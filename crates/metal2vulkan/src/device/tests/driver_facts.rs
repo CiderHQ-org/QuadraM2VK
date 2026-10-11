@@ -1,0 +1,839 @@
+//! The release-keyed table of measured driver facts (`device::driver_facts`), and the runtime's
+//! facts each committed profile's driver has.
+
+use crate::device::driver_facts::{
+    among, mesa, moltenvk, nvidia, Measured, Standing, MEASURED, MEASURED_DEVICES, NVIDIA_RTX_3090,
+};
+use crate::device::{DeviceDescription, DriverFact};
+use crate::vk::DriverId;
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+const APPLE: u32 = 0x106B;
+
+/// A driver has a fact from the first release measured: through the last as measured, beyond
+/// it as taken past the measurement, naming the last; before the first, on another driver, or
+/// on a device that names none, it has none. A row of one vendor's GPUs holds on that vendor's
+/// alone, a row of one GPU on that GPU alone, and of two rows of one fact the better standing
+/// holds.
+#[test]
+fn a_fact_holds_from_the_first_release_measured_and_past_the_last_as_beyond() {
+    let radv = Some(DriverId::MESA_RADV);
+    let row = Measured {
+        fact: 1u8,
+        driver: DriverId::MESA_RADV,
+        vendor: None,
+        device: None,
+        first: mesa(26, 2, 4),
+        last: mesa(26, 2, 6),
+    };
+    let at = |table: &[Measured<u8>], driver, vendor, version| {
+        among(table, driver, (vendor, 0x1A06_0209), version)
+            .get(&1)
+            .copied()
+    };
+    assert_eq!(at(&[row], radv, 0x1002, mesa(26, 2, 3)), None);
+    assert_eq!(
+        at(&[row], radv, 0x1002, mesa(26, 2, 4)),
+        Some(Standing::Measured)
+    );
+    assert_eq!(
+        at(&[row], radv, 0x1002, mesa(26, 2, 6)),
+        Some(Standing::Measured)
+    );
+    let beyond = Standing::Beyond {
+        last: mesa(26, 2, 6),
+    };
+    assert_eq!(at(&[row], radv, 0x1002, mesa(27, 0, 0)), Some(beyond));
+    assert_eq!(
+        at(
+            &[row],
+            Some(DriverId::MESA_LLVMPIPE),
+            0x1002,
+            mesa(26, 2, 4)
+        ),
+        None
+    );
+    assert_eq!(at(&[row], None, 0x1002, mesa(26, 2, 4)), None);
+    // A row of Apple's GPUs.
+    let apple = Measured {
+        fact: 1u8,
+        driver: DriverId::MOLTENVK,
+        vendor: Some(APPLE),
+        device: None,
+        first: moltenvk(1, 4, 1),
+        last: moltenvk(1, 4, 1),
+    };
+    let mvk = Some(DriverId::MOLTENVK);
+    assert_eq!(at(&[apple], mvk, APPLE, 10401), Some(Standing::Measured));
+    assert_eq!(at(&[apple], mvk, 0x1002, 10401), None);
+    assert_eq!(
+        at(&[apple], mvk, APPLE, moltenvk(1, 4, 2)),
+        Some(Standing::Beyond { last: 10401 })
+    );
+    // A row of one GPU holds on that GPU alone.
+    let one_gpu = Measured {
+        device: Some(0x1A06_0209),
+        ..apple
+    };
+    assert_eq!(at(&[one_gpu], mvk, APPLE, 10401), Some(Standing::Measured));
+    assert_eq!(
+        among(&[one_gpu], mvk, (APPLE, 0x1B00_0209), 10401).get(&1),
+        None
+    );
+    // Two rows: the later measurement covers what the earlier left beyond.
+    let later = Measured {
+        first: moltenvk(1, 4, 2),
+        last: moltenvk(1, 4, 2),
+        ..apple
+    };
+    assert_eq!(
+        at(&[apple, later], mvk, APPLE, moltenvk(1, 4, 2)),
+        Some(Standing::Measured)
+    );
+    // The encodings, as the committed profiles state their releases.
+    assert_eq!(nvidia(615, 71, 9), 2_580_660_800);
+    assert_eq!(mesa(26, 2, 4), 109_060_100);
+    assert_eq!(moltenvk(1, 4, 1), 10401);
+}
+
+/// The deviations a profile takes, read from the routes it derives, each as
+/// `DeviceProfile::takes_driver_deviation` answers it too.
+fn taken(p: &crate::device::DeviceProfile) -> Vec<crate::error::DriverDeviation> {
+    use crate::device::profile::{CubeGradientRoute, FloatFunctions, NanEncoding};
+    use crate::device::requirements::VkProperty;
+    use crate::error::DriverDeviation as D;
+    let f = p.fields();
+    let property = |v| f.enabled.properties.contains(&v);
+    let routes = (f.cube_gradients.graphics, f.cube_gradients.compute);
+    [
+        (
+            D::SimdgroupLockstep,
+            property(VkProperty::SimdgroupLockstep),
+        ),
+        (
+            D::MetalFloatFunctions,
+            f.float_functions == FloatFunctions::Metal,
+        ),
+        (
+            D::MetalCanonicalNans,
+            f.nan_encoding == NanEncoding::MetalCanonical,
+        ),
+        (D::MetalSampler, property(VkProperty::MetalSampler)),
+        (D::CubeGradientRoute, routes.1 == CubeGradientRoute::Metal),
+        (
+            D::GraphicsCubeGradientRoute,
+            routes.0 == CubeGradientRoute::AppleSwizzled,
+        ),
+        (D::MetalColorWrites, property(VkProperty::MetalColorWrites)),
+        (
+            D::MetalFloatColorNans,
+            property(VkProperty::MetalFloatColorNans),
+        ),
+        (
+            D::MetalHalfColorNans,
+            property(VkProperty::MetalHalfColorNans),
+        ),
+        (
+            D::HalfColorOutputBits,
+            property(VkProperty::HalfColorOutputBits),
+        ),
+        (D::MetalHalfFma, property(VkProperty::MetalHalfFma)),
+        (
+            D::MetalFloatDenormals,
+            property(VkProperty::MetalFloatDenormals),
+        ),
+        (
+            D::MetalHalfQuantize,
+            property(VkProperty::MetalHalfQuantize),
+        ),
+        (
+            D::MetalHalfConversion,
+            property(VkProperty::MetalHalfConversion),
+        ),
+        (
+            D::MetalCenterVaryings,
+            property(VkProperty::MetalCenterVaryings),
+        ),
+        (
+            D::MetalSmallFloatColorWrites,
+            property(VkProperty::MetalSmallFloatColorWrites),
+        ),
+        (
+            D::MetalNorm16ColorWrites,
+            property(VkProperty::MetalNorm16ColorWrites),
+        ),
+        (D::MetalMinMax, property(VkProperty::MetalMinMax)),
+        (
+            D::MetalHalfArithmetic,
+            property(VkProperty::MetalHalfArithmetic),
+        ),
+        (
+            D::MetalHalfStorageWrites,
+            property(VkProperty::MetalHalfStorageWrites),
+        ),
+        (
+            D::MetalHalfStorageNans,
+            property(VkProperty::MetalHalfStorageNans),
+        ),
+        (
+            D::MetalFloatStorageNans,
+            property(VkProperty::MetalFloatStorageNans),
+        ),
+        (
+            D::MetalFragmentSimdgroups,
+            property(VkProperty::MetalFragmentSimdgroups),
+        ),
+        (
+            D::MetalVertexSimdgroups,
+            property(VkProperty::MetalVertexSimdgroups),
+        ),
+        (
+            D::CenterFragCoordDepth,
+            property(VkProperty::CenterFragCoordDepth),
+        ),
+        (
+            D::SampleFragCoordDepth,
+            property(VkProperty::SampleFragCoordDepth),
+        ),
+        (
+            D::MetalHalfTexelWrites,
+            property(VkProperty::MetalHalfTexelWrites),
+        ),
+        (
+            D::MetalNormStorageWrites,
+            property(VkProperty::MetalNormStorageWrites),
+        ),
+        (
+            D::Unorm8LinearFilter,
+            property(VkProperty::Unorm8LinearFilter),
+        ),
+    ]
+    .into_iter()
+    .inspect(|&(d, taken)| {
+        // The public answer agrees with the routes (the gate lanes ask it).
+        assert_eq!(p.takes_driver_deviation(d), taken, "{d:?}");
+    })
+    .filter_map(|(d, taken)| taken.then_some(d))
+    .collect()
+}
+
+/// The profile takes each deviation its driver's release is measured with, never one a description
+/// states: every committed MoltenVK capture (MoltenVK 1.4.1 on Apple's M3 Max and M4) takes the
+/// nineteen of every Apple GPU measured (the 16-bit color outputs' bits, the `half` fused
+/// multiply-add, the `float` denormals and the `half` quantize, the `half` conversion, 4.15, the
+/// center varyings, the minimum and maximum family, the `half` arithmetic, the three half-float
+/// storage writes, the fragment simdgroups, and the vertex simdgroups, among them), the M3 Max's
+/// also its graphics cube route, the RTX 5080 Laptop GPU's (NVIDIA's 615.71.09) the two color-NaN
+/// stores, the `float` denormals and the half-float storage writes and their `0x7fc00000` and the
+/// half texel writes' NaN bits, as the RTX 3090 would, with the small float color writes, and
+/// another RTX 50 does not, lavapipe's (Mesa 26.0.8 and 26.2.3) the `float` color NaNs, Mesa
+/// 26.2.4's on the Radeon 780M (RADV) and on the Iris Xe of RPL-P and the UHD 770 of RPL-S (ANV)
+/// the `float` denormals, the `half` quantize and the half-float storage writes, the 780M's also
+/// their `0x7fc00000` and the half texel writes' NaN bits, the 780M's and the Iris Xe's also the
+/// small float color writes and the 780M's the 16-bit norm ones, the M4's and the 780M's the
+/// normalized storage writes, the RTX GPUs', the 780M's, the Iris Xe's and the UHD 770's the 8-bit
+/// linear filter's bound (lavapipe's at Mesa 26.2.4, past the committed captures' 26.0.8 and
+/// 26.2.3) under a policy that accepts it (`Unorm8LinearFilterPolicy::DeviceWithinOneCode`; the
+/// default takes it nowhere), and no other committed profile takes any. A later MoltenVK release
+/// takes them past the measurement, listed in `deviations_beyond` with the last release measured.
+/// An earlier release, and MoltenVK on another vendor's GPU, take none, each with its conservative
+/// route (the cube routes unmeasured); another driver on Apple's vendor takes none, with Vulkan's
+/// cube rule. `InterpolateAtOffsetCentered` follows the driver alone.
+#[test]
+fn the_profile_takes_the_deviations_its_driver_release_is_measured_with() {
+    use crate::device::profile::{CubeGradientRoute, CubeGradients};
+    use crate::device::requirements::VkProperty;
+    use crate::device::{Device, DevicePolicy, Unorm8LinearFilterPolicy};
+    use crate::error::DriverDeviation as D;
+    use crate::spirv::testing::is_moltenvk_capture;
+    // The nineteen of every Apple GPU measured, and the M3 Max's graphics cube route.
+    let apple = vec![
+        D::SimdgroupLockstep,
+        D::MetalFloatFunctions,
+        D::MetalCanonicalNans,
+        D::MetalSampler,
+        D::CubeGradientRoute,
+        D::MetalColorWrites,
+        D::HalfColorOutputBits,
+        D::MetalHalfFma,
+        D::MetalFloatDenormals,
+        D::MetalHalfQuantize,
+        D::MetalHalfConversion,
+        D::MetalCenterVaryings,
+        D::MetalMinMax,
+        D::MetalHalfArithmetic,
+        D::MetalHalfStorageWrites,
+        D::MetalHalfStorageNans,
+        D::MetalFloatStorageNans,
+        D::MetalFragmentSimdgroups,
+        D::MetalVertexSimdgroups,
+    ];
+    // NVIDIA's 615.71.09 on the RTX 3090 and the RTX 5080 Laptop GPU: the color-NaN stores, the
+    // `float` denormals, the half-float storage writes and their `0x7fc00000`, and the half texel
+    // writes' NaN bits.
+    let nvidia_measured = vec![
+        D::MetalFloatColorNans,
+        D::MetalHalfColorNans,
+        D::MetalFloatDenormals,
+        D::MetalHalfStorageWrites,
+        D::MetalFloatStorageNans,
+        D::MetalHalfTexelWrites,
+        D::Unorm8LinearFilter,
+    ];
+    // In `taken`'s order: the graphics route before the color writes, and each chip's per-sample
+    // depth last.
+    let mut m3_max = apple.clone();
+    m3_max.insert(5, D::GraphicsCubeGradientRoute);
+    m3_max.push(D::CenterFragCoordDepth);
+    let mut m4_measured = apple.clone();
+    m4_measured.push(D::CenterFragCoordDepth);
+    // The M4's normalized storage writes, measured on it alone.
+    m4_measured.push(D::MetalNormStorageWrites);
+    let all_of = |d: &DeviceDescription| match d.device_id {
+        crate::device::driver_facts::APPLE_M3_MAX => m3_max.clone(),
+        crate::device::driver_facts::APPLE_M4 => m4_measured.clone(),
+        _ => apple.clone(),
+    };
+    // Under a policy that accepts the 8-bit linear filter's bound, so its rows are taken where
+    // measured; the default policy takes it nowhere (checked with the committed profiles).
+    let accepting = DevicePolicy {
+        unorm8_linear_filter: Unorm8LinearFilterPolicy::DeviceWithinOneCode,
+        ..DevicePolicy::default()
+    };
+    let profile_of =
+        |d: DeviceDescription| Device::new(d, accepting).expect("device").profile().clone();
+    let centered = |p: &crate::device::DeviceProfile| {
+        p.fields()
+            .enabled
+            .properties
+            .contains(&VkProperty::InterpolateAtOffsetCentered)
+    };
+    let committed = super::committed_profiles();
+    assert!(committed.len() > 10);
+    for (stem, _) in &committed {
+        let d = super::profile(stem);
+        let want_all = all_of(&d);
+        let p = profile_of(d);
+        let moltenvk = is_moltenvk_capture(stem);
+        let want = match (moltenvk, stem.as_str()) {
+            (true, _) => want_all,
+            (false, "nvidia-rtx5080-laptop") => nvidia_measured.clone(),
+            (false, "lavapipe" | "gate-lavapipe" | "gate-lavapipe-x86_64") => vec![
+                D::MetalFloatColorNans,
+                D::MetalHalfStorageWrites,
+                D::MetalFloatStorageNans,
+            ],
+            // The per-sample `FragCoord.z` last, in `taken`'s order.
+            (false, "amd-780m-radv") => vec![
+                D::MetalFloatDenormals,
+                D::MetalHalfQuantize,
+                D::MetalSmallFloatColorWrites,
+                D::MetalNorm16ColorWrites,
+                D::MetalHalfStorageWrites,
+                D::MetalFloatStorageNans,
+                D::SampleFragCoordDepth,
+                D::MetalHalfTexelWrites,
+                D::MetalNormStorageWrites,
+                D::Unorm8LinearFilter,
+            ],
+            (false, "intel-irisxe-rplp-anv") => vec![
+                D::MetalFloatDenormals,
+                D::MetalHalfQuantize,
+                D::MetalSmallFloatColorWrites,
+                D::MetalHalfStorageWrites,
+                D::Unorm8LinearFilter,
+            ],
+            (false, "intel-uhd770-rpls-anv") => vec![
+                D::MetalFloatDenormals,
+                D::MetalHalfQuantize,
+                D::MetalSmallFloatColorWrites,
+                D::MetalHalfStorageWrites,
+                D::Unorm8LinearFilter,
+            ],
+            (false, _) => Vec::new(),
+        };
+        assert_eq!(taken(&p), want, "{stem}");
+        assert!(p.fields().deviations_beyond.is_empty(), "{stem}");
+        assert_eq!(centered(&p), !moltenvk, "{stem}");
+        // The default policy keeps Metal's 8-bit linear filter exact on every device.
+        let exact = Device::new(super::profile(stem), DevicePolicy::default())
+            .expect("device")
+            .profile()
+            .clone();
+        let want: Vec<D> = want
+            .into_iter()
+            .filter(|&d| d != D::Unorm8LinearFilter)
+            .collect();
+        assert_eq!(taken(&exact), want, "{stem} under the default policy");
+    }
+    let m4 = super::profile("moltenvk-m4");
+    assert_eq!(
+        (m4.driver_id, m4.vendor_id, m4.driver_version),
+        (Some(DriverId::MOLTENVK), APPLE, 10401)
+    );
+    // The M4's graphics cube route is unmeasured, its compute route Metal's; the M3 Max's capture
+    // is the one the graphics row names.
+    assert_eq!(
+        profile_of(m4.clone()).fields().cube_gradients,
+        CubeGradients {
+            graphics: CubeGradientRoute::Unmeasured,
+            compute: CubeGradientRoute::Metal,
+        }
+    );
+    let m3 = super::profile("moltenvk-m3");
+    assert_eq!(m3.device_id, crate::device::driver_facts::APPLE_M3_MAX);
+    let all = m4_measured.clone();
+    let unmeasured = CubeGradients {
+        graphics: CubeGradientRoute::Unmeasured,
+        compute: CubeGradientRoute::Unmeasured,
+    };
+    // A later release: taken, and listed with the last release measured.
+    let mut later = m4.clone();
+    later.driver_version = moltenvk(1, 4, 2);
+    let p = profile_of(later);
+    assert_eq!(taken(&p), all);
+    let beyond: BTreeMap<D, u32> = all.iter().map(|&d| (d, 10401)).collect();
+    assert_eq!(p.fields().deviations_beyond, beyond);
+    assert!(!centered(&p));
+    // An earlier release, and another vendor's GPU: none, the cube routes unmeasured.
+    let mut earlier = m4.clone();
+    earlier.driver_version = moltenvk(1, 4, 0);
+    let mut intel = m4.clone();
+    intel.vendor_id = 0x8086;
+    for (what, d) in [("1.4.0", earlier), ("Intel's vendor", intel)] {
+        let p = profile_of(d);
+        assert_eq!(taken(&p), Vec::new(), "{what}");
+        assert_eq!(p.fields().cube_gradients, unmeasured, "{what}");
+        assert!(p.fields().deviations_beyond.is_empty(), "{what}");
+        assert!(!centered(&p), "{what}");
+    }
+    // Another driver on Apple's vendor: none, with Vulkan's rule and a centered offset.
+    let mut lavapipe = m4;
+    lavapipe.driver_id = Some(DriverId::MESA_LLVMPIPE);
+    let p = profile_of(lavapipe);
+    assert_eq!(taken(&p), Vec::new());
+    let vulkan = CubeGradients {
+        graphics: CubeGradientRoute::Vulkan,
+        compute: CubeGradientRoute::Vulkan,
+    };
+    assert_eq!(p.fields().cube_gradients, vulkan);
+    assert!(centered(&p));
+    // NVIDIA's color-NaN stores and `float` denormals: per GPU (the 3090 and the 5080 Laptop
+    // GPU, not another RTX 50), and past 615.71.09 taken with the last release measured; the
+    // small float color writes the 3090's alone.
+    use crate::device::driver_facts::{NVIDIA_RTX_3090, NVIDIA_RTX_5080_LAPTOP};
+    let laptop = super::profile("nvidia-rtx5080-laptop");
+    assert_eq!(
+        (laptop.device_id, laptop.driver_version),
+        (NVIDIA_RTX_5080_LAPTOP, nvidia(615, 71, 9))
+    );
+    let mut rtx_3090 = laptop.clone();
+    rtx_3090.device_id = NVIDIA_RTX_3090;
+    let mut desktop = laptop.clone();
+    desktop.device_id = 0x2c02;
+    let mut later = laptop.clone();
+    later.driver_version = nvidia(615, 71, 10);
+    let mut rtx_3090_measured = nvidia_measured.clone();
+    rtx_3090_measured.insert(3, D::MetalSmallFloatColorWrites);
+    assert_eq!(taken(&profile_of(rtx_3090)), rtx_3090_measured);
+    assert_eq!(taken(&profile_of(desktop)), Vec::new());
+    let p = profile_of(later);
+    assert_eq!(taken(&p), nvidia_measured);
+    let beyond: BTreeMap<D, u32> = nvidia_measured
+        .iter()
+        .map(|&d| (d, nvidia(615, 71, 9)))
+        .collect();
+    assert_eq!(p.fields().deviations_beyond, beyond);
+}
+
+const ZERO: DriverFact = DriverFact::RobustIndexFetchReadsZero;
+const DENORMALS: DriverFact = DriverFact::DepthImageKeepsDenormals;
+const OUTSIDE: DriverFact = DriverFact::DepthImageKeepsValuesOutsideUnitRange;
+const FRAGDEPTH: DriverFact = DriverFact::FragmentDepthStoresUnchanged;
+const APART: DriverFact = DriverFact::DepthStencilImagesLieApart;
+const AVERAGE: DriverFact = DriverFact::ColorResolveAverageIsMetals;
+const HIDE: DriverFact = DriverFact::CompressedImagesHideAliasedWrites;
+const HOST: DriverFact = DriverFact::HostTransferImagesKeepTheirBytes;
+const OPTIMIZED: DriverFact = DriverFact::DepthStencilImagesStayGpuOptimized;
+const UNORM_BIAS: DriverFact = DriverFact::UnormDepthBiasIsMetals;
+const UNORM_STORES: DriverFact = DriverFact::Depth16UnormStoresMetals;
+const DEPTH16: DriverFact = DriverFact::FragmentDepthKeepsDepth16Codes;
+const FETCH: DriverFact = DriverFact::SampledFetchRecoversCodes;
+const WHOLE: DriverFact = DriverFact::InterlockedPassWholeFaster;
+const SPLIT: DriverFact = DriverFact::InterlockedPassSplitNoSlower;
+const RESTART: DriverFact = DriverFact::DynamicRestartWarns;
+const FILL: DriverFact = DriverFact::FillCompiledPerCommandPool;
+const DONT_CARE: DriverFact = DriverFact::DontCareStoreIsMetals;
+const STAMPS: DriverFact = DriverFact::TimestampsWaitForEveryQueue;
+const COLOR_BLOCKS: DriverFact = DriverFact::ColorBlockDecodeIsMetals;
+const CHANNEL_BLOCKS: DriverFact = DriverFact::ChannelBlockDecodeIsMetals;
+const PLANES: DriverFact = DriverFact::PositionedDepthReadAtStandardPositions;
+const TESTS_DENORMALS: DriverFact = DriverFact::DepthTestKeepsDenormals;
+const SPARSE_WAIT: DriverFact = DriverFact::FirstSparseResourceWaitsForQueues;
+const BC6H: DriverFact = DriverFact::Bc6hBlockDecodeIsMetals;
+const BC7: DriverFact = DriverFact::Bc7BlockDecodeIsMetals;
+const SCARCE_POOLS: DriverFact = DriverFact::TimestampPoolsAreCounterSampleBuffers;
+const ONE_OF_METALS: DriverFact = DriverFact::DontCareStoreIsOneOfMetals;
+
+/// Every committed profile's driver has exactly its measured facts (on a measured identity those
+/// its rows name, on any other its driver's defects alone). A profile of a measured identity: the
+/// 780M (RADV 26.2.4), the gate's lavapipe 26.0.8 (both CPUs), the RPL-P and the RPL-S (ANV
+/// 26.2.4), the M3 Max and the M4 (MoltenVK 1.4.1) and the RTX 5080 Laptop GPU (NVIDIA's
+/// 615.71.09). It reads zero past the bound index range on the 780M, the RPL-S and the RTX 5080
+/// Laptop GPU, the GPUs measured; its depth images keep denormals on the RTX 5080 Laptop GPU,
+/// lavapipe and both MoltenVK GPUs, and values outside `[0, 1]` on MoltenVK; lavapipe stores
+/// fragment depth unchanged and keeps a 16-bit depth's codes; MoltenVK's depth and stencil images
+/// lie apart and stay GPU-optimized, and its color resolve's average is Metal's; the constant depth
+/// bias on a 16-bit unorm depth stores Metal's codes on the 780M and the M4, and the unbiased one
+/// on the 780M, the RPL-P, the RPL-S and the M4 (the M3 Max is not measured for either); ANV's
+/// compressed images hide aliased writes and its host-transfer images keep their bytes; a pass the
+/// interlock would split runs faster whole on the M4 and the RPL-S and no slower split on the M3
+/// Max, the 780M, the RPL-P and the RTX 5080 Laptop GPU; MoltenVK warns of a dynamic restart,
+/// compiles its fill per command pool, stores `DONT_CARE` as Metal's own and orders its timestamps
+/// across queues; BC1 to BC3 decode as Metal's on the 780M and MoltenVK, BC4 and BC5 on MoltenVK;
+/// NVIDIA's reads a depth rendered at custom sample positions at the standard ones; ANV's first
+/// sparse resource waits for every queue; BC6H decodes as Metal's on the 780M, the RPL-P, lavapipe
+/// 26.0.8, both MoltenVK GPUs and the RTX 5080 Laptop GPU, and BC7 on the same but lavapipe;
+/// `DONT_CARE` keeps one of Metal's two answers on the 780M and the RPL-S. Every other profile is
+/// an unmeasured identity and takes its driver's defects alone: the GTX 1060 (580.178.04) and the
+/// RTX 5080 desktop GPU (another GPU at 615.71.09) NVIDIA's custom-position depth, the ARL
+/// (26.2.3) and the Tiger Lake Iris Xe (26.2.2) ANV's hidden aliased writes; the RDNA2 and RDNA3
+/// RADV profiles (26.2.3), lavapipe 26.2.3 and SwiftShader take nothing.
+#[test]
+fn the_committed_profiles_drivers_have_their_facts() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../metal2vulkan-validation/profiles");
+    let mut claims = BTreeMap::new();
+    for path in std::fs::read_dir(&dir).expect("validation/profiles is readable") {
+        let path = path.expect("directory entry").path();
+        if path.extension().is_none_or(|x| x != "json") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("profile is readable");
+        let desc = DeviceDescription::from_khronos_json(&text, None).expect("profile parses");
+        let facts: Vec<_> = desc.driver_facts().into_iter().collect();
+        if !facts.is_empty() {
+            let stem = path.file_stem().unwrap().to_string_lossy().into_owned();
+            claims.insert(stem, facts);
+        }
+    }
+    let expected: BTreeMap<String, Vec<DriverFact>> = [
+        (
+            "amd-780m-radv",
+            vec![
+                ZERO,
+                UNORM_BIAS,
+                UNORM_STORES,
+                FETCH,
+                SPLIT,
+                COLOR_BLOCKS,
+                BC6H,
+                BC7,
+                ONE_OF_METALS,
+            ],
+        ),
+        (
+            "gate-lavapipe",
+            vec![DENORMALS, FRAGDEPTH, DEPTH16, FETCH, BC6H],
+        ),
+        (
+            "gate-lavapipe-x86_64",
+            vec![DENORMALS, FRAGDEPTH, DEPTH16, FETCH, BC6H],
+        ),
+        ("intel-arl-anv", vec![HIDE]),
+        ("intel-irisxe-anv", vec![HIDE]),
+        (
+            "intel-irisxe-rplp-anv",
+            vec![
+                HIDE,
+                HOST,
+                UNORM_STORES,
+                FETCH,
+                SPLIT,
+                SPARSE_WAIT,
+                BC6H,
+                BC7,
+            ],
+        ),
+        (
+            "intel-uhd770-rpls-anv",
+            vec![
+                ZERO,
+                HIDE,
+                HOST,
+                UNORM_STORES,
+                FETCH,
+                WHOLE,
+                SPARSE_WAIT,
+                ONE_OF_METALS,
+            ],
+        ),
+        (
+            "moltenvk-m3",
+            vec![
+                DENORMALS,
+                OUTSIDE,
+                APART,
+                AVERAGE,
+                OPTIMIZED,
+                UNORM_BIAS,
+                UNORM_STORES,
+                FETCH,
+                SPLIT,
+                RESTART,
+                FILL,
+                DONT_CARE,
+                STAMPS,
+                COLOR_BLOCKS,
+                CHANNEL_BLOCKS,
+                BC6H,
+                BC7,
+                SCARCE_POOLS,
+            ],
+        ),
+        (
+            "moltenvk-m4",
+            vec![
+                DENORMALS,
+                OUTSIDE,
+                APART,
+                AVERAGE,
+                OPTIMIZED,
+                UNORM_BIAS,
+                UNORM_STORES,
+                FETCH,
+                WHOLE,
+                RESTART,
+                FILL,
+                DONT_CARE,
+                STAMPS,
+                COLOR_BLOCKS,
+                CHANNEL_BLOCKS,
+                TESTS_DENORMALS,
+                BC6H,
+                BC7,
+                SCARCE_POOLS,
+            ],
+        ),
+        ("nvidia-pascal-linux", vec![PLANES]),
+        ("nvidia-rtx50-linux", vec![PLANES]),
+        (
+            "nvidia-rtx5080-laptop",
+            vec![ZERO, DENORMALS, FETCH, SPLIT, PLANES, BC6H, BC7],
+        ),
+    ]
+    .into_iter()
+    .map(|(stem, facts)| (stem.to_owned(), facts))
+    .collect();
+    assert_eq!(claims, expected);
+}
+
+/// A release or GPU not measured is an unmeasured identity: it takes none of its driver's answer
+/// facts, and its driver's defects stand at every release and on every GPU of the driver. The M4
+/// at MoltenVK 1.4.2, or at 1.4.0, or another Apple GPU at 1.4.1, takes MoltenVK's depth images
+/// apart and GPU-optimized alone; the RPL-S at ANV 26.2.5, or another Intel GPU at 26.2.4, takes
+/// ANV's hidden aliased writes alone; the RTX 5080 Laptop GPU at another release takes NVIDIA's
+/// custom-position depth alone. No driver takes another driver's defects.
+#[test]
+fn an_unmeasured_identity_takes_its_drivers_defects_alone() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../metal2vulkan-validation/profiles");
+    let read = |stem: &str| {
+        let text = std::fs::read_to_string(dir.join(format!("{stem}.json"))).expect(stem);
+        DeviceDescription::from_khronos_json(&text, None).expect("profile parses")
+    };
+    let mut desc = read("moltenvk-m4");
+    assert!(desc.measured_identity());
+    assert!(desc.driver_facts().contains(&WHOLE));
+    assert!(desc.driver_facts().contains(&FETCH));
+    for release in [10402, 10400] {
+        desc.driver_version = release;
+        assert!(!desc.measured_identity());
+        assert_eq!(desc.driver_facts(), [APART, OPTIMIZED, SCARCE_POOLS].into());
+    }
+    let mut desc = read("moltenvk-m4");
+    desc.device_id ^= 1;
+    assert!(!desc.measured_identity());
+    assert_eq!(desc.driver_facts(), [APART, OPTIMIZED, SCARCE_POOLS].into());
+
+    let mut desc = read("intel-uhd770-rpls-anv");
+    assert!(desc.measured_identity());
+    desc.driver_version += 1;
+    assert!(!desc.measured_identity());
+    assert_eq!(desc.driver_facts(), [HIDE].into());
+    let mut desc = read("intel-uhd770-rpls-anv");
+    desc.device_id ^= 1;
+    assert_eq!(desc.driver_facts(), [HIDE].into());
+
+    let mut desc = read("nvidia-rtx5080-laptop");
+    assert!(desc.measured_identity());
+    desc.driver_version += 1;
+    assert!(!desc.measured_identity());
+    assert_eq!(desc.driver_facts(), [PLANES].into());
+
+    for stem in ["amd-780m-radv", "gate-lavapipe"] {
+        let mut desc = read(stem);
+        assert!(desc.measured_identity(), "{stem}");
+        desc.driver_version += 1;
+        assert!(desc.driver_facts().is_empty(), "{stem}");
+    }
+}
+
+/// Each measured identity is a GPU and release a venue ran: the committed profiles of the measured
+/// GPUs carry exactly the identities listed, so no row names a release or GPU nobody measured.
+#[test]
+fn the_measured_identities_are_the_committed_profiles() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../metal2vulkan-validation/profiles");
+    let mut measured = Vec::new();
+    for stem in [
+        "amd-780m-radv",
+        "gate-lavapipe",
+        "gate-lavapipe-x86_64",
+        "intel-irisxe-rplp-anv",
+        "intel-uhd770-rpls-anv",
+        "moltenvk-m3",
+        "moltenvk-m4",
+        "nvidia-rtx5080-laptop",
+    ] {
+        let text = std::fs::read_to_string(dir.join(format!("{stem}.json"))).expect(stem);
+        let desc = DeviceDescription::from_khronos_json(&text, None).expect("profile parses");
+        assert!(desc.measured_identity(), "{stem}");
+        measured.push((
+            desc.driver_id.expect("driver"),
+            desc.vendor_id,
+            desc.device_id,
+            desc.driver_version,
+        ));
+    }
+    for m in MEASURED_DEVICES {
+        let id = (m.driver, m.vendor, m.device, m.release);
+        assert!(
+            measured.contains(&id) || MEASURED_WITHOUT_PROFILE.contains(&id),
+            "{id:?} is measured but no venue's profile names it"
+        );
+    }
+}
+
+/// The identities measured whose venue has no committed profile: the RTX 3090 (gem10) at NVIDIA's
+/// 615.71.09, and lavapipe at Mesa 26.2.4 (the Linux venues' own lavapipe).
+const MEASURED_WITHOUT_PROFILE: [(DriverId, u32, u32, u32); 2] = [
+    (
+        DriverId::NVIDIA_PROPRIETARY,
+        0x10de,
+        NVIDIA_RTX_3090,
+        nvidia(615, 71, 9),
+    ),
+    (DriverId::MESA_LLVMPIPE, 0x10005, 0, mesa(26, 2, 4)),
+];
+
+/// A driver measured to lay depth and stencil images apart from their memory is measured to keep
+/// every `float` in a depth image from the same release on, so it holds no `Depth32Float`
+/// texture with a depth twin and no heap texture's twin is kept apart on it. A driver measured
+/// otherwise would reach the twin's `heap-depth-stencil-apart` route, which then needs a shadow of
+/// its own.
+#[test]
+fn a_driver_that_lays_depth_images_apart_holds_no_depth_twin() {
+    let apart: Vec<_> = MEASURED.iter().filter(|row| row.fact == APART).collect();
+    assert!(
+        !apart.is_empty(),
+        "no driver is measured to lay depth images apart"
+    );
+    for row in apart {
+        let gpu = (row.vendor.unwrap_or(APPLE), row.device.unwrap_or(0));
+        let facts = among(MEASURED, Some(row.driver), gpu, row.first);
+        assert!(
+            facts.contains_key(&DENORMALS) && facts.contains_key(&OUTSIDE),
+            "{:?} from {:#x} lays depth images apart but may lose a depth texel: {facts:?}",
+            row.driver,
+            row.first
+        );
+    }
+}
+
+/// No GPU and release is measured both to run a pass the interlock would split faster whole and
+/// no slower split: each measured row's GPU, at its first release, holds one of the two.
+#[test]
+fn a_gpu_keeps_one_form_of_an_interlocked_pass() {
+    let rows = MEASURED
+        .iter()
+        .filter(|row| row.fact == WHOLE || row.fact == SPLIT);
+    let mut measured = 0;
+    for row in rows {
+        let gpu = (row.vendor.unwrap_or(APPLE), row.device.unwrap_or(0));
+        let facts = among(MEASURED, Some(row.driver), gpu, row.first);
+        assert!(
+            facts.contains_key(&WHOLE) != facts.contains_key(&SPLIT),
+            "{:?} on {gpu:x?} at {:#x}: {facts:?}",
+            row.driver,
+            row.first
+        );
+        measured += 1;
+    }
+    assert_eq!(measured, 7, "the GPUs measured");
+}
+
+/// MoltenVK's warning of a pipeline whose restart may be disabled (`MVKPipeline.mm` lines 881-893
+/// at 1.4.1) is the diagnostic of a pipeline that makes the restart dynamic with its topology
+/// dynamic or a strip or fan, exactly as the driver reports it; no other pipeline's, and no other
+/// fact's. It is measured on MoltenVK 1.4.1 alone, on any GPU: 1.4.0 and 1.4.2 relay it, as does
+/// any other driver at 1.4.1's `driverVersion`.
+#[test]
+fn moltenvk_1_4_1_warns_of_a_pipeline_whose_restart_is_dynamic() {
+    use crate::device::DriverDiagnostic;
+    use crate::vk::{DynamicState as D, PrimitiveTopology as T};
+    let warning = DriverDiagnostic {
+        id_name: "mvk-warn",
+        id: 0,
+        text: "VK_ERROR_FEATURE_NOT_PRESENT: Metal does not support disabling primitive restart.",
+    };
+    let both = [D::PRIMITIVE_TOPOLOGY, D::PRIMITIVE_RESTART_ENABLE];
+    let restart = [D::CULL_MODE, D::PRIMITIVE_RESTART_ENABLE];
+    let topology = [D::PRIMITIVE_TOPOLOGY];
+    let cases: [(&[D], T, bool); 10] = [
+        (&both, T::TRIANGLE_LIST, true),
+        (&both, T::LINE_LIST, true),
+        (&both, T::POINT_LIST, true),
+        (&restart, T::TRIANGLE_STRIP, true),
+        (&restart, T::LINE_STRIP, true),
+        (&restart, T::TRIANGLE_FAN, true),
+        (&restart, T::TRIANGLE_LIST, false),
+        (&topology, T::TRIANGLE_STRIP, false),
+        (&[], T::TRIANGLE_STRIP, false),
+        (&[D::CULL_MODE], T::LINE_STRIP, false),
+    ];
+    for (dynamic, top, warns) in cases {
+        assert_eq!(
+            RESTART.pipeline_creation_diagnostic(dynamic, top),
+            warns.then_some(warning),
+            "{dynamic:?} {top:?}"
+        );
+        for other in [ZERO, DENORMALS, FETCH, WHOLE, SPLIT] {
+            assert_eq!(other.pipeline_creation_diagnostic(dynamic, top), None);
+        }
+    }
+    let rows: Vec<_> = MEASURED.iter().filter(|row| row.fact == RESTART).collect();
+    assert_eq!(rows.len(), 1);
+    let row = rows[0];
+    assert_eq!(
+        (row.driver, row.vendor, row.device, row.first, row.last),
+        (
+            DriverId::MOLTENVK,
+            None,
+            None,
+            moltenvk(1, 4, 1),
+            moltenvk(1, 4, 1)
+        )
+    );
+    let text = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../metal2vulkan-validation/profiles/moltenvk-m3.json"),
+    )
+    .expect("moltenvk-m3");
+    let mut desc = DeviceDescription::from_khronos_json(&text, None).expect("profile parses");
+    for (version, has) in [(10400, false), (10401, true), (10402, false)] {
+        desc.driver_version = version;
+        assert_eq!(desc.driver_facts().contains(&RESTART), has, "{version}");
+    }
+    desc.driver_version = 10401;
+    desc.driver_id = Some(DriverId::MESA_LLVMPIPE);
+    assert!(!desc.driver_facts().contains(&RESTART));
+}

@@ -1,0 +1,126 @@
+target triple = "air64_v28-apple-macosx26.0.0"
+source_filename = "-"
+; datalayout DataLayout { endian: Little, pointers: {0: PointerSpec { size_bits: 64, abi_bits: 64, pref_bits: 64, index_bits: 64 }}, ints: {1: AlignSpec { abi_bits: 8, pref_bits: 8 }, 8: AlignSpec { abi_bits: 8, pref_bits: 8 }, 16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }}, floats: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }}, vectors: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 24: AlignSpec { abi_bits: 32, pref_bits: 32 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 48: AlignSpec { abi_bits: 64, pref_bits: 64 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 96: AlignSpec { abi_bits: 128, pref_bits: 128 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }, 192: AlignSpec { abi_bits: 256, pref_bits: 256 }, 256: AlignSpec { abi_bits: 256, pref_bits: 256 }, 512: AlignSpec { abi_bits: 512, pref_bits: 512 }, 1024: AlignSpec { abi_bits: 1024, pref_bits: 1024 }}, aggregate: AlignSpec { abi_bits: 0, pref_bits: 64 }, native_ints: [8, 16, 32], stack_align_bits: None, alloca_space: 0, program_space: 0, globals_space: 0, mangling: None, fn_ptr_align: None, non_integral: [] }
+%t6 = type void (<4 x float>, <3 x float>, ptr addrspace(1))
+%t8 = type i32 (float)
+%t9 = type float (float, float, float)
+%t10 = type float (float)
+%t12 = type [2 x i32]
+c7 = %t12 [26, 5]
+
+define %t6 @f0 "k7_tess_triangle_domain" memory(Mod, NoModRef, NoModRef) "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-trapping-math"="true" "stack-protector-buffer-size"="8" %a2( Mod nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = extractelement %a1, i64 0
+  %i1 = extractelement %a0, i64 0
+  %i2 = fmul float %i1, %i0
+  %i3 = tail call float @f3 [air Math(Math { f: Rint, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i2)
+  %i4 = tail call float @f2 [air Math(Math { f: Clamp, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i3, float 0x0, float 0x42800000)
+  %i5 = extractelement %a1, i64 1
+  %i6 = extractelement %a0, i64 1
+  %i7 = fmul float %i6, %i5
+  %i8 = tail call float @f3 [air Math(Math { f: Rint, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i7)
+  %i9 = tail call float @f2 [air Math(Math { f: Clamp, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i8, float 0x0, float 0x42800000)
+  %i10 = tail call i32 @f1 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i9)
+  %i11 = mul i32 %i10, i32 65
+  %i12 = tail call i32 @f1 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i4)
+  %i13 = add i32 %i11, %i12
+  %i14 = zext %i13 to i64
+  %i15 = getelementptr inbounds i32, %a2, %i14
+  store i32 1, %i15, align 4
+  %i17 = mul i32 %i13, i32 3
+  %i18 = add i32 %i17, i32 4225
+  %i19 = zext %i18 to i64
+  %i20 = getelementptr inbounds i32, %a2, %i19
+  %i21 = bitcast %i20 to ptr addrspace(1)
+  store %i0, %i21, align 4
+  %i23 = add i32 %i17, i32 4226
+  %i24 = zext %i23 to i64
+  %i25 = getelementptr inbounds i32, %a2, %i24
+  %i26 = bitcast %i25 to ptr addrspace(1)
+  store %i5, %i26, align 4
+  %i28 = bitcast %a1 to <3 x i32>
+  %i29 = extractelement %i28, i64 2
+  %i30 = add i32 %i17, i32 4227
+  %i31 = zext %i30 to i64
+  %i32 = getelementptr inbounds i32, %a2, %i31
+  store %i29, %i32, align 4
+  ret void
+}
+
+declare %t8 @f1 "air.convert.u.i32.f.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t9 @f2 "air.clamp.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t10 @f3 "air.rint.f32" memory(NoModRef, NoModRef, NoModRef)
+!md0 = !"SDK Version"
+!md1 = !"wchar_size"
+!md2 = !"frame-pointer"
+!md3 = !"air.max_device_buffers"
+!md4 = !"air.max_constant_buffers"
+!md5 = !"air.max_threadgroup_buffers"
+!md6 = !"air.max_textures"
+!md7 = !"air.max_read_write_textures"
+!md8 = !"air.max_samplers"
+!md9 = !"air.patch_input"
+!md10 = !"air.location_index"
+!md11 = !"air.arg_type_name"
+!md12 = !"float4"
+!md13 = !"air.arg_name"
+!md14 = !"grid"
+!md15 = !"air.position_in_patch"
+!md16 = !"float3"
+!md17 = !"bc"
+!md18 = !"air.buffer"
+!md19 = !"air.read_write"
+!md20 = !"air.address_space"
+!md21 = !"air.arg_type_size"
+!md22 = !"air.arg_type_align_size"
+!md23 = !"uint"
+!md24 = !"marks"
+!md25 = !"air.patch"
+!md26 = !"triangle"
+!md27 = !"air.patch_control_point"
+!md28 = !"air.compile.denorms_disable"
+!md29 = !"air.compile.fast_math_disable"
+!md30 = !"air.compile.framebuffer_fetch_enable"
+!md31 = !"Apple metal version 32023.883 (metalfe-32023.883)"
+!md32 = !"Metal"
+!md33 = i32 2
+!md34 = %t12 c7
+!md35 = i32 1
+!md36 = i32 4
+!md37 = i32 7
+!md38 = i32 31
+!md39 = i32 128
+!md40 = i32 8
+!md41 = i32 16
+!md42 = ptr addrspace(0) @f0
+!md43 = i32 0
+!md44 = !{!md33, !md0, !md34}
+!md45 = !{!md35, !md1, !md36}
+!md46 = !{!md37, !md2, !md33}
+!md47 = !{!md37, !md3, !md38}
+!md48 = !{!md37, !md4, !md38}
+!md49 = !{!md37, !md5, !md38}
+!md50 = !{!md37, !md6, !md39}
+!md51 = !{!md37, !md7, !md40}
+!md52 = !{!md37, !md8, !md41}
+!md53 = !{}
+!md54 = !{!md43, !md9, !md10, !md43, !md35, !md11, !md12, !md13, !md14}
+!md55 = !{!md35, !md15, !md11, !md16, !md13, !md17}
+!md56 = !{!md33, !md18, !md10, !md35, !md35, !md19, !md20, !md35, !md21, !md36, !md22, !md36, !md11, !md23, !md13, !md24}
+!md57 = !{!md54, !md55, !md56}
+!md58 = !{!md25, !md26, !md27, !md35}
+!md59 = !{!md42, !md53, !md57, !md58}
+!md60 = !{!md28}
+!md61 = !{!md29}
+!md62 = !{!md30}
+!md63 = !{!md31}
+!md64 = !{!md33, !md40, !md43}
+!md65 = !{!md32, !md36, !md43, !md43}
+!"llvm.module.flags" = !{!md44, !md45, !md46, !md47, !md48, !md49, !md50, !md51, !md52}
+!"air.vertex" = !{!md59}
+!"air.compile_options" = !{!md60, !md61, !md62}
+!"llvm.ident" = !{!md63}
+!"air.version" = !{!md64}
+!"air.language_version" = !{!md65}

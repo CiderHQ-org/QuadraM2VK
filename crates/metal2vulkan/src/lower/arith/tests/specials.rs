@@ -1,0 +1,873 @@
+//! Metal's `sign`, `fract`, `saturate`, `median3`, and `pow` at their special operands, on the
+//! interpreter against Metal's recorded answers (Apple M3 Max, ORACLE_ABI v34), bit for bit: every
+//! distinct lane of the A1 cases `fract-saturate-and-median3-at-nan-infinity-and-signed-zero`
+//! (aed3faaa) and `sign-of-zero-and-division-range-{without,under}-fast-math` (87d13612, f9a12252,
+//! whose `sign` answers agree lane for lane), and the lanes of `pow-at-every-c99-special-operand`
+//! (116e052a) with a NaN operand, the exponent one, a denormal exponent, or a negative denormal
+//! base to a non-integral exponent. The operands are signed zeros, `f32` and `half` denormals, the
+//! smallest normals, values beside the integers, the largest finite values, infinities, and NaNs
+//! (quiet and signalling, both signs, with payloads).
+
+use super::*;
+
+/// `(x, precise::fract, fast::fract, saturate, hx, half fract, half saturate)`: `float` then
+/// `half` operands and answers (`precise::saturate` and `fast::saturate` agree on every lane).
+const FRACT_SATURATE: [(u32, u32, u32, u32, u16, u16, u16); 39] = [
+    (
+        0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x0000, 0x0000, 0x0000,
+    ),
+    (
+        0x80000000, 0x00000000, 0x00000000, 0x00000000, 0x8000, 0x0000, 0x0000,
+    ),
+    (
+        0x00000001, 0x00000000, 0x00000000, 0x00000000, 0x0001, 0x0001, 0x0001,
+    ),
+    (
+        0x80000001, 0x00000000, 0x00000000, 0x00000000, 0x8001, 0x3BFF, 0x0000,
+    ),
+    (
+        0x007FFFFF, 0x00000000, 0x00000000, 0x00000000, 0x03FF, 0x03FF, 0x03FF,
+    ),
+    (
+        0x807FFFFF, 0x00000000, 0x00000000, 0x00000000, 0x83FF, 0x3BFF, 0x0000,
+    ),
+    (
+        0x00800000, 0x00800000, 0x00800000, 0x00800000, 0x0400, 0x0400, 0x0400,
+    ),
+    (
+        0x80800000, 0x3F7FFFFF, 0x3F800000, 0x00000000, 0x8400, 0x3BFF, 0x0000,
+    ),
+    (
+        0xB3000000, 0x3F7FFFFF, 0x3F800000, 0x00000000, 0x8C00, 0x3BFF, 0x0000,
+    ),
+    (
+        0xB3800000, 0x3F7FFFFF, 0x3F7FFFFF, 0x00000000, 0x9000, 0x3BFF, 0x0000,
+    ),
+    (
+        0xAEDBE6FF, 0x3F7FFFFF, 0x3F800000, 0x00000000, 0x868E, 0x3BFF, 0x0000,
+    ),
+    (
+        0x3F000000, 0x3F000000, 0x3F000000, 0x3F000000, 0x3800, 0x3800, 0x3800,
+    ),
+    (
+        0xBF000000, 0x3F000000, 0x3F000000, 0x00000000, 0xB800, 0x3800, 0x0000,
+    ),
+    (
+        0x3FC00000, 0x3F000000, 0x3F000000, 0x3F800000, 0x3E00, 0x3800, 0x3C00,
+    ),
+    (
+        0xBFC00000, 0x3F000000, 0x3F000000, 0x00000000, 0xBE00, 0x3800, 0x0000,
+    ),
+    (
+        0x3F800000, 0x00000000, 0x00000000, 0x3F800000, 0x3C00, 0x0000, 0x3C00,
+    ),
+    (
+        0xBF800000, 0x00000000, 0x00000000, 0x00000000, 0xBC00, 0x0000, 0x0000,
+    ),
+    (
+        0x3F7FFFFF, 0x3F7FFFFF, 0x3F7FFFFF, 0x3F7FFFFF, 0x3BFF, 0x3BFF, 0x3BFF,
+    ),
+    (
+        0xBF7FFFFF, 0x33800000, 0x33800000, 0x00000000, 0xBBFF, 0x1000, 0x0000,
+    ),
+    (
+        0x3F800001, 0x34000000, 0x34000000, 0x3F800000, 0x3C01, 0x1400, 0x3C00,
+    ),
+    (
+        0xBF800001, 0x3F7FFFFE, 0x3F7FFFFE, 0x00000000, 0xBC01, 0x3BFE, 0x0000,
+    ),
+    (
+        0x4A800001, 0x3F000000, 0x3F000000, 0x3F800000, 0x6001, 0x3800, 0x3C00,
+    ),
+    (
+        0xCA800001, 0x3F000000, 0x3F000000, 0x00000000, 0xE001, 0x3800, 0x0000,
+    ),
+    (
+        0x4B800000, 0x00000000, 0x00000000, 0x3F800000, 0x6800, 0x0000, 0x3C00,
+    ),
+    (
+        0xCB800000, 0x00000000, 0x00000000, 0x00000000, 0xE800, 0x0000, 0x0000,
+    ),
+    (
+        0x7F7FFFFF, 0x00000000, 0x00000000, 0x3F800000, 0x7BFF, 0x0000, 0x3C00,
+    ),
+    (
+        0xFF7FFFFF, 0x00000000, 0x00000000, 0x00000000, 0xFBFF, 0x0000, 0x0000,
+    ),
+    (
+        0x7F800000, 0x00000000, 0x00000000, 0x3F800000, 0x7C00, 0x0000, 0x3C00,
+    ),
+    (
+        0xFF800000, 0x00000000, 0x00000000, 0x00000000, 0xFC00, 0x0000, 0x0000,
+    ),
+    (
+        0x7FC00000, 0x7FC00000, 0x7FC00000, 0x00000000, 0x7E00, 0x7E00, 0x0000,
+    ),
+    (
+        0xFFC00000, 0x7FC00000, 0x7FC00000, 0x00000000, 0xFE00, 0xFE00, 0x0000,
+    ),
+    (
+        0x7F800001, 0x7FC00000, 0x7FC00000, 0x00000000, 0x7C01, 0x7C01, 0x0000,
+    ),
+    (
+        0xFF800001, 0x7FC00000, 0x7FC00000, 0x00000000, 0xFC01, 0xFC01, 0x0000,
+    ),
+    (
+        0x7FBFFFFF, 0x7FC00000, 0x7FC00000, 0x00000000, 0x7DFF, 0x7DFF, 0x0000,
+    ),
+    (
+        0x40300000, 0x3F400000, 0x3F400000, 0x3F800000, 0x4180, 0x3A00, 0x3C00,
+    ),
+    (
+        0xC0300000, 0x3E800000, 0x3E800000, 0x00000000, 0xC180, 0x3400, 0x0000,
+    ),
+    (
+        0x3F8CCCCD, 0x3DCCCCD0, 0x3DCCCCD0, 0x3F800000, 0x3C66, 0x2E60, 0x3C00,
+    ),
+    (
+        0x40000000, 0x00000000, 0x00000000, 0x3F800000, 0x4000, 0x0000, 0x3C00,
+    ),
+    (
+        0x3E800000, 0x3E800000, 0x3E800000, 0x3E800000, 0x3400, 0x3400, 0x3400,
+    ),
+];
+
+/// `(a, b, c, precise::median3, fast::median3, ha, hb, hc, half median3)`.
+const MEDIAN3: [(u32, u32, u32, u32, u32, u16, u16, u16, u16); 50] = [
+    (
+        0x7FC00000, 0x3F800000, 0x40000000, 0x3F800000, 0x3F800000, 0x7E00, 0x3C00, 0x4000, 0x3C00,
+    ),
+    (
+        0x7FC00000, 0x40000000, 0x3F800000, 0x40000000, 0x40000000, 0x7E00, 0x4000, 0x3C00, 0x4000,
+    ),
+    (
+        0x3F800000, 0x7FC00000, 0x40000000, 0x3F800000, 0x3F800000, 0x3C00, 0x7E00, 0x4000, 0x3C00,
+    ),
+    (
+        0x40000000, 0x7FC00000, 0x3F800000, 0x40000000, 0x40000000, 0x4000, 0x7E00, 0x3C00, 0x4000,
+    ),
+    (
+        0x3F800000, 0x40000000, 0x7FC00000, 0x3F800000, 0x3F800000, 0x3C00, 0x4000, 0x7E00, 0x3C00,
+    ),
+    (
+        0x40000000, 0x3F800000, 0x7FC00000, 0x3F800000, 0x3F800000, 0x4000, 0x3C00, 0x7E00, 0x3C00,
+    ),
+    (
+        0x7FC00000, 0x7FC00000, 0x3F800000, 0x3F800000, 0x7FC00000, 0x7E00, 0x7E00, 0x3C00, 0x3C00,
+    ),
+    (
+        0x7FC00000, 0x3F800000, 0x7FC00000, 0x3F800000, 0x3F800000, 0x7E00, 0x3C00, 0x7E00, 0x3C00,
+    ),
+    (
+        0x3F800000, 0x7FC00000, 0x7FC00000, 0x3F800000, 0x3F800000, 0x3C00, 0x7E00, 0x7E00, 0x3C00,
+    ),
+    (
+        0x7FC00000, 0xFFC00000, 0x3F800000, 0x3F800000, 0xFFC00000, 0x7E00, 0xFE00, 0x3C00, 0x3C00,
+    ),
+    (
+        0x7FC00000, 0xFFC00000, 0x7FC00000, 0x7FC00000, 0xFFC00000, 0x7E00, 0xFE00, 0x7E00, 0x7E00,
+    ),
+    (
+        0xFF800000, 0x3F800000, 0x7F800000, 0x3F800000, 0x3F800000, 0xFC00, 0x3C00, 0x7C00, 0x3C00,
+    ),
+    (
+        0xFF800000, 0x7F800000, 0x3F800000, 0x3F800000, 0x3F800000, 0xFC00, 0x7C00, 0x3C00, 0x3C00,
+    ),
+    (
+        0x3F800000, 0xFF800000, 0x7F800000, 0x3F800000, 0x3F800000, 0x3C00, 0xFC00, 0x7C00, 0x3C00,
+    ),
+    (
+        0x3F800000, 0x7F800000, 0xFF800000, 0x3F800000, 0x3F800000, 0x3C00, 0x7C00, 0xFC00, 0x3C00,
+    ),
+    (
+        0x7F800000, 0xFF800000, 0x3F800000, 0x3F800000, 0x3F800000, 0x7C00, 0xFC00, 0x3C00, 0x3C00,
+    ),
+    (
+        0x7F800000, 0x3F800000, 0xFF800000, 0x3F800000, 0x3F800000, 0x7C00, 0x3C00, 0xFC00, 0x3C00,
+    ),
+    (
+        0x7FC00000, 0xFF800000, 0x7F800000, 0xFF800000, 0xFF800000, 0x7E00, 0xFC00, 0x7C00, 0xFC00,
+    ),
+    (
+        0x7FC00000, 0x7F800000, 0xFF800000, 0x7F800000, 0x7F800000, 0x7E00, 0x7C00, 0xFC00, 0x7C00,
+    ),
+    (
+        0xFF800000, 0x7FC00000, 0x7F800000, 0xFF800000, 0xFF800000, 0xFC00, 0x7E00, 0x7C00, 0xFC00,
+    ),
+    (
+        0x7F800000, 0x7FC00000, 0xFF800000, 0x7F800000, 0x7F800000, 0x7C00, 0x7E00, 0xFC00, 0x7C00,
+    ),
+    (
+        0xFF800000, 0x7F800000, 0x7FC00000, 0xFF800000, 0xFF800000, 0xFC00, 0x7C00, 0x7E00, 0xFC00,
+    ),
+    (
+        0x7F800000, 0xFF800000, 0x7FC00000, 0xFF800000, 0xFF800000, 0x7C00, 0xFC00, 0x7E00, 0xFC00,
+    ),
+    (
+        0x80000000, 0x00000000, 0x3F800000, 0x00000000, 0x00000000, 0x8000, 0x0000, 0x3C00, 0x0000,
+    ),
+    (
+        0x00000000, 0x80000000, 0x3F800000, 0x80000000, 0x80000000, 0x0000, 0x8000, 0x3C00, 0x8000,
+    ),
+    (
+        0x80000000, 0x3F800000, 0x00000000, 0x80000000, 0x80000000, 0x8000, 0x3C00, 0x0000, 0x8000,
+    ),
+    (
+        0x00000000, 0x3F800000, 0x80000000, 0x00000000, 0x00000000, 0x0000, 0x3C00, 0x8000, 0x0000,
+    ),
+    (
+        0x3F800000, 0x80000000, 0x00000000, 0x80000000, 0x80000000, 0x3C00, 0x8000, 0x0000, 0x8000,
+    ),
+    (
+        0x3F800000, 0x00000000, 0x80000000, 0x00000000, 0x00000000, 0x3C00, 0x0000, 0x8000, 0x0000,
+    ),
+    (
+        0x80000000, 0x00000000, 0xBF800000, 0x00000000, 0x00000000, 0x8000, 0x0000, 0xBC00, 0x0000,
+    ),
+    (
+        0x00000000, 0x80000000, 0xBF800000, 0x80000000, 0x80000000, 0x0000, 0x8000, 0xBC00, 0x8000,
+    ),
+    (
+        0xBF800000, 0x80000000, 0x00000000, 0x80000000, 0x80000000, 0xBC00, 0x8000, 0x0000, 0x8000,
+    ),
+    (
+        0xBF800000, 0x00000000, 0x80000000, 0x00000000, 0x00000000, 0xBC00, 0x0000, 0x8000, 0x0000,
+    ),
+    (
+        0x00000000, 0xBF800000, 0x80000000, 0x00000000, 0x00000000, 0x0000, 0xBC00, 0x8000, 0x0000,
+    ),
+    (
+        0x80000000, 0xBF800000, 0x00000000, 0x80000000, 0x80000000, 0x8000, 0xBC00, 0x0000, 0x8000,
+    ),
+    (
+        0x80000000, 0x80000000, 0x00000000, 0x80000000, 0x80000000, 0x8000, 0x8000, 0x0000, 0x8000,
+    ),
+    (
+        0x00000000, 0x00000000, 0x80000000, 0x00000000, 0x00000000, 0x0000, 0x0000, 0x8000, 0x0000,
+    ),
+    (
+        0x80000000, 0x00000000, 0x80000000, 0x00000000, 0x00000000, 0x8000, 0x0000, 0x8000, 0x0000,
+    ),
+    (
+        0x7FC00000, 0x80000000, 0x00000000, 0x80000000, 0x80000000, 0x7E00, 0x8000, 0x0000, 0x8000,
+    ),
+    (
+        0x7FC00000, 0x00000000, 0x80000000, 0x00000000, 0x00000000, 0x7E00, 0x0000, 0x8000, 0x0000,
+    ),
+    (
+        0x80000000, 0x7FC00000, 0x00000000, 0x80000000, 0x80000000, 0x8000, 0x7E00, 0x0000, 0x8000,
+    ),
+    (
+        0x00000000, 0x7FC00000, 0x80000000, 0x00000000, 0x00000000, 0x0000, 0x7E00, 0x8000, 0x0000,
+    ),
+    (
+        0x80000000, 0x00000000, 0x7FC00000, 0x00000000, 0x00000000, 0x8000, 0x0000, 0x7E00, 0x0000,
+    ),
+    (
+        0x00000000, 0x80000000, 0x7FC00000, 0x80000000, 0x80000000, 0x0000, 0x8000, 0x7E00, 0x8000,
+    ),
+    (
+        0x3F800000, 0x3F800000, 0x40000000, 0x3F800000, 0x3F800000, 0x3C00, 0x3C00, 0x4000, 0x3C00,
+    ),
+    (
+        0x40000000, 0x3F800000, 0x3F800000, 0x3F800000, 0x3F800000, 0x4000, 0x3C00, 0x3C00, 0x3C00,
+    ),
+    (
+        0x3F800000, 0x40000000, 0x3F800000, 0x3F800000, 0x3F800000, 0x3C00, 0x4000, 0x3C00, 0x3C00,
+    ),
+    (
+        0x00000001, 0x80000001, 0x00000000, 0x80000001, 0x80000001, 0x0001, 0x8001, 0x0000, 0x0000,
+    ),
+    (
+        0x80000001, 0x00000001, 0x80000000, 0x00000001, 0x00000001, 0x8001, 0x0001, 0x8000, 0x8000,
+    ),
+    (
+        0x3F800000, 0x40000000, 0x40400000, 0x40000000, 0x40000000, 0x3C00, 0x4000, 0x4200, 0x4000,
+    ),
+];
+
+/// `(x, sign(x))` of `float`, precise and fast alike.
+const SIGN_F32: [(u32, u32); 17] = [
+    (0x00000000, 0x00000000),
+    (0x80000000, 0x00000000),
+    (0x00000001, 0x00000000),
+    (0x80000001, 0x00000000),
+    (0x3F800000, 0x3F800000),
+    (0xBF800000, 0xBF800000),
+    (0x3F000000, 0x3F800000),
+    (0xBF000000, 0xBF800000),
+    (0x7F800000, 0x3F800000),
+    (0xFF800000, 0xBF800000),
+    (0x7FC00000, 0x00000000),
+    (0xFFC00000, 0x00000000),
+    (0x7F7FFFFF, 0x3F800000),
+    (0xFF7FFFFF, 0xBF800000),
+    (0x00800000, 0x3F800000),
+    (0x80800000, 0xBF800000),
+    (0x40000000, 0x3F800000),
+];
+
+/// `(x, sign(x))` of `half`.
+const SIGN_HALF: [(u16, u16); 17] = [
+    (0x0000, 0x0000),
+    (0x8000, 0x0000),
+    (0x0001, 0x3C00),
+    (0x8001, 0xBC00),
+    (0x3C00, 0x3C00),
+    (0xBC00, 0xBC00),
+    (0x3800, 0x3C00),
+    (0xB800, 0xBC00),
+    (0x7C00, 0x3C00),
+    (0xFC00, 0xBC00),
+    (0x7E00, 0x0000),
+    (0xFE00, 0x0000),
+    (0x7BFF, 0x3C00),
+    (0xFBFF, 0xBC00),
+    (0x0400, 0x3C00),
+    (0x8400, 0xBC00),
+    (0x4000, 0x3C00),
+];
+
+/// `(x, y, precise::pow, fast::pow, hx, hy, half pow)`.
+const POW: [(u32, u32, u32, u32, u16, u16, u16); 90] = [
+    (
+        0x00000000, 0x3F800000, 0x00000000, 0x00000000, 0x0000, 0x3C00, 0x0000,
+    ),
+    (
+        0x00000000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x0000, 0x7E00, 0x7E00,
+    ),
+    (
+        0x00000001, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x0001, 0x7E00, 0x7E00,
+    ),
+    (
+        0x3F000000, 0x3F800000, 0x3F000000, 0x3F000000, 0x3800, 0x3C00, 0x3800,
+    ),
+    (
+        0x3F000000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x3800, 0x7E00, 0x7E00,
+    ),
+    (
+        0x3F7FFFFF, 0x3F800000, 0x3F7FFFFF, 0x3F7FFFFF, 0x3BFF, 0x3C00, 0x3BFF,
+    ),
+    (
+        0x3F7FFFFF, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x3BFF, 0x7E00, 0x7E00,
+    ),
+    (
+        0x3F800000, 0x3F800000, 0x3F800000, 0x3F800000, 0x3C00, 0x3C00, 0x3C00,
+    ),
+    (
+        0x3F800000, 0x7FC00000, 0x3F800000, 0x3F800000, 0x3C00, 0x7E00, 0x3C00,
+    ),
+    (
+        0x3F800001, 0x3F800000, 0x3F800001, 0x3F800001, 0x3C01, 0x3C00, 0x3C01,
+    ),
+    (
+        0x3F800001, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x3C01, 0x7E00, 0x7E00,
+    ),
+    (
+        0x40000000, 0x3F800000, 0x40000000, 0x40000000, 0x4000, 0x3C00, 0x4000,
+    ),
+    (
+        0x40000000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x4000, 0x7E00, 0x7E00,
+    ),
+    (
+        0x7F7FFFFF, 0x3F800000, 0x7F7FFFFF, 0x7F7FFFFF, 0x7BFF, 0x3C00, 0x7BFF,
+    ),
+    (
+        0x7F7FFFFF, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7BFF, 0x7E00, 0x7E00,
+    ),
+    (
+        0x7F800000, 0x3F800000, 0x7F800000, 0x7F800000, 0x7C00, 0x3C00, 0x7C00,
+    ),
+    (
+        0x7F800000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7C00, 0x7E00, 0x7E00,
+    ),
+    (
+        0x7FC00000, 0x00000000, 0x3F800000, 0x3F800000, 0x7E00, 0x0000, 0x3C00,
+    ),
+    (
+        0x7FC00000, 0x00000001, 0x3F800000, 0x3F800000, 0x7E00, 0x0001, 0x7E00,
+    ),
+    (
+        0x7FC00000, 0x3F000000, 0x7FC00000, 0x7FC00000, 0x7E00, 0x3800, 0x7E00,
+    ),
+    (
+        0x7FC00000, 0x3F800000, 0x7FC00000, 0x7FC00000, 0x7E00, 0x3C00, 0x7E00,
+    ),
+    (
+        0x7FC00000, 0x40000000, 0x7FC00000, 0x7FC00000, 0x7E00, 0x4000, 0x7E00,
+    ),
+    (
+        0x7FC00000, 0x40200000, 0x7FC00000, 0x7FC00000, 0x7E00, 0x4100, 0x7E00,
+    ),
+    (
+        0x7FC00000, 0x40400000, 0x7FC00000, 0x7FC00000, 0x7E00, 0x4200, 0x7E00,
+    ),
+    (
+        0x7FC00000, 0x42FE0000, 0x7FC00000, 0x7FC00000, 0x7E00, 0x4B80, 0x7E00,
+    ),
+    (
+        0x7FC00000, 0x43000000, 0x7FC00000, 0x7FC00000, 0x7E00, 0x4C00, 0x7E00,
+    ),
+    (
+        0x7FC00000, 0x4B7FFFFF, 0x7FC00000, 0x7FC00000, 0x7E00, 0x67FF, 0x7E00,
+    ),
+    (
+        0x7FC00000, 0x4B800000, 0x7FC00000, 0x7FC00000, 0x7E00, 0x6800, 0x7E00,
+    ),
+    (
+        0x7FC00000, 0x7149F2CA, 0x7FC00000, 0x7FC00000, 0x7E00, 0x7BFF, 0x7E00,
+    ),
+    (
+        0x7FC00000, 0x7F800000, 0x7FC00000, 0x7FC00000, 0x7E00, 0x7C00, 0x7E00,
+    ),
+    (
+        0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7E00, 0x7E00, 0x7E00,
+    ),
+    (
+        0x7FC00000, 0x80000000, 0x3F800000, 0x3F800000, 0x7E00, 0x8000, 0x3C00,
+    ),
+    (
+        0x7FC00000, 0x80000001, 0x3F800000, 0x3F800000, 0x7E00, 0x8001, 0x7E00,
+    ),
+    (
+        0x7FC00000, 0xBF000000, 0x7FC00000, 0x7FC00000, 0x7E00, 0xB800, 0x7E00,
+    ),
+    (
+        0x7FC00000, 0xBF800000, 0x7FC00000, 0x7FC00000, 0x7E00, 0xBC00, 0x7E00,
+    ),
+    (
+        0x7FC00000, 0xC0000000, 0x7FC00000, 0x7FC00000, 0x7E00, 0xC000, 0x7E00,
+    ),
+    (
+        0x7FC00000, 0xC0200000, 0x7FC00000, 0x7FC00000, 0x7E00, 0xC100, 0x7E00,
+    ),
+    (
+        0x7FC00000, 0xC0400000, 0x7FC00000, 0x7FC00000, 0x7E00, 0xC200, 0x7E00,
+    ),
+    (
+        0x7FC00000, 0xC2FC0000, 0x7FC00000, 0x7FC00000, 0x7E00, 0xCB00, 0x7E00,
+    ),
+    (
+        0x7FC00000, 0xC3170000, 0x7FC00000, 0x7FC00000, 0x7E00, 0xCEC0, 0x7E00,
+    ),
+    (
+        0x7FC00000, 0xCB7FFFFF, 0x7FC00000, 0x7FC00000, 0x7E00, 0xE7FF, 0x7E00,
+    ),
+    (
+        0x7FC00000, 0xF149F2CA, 0x7FC00000, 0x7FC00000, 0x7E00, 0xFBFF, 0x7E00,
+    ),
+    (
+        0x7FC00000, 0xFF800000, 0x7FC00000, 0x7FC00000, 0x7E00, 0xFC00, 0x7E00,
+    ),
+    (
+        0x80000000, 0x3F800000, 0x80000000, 0x80000000, 0x8000, 0x3C00, 0x8000,
+    ),
+    (
+        0x80000000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x8000, 0x7E00, 0x7E00,
+    ),
+    (
+        0x80000001, 0x3F000000, 0x00000000, 0x00000000, 0x8001, 0x3800, 0x7E00,
+    ),
+    (
+        0x80000001, 0x40200000, 0x00000000, 0x00000000, 0x8001, 0x4100, 0x7E00,
+    ),
+    (
+        0x80000001, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x8001, 0x7E00, 0x7E00,
+    ),
+    (
+        0x80000001, 0xBF000000, 0x7F800000, 0x7F800000, 0x8001, 0xB800, 0x7E00,
+    ),
+    (
+        0x80000001, 0xC0200000, 0x7F800000, 0x7F800000, 0x8001, 0xC100, 0x7E00,
+    ),
+    (
+        0xBF000000, 0x3F800000, 0xBF000000, 0xBF000000, 0xB800, 0x3C00, 0xB800,
+    ),
+    (
+        0xBF000000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0xB800, 0x7E00, 0x7E00,
+    ),
+    (
+        0xBF7FFFFF, 0x3F800000, 0xBF7FFFFF, 0xBF7FFFFF, 0xBBFF, 0x3C00, 0xBBFF,
+    ),
+    (
+        0xBF7FFFFF, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0xBBFF, 0x7E00, 0x7E00,
+    ),
+    (
+        0xBF800000, 0x3F800000, 0xBF800000, 0xBF800000, 0xBC00, 0x3C00, 0xBC00,
+    ),
+    (
+        0xBF800000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0xBC00, 0x7E00, 0x7E00,
+    ),
+    (
+        0xBF800001, 0x3F800000, 0xBF800001, 0xBF800001, 0xBC01, 0x3C00, 0xBC01,
+    ),
+    (
+        0xBF800001, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0xBC01, 0x7E00, 0x7E00,
+    ),
+    (
+        0xC0000000, 0x3F800000, 0xC0000000, 0xC0000000, 0xC000, 0x3C00, 0xC000,
+    ),
+    (
+        0xC0000000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0xC000, 0x7E00, 0x7E00,
+    ),
+    (
+        0xFF7FFFFF, 0x3F800000, 0xFF7FFFFF, 0xFF7FFFFF, 0xFBFF, 0x3C00, 0xFBFF,
+    ),
+    (
+        0xFF7FFFFF, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0xFBFF, 0x7E00, 0x7E00,
+    ),
+    (
+        0xFF800000, 0x3F800000, 0xFF800000, 0xFF800000, 0xFC00, 0x3C00, 0xFC00,
+    ),
+    (
+        0xFF800000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0xFC00, 0x7E00, 0x7E00,
+    ),
+    (
+        0xFFC00000, 0x00000000, 0x3F800000, 0x3F800000, 0xFE00, 0x0000, 0x3C00,
+    ),
+    (
+        0xFFC00000, 0x00000001, 0x3F800000, 0x3F800000, 0xFE00, 0x0001, 0x7E00,
+    ),
+    (
+        0xFFC00000, 0x3F000000, 0x7FC00000, 0x7FC00000, 0xFE00, 0x3800, 0x7E00,
+    ),
+    (
+        0xFFC00000, 0x3F800000, 0xFFC00000, 0x7FC00000, 0xFE00, 0x3C00, 0x7E00,
+    ),
+    (
+        0xFFC00000, 0x40000000, 0x7FC00000, 0x7FC00000, 0xFE00, 0x4000, 0x7E00,
+    ),
+    (
+        0xFFC00000, 0x40200000, 0x7FC00000, 0x7FC00000, 0xFE00, 0x4100, 0x7E00,
+    ),
+    (
+        0xFFC00000, 0x40400000, 0x7FC00000, 0x7FC00000, 0xFE00, 0x4200, 0x7E00,
+    ),
+    (
+        0xFFC00000, 0x42FE0000, 0x7FC00000, 0x7FC00000, 0xFE00, 0x4B80, 0x7E00,
+    ),
+    (
+        0xFFC00000, 0x43000000, 0x7FC00000, 0x7FC00000, 0xFE00, 0x4C00, 0x7E00,
+    ),
+    (
+        0xFFC00000, 0x4B7FFFFF, 0x7FC00000, 0x7FC00000, 0xFE00, 0x67FF, 0x7E00,
+    ),
+    (
+        0xFFC00000, 0x4B800000, 0x7FC00000, 0x7FC00000, 0xFE00, 0x6800, 0x7E00,
+    ),
+    (
+        0xFFC00000, 0x7149F2CA, 0x7FC00000, 0x7FC00000, 0xFE00, 0x7BFF, 0x7E00,
+    ),
+    (
+        0xFFC00000, 0x7F800000, 0x7FC00000, 0x7FC00000, 0xFE00, 0x7C00, 0x7E00,
+    ),
+    (
+        0xFFC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0xFE00, 0x7E00, 0x7E00,
+    ),
+    (
+        0xFFC00000, 0x80000000, 0x3F800000, 0x3F800000, 0xFE00, 0x8000, 0x3C00,
+    ),
+    (
+        0xFFC00000, 0x80000001, 0x3F800000, 0x3F800000, 0xFE00, 0x8001, 0x7E00,
+    ),
+    (
+        0xFFC00000, 0xBF000000, 0x7FC00000, 0x7FC00000, 0xFE00, 0xB800, 0x7E00,
+    ),
+    (
+        0xFFC00000, 0xBF800000, 0x7FC00000, 0x7FC00000, 0xFE00, 0xBC00, 0x7E00,
+    ),
+    (
+        0xFFC00000, 0xC0000000, 0x7FC00000, 0x7FC00000, 0xFE00, 0xC000, 0x7E00,
+    ),
+    (
+        0xFFC00000, 0xC0200000, 0x7FC00000, 0x7FC00000, 0xFE00, 0xC100, 0x7E00,
+    ),
+    (
+        0xFFC00000, 0xC0400000, 0x7FC00000, 0x7FC00000, 0xFE00, 0xC200, 0x7E00,
+    ),
+    (
+        0xFFC00000, 0xC2FC0000, 0x7FC00000, 0x7FC00000, 0xFE00, 0xCB00, 0x7E00,
+    ),
+    (
+        0xFFC00000, 0xC3170000, 0x7FC00000, 0x7FC00000, 0xFE00, 0xCEC0, 0x7E00,
+    ),
+    (
+        0xFFC00000, 0xCB7FFFFF, 0x7FC00000, 0x7FC00000, 0xFE00, 0xE7FF, 0x7E00,
+    ),
+    (
+        0xFFC00000, 0xF149F2CA, 0x7FC00000, 0x7FC00000, 0xFE00, 0xFBFF, 0x7E00,
+    ),
+    (
+        0xFFC00000, 0xFF800000, 0x7FC00000, 0x7FC00000, 0xFE00, 0xFC00, 0x7E00,
+    ),
+];
+
+/// One lane: the operands' bits and Metal's answer.
+type Row = (Vec<u64>, u64);
+
+/// Run `op` on form `f` over `rows` and require every answer bit for bit, NaN payloads included.
+fn metal_answers(op: FloatFn, f: Form, rows: &[Row]) {
+    let cases: Vec<Case> = rows
+        .iter()
+        .map(|(ops, _)| ops.iter().map(|b| vec![*b]).collect())
+        .collect();
+    check_accept(
+        &format!("{op:?} {f:?} against Metal"),
+        &vec![f; op.arity()],
+        f,
+        &|fb, x| {
+            math::float_fn(
+                fb,
+                op,
+                f,
+                Contraction::Forbidden,
+                NanTest::IsNan,
+                x,
+                &Lib::instructions(),
+            )
+        },
+        &cases,
+        &|c| {
+            let ops: Vec<u64> = c.iter().map(|l| l[0]).collect();
+            rows.iter()
+                .find(|(o, _)| *o == ops)
+                .map(|(_, want)| vec![*want])
+        },
+        &|g, w| g == w,
+    );
+}
+
+#[test]
+fn fract_and_saturate_answer_as_metal() {
+    let rows = |x: fn(&(u32, u32, u32, u32, u16, u16, u16)) -> [u64; 2]| -> Vec<Row> {
+        FRACT_SATURATE
+            .iter()
+            .map(|r| {
+                let [x, want] = x(r);
+                (vec![x], want)
+            })
+            .collect()
+    };
+    let (f32_, half) = (float(32), float(16));
+    metal_answers(
+        FloatFn::Fract,
+        f32_,
+        &rows(|r| [u64::from(r.0), u64::from(r.1)]),
+    );
+    metal_answers(
+        // A1 case aed3faaa calls `fast::fract` without fast-math flags.
+        FloatFn::FastFract {
+            infinite_nan: false,
+        },
+        f32_,
+        &rows(|r| [u64::from(r.0), u64::from(r.2)]),
+    );
+    metal_answers(
+        FloatFn::Saturate,
+        f32_,
+        &rows(|r| [u64::from(r.0), u64::from(r.3)]),
+    );
+    metal_answers(
+        FloatFn::Fract,
+        half,
+        &rows(|r| [u64::from(r.4), u64::from(r.5)]),
+    );
+    metal_answers(
+        FloatFn::Saturate,
+        half,
+        &rows(|r| [u64::from(r.4), u64::from(r.6)]),
+    );
+}
+
+#[test]
+fn median3_answers_as_metal() {
+    type M = (u32, u32, u32, u32, u32, u16, u16, u16, u16);
+    let rows = |x: fn(&M) -> [u64; 4]| -> Vec<Row> {
+        MEDIAN3
+            .iter()
+            .map(|r| {
+                let [a, b, c, want] = x(r);
+                (vec![a, b, c], want)
+            })
+            .collect()
+    };
+    metal_answers(
+        FloatFn::Median3,
+        float(32),
+        &rows(|r| {
+            [
+                u64::from(r.0),
+                u64::from(r.1),
+                u64::from(r.2),
+                u64::from(r.3),
+            ]
+        }),
+    );
+    metal_answers(
+        FloatFn::FastMedian3,
+        float(32),
+        &rows(|r| {
+            [
+                u64::from(r.0),
+                u64::from(r.1),
+                u64::from(r.2),
+                u64::from(r.4),
+            ]
+        }),
+    );
+    metal_answers(
+        FloatFn::Median3,
+        float(16),
+        &rows(|r| {
+            [
+                u64::from(r.5),
+                u64::from(r.6),
+                u64::from(r.7),
+                u64::from(r.8),
+            ]
+        }),
+    );
+}
+
+#[test]
+fn sign_answers_as_metal() {
+    let f: Vec<Row> = SIGN_F32
+        .iter()
+        .map(|(x, s)| (vec![u64::from(*x)], u64::from(*s)))
+        .collect();
+    metal_answers(FloatFn::Sign, float(32), &f);
+    let h: Vec<Row> = SIGN_HALF
+        .iter()
+        .map(|(x, s)| (vec![u64::from(*x)], u64::from(*s)))
+        .collect();
+    metal_answers(FloatFn::Sign, float(16), &h);
+}
+
+/// `pow`'s special cases (`math::pow_special`) at the lanes of [`POW`], each decided by a special
+/// case: the magnitude operand (`GLSL.std.450 Pow(|x|, y)`, which the interpreter does not
+/// model) is a constant no answer equals, so a lane that read it would fail.
+#[test]
+fn pow_special_operands_answer_as_metal() {
+    for (bits, precise) in [(32u8, true), (32, false), (16, true)] {
+        let f = float(bits);
+        let pi = if bits == 32 { 0x4049_0FDB } else { 0x4248 };
+        let rows: Vec<Row> = POW
+            .iter()
+            .map(|r| match (bits, precise) {
+                (32, true) => (vec![u64::from(r.0), u64::from(r.1), pi], u64::from(r.2)),
+                (32, false) => (vec![u64::from(r.0), u64::from(r.1), pi], u64::from(r.3)),
+                _ => (vec![u64::from(r.4), u64::from(r.5), pi], u64::from(r.6)),
+            })
+            .collect();
+        let cases: Vec<Case> = rows
+            .iter()
+            .map(|(ops, _)| ops.iter().map(|b| vec![*b]).collect())
+            .collect();
+        check_accept(
+            &format!("pow f{bits} precise {precise} against Metal"),
+            &[f, f, f],
+            f,
+            &|fb, a| {
+                let r = math::pow_special(fb, f, a[0], a[1], a[2], precise)?;
+                crate::lower::arith::narrow::round(fb, f, r)
+            },
+            &cases,
+            &|c| {
+                let ops: Vec<u64> = c.iter().map(|l| l[0]).collect();
+                rows.iter()
+                    .find(|(o, _)| *o == ops)
+                    .map(|(_, want)| vec![*want])
+            },
+            &|g, w| g == w,
+        );
+    }
+}
+
+/// `pow(x, 1)` of an `f32` denormal `x` (`math::pow_special`): Metal's precise `pow` answers `x`
+/// itself and `fast::pow` the zero of its sign, at each denormal base of the denormal probes
+/// (cases 638c7906 and c9b6bacb, the `pow` word at `y = 1`; the M3 Max and the M4 answer the
+/// same). The magnitude operand is a constant no answer equals, so a lane that read it fails.
+#[test]
+fn pow_of_a_denormal_base_to_one_answers_as_metal() {
+    let f = float(32);
+    let magnitude = 0x4049_0FDBu64;
+    let one = 0x3F80_0000u64;
+    let bases = [
+        0x0000_0001u32,
+        0x8000_0001,
+        0x0000_0003,
+        0x0040_0000,
+        0x807F_FFFF,
+        0x007F_FFFF,
+    ];
+    for precise in [true, false] {
+        let cases: Vec<Case> = bases
+            .iter()
+            .map(|x| vec![vec![u64::from(*x)], vec![one], vec![magnitude]])
+            .collect();
+        check_accept(
+            &format!("pow f32 of a denormal base to 1 (precise {precise}) against Metal"),
+            &[f, f, f],
+            f,
+            &|fb, a| math::pow_special(fb, f, a[0], a[1], a[2], precise),
+            &cases,
+            &|c| {
+                let x = c[0][0] as u32;
+                let want = if precise { x } else { x & 0x8000_0000 };
+                Some(vec![u64::from(want)])
+            },
+            &|g, w| g == w,
+        );
+    }
+}
+
+/// Metal's `fast::sin` and `fast::cos` past the last evaluated quadrant (`math::fast_trig_flush`),
+/// against Metal's answers: `+0` from the float after `float(π/2) · 2^22` on, for the infinities,
+/// and for NaNs, whatever the sign; the device's `Sin`/`Cos` (here an input no answer equals) up to
+/// and at the limit. The arguments are the bisected boundary, the two A1 cases' (`9424775`, `1e7`,
+/// a NaN, 179b6aa6's `6588397.5`), and probe case 08bc6611's lanes.
+#[test]
+fn fast_sine_and_cosine_flush_past_the_last_quadrant_as_metal() {
+    let f = float(32);
+    let device = 0x3F12_3456u64;
+    let limit = math::FAST_TRIG_LIMIT;
+    assert_eq!(limit, std::f32::consts::FRAC_PI_2 * (1u32 << 22) as f32);
+    assert_eq!(limit.to_bits(), 0x4AC9_0FDB);
+    // (x, flushed): Metal answers +0 when flushed and its evaluated function otherwise.
+    let rows: [(u32, bool); 16] = [
+        (limit.to_bits(), false),
+        ((-limit).to_bits(), false),
+        (0x4AC9_0FDC, true),
+        (0xCAC9_0FDC, true),
+        (9_424_775f32.to_bits(), true),
+        (1e7f32.to_bits(), true),
+        ((-1e7f32).to_bits(), true),
+        (f32::MAX.to_bits(), true),
+        (0x7F80_0000, true),
+        (0xFF80_0000, true),
+        (0x7FC0_0000, true),
+        (0xFFC0_0000, true),
+        (0x7F80_0001, true),
+        (0x3F80_0000, false),
+        (0x8000_0000, false),
+        (1e6f32.to_bits(), false),
+    ];
+    let cases: Vec<Case> = rows
+        .iter()
+        .map(|(x, _)| vec![vec![u64::from(*x)], vec![device]])
+        .collect();
+    check_accept(
+        "fast sin/cos flush f32 against Metal",
+        &[f, f],
+        f,
+        &|fb, a| math::fast_trig_flush(fb, f, a[0], a[1]),
+        &cases,
+        &|c| {
+            let x = arg(c, 0) as u32;
+            rows.iter()
+                .find(|(r, _)| *r == x)
+                .map(|(_, flushed)| vec![if *flushed { 0 } else { device }])
+        },
+        &|g, w| g == w,
+    );
+}

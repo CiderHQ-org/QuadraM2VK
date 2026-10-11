@@ -1,0 +1,15 @@
+[package]
+name = "metal2vulkan-devtools"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "External-tool helpers for metal2vulkan's own tests and its validation tools"
+# The product's path-only dev-dependency (which `cargo publish` drops) and a dependency of
+# `metal2vulkan-validation`; never published itself.
+publish = false
+
+[dependencies]
+# The synthetic metallib writer's function hashes (`metallib`).
+sha2.workspace = true

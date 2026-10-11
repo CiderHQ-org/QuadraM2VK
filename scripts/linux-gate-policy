@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+# What scripts/linux-gate lets a container see. scripts/linux-gate calls it on the
+# host; crates/metal2vulkan-validation/tests/integration/linux_gate_policy.rs tests it without docker.
+#
+#   scripts/linux-gate-policy paths --root R --main-root M [--private P] [--scratch S]
+#   scripts/linux-gate-policy mounts --role fetch|cmd --network N --autoremove true|false
+#       --root R --main-root M [--private P] [--scratch S] --volume V [--private-volume W]
+#       < mounts
+#
+# R is the checkout linux-gate runs from, M the repository's main checkout (R itself, or the
+# checkout a linked worktree belongs to), P the --private-corpus directory, S the --scratch
+# directory: absolute paths. The protected paths are R, M, and P.
+#
+# - `paths` (exit 64 on refusal): the scratch directory is the one read-write host path a
+#   container gets, so it may not equal, contain, or lie inside a protected path. A scratch
+#   directory that contains the main checkout would hand its private corpus (or the index naming
+#   every private source) to the command read-write. Overlap is decided by file identity, not
+#   by spelling: two directories are the same when their device and inode are, and one lies
+#   inside the other when it is an ancestor of the other's physical path. So a symlink, a case
+#   variant on a case-insensitive file system (`/users/...`), or a firmlink
+#   (`/System/Volumes/Data/Users/...`) of a protected path is caught. A path that cannot be read
+#   counts as overlapping.
+# - `mounts` (exit 70 on refusal) judges what the daemon recorded for one created container, one
+#   mount per stdin line: type, volume name, source, destination, read-write, separated by the
+#   unit separator (0x1f; `docker container inspect` writes them so). The checkout is never
+#   mounted: its files arrive as a stream of its file list. So every mount must be one of these,
+#   and anything else is refused:
+#   - `/cache`, a volume: V, or W in the command container of a --private-corpus run, which
+#     writes no volume a networked container mounts;
+#   - `/cache-net`, V read-only, in that command container only (its crates and lockfile);
+#   - the private corpus's two directories, binds of P/local/sources and P/local/library-modules
+#     read-only under /work/m2v/crates/metal2vulkan-validation/corpus/local, in that command container only, with
+#     network `none` and auto-removal;
+#   - `/scratch`, a bind of S, in the command container only, whose recorded source overlaps no
+#     protected path (checked again here, by file identity, from the recorded source).
+#   A networked container may hold no bind and may not mount W, and the command container runs
+#   with network `none`. A bind's recorded source is matched as the host path itself or, the one
+#   prefix a daemon is known to add, under /host_mnt (Docker Desktop's spelling of a macOS path).
+set -euo pipefail
+
+usage() {
+    sed -n '5,8p' "$0" | sed 's/^# //' >&2
+    exit 64
+}
+
+[ "$#" -ge 1 ] || usage
+mode=$1
+shift
+role= network= autoremove= root= main_root= private= scratch= volume= private_volume=
+while [ "$#" -gt 0 ]; do
+    [ "$#" -ge 2 ] || usage
+    case "$1" in
+        --role) role=$2 ;;
+        --network) network=$2 ;;
+        --autoremove) autoremove=$2 ;;
+        --root) root=$2 ;;
+        --main-root) main_root=$2 ;;
+        --private) private=$2 ;;
+        --scratch) scratch=$2 ;;
+        --volume) volume=$2 ;;
+        --private-volume) private_volume=$2 ;;
+        *) usage ;;
+    esac
+    shift 2
+done
+[ -n "$root" ] && [ -n "$main_root" ] || usage
+for path in "$root" "$main_root" "$private" "$scratch"; do
+    case "$path" in
+        '' | /*) ;;
+        *) echo "linux-gate: $path is not an absolute path" >&2; exit 64 ;;
+    esac
+done
+
+# The device and inode of the directory $1, following symlinks (GNU stat, else BSD stat; GNU's
+# `stat -f` is a file-system query, so it is never tried first).
+file_id() {
+    stat -L -c '%d:%i' "$1" 2>/dev/null || stat -L -f '%d:%i' "$1" 2>/dev/null
+}
+
+# The identities of the directory $1 and of every ancestor of its physical path, up to /.
+ids_up() {
+    local p
+    p=$(cd "$1" 2>/dev/null && pwd -P) || return 1
+    while :; do
+        file_id "$p" || return 1
+        [ "$p" = / ] && return 0
+        p=$(dirname "$p")
+    done
+}
+
+# True when the directories $1 and $2 are the same directory or one lies inside the other, by
+# file identity in both directions; also true when either cannot be read.
+overlaps() {
+    local id_a id_b up_a up_b
+    if ! id_a=$(file_id "$1") || ! id_b=$(file_id "$2") || ! up_a=$(ids_up "$1") ||
+        ! up_b=$(ids_up "$2"); then
+        return 0
+    fi
+    printf '%s\n' "$up_a" | grep -qxF "$id_b" || printf '%s\n' "$up_b" | grep -qxF "$id_a"
+}
+
+# The protected path the directory $1 overlaps, if any.
+protected_overlap() {
+    local p
+    for p in "$root" "$main_root" "$private"; do
+        if [ -n "$p" ] && overlaps "$1" "$p"; then
+            echo "$p"
+            return
+        fi
+    done
+}
+
+# The host path of the recorded bind source $1: itself, or with Docker Desktop's /host_mnt removed.
+host_path() {
+    case "$1" in
+        /host_mnt/*) echo "${1#/host_mnt}" ;;
+        *) echo "$1" ;;
+    esac
+}
+
+# True when the recorded bind source $1 is the host path $2.
+same_source() {
+    [ "$(host_path "$1")" = "$2" ]
+}
+
+case "$mode" in
+    paths)
+        if [ -n "$scratch" ]; then
+            hit=$(protected_overlap "$scratch")
+            if [ -n "$hit" ]; then
+                echo "linux-gate: --scratch $scratch overlaps $hit (the checkout, the main" \
+                    "checkout, or the private corpus, by file identity; or a path cannot be" \
+                    "read); pass a directory outside all three" >&2
+                exit 64
+            fi
+        fi
+        ;;
+    mounts)
+        case "$role" in fetch | cmd) ;; *) usage ;; esac
+        [ -n "$network" ] && [ -n "$autoremove" ] && [ -n "$volume" ] || usage
+        if [ -n "$private" ] && [ -z "$private_volume" ]; then usage; fi
+        refuse() {
+            echo "linux-gate: refused: the $role container $*" >&2
+            exit 70
+        }
+        private_dest=/work/m2v/crates/metal2vulkan-validation/corpus/local
+        if [ "$role" = cmd ] && [ "$network" != none ]; then
+            refuse "runs with network $network (needs none)"
+        fi
+        found=0
+        cache=
+        while IFS=$'\x1f' read -r type name source dest rw; do
+            [ -n "$type$dest" ] || continue
+            # Defence in depth: the per-destination rules below already refuse everything these
+            # two refuse (a networked container is the fetch container, whose only allowed mount
+            # is the slot's volume at /cache; a networked command container was refused above),
+            # so no test can fail without them. They state the invariant where it is read.
+            if [ "$type" = bind ] && [ "$network" != none ]; then
+                refuse "is networked ($network) and binds $source at $dest"
+            fi
+            if [ -n "$private_volume" ] && [ "$name" = "$private_volume" ] && [ "$network" != none ]; then
+                refuse "is networked ($network) and mounts the private run's volume $name"
+            fi
+            case "$dest" in
+                /cache)
+                    want=$volume
+                    if [ "$role" = cmd ] && [ -n "$private" ]; then want=$private_volume; fi
+                    [ "$type" = volume ] && [ "$name" = "$want" ] ||
+                        refuse "mounts $type ${name:-$source} at /cache (needs the volume $want)"
+                    cache=$name
+                    ;;
+                /cache-net)
+                    [ "$role" = cmd ] && [ -n "$private" ] && [ "$type" = volume ] &&
+                        [ "$name" = "$volume" ] && [ "$rw" = false ] ||
+                        refuse "mounts $type ${name:-$source} at /cache-net rw=$rw (only a" \
+                            "--private-corpus command container, the volume $volume read-only)"
+                    ;;
+                "$private_dest/sources" | "$private_dest/library-modules")
+                    [ -n "$private" ] && [ "$role" = cmd ] ||
+                        refuse "mounts $source at $dest without --private-corpus in its command"
+                    [ "$type" = bind ] && same_source "$source" "$private/local/${dest##*/}" ||
+                        refuse "mounts $type $source at $dest (needs $private/local/${dest##*/})"
+                    if [ "$network" != none ] || [ "$autoremove" != true ] || [ "$rw" != false ]; then
+                        refuse "mounts $dest with network=$network autoremove=$autoremove" \
+                            "rw=$rw (needs none, true, false)"
+                    fi
+                    found=$((found + 1))
+                    ;;
+                /scratch)
+                    [ -n "$scratch" ] && [ "$role" = cmd ] && [ "$type" = bind ] &&
+                        same_source "$source" "$scratch" ||
+                        refuse "mounts $type $source at /scratch (only the command container," \
+                            "a bind of --scratch)"
+                    hit=$(protected_overlap "$(host_path "$source")")
+                    [ -z "$hit" ] || refuse "mounts the scratch $source, which overlaps $hit"
+                    ;;
+                *) refuse "mounts $type ${name:-$source} at $dest, which nothing needs" ;;
+            esac
+        done
+        [ -n "$cache" ] || refuse "has no /cache volume"
+        if [ "$role" = cmd ] && [ -n "$private" ] && [ "$found" -ne 2 ]; then
+            refuse "has $found of the 2 private mounts"
+        fi
+        ;;
+    *) usage ;;
+esac

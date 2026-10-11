@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Renders the consumer reference of the new API's frozen surface, warnings
+# denied. CI runs it after the ordinary documentation build; so does the gate in CONTRIBUTING.md.
+#
+#   scripts/api-docs            # render into <target>/doc/metal2vulkan
+#   scripts/api-docs --open     # and open it in a browser
+#
+# It is the ordinary rustdoc build of the library with every feature: the crate root shows the new
+# API's public module roots, `Budget`, and `CancelToken`, and hides the hidden crate-root module
+# (`env_vars`, which the binary reads). Hidden items and submodules inside the roots stay hidden.
+# `crates/metal2vulkan/tests/api_surface.rs` keeps that set equal to the pinned surface table.
+#
+# The previous output is removed first, so no page of another build survives in the reference.
+# Rustdoc renders a link to an item it does not document (a hidden or internal one) as its
+# bracketed text, without a warning; the script fails when a page shows one, so the reference
+# never points at internals.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+case "${1-}" in
+  "" | --open) ;;
+  *)
+    echo "usage: scripts/api-docs [--open]" >&2
+    exit 64
+    ;;
+esac
+
+target_dir=$(cargo metadata --format-version 1 --no-deps |
+  sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
+doc="$target_dir/doc/metal2vulkan"
+rm -rf "$doc"
+export RUSTDOCFLAGS="${RUSTDOCFLAGS-} -D warnings"
+cargo doc -p metal2vulkan --lib --no-deps --all-features
+
+if [ ! -f "$doc/pipeline/index.html" ]; then
+  echo "scripts/api-docs: $doc has no pipeline module page" >&2
+  exit 1
+fi
+unresolved=$(find "$doc" -name '*.html' -print0 |
+  xargs -0 grep -L 'http-equiv="refresh"' |
+  tr '\n' '\0' |
+  xargs -0 grep -Ho '\[<code>[^<]*</code>\]' || true)
+if [ -n "$unresolved" ]; then
+  echo "scripts/api-docs: links that did not resolve (to hidden or internal items):" >&2
+  printf '%s\n' "$unresolved" | sed "s#^$doc/##" >&2
+  exit 1
+fi
+echo "scripts/api-docs: rendered $doc/index.html"
+
+if [ "${1-}" = --open ]; then
+  cargo doc -p metal2vulkan --lib --no-deps --all-features --open
+fi

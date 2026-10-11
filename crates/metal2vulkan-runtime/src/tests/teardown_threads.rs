@@ -1,0 +1,388 @@
+//! Where the device's last handle goes on one of the runtime's own threads (the consumer's review
+//! of its first commit, item c). A program that learns of its work's end otherwise than by waiting
+//! for it (`command_buffer/gate.rs`) may drop its last handles while the runtime still holds the
+//! device; the teardown then runs on the thread that lets go last. Each case arranges that with
+//! gates the test opens, never a timing: the program drops every handle while the runtime holds the
+//! device through one path, the device is checked to be still alive, the gate opens, and the
+//! teardown must end, on the thread the path lets go on, with no message (the validation layer,
+//! where the loader lists it, reports a destroyed object used, an object destroyed twice, or one
+//! the teardown left).
+//!
+//! - **Not a pool thread**: a draw's making held waiting in the pool (`pool::held`) holds nothing
+//!   of the device, whose last handle goes on the program's thread; one held while it runs
+//!   (`pool::held::mid_making_hold`) leaves its state's release at once, and the device to its
+//!   reaper's thread. The command buffer is dropped uncommitted.
+//! - **The scheduler**: a committed command buffer held at its submission (its submission check
+//!   blocked on the scheduler's thread). The teardown ends on the scheduler, whose submitted
+//!   batch's hold goes after its lock, or on the queue's handler thread, which releases what the
+//!   command buffer retained; never on the completion thread, which drops its own handle before
+//!   it posts a finished command buffer and hands its hold to the posted transition.
+//! - **A handler thread, beside a host step's own module**: a module made as a host step makes its
+//!   variant's (`exit_guard::host_step`: one of its own, which the device's map keeps only for a
+//!   sweep or its teardown), held by a completed handler blocked on its gate; once a command
+//!   buffer of another queue committed after it finished, no thread but the handler's holds the
+//!   device. The handler lets the module go, then the command buffer's release drops the last
+//!   device handle on that thread, whose teardown destroys the module.
+//!
+//! The teardown's end is seen through the device's message sink, whose last share the instance
+//! drops after `vkDestroyInstance`, the teardown's last step: the sink owns a value that, dropped,
+//! sends the name of its thread.
+//!
+//! A device test: compiled only under the validation crate's GPU safety cfgs (`m2v_gpu`,
+//! `m2v_cpu_icd`), on the kind of device the cfg selects. The render pipeline is the owned
+//! fixture `validation/fixtures/public/examples/runtime_examples.ll` (`llvm-as`).
+
+use crate::device::lock;
+use crate::device::prime::SHADER;
+use crate::exit_guard;
+use crate::pipeline::objects::{shader_module, words_digest};
+use crate::pipeline::pool::held;
+use crate::{
+    Buffer, ClearColor, DebugMessage, Device, DeviceKind, DeviceOptions, LoadAction,
+    MessageSeverity, MessageSink, PipelineOptions, RenderPassDescriptor, RenderPipelineState,
+    ResourceOptions, ShaderCacheOptions, StoreAction, Submission, TextureDescriptor,
+};
+use metal2vulkan::metal::{PixelFormat, PrimitiveType, TextureUsage};
+use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};
+use std::ffi::CString;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, TryRecvError};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// The longest a command buffer, or a teardown, may take.
+const WAIT: Duration = Duration::from_secs(60);
+
+/// The runtime's threads, by name.
+const SCHEDULER: &str = "metal2vulkan-scheduler";
+const HANDLERS: &str = "metal2vulkan-handlers";
+const REAPER: &str = "metal2vulkan-reaper";
+
+/// The longest a state's release may take (the owner's: a 16 ms wait is already too long).
+const RELEASE: Duration = Duration::from_millis(16);
+
+/// The render target's side.
+const SIDE: u64 = 8;
+
+/// A scratch directory for the device's shader cache, removed when dropped.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new(case: &str) -> Scratch {
+        let path = std::env::temp_dir().join(format!(
+            "m2v-teardown-threads-{case}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        Scratch(path)
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Sends the name of the thread that drops it: the device's message sink owns it.
+struct Ended(mpsc::Sender<String>);
+
+impl Drop for Ended {
+    fn drop(&mut self) {
+        let thread = std::thread::current();
+        let _ = self
+            .0
+            .send(thread.name().unwrap_or("an unnamed thread").to_owned());
+    }
+}
+
+/// A watched device's teardown: the thread it ends on, and the failing messages it reported.
+struct Ending {
+    thread: mpsc::Receiver<String>,
+    failures: Arc<Mutex<Vec<String>>>,
+}
+
+impl Ending {
+    /// The device is not torn down: `holder` holds it still.
+    fn not_yet(&self, holder: &str) {
+        assert_eq!(
+            self.thread.try_recv(),
+            Err(TryRecvError::Empty),
+            "the device was torn down while {holder} held it"
+        );
+    }
+
+    /// The teardown ends, on one of `threads`, and nothing failed meanwhile.
+    fn on(&self, threads: &[&str]) {
+        let thread = self
+            .thread
+            .recv_timeout(WAIT)
+            .expect("the device's teardown ends");
+        assert!(
+            threads.contains(&thread.as_str()),
+            "the device's teardown ended on {thread}, not on one of {threads:?}"
+        );
+        let failures = lock(&self.failures);
+        assert!(failures.is_empty(), "failing messages: {:#?}", *failures);
+    }
+}
+
+/// The validation layer's name, where the loader lists it.
+fn validation_layer() -> Option<CString> {
+    let name = c"VK_LAYER_KHRONOS_validation";
+    let entry = crate::device::create::open_loader(None).ok()?;
+    // SAFETY: the loader is open; listing its layers needs nothing else.
+    let layers = unsafe { entry.enumerate_instance_layer_properties() }.ok()?;
+    layers
+        .iter()
+        .any(|layer| layer.layer_name_as_c_str().is_ok_and(|n| n == name))
+        .then(|| name.to_owned())
+}
+
+/// The device the cfg selects, its shader cache in `cache`, under the validation layer where the
+/// loader lists it, reporting to a sink that sees its teardown end.
+fn watched(cache: &Path) -> (Device, Ending) {
+    let (sender, thread) = mpsc::channel();
+    let ended = Ended(sender);
+    let failures = Arc::new(Mutex::new(Vec::new()));
+    let reported = Arc::clone(&failures);
+    let sink = MessageSink::new(move |message: &DebugMessage| {
+        // The sink owns the sentinel, which goes with its last share, the instance's.
+        let _ = &ended;
+        let fails = message.severity == MessageSeverity::Error
+            || (message.severity == MessageSeverity::Warning && message.kind.validation);
+        if fails && message.degradation.is_none() {
+            lock(&reported).push(format!("{}: {}", message.id_name, message.text));
+        }
+    });
+    let options = DeviceOptions {
+        kinds: match cfg!(m2v_cpu_icd) {
+            true => vec![DeviceKind::Cpu],
+            false => vec![
+                DeviceKind::Discrete,
+                DeviceKind::Integrated,
+                DeviceKind::Virtual,
+            ],
+        },
+        shader_cache: ShaderCacheOptions {
+            directory: Some(cache.to_owned()),
+            ..ShaderCacheOptions::default()
+        },
+        layers: validation_layer().into_iter().collect(),
+        messages: Some(sink),
+        ..DeviceOptions::default()
+    };
+    // The options' share of the sink goes as this returns: the instance's is the last.
+    let device = Device::system_default_with(&options).unwrap();
+    (device, Ending { thread, failures })
+}
+
+/// The fixture's render pipeline state: `colored_vertex` and `colored_fragment`, one
+/// `RGBA8Unorm` target. Its creation makes the pipeline of a triangle list's draw
+/// (`pipeline/predicted.rs`), which a triangle strip shares where the topology is dynamic, and not
+/// a line strip's, of another class.
+fn state(device: &Device) -> RenderPipelineState {
+    let ll = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../metal2vulkan-validation/fixtures/public/examples/runtime_examples.ll");
+    let bitcode = metal2vulkan_devtools::llvm_assemble(&ll).unwrap();
+    let library = metal2vulkan::library::Library::from_air(&bitcode).unwrap();
+    let library = device.new_library_with_compile_library(library);
+    let vertex = library.new_function_with_name("colored_vertex").unwrap();
+    let fragment = library.new_function_with_name("colored_fragment").unwrap();
+    let mut descriptor =
+        RenderPipelineDescriptor::new(StageSource::Function(vertex.function_descriptor()));
+    descriptor.fragment = Some(StageSource::Function(fragment.function_descriptor()));
+    descriptor.color_attachments[0] = Some(ColorAttachmentDescriptor::new(PixelFormat::RGBA8Unorm));
+    device
+        .new_render_pipeline_state(&descriptor, &PipelineOptions::default())
+        .unwrap()
+}
+
+/// A `Shared` buffer of `values`' bytes.
+fn floats(device: &Device, values: impl IntoIterator<Item = f32>) -> Buffer {
+    let bytes: Vec<u8> = values.into_iter().flat_map(f32::to_le_bytes).collect();
+    device
+        .new_buffer_with_bytes(&bytes, ResourceOptions::shared())
+        .unwrap()
+}
+
+/// A command buffer of `queue` that fills `buffer`, not committed.
+fn filling(queue: &crate::CommandQueue, buffer: &Buffer) -> crate::CommandBuffer {
+    let command_buffer = queue.command_buffer().unwrap();
+    let mut blit = command_buffer.blit_command_encoder().unwrap();
+    blit.fill_buffer(buffer, 0..256, 0x5a).unwrap();
+    blit.end_encoding().unwrap();
+    command_buffer
+}
+
+/// A draw's making waiting in the pool holds nothing of the device: its state keeps what it
+/// needs (`pipeline/piece_holds.rs`). Once the program let go of the command buffer (dropped
+/// uncommitted), the state and the device, the making stops and the last device handle goes on
+/// the program's thread, as it drops it.
+#[test]
+fn a_making_waiting_in_the_pool_stops_and_the_device_goes_on_the_program_s_thread() {
+    let scratch = Scratch::new("pool");
+    let (device, ending) = watched(&scratch.0);
+    let state = state(&device);
+    let hold = held::hold();
+    let (command_buffer, drawn) = line_strip_drawn(&device, &state);
+    drop((command_buffer, drawn));
+    drop((state, device));
+    ending.on(&[&program_thread()]);
+    drop(hold);
+}
+
+/// A draw's making running in the pool, which its state's release cannot stop: the release
+/// returns at once, within the 16 ms the owner allows a wait (a making takes 20 to 50 s on
+/// NVIDIA), and the device's teardown waits for the making's end, then runs on the device's
+/// reaper, which lets go of what the making gave back, never on the pool's thread.
+#[test]
+fn a_making_running_in_the_pool_leaves_its_release_at_once_and_the_device_to_the_reaper() {
+    let scratch = Scratch::new("reaper");
+    let (device, ending) = watched(&scratch.0);
+    let state = state(&device);
+    let mid = held::mid_making_hold();
+    let (command_buffer, drawn) = line_strip_drawn(&device, &state);
+    assert!(
+        mid.reached(1, WAIT),
+        "the line strip's making runs in the pool"
+    );
+    drop((command_buffer, drawn));
+    let releasing = Instant::now();
+    drop(state);
+    let release = releasing.elapsed();
+    assert!(
+        release < RELEASE,
+        "the state's release took {release:?} while its making ran"
+    );
+    drop(device);
+    ending.not_yet("the making running in the pool");
+    drop(mid);
+    ending.on(&[REAPER]);
+}
+
+/// This thread's name, as [`Ended`] sends it.
+fn program_thread() -> String {
+    let thread = std::thread::current();
+    thread.name().unwrap_or("an unnamed thread").to_owned()
+}
+
+/// An uncommitted command buffer of `device` whose draw of a line strip with `state` handed its
+/// making to the pool, and what else the draw used.
+fn line_strip_drawn(
+    device: &Device,
+    state: &RenderPipelineState,
+) -> (crate::CommandBuffer, impl Sized) {
+    let mut target = TextureDescriptor::texture_2d(PixelFormat::RGBA8Unorm, SIDE, SIDE, false);
+    target.usage = TextureUsage::RENDER_TARGET;
+    target.resource_options = ResourceOptions::private();
+    let target = device.new_texture(&target).unwrap();
+    let positions = floats(
+        device,
+        [[-1.0, 1.0], [1.0, 1.0], [-1.0, -1.0], [1.0, -1.0]]
+            .into_iter()
+            .flatten(),
+    );
+    let colors = floats(device, (0..4).flat_map(|_| [1.0, 0.2, 0.0, 1.0]));
+    let queue = device.new_command_queue().unwrap();
+    let pooled = device.work_counts().pipelines_pooled;
+    let mut pass = RenderPassDescriptor::new();
+    let color = &mut pass.color_attachments[0];
+    color.texture = Some(target.clone());
+    color.load_action = LoadAction::Clear;
+    color.store_action = StoreAction::Store;
+    color.clear_color = ClearColor::new(0.0, 0.0, 1.0, 1.0);
+    let command_buffer = queue.command_buffer().unwrap();
+    let mut encoder = command_buffer.render_command_encoder(&pass).unwrap();
+    encoder.set_render_pipeline_state(state).unwrap();
+    encoder.set_vertex_buffer(Some(&positions), 0, 0).unwrap();
+    encoder.set_vertex_buffer(Some(&colors), 0, 1).unwrap();
+    encoder
+        .draw_primitives(PrimitiveType::LineStrip, 0, 4, 1, 0)
+        .unwrap();
+    encoder.end_encoding().unwrap();
+    assert_eq!(
+        device.work_counts().pipelines_pooled,
+        pooled + 1,
+        "the line strip's making went to the pool"
+    );
+    (command_buffer, (pass, queue, colors, positions, target))
+}
+
+/// A committed command buffer held at its submission (its check blocked on the scheduler's
+/// thread) holds the device once the program let go of every handle: the last device handle goes
+/// on the scheduler or on the queue's handler thread, never on the program's.
+#[test]
+fn a_command_buffer_held_at_its_submission_tears_the_device_down_on_the_runtime_s_threads() {
+    let scratch = Scratch::new("scheduler");
+    let (device, ending) = watched(&scratch.0);
+    let buffer = device.new_buffer(256, ResourceOptions::shared()).unwrap();
+    let queue = device.new_command_queue().unwrap();
+    let command_buffer = filling(&queue, &buffer);
+    let (entered, checking) = mpsc::channel();
+    let (open, gate) = mpsc::channel::<()>();
+    let gate = Mutex::new(gate);
+    command_buffer
+        .set_submission_check(Arc::new(move |_: &Submission<'_>| {
+            let _ = entered.send(());
+            // Until the test drops its end: then the submission passes.
+            let _ = lock(&gate).recv();
+            None
+        }))
+        .unwrap();
+    command_buffer.commit().unwrap();
+    checking
+        .recv_timeout(WAIT)
+        .expect("the scheduler checks the submission");
+    drop((command_buffer, queue, buffer, device));
+    ending.not_yet("the scheduler, checking the submission");
+    drop(open);
+    ending.on(&[SCHEDULER, HANDLERS]);
+}
+
+/// A host step's own module (one the device's map keeps only for a sweep or its teardown), held
+/// by a completed handler blocked on its gate, goes on the handler's thread just before the last
+/// device handle, which the command buffer's release drops there; the teardown destroys the
+/// module once.
+#[test]
+fn a_host_step_s_own_module_and_the_last_device_go_on_a_handler_thread() {
+    let scratch = Scratch::new("handler");
+    let (device, ending) = watched(&scratch.0);
+    let words: Arc<[u32]> = Arc::from(&SHADER[..]);
+    let digest = words_digest(&words);
+    let module = exit_guard::host_step(|| shader_module(&device, &words, &digest)).unwrap();
+    assert!(
+        lock(&device.shared().shader_modules).get(&digest).is_none(),
+        "a host step's module is its own: no lookup finds it"
+    );
+    let buffer = device.new_buffer(256, ResourceOptions::shared()).unwrap();
+    let (first, second) = (
+        device.new_command_queue().unwrap(),
+        device.new_command_queue().unwrap(),
+    );
+    let command_buffer = filling(&first, &buffer);
+    let (entered, running) = mpsc::channel();
+    let (open, gate) = mpsc::channel::<()>();
+    command_buffer
+        .add_completed_handler(Box::new(move |_| {
+            let _ = entered.send(());
+            let _ = gate.recv();
+            // The module goes here, then the command buffer's release, on this thread.
+            drop(module);
+        }))
+        .unwrap();
+    command_buffer.commit().unwrap();
+    running
+        .recv_timeout(WAIT)
+        .expect("the completed handler runs");
+    // A command buffer of another queue, committed now, finished: the scheduler let go of what it
+    // submitted before it, and the completion thread holds no device handle between batches.
+    // Only the handler's thread holds the first command buffer now.
+    let after = filling(&second, &buffer);
+    after.commit().unwrap();
+    after.wait_until_completed_for(WAIT).unwrap();
+    drop((after, command_buffer, first, second, buffer, words, device));
+    ending.not_yet("the completed handler");
+    drop(open);
+    ending.on(&[HANDLERS]);
+}

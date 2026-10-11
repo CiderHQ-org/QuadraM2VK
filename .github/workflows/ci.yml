@@ -32,19 +32,29 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
       - name: Install LLVM + SPIR-V tools (Ubuntu)
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
           sudo apt-get update
           # llvm: llvm-dis; spirv-tools: spirv-val + the product passthrough path's spirv-as.
-          # Keep lavapipe available for explicit
-          # corpus-vulkan qualification on GPU-less Linux runners.
-          sudo apt-get install -y llvm spirv-tools mesa-vulkan-drivers libvulkan1
+          # lavapipe is the CPU Vulkan ICD for the `m2v_cpu_icd` execution tests and the explicit
+          # `corpus-vulkan --device-type cpu` qualification on GPU-less Linux runners.
+          # vulkan-validationlayers: every engine candidate and L4 run enables
+          # VK_LAYER_KHRONOS_validation and refuses to run without it.
+          sudo apt-get install -y llvm spirv-tools mesa-vulkan-drivers libvulkan1 vulkan-validationlayers
           command -v llvm-dis
           command -v spirv-val
           command -v spirv-as
-          # Fail setup early if an explicit corpus-vulkan run would have no ICD.
+          # Ubuntu's llvm is the oldest LLVM the committed `.ll` fixtures are written for:
+          # here the validation test that each assembles with it must run, not skip.
+          echo "METAL2VULKAN_TEST_REQUIRE_PINNED_LLVM=1" >> "$GITHUB_ENV"
+          # Fail setup early if the CPU-ICD steps would have no ICD.
           shopt -s nullglob
           icds=(/usr/share/vulkan/icd.d/*.json /etc/vulkan/icd.d/*.json)
           echo "Vulkan ICDs: ${icds[*]:-none}"
@@ -69,9 +79,47 @@ jobs:
         run: cargo fmt --all -- --check
 
       # clippy --all-targets --all-features typechecks the workspace INCLUDING the
-      # `serde` cfg the shipped CLI is built with; without it, code and tests behind
-      # `#[cfg(feature = "serde")]` are never compiled by any gate.
+      # `cli` and `serde` cfgs the shipped CLI is built with; without it, the binary and the code
+      # and tests behind `#[cfg(feature = "serde")]` are never compiled by any gate.
       - name: Clippy (warnings denied)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      # The product with no feature and with each feature alone, as a consumer of the published crate
+      # may build it. `--all-features` compiles every gated item, but an import or item that only
+      # another feature (or only a test) uses is unused, or missing, without it; `--workspace`
+      # cannot check that either, since the validation member enables most features for every
+      # build. Feature gates combine with platform cfgs, so both hosts run it. The runtime crate
+      # (`metal2vulkan-runtime`) has no feature and reaches the translator only
+      # through its public API: it is checked the same way.
+      - name: Clippy under each feature alone (warnings denied)
+        run: |
+          set -euo pipefail
+          for features in "" serde ash cli; do
+            echo "::group::features=${features:-none}"
+            cargo clippy -p metal2vulkan --all-targets --no-default-features --features "$features" -- -D warnings
+            echo "::endgroup::"
+          done
+          echo "::group::metal2vulkan-runtime"
+          cargo clippy -p metal2vulkan-runtime --all-targets -- -D warnings
+          echo "::endgroup::"
+          # The AIR front end's crate as a consumer of `metal2vulkan-air` builds it
+          # alone, with no feature and with `serde`, so nothing the translator or
+          # validation enables in a workspace build hides an unused import or a missing item.
+          for features in "" serde; do
+            echo "::group::metal2vulkan-air features=${features:-none}"
+            cargo clippy -p metal2vulkan-air --all-targets --no-default-features --features "$features" -- -D warnings
+            echo "::endgroup::"
+          done
+
+      # Validation's device tests, and the helpers only they call, compile only under `--cfg m2v_gpu`
+      # or `--cfg m2v_cpu_icd` (docs/VALIDATION.md). Clippy under `m2v_gpu` checks that code on each
+      # host without opening a device: on macOS with the Metal tests, and on Linux without them,
+      # where a helper compiled without its callers is dead code. Its own target directory keeps the
+      # ordinary build's warm.
+      - name: Clippy under --cfg m2v_gpu (warnings denied)
+        env:
+          RUSTFLAGS: -Dwarnings --cfg m2v_gpu
+          CARGO_TARGET_DIR: target/gpucfg
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Build public documentation (warnings denied)
@@ -79,35 +127,50 @@ jobs:
           RUSTDOCFLAGS: -Dwarnings
         run: cargo doc --workspace --all-features --no-deps
 
-      - name: Test metal2vulkan
-        run: cargo test -p metal2vulkan --all-features
+      # The consumer reference of the new API's frozen surface: the library's
+      # rustdoc build, warnings denied, and no link to a hidden item.
+      - name: Build the new API's consumer reference (warnings denied)
+        run: scripts/api-docs
 
+      # The published crates as crates.io takes them: each packages, and its package
+      # builds alone against the others' packages, so none reads a file outside its own directory.
+      # Validation and the dev-tools crate are not published.
+      - name: Package the published crates
+        run: cargo package --workspace --exclude metal2vulkan-validation --exclude metal2vulkan-devtools
+
+      # With the AIR front end's crate's own tests, and the dev-tools crate's:
+      # its tool runner and L3 checks.
+      - name: Test metal2vulkan
+        run: cargo nextest run -p metal2vulkan -p metal2vulkan-air -p metal2vulkan-runtime -p metal2vulkan-devtools --all-features
+
+      # GPU-free on every host: tests that open a device compile only under `--cfg m2v_gpu` or
+      # `--cfg m2v_cpu_icd`, and no device-opening code runs without one of them.
       - name: Test validation suite
-        run: cargo test -p metal2vulkan-validation --all-features
+        run: cargo nextest run -p metal2vulkan-validation --all-features
+
+      # nextest does not run doctests.
+      - name: Doc tests
+        run: cargo test --workspace --all-features --doc
+
+      # Device-executing validation tests on lavapipe. `DeviceType::Cpu` matches only a CPU
+      # physical device, so this never reaches a GPU even on a runner that has one. macOS CI runs
+      # no device tests.
+      - name: Test validation suite on the CPU Vulkan ICD (Linux)
+        if: runner.os == 'Linux'
+        env:
+          RUSTFLAGS: -Dwarnings --cfg m2v_cpu_icd
+          LP_NUM_THREADS: "1"
+        run: cargo nextest run -p metal2vulkan-validation --all-features
 
       # Machine-specific semantic qualification remains explicit. Linux CI has lavapipe, so it can
-      # execute the owned public cases against their exact committed Metal observations without a
-      # physical GPU. Rows written here are ephemeral CI evidence, not committed environment slots.
+      # execute the owned public cases with the engine, in both robustness legs, against their
+      # exact committed Metal observations without a physical GPU. Rows written here are ephemeral
+      # CI evidence, not committed environment slots (see the script's header).
       - name: Qualify public cases on native Vulkan (Linux)
         if: runner.os == 'Linux'
+        env:
+          LP_NUM_THREADS: "1"
         run: |
           set -euo pipefail
           cargo build -p metal2vulkan-validation --bins
-          for case_id in \
-            d9ce86618e0924966fbb1e7de63761ef471bb6e85b592a70193a26375ec0423f \
-            4659fedddd1695fba79c3faa797ec3be647e3fd1a87ecec23bde55ccbfbcf656 \
-            1e54315eb0ffcac633d4992c577f3e6ac384ed1bdf2321887c1f37242c00c887
-          do
-            target/debug/corpus-vulkan \
-              --case-id "$case_id" \
-              --metal-environment-id apple-m2-macos26.5.2 \
-              --environment-id ubuntu-26.04-lavapipe
-          done
-          target/debug/corpus-index
-          target/debug/corpus-index --check
-          status=$(target/debug/corpus-status --limit 20)
-          echo "$status"
-          if grep -Eq 'vulkan=(missing|stale|failed)' <<<"$status"; then
-            echo "native Vulkan qualification is incomplete" >&2
-            exit 1
-          fi
+          bash scripts/qualify-public-cases target/debug

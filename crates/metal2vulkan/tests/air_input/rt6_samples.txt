@@ -1,0 +1,950 @@
+target triple = "air64_v28-apple-macosx26.0.0"
+source_filename = "-"
+; datalayout DataLayout { endian: Little, pointers: {0: PointerSpec { size_bits: 64, abi_bits: 64, pref_bits: 64, index_bits: 64 }}, ints: {1: AlignSpec { abi_bits: 8, pref_bits: 8 }, 8: AlignSpec { abi_bits: 8, pref_bits: 8 }, 16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }}, floats: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }}, vectors: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 24: AlignSpec { abi_bits: 32, pref_bits: 32 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 48: AlignSpec { abi_bits: 64, pref_bits: 64 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 96: AlignSpec { abi_bits: 128, pref_bits: 128 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }, 192: AlignSpec { abi_bits: 256, pref_bits: 256 }, 256: AlignSpec { abi_bits: 256, pref_bits: 256 }, 512: AlignSpec { abi_bits: 512, pref_bits: 512 }, 1024: AlignSpec { abi_bits: 1024, pref_bits: 1024 }}, aggregate: AlignSpec { abi_bits: 0, pref_bits: 64 }, native_ints: [8, 16, 32], stack_align_bits: None, alloca_space: 0, program_space: 0, globals_space: 0, mangling: None, fn_ptr_align: None, non_integral: [] }
+%t3 = type <{ <4 x float> }>
+%t5 = type %t3 (i32)
+%t6 = type float (i32)
+%t9 = type float (<4 x float>, i32, ptr addrspace(1), ptr addrspace(2))
+%t11 = type float (i8)
+%t12 = type <4 x float> (<4 x float>, i32, ptr addrspace(1), ptr addrspace(2))
+%t14 = type <4 x float> (<4 x i8>)
+%t16 = type <4 x i32> (<4 x float>, i32, ptr addrspace(1), ptr addrspace(2))
+%t17 = type <4 x i32> (<4 x i8>)
+%t19 = type half (<4 x float>, i32, ptr addrspace(1), ptr addrspace(2))
+%t20 = type i32 (<4 x float>, i32, ptr addrspace(1), ptr addrspace(2))
+%t22 = type <2 x half> (<4 x float>, i32, ptr addrspace(1), ptr addrspace(2))
+%t24 = type <2 x float> (<4 x float>, i32, ptr addrspace(1), ptr addrspace(2))
+%t26 = type <4 x half> (<4 x float>, i32, ptr addrspace(1), ptr addrspace(2))
+%t29 = type <4 x i32> (<4 x i16>)
+%t30 = type <{ float }>
+%t31 = type %t30 (<4 x float>, i32, ptr addrspace(1), ptr addrspace(2))
+%t33 = type i32 (<3 x i32>, ptr addrspace(2), i32)
+%t35 = type void (ptr addrspace(1), ptr addrspace(1), ptr addrspace(2), <3 x i32>)
+%t36 = type i32 (float)
+%t37 = type ptr addrspace(2) ()
+%t38 = type { <4 x i32>, i8 }
+%t40 = type %t38 (ptr addrspace(1), ptr addrspace(2), <2 x i32>, i32, i32)
+%t41 = type { float, i8 }
+%t42 = type %t41 (ptr addrspace(1), ptr addrspace(2), i32, <2 x i32>, i32, i32)
+%t44 = type [2 x i32]
+%t46 = type { i32, i32 } ; "struct.Rt6Shape"
+c42 = %t44 [27, 0]
+c58 = <2 x float> [0x40800000, 0x40800000]
+c59 = <2 x float> [0xBF800000, 0xBF800000]
+c62 = <4 x i32> [0, 1, poison, poison]
+c66 = <4 x float> [poison, poison, 0x0, 0x3F800000]
+c67 = <4 x i32> [0, 1, 6, 7]
+c70 = <4 x float> [0x3B808081, 0x3B808081, 0x3B808081, 0x3B808081]
+c74 = <2 x i32> [0, 1]
+c77 = <4 x i32> [255, 255, 255, 255]
+c80 = <4 x i32> [65535, 65535, poison, poison]
+c81 = <4 x i32> [65535, 65535, 65535, 65535]
+
+define %t5 @f0 "rt6_fill_vertex" memory(NoModRef, NoModRef, NoModRef) "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="0" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" {
+bb0:
+  %i0 = and i32 %a0, i32 1
+  %i1 = tail call reassoc nnan ninf nsz arcp contract afn float @f1 [air Convert(Convert { dst: NumTy { elem: F32, lanes: 1 }, dst_kind: Float, src: NumTy { elem: I32, lanes: 1 }, src_kind: Unsigned, src_fp8: None })](%i0)
+  %i2 = insertelement <2 x float> undef, %i1, i64 0
+  %i3 = lshr i32 %a0, i32 1
+  %i4 = tail call reassoc nnan ninf nsz arcp contract afn float @f1 [air Convert(Convert { dst: NumTy { elem: F32, lanes: 1 }, dst_kind: Float, src: NumTy { elem: I32, lanes: 1 }, src_kind: Unsigned, src_fp8: None })](%i3)
+  %i5 = insertelement %i2, %i4, i64 1
+  %i6 = fmul reassoc nnan ninf nsz arcp contract afn <2 x float> %i5, <2 x float> c58
+  %i7 = fadd reassoc nnan ninf nsz arcp contract afn <2 x float> %i6, <2 x float> c59
+  %i8 = shufflevector <4 x float> %i7, <2 x float> poison, <0, 1, poison, poison>
+  %i9 = shufflevector <4 x float> %i8, <4 x float> c66, <0, 1, 6, 7>
+  %i10 = insertvalue %t3 undef %i9, 0
+  ret %i10
+}
+
+declare %t6 @f1 "air.convert.f.f32.u.i32" memory(NoModRef, NoModRef, NoModRef)
+
+define %t9 @f2 "rt6_fill_r8unorm" memory(Ref, NoModRef, NoModRef) "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a2( Ref nocapture "air-buffer-no-alias"="" ) %a3( align 4 dereferenceable(8) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = extractelement %a0, i64 0
+  %i1 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = extractelement %a0, i64 1
+  %i3 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i2)
+  %i4 = getelementptr inbounds %t46, %a3, i64 0, i32 0
+  %i5 = load i32, %i4, align 4
+  %i6 = mul i32 %i5, %i3
+  %i7 = add i32 %i6, %i1
+  %i8 = getelementptr inbounds %t46, %a3, i64 0, i32 1
+  %i9 = load i32, %i8, align 4
+  %i10 = mul i32 %i7, %i9
+  %i11 = add i32 %i10, %a1
+  %i12 = zext %i11 to i64
+  %i13 = getelementptr inbounds i8, %a2, %i12
+  %i14 = load i8, %i13, align 1
+  %i15 = tail call reassoc nnan ninf nsz arcp contract afn float @f3 [air Convert(Convert { dst: NumTy { elem: F32, lanes: 1 }, dst_kind: Float, src: NumTy { elem: I8, lanes: 1 }, src_kind: Unsigned, src_fp8: None })](%i14)
+  %i16 = fmul reassoc nnan ninf nsz arcp contract afn float %i15, float 0x3B808081
+  ret %i16
+}
+
+declare %t11 @f3 "air.convert.f.f32.u.i8" memory(NoModRef, NoModRef, NoModRef)
+
+define %t12 @f4 "rt6_fill_rgba8unorm" memory(Ref, NoModRef, NoModRef) "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a2( Ref nocapture "air-buffer-no-alias"="" ) %a3( align 4 dereferenceable(8) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = extractelement %a0, i64 0
+  %i1 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = extractelement %a0, i64 1
+  %i3 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i2)
+  %i4 = getelementptr inbounds %t46, %a3, i64 0, i32 0
+  %i5 = load i32, %i4, align 4
+  %i6 = mul i32 %i5, %i3
+  %i7 = add i32 %i6, %i1
+  %i8 = getelementptr inbounds %t46, %a3, i64 0, i32 1
+  %i9 = load i32, %i8, align 4
+  %i10 = mul i32 %i7, %i9
+  %i11 = add i32 %i10, %a1
+  %i12 = zext %i11 to i64
+  %i13 = getelementptr inbounds <4 x i8>, %a2, %i12
+  %i14 = load <4 x i8>, %i13, align 4
+  %i15 = tail call reassoc nnan ninf nsz arcp contract afn <4 x float> @f5 [air Convert(Convert { dst: NumTy { elem: F32, lanes: 4 }, dst_kind: Float, src: NumTy { elem: I8, lanes: 4 }, src_kind: Unsigned, src_fp8: None })](%i14)
+  %i16 = fmul reassoc nnan ninf nsz arcp contract afn <4 x float> %i15, <4 x float> c70
+  ret %i16
+}
+
+declare %t14 @f5 "air.convert.f.v4f32.u.v4i8" memory(NoModRef, NoModRef, NoModRef)
+
+define %t16 @f6 "rt6_fill_rgba8uint" memory(Ref, NoModRef, NoModRef) "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a2( Ref nocapture "air-buffer-no-alias"="" ) %a3( align 4 dereferenceable(8) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = extractelement %a0, i64 0
+  %i1 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = extractelement %a0, i64 1
+  %i3 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i2)
+  %i4 = getelementptr inbounds %t46, %a3, i64 0, i32 0
+  %i5 = load i32, %i4, align 4
+  %i6 = mul i32 %i5, %i3
+  %i7 = add i32 %i6, %i1
+  %i8 = getelementptr inbounds %t46, %a3, i64 0, i32 1
+  %i9 = load i32, %i8, align 4
+  %i10 = mul i32 %i7, %i9
+  %i11 = add i32 %i10, %a1
+  %i12 = zext %i11 to i64
+  %i13 = getelementptr inbounds <4 x i8>, %a2, %i12
+  %i14 = load <4 x i8>, %i13, align 4
+  %i15 = tail call <4 x i32> @f7 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 4 }, dst_kind: Unsigned, src: NumTy { elem: I8, lanes: 4 }, src_kind: Unsigned, src_fp8: None })](%i14)
+  ret %i15
+}
+
+declare %t17 @f7 "air.convert.u.v4i32.u.v4i8" memory(NoModRef, NoModRef, NoModRef)
+
+define %t16 @f8 "rt6_fill_rgba8sint" memory(Ref, NoModRef, NoModRef) "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a2( Ref nocapture "air-buffer-no-alias"="" ) %a3( align 4 dereferenceable(8) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = extractelement %a0, i64 0
+  %i1 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = extractelement %a0, i64 1
+  %i3 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i2)
+  %i4 = getelementptr inbounds %t46, %a3, i64 0, i32 0
+  %i5 = load i32, %i4, align 4
+  %i6 = mul i32 %i5, %i3
+  %i7 = add i32 %i6, %i1
+  %i8 = getelementptr inbounds %t46, %a3, i64 0, i32 1
+  %i9 = load i32, %i8, align 4
+  %i10 = mul i32 %i7, %i9
+  %i11 = add i32 %i10, %a1
+  %i12 = zext %i11 to i64
+  %i13 = getelementptr inbounds <4 x i8>, %a2, %i12
+  %i14 = load <4 x i8>, %i13, align 4
+  %i15 = tail call <4 x i32> @f9 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 4 }, dst_kind: Signed, src: NumTy { elem: I8, lanes: 4 }, src_kind: Signed, src_fp8: None })](%i14)
+  ret %i15
+}
+
+declare %t17 @f9 "air.convert.s.v4i32.s.v4i8" memory(NoModRef, NoModRef, NoModRef)
+
+define %t19 @f10 "rt6_fill_r16float" memory(Ref, NoModRef, NoModRef) "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a2( Ref nocapture "air-buffer-no-alias"="" ) %a3( align 4 dereferenceable(8) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = extractelement %a0, i64 0
+  %i1 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = extractelement %a0, i64 1
+  %i3 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i2)
+  %i4 = getelementptr inbounds %t46, %a3, i64 0, i32 0
+  %i5 = load i32, %i4, align 4
+  %i6 = mul i32 %i5, %i3
+  %i7 = add i32 %i6, %i1
+  %i8 = getelementptr inbounds %t46, %a3, i64 0, i32 1
+  %i9 = load i32, %i8, align 4
+  %i10 = mul i32 %i7, %i9
+  %i11 = add i32 %i10, %a1
+  %i12 = zext %i11 to i64
+  %i13 = getelementptr inbounds half, %a2, %i12
+  %i14 = load half, %i13, align 2
+  ret %i14
+}
+
+define %t20 @f11 "rt6_fill_r16uint" memory(Ref, NoModRef, NoModRef) "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a2( Ref nocapture "air-buffer-no-alias"="" ) %a3( align 4 dereferenceable(8) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = extractelement %a0, i64 0
+  %i1 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = extractelement %a0, i64 1
+  %i3 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i2)
+  %i4 = getelementptr inbounds %t46, %a3, i64 0, i32 0
+  %i5 = load i32, %i4, align 4
+  %i6 = mul i32 %i5, %i3
+  %i7 = add i32 %i6, %i1
+  %i8 = getelementptr inbounds %t46, %a3, i64 0, i32 1
+  %i9 = load i32, %i8, align 4
+  %i10 = mul i32 %i7, %i9
+  %i11 = add i32 %i10, %a1
+  %i12 = zext %i11 to i64
+  %i13 = getelementptr inbounds i16, %a2, %i12
+  %i14 = load i16, %i13, align 2
+  %i15 = zext %i14 to i32
+  ret %i15
+}
+
+define %t22 @f12 "rt6_fill_rg16float" memory(Ref, NoModRef, NoModRef) "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a2( Ref nocapture "air-buffer-no-alias"="" ) %a3( align 4 dereferenceable(8) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = extractelement %a0, i64 0
+  %i1 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = extractelement %a0, i64 1
+  %i3 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i2)
+  %i4 = getelementptr inbounds %t46, %a3, i64 0, i32 0
+  %i5 = load i32, %i4, align 4
+  %i6 = mul i32 %i5, %i3
+  %i7 = add i32 %i6, %i1
+  %i8 = getelementptr inbounds %t46, %a3, i64 0, i32 1
+  %i9 = load i32, %i8, align 4
+  %i10 = mul i32 %i7, %i9
+  %i11 = add i32 %i10, %a1
+  %i12 = zext %i11 to i64
+  %i13 = getelementptr inbounds <2 x half>, %a2, %i12
+  %i14 = load <2 x half>, %i13, align 4
+  ret %i14
+}
+
+define %t24 @f13 "rt6_fill_rg32float" memory(Ref, NoModRef, NoModRef) "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a2( Ref nocapture "air-buffer-no-alias"="" ) %a3( align 4 dereferenceable(8) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = extractelement %a0, i64 0
+  %i1 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = extractelement %a0, i64 1
+  %i3 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i2)
+  %i4 = getelementptr inbounds %t46, %a3, i64 0, i32 0
+  %i5 = load i32, %i4, align 4
+  %i6 = mul i32 %i5, %i3
+  %i7 = add i32 %i6, %i1
+  %i8 = getelementptr inbounds %t46, %a3, i64 0, i32 1
+  %i9 = load i32, %i8, align 4
+  %i10 = mul i32 %i7, %i9
+  %i11 = add i32 %i10, %a1
+  %i12 = zext %i11 to i64
+  %i13 = getelementptr inbounds <2 x float>, %a2, %i12
+  %i14 = load <2 x float>, %i13, align 8
+  ret %i14
+}
+
+define %t26 @f14 "rt6_fill_rgba16float" memory(Ref, NoModRef, NoModRef) "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a2( Ref nocapture "air-buffer-no-alias"="" ) %a3( align 4 dereferenceable(8) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = extractelement %a0, i64 0
+  %i1 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = extractelement %a0, i64 1
+  %i3 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i2)
+  %i4 = getelementptr inbounds %t46, %a3, i64 0, i32 0
+  %i5 = load i32, %i4, align 4
+  %i6 = mul i32 %i5, %i3
+  %i7 = add i32 %i6, %i1
+  %i8 = getelementptr inbounds %t46, %a3, i64 0, i32 1
+  %i9 = load i32, %i8, align 4
+  %i10 = mul i32 %i7, %i9
+  %i11 = add i32 %i10, %a1
+  %i12 = zext %i11 to i64
+  %i13 = getelementptr inbounds <4 x half>, %a2, %i12
+  %i14 = load <4 x half>, %i13, align 8
+  ret %i14
+}
+
+define %t16 @f15 "rt6_fill_rgba16uint" memory(Ref, NoModRef, NoModRef) "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a2( Ref nocapture "air-buffer-no-alias"="" ) %a3( align 4 dereferenceable(8) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = extractelement %a0, i64 0
+  %i1 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = extractelement %a0, i64 1
+  %i3 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i2)
+  %i4 = getelementptr inbounds %t46, %a3, i64 0, i32 0
+  %i5 = load i32, %i4, align 4
+  %i6 = mul i32 %i5, %i3
+  %i7 = add i32 %i6, %i1
+  %i8 = getelementptr inbounds %t46, %a3, i64 0, i32 1
+  %i9 = load i32, %i8, align 4
+  %i10 = mul i32 %i7, %i9
+  %i11 = add i32 %i10, %a1
+  %i12 = zext %i11 to i64
+  %i13 = getelementptr inbounds <4 x i16>, %a2, %i12
+  %i14 = load <4 x i16>, %i13, align 8
+  %i15 = tail call <4 x i32> @f16 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 4 }, dst_kind: Unsigned, src: NumTy { elem: I16, lanes: 4 }, src_kind: Unsigned, src_fp8: None })](%i14)
+  ret %i15
+}
+
+declare %t29 @f16 "air.convert.u.v4i32.u.v4i16" memory(NoModRef, NoModRef, NoModRef)
+
+define %t16 @f17 "rt6_fill_rgba16sint" memory(Ref, NoModRef, NoModRef) "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a2( Ref nocapture "air-buffer-no-alias"="" ) %a3( align 4 dereferenceable(8) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = extractelement %a0, i64 0
+  %i1 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = extractelement %a0, i64 1
+  %i3 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i2)
+  %i4 = getelementptr inbounds %t46, %a3, i64 0, i32 0
+  %i5 = load i32, %i4, align 4
+  %i6 = mul i32 %i5, %i3
+  %i7 = add i32 %i6, %i1
+  %i8 = getelementptr inbounds %t46, %a3, i64 0, i32 1
+  %i9 = load i32, %i8, align 4
+  %i10 = mul i32 %i7, %i9
+  %i11 = add i32 %i10, %a1
+  %i12 = zext %i11 to i64
+  %i13 = getelementptr inbounds <4 x i16>, %a2, %i12
+  %i14 = load <4 x i16>, %i13, align 8
+  %i15 = tail call <4 x i32> @f18 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 4 }, dst_kind: Signed, src: NumTy { elem: I16, lanes: 4 }, src_kind: Signed, src_fp8: None })](%i14)
+  ret %i15
+}
+
+declare %t29 @f18 "air.convert.s.v4i32.s.v4i16" memory(NoModRef, NoModRef, NoModRef)
+
+define %t20 @f19 "rt6_fill_r32uint" memory(Ref, NoModRef, NoModRef) "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a2( Ref nocapture "air-buffer-no-alias"="" ) %a3( align 4 dereferenceable(8) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = extractelement %a0, i64 0
+  %i1 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = extractelement %a0, i64 1
+  %i3 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i2)
+  %i4 = getelementptr inbounds %t46, %a3, i64 0, i32 0
+  %i5 = load i32, %i4, align 4
+  %i6 = mul i32 %i5, %i3
+  %i7 = add i32 %i6, %i1
+  %i8 = getelementptr inbounds %t46, %a3, i64 0, i32 1
+  %i9 = load i32, %i8, align 4
+  %i10 = mul i32 %i7, %i9
+  %i11 = add i32 %i10, %a1
+  %i12 = zext %i11 to i64
+  %i13 = getelementptr inbounds i32, %a2, %i12
+  %i14 = load i32, %i13, align 4
+  ret %i14
+}
+
+define %t20 @f20 "rt6_fill_r32sint" memory(Ref, NoModRef, NoModRef) "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a2( Ref nocapture "air-buffer-no-alias"="" ) %a3( align 4 dereferenceable(8) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = extractelement %a0, i64 0
+  %i1 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = extractelement %a0, i64 1
+  %i3 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i2)
+  %i4 = getelementptr inbounds %t46, %a3, i64 0, i32 0
+  %i5 = load i32, %i4, align 4
+  %i6 = mul i32 %i5, %i3
+  %i7 = add i32 %i6, %i1
+  %i8 = getelementptr inbounds %t46, %a3, i64 0, i32 1
+  %i9 = load i32, %i8, align 4
+  %i10 = mul i32 %i7, %i9
+  %i11 = add i32 %i10, %a1
+  %i12 = zext %i11 to i64
+  %i13 = getelementptr inbounds i32, %a2, %i12
+  %i14 = load i32, %i13, align 4
+  ret %i14
+}
+
+define %t9 @f21 "rt6_fill_r32float" memory(Ref, NoModRef, NoModRef) "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a2( Ref nocapture "air-buffer-no-alias"="" ) %a3( align 4 dereferenceable(8) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = extractelement %a0, i64 0
+  %i1 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = extractelement %a0, i64 1
+  %i3 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i2)
+  %i4 = getelementptr inbounds %t46, %a3, i64 0, i32 0
+  %i5 = load i32, %i4, align 4
+  %i6 = mul i32 %i5, %i3
+  %i7 = add i32 %i6, %i1
+  %i8 = getelementptr inbounds %t46, %a3, i64 0, i32 1
+  %i9 = load i32, %i8, align 4
+  %i10 = mul i32 %i7, %i9
+  %i11 = add i32 %i10, %a1
+  %i12 = zext %i11 to i64
+  %i13 = getelementptr inbounds float, %a2, %i12
+  %i14 = load float, %i13, align 4
+  ret %i14
+}
+
+define %t16 @f22 "rt6_fill_rgba32uint" memory(Ref, NoModRef, NoModRef) "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a2( Ref nocapture "air-buffer-no-alias"="" ) %a3( align 4 dereferenceable(8) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = extractelement %a0, i64 0
+  %i1 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = extractelement %a0, i64 1
+  %i3 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i2)
+  %i4 = getelementptr inbounds %t46, %a3, i64 0, i32 0
+  %i5 = load i32, %i4, align 4
+  %i6 = mul i32 %i5, %i3
+  %i7 = add i32 %i6, %i1
+  %i8 = getelementptr inbounds %t46, %a3, i64 0, i32 1
+  %i9 = load i32, %i8, align 4
+  %i10 = mul i32 %i7, %i9
+  %i11 = add i32 %i10, %a1
+  %i12 = zext %i11 to i64
+  %i13 = getelementptr inbounds <4 x i32>, %a2, %i12
+  %i14 = load <4 x i32>, %i13, align 16
+  ret %i14
+}
+
+define %t16 @f23 "rt6_fill_rgba32sint" memory(Ref, NoModRef, NoModRef) "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a2( Ref nocapture "air-buffer-no-alias"="" ) %a3( align 4 dereferenceable(8) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = extractelement %a0, i64 0
+  %i1 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = extractelement %a0, i64 1
+  %i3 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i2)
+  %i4 = getelementptr inbounds %t46, %a3, i64 0, i32 0
+  %i5 = load i32, %i4, align 4
+  %i6 = mul i32 %i5, %i3
+  %i7 = add i32 %i6, %i1
+  %i8 = getelementptr inbounds %t46, %a3, i64 0, i32 1
+  %i9 = load i32, %i8, align 4
+  %i10 = mul i32 %i7, %i9
+  %i11 = add i32 %i10, %a1
+  %i12 = zext %i11 to i64
+  %i13 = getelementptr inbounds <4 x i32>, %a2, %i12
+  %i14 = load <4 x i32>, %i13, align 16
+  ret %i14
+}
+
+define %t12 @f24 "rt6_fill_rgba32float" memory(Ref, NoModRef, NoModRef) "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a2( Ref nocapture "air-buffer-no-alias"="" ) %a3( align 4 dereferenceable(8) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = extractelement %a0, i64 0
+  %i1 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = extractelement %a0, i64 1
+  %i3 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i2)
+  %i4 = getelementptr inbounds %t46, %a3, i64 0, i32 0
+  %i5 = load i32, %i4, align 4
+  %i6 = mul i32 %i5, %i3
+  %i7 = add i32 %i6, %i1
+  %i8 = getelementptr inbounds %t46, %a3, i64 0, i32 1
+  %i9 = load i32, %i8, align 4
+  %i10 = mul i32 %i7, %i9
+  %i11 = add i32 %i10, %a1
+  %i12 = zext %i11 to i64
+  %i13 = getelementptr inbounds <4 x float>, %a2, %i12
+  %i14 = load <4 x float>, %i13, align 16
+  ret %i14
+}
+
+define %t31 @f25 "rt6_fill_depth32float" memory(Ref, NoModRef, NoModRef) "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a2( Ref nocapture "air-buffer-no-alias"="" ) %a3( align 4 dereferenceable(8) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = extractelement %a0, i64 0
+  %i1 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = extractelement %a0, i64 1
+  %i3 = tail call i32 @f35 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i2)
+  %i4 = getelementptr inbounds %t46, %a3, i64 0, i32 0
+  %i5 = load i32, %i4, align 4
+  %i6 = mul i32 %i5, %i3
+  %i7 = add i32 %i6, %i1
+  %i8 = getelementptr inbounds %t46, %a3, i64 0, i32 1
+  %i9 = load i32, %i8, align 4
+  %i10 = mul i32 %i7, %i9
+  %i11 = add i32 %i10, %a1
+  %i12 = zext %i11 to i64
+  %i13 = getelementptr inbounds float, %a2, %i12
+  %i14 = load float, %i13, align 4
+  %i15 = insertvalue %t30 undef %i14, 0
+  ret %i15
+}
+
+define %t33 @f26 "_Z10words_baseDv3_jRU11MTLconstantK8Rt6Shapej" memory(NoModRef, NoModRef, NoModRef) "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="96" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a1( align 4 dereferenceable(8) Ref nocapture ) {
+bb0:
+  %i0 = extractelement %a0, i64 1
+  %i1 = getelementptr inbounds %t46, %a1, i64 0, i32 0
+  %i2 = load i32, %i1, align 4
+  %i3 = mul i32 %i2, %i0
+  %i4 = extractelement %a0, i64 0
+  %i5 = add i32 %i3, %i4
+  %i6 = getelementptr inbounds %t46, %a1, i64 0, i32 1
+  %i7 = load i32, %i6, align 4
+  %i8 = mul i32 %i5, %i7
+  %i9 = extractelement %a0, i64 2
+  %i10 = add i32 %i8, %i9
+  %i11 = mul i32 %i10, %a2
+  ret %i11
+}
+
+define %t35 @f27 "rt6_read_words1" "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a0( Ref nocapture ) %a1( Mod nocapture "air-buffer-no-alias"="" ) %a2( align 4 dereferenceable(8) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = shufflevector <2 x i32> %a3, <3 x i32> poison, <0, 1>
+  %i1 = extractelement %a3, i64 2
+  %i2 = tail call ptr addrspace(2) @f36 [air Sampler(GetReadSampler)]()
+  %i3 = tail call %t38 @f37 [air Texture(Texture { op: Read, image: ImageShape { dim: D2, array: false, ms: true, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Unsigned) }), coord16: false, form: Current, access: Some(Read) })](%a0, %i2, %i0, %i1, i32 1) arg0( Ref nocapture )
+  %i4 = extractvalue <4 x i32> %i3, 0
+  %i5 = extractelement %a3, i64 1
+  %i6 = getelementptr inbounds %t46, %a2, i64 0, i32 0
+  %i7 = load i32, %i6, align 4
+  %i8 = mul i32 %i7, %i5
+  %i9 = extractelement %a3, i64 0
+  %i10 = add i32 %i8, %i9
+  %i11 = getelementptr inbounds %t46, %a2, i64 0, i32 1
+  %i12 = load i32, %i11, align 4
+  %i13 = mul i32 %i10, %i12
+  %i14 = add i32 %i13, %i1
+  %i15 = extractelement %i4, i64 0
+  %i16 = zext %i14 to i64
+  %i17 = getelementptr inbounds i32, %a1, %i16
+  store %i15, %i17, align 4
+  ret void
+}
+
+define %t35 @f28 "rt6_read_words2" "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a0( Ref nocapture ) %a1( Mod nocapture "air-buffer-no-alias"="" ) %a2( align 4 dereferenceable(8) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = shufflevector <2 x i32> %a3, <3 x i32> poison, <0, 1>
+  %i1 = extractelement %a3, i64 2
+  %i2 = tail call ptr addrspace(2) @f36 [air Sampler(GetReadSampler)]()
+  %i3 = tail call %t38 @f37 [air Texture(Texture { op: Read, image: ImageShape { dim: D2, array: false, ms: true, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Unsigned) }), coord16: false, form: Current, access: Some(Read) })](%a0, %i2, %i0, %i1, i32 1) arg0( Ref nocapture )
+  %i4 = extractvalue <4 x i32> %i3, 0
+  %i5 = extractelement %a3, i64 1
+  %i6 = getelementptr inbounds %t46, %a2, i64 0, i32 0
+  %i7 = load i32, %i6, align 4
+  %i8 = mul i32 %i7, %i5
+  %i9 = extractelement %a3, i64 0
+  %i10 = add i32 %i8, %i9
+  %i11 = getelementptr inbounds %t46, %a2, i64 0, i32 1
+  %i12 = load i32, %i11, align 4
+  %i13 = mul i32 %i10, %i12
+  %i14 = add i32 %i13, %i1
+  %i15 = shl i32 %i14, i32 1
+  %i16 = extractelement %i4, i64 0
+  %i17 = zext %i15 to i64
+  %i18 = getelementptr inbounds i32, %a1, %i17
+  store %i16, %i18, align 4
+  %i20 = extractelement %i4, i64 1
+  %i21 = or i32 %i15, i32 1
+  %i22 = zext %i21 to i64
+  %i23 = getelementptr inbounds i32, %a1, %i22
+  store %i20, %i23, align 4
+  ret void
+}
+
+define %t35 @f29 "rt6_read_words4" "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a0( Ref nocapture ) %a1( Mod nocapture "air-buffer-no-alias"="" ) %a2( align 4 dereferenceable(8) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = shufflevector <2 x i32> %a3, <3 x i32> poison, <0, 1>
+  %i1 = extractelement %a3, i64 2
+  %i2 = tail call ptr addrspace(2) @f36 [air Sampler(GetReadSampler)]()
+  %i3 = tail call %t38 @f37 [air Texture(Texture { op: Read, image: ImageShape { dim: D2, array: false, ms: true, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Unsigned) }), coord16: false, form: Current, access: Some(Read) })](%a0, %i2, %i0, %i1, i32 1) arg0( Ref nocapture )
+  %i4 = extractvalue <4 x i32> %i3, 0
+  %i5 = extractelement %a3, i64 1
+  %i6 = getelementptr inbounds %t46, %a2, i64 0, i32 0
+  %i7 = load i32, %i6, align 4
+  %i8 = mul i32 %i7, %i5
+  %i9 = extractelement %a3, i64 0
+  %i10 = add i32 %i8, %i9
+  %i11 = getelementptr inbounds %t46, %a2, i64 0, i32 1
+  %i12 = load i32, %i11, align 4
+  %i13 = mul i32 %i10, %i12
+  %i14 = add i32 %i13, %i1
+  %i15 = shl i32 %i14, i32 2
+  %i16 = extractelement %i4, i64 0
+  %i17 = zext %i15 to i64
+  %i18 = getelementptr inbounds i32, %a1, %i17
+  store %i16, %i18, align 4
+  %i20 = extractelement %i4, i64 1
+  %i21 = or i32 %i15, i32 1
+  %i22 = zext %i21 to i64
+  %i23 = getelementptr inbounds i32, %a1, %i22
+  store %i20, %i23, align 4
+  %i25 = extractelement %i4, i64 2
+  %i26 = or i32 %i15, i32 2
+  %i27 = zext %i26 to i64
+  %i28 = getelementptr inbounds i32, %a1, %i27
+  store %i25, %i28, align 4
+  %i30 = extractelement %i4, i64 3
+  %i31 = or i32 %i15, i32 3
+  %i32 = zext %i31 to i64
+  %i33 = getelementptr inbounds i32, %a1, %i32
+  store %i30, %i33, align 4
+  ret void
+}
+
+define %t35 @f30 "rt6_read_bytes4" "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a0( Ref nocapture ) %a1( Mod nocapture "air-buffer-no-alias"="" ) %a2( align 4 dereferenceable(8) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = shufflevector <2 x i32> %a3, <3 x i32> poison, <0, 1>
+  %i1 = extractelement %a3, i64 2
+  %i2 = tail call ptr addrspace(2) @f36 [air Sampler(GetReadSampler)]()
+  %i3 = tail call %t38 @f37 [air Texture(Texture { op: Read, image: ImageShape { dim: D2, array: false, ms: true, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Unsigned) }), coord16: false, form: Current, access: Some(Read) })](%a0, %i2, %i0, %i1, i32 1) arg0( Ref nocapture )
+  %i4 = extractvalue <4 x i32> %i3, 0
+  %i5 = and <4 x i32> %i4, <4 x i32> c77
+  %i6 = extractelement %i5, i64 0
+  %i7 = extractelement %i5, i64 1
+  %i8 = shl nuw nsw i32 %i7, i32 8
+  %i9 = or i32 %i8, %i6
+  %i10 = extractelement %i5, i64 2
+  %i11 = shl nuw nsw i32 %i10, i32 16
+  %i12 = or i32 %i9, %i11
+  %i13 = extractelement %i5, i64 3
+  %i14 = shl nuw i32 %i13, i32 24
+  %i15 = or i32 %i12, %i14
+  %i16 = extractelement %a3, i64 1
+  %i17 = getelementptr inbounds %t46, %a2, i64 0, i32 0
+  %i18 = load i32, %i17, align 4
+  %i19 = mul i32 %i18, %i16
+  %i20 = extractelement %a3, i64 0
+  %i21 = add i32 %i19, %i20
+  %i22 = getelementptr inbounds %t46, %a2, i64 0, i32 1
+  %i23 = load i32, %i22, align 4
+  %i24 = mul i32 %i21, %i23
+  %i25 = add i32 %i24, %i1
+  %i26 = zext %i25 to i64
+  %i27 = getelementptr inbounds i32, %a1, %i26
+  store %i15, %i27, align 4
+  ret void
+}
+
+define %t35 @f31 "rt6_read_halves2" "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a0( Ref nocapture ) %a1( Mod nocapture "air-buffer-no-alias"="" ) %a2( align 4 dereferenceable(8) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = shufflevector <2 x i32> %a3, <3 x i32> poison, <0, 1>
+  %i1 = extractelement %a3, i64 2
+  %i2 = tail call ptr addrspace(2) @f36 [air Sampler(GetReadSampler)]()
+  %i3 = tail call %t38 @f37 [air Texture(Texture { op: Read, image: ImageShape { dim: D2, array: false, ms: true, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Unsigned) }), coord16: false, form: Current, access: Some(Read) })](%a0, %i2, %i0, %i1, i32 1) arg0( Ref nocapture )
+  %i4 = extractvalue <4 x i32> %i3, 0
+  %i5 = and <4 x i32> %i4, <4 x i32> c80
+  %i6 = extractelement %i5, i64 0
+  %i7 = extractelement %i5, i64 1
+  %i8 = shl nuw i32 %i7, i32 16
+  %i9 = or i32 %i8, %i6
+  %i10 = extractelement %a3, i64 1
+  %i11 = getelementptr inbounds %t46, %a2, i64 0, i32 0
+  %i12 = load i32, %i11, align 4
+  %i13 = mul i32 %i12, %i10
+  %i14 = extractelement %a3, i64 0
+  %i15 = add i32 %i13, %i14
+  %i16 = getelementptr inbounds %t46, %a2, i64 0, i32 1
+  %i17 = load i32, %i16, align 4
+  %i18 = mul i32 %i15, %i17
+  %i19 = add i32 %i18, %i1
+  %i20 = zext %i19 to i64
+  %i21 = getelementptr inbounds i32, %a1, %i20
+  store %i9, %i21, align 4
+  ret void
+}
+
+define %t35 @f32 "rt6_read_halves4" "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a0( Ref nocapture ) %a1( Mod nocapture "air-buffer-no-alias"="" ) %a2( align 4 dereferenceable(8) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = shufflevector <2 x i32> %a3, <3 x i32> poison, <0, 1>
+  %i1 = extractelement %a3, i64 2
+  %i2 = tail call ptr addrspace(2) @f36 [air Sampler(GetReadSampler)]()
+  %i3 = tail call %t38 @f37 [air Texture(Texture { op: Read, image: ImageShape { dim: D2, array: false, ms: true, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Unsigned) }), coord16: false, form: Current, access: Some(Read) })](%a0, %i2, %i0, %i1, i32 1) arg0( Ref nocapture )
+  %i4 = extractvalue <4 x i32> %i3, 0
+  %i5 = and <4 x i32> %i4, <4 x i32> c81
+  %i6 = extractelement %a3, i64 1
+  %i7 = getelementptr inbounds %t46, %a2, i64 0, i32 0
+  %i8 = load i32, %i7, align 4
+  %i9 = mul i32 %i8, %i6
+  %i10 = extractelement %a3, i64 0
+  %i11 = add i32 %i9, %i10
+  %i12 = getelementptr inbounds %t46, %a2, i64 0, i32 1
+  %i13 = load i32, %i12, align 4
+  %i14 = mul i32 %i11, %i13
+  %i15 = add i32 %i14, %i1
+  %i16 = shl i32 %i15, i32 1
+  %i17 = extractelement %i5, i64 0
+  %i18 = extractelement %i5, i64 1
+  %i19 = shl nuw i32 %i18, i32 16
+  %i20 = or i32 %i19, %i17
+  %i21 = zext %i16 to i64
+  %i22 = getelementptr inbounds i32, %a1, %i21
+  store %i20, %i22, align 4
+  %i24 = extractelement %i5, i64 2
+  %i25 = extractelement %i5, i64 3
+  %i26 = shl nuw i32 %i25, i32 16
+  %i27 = or i32 %i26, %i24
+  %i28 = or i32 %i16, i32 1
+  %i29 = zext %i28 to i64
+  %i30 = getelementptr inbounds i32, %a1, %i29
+  store %i27, %i30, align 4
+  ret void
+}
+
+define %t35 @f33 "rt6_read_depth" "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="96" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a0( Ref nocapture ) %a1( Mod nocapture "air-buffer-no-alias"="" ) %a2( align 4 dereferenceable(8) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = shufflevector <2 x i32> %a3, <3 x i32> poison, <0, 1>
+  %i1 = extractelement %a3, i64 2
+  %i2 = tail call ptr addrspace(2) @f36 [air Sampler(GetReadSampler)]()
+  %i3 = tail call %t41 @f38 [air Texture(Texture { op: Read, image: ImageShape { dim: D2, array: false, ms: true, depth: true }, texel: Some(Texel { ty: NumTy { elem: F32, lanes: 1 }, sign: None }), coord16: false, form: Current, access: Some(Read) })](%a0, %i2, i32 1, %i0, %i1, i32 1) arg0( Ref nocapture )
+  %i4 = extractvalue float %i3, 0
+  %i5 = extractelement %a3, i64 1
+  %i6 = getelementptr inbounds %t46, %a2, i64 0, i32 0
+  %i7 = load i32, %i6, align 4
+  %i8 = mul i32 %i7, %i5
+  %i9 = extractelement %a3, i64 0
+  %i10 = add i32 %i8, %i9
+  %i11 = getelementptr inbounds %t46, %a2, i64 0, i32 1
+  %i12 = load i32, %i11, align 4
+  %i13 = mul i32 %i10, %i12
+  %i14 = add i32 %i13, %i1
+  %i15 = zext %i14 to i64
+  %i16 = getelementptr inbounds i32, %a1, %i15
+  %i17 = bitcast %i16 to ptr addrspace(1)
+  store %i4, %i17, align 4
+  ret void
+}
+
+define %t35 @f34 "rt6_read_stencil" "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a0( Ref nocapture ) %a1( Mod nocapture "air-buffer-no-alias"="" ) %a2( align 4 dereferenceable(8) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = shufflevector <2 x i32> %a3, <3 x i32> poison, <0, 1>
+  %i1 = extractelement %a3, i64 2
+  %i2 = tail call ptr addrspace(2) @f36 [air Sampler(GetReadSampler)]()
+  %i3 = tail call %t38 @f37 [air Texture(Texture { op: Read, image: ImageShape { dim: D2, array: false, ms: true, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Unsigned) }), coord16: false, form: Current, access: Some(Read) })](%a0, %i2, %i0, %i1, i32 1) arg0( Ref nocapture )
+  %i4 = extractvalue <4 x i32> %i3, 0
+  %i5 = extractelement %i4, i64 0
+  %i6 = extractelement %a3, i64 1
+  %i7 = getelementptr inbounds %t46, %a2, i64 0, i32 0
+  %i8 = load i32, %i7, align 4
+  %i9 = mul i32 %i8, %i6
+  %i10 = extractelement %a3, i64 0
+  %i11 = add i32 %i9, %i10
+  %i12 = getelementptr inbounds %t46, %a2, i64 0, i32 1
+  %i13 = load i32, %i12, align 4
+  %i14 = mul i32 %i11, %i13
+  %i15 = add i32 %i14, %i1
+  %i16 = zext %i15 to i64
+  %i17 = getelementptr inbounds i32, %a1, %i16
+  store %i5, %i17, align 4
+  ret void
+}
+
+declare %t36 @f35 "air.convert.u.i32.f.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t37 @f36 "air.get_read_sampler" memory(NoModRef, Ref, NoModRef)
+
+declare %t40 @f37 "air.read_texture_2d_ms.u.v4i32" memory(Ref, NoModRef, NoModRef) %a0( Ref nocapture )
+
+declare %t42 @f38 "air.read_depth_2d_ms.f32" memory(Ref, NoModRef, NoModRef) %a0( Ref nocapture )
+!md0 = !"SDK Version"
+!md1 = !"wchar_size"
+!md2 = !"frame-pointer"
+!md3 = !"air.max_device_buffers"
+!md4 = !"air.max_constant_buffers"
+!md5 = !"air.max_threadgroup_buffers"
+!md6 = !"air.max_textures"
+!md7 = !"air.max_read_write_textures"
+!md8 = !"air.max_samplers"
+!md9 = !"air.position"
+!md10 = !"air.arg_type_name"
+!md11 = !"float4"
+!md12 = !"air.arg_name"
+!md13 = !"position"
+!md14 = !"air.vertex_id"
+!md15 = !"uint"
+!md16 = !"id"
+!md17 = !"air.render_target"
+!md18 = !"float"
+!md19 = !"air.center"
+!md20 = !"air.no_perspective"
+!md21 = !"air.sample_id"
+!md22 = !"sample"
+!md23 = !"air.buffer"
+!md24 = !"air.location_index"
+!md25 = !"air.read"
+!md26 = !"air.address_space"
+!md27 = !"air.arg_type_size"
+!md28 = !"air.arg_type_align_size"
+!md29 = !"uchar"
+!md30 = !"values"
+!md31 = !"air.buffer_size"
+!md32 = !"air.struct_type_info"
+!md33 = !"width"
+!md34 = !"samples"
+!md35 = !"Rt6Shape"
+!md36 = !"shape"
+!md37 = !"uchar4"
+!md38 = !"uint4"
+!md39 = !"int4"
+!md40 = !"char4"
+!md41 = !"half"
+!md42 = !"ushort"
+!md43 = !"half2"
+!md44 = !"float2"
+!md45 = !"half4"
+!md46 = !"ushort4"
+!md47 = !"short4"
+!md48 = !"int"
+!md49 = !"air.depth"
+!md50 = !"air.depth_qualifier"
+!md51 = !"air.any"
+!md52 = !"depth"
+!md53 = !"air.texture"
+!md54 = !"texture2d_ms<uint, read>"
+!md55 = !"source"
+!md56 = !"air.read_write"
+!md57 = !"words"
+!md58 = !"air.threadgroup_position_in_grid"
+!md59 = !"uint3"
+!md60 = !"depth2d_ms<float, read>"
+!md61 = !"air.compile.denorms_disable"
+!md62 = !"air.compile.fast_math_enable"
+!md63 = !"air.compile.framebuffer_fetch_enable"
+!md64 = !"Apple metal version 32023.921 (metalfe-32023.921.6)"
+!md65 = !"Metal"
+!md66 = !"_ZTS8Rt6Shape"
+!md67 = !"omnipotent char"
+!md68 = !"Simple C++ TBAA"
+!md69 = !"air-alias-scope-arg(3)"
+!md70 = !"air-alias-scope-arg(2)"
+!md71 = !"air-alias-scope-arg(1)"
+!md72 = !"air-alias-scope-textures"
+!md73 = i32 2
+!md74 = %t44 c42
+!md75 = i32 1
+!md76 = i32 4
+!md77 = i32 7
+!md78 = i32 31
+!md79 = i32 128
+!md80 = i32 8
+!md81 = i32 16
+!md82 = ptr addrspace(0) @f0
+!md83 = i32 0
+!md84 = ptr addrspace(0) @f2
+!md85 = i32 3
+!md86 = ptr addrspace(0) @f4
+!md87 = ptr addrspace(0) @f6
+!md88 = ptr addrspace(0) @f8
+!md89 = ptr addrspace(0) @f10
+!md90 = ptr addrspace(0) @f11
+!md91 = ptr addrspace(0) @f12
+!md92 = ptr addrspace(0) @f13
+!md93 = ptr addrspace(0) @f14
+!md94 = ptr addrspace(0) @f15
+!md95 = ptr addrspace(0) @f17
+!md96 = ptr addrspace(0) @f19
+!md97 = ptr addrspace(0) @f20
+!md98 = ptr addrspace(0) @f21
+!md99 = ptr addrspace(0) @f22
+!md100 = ptr addrspace(0) @f23
+!md101 = ptr addrspace(0) @f24
+!md102 = ptr addrspace(0) @f25
+!md103 = ptr addrspace(0) @f27
+!md104 = ptr addrspace(0) @f28
+!md105 = ptr addrspace(0) @f29
+!md106 = ptr addrspace(0) @f30
+!md107 = ptr addrspace(0) @f31
+!md108 = ptr addrspace(0) @f32
+!md109 = ptr addrspace(0) @f33
+!md110 = ptr addrspace(0) @f34
+!md111 = i64 0
+!md112 = i64 4
+!md113 = !{!md73, !md0, !md74}
+!md114 = !{!md75, !md1, !md76}
+!md115 = !{!md77, !md2, !md73}
+!md116 = !{!md77, !md3, !md78}
+!md117 = !{!md77, !md4, !md78}
+!md118 = !{!md77, !md5, !md78}
+!md119 = !{!md77, !md6, !md79}
+!md120 = !{!md77, !md7, !md80}
+!md121 = !{!md77, !md8, !md81}
+!md122 = !{!md9, !md10, !md11, !md12, !md13}
+!md123 = !{!md122}
+!md124 = !{!md83, !md14, !md10, !md15, !md12, !md16}
+!md125 = !{!md124}
+!md126 = !{!md82, !md123, !md125}
+!md127 = !{!md17, !md83, !md83, !md10, !md18}
+!md128 = !{!md127}
+!md129 = !{!md83, !md9, !md19, !md20, !md10, !md11, !md12, !md13}
+!md130 = !{!md75, !md21, !md10, !md15, !md12, !md22}
+!md131 = !{!md73, !md23, !md24, !md83, !md75, !md25, !md26, !md75, !md27, !md75, !md28, !md75, !md10, !md29, !md12, !md30}
+!md132 = !{!md83, !md76, !md83, !md15, !md33, !md76, !md76, !md83, !md15, !md34}
+!md133 = !{!md85, !md23, !md31, !md80, !md24, !md75, !md75, !md25, !md26, !md73, !md32, !md132, !md27, !md80, !md28, !md76, !md10, !md35, !md12, !md36}
+!md134 = !{!md129, !md130, !md131, !md133}
+!md135 = !{!md84, !md128, !md134}
+!md136 = !{!md17, !md83, !md83, !md10, !md11}
+!md137 = !{!md136}
+!md138 = !{!md73, !md23, !md24, !md83, !md75, !md25, !md26, !md75, !md27, !md76, !md28, !md76, !md10, !md37, !md12, !md30}
+!md139 = !{!md129, !md130, !md138, !md133}
+!md140 = !{!md86, !md137, !md139}
+!md141 = !{!md17, !md83, !md83, !md10, !md38}
+!md142 = !{!md141}
+!md143 = !{!md87, !md142, !md139}
+!md144 = !{!md17, !md83, !md83, !md10, !md39}
+!md145 = !{!md144}
+!md146 = !{!md73, !md23, !md24, !md83, !md75, !md25, !md26, !md75, !md27, !md76, !md28, !md76, !md10, !md40, !md12, !md30}
+!md147 = !{!md129, !md130, !md146, !md133}
+!md148 = !{!md88, !md145, !md147}
+!md149 = !{!md17, !md83, !md83, !md10, !md41}
+!md150 = !{!md149}
+!md151 = !{!md73, !md23, !md24, !md83, !md75, !md25, !md26, !md75, !md27, !md73, !md28, !md73, !md10, !md41, !md12, !md30}
+!md152 = !{!md129, !md130, !md151, !md133}
+!md153 = !{!md89, !md150, !md152}
+!md154 = !{!md17, !md83, !md83, !md10, !md15}
+!md155 = !{!md154}
+!md156 = !{!md73, !md23, !md24, !md83, !md75, !md25, !md26, !md75, !md27, !md73, !md28, !md73, !md10, !md42, !md12, !md30}
+!md157 = !{!md129, !md130, !md156, !md133}
+!md158 = !{!md90, !md155, !md157}
+!md159 = !{!md17, !md83, !md83, !md10, !md43}
+!md160 = !{!md159}
+!md161 = !{!md73, !md23, !md24, !md83, !md75, !md25, !md26, !md75, !md27, !md76, !md28, !md76, !md10, !md43, !md12, !md30}
+!md162 = !{!md129, !md130, !md161, !md133}
+!md163 = !{!md91, !md160, !md162}
+!md164 = !{!md17, !md83, !md83, !md10, !md44}
+!md165 = !{!md164}
+!md166 = !{!md73, !md23, !md24, !md83, !md75, !md25, !md26, !md75, !md27, !md80, !md28, !md80, !md10, !md44, !md12, !md30}
+!md167 = !{!md129, !md130, !md166, !md133}
+!md168 = !{!md92, !md165, !md167}
+!md169 = !{!md17, !md83, !md83, !md10, !md45}
+!md170 = !{!md169}
+!md171 = !{!md73, !md23, !md24, !md83, !md75, !md25, !md26, !md75, !md27, !md80, !md28, !md80, !md10, !md45, !md12, !md30}
+!md172 = !{!md129, !md130, !md171, !md133}
+!md173 = !{!md93, !md170, !md172}
+!md174 = !{!md73, !md23, !md24, !md83, !md75, !md25, !md26, !md75, !md27, !md80, !md28, !md80, !md10, !md46, !md12, !md30}
+!md175 = !{!md129, !md130, !md174, !md133}
+!md176 = !{!md94, !md142, !md175}
+!md177 = !{!md73, !md23, !md24, !md83, !md75, !md25, !md26, !md75, !md27, !md80, !md28, !md80, !md10, !md47, !md12, !md30}
+!md178 = !{!md129, !md130, !md177, !md133}
+!md179 = !{!md95, !md145, !md178}
+!md180 = !{!md73, !md23, !md24, !md83, !md75, !md25, !md26, !md75, !md27, !md76, !md28, !md76, !md10, !md15, !md12, !md30}
+!md181 = !{!md129, !md130, !md180, !md133}
+!md182 = !{!md96, !md155, !md181}
+!md183 = !{!md17, !md83, !md83, !md10, !md48}
+!md184 = !{!md183}
+!md185 = !{!md73, !md23, !md24, !md83, !md75, !md25, !md26, !md75, !md27, !md76, !md28, !md76, !md10, !md48, !md12, !md30}
+!md186 = !{!md129, !md130, !md185, !md133}
+!md187 = !{!md97, !md184, !md186}
+!md188 = !{!md73, !md23, !md24, !md83, !md75, !md25, !md26, !md75, !md27, !md76, !md28, !md76, !md10, !md18, !md12, !md30}
+!md189 = !{!md129, !md130, !md188, !md133}
+!md190 = !{!md98, !md128, !md189}
+!md191 = !{!md73, !md23, !md24, !md83, !md75, !md25, !md26, !md75, !md27, !md81, !md28, !md81, !md10, !md38, !md12, !md30}
+!md192 = !{!md129, !md130, !md191, !md133}
+!md193 = !{!md99, !md142, !md192}
+!md194 = !{!md73, !md23, !md24, !md83, !md75, !md25, !md26, !md75, !md27, !md81, !md28, !md81, !md10, !md39, !md12, !md30}
+!md195 = !{!md129, !md130, !md194, !md133}
+!md196 = !{!md100, !md145, !md195}
+!md197 = !{!md73, !md23, !md24, !md83, !md75, !md25, !md26, !md75, !md27, !md81, !md28, !md81, !md10, !md11, !md12, !md30}
+!md198 = !{!md129, !md130, !md197, !md133}
+!md199 = !{!md101, !md137, !md198}
+!md200 = !{!md49, !md50, !md51, !md10, !md18, !md12, !md52}
+!md201 = !{!md200}
+!md202 = !{!md102, !md201, !md189}
+!md203 = !{}
+!md204 = !{!md83, !md53, !md24, !md83, !md75, !md25, !md10, !md54, !md12, !md55}
+!md205 = !{!md75, !md23, !md24, !md83, !md75, !md56, !md26, !md75, !md27, !md76, !md28, !md76, !md10, !md15, !md12, !md57}
+!md206 = !{!md73, !md23, !md31, !md80, !md24, !md75, !md75, !md25, !md26, !md73, !md32, !md132, !md27, !md80, !md28, !md76, !md10, !md35, !md12, !md36}
+!md207 = !{!md85, !md58, !md10, !md59, !md12, !md13}
+!md208 = !{!md204, !md205, !md206, !md207}
+!md209 = !{!md103, !md203, !md208}
+!md210 = !{!md104, !md203, !md208}
+!md211 = !{!md105, !md203, !md208}
+!md212 = !{!md106, !md203, !md208}
+!md213 = !{!md107, !md203, !md208}
+!md214 = !{!md108, !md203, !md208}
+!md215 = !{!md83, !md53, !md24, !md83, !md75, !md25, !md10, !md60, !md12, !md55}
+!md216 = !{!md215, !md205, !md206, !md207}
+!md217 = !{!md109, !md203, !md216}
+!md218 = !{!md110, !md203, !md208}
+!md219 = !{!md61}
+!md220 = !{!md62}
+!md221 = !{!md63}
+!md222 = !{!md64}
+!md223 = !{!md73, !md80, !md83}
+!md224 = !{!md65, !md76, !md83, !md83}
+!md225 = !{!md68}
+!md226 = !{!md67, !md225, !md111}
+!md227 = !{!md48, !md226, !md111}
+!md228 = !{!md66, !md227, !md111, !md227, !md112}
+!md229 = !{!md228, !md227, !md111}
+!md230 = !{!md228, !md227, !md112}
+!md231 = !{!md226, !md226, !md111}
+!md232 = !{!md227, !md227, !md111}
+!md233 = !{!md18, !md226, !md111}
+!md234 = !{!md233, !md233, !md111}
+!"llvm.module.flags" = !{!md113, !md114, !md115, !md116, !md117, !md118, !md119, !md120, !md121}
+!"air.vertex" = !{!md126}
+!"air.fragment" = !{!md135, !md140, !md143, !md148, !md153, !md158, !md163, !md168, !md173, !md176, !md179, !md182, !md187, !md190, !md193, !md196, !md199, !md202}
+!"air.kernel" = !{!md209, !md210, !md211, !md212, !md213, !md214, !md217, !md218}
+!"air.compile_options" = !{!md219, !md220, !md221}
+!"llvm.ident" = !{!md222}
+!"air.version" = !{!md223}
+!"air.language_version" = !{!md224}

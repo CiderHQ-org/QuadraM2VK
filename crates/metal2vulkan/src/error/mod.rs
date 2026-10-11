@@ -1,0 +1,1818 @@
+//! Errors: every way compiling or binding can fail, as typed values to match on.
+//!
+//! Compiling returns [`Error`]: `Device::new`, `Library::parse`, every `Device::compile_*` call,
+//! `Device::render_pipeline_key`, and the [`metal`](crate::metal) mappings. Planning and
+//! instantiating a binding returns [`BindError`]. Decoding cached bytes returns
+//! [`ArtifactError`](crate::cache::ArtifactError), which is always a cache miss. Match variants,
+//! not messages: `Display` is for logs.
+//!
+//! What each [`Error`] asks of the caller:
+//!
+//! - [`Error::Unsupported`]: a typed refusal ([`Unsupported`]) of valid Metal. Its [`Feature`]
+//!   names the Metal construct, and its [`Needs`] says what would change the answer:
+//!   [`Needs::AnyOf`] lists alternative sets of device [`Capability`]s (a device that enables
+//!   every capability of one set compiles it), [`Needs::NotImplemented`] is a gap of this
+//!   translator version on every device, [`Needs::NotRepresentable`] has no Vulkan 1.2+
+//!   mechanism, [`Needs::DriverDefect`] is a mechanism the device's driver is measured to run
+//!   wrong ([`Needs::RuntimeDriverDefect`] one the runtime records for itself), and
+//!   [`Needs::UnmeasuredDeviation`] one the driver departs from the specifications in by a rule
+//!   not measured on its release. The runtime adds [`Needs::MetalGpuFamily`]: Metal's own refusal
+//!   on a device without the family, and [`Needs::MetalRefuses`]: Metal's own refusal of the
+//!   form on the devices it was measured on. The translator does not return different output in place
+//!   of a refusal; where an output accepts a documented difference from Metal, its stage lists it
+//!   as a [`PrecisionNote`](crate::pipeline::PrecisionNote).
+//! - [`Error::NeedsInput`]: the compile needs a pipeline input the call did not supply
+//!   ([`RuntimeInput`]): a function-constant value, a storage texture's format, a linked
+//!   function, a vertex or stage-input descriptor entry. Supply it and compile again.
+//! - [`Error::InvalidInput`] (malformed or ABI-inconsistent AIR: [`InputError`]),
+//!   [`Error::InvalidDescriptor`] (an inconsistent descriptor or request: [`DescriptorError`]),
+//!   and [`Error::LimitExceeded`] (a deterministic cap: [`Limit`]): the request cannot succeed as
+//!   made.
+//! - [`Error::Budget`] and [`Error::Cancelled`]: the attempt passed its
+//!   [`Budget`](crate::Budget)'s deadline, or its [`CancelToken`](crate::CancelToken) was
+//!   cancelled. Transient: retry later.
+//! - [`Error::Internal`]: a translator bug ([`InternalError`]). A panic inside a compile entry
+//!   point is caught and returned as one.
+//!
+//! **Caching failures.** [`Error::retry`] says whether the same request can succeed later, and
+//! [`Error::is_permanent_for`] which key may memoize the failure: [`Permanence::Input`] (the
+//! input, on every device), [`Permanence::InputAndDevice`] (the input on this device profile;
+//! every compile key includes the profile's fingerprint), or [`Permanence::Never`] (transient:
+//! never cache it). A [`BindError`] from a pipeline's `plan` depends only on the pipeline, the
+//! device, and the [`BindShape`](crate::bind::BindShape), so it memoizes beside the plan on
+//! `(PipelineKey, BindShape)`. One from `instantiate_dispatch` or `instantiate_draw` can also
+//! depend on that dispatch or draw and on the bind state's per-draw values (offsets, lengths,
+//! addresses, the stage-in region, the tessellation factor buffer), so it does not memoize on the
+//! shape. [`BindError::NeedsVariant`] names the pipeline variant to plan or instantiate on
+//! instead.
+//!
+//! Every enum here is `#[non_exhaustive]`, and so are [`Unsupported`], [`InputError`], and
+//! [`InternalError`]: new refusals and variants arrive additively, so match with a wildcard arm.
+
+// Every variant is enumerated here up front; a variant discovered later is a one-line append.
+// Validation outcome classes are a `From<&Error>` in `validation/`, never a second vocabulary.
+
+use std::fmt;
+
+pub use crate::air::error::{Attachment, DiagName, InputError, InputErrorKind, Location};
+// The detail vocabulary of `InputErrorKind`.
+pub use crate::air::error::{
+    AbiError, BitcodeError, BitstreamError, CanonError, ContainerError, ErrorClass, IntrinsicError,
+    VerifyError,
+};
+// The vocabulary the front end and the translator share: the caps, the deadline, internal
+// invariants, and why a linked function cannot resolve a reference.
+pub use crate::air::error::{BudgetExceeded, InternalError, InternalKind, Limit, LinkProblem};
+use crate::air::error::{MissingInput, RequestError};
+use crate::device::requirements::{
+    ApiVersion, FormatUsage, VkExtension, VkFeature, VkLimit, VkProperty,
+};
+use crate::device::DriverWorkaround;
+use crate::metal::PixelFormat;
+use crate::pipeline::sym::{Axis, SlotRef, SpecKey, Stage};
+use crate::vk;
+
+/// Why a translation or compile did not produce output.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Error {
+    /// Valid Metal that is not representable on this device, or not implemented yet.
+    Unsupported(Unsupported),
+    /// A pipeline input the caller did not supply.
+    NeedsInput(RuntimeInput),
+    /// Malformed or ABI-inconsistent input, or input that fails IR verification.
+    InvalidInput(InputError),
+    /// The caller's descriptor or request is inconsistent.
+    InvalidDescriptor(DescriptorError),
+    /// A deterministic cap was exceeded (structural caps, work units, ledger bytes). Permanent for
+    /// the input.
+    LimitExceeded(Limit),
+    /// The wall-clock deadline passed. Transient: never cached or recorded as an observation.
+    Budget(BudgetExceeded),
+    /// The caller cancelled the attempt. Transient.
+    Cancelled,
+    /// An internal invariant failed: builder error, verifier failure, or a caught panic.
+    Internal(InternalError),
+}
+
+/// Whether retrying the same request can succeed.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Retry {
+    /// The outcome is deterministic for this request.
+    Never,
+    /// The outcome depended on host load or the caller (deadline, cancellation).
+    Later,
+}
+
+/// What the outcome is permanent for, i.e. which cache key may memoize it.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Permanence {
+    /// Permanent for the input (bytes, entry, constants, descriptor) on every device.
+    Input,
+    /// Permanent for the input on this device profile.
+    InputAndDevice,
+    /// Not permanent; never memoize.
+    Never,
+}
+
+impl Error {
+    /// A refusal ([`Error::Unsupported`]) tied to render pipeline attachment `attachment`
+    /// ([`Unsupported::at_attachment`]); any other error as it is.
+    pub(crate) fn at_attachment(self, attachment: Attachment) -> Error {
+        match self {
+            Error::Unsupported(u) => Error::Unsupported(u.at_attachment(attachment)),
+            other => other,
+        }
+    }
+
+    /// Whether retrying the same request can succeed: `Cancelled`, `Budget{Time}`, and
+    /// `Internal{AllocationFailed}` are `Later`. The last is the host allocator failing a
+    /// reservation the byte ledger admitted, which depends on the host's memory, not on the input.
+    pub fn retry(&self) -> Retry {
+        match self {
+            Error::Cancelled | Error::Budget(_) => Retry::Later,
+            Error::Internal(internal) if internal.kind == InternalKind::AllocationFailed => {
+                Retry::Later
+            }
+            Error::Unsupported(_)
+            | Error::NeedsInput(_)
+            | Error::InvalidInput(_)
+            | Error::InvalidDescriptor(_)
+            | Error::LimitExceeded(_)
+            | Error::Internal(_) => Retry::Never,
+        }
+    }
+
+    /// What this outcome is permanent for. Transient outcomes (those [`Error::retry`] calls
+    /// `Later`) are `Never` and may not enter a memo, artifact cache, or validation observation.
+    pub fn is_permanent_for(&self) -> Permanence {
+        match self {
+            Error::Cancelled | Error::Budget(_) => Permanence::Never,
+            Error::Internal(internal) if internal.kind == InternalKind::AllocationFailed => {
+                Permanence::Never
+            }
+            Error::Unsupported(u) => match u.needs {
+                Needs::AnyOf(_) => Permanence::InputAndDevice,
+                Needs::NotImplemented | Needs::NotRepresentable => Permanence::Input,
+                Needs::DriverDefect(_)
+                | Needs::RuntimeDriverDefect(_)
+                | Needs::UnmeasuredDeviation(_)
+                | Needs::MetalGpuFamily(_)
+                | Needs::MetalRefuses(_) => Permanence::InputAndDevice,
+            },
+            Error::NeedsInput(_)
+            | Error::InvalidInput(_)
+            | Error::InvalidDescriptor(_)
+            | Error::LimitExceeded(_) => Permanence::Input,
+            // The emitted module depends on the profile, so an invariant failure is keyed on both.
+            Error::Internal(_) => Permanence::InputAndDevice,
+        }
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::Unsupported(u) => write!(f, "unsupported: {u}"),
+            Error::NeedsInput(i) => write!(f, "needs pipeline input: {i:?}"),
+            Error::InvalidInput(e) => write!(f, "invalid input: {e}"),
+            Error::InvalidDescriptor(e) => write!(f, "invalid descriptor: {e:?}"),
+            Error::LimitExceeded(l) => write!(f, "limit exceeded: {l:?}"),
+            Error::Budget(b) => write!(f, "budget exceeded: {b:?}"),
+            Error::Cancelled => f.write_str("cancelled"),
+            Error::Internal(e) => write!(f, "internal error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+impl From<InputError> for Error {
+    /// The mapping of input error kinds to outcome classes, which the front end's own `Error`
+    /// makes.
+    fn from(e: InputError) -> Error {
+        Error::from(crate::air::error::Error::from(e))
+    }
+}
+
+impl From<crate::air::error::Error> for Error {
+    /// The front end's outcome, one variant to one variant: its refusals are
+    /// [`Needs::NotImplemented`], and an inconsistent request is an inconsistent descriptor.
+    fn from(e: crate::air::error::Error) -> Error {
+        use crate::air::error::Error as Air;
+        match e {
+            Air::Unsupported(u) => Error::Unsupported(u.into()),
+            Air::NeedsInput(i) => Error::NeedsInput(i.into()),
+            Air::InvalidInput(e) => Error::InvalidInput(e),
+            Air::InvalidRequest(r) => Error::InvalidDescriptor(r.into()),
+            Air::LimitExceeded(l) => Error::LimitExceeded(l),
+            Air::Budget(b) => Error::Budget(b),
+            Air::Cancelled => Error::Cancelled,
+            Air::Internal(e) => Error::Internal(e),
+        }
+    }
+}
+
+impl From<crate::air::error::Unsupported> for Unsupported {
+    fn from(u: crate::air::error::Unsupported) -> Unsupported {
+        let crate::air::error::Unsupported {
+            feature,
+            location,
+            symbol,
+        } = u;
+        Unsupported {
+            feature: feature.into(),
+            needs: Needs::NotImplemented,
+            location,
+            symbol,
+        }
+    }
+}
+
+impl From<crate::air::error::Unsupported> for Error {
+    fn from(u: crate::air::error::Unsupported) -> Error {
+        Error::Unsupported(u.into())
+    }
+}
+
+impl From<crate::air::error::Feature> for Feature {
+    /// Each front-end feature is the translator's feature of the same name.
+    fn from(f: crate::air::error::Feature) -> Feature {
+        use crate::air::error::Feature as Air;
+        match f {
+            Air::LibraryKind(kind) => Feature::LibraryKind(kind),
+            Air::Stage(tag) => Feature::Stage(tag),
+            Air::AddressSpace(space) => Feature::AddressSpace(space),
+            Air::ModuleRecord { code } => Feature::ModuleRecord { code },
+            Air::Instruction { code } => Feature::Instruction { code },
+            Air::Type { code } => Feature::Type { code },
+            Air::CallingConvention(cc) => Feature::CallingConvention(cc),
+            Air::UnknownIntrinsic => Feature::UnknownIntrinsic,
+            Air::StaticInitializer => Feature::StaticInitializer,
+            Air::Recursion => Feature::Recursion,
+            Air::DynamicCall => Feature::DynamicCall,
+            Air::Linking => Feature::Linking,
+            Air::Constant { code } => Feature::Constant { code },
+            Air::Attribute { kind } => Feature::Attribute { kind },
+            Air::BitcodeRecord { block, code } => Feature::BitcodeRecord { block, code },
+            Air::SyncScope => Feature::SyncScope,
+            Air::DirectCall => Feature::DirectCall,
+            Air::FunctionConstantArgument => Feature::FunctionConstantArgument,
+            Air::IntersectionFunctionTable => Feature::IntersectionFunctionTable,
+            Air::Tessellation => Feature::Tessellation,
+            Air::RayTracing => Feature::RayTracing,
+            Air::Tensors => Feature::Tensors,
+            Air::GpuEncodedIndirectCommands => Feature::GpuEncodedIndirectCommands,
+            Air::ProgramScopeBinding => Feature::ProgramScopeBinding,
+        }
+    }
+}
+
+impl From<MissingInput> for RuntimeInput {
+    fn from(i: MissingInput) -> RuntimeInput {
+        match i {
+            MissingInput::FunctionConstant { index } => RuntimeInput::FunctionConstant { index },
+            MissingInput::LinkedFunction { symbol } => RuntimeInput::LinkedFunction { symbol },
+            MissingInput::VisibleFunctionTable { buffer } => {
+                RuntimeInput::VisibleFunctionTable { buffer }
+            }
+            MissingInput::DynamicSymbol { symbol } => RuntimeInput::DynamicSymbol { symbol },
+            MissingInput::DynamicLibrary { install_name } => {
+                RuntimeInput::DynamicLibrary { install_name }
+            }
+        }
+    }
+}
+
+impl From<RequestError> for DescriptorError {
+    fn from(r: RequestError) -> DescriptorError {
+        match r {
+            RequestError::EntryNotFound {
+                requested,
+                available,
+            } => DescriptorError::EntryNotFound {
+                requested,
+                available,
+            },
+            RequestError::AmbiguousEntry { requested } => {
+                DescriptorError::AmbiguousEntry { requested }
+            }
+            RequestError::FunctionConstantIndex { index } => {
+                DescriptorError::FunctionConstantIndex { index }
+            }
+            RequestError::FunctionConstantType { index } => {
+                DescriptorError::FunctionConstantType { index }
+            }
+            RequestError::DuplicateFunctionConstant { index } => {
+                DescriptorError::DuplicateFunctionConstant { index }
+            }
+            RequestError::UnknownEnumValue { ty, value } => {
+                DescriptorError::UnknownEnumValue { ty, value }
+            }
+            RequestError::LinkedFunction { name, problem } => {
+                DescriptorError::LinkedFunction { name, problem }
+            }
+            RequestError::DuplicateColorOutput { color, index } => {
+                DescriptorError::DuplicateColorOutput { color, index }
+            }
+        }
+    }
+}
+
+impl From<Unsupported> for Error {
+    fn from(u: Unsupported) -> Error {
+        Error::Unsupported(u)
+    }
+}
+
+/// A typed refusal: which Metal-level feature, and what would make it translatable.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unsupported {
+    pub feature: Feature,
+    pub needs: Needs,
+    pub location: Option<Location>,
+    /// The symbol the refused construct names, for diagnostics only: an unknown intrinsic, the
+    /// callee of a call that needs linking, or the pixel format a refused texture, view or copy
+    /// holds ([`naming_format`](Self::naming_format)). Opaque like every [`DiagName`].
+    pub symbol: Option<DiagName>,
+}
+
+impl Unsupported {
+    /// Not implemented by this translator version on any device.
+    pub fn not_implemented(feature: Feature) -> Unsupported {
+        Unsupported {
+            feature,
+            needs: Needs::NotImplemented,
+            location: None,
+            symbol: None,
+        }
+    }
+
+    /// No Vulkan 1.2+ mechanism exists for these semantics.
+    pub fn not_representable(feature: Feature) -> Unsupported {
+        Unsupported {
+            feature,
+            needs: Needs::NotRepresentable,
+            location: None,
+            symbol: None,
+        }
+    }
+
+    /// Translatable on a device whose driver does not have `defect`, which this device's does.
+    pub fn driver_defect(feature: Feature, defect: DriverWorkaround) -> Unsupported {
+        Unsupported {
+            feature,
+            needs: Needs::DriverDefect(defect),
+            location: None,
+            symbol: None,
+        }
+    }
+
+    /// Run by the runtime on a device whose driver does not have `defect`, which this device's
+    /// does.
+    pub fn runtime_driver_defect(feature: Feature, defect: RuntimeDriverDefect) -> Unsupported {
+        Unsupported {
+            feature,
+            needs: Needs::RuntimeDriverDefect(defect),
+            location: None,
+            symbol: None,
+        }
+    }
+
+    /// Refused as Metal refuses it on a device that does not claim the Metal GPU `family`
+    /// (`MTLGPUFamily`'s raw value), as this device does not ([`Needs::MetalGpuFamily`]).
+    pub fn metal_gpu_family(feature: Feature, family: i64) -> Unsupported {
+        Unsupported {
+            feature,
+            needs: Needs::MetalGpuFamily(family),
+            location: None,
+            symbol: None,
+        }
+    }
+
+    /// Translatable on a device whose description states `deviation`'s rule, which this
+    /// device's driver departs by on a release no measurement covers.
+    pub fn unmeasured_deviation(feature: Feature, deviation: DriverDeviation) -> Unsupported {
+        Unsupported {
+            feature,
+            needs: Needs::UnmeasuredDeviation(deviation),
+            location: None,
+            symbol: None,
+        }
+    }
+
+    /// Translatable if the device had every capability of any one alternative.
+    pub fn needs_any_of(feature: Feature, alternatives: Vec<Vec<Capability>>) -> Unsupported {
+        Unsupported {
+            feature,
+            needs: Needs::AnyOf(alternatives),
+            location: None,
+            symbol: None,
+        }
+    }
+
+    /// Translatable if the device had this one capability.
+    pub fn needs(feature: Feature, capability: Capability) -> Unsupported {
+        Unsupported::needs_any_of(feature, vec![vec![capability]])
+    }
+
+    /// Attach the input location.
+    pub fn at(mut self, location: Location) -> Unsupported {
+        self.location = Some(location);
+        self
+    }
+
+    /// Tie the refusal to render pipeline attachment `attachment`, whose state it refuses: its
+    /// location gains the attachment, the render pipeline's descriptor where it has none yet. A
+    /// refusal already tied to an attachment keeps it.
+    pub(crate) fn at_attachment(self, attachment: Attachment) -> Unsupported {
+        let location = match &self.location {
+            Some(at) if at.attachment().is_some() => return self,
+            Some(at) => at.clone(),
+            None => Location::render_pipeline(),
+        };
+        self.at(location.with_attachment(attachment))
+    }
+
+    /// Whether the refusal is placed in the input: not where it has no location, nor where its
+    /// location is only the render pipeline's descriptor ([`Location::render_pipeline`]), which a
+    /// stage compiled under the pipeline places at its own function or metadata
+    /// ([`Unsupported::placed_at`]).
+    pub(crate) fn is_placed(&self) -> bool {
+        self.location
+            .as_ref()
+            .is_some_and(|at| !at.is_render_pipeline())
+    }
+
+    /// Place the refusal at `at`, keeping the render pipeline attachment it is tied to.
+    pub(crate) fn placed_at(self, at: Location) -> Unsupported {
+        let at = match self.location.as_ref().and_then(Location::attachment) {
+            Some(attachment) => at.with_attachment(attachment),
+            None => at,
+        };
+        self.at(at)
+    }
+
+    /// Name the symbol the refused construct names (diagnostics only).
+    pub fn naming(mut self, symbol: DiagName) -> Unsupported {
+        self.symbol = Some(symbol);
+        self
+    }
+
+    /// Name the pixel format a refused texture, view, copy or attachment holds, by its Metal
+    /// enumerator name (`MTLPixelFormatRGB10A8_2P_XR10`), as [`symbol`](Self::symbol)
+    /// (diagnostics only).
+    pub fn naming_format(self, pixel_format: PixelFormat) -> Unsupported {
+        self.naming(DiagName::new(pixel_format.name()))
+    }
+}
+
+impl fmt::Display for Unsupported {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self.feature)?;
+        if let Some(symbol) = &self.symbol {
+            write!(f, " ({symbol})")?;
+        }
+        write!(f, "; needs {:?}", self.needs)?;
+        if let Some(at) = &self.location {
+            write!(f, " at {at}")?;
+        }
+        Ok(())
+    }
+}
+
+/// What would make a refused input translatable.
+///
+/// A single device feature or extension (`Needs::Feature(..)`, `Needs::Extension(..)` in prose) is
+/// `AnyOf` with one one-capability alternative; see [`Unsupported::needs`].
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Needs {
+    /// Enabling every capability of any one alternative would make it translatable.
+    AnyOf(Vec<Vec<Capability>>),
+    /// Not implemented by this translator version on any device.
+    NotImplemented,
+    /// No Vulkan 1.2+ mechanism exists for these semantics.
+    NotRepresentable,
+    /// The mechanism exists, but the device's driver is measured to run it wrong: the profile
+    /// carries the named [`DriverWorkaround`], derived from the driver's identity, and the
+    /// translation refuses rather than hand back output the driver would change. A device
+    /// without the defect translates the input.
+    DriverDefect(DriverWorkaround),
+    /// The mechanism exists, but the device's driver runs wrong a command the runtime would
+    /// record for itself: the runtime refuses rather than hand back what the driver would
+    /// change. A device without the defect runs the input.
+    RuntimeDriverDefect(RuntimeDriverDefect),
+    /// The mechanism exists, but the device's driver departs from the specifications in it by a
+    /// rule the device's description does not state: the rule is measured on other releases of
+    /// the driver, and a description infers it only for those. The translation refuses rather
+    /// than assume another release's rule. A description that states the named deviation (a
+    /// measured release) translates the input.
+    UnmeasuredDeviation(DriverDeviation),
+    /// A device that claims this Metal GPU family (`MTLGPUFamily`'s raw value, 1010 for Apple10),
+    /// which the device does not: Metal itself refuses the input on a device without the family,
+    /// so the refusal is Metal's own answer rather than a gap. Only the runtime refuses so, by the
+    /// families its device claims (`supportsFamily:`); no compile profile, cache key or digest
+    /// holds it.
+    MetalGpuFamily(i64),
+    /// Metal itself refuses this form on every device named here, each as its GPU and macOS
+    /// version (`"Apple M4, macOS 27.0.1"`; the devices it was measured on), so the refusal is
+    /// Metal's own answer rather than a gap. No GPU family is known to take the form. Only the
+    /// runtime refuses so, on a device whose Metal answer the measured ones stand for (one that
+    /// does not claim a family past theirs); elsewhere the form is [`Needs::NotImplemented`]. No
+    /// compile profile, cache key or digest holds it.
+    MetalRefuses(&'static [&'static str]),
+}
+
+/// A departure of a driver from the specifications that translation relies on, measured per
+/// driver and release (`device::driver_facts`): the profile takes it on a measured release, and on
+/// a later one with `PrecisionNote::BeyondMeasuredDeviation` recorded
+/// (`ProfileFields::deviations_beyond`); elsewhere the translation takes its conservative route,
+/// or names the deviation in [`Needs::UnmeasuredDeviation`] where none exists.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DriverDeviation {
+    /// How the driver hands a kernel's cube sample's explicit gradients to the GPU
+    /// (`ProfileFields::cube_gradients`'s compute route, `CubeGradientRoute::Unmeasured`): as
+    /// given, to Metal's own reading. Unmeasured, an isotropic sample keeps the form every route
+    /// reads alike, and an anisotropic constexpr one is refused. A vertex or fragment function's
+    /// route is [`DriverDeviation::GraphicsCubeGradientRoute`].
+    CubeGradientRoute,
+    /// The device runs each 32 consecutive invocations of a compute workgroup in lockstep, as
+    /// an Apple GPU runs a Metal simdgroup (`VkProperty::SimdgroupLockstep`). Unmeasured, a kernel
+    /// that needs that order takes emulated simdgroups, exact.
+    SimdgroupLockstep,
+    /// The device computes each `GLSL.std.450` function and `OpFDiv` of `float` as Metal's own,
+    /// in the math mode Metal compiles the module with (`FloatFunctions::Metal`). Unmeasured, the
+    /// translation computes the functions itself, within Apple's bound.
+    MetalFloatFunctions,
+    /// The device's `float` and `half` arithmetic answers Metal's canonical NaN
+    /// (`NanEncoding::MetalCanonical`). Unmeasured, the module selects Metal's NaN itself where a
+    /// result's bits are observed, exact.
+    MetalCanonicalNans,
+    /// The device samples, filters and converts texels through Metal's own sampler
+    /// (`VkProperty::MetalSampler`). Unmeasured, the translation emulates Metal's sampler where its
+    /// emulations reach, and notes the rest.
+    MetalSampler,
+    /// How the driver hands a vertex or fragment function's cube sample's explicit gradients to
+    /// the GPU (`ProfileFields::cube_gradients`'s graphics route): through SPIRV-Cross's
+    /// `spvGradientCube`, whose result the GPU reads by its own anisotropic rule, which differs
+    /// between Apple's GPUs, so the fact is measured per GPU. Unmeasured, an isotropic sample keeps
+    /// the form every route reads alike, and an anisotropic constexpr one is refused.
+    GraphicsCubeGradientRoute,
+    /// The device stores a fragment function's float color output into a normalized, sRGB or
+    /// half-float attachment as Metal does (`VkProperty::MetalColorWrites`): the exact product
+    /// rounded to nearest, Metal's twelve-bit sRGB encode, and `half` rounded toward zero.
+    /// Unmeasured, the fragment function rounds each such output by Metal's rule itself and writes
+    /// the code's exact value (`LoweringInputs::color_writes`), exact.
+    MetalColorWrites,
+    /// The device stores the NaN a fragment function's rounding writes for a `float` output to a
+    /// half-float color channel (`0x7fc00000`) as `0x7e00`, the NaN Metal stores for any `float`
+    /// NaN (`VkProperty::MetalFloatColorNans`). Unmeasured, a module that writes a `float` output
+    /// to such a channel records `PrecisionNote::DeviceNanEncoding`.
+    MetalFloatColorNans,
+    /// The device stores a `half` NaN a fragment function writes (held widened to `float`, its
+    /// payload in the top bits of the significand) to a half-float color channel as its own
+    /// bits, as Metal stores a `half` output's NaN (`VkProperty::MetalHalfColorNans`). Unmeasured,
+    /// a module that writes a `half` output to such a channel records
+    /// `PrecisionNote::DeviceNanEncoding`.
+    MetalHalfColorNans,
+    /// The device stores a 16-bit float color output to a half-float color channel as its bits,
+    /// a NaN's included (`VkProperty::HalfColorOutputBits`). Where the profile also declares 16-bit
+    /// outputs (`storageInputOutput16`, with `shaderInt16` and `shaderFloat16`) and the device does
+    /// not store the output's NaN as Metal does, a fragment function writes an output to an
+    /// attachment whose every written channel is half-float as the bits of the half Metal stores,
+    /// through a 16-bit output, and records no `PrecisionNote::DeviceNanEncoding` for it.
+    /// Unmeasured, the output stays 32-bit and records the note.
+    HalfColorOutputBits,
+    /// The device's `GLSL.std.450 Fma` on 16-bit floats is Metal's own `half` `fma`, which
+    /// rounds the exact `a * b + c` once (`VkProperty::MetalHalfFma`). Where the profile also has
+    /// `shaderFloat16`, a `half` fused multiply-add converts its operands (each a `half`, so
+    /// exactly) to 16 bits, takes the device's `Fma` and widens its result. Unmeasured, it computes
+    /// the sum in `float` and rounds it to `half` itself, exact.
+    MetalHalfFma,
+    /// The device's `float` arithmetic reads an `f32` denormal operand as the zero of its sign
+    /// and flushes a denormal result to one, as Metal does (`VkProperty::MetalFloatDenormals`):
+    /// `OpFAdd`, `OpFSub`, `OpFMul`, `OpFmaKHR`, `OpDot`, the comparisons, and `GLSL.std.450`'s
+    /// `Ldexp`, `Sqrt`, `InverseSqrt`, `Trunc` and `RoundEven`. Unmeasured, the module reads such
+    /// operands and flushes such results itself, by their exponent field, exact.
+    MetalFloatDenormals,
+    /// The device's `OpQuantizeToF16` rounds an `f32` below 65520 in magnitude to nearest even,
+    /// as Metal's conversion to `half` does, so that a value from 65504 up to 65520 is 65504, not
+    /// infinity (`VkProperty::MetalHalfQuantize`). Vulkan leaves the quantize's rounding mode to
+    /// the device. Unmeasured, the module rounds on the `f32`'s bits in integer arithmetic, which
+    /// is Metal's conversion on every device (`QuantizeForm::Integer`).
+    MetalHalfQuantize,
+    /// The device's `OpFConvert` from 32-bit to 16-bit floats, of the result of an `OpFAdd`
+    /// decorated `NoContraction` (which its compiler cannot fold the conversion into), is Metal's
+    /// conversion of a `float` to `half`: it rounds to nearest even on the half grid, half
+    /// denormals included, keeps the sign of a zero and gives infinity from 65520 up
+    /// (`VkProperty::MetalHalfConversion`). Vulkan leaves the conversion's rounding mode, and
+    /// whether it keeps a 16-bit denormal, to the device; a conversion folded into the
+    /// instruction computing its operand rounds otherwise on MoltenVK (toward zero). Where the
+    /// profile also has `shaderFloat16`, a `half` rounding is that conversion of `x + -0.0` and its
+    /// widening (`QuantizeForm::Converted`), with no `OpQuantizeToF16` and no denormal arithmetic
+    /// beside it. Unmeasured, the module rounds through the measured quantize (`MetalHalfQuantize`)
+    /// or on the bits in integer arithmetic, exact either way.
+    MetalHalfConversion,
+    /// The device reads a center-sampled varying (a smooth input decorated neither `Centroid`
+    /// nor `Sample`) of a multisampled pipeline at the pixel center in every fragment
+    /// invocation, a sample-rate one's included, as Metal reads it
+    /// (`VkProperty::MetalCenterVaryings`). Vulkan evaluates such an input at an
+    /// implementation-defined position in the area the invocation shades. Where the profile takes
+    /// it, the input's plain read is its pixel form (`StageIo::varyings_at_pixel`), with no
+    /// `InterpolateAtOffset`. Unmeasured, the pixel form is `InterpolateAtOffset` at offset 0 where
+    /// that reads from the center (`VkProperty::InterpolateAtOffsetCentered`), and a function that
+    /// runs per sample is refused elsewhere.
+    MetalCenterVaryings,
+    /// The device stores a fragment function's `float` color output into a half-float channel,
+    /// or one of `RG11B10Float`'s unsigned 11- and 10-bit floats, as Metal does for every value
+    /// but a NaN, plain and through blending with factors one and zero
+    /// (`VkProperty::MetalSmallFloatColorWrites`): rounded toward zero, a finite value past the
+    /// largest stored as the largest, an infinity as itself, and where unsigned a negative value
+    /// as 0. Where the profile takes it, the function writes such an output as computed, a NaN
+    /// chosen as the `f32` NaN `0x7fc00000` (the NaN the rounding writes, whose store each driver
+    /// is measured by) except to a half-float channel of a device that stores its NaNs otherwise
+    /// (`PrecisionNote::DeviceNanEncoding`). Unmeasured, the function rounds each such output by
+    /// Metal's rule itself (`LoweringInputs::color_writes`), exact.
+    MetalSmallFloatColorWrites,
+    /// The device stores a fragment function's float color output into a 16-bit unorm or snorm
+    /// channel as Metal does, the exact product with the format's largest code rounded to
+    /// nearest, for every value, a NaN's included, plain and through blending with factors one
+    /// and zero, except a blended snorm channel's NaN, which Metal stores as -1.0's code
+    /// (`VkProperty::MetalNorm16ColorWrites`). Where the profile takes it, the function writes such
+    /// an output as computed, a blended snorm channel's NaN chosen as -1.0. Unmeasured, the
+    /// function rounds each such output by Metal's rule itself, exact.
+    MetalNorm16ColorWrites,
+    /// The device's `GLSL.std.450` `NMin`, `NMax` and `NClamp` on 32-bit floats are Metal's own
+    /// `fmin`, `fmax` and `clamp` (`VkProperty::MetalMinMax`): a NaN operand loses, two NaNs and a
+    /// tie answer the second operand's bits, an `f32` denormal compares as a zero but is returned
+    /// itself, and `clamp(x, lo, hi)` is `fmin(fmax(x, lo), hi)`, in every math mode, of every
+    /// operand class, and of every `half` held widened. Where the profile takes it, Metal's `fmin`,
+    /// `fmax`, `min3`, `max3` and `clamp` on `float` and `half` are those instructions. Unmeasured,
+    /// the module picks the operand itself (`math::metal_min_max`), by NaN tests and comparisons,
+    /// exact.
+    MetalMinMax,
+    /// The device's 16-bit `OpFAdd` and `OpFSub` decorated `NoContraction`, and its 16-bit
+    /// `Fma(a, b, -0.0)` decorated `NoContraction`, are Metal's own `half` `+`, `-` and `*`
+    /// (`VkProperty::MetalHalfArithmetic`), with operands narrowed from `float` and the result
+    /// widened back: the exact result rounded once to nearest even on the `half` grid, `half`
+    /// denormals kept, an exact zero sum `+0` unless both addends are `-0`, and every NaN result
+    /// `0x7E00`, in every math mode. Where the profile also has `shaderFloat16`, a `half` `fadd`,
+    /// `fsub` or `fmul` converts its operands (each a `half`, so exactly) to 16 bits, takes that
+    /// kept instruction and widens its result. Unmeasured, it computes the result in `float` and
+    /// rounds it to `half` itself, exact.
+    MetalHalfArithmetic,
+    /// The device stores every `float` but a NaN that a shader writes to a half-float storage
+    /// image (`R16Float`, `RG16Float`, `RGBA16Float`; a storage texel buffer of one too) as Metal
+    /// stores a kernel's write (`VkProperty::MetalHalfStorageWrites`): rounded toward zero, a
+    /// finite value past 65504 stored as 65504, an infinity as itself. Where the profile takes it,
+    /// such a write is the value as computed, its NaN as [`MetalHalfStorageNans`] states
+    /// (`StorageImageClass::Identity` or `HalfQuietNan`). Unmeasured, the shader rounds each
+    /// written channel by Metal's rule itself (`StorageImageClass::HalfTowardZero`), exact.
+    ///
+    /// [`MetalHalfStorageNans`]: DriverDeviation::MetalHalfStorageNans
+    MetalHalfStorageWrites,
+    /// The device stores every NaN a shader writes to a half-float storage image as Metal stores
+    /// a kernel's, `0x7e00` (`VkProperty::MetalHalfStorageNans`). With
+    /// [`MetalHalfStorageWrites`](DriverDeviation::MetalHalfStorageWrites), such a write is the
+    /// value as computed (`StorageImageClass::Identity`); without it, the shader writes a NaN as
+    /// `0x7fc00000`.
+    MetalHalfStorageNans,
+    /// The device stores the NaN `0x7fc00000` a shader writes to a half-float storage image as
+    /// Metal's `0x7e00` (`VkProperty::MetalFloatStorageNans`): the NaN a write the shader rounds
+    /// (`StorageImageClass::HalfTowardZero`) or quiets (`HalfQuietNan`) stores. Unmeasured, such a
+    /// write records `PrecisionNote::DeviceNanEncoding`.
+    MetalFloatStorageNans,
+    /// The device's fragment subgroups are Metal's simdgroups
+    /// (`VkProperty::MetalFragmentSimdgroups`): the driver hands the fragment function to Metal, so
+    /// a fragment subgroup holds the pixels (at sample rate, the samples) Apple's rasterizer packs
+    /// into one simdgroup, and its `SubgroupLocalInvocationId` is Metal's
+    /// `thread_index_in_simdgroup`. Where the profile takes it, a fragment function's
+    /// `[[thread_index_in_simdgroup]]` is that builtin. Unmeasured, the lane and the simdgroup
+    /// operations run over the device's own grouping, which Metal does not rule out, and record
+    /// `PrecisionNote::FragmentSimdgroupGrouping`: which pixels share a simdgroup, and in what
+    /// order, is the rasterizer's packing, which nothing in Vulkan states or pins.
+    MetalFragmentSimdgroups,
+    /// The device runs a vertex function's subgroup operations as Metal runs its simdgroup
+    /// functions, though its `subgroupSupportedStages` leaves the vertex stage out
+    /// (`VkProperty::MetalVertexSimdgroups`): the driver hands the vertex function to Metal, which
+    /// runs it in simdgroups of 32 consecutive vertices. Where the profile takes it, the profile's
+    /// vertex stage has subgroups, at the device's subgroup size, of the operation classes measured
+    /// exact there: basic, vote, arithmetic, ballot and shuffle. A vertex module that uses them
+    /// requires the property in place of `VkProperty::SubgroupStage(Vertex)`. Unmeasured, the stage
+    /// has none, as the device states.
+    MetalVertexSimdgroups,
+    /// In a fragment invocation of a multisampled pipeline that runs once per sample, the device
+    /// gives `FragCoord.z` at the pixel centre, the draw's depth bias included, as Metal gives
+    /// `[[position]].z`, reads a no-perspective varying at the pixel centre where it is read as it
+    /// is and at the sample through `InterpolateAtSample`, and its depth test stores each sample's
+    /// own depth (`VkProperty::CenterFragCoordDepth`). Where the profile takes it, a fragment
+    /// function that runs its draw's depth test itself at more than one sample computes each
+    /// sample's depth: its vertex function's window depth read at the sample, plus `FragCoord.z`
+    /// less that varying read at the centre, which carries the bias
+    /// (`PrecisionNote::ComputedSampleDepth`). Unmeasured, that test is refused at more than one
+    /// sample.
+    CenterFragCoordDepth,
+    /// In a fragment invocation of a multisampled pipeline that runs once per sample, the device
+    /// gives `FragCoord.z` at the invocation's sample, the draw's depth bias included: the depth
+    /// its own depth test stores at that sample (`VkProperty::SampleFragCoordDepth`). Where the
+    /// profile takes it, a fragment function that runs its draw's depth test itself at more than
+    /// one sample tests `FragCoord.z` at each sample, exact as at one sample. Unmeasured, that test
+    /// is refused at more than one sample, or computes each sample's depth where the profile takes
+    /// [`DriverDeviation::CenterFragCoordDepth`].
+    SampleFragCoordDepth,
+    /// The device stores a `half` texel's write as Metal stores it once the shader hands it the
+    /// half widened to `float` in a 16-bit float storage image, and the NaN `0x7fc00000` in a
+    /// packed small float one (`VkProperty::MetalHalfTexelWrites`): the half's own bits, a
+    /// signalling NaN's unquieted, in the first, and the format's canonical NaN in the second.
+    /// Where the profile takes it, such a write records no `PrecisionNote::DeviceNanEncoding`.
+    /// Unmeasured, it records the note, and the runtime announces it at the bind of such a
+    /// texture to a slot whose storage choice declares no format.
+    MetalHalfTexelWrites,
+    /// The device stores a `float` texel a shader writes to a unorm or snorm storage image (not
+    /// an sRGB one; a `half` texel's, widened, alike) as Metal's code
+    /// (`VkProperty::MetalNormStorageWrites`): each channel's value clamped to its range (a NaN 0)
+    /// times its maximum code exactly, rounded to nearest with a tie away from zero, a packed
+    /// 16-bit format's channel likewise and its 1-bit channel 1 only above one half. Where the
+    /// profile takes it, such a write is left to the device. Unmeasured, the shader rounds each
+    /// channel to Metal's code by the bound format's class.
+    MetalNormStorageWrites,
+    /// The device's linear filter of an 8-bit unsigned normalized texture (`R8Unorm`,
+    /// `RG8Unorm`, `RGBA8Unorm`, `BGRA8Unorm`), at the coordinate of the centre of Metal's 1/256
+    /// footprint step, lands within one code (1/255) of Metal's on every channel
+    /// (`VkProperty::Unorm8LinearFilter`): a bounded deviation the owner accepted, not an exact
+    /// equality. Where the profile takes it, such a 2D sample through a constexpr or runtime
+    /// sampler slot is the device's at that coordinate, under
+    /// `PrecisionNote::DeviceUnorm8LinearFilter` (`lower::sampler::native`). Unmeasured, the sample
+    /// takes Metal's filter, emulated exactly. A profile takes it only under a policy of
+    /// `Unorm8LinearFilterPolicy::DeviceWithinOneCode`; the default policy keeps Metal's filter
+    /// exact on every device.
+    Unorm8LinearFilter,
+}
+
+/// A defect of a device's driver in a command the runtime records for itself, never in a
+/// translation (which [`DriverWorkaround`] covers). The runtime keys it on the driver's
+/// identity and release (`driverID`, `driverVersion`; `runtime::driver_defects`), lists the
+/// device's in its properties, and takes another way where an exact one exists, else refuses,
+/// what the driver would run wrong ([`Needs::RuntimeDriverDefect`]). No compile profile, cache
+/// key or digest holds it.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RuntimeDriverDefect {
+    /// `vkCmdCopyImage` between a multisampled depth/stencil image and a multisampled colour
+    /// image (maintenance8's depth-stencil/colour copies) does not copy every sample, or loses
+    /// the device. The runtime copies so the separate multisampled depth and stencil textures
+    /// (`Feature::SeparateMultisampledDepthStencil`) and the shadow of a multisampled combined
+    /// depth/stencil attachment's stencil a fragment function writes without stencil export
+    /// (`Feature::StencilExport`).
+    MultisampledDepthStencilColourCopies,
+    /// A primitive whose normalized depths reach past `[0, 1]` rasterizes inexact depths, where
+    /// Metal's own viewport of the same depth range draws them exactly. The runtime draws a
+    /// viewport depth range past `[0, 1]` that the device does not take natively through such
+    /// depths (the vertex stage's compensation, `Feature::ViewportDepthRange`).
+    NormalizedDepthPastUnitRange,
+    /// A compressed image's memory requirements answer a size short of the memory the GPU
+    /// writes its compression data through, so a resource bound right after the image loses what
+    /// a command buffer that also writes the image writes into its first bytes. Nothing is
+    /// refused: the runtime rounds each image's size up past that memory (whole 256-byte chunks
+    /// of the aux map's on ANV's Xe-LP GPUs), so none of its resources lies there.
+    ImageSizeShortOfCompressionData,
+    /// A render pass's depth/stencil resolve (`VkSubpassDescriptionDepthStencilResolve`) reads
+    /// its attachment's image, and writes its resolve attachment's, from their first array layer
+    /// and mip level, whatever layer and level their views begin at. Nothing is refused but a
+    /// memoryless attachment at another layer: the runtime resolves into a scratch image copied
+    /// where the resolve belongs, and from a copy of an attachment at another layer.
+    DepthStencilResolveFirstSubresource,
+    /// A 2D view of a 3D image bound to lazily allocated memory (a memoryless 3D texture's depth
+    /// plane attached to a pass) crashes the process: the driver makes the view by aliasing the
+    /// image's memory through a placement heap, which lazily allocated memory lacks. Nothing is
+    /// refused: the runtime gives such an image device-local memory, where, as in a memoryless
+    /// texture, nothing a pass leaves is observable.
+    LazilyAllocatedVolumePlaneViews,
+    /// A `VkPipelineCache` made from saved data compiles every shader the data holds before
+    /// `vkCreatePipelineCache` returns, used or not, so a device seeded with a large cache waits
+    /// for all of them at its creation. Nothing is refused: the runtime neither seeds nor saves
+    /// the driver's pipeline cache there, and each pipeline compiles its own shaders when it is
+    /// made (the OS's shader cache, keyed by the shader's source, keeps what an earlier process
+    /// compiled).
+    PipelineCacheDataCompiledAtLoad,
+    /// A copy into or out of an image of `B10G11R11_UFLOAT_PACK32` or `E5B9G9R9_UFLOAT_PACK32`
+    /// that the driver keeps losslessly compressed rewrites some texels' bytes, as Metal's GPU
+    /// blits of such a texture do (its NaNs made quiet, its shared exponents renormalized),
+    /// where Metal's CPU copies keep them. Nothing is refused: the runtime makes the image of a
+    /// texture a CPU copy can reach uncompressed there, and rewrites what its blits write by
+    /// Metal's rule itself.
+    CompressedImageCopiesRewriteTexels,
+    /// A copy into a multisampled image of a float format draws the samples through that format,
+    /// so a NaN in a 16-bit float channel lands as the device's own NaN, its sign and payload
+    /// lost, where Vulkan's copies keep every bit. Nothing is refused: the runtime writes a
+    /// multisampled attachment's NaN clear through a view in the unsigned-integer format of its
+    /// texel size (an integer clear converts nothing), which a multisampled color render target
+    /// of such a format the runtime makes takes there where it costs the image nothing, and
+    /// announces `device-nan-encoding` where the image takes no such view.
+    MultisampledCopiesConvertFloatNans,
+    /// The driver signals a queue's timeline semaphore before its own completion work for what
+    /// was submitted ahead of the signal has run, and that work still reads objects the command
+    /// buffers used (the query pools they reset or began): one released at the signal's value
+    /// crashed. Nothing is refused: the runtime ends each command buffer there with a fence as
+    /// well, which the driver signals after that work, and releases what the command buffer used
+    /// only once both are signaled. Elsewhere a command buffer ends at its queue's value alone,
+    /// and its commit makes no fence.
+    ReadsCommandBuffersAfterTheirSignal,
+    /// `vkCmdCopyImage` between the stencil aspect of a multisampled depth/stencil image and a
+    /// multisampled colour image (maintenance8's depth-stencil/colour copies) loses the device,
+    /// where the depth aspect's copies are right. The runtime copies such stencils as it does
+    /// under [`RuntimeDriverDefect::MultisampledDepthStencilColourCopies`] (a kernel and draws, or
+    /// a refusal), and their depths through the colour copies.
+    MultisampledStencilColourCopies,
+}
+
+/// One device capability a refusal can name.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Capability {
+    Feature(VkFeature),
+    Extension(VkExtension),
+    Property(VkProperty),
+    Limit {
+        limit: VkLimit,
+        required: u64,
+        available: u64,
+    },
+    Format {
+        format: vk::Format,
+        usage: FormatUsage,
+    },
+    ApiVersion(ApiVersion),
+}
+
+/// A Metal-level feature (or input construct) that was refused.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Feature {
+    // ---- Input constructs outside the typed model ----
+    /// A metallib that is not an executable library (dynamic library, companion).
+    LibraryKind(u8),
+    /// A function stage the model does not cover.
+    Stage(u8),
+    /// An LLVM address space the typed model does not define (it defines AIR's `thread` 0
+    /// through `threadgroup_imageblock` 4, `object_data` 6 and the mesh output handle's 7). The 5
+    /// of Apple's AGX ray-tracing and tessellation library modules has no established meaning and
+    /// stays refused; a pointer in 6 or 7 outside an object or mesh function's payload or mesh
+    /// handle is refused as this feature too, at analysis.
+    AddressSpace(u32),
+    /// A module-level record outside the accepted subset (alias, ifunc, comdat, …).
+    ModuleRecord {
+        code: u32,
+    },
+    /// An instruction record outside the closed instruction set.
+    Instruction {
+        code: u32,
+    },
+    /// A type outside the typed model.
+    Type {
+        code: u32,
+    },
+    /// A calling convention other than AIR's.
+    CallingConvention(u32),
+    /// An intrinsic outside the closed set.
+    UnknownIntrinsic,
+    /// An AGX intrinsic whose semantics are not modeled.
+    AgxUnmodeled,
+    /// A static initializer that cannot be evaluated.
+    StaticInitializer,
+    /// Recursion (one variant).
+    Recursion,
+    /// Indirect calls, function pointers, visible/intersection function tables (one variant).
+    DynamicCall,
+    /// Linkage signatures / stitching / dynamic libraries.
+    Linking,
+
+    // ---- Control flow and simdgroups ----
+    /// Simdgroup width 32 is not achievable for this usage, stage, and device.
+    SimdWidth,
+    /// A local size beyond a device limit on this axis (`None`: the total).
+    LocalSize {
+        axis: Option<Axis>,
+    },
+    /// An irreducible region containing a convergent instruction.
+    IrreducibleConvergent,
+    /// Compute derivatives in a flattened simd tier.
+    ComputeDerivativesWithSimd,
+    /// Derivatives outside fragment without compute-derivative support.
+    ComputeDerivatives,
+    /// Quad operations in a stage without quad support.
+    QuadOperations,
+    /// Simdgroup matrix operations.
+    SimdgroupMatrix,
+
+    // ---- Memory ----
+    /// Argument buffers holding buffer pointers (dynamic roots).
+    ArgumentBufferPointers,
+    /// Argument buffers holding textures or samplers (handle domain).
+    ArgumentBufferTextures,
+    /// Argument-buffer members that are pipeline states, ICBs, function tables, or acceleration
+    /// structures.
+    ArgumentBufferObjects,
+    /// Dereferencing a pointer loaded from memory or made from an integer.
+    DereferenceLoadedPointer,
+    /// Storing a pointer or converting it to an integer.
+    PointerToInteger,
+    /// Comparing pointers with different roots.
+    PointerCompare,
+    /// A resource handle used as a byte pointer, or conflicting handle provenance.
+    HandleAsPointer,
+    /// A constant global whose address escapes.
+    ConstantGlobalEscaping,
+    /// Threadgroup memory above the device limit.
+    ThreadgroupMemorySize,
+    /// `coherent(device)` accesses (Vulkan memory model).
+    CoherentMemory,
+    /// 64-bit atomics.
+    Int64Atomics,
+    /// Image atomics beyond 32-bit integers.
+    ImageAtomics,
+    /// Too many descriptors of one kind in a stage or pipeline.
+    DescriptorCount,
+    /// A buffer window beyond the descriptor range limits.
+    BufferRange,
+
+    // ---- Arithmetic ----
+    /// 64-bit integer arithmetic.
+    Int64Arithmetic,
+    /// 64-bit float arithmetic.
+    Float64Arithmetic,
+
+    // ---- Textures and samplers (lowering B2, B3) ----
+    /// A pixel format not supported for the required use.
+    Format,
+    /// Divergent implicit-LOD sampling or LOD query through a multi-candidate handle.
+    DivergentImplicitLod,
+    /// Implicit-LOD sampling outside fragment.
+    ImplicitLodOutsideFragment,
+    /// `min_lod_clamp` without `shaderResourceMinLod`.
+    MinLodClamp,
+    /// A texel offset the device cannot apply: outside its range, dynamic without the features
+    /// `Offset` needs, or on a cube (no offset exists there in Metal or SPIR-V).
+    TexelOffset,
+    /// Gather with non-constant offsets or components.
+    GatherExtended,
+    /// Multisampled storage images.
+    StorageImageMultisample,
+    /// Storage images in the vertex stage.
+    StorageTextureInVertexStage,
+    /// Cube arrays.
+    CubeArray,
+    /// Constexpr sampler anisotropy.
+    SamplerAnisotropy,
+    /// Sampler border colors Vulkan cannot express.
+    SamplerBorderColor,
+    /// Sampler LOD bias.
+    SamplerLodBias,
+    /// Sampler compare functions outside what Vulkan allows for the image.
+    SamplerCompare,
+    /// A constexpr sampler with pixel coordinates and a compare function, which Apple's compiler
+    /// rejects ("invalid values combination in sampler initialization"), so no AIR Metal's
+    /// toolchain writes carries one and Metal gives it no answer.
+    PixelSamplerCompare,
+    /// Texture buffers beyond the device's texel-buffer limits.
+    TexelBuffer,
+
+    // ---- Stages and fragment (lowering B7, B9) ----
+    /// Raster order groups without fragment shader interlock.
+    RasterOrderGroups,
+    /// Framebuffer fetch without ordered attachment access under `RequireOrdered`, or in a
+    /// multisampled pipeline (not implemented).
+    FramebufferFetch,
+    /// `primitive_id` in fragment without geometry or tessellation shaders.
+    PrimitiveId,
+    /// Vertex amplification.
+    VertexAmplification,
+    /// Layered rendering (`render_target_array_index`, `viewport_array_index`).
+    LayeredRendering,
+    /// Clip or cull distances.
+    ClipDistance,
+    /// Dual-source blending.
+    DualSourceBlending,
+    /// Barycentric coordinates.
+    Barycentrics,
+    /// Stencil export.
+    StencilExport,
+    /// Per-sample shading.
+    SampleRateShading,
+    /// The pixel's coverage (`[[sample_mask]]` read) in a fragment function that runs once per
+    /// sample: Metal hands every invocation the whole pixel's coverage, while a Vulkan invocation
+    /// under sample shading sees only the bits of the samples it shades, and nothing gathers a
+    /// pixel's sample invocations.
+    PixelCoverageAtSampleRate,
+    /// Too many interface components or locations.
+    InterfaceComponents,
+    /// A fragment input without a vertex producer (a Metal link error).
+    UnmatchedVarying,
+    /// Kernel `[[stage_in]]`: a stage-input descriptor combination whose Metal meaning is not
+    /// established.
+    KernelStageIn,
+
+    // ---- the refused families, not implemented yet ----
+    Tessellation,
+    MeshShading,
+    TileShading,
+    Imageblocks,
+    RayTracing,
+    Tensors,
+    RasterizationRateMap,
+    GpuEncodedIndirectCommands,
+
+    // ---- Device ----
+    /// The device's Vulkan version is below the 1.2 floor.
+    VulkanVersion,
+    /// A bitcode constant record outside the typed model (block address, inline asm, `select`
+    /// and other constant expressions the IR has no form for).
+    Constant {
+        code: u32,
+    },
+    /// An LLVM attribute kind that changes the calling ABI and that AIR does not use
+    /// (`inalloca`, `preallocated`, `byref`, `nest`, the `swift*` kinds).
+    Attribute {
+        kind: u32,
+    },
+    /// A bitcode record LLVM defines in `block` that the typed model does not cover and that has
+    /// no more specific variant (legacy spellings predating module version 2, such as the old
+    /// metadata node and string records and pre-group attribute entries).
+    BitcodeRecord {
+        block: u32,
+        code: u32,
+    },
+    /// An atomic access or fence in a synchronization scope other than LLVM's built-in
+    /// `singlethread` and system scopes.
+    SyncScope,
+    /// Simdgroup operations of a class the stage's subgroups do not support (the stage is not in
+    /// `subgroupSupportedStages`, or an operation class is missing from
+    /// `subgroupSupportedOperations`).
+    SubgroupOperations,
+    /// A call to a defined function the inliner cannot take: a variadic callee, a `byval`
+    /// argument, whose private copy inlining would have to materialize, or a call at another
+    /// function type whose arguments match the parameters (another return type, or identically
+    /// shaped structs of other names). A call at a function type whose arguments differ from the
+    /// parameters in count or shape is `InvalidInput(Canon(CallTypeMismatch))`.
+    DirectCall,
+    /// A switch case literal wider than 32 bits: the structurizer emits 32-bit `OpSwitch`
+    /// selectors.
+    WideSwitchLiteral,
+    /// An instruction, intrinsic, or interface element of a lowering family whose lowering has
+    /// not landed yet (each family narrows its refusals as it lands).
+    Lowering(LowerFamily),
+    /// A sampler address mode the device lacks (`MirrorClampToEdge`).
+    SamplerAddressMode,
+    /// `alphaToOneEnabled`: the device profile does not carry Vulkan's `alphaToOne` feature yet.
+    AlphaToOne,
+    /// Buffer or image stores or atomics in a vertex or fragment function without the stage's
+    /// store feature (`vertexPipelineStoresAndAtomics`, `fragmentStoresAndAtomics`).
+    StageStoresAndAtomics,
+    /// An observed read of a pointer entry argument that a function-constant predicate removes,
+    /// other than an absent buffer (which reads as null) or an absent texture or sampler read only
+    /// as the texture or sampler operand of texture calls (an absent read): a texture used another
+    /// way, an element of a texture table (a read, query, or sample; a write to or fence of the
+    /// texture itself is dropped, as Metal drops it), threadgroup memory, an object, a
+    /// pointer-typed imageblock or control-point input, or a sampler merged with a present one. The
+    /// argument is not declared (MSL 5.8.1.2) and Metal defines no value for it (its compiler drops
+    /// a store of such a read and gives arithmetic on it NaN), and no contained answer for a
+    /// dereference is established. An absent read sets `StatusBits::ABSENT_ARGUMENT_READ` where it
+    /// runs and yields zero (`RuntimeFact::AbsentArgumentRead`); on a device that does not address
+    /// buffers, or whose vertex or fragment stage has no stores, it is refused with what it needs.
+    /// An absent argument passed by value (its parameter is not a pointer: a vertex attribute, a
+    /// stage input, a varying, a color input, a builtin, imageblock data, an indirect constant, a
+    /// per-patch attribute) reads zero instead. A read nothing observes is `undef`, or goes; a
+    /// return observes only the outputs the predicates keep, so a read that feeds only a removed
+    /// output is unobserved.
+    FunctionConstantArgument,
+    /// A use of Metal's bicubic filter that no Metal reading establishes: `min_lod_clamp` (Apple's
+    /// device compiler fails to build the pipeline), `mirrored_repeat`, a dynamic offset, a
+    /// comparison, an LOD query, a 3D, cube, depth, integer, or heap texture, min/max reduction, or
+    /// anisotropy; at bind time, a bound pixel format of no measured family. Every other bicubic
+    /// sample is Metal's measured filter emulated by fetches (`lower::sampler::bicubic`).
+    SamplerBicubicFilter,
+    /// A dispatch whose threadgroup count on `axis` exceeds `maxComputeWorkGroupCount` by more
+    /// than the binder splits into regions (`None`: the indirect arguments' offset), or whose grid does not
+    /// fit Metal's 32-bit `threads_per_grid`.
+    GroupCount {
+        axis: Option<Axis>,
+    },
+    /// A ray intersection through intersection functions: an `intersect` call with a non-null
+    /// intersection function table or an intersection function buffer, whose candidates Metal
+    /// hands to the table's functions.
+    IntersectionFunctionTable,
+    /// Color attachments whose write masks or blend states differ, as Metal sets them per
+    /// attachment, on a device without `independentBlend`, where no identical set of states
+    /// leaves every attachment as Metal would.
+    IndependentBlending,
+    /// A `rasterSampleCount` outside the device's framebuffer sample counts for the pipeline's
+    /// attachments (`framebuffer*SampleCounts`), and, for a color attachment, outside its own
+    /// format's.
+    RasterSampleCount,
+    /// The render encoder's `MTLTriangleFillModeLines` (`polygonMode` `LINE`) on a device
+    /// without `fillModeNonSolid`.
+    TriangleFillLines,
+    /// The render encoder's `MTLDepthClipModeClamp` (`depthClampEnable`) on a device without
+    /// `depthClamp`.
+    DepthClipClamp,
+    /// The render encoder's depth bias clamp, nonzero with a nonzero bias, on a device without
+    /// `depthBiasClamp`.
+    DepthBiasClamp,
+    /// `CONSTANT_ALPHA` or `ONE_MINUS_CONSTANT_ALPHA` (Metal's `BlendAlpha` factors) as a color
+    /// blend factor on a portability-subset device without `constantAlphaColorBlendFactors`.
+    ConstantAlphaBlendFactor,
+    /// A sparse texture (`MTLTexture.isSparse`) bound at `slot`, where a function observes the
+    /// residency of its accesses (`sparse_color::resident()`) and the module has no sparse form
+    /// for them (`RuntimeFact::SparseTexture`): it needs `shaderResourceResidency`, or, where the
+    /// device has it, an access has none (a bicubic sample, not implemented). A texture that is
+    /// not sparse is answered on every device.
+    SparseTexture {
+        slot: SlotRef,
+    },
+    // The runtime's refusals of texture objects and texture commands. Each depends on the Vulkan
+    // device or on a Metal measurement, so another device or a later measurement can lift it;
+    // what no Vulkan device can ever have is the runtime's Apple-only class instead.
+    /// A texture whose extent, array layers, or level count is past what the device takes for its
+    /// format, type, and usage (`Capability::Limit` names the device limit where one applies).
+    TextureSize,
+    /// A texture sample count the device does not take for its format, type, and usage.
+    TextureSampleCount,
+    /// A texture view Vulkan cannot make exactly on this image: a format reinterpretation outside
+    /// Vulkan's compatibility classes, or a view type the image cannot take.
+    TextureView,
+    /// A texture swizzle whose Metal behavior is not measured.
+    TextureSwizzle,
+    /// `generateMipmapsForTexture:` where the device's filter is not shown to give Metal's
+    /// answer.
+    MipmapGeneration,
+    /// A buffer over the caller's host memory without a copy (`newBufferWithBytesNoCopy:`): it
+    /// needs `VK_EXT_external_memory_host`, a memory type the pointer and the buffer both allow,
+    /// and a range aligned to the device's import alignment; a driver may also refuse the memory.
+    HostMemory,
+    /// A command buffer's GPU times (`GPUStartTime`, `GPUEndTime`) on a device whose queue
+    /// family writes no timestamps (`timestampValidBits` 0).
+    GpuTimes,
+    /// A `Counting` visibility result (`MTLVisibilityResultModeCounting`) on a device without
+    /// `occlusionQueryPrecise`: the samples that passed are a precise occlusion query's count.
+    CountingVisibility,
+    /// A texture view whose format has other components, or components of other widths, than
+    /// its texture's (`RGBA8Unorm` as `R32Uint`), on a device whose `VK_KHR_portability_subset`
+    /// withholds `imageViewFormatReinterpretation`, or that the runtime adopted without being
+    /// told it enabled it (the runtime's `RawDevice::view_format_reinterpretation`), where the
+    /// runtime's shadow of the view's texels cannot serve it: a view of a sparse texture or a
+    /// heap's texture, formats whose copies would not keep every bit, or a command that writes
+    /// the texture both through such a view and through another alias of it.
+    ViewFormatReinterpretation,
+    /// A render pass whose depth and stencil attachments are separate multisampled textures that
+    /// it loads or may store, on a device without maintenance8, or whose driver copies such
+    /// aspects wrong ([`RuntimeDriverDefect::MultisampledDepthStencilColourCopies`]): Vulkan copies
+    /// a multisampled depth or stencil aspect between images of different formats only through a
+    /// colour image of maintenance8's depth-stencil/colour table.
+    SeparateMultisampledDepthStencil,
+    /// The fragment's coverage (`[[sample_mask]]` read) in a fragment function of a pipeline of
+    /// more than one sample that runs once per pixel.
+    PixelCoverage,
+    /// A centroid varying (`[[centroid_perspective]]`, `[[centroid_no_perspective]]`) in a
+    /// fragment function of a pipeline of more than one sample.
+    CentroidVarying,
+    /// A stage whose private memory (its `thread` variables and arrays, and the constants it
+    /// holds per thread) takes more Function storage a thread than the device holds correctly
+    /// (`VkLimit::FunctionStorageBytesPerThread`). A stage with a call stack is refused as
+    /// `Recursion` instead.
+    PrivateMemory,
+    /// A sparse heap (`MTLHeapTypeSparse`), or a texture made from one, on a device without what
+    /// a sparse resident image of it needs, which `missing` names.
+    SparseTextures {
+        missing: SparseNeed,
+    },
+    /// A sparse texture's mapping update (`updateTextureMapping:` and its array form, or a move
+    /// of mappings) that covers part of one of the device's sparse blocks or of its mip tail, of
+    /// a texture whose texels no copy writes (a multisampled texture): binding the block would
+    /// leave its unmapped tiles' texels undefined where Metal reads them zero, and leaving it
+    /// unbound would leave tiles unmapped that Metal maps. A texture a copy writes binds the
+    /// block and zeroes the rest.
+    SparseMapping,
+    /// Command buffers and events, which the runtime completes and signals through timeline
+    /// semaphores (core in Vulkan 1.2), on a device whose `maxTimelineSemaphoreValueDifference`
+    /// (`max_value_difference`) is below the `2^31 - 1` Vulkan requires of every device: the
+    /// device is not conformant, and the runtime refuses it at creation, before its first signal.
+    TimelineSemaphores {
+        max_value_difference: u64,
+    },
+    /// Reflection of an argument whose answer Metal's has not been measured for (`reflection`):
+    /// a type the MSL type grammar does not cover, a binding kind no probe has asked Metal about
+    /// (explicit imageblocks and imageblock data, argument-buffer function tables, acceleration
+    /// structures and render pipeline states), or, in a library's answer, an index a function
+    /// constant computes. The symbol names the argument's type.
+    Reflection,
+    /// A texture of a heap whose memory the device's optimal images do not take (a `Shared` heap
+    /// on a device whose optimal images take no host-visible memory, as the RTX 3090's), which
+    /// the runtime makes a linear image in the heap's memory, on a device whose linear images
+    /// lack what the texture needs: `missing` names it.
+    HeapTextureTiling {
+        missing: LinearNeed,
+    },
+    /// A viewport depth range past `[0, 1]` (`setViewport:`), which Metal takes and the runtime
+    /// draws natively (`VK_EXT_depth_range_unrestricted`) or through the vertex stage's
+    /// compensation.
+    ViewportDepthRange,
+    /// A shader write to a texture made without `ShaderWrite` (or `ShaderAtomic`), or a read of
+    /// one made without `ShaderRead`, which plain Metal runs, where the texture's image lacks the
+    /// storage or sampled usage: the runtime adds it only where it costs the image nothing (the
+    /// same memory size and alignment), so that no valid program's texture loses its
+    /// compression. The exact route is a shadow image with the usage, copied around the commands
+    /// that use the texture so.
+    UndeclaredTextureUsage,
+    /// A render pass whose render area or layers are past the device's framebuffer limits
+    /// (`Capability::Limit` names `MaxFramebufferWidth`, `MaxFramebufferHeight` or
+    /// `MaxFramebufferLayers`). Metal renders passes up to 16384 pixels a side and 2048 layers.
+    RenderTargetSize,
+    /// A render state a function sets on an indirect render command
+    /// (`render_command::set_cull_mode`, `set_front_facing_winding`, `set_triangle_fill_mode`,
+    /// `set_depth_bias`, `set_depth_clip_mode`, `set_depth_stencil_state`), or a
+    /// `depth_stencil_state` it reads from an argument buffer: the record holds no render state.
+    /// Metal's Apple10 family alone lists the feature, and Metal's compiler refuses such a
+    /// function on an Apple9 GPU, so the runtime answers it as that compiler does on a device that
+    /// does not claim Apple10 ([`Needs::MetalGpuFamily`]).
+    IndirectRenderState,
+    /// A fragment function's read of a Metal 3.1 program-scope built-in variable that Metal does
+    /// not lower there: a global `thread_index_in_quadgroup` (`air.get_thread_index_in_quadgroup`),
+    /// which Apple's compiler takes in a fragment function but whose render pipeline the M4 and
+    /// the M3 Max refuse, while they run the same built-in as the fragment's parameter. The
+    /// translation refuses it `NotImplemented`; the runtime answers it as Metal does
+    /// ([`Needs::MetalRefuses`]).
+    GlobalBuiltinInFragment,
+    /// A private fixed-function property of Metal's pipeline descriptor (Apple SPI, OpenGL on
+    /// Metal's) set to a value whose effect the translation has not built: the property it names
+    /// ([`PrivateRenderField`]). Metal's answer for each was measured; building it is open work.
+    PrivateRenderState(PrivateRenderField),
+    /// Metal's blend into an extended-range attachment (`BGRA10_XR`, `BGR10_XR`,
+    /// `RGB10A8_2P_XR10` and their `_sRGB` twins), which the function computes in the shader in
+    /// the interlocked storage form, where Metal's measured model does not hold the part it names
+    /// ([`ExtendedRangeBlend`]). Every other such blend is Metal's arithmetic, bit for bit.
+    ExtendedRangeBlend(ExtendedRangeBlend),
+    /// The tiles a render pass's primitives reach, binned on the device
+    /// ([`tile_reach_module`](crate::bind::tile_reach_module)), on a device without what the
+    /// kernel's exact arithmetic needs: `shaderInt64` ([`Needs::AnyOf`]). Also the capture form
+    /// of a vertex function, whose records hold the positions the kernel bins
+    /// (`LoweringInputs::captured_positions`): on a device without device addresses or
+    /// `vertexPipelineStoresAndAtomics` (naming what it needs), and, not implemented, for a
+    /// post-tessellation vertex function, an attribute a hand-built projection fetches in fixed
+    /// function under the indexed form, an indirect or amplified draw, and an indexed draw whose
+    /// indices run past its buffer or whose index offset is not a multiple of the index size.
+    TileReach,
+    /// Metal's private command predication (`encodeStartIf:offset:comparison:referenceValue:`
+    /// and the rest), whose step module ([`predication_step_module`](crate::bind::predication_step_module))
+    /// reaches the counter, the condition words and the gated commands by device address: on a
+    /// device without device addresses ([`Needs::AnyOf`]).
+    CommandPredication,
+    /// A program-scope buffer binding of MSL 3.2 (macOS 15 and later), `constant T* constant p
+    /// [[buffer(n)]];` in Apple's `!air.global_bindings` list, valid AIR this version does not
+    /// implement yet.
+    ProgramScopeBinding,
+    /// A sequentially consistent fence (`seq_cst` `atomic_thread_fence`, an LLVM `fence seq_cst`,
+    /// or a `seq_cst` barrier ordering device memory), whose total order with the command
+    /// buffer's other such fences the translation keeps through an atomic of the command buffer's
+    /// `ExecutionStatus` word: on a device without device addresses ([`Needs::AnyOf`]) or the
+    /// stage's stores and atomics.
+    SeqCstFence,
+}
+
+/// The part of a blend into an extended-range attachment that [`Feature::ExtendedRangeBlend`]
+/// refuses: what the measured model of Metal's blend does not hold.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ExtendedRangeBlend {
+    /// Under fast math, a factor of the second source (`Source1Color`, `Source1Alpha` and their
+    /// one-minus forms): dual-source blending into such an attachment is not built. (Without fast
+    /// math it is, but for a function that writes no second output to the attachment.)
+    DualSource,
+    /// Under fast math, the color channels' `BlendColor` with `OneMinusBlendColor` (either as
+    /// the source factor) under `Subtract` or `ReverseSubtract`: Metal's result there follows
+    /// none of the model's forms for every blend color the sweeps drew, so no rule is known.
+    /// (Without fast math it is built.)
+    ConstantColorDifference,
+    /// Under fast math, a write mask of exactly one color channel: Metal blends that channel
+    /// otherwise than the two or three it blends as one vector, by a rule not known. (Without
+    /// fast math it is built.)
+    OneColorChannel,
+    /// Under fast math, a `float4` output into an `_sRGB` form under a blend other than the whose
+    /// color channels take one term alone, or under a write mask: not measured. (Into a linear form
+    /// it takes its own model; without fast math it is rounded to `half` first.)
+    FloatOutput,
+    /// Under fast math, an `_sRGB` form's blend other than the measured one, or under a write mask:
+    /// not measured. Without fast math every one is built.
+    SrgbForm,
+    /// An output other than four `half` or `float` lanes, or a second output other than those the
+    /// blend reads: not measured.
+    Output,
+}
+
+/// A private property of Metal's render pipeline descriptor that
+/// [`Feature::PrivateRenderState`] refuses at a value other than Metal's default
+/// (`PrivateRenderState`).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PrivateRenderField {
+    /// `sampleMask` dropping a sample, in a pipeline whose fragment function writes an
+    /// attachment itself (a storage attachment, a shadow stencil or an imageblock), whose writes
+    /// were not measured under the mask.
+    SampleMask,
+    /// `sampleCoverage` other than 1.
+    SampleCoverage,
+    /// `alphaTestEnabled`.
+    AlphaTest,
+    /// `logicOperationEnabled`.
+    LogicOperation,
+    /// `pointSmoothEnabled`.
+    PointSmooth,
+    /// `fragmentDepthCompareClampMask` other than 0.
+    FragmentDepthCompareClamp,
+    /// `textureWriteRoundingMode` 2 (`TextureWriteRoundingMode::NearestEven`) in a pipeline whose
+    /// fragment function writes a texel that Metal's mode 2 stores otherwise than its default (a
+    /// `float` texel into a half-float or packed small-float texture, `RG11B10Float` or
+    /// `RGB9E5Float`, or a `half` texel into a packed small-float one), whose mode-2 rounding the
+    /// translation has not built: refused at the pipeline's making where the write's slot
+    /// declares such a format, and at the draw where the bound texture decides and is one.
+    TextureWriteRounding,
+}
+
+/// What a device's linear images lack for a texture of a heap whose memory its optimal images do
+/// not take (`Feature::HeapTextureTiling`). The limits are those
+/// `vkGetPhysicalDeviceImageFormatProperties2` reports for a linear image of the texture's
+/// format, type, usage and flags.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum LinearNeed {
+    /// A memory type of the heap's storage that the device's linear images take: neither its
+    /// optimal nor its linear images take one.
+    MemoryType,
+    /// A linear image of the texture's format, type, usage and flags at all: the device reports
+    /// none (the RTX 3090 makes no linear cube, 3D or depth image).
+    Image,
+    /// `features` of `format`'s linear tiling, which its optimal tiling has and the texture's
+    /// usage relies on (`linearTilingFeatures`).
+    Features {
+        format: vk::Format,
+        features: vk::FormatFeatureFlags2,
+    },
+    /// An extent of `required` texels along an axis where the device's linear images hold
+    /// `available`.
+    Extent { required: u32, available: u32 },
+    /// `required` mip levels where the device's linear images hold `available`.
+    MipLevels { required: u32, available: u32 },
+    /// `required` array layers (slices, or six faces a cube) where the device's linear images
+    /// hold `available`.
+    ArrayLayers { required: u32, available: u32 },
+    /// The texture's sample count.
+    SampleCount(u32),
+}
+
+/// What a device lacks for a sparse resident image (`Feature::SparseTextures`).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SparseNeed {
+    /// `sparseBinding`.
+    SparseBinding,
+    /// A queue family with `VK_QUEUE_SPARSE_BINDING_BIT` where the runtime submits.
+    SparseBindingQueue,
+    /// `sparseResidencyImage2D`: a 2D, 2D array, cube, cube array or 2D multisample texture.
+    SparseResidencyImage2D,
+    /// `sparseResidencyImage3D`: a 3D texture.
+    SparseResidencyImage3D,
+    /// `sparseResidency2Samples` to `sparseResidency16Samples`, for this sample count.
+    SparseResidencySamples(u32),
+    /// Sparse residency of the texture's format, type, sample count and usage:
+    /// `vkGetPhysicalDeviceSparseImageFormatProperties` lists none for its aspects.
+    SparseImageFormat,
+    /// A sparse image whose memory needs a metadata aspect bound
+    /// (`VK_SPARSE_MEMORY_BIND_METADATA_BIT`), which the runtime does not bind.
+    SparseMetadata,
+}
+
+/// A family of AIR operations the translator lowers, as `Feature::Lowering` names it in a
+/// refusal of an operation it does not lower yet.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum LowerFamily {
+    /// Math, conversions, comparisons, composites (`lower::arith`).
+    Arith,
+    /// Loads, stores, address arithmetic, atomics, memory intrinsics (`lower::access`).
+    Access,
+    /// Image operations (`lower::texture`).
+    Texture,
+    /// Sampling (`lower::sampler`).
+    Sampler,
+    /// Simdgroup, quad, and matrix operations (`lower::simd`).
+    Simd,
+    /// Barriers and derivatives (`lower::sync::barrier`).
+    Barrier,
+    /// Fences and the memory model (`lower::sync::memory_model`).
+    MemoryModel,
+    /// Fragment-only operations (`lower::fragment`).
+    Fragment,
+    /// Stage inputs, outputs, and varyings (`lower::stage_io`).
+    StageIo,
+    /// Dispatch builtins and regions (`lower::dispatch`).
+    Dispatch,
+    /// A post-tessellation vertex function's patch inputs and builtins (`lower::tessellation`).
+    Tessellation,
+    /// Ray intersection and acceleration structures (`lower::raytracing`).
+    RayTracing,
+    /// An object function's mesh grid and a mesh function's outputs (`lower::mesh`).
+    Mesh,
+}
+
+/// A pipeline input that the caller did not supply.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum RuntimeInput {
+    /// A value use of an unsupplied function constant survived SCCP.
+    FunctionConstant { index: u32 },
+    /// The format of a storage texture on a profile that cannot access it without one: the
+    /// slot's `StorageImageChoice`.
+    StorageTextureFormat { slot: SlotRef },
+    /// A call through a visible-function reference (`!air.visible_function_references`)
+    /// survived specialization, and no linked function of the descriptor
+    /// (`MTLLinkedFunctions`) has the name it references. `symbol` is that name.
+    LinkedFunction { symbol: DiagName },
+    /// The vertex descriptor entry of an attribute that only an in-shader fetch can read: a
+    /// post-tessellation vertex function's patch or control-point attribute, which has no
+    /// fixed-function input to fall back on.
+    VertexDescriptor { attribute: u32 },
+    /// A call through the visible-function table at Metal buffer index `buffer` (`None` when the
+    /// index is a function-constant expression) survived specialization, and no function the
+    /// stage links in `functions` or `binary_functions` (`MTLLinkedFunctions`) has the call's
+    /// type, so no table entry can hold a function it may call.
+    VisibleFunctionTable { buffer: Option<u32> },
+    /// The stage-input descriptor entry of a kernel `[[stage_in]]` attribute
+    /// (`MTLComputePipelineDescriptor.stageInputDescriptor`): a kernel fetches its stage inputs in
+    /// the shader, so without the descriptor there is nothing to fetch them by.
+    StageInputDescriptor { attribute: u32 },
+    /// A kernel reaches the implicit imageblock, which only a tile function has
+    /// (`LoweringInputs::tile_attachments`): its cells are the tile render pipeline's color
+    /// attachments, whose formats a tile pipeline descriptor gives.
+    TileAttachments,
+    /// A fragment function linked into a render pipeline that rasterizes more than one sample
+    /// runs per sample and reads `[[position]]` or a center-sampled varying, which it reads at the
+    /// pixel center only when compiled for such a pipeline (`LoweringInputs::multisampled`):
+    /// compiled without it, a sample-rate invocation would read them at its sample. A shader-side
+    /// stencil is compiled for the pipeline's kind either way: its shadow is multisampled exactly
+    /// when the pipeline is.
+    Multisampled,
+    /// A fragment function reads a color attachment (framebuffer fetch) on a device that orders
+    /// the read only through the pixel interlock, where the read's form depends on the render
+    /// pipeline's attachments and state (`LoweringInputs::framebuffer_fetch`): compiled without
+    /// that state, or for a pipeline whose state chose another form, it is compiled for the
+    /// pipeline again.
+    FramebufferFetch,
+    /// A fragment function reads `[[viewport_array_index]]`, which it reads from the raw varying
+    /// a vertex function that writes the index adds (`LoweringInputs::viewport_index_varying`), and
+    /// was compiled for the other kind of vertex function: compiled without the field behind such a
+    /// vertex function it would read the clamped `ViewportIndex`, and compiled under it behind
+    /// another a varying no stage writes. It is compiled for the pipeline again.
+    ViewportIndex,
+    /// A fragment function reads `[[render_target_array_index]]`, which it reads from the raw
+    /// varying a vertex function that writes the index adds
+    /// (`LoweringInputs::render_target_array_index_varying`), and was compiled for the other kind
+    /// of vertex function: compiled without the field behind such a vertex function it would read
+    /// `Layer`, which holds 0 for an index at or past the pass's length (or for any index in a pass
+    /// of one layer), and compiled under it behind another a varying no stage writes. It is
+    /// compiled for the pipeline again.
+    RenderTargetArrayIndex,
+    /// A fragment function writes a color attachment whose format converts its float output (a
+    /// normalized, sRGB or half-float format) and was compiled for other attachments, another
+    /// blend state, or another device's conversion: how it rounds each such output
+    /// (`LoweringInputs::color_writes`) is not the pipeline's. It is compiled for the pipeline
+    /// again.
+    ColorWrites,
+    /// A call to a function, or a use of a variable, that the stage's module imports from a
+    /// dynamic library (a declaration its `air.dyld_flat_table` names) survived specialization,
+    /// and no dynamic library the stage links exports it: neither its preloaded libraries nor
+    /// those loaded for the install names its search reaches (`FunctionDescriptor::libraries`,
+    /// `MTLDynamicLibrary`). `symbol` is its name. Metal's pipeline creation fails the same way
+    /// ("Undefined symbols").
+    DynamicSymbol { symbol: DiagName },
+    /// An import's use survived specialization, and an install name the stage's search reaches
+    /// has no loaded library (`DynamicLibraries::loaded`; Metal could not load its file):
+    /// Metal's creation fails then even when a preloaded library exports every symbol.
+    /// `install_name` is the first such name.
+    DynamicLibrary { install_name: DiagName },
+    /// A fragment function reads a varying that its mesh render pipeline's mesh function writes
+    /// per primitive, which it reads per primitive (`PerPrimitiveEXT`) only when compiled for
+    /// that mesh function's primitive outputs (`LoweringInputs::primitive_varyings`), or reads per
+    /// primitive one that its pipeline's vertex or mesh function writes per vertex: it was
+    /// compiled for another pipeline, and is compiled for this one again.
+    PrimitiveVaryings,
+    /// A fragment function in a render pipeline whose private sample mask drops a sample writes
+    /// memory, reads `[[sample_mask]]` or declares `[[early_fragment_tests]]`, so it applies the
+    /// mask itself (`LoweringInputs::sample_mask`), as Metal applies it after the function runs;
+    /// or it applies another mask. It was compiled for another pipeline, and is compiled for this
+    /// one again.
+    SampleMask,
+    /// A fragment function reads flat an interpolated varying that its pipeline's vertex function
+    /// does not write the same at every vertex of a primitive: compiled for another vertex
+    /// function, which wrote it so (`LoweringInputs::uniform_varyings`), it would read the
+    /// provoking vertex's value where Metal interpolates. It is compiled for this pipeline again.
+    UniformVaryings,
+}
+
+/// The caller's descriptor or request is inconsistent.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DescriptorError {
+    /// The requested entry point is not in the library.
+    EntryNotFound { requested: DiagName, available: u32 },
+    /// More than one entry matches the request.
+    AmbiguousEntry { requested: DiagName },
+    /// The entry exists but has a different stage than the descriptor slot it was given.
+    StageMismatch { expected: Stage, found: Stage },
+    /// A function-constant index that the function does not declare, in a request made to the
+    /// canonicalizer directly (`air::SpecRequest`, a linked module's constants). A descriptor's
+    /// values never raise it: the compile ignores a value for a constant the function does not
+    /// declare, as Metal's `newFunctionWithName:constantValues:` does.
+    FunctionConstantIndex { index: u32 },
+    /// A function-constant value of the wrong type.
+    FunctionConstantType { index: u32 },
+    /// The same function constant supplied twice.
+    DuplicateFunctionConstant { index: u32 },
+    /// A vertex descriptor attribute the vertex function does not declare, or of the wrong type.
+    VertexAttribute { attribute: u32 },
+    /// A vertex descriptor's buffer `layout` whose layout and attributes disagree as Metal stops
+    /// at: a set attribute names it and it has no layout, or it has a layout of a nonzero or
+    /// dynamic stride and no set attribute names it.
+    VertexLayout { layout: u32 },
+    /// A color attachment format without a fragment output, or of the wrong type class; one a
+    /// fragment output has fewer components for than its channels; one whose blend reads a
+    /// second output without the first; or an integer attachment 0 under alpha to coverage
+    /// (Metal refuses each pipeline).
+    ColorAttachment { index: u32 },
+    /// A raw Metal enum value outside the known set.
+    UnknownEnumValue { ty: &'static str, value: u32 },
+    /// A pipeline descriptor without a required stage.
+    MissingStage { stage: Stage },
+    /// A device description (or the Khronos profile JSON it was read from) is malformed or
+    /// inconsistent.
+    DeviceDescription { detail: String },
+    /// A Metal enum value that is a placeholder, not a concrete value (`MTLPixelFormatInvalid`,
+    /// `...Unspecialized`), where a concrete one is required.
+    PlaceholderEnumValue { ty: &'static str, value: u32 },
+    /// A per-instance vertex buffer layout with a step rate of 0.
+    VertexStepRate { step_rate: u32 },
+    /// A sampler whose LOD clamps are NaN, or whose minimum exceeds its maximum.
+    SamplerLodClamp,
+    /// Two stages of one pipeline declare specialization constant `key` with a different size or
+    /// default: they were compiled for different pipelines or profiles.
+    SpecializationConflict { key: SpecKey },
+    /// A `StageSource::Compiled` function compiled for another device profile.
+    ForeignCompiledFunction,
+    /// A pixel format (raw `MTLPixelFormat` ordinal) used in a way its aspects do not allow: a
+    /// color attachment of a depth or stencil format, or a depth/stencil attachment of a color
+    /// format (Metal rejects either descriptor).
+    PixelFormatUsage { format: u32, usage: FormatUsage },
+    /// A linked function (`MTLLinkedFunctions`) that cannot resolve the visible-function
+    /// reference naming it. `name` is the function's name.
+    LinkedFunction {
+        name: DiagName,
+        problem: LinkProblem,
+    },
+    /// A render pipeline descriptor whose `maxVertexAmplificationCount` is 0: its encoders draw
+    /// with a count in `[1, maxVertexAmplificationCount]`, so the maximum is at least 1.
+    VertexAmplificationCount { count: u32 },
+    /// A kernel `[[stage_in]]` attribute the compute pipeline's stage-input descriptor does not
+    /// describe.
+    StageInputAttribute { attribute: u32 },
+    /// A stage-input descriptor's buffer `layout` whose layout and attributes disagree, as for
+    /// [`DescriptorError::VertexLayout`]: a set attribute names it and the descriptor lacks its
+    /// layout, or its layout has a nonzero or dynamic stride and no set attribute names it.
+    StageInputLayout { layout: u32 },
+    /// A stage-input buffer layout that steps by thread position in the grid with a step rate of
+    /// 0: no element is every 0th thread; or, but for Metal's unset layout, a constant step at a
+    /// step rate other than 0, which Metal's pipeline creation stops at an assertion for, with and
+    /// without API validation.
+    StageInputStepRate { layout: u32, step_rate: u32 },
+    /// A render pipeline descriptor whose `maxTessellationFactor` is not one Metal accepts for
+    /// its partition mode: between 1 and 64, a power of two for `pow2`, and even for the
+    /// fractional modes.
+    MaxTessellationFactor {
+        factor: u32,
+        partition_mode: crate::metal::TessellationPartitionMode,
+    },
+    /// Two color outputs of the function that remain under its function-constant values write
+    /// color attachment `color` at blend index `index` (`[[color(color), index(index)]]`): Metal
+    /// refuses the specialization when it makes the function. MSL refuses such a pair outright, so
+    /// only constants that leave both outputs of a gated pair present make one.
+    DuplicateColorOutput { color: u32, index: u32 },
+    /// A `StageSource::Compiled` stage whose recursion's call stack was sized for
+    /// `maxCallStackDepth` `compiled` (`RuntimeFact::CallStackDepth`) in a pipeline whose depth
+    /// for that stage is `given` (0 taken as 1): a compute or tile pipeline's, or a render
+    /// pipeline's vertex or fragment depth. The stack would hold another number of frames than the
+    /// pipeline's Metal stage has. Compile the stage under the pipeline's depth.
+    MaxCallStackDepth { compiled: u32, given: u32 },
+    /// A tile function that declares threadgroup variables: Metal refuses its tile pipeline
+    /// state ("Tile shaders do not support shader declared threadgroup variables", measured on an
+    /// M4 and an M3 Max). Its threadgroup memory is its `[[threadgroup(n)]]` arguments alone.
+    TileThreadgroupVariable,
+    /// A library `newDynamicLibrary:error:` refuses as a dynamic library
+    /// ([`DynamicLibrary::new`](crate::library::DynamicLibrary::new)).
+    DynamicLibrary { problem: DynamicLibraryProblem },
+    /// A stage-input buffer `layout` other than Metal's unset one (stride 0, per vertex, step
+    /// rate 1) whose step function is a vertex stage's (per vertex, instance, patch or control
+    /// point): Metal's compute pipeline creation stops at an assertion ("invalid stepFunction
+    /// value"), with and without API validation, measured on an M4.
+    StageInputStepFunction {
+        layout: u32,
+        step_function: crate::metal::StepFunction,
+    },
+    /// A `StageSource::Compiled` tile function compiled under `threadgroupSizeMatchesTileSize`
+    /// `compiled` (`RuntimeFact::TileThreadgroup`) in a tile pipeline whose descriptor gives the
+    /// flag the other value: the builtins it reads would answer the other pipeline's threadgroup.
+    /// Compile the function under the pipeline's flag
+    /// (`LoweringInputs::threadgroup_size_matches_tile_size`).
+    TileThreadgroupSize { compiled: bool },
+}
+
+/// Why a library is no dynamic library (`newDynamicLibrary:error:`), as Metal refuses it (probes,
+/// an M3 Max and an M4).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DynamicLibraryProblem {
+    /// The library's type is not dynamic: Metal's "Expected a library with type
+    /// MTLLibraryTypeDynamic".
+    NotDynamic,
+    /// A dynamic library without an install name, which no dependency could name.
+    NoInstallName,
+    /// Its code reads a function constant: Metal's "cannot lower module with unresolved
+    /// function constants" (a constant the code does not read is not in its AIR).
+    FunctionConstants,
+}
+
+/// A binder planning or instantiation error. A pipeline's `plan` sees only the pipeline, the
+/// device, and the `BindShape`, so a planning error is permanent for its `(PipelineKey,
+/// BindShape)` pair. An instantiation error can also depend on the dispatch or draw and on the
+/// bind state's per-draw values (`MissingStageInRegion`, `UniformViewAliased`, the patch-draw
+/// errors, a descriptor range or texel buffer beyond its limit, ...), so it is not permanent for
+/// the pair. `NeedsVariant` names the pipeline a dispatch or draw runs on instead.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BindError {
+    /// A slot index beyond the Metal maximum for its table.
+    SlotOutOfRange { slot: SlotRef },
+    /// The bind shape needs something the device cannot do (local size limits, formats,
+    /// sampler reduction, GPU-encoded ICBs, …).
+    Unsupported(Unsupported),
+    /// A device-address slot received a buffer without a device address.
+    MissingDeviceAddress { slot: SlotRef },
+    /// A descriptor-form slot's window exceeds the descriptor range limit (Profile F).
+    DescriptorRangeExceeded {
+        slot: SlotRef,
+        needed: u64,
+        limit: u64,
+    },
+    /// A texel buffer exceeds `maxTexelBufferElements`.
+    TexelBufferTooLarge {
+        slot: SlotRef,
+        elements: u64,
+        limit: u64,
+    },
+    /// The pipeline and the binder disagree (a pipeline built by another device, or a binder
+    /// bug); always a bug, never the guest's.
+    Internal(InternalError),
+    /// A bound resource's descriptor is invalid (e.g. a sampler whose LOD clamps are NaN or
+    /// inverted).
+    InvalidDescriptor(DescriptorError),
+    /// A render pipeline fetches a fixed-function vertex buffer that nothing is bound to.
+    UnboundVertexBuffer { slot: SlotRef },
+    /// A vertex buffer layout with a per-bind stride (`MTLBufferLayoutStrideDynamic`) reads
+    /// inline bytes (`setVertexBytes`) bound at `MTLAttributeStrideStatic`
+    /// (`BoundBuffer::Bytes::attribute_stride` `Some(u32::MAX)`), which an M4 read as element 0
+    /// and zeros past it (EV `RFL-vbytes-m4`; Metal's debug layer stops the draw): not emulated.
+    /// Inline bytes and a buffer bound without a stride read at stride 0, as plain Metal's encoder
+    /// reads them, and at the stride bound with one.
+    MissingVertexStride { slot: SlotRef },
+    /// The set-1 heap's elements (one per resident texture a handle can name, plus the null
+    /// element) exceed the pipeline's heap capacity: the heap arrays' count, at most the handle
+    /// table's reach.
+    HeapTooLarge { count: u64, limit: u64 },
+    /// A pipeline reads the Metal address of a buffer slot (`SlotGuestBase`: a pointer compare,
+    /// `ptrtoint`, or stored pointer) that is bound with `set*Bytes`, which gives the binder no
+    /// Metal address to write.
+    MissingGuestAddress { slot: SlotRef },
+    /// The encoder's vertex amplification (`setVertexAmplificationCount:viewMappings:`) is not
+    /// one Metal draws this pipeline with: a count of 0, one above 1 for a pipeline whose
+    /// `maxVertexAmplificationCount` (`max`) is 1, or view mappings given for fewer
+    /// amplifications than the count.
+    InvalidVertexAmplification {
+        count: u32,
+        max: u32,
+        view_mappings: u32,
+    },
+    /// The dispatch runs on another variant of the pipeline than the one planned: a threadgroup
+    /// with a partial simdgroup, which the kernel's flattened simd tier cannot run, runs on its
+    /// emulated-simdgroups variant (`VariantKey::emulated_simdgroups`). The consumer compiles the
+    /// pipeline under `variant` (the plan's key and what the dispatch adds, also
+    /// `BindingPlan::dispatch_variant`), plans it for the same shape, whose plan states `variant`,
+    /// and instantiates the dispatch there. Nothing is dispatched on the plan asked. A draw answers
+    /// it when the pipeline planned is not the variant its vertex function's render target slice
+    /// asks for at the shape's render target array length (`VariantKey::dropped_vertex_layer`);
+    /// `variant` is then the plan's own. A draw of a capture variant answers it when the draw is of
+    /// the other capture form (`VariantKey::captured_positions`): `variant` is the plan's with the
+    /// draw's form. Boxed: a key holds a set per kind of variant, and the error stays small.
+    NeedsVariant {
+        variant: Box<crate::cache::VariantKey>,
+    },
+    /// The compute encoder's imageblock size (`setImageblockWidth:height:`) is not one a kernel
+    /// with an imageblock dispatches with: a width or height of 0 (the encoder never set it) or
+    /// above 65535, which `get_imageblock_width` and `get_imageblock_height` cannot answer.
+    InvalidImageblockSize { width: u32, height: u32 },
+    /// The kernel reads the compute encoder's stage-in region (a `[[stage_in]]` attribute
+    /// stepping by thread position, or `[[grid_origin]]` or `[[grid_size]]`) and the encoder
+    /// never set one (`setStageInRegion:`): what Metal reads then is not established.
+    MissingStageInRegion,
+    /// A `device` buffer slot the pipeline reads through a uniform view (Profile F's per-stage
+    /// storage-buffer fallback, `RuntimeFact::UniformViewAliasing`) is bound where a buffer slot
+    /// the pipeline writes (`written`) may write: their Metal windows overlap. A uniform view need
+    /// not observe the dispatch's or draw's own writes, so nothing is bound. Depends on the
+    /// per-draw Metal addresses, not on the shape.
+    UniformViewAliased { slot: SlotRef, written: SlotRef },
+    /// A draw Metal does not make with this pipeline: patches (`patches`) with a pipeline whose
+    /// vertex function is not post-tessellation, or primitives with one whose vertex function is.
+    InvalidDrawKind { patches: bool },
+    /// A patch draw's `numberOfPatchControlPoints` (`given`) differs from the `N` the
+    /// post-tessellation vertex function's `[[patch(_, N)]]` states (`expected`).
+    PatchControlPoints { given: u32, expected: u32 },
+    /// The tessellation factors a draw reads span more bytes (`needed`) than one storage-buffer
+    /// descriptor can bind (`limit`, `maxStorageBufferRange`), or an instance stride does.
+    TessellationFactorRange { needed: u64, limit: u64 },
+    /// The encoder's tessellation factor scale (`bits`, the `float`'s) rounded to `half` is not a
+    /// positive `half` (it is negative, zero, or NaN). Metal's validation stops
+    /// `setTessellationFactorScale:` for a scale that is not a positive normal `float`, and
+    /// culls every patch for one that is 0 as a `half` (2^-30, EVs ICBV-scale2-m3 and -m4), which
+    /// a consumer draws as nothing.
+    InvalidTessellationFactorScale { bits: u32 },
+    /// A tile function's render area (`BindState::render_area`) has a width or height of 0: the
+    /// encoder's render pass was never set, so the dispatch has no tile to run.
+    InvalidRenderArea { width: u32, height: u32 },
+    /// The binder sets up no device replay of GPU-encoded compute commands for this execution,
+    /// variant set, or plan: `reason` says why. Nothing is recorded.
+    InvalidReplay {
+        reason: crate::bind::replay::ReplayRefusal,
+    },
+    /// A patch draw's patch index buffer is bound at an offset that is not a multiple of 4, which
+    /// Metal requires (RT6 Metal probe 14: "patchIndexBufferOffset(2) must be a multiple of 4
+    /// bytes").
+    InvalidPatchIndexBuffer { offset: u64 },
+    /// The patch indices a draw reads span more bytes (`needed`) than one storage-buffer
+    /// descriptor can bind (`limit`, `maxStorageBufferRange`).
+    PatchIndexRange { needed: u64, limit: u64 },
+    /// A patch draw with a control-point index buffer (`indexed`, `drawIndexedPatches`) for a
+    /// pipeline whose `tessellationControlPointIndexType` is `None`, or one without it for a
+    /// pipeline whose type is not, which Metal's validation stops (RT6 Metal probe 14:
+    /// "tessellationControlPointIndexType of MTLTessellationControlPointIndexTypeNone not valid
+    /// for drawIndexedPatches", and of `UInt32` for `drawPatches`).
+    ControlPointIndexing { indexed: bool },
+    /// A patch draw's control-point index buffer is bound at an offset that is not a multiple of
+    /// its pipeline's index size, which Metal requires (RT6 Metal probe 14:
+    /// "controlPointIndexBufferOffset(1) must be a multiple of 2 bytes").
+    InvalidControlPointIndexBuffer { offset: u64 },
+    /// The control-point indices a draw reads span more bytes (`needed`) than one storage-buffer
+    /// descriptor can bind (`limit`, `maxStorageBufferRange`).
+    ControlPointIndexRange { needed: u64, limit: u64 },
+    /// A tile function reads its threadgroup argument `index`, which the encoder never set
+    /// (`BindState::tile_threadgroup`, `setThreadgroupMemoryLength:offset:atIndex:`): Metal's
+    /// validation stops the dispatch ("missing Threadgroup Memory binding").
+    MissingThreadgroupMemory { index: u32 },
+    /// A tile function's threadgroup argument `index` set at `offset` for `length` bytes, which
+    /// end past the render pass's tile threadgroup memory of `tile_length` bytes, or a length or
+    /// offset that is not a multiple of 16: Metal's validation refuses the setter.
+    TileThreadgroupArgument {
+        index: u32,
+        offset: u32,
+        length: u32,
+        tile_length: u32,
+    },
+    /// A draw Metal does not make with this pipeline: a mesh draw (`mesh`) with a pipeline that is
+    /// not a mesh render pipeline, or a draw of primitives or patches with one (Metal ends the
+    /// process on `drawPrimitives` with a mesh pipeline state).
+    InvalidMeshDraw { mesh: bool },
+    /// An indexed draw of an indexed capture variant (`CaptureForm::Indexed`) whose bind state
+    /// names no primitive type (`BindState::primitive_type`): whether the draw restarts at the
+    /// index type's all-ones index, where Metal shades no vertex, depends on it.
+    MissingPrimitiveType,
+}
+
+impl fmt::Display for BindError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self, f)
+    }
+}
+
+impl std::error::Error for BindError {}
+
+#[cfg(test)]
+mod tests;

@@ -1,0 +1,87 @@
+[package]
+name = "metal2vulkan"
+version = "0.2.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Translate Metal AIR / LLVM IR to Vulkan SPIR-V with a native Rust emitter"
+# The repository's README, at the root: `cargo package` puts it at the package's root.
+readme = "../../README.md"
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/metal2vulkan"
+keywords = ["metal", "air", "spir-v", "vulkan", "gpu"]
+categories = ["compilers", "graphics", "encoding"]
+# Every binary has its own [[bin]] table: no crate root can appear unannounced, so the build
+# scripts watch only the files the product fingerprint hashes (build_support.rs).
+autobins = false
+# crates.io ships only this product crate's lib, bin, examples, and unit and integration tests
+# (src/, examples/, tests/). The other workspace crates live beside it under crates/ (the AIR front
+# end is published as its own crate, `metal2vulkan-air`); the private corpus, scripts and docs are
+# outside this directory.
+exclude = [
+    "/target/",
+    "Cargo.lock",
+    "**/*.air",
+    "**/*.metallib",
+    "**/*.mtlb",
+    "**/*.spv",
+    "**/*.spvasm",
+]
+
+# The command-line tool (feature `cli`, README "CLI").
+[[bin]]
+name = "metal2vulkan"
+path = "src/main.rs"
+required-features = ["cli"]
+
+# A tour of the new API's frozen surface; docs/API.md quotes it.
+[[example]]
+name = "api_preview"
+path = "examples/api_preview.rs"
+
+[lib]
+name = "metal2vulkan"
+path = "src/lib.rs"
+
+[dependencies]
+# The AIR front end: the container, bitcode, typed IR, ABI, intrinsics,
+# canonicalization, CFG algorithms and the per-attempt budget. Pinned exactly: the two crates move
+# in lockstep, one version. Named here, not through the workspace: the build script's source
+# fingerprint reads this path to hash the front end's sources (`build_support.rs`).
+metal2vulkan-air = { version = "=0.2.0", path = "../metal2vulkan-air" }
+# Optional: the new API's plain-data values.
+serde = { workspace = true, optional = true }
+# Reads Khronos device-profile JSON into a `device::DeviceDescription`.
+serde_json.workspace = true
+# SHA-256: library and function content keys, metallib hash verification, and pipeline keys.
+sha2.workspace = true
+# Optional: `ash` conversions and `DeviceDescription::query` for consumers that own an `ash` engine
+# Pinned to the consumer's (and validation's) `ash 0.38`;
+# no loader is linked or loaded (`std` only).
+ash = { workspace = true, optional = true, features = ["std"] }
+
+[features]
+default = []
+# Serialize the new API's plain-data descriptors and pipeline facts.
+serde = ["dep:serde", "metal2vulkan-air/serde"]
+# The `metal2vulkan` command-line tool: a metallib, AIR bitcode, or LLVM text in, a pipeline's
+# SPIR-V and (`--emit-meta`) its JSON out, through the new API.
+cli = ["serde"]
+# `From` conversions between the plain-data `vk` values and `ash::vk`, and
+# `DeviceDescription::query` (DESIGN §2.2 `ash_interop`).
+ash = ["dep:ash"]
+
+[build-dependencies]
+sha2.workspace = true
+
+[dev-dependencies]
+# The tests' fixture assemblers and fixture directories. Path-only, so `cargo
+# publish` drops it and the published manifest names no unpublished crate.
+metal2vulkan-devtools = { path = "../metal2vulkan-devtools" }
+serde_json.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

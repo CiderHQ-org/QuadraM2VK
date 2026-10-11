@@ -1,0 +1,156 @@
+//! The resident set and root tables.
+//!
+//! The resident set of a draw or dispatch is every bound buffer with a device address and every
+//! `Buffer`/`Heap` used resource with both addresses, coalesced (`resident_set`): sorted by
+//! guest address, an allocation inside another dropped (the outermost wins: a heap over its
+//! sub-buffers), a partially overlapping one trimmed of its overlapping head (host and guest
+//! advancing together), and empty ones dropped, of any count (At most 2¹⁶ entries before, else
+//! `ResidentSetTooLarge`). Each stage that reads a root table gets its own (`stage_root_table`):
+//! its `Psb` entries are that stage's slots; the resident set is shared.
+
+use crate::bind::instantiate::{padded, RootTable};
+use crate::bind::state::{BindState, BoundBuffer, ResourceClass};
+
+/// One root-table entry.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub(crate) struct RootEntry {
+    /// The allocation's device address.
+    pub host: u64,
+    /// The allocation's Metal address.
+    pub guest: u64,
+    /// The allocation's size, padded to 16 bytes.
+    pub size: u64,
+    /// The Metal bind offset (parameter entries only; 0 in the resident set).
+    pub bind_offset: u64,
+}
+
+/// The resident set of `all` allocations: sorted by guest address; an allocation inside another one
+/// is dropped (the outermost wins: a heap over its sub-buffers); a partially overlapping one loses
+/// its overlapping head (its host and guest addresses advance together, which is exact when both
+/// ranges view one mapping); empty allocations are dropped.
+pub(crate) fn resident_set(mut all: Vec<RootEntry>) -> Vec<RootEntry> {
+    all.retain(|e| e.size > 0);
+    all.sort_by(|a, b| a.guest.cmp(&b.guest).then(b.size.cmp(&a.size)));
+    let end = |e: &RootEntry| u128::from(e.guest) + u128::from(e.size);
+    let mut out: Vec<RootEntry> = Vec::with_capacity(all.len());
+    for mut e in all {
+        if let Some(last) = out.last() {
+            let last_end = end(last);
+            if end(&e) <= last_end {
+                continue;
+            }
+            if u128::from(e.guest) < last_end {
+                // `last_end - e.guest < e.size`, so the cut fits in `u64`.
+                let cut = (last_end - u128::from(e.guest)) as u64;
+                e.guest += cut;
+                e.host = e.host.wrapping_add(cut);
+                e.size -= cut;
+            }
+        }
+        e.bind_offset = 0;
+        out.push(e);
+    }
+    out
+}
+
+/// The coalesced resident set of `state`: every bound buffer with a device address (every stage)
+/// and every `Buffer`/`Heap` used resource with both addresses, at their padded sizes.
+pub(crate) fn resident_entries(state: &BindState) -> Vec<RootEntry> {
+    let all = resident_allocations(state)
+        .map(|(host, guest, length)| RootEntry {
+            host,
+            guest,
+            size: padded(length),
+            bind_offset: 0,
+        })
+        .collect();
+    resident_set(all)
+}
+
+/// Every allocation of `state`'s resident set before coalescing, as `(host, guest, length)` at
+/// its own length (before the padding): the bound buffers, the used buffers and heaps, and the
+/// ranges listed apart (`BindState::resident_ranges`).
+fn resident_allocations(state: &BindState) -> impl Iterator<Item = (u64, u64, u64)> + '_ {
+    let bound = state.stages.values().flat_map(|stage_table| {
+        stage_table.buffers.values().filter_map(|b| match *b {
+            BoundBuffer::Buffer {
+                length,
+                gpu_address,
+                device_address: Some(host),
+                ..
+            } => Some((host, gpu_address, length)),
+            _ => None,
+        })
+    });
+    let used = state.used_resources.iter().filter_map(|u| {
+        match (u.class, u.gpu_address, u.device_address) {
+            (ResourceClass::Buffer | ResourceClass::Heap, Some(guest), Some(host)) => {
+                Some((host, guest, u.length))
+            }
+            _ => None,
+        }
+    });
+    let listed = state
+        .resident_ranges
+        .iter()
+        .map(|range| (range.host, range.guest, range.length));
+    bound.chain(used).chain(listed)
+}
+
+/// The unpadded extent of each entry of `resident` (`state`'s resident set,
+/// [`resident_entries`]): how many bytes from the entry's guest address the allocations of `state`
+/// hold without a gap at their own lengths (before the padding), at most the entry's size. Every
+/// address an entry holds below its extent is one an allocation holds, as a host resolve finds it
+/// (`BufferBinding::resolve_buffer`); the converse fails only for an address past a gap inside one
+/// padded window, which only allocations whose guest addresses are not 16-aligned leave. Sorting,
+/// then one forward pass per entry over the allocations that start inside its window (the windows
+/// are disjoint), bounds the work by the allocations' count times its logarithm.
+pub(crate) fn resident_extents(state: &BindState, resident: &[RootEntry]) -> Vec<u64> {
+    let mut ranges: Vec<(u128, u128)> = resident_allocations(state)
+        .filter(|&(_, _, length)| length > 0)
+        .map(|(_, guest, length)| (u128::from(guest), u128::from(guest) + u128::from(length)))
+        .collect();
+    ranges.sort_unstable();
+    // The furthest end of the allocations up to each one.
+    let mut furthest = Vec::with_capacity(ranges.len());
+    let mut reach = 0u128;
+    for &(_, end) in &ranges {
+        reach = reach.max(end);
+        furthest.push(reach);
+    }
+    resident
+        .iter()
+        .map(|e| {
+            let start = u128::from(e.guest);
+            let limit = start + u128::from(e.size);
+            // The allocations starting at or below the entry: any that reaches past its start
+            // holds it.
+            let below = ranges.partition_point(|&(guest, _)| guest <= start);
+            let mut cover = match below {
+                0 => start,
+                n => furthest[n - 1].max(start),
+            };
+            for &(guest, end) in &ranges[below..] {
+                if guest > cover || cover >= limit {
+                    break;
+                }
+                cover = cover.max(end);
+            }
+            // `cover - start` is at most `size`, a `u64`.
+            (cover.min(limit) - start) as u64
+        })
+        .collect()
+}
+
+/// The root table of one stage: its `Psb` entries (`(n, entry)` for `[[buffer(n)]]`) and the
+/// coalesced `resident` set from root `first`.
+pub(crate) fn stage_root_table(
+    statics: &[(u32, RootEntry)],
+    first: u32,
+    resident: &[RootEntry],
+) -> RootTable {
+    RootTable::build(statics, u64::from(first), resident)
+}
+
+#[cfg(test)]
+mod tests;

@@ -1,0 +1,640 @@
+//! `PipelineInterface`: the binder's input and a Metal-reflection-shaped view for the consumer.
+//!
+//! Per stage and slot it states the argument kind, how the shader accesses it (proven, never
+//! guessed), the buffer form and view the function selected, and the proven window. It replaced
+//! the old engine's `ShaderReflection`, which 0.2.0 removed.
+
+use std::collections::BTreeMap;
+
+use crate::metal;
+use crate::pipeline::sym::{PushField, ResourceSlot, SampledType, SlotRef, SpecKey, Stage};
+use crate::vk;
+
+/// The interface of a pipeline.
+#[non_exhaustive]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct PipelineInterface {
+    /// Every statically used Metal argument slot.
+    #[cfg_attr(feature = "serde", serde(with = "crate::pipeline::serde_pairs"))]
+    pub slots: BTreeMap<SlotRef, SlotInterface>,
+    /// `[[threadgroup(n)]]` arguments of the kernel.
+    pub threadgroup: Vec<ThreadgroupArgument>,
+    /// Some function reads the resident root table (a `Psb` slot or a dynamic root), so the binder
+    /// builds it, with an entry for every `Psb` slot.
+    pub needs_pointer_translation: bool,
+    /// Some function resolves texture or sampler handles, so the binder builds the handle table and
+    /// the set-1 heap.
+    pub needs_handle_translation: bool,
+    /// Each stage's push placement, in stage order: the push bytes and `ArgumentTable` contents the
+    /// binder writes.
+    pub push: Vec<PushPlacement>,
+    /// Some stage's function may reach an indirect command buffer
+    /// (`StageInterface::reaches_command_buffers`): only such a pipeline can encode, reset or
+    /// copy indirect commands; `false` is proven.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub reaches_command_buffers: bool,
+    /// The stages whose function may write a texture (`StageInterface::writes_textures`), in the
+    /// pipeline's stage order: a stage not listed writes no texture, which is proven.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub texture_writing_stages: Vec<Stage>,
+    /// The samplers a pipeline state numbers for each of its Metal functions
+    /// (`StageInterface::numbered_samplers`, [`NumberedSampler`]), each function's in Metal's
+    /// order, the functions in the pipeline's stage order: what the runtime gives sampler
+    /// resource IDs as Metal's pipeline creation does.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub numbered_samplers: Vec<(Stage, Vec<NumberedSampler>)>,
+}
+
+/// What one Metal argument slot is and how the shader uses it.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum SlotInterface {
+    Buffer(BufferSlot),
+    Texture(TextureSlot),
+    Sampler(SamplerSlot),
+}
+
+/// A buffer argument.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct BufferSlot {
+    /// What the module does to the buffer through the slot: the function's loads and stores, an
+    /// atomic as both, and a read where a store merges a partial word through the sub-word
+    /// store's two atomics, which read the word they modify.
+    pub access: AccessSet,
+    /// The byte window the shader can touch, relative to the bind offset.
+    pub window: Window,
+    /// How the function reaches the buffer.
+    pub form: BufferForm,
+    /// What the slot holds: a buffer, or a function table the function reads as a buffer of
+    /// words. Metal binds each with its own call, and its API validation stops a dispatch whose
+    /// slot holds the other kind.
+    pub kind: BufferKind,
+}
+
+/// What a buffer slot holds: the function's parameter at its index in the AIR ABI (`air.buffer`,
+/// `air.visible_function_table`, `air.intersection_function_table`).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum BufferKind {
+    /// A buffer (`setBuffer:offset:atIndex:`).
+    Buffer,
+    /// A visible-function table (`setVisibleFunctionTable:atBufferIndex:`), read as the words of
+    /// `pipeline::table`.
+    VisibleFunctionTable,
+    /// An intersection function table (`setIntersectionFunctionTable:atBufferIndex:`), read as
+    /// its words.
+    IntersectionFunctionTable,
+}
+
+/// A texture argument.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TextureSlot {
+    /// The texture type the shader declares.
+    pub texture_type: metal::TextureType,
+    /// The numeric type the shader reads or writes.
+    pub sampled_type: SampledType,
+    /// A depth texture sampled with comparison.
+    pub depth_compare: bool,
+    pub access: TextureAccess,
+}
+
+/// How a texture is used (Metal `access::` qualifiers plus sampling).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TextureAccess {
+    pub sample: bool,
+    pub read: bool,
+    pub write: bool,
+}
+
+impl TextureAccess {
+    /// An access set from its three bits.
+    pub fn new(sample: bool, read: bool, write: bool) -> TextureAccess {
+        TextureAccess {
+            sample,
+            read,
+            write,
+        }
+    }
+}
+
+/// A sampler argument.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct SamplerSlot {
+    /// The shader samples with depth comparison.
+    pub compare: bool,
+    /// A coordinate-sensitive sampling op uses it, so its coordinate mode is a runtime fact.
+    pub coordinate_sensitive: bool,
+}
+
+/// A sampler a pipeline state numbers for one of its functions, as Metal's does: each takes a plain
+/// sampler resource ID (`gpuResourceID` of the sampler states made after it start past it) unless
+/// an equal one of the device holds one. Measured on an Apple M4 (macOS 27.0.1) and an M3 Max
+/// (macOS 26.7).
+///
+/// [`CompiledFunction::numbered_samplers`](crate::library::CompiledFunction::numbered_samplers)
+/// lists a function's in Metal's order, and [`PipelineInterface::numbered_samplers`] each of a
+/// pipeline's functions': its constexpr samplers in the reverse of the module's
+/// `!air.sampler_states` order, then [`Read`] where it reads a texture, then [`Write`] where it
+/// writes one.
+///
+/// [`Read`]: NumberedSampler::Read
+/// [`Write`]: NumberedSampler::Write
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum NumberedSampler {
+    /// A constexpr sampler the specialized function samples, gathers or queries a level of
+    /// texture through, by its canonical AIR state words (as `SamplerRef::Constexpr` names it):
+    /// two of equal state are one.
+    Constexpr([u64; 2]),
+    /// The sampler of a texture `read`: the specialized function reads a texel of a texture of
+    /// any type (a texture buffer's, a depth texture's, a multisampled one's), through an
+    /// argument, an argument buffer or any handle. A size query, an atomic, or a texture argument
+    /// the function never reads takes none.
+    Read,
+    /// The sampler of a texture `write`: the specialized function writes a texel of a texture of
+    /// any type (a texture buffer's too).
+    Write,
+}
+
+/// Which memory operations the shader performs on a resource. `Unused` is both false.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct AccessSet {
+    pub read: bool,
+    pub write: bool,
+}
+
+impl AccessSet {
+    /// Neither read nor written.
+    pub const UNUSED: AccessSet = AccessSet {
+        read: false,
+        write: false,
+    };
+    /// Read only.
+    pub const READ: AccessSet = AccessSet {
+        read: true,
+        write: false,
+    };
+    /// Written only.
+    pub const WRITE: AccessSet = AccessSet {
+        read: false,
+        write: true,
+    };
+    /// Read and written.
+    pub const READ_WRITE: AccessSet = AccessSet {
+        read: true,
+        write: true,
+    };
+}
+
+/// The proven byte window of a buffer slot, relative to its bind offset.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum Window {
+    /// `[start, start + len)`; `start` may be negative.
+    Bounded { start: i64, len: u64 },
+    /// Anywhere from the bind offset to the end of the allocation (always the case when the shader
+    /// has a dynamic root).
+    Whole,
+}
+
+/// How a function reaches a buffer slot.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum BufferForm {
+    /// Through a descriptor of this view kind.
+    Descriptor(DescriptorView),
+    /// Through a buffer device address (dynamic roots, per-stage limit fallback, or a
+    /// `BufferRangeLimit` variant); the bound buffer needs a device address.
+    Psb,
+}
+
+/// The descriptor view kind of a descriptor-form slot.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum DescriptorView {
+    /// A storage buffer.
+    Storage,
+    /// A uniform buffer viewed as `u32[]` (needs `uniformBufferStandardLayout`).
+    UniformWords,
+    /// A uniform buffer viewed as a `uvec4` array (std140-valid everywhere).
+    UniformVec4,
+}
+
+/// How a compiled function fetches one attribute it reads
+/// ([`CompiledFunction::attribute_fetches`](crate::library::CompiledFunction::attribute_fetches)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum AttributeFetch {
+    /// Fixed-function vertex input: the pipeline's vertex input state fetches it.
+    FixedFunction,
+    /// In the shader, from the buffer at Metal index `buffer_index`.
+    Pulled { buffer_index: u32 },
+}
+
+/// The interface of one compiled function: what link and the binder need without the module's
+/// words.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct StageInterface {
+    pub stage: Stage,
+    /// Every statically used Metal argument slot of the function.
+    #[cfg_attr(feature = "serde", serde(with = "crate::pipeline::serde_pairs"))]
+    pub slots: BTreeMap<SlotRef, SlotInterface>,
+    /// `[[threadgroup(n)]]` arguments (kernels).
+    pub threadgroup: Vec<ThreadgroupArgument>,
+    /// Where each push field lives: the stage's push range and `ArgumentTable` layout.
+    pub push: PushPlacement,
+    /// Every descriptor binding symbol the module declares, synthetic ones included, with the
+    /// descriptor it needs; sorted by symbol (the link contract).
+    pub descriptors: Vec<StageDescriptor>,
+    /// Every specialization constant the module declares, sorted by key.
+    pub spec: Vec<StageSpec>,
+    /// The function reads the resident root table: it has a `Psb` slot or a dynamic root, so the
+    /// binder builds the root table with an entry for every `Psb` slot.
+    pub needs_pointer_translation: bool,
+    /// The function resolves texture or sampler handles.
+    pub needs_handle_translation: bool,
+    /// The stage-IO interface (vertex and fragment functions; empty for kernels): what every
+    /// `Location` key of the module is, and every vertex attribute the function reads with the
+    /// fetch it was compiled under. It is the one contract link numbers locations and derives
+    /// vertex input from.
+    pub io: crate::pipeline::stage_io::StageIo,
+    /// A post-tessellation vertex function's evaluation stage: the module is a
+    /// `TessellationEvaluation` entry, bound through the vertex argument table as Metal binds it.
+    pub tessellation: Option<TessellationStage>,
+    /// The function writes memory another invocation or a later command can read: it stores to
+    /// a buffer or a texture, or updates one atomically (`spirv::requirements::writes_memory`).
+    /// Metal runs a multisampled fragment function with such a side effect once per covered
+    /// sample. The `ExecutionStatus` buffer's words, which the resident-miss count updates, are not
+    /// the function's, nor a color's interlocked storage form's or `half` shadow's, which carry
+    /// Metal's color attachment write.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub writes_memory: bool,
+    /// A mesh function compiled for a device without `VK_EXT_mesh_shader`: the module is a
+    /// `GLCompute` entry that writes its threadgroups' vertices and primitives as these records,
+    /// which the pipeline's synthesized vertex stage draws.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub mesh_records: Option<MeshRecords>,
+    /// An object or mesh function compiled for a device without `VK_EXT_mesh_shader` (a
+    /// `GLCompute` entry): its payload's words (0 without a payload), which its object
+    /// threadgroup's slot of the draw's work buffer holds (`MeshRecords::slot_words`). `None`
+    /// for any other function.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub emulated_payload: Option<u32>,
+    /// The function may reach an indirect command buffer, of the entry its function constants
+    /// specialized (a constant that gates an argument or a path off leaves it out); `false` only
+    /// where the function provably touches none. It is `true` where the function takes one
+    /// (`air.command_buffer`), as an argument or as a member of a buffer it takes at any depth of
+    /// the buffer's argument-buffer layouts, whatever the body does with it; and where the body
+    /// calls an indirect-command operation on any pointer, a command buffer the metadata names or
+    /// one the body casts from other bytes, loads from a member no layout describes, or makes
+    /// from an integer (Metal gives a command buffer's records no address, so an operation is the
+    /// only way to them), or makes a call it cannot see into (`Entry::may_encode_indirect_commands`
+    /// of `metal2vulkan-air`). Only such a function can encode, reset or copy indirect commands.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub reaches_command_buffers: bool,
+    /// The function may write a texture, of the entry its function constants specialized;
+    /// `false` only where the function provably writes none. It is `true` where the function
+    /// takes a texture declared `access::write` or `access::read_write`, as an argument or as a
+    /// member of a buffer it takes at any depth of the buffer's argument-buffer layouts,
+    /// whatever the body does with it; and where the body calls a texture operation that stores
+    /// a texel (a `write`, an imageblock slice written to a texture, or an atomic other than a
+    /// load) through any handle, an argument buffer's, a heap's or a resource ID included, or
+    /// makes a call it cannot see into (`Entry::may_write_textures` of `metal2vulkan-air`).
+    /// Color attachment outputs, imageblock and tile stores, and stores to the bytes of a
+    /// buffer a texture views are not texture writes.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub writes_textures: bool,
+    /// The samplers a pipeline state of the function numbers for it, of the entry its function
+    /// constants specialized, in Metal's order ([`NumberedSampler`]): the runtime gives each a
+    /// sampler resource ID as Metal's pipeline creation does.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub numbered_samplers: Vec<NumberedSampler>,
+}
+
+/// An emulated mesh function's records: what each of its threadgroups writes to the draw's records
+/// buffer (`SyntheticBinding::MeshRecords`), all of it words.
+///
+/// Mesh threadgroup `w`, its number among the draw's mesh threadgroups (object threadgroup by
+/// object threadgroup, each one's grid x fastest), owns [`MeshRecords::group_words`] words from
+/// the draw's first word plus `w · group_words()`: its primitive count, then `vertices` vertex
+/// records of `vertex_words` words each, then `primitives` primitive records of
+/// `primitive_words` words each, every primitive record beginning with the primitive's
+/// `corners` indices. Each field sits at its offset in its record, one word per lane. A
+/// threadgroup zeroes its words before its body runs, so an index, a culled flag, or a render
+/// target slice or viewport index the function does not write reads 0, as Metal's does.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct MeshRecords {
+    /// The mesh type's `NV`.
+    pub vertices: u32,
+    /// The mesh type's `NP`.
+    pub primitives: u32,
+    /// The indices of one primitive: 1 (points), 2 (lines) or 3 (triangles).
+    pub corners: u32,
+    pub vertex_words: u32,
+    pub primitive_words: u32,
+    /// Every field, in record order: the vertex record's, then the primitive record's.
+    pub fields: Vec<RecordField>,
+    /// The words of an object threadgroup's slot in the draw's work buffer: its grid's three
+    /// counts and a zero, then the larger payload of the pipeline's object and mesh functions
+    /// (in a function's own interface, its own payload).
+    pub slot_words: u32,
+}
+
+impl MeshRecords {
+    /// The words of one threadgroup's records: its count, its vertex records and its primitive
+    /// records.
+    pub fn group_words(&self) -> u64 {
+        1 + u64::from(self.vertices) * u64::from(self.vertex_words)
+            + u64::from(self.primitives) * u64::from(self.primitive_words)
+    }
+
+    /// The word of a threadgroup's records where its primitive records begin.
+    pub fn primitive_base(&self) -> u64 {
+        1 + u64::from(self.vertices) * u64::from(self.vertex_words)
+    }
+
+    /// The Vulkan list topology of the records' primitives.
+    pub fn topology(&self) -> vk::PrimitiveTopology {
+        match self.corners {
+            1 => vk::PrimitiveTopology::POINT_LIST,
+            2 => vk::PrimitiveTopology::LINE_LIST,
+            _ => vk::PrimitiveTopology::TRIANGLE_LIST,
+        }
+    }
+}
+
+/// One field of a vertex or primitive record ([`MeshRecords`]).
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct RecordField {
+    pub value: RecordValue,
+    /// In the primitive record, else in the vertex record.
+    pub per_primitive: bool,
+    /// Its first word in its record.
+    pub offset: u32,
+    /// Its words: its lanes, or the length of the clip distances.
+    pub words: u32,
+    /// What each word holds: a `float`'s bits, a `uint`, or an `int`'s bits (a `bool` is a
+    /// `uint`, 0 or 1).
+    pub numeric: crate::pipeline::stage_io::IoNumeric,
+}
+
+/// What a [`RecordField`] holds.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum RecordValue {
+    /// `[[position]]`.
+    Position,
+    /// `[[point_size]]`.
+    PointSize,
+    /// `[[clip_distance]]`.
+    ClipDistance,
+    /// `[[primitive_culled]]`, 1 where set.
+    Culled,
+    /// The primitive's render target slice (`Layer`): its `[[render_target_array_index]]` where
+    /// that lies below the pass's length, else 0.
+    Layer,
+    /// The primitive's viewport (`ViewportIndex`): its `[[viewport_array_index]]` where that lies
+    /// below the draw's viewport count, else 0.
+    ViewportIndex,
+    /// A user varying: vertex data, primitive data, or a raw index (the link numbers its
+    /// location by key).
+    Varying(crate::pipeline::sym::VaryingKey),
+}
+
+/// What a tessellation evaluation module (a post-tessellation vertex function) needs of the
+/// pipeline's control stage: its patch domain and Metal's control points per patch. It reads the
+/// patch index and the instance as `uint` patch inputs at
+/// [`TessellationStage::PATCH_INDEX_LOCATION`] and [`TessellationStage::INSTANCE_LOCATION`],
+/// which the control stage writes.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TessellationStage {
+    pub domain: PatchDomain,
+    /// `[[patch(_, N)]]`: the control points of each patch the function reads (0 when the
+    /// function does not state it).
+    pub control_points: u32,
+}
+
+impl TessellationStage {
+    /// The patch input holding Metal's patch index (`[[patch_id]]`).
+    pub const PATCH_INDEX_LOCATION: u32 = 0;
+    /// The patch input holding Metal's instance index (`[[instance_id]]`).
+    pub const INSTANCE_LOCATION: u32 = 1;
+    /// The patch input holding the element of each of the patch's control points: a `uvec4` array
+    /// of `ceil(N / 4)` elements, control point `k`'s element in component `k % 4` of element `k /
+    /// 4`, from this location on.
+    pub const CONTROL_POINT_LOCATION: u32 = 2;
+
+    /// The evaluation stage of a `domain` patch of `control_points` control points.
+    pub fn new(domain: PatchDomain, control_points: u32) -> TessellationStage {
+        TessellationStage {
+            domain,
+            control_points,
+        }
+    }
+}
+
+/// The patch type of a post-tessellation vertex function (`[[patch(triangle|quad, N)]]`).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum PatchDomain {
+    /// `[[patch(triangle, N)]]`.
+    Triangle,
+    /// `[[patch(quad, N)]]`.
+    Quad,
+}
+
+impl StageInterface {
+    /// The Vulkan stage of the module: the evaluation stage for a post-tessellation vertex
+    /// function, the compute stage for an emulated object or mesh function, else the Metal stage's.
+    pub fn vk_stage(&self) -> vk::ShaderStage {
+        match (self.tessellation, self.emulated_payload) {
+            (Some(_), _) => vk::ShaderStage::TESSELLATION_EVALUATION,
+            (None, Some(_)) => vk::ShaderStage::COMPUTE,
+            (None, None) => crate::device::derive::vk_stage(self.stage),
+        }
+    }
+
+    /// Whether the module declares specialization constant `key`.
+    #[cfg(test)]
+    pub fn declares_spec(&self, key: SpecKey) -> bool {
+        self.spec.iter().any(|s| s.key == key)
+    }
+
+    /// The keys the function reads: its specialization constants' keys, then the keys it reads
+    /// as data from its `PushField::Specialized` fields.
+    #[cfg(test)]
+    pub fn read_keys(&self) -> Vec<SpecKey> {
+        let pushed = self.push.fields.iter().filter_map(|f| match f.field {
+            crate::pipeline::sym::PushField::Specialized(key) => Some(key),
+            _ => None,
+        });
+        self.spec.iter().map(|s| s.key).chain(pushed).collect()
+    }
+
+    /// Whether the function reads key `key`, specialized or as data.
+    #[cfg(test)]
+    pub fn reads_key(&self, key: SpecKey) -> bool {
+        self.read_keys().contains(&key)
+    }
+
+    /// The function is a vertex function with a `[[point_size]]` output that the module writes
+    /// (its `PointSize` builtin, not the 1.0 the module writes for a function without one). Metal
+    /// refuses such a function in a render pipeline whose input primitive topology class is line or
+    /// triangle (measured on an M3 Max and an M4). A post-tessellation vertex function's point size
+    /// sizes nothing and is dropped, so it answers `false`.
+    pub fn writes_point_size(&self) -> bool {
+        self.io
+            .builtins
+            .contains(&crate::pipeline::stage_io::StageBuiltin::PointSize { default: false })
+    }
+}
+
+/// One descriptor binding a function's module declares: link numbers it in set 0 and lists it in
+/// the `PipelineLayout` with exactly this type and count.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct StageDescriptor {
+    pub slot: ResourceSlot,
+    pub ty: vk::DescriptorType,
+    /// Descriptor array size (1 for a single descriptor; 0 for a set-1 heap array, whose size
+    /// link sets).
+    pub count: u32,
+}
+
+impl StageDescriptor {
+    /// A descriptor of `ty` and `count` for `slot`.
+    pub fn new(slot: ResourceSlot, ty: vk::DescriptorType, count: u32) -> StageDescriptor {
+        StageDescriptor { slot, ty, count }
+    }
+}
+
+/// One specialization constant a function's module declares.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct StageSpec {
+    pub key: SpecKey,
+    /// Size in bytes of the `VkSpecializationMapEntry` (4 for `bool` and 32-bit scalars).
+    pub size: u32,
+    /// The module's default value, as its low bytes.
+    pub default: u64,
+    /// The bits of the value no instruction of the module can read and no specialized note
+    /// tests (`spirv::spec_bits`): a binder clears them, so values that differ only there give
+    /// one program and one pipeline. 0 where every bit may be read.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub unread_bits: u64,
+}
+
+impl StageSpec {
+    /// A constant `key` of `size` bytes with `default`, every bit of it read.
+    pub fn new(key: SpecKey, size: u32, default: u64) -> StageSpec {
+        StageSpec {
+            key,
+            size,
+            default,
+            unread_bits: 0,
+        }
+    }
+}
+
+/// The push placement of one function: each field's location in the stage's push window or its
+/// `ArgumentTable`, in the fixed kind order.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct PushPlacement {
+    pub stage: Stage,
+    /// Every field, in placement order.
+    pub fields: Vec<PlacedField>,
+    /// `(offset, size)` of the stage's push-constant range, when any field is pushed. The offset
+    /// is the stage window's start (vertex 0, fragment 64, compute 0).
+    pub push_range: Option<(u32, u32)>,
+    /// Byte size of the stage's `ArgumentTable` uniform buffer (a multiple of 16); 0 without one.
+    pub argument_table_size: u32,
+}
+
+impl PushPlacement {
+    /// The value each `PushField::Specialized` field placed in the push-constant block holds in
+    /// push-constant bytes `push` (the block's bytes from offset 0), by its key. A field in the
+    /// `ArgumentTable` is the caller's to read.
+    #[cfg(test)]
+    pub fn pushed_values(&self, push: &[u8]) -> Vec<(SpecKey, u64)> {
+        self.fields
+            .iter()
+            .filter_map(|f| match (f.field, f.loc) {
+                (PushField::Specialized(key), PushLoc::Push { offset }) => {
+                    let at = offset as usize;
+                    let word = push
+                        .get(at..at + 4)
+                        .unwrap_or_else(|| panic!("no push bytes for {key:?} at {at}"));
+                    Some((
+                        key,
+                        u64::from(u32::from_le_bytes([word[0], word[1], word[2], word[3]])),
+                    ))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// One placed push field.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct PlacedField {
+    pub field: PushField,
+    pub loc: PushLoc,
+    /// Size in bytes.
+    pub size: u32,
+}
+
+/// Where a push field lives.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum PushLoc {
+    /// At this byte offset of the push-constant block (absolute, inside the stage window).
+    Push { offset: u32 },
+    /// At this byte offset of the stage's `ArgumentTable` uniform buffer.
+    ArgumentTable { offset: u32 },
+}
+
+/// A `[[threadgroup(n)]]` argument of a kernel; its length is a runtime fact.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ThreadgroupArgument {
+    pub stage: Stage,
+    pub index: u32,
+    /// The alignment the arena gives the argument.
+    pub alignment: u32,
+}

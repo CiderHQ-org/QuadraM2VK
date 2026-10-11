@@ -1,0 +1,320 @@
+#!/usr/bin/env bash
+# Re-record one execution venue at one product build: the engine batch of the
+# venue's backend over the cases with a current Metal row, in both legs, into an out
+# directory kept on this host, resumable and measured. Metal is never run.
+#
+#   scripts/rerecord-venue --venue ID [--kind native-gpu|moltenvk|cpu-icd]
+#                          [--icd lavapipe|swiftshader] [--ref SHA] [--out-root DIR]
+#                          [--leg stated|robustness-off]... [--case-id HASH]...
+#                          [--limit CASES] [--budget SECONDS] [--cpus N] [--slot NAME]
+#                          [--private-corpus DIR] [--metal-environment-id ID] [--retry-failed]
+#                          [--profiles-layer P]
+#
+# - The venue. --venue is the operator environment ID its rows record (the batch stores them in
+#   its engine slots). A venue of crates/metal2vulkan-validation/cutover/c3-venues.json takes its kind from
+#   there; any other (a SwiftShader venue, say) needs --kind. Every venue runs both legs unless
+#   --leg says otherwise: C3 judges the legs c3-venues.json lists, but coverage needs both on every
+#   venue (a robustness-off requirement is met only by a robustness-off run). --icd picks the CPU
+#   ICD of a cpu-icd venue (default lavapipe). --profiles-layer P records a restricted leg: every
+#   run with the device restricted to the committed profile P, its rows in the ID@engine@P
+#   slots (a capability profile on a CPU ICD, or on a GPU where no CPU ICD takes it, or a GPU
+#   restricted to another profile of its own driver class). Where the device lacks what P states,
+#   each run records a typed refusal (not_supported{profile_exceeds_device}, naming the members);
+#   where the profiles layer cannot present P as the product reads it (a requirements document
+#   its regeneration did not complete for the layer), the batch refuses before its first run and
+#   the round stops. The restricted context runs at P's own API version (1.2 at least).
+# - The build. HEAD must be --ref (default: HEAD) with no tracked file changed, so every row is
+#   of the ref's product. Coverage and C3 count a row only at the build that recorded it: record
+#   every venue at one ref, then commit the rows with scripts/rerecord-commit at that ref (or a
+#   descendant that changes no product source). Any product change between recording and that
+#   commit leaves every row stale.
+# - Metal is never run. The batch selects the cases with a current Metal row in
+#   --metal-environment-id (default apple-m3-max-macos26.7), or each --case-id (each must have
+#   one), and compares against the committed row.
+# - Where it runs. native-gpu: this host's GPU, `corpus-vulkan --batch --device-type gpu`.
+#   moltenvk: this Mac's GPU, `corpus-moltenvk --batch --device-type gpu`, with Homebrew's
+#   validation layer through a scratch VK_ADD_LAYER_PATH (docs/VALIDATION.md). cpu-icd:
+#   `corpus-vulkan --batch --device-type cpu` inside scripts/linux-gate (--cpus N, default 6;
+#   --slot NAME, default rerecord; --icd; --private-corpus DIR, read-only, for the private cases,
+#   which the native venues read through crates/metal2vulkan-validation/corpus/local), lavapipe at its native width.
+# - Resumable. The out directory is OUT_ROOT/VENUE/scratch/batch-<12 hex of the ref> (OUT_ROOT
+#   defaults to ~/.cache/m2v-rerecord) and is kept between invocations: the batch skips every
+#   (case, leg) its done-list holds and refuses an out directory of another build or venue
+#   (build.json). An invocation runs the batch in rounds of --limit cases (default 50 on a GPU, 200
+#   on a CPU ICD) until nothing is pending or --budget seconds (default 1800) are spent; exit 3
+#   means runs are pending, or some ended `failed` (a tooling failure, such as Metal's compiler
+#   service dropping its connection under load): run it again at the same ref, with
+#   --retry-failed for those. --retry-failed first drops the done-list's `failed` runs, which
+#   recorded no evidence, so they run again; a timeout, a device crash, or a device-wait timeout
+#   is never retried (the GPU hang protocol owns those).
+# - GPU safety. One run at a time; no round starts while the hang tripwire (~/.cache/m2v-gpu/hang,
+#   /tmp/m2v-gpu.hang) exists, and the batch checks it before every run; each run is killed whole
+#   at 300 s, with device waits bounded at 60 s; the batch stops after a run that hung or crashed
+#   the device. Each GPU round is under a 2-hour alarm; if it fires, this script writes the
+#   tripwire itself (only a human clears it, after the suspected-hang protocol).
+# - Measured. OUT_ROOT/VENUE/summary.txt (printed at the end) has the build time, each round's
+#   exit, runs, pending count and elapsed time, --batch-report's build, per-leg, and slowest lines,
+#   and, for a venue of c3-venues.json, how many rows and refusals record each device identity and
+#   how many a device the venue does not allow (C3 reads those as stale). done.tsv holds every run's seconds.
+# - Output. The out directory (build.json, done.tsv, rows.jsonl, refusals.jsonl, logs/) is what
+#   scripts/rerecord-commit installs; copy it as it is to the checkout that commits the rows.
+#   Nothing tracked is written. A GPU venue's executor runs from a copy in OUT_ROOT/VENUE/bin. A
+#   restricted leg's directory is OUT_ROOT/VENUE@P.
+# Exit: 0 nothing pending; 3 runs pending; 86 a hang tripwire stopped it; 2 a usage or
+# precondition error; 1 any other failure.
+set -o pipefail
+
+usage() {
+    sed -n '2,/^# Exit:/p' "$0" | sed 's/^# \{0,1\}//' >&2
+    exit 2
+}
+
+venue=
+kind=
+icd=lavapipe
+ref=
+out_root=${XDG_CACHE_HOME:-$HOME/.cache}/m2v-rerecord
+leg_flags=
+case_flags=
+limit=
+budget=1800
+cpus=6
+slot=rerecord
+private=
+metal=apple-m3-max-macos26.7
+retry=
+profile=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --venue) [ "$#" -ge 2 ] || usage; venue=$2; shift 2 ;;
+        --kind) [ "$#" -ge 2 ] || usage; kind=$2; shift 2 ;;
+        --icd) [ "$#" -ge 2 ] || usage; icd=$2; shift 2 ;;
+        --ref) [ "$#" -ge 2 ] || usage; ref=$2; shift 2 ;;
+        --out-root) [ "$#" -ge 2 ] || usage; out_root=$2; shift 2 ;;
+        --leg) [ "$#" -ge 2 ] || usage; leg_flags="$leg_flags --leg $2"; shift 2 ;;
+        --case-id) [ "$#" -ge 2 ] || usage; case_flags="$case_flags --case-id $2"; shift 2 ;;
+        --limit) [ "$#" -ge 2 ] || usage; limit=$2; shift 2 ;;
+        --budget) [ "$#" -ge 2 ] || usage; budget=$2; shift 2 ;;
+        --cpus) [ "$#" -ge 2 ] || usage; cpus=$2; shift 2 ;;
+        --slot) [ "$#" -ge 2 ] || usage; slot=$2; shift 2 ;;
+        --private-corpus) [ "$#" -ge 2 ] || usage; private=$2; shift 2 ;;
+        --metal-environment-id) [ "$#" -ge 2 ] || usage; metal=$2; shift 2 ;;
+        --retry-failed) retry=1; shift ;;
+        --profiles-layer) [ "$#" -ge 2 ] || usage; profile=$2; shift 2 ;;
+        -h|--help) usage ;;
+        *) echo "rerecord-venue: unknown argument $1" >&2; usage ;;
+    esac
+done
+fail() { echo "rerecord-venue: $*" >&2; exit 2; }
+[ -n "$venue" ] || fail "--venue is required"
+case "$venue$leg_flags$case_flags$slot$icd$profile" in
+    *[!A-Za-z0-9_.@+\ -]*) fail "IDs, legs, cases, slot, and ICD are plain words" ;;
+esac
+case "$budget" in ''|*[!0-9]*) fail "--budget takes whole seconds" ;; esac
+case "$limit" in *[!0-9]*) fail "--limit takes a whole number" ;; esac
+case "$icd" in lavapipe|swiftshader) ;; *) fail "--icd is lavapipe or swiftshader" ;; esac
+
+root=$(git rev-parse --show-toplevel) || fail "not in a git checkout"
+cd "$root" || exit 2
+head=$(git rev-parse HEAD) || exit 2
+ref=$(git rev-parse --verify "${ref:-HEAD}^{commit}") || fail "no commit ${ref:-HEAD}"
+[ "$head" = "$ref" ] || fail "HEAD $head is not --ref $ref: check the ref out"
+git diff --quiet HEAD -- || fail "tracked files differ from $ref: the build would not be its"
+
+declared=$(python3 - "$root/crates/metal2vulkan-validation/cutover/c3-venues.json" "$venue" <<'PY'
+import json, sys
+for v in json.load(open(sys.argv[1]))["venues"]:
+    if v["environment_id"] == sys.argv[2]:
+        kind = {"native_gpu": "native-gpu", "cpu_icd": "cpu-icd"}.get(v["kind"], v["kind"])
+        print(kind)
+PY
+) || fail "read crates/metal2vulkan-validation/cutover/c3-venues.json"
+if [ -n "$declared" ]; then
+    declared_kind=$declared
+    [ -z "$kind" ] || [ "$kind" = "$declared_kind" ] ||
+        fail "$venue is a $declared_kind venue in c3-venues.json, not $kind"
+    kind=$declared_kind
+fi
+[ -n "$leg_flags" ] || leg_flags=" --leg stated --leg robustness-off"
+case "$kind" in
+    native-gpu) exe=corpus-vulkan; device=gpu; : "${limit:=50}" ;;
+    moltenvk) exe=corpus-moltenvk; device=gpu; : "${limit:=50}" ;;
+    cpu-icd) exe=corpus-vulkan; device=cpu; : "${limit:=200}" ;;
+    '') fail "$venue is not in c3-venues.json: pass --kind" ;;
+    *) fail "--kind is native-gpu, moltenvk, or cpu-icd" ;;
+esac
+if [ "$kind" = moltenvk ] && [ "$(uname -s)" != Darwin ]; then fail "MoltenVK runs on macOS"; fi
+[ "$limit" -gt 0 ] 2>/dev/null || fail "--limit must be positive"
+
+hex=$(printf '%s' "$ref" | cut -c1-12)
+d=$out_root/$venue${profile:+@$profile}
+scratch=$d/scratch
+out=$scratch/batch-$hex
+mkdir -p "$d/rounds" "$scratch" || exit 1
+n=0
+while [ -e "$d/summary.$n.txt" ]; do n=$((n + 1)); done
+[ -e "$d/summary.txt" ] && mv "$d/summary.txt" "$d/summary.$n.txt"
+log=$d/summary.txt
+start=$(date +%s)
+elapsed() { echo $(( $(date +%s) - start )); }
+{
+    echo "rerecord-venue $venue ($kind, $exe on a $device device) at $ref on $(hostname) $(uname -sm), $(date)"
+    echo "out $out"
+    echo "legs:$leg_flags cases:${case_flags:- every case with a current Metal row in $metal}"
+    [ -z "$profile" ] || echo "restricted to the profile $profile (--profiles-layer)"
+} > "$log"
+trip=$HOME/.cache/m2v-gpu/hang
+tripped() { [ -e "$trip" ] || [ -e /tmp/m2v-gpu.hang ]; }
+if [ -n "$retry" ] && [ -f "$out/done.tsv" ]; then
+    # Keep every complete line but the failed runs' (the third field); a cut last line, which the
+    # batch would drop anyway, goes too.
+    python3 - "$out/done.tsv" <<'PY' || exit 1
+import os, sys
+path = sys.argv[1]
+text = open(path).read()
+kept = [line for line in text[: text.rfind("\n") + 1].splitlines(True)
+        if line.split("\t")[2:3] != ["failed"]]
+open(path + ".next", "w").write("".join(kept))
+os.replace(path + ".next", path)
+PY
+    echo "retry: dropped the failed runs from done.tsv" >> "$log"
+fi
+restrict=${profile:+ --profiles-layer $profile}
+batch_flags="--device-type $device --metal-environment-id $metal --environment-id $venue$leg_flags$case_flags$restrict"
+stopped=
+pending=unknown
+
+if [ "$kind" = cpu-icd ]; then
+    # The rounds run in the container; /scratch is $scratch.
+    inner='set -u
+start=$(date +%s)
+cargo build --release -p metal2vulkan-validation --bin corpus-vulkan -j "$CARGO_BUILD_JOBS" >&2 || exit 1
+echo "BUILD $(( $(date +%s) - start ))s"
+bin=$CARGO_TARGET_DIR/release/corpus-vulkan
+unset LP_NATIVE_VECTOR_WIDTH
+echo "DEVICE $(vulkaninfo --summary 2>/dev/null | grep -m1 deviceName | sed "s/.*= //")"
+i=0
+rc=0
+while [ $(( $(date +%s) - start )) -lt '"$budget"' ]; do
+  i=$((i + 1))
+  "$bin" --batch '"$batch_flags"' --corpus crates/metal2vulkan-validation/corpus --out /scratch/batch-'"$hex"' \
+    --run-timeout 300 --gpu-wait-timeout 120 --limit '"$limit"' < /dev/null > /scratch/round.out
+  rc=$?
+  echo "ROUND $i exit=$rc runs=$(grep -c "^batch-run " /scratch/round.out) pending=$(sed -n "s/^batch-pending runs=//p" /scratch/round.out) $(( $(date +%s) - start ))s"
+  grep -E "^batch-(summary|slowest)" /scratch/round.out | sed "s/^/  /"
+  [ "$rc" -eq 0 ] || break
+  grep -q "^batch-pending runs=0$" /scratch/round.out && break
+done
+"$bin" --batch-report --corpus crates/metal2vulkan-validation/corpus --out /scratch/batch-'"$hex"' \
+  --metal-environment-id '"$metal"' --environment-id '"$venue$leg_flags$restrict"' > /scratch/report.txt 2>&1
+exit $rc'
+    gate_flags="--cpus $cpus --slot $slot --icd $icd --scratch $scratch"
+    [ -z "$private" ] || gate_flags="$gate_flags --private-corpus $private"
+    # shellcheck disable=SC2086
+    scripts/linux-gate $gate_flags -- bash -c "$inner" > "$d/gate.log" 2>&1
+    rc=$?
+    grep -E '^(BUILD|DEVICE|ROUND|  batch-)' "$d/gate.log" >> "$log"
+    echo "linux-gate exit=$rc $(elapsed)s" >> "$log"
+    [ "$rc" = 0 ] || stopped="linux-gate exit $rc: $(grep -v '^[[:space:]]*$' "$d/gate.log" | tail -n 1 | cut -c1-400)"
+    pending=$(grep '^ROUND ' "$d/gate.log" | tail -n 1 | sed -n 's/.* pending=\([0-9]*\) .*/\1/p')
+    cp "$scratch/report.txt" "$d/report.txt" 2>/dev/null
+else
+    if tripped; then echo "rerecord-venue: hang tripwire present; no device work" >&2; exit 86; fi
+    cargo build --release -p metal2vulkan-validation --bin "$exe" > "$d/build.txt" 2>&1 ||
+        { echo "BUILD FAILED" >> "$log"; tail -n 30 "$d/build.txt" >> "$log"; cat "$log"; exit 1; }
+    echo "build $(elapsed)s" >> "$log"
+    target=$(cargo metadata --format-version 1 --no-deps |
+        python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])') || exit 1
+    # The batch runs its own executable once per run: a copy no later build in a shared target
+    # directory can replace mid-batch.
+    mkdir -p "$d/bin" && cp "$target/release/$exe" "$d/bin/$exe" || exit 1
+    bin=$d/bin/$exe
+    vvl=
+    if [ "$kind" = moltenvk ]; then
+        manifest=/opt/homebrew/share/vulkan/explicit_layer.d/VkLayer_khronos_validation.json
+        [ -f "$manifest" ] || fail "no validation layer at $manifest"
+        vvl=$d/vvl
+        mkdir -p "$vvl"
+        sed 's#"library_path": *"[^"]*"#"library_path": "/opt/homebrew/lib/libVkLayer_khronos_validation.dylib"#' \
+            "$manifest" > "$vvl/VkLayer_khronos_validation.json"
+        export VK_ADD_LAYER_PATH=$vvl
+        trap 'rm -rf "$vvl"' EXIT
+    fi
+    i=0
+    while [ "$(elapsed)" -lt "$budget" ]; do
+        if tripped; then stopped="hang tripwire present"; break; fi
+        i=$((i + 1))
+        round=$d/rounds/$(date +%s)-$i
+        # shellcheck disable=SC2086
+        perl -e 'alarm 7200; exec @ARGV' "$bin" --batch $batch_flags --corpus "$root/crates/metal2vulkan-validation/corpus" \
+            --out "$out" --run-timeout 300 --gpu-wait-timeout 60 --limit "$limit" \
+            < /dev/null > "$round.out" 2> "$round.err"
+        rc=$?
+        pending=$(sed -n 's/^batch-pending runs=//p' "$round.out" | tail -n 1)
+        echo "ROUND $i exit=$rc runs=$(grep -c '^batch-run ' "$round.out") pending=${pending:-?} $(elapsed)s" >> "$log"
+        grep -E '^batch-(summary|slowest)' "$round.out" | sed 's/^/  /' >> "$log"
+        if [ "$rc" = 142 ]; then
+            mkdir -p "$(dirname "$trip")"
+            echo "rerecord-venue: the 2-hour alarm ended a batch round of $venue at $ref, $(date)" > "$trip"
+            stopped="the alarm ended round $i; tripwire $trip written"
+            break
+        fi
+        if [ "$rc" != 0 ]; then
+            stopped="round $i exit $rc: $(tail -n 1 "$round.err" | cut -c1-600)"
+            break
+        fi
+        [ "$pending" = 0 ] && break
+    done
+    # shellcheck disable=SC2086
+    "$bin" --batch-report --corpus "$root/crates/metal2vulkan-validation/corpus" --out "$out" \
+        --metal-environment-id "$metal" --environment-id "$venue"$leg_flags$restrict > "$d/report.txt" 2>&1
+fi
+
+grep -E '^batch-(build|report|slowest)' "$d/report.txt" 2>/dev/null | cut -c1-400 >> "$log"
+# A restricted leg's rows record what the profiles layer reports; C3 judges unrestricted slots only.
+if [ -n "$declared" ] && [ -z "$profile" ]; then
+    python3 - "$root/crates/metal2vulkan-validation/cutover/c3-venues.json" "$out" "$venue" >> "$log" 2>&1 <<'PY'
+import collections, json, os, sys
+venues, out, venue = sys.argv[1:4]
+# The devices the venue allows (an allowed-device list).
+allowed = next([d["identity"] for d in v["devices"]] for v in json.load(open(venues))["venues"]
+               if v["environment_id"] == venue)
+fields = sorted(allowed[0])
+allowed = {tuple(identity[f] for f in fields) for identity in allowed}
+def records(name):
+    path = os.path.join(out, name)
+    if not os.path.exists(path):
+        return []
+    text = open(path).read()
+    return [json.loads(line) for line in text[: text.rfind("\n") + 1].splitlines() if line.strip()]
+for name in ("rows.jsonl", "refusals.jsonl"):
+    found = collections.Counter(
+        tuple(r["environment"].get(f) for f in fields) for r in records(name))
+    other = {k: n for k, n in found.items() if k not in allowed}
+    print(f"identity {name}: {sum(found.values())} recorded, {sum(other.values())} of a device "
+          f"identity c3-venues.json does not allow")
+    for k, n in found.items():
+        print(f"  {n} x {dict(zip(fields, k))}{'' if k in allowed else ' (not allowed)'}")
+PY
+fi
+# The failed runs among each (case, leg)'s last: no evidence, so the venue is not complete.
+failed=$(awk -F '\t' 'NF >= 3 { last[$1 FS $2] = $3 } END { n = 0; for (k in last) if (last[k] == "failed") n++; print n }' \
+    "$out/done.tsv" 2>/dev/null)
+status=0
+if [ -n "$stopped" ]; then
+    echo "STOPPED: $stopped" >> "$log"
+    echo "RESULT stopped" >> "$log"
+    status=1
+    tripped && [ "$device" = gpu ] && status=86
+elif [ "$pending" = 0 ] && [ "${failed:-0}" != 0 ]; then
+    echo "RESULT failed=$failed: run this again at $ref with --retry-failed" >> "$log"
+    status=3
+elif [ "$pending" = 0 ]; then
+    echo "RESULT complete" >> "$log"
+else
+    echo "RESULT pending=$pending: run this again at $ref" >> "$log"
+    status=3
+fi
+echo "wall $(elapsed)s" >> "$log"
+cat "$log"
+exit "$status"

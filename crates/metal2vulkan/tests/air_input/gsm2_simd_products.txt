@@ -1,0 +1,389 @@
+target triple = "air64_v28-apple-macosx26.0.0"
+source_filename = "-"
+; datalayout DataLayout { endian: Little, pointers: {0: PointerSpec { size_bits: 64, abi_bits: 64, pref_bits: 64, index_bits: 64 }}, ints: {1: AlignSpec { abi_bits: 8, pref_bits: 8 }, 8: AlignSpec { abi_bits: 8, pref_bits: 8 }, 16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }}, floats: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }}, vectors: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 24: AlignSpec { abi_bits: 32, pref_bits: 32 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 48: AlignSpec { abi_bits: 64, pref_bits: 64 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 96: AlignSpec { abi_bits: 128, pref_bits: 128 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }, 192: AlignSpec { abi_bits: 256, pref_bits: 256 }, 256: AlignSpec { abi_bits: 256, pref_bits: 256 }, 512: AlignSpec { abi_bits: 512, pref_bits: 512 }, 1024: AlignSpec { abi_bits: 1024, pref_bits: 1024 }}, aggregate: AlignSpec { abi_bits: 0, pref_bits: 64 }, native_ints: [8, 16, 32], stack_align_bits: None, alloca_space: 0, program_space: 0, globals_space: 0, mangling: None, fn_ptr_align: None, non_integral: [] }
+%t4 = type void (ptr addrspace(1), ptr addrspace(1), i32)
+%t6 = type void (ptr addrspace(1), ptr addrspace(1), ptr addrspace(2), i32)
+%t7 = type void (i32, ptr addrspace(1), ptr addrspace(1))
+%t8 = type void (i32, ptr addrspace(1), ptr addrspace(1), ptr addrspace(2))
+%t10 = type float (float)
+%t12 = type <2 x float> (<2 x float>)
+%t14 = type half (half)
+%t16 = type <2 x half> (<2 x half>)
+%t17 = type i32 (i32)
+%t19 = type i16 (i16)
+%t21 = type i8 (i8)
+%t22 = type float (float, i16)
+%t23 = type <2 x float> (<2 x float>, i16)
+%t24 = type i32 (i32, i16)
+%t26 = type [2 x i32]
+c28 = %t26 [27, 0]
+
+define %t4 @f0 "simd_float_products" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="64" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a0( Ref nocapture "air-buffer-no-alias"="" ) %a1( Mod nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = zext %a2 to i64
+  %i1 = getelementptr inbounds float, %a0, %i0
+  %i2 = load float, %i1, align 4
+  %i3 = tail call reassoc nnan ninf nsz arcp contract afn float @f7 [air Group(Group { scope: Simdgroup, op: Product, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i2) convergent
+  %i4 = shl i32 %a2, i32 2
+  %i5 = zext %i4 to i64
+  %i6 = getelementptr inbounds float, %a1, %i5
+  store %i3, %i6, align 4
+  %i8 = tail call reassoc nnan ninf nsz arcp contract afn float @f8 [air Group(Group { scope: Simdgroup, op: PrefixInclusiveProduct, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i2) convergent
+  %i9 = or i32 %i4, i32 1
+  %i10 = zext %i9 to i64
+  %i11 = getelementptr inbounds float, %a1, %i10
+  store %i8, %i11, align 4
+  %i13 = tail call reassoc nnan ninf nsz arcp contract afn float @f9 [air Group(Group { scope: Simdgroup, op: PrefixExclusiveProduct, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i2) convergent
+  %i14 = or i32 %i4, i32 2
+  %i15 = zext %i14 to i64
+  %i16 = getelementptr inbounds float, %a1, %i15
+  store %i13, %i16, align 4
+  %i18 = insertelement <2 x float> undef, %i2, i64 0
+  %i19 = fneg reassoc nnan ninf nsz arcp contract afn float %i2
+  %i20 = insertelement %i18, %i19, i64 1
+  %i21 = tail call reassoc nnan ninf nsz arcp contract afn <2 x float> @f10 [air Group(Group { scope: Simdgroup, op: Product, ty: Some(NumTy { elem: F32, lanes: 2 }), sign: None })](%i20) convergent
+  %i22 = extractelement %i21, i64 1
+  %i23 = or i32 %i4, i32 3
+  %i24 = zext %i23 to i64
+  %i25 = getelementptr inbounds float, %a1, %i24
+  store %i22, %i25, align 4
+  ret void
+}
+
+define %t4 @f1 "simd_half_products" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="32" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a0( Ref nocapture "air-buffer-no-alias"="" ) %a1( Mod nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = zext %a2 to i64
+  %i1 = getelementptr inbounds half, %a0, %i0
+  %i2 = load half, %i1, align 2
+  %i3 = tail call reassoc nnan ninf nsz arcp contract afn half @f11 [air Group(Group { scope: Simdgroup, op: Product, ty: Some(NumTy { elem: F16, lanes: 1 }), sign: None })](%i2) convergent
+  %i4 = shl i32 %a2, i32 2
+  %i5 = zext %i4 to i64
+  %i6 = getelementptr inbounds half, %a1, %i5
+  store %i3, %i6, align 2
+  %i8 = tail call reassoc nnan ninf nsz arcp contract afn half @f12 [air Group(Group { scope: Simdgroup, op: PrefixInclusiveProduct, ty: Some(NumTy { elem: F16, lanes: 1 }), sign: None })](%i2) convergent
+  %i9 = or i32 %i4, i32 1
+  %i10 = zext %i9 to i64
+  %i11 = getelementptr inbounds half, %a1, %i10
+  store %i8, %i11, align 2
+  %i13 = tail call reassoc nnan ninf nsz arcp contract afn half @f13 [air Group(Group { scope: Simdgroup, op: PrefixExclusiveProduct, ty: Some(NumTy { elem: F16, lanes: 1 }), sign: None })](%i2) convergent
+  %i14 = or i32 %i4, i32 2
+  %i15 = zext %i14 to i64
+  %i16 = getelementptr inbounds half, %a1, %i15
+  store %i13, %i16, align 2
+  %i18 = insertelement <2 x half> undef, %i2, i64 0
+  %i19 = fneg reassoc nnan ninf nsz arcp contract afn half %i2
+  %i20 = insertelement %i18, %i19, i64 1
+  %i21 = tail call reassoc nnan ninf nsz arcp contract afn <2 x half> @f14 [air Group(Group { scope: Simdgroup, op: PrefixInclusiveProduct, ty: Some(NumTy { elem: F16, lanes: 2 }), sign: None })](%i20) convergent
+  %i22 = extractelement %i21, i64 1
+  %i23 = or i32 %i4, i32 3
+  %i24 = zext %i23 to i64
+  %i25 = getelementptr inbounds half, %a1, %i24
+  store %i22, %i25, align 2
+  ret void
+}
+
+define %t4 @f2 "simd_int_products" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="0" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a0( Ref nocapture "air-buffer-no-alias"="" ) %a1( Mod nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = zext %a2 to i64
+  %i1 = getelementptr inbounds i32, %a0, %i0
+  %i2 = load i32, %i1, align 4
+  %i3 = tail call i32 @f15 [air Group(Group { scope: Simdgroup, op: Product, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i2) convergent
+  %i4 = mul i32 %a2, i32 7
+  %i5 = zext %i4 to i64
+  %i6 = getelementptr inbounds i32, %a1, %i5
+  store %i3, %i6, align 4
+  %i8 = tail call i32 @f16 [air Group(Group { scope: Simdgroup, op: PrefixInclusiveProduct, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i2) convergent
+  %i9 = add i32 %i4, i32 1
+  %i10 = zext %i9 to i64
+  %i11 = getelementptr inbounds i32, %a1, %i10
+  store %i8, %i11, align 4
+  %i13 = tail call i32 @f17 [air Group(Group { scope: Simdgroup, op: PrefixExclusiveProduct, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i2) convergent
+  %i14 = add i32 %i4, i32 2
+  %i15 = zext %i14 to i64
+  %i16 = getelementptr inbounds i32, %a1, %i15
+  store %i13, %i16, align 4
+  %i18 = mul i32 %i2, i32 3
+  %i19 = tail call i32 @f18 [air Group(Group { scope: Simdgroup, op: Product, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Unsigned) })](%i18) convergent
+  %i20 = add i32 %i4, i32 3
+  %i21 = zext %i20 to i64
+  %i22 = getelementptr inbounds i32, %a1, %i21
+  store %i19, %i22, align 4
+  %i24 = trunc %i2 to i16
+  %i25 = tail call i16 @f19 [air Group(Group { scope: Simdgroup, op: Product, ty: Some(NumTy { elem: I16, lanes: 1 }), sign: Some(Unsigned) })](%i24) convergent
+  %i26 = zext %i25 to i32
+  %i27 = add i32 %i4, i32 4
+  %i28 = zext %i27 to i64
+  %i29 = getelementptr inbounds i32, %a1, %i28
+  store %i26, %i29, align 4
+  %i31 = trunc %i2 to i8
+  %i32 = tail call i8 @f20 [air Group(Group { scope: Simdgroup, op: PrefixInclusiveProduct, ty: Some(NumTy { elem: I8, lanes: 1 }), sign: Some(Unsigned) })](%i31) convergent
+  %i33 = zext %i32 to i32
+  %i34 = add i32 %i4, i32 5
+  %i35 = zext %i34 to i64
+  %i36 = getelementptr inbounds i32, %a1, %i35
+  store %i33, %i36, align 4
+  %i38 = tail call i16 @f21 [air Group(Group { scope: Simdgroup, op: PrefixExclusiveProduct, ty: Some(NumTy { elem: I16, lanes: 1 }), sign: Some(Signed) })](%i24) convergent
+  %i39 = sext %i38 to i32
+  %i40 = add i32 %i4, i32 6
+  %i41 = zext %i40 to i64
+  %i42 = getelementptr inbounds i32, %a1, %i41
+  store %i39, %i42, align 4
+  ret void
+}
+
+define %t4 @f3 "simd_products_divergent" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="0" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a0( Ref nocapture "air-buffer-no-alias"="" ) %a1( Mod nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = urem i32 %a2, i32 3
+  %i1 = icmp eq %i0, i32 0
+  br %i1, bb2, bb1
+bb1:
+  %i3 = zext %a2 to i64
+  %i4 = getelementptr inbounds float, %a0, %i3
+  %i5 = load float, %i4, align 4
+  %i6 = tail call reassoc nnan ninf nsz arcp contract afn float @f7 [air Group(Group { scope: Simdgroup, op: Product, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i5) convergent
+  %i7 = tail call reassoc nnan ninf nsz arcp contract afn float @f9 [air Group(Group { scope: Simdgroup, op: PrefixExclusiveProduct, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i5) convergent
+  br bb2
+bb2:
+  %i9 = phi float [%i6, bb1], [float 0xC0E00000, bb0]
+  %i10 = phi float [%i7, bb1], [float 0xC0E00000, bb0]
+  %i11 = shl i32 %a2, i32 1
+  %i12 = zext %i11 to i64
+  %i13 = getelementptr inbounds float, %a1, %i12
+  store %i9, %i13, align 4
+  %i15 = or i32 %i11, i32 1
+  %i16 = zext %i15 to i64
+  %i17 = getelementptr inbounds float, %a1, %i16
+  store %i10, %i17, align 4
+  ret void
+}
+
+define %t6 @f4 "simd_rotate_up" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="64" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a0( Ref nocapture "air-buffer-no-alias"="" ) %a1( Mod nocapture "air-buffer-no-alias"="" ) %a2( align 4 dereferenceable(4) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = zext %a3 to i64
+  %i1 = getelementptr inbounds float, %a0, %i0
+  %i2 = load float, %i1, align 4
+  %i3 = freeze float %i2
+  %i4 = tail call reassoc nnan ninf nsz arcp contract afn float @f22 [air Group(Group { scope: Simdgroup, op: ShuffleRotateUp, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i3, i16 3) convergent
+  %i5 = shl i32 %a3, i32 2
+  %i6 = zext %i5 to i64
+  %i7 = getelementptr inbounds float, %a1, %i6
+  store %i4, %i7, align 4
+  %i9 = load i32, %a2, align 4
+  %i10 = trunc %i9 to i16
+  %i11 = tail call reassoc nnan ninf nsz arcp contract afn float @f22 [air Group(Group { scope: Simdgroup, op: ShuffleRotateUp, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i3, %i10) convergent
+  %i12 = or i32 %i5, i32 1
+  %i13 = zext %i12 to i64
+  %i14 = getelementptr inbounds float, %a1, %i13
+  store %i11, %i14, align 4
+  %i16 = insertelement <2 x float> undef, %i3, i64 0
+  %i17 = fneg reassoc nnan ninf nsz arcp contract afn float %i3
+  %i18 = insertelement %i16, %i17, i64 1
+  %i19 = freeze <2 x float> %i18
+  %i20 = tail call reassoc nnan ninf nsz arcp contract afn <2 x float> @f23 [air Group(Group { scope: Simdgroup, op: ShuffleRotateUp, ty: Some(NumTy { elem: F32, lanes: 2 }), sign: None })](%i19, i16 31) convergent
+  %i21 = extractelement %i20, i64 1
+  %i22 = or i32 %i5, i32 2
+  %i23 = zext %i22 to i64
+  %i24 = getelementptr inbounds float, %a1, %i23
+  store %i21, %i24, align 4
+  %i26 = tail call i32 @f24 [air Group(Group { scope: Simdgroup, op: ShuffleRotateUp, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%a3, i16 1) convergent
+  %i27 = or i32 %i5, i32 3
+  %i28 = zext %i27 to i64
+  %i29 = getelementptr inbounds float, %a1, %i28
+  %i30 = bitcast %i29 to ptr addrspace(1)
+  store %i26, %i30, align 4
+  ret void
+}
+
+define %t7 @f5 "simd_products_in_a_vertex_function" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="0" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a1( Ref nocapture "air-buffer-no-alias"="" ) %a2( Mod nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = zext %a0 to i64
+  %i1 = getelementptr inbounds float, %a1, %i0
+  %i2 = load float, %i1, align 4
+  %i3 = tail call reassoc nnan ninf nsz arcp contract afn float @f7 [air Group(Group { scope: Simdgroup, op: Product, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i2) convergent
+  %i4 = mul i32 %a0, i32 3
+  %i5 = zext %i4 to i64
+  %i6 = getelementptr inbounds float, %a2, %i5
+  store %i3, %i6, align 4
+  %i8 = tail call reassoc nnan ninf nsz arcp contract afn float @f8 [air Group(Group { scope: Simdgroup, op: PrefixInclusiveProduct, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i2) convergent
+  %i9 = add i32 %i4, i32 1
+  %i10 = zext %i9 to i64
+  %i11 = getelementptr inbounds float, %a2, %i10
+  store %i8, %i11, align 4
+  %i13 = tail call reassoc nnan ninf nsz arcp contract afn float @f9 [air Group(Group { scope: Simdgroup, op: PrefixExclusiveProduct, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i2) convergent
+  %i14 = add i32 %i4, i32 2
+  %i15 = zext %i14 to i64
+  %i16 = getelementptr inbounds float, %a2, %i15
+  store %i13, %i16, align 4
+  ret void
+}
+
+define %t8 @f6 "simd_rotate_up_in_a_vertex_function" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="0" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a1( Ref nocapture "air-buffer-no-alias"="" ) %a2( Mod nocapture "air-buffer-no-alias"="" ) %a3( align 4 dereferenceable(4) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = zext %a0 to i64
+  %i1 = getelementptr inbounds float, %a1, %i0
+  %i2 = load float, %i1, align 4
+  %i3 = freeze float %i2
+  %i4 = tail call reassoc nnan ninf nsz arcp contract afn float @f22 [air Group(Group { scope: Simdgroup, op: ShuffleRotateUp, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i3, i16 3) convergent
+  %i5 = shl i32 %a0, i32 1
+  %i6 = zext %i5 to i64
+  %i7 = getelementptr inbounds float, %a2, %i6
+  store %i4, %i7, align 4
+  %i9 = load i32, %a3, align 4
+  %i10 = trunc %i9 to i16
+  %i11 = tail call reassoc nnan ninf nsz arcp contract afn float @f22 [air Group(Group { scope: Simdgroup, op: ShuffleRotateUp, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i3, %i10) convergent
+  %i12 = or i32 %i5, i32 1
+  %i13 = zext %i12 to i64
+  %i14 = getelementptr inbounds float, %a2, %i13
+  store %i11, %i14, align 4
+  ret void
+}
+
+declare %t10 @f7 "air.simd_product.f32" convergent
+
+declare %t10 @f8 "air.simd_prefix_inclusive_product.f32" convergent
+
+declare %t10 @f9 "air.simd_prefix_exclusive_product.f32" convergent
+
+declare %t12 @f10 "air.simd_product.v2f32" convergent
+
+declare %t14 @f11 "air.simd_product.f16" convergent
+
+declare %t14 @f12 "air.simd_prefix_inclusive_product.f16" convergent
+
+declare %t14 @f13 "air.simd_prefix_exclusive_product.f16" convergent
+
+declare %t16 @f14 "air.simd_prefix_inclusive_product.v2f16" convergent
+
+declare %t17 @f15 "air.simd_product.s.i32" convergent
+
+declare %t17 @f16 "air.simd_prefix_inclusive_product.s.i32" convergent
+
+declare %t17 @f17 "air.simd_prefix_exclusive_product.s.i32" convergent
+
+declare %t17 @f18 "air.simd_product.u.i32" convergent
+
+declare %t19 @f19 "air.simd_product.u.i16" convergent
+
+declare %t21 @f20 "air.simd_prefix_inclusive_product.u.i8" convergent
+
+declare %t19 @f21 "air.simd_prefix_exclusive_product.s.i16" convergent
+
+declare %t22 @f22 "air.simd_shuffle_rotate_up.f32" convergent
+
+declare %t23 @f23 "air.simd_shuffle_rotate_up.v2f32" convergent
+
+declare %t24 @f24 "air.simd_shuffle_rotate_up.s.i32" convergent
+!md0 = !"SDK Version"
+!md1 = !"wchar_size"
+!md2 = !"frame-pointer"
+!md3 = !"air.max_device_buffers"
+!md4 = !"air.max_constant_buffers"
+!md5 = !"air.max_threadgroup_buffers"
+!md6 = !"air.max_textures"
+!md7 = !"air.max_read_write_textures"
+!md8 = !"air.max_samplers"
+!md9 = !"air.buffer"
+!md10 = !"air.location_index"
+!md11 = !"air.read"
+!md12 = !"air.address_space"
+!md13 = !"air.arg_type_size"
+!md14 = !"air.arg_type_align_size"
+!md15 = !"air.arg_type_name"
+!md16 = !"float"
+!md17 = !"air.arg_name"
+!md18 = !"in"
+!md19 = !"air.read_write"
+!md20 = !"out"
+!md21 = !"air.thread_position_in_grid"
+!md22 = !"uint"
+!md23 = !"t"
+!md24 = !"half"
+!md25 = !"int"
+!md26 = !"air.buffer_size"
+!md27 = !"delta"
+!md28 = !"air.vertex_id"
+!md29 = !"vid"
+!md30 = !"air.compile.denorms_disable"
+!md31 = !"air.compile.fast_math_enable"
+!md32 = !"air.compile.framebuffer_fetch_enable"
+!md33 = !"Apple metal version 32023.921 (metalfe-32023.921.6)"
+!md34 = !"Metal"
+!md35 = !"omnipotent char"
+!md36 = !"Simple C++ TBAA"
+!md37 = !"air-alias-scope-arg(0)"
+!md38 = !"air-alias-scope-arg(1)"
+!md39 = !"air-alias-scope-arg(2)"
+!md40 = i32 2
+!md41 = %t26 c28
+!md42 = i32 1
+!md43 = i32 4
+!md44 = i32 7
+!md45 = i32 31
+!md46 = i32 128
+!md47 = i32 8
+!md48 = i32 16
+!md49 = ptr addrspace(0) @f0
+!md50 = i32 0
+!md51 = ptr addrspace(0) @f1
+!md52 = ptr addrspace(0) @f2
+!md53 = ptr addrspace(0) @f3
+!md54 = ptr addrspace(0) @f4
+!md55 = i32 3
+!md56 = ptr addrspace(0) @f5
+!md57 = ptr addrspace(0) @f6
+!md58 = i64 0
+!md59 = !{!md40, !md0, !md41}
+!md60 = !{!md42, !md1, !md43}
+!md61 = !{!md44, !md2, !md40}
+!md62 = !{!md44, !md3, !md45}
+!md63 = !{!md44, !md4, !md45}
+!md64 = !{!md44, !md5, !md45}
+!md65 = !{!md44, !md6, !md46}
+!md66 = !{!md44, !md7, !md47}
+!md67 = !{!md44, !md8, !md48}
+!md68 = !{}
+!md69 = !{!md50, !md9, !md10, !md50, !md42, !md11, !md12, !md42, !md13, !md43, !md14, !md43, !md15, !md16, !md17, !md18}
+!md70 = !{!md42, !md9, !md10, !md42, !md42, !md19, !md12, !md42, !md13, !md43, !md14, !md43, !md15, !md16, !md17, !md20}
+!md71 = !{!md40, !md21, !md15, !md22, !md17, !md23}
+!md72 = !{!md69, !md70, !md71}
+!md73 = !{!md49, !md68, !md72}
+!md74 = !{!md50, !md9, !md10, !md50, !md42, !md11, !md12, !md42, !md13, !md40, !md14, !md40, !md15, !md24, !md17, !md18}
+!md75 = !{!md42, !md9, !md10, !md42, !md42, !md19, !md12, !md42, !md13, !md40, !md14, !md40, !md15, !md24, !md17, !md20}
+!md76 = !{!md74, !md75, !md71}
+!md77 = !{!md51, !md68, !md76}
+!md78 = !{!md50, !md9, !md10, !md50, !md42, !md11, !md12, !md42, !md13, !md43, !md14, !md43, !md15, !md25, !md17, !md18}
+!md79 = !{!md42, !md9, !md10, !md42, !md42, !md19, !md12, !md42, !md13, !md43, !md14, !md43, !md15, !md22, !md17, !md20}
+!md80 = !{!md78, !md79, !md71}
+!md81 = !{!md52, !md68, !md80}
+!md82 = !{!md53, !md68, !md72}
+!md83 = !{!md40, !md9, !md26, !md43, !md10, !md40, !md42, !md11, !md12, !md40, !md13, !md43, !md14, !md43, !md15, !md22, !md17, !md27}
+!md84 = !{!md55, !md21, !md15, !md22, !md17, !md23}
+!md85 = !{!md69, !md70, !md83, !md84}
+!md86 = !{!md54, !md68, !md85}
+!md87 = !{!md50, !md28, !md15, !md22, !md17, !md29}
+!md88 = !{!md42, !md9, !md10, !md50, !md42, !md11, !md12, !md42, !md13, !md43, !md14, !md43, !md15, !md16, !md17, !md18}
+!md89 = !{!md40, !md9, !md10, !md42, !md42, !md19, !md12, !md42, !md13, !md43, !md14, !md43, !md15, !md16, !md17, !md20}
+!md90 = !{!md87, !md88, !md89}
+!md91 = !{!md56, !md68, !md90}
+!md92 = !{!md55, !md9, !md26, !md43, !md10, !md40, !md42, !md11, !md12, !md40, !md13, !md43, !md14, !md43, !md15, !md22, !md17, !md27}
+!md93 = !{!md87, !md88, !md89, !md92}
+!md94 = !{!md57, !md68, !md93}
+!md95 = !{!md30}
+!md96 = !{!md31}
+!md97 = !{!md32}
+!md98 = !{!md33}
+!md99 = !{!md40, !md47, !md50}
+!md100 = !{!md34, !md43, !md50, !md50}
+!md101 = !{!md36}
+!md102 = !{!md35, !md101, !md58}
+!md103 = !{!md16, !md102, !md58}
+!md104 = !{!md103, !md103, !md58}
+!md105 = !{!md25, !md102, !md58}
+!md106 = !{!md105, !md105, !md58}
+!"llvm.module.flags" = !{!md59, !md60, !md61, !md62, !md63, !md64, !md65, !md66, !md67}
+!"air.kernel" = !{!md73, !md77, !md81, !md82, !md86}
+!"air.vertex" = !{!md91, !md94}
+!"air.compile_options" = !{!md95, !md96, !md97}
+!"llvm.ident" = !{!md98}
+!"air.version" = !{!md99}
+!"air.language_version" = !{!md100}

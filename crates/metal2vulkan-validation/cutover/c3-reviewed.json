@@ -1,0 +1,2401 @@
+{
+  "readings": [
+    {
+      "case_id": "0c68471db1a6d11082881e4b73e3738dabebcd7b85834b57817ee1ef2bbb0c65",
+      "name": "fast-tangent-arctangent-and-arcsine-at-thirty-six-points",
+      "cause": "apple_reading",
+      "bound": "MSL Table 8.2 (fast math): tan is sin(x) * (1 / cos(x)), sin and cos each within 2^-13 absolute on [-pi, pi]; atan and asin within 5 ulp. Vulkan (GLSL.std.450): Atan within 4096 ulp, and Asin by inheritance.",
+      "observations": [
+        {
+          "environment_id": "ubuntu-26.04-lavapipe@engine",
+          "spv_sha256": "17c4f69b71d9eff1c56ec570bd43e7f05b8acbca5ab01d659fa7e68dc25d09bb",
+          "candidate_output_sha256": "d4980787239df509054e5d66f862b9394617adfa0caf5831b3c113eb9378563e",
+          "golden_output_sha256": "d23bdd80deb0d0426628cb5e62acdca3f2d297b7dde6ecea02a432bec2fa94fc",
+          "words": 37,
+          "differing_words": 26,
+          "values": "26 of 37 words: tan 1-2 representable values from Metal's, atan 1-199, asin 1-3,528 (D208.5's table)."
+        },
+        {
+          "environment_id": "ubuntu-26.04-lavapipe@engine+robustness-off",
+          "spv_sha256": "8a950fcdd5f2c7a2ae7005750f918ea80404a2c5468cdf1225479849cd10316e",
+          "candidate_output_sha256": "d4980787239df509054e5d66f862b9394617adfa0caf5831b3c113eb9378563e",
+          "golden_output_sha256": "d23bdd80deb0d0426628cb5e62acdca3f2d297b7dde6ecea02a432bec2fa94fc",
+          "words": 37,
+          "differing_words": 26,
+          "values": "26 of 37 words: tan 1-2 representable values from Metal's, atan 1-199, asin 1-3,528 (D208.5's table)."
+        }
+      ],
+      "lanes": [
+        {
+          "words": {
+            "first": 0,
+            "count": 12
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "tan(a)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 1,
+                "format": "f32",
+                "first": 0
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 12,
+            "count": 12
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "atan(a)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 1,
+                "format": "f32",
+                "first": 12
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 24,
+            "count": 12
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "asin(a)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 1,
+                "format": "f32",
+                "first": 24
+              }
+            }
+          ]
+        }
+      ],
+      "review": {
+        "evidence": [
+          "D204.4",
+          "D208.5",
+          "D273"
+        ],
+        "note": "Fast tan, atan, and asin at arguments chosen to show Apple's approximation. Against a double-precision reference, Metal is within 2 ulp on every word and llvmpipe's tan within 2 ulp; llvmpipe's atan is outside MSL's 5 ulp on 9 of its 11 differing words (up to 198 ulp; words 20 and 22 are inside), and its asin on 5 of its 8 differing words (up to 3,528 ulp; words 29, 32, and 35 are inside). Those words are inside Vulkan's bound: on lavapipe the translation answers less precisely than Metal promises, which DeviceTranscendentals records and U3 accepts (the device's precision for transcendentals, no software-precise math). D273's bound check, on both lavapipe slots: 26 differing words, 12 within Apple's stated bound and 14 outside it. atan (Table 8.2, at most 5 ulp): words 13-19, 21, and 23 at 9.4 to 197.8 ulp (197.8 at -0.125). asin (Table 8.2, at most 5 ulp on [-1, 1]): words 27, 28, 30, 33, and 34 at 171.3 to 3527.8 ulp (3527.8 at +-0.5). Open until the device's answer is within the bound.",
+        "sign_off": {
+          "state": "awaiting_user",
+          "decision": "C3 apple_reading: accept only within Apple's bound (the user's answer of 2026-10-03); open, because words lie outside the bound (DESIGN D273)"
+        }
+      }
+    },
+    {
+      "case_id": "da0ab89332cc6e103a7c7f416b9d3cc0c901958d6e5ea77e9d90939efc933554",
+      "name": "five-fast-float3-transcendentals-off-the-anchors",
+      "cause": "apple_reading",
+      "bound": "MSL Table 8.2 (fast math): log2 and log within 2^-22 and 2^-21 absolute on [0.5, 2], else 2 and 3 ulp; exp2 within 3 + floor(2 * abs(x)) ulp; rsqrt within 2 ulp; sin within 2^-13 absolute on [-pi, pi].",
+      "observations": [
+        {
+          "environment_id": "ubuntu-26.04-lavapipe@engine",
+          "spv_sha256": "2b43f574b231869985ea1ea4fe78ad86aefdaa1c8036994bb8c4b529eb32b7ed",
+          "candidate_output_sha256": "42dbd27f51bfd158df547b05c9fc4cf89779c9080d3935eb529fd1d428d9ec1d",
+          "golden_output_sha256": "cf687333a70730192ab788f957de469cd190643e7019ddf38655cf2dc6bf28d4",
+          "words": 15,
+          "differing_words": 10,
+          "values": "10 of 15 words, each 1-3 representable values from Metal's."
+        },
+        {
+          "environment_id": "ubuntu-26.04-lavapipe@engine+robustness-off",
+          "spv_sha256": "87895c24ff6c053c280a6683aaf3a560bdacd5465c38c36ebffffa57bcfcf8c9",
+          "candidate_output_sha256": "42dbd27f51bfd158df547b05c9fc4cf89779c9080d3935eb529fd1d428d9ec1d",
+          "golden_output_sha256": "cf687333a70730192ab788f957de469cd190643e7019ddf38655cf2dc6bf28d4",
+          "words": 15,
+          "differing_words": 10,
+          "values": "10 of 15 words, each 1-3 representable values from Metal's."
+        }
+      ],
+      "lanes": [
+        {
+          "words": {
+            "first": 0,
+            "count": 3
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "log2(a)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 1,
+                "format": "f32",
+                "first": 0
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 3,
+            "count": 3
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "log(a)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 1,
+                "format": "f32",
+                "first": 3
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 6,
+            "count": 3
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "exp2(a)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 1,
+                "format": "f32",
+                "first": 6
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 9,
+            "count": 3
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "rsqrt(a)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 1,
+                "format": "f32",
+                "first": 9
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 12,
+            "count": 3
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "sin(a)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 1,
+                "format": "f32",
+                "first": 12
+              }
+            }
+          ]
+        }
+      ],
+      "review": {
+        "evidence": [
+          "D204.4",
+          "D208.5",
+          "D273"
+        ],
+        "note": "Fast log2, log, exp2, rsqrt, and sin off their exact anchors (another case covers the anchors); the case asserts Apple's approximations. Both devices are within every stated bound. D273's bound check, on both lavapipe slots: 10 differing words, all within Apple's stated bound. Re-pinned at the candidate WP-FMX's lowering compiles (EV SGN-c3rows at 79cf7adf, fresh Metal, MoltenVK, and lavapipe rows; D273.8): the SPIR-V moved and the output did not; the check is unchanged.",
+        "sign_off": {
+          "state": "signed_off",
+          "decision": "C3 apple_reading: accept only within Apple's bound (the user's answer of 2026-10-03)",
+          "date": "2026-10-03"
+        }
+      }
+    },
+    {
+      "case_id": "59103b58f047b7b0a999274de071d97ec3a764188546f47e4428eca88f18992b",
+      "name": "fast-variant-reach-of-the-five-biggest-families",
+      "cause": "apple_reading",
+      "bound": "MSL Table 8.2 (fast math): exp within 3 + floor(2 * abs(x)) ulp (37 and 39 ulp at its arguments); log within 2^-21 absolute on [0.5, 2]; rsqrt within 2 ulp; pow, powr, and sqrt are formulas over bounded operations, with no bound of their own.",
+      "observations": [
+        {
+          "environment_id": "ubuntu-26.04-lavapipe@engine",
+          "spv_sha256": "7a1fbdf4a49f7f0655ed35679e91e810dc60c6b3ba021f0ccd0ec5e45aac719f",
+          "candidate_output_sha256": "627093b1234b4ac202bf9292317eba340de79a3796dbc6352c5a020b03a420f9",
+          "golden_output_sha256": "e453a4874387c8f6fb378b04a404071d3dcfbd863bf87611b61439fc3c921544",
+          "words": 10,
+          "differing_words": 8,
+          "values": "8 of 10 words, 1-45 representable values from Metal's; the two sqrt words now match (fast sqrt is Metal's x * rsqrt(x), D253)."
+        },
+        {
+          "environment_id": "ubuntu-26.04-lavapipe@engine+robustness-off",
+          "spv_sha256": "275bbf44f8caf8ae52901c852e035469227561e589f05207091406edfbf32b6a",
+          "candidate_output_sha256": "627093b1234b4ac202bf9292317eba340de79a3796dbc6352c5a020b03a420f9",
+          "golden_output_sha256": "e453a4874387c8f6fb378b04a404071d3dcfbd863bf87611b61439fc3c921544",
+          "words": 10,
+          "differing_words": 8,
+          "values": "8 of 10 words, 1-45 representable values from Metal's; the two sqrt words now match (fast sqrt is Metal's x * rsqrt(x), D253)."
+        }
+      ],
+      "lanes": [
+        {
+          "words": {
+            "first": 0,
+            "count": 2
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "exp(a)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 0,
+                "format": "f32",
+                "first": 0
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 2,
+            "count": 2
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "powr(a, b)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 0,
+                "format": "f32",
+                "first": 2
+              }
+            },
+            {
+              "buffer": {
+                "binding": 0,
+                "format": "f32",
+                "first": 4
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 4,
+            "count": 2
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "log(a)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 0,
+                "format": "f32",
+                "first": 6
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 6,
+            "count": 2
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "rsqrt(a)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 0,
+                "format": "f32",
+                "first": 8
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 8,
+            "count": 2
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "sqrt(a)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 0,
+                "format": "f32",
+                "first": 10
+              }
+            }
+          ]
+        }
+      ],
+      "review": {
+        "evidence": [
+          "D204.4",
+          "D208.5",
+          "D273"
+        ],
+        "note": "Fast powr, exp, pow, log, rsqrt, and sqrt at the arguments that best separate Apple's fast variants from its precise ones. Both devices are within the bound wherever one is stated. D273's bound check, on both lavapipe slots: 10 differing words, all within Apple's stated bound (powr and sqrt through Table 8.2's formulas). Re-pinned at the candidate WP-FMX's lowering compiles (EV SGN-c3rows at 79cf7adf, fresh Metal, MoltenVK, and lavapipe rows; D273.8): 8 differing words, all within Apple's stated bound; the two fast sqrt words match.",
+        "sign_off": {
+          "state": "signed_off",
+          "decision": "C3 apple_reading: accept only within Apple's bound (the user's answer of 2026-10-03)",
+          "date": "2026-10-03"
+        }
+      }
+    },
+    {
+      "case_id": "179b6aa6c7fb35fecec313ecf56c08cd2d3f4c55e2ff87176a99695120882e7b",
+      "name": "fast-trig-across-the-whole-evaluated-range",
+      "cause": "apple_reading",
+      "bound": "MSL Table 8.2: fast sin and cos are bounded (2^-13 absolute) only on [-pi, pi] and 'larger otherwise'; every argument here lies outside that range. Vulkan bounds Sin and Cos (2^-11 absolute) only on [-pi, pi] as well.",
+      "observations": [
+        {
+          "environment_id": "ubuntu-26.04-lavapipe@engine",
+          "spv_sha256": "edee64a43950ad8252977340c00ba77b902323e8bb294aea553cb48af515bb28",
+          "candidate_output_sha256": "99cd93ecef818da15e908153185d3bc21ce8c4a4bbdc432e8f39fa2d8eb3e3ec",
+          "golden_output_sha256": "43b6f6b67c749ec03a0bcd37173da4652c29c9c22ae8a4cb79f53c7a5c6296fb",
+          "words": 8,
+          "differing_words": 2,
+          "values": "2 of 8 words: words 1 and 2 (sin of 1e6 and of 6588397.5), one representable value from Metal's. Words 6 and 7 now match: fast sin and cos answer +0 past float(pi/2) * 2^22 (D253)."
+        },
+        {
+          "environment_id": "ubuntu-26.04-lavapipe@engine+robustness-off",
+          "spv_sha256": "60f3f761a7755a167a059eea4e545b05599f6c5b30a6358f5fb0c14148b3fbea",
+          "candidate_output_sha256": "99cd93ecef818da15e908153185d3bc21ce8c4a4bbdc432e8f39fa2d8eb3e3ec",
+          "golden_output_sha256": "43b6f6b67c749ec03a0bcd37173da4652c29c9c22ae8a4cb79f53c7a5c6296fb",
+          "words": 8,
+          "differing_words": 2,
+          "values": "2 of 8 words: words 1 and 2 (sin of 1e6 and of 6588397.5), one representable value from Metal's. Words 6 and 7 now match: fast sin and cos answer +0 past float(pi/2) * 2^22 (D253)."
+        }
+      ],
+      "lanes": [
+        {
+          "words": {
+            "first": 0,
+            "count": 3
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "sin(a)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 1,
+                "format": "f32",
+                "first": 0
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 3,
+            "count": 3
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "cos(a)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 1,
+                "format": "f32",
+                "first": 3
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 6,
+            "count": 1
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "sin(a)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 1,
+                "format": "f32",
+                "first": 6
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 7,
+            "count": 1
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "cos(a)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 1,
+                "format": "f32",
+                "first": 7
+              }
+            }
+          ]
+        }
+      ],
+      "review": {
+        "evidence": [
+          "D204.4",
+          "D208.5",
+          "D273"
+        ],
+        "note": "Records Apple's fast trig across its whole evaluated range, including its answer past float(pi/2) * 2^22, where Apple's hardware answers 0 on the two scalar lanes. Neither specification bounds these words. D273's bound check, on both lavapipe slots: 4 differing words, all where Apple states no bound (sin and cos outside [-pi, pi], Table 8.2's 'larger otherwise'). Re-pinned at the candidate WP-FMX's lowering compiles (EV SGN-c3rows at 79cf7adf, fresh Metal, MoltenVK, and lavapipe rows; D273.8): 2 differing words, both where Apple states no bound (sin outside [-pi, pi], Table 8.2's 'larger otherwise').",
+        "sign_off": {
+          "state": "signed_off",
+          "decision": "C3 apple_reading: accept only within Apple's bound (the user's answer of 2026-10-03)",
+          "date": "2026-10-03"
+        }
+      }
+    },
+    {
+      "case_id": "2735318760871a87eaf9861791602c635d7d912bdb7c829db89a886f95e733e2",
+      "name": "half-tanh-under-fast-math-at-every-sixteenth-pattern",
+      "cause": "apple_reading",
+      "bound": "MSL Table 8.2 (fast math): f32 tanh is a formula over the fast exp2 and division (D110.2), with no bound of its own; a NaN operand is undefined under fast math (MSL section 7.1).",
+      "observations": [
+        {
+          "environment_id": "ubuntu-26.04-lavapipe@engine",
+          "spv_sha256": "16246ad8da84ed9e4f508382f9276dc2c16d0b2d6e9aa6a7b9e8460da7cea031",
+          "candidate_output_sha256": "d5f3f8a108a8753e3aa4a6160aa23713801cb2a35689e7f8dc502845d328cb17",
+          "golden_output_sha256": "69e49c332c2a93830dd4944b54e705d700c4384eea765573907cac33a15ce254",
+          "words": 8192,
+          "differing_words": 1313,
+          "values": "1,313 of 8,192 words: 1,250 f32 words (1,125 within 1.8e-7 absolute of Metal's, and 125 at a NaN or infinity input) and 63 half words at a NaN input. tanh(44) now matches."
+        },
+        {
+          "environment_id": "ubuntu-26.04-lavapipe@engine+robustness-off",
+          "spv_sha256": "b40bfda9fa19300d753186ab818037def36a235ad7185174b8083b71365d3ade",
+          "candidate_output_sha256": "d5f3f8a108a8753e3aa4a6160aa23713801cb2a35689e7f8dc502845d328cb17",
+          "golden_output_sha256": "69e49c332c2a93830dd4944b54e705d700c4384eea765573907cac33a15ce254",
+          "words": 8192,
+          "differing_words": 1313,
+          "values": "1,313 of 8,192 words: 1,250 f32 words (1,125 within 1.8e-7 absolute of Metal's, and 125 at a NaN or infinity input) and 63 half words at a NaN input. tanh(44) now matches."
+        }
+      ],
+      "lanes": [
+        {
+          "words": {
+            "first": 0,
+            "count": 4096,
+            "stride": 2
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "tanh(a)",
+          "operands": [
+            {
+              "bits": {
+                "format": "f16",
+                "first": 0,
+                "stride": 16
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 1,
+            "count": 4096,
+            "stride": 2
+          },
+          "result": "f16_low",
+          "math": "fast",
+          "computes": "tanh(a)",
+          "operands": [
+            {
+              "bits": {
+                "format": "f16",
+                "first": 0,
+                "stride": 16
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 1,
+            "count": 4096,
+            "stride": 2
+          },
+          "result": "f16_high",
+          "math": "fast",
+          "computes": "tanh(a)",
+          "operands": [
+            {
+              "bits": {
+                "format": "f16",
+                "first": 0,
+                "stride": 16
+              }
+            }
+          ]
+        }
+      ],
+      "review": {
+        "evidence": [
+          "D126",
+          "D204.4",
+          "D208.5",
+          "D273"
+        ],
+        "note": "Measures what Metal's half tanh computes. Every half word at a non-NaN input matches. The f32 formula's words at finite inputs differ by at most 1.8e-7 absolute, each device within 1.3e-7 of tanh: Exp2's rounding, which t - 1 amplifies in ulps near 0. One word is D110.2's division lane at x = 44. The NaN-input words ask nothing Metal defines; dropping them would leave the 1,303 others. D273's bound check, on both lavapipe slots: 1554 differing words, 1302 within Apple's stated bound and 252 where Apple states none. The half lanes' 126 are NaN or infinity under fast math (section 8.1), the device's own answers. The float lane's 126 (125 NaN or infinity, and tanh(44), whose divisor t + 1 is past 2^126 where Table 8.2 bounds the fast division) are computed by the product's fast float tanh, lowered as (t - 1) / (t + 1) with its own division and recorded as a near-equivalent of Metal's (DeviceArithmetic, FloatFn::divides): those stay open until an exact path exists (near_equivalent words). At tanh(44) Metal's fast division zeroes the reciprocal and answers 0; the device answers 1. WP-FMX lowers fast tanh's division as Metal's, and the entry is judged again then (D273). Re-pinned at the candidate WP-FMX's lowering compiles (EV SGN-c3rows at 79cf7adf, fresh Metal, MoltenVK, and lavapipe rows; D273.8): 1,313 differing words. tanh(44) now matches: WP-FMX lowers fast tanh's division as Metal's. The bound check, on both lavapipe slots, judges 1,376 values: 1,125 within Apple's stated bound, the half lanes' 126 where Apple states none (NaN or infinity under fast math, section 8.1), and the float lane's 125 at a NaN or infinity, which the product's fast float tanh computes with a division it records as DeviceArithmetic: those stay open as near-equivalents.",
+        "sign_off": {
+          "state": "awaiting_user",
+          "decision": "Open until an exact path exists (the user's decision of 2026-10-03: a recorded near-equivalent stays open in C3; the product's fast float tanh still records DeviceArithmetic at a NaN or infinity input; DESIGN D273)"
+        }
+      }
+    },
+    {
+      "case_id": "a919193fde4475d4f22c1b978ba62799e09cf06818cef57337e111cdb8e60f7b",
+      "name": "fast-tanh-through-all-three-of-its-regimes",
+      "cause": "apple_reading",
+      "bound": "MSL Table 8.2 (fast math): tanh is a formula over exp and a division; the fast division is bounded (2.5 ulp) only for a divisor in [2^-126, 2^126], and at x = 44 the divisor t + 1 exceeds 2^126.",
+      "observations": [
+        {
+          "environment_id": "ubuntu-26.04-lavapipe@engine",
+          "spv_sha256": "bd52414469164fa84be28fd5f5e145bc66e7ec092df0d095f81b5912c7dd7339",
+          "candidate_output_sha256": "db629e90d19bb6f6a33ccb99b4490ed3c2ee7339ed3e585c98d85cad18d4c060",
+          "golden_output_sha256": "1f7955b8a664e4325fbf810667e5d2a3ed29739ee3a0279a95be461b0e1c4a8d",
+          "words": 8,
+          "differing_words": 1,
+          "values": "1 of 8 words: word 3, 0.999909163 against Metal's 0.999909222, one representable value. Word 5 (x = 44) now matches: Metal's fast division flushes the reciprocal and both answer 0."
+        },
+        {
+          "environment_id": "ubuntu-26.04-lavapipe@engine+robustness-off",
+          "spv_sha256": "0b0917adaf995d01d22eb5b474f8eefe0eeeb650f23cc615cc5411b0131c60a3",
+          "candidate_output_sha256": "db629e90d19bb6f6a33ccb99b4490ed3c2ee7339ed3e585c98d85cad18d4c060",
+          "golden_output_sha256": "1f7955b8a664e4325fbf810667e5d2a3ed29739ee3a0279a95be461b0e1c4a8d",
+          "words": 8,
+          "differing_words": 1,
+          "values": "1 of 8 words: word 3, 0.999909163 against Metal's 0.999909222, one representable value. Word 5 (x = 44) now matches: Metal's fast division flushes the reciprocal and both answer 0."
+        }
+      ],
+      "lanes": [
+        {
+          "words": {
+            "first": 0,
+            "count": 8
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "tanh(a)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 1,
+                "format": "f32",
+                "first": 0
+              }
+            }
+          ]
+        }
+      ],
+      "review": {
+        "evidence": [
+          "D110.2",
+          "D204.4",
+          "D208.5",
+          "D273"
+        ],
+        "note": "The lane D110.2 predicted: Metal's fast division flushes the reciprocal beyond 2^126. Re-pinned at the candidate WP-FMX's lowering compiles (EV SGN-c3rows at 79cf7adf, fresh Metal, MoltenVK, and lavapipe rows; D273.8): WP-FMX lowers fast tanh with Metal's fast division (D253), and tanh(44) matches. D273's bound check, on both lavapipe slots: 1 differing word, word 3, within Table 8.2's bound for fast tanh. Until this re-pin the entry was open as a near-equivalent: tanh(44)'s divisor t + 1 is past 2^126, where Apple states no bound, and the product divided with Vulkan's division (DeviceArithmetic).",
+        "sign_off": {
+          "state": "signed_off",
+          "decision": "C3 apple_reading: accept only within Apple's bound (the user's answer of 2026-10-03)",
+          "date": "2026-10-03"
+        }
+      }
+    },
+    {
+      "case_id": "dd3b3b99e468f3db13c9dab4a57a8a46ee5abe34a378b941ef09be323eeea04a",
+      "name": "fast-fmod-is-the-trunc-expression-not-the-exact-remainder",
+      "cause": "apple_reading",
+      "bound": "MSL Table 8.2 gives fast fmod's accuracy as 'Undefined' (Table 8.1's 0 ulp is the precise fmod's); under fast math the division is within 2.5 ulp and contraction is allowed.",
+      "observations": [
+        {
+          "environment_id": "ubuntu-26.04-lavapipe@engine",
+          "spv_sha256": "e891abe89c27dc37f078db01352eb25ade1246c42dd494c4fa40ef1f78c9ef4d",
+          "candidate_output_sha256": "88c52304e0ed5f6f12c1b720e12374d3823e0b5af1c434c642ffef922d9ea3c9",
+          "golden_output_sha256": "206a9e6a70540a81c16b5f758db5f04778f30aeb1ec4ff405b037e8199cd3df2",
+          "words": 13,
+          "differing_words": 1,
+          "values": "1 of 13 words: word 11, Metal -0.00936 against llvmpipe's 0.00464. The other six words that differed now match: WP-FMX lowers fast fmod as Metal composes it, around a fused multiply-add (D253)."
+        },
+        {
+          "environment_id": "ubuntu-26.04-lavapipe@engine+robustness-off",
+          "spv_sha256": "0aa1b8ae5132104cec78982d313e9718622ec854895567c7d60e922cd16ce9bb",
+          "candidate_output_sha256": "88c52304e0ed5f6f12c1b720e12374d3823e0b5af1c434c642ffef922d9ea3c9",
+          "golden_output_sha256": "206a9e6a70540a81c16b5f758db5f04778f30aeb1ec4ff405b037e8199cd3df2",
+          "words": 13,
+          "differing_words": 1,
+          "values": "1 of 13 words: word 11, Metal -0.00936 against llvmpipe's 0.00464. The other six words that differed now match: WP-FMX lowers fast fmod as Metal composes it, around a fused multiply-add (D253)."
+        }
+      ],
+      "lanes": [
+        {
+          "words": {
+            "first": 0,
+            "count": 8
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "fmod(a, b)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 1,
+                "format": "f32",
+                "first": 0,
+                "stride": 2
+              }
+            },
+            {
+              "buffer": {
+                "binding": 1,
+                "format": "f32",
+                "first": 1,
+                "stride": 2
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 8,
+            "count": 2
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "fmod(a, b)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 1,
+                "format": "f32",
+                "first": 16
+              }
+            },
+            {
+              "buffer": {
+                "binding": 1,
+                "format": "f32",
+                "first": 18
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 10,
+            "count": 2
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "fmod(a, b)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 1,
+                "format": "f32",
+                "first": 20
+              }
+            },
+            {
+              "buffer": {
+                "binding": 1,
+                "format": "f32",
+                "first": 22
+              }
+            }
+          ]
+        }
+      ],
+      "review": {
+        "evidence": [
+          "D204.4",
+          "D208.5",
+          "D273"
+        ],
+        "note": "Records Apple's fast fmod. Both devices answer a residue of a rounded quotient: for fmod(1e10, 3), Metal's -512 is fma(-y, q, x) on its fast quotient (one ulp above the correctly rounded one), and llvmpipe's 0 is the unfused expression on the correctly rounded quotient. Pinned arguments exist only where each value is 0. D273's bound check, on both lavapipe slots: 7 differing words where Apple states no bound (fast fmod is 'Undefined', Table 8.2), but the product computes them with Vulkan's remainder, which the rows record as a near-equivalent of Metal's (DeviceArithmetic): the user's standing rule keeps them open until an exact path exists, and it takes precedence over the unstated reading, which covers the device's own answers (the orchestrator's decision of 2026-10-03; near_equivalent words). Apple's answer is deterministic (the trunc expression); WP-FMX lowers it as Metal composes it, and the entry is judged again then (D273). Re-pinned at the candidate WP-FMX's lowering compiles (EV SGN-c3rows at 79cf7adf, fresh Metal, MoltenVK, and lavapipe rows; D273.8): 1 differing word, where Apple states no bound (fast fmod is 'Undefined', Table 8.2). The product's lowering of air.fast_fmod.f32 still records DeviceArithmetic (the quotient is Vulkan's division), so the word stays open as a near-equivalent until an exact path exists.",
+        "sign_off": {
+          "state": "awaiting_user",
+          "decision": "Open until an exact path exists (the user's decision of 2026-10-03: a recorded near-equivalent stays open in C3; after WP-FMX, the product's fast fmod is Metal's composition on Vulkan's division, recorded as DeviceArithmetic; DESIGN D273)"
+        }
+      }
+    },
+    {
+      "case_id": "f9a12252daf165f2b4e083c0710b971c37a4a61179d1a3a4786a1dca8216415e",
+      "name": "sign-of-zero-and-division-range-under-fast-math",
+      "cause": "apple_reading",
+      "bound": "MSL section 8.1: f32 denormal operands and results may be flushed to zero, fast math or not; section 8.5: where they are, a function may return any conforming non-flushed result, and a flushed zero's sign is undefined (D78.4 records both sections). MSL requires NaNs without fast math but states no NaN encoding; under fast math (this case) a NaN or infinite operand or result is undefined (section 8.1), and MSL Table 8.2 bounds the fast division (2.5 ulp) only for a divisor in [2^-126, 2^126]. Vulkan leaves f32 denormals to shaderDenormFlushToZeroFloat32 (false on the gate's lavapipe) and states no NaN encoding either.",
+      "observations": [
+        {
+          "environment_id": "ubuntu-26.04-lavapipe@engine",
+          "spv_sha256": "c652ac199ee2554dc5f14b25aed8b6ac29e7d7b28222088cc9c7bb46212683df",
+          "candidate_output_sha256": "1aa2a981b50fe59a9cdc0ef1f93f3f298c020ee8d829f55a3e1c7a487f9d420e",
+          "golden_output_sha256": "0e3fa4fcb38b955530fa56bfb161e17c4418d5105ce9b16ef293daa1520aae18",
+          "words": 192,
+          "differing_words": 21,
+          "values": "21 of 192 words: denormal operands and results kept where Metal flushes, NaN 0xffc00000 against 0x7fc00000, and reciprocals beyond 2^126 kept where Metal flushes them."
+        },
+        {
+          "environment_id": "ubuntu-26.04-lavapipe@engine+robustness-off",
+          "spv_sha256": "0817ebae0e2eee409821868213de1ae99ce4646438d3a9eaf27aaa58c08d9f49",
+          "candidate_output_sha256": "1aa2a981b50fe59a9cdc0ef1f93f3f298c020ee8d829f55a3e1c7a487f9d420e",
+          "golden_output_sha256": "0e3fa4fcb38b955530fa56bfb161e17c4418d5105ce9b16ef293daa1520aae18",
+          "words": 192,
+          "differing_words": 21,
+          "values": "21 of 192 words: denormal operands and results kept where Metal flushes, NaN 0xffc00000 against 0x7fc00000, and reciprocals beyond 2^126 kept where Metal flushes them."
+        }
+      ],
+      "lanes": [
+        {
+          "words": {
+            "first": 0,
+            "count": 48,
+            "stride": 4
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "sign(a)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 0,
+                "format": "f32",
+                "first": 0,
+                "stride": 4
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 1,
+            "count": 48,
+            "stride": 4
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "sub(a, mul(b, add(mul(sign(a), c), d)))",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 0,
+                "format": "f32",
+                "first": 0,
+                "stride": 4
+              }
+            },
+            {
+              "buffer": {
+                "binding": 0,
+                "format": "f32",
+                "first": 1,
+                "stride": 4
+              }
+            },
+            {
+              "buffer": {
+                "binding": 0,
+                "format": "f32",
+                "first": 2,
+                "stride": 4
+              }
+            },
+            {
+              "buffer": {
+                "binding": 0,
+                "format": "f32",
+                "first": 3,
+                "stride": 4
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 2,
+            "count": 48,
+            "stride": 4
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "div(a, b)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 1,
+                "format": "f32",
+                "first": 0,
+                "stride": 2
+              }
+            },
+            {
+              "buffer": {
+                "binding": 1,
+                "format": "f32",
+                "first": 1,
+                "stride": 2
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 3,
+            "count": 48,
+            "stride": 4
+          },
+          "result": "f16_low",
+          "math": "fast",
+          "computes": "sign(a)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 2,
+                "format": "f16",
+                "first": 0,
+                "stride": 4
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 3,
+            "count": 48,
+            "stride": 4
+          },
+          "result": "f16_high",
+          "math": "fast",
+          "computes": "div(a, b)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 2,
+                "format": "f16",
+                "first": 1,
+                "stride": 4
+              }
+            },
+            {
+              "buffer": {
+                "binding": 2,
+                "format": "f16",
+                "first": 2,
+                "stride": 4
+              }
+            }
+          ]
+        }
+      ],
+      "review": {
+        "evidence": [
+          "D78.4",
+          "D139.9",
+          "D204.5",
+          "D204.8",
+          "D273"
+        ],
+        "note": "Metal's answers are Apple's readings, not what MSL guarantees: it flushes f32 denormals, canonicalizes a NaN result to 0x7fc00000, and its fast division flushes a reciprocal beyond 2^126 (D139.9). llvmpipe keeps the denormals and answers 0xffc00000; both are within what MSL states, and U3 accepts the device's denormal handling. The artifact records no denormal note: PrecisionNote::DeviceDenormals is never inserted (D139.9), and these rows' DeviceArithmetic comes from the fdiv. D204.8 handed back canonicalization with that note's policy; the part still owed is the note (queued as DN1). Reviewed again at base ed6cead6: the candidate changed since the rows A4b recorded (SEMANTICS_VERSION 54 to 71, the same census), and its output on lavapipe is byte for byte the one reviewed. D273's bound check, on both lavapipe slots: 21 differing words, 3 within Apple's stated bound and 18 where Apple states none (16 fast divisions outside [2^-126, 2^126], Table 8.2; 2 NaN or infinity under fast math, section 8.1). 17 of them are the fast division's (the 16 and one NaN or infinity), which the product computes with Vulkan's division, recorded as a near-equivalent of Metal's (DeviceArithmetic): those stay open until an exact path exists (near_equivalent words). Metal's fast division is deterministic (it flushes a reciprocal beyond 2^126), so an exact path would reproduce it; the entry is judged again after WP-FMX lands (D273). Since WP-FMX the rows record DeviceDenormals and DeviceNanEncoding (D253.8), and D273's per-word check (the bound check's judgement of each differing word against the notes whose difference can be told word by word) opens the other 4 words, on both lavapipe slots: 3 within Apple's bound where a subnormal is an operand, an intermediate, or an answer of the float arithmetic (DeviceDenormals), and the NaN pair where Apple states none, whose encoding the device chose (DeviceNanEncoding). All 21 are near-equivalents, open until an exact path exists (D253.12's flush and canonicalization, WP-FMX2's division).",
+        "sign_off": {
+          "state": "awaiting_user",
+          "decision": "Open until an exact path exists (the user's decision of 2026-10-03: a recorded near-equivalent stays open in C3; the product's fast division is Vulkan's, recorded as DeviceArithmetic; DESIGN D273)"
+        }
+      }
+    },
+    {
+      "case_id": "87d136125666f4b159926bd9654cd09259fda8e51dae069ba244a6e3b8dc2615",
+      "name": "sign-of-zero-and-division-range-without-fast-math",
+      "cause": "apple_reading",
+      "bound": "MSL section 8.1: f32 denormal operands and results may be flushed to zero, fast math or not; section 8.5: where they are, a function may return any conforming non-flushed result, and a flushed zero's sign is undefined (D78.4 records both sections). MSL requires NaNs without fast math but states no NaN encoding. Vulkan leaves f32 denormals to shaderDenormFlushToZeroFloat32 (false on the gate's lavapipe) and states no NaN encoding either.",
+      "observations": [
+        {
+          "environment_id": "ubuntu-26.04-lavapipe@engine",
+          "spv_sha256": "071cbc8716936eab9e5e6f72039b33727d75a331bc8e776ea76f6ed8b934ed5f",
+          "candidate_output_sha256": "c3a22d491ea2f6fb8e6587a3510b233015d4e46bcdf9c7e1a9ecfa416c95da5a",
+          "golden_output_sha256": "463b4b22139a229ab33bcf98e1bc1dc7588b5148a8d85998ea6403301690080c",
+          "words": 192,
+          "differing_words": 6,
+          "values": "6 of 192 words, all in the precise division lane, each a denormal operand or result that Metal flushes and llvmpipe keeps: two denormal quotients where Metal answers +0, 2^127 and 2 where Metal divides by a flushed zero and answers infinity, and 1 twice where Metal flushes both operands and answers NaN."
+        },
+        {
+          "environment_id": "ubuntu-26.04-lavapipe@engine+robustness-off",
+          "spv_sha256": "fc68214c5f7243c9bf9352a154ba886d746cc175c470553de0fd83bbe65063a9",
+          "candidate_output_sha256": "c3a22d491ea2f6fb8e6587a3510b233015d4e46bcdf9c7e1a9ecfa416c95da5a",
+          "golden_output_sha256": "463b4b22139a229ab33bcf98e1bc1dc7588b5148a8d85998ea6403301690080c",
+          "words": 192,
+          "differing_words": 6,
+          "values": "6 of 192 words, all in the precise division lane, each a denormal operand or result that Metal flushes and llvmpipe keeps: two denormal quotients where Metal answers +0, 2^127 and 2 where Metal divides by a flushed zero and answers infinity, and 1 twice where Metal flushes both operands and answers NaN."
+        }
+      ],
+      "lanes": [
+        {
+          "words": {
+            "first": 0,
+            "count": 48,
+            "stride": 4
+          },
+          "result": "f32",
+          "math": "precise",
+          "computes": "sign(a)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 0,
+                "format": "f32",
+                "first": 0,
+                "stride": 4
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 1,
+            "count": 48,
+            "stride": 4
+          },
+          "result": "f32",
+          "math": "precise",
+          "computes": "sub(a, mul(b, add(mul(sign(a), c), d)))",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 0,
+                "format": "f32",
+                "first": 0,
+                "stride": 4
+              }
+            },
+            {
+              "buffer": {
+                "binding": 0,
+                "format": "f32",
+                "first": 1,
+                "stride": 4
+              }
+            },
+            {
+              "buffer": {
+                "binding": 0,
+                "format": "f32",
+                "first": 2,
+                "stride": 4
+              }
+            },
+            {
+              "buffer": {
+                "binding": 0,
+                "format": "f32",
+                "first": 3,
+                "stride": 4
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 2,
+            "count": 48,
+            "stride": 4
+          },
+          "result": "f32",
+          "math": "precise",
+          "computes": "div(a, b)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 1,
+                "format": "f32",
+                "first": 0,
+                "stride": 2
+              }
+            },
+            {
+              "buffer": {
+                "binding": 1,
+                "format": "f32",
+                "first": 1,
+                "stride": 2
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 3,
+            "count": 48,
+            "stride": 4
+          },
+          "result": "f16_low",
+          "math": "precise",
+          "computes": "sign(a)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 2,
+                "format": "f16",
+                "first": 0,
+                "stride": 4
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 3,
+            "count": 48,
+            "stride": 4
+          },
+          "result": "f16_high",
+          "math": "precise",
+          "computes": "div(a, b)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 2,
+                "format": "f16",
+                "first": 1,
+                "stride": 4
+              }
+            },
+            {
+              "buffer": {
+                "binding": 2,
+                "format": "f16",
+                "first": 2,
+                "stride": 4
+              }
+            }
+          ]
+        }
+      ],
+      "review": {
+        "evidence": [
+          "D78.4",
+          "D139.9",
+          "D204.5",
+          "D204.8",
+          "D273"
+        ],
+        "note": "Metal's answers are Apple's readings, not what MSL guarantees: it flushes f32 denormals and canonicalizes a NaN result to 0x7fc00000 (D139.9). llvmpipe keeps the denormals and answers 0xffc00000; both are within what MSL states, and U3 accepts the device's denormal handling. The artifact records no denormal note: PrecisionNote::DeviceDenormals is never inserted (D139.9), and these rows' DeviceArithmetic comes from the fdiv. D204.8 handed back canonicalization with that note's policy; the part still owed is the note (queued as DN1). Reviewed again at base ed6cead6: the candidate changed since the rows A4b recorded (SEMANTICS_VERSION 54 to 71, the same census), and its output on lavapipe is byte for byte the one reviewed. D273's bound check, on both lavapipe slots: 10 differing words, all within Apple's stated bound. Re-pinned at the candidate WP-FMX's lowering compiles (EV SGN-c3rows at 79cf7adf, fresh Metal, MoltenVK, and lavapipe rows; D273.8): 6 differing words, all in the precise division lane, all within what MSL states (section 8.5 lets a denormal be flushed or not). The rows now record DeviceDenormals (WP-FMX), and Metal flushes reproducibly, so each word is the product leaving denormals to the device: a near-equivalent, open until an exact path exists. D253.12 records that path (a flushing select, or DenormFlushToZero where offered), and WP-FMX2's division answers Metal's precise quotient, its flushes included (D279). D273's per-word check (the bound check's judgement of each differing word against the notes whose difference can be told word by word) finds all 6, on both lavapipe slots, a near-equivalent: a subnormal operand or answer of the division, whose lowering records DeviceDenormals.",
+        "sign_off": {
+          "state": "awaiting_user",
+          "decision": "Open until an exact path exists (the user's decision of 2026-10-03: a recorded near-equivalent stays open in C3; D273's per-word check finds each word a denormal the device keeps where Metal flushes, DeviceDenormals; the paths are D253.12's flush and WP-FMX2's division; DESIGN D273)"
+        }
+      }
+    },
+    {
+      "case_id": "f2432b654e916739211b2bd763af4b90899146e10da01d756b579c3792b539c1",
+      "name": "gated-bias-off",
+      "cause": "apple_reading",
+      "bound": "MSL Table 8.2 (fast math): acosh, asinh, and atanh are log formulas and tan is sin(x) * (1 / cos(x)); at these arguments they reduce to log(1) (within 2^-21 absolute on [0.5, 2]) and sin(+0) (within 2^-13 absolute), so a small non-zero result conforms, and under nsz so does -0. Vulkan: Log within 2^-21 and Sin within 2^-11 absolute.",
+      "observations": [
+        {
+          "environment_id": "ubuntu-26.04-lavapipe@engine",
+          "spv_sha256": "d01757f542b6b23b7a27545c1ef06b21a950eff7456837909d087377c9b8dd57",
+          "candidate_output_sha256": "9fe4aa061bd83377c8671a61edc1081eea2381371daf3e2645789c97310fccb7",
+          "golden_output_sha256": "9fe4aa061bd83377c8671a61edc1081eea2381371daf3e2645789c97310fccb7",
+          "words": 13,
+          "differing_words": 0,
+          "values": "0 of 13 words: every zero is +0 on both devices."
+        },
+        {
+          "environment_id": "ubuntu-26.04-lavapipe@engine+robustness-off",
+          "spv_sha256": "ab6a23894889492ae30bb3244c118aff85861833eab39d2e1601935d2af9a0bf",
+          "candidate_output_sha256": "9fe4aa061bd83377c8671a61edc1081eea2381371daf3e2645789c97310fccb7",
+          "golden_output_sha256": "9fe4aa061bd83377c8671a61edc1081eea2381371daf3e2645789c97310fccb7",
+          "words": 13,
+          "differing_words": 0,
+          "values": "0 of 13 words: every zero is +0 on both devices."
+        }
+      ],
+      "lanes": [
+        {
+          "words": {
+            "first": 0,
+            "count": 2
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "acosh(a)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 0,
+                "format": "f32",
+                "first": 0
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 2,
+            "count": 3
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "asinh(a)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 0,
+                "format": "f32",
+                "first": 2
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 5,
+            "count": 4
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "atanh(a)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 0,
+                "format": "f32",
+                "first": 5
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 9,
+            "count": 3
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "tan(a)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 1,
+                "format": "f32",
+                "first": 0
+              }
+            }
+          ]
+        }
+      ],
+      "review": {
+        "evidence": [
+          "D208.1",
+          "D208.5",
+          "D273"
+        ],
+        "note": "A bounded reading that matches: Metal and llvmpipe both answer exactly +0 for acosh(1), asinh(+0), atanh(+0), and tan(+0) on the three lanes, and the bias row (3.25 plus the bias) is exact. A device answering a conforming non-zero would mismatch, and the report would count it an unreviewed mismatch until this entry is reviewed again at that reading (its observations name only the readings reviewed). D273's bound check, on both lavapipe slots: no differing word; the lanes keep the bound checkable if a device answers a conforming non-zero.",
+        "sign_off": {
+          "state": "signed_off",
+          "decision": "C3 apple_reading: accept only within Apple's bound (the user's answer of 2026-10-03)",
+          "date": "2026-10-03"
+        }
+      }
+    },
+    {
+      "case_id": "5742c73bc385293a14a15946c9bde39b9e5da6a9e50b2855ceda236d361e8c03",
+      "name": "gated-bias-on",
+      "cause": "apple_reading",
+      "bound": "MSL Table 8.2 (fast math): acosh, asinh, and atanh are log formulas and tan is sin(x) * (1 / cos(x)); at these arguments they reduce to log(1) (within 2^-21 absolute on [0.5, 2]) and sin(+0) (within 2^-13 absolute), so a small non-zero result conforms, and under nsz so does -0. Vulkan: Log within 2^-21 and Sin within 2^-11 absolute.",
+      "observations": [
+        {
+          "environment_id": "ubuntu-26.04-lavapipe@engine",
+          "spv_sha256": "501f8560eeca50ab2a5f5a2f95bd1c97bc1fa9f904164228d591555f4f67e17a",
+          "candidate_output_sha256": "ce6a853ebf4163d4ae4ab5f32c3ed2b41ed806cce2d6fc34f7d4b52f915f2fcf",
+          "golden_output_sha256": "ce6a853ebf4163d4ae4ab5f32c3ed2b41ed806cce2d6fc34f7d4b52f915f2fcf",
+          "words": 13,
+          "differing_words": 0,
+          "values": "0 of 13 words: every zero is +0 on both devices."
+        },
+        {
+          "environment_id": "ubuntu-26.04-lavapipe@engine+robustness-off",
+          "spv_sha256": "bd83aeff7fb18c032316efa6e04f76dde0b66ee5980fc63e7dc3d52c3687de6b",
+          "candidate_output_sha256": "ce6a853ebf4163d4ae4ab5f32c3ed2b41ed806cce2d6fc34f7d4b52f915f2fcf",
+          "golden_output_sha256": "ce6a853ebf4163d4ae4ab5f32c3ed2b41ed806cce2d6fc34f7d4b52f915f2fcf",
+          "words": 13,
+          "differing_words": 0,
+          "values": "0 of 13 words: every zero is +0 on both devices."
+        }
+      ],
+      "lanes": [
+        {
+          "words": {
+            "first": 0,
+            "count": 2
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "acosh(a)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 0,
+                "format": "f32",
+                "first": 0
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 2,
+            "count": 3
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "asinh(a)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 0,
+                "format": "f32",
+                "first": 2
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 5,
+            "count": 4
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "atanh(a)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 0,
+                "format": "f32",
+                "first": 5
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 9,
+            "count": 3
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "tan(a)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 1,
+                "format": "f32",
+                "first": 0
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 12,
+            "count": 1
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "add(a, b)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 0,
+                "format": "f32",
+                "first": 9
+              }
+            },
+            {
+              "buffer": {
+                "binding": 2,
+                "format": "f32",
+                "first": 0
+              }
+            }
+          ]
+        }
+      ],
+      "review": {
+        "evidence": [
+          "D208.1",
+          "D208.5",
+          "D273"
+        ],
+        "note": "A bounded reading that matches: Metal and llvmpipe both answer exactly +0 for acosh(1), asinh(+0), atanh(+0), and tan(+0) on the three lanes, and the bias row (3.25 plus the bias) is exact. A device answering a conforming non-zero would mismatch, and the report would count it an unreviewed mismatch until this entry is reviewed again at that reading (its observations name only the readings reviewed). D273's bound check, on both lavapipe slots: no differing word; the lanes keep the bound checkable if a device answers a conforming non-zero.",
+        "sign_off": {
+          "state": "signed_off",
+          "decision": "C3 apple_reading: accept only within Apple's bound (the user's answer of 2026-10-03)",
+          "date": "2026-10-03"
+        }
+      }
+    },
+    {
+      "case_id": "2de759f0aaed6c0d4483673c6b52b6252cff3e27398ba5b0db0f3c86561196a4",
+      "name": "gated-bias-on-at-two",
+      "cause": "apple_reading",
+      "bound": "MSL Table 8.2 (fast math): acosh, asinh, and atanh are log formulas and tan is sin(x) * (1 / cos(x)); at these arguments they reduce to log(1) (within 2^-21 absolute on [0.5, 2]) and sin(+0) (within 2^-13 absolute), so a small non-zero result conforms, and under nsz so does -0. Vulkan: Log within 2^-21 and Sin within 2^-11 absolute.",
+      "observations": [
+        {
+          "environment_id": "ubuntu-26.04-lavapipe@engine",
+          "spv_sha256": "501f8560eeca50ab2a5f5a2f95bd1c97bc1fa9f904164228d591555f4f67e17a",
+          "candidate_output_sha256": "ce6a853ebf4163d4ae4ab5f32c3ed2b41ed806cce2d6fc34f7d4b52f915f2fcf",
+          "golden_output_sha256": "ce6a853ebf4163d4ae4ab5f32c3ed2b41ed806cce2d6fc34f7d4b52f915f2fcf",
+          "words": 13,
+          "differing_words": 0,
+          "values": "0 of 13 words: every zero is +0 on both devices."
+        },
+        {
+          "environment_id": "ubuntu-26.04-lavapipe@engine+robustness-off",
+          "spv_sha256": "bd83aeff7fb18c032316efa6e04f76dde0b66ee5980fc63e7dc3d52c3687de6b",
+          "candidate_output_sha256": "ce6a853ebf4163d4ae4ab5f32c3ed2b41ed806cce2d6fc34f7d4b52f915f2fcf",
+          "golden_output_sha256": "ce6a853ebf4163d4ae4ab5f32c3ed2b41ed806cce2d6fc34f7d4b52f915f2fcf",
+          "words": 13,
+          "differing_words": 0,
+          "values": "0 of 13 words: every zero is +0 on both devices."
+        }
+      ],
+      "lanes": [
+        {
+          "words": {
+            "first": 0,
+            "count": 2
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "acosh(a)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 0,
+                "format": "f32",
+                "first": 0
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 2,
+            "count": 3
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "asinh(a)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 0,
+                "format": "f32",
+                "first": 2
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 5,
+            "count": 4
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "atanh(a)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 0,
+                "format": "f32",
+                "first": 5
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 9,
+            "count": 3
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "tan(a)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 1,
+                "format": "f32",
+                "first": 0
+              }
+            }
+          ]
+        },
+        {
+          "words": {
+            "first": 12,
+            "count": 1
+          },
+          "result": "f32",
+          "math": "fast",
+          "computes": "add(a, b)",
+          "operands": [
+            {
+              "buffer": {
+                "binding": 0,
+                "format": "f32",
+                "first": 9
+              }
+            },
+            {
+              "buffer": {
+                "binding": 2,
+                "format": "f32",
+                "first": 0
+              }
+            }
+          ]
+        }
+      ],
+      "review": {
+        "evidence": [
+          "D208.1",
+          "D208.5",
+          "D273"
+        ],
+        "note": "A bounded reading that matches: Metal and llvmpipe both answer exactly +0 for acosh(1), asinh(+0), atanh(+0), and tan(+0) on the three lanes, and the bias row (3.25 plus the bias) is exact. A device answering a conforming non-zero would mismatch, and the report would count it an unreviewed mismatch until this entry is reviewed again at that reading (its observations name only the readings reviewed). D273's bound check, on both lavapipe slots: no differing word; the lanes keep the bound checkable if a device answers a conforming non-zero.",
+        "sign_off": {
+          "state": "signed_off",
+          "decision": "C3 apple_reading: accept only within Apple's bound (the user's answer of 2026-10-03)",
+          "date": "2026-10-03"
+        }
+      }
+    },
+    {
+      "case_id": "2e67d4ecaaefa00a6a54df0d6bebffc200696433305296fb0391eb5fba986fbd",
+      "name": "linked-single-radix5-zero-write",
+      "cause": "fast_math_regrouping",
+      "bound": "No numeric bound: every butterfly is a chain of fadd fast and fmul fast (reassoc, contract) over the radix's twiddle constants, so the AIR allows any grouping. Every authored input is (1, 2), so each product is exact and only the order of the additions decides the last-place residues (D175.1).",
+      "observations": [
+        {
+          "environment_id": "apple-m3-max-moltenvk@engine",
+          "spv_sha256": "582f008c4a6cf0b59a29acc582d600557a976949467bea0dccaaddd33150da24",
+          "candidate_output_sha256": "7a7ad65159a287f546c4a8845ad14cc66466c18e6f6781d24303129c759a3af1",
+          "golden_output_sha256": "5ba0adf44b81eb5809e6e342be7b7c2834b21957444ac4c67d418c5657fdde0d",
+          "words": 5,
+          "differing_words": 2,
+          "values": "2 of 5 words (4 of 10 half lanes): every differing lane is a residue of the sums' rounding where the exact transform of the constant input is 0; the largest is 2.38e-07 in the device's reading and 1.19e-07 in Metal's (macOS 26.7). The DC term matches. Every venue's committed stated row reads these words."
+        }
+      ],
+      "review": {
+        "evidence": [
+          "D175",
+          "D273",
+          "D557"
+        ],
+        "note": "An MPS ND-array FFT kernel (radix 5, half). MoltenVK compiles SPIRV-Cross's MSL with -fmetal-math-mode=fast, and Metal's front end regroups the chains; its output evaluated in its own order reproduced MoltenVK's bytes for radix 5, 7, and 11 (D175.1). Metal's own grouping moved between macOS 26.5.2 and 26.7, so matching it is not a goal. The product leaves only operations carrying both contract and reassoc undecorated (D175.2) and records FastMathRewrites, so the observation is Unbounded. Re-pinned at the candidate WP-FMX's lowering compiles (EV SGN-c3rows at 79cf7adf, fresh Metal, MoltenVK, and lavapipe rows; D273.8): a current MoltenVK row. Keyed by its cause since D557: it reviews the case's mismatch in every venue's slots while the row records FastMathRewrites; re-pinned at the snapshot's M3 Max row (master 752908b6).",
+        "sign_off": {
+          "state": "signed_off",
+          "decision": "C3 fast_math_regrouping: accept (the user's answer of 2026-10-03)",
+          "date": "2026-10-03"
+        }
+      }
+    },
+    {
+      "case_id": "380b9b9f0979e03292dea5fcd5cc642c03c9bb5df2f409c684a57d81cdf966e8",
+      "name": "linked-single-radix7-zero-write",
+      "cause": "fast_math_regrouping",
+      "bound": "No numeric bound: every butterfly is a chain of fadd fast and fmul fast (reassoc, contract) over the radix's twiddle constants, so the AIR allows any grouping. Every authored input is (1, 2), so each product is exact and only the order of the additions decides the last-place residues (D175.1).",
+      "observations": [
+        {
+          "environment_id": "apple-m3-max-moltenvk@engine",
+          "spv_sha256": "828202a6d35773f69efb4af7c01f28dc806a4a114989e4bda3806af1103a407e",
+          "candidate_output_sha256": "945bde05e2fb639195929ca887f7cf17aa44ef370cd79b63390e36ec78b42749",
+          "golden_output_sha256": "387ce2a23f9ff172412c93739f9a250ee707ef5ac47ae9f18c3ba396ccdd44bc",
+          "words": 7,
+          "differing_words": 4,
+          "values": "4 of 7 words (8 of 14 half lanes): every differing lane is a residue of the sums' rounding where the exact transform of the constant input is 0; the largest is 4.77e-07 in the device's reading and 2.98e-07 in Metal's (macOS 26.7). The DC term matches. Every venue's committed stated row reads these words."
+        }
+      ],
+      "review": {
+        "evidence": [
+          "D175",
+          "D273",
+          "D557"
+        ],
+        "note": "An MPS ND-array FFT kernel (radix 7, half). MoltenVK compiles SPIRV-Cross's MSL with -fmetal-math-mode=fast, and Metal's front end regroups the chains; its output evaluated in its own order reproduced MoltenVK's bytes for radix 5, 7, and 11 (D175.1). Metal's own grouping moved between macOS 26.5.2 and 26.7, so matching it is not a goal. The product leaves only operations carrying both contract and reassoc undecorated (D175.2) and records FastMathRewrites, so the observation is Unbounded. Re-pinned at the candidate WP-FMX's lowering compiles (EV SGN-c3rows at 79cf7adf, fresh Metal, MoltenVK, and lavapipe rows; D273.8): a current MoltenVK row. Keyed by its cause since D557: it reviews the case's mismatch in every venue's slots while the row records FastMathRewrites; re-pinned at the snapshot's M3 Max row (master 752908b6).",
+        "sign_off": {
+          "state": "signed_off",
+          "decision": "C3 fast_math_regrouping: accept (the user's answer of 2026-10-03)",
+          "date": "2026-10-03"
+        }
+      }
+    },
+    {
+      "case_id": "cd50e77be3ef88a987c936309321bf53ce72a31534522c2203f884e6ec3718ad",
+      "name": "linked-single-radix11-zero-write",
+      "cause": "fast_math_regrouping",
+      "bound": "No numeric bound: every butterfly is a chain of fadd fast and fmul fast (reassoc, contract) over the radix's twiddle constants, so the AIR allows any grouping. Every authored input is (1, 2), so each product is exact and only the order of the additions decides the last-place residues (D175.1).",
+      "observations": [
+        {
+          "environment_id": "apple-m3-max-moltenvk@engine",
+          "spv_sha256": "2273f82305260f512ff97e7210c5987225b79736a3eb6d4ee92ec76b7808b554",
+          "candidate_output_sha256": "d8ae9087d74ab96e4f902fdd98991dc8d8e60c2c73419d7f952048841b7ebd4b",
+          "golden_output_sha256": "80b3252dc92f373f626a68bd61db38ae9b9f763b2e0a88cbaccb4b44d814c57c",
+          "words": 22,
+          "differing_words": 13,
+          "values": "13 of 22 words (13 of 22 float lanes): every differing lane is a residue of the sums' rounding where the exact transform of the constant input is 0; the largest is 2.38e-07 in the device's reading and 4.77e-07 in Metal's (macOS 26.7). The DC term matches. Every venue's committed stated row reads these words."
+        }
+      ],
+      "review": {
+        "evidence": [
+          "D175",
+          "D273",
+          "D557"
+        ],
+        "note": "An MPS ND-array FFT kernel (radix 11, float). MoltenVK compiles SPIRV-Cross's MSL with -fmetal-math-mode=fast, and Metal's front end regroups the chains; its output evaluated in its own order reproduced MoltenVK's bytes for radix 5, 7, and 11 (D175.1). Metal's own grouping moved between macOS 26.5.2 and 26.7, so matching it is not a goal. The product leaves only operations carrying both contract and reassoc undecorated (D175.2) and records FastMathRewrites, so the observation is Unbounded. Re-pinned at the candidate WP-FMX's lowering compiles (EV SGN-c3rows at 79cf7adf, fresh Metal, MoltenVK, and lavapipe rows; D273.8): a current MoltenVK row. Keyed by its cause since D557: it reviews the case's mismatch in every venue's slots while the row records FastMathRewrites; re-pinned at the snapshot's M3 Max row (master 752908b6).",
+        "sign_off": {
+          "state": "signed_off",
+          "decision": "C3 fast_math_regrouping: accept (the user's answer of 2026-10-03)",
+          "date": "2026-10-03"
+        }
+      }
+    },
+    {
+      "case_id": "85a566716580a4f5417a70f849a40d362f64250b47b19965f5ea8947a54172cd",
+      "name": "linked-single-radix11-zero-write",
+      "cause": "fast_math_regrouping",
+      "bound": "No numeric bound: every butterfly is a chain of fadd fast and fmul fast (reassoc, contract) over the radix's twiddle constants, so the AIR allows any grouping. Every authored input is (1, 2), so each product is exact and only the order of the additions decides the last-place residues (D175.1).",
+      "observations": [
+        {
+          "environment_id": "apple-m3-max-moltenvk@engine",
+          "spv_sha256": "41882b92350f2ef3ea9af79554b1a04c2fd4fde04df07f1b41340cc2cd7fbcb5",
+          "candidate_output_sha256": "c6ea68c5aff11be40887b41f24d789526f93320a73c6c568a0326633cd433257",
+          "golden_output_sha256": "36afbf49fad08006146b30366ebd73ddceb7091eee42e03cf22d5e7efe7d125e",
+          "words": 11,
+          "differing_words": 9,
+          "values": "9 of 11 words (11 of 22 half lanes): every differing lane is a residue of the sums' rounding where the exact transform of the constant input is 0; the largest is 2.38e-07 in the device's reading and 4.77e-07 in Metal's (macOS 26.7). The DC term matches. Every venue's committed stated row reads these words."
+        }
+      ],
+      "review": {
+        "evidence": [
+          "D175",
+          "D273",
+          "D557"
+        ],
+        "note": "An MPS ND-array FFT kernel (radix 11, half). MoltenVK compiles SPIRV-Cross's MSL with -fmetal-math-mode=fast, and Metal's front end regroups the chains; its output evaluated in its own order reproduced MoltenVK's bytes for radix 5, 7, and 11 (D175.1). Metal's own grouping moved between macOS 26.5.2 and 26.7, so matching it is not a goal. The product leaves only operations carrying both contract and reassoc undecorated (D175.2) and records FastMathRewrites, so the observation is Unbounded. Re-pinned at the candidate WP-FMX's lowering compiles (EV SGN-c3rows at 79cf7adf, fresh Metal, MoltenVK, and lavapipe rows; D273.8): a current MoltenVK row. Keyed by its cause since D557: it reviews the case's mismatch in every venue's slots while the row records FastMathRewrites; re-pinned at the snapshot's M3 Max row (master 752908b6).",
+        "sign_off": {
+          "state": "signed_off",
+          "decision": "C3 fast_math_regrouping: accept (the user's answer of 2026-10-03)",
+          "date": "2026-10-03"
+        }
+      }
+    },
+    {
+      "case_id": "de0124c93fb9d10fb6d78b8b5da8367a6b9bec8ac5c38807411a8525d3d470a1",
+      "name": "linked-single-radix13-zero-write",
+      "cause": "fast_math_regrouping",
+      "bound": "No numeric bound: every butterfly is a chain of fadd fast and fmul fast (reassoc, contract) over the radix's twiddle constants, so the AIR allows any grouping. Every authored input is (1, 2), so each product is exact and only the order of the additions decides the last-place residues (D175.1).",
+      "observations": [
+        {
+          "environment_id": "apple-m3-max-moltenvk@engine",
+          "spv_sha256": "b960991bb435693e9217b5c19cf9e01df4559d96f19e7503edcb5d7c1e8d8ccd",
+          "candidate_output_sha256": "7d02bdf035208470bc61277581e5f47968cd9a494f4f8f8f26822a7ad08da816",
+          "golden_output_sha256": "9bfec8ea8d8a59ae669ebcc604d470e5e118fb8eaeeb9fa632b3cad7497da12c",
+          "words": 13,
+          "differing_words": 5,
+          "values": "5 of 13 words (5 of 26 half lanes): every differing lane is a residue of the sums' rounding where the exact transform of the constant input is 0; the largest is 4.77e-07 in the device's reading and 3.58e-07 in Metal's (macOS 26.7). The DC term matches. Every venue's committed stated row reads these words."
+        }
+      ],
+      "review": {
+        "evidence": [
+          "D175",
+          "D273",
+          "D557"
+        ],
+        "note": "An MPS ND-array FFT kernel (radix 13, half). MoltenVK compiles SPIRV-Cross's MSL with -fmetal-math-mode=fast, and Metal's front end regroups the chains; its output evaluated in its own order reproduced MoltenVK's bytes for radix 5, 7, and 11 (D175.1). This kernel's own bytes (radix 13, half) were not reproduced: D175.1 reproduced radix 13 only for float, where MoltenVK matches Metal, so this entry is attributed by the family and the residue lanes it differs in. Metal's own grouping moved between macOS 26.5.2 and 26.7, so matching it is not a goal. The product leaves only operations carrying both contract and reassoc undecorated (D175.2) and records FastMathRewrites, so the observation is Unbounded. Re-pinned at the candidate WP-FMX's lowering compiles (EV SGN-c3rows at 79cf7adf, fresh Metal, MoltenVK, and lavapipe rows; D273.8): a current MoltenVK row. Keyed by its cause since D557: it reviews the case's mismatch in every venue's slots while the row records FastMathRewrites; re-pinned at the snapshot's M3 Max row (master 752908b6).",
+        "sign_off": {
+          "state": "signed_off",
+          "decision": "C3 fast_math_regrouping: accept (the user's answer of 2026-10-03)",
+          "date": "2026-10-03"
+        }
+      }
+    },
+    {
+      "case_id": "8f4525d29027a76b6bca0aa935aa1646c698e6a7edfb35a5a32f08bc2d710fd4",
+      "name": "linked-single-radix5-zero-write",
+      "cause": "fast_math_regrouping",
+      "bound": "No numeric bound: every butterfly is a chain of fadd fast and fmul fast (reassoc, contract) over the radix's twiddle constants, so the AIR allows any grouping. Every authored input is (1, 2), so each product is exact and only the order of the additions decides the last-place residues (D175.1).",
+      "observations": [
+        {
+          "environment_id": "apple-m3-max-moltenvk@engine",
+          "spv_sha256": "3c09c279adf1f55b35a2e570f2ca9dfb2811b1f1fa59458548f4e8c610ffb3d7",
+          "candidate_output_sha256": "dd09a3a8cf9b9ae1973f60669972881a76eb167a0d30b24b7a85a1625c3d645a",
+          "golden_output_sha256": "dbcb6ec07e6707815f6a0aecce5fbcdf7476d8f146d71506832372432a42c70a",
+          "words": 10,
+          "differing_words": 4,
+          "values": "4 of 10 words (4 of 10 float lanes): every differing lane is a residue of the sums' rounding where the exact transform of the constant input is 0; the largest is 2.38e-07 in the device's reading and 1.19e-07 in Metal's (macOS 26.7). The DC term matches. Every venue's committed stated row reads these words."
+        }
+      ],
+      "review": {
+        "evidence": [
+          "D175",
+          "D273",
+          "D557"
+        ],
+        "note": "An MPS ND-array FFT kernel (radix 5, float): fast-flagged butterfly chains over exact products, where only the order of the additions decides the residue lanes (D175.1). The list held the case only as the cause of its old-engine mismatch (its reading was removed when its MoltenVK row matched, D273 item 8); its engine rows mismatch Metal on every venue, each in the same residue lanes (the snapshot at master 752908b6). Listed under the user's answer, which accepted every fast_math_regrouping entry (D273 item 2), keyed by its cause (D557): it reviews the case's mismatch in every venue's slots while the row records FastMathRewrites.",
+        "sign_off": {
+          "state": "signed_off",
+          "decision": "C3 fast_math_regrouping: accept (the user's answer of 2026-10-03)",
+          "date": "2026-10-03"
+        }
+      }
+    },
+    {
+      "case_id": "421b21bac80d60a446415dec5a6afa23aef24dcf500c8deb44969f6d80f365f5",
+      "name": "linked-single-radix7-zero-write",
+      "cause": "fast_math_regrouping",
+      "bound": "No numeric bound: every butterfly is a chain of fadd fast and fmul fast (reassoc, contract) over the radix's twiddle constants, so the AIR allows any grouping. Every authored input is (1, 2), so each product is exact and only the order of the additions decides the last-place residues (D175.1).",
+      "observations": [
+        {
+          "environment_id": "apple-m3-max-moltenvk@engine",
+          "spv_sha256": "9283c01ec94804b4376d960582af5d18a2e0ee04764096c31baa03b40f1f3c42",
+          "candidate_output_sha256": "bc0f8bac98ddf7b94e77abcc3c4acb69a6b6b8daf6485c4512c0ed7ce0809188",
+          "golden_output_sha256": "10c4aae0fbb3a33266ef114f024c526456d79995736504663d17c0104acb4e29",
+          "words": 14,
+          "differing_words": 8,
+          "values": "8 of 14 words (8 of 14 float lanes): every differing lane is a residue of the sums' rounding where the exact transform of the constant input is 0; the largest is 4.77e-07 in the device's reading and 2.98e-07 in Metal's (macOS 26.7). The DC term matches. Every venue's committed stated row reads these words."
+        }
+      ],
+      "review": {
+        "evidence": [
+          "D175",
+          "D273",
+          "D557"
+        ],
+        "note": "An MPS ND-array FFT kernel (radix 7, float): fast-flagged butterfly chains over exact products, where only the order of the additions decides the residue lanes (D175.1). The list held the case only as the cause of its old-engine mismatch (its reading was removed when its MoltenVK row matched, D273 item 8); its engine rows mismatch Metal on every venue, each in the same residue lanes (the snapshot at master 752908b6). Listed under the user's answer, which accepted every fast_math_regrouping entry (D273 item 2), keyed by its cause (D557): it reviews the case's mismatch in every venue's slots while the row records FastMathRewrites.",
+        "sign_off": {
+          "state": "signed_off",
+          "decision": "C3 fast_math_regrouping: accept (the user's answer of 2026-10-03)",
+          "date": "2026-10-03"
+        }
+      }
+    },
+    {
+      "case_id": "4825f9c3595bfe824e80f768c3ddf840609b4ca219f82e6342fd917be215e58b",
+      "name": "linked-single-radix13-zero-write",
+      "cause": "fast_math_regrouping",
+      "bound": "No numeric bound: every butterfly is a chain of fadd fast and fmul fast (reassoc, contract) over the radix's twiddle constants, so the AIR allows any grouping. Every authored input is (1, 2), so each product is exact and only the order of the additions decides the last-place residues (D175.1).",
+      "observations": [
+        {
+          "environment_id": "apple-m3-max-moltenvk@engine",
+          "spv_sha256": "dcbed11db73ca901c9dc2c962b0ed652a6bacf2757e9610d1bf0cd32be1b3e90",
+          "candidate_output_sha256": "68d7fac24a7cff0f1e5b6bf922c5b55017af3237f4adcdda8f663c617372924d",
+          "golden_output_sha256": "457fdc9c9af61c957ac00c50076198600adb56ceaf0aa09fcb2d1453051d5caa",
+          "words": 26,
+          "differing_words": 5,
+          "values": "5 of 26 words (5 of 26 float lanes): every differing lane is a residue of the sums' rounding where the exact transform of the constant input is 0; the largest is 4.77e-07 in the device's reading and 3.58e-07 in Metal's (macOS 26.7). The DC term matches. Every venue's committed stated row reads these words."
+        }
+      ],
+      "review": {
+        "evidence": [
+          "D175",
+          "D273",
+          "D557"
+        ],
+        "note": "An MPS ND-array FFT kernel (radix 13, float): fast-flagged butterfly chains over exact products, where only the order of the additions decides the residue lanes (D175.1). The list held the case only as the cause of its old-engine mismatch; its engine rows mismatch Metal on every venue, each in the same residue lanes (the snapshot at master 752908b6). Listed under the user's answer, which accepted every fast_math_regrouping entry (D273 item 2), keyed by its cause (D557): it reviews the case's mismatch in every venue's slots while the row records FastMathRewrites.",
+        "sign_off": {
+          "state": "signed_off",
+          "decision": "C3 fast_math_regrouping: accept (the user's answer of 2026-10-03)",
+          "date": "2026-10-03"
+        }
+      }
+    },
+    {
+      "case_id": "456861185b49180b0dd830f9d213d48b01d12ebc7ecd30236466ffa34dcffda0",
+      "name": "linked-single-radix15-zero-write",
+      "cause": "fast_math_regrouping",
+      "bound": "No numeric bound: every butterfly is a chain of fadd fast and fmul fast (reassoc, contract) over the radix's twiddle constants, so the AIR allows any grouping. Every authored input is (1, 2), so each product is exact and only the order of the additions decides the last-place residues (D175.1).",
+      "observations": [
+        {
+          "environment_id": "apple-m3-max-moltenvk@engine",
+          "spv_sha256": "3a608a9dc8d865a4d3d231aa74548de971ac307866f8a3afec6a3b01ca636a42",
+          "candidate_output_sha256": "281b5b4a5c66388394e136c446cf46fa7b08a5b6e9d1cbceb60c7b79e9819017",
+          "golden_output_sha256": "b015b18fe37a1267dd1a86e9d5e47fdae64874ae27edd26d8099d68c741b2cc6",
+          "words": 15,
+          "differing_words": 4,
+          "values": "4 of 15 words (8 of 30 half lanes): every differing lane is a residue of the sums' rounding where the exact transform of the constant input is 0; the largest is 1.19e-07 in the device's reading and 2.38e-07 in Metal's (macOS 26.7). The DC term matches. Every venue's committed stated row reads these words."
+        }
+      ],
+      "review": {
+        "evidence": [
+          "D175",
+          "D273",
+          "D557"
+        ],
+        "note": "An MPS ND-array FFT kernel (radix 15, half): fast-flagged butterfly chains over exact products, where only the order of the additions decides the residue lanes (D175.1). The list held the case only as the cause of its old-engine mismatch; its engine rows mismatch Metal on every venue, each in the same residue lanes (the snapshot at master 752908b6). Listed under the user's answer, which accepted every fast_math_regrouping entry (D273 item 2), keyed by its cause (D557): it reviews the case's mismatch in every venue's slots while the row records FastMathRewrites.",
+        "sign_off": {
+          "state": "signed_off",
+          "decision": "C3 fast_math_regrouping: accept (the user's answer of 2026-10-03)",
+          "date": "2026-10-03"
+        }
+      }
+    },
+    {
+      "case_id": "845d96f2755d3e19fad12cab86488409277eb003f34f1b9752ee5b952389c900",
+      "name": "linked-single-radix15-zero-write",
+      "cause": "fast_math_regrouping",
+      "bound": "No numeric bound: every butterfly is a chain of fadd fast and fmul fast (reassoc, contract) over the radix's twiddle constants, so the AIR allows any grouping. Every authored input is (1, 2), so each product is exact and only the order of the additions decides the last-place residues (D175.1).",
+      "observations": [
+        {
+          "environment_id": "apple-m3-max-moltenvk@engine",
+          "spv_sha256": "ce920518a3e5bcbd907235ad83e749a55ec9ca916bcf459a295a946e6581f122",
+          "candidate_output_sha256": "f3a2ec44d7e9ebd6312ccebfd1a1be3154ac8bb98d06e2d592fbd075fccb22f3",
+          "golden_output_sha256": "8492054da7e7a0d20c703e3c54ddb9d2addc28ab1cb68daf193b9fd1a2b81ec5",
+          "words": 30,
+          "differing_words": 8,
+          "values": "8 of 30 words (8 of 30 float lanes): every differing lane is a residue of the sums' rounding where the exact transform of the constant input is 0; the largest is 1.19e-07 in the device's reading and 2.38e-07 in Metal's (macOS 26.7). The DC term matches. Every venue's committed stated row reads these words."
+        }
+      ],
+      "review": {
+        "evidence": [
+          "D175",
+          "D273",
+          "D557"
+        ],
+        "note": "An MPS ND-array FFT kernel (radix 15, float): fast-flagged butterfly chains over exact products, where only the order of the additions decides the residue lanes (D175.1). The list held the case only as the cause of its old-engine mismatch; its engine rows mismatch Metal on every venue, each in the same residue lanes (the snapshot at master 752908b6). Listed under the user's answer, which accepted every fast_math_regrouping entry (D273 item 2), keyed by its cause (D557): it reviews the case's mismatch in every venue's slots while the row records FastMathRewrites.",
+        "sign_off": {
+          "state": "signed_off",
+          "decision": "C3 fast_math_regrouping: accept (the user's answer of 2026-10-03)",
+          "date": "2026-10-03"
+        }
+      }
+    }
+  ],
+  "old_mismatches": [
+    {
+      "case_id": "85a566716580a4f5417a70f849a40d362f64250b47b19965f5ea8947a54172cd",
+      "name": "linked-single-radix11-zero-write",
+      "cause": "fast_math_regrouping",
+      "review": {
+        "evidence": [
+          "D175",
+          "D273"
+        ],
+        "note": "An MPS ND-array FFT kernel: fast-flagged butterfly chains over exact products, where only the order of the additions decides the residue lanes (D175.1). The old engine's module was not reproduced; its row is attributed by the family and the residue lanes it differs in. The engine still differs (its reading is reviewed). One row of another old-engine build differs as well.",
+        "sign_off": {
+          "state": "signed_off",
+          "decision": "C3 fast_math_regrouping: accept (the user's answer of 2026-10-03)",
+          "date": "2026-10-03"
+        }
+      }
+    },
+    {
+      "case_id": "cd50e77be3ef88a987c936309321bf53ce72a31534522c2203f884e6ec3718ad",
+      "name": "linked-single-radix11-zero-write",
+      "cause": "fast_math_regrouping",
+      "review": {
+        "evidence": [
+          "D175",
+          "D273"
+        ],
+        "note": "An MPS ND-array FFT kernel: fast-flagged butterfly chains over exact products, where only the order of the additions decides the residue lanes (D175.1). D175 reproduced MoltenVK's bytes for radix 11 from the engine's module; the old engine's module was not reproduced, so its rows are attributed by the family and the residue lanes they differ in. The engine still differs (its reading is reviewed). Thirteen rows of other old-engine builds (masks, groupings, native fma, typed cancellation) differ as well.",
+        "sign_off": {
+          "state": "signed_off",
+          "decision": "C3 fast_math_regrouping: accept (the user's answer of 2026-10-03)",
+          "date": "2026-10-03"
+        }
+      }
+    },
+    {
+      "case_id": "4825f9c3595bfe824e80f768c3ddf840609b4ca219f82e6342fd917be215e58b",
+      "name": "linked-single-radix13-zero-write",
+      "cause": "fast_math_regrouping",
+      "review": {
+        "evidence": [
+          "D175",
+          "D273"
+        ],
+        "note": "An MPS ND-array FFT kernel: fast-flagged butterfly chains over exact products, where only the order of the additions decides the residue lanes (D175.1). Fixed: the engine matches Metal (executor v18; one of D175.4's guards). For radix 13 (float), Metal's regrouped front-end output of the engine's module, evaluated in its own order, gives Metal's own reading (D175.1). The old engine's module was not reproduced; its row is attributed by the family and the residue lanes it differs in.",
+        "sign_off": {
+          "state": "signed_off",
+          "decision": "C3 fast_math_regrouping: accept (the user's answer of 2026-10-03)",
+          "date": "2026-10-03"
+        }
+      }
+    },
+    {
+      "case_id": "de0124c93fb9d10fb6d78b8b5da8367a6b9bec8ac5c38807411a8525d3d470a1",
+      "name": "linked-single-radix13-zero-write",
+      "cause": "fast_math_regrouping",
+      "review": {
+        "evidence": [
+          "D175",
+          "D273"
+        ],
+        "note": "An MPS ND-array FFT kernel: fast-flagged butterfly chains over exact products, where only the order of the additions decides the residue lanes (D175.1). The old engine's module was not reproduced; its row is attributed by the family and the residue lanes it differs in. The engine still differs (its reading is reviewed). Six rows of other old-engine builds differ as well.",
+        "sign_off": {
+          "state": "signed_off",
+          "decision": "C3 fast_math_regrouping: accept (the user's answer of 2026-10-03)",
+          "date": "2026-10-03"
+        }
+      }
+    },
+    {
+      "case_id": "456861185b49180b0dd830f9d213d48b01d12ebc7ecd30236466ffa34dcffda0",
+      "name": "linked-single-radix15-zero-write",
+      "cause": "fast_math_regrouping",
+      "review": {
+        "evidence": [
+          "D175",
+          "D273"
+        ],
+        "note": "An MPS ND-array FFT kernel: fast-flagged butterfly chains over exact products, where only the order of the additions decides the residue lanes (D175.1). The old engine's own row in apple-m3-max-moltenvk matched, as does the engine (executor v18). The one mismatching row is another old-engine build's, recorded under its own environment (byte-exact-closed-20260830).",
+        "sign_off": {
+          "state": "signed_off",
+          "decision": "C3 fast_math_regrouping: accept (the user's answer of 2026-10-03)",
+          "date": "2026-10-03"
+        }
+      }
+    },
+    {
+      "case_id": "845d96f2755d3e19fad12cab86488409277eb003f34f1b9752ee5b952389c900",
+      "name": "linked-single-radix15-zero-write",
+      "cause": "fast_math_regrouping",
+      "review": {
+        "evidence": [
+          "D175",
+          "D273"
+        ],
+        "note": "An MPS ND-array FFT kernel: fast-flagged butterfly chains over exact products, where only the order of the additions decides the residue lanes (D175.1). The old engine's own row in apple-m3-max-moltenvk matched, as does the engine (executor v18). The four mismatching rows are other old-engine builds recorded under their own environments (byte-exact-closed-20260830, fast-shape-debug, radix15-leading-pair, radix15-topology).",
+        "sign_off": {
+          "state": "signed_off",
+          "decision": "C3 fast_math_regrouping: accept (the user's answer of 2026-10-03)",
+          "date": "2026-10-03"
+        }
+      }
+    },
+    {
+      "case_id": "2e67d4ecaaefa00a6a54df0d6bebffc200696433305296fb0391eb5fba986fbd",
+      "name": "linked-single-radix5-zero-write",
+      "cause": "fast_math_regrouping",
+      "review": {
+        "evidence": [
+          "D175",
+          "D273"
+        ],
+        "note": "An MPS ND-array FFT kernel: fast-flagged butterfly chains over exact products, where only the order of the additions decides the residue lanes (D175.1). The old engine's row in apple-m3-max-moltenvk (executor v46) was compared with Metal's macOS 26.5.2 reading; its output equals Metal's 26.7 reading byte for byte, so Metal's own grouping moved between the releases. The engine still differs from 26.7 (its reading is reviewed). Six rows of other old-engine builds differ as well.",
+        "sign_off": {
+          "state": "signed_off",
+          "decision": "C3 fast_math_regrouping: accept (the user's answer of 2026-10-03)",
+          "date": "2026-10-03"
+        }
+      }
+    },
+    {
+      "case_id": "8f4525d29027a76b6bca0aa935aa1646c698e6a7edfb35a5a32f08bc2d710fd4",
+      "name": "linked-single-radix5-zero-write",
+      "cause": "fast_math_regrouping",
+      "review": {
+        "evidence": [
+          "D175",
+          "D273"
+        ],
+        "note": "An MPS ND-array FFT kernel: fast-flagged butterfly chains over exact products, where only the order of the additions decides the residue lanes (D175.1). The old engine's row in apple-m3-max-moltenvk (executor v46) was compared with Metal's macOS 26.5.2 reading; its output equals Metal's 26.7 reading byte for byte, so Metal's own grouping moved between the releases. The engine still differs from 26.7 (its reading is reviewed). Three rows of other old-engine builds, recorded under their own environments, differ as well.",
+        "sign_off": {
+          "state": "signed_off",
+          "decision": "C3 fast_math_regrouping: accept (the user's answer of 2026-10-03)",
+          "date": "2026-10-03"
+        }
+      }
+    },
+    {
+      "case_id": "380b9b9f0979e03292dea5fcd5cc642c03c9bb5df2f409c684a57d81cdf966e8",
+      "name": "linked-single-radix7-zero-write",
+      "cause": "fast_math_regrouping",
+      "review": {
+        "evidence": [
+          "D175",
+          "D273"
+        ],
+        "note": "An MPS ND-array FFT kernel: fast-flagged butterfly chains over exact products, where only the order of the additions decides the residue lanes (D175.1). The old engine's module was not reproduced; its row is attributed by the family and the residue lanes it differs in. The engine still differs (its reading is reviewed).",
+        "sign_off": {
+          "state": "signed_off",
+          "decision": "C3 fast_math_regrouping: accept (the user's answer of 2026-10-03)",
+          "date": "2026-10-03"
+        }
+      }
+    },
+    {
+      "case_id": "421b21bac80d60a446415dec5a6afa23aef24dcf500c8deb44969f6d80f365f5",
+      "name": "linked-single-radix7-zero-write",
+      "cause": "fast_math_regrouping",
+      "review": {
+        "evidence": [
+          "D175",
+          "D273"
+        ],
+        "note": "An MPS ND-array FFT kernel: fast-flagged butterfly chains over exact products, where only the order of the additions decides the residue lanes (D175.1). D175 reproduced MoltenVK's bytes for radix 7 from Metal's regrouped front-end output of the engine's module; the old engine's module was not reproduced, so its rows are attributed by the family and the residue lanes they differ in. The engine still differs (its reading is reviewed). Five rows of other old-engine builds differ as well; three of them equal Metal's 26.7 reading.",
+        "sign_off": {
+          "state": "signed_off",
+          "decision": "C3 fast_math_regrouping: accept (the user's answer of 2026-10-03)",
+          "date": "2026-10-03"
+        }
+      }
+    },
+    {
+      "case_id": "d34084bcd8e19a9b7799c4bb81c33d7db666708f9bd2997ef39b0ab38d1a652a",
+      "name": "linked-single-radix9-zero-write",
+      "cause": "fast_math_regrouping",
+      "review": {
+        "evidence": [
+          "D175",
+          "D273"
+        ],
+        "note": "An MPS ND-array FFT kernel: fast-flagged butterfly chains over exact products, where only the order of the additions decides the residue lanes (D175.1). Fixed: the engine matches Metal (executor v18). The old engine's module was not reproduced; its row is attributed by the family and the residue lanes it differs in.",
+        "sign_off": {
+          "state": "signed_off",
+          "decision": "C3 fast_math_regrouping: accept (the user's answer of 2026-10-03)",
+          "date": "2026-10-03"
+        }
+      }
+    },
+    {
+      "case_id": "e515289a7d832addcf0e1ca3c55ff5bd38dfa62f3f83153ba5b726690667193c",
+      "name": "linked-single-radix9-zero-write",
+      "cause": "fast_math_regrouping",
+      "review": {
+        "evidence": [
+          "D175",
+          "D273"
+        ],
+        "note": "An MPS ND-array FFT kernel: fast-flagged butterfly chains over exact products, where only the order of the additions decides the residue lanes (D175.1). Fixed: the engine matches Metal (executor v18). The old engine's module was not reproduced; its row is attributed by the family and the residue lanes it differs in.",
+        "sign_off": {
+          "state": "signed_off",
+          "decision": "C3 fast_math_regrouping: accept (the user's answer of 2026-10-03)",
+          "date": "2026-10-03"
+        }
+      }
+    }
+  ],
+  "reference_gaps": [
+    {
+      "case_id": "1b2b9feecdc8a56e19a72cb0f728b4189939500fd9debabf141be708412b0286",
+      "name": "conv2d-a20-float8-unit",
+      "apple_family": 10,
+      "review": {
+        "evidence": [
+          "D296.2",
+          "D296.6"
+        ],
+        "note": "Metal pipeline creation names GPUFamily10, which the reference device (Apple M3 Max, apple-m3-max-macos26.7) does not support; both passes of EV ORC-metal-qual recorded the reference gap. No reference device here has the family (the M4 minis lack it too), so no Metal answer exists to compare against.",
+        "sign_off": {
+          "state": "signed_off",
+          "decision": "C3 reference gap: accept (the user's answer of 2026-10-03)",
+          "date": "2026-10-03"
+        }
+      }
+    },
+    {
+      "case_id": "5f2f647c3104dc529605ec8184f38a9287bfee771116560ef2207c5199d3e0d7",
+      "name": "linked-zero-work-conv2d-a20-int32-uint8-int8",
+      "apple_family": 10,
+      "review": {
+        "evidence": [
+          "D296.2",
+          "D296.6"
+        ],
+        "note": "Metal pipeline creation names GPUFamily10, which the reference device (Apple M3 Max, apple-m3-max-macos26.7) does not support; both passes of EV ORC-metal-qual recorded the reference gap. No reference device here has the family (the M4 minis lack it too), so no Metal answer exists to compare against.",
+        "sign_off": {
+          "state": "signed_off",
+          "decision": "C3 reference gap: accept (the user's answer of 2026-10-03)",
+          "date": "2026-10-03"
+        }
+      }
+    },
+    {
+      "case_id": "b4c5449e3b837a59122920177c412e6700989441966a3391dc95aa1874c6a7be",
+      "name": "q4q8-gemm-one-row-three-columns-k128-four-scaled-blocks",
+      "apple_family": 10,
+      "review": {
+        "evidence": [
+          "D296.2",
+          "D296.6"
+        ],
+        "note": "Metal pipeline creation names GPUFamily10 (\"simdgroup_matrix<T,16,16x16> operations are supported by GPUFamily10 and later\"): q4q8_gemm's live path uses 16x16 integer simdgroup matrices. The reference device (Apple M3 Max, apple-m3-max-macos26.7) does not support the family; Metal qualification recorded the reference gap on the M3 Max (EV RVC-b2-m3) and on an M4 mini (EV RVC-b2-m4), so no reference device here has the family and no Metal answer exists to compare against. Listed after the parity snapshot of 2026-10-07 (docs/TODO.md 9) found it recorded but unlisted.",
+        "sign_off": {
+          "state": "signed_off",
+          "decision": "C3 reference gap: accept, as the three GPU-family-10 conv2d cases of 2026-10-03 (the user's answer of 2026-10-07)",
+          "date": "2026-10-07"
+        }
+      }
+    },
+    {
+      "case_id": "e3457b473156942d3778acdadebd50cef6e7e0f426d5fe4b6d561c16ccaf1ba4",
+      "name": "conv2d-a18-int32-int8-zero-shape",
+      "apple_family": 10,
+      "review": {
+        "evidence": [
+          "D296.2",
+          "D296.6"
+        ],
+        "note": "Metal pipeline creation names GPUFamily10, which the reference device (Apple M3 Max, apple-m3-max-macos26.7) does not support; both passes of EV ORC-metal-qual recorded the reference gap. No reference device here has the family (the M4 minis lack it too), so no Metal answer exists to compare against.",
+        "sign_off": {
+          "state": "signed_off",
+          "decision": "C3 reference gap: accept (the user's answer of 2026-10-03)",
+          "date": "2026-10-03"
+        }
+      }
+    }
+  ],
+  "answer_gaps": [
+    {
+      "case_id": "815967a0d256a36cebbcd935c1d526bdea06a0e088062d77a3116d95b209e095",
+      "name": "an-atomic-between-a-simdgroup-sum-and-a-discard-keeps-the-dropped-quads",
+      "gap": "fragment_subgroup_under_two_quads",
+      "review": {
+        "evidence": [
+          "D327.6"
+        ],
+        "note": "An atomic between a simdgroup sum and a discard of whole quads keeps the sum ahead of the discard, so on Apple M4 and M3 Max the kept quad's simdgroup counts the dropped quads beside it and the case reads (1, 0, 0, 0) (EVs REF-hfix, REF-hfix-m3, REF-hcase-m4). A device whose fragment subgroups hold fewer than two quads (its description's fragment subgroup size below 8 lanes; arm64 lavapipe's 4) cannot place a dropped quad in the kept quad's subgroup, so it reads (0, 0, 0, 0). Metal permits a partly occupied simdgroup, so that answer is a valid Metal answer, just not the M3's; and Vulkan gives no way to widen a fragment subgroup. Open until an exact emulation exists (the user's decision of 2026-10-06): the mismatch stays counted, its reason naming the gap.",
+        "sign_off": {
+          "state": "awaiting_user",
+          "decision": "C3 answer gap: fragment subgroup holds fewer than two quads; open until an exact emulation exists (the user's decision of 2026-10-06)"
+        }
+      }
+    },
+    {
+      "case_id": "77e912c10141f6cb2a9d9da776d9708362262ce914317c89dd04c66fd54e7bc4",
+      "name": "sample-mask-in-per-pixel-2x",
+      "gap": "clipped_primitive_split",
+      "review": {
+        "evidence": [
+          "D341.6",
+          "D341.7"
+        ],
+        "note": "A pixel-rate function returns [[sample_mask]] over the generated full-screen triangle at 2 samples into a 2x2 target. Apple's rasterizer splits a triangle it clips into pieces whose runs read their piece's coverage (D341 item 6); over this draw at 2 samples it splits no pixel, and the M3 Max and the M4 read 0x3 in every sample. A Vulkan device reads the whole primitive's coverage. Open until an exact emulation exists (the user's decision of 2026-10-06): the mismatch stays counted, its reason naming the gap.",
+        "sign_off": {
+          "state": "awaiting_user",
+          "decision": "C3 answer gap: Apple's rasterizer splits the primitives it clips; open until an exact emulation exists (the user's decision of 2026-10-06)"
+        }
+      }
+    },
+    {
+      "case_id": "8fe4716830d3a98bb1462ddf078422670132bca83ee4c813c52228177f75a72c",
+      "name": "sample-mask-in-per-pixel-4x",
+      "gap": "clipped_primitive_split",
+      "review": {
+        "evidence": [
+          "D341.6",
+          "D341.7"
+        ],
+        "note": "A pixel-rate function returns [[sample_mask]] over the generated full-screen triangle at 4 samples into a 2x2 target. Apple's rasterizer splits a triangle it clips into pieces whose runs read their piece's coverage (D341 item 6); a color-only function over this draw reads 0xf in every sample on the M3 Max and the M4, while a memory writer's runs read 0xd and 0x2 at pixels (0, 0) and (1, 1). A Vulkan device reads the whole primitive's coverage. Open until an exact emulation exists (the user's decision of 2026-10-06): the mismatch stays counted, its reason naming the gap.",
+        "sign_off": {
+          "state": "awaiting_user",
+          "decision": "C3 answer gap: Apple's rasterizer splits the primitives it clips; open until an exact emulation exists (the user's decision of 2026-10-06)"
+        }
+      }
+    },
+    {
+      "case_id": "dc298a48024272b9907b66c67434dc294c50838d7ee81d215de4a1460861eb79",
+      "name": "sample-mask-in-per-sample-2x",
+      "gap": "clipped_primitive_split",
+      "review": {
+        "evidence": [
+          "D341.6",
+          "D341.7"
+        ],
+        "note": "A sample-rate function returns [[sample_mask]] beside [[sample_id]] over the generated full-screen triangle at 2 samples. Every device refuses it (a stage output beside the per-sample loop, NotRepresentable, D341 item 3); its answer still reads the coverage Apple's clipper may split (D341 item 6): the M3 Max and the M4 read 0x3. Open until an exact emulation exists (the user's decision of 2026-10-06): the mismatch stays counted, its reason naming the gap.",
+        "sign_off": {
+          "state": "awaiting_user",
+          "decision": "C3 answer gap: Apple's rasterizer splits the primitives it clips; open until an exact emulation exists (the user's decision of 2026-10-06)"
+        }
+      }
+    },
+    {
+      "case_id": "85a52f7ad728caab16e36e636c9efe0cfc8a587f68945eaab192f5f820573d80",
+      "name": "sample-mask-in-per-sample-4x",
+      "gap": "clipped_primitive_split",
+      "review": {
+        "evidence": [
+          "D341.6",
+          "D341.7"
+        ],
+        "note": "A sample-rate function returns [[sample_mask]] beside [[sample_id]] over the generated full-screen triangle at 4 samples. Every device refuses it (a stage output beside the per-sample loop, NotRepresentable, D341 item 3); its answer still reads the coverage Apple's clipper may split (D341 item 6): the M3 Max and the M4 read 0xf in every run here, where a memory writer's runs over the same draw read 0xd and 0x2. Open until an exact emulation exists (the user's decision of 2026-10-06): the mismatch stays counted, its reason naming the gap.",
+        "sign_off": {
+          "state": "awaiting_user",
+          "decision": "C3 answer gap: Apple's rasterizer splits the primitives it clips; open until an exact emulation exists (the user's decision of 2026-10-06)"
+        }
+      }
+    },
+    {
+      "case_id": "a2d29777446c2bb3eaf58c6194410c73fe56770a37c3f910e4be9ddb0b917ed4",
+      "name": "fetch-beside-the-coverage-mask-in-at-4x",
+      "gap": "clipped_primitive_split",
+      "review": {
+        "evidence": [
+          "D341.6",
+          "D341.7"
+        ],
+        "note": "A framebuffer-fetch function reads [[sample_mask]] over the generated full-screen triangle at 4 samples into a 2x2 target. Its answer reads the coverage Apple's clipper may split into pieces (D341 item 6), which no Vulkan rasterizer reproduces. Open until an exact emulation exists (the user's decision of 2026-10-06): the mismatch stays counted, its reason naming the gap.",
+        "sign_off": {
+          "state": "awaiting_user",
+          "decision": "C3 answer gap: Apple's rasterizer splits the primitives it clips; open until an exact emulation exists (the user's decision of 2026-10-06)"
+        }
+      }
+    },
+    {
+      "case_id": "00619d339490f7ae9eaa67711c5bdb6ba8b01c50d6ebd69410a33e6eca4ee0d0",
+      "name": "coverage-loop-records-each-sample-at-2x",
+      "gap": "clipped_primitive_split",
+      "review": {
+        "evidence": [
+          "D341.6",
+          "D341.7",
+          "D341.8"
+        ],
+        "note": "A memory writer that reads [[sample_mask]] and [[sample_id]] runs once per covered sample over the generated full-screen triangle at 2 samples in a 1x1 pass without attachments (D341 items 2 and 3). Apple's rasterizer splits a triangle it clips into pieces whose runs read their piece's coverage (D341 item 6); over this draw at 2 samples it splits no pixel, and the M4 reads 0x3 in both runs (EV VSM-cov-m4b), as a Vulkan device's loop does. A Vulkan device reads the whole primitive's coverage. Open until an exact emulation exists (the user's decision of 2026-10-06): the mismatch stays counted, its reason naming the gap.",
+        "sign_off": {
+          "state": "awaiting_user",
+          "decision": "C3 answer gap: Apple's rasterizer splits the primitives it clips; open until an exact emulation exists (the user's decision of 2026-10-06)"
+        }
+      }
+    },
+    {
+      "case_id": "334671e3800c1313eac001c0615fe56a0b09ab70c7090cf3b3bfb272eadcf8b9",
+      "name": "coverage-loop-records-each-sample-at-4x",
+      "gap": "clipped_primitive_split",
+      "review": {
+        "evidence": [
+          "D341.6",
+          "D341.7",
+          "D341.8"
+        ],
+        "note": "The same memory writer at 4 samples. Apple's rasterizer splits the clipped triangle's pixel (D341 item 6): the M4 reads 0x3 in samples 0 and 1 and 0xc in samples 2 and 3, each run once (EV VSM-cov-m4b). A Vulkan device reads the whole primitive's coverage. Open until an exact emulation exists (the user's decision of 2026-10-06): the mismatch stays counted, its reason naming the gap.",
+        "sign_off": {
+          "state": "awaiting_user",
+          "decision": "C3 answer gap: Apple's rasterizer splits the primitives it clips; open until an exact emulation exists (the user's decision of 2026-10-06)"
+        }
+      }
+    },
+    {
+      "case_id": "980657fb3fcbadf869b6f9dcdddf1b6ed1b62db15b241645af242625e093b50e",
+      "name": "coverage-loop-union-of-runs-at-2x",
+      "gap": "clipped_primitive_split",
+      "review": {
+        "evidence": [
+          "D341.6",
+          "D341.7",
+          "D341.8"
+        ],
+        "note": "What any split of a pixel leaves alone, at 2 samples: the union of the coverages the runs read, the union of their samples, the number of runs, and whether a run's sample was outside its coverage. The M4 reads 0x3, 0x3, 2, 0 (EV VSM-cov-m4b). Listed because it meets the split's structure (D341 item 7); no split moves its answer. A Vulkan device reads the whole primitive's coverage. Open until an exact emulation exists (the user's decision of 2026-10-06): the mismatch stays counted, its reason naming the gap.",
+        "sign_off": {
+          "state": "awaiting_user",
+          "decision": "C3 answer gap: Apple's rasterizer splits the primitives it clips; open until an exact emulation exists (the user's decision of 2026-10-06)"
+        }
+      }
+    },
+    {
+      "case_id": "5ecfd96567e81520ea4a0534b5781b83e89d1d7656fce5819f20f5797d125d52",
+      "name": "coverage-loop-union-of-runs-at-4x",
+      "gap": "clipped_primitive_split",
+      "review": {
+        "evidence": [
+          "D341.6",
+          "D341.7",
+          "D341.8"
+        ],
+        "note": "What any split of a pixel leaves alone, at 4 samples, where Apple's rasterizer splits the pixel: the M4 reads 0xf, 0xf, 4, 0 (EV VSM-cov-m4b). Listed because it meets the split's structure (D341 item 7); no split moves its answer. A Vulkan device reads the whole primitive's coverage. Open until an exact emulation exists (the user's decision of 2026-10-06): the mismatch stays counted, its reason naming the gap.",
+        "sign_off": {
+          "state": "awaiting_user",
+          "decision": "C3 answer gap: Apple's rasterizer splits the primitives it clips; open until an exact emulation exists (the user's decision of 2026-10-06)"
+        }
+      }
+    },
+    {
+      "case_id": "305b0f26046a131ada76b6f8d469b51c82ca928ec64aa963367d50f55334a57f",
+      "name": "coverage-loop-sample-varying-at-2x",
+      "gap": "clipped_primitive_split",
+      "review": {
+        "evidence": [
+          "D341.6",
+          "D341.7",
+          "D341.8"
+        ],
+        "note": "A [[sample_perspective]] varying read at each run's sample beside [[sample_mask]], at 2 samples, where Apple's rasterizer splits no pixel of this draw: the M4 reads uv (0.75, 0.25) at sample 0 and (0.25, 0.75) at sample 1, each beside the coverage 0x3 (EV VSM-cov-m4b). A Vulkan device reads the whole primitive's coverage. Open until an exact emulation exists (the user's decision of 2026-10-06): the mismatch stays counted, its reason naming the gap.",
+        "sign_off": {
+          "state": "awaiting_user",
+          "decision": "C3 answer gap: Apple's rasterizer splits the primitives it clips; open until an exact emulation exists (the user's decision of 2026-10-06)"
+        }
+      }
+    },
+    {
+      "case_id": "6ece8087a1124a9baebcbcefc0f858712d7b37abecf21d9d28c629406ce42eaf",
+      "name": "coverage-read-by-each-run-of-a-memory-writer-at-2x",
+      "gap": "clipped_primitive_split",
+      "review": {
+        "evidence": [
+          "D341.6",
+          "D341.7",
+          "D341.9"
+        ],
+        "note": "A memory writer that reads [[sample_mask]] and no sample index runs once per covered sample over the generated full-screen triangle at 2 samples in a 1x1 pass without attachments; Apple's rasterizer splits no pixel of this draw at 2 samples, and the M4 counts 2 runs of 0x3 (EV VSM-nat-m4). A Vulkan device's loop reads the whole primitive's coverage; MoltenVK, which runs the function as written, reads Metal's (D341 item 9). Open until an exact emulation exists (the user's decision of 2026-10-06): the mismatch stays counted, its reason naming the gap.",
+        "sign_off": {
+          "state": "awaiting_user",
+          "decision": "C3 answer gap: Apple's rasterizer splits the primitives it clips; open until an exact emulation exists (the user's decision of 2026-10-06)"
+        }
+      }
+    },
+    {
+      "case_id": "74b594b3df7dfe5a11ba2fd1aba919c0ac0af3e194f913ff86fc1a682606fc47",
+      "name": "coverage-read-by-each-run-of-a-memory-writer-at-4x",
+      "gap": "clipped_primitive_split",
+      "review": {
+        "evidence": [
+          "D341.6",
+          "D341.7",
+          "D341.9"
+        ],
+        "note": "The same at 4 samples, where Apple's rasterizer splits the clipped triangle's pixel (D341 item 6): the M4 counts 2 runs of 0x3 and 2 of 0xc (EV VSM-nat-m4). A Vulkan device's loop reads the whole primitive's coverage; MoltenVK, which runs the function as written, reads Metal's (D341 item 9). Open until an exact emulation exists (the user's decision of 2026-10-06): the mismatch stays counted, its reason naming the gap.",
+        "sign_off": {
+          "state": "awaiting_user",
+          "decision": "C3 answer gap: Apple's rasterizer splits the primitives it clips; open until an exact emulation exists (the user's decision of 2026-10-06)"
+        }
+      }
+    },
+    {
+      "case_id": "6322020d4a6af24b6ac804511fb58c15862359d356b8c03483d6c3f66f78171a",
+      "name": "coverage-and-pixel-center-read-by-each-run-at-4x",
+      "gap": "clipped_primitive_split",
+      "review": {
+        "evidence": [
+          "D341.6",
+          "D341.7",
+          "D341.9"
+        ],
+        "note": "The same beside [[position]] at 4 samples: the M4 counts 2 runs of 0x3 and 2 of 0xc, each reading the pixel center (EV VSM-nat-m4). A Vulkan device's loop reads the whole primitive's coverage; MoltenVK, which runs the function as written, reads Metal's (D341 item 9). Open until an exact emulation exists (the user's decision of 2026-10-06): the mismatch stays counted, its reason naming the gap.",
+        "sign_off": {
+          "state": "awaiting_user",
+          "decision": "C3 answer gap: Apple's rasterizer splits the primitives it clips; open until an exact emulation exists (the user's decision of 2026-10-06)"
+        }
+      }
+    },
+    {
+      "case_id": "796308cc7cbcc39fc0b5076de5ec331f0551e1a06399712fcceb9cc8ea0fbe74",
+      "name": "coverage-read-by-each-sample-run-at-2x",
+      "gap": "clipped_primitive_split",
+      "review": {
+        "evidence": [
+          "D341.6",
+          "D341.7",
+          "D341.9"
+        ],
+        "note": "A memory writer that reads [[sample_mask]] and [[sample_id]] and no [[position]] at 2 samples, unsplit: each sample's run reads 0x3, once (EV VSM-nat-m4). A Vulkan device's loop reads the whole primitive's coverage; MoltenVK, which runs the function as written, reads Metal's (D341 item 9). Open until an exact emulation exists (the user's decision of 2026-10-06): the mismatch stays counted, its reason naming the gap.",
+        "sign_off": {
+          "state": "awaiting_user",
+          "decision": "C3 answer gap: Apple's rasterizer splits the primitives it clips; open until an exact emulation exists (the user's decision of 2026-10-06)"
+        }
+      }
+    },
+    {
+      "case_id": "255d3ae73e9154417071416b77e523c1717ff4ce4f1d5010bc9ec8c70a50557c",
+      "name": "coverage-read-by-each-sample-run-at-4x",
+      "gap": "clipped_primitive_split",
+      "review": {
+        "evidence": [
+          "D341.6",
+          "D341.7",
+          "D341.9"
+        ],
+        "note": "The same at 4 samples, split: samples 0 and 1 read 0x3, samples 2 and 3 read 0xc, each run once (EV VSM-nat-m4). A Vulkan device's loop reads the whole primitive's coverage; MoltenVK, which runs the function as written, reads Metal's (D341 item 9). Open until an exact emulation exists (the user's decision of 2026-10-06): the mismatch stays counted, its reason naming the gap.",
+        "sign_off": {
+          "state": "awaiting_user",
+          "decision": "C3 answer gap: Apple's rasterizer splits the primitives it clips; open until an exact emulation exists (the user's decision of 2026-10-06)"
+        }
+      }
+    },
+    {
+      "case_id": "50b31f70155ada377256adeec6e38064a1be1da92863ee5ededdb1edb061a56b",
+      "name": "coverage-beside-a-sample-varying-at-2x",
+      "gap": "clipped_primitive_split",
+      "review": {
+        "evidence": [
+          "D341.6",
+          "D341.7",
+          "D341.9"
+        ],
+        "note": "A memory writer that reads [[sample_mask]] beside a [[sample_perspective]] varying and no sample index at 2 samples, unsplit: each run reads its sample's uv beside 0x3 (EV VSM-nat-m4). A Vulkan device's loop reads the whole primitive's coverage; MoltenVK, which runs the function as written, reads Metal's (D341 item 9). Open until an exact emulation exists (the user's decision of 2026-10-06): the mismatch stays counted, its reason naming the gap.",
+        "sign_off": {
+          "state": "awaiting_user",
+          "decision": "C3 answer gap: Apple's rasterizer splits the primitives it clips; open until an exact emulation exists (the user's decision of 2026-10-06)"
+        }
+      }
+    },
+    {
+      "case_id": "929d5c70c475e3a7968edf62eebfa394a8bd774ca78eea2611c2636ba7a233bc",
+      "name": "coverage-beside-a-sample-varying-at-4x",
+      "gap": "clipped_primitive_split",
+      "review": {
+        "evidence": [
+          "D341.6",
+          "D341.7",
+          "D341.9"
+        ],
+        "note": "The same at 4 samples, split: the runs at samples 0 and 1 read 0x3 and those at samples 2 and 3 read 0xc, each beside its sample's uv (EV VSM-nat-m4). A Vulkan device's loop reads the whole primitive's coverage; MoltenVK, which runs the function as written, reads Metal's (D341 item 9). Open until an exact emulation exists (the user's decision of 2026-10-06): the mismatch stays counted, its reason naming the gap.",
+        "sign_off": {
+          "state": "awaiting_user",
+          "decision": "C3 answer gap: Apple's rasterizer splits the primitives it clips; open until an exact emulation exists (the user's decision of 2026-10-06)"
+        }
+      }
+    },
+    {
+      "case_id": "e3fb278b7ebfbd8dff22412f79cb13e0c6d85560b23f34c4390e3f268da1d788",
+      "name": "divide-an-overdraw-step-by-a-quad-the-clip-diagonal-crosses",
+      "gap": "quads_split_by_clipping",
+      "review": {
+        "evidence": [
+          "D315.10",
+          "D435"
+        ],
+        "note": "The fragment function counts its quad's active lanes (quad_active_threads_mask) under the generated full-screen triangle in a 2x2 target, exactly one quad, and divides a step by the count. Metal and the RADV, ANV, NVIDIA and MoltenVK venues count 4 at every pixel. Both lavapipes count 1 at pixel (0, 0) and 3 at the others, in both legs: lavapipe's clipper emits the triangle clipped to the viewport as a fan of triangles (Mesa's draw module, draw_pipe_clip.c emit_poly, with no guard band for triangles), so the quad on the fan's seam runs once per piece, each with the other piece's pixels as helpers (D315 item 10). Metal permits a partly occupied quad, so lavapipe's answer is one Metal allows, not the M3 Max's; no Vulkan mechanism keeps the clipped triangle one primitive. Open until an exact emulation exists (the user's decision of 2026-10-06): the mismatch stays counted, its reason naming the gap.",
+        "sign_off": {
+          "state": "awaiting_user",
+          "decision": "C3 answer gap: lavapipe shades a triangle it clips as several, splitting a quad on the seam; open until an exact emulation exists (the user's decision of 2026-10-06)"
+        }
+      }
+    }
+  ]
+}

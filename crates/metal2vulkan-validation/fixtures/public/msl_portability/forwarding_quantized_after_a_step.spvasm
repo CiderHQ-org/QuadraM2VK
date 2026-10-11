@@ -1,0 +1,73 @@
+; metal2vulkan's spirv::testing::forwarding::quantized_after_a_step (DESIGN D247): the module
+; the serializer writes for it, linked densely and relocated, as spirv-dis --raw-id prints it.
+; The crate's test the_committed_assembly_is_each_kernels_module holds it equal to that module;
+; validation's MoltenVK portability tests assemble it with spirv-as (DESIGN D342 item 9).
+; SPIR-V
+; Version: 1.5
+; Generator: Khronos; 0
+; Bound: 47
+; Schema: 0
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %18 "main" %6 %11
+               OpExecutionMode %18 LocalSize 1 1 1
+               OpDecorate %3 ArrayStride 16
+               OpDecorate %4 Block
+               OpMemberDecorate %4 0 Offset 0
+               OpDecorate %6 DescriptorSet 0
+               OpDecorate %6 Binding 0
+               OpDecorate %6 Aliased
+               OpDecorate %11 BuiltIn GlobalInvocationId
+          %1 = OpTypeFloat 32
+          %2 = OpTypeVector %1 4
+          %3 = OpTypeRuntimeArray %2
+          %4 = OpTypeStruct %3
+          %5 = OpTypePointer StorageBuffer %4
+          %6 = OpVariable %5 StorageBuffer
+          %7 = OpTypeVoid
+          %8 = OpTypeInt 32 0
+          %9 = OpTypeVector %8 3
+         %10 = OpTypePointer Input %9
+         %11 = OpVariable %10 Input
+         %12 = OpConstant %8 0
+         %13 = OpTypePointer StorageBuffer %2
+         %14 = OpConstant %1 0
+         %15 = OpConstant %1 1
+         %16 = OpConstant %1 4
+         %17 = OpTypeFunction %7
+         %18 = OpFunction %7 None %17
+         %19 = OpLabel
+         %20 = OpLoad %9 %11
+         %21 = OpCompositeExtract %8 %20 0
+         %22 = OpAccessChain %13 %6 %12 %21
+         %23 = OpLoad %2 %22
+         %24 = OpQuantizeToF16 %2 %23
+         %25 = OpCopyObject %2 %24
+         %26 = OpVectorShuffle %2 %25 %25 2 1 0 3
+         %27 = OpCompositeExtract %1 %23 0
+         %28 = OpQuantizeToF16 %1 %27
+         %29 = OpCopyObject %1 %28
+         %30 = OpCompositeConstruct %2 %29 %29 %29 %29
+         %31 = OpQuantizeToF16 %2 %23
+         %32 = OpCopyObject %2 %31
+         %33 = OpCompositeExtract %1 %32 0
+         %34 = OpCompositeExtract %1 %32 1
+         %35 = OpCompositeConstruct %2 %33 %34 %14 %15
+         %36 = OpQuantizeToF16 %2 %23
+         %37 = OpCopyObject %2 %36
+         %38 = OpCompositeExtract %1 %37 2
+         %39 = OpCompositeExtract %1 %23 0
+         %40 = OpFAdd %1 %39 %16
+         %41 = OpCompositeInsert %2 %40 %23 0
+         %42 = OpAccessChain %13 %6 %12 %21
+               OpStore %42 %41
+         %43 = OpAccessChain %13 %6 %12 %21
+               OpStore %43 %26
+         %44 = OpAccessChain %13 %6 %12 %21
+               OpStore %44 %30
+         %45 = OpAccessChain %13 %6 %12 %21
+               OpStore %45 %35
+         %46 = OpAccessChain %13 %6 %12 %21
+               OpStore %46 %37
+               OpReturn
+               OpFunctionEnd

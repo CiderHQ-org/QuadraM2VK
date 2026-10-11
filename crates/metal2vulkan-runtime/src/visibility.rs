@@ -1,0 +1,1062 @@
+//! Visibility results (`setVisibilityResultMode:offset:`).
+//!
+//! Metal writes, at the end of a pass, one 64-bit result at each offset the encoder set a mode
+//! at: in `Boolean` mode 1 when any sample of the draws while it was set passed and 0 otherwise,
+//! in `Counting` mode the samples that passed; an offset set with no draw after it gets 0, an
+//! offset the encoder never set keeps its bytes, and a later pass rewrites only its own offsets
+//! (measured on an M4, RT6 probes 1 and 5).
+//!
+//! - **Queries.** Each mode set is an occlusion query of the encoder's own pools, begun in the
+//!   draws' secondary command buffer when the mode is set and ended when the next one is set, at
+//!   `Disabled`, or at `end_encoding`: one query spans every draw of its offset. A `Counting`
+//!   query is precise (`VK_QUERY_CONTROL_PRECISE_BIT`): its result is the samples that passed,
+//!   Metal's count. A `Boolean` query is imprecise: its count is only ever zero or not.
+//!   `end_encoding` resets the pools before the pass (query commands run in submission order, so
+//!   the queries begun later see the reset).
+//! - **Continuations.** A query begins and ends in one subpass, so where the pass splits into
+//!   render pass instances (`render.rs`) while a mode is set, the active query ends in the
+//!   instance before and a continuation query of the same offset begins in the one after.
+//!   A draw every fragment of which fails Metal's depth test (a compare of `Never` without a
+//!   depth attachment) counts no sample, where Vulkan's fragments would pass: the active query
+//!   ends before it and a continuation begins after it (a probe). An execution of render commands
+//!   ends the active query before it and continues it after it, and its own commands count in a
+//!   continuation lent to it (`Lent`), which its recording begins and ends
+//!   (`render/executions.rs`).
+//! - **Results.** After the pass every query's 64-bit result is copied to its offset
+//!   (`vkCmdCopyQueryPoolResults` waiting for each), consecutive ones in one copy, and every
+//!   continuation's to a word of an upload region, whose words one dispatch of the crate-owned
+//!   `bind::visibility_combine_module` combines into their offsets'
+//!   (`bind::VisibilityCombine::plan`): summed for a `Counting` offset, ORed for a `Boolean` one,
+//!   since an imprecise query's count is any nonzero value. A `Counting` result is then as
+//!   copied; the `Boolean` offsets are made Metal's 1 or 0 in place by one dispatch of the
+//!   crate-owned `bind::visibility_resolve_module` (more only where the offsets span more than
+//!   one storage binding reaches, `bind::VisibilityResolve::plan`), whose targets are uploaded.
+//!   Where a no-copy buffer's bytes start at no multiple of 8 of its `VkBuffer`, the results land
+//!   in an upload region first and are copied on (`Landing`).
+//! - **Refusals** (`Invalid`, measured): a pass without a visibility result buffer, an offset
+//!   whose 8 bytes run past the buffer, and an offset the encoder took before in the other mode.
+//!   `Counting` needs a precise query: `Unsupported`, naming `occlusionQueryPrecise`, where the
+//!   device lacks it.
+//! - **An offset taken again in its mode** stops Metal's validation ("using the same offset ...
+//!   twice in the same command encoder is not allowed"); plain Metal adds the draws since to its
+//!   result: `Counting` sums them (16 and 16 write 32), `Boolean` writes 1 when either passed a
+//!   sample, `Disabled` between them or not (RT6 probe 5's `vis_revisit_counting`,
+//!   `vis_revisit_boolean_then_none`, `vis_revisit_none_then_boolean`,
+//!   `vis_revisit_after_disabled`). The encoder takes it as a continuation of the offset's
+//!   result. In the other mode plain Metal answers in order (`Boolean` then `Counting` writes 1
+//!   plus the count, `Counting` then `Boolean` 1: `vis_boolean_then_counting`,
+//!   `vis_counting_then_boolean`), which the combine does not build: refused.
+//! - **An offset that is not a multiple of 8** stops Metal's validation; plain Metal writes the
+//!   result at the offset rounded down to 8 (RT6 probe 1's `visibility_misaligned`: `Counting`
+//!   at 4 writes the samples at 0), and the encoder takes that offset (`result_offset`).
+//! - **`Disabled`** ends the current query. Its offset is no use of the offset: Metal takes it
+//!   past the buffer, twice, before a mode at the same offset, and without a buffer, and plain
+//!   Metal at an offset that is not a multiple of 8, which its validation stops (RT6 probe 5d).
+
+use super::degradation::Degradation;
+use super::encoder::EncoderCore;
+use super::error::{internal, invalid, vulkan, Error, Problem};
+use super::exit_guard;
+use super::owned_kernel::{OwnedModule, OwnedSets};
+use super::release;
+use super::tracker::{Access, Barrier, Use, UseRange};
+use super::upload::Upload;
+use super::{Buffer, Device};
+use ash::vk;
+use metal2vulkan::bind::{ContinuedResult, VisibilityCombine, VisibilityResolve};
+use metal2vulkan::device::VkFeature;
+use metal2vulkan::error::{Capability, Feature, Unsupported};
+use std::collections::BTreeMap;
+
+/// `MTLVisibilityResultMode`.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum VisibilityResultMode {
+    /// `MTLVisibilityResultModeDisabled`: the draws write no result.
+    #[default]
+    Disabled,
+    /// `MTLVisibilityResultModeBoolean`: 1 when any sample passed, else 0.
+    Boolean,
+    /// `MTLVisibilityResultModeCounting`: the samples that passed.
+    Counting,
+}
+
+impl VisibilityResultMode {
+    /// Metal's raw value.
+    pub fn raw(self) -> u64 {
+        match self {
+            VisibilityResultMode::Disabled => 0,
+            VisibilityResultMode::Boolean => 1,
+            VisibilityResultMode::Counting => 2,
+        }
+    }
+
+    /// The mode of Metal's raw value `raw`.
+    pub fn from_raw(raw: u64) -> Result<VisibilityResultMode, Error> {
+        Ok(match raw {
+            0 => VisibilityResultMode::Disabled,
+            1 => VisibilityResultMode::Boolean,
+            2 => VisibilityResultMode::Counting,
+            raw => {
+                return Err(invalid(
+                    "VisibilityResultMode::from_raw",
+                    Problem::UndefinedValue {
+                        ty: "MTLVisibilityResultMode",
+                        raw,
+                    },
+                ))
+            }
+        })
+    }
+}
+
+/// What a `set_visibility_result_mode` did wrong (each measured: Metal stops it).
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VisibilityProblem {
+    /// The pass has no visibility result buffer: Metal stops it with or without API validation.
+    NoBuffer,
+    /// An offset whose 8 bytes run past the buffer's `length`.
+    OffsetOutOfRange {
+        /// The offset given.
+        offset: u64,
+        /// The visibility result buffer's length.
+        length: u64,
+    },
+    /// An offset the encoder took before in the other mode ("using the same offset ... twice in
+    /// the same command encoder is not allowed"), `Disabled` between them or not. In its own mode
+    /// the offset continues its result, as plain Metal's (the module docs).
+    OffsetReused {
+        /// The offset given.
+        offset: u64,
+    },
+}
+
+/// Bytes of one result.
+const RESULT_BYTES: u64 = 8;
+
+/// The offset a result of `setVisibilityResultMode:offset:` at `offset` lands at: rounded down to
+/// a multiple of 8, as plain Metal writes it (the module docs).
+pub(super) fn result_offset(offset: u64) -> u64 {
+    offset - offset % RESULT_BYTES
+}
+
+/// Queries of an encoder's first pool; each later pool doubles, up to [`MAX_POOL`].
+const FIRST_POOL: u32 = 16;
+const MAX_POOL: u32 = 1024;
+
+/// One occlusion query pool of an encoder.
+struct QueryPool {
+    device: Device,
+    raw: vk::QueryPool,
+    capacity: u32,
+    /// Queries taken, from 0.
+    used: u32,
+}
+
+impl Drop for QueryPool {
+    fn drop(&mut self) {
+        // Once the process is exiting, the pool is left to its end (`exit_guard`).
+        let Some(_busy) = exit_guard::enter() else {
+            return;
+        };
+        // SAFETY: no pending command uses the pool (a command buffer retains it until it
+        // completes).
+        unsafe { release::object(self.device.shared().vk(), self.raw) };
+    }
+}
+
+/// The pools of one encoder, held until its command buffer completes.
+struct QueryPools(Vec<QueryPool>);
+
+/// One offset an encoder took: its mode and its query.
+#[derive(Clone, Copy, Debug)]
+struct Taken {
+    offset: u64,
+    boolean: bool,
+    pool: usize,
+    query: u32,
+}
+
+/// A query that continues the active one in a later render pass instance: its pool and query,
+/// taken before the split records ([`Visibility::continuation`]). `pool` is `None` for one of an
+/// execution's spares ([`Lent`]), which the lending encoder took as a continuation of its offset
+/// already.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Continuation {
+    pool: Option<usize>,
+    raw: vk::QueryPool,
+    query: u32,
+}
+
+/// A continuation begun: the offset it continues ([`Taken`], by index) and its query.
+#[derive(Clone, Copy, Debug)]
+struct Continued {
+    taken: usize,
+    pool: usize,
+    query: u32,
+}
+
+/// The query an execution of render commands encoded while a query was active counts its
+/// commands' draws in (`render/executions.rs`): a continuation of the active offset, which the
+/// execution's recording begins and ends in its own secondary command buffer
+/// ([`Visibility::borrowing`]). Its pool lives until the command buffer completes.
+/// Its `spares` are continuations of the same offset, one for each time a command's draw may end
+/// the query and begin another: where it begins another run of the execution, and after a draw that
+/// counts no sample. The recording begins and ends each spare it takes, and every other one empty,
+/// counting nothing.
+#[derive(Clone, Debug)]
+pub(super) struct Lent {
+    pool: vk::QueryPool,
+    query: u32,
+    boolean: bool,
+    spares: Vec<(vk::QueryPool, u32)>,
+}
+
+impl Lent {
+    /// Begin the lent query in `draws`, before what counts in it: a draw recorded once its
+    /// `VkPipeline` is made (`render/pending.rs`), which lends no spare.
+    ///
+    /// # Safety
+    ///
+    /// `draws` is recording inside its render pass instance, with no query active in it; the
+    /// pool lives until the command buffer completes, and the lending encoder's `end_encoding`
+    /// reset it before the pass.
+    pub(super) unsafe fn begin(&self, raw: &ash::Device, draws: vk::CommandBuffer) {
+        // SAFETY: the caller's; a precise query's device enables `occlusionQueryPrecise`
+        // (checked when its mode was set).
+        unsafe { raw.cmd_begin_query(draws, self.pool, self.query, control(self.boolean)) };
+    }
+
+    /// End the lent query in `draws`, which began it ([`Lent::begin`]).
+    ///
+    /// # Safety
+    ///
+    /// As [`Lent::begin`]'s, after it.
+    pub(super) unsafe fn end(&self, raw: &ash::Device, draws: vk::CommandBuffer) {
+        // SAFETY: the caller's.
+        unsafe { raw.cmd_end_query(draws, self.pool, self.query) };
+    }
+}
+
+/// The queries an execution takes as it is encoded ([`Visibility::lend`]): the one its
+/// commands' draws count in, its spares, and the one that continues the offset after it.
+pub(super) struct Loan {
+    lent: Continuation,
+    spares: Vec<Continuation>,
+    next: Continuation,
+}
+
+/// The lent query of an encoder replaying an execution's commands ([`Visibility::borrowing`]):
+/// its mode, and the spares not yet taken, the next last.
+struct Borrowed {
+    boolean: bool,
+    spares: Vec<(vk::QueryPool, u32)>,
+}
+
+/// One render encoder's visibility results.
+pub(super) struct Visibility {
+    /// The pass's visibility result buffer.
+    buffer: Option<Buffer>,
+    pools: Vec<QueryPool>,
+    taken: Vec<Taken>,
+    /// The continuations begun, in order.
+    continued: Vec<Continued>,
+    /// Each offset taken, with its index in `taken`.
+    offsets: BTreeMap<u64, usize>,
+    /// The index in `taken` of the offset the active query, or the one last ended, counts for.
+    current: usize,
+    /// The query begun in the draws' command buffer and not yet ended.
+    active: Option<(vk::QueryPool, u32)>,
+    /// The active query is an execution's [`Lent`] one, in an encoder replaying its commands: it
+    /// has no pools to continue it from (But the lent spares).
+    borrowed: Option<Borrowed>,
+}
+
+impl Visibility {
+    /// No result yet, for a pass with `buffer`.
+    pub(super) fn new(buffer: Option<Buffer>) -> Visibility {
+        Visibility {
+            buffer,
+            pools: Vec::new(),
+            taken: Vec::new(),
+            continued: Vec::new(),
+            offsets: BTreeMap::new(),
+            current: 0,
+            active: None,
+            borrowed: None,
+        }
+    }
+
+    /// The visibility of an encoder replaying an execution's commands into `draws`
+    /// (`render/executions.rs`): with `lent`, its query begun in `draws` now, in which the
+    /// commands' draws count. A split of the replay's instance, or a draw that counts no sample,
+    /// while it is active continues it in the next of the lent spares
+    /// ([`Visibility::continuation`]).
+    pub(super) fn borrowing(
+        buffer: Option<Buffer>,
+        lent: Option<Lent>,
+        raw: &ash::Device,
+        draws: vk::CommandBuffer,
+    ) -> Visibility {
+        let mut out = Visibility::new(buffer);
+        if let Some(lent) = lent {
+            // SAFETY: `draws` is recording inside its render pass instance, and only the replay
+            // records it; no query is active in it (a new one); the pool lives until the command
+            // buffer completes, and the encoder's `end_encoding` reset it before the pass; a
+            // precise query's device enables `occlusionQueryPrecise` (checked when its mode was
+            // set).
+            unsafe { raw.cmd_begin_query(draws, lent.pool, lent.query, control(lent.boolean)) };
+            out.active = Some((lent.pool, lent.query));
+            let mut spares = lent.spares;
+            spares.reverse();
+            out.borrowed = Some(Borrowed {
+                boolean: lent.boolean,
+                spares,
+            });
+        }
+        out
+    }
+
+    /// The visibility of an encoder that settles an execution's draws at commit and records
+    /// nothing (`render/executions.rs`): [`borrowing`](Visibility::borrowing)'s, active where
+    /// `lent`, with no query begun.
+    pub(super) fn settling(buffer: Option<Buffer>, lent: Option<&Lent>) -> Visibility {
+        let mut out = Visibility::new(buffer);
+        if let Some(lent) = lent {
+            out.active = Some((lent.pool, lent.query));
+            let mut spares = lent.spares.clone();
+            spares.reverse();
+            out.borrowed = Some(Borrowed {
+                boolean: lent.boolean,
+                spares,
+            });
+        }
+        out
+    }
+
+    /// The queries an execution of render commands encoded while a query is active takes,
+    /// before anything of it records: the one its commands count in, `spares` more of the same
+    /// offset ([`Lent`]), and the one that continues the offset after it. `None` when no query
+    /// is active.
+    pub(super) fn lend(&mut self, device: &Device, spares: u64) -> Result<Option<Loan>, Error> {
+        if self.active.is_none() {
+            return Ok(None);
+        }
+        let lent = self.next_continuation(device)?;
+        let spares = (0..spares)
+            .map(|_| self.next_continuation(device))
+            .collect::<Result<Vec<_>, _>>()?;
+        let next = self.next_continuation(device)?;
+        Ok(Some(Loan { lent, spares, next }))
+    }
+
+    /// Hand `loan`'s queries (from [`Visibility::lend`]) to an execution whose secondary
+    /// command buffer stands between `before` and `after`: end the active query in `before`,
+    /// record the execution's query and its spares as continuations of its offset, and begin the
+    /// last of the loan in `after` for the same offset. The execution's recording begins and
+    /// ends its query and spares ([`Visibility::borrowing`]).
+    pub(super) fn lend_to(
+        &mut self,
+        raw: &ash::Device,
+        before: vk::CommandBuffer,
+        after: vk::CommandBuffer,
+        loan: Loan,
+    ) -> Lent {
+        self.end(raw, before);
+        let boolean = self.taken.get(self.current).is_none_or(|t| t.boolean);
+        for taken in std::iter::once(&loan.lent).chain(&loan.spares) {
+            if let Some(pool) = taken.pool {
+                self.continued.push(Continued {
+                    taken: self.current,
+                    pool,
+                    query: taken.query,
+                });
+            }
+        }
+        let out = Lent {
+            pool: loan.lent.raw,
+            query: loan.lent.query,
+            boolean,
+            spares: loan.spares.iter().map(|s| (s.raw, s.query)).collect(),
+        };
+        self.resume(raw, after, loan.next);
+        out
+    }
+
+    /// End, empty, every spare of the lent query the replay did not take, in `draws`, the last
+    /// run's secondary command buffer, after the active query ended: each counts nothing, and
+    /// the combine reads a result from it.
+    pub(super) fn close_spares(&mut self, raw: &ash::Device, draws: vk::CommandBuffer) {
+        let Some(borrowed) = &mut self.borrowed else {
+            return;
+        };
+        let boolean = borrowed.boolean;
+        for (pool, query) in borrowed.spares.drain(..) {
+            // SAFETY: `draws` is recording inside its render pass instance, and only the replay
+            // records it; no query is active in it (ended before); the pool lives until the
+            // command buffer completes, and the lending encoder's `end_encoding` reset it before
+            // the pass; a precise query's device enables `occlusionQueryPrecise`.
+            unsafe {
+                raw.cmd_begin_query(draws, pool, query, control(boolean));
+                raw.cmd_end_query(draws, pool, query);
+            }
+        }
+    }
+
+    /// Whether `setVisibilityResultMode:offset:` in `call` on `device`, at `offset` (a
+    /// [`result_offset`]), is refused as the module docs say, apart from running out of query
+    /// memory: [`Visibility::set_mode`]'s checks, which a caller makes before what it records
+    /// for the query.
+    pub(super) fn check_mode(
+        &self,
+        call: &'static str,
+        device: &Device,
+        mode: VisibilityResultMode,
+        offset: u64,
+    ) -> Result<(), Error> {
+        let problem = |problem| invalid(call, Problem::Visibility(problem));
+        if mode == VisibilityResultMode::Disabled {
+            return Ok(());
+        }
+        let Some(buffer) = &self.buffer else {
+            return Err(problem(VisibilityProblem::NoBuffer));
+        };
+        let length = buffer.length();
+        if offset
+            .checked_add(RESULT_BYTES)
+            .is_none_or(|end| end > length)
+        {
+            return Err(problem(VisibilityProblem::OffsetOutOfRange {
+                offset,
+                length,
+            }));
+        }
+        let boolean = mode == VisibilityResultMode::Boolean;
+        if let Some(&index) = self.offsets.get(&offset) {
+            if self.taken[index].boolean != boolean {
+                return Err(problem(VisibilityProblem::OffsetReused { offset }));
+            }
+        }
+        if mode != VisibilityResultMode::Boolean
+            && !device
+                .properties()
+                .description
+                .has(VkFeature::OcclusionQueryPrecise)
+        {
+            return Err(Error::Unsupported(Unsupported::needs(
+                Feature::CountingVisibility,
+                Capability::Feature(VkFeature::OcclusionQueryPrecise),
+            )));
+        }
+        Ok(())
+    }
+
+    /// `setVisibilityResultMode:offset:` in `call` on `device`, recording into `draws`, the
+    /// encoder's secondary command buffer. Refused as the module docs say; a refused call
+    /// records nothing and keeps the mode set before.
+    pub(super) fn set_mode(
+        &mut self,
+        call: &'static str,
+        device: &Device,
+        draws: vk::CommandBuffer,
+        mode: VisibilityResultMode,
+        offset: u64,
+    ) -> Result<(), Error> {
+        self.check_mode(call, device, mode, offset)?;
+        let raw = device.shared().vk();
+        if mode == VisibilityResultMode::Disabled {
+            self.end(raw, draws);
+            return Ok(());
+        }
+        let boolean = mode == VisibilityResultMode::Boolean;
+        let (pool, query) = self.next_query(device)?;
+        // Recording starts here: nothing below can be refused.
+        self.end(raw, draws);
+        let pool_raw = self.pools[pool].raw;
+        // SAFETY: the secondary command buffer is recording inside the pass, and only this
+        // encoder records it; no query is active in it (ended above); the pool lives until the
+        // command buffer completes, and `end_encoding` resets it before the pass; a precise
+        // query's device has `occlusionQueryPrecise` (checked above), which it enables.
+        unsafe { raw.cmd_begin_query(draws, pool_raw, query, control(boolean)) };
+        self.active = Some((pool_raw, query));
+        // An offset taken again (in its mode, `check_mode`) continues its result.
+        if let Some(&index) = self.offsets.get(&offset) {
+            self.continued.push(Continued {
+                taken: index,
+                pool,
+                query,
+            });
+            self.current = index;
+            return Ok(());
+        }
+        self.current = self.taken.len();
+        self.offsets.insert(offset, self.current);
+        self.taken.push(Taken {
+            offset,
+            boolean,
+            pool,
+            query,
+        });
+        Ok(())
+    }
+
+    /// Whether a query is begun and not yet ended.
+    pub(super) fn active(&self) -> bool {
+        self.active.is_some()
+    }
+
+    /// The query that will continue the active one in the render pass instance a split opens,
+    /// taken now, before anything of the split records: `None` when no query is active. In an
+    /// encoder replaying an execution's commands (`borrowing`), whose active query is the
+    /// execution's lent one, the next of its spares.
+    pub(super) fn continuation(&mut self, device: &Device) -> Result<Option<Continuation>, Error> {
+        if self.active.is_none() {
+            return Ok(None);
+        }
+        if let Some(borrowed) = &mut self.borrowed {
+            let (raw, query) = borrowed
+                .spares
+                .pop()
+                .ok_or_else(|| internal("an execution's draws past the queries lent to it"))?;
+            return Ok(Some(Continuation {
+                pool: None,
+                raw,
+                query,
+            }));
+        }
+        self.next_continuation(device).map(Some)
+    }
+
+    /// The next free query (`next_query`), as a continuation.
+    fn next_continuation(&mut self, device: &Device) -> Result<Continuation, Error> {
+        let (pool, query) = self.next_query(device)?;
+        Ok(Continuation {
+            pool: Some(pool),
+            raw: self.pools[pool].raw,
+            query,
+        })
+    }
+
+    /// End the active query in `from`, the draws' command buffer of the instance before a split,
+    /// and begin `next` (from [`Visibility::continuation`]) in `into`, the next instance's, for
+    /// the same offset.
+    pub(super) fn continue_in(
+        &mut self,
+        raw: &ash::Device,
+        from: vk::CommandBuffer,
+        into: vk::CommandBuffer,
+        next: Continuation,
+    ) {
+        self.end(raw, from);
+        self.resume(raw, into, next);
+    }
+
+    /// Begin `next` (from [`Visibility::continuation`]) in `into`, continuing the offset of the
+    /// query last ended: after a split ([`Visibility::continue_in`]), or after a draw that counts
+    /// no sample, around which the active query ends (`render.rs`).
+    pub(super) fn resume(
+        &mut self,
+        raw: &ash::Device,
+        into: vk::CommandBuffer,
+        next: Continuation,
+    ) {
+        let pool = next.raw;
+        let boolean = match &self.borrowed {
+            Some(borrowed) => borrowed.boolean,
+            None => self.taken.get(self.current).is_none_or(|t| t.boolean),
+        };
+        // SAFETY: `into` is recording inside its render pass instance, and only this encoder
+        // records it; no query is active in it (a new one, or the one the caller ended the
+        // query in); the pool lives until the command buffer completes, and `end_encoding`
+        // resets it before the pass (a spare's, the lending encoder's); a precise query's device
+        // enables `occlusionQueryPrecise` (checked when its mode was set).
+        unsafe { raw.cmd_begin_query(into, pool, next.query, control(boolean)) };
+        self.active = Some((pool, next.query));
+        // A spare is the lending encoder's continuation already (`lend_to`).
+        if let Some(pool) = next.pool {
+            self.continued.push(Continued {
+                taken: self.current,
+                pool,
+                query: next.query,
+            });
+        }
+    }
+
+    /// End the active query, if any, in `draws`.
+    pub(super) fn end(&mut self, raw: &ash::Device, draws: vk::CommandBuffer) {
+        if let Some((pool, query)) = self.active {
+            // SAFETY: the query was begun in `draws`, which is still recording inside the pass.
+            unsafe { raw.cmd_end_query(draws, pool, query) };
+            self.active = None;
+        }
+    }
+
+    /// The next free query, in a new pool when the last is full.
+    fn next_query(&mut self, device: &Device) -> Result<(usize, u32), Error> {
+        let count = self.pools.len();
+        if let Some(last) = self.pools.last_mut() {
+            if last.used < last.capacity {
+                last.used += 1;
+                return Ok((count - 1, last.used - 1));
+            }
+        }
+        let capacity = self
+            .pools
+            .last()
+            .map_or(FIRST_POOL, |last| (last.capacity * 2).min(MAX_POOL));
+        let info = vk::QueryPoolCreateInfo::default()
+            .query_type(vk::QueryType::OCCLUSION)
+            .query_count(capacity);
+        // SAFETY: the device is live and `info` valid.
+        let raw = unsafe { device.shared().vk().create_query_pool(&info, None) }.map_err(vulkan)?;
+        self.pools.push(QueryPool {
+            device: device.clone(),
+            raw,
+            capacity,
+            used: 1,
+        });
+        Ok((self.pools.len() - 1, 0))
+    }
+
+    /// The results' copies and resolves, planned before anything of the pass records: `None`
+    /// when the encoder took no offset. The draws' command buffer must have ended its query
+    /// ([`Visibility::end`]).
+    pub(super) fn plan(self, core: &mut EncoderCore) -> Result<Option<Results>, Error> {
+        let Visibility {
+            buffer,
+            pools,
+            taken,
+            continued,
+            active,
+            ..
+        } = self;
+        if active.is_some() {
+            return Err(internal(
+                "a visibility query still active at the pass's end",
+            ));
+        }
+        let Some(buffer) = buffer.filter(|_| !taken.is_empty()) else {
+            return Ok(None);
+        };
+        let device = core.device().clone();
+        let landing = Landing::new(core, &buffer, &taken)?;
+        // Consecutive queries of one pool at consecutive offsets copy at once. The copies and
+        // resolves address the landing region; the uses, the Metal buffer.
+        let mut copies: Vec<ResultCopy> = Vec::new();
+        for t in &taken {
+            push_copy(
+                &mut copies,
+                pools[t.pool].raw,
+                t.query,
+                landing.raw,
+                landing.at(t.offset),
+            );
+        }
+        let combine = combine(core, &pools, &taken, &continued, &landing, &mut copies)?;
+        let booleans: Vec<u64> = taken
+            .iter()
+            .filter(|t| t.boolean)
+            .map(|t| landing.at(t.offset))
+            .collect();
+        let limits = &device.properties().description.limits;
+        let resolves = VisibilityResolve::plan(
+            &booleans,
+            limits.min_storage_buffer_offset_alignment,
+            limits.max_storage_buffer_range,
+            limits.max_compute_work_group_count[0],
+        )
+        .ok_or_else(|| internal("visibility offsets the resolve cannot bind"))?;
+        let resolve = if resolves.is_empty() {
+            None
+        } else {
+            let kernel = device.owned_kernel(OwnedModule::VisibilityResolve)?;
+            let mut uploads: Vec<Upload> = Vec::with_capacity(resolves.len());
+            {
+                let mut state = core.command_buffer().state();
+                for r in &resolves {
+                    let bytes = r.target_bytes();
+                    uploads.push(state.uploads.upload(&device, &bytes, bytes.len() as u64)?);
+                }
+            }
+            let target = landing.raw;
+            let ranges: Vec<Vec<(vk::Buffer, u64, u64)>> = resolves
+                .iter()
+                .zip(&uploads)
+                .map(|(r, upload)| {
+                    vec![
+                        (upload.raw(), upload.offset(), 4 * r.targets.len() as u64),
+                        (target, r.dest_range.offset, r.dest_range.range),
+                    ]
+                })
+                .collect();
+            let sets = OwnedSets::write(&device, &kernel, &ranges)?;
+            let groups = resolves.iter().map(|r| r.group_count).collect();
+            Some(Dispatches {
+                pipeline: kernel.pipeline,
+                layout: kernel.layout,
+                sets,
+                groups,
+            })
+        };
+        let mut uses = Vec::with_capacity(taken.len());
+        for t in &taken {
+            let (identity, range) = buffer.tracked(t.offset..t.offset + RESULT_BYTES);
+            let range = UseRange::Bytes(range);
+            let copy = Access::new(
+                vk::PipelineStageFlags2::TRANSFER,
+                vk::AccessFlags2::TRANSFER_WRITE,
+            );
+            uses.push(Use::writes(
+                identity.key,
+                identity.tracked,
+                range.clone(),
+                copy,
+            ));
+            if t.boolean {
+                let shader = Access::new(
+                    vk::PipelineStageFlags2::COMPUTE_SHADER,
+                    vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE,
+                );
+                uses.push(Use {
+                    key: identity.key,
+                    tracked: identity.tracked,
+                    range,
+                    read: shader,
+                    write: shader,
+                });
+            }
+        }
+        Ok(Some(Results {
+            pools: QueryPools(pools),
+            buffer,
+            landing,
+            copies,
+            combine,
+            resolve,
+            uses,
+        }))
+    }
+}
+
+/// Where a pass's results land, at multiples of 8 as Vulkan copies them: in the buffer's
+/// `VkBuffer`, or, where a no-copy buffer's bytes start past such a multiple (`Buffer::base`), in
+/// an upload region laid out as the buffer from the first offset taken, whence one more copy, which
+/// takes any offset, moves each result into the buffer after the resolve.
+struct Landing {
+    /// The `VkBuffer` the results land in.
+    raw: vk::Buffer,
+    /// Where the first offset taken lands in `raw`.
+    start: u64,
+    /// The first offset taken.
+    first: u64,
+    /// The buffer's `VkBuffer`.
+    to: vk::Buffer,
+    /// The copies of the results on into the buffer, where `raw` is an upload's.
+    onward: Vec<vk::BufferCopy>,
+}
+
+impl Landing {
+    /// Where the results of `taken` (not empty) land, for `buffer`; the upload region is
+    /// `core`'s command buffer's.
+    fn new(core: &EncoderCore, buffer: &Buffer, taken: &[Taken]) -> Result<Landing, Error> {
+        let first = taken.iter().map(|t| t.offset).min().unwrap_or(0);
+        let (to, start) = buffer.at(first);
+        if start.is_multiple_of(RESULT_BYTES) {
+            return Ok(Landing {
+                raw: to,
+                start,
+                first,
+                to,
+                onward: Vec::new(),
+            });
+        }
+        let end = taken.iter().map(|t| t.offset + RESULT_BYTES).max();
+        let len = end.unwrap_or(first) - first;
+        let device = core.device();
+        let region = core
+            .command_buffer()
+            .state()
+            .uploads
+            .upload(device, &[], len)?;
+        let onward = taken
+            .iter()
+            .map(|t| vk::BufferCopy {
+                src_offset: region.offset() + (t.offset - first),
+                dst_offset: buffer.at(t.offset).1,
+                size: RESULT_BYTES,
+            })
+            .collect();
+        device.degrade(Degradation::LandedVisibilityResults, || {
+            let object = format!("visibility results from offset {first}");
+            let reason = format!(
+                "they start at byte {start} of the buffer's VkBuffer, and Vulkan writes query \
+                 results only at multiples of {RESULT_BYTES} bytes"
+            );
+            (object, reason)
+        });
+        Ok(Landing {
+            raw: region.raw(),
+            start: region.offset(),
+            first,
+            to,
+            onward,
+        })
+    }
+
+    /// Where the result at `offset` of the buffer lands.
+    fn at(&self, offset: u64) -> u64 {
+        self.start + (offset - self.first)
+    }
+}
+
+/// The control flags of a query of a `Boolean` offset (imprecise) or a `Counting` one (precise).
+fn control(boolean: bool) -> vk::QueryControlFlags {
+    if boolean {
+        vk::QueryControlFlags::empty()
+    } else {
+        vk::QueryControlFlags::PRECISE
+    }
+}
+
+/// One copy of query results.
+#[derive(Clone, Copy, Debug)]
+struct ResultCopy {
+    pool: vk::QueryPool,
+    first: u32,
+    count: u32,
+    /// The landing region's buffer, or the continuations' upload region's.
+    target: vk::Buffer,
+    /// In `target` (`Landing::at` for a result).
+    offset: u64,
+}
+
+/// Add the copy of `query` of `pool` to `offset` of `target` to `copies`: into the last copy
+/// where it continues it.
+fn push_copy(
+    copies: &mut Vec<ResultCopy>,
+    pool: vk::QueryPool,
+    query: u32,
+    target: vk::Buffer,
+    offset: u64,
+) {
+    if let Some(last) = copies.last_mut() {
+        let next = u64::from(last.count) * RESULT_BYTES;
+        if last.pool == pool
+            && last.first + last.count == query
+            && last.target == target
+            && last.offset + next == offset
+        {
+            last.count += 1;
+            return;
+        }
+    }
+    copies.push(ResultCopy {
+        pool,
+        first: query,
+        count: 1,
+        target,
+        offset,
+    });
+}
+
+/// The continuations' copies, added to `copies`, into an upload region of `core`'s command
+/// buffer, one word each, those of one offset consecutive, and the combine dispatches that OR
+/// them into their `Boolean` results' landed words and sum them into their `Counting` ones:
+/// `None` without continuations.
+fn combine(
+    core: &mut EncoderCore,
+    pools: &[QueryPool],
+    taken: &[Taken],
+    continued: &[Continued],
+    landing: &Landing,
+    copies: &mut Vec<ResultCopy>,
+) -> Result<Option<Dispatches>, Error> {
+    if continued.is_empty() {
+        return Ok(None);
+    }
+    let device = core.device().clone();
+    let words = continued.len() as u64 * RESULT_BYTES;
+    let sources = {
+        let mut state = core.command_buffer().state();
+        state.uploads.upload(&device, &[], words)?
+    };
+    // An offset taken again continues after others' continuations: each offset's words are
+    // gathered (the order within one is no matter, a sum or an OR).
+    let mut order: Vec<&Continued> = continued.iter().collect();
+    order.sort_by_key(|c| c.taken);
+    let mut results: Vec<ContinuedResult> = Vec::new();
+    for (word, c) in order.into_iter().enumerate() {
+        let at = sources.offset() + word as u64 * RESULT_BYTES;
+        push_copy(copies, pools[c.pool].raw, c.query, sources.raw(), at);
+        let result = &taken[c.taken];
+        let offset = landing.at(result.offset);
+        match results.last_mut() {
+            Some(last) if last.offset == offset => last.count += 1,
+            _ => {
+                let first =
+                    u32::try_from(word).map_err(|_| internal("too many continuation queries"))?;
+                results.push(ContinuedResult::new(offset, first, 1, !result.boolean));
+            }
+        }
+    }
+    let limits = &device.properties().description.limits;
+    let combines = VisibilityCombine::plan(
+        &results,
+        limits.min_storage_buffer_offset_alignment,
+        limits.max_storage_buffer_range,
+        limits.max_compute_work_group_count[0],
+    )
+    .ok_or_else(|| internal("visibility continuations the combine cannot bind"))?;
+    let kernel = device.owned_kernel(OwnedModule::VisibilityCombine)?;
+    let mut ranges: Vec<Vec<(vk::Buffer, u64, u64)>> = Vec::with_capacity(combines.len());
+    {
+        let mut state = core.command_buffer().state();
+        for c in &combines {
+            let bytes = c.table_bytes();
+            let table = state.uploads.upload(&device, &bytes, bytes.len() as u64)?;
+            ranges.push(vec![
+                (table.raw(), table.offset(), bytes.len() as u64),
+                (landing.raw, c.dest_range.offset, c.dest_range.range),
+                (sources.raw(), sources.offset(), words),
+            ]);
+        }
+    }
+    let sets = OwnedSets::write(&device, &kernel, &ranges)?;
+    Ok(Some(Dispatches {
+        pipeline: kernel.pipeline,
+        layout: kernel.layout,
+        sets,
+        groups: combines.iter().map(|c| c.group_count).collect(),
+    }))
+}
+
+/// The dispatches of one crate-owned kernel after a pass: the combine's or the resolve's.
+struct Dispatches {
+    pipeline: vk::Pipeline,
+    layout: vk::PipelineLayout,
+    sets: OwnedSets,
+    groups: Vec<u32>,
+}
+
+/// A pass's visibility results, planned: what records before the pass and after it.
+pub(super) struct Results {
+    pools: QueryPools,
+    buffer: Buffer,
+    landing: Landing,
+    copies: Vec<ResultCopy>,
+    combine: Option<Dispatches>,
+    resolve: Option<Dispatches>,
+    uses: Vec<Use<super::resource::ResourceKey>>,
+}
+
+impl Results {
+    /// Reset the queries the pass begins, in `command_buffer` before the pass.
+    ///
+    /// # Safety
+    ///
+    /// `command_buffer` is recording outside a render pass.
+    pub(super) unsafe fn reset(&self, raw: &ash::Device, command_buffer: vk::CommandBuffer) {
+        for pool in &self.pools.0 {
+            // SAFETY: the caller's contract; the pool is live until the command buffer completes.
+            unsafe { raw.cmd_reset_query_pool(command_buffer, pool.raw, 0, pool.used) };
+        }
+    }
+
+    /// Record the copies and resolves in `core`'s command buffer after the pass, between barriers
+    /// from everything before and to everything after, and hold their objects until it completes.
+    pub(super) fn record(self, core: &mut EncoderCore) {
+        let Results {
+            pools,
+            buffer,
+            landing,
+            copies,
+            combine,
+            resolve,
+            uses,
+        } = self;
+        let mut stages = vk::PipelineStageFlags2::TRANSFER;
+        if combine.is_some() || resolve.is_some() {
+            stages |= vk::PipelineStageFlags2::COMPUTE_SHADER;
+        }
+        core.device().shared().counts.pool_compiled(
+            crate::work_counts::PoolCompiled::QueryResultCopy,
+            copies.len() as u64,
+        );
+        core.barrier(Barrier::everything());
+        core.command(stages, &uses, |raw, command_buffer| {
+            // SAFETY: the encoder's command buffer is recording outside a render pass, after the
+            // pass that ended every query; the pools, the buffer, the sets and the uploads are
+            // live until it completes (retained below, and with the command buffer); each copy
+            // lies in the landing region or the continuations' upload region at a multiple of 8,
+            // and each onward copy in the landing region and in the buffer (checked when the
+            // offset was set).
+            unsafe {
+                for copy in &copies {
+                    raw.cmd_copy_query_pool_results(
+                        command_buffer,
+                        copy.pool,
+                        copy.first,
+                        copy.count,
+                        copy.target,
+                        copy.offset,
+                        RESULT_BYTES,
+                        vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT,
+                    );
+                }
+                // The continuations ORed into their results, then the `Boolean` ones resolved.
+                for dispatches in [&combine, &resolve].into_iter().flatten() {
+                    Barrier::everything().record(raw, command_buffer);
+                    raw.cmd_bind_pipeline(
+                        command_buffer,
+                        vk::PipelineBindPoint::COMPUTE,
+                        dispatches.pipeline,
+                    );
+                    for (set, &groups) in dispatches.sets.sets.iter().zip(&dispatches.groups) {
+                        raw.cmd_bind_descriptor_sets(
+                            command_buffer,
+                            vk::PipelineBindPoint::COMPUTE,
+                            dispatches.layout,
+                            0,
+                            std::slice::from_ref(set),
+                            &[],
+                        );
+                        raw.cmd_dispatch(command_buffer, groups, 1, 1);
+                    }
+                }
+                if !landing.onward.is_empty() {
+                    Barrier::everything().record(raw, command_buffer);
+                    raw.cmd_copy_buffer(command_buffer, landing.raw, landing.to, &landing.onward);
+                }
+            }
+        });
+        core.barrier(Barrier::everything());
+        core.retain(pools);
+        for dispatches in [combine, resolve].into_iter().flatten() {
+            core.retain(dispatches.sets);
+        }
+        core.retain(buffer);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::VisibilityResultMode;
+
+    /// Metal's raw values round trip, and an undefined one is refused.
+    #[test]
+    fn modes_take_metals_raw_values() {
+        for mode in [
+            VisibilityResultMode::Disabled,
+            VisibilityResultMode::Boolean,
+            VisibilityResultMode::Counting,
+        ] {
+            assert_eq!(VisibilityResultMode::from_raw(mode.raw()), Ok(mode));
+        }
+        assert_eq!(
+            [0, 1, 2].map(|raw| VisibilityResultMode::from_raw(raw).map(|m| m.raw())),
+            [Ok(0), Ok(1), Ok(2)]
+        );
+        assert!(VisibilityResultMode::from_raw(3).is_err());
+    }
+}

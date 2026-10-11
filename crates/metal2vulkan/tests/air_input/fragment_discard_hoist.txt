@@ -1,0 +1,824 @@
+target triple = "air64_v28-apple-macosx26.0.0"
+source_filename = "-"
+; datalayout DataLayout { endian: Little, pointers: {0: PointerSpec { size_bits: 64, abi_bits: 64, pref_bits: 64, index_bits: 64 }}, ints: {1: AlignSpec { abi_bits: 8, pref_bits: 8 }, 8: AlignSpec { abi_bits: 8, pref_bits: 8 }, 16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }}, floats: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }}, vectors: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 24: AlignSpec { abi_bits: 32, pref_bits: 32 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 48: AlignSpec { abi_bits: 64, pref_bits: 64 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 96: AlignSpec { abi_bits: 128, pref_bits: 128 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }, 192: AlignSpec { abi_bits: 256, pref_bits: 256 }, 256: AlignSpec { abi_bits: 256, pref_bits: 256 }, 512: AlignSpec { abi_bits: 512, pref_bits: 512 }, 1024: AlignSpec { abi_bits: 1024, pref_bits: 1024 }}, aggregate: AlignSpec { abi_bits: 0, pref_bits: 64 }, native_ints: [8, 16, 32], stack_align_bits: None, alloca_space: 0, program_space: 0, globals_space: 0, mangling: None, fn_ptr_align: None, non_integral: [] }
+%t3 = type <{ <4 x float> }>
+%t5 = type %t3 (i32)
+%t6 = type float (i32)
+%t7 = type i32 (i32)
+%t10 = type <4 x i32> (<4 x float>, ptr addrspace(2), ptr addrspace(2))
+%t13 = type <2 x i32> (<2 x float>)
+%t15 = type <4 x i32> (<4 x float>, ptr addrspace(2), ptr addrspace(2), ptr addrspace(1))
+%t16 = type <4 x i32> (<4 x float>, ptr addrspace(2), ptr addrspace(2), ptr addrspace(1), ptr addrspace(2))
+%t17 = type i32 (float)
+%t19 = type void ()
+%t21 = type { <4 x float>, i8 }
+%t23 = type %t21 (ptr addrspace(1), ptr addrspace(2), <2 x float>, i1, <2 x i32>, i1, float, float, i32)
+%t24 = type ptr addrspace(2) ()
+%t25 = type %t21 (ptr addrspace(1), ptr addrspace(2), <2 x i32>, <2 x i32>, i32, i32)
+%t26 = type i32 (ptr addrspace(1), i32, i32, i32, i1)
+%t27 = type i32 (i32, i32)
+%t29 = type [2 x i32]
+%t33 = type { i32 } ; "struct.metal::_atomic"
+c28 = %t29 [27, 0]
+c43 = <2 x float> [0x40800000, 0x40800000]
+c44 = <2 x float> [0xBF800000, 0xBF800000]
+c47 = <4 x i32> [0, 1, poison, poison]
+c51 = <4 x float> [poison, poison, 0x3F000000, 0x3F800000]
+c52 = <4 x i32> [0, 1, 6, 7]
+c55 = <2 x i32> [0, 1]
+c62 = <2 x float> [0x3F000000, 0x3F000000]
+
+define %t5 @f0 "discard_hoist_full" memory(NoModRef, NoModRef, NoModRef) "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="0" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" {
+bb0:
+  %i0 = and i32 %a0, i32 1
+  %i1 = tail call reassoc nnan ninf nsz arcp contract afn float @f1 [air Convert(Convert { dst: NumTy { elem: F32, lanes: 1 }, dst_kind: Float, src: NumTy { elem: I32, lanes: 1 }, src_kind: Unsigned, src_fp8: None })](%i0)
+  %i2 = insertelement <2 x float> undef, %i1, i64 0
+  %i3 = lshr i32 %a0, i32 1
+  %i4 = tail call reassoc nnan ninf nsz arcp contract afn float @f1 [air Convert(Convert { dst: NumTy { elem: F32, lanes: 1 }, dst_kind: Float, src: NumTy { elem: I32, lanes: 1 }, src_kind: Unsigned, src_fp8: None })](%i3)
+  %i5 = insertelement %i2, %i4, i64 1
+  %i6 = fmul reassoc nnan ninf nsz arcp contract afn <2 x float> %i5, <2 x float> c43
+  %i7 = fadd reassoc nnan ninf nsz arcp contract afn <2 x float> %i6, <2 x float> c44
+  %i8 = shufflevector <4 x float> %i7, <2 x float> poison, <0, 1, poison, poison>
+  %i9 = shufflevector <4 x float> %i8, <4 x float> c51, <0, 1, 6, 7>
+  %i10 = insertvalue %t3 undef %i9, 0
+  ret %i10
+}
+
+declare %t6 @f1 "air.convert.f.f32.u.i32" memory(NoModRef, NoModRef, NoModRef)
+
+define %t7 @f2 "_Z20discard_hoist_helperi" memory(NoModRef, NoModRef, NoModRef) "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="0" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" {
+bb0:
+  %i0 = mul nsw i32 %a0, i32 7
+  ret %i0
+}
+
+define %t10 @f3 "hoisted_known" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a1( align 4 dereferenceable(4) Ref nocapture "air-buffer-no-alias"="" ) %a2( align 4 dereferenceable(4) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = shufflevector <2 x float> %a0, <4 x float> poison, <0, 1>
+  %i1 = tail call <2 x i32> @f4 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 2 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 2 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = load i32, %a2, align 4
+  %i3 = load i32, %a1, align 4
+  %i4 = extractelement %i1, i64 1
+  %i5 = shl i32 %i4, i32 1
+  %i6 = and i32 %i5, i32 28
+  %i7 = extractelement %i1, i64 0
+  %i8 = lshr i32 %i7, i32 1
+  %i9 = add nuw i32 %i6, %i8
+  %i10 = and i32 %i9, i32 31
+  %i11 = shl nuw i32 i32 1, %i10
+  %i12 = and i32 %i11, %i3
+  %i13 = icmp ne %i12, i32 0
+  %i14 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](i32 1) convergent
+  br %i13, bb2, bb1
+bb1:
+  tail call void @f18 [air Fragment(Discard)]()
+  br bb2
+bb2:
+  %i18 = add nsw i32 %i2, i32 1
+  %i19 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i18) convergent
+  %i20 = select i32 %i13, %i18, i32 0
+  %i21 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i20) convergent
+  %i22 = icmp sgt %i14, %i19
+  %i23 = zext %i22 to i32
+  %i24 = insertelement <4 x i32> undef, %i23, i64 0
+  %i25 = sub nsw i32 %i19, %i21
+  %i26 = insertelement %i24, %i25, i64 1
+  %i27 = sub nsw i32 %i14, %i19
+  %i28 = and i32 %i27, i32 3
+  %i29 = insertelement %i26, %i28, i64 2
+  %i30 = icmp slt %i14, %i19
+  %i31 = zext %i30 to i32
+  %i32 = insertelement %i29, %i31, i64 3
+  ret %i32
+}
+
+declare %t13 @f4 "air.convert.u.v2i32.f.v2f32" memory(NoModRef, NoModRef, NoModRef)
+
+define %t10 @f5 "counted_dependent" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a1( align 4 dereferenceable(4) Ref nocapture "air-buffer-no-alias"="" ) %a2( align 4 dereferenceable(4) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = shufflevector <2 x float> %a0, <4 x float> poison, <0, 1>
+  %i1 = tail call <2 x i32> @f4 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 2 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 2 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = load i32, %a2, align 4
+  %i3 = load i32, %a1, align 4
+  %i4 = extractelement %i1, i64 1
+  %i5 = shl i32 %i4, i32 1
+  %i6 = and i32 %i5, i32 28
+  %i7 = extractelement %i1, i64 0
+  %i8 = lshr i32 %i7, i32 1
+  %i9 = add nuw i32 %i6, %i8
+  %i10 = and i32 %i9, i32 31
+  %i11 = shl nuw i32 i32 1, %i10
+  %i12 = and i32 %i11, %i3
+  %i13 = icmp ne %i12, i32 0
+  %i14 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](i32 1) convergent
+  %i15 = xor i1 %i13, i1 1
+  %i16 = icmp sgt %i14, %i2
+  %i17 = select i1 %i15, %i16, i1 0
+  br %i17, bb1, bb2
+bb1:
+  tail call void @f18 [air Fragment(Discard)]()
+  br bb2
+bb2:
+  %i21 = add nsw i32 %i2, i32 1
+  %i22 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i21) convergent
+  %i23 = select i32 %i13, %i21, i32 0
+  %i24 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i23) convergent
+  %i25 = icmp sgt %i14, %i22
+  %i26 = zext %i25 to i32
+  %i27 = insertelement <4 x i32> undef, %i26, i64 0
+  %i28 = sub nsw i32 %i22, %i24
+  %i29 = insertelement %i27, %i28, i64 1
+  %i30 = sub nsw i32 %i14, %i22
+  %i31 = and i32 %i30, i32 3
+  %i32 = insertelement %i29, %i31, i64 2
+  %i33 = icmp slt %i14, %i22
+  %i34 = zext %i33 to i32
+  %i35 = insertelement %i32, %i34, i64 3
+  ret %i35
+}
+
+define %t10 @f6 "hoisted_const" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a1( align 4 dereferenceable(4) Ref nocapture "air-buffer-no-alias"="" ) %a2( align 4 dereferenceable(4) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = shufflevector <2 x float> %a0, <4 x float> poison, <0, 1>
+  %i1 = tail call <2 x i32> @f4 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 2 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 2 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = load i32, %a2, align 4
+  %i3 = load i32, %a1, align 4
+  %i4 = extractelement %i1, i64 1
+  %i5 = shl i32 %i4, i32 1
+  %i6 = and i32 %i5, i32 28
+  %i7 = extractelement %i1, i64 0
+  %i8 = lshr i32 %i7, i32 1
+  %i9 = add nuw i32 %i6, %i8
+  %i10 = and i32 %i9, i32 31
+  %i11 = shl nuw i32 i32 1, %i10
+  %i12 = and i32 %i11, %i3
+  %i13 = icmp ne %i12, i32 0
+  %i14 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](i32 1) convergent
+  %i15 = xor i1 %i13, i1 1
+  %i16 = icmp eq %i2, i32 0
+  %i17 = select i1 %i15, %i16, i1 0
+  br %i17, bb1, bb2
+bb1:
+  tail call void @f18 [air Fragment(Discard)]()
+  br bb2
+bb2:
+  %i21 = add nsw i32 %i2, i32 1
+  %i22 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i21) convergent
+  %i23 = select i32 %i13, %i21, i32 0
+  %i24 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i23) convergent
+  %i25 = icmp sgt %i14, %i22
+  %i26 = zext %i25 to i32
+  %i27 = insertelement <4 x i32> undef, %i26, i64 0
+  %i28 = sub nsw i32 %i22, %i24
+  %i29 = insertelement %i27, %i28, i64 1
+  %i30 = sub nsw i32 %i14, %i22
+  %i31 = and i32 %i30, i32 3
+  %i32 = insertelement %i29, %i31, i64 2
+  %i33 = icmp slt %i14, %i22
+  %i34 = zext %i33 to i32
+  %i35 = insertelement %i32, %i34, i64 3
+  ret %i35
+}
+
+define %t15 @f7 "hoisted_device_read" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a1( align 4 dereferenceable(4) Ref nocapture "air-buffer-no-alias"="" ) %a2( align 4 dereferenceable(4) Ref nocapture "air-buffer-no-alias"="" ) %a3( Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = shufflevector <2 x float> %a0, <4 x float> poison, <0, 1>
+  %i1 = tail call <2 x i32> @f4 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 2 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 2 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = load i32, %a2, align 4
+  %i3 = load i32, %a1, align 4
+  %i4 = extractelement %i1, i64 1
+  %i5 = shl i32 %i4, i32 1
+  %i6 = and i32 %i5, i32 28
+  %i7 = extractelement %i1, i64 0
+  %i8 = lshr i32 %i7, i32 1
+  %i9 = add nuw i32 %i6, %i8
+  %i10 = and i32 %i9, i32 31
+  %i11 = shl nuw i32 i32 1, %i10
+  %i12 = and i32 %i11, %i3
+  %i13 = icmp ne %i12, i32 0
+  %i14 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](i32 1) convergent
+  %i15 = load i32, %a3, align 4
+  %i16 = xor i1 %i13, i1 1
+  %i17 = icmp eq %i15, i32 0
+  %i18 = select i1 %i16, %i17, i1 0
+  br %i18, bb1, bb2
+bb1:
+  tail call void @f18 [air Fragment(Discard)]()
+  br bb2
+bb2:
+  %i22 = add nsw i32 %i2, i32 1
+  %i23 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i22) convergent
+  %i24 = select i32 %i13, %i22, i32 0
+  %i25 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i24) convergent
+  %i26 = icmp sgt %i14, %i23
+  %i27 = zext %i26 to i32
+  %i28 = insertelement <4 x i32> undef, %i27, i64 0
+  %i29 = sub nsw i32 %i23, %i25
+  %i30 = insertelement %i28, %i29, i64 1
+  %i31 = sub nsw i32 %i14, %i23
+  %i32 = and i32 %i31, i32 3
+  %i33 = insertelement %i30, %i32, i64 2
+  %i34 = icmp slt %i14, %i23
+  %i35 = zext %i34 to i32
+  %i36 = insertelement %i33, %i35, i64 3
+  ret %i36
+}
+
+define %t15 @f8 "hoisted_written_read" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a1( align 4 dereferenceable(4) Ref nocapture "air-buffer-no-alias"="" ) %a2( align 4 dereferenceable(4) Ref nocapture "air-buffer-no-alias"="" ) %a3( nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = shufflevector <2 x float> %a0, <4 x float> poison, <0, 1>
+  %i1 = tail call <2 x i32> @f4 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 2 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 2 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = load i32, %a2, align 4
+  %i3 = load i32, %a1, align 4
+  %i4 = extractelement %i1, i64 1
+  %i5 = shl i32 %i4, i32 1
+  %i6 = and i32 %i5, i32 28
+  %i7 = extractelement %i1, i64 0
+  %i8 = lshr i32 %i7, i32 1
+  %i9 = add nuw i32 %i6, %i8
+  %i10 = and i32 %i9, i32 31
+  %i11 = shl nuw i32 i32 1, %i10
+  %i12 = and i32 %i11, %i3
+  %i13 = icmp ne %i12, i32 0
+  %i14 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](i32 1) convergent
+  %i15 = load i32, %a3, align 4
+  %i16 = xor i1 %i13, i1 1
+  %i17 = icmp eq %i15, i32 0
+  %i18 = select i1 %i16, %i17, i1 0
+  br %i18, bb1, bb2
+bb1:
+  tail call void @f18 [air Fragment(Discard)]()
+  br bb2
+bb2:
+  %i22 = add nsw i32 %i2, i32 1
+  %i23 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i22) convergent
+  %i24 = select i32 %i13, %i22, i32 0
+  %i25 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i24) convergent
+  %i26 = shl i32 %i4, i32 3
+  %i27 = add i32 %i7, i32 16
+  %i28 = add i32 %i27, %i26
+  %i29 = zext %i28 to i64
+  %i30 = getelementptr inbounds i32, %a3, %i29
+  store %i23, %i30, align 4
+  %i32 = icmp sgt %i14, %i23
+  %i33 = zext %i32 to i32
+  %i34 = insertelement <4 x i32> undef, %i33, i64 0
+  %i35 = sub nsw i32 %i23, %i25
+  %i36 = insertelement %i34, %i35, i64 1
+  %i37 = sub nsw i32 %i14, %i23
+  %i38 = and i32 %i37, i32 3
+  %i39 = insertelement %i36, %i38, i64 2
+  %i40 = icmp slt %i14, %i23
+  %i41 = zext %i40 to i32
+  %i42 = insertelement %i39, %i41, i64 3
+  ret %i42
+}
+
+define %t16 @f9 "hoisted_sample" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a1( align 4 dereferenceable(4) Ref nocapture "air-buffer-no-alias"="" ) %a2( align 4 dereferenceable(4) Ref nocapture "air-buffer-no-alias"="" ) %a4( Ref nocapture ) {
+bb0:
+  %i0 = shufflevector <2 x float> %a0, <4 x float> poison, <0, 1>
+  %i1 = tail call <2 x i32> @f4 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 2 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 2 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = load i32, %a2, align 4
+  %i3 = load i32, %a1, align 4
+  %i4 = extractelement %i1, i64 1
+  %i5 = shl i32 %i4, i32 1
+  %i6 = and i32 %i5, i32 28
+  %i7 = extractelement %i1, i64 0
+  %i8 = lshr i32 %i7, i32 1
+  %i9 = add nuw i32 %i6, %i8
+  %i10 = and i32 %i9, i32 31
+  %i11 = shl nuw i32 i32 1, %i10
+  %i12 = and i32 %i11, %i3
+  %i13 = icmp ne %i12, i32 0
+  %i14 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](i32 1) convergent
+  %i15 = tail call %t21 @f20 [air Texture(Texture { op: Sample { compare: false, lod: Bias, offset: true }, image: ImageShape { dim: D2, array: false, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: F32, lanes: 4 }, sign: None }), coord16: false, form: Current, access: Some(Sample) })](%a3, %a4, <2 x float> c62, i1 1, <2 x i32> zeroinitializer, i1 0, float 0x0, float 0x0, i32 0) convergent arg0( Ref nocapture ) arg1( Ref nocapture )
+  %i16 = extractvalue <4 x float> %i15, 0
+  %i17 = extractelement %i16, i64 0
+  %i18 = tail call i32 @f10 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Signed, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i17)
+  %i19 = xor i1 %i13, i1 1
+  %i20 = icmp eq %i18, i32 0
+  %i21 = select i1 %i19, %i20, i1 0
+  br %i21, bb1, bb2
+bb1:
+  tail call void @f18 [air Fragment(Discard)]()
+  br bb2
+bb2:
+  %i25 = add nsw i32 %i2, i32 1
+  %i26 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i25) convergent
+  %i27 = select i32 %i13, %i25, i32 0
+  %i28 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i27) convergent
+  %i29 = icmp sgt %i14, %i26
+  %i30 = zext %i29 to i32
+  %i31 = insertelement <4 x i32> undef, %i30, i64 0
+  %i32 = sub nsw i32 %i26, %i28
+  %i33 = insertelement %i31, %i32, i64 1
+  %i34 = sub nsw i32 %i14, %i26
+  %i35 = and i32 %i34, i32 3
+  %i36 = insertelement %i33, %i35, i64 2
+  %i37 = icmp slt %i14, %i26
+  %i38 = zext %i37 to i32
+  %i39 = insertelement %i36, %i38, i64 3
+  ret %i39
+}
+
+declare %t17 @f10 "air.convert.s.i32.f.f32" memory(NoModRef, NoModRef, NoModRef)
+
+define %t15 @f11 "hoisted_texture_read" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a1( align 4 dereferenceable(4) Ref nocapture "air-buffer-no-alias"="" ) %a2( align 4 dereferenceable(4) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = shufflevector <2 x float> %a0, <4 x float> poison, <0, 1>
+  %i1 = tail call <2 x i32> @f4 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 2 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 2 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = load i32, %a2, align 4
+  %i3 = load i32, %a1, align 4
+  %i4 = extractelement %i1, i64 1
+  %i5 = shl i32 %i4, i32 1
+  %i6 = and i32 %i5, i32 28
+  %i7 = extractelement %i1, i64 0
+  %i8 = lshr i32 %i7, i32 1
+  %i9 = add nuw i32 %i6, %i8
+  %i10 = and i32 %i9, i32 31
+  %i11 = shl nuw i32 i32 1, %i10
+  %i12 = and i32 %i11, %i3
+  %i13 = icmp ne %i12, i32 0
+  %i14 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](i32 1) convergent
+  %i15 = tail call ptr addrspace(2) @f21 [air Sampler(GetReadSampler)]()
+  %i16 = tail call %t21 @f22 [air Texture(Texture { op: Read, image: ImageShape { dim: D2, array: false, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: F32, lanes: 4 }, sign: None }), coord16: false, form: Current, access: Some(Sample) })](%a3, %i15, <2 x i32> zeroinitializer, <2 x i32> zeroinitializer, i32 0, i32 0) arg0( Ref nocapture )
+  %i17 = extractvalue <4 x float> %i16, 0
+  %i18 = extractelement %i17, i64 0
+  %i19 = tail call i32 @f10 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Signed, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i18)
+  %i20 = xor i1 %i13, i1 1
+  %i21 = icmp eq %i19, i32 0
+  %i22 = select i1 %i20, %i21, i1 0
+  br %i22, bb1, bb2
+bb1:
+  tail call void @f18 [air Fragment(Discard)]()
+  br bb2
+bb2:
+  %i26 = add nsw i32 %i2, i32 1
+  %i27 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i26) convergent
+  %i28 = select i32 %i13, %i26, i32 0
+  %i29 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i28) convergent
+  %i30 = icmp sgt %i14, %i27
+  %i31 = zext %i30 to i32
+  %i32 = insertelement <4 x i32> undef, %i31, i64 0
+  %i33 = sub nsw i32 %i27, %i29
+  %i34 = insertelement %i32, %i33, i64 1
+  %i35 = sub nsw i32 %i14, %i27
+  %i36 = and i32 %i35, i32 3
+  %i37 = insertelement %i34, %i36, i64 2
+  %i38 = icmp slt %i14, %i27
+  %i39 = zext %i38 to i32
+  %i40 = insertelement %i37, %i39, i64 3
+  ret %i40
+}
+
+define %t10 @f12 "hoisted_loop" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a1( align 4 dereferenceable(4) Ref nocapture "air-buffer-no-alias"="" ) %a2( align 4 dereferenceable(4) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = shufflevector <2 x float> %a0, <4 x float> poison, <0, 1>
+  %i1 = tail call <2 x i32> @f4 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 2 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 2 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = load i32, %a2, align 4
+  %i3 = load i32, %a1, align 4
+  %i4 = extractelement %i1, i64 1
+  %i5 = shl i32 %i4, i32 1
+  %i6 = and i32 %i5, i32 28
+  %i7 = extractelement %i1, i64 0
+  %i8 = lshr i32 %i7, i32 1
+  %i9 = add nuw i32 %i6, %i8
+  %i10 = and i32 %i9, i32 31
+  %i11 = shl nuw i32 i32 1, %i10
+  %i12 = and i32 %i11, %i3
+  %i13 = icmp ne %i12, i32 0
+  %i14 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](i32 1) convergent
+  %i15 = icmp sgt %i2, i32 4294967292
+  br %i15, bb1, bb2
+bb1:
+  %i17 = add i32 %i2, i32 3
+  %i18 = call i32 @f24 [llvm Int { op: SMax, ty: NumTy { elem: I32, lanes: 1 } }](%i17, i32 0)
+  %i19 = zext %i18 to i33
+  %i20 = add nsw i32 %i18, i32 4294967295
+  %i21 = zext %i20 to i33
+  %i22 = mul i33 %i21, %i19
+  %i23 = lshr i33 %i22, i33 1
+  %i24 = trunc %i23 to i32
+  %i25 = add i32 %i18, %i24
+  %i26 = mul i32 %i25, %i2
+  %i27 = icmp eq %i26, i32 0
+  br bb2
+bb2:
+  %i29 = phi i1 [i1 1, bb0], [%i27, bb1]
+  %i30 = xor i1 %i13, i1 1
+  %i31 = select i1 %i30, %i29, i1 0
+  br %i31, bb3, bb4
+bb3:
+  tail call void @f18 [air Fragment(Discard)]()
+  br bb4
+bb4:
+  %i35 = add nsw i32 %i2, i32 1
+  %i36 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i35) convergent
+  %i37 = select i32 %i13, %i35, i32 0
+  %i38 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i37) convergent
+  %i39 = icmp sgt %i14, %i36
+  %i40 = zext %i39 to i32
+  %i41 = insertelement <4 x i32> undef, %i40, i64 0
+  %i42 = sub nsw i32 %i36, %i38
+  %i43 = insertelement %i41, %i42, i64 1
+  %i44 = sub nsw i32 %i14, %i36
+  %i45 = and i32 %i44, i32 3
+  %i46 = insertelement %i43, %i45, i64 2
+  %i47 = icmp slt %i14, %i36
+  %i48 = zext %i47 to i32
+  %i49 = insertelement %i46, %i48, i64 3
+  ret %i49
+}
+
+define %t10 @f13 "hoisted_call" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a1( align 4 dereferenceable(4) Ref nocapture "air-buffer-no-alias"="" ) %a2( align 4 dereferenceable(4) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = shufflevector <2 x float> %a0, <4 x float> poison, <0, 1>
+  %i1 = tail call <2 x i32> @f4 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 2 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 2 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = load i32, %a2, align 4
+  %i3 = load i32, %a1, align 4
+  %i4 = extractelement %i1, i64 1
+  %i5 = shl i32 %i4, i32 1
+  %i6 = and i32 %i5, i32 28
+  %i7 = extractelement %i1, i64 0
+  %i8 = lshr i32 %i7, i32 1
+  %i9 = add nuw i32 %i6, %i8
+  %i10 = and i32 %i9, i32 31
+  %i11 = shl nuw i32 i32 1, %i10
+  %i12 = and i32 %i11, %i3
+  %i13 = icmp ne %i12, i32 0
+  %i14 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](i32 1) convergent
+  %i15 = tail call i32 @f2(%i2) "no-builtins"=""
+  %i16 = xor i1 %i13, i1 1
+  %i17 = icmp eq %i15, i32 0
+  %i18 = select i1 %i16, %i17, i1 0
+  br %i18, bb1, bb2
+bb1:
+  tail call void @f18 [air Fragment(Discard)]()
+  br bb2
+bb2:
+  %i22 = add nsw i32 %i2, i32 1
+  %i23 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i22) convergent
+  %i24 = select i32 %i13, %i22, i32 0
+  %i25 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i24) convergent
+  %i26 = icmp sgt %i14, %i23
+  %i27 = zext %i26 to i32
+  %i28 = insertelement <4 x i32> undef, %i27, i64 0
+  %i29 = sub nsw i32 %i23, %i25
+  %i30 = insertelement %i28, %i29, i64 1
+  %i31 = sub nsw i32 %i14, %i23
+  %i32 = and i32 %i31, i32 3
+  %i33 = insertelement %i30, %i32, i64 2
+  %i34 = icmp slt %i14, %i23
+  %i35 = zext %i34 to i32
+  %i36 = insertelement %i33, %i35, i64 3
+  ret %i36
+}
+
+define %t15 @f14 "counted_call_use" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a1( align 4 dereferenceable(4) Ref nocapture "air-buffer-no-alias"="" ) %a2( align 4 dereferenceable(4) Ref nocapture "air-buffer-no-alias"="" ) %a3( Mod nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = shufflevector <2 x float> %a0, <4 x float> poison, <0, 1>
+  %i1 = tail call <2 x i32> @f4 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 2 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 2 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = load i32, %a2, align 4
+  %i3 = add nsw i32 %i2, i32 1
+  %i4 = load i32, %a1, align 4
+  %i5 = extractelement %i1, i64 1
+  %i6 = shl i32 %i5, i32 1
+  %i7 = and i32 %i6, i32 28
+  %i8 = extractelement %i1, i64 0
+  %i9 = lshr i32 %i8, i32 1
+  %i10 = add nuw i32 %i7, %i9
+  %i11 = and i32 %i10, i32 31
+  %i12 = shl nuw i32 i32 1, %i11
+  %i13 = and i32 %i12, %i4
+  %i14 = icmp ne %i13, i32 0
+  %i15 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](i32 1) convergent
+  %i16 = tail call i32 @f2(%i15) "no-builtins"=""
+  %i17 = xor i1 %i14, i1 1
+  %i18 = icmp eq %i2, i32 0
+  %i19 = select i1 %i17, %i18, i1 0
+  br %i19, bb1, bb2
+bb1:
+  tail call void @f18 [air Fragment(Discard)]()
+  br bb2
+bb2:
+  %i23 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i3) convergent
+  %i24 = select i32 %i14, %i3, i32 0
+  %i25 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i24) convergent
+  %i26 = icmp eq %i16, i32 12345
+  br %i26, bb3, bb4
+bb3:
+  %i28 = getelementptr inbounds i32, %a3, i64 1
+  store i32 12345, %i28, align 4
+  br bb4
+bb4:
+  %i31 = icmp sgt %i15, %i23
+  %i32 = zext %i31 to i32
+  %i33 = insertelement <4 x i32> undef, %i32, i64 0
+  %i34 = sub nsw i32 %i23, %i25
+  %i35 = insertelement %i33, %i34, i64 1
+  %i36 = sub nsw i32 %i15, %i23
+  %i37 = and i32 %i36, i32 3
+  %i38 = insertelement %i35, %i37, i64 2
+  %i39 = icmp slt %i15, %i23
+  %i40 = zext %i39 to i32
+  %i41 = insertelement %i38, %i40, i64 3
+  ret %i41
+}
+
+define %t10 @f15 "hoisted_nested" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a1( align 4 dereferenceable(4) Ref nocapture "air-buffer-no-alias"="" ) %a2( align 4 dereferenceable(4) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = shufflevector <2 x float> %a0, <4 x float> poison, <0, 1>
+  %i1 = tail call <2 x i32> @f4 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 2 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 2 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = load i32, %a2, align 4
+  %i3 = load i32, %a1, align 4
+  %i4 = extractelement %i1, i64 1
+  %i5 = shl i32 %i4, i32 1
+  %i6 = and i32 %i5, i32 28
+  %i7 = extractelement %i1, i64 0
+  %i8 = lshr i32 %i7, i32 1
+  %i9 = add nuw i32 %i6, %i8
+  %i10 = and i32 %i9, i32 31
+  %i11 = shl nuw i32 i32 1, %i10
+  %i12 = and i32 %i11, %i3
+  %i13 = icmp ne %i12, i32 0
+  %i14 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](i32 1) convergent
+  %i15 = add i32 %i2, i32 100
+  %i16 = icmp ult %i7, %i15
+  br %i16, bb1, bb3
+bb1:
+  %i18 = xor i1 %i13, i1 1
+  %i19 = icmp eq %i2, i32 0
+  %i20 = select i1 %i18, %i19, i1 0
+  br %i20, bb2, bb3
+bb2:
+  tail call void @f18 [air Fragment(Discard)]()
+  br bb3
+bb3:
+  %i24 = add nsw i32 %i2, i32 1
+  %i25 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i24) convergent
+  %i26 = select i32 %i13, %i24, i32 0
+  %i27 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i26) convergent
+  %i28 = icmp sgt %i14, %i25
+  %i29 = zext %i28 to i32
+  %i30 = insertelement <4 x i32> undef, %i29, i64 0
+  %i31 = sub nsw i32 %i25, %i27
+  %i32 = insertelement %i30, %i31, i64 1
+  %i33 = sub nsw i32 %i14, %i25
+  %i34 = and i32 %i33, i32 3
+  %i35 = insertelement %i32, %i34, i64 2
+  %i36 = icmp slt %i14, %i25
+  %i37 = zext %i36 to i32
+  %i38 = insertelement %i35, %i37, i64 3
+  ret %i38
+}
+
+define %t15 @f16 "counted_store" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a1( align 4 dereferenceable(4) Ref nocapture "air-buffer-no-alias"="" ) %a2( align 4 dereferenceable(4) Ref nocapture "air-buffer-no-alias"="" ) %a3( Mod nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = shufflevector <2 x float> %a0, <4 x float> poison, <0, 1>
+  %i1 = tail call <2 x i32> @f4 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 2 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 2 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = load i32, %a2, align 4
+  %i3 = load i32, %a1, align 4
+  %i4 = extractelement %i1, i64 1
+  %i5 = shl i32 %i4, i32 1
+  %i6 = and i32 %i5, i32 28
+  %i7 = extractelement %i1, i64 0
+  %i8 = lshr i32 %i7, i32 1
+  %i9 = add nuw i32 %i6, %i8
+  %i10 = and i32 %i9, i32 31
+  %i11 = shl nuw i32 i32 1, %i10
+  %i12 = and i32 %i11, %i3
+  %i13 = icmp ne %i12, i32 0
+  %i14 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](i32 1) convergent
+  %i15 = shl i32 %i4, i32 3
+  %i16 = add i32 %i7, i32 64
+  %i17 = add i32 %i16, %i15
+  %i18 = zext %i17 to i64
+  %i19 = getelementptr inbounds i32, %a3, %i18
+  store %i14, %i19, align 4
+  %i21 = xor i1 %i13, i1 1
+  %i22 = icmp eq %i2, i32 0
+  %i23 = select i1 %i21, %i22, i1 0
+  br %i23, bb1, bb2
+bb1:
+  tail call void @f18 [air Fragment(Discard)]()
+  br bb2
+bb2:
+  %i27 = add nsw i32 %i2, i32 1
+  %i28 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i27) convergent
+  %i29 = select i32 %i13, %i27, i32 0
+  %i30 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i29) convergent
+  %i31 = icmp sgt %i14, %i28
+  %i32 = zext %i31 to i32
+  %i33 = insertelement <4 x i32> undef, %i32, i64 0
+  %i34 = sub nsw i32 %i28, %i30
+  %i35 = insertelement %i33, %i34, i64 1
+  %i36 = sub nsw i32 %i14, %i28
+  %i37 = and i32 %i36, i32 3
+  %i38 = insertelement %i35, %i37, i64 2
+  %i39 = icmp slt %i14, %i28
+  %i40 = zext %i39 to i32
+  %i41 = insertelement %i38, %i40, i64 3
+  ret %i41
+}
+
+define %t15 @f17 "counted_atomic" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a1( align 4 dereferenceable(4) Ref nocapture "air-buffer-no-alias"="" ) %a2( align 4 dereferenceable(4) Ref nocapture "air-buffer-no-alias"="" ) %a3( nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = shufflevector <2 x float> %a0, <4 x float> poison, <0, 1>
+  %i1 = tail call <2 x i32> @f4 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 2 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 2 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = load i32, %a2, align 4
+  %i3 = load i32, %a1, align 4
+  %i4 = extractelement %i1, i64 1
+  %i5 = shl i32 %i4, i32 1
+  %i6 = and i32 %i5, i32 28
+  %i7 = extractelement %i1, i64 0
+  %i8 = lshr i32 %i7, i32 1
+  %i9 = add nuw i32 %i6, %i8
+  %i10 = and i32 %i9, i32 31
+  %i11 = shl nuw i32 i32 1, %i10
+  %i12 = and i32 %i11, %i3
+  %i13 = icmp ne %i12, i32 0
+  %i14 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](i32 1) convergent
+  %i15 = getelementptr inbounds %t33, %a3, i64 0, i32 0
+  %i16 = tail call i32 @f23 [air Atomic(Atomic { space: Global, op: Add, sign: Some(Signed), ty: NumTy { elem: I32, lanes: 1 }, order: Relaxed, failure: None, scope: Device, volatile: true, fetch: true, flags: None })](%i15, i32 1, i32 0, i32 2, i1 1) arg0( nocapture )
+  %i17 = xor i1 %i13, i1 1
+  %i18 = icmp eq %i2, i32 0
+  %i19 = select i1 %i17, %i18, i1 0
+  br %i19, bb1, bb2
+bb1:
+  tail call void @f18 [air Fragment(Discard)]()
+  br bb2
+bb2:
+  %i23 = add nsw i32 %i2, i32 1
+  %i24 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i23) convergent
+  %i25 = select i32 %i13, %i23, i32 0
+  %i26 = tail call i32 @f19 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i25) convergent
+  %i27 = icmp sgt %i14, %i24
+  %i28 = zext %i27 to i32
+  %i29 = insertelement <4 x i32> undef, %i28, i64 0
+  %i30 = sub nsw i32 %i24, %i26
+  %i31 = insertelement %i29, %i30, i64 1
+  %i32 = sub nsw i32 %i14, %i24
+  %i33 = and i32 %i32, i32 3
+  %i34 = insertelement %i31, %i33, i64 2
+  %i35 = icmp slt %i14, %i24
+  %i36 = zext %i35 to i32
+  %i37 = insertelement %i34, %i36, i64 3
+  ret %i37
+}
+
+declare %t19 @f18 "air.discard_fragment"
+
+declare %t7 @f19 "air.simd_sum.s.i32" convergent
+
+declare %t23 @f20 "air.sample_texture_2d.v4f32" convergent memory(Ref, NoModRef, NoModRef) %a0( Ref nocapture ) %a1( Ref nocapture )
+
+declare %t24 @f21 "air.get_read_sampler" memory(NoModRef, Ref, NoModRef)
+
+declare %t25 @f22 "air.read_texture_2d.v4f32" memory(Ref, NoModRef, NoModRef) %a0( Ref nocapture )
+
+declare %t26 @f23 "air.atomic.global.add.s.i32" %a0( nocapture )
+
+declare %t27 @f24 "llvm.smax.i32" memory(NoModRef, NoModRef, NoModRef)
+!md0 = !"SDK Version"
+!md1 = !"wchar_size"
+!md2 = !"frame-pointer"
+!md3 = !"air.max_device_buffers"
+!md4 = !"air.max_constant_buffers"
+!md5 = !"air.max_threadgroup_buffers"
+!md6 = !"air.max_textures"
+!md7 = !"air.max_read_write_textures"
+!md8 = !"air.max_samplers"
+!md9 = !"air.position"
+!md10 = !"air.arg_type_name"
+!md11 = !"float4"
+!md12 = !"air.arg_name"
+!md13 = !"position"
+!md14 = !"air.vertex_id"
+!md15 = !"uint"
+!md16 = !"vid"
+!md17 = !"air.render_target"
+!md18 = !"int4"
+!md19 = !"air.center"
+!md20 = !"air.no_perspective"
+!md21 = !"air.buffer"
+!md22 = !"air.buffer_size"
+!md23 = !"air.location_index"
+!md24 = !"air.read"
+!md25 = !"air.address_space"
+!md26 = !"air.arg_type_size"
+!md27 = !"air.arg_type_align_size"
+!md28 = !"kept_quads"
+!md29 = !"int"
+!md30 = !"k"
+!md31 = !"ro"
+!md32 = !"air.read_write"
+!md33 = !"rw"
+!md34 = !"air.texture"
+!md35 = !"air.sample"
+!md36 = !"texture2d<float, sample>"
+!md37 = !"tex"
+!md38 = !"air.sampler"
+!md39 = !"sampler"
+!md40 = !"smp"
+!md41 = !"air.struct_type_info"
+!md42 = !"__s"
+!md43 = !"metal::_atomic"
+!md44 = !"atom"
+!md45 = !"air.compile.denorms_disable"
+!md46 = !"air.compile.fast_math_enable"
+!md47 = !"air.compile.framebuffer_fetch_enable"
+!md48 = !"Apple metal version 32023.921 (metalfe-32023.921.6)"
+!md49 = !"Metal"
+!md50 = !"omnipotent char"
+!md51 = !"Simple C++ TBAA"
+!md52 = !"air-alias-scope-arg(2)"
+!md53 = !"air-alias-scope-arg(1)"
+!md54 = !"air-alias-scope-arg(3)"
+!md55 = !"air-alias-scope-textures"
+!md56 = i32 2
+!md57 = %t29 c28
+!md58 = i32 1
+!md59 = i32 4
+!md60 = i32 7
+!md61 = i32 31
+!md62 = i32 128
+!md63 = i32 8
+!md64 = i32 16
+!md65 = ptr addrspace(0) @f0
+!md66 = i32 0
+!md67 = ptr addrspace(0) @f3
+!md68 = ptr addrspace(0) @f5
+!md69 = ptr addrspace(0) @f6
+!md70 = ptr addrspace(0) @f7
+!md71 = i32 3
+!md72 = ptr addrspace(0) @f8
+!md73 = ptr addrspace(0) @f9
+!md74 = ptr addrspace(0) @f11
+!md75 = ptr addrspace(0) @f12
+!md76 = ptr addrspace(0) @f13
+!md77 = ptr addrspace(0) @f14
+!md78 = ptr addrspace(0) @f15
+!md79 = ptr addrspace(0) @f16
+!md80 = ptr addrspace(0) @f17
+!md81 = i64 0
+!md82 = !{!md56, !md0, !md57}
+!md83 = !{!md58, !md1, !md59}
+!md84 = !{!md60, !md2, !md56}
+!md85 = !{!md60, !md3, !md61}
+!md86 = !{!md60, !md4, !md61}
+!md87 = !{!md60, !md5, !md61}
+!md88 = !{!md60, !md6, !md62}
+!md89 = !{!md60, !md7, !md63}
+!md90 = !{!md60, !md8, !md64}
+!md91 = !{!md9, !md10, !md11, !md12, !md13}
+!md92 = !{!md91}
+!md93 = !{!md66, !md14, !md10, !md15, !md12, !md16}
+!md94 = !{!md93}
+!md95 = !{!md65, !md92, !md94}
+!md96 = !{!md17, !md66, !md66, !md10, !md18}
+!md97 = !{!md96}
+!md98 = !{!md66, !md9, !md19, !md20, !md10, !md11, !md12, !md13}
+!md99 = !{!md58, !md21, !md22, !md59, !md23, !md66, !md58, !md24, !md25, !md56, !md26, !md59, !md27, !md59, !md10, !md15, !md12, !md28}
+!md100 = !{!md56, !md21, !md22, !md59, !md23, !md58, !md58, !md24, !md25, !md56, !md26, !md59, !md27, !md59, !md10, !md29, !md12, !md30}
+!md101 = !{!md98, !md99, !md100}
+!md102 = !{!md67, !md97, !md101}
+!md103 = !{!md68, !md97, !md101}
+!md104 = !{!md69, !md97, !md101}
+!md105 = !{!md71, !md21, !md23, !md56, !md58, !md24, !md25, !md58, !md26, !md59, !md27, !md59, !md10, !md29, !md12, !md31}
+!md106 = !{!md98, !md99, !md100, !md105}
+!md107 = !{!md70, !md97, !md106}
+!md108 = !{!md71, !md21, !md23, !md71, !md58, !md32, !md25, !md58, !md26, !md59, !md27, !md59, !md10, !md29, !md12, !md33}
+!md109 = !{!md98, !md99, !md100, !md108}
+!md110 = !{!md72, !md97, !md109}
+!md111 = !{!md71, !md34, !md23, !md66, !md58, !md35, !md10, !md36, !md12, !md37}
+!md112 = !{!md59, !md38, !md23, !md66, !md58, !md10, !md39, !md12, !md40}
+!md113 = !{!md98, !md99, !md100, !md111, !md112}
+!md114 = !{!md73, !md97, !md113}
+!md115 = !{!md98, !md99, !md100, !md111}
+!md116 = !{!md74, !md97, !md115}
+!md117 = !{!md75, !md97, !md101}
+!md118 = !{!md76, !md97, !md101}
+!md119 = !{!md77, !md97, !md109}
+!md120 = !{!md78, !md97, !md101}
+!md121 = !{!md79, !md97, !md109}
+!md122 = !{!md66, !md59, !md66, !md29, !md42}
+!md123 = !{!md71, !md21, !md23, !md59, !md58, !md32, !md25, !md58, !md41, !md122, !md26, !md59, !md27, !md59, !md10, !md43, !md12, !md44}
+!md124 = !{!md98, !md99, !md100, !md123}
+!md125 = !{!md80, !md97, !md124}
+!md126 = !{!md45}
+!md127 = !{!md46}
+!md128 = !{!md47}
+!md129 = !{!md48}
+!md130 = !{!md56, !md63, !md66}
+!md131 = !{!md49, !md56, !md71, !md66}
+!md132 = !{!md51}
+!md133 = !{!md50, !md132, !md81}
+!md134 = !{!md29, !md133, !md81}
+!md135 = !{!md134, !md134, !md81}
+!"llvm.module.flags" = !{!md82, !md83, !md84, !md85, !md86, !md87, !md88, !md89, !md90}
+!"air.vertex" = !{!md95}
+!"air.fragment" = !{!md102, !md103, !md104, !md107, !md110, !md114, !md116, !md117, !md118, !md119, !md120, !md121, !md125}
+!"air.compile_options" = !{!md126, !md127, !md128}
+!"llvm.ident" = !{!md129}
+!"air.version" = !{!md130}
+!"air.language_version" = !{!md131}

@@ -1,0 +1,221 @@
+//! Whether an entry may encode indirect commands: where its metadata names a command buffer it
+//! takes, and where its body calls an indirect-command operation, whatever pointer the operation's
+//! command operand is, or makes a call the walk cannot see into.
+
+use super::*;
+use crate::abi::ObjectArg;
+use crate::intrinsics::IndirectCommand;
+
+/// `kernel k(device void* data [[buffer(0)]], device void* out [[buffer(1)]])`, its body built by
+/// `body` (before the `ret`), and its entry point taking `params`.
+pub(super) fn module(
+    params: Vec<ParamBinding>,
+    body: impl FnOnce(&mut FunctionBuilder<'_>),
+) -> (Module, EntryPoint) {
+    let mut m = ModuleBuilder::new();
+    let void = m.void();
+    let dev = m.ptr(AddrSpace::Device);
+    let fty = m.fn_ty(void, &[dev, dev]);
+    let mut f = m.define("k", fty);
+    body(&mut f);
+    f.ret(None);
+    let k = f.finish();
+    (m.finish().unwrap(), kernel(k, params))
+}
+
+/// [`module`] with plain buffers, specialized.
+fn specialized(body: impl FnOnce(&mut FunctionBuilder<'_>)) -> Entry {
+    let (module, ep) = module(vec![buffer(0, 0), buffer(1, 1)], body);
+    let abi = abi(vec![ep], Vec::new());
+    specialize(module, &abi, &request(&[]), &mut meter()).unwrap()
+}
+
+/// `air.draw_primitives_render_command(cmd, 0, 3, 0, 3, 1, 0)`: command 0 of `cmd` draws one
+/// triangle.
+fn draw(f: &mut FunctionBuilder<'_>, cmd: Value) {
+    let name = "air.draw_primitives_render_command";
+    let void = f.module().void();
+    let i32t = f.module().int(32);
+    let dev = f.module().ptr(AddrSpace::Device);
+    let ty = f
+        .module()
+        .fn_ty(void, &[dev, i32t, i32t, i32t, i32t, i32t, i32t]);
+    let decl = f.module().declare(name, ty);
+    let op = AirIntrinsic::parse(name).unwrap();
+    assert_eq!(
+        op,
+        AirIntrinsic::IndirectCommand(IndirectCommand::DrawPrimitives)
+    );
+    let [zero, one, three] = [0, 1, 3].map(|v| f.module().const_int(i32t, v));
+    let args = [cmd, zero, three, zero, three, one, zero];
+    void_call(f, Callee::Air { decl, op }, &args);
+}
+
+pub(super) fn void_call(f: &mut FunctionBuilder<'_>, callee: Callee, args: &[Value]) {
+    f.push_void(InstKind::Call(Box::new(Call {
+        callee,
+        args: args.into(),
+        fmf: FastMath::NONE,
+        tail: TailKind::None,
+        attrs: None,
+        range: None,
+    })));
+}
+
+/// The pointer at byte 16 of `data`, a member no layout of the entry describes.
+pub(super) fn loaded_handle(f: &mut FunctionBuilder<'_>) -> Value {
+    let i8t = f.module().int(8);
+    let i64t = f.module().int(64);
+    let dev = f.module().ptr(AddrSpace::Device);
+    let sixteen = f.module().const_int(i64t, 16);
+    let at = f.push(
+        dev,
+        InstKind::Gep {
+            src_ty: i8t,
+            base: arg(0),
+            indices: Box::new([sixteen]),
+            inbounds: true,
+        },
+    );
+    load(f, dev, at)
+}
+
+/// The pointer the first word of `data` holds as an integer.
+pub(super) fn handle_from_integer(f: &mut FunctionBuilder<'_>) -> Value {
+    let i64t = f.module().int(64);
+    let dev = f.module().ptr(AddrSpace::Device);
+    let word = load(f, i64t, arg(0));
+    f.push(
+        dev,
+        InstKind::Cast {
+            op: CastOp::IntToPtr,
+            v: word,
+        },
+    )
+}
+
+/// A command buffer the metadata names counts whatever the body does with it; a kernel that takes
+/// none and calls no operation does not.
+#[test]
+fn a_command_buffer_the_metadata_names_counts_untouched() {
+    let command_buffer = ParamBinding {
+        role: ParamRole::CommandBuffer(ObjectArg {
+            location: Slot {
+                index: AbiInt::Const(0),
+                count: AbiInt::Const(1),
+            },
+            access: None,
+        }),
+        ..buffer(0, 0)
+    };
+    for (first, may) in [(command_buffer, true), (buffer(0, 0), false)] {
+        let (module, ep) = module(vec![first, buffer(1, 1)], |f| {
+            let i32t = f.module().int(32);
+            let one = f.module().const_int(i32t, 1);
+            store(f, one, arg(1));
+        });
+        let abi = abi(vec![ep], Vec::new());
+        let e = specialize(module, &abi, &request(&[]), &mut meter()).unwrap();
+        assert_eq!(e.may_encode_indirect_commands(), may);
+    }
+}
+
+/// An operation on a command operand the metadata does not name counts, whatever the pointer: a
+/// buffer's own address cast to a command buffer, a handle loaded from a member no layout
+/// describes, a handle made from an integer. The same pointers stored rather than encoded through
+/// reach no command buffer's records, which only an operation reaches.
+#[test]
+fn an_operation_on_a_cast_command_buffer_counts() {
+    type Shape = fn(&mut FunctionBuilder<'_>) -> Value;
+    let shapes: [(&str, Shape); 3] = [
+        ("the buffer's own address", |_| arg(0)),
+        ("a handle loaded from a member", loaded_handle),
+        ("a handle made from an integer", handle_from_integer),
+    ];
+    for (what, shape) in shapes {
+        let encodes = specialized(|f| {
+            let cmd = shape(f);
+            draw(f, cmd);
+        });
+        assert!(
+            !encodes.ep.reaches_command_buffers(&encodes.structs),
+            "{what}"
+        );
+        assert!(encodes.may_encode_indirect_commands(), "{what}");
+        let stores = specialized(|f| {
+            let cmd = shape(f);
+            store(f, cmd, arg(1));
+        });
+        assert!(!stores.may_encode_indirect_commands(), "{what}");
+    }
+}
+
+/// A call the walk cannot see into counts: an indirect call, an intrinsic outside the closed set, a
+/// call to a declaration. Canonicalization refuses each, so the walk is run over the module as
+/// built; a defined function's body is walked as the entry's is.
+#[test]
+fn a_call_the_walk_cannot_see_into_counts() {
+    type Body = fn(&mut FunctionBuilder<'_>);
+    let bodies: [(&str, Body, bool); 5] = [
+        (
+            "an indirect call",
+            |f| {
+                let void = f.module().void();
+                let fn_ty = f.module().fn_ty(void, &[]);
+                let callee = loaded_handle(f);
+                void_call(f, Callee::Indirect { callee, fn_ty }, &[]);
+            },
+            true,
+        ),
+        (
+            "an unknown intrinsic",
+            |f| {
+                let void = f.module().void();
+                let ty = f.module().fn_ty(void, &[]);
+                let decl = f.module().declare("air.not_an_operation", ty);
+                void_call(f, Callee::UnknownIntrinsic(decl), &[]);
+            },
+            true,
+        ),
+        (
+            "a declaration",
+            |f| {
+                let void = f.module().void();
+                let ty = f.module().fn_ty(void, &[]);
+                let decl = f.module().declare("elsewhere", ty);
+                void_call(f, Callee::Direct(decl), &[]);
+            },
+            true,
+        ),
+        (
+            "a defined function that encodes",
+            |f| {
+                let void = f.module().void();
+                let dev = f.module().ptr(AddrSpace::Device);
+                let ty = f.module().fn_ty(void, &[dev]);
+                let mut g = f.module().define("helper", ty);
+                draw(&mut g, arg(0));
+                g.ret(None);
+                let helper = g.finish();
+                void_call(f, Callee::Direct(helper), &[arg(0)]);
+            },
+            true,
+        ),
+        (
+            "a defined function that does not",
+            |f| {
+                let void = f.module().void();
+                let ty = f.module().fn_ty(void, &[]);
+                let mut g = f.module().define("helper", ty);
+                g.ret(None);
+                let helper = g.finish();
+                void_call(f, Callee::Direct(helper), &[]);
+            },
+            false,
+        ),
+    ];
+    for (what, body, may) in bodies {
+        let (module, ep) = module(vec![buffer(0, 0), buffer(1, 1)], body);
+        assert_eq!(calls_commands(&module, &ep), may, "{what}");
+    }
+}

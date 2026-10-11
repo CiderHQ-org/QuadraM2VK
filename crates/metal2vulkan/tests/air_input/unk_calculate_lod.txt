@@ -1,0 +1,218 @@
+target triple = "air64_v28-apple-macosx26.0.0"
+source_filename = "-"
+; datalayout DataLayout { endian: Little, pointers: {0: PointerSpec { size_bits: 64, abi_bits: 64, pref_bits: 64, index_bits: 64 }}, ints: {1: AlignSpec { abi_bits: 8, pref_bits: 8 }, 8: AlignSpec { abi_bits: 8, pref_bits: 8 }, 16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }}, floats: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }}, vectors: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 24: AlignSpec { abi_bits: 32, pref_bits: 32 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 48: AlignSpec { abi_bits: 64, pref_bits: 64 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 96: AlignSpec { abi_bits: 128, pref_bits: 128 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }, 192: AlignSpec { abi_bits: 256, pref_bits: 256 }, 256: AlignSpec { abi_bits: 256, pref_bits: 256 }, 512: AlignSpec { abi_bits: 512, pref_bits: 512 }, 1024: AlignSpec { abi_bits: 1024, pref_bits: 1024 }}, aggregate: AlignSpec { abi_bits: 0, pref_bits: 64 }, native_ints: [8, 16, 32], stack_align_bits: None, alloca_space: 0, program_space: 0, globals_space: 0, mangling: None, fn_ptr_align: None, non_integral: [] }
+%t5 = type <4 x float> (<4 x float>, ptr addrspace(1), ptr addrspace(1), ptr addrspace(1), ptr addrspace(1), ptr addrspace(1), ptr addrspace(1), ptr addrspace(1), ptr addrspace(1), ptr addrspace(2), ptr addrspace(1))
+%t7 = type i32 (float)
+%t9 = type float (ptr addrspace(1), ptr addrspace(2), <2 x float>, i32)
+%t11 = type float (ptr addrspace(1), ptr addrspace(2), <3 x float>, i32)
+%t13 = type [2 x i32]
+c21 = %t13 [27, 0]
+c37 = <2 x i32> [0, 1]
+c38 = <2 x float> [0x3D800000, 0x3D800000]
+c41 = <3 x i32> [0, 1, poison]
+c49 = <3 x float> [0x3F800000, poison, poison]
+
+define %t5 @f0 "unk_calculate_lod" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a9( Ref nocapture ) %a10( Mod nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = shufflevector <2 x float> %a0, <4 x float> poison, <0, 1>
+  %i1 = fmul reassoc nnan ninf nsz arcp contract afn <2 x float> %i0, <2 x float> c38
+  %i2 = shufflevector <3 x float> %i1, <2 x float> poison, <0, 1, poison>
+  %i3 = insertelement %i2, float 0x3F000000, i64 2
+  %i4 = extractelement %a0, i64 1
+  %i5 = fsub reassoc nnan ninf nsz arcp contract afn float float 0x41000000, %i4
+  %i6 = fmul reassoc nnan ninf nsz arcp contract afn float %i5, float 0x3E000000
+  %i7 = insertelement <3 x float> c49, %i6, i64 1
+  %i8 = extractelement %a0, i64 0
+  %i9 = fsub reassoc nnan ninf nsz arcp contract afn float float 0x41000000, %i8
+  %i10 = fmul reassoc nnan ninf nsz arcp contract afn float %i9, float 0x3E000000
+  %i11 = insertelement %i7, %i10, i64 2
+  %i12 = tail call i32 @f1 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i4)
+  %i13 = shl i32 %i12, i32 4
+  %i14 = tail call i32 @f1 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 1 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 1 }, src_kind: Float, src_fp8: None })](%i8)
+  %i15 = add i32 %i13, %i14
+  %i16 = shl i32 %i15, i32 2
+  %i17 = tail call reassoc nnan ninf nsz arcp contract afn float @f2 [air Texture(Texture { op: CalculateLod { clamped: true }, image: ImageShape { dim: D2, array: true, ms: false, depth: false }, texel: None, coord16: false, form: Current, access: Some(Sample) })](%a1, %a9, %i1, i32 0) convergent arg0( Ref nocapture ) arg1( Ref nocapture )
+  %i18 = insertelement <4 x float> undef, %i17, i64 0
+  %i19 = tail call reassoc nnan ninf nsz arcp contract afn float @f3 [air Texture(Texture { op: CalculateLod { clamped: false }, image: ImageShape { dim: D2, array: true, ms: false, depth: false }, texel: None, coord16: false, form: Current, access: Some(Sample) })](%a1, %a9, %i1, i32 0) convergent arg0( Ref nocapture ) arg1( Ref nocapture )
+  %i20 = insertelement %i18, %i19, i64 1
+  %i21 = tail call reassoc nnan ninf nsz arcp contract afn float @f4 [air Texture(Texture { op: CalculateLod { clamped: true }, image: ImageShape { dim: D3, array: false, ms: false, depth: false }, texel: None, coord16: false, form: Current, access: Some(Sample) })](%a2, %a9, %i3, i32 0) convergent arg0( Ref nocapture ) arg1( Ref nocapture )
+  %i22 = insertelement %i20, %i21, i64 2
+  %i23 = tail call reassoc nnan ninf nsz arcp contract afn float @f5 [air Texture(Texture { op: CalculateLod { clamped: false }, image: ImageShape { dim: D3, array: false, ms: false, depth: false }, texel: None, coord16: false, form: Current, access: Some(Sample) })](%a2, %a9, %i3, i32 0) convergent arg0( Ref nocapture ) arg1( Ref nocapture )
+  %i24 = insertelement %i22, %i23, i64 3
+  %i25 = zext %i16 to i64
+  %i26 = getelementptr inbounds <4 x float>, %a10, %i25
+  store %i24, %i26, align 16
+  %i28 = tail call reassoc nnan ninf nsz arcp contract afn float @f6 [air Texture(Texture { op: CalculateLod { clamped: true }, image: ImageShape { dim: Cube, array: false, ms: false, depth: false }, texel: None, coord16: false, form: Current, access: Some(Sample) })](%a3, %a9, %i11, i32 0) convergent arg0( Ref nocapture ) arg1( Ref nocapture )
+  %i29 = insertelement <4 x float> undef, %i28, i64 0
+  %i30 = tail call reassoc nnan ninf nsz arcp contract afn float @f7 [air Texture(Texture { op: CalculateLod { clamped: false }, image: ImageShape { dim: Cube, array: false, ms: false, depth: false }, texel: None, coord16: false, form: Current, access: Some(Sample) })](%a3, %a9, %i11, i32 0) convergent arg0( Ref nocapture ) arg1( Ref nocapture )
+  %i31 = insertelement %i29, %i30, i64 1
+  %i32 = tail call reassoc nnan ninf nsz arcp contract afn float @f8 [air Texture(Texture { op: CalculateLod { clamped: true }, image: ImageShape { dim: Cube, array: true, ms: false, depth: false }, texel: None, coord16: false, form: Current, access: Some(Sample) })](%a4, %a9, %i11, i32 0) convergent arg0( Ref nocapture ) arg1( Ref nocapture )
+  %i33 = insertelement %i31, %i32, i64 2
+  %i34 = tail call reassoc nnan ninf nsz arcp contract afn float @f9 [air Texture(Texture { op: CalculateLod { clamped: false }, image: ImageShape { dim: Cube, array: true, ms: false, depth: false }, texel: None, coord16: false, form: Current, access: Some(Sample) })](%a4, %a9, %i11, i32 0) convergent arg0( Ref nocapture ) arg1( Ref nocapture )
+  %i35 = insertelement %i33, %i34, i64 3
+  %i36 = or i32 %i16, i32 1
+  %i37 = zext %i36 to i64
+  %i38 = getelementptr inbounds <4 x float>, %a10, %i37
+  store %i35, %i38, align 16
+  %i40 = tail call reassoc nnan ninf nsz arcp contract afn float @f10 [air Texture(Texture { op: CalculateLod { clamped: true }, image: ImageShape { dim: D2, array: false, ms: false, depth: true }, texel: None, coord16: false, form: Current, access: Some(Sample) })](%a5, %a9, %i1, i32 0) convergent arg0( Ref nocapture ) arg1( Ref nocapture )
+  %i41 = insertelement <4 x float> undef, %i40, i64 0
+  %i42 = tail call reassoc nnan ninf nsz arcp contract afn float @f11 [air Texture(Texture { op: CalculateLod { clamped: false }, image: ImageShape { dim: D2, array: false, ms: false, depth: true }, texel: None, coord16: false, form: Current, access: Some(Sample) })](%a5, %a9, %i1, i32 0) convergent arg0( Ref nocapture ) arg1( Ref nocapture )
+  %i43 = insertelement %i41, %i42, i64 1
+  %i44 = tail call reassoc nnan ninf nsz arcp contract afn float @f12 [air Texture(Texture { op: CalculateLod { clamped: true }, image: ImageShape { dim: D2, array: true, ms: false, depth: true }, texel: None, coord16: false, form: Current, access: Some(Sample) })](%a6, %a9, %i1, i32 0) convergent arg0( Ref nocapture ) arg1( Ref nocapture )
+  %i45 = insertelement %i43, %i44, i64 2
+  %i46 = tail call reassoc nnan ninf nsz arcp contract afn float @f13 [air Texture(Texture { op: CalculateLod { clamped: false }, image: ImageShape { dim: D2, array: true, ms: false, depth: true }, texel: None, coord16: false, form: Current, access: Some(Sample) })](%a6, %a9, %i1, i32 0) convergent arg0( Ref nocapture ) arg1( Ref nocapture )
+  %i47 = insertelement %i45, %i46, i64 3
+  %i48 = or i32 %i16, i32 2
+  %i49 = zext %i48 to i64
+  %i50 = getelementptr inbounds <4 x float>, %a10, %i49
+  store %i47, %i50, align 16
+  %i52 = tail call reassoc nnan ninf nsz arcp contract afn float @f14 [air Texture(Texture { op: CalculateLod { clamped: true }, image: ImageShape { dim: Cube, array: false, ms: false, depth: true }, texel: None, coord16: false, form: Current, access: Some(Sample) })](%a7, %a9, %i11, i32 0) convergent arg0( Ref nocapture ) arg1( Ref nocapture )
+  %i53 = insertelement <4 x float> undef, %i52, i64 0
+  %i54 = tail call reassoc nnan ninf nsz arcp contract afn float @f15 [air Texture(Texture { op: CalculateLod { clamped: false }, image: ImageShape { dim: Cube, array: false, ms: false, depth: true }, texel: None, coord16: false, form: Current, access: Some(Sample) })](%a7, %a9, %i11, i32 0) convergent arg0( Ref nocapture ) arg1( Ref nocapture )
+  %i55 = insertelement %i53, %i54, i64 1
+  %i56 = tail call reassoc nnan ninf nsz arcp contract afn float @f16 [air Texture(Texture { op: CalculateLod { clamped: true }, image: ImageShape { dim: Cube, array: true, ms: false, depth: true }, texel: None, coord16: false, form: Current, access: Some(Sample) })](%a8, %a9, %i11, i32 0) convergent arg0( Ref nocapture ) arg1( Ref nocapture )
+  %i57 = insertelement %i55, %i56, i64 2
+  %i58 = tail call reassoc nnan ninf nsz arcp contract afn float @f17 [air Texture(Texture { op: CalculateLod { clamped: false }, image: ImageShape { dim: Cube, array: true, ms: false, depth: true }, texel: None, coord16: false, form: Current, access: Some(Sample) })](%a8, %a9, %i11, i32 0) convergent arg0( Ref nocapture ) arg1( Ref nocapture )
+  %i59 = insertelement %i57, %i58, i64 3
+  %i60 = or i32 %i16, i32 3
+  %i61 = zext %i60 to i64
+  %i62 = getelementptr inbounds <4 x float>, %a10, %i61
+  store %i59, %i62, align 16
+  ret <4 x float> zeroinitializer
+}
+
+declare %t7 @f1 "air.convert.u.i32.f.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t9 @f2 "air.calculate_clamped_lod_texture_2d_array" convergent memory(Ref, NoModRef, NoModRef) %a0( Ref nocapture ) %a1( Ref nocapture )
+
+declare %t9 @f3 "air.calculate_unclamped_lod_texture_2d_array" convergent memory(Ref, NoModRef, NoModRef) %a0( Ref nocapture ) %a1( Ref nocapture )
+
+declare %t11 @f4 "air.calculate_clamped_lod_texture_3d" convergent memory(Ref, NoModRef, NoModRef) %a0( Ref nocapture ) %a1( Ref nocapture )
+
+declare %t11 @f5 "air.calculate_unclamped_lod_texture_3d" convergent memory(Ref, NoModRef, NoModRef) %a0( Ref nocapture ) %a1( Ref nocapture )
+
+declare %t11 @f6 "air.calculate_clamped_lod_texture_cube" convergent memory(Ref, NoModRef, NoModRef) %a0( Ref nocapture ) %a1( Ref nocapture )
+
+declare %t11 @f7 "air.calculate_unclamped_lod_texture_cube" convergent memory(Ref, NoModRef, NoModRef) %a0( Ref nocapture ) %a1( Ref nocapture )
+
+declare %t11 @f8 "air.calculate_clamped_lod_texture_cube_array" convergent memory(Ref, NoModRef, NoModRef) %a0( Ref nocapture ) %a1( Ref nocapture )
+
+declare %t11 @f9 "air.calculate_unclamped_lod_texture_cube_array" convergent memory(Ref, NoModRef, NoModRef) %a0( Ref nocapture ) %a1( Ref nocapture )
+
+declare %t9 @f10 "air.calculate_clamped_lod_depth_2d" convergent memory(Ref, NoModRef, NoModRef) %a0( Ref nocapture ) %a1( Ref nocapture )
+
+declare %t9 @f11 "air.calculate_unclamped_lod_depth_2d" convergent memory(Ref, NoModRef, NoModRef) %a0( Ref nocapture ) %a1( Ref nocapture )
+
+declare %t9 @f12 "air.calculate_clamped_lod_depth_2d_array" convergent memory(Ref, NoModRef, NoModRef) %a0( Ref nocapture ) %a1( Ref nocapture )
+
+declare %t9 @f13 "air.calculate_unclamped_lod_depth_2d_array" convergent memory(Ref, NoModRef, NoModRef) %a0( Ref nocapture ) %a1( Ref nocapture )
+
+declare %t11 @f14 "air.calculate_clamped_lod_depth_cube" convergent memory(Ref, NoModRef, NoModRef) %a0( Ref nocapture ) %a1( Ref nocapture )
+
+declare %t11 @f15 "air.calculate_unclamped_lod_depth_cube" convergent memory(Ref, NoModRef, NoModRef) %a0( Ref nocapture ) %a1( Ref nocapture )
+
+declare %t11 @f16 "air.calculate_clamped_lod_depth_cube_array" convergent memory(Ref, NoModRef, NoModRef) %a0( Ref nocapture ) %a1( Ref nocapture )
+
+declare %t11 @f17 "air.calculate_unclamped_lod_depth_cube_array" convergent memory(Ref, NoModRef, NoModRef) %a0( Ref nocapture ) %a1( Ref nocapture )
+!md0 = !"SDK Version"
+!md1 = !"wchar_size"
+!md2 = !"frame-pointer"
+!md3 = !"air.max_device_buffers"
+!md4 = !"air.max_constant_buffers"
+!md5 = !"air.max_threadgroup_buffers"
+!md6 = !"air.max_textures"
+!md7 = !"air.max_read_write_textures"
+!md8 = !"air.max_samplers"
+!md9 = !"air.render_target"
+!md10 = !"air.arg_type_name"
+!md11 = !"float4"
+!md12 = !"air.position"
+!md13 = !"air.center"
+!md14 = !"air.no_perspective"
+!md15 = !"air.arg_name"
+!md16 = !"pos"
+!md17 = !"air.texture"
+!md18 = !"air.location_index"
+!md19 = !"air.sample"
+!md20 = !"texture2d_array<float, sample>"
+!md21 = !"t2a"
+!md22 = !"texture3d<float, sample>"
+!md23 = !"t3"
+!md24 = !"texturecube<float, sample>"
+!md25 = !"tc"
+!md26 = !"texturecube_array<float, sample>"
+!md27 = !"tca"
+!md28 = !"depth2d<float, sample>"
+!md29 = !"d2"
+!md30 = !"depth2d_array<float, sample>"
+!md31 = !"d2a"
+!md32 = !"depthcube<float, sample>"
+!md33 = !"dc"
+!md34 = !"depthcube_array<float, sample>"
+!md35 = !"dca"
+!md36 = !"air.sampler"
+!md37 = !"sampler"
+!md38 = !"s"
+!md39 = !"air.buffer"
+!md40 = !"air.read_write"
+!md41 = !"air.address_space"
+!md42 = !"air.arg_type_size"
+!md43 = !"air.arg_type_align_size"
+!md44 = !"out"
+!md45 = !"air.compile.denorms_disable"
+!md46 = !"air.compile.fast_math_enable"
+!md47 = !"air.compile.framebuffer_fetch_enable"
+!md48 = !"Apple metal version 32023.921 (metalfe-32023.921.6)"
+!md49 = !"Metal"
+!md50 = i32 2
+!md51 = %t13 c21
+!md52 = i32 1
+!md53 = i32 4
+!md54 = i32 7
+!md55 = i32 31
+!md56 = i32 128
+!md57 = i32 8
+!md58 = i32 16
+!md59 = ptr addrspace(0) @f0
+!md60 = i32 0
+!md61 = i32 3
+!md62 = i32 5
+!md63 = i32 6
+!md64 = i32 9
+!md65 = i32 10
+!md66 = !{!md50, !md0, !md51}
+!md67 = !{!md52, !md1, !md53}
+!md68 = !{!md54, !md2, !md50}
+!md69 = !{!md54, !md3, !md55}
+!md70 = !{!md54, !md4, !md55}
+!md71 = !{!md54, !md5, !md55}
+!md72 = !{!md54, !md6, !md56}
+!md73 = !{!md54, !md7, !md57}
+!md74 = !{!md54, !md8, !md58}
+!md75 = !{!md9, !md60, !md60, !md10, !md11}
+!md76 = !{!md75}
+!md77 = !{!md60, !md12, !md13, !md14, !md10, !md11, !md15, !md16}
+!md78 = !{!md52, !md17, !md18, !md60, !md52, !md19, !md10, !md20, !md15, !md21}
+!md79 = !{!md50, !md17, !md18, !md52, !md52, !md19, !md10, !md22, !md15, !md23}
+!md80 = !{!md61, !md17, !md18, !md50, !md52, !md19, !md10, !md24, !md15, !md25}
+!md81 = !{!md53, !md17, !md18, !md61, !md52, !md19, !md10, !md26, !md15, !md27}
+!md82 = !{!md62, !md17, !md18, !md53, !md52, !md19, !md10, !md28, !md15, !md29}
+!md83 = !{!md63, !md17, !md18, !md62, !md52, !md19, !md10, !md30, !md15, !md31}
+!md84 = !{!md54, !md17, !md18, !md63, !md52, !md19, !md10, !md32, !md15, !md33}
+!md85 = !{!md57, !md17, !md18, !md54, !md52, !md19, !md10, !md34, !md15, !md35}
+!md86 = !{!md64, !md36, !md18, !md60, !md52, !md10, !md37, !md15, !md38}
+!md87 = !{!md65, !md39, !md18, !md60, !md52, !md40, !md41, !md52, !md42, !md58, !md43, !md58, !md10, !md11, !md15, !md44}
+!md88 = !{!md77, !md78, !md79, !md80, !md81, !md82, !md83, !md84, !md85, !md86, !md87}
+!md89 = !{!md59, !md76, !md88}
+!md90 = !{!md45}
+!md91 = !{!md46}
+!md92 = !{!md47}
+!md93 = !{!md48}
+!md94 = !{!md50, !md57, !md60}
+!md95 = !{!md49, !md53, !md60, !md60}
+!"llvm.module.flags" = !{!md66, !md67, !md68, !md69, !md70, !md71, !md72, !md73, !md74}
+!"air.fragment" = !{!md89}
+!"air.compile_options" = !{!md90, !md91, !md92}
+!"llvm.ident" = !{!md93}
+!"air.version" = !{!md94}
+!"air.language_version" = !{!md95}

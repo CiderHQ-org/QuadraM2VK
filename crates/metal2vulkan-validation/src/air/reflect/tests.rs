@@ -1,0 +1,180 @@
+//! The access and descriptor rules of the declared interface. Its field-by-field comparisons with
+//! the old engine's `inspect` were deleted with that engine (X34); these keep fixed expectations.
+
+use super::*;
+
+/// A kernel whose device buffer `%buffer`, declared read-write, is used only by `use_line`.
+fn kernel_using_buffer_only_in(attributes: &str, use_line: &str, declarations: &str) -> String {
+    format!(
+        r#"define void @k(ptr addrspace(1) {attributes} %buffer, ptr addrspace(3) %tile, ptr addrspace(2) %length) {{
+entry:
+{use_line}
+  ret void
+}}
+{declarations}
+!air.kernel = !{{!0}}
+!0 = !{{ptr @k, !1, !2}}
+!1 = !{{}}
+!2 = !{{!3, !4, !5}}
+!3 = !{{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read_write", !"air.address_space", i32 1, !"air.arg_type_size", i32 4, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"float", !"air.arg_name", !"buffer"}}
+!4 = !{{i32 1, !"air.buffer", !"air.location_index", i32 1, i32 1, !"air.read_write", !"air.address_space", i32 3, !"air.arg_type_size", i32 4, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"float", !"air.arg_name", !"tile"}}
+!5 = !{{i32 2, !"air.buffer", !"air.location_index", i32 2, i32 1, !"air.read", !"air.address_space", i32 2, !"air.arg_type_size", i32 8, !"air.arg_type_align_size", i32 8, !"air.arg_type_name", !"ulong", !"air.arg_name", !"length"}}
+"#
+    )
+}
+
+/// The access the declared interface gives `%buffer`.
+fn buffer_access(ll: &str) -> (Option<ResourceAccess>, String) {
+    let ours = inspect(ll, Stage::Kernel, "k", &[]).unwrap();
+    let access = ours.binding_at(ResourceKind::Buffer, 0).unwrap().access;
+    (access, format!("{access:?}"))
+}
+
+/// A buffer whose only use is an asynchronous copy keeps the access its metadata declares, as it
+/// did after the old engine lowered the copy: the copy still names the buffer, and its attributes
+/// say nothing narrower.
+#[test]
+fn an_async_copy_as_a_buffers_only_use_keeps_its_declared_access() {
+    let ll = kernel_using_buffer_only_in(
+        "",
+        "  %event = call ptr @air.simdgroup_async_copy_2d.p3i8.p1i8(i64 4, i64 4, ptr addrspace(3) %tile, i64 1, i64 1, <2 x i64> <i64 1, i64 1>, ptr addrspace(1) %buffer, i64 1, i64 1, <2 x i64> <i64 1, i64 1>, <2 x i64> zeroinitializer, i32 0)\n  call void @air.wait_simdgroup_events(i32 1, ptr %event)",
+        "declare ptr @air.simdgroup_async_copy_2d.p3i8.p1i8(i64, i64, ptr addrspace(3), i64, i64, <2 x i64>, ptr addrspace(1), i64, i64, <2 x i64>, <2 x i64>, i32)\ndeclare void @air.wait_simdgroup_events(i32, ptr)",
+    );
+    assert_eq!(buffer_access(&ll).0, Some(ResourceAccess::ReadWrite));
+    // The compiler's own attribute narrows it, unlowered as lowered.
+    let readonly = ll.replacen(
+        "ptr addrspace(1)  %buffer",
+        "ptr addrspace(1) readonly %buffer",
+        1,
+    );
+    assert_eq!(buffer_access(&readonly).0, Some(ResourceAccess::ReadOnly));
+}
+
+/// A buffer whose only use is a dynamic-length copy keeps its declared access, as it did after
+/// the old engine lowered the copy into a loop over the same operands.
+#[test]
+fn a_dynamic_copy_as_a_buffers_only_use_keeps_its_declared_access() {
+    let ll = kernel_using_buffer_only_in(
+        "",
+        "  %n = load i64, ptr addrspace(2) %length\n  tail call void @llvm.memcpy.p3.p1.i64(ptr addrspace(3) align 4 %tile, ptr addrspace(1) align 4 %buffer, i64 %n, i1 false)",
+        "declare void @llvm.memcpy.p3.p1.i64(ptr addrspace(3), ptr addrspace(1), i64, i1)",
+    );
+    assert_eq!(buffer_access(&ll).0, Some(ResourceAccess::ReadWrite));
+}
+
+/// A buffer the body never names is unused, and an unknown call through the buffer leaves its
+/// declared access alone: refinement narrows only by the parameter's attributes and by whether
+/// the body names it at all.
+#[test]
+fn only_attributes_and_absence_narrow_a_buffers_access() {
+    let unused = kernel_using_buffer_only_in("", "", "");
+    assert_eq!(buffer_access(&unused).0, Some(ResourceAccess::Unused));
+    let unknown = kernel_using_buffer_only_in(
+        "",
+        "  call void @opaque(ptr addrspace(1) %buffer)",
+        "declare void @opaque(ptr addrspace(1))",
+    );
+    assert_eq!(buffer_access(&unknown).0, Some(ResourceAccess::ReadWrite));
+    let writeonly = kernel_using_buffer_only_in(
+        "writeonly",
+        "  call void @opaque(ptr addrspace(1) %buffer)",
+        "declare void @opaque(ptr addrspace(1))",
+    );
+    assert_eq!(buffer_access(&writeonly).0, Some(ResourceAccess::WriteOnly));
+}
+
+/// The descriptor bands refuse a buffer index past the buffer band, and a texture index past the
+/// texture bands, naming the resource (the old engine's refusal ended with the same words).
+#[test]
+fn an_index_past_its_band_is_refused() {
+    let module = |role: &str, index: u32, name: &str| {
+        format!(
+            r#"define void @k(ptr addrspace(1) %0) {{
+entry:
+  ret void
+}}
+!air.kernel = !{{!0}}
+!0 = !{{ptr @k, !1, !2}}
+!1 = !{{}}
+!2 = !{{!3}}
+!3 = !{{i32 0, !"air.{role}", !"air.location_index", i32 {index}, i32 1, !"air.read", !"air.address_space", i32 1, !"air.arg_type_name", !"{name}", !"air.arg_name", !"r"}}
+"#
+        )
+    };
+    for (ll, owner) in [
+        (module("buffer", 40, "float"), "Buffer(40)"),
+        (
+            module("texture", 200, "texture2d<float, sample>"),
+            "Texture(200)",
+        ),
+    ] {
+        assert_eq!(
+            inspect(&ll, Stage::Kernel, "k", &[]).unwrap_err(),
+            format!("{owner} exceeds its descriptor ABI band")
+        );
+    }
+}
+
+/// A module of several tile functions: each one's interface is its own, read from what it reaches,
+/// so another entry's implicit imageblock calls add no attachment to it, and one of a suffix
+/// reflection does not decode (here `v3f16`) does not empty its bindings. Each entry's interface is
+/// its projection's.
+#[test]
+fn another_entrys_implicit_imageblock_calls_are_not_this_ones() {
+    let ll = r#"define void @a(ptr addrspace(1) %out, <2 x i16> %lid) {
+  %value = load float, ptr addrspace(1) %out, align 4
+  tail call void @air.store.implicit_imageblock.f32(float %value, i32 0, <2 x i16> %lid, i32 0, i16 0)
+  ret void
+}
+define void @b(<2 x i16> %lid) {
+  %value = tail call <3 x half> @air.load.implicit_imageblock.v3f16(i32 0, <2 x i16> %lid, i32 0, i16 0)
+  ret void
+}
+define void @c(<2 x i16> %lid) {
+  %value = tail call <4 x float> @air.load.implicit_imageblock.v4f32(i32 1, <2 x i16> %lid, i32 0, i16 0)
+  ret void
+}
+declare void @air.store.implicit_imageblock.f32(float, i32, <2 x i16>, i32, i16)
+declare <3 x half> @air.load.implicit_imageblock.v3f16(i32, <2 x i16>, i32, i16)
+declare <4 x float> @air.load.implicit_imageblock.v4f32(i32, <2 x i16>, i32, i16)
+!air.kernel = !{!0, !5, !7}
+!0 = !{ptr @a, !1, !2}
+!1 = !{}
+!2 = !{!3, !4}
+!3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read", !"air.address_space", i32 1, !"air.arg_type_size", i32 4, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"float", !"air.arg_name", !"out"}
+!4 = !{i32 1, !"air.thread_position_in_threadgroup", !"air.arg_type_name", !"ushort2", !"air.arg_name", !"lid"}
+!5 = !{ptr @b, !1, !6}
+!6 = !{!8}
+!7 = !{ptr @c, !1, !6}
+!8 = !{i32 0, !"air.thread_position_in_threadgroup", !"air.arg_type_name", !"ushort2", !"air.arg_name", !"lid"}
+"#;
+    let a = inspect(ll, Stage::Kernel, "a", &[]).unwrap();
+    assert!(a.binding_at(ResourceKind::Buffer, 0).is_some(), "{a:?}");
+    let planes: Vec<_> = a
+        .implicit_imageblock_attachments
+        .iter()
+        .map(|plane| (plane.attachment, plane.format, plane.access))
+        .collect();
+    assert_eq!(
+        planes,
+        [(0, TextureFormat::R32f, ResourceAccess::WriteOnly)]
+    );
+    let c = inspect(ll, Stage::Kernel, "c", &[]).unwrap();
+    let planes: Vec<_> = c
+        .implicit_imageblock_attachments
+        .iter()
+        .map(|plane| (plane.attachment, plane.format, plane.access))
+        .collect();
+    assert_eq!(
+        planes,
+        [(1, TextureFormat::Rgba32f, ResourceAccess::ReadOnly)]
+    );
+    for entry in ["a", "b", "c"] {
+        let projected = crate::air::entry_projection(ll, entry).unwrap();
+        assert_eq!(
+            inspect(ll, Stage::Kernel, entry, &[]),
+            inspect(&projected, Stage::Kernel, entry, &[]),
+            "{entry}"
+        );
+    }
+}

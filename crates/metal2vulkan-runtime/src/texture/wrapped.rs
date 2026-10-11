@@ -1,0 +1,631 @@
+//! Textures over images the caller made: `Device::new_texture_with_vk_image`, for example a
+//! swapchain image of an adopted device.
+//!
+//! - **Ownership.** The caller made the `VkImage` and its memory and keeps both: the runtime never
+//!   destroys or frees them ([`Owner::Caller`]). It makes and destroys only its own views of the
+//!   image.
+//! - **What the image is.** Vulkan has no query for an image's creation, so the caller states it:
+//!   the `VkImageCreateInfo` it made the image with. The image must be what the runtime would make
+//!   for the descriptor on this device ([`wrap_plan`]): the same type, format, extent, levels,
+//!   layers and samples, optimal tiling, every usage and the cube compatibility the runtime's own
+//!   texture of the descriptor would have (transfer usage among them where the format has it:
+//!   Metal copies every texture with blits). Two the runtime gives against uses no texture can
+//!   foresee may be missing, and a pass that needs one renders the texture through a stand-in
+//!   that has it (`attachment_stand_in.rs`): input attachment usage, and the custom sample
+//!   location flag of a multisampled depth render target. A contradiction is refused, naming it
+//!   ([`WrappedImageProblem`]). An image that is not mutable-format is viewed in its own format
+//!   only: a view or binding in another one (the sRGB twin Metal views without
+//!   `PixelFormatView`) is refused when made.
+//! - **The layout contract** ([`VkImageLayouts`]). The image is the caller's between the
+//!   runtime's batches, in its `home` layout. Each batch of the runtime's submissions that uses
+//!   the image moves it to `GENERAL` at its start, where every image of the runtime rests, and
+//!   back to `home` at its end, before its signals; the first batch moves it from `initial` (its
+//!   layout when wrapped) instead. A layout `GENERAL` on both sides makes no transition. The moves
+//!   are writes the hazard tracker orders as every write ([`WrappedImage::transition_use`]), so a
+//!   texture that moves needs tracked hazards. Storage is `Private`: the runtime gives no CPU access to the
+//!   caller's memory. Once an image rests in `GENERAL` and its home is `GENERAL` (an `initial` of
+//!   `UNDEFINED` or `PREINITIALIZED` moved by its first batch), no batch moves it again, and the
+//!   scheduler forgets it.
+
+use super::super::address::ObjectsToken;
+use super::super::error::{invalid, Error, Problem};
+use super::super::image_plan::{plan_image, ImagePlan};
+use super::super::resource::{Identity, ResourceKey};
+use super::super::sharing::Sharing;
+use super::super::texture_descriptor::{texture_usage, TextureDescriptor};
+use super::super::tracker::{Access, Use, UseRange};
+use super::super::values::StorageMode;
+use super::super::view_plan::ViewRecord;
+use super::super::Device;
+use super::{image_aspects, image_error, IdUse, Image, Owner, Storage, Texture};
+use ash::vk;
+use metal2vulkan::metal::TextureType;
+use metal2vulkan::vk::{
+    Format, ImageAspectFlags, ImageCreateFlags, ImageLayout, ImageTiling, ImageType,
+    ImageUsageFlags, SampleCountFlags,
+};
+use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
+
+/// No Metal counterpart (an interop hook): the layouts of an image the caller owns around the
+/// runtime's work on it. The runtime finds the image in `initial` at the first batch that uses it,
+/// in `home` at every later one, and leaves it in `home` after each.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VkImageLayouts {
+    /// The image's layout when wrapped. `UNDEFINED` (a new swapchain image's) lets the first use
+    /// discard the contents; `PREINITIALIZED` keeps them, as every other layout does.
+    pub initial: ImageLayout,
+    /// The image's layout between the runtime's batches: `PRESENT_SRC_KHR` for a swapchain image
+    /// the caller presents, `GENERAL` for one it leaves to the runtime.
+    pub home: ImageLayout,
+}
+
+impl VkImageLayouts {
+    /// The image is in `initial` now, and in `home` between the runtime's batches.
+    pub fn new(initial: ImageLayout, home: ImageLayout) -> VkImageLayouts {
+        VkImageLayouts { initial, home }
+    }
+
+    /// The image rests in `GENERAL`, as the runtime's own images do: no transition at all.
+    pub fn general() -> VkImageLayouts {
+        VkImageLayouts::new(ImageLayout::GENERAL, ImageLayout::GENERAL)
+    }
+
+    /// Whether any batch moves the image between layouts.
+    pub(crate) fn moves(self) -> bool {
+        self.initial != ImageLayout::GENERAL || self.home != ImageLayout::GENERAL
+    }
+}
+
+/// Why an image the caller made cannot be wrapped as a texture of the descriptor.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WrappedImageProblem {
+    /// A null image handle.
+    NullImage,
+    /// The descriptor's type has no image here (`TextureBuffer`), or the image's type is another.
+    ImageType {
+        /// The image's type.
+        image: ImageType,
+    },
+    /// The image's format is not the one the runtime makes for the descriptor's pixel format on
+    /// this device.
+    Format {
+        /// The image's format.
+        image: Format,
+        /// The format the runtime makes for the descriptor.
+        texture: Format,
+    },
+    /// The image's extent is not the descriptor's.
+    Extent {
+        /// The image's extent.
+        image: [u32; 3],
+        /// The descriptor's extent.
+        texture: [u32; 3],
+    },
+    /// The image's level count is not the descriptor's.
+    Levels {
+        /// The image's level count.
+        image: u32,
+        /// The descriptor's level count.
+        texture: u32,
+    },
+    /// The image's array layers are not the descriptor's (slices, six per cube).
+    Layers {
+        /// The image's array layers.
+        image: u32,
+        /// The descriptor's layers.
+        texture: u32,
+    },
+    /// The image's sample count is not the descriptor's.
+    Samples {
+        /// The image's sample count.
+        image: SampleCountFlags,
+        /// The descriptor's sample count.
+        texture: SampleCountFlags,
+    },
+    /// The image is not optimal-tiled.
+    Tiling {
+        /// The image's tiling.
+        image: ImageTiling,
+    },
+    /// The image lacks usages the runtime's own texture of the descriptor has, other than the
+    /// input attachment usage only a fetching pass needs (that pass renders into a stand-in).
+    Usage {
+        /// The usages the image lacks.
+        missing: ImageUsageFlags,
+    },
+    /// The image lacks creation flags the texture needs (cube compatibility, or extended usage
+    /// for a storage view in another format).
+    Flags {
+        /// The creation flags the image lacks.
+        missing: ImageCreateFlags,
+    },
+    /// A protected image: the runtime makes no protected submissions.
+    Protected,
+    /// An image not shared with every queue family of the device: a concurrent one whose
+    /// families leave out one of the device's, or, on a device of several families, an exclusive
+    /// one, as the runtime transfers no ownership between them.
+    QueueFamily,
+    /// A layout the contract cannot take: `UNDEFINED` or `PREINITIALIZED` as `home`, a layout
+    /// the image's usage or aspects do not allow, or one the runtime does not move images
+    /// through.
+    Layout {
+        /// The layout given.
+        layout: ImageLayout,
+    },
+    /// A texture whose image moves between layouts made with `Untracked` hazards: the moves are
+    /// writes only the tracker orders.
+    Untracked,
+}
+
+/// The runtime's view of an image the caller owns: its key, and where its layout stands.
+pub(crate) struct WrappedImage {
+    /// What the hazard tracker knows the image by: its texture's key.
+    pub(crate) key: ResourceKey,
+    raw: vk::Image,
+    aspects: ImageAspectFlags,
+    levels: u32,
+    layers: u32,
+    home: ImageLayout,
+    /// The image as its degrade notice names it: its handle, format and extent.
+    object: String,
+    /// The layout the image is in once every batch submitted so far completed: `initial` until
+    /// the first batch that uses it is submitted, `home` after. The scheduler's thread reads and
+    /// writes it as it submits, under its lock.
+    current: Mutex<ImageLayout>,
+}
+
+/// One layout transition of a caller's image, recorded as one `VkImageMemoryBarrier` over all of
+/// it that orders everything before it before everything after it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Transition {
+    pub(crate) image: vk::Image,
+    pub(crate) aspects: ImageAspectFlags,
+    pub(crate) old: ImageLayout,
+    pub(crate) new: ImageLayout,
+}
+
+impl Transition {
+    /// The barrier recording the transition.
+    pub(crate) fn barrier(&self) -> vk::ImageMemoryBarrier<'static> {
+        vk::ImageMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
+            .dst_access_mask(vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE)
+            .old_layout(self.old.into())
+            .new_layout(self.new.into())
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(self.image)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: self.aspects.into(),
+                base_mip_level: 0,
+                level_count: vk::REMAINING_MIP_LEVELS,
+                base_array_layer: 0,
+                layer_count: vk::REMAINING_ARRAY_LAYERS,
+            })
+    }
+}
+
+/// The transitions a batch makes of an image now in `current` whose home is `home`: into
+/// `GENERAL` at the batch's start, and back home at its end.
+fn moves(
+    current: ImageLayout,
+    home: ImageLayout,
+) -> (
+    Option<(ImageLayout, ImageLayout)>,
+    Option<(ImageLayout, ImageLayout)>,
+) {
+    let general = ImageLayout::GENERAL;
+    (
+        (current != general).then_some((current, general)),
+        (home != general).then_some((general, home)),
+    )
+}
+
+impl WrappedImage {
+    /// The image `raw` of the texture known by `key`, with `levels` and `layers` of `aspects`,
+    /// in `layouts.initial` now; `object` names it in its degrade notice.
+    pub(crate) fn new(
+        key: ResourceKey,
+        raw: vk::Image,
+        aspects: ImageAspectFlags,
+        levels: u32,
+        layers: u32,
+        layouts: VkImageLayouts,
+        object: String,
+    ) -> WrappedImage {
+        WrappedImage {
+            key,
+            raw,
+            aspects,
+            levels,
+            layers,
+            home: layouts.home,
+            object,
+            current: Mutex::new(layouts.initial),
+        }
+    }
+
+    /// Whether the image rests out of `GENERAL` between batches: each batch that uses it moves
+    /// it into `GENERAL` and back (`Degradation::WrappedImageLayoutTransitions`).
+    pub(crate) fn rests_out_of_general(&self) -> bool {
+        self.home != ImageLayout::GENERAL
+    }
+
+    /// The degrade notice's object and reason for an image that rests out of `GENERAL`.
+    pub(crate) fn notice(&self) -> (String, String) {
+        (
+            self.object.clone(),
+            format!(
+                "its home layout is {:?}, not GENERAL: each batch that uses it moves it into \
+                 GENERAL before its first encoder and back at its end, 2 whole-image barriers \
+                 per batch",
+                self.home
+            ),
+        )
+    }
+
+    /// The transitions a batch submitted now makes: at its start, and at its end.
+    pub(crate) fn transitions(&self) -> (Option<Transition>, Option<Transition>) {
+        let current = *self.current.lock().unwrap_or_else(|p| p.into_inner());
+        let (entry, exit) = moves(current, self.home);
+        let transition = |(old, new)| Transition {
+            image: self.raw,
+            aspects: self.aspects,
+            old,
+            new,
+        };
+        (entry.map(transition), exit.map(transition))
+    }
+
+    /// A batch that used the image was submitted: it leaves the image home.
+    pub(crate) fn submitted(&self) {
+        *self.current.lock().unwrap_or_else(|p| p.into_inner()) = self.home;
+    }
+
+    /// Whether no batch moves the image again: it rests in `GENERAL`, which is its home.
+    pub(crate) fn settled(&self) -> bool {
+        let current = *self.current.lock().unwrap_or_else(|p| p.into_inner());
+        moves(current, self.home) == (None, None)
+    }
+
+    /// A transition's use of the whole image, for the hazard tracker: a write in every stage.
+    pub(crate) fn transition_use(&self) -> Use<ResourceKey> {
+        Use::writes(
+            self.key,
+            true,
+            UseRange::Image {
+                aspects: self.aspects.into(),
+                levels: 0..self.levels,
+                layers: 0..self.layers,
+            },
+            Access::new(
+                vk::PipelineStageFlags2::ALL_COMMANDS,
+                vk::AccessFlags2::MEMORY_WRITE,
+            ),
+        )
+    }
+}
+
+/// The wrapped images of one device whose batches move them between layouts, by key. The
+/// scheduler finds each batch's among its encoders' uses, and forgets each once it is
+/// [`settled`](WrappedImage::settled).
+#[derive(Default)]
+pub(crate) struct Wrapped {
+    images: Mutex<HashMap<ResourceKey, Arc<WrappedImage>>>,
+}
+
+impl Wrapped {
+    /// `image` moves between layouts: the scheduler looks for it in batches.
+    pub(crate) fn insert(&self, image: &Arc<WrappedImage>) {
+        self.lock().insert(image.key, Arc::clone(image));
+    }
+
+    /// The image of `wrapped` is gone, or settled.
+    pub(crate) fn forget(&self, wrapped: &WrappedImage) {
+        self.lock().remove(&wrapped.key);
+    }
+
+    /// The moving images among `keys`, each once, in key order.
+    pub(crate) fn among(
+        &self,
+        keys: impl IntoIterator<Item = ResourceKey>,
+    ) -> Vec<Arc<WrappedImage>> {
+        let images = self.lock();
+        if images.is_empty() {
+            return Vec::new();
+        }
+        let mut found: Vec<Arc<WrappedImage>> = keys
+            .into_iter()
+            .filter_map(|key| images.get(&key).cloned())
+            .collect();
+        found.sort_by_key(|image| image.key);
+        found.dedup_by_key(|image| image.key);
+        found
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<ResourceKey, Arc<WrappedImage>>> {
+        self.images.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
+/// The plan of a texture of `plan` (the runtime's own image for the descriptor) over an image the
+/// caller made with `info`, shared with the queue families `families` (read for a concurrent
+/// image), on a device whose images are shared as `sharing` says: `plan` without the format list
+/// where the image is not mutable-format. Refused, naming the first contradiction.
+pub(crate) fn wrap_plan(
+    mut plan: ImagePlan,
+    info: &vk::ImageCreateInfo<'_>,
+    families: &[u32],
+    sharing: Sharing<'_>,
+) -> Result<ImagePlan, WrappedImageProblem> {
+    use WrappedImageProblem as P;
+    let image_type = ImageType::from(info.image_type);
+    if image_type != plan.image_type {
+        return Err(P::ImageType { image: image_type });
+    }
+    let format = Format::from(info.format);
+    if format != plan.format {
+        return Err(P::Format {
+            image: format,
+            texture: plan.format,
+        });
+    }
+    let extent = [info.extent.width, info.extent.height, info.extent.depth];
+    if extent != plan.extent {
+        return Err(P::Extent {
+            image: extent,
+            texture: plan.extent,
+        });
+    }
+    if info.mip_levels != plan.levels {
+        return Err(P::Levels {
+            image: info.mip_levels,
+            texture: plan.levels,
+        });
+    }
+    if info.array_layers != plan.layers {
+        return Err(P::Layers {
+            image: info.array_layers,
+            texture: plan.layers,
+        });
+    }
+    let samples = SampleCountFlags::from(info.samples);
+    if samples != plan.samples {
+        return Err(P::Samples {
+            image: samples,
+            texture: plan.samples,
+        });
+    }
+    let tiling = ImageTiling::from(info.tiling);
+    if tiling != ImageTiling::OPTIMAL {
+        return Err(P::Tiling { image: tiling });
+    }
+    let flags = ImageCreateFlags::from(info.flags);
+    if flags.contains(ImageCreateFlags::PROTECTED) {
+        return Err(P::Protected);
+    }
+    let usage = ImageUsageFlags::from(info.usage);
+    // Where framebuffer fetch reads input attachments, the runtime's color render targets take
+    // input attachment usage against a fetch no texture can foresee (`image_plan.rs`): an image
+    // without it is wrapped without it, and a pass that fetches it renders into a stand-in that
+    // has it (`attachment_stand_in.rs`).
+    if !usage.contains(ImageUsageFlags::INPUT_ATTACHMENT) {
+        plan.usage = plan.usage.difference(ImageUsageFlags::INPUT_ATTACHMENT);
+    }
+    let missing = plan.usage.difference(usage);
+    if !missing.is_empty() {
+        return Err(P::Usage { missing });
+    }
+    // So does the flag custom sample positions need of a multisampled depth render target
+    // (`sample_positions::compatible_depth`), against positions no texture can foresee: an image
+    // without it is wrapped without it, and a pass at custom positions renders it through a
+    // stand-in made with it (`attachment_stand_in.rs`).
+    let located = ImageCreateFlags::SAMPLE_LOCATIONS_COMPATIBLE_DEPTH_EXT;
+    if !flags.contains(located) {
+        plan.flags = plan.flags.difference(located);
+    }
+    // Cube compatibility, and extended usage where a storage view in another format needs it,
+    // are the image's to have; the format list of a mutable-format image is the runtime's choice
+    // of views, so an image that is not mutable is viewed in its own format alone.
+    let mutable = ImageCreateFlags::MUTABLE_FORMAT;
+    let mut needed = plan.flags.difference(mutable);
+    if plan.flags.contains(ImageCreateFlags::EXTENDED_USAGE) {
+        needed |= mutable;
+    }
+    let missing = needed.difference(flags);
+    if !missing.is_empty() {
+        return Err(P::Flags { missing });
+    }
+    if !sharing.admits(info.sharing_mode, families) {
+        return Err(P::QueueFamily);
+    }
+    if !flags.contains(mutable) {
+        plan.flags = plan.flags.difference(mutable);
+        plan.view_formats.clear();
+    }
+    Ok(plan)
+}
+
+/// Whether `layouts` meet the contract for an image of `usage` and `aspects`: `home` a layout the
+/// runtime moves images out of and back into, `initial` such a layout or `UNDEFINED` or
+/// `PREINITIALIZED`, each allowed by the image's usage and aspects (the `VkImageMemoryBarrier`
+/// layout rules, VUID-VkImageMemoryBarrier-oldLayout-01208 to 01213).
+pub(crate) fn check_layouts(
+    layouts: VkImageLayouts,
+    usage: ImageUsageFlags,
+    aspects: ImageAspectFlags,
+) -> Result<(), WrappedImageProblem> {
+    let start = matches!(
+        layouts.initial,
+        ImageLayout::UNDEFINED | ImageLayout::PREINITIALIZED
+    );
+    for (layout, may_start) in [(layouts.initial, start), (layouts.home, false)] {
+        if !(may_start || layout_allowed(layout, usage, aspects)) {
+            return Err(WrappedImageProblem::Layout { layout });
+        }
+    }
+    Ok(())
+}
+
+/// Whether the runtime moves an image of `usage` and `aspects` out of `layout` and back.
+fn layout_allowed(layout: ImageLayout, usage: ImageUsageFlags, aspects: ImageAspectFlags) -> bool {
+    use ImageLayout as L;
+    use ImageUsageFlags as U;
+    let color = aspects.contains(ImageAspectFlags::COLOR);
+    match layout {
+        L::GENERAL => true,
+        L::COLOR_ATTACHMENT_OPTIMAL => color && usage.contains(U::COLOR_ATTACHMENT),
+        L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL => {
+            !color && usage.contains(U::DEPTH_STENCIL_ATTACHMENT)
+        }
+        L::DEPTH_STENCIL_READ_ONLY_OPTIMAL => {
+            !color
+                && usage.intersects(U::DEPTH_STENCIL_ATTACHMENT | U::SAMPLED | U::INPUT_ATTACHMENT)
+        }
+        L::SHADER_READ_ONLY_OPTIMAL => usage.intersects(U::SAMPLED | U::INPUT_ATTACHMENT),
+        L::TRANSFER_SRC_OPTIMAL => usage.contains(U::TRANSFER_SRC),
+        L::TRANSFER_DST_OPTIMAL => usage.contains(U::TRANSFER_DST),
+        L::PRESENT_SRC_KHR => color,
+        _ => false,
+    }
+}
+
+impl Device {
+    /// A texture of `descriptor` over `image`, which the caller made with `info` and keeps: a
+    /// swapchain image of an adopted device, for example. The runtime never destroys the image or
+    /// frees its memory; it finds the image in `layouts.initial` at the first batch that uses it,
+    /// in `layouts.home` at every later one, and leaves it in `layouts.home` after each
+    /// ([`VkImageLayouts`]). Hazard tracking orders its uses as it orders a texture the runtime
+    /// made.
+    ///
+    /// Refused: a descriptor Metal stops, as [`Device::new_texture`] refuses it; storage other
+    /// than `Private` (`Invalid`, `StorageMode`); an image that contradicts the descriptor, a
+    /// layout outside the contract, or a texture that moves between layouts with `Untracked`
+    /// hazards (`Invalid` with a [`WrappedImageProblem`]); a format or size the device lacks for
+    /// the descriptor (`Unsupported`, as `new_texture`).
+    ///
+    /// # Safety
+    ///
+    /// - `image` is a live image of this device, made with exactly `info` (its `pNext` chain is
+    ///   not read; a format list there includes every format of the runtime's views of a
+    ///   mutable-format image), bound to memory, in `layouts.initial` now, and owned by the
+    ///   device's queue family whenever a batch of the runtime that uses it runs.
+    /// - The image and its memory outlive the texture, every view of it, and every command
+    ///   buffer that uses them.
+    /// - Between the runtime's batches the caller uses the image only in `layouts.home`, ordered
+    ///   against the runtime's batches that use it (by the binary semaphores of
+    ///   [`CommandBuffer::encode_wait_for_vk_semaphore`](super::super::CommandBuffer::encode_wait_for_vk_semaphore)
+    ///   and
+    ///   [`encode_signal_vk_semaphore`](super::super::CommandBuffer::encode_signal_vk_semaphore),
+    ///   or by waiting for their completion).
+    pub unsafe fn new_texture_with_vk_image(
+        &self,
+        descriptor: &TextureDescriptor,
+        image: vk::Image,
+        info: &vk::ImageCreateInfo<'_>,
+        layouts: VkImageLayouts,
+    ) -> Result<Texture, Error> {
+        const CALL: &str = "new_texture_with_vk_image";
+        let descriptor = &self.take_texture_options(CALL, descriptor);
+        self.check_texture_placement(
+            CALL,
+            descriptor.placement,
+            descriptor.usage,
+            descriptor.texture_type,
+        )?;
+        let wrapped = |problem| invalid(CALL, Problem::WrappedImage(problem));
+        let options = descriptor.resource_options;
+        let storage = options.storage_mode()?;
+        let hazard = options.hazard_tracking_mode()?;
+        options.cpu_cache_mode()?;
+        let layout = descriptor
+            .check(self.properties().texture_rules())
+            .map_err(|refused| refused.error(CALL))?;
+        if storage != StorageMode::Private {
+            return Err(invalid(CALL, Problem::StorageMode));
+        }
+        if image == vk::Image::null() {
+            return Err(wrapped(WrappedImageProblem::NullImage));
+        }
+        if layout.texture_type == TextureType::TextureBuffer {
+            return Err(wrapped(WrappedImageProblem::ImageType {
+                image: info.image_type.into(),
+            }));
+        }
+        if self.is_lost() {
+            return Err(Error::DeviceLost);
+        }
+        let facts = self
+            .shared()
+            .textures
+            .facts(self.compile_device().profile());
+        let usage = texture_usage(descriptor.usage, descriptor.swizzle);
+        let plan = plan_image(&layout, usage, false, &facts)
+            .map_err(|refusal| image_error(CALL, refusal))?;
+        let families: &[u32] = if info.sharing_mode == vk::SharingMode::CONCURRENT
+            && !info.p_queue_family_indices.is_null()
+        {
+            // SAFETY: the caller's contract: `info` is the image's creation, whose concurrent
+            // queue families are `queue_family_index_count` at `p_queue_family_indices`.
+            unsafe {
+                std::slice::from_raw_parts(
+                    info.p_queue_family_indices,
+                    info.queue_family_index_count as usize,
+                )
+            }
+        } else {
+            &[]
+        };
+        let plan = wrap_plan(plan, info, families, self.shared().sharing()).map_err(wrapped)?;
+        let aspects = image_aspects(plan.format);
+        check_layouts(layouts, info.usage.into(), aspects).map_err(wrapped)?;
+        let identity = Identity::new(hazard, false);
+        if layouts.moves() && !identity.tracked {
+            return Err(wrapped(WrappedImageProblem::Untracked));
+        }
+        let [width, height, depth] = plan.extent;
+        let caller = Arc::new(WrappedImage::new(
+            identity.key,
+            image,
+            aspects,
+            plan.levels,
+            plan.layers,
+            layouts,
+            format!(
+                "texture over the caller's VkImage {image:?}, {:?}, {width}x{height}x{depth}",
+                plan.format
+            ),
+        ));
+        if layouts.moves() {
+            self.shared().interop.wrapped.insert(&caller);
+        }
+        let image = Image {
+            device: self.clone(),
+            raw: super::Raw::new(image),
+            owner: Owner::Caller(caller),
+            plan,
+            options,
+            allow_gpu_optimized_contents: descriptor.allow_gpu_optimized_contents,
+            identity,
+            views: Mutex::new(HashMap::new()),
+            twin: None,
+            decoded: None,
+            form: Default::default(),
+            kept_outside: AtomicBool::new(false),
+            detached: Mutex::new(None),
+            first_move: Mutex::new(None),
+            host_copies: false,
+            linear: false,
+            staging_copies: false,
+            objects: ObjectsToken::default(),
+        };
+        let record = ViewRecord::of_descriptor(&layout, descriptor);
+        let storage = Storage::Image(Arc::new(image));
+        let id_use = IdUse::Program(descriptor.placement);
+        Ok(Texture::made(self, storage, record, None, id_use))
+    }
+}

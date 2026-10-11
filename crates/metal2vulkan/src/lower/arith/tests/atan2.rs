@@ -1,0 +1,724 @@
+//! Metal's `atan2` and `fast::atan2` on the interpreter against Metal's recorded answers (Apple M3
+//! Max, probe cases 6802ab13 and c11eb8cb, every lane of the sixteen operands below squared): zeros
+//! of both signs, denormals, the smallest normal, ordinary values, the largest finite values,
+//! infinities, and NaNs. The interpreter does not model `GLSL.std.450 Atan2` or `Atan`, so `atan2`
+//! takes its generic value as an input and `fast::atan2` a stand-in `atan`; every lane a special
+//! value decides must equal Metal's answer bit for bit, and every other lane must be the generic
+//! value (or the stand-in's), so the special values read neither.
+
+use super::*;
+
+/// The operands of both cases on `float`.
+const F32_OPERANDS: [u32; 16] = [
+    0x0000_0000,
+    0x8000_0000,
+    0x0000_0001,
+    0x8000_0001,
+    0x0080_0000,
+    0x3F80_0000,
+    0xBF80_0000,
+    0x4040_0000,
+    0xBF40_0000,
+    0x7F7F_FFFF,
+    0xFF7F_FFFF,
+    0x7F80_0000,
+    0xFF80_0000,
+    0x7FC0_0000,
+    0xFFC0_0000,
+    0x7FC1_2345,
+];
+
+/// The operands of both cases on `half`.
+const HALF_OPERANDS: [u16; 16] = [
+    0x0000, 0x8000, 0x0001, 0x8001, 0x0400, 0x3C00, 0xBC00, 0x4200, 0xBA00, 0x7BFF, 0xFBFF, 0x7C00,
+    0xFC00, 0x7E00, 0xFE00, 0x7E45,
+];
+
+/// Metal's `atan2(Y, X)` on `float` (precise; the same in both compiles), indexed `[y][x]`.
+const ATAN2_F32: [[u32; 16]; 16] = [
+    [
+        0x00000000, 0x40490FDB, 0x00000000, 0x40490FDB, 0x00000000, 0x00000000, 0x40490FDB,
+        0x00000000, 0x40490FDB, 0x00000000, 0x40490FDB, 0x00000000, 0x40490FDB, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0x80000000, 0xC0490FDB, 0x80000000, 0xC0490FDB, 0x80000000, 0x80000000, 0xC0490FDB,
+        0x80000000, 0xC0490FDB, 0x80000000, 0xC0490FDB, 0x80000000, 0xC0490FDB, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0x00000000, 0x40490FDB, 0x00000000, 0x40490FDB, 0x00000000, 0x00000000, 0x40490FDB,
+        0x00000000, 0x40490FDB, 0x00000000, 0x40490FDB, 0x00000000, 0x40490FDB, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0x80000000, 0xC0490FDB, 0x80000000, 0xC0490FDB, 0x80000000, 0x80000000, 0xC0490FDB,
+        0x80000000, 0xC0490FDB, 0x80000000, 0xC0490FDB, 0x80000000, 0xC0490FDB, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0x3FC90FDB, 0x3FC90FDB, 0x3FC90FDB, 0x3FC90FDB, 0x3F490FDB, 0x00800000, 0x40490FDB,
+        0x00000000, 0x40490FDB, 0x00000000, 0x40490FDB, 0x00000000, 0x40490FDB, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0x3FC90FDB, 0x3FC90FDB, 0x3FC90FDB, 0x3FC90FDB, 0x3FC90FDB, 0x3F490FDB, 0x4016CBE4,
+        0x3EA4BC7E, 0x400DB70D, 0x00000000, 0x40490FDB, 0x00000000, 0x40490FDB, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0xBFC90FDB, 0xBFC90FDB, 0xBFC90FDB, 0xBFC90FDB, 0xBFC90FDB, 0xBF490FDB, 0xC016CBE4,
+        0xBEA4BC7E, 0xC00DB70D, 0x00000000, 0xC0490FDB, 0x80000000, 0xC0490FDB, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0x3FC90FDB, 0x3FC90FDB, 0x3FC90FDB, 0x3FC90FDB, 0x3FC90FDB, 0x3F9FE0BC, 0x3FF23EFA,
+        0x3F490FDB, 0x3FE86B51, 0x00000000, 0x40490FDB, 0x00000000, 0x40490FDB, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0xBFC90FDB, 0xBFC90FDB, 0xBFC90FDB, 0xBFC90FDB, 0xBFC90FDB, 0xBF24BC7D, 0xC01FE0BC,
+        0xBE7ADBAF, 0xC016CBE4, 0x00000000, 0xC0490FDB, 0x80000000, 0xC0490FDB, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0x3FC90FDB, 0x3FC90FDB, 0x3FC90FDB, 0x3FC90FDB, 0x3FC90FDB, 0x3FC90FDB, 0x3FC90FDB,
+        0x3FC90FDB, 0x3FC90FDB, 0x3F490FDB, 0x4016CBE4, 0x00000000, 0x40490FDB, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0xBFC90FDB, 0xBFC90FDB, 0xBFC90FDB, 0xBFC90FDB, 0xBFC90FDB, 0xBFC90FDB, 0xBFC90FDB,
+        0xBFC90FDB, 0xBFC90FDB, 0xBF490FDB, 0xC016CBE4, 0x80000000, 0xC0490FDB, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0x3FC90FDB, 0x3FC90FDB, 0x3FC90FDB, 0x3FC90FDB, 0x3FC90FDB, 0x3FC90FDB, 0x3FC90FDB,
+        0x3FC90FDB, 0x3FC90FDB, 0x3FC90FDB, 0x3FC90FDB, 0x3F490FDB, 0x4016CBE4, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0xBFC90FDB, 0xBFC90FDB, 0xBFC90FDB, 0xBFC90FDB, 0xBFC90FDB, 0xBFC90FDB, 0xBFC90FDB,
+        0xBFC90FDB, 0xBFC90FDB, 0xBFC90FDB, 0xBFC90FDB, 0xBF490FDB, 0xC016CBE4, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000,
+        0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000,
+        0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000,
+        0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+];
+/// Metal's `fast::atan2(Y, X)` from a call with every fast-math flag (case c11eb8cb).
+const FAST_ATAN2_F32: [[u32; 16]; 16] = [
+    [
+        0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x00000000, 0x00000000, 0x40490FDB,
+        0x00000000, 0x40490FDB, 0x00000000, 0x40490FDB, 0x00000000, 0x40490FDB, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x80000000, 0x80000000, 0x40490FDB,
+        0x80000000, 0x40490FDB, 0x80000000, 0x40490FDB, 0x80000000, 0x40490FDB, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x00000000, 0x00000000, 0x40490FDB,
+        0x00000000, 0x40490FDB, 0x00000000, 0x40490FDB, 0x00000000, 0x40490FDB, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x80000000, 0x80000000, 0x40490FDB,
+        0x80000000, 0x40490FDB, 0x80000000, 0x40490FDB, 0x80000000, 0x40490FDB, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0x3FC90FDB, 0xBFC90FDB, 0x3FC90FDB, 0xBFC90FDB, 0x3F490FDA, 0x00000000, 0x40490FDB,
+        0x00000000, 0x40490FDB, 0x00000000, 0x40490FDB, 0x00000000, 0x40490FDB, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0x3FC90FDB, 0xBFC90FDB, 0x3FC90FDB, 0xBFC90FDB, 0x3FC90FDB, 0x3F490FDA, 0x4016CBE4,
+        0x3EA4BC7D, 0x400DB70D, 0x00000000, 0x40490FDB, 0x00000000, 0x40490FDB, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0xBFC90FDB, 0x3FC90FDB, 0xBFC90FDB, 0x3FC90FDB, 0xBFC90FDB, 0xBF490FDA, 0xC016CBE4,
+        0xBEA4BC7D, 0xC00DB70D, 0x80000000, 0xC0490FDB, 0x80000000, 0xC0490FDB, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0x3FC90FDB, 0xBFC90FDB, 0x3FC90FDB, 0xBFC90FDB, 0x3FC90FDB, 0x3F9FE0BC, 0x3FF23EFA,
+        0x3F490FDA, 0x3FE86B51, 0x00000000, 0x40490FDB, 0x00000000, 0x40490FDB, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0xBFC90FDB, 0x3FC90FDB, 0xBFC90FDB, 0x3FC90FDB, 0xBFC90FDB, 0xBF24BC7D, 0xC01FE0BC,
+        0xBE7ADBB1, 0xC016CBE4, 0x80000000, 0xC0490FDB, 0x80000000, 0xC0490FDB, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0x3FC90FDB, 0xBFC90FDB, 0x3FC90FDB, 0xBFC90FDB, 0x3FC90FDB, 0x3FC90FDB, 0x3FC90FDB,
+        0x3FC90FDB, 0x3FC90FDB, 0x3F490FDA, 0x4016CBE4, 0x00000000, 0x40490FDB, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0xBFC90FDB, 0x3FC90FDB, 0xBFC90FDB, 0x3FC90FDB, 0xBFC90FDB, 0xBFC90FDB, 0xBFC90FDB,
+        0xBFC90FDB, 0xBFC90FDB, 0xBF490FDA, 0xC016CBE4, 0x80000000, 0xC0490FDB, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0x3FC90FDB, 0xBFC90FDB, 0x3FC90FDB, 0xBFC90FDB, 0x3FC90FDB, 0x3FC90FDB, 0x3FC90FDB,
+        0x3FC90FDB, 0x3FC90FDB, 0x3FC90FDB, 0x3FC90FDB, 0x7FC00000, 0x7FC00000, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0xBFC90FDB, 0x3FC90FDB, 0xBFC90FDB, 0x3FC90FDB, 0xBFC90FDB, 0xBFC90FDB, 0xBFC90FDB,
+        0xBFC90FDB, 0xBFC90FDB, 0xBFC90FDB, 0xBFC90FDB, 0x7FC00000, 0x7FC00000, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000,
+        0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000,
+        0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000,
+        0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+];
+/// Metal's `fast::atan2(Y, X)` from a call with no fast-math flag (case 6802ab13).
+const FAST_ATAN2_F32_NO_FLAGS: [[u32; 16]; 16] = [
+    [
+        0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x00000000, 0x00000000, 0x40490FDB,
+        0x00000000, 0x40490FDB, 0x00000000, 0x40490FDB, 0x00000000, 0x40490FDB, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x80000000, 0x80000000, 0x40490FDB,
+        0x80000000, 0x40490FDB, 0x80000000, 0x40490FDB, 0x80000000, 0x40490FDB, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x00000000, 0x00000000, 0x40490FDB,
+        0x00000000, 0x40490FDB, 0x00000000, 0x40490FDB, 0x00000000, 0x40490FDB, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x80000000, 0x80000000, 0x40490FDB,
+        0x80000000, 0x40490FDB, 0x80000000, 0x40490FDB, 0x80000000, 0x40490FDB, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0x3FC90FDB, 0xBFC90FDB, 0x3FC90FDB, 0xBFC90FDB, 0x3F490FDA, 0x00000000, 0x40490FDB,
+        0x00000000, 0x40490FDB, 0x00000000, 0x40490FDB, 0x00000000, 0x40490FDB, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0x3FC90FDB, 0xBFC90FDB, 0x3FC90FDB, 0xBFC90FDB, 0x3FC90FDB, 0x3F490FDA, 0x4016CBE4,
+        0x3EA4BC7D, 0x400DB70D, 0x00000000, 0x40490FDB, 0x00000000, 0x40490FDB, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0xBFC90FDB, 0x3FC90FDB, 0xBFC90FDB, 0x3FC90FDB, 0xBFC90FDB, 0xBF490FDA, 0xC016CBE4,
+        0xBEA4BC7D, 0xC00DB70D, 0x80000000, 0xC0490FDB, 0x80000000, 0xC0490FDB, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0x3FC90FDB, 0xBFC90FDB, 0x3FC90FDB, 0xBFC90FDB, 0x3FC90FDB, 0x3F9FE0BC, 0x3FF23EFA,
+        0x3F490FDA, 0x3FE86B51, 0x00000000, 0x40490FDB, 0x00000000, 0x40490FDB, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0xBFC90FDB, 0x3FC90FDB, 0xBFC90FDB, 0x3FC90FDB, 0xBFC90FDB, 0xBF24BC7D, 0xC01FE0BC,
+        0xBE7ADBB1, 0xC016CBE4, 0x80000000, 0xC0490FDB, 0x80000000, 0xC0490FDB, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0x3FC90FDB, 0xBFC90FDB, 0x3FC90FDB, 0xBFC90FDB, 0x3FC90FDB, 0x3FC90FDB, 0x3FC90FDB,
+        0x3FC90FDB, 0x3FC90FDB, 0x00000000, 0x40490FDB, 0x00000000, 0x40490FDB, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0xBFC90FDB, 0x3FC90FDB, 0xBFC90FDB, 0x3FC90FDB, 0xBFC90FDB, 0xBFC90FDB, 0xBFC90FDB,
+        0xBFC90FDB, 0xBFC90FDB, 0x80000000, 0xC0490FDB, 0x80000000, 0xC0490FDB, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0x3FC90FDB, 0xBFC90FDB, 0x3FC90FDB, 0xBFC90FDB, 0x3FC90FDB, 0x3FC90FDB, 0x3FC90FDB,
+        0x3FC90FDB, 0x3FC90FDB, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0xBFC90FDB, 0x3FC90FDB, 0xBFC90FDB, 0x3FC90FDB, 0xBFC90FDB, 0xBFC90FDB, 0xBFC90FDB,
+        0xBFC90FDB, 0xBFC90FDB, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000,
+        0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000,
+        0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+    [
+        0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000,
+        0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000,
+        0x7FC00000, 0x7FC00000,
+    ],
+];
+/// Metal's `atan2(Y, X)` on `half` (the same in both compiles), indexed `[y][x]`.
+const ATAN2_HALF: [[u16; 16]; 16] = [
+    [
+        0x0000, 0x4248, 0x0000, 0x4248, 0x0000, 0x0000, 0x4248, 0x0000, 0x4248, 0x0000, 0x4248,
+        0x0000, 0x4248, 0x7E00, 0x7E00, 0x7E00,
+    ],
+    [
+        0x8000, 0xC248, 0x8000, 0xC248, 0x8000, 0x8000, 0xC248, 0x8000, 0xC248, 0x8000, 0xC248,
+        0x8000, 0xC248, 0x7E00, 0x7E00, 0x7E00,
+    ],
+    [
+        0x3E48, 0x3E48, 0x3A48, 0x40B6, 0x1400, 0x0001, 0x4248, 0x0000, 0x4248, 0x0000, 0x4248,
+        0x0000, 0x4248, 0x7E00, 0x7E00, 0x7E00,
+    ],
+    [
+        0xBE48, 0xBE48, 0xBA48, 0xC0B6, 0x9400, 0x8001, 0xC248, 0x8000, 0xC248, 0x8000, 0xC248,
+        0x8000, 0xC248, 0x7E00, 0x7E00, 0x7E00,
+    ],
+    [
+        0x3E48, 0x3E48, 0x3E47, 0x3E49, 0x3A48, 0x0400, 0x4248, 0x0155, 0x4248, 0x0000, 0x4248,
+        0x0000, 0x4248, 0x7E00, 0x7E00, 0x7E00,
+    ],
+    [
+        0x3E48, 0x3E48, 0x3E48, 0x3E48, 0x3E48, 0x3A48, 0x40B6, 0x3526, 0x406E, 0x0100, 0x4248,
+        0x0000, 0x4248, 0x7E00, 0x7E00, 0x7E00,
+    ],
+    [
+        0xBE48, 0xBE48, 0xBE48, 0xBE48, 0xBE48, 0xBA48, 0xC0B6, 0xB526, 0xC06E, 0x8100, 0xC248,
+        0x8000, 0xC248, 0x7E00, 0x7E00, 0x7E00,
+    ],
+    [
+        0x3E48, 0x3E48, 0x3E48, 0x3E48, 0x3E48, 0x3CFF, 0x3F92, 0x3A48, 0x3F43, 0x0300, 0x4248,
+        0x0000, 0x4248, 0x7E00, 0x7E00, 0x7E00,
+    ],
+    [
+        0xBE48, 0xBE48, 0xBE48, 0xBE48, 0xBE48, 0xB926, 0xC0FF, 0xB3D7, 0xC0B6, 0x80C0, 0xC248,
+        0x8000, 0xC248, 0x7E00, 0x7E00, 0x7E00,
+    ],
+    [
+        0x3E48, 0x3E48, 0x3E48, 0x3E48, 0x3E48, 0x3E48, 0x3E49, 0x3E48, 0x3E49, 0x3A48, 0x40B6,
+        0x0000, 0x4248, 0x7E00, 0x7E00, 0x7E00,
+    ],
+    [
+        0xBE48, 0xBE48, 0xBE48, 0xBE48, 0xBE48, 0xBE48, 0xBE49, 0xBE48, 0xBE49, 0xBA48, 0xC0B6,
+        0x8000, 0xC248, 0x7E00, 0x7E00, 0x7E00,
+    ],
+    [
+        0x3E48, 0x3E48, 0x3E48, 0x3E48, 0x3E48, 0x3E48, 0x3E48, 0x3E48, 0x3E48, 0x3E48, 0x3E48,
+        0x3A48, 0x40B6, 0x7E00, 0x7E00, 0x7E00,
+    ],
+    [
+        0xBE48, 0xBE48, 0xBE48, 0xBE48, 0xBE48, 0xBE48, 0xBE48, 0xBE48, 0xBE48, 0xBE48, 0xBE48,
+        0xBA48, 0xC0B6, 0x7E00, 0x7E00, 0x7E00,
+    ],
+    [
+        0x7E00, 0x7E00, 0x7E00, 0x7E00, 0x7E00, 0x7E00, 0x7E00, 0x7E00, 0x7E00, 0x7E00, 0x7E00,
+        0x7E00, 0x7E00, 0x7E00, 0x7E00, 0x7E00,
+    ],
+    [
+        0x7E00, 0x7E00, 0x7E00, 0x7E00, 0x7E00, 0x7E00, 0x7E00, 0x7E00, 0x7E00, 0x7E00, 0x7E00,
+        0x7E00, 0x7E00, 0x7E00, 0x7E00, 0x7E00,
+    ],
+    [
+        0x7E00, 0x7E00, 0x7E00, 0x7E00, 0x7E00, 0x7E00, 0x7E00, 0x7E00, 0x7E00, 0x7E00, 0x7E00,
+        0x7E00, 0x7E00, 0x7E00, 0x7E00, 0x7E00,
+    ],
+];
+
+/// A value no `atan2` answer of either format equals: the generic input of a lane a special value
+/// decides, so a special lane that read it would fail.
+const MARKER_F32: u32 = 0x3E00_0000;
+const MARKER_HALF: u16 = 0x3000;
+
+/// Whether an `f32` operand is a zero to Metal (its exponent field is zero), infinite, or NaN.
+fn f32_special(b: u32) -> bool {
+    b & 0x7F80_0000 == 0 || b & 0x7F80_0000 == 0x7F80_0000
+}
+
+/// Whether a `half` operand is a zero, infinite, or NaN (its denormals are values).
+fn half_special(b: u16) -> bool {
+    b & 0x7FFF == 0 || b & 0x7C00 == 0x7C00
+}
+
+/// `atan2` (`math::atan2_special` around its generic input, then the format's rounding): a lane
+/// with a zero, infinite, or NaN operand is Metal's answer whatever the generic value; any other
+/// lane is the generic value, `+0` when it is an `f32` denormal. The generic input is the host's
+/// correctly rounded `atan2` there and [`MARKER_F32`] elsewhere. Metal's own generic answers are
+/// within one ulp of it (five `float` lanes differ by one, the device's precision); its `+0` for
+/// a denormal `float` result is asserted on the lanes that have one.
+#[test]
+fn atan2_answers_as_metal_at_every_special_operand() {
+    for bits in [32u8, 16] {
+        let f = float(bits);
+        let mut cases: Vec<Case> = Vec::new();
+        let mut want = Vec::new();
+        let mut flushed = 0;
+        for j in 0..16 {
+            for k in 0..16 {
+                let (y, x, metal, special) = if bits == 32 {
+                    let (y, x) = (F32_OPERANDS[j], F32_OPERANDS[k]);
+                    let special = f32_special(y) || f32_special(x);
+                    (
+                        u64::from(y),
+                        u64::from(x),
+                        u64::from(ATAN2_F32[j][k]),
+                        special,
+                    )
+                } else {
+                    let (y, x) = (HALF_OPERANDS[j], HALF_OPERANDS[k]);
+                    let special = half_special(y) || half_special(x);
+                    (
+                        u64::from(y),
+                        u64::from(x),
+                        u64::from(ATAN2_HALF[j][k]),
+                        special,
+                    )
+                };
+                let (generic, expect) = if special {
+                    let marker = if bits == 32 {
+                        u64::from(MARKER_F32)
+                    } else {
+                        u64::from(MARKER_HALF)
+                    };
+                    (marker, metal)
+                } else {
+                    let g = if bits == 32 {
+                        let r = f64::from(f32v(y)).atan2(f64::from(f32v(x)));
+                        u64::from((r as f32).to_bits())
+                    } else {
+                        let r = f16_to_f64(y as u16).atan2(f16_to_f64(x as u16));
+                        u64::from(f64_to_f16(r))
+                    };
+                    let tiny = bits == 32 && g & 0x7F80_0000 == 0;
+                    if tiny {
+                        flushed += 1;
+                        assert_eq!(metal, 0, "Metal's tiny atan2({y:#x}, {x:#x})");
+                    }
+                    (g, if tiny { 0 } else { g })
+                };
+                cases.push(vec![vec![y], vec![x], vec![generic]]);
+                want.push(((y, x), expect));
+            }
+        }
+        if bits == 32 {
+            assert_eq!(flushed, 6, "the float lanes with a denormal answer");
+        }
+        check_accept(
+            &format!("atan2 f{bits} against Metal"),
+            &[f, f, f],
+            f,
+            &|fb, a| {
+                let r = math::atan2_special(fb, f, a[0], a[1], a[2])?;
+                crate::lower::arith::narrow::round(fb, f, r)
+            },
+            &cases,
+            &|c| {
+                let key = (arg(c, 0), arg(c, 1));
+                want.iter().find(|(k, _)| *k == key).map(|(_, w)| vec![*w])
+            },
+            &|g, w| g == w,
+        );
+    }
+}
+
+/// The value of an `f32` operand as Metal reads it: an `f32` denormal is a zero of its sign.
+fn metal_read(b: u32) -> f32 {
+    if b & 0x7F80_0000 == 0 {
+        f32::from_bits(b & 0x8000_0000)
+    } else {
+        f32::from_bits(b)
+    }
+}
+
+/// `fast::atan2(y, x)` with the stand-in `atan(q) = q + 1/8`, where Metal's special values do not
+/// decide it (`None` where they do): the quotient (divided over the whole range, or `y` times the
+/// flushed reciprocal), the stand-in, and the turn.
+fn fast_generic(y: u32, x: u32, reciprocal_flushed: bool) -> Option<u32> {
+    if f32_special(y) || f32_special(x) {
+        return None;
+    }
+    let (yv, xv) = (f32::from_bits(y), f32::from_bits(x));
+    if reciprocal_flushed && xv.abs() > 2f32.powi(126) {
+        return None;
+    }
+    let q = (f64::from(yv) / f64::from(xv)) as f32;
+    if f32_special(q.to_bits()) {
+        return None;
+    }
+    let a = q + 0.125;
+    let pi = std::f32::consts::PI;
+    let r = if xv < 0.0 {
+        a + if yv >= 0.0 { pi } else { -pi }
+    } else {
+        a
+    };
+    Some(r.to_bits())
+}
+
+/// `fast::atan2` (`math::fast_atan2`) with a stand-in `atan(q) = q + 1/8` the interpreter runs:
+/// every lane of the grid that Metal's special values decide is Metal's answer for the call's
+/// flags (the quotient's sign, the flushed operands and quotient, `0 / 0` and `inf / inf`, the
+/// turn's comparisons, and the flushed reciprocal beyond `2^126` of a call without every flag),
+/// and every other lane is the stand-in of the correctly rounded quotient, turned; operands
+/// beyond the grid check the scaled division near `2^126` and `FLT_MAX`.
+#[test]
+fn fast_atan2_answers_as_metal_at_every_special_operand() {
+    let f = float(32);
+    let extra: [(f32, f32); 8] = [
+        (3.0, 2f32.powi(126)),
+        (3.0, 1.5 * 2f32.powi(126)),
+        (-1e38, f32::MAX),
+        (f32::MAX, -2f32.powi(127)),
+        (2e10, -3e37),
+        (1.0, 2f32.powi(125)),
+        (-5.0, -7.0),
+        (6.5, 0.25),
+    ];
+    for reciprocal_flushed in [false, true] {
+        let table = if reciprocal_flushed {
+            &FAST_ATAN2_F32_NO_FLAGS
+        } else {
+            &FAST_ATAN2_F32
+        };
+        let mut want: Vec<((u64, u64), u64)> = Vec::new();
+        let mut decided = 0;
+        for j in 0..16 {
+            for k in 0..16 {
+                let (y, x) = (F32_OPERANDS[j], F32_OPERANDS[k]);
+                let w = match fast_generic(y, x, reciprocal_flushed) {
+                    Some(g) => g,
+                    None => {
+                        decided += 1;
+                        table[j][k]
+                    }
+                };
+                want.push(((u64::from(y), u64::from(x)), u64::from(w)));
+            }
+        }
+        // The lanes with a finite normal quotient of finite normal operands, less the lanes a
+        // flushed reciprocal decides.
+        assert_eq!(
+            decided,
+            if reciprocal_flushed {
+                256 - 30
+            } else {
+                256 - 34
+            }
+        );
+        if !reciprocal_flushed {
+            for (y, x) in extra {
+                let (y, x) = (y.to_bits(), x.to_bits());
+                let w = fast_generic(y, x, false).expect("a generic lane");
+                want.push(((u64::from(y), u64::from(x)), u64::from(w)));
+            }
+        }
+        // Metal reads denormal operands as zeros: the answers of the grid's flushed operands are
+        // the answers of the zeros of their sign.
+        for j in 0..16 {
+            for k in 0..16 {
+                let zero_of = |b: u32| {
+                    F32_OPERANDS
+                        .iter()
+                        .position(|o| *o == metal_read(b).to_bits())
+                };
+                if let (Some(zj), Some(zk)) = (zero_of(F32_OPERANDS[j]), zero_of(F32_OPERANDS[k])) {
+                    assert_eq!(table[j][k], table[zj][zk], "lane ({j}, {k})");
+                }
+            }
+        }
+        let cases: Vec<Case> = want
+            .iter()
+            .map(|((y, x), _)| vec![vec![*y], vec![*x]])
+            .collect();
+        check_accept(
+            &format!("fast atan2 f32 (reciprocal flushed {reciprocal_flushed}) against Metal"),
+            &[f, f],
+            f,
+            &|fb, a| {
+                let atan = |fb: &mut FunctionBuilder<'_>, q: Value| {
+                    let eighth = crate::lower::arith::ops::fsplat(fb, f, 0.125)?;
+                    fb.binary(BinOp::FAdd, q, eighth)
+                };
+                let divide =
+                    |fb: &mut FunctionBuilder<'_>, n: Value, d: Value| fb.binary(BinOp::FDiv, n, d);
+                math::fast_atan2(fb, f, a[0], a[1], reciprocal_flushed, &atan, &divide)
+            },
+            &cases,
+            &|c| {
+                let key = (arg(c, 0), arg(c, 1));
+                want.iter().find(|(k, _)| *k == key).map(|(_, w)| vec![*w])
+            },
+            &|g, w| g == w,
+        );
+    }
+}
+
+/// Metal's `fast::atan2(y, x)` with the translation's routines (Metal's fast `atan` and its
+/// reciprocal) at pairs of EV MBB-atan2-m4 (the M4) where Metal's word is not the correctly rounded
+/// one: `atan(y · rcp(x))`, turned by `±RN(π)` toward a negative `x`, bit for bit, in both of its
+/// compiles.
+#[test]
+fn fast_atan2_answers_metals_words_through_its_reciprocal() {
+    use crate::lower::arith::libm as routines;
+    use std::collections::BTreeMap;
+    let words: [(u64, u64, u64); 32] = [
+        (0xC19756F4, 0xBCB32371, 0xBFC935BC),
+        (0x3EF2780E, 0xB5B2A829, 0x3FC90FF3),
+        (0x3E6BF7B9, 0xBD0F72FB, 0x3FDC5E1B),
+        (0xBD4181FA, 0x3D17DFBB, 0xBF67C5E7),
+        (0x3C548FED, 0x3B64B74E, 0x3FA76D21),
+        (0xC0DD1B6B, 0xBD1D9C98, 0xBFC9C657),
+        (0x3C0A99D9, 0x3F1F346A, 0x3C5EDB04),
+        (0xBC409105, 0x421B1F31, 0xB99EE5D1),
+        (0xBEBB68F2, 0x41595AE5, 0xBCDCAD66),
+        (0x3D20648F, 0x42BFB421, 0x39D6300B),
+        (0x415087E1, 0x75D05A1E, 0x0B001C1C),
+        (0x3E53970E, 0x52C98B34, 0x2B066160),
+        (0xC0BEA79E, 0x4D39DF1E, 0xB3034B3F),
+        (0x4020F92A, 0x6CAD5F44, 0x12EDB124),
+        (0xBEB14461, 0x535AFD42, 0xAACF39F9),
+        (0xC2D8CD64, 0x3F5CDE07, 0xBFC80B10),
+        (0xBFD8F5D4, 0xC187265C, 0xC042A97B),
+        (0x4165ED74, 0xC03D4866, 0x3FE30AE0),
+        (0xBF95112C, 0x4139BD55, 0xBDCCC52A),
+        (0x40E2F5D5, 0x410FA6B3, 0x3F2B2910),
+        (0x41070303, 0xBF802825, 0x3FD82DCC),
+        (0x409EF0B0, 0x41187E78, 0x3EF5F8B0),
+        (0x41420F9D, 0xC0E8502E, 0x40070CC5),
+        (0x3DFE923E, 0xC14B9710, 0x40486FCF),
+        (0x40596E18, 0x42226465, 0x3DAAFBBB),
+        (0x4855E587, 0x3F7F47CE, 0x3FC90FB5),
+        (0xC180A967, 0x3F828DF3, 0xBFC0F482),
+        (0xC8F92619, 0x3F7FFC82, 0xBFC90FCB),
+        (0xC9A00AEE, 0x3F4FAF31, 0xBFC90FD6),
+        (0xC50006E2, 0x3F80009A, 0xBFC8FFDC),
+        (0xC06A090F, 0x3F80000D, 0xBFA6E4DD),
+        (0x20E9F44C, 0x2E7C8B9B, 0x31ED2795),
+    ];
+    let f = float(32);
+    for reciprocal_flushed in [false, true] {
+        let op = FloatFn::FastAtan2 { reciprocal_flushed };
+        let funs = routines::uses(op, f);
+        let m = kernel_defs(
+            &[f, f],
+            f,
+            &|b| {
+                funs.iter()
+                    .map(|fun| routines::define_alone(b, *fun, false))
+                    .collect()
+            },
+            &|fb, x, ids| {
+                let map: BTreeMap<routines::Fun, FuncId> =
+                    funs.iter().copied().zip(ids.iter().copied()).collect();
+                math::float_fn(
+                    fb,
+                    op,
+                    f,
+                    Contraction::Forbidden,
+                    NanTest::IsNan,
+                    x,
+                    &routines::Lib::new(None, &map),
+                )
+            },
+            false,
+            false,
+        )
+        .expect("build");
+        let cases: Vec<Case> = words
+            .iter()
+            .map(|(y, x, _)| vec![vec![*y], vec![*x]])
+            .collect();
+        check_module(
+            &format!("fast atan2 (reciprocal flushed {reciprocal_flushed}) through the routines"),
+            m,
+            &[f, f],
+            f,
+            &cases,
+            &|c| {
+                words
+                    .iter()
+                    .find(|(y, x, _)| (*y, *x) == (c[0][0], c[1][0]))
+                    .map(|(_, _, w)| vec![*w])
+            },
+            &|g, w| g == w,
+        );
+    }
+}
+
+/// [`FloatFn::words`] bounds what `atan2`, `fast::atan2`, `fast::sin`, and `fast::cos` emit on
+/// every form they take (`fast::sin` and `fast::cos` on `float`), and is not more than twice it.
+/// The module's growth over an identity kernel is charged in full, its constants and the
+/// `GLSL.std.450` import included.
+#[test]
+fn special_value_functions_stay_within_their_word_estimate() {
+    let module_words = |f: Form, body: Body<'_>| {
+        let m = kernel(&[f, f], f, body).expect("kernel");
+        crate::spirv::serialize::serialize(m)
+            .expect("words")
+            .words
+            .len()
+    };
+    let fns = [
+        FloatFn::Atan2,
+        FloatFn::FastAtan2 {
+            reciprocal_flushed: false,
+        },
+        FloatFn::FastAtan2 {
+            reciprocal_flushed: true,
+        },
+        FloatFn::FastSin,
+        FloatFn::FastCos,
+    ];
+    let mut out = Vec::new();
+    for f in [float(32), vec(float(32), 4), float(16), vec(float(16), 4)] {
+        let bare = module_words(f, &|_, x| Ok(x[0]));
+        for g in fns {
+            // `fast::sin` and `fast::cos` are refined from `float` calls only.
+            if matches!(g, FloatFn::FastSin | FloatFn::FastCos) && f.is_narrow() {
+                continue;
+            }
+            let used = module_words(f, &|fb, x| {
+                math::float_fn(
+                    fb,
+                    g,
+                    f,
+                    Contraction::Allowed,
+                    NanTest::IsNan,
+                    x,
+                    &Lib::instructions(),
+                )
+            });
+            let (emitted, bound) = (used - bare, g.words(f) as usize);
+            if emitted > bound || 2 * emitted < bound {
+                out.push(format!("{g:?} {f:?}: {emitted} words against {bound}"));
+            }
+        }
+    }
+    assert!(out.is_empty(), "{out:#?}");
+}

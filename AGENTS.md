@@ -1,283 +1,269 @@
 # AGENTS.md
 
-Operating guide for any AI agent working in this repository. Follow it unless the user
-explicitly overrides a rule for the current task.
+Rules for any AI agent working in this repository. Follow them unless the user overrides one for
+the current task.
 
-## What this project is
+## The project
 
-**metal2vulkan** is a standalone Rust crate and CLI that translates **Metal AIR** (LLVM bitcode
-or sanitized `.ll`) to **Vulkan SPIR-V** with a native Rust emitter.
+metal2vulkan runs Metal shaders and Metal programs on Vulkan. It is a Cargo workspace (a virtual
+manifest at the root) of five crates under `crates/`:
 
-- **License:** LGPL-3.0-or-later (`LICENSE`)
-- **Publishable crate:** `metal2vulkan` (library + `metal2vulkan` binary)
-- **Unpublished workspace member:** `validation/` (`metal2vulkan-validation`, `publish = false`) —
-  authored semantic cases, dependency-exact observations, deterministic harvest, and GPU-free A/B
+| Crate | Published | What it is |
+|---|---|---|
+| `crates/metal2vulkan` | yes | The translator: Metal AIR to SPIR-V through a Metal-shaped API (device, library, pipelines, binding plans), and the `metal2vulkan` command (feature `cli`) |
+| `crates/metal2vulkan-runtime` | yes | The Metal API on Vulkan, built only on the translator's public API |
+| `crates/metal2vulkan-air` | yes | The AIR front end: container, bitstream, bitcode, typed IR, metadata ABI, intrinsics, canonicalization, `graph`, `budget` |
+| `crates/metal2vulkan-validation` | no | Authored semantic cases, Metal and Vulkan execution, harvest, the corpus index and audits |
+| `crates/metal2vulkan-devtools` | no | The external-tool runner, fixture assemblers and fixture paths the tests share |
 
-This tree is **not** the paravirtual GPU monorepo. Do not reintroduce monorepo paths (`host/`,
-`vm/`, `kb/`, `journal/`), device/protocol code, or private capture corpora.
+The three published crates share one version; `metal2vulkan` pins `metal2vulkan-air` exactly
+(`=0.x.y`). License: dual, `GPL-2.0-or-later OR LGPL-3.0-or-later`, at the recipient's choice. The
+root `LICENSE` is the notice; `LICENSE-GPL-2.0`, `LICENSE-LGPL-3.0` and `LICENSE-GPL-3.0` (which the
+LGPL v3 incorporates) are the texts. Each published crate carries copies of all four, held equal to
+the root's by a test (`published_crates`).
 
-**Orientation for humans and agents:**
+The translator's core lives in `crates/metal2vulkan-air/src/` and, in
+`crates/metal2vulkan/src/`, `memory/`, `lower/`, `structurize/`, `spirv/`, `pipeline/` and
+`bind/`. Prefer structural fixes there over one-off workarounds.
 
 | Doc | Role |
 |---|---|
-| `README.md` | Install, CLI, quick library use |
-| `docs/HOWTO.md` | End-to-end translation and consumer integration |
-| `docs/ARCHITECTURE.md` | Pipeline, structurizer/relooper, retry cascade |
-| `docs/REFLECTION.md` | Consumer binding metadata (`ShaderReflection`) |
-| `docs/VALIDATION.md` | Developer validation ladder (harvest, drift, A/B) |
-| `CONTRIBUTING.md` | Day-to-day build/test loop |
-| `src/env_vars.rs` | Authoritative `METAL2VULKAN_*` registry (`--help`) |
+| `README.md` | What it is, install, command line, quick library use |
+| `docs/API.md` | The translator's API guide; the degrade-notice catalogue; accepted differences |
+| `crates/metal2vulkan-runtime/README.md` | The runtime's guide |
+| `docs/HOWTO.md` | Integration: tools, caching, failures, isolation |
+| `docs/ARCHITECTURE.md` | The translator's stages and module map |
+| `docs/FAST-PATHS.md` | The ledger of speed-for-accuracy defaults and their exact switches |
+| `docs/VALIDATION.md` | The validation ladder |
+| `CONTRIBUTING.md` | Build, test, golden tables |
+| `crates/metal2vulkan/src/env_vars.rs` | The `METAL2VULKAN_*` variables |
 
-## Components (start here)
+## The owner's two rules
 
-| Path | Role |
-|---|---|
-| `src/` | Product library + CLI (`translate*`, native emitter, passes, reflect) |
-| `tests/` | Integration tests for the product crate |
-| `examples/` | Small runnable examples |
-| `validation/` | Authored-case validation tooling (not published to crates.io) |
-| `docs/` | Architecture and consumer guides |
-| `scripts/` | Dev utilities (`mtlb-extract`, SPIR-V grammar regeneration) |
-| `.github/workflows/ci.yml` | Format, warnings-denied clippy/Rustdoc, and parallel tests on `ubuntu-26.04` + `macos-26`; public Vulkan qualification on Linux |
+These override anything below.
 
-Crown-jewel code lives under `src/native/`, `src/passes/`, and `src/reflect/`. Prefer structural
-fixes over one-off workarounds.
+1. **Fast by default, exact on request, both kept.** Every choice that trades accuracy for speed
+   (pipeline-creation time or GPU time) defaults to the fast form. Its accurate form stays behind
+   an opt-in `DevicePolicy` switch (`DevicePolicy::exact_answers()` selects them all), with tests
+   of both settings. Never delete either form, and never make the accurate form the default: that
+   is the owner's call alone. `docs/FAST-PATHS.md` is the ledger, one row per choice, edited in
+   place (a ledger, not a journal). A commit that adds, removes or changes such a choice, its
+   bound or its switch updates its row in the same commit; `tests::fast_paths` checks the ledger
+   against the code.
+2. **An accuracy note is logged, never fatal.** A precision note or degradation is recorded and
+   announced, and the work runs, on every device. Only what Metal itself refuses, or an operation
+   that cannot run at all, may fail or end anything.
 
-## Ground rules
+## Translation honesty
 
-### Translation honesty
+- **Structure over names.** Decide lowering from IR structure (types, address spaces, access
+  chains, AIR's metadata ABI), never from a function, type, variable or shader name. Dispatching on
+  the stable `air.*` and `llvm.*` intrinsic families is allowed; prefer a structural test when one
+  exists. A name-keyed branch that passes one shader while failing identically shaped others is a
+  defect. No behavior keyed to an app, a shader hash, an earlier session or a corpus census.
+- **Honest FALLBACK.** Unsupported input returns a typed `Err` (the command line prints
+  `FALLBACK`). Never emit wrong-but-valid SPIR-V to silence a gate.
+- **Scope is the device's.** Refuse only what the device truly lacks; implement or exactly
+  emulate the rest. Where no exact form exists, a near-equivalent is allowed only when the
+  artifact records it (a `PrecisionNote`) and the runtime announces it.
+- **Unknown stays unknown.** Do not invent semantics for unsupported opcodes, types or layouts.
+  Fail visibly and leave a test or a doc note.
+- **No env-gated product paths.** Translation never branches on environment variables. The
+  `METAL2VULKAN_*` variables are for tool paths, operational settings and default-off
+  diagnostics only.
+- **Fix causes, not observations.** A probe may explain a failure; committed behavior needs a
+  structural or ABI reason.
 
-- **Structure and semantics over names.** Decide emit/lowering from IR structure (types, storage
-  classes, access chains, AIR metadata ABI) — **never** from a hardcoded function, type, variable,
-  or corpus-style identifier. A name-keyed branch that green-lights one shader while failing
-  identically shaped others is a defect.
-  - **Allowed:** dispatch on **stable ABI symbols** that are part of the AIR/LLVM contract
-    (`air.*`, `llvm.*` families). Prefer a structural test when one exists.
-  - **Honest FALLBACK:** unsupported inputs return `Err` / CLI `FALLBACK`. Do not emit
-    wrong-but-valid SPIR-V to silence a gate.
-- **No env-gated product paths.** Product translation behavior must not branch on env vars. Keep
-  `METAL2VULKAN_*` for operational settings, tool path overrides, and default-off diagnostics /
-  measurement only (`src/env_vars.rs`).
-- **Unknown stays unknown.** Do not invent semantics for unsupported opcodes, types, or layouts.
-  Fail visibly and leave a test or doc note if the gap is real.
-- **Fix causes, not observations.** Temporary probes may explain a failure; committed behavior
-  needs a structural/ABI justification, not matching one workload’s bytes by special-case.
+## Claims and evidence
 
-### Claims and evidence
-
-- **A claim is only as broad as its evidence.** Verifying one path does not license “all / never /
-  zero” statements. Scope replies, commits, and docs to what you actually ran.
-- Say **verified** only for commands you executed and results you saw; use **expected** /
+- A claim is only as broad as its evidence. One verified path does not license "all", "never" or
+  "zero". Scope replies, commits and docs to what you ran.
+- Say **verified** only for commands you ran and results you saw; say **expected** or
   **unaudited** for the rest.
+- Prefer the smallest testable change. When you fix a bug class, add a test or a measurable check
+  that fails without the fix.
+- Evidence for a gated or device-specific path must show the path ran (a counter, a log line, an
+  assertion), not only that a run passed.
 
-### Measurement before polish
+## Translation ceilings
 
-- Prefer the smallest change that can be **tested** (unit/integration, local A/B, or a synthetic
-  `.ll` fixture). Do not ship third-party captured shaders or mined corpora.
-- When fixing a bug class, add or update a **test** (or a clear measurable check) so it cannot
-  regress silently.
+- **20 seconds per translation attempt, end to end**: handing the AIR to an isolated worker,
+  translation, SPIR-V validation and reporting. Success or an honest FALLBACK must arrive within
+  it. A timeout is a failure to diagnose and fix, never a way to classify supported input.
+- **500 MiB per translation attempt**, enforced at the worker boundary (peak live allocations and
+  resident growth). On a breach, kill the worker's whole process group and remove its scratch
+  files. Do not raise the ceiling without a new explicit instruction from the user.
+- Keep total use bounded: parallelize only independent rows, cap workers and queues, account for
+  `workers × 500 MiB`. No unbounded threads, processes, queues, caches or retained IR.
+- Corpus tools default `--jobs` to the host's logical CPU count; pass `--jobs N` only when asked.
+- Remove work rather than hide it: incremental, shard-local indexing; parse only what is selected;
+  cache immutable analysis; never reuse analysis across a semantics-changing rewrite.
+- Changes to translation, planner, indexing or validation hot paths need release-mode evidence:
+  wall time and peak memory for the largest relevant row and a bounded representative batch.
+  Report the slowest row and the scope. Debug timings prove nothing.
+- An over-budget translation is an active bug, never accepted debt. Add a deterministic check for
+  the redundant work behind it.
 
-### Validation coverage is a closed contract
+## Validation coverage
 
-- **Chase closure, not a better-looking queue.** The authoring-capability census covers every
-  indexed AIR identity, including identities that already have authored cases. A fresh complete
-  census is closed only when `classified == total`, `remaining == 0`, and `unresolved == 0`.
-  Reviews, annotations, allowlists, previous observations, or a smaller selection do not resolve a
-  tooling gap. A newly observed requirement is work to model honestly, not a row to suppress.
-- **One typed capability vocabulary owns the truth.** `ToolingRequirement` and the shared
-  structural checks in `validation/src/executor_contract.rs` are the contract among classification,
-  the case checker, both Metal and Vulkan executors, persisted facts, and reporting. Do not grow
-  parallel string lists or component-local support tables. Adding support for a structure means
-  updating the literal schema, validation, both applicable execution paths, classification, and
-  regression tests together; if one side cannot execute it exactly, it remains an unsupported
-  requirement.
-- **Describe supported families independently from missing tooling.** A focused `AuditTarget`
-  selects current typed structural facts, not rows carrying an unsupported requirement. Fixing a
-  capability must not make its regression audit select zero rows. Keep descriptive facts and
-  blocking requirements separate even when they initially identify the same corpus family.
-- **Prefer architectural fit over policy patches.** Put shared semantics at the narrowest common
-  boundary and delete superseded blocker fields, adapters, commands, and duplicated mappings.
-  Never post-filter a stale classifier result, special-case a hash/name, or add a review policy to
-  make incompatible components appear consistent.
-- **The disposable index is the acceleration structure, not another corpus.** It owns compact
-  identities, exact source byte locations, dependency hashes, and versioned structural facts.
-  Ordinary refresh and lookup paths must inspect only new/changed shards or directly selected byte
-  ranges. Once warm, a no-change capability audit should select no rows and open/read zero source
-  shards; exact-row and focused audits must not scan unrelated shards.
-- **Cache validity follows semantics.** Analyzer, executor, oracle, product, and dependency
-  fingerprints must include every behavior that can change classification, translation, or
-  expected output. Bump the appropriate version when that behavior changes and recompute through
-  the normal indexed path. Do not trust cached validation produced by different semantics, and do
-  not rebuild or rescan source data merely to invalidate derived facts.
-- **Tests own their inputs.** Index, cache, and audit tests must build isolated synthetic shards and
-  observations. They may not depend on the developer's ambient private corpus, pre-existing index,
-  filesystem ordering, or cache warmth.
-- **Use the right proof for the claim.** After capability/classifier changes, run a full fresh
-  `authoring-capabilities --reclassify-all` census and then a warm pass that proves zero source
-  reads. After feature-specific changes, run the corresponding focused audit across its complete
-  selected family in bounded, resumable batches. After product translation changes, run a fresh
-  translation fingerprint sweep when the local corpus is available. Corpus-wide claims require
-  corpus-wide results; otherwise state the measured subset.
-- **Authored evidence is execution, not bookkeeping.** Qualify an authored case freshly on Metal,
-  then execute the Vulkan candidate and compare the declared observations. Existing observation
-  files, successful SPIR-V validation, or an authored manifest alone are not semantic proof.
-- **`authored_linkage_required` is narrow and structural.** Use it only when exact AIR structure
-  establishes that translation needs explicit authored linked inputs which a standalone harvested
-  row cannot supply. Timeouts, resource-limit breaches, malformed input, unsupported lowering, and
-  ordinary translator errors remain failures; never relabel them to complete a census.
+Validation lives in `crates/metal2vulkan-validation`; [docs/VALIDATION.md](docs/VALIDATION.md)
+has the commands.
 
-### Translation performance is a correctness contract
+- **Close the census.** The authoring-capability census
+  (`corpus-triage --audit authoring-capabilities`) covers every indexed AIR identity. A fresh
+  census is closed only when `classified == total`, `remaining == 0` and `unresolved == 0`.
+  Reviews, allowlists, older observations or a smaller selection do not resolve a gap.
+- **One vocabulary.** `ToolingRequirement` (`src/requirement.rs`) and the structural checks in
+  `src/executor_contract/` are the contract between classification, the case checker, the Metal
+  and Vulkan executors, stored facts and reports. Do not grow parallel string lists. Supporting a
+  structure means updating the schema, validation, both executors, classification and tests
+  together; what one side cannot execute exactly stays an unsupported requirement.
+- **Describe families apart from gaps.** A focused `AuditTarget` selects current structural facts,
+  not rows that carry a requirement, so fixing a capability does not empty its regression audit.
+- **The index is an acceleration structure.** Refresh only new or changed shards; a warm,
+  unchanged audit reads no source shard; an exact-row lookup reads only its own shard.
+- **Cache validity follows semantics.** Fingerprints cover everything that can change
+  classification, translation or expected output. Bump the matching version when behavior changes
+  (`SEMANTICS_VERSION`, `ARTIFACT_FORMAT_VERSION`, `RUNTIME_VERSION`, the executor and census
+  versions) and recompute through the indexed path.
+- **Tests own their inputs.** Index, cache and audit tests build their own synthetic shards; they
+  never depend on a private corpus, an existing index, filesystem order or cache warmth.
+- **The right proof for the claim.** After classifier changes, a full
+  `--reclassify-all` census, then a warm pass with zero source reads. After a feature change, its
+  focused audit over the whole selected family. After translation changes, a fresh translation
+  census where the corpus is available. Corpus-wide claims need corpus-wide results.
+- **Authored evidence is execution.** Qualify a case on Metal, run the Vulkan candidate and compare
+  the observations. A stored observation, a valid module or a manifest alone proves nothing.
 
-- **20 seconds is a hard end-to-end ceiling per translation attempt.** Measure from handing the
-  selected AIR input to an isolated worker through translation, SPIR-V validation, and reporting
-  the result. Success or an honest unsupported-input `FALLBACK` must arrive within the ceiling;
-  exceeding it, timing out, or killing a stuck worker is a failing result that must be diagnosed
-  and fixed before the affected work is done. A timeout is a safety rail, not an acceptable way
-  to classify supported input. Do not meet the ceiling by skipping required validation, reducing
-  semantic coverage, or converting an input that was supported before into a premature fallback.
-- **500 MiB is the hard memory budget per translation attempt.** Enforce it at the worker
-  boundary, covering peak translation-attributable live allocations and resident growth. Kill
-  the complete worker process group on a time or memory breach and clean up its scratch files.
-  This explicit 500-MiB ceiling supersedes the former 300/350-MiB escalation contract. Do not raise
-  it again unless a new explicit user instruction supersedes this rule; no automatic increase
-  remains available.
-- **Keep total resource use bounded.** Parallelize only independent rows or phases, cap worker and
-  queue counts, and account for the aggregate worst case (`workers * 500 MiB`). No optimization
-  may introduce unbounded threads, processes, queues, caches, retained IR, or candidate modules.
-- **Use host parallelism for corpus runs.** Corpus tooling defaults `jobs` to the host's available
-  logical CPU count (the equivalent of `nproc`). Use that default for full-corpus work; pass an
-  explicit `--jobs N` only when the user requests an override.
-- **Remove work instead of hiding it.** Prefer shard-local incremental indexing, parsing only the
-  selected or changed source, caching immutable analysis, reusing still-valid CFG facts, skipping
-  equivalent retry states, and releasing failed candidates promptly. Never reuse analysis across
-  a semantics-affecting rewrite unless its validity is structurally guaranteed.
-- **Warm indexes must prevent corpus-wide revisits.** Refresh only new or changed sources; an
-  exact-row translation should read its hash-derived shard, not scan unrelated shards. If a
-  compatibility migration needs a broader scan, make it explicit, resumable, one-time, and
-  measured rather than silently placing it on the translation path.
-- **Performance changes require release-mode evidence.** When touching translation, retry,
-  planner, indexing, or validation hot paths, measure the end-to-end wall time and peak memory for
-  the largest relevant locally available row plus a bounded representative batch. Report the
-  slowest row and the scope measured. Debug-build timing does not verify the ceiling.
-- When a slow or memory-heavy failure class is found, add a deterministic regression check for
-  the underlying redundant-work or boundedness property. Avoid machine-fragile microbenchmarks;
-  keep the 20-second and 500-MiB worker guards as hard integration backstops.
-- **Do not normalize known breaches.** An observed over-budget translation is an active correctness
-  bug, not acceptable technical debt or a reason to weaken the workload. Profile where its time
-  and memory go, remove redundant or global work structurally, and remeasure the same input under
-  the same release-mode boundary before claiming the regression fixed.
+## Tools and scratch files
 
-### Tooling and temp files
+- The libraries run no external tool. The command line runs `llvm-as` (for `.ll` input) and
+  `spirv-val`. Tests and validation also use `llvm-dis`, `spirv-as` and `xcrun metal-as`. Each is
+  found on `PATH` or through `METAL2VULKAN_<TOOL>`.
+- Remove scratch files under the OS temp dir as soon as the tool is done with them; no long-lived
+  dumps under fixed `/tmp` paths. FALLBACK repro bundles under `$TMPDIR/metal2vulkan-repros` (or
+  `METAL2VULKAN_REPRO_DIR`) may stay.
+- `pgrep -f` and `ps | grep` match their own command line. Always bracket the first character:
+  `pgrep -f '[c]orpus-refresh'`.
 
-- External tools: **`llvm-dis`** for AIR bitcode input, **`spirv-val`** for product validation, and
-  **`spirv-as`** for passthrough generation. Resolve via PATH or `METAL2VULKAN_<TOOL>` overrides.
-- Scratch files under the OS temp dir (or a caller-supplied `tmp`) must be **removed as soon as
-  the tool no longer needs them**. The CLI removes its work directory on success and before
-  `process::exit` on FALLBACK. Do not reintroduce long-lived dumps under fixed `/tmp/...` paths.
-- FALLBACK **repro bundles** under `$TMPDIR/metal2vulkan-repros` (or `METAL2VULKAN_REPRO_DIR`) are
-  intentional and may be kept for debugging.
-- **`pgrep` / `ps | grep`:** the only permitted spelling brackets the first character of the
-  pattern — `pgrep -f '[c]orpus-refresh'`, `pgrep -f '[c]argo test --release'`. Unbracketed, `-f`
-  tests the whole command line and the pattern appears verbatim in the argv of the shell running
-  the `pgrep`, so it matches itself and the target always looks alive: you end up waiting on your
-  own wait loop, which then returns only on its timeout. A long, specific pattern is *more* likely
-  to self-match, not less. Bracket unconditionally.
+## What not to commit
 
-### What not to commit
+- Apple-owned binaries, disk images, mined metallib or AIR corpora, private golden sets.
+- Anything derived from a consumer's guest shaders: shader caches, metallibs, translated SPIR-V or
+  MSL, logs with shader text, census results over them.
+- `crates/metal2vulkan-validation/corpus/local/`, and raw `*.metallib`, `*.air`, `*.spv` or
+  `*.spvasm` dumps (gitignored).
+- AIR or SPIR-V of anyone else's shader. The exceptions are our own: `.air` that
+  `scripts/regen-air-fixtures` compiles from MSL we wrote, and synthetic `.spvasm` we wrote,
+  committed under `crates/metal2vulkan-validation/fixtures/public/`.
+- `target/`, `Cargo.lock` (ignored: this tree is library-first), `.cache/`, secrets, large binaries,
+  name-keyed special cases.
 
-- Apple-owned binaries, guest disk images, mined metallib/AIR corpora, or private golden sets
-- Contents of `validation/corpus/local/`, raw `*.metallib` / `*.air` / `*.spv` dumps
-  (all gitignored — see `validation/corpus/README.md`)
-- `target/`, `Cargo.lock` (gitignored for this library-first tree), `.cache/`
-- Name-keyed special cases “just to pass one case”
+Committed and allowed: synthetic fixtures under `crates/metal2vulkan-validation/fixtures/public/`,
+authored cases under `corpus/cases/` and observations under `corpus/observations/` (no AIR bodies
+in either).
 
-**Allowed (committed):** synthetic fixtures under `validation/fixtures/public/`, authored case
-shards under `validation/corpus/cases/`, and dependency-exact observation shards under
-`validation/corpus/observations/`. None may contain AIR source bodies.
+## Layout and ownership
 
-## Layout & ownership
-
-- **Product logic** stays in the `metal2vulkan` crate (`src/`).
-- **Optional offline/oracle work** stays in `validation/` (may depend on MoltenVK or a Vulkan ICD).
-  Do not pull that into the published crate’s default dependency graph.
-- **Grammar tables** under `src/spirv_binary/*_generated.rs` are regenerated via
-  `scripts/regen-spirv-grammar/` from Khronos SPIRV-Headers + rspirv-autogen; do not hand-edit.
-- **Reflection** for consumers: `src/reflect/` + `docs/REFLECTION.md`. Binding numbers must stay
-  aligned with the interface pass ABI (set 0; bases 0 / 32 / 64 / 96 / 128 / 160).
+- Product logic stays in `crates/metal2vulkan`. The runtime reaches it only through its public
+  API, which the compiler enforces. Validation and devtools use public APIs too; a test that needs
+  an internal item lives in the crate's own `src/tests/`.
+- Validation may depend on MoltenVK or a Vulkan ICD; none of that enters a published crate's
+  dependencies.
+- `crates/metal2vulkan/src/spv.rs` (the SPIR-V grammar items the translator names) and
+  `crates/metal2vulkan/src/spirv_binary/table.rs` (the test parser's table, test-only) come from
+  `scripts/regen-spirv-grammar/`, from Khronos's grammar JSON alone; never hand-edit them. A
+  newly named opcode or enumerant goes in that script's `items.txt`, then regenerate.
+- The published crates (`metal2vulkan`, `metal2vulkan-air`, `metal2vulkan-runtime`) take only
+  dependencies that offer a GPL-2.0-compatible license (MIT, BSD, ISC, Unlicense or a similar
+  option); never one that is Apache-2.0-only, GPL-3.0-only or LGPL-3.0-only. The dual license's
+  GPL-2.0 option must hold for consumers that link the crates into GPL-2.0 programs. Code in
+  their sources is ours or comes from such a source with its notice kept.
+- The pipeline interface: link numbers set 0 densely in `ResourceSlot` order; set 1 holds the heap
+  arrays (docs/API.md section 5).
+- A new or changed refusal, `RuntimeGap` or public type regenerates `docs/REFUSALS.md`
+  (`python3 scripts/refusal-surface/refusal_surface.py`) and updates the `api_surface` table.
+  Public docs never link to private items.
+- Every public runtime item has a doc comment that names its Metal counterpart and what differs
+  or is refused.
 
 ## Build, test, CI
 
-Run Rust tests with Cargo's default available parallelism (the logical CPU count):
+Tests run under [cargo-nextest](https://nexte.st) at its default parallelism. nextest skips
+doctests, so they have their own line. The gate:
 
 ```sh
 cargo fmt --all
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps
-cargo test -p metal2vulkan --all-features
-cargo test -p metal2vulkan-validation --all-features
+cargo nextest run -p metal2vulkan -p metal2vulkan-air -p metal2vulkan-runtime -p metal2vulkan-devtools --all-features
+cargo nextest run -p metal2vulkan-validation --all-features
+cargo test --workspace --all-features --doc
 ```
 
-- **MSRV:** see `rust-version` in `Cargo.toml` (currently 1.87).
-- **Warnings are hard failures.** CI sets `RUSTFLAGS=-Dwarnings` and runs clippy with
-  `-D warnings`. Treat any new rustc or clippy warning as a bug you must fix before committing —
-  do not leave `#[allow(...)]` noise to paper over real issues, and do not ask reviewers (or a
-  later CI run) to clean up after you.
-- **Features:** `serde` enables `ShaderReflection` JSON and CLI `--emit-meta`. Every gate above
-  passes `--all-features`, because the released CLI is built with `serde` and code behind
-  `#[cfg(feature = "serde")]` is otherwise compiled by nothing.
-- CI runners: **`ubuntu-26.04`** and **`macos-26`** (not `*-latest`).
+- MSRV: `rust-version` in the crates' manifests (1.98).
+- Warnings are errors everywhere (CI sets `RUSTFLAGS=-Dwarnings`). Never hide one behind
+  `#[allow(...)]`; fix it.
+- Features: `serde`, `ash` and `cli` (which enables `serde`). Every gate passes `--all-features`;
+  CI also builds `metal2vulkan` with no feature and with each alone.
+- Device tests compile only under `--cfg m2v_gpu` or `--cfg m2v_cpu_icd`
+  ([docs/VALIDATION.md](docs/VALIDATION.md)).
+- CI (`.github/workflows/ci.yml`) runs on `ubuntu-26.04` and `macos-26` (never `*-latest`): format,
+  clippy (all features, each feature alone, `--cfg m2v_gpu`), Rustdoc, the API reference check
+  (`scripts/api-docs`), packaging, the suites, doctests, and on Linux the device tests and public
+  case qualification on lavapipe.
 
-When diagnosing a hang, prefer reading full `cargo test` output over piping through `head`/`grep`
-(easy to hide a later failure).
+When chasing a hang, read the whole nextest output; do not pipe it through `head` or `grep`.
 
 ## Code style
 
-- **No empty-placeholder ownership tricks.** Do not use `std::mem::take`, `mem::replace` with an
-  empty/default sentinel, `swap` with an empty value, or an equivalent helper to move IR, modules,
-  functions, blocks, instructions, or analysis collections out of a borrowed owner. Express the
-  real ownership contract instead: consume and return the owned value, borrow the existing
-  allocation, or redesign the transformation around an explicit result. When touching an existing
-  occurrence, remove it structurally rather than copying the pattern.
+- **No placeholder ownership tricks.** Never move IR, modules, functions, blocks, instructions or
+  analysis out of a borrowed owner with `mem::take`, `mem::replace` with an empty value, `swap`
+  with an empty value or a helper that does the same. Consume and return the owned value, borrow
+  it, or restructure around an explicit result. Remove an existing occurrence when you touch it.
+- Run `cargo fmt --all` before every commit; keep clippy clean.
+- Match the surrounding style; prefer small files and structural fixes over special-case tables.
+- No dead code: delete what nothing uses.
 
-- **Format before every commit.** Run `cargo fmt --all` (repo `rustfmt.toml`) on the whole
-  workspace so the diff you commit already matches what CI’s `fmt --check` expects. If a change
-  is pure formatting, keep it in its own commit when mixed with logic would obscure the review.
-- **Clippy must be clean.** Before you commit Rust edits, run
-  `cargo clippy --workspace --all-targets -- -D warnings` and clear every finding. Match
-  surrounding module style; prefer small, reviewable files and structural fixes over growing
-  special-case tables.
-- Public API and CLI changes should update `README.md` / `docs/` when consumer-visible.
+## Docs and comments
+
+- **No planning documents and no design citations.** Code, comments and docs cite no design-record
+  entries (`D<n>`), work-package codes or TODO section numbers, and the tree keeps no plan, status
+  or journal. The why of a change goes in its commit message; a durable contract goes in the doc
+  that owns it.
+- **The honest trade-offs stay current.** `docs/FAST-PATHS.md` (speed-for-accuracy choices, device
+  gaps and known gaps), `docs/REFUSALS.md` (generated), `docs/METAL-COVERAGE.md` (generated) and
+  `docs/API.md`'s degrade-notice catalogue and accepted differences change in the same commit as
+  the behavior they describe. An open gap is recorded where a user reads it: a typed refusal, a
+  degrade notice or precision note, or `docs/FAST-PATHS.md`'s known gaps.
+- Consumer-visible API or command-line changes update `README.md` and `docs/`.
+- Docs say what is true now, plainly; no history.
 
 ## Git workflow
 
-- Prefer **focused commits** with a clear subject and body (what / why / how verified).
-- **Pre-commit gate (Rust):** `cargo fmt --all`, clippy with `-D warnings`, and warnings-denied
-  all-features Rustdoc as above. Do not commit unformatted code or known clippy/rustc/Rustdoc
-  warnings; CI will fail the same checks.
-- Do not force-push shared history unless the user asks.
-- Do not commit secrets, large binaries, or lockfiles that this repo intentionally ignores.
-- **Never amend a commit** unless the user explicitly asks for it in the current conversation. A
-  commit that is already written is history someone else may have read; correct it by adding the
-  next commit, not by rewriting the last one.
-- **Every commit is a release candidate.** Do not land partial work, a half-applied refactor, or a
-  fix whose test is still to come. Each commit must build, pass the pre-commit gate above, and leave
-  no capability worse off than the commit before it. If a change is too large to land in one sound
-  step, split it into steps that are each independently sound - not into a broken step followed by a
-  repair.
+- Commit at every coherent step: a focused subject, and a body saying what, why and how it was
+  verified.
+- Before each commit run `cargo fmt --all`, and nothing more.
+- **Merge into `master` at once**, with no pre-merge test, queue or gate. On a conflict, merge
+  `master` into your branch, resolve it there, commit, and merge again. `master` may be broken for
+  a while; a claim about a change still waits for its evidence.
+- **Checks run on `master` after the merge**: fmt, clippy in every configuration, Rustdoc, the
+  suites, the public-surface table, the authored compile census and the golden tables. The golden
+  tables and the compile census are re-blessed on `master`, not in the change.
+- **Fix forward.** Every failure the checks report is a work item for the change's owner, fixed by
+  a new commit. Never amend, rebase published history, squash, force-push or revert by rewriting
+  history. Never use `git stash`.
 
-## The loop (unit of work)
+## The loop
 
-1. **Scope** — smallest testable increment; name how you will verify it.
-2. **Validate** — read the relevant code and `docs/`; do not assume monorepo facts.
-3. **Change** — implement; keep product paths free of env gates and name keys.
-4. **Test** — serial `cargo test` for the packages you touched; full workspace clippy with
-   `-D warnings` when Rust sources changed; warnings-denied all-features Rustdoc when public APIs or
-   documentation changed.
-5. **Document** — update `docs/` or comments only when the durable contract changed.
-6. **Commit** — `cargo fmt --all` first, then one concern per commit when practical. Only commit
-   when fmt, clippy, and applicable Rustdoc checks are clean.
+1. **Scope** the smallest testable increment and name how you will verify it.
+2. **Read** the code and docs it touches; assume nothing.
+3. **Change** it, keeping product paths free of env gates and name keys.
+4. **Test** it with the test or measurable check it needs.
+5. **Document** it where a durable contract changed (and in `docs/FAST-PATHS.md` for any
+   speed-for-accuracy choice).
+6. **Commit and merge** into `master`, then fix forward what `master`'s checks report.
 
-**Done** = it works under the checks above, claims match evidence, fmt/clippy/Rustdoc are green,
-measured translations in the touched scope stay within 20 seconds and 500 MiB, relevant capability
-audits remain closed without stale evidence or unrelated source reads, and the tree stays
-publishable as a general AIR→SPIR-V translator.
+**Done** means merged into `master`, `master`'s checks green for it, claims matching evidence,
+translations in the touched scope within 20 seconds and 500 MiB, and capability audits still
+closed.

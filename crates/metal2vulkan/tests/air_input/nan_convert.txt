@@ -1,0 +1,136 @@
+target triple = "air64_v28-apple-macosx26.0.0"
+source_filename = "-"
+; datalayout DataLayout { endian: Little, pointers: {0: PointerSpec { size_bits: 64, abi_bits: 64, pref_bits: 64, index_bits: 64 }}, ints: {1: AlignSpec { abi_bits: 8, pref_bits: 8 }, 8: AlignSpec { abi_bits: 8, pref_bits: 8 }, 16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }}, floats: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }}, vectors: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 24: AlignSpec { abi_bits: 32, pref_bits: 32 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 48: AlignSpec { abi_bits: 64, pref_bits: 64 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 96: AlignSpec { abi_bits: 128, pref_bits: 128 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }, 192: AlignSpec { abi_bits: 256, pref_bits: 256 }, 256: AlignSpec { abi_bits: 256, pref_bits: 256 }, 512: AlignSpec { abi_bits: 512, pref_bits: 512 }, 1024: AlignSpec { abi_bits: 1024, pref_bits: 1024 }}, aggregate: AlignSpec { abi_bits: 0, pref_bits: 64 }, native_ints: [8, 16, 32], stack_align_bits: None, alloca_space: 0, program_space: 0, globals_space: 0, mangling: None, fn_ptr_align: None, non_integral: [] }
+%t4 = type void (ptr addrspace(1), ptr addrspace(1), i32)
+%t9 = type <4 x half> (<4 x float>)
+%t10 = type <4 x float> (<4 x half>)
+%t12 = type [2 x i32]
+c6 = %t12 [27, 0]
+c17 = <4 x i32> [0, 1, 2, 3]
+
+define %t4 @f0 "nan_convert" memory(ModRef, NoModRef, NoModRef) "frame-pointer"="all" "min-legal-vector-width"="0" "no-builtins"="" "no-trapping-math"="true" "stack-protector-buffer-size"="8" %a0( Ref nocapture "air-buffer-no-alias"="" ) %a1( Mod nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = shl i32 %a2, i32 1
+  %i1 = zext %i0 to i64
+  %i2 = getelementptr inbounds <4 x i32>, %a0, %i1
+  %i3 = bitcast %i2 to ptr addrspace(1)
+  %i4 = load <4 x float>, %i3, align 16
+  %i5 = or i32 %i0, i32 1
+  %i6 = zext %i5 to i64
+  %i7 = getelementptr inbounds <4 x i32>, %a0, %i6
+  %i8 = load <4 x i32>, %i7, align 16
+  %i9 = extractelement %i8, i64 0
+  %i10 = bitcast %i9 to <2 x half>
+  %i11 = extractelement %i8, i64 1
+  %i12 = bitcast %i11 to <2 x half>
+  %i13 = shufflevector <4 x half> %i10, %i12, <0, 1, 2, 3>
+  %i14 = tail call <4 x half> @f1 [air Convert(Convert { dst: NumTy { elem: F16, lanes: 4 }, dst_kind: Float, src: NumTy { elem: F32, lanes: 4 }, src_kind: Float, src_fp8: None })](%i4)
+  %i15 = bitcast %i14 to <4 x i16>
+  %i16 = extractelement %i15, i64 0
+  %i17 = zext %i16 to i32
+  %i18 = extractelement %i15, i64 1
+  %i19 = zext %i18 to i32
+  %i20 = shl nuw i32 %i19, i32 16
+  %i21 = or i32 %i20, %i17
+  %i22 = insertelement <4 x i32> undef, %i21, i64 0
+  %i23 = extractelement %i15, i64 2
+  %i24 = zext %i23 to i32
+  %i25 = extractelement %i15, i64 3
+  %i26 = zext %i25 to i32
+  %i27 = shl nuw i32 %i26, i32 16
+  %i28 = or i32 %i27, %i24
+  %i29 = insertelement %i22, %i28, i64 1
+  %i30 = extractelement %i4, i64 0
+  %i31 = fptrunc %i30 to half
+  %i32 = extractelement %i4, i64 1
+  %i33 = fptrunc %i32 to half
+  %i34 = bitcast %i31 to i16
+  %i35 = zext %i34 to i32
+  %i36 = bitcast %i33 to i16
+  %i37 = zext %i36 to i32
+  %i38 = shl nuw i32 %i37, i32 16
+  %i39 = or i32 %i38, %i35
+  %i40 = insertelement %i29, %i39, i64 2
+  %i41 = extractelement %i10, i64 0
+  %i42 = fpext %i41 to float
+  %i43 = bitcast %i42 to i32
+  %i44 = insertelement %i40, %i43, i64 3
+  %i45 = getelementptr inbounds <4 x i32>, %a1, %i1
+  store %i44, %i45, align 16
+  %i47 = tail call <4 x float> @f2 [air Convert(Convert { dst: NumTy { elem: F32, lanes: 4 }, dst_kind: Float, src: NumTy { elem: F16, lanes: 4 }, src_kind: Float, src_fp8: None })](%i13)
+  %i48 = getelementptr inbounds <4 x i32>, %a1, %i6
+  %i49 = bitcast %i48 to ptr addrspace(1)
+  store %i47, %i49, align 16
+  ret void
+}
+
+declare %t9 @f1 "air.convert.f.v4f16.f.v4f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t10 @f2 "air.convert.f.v4f32.f.v4f16" memory(NoModRef, NoModRef, NoModRef)
+!md0 = !"SDK Version"
+!md1 = !"wchar_size"
+!md2 = !"frame-pointer"
+!md3 = !"air.max_device_buffers"
+!md4 = !"air.max_constant_buffers"
+!md5 = !"air.max_threadgroup_buffers"
+!md6 = !"air.max_textures"
+!md7 = !"air.max_read_write_textures"
+!md8 = !"air.max_samplers"
+!md9 = !"air.buffer"
+!md10 = !"air.location_index"
+!md11 = !"air.read"
+!md12 = !"air.address_space"
+!md13 = !"air.arg_type_size"
+!md14 = !"air.arg_type_align_size"
+!md15 = !"air.arg_type_name"
+!md16 = !"uint4"
+!md17 = !"air.arg_name"
+!md18 = !"in"
+!md19 = !"air.read_write"
+!md20 = !"out"
+!md21 = !"air.thread_position_in_grid"
+!md22 = !"uint"
+!md23 = !"tid"
+!md24 = !"air.compile.denorms_disable"
+!md25 = !"air.compile.fast_math_disable"
+!md26 = !"air.compile.framebuffer_fetch_enable"
+!md27 = !"Apple metal version 32023.921 (metalfe-32023.921.6)"
+!md28 = !"Metal"
+!md29 = i32 2
+!md30 = %t12 c6
+!md31 = i32 1
+!md32 = i32 4
+!md33 = i32 7
+!md34 = i32 31
+!md35 = i32 128
+!md36 = i32 8
+!md37 = i32 16
+!md38 = ptr addrspace(0) @f0
+!md39 = i32 0
+!md40 = !{!md29, !md0, !md30}
+!md41 = !{!md31, !md1, !md32}
+!md42 = !{!md33, !md2, !md29}
+!md43 = !{!md33, !md3, !md34}
+!md44 = !{!md33, !md4, !md34}
+!md45 = !{!md33, !md5, !md34}
+!md46 = !{!md33, !md6, !md35}
+!md47 = !{!md33, !md7, !md36}
+!md48 = !{!md33, !md8, !md37}
+!md49 = !{}
+!md50 = !{!md39, !md9, !md10, !md39, !md31, !md11, !md12, !md31, !md13, !md37, !md14, !md37, !md15, !md16, !md17, !md18}
+!md51 = !{!md31, !md9, !md10, !md31, !md31, !md19, !md12, !md31, !md13, !md37, !md14, !md37, !md15, !md16, !md17, !md20}
+!md52 = !{!md29, !md21, !md15, !md22, !md17, !md23}
+!md53 = !{!md50, !md51, !md52}
+!md54 = !{!md38, !md49, !md53}
+!md55 = !{!md24}
+!md56 = !{!md25}
+!md57 = !{!md26}
+!md58 = !{!md27}
+!md59 = !{!md29, !md36, !md39}
+!md60 = !{!md28, !md32, !md39, !md39}
+!"llvm.module.flags" = !{!md40, !md41, !md42, !md43, !md44, !md45, !md46, !md47, !md48}
+!"air.kernel" = !{!md54}
+!"air.compile_options" = !{!md55, !md56, !md57}
+!"llvm.ident" = !{!md58}
+!"air.version" = !{!md59}
+!"air.language_version" = !{!md60}

@@ -1,0 +1,117 @@
+target triple = "air64_v28-apple-macosx26.0.0"
+source_filename = "-"
+; datalayout DataLayout { endian: Little, pointers: {0: PointerSpec { size_bits: 64, abi_bits: 64, pref_bits: 64, index_bits: 64 }}, ints: {1: AlignSpec { abi_bits: 8, pref_bits: 8 }, 8: AlignSpec { abi_bits: 8, pref_bits: 8 }, 16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }}, floats: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }}, vectors: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 24: AlignSpec { abi_bits: 32, pref_bits: 32 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 48: AlignSpec { abi_bits: 64, pref_bits: 64 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 96: AlignSpec { abi_bits: 128, pref_bits: 128 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }, 192: AlignSpec { abi_bits: 256, pref_bits: 256 }, 256: AlignSpec { abi_bits: 256, pref_bits: 256 }, 512: AlignSpec { abi_bits: 512, pref_bits: 512 }, 1024: AlignSpec { abi_bits: 1024, pref_bits: 1024 }}, aggregate: AlignSpec { abi_bits: 0, pref_bits: 64 }, native_ints: [8, 16, 32], stack_align_bits: None, alloca_space: 0, program_space: 0, globals_space: 0, mangling: None, fn_ptr_align: None, non_integral: [] }
+%t5 = type void (ptr addrspace(1), ptr addrspace(1), ptr addrspace(2), ptr addrspace(2), ptr addrspace(1), i32)
+%t6 = type void (ptr addrspace(1), i32, i32, i32, ptr addrspace(1), i32, i32, i32)
+%t7 = type void (ptr addrspace(1), i32, i32, i32, ptr addrspace(2), i32, i32, i32)
+%t9 = type [2 x i32]
+%t11 = type { ptr addrspace(1) } ; "struct.metal::command_buffer"
+%t12 = type { %t11 } ; "struct.Encoder"
+c6 = %t9 [27, 0]
+
+define %t5 @f0 "icb_render_indexed_encode" "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="0" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a0( align 8 dereferenceable(8) Ref nocapture "air-buffer-no-alias"="" ) %a1( "air-buffer-no-alias"="" ) %a2( "air-buffer-no-alias"="" ) %a3( NoModRef nocapture "air-buffer-no-alias"="" ) %a4( NoModRef nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = getelementptr inbounds %t12, %a0, i64 0, i32 0, i32 0
+  %i1 = load ptr addrspace(1), %i0, align 8
+  %i2 = icmp eq %a5, i32 0
+  br %i2, bb1, bb2
+bb1:
+  %i4 = getelementptr inbounds i16, %a1, i64 1
+  tail call void @f1 [air IndirectCommand(DrawIndexedPrimitives { space: Device, wide: false })](%i1, i32 0, i32 0, i32 5, %i4, i32 2, i32 4294967294, i32 1) arg0( nocapture )
+  br bb3
+bb2:
+  tail call void @f2 [air IndirectCommand(DrawIndexedPrimitives { space: Constant, wide: true })](%i1, %a5, i32 0, i32 3, %a2, i32 1, i32 4, i32 0) arg0( nocapture )
+  br bb3
+bb3:
+  ret void
+}
+
+declare %t6 @f1 "air.draw_indexed_primitives_render_command.p1i16" %a0( nocapture )
+
+declare %t7 @f2 "air.draw_indexed_primitives_render_command.p2i32" %a0( nocapture )
+!md0 = !"SDK Version"
+!md1 = !"wchar_size"
+!md2 = !"frame-pointer"
+!md3 = !"air.max_device_buffers"
+!md4 = !"air.max_constant_buffers"
+!md5 = !"air.max_threadgroup_buffers"
+!md6 = !"air.max_textures"
+!md7 = !"air.max_read_write_textures"
+!md8 = !"air.max_samplers"
+!md9 = !"air.indirect_buffer"
+!md10 = !"air.buffer_size"
+!md11 = !"air.location_index"
+!md12 = !"air.read"
+!md13 = !"air.address_space"
+!md14 = !"air.struct_type_info"
+!md15 = !"command_buffer"
+!md16 = !"commands"
+!md17 = !"air.indirect_argument"
+!md18 = !"air.command_buffer"
+!md19 = !"air.arg_type_name"
+!md20 = !"air.arg_name"
+!md21 = !"air.arg_type_size"
+!md22 = !"air.arg_type_align_size"
+!md23 = !"Encoder"
+!md24 = !"encoder"
+!md25 = !"air.buffer"
+!md26 = !"ushort"
+!md27 = !"short_indices"
+!md28 = !"uint"
+!md29 = !"wide_indices"
+!md30 = !"params"
+!md31 = !"air.arg_unused"
+!md32 = !"air.read_write"
+!md33 = !"out"
+!md34 = !"air.thread_position_in_grid"
+!md35 = !"tid"
+!md36 = !"air.compile.denorms_disable"
+!md37 = !"air.compile.fast_math_enable"
+!md38 = !"air.compile.framebuffer_fetch_enable"
+!md39 = !"Apple metal version 32023.921 (metalfe-32023.921.6)"
+!md40 = !"Metal"
+!md41 = i32 2
+!md42 = %t9 c6
+!md43 = i32 1
+!md44 = i32 4
+!md45 = i32 7
+!md46 = i32 31
+!md47 = i32 128
+!md48 = i32 8
+!md49 = i32 16
+!md50 = ptr addrspace(0) @f0
+!md51 = i32 0
+!md52 = i32 3
+!md53 = i32 5
+!md54 = !{!md41, !md0, !md42}
+!md55 = !{!md43, !md1, !md44}
+!md56 = !{!md45, !md2, !md41}
+!md57 = !{!md45, !md3, !md46}
+!md58 = !{!md45, !md4, !md46}
+!md59 = !{!md45, !md5, !md46}
+!md60 = !{!md45, !md6, !md47}
+!md61 = !{!md45, !md7, !md48}
+!md62 = !{!md45, !md8, !md49}
+!md63 = !{}
+!md64 = !{!md51, !md18, !md11, !md51, !md43, !md19, !md15, !md20, !md16}
+!md65 = !{!md51, !md48, !md51, !md15, !md16, !md17, !md64}
+!md66 = !{!md51, !md9, !md10, !md48, !md11, !md51, !md43, !md12, !md13, !md43, !md14, !md65, !md21, !md48, !md22, !md48, !md19, !md23, !md20, !md24}
+!md67 = !{!md43, !md25, !md11, !md43, !md43, !md12, !md13, !md43, !md21, !md41, !md22, !md41, !md19, !md26, !md20, !md27}
+!md68 = !{!md41, !md25, !md11, !md41, !md43, !md12, !md13, !md41, !md21, !md44, !md22, !md44, !md19, !md28, !md20, !md29}
+!md69 = !{!md52, !md25, !md11, !md52, !md43, !md12, !md13, !md41, !md21, !md44, !md22, !md44, !md19, !md28, !md20, !md30, !md31}
+!md70 = !{!md44, !md25, !md11, !md44, !md43, !md32, !md13, !md43, !md21, !md44, !md22, !md44, !md19, !md28, !md20, !md33, !md31}
+!md71 = !{!md53, !md34, !md19, !md28, !md20, !md35}
+!md72 = !{!md66, !md67, !md68, !md69, !md70, !md71}
+!md73 = !{!md50, !md63, !md72}
+!md74 = !{!md36}
+!md75 = !{!md37}
+!md76 = !{!md38}
+!md77 = !{!md39}
+!md78 = !{!md41, !md48, !md51}
+!md79 = !{!md40, !md44, !md51, !md51}
+!"llvm.module.flags" = !{!md54, !md55, !md56, !md57, !md58, !md59, !md60, !md61, !md62}
+!"air.kernel" = !{!md73}
+!"air.compile_options" = !{!md74, !md75, !md76}
+!"llvm.ident" = !{!md77}
+!"air.version" = !{!md78}
+!"air.language_version" = !{!md79}

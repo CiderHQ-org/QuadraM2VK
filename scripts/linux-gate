@@ -1,0 +1,433 @@
+#!/usr/bin/env bash
+# G-linux: run a command in the pinned Linux container (scripts/linux-gate.Dockerfile), or by
+# default the Linux job of .github/workflows/ci.yml (scripts/linux-gate-ci).
+#
+#   scripts/linux-gate --cpus N [--slot NAME] [--platform amd64|arm64]
+#                      [--icd lavapipe|swiftshader] [--profile P]
+#                      [--recipe gate | --recipe drm-shim --driver radv|anv|nvk --chip ID]
+#                      [--private-corpus DIR] [--scratch DIR]
+#                      [-- <command> [args...]]
+#
+# - --cpus N is the CPU share (default: $CARGO_BUILD_JOBS; refuses when neither is given). The
+#   container runs with --cpus=N --memory=$((4*N))g and CARGO_BUILD_JOBS=N, and an image build
+#   compiles with N jobs.
+# - --slot NAME selects the Linux target/cargo volume `m2v-linux-gate-<NAME>` (default: basename
+#   of $CARGO_TARGET_DIR, e.g. `slot-3`, else `default`). One run per slot at a time: each
+#   container holds an exclusive lock on its /cache volume (the target's) from before it unpacks
+#   the tree until its command ends, and a second run on the slot waits for it.
+# - --platform selects the container architecture (default: the host's). The GitHub runner is
+#   amd64; on Apple silicon amd64 runs under emulation (OrbStack: Rosetta) and is much slower.
+#   Each platform has its own image tag and volume (`m2v-linux-gate-<NAME>-<platform>`).
+# - No container mounts the checkout. The files in git's index (tracked files, as the working tree
+#   has them, and new files you opted in with `git add -N`; never an untracked file, so a local
+#   dump is not sent even when no ignore rule covers it; `git check-ignore` confirms that none is
+#   ignored) are streamed to each container as a tar archive on its stdin and unpacked into a
+#   container-local /work/m2v, which is the working directory, every file stamped with the time
+#   of unpacking (under the slot's lock): newer than anything an earlier run built in the slot's
+#   target, so cargo rebuilds the workspace's crates and reruns their build scripts. Kept
+#   checkout mtimes let a run whose checkout predates another checkout's build in the same target
+#   (a queued job, or two runs at once) take that build as fresh: its binaries carried the other
+#   tree's product fingerprint, or its code. Registry crates stay cached. Before anything
+#   else runs there, the container checks that /work/m2v holds exactly that file list (the private
+#   corpus's mount points aside) and exits 70 otherwise. Writes there (Cargo.lock, the corpus
+#   index, observation rows) vanish with the container.
+# - Network is used only to build the image and, in a first container, to resolve Cargo.lock and
+#   `cargo fetch`. The command runs in a second container with `--network none` and
+#   CARGO_NET_OFFLINE=true.
+# - Private AIR. No container sees an ignored file of the checkout (the private
+#   corpus, the corpus index, local dumps): nothing of the checkout is mounted. --private-corpus DIR
+#   (an explicit opt-in that needs an explicit command) mounts DIR/local/sources and
+#   DIR/local/library-modules (a corpus root, e.g. the main checkout's crates/metal2vulkan-validation/corpus)
+#   READ-ONLY at the same paths under /work/m2v/crates/metal2vulkan-validation/corpus in the command container only,
+#   so the work tree's corpus holds the private AIR. That container writes no volume a networked
+#   container mounts: its /cache is the slot's private volume (`m2v-linux-gate-<NAME>-<platform>-
+#   private`), and the slot's volume is read-only at /cache-net, whose crates and Cargo.lock it
+#   copies in. The script enforces, not merely states, where everything goes: each container is
+#   created, inspected, and started only when every mount the daemon records for it is one that
+#   scripts/linux-gate-policy allows (the slot's volumes; the private directories read-only in a
+#   container with `--network none` and `--rm`; the scratch directory; no bind at all in a
+#   networked container). Otherwise it is removed unstarted and the script exits 70.
+# - --scratch DIR mounts the host directory DIR read-write at /scratch in the command container
+#   only: the one place a command's output outlives the container (e.g. `corpus-vulkan --batch`'s
+#   done-list and rows, which carry hashes, inputs, and outputs, never AIR). DIR may not equal,
+#   contain, or lie inside the checkout, the main checkout (a linked worktree's), or the private
+#   corpus, compared by file identity (device and inode), so a symlink, a case variant, or a
+#   firmlink spelling of a protected path is refused too (exit 64).
+# - No GPU passthrough. The command's loader sees exactly one Vulkan ICD (VK_DRIVER_FILES), a CPU
+#   ICD chosen by --icd: `lavapipe` (default; Mesa's llvmpipe, with LP_NUM_THREADS=1) or
+#   `swiftshader` (built into the gate image at /opt/swiftshader). The default command is ci.yml's
+#   Linux job, which records engine `ci-lavapipe` rows, so it runs on lavapipe only: --icd
+#   swiftshader and --profile need an explicit command.
+# - --profile P stacks VK_LAYER_KHRONOS_profiles, configured with the committed
+#   crates/metal2vulkan-validation/profiles/P.json, between VK_LAYER_KHRONOS_validation and the ICD (validation spec
+#   §4.1.2), so the device reports P and the validation layer checks against it. It refuses P
+#   when P states anything the device lacks, and it enables the validation layer for every Vulkan
+#   instance of the command. scripts/linux-gate-vulkan, which applies --icd and --profile inside
+#   the container, has the details. The gate recipe only. The validation crate's store refuses the
+#   rows of an executor the layer restricts without its request: to record rows
+#   under P, pass `--profiles-layer P` to corpus-vulkan or corpus-pipeline instead.
+# - --recipe drm-shim (L4 driver acceptance) builds
+#   scripts/drm-shim.Dockerfile instead: the gate's toolchain plus Mesa's RADV/ANV/NVK and their
+#   noop drm-shims (Mesa 26.2.3). --driver and --chip pick the driver and the GPU it compiles for,
+#   in the shim's own spelling, as the pinned Mesa reads it:
+#     radv  AMDGPU_GPU_ID, a device name of src/amd/common/amdgpu_devices.c (navi31, rembrandt,
+#           ...; any case);
+#     anv   INTEL_STUB_GPU_PLATFORM, a platform name of src/intel/dev/intel_device_info.c (tgl,
+#           arl, ...);
+#     nvk   NOUVEAU_CHIPSET, a hexadecimal chipset id (1b3 for GB203, 136 for GP106).
+#   This script checks the spelling's form; a name the shim does not know fails when the driver
+#   opens the device (the amdgpu shim aborts, the Intel shim leaves the device uninitialized).
+#   The chip each committed profile maps to is in docs/VALIDATION.md. That image has neither
+#   SwiftShader nor the profiles layer, so the command sees lavapipe; only a process started
+#   through scripts/drm-shim-exec sees the shimmed driver, so cargo and rustc never load the
+#   shim. Example:
+#     scripts/linux-gate --cpus 2 --recipe drm-shim --driver radv --chip navi31 -- bash -c \
+#       'cargo build --release -p metal2vulkan-validation --bin corpus-pipeline &&
+#        scripts/drm-shim-exec "$CARGO_TARGET_DIR/release/corpus-pipeline" \
+#          --profile amd-rdna3-radv --device-type gpu --fixtures'
+# - The command container gets one capability beyond Docker's default, SYS_PTRACE, for kcmp: the
+#   per-attempt memory accounting compares a worker's address space with its parent's, so a member
+#   still running in its parent's memory is charged once. Docker's default seccomp
+#   profile refuses kcmp without it. The container has its own PID namespace, so the grant reaches
+#   only the container's own processes. No custom seccomp profile: a copy of Docker's default
+#   would go stale.
+# - Every container is `--rm`, named, and stopped by a trap if this script is interrupted; nothing
+#   outlives the command. The image and the slot volumes persist (remove them with
+#   `docker volume rm m2v-linux-gate-<slot>-<platform>` (and `...-private` after a
+#   --private-corpus run) / `docker image rm m2v-linux-gate:<tag>`).
+set -euo pipefail
+
+usage() {
+    echo "usage: scripts/linux-gate --cpus N [--slot NAME] [--platform amd64|arm64]" \
+        "[--icd lavapipe|swiftshader] [--profile P]" \
+        "[--recipe gate | --recipe drm-shim --driver radv|anv|nvk --chip ID]" \
+        "[--private-corpus DIR] [--scratch DIR] [-- <command> [args...]]" >&2
+    exit 64
+}
+
+cpus=${CARGO_BUILD_JOBS:-}
+slot=
+platform=
+recipe=gate
+icd=lavapipe
+profile=
+driver=
+chip=
+private=
+scratch=
+if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+    slot=$(basename "$CARGO_TARGET_DIR")
+fi
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --cpus) [ "$#" -ge 2 ] || usage; cpus=$2; shift 2 ;;
+        --cpus=*) cpus=${1#--cpus=}; shift ;;
+        --slot) [ "$#" -ge 2 ] || usage; slot=$2; shift 2 ;;
+        --slot=*) slot=${1#--slot=}; shift ;;
+        --platform) [ "$#" -ge 2 ] || usage; platform=$2; shift 2 ;;
+        --platform=*) platform=${1#--platform=}; shift ;;
+        --recipe) [ "$#" -ge 2 ] || usage; recipe=$2; shift 2 ;;
+        --icd) [ "$#" -ge 2 ] || usage; icd=$2; shift 2 ;;
+        --icd=*) icd=${1#--icd=}; shift ;;
+        --profile) [ "$#" -ge 2 ] || usage; profile=$2; shift 2 ;;
+        --profile=*) profile=${1#--profile=}; shift ;;
+        --driver) [ "$#" -ge 2 ] || usage; driver=$2; shift 2 ;;
+        --chip) [ "$#" -ge 2 ] || usage; chip=$2; shift 2 ;;
+        --private-corpus) [ "$#" -ge 2 ] || usage; private=$2; shift 2 ;;
+        --private-corpus=*) private=${1#--private-corpus=}; shift ;;
+        --scratch) [ "$#" -ge 2 ] || usage; scratch=$2; shift 2 ;;
+        --scratch=*) scratch=${1#--scratch=}; shift ;;
+        --) shift; break ;;
+        -h|--help) usage ;;
+        *) echo "linux-gate: unknown argument $1" >&2; usage ;;
+    esac
+done
+case "$cpus" in
+    ''|*[!0-9]*|0) echo "linux-gate: pass --cpus N (the assigned share)" >&2; usage ;;
+esac
+slot=${slot:-default}
+case "$icd" in
+    lavapipe|swiftshader) ;;
+    *) echo "linux-gate: --icd must be lavapipe or swiftshader" >&2; exit 64 ;;
+esac
+case "$profile" in
+    *[!A-Za-z0-9_.-]*|.*) echo "linux-gate: --profile must name a crates/metal2vulkan-validation/profiles/*.json stem" >&2; exit 64 ;;
+esac
+if [ "$#" -eq 0 ] && [ "$icd$profile" != lavapipe ]; then
+    echo "linux-gate: the default command (ci.yml's Linux job) runs on lavapipe with no profile;" \
+        "pass a command after -- to use --icd swiftshader or --profile" >&2
+    exit 64
+fi
+if [ -n "$private" ]; then
+    [ "$#" -gt 0 ] || {
+        echo "linux-gate: --private-corpus needs an explicit command after --" >&2
+        exit 64
+    }
+    for part in sources library-modules; do
+        [ -d "$private/local/$part" ] || {
+            echo "linux-gate: --private-corpus $private has no local/$part directory" >&2
+            exit 64
+        }
+    done
+    private=$(cd "$private" && pwd -P)
+fi
+if [ -n "$scratch" ]; then
+    [ -d "$scratch" ] || { echo "linux-gate: --scratch $scratch is not a directory" >&2; exit 64; }
+    scratch=$(cd "$scratch" && pwd -P)
+fi
+shim_env=()
+icd_label="icd=$icd"
+case "$recipe" in
+    gate)
+        [ -z "$driver$chip" ] || { echo "linux-gate: --driver/--chip need --recipe drm-shim" >&2; exit 64; }
+        ;;
+    drm-shim)
+        [ -n "$chip" ] || { echo "linux-gate: --recipe drm-shim needs --chip ID" >&2; exit 64; }
+        [ "$icd" = lavapipe ] && [ -z "$profile" ] || {
+            echo "linux-gate: the drm-shim image has lavapipe only and no profiles layer" >&2
+            exit 64
+        }
+        # The form each shim parses: a device name, a platform name, or a
+        # hexadecimal chipset id.
+        case "$driver" in
+            radv) shim=amdgpu; chip_var=AMDGPU_GPU_ID; shim_icd=radeon; form='[A-Za-z0-9_]+' ;;
+            anv) shim=intel; chip_var=INTEL_STUB_GPU_PLATFORM; shim_icd=intel; form='[a-z0-9-]+' ;;
+            nvk) shim=nouveau; chip_var=NOUVEAU_CHIPSET; shim_icd=nouveau; form='[0-9a-f]+' ;;
+            *) echo "linux-gate: --driver must be radv, anv, or nvk" >&2; exit 64 ;;
+        esac
+        [[ "$chip" =~ ^${form}$ ]] || {
+            echo "linux-gate: --chip $chip is not a $driver chip spelling ($form)" >&2
+            exit 64
+        }
+        shim_env=(
+            -e "M2V_DRM_SHIM_LIBRARY=/opt/mesa/lib/lib${shim}_noop_drm_shim.so"
+            -e "M2V_DRM_SHIM_CHIP_VAR=$chip_var"
+            -e "M2V_DRM_SHIM_CHIP=$chip"
+            -e "M2V_DRM_SHIM_ICD_GLOB=/opt/mesa/share/vulkan/icd.d/${shim_icd}_icd.*.json"
+        )
+        # The command itself sees lavapipe; only scripts/drm-shim-exec's process sees the driver.
+        icd_label="icd=$shim_icd under scripts/drm-shim-exec, $icd otherwise"
+        ;;
+    *) echo "linux-gate: --recipe must be gate or drm-shim" >&2; exit 64 ;;
+esac
+case "$slot" in
+    *[!A-Za-z0-9_.-]*) echo "linux-gate: slot name must be [A-Za-z0-9_.-]+" >&2; exit 64 ;;
+esac
+
+if [ -z "$platform" ]; then
+    case "$(uname -m)" in
+        arm64|aarch64) platform=arm64 ;;
+        x86_64|amd64) platform=amd64 ;;
+        *) echo "linux-gate: unknown host architecture $(uname -m); pass --platform" >&2; exit 64 ;;
+    esac
+fi
+case "$platform" in
+    amd64|arm64) ;;
+    *) echo "linux-gate: --platform must be amd64 or arm64" >&2; exit 64 ;;
+esac
+
+# The checkout, the main checkout it belongs to, and the scratch directory's place among them
+# (scripts/linux-gate-policy), all before docker is touched.
+root=$(cd "$(dirname "$0")/.." && pwd -P)
+common_dir=$(git -C "$root" rev-parse --path-format=absolute --git-common-dir)
+main_root=$(cd "$common_dir/.." && pwd -P)
+policy=(--root "$root" --main-root "$main_root")
+[ -z "$private" ] || policy+=(--private "$private")
+[ -z "$scratch" ] || policy+=(--scratch "$scratch")
+"$root/scripts/linux-gate-policy" paths "${policy[@]}" || exit 64
+
+command -v docker >/dev/null || { echo "linux-gate: docker not found" >&2; exit 69; }
+docker info >/dev/null 2>&1 || {
+    echo "linux-gate: the docker daemon is not running (OrbStack: \`orbctl start\`)" >&2
+    exit 69
+}
+
+if [ "$recipe" = drm-shim ]; then
+    dockerfile="$root/scripts/drm-shim.Dockerfile"
+else
+    dockerfile="$root/scripts/linux-gate.Dockerfile"
+fi
+if command -v shasum >/dev/null; then
+    tag=$(shasum -a 256 "$dockerfile" | cut -c1-16)
+else
+    tag=$(sha256sum "$dockerfile" | cut -c1-16)
+fi
+image="m2v-linux-gate:$tag-$platform"
+[ "$recipe" = gate ] || image="m2v-linux-gate:$recipe-$tag-$platform"
+volume="m2v-linux-gate-$slot-$platform"
+private_volume="$volume-private"
+memory="$((4 * cpus))g"
+run_id="m2v-linux-gate-$slot-$$"
+
+if ! docker image inspect "$image" >/dev/null 2>&1; then
+    echo "linux-gate: building $image" >&2
+    # BuildKit takes no per-build --cpus/--memory. Both images compile (cargo-nextest,
+    # SwiftShader, and the profiles layer; the drm-shim image also bindgen and Mesa), so their
+    # compile steps take the share as JOBS (cargo -j, ninja -j), which also bounds their memory.
+    docker build --platform "linux/$platform" --build-arg "JOBS=$cpus" -t "$image" \
+        -f "$dockerfile" "$root/scripts" >&2
+fi
+
+# The index's file list (tracked files and `git add -N` entries, as the working tree has them);
+# skips index entries deleted in the worktree. Untracked files are never listed: the networked
+# fetch container and the shared volume see only what the index names.
+filelist=$(mktemp "${TMPDIR:-/tmp}/m2v-linux-gate.XXXXXX")
+containers=()
+cleanup() {
+    local c
+    for c in "${containers[@]+"${containers[@]}"}"; do
+        docker stop -t 5 "$c" >/dev/null 2>&1 || true
+        # A container created but refused (or interrupted) before it started is not auto-removed.
+        docker rm -f "$c" >/dev/null 2>&1 || true
+    done
+    rm -f "$filelist"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+git -C "$root" ls-files -z --cached |
+    while IFS= read -r -d '' f; do
+        if [ -f "$root/$f" ] || [ -L "$root/$f" ]; then printf '%s\0' "$f"; fi
+    done >"$filelist"
+# Self-check: the list holds no ignored file (check-ignore exits 1 when it finds none). Any other
+# status refuses, so it fails closed: a tracked path behind a working-tree symlink makes
+# check-ignore exit 128 ("beyond a symbolic link"), and the script exits 70.
+ignored=0
+git -C "$root" check-ignore -z --stdin <"$filelist" >/dev/null || ignored=$?
+if [ "$ignored" -ne 1 ]; then
+    echo "linux-gate: refused: the file list holds an ignored file (git check-ignore: $ignored)" >&2
+    exit 70
+fi
+if command -v sha256sum >/dev/null; then
+    tree_sha256=$(LC_ALL=C sort -z "$filelist" | sha256sum | cut -c1-64)
+else
+    tree_sha256=$(LC_ALL=C sort -z "$filelist" | shasum -a 256 | cut -c1-64)
+fi
+# The listed files as a pax archive (symlinks as links, mtimes to the nanosecond, as `cp -a` kept
+# them; no macOS metadata).
+if tar --version 2>/dev/null | grep -q bsdtar; then
+    tar_flags=(--no-mac-metadata --no-xattrs --no-acls --no-fflags)
+else
+    tar_flags=()
+fi
+tree_archive() {
+    COPYFILE_DISABLE=1 tar -c -f - --format pax -C "$root" \
+        "${tar_flags[@]+"${tar_flags[@]}"}" --no-recursion --null -T "$filelist"
+}
+
+# Takes the exclusive lock of the /cache volume (the slot's target; fd 9 stays open through the
+# exec, so the command holds it to its end), unpacks the streamed tree into /work/m2v with fresh
+# mtimes (--touch: newer than every earlier build in that target), checks that it holds exactly
+# the listed files (the private corpus's mount points aside), then runs "$@" there.
+stage='set -euo pipefail
+exec 9>>/cache/.m2v-linux-gate.lock
+if ! flock -n 9; then
+    echo "linux-gate: waiting for this slot'"'"'s lock (another run is using its target)" >&2
+    flock 9
+fi
+mkdir -p /work/m2v
+tar -x -f - -C /work/m2v --no-same-owner --touch --warning=no-unknown-keyword
+cd /work/m2v
+seen=$(find . -path ./crates/metal2vulkan-validation/corpus/local/sources -prune \
+    -o -path ./crates/metal2vulkan-validation/corpus/local/library-modules -prune \
+    -o \( -type f -o -type l \) -printf "%P\0" | LC_ALL=C sort -z | sha256sum | cut -c1-64)
+if [ "$seen" != "$M2V_GATE_TREE_SHA256" ]; then
+    echo "linux-gate: refused: /work/m2v is not exactly the checkout'"'"'s file list" >&2
+    exit 70
+fi
+exec "$@"'
+
+common=(
+    --rm --init --interactive --platform "linux/$platform"
+    --cpus "$cpus" --memory "$memory" --memory-swap "$memory"
+    -e M2V_GATE_TREE_SHA256="$tree_sha256"
+    -e CARGO_HOME=/cache/cargo-home
+    -e CARGO_TARGET_DIR=/cache/target
+    -e CARGO_BUILD_JOBS="$cpus"
+    -e LP_NUM_THREADS=1
+    -e M2V_GATE_ICD="$icd"
+    -e M2V_GATE_PROFILE="$profile"
+    "${shim_env[@]+"${shim_env[@]}"}"
+)
+# The volumes, the private corpus, and the scratch directory. A --private-corpus command
+# container writes only the private volume and reads the slot's volume (crates, Cargo.lock).
+private_sources=/work/m2v/crates/metal2vulkan-validation/corpus/local/sources
+private_modules=/work/m2v/crates/metal2vulkan-validation/corpus/local/library-modules
+offline=()
+if [ -n "$private" ]; then
+    offline+=(
+        -v "$private_volume:/cache"
+        -v "$volume:/cache-net:ro"
+        -v "$private/local/sources:$private_sources:ro"
+        -v "$private/local/library-modules:$private_modules:ro"
+    )
+else
+    offline+=(-v "$volume:/cache")
+fi
+if [ -n "$scratch" ]; then
+    offline+=(-v "$scratch:/scratch")
+fi
+
+# Refuses (exit 70) to start the created container $1 (role $2: fetch or cmd) unless every mount
+# the daemon recorded for it is one scripts/linux-gate-policy allows. The check reads
+# `docker container inspect`, not this script's arguments.
+# Every failure returns non-zero explicitly: callers run inside `||` lists, where set -e does not
+# apply.
+check_container() {
+    local name=$1 role=$2 network autoremove mounts
+    network=$(docker container inspect -f '{{.HostConfig.NetworkMode}}' "$name") || return 70
+    autoremove=$(docker container inspect -f '{{.HostConfig.AutoRemove}}' "$name") || return 70
+    mounts=$(docker container inspect -f '{{range .Mounts}}{{.Type}}{{"\x1f"}}{{.Name}}{{"\x1f"}}
+{{- .Source}}{{"\x1f"}}{{.Destination}}{{"\x1f"}}{{.RW}}{{"\n"}}{{end}}' "$name") || return 70
+    "$root/scripts/linux-gate-policy" mounts --role "$role" --network "$network" \
+        --autoremove "$autoremove" "${policy[@]}" --volume "$volume" \
+        --private-volume "$private_volume" <<<"$mounts" || return 70
+}
+
+# Creates the container $1 (role $2: fetch or cmd) from "${common[@]}" "$@", checks it, then runs
+# it attached with the tree on its stdin; returns its exit status. A refusal exits the script
+# (70) with the container unstarted (the EXIT trap removes it). The exits are explicit because
+# the command container's run sits in an `||` list, where set -e does not apply: relying on it let
+# a refused command container start.
+run() {
+    local name=$1 role=$2
+    shift 2
+    containers+=("$name")
+    docker create --name "$name" "${common[@]}" "$@" >/dev/null || {
+        echo "linux-gate: docker create $name failed" >&2
+        exit 70
+    }
+    check_container "$name" "$role" || exit 70
+    tree_archive | docker start -a -i "$name"
+}
+
+# 1. Network: resolve Cargo.lock as CI does (fresh, no committed lockfile) and fetch the crates
+#    for every target platform into the slot's CARGO_HOME. The lockfile is kept for step 2.
+run "$run_id-fetch" fetch -v "$volume:/cache" "$image" bash -c "$stage" stage bash -c '
+    set -euo pipefail
+    cargo generate-lockfile
+    cargo fetch
+    cp Cargo.lock /cache/Cargo.lock'
+
+# 2. Offline: the command (default: the ci.yml Linux job).
+if [ "$#" -eq 0 ]; then
+    set -- bash scripts/linux-gate-ci
+fi
+start=$(date +%s)
+status=0
+run "$run_id-cmd" cmd --network none -e CARGO_NET_OFFLINE=true --cap-add SYS_PTRACE \
+    "${offline[@]+"${offline[@]}"}" "$image" bash -c "$stage" stage \
+    bash -c 'if [ -d /cache-net ]; then
+            mkdir -p /cache/cargo-home
+            cp -a -u /cache-net/cargo-home/. /cache/cargo-home/
+            cp /cache-net/Cargo.lock Cargo.lock
+        else
+            cp /cache/Cargo.lock Cargo.lock
+        fi && exec "$@"' lock \
+    bash scripts/linux-gate-vulkan "$@" || status=$?
+echo "linux-gate: slot=$slot platform=$platform recipe=$recipe" \
+    "${driver:+driver=$driver chip=$chip }$icd_label${profile:+ profile=$profile}" \
+    "${private:+private-corpus=$private }${scratch:+scratch=$scratch }" \
+    "cpus=$cpus memory=$memory image=$image" \
+    "exit=$status wall=$(($(date +%s) - start)) s" >&2
+exit "$status"

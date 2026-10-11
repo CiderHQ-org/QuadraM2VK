@@ -1,0 +1,770 @@
+//! Enable sets: `recommended_enables`, `with_enabled`, `required_enables`, and the exposure
+//! invariant `Device::new` checks.
+
+use std::collections::BTreeSet;
+
+use super::*;
+use crate::device::enables::{
+    self, Exposure, BUFFER_UPDATE_AFTER_BIND, BUFFER_UPDATE_AFTER_BIND_VUID, FEATURE_NEEDS,
+};
+use crate::device::profile::GuestIsolation;
+use crate::device::requirements::{Requirements, StageCreateFlag};
+use crate::error::Capability;
+
+fn set<T: Ord + Copy>(items: &[T]) -> BTreeSet<T> {
+    items.iter().copied().collect()
+}
+
+fn enables(features: &[VkFeature], extensions: &[VkExtension]) -> EnableSet {
+    let mut out = EnableSet::new();
+    out.features = set(features);
+    out.extensions = set(extensions);
+    out
+}
+
+fn requiring(features: &[VkFeature]) -> Requirements {
+    Requirements {
+        features: set(features),
+        ..Requirements::default()
+    }
+}
+
+fn description_error(result: Result<DeviceDescription, Error>) -> String {
+    match result {
+        Err(Error::InvalidDescriptor(DescriptorError::DeviceDescription { detail })) => detail,
+        other => panic!("expected a DeviceDescription error, got {other:?}"),
+    }
+}
+
+/// A 1.2 description exposing only what `extensions` add to the floor.
+fn floor_with(extensions: &[VkExtension], features: &[VkFeature]) -> DeviceDescription {
+    let mut d = profile("vk12-floor");
+    assert_eq!(d.api_version, ApiVersion::V1_2);
+    d.extensions.extend(extensions.iter().copied());
+    d.features.extend(features.iter().copied());
+    d
+}
+
+/// On every committed profile the recommendation lists only what the description lists, is
+/// closed (`with_enabled` accepts it, `Device::new` accepts the result), and is a fixed point:
+/// the device made from it needs exactly it, as does the device made from the full description.
+/// It leaves out exactly the buffer update-after-bind features of the three profiles that list
+/// them with `robustBufferAccess` and without `robustBufferAccessUpdateAfterBind`.
+#[test]
+fn recommendations_are_closed_fixed_points_on_every_committed_profile() {
+    let mut left_out = Vec::new();
+    for (stem, text) in committed_profiles() {
+        let desc = DeviceDescription::from_khronos_json(&text, None).unwrap();
+        let rec = desc.recommended_enables(&DevicePolicy::default());
+        assert!(rec.features.is_subset(&desc.features), "{stem}");
+        assert!(rec.extensions.is_subset(&desc.extensions), "{stem}");
+        for &f in &rec.features {
+            let x = f.exposure();
+            assert!(
+                x.exposed(desc.api_version, &rec.extensions),
+                "{stem}: {f:?}"
+            );
+        }
+        // Every listed feature with a member is recommended (the committed profiles list only
+        // exposed features whose extensions' requirements are listed), except the buffer
+        // update-after-bind features VUID 10247 forbids beside `robustBufferAccess`.
+        let forbidden = |f: VkFeature| {
+            !desc.robust_buffer_access_update_after_bind
+                && desc.has(VkFeature::RobustBufferAccess)
+                && BUFFER_UPDATE_AFTER_BIND.contains(&f)
+        };
+        for &f in &desc.features {
+            assert_eq!(
+                rec.features.contains(&f),
+                f.exposure().has_member(desc.api_version) && !forbidden(f),
+                "{stem}: {f:?}"
+            );
+            if forbidden(f) {
+                left_out.push((stem.clone(), f));
+            }
+        }
+        assert!(
+            rec.features.contains(&VkFeature::RobustBufferAccess),
+            "{stem}"
+        );
+        let restricted = desc
+            .clone()
+            .with_enabled(&rec)
+            .unwrap_or_else(|e| panic!("{stem}: {e}"));
+        let dev = Device::new(restricted, DevicePolicy::default())
+            .unwrap_or_else(|e| panic!("{stem}: {e}"));
+        assert_eq!(dev.required_enables(), rec, "{stem}");
+        let full = Device::new(desc.clone(), DevicePolicy::default()).unwrap();
+        assert_eq!(full.required_enables(), rec, "{stem}");
+        assert_eq!(
+            rec.extensions.contains(&VkExtension::KhrPortabilitySubset),
+            desc.extensions.contains(&VkExtension::KhrPortabilitySubset),
+            "{stem}"
+        );
+    }
+    let m = profile("moltenvk-m3").recommended_enables(&DevicePolicy::default());
+    assert!(m.extensions.contains(&VkExtension::KhrPortabilitySubset));
+    let stems: BTreeSet<&str> = left_out.iter().map(|(s, _)| s.as_str()).collect();
+    assert_eq!(
+        stems,
+        set(&[
+            "lunarg-desktop-baseline-2023",
+            "roadmap-2022",
+            "swiftshader"
+        ])
+    );
+    assert_eq!(left_out.len(), 9, "{left_out:?}");
+}
+
+/// A description listing `robustBufferAccess` and update-after-bind features: without
+/// `robustBufferAccessUpdateAfterBind` the recommendation keeps `robustBufferAccess` (the
+/// containment encoding) and leaves out the buffer update-after-bind features, which the core does
+/// not read (VUID-VkDeviceCreateInfo-robustBufferAccess-10247), keeping the image ones the rule
+/// does not name; with it, both. Either set passes `with_enabled`, and the device made from the
+/// description, whole or restricted, requires exactly it.
+#[test]
+fn recommendations_keep_robust_buffer_access_and_vuid_10247() {
+    let images = [
+        VkFeature::DescriptorBindingSampledImageUpdateAfterBind,
+        VkFeature::DescriptorBindingStorageImageUpdateAfterBind,
+    ];
+    let listed: Vec<VkFeature> = BUFFER_UPDATE_AFTER_BIND
+        .iter()
+        .chain(&images)
+        .copied()
+        .collect();
+    let mut d = floor_with(&[], &listed);
+    assert!(d.has(VkFeature::RobustBufferAccess));
+    for reported in [false, true] {
+        d.robust_buffer_access_update_after_bind = reported;
+        let rec = d.recommended_enables(&DevicePolicy::default());
+        assert!(rec.features.contains(&VkFeature::RobustBufferAccess));
+        assert!(rec.features.is_superset(&set(&images)));
+        for f in BUFFER_UPDATE_AFTER_BIND {
+            assert_eq!(rec.features.contains(f), reported, "{reported}: {f:?}");
+        }
+        let restricted = d.clone().with_enabled(&rec).unwrap();
+        let dev = Device::new(restricted, DevicePolicy::default()).unwrap();
+        assert_eq!(dev.required_enables(), rec, "{reported}");
+        let whole = Device::new(d.clone(), DevicePolicy::default()).unwrap();
+        assert_eq!(whole.required_enables(), rec, "{reported}");
+    }
+    // Under `UnsafeOff` robust buffer access is not recommended, so neither rule side is lost.
+    d.robust_buffer_access_update_after_bind = false;
+    let policy = DevicePolicy {
+        containment: ContainmentPolicy::UnsafeOff,
+        isolation: GuestIsolation::Off,
+        ..DevicePolicy::default()
+    };
+    let rec = d.recommended_enables(&policy);
+    assert!(!rec.features.contains(&VkFeature::RobustBufferAccess));
+    assert!(rec.features.is_superset(&set(BUFFER_UPDATE_AFTER_BIND)));
+    d.with_enabled(&rec).unwrap();
+}
+
+/// SwiftShader's committed profile states `robustBufferAccessUpdateAfterBind` false and lists
+/// `robustBufferAccess` with the buffer update-after-bind features (the finding: a device made from
+/// the recommendation failed `vkCreateDevice`). Its recommendation now keeps the rule, so the
+/// stated robustness can be created; adding the buffer update-after-bind features to the restricted
+/// description changes only the profile's update-after-bind facts, which no lowering reads: the
+/// containment encoding and every other field are the same.
+#[test]
+fn the_swiftshader_recommendation_keeps_vuid_10247() {
+    let desc = profile("swiftshader");
+    assert!(!desc.robust_buffer_access_update_after_bind);
+    assert!(desc.has(VkFeature::RobustBufferAccess));
+    assert!(BUFFER_UPDATE_AFTER_BIND.iter().all(|&f| desc.has(f)));
+    let rec = desc.recommended_enables(&DevicePolicy::default());
+    assert!(rec.features.contains(&VkFeature::RobustBufferAccess));
+    assert!(rec.features.is_disjoint(&set(BUFFER_UPDATE_AFTER_BIND)));
+    assert!(rec
+        .features
+        .contains(&VkFeature::DescriptorBindingSampledImageUpdateAfterBind));
+    let restricted = desc.clone().with_enabled(&rec).unwrap();
+    let stated = Device::new(restricted.clone(), DevicePolicy::default()).unwrap();
+    assert_eq!(stated.required_enables(), rec);
+    let mut with_buffers = restricted;
+    with_buffers
+        .features
+        .extend(BUFFER_UPDATE_AFTER_BIND.iter().copied());
+    let both = Device::new(with_buffers, DevicePolicy::default()).unwrap();
+    assert_eq!(both.required_enables(), rec);
+    let mut fields = both.profile().fields().clone();
+    assert!(fields.descriptors.update_after_bind_storage_buffer);
+    fields.descriptors.update_after_bind_storage_buffer = false;
+    for f in BUFFER_UPDATE_AFTER_BIND {
+        fields.enabled.features.remove(f);
+    }
+    assert_eq!(&fields, stated.profile().fields());
+    assert!(matches!(
+        fields.containment,
+        crate::device::profile::Containment::On {
+            robust: crate::device::profile::Robustness::Rba
+        }
+    ));
+    // The whole set is the one a conformant SwiftShader refuses.
+    let mut both = rec.clone();
+    both.features
+        .insert(VkFeature::DescriptorBindingStorageBufferUpdateAfterBind);
+    let e = description_error(desc.with_enabled(&both));
+    assert!(e.contains(BUFFER_UPDATE_AFTER_BIND_VUID), "{e}");
+}
+
+/// The recommendation names the exposing extension of promoted features below their version,
+/// omits consumed extensions a version makes redundant, and omits refusal-only extensions.
+#[test]
+fn recommendations_follow_the_device_version() {
+    let d = floor_with(
+        &[
+            VkExtension::KhrShaderTerminateInvocation,
+            VkExtension::ExtShaderViewportIndexLayer,
+            VkExtension::ExtMutableDescriptorType,
+            VkExtension::ExtMeshShader,
+        ],
+        &[
+            VkFeature::ShaderTerminateInvocation,
+            VkFeature::TaskShader,
+            VkFeature::MeshShader,
+        ],
+    );
+    let rec = d.recommended_enables(&DevicePolicy::default());
+    assert!(rec.features.contains(&VkFeature::ShaderTerminateInvocation));
+    assert!(rec
+        .extensions
+        .contains(&VkExtension::KhrShaderTerminateInvocation));
+    // Promoted to 1.2; the core never enables refusal-only extensions.
+    assert!(!rec
+        .extensions
+        .contains(&VkExtension::ExtShaderViewportIndexLayer));
+    assert!(!rec
+        .extensions
+        .contains(&VkExtension::ExtMutableDescriptorType));
+    // The core consumes `VK_EXT_mesh_shader`: listed, it is enabled with the features it exposes.
+    assert!(rec.extensions.contains(&VkExtension::ExtMeshShader));
+    assert!(rec.features.contains(&VkFeature::TaskShader));
+    assert!(rec.features.contains(&VkFeature::MeshShader));
+
+    let mut v13 = d.clone();
+    v13.api_version = ApiVersion { major: 1, minor: 3 };
+    v13.features.insert(VkFeature::ExtendedDynamicState);
+    let rec13 = v13.recommended_enables(&DevicePolicy::default());
+    assert!(rec13
+        .features
+        .contains(&VkFeature::ShaderTerminateInvocation));
+    assert!(!rec13
+        .extensions
+        .contains(&VkExtension::KhrShaderTerminateInvocation));
+    // Core in 1.3 without a feature member: nothing to enable.
+    assert!(!rec13.features.contains(&VkFeature::ExtendedDynamicState));
+    let restricted = v13.with_enabled(&rec13).unwrap();
+    assert!(restricted.has(VkFeature::ExtendedDynamicState));
+}
+
+/// Below Vulkan 1.3 the core consumes `VK_EXT_extended_dynamic_state2`, so a device listing it with
+/// its feature is told to enable both, and the profile made from them has the feature; from 1.3 the
+/// feature is core without a member, kept with nothing to enable.
+#[test]
+fn extended_dynamic_state2_is_enabled_below_1_3_and_implied_from_it() {
+    let d = floor_with(
+        &[
+            VkExtension::ExtExtendedDynamicState,
+            VkExtension::ExtExtendedDynamicState2,
+        ],
+        &[
+            VkFeature::ExtendedDynamicState,
+            VkFeature::ExtendedDynamicState2,
+        ],
+    );
+    let rec = d.recommended_enables(&DevicePolicy::default());
+    for (extension, feature) in [
+        (
+            VkExtension::ExtExtendedDynamicState,
+            VkFeature::ExtendedDynamicState,
+        ),
+        (
+            VkExtension::ExtExtendedDynamicState2,
+            VkFeature::ExtendedDynamicState2,
+        ),
+    ] {
+        assert!(rec.extensions.contains(&extension), "{extension:?}");
+        assert!(rec.features.contains(&feature), "{feature:?}");
+    }
+    let dev = Device::new(
+        d.clone().with_enabled(&rec).unwrap(),
+        DevicePolicy::default(),
+    )
+    .unwrap();
+    let enabled = &dev.profile().fields().enabled;
+    assert!(enabled.features.contains(&VkFeature::ExtendedDynamicState2));
+    assert!(enabled
+        .extensions
+        .contains(&VkExtension::ExtExtendedDynamicState2));
+
+    let mut v13 = d.clone();
+    v13.api_version = ApiVersion { major: 1, minor: 3 };
+    v13.extensions.clear();
+    let rec13 = v13.recommended_enables(&DevicePolicy::default());
+    assert!(!rec13.features.contains(&VkFeature::ExtendedDynamicState2));
+    assert!(!rec13
+        .extensions
+        .contains(&VkExtension::ExtExtendedDynamicState2));
+    assert!(v13
+        .with_enabled(&rec13)
+        .unwrap()
+        .has(VkFeature::ExtendedDynamicState2));
+}
+
+/// A listed extension whose requirement is not listed is not recommended, and neither are the
+/// features only it exposes; a listed requirement is added with it.
+#[test]
+fn recommendations_close_extension_requirements() {
+    let float2 = [
+        VkFeature::ShaderBufferFloat32AtomicMinMax,
+        VkFeature::ShaderSharedFloat32AtomicMinMax,
+    ];
+    let lonely = floor_with(&[VkExtension::ExtShaderAtomicFloat2], &float2);
+    let rec = lonely.recommended_enables(&DevicePolicy::default());
+    assert!(!rec.extensions.contains(&VkExtension::ExtShaderAtomicFloat2));
+    assert!(rec.features.is_disjoint(&set(&float2)));
+
+    let both = floor_with(
+        &[
+            VkExtension::ExtShaderAtomicFloat2,
+            VkExtension::ExtShaderAtomicFloat,
+        ],
+        &float2,
+    );
+    let rec = both.recommended_enables(&DevicePolicy::default());
+    assert!(rec.features.is_superset(&set(&float2)));
+    assert!(rec.extensions.is_superset(&set(&[
+        VkExtension::ExtShaderAtomicFloat2,
+        VkExtension::ExtShaderAtomicFloat,
+    ])));
+
+    let swizzle = floor_with(
+        &[
+            VkExtension::ExtBorderColorSwizzle,
+            VkExtension::ExtCustomBorderColor,
+        ],
+        &[VkFeature::BorderColorSwizzle],
+    );
+    let rec = swizzle.recommended_enables(&DevicePolicy::default());
+    assert!(rec.features.contains(&VkFeature::BorderColorSwizzle));
+    // Not consumed on its own, enabled as the swizzle extension's requirement.
+    assert!(rec.extensions.contains(&VkExtension::ExtCustomBorderColor));
+}
+
+/// `UnsafeOff` containment reads no robust buffer access, so it is not recommended.
+#[test]
+fn unsafe_containment_recommends_no_robust_buffer_access() {
+    let desc = profile("nvidia-rtx50-linux");
+    assert!(desc.has(VkFeature::RobustBufferAccess2));
+    let policy = DevicePolicy {
+        containment: ContainmentPolicy::UnsafeOff,
+        isolation: GuestIsolation::Off,
+        ..DevicePolicy::default()
+    };
+    let rec = desc.recommended_enables(&policy);
+    assert!(!rec.features.contains(&VkFeature::RobustBufferAccess));
+    assert!(!rec.features.contains(&VkFeature::RobustBufferAccess2));
+    let restricted = desc.with_enabled(&rec).unwrap();
+    Device::new(restricted, policy).unwrap();
+}
+
+#[test]
+fn with_enabled_refuses_unsound_sets() {
+    let d = floor_with(
+        &[
+            VkExtension::ExtRobustness2,
+            VkExtension::ExtShaderAtomicFloat2,
+            VkExtension::ExtShaderAtomicFloat,
+        ],
+        &[VkFeature::RobustBufferAccess2],
+    );
+    // Not listed.
+    let e = description_error(
+        d.clone()
+            .with_enabled(&enables(&[VkFeature::Maintenance8], &[])),
+    );
+    assert!(e.contains("Maintenance8"), "{e}");
+    let e = description_error(
+        d.clone()
+            .with_enabled(&enables(&[], &[VkExtension::KhrMaintenance8])),
+    );
+    assert!(e.contains("KhrMaintenance8"), "{e}");
+    // Enabled without its structure's extension.
+    let e = description_error(
+        d.clone()
+            .with_enabled(&enables(&[VkFeature::RobustBufferAccess2], &[])),
+    );
+    assert!(e.contains("ExtRobustness2"), "{e}");
+    // An extension without its requirement.
+    let e = description_error(
+        d.clone()
+            .with_enabled(&enables(&[], &[VkExtension::ExtShaderAtomicFloat2])),
+    );
+    assert!(e.contains("ExtShaderAtomicFloat"), "{e}");
+    // The portability subset is mandatory where listed.
+    let m = profile("moltenvk-m3");
+    let e = description_error(m.clone().with_enabled(&EnableSet::new()));
+    assert!(e.contains("KhrPortabilitySubset"), "{e}");
+    m.with_enabled(&enables(&[], &[VkExtension::KhrPortabilitySubset]))
+        .unwrap();
+}
+
+/// `with_enabled` refuses a set breaking a co-enable rule, naming its VUID: `robustBufferAccess`
+/// with a buffer update-after-bind feature where the description does not report
+/// `robustBufferAccessUpdateAfterBind` (and accepts it where it does, and either side alone), and a
+/// feature without its companion.
+#[test]
+fn with_enabled_refuses_sets_breaking_a_co_enable_rule() {
+    let mut d = floor_with(
+        &[VkExtension::ExtRobustness2],
+        &[
+            VkFeature::RobustBufferAccess2,
+            VkFeature::MultiviewTessellationShader,
+        ],
+    );
+    d.features.extend(BUFFER_UPDATE_AFTER_BIND.iter().copied());
+    assert!(!d.robust_buffer_access_update_after_bind);
+    let robustness2 = [VkExtension::ExtRobustness2];
+    for &f in BUFFER_UPDATE_AFTER_BIND {
+        let e = description_error(
+            d.clone()
+                .with_enabled(&enables(&[VkFeature::RobustBufferAccess, f], &[])),
+        );
+        assert!(
+            e.contains(BUFFER_UPDATE_AFTER_BIND_VUID) && e.contains(&format!("{f:?}")),
+            "{e}"
+        );
+        d.clone().with_enabled(&enables(&[f], &[])).unwrap();
+    }
+    d.clone()
+        .with_enabled(&enables(&[VkFeature::RobustBufferAccess], &[]))
+        .unwrap();
+    let mut reported = d.clone();
+    reported.robust_buffer_access_update_after_bind = true;
+    let mut all = BUFFER_UPDATE_AFTER_BIND.to_vec();
+    all.push(VkFeature::RobustBufferAccess);
+    reported.with_enabled(&enables(&all, &[])).unwrap();
+    // Each feature without its companion.
+    for &(f, needs, vuid) in FEATURE_NEEDS {
+        let e = description_error(d.clone().with_enabled(&enables(&[f], &robustness2)));
+        assert!(e.contains(vuid) && e.contains(&format!("{needs:?}")), "{e}");
+        d.clone()
+            .with_enabled(&enables(&[f, needs], &robustness2))
+            .unwrap();
+    }
+}
+
+/// `Device::new` refuses a description listing a feature without its companion; every committed
+/// profile lists both or neither. No companion needs one itself, which the one-pass recommendation
+/// relies on.
+#[test]
+fn device_new_refuses_a_feature_without_its_companion() {
+    for &(f, needs, vuid) in FEATURE_NEEDS {
+        assert!(FEATURE_NEEDS.iter().all(|&(g, _, _)| g != needs));
+        for (stem, text) in committed_profiles() {
+            let desc = DeviceDescription::from_khronos_json(&text, None).unwrap();
+            assert!(!desc.has(f) || desc.has(needs), "{stem}: {f:?}");
+        }
+        let mut d = floor_with(&[VkExtension::ExtRobustness2], &[f]);
+        d.features.remove(&needs);
+        let e = match Device::new(d.clone(), DevicePolicy::default()) {
+            Err(Error::InvalidDescriptor(DescriptorError::DeviceDescription { detail })) => detail,
+            other => panic!("{other:?}"),
+        };
+        assert!(e.contains(vuid), "{e}");
+        d.features.insert(needs);
+        Device::new(d, DevicePolicy::default()).unwrap();
+    }
+}
+
+/// The restriction keeps exactly the enabled features and extensions and drops format entries
+/// whose value the enabled extensions do not expose.
+#[test]
+fn with_enabled_restricts_features_extensions_and_formats() {
+    let listed = [
+        VkExtension::ExtRobustness2,
+        VkExtension::KhrMaintenance5,
+        VkExtension::KhrDynamicRendering,
+    ];
+    let mut d = floor_with(
+        &listed,
+        &[VkFeature::RobustBufferAccess2, VkFeature::NullDescriptor],
+    );
+    let a8 = vk::Format::A8_UNORM;
+    let r8 = vk::Format::R8_UNORM;
+    let entry = *d.formats.formats.get(&r8).expect("the floor lists R8");
+    d.formats.formats.insert(a8, entry);
+    let kept = d
+        .clone()
+        .with_enabled(&enables(
+            &[
+                VkFeature::RobustBufferAccess,
+                VkFeature::RobustBufferAccess2,
+                VkFeature::UniformBufferStandardLayout,
+            ],
+            &listed,
+        ))
+        .unwrap();
+    assert_eq!(
+        kept.features,
+        set(&[
+            VkFeature::RobustBufferAccess,
+            VkFeature::RobustBufferAccess2,
+            VkFeature::UniformBufferStandardLayout
+        ])
+    );
+    assert_eq!(kept.extensions, set(&listed));
+    assert!(kept.formats.formats.contains_key(&a8));
+    let dropped = d
+        .with_enabled(&enables(&[VkFeature::UniformBufferStandardLayout], &[]))
+        .unwrap();
+    assert!(dropped.extensions.is_empty());
+    assert!(!dropped.formats.formats.contains_key(&a8));
+    assert!(dropped.formats.formats.contains_key(&r8));
+}
+
+/// Every extension-only feature's requirement names its extension on every committed profile
+/// that lists the feature, through `required_enables` both of the bare feature and of the
+/// derivation's closed requirements; a promoted feature names an exposing extension exactly
+/// below its version (the finding: `maintenance8` without `VK_KHR_maintenance8`).
+#[test]
+fn required_enables_name_the_exposing_extension_of_every_feature() {
+    let mut checked_extension_only = 0;
+    for (stem, text) in committed_profiles() {
+        let desc = DeviceDescription::from_khronos_json(&text, None).unwrap();
+        let api = desc.api_version;
+        for &f in VkFeature::ALL.iter().filter(|&&f| desc.has(f)) {
+            let bare = desc
+                .required_enables(&requiring(&[f]))
+                .unwrap_or_else(|c| panic!("{stem}: {f:?}: {c:?}"));
+            let mut closed = requiring(&[f]);
+            crate::spirv::requirements::close_extensions(&mut closed);
+            assert_eq!(
+                desc.required_enables(&closed),
+                Ok(bare.clone()),
+                "{stem}: {f:?}"
+            );
+            let x = f.exposure();
+            assert_eq!(
+                bare.features.contains(&f),
+                x.has_member(api),
+                "{stem}: {f:?}"
+            );
+            let named = x.extensions_at(api);
+            assert_eq!(
+                named.iter().any(|e| bare.extensions.contains(e)),
+                !named.is_empty(),
+                "{stem}: {f:?}: {bare:?}"
+            );
+            if let Exposure::Extension(&[e]) = x {
+                assert!(bare.extensions.contains(&e), "{stem}: {f:?}");
+                checked_extension_only += 1;
+            }
+        }
+    }
+    assert!(checked_extension_only > 0);
+    let m8 = floor_with(&[VkExtension::KhrMaintenance8], &[VkFeature::Maintenance8]);
+    assert_eq!(
+        m8.required_enables(&requiring(&[VkFeature::Maintenance8])),
+        Ok(enables(
+            &[VkFeature::Maintenance8],
+            &[VkExtension::KhrMaintenance8]
+        ))
+    );
+}
+
+#[test]
+fn required_enables_follow_version_dependencies_formats_and_flags() {
+    // A promoted feature below its version names its extension; at its version, nothing.
+    let terminate = [VkFeature::ShaderTerminateInvocation];
+    let d = floor_with(&[VkExtension::KhrShaderTerminateInvocation], &terminate);
+    assert_eq!(
+        d.required_enables(&requiring(&terminate)),
+        Ok(enables(
+            &terminate,
+            &[VkExtension::KhrShaderTerminateInvocation]
+        ))
+    );
+    let mut v13 = d.clone();
+    v13.api_version = ApiVersion { major: 1, minor: 3 };
+    assert_eq!(
+        v13.required_enables(&requiring(&terminate)),
+        Ok(enables(&terminate, &[]))
+    );
+    // Stage create flags need their features.
+    let mut sized = floor_with(
+        &[VkExtension::ExtSubgroupSizeControl],
+        &[
+            VkFeature::ComputeFullSubgroups,
+            VkFeature::SubgroupSizeControl,
+        ],
+    );
+    let flags = Requirements {
+        stage_flags: set(&[StageCreateFlag::RequireFullSubgroups]),
+        ..Requirements::default()
+    };
+    assert_eq!(
+        sized.required_enables(&flags),
+        Ok(enables(
+            &[VkFeature::ComputeFullSubgroups],
+            &[VkExtension::ExtSubgroupSizeControl]
+        ))
+    );
+    sized.features.remove(&VkFeature::ComputeFullSubgroups);
+    assert_eq!(
+        sized.required_enables(&flags),
+        Err(Capability::Feature(VkFeature::ComputeFullSubgroups))
+    );
+    // Extension requirements close transitively.
+    let float2 = [VkFeature::ShaderBufferFloat32AtomicMinMax];
+    let atomics = floor_with(
+        &[
+            VkExtension::ExtShaderAtomicFloat2,
+            VkExtension::ExtShaderAtomicFloat,
+        ],
+        &float2,
+    );
+    assert_eq!(
+        atomics.required_enables(&requiring(&float2)),
+        Ok(enables(
+            &float2,
+            &[
+                VkExtension::ExtShaderAtomicFloat2,
+                VkExtension::ExtShaderAtomicFloat
+            ]
+        ))
+    );
+    let lonely = floor_with(&[VkExtension::ExtShaderAtomicFloat2], &float2);
+    assert_eq!(
+        lonely.required_enables(&requiring(&float2)),
+        Err(Capability::Extension(VkExtension::ExtShaderAtomicFloat))
+    );
+    // A format enum value below its core version needs its extension.
+    let a8 = Requirements {
+        formats: set(&[(vk::Format::A8_UNORM, FormatUsage::SampledImage)]),
+        ..Requirements::default()
+    };
+    assert_eq!(
+        profile("vk12-floor").required_enables(&a8),
+        Err(Capability::Extension(VkExtension::KhrMaintenance5))
+    );
+    let m5 = floor_with(
+        &[
+            VkExtension::KhrMaintenance5,
+            VkExtension::KhrDynamicRendering,
+        ],
+        &[],
+    );
+    assert_eq!(
+        m5.required_enables(&a8),
+        Ok(enables(
+            &[],
+            &[
+                VkExtension::KhrMaintenance5,
+                VkExtension::KhrDynamicRendering
+            ]
+        ))
+    );
+    // Core formats need nothing.
+    let rgba = Requirements {
+        formats: set(&[(vk::Format::R8G8B8A8_UNORM, FormatUsage::SampledImage)]),
+        ..Requirements::default()
+    };
+    assert_eq!(
+        profile("vk12-floor").required_enables(&rgba),
+        Ok(EnableSet::new())
+    );
+    // The API version and missing listed items are the first missing capability.
+    let newer = Requirements {
+        api_version: Some(ApiVersion { major: 1, minor: 3 }),
+        ..Requirements::default()
+    };
+    assert_eq!(
+        profile("vk12-floor").required_enables(&newer),
+        Err(Capability::ApiVersion(ApiVersion { major: 1, minor: 3 }))
+    );
+    let named = Requirements {
+        extensions: set(&[VkExtension::ExtShaderStencilExport]),
+        ..Requirements::default()
+    };
+    assert_eq!(
+        profile("vk12-floor").required_enables(&named),
+        Err(Capability::Extension(VkExtension::ExtShaderStencilExport))
+    );
+    // The portability subset is part of every set on a device that lists it.
+    assert_eq!(
+        profile("moltenvk-m3").required_enables(&Requirements::default()),
+        Ok(enables(&[], &[VkExtension::KhrPortabilitySubset]))
+    );
+}
+
+/// `Device::new` refuses a description listing a feature it does not expose.
+#[test]
+fn device_new_refuses_unexposed_features() {
+    let mut d = profile("vk12-floor");
+    d.features.insert(VkFeature::Maintenance8);
+    let e = match Device::new(d.clone(), DevicePolicy::default()) {
+        Err(Error::InvalidDescriptor(DescriptorError::DeviceDescription { detail })) => detail,
+        other => panic!("{other:?}"),
+    };
+    assert!(
+        e.contains("Maintenance8") && e.contains("KhrMaintenance8"),
+        "{e}"
+    );
+    d.extensions.insert(VkExtension::KhrMaintenance8);
+    Device::new(d, DevicePolicy::default()).unwrap();
+}
+
+/// The profile's format tables hold only formats the description exposes: a queried description
+/// answers for the formats of extensions the device supports, the consumer may not enable them.
+/// Every committed profile lists only formats its own version or listed extensions expose, and
+/// every one keeps its entry but a format only extensions outside the product's vocabulary expose
+/// (a vulkaninfo capture's `VK_NV_optical_flow` formats), which a queried description never asks
+/// about.
+#[test]
+fn profile_format_tables_hold_only_exposed_formats() {
+    for (stem, text) in committed_profiles() {
+        let document: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let listed: BTreeSet<String> = document["capabilities"]
+            .as_object()
+            .into_iter()
+            .flat_map(|blocks| blocks.values())
+            .filter_map(|block| block.get("extensions")?.as_object())
+            .flat_map(|extensions| extensions.keys().cloned())
+            .collect();
+        let d = DeviceDescription::from_khronos_json(&text, None).unwrap();
+        for &f in d.formats.formats.keys() {
+            let exposure = f.exposure().unwrap_or_else(|| panic!("{stem}: {f:?}"));
+            assert!(
+                exposure.exposed(d.api_version, |name| listed.contains(name)),
+                "{stem}: {f:?} is not exposed by the profile's version or extensions"
+            );
+            assert!(
+                enables::format_exposed(f, d.api_version, &d.extensions)
+                    || exposure
+                        .extensions
+                        .iter()
+                        .all(|name| crate::device::khronos::extension_from_name(name).is_none()),
+                "{stem}: {f:?} loses its entry"
+            );
+        }
+    }
+    let mut d = profile("vk12-floor");
+    let entry = d.formats.formats[&vk::Format::R8_UNORM];
+    d.formats.formats.insert(vk::Format::A8_UNORM, entry);
+    let a8 = |d: &DeviceDescription| {
+        Device::new(d.clone(), DevicePolicy::default())
+            .unwrap()
+            .profile()
+            .supports_format(vk::Format::A8_UNORM, FormatUsage::SampledImage)
+    };
+    assert!(!a8(&d));
+    d.extensions.extend([
+        VkExtension::KhrMaintenance5,
+        VkExtension::KhrDynamicRendering,
+    ]);
+    assert!(a8(&d));
+}

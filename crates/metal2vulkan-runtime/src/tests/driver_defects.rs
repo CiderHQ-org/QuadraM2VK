@@ -1,0 +1,182 @@
+//! The runtime's driver defects, keyed on the driver's identity and release
+//! (`driver_defects.rs`).
+
+use super::super::driver_defects::{among, of, Affected, AFFECTED};
+use metal2vulkan::device::DeviceDescription;
+use metal2vulkan::error::RuntimeDriverDefect;
+use metal2vulkan::vk::DriverId;
+use std::path::PathBuf;
+
+const COPIES: RuntimeDriverDefect = RuntimeDriverDefect::MultisampledDepthStencilColourCopies;
+const STENCIL_COPIES: RuntimeDriverDefect = RuntimeDriverDefect::MultisampledStencilColourCopies;
+const DEPTHS: RuntimeDriverDefect = RuntimeDriverDefect::NormalizedDepthPastUnitRange;
+const COMPRESSION: RuntimeDriverDefect = RuntimeDriverDefect::ImageSizeShortOfCompressionData;
+const RESOLVES: RuntimeDriverDefect = RuntimeDriverDefect::DepthStencilResolveFirstSubresource;
+const PLANE_VIEWS: RuntimeDriverDefect = RuntimeDriverDefect::LazilyAllocatedVolumePlaneViews;
+const CACHE_LOAD: RuntimeDriverDefect = RuntimeDriverDefect::PipelineCacheDataCompiledAtLoad;
+const COPY_REWRITES: RuntimeDriverDefect = RuntimeDriverDefect::CompressedImageCopiesRewriteTexels;
+const NAN_COPIES: RuntimeDriverDefect = RuntimeDriverDefect::MultisampledCopiesConvertFloatNans;
+const LATE_READS: RuntimeDriverDefect = RuntimeDriverDefect::ReadsCommandBuffersAfterTheirSignal;
+
+/// Every committed profile's driver has its defects at every release and GPU but those a probe
+/// found clean: MoltenVK the multisampled depth/stencil colour copies, the inexact depths past
+/// `[0, 1]`, the crashing 2D views of a 3D image in lazily allocated memory, the pipeline cache
+/// compiled at load, the copies of compressed images that rewrite texels and the reads of command
+/// buffers after their signal; lavapipe the colour copies and the depth/stencil resolve of the
+/// first layer and level; RADV the multisampled copies that convert float NaNs; ANV the
+/// compressed image's short size on every GPU (Arrow Lake's, not measured, too); NVIDIA's the
+/// stencil colour copies on every GPU but the RTX 5080 Laptop GPU at 615.71.09, measured clean (the
+/// GTX 1060 and the RTX 5080 desktop GPU, not measured, take them); SwiftShader none.
+#[test]
+fn the_committed_profiles_drivers_have_their_defects() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../metal2vulkan-validation/profiles");
+    let mut drivers = 0;
+    for path in std::fs::read_dir(&dir).expect("validation/profiles is readable") {
+        let path = path.expect("directory entry").path();
+        if path.extension().is_none_or(|x| x != "json") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("profile is readable");
+        let desc = DeviceDescription::from_khronos_json(&text, None).expect("profile parses");
+        let expected = match desc.driver_id {
+            Some(DriverId::MOLTENVK) => {
+                vec![
+                    COPIES,
+                    DEPTHS,
+                    PLANE_VIEWS,
+                    CACHE_LOAD,
+                    COPY_REWRITES,
+                    LATE_READS,
+                ]
+            }
+            Some(DriverId::MESA_LLVMPIPE) => vec![COPIES, RESOLVES],
+            Some(DriverId::MESA_RADV) => vec![NAN_COPIES],
+            Some(DriverId::INTEL_OPEN_SOURCE_MESA) => vec![COMPRESSION],
+            Some(DriverId::NVIDIA_PROPRIETARY)
+                if (desc.device_id, desc.driver_version) == (0x2c19, NVIDIA_615_71_09) =>
+            {
+                Vec::new()
+            }
+            Some(DriverId::NVIDIA_PROPRIETARY) => vec![STENCIL_COPIES],
+            _ => Vec::new(),
+        };
+        let defects: Vec<_> = of(&desc).into_iter().collect();
+        assert_eq!(defects, expected, "{}", path.display());
+        drivers += usize::from(!expected.is_empty());
+    }
+    assert!(
+        drivers >= 13,
+        "lavapipe's three, MoltenVK's two, ANV's four, RADV's three and NVIDIA's two"
+    );
+}
+
+/// NVIDIA's `driverVersion` of 615.71.09: the release's major, minor and patch in 10, 8 and 6 bits
+/// from bit 22, 14 and 6.
+const NVIDIA_615_71_09: u32 = (615 << 22) | (71 << 14) | (9 << 6);
+
+/// A driver has a defect at every release and on every GPU but a measured identity a probe found
+/// clean; another driver, or none, has none of it.
+#[test]
+fn a_clean_identity_alone_lacks_the_defect() {
+    // Mesa's `driverVersion`: `VK_MAKE_API_VERSION(0, major, minor, patch)`.
+    let mesa = |minor: u32, patch: u32| (26 << 22) | (minor << 12) | patch;
+    let table = [Affected {
+        defect: COPIES,
+        driver: DriverId::MESA_LLVMPIPE,
+        clean: &[(0, (26 << 22) | (3 << 12))],
+    }];
+    let lavapipe = Some(DriverId::MESA_LLVMPIPE);
+    assert!(among(&table, lavapipe, 0, mesa(2, 9)).contains(&COPIES));
+    assert!(among(&table, lavapipe, 0, mesa(3, 0)).is_empty());
+    assert!(among(&table, lavapipe, 0, mesa(3, 1)).contains(&COPIES));
+    assert!(among(&table, lavapipe, 1, mesa(3, 0)).contains(&COPIES));
+    assert!(among(&table, Some(DriverId::MESA_RADV), 0, mesa(2, 9)).is_empty());
+    assert!(among(&table, None, 0, mesa(2, 9)).is_empty());
+}
+
+/// NVIDIA's stencil colour-copy defect, measured on the RTX 3090 (`deviceID` 0x2204) at 615.71.09,
+/// is every NVIDIA GPU's at every release but the RTX 5080 Laptop GPU's (0x2c19) at 615.71.09,
+/// measured clean: the RTX 3070 (0x2484), an Ada GPU (0x2684) and the 5080 Laptop GPU at another
+/// release take it; a device that runs another driver has none.
+#[test]
+fn nvidia_s_colour_copies_are_clean_on_the_identity_measured_alone() {
+    let nvidia = Some(DriverId::NVIDIA_PROPRIETARY);
+    let of = |device, release| among(AFFECTED, nvidia, device, release);
+    for (device, release) in [
+        (0x2204, NVIDIA_615_71_09),
+        (0x2484, NVIDIA_615_71_09),
+        (0x2684, NVIDIA_615_71_09),
+        (0x2c19, NVIDIA_615_71_09 + (1 << 6)),
+    ] {
+        assert_eq!(
+            of(device, release).into_iter().collect::<Vec<_>>(),
+            vec![STENCIL_COPIES],
+            "{device:#x} {release:#x}"
+        );
+    }
+    assert!(of(0x2c19, NVIDIA_615_71_09).is_empty());
+    let radv = among(
+        AFFECTED,
+        Some(DriverId::MESA_RADV),
+        0x2204,
+        NVIDIA_615_71_09,
+    );
+    assert!(!radv.contains(&COPIES) && !radv.contains(&STENCIL_COPIES));
+}
+
+/// Each clean identity is a measured one: a committed profile of the driver, GPU and release
+/// that the device layer takes as measured (`DeviceDescription::measured_identity`).
+#[test]
+fn every_clean_identity_is_measured() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../metal2vulkan-validation/profiles");
+    let mut measured = Vec::new();
+    for path in std::fs::read_dir(&dir).expect("validation/profiles is readable") {
+        let path = path.expect("directory entry").path();
+        if path.extension().is_none_or(|x| x != "json") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("profile is readable");
+        let desc = DeviceDescription::from_khronos_json(&text, None).expect("profile parses");
+        if desc.measured_identity() {
+            measured.push((desc.driver_id, desc.device_id, desc.driver_version));
+        }
+    }
+    for affected in AFFECTED {
+        for &(device, release) in affected.clean {
+            assert!(
+                measured.contains(&(Some(affected.driver), device, release)),
+                "{:?} clean on {device:#x} at {release:#x}, which is not measured",
+                affected.defect
+            );
+        }
+    }
+}
+
+/// A device whose identity is not measured says so in an informational message, never a degrade
+/// notice: on every committed profile of a measured identity nothing; on the M4's profile at
+/// another MoltenVK release, the identity, the answers it withholds and the defects it assumes,
+/// under the message's id name; on SwiftShader, whose driver has nothing measured, nothing.
+#[test]
+fn an_unmeasured_identity_says_so_in_an_informational_message() {
+    use crate::driver_facts::{unmeasured_driver, UNMEASURED_DRIVER};
+    for (stem, desc) in super::capabilities::committed_descriptions() {
+        let (_, properties) = super::capabilities::created(&stem, &desc);
+        let text = unmeasured_driver(&properties);
+        let measured = properties.description.measured_identity();
+        let nothing = properties.driver_facts_withheld.is_empty()
+            && properties.driver_facts.is_empty()
+            && properties.driver_defects.is_empty();
+        assert_eq!(text.is_some(), !measured && !nothing, "{stem}: {text:?}");
+    }
+    let (stem, mut desc) = super::capabilities::committed_descriptions()
+        .into_iter()
+        .find(|(stem, _)| stem == "moltenvk-m4")
+        .expect("moltenvk-m4");
+    desc.driver_version += 1;
+    let (_, properties) = super::capabilities::created(&stem, &desc);
+    let text = unmeasured_driver(&properties).expect("an unmeasured MoltenVK release");
+    assert!(text.ends_with(&format!("[{UNMEASURED_DRIVER}]")), "{text}");
+    assert!(text.contains("DepthImageKeepsDenormals"), "{text}");
+    assert!(text.contains("DepthStencilImagesLieApart"), "{text}");
+    assert!(!text.contains("metal2vulkan-degrade-"), "{text}");
+}

@@ -1,0 +1,133 @@
+; metal2vulkan's spirv::testing::forwarding::images_after_their_index_steps (DESIGN D247): the
+; module the serializer writes for it, linked densely and relocated, as spirv-dis --raw-id prints
+; it. The crate's test the_committed_assembly_is_each_kernels_module holds it equal to that
+; module; validation's MoltenVK portability tests assemble it with spirv-as (DESIGN D342 item 9).
+; SPIR-V
+; Version: 1.5
+; Generator: Khronos; 0
+; Bound: 83
+; Schema: 0
+               OpCapability Shader
+               OpCapability SampledImageArrayDynamicIndexing
+               OpCapability StorageBufferArrayDynamicIndexing
+               OpCapability ImageQuery
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %46 "main" %12 %16 %19 %24 %28 %30 %34
+               OpExecutionMode %46 LocalSize 1 1 1
+               OpDecorate %9 ArrayStride 8
+               OpDecorate %10 Block
+               OpMemberDecorate %10 0 Offset 0
+               OpDecorate %12 DescriptorSet 0
+               OpDecorate %12 Binding 0
+               OpDecorate %12 Aliased
+               OpDecorate %16 DescriptorSet 0
+               OpDecorate %16 Binding 1
+               OpDecorate %19 DescriptorSet 0
+               OpDecorate %19 Binding 2
+               OpDecorate %20 ArrayStride 4
+               OpDecorate %21 Block
+               OpMemberDecorate %21 0 Offset 0
+               OpDecorate %24 DescriptorSet 0
+               OpDecorate %24 Binding 3
+               OpDecorate %24 Aliased
+               OpDecorate %25 ArrayStride 16
+               OpDecorate %26 Block
+               OpMemberDecorate %26 0 Offset 0
+               OpDecorate %28 DescriptorSet 0
+               OpDecorate %28 Binding 4
+               OpDecorate %28 Aliased
+               OpDecorate %30 DescriptorSet 0
+               OpDecorate %30 Binding 5
+               OpDecorate %30 Aliased
+               OpDecorate %34 BuiltIn GlobalInvocationId
+          %1 = OpTypeFloat 32
+          %2 = OpTypeInt 32 0
+          %3 = OpTypeInt 32 1
+          %4 = OpTypeVector %1 2
+          %5 = OpTypeVector %1 4
+          %6 = OpTypeVector %2 2
+          %7 = OpTypeVector %3 2
+          %8 = OpConstant %2 4
+          %9 = OpTypeRuntimeArray %6
+         %10 = OpTypeStruct %9
+         %11 = OpTypePointer StorageBuffer %10
+         %12 = OpVariable %11 StorageBuffer
+         %13 = OpTypeImage %1 2D 0 0 0 1 Unknown
+         %14 = OpTypeArray %13 %8
+         %15 = OpTypePointer UniformConstant %14
+         %16 = OpVariable %15 UniformConstant
+         %17 = OpTypeSampler
+         %18 = OpTypePointer UniformConstant %17
+         %19 = OpVariable %18 UniformConstant
+         %20 = OpTypeRuntimeArray %2
+         %21 = OpTypeStruct %20
+         %22 = OpTypeArray %21 %8
+         %23 = OpTypePointer StorageBuffer %22
+         %24 = OpVariable %23 StorageBuffer
+         %25 = OpTypeRuntimeArray %5
+         %26 = OpTypeStruct %25
+         %27 = OpTypePointer StorageBuffer %26
+         %28 = OpVariable %27 StorageBuffer
+         %29 = OpTypePointer StorageBuffer %21
+         %30 = OpVariable %29 StorageBuffer
+         %31 = OpTypeVoid
+         %32 = OpTypeVector %2 3
+         %33 = OpTypePointer Input %32
+         %34 = OpVariable %33 Input
+         %35 = OpConstant %2 0
+         %36 = OpTypePointer StorageBuffer %6
+         %37 = OpTypePointer UniformConstant %13
+         %38 = OpConstant %3 0
+         %39 = OpTypeSampledImage %13
+         %40 = OpConstant %1 0.5
+         %41 = OpConstant %1 0
+         %42 = OpConstant %2 1
+         %43 = OpTypePointer StorageBuffer %5
+         %44 = OpTypePointer StorageBuffer %2
+         %45 = OpTypeFunction %31
+         %46 = OpFunction %31 None %45
+         %47 = OpLabel
+         %48 = OpLoad %32 %34
+         %49 = OpCompositeExtract %2 %48 0
+         %50 = OpAccessChain %36 %12 %35 %49
+         %51 = OpLoad %6 %50
+         %52 = OpCompositeExtract %2 %51 0
+         %53 = OpAccessChain %37 %16 %52
+         %54 = OpLoad %13 %53
+         %55 = OpCompositeConstruct %7 %38 %38
+         %56 = OpImageFetch %5 %54 %55 Lod %38
+         %57 = OpCopyObject %5 %56
+         %58 = OpImageQuerySizeLod %6 %54 %38
+         %59 = OpCopyObject %6 %58
+         %60 = OpCompositeExtract %2 %59 0
+         %61 = OpImageQueryLevels %2 %54
+         %62 = OpCopyObject %2 %61
+         %63 = OpLoad %17 %19
+         %64 = OpSampledImage %39 %54 %63
+         %65 = OpCompositeConstruct %4 %40 %40
+         %66 = OpImageSampleExplicitLod %5 %64 %65 Lod %41
+         %67 = OpCopyObject %5 %66
+         %68 = OpImage %13 %64
+         %69 = OpImageFetch %5 %68 %55 Lod %38
+         %70 = OpCopyObject %5 %69
+         %71 = OpAccessChain %29 %24 %52
+         %72 = OpArrayLength %2 %71 0
+         %73 = OpCopyObject %2 %72
+         %74 = OpIAdd %2 %52 %42
+         %75 = OpCompositeInsert %6 %74 %51 0
+         %76 = OpAccessChain %36 %12 %35 %49
+               OpStore %76 %75
+         %77 = OpAccessChain %43 %28 %35 %49
+               OpStore %77 %57
+         %78 = OpAccessChain %43 %28 %35 %49
+               OpStore %78 %67
+         %79 = OpAccessChain %43 %28 %35 %49
+               OpStore %79 %70
+         %80 = OpAccessChain %44 %30 %35 %49
+               OpStore %80 %60
+         %81 = OpAccessChain %44 %30 %35 %49
+               OpStore %81 %62
+         %82 = OpAccessChain %44 %30 %35 %49
+               OpStore %82 %73
+               OpReturn
+               OpFunctionEnd

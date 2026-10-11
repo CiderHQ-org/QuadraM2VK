@@ -1,0 +1,377 @@
+//! Profile F end to end.
+//!
+//! Profile F (`BufferAccess::Floor`: no `bufferDeviceAddress` or no `shaderInt64`) reaches every
+//! buffer through a descriptor. Over every public fixture on every committed Profile F device
+//! (`vk12-floor`, `vk12-bare`, and `roadmap-2022`, which has device addresses but no 64-bit
+//! integers), every compiled function:
+//!
+//! - reaches every buffer slot through a descriptor view, never by device address;
+//! - reads no root table and no execution status by address, and needs no pointer translation;
+//! - declares no `DeviceAddresses` fact, and every `BufferRangeLimit` it declares is honored by a
+//!   plan-time check (the binder's `DescriptorRangeExceeded`), never a device-address variant;
+//! - requires neither `bufferDeviceAddress` nor `PhysicalStorageBufferAddresses`.
+//!
+//! `vk12-bare` asserts refusals: it is `vk12-floor` without the features the consumer always
+//! enables (`shaderInt16`, 8- and 16-bit storage, formatless storage images). The engine never
+//! needs the first three (registers hold narrow integers in `u32`s, and every memory leaf is
+//! word-composed), so its inventory equals `vk12-floor`'s except where a storage texture needs its
+//! format as a lowering input, or where a storage heap class, refused on both, names the formatless
+//! access among the features `vk12-bare` lacks, or where a slot's format is the module's own
+//! extended format (a `ulong` texture's `RG32Uint`), which `vk12-floor` declares formatless and
+//! `vk12-bare` refuses. An integer imageblock slice takes its texel class from the slot's format on
+//! both.
+//!
+//! The per-construct refusals (a dynamic-root dereference, the per-stage descriptor limit, a
+//! `BufferRangeLimit` variant) are asserted on the Profile F devices in
+//! `engine_dynamic_roots.rs` and `engine_access.rs`; the device-address-capable
+//! Profile F device is checked here.
+//!
+//! Fixtures are assembled with `llvm-as` (and `xcrun metal-as` for typed-pointer `.air.ll`);
+//! without them the tests skip visibly.
+
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::device::mechanism;
+use crate::device::profile::BufferAccess;
+use crate::device::requirements::{VkFeature, VkLimit};
+use crate::device::SpirvCapability;
+use crate::device::{Device, DeviceDescription, DevicePolicy, DeviceProfile};
+use crate::error::{Capability, Error, Feature, Needs};
+use crate::library::FunctionArtifact;
+use crate::pipeline::facts::{Mechanism, RuntimeFact};
+use crate::pipeline::interface::{BufferForm, SlotInterface};
+use crate::pipeline::sym::PushField;
+use crate::pipeline::testing::{
+    compile, engine_dir, fixtures_dir, link_and_validate, llvm_assemble, metal_assemble, meter,
+    profile, AssembleError,
+};
+
+/// The committed Profile F devices this file checks.
+const PROFILE_F: [&str; 3] = ["vk12-floor", "vk12-bare", "roadmap-2022"];
+
+fn profile_f() -> Vec<(&'static str, DeviceProfile)> {
+    PROFILE_F
+        .iter()
+        .map(|stem| {
+            let p = profile(stem, DevicePolicy::default()).expect("profile");
+            assert_eq!(p.fields().buffer_access, BufferAccess::Floor, "{stem}");
+            (*stem, p)
+        })
+        .collect()
+}
+
+/// `.ll` files directly in `dir`, sorted by name.
+fn ll_files(dir: &Path) -> Vec<PathBuf> {
+    let mut paths = std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+        .map(|entry| entry.expect("read fixture directory entry").path())
+        .filter(|p| p.extension().is_some_and(|x| x == "ll"))
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths
+}
+
+/// The bitcode of a public fixture; `None` when its assembler is missing or rejects it (the
+/// inventory test records those).
+fn assemble_fixture(path: &Path) -> Option<Vec<u8>> {
+    let r = if path.to_str().is_some_and(|s| s.ends_with(".air.ll")) {
+        metal_assemble(path)
+    } else {
+        llvm_assemble(path)
+    };
+    match r {
+        Ok(b) => Some(b),
+        Err(AssembleError::Missing(why)) => {
+            eprintln!("SKIPPED {}: {why}", path.display());
+            None
+        }
+        Err(AssembleError::Rejected(_)) => None,
+    }
+}
+
+/// The Profile F contract of one compiled function.
+fn check_descriptor_only(a: &FunctionArtifact, p: &DeviceProfile, what: &str) {
+    for (slot, s) in &a.interface.slots {
+        if let SlotInterface::Buffer(b) = s {
+            assert!(
+                matches!(b.form, BufferForm::Descriptor(_)),
+                "{what}: {slot:?} is {:?}",
+                b.form
+            );
+        }
+    }
+    assert!(!a.interface.needs_pointer_translation, "{what}");
+    for f in &a.interface.push.fields {
+        assert!(
+            !matches!(
+                f.field,
+                PushField::RootTableAddress | PushField::ExecutionStatusAddress
+            ),
+            "{what}: {:?}",
+            f.field
+        );
+    }
+    for fact in &a.facts {
+        assert!(
+            !matches!(fact, RuntimeFact::DeviceAddresses { .. }),
+            "{what}: {fact:?}"
+        );
+        if let RuntimeFact::BufferRangeLimit { .. } = fact {
+            assert_eq!(
+                mechanism(fact, p),
+                Mechanism::PlanTimeCheck,
+                "{what}: {fact:?}"
+            );
+        }
+    }
+    assert!(
+        !a.requirements
+            .features
+            .contains(&VkFeature::BufferDeviceAddress),
+        "{what}"
+    );
+    assert!(
+        !a.requirements
+            .spirv_capabilities
+            .contains(&SpirvCapability::from_raw(
+                crate::spv::Capability::PhysicalStorageBufferAddresses as u32
+            )),
+        "{what}"
+    );
+}
+
+/// The inventory cell of an outcome, as the inventory test spells it (without the location).
+fn cell(r: &Result<std::sync::Arc<FunctionArtifact>, Error>) -> String {
+    match r {
+        Ok(_) => "ok".to_owned(),
+        Err(Error::Unsupported(u)) => format!("Unsupported{{{:?}; {:?}}}", u.feature, u.needs),
+        Err(Error::NeedsInput(i)) => format!("NeedsInput{{{i:?}}}"),
+        Err(e) => format!("{e:?}"),
+    }
+}
+
+/// Whether `bare` is `floor`'s refusal naming, beside what `floor` names, only the formatless
+/// storage-image features `vk12-bare` lacks: a storage heap class names every feature the profile
+/// lacks in one `AnyOf`, the formatless access among them.
+fn refused_also_for_formatless(
+    floor: &Result<std::sync::Arc<FunctionArtifact>, Error>,
+    bare: &Result<std::sync::Arc<FunctionArtifact>, Error>,
+) -> bool {
+    let (Err(Error::Unsupported(f)), Err(Error::Unsupported(b))) = (floor, bare) else {
+        return false;
+    };
+    let (Needs::AnyOf(fa), Needs::AnyOf(ba)) = (&f.needs, &b.needs) else {
+        return false;
+    };
+    let formatless = |c: &Capability| {
+        matches!(
+            c,
+            Capability::Feature(
+                VkFeature::ShaderStorageImageReadWithoutFormat
+                    | VkFeature::ShaderStorageImageWriteWithoutFormat
+            )
+        )
+    };
+    f.feature == b.feature
+        && fa.len() == ba.len()
+        && fa.iter().zip(ba).all(|(x, y)| {
+            x.iter().all(|c| y.contains(c)) && y.iter().all(|c| x.contains(c) || formatless(c))
+        })
+}
+
+/// Whether `bare` refuses the storage format of a slot whose format the module fixes as an
+/// extended one (a `ulong` texture is `RG32Uint` whatever is bound): its ways are
+/// `shaderStorageImageExtendedFormats`, which neither Profile F device has, or the formatless
+/// access the slot uses, which `vk12-floor` has and `vk12-bare` lacks. `vk12-floor` declares
+/// such a slot formatless, so `vk12-bare` refuses it whatever `vk12-floor` makes of the function,
+/// and lacks whatever else `vk12-floor` refuses.
+fn refused_for_a_fixed_extended_format(
+    bare: &Result<std::sync::Arc<FunctionArtifact>, Error>,
+) -> bool {
+    let Err(Error::Unsupported(b)) = bare else {
+        return false;
+    };
+    let Needs::AnyOf(ways) = &b.needs else {
+        return false;
+    };
+    let extended = Capability::Feature(VkFeature::ShaderStorageImageExtendedFormats);
+    let formatless = |c: &Capability| {
+        matches!(
+            c,
+            Capability::Feature(
+                VkFeature::ShaderStorageImageReadWithoutFormat
+                    | VkFeature::ShaderStorageImageWriteWithoutFormat
+            )
+        )
+    };
+    b.feature == Feature::Format
+        && ways.len() == 2
+        && ways.iter().any(|way| way.len() == 1 && way[0] == extended)
+        && ways
+            .iter()
+            .any(|way| !way.is_empty() && way.iter().all(formatless))
+}
+
+/// Every public fixture compiled for a Profile F device uses the static-root descriptor machinery
+/// only and passes L3; and `vk12-bare` refuses exactly what `vk12-floor` accepts only through its
+/// formatless storage-image bits, or refuses as `vk12-floor` does naming those bits too, or refuses
+/// a module-fixed extended format that `vk12-floor` declares formatless.
+#[test]
+fn profile_f_functions_reach_every_buffer_through_a_descriptor() {
+    let profiles = profile_f();
+    let mut compiled = 0usize;
+    let mut bare_only = 0usize;
+    for dir in [fixtures_dir(), engine_dir()] {
+        for path in ll_files(&dir) {
+            let Some(bc) = assemble_fixture(&path) else {
+                continue;
+            };
+            let Ok(d) = crate::air::decode(&bc, &mut meter()) else {
+                continue;
+            };
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            for e in d.abi.entries.iter() {
+                let entry = e.name.to_string();
+                let mut cells = Vec::new();
+                let mut results = Vec::new();
+                for (stem, p) in &profiles {
+                    let what = format!("{name} {entry} on {stem}");
+                    let r = compile(&bc, &entry, p);
+                    if let Ok(a) = &r {
+                        check_descriptor_only(a, p, &what);
+                        link_and_validate(a, p).unwrap_or_else(|e| panic!("{what}: L3: {e}"));
+                        compiled += 1;
+                    }
+                    cells.push(cell(&r));
+                    results.push(r);
+                }
+                let (floor, bare) = (&cells[0], &cells[1]);
+                if floor != bare
+                    && !refused_also_for_formatless(&results[0], &results[1])
+                    && !refused_for_a_fixed_extended_format(&results[1])
+                {
+                    assert!(
+                        floor == "ok" && bare.starts_with("NeedsInput{StorageTextureFormat"),
+                        "{name} {entry}: vk12-floor {floor}, vk12-bare {bare}"
+                    );
+                    bare_only += 1;
+                }
+            }
+        }
+    }
+    eprintln!("{compiled} Profile F functions compiled; {bare_only} need a format on vk12-bare");
+    assert!(compiled > 0, "no fixture compiled");
+}
+
+// ---- The device-address-capable Profile F device ----
+
+const HEADER: &str = "target datalayout = \"e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:1024-n8:16:32\"\ntarget triple = \"air64_v28-apple-macosx26.0.0\"\n\n";
+
+fn assemble_text(name: &str, text: &str) -> Option<Vec<u8>> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "m2v-profile-f-{}-{}-{name}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).expect("scratch");
+    let ll = dir.join("k.ll");
+    std::fs::write(&ll, text).expect("write");
+    let r = llvm_assemble(&ll);
+    let _ = std::fs::remove_dir_all(&dir);
+    match r {
+        Ok(b) => Some(b),
+        Err(AssembleError::Missing(why)) => {
+            eprintln!("SKIPPED: {why}");
+            None
+        }
+        Err(AssembleError::Rejected(why)) => panic!("llvm-as rejected {name}: {why}\n{text}"),
+    }
+}
+
+/// A kernel over `n` read-write `device uint *` buffers running `body` before `ret void`.
+fn kernel(name: &str, n: u32, body: &str) -> String {
+    let params: Vec<String> = (0..n)
+        .map(|i| format!("ptr addrspace(1) noundef \"air-buffer-no-alias\" %{i}"))
+        .collect();
+    let refs: Vec<String> = (0..n).map(|i| format!("!{}", 100 + i)).collect();
+    let mut meta = String::new();
+    for i in 0..n {
+        meta.push_str(&format!(
+            "!{} = !{{i32 {i}, !\"air.buffer\", !\"air.location_index\", i32 {i}, i32 1, !\"air.read_write\", !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\", i32 4, !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"b{i}\"}}\n",
+            100 + i
+        ));
+    }
+    format!(
+        "{HEADER}define void @{name}({}) {{\nentry:\n{body}  ret void\n}}\n\n\
+         !air.kernel = !{{!9}}\n!air.version = !{{!17}}\n!air.language_version = !{{!18}}\n\
+         !9 = !{{ptr @{name}, !10, !11}}\n!10 = !{{}}\n!11 = !{{{}}}\n{meta}\
+         !17 = !{{i32 2, i32 8, i32 0}}\n!18 = !{{!\"Metal\", i32 4, i32 0, i32 0}}\n",
+        params.join(", "),
+        refs.join(", ")
+    )
+}
+
+/// `roadmap-2022` with at most `storage` storage buffers per stage.
+fn roadmap_with(storage: u32) -> DeviceProfile {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../metal2vulkan-validation/profiles/roadmap-2022.json");
+    let text = std::fs::read_to_string(path).expect("profile");
+    let mut desc = DeviceDescription::from_khronos_json(&text, None).expect("description");
+    desc.limits.max_per_stage_descriptor_storage_buffers = storage;
+    Device::new(desc, DevicePolicy::default())
+        .expect("device")
+        .profile()
+        .clone()
+}
+
+/// `roadmap-2022` has `bufferDeviceAddress` but no `shaderInt64`, so it is Profile F: a function
+/// over more storage buffers than the stage allows is refused naming the limit (it never falls back
+/// to device addresses), and a loaded-pointer dereference is refused naming only `shaderInt64`, the
+/// one Profile A requirement the device lacks.
+#[test]
+fn a_profile_f_device_with_device_addresses_still_uses_descriptors_only() {
+    let name = "three_stores";
+    let body: String = (0..3)
+        .map(|i| format!("  store i32 {i}, ptr addrspace(1) %{i}, align 4\n"))
+        .collect();
+    let Some(bc) = assemble_text(name, &kernel(name, 3, &body)) else {
+        return;
+    };
+    let p = roadmap_with(2);
+    assert!(p.fields().buffer_access == BufferAccess::Floor);
+    match compile(&bc, name, &p) {
+        Err(Error::Unsupported(u)) => {
+            assert_eq!(u.feature, Feature::DescriptorCount);
+            assert_eq!(
+                u.needs,
+                Needs::AnyOf(vec![vec![Capability::Limit {
+                    limit: VkLimit::MaxPerStageDescriptorStorageBuffers,
+                    required: 3,
+                    available: 2,
+                }]])
+            );
+        }
+        other => panic!("expected a descriptor-count refusal, got {other:?}"),
+    }
+    let a = compile(&bc, name, &roadmap_with(3)).unwrap_or_else(|e| panic!("{e}"));
+    check_descriptor_only(&a, &roadmap_with(3), name);
+
+    let name = "chase";
+    let body = "  %q = load ptr addrspace(1), ptr addrspace(1) %0, align 8\n  store i32 7, ptr addrspace(1) %q, align 4\n";
+    let Some(bc) = assemble_text(name, &kernel(name, 1, body)) else {
+        return;
+    };
+    let p = profile("roadmap-2022", DevicePolicy::default()).expect("profile");
+    match compile(&bc, name, &p) {
+        Err(Error::Unsupported(u)) => {
+            assert_eq!(u.feature, Feature::DereferenceLoadedPointer);
+            assert_eq!(
+                u.needs,
+                Needs::AnyOf(vec![vec![Capability::Feature(VkFeature::ShaderInt64)]])
+            );
+        }
+        other => panic!("expected a loaded-pointer refusal, got {other:?}"),
+    }
+}

@@ -1,0 +1,681 @@
+//! Buffer-slot planning shared by compute and render plans: the Metal table bounds, one
+//! [`PlannedBuffer`] per statically used buffer slot, the `BufferRangeLimit` variant a shape's
+//! length classes require, and the `uses` of bound buffers and used resources.
+
+use std::collections::BTreeMap;
+
+use super::{AccessClass, BoundKind, ByteRange, PlannedBuffer, ResourceUse, UseTarget};
+use crate::bind::state::{BindShape, BufferShape, TextureShape, UsedClass, UsedShape};
+use crate::device::profile::Limits;
+use crate::device::requirements::VkFeature;
+use crate::device::{mechanism, DeviceProfile};
+use crate::error::{BindError, Capability, Feature, Unsupported};
+use crate::metal;
+use crate::pipeline::artifact::RuntimeDependency;
+use crate::pipeline::facts::{Mechanism, RuntimeFact, UniformViewChoice};
+use crate::pipeline::interface::SlotInterface;
+use crate::pipeline::interface::{AccessSet, BufferForm, BufferSlot, DescriptorView, Window};
+use crate::pipeline::layout::{BindingSource, PipelineLayout};
+use crate::pipeline::sym::{PushField, SampledType, SlotClass, SlotRef, SpecKey, Stage};
+use crate::vk;
+
+use super::compute::internal;
+use super::resources::ResourcePlanner;
+
+/// Metal's argument-table sizes: `buffers[31]` (and `threadgroup_lengths[31]`), `textures[128]`,
+/// `samplers[16]`.
+pub(crate) const MAX_BUFFERS: u32 = 31;
+pub(crate) const MAX_TEXTURES: u32 = 128;
+pub(crate) const MAX_SAMPLERS: u32 = 16;
+
+/// Every slot index of `shape` inside Metal's argument tables.
+pub(crate) fn check_slots(shape: &BindShape) -> Result<(), BindError> {
+    for (&stage, s) in &shape.stages {
+        let tables = [
+            (SlotClass::Buffer, MAX_BUFFERS, s.buffers.keys().max()),
+            (SlotClass::Texture, MAX_TEXTURES, s.textures.keys().max()),
+            (SlotClass::Sampler, MAX_SAMPLERS, s.samplers.keys().max()),
+            // A threadgroup-memory index names no argument slot; it is reported with the buffer
+            // table's class, whose size it shares.
+            (
+                SlotClass::Buffer,
+                MAX_BUFFERS,
+                s.threadgroup_lengths.keys().max(),
+            ),
+        ];
+        for (class, max, top) in tables {
+            if let Some(&index) = top.filter(|&&i| i >= max) {
+                return Err(BindError::SlotOutOfRange {
+                    slot: SlotRef {
+                        stage,
+                        class,
+                        index,
+                    },
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Where each layout binding sits, by source.
+pub(crate) fn bindings(layout: &PipelineLayout) -> BTreeMap<BindingSource, (u32, u32)> {
+    let mut out = BTreeMap::new();
+    for set in &layout.sets {
+        for b in &set.bindings {
+            out.insert(b.source, (set.set, b.binding));
+        }
+    }
+    out
+}
+
+impl BoundKind {
+    /// What `shape` binds at a buffer slot.
+    pub(crate) fn of(shape: Option<&BufferShape>) -> BoundKind {
+        match shape {
+            None => BoundKind::Unbound,
+            Some(&BufferShape::Buffer {
+                device_address,
+                length_class,
+                ..
+            }) => BoundKind::Buffer {
+                device_address,
+                length_class,
+            },
+            Some(BufferShape::Bytes { .. }) => BoundKind::Bytes,
+        }
+    }
+}
+
+/// Whether a buffer form reads through a uniform-buffer view.
+pub(crate) fn uniform(form: BufferForm) -> bool {
+    matches!(
+        form,
+        BufferForm::Descriptor(DescriptorView::UniformWords | DescriptorView::UniformVec4)
+    )
+}
+
+/// The plan of buffer slot `slot` with interface `b` and what the shape binds there: its descriptor
+/// binding (descriptor forms), the view's descriptor base alignment and range limit, and a
+/// `MissingDeviceAddress` refusal for a device-address slot bound without an address. The base
+/// alignment is `max(min*BufferOffsetAlignment, 16)` (`views::base_alignment`): a descriptor byte
+/// is then congruent to its Metal address modulo 16, which a `uvec4` view of the slot relies on.
+pub(crate) fn plan_buffer(
+    slot: SlotRef,
+    b: &BufferSlot,
+    shape: Option<&BufferShape>,
+    limits: &Limits,
+    bindings: &BTreeMap<BindingSource, (u32, u32)>,
+) -> Result<PlannedBuffer, BindError> {
+    let bound = BoundKind::of(shape);
+    let (min_offset, max_range) = if uniform(b.form) {
+        (
+            limits.min_uniform_buffer_offset_alignment,
+            u64::from(limits.max_uniform_buffer_range),
+        )
+    } else {
+        (
+            limits.min_storage_buffer_offset_alignment,
+            u64::from(limits.max_storage_buffer_range),
+        )
+    };
+    let alignment = crate::memory::views::base_alignment(min_offset);
+    let binding = match b.form {
+        BufferForm::Descriptor(_) => Some(
+            bindings
+                .get(&BindingSource::Buffer(slot))
+                .copied()
+                .ok_or_else(|| internal(format!("descriptor slot {slot:?} has no binding")))?,
+        ),
+        BufferForm::Psb => {
+            if matches!(
+                bound,
+                BoundKind::Bytes
+                    | BoundKind::Buffer {
+                        device_address: false,
+                        ..
+                    }
+            ) {
+                return Err(BindError::MissingDeviceAddress { slot });
+            }
+            None
+        }
+    };
+    Ok(PlannedBuffer {
+        slot,
+        window: b.window,
+        form: b.form,
+        access: b.access,
+        binding,
+        alignment,
+        max_range,
+        bound,
+        disjoint: false,
+    })
+}
+
+/// The value of `key` for a draw or dispatch of `shape`, whose resources `resources` plans, where
+/// the bound resources decide it: a slot's presence, a bound sampler's words, a bound texture's
+/// class, swizzle, sparseness and view axes. It is what a specialization constant of `key` is set
+/// to, the one place a plan computes it. `None` for a key the bound resources do not decide (a
+/// threadgroup's, a tile's, a pass's).
+pub(crate) fn bound_value(
+    key: SpecKey,
+    shape: &BindShape,
+    resources: &ResourcePlanner<'_>,
+) -> Result<Option<u64>, BindError> {
+    Ok(Some(match key {
+        SpecKey::Presence(slot) => u64::from(present(shape, slot)),
+        SpecKey::SamplerState { slot, fields } => resources.sampler_state(slot, fields),
+        SpecKey::SamplerMinLevel(slot) => resources.sampler_min_level(slot),
+        SpecKey::SamplerAnisotropy(slot) => resources.sampler_anisotropy(slot),
+        // An unbound slot, or one bound to a placeholder format, reads its neutral: its
+        // out-of-bounds texel is all zero.
+        SpecKey::OutOfBoundsAlpha(slot) => bound_texture(shape, slot)
+            .and_then(TextureShape::out_of_bounds_alpha)
+            .unwrap_or(0),
+        SpecKey::BicubicTexels(slot) => resources.bicubic_texels(slot)?,
+        SpecKey::TexelFormat(slot) => resources.texel_format(slot),
+        SpecKey::UnmeasuredTexels(slot) => resources.unmeasured_texels(slot),
+        SpecKey::TextureSwizzle(slot) => resources.texture_swizzle(slot),
+        SpecKey::SparseTexture(slot) => sparse_texture(shape, slot),
+        SpecKey::ConstantLanes(slot) => constant_lanes(shape, slot),
+        SpecKey::OffsetBaseAxes(slot) => offset_base_axes(shape, slot),
+        _ => return Ok(None),
+    }))
+}
+
+/// Record in `resources`' template the value of each key `push` places as a push field
+/// (`PushField::Specialized`), the value its specialization constant would take
+/// ([`bound_value`]), which instantiation writes there (`instantiate::slot_field`). A key the
+/// bound resources do not decide is not one a function pushes: an internal error.
+pub(crate) fn record_specialized(
+    push: &super::PushTemplate,
+    shape: &BindShape,
+    resources: &mut ResourcePlanner<'_>,
+) -> Result<(), BindError> {
+    for placed in &push.fields {
+        let PushField::Specialized(key) = placed.field else {
+            continue;
+        };
+        let value = bound_value(key, shape, resources)?.ok_or_else(|| {
+            internal(format!("a pushed {key:?}, which no bound resource decides"))
+        })?;
+        let value = u32::try_from(value)
+            .map_err(|_| internal(format!("a pushed {key:?} of {value}, past a push word")))?;
+        let recorded = &mut resources.template.specialized;
+        if !recorded.iter().any(|(k, _)| *k == key) {
+            recorded.push((key, value));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `shape` binds anything at `slot`.
+fn present(shape: &BindShape, slot: SlotRef) -> bool {
+    shape
+        .stages
+        .get(&slot.stage)
+        .is_some_and(|s| match slot.class {
+            SlotClass::Buffer => s.buffers.contains_key(&slot.index),
+            SlotClass::Texture => s.textures.contains_key(&slot.index),
+            SlotClass::Sampler => s.samplers.contains_key(&slot.index),
+        })
+}
+
+/// The `SpecKey::SparseTexture` of `slot` for `shape`: 1 where the slot binds a sparse texture
+/// (`TextureFacts::sparse`), 0 where it binds one that is not sparse or nothing.
+fn sparse_texture(shape: &BindShape, slot: SlotRef) -> u64 {
+    u64::from(bound_texture(shape, slot).is_some_and(TextureShape::sparse))
+}
+
+/// The `SpecKey::ConstantLanes` of `slot` for `shape`: the lanes the bound sparse texture's format
+/// and swizzle make constants (`TextureShape::constant_lanes`), 0 where the slot binds a texture
+/// that is not sparse or nothing.
+fn constant_lanes(shape: &BindShape, slot: SlotRef) -> u64 {
+    bound_texture(shape, slot).map_or(0, TextureShape::constant_lanes)
+}
+
+/// The `SpecKey::OffsetBaseAxes` of `slot` for `shape`: the plane axes on which the bound view's
+/// parent's base-level size, which Metal's texel-offset rule reads, is not a power of two where
+/// the view's own is (`TextureShape::offset_base_axes`); 0 where the slot binds any other texture
+/// or nothing.
+fn offset_base_axes(shape: &BindShape, slot: SlotRef) -> u64 {
+    bound_texture(shape, slot).map_or(0, TextureShape::offset_base_axes)
+}
+
+/// The texture slots whose function decodes an 8-bit sRGB texel from its raw code
+/// (`RuntimeFact::SrgbTexture`) at which `shape` binds a texture of such a format
+/// (`metal::texel_format::srgb_raw`): the plan's `VariantKey::srgb_textures`. So is each slot of
+/// `cross` that the variant reads in the float class (an integer slot), whose accesses there take
+/// `float` results, which the raw code serves as a float slot's: the variant's compile states
+/// `SrgbTexture` there. The variant's compile states the same facts, so its plan for the same shape
+/// states the same key.
+pub(crate) fn srgb_variant(
+    dependencies: &[RuntimeDependency],
+    shape: &BindShape,
+    cross: &BTreeMap<SlotRef, SampledType>,
+) -> std::collections::BTreeSet<SlotRef> {
+    let read_float = cross
+        .iter()
+        .filter(|(_, ty)| **ty == SampledType::Float)
+        .map(|(slot, _)| *slot);
+    dependencies
+        .iter()
+        .filter_map(|d| match d.fact {
+            RuntimeFact::SrgbTexture { slot } => Some(slot),
+            _ => None,
+        })
+        .chain(read_float)
+        .filter(|slot| {
+            matches!(bound_texture(shape, *slot), Some(TextureShape::Texture { pixel_format, .. })
+                if metal::texel_format::srgb_raw(*pixel_format))
+        })
+        .collect()
+}
+
+/// The sampled texture slots whose function reads their texels in any numeric class
+/// (`RuntimeFact::CrossClassReads`) at which `shape` binds a texture whose format's class is not
+/// the slot's declared one and which the variant reads in that class
+/// (`resources::cross_class`), each with that class: the plan's `VariantKey::cross_class`. The
+/// variant's compile states the same facts, and its interface the same declared types, so its
+/// plan for the same shape states the same key.
+pub(crate) fn cross_variant(
+    dependencies: &[RuntimeDependency],
+    slots: &BTreeMap<SlotRef, SlotInterface>,
+    shape: &BindShape,
+) -> BTreeMap<SlotRef, SampledType> {
+    dependencies
+        .iter()
+        .filter_map(|d| match d.fact {
+            RuntimeFact::CrossClassReads { slot } => Some(slot),
+            _ => None,
+        })
+        .filter_map(|slot| {
+            let Some(SlotInterface::Texture(t)) = slots.get(&slot) else {
+                return None;
+            };
+            let bound = bound_texture(shape, slot)?;
+            // A storage slot whose integer texels take the bound format's signedness reads an
+            // integer texture of either signedness in its own class: only a float one crosses, as
+            // the binding sees it (`resources::plain_texture`).
+            let numeric = dependencies
+                .iter()
+                .any(|d| d.fact == RuntimeFact::StorageTextureNumericType { slot });
+            let t = match numeric {
+                true => super::resources::bound_integer_type(*t, Some(bound)),
+                false => *t,
+            };
+            let class = super::resources::cross_class(&t, bound)?;
+            Some((slot, class))
+        })
+        .collect()
+}
+
+/// The texture slots whose linear samples the function emulates on a device that samples
+/// through Metal's own sampler where the slot is bound in a YCbCr format
+/// (`RuntimeFact::YCbCrTexture`) at which `shape` binds a texture of a two-plane YCbCr format
+/// (`metal::format::ycbcr_format`), whose view Metal's sampler filters as the view's format, not as
+/// Metal's filter of the YCbCr format: the plan's `VariantKey::ycbcr_textures`. The variant's
+/// compile states the same facts, so its plan for the same shape states the same key.
+pub(crate) fn ycbcr_variant(
+    dependencies: &[RuntimeDependency],
+    shape: &BindShape,
+) -> std::collections::BTreeSet<SlotRef> {
+    dependencies
+        .iter()
+        .filter_map(|d| match d.fact {
+            RuntimeFact::YCbCrTexture { slot } => Some(slot),
+            _ => None,
+        })
+        .filter(|slot| {
+            matches!(bound_texture(shape, *slot), Some(TextureShape::Texture { pixel_format, .. })
+                if metal::format::ycbcr_format(*pixel_format).is_some())
+        })
+        .collect()
+}
+
+/// The texture slots a constexpr sampler samples (`RuntimeFact::ConstexprSampled`) at which
+/// `shape` binds a texture whose address-mode map changes a mode the slot's constexpr samplers
+/// state, each with that map restricted to those modes (every other mode to itself): the plan's
+/// `VariantKey::address_maps`. A texture whose map keeps them, every ordinary texture's among
+/// them, adds nothing, so its draws keep their key; textures whose maps agree on them share a
+/// variant. The variant's compile states the same facts, so its plan for the same shape states
+/// the same key.
+pub(crate) fn address_map_variant(
+    dependencies: &[RuntimeDependency],
+    shape: &BindShape,
+) -> BTreeMap<SlotRef, metal::sampler::AddressModeMap> {
+    let mut out = BTreeMap::new();
+    for d in dependencies {
+        let RuntimeFact::ConstexprSampled { slot, modes } = d.fact else {
+            continue;
+        };
+        let Some(&TextureShape::Texture { address_modes, .. }) = bound_texture(shape, slot) else {
+            continue;
+        };
+        let stated = out
+            .entry(slot)
+            .or_insert(metal::sampler::AddressModeMap::IDENTITY);
+        for mode in modes {
+            *stated = stated.with(mode, address_modes.mode(mode));
+        }
+    }
+    out.retain(|_, map| !map.is_identity());
+    out
+}
+
+/// The runtime sampler slots whose function samples through them (`RuntimeFact::CubicSampler`)
+/// at which `shape` binds a sampler whose min or mag filter is `Cubic`, each with the bound word
+/// masked by `SamplerWord::CUBIC_STATE`: the plan's `VariantKey::cubic_samplers`. Metal samples
+/// through such a sampler with its bicubic filter of that state (EV GSM2-bcs2-m4). The variant's
+/// compile states the same facts, so its plan for the same shape states the same key.
+pub(crate) fn cubic_variant(
+    dependencies: &[RuntimeDependency],
+    shape: &BindShape,
+) -> std::collections::BTreeMap<SlotRef, u32> {
+    use crate::metal::sampler::SamplerWord;
+    dependencies
+        .iter()
+        .filter_map(|d| match d.fact {
+            RuntimeFact::CubicSampler { slot } => Some(slot),
+            _ => None,
+        })
+        .filter_map(|slot| {
+            let bound = shape
+                .stages
+                .get(&slot.stage)
+                .and_then(|s| s.samplers.get(&slot.index))?;
+            bound
+                .shape
+                .cubic
+                .then_some((slot, bound.word.0 & SamplerWord::CUBIC_STATE))
+        })
+        .collect()
+}
+
+/// The runtime sampler slots whose samples Metal's anisotropic filter, emulated, reaches
+/// (`RuntimeFact::AnisotropicSampler`) at which `shape` binds a sampler whose word states
+/// anisotropy (`SamplerWord::ANISOTROPIC`, `maxAnisotropy` above 1): the plan's
+/// `VariantKey::anisotropic_samplers`. A function compiled without a slot named there takes the
+/// plain sample at it, which is Metal's only where the bound word states no anisotropy, so the
+/// variant names every such slot the word of whose bound sampler states it. The variant's compile
+/// states the same facts, so its plan for the same shape states the same key.
+pub(crate) fn anisotropic_variant(
+    dependencies: &[RuntimeDependency],
+    shape: &BindShape,
+) -> std::collections::BTreeSet<SlotRef> {
+    use crate::metal::sampler::SamplerWord;
+    dependencies
+        .iter()
+        .filter_map(|d| match d.fact {
+            RuntimeFact::AnisotropicSampler { slot } => Some(slot),
+            _ => None,
+        })
+        .filter(|slot| {
+            shape
+                .stages
+                .get(&slot.stage)
+                .and_then(|s| s.samplers.get(&slot.index))
+                .is_some_and(|bound| bound.word.0 & SamplerWord::ANISOTROPIC != 0)
+        })
+        .collect()
+}
+
+/// The texture `shape` binds at `slot`.
+fn bound_texture(shape: &BindShape, slot: SlotRef) -> Option<&TextureShape> {
+    shape
+        .stages
+        .get(&slot.stage)
+        .and_then(|s| s.textures.get(&slot.index))
+}
+
+/// Check every slot whose function observes the residency of its accesses
+/// (`RuntimeFact::SparseTexture`). A texture that is not sparse is resident everywhere, so its word
+/// is answered on every device. A sparse one needs the module's tile-map arm (`tile_map`, on every
+/// profile where the slot has one) or its sparse arm (`sparse_arm`, compiled only where the profile
+/// enables `shaderResourceResidency` and the slot has no tile map). A slot the function writes
+/// drops its writes to a sparse texture under the same specialization, as Metal does
+/// (`RuntimeFact::SparseTextureWrites`). A sparse texture is refused, `Unsupported{SparseTexture {
+/// slot }}`:
+/// - `NotRepresentable` at a slot the function updates by a texture atomic, whose answer on Metal
+///   is not deterministic;
+/// - at a slot of observed residency without either arm, naming `shaderResourceResidency` where
+///   the device lacks it (an access the tile map does not answer, which the device's residency
+///   would), and `NotImplemented` where the device has it but the slot's accesses have no sparse
+///   form (a bicubic sample).
+///
+/// This is the shader's side only: the sparse arm reports the residency of the Vulkan image
+/// bound and the tile-map arm that of the tile map bound, and that they mirror Metal's tile
+/// mappings is the consumer's contract (`docs/API.md`; the profile does not describe sparse
+/// binding).
+pub(crate) fn check_sparse_textures(
+    dependencies: &[RuntimeDependency],
+    profile: &DeviceProfile,
+    shape: &BindShape,
+) -> Result<(), BindError> {
+    for d in dependencies {
+        if let RuntimeFact::SparseTextureWrites { slot, atomic: true } = d.fact {
+            if sparse_texture(shape, slot) != 0 {
+                let feature = Feature::SparseTexture { slot };
+                return Err(BindError::Unsupported(Unsupported::not_representable(
+                    feature,
+                )));
+            }
+        }
+    }
+    for d in dependencies {
+        let RuntimeFact::SparseTexture {
+            slot,
+            sparse_arm,
+            tile_map,
+        } = d.fact
+        else {
+            continue;
+        };
+        if sparse_arm || tile_map || sparse_texture(shape, slot) == 0 {
+            continue;
+        }
+        let residency = profile
+            .fields()
+            .enabled
+            .features
+            .contains(&VkFeature::ShaderResourceResidency);
+        let feature = Feature::SparseTexture { slot };
+        return Err(BindError::Unsupported(if residency {
+            Unsupported::not_implemented(feature)
+        } else {
+            Unsupported::needs(
+                feature,
+                Capability::Feature(VkFeature::ShaderResourceResidency),
+            )
+        }));
+    }
+    Ok(())
+}
+
+/// Mark each planned buffer whose uniform view no written slot may alias
+/// (`RuntimeFact::UniformViewAliasing`): instantiation compares their Metal windows.
+pub(crate) fn mark_disjoint(buffers: &mut [PlannedBuffer], dependencies: &[RuntimeDependency]) {
+    for b in buffers {
+        b.disjoint = dependencies
+            .iter()
+            .any(|d| d.fact == RuntimeFact::UniformViewAliasing { slot: b.slot });
+    }
+}
+
+/// The read-only slots Profile F's per-stage storage-buffer fallback must keep as storage views
+/// for this shape (`VariantKey::storage_view_slots`): the slots the pipeline was compiled keeping
+/// (`Kept`), and, when a slot the pipeline views as a uniform buffer is large, every large
+/// candidate ([`large_view_candidates`]), so the fallback views none of them. The variant's
+/// compile keeps and restates every slot of the key, and views only candidates the shape proves
+/// small, so its plan for the same shape states the same key (a fixed point, in one compile).
+/// Otherwise the key is the pipeline's own.
+pub(crate) fn storage_view_variant(
+    dependencies: &[RuntimeDependency],
+    buffers: &[PlannedBuffer],
+    profile: &DeviceProfile,
+) -> std::collections::BTreeSet<SlotRef> {
+    let mut kept = std::collections::BTreeSet::new();
+    let large = large_view_candidates(dependencies, buffers, profile, None);
+    let mut viewed_large = false;
+    for d in dependencies {
+        let RuntimeFact::UniformViewRange { slot, choice } = d.fact else {
+            continue;
+        };
+        match choice {
+            UniformViewChoice::Kept => {
+                kept.insert(slot);
+            }
+            UniformViewChoice::Viewed => viewed_large |= large.contains(&slot),
+            _ => {}
+        }
+    }
+    if viewed_large {
+        kept.extend(large);
+    }
+    kept
+}
+
+/// The candidates of Profile F's per-stage storage-buffer fallback (`UniformViewRange` facts of
+/// any choice, of `stage` when given) at which the shape binds a buffer whose length class does
+/// not prove that a uniform view's range fits `maxUniformBufferRange`. A plan whose variant adds a
+/// storage buffer to a stage (a newly pulled vertex layout) names them all, since that variant's
+/// fallback may view any of them.
+pub(crate) fn large_view_candidates(
+    dependencies: &[RuntimeDependency],
+    buffers: &[PlannedBuffer],
+    profile: &DeviceProfile,
+    stage: Option<Stage>,
+) -> std::collections::BTreeSet<SlotRef> {
+    let max = u64::from(profile.fields().limits.max_uniform_buffer_range);
+    dependencies
+        .iter()
+        .filter_map(|d| match d.fact {
+            RuntimeFact::UniformViewRange { slot, .. } => Some(slot),
+            _ => None,
+        })
+        .filter(|slot| stage.is_none_or(|s| slot.stage == s))
+        .filter(|&slot| {
+            buffers.iter().any(|b| {
+                b.slot == slot
+                    && matches!(b.bound, BoundKind::Buffer { length_class, .. }
+                        if !class_fits(length_class, max))
+            })
+        })
+        .collect()
+}
+
+/// Whether every range of an allocation of length class `class` fits `max_range`: its padded
+/// length is below `2^class` (`BindShape` length class).
+pub(crate) fn class_fits(class: u8, max_range: u64) -> bool {
+    (1u128 << class.min(127)) - 1 <= u128::from(max_range)
+}
+
+/// The slots a `BufferRangeLimit` variant must move to device addresses for this shape: every slot
+/// whose fact the profile honors by `Variant` and whose bound buffer's length class does not prove
+/// that its range fits the view's limit. A slot already in device-address form (the variant's own
+/// pipeline) is listed as well, so planning the variant's pipeline with the same shape gives the
+/// same key (a fixed point). Profile F honors the fact at instantiation (`DescriptorRangeExceeded`,
+/// exact) and needs no variant.
+pub(crate) fn psb_variant(
+    dependencies: &[RuntimeDependency],
+    buffers: &[PlannedBuffer],
+    profile: &DeviceProfile,
+) -> std::collections::BTreeSet<SlotRef> {
+    let mut out = std::collections::BTreeSet::new();
+    for d in dependencies {
+        let RuntimeFact::BufferRangeLimit { slot } = d.fact else {
+            continue;
+        };
+        let large = buffers
+            .iter()
+            .any(|b| b.slot == slot && range_variant(slot, b.bound, profile));
+        if large {
+            out.insert(slot);
+        }
+    }
+    out
+}
+
+/// Whether a slot with the `BufferRangeLimit` fact bound as `bound` joins the variant's
+/// device-address slots: the profile honors the fact by `Variant` and the bound buffer's length
+/// class does not prove that its range fits `maxStorageBufferRange`.
+pub(crate) fn range_variant(slot: SlotRef, bound: BoundKind, profile: &DeviceProfile) -> bool {
+    let storage = u64::from(profile.fields().limits.max_storage_buffer_range);
+    mechanism(&RuntimeFact::BufferRangeLimit { slot }, profile) == Mechanism::Variant
+        && matches!(bound, BoundKind::Buffer { length_class, .. } if !class_fits(length_class, storage))
+}
+
+/// The `uses` entry of a bound buffer slot: its proven access, `Uniform` for a uniform view and
+/// `Storage` otherwise, `stages`, and the window as a range when it starts at or after the bind
+/// offset.
+pub(crate) fn buffer_use(b: &PlannedBuffer, stages: vk::PipelineStageFlags2) -> ResourceUse {
+    ResourceUse {
+        resource: UseTarget::Slot(b.slot),
+        access: b.access,
+        class: if uniform(b.form) {
+            AccessClass::Uniform
+        } else {
+            AccessClass::Storage
+        },
+        stages,
+        range: match b.window {
+            Window::Bounded { start, len } if start >= 0 => Some(ByteRange {
+                offset: start as u64,
+                len,
+            }),
+            _ => None,
+        },
+    }
+}
+
+/// The `uses` of the used resources a pipeline can reach (the handback): buffers and heaps when a
+/// function reads the resident root table (`pointer`), textures and heaps when one resolves handles
+/// (`handle`). The access is the guest's declared `MTLResourceUsage` (`Read` and `Sample` read,
+/// `Write` writes; no usage is `READ_WRITE`), since nothing proves a narrower one; `stages` maps a
+/// used resource's render stages to the pipeline stages that reach it (a compute plan maps every
+/// resource to `COMPUTE_SHADER`), and a resource reaching none is not listed.
+pub(crate) fn used_uses(
+    used: &BTreeMap<u32, UsedShape>,
+    pointer: bool,
+    handle: bool,
+    stages: impl Fn(metal::RenderStages) -> vk::PipelineStageFlags2,
+) -> Vec<ResourceUse> {
+    let mut out = Vec::new();
+    for (&token, u) in used {
+        let reachable = match u.class {
+            UsedClass::Buffer => pointer,
+            UsedClass::Texture(_) => handle,
+            UsedClass::Heap => pointer || handle,
+        };
+        let stages = stages(u.stages);
+        if !reachable || stages.is_empty() {
+            continue;
+        }
+        let read = u
+            .usage
+            .intersects(metal::ResourceUsage::READ | metal::ResourceUsage::SAMPLE);
+        let write = u.usage.contains(metal::ResourceUsage::WRITE);
+        let access = match (read, write) {
+            (false, false) => AccessSet::READ_WRITE,
+            (read, write) => AccessSet { read, write },
+        };
+        let class = match u.class {
+            UsedClass::Texture(_) if write => AccessClass::StorageImage,
+            UsedClass::Texture(_) => AccessClass::Sampled,
+            UsedClass::Buffer | UsedClass::Heap => AccessClass::Storage,
+        };
+        out.push(ResourceUse {
+            resource: UseTarget::Used(token),
+            access,
+            class,
+            stages,
+            range: None,
+        });
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests;

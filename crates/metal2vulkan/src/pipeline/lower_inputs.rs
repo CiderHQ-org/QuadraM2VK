@@ -1,0 +1,1224 @@
+//! `LoweringInputs`: the public, canonical projection of a function's lowering inputs.
+//!
+//! These are the only per-function inputs besides the function, its constant values, and the
+//! profile: the vertex-fetch projection, storage-image choices, the slots a `BufferRangeLimit`
+//! variant moves to device addresses, whether a kernel's simdgroups are emulated for dispatches
+//! with a partial simdgroup, whether a vertex function's `Layer` output is dropped for a pass of
+//! one layer, a kernel's stage-input descriptor, the read-only slots Profile F's per-stage
+//! storage-buffer fallback keeps as storage views, a fragment function's signed-integer color
+//! attachments, and whether a kernel compiles as a device-replay variant, the texture slots bound
+//! in an sRGB format whose raw codes the function reads, and how a fragment function's color
+//! outputs reach attachments whose formats convert them. Local size is never one. Every field is
+//! part of the `FunctionCompileKey`.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::metal;
+use crate::pipeline::descriptor::{
+    StageInputDescriptor, VertexAttributeDescriptor, VertexBufferLayoutDescriptor,
+};
+use crate::pipeline::sym::{SampledType, SlotRef, VaryingKey};
+use crate::vk;
+
+/// Per-function lowering inputs, public projection.
+#[non_exhaustive]
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct LoweringInputs {
+    /// How each vertex attribute is fetched; `None` for non-vertex functions.
+    pub vertex_fetch: Option<VertexFetchProjection>,
+    /// The representation chosen for each storage texture slot whose format is a variant.
+    #[cfg_attr(feature = "serde", serde(with = "crate::pipeline::serde_pairs"))]
+    pub storage_images: BTreeMap<SlotRef, StorageImageChoice>,
+    /// Slots moved to `BufferForm::Psb` by a `BufferRangeLimit` variant.
+    pub psb_slots: BTreeSet<SlotRef>,
+    /// A kernel's simdgroups run in the emulated tier whatever tier the profile's subgroups give
+    /// them (`VariantKey::emulated_simdgroups`): the variant a dispatch with a partial simdgroup
+    /// runs on. A kernel compiled under it depends on `RuntimeFact::EmulatedSimdgroups`. Only a
+    /// kernel has simdgroups this emulates; a vertex or fragment function compiles as without it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub emulated_simdgroups: bool,
+    /// A vertex function does not write its `[[render_target_array_index]]` output
+    /// (`VariantKey::dropped_vertex_layer`): the variant a pass of at most one layer runs on, where
+    /// every index renders slice 0. A vertex function that writes the output depends on
+    /// `RuntimeFact::RenderTargetArrayLength`, which states whether it was dropped; any other
+    /// function compiles as without it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dropped_vertex_layer: bool,
+    /// A kernel's stage-input descriptor (`MTLComputePipelineDescriptor.stageInputDescriptor`): how
+    /// each `[[stage_in]]` attribute is fetched from its buffer. A kernel reading a stage-in
+    /// attribute needs it (`NeedsInput(StageInputDescriptor)` without it);
+    /// `Device::compile_compute_pipeline` compiles a `Function` kernel under the pipeline's, and
+    /// a kernel compiled on its own for such a pipeline compiles under the same descriptor. The
+    /// key takes it canonicalized ([`StageInputDescriptor::canonical`]); any other function
+    /// compiles as without it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub stage_input: Option<StageInputDescriptor>,
+    /// Read-only slots that Profile F's per-stage storage-buffer fallback keeps as storage views
+    /// (`VariantKey::storage_view_slots`): the shape binds them where a uniform view's range may
+    /// exceed `maxUniformBufferRange`. The fallback views other read-only slots as uniform buffers
+    /// instead, and the function depends on `RuntimeFact::UniformViewRange` with
+    /// `UniformViewChoice::Kept` for each of them; a slot the fallback cannot consider is ignored.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub storage_view_slots: BTreeSet<SlotRef>,
+    /// The color attachments a fragment function writes that its render pipeline gives a
+    /// signed-integer pixel format (`MTLRenderPipelineColorAttachmentDescriptor.pixelFormat`). A
+    /// 32-bit integer color output to one is declared `int`, because Vulkan writes a signed-integer
+    /// attachment only from a signed output; every other integer output is declared `uint`.
+    /// `Device::compile_render_pipeline` sets it for a `Function` fragment stage, and a fragment
+    /// compiled on its own for such a pipeline compiles under the same set; any other function
+    /// compiles as without it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub signed_color_attachments: BTreeSet<u32>,
+    /// A tile function's color attachments, the pixel format of each by color index
+    /// (`MTLTileRenderPipelineDescriptor.colorAttachments[n].pixelFormat`). `Some` compiles a
+    /// kernel as a tile function, whose implicit imageblock holds those attachments' pixels;
+    /// `Device::compile_tile_pipeline` sets it, and a tile function compiled on its own for such a
+    /// pipeline compiles under the same map. `None` for every other function: a kernel that reaches
+    /// the implicit imageblock then is `NeedsInput(TileAttachments)`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub tile_attachments: Option<BTreeMap<u32, metal::PixelFormat>>,
+    /// The fragment function's render pipeline rasterizes more than one sample
+    /// (`rasterSampleCount` above 1 with rasterization on). Metal reads `[[position]]` and
+    /// center-sampled varyings at the pixel center in every invocation, so under it a fragment
+    /// function reads `[[position]]`'s x and y as `floor(FragCoord.xy) + 0.5`, and each
+    /// center-sampled varying through `InterpolateAtOffset` at offset 0 on a device with
+    /// interpolation functions whose offset reads from the center
+    /// (`VkProperty::InterpolateAtOffsetCentered`), or as it is on a device that reads it at the
+    /// pixel center itself, as Metal does (`VkProperty::MetalCenterVaryings`): the pixel center
+    /// whatever samples its invocation shades (`StageIo::{multisampled, varyings_at_pixel}`). A
+    /// function that reads its color attachments (`framebuffer_fetch`) reads, and in the storage
+    /// form writes, each one's multisampled image at its `SampleId`, running once per covered
+    /// sample, as Metal does. `Device::compile_render_pipeline` sets it for a `Function` fragment
+    /// stage, and a fragment compiled on its own for such a pipeline compiles under it: link
+    /// refuses one compiled without it whose sample-rate invocations would read either elsewhere,
+    /// or that reads its color attachments, as `NeedsInput(Multisampled)`, and one compiled under
+    /// it that reads its color attachments into a pipeline of one sample likewise. Any other
+    /// function compiles as without it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub multisampled: bool,
+    /// A kernel compiles as a device-replay variant of an indirect-command template: every buffer
+    /// slot it reaches is a device-address slot (`BufferForm::Psb`), read through its entry of the
+    /// root table at `PushField::RootTableAddress`, and a slot's Metal address (a pointer compare's
+    /// or a `memmove`'s) is its entry's `guest + bind_offset`, never a `SlotGuestBase` push field.
+    /// So everything the function reads of its buffers is in the root table, which the device
+    /// replay's preprocess writes per replayed command from the command's record (`bind::replay`).
+    /// It needs device addresses (`bufferDeviceAddress` and `shaderInt64`:
+    /// `GpuEncodedIndirectCommands` names them otherwise); a vertex, fragment, or tile function, or
+    /// a kernel with a stage-input descriptor, is `Unsupported{GpuEncodedIndirectCommands,
+    /// NotImplemented}` under it (a replayed command is a compute dispatch with no stage-in
+    /// region).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub replay_bindings: bool,
+    /// The render pipeline state a fragment function's framebuffer fetch takes its form from, on
+    /// a device that orders a fetch only through the ordered pixel interlock (no
+    /// `rasterizationOrderColorAttachmentAccess`, with `fragmentShaderPixelInterlock`): there each
+    /// color attachment the function reads is read, and written, as a storage image inside the
+    /// interlock where the pipeline's state lets that form be exact, and otherwise is refused
+    /// (`RequireOrdered`) or read unordered (`AcceptUnordered`). `Device::compile_render_pipeline`
+    /// sets it for a `Function` fragment stage that declares a `[[color(n)]]` input on such a
+    /// device, and a fragment compiled on its own for such a pipeline compiles under the same
+    /// state; without it such a function is `NeedsInput(FramebufferFetch)`. On a device that orders
+    /// fetch through rasterization-order input attachments, the state of each extended-range
+    /// attachment the function writes where the pipeline blends it, whose blend the function
+    /// computes over its input attachment (its depth, coverage and amplification bits unset,
+    /// which that blend does not read); without it such a function is
+    /// `NeedsInput(FramebufferFetch)` there too. `None` on every other device and for every other
+    /// function.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub framebuffer_fetch: Option<FramebufferFetchInputs>,
+    /// Texture slots bound in an 8-bit sRGB format whose raw codes the function reads
+    /// (`VariantKey::srgb_textures`, `RuntimeFact::SrgbTexture`): each such slot's reads, nearest
+    /// samples, and gathers whose result Metal decodes from the raw code read a UNORM view of the
+    /// same image (`ResourceKind::RawTexture`, `CombinedSampler::raw`) and decode it through
+    /// Metal's twelve-bit table. A slot of no such access is ignored.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub srgb_textures: BTreeSet<SlotRef>,
+    /// Texture slots bound in a YCbCr format (`VariantKey::ycbcr_textures`,
+    /// `RuntimeFact::YCbCrTexture`): on a device that samples through Metal's own sampler, each
+    /// such slot's linear samples take the emulation of Metal's filter a device without it takes,
+    /// and the samples it does not reach are noted. Ignored on any other device, and for a slot of
+    /// no such sample.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub ycbcr_textures: BTreeSet<SlotRef>,
+    /// The fragment function's render pipeline has a vertex function that writes
+    /// `[[viewport_array_index]]`. That function stores `ViewportIndex` as 0 for an index at or
+    /// past the draw's viewport count, where Metal draws through viewport 0 and its fragment
+    /// function still reads the index as written, so it also writes the index to a flat varying
+    /// (`IoRole::ViewportIndex`). Under this field a fragment function reads its
+    /// `[[viewport_array_index]]` from that varying; without it, from `ViewportIndex` (0 when no
+    /// stage writes the index). `Device::compile_render_pipeline` sets it for a `Function`
+    /// fragment stage that reads `[[viewport_array_index]]` under such a vertex function, and a
+    /// fragment compiled on its own for such a pipeline compiles under it: link refuses a
+    /// fragment function compiled for the other kind of vertex function as
+    /// `NeedsInput(ViewportIndex)`. Any other function compiles as without it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub viewport_index_varying: bool,
+    /// A stage's `maxCallStackDepth` when it is not Metal's default, 1 (`None`): it sizes the
+    /// call stack of the stage's recursion through visible functions. A pipeline compiles each
+    /// `Function` stage under its own: a compute kernel under
+    /// `ComputePipelineDescriptor::max_call_stack_depth`, a tile function under
+    /// `TileRenderPipelineDescriptor::max_call_stack_depth`, and a render pipeline's vertex and
+    /// fragment functions under `RenderPipelineDescriptor::max_vertex_call_stack_depth` and
+    /// `max_fragment_call_stack_depth`. Any other function compiles as without it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub max_call_stack_depth: Option<u32>,
+    /// The kernel runs its dispatch's grid flat (`VariantKey::flat_grid`): the dispatch is any
+    /// number of threadgroups of the variant's local size, whose invocations count the grid's
+    /// threads in order (`x` fastest) from the `threads_per_grid` of the 32-byte region record at
+    /// `PushField::ReplayRegionAddress`, each taking the thread position it counts to and returning
+    /// early past the grid's last thread. So one variant runs every grid and threadgroup size of
+    /// its pipeline, which only a kernel that does not observe its threadgroup partition
+    /// (`KernelFacts::partition_oblivious`) allows: it reads no dispatch builtin but
+    /// `thread_position_in_grid` and `threads_per_grid`. Any other function is
+    /// `Unsupported{GpuEncodedIndirectCommands, NotRepresentable}` under it. Under
+    /// `replay_bindings` the replay's preprocess writes the record per command
+    /// (`ReplayVariant::flat`); otherwise the kernel binds as any other, and a preprocess writes
+    /// the record beside its dispatch's group counts. It needs device addresses, and refuses a
+    /// stage-input region, a tile function and `emulated_simdgroups`
+    /// (`Unsupported{GpuEncodedIndirectCommands, NotImplemented}`).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub flat_grid: bool,
+    /// The fragment function's render pipeline has a vertex function that writes
+    /// `[[render_target_array_index]]`. That function stores `Layer` as 0 for an index at or past
+    /// the render pass's `renderTargetArrayLength`, where Metal renders the pass's first layer, and
+    /// its variant for a pass of one layer writes no `Layer`, while Metal's fragment function reads
+    /// the index as written in both; so in every variant it also writes the index to a flat varying
+    /// (`IoRole::RenderTargetArrayIndex`). Under this field a fragment function reads its
+    /// `[[render_target_array_index]]` from that varying; without it, from `Layer` (0 when no stage
+    /// writes the index). `Device::compile_render_pipeline` sets it for a `Function` fragment stage
+    /// that reads `[[render_target_array_index]]` under such a vertex function, and a fragment
+    /// compiled on its own for such a pipeline compiles under it: link refuses a fragment function
+    /// compiled for the other kind of vertex function as `NeedsInput(RenderTargetArrayIndex)`. Any
+    /// other function compiles as without it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub render_target_array_index_varying: bool,
+    /// The function's render pipeline draws each vertex amplification as a draw of its own
+    /// (`VariantKey::amplification_draws`), where Vulkan multiview cannot draw the encoder's
+    /// mappings as Metal renders them. Under it a vertex or fragment function reads its
+    /// `[[amplification_id]]` from `PushField::AmplificationId`, which the binder writes before
+    /// each of those draws, not from `ViewIndex`. A vertex function adds the amplification's render
+    /// target slice offset (`PushField::AmplificationLayerOffset`) to the slice index it writes (0
+    /// where it writes none) and stores `Layer` as that sum where it is below the pass's length and
+    /// 0 where it is not, only under [`AmplificationDraws::layered`]; it adds the viewport offset
+    /// (`PushField::AmplificationViewportOffset`) to its viewport index and stores `ViewportIndex`
+    /// as that sum below the draw's viewport count and 0 at or past it, where it writes an index of
+    /// its own or under [`AmplificationDraws::viewports`]. The raw index varyings it writes hold
+    /// the sums. A fragment function reads its `[[render_target_array_index]]` and
+    /// `[[viewport_array_index]]` from those varyings where its vertex function writes the index
+    /// (`render_target_array_index_varying`, `viewport_index_varying`), and otherwise as the
+    /// offsets themselves, from the push fields. The vertex function states
+    /// `RuntimeFact::AmplificationDraws`. Any other function compiles as without it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub amplification_draws: Option<AmplificationDraws>,
+    /// How each color attachment the fragment function writes takes each channel of its float
+    /// output (red, green, blue, alpha; `None` for a channel the format lacks), where the
+    /// attachment's format converts it (a normalized, sRGB or half-float format) on a device not
+    /// measured to convert as Metal does (without `VkProperty::MetalColorWrites`): a
+    /// [`ChannelWrite`] rule where the function rounds the channel by Metal's rule and writes the
+    /// `f32` nearest the code's exact value, which the device stores as that code;
+    /// [`ChannelWrite::Device`] where the device's conversion stays (blending other than factors
+    /// one and zero, the alpha alpha-to-coverage reads, or a format whose conversion Metal was
+    /// not measured with), a near-equivalent the function records as
+    /// `PrecisionNote::DeviceColorConversion`. `Device::compile_render_pipeline` sets it for a
+    /// `Function` fragment stage from the pipeline's color attachments, blend states and
+    /// alpha-to-coverage, and a fragment compiled on its own for such a pipeline compiles under the
+    /// same map: link refuses one compiled under another as `NeedsInput(ColorWrites)`. Empty on a
+    /// device with the property and for any other function.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub color_writes: BTreeMap<u32, [Option<ChannelWrite>; 4]>,
+    /// The varyings the fragment function's mesh render pipeline's mesh function writes per
+    /// primitive: its primitive data (`IoRole::PrimitiveVarying`) and its raw render target slice
+    /// and viewport indices (`IoRole::RenderTargetArrayIndex`, `IoRole::ViewportIndex`). A
+    /// fragment function reads an input of such a key per primitive (`PerPrimitiveEXT`, flat,
+    /// whatever interpolation it states: the value is the primitive's), and lists it among
+    /// `StageIo::primitive_inputs`. `Device::compile_mesh_pipeline` sets it for a `Function`
+    /// fragment stage from the pipeline's mesh function, and a fragment compiled on its own for
+    /// such a pipeline compiles under the same keys: link refuses one compiled for another
+    /// pipeline as `NeedsInput(PrimitiveVaryings)`. Empty for a render pipeline's fragment
+    /// function and for any other function.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub primitive_varyings: BTreeSet<VaryingKey>,
+    /// The fragment function's stage inputs (their user varying keys) that its render pipeline's
+    /// vertex function writes no output of and that Metal's linking drops: no instruction the
+    /// linking keeps reads them, with every rule it keeps beyond Metal on, and their values,
+    /// followed forward, reach no kept output, effect, branch condition or memory
+    /// (`reflection`'s module `linked`). Metal makes such a pipeline; Vulkan requires every
+    /// fragment input the vertex stage declares as an output, so the function declares no input for
+    /// them and reads each as zero, which reaches nothing kept. `Device::compile_render_pipeline`
+    /// sets it for a `Function` fragment stage from the pipeline's vertex function and color
+    /// attachments; empty for any other function.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub absent_varyings: BTreeSet<VaryingKey>,
+    /// The vertex function's position is compensated for a viewport Vulkan's cannot be
+    /// (`VariantKey::viewport_compensation`): a negative width, or, under
+    /// [`ViewportCompensation::depth`], a depth range past `[0, 1]` on a device that does not take
+    /// one. The function reads the draw's `[sx, a, b, clip]` from `PushField::ViewportCompensation`
+    /// (four `f32`s' bits) and writes `Position` as `(sx x, y, a w + b z, w)`; under `depth` it
+    /// also writes two `ClipDistance` elements after its own, `z` and `w - z` where `clip` is 1
+    /// (Metal's near and far planes) and 1 where it is 0. Under
+    /// [`ViewportCompensation::point_guard`] it reads the draw's `[gx, gy]` from
+    /// `PushField::PointGuard` (two `f32`s' bits), writes `Position` as `(gx sx x, gy y, ..)`, and
+    /// writes four `ClipDistance` elements after the others: `1.5 w - x`, `1.5 w + x`, `1.5 w - y`
+    /// and `1.5 w + y`, of the function's own `x` and `y`. It states
+    /// `RuntimeFact::ViewportCompensation`. A post-tessellation vertex function is compensated
+    /// as a vertex function is; any other function compiles as without it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub viewport_compensation: Option<ViewportCompensation>,
+    /// The kernel runs a threadgroup dispatch whose group counts are GPU data
+    /// (`dispatchThreadgroupsWithIndirectBuffer:`) as one Vulkan dispatch within the device's
+    /// group-count limits, whatever the counts (`VariantKey::folded_groups`): Vulkan workgroup
+    /// `(wx, wy, wz)` of a dispatch of `(nx, ny, nz)` workgroups is Metal's threadgroup number `(wz
+    /// · ny + wy) · nx + wx`, counted over Metal's group counts `x` fastest, in 64 bits. The group
+    /// counts are `threads_per_grid / threads_per_threadgroup` of the 32-byte region record at
+    /// `PushField::ReplayRegionAddress` (the `DispatchRegion` value: base 0, the packed threadgroup
+    /// size, and `threads_per_grid`), which a preprocess writes beside the dispatch's group counts,
+    /// and every grid builtin reads its region from that record (`MultiRegion` 1). A workgroup past
+    /// Metal's last threadgroup returns before the body, as a whole. So a kernel that observes its
+    /// threadgroup partition runs any group counts on one variant of the call's threadgroup size.
+    /// It needs device addresses, and refuses a stage-input region, a tile function, `flat_grid`
+    /// and `replay_bindings` (`Unsupported{GpuEncodedIndirectCommands, NotImplemented}`). Any other
+    /// function compiles as without it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub folded_groups: bool,
+    /// Texture slots bound in one of Apple's extended-range formats
+    /// (`VariantKey::extended_range`): each such slot is declared as an image of the format's raw
+    /// unsigned texels (`metal::format::ExtendedRange::raw_format`), whose reads decode Metal's
+    /// values and whose writes encode them. A sample or gather of such a slot is
+    /// `NotImplemented(Format)`.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, with = "crate::pipeline::serde_pairs")
+    )]
+    pub extended_range: BTreeMap<SlotRef, metal::format::ExtendedRange>,
+    /// The color attachments the fragment function's render pipeline gives one of Apple's
+    /// extended-range formats, by color index ([`ExtendedRangeColor`]): each such attachment
+    /// holds the format's raw texels (`metal::format::ExtendedRange::raw_format`), so the
+    /// function writes it through an output variable of the raw format's unsigned components and
+    /// stores the texel Metal stores for its `float` or `half` output (a `float` rounded to `half`
+    /// first, nearest even, then encoded as a kernel write encodes it). A dual-source second
+    /// output to such an attachment is `NotImplemented(Format)`. `Device::compile_render_pipeline`
+    /// sets it for a `Function` fragment stage from the pipeline's color attachments, and a
+    /// fragment compiled on its own for such a pipeline compiles under the same map: link refuses
+    /// one compiled under another as `NeedsInput(ColorWrites)`. Empty for any other function.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub extended_range_colors: BTreeMap<u32, ExtendedRangeColor>,
+    /// The color attachments the fragment function reads (`[[color(n)]]`) that its render
+    /// pipeline gives an 8-bit four-channel sRGB format (`RGBA8Unorm_sRGB`, `BGRA8Unorm_sRGB`),
+    /// by color index. Read through an input attachment, such an attachment's value is the
+    /// device's decode, which is not Metal's: the function snaps it back to its byte (Metal's
+    /// encode, which every byte's exact decode lands on) and decodes that byte by Metal's table
+    /// (`math::pack` and `math::unpack` of `unorm4x8_srgb`). The storage form decodes its bytes
+    /// itself and takes nothing from this. `Device::compile_render_pipeline` sets it for a
+    /// `Function` fragment stage from the pipeline's color attachments, and link refuses a
+    /// fragment compiled under another set than the pipeline's as `NeedsInput(ColorWrites)`.
+    /// Empty for any other function.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub srgb_fetches: BTreeSet<u32>,
+    /// Color attachments of the pass the fragment function's render pipeline has no pixel
+    /// format for, the pass's pixel format of each by color index
+    /// (`VariantKey::zeroed_colors`): plain Metal stores zero bytes into each at every sample a
+    /// draw covers (Metal probes). The function writes zero to each, through an output variable of
+    /// the format's numeric class at that color, at every return; the pipeline compiled under the
+    /// key gives each attachment that format, written whole and unblended. A function that writes
+    /// or reads such a color itself is `NotImplemented` (unmeasured). Any other function compiles
+    /// as without it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub zeroed_colors: BTreeMap<u32, metal::PixelFormat>,
+    /// Color attachments the fragment function's render pipeline has a pixel format for and the
+    /// pass has none, by color index (`VariantKey::dropped_colors`): plain Metal drops what the
+    /// function writes there (a Metal probe). The function keeps no output variable at each, its
+    /// writes stored nowhere, so the pipeline writes no location without a color attachment of its
+    /// subpass. Any other function compiles as without it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dropped_colors: BTreeSet<u32>,
+    /// The bytes of each cell of a tile function's explicit imageblock standing alone that its
+    /// render pass keeps, fewer than the cell holds (`VariantKey::kept_imageblock_bytes`): plain
+    /// Metal keeps the block's words below the pass's imageblock sample length rounded up to 8,
+    /// and reads every other word as zero and drops its writes, the dispatch's own included
+    /// (Metal probes). The function reads each word of a cell past these bytes as zero and writes
+    /// it nowhere, whatever the access (a whole number of words). A function without such an
+    /// imageblock is not lowered under it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub kept_imageblock_bytes: Option<u32>,
+    /// The fragment function clamps the depth it writes to the draw's depth clamp range itself
+    /// (`VariantKey::depth_clamp_range`): it reads the range's `[low, high]` from
+    /// `PushField::DepthClampRange` (two `f32`s' bits) and stores its depth output as Metal does in
+    /// depth clamp mode through that range, whatever the device's own clamp: a value with the sign
+    /// bit set as +0 and one past 1 up to +inf as 1, then clamped to the range, but a negative NaN
+    /// as 0 (a Metal probe, an M3 Max and an M4 alike). It states `RuntimeFact::DepthClampRange`.
+    /// The variant a draw in depth clamp mode through a range above 0 runs, whose Vulkan depth
+    /// clamp holds 0; a function that writes no depth, or any other function, compiles as without
+    /// it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub depth_clamp_range: bool,
+    /// Storage-image texture slots bound to a swizzled texture (`VariantKey::swizzled_storage`):
+    /// the function applies the bound texture's swizzle, its slot's `SpecKey::TextureSwizzle`
+    /// word, to each texel it reads there, out of bounds too, after converting the texel, and
+    /// undoes it on each texel it writes, before converting it: channel `c` stores the value of
+    /// the first lane whose source is `c`, else lane `c`'s own (plain Metal's answer on an M4,
+    /// where atomics ignore the swizzle, as here). It states `RuntimeFact::TextureSwizzle`. A
+    /// `ulong` texel, an imageblock slice written to such a slot, or a read of fewer than four
+    /// lanes there is `NotImplemented(TextureSwizzle)` (unmeasured). A slot the function does
+    /// not read or write texels of compiles as without it.
+    ///
+    /// It holds too each sampled slot of `extended_range` bound to a swizzled texture, whose view
+    /// holds raw codes: the function applies the swizzle to each texel it reads, samples or gathers
+    /// there after decoding it, a border or out-of-bounds texel included, and a gather of a
+    /// component gathers the component the swizzle names (a `Zero` or `One` 0 or 1 at every tap),
+    /// as plain Metal does. And on a device without Metal's own sampler each sampled slot bound to
+    /// a swizzled packed normalized texture: the function swizzles the texels its class converts,
+    /// likewise.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub swizzled_storage: BTreeSet<SlotRef>,
+    /// The function reads every visible-function table it reads by resource id through the
+    /// table's device address (`VariantKey::addressed_function_tables`): the directory's entry
+    /// of the id holds the address of the table's words in place of an element, and a read of
+    /// word `w` is checked against the table's size word, so a table whose words pass
+    /// `maxStorageBufferRange` is read whole. It declares neither the function-table array nor
+    /// the snapshot, and states `RuntimeFact::FunctionTableRange` with `addressed`. It needs
+    /// device addresses (`Unsupported{BufferRange}` without them). A function that reads no
+    /// table by resource id compiles as without it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub addressed_function_tables: bool,
+    /// Colors the fragment function's render pipeline has no attachment for, by color index:
+    /// plain Metal discards what the function writes there. The function keeps no output variable
+    /// at each it writes, its writes stored nowhere, so the pipeline writes no location without a
+    /// color attachment (`StageIo::unattached_colors`). `Device::compile_render_pipeline` sets it
+    /// for a `Function` fragment stage to the colors it writes without an attachment, but color 0
+    /// under alpha to coverage, whose alpha the coverage reads; a fragment compiled on its own for
+    /// such a pipeline may compile under the same set, and link refuses one whose stored-nowhere
+    /// colors include an attachment of the pipeline, or color 0 under alpha to coverage
+    /// (`NeedsInput(ColorWrites)`). Any other function compiles as without it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub unattached_colors: BTreeSet<u32>,
+    /// The render pipeline's private sample mask, its bits below the pipeline's sample count,
+    /// which the fragment function applies itself: each return ANDs it into the function's
+    /// `[[sample_mask]]` output, or writes it as that output where the function writes none
+    /// (`StageIo::sample_mask`). Metal applies the mask after the function runs, so the function
+    /// still runs for the masked samples and reads the unmasked coverage, and under
+    /// `[[early_fragment_tests]]` the mask keeps only the colors. `Device::compile_render_pipeline`
+    /// sets it for a `Function` fragment stage that writes memory, reads `[[sample_mask]]` or
+    /// declares `[[early_fragment_tests]]`, in a pipeline whose mask drops a sample; the pipeline
+    /// then has no Vulkan sample mask. Any other function compiles as without it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub sample_mask: Option<u32>,
+    /// The depth and stencil tests of the draws that run the fragment function write neither
+    /// attachment and count no visibility result (`VariantKey::read_only_tests`): a function that
+    /// stores a color through the interlocked storage form and declares no early tests only
+    /// because it discards (`RuntimeFact::TestedStorageWrites`) is lowered with early fragment
+    /// tests, which then drop what Metal's later tests drop and leave the attachments as Metal's
+    /// do, and states the fact with `early_tests`. Any other function compiles as without it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub read_only_tests: bool,
+    /// Only the depth test of the draws that run the fragment function can drop fragments
+    /// (`VariantKey::shader_tests`): a function that stores a color through the interlocked
+    /// storage form before the tests (`RuntimeFact::TestedStorageWrites`) runs the depth test
+    /// itself, inside the ordered pixel interlock, against a stand-in of the depth attachment, and
+    /// states `RuntimeFact::ShaderTests`. Any other function compiles as without it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub shader_tests: bool,
+    /// Under `shader_tests`, the draw's stencil test can drop fragments or write too
+    /// (`VariantKey::shader_stencil`): the function also runs the stencil test itself, before its
+    /// depth test, against a stand-in of the stencil attachment, and states
+    /// `RuntimeFact::ShaderStencilTest`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub shader_stencil: bool,
+    /// A vertex function's fragment function runs its draw's depth test itself at more than one
+    /// sample from each sample's computed depth (`VariantKey::window_depth_varying`): the function
+    /// also writes its position's window depth `z / w` to a no-perspective varying
+    /// (`IoRole::WindowDepth`), which the fragment function reads. Read only by a vertex function.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub window_depth_varying: bool,
+    /// The color attachments the fragment function's render pipeline gives a format held with
+    /// its channels rotated (`metal::format::rotated_channels`, `ARGB8Unorm`), by color index:
+    /// each such attachment's image holds Metal's alpha, red, green and blue in its red, green,
+    /// blue and alpha, so the function writes each `float` or `half` output to it, of either
+    /// dual-source index, rotated (`metal::format::to_rotated_image`), after Metal's conversion
+    /// of its channels (`color_writes`). An output of fewer than four lanes there is
+    /// `NotImplemented(Format)`. `Device::compile_render_pipeline` sets it for a `Function`
+    /// fragment stage from the pipeline's color attachments, and a fragment compiled on its own for
+    /// such a pipeline compiles under the same set: link refuses one compiled under another as
+    /// `NeedsInput(ColorWrites)`. Empty for any other function.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub rotated_colors: BTreeSet<u32>,
+    /// The second output (`[[color(n), index(1)]]`) the fragment function writes for an
+    /// attachment of `rotated_colors` whose blend reads a value no channel of the image holds where
+    /// Vulkan's factors read it (Metal's source alpha in a color factor), by color index: per
+    /// channel of the image, what the output holds there ([`FactorLane`]), which link's blend
+    /// reads through Vulkan's `SRC1` factors (`pipeline::rotated_blend`). The function writes it
+    /// beside its first output to the attachment, in place of any second output of its own there,
+    /// which Metal's blend then does not read; without a first output there it writes neither.
+    /// `Device::compile_render_pipeline` sets it for a `Function` fragment stage from the
+    /// pipeline's color attachments, and link refuses a fragment compiled under another map as
+    /// `NeedsInput(ColorWrites)`. Empty for any other function.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub rotated_factors: BTreeMap<u32, [FactorLane; 4]>,
+    /// A tile function's pipeline sets `threadgroupSizeMatchesTileSize`
+    /// (`MTLTileRenderPipelineDescriptor`). Metal then answers the pass's tile as the function's
+    /// threadgroup, whatever threads per tile the dispatch runs: its threads per threadgroup,
+    /// simdgroups and quadgroups per threadgroup, and their `dispatch_` forms are the tile's, its
+    /// position in the grid is `threadgroup · tile + position in threadgroup`, its threads per grid
+    /// the tiles times the tile, and its thread index in the threadgroup `simdgroup · 32 + lane`
+    /// (its quadgroups four consecutive of those). Under it a tile function reads those from the
+    /// region's nominal threadgroup, which the binder sets to the tile, and states
+    /// `RuntimeFact::TileThreadgroup` with `tile_sized`. `Device::compile_tile_pipeline` sets it
+    /// from the descriptor, and a tile function compiled on its own for such a pipeline compiles
+    /// under it: the pipeline refuses one compiled under the other as
+    /// `InvalidDescriptor(TileThreadgroupSize)`. Any other function compiles as without it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub threadgroup_size_matches_tile_size: bool,
+    /// The address-mode map of the texture bound at each texture slot a constexpr sampler
+    /// samples, where it is not the identity (`VariantKey::address_maps`,
+    /// `RuntimeFact::ConstexprSampled`): each constexpr sampler sampling the slot samples it with
+    /// its address modes mapped, as the binder maps a runtime sampler's, its immutable sampler and
+    /// every emulation that reads the modes alike. A mode the map sends where a constexpr sampler
+    /// cannot address (mirror-clamp-to-edge) is refused `NotImplemented(SamplerAddressMode)`. Empty
+    /// for any other function.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, with = "crate::pipeline::serde_pairs")
+    )]
+    pub address_maps: BTreeMap<SlotRef, metal::sampler::AddressModeMap>,
+    /// The runtime sampler slots bound to a sampler whose min or mag filter is Metal's `Cubic`
+    /// (`VariantKey::cubic_samplers`, `RuntimeFact::CubicSampler`), each with the bound word's
+    /// `SamplerWord::CUBIC_STATE` bits. A sample through such a slot is Metal's bicubic filter
+    /// of that state (EV GSM2-bcs2-m4), which the function emulates by fetches as it does a
+    /// constexpr bicubic sampler's, refusing what that emulation refuses and a mip filter
+    /// (`NotImplemented(SamplerBicubicFilter)`). A slot the function samples through without
+    /// being named here filters as its word says.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, with = "crate::pipeline::serde_pairs")
+    )]
+    pub cubic_samplers: BTreeMap<SlotRef, u32>,
+    /// The attachments of `rotated_colors` whose blend the fragment function shapes or
+    /// announces, by color index (`pipeline::rotated_blend`): one blended in a measured form that
+    /// reads Metal's blue premultiplied (`RotatedBlendForm::Premultiplied`), and one blended in
+    /// none of the measured forms (`RotatedBlendForm::Unmeasured`). An attachment blended in
+    /// another measured form, or not blended, is not listed. `Device::compile_render_pipeline` sets
+    /// it for a `Function` fragment stage from the pipeline's color attachments, and link refuses a
+    /// fragment compiled under another map as `NeedsInput(ColorWrites)`. Empty for any other
+    /// function.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub rotated_blends: BTreeMap<u32, RotatedBlendForm>,
+    /// A vertex function's capture form (`VariantKey::captured_positions`, [`CaptureForm`]): at
+    /// each return it also writes a 32-byte record of the vertex, its `[[position]]` as returned
+    /// (Metal's clip position, before any viewport compensation) at byte 0, its `[[point_size]]`
+    /// (1.0 where it writes none) at byte 16, and a `u32` restart flag at byte 20 (1 where the
+    /// indexed form's index is its type's all-ones value, Metal's strip restart index; 0
+    /// otherwise and in the vertices form), words 6 and 7 left unwritten, at
+    /// `PushField::CaptureAddress + 32 slot`, `slot = p + (InstanceIndex - first instance) ·
+    /// vertex count` in 64 bits from `PushField::CaptureLayout` (`p` is `VertexIndex` less the
+    /// first vertex in the vertices form, `VertexIndex` itself in the indexed form), and states
+    /// `RuntimeFact::CapturedPositions`. A function that writes no position plans no record.
+    /// Under [`CaptureForm::Indexed`] the function also reads its vertex from the draw's
+    /// index buffer (see there). Refused `Feature::TileReach`: a device without device addresses
+    /// or the vertex stage's stores, and a post-tessellation vertex function. Any other function
+    /// compiles as without it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub captured_positions: Option<CaptureForm>,
+    /// The channels of the render pipeline's color attachments that take a fragment function's
+    /// `half` output at `float` precision where Metal computes its last operation so, by color
+    /// index, one entry per channel the attachment stores: each attachment of a 32-bit float format
+    /// (`R32Float`, `RG32Float`, `RGBA32Float`) whose stored channels each take one
+    /// ([`HalfOutputLane`]). An attachment of another format, or one a stored channel of which
+    /// blends otherwise, is not listed. `Device::compile_render_pipeline` sets it for a `Function`
+    /// fragment stage from the pipeline's color attachments. The function records the entries of
+    /// the attachments it writes a `half` output to (`StageIo::half_output_lanes`), and link
+    /// refuses one whose recorded entry is not the pipeline's as `NeedsInput(ColorWrites)`. A
+    /// function compiled without the map (or an attachment's entry) rounds that output to `half`
+    /// with `PrecisionNote::HalfOutputPrecision` (or `HalfOutputFastMathBlend` under fast math) and
+    /// links into any pipeline: the missing input loses Metal's `float`, never the pipeline. Empty
+    /// for any other function.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub half_output_lanes: BTreeMap<u32, [Option<HalfOutputLane>; 4]>,
+    /// The extended-range color attachments, by color index, whose `half` shadow the draw's
+    /// render pass instance holds (`VariantKey::extended_shadows`): Metal's tile memory holds
+    /// such an attachment as `half` through the pass and rounds it to the codes once at the
+    /// store, so a function that reads one in the interlocked storage form reads the shadow's texel
+    /// (`ResourceKind::ExtendedShadow`) as the tile value, and a write stores the value it computes
+    /// there as well as the codes. Each is a single-sample attachment the function writes or reads
+    /// in the storage form under `framebuffer_fetch`; any other is
+    /// `NotImplemented(FramebufferFetch)`. Empty for any other function.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub extended_shadows: BTreeSet<u32>,
+    /// Sampled texture slots bound to a texture whose format's numeric class (`Float`, `Sint` or
+    /// `Uint`) is not the class the function declares there, by the bound format's class
+    /// (`VariantKey::cross_class`): each such slot is declared as an image of the bound class,
+    /// and its reads, samples and gathers take the bound format's own result, whose 32-bit words
+    /// the function hands back as the declared type, a `half` result each word's low 16 bits, as
+    /// plain Metal answers (measured on Apple M3 Max and M4). Only slots whose compile states
+    /// `RuntimeFact::CrossClassReads` take it. Empty for any other function.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, with = "crate::pipeline::serde_pairs")
+    )]
+    pub cross_class: BTreeMap<SlotRef, SampledType>,
+    /// The render pipeline's `textureWriteRoundingMode` (Apple SPI), for a fragment function's
+    /// texture writes that Metal's mode 2 stores otherwise than its default (a `float` texel into a
+    /// half-float, `RG11B10Float` or `RGB9E5Float` texture, a `half` texel into one of the latter
+    /// two). Under `NearestEven` such a write the translation has not built is refused where its
+    /// slot's storage choice declares such a format, and stated where the bound texture decides
+    /// (`RuntimeFact::StorageTextureWriteRounding`, `RuntimeFact::HeapWriteRounding`), which the
+    /// binder refuses where one is bound. The function records the mode it compiled such writes
+    /// under (`StageIo::texture_write_rounding`), and link refuses one compiled under the other
+    /// mode as `NeedsInput(ColorWrites)`. `Device::compile_render_pipeline` sets it for a
+    /// `Function` fragment stage from the descriptor. Any other function, and a fragment function
+    /// that writes no such texel, compiles as without it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub texture_write_rounding: metal::TextureWriteRoundingMode,
+    /// The runtime sampler slots bound to a sampler whose word states anisotropy
+    /// (`VariantKey::anisotropic_samplers`, `RuntimeFact::AnisotropicSampler`): a sample through
+    /// such a slot that Metal's anisotropic filter, emulated, reaches
+    /// (`lower::sampler::anisotropic`) takes it where the slot's word states anisotropy and the
+    /// plain sample elsewhere. A slot the function samples through without being named here takes
+    /// the plain sample, with no emulation in the module: the binder names every slot whose bound
+    /// word states anisotropy. Empty for any other function.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub anisotropic_samplers: BTreeSet<SlotRef>,
+    /// The `float` and `half` varyings the fragment function reads interpolated (`center`,
+    /// `centroid` or `sample`, with or without perspective) whose keys its render pipeline's
+    /// vertex function writes the same value at every vertex of a primitive
+    /// (`StageIo::uniform_outputs`). The function reads each flat, from the provoking vertex, as
+    /// Metal's interpolation returns such a value: a zero or subnormal as `+0`, an infinity as the
+    /// largest finite value of its sign, and a NaN as `+FLT_MAX`; every other value exactly
+    /// (measured on the M3 Max in every qualifier, EV FLT-m3b). It lists them among
+    /// `StageIo::uniform_inputs`. `Device::compile_render_pipeline` sets it for a `Function`
+    /// fragment stage from the pipeline's vertex function, and a fragment compiled on its own for
+    /// such a pipeline compiles under the same keys: link refuses one compiled under a key its
+    /// pipeline's vertex function does not write so (`NeedsInput(UniformVaryings)`). Empty for
+    /// any other function.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub uniform_varyings: BTreeSet<VaryingKey>,
+    /// The attributes, by Metal attribute index, that the vertex function fetches in fixed
+    /// function from layouts its vertex descriptor steps per instance, which every vertex of one
+    /// instance (so of one primitive) reads alike; set only where one of them makes a varying the
+    /// function writes the same at every vertex of a primitive (`StageIo::uniform_outputs`).
+    /// A pulled attribute's step is in its `VertexFetch::Pulled` already. The function lists
+    /// them as `StageIo::instanced_attributes`, and link refuses it behind a descriptor that
+    /// steps one of them per vertex (`InvalidDescriptor(VertexAttribute)`, as for another
+    /// projection). Empty for any other function.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub instanced_attributes: BTreeSet<u32>,
+}
+
+/// The draws a vertex function's capture form (`LoweringInputs::captured_positions`) runs
+/// under: each writes one record per vertex per instance, `p + (InstanceIndex - first instance) ·
+/// vertex count` from `PushField::CaptureLayout`, for stream position `p` (see each form).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum CaptureForm {
+    /// The draw's own non-indexed draw (`drawPrimitives:`), drawn as it is: the layout is
+    /// `[vertex start, vertex count, base instance, 0]`, and the function sees its vertices as
+    /// the draw does.
+    Vertices,
+    /// An indexed draw (`drawIndexedPrimitives:`) of this index type, drawn without indices as
+    /// `index count` vertices from vertex 0 with the draw's instance count and base instance: the
+    /// layout is `[restarts, index count, base instance, base vertex]`, `restarts` 1 for a line
+    /// or triangle strip. Stream position `p = VertexIndex` reads the draw's raw index at
+    /// `PushField::CaptureIndexAddress + p · size` (the binder's consumer folds the index buffer's
+    /// offset into the address; a `u16` index is read from the aligned word that holds it), and
+    /// the vertex is `raw + base vertex` in wrapping `u32` arithmetic. That vertex is
+    /// `[[vertex_id]]` and every per-vertex attribute's element, and the layout's base vertex is
+    /// `[[base_vertex]]`; the instance builtins are the draw's. Every attribute is pulled
+    /// (fixed-function input would fetch at `p`): an attribute a hand-built projection fetches in
+    /// fixed function is refused `Feature::TileReach`. The record's restart flag is 1 where the
+    /// raw index is the type's all-ones value. Where the draw restarts and the raw index is that
+    /// value, Metal shades no vertex: the function stores its record's restart flag alone and
+    /// returns before its body.
+    Indexed(metal::IndexType),
+}
+
+impl CaptureForm {
+    /// The index type of the indexed form; `None` for the vertices form.
+    pub fn index_type(self) -> Option<metal::IndexType> {
+        match self {
+            CaptureForm::Vertices => None,
+            CaptureForm::Indexed(ty) => Some(ty),
+        }
+    }
+}
+
+/// How a channel of a color attachment takes a fragment function's `half` output whose last
+/// operation Metal's fast math computes at `float` precision (`LoweringInputs::half_output_lanes`,
+/// an M4, plain Metal). The output is that operation's only use, and the operation carries every
+/// fast-math flag.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum HalfOutputLane {
+    /// A channel of a 32-bit float format that does not blend: Metal stores a product of two
+    /// `half`s exactly, and a sum, a difference, or a fused multiply-add of `half`s rounded to
+    /// `float` once.
+    Float32,
+    /// A channel of a 32-bit float format blended with factors one and one under `Add`: Metal
+    /// adds a product of two `half`s exactly to the destination, rounded to `float` once.
+    Float32Added,
+}
+
+/// How the blend of an attachment held with its channels rotated reads the fragment function's
+/// first output there (`LoweringInputs::rotated_blends`). Apple's blend does not compute each
+/// factor pair alike in its color and alpha arithmetic, and the rotation moves Metal's blue into
+/// the image's alpha and Metal's alpha into its red: under Metal's color factors `SourceAlpha` over
+/// `OneMinusSourceAlpha`, Metal's color is `fma(d, 1 - a, s * a)`, and the image's alpha blends a
+/// factor and one minus it as `fma(f, s - d, d)`, which rounds one code apart near half-code ties
+/// (EVs GSM2-f84b-m4 and GSM2-f84d-m4/-m3).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum RotatedBlendForm {
+    /// The image's alpha (Metal's blue) blends under factors one and one minus the second
+    /// output's alpha (Metal's source alpha), and the function writes it premultiplied: Metal's
+    /// blue times Metal's alpha, each clamped to `[0, 1]` with a NaN taken as 0 as Metal's blend
+    /// clamps its source, multiplied in the output's float format and not contracted. The
+    /// blend then computes `fma(d, 1 - a, s * a)`, Metal's own.
+    Premultiplied,
+    /// None of the measured forms: the blend stores Metal's channels rotated by Vulkan's factors
+    /// (`pipeline::rotated_blend`'s search), which Apple's blend may round one code apart from
+    /// Metal's (up to 1,767 of 65,536 tie-heavy texels in EV GSM2-f84e-m4's sweep). The function
+    /// records `PrecisionNote::RotatedBlendRounding`.
+    Unmeasured,
+}
+
+/// One channel of the second output a fragment function writes for an attachment held with its
+/// channels rotated (`LoweringInputs::rotated_factors`): a constant, or a channel of its first
+/// output to the attachment as the function returns it, so the blend reads the very value
+/// Metal's blend reads.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum FactorLane {
+    /// `0`.
+    Zero,
+    /// `1`.
+    One,
+    /// The first output's channel: Metal's red, green, blue or alpha (0 to 3).
+    Output(u8),
+}
+
+/// How a fragment function writes a color attachment of one of Apple's extended-range formats
+/// (`LoweringInputs::extended_range_colors`), as Metal stores its output there (measured on an
+/// Apple M3 Max and an M4, EVs XRR-rtp1-m3 and -m4): a `float` output is rounded to `half` (nearest
+/// even), a `half` one is taken as it is, and the value is stored as a kernel write stores it.
+/// Under blending Metal first clamps the output to the format's range (each color channel to the
+/// values of codes 0 and 1022 as `half`s, an `_sRGB` color channel of `BGRA10_XR_sRGB` to its
+/// decoded codes 0 and 1022, a NaN to the low end; alpha to `[0, 1]`, a NaN to 0).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ExtendedRangeColor {
+    /// The attachment's format.
+    pub form: metal::format::ExtendedRange,
+    /// The pipeline enables blending at the attachment, with factors one and zero for color and
+    /// alpha and the operation add (any other blend is not built): the output is clamped to the
+    /// format's range first.
+    pub blended: bool,
+    /// A bfloat attachment of a pipeline whose `textureWriteRoundingMode` is
+    /// `metal::TextureWriteRoundingMode::NearestEven`: a `float` output rounds to `half` to
+    /// nearest even, where at the default mode it rounds toward zero, a finite value past 65504
+    /// saturating there. False for every other form, whose store is measured at the default mode
+    /// alone: an extended-range form's `float` output rounds to nearest even, a padded one's toward
+    /// zero.
+    pub nearest_even: bool,
+}
+
+impl ExtendedRangeColor {
+    /// The write of an attachment of `form`, blended (with factors one and zero) where `blended`,
+    /// at the default `textureWriteRoundingMode`.
+    pub fn new(form: metal::format::ExtendedRange, blended: bool) -> ExtendedRangeColor {
+        ExtendedRangeColor {
+            form,
+            blended,
+            nearest_even: false,
+        }
+    }
+
+    /// This write in a pipeline of `textureWriteRoundingMode` `rounding`: `nearest_even` where
+    /// the form is a bfloat one and `rounding` is `NearestEven`.
+    pub fn with_rounding(self, rounding: metal::TextureWriteRoundingMode) -> ExtendedRangeColor {
+        ExtendedRangeColor {
+            nearest_even: self.form.bfloat()
+                && rounding == metal::TextureWriteRoundingMode::NearestEven,
+            ..self
+        }
+    }
+}
+
+/// Metal's conversion of a fragment function's float output into one channel of a color
+/// attachment (probes on an Apple M3 Max and an M4, every code's exact value and every tie with two
+/// `f32` steps either side).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum ChannelWrite {
+    /// A unorm channel of `bits` bits: the value clamped to `[0, 1]` (a NaN 0) times
+    /// `2^bits - 1`, the exact product rounded to nearest.
+    Unorm {
+        /// The channel's bits.
+        bits: u8,
+    },
+    /// A snorm channel of `bits` bits: the value clamped to `[-1, 1]` times `2^(bits-1) - 1`,
+    /// the exact product rounded to nearest. A NaN is 0, or -1.0 where the attachment blends
+    /// with factors one and zero (`blended`).
+    Snorm {
+        /// The channel's bits.
+        bits: u8,
+        /// The attachment blends (with factors one and zero).
+        blended: bool,
+    },
+    /// An 8-bit sRGB channel: the value clamped to `[0, 1]` (a NaN 0) times 4095, the exact
+    /// product rounded to nearest, encoded by Metal's twelve-bit thresholds.
+    Srgb,
+    /// A floating-point channel of a five-bit exponent (bias 15) and `mantissa` fraction bits:
+    /// a half (`mantissa` 10, `signed`) or one of `RG11B10Float`'s unsigned 11- and 10-bit
+    /// floats (6 and 5). The value rounded toward zero, a finite value past the largest to the
+    /// largest, an infinity kept, a NaN to the quiet NaN (`0x7e00`, `0x7e0`, `0x3f0`); where
+    /// unsigned, a negative value (an infinity included) to 0.
+    FloatTowardZero {
+        /// The channel's fraction bits.
+        mantissa: u8,
+        /// The channel has a sign bit.
+        signed: bool,
+    },
+    /// The device converts the channel: a near-equivalent the function records as
+    /// `PrecisionNote::DeviceColorConversion`.
+    Device,
+    /// A floating-point channel as [`ChannelWrite::FloatTowardZero`]'s, rounded to nearest even:
+    /// a finite value from the midpoint past the largest up to infinity, an infinity kept, a NaN
+    /// to the quiet NaN; where unsigned, a negative value to 0. A render pipeline's half-float
+    /// channel under `TextureWriteRoundingMode::NearestEven` (EV TXN2-twr-m4).
+    FloatNearestEven {
+        /// The channel's fraction bits.
+        mantissa: u8,
+        /// The channel has a sign bit.
+        signed: bool,
+    },
+    /// A floating-point channel as [`ChannelWrite::FloatNearestEven`]'s whose blend Metal rounds
+    /// to nearest even after blending (a render pipeline's half-float channel under
+    /// `TextureWriteRoundingMode::NearestEven` that blends with factors other than one and zero),
+    /// which only the device's blend can compute here: the device converts its result by its own
+    /// rounding, a near-equivalent the function records as
+    /// `PrecisionNote::BlendedWriteRounding`.
+    BlendedNearestEven {
+        /// The channel's fraction bits.
+        mantissa: u8,
+        /// The channel has a sign bit.
+        signed: bool,
+    },
+    /// A unorm channel of `bits` bits of a packed 16-bit format (`B5G6R5Unorm`, `A1BGR5Unorm`,
+    /// `ABGR4Unorm`, `BGR5A1Unorm`): the value rounded to a half first (to nearest even, a
+    /// finite value from 65520 up to infinity), then as [`ChannelWrite::Unorm`]'s: clamped to
+    /// `[0, 1]` (a NaN 0) times `2^bits - 1`, the exact product rounded to nearest even (EV
+    /// TXN2-pk16b-m3). A Clear load action of these formats converts so too.
+    HalfUnorm {
+        /// The channel's bits.
+        bits: u8,
+    },
+    /// One of the selectable rules (none, the device's conversion, an 8-bit unorm channel's, a
+    /// half-float channel's), chosen at each draw by the attachment's `PushField::ColorWriteRule`
+    /// word, which the pipeline's attachment decides (`GraphicsState::color_write_rules`): the
+    /// function computes each rule's value and selects one, so one module serves every
+    /// attachment whose channels take such rules, whatever its format or blend. Where the device
+    /// does not store Metal's codes itself, an attachment whose channels each take such a rule, one
+    /// of them a rounding (`Unorm { bits: 8 }` or a half's `FloatTowardZero`), takes `Selected` on
+    /// every channel of its entry.
+    Selected,
+}
+
+/// What a vertex function compiled for draws of one amplification each writes beyond its own
+/// outputs (`LoweringInputs::amplification_draws`, `VariantKey::amplification_draws`).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct AmplificationDraws {
+    /// The render pass has at least two layers (`renderTargetArrayLength` above 1): the vertex
+    /// function writes `Layer`, its own slice index plus the amplification's offset, 0 at or past
+    /// the pass's length. In a pass of one layer every amplification renders it, and no `Layer`
+    /// is written.
+    pub layered: bool,
+    /// A view mapping offsets the viewport: a vertex function that writes no viewport index of
+    /// its own writes `ViewportIndex` as the amplification's offset, 0 at or past the draw's
+    /// viewport count. One that writes its own adds the offset whatever this says.
+    pub viewports: bool,
+}
+
+impl AmplificationDraws {
+    /// The draws of a pass of more than one layer (`layered`) under mappings that offset the
+    /// viewport (`viewports`).
+    pub fn new(layered: bool, viewports: bool) -> AmplificationDraws {
+        AmplificationDraws { layered, viewports }
+    }
+}
+
+/// How a vertex function compiled for a viewport Vulkan's cannot be compensates its position
+/// (`LoweringInputs::viewport_compensation`, `VariantKey::viewport_compensation`).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ViewportCompensation {
+    /// The depth too: the function rewrites `z` and writes the two clip distances, for a depth
+    /// range past `[0, 1]` the Vulkan viewport cannot hold. Without it only `x` is negated (a
+    /// negative width), and the function declares no clip distance of its own.
+    pub depth: bool,
+    /// Metal's guard band for points too: the function scales its position's `x` and `y` by the
+    /// draw's `PushField::PointGuard`, for a draw of points through Vulkan viewports widened by the
+    /// inverse scale about their centers, and writes four clip distances after the others, which
+    /// cull a point where Metal does, its `|x|` or `|y|` past `1.5 w`.
+    pub point_guard: bool,
+    /// Mirrored and unmirrored viewports in one draw: the function negates its position's `x` where
+    /// the viewport it selects (the `ViewportIndex` it stores, or the amplification's, else the
+    /// first) has its bit set in the draw's `PushField::ViewportMirrors`, on top of `sx`.
+    pub mirrors: bool,
+    /// Metal's clamp of each vertex's depth before the interpolation, under `depth`: the function
+    /// clamps its compensated depth `a w + b z` to `[lo w, hi w]` of the draw's
+    /// `PushField::VertexDepthClamp` `[lo, hi]` where `w` is positive, so the device interpolates
+    /// the vertices' clamped depths, as Metal does, where it would clamp each sample. The clip
+    /// distances take the unclamped `z`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub vertex_clamp: bool,
+}
+
+impl ViewportCompensation {
+    /// The compensation of the position's `x`, and of its depth where `depth`.
+    pub fn new(depth: bool) -> ViewportCompensation {
+        ViewportCompensation {
+            depth,
+            point_guard: false,
+            mirrors: false,
+            vertex_clamp: false,
+        }
+    }
+
+    /// This compensation, with Metal's guard band for points where `point_guard`.
+    pub fn with_point_guard(self, point_guard: bool) -> ViewportCompensation {
+        ViewportCompensation {
+            point_guard,
+            ..self
+        }
+    }
+
+    /// This compensation, negating `x` by the selected viewport's bit of the draw's mirrors where
+    /// `mirrors`.
+    pub fn with_mirrors(self, mirrors: bool) -> ViewportCompensation {
+        ViewportCompensation { mirrors, ..self }
+    }
+
+    /// This compensation, clamping each vertex's depth by the draw's
+    /// `PushField::VertexDepthClamp` where `vertex_clamp`.
+    pub fn with_vertex_clamp(self, vertex_clamp: bool) -> ViewportCompensation {
+        ViewportCompensation {
+            vertex_clamp,
+            ..self
+        }
+    }
+}
+
+/// The render pipeline state a fragment function's interlocked framebuffer fetch depends on
+/// (`LoweringInputs::framebuffer_fetch`).
+#[non_exhaustive]
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct FramebufferFetchInputs {
+    /// Each color attachment index the function declares a `[[color(n)]]` input for: the
+    /// descriptor's attachment there, `None` where the descriptor sets none.
+    pub attachments: BTreeMap<u32, Option<FetchedAttachment>>,
+    /// The pipeline has a depth or a stencil attachment, whose tests can drop a fragment after
+    /// its function ran.
+    pub depth_or_stencil: bool,
+    /// The descriptor enables alpha to coverage.
+    pub alpha_to_coverage: bool,
+    /// The descriptor's `maxVertexAmplificationCount` is above 1: the pipeline may draw
+    /// multiview.
+    pub amplified: bool,
+    /// The attachments of [`attachments`](Self::attachments) the pipeline names only for Metal's
+    /// 16-bit float blend of a `half4` output (`DevicePolicy::half_blend`): the function takes
+    /// the storage form there where it is exact for the pipeline, and otherwise leaves the write
+    /// to the attachment and its blend to the device. Empty unless the profile asks for that
+    /// blend.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub half_blends: std::collections::BTreeSet<u32>,
+}
+
+impl FramebufferFetchInputs {
+    /// The state of a pipeline whose color attachments are `colors` (by Metal index), whose depth
+    /// and stencil formats are `depth` and `stencil`, under `alpha_to_coverage` and
+    /// `max_vertex_amplification_count`, for a function that declares color inputs at `read`.
+    pub fn of(
+        read: impl IntoIterator<Item = u32>,
+        colors: &[Option<crate::pipeline::descriptor::ColorAttachmentDescriptor>],
+        depth_or_stencil: bool,
+        alpha_to_coverage: bool,
+        max_vertex_amplification_count: u32,
+    ) -> FramebufferFetchInputs {
+        FramebufferFetchInputs {
+            attachments: read
+                .into_iter()
+                .map(|color| {
+                    let attachment =
+                        colors
+                            .get(color as usize)
+                            .copied()
+                            .flatten()
+                            .map(|a| FetchedAttachment {
+                                pixel_format: a.pixel_format,
+                                blending_enabled: a.blending_enabled,
+                                write_mask: crate::lower::fragment::compiled_write_mask(
+                                    a.pixel_format,
+                                    a.write_mask,
+                                ),
+                                replaces: crate::pipeline::color_writes::replaces(&a),
+                                equation: BlendEquation::of(&a),
+                            });
+                    (color, attachment)
+                })
+                .collect(),
+            depth_or_stencil,
+            alpha_to_coverage,
+            amplified: max_vertex_amplification_count > 1,
+            half_blends: std::collections::BTreeSet::new(),
+        }
+    }
+}
+
+/// What the interlocked framebuffer fetch reads of one color attachment's descriptor.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct FetchedAttachment {
+    pub pixel_format: metal::PixelFormat,
+    pub blending_enabled: bool,
+    /// The descriptor's write mask, as the function compiles it: for a format whose kept
+    /// channels a draw names (every format but an extended-range or an sRGB one), the mask's class
+    /// (none where it covers none of the format's channels, all where it covers every one, and for
+    /// a mask covering some, every channel of the format but its first), so that the masks of a
+    /// class share one key; any other format's mask as the descriptor sets it.
+    pub write_mask: metal::ColorWriteMask,
+    /// The descriptor's blend factors are one and zero, added, for color and alpha: where
+    /// blending is enabled, Metal stores the source as blending disabled does (but a signed
+    /// normalized NaN).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub replaces: bool,
+    /// The descriptor's blend where it enables blending, which the function computes in the
+    /// shader for an extended-range attachment (`metal::format::ExtendedRange`) it writes.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub equation: Option<BlendEquation>,
+}
+
+/// A color attachment's blend as its descriptor states it: the factors and operation of the color
+/// channels and of alpha.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct BlendEquation {
+    /// `sourceRGBBlendFactor`.
+    pub source_rgb: metal::BlendFactor,
+    /// `destinationRGBBlendFactor`.
+    pub destination_rgb: metal::BlendFactor,
+    /// `rgbBlendOperation`.
+    pub rgb_operation: metal::BlendOperation,
+    /// `sourceAlphaBlendFactor`.
+    pub source_alpha: metal::BlendFactor,
+    /// `destinationAlphaBlendFactor`.
+    pub destination_alpha: metal::BlendFactor,
+    /// `alphaBlendOperation`.
+    pub alpha_operation: metal::BlendOperation,
+}
+
+impl BlendEquation {
+    /// The blend of attachment `c`, where it enables blending.
+    pub fn of(c: &crate::pipeline::descriptor::ColorAttachmentDescriptor) -> Option<BlendEquation> {
+        c.blending_enabled.then_some(BlendEquation {
+            source_rgb: c.source_rgb_blend_factor,
+            destination_rgb: c.destination_rgb_blend_factor,
+            rgb_operation: c.rgb_blend_operation,
+            source_alpha: c.source_alpha_blend_factor,
+            destination_alpha: c.destination_alpha_blend_factor,
+            alpha_operation: c.alpha_blend_operation,
+        })
+    }
+}
+
+impl LoweringInputs {
+    /// No inputs: fixed-function vertex fetch, no variants.
+    pub fn new() -> LoweringInputs {
+        LoweringInputs::default()
+    }
+}
+
+/// How a storage image is declared and viewed for one bound pixel format.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct StorageImageChoice {
+    /// The format the shader declares (`Unknown` for formatless `Identity` choices, so every such
+    /// format of one numeric type shares one key).
+    pub vk_format: vk::Format,
+    pub class: StorageImageClass,
+    /// The mutable-format alias view, when the bound format is not itself storage-capable.
+    pub alias: Option<AliasView>,
+    /// The numeric type of the bound format's components, kept where the choice declares no
+    /// format (`vk_format` `Unknown`): a function whose texels at the slot take that type and
+    /// nothing else states it depends on it (`RuntimeFact::StorageTextureNumericType`). `None` when
+    /// `vk_format` names the format, whose own numeric type it is.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub numeric: Option<SampledType>,
+    /// The bound format is one of Apple's RGBX formats (`metal::format::x_channel`), held in its
+    /// RGBA twin: after the class's conversion, a read's alpha is 1 (`1.0`, or the integer 1) and
+    /// a write stores its green in the fourth channel, Metal's X field.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub x_channel: bool,
+}
+
+impl StorageImageChoice {
+    /// A choice with no alias view, no separate numeric type and no RGBX conversion.
+    pub fn new(vk_format: vk::Format, class: StorageImageClass) -> StorageImageChoice {
+        StorageImageChoice {
+            vk_format,
+            class,
+            alias: None,
+            numeric: None,
+            x_channel: false,
+        }
+    }
+}
+
+/// What the shader does around a storage image access.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum StorageImageClass {
+    /// The bound format is storage-capable; no conversion.
+    Identity,
+    /// A bgra8 image viewed as rgba8, or a bgr10a2 image as rgb10a2: the shader exchanges red and
+    /// blue.
+    SwizzleBgra,
+    /// An sRGB image viewed as its UNORM alias: the shader encodes and decodes sRGB, through
+    /// Metal's twelve-bit tables.
+    SrgbEncode,
+    /// An `ARGB8Unorm` image (alpha in byte 0, then red, green, and blue) viewed as
+    /// `R8G8B8A8_UNORM`: the shader rotates the channels.
+    RotateArgb,
+    /// A half-float image (`R16Float`, `RG16Float`, `RGBA16Float`) written by a device not
+    /// measured to round a `float` texel as Metal does: the shader rounds each written `float`
+    /// channel toward zero to the `half` Metal stores (a finite value past 65504 to 65504, an
+    /// infinity kept, a NaN to `0x7fc00000`), which the device then stores exactly. A `half`
+    /// texel is written as it is, and reads are `Identity`'s.
+    HalfTowardZero,
+    /// A half-float image written by a device measured to round a `float` texel as Metal does
+    /// but not to store every NaN as Metal's `0x7e00`: the shader writes a `float` channel's NaN
+    /// as `0x7fc00000`, every other value as computed. Reads are `Identity`'s.
+    HalfQuietNan,
+    /// A 4:4:4 two-plane YCbCr texture a slot only writes, through an `R32G32B32A32_UINT` image
+    /// of the texture's own (the consumer's write shadow): the shader writes each texel as the
+    /// bits of its red, green and blue `float` channels (a `half` texel's widened exactly) and a
+    /// 1, the mark of a written texel, which the consumer then encodes into the planes as Metal
+    /// stores it (`bind::ycbcr_write`). The slot is declared `Rgba32ui`; it has no reads.
+    YCbCrWrite,
+    /// An `RG11B10Float` image written by `float` texels, on every device: the shader writes a
+    /// channel's NaN as `0x7fc00000`, which every device measured stores as Metal's `0x7e0` (and
+    /// `0x3f0` in the 10-bit field), every other value as computed, which each rounds toward zero
+    /// as Metal does; RADV and NVIDIA keep another NaN's payload bits. A `half` texel is written
+    /// as it is, and reads are `Identity`'s.
+    SmallFloatQuietNan,
+    /// A unorm image with a 1-bit alpha (`A1BGR5Unorm`, `BGR5A1Unorm`) written on a device
+    /// measured to store every other normalized channel as Metal does
+    /// (`DriverDeviation::MetalNormStorageWrites`) but to round a 1-bit channel's half up: the
+    /// shader writes a `float` or `half` texel's alpha as `1.0` above one half and `0.0`
+    /// elsewhere (a NaN 0), the code Metal stores, every other channel as computed. Reads are
+    /// `Identity`'s.
+    OneBitAlpha,
+    /// A half-float image (`R16Float`, `RG16Float`, `RGBA16Float`) a slot writes, and may read,
+    /// on a device not measured to store a written `half`'s NaN as its bits
+    /// (`DriverDeviation::MetalHalfTexelWrites`), viewed through its unsigned integer alias of
+    /// the same channels (`R16_UINT`, `R16G16_UINT`, `R16G16B16A16_UINT`): the shader writes each
+    /// channel's half bits, a `half` texel's own (a NaN's sign and payload kept, as Metal stores
+    /// them) and a `float` texel's rounded toward zero to the half Metal stores (a finite value
+    /// past 65504 to 65504, an infinity kept, every NaN `0x7e00`), which every device stores
+    /// exactly; a read widens each channel's half exactly, a `float` read's NaN `0x7fc00000`, as
+    /// Metal reads them. The slot is declared of the alias's unsigned integer format; it takes no
+    /// atomic.
+    HalfBits,
+}
+
+/// The alias view of a storage image created with `MUTABLE_FORMAT`.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct AliasView {
+    /// The format of the bound image; the view uses the choice's `vk_format`.
+    pub image_format: vk::Format,
+}
+
+impl AliasView {
+    /// The alias of an image of `image_format`.
+    pub fn new(image_format: vk::Format) -> AliasView {
+        AliasView { image_format }
+    }
+}
+
+/// How each vertex attribute of a vertex function is fetched. Everything else about vertex input is
+/// link-time `VertexInputState`.
+#[non_exhaustive]
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct VertexFetchProjection {
+    /// By Metal attribute index.
+    pub attributes: BTreeMap<u32, VertexFetch>,
+}
+
+impl VertexFetchProjection {
+    /// No attributes.
+    pub fn new() -> VertexFetchProjection {
+        VertexFetchProjection::default()
+    }
+}
+
+/// How one vertex attribute is fetched.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum VertexFetch {
+    /// Fixed-function vertex input; the Vulkan format is link-time state.
+    FixedFunction,
+    /// Fetched in the shader from a buffer, decoding this Metal format.
+    ///
+    /// Everything that changes the fetch code is here: the source buffer, the attribute's
+    /// offset in an element, and the step. The layout's stride is not: the shader reads it from
+    /// `PushField::VertexBufferStride(buffer_index)`. Build it with [`VertexFetch::pulled`],
+    /// which canonicalizes the step rate.
+    Pulled {
+        format: metal::VertexFormat,
+        /// The Metal buffer index the attribute's layout reads.
+        buffer_index: u32,
+        /// The attribute's byte offset in an element.
+        offset: u32,
+        step_function: metal::VertexStepFunction,
+        /// The instance step rate for `PerInstance`; 1 for `PerVertex` and 0 for `Constant`,
+        /// whose fetch does not depend on it.
+        step_rate: u32,
+    },
+}
+
+impl VertexFetch {
+    /// The pulled fetch of attribute `attr` from layout `layout`, with the step rate
+    /// canonicalized (equal fetch code gives an equal key).
+    pub fn pulled(
+        attr: &VertexAttributeDescriptor,
+        layout: &VertexBufferLayoutDescriptor,
+    ) -> VertexFetch {
+        let step_rate = match layout.step_function {
+            metal::VertexStepFunction::PerVertex => 1,
+            metal::VertexStepFunction::Constant => 0,
+            _ => layout.step_rate,
+        };
+        VertexFetch::Pulled {
+            format: attr.format,
+            buffer_index: attr.buffer_index,
+            offset: attr.offset,
+            step_function: layout.step_function,
+            step_rate,
+        }
+    }
+}

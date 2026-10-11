@@ -1,0 +1,13 @@
+{
+  "primary": {
+    "environment_id": "apple-m3-max-macos26.7",
+    "identity": {
+      "device": "Apple M3 Max",
+      "gpu_cores": 40,
+      "os": "26.7",
+      "os_build": "25G229",
+      "xcode_build": "27A266a",
+      "metal_toolchain": "Apple metal version 32023.921 (metalfe-32023.921.6)"
+    }
+  }
+}

@@ -1,0 +1,154 @@
+target triple = "air64_v28-apple-macosx26.0.0"
+source_filename = "-"
+; datalayout DataLayout { endian: Little, pointers: {0: PointerSpec { size_bits: 64, abi_bits: 64, pref_bits: 64, index_bits: 64 }}, ints: {1: AlignSpec { abi_bits: 8, pref_bits: 8 }, 8: AlignSpec { abi_bits: 8, pref_bits: 8 }, 16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }}, floats: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }}, vectors: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 24: AlignSpec { abi_bits: 32, pref_bits: 32 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 48: AlignSpec { abi_bits: 64, pref_bits: 64 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 96: AlignSpec { abi_bits: 128, pref_bits: 128 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }, 192: AlignSpec { abi_bits: 256, pref_bits: 256 }, 256: AlignSpec { abi_bits: 256, pref_bits: 256 }, 512: AlignSpec { abi_bits: 512, pref_bits: 512 }, 1024: AlignSpec { abi_bits: 1024, pref_bits: 1024 }}, aggregate: AlignSpec { abi_bits: 0, pref_bits: 64 }, native_ints: [8, 16, 32], stack_align_bits: None, alloca_space: 0, program_space: 0, globals_space: 0, mangling: None, fn_ptr_align: None, non_integral: [] }
+%t4 = type void (ptr addrspace(1), ptr addrspace(1), ptr addrspace(1), i32, i32, i32)
+%t9 = type <64 x float> (ptr addrspace(1), <2 x i64>, <2 x i64>, <2 x i64>)
+%t12 = type <64 x half> (ptr addrspace(1), <2 x i64>, <2 x i64>, <2 x i64>)
+%t13 = type i32 (i32)
+%t14 = type <64 x float> (<64 x float>, <64 x float>, <64 x float>)
+%t15 = type <64 x half> (<64 x half>, <64 x half>, <64 x half>)
+%t17 = type [2 x i32]
+c9 = %t17 [27, 0]
+c22 = <2 x i64> [8, 8]
+c23 = <2 x i64> [1, 8]
+
+define %t4 @f0 "dsm2_collective_branch" convergent "frame-pointer"="all" "min-legal-vector-width"="2048" "no-builtins"="" "no-trapping-math"="true" "stack-protector-buffer-size"="8" %a0( Ref nocapture "air-buffer-no-alias"="" ) %a1( Ref nocapture "air-buffer-no-alias"="" ) %a2( Mod nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = tail call <64 x float> @f1 [air SimdMatrix(Load8x8 { elem: F32, space: Device })](%a0, <2 x i64> c22, <2 x i64> c23, <2 x i64> zeroinitializer) convergent arg0( Ref nocapture )
+  %i1 = getelementptr inbounds float, %a0, i64 64
+  %i2 = tail call <64 x float> @f1 [air SimdMatrix(Load8x8 { elem: F32, space: Device })](%i1, <2 x i64> c22, <2 x i64> c23, <2 x i64> zeroinitializer) convergent arg0( Ref nocapture )
+  %i3 = getelementptr inbounds float, %a0, i64 128
+  %i4 = tail call <64 x float> @f1 [air SimdMatrix(Load8x8 { elem: F32, space: Device })](%i3, <2 x i64> c22, <2 x i64> c23, <2 x i64> zeroinitializer) convergent arg0( Ref nocapture )
+  %i5 = tail call <64 x half> @f2 [air SimdMatrix(Load8x8 { elem: F16, space: Device })](%a1, <2 x i64> c22, <2 x i64> c23, <2 x i64> zeroinitializer) convergent arg0( Ref nocapture )
+  %i6 = getelementptr inbounds half, %a1, i64 64
+  %i7 = tail call <64 x half> @f2 [air SimdMatrix(Load8x8 { elem: F16, space: Device })](%i6, <2 x i64> c22, <2 x i64> c23, <2 x i64> zeroinitializer) convergent arg0( Ref nocapture )
+  %i8 = getelementptr inbounds half, %a1, i64 128
+  %i9 = tail call <64 x half> @f2 [air SimdMatrix(Load8x8 { elem: F16, space: Device })](%i8, <2 x i64> c22, <2 x i64> c23, <2 x i64> zeroinitializer) convergent arg0( Ref nocapture )
+  br bb1
+bb1:
+  %i11 = phi i32 [i32 0, bb0], [%i13, bb1]
+  %i12 = tail call i32 @f3 [air Group(Group { scope: Simdgroup, op: Sum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Unsigned) })](i32 1) convergent
+  %i13 = add i32 %i11, i32 1
+  %i14 = icmp ugt %i13, %a5
+  br %i14, bb2, bb1, !llvm.loop LoopHints { unroll: Default, must_progress: true }
+bb2:
+  %i16 = icmp ugt %i12, i32 16
+  br %i16, bb3, bb4
+bb3:
+  %i18 = tail call <64 x float> @f4 [air SimdMatrix(MultiplyAccumulate8x8 { result: F32, lhs: F32, rhs: F32, acc: F32 })](%i0, %i2, %i4) convergent
+  %i19 = tail call <64 x half> @f5 [air SimdMatrix(MultiplyAccumulate8x8 { result: F16, lhs: F16, rhs: F16, acc: F16 })](%i5, %i7, %i9) convergent
+  %i20 = extractelement %i18, i64 0
+  %i21 = shl i32 %a3, i32 1
+  %i22 = zext %i21 to i64
+  %i23 = getelementptr inbounds float, %a2, %i22
+  store %i20, %i23, align 4
+  %i25 = extractelement %i18, i64 1
+  %i26 = or i32 %i21, i32 1
+  %i27 = zext %i26 to i64
+  %i28 = getelementptr inbounds float, %a2, %i27
+  store %i25, %i28, align 4
+  %i30 = extractelement %i19, i64 0
+  %i31 = fpext %i30 to float
+  %i32 = add i32 %a4, %a3
+  %i33 = shl i32 %i32, i32 1
+  %i34 = zext %i33 to i64
+  %i35 = getelementptr inbounds float, %a2, %i34
+  store %i31, %i35, align 4
+  %i37 = extractelement %i19, i64 1
+  %i38 = fpext %i37 to float
+  %i39 = or i32 %i33, i32 1
+  %i40 = zext %i39 to i64
+  %i41 = getelementptr inbounds float, %a2, %i40
+  store %i38, %i41, align 4
+  br bb4
+bb4:
+  ret void
+}
+
+declare %t9 @f1 "air.simdgroup_matrix_8x8_load.v64f32.p1f32" convergent memory(Ref, Ref, Ref) %a0( Ref nocapture )
+
+declare %t12 @f2 "air.simdgroup_matrix_8x8_load.v64f16.p1f16" convergent memory(Ref, Ref, Ref) %a0( Ref nocapture )
+
+declare %t13 @f3 "air.simd_sum.u.i32" convergent
+
+declare %t14 @f4 "air.simdgroup_matrix_8x8_multiply_accumulate.v64f32.v64f32.v64f32.v64f32" convergent
+
+declare %t15 @f5 "air.simdgroup_matrix_8x8_multiply_accumulate.v64f16.v64f16.v64f16.v64f16" convergent
+!md0 = !"SDK Version"
+!md1 = !"wchar_size"
+!md2 = !"frame-pointer"
+!md3 = !"air.max_device_buffers"
+!md4 = !"air.max_constant_buffers"
+!md5 = !"air.max_threadgroup_buffers"
+!md6 = !"air.max_textures"
+!md7 = !"air.max_read_write_textures"
+!md8 = !"air.max_samplers"
+!md9 = !"air.buffer"
+!md10 = !"air.location_index"
+!md11 = !"air.read"
+!md12 = !"air.address_space"
+!md13 = !"air.arg_type_size"
+!md14 = !"air.arg_type_align_size"
+!md15 = !"air.arg_type_name"
+!md16 = !"float"
+!md17 = !"air.arg_name"
+!md18 = !"in"
+!md19 = !"half"
+!md20 = !"hin"
+!md21 = !"air.read_write"
+!md22 = !"out"
+!md23 = !"air.thread_position_in_grid"
+!md24 = !"uint"
+!md25 = !"g"
+!md26 = !"air.threads_per_grid"
+!md27 = !"n"
+!md28 = !"air.thread_index_in_simdgroup"
+!md29 = !"lane"
+!md30 = !"air.compile.denorms_disable"
+!md31 = !"air.compile.fast_math_disable"
+!md32 = !"air.compile.framebuffer_fetch_enable"
+!md33 = !"Apple metal version 32023.921 (metalfe-32023.921.6)"
+!md34 = !"Metal"
+!md35 = i32 2
+!md36 = %t17 c9
+!md37 = i32 1
+!md38 = i32 4
+!md39 = i32 7
+!md40 = i32 31
+!md41 = i32 128
+!md42 = i32 8
+!md43 = i32 16
+!md44 = ptr addrspace(0) @f0
+!md45 = i32 0
+!md46 = i32 3
+!md47 = i32 5
+!md48 = !{!md35, !md0, !md36}
+!md49 = !{!md37, !md1, !md38}
+!md50 = !{!md39, !md2, !md35}
+!md51 = !{!md39, !md3, !md40}
+!md52 = !{!md39, !md4, !md40}
+!md53 = !{!md39, !md5, !md40}
+!md54 = !{!md39, !md6, !md41}
+!md55 = !{!md39, !md7, !md42}
+!md56 = !{!md39, !md8, !md43}
+!md57 = !{}
+!md58 = !{!md45, !md9, !md10, !md45, !md37, !md11, !md12, !md37, !md13, !md38, !md14, !md38, !md15, !md16, !md17, !md18}
+!md59 = !{!md37, !md9, !md10, !md37, !md37, !md11, !md12, !md37, !md13, !md35, !md14, !md35, !md15, !md19, !md17, !md20}
+!md60 = !{!md35, !md9, !md10, !md35, !md37, !md21, !md12, !md37, !md13, !md38, !md14, !md38, !md15, !md16, !md17, !md22}
+!md61 = !{!md46, !md23, !md15, !md24, !md17, !md25}
+!md62 = !{!md38, !md26, !md15, !md24, !md17, !md27}
+!md63 = !{!md47, !md28, !md15, !md24, !md17, !md29}
+!md64 = !{!md58, !md59, !md60, !md61, !md62, !md63}
+!md65 = !{!md44, !md57, !md64}
+!md66 = !{!md30}
+!md67 = !{!md31}
+!md68 = !{!md32}
+!md69 = !{!md33}
+!md70 = !{!md35, !md42, !md45}
+!md71 = !{!md34, !md38, !md45, !md45}
+!"llvm.module.flags" = !{!md48, !md49, !md50, !md51, !md52, !md53, !md54, !md55, !md56}
+!"air.kernel" = !{!md65}
+!"air.compile_options" = !{!md66, !md67, !md68}
+!"llvm.ident" = !{!md69}
+!"air.version" = !{!md70}
+!"air.language_version" = !{!md71}

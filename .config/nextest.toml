@@ -1,0 +1,14 @@
+# cargo-nextest configuration (https://nexte.st/docs/configuration/).
+#
+# A hung test must never block a gate run: nextest terminates any test still
+# running after 20 minutes and reports it as a timeout. The slowest passing test in the
+# 2026-09-30 gate runs took 334 s (debug, a loaded host), so the limit leaves more than 3x
+# headroom. A test that reaches it is a hang or a regression to diagnose, not a limit to raise.
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 20 }
+
+# The ignored `soak_` tests enumerate whole structurizer families and run for up to an hour
+# alone; outside the gate they get two hours.
+[[profile.default.overrides]]
+filter = 'test(/::soak_/)'
+slow-timeout = { period = "300s", terminate-after = 24 }

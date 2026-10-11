@@ -1,0 +1,762 @@
+//! Per-draw and per-dispatch instantiation outputs shared by draws and dispatches, and the
+//! arithmetic both share: descriptor ranges and residual bind offsets (`descriptor_range`), and the
+//! resident root table ([`RootTable`]), and the buffer-slot, push-field, and texel-buffer
+//! instantiation both share (`bind_buffers`, `slot_field`, `put`, `texel_ranges`).
+
+use crate::bind::plan::compute::internal;
+use crate::bind::plan::{BoundKind, PlannedBuffer, ResourceTemplate};
+pub(crate) use crate::bind::resident::RootEntry;
+use crate::bind::state::{BindState, BoundBuffer, BoundTexture};
+use crate::error::{BindError, Feature, Unsupported};
+use crate::memory::roots::{
+    BIND_OFFSET, ENTRY_BYTES, GUEST, HOST, RESIDENT_COUNT, RESIDENT_FIRST, SINK_ROOT, SIZE,
+};
+use crate::pipeline::interface::{BufferForm, PushLoc, Window};
+use crate::pipeline::sym::{PushField, SlotRef};
+use crate::vk;
+
+/// Push-constant bytes for one stage range (`vkCmdPushConstants`).
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct PushConstantWrite {
+    pub stages: vk::ShaderStageFlags,
+    pub offset: u32,
+    pub bytes: Vec<u8>,
+}
+
+/// Bytes the consumer uploads into the buffer behind a plan binding (argument table, handle
+/// table) before recording the draw or dispatch.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct DescriptorBytes {
+    pub set: u32,
+    pub binding: u32,
+    pub bytes: Vec<u8>,
+}
+
+/// The byte window of one bound buffer slot that this draw or dispatch can touch: the staging and
+/// writeback window. `window` is relative to the bind offset, as in the interface.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct BufferExtent {
+    pub slot: SlotRef,
+    pub window: Window,
+}
+
+/// A push-constant field the consumer fills after uploading `descriptor_bytes`: a declared field,
+/// not a patch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum PushHole {
+    /// The device address of the uploaded resident root table ([`RootTable`]), as a `u64` at
+    /// `offset` (absolute, in the push-constant block) of every region's push bytes.
+    RootTableAddress {
+        stages: vk::ShaderStageFlags,
+        offset: u32,
+    },
+    /// The device address of the command buffer's `ExecutionStatus` buffer (a function that counts
+    /// resident-set misses, reaches it by address), as a `u64` at `offset` of every region's push
+    /// bytes.
+    ExecutionStatusAddress {
+        stages: vk::ShaderStageFlags,
+        offset: u32,
+    },
+    /// The device address of the replayed indirect command buffer's record storage (its header), as
+    /// a `u64` at `offset` of the device replay's preprocess push bytes.
+    CommandRecordsAddress {
+        stages: vk::ShaderStageFlags,
+        offset: u32,
+    },
+    /// The device address of the region record a device-replay variant's dispatch reads:
+    /// `ReplayLayout::region_offset` of the dispatch's command and region in the replay's scratch,
+    /// as a `u64` at `offset` of the variant's push bytes. A flat variant's dispatch outside a
+    /// replay (`BindingPlan::instantiate_dispatch`) reads the record its preprocess wrote beside
+    /// the group counts.
+    ReplayRegionAddress {
+        stages: vk::ShaderStageFlags,
+        offset: u32,
+    },
+    /// The device address of the draw's first capture record, as a `u64` at `offset` of a
+    /// capture variant's vertex push bytes (`VariantKey::captured_positions`): a multiple of 16,
+    /// in a buffer of `SHADER_DEVICE_ADDRESS` usage that the draw's vertex stage writes
+    /// (`VERTEX_SHADER`, `SHADER_WRITE`), holding 32 bytes for each vertex of each instance the
+    /// draw runs (each index of an indexed draw). The record of the draw's vertex `v` (from its
+    /// first; an indexed draw's index position) in instance `i` (from its first) is at
+    /// `32 (v + i · vertex count)`: its clip position's four `f32`s at byte 0, as the vertex
+    /// function returned them (before any viewport compensation), its point size's `f32` at byte
+    /// 16 (1.0 where the function writes none), a `u32` at byte 20 that is 1 where an indexed
+    /// draw's index there is its type's all-ones value (Metal's strip restart index) and 0
+    /// otherwise, and two words the draw leaves as they were.
+    CaptureAddress {
+        stages: vk::ShaderStageFlags,
+        offset: u32,
+    },
+    /// The device address of an indexed capture draw's first index (`CaptureForm::Indexed`), as
+    /// a `u64` at `offset` of the capture variant's vertex push bytes: the draw's index buffer's
+    /// address plus its index offset, which the binder requires to be a multiple of the index
+    /// size, in a buffer of `SHADER_DEVICE_ADDRESS` usage whose address is a multiple of 4. The
+    /// draw reads its indices there in the vertex stage (`DrawCommands::uses`, as storage); a
+    /// `u16` index is read in the aligned 4-byte word that holds it, which lies inside the
+    /// `VkBuffer` an `IndexBufferRef` describes.
+    CaptureIndexAddress {
+        stages: vk::ShaderStageFlags,
+        offset: u32,
+    },
+}
+
+/// A consumer-owned indirect-argument buffer and the byte offset of the arguments.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct IndirectRef {
+    /// The consumer's id for the buffer.
+    pub token: u32,
+    pub offset: u64,
+}
+
+impl IndirectRef {
+    /// The arguments at `offset` in the consumer's buffer `token`.
+    pub fn new(token: u32, offset: u64) -> IndirectRef {
+        IndirectRef { token, offset }
+    }
+}
+
+/// A consumer-owned index buffer.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct IndexBufferRef {
+    /// The consumer's id for the buffer.
+    pub token: u32,
+    /// The end of the buffer's bytes (`MTLBuffer.length`), against which a draw's indices are
+    /// bounded ([`IndexBufferRef::fetch_end`]), in the offsets the draw binds the `VkBuffer` at
+    /// (the length itself where the consumer binds the buffer from its start). The buffer's byte 0
+    /// lies at a multiple of 4 bytes of those offsets, and the `VkBuffer` behind it holds at least
+    /// the length rounded up to 16 bytes (the padding).
+    pub length: u64,
+}
+
+impl IndexBufferRef {
+    /// The consumer's index buffer `token`, `length` bytes long.
+    pub fn new(token: u32, length: u64) -> IndexBufferRef {
+        IndexBufferRef { token, length }
+    }
+
+    /// Where Metal's index fetch from `index_offset` stops reading bytes at their position: the
+    /// length rounded up to 4 bytes where the offset lies before the length, so a partial last
+    /// index reads the bytes past the length up to there (the padding, or a heap's bytes after a
+    /// placed buffer); the length otherwise, where no byte lies inside from the offset. A position
+    /// from there on reads index 0. Measured on an Apple M4 (macOS 27.0.1) from offsets that are
+    /// multiples of 4; from an offset at or past the length Metal reads the memory past the buffer,
+    /// which the bound replaces with index 0, a contained near-equivalent.
+    pub fn fetch_end(&self, index_offset: u64) -> u64 {
+        if index_offset < self.length {
+            self.length
+                .checked_next_multiple_of(4)
+                .unwrap_or(self.length)
+        } else {
+            self.length
+        }
+    }
+}
+
+/// A byte range of a buffer: `range` bytes from `offset`.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct BufferRange {
+    pub offset: u64,
+    pub range: u64,
+}
+
+/// The range a buffer descriptor of the plan binds for this draw or dispatch. For a
+/// `WriteSource::Buffer`, `range.offset` is from the start of the bound allocation; for a
+/// `WriteSource::InlineBytes`, from the start of the consumer's upload of the bytes, which the
+/// consumer places at an offset aligned to the descriptor type's `min*BufferOffsetAlignment`.
+/// The consumer binds exactly this range, never more. It is at least 16 bytes, inside the
+/// allocation padded to 16 bytes, and its offset is a multiple of the alignment.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct DescriptorRange {
+    pub set: u32,
+    pub binding: u32,
+    pub range: BufferRange,
+}
+
+/// The resident root table of a draw or dispatch: 32-byte entries `{host, guest, size,
+/// bind_offset}: u64`, little-endian.
+///
+/// Entry 0 is the null root (zero). Entry 1 is the sink: its `host` field (at
+/// [`RootTable::SINK_HOST_OFFSET`]) is left 0 for the consumer to fill with the device address of
+/// its `NeutralResource::Sink`; its `guest` and `size` fields hold the resident set's first root
+/// `R0` and entry count `N`. Entry `2 + n` is the `BufferForm::Psb` slot `[[buffer(n)]]` (zero
+/// when unbound, so every access through it is contained). Entries `R0 .. R0 + N` are the
+/// resident set, sorted by guest address and disjoint, each with `bind_offset = 0`. The consumer
+/// writes the sink address, uploads the bytes to memory with a 16-byte-aligned device address,
+/// and fills `PushHole::RootTableAddress` with that address.
+///
+/// `R0` counts 32-byte entries from the table's own address, modulo `2^64`, so a consumer may
+/// point the table at a resident set it uploaded elsewhere ([`ResidentSet`]): the table and the set
+/// 32-byte-aligned, and the set holding at least the table's own ranges
+/// ([`RootTable::resident_ranges`]), it writes [`RootTable::resident_fields`] over the sink
+/// entry's `guest` and `size` fields, at [`RootTable::RESIDENT_FIELDS_OFFSET`].
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct RootTable {
+    pub bytes: Vec<u8>,
+}
+
+impl RootTable {
+    /// Byte offset of the sink entry's `host` field, which the consumer fills.
+    pub const SINK_HOST_OFFSET: u32 = (SINK_ROOT * ENTRY_BYTES + HOST) as u32;
+
+    /// Byte offset of the sink entry's `guest` and `size` fields, `R0` and `N`: the 16 bytes
+    /// [`resident_fields`](Self::resident_fields) gives.
+    pub const RESIDENT_FIELDS_OFFSET: u32 = (SINK_ROOT * ENTRY_BYTES + RESIDENT_FIRST) as u32;
+
+    /// The alignment a table and a [`ResidentSet`] it is pointed at both need: one entry.
+    pub const ENTRY_ALIGNMENT: u64 = ENTRY_BYTES;
+
+    /// The table's resident set, `R0 .. R0 + N` as the binder wrote it, each at its padded size.
+    pub fn resident_ranges(&self) -> Vec<ResidentRange> {
+        let field = |root: u64, field: u64| {
+            let at = (root * ENTRY_BYTES + field) as usize;
+            self.bytes
+                .get(at..at + 8)
+                .and_then(|bytes| bytes.try_into().ok())
+                .map_or(0, u64::from_le_bytes)
+        };
+        let first = field(SINK_ROOT, RESIDENT_FIRST);
+        let count = field(SINK_ROOT, RESIDENT_COUNT);
+        (first..first.saturating_add(count))
+            .map(|root| ResidentRange {
+                host: field(root, HOST),
+                guest: field(root, GUEST),
+                length: field(root, SIZE),
+            })
+            .collect()
+    }
+
+    /// The sink entry's `guest` and `size` fields (`R0`, then `N`, little-endian) that point a
+    /// table at `table` at the `count` entries of a [`ResidentSet`] at `set`: `R0` is
+    /// `(set - table) / 32` modulo `2^64`. `None` where `set - table` is not a multiple of 32.
+    pub fn resident_fields(table: u64, set: u64, count: u64) -> Option<[u8; 16]> {
+        let distance = set.abs_diff(table);
+        if !distance.is_multiple_of(ENTRY_BYTES) {
+            return None;
+        }
+        let entries = distance / ENTRY_BYTES;
+        // A set below the table wraps: `first * 32` is `set - table` modulo `2^64` either way.
+        let first = match set >= table {
+            true => entries,
+            false => 0u64.wrapping_sub(entries),
+        };
+        let mut fields = [0u8; 16];
+        fields[..8].copy_from_slice(&first.to_le_bytes());
+        fields[8..].copy_from_slice(&count.to_le_bytes());
+        Some(fields)
+    }
+
+    /// The table with `statics` (entry `2 + n` for each `(n, entry)`, every `n < first - 2`) and
+    /// the resident set `resident` (already coalesced, [`resident_set`]) from root `first`.
+    pub(crate) fn build(statics: &[(u32, RootEntry)], first: u64, resident: &[RootEntry]) -> Self {
+        let count = first as usize + resident.len();
+        let mut bytes = vec![0u8; count * ENTRY_BYTES as usize];
+        let mut put = |root: u64, field: u64, value: u64| {
+            let at = (root * ENTRY_BYTES + field) as usize;
+            bytes[at..at + 8].copy_from_slice(&value.to_le_bytes());
+        };
+        put(SINK_ROOT, RESIDENT_FIRST, first);
+        put(SINK_ROOT, RESIDENT_COUNT, resident.len() as u64);
+        let statics = statics.iter().map(|(n, e)| (2 + u64::from(*n), e));
+        let resident = (first..).zip(resident);
+        for (root, e) in statics.chain(resident) {
+            put(root, HOST, e.host);
+            put(root, GUEST, e.guest);
+            put(root, SIZE, e.size);
+            put(root, BIND_OFFSET, e.bind_offset);
+        }
+        RootTable { bytes }
+    }
+}
+
+/// One allocation of a resident set.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ResidentRange {
+    /// Its Vulkan device address.
+    pub host: u64,
+    /// Its Metal address.
+    pub guest: u64,
+    /// Its length in bytes, which a set pads to a multiple of 16.
+    pub length: u64,
+}
+
+impl ResidentRange {
+    /// The allocation of `length` bytes at device address `host` and Metal address `guest`.
+    pub fn new(host: u64, guest: u64, length: u64) -> ResidentRange {
+        ResidentRange {
+            host,
+            guest,
+            length,
+        }
+    }
+}
+
+/// A resident set a consumer uploads apart from the root tables that search it: its allocations
+/// coalesced as a root table's are (sorted by Metal address, one inside another dropped, a partial
+/// overlap trimmed of its head, an empty one dropped), each at its padded size, as entries in a
+/// root table's layout. The consumer uploads [`bytes`]( Self::bytes) at a 32-byte-aligned device
+/// address and points root tables there ([`RootTable::resident_fields`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResidentSet {
+    entries: Vec<RootEntry>,
+}
+
+impl ResidentSet {
+    /// The coalesced set of `ranges`, of any count (Refused with `BindError::ResidentSetTooLarge`
+    /// past 2^16 entries before).
+    pub fn new(ranges: impl IntoIterator<Item = ResidentRange>) -> ResidentSet {
+        let all = ranges
+            .into_iter()
+            .map(|range| RootEntry {
+                host: range.host,
+                guest: range.guest,
+                size: padded(range.length),
+                bind_offset: 0,
+            })
+            .collect();
+        ResidentSet {
+            entries: crate::bind::resident::resident_set(all),
+        }
+    }
+
+    /// Its entries' count, `N`.
+    pub fn len(&self) -> u64 {
+        self.entries.len() as u64
+    }
+
+    /// Whether it has no entry.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Its entries, 32 bytes each, in a root table's layout.
+    pub fn bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(self.entries.len() * ENTRY_BYTES as usize);
+        for e in &self.entries {
+            for value in [e.host, e.guest, e.size, 0] {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        bytes
+    }
+
+    /// Whether a search of the set resolves every address of `range` (at its padded length) as
+    /// a root table holding `range` alone does: one entry holds the whole range, at the same
+    /// device address for its first byte.
+    pub fn holds(&self, range: &ResidentRange) -> bool {
+        let below = self.entries.partition_point(|e| e.guest <= range.guest);
+        let Some(e) = below.checked_sub(1).and_then(|at| self.entries.get(at)) else {
+            return range.length == 0;
+        };
+        let into = range.guest - e.guest;
+        let end = u128::from(into) + u128::from(padded(range.length));
+        end <= u128::from(e.size) && e.host.wrapping_add(into) == range.host
+    }
+
+    /// The set of its entries and `ranges`, coalesced.
+    pub fn with(&self, ranges: impl IntoIterator<Item = ResidentRange>) -> ResidentSet {
+        let own = self
+            .entries
+            .iter()
+            .map(|e| ResidentRange::new(e.host, e.guest, e.size));
+        ResidentSet::new(own.chain(ranges))
+    }
+}
+
+/// `n` rounded up to a multiple of 16 (the allocation padding contract).
+pub(crate) fn padded(n: u64) -> u64 {
+    n.saturating_add(15) & !15
+}
+
+/// Why [`descriptor_range`] has no range to bind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RangeError {
+    /// The allocation is empty: nothing can back a descriptor.
+    Empty,
+    /// The range exceeds the descriptor type's maximum (`needed` bytes).
+    TooLarge { needed: u64 },
+}
+
+/// The descriptor range and the `SlotBindOffset` residual of a descriptor-form slot, in checked
+/// `i128` arithmetic, for an allocation of `length` bytes (padded to 16) bound at `bind_offset`,
+/// with the slot's proven `window`, the descriptor base `alignment` `A` (at least 4 is used; a
+/// Metal buffer slot's plan gives `max(min*BufferOffsetAlignment, 16)`, so a descriptor byte is
+/// congruent to its Metal address modulo 16), and the view's maximum range `max_range`.
+///
+/// - `Bounded{start, len}`: from `align_down(max(0, bind_offset + start), A)` to
+///   `round_up(bind_offset + start + len, 16)`; `Whole`: from `align_down(bind_offset, A)` to the
+///   padded end. The end is clamped to the padded allocation.
+/// - A range shorter than 16 bytes (a window at or past the end of the allocation) is widened to
+///   16 bytes inside the allocation (its start moves down to an aligned offset), so a bound range
+///   is never empty and a contained load of word 0 stays inside it.
+/// - The residual is `bind_offset` minus the range's start, modulo `2^32`: a leaf reads byte
+///   `residual + m` of the range for the `u32` Metal offset `m` from the bind offset.
+pub(crate) fn descriptor_range(
+    bind_offset: u64,
+    length: u64,
+    window: Window,
+    alignment: u64,
+    max_range: u64,
+) -> Result<(BufferRange, u32), RangeError> {
+    let end = i128::from(padded(length));
+    if end == 0 {
+        return Err(RangeError::Empty);
+    }
+    let a = i128::from(alignment.max(4));
+    let down = |x: i128| x - x.rem_euclid(a);
+    let b = i128::from(bind_offset);
+    let (mut lo, hi) = match window {
+        Window::Bounded { start, len } => {
+            let s = b + i128::from(start);
+            (down(s.max(0)), (s + i128::from(len) + 15) & !15)
+        }
+        Window::Whole => (down(b), end),
+    };
+    let mut hi = hi.min(end);
+    if hi - lo < 16 {
+        lo = lo.min(down(end - 16));
+        hi = hi.max(lo + 16);
+    }
+    // `0 <= lo < hi <= end <= 2^64`: both fit `u64`.
+    let range = (hi - lo) as u64;
+    if range > max_range {
+        return Err(RangeError::TooLarge { needed: range });
+    }
+    let residual = (b - lo).rem_euclid(1 << 32) as u32;
+    Ok((
+        BufferRange {
+            offset: lo as u64,
+            range,
+        },
+        residual,
+    ))
+}
+
+/// The bound buffer at `slot` of `state`, checked against the plan's shape.
+pub(crate) fn bound_buffer(
+    state: &BindState,
+    slot: SlotRef,
+    expected: BoundKind,
+) -> Result<Option<&BoundBuffer>, BindError> {
+    let b = state
+        .stages
+        .get(&slot.stage)
+        .and_then(|t| t.buffers.get(&slot.index));
+    if BoundKind::of(b.map(BoundBuffer::shape).as_ref()) != expected {
+        return Err(internal(format!(
+            "the bind state's shape differs from the plan's at {slot:?}"
+        )));
+    }
+    Ok(b)
+}
+
+/// What a draw or dispatch binds for the plan's buffer slots.
+pub(crate) struct BoundBuffers {
+    /// The range of every descriptor-form slot's buffer or inline bytes.
+    pub descriptor_ranges: Vec<DescriptorRange>,
+    /// The window of every bound buffer slot.
+    pub extents: Vec<BufferExtent>,
+    /// The `SlotBindOffset` residual of every bound descriptor-form slot.
+    pub residuals: Vec<(SlotRef, u32)>,
+    /// The root entry of every bound device-address slot.
+    pub statics: Vec<(SlotRef, RootEntry)>,
+}
+
+/// The Metal addresses `[lo, hi)` a buffer bound at `gpu_address + offset` (an allocation of
+/// `length` bytes) can reach through `window`: a `Bounded` window from the bind offset, a `Whole`
+/// one from the bind offset to the end, clamped to the padded allocation, since an access outside
+/// it is not Metal-defined (containment keeps it in the bound range).
+fn metal_extent(window: Window, gpu_address: u64, offset: u64, length: u64) -> (i128, i128) {
+    let base = i128::from(gpu_address);
+    let end = base + i128::from(padded(length));
+    let bind = base + i128::from(offset);
+    let (lo, hi) = match window {
+        Window::Bounded { start, len } => {
+            let lo = bind + i128::from(start);
+            (lo, lo + i128::from(len))
+        }
+        _ => (bind, end),
+    };
+    (lo.max(base), hi.min(end))
+}
+
+/// Refuse a binding where a slot read through a `device` uniform view (`PlannedBuffer::disjoint`)
+/// can reach Metal addresses a written slot of the pipeline can reach: a uniform view need not
+/// observe the dispatch's or draw's own writes. Inline bytes are copies and alias nothing.
+fn check_uniform_aliasing(buffers: &[PlannedBuffer], state: &BindState) -> Result<(), BindError> {
+    let extent = |pb: &PlannedBuffer| -> Result<Option<(i128, i128)>, BindError> {
+        Ok(match bound_buffer(state, pb.slot, pb.bound)? {
+            Some(&BoundBuffer::Buffer {
+                length,
+                offset,
+                gpu_address,
+                ..
+            }) => Some(metal_extent(pb.window, gpu_address, offset, length)),
+            _ => None,
+        })
+    };
+    for pb in buffers.iter().filter(|b| b.disjoint) {
+        let Some((lo, hi)) = extent(pb)? else {
+            continue;
+        };
+        for w in buffers
+            .iter()
+            .filter(|b| b.access.write && b.slot != pb.slot)
+        {
+            if let Some((wlo, whi)) = extent(w)? {
+                if lo < whi && wlo < hi {
+                    return Err(BindError::UniformViewAliased {
+                        slot: pb.slot,
+                        written: w.slot,
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Instantiate `buffers` for `state`: each descriptor-form slot's range and residual (checked
+/// `i128`, `DescriptorRangeExceeded` above the view's limit, an empty allocation
+/// `Unsupported{BufferRange}`), each bound device-address slot's root entry, and each bound
+/// buffer's extent. A `device` slot's uniform view must not alias a written slot
+/// (`UniformViewAliased`).
+pub(crate) fn bind_buffers(
+    buffers: &[PlannedBuffer],
+    state: &BindState,
+) -> Result<BoundBuffers, BindError> {
+    check_uniform_aliasing(buffers, state)?;
+    let mut out = BoundBuffers {
+        descriptor_ranges: Vec::new(),
+        extents: Vec::new(),
+        residuals: Vec::new(),
+        statics: Vec::new(),
+    };
+    for pb in buffers {
+        let bound = bound_buffer(state, pb.slot, pb.bound)?;
+        let (bind_offset, length) = match bound {
+            Some(&BoundBuffer::Buffer { length, offset, .. }) => {
+                out.extents.push(BufferExtent {
+                    slot: pb.slot,
+                    window: pb.window,
+                });
+                (offset, length)
+            }
+            // `set*Bytes` data: the consumer uploads it at an aligned offset of its own.
+            Some(&BoundBuffer::Bytes { len, .. }) => (0, u64::from(len.max(1))),
+            None => continue,
+        };
+        match (pb.form, pb.binding) {
+            (BufferForm::Descriptor(_), Some((set, binding))) => {
+                let (range, residual) =
+                    descriptor_range(bind_offset, length, pb.window, pb.alignment, pb.max_range)
+                        .map_err(|e| match e {
+                            RangeError::TooLarge { needed } => BindError::DescriptorRangeExceeded {
+                                slot: pb.slot,
+                                needed,
+                                limit: pb.max_range,
+                            },
+                            RangeError::Empty => BindError::Unsupported(
+                                Unsupported::not_representable(Feature::BufferRange),
+                            ),
+                        })?;
+                out.descriptor_ranges.push(DescriptorRange {
+                    set,
+                    binding,
+                    range,
+                });
+                out.residuals.push((pb.slot, residual));
+            }
+            (BufferForm::Psb, _) => {
+                if let Some(&BoundBuffer::Buffer {
+                    length,
+                    offset,
+                    gpu_address,
+                    device_address: Some(host),
+                    ..
+                }) = bound
+                {
+                    out.statics.push((
+                        pb.slot,
+                        RootEntry {
+                            host,
+                            guest: gpu_address,
+                            size: padded(length),
+                            bind_offset: offset,
+                        },
+                    ));
+                }
+            }
+            _ => return Err(internal(format!("{:?} without its descriptor", pb.slot))),
+        }
+    }
+    Ok(out)
+}
+
+/// The bytes of a slot push field (`SlotBindOffset`: the residual, 0 unbound; `SlotGuestBase`: the
+/// slot's `gpu_address + offset`, which is Metal's `nil`; `TextureLevels`: the level count the plan
+/// bound; `InstanceCount`: the bound structure's instance count; `Specialized`: the value the plan
+/// recorded for its key), or `None` for another field. Planning refuses a `SlotGuestBase` of a
+/// `set*Bytes` slot (`MissingGuestAddress`), so no inline-bytes slot is written as null here.
+pub(crate) fn slot_field(
+    field: PushField,
+    residuals: &[(SlotRef, u32)],
+    resources: &crate::bind::plan::ResourceTemplate,
+    state: &BindState,
+) -> Option<Vec<u8>> {
+    match field {
+        // The bound structure's instance count, 0 for an unbound slot.
+        PushField::InstanceCount(slot) => {
+            let count = state
+                .stages
+                .get(&slot.stage)
+                .and_then(|t| t.acceleration_structures.get(&slot.index))
+                .map_or(0, |s| s.instance_count);
+            Some(count.to_le_bytes().to_vec())
+        }
+        // The level count the plan bound.
+        PushField::TextureLevels(slot) => resources
+            .texture_levels
+            .iter()
+            .find(|(s, _)| *s == slot)
+            .map(|(_, levels)| levels.to_le_bytes().to_vec()),
+        // The value the bound resources decide, as the plan recorded it.
+        PushField::Specialized(key) => resources
+            .specialized
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, value)| value.to_le_bytes().to_vec()),
+        // Whether the texture the plan bound holds 16-bit float channels.
+        PushField::TextureHalfChannels(slot) => resources
+            .texture_half_channels
+            .iter()
+            .find(|(s, _)| *s == slot)
+            .map(|(_, half)| half.to_le_bytes().to_vec()),
+        // The integer channel widths of the texture the plan bound.
+        PushField::TextureIntegerChannels(slot) => resources
+            .texture_integer_channels
+            .iter()
+            .find(|(s, _)| *s == slot)
+            .map(|(_, word)| word.to_le_bytes().to_vec()),
+        PushField::SlotBindOffset(slot) => {
+            let r = residuals
+                .iter()
+                .find(|(s, _)| *s == slot)
+                .map_or(0, |r| r.1);
+            Some(r.to_le_bytes().to_vec())
+        }
+        PushField::SlotGuestBase(slot) => {
+            let base = match state
+                .stages
+                .get(&slot.stage)
+                .and_then(|t| t.buffers.get(&slot.index))
+            {
+                Some(&BoundBuffer::Buffer {
+                    gpu_address,
+                    offset,
+                    ..
+                }) => gpu_address.wrapping_add(offset),
+                _ => 0,
+            };
+            Some(base.to_le_bytes().to_vec())
+        }
+        _ => None,
+    }
+}
+
+/// A field's bytes at its placed location: the push bytes (relative to the push range's start
+/// `push_start`) or the argument table.
+pub(crate) fn put(
+    push: &mut [u8],
+    push_start: u32,
+    table: &mut [u8],
+    loc: PushLoc,
+    bytes: &[u8],
+) -> Result<(), BindError> {
+    let (buf, at) = match loc {
+        PushLoc::Push { offset } => (push, offset.checked_sub(push_start)),
+        PushLoc::ArgumentTable { offset } => (table, Some(offset)),
+    };
+    let at = at.ok_or_else(|| internal("a push field before its range"))? as usize;
+    buf.get_mut(at..at + bytes.len())
+        .ok_or_else(|| internal("a push field outside its range or table"))?
+        .copy_from_slice(bytes);
+    Ok(())
+}
+
+/// The texel-buffer view range of every bound texture buffer the plan writes: the view starts at
+/// the texture buffer's offset, which must be a multiple of `minTexelBufferOffsetAlignment` (the
+/// shader indexes from element 0 of the view; an unaligned offset is `Unsupported{TexelBuffer,
+/// NotRepresentable}`), and spans the whole texel blocks of its length
+/// (`VUID-VkBufferViewCreateInfo-range-00929`: a multiple of the view format's block size; bytes
+/// past the last whole block hold no texel). Its element count, `⌊length / block size⌋ × texels per
+/// block`, must be at most `maxTexelBufferElements` (`VUID-VkBufferViewCreateInfo-range-00930`),
+/// else `TexelBufferTooLarge`; a view without a whole block is `Unsupported{TexelBuffer,
+/// NotRepresentable}`.
+pub(crate) fn texel_ranges(
+    t: &ResourceTemplate,
+    state: &BindState,
+) -> Result<Vec<DescriptorRange>, BindError> {
+    let mut out = Vec::new();
+    for pt in &t.texel_buffers {
+        let bound = state
+            .stages
+            .get(&pt.slot.stage)
+            .and_then(|s| s.textures.get(&pt.slot.index));
+        let Some(&BoundTexture::Buffer { offset, length, .. }) = bound else {
+            return Err(internal(format!(
+                "the bind state's shape differs from the plan's at {:?}",
+                pt.slot
+            )));
+        };
+        if offset % pt.alignment != 0 {
+            return Err(BindError::Unsupported(Unsupported::not_representable(
+                Feature::TexelBuffer,
+            )));
+        }
+        let blocks = length / pt.block_size.max(1);
+        if blocks == 0 {
+            return Err(BindError::Unsupported(Unsupported::not_representable(
+                Feature::TexelBuffer,
+            )));
+        }
+        let elements = blocks.saturating_mul(pt.texels_per_block);
+        if elements > pt.max_elements {
+            return Err(BindError::TexelBufferTooLarge {
+                slot: pt.slot,
+                elements,
+                limit: pt.max_elements,
+            });
+        }
+        out.push(DescriptorRange {
+            set: pt.set,
+            binding: pt.binding,
+            range: BufferRange {
+                offset,
+                range: blocks * pt.block_size.max(1),
+            },
+        });
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests;

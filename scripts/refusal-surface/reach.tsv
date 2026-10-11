@@ -1,0 +1,233 @@
+# Reach marks of docs/REFUSALS.md: section<TAB>variant<TAB>mark<TAB>why. Marks: system (a guest's
+# CoreAnimation, CoreImage or VideoToolbox plausibly reaches it), app (a typical Metal app from
+# public API), rare (specialized public API), none (no public API path). A judgment, kept by hand;
+# refusal_surface.py lists every variant that has none (--missing-reach).
+feature	LibraryKind	none	a metallib that is not an executable library, loaded as one
+feature	Stage	none	a stage outside AIR's public stages
+feature	AddressSpace	none	Apple's AGX library address spaces
+feature	ModuleRecord	none	LLVM constructs AIR does not emit
+feature	Instruction	none	LLVM instructions AIR does not emit
+feature	Type	none	LLVM types AIR does not emit
+feature	CallingConvention	none	LLVM calling conventions AIR does not use
+feature	UnknownIntrinsic	rare	AIR from a newer compiler (macOS 27 AIR 2.9)
+feature	AgxUnmodeled	rare	Apple's own libraries' AGX intrinsics
+feature	StaticInitializer	none	LLVM initializers AIR does not emit
+feature	Recursion	rare	recursion through visible functions
+feature	DynamicCall	rare	function pointers and function tables
+feature	Linking	rare	dynamic libraries and linked functions
+feature	SimdWidth	app	simdgroup functions on a device whose subgroups cannot run 32 wide for the use
+feature	LocalSize	app	a threadgroup size past a smaller device's limit
+feature	IrreducibleConvergent	rare	irreducible loops around barriers or simd operations
+feature	ComputeDerivativesWithSimd	rare	derivatives in a kernel
+feature	ComputeDerivatives	rare	derivatives in a kernel
+feature	QuadOperations	app	quad shuffles in kernels on devices without quad operations there
+feature	SimdgroupMatrix	rare	simdgroup matrix kernels
+feature	ArgumentBufferPointers	app	argument buffers holding buffer pointers
+feature	ArgumentBufferTextures	app	argument buffers holding textures and samplers (bindless)
+feature	ArgumentBufferObjects	rare	pipeline states and ICBs in argument buffers
+feature	DereferenceLoadedPointer	app	pointers loaded from argument buffers
+feature	PointerToInteger	rare	pointer to integer casts
+feature	PointerCompare	rare	comparing pointers of different roots
+feature	HandleAsPointer	rare	resource handles used as byte pointers
+feature	ConstantGlobalEscaping	rare	a constant global whose address escapes
+feature	ThreadgroupMemorySize	rare	threadgroup memory past a smaller device's limit
+feature	CoherentMemory	rare	coherent(device) accesses
+feature	Int64Atomics	rare	64-bit atomics
+feature	ImageAtomics	rare	texture atomics beyond 32-bit integers
+feature	DescriptorCount	app	many textures or buffers in one stage on a smaller device
+feature	BufferRange	app	a buffer window past a device's descriptor range
+feature	Int64Arithmetic	rare	64-bit integers on a device without shaderInt64
+feature	Float64Arithmetic	rare	doubles (MSL has none outside Apple's own code)
+feature	Format	system	pixel formats a device lacks for a use (CoreVideo's 4:2:x and 10-bit formats among them)
+feature	DivergentImplicitLod	app	implicit-LOD sampling through a dynamically chosen texture
+feature	ImplicitLodOutsideFragment	rare	implicit-LOD sampling outside fragment functions
+feature	MinLodClamp	rare	min_lod_clamp on a device without shaderResourceMinLod
+feature	TexelOffset	app	texel offsets a device cannot apply
+feature	GatherExtended	rare	gathers with dynamic offsets or components
+feature	StorageImageMultisample	rare	writable multisampled textures
+feature	StorageTextureInVertexStage	rare	writable textures in vertex functions
+feature	CubeArray	rare	cube arrays on a device without imageCubeArray
+feature	SamplerAnisotropy	app	anisotropic constexpr samplers on a device without samplerAnisotropy
+feature	SamplerBorderColor	app	border colors a device cannot express
+feature	SamplerLodBias	app	constexpr samplers with an LOD bias
+feature	SamplerCompare	app	compare samplers a device cannot apply to the image
+feature	PixelSamplerCompare	none	Apple's compiler rejects it
+feature	TexelBuffer	app	texture buffers past a device's texel-buffer limits
+feature	RasterOrderGroups	rare	raster order groups
+feature	FramebufferFetch	system	programmable blending (framebuffer fetch); macOS 26.6.2's login reaches it (two WindowServer and RenderBox pipelines fetch RGB10A8_2P_XR10 attachments, the consumer's boots)
+feature	PrimitiveId	rare	primitive_id on a device without geometry or tessellation shaders
+feature	VertexAmplification	rare	vertex amplification
+feature	LayeredRendering	rare	layered rendering on a device without its features
+feature	ClipDistance	rare	clip distances on a device without them
+feature	DualSourceBlending	rare	dual-source blending on a device without it
+feature	Barycentrics	rare	barycentric coordinates
+feature	StencilExport	rare	stencil from the shader
+feature	SampleRateShading	rare	per-sample shading
+feature	PixelCoverageAtSampleRate	rare	coverage read at sample rate
+feature	InterfaceComponents	rare	too many varyings or attachments for a device
+feature	UnmatchedVarying	none	a Metal link error
+feature	KernelStageIn	rare	kernel stage-in combinations Metal leaves unestablished
+feature	Tessellation	rare	tessellation
+feature	MeshShading	rare	mesh pipelines
+feature	TileShading	rare	tile shaders (Apple GPU families)
+feature	Imageblocks	rare	imageblocks (Apple GPU families)
+feature	RayTracing	rare	ray tracing (out of scope by ruling)
+feature	Tensors	rare	shader tensors
+feature	RasterizationRateMap	rare	rasterization rate maps
+feature	GpuEncodedIndirectCommands	rare	indirect command buffers encoded by a kernel
+feature	VulkanVersion	none	a device below Vulkan 1.2
+feature	Constant	none	LLVM constant forms AIR does not emit
+feature	Attribute	none	LLVM ABI attributes AIR does not use
+feature	BitcodeRecord	none	bitcode records AIR does not emit
+feature	SyncScope	none	synchronization scopes AIR does not use
+feature	SubgroupOperations	app	simdgroup functions in a stage a device's subgroups do not support
+feature	DirectCall	rare	variadic or byval calls the inliner cannot take
+feature	WideSwitchLiteral	rare	64-bit switch literals
+feature	Lowering	system	the catch-all of lowering families not landed: any shader can meet one
+feature	SamplerAddressMode	app	mirror-clamp-to-edge on a device without it
+feature	AlphaToOne	rare	alphaToOneEnabled
+feature	StageStoresAndAtomics	app	stores or atomics in vertex or fragment functions on a device without the feature
+feature	FunctionConstantArgument	rare	a function-constant-removed argument read
+feature	SamplerBicubicFilter	system	bicubic filtering forms Metal does not establish; macOS 26.6.2 makes a runtime sampler with MTLSamplerMinMagFilterCubic (the consumer's boots), whose mip-filtered form is refused
+feature	GroupCount	rare	more threadgroups than a device dispatches, past the binder's split
+feature	IntersectionFunctionTable	rare	ray tracing (out of scope by ruling)
+feature	IndependentBlending	rare	per-attachment blending on a device without independentBlend
+feature	RasterSampleCount	app	a sample count a device lacks for the attachments
+feature	TriangleFillLines	app	wireframe on a device without fillModeNonSolid
+feature	DepthClipClamp	app	depth clamp on a device without depthClamp
+feature	DepthBiasClamp	app	depth bias clamp on a device without depthBiasClamp
+feature	ConstantAlphaBlendFactor	app	blend-alpha factors on a portability-subset device without them
+feature	SparseTexture	rare	sparse residency reads
+feature	TextureSize	app	a texture past a device's image limits
+feature	TextureSampleCount	app	a sample count a device lacks for the texture
+feature	TextureView	app	a texture view Vulkan cannot make exactly
+feature	TextureSwizzle	app	texture swizzles whose Metal behaviour is unmeasured
+feature	MipmapGeneration	app	generateMipmapsForTexture: where the device's filter is not Metal's
+feature	HostMemory	system	newBufferWithBytesNoCopy: where the device cannot import the memory
+feature	GpuTimes	rare	GPU times on a queue without timestamps
+feature	CountingVisibility	rare	counting occlusion queries on a device without precise queries
+feature	ViewFormatReinterpretation	app	a view of another component layout on a portability subset (MoltenVK)
+feature	SeparateMultisampledDepthStencil	rare	separate multisampled depth and stencil textures
+feature	PixelCoverage	rare	coverage reads at pixel rate in a multisampled pipeline
+feature	CentroidVarying	rare	centroid varyings in a multisampled pipeline
+feature	PrivateMemory	rare	very large per-thread arrays
+feature	SparseTextures	rare	sparse heaps on a device without sparse images
+feature	SparseMapping	rare	sparse mappings off the device's blocks
+feature	TimelineSemaphores	none	a device below the runtime's floor
+feature	Reflection	rare	reflection of argument kinds Metal's answer is unmeasured for
+feature	HeapTextureTiling	app	textures in Shared heaps on a device whose optimal images take no host memory
+feature	ViewportDepthRange	rare	viewport depth outside [0, 1]
+feature	UndeclaredTextureUsage	app	a shader write to a texture made without ShaderWrite, which plain Metal runs
+feature	RenderTargetSize	rare	a render area past a device's framebuffer limits
+feature	IndirectRenderState	rare	render state set by a kernel on an indirect command
+feature	GlobalBuiltinInFragment	rare	Metal 3.1 global built-ins in fragment functions
+feature	(computed)	none	helpers that build a refusal for a feature their callers name: see the "via a helper" rows
+gap	Textures	rare	texture forms the runtime has not built (texture buffers of some forms, X24Stencil8 views)
+gap	ResourceHeap	rare	the resource-ID heap's remaining forms
+gap	SparseHeaps	rare	sparse heaps
+gap	SparseTileMaps	rare	sparse texture emulation's unbuilt pieces
+gap	HeapPastMaxBufferSize	rare	a heap past maxBufferSize
+gap	RotatedTexture	rare	a rotated drawable's views, blits with images over overlapping rows, rows past its buffer
+gap	HeapTextureAlignment	rare	a heap texture needing more than 64 KiB alignment
+gap	HeapTextureMemory	app	a heap texture the heap's memory type does not take
+gap	FunctionTablePastMaxBufferLength	none	a function table past one buffer
+gap	IndirectCommandBufferPastMaxBufferLength	none	an ICB past one buffer
+gap	IndirectRenderCommands	rare	indirect render commands' remaining pieces
+gap	IndirectImageblockSize	none	an imageblock side past 65535
+gap	CommandReplay	rare	the device replay of indirect command buffers
+gap	RenderAttachments	rare	render attachment forms not built
+gap	AccelerationStructures	rare	ray tracing (out of scope by ruling)
+gap	FeatureEnable	none	device creation with a feature the runtime's chain lacks
+gap	ExtensionEnable	none	device creation with an extension under an unknown name
+gap	Render	system	render pass, resolve and attachment forms not built (20 sites: see the appendix)
+gap	TexelsPastBufferLength	rare	a 2D array over a buffer past its length
+gap	OverlappingSurfaceRows	rare	an IOSurface plane whose rows overlap
+gap	SamplePositionsAtBegin	rare	custom sample positions Vulkan takes only at begin
+gap	SharedEventAcrossDevices	rare	a shared event opened on another device
+gap	ViewportDepthRange	rare	viewport depth outside [0, 1] without the device features
+gap	NonFiniteDepthBias	rare	NaN or infinite depth bias
+gap	DepthNeverWithoutAttachment	rare	depth compare Never with no depth attachment
+gap	HiddenDepthStencil	app	a depth-stencil state using depth or stencil the pass lacks
+gap	IndirectDrawArguments	rare	indirect draws whose arguments the CPU must read
+gap	DepthStencilResolve	rare	depth/stencil resolve modes a device lacks
+gap	TileAtSampleCount	none	tile memory at a sample count Apple's GPUs lack
+gap	ImageblockMasters	rare	imageblocks of mixed sizes in one pass
+gap	TileAndFragmentImageblocks	rare	explicit imageblocks shared by tile and fragment functions
+gap	Metal4Api	app	Metal 4 (the API is missing: METAL-COVERAGE.md)
+gap	CounterSampleBuffers	app	GPU counters and timestamps by sample buffer (missing API)
+gap	ResidencySets	app	residency sets (missing API)
+gap	TextureAccessCounters	rare	sparse texture access counters
+gap	IoCommandQueues	rare	fast resource loading (missing API)
+gap	TextureViewPools	rare	texture view pools (missing API)
+gap	ColorAttachmentMapping	rare	color attachment mapping (missing API)
+gap	LossyTextureCompression	rare	lossy texture compression
+gap	ShaderValidation	rare	per-pipeline shader validation
+gap	ShaderLogging	rare	shader os_log
+gap	DeviceNotifications	rare	device hotplug notifications (deprecated)
+gap	RateMapRegions	rare	draws in rate-mapped passes the region path does not draw
+gap	LayeredPass	rare	layered passes needing a per-layer color resolve
+gap	FunctionOptions	rare	function descriptor options beyond CompileToBinary
+gap	OverlappingTextureCopies	rare	overlapping texture copies (Metal races)
+gap	RebindTextures	none	a runtime extension's rebind with a live texture
+gap	DetachTextures	none	a runtime extension's detach with a texture no stand-in presents exactly
+gap	DetachedTexelAccess	none	CPU texel access while a runtime extension detached the bytes
+gap	TextureBufferLevels	rare	a texture buffer of more than one level (public, unusual)
+gap	WriteSwizzle	none	Apple-private writeSwizzleEnabled with a swizzle that writes
+gap	PvrtcBlockOrder	rare	PVRTC regions off whole levels
+gap	VertexFetchPast4GiB	rare	vertex fetch past 4 GiB of a bind offset
+gap	StageInFetchPast4GiB	rare	stage-in fetch past 4 GiB of a bind offset
+apple	ProtectedContent	none	Apple-private (no public header)
+apple	LineWidth	none	Apple-private (no public header)
+apple	ProvokingVertexMode	none	Apple-private (no public header)
+apple	ViewportTransformDisabled	none	Apple-private (no public header)
+apple	VertexAmplificationMode	none	Apple-private (no public header)
+apple	DepthCleared	none	Apple-private (no public header)
+apple	StencilCleared	none	Apple-private (no public header)
+apple	SurfaceClientDirection	none	an IOSurface key in no public header
+apple	FillUnmeasured	system	Apple-private texture fills, which macOS system software encodes
+bind	DescriptorRangeExceeded	app	a buffer window past a device's descriptor range
+bind	TexelBufferTooLarge	rare	a texture buffer past maxTexelBufferElements
+bind	HeapTooLarge	rare	more resident textures than the pipeline's heap holds (bindless at scale)
+bind	TessellationFactorRange	rare	tessellation factors past one storage descriptor
+bind	PatchIndexRange	rare	patch indices past one storage descriptor
+bind	ControlPointIndexRange	rare	control-point indices past one storage descriptor
+bind	MissingStageInRegion	none	a stage-in region never set, which Metal leaves undefined
+bind	UniformViewAliased	rare	Profile F's uniform-view fallback aliased by a write
+bind	MissingDeviceAddress	rare	a slot reached through a pointer loaded from memory, bound with inline bytes or on a device without device addresses
+limit	InlinedInstructions	rare	very large shaders after inlining
+limit	OutputBlocks	rare	very large control flow
+limit	IrreducibleDepth	none	deeply nested irreducible loops
+limit	SpirvWords	rare	very large output modules
+limit	WorkUnits	rare	very large shaders
+limit	LedgerBytes	rare	very large shaders
+limit	TypeCount	none	a type table past the cap
+limit	MetadataNodes	none	metadata past the cap
+limit	BitstreamNesting	none	malformed nesting
+limit	InstructionCount	rare	very large modules
+limit	LayoutNesting	none	argument-buffer layouts nested past the cap
+limit	ConstructNesting	none	control flow nested past the cap
+limit	PrivateArenaBytes	none	a private arena past 4 GiB
+limit	CallStackBytes	rare	deep visible-function call stacks
+gap	MappedTextureSampling	none	a runtime extension's texture (address_mode_map) sampled where the runtime cannot map it; no Metal API path
+ratemap	ScreenExtent	rare	a rate map whose screen is past 16384 a side
+ratemap	LayerCount	none	a rate map of more than two layers, which Apple's compile crashes on
+ratemap	DenseSamples	rare	a rate map axis with more quality samples than screen pixels
+ratemap	SampleOutOfRange	rare	a rate map quality sample outside [0, 1] among others
+ratemap	SampleCount	rare	a rate map axis of more distinct samples than measured (9 on one layer, 4 on two)
+budget	Time	none	a translation past its deadline: a defect of ours to fix on any supported input (AGENTS.md: 20 seconds)
+gap	LibrarySource	app	a library compiled from Metal source (newLibraryWithSource:); the runtime takes metallibs and AIR
+gap	RestartedStrip	none	a strip after the Apple-private setPrimitiveRestartEnabled:index: whose rewrite pass cannot run as Metal draws
+feature	PrivateRenderState	none	Apple-private pipeline fields of OpenGL on Metal (no public header)
+gap	SurfaceDepthStencil	rare	a blit of the stencil of a Depth32Float_Stencil8 texture over a plane of an IOSurface with planes, or a pass on an X32_Stencil8 one's view as Depth32Float_Stencil8
+feature	ExtendedRangeBlend	system	the parts of a blend into an extended-range (XR10) attachment the measured model does not hold (second-source factors, the color blend color difference, a one-color-channel mask, float4 and sRGB outside the measured forms); the consumer's guests blend RGB10A8_2P_XR10 attachments
+feature	TileReach	app	the tiles a pass's draws reach, binned on a device without shaderInt64
+gap	HostHeapUncompressedMultisample	none	a multisample texture Metal keeps uncompressed in a runtime extension's heap over host pages
+feature	CommandPredication	none	Apple-private command predication on a device without buffer device addresses
+feature	ProgramScopeBinding	app	MSL 3.2 program-scope buffer bindings (macOS 15 and later)
+feature	SeqCstFence	rare	a seq_cst fence on a device without buffer device addresses or the stage's stores
+gap	PredicationUnbalanced	none	an unbalanced Apple-private command-predication record, whose dropped work Metal decides by no rule measured
+gap	PredicationOpenAtUnitEnd	none	an Apple-private predication If left open, live, where its unit ends
+gap	PredicationWordPastBuffer	none	an Apple-private predication condition word past its buffer
+gap	PredicatedLoopDepth	none	an Apple-private predicated loop four deep
+gap	PredicatedLoopAcrossEncoders	none	a live Apple-private predicated loop spanning compute encoders
+gap	MultisampledBufferCopy	rare	a buffer<->multisampled-texture copy on a device without sample-rate shading, an integer multisample attachment at the count, or the copy format's storage; and, where maintenance8's depth/colour copies are missing or wrong, what the sample-rate draws cannot move: a 16-bit depth, a depth or stencil texture they cannot sample or render to, or a 32-bit float depth on a driver whose fragment depth is unmeasured (emulated elsewhere; the consumer's Maps pans and screensaver make the copy)

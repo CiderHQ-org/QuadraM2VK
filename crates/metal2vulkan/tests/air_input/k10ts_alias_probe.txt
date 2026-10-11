@@ -1,0 +1,140 @@
+target triple = "air64_v28-apple-macosx26.0.0"
+source_filename = "-"
+; datalayout DataLayout { endian: Little, pointers: {0: PointerSpec { size_bits: 64, abi_bits: 64, pref_bits: 64, index_bits: 64 }}, ints: {1: AlignSpec { abi_bits: 8, pref_bits: 8 }, 8: AlignSpec { abi_bits: 8, pref_bits: 8 }, 16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }}, floats: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }}, vectors: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 24: AlignSpec { abi_bits: 32, pref_bits: 32 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 48: AlignSpec { abi_bits: 64, pref_bits: 64 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 96: AlignSpec { abi_bits: 128, pref_bits: 128 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }, 192: AlignSpec { abi_bits: 256, pref_bits: 256 }, 256: AlignSpec { abi_bits: 256, pref_bits: 256 }, 512: AlignSpec { abi_bits: 512, pref_bits: 512 }, 1024: AlignSpec { abi_bits: 1024, pref_bits: 1024 }}, aggregate: AlignSpec { abi_bits: 0, pref_bits: 64 }, native_ints: [8, 16, 32], stack_align_bits: None, alloca_space: 0, program_space: 0, globals_space: 0, mangling: None, fn_ptr_align: None, non_integral: [] }
+%t3 = type { ptr addrspace(4) } ; "struct.metal::_imageblock_base"
+%t7 = type void (%t3, ptr addrspace(1), <2 x i16>)
+%t9 = type ptr addrspace(4) (<2 x i16>, i32, i16)
+%t11 = type [2 x i32]
+c5 = %t11 [26, 5]
+
+define %t7 @f0 "k10ts_alias_probe" "frame-pointer"="all" "min-legal-vector-width"="32" "no-builtins"="" "no-trapping-math"="true" "stack-protector-buffer-size"="8" %a1( Mod nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = tail call ptr addrspace(4) @f1 [air Imageblock(Data)](%a2, i32 0, i16 0)
+  %i1 = extractelement %a2, i64 1
+  %i2 = zext %i1 to i32
+  %i3 = shl nuw nsw i32 %i2, i32 4
+  %i4 = extractelement %a2, i64 0
+  %i5 = zext %i4 to i32
+  %i6 = add nuw nsw i32 %i3, %i5
+  %i7 = mul nuw nsw i32 %i6, i32 5
+  %i8 = zext %i7 to i64
+  %i9 = getelementptr inbounds i32, %a1, %i8
+  %i10 = getelementptr inbounds i8, %i0, i64 8
+  %i11 = bitcast %i10 to ptr addrspace(4)
+  %i12 = load <4 x i16>, %i11, align 8
+  %i13 = bitcast %i0 to ptr addrspace(4)
+  %i14 = load i16, %i13, align 8
+  %i15 = zext %i14 to i32
+  store %i15, %i9, align 4
+  %i17 = getelementptr inbounds i8, %i0, i64 4
+  %i18 = bitcast %i17 to ptr addrspace(4)
+  %i19 = load i32, %i18, align 4
+  %i20 = getelementptr inbounds i32, %i9, i64 1
+  store %i19, %i20, align 4
+  %i22 = extractelement %i12, i64 0
+  %i23 = zext %i22 to i32
+  %i24 = extractelement %i12, i64 1
+  %i25 = zext %i24 to i32
+  %i26 = shl nuw i32 %i25, i32 16
+  %i27 = or i32 %i26, %i23
+  %i28 = getelementptr inbounds i32, %i9, i64 2
+  store %i27, %i28, align 4
+  %i30 = extractelement %i12, i64 2
+  %i31 = zext %i30 to i32
+  %i32 = extractelement %i12, i64 3
+  %i33 = zext %i32 to i32
+  %i34 = shl nuw i32 %i33, i32 16
+  %i35 = or i32 %i34, %i31
+  %i36 = getelementptr inbounds i32, %i9, i64 3
+  store %i35, %i36, align 4
+  %i38 = getelementptr inbounds i8, %i0, i64 16
+  %i39 = bitcast %i38 to ptr addrspace(4)
+  %i40 = load i16, %i39, align 8
+  %i41 = zext %i40 to i32
+  %i42 = getelementptr inbounds i32, %i9, i64 4
+  store %i41, %i42, align 4
+  ret void
+}
+
+declare %t9 @f1 "air.imageblock_data" memory(Ref, Ref, Ref)
+!md0 = !"SDK Version"
+!md1 = !"wchar_size"
+!md2 = !"frame-pointer"
+!md3 = !"air.max_device_buffers"
+!md4 = !"air.max_constant_buffers"
+!md5 = !"air.max_threadgroup_buffers"
+!md6 = !"air.max_textures"
+!md7 = !"air.max_read_write_textures"
+!md8 = !"air.max_samplers"
+!md9 = !"air.imageblock"
+!md10 = !"explicit"
+!md11 = !"air.imageblock_data_size"
+!md12 = !"air.struct_type_info"
+!md13 = !"half"
+!md14 = !"a"
+!md15 = !"float"
+!md16 = !"b"
+!md17 = !"half4"
+!md18 = !"c"
+!md19 = !"d"
+!md20 = !"air.alias_implicit_imageblock"
+!md21 = !"air.arg_type_align_size"
+!md22 = !"air.arg_type_name"
+!md23 = !"imageblock<Mixed, layout_explicit>"
+!md24 = !"air.arg_name"
+!md25 = !"block"
+!md26 = !"air.buffer"
+!md27 = !"air.location_index"
+!md28 = !"air.read_write"
+!md29 = !"air.address_space"
+!md30 = !"air.arg_type_size"
+!md31 = !"uint"
+!md32 = !"out"
+!md33 = !"air.thread_position_in_threadgroup"
+!md34 = !"ushort2"
+!md35 = !"tid"
+!md36 = !"air.compile.denorms_disable"
+!md37 = !"air.compile.fast_math_disable"
+!md38 = !"air.compile.framebuffer_fetch_enable"
+!md39 = !"Apple metal version 32023.883 (metalfe-32023.883)"
+!md40 = !"Metal"
+!md41 = i32 2
+!md42 = %t11 c5
+!md43 = i32 1
+!md44 = i32 4
+!md45 = i32 7
+!md46 = i32 31
+!md47 = i32 128
+!md48 = i32 8
+!md49 = i32 16
+!md50 = ptr addrspace(0) @f0
+!md51 = i32 0
+!md52 = i32 24
+!md53 = !{!md41, !md0, !md42}
+!md54 = !{!md43, !md1, !md44}
+!md55 = !{!md45, !md2, !md41}
+!md56 = !{!md45, !md3, !md46}
+!md57 = !{!md45, !md4, !md46}
+!md58 = !{!md45, !md5, !md46}
+!md59 = !{!md45, !md6, !md47}
+!md60 = !{!md45, !md7, !md48}
+!md61 = !{!md45, !md8, !md49}
+!md62 = !{}
+!md63 = !{!md51, !md41, !md51, !md13, !md14, !md44, !md44, !md51, !md15, !md16, !md48, !md48, !md51, !md17, !md18, !md49, !md41, !md51, !md13, !md19}
+!md64 = !{!md51, !md9, !md10, !md11, !md52, !md12, !md63, !md20, !md21, !md48, !md22, !md23, !md24, !md25}
+!md65 = !{!md43, !md26, !md27, !md51, !md43, !md28, !md29, !md43, !md30, !md44, !md21, !md44, !md22, !md31, !md24, !md32}
+!md66 = !{!md41, !md33, !md22, !md34, !md24, !md35}
+!md67 = !{!md64, !md65, !md66}
+!md68 = !{!md50, !md62, !md67}
+!md69 = !{!md36}
+!md70 = !{!md37}
+!md71 = !{!md38}
+!md72 = !{!md39}
+!md73 = !{!md41, !md48, !md51}
+!md74 = !{!md40, !md44, !md51, !md51}
+!"llvm.module.flags" = !{!md53, !md54, !md55, !md56, !md57, !md58, !md59, !md60, !md61}
+!"air.kernel" = !{!md68}
+!"air.compile_options" = !{!md69, !md70, !md71}
+!"llvm.ident" = !{!md72}
+!"air.version" = !{!md73}
+!"air.language_version" = !{!md74}

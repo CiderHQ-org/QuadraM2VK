@@ -1,0 +1,76 @@
+//! The memory-model choice and its feature checks.
+
+use super::*;
+use crate::spirv::testing::committed_profiles;
+
+fn needs(f: VkFeature) -> Error {
+    Unsupported::needs(Feature::CoherentMemory, Capability::Feature(f)).into()
+}
+
+/// `GLSL450` needs nothing; the Vulkan model needs `vulkanMemoryModel`, and with a `Device`-scope
+/// operation also `vulkanMemoryModelDeviceScope`, on every committed profile.
+#[test]
+fn the_vulkan_model_is_checked_against_the_profile() {
+    let profiles = committed_profiles().expect("profiles");
+    let (mut refused, mut accepted) = (0, 0);
+    for (stem, p) in &profiles {
+        for device_scope in [false, true] {
+            let glsl = MemoryModelPlan {
+                model: BarrierModel::Glsl450,
+                device_scope,
+            };
+            assert_eq!(check(&glsl, p), Ok(()), "{stem}");
+            let vulkan = MemoryModelPlan {
+                model: BarrierModel::Vulkan,
+                device_scope,
+            };
+            let mm = p.fields().vulkan_memory_model;
+            let ds = p
+                .fields()
+                .enabled
+                .features
+                .contains(&VkFeature::VulkanMemoryModelDeviceScope);
+            let want = if !mm {
+                Err(needs(VkFeature::VulkanMemoryModel))
+            } else if device_scope && !ds {
+                Err(needs(VkFeature::VulkanMemoryModelDeviceScope))
+            } else {
+                Ok(())
+            };
+            if want.is_ok() {
+                accepted += 1;
+            } else {
+                refused += 1;
+            }
+            assert_eq!(
+                check(&vulkan, p),
+                want,
+                "{stem} device_scope={device_scope}"
+            );
+        }
+    }
+    assert!(refused > 0 && accepted > 0, "both outcomes are exercised");
+}
+
+/// LLVM fence orderings map like `air.atomic.fence`'s; the non-fence orderings emit nothing.
+#[test]
+fn llvm_fence_orders_map_onto_vulkan() {
+    assert_eq!(fence_order(Ordering::Unordered), None);
+    assert_eq!(fence_order(Ordering::Monotonic), None);
+    assert_eq!(fence_order(Ordering::Acquire), Some(MemoryOrder::Acquire));
+    assert_eq!(fence_order(Ordering::Release), Some(MemoryOrder::Release));
+    assert_eq!(
+        fence_order(Ordering::AcqRel),
+        Some(MemoryOrder::AcquireRelease)
+    );
+    assert_eq!(
+        fence_order(Ordering::SeqCst),
+        Some(MemoryOrder::AcquireRelease)
+    );
+}
+
+/// The default plan is `GLSL450` (Metal's default model).
+#[test]
+fn the_default_model_is_glsl450() {
+    assert_eq!(MemoryModelPlan::default().model, BarrierModel::Glsl450);
+}

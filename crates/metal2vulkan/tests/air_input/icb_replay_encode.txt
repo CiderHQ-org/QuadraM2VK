@@ -1,0 +1,144 @@
+target triple = "air64_v28-apple-macosx26.0.0"
+source_filename = "-"
+; datalayout DataLayout { endian: Little, pointers: {0: PointerSpec { size_bits: 64, abi_bits: 64, pref_bits: 64, index_bits: 64 }}, ints: {1: AlignSpec { abi_bits: 8, pref_bits: 8 }, 8: AlignSpec { abi_bits: 8, pref_bits: 8 }, 16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }}, floats: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }}, vectors: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 24: AlignSpec { abi_bits: 32, pref_bits: 32 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 48: AlignSpec { abi_bits: 64, pref_bits: 64 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 96: AlignSpec { abi_bits: 128, pref_bits: 128 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }, 192: AlignSpec { abi_bits: 256, pref_bits: 256 }, 256: AlignSpec { abi_bits: 256, pref_bits: 256 }, 512: AlignSpec { abi_bits: 512, pref_bits: 512 }, 1024: AlignSpec { abi_bits: 1024, pref_bits: 1024 }}, aggregate: AlignSpec { abi_bits: 0, pref_bits: 64 }, native_ints: [8, 16, 32], stack_align_bits: None, alloca_space: 0, program_space: 0, globals_space: 0, mangling: None, fn_ptr_align: None, non_integral: [] }
+%t5 = type void (ptr addrspace(1), ptr addrspace(2), ptr addrspace(1), i32)
+%t6 = type void (ptr addrspace(1), i32, ptr addrspace(1))
+%t7 = type void (ptr addrspace(1), i32, i32, i32)
+%t9 = type void (ptr addrspace(1), i32, <3 x i32>, <3 x i32>)
+%t10 = type void (ptr addrspace(1), i32)
+%t12 = type void (ptr addrspace(1), i32, ptr addrspace(2), i64, i32)
+%t13 = type void (ptr addrspace(1), i32, ptr addrspace(1), i64, i32)
+%t15 = type [2 x i32]
+%t16 = type { ptr addrspace(1) } ; "struct.metal::command_buffer"
+%t17 = type { ptr addrspace(1) } ; "struct.metal::compute_pipeline_state"
+%t18 = type { %t16, %t17 } ; "struct.Encoder"
+c11 = %t15 [26, 5]
+c27 = <3 x i32> [8, 1, 1]
+c28 = <3 x i32> [64, 1, 1]
+
+define %t5 @f0 "icb_replay_encode" "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="96" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a0( align 8 dereferenceable(16) Ref nocapture "air-buffer-no-alias"="" ) %a1( "air-buffer-no-alias"="" ) %a2( "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = getelementptr inbounds %t18, %a0, i64 0, i32 0, i32 0
+  %i1 = load ptr addrspace(1), %i0, align 8
+  %i2 = getelementptr inbounds %t18, %a0, i64 0, i32 1, i32 0
+  %i3 = load ptr addrspace(1), %i2, align 8
+  tail call void @f1 [air IndirectCommand(SetComputePipeline)](%i1, %a3, %i3) arg0( nocapture ) arg2( Ref )
+  %i5 = shl i32 %a3, i32 6
+  %i6 = zext %i5 to i64
+  %i7 = getelementptr inbounds i32, %a1, %i6
+  %i8 = bitcast %i7 to ptr addrspace(2)
+  tail call void @f6 [air IndirectCommand(SetBuffer { stage: Kernel, space: Constant })](%i1, %a3, %i8, i64 18446744073709551615, i32 0) arg0( nocapture )
+  %i10 = getelementptr inbounds i32, %a2, %i6
+  %i11 = bitcast %i10 to ptr addrspace(1)
+  tail call void @f7 [air IndirectCommand(SetBuffer { stage: Kernel, space: Device })](%i1, %a3, %i11, i64 18446744073709551615, i32 1) arg0( nocapture )
+  tail call void @f2 [air IndirectCommand(SetThreadgroupMemoryLength)](%i1, %a3, i32 32, i32 0) arg0( nocapture )
+  %i14 = and i32 %a3, i32 1
+  %i15 = icmp eq %i14, i32 0
+  br %i15, bb1, bb2
+bb1:
+  tail call void @f3 [air IndirectCommand(Dispatch { exact_threads: false })](%i1, %a3, <3 x i32> c27, <3 x i32> c27) arg0( nocapture )
+  br bb3
+bb2:
+  tail call void @f4 [air IndirectCommand(Dispatch { exact_threads: true })](%i1, %a3, <3 x i32> c28, <3 x i32> c27) arg0( nocapture )
+  br bb3
+bb3:
+  tail call void @f5 [air IndirectCommand(ComputeBarrier { enabled: true })](%i1, %a3) arg0( nocapture )
+  ret void
+}
+
+declare %t6 @f1 "air.set_pipeline_state_compute_command" %a0( nocapture ) %a2( Ref )
+
+declare %t7 @f2 "air.set_threadgroup_memory_length_compute_command" %a0( nocapture )
+
+declare %t9 @f3 "air.concurrent_dispatch_threadgroups_compute_command" %a0( nocapture )
+
+declare %t9 @f4 "air.concurrent_dispatch_threads_compute_command" %a0( nocapture )
+
+declare %t10 @f5 "air.set_barrier_compute_command" %a0( nocapture )
+
+declare %t12 @f6 "air.set_kernel_buffer_compute_command.p2i8" %a0( nocapture )
+
+declare %t13 @f7 "air.set_kernel_buffer_compute_command.p1i8" %a0( nocapture )
+!md0 = !"SDK Version"
+!md1 = !"wchar_size"
+!md2 = !"frame-pointer"
+!md3 = !"air.max_device_buffers"
+!md4 = !"air.max_constant_buffers"
+!md5 = !"air.max_threadgroup_buffers"
+!md6 = !"air.max_textures"
+!md7 = !"air.max_read_write_textures"
+!md8 = !"air.max_samplers"
+!md9 = !"air.indirect_buffer"
+!md10 = !"air.buffer_size"
+!md11 = !"air.location_index"
+!md12 = !"air.read"
+!md13 = !"air.address_space"
+!md14 = !"air.struct_type_info"
+!md15 = !"command_buffer"
+!md16 = !"commands"
+!md17 = !"air.indirect_argument"
+!md18 = !"air.command_buffer"
+!md19 = !"air.arg_type_name"
+!md20 = !"air.arg_name"
+!md21 = !"compute_pipeline_state"
+!md22 = !"pipeline"
+!md23 = !"air.compute_pipeline_state"
+!md24 = !"air.arg_type_size"
+!md25 = !"air.arg_type_align_size"
+!md26 = !"Encoder"
+!md27 = !"encoder"
+!md28 = !"air.buffer"
+!md29 = !"uint"
+!md30 = !"params"
+!md31 = !"air.read_write"
+!md32 = !"out"
+!md33 = !"air.thread_position_in_grid"
+!md34 = !"tid"
+!md35 = !"air.compile.denorms_disable"
+!md36 = !"air.compile.fast_math_enable"
+!md37 = !"air.compile.framebuffer_fetch_enable"
+!md38 = !"Apple metal version 32023.883 (metalfe-32023.883)"
+!md39 = !"Metal"
+!md40 = i32 2
+!md41 = %t15 c11
+!md42 = i32 1
+!md43 = i32 4
+!md44 = i32 7
+!md45 = i32 31
+!md46 = i32 128
+!md47 = i32 8
+!md48 = i32 16
+!md49 = ptr addrspace(0) @f0
+!md50 = i32 0
+!md51 = i32 3
+!md52 = !{!md40, !md0, !md41}
+!md53 = !{!md42, !md1, !md43}
+!md54 = !{!md44, !md2, !md40}
+!md55 = !{!md44, !md3, !md45}
+!md56 = !{!md44, !md4, !md45}
+!md57 = !{!md44, !md5, !md45}
+!md58 = !{!md44, !md6, !md46}
+!md59 = !{!md44, !md7, !md47}
+!md60 = !{!md44, !md8, !md48}
+!md61 = !{}
+!md62 = !{!md50, !md18, !md11, !md50, !md42, !md19, !md15, !md20, !md16}
+!md63 = !{!md42, !md23, !md11, !md42, !md42, !md19, !md21, !md20, !md22}
+!md64 = !{!md50, !md47, !md50, !md15, !md16, !md17, !md62, !md47, !md47, !md50, !md21, !md22, !md17, !md63}
+!md65 = !{!md50, !md9, !md10, !md48, !md11, !md50, !md42, !md12, !md13, !md42, !md14, !md64, !md24, !md48, !md25, !md47, !md19, !md26, !md20, !md27}
+!md66 = !{!md42, !md28, !md11, !md42, !md42, !md12, !md13, !md40, !md24, !md43, !md25, !md43, !md19, !md29, !md20, !md30}
+!md67 = !{!md40, !md28, !md11, !md40, !md42, !md31, !md13, !md42, !md24, !md43, !md25, !md43, !md19, !md29, !md20, !md32}
+!md68 = !{!md51, !md33, !md19, !md29, !md20, !md34}
+!md69 = !{!md65, !md66, !md67, !md68}
+!md70 = !{!md49, !md61, !md69}
+!md71 = !{!md35}
+!md72 = !{!md36}
+!md73 = !{!md37}
+!md74 = !{!md38}
+!md75 = !{!md40, !md47, !md50}
+!md76 = !{!md39, !md43, !md50, !md50}
+!"llvm.module.flags" = !{!md52, !md53, !md54, !md55, !md56, !md57, !md58, !md59, !md60}
+!"air.kernel" = !{!md70}
+!"air.compile_options" = !{!md71, !md72, !md73}
+!"llvm.ident" = !{!md74}
+!"air.version" = !{!md75}
+!"air.language_version" = !{!md76}

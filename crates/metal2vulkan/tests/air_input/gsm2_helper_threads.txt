@@ -1,0 +1,298 @@
+target triple = "air64_v28-apple-macosx26.0.0"
+source_filename = "-"
+; datalayout DataLayout { endian: Little, pointers: {0: PointerSpec { size_bits: 64, abi_bits: 64, pref_bits: 64, index_bits: 64 }}, ints: {1: AlignSpec { abi_bits: 8, pref_bits: 8 }, 8: AlignSpec { abi_bits: 8, pref_bits: 8 }, 16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }}, floats: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }}, vectors: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 24: AlignSpec { abi_bits: 32, pref_bits: 32 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 48: AlignSpec { abi_bits: 64, pref_bits: 64 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 96: AlignSpec { abi_bits: 128, pref_bits: 128 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }, 192: AlignSpec { abi_bits: 256, pref_bits: 256 }, 256: AlignSpec { abi_bits: 256, pref_bits: 256 }, 512: AlignSpec { abi_bits: 512, pref_bits: 512 }, 1024: AlignSpec { abi_bits: 1024, pref_bits: 1024 }}, aggregate: AlignSpec { abi_bits: 0, pref_bits: 64 }, native_ints: [8, 16, 32], stack_align_bits: None, alloca_space: 0, program_space: 0, globals_space: 0, mangling: None, fn_ptr_align: None, non_integral: [] }
+%t4 = type void (ptr addrspace(1), i32)
+%t5 = type void (i32, ptr addrspace(1))
+%t9 = type <4 x i32> (<4 x float>)
+%t11 = type i1 ()
+%t12 = type i1 (i1)
+%t14 = type i16 (i1)
+%t15 = type i16 ()
+%t18 = type <2 x i32> (<2 x float>)
+%t19 = type void ()
+%t21 = type [2 x i32]
+c17 = %t21 [27, 0]
+c33 = <2 x i32> [0, 1]
+
+define %t4 @f0 "helper_threads_in_a_kernel" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="0" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a0( Mod nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = tail call i1 @f6 [air Fragment(IsHelperThread)]() convergent
+  %i1 = tail call i1 @f7 [air Fragment(IsHelperThread)]() convergent
+  %i2 = zext %i0 to i32
+  %i3 = select i32 %i1, i32 2, i32 0
+  %i4 = tail call i1 @f8 [air Group(Group { scope: Quad, op: Any, ty: None, sign: None })](%i0) convergent
+  %i5 = select i32 %i4, i32 4, i32 0
+  %i6 = tail call i1 @f9 [air Group(Group { scope: Simdgroup, op: Any, ty: None, sign: None })](%i1) convergent
+  %i7 = select i32 %i6, i32 8, i32 0
+  %i8 = or i32 %i3, %i2
+  %i9 = or i32 %i8, %i5
+  %i10 = or i32 %i9, %i7
+  %i11 = or i32 %i10, i32 256
+  %i12 = zext %a1 to i64
+  %i13 = getelementptr inbounds i32, %a0, %i12
+  store %i11, %i13, align 4
+  ret void
+}
+
+define %t5 @f1 "helper_threads_in_a_vertex_function" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="0" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a1( Mod nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = tail call i1 @f6 [air Fragment(IsHelperThread)]() convergent
+  %i1 = zext %i0 to i32
+  %i2 = tail call i1 @f7 [air Fragment(IsHelperThread)]() convergent
+  %i3 = select i32 %i2, i32 2, i32 0
+  %i4 = or i32 %i3, %i1
+  %i5 = or i32 %i4, i32 256
+  %i6 = zext %a0 to i64
+  %i7 = getelementptr inbounds i32, %a1, %i6
+  store %i5, %i7, align 4
+  ret void
+}
+
+define %t9 @f2 "fragment_helper_threads" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" {
+bb0:
+  %i0 = tail call i1 @f6 [air Fragment(IsHelperThread)]() convergent
+  %i1 = tail call i1 @f7 [air Fragment(IsHelperThread)]() convergent
+  %i2 = zext %i0 to i32
+  %i3 = select i32 %i1, i32 2, i32 0
+  %i4 = or i32 %i3, %i2
+  %i5 = insertelement <4 x i32> undef, %i4, i64 0
+  %i6 = tail call i16 @f10 [air Group(Group { scope: Quad, op: Ballot, ty: None, sign: None })](%i0) convergent
+  %i7 = and i16 %i6, i16 15
+  %i8 = zext %i7 to i32
+  %i9 = insertelement %i5, %i8, i64 1
+  %i10 = tail call i16 @f10 [air Group(Group { scope: Quad, op: Ballot, ty: None, sign: None })](%i1) convergent
+  %i11 = and i16 %i10, i16 15
+  %i12 = zext %i11 to i32
+  %i13 = insertelement %i9, %i12, i64 2
+  %i14 = tail call i16 @f11 [air Group(Group { scope: Quad, op: ActiveThreadsMask, ty: None, sign: None })]() convergent
+  %i15 = and i16 %i14, i16 15
+  %i16 = zext %i15 to i32
+  %i17 = insertelement %i13, %i16, i64 3
+  ret %i17
+}
+
+define %t9 @f3 "fragment_helper_threads_after_a_discard" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" {
+bb0:
+  %i0 = shufflevector <2 x float> %a0, <4 x float> poison, <0, 1>
+  %i1 = tail call <2 x i32> @f12 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 2 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 2 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = extractelement %i1, i64 0
+  %i3 = extractelement %i1, i64 1
+  %i4 = add i32 %i2, %i3
+  %i5 = urem i32 %i4, i32 3
+  %i6 = icmp eq %i5, i32 0
+  br %i6, bb1, bb2
+bb1:
+  tail call void @f13 [air Fragment(Discard)]()
+  br bb2
+bb2:
+  %i10 = tail call i1 @f6 [air Fragment(IsHelperThread)]() convergent
+  %i11 = tail call i1 @f7 [air Fragment(IsHelperThread)]() convergent
+  %i12 = zext %i10 to i32
+  %i13 = select i32 %i11, i32 2, i32 0
+  %i14 = or i32 %i13, %i12
+  %i15 = insertelement <4 x i32> undef, %i14, i64 0
+  %i16 = tail call i16 @f10 [air Group(Group { scope: Quad, op: Ballot, ty: None, sign: None })](%i10) convergent
+  %i17 = and i16 %i16, i16 15
+  %i18 = zext %i17 to i32
+  %i19 = insertelement %i15, %i18, i64 1
+  %i20 = tail call i16 @f10 [air Group(Group { scope: Quad, op: Ballot, ty: None, sign: None })](%i11) convergent
+  %i21 = and i16 %i20, i16 15
+  %i22 = zext %i21 to i32
+  %i23 = insertelement %i19, %i22, i64 2
+  %i24 = tail call i16 @f11 [air Group(Group { scope: Quad, op: ActiveThreadsMask, ty: None, sign: None })]() convergent
+  %i25 = and i16 %i24, i16 15
+  %i26 = zext %i25 to i32
+  %i27 = insertelement %i23, %i26, i64 3
+  ret %i27
+}
+
+define %t9 @f4 "fragment_helper_threads_before_a_discard" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" {
+bb0:
+  %i0 = tail call i1 @f6 [air Fragment(IsHelperThread)]() convergent
+  %i1 = tail call i1 @f7 [air Fragment(IsHelperThread)]() convergent
+  %i2 = shufflevector <2 x float> %a0, <4 x float> poison, <0, 1>
+  %i3 = tail call <2 x i32> @f12 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 2 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 2 }, src_kind: Float, src_fp8: None })](%i2)
+  %i4 = extractelement %i3, i64 0
+  %i5 = extractelement %i3, i64 1
+  %i6 = add i32 %i4, %i5
+  %i7 = urem i32 %i6, i32 3
+  %i8 = icmp eq %i7, i32 0
+  br %i8, bb1, bb2
+bb1:
+  tail call void @f13 [air Fragment(Discard)]()
+  br bb2
+bb2:
+  %i12 = zext %i0 to i32
+  %i13 = select i32 %i1, i32 2, i32 0
+  %i14 = or i32 %i13, %i12
+  %i15 = insertelement <4 x i32> undef, %i14, i64 0
+  %i16 = tail call i16 @f10 [air Group(Group { scope: Quad, op: Ballot, ty: None, sign: None })](%i0) convergent
+  %i17 = and i16 %i16, i16 15
+  %i18 = zext %i17 to i32
+  %i19 = insertelement %i15, %i18, i64 1
+  %i20 = tail call i16 @f10 [air Group(Group { scope: Quad, op: Ballot, ty: None, sign: None })](%i1) convergent
+  %i21 = and i16 %i20, i16 15
+  %i22 = zext %i21 to i32
+  %i23 = insertelement %i19, %i22, i64 2
+  %i24 = tail call i16 @f11 [air Group(Group { scope: Quad, op: ActiveThreadsMask, ty: None, sign: None })]() convergent
+  %i25 = and i16 %i24, i16 15
+  %i26 = zext %i25 to i32
+  %i27 = insertelement %i23, %i26, i64 3
+  ret %i27
+}
+
+define %t9 @f5 "fragment_helper_threads_beside_a_simdgroup_vote" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" {
+bb0:
+  %i0 = shufflevector <2 x float> %a0, <4 x float> poison, <0, 1>
+  %i1 = tail call <2 x i32> @f12 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 2 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 2 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = extractelement %i1, i64 0
+  %i3 = extractelement %i1, i64 1
+  %i4 = add i32 %i2, %i3
+  %i5 = urem i32 %i4, i32 3
+  %i6 = icmp eq %i5, i32 0
+  br %i6, bb1, bb2
+bb1:
+  tail call void @f13 [air Fragment(Discard)]()
+  br bb2
+bb2:
+  %i10 = tail call i1 @f6 [air Fragment(IsHelperThread)]() convergent
+  %i11 = tail call i1 @f7 [air Fragment(IsHelperThread)]() convergent
+  %i12 = zext %i10 to i32
+  %i13 = select i32 %i11, i32 2, i32 0
+  %i14 = or i32 %i13, %i12
+  %i15 = tail call i16 @f10 [air Group(Group { scope: Quad, op: Ballot, ty: None, sign: None })](%i10) convergent
+  %i16 = and i16 %i15, i16 15
+  %i17 = zext %i16 to i32
+  %i18 = insertelement <4 x i32> poison, %i17, i64 1
+  %i19 = tail call i16 @f10 [air Group(Group { scope: Quad, op: Ballot, ty: None, sign: None })](%i11) convergent
+  %i20 = and i16 %i19, i16 15
+  %i21 = zext %i20 to i32
+  %i22 = insertelement %i18, %i21, i64 2
+  %i23 = tail call i16 @f11 [air Group(Group { scope: Quad, op: ActiveThreadsMask, ty: None, sign: None })]() convergent
+  %i24 = and i16 %i23, i16 15
+  %i25 = zext %i24 to i32
+  %i26 = insertelement %i22, %i25, i64 3
+  %i27 = tail call i1 @f9 [air Group(Group { scope: Simdgroup, op: Any, ty: None, sign: None })](%i11) convergent
+  %i28 = select i32 %i27, i32 4, i32 0
+  %i29 = or i32 %i14, %i28
+  %i30 = insertelement %i26, %i29, i64 0
+  ret %i30
+}
+
+declare %t11 @f6 "air.quad_is_helper_thread" convergent
+
+declare %t11 @f7 "air.simd_is_helper_thread" convergent
+
+declare %t12 @f8 "air.quad_any" convergent
+
+declare %t12 @f9 "air.simd_any" convergent
+
+declare %t14 @f10 "air.quad_ballot" convergent
+
+declare %t15 @f11 "air.quad_active_threads_mask" convergent
+
+declare %t18 @f12 "air.convert.u.v2i32.f.v2f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t19 @f13 "air.discard_fragment"
+!md0 = !"SDK Version"
+!md1 = !"wchar_size"
+!md2 = !"frame-pointer"
+!md3 = !"air.max_device_buffers"
+!md4 = !"air.max_constant_buffers"
+!md5 = !"air.max_threadgroup_buffers"
+!md6 = !"air.max_textures"
+!md7 = !"air.max_read_write_textures"
+!md8 = !"air.max_samplers"
+!md9 = !"air.buffer"
+!md10 = !"air.location_index"
+!md11 = !"air.read_write"
+!md12 = !"air.address_space"
+!md13 = !"air.arg_type_size"
+!md14 = !"air.arg_type_align_size"
+!md15 = !"air.arg_type_name"
+!md16 = !"uint"
+!md17 = !"air.arg_name"
+!md18 = !"out"
+!md19 = !"air.thread_position_in_grid"
+!md20 = !"t"
+!md21 = !"air.vertex_id"
+!md22 = !"vid"
+!md23 = !"air.render_target"
+!md24 = !"uint4"
+!md25 = !"air.position"
+!md26 = !"air.center"
+!md27 = !"air.no_perspective"
+!md28 = !"float4"
+!md29 = !"position"
+!md30 = !"air.arg_unused"
+!md31 = !"air.compile.denorms_disable"
+!md32 = !"air.compile.fast_math_enable"
+!md33 = !"air.compile.framebuffer_fetch_enable"
+!md34 = !"Apple metal version 32023.921 (metalfe-32023.921.6)"
+!md35 = !"Metal"
+!md36 = !"int"
+!md37 = !"omnipotent char"
+!md38 = !"Simple C++ TBAA"
+!md39 = i32 2
+!md40 = %t21 c17
+!md41 = i32 1
+!md42 = i32 4
+!md43 = i32 7
+!md44 = i32 31
+!md45 = i32 128
+!md46 = i32 8
+!md47 = i32 16
+!md48 = ptr addrspace(0) @f0
+!md49 = i32 0
+!md50 = ptr addrspace(0) @f1
+!md51 = ptr addrspace(0) @f2
+!md52 = ptr addrspace(0) @f3
+!md53 = ptr addrspace(0) @f4
+!md54 = ptr addrspace(0) @f5
+!md55 = i64 0
+!md56 = !{!md39, !md0, !md40}
+!md57 = !{!md41, !md1, !md42}
+!md58 = !{!md43, !md2, !md39}
+!md59 = !{!md43, !md3, !md44}
+!md60 = !{!md43, !md4, !md44}
+!md61 = !{!md43, !md5, !md44}
+!md62 = !{!md43, !md6, !md45}
+!md63 = !{!md43, !md7, !md46}
+!md64 = !{!md43, !md8, !md47}
+!md65 = !{}
+!md66 = !{!md49, !md9, !md10, !md41, !md41, !md11, !md12, !md41, !md13, !md42, !md14, !md42, !md15, !md16, !md17, !md18}
+!md67 = !{!md41, !md19, !md15, !md16, !md17, !md20}
+!md68 = !{!md66, !md67}
+!md69 = !{!md48, !md65, !md68}
+!md70 = !{!md49, !md21, !md15, !md16, !md17, !md22}
+!md71 = !{!md41, !md9, !md10, !md41, !md41, !md11, !md12, !md41, !md13, !md42, !md14, !md42, !md15, !md16, !md17, !md18}
+!md72 = !{!md70, !md71}
+!md73 = !{!md50, !md65, !md72}
+!md74 = !{!md23, !md49, !md49, !md15, !md24}
+!md75 = !{!md74}
+!md76 = !{!md49, !md25, !md26, !md27, !md15, !md28, !md17, !md29, !md30}
+!md77 = !{!md76}
+!md78 = !{!md51, !md75, !md77}
+!md79 = !{!md49, !md25, !md26, !md27, !md15, !md28, !md17, !md29}
+!md80 = !{!md79}
+!md81 = !{!md52, !md75, !md80}
+!md82 = !{!md53, !md75, !md80}
+!md83 = !{!md54, !md75, !md80}
+!md84 = !{!md31}
+!md85 = !{!md32}
+!md86 = !{!md33}
+!md87 = !{!md34}
+!md88 = !{!md39, !md46, !md49}
+!md89 = !{!md35, !md42, !md49, !md49}
+!md90 = !{!md38}
+!md91 = !{!md37, !md90, !md55}
+!md92 = !{!md36, !md91, !md55}
+!md93 = !{!md92, !md92, !md55}
+!"llvm.module.flags" = !{!md56, !md57, !md58, !md59, !md60, !md61, !md62, !md63, !md64}
+!"air.kernel" = !{!md69}
+!"air.vertex" = !{!md73}
+!"air.fragment" = !{!md78, !md81, !md82, !md83}
+!"air.compile_options" = !{!md84, !md85, !md86}
+!"llvm.ident" = !{!md87}
+!"air.version" = !{!md88}
+!"air.language_version" = !{!md89}

@@ -1,0 +1,79 @@
+//! [`color_writes`] of the 32-bit float attachments: a blend of factors other than one and zero
+//! is the device's arithmetic (`ChannelWrite::Device`, which records
+//! `PrecisionNote::DeviceColorConversion`) where the device does not store Metal's color writes,
+//! and nothing otherwise.
+
+use super::*;
+use crate::metal::{BlendFactor, PixelFormat};
+
+/// Attachment 0 of `pf`, blended source-over where `blend` is `Some(true)`, with factors one and
+/// zero where `Some(false)`, not blended where `None`.
+fn attachment(pf: PixelFormat, blend: Option<bool>) -> ColorAttachmentDescriptor {
+    let mut c = ColorAttachmentDescriptor::new(pf);
+    if let Some(over) = blend {
+        c.blending_enabled = true;
+        if over {
+            c.source_rgb_blend_factor = BlendFactor::SourceAlpha;
+            c.destination_rgb_blend_factor = BlendFactor::OneMinusSourceAlpha;
+            c.source_alpha_blend_factor = BlendFactor::SourceAlpha;
+            c.destination_alpha_blend_factor = BlendFactor::OneMinusSourceAlpha;
+        }
+    }
+    c
+}
+
+/// Every committed profile's map for the 32-bit float formats: each channel the device's under a
+/// source-over blend, unless the profile stores Metal's color writes (MoltenVK), and no entry
+/// without a blend or under factors one and zero; an integer format takes none either way.
+#[test]
+fn a_blended_32_bit_float_channel_is_the_devices() {
+    let mut device_blends = 0;
+    for (stem, dev) in crate::metal::format::tests::committed_devices() {
+        let p = dev.profile();
+        let metal = p
+            .fields()
+            .enabled
+            .properties
+            .contains(&VkProperty::MetalColorWrites);
+        for (pf, channels) in [
+            (PixelFormat::R32Float, 1),
+            (PixelFormat::RG32Float, 2),
+            (PixelFormat::RGBA32Float, 4),
+        ] {
+            let map = |blend| {
+                let colors = [Some(attachment(pf, blend))];
+                color_writes(
+                    [0],
+                    &colors,
+                    (false, TextureWriteRoundingMode::TowardZero),
+                    p,
+                )
+            };
+            let blended = map(Some(true));
+            if metal {
+                assert!(blended.is_empty(), "{stem} {pf:?}: {blended:?}");
+            } else {
+                let mut want = [None; 4];
+                for channel in want.iter_mut().take(channels) {
+                    *channel = Some(ChannelWrite::Device);
+                }
+                assert_eq!(blended.get(&0), Some(&want), "{stem} {pf:?}");
+                device_blends += 1;
+            }
+            assert!(map(None).is_empty(), "{stem} {pf:?} unblended");
+            assert!(map(Some(false)).is_empty(), "{stem} {pf:?} one and zero");
+        }
+        let colors = [Some(attachment(PixelFormat::RGBA32Uint, None))];
+        let integer = color_writes(
+            [0],
+            &colors,
+            (false, TextureWriteRoundingMode::TowardZero),
+            p,
+        );
+        assert!(integer.is_empty(), "{stem} RGBA32Uint");
+    }
+    assert!(
+        device_blends > 0,
+        "no committed profile blends on the device"
+    );
+}

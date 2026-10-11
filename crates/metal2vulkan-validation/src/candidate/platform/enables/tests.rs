@@ -1,0 +1,1596 @@
+use super::*;
+use crate::acceptance::{derived_profile, opened_description};
+use crate::coverage::{Leg, ROBUSTNESS_FEATURES};
+use crate::engine::{committed_profiles, load_description};
+use metal2vulkan::device::ApiVersion;
+use metal2vulkan::device::Device;
+
+/// A chain that supports every member.
+fn all_supported() -> FeatureChain {
+    let mut chain = FeatureChain::default();
+    for member in MEMBERS {
+        member.set(&mut chain);
+    }
+    chain
+}
+
+/// A device that lists every extension a context can enable.
+fn every_extension() -> Available {
+    Available::at(
+        ApiVersion::V1_2,
+        EXTENSIONS.iter().map(|extension| extension.name.to_owned()),
+    )
+}
+
+/// What a device described by `description` supports, as a chain: every member it lists, and
+/// every member no vocabulary names.
+fn supported_by(description: &DeviceDescription) -> FeatureChain {
+    let mut chain = FeatureChain::default();
+    for member in MEMBERS {
+        if member
+            .feature
+            .is_none_or(|feature| description.features.contains(&feature))
+        {
+            member.set(&mut chain);
+        }
+    }
+    chain
+}
+
+/// `description` as a context's query reads it: at the instance's API 1.2, so a feature only a
+/// later core version exposes (without the extension listed) is not reported.
+fn at_1_2(mut description: DeviceDescription) -> DeviceDescription {
+    let api = ApiVersion::V1_2;
+    description.api_version = api;
+    let extensions = description.extensions.clone();
+    description
+        .features
+        .retain(|&feature| feature.exposure().exposed(api, &extensions));
+    description
+}
+
+/// Whether [`NOT_ENABLED`] names `feature`.
+fn excluded(feature: VkFeature) -> bool {
+    NOT_ENABLED.iter().any(|(named, _)| *named == feature)
+}
+
+/// The extensions a device described by `description` lists: every name whose vocabulary
+/// extension it reports, and the names the vocabulary does not carry (a Khronos profile's
+/// description keeps only the vocabulary).
+fn listed_by(description: &DeviceDescription) -> Available {
+    listed_at(ApiVersion::V1_2, description)
+}
+
+/// [`listed_by`], as a context at `version` sees the list.
+fn listed_at(version: ApiVersion, description: &DeviceDescription) -> Available {
+    Available::at(
+        version,
+        EXTENSIONS
+            .iter()
+            .filter(|extension| {
+                extension
+                    .vocabulary
+                    .is_none_or(|name| description.extensions.contains(&name))
+            })
+            .map(|extension| extension.name.to_owned()),
+    )
+}
+
+#[test]
+fn every_member_reads_and_writes_its_own_bit() {
+    for (index, member) in MEMBERS.iter().enumerate() {
+        let mut chain = FeatureChain::default();
+        member.set(&mut chain);
+        for (other_index, other) in MEMBERS.iter().enumerate() {
+            assert_eq!(
+                other.is_set(&chain),
+                index == other_index,
+                "{:?} / {:?}",
+                member.feature,
+                other.feature
+            );
+        }
+    }
+}
+
+/// One member per name in each vocabulary, one name table entry per extension name, and every
+/// feature of the product's vocabulary is either one the table can enable or one excluded with
+/// its reason.
+#[test]
+fn every_feature_is_enabled_or_excluded_by_name() {
+    let mut named = BTreeSet::new();
+    for feature in MEMBERS.iter().filter_map(|member| member.feature) {
+        assert!(named.insert(feature), "{feature:?} is listed twice");
+    }
+    let mut excluded = BTreeSet::new();
+    for (feature, reason) in NOT_ENABLED {
+        assert!(excluded.insert(*feature), "{feature:?} is excluded twice");
+        assert!(!reason.is_empty());
+    }
+    let mut fields = BTreeSet::new();
+    for member in MEMBERS {
+        assert!(
+            fields.insert((member.structure, member.name)),
+            "{:?}.{} is listed twice",
+            member.structure,
+            member.name
+        );
+    }
+    let mut names = BTreeSet::new();
+    for extension in EXTENSIONS {
+        assert!(names.insert(extension.name), "{:?} twice", extension.name);
+    }
+    // Every structure's exposing extensions and requirements are names the table carries.
+    for structure in Structure::EXTENSIONS {
+        for name in structure.extensions().iter().chain(structure.requires()) {
+            assert!(names.contains(name), "{structure:?}: {name:?}");
+        }
+    }
+    for feature in VkFeature::ALL {
+        assert!(
+            named.contains(feature) || excluded.contains(feature),
+            "{feature:?} has no member"
+        );
+    }
+}
+
+/// The old executor's context enables what it enabled before the engine had its own list:
+/// the base of every engine context, so its opened profile and its rows do not move.
+#[test]
+fn the_old_engine_list_is_unchanged() {
+    use VkExtension as X;
+    let enables = old_engine_list(&all_supported(), &every_extension());
+    let set = enabled_set(&enables);
+    assert_eq!(
+        set.features,
+        BTreeSet::from([
+            F::SamplerAnisotropy,
+            F::SampleRateShading,
+            F::TessellationShader,
+            F::ShaderInt16,
+            F::ShaderInt64,
+            F::ShaderClipDistance,
+            F::ShaderCullDistance,
+            F::ShaderStorageImageExtendedFormats,
+            F::ImageCubeArray,
+            F::GeometryShader,
+            F::FragmentStoresAndAtomics,
+            F::VertexPipelineStoresAndAtomics,
+            F::StorageInputOutput16,
+            F::StorageBuffer16BitAccess,
+            F::UniformAndStorageBuffer16BitAccess,
+            F::StoragePushConstant16,
+            F::StorageBuffer8BitAccess,
+            F::UniformAndStorageBuffer8BitAccess,
+            F::StoragePushConstant8,
+            F::ShaderFloat16,
+            F::ShaderInt8,
+            F::ShaderSubgroupExtendedTypes,
+            F::ShaderOutputViewportIndex,
+            F::ShaderOutputLayer,
+            F::BufferDeviceAddress,
+            F::FragmentShaderPixelInterlock,
+            F::ShaderDemoteToHelperInvocation,
+            F::ShaderBufferFloat32AtomicAdd,
+            F::ShaderSharedFloat32AtomicAdd,
+            F::FragmentShaderBarycentric,
+            // The portability subset's structure is chained with what the device supports, as
+            // it always was; the vocabulary names these members, the next three since ARTIFACT 180,
+            // and `imageViewFormatSwizzle` since ARTIFACT 203.
+            F::ConstantAlphaColorBlendFactors,
+            F::VertexAttributeAccessBeyondStride,
+            F::SamplerMipLodBias,
+            F::MutableComparisonSamplers,
+            F::ShaderSampleRateInterpolationFunctions,
+            F::MultisampleArrayImage,
+            F::ImageView2DOn3DImage,
+            F::SeparateStencilMaskRef,
+            F::ImageViewFormatSwizzle,
+            // `maintenance5` was always chained for the generated-commands path; the vocabulary
+            // names it.
+            F::Maintenance5,
+        ])
+    );
+    assert_eq!(
+        set.extensions,
+        BTreeSet::from([
+            X::ExtShaderStencilExport,
+            X::ExtFragmentShaderInterlock,
+            X::ExtShaderDemoteToHelperInvocation,
+            X::ExtShaderAtomicFloat,
+            X::KhrFragmentShaderBarycentric,
+            X::KhrMaintenance5,
+            X::KhrDynamicRendering,
+            X::KhrPortabilitySubset,
+        ])
+    );
+    // The members the engine's vocabulary does not name, through their structures.
+    assert_eq!(enables.chain.v11.variable_pointers, vk::TRUE);
+    assert_eq!(enables.chain.v11.variable_pointers_storage_buffer, vk::TRUE);
+    assert!(enables.linked.contains(&Structure::FloatControls2));
+    assert_eq!(
+        enables.chain.float_controls2.shader_float_controls2,
+        vk::TRUE
+    );
+    assert_eq!(
+        enables.extensions,
+        BTreeSet::from([
+            c"VK_KHR_portability_subset",
+            c"VK_EXT_shader_stencil_export",
+            c"VK_EXT_fragment_shader_interlock",
+            c"VK_KHR_shader_float_controls2",
+            c"VK_EXT_shader_demote_to_helper_invocation",
+            c"VK_EXT_shader_atomic_float",
+            c"VK_KHR_fragment_shader_barycentric",
+            c"VK_KHR_maintenance5",
+            c"VK_KHR_dynamic_rendering",
+        ])
+    );
+}
+
+/// A structure is chained, and its members enabled, only through an extension the device lists
+/// together with what that extension requires; the first listed alternative name is the one
+/// enabled.
+#[test]
+fn a_member_is_enabled_only_through_a_listed_extension() {
+    let supported = all_supported();
+    let bare = Available::at(ApiVersion::V1_2, []);
+    let enables = old_engine_list(&supported, &bare);
+    assert!(enables.linked.is_empty());
+    assert!(enables.extensions.is_empty());
+    assert!(!enabled_set(&enables)
+        .features
+        .contains(&F::FragmentShaderPixelInterlock));
+
+    let unmet = Available::at(
+        ApiVersion::V1_2,
+        [
+            c"VK_KHR_maintenance5".to_owned(),
+            c"VK_KHR_dynamic_rendering_local_read".to_owned(),
+            c"VK_EXT_shader_atomic_float2".to_owned(),
+            c"VK_EXT_border_color_swizzle".to_owned(),
+        ],
+    );
+    assert_eq!(unmet.exposing(Structure::Maintenance5), None);
+    assert_eq!(unmet.exposing(Structure::LocalRead), None);
+    assert_eq!(unmet.exposing(Structure::AtomicFloat2), None);
+    assert_eq!(unmet.exposing(Structure::BorderColorSwizzle), None);
+    assert!(unmet.exposed().is_empty());
+
+    let alternative = Available::at(
+        ApiVersion::V1_2,
+        [
+            c"VK_NV_compute_shader_derivatives".to_owned(),
+            c"VK_EXT_vertex_attribute_divisor".to_owned(),
+            c"VK_KHR_vertex_attribute_divisor".to_owned(),
+        ],
+    );
+    assert_eq!(
+        alternative.exposing(Structure::Derivatives),
+        Some(Some(c"VK_NV_compute_shader_derivatives"))
+    );
+    assert_eq!(
+        alternative.exposing(Structure::Divisor),
+        Some(Some(c"VK_KHR_vertex_attribute_divisor"))
+    );
+    assert_eq!(alternative.exposing(Structure::V12), Some(None));
+
+    // `link` chains a structure only through a name already enabled, with its requirements.
+    let mut enables = Enables::new(ApiVersion::V1_2);
+    assert!(enables.link(Structure::V11));
+    assert!(!enables.link(Structure::BorderColorSwizzle));
+    enables.extensions.insert(c"VK_EXT_border_color_swizzle");
+    assert!(!enables.link(Structure::BorderColorSwizzle));
+    enables.extensions.insert(c"VK_EXT_custom_border_color");
+    assert!(enables.link(Structure::BorderColorSwizzle));
+    assert_eq!(
+        enables.linked,
+        BTreeSet::from([Structure::BorderColorSwizzle])
+    );
+}
+
+/// On every committed profile (as a context's API-1.2 query reads it), the engine's context
+/// enables exactly the product's recommendation less the excluded features, in the one closed
+/// set `with_enabled` accepts and `Device::new` derives from, with the robustness features the
+/// leg decides: every one the profile states in the stated leg, so the opened profile compiles the
+/// robust encodings it states, and none in the robustness-off leg, so it compiles the in-shader
+/// ones. The old engine's context enables a closed set too.
+#[test]
+fn the_new_list_enables_the_recommendation_but_the_excluded() {
+    let stems = committed_profiles().unwrap();
+    assert!(!stems.is_empty());
+    for stem in stems {
+        let description = at_1_2(load_description(&stem).unwrap());
+        let supported = supported_by(&description);
+        let available = listed_by(&description);
+        let old = enabled_set(&old_engine_list(&supported, &available));
+        opened_description(description.clone(), &old)
+            .unwrap_or_else(|error| panic!("{stem}: the old list: {error}"));
+        for leg in [Leg::Stated, Leg::RobustnessOff] {
+            let enables = engine_list(
+                old_engine_list(&supported, &available),
+                &description,
+                &supported,
+                &available,
+                leg,
+            )
+            .unwrap_or_else(|error| panic!("{stem}: {error}"));
+            assert!(enables.unmet_robustness.is_empty(), "{stem} {leg:?}");
+            let set = enabled_set(&enables);
+            let mut expected = description.recommended_enables(&DevicePolicy::default());
+            expected.features.retain(|&feature| {
+                !excluded(feature)
+                    && (leg == Leg::Stated || !ROBUSTNESS_FEATURES.contains(&feature))
+            });
+            assert_eq!(set, expected, "{stem} {leg:?}");
+            let opened = opened_description(description.clone(), &set)
+                .unwrap_or_else(|error| panic!("{stem}: {error}"));
+            let profile = Device::new(opened, DevicePolicy::default())
+                .unwrap_or_else(|error| panic!("{stem}: {error}"))
+                .profile()
+                .clone();
+            let states = |feature| description.features.contains(&feature);
+            let robust = (
+                profile.checks_buffers_in_shader(),
+                profile.images().robust_image_access,
+            );
+            match leg {
+                Leg::Stated => assert_eq!(
+                    robust,
+                    (
+                        !(states(F::RobustBufferAccess) || states(F::RobustBufferAccess2)),
+                        states(F::RobustImageAccess) || states(F::RobustImageAccess2)
+                    ),
+                    "{stem}"
+                ),
+                Leg::RobustnessOff => assert_eq!(robust, (true, false), "{stem}"),
+            }
+            // A member no vocabulary names rides along where its structure is chained.
+            if set
+                .extensions
+                .contains(&VkExtension::ExtTextureCompressionAstcHdr)
+            {
+                assert!(enables.linked.contains(&Structure::AstcHdr), "{stem}");
+                assert_eq!(
+                    enables.chain.astc_hdr.texture_compression_astc_hdr,
+                    vk::TRUE
+                );
+            }
+        }
+    }
+}
+
+/// The stated leg enables exactly the robustness features the device's description states,
+/// through their structures: `robustBufferAccess2` and `robustImageAccess2` through
+/// `VK_EXT_robustness2`'s, `robustImageAccess` through `VK_EXT_image_robustness`'s; `moltenvk-m3`
+/// states `robustBufferAccess2` false, so its context enables `robustBufferAccess` alone for
+/// buffers. A stated feature the device cannot enable is not dropped: no robustness feature is
+/// enabled then, and the context names it unmet, which refuses every run on it.
+#[test]
+fn the_stated_leg_enables_what_the_description_states_or_names_it_unmet() {
+    let leg_of = |stem: &str, unreported: Option<VkFeature>| {
+        let description = at_1_2(load_description(stem).unwrap());
+        let mut supported = supported_by(&description);
+        if let Some(feature) = unreported {
+            *(member_of(feature).unwrap().write)(&mut supported) = vk::FALSE;
+        }
+        let available = listed_by(&description);
+        engine_list(
+            old_engine_list(&supported, &available),
+            &description,
+            &supported,
+            &available,
+            Leg::Stated,
+        )
+        .unwrap_or_else(|error| panic!("{stem}: {error}"))
+    };
+    let robustness = |enables: &Enables| {
+        enabled_set(enables)
+            .features
+            .into_iter()
+            .filter(|feature| ROBUSTNESS_FEATURES.contains(feature))
+            .collect::<BTreeSet<_>>()
+    };
+    let lavapipe = leg_of("lavapipe", None);
+    assert_eq!(robustness(&lavapipe), ROBUSTNESS_FEATURES.into());
+    assert!(lavapipe.linked.contains(&Structure::Robustness2));
+    assert!(lavapipe.linked.contains(&Structure::ImageRobustness));
+    assert_eq!(lavapipe.chain.core.robust_buffer_access, vk::TRUE);
+    assert_eq!(lavapipe.chain.robustness2.robust_buffer_access2, vk::TRUE);
+    assert_eq!(lavapipe.chain.robustness2.robust_image_access2, vk::TRUE);
+    assert_eq!(
+        lavapipe.chain.image_robustness.robust_image_access,
+        vk::TRUE
+    );
+    assert_eq!(lavapipe.chain.robustness2.null_descriptor, vk::FALSE);
+    let moltenvk = leg_of("moltenvk-m3", None);
+    assert_eq!(
+        robustness(&moltenvk),
+        [
+            F::RobustBufferAccess,
+            F::RobustImageAccess,
+            F::RobustImageAccess2
+        ]
+        .into()
+    );
+    let floor = leg_of("vk12-floor", None);
+    assert_eq!(robustness(&floor), [F::RobustBufferAccess].into());
+
+    let unmet = leg_of("lavapipe", Some(F::RobustImageAccess));
+    assert_eq!(unmet.unmet_robustness, [F::RobustImageAccess].into());
+    assert_eq!(robustness(&unmet), BTreeSet::new());
+}
+
+/// Where a device lists `VK_EXT_extended_dynamic_state`, the engine's context enables it and
+/// `extendedDynamicState` through its structure, so the opened profile makes the extended states
+/// dynamic and a render pipeline's requirement of them is met; the old list enables neither, and a
+/// device without the extension gets neither.
+#[test]
+fn the_new_list_enables_extended_dynamic_state_where_the_device_lists_it() {
+    let lists = |stem: &str| {
+        let description = at_1_2(load_description(stem).unwrap());
+        let supported = supported_by(&description);
+        let available = listed_by(&description);
+        let old = enabled_set(&old_engine_list(&supported, &available));
+        assert!(!old.features.contains(&F::ExtendedDynamicState), "{stem}");
+        let enables = engine_list(
+            old_engine_list(&supported, &available),
+            &description,
+            &supported,
+            &available,
+            Leg::Stated,
+        )
+        .unwrap_or_else(|error| panic!("{stem}: {error}"));
+        (description, enables)
+    };
+    for stem in ["lavapipe", "moltenvk-m3"] {
+        let (description, enables) = lists(stem);
+        assert!(description.has(F::ExtendedDynamicState), "{stem}");
+        assert!(enables.linked.contains(&Structure::ExtendedDynamicState));
+        assert!(enables
+            .extensions
+            .contains(c"VK_EXT_extended_dynamic_state"));
+        assert_eq!(
+            enables.chain.extended_dynamic_state.extended_dynamic_state,
+            vk::TRUE
+        );
+        let set = enabled_set(&enables);
+        assert!(set.features.contains(&F::ExtendedDynamicState), "{stem}");
+        assert!(set
+            .extensions
+            .contains(&VkExtension::ExtExtendedDynamicState));
+        let profile = derived_profile(opened_description(description, &set).unwrap()).unwrap();
+        assert!(
+            profile
+                .enabled()
+                .features
+                .contains(&F::ExtendedDynamicState),
+            "{stem}"
+        );
+    }
+    let (description, enables) = lists("vk12-floor");
+    assert!(!description.has(F::ExtendedDynamicState));
+    assert!(!enabled_set(&enables)
+        .features
+        .contains(&F::ExtendedDynamicState));
+    let profile =
+        derived_profile(opened_description(description, &enabled_set(&enables)).unwrap()).unwrap();
+    assert!(!profile
+        .enabled()
+        .features
+        .contains(&F::ExtendedDynamicState));
+}
+
+/// Where a device lists `VK_EXT_extended_dynamic_state2`, the engine's context at API 1.2
+/// enables it and `extendedDynamicState2` through its structure, so the opened profile makes a
+/// vertex pipeline's topology and restart dynamic as the runtime's does; a device without the
+/// extension gets neither.
+#[test]
+fn the_new_list_enables_extended_dynamic_state2_where_the_device_lists_it() {
+    let lists = |stem: &str| {
+        let description = at_1_2(load_description(stem).unwrap());
+        let supported = supported_by(&description);
+        let available = listed_by(&description);
+        let enables = engine_list(
+            old_engine_list(&supported, &available),
+            &description,
+            &supported,
+            &available,
+            Leg::Stated,
+        )
+        .unwrap_or_else(|error| panic!("{stem}: {error}"));
+        (description, enables)
+    };
+    for stem in ["lavapipe", "moltenvk-m3", "amd-780m-radv"] {
+        let (description, enables) = lists(stem);
+        assert!(description.has(F::ExtendedDynamicState2), "{stem}");
+        assert!(enables.linked.contains(&Structure::ExtendedDynamicState2));
+        assert!(enables
+            .extensions
+            .contains(c"VK_EXT_extended_dynamic_state2"));
+        assert_eq!(
+            enables
+                .chain
+                .extended_dynamic_state2
+                .extended_dynamic_state2,
+            vk::TRUE
+        );
+        let set = enabled_set(&enables);
+        assert!(set.features.contains(&F::ExtendedDynamicState2), "{stem}");
+        assert!(set
+            .extensions
+            .contains(&VkExtension::ExtExtendedDynamicState2));
+        let profile = derived_profile(opened_description(description, &set).unwrap()).unwrap();
+        assert!(
+            profile
+                .enabled()
+                .features
+                .contains(&F::ExtendedDynamicState2),
+            "{stem}"
+        );
+    }
+    let (description, enables) = lists("vk12-floor");
+    assert!(!description.has(F::ExtendedDynamicState2));
+    assert!(!enabled_set(&enables)
+        .features
+        .contains(&F::ExtendedDynamicState2));
+}
+
+/// On every committed profile (as a context's API-1.2 query reads it), the new list in the stated
+/// robustness leg (which enables the robustness features the description states) is a set the
+/// device can create: `with_enabled` accepts it, so it keeps
+/// VUID-VkDeviceCreateInfo-robustBufferAccess-10247. On SwiftShader,
+/// whose profile states `robustBufferAccessUpdateAfterBind` false, the recommendation left out
+/// the buffer update-after-bind features, so `robustBufferAccess` can be enabled.
+#[test]
+fn the_new_list_with_the_stated_robustness_keeps_the_co_enable_rules() {
+    // The features of VUID-VkDeviceCreateInfo-robustBufferAccess-10247 the vocabulary names (its
+    // fourth, `descriptorBindingUniformBufferUpdateAfterBind`, is not in it).
+    const BUFFER_UPDATE_AFTER_BIND: [VkFeature; 3] = [
+        F::DescriptorBindingStorageBufferUpdateAfterBind,
+        F::DescriptorBindingUniformTexelBufferUpdateAfterBind,
+        F::DescriptorBindingStorageTexelBufferUpdateAfterBind,
+    ];
+    let mut held = Vec::new();
+    for stem in committed_profiles().unwrap() {
+        let description = at_1_2(load_description(&stem).unwrap());
+        let supported = supported_by(&description);
+        let available = listed_by(&description);
+        let enables = engine_list(
+            old_engine_list(&supported, &available),
+            &description,
+            &supported,
+            &available,
+            Leg::Stated,
+        )
+        .unwrap_or_else(|error| panic!("{stem}: {error}"));
+        let set = enabled_set(&enables);
+        assert!(set.features.contains(&F::RobustBufferAccess), "{stem}");
+        if !description.robust_buffer_access_update_after_bind {
+            assert!(
+                BUFFER_UPDATE_AFTER_BIND
+                    .iter()
+                    .all(|feature| !set.features.contains(feature)),
+                "{stem}"
+            );
+            if BUFFER_UPDATE_AFTER_BIND
+                .iter()
+                .any(|&feature| description.has(feature))
+            {
+                held.push(stem.clone());
+            }
+        }
+        let opened = opened_description(description.clone(), &set)
+            .unwrap_or_else(|error| panic!("{stem}: {error}"));
+        Device::new(opened, DevicePolicy::default())
+            .unwrap_or_else(|error| panic!("{stem}: {error}"));
+    }
+    assert_eq!(
+        held,
+        [
+            "lunarg-desktop-baseline-2023",
+            "roadmap-2022",
+            "swiftshader"
+        ]
+    );
+}
+
+/// A description and a device's own lists that disagree open no context: a recommended feature
+/// the chain does not report, or a recommended extension the device lists no name of.
+#[test]
+fn a_disagreeing_description_is_refused() {
+    let description = at_1_2(load_description("lavapipe").unwrap());
+    let supported = supported_by(&description);
+    let available = listed_by(&description);
+    let mut unreported = supported;
+    *(member_of(F::ShaderInt64).unwrap().write)(&mut unreported) = vk::FALSE;
+    let error = engine_list(
+        Enables::new(ApiVersion::V1_2),
+        &description,
+        &unreported,
+        &available,
+        Leg::Stated,
+    )
+    .err()
+    .unwrap();
+    assert!(error.contains("ShaderInt64"), "{error}");
+    let unlisted = Available::at(
+        ApiVersion::V1_2,
+        EXTENSIONS
+            .iter()
+            .filter(|named| named.vocabulary != Some(VkExtension::ExtRobustness2))
+            .filter(|named| available.has(named.name))
+            .map(|named| named.name.to_owned()),
+    );
+    let error = engine_list(
+        Enables::new(ApiVersion::V1_2),
+        &description,
+        &supported,
+        &unlisted,
+        Leg::Stated,
+    )
+    .err()
+    .unwrap();
+    assert!(error.contains("ExtRobustness2"), "{error}");
+}
+
+/// An engine context enables sparse binding and 2D and 3D sparse residency where the device
+/// supports them, for the executor's sparse case textures. The vocabulary does not name them, so
+/// the opened profile does not move; the old engine's list enables none, and a device without them
+/// gets none.
+#[test]
+fn the_new_list_enables_sparse_images_where_the_device_supports_them() {
+    for member in MEMBERS.iter().filter(|member| member.executor.is_some()) {
+        assert_eq!(member.structure, Structure::Core);
+        assert!(member.feature.is_none());
+    }
+    let description = at_1_2(load_description("lavapipe").unwrap());
+    let supported = supported_by(&description);
+    let available = listed_by(&description);
+    assert!(executor_features(&old_engine_list(&supported, &available)).is_empty());
+    let list = |supported: &FeatureChain| {
+        engine_list(
+            old_engine_list(supported, &available),
+            &description,
+            supported,
+            &available,
+            Leg::Stated,
+        )
+        .unwrap()
+    };
+    let enables = list(&supported);
+    assert_eq!(
+        executor_features(&enables),
+        BTreeSet::from([
+            ExecutorFeature::SparseBinding,
+            ExecutorFeature::SparseResidencyImage2D,
+            ExecutorFeature::SparseResidencyImage3D,
+        ])
+    );
+    assert_eq!(enables.chain.core.sparse_binding, vk::TRUE);
+    assert_eq!(enables.chain.core.sparse_residency_image2_d, vk::TRUE);
+    assert_eq!(enables.chain.core.sparse_residency_image3_d, vk::TRUE);
+    let mut without = supported;
+    without.core.sparse_binding = vk::FALSE;
+    without.core.sparse_residency_image3_d = vk::FALSE;
+    let enables = list(&without);
+    assert_eq!(
+        executor_features(&enables),
+        BTreeSet::from([ExecutorFeature::SparseResidencyImage2D])
+    );
+    assert_eq!(enabled_set(&enables), enabled_set(&list(&supported)));
+}
+
+/// The executor's MoltenVK device (the Q1 refusals): the old list dropped subgroup size control and
+/// the memory model, so the opened kernel stage could not require full subgroups; the engine's
+/// list enables both, and the opened profile carries them.
+#[test]
+fn the_moltenvk_context_opens_full_subgroups_and_the_memory_model() {
+    let description = at_1_2(load_description("moltenvk-m3").unwrap());
+    let supported = supported_by(&description);
+    let available = listed_by(&description);
+    let opened = |set: &EnableSet| {
+        derived_profile(opened_description(description.clone(), set).unwrap()).unwrap()
+    };
+
+    let old = enabled_set(&old_engine_list(&supported, &available));
+    let old_profile = opened(&old);
+    assert!(!old_profile.subgroups().kernel.full_subgroups);
+    assert!(!old_profile
+        .enabled()
+        .features
+        .contains(&F::VulkanMemoryModel));
+
+    let enables = engine_list(
+        old_engine_list(&supported, &available),
+        &description,
+        &supported,
+        &available,
+        Leg::Stated,
+    )
+    .unwrap();
+    let set = enabled_set(&enables);
+    for feature in [
+        F::SubgroupSizeControl,
+        F::ComputeFullSubgroups,
+        F::VulkanMemoryModel,
+        F::VulkanMemoryModelDeviceScope,
+        F::FragmentShaderSampleInterlock,
+        F::Maintenance8,
+    ] {
+        assert!(set.features.contains(&feature), "{feature:?}");
+    }
+    assert!(set
+        .extensions
+        .contains(&VkExtension::ExtSubgroupSizeControl));
+    assert!(enables.linked.contains(&Structure::SubgroupSizeControl));
+    let profile = opened(&set);
+    assert!(profile.subgroups().kernel.full_subgroups);
+    assert!(profile.enabled().features.contains(&F::VulkanMemoryModel));
+}
+
+/// The opened context enables the product's recommendation less the excluded features on top of
+/// the base list (lavapipe and MoltenVK both list subgroup size control and have the memory
+/// model), under the validation layer without a message, and its opened description is
+/// restricted to exactly what it enabled. Run in the
+/// stated leg, it enables the device's stated robustness (both devices state
+/// `robustBufferAccess`) with none unmet, so its opened profile compiles robust descriptor views.
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+#[test]
+fn the_opened_contexts_enable_their_lists() {
+    use super::super::device::with_validated_context;
+    let device = crate::gpu::TEST_DEVICE;
+    let (new, messages, opened, leg, unmet) = with_validated_context(device, |context| {
+        Ok((
+            context.enabled.clone(),
+            context.take_messages(),
+            context.opened_description.clone(),
+            context.leg,
+            context.unmet_robustness.clone(),
+        ))
+    })
+    .unwrap();
+    assert!(messages.is_empty(), "{messages:?}");
+    assert_eq!(leg, Leg::Stated);
+    assert_eq!(unmet, BTreeSet::new());
+    assert!(new.features.contains(&F::RobustBufferAccess));
+    let opened = opened.unwrap();
+    assert_eq!(opened.features, new.features);
+    assert_eq!(opened.extensions, new.extensions);
+    for feature in [
+        F::SubgroupSizeControl,
+        F::ComputeFullSubgroups,
+        F::VulkanMemoryModel,
+        F::VulkanMemoryModelDeviceScope,
+    ] {
+        assert!(new.features.contains(&feature), "{feature:?}");
+    }
+    for (feature, _) in NOT_ENABLED {
+        assert!(!new.features.contains(feature), "{feature:?}");
+    }
+}
+
+/// Where the device lists `VK_KHR_shader_fma` (moltenvk-m3), the new list enables it and
+/// `shaderFmaFloat32`, and the opened description states both, so a module the engine
+/// translated with `OpFmaKHR`, whose requirements name the feature, is not refused as
+/// `not_enabled`.
+#[test]
+fn an_enabled_shader_fma_is_in_the_opened_description() {
+    let description = at_1_2(load_description("moltenvk-m3").unwrap());
+    let supported = supported_by(&description);
+    let available = listed_by(&description);
+    let enables = engine_list(
+        old_engine_list(&supported, &available),
+        &description,
+        &supported,
+        &available,
+        Leg::Stated,
+    )
+    .unwrap();
+    assert_eq!(enables.chain.shader_fma.shader_fma_float32, vk::TRUE);
+    assert!(enables.extensions.contains(c"VK_KHR_shader_fma"));
+    let set = enabled_set(&enables);
+    let opened = opened_description(description, &set).unwrap();
+    assert!(opened.features.contains(&F::ShaderFmaFloat32));
+    assert!(opened.extensions.contains(&VkExtension::KhrShaderFma));
+}
+
+/// An engine context enables `VK_EXT_depth_range_unrestricted` exactly where the device lists
+/// it, in both legs, so its copies into a depth aspect keep Metal's `Depth32Float` texels outside
+/// `[0, 1]` (RADV stores them clamped without it); the opened description then states it, and a
+/// module reading depth texels compiled for it records no `RestrictedDepthRange`. A device that
+/// does not list it (moltenvk-m3) is opened without it.
+#[test]
+fn depth_range_unrestricted_is_enabled_where_the_device_lists_it() {
+    use metal2vulkan::device::VkExtension as X;
+    let name = c"VK_EXT_depth_range_unrestricted";
+    for (stem, listed) in [
+        ("amd-rdna3-radv", true),
+        ("lavapipe", true),
+        ("moltenvk-m3", false),
+    ] {
+        let description = at_1_2(load_description(stem).unwrap());
+        assert_eq!(
+            description
+                .extensions
+                .contains(&X::ExtDepthRangeUnrestricted),
+            listed,
+            "{stem}"
+        );
+        let supported = supported_by(&description);
+        let available = listed_by(&description);
+        for leg in [Leg::Stated, Leg::RobustnessOff] {
+            let enables = engine_list(
+                old_engine_list(&supported, &available),
+                &description,
+                &supported,
+                &available,
+                leg,
+            )
+            .unwrap_or_else(|error| panic!("{stem} {leg:?}: {error}"));
+            assert_eq!(enables.extensions.contains(name), listed, "{stem} {leg:?}");
+            let set = enabled_set(&enables);
+            assert_eq!(
+                set.extensions.contains(&X::ExtDepthRangeUnrestricted),
+                listed,
+                "{stem} {leg:?}"
+            );
+            let opened = opened_description(description.clone(), &set)
+                .unwrap_or_else(|error| panic!("{stem}: {error}"));
+            assert_eq!(
+                opened.extensions.contains(&X::ExtDepthRangeUnrestricted),
+                listed,
+                "{stem} {leg:?}"
+            );
+        }
+    }
+}
+
+/// Vulkan 1.4.
+const V1_4: ApiVersion = ApiVersion { major: 1, minor: 4 };
+
+/// Every structure the model chains: the base ones and every extension structure.
+fn every_structure() -> impl Iterator<Item = Structure> {
+    [Structure::Core, Structure::V11, Structure::V12]
+        .into_iter()
+        .chain(Structure::EXTENSIONS)
+}
+
+/// A context at Vulkan 1.2, every unrestricted context and every one restricted to a profile of
+/// that version, exposes, chains, and enables exactly as before contexts had a version. Only the
+/// base structures are core at 1.2, every extension requirement stands, and
+/// [`Available::exposing`], [`Enables::expose`] and [`Enables::link`] give what the former rules
+/// (restated here) give over extension lists this test builds: none, all, each structure's names
+/// alone, and each with its requirements.
+#[test]
+fn a_context_at_vulkan_1_2_exposes_and_links_as_before() {
+    fn former_exposing(
+        names: &BTreeSet<&'static CStr>,
+        structure: Structure,
+    ) -> Option<Option<&'static CStr>> {
+        let alternatives = structure.extensions();
+        if alternatives.is_empty() {
+            return Some(None);
+        }
+        if !structure.requires().iter().all(|name| names.contains(name)) {
+            return None;
+        }
+        alternatives
+            .iter()
+            .copied()
+            .find(|name| names.contains(name))
+            .map(Some)
+    }
+    /// `(linked, extensions)` of a former `Enables`.
+    type Former = (BTreeSet<Structure>, BTreeSet<&'static CStr>);
+    fn former_expose(
+        state: &mut Former,
+        structure: Structure,
+        names: &BTreeSet<&'static CStr>,
+    ) -> bool {
+        let Some(extension) = former_exposing(names, structure) else {
+            return false;
+        };
+        if let Some(name) = extension {
+            state.0.insert(structure);
+            state.1.insert(name);
+            state.1.extend(structure.requires().iter().copied());
+        }
+        true
+    }
+    fn former_link(state: &mut Former, structure: Structure) -> bool {
+        let alternatives = structure.extensions();
+        if alternatives.is_empty() {
+            return true;
+        }
+        let exposed = alternatives.iter().any(|name| state.1.contains(name))
+            && structure
+                .requires()
+                .iter()
+                .all(|name| state.1.contains(name));
+        if exposed {
+            state.0.insert(structure);
+        }
+        exposed
+    }
+
+    for structure in every_structure() {
+        assert_eq!(
+            structure.core_at(ApiVersion::V1_2),
+            structure.extensions().is_empty(),
+            "{structure:?}"
+        );
+        assert_eq!(
+            structure.requires_at(ApiVersion::V1_2).collect::<Vec<_>>(),
+            structure.requires(),
+            "{structure:?}"
+        );
+    }
+    let every: BTreeSet<&'static CStr> = every_structure()
+        .flat_map(|structure| structure.extensions().iter().chain(structure.requires()))
+        .copied()
+        .collect();
+    let mut lists = vec![BTreeSet::new(), every];
+    for structure in Structure::EXTENSIONS {
+        let alone: BTreeSet<&'static CStr> = structure.extensions().iter().copied().collect();
+        let mut required = alone.clone();
+        required.extend(structure.requires().iter().copied());
+        lists.extend([alone, required]);
+    }
+    for names in &lists {
+        let available = Available::at(
+            ApiVersion::V1_2,
+            names.iter().map(|name| (*name).to_owned()),
+        );
+        let mut exposing = Enables::new(ApiVersion::V1_2);
+        let mut former_exposed: Former = Default::default();
+        let mut linking = Enables::new(ApiVersion::V1_2);
+        linking.extensions = names.clone();
+        let mut former_linked: Former = (BTreeSet::new(), names.clone());
+        for structure in every_structure() {
+            assert_eq!(
+                available.exposing(structure),
+                former_exposing(names, structure),
+                "{structure:?} {names:?}"
+            );
+            assert_eq!(
+                exposing.expose(structure, &available),
+                former_expose(&mut former_exposed, structure, names),
+                "{structure:?} {names:?}"
+            );
+            assert_eq!(
+                linking.link(structure),
+                former_link(&mut former_linked, structure),
+                "{structure:?} {names:?}"
+            );
+        }
+        assert_eq!(
+            (exposing.linked, exposing.extensions),
+            former_exposed,
+            "{names:?}"
+        );
+        assert_eq!(
+            (linking.linked, linking.extensions),
+            former_linked,
+            "{names:?}"
+        );
+    }
+}
+
+/// The structures a context chains as core from a later version are the ones the product reads as
+/// core from it. Every member whose feature the product reads from a core structure, or one
+/// promoted by 1.2, belongs to a base structure; every member of a structure a later version
+/// promoted belongs to one core from that version ([`Structure::core_since`]); and a member only an
+/// extension exposes, or one whose functionality a version makes core without a member (extended
+/// dynamic state), belongs to a structure no version makes core. Each structure's requirements at
+/// each version are the closure of what the product's `VkExtension::requires` names at that version
+/// for each of its extensions (`VK_KHR_dynamic_rendering` core from 1.3).
+#[test]
+fn a_structure_is_core_from_the_version_the_product_reads_it_core() {
+    use metal2vulkan::device::Exposure;
+    for member in MEMBERS {
+        let Some(feature) = member.feature else {
+            continue;
+        };
+        let structure = member.structure;
+        match feature.exposure() {
+            Exposure::Core(_) => assert!(structure.is_base(), "{feature:?}"),
+            Exposure::Promoted { version, .. } if version <= ApiVersion::V1_2 => {
+                assert!(structure.is_base(), "{feature:?}")
+            }
+            Exposure::Promoted { version, .. } => {
+                assert_eq!(structure.core_since(), Some(version), "{feature:?}")
+            }
+            Exposure::Extension(_) | Exposure::Implied { .. } => {
+                assert!(!structure.is_base(), "{feature:?}");
+                assert_eq!(structure.core_since(), None, "{feature:?}");
+            }
+            other => panic!("{feature:?}: an exposure this test does not model: {other:?}"),
+        }
+    }
+    let name_of = |extension: VkExtension| {
+        EXTENSIONS
+            .iter()
+            .find(|named| named.vocabulary == Some(extension))
+            .map(|named| named.name)
+            .unwrap_or_else(|| panic!("{extension:?} has a name"))
+    };
+    let mut checked = 0;
+    for structure in Structure::EXTENSIONS {
+        for version in [ApiVersion::V1_2, ApiVersion::V1_3, V1_4] {
+            if structure.core_at(version) {
+                continue;
+            }
+            let ours: BTreeSet<&CStr> = structure.requires_at(version).collect();
+            for named in EXTENSIONS
+                .iter()
+                .filter(|named| structure.extensions().contains(&named.name))
+            {
+                let Some(extension) = named.vocabulary else {
+                    continue;
+                };
+                let mut closure = BTreeSet::new();
+                let mut open = extension.requires(version);
+                while let Some(required) = open.pop() {
+                    if closure.insert(name_of(required)) {
+                        open.extend(required.requires(version));
+                    }
+                }
+                assert_eq!(ours, closure, "{structure:?} {:?} {version:?}", named.name);
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 0);
+}
+
+/// A context restricted to a committed profile runs at the profile's version
+/// (`ProfileRestriction::context_version`) and translates for the profile read there. At that
+/// version its engine list is the product's recommendation less the excluded features, the
+/// one closed set `with_enabled` accepts and `Device::new` derives from, as at 1.2
+/// ([`the_new_list_enables_the_recommendation_but_the_excluded`]), and no structure core at the
+/// version is chained through its extension. The profiles at Vulkan 1.2 run at 1.2.
+#[test]
+fn a_restricted_context_enables_the_recommendation_at_its_profiles_version() {
+    use super::super::profiles::ProfileRestriction;
+    let mut at_1_2 = Vec::new();
+    for stem in committed_profiles().unwrap() {
+        let restriction = ProfileRestriction::committed(&stem).unwrap();
+        let version = restriction.context_version();
+        assert_eq!(
+            version,
+            restriction.description.api_version.max(ApiVersion::V1_2),
+            "{stem}"
+        );
+        if version == ApiVersion::V1_2 {
+            at_1_2.push(stem.clone());
+        }
+        let description = restriction.read_at(version);
+        let supported = supported_by(&description);
+        let available = listed_at(version, &description);
+        for leg in [Leg::Stated, Leg::RobustnessOff] {
+            let enables = engine_list(
+                old_engine_list(&supported, &available),
+                &description,
+                &supported,
+                &available,
+                leg,
+            )
+            .unwrap_or_else(|error| panic!("{stem} {leg:?}: {error}"));
+            assert_eq!(enables.version, version, "{stem}");
+            assert!(enables.unmet_robustness.is_empty(), "{stem} {leg:?}");
+            let set = enabled_set(&enables);
+            let mut expected = description.recommended_enables(&DevicePolicy::default());
+            expected.features.retain(|&feature| {
+                !excluded(feature)
+                    && (leg == Leg::Stated || !ROBUSTNESS_FEATURES.contains(&feature))
+            });
+            assert_eq!(set, expected, "{stem} {leg:?}");
+            let opened = opened_description(description.clone(), &set)
+                .unwrap_or_else(|error| panic!("{stem} {leg:?}: {error}"));
+            Device::new(opened, DevicePolicy::default())
+                .unwrap_or_else(|error| panic!("{stem} {leg:?}: {error}"));
+            for structure in enables.linked.iter().filter(|s| s.core_at(version)) {
+                assert!(
+                    structure
+                        .extensions()
+                        .iter()
+                        .all(|name| !enables.extensions.contains(name)),
+                    "{stem} {leg:?} {structure:?}"
+                );
+            }
+        }
+    }
+    assert_eq!(
+        at_1_2,
+        ["lunarg-desktop-baseline-2023", "vk12-bare", "vk12-floor"]
+    );
+}
+
+/// A fake Vulkan instance for the cross-check of the executor's feature structures against the
+/// product's ([`the_executor_reads_and_enables_each_promoted_feature_where_the_product_reads_it`]):
+/// a `vkGetInstanceProcAddr` whose physical-device entry points answer for one device, of
+/// [`fake::Device::api_version`] listing [`fake::Device::extensions`], and record the type of
+/// every structure chained onto `vkGetPhysicalDeviceFeatures2`. No loader, ICD, or device.
+mod fake {
+    use ash::vk;
+    use std::cell::RefCell;
+    use std::ffi::{c_char, CStr, CString};
+
+    #[derive(Default)]
+    pub(super) struct Device {
+        pub(super) api_version: u32,
+        pub(super) extensions: Vec<CString>,
+        pub(super) chained: Vec<vk::StructureType>,
+    }
+
+    thread_local! {
+        pub(super) static DEVICE: RefCell<Device> = RefCell::new(Device::default());
+    }
+
+    unsafe extern "system" fn properties(
+        _: vk::PhysicalDevice,
+        out: *mut vk::PhysicalDeviceProperties,
+    ) {
+        let api_version = DEVICE.with(|device| device.borrow().api_version);
+        // SAFETY: the caller hands a writable structure.
+        unsafe {
+            out.write(vk::PhysicalDeviceProperties {
+                api_version,
+                ..Default::default()
+            })
+        };
+    }
+
+    unsafe extern "system" fn properties2(
+        _: vk::PhysicalDevice,
+        out: *mut vk::PhysicalDeviceProperties2<'_>,
+    ) {
+        let api_version = DEVICE.with(|device| device.borrow().api_version);
+        // SAFETY: the caller hands a writable structure; its chain is left as handed.
+        unsafe { (*out).properties.api_version = api_version };
+    }
+
+    unsafe extern "system" fn features2(
+        _: vk::PhysicalDevice,
+        out: *mut vk::PhysicalDeviceFeatures2<'_>,
+    ) {
+        // SAFETY: every chained structure begins with `sType` and `pNext`.
+        let mut next = unsafe { (*out).p_next }.cast::<vk::BaseOutStructure<'_>>();
+        while !next.is_null() {
+            // SAFETY: as above.
+            let ty = unsafe { (*next).s_type };
+            DEVICE.with(|device| device.borrow_mut().chained.push(ty));
+            // SAFETY: as above.
+            next = unsafe { (*next).p_next };
+        }
+    }
+
+    unsafe extern "system" fn extensions(
+        _: vk::PhysicalDevice,
+        _: *const c_char,
+        count: *mut u32,
+        out: *mut vk::ExtensionProperties,
+    ) -> vk::Result {
+        DEVICE.with(|device| {
+            let names = &device.borrow().extensions;
+            if out.is_null() {
+                // SAFETY: the caller hands a writable count.
+                unsafe { *count = names.len() as u32 };
+                return vk::Result::SUCCESS;
+            }
+            // SAFETY: as above, and `out` holds `*count` entries.
+            let written = (unsafe { *count } as usize).min(names.len());
+            for (i, name) in names.iter().take(written).enumerate() {
+                let mut entry = vk::ExtensionProperties::default();
+                for (dst, &src) in entry
+                    .extension_name
+                    .iter_mut()
+                    .zip(name.to_bytes_with_nul())
+                {
+                    *dst = src as c_char;
+                }
+                // SAFETY: as above.
+                unsafe { out.add(i).write(entry) };
+            }
+            // SAFETY: as above.
+            unsafe { *count = written as u32 };
+            if written < names.len() {
+                vk::Result::INCOMPLETE
+            } else {
+                vk::Result::SUCCESS
+            }
+        })
+    }
+
+    unsafe extern "system" fn format_properties(
+        _: vk::PhysicalDevice,
+        _: vk::Format,
+        out: *mut vk::FormatProperties,
+    ) {
+        // SAFETY: the caller hands a writable structure.
+        unsafe { out.write(vk::FormatProperties::default()) };
+    }
+
+    unsafe extern "system" fn format_properties2(
+        _: vk::PhysicalDevice,
+        _: vk::Format,
+        out: *mut vk::FormatProperties2<'_>,
+    ) {
+        // SAFETY: the caller hands a writable structure; its chain is left as handed.
+        unsafe { (*out).format_properties = vk::FormatProperties::default() };
+    }
+
+    pub(super) unsafe extern "system" fn get_instance_proc_addr(
+        _: vk::Instance,
+        name: *const c_char,
+    ) -> vk::PFN_vkVoidFunction {
+        // SAFETY (every arm): `name` is a NUL-terminated entry point name, and the loader casts
+        // the pointer back to the named entry point's type, which is the returned function's.
+        unsafe {
+            match CStr::from_ptr(name).to_bytes() {
+                b"vkGetPhysicalDeviceProperties" => Some(std::mem::transmute::<
+                    vk::PFN_vkGetPhysicalDeviceProperties,
+                    unsafe extern "system" fn(),
+                >(properties)),
+                b"vkGetPhysicalDeviceProperties2" => Some(std::mem::transmute::<
+                    vk::PFN_vkGetPhysicalDeviceProperties2,
+                    unsafe extern "system" fn(),
+                >(properties2)),
+                b"vkGetPhysicalDeviceFeatures2" => Some(std::mem::transmute::<
+                    vk::PFN_vkGetPhysicalDeviceFeatures2,
+                    unsafe extern "system" fn(),
+                >(features2)),
+                b"vkEnumerateDeviceExtensionProperties" => Some(std::mem::transmute::<
+                    vk::PFN_vkEnumerateDeviceExtensionProperties,
+                    unsafe extern "system" fn(),
+                >(extensions)),
+                b"vkGetPhysicalDeviceFormatProperties" => Some(std::mem::transmute::<
+                    vk::PFN_vkGetPhysicalDeviceFormatProperties,
+                    unsafe extern "system" fn(),
+                >(format_properties)),
+                b"vkGetPhysicalDeviceFormatProperties2" => {
+                    Some(std::mem::transmute::<
+                        vk::PFN_vkGetPhysicalDeviceFormatProperties2,
+                        unsafe extern "system" fn(),
+                    >(format_properties2))
+                }
+                _ => None,
+            }
+        }
+    }
+}
+
+/// The structure type of each structure a version up to 1.4 promoted.
+fn promoted_structure_type(structure: Structure) -> vk::StructureType {
+    let chain = FeatureChain::default();
+    match structure {
+        Structure::SubgroupSizeControl => chain.subgroup_size_control.s_type,
+        Structure::Demote => chain.demote.s_type,
+        Structure::Terminate => chain.terminate.s_type,
+        Structure::ZeroInitialize => chain.zero_initialize.s_type,
+        Structure::Synchronization2 => chain.synchronization2.s_type,
+        Structure::Maintenance4 => chain.maintenance4.s_type,
+        Structure::ImageRobustness => chain.image_robustness.s_type,
+        Structure::AstcHdr => chain.astc_hdr.s_type,
+        Structure::SubgroupRotate => chain.subgroup_rotate.s_type,
+        Structure::LocalRead => chain.local_read.s_type,
+        Structure::Divisor => chain.divisor.s_type,
+        Structure::Maintenance5 => chain.maintenance5.s_type,
+        Structure::FloatControls2 => chain.float_controls2.s_type,
+        other => panic!("{other:?} is not a promoted structure"),
+    }
+}
+
+/// For each feature the product reads whose structure a later version promoted, the executor's
+/// context queries it, and enables it, through the structure the product's query reads it from, at
+/// Vulkan 1.2, 1.3, and 1.4: the structure itself through its extension at 1.2,
+/// `VkPhysicalDeviceVulkan13Features` for 1.3's from 1.3, and 1.4's own structures at 1.4. Both
+/// queries run against one fake instance this test owns, which records the structures chained; the
+/// enabled chain is read from the create info the executor hands its device's creation. And each
+/// member `VkPhysicalDeviceVulkan13Features` carries reaches the device and comes back as itself
+/// alone.
+#[test]
+fn the_executor_reads_and_enables_each_promoted_feature_where_the_product_reads_it() {
+    use ash::vk::Handle;
+    let promoted: Vec<Structure> = Structure::EXTENSIONS
+        .into_iter()
+        .filter(|structure| structure.core_since().is_some())
+        .filter(|structure| {
+            MEMBERS
+                .iter()
+                .any(|member| member.structure == *structure && member.feature.is_some())
+        })
+        .collect();
+    // Raw structure types: ash's types print only with its `debug` feature.
+    let v13 = FeatureChain::default().v13.s_type.as_raw();
+    let watched: BTreeSet<i32> = promoted
+        .iter()
+        .map(|structure| promoted_structure_type(*structure).as_raw())
+        .chain([v13])
+        .collect();
+    let names: Vec<CString> = every_structure()
+        .flat_map(|structure| structure.extensions().iter().chain(structure.requires()))
+        .map(|name| (*name).to_owned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let static_fn = ash::StaticFn {
+        get_instance_proc_addr: fake::get_instance_proc_addr,
+    };
+    // SAFETY: the fake table answers every entry point either query calls.
+    let instance = unsafe { ash::Instance::load(&static_fn, vk::Instance::from_raw(1)) };
+    let physical = vk::PhysicalDevice::from_raw(1);
+    let chained = || -> BTreeSet<i32> {
+        fake::DEVICE.with(|device| {
+            device
+                .borrow_mut()
+                .chained
+                .drain(..)
+                .map(|ty| ty.as_raw())
+                .filter(|ty| watched.contains(ty))
+                .collect()
+        })
+    };
+    for version in [ApiVersion::V1_2, ApiVersion::V1_3, V1_4] {
+        fake::DEVICE.with(|device| {
+            let mut device = device.borrow_mut();
+            device.api_version = vk::make_api_version(0, version.major, version.minor, 0);
+            device.extensions = names.clone();
+            device.chained.clear();
+        });
+        // SAFETY: the fake device answers for any handle.
+        let _ = unsafe { DeviceDescription::query(&instance, physical, version) };
+        let product = chained();
+        assert_eq!(
+            product.contains(&v13),
+            version >= ApiVersion::V1_3,
+            "{version:?}"
+        );
+        let available = Available::at(version, names.iter().cloned());
+        // SAFETY: as above.
+        let supported = unsafe { FeatureChain::query(&instance, physical, &available) };
+        assert_eq!(chained(), product, "the query at {version:?}");
+        let linked: BTreeSet<Structure> = promoted.iter().copied().collect();
+        let mut chain = supported;
+        let enabled = chain.with_create_info(&[], &[], &linked, version, |info| {
+            let mut types = BTreeSet::new();
+            let mut next = info.p_next.cast::<vk::BaseInStructure<'_>>();
+            while !next.is_null() {
+                // SAFETY: every chained structure begins with `sType` and `pNext`.
+                let ty = unsafe { (*next).s_type }.as_raw();
+                if watched.contains(&ty) {
+                    types.insert(ty);
+                }
+                // SAFETY: as above.
+                next = unsafe { (*next).p_next };
+            }
+            types
+        });
+        assert_eq!(enabled, product, "the enabled chain at {version:?}");
+    }
+
+    let carried: Vec<&Member> = MEMBERS
+        .iter()
+        .filter(|member| member.structure.in_vulkan13())
+        .collect();
+    let all: BTreeSet<Structure> = carried.iter().map(|member| member.structure).collect();
+    for member in &carried {
+        let mut chain = FeatureChain::default();
+        member.set(&mut chain);
+        let mut back = FeatureChain {
+            v13: chain.gather_v13(&all),
+            ..FeatureChain::default()
+        };
+        back.spread_v13();
+        for other in &carried {
+            assert_eq!(
+                other.is_set(&back),
+                std::ptr::eq(*other, *member),
+                "{:?} through {:?}",
+                other.structure,
+                member.structure
+            );
+        }
+    }
+}
+
+/// A context records the extended dynamic states exactly where the product reads the functionality
+/// as present: through Vulkan 1.3's core commands from 1.3, where it is core without a feature and
+/// a profile need not list the extension, and below 1.3 through `VK_EXT_extended_dynamic_state`'s
+/// where the context enabled it.
+#[test]
+fn a_context_has_the_extended_dynamic_states_where_the_product_reads_them() {
+    let feature = VkFeature::ExtendedDynamicState;
+    for version in [ApiVersion::V1_2, ApiVersion::V1_3, V1_4] {
+        for enabled in [false, true] {
+            let extensions = if enabled {
+                BTreeSet::from([VkExtension::ExtExtendedDynamicState])
+            } else {
+                BTreeSet::new()
+            };
+            let commands = dynamic_state_commands(version, enabled);
+            assert_eq!(
+                commands.is_some(),
+                feature.exposure().exposed(version, &extensions),
+                "{version:?} {enabled}"
+            );
+            assert_eq!(
+                commands == Some(DynamicStateCommands::Core),
+                !feature.exposure().has_member(version),
+                "{version:?} {enabled}"
+            );
+        }
+    }
+}
+
+/// The runtime probe's context enables each extension it measures exactly where the device lists
+/// it, with `VK_KHR_image_format_list` beside the modifier extension only below Vulkan 1.2, where
+/// that requirement is not core.
+#[test]
+fn the_runtime_probe_enables_what_it_measures_where_listed() {
+    let host = ash::ext::external_memory_host::NAME;
+    let modifier = ash::ext::image_drm_format_modifier::NAME;
+    let format_list = ash::khr::image_format_list::NAME;
+    let v1_1 = ApiVersion { major: 1, minor: 1 };
+    for version in [v1_1, ApiVersion::V1_2, ApiVersion::V1_3] {
+        for listed in [
+            vec![],
+            vec![host],
+            vec![modifier],
+            vec![modifier, format_list],
+            vec![host, modifier, format_list],
+        ] {
+            let available = Available::at(version, listed.iter().map(|name| (*name).to_owned()));
+            let mut enables = Enables::new(version);
+            let before = enables.extensions.clone();
+            let enabled = enable_runtime_probe(&mut enables, &available);
+            let below_1_2 = version < ApiVersion::V1_2;
+            let expect_modifier =
+                listed.contains(&modifier) && (!below_1_2 || listed.contains(&format_list));
+            assert_eq!(enabled.external_memory_host, listed.contains(&host));
+            assert_eq!(enabled.drm_format_modifier, expect_modifier);
+            let mut expected = before;
+            if enabled.external_memory_host {
+                expected.insert(host);
+            }
+            if expect_modifier {
+                expected.insert(modifier);
+                if below_1_2 {
+                    expected.insert(format_list);
+                }
+            }
+            assert_eq!(enables.extensions, expected, "{version:?} {listed:?}");
+        }
+    }
+}
+
+/// What a context enables, as `vkCreateDevice` receives it: the API version, the structures
+/// chained, every member set in a chained structure (by its structure and field), the extension
+/// names, and the robustness features left unmet. One line each, for [`OPENED_CHAINS`].
+fn chain_lines(enables: &Enables) -> Vec<String> {
+    let mut lines = vec![format!("  version {:?}", enables.version)];
+    lines.extend(
+        enables
+            .linked
+            .iter()
+            .map(|structure| format!("  linked {structure:?}")),
+    );
+    lines.extend(
+        MEMBERS
+            .iter()
+            .filter(|member| enabled(enables, member))
+            .map(|member| format!("  member {:?}.{}", member.structure, member.name)),
+    );
+    lines.extend(
+        enables
+            .extensions
+            .iter()
+            .map(|name| format!("  extension {}", name.to_string_lossy())),
+    );
+    lines.extend(
+        enables
+            .unmet_robustness
+            .iter()
+            .map(|feature| format!("  unmet {feature:?}")),
+    );
+    lines
+}
+
+/// Every committed profile's context, in each leg, with the generated-commands extension where
+/// the profile lists it: at API 1.2 as a device context queries it, and at the profile's own
+/// version as a restricted context opens it. Each is named `<stem> <kind> <leg>` and given with
+/// its [`chain_lines`].
+fn opened_chains() -> Vec<(String, Vec<String>)> {
+    use super::super::profiles::ProfileRestriction;
+    let mut out = Vec::new();
+    for stem in committed_profiles().unwrap() {
+        let restriction = ProfileRestriction::committed(&stem).unwrap();
+        let version = restriction.context_version();
+        let contexts = [
+            (
+                "device",
+                at_1_2(load_description(&stem).unwrap()),
+                ApiVersion::V1_2,
+            ),
+            ("restricted", restriction.read_at(version), version),
+        ];
+        for (kind, description, version) in contexts {
+            let supported = supported_by(&description);
+            let available = listed_at(version, &description);
+            for leg in [Leg::Stated, Leg::RobustnessOff] {
+                let mut enables = engine_list(
+                    old_engine_list(&supported, &available),
+                    &description,
+                    &supported,
+                    &available,
+                    leg,
+                )
+                .unwrap_or_else(|error| panic!("{stem} {kind} {leg:?}: {error}"));
+                enable_generated_commands(&mut enables, &supported, &available);
+                out.push((format!("{stem} {kind} {leg:?}"), chain_lines(&enables)));
+            }
+        }
+    }
+    out
+}
+
+/// One line of [`OPENED_CHAINS`]: a context's name, the SHA-256 of its [`chain_lines`] (each
+/// ending in a newline), and how many members and extensions it enables.
+fn pinned_line(name: &str, lines: &[String]) -> String {
+    let text = lines
+        .iter()
+        .map(|line| format!("{line}\n"))
+        .collect::<String>();
+    let count = |prefix: &str| lines.iter().filter(|line| line.starts_with(prefix)).count();
+    format!(
+        "{name} {} members={} extensions={}",
+        crate::hash::sha256_bytes(text.as_bytes()),
+        count("  member "),
+        count("  extension ")
+    )
+}
+
+/// The pinned [`opened_chains`], written by [`bless_opened_chains`].
+const OPENED_CHAINS: &str = "src/candidate/platform/enables/opened_chains.txt";
+
+/// What every committed profile's context enables is pinned, chain by chain: a change to the enable
+/// lists, or to the tables that name what they enable, that moves one bit of a context's chain or
+/// one extension name fails here, printing that context's chain as it is now. The opened profile,
+/// and so every row's translator fingerprint, derives from that chain. Bless with `cargo nextest
+/// run -p metal2vulkan-validation --run-ignored ignored-only -E 'test(bless_opened_chains)'`.
+#[test]
+fn every_committed_profiles_context_enables_its_pinned_chain() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(OPENED_CHAINS);
+    let pinned = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
+    let pinned = pinned.lines().collect::<Vec<_>>();
+    let chains = opened_chains();
+    let moved = chains
+        .iter()
+        .filter(|(name, lines)| !pinned.contains(&pinned_line(name, lines).as_str()))
+        .map(|(name, lines)| format!("{name}:\n{}", lines.join("\n")))
+        .collect::<Vec<_>>();
+    assert!(
+        moved.is_empty(),
+        "{OPENED_CHAINS}: {} contexts enable another chain than pinned (bless_opened_chains):\n{}",
+        moved.len(),
+        moved.join("\n")
+    );
+    assert_eq!(
+        pinned.len(),
+        chains.len(),
+        "{OPENED_CHAINS}: contexts pinned and now"
+    );
+}
+
+/// Rewrite [`OPENED_CHAINS`].
+#[test]
+#[ignore]
+fn bless_opened_chains() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(OPENED_CHAINS);
+    let text = opened_chains()
+        .iter()
+        .map(|(name, lines)| format!("{}\n", pinned_line(name, lines)))
+        .collect::<String>();
+    std::fs::write(&path, text).unwrap_or_else(|e| panic!("{path:?}: {e}"));
+}

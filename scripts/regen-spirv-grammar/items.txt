@@ -1,0 +1,137 @@
+# The SPIR-V grammar items the translator names: generate.py emits these into
+# crates/metal2vulkan/src/spv.rs and nothing else. A value the code names that is missing here
+# fails to build; a value listed here that nothing uses is dead code, which rustc reports where it
+# can see it (not for a type the crate's public impls reach, such as `Op` through `BuildError`).
+# Values only test code names go in test-values, so the library build has none of them.
+#
+#   type Word | const MAGIC_NUMBER   the word type; the module header's first word
+#   enum <Kind> [test]               an operand kind of the core grammar by its grammar name (a
+#                                    mask for a BitEnum kind), `Op` for the core instructions or
+#                                    `GlslStd450Op` for GLSL.std.450's; `test`: in test builds only
+#   from_u32 [test]                  the kind's word-to-value conversion (it needs every value)
+#   values <Name>... | *             values every build has, by their Rust names (generate.py's
+#                                    variant_name and const_name); `*`: all not named yet
+#   test-values <Name>... | *        values only test builds have
+
+type Word test
+const MAGIC_NUMBER
+
+enum Op
+from_u32 test
+values Nop Undef Extension ExtInstImport ExtInst MemoryModel EntryPoint ExecutionMode Capability
+values TypeVoid TypeBool TypeInt TypeFloat TypeVector TypeMatrix TypeImage TypeSampler
+values TypeSampledImage TypeArray TypeRuntimeArray TypeStruct TypePointer TypeFunction ConstantTrue
+values ConstantFalse Constant ConstantComposite ConstantNull SpecConstantTrue SpecConstantFalse
+values SpecConstant SpecConstantComposite SpecConstantOperation Function FunctionParameter FunctionEnd
+values FunctionCall Variable ImageTexelPointer Load Store AccessChain ArrayLength Decorate
+values MemberDecorate VectorExtractDynamic VectorInsertDynamic VectorShuffle CompositeConstruct
+values CompositeExtract CompositeInsert CopyObject SampledImage ImageSampleImplicitLod
+values ImageSampleExplicitLod ImageSampleDrefImplicitLod ImageSampleDrefExplicitLod
+values ImageSampleProjImplicitLod ImageSampleProjExplicitLod ImageSampleProjDrefImplicitLod
+values ImageSampleProjDrefExplicitLod ImageFetch ImageGather ImageDrefGather ImageRead ImageWrite
+values Image ImageQuerySizeLod ImageQuerySize ImageQueryLod ImageQueryLevels ImageQuerySamples
+values ConvertFToU ConvertFToS ConvertSToF ConvertUToF UConvert SConvert FConvert QuantizeToF16
+values ConvertUToPtr Bitcast SNegate FNegate IAdd FAdd ISub FSub IMul FMul UDiv SDiv FDiv UMod SRem
+values SMod FRem VectorTimesScalar Dot IAddCarry ISubBorrow UMulExtended SMulExtended Any All IsNan
+values IsInf LogicalEqual LogicalNotEqual LogicalOr LogicalAnd LogicalNot Select IEqual INotEqual
+values UGreaterThan SGreaterThan UGreaterThanEqual SGreaterThanEqual ULessThan SLessThan
+values ULessThanEqual SLessThanEqual FOrdEqual FUnordEqual FOrdNotEqual FUnordNotEqual FOrdLessThan
+values FUnordLessThan FOrdGreaterThan FUnordGreaterThan FOrdLessThanEqual FUnordLessThanEqual
+values FOrdGreaterThanEqual FUnordGreaterThanEqual ShiftRightLogical ShiftRightArithmetic
+values ShiftLeftLogical BitwiseOr BitwiseXor BitwiseAnd Not BitFieldInsert BitFieldSExtract
+values BitFieldUExtract BitReverse BitCount DPdx DPdy Fwidth DPdxFine DPdyFine FwidthFine
+values ControlBarrier MemoryBarrier AtomicLoad AtomicStore AtomicExchange AtomicCompareExchange
+values AtomicIAdd AtomicISub AtomicSMin AtomicUMin AtomicSMax AtomicUMax AtomicAnd AtomicOr
+values AtomicXor Phi LoopMerge SelectionMerge Label Branch BranchConditional Switch Kill Return
+values ReturnValue Unreachable ImageSparseSampleImplicitLod ImageSparseSampleExplicitLod
+values ImageSparseSampleDrefImplicitLod ImageSparseSampleDrefExplicitLod ImageSparseFetch
+values ImageSparseGather ImageSparseDrefGather ImageSparseTexelsResident ImageSparseRead
+values GroupNonUniformElect GroupNonUniformAll GroupNonUniformAny GroupNonUniformBroadcastFirst
+values GroupNonUniformBallot GroupNonUniformBallotBitExtract GroupNonUniformShuffle
+values GroupNonUniformShuffleXor GroupNonUniformIAdd GroupNonUniformFAdd GroupNonUniformIMul
+values GroupNonUniformFMul GroupNonUniformSMin GroupNonUniformUMin GroupNonUniformFMin
+values GroupNonUniformSMax GroupNonUniformUMax GroupNonUniformFMax GroupNonUniformBitwiseAnd
+values GroupNonUniformBitwiseOr GroupNonUniformBitwiseXor GroupNonUniformLogicalAnd
+values GroupNonUniformLogicalOr GroupNonUniformLogicalXor GroupNonUniformQuadBroadcast
+values GroupNonUniformQuadSwap TerminateInvocation FmaKHR TypeRayQueryKHR RayQueryInitializeKHR
+values RayQueryConfirmIntersectionKHR RayQueryProceedKHR RayQueryGetIntersectionTypeKHR
+values EmitMeshTasksEXT SetMeshOutputsEXT TypeAccelerationStructureKHR BeginInvocationInterlockEXT
+values EndInvocationInterlockEXT DemoteToHelperInvocation IsHelperInvocationEXT
+values RayQueryGetIntersectionTKHR RayQueryGetIntersectionInstanceCustomIndexKHR
+values RayQueryGetIntersectionInstanceIdKHR
+values RayQueryGetIntersectionInstanceShaderBindingTableRecordOffsetKHR
+values RayQueryGetIntersectionGeometryIndexKHR RayQueryGetIntersectionPrimitiveIndexKHR
+values RayQueryGetIntersectionBarycentricsKHR RayQueryGetIntersectionFrontFaceKHR
+values RayQueryGetIntersectionObjectToWorldKHR RayQueryGetIntersectionWorldToObjectKHR
+values AtomicFAddEXT
+test-values *
+
+enum Capability
+from_u32
+values *
+
+enum ExecutionModel
+from_u32 test
+values Vertex TessellationControl TessellationEvaluation Fragment GLCompute TaskEXT MeshEXT
+test-values *
+
+enum AddressingModel
+values Logical PhysicalStorageBuffer64
+
+enum MemoryModel
+values GLSL450 Vulkan
+
+enum ExecutionMode
+values SpacingEqual SpacingFractionalEven SpacingFractionalOdd VertexOrderCw VertexOrderCcw
+values OriginUpperLeft EarlyFragmentTests DepthReplacing DepthGreater DepthLess LocalSize Triangles
+values Quads OutputVertices OutputPoints SubgroupUniformControlFlowKHR SignedZeroInfNanPreserve
+values StencilRefReplacingEXT RequireFullQuadsKHR OutputLinesEXT OutputPrimitivesEXT
+values DerivativeGroupLinearKHR OutputTrianglesEXT PixelInterlockOrderedEXT
+values SampleInterlockOrderedEXT MaximallyReconvergesKHR
+test-values ContractionOff RoundingModeRTE FPFastMathDefault
+
+enum StorageClass
+values UniformConstant Input Uniform Output Workgroup Private Function PushConstant Image
+values StorageBuffer PhysicalStorageBuffer TaskPayloadWorkgroupEXT
+
+enum Dim
+values D1 D2 D3 Cube Buffer SubpassData
+
+enum ImageFormat
+values *
+
+enum Decoration
+values SpecId Block ColMajor ArrayStride MatrixStride BuiltIn NoPerspective Flat Patch Centroid
+values Sample Invariant Aliased Volatile Coherent NonWritable Location Component Index Binding
+values DescriptorSet Offset NoContraction InputAttachmentIndex PerPrimitiveEXT NonUniform
+values AliasedPointer
+test-values FPFastMathMode
+
+enum BuiltIn
+values Position PointSize ClipDistance PrimitiveId Layer ViewportIndex TessLevelOuter
+values TessLevelInner TessCoord FragCoord PointCoord FrontFacing SampleId SampleMask FragDepth
+values HelperInvocation NumWorkgroups WorkgroupSize WorkgroupId LocalInvocationId
+values GlobalInvocationId LocalInvocationIndex SubgroupSize SubgroupId SubgroupLocalInvocationId
+values VertexIndex InstanceIndex BaseVertex BaseInstance ViewIndex FragStencilRefEXT BaryCoordKHR
+values BaryCoordNoPerspKHR PrimitivePointIndicesEXT PrimitiveLineIndicesEXT
+values PrimitiveTriangleIndicesEXT CullPrimitiveEXT CullDistance SamplePosition NumSubgroups
+values DrawIndex InvocationId PatchVertices
+test-values WorkDim
+
+enum Scope
+values Device Workgroup Subgroup Invocation
+
+enum GroupOperation
+values Reduce InclusiveScan ExclusiveScan ClusteredReduce
+
+enum FPFastMathMode test
+values NOT_NAN NOT_INF NSZ ALLOW_RECIP ALLOW_REASSOC ALLOW_CONTRACT
+
+enum GlslStd450Op
+values Round RoundEven Trunc FAbs SAbs FSign SSign Floor Ceil Fract Radians Degrees Sin Cos Tan
+values Asin Acos Atan Sinh Cosh Tanh Asinh Acosh Atanh Atan2 Pow Exp Log Exp2 Log2 Sqrt InverseSqrt
+values Determinant MatrixInverse ModfStruct FMin UMin SMin FMax UMax SMax FClamp UClamp SClamp FMix
+values Step SmoothStep Fma FrexpStruct Ldexp PackSnorm4x8 PackUnorm4x8 PackSnorm2x16 PackUnorm2x16
+values PackHalf2x16 UnpackSnorm2x16 UnpackUnorm2x16 UnpackHalf2x16 UnpackSnorm4x8 UnpackUnorm4x8
+values Length Distance Cross Normalize FaceForward Reflect Refract FindILsb FindSMsb FindUMsb
+values InterpolateAtCentroid InterpolateAtSample InterpolateAtOffset NMin NMax NClamp

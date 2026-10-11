@@ -1,79 +1,41 @@
 [workspace]
-members = ["validation"]
+members = [
+    "crates/metal2vulkan",
+    "crates/metal2vulkan-air",
+    "crates/metal2vulkan-devtools",
+    "crates/metal2vulkan-runtime",
+    "crates/metal2vulkan-validation",
+]
+# A bare `cargo build`, `cargo test` or `cargo run` at the root acts on the translator alone, as it
+# did when the translator's package was this manifest; `--workspace` or `-p` selects the others.
+default-members = ["crates/metal2vulkan"]
 resolver = "2"
 
-[package]
-name = "metal2vulkan"
-version = "0.1.0"
+# What every crate here shares. The translator's source fingerprint hashes this manifest beside its
+# own, because the translator inherits from it (`build_support.rs`).
+[workspace.package]
 edition = "2021"
-rust-version = "1.87"
-license = "LGPL-3.0-or-later"
+rust-version = "1.98"
+license = "GPL-2.0-or-later OR LGPL-3.0-or-later"
 authors = ["Anees Iqbal <hello@aneesiqbal.ai>"]
-description = "Translate Metal AIR / LLVM IR to Vulkan SPIR-V with a native Rust emitter"
-readme = "README.md"
 repository = "https://github.com/steelbrain/metal2vulkan"
 homepage = "https://github.com/steelbrain/metal2vulkan"
-documentation = "https://docs.rs/metal2vulkan"
-keywords = ["metal", "air", "spir-v", "vulkan", "gpu"]
-categories = ["compilers", "graphics", "encoding"]
-# crates.io ships only this product crate (lib + bin + unit/integration tests under
-# src/ and tests/). Workspace member `validation/`, private harvest/corpus, scripts,
-# and docs stay out of the published tarball.
-exclude = [
-    "/.github/",
-    "/docs/",
-    "/scripts/",
-    "/validation/",
-    "/validation/**",
-    "/target/",
-    "Cargo.lock",
-    "tests/fixtures/",
-    "m2v-old",
-    "**/*.air",
-    "**/*.metallib",
-    "**/*.mtlb",
-    "**/*.spv",
-    "**/*.spvasm",
-]
 
-[[bin]]
-name = "metal2vulkan"
-path = "src/main.rs"
-required-features = []
-
-[[example]]
-name = "translate_reflected"
-path = "examples/translate_reflected.rs"
-required-features = ["serde"]
-
-[lib]
-name = "metal2vulkan"
-path = "src/lib.rs"
-
-[dependencies]
-# Grammar-derived SPIR-V enums at the locked 1.4.341 revision.
-spirv = "0.4.0"
-# Bound every external-tool spawn (llvm-dis / spirv-val / …) so a stuck tool cannot hang us.
-wait-timeout = "0.2"
-# Optional: persistable ShaderReflection + CLI `--emit-meta` JSON.
-serde = { version = "1", features = ["derive"], optional = true }
-serde_json = { version = "1", optional = true }
-
-[features]
-default = []
-# Derive Serialize/Deserialize on public reflection types and enable the CLI `--emit-meta` dump.
-serde = ["dep:serde", "dep:serde_json"]
-
-[dev-dependencies]
+# The external dependencies more than one crate takes, at one version each. A crate adds its own
+# features (and `optional`). The crates' dependencies on one another stay in their own manifests,
+# by path and version: the translator pins the AIR front end exactly (`=0.x.y`), and its build
+# script reads that path from its own manifest.
+[workspace.dependencies]
+# Never the loader at build time: a crate that opens it adds `loaded`.
+ash = { version = "0.38", default-features = false }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-
-[package.metadata.docs.rs]
-all-features = true
-rustdoc-args = ["--cfg", "docsrs"]
+sha2 = "0.10"
 
 # Cargo's default release profile turns incremental compilation OFF, which means every rebuild of
-# this crate is a full rebuild of all ~262k lines of it. That is the whole cost: measured on an idle
-# machine, a one-line source edit cost 24.97s to rebuild without incremental and 1.67s with it.
+# the translator is a full rebuild of all ~262k lines of it. That is the whole cost: measured on an
+# idle machine, a one-line source edit cost 24.97s to rebuild without incremental and 1.67s with it.
 #
 # It buys that back for nothing measurable. A cold build is unchanged (23.4s incremental vs 24.0s
 # not), and translation throughput is unchanged: 300 corpus modules translated four times each took
@@ -81,6 +43,18 @@ rustdoc-args = ["--cfg", "docsrs"]
 # per-translation contract in AGENTS.md is unaffected.
 #
 # Profile settings only apply to builds whose workspace root this is, so this changes how the repo
-# builds itself and nothing about how a consumer builds the published crate.
+# builds itself and nothing about how a consumer builds the published crates.
 [profile.release]
 incremental = true
+
+# Dev and test builds keep line tables (file and line in backtraces) and no other debug info, and
+# dependencies none. Full debug info made each link of a binary holding the translator, the runtime
+# and validation take 35-47 s; on an i9-13900 (EV BLD-base1) the clean workspace build's links
+# summed to 726 s against 94 s with this, and its target to half the size. A debugger session that
+# needs variables builds with CARGO_PROFILE_DEV_DEBUG=full. Like the release profile above, this
+# changes only how the repo builds itself.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

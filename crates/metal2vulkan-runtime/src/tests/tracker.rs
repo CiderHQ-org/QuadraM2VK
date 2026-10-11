@@ -1,0 +1,1373 @@
+//! The hazard tracker (`tracker.rs`): every read and write order, tracked and untracked
+//! resources, byte ranges and image subresources, fences, retirement, the order across
+//! `VkQueue`s, and the legacy masks.
+
+use crate::tracker::{
+    ordered, Access, Barrier, EncoderUses, Footprint, LegacyBarrier, Point, Summary, Tracker, Use,
+    UseRange, Wait, ENTRIES_PER_KEY,
+};
+use ash::vk;
+use std::ops::Range;
+
+type Key = u64;
+
+const COMPUTE: vk::PipelineStageFlags2 = vk::PipelineStageFlags2::COMPUTE_SHADER;
+const TRANSFER: vk::PipelineStageFlags2 = vk::PipelineStageFlags2::TRANSFER;
+const FRAGMENT: vk::PipelineStageFlags2 = vk::PipelineStageFlags2::FRAGMENT_SHADER;
+const NO_ACCESS: vk::AccessFlags2 = vk::AccessFlags2::NONE;
+
+fn shader_read() -> Access {
+    Access::new(COMPUTE, vk::AccessFlags2::SHADER_STORAGE_READ)
+}
+
+fn shader_write() -> Access {
+    Access::new(COMPUTE, vk::AccessFlags2::SHADER_STORAGE_WRITE)
+}
+
+fn copy_read() -> Access {
+    Access::new(TRANSFER, vk::AccessFlags2::TRANSFER_READ)
+}
+
+fn copy_write() -> Access {
+    Access::new(TRANSFER, vk::AccessFlags2::TRANSFER_WRITE)
+}
+
+fn bytes(range: Range<u64>) -> UseRange {
+    UseRange::Bytes(range)
+}
+
+fn image(aspects: vk::ImageAspectFlags, levels: Range<u32>, layers: Range<u32>) -> UseRange {
+    UseRange::Image {
+        aspects,
+        levels,
+        layers,
+    }
+}
+
+fn reads(key: Key, range: UseRange, access: Access) -> Use<Key> {
+    Use::reads(key, true, range, access)
+}
+
+fn writes(key: Key, range: UseRange, access: Access) -> Use<Key> {
+    Use::writes(key, true, range, access)
+}
+
+fn barrier(src: Access, dst: Access) -> Option<Barrier> {
+    Some(Barrier { src, dst })
+}
+
+/// An ordered encoder with one command per entry of `commands`.
+fn encoder(commands: &[&[Use<Key>]]) -> Summary<Key> {
+    let mut uses = EncoderUses::new(true);
+    for command in commands {
+        let barrier = uses.barrier(command);
+        uses.record(vk::PipelineStageFlags2::NONE, command, barrier);
+    }
+    uses.finish()
+}
+
+/// An encoder of one command.
+fn one(command: &[Use<Key>]) -> Summary<Key> {
+    encoder(&[command])
+}
+
+/// The batch of `VkQueue` 0 at timeline value `value`.
+fn at(value: u64) -> Point {
+    Point { queue: 0, value }
+}
+
+/// The batch of `VkQueue` `queue` at timeline value `value`.
+fn on(queue: usize, value: u64) -> Point {
+    Point { queue, value }
+}
+
+/// Submit a batch of `encoders` at `point`: the barriers before each, and the batch's waits.
+fn submit(
+    queue: &mut Tracker<Key>,
+    encoders: &[Summary<Key>],
+    point: Point,
+) -> (Vec<Option<Barrier>>, Vec<Wait>) {
+    let plan = queue.plan(encoders, point);
+    let barriers = plan.barriers().to_vec();
+    let waits = plan.waits().to_vec();
+    queue.apply(plan);
+    (barriers, waits)
+}
+
+/// Submit a batch of `encoders` on `VkQueue` 0 at `value`: the barriers before each. A batch on
+/// one queue never waits.
+fn commit(queue: &mut Tracker<Key>, encoders: &[Summary<Key>], value: u64) -> Vec<Option<Barrier>> {
+    let (barriers, waits) = submit(queue, encoders, at(value));
+    assert_eq!(waits, []);
+    barriers
+}
+
+/// A wait for `point` before `stages`.
+fn wait(point: Point, stages: vk::PipelineStageFlags2) -> Wait {
+    Wait { at: point, stages }
+}
+
+/// Commit each encoder in its own command buffer: the barrier before each.
+fn commit_each(queue: &mut Tracker<Key>, encoders: &[Summary<Key>]) -> Vec<Option<Barrier>> {
+    (0..)
+        .zip(encoders)
+        .map(|(serial, summary)| commit(queue, std::slice::from_ref(summary), serial + 1)[0])
+        .collect()
+}
+
+#[test]
+fn a_read_after_a_write_waits_for_the_write() {
+    let mut queue = Tracker::default();
+    let got = commit_each(
+        &mut queue,
+        &[
+            one(&[writes(1, bytes(0..256), shader_write())]),
+            one(&[reads(1, bytes(0..256), shader_read())]),
+        ],
+    );
+    assert_eq!(got, [None, barrier(shader_write(), shader_read())]);
+}
+
+#[test]
+fn reads_after_reads_need_nothing() {
+    let mut queue = Tracker::default();
+    let got = commit_each(
+        &mut queue,
+        &[
+            one(&[reads(1, bytes(0..256), shader_read())]),
+            one(&[reads(1, bytes(0..256), copy_read())]),
+            one(&[reads(1, bytes(0..256), shader_read())]),
+        ],
+    );
+    assert_eq!(got, [None, None, None]);
+}
+
+#[test]
+fn a_write_after_reads_waits_for_their_execution() {
+    let mut queue = Tracker::default();
+    let got = commit_each(
+        &mut queue,
+        &[
+            one(&[reads(1, bytes(0..256), copy_read())]),
+            one(&[reads(
+                1,
+                bytes(0..256),
+                Access::new(FRAGMENT, vk::AccessFlags2::SHADER_SAMPLED_READ),
+            )]),
+            one(&[writes(1, bytes(0..256), shader_write())]),
+        ],
+    );
+    // An execution dependency only: no access types on either side.
+    assert_eq!(
+        got,
+        [
+            None,
+            None,
+            barrier(
+                Access::new(TRANSFER | FRAGMENT, NO_ACCESS),
+                Access::new(COMPUTE, NO_ACCESS)
+            )
+        ]
+    );
+}
+
+#[test]
+fn a_write_after_a_write_is_a_memory_dependency() {
+    let mut queue = Tracker::default();
+    let got = commit_each(
+        &mut queue,
+        &[
+            one(&[writes(1, bytes(0..256), copy_write())]),
+            one(&[writes(1, bytes(0..256), shader_write())]),
+        ],
+    );
+    assert_eq!(got, [None, barrier(copy_write(), shader_write())]);
+}
+
+#[test]
+fn a_write_after_a_read_after_a_write_orders_after_both() {
+    let mut queue = Tracker::default();
+    let got = commit_each(
+        &mut queue,
+        &[
+            one(&[writes(1, bytes(0..256), copy_write())]),
+            one(&[reads(1, bytes(0..256), shader_read())]),
+            one(&[writes(1, bytes(0..256), shader_write())]),
+        ],
+    );
+    assert_eq!(got[1], barrier(copy_write(), shader_read()));
+    // The read's execution, and the copy's write: it was made visible to shader reads, not to
+    // shader writes.
+    assert_eq!(
+        got[2],
+        barrier(
+            Access::new(TRANSFER | COMPUTE, vk::AccessFlags2::TRANSFER_WRITE),
+            shader_write()
+        )
+    );
+}
+
+#[test]
+fn a_write_visible_to_a_read_needs_no_second_barrier() {
+    let mut queue = Tracker::default();
+    let got = commit_each(
+        &mut queue,
+        &[
+            one(&[writes(1, bytes(0..256), shader_write())]),
+            one(&[reads(1, bytes(0..256), shader_read())]),
+            one(&[reads(1, bytes(0..256), shader_read())]),
+            one(&[reads(1, bytes(0..64), shader_read())]),
+            // Another stage and access type: not yet visible there.
+            one(&[reads(1, bytes(0..256), copy_read())]),
+            one(&[reads(1, bytes(0..256), copy_read())]),
+        ],
+    );
+    assert_eq!(
+        got,
+        [
+            None,
+            barrier(shader_write(), shader_read()),
+            None,
+            None,
+            barrier(shader_write(), copy_read()),
+            None
+        ]
+    );
+}
+
+#[test]
+fn byte_ranges_order_only_where_they_meet() {
+    let mut queue = Tracker::default();
+    let got = commit_each(
+        &mut queue,
+        &[
+            one(&[writes(1, bytes(0..64), shader_write())]),
+            one(&[reads(1, bytes(64..128), shader_read())]),
+            one(&[writes(1, bytes(128..256), copy_write())]),
+            one(&[reads(1, bytes(32..96), shader_read())]),
+            one(&[writes(1, bytes(96..160), shader_write())]),
+        ],
+    );
+    assert_eq!(
+        got,
+        [
+            None,
+            None,
+            None,
+            barrier(shader_write(), shader_read()),
+            // After the reads of 64..128 and 32..96, and the copy's write of 128..256.
+            barrier(
+                Access::new(COMPUTE | TRANSFER, vk::AccessFlags2::TRANSFER_WRITE),
+                shader_write()
+            ),
+        ]
+    );
+}
+
+#[test]
+fn resources_are_keyed_by_identity() {
+    let mut queue = Tracker::default();
+    let got = commit_each(
+        &mut queue,
+        &[
+            one(&[writes(1, bytes(0..256), shader_write())]),
+            one(&[reads(2, bytes(0..256), shader_read())]),
+            one(&[writes(3, bytes(0..256), shader_write())]),
+            one(&[reads(1, bytes(0..256), shader_read())]),
+        ],
+    );
+    assert_eq!(
+        got,
+        [None, None, None, barrier(shader_write(), shader_read())]
+    );
+}
+
+#[test]
+fn a_covering_write_replaces_the_older_writes() {
+    let mut queue = Tracker::default();
+    let got = commit_each(
+        &mut queue,
+        &[
+            one(&[writes(1, bytes(0..16), copy_write())]),
+            one(&[writes(1, bytes(16..32), copy_write())]),
+            one(&[writes(1, bytes(0..64), shader_write())]),
+            one(&[reads(
+                1,
+                bytes(0..8),
+                Access::new(FRAGMENT, vk::AccessFlags2::SHADER_STORAGE_READ),
+            )]),
+        ],
+    );
+    assert_eq!(got[2], barrier(copy_write(), shader_write()));
+    // Only the covering write is left to order after.
+    assert_eq!(
+        got[3],
+        barrier(
+            shader_write(),
+            Access::new(FRAGMENT, vk::AccessFlags2::SHADER_STORAGE_READ)
+        )
+    );
+}
+
+#[test]
+fn image_subresources_order_only_where_they_meet() {
+    let color = vk::ImageAspectFlags::COLOR;
+    let depth = vk::ImageAspectFlags::DEPTH;
+    let stencil = vk::ImageAspectFlags::STENCIL;
+    let sampled = Access::new(COMPUTE, vk::AccessFlags2::SHADER_SAMPLED_READ);
+    let mut queue = Tracker::default();
+    let got = commit_each(
+        &mut queue,
+        &[
+            one(&[writes(7, image(color, 0..1, 2..3), copy_write())]),
+            // Another level, then another layer of the same level.
+            one(&[reads(7, image(color, 1..4, 0..6), sampled)]),
+            one(&[reads(7, image(color, 0..1, 3..6), sampled)]),
+            // The written subresource among others.
+            one(&[reads(7, image(color, 0..4, 0..6), sampled)]),
+        ],
+    );
+    assert_eq!(got, [None, None, None, barrier(copy_write(), sampled)]);
+
+    let mut queue = Tracker::default();
+    let got = commit_each(
+        &mut queue,
+        &[
+            one(&[writes(8, image(depth, 0..1, 0..1), copy_write())]),
+            one(&[reads(8, image(stencil, 0..1, 0..1), copy_read())]),
+            one(&[reads(8, image(depth | stencil, 0..1, 0..1), copy_read())]),
+        ],
+    );
+    assert_eq!(got, [None, None, barrier(copy_write(), copy_read())]);
+}
+
+#[test]
+fn untracked_resources_are_left_to_the_program_between_encoders() {
+    let mut queue = Tracker::default();
+    let untracked = |access| Use::writes(5, false, bytes(0..256), access);
+    let read_untracked = Use::reads(5, false, bytes(0..256), shader_read());
+    let got = commit_each(
+        &mut queue,
+        &[
+            one(&[untracked(shader_write())]),
+            one(std::slice::from_ref(&read_untracked)),
+            one(&[untracked(copy_write())]),
+        ],
+    );
+    assert_eq!(got, [None, None, None]);
+    // The summary holds no untracked use, but its stages: a fence wait orders all the work.
+    let summary = one(&[untracked(shader_write())]);
+    assert!(summary.uses().is_empty());
+    assert!(summary.stages() == COMPUTE);
+}
+
+#[test]
+fn one_barrier_holds_every_hazard_of_an_encoder() {
+    let mut queue = Tracker::default();
+    let got = commit_each(
+        &mut queue,
+        &[
+            encoder(&[
+                &[writes(1, bytes(0..256), shader_write())],
+                &[reads(2, bytes(0..256), copy_read())],
+            ]),
+            encoder(&[
+                &[reads(1, bytes(0..256), shader_read())],
+                &[writes(2, bytes(0..256), shader_write())],
+            ]),
+        ],
+    );
+    assert_eq!(
+        got[1],
+        barrier(
+            Access::new(COMPUTE | TRANSFER, vk::AccessFlags2::SHADER_STORAGE_WRITE),
+            Access::new(COMPUTE, vk::AccessFlags2::SHADER_STORAGE_READ)
+        )
+    );
+}
+
+#[test]
+fn encoders_of_one_command_buffer_order_among_themselves() {
+    let mut queue = Tracker::default();
+    let got = commit(
+        &mut queue,
+        &[
+            one(&[writes(1, bytes(0..256), copy_write())]),
+            one(&[reads(1, bytes(0..256), shader_read())]),
+            one(&[reads(1, bytes(0..256), shader_read())]),
+            one(&[writes(1, bytes(0..256), copy_write())]),
+        ],
+        1,
+    );
+    assert_eq!(
+        got,
+        [
+            None,
+            barrier(copy_write(), shader_read()),
+            None,
+            barrier(
+                Access::new(TRANSFER | COMPUTE, vk::AccessFlags2::TRANSFER_WRITE),
+                copy_write()
+            ),
+        ]
+    );
+}
+
+#[test]
+fn the_order_is_the_commit_order_and_an_unapplied_plan_changes_nothing() {
+    let mut queue = Tracker::default();
+    let write = [one(&[writes(1, bytes(0..256), shader_write())])];
+    let read = [one(&[reads(1, bytes(0..256), shader_read())])];
+    // A plan that is never submitted leaves the state as it was.
+    let dropped = queue.plan(&write, at(1));
+    assert_eq!(dropped.barriers(), [None]);
+    drop(dropped);
+    assert_eq!(commit(&mut queue, &read, 2), [None]);
+    // The command buffer committed later orders after the earlier one, whichever was made first.
+    assert_eq!(
+        commit(&mut queue, &write, 3),
+        [barrier(
+            Access::new(COMPUTE, NO_ACCESS),
+            Access::new(COMPUTE, NO_ACCESS)
+        )]
+    );
+    assert_eq!(
+        commit(&mut queue, &read, 4),
+        [barrier(shader_write(), shader_read())]
+    );
+}
+
+#[test]
+fn a_fence_wait_orders_after_the_last_update_in_commit_order() {
+    let mut queue = Tracker::default();
+    let fence: Key = 100;
+    // Untracked work: only the fence orders it.
+    let mut first = EncoderUses::new(true);
+    first.record(
+        TRANSFER,
+        &[Use::writes(5, false, bytes(0..64), copy_write())],
+        None,
+    );
+    first.update_fence(fence);
+    let mut second = EncoderUses::new(false);
+    second.wait_for_fence(fence);
+    second.record(
+        COMPUTE,
+        &[Use::reads(5, false, bytes(0..64), shader_read())],
+        None,
+    );
+    let got = commit_each(&mut queue, &[first.finish(), second.finish()]);
+    assert_eq!(
+        got,
+        [
+            None,
+            barrier(
+                Access::new(TRANSFER, vk::AccessFlags2::MEMORY_WRITE),
+                Access::new(
+                    COMPUTE,
+                    vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE
+                )
+            )
+        ]
+    );
+}
+
+#[test]
+fn a_fence_never_updated_orders_nothing() {
+    let mut queue = Tracker::default();
+    let mut waiting = EncoderUses::<Key>::new(false);
+    waiting.wait_for_fence(100);
+    waiting.record(COMPUTE, &[], None);
+    assert_eq!(commit(&mut queue, &[waiting.finish()], 1), [None]);
+}
+
+#[test]
+fn a_fence_wait_sees_only_the_latest_update() {
+    let fence: Key = 100;
+    let updating = |stages| {
+        let mut uses = EncoderUses::<Key>::new(false);
+        uses.record(stages, &[], None);
+        uses.update_fence(fence);
+        uses.finish()
+    };
+    let mut waiting = EncoderUses::<Key>::new(false);
+    waiting.wait_for_fence(fence);
+    waiting.record(FRAGMENT, &[], None);
+    let mut queue = Tracker::default();
+    let got = commit(
+        &mut queue,
+        &[updating(TRANSFER), updating(COMPUTE), waiting.finish()],
+        1,
+    );
+    assert_eq!(
+        got,
+        [
+            None,
+            None,
+            barrier(
+                Access::new(COMPUTE, vk::AccessFlags2::MEMORY_WRITE),
+                Access::new(
+                    FRAGMENT,
+                    vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE
+                )
+            )
+        ]
+    );
+}
+
+#[test]
+fn a_fence_passes_through_an_encoder_that_waits_and_updates() {
+    let (first, second): (Key, Key) = (100, 101);
+    let mut a = EncoderUses::<Key>::new(true);
+    a.record(TRANSFER, &[], None);
+    a.update_fence(first);
+    // No work of its own: it only waits for one fence and updates another.
+    let mut b = EncoderUses::<Key>::new(false);
+    b.wait_for_fence(first);
+    b.update_fence(second);
+    let mut c = EncoderUses::<Key>::new(false);
+    c.wait_for_fence(second);
+    c.record(COMPUTE, &[], None);
+    let mut queue = Tracker::default();
+    let got = commit_each(&mut queue, &[a.finish(), b.finish(), c.finish()]);
+    assert_eq!(got[1], None);
+    assert_eq!(
+        got[2].map(|barrier| barrier.src),
+        Some(Access::new(TRANSFER, vk::AccessFlags2::MEMORY_WRITE))
+    );
+}
+
+/// A wait after the same encoder updated the fence waits for the update before the encoder, as
+/// plain Metal's does: the second encoder orders after the first's update, and the third, waiting
+/// for the fence, after the second's.
+#[test]
+fn a_wait_after_an_update_in_one_encoder_waits_for_the_update_before_it() {
+    let fence: Key = 100;
+    let mut first = EncoderUses::<Key>::new(false);
+    first.record(TRANSFER, &[], None);
+    first.update_fence(fence);
+    let mut second = EncoderUses::<Key>::new(false);
+    second.update_fence(fence);
+    second.wait_for_fence(fence);
+    second.record(COMPUTE, &[], None);
+    let mut third = EncoderUses::<Key>::new(false);
+    third.wait_for_fence(fence);
+    third.record(FRAGMENT, &[], None);
+    let mut queue = Tracker::default();
+    let got = commit_each(
+        &mut queue,
+        &[first.finish(), second.finish(), third.finish()],
+    );
+    assert_eq!(
+        got[1].map(|barrier| barrier.src),
+        Some(Access::new(TRANSFER, vk::AccessFlags2::MEMORY_WRITE))
+    );
+    assert_eq!(
+        got[2].map(|barrier| barrier.src),
+        Some(Access::new(
+            TRANSFER | COMPUTE,
+            vk::AccessFlags2::MEMORY_WRITE
+        ))
+    );
+}
+
+#[test]
+fn ordered_commands_wait_for_earlier_commands_of_the_encoder() {
+    let mut uses = EncoderUses::<Key>::new(true);
+    let copy_in = [writes(1, bytes(0..256), copy_write())];
+    let copy_out = [
+        reads(1, bytes(0..256), copy_read()),
+        writes(2, bytes(0..256), copy_write()),
+    ];
+    let again = [reads(1, bytes(0..64), copy_read())];
+    let overwrite = [writes(1, bytes(0..256), copy_write())];
+
+    assert_eq!(uses.barrier(&copy_in), None);
+    uses.record(TRANSFER, &copy_in, None);
+    let before_out = uses.barrier(&copy_out);
+    assert_eq!(before_out, barrier(copy_write(), copy_read()));
+    uses.record(TRANSFER, &copy_out, before_out);
+    // Visible already.
+    assert_eq!(uses.barrier(&again), None);
+    uses.record(TRANSFER, &again, None);
+    // After the reads, and the write already visible to transfer reads only.
+    assert_eq!(
+        uses.barrier(&overwrite),
+        barrier(
+            Access::new(TRANSFER, vk::AccessFlags2::TRANSFER_WRITE),
+            copy_write()
+        )
+    );
+}
+
+#[test]
+fn unordered_encoders_order_nothing_inside() {
+    let mut uses = EncoderUses::<Key>::new(false);
+    let write = [writes(1, bytes(0..256), shader_write())];
+    uses.record(COMPUTE, &write, None);
+    assert_eq!(
+        uses.barrier(&[reads(1, bytes(0..256), shader_read())]),
+        None
+    );
+    assert_eq!(uses.barrier(&write), None);
+}
+
+#[test]
+fn untracked_memory_is_one_class_inside_an_encoder() {
+    let mut uses = EncoderUses::<Key>::new(true);
+    // Two untracked resources may alias (heap resources): they order.
+    uses.record(
+        TRANSFER,
+        &[Use::writes(5, false, bytes(0..16), copy_write())],
+        None,
+    );
+    assert_eq!(
+        uses.barrier(&[Use::reads(6, false, bytes(1024..2048), copy_read())]),
+        barrier(copy_write(), copy_read())
+    );
+    // Tracked resources order per identity.
+    let mut uses = EncoderUses::<Key>::new(true);
+    uses.record(TRANSFER, &[writes(5, bytes(0..16), copy_write())], None);
+    assert_eq!(uses.barrier(&[reads(6, bytes(0..16), copy_read())]), None);
+    // A tracked and an untracked resource are different memory.
+    assert_eq!(
+        uses.barrier(&[Use::reads(7, false, bytes(0..16), copy_read())]),
+        None
+    );
+}
+
+#[test]
+fn a_command_does_not_order_against_itself() {
+    let mut uses = EncoderUses::<Key>::new(true);
+    // A copy between two ranges of one buffer.
+    let copy = [
+        reads(1, bytes(0..64), copy_read()),
+        writes(1, bytes(64..128), copy_write()),
+    ];
+    assert_eq!(uses.barrier(&copy), None);
+    uses.record(TRANSFER, &copy, None);
+    // The same copy again: after its write (write after write), and after its read (write after
+    // read on 0..64 is not touched; read after write on 64..128 is not read).
+    assert_eq!(
+        uses.barrier(&copy),
+        barrier(
+            Access::new(TRANSFER, vk::AccessFlags2::TRANSFER_WRITE),
+            copy_write()
+        )
+    );
+}
+
+#[test]
+fn uses_that_touch_nothing_are_ignored() {
+    let mut uses = EncoderUses::<Key>::new(true);
+    uses.record(TRANSFER, &[writes(1, bytes(0..256), copy_write())], None);
+    assert_eq!(uses.barrier(&[reads(1, bytes(16..16), copy_read())]), None);
+    assert_eq!(uses.barrier(&[reads(1, bytes(0..16), Access::NONE)]), None);
+    let summary = one(&[writes(1, bytes(8..8), copy_write())]);
+    assert!(summary.uses().is_empty());
+}
+
+#[test]
+fn completed_submissions_retire() {
+    let mut queue = Tracker::default();
+    let fence: Key = 100;
+    let mut update = EncoderUses::<Key>::new(true);
+    update.record(TRANSFER, &[writes(1, bytes(0..256), copy_write())], None);
+    update.update_fence(fence);
+    assert_eq!(commit(&mut queue, &[update.finish()], 1), [None]);
+    // Not completed yet: still ordered.
+    let read = || one(&[reads(1, bytes(0..256), shader_read())]);
+    assert_eq!(queue.entries(), 2);
+    assert_eq!(
+        queue.plan(&[read()], at(2)).barriers(),
+        [barrier(copy_write(), shader_read())]
+    );
+    // Completed: the host saw it before the next submission, so nothing is left to order.
+    queue.completed(0, 1);
+    assert_eq!(queue.entries(), 0);
+    let mut wait = EncoderUses::<Key>::new(false);
+    wait.wait_for_fence(fence);
+    wait.record(COMPUTE, &[reads(1, bytes(0..256), shader_read())], None);
+    assert_eq!(commit(&mut queue, &[wait.finish()], 2), [None]);
+}
+
+#[test]
+fn the_state_retires_only_through_the_completed_value() {
+    let mut queue = Tracker::default();
+    // Two reads in two batches; the first completed, the second not.
+    commit(
+        &mut queue,
+        &[one(&[reads(1, bytes(0..256), copy_read())])],
+        1,
+    );
+    commit(
+        &mut queue,
+        &[one(&[reads(1, bytes(0..256), shader_read())])],
+        2,
+    );
+    queue.completed(0, 1);
+    // The second read may still run: a write orders after it. One queue's reads of a range are
+    // kept together, at the latest batch, so they retire together (ordering more, never less).
+    assert_eq!(
+        queue
+            .plan(&[one(&[writes(1, bytes(0..256), shader_write())])], at(3))
+            .barriers(),
+        [barrier(
+            Access::new(TRANSFER | COMPUTE, NO_ACCESS),
+            Access::new(COMPUTE, NO_ACCESS)
+        )]
+    );
+    // An older value, or the same one again, changes nothing.
+    queue.completed(0, 1);
+    queue.completed(0, 0);
+    assert_eq!(queue.entries(), 1);
+    queue.completed(0, 2);
+    assert_eq!(queue.entries(), 0);
+}
+
+#[test]
+fn each_queue_retires_by_its_own_timeline() {
+    let mut queue = Tracker::default();
+    // A write on queue 0 and a read of it on queue 1.
+    submit(
+        &mut queue,
+        &[one(&[writes(1, bytes(0..256), copy_write())])],
+        on(0, 1),
+    );
+    let (_, waits) = submit(
+        &mut queue,
+        &[one(&[reads(1, bytes(0..256), shader_read())])],
+        on(1, 1),
+    );
+    assert_eq!(waits, [wait(on(0, 1), COMPUTE)]);
+    // Queue 1's value 1 completing retires its read, not queue 0's write.
+    queue.completed(1, 1);
+    let (_, waits) = submit(
+        &mut queue,
+        &[one(&[reads(1, bytes(0..256), copy_read())])],
+        on(2, 1),
+    );
+    assert_eq!(waits, [wait(on(0, 1), TRANSFER)]);
+    queue.completed(0, 1);
+    // The write retired; the read on queue 2 has not.
+    let (barriers, waits) = submit(
+        &mut queue,
+        &[one(&[writes(1, bytes(0..256), shader_write())])],
+        on(1, 2),
+    );
+    assert_eq!(barriers, [None]);
+    assert_eq!(waits, [wait(on(2, 1), COMPUTE)]);
+}
+
+#[test]
+fn a_read_on_another_queue_waits_for_the_write() {
+    let mut queue = Tracker::default();
+    submit(
+        &mut queue,
+        &[one(&[writes(1, bytes(0..256), shader_write())])],
+        on(0, 1),
+    );
+    let (barriers, waits) = submit(
+        &mut queue,
+        &[one(&[reads(1, bytes(0..256), copy_read())])],
+        on(1, 4),
+    );
+    // No barrier on queue 1: the wait for queue 0's batch makes the write visible.
+    assert_eq!(barriers, [None]);
+    assert_eq!(waits, [wait(on(0, 1), TRANSFER)]);
+}
+
+#[test]
+fn a_wait_covers_the_later_batches_of_its_queue() {
+    let mut queue = Tracker::default();
+    submit(
+        &mut queue,
+        &[one(&[writes(1, bytes(0..256), shader_write())])],
+        on(0, 1),
+    );
+    submit(
+        &mut queue,
+        &[one(&[reads(1, bytes(0..256), copy_read())])],
+        on(1, 1),
+    );
+    // The same stages again on queue 1: the earlier wait covers them.
+    let (_, waits) = submit(
+        &mut queue,
+        &[one(&[reads(1, bytes(0..256), copy_read())])],
+        on(1, 2),
+    );
+    assert_eq!(waits, []);
+    // Other stages need a wait of their own.
+    let (_, waits) = submit(
+        &mut queue,
+        &[one(&[reads(1, bytes(0..256), shader_read())])],
+        on(1, 3),
+    );
+    assert_eq!(waits, [wait(on(0, 1), COMPUTE)]);
+}
+
+#[test]
+fn a_write_waits_for_every_queue_that_wrote_or_read() {
+    let mut queue = Tracker::default();
+    submit(
+        &mut queue,
+        &[one(&[writes(1, bytes(0..256), shader_write())])],
+        on(0, 1),
+    );
+    submit(
+        &mut queue,
+        &[one(&[reads(1, bytes(0..128), copy_read())])],
+        on(1, 1),
+    );
+    submit(
+        &mut queue,
+        &[one(&[reads(1, bytes(128..256), copy_read())])],
+        on(1, 2),
+    );
+    let (barriers, waits) = submit(
+        &mut queue,
+        &[one(&[writes(1, bytes(0..256), copy_write())])],
+        on(2, 1),
+    );
+    assert_eq!(barriers, [None]);
+    // The last write's queue and the latest read of the other queue, once each.
+    assert_eq!(waits, [wait(on(0, 1), TRANSFER), wait(on(1, 2), TRANSFER)]);
+    // The write replaced them: a read on queue 0 now follows queue 2 alone.
+    let (barriers, waits) = submit(
+        &mut queue,
+        &[one(&[reads(1, bytes(0..256), shader_read())])],
+        on(0, 2),
+    );
+    assert_eq!(barriers, [None]);
+    assert_eq!(waits, [wait(on(2, 1), COMPUTE)]);
+}
+
+#[test]
+fn logical_queues_on_one_vk_queue_order_by_barriers() {
+    // Two logical queues share VkQueue 0: their batches are one submission order there.
+    let mut queue = Tracker::default();
+    let (_, waits) = submit(
+        &mut queue,
+        &[one(&[writes(1, bytes(0..256), shader_write())])],
+        on(0, 1),
+    );
+    assert_eq!(waits, []);
+    let (barriers, waits) = submit(
+        &mut queue,
+        &[one(&[reads(1, bytes(0..256), shader_read())])],
+        on(0, 2),
+    );
+    assert_eq!(barriers, [barrier(shader_write(), shader_read())]);
+    assert_eq!(waits, []);
+}
+
+#[test]
+fn a_fence_updated_on_another_queue_is_a_wait() {
+    let fence: Key = 100;
+    let mut update = EncoderUses::<Key>::new(true);
+    update.record(
+        TRANSFER,
+        &[Use::writes(5, false, bytes(0..64), copy_write())],
+        None,
+    );
+    update.update_fence(fence);
+    let mut waiting = EncoderUses::<Key>::new(false);
+    waiting.wait_for_fence(fence);
+    waiting.record(
+        COMPUTE,
+        &[Use::reads(5, false, bytes(0..64), shader_read())],
+        None,
+    );
+    let mut queue = Tracker::default();
+    submit(&mut queue, &[update.finish()], on(0, 3));
+    let (barriers, waits) = submit(&mut queue, &[waiting.finish()], on(1, 1));
+    assert_eq!(barriers, [None]);
+    assert_eq!(waits, [wait(on(0, 3), COMPUTE)]);
+    // Retired once queue 0's value 3 completed.
+    queue.completed(0, 3);
+    assert_eq!(queue.entries(), 0);
+}
+
+#[test]
+fn a_waits_stages_come_from_the_whole_batch() {
+    // Two encoders of one batch on queue 1 read what queue 0 wrote: one wait, for both stages.
+    let mut queue = Tracker::default();
+    submit(
+        &mut queue,
+        &[one(&[
+            writes(1, bytes(0..64), shader_write()),
+            writes(2, bytes(0..64), shader_write()),
+        ])],
+        on(0, 1),
+    );
+    submit(
+        &mut queue,
+        &[one(&[writes(3, bytes(0..64), shader_write())])],
+        on(0, 2),
+    );
+    let (barriers, waits) = submit(
+        &mut queue,
+        &[
+            one(&[reads(1, bytes(0..64), copy_read())]),
+            one(&[reads(2, bytes(0..64), shader_read())]),
+            one(&[reads(3, bytes(0..64), shader_read())]),
+        ],
+        on(1, 1),
+    );
+    assert_eq!(barriers, [None, None, None]);
+    assert_eq!(waits, [wait(on(0, 2), TRANSFER | COMPUTE)]);
+}
+
+#[test]
+fn merged_entries_of_several_queues_still_order_every_access() {
+    let mut queue = Tracker::default();
+    // Writes on queues 0 and 1, alternating, past the entry bound: they merge.
+    for index in 0..(ENTRIES_PER_KEY as u64 * 2) {
+        let start = index * 64;
+        submit(
+            &mut queue,
+            &[one(&[writes(1, bytes(start..start + 64), copy_write())])],
+            on((index % 2) as usize, index + 1),
+        );
+    }
+    assert!(queue.entries() <= ENTRIES_PER_KEY);
+    // A read on queue 2 of the first bytes waits for queue 0, which wrote them, and for queue 1,
+    // whose writes merged with them (more than Metal needs, never less).
+    let (barriers, waits) = submit(
+        &mut queue,
+        &[one(&[reads(1, bytes(0..8), shader_read())])],
+        on(2, 1),
+    );
+    assert_eq!(barriers, [None]);
+    let waits_for = |waits: &[Wait], queue: usize, stages| {
+        waits
+            .iter()
+            .any(|wait| wait.at.queue == queue && wait.at.value >= 1 && wait.stages == stages)
+    };
+    assert_eq!(waits.len(), 2);
+    assert!(waits_for(&waits, 0, COMPUTE) && waits_for(&waits, 1, COMPUTE));
+    // A read on queue 0 needs a barrier from its own queue's writes and a wait for queue 1's.
+    let (barriers, waits) = submit(
+        &mut queue,
+        &[one(&[reads(1, bytes(0..8), copy_read())])],
+        on(0, 100),
+    );
+    assert_eq!(barriers, [barrier(copy_write(), copy_read())]);
+    assert_eq!(waits.len(), 1);
+    assert!(waits_for(&waits, 1, TRANSFER));
+}
+
+#[test]
+fn the_state_stays_bounded_and_still_orders() {
+    let mut queue = Tracker::default();
+    for serial in 1..=1000u64 {
+        let at = serial * 16;
+        let got = commit(
+            &mut queue,
+            &[one(&[reads(1, bytes(at..at + 16), copy_read())])],
+            serial,
+        );
+        assert_eq!(got, [None]);
+        assert!(queue.entries() <= ENTRIES_PER_KEY);
+    }
+    // The merged reads still order a write over any of them.
+    assert_eq!(
+        commit(
+            &mut queue,
+            &[one(&[writes(1, bytes(32..48), shader_write())])],
+            1001
+        ),
+        [barrier(
+            Access::new(TRANSFER, NO_ACCESS),
+            Access::new(COMPUTE, NO_ACCESS)
+        )]
+    );
+}
+
+#[test]
+fn merged_writes_still_order_every_read() {
+    let mut queue = Tracker::default();
+    for serial in 1..=(ENTRIES_PER_KEY as u64 * 4) {
+        let at = serial * 64;
+        commit(
+            &mut queue,
+            &[one(&[writes(1, bytes(at..at + 64), copy_write())])],
+            serial,
+        );
+    }
+    assert!(queue.entries() <= ENTRIES_PER_KEY);
+    // A read of the first write's bytes, long merged away.
+    assert_eq!(
+        commit(
+            &mut queue,
+            &[one(&[reads(1, bytes(64..72), shader_read())])],
+            1000
+        ),
+        [barrier(copy_write(), shader_read())]
+    );
+}
+
+#[test]
+fn an_encoder_summary_stays_bounded() {
+    let mut uses = EncoderUses::<Key>::new(true);
+    for at in 0..1000u64 {
+        let command = [reads(1, bytes(at * 4..at * 4 + 4), copy_read())];
+        let barrier = uses.barrier(&command);
+        uses.record(TRANSFER, &command, barrier);
+    }
+    let summary = uses.finish();
+    assert!(summary.uses().len() <= ENTRIES_PER_KEY);
+    // What it claims holds every read.
+    for at in 0..1000u64 {
+        let read = bytes(at * 4..at * 4 + 4);
+        assert!(summary.uses().iter().any(|used| used.range.contains(&read)));
+    }
+}
+
+#[test]
+fn ranges_meet_and_hold() {
+    assert!(bytes(0..16).overlaps(&bytes(15..17)));
+    assert!(!bytes(0..16).overlaps(&bytes(16..32)));
+    assert!(bytes(0..16).contains(&bytes(0..16)));
+    assert!(!bytes(0..16).contains(&bytes(8..17)));
+    let color = vk::ImageAspectFlags::COLOR;
+    assert!(image(color, 0..2, 0..2).overlaps(&image(color, 1..3, 1..3)));
+    assert!(!image(color, 0..2, 0..2).overlaps(&image(color, 2..3, 0..2)));
+    assert!(image(color, 0..4, 0..4).contains(&image(color, 1..2, 3..4)));
+    assert!(!image(color, 0..4, 0..4).contains(&image(
+        color | vk::ImageAspectFlags::DEPTH,
+        1..2,
+        3..4
+    )));
+    // Different kinds of range on one key: taken to meet, never to hold one another.
+    assert!(bytes(0..16).overlaps(&image(color, 0..1, 0..1)));
+    assert!(!bytes(0..u64::MAX).contains(&image(color, 0..1, 0..1)));
+    assert!(bytes(4..4).is_empty());
+    assert!(image(vk::ImageAspectFlags::empty(), 0..1, 0..1).is_empty());
+}
+
+#[test]
+fn legacy_masks_keep_the_shared_bits() {
+    let got = Barrier {
+        src: Access::new(
+            COMPUTE | TRANSFER,
+            vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::TRANSFER_WRITE,
+        ),
+        dst: Access::new(FRAGMENT, vk::AccessFlags2::UNIFORM_READ),
+    }
+    .legacy();
+    assert_eq!(
+        got,
+        LegacyBarrier {
+            src_stages: vk::PipelineStageFlags::COMPUTE_SHADER | vk::PipelineStageFlags::TRANSFER,
+            src_access: vk::AccessFlags::SHADER_WRITE | vk::AccessFlags::TRANSFER_WRITE,
+            dst_stages: vk::PipelineStageFlags::FRAGMENT_SHADER,
+            dst_access: vk::AccessFlags::UNIFORM_READ,
+        }
+    );
+}
+
+#[test]
+fn the_command_buffer_barriers_keep_their_masks() {
+    let start = Barrier::after_completed().legacy();
+    assert_eq!(
+        start,
+        LegacyBarrier {
+            src_stages: vk::PipelineStageFlags::TOP_OF_PIPE,
+            src_access: vk::AccessFlags::empty(),
+            dst_stages: vk::PipelineStageFlags::ALL_COMMANDS,
+            dst_access: vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE,
+        }
+    );
+    let end = Barrier::to_host().legacy();
+    assert_eq!(
+        end,
+        LegacyBarrier {
+            src_stages: vk::PipelineStageFlags::ALL_COMMANDS,
+            src_access: vk::AccessFlags::MEMORY_WRITE,
+            dst_stages: vk::PipelineStageFlags::HOST,
+            dst_access: vk::AccessFlags::HOST_READ | vk::AccessFlags::HOST_WRITE,
+        }
+    );
+}
+
+#[test]
+fn legacy_masks_map_the_newer_bits() {
+    use vk::AccessFlags2 as A2;
+    use vk::PipelineStageFlags2 as S2;
+    let got = Barrier {
+        src: Access::new(S2::COPY | S2::CLEAR, A2::SHADER_STORAGE_WRITE),
+        dst: Access::new(
+            S2::INDEX_INPUT | S2::PRE_RASTERIZATION_SHADERS,
+            A2::SHADER_STORAGE_READ | A2::SHADER_SAMPLED_READ,
+        ),
+    }
+    .legacy();
+    assert_eq!(
+        got,
+        LegacyBarrier {
+            src_stages: vk::PipelineStageFlags::TRANSFER,
+            src_access: vk::AccessFlags::SHADER_WRITE,
+            dst_stages: vk::PipelineStageFlags::VERTEX_INPUT | vk::PipelineStageFlags::ALL_GRAPHICS,
+            dst_access: vk::AccessFlags::SHADER_READ,
+        }
+    );
+    // A stage or access type the older family lacks orders everything.
+    let got = Barrier {
+        src: Access::new(S2::VIDEO_DECODE_KHR, A2::SHADER_BINDING_TABLE_READ_KHR),
+        dst: Access::new(S2::COMPUTE_SHADER, A2::NONE),
+    }
+    .legacy();
+    assert_eq!(
+        got,
+        LegacyBarrier {
+            src_stages: vk::PipelineStageFlags::ALL_COMMANDS,
+            src_access: vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE,
+            dst_stages: vk::PipelineStageFlags::COMPUTE_SHADER,
+            dst_access: vk::AccessFlags::empty(),
+        }
+    );
+    // No stage is the top of the pipe as a source, the bottom as a destination.
+    let got = Barrier {
+        src: Access::NONE,
+        dst: Access::NONE,
+    }
+    .legacy();
+    assert_eq!(
+        got,
+        LegacyBarrier {
+            src_stages: vk::PipelineStageFlags::TOP_OF_PIPE,
+            src_access: vk::AccessFlags::empty(),
+            dst_stages: vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+            dst_access: vk::AccessFlags::empty(),
+        }
+    );
+}
+
+#[test]
+fn layout_moves_outside_encoders_order_as_writes_of_the_whole_image() {
+    // A batch moves a caller's image into `GENERAL` before its encoders and home after them: each
+    // move is a write of the whole image in every stage, ordered against the image's other uses on
+    // any queue.
+    let mut queue = Tracker::default();
+    let whole = image(vk::ImageAspectFlags::COLOR, 0..1, 0..1);
+    let moved = Access::new(
+        vk::PipelineStageFlags2::ALL_COMMANDS,
+        vk::AccessFlags2::MEMORY_WRITE,
+    );
+    let entry = Summary::outside_encoders(vec![writes(1, whole.clone(), moved)]);
+    let exit = Summary::outside_encoders(vec![writes(1, whole.clone(), moved)]);
+    assert_eq!(entry.keys().collect::<Vec<_>>(), [1]);
+    submit(
+        &mut queue,
+        &[one(&[reads(1, whole.clone(), copy_read())])],
+        on(1, 1),
+    );
+    let (barriers, waits) = submit(
+        &mut queue,
+        &[
+            entry,
+            one(&[writes(1, whole.clone(), shader_write())]),
+            exit,
+        ],
+        on(0, 1),
+    );
+    assert_eq!(
+        waits,
+        [wait(on(1, 1), vk::PipelineStageFlags2::ALL_COMMANDS)]
+    );
+    assert_eq!(
+        barriers,
+        [
+            None,
+            barrier(moved, shader_write()),
+            barrier(shader_write(), moved)
+        ]
+    );
+    // The next batch's read of the image orders after the move home.
+    let got = commit(&mut queue, &[one(&[reads(1, whole, copy_read())])], 2);
+    assert_eq!(got, [barrier(moved, copy_read())]);
+}
+
+/// A segment's summary joined to its encoder's (an indirect command buffer's commands, recorded
+/// at commit) orders later encoders as one encoder of every command would: its stages and
+/// tracked uses join, a use of a range the encoder used widens it, and its fences join.
+#[test]
+fn a_joined_summary_orders_as_one_encoder() {
+    let commands: [&[Use<Key>]; 3] = [
+        &[writes(1, bytes(0..256), copy_write())],
+        &[reads(1, bytes(0..256), shader_read())],
+        &[writes(2, bytes(0..64), shader_write())],
+    ];
+    let mut joined = encoder(&commands[..1]);
+    joined.join(encoder(&commands[1..]));
+    let whole = encoder(&commands);
+    let mut fenced = EncoderUses::<Key>::new(true);
+    fenced.update_fence(9);
+    joined.join(fenced.finish());
+    assert_eq!(joined.uses(), whole.uses());
+    let later = [one(&[
+        writes(1, bytes(0..256), copy_write()),
+        reads(2, bytes(0..64), copy_read()),
+    ])];
+    let (mut a, mut b) = (Tracker::default(), Tracker::default());
+    assert_eq!(
+        commit(&mut a, &[joined, later[0].clone()], 1),
+        commit(&mut b, &[whole, later[0].clone()], 1)
+    );
+    // The joined fence update orders a later wait after every stage the joined work ran in.
+    let mut waits = EncoderUses::<Key>::new(false);
+    waits.wait_for_fence(9);
+    waits.record(FRAGMENT, &[], None);
+    assert_eq!(
+        commit(&mut a, &[waits.finish()], 2),
+        [barrier(
+            Access::new(TRANSFER | COMPUTE, vk::AccessFlags2::MEMORY_WRITE),
+            Access::new(
+                FRAGMENT,
+                vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE
+            )
+        )]
+    );
+}
+
+/// A joined summary keeps at most [`ENTRIES_PER_KEY`] ranges of a resource, and what it claims
+/// holds every use joined.
+#[test]
+fn a_joined_summary_stays_bounded() {
+    let mut joined = one(&[reads(1, bytes(0..4), copy_read())]);
+    for at in 1..100u64 {
+        joined.join(one(&[reads(1, bytes(at * 8..at * 8 + 4), copy_read())]));
+    }
+    assert!(joined.uses().len() <= ENTRIES_PER_KEY);
+    for at in 0..100u64 {
+        let read = bytes(at * 8..at * 8 + 4);
+        assert!(joined.uses().iter().any(|used| used.range.contains(&read)));
+    }
+}
+
+/// A split encoder's commands after the split need no barrier after those before (they run once
+/// everything before completed), and its parts' summaries take its fence waits first and its
+/// updates last.
+#[test]
+fn a_split_encoder_waits_in_its_first_part_and_updates_in_its_last() {
+    let write = [writes(1, bytes(0..256), shader_write())];
+    let read = [reads(1, bytes(0..256), shader_read())];
+    let mut whole = EncoderUses::<Key>::new(true);
+    whole.record(COMPUTE, &write, None);
+    assert!(whole.barrier(&read).is_some());
+    let mut split = EncoderUses::<Key>::new(true);
+    split.record(COMPUTE, &write, None);
+    split.split();
+    assert_eq!(split.barrier(&read), None);
+
+    let (first, second): (Key, Key) = (100, 101);
+    let mut a = EncoderUses::<Key>::new(false);
+    a.record(FRAGMENT, &[], None);
+    a.update_fence(first);
+    let mut parted = EncoderUses::<Key>::new(false);
+    parted.wait_for_fence(first);
+    parted.record(TRANSFER, &[], None);
+    parted.split();
+    parted.record(COMPUTE, &[], None);
+    parted.update_fence(second);
+    let mut c = EncoderUses::<Key>::new(false);
+    c.wait_for_fence(second);
+    c.record(COMPUTE, &[], None);
+    let parts = parted.finish_parts();
+    assert_eq!(parts.len(), 2);
+    let mut summaries = vec![a.finish()];
+    summaries.extend(parts);
+    summaries.push(c.finish());
+    let mut queue = Tracker::default();
+    let got = commit_each(&mut queue, &summaries);
+    let written = |stages| Some(Access::new(stages, vk::AccessFlags2::MEMORY_WRITE));
+    assert_eq!(got[1].map(|barrier| barrier.src), written(FRAGMENT));
+    assert_eq!(got[2], None);
+    assert_eq!(got[3].map(|barrier| barrier.src), written(COMPUTE));
+}
+
+/// An unordered encoder's commands so far are seen to write what a later command reads only where
+/// a tracked range overlaps (the index bounds pass's hazard check, `index_bounds.rs`): not a read,
+/// not another range or resource, and not an untracked write, which the encoder does not record.
+#[test]
+fn an_earlier_write_is_seen_only_where_a_tracked_read_overlaps_it() {
+    let mut uses = EncoderUses::new(false);
+    uses.record(
+        FRAGMENT,
+        &[
+            writes(1, bytes(64..128), shader_write()),
+            reads(2, bytes(0..64), shader_read()),
+            Use::writes(3, false, bytes(0..64), shader_write()),
+        ],
+        None,
+    );
+    let read = |key, range, tracked| [Use::reads(key, tracked, bytes(range), shader_read())];
+    assert!(uses.written(&read(1, 120..140, true)));
+    assert!(!uses.written(&read(1, 0..64, true)));
+    assert!(!uses.written(&read(2, 0..64, true)));
+    assert!(!uses.written(&read(4, 0..64, true)));
+    assert!(!uses.written(&read(3, 0..64, false)));
+    // A write-only use reads nothing.
+    assert!(!uses.written(&[writes(1, bytes(64..128), shader_write())]));
+}
+
+/// The footprint of a batch of `summaries`.
+fn footprint(summaries: &[Summary<Key>]) -> Footprint<Key> {
+    Footprint::of(summaries)
+}
+
+/// Two batches across queues run in commit order where a tracked use of each shares a range
+/// that one of them writes, across the batch's encoders; reads of one range, disjoint ranges and
+/// other resources do not.
+#[test]
+fn a_batch_conflicts_with_an_earlier_one_where_a_shared_range_is_written() {
+    let write = footprint(&[
+        one(&[reads(9, bytes(0..64), copy_read())]),
+        one(&[writes(1, bytes(0..64), copy_write())]),
+    ]);
+    let read = footprint(&[one(&[reads(1, bytes(32..96), shader_read())])]);
+    assert!(ordered(Some(&write), Some(&read)));
+    assert!(ordered(Some(&read), Some(&write)));
+    let elsewhere = footprint(&[one(&[reads(1, bytes(64..128), shader_read())])]);
+    assert!(!ordered(Some(&write), Some(&elsewhere)));
+    let other = footprint(&[one(&[writes(2, bytes(0..64), shader_write())])]);
+    assert!(!ordered(Some(&write), Some(&other)));
+    assert!(!ordered(Some(&read), Some(&elsewhere)));
+    let levels = |levels: Range<u32>| image(vk::ImageAspectFlags::COLOR, levels, 0..1);
+    let level0 = footprint(&[one(&[writes(3, levels(0..1), copy_write())])]);
+    let level1 = footprint(&[one(&[reads(3, levels(1..2), copy_read())])]);
+    assert!(!ordered(Some(&level0), Some(&level1)));
+    let both = footprint(&[one(&[reads(3, levels(0..2), copy_read())])]);
+    assert!(ordered(Some(&level0), Some(&both)));
+}
+
+/// A fence one batch updates orders it with a batch that waits for or updates it, whatever the
+/// resources; a batch whose uses are not known yet conflicts with any that uses a tracked
+/// resource or names a fence, and with none that does neither.
+#[test]
+fn fences_and_unknown_uses_order_batches_across_queues() {
+    let fence: Key = 100;
+    let mut updating = EncoderUses::new(true);
+    updating.record(
+        TRANSFER,
+        &[Use::writes(5, false, bytes(0..64), copy_write())],
+        None,
+    );
+    updating.update_fence(fence);
+    let updating = footprint(&[updating.finish()]);
+    let mut waiting = EncoderUses::new(true);
+    waiting.wait_for_fence(fence);
+    let waiting = footprint(&[waiting.finish()]);
+    assert!(ordered(Some(&updating), Some(&waiting)));
+    assert!(ordered(Some(&waiting), Some(&updating)));
+    assert!(!ordered(Some(&waiting), Some(&waiting)));
+    let untracked = footprint(&[one(&[Use::writes(5, false, bytes(0..64), copy_write())])]);
+    let tracked = footprint(&[one(&[reads(1, bytes(0..4), copy_read())])]);
+    assert!(ordered(None, Some(&tracked)));
+    assert!(ordered(Some(&tracked), None));
+    assert!(ordered(None, Some(&waiting)));
+    assert!(!ordered(None, Some(&untracked)));
+    assert!(!ordered(Some(&untracked), None));
+    assert!(ordered::<Key>(None, None));
+}

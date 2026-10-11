@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# The Vulkan environment of a `scripts/linux-gate` command, applied inside its container before the
+# command runs (validation spec §4.1.2, §4.1.4). Not meant to run on the host.
+#
+#   scripts/linux-gate-vulkan <command> [args...]
+#
+# Reads what scripts/linux-gate passes: M2V_GATE_ICD (lavapipe|swiftshader), M2V_GATE_PROFILE (a
+# crates/metal2vulkan-validation/profiles stem, or empty), and for the drm-shim recipe M2V_DRM_SHIM_ICD_GLOB.
+#
+# - The selected ICD becomes the only one the loader sees (VK_DRIVER_FILES).
+# - With a profile P, VK_LAYER_KHRONOS_profiles is stacked between VK_LAYER_KHRONOS_validation and
+#   the ICD. The loader places VK_INSTANCE_LAYERS in list order, nearest the application first,
+#   after the implicit layers and ahead of the layers the application enables (a layer enabled
+#   twice is enabled once), so the validation layer checks against what the profiles layer
+#   reports. The device then reports P's API version, properties, extensions, formats, and queue
+#   families wherever P states them, and P's features, with every feature P does not state false.
+#   The ICD still executes as itself (docs/VALIDATION.md, "Profiles layer"). The
+#   layer's portability emulation is off: by default the pinned layer adds
+#   VK_KHR_portability_subset (a 4-byte vertex stride alignment) and hides the formats a
+#   portability device lacks, on any device and under any profile.
+# - First, P must not state more than the device has. The profiles layer simulates P's values
+#   whether or not the device supports them and only warns where it does not (the warnings are
+#   meaningful only with the device's values as defaults, so this check runs apart from the
+#   command). It refuses P when the layer reports a feature, limit, flag, format feature, or queue
+#   family of P beyond the device, reports any other warning or error it does not know to be
+#   harmless, or cannot open the device under P, and when P's API major.minor exceeds the device's.
+#   Harmless, because they do not make the device report more than it has: P setting one member
+#   through both a core and an extension struct, a member the layer cannot modify (it keeps the
+#   device's value), and the layer's API-version warning (it compares patch numbers only; the
+#   major.minor comparison here replaces it). The messages are those of the pinned layer
+#   (VULKAN_PROFILES_COMMIT in scripts/linux-gate.Dockerfile): re-check them on a bump.
+set -euo pipefail
+
+[ "$#" -ge 1 ] || { echo "usage: scripts/linux-gate-vulkan <command> [args...]" >&2; exit 64; }
+: "${M2V_GATE_ICD:?linux-gate-vulkan runs inside scripts/linux-gate}"
+
+shopt -s nullglob
+case "$M2V_GATE_ICD" in
+    lavapipe) icds=(/usr/share/vulkan/icd.d/lvp_icd*.json) ;;
+    swiftshader) icds=(/opt/swiftshader/vk_swiftshader_icd.json) ;;
+    *) icds=() ;;
+esac
+[ "${#icds[@]}" -eq 1 ] && [ -f "${icds[0]}" ] ||
+    { echo "linux-gate: this image has no single $M2V_GATE_ICD ICD" >&2; exit 69; }
+export VK_DRIVER_FILES=${icds[0]}
+
+profile=${M2V_GATE_PROFILE:-}
+if [ -n "$profile" ]; then
+    file=$PWD/crates/metal2vulkan-validation/profiles/$profile.json
+    [ -f "$file" ] || { echo "linux-gate: no committed profile $file" >&2; exit 64; }
+    [ -f /usr/local/share/vulkan/explicit_layer.d/VkLayer_khronos_profiles.json ] ||
+        { echo "linux-gate: this image has no VK_LAYER_KHRONOS_profiles" >&2; exit 69; }
+    simulate=SIMULATE_API_VERSION_BIT,SIMULATE_FEATURES_BIT,SIMULATE_PROPERTIES_BIT
+    simulate+=,SIMULATE_EXTENSIONS_BIT,SIMULATE_FORMATS_BIT,SIMULATE_QUEUE_FAMILY_PROPERTIES_BIT
+    device=$(vulkaninfo --summary 2>/dev/null) ||
+        { echo "linux-gate: vulkaninfo cannot open the $M2V_GATE_ICD device" >&2; exit 69; }
+    name=$(python3 - "$file" <<"PY"
+import json, sys
+names = list(json.load(open(sys.argv[1]))["profiles"])
+if len(names) != 1:
+    sys.exit(f"linux-gate: expected one profile in {sys.argv[1]}, found {len(names)}")
+print(names[0])
+PY
+)
+    # The same layer stack as the command: the pinned profiles layer alone fails
+    # vkEnumeratePhysicalDevices under debug_fail_on_error without reporting why.
+    check=$(mktemp)
+    status=0
+    VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation:VK_LAYER_KHRONOS_profiles \
+        VK_KHRONOS_PROFILES_PROFILE_FILE="$file" \
+        VK_KHRONOS_PROFILES_PROFILE_NAME="$name" \
+        VK_KHRONOS_PROFILES_SIMULATE_CAPABILITIES="$simulate" \
+        VK_KHRONOS_PROFILES_EMULATE_PORTABILITY=false \
+        VK_KHRONOS_PROFILES_DEBUG_REPORTS=DEBUG_REPORT_WARNING_BIT,DEBUG_REPORT_ERROR_BIT \
+        VK_KHRONOS_PROFILES_DEBUG_ACTIONS=DEBUG_ACTION_STDOUT_BIT \
+        VK_KHRONOS_PROFILES_DEBUG_FAIL_ON_ERROR=true \
+        vulkaninfo --summary >"$check" 2>&1 || status=$?
+    verdict=0
+    M2V_DEVICE=$device python3 - "$file" "$name" "$M2V_GATE_ICD" "$status" "$check" <<"PY" ||
+import json, os, re, sys
+
+file, name, icd, status, log = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), sys.argv[5]
+device = os.environ["M2V_DEVICE"]
+check = open(log, errors="replace").read()
+
+version = lambda text: tuple(int(part) for part in text.split(".")[:2])
+wanted = json.load(open(file))["profiles"][name]["api-version"]
+found = re.search(r"apiVersion\s*=\s*(\d+\.\d+\.\d+)", device)
+problems = []
+if found is None:
+    problems.append("vulkaninfo reported no device apiVersion")
+elif version(wanted) > version(found.group(1)):
+    problems.append(f"the profile's API version {wanted} exceeds the device's {found.group(1)}")
+harmless = (
+    re.compile(r"PROFILES WARNING: Profile sets variables for \S+ while also using \S+$"),
+    re.compile(r"PROFILES WARNING: '[^']+' is not modifiable but the profile value .* is "
+               r"different from the device .* value .*$"),
+    re.compile(r"PROFILES WARNING: Profile apiVersion \(\S+\) is greater than the device "
+               r"apiVersion \(\S+\)\.$"),
+)
+for line in check.splitlines():
+    line = line.strip()
+    if line.startswith("PROFILES ") and not any(p.match(line) for p in harmless):
+        problems.append(line)
+if status != 0:
+    problems.append(f"vulkaninfo under the profile exited with {status}")
+if problems:
+    unique = list(dict.fromkeys(problems))
+    print(f"linux-gate: profile {name} ({file}) states more than the {icd} device has "
+          f"({len(unique)} distinct problems):", file=sys.stderr)
+    for problem in unique[:40]:
+        print(f"  {problem}", file=sys.stderr)
+    if len(unique) > 40:
+        print(f"  ... and {len(unique) - 40} more", file=sys.stderr)
+    sys.exit(65)
+PY
+        verdict=$?
+    rm -f "$check"
+    [ "$verdict" -eq 0 ] || exit "$verdict"
+    export VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation:VK_LAYER_KHRONOS_profiles
+    export VK_KHRONOS_PROFILES_PROFILE_FILE=$file
+    export VK_KHRONOS_PROFILES_PROFILE_NAME=$name
+    export VK_KHRONOS_PROFILES_SIMULATE_CAPABILITIES=$simulate
+    export VK_KHRONOS_PROFILES_EMULATE_PORTABILITY=false
+    export VK_KHRONOS_PROFILES_DEFAULT_FEATURE_VALUES=DEFAULT_FEATURE_VALUES_FALSE
+    export VK_KHRONOS_PROFILES_DEBUG_FAIL_ON_ERROR=true
+    # With false defaults the layer's warnings compare P against the defaulted values, not the
+    # device (the check above covers the device), so only errors are reported.
+    export VK_KHRONOS_PROFILES_DEBUG_REPORTS=DEBUG_REPORT_ERROR_BIT
+    echo "linux-gate: VK_LAYER_KHRONOS_profiles with $name from $file" >&2
+fi
+
+if [ -n "${M2V_DRM_SHIM_ICD_GLOB:-}" ]; then
+    shims=($M2V_DRM_SHIM_ICD_GLOB)
+    [ "${#shims[@]}" -eq 1 ] && [ -f "${shims[0]}" ] ||
+        { echo "linux-gate: expected one ICD at $M2V_DRM_SHIM_ICD_GLOB" >&2; exit 69; }
+    export M2V_DRM_SHIM_ICD=${shims[0]}
+fi
+exec "$@"

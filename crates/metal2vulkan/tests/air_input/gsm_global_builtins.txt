@@ -1,0 +1,211 @@
+target triple = "air64_v28-apple-macosx26.0.0"
+source_filename = "-"
+; datalayout DataLayout { endian: Little, pointers: {0: PointerSpec { size_bits: 64, abi_bits: 64, pref_bits: 64, index_bits: 64 }}, ints: {1: AlignSpec { abi_bits: 8, pref_bits: 8 }, 8: AlignSpec { abi_bits: 8, pref_bits: 8 }, 16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }}, floats: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }}, vectors: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 24: AlignSpec { abi_bits: 32, pref_bits: 32 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 48: AlignSpec { abi_bits: 64, pref_bits: 64 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 96: AlignSpec { abi_bits: 128, pref_bits: 128 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }, 192: AlignSpec { abi_bits: 256, pref_bits: 256 }, 256: AlignSpec { abi_bits: 256, pref_bits: 256 }, 512: AlignSpec { abi_bits: 512, pref_bits: 512 }, 1024: AlignSpec { abi_bits: 1024, pref_bits: 1024 }}, aggregate: AlignSpec { abi_bits: 0, pref_bits: 64 }, native_ints: [8, 16, 32], stack_align_bits: None, alloca_space: 0, program_space: 0, globals_space: 0, mangling: None, fn_ptr_align: None, non_integral: [] }
+%t3 = type void (ptr addrspace(1))
+%t5 = type i32 (i32)
+%t6 = type i32 ()
+%t8 = type [2 x i32]
+c20 = %t8 [27, 0]
+
+define %t3 @f0 "global_builtins_in_a_kernel" convergent memory(Mod, NoModRef, NoModRef) "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="0" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a0( Mod nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = tail call i32 @f1 [air GlobalBuiltin(GlobalBuiltin { var: ThreadPositionInGrid, ty: I32 })](i32 0)
+  %i1 = tail call i32 @f1 [air GlobalBuiltin(GlobalBuiltin { var: ThreadPositionInGrid, ty: I32 })](i32 1)
+  %i2 = tail call i32 @f1 [air GlobalBuiltin(GlobalBuiltin { var: ThreadPositionInGrid, ty: I32 })](i32 2)
+  %i3 = tail call i32 @f2 [air GlobalBuiltin(GlobalBuiltin { var: ThreadsPerGrid, ty: I32 })](i32 0)
+  %i4 = tail call i32 @f2 [air GlobalBuiltin(GlobalBuiltin { var: ThreadsPerGrid, ty: I32 })](i32 1)
+  %i5 = tail call i32 @f2 [air GlobalBuiltin(GlobalBuiltin { var: ThreadsPerGrid, ty: I32 })](i32 2)
+  %i6 = mul i32 %i4, %i2
+  %i7 = add i32 %i6, %i1
+  %i8 = mul i32 %i7, %i3
+  %i9 = add i32 %i8, %i0
+  %i10 = mul i32 %i9, i32 29
+  %i11 = zext %i10 to i64
+  %i12 = getelementptr inbounds i32, %a0, %i11
+  %i13 = tail call i32 @f3 [air GlobalBuiltin(GlobalBuiltin { var: ThreadsPerThreadgroup, ty: I32 })](i32 0)
+  %i14 = tail call i32 @f3 [air GlobalBuiltin(GlobalBuiltin { var: ThreadsPerThreadgroup, ty: I32 })](i32 1)
+  %i15 = tail call i32 @f3 [air GlobalBuiltin(GlobalBuiltin { var: ThreadsPerThreadgroup, ty: I32 })](i32 2)
+  store %i13, %i12, align 4
+  %i17 = getelementptr inbounds i32, %i12, i64 1
+  store %i14, %i17, align 4
+  %i19 = getelementptr inbounds i32, %i12, i64 2
+  store %i15, %i19, align 4
+  %i21 = tail call i32 @f4 [air GlobalBuiltin(GlobalBuiltin { var: ThreadPositionInThreadgroup, ty: I32 })](i32 0)
+  %i22 = tail call i32 @f4 [air GlobalBuiltin(GlobalBuiltin { var: ThreadPositionInThreadgroup, ty: I32 })](i32 1)
+  %i23 = tail call i32 @f4 [air GlobalBuiltin(GlobalBuiltin { var: ThreadPositionInThreadgroup, ty: I32 })](i32 2)
+  %i24 = getelementptr inbounds i32, %i12, i64 3
+  store %i21, %i24, align 4
+  %i26 = getelementptr inbounds i32, %i12, i64 4
+  store %i22, %i26, align 4
+  %i28 = getelementptr inbounds i32, %i12, i64 5
+  store %i23, %i28, align 4
+  %i30 = tail call i32 @f5 [air GlobalBuiltin(GlobalBuiltin { var: ThreadIndexInThreadgroup, ty: I32 })]()
+  %i31 = getelementptr inbounds i32, %i12, i64 6
+  store %i30, %i31, align 4
+  tail call void @f6(%i12) "no-builtins"=""
+  %i34 = tail call i32 @f7 [air GlobalBuiltin(GlobalBuiltin { var: SimdgroupIndexInThreadgroup, ty: I32 })]()
+  %i35 = getelementptr inbounds i32, %i12, i64 8
+  store %i34, %i35, align 4
+  %i37 = tail call i32 @f8 [air GlobalBuiltin(GlobalBuiltin { var: SimdgroupsPerThreadgroup, ty: I32 })]()
+  %i38 = getelementptr inbounds i32, %i12, i64 9
+  store %i37, %i38, align 4
+  %i40 = tail call i32 @f9 [air GlobalBuiltin(GlobalBuiltin { var: QuadgroupIndexInThreadgroup, ty: I32 })]()
+  %i41 = getelementptr inbounds i32, %i12, i64 11
+  store %i40, %i41, align 4
+  %i43 = tail call i32 @f10 [air GlobalBuiltin(GlobalBuiltin { var: QuadgroupsPerThreadgroup, ty: I32 })]()
+  %i44 = getelementptr inbounds i32, %i12, i64 12
+  store %i43, %i44, align 4
+  %i46 = getelementptr inbounds i32, %i12, i64 13
+  store %i0, %i46, align 4
+  %i48 = getelementptr inbounds i32, %i12, i64 14
+  store %i1, %i48, align 4
+  %i50 = getelementptr inbounds i32, %i12, i64 15
+  store %i2, %i50, align 4
+  %i52 = tail call i32 @f11 [air GlobalBuiltin(GlobalBuiltin { var: ThreadgroupPositionInGrid, ty: I32 })](i32 0)
+  %i53 = tail call i32 @f11 [air GlobalBuiltin(GlobalBuiltin { var: ThreadgroupPositionInGrid, ty: I32 })](i32 1)
+  %i54 = tail call i32 @f11 [air GlobalBuiltin(GlobalBuiltin { var: ThreadgroupPositionInGrid, ty: I32 })](i32 2)
+  %i55 = getelementptr inbounds i32, %i12, i64 16
+  store %i52, %i55, align 4
+  %i57 = getelementptr inbounds i32, %i12, i64 17
+  store %i53, %i57, align 4
+  %i59 = getelementptr inbounds i32, %i12, i64 18
+  store %i54, %i59, align 4
+  %i61 = getelementptr inbounds i32, %i12, i64 19
+  store %i3, %i61, align 4
+  %i63 = getelementptr inbounds i32, %i12, i64 20
+  store %i4, %i63, align 4
+  %i65 = getelementptr inbounds i32, %i12, i64 21
+  store %i5, %i65, align 4
+  %i67 = tail call i32 @f12 [air GlobalBuiltin(GlobalBuiltin { var: ThreadgroupsPerGrid, ty: I32 })](i32 0)
+  %i68 = tail call i32 @f12 [air GlobalBuiltin(GlobalBuiltin { var: ThreadgroupsPerGrid, ty: I32 })](i32 1)
+  %i69 = tail call i32 @f12 [air GlobalBuiltin(GlobalBuiltin { var: ThreadgroupsPerGrid, ty: I32 })](i32 2)
+  %i70 = getelementptr inbounds i32, %i12, i64 22
+  store %i67, %i70, align 4
+  %i72 = getelementptr inbounds i32, %i12, i64 23
+  store %i68, %i72, align 4
+  %i74 = getelementptr inbounds i32, %i12, i64 24
+  store %i69, %i74, align 4
+  %i76 = tail call i32 @f13 [air GlobalBuiltin(GlobalBuiltin { var: DispatchThreadsPerThreadgroup, ty: I32 })](i32 0)
+  %i77 = tail call i32 @f13 [air GlobalBuiltin(GlobalBuiltin { var: DispatchThreadsPerThreadgroup, ty: I32 })](i32 1)
+  %i78 = tail call i32 @f13 [air GlobalBuiltin(GlobalBuiltin { var: DispatchThreadsPerThreadgroup, ty: I32 })](i32 2)
+  %i79 = getelementptr inbounds i32, %i12, i64 25
+  store %i76, %i79, align 4
+  %i81 = getelementptr inbounds i32, %i12, i64 26
+  store %i77, %i81, align 4
+  %i83 = getelementptr inbounds i32, %i12, i64 27
+  store %i78, %i83, align 4
+  %i85 = tail call i32 @f14 [air GlobalBuiltin(GlobalBuiltin { var: DispatchSimdgroupsPerThreadgroup, ty: I32 })]()
+  %i86 = getelementptr inbounds i32, %i12, i64 28
+  store %i85, %i86, align 4
+  ret void
+}
+
+declare %t5 @f1 "air.get_global_id.i32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t5 @f2 "air.get_global_size.i32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t5 @f3 "air.get_local_size.i32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t5 @f4 "air.get_local_id.i32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f5 "air.get_local_linear_id.i32" memory(NoModRef, NoModRef, NoModRef)
+
+define internal %t3 @f6 "_ZL11write_lanesPU9MTLdevicej" fastcc memory(Mod, NoModRef, NoModRef) "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="0" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a0( Mod nocapture ) {
+bb0:
+  %i0 = tail call i32 @f15 [air GlobalBuiltin(GlobalBuiltin { var: ThreadIndexInSimdgroup, ty: I32 })]()
+  %i1 = getelementptr inbounds i32, %a0, i64 7
+  store %i0, %i1, align 4
+  %i3 = tail call i32 @f16 [air GlobalBuiltin(GlobalBuiltin { var: ThreadIndexInQuadgroup, ty: I32 })]()
+  %i4 = getelementptr inbounds i32, %a0, i64 10
+  store %i3, %i4, align 4
+  ret void
+}
+
+declare %t6 @f7 "air.get_simdgroup_index_in_threadgroup.i32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f8 "air.get_simdgroups_per_threadgroup.i32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f9 "air.get_quadgroup_index_in_threadgroup.i32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f10 "air.get_quadgroups_per_threadgroup.i32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t5 @f11 "air.get_group_id.i32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t5 @f12 "air.get_num_groups.i32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t5 @f13 "air.get_dispatch_threads_per_threadgroup.i32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f14 "air.get_dispatch_simdgroups_per_threadgroup.i32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f15 "air.get_thread_index_in_simdgroup.i32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f16 "air.get_thread_index_in_quadgroup.i32" memory(NoModRef, NoModRef, NoModRef)
+!md0 = !"SDK Version"
+!md1 = !"wchar_size"
+!md2 = !"frame-pointer"
+!md3 = !"air.max_device_buffers"
+!md4 = !"air.max_constant_buffers"
+!md5 = !"air.max_threadgroup_buffers"
+!md6 = !"air.max_textures"
+!md7 = !"air.max_read_write_textures"
+!md8 = !"air.max_samplers"
+!md9 = !"air.buffer"
+!md10 = !"air.location_index"
+!md11 = !"air.read_write"
+!md12 = !"air.address_space"
+!md13 = !"air.arg_type_size"
+!md14 = !"air.arg_type_align_size"
+!md15 = !"air.arg_type_name"
+!md16 = !"uint"
+!md17 = !"air.arg_name"
+!md18 = !"out"
+!md19 = !"air.compile.denorms_disable"
+!md20 = !"air.compile.fast_math_enable"
+!md21 = !"air.compile.framebuffer_fetch_enable"
+!md22 = !"Apple metal version 32023.921 (metalfe-32023.921.6)"
+!md23 = !"Metal"
+!md24 = !"int"
+!md25 = !"omnipotent char"
+!md26 = !"Simple C++ TBAA"
+!md27 = i32 2
+!md28 = %t8 c20
+!md29 = i32 1
+!md30 = i32 4
+!md31 = i32 7
+!md32 = i32 31
+!md33 = i32 128
+!md34 = i32 8
+!md35 = i32 16
+!md36 = ptr addrspace(0) @f0
+!md37 = i32 0
+!md38 = i32 3
+!md39 = i64 0
+!md40 = !{!md27, !md0, !md28}
+!md41 = !{!md29, !md1, !md30}
+!md42 = !{!md31, !md2, !md27}
+!md43 = !{!md31, !md3, !md32}
+!md44 = !{!md31, !md4, !md32}
+!md45 = !{!md31, !md5, !md32}
+!md46 = !{!md31, !md6, !md33}
+!md47 = !{!md31, !md7, !md34}
+!md48 = !{!md31, !md8, !md35}
+!md49 = !{}
+!md50 = !{!md37, !md9, !md10, !md37, !md29, !md11, !md12, !md29, !md13, !md30, !md14, !md30, !md15, !md16, !md17, !md18}
+!md51 = !{!md50}
+!md52 = !{!md36, !md49, !md51}
+!md53 = !{!md19}
+!md54 = !{!md20}
+!md55 = !{!md21}
+!md56 = !{!md22}
+!md57 = !{!md27, !md34, !md37}
+!md58 = !{!md23, !md38, !md29, !md37}
+!md59 = !{!md26}
+!md60 = !{!md25, !md59, !md39}
+!md61 = !{!md24, !md60, !md39}
+!md62 = !{!md61, !md61, !md39}
+!"llvm.module.flags" = !{!md40, !md41, !md42, !md43, !md44, !md45, !md46, !md47, !md48}
+!"air.kernel" = !{!md52}
+!"air.compile_options" = !{!md53, !md54, !md55}
+!"llvm.ident" = !{!md56}
+!"air.version" = !{!md57}
+!"air.language_version" = !{!md58}

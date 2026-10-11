@@ -1,0 +1,781 @@
+//! A render encoder's mesh draws: a mesh render pipeline's state
+//! ([`Device::new_mesh_render_pipeline_state`](crate::Device::new_mesh_render_pipeline_state))
+//! draws through `drawMeshThreadgroups:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:`,
+//! `drawMeshThreads:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:` and
+//! `drawMeshThreadgroupsWithIndirectBuffer:indirectBufferOffset:threadsPerObjectThreadgroup:
+//! threadsPerMeshThreadgroup:`, with the object and mesh stages' tables the `setObject` and
+//! `setMesh` setters fill.
+//!
+//! - **What Metal draws**, measured by probes on an M3 Max and an M4, the two alike: each mesh
+//!   threadgroup's primitives in its threadgroup's order. `drawMeshThreads` without an object
+//!   function launches the whole mesh threadgroups the threads fill, rounded down along each axis,
+//!   and those threadgroups' threads are the grid the mesh function's builtins report
+//!   (`threads_per_grid`, `thread_position_in_grid`): 10 by 3 threads in threadgroups of 4 by 2
+//!   draw 2 by 1 threadgroups of an 8 by 2 grid. With an object function it launches the object
+//!   threadgroups the threads fill, rounded up, the last along an axis running only the threads
+//!   left (6 threads in threadgroups of 4: a threadgroup of 4 and one of 2, whose
+//!   `threads_per_threadgroup` is 2). Each object threadgroup launches the mesh grid it sets, whose
+//!   threadgroups read the payload it wrote. A grid with a zero axis, and a threadgroup of no
+//!   thread, draw nothing; a threadgroup of more than 1024 threads, and indirect arguments at an
+//!   offset that is not a multiple of 4, draw nothing too, though Metal's validation stops them
+//!   ("threadsPerMeshThreadgroup (1025 x 1 x 1 = 1025) cannot exceed
+//!   maxTotalThreadsPerMeshThreadgroup (1024)"), and they draw nothing here, refused only as a draw
+//!   of the encoder's pipeline state is before it reads anything (no state, a tile state, a state
+//!   that is not a mesh render pipeline's). A draw of primitives with a mesh render pipeline's
+//!   state, and a mesh draw with another state, stop Metal with or without its validation
+//!   (`DrawProblem::DrawKind`), but for a mesh draw of a grid with a zero axis, which plain Metal
+//!   draws nothing of with a drawing state too, and so does the encoder (EV RFX-probe2-m4, an M4;
+//!   its validation stops it).
+//! - **The draw** is the binder's (`DrawCall::MeshThreadgroups`, `MeshThreads`,
+//!   `MeshThreadgroupsIndirect`): `vkCmdDrawMeshTasksEXT` of its first stage's threadgroups
+//!   (the object function's, where the pipeline has one), each stage's threadgroup size a
+//!   specialization of the draw's own `VkPipeline` (the draw's `DrawCommands::specialization`, as
+//!   a kernel's threadgroup size is a dispatch's), through the
+//!   render encoder's steps (`render.rs`). A mesh pipeline has no vertex input and no input
+//!   assembly; its key takes a triangle list, under which Vulkan biases the depth of a mesh
+//!   function's triangles and of none of its lines or points, as Metal does.
+//! - **Refused**, as the binder refuses them: a threadgroup or a grid past the device's limits
+//!   for its stage (`Unsupported{MeshShading}` naming the limit), a `drawMeshThreads` that
+//!   leaves a partial object threadgroup (`NotImplemented(MeshShading)`: splitting the draw into
+//!   regions of their own threadgroup sizes would reorder its primitives), and an object
+//!   function's threadgroup memory arguments (`NotImplemented(MeshShading)`, which no setter
+//!   here sets). On a device with `VK_EXT_mesh_shader` an indirect draw is
+//!   `NotImplemented(IndirectDrawArguments)`: the binder asks for its arguments on the CPU, since
+//!   nothing bounds its GPU-written group counts by the device's limits yet.
+//! - **Emulated** on a device without `VK_EXT_mesh_shader`, whose pipeline's object and mesh
+//!   functions are compute stages and whose mesh function writes records
+//!   (`GraphicsState::mesh_records`): each draw has a work buffer ([`MeshWork`], uploaded per draw)
+//!   and its records, which the draw's set 0 binds for its dispatches and the draw alike; the draw
+//!   is the binder's draw of the synthesized vertex stage, as a list of the mesh's topology. A
+//!   direct draw without an object function knows its grid: its work buffer is complete, its
+//!   records an exact region of the command buffer's arena, and it runs its mesh threadgroups as
+//!   one dispatch ([`MeshSteps`]). A draw with an object function, or an indirect draw, runs the
+//!   object threadgroups (or nothing), then the crate's mesh scan (`bind::mesh_scan_module`), which
+//!   places the mesh threadgroups each object threadgroup launched (or Metal's indirect arguments'
+//!   grid), reserves their records in the command buffer's records pool, and writes the mesh
+//!   dispatch's and the draw's indirect arguments; between barriers, the mesh dispatch and the draw
+//!   read them. The pool is a sixty-fourth of the device's largest device-local heap, within one
+//!   binding and one allocation, a block the command buffer leases from the device's spare
+//!   (`gpu_pools.rs`; made for each command buffer before); a draw whose records the rest of it
+//!   cannot hold draws nothing and fails the command buffer
+//!   (`CommandBufferError::MeshRecordsOverflow`, naming the first such draw's number, its object
+//!   threadgroups and its mesh threadgroups). The dispatches record before the pass, as a draw's
+//!   copies do (`draw_source.rs`), or, where an earlier draw or tile dispatch of the encoder wrote
+//!   what they read behind a memory barrier, or touched what they write, before the draw's own
+//!   render pass instance, after theirs: between a barrier from everything before and one to
+//!   everything after. An indirect command's record before its pass too, or, behind the command's
+//!   barrier where an earlier draw's stages before its fragments touched what they use, before the
+//!   run of the execution's that the barrier begins (`render/executions.rs`). Such draws announce
+//!   `emulated-mesh-draws` once. An indirect draw of a pipeline with an object function is not
+//!   emulated yet (`NotImplemented(MeshShading)`).
+
+use super::replay::Samplers;
+use super::RenderCommandEncoder;
+use super::{check_arguments, draw_problem, Assembly, DrawBuffers, DrawProblem};
+use super::{RenderCall, Table};
+use crate::binding::{MeshRegions, PushWrite};
+use crate::buffer::Buffer;
+use crate::degradation::Degradation;
+use crate::draw_source::DrawSource;
+use crate::encoder::EncoderCore;
+use crate::error::{internal, invalid, Error, Problem};
+use crate::owned_kernel::{OwnedKernel, OwnedModule, OwnedSets};
+use crate::pipeline::RawPipeline;
+use crate::resource::ResourceKey;
+use crate::sampler::SamplerState;
+use crate::texture::Texture;
+use crate::tracker::{Barrier, Use};
+use crate::upload::Upload;
+use crate::values::Size;
+use ash::vk;
+use metal2vulkan::bind::{
+    BufferRange, DrawCall, ExecutionStatus, IndirectRef, MeshDispatch, MeshRecordsRegion,
+    MeshScanModule,
+};
+use std::sync::Arc;
+
+/// Metal's most threads of an object or mesh threadgroup (`maxTotalThreadsPerObjectThreadgroup`,
+/// `maxTotalThreadsPerMeshThreadgroup`, measured).
+const METAL_THREADGROUP_THREADS: u64 = 1024;
+
+/// The bytes of `MTLDispatchThreadgroupsIndirectArguments`, which are
+/// `VkDrawMeshTasksIndirectCommandEXT`'s.
+const INDIRECT_BYTES: u64 = 12;
+
+impl RenderCommandEncoder {
+    /// `setObjectBuffer:offset:atIndex:` (`None` unbinds the index). Refused as
+    /// [`set_vertex_buffer`](Self::set_vertex_buffer) is.
+    pub fn set_object_buffer(
+        &mut self,
+        buffer: Option<&Buffer>,
+        offset: u64,
+        index: u32,
+    ) -> Result<(), Error> {
+        self.log(|_| RenderCall::Buffer(Table::Object, buffer.cloned(), offset, index));
+        self.object
+            .set_buffer(&self.core, "set_object_buffer", buffer, offset, index)
+    }
+
+    /// `setObjectBuffers:offsets:withRange:`. Refused as
+    /// [`set_vertex_buffers`](Self::set_vertex_buffers) is.
+    pub fn set_object_buffers(
+        &mut self,
+        buffers: &[Option<&Buffer>],
+        offsets: &[u64],
+        first: u32,
+    ) -> Result<(), Error> {
+        self.log(|log| {
+            RenderCall::Buffers(
+                Table::Object,
+                log.buffer_span(buffers),
+                log.word_span(offsets),
+                first,
+            )
+        });
+        self.object
+            .set_buffers(&self.core, "set_object_buffers", buffers, offsets, first)
+    }
+
+    /// `setObjectBufferOffset:atIndex:`. Refused as
+    /// [`set_vertex_buffer_offset`](Self::set_vertex_buffer_offset) is.
+    pub fn set_object_buffer_offset(&mut self, offset: u64, index: u32) -> Result<(), Error> {
+        self.log(|_| RenderCall::BufferOffset(Table::Object, offset, index));
+        self.object
+            .set_buffer_offset(&self.core, "set_object_buffer_offset", offset, index)
+    }
+
+    /// `setObjectBytes:length:atIndex:`: as [`set_vertex_bytes`](Self::set_vertex_bytes), in
+    /// the object stage's table. Refused as that is.
+    pub fn set_object_bytes(&mut self, bytes: &[u8], index: u32) -> Result<(), Error> {
+        self.log(|log| RenderCall::Bytes(Table::Object, log.byte_span(bytes), index));
+        self.object
+            .set_bytes(&self.core, "set_object_bytes", bytes, None, index)
+    }
+
+    /// `setObjectTexture:atIndex:` (`None` unbinds the index). Refused as
+    /// [`set_vertex_texture`](Self::set_vertex_texture) is.
+    pub fn set_object_texture(
+        &mut self,
+        texture: Option<&Texture>,
+        index: u32,
+    ) -> Result<(), Error> {
+        self.log(|_| RenderCall::Texture(Table::Object, texture.cloned(), index));
+        self.object
+            .set_textures(&self.core, "set_object_texture", &[texture], index)
+    }
+
+    /// `setObjectTextures:withRange:`. Refused as
+    /// [`set_vertex_textures`](Self::set_vertex_textures) is.
+    pub fn set_object_textures(
+        &mut self,
+        textures: &[Option<&Texture>],
+        first: u32,
+    ) -> Result<(), Error> {
+        self.log(|log| RenderCall::Textures(Table::Object, log.texture_span(textures), first));
+        self.object
+            .set_textures(&self.core, "set_object_textures", textures, first)
+    }
+
+    /// `setObjectSamplerState:atIndex:` (`None` unbinds the index). Refused as
+    /// [`set_vertex_sampler_state`](Self::set_vertex_sampler_state) is.
+    pub fn set_object_sampler_state(
+        &mut self,
+        sampler: Option<&SamplerState>,
+        index: u32,
+    ) -> Result<(), Error> {
+        self.log(|_| RenderCall::Sampler(Table::Object, sampler.cloned(), index));
+        self.object.set_samplers(
+            &self.core,
+            "set_object_sampler_state",
+            &[sampler],
+            None,
+            index,
+        )
+    }
+
+    /// `setObjectSamplerStates:withRange:`, or with `clamps`
+    /// `setObjectSamplerStates:lodMinClamps:lodMaxClamps:withRange:`. Refused as
+    /// [`set_vertex_sampler_states`](Self::set_vertex_sampler_states) is.
+    pub fn set_object_sampler_states(
+        &mut self,
+        samplers: &[Option<&SamplerState>],
+        clamps: Option<(&[f32], &[f32])>,
+        first: u32,
+    ) -> Result<(), Error> {
+        self.log(|_| RenderCall::Samplers(Table::Object, Samplers::of(samplers, clamps, first)));
+        self.object.set_samplers(
+            &self.core,
+            "set_object_sampler_states",
+            samplers,
+            clamps,
+            first,
+        )
+    }
+
+    /// `setMeshBuffer:offset:atIndex:` (`None` unbinds the index). Refused as
+    /// [`set_vertex_buffer`](Self::set_vertex_buffer) is.
+    pub fn set_mesh_buffer(
+        &mut self,
+        buffer: Option<&Buffer>,
+        offset: u64,
+        index: u32,
+    ) -> Result<(), Error> {
+        self.log(|_| RenderCall::Buffer(Table::Mesh, buffer.cloned(), offset, index));
+        self.mesh
+            .set_buffer(&self.core, "set_mesh_buffer", buffer, offset, index)
+    }
+
+    /// `setMeshBuffers:offsets:withRange:`. Refused as
+    /// [`set_vertex_buffers`](Self::set_vertex_buffers) is.
+    pub fn set_mesh_buffers(
+        &mut self,
+        buffers: &[Option<&Buffer>],
+        offsets: &[u64],
+        first: u32,
+    ) -> Result<(), Error> {
+        self.log(|log| {
+            RenderCall::Buffers(
+                Table::Mesh,
+                log.buffer_span(buffers),
+                log.word_span(offsets),
+                first,
+            )
+        });
+        self.mesh
+            .set_buffers(&self.core, "set_mesh_buffers", buffers, offsets, first)
+    }
+
+    /// `setMeshBufferOffset:atIndex:`. Refused as
+    /// [`set_vertex_buffer_offset`](Self::set_vertex_buffer_offset) is.
+    pub fn set_mesh_buffer_offset(&mut self, offset: u64, index: u32) -> Result<(), Error> {
+        self.log(|_| RenderCall::BufferOffset(Table::Mesh, offset, index));
+        self.mesh
+            .set_buffer_offset(&self.core, "set_mesh_buffer_offset", offset, index)
+    }
+
+    /// `setMeshBytes:length:atIndex:`: as [`set_vertex_bytes`](Self::set_vertex_bytes), in the
+    /// mesh stage's table. Refused as that is.
+    pub fn set_mesh_bytes(&mut self, bytes: &[u8], index: u32) -> Result<(), Error> {
+        self.log(|log| RenderCall::Bytes(Table::Mesh, log.byte_span(bytes), index));
+        self.mesh
+            .set_bytes(&self.core, "set_mesh_bytes", bytes, None, index)
+    }
+
+    /// `setMeshTexture:atIndex:` (`None` unbinds the index). Refused as
+    /// [`set_vertex_texture`](Self::set_vertex_texture) is.
+    pub fn set_mesh_texture(&mut self, texture: Option<&Texture>, index: u32) -> Result<(), Error> {
+        self.log(|_| RenderCall::Texture(Table::Mesh, texture.cloned(), index));
+        self.mesh
+            .set_textures(&self.core, "set_mesh_texture", &[texture], index)
+    }
+
+    /// `setMeshTextures:withRange:`. Refused as
+    /// [`set_vertex_textures`](Self::set_vertex_textures) is.
+    pub fn set_mesh_textures(
+        &mut self,
+        textures: &[Option<&Texture>],
+        first: u32,
+    ) -> Result<(), Error> {
+        self.log(|log| RenderCall::Textures(Table::Mesh, log.texture_span(textures), first));
+        self.mesh
+            .set_textures(&self.core, "set_mesh_textures", textures, first)
+    }
+
+    /// `setMeshSamplerState:atIndex:` (`None` unbinds the index). Refused as
+    /// [`set_vertex_sampler_state`](Self::set_vertex_sampler_state) is.
+    pub fn set_mesh_sampler_state(
+        &mut self,
+        sampler: Option<&SamplerState>,
+        index: u32,
+    ) -> Result<(), Error> {
+        self.log(|_| RenderCall::Sampler(Table::Mesh, sampler.cloned(), index));
+        self.mesh.set_samplers(
+            &self.core,
+            "set_mesh_sampler_state",
+            &[sampler],
+            None,
+            index,
+        )
+    }
+
+    /// `setMeshSamplerStates:withRange:`, or with `clamps`
+    /// `setMeshSamplerStates:lodMinClamps:lodMaxClamps:withRange:`. Refused as
+    /// [`set_vertex_sampler_states`](Self::set_vertex_sampler_states) is.
+    pub fn set_mesh_sampler_states(
+        &mut self,
+        samplers: &[Option<&SamplerState>],
+        clamps: Option<(&[f32], &[f32])>,
+        first: u32,
+    ) -> Result<(), Error> {
+        self.log(|_| RenderCall::Samplers(Table::Mesh, Samplers::of(samplers, clamps, first)));
+        self.mesh.set_samplers(
+            &self.core,
+            "set_mesh_sampler_states",
+            samplers,
+            clamps,
+            first,
+        )
+    }
+
+    /// `drawMeshThreadgroups:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:`: `groups`
+    /// mesh threadgroups of `threads_per_mesh_group` threads (the module docs). Refused as the
+    /// module docs say, and for a size past 32 bits on an axis (`Invalid(SizeOutOfRange)`).
+    pub fn draw_mesh_threadgroups(
+        &mut self,
+        groups: Size,
+        threads_per_object_group: Size,
+        threads_per_mesh_group: Size,
+    ) -> Result<(), Error> {
+        self.log(|_| {
+            RenderCall::MeshThreadgroups(Box::new((
+                groups,
+                threads_per_object_group,
+                threads_per_mesh_group,
+            )))
+        });
+        const CALL: &str = "draw_mesh_threadgroups";
+        let grid = MeshGrid::Threadgroups(axes(CALL, groups)?);
+        let object = axes(CALL, threads_per_object_group)?;
+        let mesh = axes(CALL, threads_per_mesh_group)?;
+        self.draw_mesh(CALL, grid, object, mesh)
+    }
+
+    /// `drawMeshThreads:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:`: the whole mesh
+    /// threadgroups of `threads_per_mesh_group` threads that `threads` fill (the module docs).
+    /// Refused as [`draw_mesh_threadgroups`](Self::draw_mesh_threadgroups) is.
+    pub fn draw_mesh_threads(
+        &mut self,
+        threads: Size,
+        threads_per_object_group: Size,
+        threads_per_mesh_group: Size,
+    ) -> Result<(), Error> {
+        self.log(|_| {
+            RenderCall::MeshThreads(Box::new((
+                threads,
+                threads_per_object_group,
+                threads_per_mesh_group,
+            )))
+        });
+        const CALL: &str = "draw_mesh_threads";
+        let grid = MeshGrid::Threads(axes(CALL, threads)?);
+        let object = axes(CALL, threads_per_object_group)?;
+        let mesh = axes(CALL, threads_per_mesh_group)?;
+        self.draw_mesh(CALL, grid, object, mesh)
+    }
+
+    /// The direct mesh draw of `grid` for `call`, its object and mesh threadgroups of `object`
+    /// and `mesh` threads: the encoder's `draw_mesh_threadgroups` and `draw_mesh_threads`, and
+    /// an indirect command buffer's mesh command (`render/executions.rs`).
+    pub(super) fn draw_mesh(
+        &mut self,
+        call: &'static str,
+        grid: MeshGrid,
+        object: [u32; 3],
+        mesh: [u32; 3],
+    ) -> Result<(), Error> {
+        if !self.mesh_threadgroups_run(object, mesh) {
+            return self.mesh_draws_nothing(call);
+        }
+        // A grid with an axis of 0 launches no threadgroup: an empty draw (`RenderCommandEncoder::
+        // draw`, which checks it only as plain Metal checks one).
+        let empty = match grid {
+            MeshGrid::Threadgroups(axes) | MeshGrid::Threads(axes) => axes.contains(&0),
+        };
+        let draw = match grid {
+            MeshGrid::Threadgroups(groups) => DrawCall::MeshThreadgroups {
+                groups,
+                threads_per_object_group: object,
+                threads_per_mesh_group: mesh,
+            },
+            MeshGrid::Threads(threads) => DrawCall::MeshThreads {
+                threads,
+                threads_per_object_group: object,
+                threads_per_mesh_group: mesh,
+            },
+        };
+        self.draw(call, Assembly::Meshes, draw, DrawBuffers::default(), empty)
+    }
+
+    /// `drawMeshThreadgroupsWithIndirectBuffer:indirectBufferOffset:threadsPerObjectThreadgroup:
+    /// threadsPerMeshThreadgroup:`: Metal's `MTLDispatchThreadgroupsIndirectArguments` at
+    /// `indirect_buffer_offset`, the threadgroups' counts. Refused as
+    /// [`draw_mesh_threadgroups`](Self::draw_mesh_threadgroups) is, as an indirect draw's
+    /// arguments are (`render.rs`'s module docs), and for an indirect buffer of another device.
+    /// On a device with `VK_EXT_mesh_shader` the draw is `NotImplemented(IndirectDrawArguments)`,
+    /// and on one without it, of a pipeline with an object function, `NotImplemented(MeshShading)`
+    /// (the module docs).
+    pub fn draw_mesh_threadgroups_indirect(
+        &mut self,
+        indirect_buffer: &Buffer,
+        indirect_buffer_offset: u64,
+        threads_per_object_group: Size,
+        threads_per_mesh_group: Size,
+    ) -> Result<(), Error> {
+        self.log(|_| {
+            RenderCall::MeshThreadgroupsIndirect(Box::new((
+                indirect_buffer.clone(),
+                indirect_buffer_offset,
+                threads_per_object_group,
+                threads_per_mesh_group,
+            )))
+        });
+        const CALL: &str = "draw_mesh_threadgroups_indirect";
+        self.core.check_device(CALL, indirect_buffer.device())?;
+        // Arguments at an offset that is not a multiple of 4 draw nothing (the module docs).
+        let aligned = indirect_buffer_offset.is_multiple_of(4);
+        check_arguments(
+            CALL,
+            indirect_buffer.length(),
+            indirect_buffer_offset,
+            INDIRECT_BYTES,
+        )?;
+        let (object, mesh) = (
+            axes(CALL, threads_per_object_group)?,
+            axes(CALL, threads_per_mesh_group)?,
+        );
+        if !aligned || !self.mesh_threadgroups_run(object, mesh) {
+            return self.mesh_draws_nothing(CALL);
+        }
+        let indirect = DrawSource::new(
+            indirect_buffer,
+            indirect_buffer_offset,
+            INDIRECT_BYTES,
+            4,
+            false,
+            false,
+        )?;
+        let draw = DrawCall::MeshThreadgroupsIndirect {
+            indirect: IndirectRef::new(0, indirect.at),
+            threads_per_object_group: object,
+            threads_per_mesh_group: mesh,
+        };
+        let buffers = DrawBuffers {
+            indirect: Some(indirect),
+            ..DrawBuffers::default()
+        };
+        self.draw(CALL, Assembly::Meshes, draw, buffers, false)
+    }
+
+    /// Whether a mesh draw of `object` and `mesh` threads in its object and mesh threadgroups
+    /// runs: not where it draws nothing, though Metal's validation stops it, more than
+    /// [`METAL_THREADGROUP_THREADS`] in the mesh threadgroup, or in the object threadgroup of a
+    /// pipeline with an object function (a probe).
+    fn mesh_threadgroups_run(&self, object: [u32; 3], mesh: [u32; 3]) -> bool {
+        let has_object = self.pipeline.as_ref().is_some_and(|state| {
+            matches!(
+                state.kind(),
+                super::RenderStateKind::Graphics(graphics)
+                    if graphics.descriptor().stage(metal2vulkan::pipeline::Stage::Object).is_some()
+            )
+        });
+        let checked = [(false, mesh)]
+            .into_iter()
+            .chain(has_object.then_some((true, object)));
+        let over = checked.into_iter().any(|(_, size)| {
+            let threads: u64 = size.iter().map(|&axis| u64::from(axis)).product();
+            threads > METAL_THREADGROUP_THREADS
+        });
+        !over
+    }
+
+    /// A mesh draw that draws nothing (the module docs): refused as a mesh draw of the encoder's
+    /// pipeline state is before it reads anything, without a state, with a tile state, or with
+    /// a state that is not a mesh render pipeline's (`DrawProblem::DrawKind`; each stops Metal).
+    fn mesh_draws_nothing(&self, call: &'static str) -> Result<(), Error> {
+        match self
+            .pipeline
+            .as_ref()
+            .map(crate::pipeline::RenderPipelineState::kind)
+        {
+            None => Err(invalid(call, Problem::NoPipelineState)),
+            Some(super::RenderStateKind::Tile(_)) => {
+                Err(draw_problem(call, DrawProblem::TileState))
+            }
+            Some(super::RenderStateKind::Graphics(state))
+                if state.descriptor().vertex().is_some() =>
+            {
+                Err(draw_problem(call, DrawProblem::DrawKind))
+            }
+            Some(super::RenderStateKind::Graphics(_)) => Ok(()),
+        }
+    }
+}
+
+/// A direct mesh draw's grid: of threadgroups (`drawMeshThreadgroups`) or of threads
+/// (`drawMeshThreads`).
+#[derive(Clone, Copy, Debug)]
+pub(super) enum MeshGrid {
+    Threadgroups([u32; 3]),
+    Threads([u32; 3]),
+}
+
+/// `size`'s axes, refused past 32 bits (`Invalid(SizeOutOfRange)`; Metal's answer is not
+/// measured).
+fn axes(call: &'static str, size: Size) -> Result<[u32; 3], Error> {
+    size.axes()
+        .ok_or_else(|| invalid(call, Problem::SizeOutOfRange))
+}
+
+/// An emulated mesh draw's work buffer and records (`DrawCommands::mesh_dispatch`), made for the
+/// draw: the work buffer a region of the command buffer's arena holding the binder's words with
+/// the draw's number and, for records in the command buffer's pool, the pool's words.
+pub(crate) struct MeshWork {
+    pub(crate) work: Upload,
+    /// The records' buffer, offset and bytes.
+    records: (vk::Buffer, u64, u64),
+}
+
+impl MeshWork {
+    /// The work buffer and records of `dispatch`, in `core`'s command buffer. Refused as uploads
+    /// and buffers are.
+    pub(crate) fn new(core: &EncoderCore, dispatch: &MeshDispatch) -> Result<MeshWork, Error> {
+        let device = core.device().clone();
+        let mut state = core.command_buffer().state();
+        let mut words = dispatch.work.clone();
+        let mut set = |at: usize, value: u32| match words.get_mut(at) {
+            Some(word) => {
+                *word = value;
+                Ok(())
+            }
+            None => Err(internal("a mesh work buffer without its header")),
+        };
+        set(MeshDispatch::DRAW_ID, state.next_mesh_draw())?;
+        let records = match dispatch.records {
+            MeshRecordsRegion::Exact(bytes) => {
+                let region = state.uploads.upload(&device, &[], bytes)?;
+                (region.raw(), region.offset(), region.len())
+            }
+            MeshRecordsRegion::Pool => {
+                let (raw, bytes) = state.mesh_pool(&device)?;
+                let words = u32::try_from(bytes / 4)
+                    .map_err(|_| internal("a mesh records pool past a u32's words"))?;
+                set(MeshDispatch::POOL_WORDS, words)?;
+                (raw, 0, bytes)
+            }
+            _ => return Err(internal("mesh records of another kind")),
+        };
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let work = state.uploads.upload(&device, &bytes, dispatch.work_bytes)?;
+        Ok(MeshWork { work, records })
+    }
+
+    /// The work buffer's and the records' descriptors, each bound whole.
+    pub(crate) fn regions(&self) -> MeshRegions {
+        let (buffer, offset, range) = self.records;
+        MeshRegions {
+            work: vk::DescriptorBufferInfo::default()
+                .buffer(self.work.raw())
+                .offset(self.work.offset())
+                .range(self.work.len()),
+            records: vk::DescriptorBufferInfo::default()
+                .buffer(buffer)
+                .offset(offset)
+                .range(range),
+        }
+    }
+
+    /// The work buffer's `VkBuffer` and the byte of it at `offset` into the work buffer.
+    pub(crate) fn at(&self, offset: u64) -> (vk::Buffer, u64) {
+        (self.work.raw(), self.work.offset() + offset)
+    }
+}
+
+/// An emulated mesh draw's scan (`bind::MeshScanModule`): the device's kernel and its set over
+/// the draw's work buffer, the command buffer's status words, and Metal's arguments.
+pub(crate) struct Scan {
+    kernel: OwnedKernel,
+    sets: Vec<vk::DescriptorSet>,
+}
+
+impl Scan {
+    /// The scan of `work`, in `core`'s command buffer (which holds its set until it completes),
+    /// reading Metal's arguments at `arguments` (the `VkBuffer` and the binder's range in it) for
+    /// an indirect draw. Refused as kernels, uploads and sets are.
+    pub(crate) fn new(
+        core: &mut EncoderCore,
+        work: &MeshWork,
+        arguments: Option<(vk::Buffer, BufferRange)>,
+    ) -> Result<Scan, Error> {
+        let device = core.device().clone();
+        let kernel = device.owned_kernel(OwnedModule::MeshScan)?;
+        let status = core.command_buffer().state().status_words(&device)?;
+        let status = (status.raw(), status.offset(), ExecutionStatus::BYTES as u64);
+        let mut set = [(vk::Buffer::null(), 0, 0); 3];
+        set[MeshScanModule::WORK_BINDING as usize] =
+            (work.work.raw(), work.work.offset(), work.work.len());
+        set[MeshScanModule::STATUS_BINDING as usize] = status;
+        // Without arguments nothing reads the binding, which takes the status words.
+        set[MeshScanModule::ARGUMENTS_BINDING as usize] = match arguments {
+            Some((raw, range)) => (raw, range.offset, range.range),
+            None => status,
+        };
+        let owned = OwnedSets::write(&device, &kernel, &[set.to_vec()])?;
+        let sets = owned.sets.clone();
+        core.retain(owned);
+        Ok(Scan { kernel, sets })
+    }
+}
+
+/// How an emulated mesh draw launches its mesh threadgroups.
+pub(crate) enum Launch {
+    /// `vkCmdDispatch` of these counts.
+    Direct([u32; 3]),
+    /// `vkCmdDispatchIndirect` from this `VkBuffer` and byte: the scan's.
+    Indirect(vk::Buffer, u64),
+}
+
+/// An emulated mesh draw's compute work (`DrawCommands::mesh_dispatch`), ready to record before
+/// the draw's render pass instance (the module docs): its object dispatch, its scan, and its mesh
+/// dispatch, each with the draw's sets and compute-stage push writes, between barriers.
+pub(crate) struct MeshSteps {
+    pub(crate) layout: vk::PipelineLayout,
+    /// Set 0, the draw's, where the layout has one.
+    pub(crate) sets: Vec<vk::DescriptorSet>,
+    /// Set 1, the command buffer's heap set of the variant, where it has one.
+    pub(crate) heap: Option<vk::DescriptorSet>,
+    /// The draw's push writes of the compute stage.
+    pub(crate) push: Vec<PushWrite>,
+    /// The object function's pipeline and threadgroups, where the pipeline has one.
+    pub(crate) object: Option<(Arc<RawPipeline>, [u32; 3])>,
+    /// The scan, of a draw whose mesh threadgroups the GPU decides.
+    pub(crate) scan: Option<Scan>,
+    /// The mesh function's pipeline.
+    pub(crate) pipeline: Arc<RawPipeline>,
+    pub(crate) launch: Launch,
+    /// The object and mesh functions' uses, and the scan's read of Metal's arguments: the
+    /// draw's compute-stage uses.
+    pub(crate) uses: Vec<Use<ResourceKey>>,
+}
+
+impl MeshSteps {
+    /// The steps' uses.
+    pub(crate) fn uses(&self) -> &[Use<ResourceKey>] {
+        &self.uses
+    }
+
+    /// Hold what the steps record until `core`'s command buffer completes, and announce the
+    /// emulation once. Call it once the draw records.
+    pub(crate) fn retain(&mut self, core: &mut EncoderCore) {
+        core.retain(Arc::clone(&self.pipeline));
+        if let Some((pipeline, _)) = &self.object {
+            core.retain(Arc::clone(pipeline));
+        }
+        core.device().degrade(Degradation::EmulatedMeshDraws, || {
+            (
+                "a mesh draw".to_owned(),
+                "the device does not enable VK_EXT_mesh_shader, so the draw's object and mesh \
+                 functions run as compute dispatches before its render pass instance"
+                    .to_owned(),
+            )
+        });
+    }
+
+    /// Record the steps into `core`'s command buffer before the pass, between a barrier from
+    /// everything before and one to everything after.
+    pub(crate) fn record(&self, core: &mut EncoderCore) {
+        core.barrier(Barrier::everything());
+        core.command(
+            vk::PipelineStageFlags2::COMPUTE_SHADER,
+            &self.uses,
+            |raw, command_buffer| {
+                // SAFETY: the encoder's command buffer is recording outside a render pass.
+                unsafe { self.dispatches(raw, command_buffer) }
+            },
+        );
+        core.barrier(Barrier::everything());
+    }
+
+    /// Record the steps into `command_buffer` between a barrier from everything before and one
+    /// to everything after: before a render pass instance of the encoder's pass, after the
+    /// instances before it (`render.rs`).
+    ///
+    /// # Safety
+    ///
+    /// `command_buffer` is the encoder's, recording outside a render pass, and only the encoder
+    /// records it.
+    pub(crate) unsafe fn record_in(&self, raw: &ash::Device, command_buffer: vk::CommandBuffer) {
+        // SAFETY: as the caller states; barriers need nothing more.
+        unsafe {
+            Barrier::everything().record(raw, command_buffer);
+            self.dispatches(raw, command_buffer);
+            Barrier::everything().record(raw, command_buffer);
+        }
+    }
+
+    /// The object dispatch, the scan and the mesh dispatch, each after a barrier from the one
+    /// before.
+    ///
+    /// # Safety
+    ///
+    /// `command_buffer` is recording outside a render pass, and only one encoder records it; the
+    /// pipelines, the sets and what they name are live until it completes (the draw retains
+    /// them, and the command buffer the scan's set).
+    unsafe fn dispatches(&self, raw: &ash::Device, command_buffer: vk::CommandBuffer) {
+        let point = vk::PipelineBindPoint::COMPUTE;
+        // A pipeline of the draw's layout, its sets and its push writes.
+        let bind = |pipeline: vk::Pipeline| {
+            // SAFETY: as the caller states.
+            unsafe {
+                raw.cmd_bind_pipeline(command_buffer, point, pipeline);
+                if !self.sets.is_empty() {
+                    raw.cmd_bind_descriptor_sets(
+                        command_buffer,
+                        point,
+                        self.layout,
+                        0,
+                        &self.sets,
+                        &[],
+                    );
+                }
+                if let Some(heap) = self.heap {
+                    raw.cmd_bind_descriptor_sets(
+                        command_buffer,
+                        point,
+                        self.layout,
+                        1,
+                        &[heap],
+                        &[],
+                    );
+                }
+                for (stages, offset, bytes) in &self.push {
+                    raw.cmd_push_constants(command_buffer, self.layout, *stages, *offset, bytes);
+                }
+            }
+        };
+        if let Some((pipeline, [x, y, z])) = &self.object {
+            bind(pipeline.raw);
+            // SAFETY: as the caller states.
+            unsafe {
+                raw.cmd_dispatch(command_buffer, *x, *y, *z);
+                Barrier::everything().record(raw, command_buffer);
+            }
+        }
+        if let Some(scan) = &self.scan {
+            // SAFETY: as the caller states; the kernel is the device's.
+            unsafe {
+                raw.cmd_bind_pipeline(command_buffer, point, scan.kernel.pipeline);
+                raw.cmd_bind_descriptor_sets(
+                    command_buffer,
+                    point,
+                    scan.kernel.layout,
+                    0,
+                    &scan.sets,
+                    &[],
+                );
+                raw.cmd_dispatch(command_buffer, 1, 1, 1);
+                Barrier::everything().record(raw, command_buffer);
+            }
+        }
+        bind(self.pipeline.raw);
+        // SAFETY: as the caller states; an indirect launch's arguments lie in the work buffer,
+        // which the scan wrote before the barrier.
+        unsafe {
+            match self.launch {
+                Launch::Direct([x, y, z]) => raw.cmd_dispatch(command_buffer, x, y, z),
+                Launch::Indirect(buffer, offset) => {
+                    raw.cmd_dispatch_indirect(command_buffer, buffer, offset)
+                }
+            }
+        }
+    }
+}

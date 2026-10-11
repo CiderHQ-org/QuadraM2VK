@@ -1,0 +1,213 @@
+target triple = "air64_v28-apple-macosx26.0.0"
+source_filename = "-"
+; datalayout DataLayout { endian: Little, pointers: {0: PointerSpec { size_bits: 64, abi_bits: 64, pref_bits: 64, index_bits: 64 }}, ints: {1: AlignSpec { abi_bits: 8, pref_bits: 8 }, 8: AlignSpec { abi_bits: 8, pref_bits: 8 }, 16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }}, floats: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }}, vectors: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 24: AlignSpec { abi_bits: 32, pref_bits: 32 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 48: AlignSpec { abi_bits: 64, pref_bits: 64 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 96: AlignSpec { abi_bits: 128, pref_bits: 128 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }, 192: AlignSpec { abi_bits: 256, pref_bits: 256 }, 256: AlignSpec { abi_bits: 256, pref_bits: 256 }, 512: AlignSpec { abi_bits: 512, pref_bits: 512 }, 1024: AlignSpec { abi_bits: 1024, pref_bits: 1024 }}, aggregate: AlignSpec { abi_bits: 0, pref_bits: 64 }, native_ints: [8, 16, 32], stack_align_bits: None, alloca_space: 0, program_space: 0, globals_space: 0, mangling: None, fn_ptr_align: None, non_integral: [] }
+%t4 = type { ptr addrspace(4) } ; "struct.metal::_imageblock_base"
+%t7 = type void (ptr addrspace(1), %t4, <2 x i16>, <2 x i16>)
+%t10 = type half (i32)
+%t11 = type void (i32, i32)
+%t14 = type i1 (<2 x i1>)
+%t15 = type ptr addrspace(4) (<2 x i16>, i32, i16)
+%t16 = type void (ptr addrspace(1), ptr addrspace(4), i1, <2 x i16>, <2 x i16>, <2 x i16>, i16, i1, i32)
+%t18 = type [2 x i32]
+%t21 = type { ptr addrspace(1) } ; "struct.metal::texture2d"
+%t22 = type { %t21 } ; "struct.TibHalfTarget"
+c12 = %t18 [27, 0]
+
+define %t7 @f0 "tib_slot_half_slice" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="32" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" {
+bb0:
+  %i0 = tail call ptr addrspace(4) @f6 [air Imageblock(Data)](%a2, i32 0, i16 0)
+  %i1 = extractelement %a3, i64 0
+  %i2 = zext %i1 to i32
+  %i3 = add nuw nsw i32 %i2, i32 1
+  %i4 = extractelement %a3, i64 1
+  %i5 = zext %i4 to i32
+  %i6 = shl nuw nsw i32 %i5, i32 3
+  %i7 = add nuw nsw i32 %i3, %i6
+  %i8 = tail call reassoc nnan ninf nsz arcp contract afn half @f1 [air Convert(Convert { dst: NumTy { elem: F16, lanes: 1 }, dst_kind: Float, src: NumTy { elem: I32, lanes: 1 }, src_kind: Signed, src_fp8: None })](%i7)
+  %i9 = fmul reassoc nnan ninf nsz arcp contract afn half %i8, half 0x2400
+  %i10 = bitcast %i0 to ptr addrspace(4)
+  store %i9, %i10, align 2
+  tail call void @f4 [air Sync(Barrier { name: Threadgroup, flags: MemFlags { device: false, threadgroup: false, texture: false, threadgroup_imageblock: true, object_data: false }, order: None, scope: Threadgroup, memory: Threadgroup })](i32 8, i32 1) convergent
+  %i13 = icmp eq %a2, <2 x i16> zeroinitializer
+  %i14 = tail call i1 @f5 [air BoolReduce(BoolReduce { all: true, lanes: 2 })](%i13)
+  br %i14, bb1, bb2
+bb1:
+  %i16 = tail call ptr addrspace(4) @f6 [air Imageblock(Data)](<2 x i16> zeroinitializer, i32 0, i16 0)
+  tail call void @f7 [air Texture(Texture { op: WriteImageblockSlice, image: ImageShape { dim: D2, array: false, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: F16, lanes: 1 }, sign: None }), coord16: true, form: Current, access: Some(Write) })](%a0, %i16, i1 0, <2 x i16> zeroinitializer, <2 x i16> undef, %a3, i16 0, i1 0, i32 2) arg0( nocapture ) arg1( nocapture )
+  br bb2
+bb2:
+  ret void
+}
+
+declare %t10 @f1 "air.convert.f.f16.s.i32" memory(NoModRef, NoModRef, NoModRef)
+
+define %t7 @f2 "tib_argument_half_slice" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="32" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a0( align 8 dereferenceable(8) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = tail call ptr addrspace(4) @f6 [air Imageblock(Data)](%a2, i32 0, i16 0)
+  %i1 = extractelement %a3, i64 0
+  %i2 = zext %i1 to i32
+  %i3 = add nuw nsw i32 %i2, i32 1
+  %i4 = extractelement %a3, i64 1
+  %i5 = zext %i4 to i32
+  %i6 = shl nuw nsw i32 %i5, i32 3
+  %i7 = add nuw nsw i32 %i3, %i6
+  %i8 = tail call reassoc nnan ninf nsz arcp contract afn half @f1 [air Convert(Convert { dst: NumTy { elem: F16, lanes: 1 }, dst_kind: Float, src: NumTy { elem: I32, lanes: 1 }, src_kind: Signed, src_fp8: None })](%i7)
+  %i9 = fmul reassoc nnan ninf nsz arcp contract afn half %i8, half 0x2400
+  %i10 = bitcast %i0 to ptr addrspace(4)
+  store %i9, %i10, align 2
+  tail call void @f4 [air Sync(Barrier { name: Threadgroup, flags: MemFlags { device: false, threadgroup: false, texture: false, threadgroup_imageblock: true, object_data: false }, order: None, scope: Threadgroup, memory: Threadgroup })](i32 8, i32 1) convergent
+  %i13 = icmp eq %a2, <2 x i16> zeroinitializer
+  %i14 = tail call i1 @f5 [air BoolReduce(BoolReduce { all: true, lanes: 2 })](%i13)
+  br %i14, bb1, bb2
+bb1:
+  %i16 = getelementptr inbounds %t22, %a0, i64 0, i32 0, i32 0
+  %i17 = tail call ptr addrspace(4) @f6 [air Imageblock(Data)](<2 x i16> zeroinitializer, i32 0, i16 0)
+  %i18 = load ptr addrspace(1), %i16, align 8
+  tail call void @f7 [air Texture(Texture { op: WriteImageblockSlice, image: ImageShape { dim: D2, array: false, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: F16, lanes: 1 }, sign: None }), coord16: true, form: Current, access: Some(Write) })](%i18, %i17, i1 0, <2 x i16> zeroinitializer, <2 x i16> undef, %a3, i16 0, i1 0, i32 2) arg0( nocapture ) arg1( nocapture )
+  br bb2
+bb2:
+  ret void
+}
+
+define %t7 @f3 "tib_slot_short2_slice" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="32" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" {
+bb0:
+  %i0 = tail call ptr addrspace(4) @f6 [air Imageblock(Data)](%a2, i32 0, i16 0)
+  %i1 = extractelement %a3, i64 0
+  %i2 = add i16 %i1, i16 65533
+  %i3 = insertelement <2 x i16> undef, %i2, i64 0
+  %i4 = extractelement %a3, i64 1
+  %i5 = mul i16 %i4, i16 65436
+  %i6 = add i16 %i5, i16 65529
+  %i7 = insertelement %i3, %i6, i64 1
+  %i8 = bitcast %i0 to ptr addrspace(4)
+  store %i7, %i8, align 4
+  tail call void @f4 [air Sync(Barrier { name: Threadgroup, flags: MemFlags { device: false, threadgroup: false, texture: false, threadgroup_imageblock: true, object_data: false }, order: None, scope: Threadgroup, memory: Threadgroup })](i32 8, i32 1) convergent
+  %i11 = icmp eq %a2, <2 x i16> zeroinitializer
+  %i12 = tail call i1 @f5 [air BoolReduce(BoolReduce { all: true, lanes: 2 })](%i11)
+  br %i12, bb1, bb2
+bb1:
+  %i14 = tail call ptr addrspace(4) @f6 [air Imageblock(Data)](<2 x i16> zeroinitializer, i32 0, i16 0)
+  tail call void @f8 [air Texture(Texture { op: WriteImageblockSlice, image: ImageShape { dim: D2, array: false, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I16, lanes: 2 }, sign: None }), coord16: true, form: Current, access: Some(Write) })](%a0, %i14, i1 0, <2 x i16> zeroinitializer, <2 x i16> undef, %a3, i16 0, i1 0, i32 2) arg0( nocapture ) arg1( nocapture )
+  br bb2
+bb2:
+  ret void
+}
+
+declare %t11 @f4 "air.wg.barrier" convergent
+
+declare %t14 @f5 "air.all.v2i1" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t15 @f6 "air.imageblock_data" memory(Ref, Ref, Ref)
+
+declare %t16 @f7 "air.write_imageblock_slice_to_texture_2d.i16.f16" memory(ModRef, NoModRef, NoModRef) %a0( nocapture ) %a1( nocapture )
+
+declare %t16 @f8 "air.write_imageblock_slice_to_texture_2d.i16.v2i16" memory(ModRef, NoModRef, NoModRef) %a0( nocapture ) %a1( nocapture )
+!md0 = !"SDK Version"
+!md1 = !"wchar_size"
+!md2 = !"frame-pointer"
+!md3 = !"air.max_device_buffers"
+!md4 = !"air.max_constant_buffers"
+!md5 = !"air.max_threadgroup_buffers"
+!md6 = !"air.max_textures"
+!md7 = !"air.max_read_write_textures"
+!md8 = !"air.max_samplers"
+!md9 = !"air.texture"
+!md10 = !"air.location_index"
+!md11 = !"air.write"
+!md12 = !"air.arg_type_name"
+!md13 = !"texture2d<half, write>"
+!md14 = !"air.arg_name"
+!md15 = !"out"
+!md16 = !"air.imageblock"
+!md17 = !"explicit"
+!md18 = !"air.imageblock_data_size"
+!md19 = !"air.struct_type_info"
+!md20 = !"half"
+!md21 = !"v"
+!md22 = !"air.arg_type_align_size"
+!md23 = !"imageblock<TibHalfCell, layout_explicit>"
+!md24 = !"img"
+!md25 = !"air.thread_position_in_threadgroup"
+!md26 = !"ushort2"
+!md27 = !"lid"
+!md28 = !"air.thread_position_in_grid"
+!md29 = !"gid"
+!md30 = !"air.indirect_buffer"
+!md31 = !"air.buffer_size"
+!md32 = !"air.read_write"
+!md33 = !"air.address_space"
+!md34 = !"t"
+!md35 = !"air.indirect_argument"
+!md36 = !"air.arg_type_size"
+!md37 = !"TibHalfTarget"
+!md38 = !"target"
+!md39 = !"texture2d<short, write>"
+!md40 = !"short2"
+!md41 = !"imageblock<TibShort2Cell, layout_explicit>"
+!md42 = !"air.compile.denorms_disable"
+!md43 = !"air.compile.fast_math_enable"
+!md44 = !"air.compile.framebuffer_fetch_enable"
+!md45 = !"Apple metal version 32023.921 (metalfe-32023.921.6)"
+!md46 = !"Metal"
+!md47 = !"_ZTS11TibHalfCell"
+!md48 = !"omnipotent char"
+!md49 = !"Simple C++ TBAA"
+!md50 = i32 2
+!md51 = %t18 c12
+!md52 = i32 1
+!md53 = i32 4
+!md54 = i32 7
+!md55 = i32 31
+!md56 = i32 128
+!md57 = i32 8
+!md58 = i32 16
+!md59 = ptr addrspace(0) @f0
+!md60 = i32 0
+!md61 = i32 3
+!md62 = ptr addrspace(0) @f2
+!md63 = ptr addrspace(0) @f3
+!md64 = i64 0
+!md65 = !{!md50, !md0, !md51}
+!md66 = !{!md52, !md1, !md53}
+!md67 = !{!md54, !md2, !md50}
+!md68 = !{!md54, !md3, !md55}
+!md69 = !{!md54, !md4, !md55}
+!md70 = !{!md54, !md5, !md55}
+!md71 = !{!md54, !md6, !md56}
+!md72 = !{!md54, !md7, !md57}
+!md73 = !{!md54, !md8, !md58}
+!md74 = !{}
+!md75 = !{!md60, !md9, !md10, !md60, !md52, !md11, !md12, !md13, !md14, !md15}
+!md76 = !{!md60, !md50, !md60, !md20, !md21}
+!md77 = !{!md52, !md16, !md17, !md18, !md50, !md19, !md76, !md22, !md50, !md12, !md23, !md14, !md24}
+!md78 = !{!md50, !md25, !md12, !md26, !md14, !md27}
+!md79 = !{!md61, !md28, !md12, !md26, !md14, !md29}
+!md80 = !{!md75, !md77, !md78, !md79}
+!md81 = !{!md59, !md74, !md80}
+!md82 = !{!md60, !md9, !md10, !md60, !md52, !md11, !md12, !md13, !md14, !md34}
+!md83 = !{!md60, !md57, !md60, !md13, !md34, !md35, !md82}
+!md84 = !{!md60, !md30, !md31, !md57, !md10, !md60, !md52, !md32, !md33, !md52, !md19, !md83, !md36, !md57, !md22, !md57, !md12, !md37, !md14, !md38}
+!md85 = !{!md84, !md77, !md78, !md79}
+!md86 = !{!md62, !md74, !md85}
+!md87 = !{!md60, !md9, !md10, !md60, !md52, !md11, !md12, !md39, !md14, !md15}
+!md88 = !{!md60, !md53, !md60, !md40, !md21}
+!md89 = !{!md52, !md16, !md17, !md18, !md53, !md19, !md88, !md22, !md53, !md12, !md41, !md14, !md24}
+!md90 = !{!md87, !md89, !md78, !md79}
+!md91 = !{!md63, !md74, !md90}
+!md92 = !{!md42}
+!md93 = !{!md43}
+!md94 = !{!md44}
+!md95 = !{!md45}
+!md96 = !{!md50, !md57, !md60}
+!md97 = !{!md46, !md53, !md60, !md60}
+!md98 = !{!md49}
+!md99 = !{!md48, !md98, !md64}
+!md100 = !{!md20, !md99, !md64}
+!md101 = !{!md47, !md100, !md64}
+!md102 = !{!md101, !md100, !md64}
+!"llvm.module.flags" = !{!md65, !md66, !md67, !md68, !md69, !md70, !md71, !md72, !md73}
+!"air.kernel" = !{!md81, !md86, !md91}
+!"air.compile_options" = !{!md92, !md93, !md94}
+!"llvm.ident" = !{!md95}
+!"air.version" = !{!md96}
+!"air.language_version" = !{!md97}

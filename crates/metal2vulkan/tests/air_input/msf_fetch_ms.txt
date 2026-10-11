@@ -1,0 +1,144 @@
+target triple = "air64_v28-apple-macosx26.0.0"
+source_filename = "-"
+; datalayout DataLayout { endian: Little, pointers: {0: PointerSpec { size_bits: 64, abi_bits: 64, pref_bits: 64, index_bits: 64 }}, ints: {1: AlignSpec { abi_bits: 8, pref_bits: 8 }, 8: AlignSpec { abi_bits: 8, pref_bits: 8 }, 16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }}, floats: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }}, vectors: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 24: AlignSpec { abi_bits: 32, pref_bits: 32 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 48: AlignSpec { abi_bits: 64, pref_bits: 64 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 96: AlignSpec { abi_bits: 128, pref_bits: 128 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }, 192: AlignSpec { abi_bits: 256, pref_bits: 256 }, 256: AlignSpec { abi_bits: 256, pref_bits: 256 }, 512: AlignSpec { abi_bits: 512, pref_bits: 512 }, 1024: AlignSpec { abi_bits: 1024, pref_bits: 1024 }}, aggregate: AlignSpec { abi_bits: 0, pref_bits: 64 }, native_ints: [8, 16, 32], stack_align_bits: None, alloca_space: 0, program_space: 0, globals_space: 0, mangling: None, fn_ptr_align: None, non_integral: [] }
+%t4 = type <4 x float> (<4 x float>, i32)
+%t5 = type float (i32)
+%t6 = type <{ <4 x float>, i32 }>
+%t7 = type %t6 (<4 x float>)
+%t8 = type <4 x float> (<4 x float>)
+%t10 = type void ()
+%t12 = type [2 x i32]
+c9 = %t12 [27, 0]
+c22 = <4 x i32> [0, 1, 2, 7]
+c24 = <4 x i32> [0, 1, 6, 7]
+c28 = <4 x float> [0x3F800000, 0x40000000, 0x40400000, 0x40800000]
+c29 = <4 x float> [0x40000000, 0x40000000, 0x40000000, 0x40000000]
+
+define %t4 @f0 "msf_fetch_sample" memory(NoModRef, NoModRef, NoModRef) "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-trapping-math"="true" "stack-protector-buffer-size"="8" {
+bb0:
+  %i0 = extractelement %a0, i64 0
+  %i1 = fadd float %i0, float 0x3F800000
+  %i2 = insertelement <4 x float> undef, %i1, i64 0
+  %i3 = tail call float @f1 [air Convert(Convert { dst: NumTy { elem: F32, lanes: 1 }, dst_kind: Float, src: NumTy { elem: I32, lanes: 1 }, src_kind: Unsigned, src_fp8: None })](%a1)
+  %i4 = insertelement %i2, %i3, i64 1
+  %i5 = extractelement %a0, i64 2
+  %i6 = fadd float %i5, %i5
+  %i7 = insertelement %i4, %i6, i64 2
+  %i8 = shufflevector <4 x float> %i7, %a0, <0, 1, 2, 7>
+  ret %i8
+}
+
+declare %t5 @f1 "air.convert.f.f32.u.i32" memory(NoModRef, NoModRef, NoModRef)
+
+define %t4 @f2 "msf_fetch_mask_in" memory(NoModRef, NoModRef, NoModRef) "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-trapping-math"="true" "stack-protector-buffer-size"="8" {
+bb0:
+  %i0 = extractelement %a0, i64 0
+  %i1 = fadd float %i0, float 0x3F800000
+  %i2 = insertelement <4 x float> undef, %i1, i64 0
+  %i3 = tail call float @f1 [air Convert(Convert { dst: NumTy { elem: F32, lanes: 1 }, dst_kind: Float, src: NumTy { elem: I32, lanes: 1 }, src_kind: Unsigned, src_fp8: None })](%a1)
+  %i4 = insertelement %i2, %i3, i64 1
+  %i5 = shufflevector <4 x float> %i4, %a0, <0, 1, 6, 7>
+  ret %i5
+}
+
+define %t7 @f3 "msf_fetch_mask_out" memory(NoModRef, NoModRef, NoModRef) "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-trapping-math"="true" "stack-protector-buffer-size"="8" {
+bb0:
+  %i0 = fadd <4 x float> %a0, <4 x float> c28
+  %i1 = fmul <4 x float> %i0, <4 x float> c29
+  %i2 = insertvalue %t6 undef %i1, 0
+  %i3 = insertvalue %i2 i32 5, 1
+  ret %i3
+}
+
+define %t8 @f4 "msf_fetch_discard" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-trapping-math"="true" "stack-protector-buffer-size"="8" {
+bb0:
+  %i0 = extractelement %a0, i64 3
+  %i1 = fcmp olt %i0, float 0x0
+  br %i1, bb1, bb2
+bb1:
+  tail call void @f5 [air Fragment(Discard)]()
+  br bb2
+bb2:
+  %i5 = extractelement %a0, i64 0
+  %i6 = fadd float %i5, float 0x3F800000
+  %i7 = insertelement %a0, %i6, i64 0
+  ret %i7
+}
+
+declare %t10 @f5 "air.discard_fragment"
+!md0 = !"SDK Version"
+!md1 = !"wchar_size"
+!md2 = !"frame-pointer"
+!md3 = !"air.max_device_buffers"
+!md4 = !"air.max_constant_buffers"
+!md5 = !"air.max_threadgroup_buffers"
+!md6 = !"air.max_textures"
+!md7 = !"air.max_read_write_textures"
+!md8 = !"air.max_samplers"
+!md9 = !"air.render_target"
+!md10 = !"air.arg_type_name"
+!md11 = !"float4"
+!md12 = !"air.arg_name"
+!md13 = !"dst"
+!md14 = !"air.sample_id"
+!md15 = !"uint"
+!md16 = !"s"
+!md17 = !"air.sample_mask_in"
+!md18 = !"mask"
+!md19 = !"color"
+!md20 = !"air.sample_mask"
+!md21 = !"air.compile.denorms_disable"
+!md22 = !"air.compile.fast_math_disable"
+!md23 = !"air.compile.framebuffer_fetch_enable"
+!md24 = !"Apple metal version 32023.921 (metalfe-32023.921.6)"
+!md25 = !"Metal"
+!md26 = i32 2
+!md27 = %t12 c9
+!md28 = i32 1
+!md29 = i32 4
+!md30 = i32 7
+!md31 = i32 31
+!md32 = i32 128
+!md33 = i32 8
+!md34 = i32 16
+!md35 = ptr addrspace(0) @f0
+!md36 = i32 0
+!md37 = ptr addrspace(0) @f2
+!md38 = ptr addrspace(0) @f3
+!md39 = ptr addrspace(0) @f4
+!md40 = !{!md26, !md0, !md27}
+!md41 = !{!md28, !md1, !md29}
+!md42 = !{!md30, !md2, !md26}
+!md43 = !{!md30, !md3, !md31}
+!md44 = !{!md30, !md4, !md31}
+!md45 = !{!md30, !md5, !md31}
+!md46 = !{!md30, !md6, !md32}
+!md47 = !{!md30, !md7, !md33}
+!md48 = !{!md30, !md8, !md34}
+!md49 = !{!md9, !md36, !md36, !md10, !md11}
+!md50 = !{!md49}
+!md51 = !{!md36, !md9, !md36, !md10, !md11, !md12, !md13}
+!md52 = !{!md28, !md14, !md10, !md15, !md12, !md16}
+!md53 = !{!md51, !md52}
+!md54 = !{!md35, !md50, !md53}
+!md55 = !{!md28, !md17, !md10, !md15, !md12, !md18}
+!md56 = !{!md51, !md55}
+!md57 = !{!md37, !md50, !md56}
+!md58 = !{!md9, !md36, !md36, !md10, !md11, !md12, !md19}
+!md59 = !{!md20, !md10, !md15, !md12, !md18}
+!md60 = !{!md58, !md59}
+!md61 = !{!md51}
+!md62 = !{!md38, !md60, !md61}
+!md63 = !{!md39, !md50, !md61}
+!md64 = !{!md21}
+!md65 = !{!md22}
+!md66 = !{!md23}
+!md67 = !{!md24}
+!md68 = !{!md26, !md33, !md36}
+!md69 = !{!md25, !md29, !md36, !md36}
+!"llvm.module.flags" = !{!md40, !md41, !md42, !md43, !md44, !md45, !md46, !md47, !md48}
+!"air.fragment" = !{!md54, !md57, !md62, !md63}
+!"air.compile_options" = !{!md64, !md65, !md66}
+!"llvm.ident" = !{!md67}
+!"air.version" = !{!md68}
+!"air.language_version" = !{!md69}

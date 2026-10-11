@@ -1,0 +1,117 @@
+# The metallib function tags Metal answers MTLFunction's properties from (DESIGN D311 item 5,
+# S2): tags.py over the metallibs probe.swift's answers came from (metal-answers.txt), on an M4
+# (macOS 27.0.1, the toolchain TOOLCHAIN records; EV UNI-reflfix-7, for encoders and encoder_types
+# EV UNI-reflfix-14, for encoder_arrays EV UNI-reflfix-15, for leftovers EV RTL-refl-m4c, the
+# same on the M3 Max's toolchain in EV RTL-refl-m3c, for tables_in_arguments EV
+# RFL-refltab3-m4, the same in EV RFL-refltab-m3, for annotations, specialized_reads and
+# mesh_functions EV RFL-reflr2b-m4, the same in EV RFL-reflr2-m3, and for specialized_inputs EV
+# RRX-refl2-m4, the same in EV RRX-refl2-m3, for constant_pointers, function_addresses and
+# constant_initializers EV RRX-ci2-m4, the same in EV RRX-ci2-m3, for constant_loops EV
+# RRX-ci3-m4, the same in EV RRX-ci3-m3, and for constant_branches EV RRX-ci4-m4, the same in EV
+# RRX-ci4-m3). Per function, in function-list
+# order: the TYPE and TESS function-list tags and the CNST, VATT and VATY public-metadata tags, as
+# hex bytes, and the names of its other tags. src/reflection/tests.rs builds metallibs carrying
+# these tags and compares the crate's answers with Metal's.
+== argument_buffers
+function reflection_argument_buffers TYPE=02 other=RFLT
+== buffers
+function reflection_buffers TYPE=02 CNST=03007265666c656374696f6e5f6861735f657874726100350000017265666c656374696f6e5f7363616c65001d0100017265666c656374696f6e5f6f66667365740003020000 other=RFLT
+function reflection_order TYPE=02 other=RFLT
+function reflection_threadgroup TYPE=02 other=RFLT
+== render
+function reflection_vertex TYPE=00 VATT=0300706f730000807576000180636f6c6f72000280 VATY=0300060413 other=RFLT
+function reflection_vertex_plain TYPE=00 other=RFLT
+function reflection_fragment TYPE=01 other=RFLT
+function reflection_fragment_solid TYPE=01 other=RFLT
+== stage_in
+function reflection_stage_in TYPE=02 VATT=02006100008062000180 VATY=02000621 other=RFLT
+== tables
+function reflection_tables TYPE=02 other=RFLT
+function reflection_visible TYPE=04 other=RFLT
+== tessellation
+function reflection_tessellation TYPE=00 TESS=12 VATT=0200700000c070660003a0 VATY=02000606 other=RFLT
+== textures
+function reflection_textures TYPE=02 other=RFLT
+== tile
+function reflection_tile TYPE=02 other=RFLT
+== vertex_inputs
+function reflection_unread TYPE=00 VATT=0200706f730000807576000100 VATY=02000604 other=RFLT
+function reflection_gated TYPE=00 CNST=01007265666c656374696f6e5f7573655f75760035000001 VATT=0200706f730000807576000180 VATY=02000604 other=RFLT
+function reflection_solid TYPE=01 other=RFLT
+== encoders
+function encoders_plain TYPE=02 other=RFLT
+function encoders_args TYPE=02 other=RFLT
+== encoder_types
+function encoder_types_plain_0 TYPE=02 other=RFLT
+function encoder_types_plain_1 TYPE=02 other=RFLT
+function encoder_types_plain_2 TYPE=02 other=RFLT
+function encoder_types_tail_0 TYPE=02 other=RFLT
+function encoder_types_tail_1 TYPE=02 other=RFLT
+function encoder_types_tail_2 TYPE=02 other=RFLT
+== encoder_arrays
+function encoder_arrays TYPE=02 other=RFLT
+== function_kinds
+function kinds_constants TYPE=02 CNST=02006b696e64735f646566696e65645f6f6e6c7900350000006b696e64735f676174650035010001 other=RFLT
+function kinds_values TYPE=02 CNST=02006b696e64735f76616c7565001d0200016b696e64735f6f7074696f6e616c0003030000 other=RFLT
+function kinds_none TYPE=02 other=RFLT
+function kinds_stage_in TYPE=02 VATT=02006300078068000380 VATY=02002111 other=RFLT
+function kinds_triangle TYPE=00 TESS=0d VATT=0300700002c0710009c070660011a0 VATY=0300060406 other=RFLT
+function kinds_quad16 TYPE=00 TESS=42 VATT=0100700000c0 VATY=010006 other=RFLT
+function kinds_triangle32 TYPE=00 TESS=81 VATT=0100700000c0 VATY=010006 other=RFLT
+function kinds_order TYPE=00 VATT=0300620005806100018063001e80 VATY=0300040621 other=RFLT
+== function_types
+function types_quad_any TYPE=00 TESS=fe VATT=0100700000c0 VATY=010006 other=RFLT
+function types_intersection TYPE=06 other=RFLT
+function types_mesh TYPE=07 other=RFLT
+function types_object TYPE=08 other=RFLT
+== leftovers
+function reflection_tile_explicit TYPE=02 other=RFLT
+function reflection_kernel_explicit TYPE=02 other=RFLT
+function reflection_pipeline_states TYPE=02 other=RFLT
+function reflection_gated_indices TYPE=02 CNST=01007265666c656374696f6e5f676174650035000001 other=RFLT
+function reflection_computed_indices TYPE=02 CNST=01007265666c656374696f6e5f62617365001d010001 other=RFLT
+function reflection_cover TYPE=00 other=RFLT
+function reflection_fragment_data TYPE=01 other=RFLT
+== tables_in_arguments
+function reflection_tables_in_arguments TYPE=02 other=RFLT
+function reflection_table_step TYPE=04 other=RFLT
+== annotations
+function reflection_annotated TYPE=02 other=RFLT
+function reflection_unannotated TYPE=02 other=RFLT
+== specialized_reads
+function reflection_branch_read TYPE=00 CNST=01007265666c656374696f6e5f726561645f75760035000001 VATT=0200706f730000807576000180 VATY=02000604 other=RFLT
+function reflection_branch_solid TYPE=01 other=RFLT
+== mesh_functions
+function reflection_mesh_fragment TYPE=01 other=RFLT
+function reflection_mesh TYPE=07 other=RFLT
+function reflection_object TYPE=08 other=RFLT
+== specialized_inputs
+function reflection_gated_stage_in TYPE=02 CNST=01007265666c656374696f6e5f726561645f6d6f72650035000001 VATT=02006100008062000180 VATY=02000621 other=RFLT
+function reflection_gated_resources TYPE=02 CNST=01007265666c656374696f6e5f726561645f6d6f72650035000001 other=RFLT
+function reflection_gated_tessellation TYPE=00 TESS=12 CNST=01007265666c656374696f6e5f726561645f6d6f72650035000001 VATT=0400700000c0710001c070660003a070670004a0 VATY=040006060606 other=RFLT
+function reflection_gated_control_points TYPE=00 TESS=12 CNST=01007265666c656374696f6e5f726561645f6d6f72650035000001 VATT=0300700000c0710001c070660003a0 VATY=0300060606 other=RFLT
+function reflection_gated_solid TYPE=01 other=RFLT
+== constant_pointers
+function cp_pointer TYPE=02 CNST=010063705f666c61670035000001 other=RFLT
+function cp_value TYPE=02 CNST=010063705f7363616c65001d010001 other=RFLT
+== function_addresses
+function fa_pointers TYPE=02 CNST=010066615f6f776e001d020001 other=RFLT
+function fa_direct TYPE=02 other=RFLT
+function fa_plain TYPE=02 CNST=010066615f68656c705f6b001d030001 other=RFLT
+function fa_add TYPE=04 CNST=010066615f6164645f6b001d000001 other=RFLT
+function fa_sub TYPE=04 CNST=010066615f7375625f6b001d010001 other=RFLT
+== constant_initializers
+function ci_defined_global TYPE=02 CNST=030063695f61001d00000163695f6e001d04000163695f6f70740003050000 other=RFLT
+function ci_defined_and_read TYPE=02 CNST=030063695f61001d00000163695f6e001d04000163695f6f70740003050000 other=RFLT
+function ci_branch TYPE=02 CNST=020063695f61001d00000163695f6e001d040001 other=RFLT
+function ci_choice TYPE=02 CNST=050063695f61001d00000163695f62001d01000163695f63001d02000163695f666c6167003503000163695f6e001d040001 other=RFLT
+function ci_none TYPE=02 CNST=020063695f61001d00000163695f6e001d040001 other=RFLT
+== constant_loops
+function cl_read_after TYPE=02 CNST=0400636c5f6e001d000001636c5f61001d010001636c5f7a001d020001636c5f6d001d040001 other=RFLT
+function cl_read_plain TYPE=02 CNST=0400636c5f6e001d000001636c5f61001d010001636c5f77001d030001636c5f6d001d040001 other=RFLT
+function cl_read_fixed TYPE=02 CNST=0300636c5f6e001d000001636c5f61001d010001636c5f6d001d040001 other=RFLT
+function cl_none TYPE=02 CNST=0300636c5f6e001d000001636c5f61001d010001636c5f6d001d040001 other=RFLT
+== constant_branches
+function cb_read_div TYPE=02 CNST=040063625f666c6167003500000163625f70001d01000163625f64001d02000163625f71001d030001 other=RFLT
+function cb_read_called TYPE=02 CNST=020063625f6b001d04000163625f73001d050001 other=RFLT
+function cb_none TYPE=02 other=RFLT

@@ -1,0 +1,665 @@
+//! A fetched render target's storage form: a color render target that a framebuffer fetch through
+//! the pixel interlock reads, whose image lacks `STORAGE` (the device lays it out otherwise with
+//! it, `Device::with_free_usage`), renders each fetching pass into a scratch image copied in and
+//! out (`fetch-through-scratch`, `attachment_stand_in.rs`). The first such pass notes the texture;
+//! a later commit gives it an image with `STORAGE`, its texels copied in once, and every later pass
+//! fetches it in place.
+//!
+//! - **Which textures.** A texture's own image (not a view's), the runtime's in memory of its own
+//!   (not shareable, not a heap's, a buffer's or the caller's), `Private`, its hazards tracked,
+//!   without a depth twin, whose plan [`storage_candidate`] gives `STORAGE`, and whose `VkImage`
+//!   was never handed out ([`Texture::vk_image`](crate::Texture::vk_image) keeps it for good).
+//!   Noted once, at the first fetching pass that renders it into a scratch image for want of
+//!   `STORAGE`. An untracked texture keeps its scratch: the program orders its uses on other
+//!   queues with its own fences and events, which the copy below could not follow.
+//! - **When: the commit of the only uncommitted command buffer.** A command buffer that commits
+//!   while it is the device's only one not committed (`queue.rs`'s
+//!   [`Uncommitted`](crate::queue::Uncommitted)), whatever is in flight, takes the switch where
+//!   (`command_buffer/storage_form.rs`): every encoder of it may run (no injected failure, no
+//!   encoder that fails or faults it), it waits for no event or binary semaphore, leaves no
+//!   segment to record, and it bound no heap set; and where the device's scheduler holds no
+//!   batch (every command buffer committed before was submitted) and no command buffer that may
+//!   read the heap sets is incomplete (no heap ticket is out). A command buffer with a
+//!   submission check takes it too: a program that checks every command buffer commits no other
+//!   kind.
+//! - **How.** Before the commit, the image of the plan with `STORAGE` is made and placed, and a
+//!   last part of the command buffer moves it to `GENERAL` and copies every level and layer of
+//!   the old image into it: a tracked write of the texture, so hazard tracking orders it after
+//!   every use of the texture committed before, on any queue, and every later use after it. The
+//!   part is the runtime's: no submission check sees it (it is no encoder of the program's, and
+//!   lists no use). The switch rides on the command buffer ([`Riding`]) until its last batch is
+//!   submitted, its checks run: the scheduler then settles it, the swap's verdict being whether
+//!   every encoder of it ran. A program thread finishes it (the swap makes Vulkan calls, which
+//!   the scheduler's thread makes only for submissions): the committing one, where its commit
+//!   submitted it, else the next that makes a command buffer or commits. Where every encoder
+//!   ran, under the image's views lock (which [`Texture::vk_image`](crate::Texture::vk_image)
+//!   takes to hand the image out) the new `VkImage` swaps in and the plan with `STORAGE` is the
+//!   image's from then on; the old image's views are emptied. The old image, its views and its
+//!   memory go as the committing command buffer completes, after every earlier use of them: its
+//!   copy waits for those. The texture and its views keep their resource IDs: each texture
+//!   slot's generation changes, so the device's texture table and heap sets write their
+//!   elements again ([`heap_sets::renew`]) while no command buffer that may read them is
+//!   pending. `allocatedSize` keeps the bytes the texture was made with. Where a check failed a
+//!   submission of it (or its submission failed), nothing swaps: the old image stays the
+//!   texture's, the image made goes with the command buffer, and the texture waits again.
+//! - **Nothing names the old image after the swap.** No other command buffer is uncommitted, and
+//!   none committed before is held. A new one counts itself as it takes its slot and then reads
+//!   the switch's flag ([`StorageForms::switching`]), which is up from before the switch reads
+//!   the count until the switch ended: so either the switch sees it and leaves the texture for a
+//!   later commit, or it waits until the switch ended (finishing it itself once settled) and its
+//!   encoders name the image the texture has then, their uses after the copy in hazard
+//!   tracking. It waits at most [`SWITCH_WAIT`], and not at all on the scheduler's thread (a
+//!   submission check that makes a command buffer): past that, it gives the switch up, so
+//!   nothing swaps, and goes on with the old image.
+//! - **Once per texture,** by construction: the storage form is a `OnceLock` of the image, which
+//!   is noted at most once. A switch the device refuses (the image's limits, memory) leaves the
+//!   texture its scratch, for good; a commit that fails or is given up leaves it waiting.
+//! - **Announced** once per device as `fetched-target-storage` (performance): the image now has
+//!   `STORAGE`, which on MoltenVK is `ShaderWrite` usage, laid out without lossless compression.
+//! - **The gates' cost.** A commit reads two atomics, [`StorageForms::switching`] and
+//!   [`StorageForms::wanted`], 0 wherever no texture waits; a new command buffer reads one,
+//!   `switching`, up only during a switch. Counting the uncommitted command buffers adds one
+//!   atomic add to a slot's taking and one subtraction to its commit (or its drop uncommitted),
+//!   under its queue's lock. The stall: once per texture, the next command buffer made after a
+//!   checked commit that took a switch waits until the scheduler's thread ran its check and
+//!   submitted it.
+
+use super::{texture_aspects, Image, ImageObjects, Owner, Storage, Texture, TextureShared};
+use crate::degradation::Degradation;
+use crate::device::lock;
+use crate::encoder::EncoderCore;
+use crate::error::Error;
+use crate::exit_guard;
+use crate::framebuffer_fetch::storage_candidate;
+use crate::heap_sets;
+use crate::image_plan::ImagePlan;
+use crate::memory::Placement;
+use crate::tracker::Access;
+use crate::values::StorageMode;
+use crate::Device;
+use ash::vk;
+use ash::vk::Handle;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak};
+use std::time::{Duration, Instant};
+
+/// The longest a new command buffer waits for a switch under way before it gives it up (the
+/// module docs): far above the scheduler's latency in running a check and submitting.
+const SWITCH_WAIT: Duration = Duration::from_millis(100);
+
+/// The device's textures waiting for their storage form (the module docs), in its
+/// `TextureState`.
+#[derive(Default)]
+pub(super) struct StorageForms {
+    /// How many textures wait: [`waiting`](Self::waiting)'s length, set under its lock and read
+    /// without it, the gate each commit reads.
+    wanted: AtomicUsize,
+    /// A switch is under way, from before it reads the uncommitted count until it ended: set and
+    /// cleared under [`waiting`](Self::waiting)'s lock, the gate each new command buffer reads
+    /// once it counted itself, and each commit.
+    switching: AtomicBool,
+    /// Signaled as a switch ends, and as one rides no more on a command buffer that its
+    /// scheduler settled.
+    changed: Condvar,
+    /// The textures waiting, and the switch under way: the switch's lock.
+    waiting: Mutex<Waiting>,
+}
+
+/// What [`StorageForms`]'s lock guards.
+#[derive(Default)]
+struct Waiting {
+    /// The textures waiting for their storage form.
+    textures: Vec<Weak<TextureShared>>,
+    /// The switch under way rides on this command buffer's commit (the command buffer holds it).
+    riding: Weak<Riding>,
+    /// A new command buffer gave the switch under way up: nothing swaps.
+    given_up: bool,
+}
+
+/// What an image keeps of its storage form (the module docs).
+#[derive(Default)]
+pub(super) struct Form {
+    /// The storage form, once taken.
+    taken: OnceLock<Taken>,
+    /// The image's texture was noted to take it (at most once).
+    noted: AtomicBool,
+    /// The image's `VkImage` was handed out: it keeps it. Set and read under the views lock.
+    exported: AtomicBool,
+}
+
+/// An image's storage form: its plan with `STORAGE`, and the memory its `VkImage` is placed in.
+struct Taken {
+    plan: ImagePlan,
+    placement: Placement,
+}
+
+impl Form {
+    /// The plan of the storage form, once taken.
+    pub(super) fn plan(&self) -> Option<&ImagePlan> {
+        self.taken.get().map(|taken| &taken.plan)
+    }
+
+    /// The memory the storage form's image is placed in, once taken.
+    pub(super) fn placement(&self) -> Option<&Placement> {
+        self.taken.get().map(|taken| &taken.placement)
+    }
+}
+
+/// A `VkImage` with views of it, and the memory it is placed in, that go when this does: the
+/// storage form's image made for a commit, until it swaps in; then the image it replaced, with
+/// that image's views and first memory. The committing command buffer retains it until it
+/// completes, and the switch until it ends.
+struct Swapped {
+    /// Dropped first: the image and its views.
+    objects: ImageObjects,
+    /// Then the memory they were in.
+    memory: Freed,
+}
+
+/// Memory of the device's that goes when this does.
+struct Freed {
+    device: Device,
+    placement: Placement,
+}
+
+impl Drop for Freed {
+    fn drop(&mut self) {
+        // Once the process is exiting, the memory is left to its end (`exit_guard`).
+        let Some(_busy) = exit_guard::enter() else {
+            return;
+        };
+        let shared = self.device.shared();
+        lock(&shared.memory).free(shared.vk(), &self.placement);
+    }
+}
+
+/// A texture's storage form, made and its copy recorded into the committing command buffer's
+/// last part, to swap in once the commit submitted it.
+pub(crate) struct Prepared {
+    texture: Texture,
+    plan: ImagePlan,
+    swapped: Arc<Mutex<Swapped>>,
+}
+
+/// A switch under way (the module docs): its flag is up, and the textures it took from the
+/// waiting list, to let go of once the lock is free (a texture's last handle may go with them).
+pub(crate) struct Switch {
+    textures: Vec<Texture>,
+}
+
+/// A switch that rides on a command buffer's commit (the module docs), which holds it: its
+/// storage forms made and their copy appended to the command buffer, until a program thread
+/// finishes it once the scheduler settled it. Dropped unfinished (the command buffer went before
+/// any thread finished it), it gives the switch up: nothing swaps, and the textures wait again.
+pub(crate) struct Riding {
+    device: Device,
+    inner: Mutex<RidingState>,
+}
+
+struct RidingState {
+    /// The switch and its storage forms, until a thread finishes it.
+    switch: Option<(Switch, Vec<Prepared>)>,
+    /// Settled: whether every encoder of the command buffer ran, its last batch submitted.
+    settled: Option<bool>,
+}
+
+impl Riding {
+    /// The switch, its storage forms made for `device`, to ride on a command buffer's commit.
+    pub(crate) fn new(device: &Device, switch: Switch, prepared: Vec<Prepared>) -> Arc<Riding> {
+        let riding = Arc::new(Riding {
+            device: device.clone(),
+            inner: Mutex::new(RidingState {
+                switch: Some((switch, prepared)),
+                settled: None,
+            }),
+        });
+        let forms = &device.shared().textures.storage_forms;
+        lock(&forms.waiting).riding = Arc::downgrade(&riding);
+        riding
+    }
+
+    /// The scheduler submitted the command buffer's last batch (or failed it), `ran` whether
+    /// every encoder of it ran: a program thread may finish the switch now.
+    pub(crate) fn settle(&self, ran: bool) {
+        let mut inner = lock(&self.inner);
+        inner.settled.get_or_insert(ran);
+    }
+
+    /// The switch, its storage forms and its verdict, once settled; taken once.
+    fn settled(&self) -> Option<(Switch, Vec<Prepared>, bool)> {
+        let mut inner = lock(&self.inner);
+        let ran = inner.settled?;
+        let (switch, prepared) = inner.switch.take()?;
+        Some((switch, prepared, ran))
+    }
+}
+
+impl Drop for Riding {
+    fn drop(&mut self) {
+        let unfinished = lock(&self.inner).switch.take();
+        if let Some((switch, prepared)) = unfinished {
+            let waiting = lock(&self.device.shared().textures.storage_forms.waiting);
+            self.device.end_switch(waiting, (switch, prepared, false));
+        }
+    }
+}
+
+impl Image {
+    /// The `VkImage`, handed out: the image keeps it for good (it takes no storage form after).
+    fn export(&self) -> vk::Image {
+        let _views = lock(&self.views);
+        self.form.exported.store(true, Ordering::Relaxed);
+        self.raw.get()
+    }
+}
+
+impl Texture {
+    /// Note the texture, a color render target that a pass fetches through the pixel interlock
+    /// and renders into a scratch image for want of `STORAGE`, to take its storage form where it
+    /// may (the module docs); once.
+    pub(crate) fn want_storage_form(&self) {
+        if self.0.parent.is_some() {
+            return;
+        }
+        let Storage::Image(image) = &self.0.storage else {
+            return;
+        };
+        let form = &image.form;
+        let own = matches!(
+            image.owner,
+            Owner::Runtime {
+                shareable: false,
+                ..
+            }
+        );
+        if !own
+            || !image.identity.tracked
+            || image.twin.is_some()
+            || self.storage_mode() != StorageMode::Private
+            || form.taken.get().is_some()
+            || form.exported.load(Ordering::Relaxed)
+        {
+            return;
+        }
+        let profile = image.device.compile_device().profile();
+        if storage_candidate(image.plan(), profile).is_none()
+            || form.noted.swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        let forms = &image.device.shared().textures.storage_forms;
+        let mut waiting = lock(&forms.waiting);
+        waiting.textures.push(self.downgrade());
+        forms.wanted.store(waiting.textures.len(), Ordering::SeqCst);
+    }
+
+    /// The texture's `VkImage`, handed out ([`Texture::vk_image`](crate::Texture::vk_image)):
+    /// the texture keeps it (the module docs), in `GENERAL`, its first move made first where it
+    /// waits (`texture/first_move.rs`). Refused as `image` is.
+    pub(crate) fn exported_image(&self) -> Result<vk::Image, Error> {
+        let image = self.image()?;
+        image.settle()?;
+        Ok(image.export())
+    }
+
+    /// The texture's storage form, made, its copy recorded into `core` (the committing command
+    /// buffer's last part); `None` where the device refuses it, or the texture may no longer
+    /// take it.
+    fn prepare_storage_form(&self, core: &mut EncoderCore) -> Option<Prepared> {
+        let Storage::Image(image) = &self.0.storage else {
+            return None;
+        };
+        if image.form.taken.get().is_some() || image.form.exported.load(Ordering::Relaxed) {
+            return None;
+        }
+        let device = &image.device;
+        let plan = storage_candidate(image.plan(), device.compile_device().profile())?;
+        let class = plan.memory_class(StorageMode::Private, &device.properties().driver_defects);
+        let (raw, placement) = device
+            .placed_image(&plan, self.texture_type(), class, device.shared().sharing())
+            .ok()?;
+        let swapped = Arc::new(Mutex::new(Swapped {
+            objects: ImageObjects::new(device, raw),
+            memory: Freed {
+                device: device.clone(),
+                placement,
+            },
+        }));
+        let access = Access::new(
+            crate::blit::TRANSFER,
+            vk::AccessFlags2::TRANSFER_READ | vk::AccessFlags2::TRANSFER_WRITE,
+        );
+        let written = self
+            .image_use(0..plan.levels, 0..plan.layers, access, true)
+            .ok()?;
+        let from = image.raw.get();
+        let aspects = texture_aspects(&plan);
+        let regions = whole_copy(&plan, aspects);
+        core.command(
+            crate::blit::TRANSFER,
+            &[written],
+            |device, command_buffer| {
+                let made = vk::ImageMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::empty())
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::GENERAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(raw)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: aspects,
+                        base_mip_level: 0,
+                        level_count: vk::REMAINING_MIP_LEVELS,
+                        base_array_layer: 0,
+                        layer_count: vk::REMAINING_ARRAY_LAYERS,
+                    });
+                // SAFETY: the part's command buffer is recording, after a barrier from everything
+                // recorded before it; the new image is live and unused, the old one live and in
+                // `GENERAL` (every image rests there outside render passes); both are of one format,
+                // extent, levels, layers and samples, and the regions lie in both. The command buffer
+                // retains the new image, and the old one until it completes.
+                unsafe {
+                    device.cmd_pipeline_barrier(
+                        command_buffer,
+                        vk::PipelineStageFlags::TOP_OF_PIPE,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[made],
+                    );
+                    device.cmd_copy_image(
+                        command_buffer,
+                        from,
+                        vk::ImageLayout::GENERAL,
+                        raw,
+                        vk::ImageLayout::GENERAL,
+                        &regions,
+                    );
+                }
+            },
+        );
+        core.retain(Arc::clone(&swapped));
+        Some(Prepared {
+            texture: self.clone(),
+            plan,
+            swapped,
+        })
+    }
+}
+
+/// One copy of every level, all layers at once, of an image of `plan`'s shape, of `aspects`.
+fn whole_copy(plan: &ImagePlan, aspects: vk::ImageAspectFlags) -> Vec<vk::ImageCopy> {
+    let volume = plan.image_type == metal2vulkan::vk::ImageType::TYPE_3D;
+    (0..plan.levels)
+        .map(|level| {
+            let subresource = vk::ImageSubresourceLayers {
+                aspect_mask: aspects,
+                mip_level: level,
+                base_array_layer: 0,
+                layer_count: plan.layers,
+            };
+            let [width, height, depth] = plan.extent.map(|axis| (axis >> level.min(31)).max(1));
+            vk::ImageCopy {
+                src_subresource: subresource,
+                src_offset: vk::Offset3D::default(),
+                dst_subresource: subresource,
+                dst_offset: vk::Offset3D::default(),
+                extent: vk::Extent3D {
+                    width,
+                    height,
+                    depth: if volume { depth } else { 1 },
+                },
+            }
+        })
+        .collect()
+}
+
+impl Prepared {
+    /// Swap the storage form in (the module docs): the bytes of the image's first memory and of
+    /// its storage form's, where it swapped in; `None` where the texture's image was handed out
+    /// meanwhile, the made image then going with the command buffer.
+    fn swap_in(&self) -> Option<(u64, u64)> {
+        let Storage::Image(image) = &self.texture.0.storage else {
+            return None;
+        };
+        let Owner::Runtime { placement: old, .. } = &image.owner else {
+            return None;
+        };
+        let mut views = lock(&image.views);
+        if image.form.exported.load(Ordering::Relaxed) || image.form.taken.get().is_some() {
+            return None;
+        }
+        let mut swapped = lock(&self.swapped);
+        let bytes = swapped.memory.placement.size();
+        // The image frees its storage form's memory from now on (`Image::drop`); its first
+        // memory goes with its first `VkImage`, as the command buffer completes.
+        let made = std::mem::replace(&mut swapped.memory.placement, old.handed_over());
+        let taken = Taken {
+            plan: self.plan.clone(),
+            placement: made,
+        };
+        if let Err(taken) = image.form.taken.set(taken) {
+            // Not reached: every setter holds the views lock, under which it was not taken.
+            swapped.memory.placement = taken.placement;
+            return None;
+        }
+        image.views_go();
+        let first = image
+            .raw
+            .0
+            .swap(swapped.objects.raw.as_raw(), Ordering::AcqRel);
+        swapped.objects.raw = vk::Image::from_raw(first);
+        swapped
+            .objects
+            .views
+            .extend(views.drain().map(|(_, view)| view));
+        Some((old.size(), bytes))
+    }
+}
+
+impl Device {
+    /// A new command buffer, counted among the uncommitted, waits out a switch under way (the
+    /// module docs), finishing it itself once its command buffer's scheduler settled it: one
+    /// atomic read where none is. It gives the switch up past [`SWITCH_WAIT`], and at once on the
+    /// scheduler's thread, which the switch waits for.
+    pub(crate) fn storage_form_wait(&self) {
+        let shared = self.shared();
+        let forms = &shared.textures.storage_forms;
+        if !forms.switching.load(Ordering::SeqCst) {
+            return;
+        }
+        let until = Instant::now() + SWITCH_WAIT;
+        loop {
+            let mut waiting = lock(&forms.waiting);
+            if !forms.switching.load(Ordering::SeqCst) || waiting.given_up {
+                return;
+            }
+            // Read under the lock, which the scheduler's notice of a settled switch takes: a
+            // settling after this read wakes the wait below. The command buffer's handle goes
+            // with the lock free on every path (`Riding`'s drop takes it).
+            let riding = waiting.riding.upgrade();
+            if let Some(settled) = riding.as_ref().and_then(|riding| riding.settled()) {
+                self.end_switch(waiting, settled);
+                drop(riding);
+                return;
+            }
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() || shared.scheduler.is_current() {
+                waiting.given_up = true;
+                drop(waiting);
+                drop(riding);
+                return;
+            }
+            let waited = forms
+                .changed
+                .wait_timeout(waiting, left)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+            drop(waited);
+            drop(riding);
+        }
+    }
+
+    /// Finish the switch under way where its command buffer's scheduler settled it (the module
+    /// docs), on the program's thread: at each commit, before it looks for a switch of its own,
+    /// and after one whose commit submitted its own. Two atomic reads where none is under way.
+    pub(crate) fn finish_storage_forms(&self) {
+        let forms = &self.shared().textures.storage_forms;
+        if !forms.switching.load(Ordering::SeqCst) {
+            return;
+        }
+        let waiting = lock(&forms.waiting);
+        let riding = waiting.riding.upgrade();
+        match riding.as_ref().and_then(|riding| riding.settled()) {
+            Some(settled) => self.end_switch(waiting, settled),
+            None => drop(waiting),
+        }
+        // The command buffer's handle goes with the lock free (`Riding`'s drop takes it).
+        drop(riding);
+    }
+
+    /// The scheduler settled the switch riding on a command buffer of this device: wake the
+    /// command buffers waiting for it. Called with no lock held.
+    pub(crate) fn storage_form_settled(&self) {
+        let forms = &self.shared().textures.storage_forms;
+        // Taken so that a waiter reads the switch settled or is waiting when this notifies.
+        drop(lock(&forms.waiting));
+        forms.changed.notify_all();
+    }
+
+    /// Whether a texture waits for its storage form: one atomic read, each commit's gate.
+    pub(crate) fn storage_forms_wanted(&self) -> bool {
+        let forms = &self.shared().textures.storage_forms;
+        forms.wanted.load(Ordering::SeqCst) > 0
+    }
+
+    /// A switch, under way, where the device allows one now (the module docs): no other is, the
+    /// committing command buffer, which the caller checked, is its only uncommitted one, the
+    /// scheduler holds no batch, and no command buffer that may read the heap sets is
+    /// incomplete. It takes the waiting textures.
+    pub(crate) fn storage_form_switch(&self) -> Option<Switch> {
+        let shared = self.shared();
+        // Another command buffer open now: no switch, and no lock taken (the count is read again
+        // under the lock, once the flag is up).
+        if shared.uncommitted.count() != 1 {
+            return None;
+        }
+        let forms = &shared.textures.storage_forms;
+        let mut waiting = lock(&forms.waiting);
+        if forms.switching.load(Ordering::SeqCst) || waiting.textures.is_empty() {
+            return None;
+        }
+        forms.switching.store(true, Ordering::SeqCst);
+        let quiet = shared.uncommitted.count() == 1
+            && !self.is_lost()
+            && shared.scheduler.holds_none()
+            && !heap_sets::tickets_out(self);
+        if !quiet {
+            forms.switching.store(false, Ordering::SeqCst);
+            drop(waiting);
+            // A new command buffer that read the flag up waits for the lock or the signal.
+            forms.changed.notify_all();
+            return None;
+        }
+        waiting.given_up = false;
+        // Those gone stop waiting; the others are let go of once the lock is free.
+        let textures = waiting
+            .textures
+            .drain(..)
+            .filter_map(|weak| Texture::upgrade(&weak))
+            .collect();
+        forms.wanted.store(0, Ordering::SeqCst);
+        drop(waiting);
+        Some(Switch { textures })
+    }
+
+    /// End the switch under way (`waiting` its lock, held), `ran` whether every encoder of its
+    /// command buffer ran, which settled it, or `false` where it rides on none (the module
+    /// docs): the storage forms swap in where it ran and no new command buffer gave it up, the
+    /// heap's elements are written again, and, once the lock is free, the switch is announced;
+    /// else the textures it made forms for wait again, and the images made for them go with the
+    /// command buffer.
+    fn end_switch(
+        &self,
+        mut waiting: MutexGuard<'_, Waiting>,
+        (switch, prepared, ran): (Switch, Vec<Prepared>, bool),
+    ) {
+        let shared = self.shared();
+        let forms = &shared.textures.storage_forms;
+        let swapped: Vec<(&Prepared, (u64, u64))> = if ran && !waiting.given_up {
+            prepared
+                .iter()
+                .filter_map(|form| form.swap_in().map(|bytes| (form, bytes)))
+                .collect()
+        } else {
+            let again = prepared.iter().map(|form| form.texture.downgrade());
+            waiting.textures.extend(again);
+            Vec::new()
+        };
+        if !swapped.is_empty() {
+            // The texture slots' elements view the new images; no command buffer that may read
+            // them is pending (the module docs).
+            lock(&shared.resource_ids).renew_textures();
+            heap_sets::renew(self);
+        }
+        waiting.riding = Weak::new();
+        waiting.given_up = false;
+        forms.wanted.store(waiting.textures.len(), Ordering::SeqCst);
+        forms.switching.store(false, Ordering::SeqCst);
+        // The lock goes, then the announcements, which run the program's callback.
+        drop(waiting);
+        forms.changed.notify_all();
+        for (form, (old_bytes, bytes)) in swapped {
+            shared.counts.storage_form_taken();
+            let texture = &form.texture;
+            self.degrade(Degradation::FetchedTargetStorage, || {
+                let object = format!(
+                    "a {:?} {}x{} render target",
+                    texture.pixel_format(),
+                    texture.width(),
+                    texture.height()
+                );
+                let reason = format!(
+                    "a pass fetched it through the pixel interlock while its image had no \
+                     `STORAGE` usage, so that pass rendered into a scratch image; at the commit \
+                     of the device's only uncommitted command buffer, its image was made again \
+                     with `STORAGE` ({bytes} bytes, where it held {old_bytes}) and its texels \
+                     copied in, so its later passes fetch it in place"
+                );
+                (object, reason)
+            });
+        }
+        // The textures' handles go with no lock held.
+        drop(prepared);
+        drop(switch);
+    }
+
+    /// Give up a switch whose storage forms ride on no command buffer (they were not appended):
+    /// nothing swaps, and the textures it made forms for wait again.
+    pub(crate) fn give_up_switch(&self, switch: Switch, prepared: Vec<Prepared>) {
+        let waiting = lock(&self.shared().textures.storage_forms.waiting);
+        self.end_switch(waiting, (switch, prepared, false));
+    }
+
+    /// Give up a switch before it made any storage form: every texture it took waits again.
+    pub(crate) fn put_back_switch(&self, switch: Switch) {
+        let mut waiting = lock(&self.shared().textures.storage_forms.waiting);
+        let again = switch.textures.iter().map(Texture::downgrade);
+        waiting.textures.extend(again);
+        self.end_switch(waiting, (switch, Vec::new(), false));
+    }
+}
+
+impl Switch {
+    /// The waiting textures' storage forms, their copies recorded into `core` (the committing
+    /// command buffer's last part). A texture the device refuses one stops waiting, as does one
+    /// that is gone.
+    pub(crate) fn prepare(&self, core: &mut EncoderCore) -> Vec<Prepared> {
+        self.textures
+            .iter()
+            .filter_map(|texture| texture.prepare_storage_form(core))
+            .collect()
+    }
+}

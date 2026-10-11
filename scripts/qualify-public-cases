@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# The "Qualify public cases on native Vulkan (Linux)" step of .github/workflows/ci.yml, shared
+# with scripts/linux-gate-ci so the two cannot drift.
+#
+#   scripts/qualify-public-cases <bin-dir>     # <bin-dir> holds the built validation binaries
+#
+# Executes the owned public cases with the engine (the only engine the validation binaries run
+# since cutover X2b) on the CPU Vulkan ICD (lavapipe), in both robustness legs, against their committed
+# Metal observations in the reference list's primary environment
+# (crates/metal2vulkan-validation/cutover/c3-references.json), then rebuilds the disposable index and
+# requires each case's two engine slots to be current. Run it from the repository root.
+#
+# Rows written here are ephemeral CI evidence under the operator environment `ci-lavapipe`, which
+# no C3 venue names: a runner's lavapipe is not a venue's declared device, so a
+# venue's environment would refuse it (`venue_mismatch`), and these rows are no venue's evidence.
+#
+# A public checkout has no private store, so `corpus-index` indexes only the rows of public
+# sources and reports the committed rows of private AIR it left out (`scope=public-only ...`);
+# any failure of it fails the step.
+set -euo pipefail
+
+[ "$#" -eq 1 ] || { echo "usage: scripts/qualify-public-cases <bin-dir>" >&2; exit 64; }
+bin=$1
+export LP_NUM_THREADS=1
+
+environment=ci-lavapipe
+metal=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["primary"]["environment_id"])' \
+    crates/metal2vulkan-validation/cutover/c3-references.json)
+cases=(
+    d9ce86618e0924966fbb1e7de63761ef471bb6e85b592a70193a26375ec0423f
+    4659fedddd1695fba79c3faa797ec3be647e3fd1a87ecec23bde55ccbfbcf656
+    1e54315eb0ffcac633d4992c577f3e6ac384ed1bdf2321887c1f37242c00c887
+)
+
+for case_id in "${cases[@]}"; do
+    for leg in "" --robustness-off; do
+        "$bin/corpus-vulkan" \
+            --case-id "$case_id" \
+            --metal-environment-id "$metal" \
+            --environment-id "$environment" \
+            --device-type cpu \
+            ${leg:+"$leg"}
+    done
+done
+
+"$bin/corpus-index"
+"$bin/corpus-index" --check
+named=()
+for case_id in "${cases[@]}"; do
+    named+=(--case-id "$case_id")
+done
+status=$("$bin/corpus-status" "${named[@]}")
+echo "$status"
+incomplete=0
+tab=$'\t'
+for case_id in "${cases[@]}"; do
+    for slot in "$environment@engine" "$environment@engine+robustness-off"; do
+        if ! grep -Fqx "slot${tab}${case_id}${tab}vulkan${tab}${slot}${tab}current" <<<"$status"; then
+            echo "native Vulkan qualification of $case_id in $slot is not current" >&2
+            incomplete=1
+        fi
+    done
+done
+if [ "$incomplete" -ne 0 ]; then
+    echo "native Vulkan qualification is incomplete" >&2
+    exit 1
+fi

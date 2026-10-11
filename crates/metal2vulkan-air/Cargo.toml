@@ -1,0 +1,42 @@
+[package]
+name = "metal2vulkan-air"
+# Moves in lockstep with metal2vulkan, which pins it exactly (`=0.x.y`): see the crate docs.
+version = "0.2.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Read Metal AIR: the metallib container, LLVM bitcode, a typed IR, the AIR metadata ABI, intrinsics, and canonicalization"
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/metal2vulkan-air"
+keywords = ["metal", "air", "llvm", "bitcode", "gpu"]
+categories = ["compilers", "graphics", "parser-implementations"]
+# No binaries and no build script unless declared here: the build scripts that fingerprint this
+# crate's sources (the translator's build_support.rs) watch only the files its module tree reaches
+# and this manifest.
+autobins = false
+build = false
+
+[lib]
+name = "metal2vulkan_air"
+path = "src/lib.rs"
+
+[dependencies]
+# SHA-256: metallib function hashes (`container`).
+sha2.workspace = true
+# Optional: `serde` for the plain-data Metal enums (`metal::DataType`).
+serde = { workspace = true, optional = true }
+
+[features]
+default = []
+# Serialize the plain-data Metal enums (`metal`).
+serde = ["dep:serde"]
+
+[dev-dependencies]
+# The tests' fixture assembler and fixture directories. Path-only, so `cargo
+# publish` drops it and the published manifest names no unpublished crate.
+metal2vulkan-devtools = { path = "../metal2vulkan-devtools" }
+
+[package.metadata.docs.rs]
+all-features = true

@@ -1,0 +1,358 @@
+//! Framebuffer fetch (its fourth part).
+//!
+//! Metal orders a fragment function's read of its color attachment after every earlier fragment
+//! of the pixel, within a draw and across draws. The compile layer emits one of two exact forms
+//! (`lower::fragment::fetch`), by what the compile device has:
+//!
+//! - **Input attachments** (`GraphicsState::input_attachments`) with rasterization-order
+//!   attachment access (`GraphicsState::rasterization_order_attachment_access`), where the device
+//!   has `rasterizationOrderColorAttachmentAccess` (both lavapipes of the venues).
+//! - **Storage attachments in the ordered pixel interlock** (`GraphicsState::storage_attachments`),
+//!   where it has `fragmentShaderPixelInterlock` alone (RADV, ANV, NVIDIA and MoltenVK).
+//!
+//! Under `FramebufferFetchPolicy::AcceptUnordered`, which a caller may pass in
+//! `DeviceOptions::policy`, the compile layer also emits input attachments without that access
+//! where neither form is open to the pipeline (a device with neither feature, or a pipeline
+//! state the storage form cannot keep exact, such as a blending fetched attachment), recording
+//! `PrecisionNote::UnorderedFramebufferFetch`. The runtime runs only the ordered forms, which
+//! are Metal's, so it refuses such a pipeline where it makes it ([`ordered`]).
+//!
+//! The input attachment form ([`through_inputs`]): a pass cannot foresee which of its draws
+//! fetch, so on such a device every color render target is also an input attachment
+//! (`image_plan.rs`; a caller's image made without that usage is not, `texture/wrapped.rs`, and
+//! a pass that fetches it renders it into a scratch image that has it, `attachment_stand_in.rs`),
+//! every pass's draws' subpass reads each color attachment as the input attachment of its index
+//! with rasterization-order access (`render_target.rs`), and every
+//! graphics pipeline made for such a subpass orders its color attachment accesses so
+//! (`pipeline/graphics.rs`): a fetch then reads what each earlier fragment of the pixel wrote,
+//! whichever pipeline drew it. Every attachment rests in `GENERAL`, the layout an attachment
+//! read as both needs.
+//!
+//! The storage form ([`through_storage`]): a draw's fetched attachments are storage images it
+//! reads and writes in the interlock, which its subpass leaves out (`render_target.rs`); a pass
+//! whose draws change an attachment's role splits into render pass instances (`render.rs`). The
+//! fetched attachment's image needs `STORAGE` usage, which a texture cannot foresee either, and
+//! which costs some devices: on Apple's GPU (MoltenVK) it drops the image's lossless compression,
+//! measured as a sampled read three to five times slower, while RADV and NVIDIA lay out every
+//! target measured alike, and ANV its 2048x2048 `RGBA8Unorm` and `RGBA16Float` targets but not a
+//! 16x16 `R32Float` one. So each device answers for each image: a color render target takes
+//! `STORAGE` where its image's memory requirements are the same with it and without it
+//! ([`Device::with_free_usage`], remembered by description in [`UsageAnswers`]), and a pass that
+//! fetches a texture without it (a caller's image among them) renders the texture into a scratch
+//! image that has it (`attachment_stand_in.rs`). A texture Metal may write from a shader has
+//! `STORAGE` anyway.
+//!
+//! The interlock orders the overlapping fragments of a draw; between two draws of one render pass
+//! instance, a draw that reads or writes a color in the storage form after an earlier draw of the
+//! instance wrote one there records after a barrier from the fragment shader's writes
+//! (`render_target::between_storage_draws`), as a draw that reaches the fragment imageblock's
+//! storage does: RADV on an AMD 780M (Mesa 26.2.4) did not order such draws by the interlock alone,
+//! and a memoryless color's copy through a fetch read texels as they were before the blends of the
+//! draws just before it.
+//!
+//! An 8-bit sRGB attachment (with the compile form) is read and written through a storage view in
+//! the unsigned-integer format of its texel size ([`storage_view_format`]): Metal's tile keeps the
+//! attachment's 8-bit codes between draws, and the compile layer decodes and encodes them itself. A
+//! texture is not made mutable to that view, so a pass that fetches one renders it into a scratch
+//! image that is, with extended usage (its `STORAGE` is the view's), and a memoryless one into such
+//! a backing; the pass's draws that do not fetch it render it through a view in its own format. A
+//! multisampled pass's sample planes take the view too (`sample_planes.rs`). A device that stores
+//! no image of the view's format, or does not reinterpret the attachment's components as the
+//! view's, refuses the fetching draw, typed `Unsupported`. Through input attachments the device
+//! decodes the codes the function reads, and the compile layer takes that value back to its code by
+//! Metal's encode and decodes the code by Metal's table, so the function reads Metal's value there
+//! too.
+//!
+//! In a multisampled pass the compile layer reads the attachment per sample, in either form. The
+//! runtime draws the input attachment form where the attachment's image takes input attachment
+//! usage. On a device without multisampled storage images ([`through_planes`]: ANV, MoltenVK) the
+//! storage form reads and writes the attachment's sample planes, which the runtime keeps for the
+//! pass and copies the samples into and out of (`sample_planes.rs`). Those copies read and write
+//! the attachment's image sampled, through a view in the unsigned-integer format of its texel size;
+//! a multisampled color render target takes that usage by the same rule as `STORAGE`
+//! ([`planes_candidate`]), and a pass that fetches a texture without it renders into a multisampled
+//! scratch image that has it. A device with multisampled storage images
+//! ([`through_multisampled_storage`]: RADV, NVIDIA) takes the storage form on the attachment's own
+//! multisampled image: a multisampled color render target takes `STORAGE` by the single-sampled
+//! rule where the device stores its format at its sample count ([`storage_candidate`]), and a pass
+//! that fetches a texture without it, or a memoryless one, renders into a multisampled scratch
+//! image or backing that has it, which an image copy fills and empties at the same sample count
+//! (`attachment_stand_in.rs`).
+
+use super::color_resolve;
+use super::depth_stencil_scratch;
+use super::device::lock;
+use super::error::Error;
+use super::image_plan::ImagePlan;
+use super::Device;
+use metal2vulkan::bind::PlanesCopy;
+use metal2vulkan::device::{DeviceProfile, FormatUsage, VkFeature, VkProperty};
+use metal2vulkan::error::{Capability, Feature, Unsupported};
+use metal2vulkan::metal::TextureType;
+use metal2vulkan::pipeline::{GraphicsState, StorageAttachmentUse};
+use metal2vulkan::vk::{Format, ImageCreateFlags, ImageUsageFlags};
+use std::collections::VecDeque;
+
+/// Whether the compile layer reads `profile`'s fetched color attachments as input attachments
+/// in rasterization order (`lower::fragment::fetch`): where the device has
+/// `rasterizationOrderColorAttachmentAccess`.
+pub(crate) fn through_inputs(profile: &DeviceProfile) -> bool {
+    profile.fragment().rasterization_order_color_access
+}
+
+/// Whether the compile layer reads `profile`'s fetched color attachments as storage images in the
+/// ordered pixel interlock (`lower::fragment::fetch`): where it has `fragmentShaderPixelInterlock`
+/// without rasterization-order color attachment access.
+pub(crate) fn through_storage(profile: &DeviceProfile) -> bool {
+    let fragment = profile.fragment();
+    !fragment.rasterization_order_color_access && fragment.pixel_interlock
+}
+
+/// Whether the compile layer reads `profile`'s fetched color attachments of a pass of `samples`
+/// samples as sample planes (`StorageAttachmentView::SamplePlanes`): in the pixel interlock, at
+/// more than one sample, on a device without multisampled storage images.
+pub(crate) fn through_planes(profile: &DeviceProfile, samples: u32) -> bool {
+    through_storage(profile) && samples > 1 && !profile.images().storage_multisample
+}
+
+/// Whether the compile layer reads `profile`'s fetched color attachments of a pass of `samples`
+/// samples as the attachment's own multisampled storage image (`StorageAttachmentView::Attachment`
+/// at more than one sample): in the pixel interlock, at more than one sample, on a device with
+/// multisampled storage images. Link refuses the pipeline where the count is not among
+/// `storageImageSampleCounts`.
+pub(crate) fn through_multisampled_storage(profile: &DeviceProfile, samples: u32) -> bool {
+    through_storage(profile) && samples > 1 && profile.images().storage_multisample
+}
+
+/// Whether `profile` stores images of `samples` samples: every device at one sample; at more,
+/// one with multisampled storage images whose `storageImageSampleCounts` has the count.
+pub(crate) fn stores_samples(profile: &DeviceProfile, samples: u32) -> bool {
+    samples == 1
+        || (profile.images().storage_multisample
+            && profile
+                .enabled()
+                .properties
+                .contains(&VkProperty::StorageImageSampleCount(samples)))
+}
+
+/// The format of a fetching draw's storage view of a color attachment of `format` in the pixel
+/// interlock (`StorageAttachmentUse::view_format`): the unsigned-integer format of an 8-bit sRGB
+/// format's texel size (`StorageAttachmentUse::uint_view_of`), through which the compile layer
+/// reads and writes the attachment's codes and decodes and encodes them itself, as Metal's tile
+/// keeps them; `format` itself for any other. A pass renders such an attachment, wherever a
+/// draw fetches it, into an image that takes this view: its own where it does
+/// ([`views_in`]), else a stand-in made mutable to it (`attachment_stand_in.rs`).
+pub(crate) fn storage_view_format(format: Format) -> Format {
+    StorageAttachmentUse::uint_view_of(format).unwrap_or(format)
+}
+
+/// Whether an image of `plan` takes a view in `format`: its own format, or a mutable image's
+/// view format (any of its texel size where it lists none).
+pub(crate) fn views_in(plan: &ImagePlan, format: Format) -> bool {
+    format == plan.format
+        || (plan.flags.contains(ImageCreateFlags::MUTABLE_FORMAT)
+            && (plan.view_formats.is_empty() || plan.view_formats.contains(&format)))
+}
+
+/// The image descriptions remembered at most: past this many, the oldest answer goes.
+const ANSWERS: usize = 64;
+
+/// A device's answers, by image description and the description with a usage added, to whether
+/// the usage costs a color render target's image nothing (the module docs): what a framebuffer
+/// fetch's form needs, `STORAGE` ([`storage_candidate`]) or what the sample planes' copies need
+/// ([`planes_candidate`]), and the input attachment usage the exact resolve reads through
+/// (`color_resolve::input_candidate`). Bounded: the oldest answer goes first.
+#[derive(Default)]
+pub(crate) struct UsageAnswers(VecDeque<(ImagePlan, ImagePlan, bool)>);
+
+impl UsageAnswers {
+    /// The answer for an image of `plan` given `candidate`'s usage, if remembered.
+    pub(crate) fn answer(&self, plan: &ImagePlan, candidate: &ImagePlan) -> Option<bool> {
+        self.0
+            .iter()
+            .find(|(p, c, _)| p == plan && c == candidate)
+            .map(|&(_, _, free)| free)
+    }
+
+    /// Remember `free` for an image of `plan` given `candidate`'s usage.
+    pub(crate) fn remember(&mut self, plan: ImagePlan, candidate: ImagePlan, free: bool) {
+        if self.0.len() == ANSWERS {
+            self.0.pop_front();
+        }
+        self.0.push_back((plan, candidate, free));
+    }
+}
+
+/// `plan` with the usage its fetch's form needs, where a framebuffer fetch through the interlock
+/// may read its image (the module docs): [`storage_candidate`] for a single-sampled color
+/// attachment and a multisampled one of a device with multisampled storage images,
+/// [`planes_candidate`] for a multisampled one of a device without them. `None` where the plan
+/// has it already or cannot take it.
+pub(crate) fn fetch_candidate(plan: &ImagePlan, profile: &DeviceProfile) -> Option<ImagePlan> {
+    storage_candidate(plan, profile).or_else(|| planes_candidate(plan, profile))
+}
+
+/// `plan` with `STORAGE` usage, where a framebuffer fetch through the interlock may read its
+/// image (the module docs): a color attachment that is not transient, of a format the device
+/// stores, on a device whose fetch is that form; single-sampled, or multisampled where the fetch
+/// reads the attachment's own multisampled image ([`through_multisampled_storage`]) and the device
+/// stores images of its samples ([`stores_samples`]). `None` where the plan has `STORAGE` already
+/// (a texture Metal may write) or cannot take it.
+pub(crate) fn storage_candidate(plan: &ImagePlan, profile: &DeviceProfile) -> Option<ImagePlan> {
+    let usage = plan.usage;
+    let samples = plan.samples.as_raw();
+    let own_image = samples == 1 || through_multisampled_storage(profile, samples);
+    let candidate = through_storage(profile)
+        && usage.contains(ImageUsageFlags::COLOR_ATTACHMENT)
+        && !usage.intersects(ImageUsageFlags::STORAGE | ImageUsageFlags::TRANSIENT_ATTACHMENT)
+        && own_image
+        && stores_samples(profile, samples)
+        && profile.supports_format(plan.format, FormatUsage::StorageImage);
+    candidate.then(|| ImagePlan {
+        usage: usage | ImageUsageFlags::STORAGE,
+        ..plan.clone()
+    })
+}
+
+/// Whether the sample planes' copies (`sample_planes.rs`) read and write `plan`'s image directly:
+/// it is sampled and may be viewed in the [`PlanesCopy`] format of its texel size (mutable, with
+/// no format list or one that lists it).
+pub(crate) fn planes_copies(plan: &ImagePlan) -> bool {
+    let Some(copy) = PlanesCopy::for_format(plan.format) else {
+        return false;
+    };
+    plan.usage.contains(ImageUsageFlags::SAMPLED)
+        && plan.flags.contains(ImageCreateFlags::MUTABLE_FORMAT)
+        && (plan.view_formats.is_empty() || plan.view_formats.contains(&copy.format()))
+}
+
+/// What a multisampled color image of `format` lacks on `profile` for the sample planes' copies
+/// to read and write it (`sample_planes.rs`), the first of: its own format sampled (no extended
+/// usage is asked), and the [`PlanesCopy`] format of its texel size sampled and a color
+/// attachment. `None` where it lacks nothing, and where `format` has no copy format.
+pub(crate) fn planes_copies_gap(format: Format, profile: &DeviceProfile) -> Option<Capability> {
+    let copy = PlanesCopy::for_format(format)?;
+    [
+        (format, FormatUsage::SampledImage),
+        (copy.format(), FormatUsage::SampledImage),
+        (copy.format(), FormatUsage::ColorAttachment),
+    ]
+    .into_iter()
+    .find(|&(format, usage)| !profile.supports_format(format, usage))
+    .map(|(format, usage)| Capability::Format { format, usage })
+}
+
+/// The usage and format list a multisampled color image takes for the sample planes' copies
+/// (`sample_planes.rs`): `plan` sampled and mutable with the [`PlanesCopy`] format of its texel
+/// size among its view formats. `None` where the device cannot run the copies on it: no copy
+/// format, or a format usage it lacks ([`planes_copies_gap`]).
+pub(crate) fn with_planes_copies(plan: &ImagePlan, profile: &DeviceProfile) -> Option<ImagePlan> {
+    let copy = PlanesCopy::for_format(plan.format)?;
+    if planes_copies_gap(plan.format, profile).is_some() {
+        return None;
+    }
+    let mut candidate = plan.clone();
+    candidate.usage |= ImageUsageFlags::SAMPLED;
+    let any_format =
+        plan.flags.contains(ImageCreateFlags::MUTABLE_FORMAT) && plan.view_formats.is_empty();
+    candidate.flags |= ImageCreateFlags::MUTABLE_FORMAT;
+    if !any_format {
+        if candidate.view_formats.is_empty() {
+            candidate.view_formats.push(plan.format);
+        }
+        if !candidate.view_formats.contains(&copy.format()) {
+            candidate.view_formats.push(copy.format());
+        }
+    }
+    Some(candidate)
+}
+
+/// `plan` with what the sample planes' copies need ([`with_planes_copies`]), where a framebuffer
+/// fetch reads its image as sample planes (the module docs): a multisampled color attachment
+/// that is not transient, on a device that reads it so ([`through_planes`]). `None` where the
+/// plan has it already or cannot take it.
+pub(crate) fn planes_candidate(plan: &ImagePlan, profile: &DeviceProfile) -> Option<ImagePlan> {
+    let usage = plan.usage;
+    let candidate = through_planes(profile, plan.samples.as_raw())
+        && usage.contains(ImageUsageFlags::COLOR_ATTACHMENT)
+        && !usage.contains(ImageUsageFlags::TRANSIENT_ATTACHMENT)
+        && !planes_copies(plan);
+    if !candidate {
+        return None;
+    }
+    with_planes_copies(plan, profile)
+}
+
+impl Device {
+    /// `plan`, an image of Metal's `texture_type`, with the usage its framebuffer fetch's form
+    /// needs ([`fetch_candidate`]), or a multisampled depth/stencil attachment's copies without
+    /// colour copies need (`depth_stencil_scratch::sampled_candidate`), then the unsigned-integer
+    /// view a NaN clear writes a multisampled attachment through on a device whose copies
+    /// convert its NaNs (`nan_clear::view_candidate`), and then the input attachment usage the
+    /// exact color resolve reads a multisampled color attachment through
+    /// (`color_resolve::input_candidate`), each where it may take it and it costs the image
+    /// nothing: the image's memory requirements, size and alignment, are the same with it as
+    /// without it (the module docs).
+    pub(crate) fn with_free_usage(
+        &self,
+        plan: ImagePlan,
+        texture_type: TextureType,
+    ) -> Result<ImagePlan, Error> {
+        let fetched = fetch_candidate(&plan, self.compile_device().profile())
+            .or_else(|| depth_stencil_scratch::sampled_candidate(&plan, self));
+        let plan = match fetched {
+            Some(candidate) => self.if_free(plan, candidate, texture_type)?,
+            None => plan,
+        };
+        let plan = match super::nan_clear::view_candidate(&plan, self)? {
+            Some(candidate) => self.if_free(plan, candidate, texture_type)?,
+            None => plan,
+        };
+        match color_resolve::input_candidate(&plan, self) {
+            Some(candidate) => self.if_free(plan, candidate, texture_type),
+            None => Ok(plan),
+        }
+    }
+
+    /// `candidate`, `plan` with a usage added, where that costs the image nothing (as
+    /// [`Device::with_free_usage`] says), else `plan`.
+    pub(crate) fn if_free(
+        &self,
+        plan: ImagePlan,
+        candidate: ImagePlan,
+        texture_type: TextureType,
+    ) -> Result<ImagePlan, Error> {
+        let answers = &self.shared().textures.usage_answers;
+        let known = lock(answers).answer(&plan, &candidate);
+        let free = match known {
+            Some(free) => free,
+            None => {
+                let with = self.image_requirements(&candidate, texture_type)?;
+                let without = self.image_requirements(&plan, texture_type)?;
+                let free = match (with, without) {
+                    (Some(with), Some(without)) => {
+                        (with.size, with.alignment) == (without.size, without.alignment)
+                    }
+                    _ => false,
+                };
+                lock(answers).remember(plan.clone(), candidate.clone(), free);
+                free
+            }
+        };
+        Ok(if free { candidate } else { plan })
+    }
+}
+
+/// Refuse a pipeline of `graphics` whose framebuffer fetch the compile layer left unordered:
+/// input attachments without rasterization-order attachment access. The refusal names that
+/// access, with which the compile layer orders every fetch; compiling under `RequireOrdered`
+/// names each alternative the device lacks.
+pub(crate) fn ordered(graphics: &GraphicsState) -> Result<(), Error> {
+    if graphics.input_attachments.is_empty() || graphics.rasterization_order_attachment_access {
+        return Ok(());
+    }
+    Err(Error::Unsupported(Unsupported::needs(
+        Feature::FramebufferFetch,
+        Capability::Feature(VkFeature::RasterizationOrderColorAttachmentAccess),
+    )))
+}

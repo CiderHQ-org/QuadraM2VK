@@ -1,0 +1,1001 @@
+target triple = "air64_v28-apple-macosx26.0.0"
+source_filename = "-"
+; datalayout DataLayout { endian: Little, pointers: {0: PointerSpec { size_bits: 64, abi_bits: 64, pref_bits: 64, index_bits: 64 }}, ints: {1: AlignSpec { abi_bits: 8, pref_bits: 8 }, 8: AlignSpec { abi_bits: 8, pref_bits: 8 }, 16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }}, floats: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }}, vectors: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 24: AlignSpec { abi_bits: 32, pref_bits: 32 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 48: AlignSpec { abi_bits: 64, pref_bits: 64 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 96: AlignSpec { abi_bits: 128, pref_bits: 128 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }, 192: AlignSpec { abi_bits: 256, pref_bits: 256 }, 256: AlignSpec { abi_bits: 256, pref_bits: 256 }, 512: AlignSpec { abi_bits: 512, pref_bits: 512 }, 1024: AlignSpec { abi_bits: 1024, pref_bits: 1024 }}, aggregate: AlignSpec { abi_bits: 0, pref_bits: 64 }, native_ints: [8, 16, 32], stack_align_bits: None, alloca_space: 0, program_space: 0, globals_space: 0, mangling: None, fn_ptr_align: None, non_integral: [] }
+%t5 = type void (ptr addrspace(1), ptr addrspace(1), ptr addrspace(2), i32)
+%t6 = type void (ptr addrspace(1), ptr addrspace(1), i32)
+%t8 = type half (i32)
+%t9 = type void (ptr addrspace(1), i32)
+%t10 = type void (i32, ptr addrspace(1), ptr addrspace(1), ptr addrspace(2))
+%t11 = type void (i32, ptr addrspace(1), ptr addrspace(1))
+%t14 = type <4 x float> (<4 x float>)
+%t16 = type <4 x i32> (<4 x float>)
+%t17 = type float (i32)
+%t20 = type <2 x i32> (<2 x float>)
+%t22 = type float (float, float, i16, i16)
+%t23 = type float (float, i16)
+%t24 = type <2 x float> (<2 x float>, <2 x float>, i16, i16)
+%t25 = type i32 (i32, i32, i16, i16)
+%t26 = type i16 (i16, i16, i16, i16)
+%t27 = type half (half, half, i16, i16)
+%t28 = type half (half, i16)
+%t30 = type i8 (i8, i8, i16, i16)
+%t31 = type i32 (i32)
+%t32 = type i16 (i16)
+%t33 = type i8 (i8)
+%t34 = type float (float)
+%t35 = type <2 x float> (<2 x float>)
+%t36 = type half (half)
+%t38 = type <2 x half> (<2 x half>)
+%t39 = type i16 ()
+%t41 = type [2 x i32]
+c66 = %t41 [27, 0]
+c104 = <2 x i32> [0, 1]
+c114 = <4 x float> [0xC0E00000, 0xC0E00000, 0xC0E00000, 0xC0E00000]
+c117 = <4 x float> [poison, 0x0, 0x0, 0x3F800000]
+
+define %t5 @f0 "quad_fills" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="64" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a0( Ref nocapture "air-buffer-no-alias"="" ) %a1( Mod nocapture "air-buffer-no-alias"="" ) %a2( Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = zext %a3 to i64
+  %i1 = getelementptr inbounds float, %a0, %i0
+  %i2 = load float, %i1, align 4
+  %i3 = fadd reassoc nnan ninf nsz arcp contract afn float %i2, float 0x447A0000
+  %i4 = freeze float %i2
+  %i5 = tail call reassoc nnan ninf nsz arcp contract afn float @f21 [air Group(Group { scope: Quad, op: ShuffleAndFillUp, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i4, %i3, i16 1, i16 4) convergent
+  %i6 = mul i32 %a3, i32 12
+  %i7 = zext %i6 to i64
+  %i8 = getelementptr inbounds float, %a1, %i7
+  store %i5, %i8, align 4
+  %i10 = tail call reassoc nnan ninf nsz arcp contract afn float @f22 [air Group(Group { scope: Quad, op: ShuffleAndFillDown, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i4, %i3, i16 2, i16 4) convergent
+  %i11 = or i32 %i6, i32 1
+  %i12 = zext %i11 to i64
+  %i13 = getelementptr inbounds float, %a1, %i12
+  store %i10, %i13, align 4
+  %i15 = tail call reassoc nnan ninf nsz arcp contract afn float @f21 [air Group(Group { scope: Quad, op: ShuffleAndFillUp, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i4, %i3, i16 1, i16 2) convergent
+  %i16 = or i32 %i6, i32 2
+  %i17 = zext %i16 to i64
+  %i18 = getelementptr inbounds float, %a1, %i17
+  store %i15, %i18, align 4
+  %i20 = tail call reassoc nnan ninf nsz arcp contract afn float @f22 [air Group(Group { scope: Quad, op: ShuffleAndFillDown, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i4, %i3, i16 3, i16 4) convergent
+  %i21 = or i32 %i6, i32 3
+  %i22 = zext %i21 to i64
+  %i23 = getelementptr inbounds float, %a1, %i22
+  store %i20, %i23, align 4
+  %i25 = load i32, %a2, align 4
+  %i26 = trunc %i25 to i16
+  %i27 = getelementptr inbounds i32, %a2, i64 1
+  %i28 = load i32, %i27, align 4
+  %i29 = trunc %i28 to i16
+  %i30 = tail call reassoc nnan ninf nsz arcp contract afn float @f21 [air Group(Group { scope: Quad, op: ShuffleAndFillUp, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i4, %i3, %i26, %i29) convergent
+  %i31 = add i32 %i6, i32 4
+  %i32 = zext %i31 to i64
+  %i33 = getelementptr inbounds float, %a1, %i32
+  store %i30, %i33, align 4
+  %i35 = getelementptr inbounds i32, %a2, i64 2
+  %i36 = load i32, %i35, align 4
+  %i37 = trunc %i36 to i16
+  %i38 = getelementptr inbounds i32, %a2, i64 3
+  %i39 = load i32, %i38, align 4
+  %i40 = trunc %i39 to i16
+  %i41 = tail call reassoc nnan ninf nsz arcp contract afn float @f22 [air Group(Group { scope: Quad, op: ShuffleAndFillDown, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i4, %i3, %i37, %i40) convergent
+  %i42 = add i32 %i6, i32 5
+  %i43 = zext %i42 to i64
+  %i44 = getelementptr inbounds float, %a1, %i43
+  store %i41, %i44, align 4
+  %i46 = getelementptr inbounds i32, %a2, i64 4
+  %i47 = load i32, %i46, align 4
+  %i48 = trunc %i47 to i16
+  %i49 = getelementptr inbounds i32, %a2, i64 5
+  %i50 = load i32, %i49, align 4
+  %i51 = trunc %i50 to i16
+  %i52 = tail call reassoc nnan ninf nsz arcp contract afn float @f21 [air Group(Group { scope: Quad, op: ShuffleAndFillUp, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i4, %i3, %i48, %i51) convergent
+  %i53 = add i32 %i6, i32 6
+  %i54 = zext %i53 to i64
+  %i55 = getelementptr inbounds float, %a1, %i54
+  store %i52, %i55, align 4
+  %i57 = getelementptr inbounds i32, %a2, i64 6
+  %i58 = load i32, %i57, align 4
+  %i59 = trunc %i58 to i16
+  %i60 = getelementptr inbounds i32, %a2, i64 7
+  %i61 = load i32, %i60, align 4
+  %i62 = trunc %i61 to i16
+  %i63 = tail call reassoc nnan ninf nsz arcp contract afn float @f22 [air Group(Group { scope: Quad, op: ShuffleAndFillDown, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i4, %i3, %i59, %i62) convergent
+  %i64 = add i32 %i6, i32 7
+  %i65 = zext %i64 to i64
+  %i66 = getelementptr inbounds float, %a1, %i65
+  store %i63, %i66, align 4
+  %i68 = tail call reassoc nnan ninf nsz arcp contract afn float @f22 [air Group(Group { scope: Quad, op: ShuffleAndFillDown, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i4, %i3, %i26, i16 4) convergent
+  %i69 = add i32 %i6, i32 8
+  %i70 = zext %i69 to i64
+  %i71 = getelementptr inbounds float, %a1, %i70
+  store %i68, %i71, align 4
+  %i73 = tail call reassoc nnan ninf nsz arcp contract afn float @f23 [air Group(Group { scope: Quad, op: ShuffleRotateUp, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i4, i16 1) convergent
+  %i74 = add i32 %i6, i32 9
+  %i75 = zext %i74 to i64
+  %i76 = getelementptr inbounds float, %a1, %i75
+  store %i73, %i76, align 4
+  %i78 = tail call reassoc nnan ninf nsz arcp contract afn float @f23 [air Group(Group { scope: Quad, op: ShuffleRotateUp, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i4, %i37) convergent
+  %i79 = add i32 %i6, i32 10
+  %i80 = zext %i79 to i64
+  %i81 = getelementptr inbounds float, %a1, %i80
+  store %i78, %i81, align 4
+  %i83 = insertelement <2 x float> undef, %i4, i64 0
+  %i84 = insertelement %i83, %i3, i64 1
+  %i85 = insertelement <2 x float> undef, %i3, i64 0
+  %i86 = insertelement %i85, %i4, i64 1
+  %i87 = freeze <2 x float> %i84
+  %i88 = tail call reassoc nnan ninf nsz arcp contract afn <2 x float> @f24 [air Group(Group { scope: Quad, op: ShuffleAndFillUp, ty: Some(NumTy { elem: F32, lanes: 2 }), sign: None })](%i87, %i86, i16 2, i16 4) convergent
+  %i89 = extractelement %i88, i64 1
+  %i90 = add i32 %i6, i32 11
+  %i91 = zext %i90 to i64
+  %i92 = getelementptr inbounds float, %a1, %i91
+  store %i89, %i92, align 4
+  ret void
+}
+
+define %t6 @f1 "quad_pair_fills" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="0" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a0( Ref nocapture "air-buffer-no-alias"="" ) %a1( Mod nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = zext %a2 to i64
+  %i1 = getelementptr inbounds float, %a0, %i0
+  %i2 = load float, %i1, align 4
+  %i3 = fadd reassoc nnan ninf nsz arcp contract afn float %i2, float 0x447A0000
+  %i4 = freeze float %i2
+  %i5 = tail call reassoc nnan ninf nsz arcp contract afn float @f21 [air Group(Group { scope: Quad, op: ShuffleAndFillUp, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i4, %i3, i16 1, i16 2) convergent
+  %i6 = shl i32 %a2, i32 2
+  %i7 = zext %i6 to i64
+  %i8 = getelementptr inbounds float, %a1, %i7
+  store %i5, %i8, align 4
+  %i10 = tail call reassoc nnan ninf nsz arcp contract afn float @f22 [air Group(Group { scope: Quad, op: ShuffleAndFillDown, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i4, %i3, i16 1, i16 2) convergent
+  %i11 = or i32 %i6, i32 1
+  %i12 = zext %i11 to i64
+  %i13 = getelementptr inbounds float, %a1, %i12
+  store %i10, %i13, align 4
+  %i15 = tail call reassoc nnan ninf nsz arcp contract afn float @f21 [air Group(Group { scope: Quad, op: ShuffleAndFillUp, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i4, %i3, i16 2, i16 2) convergent
+  %i16 = or i32 %i6, i32 2
+  %i17 = zext %i16 to i64
+  %i18 = getelementptr inbounds float, %a1, %i17
+  store %i15, %i18, align 4
+  %i20 = tail call reassoc nnan ninf nsz arcp contract afn float @f22 [air Group(Group { scope: Quad, op: ShuffleAndFillDown, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i4, %i3, i16 2, i16 2) convergent
+  %i21 = or i32 %i6, i32 3
+  %i22 = zext %i21 to i64
+  %i23 = getelementptr inbounds float, %a1, %i22
+  store %i20, %i23, align 4
+  ret void
+}
+
+define %t5 @f2 "quad_typed_fills" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="0" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a0( Ref nocapture "air-buffer-no-alias"="" ) %a1( Mod nocapture "air-buffer-no-alias"="" ) %a2( Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = zext %a3 to i64
+  %i1 = getelementptr inbounds i32, %a0, %i0
+  %i2 = load i32, %i1, align 4
+  %i3 = add nsw i32 %i2, i32 1000
+  %i4 = load i32, %a2, align 4
+  %i5 = trunc %i4 to i16
+  %i6 = getelementptr inbounds i32, %a2, i64 1
+  %i7 = load i32, %i6, align 4
+  %i8 = trunc %i7 to i16
+  %i9 = freeze i32 %i2
+  %i10 = tail call i32 @f25 [air Group(Group { scope: Quad, op: ShuffleAndFillUp, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i9, %i3, %i5, %i8) convergent
+  %i11 = shl i32 %a3, i32 2
+  %i12 = zext %i11 to i64
+  %i13 = getelementptr inbounds i32, %a1, %i12
+  store %i10, %i13, align 4
+  %i15 = trunc %i9 to i16
+  %i16 = tail call i16 @f26 [air Group(Group { scope: Quad, op: ShuffleAndFillDown, ty: Some(NumTy { elem: I16, lanes: 1 }), sign: Some(Signed) })](%i15, i16 7, i16 1, i16 4) convergent
+  %i17 = sext %i16 to i32
+  %i18 = or i32 %i11, i32 1
+  %i19 = zext %i18 to i64
+  %i20 = getelementptr inbounds i32, %a1, %i19
+  store %i17, %i20, align 4
+  %i22 = tail call reassoc nnan ninf nsz arcp contract afn half @f3 [air Convert(Convert { dst: NumTy { elem: F16, lanes: 1 }, dst_kind: Float, src: NumTy { elem: I32, lanes: 1 }, src_kind: Signed, src_fp8: None })](%i9)
+  %i23 = freeze half %i22
+  %i24 = tail call reassoc nnan ninf nsz arcp contract afn half @f27 [air Group(Group { scope: Quad, op: ShuffleAndFillUp, ty: Some(NumTy { elem: F16, lanes: 1 }), sign: None })](%i23, half 0xBC00, i16 2, i16 4) convergent
+  %i25 = insertelement <2 x half> undef, %i24, i64 0
+  %i26 = tail call reassoc nnan ninf nsz arcp contract afn half @f28 [air Group(Group { scope: Quad, op: ShuffleRotateUp, ty: Some(NumTy { elem: F16, lanes: 1 }), sign: None })](%i23, i16 3) convergent
+  %i27 = insertelement %i25, %i26, i64 1
+  %i28 = or i32 %i11, i32 2
+  %i29 = zext %i28 to i64
+  %i30 = getelementptr inbounds i32, %a1, %i29
+  %i31 = bitcast %i30 to ptr addrspace(1)
+  store %i27, %i31, align 4
+  %i33 = trunc %i9 to i8
+  %i34 = tail call i8 @f29 [air Group(Group { scope: Quad, op: ShuffleAndFillDown, ty: Some(NumTy { elem: I8, lanes: 1 }), sign: Some(Unsigned) })](%i33, i8 9, i16 1, i16 2) convergent
+  %i35 = zext %i34 to i32
+  %i36 = or i32 %i11, i32 3
+  %i37 = zext %i36 to i64
+  %i38 = getelementptr inbounds i32, %a1, %i37
+  store %i35, %i38, align 4
+  ret void
+}
+
+declare %t8 @f3 "air.convert.f.f16.s.i32" memory(NoModRef, NoModRef, NoModRef)
+
+define %t6 @f4 "quad_bitwise" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="0" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a0( Ref nocapture "air-buffer-no-alias"="" ) %a1( Mod nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = zext %a2 to i64
+  %i1 = getelementptr inbounds i32, %a0, %i0
+  %i2 = load i32, %i1, align 4
+  %i3 = tail call i32 @f30 [air Group(Group { scope: Quad, op: And, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i2) convergent
+  %i4 = mul i32 %a2, i32 6
+  %i5 = zext %i4 to i64
+  %i6 = getelementptr inbounds i32, %a1, %i5
+  store %i3, %i6, align 4
+  %i8 = tail call i32 @f31 [air Group(Group { scope: Quad, op: Or, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i2) convergent
+  %i9 = or i32 %i4, i32 1
+  %i10 = zext %i9 to i64
+  %i11 = getelementptr inbounds i32, %a1, %i10
+  store %i8, %i11, align 4
+  %i13 = tail call i32 @f32 [air Group(Group { scope: Quad, op: Xor, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Unsigned) })](%i2) convergent
+  %i14 = add i32 %i4, i32 2
+  %i15 = zext %i14 to i64
+  %i16 = getelementptr inbounds i32, %a1, %i15
+  store %i13, %i16, align 4
+  %i18 = trunc %i2 to i16
+  %i19 = tail call i16 @f33 [air Group(Group { scope: Quad, op: Or, ty: Some(NumTy { elem: I16, lanes: 1 }), sign: Some(Unsigned) })](%i18) convergent
+  %i20 = zext %i19 to i32
+  %i21 = add i32 %i4, i32 3
+  %i22 = zext %i21 to i64
+  %i23 = getelementptr inbounds i32, %a1, %i22
+  store %i20, %i23, align 4
+  %i25 = trunc %i2 to i8
+  %i26 = tail call i8 @f34 [air Group(Group { scope: Quad, op: Xor, ty: Some(NumTy { elem: I8, lanes: 1 }), sign: Some(Unsigned) })](%i25) convergent
+  %i27 = zext %i26 to i32
+  %i28 = add i32 %i4, i32 4
+  %i29 = zext %i28 to i64
+  %i30 = getelementptr inbounds i32, %a1, %i29
+  store %i27, %i30, align 4
+  %i32 = tail call i32 @f35 [air Group(Group { scope: Quad, op: BroadcastFirst, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Unsigned) })](%i2) convergent
+  %i33 = add i32 %i4, i32 5
+  %i34 = zext %i33 to i64
+  %i35 = getelementptr inbounds i32, %a1, %i34
+  store %i32, %i35, align 4
+  ret void
+}
+
+define %t6 @f5 "quad_float_scans" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="64" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a0( Ref nocapture "air-buffer-no-alias"="" ) %a1( Mod nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = zext %a2 to i64
+  %i1 = getelementptr inbounds float, %a0, %i0
+  %i2 = load float, %i1, align 4
+  %i3 = tail call reassoc nnan ninf nsz arcp contract afn float @f36 [air Group(Group { scope: Quad, op: Product, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i2) convergent
+  %i4 = shl i32 %a2, i32 3
+  %i5 = zext %i4 to i64
+  %i6 = getelementptr inbounds float, %a1, %i5
+  store %i3, %i6, align 4
+  %i8 = tail call reassoc nnan ninf nsz arcp contract afn float @f37 [air Group(Group { scope: Quad, op: Sum, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i2) convergent
+  %i9 = or i32 %i4, i32 1
+  %i10 = zext %i9 to i64
+  %i11 = getelementptr inbounds float, %a1, %i10
+  store %i8, %i11, align 4
+  %i13 = tail call reassoc nnan ninf nsz arcp contract afn float @f38 [air Group(Group { scope: Quad, op: PrefixInclusiveSum, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i2) convergent
+  %i14 = or i32 %i4, i32 2
+  %i15 = zext %i14 to i64
+  %i16 = getelementptr inbounds float, %a1, %i15
+  store %i13, %i16, align 4
+  %i18 = tail call reassoc nnan ninf nsz arcp contract afn float @f39 [air Group(Group { scope: Quad, op: PrefixExclusiveSum, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i2) convergent
+  %i19 = or i32 %i4, i32 3
+  %i20 = zext %i19 to i64
+  %i21 = getelementptr inbounds float, %a1, %i20
+  store %i18, %i21, align 4
+  %i23 = tail call reassoc nnan ninf nsz arcp contract afn float @f40 [air Group(Group { scope: Quad, op: PrefixInclusiveProduct, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i2) convergent
+  %i24 = or i32 %i4, i32 4
+  %i25 = zext %i24 to i64
+  %i26 = getelementptr inbounds float, %a1, %i25
+  store %i23, %i26, align 4
+  %i28 = tail call reassoc nnan ninf nsz arcp contract afn float @f41 [air Group(Group { scope: Quad, op: PrefixExclusiveProduct, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i2) convergent
+  %i29 = or i32 %i4, i32 5
+  %i30 = zext %i29 to i64
+  %i31 = getelementptr inbounds float, %a1, %i30
+  store %i28, %i31, align 4
+  %i33 = tail call reassoc nnan ninf nsz arcp contract afn float @f42 [air Group(Group { scope: Quad, op: BroadcastFirst, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i2) convergent
+  %i34 = or i32 %i4, i32 6
+  %i35 = zext %i34 to i64
+  %i36 = getelementptr inbounds float, %a1, %i35
+  store %i33, %i36, align 4
+  %i38 = insertelement <2 x float> undef, %i2, i64 0
+  %i39 = fneg reassoc nnan ninf nsz arcp contract afn float %i2
+  %i40 = insertelement %i38, %i39, i64 1
+  %i41 = tail call reassoc nnan ninf nsz arcp contract afn <2 x float> @f43 [air Group(Group { scope: Quad, op: PrefixExclusiveSum, ty: Some(NumTy { elem: F32, lanes: 2 }), sign: None })](%i40) convergent
+  %i42 = extractelement %i41, i64 1
+  %i43 = or i32 %i4, i32 7
+  %i44 = zext %i43 to i64
+  %i45 = getelementptr inbounds float, %a1, %i44
+  store %i42, %i45, align 4
+  ret void
+}
+
+define %t6 @f6 "quad_half_scans" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="32" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a0( Ref nocapture "air-buffer-no-alias"="" ) %a1( Mod nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = zext %a2 to i64
+  %i1 = getelementptr inbounds half, %a0, %i0
+  %i2 = load half, %i1, align 2
+  %i3 = tail call reassoc nnan ninf nsz arcp contract afn half @f44 [air Group(Group { scope: Quad, op: Product, ty: Some(NumTy { elem: F16, lanes: 1 }), sign: None })](%i2) convergent
+  %i4 = mul i32 %a2, i32 6
+  %i5 = zext %i4 to i64
+  %i6 = getelementptr inbounds half, %a1, %i5
+  store %i3, %i6, align 2
+  %i8 = tail call reassoc nnan ninf nsz arcp contract afn half @f45 [air Group(Group { scope: Quad, op: PrefixInclusiveSum, ty: Some(NumTy { elem: F16, lanes: 1 }), sign: None })](%i2) convergent
+  %i9 = or i32 %i4, i32 1
+  %i10 = zext %i9 to i64
+  %i11 = getelementptr inbounds half, %a1, %i10
+  store %i8, %i11, align 2
+  %i13 = tail call reassoc nnan ninf nsz arcp contract afn half @f46 [air Group(Group { scope: Quad, op: PrefixExclusiveSum, ty: Some(NumTy { elem: F16, lanes: 1 }), sign: None })](%i2) convergent
+  %i14 = add i32 %i4, i32 2
+  %i15 = zext %i14 to i64
+  %i16 = getelementptr inbounds half, %a1, %i15
+  store %i13, %i16, align 2
+  %i18 = tail call reassoc nnan ninf nsz arcp contract afn half @f47 [air Group(Group { scope: Quad, op: PrefixInclusiveProduct, ty: Some(NumTy { elem: F16, lanes: 1 }), sign: None })](%i2) convergent
+  %i19 = add i32 %i4, i32 3
+  %i20 = zext %i19 to i64
+  %i21 = getelementptr inbounds half, %a1, %i20
+  store %i18, %i21, align 2
+  %i23 = tail call reassoc nnan ninf nsz arcp contract afn half @f48 [air Group(Group { scope: Quad, op: PrefixExclusiveProduct, ty: Some(NumTy { elem: F16, lanes: 1 }), sign: None })](%i2) convergent
+  %i24 = add i32 %i4, i32 4
+  %i25 = zext %i24 to i64
+  %i26 = getelementptr inbounds half, %a1, %i25
+  store %i23, %i26, align 2
+  %i28 = insertelement <2 x half> undef, %i2, i64 0
+  %i29 = fneg reassoc nnan ninf nsz arcp contract afn half %i2
+  %i30 = insertelement %i28, %i29, i64 1
+  %i31 = tail call reassoc nnan ninf nsz arcp contract afn <2 x half> @f49 [air Group(Group { scope: Quad, op: Product, ty: Some(NumTy { elem: F16, lanes: 2 }), sign: None })](%i30) convergent
+  %i32 = extractelement %i31, i64 1
+  %i33 = add i32 %i4, i32 5
+  %i34 = zext %i33 to i64
+  %i35 = getelementptr inbounds half, %a1, %i34
+  store %i32, %i35, align 2
+  ret void
+}
+
+define %t6 @f7 "quad_int_scans" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="0" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a0( Ref nocapture "air-buffer-no-alias"="" ) %a1( Mod nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = zext %a2 to i64
+  %i1 = getelementptr inbounds i32, %a0, %i0
+  %i2 = load i32, %i1, align 4
+  %i3 = tail call i32 @f50 [air Group(Group { scope: Quad, op: Product, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i2) convergent
+  %i4 = mul i32 %a2, i32 7
+  %i5 = zext %i4 to i64
+  %i6 = getelementptr inbounds i32, %a1, %i5
+  store %i3, %i6, align 4
+  %i8 = tail call i32 @f51 [air Group(Group { scope: Quad, op: PrefixInclusiveSum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i2) convergent
+  %i9 = add i32 %i4, i32 1
+  %i10 = zext %i9 to i64
+  %i11 = getelementptr inbounds i32, %a1, %i10
+  store %i8, %i11, align 4
+  %i13 = tail call i32 @f52 [air Group(Group { scope: Quad, op: PrefixExclusiveSum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i2) convergent
+  %i14 = add i32 %i4, i32 2
+  %i15 = zext %i14 to i64
+  %i16 = getelementptr inbounds i32, %a1, %i15
+  store %i13, %i16, align 4
+  %i18 = tail call i32 @f53 [air Group(Group { scope: Quad, op: PrefixInclusiveProduct, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Signed) })](%i2) convergent
+  %i19 = add i32 %i4, i32 3
+  %i20 = zext %i19 to i64
+  %i21 = getelementptr inbounds i32, %a1, %i20
+  store %i18, %i21, align 4
+  %i23 = mul i32 %i2, i32 3
+  %i24 = tail call i32 @f54 [air Group(Group { scope: Quad, op: PrefixExclusiveProduct, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Unsigned) })](%i23) convergent
+  %i25 = add i32 %i4, i32 4
+  %i26 = zext %i25 to i64
+  %i27 = getelementptr inbounds i32, %a1, %i26
+  store %i24, %i27, align 4
+  %i29 = trunc %i2 to i16
+  %i30 = tail call i16 @f55 [air Group(Group { scope: Quad, op: Product, ty: Some(NumTy { elem: I16, lanes: 1 }), sign: Some(Unsigned) })](%i29) convergent
+  %i31 = zext %i30 to i32
+  %i32 = add i32 %i4, i32 5
+  %i33 = zext %i32 to i64
+  %i34 = getelementptr inbounds i32, %a1, %i33
+  store %i31, %i34, align 4
+  %i36 = tail call i16 @f56 [air Group(Group { scope: Quad, op: PrefixExclusiveSum, ty: Some(NumTy { elem: I16, lanes: 1 }), sign: Some(Signed) })](%i29) convergent
+  %i37 = sext %i36 to i32
+  %i38 = add i32 %i4, i32 6
+  %i39 = zext %i38 to i64
+  %i40 = getelementptr inbounds i32, %a1, %i39
+  store %i37, %i40, align 4
+  ret void
+}
+
+define %t6 @f8 "quad_ops_divergent" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="0" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a0( Ref nocapture "air-buffer-no-alias"="" ) %a1( Mod nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = zext %a2 to i64
+  %i1 = getelementptr inbounds float, %a0, %i0
+  %i2 = load float, %i1, align 4
+  %i3 = lshr i32 %a2, i32 2
+  %i4 = mul i32 %a2, i32 6
+  %i5 = zext %i4 to i64
+  %i6 = getelementptr inbounds float, %a1, %i5
+  store float 0xC0E00000, %i6, align 4
+  %i8 = or i32 %i4, i32 1
+  %i9 = zext %i8 to i64
+  %i10 = getelementptr inbounds float, %a1, %i9
+  store float 0xC0E00000, %i10, align 4
+  %i12 = add i32 %i4, i32 2
+  %i13 = zext %i12 to i64
+  %i14 = getelementptr inbounds float, %a1, %i13
+  store float 0xC0E00000, %i14, align 4
+  %i16 = add i32 %i4, i32 3
+  %i17 = zext %i16 to i64
+  %i18 = getelementptr inbounds float, %a1, %i17
+  store float 0xC0E00000, %i18, align 4
+  %i20 = add i32 %i4, i32 4
+  %i21 = zext %i20 to i64
+  %i22 = getelementptr inbounds float, %a1, %i21
+  store float 0xC0E00000, %i22, align 4
+  %i24 = add i32 %i4, i32 5
+  %i25 = zext %i24 to i64
+  %i26 = getelementptr inbounds float, %a1, %i25
+  store float 0xC0E00000, %i26, align 4
+  %i28 = and i32 %a2, i32 3
+  %i29 = shl nuw nsw i32 i32 1, %i28
+  %i30 = and i32 %i29, %i3
+  %i31 = icmp eq %i30, i32 0
+  br %i31, bb2, bb1
+bb1:
+  %i33 = freeze float %i2
+  %i34 = tail call reassoc nnan ninf nsz arcp contract afn float @f42 [air Group(Group { scope: Quad, op: BroadcastFirst, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i33) convergent
+  store %i34, %i6, align 4
+  %i36 = tail call reassoc nnan ninf nsz arcp contract afn float @f36 [air Group(Group { scope: Quad, op: Product, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i33) convergent
+  store %i36, %i10, align 4
+  %i38 = tail call reassoc nnan ninf nsz arcp contract afn float @f39 [air Group(Group { scope: Quad, op: PrefixExclusiveSum, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i33) convergent
+  store %i38, %i14, align 4
+  %i40 = tail call reassoc nnan ninf nsz arcp contract afn float @f40 [air Group(Group { scope: Quad, op: PrefixInclusiveProduct, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i33) convergent
+  store %i40, %i18, align 4
+  %i42 = shl i32 %a2, i32 8
+  %i43 = tail call i32 @f57 [air Group(Group { scope: Quad, op: Or, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Unsigned) })](%i42) convergent
+  %i44 = or i32 %i43, i32 1073741824
+  %i45 = bitcast %i22 to ptr addrspace(1)
+  store %i44, %i45, align 4
+  %i47 = tail call i32 @f32 [air Group(Group { scope: Quad, op: Xor, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Unsigned) })](%a2) convergent
+  %i48 = or i32 %i47, i32 1073741824
+  %i49 = bitcast %i26 to ptr addrspace(1)
+  store %i48, %i49, align 4
+  br bb2
+bb2:
+  ret void
+}
+
+define %t9 @f9 "quad_first_in_a_speculated_arm" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="0" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a0( Mod nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = urem i32 %a1, i32 3
+  %i1 = icmp eq %i0, i32 0
+  br %i1, bb2, bb1
+bb1:
+  %i3 = mul i32 %a1, i32 10
+  %i4 = or i32 %i3, i32 1
+  %i5 = tail call i32 @f35 [air Group(Group { scope: Quad, op: BroadcastFirst, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Unsigned) })](%i4) convergent
+  br bb2
+bb2:
+  %i7 = phi i32 [%i5, bb1], [i32 7777, bb0]
+  %i8 = zext %a1 to i64
+  %i9 = getelementptr inbounds i32, %a0, %i8
+  store %i7, %i9, align 4
+  ret void
+}
+
+define %t10 @f10 "quad_ops_in_a_vertex_function" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="0" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a1( Ref nocapture "air-buffer-no-alias"="" ) %a2( Mod nocapture "air-buffer-no-alias"="" ) %a3( Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = zext %a0 to i64
+  %i1 = getelementptr inbounds float, %a1, %i0
+  %i2 = load float, %i1, align 4
+  %i3 = fadd reassoc nnan ninf nsz arcp contract afn float %i2, float 0x447A0000
+  %i4 = freeze float %i2
+  %i5 = tail call reassoc nnan ninf nsz arcp contract afn float @f21 [air Group(Group { scope: Quad, op: ShuffleAndFillUp, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i4, %i3, i16 1, i16 4) convergent
+  %i6 = shl i32 %a0, i32 3
+  %i7 = zext %i6 to i64
+  %i8 = getelementptr inbounds float, %a2, %i7
+  store %i5, %i8, align 4
+  %i10 = load i32, %a3, align 4
+  %i11 = trunc %i10 to i16
+  %i12 = getelementptr inbounds i32, %a3, i64 1
+  %i13 = load i32, %i12, align 4
+  %i14 = trunc %i13 to i16
+  %i15 = tail call reassoc nnan ninf nsz arcp contract afn float @f22 [air Group(Group { scope: Quad, op: ShuffleAndFillDown, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i4, %i3, %i11, %i14) convergent
+  %i16 = or i32 %i6, i32 1
+  %i17 = zext %i16 to i64
+  %i18 = getelementptr inbounds float, %a2, %i17
+  store %i15, %i18, align 4
+  %i20 = tail call reassoc nnan ninf nsz arcp contract afn float @f23 [air Group(Group { scope: Quad, op: ShuffleRotateUp, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i4, i16 1) convergent
+  %i21 = or i32 %i6, i32 2
+  %i22 = zext %i21 to i64
+  %i23 = getelementptr inbounds float, %a2, %i22
+  store %i20, %i23, align 4
+  %i25 = tail call reassoc nnan ninf nsz arcp contract afn float @f42 [air Group(Group { scope: Quad, op: BroadcastFirst, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i4) convergent
+  %i26 = or i32 %i6, i32 3
+  %i27 = zext %i26 to i64
+  %i28 = getelementptr inbounds float, %a2, %i27
+  store %i25, %i28, align 4
+  %i30 = tail call reassoc nnan ninf nsz arcp contract afn float @f36 [air Group(Group { scope: Quad, op: Product, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i4) convergent
+  %i31 = or i32 %i6, i32 4
+  %i32 = zext %i31 to i64
+  %i33 = getelementptr inbounds float, %a2, %i32
+  store %i30, %i33, align 4
+  %i35 = tail call reassoc nnan ninf nsz arcp contract afn float @f39 [air Group(Group { scope: Quad, op: PrefixExclusiveSum, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i4) convergent
+  %i36 = or i32 %i6, i32 5
+  %i37 = zext %i36 to i64
+  %i38 = getelementptr inbounds float, %a2, %i37
+  store %i35, %i38, align 4
+  %i40 = tail call reassoc nnan ninf nsz arcp contract afn float @f40 [air Group(Group { scope: Quad, op: PrefixInclusiveProduct, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i4) convergent
+  %i41 = or i32 %i6, i32 6
+  %i42 = zext %i41 to i64
+  %i43 = getelementptr inbounds float, %a2, %i42
+  store %i40, %i43, align 4
+  %i45 = or i32 %a0, i32 1073741824
+  %i46 = tail call i32 @f58 [air Group(Group { scope: Quad, op: And, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Unsigned) })](%i45) convergent
+  %i47 = tail call i32 @f32 [air Group(Group { scope: Quad, op: Xor, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Unsigned) })](%a0) convergent
+  %i48 = xor i32 %i47, %i46
+  %i49 = or i32 %i6, i32 7
+  %i50 = zext %i49 to i64
+  %i51 = getelementptr inbounds float, %a2, %i50
+  %i52 = bitcast %i51 to ptr addrspace(1)
+  store %i48, %i52, align 4
+  ret void
+}
+
+define %t11 @f11 "quad_reductions_in_a_vertex_function" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="0" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a1( Ref nocapture "air-buffer-no-alias"="" ) %a2( Mod nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = zext %a0 to i64
+  %i1 = getelementptr inbounds float, %a1, %i0
+  %i2 = load float, %i1, align 4
+  %i3 = fadd reassoc nnan ninf nsz arcp contract afn float %i2, float 0x447A0000
+  %i4 = freeze float %i2
+  %i5 = tail call reassoc nnan ninf nsz arcp contract afn float @f21 [air Group(Group { scope: Quad, op: ShuffleAndFillUp, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i4, %i3, i16 1, i16 2) convergent
+  %i6 = mul i32 %a0, i32 6
+  %i7 = zext %i6 to i64
+  %i8 = getelementptr inbounds float, %a2, %i7
+  store %i5, %i8, align 4
+  %i10 = tail call reassoc nnan ninf nsz arcp contract afn float @f42 [air Group(Group { scope: Quad, op: BroadcastFirst, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i4) convergent
+  %i11 = or i32 %i6, i32 1
+  %i12 = zext %i11 to i64
+  %i13 = getelementptr inbounds float, %a2, %i12
+  store %i10, %i13, align 4
+  %i15 = tail call reassoc nnan ninf nsz arcp contract afn float @f36 [air Group(Group { scope: Quad, op: Product, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i4) convergent
+  %i16 = add i32 %i6, i32 2
+  %i17 = zext %i16 to i64
+  %i18 = getelementptr inbounds float, %a2, %i17
+  store %i15, %i18, align 4
+  %i20 = tail call reassoc nnan ninf nsz arcp contract afn float @f39 [air Group(Group { scope: Quad, op: PrefixExclusiveSum, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i4) convergent
+  %i21 = add i32 %i6, i32 3
+  %i22 = zext %i21 to i64
+  %i23 = getelementptr inbounds float, %a2, %i22
+  store %i20, %i23, align 4
+  %i25 = tail call reassoc nnan ninf nsz arcp contract afn float @f40 [air Group(Group { scope: Quad, op: PrefixInclusiveProduct, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i4) convergent
+  %i26 = add i32 %i6, i32 4
+  %i27 = zext %i26 to i64
+  %i28 = getelementptr inbounds float, %a2, %i27
+  store %i25, %i28, align 4
+  %i30 = or i32 %a0, i32 1073741824
+  %i31 = tail call i32 @f58 [air Group(Group { scope: Quad, op: And, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Unsigned) })](%i30) convergent
+  %i32 = tail call i32 @f32 [air Group(Group { scope: Quad, op: Xor, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Unsigned) })](%a0) convergent
+  %i33 = xor i32 %i32, %i31
+  %i34 = add i32 %i6, i32 5
+  %i35 = zext %i34 to i64
+  %i36 = getelementptr inbounds float, %a2, %i35
+  %i37 = bitcast %i36 to ptr addrspace(1)
+  store %i33, %i37, align 4
+  ret void
+}
+
+define %t14 @f12 "fragment_quad_fills" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" {
+bb0:
+  %i0 = shufflevector <2 x float> %a0, <4 x float> poison, <0, 1>
+  %i1 = tail call <2 x i32> @f20 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 2 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 2 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = extractelement %i1, i64 0
+  %i3 = extractelement %i1, i64 1
+  %i4 = shl i32 %i3, i32 6
+  %i5 = add i32 %i4, %i2
+  %i6 = tail call reassoc nnan ninf nsz arcp contract afn float @f19 [air Convert(Convert { dst: NumTy { elem: F32, lanes: 1 }, dst_kind: Float, src: NumTy { elem: I32, lanes: 1 }, src_kind: Unsigned, src_fp8: None })](%i5)
+  %i7 = fadd reassoc nnan ninf nsz arcp contract afn float %i6, float 0x461C4000
+  %i8 = freeze float %i6
+  %i9 = tail call reassoc nnan ninf nsz arcp contract afn float @f21 [air Group(Group { scope: Quad, op: ShuffleAndFillUp, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i8, %i7, i16 1, i16 4) convergent
+  %i10 = insertelement <4 x float> undef, %i9, i64 0
+  %i11 = tail call reassoc nnan ninf nsz arcp contract afn float @f22 [air Group(Group { scope: Quad, op: ShuffleAndFillDown, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i8, %i7, i16 2, i16 4) convergent
+  %i12 = insertelement %i10, %i11, i64 1
+  %i13 = tail call reassoc nnan ninf nsz arcp contract afn float @f21 [air Group(Group { scope: Quad, op: ShuffleAndFillUp, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i8, %i7, i16 1, i16 2) convergent
+  %i14 = insertelement %i12, %i13, i64 2
+  %i15 = tail call reassoc nnan ninf nsz arcp contract afn float @f22 [air Group(Group { scope: Quad, op: ShuffleAndFillDown, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i8, %i7, i16 1, i16 2) convergent
+  %i16 = insertelement %i14, %i15, i64 3
+  ret %i16
+}
+
+define %t14 @f13 "fragment_quad_fills_and_rotations" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" {
+bb0:
+  %i0 = shufflevector <2 x float> %a0, <4 x float> poison, <0, 1>
+  %i1 = tail call <2 x i32> @f20 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 2 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 2 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = extractelement %i1, i64 0
+  %i3 = extractelement %i1, i64 1
+  %i4 = shl i32 %i3, i32 6
+  %i5 = add i32 %i4, %i2
+  %i6 = tail call reassoc nnan ninf nsz arcp contract afn float @f19 [air Convert(Convert { dst: NumTy { elem: F32, lanes: 1 }, dst_kind: Float, src: NumTy { elem: I32, lanes: 1 }, src_kind: Unsigned, src_fp8: None })](%i5)
+  %i7 = fadd reassoc nnan ninf nsz arcp contract afn float %i6, float 0x461C4000
+  %i8 = freeze float %i6
+  %i9 = tail call reassoc nnan ninf nsz arcp contract afn float @f21 [air Group(Group { scope: Quad, op: ShuffleAndFillUp, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i8, %i7, i16 3, i16 4) convergent
+  %i10 = insertelement <4 x float> undef, %i9, i64 0
+  %i11 = tail call reassoc nnan ninf nsz arcp contract afn float @f22 [air Group(Group { scope: Quad, op: ShuffleAndFillDown, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i8, %i7, i16 3, i16 4) convergent
+  %i12 = insertelement %i10, %i11, i64 1
+  %i13 = tail call reassoc nnan ninf nsz arcp contract afn float @f23 [air Group(Group { scope: Quad, op: ShuffleRotateUp, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i8, i16 1) convergent
+  %i14 = insertelement %i12, %i13, i64 2
+  %i15 = tail call reassoc nnan ninf nsz arcp contract afn float @f23 [air Group(Group { scope: Quad, op: ShuffleRotateUp, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i8, i16 3) convergent
+  %i16 = insertelement %i14, %i15, i64 3
+  ret %i16
+}
+
+define %t14 @f14 "fragment_quad_scans" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" {
+bb0:
+  %i0 = shufflevector <2 x float> %a0, <4 x float> poison, <0, 1>
+  %i1 = tail call <2 x i32> @f20 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 2 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 2 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = extractelement %i1, i64 0
+  %i3 = mul i32 %i2, i32 3
+  %i4 = extractelement %i1, i64 1
+  %i5 = mul i32 %i4, i32 5
+  %i6 = add i32 %i3, %i5
+  %i7 = urem i32 %i6, i32 6
+  %i8 = icmp ult %i7, i32 2
+  %i9 = icmp ult %i7, i32 4
+  %i10 = select reassoc nnan ninf nsz arcp contract afn float %i9, float 0x40000000, float 0x3F000000
+  %i11 = select reassoc nnan ninf nsz arcp contract afn float %i8, float 0x3F800000, %i10
+  %i12 = and i32 %i7, i32 1
+  %i13 = icmp eq %i12, i32 0
+  %i14 = fneg reassoc nnan ninf nsz arcp contract afn float %i11
+  %i15 = select reassoc nnan ninf nsz arcp contract afn float %i13, %i11, %i14
+  %i16 = tail call reassoc nnan ninf nsz arcp contract afn float @f36 [air Group(Group { scope: Quad, op: Product, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i15) convergent
+  %i17 = insertelement <4 x float> undef, %i16, i64 0
+  %i18 = tail call reassoc nnan ninf nsz arcp contract afn float @f39 [air Group(Group { scope: Quad, op: PrefixExclusiveSum, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i15) convergent
+  %i19 = insertelement %i17, %i18, i64 1
+  %i20 = tail call reassoc nnan ninf nsz arcp contract afn float @f40 [air Group(Group { scope: Quad, op: PrefixInclusiveProduct, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i15) convergent
+  %i21 = insertelement %i19, %i20, i64 2
+  %i22 = shl i32 %i4, i32 6
+  %i23 = add i32 %i22, %i2
+  %i24 = tail call reassoc nnan ninf nsz arcp contract afn float @f19 [air Convert(Convert { dst: NumTy { elem: F32, lanes: 1 }, dst_kind: Float, src: NumTy { elem: I32, lanes: 1 }, src_kind: Unsigned, src_fp8: None })](%i23)
+  %i25 = freeze float %i24
+  %i26 = tail call reassoc nnan ninf nsz arcp contract afn float @f42 [air Group(Group { scope: Quad, op: BroadcastFirst, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i25) convergent
+  %i27 = insertelement %i21, %i26, i64 3
+  ret %i27
+}
+
+define %t16 @f15 "fragment_quad_bitwise" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" {
+bb0:
+  %i0 = shufflevector <2 x float> %a0, <4 x float> poison, <0, 1>
+  %i1 = tail call <2 x i32> @f20 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 2 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 2 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = extractelement %i1, i64 0
+  %i3 = mul i32 %i2, i32 7
+  %i4 = extractelement %i1, i64 1
+  %i5 = mul i32 %i4, i32 13
+  %i6 = add i32 %i3, %i5
+  %i7 = xor i32 %i6, i32 90
+  %i8 = or i32 %i7, i32 256
+  %i9 = tail call i32 @f58 [air Group(Group { scope: Quad, op: And, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Unsigned) })](%i8) convergent
+  %i10 = insertelement <4 x i32> undef, %i9, i64 0
+  %i11 = tail call i32 @f57 [air Group(Group { scope: Quad, op: Or, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Unsigned) })](%i7) convergent
+  %i12 = insertelement %i10, %i11, i64 1
+  %i13 = tail call i32 @f32 [air Group(Group { scope: Quad, op: Xor, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Unsigned) })](%i7) convergent
+  %i14 = insertelement %i12, %i13, i64 2
+  %i15 = tail call i32 @f59 [air Group(Group { scope: Quad, op: PrefixInclusiveSum, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Unsigned) })](%i7) convergent
+  %i16 = insertelement %i14, %i15, i64 3
+  ret %i16
+}
+
+define %t14 @f16 "fragment_quad_ops_divergent" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" {
+bb0:
+  %i0 = shufflevector <2 x float> %a0, <4 x float> poison, <0, 1>
+  %i1 = tail call <2 x i32> @f20 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 2 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 2 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = extractelement %i1, i64 0
+  %i3 = extractelement %i1, i64 1
+  %i4 = shl i32 %i3, i32 1
+  %i5 = add i32 %i4, %i2
+  %i6 = urem i32 %i5, i32 3
+  %i7 = icmp eq %i6, i32 0
+  br %i7, bb2, bb1
+bb1:
+  %i9 = mul i32 %i2, i32 3
+  %i10 = mul i32 %i3, i32 5
+  %i11 = add i32 %i9, %i10
+  %i12 = urem i32 %i11, i32 6
+  %i13 = and i32 %i12, i32 1
+  %i14 = icmp eq %i13, i32 0
+  %i15 = icmp ult %i12, i32 2
+  %i16 = icmp ult %i12, i32 4
+  %i17 = select reassoc nnan ninf nsz arcp contract afn float %i16, float 0x40000000, float 0x3F000000
+  %i18 = select reassoc nnan ninf nsz arcp contract afn float %i15, float 0x3F800000, %i17
+  %i19 = fneg reassoc nnan ninf nsz arcp contract afn float %i18
+  %i20 = select reassoc nnan ninf nsz arcp contract afn float %i14, %i18, %i19
+  %i21 = tail call reassoc nnan ninf nsz arcp contract afn float @f36 [air Group(Group { scope: Quad, op: Product, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i20) convergent
+  %i22 = insertelement <4 x float> undef, %i21, i64 0
+  %i23 = tail call reassoc nnan ninf nsz arcp contract afn float @f39 [air Group(Group { scope: Quad, op: PrefixExclusiveSum, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i20) convergent
+  %i24 = insertelement %i22, %i23, i64 1
+  %i25 = tail call reassoc nnan ninf nsz arcp contract afn float @f40 [air Group(Group { scope: Quad, op: PrefixInclusiveProduct, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i20) convergent
+  %i26 = insertelement %i24, %i25, i64 2
+  %i27 = shl i32 %i2, i32 8
+  %i28 = tail call i32 @f57 [air Group(Group { scope: Quad, op: Or, ty: Some(NumTy { elem: I32, lanes: 1 }), sign: Some(Unsigned) })](%i27) convergent
+  %i29 = or i32 %i28, i32 1073741824
+  %i30 = bitcast %i29 to float
+  %i31 = insertelement %i26, %i30, i64 3
+  br bb2
+bb2:
+  %i33 = phi <4 x float> [%i31, bb1], [<4 x float> c114, bb0]
+  ret %i33
+}
+
+define %t14 @f17 "fragment_quad_first_in_a_speculated_arm" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" {
+bb0:
+  %i0 = shufflevector <2 x float> %a0, <4 x float> poison, <0, 1>
+  %i1 = tail call <2 x i32> @f20 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 2 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 2 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = extractelement %i1, i64 0
+  %i3 = extractelement %i1, i64 1
+  %i4 = shl i32 %i3, i32 1
+  %i5 = add i32 %i4, %i2
+  %i6 = urem i32 %i5, i32 3
+  %i7 = icmp eq %i6, i32 0
+  br %i7, bb2, bb1
+bb1:
+  %i9 = shl i32 %i3, i32 6
+  %i10 = add i32 %i9, %i2
+  %i11 = tail call reassoc nnan ninf nsz arcp contract afn float @f19 [air Convert(Convert { dst: NumTy { elem: F32, lanes: 1 }, dst_kind: Float, src: NumTy { elem: I32, lanes: 1 }, src_kind: Unsigned, src_fp8: None })](%i10)
+  %i12 = freeze float %i11
+  %i13 = tail call reassoc nnan ninf nsz arcp contract afn float @f42 [air Group(Group { scope: Quad, op: BroadcastFirst, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i12) convergent
+  br bb2
+bb2:
+  %i15 = phi float [%i13, bb1], [float 0xC0E00000, bb0]
+  %i16 = insertelement <4 x float> c117, %i15, i64 0
+  ret %i16
+}
+
+define %t14 @f18 "fragment_simd_fills" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" {
+bb0:
+  %i0 = shufflevector <2 x float> %a0, <4 x float> poison, <0, 1>
+  %i1 = tail call <2 x i32> @f20 [air Convert(Convert { dst: NumTy { elem: I32, lanes: 2 }, dst_kind: Unsigned, src: NumTy { elem: F32, lanes: 2 }, src_kind: Float, src_fp8: None })](%i0)
+  %i2 = extractelement %i1, i64 0
+  %i3 = extractelement %i1, i64 1
+  %i4 = shl i32 %i3, i32 6
+  %i5 = add i32 %i4, %i2
+  %i6 = tail call reassoc nnan ninf nsz arcp contract afn float @f19 [air Convert(Convert { dst: NumTy { elem: F32, lanes: 1 }, dst_kind: Float, src: NumTy { elem: I32, lanes: 1 }, src_kind: Unsigned, src_fp8: None })](%i5)
+  %i7 = fadd reassoc nnan ninf nsz arcp contract afn float %i6, float 0x461C4000
+  %i8 = freeze float %i6
+  %i9 = tail call i16 @f60 [air SimdgroupSize(SimdgroupSize { ty: I16 })]()
+  %i10 = tail call reassoc nnan ninf nsz arcp contract afn float @f61 [air Group(Group { scope: Simdgroup, op: ShuffleAndFillUp, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i8, %i7, i16 1, %i9) convergent
+  %i11 = insertelement <4 x float> undef, %i10, i64 0
+  %i12 = tail call reassoc nnan ninf nsz arcp contract afn float @f62 [air Group(Group { scope: Simdgroup, op: ShuffleAndFillDown, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i8, %i7, i16 3, %i9) convergent
+  %i13 = insertelement %i11, %i12, i64 1
+  %i14 = tail call reassoc nnan ninf nsz arcp contract afn float @f61 [air Group(Group { scope: Simdgroup, op: ShuffleAndFillUp, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i8, %i7, i16 2, i16 8) convergent
+  %i15 = insertelement %i13, %i14, i64 2
+  %i16 = tail call reassoc nnan ninf nsz arcp contract afn float @f62 [air Group(Group { scope: Simdgroup, op: ShuffleAndFillDown, ty: Some(NumTy { elem: F32, lanes: 1 }), sign: None })](%i8, %i7, i16 5, i16 16) convergent
+  %i17 = insertelement %i15, %i16, i64 3
+  ret %i17
+}
+
+declare %t17 @f19 "air.convert.f.f32.u.i32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t20 @f20 "air.convert.u.v2i32.f.v2f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t22 @f21 "air.quad_shuffle_and_fill_up.f32" convergent
+
+declare %t22 @f22 "air.quad_shuffle_and_fill_down.f32" convergent
+
+declare %t23 @f23 "air.quad_shuffle_rotate_up.f32" convergent
+
+declare %t24 @f24 "air.quad_shuffle_and_fill_up.v2f32" convergent
+
+declare %t25 @f25 "air.quad_shuffle_and_fill_up.s.i32" convergent
+
+declare %t26 @f26 "air.quad_shuffle_and_fill_down.s.i16" convergent
+
+declare %t27 @f27 "air.quad_shuffle_and_fill_up.f16" convergent
+
+declare %t28 @f28 "air.quad_shuffle_rotate_up.f16" convergent
+
+declare %t30 @f29 "air.quad_shuffle_and_fill_down.u.i8" convergent
+
+declare %t31 @f30 "air.quad_and.s.i32" convergent
+
+declare %t31 @f31 "air.quad_or.s.i32" convergent
+
+declare %t31 @f32 "air.quad_xor.u.i32" convergent
+
+declare %t32 @f33 "air.quad_or.u.i16" convergent
+
+declare %t33 @f34 "air.quad_xor.u.i8" convergent
+
+declare %t31 @f35 "air.quad_broadcast_first.u.i32" convergent
+
+declare %t34 @f36 "air.quad_product.f32" convergent
+
+declare %t34 @f37 "air.quad_sum.f32" convergent
+
+declare %t34 @f38 "air.quad_prefix_inclusive_sum.f32" convergent
+
+declare %t34 @f39 "air.quad_prefix_exclusive_sum.f32" convergent
+
+declare %t34 @f40 "air.quad_prefix_inclusive_product.f32" convergent
+
+declare %t34 @f41 "air.quad_prefix_exclusive_product.f32" convergent
+
+declare %t34 @f42 "air.quad_broadcast_first.f32" convergent
+
+declare %t35 @f43 "air.quad_prefix_exclusive_sum.v2f32" convergent
+
+declare %t36 @f44 "air.quad_product.f16" convergent
+
+declare %t36 @f45 "air.quad_prefix_inclusive_sum.f16" convergent
+
+declare %t36 @f46 "air.quad_prefix_exclusive_sum.f16" convergent
+
+declare %t36 @f47 "air.quad_prefix_inclusive_product.f16" convergent
+
+declare %t36 @f48 "air.quad_prefix_exclusive_product.f16" convergent
+
+declare %t38 @f49 "air.quad_product.v2f16" convergent
+
+declare %t31 @f50 "air.quad_product.s.i32" convergent
+
+declare %t31 @f51 "air.quad_prefix_inclusive_sum.s.i32" convergent
+
+declare %t31 @f52 "air.quad_prefix_exclusive_sum.s.i32" convergent
+
+declare %t31 @f53 "air.quad_prefix_inclusive_product.s.i32" convergent
+
+declare %t31 @f54 "air.quad_prefix_exclusive_product.u.i32" convergent
+
+declare %t32 @f55 "air.quad_product.u.i16" convergent
+
+declare %t32 @f56 "air.quad_prefix_exclusive_sum.s.i16" convergent
+
+declare %t31 @f57 "air.quad_or.u.i32" convergent
+
+declare %t31 @f58 "air.quad_and.u.i32" convergent
+
+declare %t31 @f59 "air.quad_prefix_inclusive_sum.u.i32" convergent
+
+declare %t39 @f60 "air.get_simdgroup_size.i16" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t22 @f61 "air.simd_shuffle_and_fill_up.f32" convergent
+
+declare %t22 @f62 "air.simd_shuffle_and_fill_down.f32" convergent
+!md0 = !"SDK Version"
+!md1 = !"wchar_size"
+!md2 = !"frame-pointer"
+!md3 = !"air.max_device_buffers"
+!md4 = !"air.max_constant_buffers"
+!md5 = !"air.max_threadgroup_buffers"
+!md6 = !"air.max_textures"
+!md7 = !"air.max_read_write_textures"
+!md8 = !"air.max_samplers"
+!md9 = !"air.buffer"
+!md10 = !"air.location_index"
+!md11 = !"air.read"
+!md12 = !"air.address_space"
+!md13 = !"air.arg_type_size"
+!md14 = !"air.arg_type_align_size"
+!md15 = !"air.arg_type_name"
+!md16 = !"float"
+!md17 = !"air.arg_name"
+!md18 = !"in"
+!md19 = !"air.read_write"
+!md20 = !"out"
+!md21 = !"uint"
+!md22 = !"dm"
+!md23 = !"air.thread_position_in_grid"
+!md24 = !"t"
+!md25 = !"int"
+!md26 = !"half"
+!md27 = !"air.vertex_id"
+!md28 = !"vid"
+!md29 = !"air.render_target"
+!md30 = !"float4"
+!md31 = !"air.position"
+!md32 = !"air.center"
+!md33 = !"air.no_perspective"
+!md34 = !"position"
+!md35 = !"uint4"
+!md36 = !"air.compile.denorms_disable"
+!md37 = !"air.compile.fast_math_enable"
+!md38 = !"air.compile.framebuffer_fetch_enable"
+!md39 = !"Apple metal version 32023.921 (metalfe-32023.921.6)"
+!md40 = !"Metal"
+!md41 = !"omnipotent char"
+!md42 = !"Simple C++ TBAA"
+!md43 = !"air-alias-scope-arg(0)"
+!md44 = !"air-alias-scope-arg(2)"
+!md45 = !"air-alias-scope-arg(1)"
+!md46 = i32 2
+!md47 = %t41 c66
+!md48 = i32 1
+!md49 = i32 4
+!md50 = i32 7
+!md51 = i32 31
+!md52 = i32 128
+!md53 = i32 8
+!md54 = i32 16
+!md55 = ptr addrspace(0) @f0
+!md56 = i32 0
+!md57 = i32 3
+!md58 = ptr addrspace(0) @f1
+!md59 = ptr addrspace(0) @f2
+!md60 = ptr addrspace(0) @f4
+!md61 = ptr addrspace(0) @f5
+!md62 = ptr addrspace(0) @f6
+!md63 = ptr addrspace(0) @f7
+!md64 = ptr addrspace(0) @f8
+!md65 = ptr addrspace(0) @f9
+!md66 = ptr addrspace(0) @f10
+!md67 = ptr addrspace(0) @f11
+!md68 = ptr addrspace(0) @f12
+!md69 = ptr addrspace(0) @f13
+!md70 = ptr addrspace(0) @f14
+!md71 = ptr addrspace(0) @f15
+!md72 = ptr addrspace(0) @f16
+!md73 = ptr addrspace(0) @f17
+!md74 = ptr addrspace(0) @f18
+!md75 = i64 0
+!md76 = !{!md46, !md0, !md47}
+!md77 = !{!md48, !md1, !md49}
+!md78 = !{!md50, !md2, !md46}
+!md79 = !{!md50, !md3, !md51}
+!md80 = !{!md50, !md4, !md51}
+!md81 = !{!md50, !md5, !md51}
+!md82 = !{!md50, !md6, !md52}
+!md83 = !{!md50, !md7, !md53}
+!md84 = !{!md50, !md8, !md54}
+!md85 = !{}
+!md86 = !{!md56, !md9, !md10, !md56, !md48, !md11, !md12, !md48, !md13, !md49, !md14, !md49, !md15, !md16, !md17, !md18}
+!md87 = !{!md48, !md9, !md10, !md48, !md48, !md19, !md12, !md48, !md13, !md49, !md14, !md49, !md15, !md16, !md17, !md20}
+!md88 = !{!md46, !md9, !md10, !md46, !md48, !md11, !md12, !md46, !md13, !md49, !md14, !md49, !md15, !md21, !md17, !md22}
+!md89 = !{!md57, !md23, !md15, !md21, !md17, !md24}
+!md90 = !{!md86, !md87, !md88, !md89}
+!md91 = !{!md55, !md85, !md90}
+!md92 = !{!md46, !md23, !md15, !md21, !md17, !md24}
+!md93 = !{!md86, !md87, !md92}
+!md94 = !{!md58, !md85, !md93}
+!md95 = !{!md56, !md9, !md10, !md56, !md48, !md11, !md12, !md48, !md13, !md49, !md14, !md49, !md15, !md25, !md17, !md18}
+!md96 = !{!md48, !md9, !md10, !md48, !md48, !md19, !md12, !md48, !md13, !md49, !md14, !md49, !md15, !md21, !md17, !md20}
+!md97 = !{!md95, !md96, !md88, !md89}
+!md98 = !{!md59, !md85, !md97}
+!md99 = !{!md95, !md96, !md92}
+!md100 = !{!md60, !md85, !md99}
+!md101 = !{!md61, !md85, !md93}
+!md102 = !{!md56, !md9, !md10, !md56, !md48, !md11, !md12, !md48, !md13, !md46, !md14, !md46, !md15, !md26, !md17, !md18}
+!md103 = !{!md48, !md9, !md10, !md48, !md48, !md19, !md12, !md48, !md13, !md46, !md14, !md46, !md15, !md26, !md17, !md20}
+!md104 = !{!md102, !md103, !md92}
+!md105 = !{!md62, !md85, !md104}
+!md106 = !{!md63, !md85, !md99}
+!md107 = !{!md64, !md85, !md93}
+!md108 = !{!md56, !md9, !md10, !md48, !md48, !md19, !md12, !md48, !md13, !md49, !md14, !md49, !md15, !md21, !md17, !md20}
+!md109 = !{!md48, !md23, !md15, !md21, !md17, !md24}
+!md110 = !{!md108, !md109}
+!md111 = !{!md65, !md85, !md110}
+!md112 = !{!md56, !md27, !md15, !md21, !md17, !md28}
+!md113 = !{!md48, !md9, !md10, !md56, !md48, !md11, !md12, !md48, !md13, !md49, !md14, !md49, !md15, !md16, !md17, !md18}
+!md114 = !{!md46, !md9, !md10, !md48, !md48, !md19, !md12, !md48, !md13, !md49, !md14, !md49, !md15, !md16, !md17, !md20}
+!md115 = !{!md57, !md9, !md10, !md46, !md48, !md11, !md12, !md46, !md13, !md49, !md14, !md49, !md15, !md21, !md17, !md22}
+!md116 = !{!md112, !md113, !md114, !md115}
+!md117 = !{!md66, !md85, !md116}
+!md118 = !{!md112, !md113, !md114}
+!md119 = !{!md67, !md85, !md118}
+!md120 = !{!md29, !md56, !md56, !md15, !md30}
+!md121 = !{!md120}
+!md122 = !{!md56, !md31, !md32, !md33, !md15, !md30, !md17, !md34}
+!md123 = !{!md122}
+!md124 = !{!md68, !md121, !md123}
+!md125 = !{!md69, !md121, !md123}
+!md126 = !{!md70, !md121, !md123}
+!md127 = !{!md29, !md56, !md56, !md15, !md35}
+!md128 = !{!md127}
+!md129 = !{!md71, !md128, !md123}
+!md130 = !{!md72, !md121, !md123}
+!md131 = !{!md73, !md121, !md123}
+!md132 = !{!md74, !md121, !md123}
+!md133 = !{!md36}
+!md134 = !{!md37}
+!md135 = !{!md38}
+!md136 = !{!md39}
+!md137 = !{!md46, !md53, !md56}
+!md138 = !{!md40, !md49, !md56, !md56}
+!md139 = !{!md42}
+!md140 = !{!md41, !md139, !md75}
+!md141 = !{!md16, !md140, !md75}
+!md142 = !{!md141, !md141, !md75}
+!md143 = !{!md25, !md140, !md75}
+!md144 = !{!md143, !md143, !md75}
+!"llvm.module.flags" = !{!md76, !md77, !md78, !md79, !md80, !md81, !md82, !md83, !md84}
+!"air.kernel" = !{!md91, !md94, !md98, !md100, !md101, !md105, !md106, !md107, !md111}
+!"air.vertex" = !{!md117, !md119}
+!"air.fragment" = !{!md124, !md125, !md126, !md129, !md130, !md131, !md132}
+!"air.compile_options" = !{!md133, !md134, !md135}
+!"llvm.ident" = !{!md136}
+!"air.version" = !{!md137}
+!"air.language_version" = !{!md138}

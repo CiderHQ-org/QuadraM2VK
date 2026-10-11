@@ -1,0 +1,807 @@
+target triple = "air64_v28-apple-macosx26.0.0"
+source_filename = "-"
+; datalayout DataLayout { endian: Little, pointers: {0: PointerSpec { size_bits: 64, abi_bits: 64, pref_bits: 64, index_bits: 64 }}, ints: {1: AlignSpec { abi_bits: 8, pref_bits: 8 }, 8: AlignSpec { abi_bits: 8, pref_bits: 8 }, 16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }}, floats: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }}, vectors: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 24: AlignSpec { abi_bits: 32, pref_bits: 32 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 48: AlignSpec { abi_bits: 64, pref_bits: 64 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 96: AlignSpec { abi_bits: 128, pref_bits: 128 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }, 192: AlignSpec { abi_bits: 256, pref_bits: 256 }, 256: AlignSpec { abi_bits: 256, pref_bits: 256 }, 512: AlignSpec { abi_bits: 512, pref_bits: 512 }, 1024: AlignSpec { abi_bits: 1024, pref_bits: 1024 }}, aggregate: AlignSpec { abi_bits: 0, pref_bits: 64 }, native_ints: [8, 16, 32], stack_align_bits: None, alloca_space: 0, program_space: 0, globals_space: 0, mangling: None, fn_ptr_align: None, non_integral: [] }
+%t4 = type void (ptr addrspace(1), ptr addrspace(1), ptr addrspace(1), i32)
+%t6 = type [2 x i32]
+c4 = %t6 [27, 0]
+
+define %t4 @f0 "fmx2_contract_fast" memory(ModRef, NoModRef, NoModRef) "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="0" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="false" %a0( Ref "air-buffer-no-alias"="" ) %a1( Ref "air-buffer-no-alias"="" ) %a2( Mod "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = mul i32 %a3, i32 192
+  %i1 = zext %i0 to i64
+  %i2 = getelementptr inbounds float, %a0, %i1
+  %i3 = getelementptr inbounds half, %a1, %i1
+  %i4 = shl i32 %a3, i32 6
+  %i5 = zext %i4 to i64
+  %i6 = getelementptr inbounds i32, %a2, %i5
+  %i7 = load float, %i2, align 4
+  %i8 = getelementptr inbounds float, %i2, i64 1
+  %i9 = load float, %i8, align 4
+  %i10 = fmul reassoc nnan ninf nsz arcp contract afn float %i9, %i7
+  %i11 = getelementptr inbounds float, %i2, i64 2
+  %i12 = load float, %i11, align 4
+  %i13 = fadd reassoc nnan ninf nsz arcp contract afn float %i10, %i12
+  %i14 = bitcast %i6 to ptr addrspace(1)
+  store %i13, %i14, align 4
+  %i16 = getelementptr inbounds float, %i2, i64 8
+  %i17 = load float, %i16, align 4
+  %i18 = getelementptr inbounds float, %i2, i64 9
+  %i19 = load float, %i18, align 4
+  %i20 = fmul reassoc nnan ninf nsz arcp contract afn float %i19, %i17
+  %i21 = getelementptr inbounds float, %i2, i64 10
+  %i22 = load float, %i21, align 4
+  %i23 = fadd reassoc nnan ninf nsz arcp contract afn float %i20, %i22
+  %i24 = getelementptr inbounds i32, %i6, i64 1
+  %i25 = bitcast %i24 to ptr addrspace(1)
+  store %i23, %i25, align 4
+  %i27 = getelementptr inbounds float, %i2, i64 11
+  %i28 = load float, %i27, align 4
+  %i29 = fadd reassoc nnan ninf nsz arcp contract afn float %i28, %i20
+  %i30 = getelementptr inbounds i32, %i6, i64 2
+  %i31 = bitcast %i30 to ptr addrspace(1)
+  store %i29, %i31, align 4
+  %i33 = getelementptr inbounds float, %i2, i64 16
+  %i34 = load float, %i33, align 4
+  %i35 = getelementptr inbounds float, %i2, i64 17
+  %i36 = load float, %i35, align 4
+  %i37 = fmul reassoc nnan ninf nsz arcp contract afn float %i36, %i34
+  %i38 = getelementptr inbounds float, %i2, i64 18
+  %i39 = load float, %i38, align 4
+  %i40 = fadd reassoc nnan ninf nsz arcp contract afn float %i37, %i39
+  %i41 = getelementptr inbounds i32, %i6, i64 3
+  %i42 = bitcast %i41 to ptr addrspace(1)
+  store %i40, %i42, align 4
+  %i44 = getelementptr inbounds i32, %i6, i64 4
+  %i45 = bitcast %i44 to ptr addrspace(1)
+  store %i37, %i45, align 4
+  %i47 = getelementptr inbounds float, %i2, i64 24
+  %i48 = load float, %i47, align 4
+  %i49 = getelementptr inbounds float, %i2, i64 25
+  %i50 = load float, %i49, align 4
+  %i51 = fmul reassoc nnan ninf nsz arcp contract afn float %i50, %i48
+  %i52 = getelementptr inbounds float, %i2, i64 26
+  %i53 = load float, %i52, align 4
+  %i54 = fsub reassoc nnan ninf nsz arcp contract afn float %i51, %i53
+  %i55 = getelementptr inbounds i32, %i6, i64 5
+  %i56 = bitcast %i55 to ptr addrspace(1)
+  store %i54, %i56, align 4
+  %i58 = getelementptr inbounds float, %i2, i64 32
+  %i59 = getelementptr inbounds float, %i2, i64 34
+  %i60 = load float, %i59, align 4
+  %i61 = load float, %i58, align 4
+  %i62 = getelementptr inbounds float, %i2, i64 33
+  %i63 = load float, %i62, align 4
+  %i64 = fmul reassoc nnan ninf nsz arcp contract afn float %i63, %i61
+  %i65 = fsub reassoc nnan ninf nsz arcp contract afn float %i60, %i64
+  %i66 = getelementptr inbounds i32, %i6, i64 6
+  %i67 = bitcast %i66 to ptr addrspace(1)
+  store %i65, %i67, align 4
+  %i69 = getelementptr inbounds float, %i2, i64 40
+  %i70 = load float, %i69, align 4
+  %i71 = getelementptr inbounds float, %i2, i64 41
+  %i72 = load float, %i71, align 4
+  %i73 = fmul reassoc nnan ninf nsz arcp contract afn float %i72, %i70
+  %i74 = getelementptr inbounds float, %i2, i64 42
+  %i75 = load float, %i74, align 4
+  %i76 = fadd reassoc nnan ninf nsz arcp contract afn float %i73, %i75
+  %i77 = fneg reassoc nnan ninf nsz arcp contract afn float %i76
+  %i78 = getelementptr inbounds i32, %i6, i64 7
+  %i79 = bitcast %i78 to ptr addrspace(1)
+  store %i77, %i79, align 4
+  %i81 = getelementptr inbounds float, %i2, i64 48
+  %i82 = load float, %i81, align 4
+  %i83 = getelementptr inbounds float, %i2, i64 49
+  %i84 = load float, %i83, align 4
+  %i85 = fneg reassoc nnan ninf nsz arcp contract afn float %i82
+  %i86 = fmul reassoc nnan ninf nsz arcp contract afn float %i84, %i85
+  %i87 = getelementptr inbounds float, %i2, i64 50
+  %i88 = load float, %i87, align 4
+  %i89 = fsub reassoc nnan ninf nsz arcp contract afn float %i86, %i88
+  %i90 = getelementptr inbounds i32, %i6, i64 8
+  %i91 = bitcast %i90 to ptr addrspace(1)
+  store %i89, %i91, align 4
+  %i93 = getelementptr inbounds float, %i2, i64 56
+  %i94 = load float, %i93, align 4
+  %i95 = getelementptr inbounds float, %i2, i64 57
+  %i96 = load float, %i95, align 4
+  %i97 = fmul reassoc nnan ninf nsz arcp contract afn float %i96, %i94
+  %i98 = getelementptr inbounds float, %i2, i64 58
+  %i99 = load float, %i98, align 4
+  %i100 = getelementptr inbounds float, %i2, i64 59
+  %i101 = load float, %i100, align 4
+  %i102 = fmul reassoc nnan ninf nsz arcp contract afn float %i101, %i99
+  %i103 = fadd reassoc nnan ninf nsz arcp contract afn float %i102, %i97
+  %i104 = getelementptr inbounds i32, %i6, i64 9
+  %i105 = bitcast %i104 to ptr addrspace(1)
+  store %i103, %i105, align 4
+  %i107 = getelementptr inbounds float, %i2, i64 64
+  %i108 = load float, %i107, align 4
+  %i109 = getelementptr inbounds float, %i2, i64 65
+  %i110 = load float, %i109, align 4
+  %i111 = getelementptr inbounds float, %i2, i64 66
+  %i112 = load float, %i111, align 4
+  %i113 = getelementptr inbounds float, %i2, i64 67
+  %i114 = load float, %i113, align 4
+  %i115 = fmul reassoc nnan ninf nsz arcp contract afn float %i114, %i112
+  %i116 = fmul reassoc nnan ninf nsz arcp contract afn float %i110, %i108
+  %i117 = fadd reassoc nnan ninf nsz arcp contract afn float %i115, %i116
+  %i118 = getelementptr inbounds i32, %i6, i64 10
+  %i119 = bitcast %i118 to ptr addrspace(1)
+  store %i117, %i119, align 4
+  %i121 = getelementptr inbounds float, %i2, i64 72
+  %i122 = load float, %i121, align 4
+  %i123 = getelementptr inbounds float, %i2, i64 73
+  %i124 = load float, %i123, align 4
+  %i125 = fmul reassoc nnan ninf nsz arcp contract afn float %i124, %i122
+  %i126 = getelementptr inbounds float, %i2, i64 74
+  %i127 = load float, %i126, align 4
+  %i128 = getelementptr inbounds float, %i2, i64 75
+  %i129 = load float, %i128, align 4
+  %i130 = fmul reassoc nnan ninf nsz arcp contract afn float %i129, %i127
+  %i131 = fsub reassoc nnan ninf nsz arcp contract afn float %i125, %i130
+  %i132 = getelementptr inbounds i32, %i6, i64 11
+  %i133 = bitcast %i132 to ptr addrspace(1)
+  store %i131, %i133, align 4
+  %i135 = getelementptr inbounds float, %i2, i64 80
+  %i136 = load float, %i135, align 4
+  %i137 = getelementptr inbounds float, %i2, i64 81
+  %i138 = load float, %i137, align 4
+  %i139 = fmul reassoc nnan ninf nsz arcp contract afn float %i138, %i136
+  %i140 = getelementptr inbounds float, %i2, i64 82
+  %i141 = load float, %i140, align 4
+  %i142 = getelementptr inbounds float, %i2, i64 83
+  %i143 = load float, %i142, align 4
+  %i144 = fmul reassoc nnan ninf nsz arcp contract afn float %i143, %i141
+  %i145 = fadd reassoc nnan ninf nsz arcp contract afn float %i144, %i139
+  %i146 = getelementptr inbounds i32, %i6, i64 12
+  %i147 = bitcast %i146 to ptr addrspace(1)
+  store %i145, %i147, align 4
+  %i149 = getelementptr inbounds i32, %i6, i64 13
+  %i150 = bitcast %i149 to ptr addrspace(1)
+  store %i139, %i150, align 4
+  %i152 = getelementptr inbounds float, %i2, i64 88
+  %i153 = load float, %i152, align 4
+  %i154 = getelementptr inbounds float, %i2, i64 89
+  %i155 = load float, %i154, align 4
+  %i156 = fmul reassoc nnan ninf nsz arcp contract afn float %i155, %i153
+  %i157 = getelementptr inbounds float, %i2, i64 90
+  %i158 = load float, %i157, align 4
+  %i159 = getelementptr inbounds float, %i2, i64 91
+  %i160 = load float, %i159, align 4
+  %i161 = fmul reassoc nnan ninf nsz arcp contract afn float %i160, %i158
+  %i162 = fadd reassoc nnan ninf nsz arcp contract afn float %i161, %i156
+  %i163 = getelementptr inbounds float, %i2, i64 92
+  %i164 = load float, %i163, align 4
+  %i165 = fadd reassoc nnan ninf nsz arcp contract afn float %i162, %i164
+  %i166 = getelementptr inbounds i32, %i6, i64 14
+  %i167 = bitcast %i166 to ptr addrspace(1)
+  store %i165, %i167, align 4
+  %i169 = getelementptr inbounds float, %i2, i64 96
+  %i170 = load float, %i169, align 4
+  %i171 = getelementptr inbounds float, %i2, i64 97
+  %i172 = load float, %i171, align 4
+  %i173 = fmul reassoc nnan ninf nsz arcp contract afn float %i172, %i170
+  %i174 = getelementptr inbounds float, %i2, i64 98
+  %i175 = load float, %i174, align 4
+  %i176 = fadd reassoc nnan ninf nsz arcp contract afn float %i173, %i175
+  %i177 = getelementptr inbounds float, %i2, i64 99
+  %i178 = load float, %i177, align 4
+  %i179 = fmul reassoc nnan ninf nsz arcp contract afn float %i176, %i178
+  %i180 = getelementptr inbounds float, %i2, i64 100
+  %i181 = load float, %i180, align 4
+  %i182 = fadd reassoc nnan ninf nsz arcp contract afn float %i179, %i181
+  %i183 = getelementptr inbounds i32, %i6, i64 15
+  %i184 = bitcast %i183 to ptr addrspace(1)
+  store %i182, %i184, align 4
+  %i186 = getelementptr inbounds float, %i2, i64 104
+  %i187 = load float, %i186, align 4
+  %i188 = getelementptr inbounds float, %i2, i64 105
+  %i189 = load float, %i188, align 4
+  %i190 = getelementptr inbounds float, %i2, i64 106
+  %i191 = load float, %i190, align 4
+  %i192 = getelementptr inbounds float, %i2, i64 107
+  %i193 = load float, %i192, align 4
+  %i194 = getelementptr inbounds float, %i2, i64 109
+  %i195 = load float, %i194, align 4
+  %i196 = fcmp reassoc nnan ninf nsz arcp contract afn ogt %i195, float 0x0
+  %i197 = fmul reassoc nnan ninf nsz arcp contract afn float %i189, %i187
+  %i198 = select reassoc nnan ninf nsz arcp contract afn float %i196, %i197, %i193
+  %i199 = fadd reassoc nnan ninf nsz arcp contract afn float %i198, %i191
+  %i200 = getelementptr inbounds i32, %i6, i64 16
+  %i201 = bitcast %i200 to ptr addrspace(1)
+  store %i199, %i201, align 4
+  %i203 = getelementptr inbounds float, %i2, i64 117
+  %i204 = load float, %i203, align 4
+  %i205 = fcmp reassoc nnan ninf nsz arcp contract afn ogt %i204, float 0x0
+  br %i205, bb1, bb2
+bb1:
+  %i207 = getelementptr inbounds float, %i2, i64 112
+  %i208 = load float, %i207, align 4
+  %i209 = getelementptr inbounds float, %i2, i64 113
+  %i210 = load float, %i209, align 4
+  %i211 = fmul reassoc nnan ninf nsz arcp contract afn float %i210, %i208
+  br bb3
+bb2:
+  %i213 = getelementptr inbounds float, %i2, i64 115
+  %i214 = load float, %i213, align 4
+  br bb3
+bb3:
+  %i216 = phi reassoc nnan ninf nsz arcp contract afn float [%i211, bb1], [%i214, bb2]
+  %i217 = getelementptr inbounds float, %i2, i64 114
+  %i218 = load float, %i217, align 4
+  %i219 = fadd reassoc nnan ninf nsz arcp contract afn float %i218, %i216
+  %i220 = getelementptr inbounds i32, %i6, i64 17
+  %i221 = bitcast %i220 to ptr addrspace(1)
+  store %i219, %i221, align 4
+  %i223 = getelementptr inbounds float, %i2, i64 125
+  %i224 = load float, %i223, align 4
+  %i225 = fcmp reassoc nnan ninf nsz arcp contract afn ogt %i224, float 0x0
+  br %i225, bb4, bb5
+bb4:
+  %i227 = getelementptr inbounds float, %i2, i64 120
+  %i228 = load float, %i227, align 4
+  %i229 = getelementptr inbounds float, %i2, i64 121
+  %i230 = load float, %i229, align 4
+  %i231 = fmul reassoc nnan ninf nsz arcp contract afn float %i230, %i228
+  %i232 = getelementptr inbounds i32, %i6, i64 18
+  store i32 1, %i232, align 4
+  br bb6
+bb5:
+  %i235 = getelementptr inbounds float, %i2, i64 123
+  %i236 = load float, %i235, align 4
+  br bb6
+bb6:
+  %i238 = phi float [%i231, bb4], [%i236, bb5]
+  %i239 = getelementptr inbounds float, %i2, i64 122
+  %i240 = load float, %i239, align 4
+  %i241 = fadd reassoc nnan ninf nsz arcp contract afn float %i240, %i238
+  %i242 = getelementptr inbounds i32, %i6, i64 19
+  %i243 = bitcast %i242 to ptr addrspace(1)
+  store %i241, %i243, align 4
+  %i245 = getelementptr inbounds float, %i2, i64 128
+  %i246 = load float, %i245, align 4
+  %i247 = getelementptr inbounds float, %i2, i64 129
+  %i248 = load float, %i247, align 4
+  %i249 = fmul reassoc nnan ninf nsz arcp afn float %i246, %i248
+  %i250 = getelementptr inbounds float, %i2, i64 130
+  %i251 = load float, %i250, align 4
+  %i252 = fadd reassoc nnan ninf nsz arcp afn float %i249, %i251
+  %i253 = getelementptr inbounds i32, %i6, i64 20
+  %i254 = bitcast %i253 to ptr addrspace(1)
+  store %i252, %i254, align 4
+  %i256 = getelementptr inbounds float, %i2, i64 136
+  %i257 = load float, %i256, align 4
+  %i258 = getelementptr inbounds float, %i2, i64 137
+  %i259 = load float, %i258, align 4
+  %i260 = fmul reassoc nnan ninf nsz arcp afn float %i257, %i259
+  %i261 = getelementptr inbounds float, %i2, i64 138
+  %i262 = load float, %i261, align 4
+  %i263 = fadd reassoc nnan ninf nsz arcp contract afn float %i260, %i262
+  %i264 = getelementptr inbounds i32, %i6, i64 21
+  %i265 = bitcast %i264 to ptr addrspace(1)
+  store %i263, %i265, align 4
+  %i267 = getelementptr inbounds float, %i2, i64 144
+  %i268 = load float, %i267, align 4
+  %i269 = getelementptr inbounds float, %i2, i64 145
+  %i270 = load float, %i269, align 4
+  %i271 = fmul reassoc nnan ninf nsz arcp contract afn float %i270, %i268
+  %i272 = getelementptr inbounds float, %i2, i64 146
+  %i273 = load float, %i272, align 4
+  %i274 = fadd reassoc nnan ninf nsz arcp afn float %i271, %i273
+  %i275 = getelementptr inbounds i32, %i6, i64 22
+  %i276 = bitcast %i275 to ptr addrspace(1)
+  store %i274, %i276, align 4
+  %i278 = getelementptr inbounds float, %i2, i64 152
+  %i279 = load float, %i278, align 4
+  %i280 = getelementptr inbounds float, %i2, i64 153
+  %i281 = load float, %i280, align 4
+  %i282 = fmul nnan ninf nsz arcp contract afn float %i279, %i281
+  %i283 = getelementptr inbounds float, %i2, i64 154
+  %i284 = load float, %i283, align 4
+  %i285 = fadd nnan ninf nsz arcp contract afn float %i282, %i284
+  %i286 = getelementptr inbounds i32, %i6, i64 23
+  %i287 = bitcast %i286 to ptr addrspace(1)
+  store %i285, %i287, align 4
+  %i289 = getelementptr inbounds float, %i2, i64 160
+  %i290 = load float, %i289, align 4
+  %i291 = insertelement <4 x float> undef, %i290, i64 0
+  %i292 = getelementptr inbounds float, %i2, i64 161
+  %i293 = load float, %i292, align 4
+  %i294 = insertelement %i291, %i293, i64 1
+  %i295 = getelementptr inbounds float, %i2, i64 162
+  %i296 = load float, %i295, align 4
+  %i297 = insertelement %i294, %i296, i64 2
+  %i298 = getelementptr inbounds float, %i2, i64 163
+  %i299 = load float, %i298, align 4
+  %i300 = insertelement %i297, %i299, i64 3
+  %i301 = getelementptr inbounds float, %i2, i64 164
+  %i302 = load float, %i301, align 4
+  %i303 = insertelement <4 x float> undef, %i302, i64 0
+  %i304 = getelementptr inbounds float, %i2, i64 165
+  %i305 = load float, %i304, align 4
+  %i306 = insertelement %i303, %i305, i64 1
+  %i307 = getelementptr inbounds float, %i2, i64 166
+  %i308 = load float, %i307, align 4
+  %i309 = insertelement %i306, %i308, i64 2
+  %i310 = getelementptr inbounds float, %i2, i64 167
+  %i311 = load float, %i310, align 4
+  %i312 = insertelement %i309, %i311, i64 3
+  %i313 = getelementptr inbounds float, %i2, i64 168
+  %i314 = load float, %i313, align 4
+  %i315 = insertelement <4 x float> undef, %i314, i64 0
+  %i316 = getelementptr inbounds float, %i2, i64 169
+  %i317 = load float, %i316, align 4
+  %i318 = insertelement %i315, %i317, i64 1
+  %i319 = getelementptr inbounds float, %i2, i64 170
+  %i320 = load float, %i319, align 4
+  %i321 = insertelement %i318, %i320, i64 2
+  %i322 = getelementptr inbounds float, %i2, i64 171
+  %i323 = load float, %i322, align 4
+  %i324 = insertelement %i321, %i323, i64 3
+  %i325 = fmul reassoc nnan ninf nsz arcp contract afn <4 x float> %i312, %i300
+  %i326 = fadd reassoc nnan ninf nsz arcp contract afn <4 x float> %i324, %i325
+  %i327 = bitcast %i326 to <4 x i32>
+  %i328 = extractelement %i327, i64 0
+  %i329 = getelementptr inbounds i32, %i6, i64 24
+  store %i328, %i329, align 4
+  %i331 = extractelement %i327, i64 1
+  %i332 = getelementptr inbounds i32, %i6, i64 25
+  store %i331, %i332, align 4
+  %i334 = extractelement %i327, i64 2
+  %i335 = getelementptr inbounds i32, %i6, i64 26
+  store %i334, %i335, align 4
+  %i337 = extractelement %i327, i64 3
+  %i338 = getelementptr inbounds i32, %i6, i64 27
+  store %i337, %i338, align 4
+  %i340 = getelementptr inbounds i32, %i6, i64 32
+  %i341 = load half, %i3, align 2
+  %i342 = getelementptr inbounds half, %i3, i64 1
+  %i343 = load half, %i342, align 2
+  %i344 = fmul reassoc nnan ninf nsz arcp contract afn half %i343, %i341
+  %i345 = getelementptr inbounds half, %i3, i64 2
+  %i346 = load half, %i345, align 2
+  %i347 = fadd reassoc nnan ninf nsz arcp contract afn half %i344, %i346
+  %i348 = bitcast %i347 to i16
+  %i349 = zext %i348 to i32
+  store %i349, %i340, align 4
+  %i351 = getelementptr inbounds half, %i3, i64 8
+  %i352 = load half, %i351, align 2
+  %i353 = getelementptr inbounds half, %i3, i64 9
+  %i354 = load half, %i353, align 2
+  %i355 = fmul reassoc nnan ninf nsz arcp contract afn half %i354, %i352
+  %i356 = getelementptr inbounds half, %i3, i64 10
+  %i357 = load half, %i356, align 2
+  %i358 = fadd reassoc nnan ninf nsz arcp contract afn half %i355, %i357
+  %i359 = bitcast %i358 to i16
+  %i360 = zext %i359 to i32
+  %i361 = getelementptr inbounds i32, %i340, i64 1
+  store %i360, %i361, align 4
+  %i363 = getelementptr inbounds half, %i3, i64 11
+  %i364 = load half, %i363, align 2
+  %i365 = fadd reassoc nnan ninf nsz arcp contract afn half %i364, %i355
+  %i366 = bitcast %i365 to i16
+  %i367 = zext %i366 to i32
+  %i368 = getelementptr inbounds i32, %i340, i64 2
+  store %i367, %i368, align 4
+  %i370 = getelementptr inbounds half, %i3, i64 16
+  %i371 = load half, %i370, align 2
+  %i372 = getelementptr inbounds half, %i3, i64 17
+  %i373 = load half, %i372, align 2
+  %i374 = fmul reassoc nnan ninf nsz arcp contract afn half %i373, %i371
+  %i375 = getelementptr inbounds half, %i3, i64 18
+  %i376 = load half, %i375, align 2
+  %i377 = fadd reassoc nnan ninf nsz arcp contract afn half %i374, %i376
+  %i378 = bitcast %i377 to i16
+  %i379 = zext %i378 to i32
+  %i380 = getelementptr inbounds i32, %i340, i64 3
+  store %i379, %i380, align 4
+  %i382 = bitcast %i374 to i16
+  %i383 = zext %i382 to i32
+  %i384 = getelementptr inbounds i32, %i340, i64 4
+  store %i383, %i384, align 4
+  %i386 = getelementptr inbounds half, %i3, i64 24
+  %i387 = load half, %i386, align 2
+  %i388 = getelementptr inbounds half, %i3, i64 25
+  %i389 = load half, %i388, align 2
+  %i390 = fmul reassoc nnan ninf nsz arcp contract afn half %i389, %i387
+  %i391 = getelementptr inbounds half, %i3, i64 26
+  %i392 = load half, %i391, align 2
+  %i393 = fsub reassoc nnan ninf nsz arcp contract afn half %i390, %i392
+  %i394 = bitcast %i393 to i16
+  %i395 = zext %i394 to i32
+  %i396 = getelementptr inbounds i32, %i340, i64 5
+  store %i395, %i396, align 4
+  %i398 = getelementptr inbounds half, %i3, i64 32
+  %i399 = getelementptr inbounds half, %i3, i64 34
+  %i400 = load half, %i399, align 2
+  %i401 = load half, %i398, align 2
+  %i402 = getelementptr inbounds half, %i3, i64 33
+  %i403 = load half, %i402, align 2
+  %i404 = fmul reassoc nnan ninf nsz arcp contract afn half %i403, %i401
+  %i405 = fsub reassoc nnan ninf nsz arcp contract afn half %i400, %i404
+  %i406 = bitcast %i405 to i16
+  %i407 = zext %i406 to i32
+  %i408 = getelementptr inbounds i32, %i340, i64 6
+  store %i407, %i408, align 4
+  %i410 = getelementptr inbounds half, %i3, i64 40
+  %i411 = load half, %i410, align 2
+  %i412 = getelementptr inbounds half, %i3, i64 41
+  %i413 = load half, %i412, align 2
+  %i414 = fmul reassoc nnan ninf nsz arcp contract afn half %i413, %i411
+  %i415 = getelementptr inbounds half, %i3, i64 42
+  %i416 = load half, %i415, align 2
+  %i417 = fadd reassoc nnan ninf nsz arcp contract afn half %i414, %i416
+  %i418 = fneg reassoc nnan ninf nsz arcp contract afn half %i417
+  %i419 = bitcast %i418 to i16
+  %i420 = zext %i419 to i32
+  %i421 = getelementptr inbounds i32, %i340, i64 7
+  store %i420, %i421, align 4
+  %i423 = getelementptr inbounds half, %i3, i64 48
+  %i424 = load half, %i423, align 2
+  %i425 = getelementptr inbounds half, %i3, i64 49
+  %i426 = load half, %i425, align 2
+  %i427 = fneg reassoc nnan ninf nsz arcp contract afn half %i424
+  %i428 = fmul reassoc nnan ninf nsz arcp contract afn half %i426, %i427
+  %i429 = getelementptr inbounds half, %i3, i64 50
+  %i430 = load half, %i429, align 2
+  %i431 = fsub reassoc nnan ninf nsz arcp contract afn half %i428, %i430
+  %i432 = bitcast %i431 to i16
+  %i433 = zext %i432 to i32
+  %i434 = getelementptr inbounds i32, %i340, i64 8
+  store %i433, %i434, align 4
+  %i436 = getelementptr inbounds half, %i3, i64 56
+  %i437 = load half, %i436, align 2
+  %i438 = getelementptr inbounds half, %i3, i64 57
+  %i439 = load half, %i438, align 2
+  %i440 = fmul reassoc nnan ninf nsz arcp contract afn half %i439, %i437
+  %i441 = getelementptr inbounds half, %i3, i64 58
+  %i442 = load half, %i441, align 2
+  %i443 = getelementptr inbounds half, %i3, i64 59
+  %i444 = load half, %i443, align 2
+  %i445 = fmul reassoc nnan ninf nsz arcp contract afn half %i444, %i442
+  %i446 = fadd reassoc nnan ninf nsz arcp contract afn half %i445, %i440
+  %i447 = bitcast %i446 to i16
+  %i448 = zext %i447 to i32
+  %i449 = getelementptr inbounds i32, %i340, i64 9
+  store %i448, %i449, align 4
+  %i451 = getelementptr inbounds half, %i3, i64 64
+  %i452 = load half, %i451, align 2
+  %i453 = getelementptr inbounds half, %i3, i64 65
+  %i454 = load half, %i453, align 2
+  %i455 = getelementptr inbounds half, %i3, i64 66
+  %i456 = load half, %i455, align 2
+  %i457 = getelementptr inbounds half, %i3, i64 67
+  %i458 = load half, %i457, align 2
+  %i459 = fmul reassoc nnan ninf nsz arcp contract afn half %i458, %i456
+  %i460 = fmul reassoc nnan ninf nsz arcp contract afn half %i454, %i452
+  %i461 = fadd reassoc nnan ninf nsz arcp contract afn half %i459, %i460
+  %i462 = bitcast %i461 to i16
+  %i463 = zext %i462 to i32
+  %i464 = getelementptr inbounds i32, %i340, i64 10
+  store %i463, %i464, align 4
+  %i466 = getelementptr inbounds half, %i3, i64 72
+  %i467 = load half, %i466, align 2
+  %i468 = getelementptr inbounds half, %i3, i64 73
+  %i469 = load half, %i468, align 2
+  %i470 = fmul reassoc nnan ninf nsz arcp contract afn half %i469, %i467
+  %i471 = getelementptr inbounds half, %i3, i64 74
+  %i472 = load half, %i471, align 2
+  %i473 = getelementptr inbounds half, %i3, i64 75
+  %i474 = load half, %i473, align 2
+  %i475 = fmul reassoc nnan ninf nsz arcp contract afn half %i474, %i472
+  %i476 = fsub reassoc nnan ninf nsz arcp contract afn half %i470, %i475
+  %i477 = bitcast %i476 to i16
+  %i478 = zext %i477 to i32
+  %i479 = getelementptr inbounds i32, %i340, i64 11
+  store %i478, %i479, align 4
+  %i481 = getelementptr inbounds half, %i3, i64 80
+  %i482 = load half, %i481, align 2
+  %i483 = getelementptr inbounds half, %i3, i64 81
+  %i484 = load half, %i483, align 2
+  %i485 = fmul reassoc nnan ninf nsz arcp contract afn half %i484, %i482
+  %i486 = getelementptr inbounds half, %i3, i64 82
+  %i487 = load half, %i486, align 2
+  %i488 = getelementptr inbounds half, %i3, i64 83
+  %i489 = load half, %i488, align 2
+  %i490 = fmul reassoc nnan ninf nsz arcp contract afn half %i489, %i487
+  %i491 = fadd reassoc nnan ninf nsz arcp contract afn half %i490, %i485
+  %i492 = bitcast %i491 to i16
+  %i493 = zext %i492 to i32
+  %i494 = getelementptr inbounds i32, %i340, i64 12
+  store %i493, %i494, align 4
+  %i496 = bitcast %i485 to i16
+  %i497 = zext %i496 to i32
+  %i498 = getelementptr inbounds i32, %i340, i64 13
+  store %i497, %i498, align 4
+  %i500 = getelementptr inbounds half, %i3, i64 88
+  %i501 = load half, %i500, align 2
+  %i502 = getelementptr inbounds half, %i3, i64 89
+  %i503 = load half, %i502, align 2
+  %i504 = fmul reassoc nnan ninf nsz arcp contract afn half %i503, %i501
+  %i505 = getelementptr inbounds half, %i3, i64 90
+  %i506 = load half, %i505, align 2
+  %i507 = getelementptr inbounds half, %i3, i64 91
+  %i508 = load half, %i507, align 2
+  %i509 = fmul reassoc nnan ninf nsz arcp contract afn half %i508, %i506
+  %i510 = fadd reassoc nnan ninf nsz arcp contract afn half %i509, %i504
+  %i511 = getelementptr inbounds half, %i3, i64 92
+  %i512 = load half, %i511, align 2
+  %i513 = fadd reassoc nnan ninf nsz arcp contract afn half %i510, %i512
+  %i514 = bitcast %i513 to i16
+  %i515 = zext %i514 to i32
+  %i516 = getelementptr inbounds i32, %i340, i64 14
+  store %i515, %i516, align 4
+  %i518 = getelementptr inbounds half, %i3, i64 96
+  %i519 = load half, %i518, align 2
+  %i520 = getelementptr inbounds half, %i3, i64 97
+  %i521 = load half, %i520, align 2
+  %i522 = fmul reassoc nnan ninf nsz arcp contract afn half %i521, %i519
+  %i523 = getelementptr inbounds half, %i3, i64 98
+  %i524 = load half, %i523, align 2
+  %i525 = fadd reassoc nnan ninf nsz arcp contract afn half %i522, %i524
+  %i526 = getelementptr inbounds half, %i3, i64 99
+  %i527 = load half, %i526, align 2
+  %i528 = fmul reassoc nnan ninf nsz arcp contract afn half %i525, %i527
+  %i529 = getelementptr inbounds half, %i3, i64 100
+  %i530 = load half, %i529, align 2
+  %i531 = fadd reassoc nnan ninf nsz arcp contract afn half %i528, %i530
+  %i532 = bitcast %i531 to i16
+  %i533 = zext %i532 to i32
+  %i534 = getelementptr inbounds i32, %i340, i64 15
+  store %i533, %i534, align 4
+  %i536 = getelementptr inbounds half, %i3, i64 104
+  %i537 = load half, %i536, align 2
+  %i538 = getelementptr inbounds half, %i3, i64 105
+  %i539 = load half, %i538, align 2
+  %i540 = getelementptr inbounds half, %i3, i64 106
+  %i541 = load half, %i540, align 2
+  %i542 = getelementptr inbounds half, %i3, i64 107
+  %i543 = load half, %i542, align 2
+  %i544 = getelementptr inbounds half, %i3, i64 109
+  %i545 = load half, %i544, align 2
+  %i546 = fcmp reassoc nnan ninf nsz arcp contract afn ogt %i545, half 0x0
+  %i547 = fmul reassoc nnan ninf nsz arcp contract afn half %i539, %i537
+  %i548 = select reassoc nnan ninf nsz arcp contract afn half %i546, %i547, %i543
+  %i549 = fadd reassoc nnan ninf nsz arcp contract afn half %i548, %i541
+  %i550 = bitcast %i549 to i16
+  %i551 = zext %i550 to i32
+  %i552 = getelementptr inbounds i32, %i340, i64 16
+  store %i551, %i552, align 4
+  %i554 = getelementptr inbounds half, %i3, i64 117
+  %i555 = load half, %i554, align 2
+  %i556 = fcmp reassoc nnan ninf nsz arcp contract afn ogt %i555, half 0x0
+  br %i556, bb7, bb8
+bb7:
+  %i558 = getelementptr inbounds half, %i3, i64 112
+  %i559 = load half, %i558, align 2
+  %i560 = getelementptr inbounds half, %i3, i64 113
+  %i561 = load half, %i560, align 2
+  %i562 = fmul reassoc nnan ninf nsz arcp contract afn half %i561, %i559
+  br bb9
+bb8:
+  %i564 = getelementptr inbounds half, %i3, i64 115
+  %i565 = load half, %i564, align 2
+  br bb9
+bb9:
+  %i567 = phi reassoc nnan ninf nsz arcp contract afn half [%i562, bb7], [%i565, bb8]
+  %i568 = getelementptr inbounds half, %i3, i64 114
+  %i569 = load half, %i568, align 2
+  %i570 = fadd reassoc nnan ninf nsz arcp contract afn half %i569, %i567
+  %i571 = bitcast %i570 to i16
+  %i572 = zext %i571 to i32
+  %i573 = getelementptr inbounds i32, %i340, i64 17
+  store %i572, %i573, align 4
+  %i575 = getelementptr inbounds half, %i3, i64 125
+  %i576 = load half, %i575, align 2
+  %i577 = fcmp reassoc nnan ninf nsz arcp contract afn ogt %i576, half 0x0
+  br %i577, bb10, bb11
+bb10:
+  %i579 = getelementptr inbounds half, %i3, i64 120
+  %i580 = load half, %i579, align 2
+  %i581 = getelementptr inbounds half, %i3, i64 121
+  %i582 = load half, %i581, align 2
+  %i583 = fmul reassoc nnan ninf nsz arcp contract afn half %i582, %i580
+  %i584 = getelementptr inbounds i32, %i340, i64 18
+  store i32 1, %i584, align 4
+  br bb12
+bb11:
+  %i587 = getelementptr inbounds half, %i3, i64 123
+  %i588 = load half, %i587, align 2
+  br bb12
+bb12:
+  %i590 = phi half [%i583, bb10], [%i588, bb11]
+  %i591 = getelementptr inbounds half, %i3, i64 122
+  %i592 = load half, %i591, align 2
+  %i593 = fadd reassoc nnan ninf nsz arcp contract afn half %i592, %i590
+  %i594 = bitcast %i593 to i16
+  %i595 = zext %i594 to i32
+  %i596 = getelementptr inbounds i32, %i340, i64 19
+  store %i595, %i596, align 4
+  %i598 = getelementptr inbounds half, %i3, i64 128
+  %i599 = load half, %i598, align 2
+  %i600 = getelementptr inbounds half, %i3, i64 129
+  %i601 = load half, %i600, align 2
+  %i602 = fmul reassoc nnan ninf nsz arcp afn half %i599, %i601
+  %i603 = getelementptr inbounds half, %i3, i64 130
+  %i604 = load half, %i603, align 2
+  %i605 = fadd reassoc nnan ninf nsz arcp afn half %i602, %i604
+  %i606 = bitcast %i605 to i16
+  %i607 = zext %i606 to i32
+  %i608 = getelementptr inbounds i32, %i340, i64 20
+  store %i607, %i608, align 4
+  %i610 = getelementptr inbounds half, %i3, i64 136
+  %i611 = load half, %i610, align 2
+  %i612 = getelementptr inbounds half, %i3, i64 137
+  %i613 = load half, %i612, align 2
+  %i614 = fmul reassoc nnan ninf nsz arcp afn half %i611, %i613
+  %i615 = getelementptr inbounds half, %i3, i64 138
+  %i616 = load half, %i615, align 2
+  %i617 = fadd reassoc nnan ninf nsz arcp contract afn half %i614, %i616
+  %i618 = bitcast %i617 to i16
+  %i619 = zext %i618 to i32
+  %i620 = getelementptr inbounds i32, %i340, i64 21
+  store %i619, %i620, align 4
+  %i622 = getelementptr inbounds half, %i3, i64 144
+  %i623 = load half, %i622, align 2
+  %i624 = getelementptr inbounds half, %i3, i64 145
+  %i625 = load half, %i624, align 2
+  %i626 = fmul reassoc nnan ninf nsz arcp contract afn half %i625, %i623
+  %i627 = getelementptr inbounds half, %i3, i64 146
+  %i628 = load half, %i627, align 2
+  %i629 = fadd reassoc nnan ninf nsz arcp afn half %i626, %i628
+  %i630 = bitcast %i629 to i16
+  %i631 = zext %i630 to i32
+  %i632 = getelementptr inbounds i32, %i340, i64 22
+  store %i631, %i632, align 4
+  %i634 = getelementptr inbounds half, %i3, i64 152
+  %i635 = load half, %i634, align 2
+  %i636 = getelementptr inbounds half, %i3, i64 153
+  %i637 = load half, %i636, align 2
+  %i638 = fmul nnan ninf nsz arcp contract afn half %i635, %i637
+  %i639 = getelementptr inbounds half, %i3, i64 154
+  %i640 = load half, %i639, align 2
+  %i641 = fadd nnan ninf nsz arcp contract afn half %i638, %i640
+  %i642 = bitcast %i641 to i16
+  %i643 = zext %i642 to i32
+  %i644 = getelementptr inbounds i32, %i340, i64 23
+  store %i643, %i644, align 4
+  %i646 = getelementptr inbounds half, %i3, i64 160
+  %i647 = load half, %i646, align 2
+  %i648 = insertelement <4 x half> undef, %i647, i64 0
+  %i649 = getelementptr inbounds half, %i3, i64 161
+  %i650 = load half, %i649, align 2
+  %i651 = insertelement %i648, %i650, i64 1
+  %i652 = getelementptr inbounds half, %i3, i64 162
+  %i653 = load half, %i652, align 2
+  %i654 = insertelement %i651, %i653, i64 2
+  %i655 = getelementptr inbounds half, %i3, i64 163
+  %i656 = load half, %i655, align 2
+  %i657 = insertelement %i654, %i656, i64 3
+  %i658 = getelementptr inbounds half, %i3, i64 164
+  %i659 = load half, %i658, align 2
+  %i660 = insertelement <4 x half> undef, %i659, i64 0
+  %i661 = getelementptr inbounds half, %i3, i64 165
+  %i662 = load half, %i661, align 2
+  %i663 = insertelement %i660, %i662, i64 1
+  %i664 = getelementptr inbounds half, %i3, i64 166
+  %i665 = load half, %i664, align 2
+  %i666 = insertelement %i663, %i665, i64 2
+  %i667 = getelementptr inbounds half, %i3, i64 167
+  %i668 = load half, %i667, align 2
+  %i669 = insertelement %i666, %i668, i64 3
+  %i670 = getelementptr inbounds half, %i3, i64 168
+  %i671 = load half, %i670, align 2
+  %i672 = insertelement <4 x half> undef, %i671, i64 0
+  %i673 = getelementptr inbounds half, %i3, i64 169
+  %i674 = load half, %i673, align 2
+  %i675 = insertelement %i672, %i674, i64 1
+  %i676 = getelementptr inbounds half, %i3, i64 170
+  %i677 = load half, %i676, align 2
+  %i678 = insertelement %i675, %i677, i64 2
+  %i679 = getelementptr inbounds half, %i3, i64 171
+  %i680 = load half, %i679, align 2
+  %i681 = insertelement %i678, %i680, i64 3
+  %i682 = fmul reassoc nnan ninf nsz arcp contract afn <4 x half> %i669, %i657
+  %i683 = fadd reassoc nnan ninf nsz arcp contract afn <4 x half> %i681, %i682
+  %i684 = bitcast %i683 to <4 x i16>
+  %i685 = extractelement %i684, i64 0
+  %i686 = zext %i685 to i32
+  %i687 = getelementptr inbounds i32, %i340, i64 24
+  store %i686, %i687, align 4
+  %i689 = extractelement %i684, i64 1
+  %i690 = zext %i689 to i32
+  %i691 = getelementptr inbounds i32, %i340, i64 25
+  store %i690, %i691, align 4
+  %i693 = extractelement %i684, i64 2
+  %i694 = zext %i693 to i32
+  %i695 = getelementptr inbounds i32, %i340, i64 26
+  store %i694, %i695, align 4
+  %i697 = extractelement %i684, i64 3
+  %i698 = zext %i697 to i32
+  %i699 = getelementptr inbounds i32, %i340, i64 27
+  store %i698, %i699, align 4
+  %i701 = getelementptr inbounds half, %i3, i64 176
+  %i702 = load half, %i701, align 2
+  %i703 = getelementptr inbounds half, %i3, i64 177
+  %i704 = load half, %i703, align 2
+  %i705 = fmul reassoc nnan ninf nsz arcp contract afn half %i704, %i702
+  %i706 = fpext %i705 to float
+  %i707 = getelementptr inbounds float, %i2, i64 176
+  %i708 = load float, %i707, align 4
+  %i709 = fadd reassoc nnan ninf nsz arcp contract afn float %i708, %i706
+  %i710 = getelementptr inbounds i32, %i6, i64 63
+  %i711 = bitcast %i710 to ptr addrspace(1)
+  store %i709, %i711, align 4
+  ret void
+}
+!md0 = !"SDK Version"
+!md1 = !"wchar_size"
+!md2 = !"frame-pointer"
+!md3 = !"air.max_device_buffers"
+!md4 = !"air.max_constant_buffers"
+!md5 = !"air.max_threadgroup_buffers"
+!md6 = !"air.max_textures"
+!md7 = !"air.max_read_write_textures"
+!md8 = !"air.max_samplers"
+!md9 = !"air.buffer"
+!md10 = !"air.location_index"
+!md11 = !"air.read"
+!md12 = !"air.address_space"
+!md13 = !"air.arg_type_size"
+!md14 = !"air.arg_type_align_size"
+!md15 = !"air.arg_type_name"
+!md16 = !"float"
+!md17 = !"air.arg_name"
+!md18 = !"fin"
+!md19 = !"half"
+!md20 = !"hin"
+!md21 = !"air.read_write"
+!md22 = !"uint"
+!md23 = !"out"
+!md24 = !"air.thread_position_in_grid"
+!md25 = !"i"
+!md26 = !"air.compile.denorms_disable"
+!md27 = !"air.compile.fast_math_enable"
+!md28 = !"air.compile.framebuffer_fetch_enable"
+!md29 = !"Apple metal version 32023.921 (metalfe-32023.921.6)"
+!md30 = !"Metal"
+!md31 = i32 2
+!md32 = %t6 c4
+!md33 = i32 1
+!md34 = i32 4
+!md35 = i32 7
+!md36 = i32 31
+!md37 = i32 128
+!md38 = i32 8
+!md39 = i32 16
+!md40 = ptr addrspace(0) @f0
+!md41 = i32 0
+!md42 = i32 3
+!md43 = !{!md31, !md0, !md32}
+!md44 = !{!md33, !md1, !md34}
+!md45 = !{!md35, !md2, !md31}
+!md46 = !{!md35, !md3, !md36}
+!md47 = !{!md35, !md4, !md36}
+!md48 = !{!md35, !md5, !md36}
+!md49 = !{!md35, !md6, !md37}
+!md50 = !{!md35, !md7, !md38}
+!md51 = !{!md35, !md8, !md39}
+!md52 = !{}
+!md53 = !{!md41, !md9, !md10, !md41, !md33, !md11, !md12, !md33, !md13, !md34, !md14, !md34, !md15, !md16, !md17, !md18}
+!md54 = !{!md33, !md9, !md10, !md33, !md33, !md11, !md12, !md33, !md13, !md31, !md14, !md31, !md15, !md19, !md17, !md20}
+!md55 = !{!md31, !md9, !md10, !md31, !md33, !md21, !md12, !md33, !md13, !md34, !md14, !md34, !md15, !md22, !md17, !md23}
+!md56 = !{!md42, !md24, !md15, !md22, !md17, !md25}
+!md57 = !{!md53, !md54, !md55, !md56}
+!md58 = !{!md40, !md52, !md57}
+!md59 = !{!md26}
+!md60 = !{!md27}
+!md61 = !{!md28}
+!md62 = !{!md29}
+!md63 = !{!md31, !md38, !md41}
+!md64 = !{!md30, !md34, !md41, !md41}
+!"llvm.module.flags" = !{!md43, !md44, !md45, !md46, !md47, !md48, !md49, !md50, !md51}
+!"air.kernel" = !{!md58}
+!"air.compile_options" = !{!md59, !md60, !md61}
+!"llvm.ident" = !{!md62}
+!"air.version" = !{!md63}
+!"air.language_version" = !{!md64}

@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# The Linux job of .github/workflows/ci.yml, step for step, for `scripts/linux-gate` to run inside
+# its container (the default command). Not meant to run on the host: it expects the container's
+# environment (a writable source copy as the working directory, CARGO_TARGET_DIR on the slot
+# volume, CARGO_BUILD_JOBS set to the share, lavapipe as the only Vulkan ICD).
+#
+# Keep it in step with ci.yml: every Linux `run:` there has one `step` here, with the same command
+# plus the explicit build share (`-j`, or `--build-jobs` for nextest, whose `-j` is its test-thread
+# count), which ci.yml leaves to Cargo's default on a dedicated runner. Tests run with nextest's
+# default parallelism, as in ci.yml.
+set -euo pipefail
+
+: "${CARGO_BUILD_JOBS:?linux-gate-ci runs inside scripts/linux-gate}"
+: "${CARGO_TARGET_DIR:?linux-gate-ci runs inside scripts/linux-gate}"
+jobs=$CARGO_BUILD_JOBS
+
+# ci.yml job-level env.
+export CARGO_TERM_COLOR=always
+export RUSTFLAGS=-Dwarnings
+# ci.yml's Ubuntu tool step exports this to every later step (GITHUB_ENV).
+export METAL2VULKAN_TEST_REQUIRE_PINNED_LLVM=1
+
+gate_start=$SECONDS
+step() {
+    local name=$1
+    shift
+    local start=$SECONDS
+    echo "::: linux-gate step: ${name}"
+    "$@"
+    echo "::: linux-gate step ok: ${name} ($((SECONDS - start)) s)"
+}
+
+tools_probe() {
+    command -v llvm-dis
+    command -v spirv-val
+    command -v spirv-as
+    shopt -s nullglob
+    local icds=(/usr/share/vulkan/icd.d/*.json /etc/vulkan/icd.d/*.json)
+    echo "Vulkan ICDs: ${icds[*]:-none}"
+    test "${#icds[@]}" -gt 0
+}
+
+cpu_icd_tests() {
+    # A separate target dir keeps the ordinary (`-Dwarnings`) build warm: a RUSTFLAGS change would
+    # otherwise rebuild the whole tree in place on every run.
+    CARGO_TARGET_DIR="${CARGO_TARGET_DIR}-cpu-icd" \
+        RUSTFLAGS='-Dwarnings --cfg m2v_cpu_icd' LP_NUM_THREADS=1 \
+        cargo nextest run -p metal2vulkan-validation --all-features --build-jobs "$jobs"
+}
+
+gpu_cfg_clippy() {
+    # As cpu_icd_tests, a sibling target dir keeps the ordinary build warm.
+    CARGO_TARGET_DIR="${CARGO_TARGET_DIR}-gpucfg" RUSTFLAGS='-Dwarnings --cfg m2v_gpu' \
+        cargo clippy --workspace --all-targets --all-features -j "$jobs" -- -D warnings
+}
+
+qualify_public_cases() {
+    cargo build -p metal2vulkan-validation --bins -j "$jobs"
+    LP_NUM_THREADS=1 bash scripts/qualify-public-cases "${CARGO_TARGET_DIR}/debug"
+}
+
+step "Install LLVM + SPIR-V tools (probe)" tools_probe
+step "Format" cargo fmt --all -- --check
+step "Clippy (warnings denied)" \
+    cargo clippy --workspace --all-targets --all-features -j "$jobs" -- -D warnings
+step "Clippy under --cfg m2v_gpu (warnings denied)" gpu_cfg_clippy
+step "Build public documentation (warnings denied)" \
+    env RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --all-features --no-deps -j "$jobs"
+step "Test metal2vulkan" cargo nextest run -p metal2vulkan --all-features --build-jobs "$jobs"
+step "Test validation suite" \
+    cargo nextest run -p metal2vulkan-validation --all-features --build-jobs "$jobs"
+step "Doc tests" cargo test --workspace --all-features --doc -j "$jobs"
+step "Test validation suite on the CPU Vulkan ICD (Linux)" cpu_icd_tests
+step "Qualify public cases on native Vulkan (Linux)" qualify_public_cases
+echo "::: linux-gate: all ci.yml Linux steps passed ($((SECONDS - gate_start)) s)"

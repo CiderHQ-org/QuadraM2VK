@@ -1,0 +1,143 @@
+target triple = "air64_v29-apple-macosx27.0.0"
+source_filename = "-"
+; datalayout DataLayout { endian: Little, pointers: {0: PointerSpec { size_bits: 64, abi_bits: 64, pref_bits: 64, index_bits: 64 }}, ints: {1: AlignSpec { abi_bits: 8, pref_bits: 8 }, 8: AlignSpec { abi_bits: 8, pref_bits: 8 }, 16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }}, floats: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }}, vectors: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 24: AlignSpec { abi_bits: 32, pref_bits: 32 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 48: AlignSpec { abi_bits: 64, pref_bits: 64 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 96: AlignSpec { abi_bits: 128, pref_bits: 128 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }, 192: AlignSpec { abi_bits: 256, pref_bits: 256 }, 256: AlignSpec { abi_bits: 256, pref_bits: 256 }, 512: AlignSpec { abi_bits: 512, pref_bits: 512 }, 1024: AlignSpec { abi_bits: 1024, pref_bits: 1024 }}, aggregate: AlignSpec { abi_bits: 0, pref_bits: 64 }, native_ints: [8, 16, 32], stack_align_bits: None, alloca_space: 0, program_space: 0, globals_space: 0, mangling: None, fn_ptr_align: None, non_integral: [] }
+%t2 = type { i32 } ; "struct.metal::_atomic"
+%t6 = type void (ptr addrspace(1), ptr addrspace(1), ptr addrspace(1), i32)
+%t8 = type float (i32)
+%t9 = type void (i32, i32, i32)
+%t11 = type void (ptr addrspace(3), i32, i32, i32, i32, i1)
+%t12 = type i32 (ptr addrspace(1), i32, i32, i32, i32, i1)
+%t13 = type float (ptr addrspace(1), float, i32, i32, i32, i1)
+%t14 = type i32 (ptr addrspace(3), i32, i32, i32, i32, i1)
+%t15 = type i32 (ptr addrspace(3), i32, i32, i32, i1)
+%t16 = type void (ptr addrspace(1), i32, i32, i32, i32, i1)
+%t18 = type [2 x i32]
+%t21 = type { i32 } ; "struct.metal::_atomic.0"
+%t22 = type { float } ; "struct.metal::_atomic.1"
+c15 = %t18 [27, 0]
+@g0 "_ZZ30kernel_atomic_xor_and_subtractPU9MTLdeviceN5metal7_atomicIjvEEPU9MTLdeviceNS0_IivEEPU9MTLdeviceNS0_IfvEEjE10tile_total" = internal addrspace(3) global %t2 zeroinitializer, align 4
+
+define %t6 @f0 "kernel_atomic_xor_and_subtract" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="0" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a0( nocapture "air-buffer-no-alias"="" ) %a1( nocapture "air-buffer-no-alias"="" ) %a2( nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = icmp eq %a3, i32 0
+  br %i0, bb1, bb2
+bb1:
+  tail call void @f3 [air Atomic(Atomic { space: Local, op: Store, sign: None, ty: NumTy { elem: I32, lanes: 1 }, order: Relaxed, failure: None, scope: Threadgroup, volatile: true, fetch: false, flags: Some(MemFlags { device: false, threadgroup: false, texture: false, threadgroup_imageblock: false, object_data: false }) })](ptr addrspace(3) @g0, i32 0, i32 0, i32 1, i32 0, i1 1) arg0( nocapture )
+  br bb2
+bb2:
+  tail call void @f2 [air Sync(Barrier { name: Threadgroup, flags: MemFlags { device: false, threadgroup: true, texture: false, threadgroup_imageblock: false, object_data: false }, order: Some(SeqCst), scope: Threadgroup, memory: Threadgroup })](i32 2, i32 5, i32 1) convergent
+  %i5 = mul i32 %a3, i32 2654435761
+  %i6 = getelementptr inbounds %t2, %a0, i64 0, i32 0
+  %i7 = tail call i32 @f4 [air Atomic(Atomic { space: Global, op: Xor, sign: Some(Unsigned), ty: NumTy { elem: I32, lanes: 1 }, order: Relaxed, failure: None, scope: Device, volatile: true, fetch: true, flags: Some(MemFlags { device: false, threadgroup: false, texture: false, threadgroup_imageblock: false, object_data: false }) })](%i6, %i5, i32 0, i32 2, i32 0, i1 1) arg0( nocapture )
+  %i8 = add nsw i32 %a3, i32 1
+  %i9 = getelementptr inbounds %t21, %a1, i64 0, i32 0
+  %i10 = tail call i32 @f5 [air Atomic(Atomic { space: Global, op: Sub, sign: Some(Signed), ty: NumTy { elem: I32, lanes: 1 }, order: Relaxed, failure: None, scope: Device, volatile: true, fetch: true, flags: Some(MemFlags { device: false, threadgroup: false, texture: false, threadgroup_imageblock: false, object_data: false }) })](%i9, %i8, i32 0, i32 2, i32 0, i1 1) arg0( nocapture )
+  %i11 = tail call reassoc nnan ninf nsz arcp contract afn float @f1 [air Convert(Convert { dst: NumTy { elem: F32, lanes: 1 }, dst_kind: Float, src: NumTy { elem: I32, lanes: 1 }, src_kind: Unsigned, src_fp8: None })](%i8)
+  %i12 = getelementptr inbounds %t22, %a2, i64 0, i32 0
+  %i13 = tail call reassoc nnan ninf nsz arcp contract afn float @f6 [air Atomic(Atomic { space: Global, op: Sub, sign: None, ty: NumTy { elem: F32, lanes: 1 }, order: Relaxed, failure: None, scope: Device, volatile: true, fetch: true, flags: Some(MemFlags { device: false, threadgroup: false, texture: false, threadgroup_imageblock: false, object_data: false }) })](%i12, %i11, i32 0, i32 2, i32 0, i1 1) arg0( nocapture )
+  %i14 = tail call i32 @f7 [air Atomic(Atomic { space: Local, op: Sub, sign: Some(Unsigned), ty: NumTy { elem: I32, lanes: 1 }, order: Relaxed, failure: None, scope: Threadgroup, volatile: true, fetch: true, flags: Some(MemFlags { device: false, threadgroup: false, texture: false, threadgroup_imageblock: false, object_data: false }) })](ptr addrspace(3) @g0, %i8, i32 0, i32 1, i32 0, i1 1) arg0( nocapture )
+  tail call void @f2 [air Sync(Barrier { name: Threadgroup, flags: MemFlags { device: false, threadgroup: true, texture: false, threadgroup_imageblock: false, object_data: false }, order: Some(SeqCst), scope: Threadgroup, memory: Threadgroup })](i32 2, i32 5, i32 1) convergent
+  br %i0, bb3, bb4
+bb3:
+  %i17 = getelementptr inbounds %t2, %a0, i64 1, i32 0
+  %i18 = tail call i32 @f8 [air Atomic(Atomic { space: Local, op: Load, sign: None, ty: NumTy { elem: I32, lanes: 1 }, order: Relaxed, failure: None, scope: Threadgroup, volatile: true, fetch: true, flags: Some(MemFlags { device: false, threadgroup: false, texture: false, threadgroup_imageblock: false, object_data: false }) })](ptr addrspace(3) @g0, i32 0, i32 1, i32 0, i1 1) arg0( nocapture )
+  tail call void @f9 [air Atomic(Atomic { space: Global, op: Store, sign: None, ty: NumTy { elem: I32, lanes: 1 }, order: Relaxed, failure: None, scope: Device, volatile: true, fetch: false, flags: Some(MemFlags { device: false, threadgroup: false, texture: false, threadgroup_imageblock: false, object_data: false }) })](%i17, %i18, i32 0, i32 2, i32 0, i1 1) arg0( nocapture )
+  br bb4
+bb4:
+  ret void
+}
+
+declare %t8 @f1 "air.convert.f.f32.u.i32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t9 @f2 "air.wg.barrier" convergent
+
+declare %t11 @f3 "air.atomic.local.store.i32" %a0( nocapture )
+
+declare %t12 @f4 "air.atomic.global.xor.u.i32" %a0( nocapture )
+
+declare %t12 @f5 "air.atomic.global.sub.s.i32" %a0( nocapture )
+
+declare %t13 @f6 "air.atomic.global.sub.f32" %a0( nocapture )
+
+declare %t14 @f7 "air.atomic.local.sub.u.i32" %a0( nocapture )
+
+declare %t15 @f8 "air.atomic.local.load.i32" %a0( nocapture )
+
+declare %t16 @f9 "air.atomic.global.store.i32" %a0( nocapture )
+!md0 = !"SDK Version"
+!md1 = !"wchar_size"
+!md2 = !"frame-pointer"
+!md3 = !"air.max_device_buffers"
+!md4 = !"air.max_constant_buffers"
+!md5 = !"air.max_threadgroup_buffers"
+!md6 = !"air.max_textures"
+!md7 = !"air.max_read_write_textures"
+!md8 = !"air.max_samplers"
+!md9 = !"air.buffer"
+!md10 = !"air.location_index"
+!md11 = !"air.read_write"
+!md12 = !"air.address_space"
+!md13 = !"air.struct_type_info"
+!md14 = !"uint"
+!md15 = !"__s"
+!md16 = !"air.arg_type_size"
+!md17 = !"air.arg_type_align_size"
+!md18 = !"air.arg_type_name"
+!md19 = !"metal::_atomic"
+!md20 = !"air.arg_name"
+!md21 = !"unsigned_words"
+!md22 = !"int"
+!md23 = !"signed_total"
+!md24 = !"float"
+!md25 = !"float_total"
+!md26 = !"air.thread_position_in_threadgroup"
+!md27 = !"tid"
+!md28 = !"air.compile.denorms_disable"
+!md29 = !"air.compile.fast_math_enable"
+!md30 = !"air.compile.framebuffer_fetch_enable"
+!md31 = !"Apple metal version 32023.921 (metalfe-32023.921.6)"
+!md32 = !"Metal"
+!md33 = i32 2
+!md34 = %t18 c15
+!md35 = i32 1
+!md36 = i32 4
+!md37 = i32 7
+!md38 = i32 31
+!md39 = i32 128
+!md40 = i32 8
+!md41 = i32 16
+!md42 = ptr addrspace(0) @f0
+!md43 = i32 0
+!md44 = i32 3
+!md45 = i32 9
+!md46 = !{!md33, !md0, !md34}
+!md47 = !{!md35, !md1, !md36}
+!md48 = !{!md37, !md2, !md33}
+!md49 = !{!md37, !md3, !md38}
+!md50 = !{!md37, !md4, !md38}
+!md51 = !{!md37, !md5, !md38}
+!md52 = !{!md37, !md6, !md39}
+!md53 = !{!md37, !md7, !md40}
+!md54 = !{!md37, !md8, !md41}
+!md55 = !{}
+!md56 = !{!md43, !md36, !md43, !md14, !md15}
+!md57 = !{!md43, !md9, !md10, !md43, !md35, !md11, !md12, !md35, !md13, !md56, !md16, !md36, !md17, !md36, !md18, !md19, !md20, !md21}
+!md58 = !{!md43, !md36, !md43, !md22, !md15}
+!md59 = !{!md35, !md9, !md10, !md35, !md35, !md11, !md12, !md35, !md13, !md58, !md16, !md36, !md17, !md36, !md18, !md19, !md20, !md23}
+!md60 = !{!md43, !md36, !md43, !md24, !md15}
+!md61 = !{!md33, !md9, !md10, !md33, !md35, !md11, !md12, !md35, !md13, !md60, !md16, !md36, !md17, !md36, !md18, !md19, !md20, !md25}
+!md62 = !{!md44, !md26, !md18, !md14, !md20, !md27}
+!md63 = !{!md57, !md59, !md61, !md62}
+!md64 = !{!md42, !md55, !md63}
+!md65 = !{!md28}
+!md66 = !{!md29}
+!md67 = !{!md30}
+!md68 = !{!md31}
+!md69 = !{!md33, !md45, !md43}
+!md70 = !{!md32, !md36, !md43, !md43}
+!"llvm.module.flags" = !{!md46, !md47, !md48, !md49, !md50, !md51, !md52, !md53, !md54}
+!"air.kernel" = !{!md64}
+!"air.compile_options" = !{!md65, !md66, !md67}
+!"llvm.ident" = !{!md68}
+!"air.version" = !{!md69}
+!"air.language_version" = !{!md70}

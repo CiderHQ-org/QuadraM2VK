@@ -1,0 +1,123 @@
+target triple = "air64_v28-apple-macosx26.0.0"
+source_filename = "-"
+; datalayout DataLayout { endian: Little, pointers: {0: PointerSpec { size_bits: 64, abi_bits: 64, pref_bits: 64, index_bits: 64 }}, ints: {1: AlignSpec { abi_bits: 8, pref_bits: 8 }, 8: AlignSpec { abi_bits: 8, pref_bits: 8 }, 16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }}, floats: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }}, vectors: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 24: AlignSpec { abi_bits: 32, pref_bits: 32 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 48: AlignSpec { abi_bits: 64, pref_bits: 64 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 96: AlignSpec { abi_bits: 128, pref_bits: 128 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }, 192: AlignSpec { abi_bits: 256, pref_bits: 256 }, 256: AlignSpec { abi_bits: 256, pref_bits: 256 }, 512: AlignSpec { abi_bits: 512, pref_bits: 512 }, 1024: AlignSpec { abi_bits: 1024, pref_bits: 1024 }}, aggregate: AlignSpec { abi_bits: 0, pref_bits: 64 }, native_ints: [8, 16, 32], stack_align_bits: None, alloca_space: 0, program_space: 0, globals_space: 0, mangling: None, fn_ptr_align: None, non_integral: [] }
+%t4 = type void (ptr addrspace(1), ptr addrspace(1), ptr addrspace(1), i32)
+%t6 = type half (half, half, half)
+%t8 = type float (float, float, float)
+%t10 = type [2 x i32]
+c6 = %t10 [27, 0]
+
+define %t4 @f0 "fmx_fma_fast" memory(ModRef, NoModRef, NoModRef) "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="0" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a0( Ref nocapture "air-buffer-no-alias"="" ) %a1( Ref nocapture "air-buffer-no-alias"="" ) %a2( Mod nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = zext %a3 to i64
+  %i1 = getelementptr inbounds <4 x i32>, %a0, %i0
+  %i2 = bitcast %i1 to ptr addrspace(1)
+  %i3 = load <4 x float>, %i2, align 16
+  %i4 = getelementptr inbounds <4 x i16>, %a1, %i0
+  %i5 = bitcast %i4 to ptr addrspace(1)
+  %i6 = load <4 x half>, %i5, align 8
+  %i7 = extractelement %i6, i64 0
+  %i8 = extractelement %i6, i64 1
+  %i9 = extractelement %i6, i64 2
+  %i10 = tail call reassoc nnan ninf nsz arcp contract afn half @f1 [air Math(Math { f: Fma, precision: Precise, ty: NumTy { elem: F16, lanes: 1 } })](%i7, %i8, %i9)
+  %i11 = fmul reassoc nnan ninf nsz arcp contract afn half %i7, %i8
+  %i12 = fadd reassoc nnan ninf nsz arcp contract afn half %i11, %i9
+  %i13 = extractelement %i3, i64 0
+  %i14 = extractelement %i3, i64 1
+  %i15 = extractelement %i3, i64 2
+  %i16 = tail call reassoc nnan ninf nsz arcp contract afn float @f2 [air Math(Math { f: Fma, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i13, %i14, %i15)
+  %i17 = insertelement <4 x float> undef, %i16, i64 0
+  %i18 = fmul reassoc nnan ninf nsz arcp contract afn float %i13, %i14
+  %i19 = fadd reassoc nnan ninf nsz arcp contract afn float %i18, %i15
+  %i20 = insertelement %i17, %i19, i64 1
+  %i21 = bitcast %i20 to <4 x i32>
+  %i22 = bitcast %i10 to i16
+  %i23 = zext %i22 to i32
+  %i24 = bitcast %i12 to i16
+  %i25 = zext %i24 to i32
+  %i26 = shl nuw i32 %i25, i32 16
+  %i27 = or i32 %i26, %i23
+  %i28 = insertelement %i21, %i27, i64 2
+  %i29 = extractelement %i3, i64 3
+  %i30 = fmul reassoc nnan ninf nsz arcp contract afn float %i13, %i29
+  %i31 = bitcast %i30 to i32
+  %i32 = insertelement %i28, %i31, i64 3
+  %i33 = getelementptr inbounds <4 x i32>, %a2, %i0
+  store %i32, %i33, align 16
+  ret void
+}
+
+declare %t6 @f1 "air.fma.f16" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t8 @f2 "air.fma.f32" memory(NoModRef, NoModRef, NoModRef)
+!md0 = !"SDK Version"
+!md1 = !"wchar_size"
+!md2 = !"frame-pointer"
+!md3 = !"air.max_device_buffers"
+!md4 = !"air.max_constant_buffers"
+!md5 = !"air.max_threadgroup_buffers"
+!md6 = !"air.max_textures"
+!md7 = !"air.max_read_write_textures"
+!md8 = !"air.max_samplers"
+!md9 = !"air.buffer"
+!md10 = !"air.location_index"
+!md11 = !"air.read"
+!md12 = !"air.address_space"
+!md13 = !"air.arg_type_size"
+!md14 = !"air.arg_type_align_size"
+!md15 = !"air.arg_type_name"
+!md16 = !"uint4"
+!md17 = !"air.arg_name"
+!md18 = !"fin"
+!md19 = !"ushort4"
+!md20 = !"hin"
+!md21 = !"air.read_write"
+!md22 = !"out"
+!md23 = !"air.thread_position_in_grid"
+!md24 = !"uint"
+!md25 = !"i"
+!md26 = !"air.compile.denorms_disable"
+!md27 = !"air.compile.fast_math_enable"
+!md28 = !"air.compile.framebuffer_fetch_enable"
+!md29 = !"Apple metal version 32023.921 (metalfe-32023.921.6)"
+!md30 = !"Metal"
+!md31 = i32 2
+!md32 = %t10 c6
+!md33 = i32 1
+!md34 = i32 4
+!md35 = i32 7
+!md36 = i32 31
+!md37 = i32 128
+!md38 = i32 8
+!md39 = i32 16
+!md40 = ptr addrspace(0) @f0
+!md41 = i32 0
+!md42 = i32 3
+!md43 = !{!md31, !md0, !md32}
+!md44 = !{!md33, !md1, !md34}
+!md45 = !{!md35, !md2, !md31}
+!md46 = !{!md35, !md3, !md36}
+!md47 = !{!md35, !md4, !md36}
+!md48 = !{!md35, !md5, !md36}
+!md49 = !{!md35, !md6, !md37}
+!md50 = !{!md35, !md7, !md38}
+!md51 = !{!md35, !md8, !md39}
+!md52 = !{}
+!md53 = !{!md41, !md9, !md10, !md41, !md33, !md11, !md12, !md33, !md13, !md39, !md14, !md39, !md15, !md16, !md17, !md18}
+!md54 = !{!md33, !md9, !md10, !md33, !md33, !md11, !md12, !md33, !md13, !md38, !md14, !md38, !md15, !md19, !md17, !md20}
+!md55 = !{!md31, !md9, !md10, !md31, !md33, !md21, !md12, !md33, !md13, !md39, !md14, !md39, !md15, !md16, !md17, !md22}
+!md56 = !{!md42, !md23, !md15, !md24, !md17, !md25}
+!md57 = !{!md53, !md54, !md55, !md56}
+!md58 = !{!md40, !md52, !md57}
+!md59 = !{!md26}
+!md60 = !{!md27}
+!md61 = !{!md28}
+!md62 = !{!md29}
+!md63 = !{!md31, !md38, !md41}
+!md64 = !{!md30, !md34, !md41, !md41}
+!"llvm.module.flags" = !{!md43, !md44, !md45, !md46, !md47, !md48, !md49, !md50, !md51}
+!"air.kernel" = !{!md58}
+!"air.compile_options" = !{!md59, !md60, !md61}
+!"llvm.ident" = !{!md62}
+!"air.version" = !{!md63}
+!"air.language_version" = !{!md64}

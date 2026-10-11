@@ -1,0 +1,239 @@
+target triple = "air64_v28-apple-macosx26.0.0"
+source_filename = "-"
+; datalayout DataLayout { endian: Little, pointers: {0: PointerSpec { size_bits: 64, abi_bits: 64, pref_bits: 64, index_bits: 64 }}, ints: {1: AlignSpec { abi_bits: 8, pref_bits: 8 }, 8: AlignSpec { abi_bits: 8, pref_bits: 8 }, 16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }}, floats: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }}, vectors: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 24: AlignSpec { abi_bits: 32, pref_bits: 32 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 48: AlignSpec { abi_bits: 64, pref_bits: 64 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 96: AlignSpec { abi_bits: 128, pref_bits: 128 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }, 192: AlignSpec { abi_bits: 256, pref_bits: 256 }, 256: AlignSpec { abi_bits: 256, pref_bits: 256 }, 512: AlignSpec { abi_bits: 512, pref_bits: 512 }, 1024: AlignSpec { abi_bits: 1024, pref_bits: 1024 }}, aggregate: AlignSpec { abi_bits: 0, pref_bits: 64 }, native_ints: [8, 16, 32], stack_align_bits: None, alloca_space: 0, program_space: 0, globals_space: 0, mangling: None, fn_ptr_align: None, non_integral: [] }
+%t3 = type <{ <4 x float> }>
+%t6 = type %t3 (i32, ptr addrspace(2))
+%t7 = type float (float, float, float)
+%t8 = type <4 x float> (<4 x float>, <4 x float>, ptr addrspace(2))
+%t9 = type <4 x float> (<4 x float>, <4 x float>, <4 x float>)
+%t10 = type <4 x float> (<4 x float>, ptr addrspace(2))
+%t12 = type <2 x float> (<2 x float>, <2 x float>, <2 x float>)
+%t14 = type void ()
+%t18 = type void (ptr addrspace(0), i8, i64, i1)
+%t20 = type [2 x i32]
+%t21 = type [6 x <2 x float>]
+%t22 = type { <4 x float>, <4 x float>, <4 x float>, <4 x float> } ; "struct.ZwsBox"
+c11 = %t20 [27, 0]
+c35 = <2 x i32> [0, 1]
+c36 = <2 x i32> [2, 3]
+c37 = <2 x float> [0x3F000000, 0x3F000000]
+c42 = <4 x float> [poison, poison, 0x0, 0x3F800000]
+
+define %t6 @f0 "zws_box" memory(NoModRef, NoModRef, NoModRef) "frame-pointer"="all" "min-legal-vector-width"="64" "no-builtins"="" "no-trapping-math"="true" "stack-protector-buffer-size"="8" %a1( align 16 dereferenceable(64) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = alloca %t21, i32 1, align 8
+  %i1 = bitcast %i0 to ptr addrspace(0)
+  call void @f7 [llvm Memset { dst: Thread, len: I64, volatile: false }](%i1, i8 0, i64 48, i1 0) arg0( align 8 dereferenceable(48) )
+  %i3 = getelementptr inbounds %t21, %i0, i64 0, i64 1, i64 0
+  store float 0x3F800000, %i3, align 8
+  %i5 = getelementptr inbounds %t21, %i0, i64 0, i64 2, i64 1
+  store float 0x3F800000, %i5, align 4
+  %i7 = getelementptr inbounds %t21, %i0, i64 0, i64 3, i64 0
+  store float 0x3F800000, %i7, align 8
+  %i9 = getelementptr inbounds %t21, %i0, i64 0, i64 4, i64 0
+  store float 0x3F800000, %i9, align 8
+  %i11 = getelementptr inbounds %t21, %i0, i64 0, i64 4, i64 1
+  store float 0x3F800000, %i11, align 4
+  %i13 = getelementptr inbounds %t21, %i0, i64 0, i64 5, i64 1
+  store float 0x3F800000, %i13, align 4
+  %i15 = zext %a0 to i64
+  %i16 = getelementptr inbounds %t21, %i0, i64 0, %i15
+  %i17 = load <2 x float>, %i16, align 8
+  %i18 = getelementptr inbounds %t22, %a1, i64 0, i32 0
+  %i19 = load <4 x float>, %i18, align 16
+  %i20 = shufflevector <2 x float> %i19, <4 x float> poison, <0, 1>
+  %i21 = shufflevector <2 x float> %i19, <4 x float> poison, <2, 3>
+  %i22 = fcmp ogt %i17, <2 x float> c37
+  %i23 = select <2 x float> %i22, %i21, %i20
+  %i24 = getelementptr inbounds %t22, %a1, i64 0, i32 3
+  %i25 = load <4 x float>, %i24, align 16
+  %i26 = extractelement %i23, i64 0
+  %i27 = extractelement %i25, i64 1
+  %i28 = fdiv float %i26, %i27
+  %i29 = tail call float @f1 [llvm Float { op: FMulAdd, ty: NumTy { elem: F32, lanes: 1 } }](%i28, float 0x40000000, float 0xBF800000)
+  %i30 = extractelement %i23, i64 1
+  %i31 = extractelement %i25, i64 2
+  %i32 = fneg float %i30
+  %i33 = fdiv float %i32, %i31
+  %i34 = tail call float @f1 [llvm Float { op: FMulAdd, ty: NumTy { elem: F32, lanes: 1 } }](%i33, float 0x40000000, float 0x3F800000)
+  %i35 = insertelement <4 x float> c42, %i29, i64 0
+  %i36 = insertelement %i35, %i34, i64 1
+  %i37 = insertvalue %t3 undef %i36, 0
+  ret %i37
+}
+
+declare %t7 @f1 "llvm.fmuladd.f32" memory(NoModRef, NoModRef, NoModRef)
+
+define %t8 @f2 "zws_over" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-trapping-math"="true" "stack-protector-buffer-size"="8" %a2( align 16 dereferenceable(64) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = shufflevector <2 x float> %a0, <4 x float> poison, <0, 1>
+  %i1 = getelementptr inbounds %t22, %a2, i64 0, i32 3
+  %i2 = load <4 x float>, %i1, align 16
+  %i3 = extractelement %i2, i64 0
+  %i4 = getelementptr inbounds %t22, %a2, i64 0, i32 0
+  %i5 = load <4 x float>, %i4, align 16
+  %i6 = shufflevector <2 x float> %i5, <4 x float> poison, <0, 1>
+  %i7 = shufflevector <2 x float> %i2, <4 x float> undef, <0, 0>
+  %i8 = fadd <2 x float> %i7, %i6
+  %i9 = shufflevector <2 x float> %i5, <4 x float> poison, <2, 3>
+  %i10 = fsub <2 x float> %i9, %i7
+  %i11 = tail call <2 x float> @f5 [air Math(Math { f: Clamp, precision: Precise, ty: NumTy { elem: F32, lanes: 2 } })](%i0, %i8, %i10)
+  %i12 = fsub <2 x float> %i0, %i11
+  %i13 = extractelement %i12, i64 0
+  %i14 = extractelement %i12, i64 1
+  %i15 = fmul float %i14, %i14
+  %i16 = tail call float @f1 [llvm Float { op: FMulAdd, ty: NumTy { elem: F32, lanes: 1 } }](%i13, %i13, %i15)
+  %i17 = fmul float %i3, %i3
+  %i18 = fcmp ogt %i16, %i17
+  br %i18, bb1, bb2
+bb1:
+  tail call void @f6 [air Fragment(Discard)]()
+  br bb2
+bb2:
+  %i22 = getelementptr inbounds %t22, %a2, i64 0, i32 1
+  %i23 = load <4 x float>, %i22, align 16
+  %i24 = getelementptr inbounds %t22, %a2, i64 0, i32 2
+  %i25 = load <4 x float>, %i24, align 16
+  %i26 = tail call <4 x float> @f3 [llvm Float { op: FMulAdd, ty: NumTy { elem: F32, lanes: 4 } }](%a1, %i25, %i23)
+  ret %i26
+}
+
+declare %t9 @f3 "llvm.fmuladd.v4f32" memory(NoModRef, NoModRef, NoModRef)
+
+define %t10 @f4 "zws_plain" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-trapping-math"="true" "stack-protector-buffer-size"="8" %a1( align 16 dereferenceable(64) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = shufflevector <2 x float> %a0, <4 x float> poison, <0, 1>
+  %i1 = getelementptr inbounds %t22, %a1, i64 0, i32 3
+  %i2 = load <4 x float>, %i1, align 16
+  %i3 = extractelement %i2, i64 0
+  %i4 = getelementptr inbounds %t22, %a1, i64 0, i32 0
+  %i5 = load <4 x float>, %i4, align 16
+  %i6 = shufflevector <2 x float> %i5, <4 x float> poison, <0, 1>
+  %i7 = shufflevector <2 x float> %i2, <4 x float> undef, <0, 0>
+  %i8 = fadd <2 x float> %i7, %i6
+  %i9 = shufflevector <2 x float> %i5, <4 x float> poison, <2, 3>
+  %i10 = fsub <2 x float> %i9, %i7
+  %i11 = tail call <2 x float> @f5 [air Math(Math { f: Clamp, precision: Precise, ty: NumTy { elem: F32, lanes: 2 } })](%i0, %i8, %i10)
+  %i12 = fsub <2 x float> %i0, %i11
+  %i13 = extractelement %i12, i64 0
+  %i14 = extractelement %i12, i64 1
+  %i15 = fmul float %i14, %i14
+  %i16 = tail call float @f1 [llvm Float { op: FMulAdd, ty: NumTy { elem: F32, lanes: 1 } }](%i13, %i13, %i15)
+  %i17 = fmul float %i3, %i3
+  %i18 = fcmp ogt %i16, %i17
+  br %i18, bb1, bb2
+bb1:
+  tail call void @f6 [air Fragment(Discard)]()
+  br bb2
+bb2:
+  %i22 = getelementptr inbounds %t22, %a1, i64 0, i32 1
+  %i23 = load <4 x float>, %i22, align 16
+  ret %i23
+}
+
+declare %t12 @f5 "air.clamp.v2f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t14 @f6 "air.discard_fragment"
+
+declare %t18 @f7 "llvm.memset.p0.i64" memory(Mod, NoModRef, NoModRef) %a0( Mod nocapture )
+!md0 = !"SDK Version"
+!md1 = !"wchar_size"
+!md2 = !"frame-pointer"
+!md3 = !"air.max_device_buffers"
+!md4 = !"air.max_constant_buffers"
+!md5 = !"air.max_threadgroup_buffers"
+!md6 = !"air.max_textures"
+!md7 = !"air.max_read_write_textures"
+!md8 = !"air.max_samplers"
+!md9 = !"air.position"
+!md10 = !"air.arg_type_name"
+!md11 = !"float4"
+!md12 = !"air.arg_name"
+!md13 = !"position"
+!md14 = !"air.vertex_id"
+!md15 = !"uint"
+!md16 = !"vid"
+!md17 = !"air.buffer"
+!md18 = !"air.buffer_size"
+!md19 = !"air.location_index"
+!md20 = !"air.read"
+!md21 = !"air.address_space"
+!md22 = !"air.struct_type_info"
+!md23 = !"rect"
+!md24 = !"color"
+!md25 = !"keep"
+!md26 = !"shape"
+!md27 = !"air.arg_type_size"
+!md28 = !"air.arg_type_align_size"
+!md29 = !"ZwsBox"
+!md30 = !"box"
+!md31 = !"air.render_target"
+!md32 = !"air.center"
+!md33 = !"air.no_perspective"
+!md34 = !"dst"
+!md35 = !"air.compile.denorms_disable"
+!md36 = !"air.compile.fast_math_disable"
+!md37 = !"air.compile.framebuffer_fetch_enable"
+!md38 = !"Apple metal version 32023.921 (metalfe-32023.921.6)"
+!md39 = !"Metal"
+!md40 = !"omnipotent char"
+!md41 = !"Simple C++ TBAA"
+!md42 = !"air-alias-scope-arg(1)"
+!md43 = i32 2
+!md44 = %t20 c11
+!md45 = i32 1
+!md46 = i32 4
+!md47 = i32 7
+!md48 = i32 31
+!md49 = i32 128
+!md50 = i32 8
+!md51 = i32 16
+!md52 = ptr addrspace(0) @f0
+!md53 = i32 0
+!md54 = i32 64
+!md55 = i32 32
+!md56 = i32 48
+!md57 = ptr addrspace(0) @f2
+!md58 = ptr addrspace(0) @f4
+!md59 = i64 0
+!md60 = !{!md43, !md0, !md44}
+!md61 = !{!md45, !md1, !md46}
+!md62 = !{!md47, !md2, !md43}
+!md63 = !{!md47, !md3, !md48}
+!md64 = !{!md47, !md4, !md48}
+!md65 = !{!md47, !md5, !md48}
+!md66 = !{!md47, !md6, !md49}
+!md67 = !{!md47, !md7, !md50}
+!md68 = !{!md47, !md8, !md51}
+!md69 = !{!md9, !md10, !md11, !md12, !md13}
+!md70 = !{!md69}
+!md71 = !{!md53, !md14, !md10, !md15, !md12, !md16}
+!md72 = !{!md53, !md51, !md53, !md11, !md23, !md51, !md51, !md53, !md11, !md24, !md55, !md51, !md53, !md11, !md25, !md56, !md51, !md53, !md11, !md26}
+!md73 = !{!md45, !md17, !md18, !md54, !md19, !md53, !md45, !md20, !md21, !md43, !md22, !md72, !md27, !md54, !md28, !md51, !md10, !md29, !md12, !md30}
+!md74 = !{!md71, !md73}
+!md75 = !{!md52, !md70, !md74}
+!md76 = !{!md31, !md53, !md53, !md10, !md11}
+!md77 = !{!md76}
+!md78 = !{!md53, !md9, !md32, !md33, !md10, !md11, !md12, !md13}
+!md79 = !{!md45, !md31, !md53, !md10, !md11, !md12, !md34}
+!md80 = !{!md43, !md17, !md18, !md54, !md19, !md53, !md45, !md20, !md21, !md43, !md22, !md72, !md27, !md54, !md28, !md51, !md10, !md29, !md12, !md30}
+!md81 = !{!md78, !md79, !md80}
+!md82 = !{!md57, !md77, !md81}
+!md83 = !{!md78, !md73}
+!md84 = !{!md58, !md77, !md83}
+!md85 = !{!md35}
+!md86 = !{!md36}
+!md87 = !{!md37}
+!md88 = !{!md38}
+!md89 = !{!md43, !md50, !md53}
+!md90 = !{!md39, !md46, !md53, !md53}
+!md91 = !{!md41}
+!md92 = !{!md40, !md91, !md59}
+!md93 = !{!md92, !md92, !md59}
+!"llvm.module.flags" = !{!md60, !md61, !md62, !md63, !md64, !md65, !md66, !md67, !md68}
+!"air.vertex" = !{!md75}
+!"air.fragment" = !{!md82, !md84}
+!"air.compile_options" = !{!md85, !md86, !md87}
+!"llvm.ident" = !{!md88}
+!"air.version" = !{!md89}
+!"air.language_version" = !{!md90}

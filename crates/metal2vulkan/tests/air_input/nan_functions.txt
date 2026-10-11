@@ -1,0 +1,314 @@
+target triple = "air64_v28-apple-macosx26.0.0"
+source_filename = "-"
+; datalayout DataLayout { endian: Little, pointers: {0: PointerSpec { size_bits: 64, abi_bits: 64, pref_bits: 64, index_bits: 64 }}, ints: {1: AlignSpec { abi_bits: 8, pref_bits: 8 }, 8: AlignSpec { abi_bits: 8, pref_bits: 8 }, 16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }}, floats: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }}, vectors: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 24: AlignSpec { abi_bits: 32, pref_bits: 32 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 48: AlignSpec { abi_bits: 64, pref_bits: 64 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 96: AlignSpec { abi_bits: 128, pref_bits: 128 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }, 192: AlignSpec { abi_bits: 256, pref_bits: 256 }, 256: AlignSpec { abi_bits: 256, pref_bits: 256 }, 512: AlignSpec { abi_bits: 512, pref_bits: 512 }, 1024: AlignSpec { abi_bits: 1024, pref_bits: 1024 }}, aggregate: AlignSpec { abi_bits: 0, pref_bits: 64 }, native_ints: [8, 16, 32], stack_align_bits: None, alloca_space: 0, program_space: 0, globals_space: 0, mangling: None, fn_ptr_align: None, non_integral: [] }
+%t4 = type void (ptr addrspace(1), ptr addrspace(1), i32)
+%t6 = type float (float)
+%t7 = type float (float, float)
+%t9 = type float (<2 x float>, <2 x float>)
+%t10 = type float (float, float, float)
+%t12 = type float (i1)
+%t13 = type float (float, i32)
+%t15 = type [2 x i32]
+c39 = %t15 [27, 0]
+c59 = <2 x i32> [0, 1]
+c62 = <2 x float> [0x1E800000, 0x1E800000]
+c65 = <2 x float> [0x5F800000, 0x5F800000]
+c67 = <2 x i32> [1, 0]
+c72 = <4 x i32> [0, 1, 4, 5]
+
+define %t4 @f0 "nan_functions" memory(ModRef, NoModRef, NoModRef) "frame-pointer"="all" "min-legal-vector-width"="64" "no-builtins"="" "no-trapping-math"="true" "stack-protector-buffer-size"="8" %a0( Ref nocapture "air-buffer-no-alias"="" ) %a1( Mod nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = zext %a2 to i64
+  %i1 = getelementptr inbounds <4 x i32>, %a0, %i0
+  %i2 = bitcast %i1 to ptr addrspace(1)
+  %i3 = load <4 x float>, %i2, align 16
+  %i4 = extractelement %i3, i64 0
+  %i5 = extractelement %i3, i64 1
+  %i6 = tail call float @f1 [air Math(Math { f: Sin, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i4)
+  %i7 = insertelement <4 x float> undef, %i6, i64 0
+  %i8 = tail call float @f2 [air Math(Math { f: Cos, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i4)
+  %i9 = insertelement %i7, %i8, i64 1
+  %i10 = tail call float @f3 [air Math(Math { f: Tan, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i4)
+  %i11 = insertelement %i9, %i10, i64 2
+  %i12 = tail call float @f4 [air Math(Math { f: Asin, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i4)
+  %i13 = insertelement %i11, %i12, i64 3
+  %i14 = mul i32 %a2, i32 9
+  %i15 = zext %i14 to i64
+  %i16 = getelementptr inbounds <4 x i32>, %a1, %i15
+  %i17 = bitcast %i16 to ptr addrspace(1)
+  store %i13, %i17, align 16
+  %i19 = tail call float @f5 [air Math(Math { f: Acos, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i4)
+  %i20 = insertelement <4 x float> undef, %i19, i64 0
+  %i21 = tail call float @f6 [air Math(Math { f: Atan, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i4)
+  %i22 = insertelement %i20, %i21, i64 1
+  %i23 = tail call float @f7 [air Math(Math { f: Atan2, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i4, %i5)
+  %i24 = insertelement %i22, %i23, i64 2
+  %i25 = tail call float @f8 [air Math(Math { f: Sinh, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i4)
+  %i26 = insertelement %i24, %i25, i64 3
+  %i27 = add i32 %i14, i32 1
+  %i28 = zext %i27 to i64
+  %i29 = getelementptr inbounds <4 x i32>, %a1, %i28
+  %i30 = bitcast %i29 to ptr addrspace(1)
+  store %i26, %i30, align 16
+  %i32 = tail call float @f9 [air Math(Math { f: Cosh, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i4)
+  %i33 = insertelement <4 x float> undef, %i32, i64 0
+  %i34 = tail call float @f10 [air Math(Math { f: Tanh, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i4)
+  %i35 = insertelement %i33, %i34, i64 1
+  %i36 = tail call float @f11 [air Math(Math { f: Asinh, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i4)
+  %i37 = insertelement %i35, %i36, i64 2
+  %i38 = tail call float @f12 [air Math(Math { f: Acosh, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i4)
+  %i39 = insertelement %i37, %i38, i64 3
+  %i40 = add i32 %i14, i32 2
+  %i41 = zext %i40 to i64
+  %i42 = getelementptr inbounds <4 x i32>, %a1, %i41
+  %i43 = bitcast %i42 to ptr addrspace(1)
+  store %i39, %i43, align 16
+  %i45 = tail call float @f13 [air Math(Math { f: Atanh, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i4)
+  %i46 = insertelement <4 x float> undef, %i45, i64 0
+  %i47 = tail call float @f14 [air Math(Math { f: Exp, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i4)
+  %i48 = insertelement %i46, %i47, i64 1
+  %i49 = tail call float @f15 [air Math(Math { f: Exp2, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i4)
+  %i50 = insertelement %i48, %i49, i64 2
+  %i51 = tail call float @f16 [air Math(Math { f: Exp10, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i4)
+  %i52 = insertelement %i50, %i51, i64 3
+  %i53 = add i32 %i14, i32 3
+  %i54 = zext %i53 to i64
+  %i55 = getelementptr inbounds <4 x i32>, %a1, %i54
+  %i56 = bitcast %i55 to ptr addrspace(1)
+  store %i52, %i56, align 16
+  %i58 = tail call float @f17 [air Math(Math { f: Log, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i4)
+  %i59 = insertelement <4 x float> undef, %i58, i64 0
+  %i60 = tail call float @f18 [air Math(Math { f: Log2, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i4)
+  %i61 = insertelement %i59, %i60, i64 1
+  %i62 = tail call float @f19 [air Math(Math { f: Log10, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i4)
+  %i63 = insertelement %i61, %i62, i64 2
+  %i64 = tail call float @f20 [air Math(Math { f: Pow, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i4, %i5)
+  %i65 = insertelement %i63, %i64, i64 3
+  %i66 = add i32 %i14, i32 4
+  %i67 = zext %i66 to i64
+  %i68 = getelementptr inbounds <4 x i32>, %a1, %i67
+  %i69 = bitcast %i68 to ptr addrspace(1)
+  store %i65, %i69, align 16
+  %i71 = tail call float @f21 [air Math(Math { f: Powr, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i4, %i5)
+  %i72 = insertelement <4 x float> undef, %i71, i64 0
+  %i73 = tail call float @f22 [air Math(Math { f: Rsqrt, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i4)
+  %i74 = insertelement %i72, %i73, i64 1
+  %i75 = tail call float @f23 [air Math(Math { f: Floor, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i4)
+  %i76 = insertelement %i74, %i75, i64 2
+  %i77 = tail call float @f24 [air Math(Math { f: Ceil, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i4)
+  %i78 = insertelement %i76, %i77, i64 3
+  %i79 = add i32 %i14, i32 5
+  %i80 = zext %i79 to i64
+  %i81 = getelementptr inbounds <4 x i32>, %a1, %i80
+  %i82 = bitcast %i81 to ptr addrspace(1)
+  store %i78, %i82, align 16
+  %i84 = tail call float @f25 [air Math(Math { f: Round, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i4)
+  %i85 = insertelement <4 x float> undef, %i84, i64 0
+  %i86 = tail call float @f26 [air Math(Math { f: Trunc, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i4)
+  %i87 = insertelement %i85, %i86, i64 1
+  %i88 = tail call float @f27 [air Math(Math { f: Rint, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i4)
+  %i89 = insertelement %i87, %i88, i64 2
+  %i90 = tail call float @f28 [air Math(Math { f: Fract, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i4)
+  %i91 = insertelement %i89, %i90, i64 3
+  %i92 = add i32 %i14, i32 6
+  %i93 = zext %i92 to i64
+  %i94 = getelementptr inbounds <4 x i32>, %a1, %i93
+  %i95 = bitcast %i94 to ptr addrspace(1)
+  store %i91, %i95, align 16
+  %i97 = shufflevector <2 x float> %i3, <4 x float> poison, <0, 1>
+  %i98 = tail call float @f29 [air Math(Math { f: Dot, precision: Precise, ty: NumTy { elem: F32, lanes: 2 } })](%i97, %i97)
+  %i99 = bitcast %i98 to i32
+  %i100 = and i32 %i99, i32 2147483647
+  %i101 = icmp eq %i100, i32 2139095040
+  br %i101, bb1, bb2
+bb1:
+  %i103 = fmul <2 x float> %i97, <2 x float> c62
+  %i104 = tail call float @f29 [air Math(Math { f: Dot, precision: Precise, ty: NumTy { elem: F32, lanes: 2 } })](%i103, %i103)
+  %i105 = tail call float @f30 [air Math(Math { f: Sqrt, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i104)
+  %i106 = fmul float %i105, float 0x60800000
+  br bb5
+bb2:
+  %i108 = fcmp olt %i98, float 0xC000000
+  br %i108, bb3, bb4
+bb3:
+  %i110 = fmul <2 x float> %i97, <2 x float> c65
+  %i111 = tail call float @f29 [air Math(Math { f: Dot, precision: Precise, ty: NumTy { elem: F32, lanes: 2 } })](%i110, %i110)
+  %i112 = tail call float @f30 [air Math(Math { f: Sqrt, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i111)
+  %i113 = fmul float %i112, float 0x1F800000
+  br bb5
+bb4:
+  %i115 = tail call float @f30 [air Math(Math { f: Sqrt, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i98)
+  br bb5
+bb5:
+  %i117 = phi float [%i106, bb1], [%i113, bb3], [%i115, bb4]
+  %i118 = shufflevector <2 x float> %i3, <4 x float> poison, <1, 0>
+  %i119 = tail call float @f29 [air Math(Math { f: Dot, precision: Precise, ty: NumTy { elem: F32, lanes: 2 } })](%i97, %i118)
+  %i120 = insertelement <4 x float> undef, %i119, i64 0
+  %i121 = extractelement %i3, i64 2
+  %i122 = insertelement %i120, %i117, i64 1
+  %i123 = tail call float @f31 [air Math(Math { f: Mix, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i4, %i5, %i121)
+  %i124 = insertelement %i122, %i123, i64 2
+  %i125 = fcmp oge %i5, %i4
+  %i126 = tail call float @f32 [air Convert(Convert { dst: NumTy { elem: F32, lanes: 1 }, dst_kind: Float, src: NumTy { elem: I1, lanes: 1 }, src_kind: Unsigned, src_fp8: None })](%i125)
+  %i127 = insertelement %i124, %i126, i64 3
+  %i128 = add i32 %i14, i32 7
+  %i129 = zext %i128 to i64
+  %i130 = getelementptr inbounds <4 x i32>, %a1, %i129
+  %i131 = bitcast %i130 to ptr addrspace(1)
+  store %i127, %i131, align 16
+  %i133 = fsub float %i4, %i5
+  %i134 = fsub float %i121, %i5
+  %i135 = fdiv float %i133, %i134
+  %i136 = tail call float @f34 [air Math(Math { f: Clamp, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i135, float 0x0, float 0x3F800000)
+  %i137 = fmul float %i136, %i136
+  %i138 = tail call float @f33 [llvm Float { op: FMulAdd, ty: NumTy { elem: F32, lanes: 1 } }](%i136, float 0xC0000000, float 0x40400000)
+  %i139 = fmul float %i137, %i138
+  %i140 = insertelement <4 x float> undef, %i139, i64 0
+  %i141 = tail call float @f35 [air Math(Math { f: Ldexp, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i4, i32 2)
+  %i142 = insertelement %i140, %i141, i64 1
+  %i143 = bitcast %i142 to <4 x i32>
+  %i144 = load <4 x i32>, %i1, align 16
+  %i145 = shufflevector <4 x i32> %i143, %i144, <0, 1, 4, 5>
+  %i146 = add i32 %i14, i32 8
+  %i147 = zext %i146 to i64
+  %i148 = getelementptr inbounds <4 x i32>, %a1, %i147
+  store %i145, %i148, align 16
+  ret void
+}
+
+declare %t6 @f1 "air.sin.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f2 "air.cos.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f3 "air.tan.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f4 "air.asin.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f5 "air.acos.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f6 "air.atan.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t7 @f7 "air.atan2.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f8 "air.sinh.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f9 "air.cosh.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f10 "air.tanh.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f11 "air.asinh.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f12 "air.acosh.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f13 "air.atanh.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f14 "air.exp.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f15 "air.exp2.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f16 "air.exp10.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f17 "air.log.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f18 "air.log2.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f19 "air.log10.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t7 @f20 "air.pow.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t7 @f21 "air.powr.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f22 "air.rsqrt.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f23 "air.floor.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f24 "air.ceil.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f25 "air.round.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f26 "air.trunc.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f27 "air.rint.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f28 "air.fract.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t9 @f29 "air.dot.v2f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f30 "air.sqrt.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t10 @f31 "air.mix.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t12 @f32 "air.convert.f.f32.u.i1" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t10 @f33 "llvm.fmuladd.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t10 @f34 "air.clamp.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t13 @f35 "air.ldexp.f32" memory(NoModRef, NoModRef, NoModRef)
+!md0 = !"SDK Version"
+!md1 = !"wchar_size"
+!md2 = !"frame-pointer"
+!md3 = !"air.max_device_buffers"
+!md4 = !"air.max_constant_buffers"
+!md5 = !"air.max_threadgroup_buffers"
+!md6 = !"air.max_textures"
+!md7 = !"air.max_read_write_textures"
+!md8 = !"air.max_samplers"
+!md9 = !"air.buffer"
+!md10 = !"air.location_index"
+!md11 = !"air.read"
+!md12 = !"air.address_space"
+!md13 = !"air.arg_type_size"
+!md14 = !"air.arg_type_align_size"
+!md15 = !"air.arg_type_name"
+!md16 = !"uint4"
+!md17 = !"air.arg_name"
+!md18 = !"in"
+!md19 = !"air.read_write"
+!md20 = !"out"
+!md21 = !"air.thread_position_in_grid"
+!md22 = !"uint"
+!md23 = !"tid"
+!md24 = !"air.compile.denorms_disable"
+!md25 = !"air.compile.fast_math_disable"
+!md26 = !"air.compile.framebuffer_fetch_enable"
+!md27 = !"Apple metal version 32023.921 (metalfe-32023.921.6)"
+!md28 = !"Metal"
+!md29 = i32 2
+!md30 = %t15 c39
+!md31 = i32 1
+!md32 = i32 4
+!md33 = i32 7
+!md34 = i32 31
+!md35 = i32 128
+!md36 = i32 8
+!md37 = i32 16
+!md38 = ptr addrspace(0) @f0
+!md39 = i32 0
+!md40 = !{!md29, !md0, !md30}
+!md41 = !{!md31, !md1, !md32}
+!md42 = !{!md33, !md2, !md29}
+!md43 = !{!md33, !md3, !md34}
+!md44 = !{!md33, !md4, !md34}
+!md45 = !{!md33, !md5, !md34}
+!md46 = !{!md33, !md6, !md35}
+!md47 = !{!md33, !md7, !md36}
+!md48 = !{!md33, !md8, !md37}
+!md49 = !{}
+!md50 = !{!md39, !md9, !md10, !md39, !md31, !md11, !md12, !md31, !md13, !md37, !md14, !md37, !md15, !md16, !md17, !md18}
+!md51 = !{!md31, !md9, !md10, !md31, !md31, !md19, !md12, !md31, !md13, !md37, !md14, !md37, !md15, !md16, !md17, !md20}
+!md52 = !{!md29, !md21, !md15, !md22, !md17, !md23}
+!md53 = !{!md50, !md51, !md52}
+!md54 = !{!md38, !md49, !md53}
+!md55 = !{!md24}
+!md56 = !{!md25}
+!md57 = !{!md26}
+!md58 = !{!md27}
+!md59 = !{!md29, !md36, !md39}
+!md60 = !{!md28, !md32, !md39, !md39}
+!"llvm.module.flags" = !{!md40, !md41, !md42, !md43, !md44, !md45, !md46, !md47, !md48}
+!"air.kernel" = !{!md54}
+!"air.compile_options" = !{!md55, !md56, !md57}
+!"llvm.ident" = !{!md58}
+!"air.version" = !{!md59}
+!"air.language_version" = !{!md60}

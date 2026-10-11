@@ -1,0 +1,755 @@
+//! The runtime's own compute work: the crate-owned modules of the compile-and-plan layer
+//! (`bind`'s resolve and prepass modules) the runtime dispatches for Metal commands that have no
+//! single Vulkan command.
+//!
+//! - **Kernels.** Each [`OwnedModule`] is made once per device, when a command first needs it:
+//!   its shader module, a set layout of set 0 (sampled images first, at bindings `0..i`, where
+//!   the module has them, then storage images, then storage buffers), a pipeline layout with its
+//!   push range, and the compute pipeline. The device keeps them
+//!   ([`OwnedKernels`]) and destroys them with itself; a command buffer holds its device, so a
+//!   kernel outlives every command that records it. The mipmap filter is one kernel per
+//!   `MipmapFilterKernel` a chain dispatches (a format's few steps; bounded by the formats), and
+//!   the index rewrite one per `RewriteProgram` and `RewritePhase` (closed enums of a few).
+//! - **Descriptor sets** ([`OwnedSets`]): one pool per command, holding one set per dispatch, each
+//!   written with the command's image views and buffer ranges; the command buffer retains it
+//!   until it completes.
+
+use super::device::lock;
+use super::error::{internal, vulkan, Error};
+use super::exit_guard;
+use super::release;
+use super::Device;
+use crate::shader_cache::driver::Making;
+use ash::vk;
+use metal2vulkan::bind::{
+    BlockDecode, CompressedBlit, MipmapFilterKernel, RewritePhase, RewriteProgram, TexelWords,
+    YCbCrOutput,
+};
+use metal2vulkan::metal::format::ExtendedRange;
+use std::collections::HashMap;
+
+/// A crate-owned module the runtime dispatches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum OwnedModule {
+    /// `bind::visibility_resolve_module`: a pass's `Boolean` visibility results, made Metal's 1
+    /// or 0 in place.
+    VisibilityResolve,
+    /// `bind::visibility_combine_module`: a split pass's continuation queries, ORed into their
+    /// results.
+    VisibilityCombine,
+    /// `bind::index_bounds_plan_module`: an indexed indirect draw's index bounds plan
+    /// (`index_bounds.rs`).
+    IndexBoundsPlan,
+    /// `bind::index_bounds_fill_module`: the plan's reservation in the index pool, filled.
+    IndexBoundsFill,
+    /// `bind::replay_preprocess_module`: a device replay's preprocess, which reads every buffer
+    /// at its device address (no storage buffer; its push bytes, `generated_execute.rs`).
+    ReplayPreprocess,
+    /// `bind::flat_dispatch_module`: an indirect dispatch's region record and group counts on its
+    /// flat variant, from Metal's arguments (`indirect_dispatch.rs`). No descriptor: it reaches
+    /// memory by device address.
+    FlatDispatch,
+    /// `bind::shadow_merge_module`: a shadowed texture's writes merged into its buffer's bytes
+    /// after a command that also wrote them another way (`shadow_merge.rs`).
+    ShadowMerge,
+    /// `bind::mipmap_filter_module` of one kernel: a level of a mipmap chain from the level
+    /// above it, as Metal's filter computes it (`mipmap_filter.rs`); a kernel that fetches the
+    /// first level binds its sampled view first. Needs `shaderInt64`: a device without it fails
+    /// to build it with `Unsupported`.
+    MipmapFilter(MipmapFilterKernel),
+    /// `bind::mesh_scan_module`: a scanned emulated mesh draw's mesh threadgroups, records and
+    /// draw (`render/mesh.rs`).
+    MeshScan,
+    /// `bind::plane_words_module`: a blit's color words of a two-plane extended-range texture
+    /// moved between its texels and a buffer (`two_planes.rs`).
+    PlaneWords,
+    /// `bind::plane_copy_module`: a blit between two two-plane extended-range textures, both
+    /// planes' bytes moved as Metal's blit moves them (`two_planes.rs`).
+    PlaneCopy,
+    /// `bind::index_rewrite_module` of one program's dispatch of one phase: an indexed draw's
+    /// primitives as a list (`index_rewrite.rs`).
+    IndexRewrite(RewriteProgram, RewritePhase),
+    /// `bind::rotate_texels_module`: a rotated texture's texels moved between its pass's frame
+    /// and its bytes (`rotated.rs`).
+    RotateTexels,
+    /// `bind::ycbcr_convert_module`: a YCbCr texture's texels converted from its surface's two
+    /// planes into its image (`ycbcr.rs`), which it binds as a storage image: converted values,
+    /// or (`YCbCrOutput::Codes`) the packed codes.
+    YCbCrConvert(YCbCrOutput),
+    /// `bind::two_plane_texels_module`: a heap's two-plane extended-range texture's texels moved
+    /// between its image and its two planes in the heap's bytes (`texture/heap_two_planes.rs`).
+    TwoPlaneTexels,
+    /// `bind::plane_bytes_copy_module`: a blit into a heap's two-plane extended-range texture,
+    /// the heap's bytes written as Metal's blit writes them (`two_planes.rs`).
+    PlaneBytesCopy,
+    /// `bind::ycbcr_write_module`: a 4:4:4 YCbCr texture's written texels encoded into its
+    /// surface's two planes (`ycbcr.rs`), its write shadow bound as a storage image.
+    YCbCrWrite,
+    /// `bind::unused_bits_module` of one form held as one kind of words: an extended-range or
+    /// padded 10-bit texture's words in the tiles a mask names rewritten as Metal's tile store
+    /// leaves them, before a pass that loads it and draws (`render/unused_bits_load.rs`).
+    UnusedBits(ExtendedRange, TexelWords),
+    /// `bind::tiled_texels_module`: a heap texture's elements moved between its image's tight
+    /// copy and Metal's tiles in the heap's bytes (`texture/heap_tiled.rs`).
+    TiledTexels,
+    /// `bind::compressed_blit_module` of one rule: the texels a blit wrote rewritten as Metal's
+    /// blit through a losslessly compressed texture writes them (`compressed_blit.rs`).
+    CompressedBlit(CompressedBlit),
+    /// `bind::capture_assembly_module`: a pass's capture records assembled into its primitives
+    /// (`render/capture.rs`).
+    CaptureAssembly,
+    /// `bind::tile_reach_module`: a pass's primitives binned into the tiles they reach. Needs
+    /// `shaderInt64`: a device without it fails to build it with `Unsupported`.
+    TileReach,
+    /// `bind::capture_settle_module`: the mask made every tile where a primitive's reach was not
+    /// measured, reported in the status words.
+    CaptureSettle,
+    /// `bind::extended_shadow_module` of one form: an extended-range attachment's `half` shadow
+    /// set from its codes before the instance whose draws first hold it
+    /// (`render/extended_shadow.rs`). Two storage images: the codes, then the shadow.
+    ExtendedShadowLoad(ExtendedRange),
+    /// `bind::predication_step_module`: one command-predication record's step, its skip counter
+    /// moved and its dispatches gated (`predication.rs`). No descriptor: it reaches memory by
+    /// device address.
+    PredicationStep,
+    /// `bind::block_decode_module` of one decode: a BC1 to BC5 texture's written region decoded
+    /// as Metal decodes it into its decoded twin (`texture/decoded_twin.rs`).
+    BlockDecode(BlockDecode),
+}
+
+impl OwnedModule {
+    /// The module's sampled-image bindings, which come first in its set.
+    fn images(self) -> u32 {
+        match self {
+            OwnedModule::MipmapFilter(kernel) => u32::from(kernel.fetches()),
+            _ => 0,
+        }
+    }
+
+    /// The module's storage-image bindings, which come after its sampled images.
+    fn storage_images(self) -> u32 {
+        match self {
+            OwnedModule::YCbCrConvert(_) | OwnedModule::YCbCrWrite => 1,
+            OwnedModule::ExtendedShadowLoad(_) => 2,
+            _ => 0,
+        }
+    }
+
+    /// The module's SPIR-V words for `device`, its storage-buffer bindings (after its
+    /// [`images`](Self::images)), and its push bytes.
+    fn build(self, device: &Device) -> Result<(Vec<u32>, u32, u32), Error> {
+        match self {
+            OwnedModule::VisibilityResolve => {
+                let module = metal2vulkan::bind::visibility_resolve_module(device.compile_device())
+                    .map_err(Error::Compile)?;
+                Ok((module.spirv.to_vec(), 2, 0))
+            }
+            OwnedModule::VisibilityCombine => {
+                let module = metal2vulkan::bind::visibility_combine_module(device.compile_device())
+                    .map_err(Error::Compile)?;
+                Ok((module.spirv.to_vec(), 3, 0))
+            }
+            OwnedModule::IndexBoundsPlan => {
+                let module = metal2vulkan::bind::index_bounds_plan_module(device.compile_device())
+                    .map_err(Error::Compile)?;
+                Ok((module.spirv.to_vec(), 4, 0))
+            }
+            OwnedModule::IndexBoundsFill => {
+                let module = metal2vulkan::bind::index_bounds_fill_module(device.compile_device())
+                    .map_err(Error::Compile)?;
+                Ok((module.spirv.to_vec(), 3, 0))
+            }
+            OwnedModule::ReplayPreprocess => {
+                let module = metal2vulkan::bind::replay_preprocess_module(device.compile_device())
+                    .map_err(Error::Compile)?;
+                Ok((
+                    module.spirv.to_vec(),
+                    0,
+                    metal2vulkan::bind::ReplayPreprocessModule::PUSH_BYTES,
+                ))
+            }
+            OwnedModule::FlatDispatch => {
+                let module = metal2vulkan::bind::flat_dispatch_module(device.compile_device())
+                    .map_err(Error::Compile)?;
+                let push_bytes = metal2vulkan::bind::FlatDispatchModule::PUSH_BYTES;
+                Ok((module.spirv.to_vec(), 0, push_bytes))
+            }
+            OwnedModule::ShadowMerge => {
+                let module = metal2vulkan::bind::shadow_merge_module(device.compile_device())
+                    .map_err(Error::Compile)?;
+                let push_bytes = metal2vulkan::bind::ShadowMergeModule::PUSH_BYTES;
+                Ok((module.spirv.to_vec(), 3, push_bytes))
+            }
+            OwnedModule::MipmapFilter(kernel) => {
+                let module =
+                    metal2vulkan::bind::mipmap_filter_module(device.compile_device(), kernel)
+                        .map_err(Error::Compile)?;
+                Ok((module.spirv.to_vec(), 5 - u32::from(kernel.fetches()), 0))
+            }
+            OwnedModule::MeshScan => {
+                let module = metal2vulkan::bind::mesh_scan_module(device.compile_device())
+                    .map_err(Error::Compile)?;
+                Ok((module.spirv.to_vec(), 3, 0))
+            }
+            OwnedModule::PlaneWords => {
+                let module = metal2vulkan::bind::plane_words_module(device.compile_device())
+                    .map_err(Error::Compile)?;
+                Ok((module.spirv.to_vec(), 3, 0))
+            }
+            OwnedModule::PlaneCopy => {
+                let module = metal2vulkan::bind::plane_copy_module(device.compile_device())
+                    .map_err(Error::Compile)?;
+                Ok((module.spirv.to_vec(), 3, 0))
+            }
+            OwnedModule::IndexRewrite(program, phase) => {
+                let device = device.compile_device();
+                let module = metal2vulkan::bind::index_rewrite_module(device, program, phase)
+                    .map_err(Error::Compile)?;
+                Ok((module.spirv.to_vec(), 5, 0))
+            }
+            OwnedModule::YCbCrConvert(output) => {
+                let module =
+                    metal2vulkan::bind::ycbcr_convert_module(device.compile_device(), output)
+                        .map_err(Error::Compile)?;
+                Ok((module.spirv.to_vec(), 2, 0))
+            }
+            OwnedModule::RotateTexels => {
+                let module = metal2vulkan::bind::rotate_texels_module(device.compile_device())
+                    .map_err(Error::Compile)?;
+                Ok((module.spirv.to_vec(), 3, 0))
+            }
+            OwnedModule::TwoPlaneTexels => {
+                let module = metal2vulkan::bind::two_plane_texels_module(device.compile_device())
+                    .map_err(Error::Compile)?;
+                Ok((module.spirv.to_vec(), 3, 0))
+            }
+            OwnedModule::PlaneBytesCopy => {
+                let module = metal2vulkan::bind::plane_bytes_copy_module(device.compile_device())
+                    .map_err(Error::Compile)?;
+                Ok((module.spirv.to_vec(), 3, 0))
+            }
+            OwnedModule::YCbCrWrite => {
+                let module = metal2vulkan::bind::ycbcr_write_module(device.compile_device())
+                    .map_err(Error::Compile)?;
+                Ok((module.spirv.to_vec(), 2, 0))
+            }
+            OwnedModule::TiledTexels => {
+                let module = metal2vulkan::bind::tiled_texels_module(device.compile_device())
+                    .map_err(Error::Compile)?;
+                Ok((module.spirv.to_vec(), 3, 0))
+            }
+            OwnedModule::UnusedBits(form, words) => {
+                let device = device.compile_device();
+                let module = metal2vulkan::bind::unused_bits_module(device, form, words)
+                    .map_err(Error::Compile)?;
+                Ok((module.spirv.to_vec(), 3, 0))
+            }
+            OwnedModule::CompressedBlit(rule) => {
+                let device = device.compile_device();
+                let module = metal2vulkan::bind::compressed_blit_module(device, rule)
+                    .map_err(Error::Compile)?;
+                Ok((module.spirv.to_vec(), 1, 0))
+            }
+            OwnedModule::CaptureAssembly => {
+                let module = metal2vulkan::bind::capture_assembly_module(device.compile_device())
+                    .map_err(Error::Compile)?;
+                Ok((module.spirv.to_vec(), 3, 0))
+            }
+            OwnedModule::TileReach => {
+                let module = metal2vulkan::bind::tile_reach_module(device.compile_device())
+                    .map_err(Error::Compile)?;
+                Ok((module.spirv.to_vec(), 3, 0))
+            }
+            OwnedModule::CaptureSettle => {
+                let module = metal2vulkan::bind::capture_settle_module(device.compile_device())
+                    .map_err(Error::Compile)?;
+                Ok((module.spirv.to_vec(), 3, 0))
+            }
+            OwnedModule::ExtendedShadowLoad(form) => {
+                let device = device.compile_device();
+                let module = metal2vulkan::bind::extended_shadow_module(device, form)
+                    .map_err(Error::Compile)?;
+                Ok((module.spirv.to_vec(), 0, 0))
+            }
+            OwnedModule::PredicationStep => {
+                let module = metal2vulkan::bind::predication_step_module(device.compile_device())
+                    .map_err(Error::Compile)?;
+                let push_bytes = metal2vulkan::bind::PredicationStepModule::PUSH_BYTES;
+                Ok((module.spirv.to_vec(), 0, push_bytes))
+            }
+            OwnedModule::BlockDecode(decode) => {
+                let module =
+                    metal2vulkan::bind::block_decode_module(device.compile_device(), decode)
+                        .map_err(Error::Compile)?;
+                Ok((module.spirv.to_vec(), 3, 0))
+            }
+        }
+    }
+}
+
+/// The Vulkan objects of one kernel. The handles are the device's until it is dropped.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct OwnedKernel {
+    module: vk::ShaderModule,
+    pub(super) set_layout: vk::DescriptorSetLayout,
+    pub(super) layout: vk::PipelineLayout,
+    pub(super) pipeline: vk::Pipeline,
+    /// Sampled-image bindings of set 0, its first.
+    pub(super) images: u32,
+    /// Storage-image bindings of set 0, after the sampled images.
+    pub(super) storage_images: u32,
+    /// Storage-buffer bindings of set 0, after the images.
+    pub(super) buffers: u32,
+}
+
+impl OwnedKernel {
+    /// Destroy the objects; no pending command uses them.
+    fn destroy(&self, raw: &ash::Device) {
+        // SAFETY: the device is idle or the objects were never used; destroying a null handle
+        // is a no-op.
+        unsafe {
+            release::object(raw, self.pipeline);
+            release::object(raw, self.layout);
+            release::object(raw, self.set_layout);
+            release::object(raw, self.module);
+        }
+    }
+}
+
+/// Every kernel one device has made.
+#[derive(Default)]
+pub(super) struct OwnedKernels {
+    visibility_resolve: Option<OwnedKernel>,
+    visibility_combine: Option<OwnedKernel>,
+    index_bounds_plan: Option<OwnedKernel>,
+    index_bounds_fill: Option<OwnedKernel>,
+    replay_preprocess: Option<OwnedKernel>,
+    flat_dispatch: Option<OwnedKernel>,
+    shadow_merge: Option<OwnedKernel>,
+    mipmap_filters: HashMap<MipmapFilterKernel, OwnedKernel>,
+    mesh_scan: Option<OwnedKernel>,
+    plane_words: Option<OwnedKernel>,
+    plane_copy: Option<OwnedKernel>,
+    index_rewrites: HashMap<(RewriteProgram, RewritePhase), OwnedKernel>,
+    rotate_texels: Option<OwnedKernel>,
+    ycbcr_converts: HashMap<YCbCrOutput, OwnedKernel>,
+    two_plane_texels: Option<OwnedKernel>,
+    plane_bytes_copy: Option<OwnedKernel>,
+    ycbcr_write: Option<OwnedKernel>,
+    unused_bits: HashMap<(ExtendedRange, TexelWords), OwnedKernel>,
+    tiled_texels: Option<OwnedKernel>,
+    compressed_blits: HashMap<CompressedBlit, OwnedKernel>,
+    capture_assembly: Option<OwnedKernel>,
+    tile_reach: Option<OwnedKernel>,
+    capture_settle: Option<OwnedKernel>,
+    extended_shadow_loads: HashMap<ExtendedRange, OwnedKernel>,
+    predication_step: Option<OwnedKernel>,
+    block_decodes: HashMap<BlockDecode, OwnedKernel>,
+}
+
+impl OwnedKernels {
+    /// Destroy every kernel; the device is idle, and is destroyed next.
+    pub(super) fn destroy(&self, raw: &ash::Device) {
+        for kernel in [
+            self.visibility_resolve,
+            self.visibility_combine,
+            self.index_bounds_plan,
+            self.index_bounds_fill,
+            self.replay_preprocess,
+            self.flat_dispatch,
+            self.shadow_merge,
+            self.mesh_scan,
+            self.plane_words,
+            self.plane_copy,
+            self.rotate_texels,
+            self.two_plane_texels,
+            self.plane_bytes_copy,
+            self.ycbcr_write,
+            self.tiled_texels,
+            self.capture_assembly,
+            self.tile_reach,
+            self.capture_settle,
+            self.predication_step,
+        ]
+        .into_iter()
+        .flatten()
+        .chain(self.mipmap_filters.values().copied())
+        .chain(self.index_rewrites.values().copied())
+        .chain(self.ycbcr_converts.values().copied())
+        .chain(self.unused_bits.values().copied())
+        .chain(self.compressed_blits.values().copied())
+        .chain(self.extended_shadow_loads.values().copied())
+        .chain(self.block_decodes.values().copied())
+        {
+            kernel.destroy(raw);
+        }
+    }
+
+    /// The kernel of `which`, where the device has made it.
+    fn get(&mut self, which: OwnedModule) -> Option<OwnedKernel> {
+        match which {
+            OwnedModule::MipmapFilter(kernel) => self.mipmap_filters.get(&kernel).copied(),
+            OwnedModule::IndexRewrite(program, phase) => {
+                self.index_rewrites.get(&(program, phase)).copied()
+            }
+            OwnedModule::YCbCrConvert(output) => self.ycbcr_converts.get(&output).copied(),
+            OwnedModule::UnusedBits(form, words) => self.unused_bits.get(&(form, words)).copied(),
+            OwnedModule::CompressedBlit(rule) => self.compressed_blits.get(&rule).copied(),
+            OwnedModule::ExtendedShadowLoad(form) => self.extended_shadow_loads.get(&form).copied(),
+            OwnedModule::BlockDecode(decode) => self.block_decodes.get(&decode).copied(),
+            _ => self.slot(which).and_then(|slot| *slot),
+        }
+    }
+
+    /// Keep `kernel`, the kernel of `which`.
+    fn put(&mut self, which: OwnedModule, kernel: OwnedKernel) {
+        match which {
+            OwnedModule::MipmapFilter(key) => {
+                self.mipmap_filters.insert(key, kernel);
+            }
+            OwnedModule::IndexRewrite(program, phase) => {
+                self.index_rewrites.insert((program, phase), kernel);
+            }
+            OwnedModule::YCbCrConvert(output) => {
+                self.ycbcr_converts.insert(output, kernel);
+            }
+            OwnedModule::UnusedBits(form, words) => {
+                self.unused_bits.insert((form, words), kernel);
+            }
+            OwnedModule::CompressedBlit(rule) => {
+                self.compressed_blits.insert(rule, kernel);
+            }
+            OwnedModule::ExtendedShadowLoad(form) => {
+                self.extended_shadow_loads.insert(form, kernel);
+            }
+            OwnedModule::BlockDecode(decode) => {
+                self.block_decodes.insert(decode, kernel);
+            }
+            _ => {
+                if let Some(slot) = self.slot(which) {
+                    *slot = Some(kernel);
+                }
+            }
+        }
+    }
+
+    /// The slot of a kernel the device makes once (none for the mipmap filter's, the index
+    /// rewrite's, the YCbCr conversion's, the unused bits', the compressed blit's, the
+    /// extended shadow load's or the block decode's, one per key).
+    fn slot(&mut self, which: OwnedModule) -> Option<&mut Option<OwnedKernel>> {
+        Some(match which {
+            OwnedModule::VisibilityResolve => &mut self.visibility_resolve,
+            OwnedModule::VisibilityCombine => &mut self.visibility_combine,
+            OwnedModule::IndexBoundsPlan => &mut self.index_bounds_plan,
+            OwnedModule::IndexBoundsFill => &mut self.index_bounds_fill,
+            OwnedModule::ReplayPreprocess => &mut self.replay_preprocess,
+            OwnedModule::FlatDispatch => &mut self.flat_dispatch,
+            OwnedModule::ShadowMerge => &mut self.shadow_merge,
+            OwnedModule::MipmapFilter(_)
+            | OwnedModule::IndexRewrite(..)
+            | OwnedModule::YCbCrConvert(_)
+            | OwnedModule::UnusedBits(..)
+            | OwnedModule::CompressedBlit(_)
+            | OwnedModule::ExtendedShadowLoad(_)
+            | OwnedModule::BlockDecode(_) => return None,
+            OwnedModule::MeshScan => &mut self.mesh_scan,
+            OwnedModule::PlaneWords => &mut self.plane_words,
+            OwnedModule::PlaneCopy => &mut self.plane_copy,
+            OwnedModule::RotateTexels => &mut self.rotate_texels,
+
+            OwnedModule::TwoPlaneTexels => &mut self.two_plane_texels,
+            OwnedModule::PlaneBytesCopy => &mut self.plane_bytes_copy,
+            OwnedModule::YCbCrWrite => &mut self.ycbcr_write,
+            OwnedModule::TiledTexels => &mut self.tiled_texels,
+            OwnedModule::CaptureAssembly => &mut self.capture_assembly,
+            OwnedModule::TileReach => &mut self.tile_reach,
+            OwnedModule::CaptureSettle => &mut self.capture_settle,
+            OwnedModule::PredicationStep => &mut self.predication_step,
+        })
+    }
+}
+
+impl Device {
+    /// The kernel of `which`, made on first use.
+    pub(super) fn owned_kernel(&self, which: OwnedModule) -> Result<OwnedKernel, Error> {
+        // A making's turn before the lock (`budget::helper_turn`): none where it is made.
+        let _turn = crate::pipeline::budget::helper_turn(&self.shared().owned_kernels, |kernels| {
+            kernels.get(which).is_some()
+        });
+        let mut kernels = lock(&self.shared().owned_kernels);
+        if let Some(kernel) = kernels.get(which) {
+            return Ok(kernel);
+        }
+        let (spirv, buffers, push_bytes) = which.build(self)?;
+        let bindings = (which.images(), which.storage_images(), buffers);
+        let kernel = make(self, &spirv, bindings, push_bytes)?;
+        kernels.put(which, kernel);
+        Ok(kernel)
+    }
+}
+
+/// The objects of a kernel of `spirv` (entry point `main`) with `images` sampled images, then
+/// `storage_images` storage images and then `buffers` storage buffers in set 0, and `push_bytes`
+/// of `COMPUTE` push constants.
+fn make(
+    device: &Device,
+    spirv: &[u32],
+    (images, storage_images, buffers): (u32, u32, u32),
+    push_bytes: u32,
+) -> Result<OwnedKernel, Error> {
+    let shared = device.shared();
+    let raw = shared.vk();
+    let mut kernel = OwnedKernel {
+        module: vk::ShaderModule::null(),
+        set_layout: vk::DescriptorSetLayout::null(),
+        layout: vk::PipelineLayout::null(),
+        pipeline: vk::Pipeline::null(),
+        images,
+        storage_images,
+        buffers,
+    };
+    let made = (|| {
+        let info = vk::ShaderModuleCreateInfo::default().code(spirv);
+        // SAFETY: the code is live SPIR-V words for the call.
+        kernel.module = unsafe { raw.create_shader_module(&info, None) }.map_err(vulkan)?;
+        let bindings: Vec<vk::DescriptorSetLayoutBinding<'_>> =
+            (0..images + storage_images + buffers)
+                .map(|binding| {
+                    vk::DescriptorSetLayoutBinding::default()
+                        .binding(binding)
+                        .descriptor_type(descriptor_type(binding, images, storage_images))
+                        .descriptor_count(1)
+                        .stage_flags(vk::ShaderStageFlags::COMPUTE)
+                })
+                .collect();
+        let info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+        // SAFETY: `info` and its array are live for the call.
+        kernel.set_layout =
+            unsafe { raw.create_descriptor_set_layout(&info, None) }.map_err(vulkan)?;
+        let push = [vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::COMPUTE)
+            .offset(0)
+            .size(push_bytes)];
+        let set_layouts = [kernel.set_layout];
+        let mut info = vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
+        if push_bytes > 0 {
+            info = info.push_constant_ranges(&push);
+        }
+        // SAFETY: as above.
+        kernel.layout = unsafe { raw.create_pipeline_layout(&info, None) }.map_err(vulkan)?;
+        let stage = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::COMPUTE)
+            .module(kernel.module)
+            .name(c"main");
+        let info = vk::ComputePipelineCreateInfo::default()
+            .stage(stage)
+            .layout(kernel.layout);
+        let created = shared
+            .make_pipelines(
+                Making::new("owned kernel").words(spirv).text(&(
+                    images,
+                    storage_images,
+                    buffers,
+                    push_bytes,
+                )),
+                |cache| {
+                    // SAFETY: every pointer in `info` outlives the call; the pipeline cache is the
+                    // making's own (`shader_cache/driver.rs`).
+                    unsafe { raw.create_compute_pipelines(cache, &[info], None) }
+                },
+            )
+            .map_err(|(_, error)| vulkan(error))?;
+        kernel.pipeline = created
+            .first()
+            .copied()
+            .ok_or_else(|| internal("the driver made no pipeline"))?;
+        Ok(())
+    })();
+    match made {
+        Ok(()) => Ok(kernel),
+        Err(error) => {
+            kernel.destroy(raw);
+            Err(error)
+        }
+    }
+}
+
+/// The type of binding `binding` of a set whose first `images` bindings are sampled images, the
+/// next `storage_images` storage images, and the rest storage buffers.
+fn descriptor_type(binding: u32, images: u32, storage_images: u32) -> vk::DescriptorType {
+    if binding < images {
+        vk::DescriptorType::SAMPLED_IMAGE
+    } else if binding < images + storage_images {
+        vk::DescriptorType::STORAGE_IMAGE
+    } else {
+        vk::DescriptorType::STORAGE_BUFFER
+    }
+}
+
+/// What one set of an [`OwnedKernel`] binds: its sampled images' views, then its storage images'
+/// views, each in the `GENERAL` layout, then its storage buffers' `(buffer, offset, range)`.
+pub(super) struct OwnedSet {
+    pub(super) images: Vec<vk::ImageView>,
+    pub(super) storage_images: Vec<vk::ImageView>,
+    pub(super) buffers: Vec<(vk::Buffer, u64, u64)>,
+}
+
+/// The descriptor sets of one command's dispatches of one kernel, from a pool of their own.
+pub(super) struct OwnedSets {
+    device: Device,
+    pool: vk::DescriptorPool,
+    pub(super) sets: Vec<vk::DescriptorSet>,
+}
+
+impl Drop for OwnedSets {
+    fn drop(&mut self) {
+        // Once the process is exiting, the pool is left to its end (`exit_guard`).
+        let Some(_busy) = exit_guard::enter() else {
+            return;
+        };
+        // SAFETY: no pending command uses the sets (a command buffer retains them until it
+        // completes); the sets are freed with their pool.
+        unsafe { release::object(self.device.shared().vk(), self.pool) };
+    }
+}
+
+impl OwnedSets {
+    /// One set of `kernel` (of storage buffers only) per entry of `ranges`, each binding `i`
+    /// written with the `i`-th `(buffer, offset, range)`.
+    pub(super) fn write(
+        device: &Device,
+        kernel: &OwnedKernel,
+        ranges: &[Vec<(vk::Buffer, u64, u64)>],
+    ) -> Result<OwnedSets, Error> {
+        let sets: Vec<OwnedSet> = ranges
+            .iter()
+            .map(|buffers| OwnedSet {
+                images: Vec::new(),
+                storage_images: Vec::new(),
+                buffers: buffers.clone(),
+            })
+            .collect();
+        OwnedSets::write_each(device, &vec![*kernel; ranges.len()], &sets)
+    }
+
+    /// One set per entry of `sets`, of the kernel at its index in `kernels`, each written with
+    /// its entry's views and then its buffer ranges, in binding order.
+    pub(super) fn write_each(
+        device: &Device,
+        kernels: &[OwnedKernel],
+        sets: &[OwnedSet],
+    ) -> Result<OwnedSets, Error> {
+        let raw = device.shared().vk();
+        let count = u32::try_from(sets.len()).map_err(|_| internal("too many owned sets"))?;
+        if kernels.len() != sets.len()
+            || sets.iter().zip(kernels).any(|(set, kernel)| {
+                set.images.len() != kernel.images as usize
+                    || set.storage_images.len() != kernel.storage_images as usize
+                    || set.buffers.len() != kernel.buffers as usize
+            })
+            || count == 0
+        {
+            return Err(internal("owned sets that do not match their kernel"));
+        }
+        let total = |of: fn(&OwnedKernel) -> u32| {
+            kernels
+                .iter()
+                .try_fold(0u32, |n, kernel| n.checked_add(of(kernel)))
+                .ok_or_else(|| internal("too many owned descriptors"))
+        };
+        let (images, storage_images, buffers) = (
+            total(|k| k.images)?,
+            total(|k| k.storage_images)?,
+            total(|k| k.buffers)?,
+        );
+        // A pool size names at least one descriptor.
+        let sizes: Vec<vk::DescriptorPoolSize> = [
+            (vk::DescriptorType::SAMPLED_IMAGE, images),
+            (vk::DescriptorType::STORAGE_IMAGE, storage_images),
+            (vk::DescriptorType::STORAGE_BUFFER, buffers),
+        ]
+        .into_iter()
+        .filter(|&(_, n)| n > 0)
+        .map(|(ty, n)| vk::DescriptorPoolSize::default().ty(ty).descriptor_count(n))
+        .collect();
+        let info = vk::DescriptorPoolCreateInfo::default()
+            .max_sets(count)
+            .pool_sizes(&sizes);
+        // SAFETY: `info` and its array are live for the call.
+        let pool = unsafe { raw.create_descriptor_pool(&info, None) }.map_err(vulkan)?;
+        let mut owned = OwnedSets {
+            device: device.clone(),
+            pool,
+            sets: Vec::new(),
+        };
+        let layouts: Vec<vk::DescriptorSetLayout> =
+            kernels.iter().map(|kernel| kernel.set_layout).collect();
+        let info = vk::DescriptorSetAllocateInfo::default()
+            .descriptor_pool(pool)
+            .set_layouts(&layouts);
+        // SAFETY: the pool holds `count` sets, each of its kernel's images and storage buffers.
+        owned.sets = unsafe { raw.allocate_descriptor_sets(&info) }.map_err(vulkan)?;
+        let image_info = |view: &vk::ImageView| {
+            vk::DescriptorImageInfo::default()
+                .image_view(*view)
+                .image_layout(vk::ImageLayout::GENERAL)
+        };
+        let image_infos: Vec<Vec<vk::DescriptorImageInfo>> = sets
+            .iter()
+            .map(|set| set.images.iter().map(image_info).collect())
+            .collect();
+        let storage_infos: Vec<Vec<vk::DescriptorImageInfo>> = sets
+            .iter()
+            .map(|set| set.storage_images.iter().map(image_info).collect())
+            .collect();
+        let buffer_infos: Vec<Vec<vk::DescriptorBufferInfo>> = sets
+            .iter()
+            .map(|set| {
+                set.buffers
+                    .iter()
+                    .map(|&(buffer, offset, range)| {
+                        vk::DescriptorBufferInfo::default()
+                            .buffer(buffer)
+                            .offset(offset)
+                            .range(range)
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut writes = Vec::new();
+        let infos = image_infos.iter().zip(&storage_infos).zip(&buffer_infos);
+        for (set, ((images, storage), buffers)) in owned.sets.iter().zip(infos) {
+            for (binding, info) in images.iter().enumerate() {
+                writes.push(
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(*set)
+                        .dst_binding(binding as u32)
+                        .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                        .image_info(std::slice::from_ref(info)),
+                );
+            }
+            for (binding, info) in (images.len()..).zip(storage) {
+                writes.push(
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(*set)
+                        .dst_binding(binding as u32)
+                        .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                        .image_info(std::slice::from_ref(info)),
+                );
+            }
+            for (binding, info) in (images.len() + storage.len()..).zip(buffers) {
+                writes.push(
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(*set)
+                        .dst_binding(binding as u32)
+                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                        .buffer_info(std::slice::from_ref(info)),
+                );
+            }
+        }
+        // SAFETY: the sets were just allocated and no command uses them; every view and buffer
+        // written is live (the caller's command retains them).
+        unsafe { raw.update_descriptor_sets(&writes, &[]) };
+        Ok(owned)
+    }
+}

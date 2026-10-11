@@ -1,0 +1,411 @@
+target triple = "air64_v28-apple-macosx26.0.0"
+source_filename = "-"
+; datalayout DataLayout { endian: Little, pointers: {0: PointerSpec { size_bits: 64, abi_bits: 64, pref_bits: 64, index_bits: 64 }}, ints: {1: AlignSpec { abi_bits: 8, pref_bits: 8 }, 8: AlignSpec { abi_bits: 8, pref_bits: 8 }, 16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }}, floats: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }}, vectors: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 24: AlignSpec { abi_bits: 32, pref_bits: 32 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 48: AlignSpec { abi_bits: 64, pref_bits: 64 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 96: AlignSpec { abi_bits: 128, pref_bits: 128 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }, 192: AlignSpec { abi_bits: 256, pref_bits: 256 }, 256: AlignSpec { abi_bits: 256, pref_bits: 256 }, 512: AlignSpec { abi_bits: 512, pref_bits: 512 }, 1024: AlignSpec { abi_bits: 1024, pref_bits: 1024 }}, aggregate: AlignSpec { abi_bits: 0, pref_bits: 64 }, native_ints: [8, 16, 32], stack_align_bits: None, alloca_space: 0, program_space: 0, globals_space: 0, mangling: None, fn_ptr_align: None, non_integral: [] }
+%t4 = type void (ptr addrspace(1), ptr addrspace(1), ptr addrspace(1), ptr addrspace(1), ptr addrspace(1), ptr addrspace(1), ptr addrspace(1), i32)
+%t6 = type <4 x i32> (ptr addrspace(1), i32, <4 x i32>, i32, i32)
+%t7 = type <4 x i32> (ptr addrspace(1), i32, i32, i32)
+%t8 = type <4 x i32> (ptr addrspace(1), i32, i32, <4 x i32>, i32, i32)
+%t9 = type void (ptr addrspace(1), <4 x i32>, i32, i32, i32, i32)
+%t10 = type <4 x i32> (ptr addrspace(1), i32, i32, i32, i32)
+%t12 = type <4 x i32> (ptr addrspace(1), <2 x i32>, i32, <2 x i32>, <4 x i32>, i32, i32)
+%t14 = type i1 (ptr addrspace(1), <2 x i32>, i32, <2 x i32>, ptr addrspace(0), <4 x i32>, i32, i32, i32)
+%t15 = type <4 x i32> (ptr addrspace(1), <2 x i32>, i32, <2 x i32>, i32, i32)
+%t17 = type <4 x i32> (ptr addrspace(1), <3 x i32>, <3 x i32>, <4 x i32>, i32, i32)
+%t18 = type <4 x i32> (ptr addrspace(1), <3 x i32>, <3 x i32>, i32, i32)
+%t19 = type i1 (ptr addrspace(1), <3 x i32>, <3 x i32>, ptr addrspace(0), <4 x i32>, i32, i32, i32)
+%t20 = type i1 (ptr addrspace(1), i32, ptr addrspace(0), <4 x i32>, i32, i32, i32)
+%t21 = type void (ptr addrspace(1), <4 x i32>, i32, i32, i32)
+%t24 = type <4 x i32> (ptr addrspace(1), <2 x i16>, <2 x i16>, <4 x i32>, i32, i32)
+%t25 = type <4 x i32> (ptr addrspace(1), <2 x i16>, <2 x i16>, i32, i32)
+%t27 = type [2 x i32]
+c40 = %t27 [27, 0]
+c71 = <4 x i32> [5, 5, 5, 5]
+c72 = <4 x i32> [2, 2, 2, 2]
+c74 = <4 x i32> [65295, 65295, 65295, 65295]
+c76 = <4 x i32> [256, 256, 256, 256]
+c78 = <4 x i32> [51, 51, 51, 51]
+c84 = <4 x i32> [4096, 4096, 4096, 4096]
+c89 = <4 x i32> [4294967293, 4294967293, 4294967293, 4294967293]
+c91 = <4 x i32> [7, 7, 7, 7]
+c93 = <4 x i32> [4294967196, 4294967196, 4294967196, 4294967196]
+c100 = <2 x i32> [poison, 0]
+c102 = <4 x i32> [16, 16, 16, 16]
+c104 = <4 x i32> [28672, 28672, 28672, 28672]
+c106 = <4 x i32> [64, 64, 64, 64]
+c108 = <4 x i32> [57005, 57005, 57005, 57005]
+c109 = <4 x i32> [4660, 4660, 4660, 4660]
+c116 = <3 x i32> [poison, 0, poison]
+c118 = <4 x i32> [9, 9, 9, 9]
+c120 = <4 x i32> [4294967280, 4294967280, 4294967280, 4294967280]
+c122 = <4 x i32> [768, 768, 768, 768]
+c124 = <4 x i32> [4294967295, 4294967295, 4294967295, 4294967295]
+c126 = <4 x i32> [4294966296, 4294966296, 4294966296, 4294966296]
+c132 = <4 x i32> [3, 3, 3, 3]
+c134 = <4 x i32> [2048, 2048, 2048, 2048]
+c138 = <4 x i32> [24576, 24576, 24576, 24576]
+c144 = <2 x i16> [poison, 0]
+c146 = <4 x i32> [11, 11, 11, 11]
+
+define %t4 @f0 "unk_atomic_ops" "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a6( Mod nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = alloca <4 x i32>, i32 1, align 16
+  %i1 = alloca <4 x i32>, i32 1, align 16
+  %i2 = alloca <4 x i32>, i32 1, align 16
+  %i3 = mul i32 %a7, i32 40
+  %i4 = zext %i3 to i64
+  %i5 = getelementptr inbounds i32, %a6, %i4
+  %i6 = icmp ult %a7, i32 9
+  %i7 = and i32 %a7, i32 1
+  %i8 = select i32 %i6, %i7, i32 2
+  %i9 = tail call <4 x i32> @f1 [air Texture(Texture { op: Atomic(Add), image: ImageShape { dim: D1, array: false, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Unsigned) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a0, %a7, <4 x i32> c71, i32 0, i32 3) arg0( nocapture )
+  %i10 = extractelement %i9, i64 0
+  store %i10, %i5, align 4
+  %i12 = tail call <4 x i32> @f2 [air Texture(Texture { op: Atomic(Sub), image: ImageShape { dim: D1, array: false, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Unsigned) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a0, %a7, <4 x i32> c72, i32 0, i32 3) arg0( nocapture )
+  %i13 = extractelement %i12, i64 0
+  %i14 = getelementptr inbounds i32, %i5, i64 1
+  store %i13, %i14, align 4
+  %i16 = tail call <4 x i32> @f3 [air Texture(Texture { op: Atomic(And), image: ImageShape { dim: D1, array: false, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Unsigned) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a0, %a7, <4 x i32> c74, i32 0, i32 3) arg0( nocapture )
+  %i17 = extractelement %i16, i64 0
+  %i18 = getelementptr inbounds i32, %i5, i64 2
+  store %i17, %i18, align 4
+  %i20 = tail call <4 x i32> @f4 [air Texture(Texture { op: Atomic(Or), image: ImageShape { dim: D1, array: false, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Unsigned) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a0, %a7, <4 x i32> c76, i32 0, i32 3) arg0( nocapture )
+  %i21 = extractelement %i20, i64 0
+  %i22 = getelementptr inbounds i32, %i5, i64 3
+  store %i21, %i22, align 4
+  %i24 = tail call <4 x i32> @f5 [air Texture(Texture { op: Atomic(Xor), image: ImageShape { dim: D1, array: false, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Unsigned) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a0, %a7, <4 x i32> c78, i32 0, i32 3) arg0( nocapture )
+  %i25 = extractelement %i24, i64 0
+  %i26 = getelementptr inbounds i32, %i5, i64 4
+  store %i25, %i26, align 4
+  %i28 = add i32 %a7, i32 4352
+  %i29 = insertelement <4 x i32> poison, %i28, i64 0
+  %i30 = shufflevector <4 x i32> %i29, <4 x i32> poison, <0, 0, 0, 0>
+  %i31 = tail call <4 x i32> @f6 [air Texture(Texture { op: Atomic(Min), image: ImageShape { dim: D1, array: false, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Unsigned) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a0, %a7, %i30, i32 0, i32 3) arg0( nocapture )
+  %i32 = extractelement %i31, i64 0
+  %i33 = getelementptr inbounds i32, %i5, i64 5
+  store %i32, %i33, align 4
+  %i35 = tail call <4 x i32> @f7 [air Texture(Texture { op: Atomic(Max), image: ImageShape { dim: D1, array: false, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Unsigned) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a0, %a7, <4 x i32> c84, i32 0, i32 3) arg0( nocapture )
+  %i36 = extractelement %i35, i64 0
+  %i37 = getelementptr inbounds i32, %i5, i64 6
+  store %i36, %i37, align 4
+  %i39 = add i32 %a7, i32 43968
+  %i40 = insertelement <4 x i32> poison, %i39, i64 0
+  %i41 = shufflevector <4 x i32> %i40, <4 x i32> poison, <0, 0, 0, 0>
+  %i42 = tail call <4 x i32> @f8 [air Texture(Texture { op: Atomic(Xchg), image: ImageShape { dim: D1, array: false, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Unsigned) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a0, %a7, %i41, i32 0, i32 3) arg0( nocapture )
+  %i43 = extractelement %i42, i64 0
+  %i44 = getelementptr inbounds i32, %i5, i64 7
+  store %i43, %i44, align 4
+  %i46 = tail call <4 x i32> @f9 [air Texture(Texture { op: Atomic(Load), image: ImageShape { dim: D1, array: false, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Unsigned) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a0, %a7, i32 0, i32 3) arg0( nocapture )
+  %i47 = extractelement %i46, i64 0
+  %i48 = getelementptr inbounds i32, %i5, i64 8
+  store %i47, %i48, align 4
+  %i50 = tail call <4 x i32> @f10 [air Texture(Texture { op: Atomic(Min), image: ImageShape { dim: D1, array: true, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Signed) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a1, %a7, %i8, <4 x i32> c89, i32 0, i32 3) arg0( nocapture )
+  %i51 = extractelement %i50, i64 0
+  %i52 = getelementptr inbounds i32, %i5, i64 9
+  store %i51, %i52, align 4
+  %i54 = tail call <4 x i32> @f11 [air Texture(Texture { op: Atomic(Max), image: ImageShape { dim: D1, array: true, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Signed) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a1, %a7, %i8, <4 x i32> c91, i32 0, i32 3) arg0( nocapture )
+  %i55 = extractelement %i54, i64 0
+  %i56 = getelementptr inbounds i32, %i5, i64 10
+  store %i55, %i56, align 4
+  %i58 = tail call <4 x i32> @f12 [air Texture(Texture { op: Atomic(Add), image: ImageShape { dim: D1, array: true, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Signed) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a1, %a7, %i8, <4 x i32> c93, i32 0, i32 3) arg0( nocapture )
+  %i59 = extractelement %i58, i64 0
+  %i60 = getelementptr inbounds i32, %i5, i64 11
+  store %i59, %i60, align 4
+  %i62 = sub nsw i32 i32 4294967219, %a7
+  %i63 = insertelement <4 x i32> poison, %i62, i64 0
+  %i64 = shufflevector <4 x i32> %i63, <4 x i32> poison, <0, 0, 0, 0>
+  %i65 = tail call <4 x i32> @f13 [air Texture(Texture { op: Atomic(Xchg), image: ImageShape { dim: D1, array: true, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Signed) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a1, %a7, %i8, %i64, i32 0, i32 3) arg0( nocapture )
+  %i66 = extractelement %i65, i64 0
+  %i67 = getelementptr inbounds i32, %i5, i64 12
+  store %i66, %i67, align 4
+  %i69 = add nsw i32 %a7, i32 4294967246
+  %i70 = insertelement <4 x i32> poison, %i69, i64 0
+  %i71 = shufflevector <4 x i32> %i70, <4 x i32> poison, <0, 0, 0, 0>
+  tail call void @f14 [air Texture(Texture { op: Atomic(Store), image: ImageShape { dim: D1, array: true, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Signed) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a1, %i71, %a7, %i8, i32 0, i32 3) arg0( nocapture )
+  %i73 = tail call <4 x i32> @f15 [air Texture(Texture { op: Atomic(Load), image: ImageShape { dim: D1, array: true, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Signed) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a1, %a7, %i8, i32 0, i32 3) arg0( nocapture )
+  %i74 = extractelement %i73, i64 0
+  %i75 = getelementptr inbounds i32, %i5, i64 13
+  store %i74, %i75, align 4
+  %i77 = insertelement <2 x i32> c100, %a7, i64 0
+  %i78 = tail call <4 x i32> @f16 [air Texture(Texture { op: Atomic(Add), image: ImageShape { dim: D2, array: true, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Unsigned) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a2, %i77, %i8, <2 x i32> zeroinitializer, <4 x i32> c102, i32 0, i32 3) arg0( nocapture )
+  %i79 = extractelement %i78, i64 0
+  %i80 = getelementptr inbounds i32, %i5, i64 14
+  store %i79, %i80, align 4
+  %i82 = tail call <4 x i32> @f17 [air Texture(Texture { op: Atomic(Min), image: ImageShape { dim: D2, array: true, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Unsigned) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a2, %i77, %i8, <2 x i32> zeroinitializer, <4 x i32> c104, i32 0, i32 3) arg0( nocapture )
+  %i83 = extractelement %i82, i64 0
+  %i84 = getelementptr inbounds i32, %i5, i64 15
+  store %i83, %i84, align 4
+  %i86 = tail call <4 x i32> @f18 [air Texture(Texture { op: Atomic(Max), image: ImageShape { dim: D2, array: true, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Unsigned) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a2, %i77, %i8, <2 x i32> zeroinitializer, <4 x i32> c106, i32 0, i32 3) arg0( nocapture )
+  %i87 = extractelement %i86, i64 0
+  %i88 = getelementptr inbounds i32, %i5, i64 16
+  store %i87, %i88, align 4
+  store <4 x i32> c108, %i0, align 16
+  %i91 = call i1 @f19 [air Texture(Texture { op: Atomic(CmpXchgWeak), image: ImageShape { dim: D2, array: true, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Unsigned) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a2, %i77, %i8, <2 x i32> zeroinitializer, %i0, <4 x i32> c109, i32 0, i32 0, i32 3) arg0( nocapture )
+  %i92 = zext %i91 to i32
+  %i93 = getelementptr inbounds i32, %i5, i64 17
+  store %i92, %i93, align 4
+  %i95 = load <4 x i32>, %i0, align 16
+  %i96 = extractelement %i95, i64 0
+  %i97 = getelementptr inbounds i32, %i5, i64 18
+  store %i96, %i97, align 4
+  %i99 = add i32 %a7, i32 17185
+  %i100 = insertelement <4 x i32> poison, %i99, i64 0
+  %i101 = shufflevector <4 x i32> %i100, <4 x i32> poison, <0, 0, 0, 0>
+  %i102 = call i1 @f19 [air Texture(Texture { op: Atomic(CmpXchgWeak), image: ImageShape { dim: D2, array: true, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Unsigned) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a2, %i77, %i8, <2 x i32> zeroinitializer, %i0, %i101, i32 0, i32 0, i32 3) arg0( nocapture )
+  %i103 = zext %i102 to i32
+  %i104 = getelementptr inbounds i32, %i5, i64 19
+  store %i103, %i104, align 4
+  %i106 = load <4 x i32>, %i0, align 16
+  %i107 = extractelement %i106, i64 0
+  %i108 = getelementptr inbounds i32, %i5, i64 20
+  store %i107, %i108, align 4
+  %i110 = call <4 x i32> @f20 [air Texture(Texture { op: Atomic(Load), image: ImageShape { dim: D2, array: true, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Unsigned) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a2, %i77, %i8, <2 x i32> zeroinitializer, i32 0, i32 3) arg0( nocapture )
+  %i111 = extractelement %i110, i64 0
+  %i112 = getelementptr inbounds i32, %i5, i64 21
+  store %i111, %i112, align 4
+  %i114 = insertelement <3 x i32> c116, %a7, i64 0
+  %i115 = insertelement %i114, %i8, i64 2
+  %i116 = call <4 x i32> @f21 [air Texture(Texture { op: Atomic(Sub), image: ImageShape { dim: D3, array: false, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Signed) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a3, %i115, <3 x i32> zeroinitializer, <4 x i32> c118, i32 0, i32 3) arg0( nocapture )
+  %i117 = extractelement %i116, i64 0
+  %i118 = getelementptr inbounds i32, %i5, i64 22
+  store %i117, %i118, align 4
+  %i120 = call <4 x i32> @f22 [air Texture(Texture { op: Atomic(And), image: ImageShape { dim: D3, array: false, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Signed) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a3, %i115, <3 x i32> zeroinitializer, <4 x i32> c120, i32 0, i32 3) arg0( nocapture )
+  %i121 = extractelement %i120, i64 0
+  %i122 = getelementptr inbounds i32, %i5, i64 23
+  store %i121, %i122, align 4
+  %i124 = call <4 x i32> @f23 [air Texture(Texture { op: Atomic(Or), image: ImageShape { dim: D3, array: false, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Signed) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a3, %i115, <3 x i32> zeroinitializer, <4 x i32> c122, i32 0, i32 3) arg0( nocapture )
+  %i125 = extractelement %i124, i64 0
+  %i126 = getelementptr inbounds i32, %i5, i64 24
+  store %i125, %i126, align 4
+  %i128 = call <4 x i32> @f24 [air Texture(Texture { op: Atomic(Xor), image: ImageShape { dim: D3, array: false, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Signed) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a3, %i115, <3 x i32> zeroinitializer, <4 x i32> c124, i32 0, i32 3) arg0( nocapture )
+  %i129 = extractelement %i128, i64 0
+  %i130 = getelementptr inbounds i32, %i5, i64 25
+  store %i129, %i130, align 4
+  %i132 = call <4 x i32> @f25 [air Texture(Texture { op: Atomic(Min), image: ImageShape { dim: D3, array: false, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Signed) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a3, %i115, <3 x i32> zeroinitializer, <4 x i32> c126, i32 0, i32 3) arg0( nocapture )
+  %i133 = extractelement %i132, i64 0
+  %i134 = getelementptr inbounds i32, %i5, i64 26
+  store %i133, %i134, align 4
+  %i136 = call <4 x i32> @f26 [air Texture(Texture { op: Atomic(Load), image: ImageShape { dim: D3, array: false, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Signed) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a3, %i115, <3 x i32> zeroinitializer, i32 0, i32 3) arg0( nocapture )
+  %i137 = shufflevector <4 x i32> %i136, <4 x i32> poison, <0, 0, 0, 0>
+  store %i137, %i1, align 16
+  %i139 = add nsw i32 %a7, i32 77
+  %i140 = insertelement <4 x i32> poison, %i139, i64 0
+  %i141 = shufflevector <4 x i32> %i140, <4 x i32> poison, <0, 0, 0, 0>
+  %i142 = call i1 @f27 [air Texture(Texture { op: Atomic(CmpXchgWeak), image: ImageShape { dim: D3, array: false, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Signed) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a3, %i115, <3 x i32> zeroinitializer, %i1, %i141, i32 0, i32 0, i32 3) arg0( nocapture )
+  %i143 = zext %i142 to i32
+  %i144 = getelementptr inbounds i32, %i5, i64 27
+  store %i143, %i144, align 4
+  %i146 = load <4 x i32>, %i1, align 16
+  %i147 = extractelement %i146, i64 0
+  %i148 = getelementptr inbounds i32, %i5, i64 28
+  store %i147, %i148, align 4
+  %i150 = call <4 x i32> @f26 [air Texture(Texture { op: Atomic(Load), image: ImageShape { dim: D3, array: false, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Signed) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a3, %i115, <3 x i32> zeroinitializer, i32 0, i32 3) arg0( nocapture )
+  %i151 = extractelement %i150, i64 0
+  %i152 = getelementptr inbounds i32, %i5, i64 29
+  store %i151, %i152, align 4
+  %i154 = call <4 x i32> @f28 [air Texture(Texture { op: Atomic(Add), image: ImageShape { dim: Buffer, array: false, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Unsigned) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a4, %a7, <4 x i32> c132, i32 0, i32 3) arg0( nocapture )
+  %i155 = extractelement %i154, i64 0
+  %i156 = getelementptr inbounds i32, %i5, i64 30
+  store %i155, %i156, align 4
+  %i158 = call <4 x i32> @f29 [air Texture(Texture { op: Atomic(Max), image: ImageShape { dim: Buffer, array: false, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Unsigned) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a4, %a7, <4 x i32> c134, i32 0, i32 3) arg0( nocapture )
+  %i159 = extractelement %i158, i64 0
+  %i160 = getelementptr inbounds i32, %i5, i64 31
+  store %i159, %i160, align 4
+  %i162 = add i32 %a7, i32 20480
+  %i163 = insertelement <4 x i32> poison, %i162, i64 0
+  %i164 = shufflevector <4 x i32> %i163, <4 x i32> poison, <0, 0, 0, 0>
+  %i165 = call <4 x i32> @f30 [air Texture(Texture { op: Atomic(Xchg), image: ImageShape { dim: Buffer, array: false, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Unsigned) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a4, %a7, %i164, i32 0, i32 3) arg0( nocapture )
+  %i166 = extractelement %i165, i64 0
+  %i167 = getelementptr inbounds i32, %i5, i64 32
+  store %i166, %i167, align 4
+  store %i164, %i2, align 16
+  %i170 = call i1 @f31 [air Texture(Texture { op: Atomic(CmpXchgWeak), image: ImageShape { dim: Buffer, array: false, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Unsigned) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a4, %a7, %i2, <4 x i32> c138, i32 0, i32 0, i32 3) arg0( nocapture )
+  %i171 = zext %i170 to i32
+  %i172 = getelementptr inbounds i32, %i5, i64 33
+  store %i171, %i172, align 4
+  %i174 = load <4 x i32>, %i2, align 16
+  %i175 = extractelement %i174, i64 0
+  %i176 = getelementptr inbounds i32, %i5, i64 34
+  store %i175, %i176, align 4
+  %i178 = add i32 %a7, i32 28672
+  %i179 = insertelement <4 x i32> poison, %i178, i64 0
+  %i180 = shufflevector <4 x i32> %i179, <4 x i32> poison, <0, 0, 0, 0>
+  call void @f32 [air Texture(Texture { op: Atomic(Store), image: ImageShape { dim: Buffer, array: false, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Unsigned) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a4, %i180, %a7, i32 0, i32 3) arg0( nocapture )
+  %i182 = call <4 x i32> @f33 [air Texture(Texture { op: Atomic(Load), image: ImageShape { dim: Buffer, array: false, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Unsigned) }), coord16: false, form: Current, access: Some(ReadWrite) })](%a4, %a7, i32 0, i32 3) arg0( nocapture )
+  %i183 = extractelement %i182, i64 0
+  %i184 = getelementptr inbounds i32, %i5, i64 35
+  store %i183, %i184, align 4
+  %i186 = trunc %a7 to i16
+  %i187 = insertelement <2 x i16> c144, %i186, i64 0
+  %i188 = call <4 x i32> @f34 [air Texture(Texture { op: Atomic(Add), image: ImageShape { dim: D2, array: false, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Signed) }), coord16: true, form: Current, access: Some(ReadWrite) })](%a5, %i187, <2 x i16> zeroinitializer, <4 x i32> c146, i32 0, i32 3) arg0( nocapture )
+  %i189 = extractelement %i188, i64 0
+  %i190 = getelementptr inbounds i32, %i5, i64 36
+  store %i189, %i190, align 4
+  %i192 = call <4 x i32> @f35 [air Texture(Texture { op: Atomic(Or), image: ImageShape { dim: D2, array: false, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Signed) }), coord16: true, form: Current, access: Some(ReadWrite) })](%a5, %i187, <2 x i16> zeroinitializer, <4 x i32> c106, i32 0, i32 3) arg0( nocapture )
+  %i193 = extractelement %i192, i64 0
+  %i194 = getelementptr inbounds i32, %i5, i64 37
+  store %i193, %i194, align 4
+  %i196 = call <4 x i32> @f36 [air Texture(Texture { op: Atomic(Load), image: ImageShape { dim: D2, array: false, ms: false, depth: false }, texel: Some(Texel { ty: NumTy { elem: I32, lanes: 4 }, sign: Some(Signed) }), coord16: true, form: Current, access: Some(ReadWrite) })](%a5, %i187, <2 x i16> zeroinitializer, i32 0, i32 3) arg0( nocapture )
+  %i197 = extractelement %i196, i64 0
+  %i198 = getelementptr inbounds i32, %i5, i64 38
+  store %i197, %i198, align 4
+  %i200 = getelementptr inbounds i32, %i5, i64 39
+  store %i8, %i200, align 4
+  ret void
+}
+
+declare %t6 @f1 "air.atomic_fetch_add_explicit_texture_1d.u.v4i32" %a0( nocapture )
+
+declare %t6 @f2 "air.atomic_fetch_sub_explicit_texture_1d.u.v4i32" %a0( nocapture )
+
+declare %t6 @f3 "air.atomic_fetch_and_explicit_texture_1d.u.v4i32" %a0( nocapture )
+
+declare %t6 @f4 "air.atomic_fetch_or_explicit_texture_1d.u.v4i32" %a0( nocapture )
+
+declare %t6 @f5 "air.atomic_fetch_xor_explicit_texture_1d.u.v4i32" %a0( nocapture )
+
+declare %t6 @f6 "air.atomic_fetch_min_explicit_texture_1d.u.v4i32" %a0( nocapture )
+
+declare %t6 @f7 "air.atomic_fetch_max_explicit_texture_1d.u.v4i32" %a0( nocapture )
+
+declare %t6 @f8 "air.atomic_exchange_explicit_texture_1d.u.v4i32" %a0( nocapture )
+
+declare %t7 @f9 "air.atomic_load_explicit_texture_1d.u.v4i32" %a0( nocapture )
+
+declare %t8 @f10 "air.atomic_fetch_min_explicit_texture_1d_array.s.v4i32" %a0( nocapture )
+
+declare %t8 @f11 "air.atomic_fetch_max_explicit_texture_1d_array.s.v4i32" %a0( nocapture )
+
+declare %t8 @f12 "air.atomic_fetch_add_explicit_texture_1d_array.s.v4i32" %a0( nocapture )
+
+declare %t8 @f13 "air.atomic_exchange_explicit_texture_1d_array.s.v4i32" %a0( nocapture )
+
+declare %t9 @f14 "air.atomic_store_explicit_texture_1d_array.s.v4i32" %a0( nocapture )
+
+declare %t10 @f15 "air.atomic_load_explicit_texture_1d_array.s.v4i32" %a0( nocapture )
+
+declare %t12 @f16 "air.atomic_fetch_add_explicit_texture_2d_array.u.v4i32" %a0( nocapture )
+
+declare %t12 @f17 "air.atomic_fetch_min_explicit_texture_2d_array.u.v4i32" %a0( nocapture )
+
+declare %t12 @f18 "air.atomic_fetch_max_explicit_texture_2d_array.u.v4i32" %a0( nocapture )
+
+declare %t14 @f19 "air.atomic_compare_exchange_weak_explicit_texture_2d_array.u.v4i32" %a0( nocapture )
+
+declare %t15 @f20 "air.atomic_load_explicit_texture_2d_array.u.v4i32" %a0( nocapture )
+
+declare %t17 @f21 "air.atomic_fetch_sub_explicit_texture_3d.s.v4i32" %a0( nocapture )
+
+declare %t17 @f22 "air.atomic_fetch_and_explicit_texture_3d.s.v4i32" %a0( nocapture )
+
+declare %t17 @f23 "air.atomic_fetch_or_explicit_texture_3d.s.v4i32" %a0( nocapture )
+
+declare %t17 @f24 "air.atomic_fetch_xor_explicit_texture_3d.s.v4i32" %a0( nocapture )
+
+declare %t17 @f25 "air.atomic_fetch_min_explicit_texture_3d.s.v4i32" %a0( nocapture )
+
+declare %t18 @f26 "air.atomic_load_explicit_texture_3d.s.v4i32" %a0( nocapture )
+
+declare %t19 @f27 "air.atomic_compare_exchange_weak_explicit_texture_3d.s.v4i32" %a0( nocapture )
+
+declare %t6 @f28 "air.atomic_fetch_add_explicit_texture_buffer_1d.u.v4i32" %a0( nocapture )
+
+declare %t6 @f29 "air.atomic_fetch_max_explicit_texture_buffer_1d.u.v4i32" %a0( nocapture )
+
+declare %t6 @f30 "air.atomic_exchange_explicit_texture_buffer_1d.u.v4i32" %a0( nocapture )
+
+declare %t20 @f31 "air.atomic_compare_exchange_weak_explicit_texture_buffer_1d.u.v4i32" %a0( nocapture )
+
+declare %t21 @f32 "air.atomic_store_explicit_texture_buffer_1d.u.v4i32" %a0( nocapture )
+
+declare %t7 @f33 "air.atomic_load_explicit_texture_buffer_1d.u.v4i32" %a0( nocapture )
+
+declare %t24 @f34 "air.atomic_fetch_add_explicit_texture_2d.i16.s.v4i32" %a0( nocapture )
+
+declare %t24 @f35 "air.atomic_fetch_or_explicit_texture_2d.i16.s.v4i32" %a0( nocapture )
+
+declare %t25 @f36 "air.atomic_load_explicit_texture_2d.i16.s.v4i32" %a0( nocapture )
+!md0 = !"SDK Version"
+!md1 = !"wchar_size"
+!md2 = !"frame-pointer"
+!md3 = !"air.max_device_buffers"
+!md4 = !"air.max_constant_buffers"
+!md5 = !"air.max_threadgroup_buffers"
+!md6 = !"air.max_textures"
+!md7 = !"air.max_read_write_textures"
+!md8 = !"air.max_samplers"
+!md9 = !"air.texture"
+!md10 = !"air.location_index"
+!md11 = !"air.read_write"
+!md12 = !"air.arg_type_name"
+!md13 = !"texture1d<uint, read_write>"
+!md14 = !"air.arg_name"
+!md15 = !"a1"
+!md16 = !"texture1d_array<int, read_write>"
+!md17 = !"a1a"
+!md18 = !"texture2d_array<uint, read_write>"
+!md19 = !"a2a"
+!md20 = !"texture3d<int, read_write>"
+!md21 = !"a3"
+!md22 = !"texture_buffer<uint, read_write>"
+!md23 = !"ab"
+!md24 = !"texture2d<int, read_write>"
+!md25 = !"a2"
+!md26 = !"air.buffer"
+!md27 = !"air.address_space"
+!md28 = !"air.arg_type_size"
+!md29 = !"air.arg_type_align_size"
+!md30 = !"uint"
+!md31 = !"out"
+!md32 = !"air.thread_position_in_grid"
+!md33 = !"t"
+!md34 = !"air.compile.denorms_disable"
+!md35 = !"air.compile.fast_math_enable"
+!md36 = !"air.compile.framebuffer_fetch_enable"
+!md37 = !"Apple metal version 32023.921 (metalfe-32023.921.6)"
+!md38 = !"Metal"
+!md39 = i32 2
+!md40 = %t27 c40
+!md41 = i32 1
+!md42 = i32 4
+!md43 = i32 7
+!md44 = i32 31
+!md45 = i32 128
+!md46 = i32 8
+!md47 = i32 16
+!md48 = ptr addrspace(0) @f0
+!md49 = i32 0
+!md50 = i32 3
+!md51 = i32 5
+!md52 = i32 6
+!md53 = !{!md39, !md0, !md40}
+!md54 = !{!md41, !md1, !md42}
+!md55 = !{!md43, !md2, !md39}
+!md56 = !{!md43, !md3, !md44}
+!md57 = !{!md43, !md4, !md44}
+!md58 = !{!md43, !md5, !md44}
+!md59 = !{!md43, !md6, !md45}
+!md60 = !{!md43, !md7, !md46}
+!md61 = !{!md43, !md8, !md47}
+!md62 = !{}
+!md63 = !{!md49, !md9, !md10, !md49, !md41, !md11, !md12, !md13, !md14, !md15}
+!md64 = !{!md41, !md9, !md10, !md41, !md41, !md11, !md12, !md16, !md14, !md17}
+!md65 = !{!md39, !md9, !md10, !md39, !md41, !md11, !md12, !md18, !md14, !md19}
+!md66 = !{!md50, !md9, !md10, !md50, !md41, !md11, !md12, !md20, !md14, !md21}
+!md67 = !{!md42, !md9, !md10, !md42, !md41, !md11, !md12, !md22, !md14, !md23}
+!md68 = !{!md51, !md9, !md10, !md51, !md41, !md11, !md12, !md24, !md14, !md25}
+!md69 = !{!md52, !md26, !md10, !md49, !md41, !md11, !md27, !md41, !md28, !md42, !md29, !md42, !md12, !md30, !md14, !md31}
+!md70 = !{!md43, !md32, !md12, !md30, !md14, !md33}
+!md71 = !{!md63, !md64, !md65, !md66, !md67, !md68, !md69, !md70}
+!md72 = !{!md48, !md62, !md71}
+!md73 = !{!md34}
+!md74 = !{!md35}
+!md75 = !{!md36}
+!md76 = !{!md37}
+!md77 = !{!md39, !md46, !md49}
+!md78 = !{!md38, !md42, !md49, !md49}
+!"llvm.module.flags" = !{!md53, !md54, !md55, !md56, !md57, !md58, !md59, !md60, !md61}
+!"air.kernel" = !{!md72}
+!"air.compile_options" = !{!md73, !md74, !md75}
+!"llvm.ident" = !{!md76}
+!"air.version" = !{!md77}
+!"air.language_version" = !{!md78}

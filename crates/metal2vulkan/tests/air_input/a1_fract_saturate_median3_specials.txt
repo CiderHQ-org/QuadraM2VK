@@ -1,0 +1,162 @@
+target triple = "air64_v28-apple-macosx26.0.0"
+source_filename = "-"
+; datalayout DataLayout { endian: Little, pointers: {0: PointerSpec { size_bits: 64, abi_bits: 64, pref_bits: 64, index_bits: 64 }}, ints: {1: AlignSpec { abi_bits: 8, pref_bits: 8 }, 8: AlignSpec { abi_bits: 8, pref_bits: 8 }, 16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }}, floats: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }}, vectors: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 24: AlignSpec { abi_bits: 32, pref_bits: 32 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 48: AlignSpec { abi_bits: 64, pref_bits: 64 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 96: AlignSpec { abi_bits: 128, pref_bits: 128 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }, 192: AlignSpec { abi_bits: 256, pref_bits: 256 }, 256: AlignSpec { abi_bits: 256, pref_bits: 256 }, 512: AlignSpec { abi_bits: 512, pref_bits: 512 }, 1024: AlignSpec { abi_bits: 1024, pref_bits: 1024 }}, aggregate: AlignSpec { abi_bits: 0, pref_bits: 64 }, native_ints: [8, 16, 32], stack_align_bits: None, alloca_space: 0, program_space: 0, globals_space: 0, mangling: None, fn_ptr_align: None, non_integral: [] }
+%t4 = type void (ptr addrspace(1), ptr addrspace(1), ptr addrspace(1), i32)
+%t6 = type float (float)
+%t7 = type float (float, float, float)
+%t9 = type half (half)
+%t10 = type half (half, half, half)
+%t12 = type [2 x i32]
+c13 = %t12 [26, 5]
+
+define %t4 @f0 "a1_fract_saturate_median3_specials" memory(ModRef, NoModRef, NoModRef) "frame-pointer"="all" "min-legal-vector-width"="0" "no-builtins"="" "no-trapping-math"="true" "stack-protector-buffer-size"="8" %a0( Ref nocapture "air-buffer-no-alias"="" ) %a1( Ref nocapture "air-buffer-no-alias"="" ) %a2( Mod nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = zext %a3 to i64
+  %i1 = getelementptr inbounds <4 x i32>, %a0, %i0
+  %i2 = bitcast %i1 to ptr addrspace(1)
+  %i3 = load <4 x float>, %i2, align 16
+  %i4 = getelementptr inbounds <4 x i16>, %a1, %i0
+  %i5 = bitcast %i4 to ptr addrspace(1)
+  %i6 = load <4 x half>, %i5, align 8
+  %i7 = mul i32 %a3, i32 9
+  %i8 = zext %i7 to i64
+  %i9 = getelementptr inbounds i32, %a2, %i8
+  %i10 = extractelement %i3, i64 0
+  %i11 = tail call float @f1 [air Math(Math { f: Fract, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i10)
+  %i12 = bitcast %i9 to ptr addrspace(1)
+  store %i11, %i12, align 4
+  %i14 = tail call float @f2 [air Math(Math { f: Fract, precision: Fast, ty: NumTy { elem: F32, lanes: 1 } })](%i10)
+  %i15 = getelementptr inbounds i32, %i9, i64 1
+  %i16 = bitcast %i15 to ptr addrspace(1)
+  store %i14, %i16, align 4
+  %i18 = tail call float @f3 [air Math(Math { f: Saturate, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i10)
+  %i19 = getelementptr inbounds i32, %i9, i64 2
+  %i20 = bitcast %i19 to ptr addrspace(1)
+  store %i18, %i20, align 4
+  %i22 = tail call float @f4 [air Math(Math { f: Saturate, precision: Fast, ty: NumTy { elem: F32, lanes: 1 } })](%i10)
+  %i23 = getelementptr inbounds i32, %i9, i64 3
+  %i24 = bitcast %i23 to ptr addrspace(1)
+  store %i22, %i24, align 4
+  %i26 = extractelement %i3, i64 1
+  %i27 = extractelement %i3, i64 2
+  %i28 = extractelement %i3, i64 3
+  %i29 = tail call float @f5 [air Math(Math { f: FMedian3, precision: Precise, ty: NumTy { elem: F32, lanes: 1 } })](%i26, %i27, %i28)
+  %i30 = getelementptr inbounds i32, %i9, i64 4
+  %i31 = bitcast %i30 to ptr addrspace(1)
+  store %i29, %i31, align 4
+  %i33 = tail call float @f6 [air Math(Math { f: FMedian3, precision: Fast, ty: NumTy { elem: F32, lanes: 1 } })](%i26, %i27, %i28)
+  %i34 = getelementptr inbounds i32, %i9, i64 5
+  %i35 = bitcast %i34 to ptr addrspace(1)
+  store %i33, %i35, align 4
+  %i37 = extractelement %i6, i64 0
+  %i38 = tail call half @f7 [air Math(Math { f: Fract, precision: Precise, ty: NumTy { elem: F16, lanes: 1 } })](%i37)
+  %i39 = bitcast %i38 to i16
+  %i40 = zext %i39 to i32
+  %i41 = tail call half @f8 [air Math(Math { f: Saturate, precision: Precise, ty: NumTy { elem: F16, lanes: 1 } })](%i37)
+  %i42 = bitcast %i41 to i16
+  %i43 = zext %i42 to i32
+  %i44 = shl nuw i32 %i43, i32 16
+  %i45 = or i32 %i44, %i40
+  %i46 = getelementptr inbounds i32, %i9, i64 6
+  store %i45, %i46, align 4
+  %i48 = extractelement %i6, i64 1
+  %i49 = extractelement %i6, i64 2
+  %i50 = extractelement %i6, i64 3
+  %i51 = tail call half @f9 [air Math(Math { f: FMedian3, precision: Precise, ty: NumTy { elem: F16, lanes: 1 } })](%i48, %i49, %i50)
+  %i52 = bitcast %i51 to i16
+  %i53 = zext %i52 to i32
+  %i54 = getelementptr inbounds i32, %i9, i64 7
+  store %i53, %i54, align 4
+  %i56 = getelementptr inbounds i32, %i9, i64 8
+  store i32 0, %i56, align 4
+  ret void
+}
+
+declare %t6 @f1 "air.fract.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f2 "air.fast_fract.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f3 "air.saturate.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t6 @f4 "air.fast_saturate.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t7 @f5 "air.fmedian3.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t7 @f6 "air.fast_fmedian3.f32" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t9 @f7 "air.fract.f16" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t9 @f8 "air.saturate.f16" memory(NoModRef, NoModRef, NoModRef)
+
+declare %t10 @f9 "air.fmedian3.f16" memory(NoModRef, NoModRef, NoModRef)
+!md0 = !"SDK Version"
+!md1 = !"wchar_size"
+!md2 = !"frame-pointer"
+!md3 = !"air.max_device_buffers"
+!md4 = !"air.max_constant_buffers"
+!md5 = !"air.max_threadgroup_buffers"
+!md6 = !"air.max_textures"
+!md7 = !"air.max_read_write_textures"
+!md8 = !"air.max_samplers"
+!md9 = !"air.buffer"
+!md10 = !"air.location_index"
+!md11 = !"air.read"
+!md12 = !"air.address_space"
+!md13 = !"air.arg_type_size"
+!md14 = !"air.arg_type_align_size"
+!md15 = !"air.arg_type_name"
+!md16 = !"uint4"
+!md17 = !"air.arg_name"
+!md18 = !"in"
+!md19 = !"ushort4"
+!md20 = !"hin"
+!md21 = !"air.read_write"
+!md22 = !"uint"
+!md23 = !"out"
+!md24 = !"air.thread_position_in_grid"
+!md25 = !"i"
+!md26 = !"air.compile.denorms_disable"
+!md27 = !"air.compile.fast_math_disable"
+!md28 = !"air.compile.framebuffer_fetch_enable"
+!md29 = !"Apple metal version 32023.883 (metalfe-32023.883)"
+!md30 = !"Metal"
+!md31 = i32 2
+!md32 = %t12 c13
+!md33 = i32 1
+!md34 = i32 4
+!md35 = i32 7
+!md36 = i32 31
+!md37 = i32 128
+!md38 = i32 8
+!md39 = i32 16
+!md40 = ptr addrspace(0) @f0
+!md41 = i32 0
+!md42 = i32 3
+!md43 = !{!md31, !md0, !md32}
+!md44 = !{!md33, !md1, !md34}
+!md45 = !{!md35, !md2, !md31}
+!md46 = !{!md35, !md3, !md36}
+!md47 = !{!md35, !md4, !md36}
+!md48 = !{!md35, !md5, !md36}
+!md49 = !{!md35, !md6, !md37}
+!md50 = !{!md35, !md7, !md38}
+!md51 = !{!md35, !md8, !md39}
+!md52 = !{}
+!md53 = !{!md41, !md9, !md10, !md41, !md33, !md11, !md12, !md33, !md13, !md39, !md14, !md39, !md15, !md16, !md17, !md18}
+!md54 = !{!md33, !md9, !md10, !md33, !md33, !md11, !md12, !md33, !md13, !md38, !md14, !md38, !md15, !md19, !md17, !md20}
+!md55 = !{!md31, !md9, !md10, !md31, !md33, !md21, !md12, !md33, !md13, !md34, !md14, !md34, !md15, !md22, !md17, !md23}
+!md56 = !{!md42, !md24, !md15, !md22, !md17, !md25}
+!md57 = !{!md53, !md54, !md55, !md56}
+!md58 = !{!md40, !md52, !md57}
+!md59 = !{!md26}
+!md60 = !{!md27}
+!md61 = !{!md28}
+!md62 = !{!md29}
+!md63 = !{!md31, !md38, !md41}
+!md64 = !{!md30, !md34, !md41, !md41}
+!"llvm.module.flags" = !{!md43, !md44, !md45, !md46, !md47, !md48, !md49, !md50, !md51}
+!"air.kernel" = !{!md58}
+!"air.compile_options" = !{!md59, !md60, !md61}
+!"llvm.ident" = !{!md62}
+!"air.version" = !{!md63}
+!"air.language_version" = !{!md64}

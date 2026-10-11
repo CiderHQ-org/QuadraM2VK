@@ -1,0 +1,421 @@
+"""Tests for regen-air-fixtures.sh's LLVM toolchain handling.
+
+Each test runs a copy of the script on its own fixture tree against fake `xcrun`, `llvm-dis`, and
+`llvm-as`, so no Metal toolchain or LLVM install is needed and no tool on the host's PATH is
+reachable. A fake `llvm-dis` of major M marks its output `; llvm-dis M`; a fake `llvm-as` of
+major M rejects text marked by a newer `llvm-dis` (as LLVM 21's rejects LLVM 23's
+`splat (float f0x...)`) and text containing `REJECT` (a verifier failure). The fake Metal
+toolchain's version and SDK come from FAKE_METAL, FAKE_SDK, and FAKE_SDK_BUILD (default 1.0, 99.0,
+99A1), and its modules record them as Apple's do (`!llvm.ident`, the `SDK Version` module flag).
+"""
+
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+SCRIPT = HERE / "regen-air-fixtures.sh"
+REPO = HERE.parent.parent
+PIN = int(re.search(r"^llvm_major=(\d+)$", SCRIPT.read_text(), re.M).group(1))
+NEWER = PIN + 2
+# What the script and the fake run.
+UTILITIES = ["awk", "basename", "bash", "cat", "cmp", "cp", "diff", "dirname", "grep", "head",
+             "mkdir", "mktemp", "mv", "rm", "sed"]
+# A host whose Metal toolchain was updated, and the TOOLCHAIN records of both toolchains.
+NEW_METAL = {"FAKE_METAL": "2.0", "FAKE_SDK": "100.0", "FAKE_SDK_BUILD": "100A1"}
+OLD_RECORD = "metal: Fake metal version 1.0; macosx-sdk: 99.0 (99A1)"
+NEW_RECORD = "metal: Fake metal version 2.0; macosx-sdk: 100.0 (100A1)"
+
+# One fake for every tool, reached through symlinks: the invoked name picks the tool, and a
+# VERSION file next to an LLVM tool's link gives its version. xcrun's bitcode is the source
+# text, and its typed text is that behind a `; typed` line, followed by the module's toolchain
+# metadata; either ends with a `; flags` line naming the language-standard, fast-math, and
+# deployment-target flags the compile received, if any.
+FAKE = r"""#!/bin/sh
+metal="${FAKE_METAL:-1.0}"; sdk="${FAKE_SDK:-99.0}"; build="${FAKE_SDK_BUILD:-99A1}"
+case "$(basename "$0")" in
+  xcrun)
+    [ "$1" = -sdk ] && shift 2
+    case "$1" in
+      -f) echo "/fake/$2"; exit 0 ;;
+      --show-sdk-version) echo "$sdk"; exit 0 ;;
+      --show-sdk-build-version) echo "$build"; exit 0 ;;
+    esac
+    tool="$1"; shift; out=""; typed=0; input=""; flags=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --version) echo "Fake metal version $metal"; exit 0 ;;
+        -o) out="$2"; shift ;;
+        -S) typed=1 ;;
+        -std=*|-fno-fast-math|-mmacosx-version-min=*) flags="$flags $1" ;;
+        -*) ;;
+        *) input="$1" ;;
+      esac
+      shift
+    done
+    case "$tool" in
+      metal)
+        if [ $typed -eq 1 ]; then { echo "; typed"; cat; } >"$out"; else cat >"$out"; fi
+        printf '%s\n' '!llvm.ident = !{!90}' "!90 = !{!\"Fake metal version $metal\"}" \
+          "!91 = !{i32 2, !\"SDK Version\", [2 x i32] [i32 ${sdk%%.*}, i32 ${sdk#*.}]}" >>"$out"
+        if [ -n "$flags" ]; then echo "; flags$flags" >>"$out"; fi ;;
+      metal-as) sed 1d "$input" >"$out" ;;
+      *) echo "fake xcrun: unknown tool $tool" >&2; exit 1 ;;
+    esac ;;
+  llvm-dis*|llvm-as*)
+    version="$(cat "$(dirname "$0")/VERSION")"; major="${version%%.*}"
+    if [ "$1" = --version ]; then
+      printf 'LLVM (http://llvm.org/):\n  Fake LLVM version %s\n' "$version"; exit 0
+    fi
+    [ "$1" = -o ] || exit 2
+    case "$(basename "$0")" in
+      llvm-dis*) { echo "; llvm-dis $major"; cat; } >"$2" ;;
+      *)
+        writer="$(sed -n 's/^; llvm-dis \([0-9]*\)$/\1/p' "$3")"
+        if [ -n "$writer" ] && [ "$writer" -gt "$major" ]; then
+          echo "$3:2:1: error: expected value token" >&2; exit 1
+        fi
+        if grep -q REJECT "$3"; then echo "$3: error: verifier failure" >&2; exit 1; fi ;;
+    esac ;;
+  *) echo "fake: unknown tool $0" >&2; exit 1 ;;
+esac
+"""
+
+
+class RegenAirFixturesTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # The toolchains are shared read-only inputs. macOS scans a newly written executable on
+        # its first exec, which can take a minute, so there is one fake file, written once.
+        cls.tools = Path(tempfile.mkdtemp(prefix="regen-air-fixtures-tools."))
+        cls.addClassCleanup(shutil.rmtree, cls.tools)
+        fake = cls.tools / "fake"
+        fake.write_text(FAKE)
+        fake.chmod(0o755)
+        # Only the utilities the script needs, so no LLVM tool of the host is reachable.
+        cls.bin = cls.tools / "bin"
+        cls.bin.mkdir()
+        for utility in UTILITIES:
+            found = shutil.which(utility)
+            if found is None:
+                raise unittest.SkipTest(f"{utility} is not on PATH")
+            (cls.bin / utility).symlink_to(found)
+        (cls.bin / "xcrun").symlink_to(fake)
+        cls.newer = cls.llvm("newer", f"{NEWER}.1.2")
+        cls.pinned = cls.llvm("pinned", f"{PIN}.1.8")
+        cls.patch = cls.llvm("patch", f"{PIN}.1.9")
+        cls.debian = cls.llvm("debian", f"{PIN}.1.8", suffix=f"-{PIN}")
+
+    @classmethod
+    def llvm(cls, name, version, suffix=""):
+        """A directory with llvm-dis<suffix> and llvm-as<suffix> of `version`."""
+        directory = cls.tools / name
+        directory.mkdir()
+        (directory / "VERSION").write_text(version + "\n")
+        for tool in ("llvm-dis", "llvm-as"):
+            (directory / (tool + suffix)).symlink_to(cls.tools / "fake")
+        return directory
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="regen-air-fixtures-test."))
+        self.addCleanup(shutil.rmtree, self.root)
+        self.script = self.root / "scripts/regen-air-fixtures/regen-air-fixtures.sh"
+        self.script.parent.mkdir(parents=True)
+        shutil.copy2(SCRIPT, self.script)
+        self.fixtures = self.root / "crates/metal2vulkan-validation/fixtures/public/engine"
+        self.fixtures.mkdir(parents=True)
+        (self.fixtures / "kernel.metal").write_text("kernel void k() {}\n")
+        (self.fixtures / "legacy.metal").write_text("// metal-std: macos-metal2.2\nkernel\n")
+        (self.root / "tmp").mkdir()
+
+    def run_script(self, path, *args, env=None):
+        environment = {"PATH": os.pathsep.join(str(p) for p in [self.bin, *path]),
+                       "TMPDIR": str(self.root / "tmp")}
+        environment.update(env or {})
+        # bash reads the copy rather than executing it (a new executable, see setUpClass); the
+        # timeout is only a hang guard.
+        return subprocess.run([str(self.bin / "bash"), str(self.script), *args],
+                              env=environment, capture_output=True, text=True, timeout=600)
+
+    def committed(self):
+        return {p.name: p.read_text() for p in sorted(self.fixtures.iterdir())
+                if p.suffix != ".metal"}
+
+    def test_the_pinned_llvm_writes_behind_a_newer_one_on_path(self):
+        result = self.run_script([self.newer, self.pinned])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        files = self.committed()
+        self.assertEqual(sorted(files), ["TOOLCHAIN", "kernel.air", "kernel.air.ll", "kernel.ll",
+                                         "legacy.air", "legacy.air.ll", "legacy.ll"])
+        self.assertEqual(files["kernel.ll"].splitlines()[1], f"; llvm-dis {PIN}")
+        self.assertEqual(files["TOOLCHAIN"].splitlines()[1:], [
+            "metal: Fake metal version 1.0",
+            "macosx-sdk: 99.0 (99A1)",
+            f"llvm: {PIN} (pinned: llvm-dis writes each .ll, and llvm-as must accept it)",
+            f"llvm-dis: Fake LLVM version {PIN}.1.8",
+            f"llvm-as: Fake LLVM version {PIN}.1.8",
+        ])
+        # The check only compares: in either PATH order, with Debian's versioned names, and
+        # with overrides naming the pinned tools.
+        overrides = {"METAL2VULKAN_LLVM_DIS": str(self.pinned / "llvm-dis"),
+                     "METAL2VULKAN_LLVM_AS": str(self.pinned / "llvm-as")}
+        for path, env in (([self.newer, self.pinned], None), ([self.pinned, self.newer], None),
+                          ([self.newer, self.debian], None), ([self.newer], overrides)):
+            with self.subTest(path=[p.name for p in path], env=env):
+                check = self.run_script(path, "--check", env=env)
+                self.assertEqual(check.returncode, 0, check.stderr)
+                self.assertEqual(check.stdout, "air fixtures up to date "
+                                 "(2 sources: 2 checked, 0 not checked)\n")
+        self.assertEqual(self.committed(), files)
+
+    def test_source_directives_reach_both_compiles(self):
+        (self.fixtures / "precise.metal").write_text("// metal-fast-math: off\nkernel\n")
+        (self.fixtures / "both.metal").write_text(
+            "// metal-std: macos-metal2.2\n// metal-fast-math: off\nkernel\n")
+        (self.fixtures / "targeted.metal").write_text(
+            "// metal-std: metal4.0\n// metal-macos-min: 26.2\nkernel\n")
+        result = self.run_script([self.pinned])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        files = self.committed()
+        for name, flags in (("kernel", None), ("legacy", " -std=macos-metal2.2"),
+                            ("precise", " -fno-fast-math"),
+                            ("both", " -std=macos-metal2.2 -fno-fast-math"),
+                            ("targeted", " -std=metal4.0 -mmacosx-version-min=26.2")):
+            for suffix in (".ll", ".air.ll"):
+                with self.subTest(fixture=name + suffix):
+                    last = files[name + suffix].splitlines()[-1]
+                    if flags is None:
+                        self.assertFalse(last.startswith("; flags"), last)
+                    else:
+                        self.assertEqual(last, "; flags" + flags)
+
+    def test_a_rename_reaches_both_companions_and_the_check(self):
+        (self.fixtures / "agx.metal").write_text(
+            "// air-rename: _Z4stubt llvm.agx3.yield\n"
+            "declare void @_Z4stubt(i16)\n"
+            "call void @_Z4stubt(i16 0)\n")
+        result = self.run_script([self.pinned])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        files = self.committed()
+        for suffix in (".ll", ".air.ll", ".air"):
+            with self.subTest(file="agx" + suffix):
+                body = [line for line in files["agx" + suffix].splitlines()
+                        if not line.startswith(("//", ";"))]
+                self.assertIn("declare void @llvm.agx3.yield(i16)", body)
+                self.assertIn("call void @llvm.agx3.yield(i16 0)", body)
+                self.assertFalse(any("_Z4stubt" in line for line in body), body)
+        check = self.run_script([self.pinned], "--check")
+        self.assertEqual(check.returncode, 0, check.stderr)
+        self.assertEqual(self.committed(), files)
+
+    def test_a_rename_needs_a_declared_function_and_an_intrinsic_name(self):
+        for text, message in (
+            ("// air-rename: _Z4stubt yield\ndeclare void @_Z4stubt(i16)\n",
+             "agx.metal: air-rename needs <declared> <llvm.* or air.* name>, not: _Z4stubt yield"),
+            ("// air-rename: _Z4stubt llvm.agx3.yield extra\ndeclare void @_Z4stubt(i16)\n",
+             "agx.metal: air-rename needs <declared> <llvm.* or air.* name>"),
+            ("// air-rename: _Z4stubt llvm.agx3.yield\ndeclare void @_Z4other(i16)\n",
+             "agx.metal: air-rename: the module declares no _Z4stubt"),
+            ("// air-rename: _Z4stubt llvm.agx3.yield\ndeclare void @_Z4stubt(i16)\n"
+             "define void @_Z4stubt(i16 %0) {\n",
+             "agx.metal: air-rename: the module defines _Z4stubt"),
+        ):
+            with self.subTest(text=text):
+                (self.fixtures / "agx.metal").write_text(text)
+                result = self.run_script([self.pinned])
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(message, result.stderr)
+                self.assertEqual(self.committed(), {})
+
+    def test_a_fast_math_value_other_than_off_is_refused(self):
+        (self.fixtures / "kernel.metal").write_text("// metal-fast-math: on\nkernel\n")
+        for args in ((), ("--check",)):
+            with self.subTest(args=args):
+                result = self.run_script([self.pinned], *args)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("kernel.metal: metal-fast-math must be off, not on", result.stderr)
+                self.assertEqual(self.committed(), {})
+
+    def test_a_deployment_target_that_is_not_a_dotted_version_is_refused(self):
+        (self.fixtures / "kernel.metal").write_text("// metal-macos-min: 26.x\nkernel\n")
+        for args in ((), ("--check",)):
+            with self.subTest(args=args):
+                result = self.run_script([self.pinned], *args)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("kernel.metal: metal-macos-min must be a dotted version, not 26.x",
+                              result.stderr)
+                self.assertEqual(self.committed(), {})
+
+    def test_no_pinned_llvm_is_refused_before_writing(self):
+        for args in ((), ("--check",)):
+            with self.subTest(args=args):
+                result = self.run_script([self.newer], *args)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(f"no llvm-dis of LLVM {PIN}", result.stderr)
+                self.assertIn(f"{self.newer / 'llvm-dis'}: Fake LLVM version {NEWER}.1.2",
+                              result.stderr)
+                self.assertEqual(self.committed(), {})
+
+    def test_an_override_of_another_major_is_refused(self):
+        for variable, tool in (("METAL2VULKAN_LLVM_DIS", "llvm-dis"),
+                               ("METAL2VULKAN_LLVM_AS", "llvm-as")):
+            with self.subTest(variable=variable):
+                result = self.run_script([self.pinned], env={variable: str(self.newer / tool)})
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(f"{variable}={self.newer / tool} is Fake LLVM version {NEWER}.1.2, "
+                              f"but the fixtures pin LLVM {PIN}", result.stderr)
+                self.assertEqual(self.committed(), {})
+
+    def test_text_the_pinned_llvm_as_rejects_fails_and_writes_nothing(self):
+        self.assertEqual(self.run_script([self.pinned]).returncode, 0)
+        before = self.committed()
+        (self.fixtures / "kernel.metal").write_text("kernel void k() { REJECT }\n")
+        for args in ((), ("--check",)):
+            with self.subTest(args=args):
+                result = self.run_script([self.pinned], *args)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(f"kernel.ll: llvm-as of LLVM {PIN} rejects the text:",
+                              result.stderr)
+                self.assertIn("verifier failure", result.stderr)
+                self.assertEqual(self.committed(), before)
+
+    def test_check_names_stale_and_orphan_companions(self):
+        self.assertEqual(self.run_script([self.pinned]).returncode, 0)
+        with open(self.fixtures / "kernel.ll", "a") as ll:
+            ll.write("; edited\n")
+        (self.fixtures / "orphan.ll").write_text("; orphan\n")
+        # Another build of the pinned major writes the same text but is recorded exactly.
+        result = self.run_script([self.patch], "--check")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr.splitlines(),
+                         ["stale: kernel.ll", "stale: TOOLCHAIN", "orphan: orphan.ll",
+                          "air fixtures not up to date (2 sources: 2 checked, 0 not checked)"])
+
+    def toolchain(self):
+        return (self.fixtures / "TOOLCHAIN").read_text().splitlines()
+
+    def test_another_directory_regenerates_alone(self):
+        other = self.root / "crates/metal2vulkan-validation/fixtures/public/reflection"
+        other.mkdir(parents=True)
+        (other / "probe.metal").write_text("kernel void p() {}\n")
+        result = self.run_script([self.pinned], "--dir", "reflection")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(result.stdout.startswith(
+            "regenerated 1 fixtures in crates/metal2vulkan-validation/fixtures/public/reflection"), result.stdout)
+        self.assertEqual(sorted(p.name for p in other.iterdir()),
+                         ["TOOLCHAIN", "probe.air", "probe.air.ll", "probe.ll", "probe.metal"])
+        self.assertEqual(sorted(p.name for p in self.fixtures.iterdir()),
+                         ["kernel.metal", "legacy.metal"])
+        self.assertEqual(self.run_script([self.pinned], "--dir", "Reflection").returncode, 2)
+        self.assertEqual(self.run_script([self.pinned], "--dir", "absent").returncode, 1)
+
+    def mixed(self):
+        """Every fixture compiled by Metal 1.0 (SDK 99.0), then `kernel` alone by Metal 2.0
+        (SDK 100.0): the committed files of a host that updated its Metal toolchain and compiled
+        one new fixture."""
+        self.assertEqual(self.run_script([self.pinned]).returncode, 0)
+        result = self.run_script([self.pinned], "kernel", env=NEW_METAL)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "regenerated 1 of 2 fixtures in "
+                         f"crates/metal2vulkan-validation/fixtures/public/engine ({NEW_RECORD})\n")
+
+    def test_a_partial_regeneration_records_its_fixtures_toolchain(self):
+        self.mixed()
+        files = self.committed()
+        self.assertEqual(self.toolchain()[1:], [
+            "metal: Fake metal version 1.0",
+            "macosx-sdk: 99.0 (99A1)",
+            f"llvm: {PIN} (pinned: llvm-dis writes each .ll, and llvm-as must accept it)",
+            f"llvm-dis: Fake LLVM version {PIN}.1.8",
+            f"llvm-as: Fake LLVM version {PIN}.1.8",
+            "# Fixtures compiled by another Metal toolchain (regen-air-fixtures.sh <name>...).",
+            f"fixture kernel: {NEW_RECORD}",
+        ])
+        self.assertIn('!90 = !{!"Fake metal version 2.0"}', files["kernel.ll"])
+        self.assertIn('!90 = !{!"Fake metal version 1.0"}', files["legacy.ll"])
+        # Each host checks exactly the fixtures recorded under its toolchain.
+        for env, checked, other in ((NEW_METAL, "kernel", f"legacy (compiled by {OLD_RECORD})"),
+                                    (None, "legacy", f"kernel (compiled by {NEW_RECORD})")):
+            with self.subTest(checked=checked):
+                check = self.run_script([self.pinned], "--check", env=env)
+                self.assertEqual(check.returncode, 0, check.stderr)
+                self.assertEqual(check.stdout.splitlines(), [
+                    f"not checked: {other}",
+                    "air fixtures up to date (2 sources: 1 checked, 1 not checked)"])
+        # A fixture not checked is not compared, but a checked one still is.
+        with open(self.fixtures / "legacy.air.ll", "a") as ll:
+            ll.write("; edited\n")
+        self.assertEqual(self.run_script([self.pinned], "--check", env=NEW_METAL).returncode, 0)
+        with open(self.fixtures / "kernel.air.ll", "a") as ll:
+            ll.write("; edited\n")
+        check = self.run_script([self.pinned], "--check", env=NEW_METAL)
+        self.assertEqual(check.returncode, 1)
+        self.assertEqual(check.stderr.splitlines(), [
+            "stale: kernel.air.ll",
+            "air fixtures not up to date (2 sources: 1 checked, 1 not checked)"])
+        # Naming a fixture again under the base toolchain drops its record; a plain run
+        # regenerates everything under one toolchain.
+        self.assertEqual(self.run_script([self.pinned], "kernel").returncode, 0)
+        self.assertNotIn(f"fixture kernel: {NEW_RECORD}", self.toolchain())
+        self.assertEqual(len(self.toolchain()), 6)
+        self.assertEqual(self.run_script([self.pinned], env=NEW_METAL).returncode, 0)
+        self.assertEqual(self.toolchain()[1:3],
+                         ["metal: Fake metal version 2.0", "macosx-sdk: 100.0 (100A1)"])
+        self.assertEqual(len(self.toolchain()), 6)
+
+    def test_check_fails_when_a_module_disagrees_with_its_toolchain_record(self):
+        self.mixed()
+        pristine = self.committed()
+        edits = (
+            ("legacy.ll", '!{!"Fake metal version 1.0"}', '!{!"Fake metal version 1.5"}',
+             "toolchain mismatch: legacy.ll records Fake metal version 1.5, SDK 99.0; "
+             f"TOOLCHAIN records {OLD_RECORD}"),
+            ("legacy.air.ll", "[i32 99, i32 0]", "[i32 98, i32 0]",
+             "toolchain mismatch: legacy.air.ll records Fake metal version 1.0, SDK 98.0; "
+             f"TOOLCHAIN records {OLD_RECORD}"),
+            ("kernel.ll", "!llvm.ident = !{!90}\n", "",
+             "toolchain mismatch: kernel.ll records no Metal version, SDK 100.0; "
+             f"TOOLCHAIN records {NEW_RECORD}"),
+            ("TOOLCHAIN", "Fake metal version 2.0;", "Fake metal version 1.0;",
+             "toolchain mismatch: kernel.ll records Fake metal version 2.0, SDK 100.0; "
+             "TOOLCHAIN records metal: Fake metal version 1.0; macosx-sdk: 100.0 (100A1)"),
+        )
+        for file, old, new, message in edits:
+            with self.subTest(file=file):
+                for name, text in pristine.items():
+                    (self.fixtures / name).write_text(text)
+                self.assertIn(old, pristine[file])
+                (self.fixtures / file).write_text(pristine[file].replace(old, new, 1))
+                check = self.run_script([self.pinned], "--check", env=NEW_METAL)
+                self.assertEqual(check.returncode, 1)
+                self.assertIn(message, check.stderr.splitlines())
+
+    def test_a_partial_regeneration_needs_the_recorded_llvm_and_known_fixtures(self):
+        result = self.run_script([self.pinned], "kernel")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no TOOLCHAIN in crates/metal2vulkan-validation/fixtures/public/engine", result.stderr)
+        self.assertEqual(self.run_script([self.pinned]).returncode, 0)
+        before = self.committed()
+        result = self.run_script([self.patch], "kernel", env=NEW_METAL)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("the host's LLVM tools are not the ones TOOLCHAIN records", result.stderr)
+        result = self.run_script([self.pinned], "absent")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no fixture absent", result.stderr)
+        self.assertEqual(self.committed(), before)
+
+    def test_committed_toolchain_records_the_pin(self):
+        lines = (REPO / "crates/metal2vulkan-validation/fixtures/public/engine/TOOLCHAIN").read_text().splitlines()
+        fields = dict(line.split(": ", 1) for line in lines if not line.startswith("#"))
+        self.assertEqual(fields["llvm"].split()[0], str(PIN))
+        for tool in ("llvm-dis", "llvm-as"):
+            with self.subTest(tool=tool):
+                self.assertRegex(fields[tool], rf"[Vv]ersion {PIN}\.")
+
+
+if __name__ == "__main__":
+    unittest.main()

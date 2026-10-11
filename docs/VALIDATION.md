@@ -1,481 +1,313 @@
-# Validation playbook
+# Validation
 
-Validation has two independent contracts: translator byte stability and authored-case semantic
-correctness. Neither SPIR-V validity nor a delta category proves agreement with Metal.
+How to check that the translator and the runtime give Metal's answers. Two contracts are kept
+apart:
 
-Choose the smallest route that proves the claim being made:
+- **Emitter stability**: the SPIR-V the translator emits for owned fixtures does not change
+  unless the change means it to (the golden output hashes).
+- **Semantic correctness**: an authored case gives the same observations on Vulkan as on Metal.
 
-| Goal | Required starting point |
+A valid SPIR-V module proves neither. Choose the smallest route that proves the claim:
+
+| Claim | Starting point |
 |---|---|
-| Ordinary code change | Format, clippy, and parallel product/validation tests |
-| Behavior-preserving translator refactor | Ordinary gate plus exact old/new `corpus-ab` over the structurally affected selection |
-| Intentional shader behavior change | Synthetic regression, reviewed byte drift, and affected authored Metal/candidate evidence |
-| Corpus-wide support or performance claim | Resumable indexed `corpus-triage` audit with its completion/read/time summaries |
+| An ordinary code change | The gate below |
+| A behavior-preserving translator change | The gate, and unchanged golden output hashes |
+| An intentional change of output | A synthetic regression test, the reviewed golden drift (and a `SEMANTICS_VERSION` bump), and the affected authored cases rerun on Metal and Vulkan |
+| A corpus-wide support or performance claim | A resumable indexed `corpus-triage` audit, with its completion, read and time summaries |
 
-## Ordinary gate
+Validation lives in the unpublished crate `crates/metal2vulkan-validation`. Paths below are
+relative to it unless they start with `crates/`, `docs/` or `scripts/`. Each tool's `--help` lists
+every option.
 
-Run Rust tests with Cargo's default available parallelism:
+## The gate
 
 ```sh
 cargo fmt --all
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test -p metal2vulkan --all-features
-cargo test -p metal2vulkan-validation --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo nextest run -p metal2vulkan -p metal2vulkan-air -p metal2vulkan-runtime -p metal2vulkan-devtools --all-features
+cargo nextest run -p metal2vulkan-validation --all-features
+cargo test --workspace --all-features --doc
 ```
 
-CI uses owned synthetic fixtures. Private AIR and machine-specific GPU execution are optional.
+None of these opens a device. They use the repository's own synthetic fixtures; private AIR and
+GPU runs are optional and explicit.
 
-## Private corpus and authored evidence
+## Device tests and GPU safety
 
-### Harvest and incrementally index
+A shader that never terminates keeps a GPU busy after its process is killed, and a wedged GPU can
+hang the host. So everything that opens a device is explicit, bounded and refusable.
 
-Harvesting only creates private sources; it never creates execution obligations or manifests.
+**Device tests compile only under a cfg** (not a feature, since the gate builds with
+`--all-features`):
+
+| cfg | Adds | Device | Run |
+|---|---|---|---|
+| none | GPU-free tests only | none | the gate |
+| `--cfg m2v_cpu_icd` | Vulkan execution tests | a CPU ICD only (lavapipe, SwiftShader) | Linux CI, with `LP_NUM_THREADS=1` |
+| `--cfg m2v_gpu` | Vulkan and Metal execution tests | a real GPU | explicitly, on a host with a GPU |
+
+The two are mutually exclusive. Lint the gated code without running it, in its own target
+directory:
 
 ```sh
-cargo run -p metal2vulkan-validation --release --bin corpus-harvest
-cargo run -p metal2vulkan-validation --bin corpus-index
-cargo run -p metal2vulkan-validation --bin corpus-next -- --limit 1
+CARGO_TARGET_DIR=target/gpucfg RUSTFLAGS='-Dwarnings --cfg m2v_gpu' \
+  cargo clippy -p metal2vulkan-validation --all-targets --all-features -- -D warnings
+RUSTFLAGS='-Dwarnings --cfg m2v_gpu' cargo nextest run -p metal2vulkan-validation --release
 ```
 
-`corpus-next --coverage` orders the same case-less sources by what authoring one would add rather
-than by hash: each row's `reach` is the total number of case-less sources that call the `air.*`
-symbols this source would be the first cased source to call, and `calls` is how many distinct
-symbols it calls at all, which breaks ties toward the cheapest row to author. Coverage is
-source-level -- a symbol counts as covered once any source with a case calls it -- so `reach` is an
-upper bound on what one case closes, not a promise. The query reads only `sources`, `cases`, and
-the cached `triage_analysis` histogram; it opens no source shard.
+- **Device selection is an argument.** Every device-opening binary takes `--device-type cpu|gpu`,
+  with no default. `cpu` matches only a CPU device and never falls back to a GPU; `gpu` takes the
+  loader's first GPU. `corpus-metal` takes only `gpu`.
+- **Waits are bounded.** Every host wait on device work goes through `src/gpu/wait.rs` (10 seconds
+  by default; `--gpu-wait-timeout SECONDS` raises it for one command). A test fails if an
+  unbounded wait appears elsewhere.
+- **The hang tripwire.** When a wait times out, or a submission ends with a device fault, the
+  process writes `~/.cache/m2v-gpu/hang` (JSON: what ran, on what, when), frees nothing and exits
+  with status 86. While the file exists every GPU open is refused; a CPU device never checks it.
+- **If a hang is suspected** (the tripwire, a device-lost, a display blink, an unresponsive UI):
+  stop launching GPU work; read the tripwire; check for other GPU users on the host
+  (`pgrep -fl '[c]argo'`), since another workload may fault the GPU on purpose; check the system
+  log for GPU restarts; reproduce the suspect module on a CPU ICD only, where a stuck shader is an
+  ordinary killable process; add a deterministic regression; then a person removes the tripwire.
 
-Ordinary `corpus-index` runs are incremental: unchanged multi-gigabyte AIR source shards are not
-opened. Use `corpus-index -- --rebuild` only for explicit recovery; `--check` verifies a cloned,
-incrementally synchronized snapshot without performing a second full rebuild. Upgrading a legacy
-index installs shard stamps from file metadata without reading source bodies. Its first lookup of a
-row without a byte location scans only that hash's one aligned shard, records every row location in
-that shard, and then uses direct seeks.
+**The runtime lane** (`runtime_lane::` tests) runs the runtime on a device under
+`VK_LAYER_KHRONOS_validation`. `METAL2VULKAN_LANE_VALIDATION=sync` (or `load-store`) adds the
+layer's synchronization checks to every lane device and prints each failing message as a
+`LANE-VALIDATION <test>: ...` line:
 
-Harvest is shard-local too. A batch is deduplicated in memory, then merged only into buckets that
-received a hash; unrelated source shards are neither opened nor rewritten. The harvest summary
-reports `affected_shards`, and index synchronization reports `source_shards_scanned` and
-`source_bytes_scanned`, so an accidental corpus-wide traversal is visible immediately. A changed
-bucket's compact identities and byte locations are published to SQLite while the merger still has
-them in memory; the following index sync therefore reads zero AIR bytes. If publication is
-interrupted, the unmatched file stamp makes the next sync repair only that bucket. Sanitization
-also removes llvm-dis's input-path `ModuleID` comment, so a scratch-directory name cannot turn an
-identical AIR module into a new content identity.
+```sh
+METAL2VULKAN_LANE_VALIDATION=sync RUSTFLAGS='--cfg m2v_cpu_icd' cargo nextest run \
+  -p metal2vulkan-validation --all-features --no-fail-fast -E 'test(/^runtime_lane::/)'
+```
 
-### Audit authoring capabilities
+**Seeded differential sequences** (`parity::sequences`): 64 seeded, race-free Metal programs of
+render passes, blits, dispatches, indirect commands, fences and events over buffers, heaps and
+textures, run on the runtime and compared with committed Metal results
+(`corpus/observations/parity/sequences.jsonl`) and with a CPU model. A failing seed is shrunk and
+printed. Metal's results are recorded on a Mac by the ignored test
+`parity::sequences::lane::metal_recording::record_metal`, each seed in a child process of its
+own. A seed whose child Metal's driver crashes is recorded as a Metal-side gap, with the crash's
+signature (the call, the faulting frame and the command); the lane then has nothing of Metal's to
+compare that seed with, runs it on the runtime all the same (it must complete with no refusal and
+no validation message), and names it in its output. Under `METAL2VULKAN_LANE_VALIDATION=sync` the
+lane reads each hazard the layer reports against the sequence: the layer takes a shader's buffer
+as accessed over its whole descriptor (the bytes the shader reaches widened to 16-byte granules,
+or from the bound offset to the end where it indexes the buffer), so a hazard between two
+commands that share no byte of its memory changes no answer, and prints as a `SEQUENCE-SYNC` line
+naming what Metal orders between them (nothing, for untracked memory between encoders or a
+concurrent encoder's dispatches). The lane matches the commands by the Vulkan command the layer
+names and by the command buffers it may have checked since the lane last took its messages
+(after each commit). A hazard between commands that share a byte (the generator orders those, so
+the runtime must), on a buffer no command of the sequence bound, or of another shape fails the
+seed. So does one the layer's words fit both to such a pair and to pairs whose bytes are apart;
+the minimized sequence then tells them apart: when it still needs a command of an apart pair,
+the pair sharing bytes alone raised no hazard. Two seeds fail so today (7 and 50, on lavapipe,
+the RTX 3090 and RADV), each settled that way: the hazard is between untracked commands in two
+encoders, which Metal leaves unordered and whose bytes are apart.
 
-`corpus-triage` stores analyzer-versioned structural facts in the disposable index. Its first audit
-reads only selected indexed rows and skips retained blob decoding; repeated audits reuse those facts.
-A newly harvested content hash has no cached facts, so only that new row is analyzed.
+**Generated-program fuzzers** (`metal2vulkan_devtools::fuzz`: structured, irreducible, inline,
+access, workgroup, pointer select) run device-free in the translator's tests
+(`crates/metal2vulkan/src/tests/fuzz_interp.rs`) on its SPIR-V interpreter, at every subgroup
+width, against each generator's reference model. A longer soak:
 
-The authoring-capability audit covers every indexed source, including rows that already have an
-authored case. It selects uncached identities in SQLite, reads only their indexed source slices,
-and fails when a complete census contains a structural requirement that the authored schema and
-executors cannot represent. The shared check consumes reflection—not source names—and covers both
-resource kinds and executable shape/state facts such as texture dimensionality and storage format,
-static-sampler state, depth/stencil outputs, and tessellation interfaces.
+```sh
+METAL2VULKAN_TEST_FUZZ_SOAK='--seeds N [--first S] [--profile P] [--threads 32|64] [--jobs J]' \
+  cargo nextest run --release -p metal2vulkan --all-features --run-ignored only fuzz_soak
+```
 
-The same census also inventories every called `air.*` ABI symbol through the product crate's
-canonical intrinsic-family contract. A call outside that contract adds the typed
-`unrecognized-air-intrinsic` product-support gap, with the exact symbol and aggregate call count.
-Declarations alone are not uses. Product-support gaps are tracked separately from authored-tooling
-requirements, so adding a schema or executor feature cannot make one disappear: the product's
-family contract must gain an intentional lowering or exact static-linkage path, and the lowering
-remains responsible for validating operand and result shapes.
+Their device variants run under `--cfg m2v_gpu`:
+
+```sh
+RUSTFLAGS='-Dwarnings --cfg m2v_gpu' cargo nextest run --release -p metal2vulkan-validation \
+  --all-features -j 1 -E 'test(/_fuzz::.*_on_the_device/)'
+```
+
+## The Linux gate in a container
+
+`scripts/linux-gate` runs CI's Linux job, or any command, in a container: Ubuntu 26.04 pinned by
+digest with CI's packages, plus SwiftShader and `VK_LAYER_KHRONOS_profiles` built from pinned
+commits. It is where CPU-ICD execution runs; the container never sees a host GPU.
+
+```sh
+scripts/linux-gate --cpus N [--slot NAME] [--platform amd64|arm64]            # ci.yml's Linux job
+scripts/linux-gate --cpus N [--slot NAME] [--platform amd64|arm64] \
+    [--icd lavapipe|swiftshader] [--profile P] \
+    [--private-corpus DIR] [--scratch DIR] -- <command> ...                   # any command
+```
+
+- The container gets 4 GiB of memory per CPU. Each `--slot` keeps its own target volume; remove a
+  slot's volumes when you are done with it.
+- The default command, `scripts/linux-gate-ci`, runs every Linux step of `ci.yml` in order: change
+  the two together.
+- `scripts/qualify-public-cases` (also run by CI) runs the public cases on lavapipe in both
+  robustness legs against their committed Metal rows, and fails on anything but a match.
+- lavapipe's vector width follows the host (128 bits on arm64, 256 on x86 with AVX2);
+  `LP_NATIVE_VECTOR_WIDTH=256` forces the wider one.
+
+## The private corpus
+
+Optional, local and never committed: AIR harvested from metallibs on a Mac, kept as JSONL shards
+under `corpus/local/`, with a disposable SQLite index (`corpus/.index.sqlite`) of identities, byte
+locations and cached facts. [corpus/README.md](../crates/metal2vulkan-validation/corpus/README.md)
+describes the formats.
+
+```sh
+cargo run -p metal2vulkan-validation --release --bin corpus-harvest   # macOS
+cargo run -p metal2vulkan-validation --bin corpus-index
+cargo run -p metal2vulkan-validation --bin corpus-status
+```
+
+- **Harvest** merges new rows only into the shards they belong to, and creates no obligations.
+  A row is one entry point of one module; library modules that only supply linked functions are
+  kept apart (`corpus/local/library-modules`).
+- **Indexing is incremental**: an unchanged shard is never opened, and a warm index reads no
+  source bytes. `--rebuild` is for recovery only; `--check` verifies the index against the shards.
+- Sweeps that write into the index run under `lockf /tmp/m2v-index.lock <command>`.
+- Tools built in a worktree default their corpus root to that worktree; pass `--corpus DIR` to use
+  another checkout's.
+
+### Audits
+
+Every audit is a `corpus-triage --audit ...` run over indexed rows, each attempt in a killable
+worker under the 20-second and 500-MiB ceilings, resumable in bounded batches (`--limit N`,
+`--after HASH`), with `--jobs` defaulting to the host's logical CPU count.
+
+| Audit | What it answers |
+|---|---|
+| `authoring-capabilities [--reclassify-all]` | For every indexed AIR identity, whether a case can express and both executors can run its structure (`ToolingRequirement`s). Closed only when `classified == total`, `remaining == 0` and `unresolved == 0`; a warm rerun reads no source shard |
+| `translation --profile P...` | Each row translated for each committed profile, recorded as a typed outcome class under the current product fingerprint (`--current-fingerprint`, `--retry-failures`, `--hash-file PATH` select rows). It fails when a row breaks a ceiling |
+| `budgets --profile P...` | The budget gates from recorded rows: no row above 20 s or 500 MiB, no stopped worker, and each row's ledger peak at least 0.7 of its allocator peak |
+| `specialization --profile P...` | Rows translated under planned function-constant value sets and the pipeline inputs their AIR states, not only with none |
+| `authored-compile [--bless \| --bless-additions \| --case ID]` | Every committed authored case compiled, with the requests its executor builds, on each profile and leg of `corpus/authored-compile.tsv`; it fails on any changed cell. The table is re-blessed on `master` |
+| `bitcode-reader` | The bitcode reader's decode compared with `llvm-dis`, and the intrinsic census |
+| focused audits (`rasterization-rate-maps`, `sample-rate`, `ulong-textures`, `fragment-varyings`, `linked-functions`) | One structural family, selected by current facts, translated in batches |
 
 ```sh
 cargo run -p metal2vulkan-validation --release --bin corpus-triage -- \
   --audit authoring-capabilities --limit 100000
+lockf /tmp/m2v-index.lock cargo run --release -p metal2vulkan-validation --bin corpus-triage -- \
+  --audit translation --profile vk12-floor --profile moltenvk-m3 --current-fingerprint --limit 500 --summary-only
+cargo run --release -p metal2vulkan-validation --bin corpus-triage -- \
+  --audit budgets --profile vk12-floor --profile moltenvk-m3 --summary-only
 ```
 
-After changing the product or source-derived structural contract, bump the analyzer ABI and add
-`--reclassify-all`. It deliberately selects every indexed identity up to `--limit`, reopens the
-indexed source slices, and replaces their facts under the new contract. This is the cold closure
-proof; follow it with the ordinary command above, which must select no rows and open/read zero source
-shards once the index is warm.
+Other corpus tools:
 
-The summary exposes classified and remaining counts plus exact shard bytes read, so both an
-incomplete support claim and an accidental corpus rescan are visible. Classification defaults to
-the host's available logical CPU count (the equivalent of `nproc`). Only one parsed source may wait
-outside the workers (individual rows can be tens of MiB), result channels are bounded, and cache
-writes are committed in fixed-size batches, so a full recomputation does not retain the corpus in
-memory.
+- `corpus-pipeline --device-type cpu|gpu --profile P` asks a Vulkan driver to create each
+  translated pipeline, without dispatching anything (driver acceptance).
+- `--profiles-layer P` (on `corpus-vulkan` and `corpus-pipeline`) runs every context through
+  `VK_LAYER_KHRONOS_profiles` restricted to a committed profile, to test a profile on a device that
+  exceeds it.
 
-### Run the bounded translation census
+## Authored cases
 
-The translation census is resumable and uses the same indexed source locations. Discovery skips any
-hash that has already translated (or has been classified as requiring authored linkage), while
-`--current-fingerprint` performs a fresh regression sweep after product or translation-audit harness
-changes. Its cache fingerprint covers both contracts. `--retry-failures` re-runs only failures
-recorded for that exact fingerprint. `--retry-linkage` resumably revisits every row that an older
-fingerprint classified as requiring linkage but the current fingerprint has not attempted.
-Uncursored batches still prioritize historical failures, but materialize that compact priority set
-once rather than probing the complete audit history independently for every indexed identity;
-cursor pages use strict hash order and skip the priority work entirely.
-
-Rows whose exact AIR flow proves that an observed visible-table operation depends on table contents
-are classified as `authored_linkage_required` before spawning translation tools. Dead lookups remain
-ordinary translation work, while unsupported pointer escapes remain failures; the shortcut applies
-only when the shared structural audit proves authored linkage is the sole missing semantic input.
-Direct `!air.visible_function_references` are different: their metadata already names the logical
-symbol. The audit resolves that symbol recursively when exactly one retained module from the same
-library defines it, using the disposable SQLite `(library, symbol)` index and the module's exact
-JSONL byte range. When parent-library resolution is missing or ambiguous, an exact authored case
-may instead name cross-library reference modules and their recursive dependency closure. Function
-tables likewise require exact authored slot population. For either authored linkage form, the
-isolated worker reads only that identity's hash-derived case shard, checks every case against the
-source row it already owns, translates with the exact linked modules, slots, and function
-constants, and validates every resulting module. The row is `translated` only when all of its
-authored cases succeed; a row with no complete authored population remains
-`authored_linkage_required`.
-
-`--tier-census` is retained as compatibility telemetry. Product translation now reports `default`
-for any successfully constructed module and `fallback` for a construction error; representation
-selection is deliberately not exposed as validator-gated tier adoption. The disposable index can
-resume this measurement without rescanning warm source shards. Inputs that structurally require
-authored linkage remain `authored_linkage_required`.
-
-For a targeted regression set, `--hash-file PATH` reads the lowercase SHA-256 in the first
-whitespace-delimited field of each non-empty line. It audits exactly those identities through their
-indexed byte ranges, so a saved structural manifest never requires a shard or corpus rescan. Combine
-it with `--tier-census` to persist the compatibility construction result for exactly that set.
-
-Translation workers default to the host's available logical CPU count (the equivalent of `nproc`).
-An explicit `--jobs N` is an operator override, not part of the normal full-corpus command. Each row
-is decoded from its indexed shard slice and translated in an independent child with the
-per-translation limits below. The summary reports source-read time separately from
-translate/validate time so serial decode overhead stays visible. To prevent CPU contention from
-turning into false wall-time failures, all requested workers finish sources below 256 KiB first,
-then at most two workers translate the costly 256-KiB-and-larger lane. Structurally costly
-device-address/function-table rows join that bounded lane regardless of serialized size. Inputs no
-larger than 384 KiB with at least 370 source blocks and 400 call instructions use a dedicated
-single-worker sublane, so their attempts cannot consume one another's wall-time budget while
-unrelated costly rows continue on the other worker.
+A case is a JSON manifest that names one AIR (by hash) and every resource, initial byte, function
+constant, dispatch or draw, output region and comparison rule. Runners do not infer, seed, resize,
+repair or reinterpret anything. Cases live in `corpus/cases/`, Metal and Vulkan observations in
+`corpus/observations/`, keyed by the case's semantic ID. The schema and its resource kinds are in
+[the crate's README](../crates/metal2vulkan-validation/README.md); they include out-of-bounds
+targets for containment checks (`out_of_bounds`), sparse textures (`sparse`), fragment, vertex,
+tessellation and tile cases, argument buffers and indirect command buffers.
 
 ```sh
-cargo run --release -p metal2vulkan-validation --bin corpus-triage -- \
-  --audit translation --limit 500 --summary-only
-cargo run --release -p metal2vulkan-validation --bin corpus-triage -- \
-  --audit translation --retry-failures --limit 500 --summary-only
-cargo run --release -p metal2vulkan-validation --bin corpus-triage -- \
-  --audit translation --tier-census --limit 500 --summary-only
-cargo run --release -p metal2vulkan-validation --bin corpus-triage -- \
-  --audit translation --hash-file imageblock-sources.txt --tier-census --summary-only
-```
-
-The 500-row checkpoint is the measured default for the current 88,820-row corpus: unlike a
-1,000-row checkpoint containing several of its largest modules, it retained comfortable margin
-under the repository's 20-second workflow ceiling while still persisting every ten completions.
-Jobs default to the host's available logical cores (`nproc`). Explicitly increasing that value
-beyond the available cores can starve individual workers and create false timeouts.
-
-The translation audit supplies the validation graphics executor's single-sample pipeline contract
-when lowering `air.get_num_samples.i32`; authored candidate execution uses that same value. This is
-not a product default: general callers provide their exact raster sample count through
-`TransformOptions` or the CLI.
-
-Each translation runs in a killable child with a 20-second / 500-MiB ceiling. The parent owns the
-child's scratch subtree, so success, failure, timeout, and memory termination all have the same
-deterministic cleanup path; a killed child never strands a PID-named directory. Completed results
-cross a queue bounded by the requested worker count. If a ten-row SQLite checkpoint fails, the
-parent cancels unclaimed work and drains only the in-flight bounded queue before reporting the
-database error.
-
-### Run focused structural audits
-
-Visible-function-table lowering can be audited in deterministic bounded batches without traversing
-the corpus. The summary names the first and last hash; pass the last hash back as `--after` to read
-the next batch:
-
-```sh
-cargo run -p metal2vulkan-validation --bin corpus-triage -- \
-  --audit visible-function-tables --limit 200 --summary-only
-cargo run -p metal2vulkan-validation --bin corpus-triage -- \
-  --audit visible-function-tables --after LAST_SHA256 --limit 200 --summary-only
-```
-
-The audit distinguishes direct/cast calls, table-handle and callback-pointer threading through
-internal helper parameters, authored slot nullness checks, and unsupported pointer escapes.
-Function-constant-wrapped table parameters retain the same authored-linkage role. Dynamic
-dispatchers contain only linked functions whose LLVM signature matches the call site, allowing one
-authored table to hold heterogeneous visible-function types. AIR's exact `ptrtoint` / truncate /
-compare-with-`1` opaque-intersection sentinel probe is folded to false for authored visible tables,
-whose slots are strictly linked functions or null; other pointer-integer observations remain
-unsupported.
-
-Ray-intersection families use the same indexed cursor workflow:
-
-```sh
-cargo run -p metal2vulkan-validation --bin corpus-triage -- \
-  --audit ray-intersections --limit 200 --summary-only
-cargo run -p metal2vulkan-validation --bin corpus-triage -- \
-  --audit ray-intersections --after LAST_SHA256 --limit 200 --summary-only
-```
-
-The product crate owns the compositional `air.intersect.*` family descriptor. The audit checks each
-callee's exact return aggregate and argument count against that descriptor, so validation and
-translation cannot drift into separate whole-symbol allowlists.
-
-Focused audits select cached structural facts, not unsupported-requirement rows. A feature therefore
-remains auditable after it becomes fully supported. Device-address captures use the same cursor and
-the same killable 20-second / 500-MiB translation worker as the full census:
-
-```sh
-cargo run --release -p metal2vulkan-validation --bin corpus-triage -- \
-  --audit device-address-hierarchy --limit 200 --summary-only
-cargo run --release -p metal2vulkan-validation --bin corpus-triage -- \
-  --audit device-address-hierarchy --after LAST_SHA256 --limit 200 --summary-only
-```
-
-### Author an executable case
-
-Authored fragment cases are executable, not review-only: `render_targets`, `depth_stencil`, and
-`draw` feed real Metal and Vulkan render pipelines. Depth outputs preserve the reflected AIR
-`any`/`less`/`greater` qualifier, while stencil outputs use the native fragment stencil-export
-contract. Each runner derives the same fullscreen vertex inputs from the
-fragment AIR interface, and the candidate dependency hash covers both generated vertex SPIR-V and
-translated fragment SPIR-V. Render-target formats retain their exact channel width across both
-executors, including scalar `R32Float`, two-channel `Rg32Float`, and four-channel `Rgba32Float`.
-Authored Vulkan draws use clockwise front faces, matching a Metal render encoder's default winding;
-this keeps `[[front_facing]]` values comparable without rewriting the shader builtin.
-
-Custom fragment `[[imageblock_data]]` is authored separately as `fragment_imageblock`: one
-tightly-packed plane per accessed AIR user semantic, with an explicit `half`, `half4`, `uchar4`, or
-`ushort` format and the same input/output/inout byte rules as other resources. `half` remains the
-omittable default. Metal initializes and resolves those exact types with generated fragment helpers
-in the same render pass; Vulkan binds the corresponding storage-image formats under ordered pixel
-interlock. `output.kind: fragment_imageblock` selects a semantic and 2D region for comparison.
-
-Framebuffer-fetch inputs reuse the authored render target at the same attachment index. Metal
-loads that attachment natively; Vulkan binds the same initialized image as both a color attachment
-and subpass input in `GENERAL` layout with a by-region self-dependency, preserving the single-pass
-read/modify/write contract. These cases use the ordinary one-instance fullscreen triangle so each
-sample has one fragment invocation; manifests that request intra-draw overlapping framebuffer
-fetches are rejected instead of assuming an unavailable raster-order attachment extension.
-
-Kernel functions with implicit imageblock attachments execute as Metal tile pipelines and Vulkan
-storage-image attachment planes. Their render-target bytes are the shared initial pixel values.
-The exact scalar/vector plane format is reflected for `half`, `half2`, `half4`, `float`, and
-32-bit integer AIR imageblock calls rather than padding narrow planes to four channels.
-`imageblock.implicit_coverage: full_single_sample` explicitly requests the fullscreen,
-color-write-disabled Metal coverage prepass needed for ordinary implicit imageblock writes to
-persist through the render-pass store action.
-
-Authored vertex cases use the same graphics executor with literal vertex attributes and an explicit
-`vertex_observation`. Product reflection carries vertex-output type, field name, and linker semantic;
-the generated fragment companion observes that exact interface and writes attachment zero.
-
-Inspect the selected sanitized AIR. Write one meaningful manifest with exact resources, bytes,
-function constants, dispatch/draw parameters, output region, exact comparison, and rationale. Then:
-
-For an AIR instance acceleration structure, declare `acceleration_structures` with its Metal
-binding and explicit `child_references`. The oracle constructs identity instances of a canonical
-triangle; candidates serialize the count and host-defined child payloads using the product shadow
-ABI. Do not compare raw child-pointer identities across Metal and Vulkan.
-
-For an AIR primitive acceleration structure, set `kind` to `primitive` and provide
-`primitive_triangles_b64`: tightly packed little-endian triangle vertices (nine `f32` values per
-triangle). Metal builds a primitive AS from those exact vertices. Vulkan consumes the same bytes
-through the reflected geometry shadow when AIR intersection lowering requires it; an unused native
-handle correctly has no Vulkan descriptor.
-
-```sh
-cargo run -p metal2vulkan-validation --bin corpus-case-check -- \
-  --manifest /path/to/case.json --install
 cargo run -p metal2vulkan-validation --bin corpus-index
-cargo run -p metal2vulkan-validation --bin corpus-index -- --check
+# Read an indexed AIR function and write one manifest for it.
+cargo run -p metal2vulkan-validation --bin corpus-case-check -- --manifest /path/to/case.json --install
+cargo run -p metal2vulkan-validation --bin corpus-index
 cargo run -p metal2vulkan-validation --bin corpus-status
 ```
 
-If the AIR cannot yet be authored safely, record why without creating a case or evidence row:
-
-```sh
-cargo run -p metal2vulkan-validation --bin corpus-next -- \
-  --review-air AIR_SHA256 --reason "explicit unsupported requirement" --reviewed-by ID
-```
-
-The aligned review note remains an `unplanned` queue annotation and survives index rebuilds. It is
-removed when a case for that AIR is installed.
-
-### Optional model proposals
-
-For large private corpora, `corpus-openrouter-propose` may be used as an optional
-offline proposal source. It sends sanitized AIR to the configured OpenRouter model, so live use
-requires an explicit private-upload acknowledgement and an API key supplied only through
-`OPENROUTER_API_KEY`. Responses remain gitignored under `validation/corpus/local/proposals/` and
-are not cases or evidence. Every proposed manifest still requires AIR-specific review, mechanical
-checking, installation, and Metal qualification through the commands below; the script performs
-none of those acceptance steps.
-
-The checker recomputes identities, verifies source hash and AIR metadata, rejects malformed or
-duplicate resources, and validates output bounds and product reflection. A cyclic module must use
-`execution_safety: authored_bounded` and explain which literal input or function constant gives
-every reachable loop a finite bound; `loop_free` remains mechanically checked. It never supplies
-missing facts.
-
-Replacing an installed `(air_sha256, name)` slot is atomic. To remove one explicitly, including
-only that identity's observations:
-
-```sh
-cargo run -p metal2vulkan-validation --bin corpus-case-check -- \
-  --delete-air AIR_SHA256 --delete-name CASE_NAME
-```
-
-### Re-check the installed store against the current product
-
-An authored case is evidence about the bytes this translator emits **today**. A product change that
-moves a descriptor slot or starts requiring a resource turns that evidence into a manifest the
-checker no longer accepts, with its Metal and candidate observations still committed beside it.
-`corpus-index --check` does not see this: it verifies the index against the shards, not the shards
-against the product.
-
-```sh
-cargo run --release -p metal2vulkan-validation --bin corpus-case-check -- --recheck-all
-```
-
-It re-runs the shared checker over every installed case, names each one it now rejects with the
-checker's own reasons, and exits non-zero if any are stale. It needs the private AIR sources, so it
-is a developer command rather than a CI gate. Run it after any change to reflection, to the
-descriptor ABI, or to the authored schema — a full-corpus translation A/B measures status and bytes
-and will not tell you the store went stale.
+- Editing a manifest replaces its `(air_sha256, name)` slot; observations of the old identity are
+  removed.
+- After a change to the AIR layer, reflection, the descriptor ABI or the case schema, re-check every
+  installed case: `corpus-case-check --recheck-all` (needs the private sources). CI re-checks the
+  cases over public fixtures.
 
 ## Contract 1: emitter stability
 
-Preserve the old translator binary, build the new one, and use the smallest useful explicit
-selection:
-
-```text
-single reproducer
-  -> owned synthetic canary
-  -> structurally affected private shards
-  -> full background corpus
-```
-
-```sh
-cargo run -p metal2vulkan-validation --release --bin corpus-ab -- \
-  --old ./m2v-old --new target/release/metal2vulkan \
-  --canary --expect-no-change
-
-cargo run -p metal2vulkan-validation --release --bin corpus-ab -- \
-  --old ./m2v-old --new target/release/metal2vulkan \
-  --air-list affected.txt --fail-on-unlisted-change \
-  --allow-spv-change intentional.txt \
-  --allow-fallback-to-success expected-new-support.txt
-```
-
-Selections are `--air-sha256`, `--air-list`, `--shard`, and `--canary`. Reports distinguish
-unchanged/changed SPIR-V, fallback-to-success, success-to-fallback, valid-to-invalid, and tool or
-timeout failure. Cache reuse includes the AIR hash, translator binary hash, exact options, stage,
-external validator identity, and relevant `METAL2VULKAN_*` translator environment.
-
-For a behavior-preserving refactor, `--expect-no-change` is the hard gate. For intentional work,
-`--fail-on-unlisted-change` makes any drift outside the reviewed hash lists fail.
+`crates/metal2vulkan/src/tests/golden_hashes.rs` pins a hash of the final SPIR-V (or the refusal
+class) of every public fixture entry point on every committed profile. A behavior-preserving change
+keeps every cell; a change that moves one bumps `SEMANTICS_VERSION` and re-blesses
+([CONTRIBUTING.md](../CONTRIBUTING.md#golden-output-hashes-and-semantics_version)). The fixture
+inventory (`crates/metal2vulkan/tests/public_fixture_expectations_engine.tsv`) pins which
+fixtures compile or refuse on which profile. Over the private corpus, the translation audit records
+outcomes, not bytes.
 
 ## Contract 2: semantic correctness
 
-GPU runners accept explicit case IDs only. Metal qualification is first:
+Each case runs first on Metal, then on Vulkan, and the observations are compared.
 
 ```sh
 cargo run -p metal2vulkan-validation --release --bin corpus-metal -- \
-  --case-id CASE --environment-id METAL_ENV
-```
-
-Qualification first requires the shared checker to prove that the selected output maps to a
-shader-writable reflected resource, then executes the literal manifest three times. The selected
-bytes must be identical on all runs; byte-identical in-place transformations remain valid evidence
-because their write contract is established structurally rather than inferred from changed poison
-bytes. The accepted row records case/AIR/input/output hashes, output bytes, environment identity,
-and exact oracle ABI.
-
-An authored `output` with `kind: "none"` records the exact empty byte sequence after normal GPU
-execution. The shared checker accepts it only when product reflection exposes no writable buffer,
-image, attachment, depth/stencil aspect, imageblock member, vertex position, or vertex varying; it
-cannot be used to ignore an observable shader result.
-
-Candidates require a matching Metal slot and run independently:
-
-```sh
-cargo run -p metal2vulkan-validation --release --bin corpus-moltenvk -- \
-  --case-id CASE --metal-environment-id METAL_ENV --environment-id MOLTENVK_ENV
+  --case-id CASE --environment-id METAL_ENV --device-type gpu
 cargo run -p metal2vulkan-validation --release --bin corpus-vulkan -- \
-  --case-id CASE --metal-environment-id METAL_ENV --environment-id VULKAN_ENV
+  --case-id CASE --environment-id VENUE --device-type cpu|gpu
+cargo run -p metal2vulkan-validation --release --bin corpus-moltenvk -- \
+  --case-id CASE --environment-id VENUE --device-type gpu     # macOS
 ```
 
-Each candidate row records the exact input, Metal output, emitted SPIR-V, backend environment, and
-executor ABI dependencies. The runner compares selected candidate bytes only with the recorded
-Metal bytes for the same case. `corpus-moltenvk` is a macOS runner; `corpus-vulkan` requires a
-native Vulkan host (currently Linux) and rejects macOS rather than relabeling MoltenVK evidence.
+- **Metal qualification** (`corpus-metal`) runs the case three times through Metal and records its
+  observation for the environment. `--prepare-only` does the CPU side and stops before a device
+  opens, to screen cases.
+- **The Vulkan candidate** (`corpus-vulkan` on Linux, `corpus-moltenvk` on macOS) translates the
+  case through the public API in a killable compile worker, executes exactly what the binder plans,
+  and compares the observations with Metal's. Every context runs under the validation layer, in a
+  robustness leg: the stated leg enables every robustness feature the device states, and the
+  `robustness-off` leg none, so both containment encodings run.
+- **Batches.** `--batch --out OUT` runs every selected case, one process per case, each killed
+  whole after `--run-timeout`, resuming from `OUT/done.tsv`; `--batch-report` and
+  `--batch-install STORE` read and install the results. A batch starts no GPU run while the
+  tripwire exists.
+- **What counts.** An observation is current only for the product, executor and runtime versions
+  it was made with: a row records the product fingerprint, the executor ABI and `RUNTIME_VERSION`,
+  and a change of any makes it stale until it is rerun. A stored observation, a valid module or a
+  manifest alone is not evidence.
+- **No-effect declarations and reference gaps.** A case may declare that an output equals its
+  authored bytes, and a Metal pipeline creation that fails naming one feature is recorded as a
+  reference gap rather than a pass.
 
-Direct visible-function references and function-table cases use the same commands. A direct
-reference under `visible_function_references` names the logical symbol from AIR's
-`!air.visible_function_references` metadata and the exact harvested module that defines it. Direct
-dependencies may come from a separate explicitly harvested Metal library, matching Metal's linked
-functions API. The Vulkan path recursively closes their dependency metadata, replaces every
-`.MTL_VISIBLE_FN_REF` stub with a direct call, and rejects an unresolved symbol. The checker also
-resolves each authored table slot from the hash-derived private library-module shard and proves that
-the exact module defines the exact authored symbol before either runner starts. Table entries may
-come from a separate explicitly harvested Metal library, matching `MTLLinkedFunctions`' object-based
-linking contract. Metal receives all referenced `MTLFunction` handles through one descriptor and
-creates native function tables. Intersection
-entries may instead author Metal's explicit opaque-triangle sentinel and its sorted signature
-flags; that entry uses the dedicated native opaque-triangle API and needs no library module.
-Vulkan translation specializes visible-table calls to the exact linked AIR definitions; constant
-slots become direct calls and dynamic slots become a switch over the authored population. A
-callback-bearing ray query becomes callback-free only when every possible table slot is explicitly
-opaque triangle and has the exact compositional AIR-family signature. Null slots, linked callbacks,
-and mismatches remain unsupported rather than silently losing callback semantics.
+### Venues
 
-An intersection table nested in an AIR argument buffer is authored separately under
-`argument_buffer_intersection_function_tables` by owner buffer binding and field byte offset. The
-checker resolves that pair through product reflection; Metal writes the native table with the
-entry function's `MTLArgumentEncoder`, while Vulkan traces the corresponding constant struct-member
-load from the owner entry parameter before applying the same opaque-table specialization.
+`cutover/c3-venues.json` lists the venues the cases must pass on: each is one translation key under
+one driver, with its environment ID, committed profile, devices and the legs it records. Today:
+MoltenVK on Apple's M3 Max, lavapipe on arm64 and x86, the AMD Radeon 780M under RADV, Intel's
+Raptor Lake Xe graphics under ANV, and the NVIDIA GeForce RTX 5080 Laptop GPU.
+`cutover/c3-references.json` names the Metal environment that is the reference (the Apple M3 Max),
+with its declared identity; each case is judged against its row.
 
-A device buffer nested in an AIR argument buffer is authored under `argument_buffer_buffers` by
-the same owner-buffer binding and field byte offset, with ordinary input/output literal bytes. Metal
-encodes the native buffer at the reflected argument index. Vulkan allocates it with device-address
-support and writes that address into the reflected owner field; the BDA lowering then dereferences
-the identical logical resource. `argument_buffer_buffer` output selection observes writable nested
-buffers directly.
+`corpus-status --c3` judges every venue's slot of every case, in both legs: `match`, `reviewed`,
+`device_gap`, `out_of_scope_ray_tracing`, `reference_gap`, `mismatch`, `refused`, `stale` or
+`missing`. A row recorded on a device or driver its venue does not allow is rejected. A change that
+moves a venue's profile fingerprint without changing any artifact is handled by rekeying its
+records (`corpus-status --venue-keys`, then `--rekey-venues`); a change that moves artifacts needs a
+re-record on that venue.
 
-A top-level AIR `array_ref<void>` is authored under `device_buffer_arrays`. `binding` is the
-literal AIR/Metal base buffer index, `length` is the address-table extent, and each sorted sparse
-element owns ordinary input/output literal bytes; undeclared slots are null. Metal flattens the
-elements onto consecutive native buffer indices. Vulkan binds an address-table buffer at the base,
-allocates every element separately with device-address support, and writes their addresses into the
-matching slots. `device_buffer_array_element` output selection observes one writable element.
+### Draw A/B and command replay
 
-Every function table declares `size` separately from `entries`. The size is the native table
-capacity; omitted indices are authored null slots, so `entries: []` honestly represents an all-null
-table without inventing a linked function. Entry indices must be unique, sorted, and smaller than
-the declared size. This distinction is semantic: AIR table-size and null-slot queries observe it.
+- `corpus-draw-ab` draws a logged render pipeline's fragment function through the runtime on seeded
+  inputs and records what it writes and how long it takes; `corpus-draw-ab compare --base DIR
+  --change DIR --draws FILE --runs N` compares two builds. A draw skipped in both legs is not
+  compared, and fails the comparison unless named in `--expected-skips`.
+- `command-replay` runs one recorded stretch of Metal commands through the runtime from a manifest
+  that names every object and byte.
+- `format-scout` drives every Metal pixel format through the runtime's public API, one use at a
+  time, and records what each use did.
 
-Dependency consequences are deliberately narrow:
+## The product bug loop
 
-- unchanged SPIR-V and matching dependencies reuse candidate evidence;
-- changed SPIR-V reuses matching Metal evidence and reruns affected candidates;
-- replacing a named case deletes only the old identity's observations, then requires Metal again;
-- changed Metal ABI removes only incompatible Metal slots and their downstream usability;
-- changed candidate ABI or backend environment reruns only that backend/environment slot.
+1. Say whether the SPIR-V should change, and name the structural feature.
+2. Reproduce with one AIR or an owned synthetic fixture.
+3. Add a synthetic regression test where practical.
+4. Fix the product, without names or environment gates.
+5. Run the gate's format, clippy and the narrow tests.
+6. Check the golden drift: only the intended cells move.
+7. Where cases cover the change, rerun them on Metal (only if the Metal side changed) and on the
+   affected venues.
 
-## Product bug loop
+## What stays private
 
-1. State whether SPIR-V should change and identify the structural feature.
-2. Reproduce with one AIR or owned synthetic fixture.
-3. Add a structural synthetic regression when practical.
-4. Fix product behavior without corpus names or environment gates.
-5. Run format, clippy, and serial product tests.
-6. Run narrow A/B with unlisted drift failing, then expand to related canaries/shards.
-7. For intentional changed SPIR-V with authored cases, reuse matching Metal and rerun only affected
-   candidates.
-8. Report exactly which scope was executed and which remains unaudited.
-
-The live corpus contains only current cases and current experiment slots. Git history, not active
-superseded rows or mutable append-only rows, preserves replacements.
-
-## Package and privacy boundary
-
-The published product crate excludes `validation/`, docs, scripts, captures, and private sources.
-Committed validation artifacts are owned synthetic fixtures, authored manifests, and
-hash-identified observations. Never commit `validation/corpus/local/`, `.index.sqlite`, metallibs,
-AIR blobs, SPIR-V dumps, or third-party shader bodies.
+The published crates exclude validation, docs, scripts and every capture. Committed validation
+data is owned synthetic fixtures, authored manifests and hash-identified observations. Never commit
+`corpus/local/`, the index, metallibs, AIR, SPIR-V dumps, third-party shader bodies, or anything
+derived from a consumer's guest shaders.

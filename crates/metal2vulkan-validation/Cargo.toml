@@ -1,0 +1,128 @@
+[package]
+name = "metal2vulkan-validation"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Authored-case validation tools for metal2vulkan"
+# Never publish this workspace member to crates.io (oracle/executor + private corpus).
+publish = false
+autobins = false
+readme = "README.md"
+# Belt-and-suspenders if someone packages this crate locally: keep private harvest out.
+exclude = [
+    "corpus/local/",
+    "corpus/local/**",
+    "target/",
+    "**/*.air",
+    "**/*.metallib",
+    "**/*.mtlb",
+    "**/*.spv",
+    "**/*.spvasm",
+]
+
+[dependencies]
+# `cli` adds nothing validation uses (it builds the product's binary and enables `serde`), but with
+# it the product's library here has the feature set of `cargo test -p metal2vulkan --all-features`,
+# so one target dir builds the product (and the runtime on it) once for both suites, not twice.
+metal2vulkan = { path = "../metal2vulkan", features = ["serde", "ash", "cli"] }
+# The AIR front end the product pins exactly: the same crate the product
+# builds, which validation decodes, canonicalizes, and audits AIR through.
+metal2vulkan-air = { path = "../metal2vulkan-air" }
+metal2vulkan-runtime = { path = "../metal2vulkan-runtime" }
+metal2vulkan-devtools = { path = "../metal2vulkan-devtools" }
+base64 = "0.22"
+libc.workspace = true
+memchr = "2"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+wait-timeout = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-metal = "0.3"
+ash = { workspace = true, features = ["loaded"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ash = { workspace = true, features = ["loaded"] }
+
+# Device-executing tests are gated on non-default cfgs rather than features, because the ordinary
+# gate builds with `--all-features`: `--cfg m2v_gpu` (a real GPU) and `--cfg m2v_cpu_icd` (a CPU
+# Vulkan ICD such as lavapipe). See docs/VALIDATION.md. `--cfg m2v_system_alloc` keeps the system
+# allocator in the lib test binary for the runtime lanes' cost measurements (worker/alloc.rs).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(m2v_gpu)", "cfg(m2v_cpu_icd)", "cfg(m2v_system_alloc)"] }
+
+[build-dependencies]
+sha2.workspace = true
+
+[dev-dependencies]
+# Resolves the modules the classifier's sources reach (triage's analyzer-key test).
+syn = { version = "2", features = ["full", "visit"] }
+proc-macro2 = "1"
+
+# A binary without unit tests sets `test = false`: `cargo test`, nextest and `clippy --all-targets`
+# then build no test harness of it (one compile and one link of the whole translator, runtime and
+# validation saved per binary on every test build). The integration test `bins.rs` fails when such a
+# binary's sources hold a `#[test]`; a binary that gains unit tests drops the line.
+[[bin]]
+name = "corpus-draw-ab"
+path = "src/bin/corpus-draw-ab.rs"
+
+[[bin]]
+name = "command-replay"
+path = "src/bin/command-replay.rs"
+test = false
+
+[[bin]]
+name = "corpus-harvest"
+path = "src/bin/corpus-harvest.rs"
+
+[[bin]]
+name = "corpus-index"
+path = "src/bin/corpus-index.rs"
+test = false
+
+[[bin]]
+name = "corpus-case-check"
+path = "src/bin/corpus-case-check.rs"
+test = false
+
+[[bin]]
+name = "corpus-status"
+path = "src/bin/corpus-status.rs"
+test = false
+
+[[bin]]
+name = "corpus-metal"
+path = "src/bin/corpus-metal.rs"
+test = false
+
+[[bin]]
+name = "corpus-moltenvk"
+path = "src/bin/corpus-moltenvk.rs"
+test = false
+
+[[bin]]
+name = "corpus-vulkan"
+path = "src/bin/corpus-vulkan.rs"
+test = false
+
+[[bin]]
+name = "corpus-pipeline"
+path = "src/bin/corpus-pipeline.rs"
+
+[[bin]]
+name = "corpus-triage"
+path = "src/bin/corpus-triage.rs"
+
+[[bin]]
+name = "format-scout"
+path = "src/bin/format-scout.rs"
+test = false
+

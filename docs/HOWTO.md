@@ -1,290 +1,149 @@
-# How to translate and integrate a shader
+# Integrating metal2vulkan
 
-This guide takes one Metal AIR or sanitized LLVM-IR module from input bytes to a validated Vulkan
-shader and the host state needed to use it. For the complete field-by-field reflection contract, see
-[Shader reflection for consumers](REFLECTION.md).
+The checklist around the library: the tools each piece needs, caching, failures, isolating a
+compile and checking an integration. The API itself is [API.md](API.md); the runtime's is
+[its README](../crates/metal2vulkan-runtime/README.md).
 
-## 1. Install the tools
+## 1. Tools
 
-Product translation uses two external executables:
+The libraries read AIR bitcode (a metallib, a bitcode wrapper or a raw module) and run no external
+tool. The command line (feature `cli`) runs two, both optional:
 
-- `llvm-dis` converts AIR bitcode to LLVM IR. It is not needed when the input is already textual
-  `.ll`.
-- `spirv-val` validates the single constructed output under the Vulkan 1.2 environment. Its verdict
-  cannot trigger a repair or select another representation.
+- `llvm-as` (LLVM 21 or newer) to assemble an LLVM text input (`.ll`). Not needed for a metallib
+  or bitcode.
+- `spirv-val` (SPIRV-Tools) to check each module it writes. When it is missing the tool says so and
+  still writes the modules, which the library has verified itself.
 
-Put both tools on `PATH`, or set an absolute per-tool override:
+Put them on `PATH`, or name each one:
 
 ```sh
-export METAL2VULKAN_LLVM_DIS=/path/to/llvm-dis
+export METAL2VULKAN_LLVM_AS=/path/to/llvm-as
 export METAL2VULKAN_SPIRV_VAL=/path/to/spirv-val
 ```
 
-Install the CLI with reflection JSON enabled:
+The runtime opens the Vulkan loader when it makes a device (or takes the consumer's
+`vkGetInstanceProcAddr` when it adopts one). Nothing links against Vulkan at build time.
 
-```sh
-cargo install metal2vulkan --features serde
-```
+## 2. Compile
 
-## 2. Translate from the command line
+From the command line, see the [README](../README.md#command-line). From Rust, [API.md](API.md)
+walks the flow in the order a consumer meets it:
 
-The default `--stage auto` reads `!air.vertex`, `!air.fragment`, or `!air.kernel` metadata from the
-module:
+1. [A device](API.md#1-a-device): describe the Vulkan device as created and choose a policy.
+2. [A library](API.md#2-a-library): parse a metallib or AIR bitcode.
+3. [A compute pipeline](API.md#3-a-compute-pipeline) or
+   [a render pipeline](API.md#4-a-render-pipeline), under a `Budget`.
+4. [The interface and the plan](API.md#5-the-interface-and-the-plan): the layout, what each slot
+   binds, what a dispatch or draw needs.
+5. [At bind time](API.md#6-at-bind-time): descriptor writes and push-constant bytes from what is
+   bound.
 
-```sh
-metal2vulkan input.air output.spv --emit-meta reflection.json
-```
+Every `air.simd_*` operation keeps Metal's 32-lane simdgroup; there is no option to use the
+driver's subgroup width instead.
 
-Successful output contains `PASS`; the process exits `0` after writing validated SPIR-V and schema-
-versioned reflection. Use an explicit stage only when appropriate:
+To read AIR without translating it (list a metallib's functions, decode a module into typed IR,
+read its entry points' bindings, canonicalize an entry under function-constant values), depend on
+[`metal2vulkan-air`](../crates/metal2vulkan-air). Use the same version as `metal2vulkan`, which
+pins it exactly; the translator's input errors are that crate's types.
 
-```sh
-metal2vulkan input.ll output.spv --stage vertex
-metal2vulkan input.ll output.spv --stage fragment
-metal2vulkan input.ll output.spv --stage kernel
-metal2vulkan input.ll passthrough.spv --stage passthrough
-```
+## 3. Cache
 
-Passthrough generation has no Metal interface metadata, so it cannot be combined with
-`--emit-meta`. The accepted alias `--stage compute` is equivalent to `kernel`.
+The translator keeps no cache; it gives you keys and encodings to keep one
+([API.md section 7](API.md#7-caching)):
 
-These options affect pipeline- or dispatch-dependent lowering:
+- A key is a SHA-256 of the inputs, `cache::SEMANTICS_VERSION` and the device's profile
+  fingerprint, known before compiling.
+- A decode checks the format and semantics versions, the key, the profile fingerprint and a
+  checksum. Every `ArtifactError` is a cache miss: compile again and replace the entry.
+- The versions move independently: the crate's (the API), `SEMANTICS_VERSION` (the output; a bump
+  misses every cached artifact), `ARTIFACT_FORMAT_VERSION` (the encoding) and `RUNTIME_VERSION`
+  (what the runtime does with an unchanged artifact).
 
-| Option | Supply it when |
-|---|---|
-| `--raster-samples 1|2|4|8|16|32|64` | Fragment AIR calls `air.get_num_samples.i32`; use the exact graphics-pipeline sample count |
-| `--local X,Y,Z` | Kernel dispatches use a threadgroup size other than the default `64,1,1` |
-| `--threads-per-grid X,Y,Z` | Reflect one fixed Metal `dispatchThreads` grid for region planning |
-| `--threads-per-grid-push-constant OFFSET` | Move the default 48-byte dispatch-region payload from offset 0 to `OFFSET` |
-| `--whole-workgroups` | Assert every kernel launch covers complete workgroups and use one fixed-local-size pipeline |
+### The runtime's shader cache
 
-Every `air.simd_*` lowering keeps Metal's 32-lane simdgroup contract unconditionally; there is no
-option for it, because there is no correct module that wants the driver's subgroup width instead.
-Do not use either option as a workaround for an unrelated translation failure.
+The runtime keeps every shader it translates on disk, as Metal programs get from the OS, so a
+second process does not translate it again. It cannot be turned off.
 
-## 3. Translate from Rust
+- **Where.** By default `~/Library/Caches/metal2vulkan` on macOS, `$XDG_CACHE_HOME/metal2vulkan`
+  elsewhere, or `~/.cache/metal2vulkan` when `XDG_CACHE_HOME` is unset. `ShaderCacheOptions`
+  (in `DeviceOptions`, or `RawDevice` for an adopted device) names another directory. Several
+  processes and builds may share it; each build reads only its own translations.
+- **How much.** At most `capacity` bytes on disk (25 GiB by default), least recently used first;
+  another build's entries go after 30 days unused. In memory, at most `memory_capacity` bytes
+  (256 MiB by default): a pipeline state made again takes its translation from there without
+  reading the disk.
+- **The driver's pipeline cache.** Each pipeline is made with a `VkPipelineCache` of its own,
+  seeded from a record named by what the making reads (its SPIR-V, layout and state, and the
+  driver's identity) and written back only when the making added to it. After an update of
+  metal2vulkan, a pipeline whose SPIR-V and state did not change is made from its record; a driver
+  update starts empty. On drivers that report `pipelineBinaryInternalCacheControl` (NVIDIA's), a
+  device the runtime makes turns the driver's own internal cache off; an adopted device keeps what
+  its creator chose.
+- **When it fills or a write fails.** Each device says so once, through its `MessageSink` (or on
+  stderr) as a `Warning` whose `id_name` is `metal2vulkan-shader-cache-evicted` or
+  `metal2vulkan-shader-cache-write-failed`. Match on `id_name`, never on the text. Later events are
+  counted in `Device::shader_cache_statistics`.
+- **Failures.** Making or adopting a device fails with `Error::ShaderCache` when the directory
+  cannot be made or written. After that, a failed read or write only costs a translation.
+- **Cold runs.** To measure with nothing cached, give the device an empty directory, and turn the
+  driver's own shader cache off (`__GL_SHADER_DISK_CACHE=0` for NVIDIA,
+  `MESA_SHADER_CACHE_DISABLE=true` for Mesa). Give each test its own directory.
+- **It is a cache.** Deleting the directory, or any file in it, is always safe.
 
-Use `translate_reflected` for an `.air`/`.ll` path and
-`translate_sanitized_native_reflected` when sanitized LLVM IR is already in memory. All translation
-entry points require caller-owned scratch space. Give concurrent calls different directories and
-remove each directory on success or failure.
+## 4. Handle failures
 
-The repository includes a complete, compiled example that does this cleanup and writes both output
-files:
+Every failure is a typed value; match variants, never messages
+([API.md section 8](API.md#8-refusals-requested-inputs-and-precision)).
 
-```sh
-cargo run --features serde --example translate_reflected -- \
-  input.air output.spv reflection.json auto
-```
+- A refusal names what would change the answer: the feature the device lacks, the pipeline input
+  the compile needs, or a limit.
+- A deadline or a cancellation (`Error::Budget`, `Error::Cancelled`) is transient: retry later.
+  Every other error is the answer for that input and device and may be cached as one
+  (`error.retry()`, `error.is_permanent_for()`).
+- Never use a module from a compile that returned an error.
+- The command line prints `metal2vulkan: FALLBACK (<why>)`, exits 2, and writes a repro bundle
+  (the input, the profile, `repro.sh`, `failure.txt`) under `$TMPDIR/metal2vulkan-repros`, or
+  `METAL2VULKAN_REPRO_DIR`.
 
-The core call is:
+## 5. Bound a compile
 
-```rust
-use metal2vulkan::passes::{Stage, TransformOptions};
-use std::path::Path;
+Every compile runs in-process under the caller's `Budget`: a wall deadline (`Budget::standard()`
+is 20 seconds), a `CancelToken` any thread may trigger, a deterministic work-unit cap and a byte
+ledger charged before each input-sized allocation. A panic inside a compile becomes
+`Error::Internal`. That is enough for a consumer that trusts its process.
 
-fn translate_ir(
-    sanitized_ll: &str,
-    scratch: &Path,
-) -> Result<(Vec<u8>, metal2vulkan::reflect::ShaderReflection), String> {
-    metal2vulkan::translate_sanitized_native_reflected(
-        sanitized_ll,
-        Stage::Kernel,
-        scratch,
-        TransformOptions::default(),
-    )
-}
-```
+When an abort, a stack overflow or a failed allocation in the compiler must not take the consumer
+down, or a hard memory ceiling must hold, compile in a child process:
 
-For path input, call `detect_stage(path, scratch)` and pass the resulting `Stage` to
-`translate_reflected`. Translation already validates the final module; calling `spirv-val` again is
-useful only as an independent deployment check or when bytes have changed after translation.
+1. Spawn one worker per compile in its own process group, with the input in a file and the result
+   written to a file. Send the library bytes, the entry and descriptor, and the device description
+   and policy (with feature `serde` they serialize; equal description and policy give the same
+   profile fingerprint and keys).
+2. In the child, install a counting global allocator that refuses allocations above a budget, build
+   the `Device`, and compile with the same `Budget`.
+3. In the parent, poll the deadline, cancellation and the process group's resident memory. On a
+   breach, kill the whole group and remove its scratch files. A result that arrives late is a
+   timeout.
+4. Load the result with `PipelineArtifact::from_bytes` against the parent's own `Device`, and check
+   that its key is the one the parent computed (`Device::compute_pipeline_key`,
+   `render_pipeline_key`).
+5. Classify as in-process: a typed error is the answer; a deadline, cancellation or killed child is
+   transient.
 
-## 4. Create the descriptor-set layout
+The validation crate's worker (`crates/metal2vulkan-validation/src/worker/`) implements this,
+under 20 seconds and 500 MiB per attempt.
 
-Reflected descriptors use `reflection.descriptor_layout.set` (set `0` in the default layout), and
-come from three top-level places. A complete
-consumer must inspect all three:
+## 6. Check the integration
 
-1. `bindings[*].descriptor`
-2. `implicit_imageblock_attachments[*].binding`
-3. `fragment_imageblock.members[*].binding` when non-null
-
-The latter two are single storage-image descriptors in the effective set. For an entry in `bindings`, use
-`descriptor.set`, `descriptor.binding`, and `descriptor.count` exactly as reported:
-
-| `ResourceBinding.kind` | Vulkan descriptor type |
-|---|---|
-| `Buffer`, `KernelStageInput`, `AccelerationStructureShadow`, `PrimitiveAccelerationStructure`, `BufferAddressTable` | Storage buffer |
-| `Texture`, `EmbeddedArgBufferTexture` | Sampled image; a `Texture` whose reflected dimension is `Buffer` uses a uniform texel buffer |
-| `TextureArray` with `access: Sampled` | Sampled-image array; reflected dimension `Buffer` uses a uniform texel-buffer array |
-| `TextureArray` with `access: Storage` | Storage-image array; reflected dimension `Buffer` uses a storage texel-buffer array |
-| `StorageImage` | Storage image; reflected dimension `Buffer` uses a storage texel buffer |
-| `Sampler`, `StaticSampler` | Sampler |
-| `ColorInput` | Input attachment |
-
-`ThreadgroupBuffer`, `EmbeddedArgBufferBuffer`, visible/intersection function tables, and any other
-entry with `descriptor: null` do not consume a Vulkan descriptor. Do not derive binding numbers
-from list positions or Metal indices; synthesized resources are deliberately assigned by the
-translator and reflection is authoritative.
-
-Static samplers are ordinary Vulkan sampler descriptors whose creation state comes from
-`static_sampler`. Dynamically bound samplers whose pipeline state affects shader legality must be
-translated with `TransformOptions::with_runtime_sampler`; create their descriptors from the matching
-`runtime_sampler_specializations` entries returned with the executable module. Never substitute the
-default Vulkan binding (`160 + n`) for the API's Metal sampler index `n`. Embedded argument-buffer
-textures use `embedded_source` to identify their owner, field offset, and Metal argument-encoder index.
-Embedded buffers use matching entries in `argument_buffer_fields`; write the Vulkan device address
-into the reflected owner field rather than allocating a separate descriptor.
-
-Writable runtime textures must likewise be translated with
-`TransformOptions::with_runtime_storage_image`, keyed by the Metal texture index for a top-level
-binding or by the reflected `metal_index` for an `EmbeddedArgBufferTexture`. Embedded indices are
-translator-assigned; use reflection instead of recomputing them from field positions. Pass the
-bound format and the device's per-format storage/atomic support plus enabled
-read/write-without-format features. Use the returned `runtime_storage_image_specializations` entry
-to create the matching image view. The reflected `spirv_format` and
-`texture_shape.storage_format` are `None` only when translation proved that the shader's exact
-operations are covered by the supplied formatless features.
-
-When independently translated graphics stages would otherwise reuse the same Metal indices, give
-each stage a complete layout whose resource bands do not collide in the pipeline layout:
-
-```rust
-use metal2vulkan::passes::TransformOptions;
-use metal2vulkan::reflect::{DescriptorBindingRange, DescriptorLayout};
-
-let fragment_layout = DescriptorLayout {
-    set: 1,
-    buffers: DescriptorBindingRange::from_base_count(1000, 32)?,
-    sampled_textures: DescriptorBindingRange::from_base_count(1032, 128)?,
-    samplers: DescriptorBindingRange::from_base_count(1160, 32)?,
-    color_inputs: DescriptorBindingRange::from_base_count(1192, 8)?,
-    imageblocks: DescriptorBindingRange::from_base_count(1200, 24)?,
-    fragment_imageblocks: DescriptorBindingRange::from_base_count(1224, 256)?,
-    storage_textures: DescriptorBindingRange::from_base_count(1480, 128)?,
-    synthetic: DescriptorBindingRange::from_base_count(1640, 32)?,
-    ..DescriptorLayout::default()
-};
-let options = TransformOptions::default().with_descriptor_layout(fragment_layout)?;
-# Ok::<(), Box<dyn std::error::Error>>(())
-```
-
-Keep the same `set` for stages sharing one Vulkan descriptor-set layout, choose disjoint bands where
-their resources are unrelated, and use the returned effective layout rather than recomputing it.
-
-## 5. Stage only the buffer bytes the shader can reach
-
-Successful reflected translation attaches `footprint` to descriptor-backed `Buffer`,
-`KernelStageInput`, and `AccelerationStructureShadow` resources. It describes accesses in the final
-constructed SPIR-V module returned by translation.
-
-Apply this decision in order:
-
-1. If `footprint` is null, there is no final-module proof. Retain the complete caller-provided
-   window.
-2. If `has_unbounded_access` is true, retain the complete window. Static or strided entries remain
-   diagnostic only.
-3. Otherwise, stage the union of `static_ranges` and every draw/dispatch-bounded
-   `strided_accesses` range. An empty union means the final module does not access the binding.
-
-Each static item `{ offset, size }` is the half-open interval `[offset, offset + size)`. Each strided
-item describes accesses of `access_size` bytes at:
-
-```text
-base_offset + sum(actual_index_value(source) * stride)
-```
-
-Use the exact values generated by the current command, not counts alone. In particular,
-`VertexIndex`, `InstanceIndex`, and `WorkgroupId` may include nonzero base values. Local invocation
-IDs range over the pipeline's local size; global invocation IDs range over the dispatched grid. A
-consumer can enumerate and coalesce the exact accesses, or conservatively copy the interval from
-the minimum reachable address through the maximum reachable address plus `access_size`.
-
-All offset, multiply, and end calculations must use checked arithmetic. Overflow means the
-consumer cannot prove a bound and must retain the complete window. Clip computed ranges to neither
-`declared_size` nor `extent`: `declared_size` may be only one pointee's size, while an unbounded AIR
-pointer can legally index beyond it.
-
-`Object { bytes }` is an independent AIR-metadata guarantee. If a supposedly bounded object's final
-footprint extends beyond `bytes`, do not hide the inconsistency by clipping it: retain the complete
-caller window and report the translator/reflection mismatch.
-
-`access` answers read/write/unused classification when it can be proven. It does not replace the
-footprint soundness gate. Treat `access: null` conservatively as read-write.
-
-## 6. Configure the stage interface
-
-- Create the Vulkan pipeline with entry point `"main"`; `entry_point` contains the original Metal
-  function name for identity and diagnostics.
-- Vertex stages use `vertex_attributes`, `varyings`, and `vertex_builtins`.
-- A reflected `TessellationEvaluation` stage also uses `tessellation`; its control-point locations
-  are arrays and its other listed locations carry patch data.
-- Fragment stages use `varyings`, `render_targets`, `depth_members`, `stencil_members`, and
-  `depth_qualifier`.
-- Kernel stages use `local_size`. `imageblock_layouts` and threadgroup bindings describe Workgroup
-  storage rather than descriptors.
-- For kernels, obey `kernel_dispatch`. For `ThreadsDynamic` and `ThreadsFixed`, call
-  `KernelDispatch::plan`, create one pipeline per distinct region `local_size` using
-  `KERNEL_LOCAL_SIZE_SPEC_IDS`, and issue every returned region. Before each dispatch, write
-  `KernelDispatchPlan::push_constants` into the reflected
-  `KERNEL_DISPATCH_PUSH_CONSTANT_SIZE` range. Its four `u32[3]` fields are the logical thread grid,
-  thread base, threadgroup base, and logical threadgroup grid. `Workgroups` is the only single
-  fixed-local-size path and asserts that every workgroup is complete.
-- Use `function_constants` to discover exact indices and Metal ABI type encodings. When exact scalar
-  or vector payloads are supplied, translate sanitized AIR with
-  `translate_sanitized_native_specialized_with_options`; specialization must precede metadata,
-  resource-interface, and CFG construction. Metadata-only tooling must pass those same payloads to
-  `reflect_sanitized_specialized`; reflecting the default AIR can omit a resource selected by a
-  non-default value. A consumer that BINDS the specialized module should take its reflection from
-  `translate_sanitized_native_specialized_reflected_with_options` instead: `reflect_sanitized*`
-  constructs no module, so the image type behind a texture binding stays at the AIR type name, and a
-  `texturecube` that is only ever texel-read is bound as a 2D array image. Exact predicates also remove false-gated resources from the specialized
-  interface, so consumers bind the selected contract rather than the unspecialized union. A
-  generated fullscreen companion must use `translate_passthrough_specialized` with the same
-  payloads so its vertex outputs match the selected fragment inputs.
-
-## 7. Cache outputs safely
-
-Cache SPIR-V and reflection as one atomic result. A practical cache key includes:
-
-- the exact input bytes;
-- stage and every `TransformOptions` value;
-- the metal2vulkan crate/binary version; and
-- `reflection_version`.
-- `descriptor_layout.version` (also already covered when hashing every `TransformOptions` value).
-
-Invalidate both artifacts together when any key changes. Reflection is byte-neutral, but it is tied
-to the exact final module returned by the same call. Metadata-only `reflect_sanitized` deliberately
-has no final-module footprint and is not a substitute for reflected translation in a staging path.
-
-## 8. Handle failures
-
-The Rust API returns `Err(String)`. The CLI prints `FALLBACK`, exits nonzero, and writes a self-
-contained repro bundle under `$TMPDIR/metal2vulkan-repros` unless `METAL2VULKAN_REPRO_DIR` overrides
-the base directory. Unsupported input must remain a fallback; do not continue with partial metadata
-or a construction that returned an error.
-
-For local diagnosis:
-
-```sh
-METAL2VULKAN_RETRY_DEBUG=1 metal2vulkan input.air output.spv
-METAL2VULKAN_WHY=1 metal2vulkan input.air output.spv
-```
-
-The first command traces construction phases (the environment-variable name is retained for
-compatibility). The second reports structured-CFG admission decisions. These diagnostics do not
-authorize a different product translation path.
-
-## 9. Verify the integration
-
-At minimum:
+`spirv-val` checks structural validity, not agreement with Metal:
 
 ```sh
 spirv-val --target-env vulkan1.2 output.spv
-cargo test -p metal2vulkan --all-features
 ```
 
-`spirv-val` checks structural validity, not Metal equivalence. For a semantic claim, follow the
-[validation playbook](VALIDATION.md): use an owned synthetic regression, exact byte A/B where
-appropriate, and an authored Metal/Vulkan case when output behavior changes.
+`device.profile().spirv_validation()` names the environments and relaxations a module compiled
+for the device is valid under; the command line runs each.
+
+For a claim about behavior, follow [VALIDATION.md](VALIDATION.md): a synthetic regression test,
+the golden output hashes where output must not move, and an authored case run on Metal and Vulkan
+where it should.

@@ -1,0 +1,265 @@
+target triple = "air64_v29-apple-macosx27.0.0"
+source_filename = "-"
+; datalayout DataLayout { endian: Little, pointers: {0: PointerSpec { size_bits: 64, abi_bits: 64, pref_bits: 64, index_bits: 64 }}, ints: {1: AlignSpec { abi_bits: 8, pref_bits: 8 }, 8: AlignSpec { abi_bits: 8, pref_bits: 8 }, 16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }}, floats: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }}, vectors: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 24: AlignSpec { abi_bits: 32, pref_bits: 32 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 48: AlignSpec { abi_bits: 64, pref_bits: 64 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 96: AlignSpec { abi_bits: 128, pref_bits: 128 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }, 192: AlignSpec { abi_bits: 256, pref_bits: 256 }, 256: AlignSpec { abi_bits: 256, pref_bits: 256 }, 512: AlignSpec { abi_bits: 512, pref_bits: 512 }, 1024: AlignSpec { abi_bits: 1024, pref_bits: 1024 }}, aggregate: AlignSpec { abi_bits: 0, pref_bits: 64 }, native_ints: [8, 16, 32], stack_align_bits: None, alloca_space: 0, program_space: 0, globals_space: 0, mangling: None, fn_ptr_align: None, non_integral: [] }
+%t2 = type { i32 } ; "struct.metal::_atomic"
+%t3 = type [32 x i32]
+%t7 = type void (ptr addrspace(1), i32)
+%t9 = type float (i32)
+%t10 = type void (ptr addrspace(1))
+%t11 = type void (i32, i32, i32)
+%t13 = type void (ptr addrspace(3), i32, i32, i32, i32, i1)
+%t14 = type i32 (ptr addrspace(3), i32, i32, i32, i32, i1)
+%t15 = type i32 (ptr addrspace(3), i32, i32, i32, i1)
+%t16 = type i32 (ptr addrspace(1), i32, i32, i32, i32, i1)
+%t17 = type i32 (ptr addrspace(1), ptr addrspace(0), i32, i32, i32, i32, i32, i1)
+%t19 = type void (ptr addrspace(1), i64, i32, i32, i32, i1)
+%t20 = type float (ptr addrspace(1), float, i32, i32, i32, i1)
+%t21 = type i32 (ptr addrspace(1), i32, i32, i32, i1)
+%t22 = type void (ptr addrspace(1), i32, i32, i32, i32, i1)
+%t24 = type [2 x i32]
+%t26 = type [48 x %t2]
+%t27 = type [192 x i32]
+%t28 = type { %t26, %t27 } ; "struct.Block"
+%t29 = type { i64 } ; "struct.metal::_atomic.1"
+%t30 = type { float } ; "struct.metal::_atomic.2"
+%t32 = type [4 x i8]
+%t33 = type <{ %t29, %t30, %t32 }> ; "struct.Wide"
+c24 = %t24 [27, 0]
+@g0 "_ZZ16a27_memory_orderRU9MTLdevice5BlockjE3sum" = internal addrspace(3) global %t2 zeroinitializer, align 4
+@g1 "_ZZ16a27_memory_orderRU9MTLdevice5BlockjE5words" = internal addrspace(3) global %t3 undef, align 4
+
+define %t7 @f0 "a27_memory_order" convergent "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="0" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a0( align 4 dereferenceable(960) nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = alloca i32, i32 1, align 4
+  %i1 = icmp eq %a1, i32 0
+  br %i1, bb1, bb2
+bb1:
+  tail call void @f6 [air Atomic(Atomic { space: Local, op: Store, sign: None, ty: NumTy { elem: I32, lanes: 1 }, order: SeqCst, failure: None, scope: Threadgroup, volatile: false, fetch: false, flags: Some(MemFlags { device: true, threadgroup: true, texture: true, threadgroup_imageblock: true, object_data: true }) })](ptr addrspace(3) @g0, i32 0, i32 5, i32 1, i32 31, i1 0) arg0( nocapture )
+  br bb2
+bb2:
+  %i5 = mul i32 %a1, i32 3
+  %i6 = add i32 %i5, i32 1
+  %i7 = zext %a1 to i64
+  %i8 = getelementptr inbounds %t3, ptr addrspace(3) @g1, i64 0, %i7
+  store %i6, %i8, align 4
+  tail call void @f4 [air Sync(Barrier { name: Threadgroup, flags: MemFlags { device: false, threadgroup: true, texture: false, threadgroup_imageblock: false, object_data: false }, order: Some(AcqRel), scope: Threadgroup, memory: Threadgroup })](i32 2, i32 4, i32 1) convergent
+  %i11 = xor i32 %a1, i32 1
+  %i12 = zext %i11 to i64
+  %i13 = getelementptr inbounds %t3, ptr addrspace(3) @g1, i64 0, %i12
+  %i14 = load i32, %i13, align 4
+  %i15 = tail call i32 @f7 [air Atomic(Atomic { space: Local, op: Add, sign: Some(Unsigned), ty: NumTy { elem: I32, lanes: 1 }, order: SeqCst, failure: None, scope: Threadgroup, volatile: false, fetch: true, flags: Some(MemFlags { device: true, threadgroup: true, texture: true, threadgroup_imageblock: true, object_data: true }) })](ptr addrspace(3) @g0, %i14, i32 5, i32 1, i32 31, i1 0) arg0( nocapture )
+  tail call void @f4 [air Sync(Barrier { name: Threadgroup, flags: MemFlags { device: false, threadgroup: true, texture: false, threadgroup_imageblock: false, object_data: false }, order: Some(SeqCst), scope: Threadgroup, memory: Threadgroup })](i32 2, i32 5, i32 1) convergent
+  %i17 = tail call i32 @f8 [air Atomic(Atomic { space: Local, op: Load, sign: None, ty: NumTy { elem: I32, lanes: 1 }, order: Acquire, failure: None, scope: Threadgroup, volatile: false, fetch: true, flags: Some(MemFlags { device: false, threadgroup: true, texture: false, threadgroup_imageblock: false, object_data: false }) })](ptr addrspace(3) @g0, i32 2, i32 1, i32 2, i1 0) arg0( nocapture )
+  %i18 = mul i32 %a1, i32 5
+  %i19 = add i32 %i18, i32 2
+  store %i19, %i8, align 4
+  tail call void @f4 [air Sync(Barrier { name: Threadgroup, flags: MemFlags { device: false, threadgroup: true, texture: false, threadgroup_imageblock: false, object_data: false }, order: Some(SeqCst), scope: Threadgroup, memory: Simdgroup })](i32 2, i32 5, i32 4) convergent
+  %i22 = load i32, %i13, align 4
+  %i23 = mul i32 %a1, i32 7
+  %i24 = add i32 %i23, i32 3
+  %i25 = add i32 %a1, i32 96
+  %i26 = zext %i25 to i64
+  %i27 = getelementptr inbounds %t28, %a0, i64 0, i32 1, %i26
+  store %i24, %i27, align 4
+  tail call void @f4 [air Sync(Barrier { name: Threadgroup, flags: MemFlags { device: true, threadgroup: false, texture: false, threadgroup_imageblock: false, object_data: false }, order: Some(SeqCst), scope: Threadgroup, memory: Device })](i32 1, i32 5, i32 2) convergent
+  %i30 = xor i32 %a1, i32 31
+  %i31 = add i32 %i30, i32 96
+  %i32 = zext %i31 to i64
+  %i33 = getelementptr inbounds %t28, %a0, i64 0, i32 1, %i32
+  %i34 = load i32, %i33, align 4
+  %i35 = getelementptr inbounds %t28, %a0, i64 0, i32 0, i64 0, i32 0
+  %i36 = tail call i32 @f9 [air Atomic(Atomic { space: Global, op: Add, sign: Some(Unsigned), ty: NumTy { elem: I32, lanes: 1 }, order: Release, failure: None, scope: Device, volatile: false, fetch: true, flags: Some(MemFlags { device: true, threadgroup: false, texture: false, threadgroup_imageblock: false, object_data: false }) })](%i35, i32 1, i32 3, i32 2, i32 1, i1 0) arg0( nocapture )
+  %i37 = getelementptr inbounds %t28, %a0, i64 0, i32 0, i64 1, i32 0
+  %i38 = tail call i32 @f9 [air Atomic(Atomic { space: Global, op: Add, sign: Some(Unsigned), ty: NumTy { elem: I32, lanes: 1 }, order: SeqCst, failure: None, scope: Device, volatile: false, fetch: true, flags: Some(MemFlags { device: true, threadgroup: true, texture: true, threadgroup_imageblock: true, object_data: true }) })](%i37, %a1, i32 5, i32 2, i32 31, i1 0) arg0( nocapture )
+  %i39 = getelementptr inbounds %t28, %a0, i64 0, i32 0, i64 2, i32 0
+  %i40 = tail call i32 @f10 [air Atomic(Atomic { space: Global, op: Max, sign: Some(Unsigned), ty: NumTy { elem: I32, lanes: 1 }, order: Relaxed, failure: None, scope: Device, volatile: false, fetch: true, flags: Some(MemFlags { device: false, threadgroup: false, texture: true, threadgroup_imageblock: false, object_data: false }) })](%i39, %a1, i32 0, i32 2, i32 4, i1 0) arg0( nocapture )
+  %i41 = getelementptr inbounds %t28, %a0, i64 0, i32 0, i64 3, i32 0
+  %i42 = tail call i32 @f9 [air Atomic(Atomic { space: Global, op: Add, sign: Some(Unsigned), ty: NumTy { elem: I32, lanes: 1 }, order: Relaxed, failure: None, scope: Threadgroup, volatile: false, fetch: true, flags: Some(MemFlags { device: false, threadgroup: false, texture: false, threadgroup_imageblock: false, object_data: false }) })](%i41, i32 1, i32 0, i32 1, i32 0, i1 0) arg0( nocapture )
+  %i43 = and i32 %a1, i32 31
+  %i44 = shl nuw i32 i32 1, %i43
+  %i45 = getelementptr inbounds %t28, %a0, i64 0, i32 0, i64 4, i32 0
+  %i46 = tail call i32 @f11 [air Atomic(Atomic { space: Global, op: Or, sign: Some(Unsigned), ty: NumTy { elem: I32, lanes: 1 }, order: AcqRel, failure: None, scope: Device, volatile: false, fetch: true, flags: Some(MemFlags { device: false, threadgroup: false, texture: true, threadgroup_imageblock: false, object_data: false }) })](%i45, %i44, i32 4, i32 2, i32 4, i1 0) arg0( nocapture )
+  %i47 = add i32 %a1, i32 16
+  %i48 = zext %i47 to i64
+  %i49 = add i32 %a1, i32 100
+  %i50 = bitcast %i0 to ptr addrspace(0)
+  store i32 7, %i0, align 4
+  %i52 = getelementptr inbounds %t28, %a0, i64 0, i32 0, %i48, i32 0
+  %i53 = call i32 @f12 [air Atomic(Atomic { space: Global, op: CmpXchgWeak, sign: None, ty: NumTy { elem: I32, lanes: 1 }, order: AcqRel, failure: Some(Acquire), scope: Device, volatile: false, fetch: true, flags: Some(MemFlags { device: true, threadgroup: false, texture: false, threadgroup_imageblock: false, object_data: false }) })](%i52, %i0, %i49, i32 4, i32 2, i32 2, i32 1, i1 0) arg0( nocapture ) arg1( nocapture )
+  %i54 = icmp eq %i53, i32 7
+  %i55 = load i32, %i0, align 4
+  tail call void @f4 [air Sync(Barrier { name: Threadgroup, flags: MemFlags { device: true, threadgroup: false, texture: false, threadgroup_imageblock: false, object_data: false }, order: Some(Release), scope: Threadgroup, memory: Threadgroup })](i32 1, i32 3, i32 1) convergent
+  tail call void @f4 [air Sync(Barrier { name: Threadgroup, flags: MemFlags { device: true, threadgroup: false, texture: false, threadgroup_imageblock: false, object_data: false }, order: Some(Acquire), scope: Threadgroup, memory: Threadgroup })](i32 1, i32 2, i32 1) convergent
+  tail call void @f4 [air Sync(Barrier { name: Threadgroup, flags: MemFlags { device: true, threadgroup: true, texture: false, threadgroup_imageblock: false, object_data: false }, order: Some(Relaxed), scope: Threadgroup, memory: Threadgroup })](i32 3, i32 0, i32 1) convergent
+  tail call void @f4 [air Sync(Barrier { name: Threadgroup, flags: MemFlags { device: true, threadgroup: false, texture: false, threadgroup_imageblock: false, object_data: false }, order: Some(SeqCst), scope: Threadgroup, memory: Thread })](i32 1, i32 5, i32 0) convergent
+  tail call void @f5 [air Sync(Barrier { name: Simdgroup, flags: MemFlags { device: false, threadgroup: true, texture: false, threadgroup_imageblock: false, object_data: false }, order: Some(AcqRel), scope: Simdgroup, memory: Simdgroup })](i32 2, i32 4, i32 4) convergent
+  %i61 = getelementptr inbounds %t28, %a0, i64 0, i32 1, %i7
+  store %i17, %i61, align 4
+  %i63 = add i32 %a1, i32 32
+  %i64 = zext %i63 to i64
+  %i65 = getelementptr inbounds %t28, %a0, i64 0, i32 1, %i64
+  store %i55, %i65, align 4
+  %i67 = zext %i54 to i32
+  %i68 = add i32 %a1, i32 64
+  %i69 = zext %i68 to i64
+  %i70 = getelementptr inbounds %t28, %a0, i64 0, i32 1, %i69
+  store %i67, %i70, align 4
+  %i72 = add i32 %a1, i32 128
+  %i73 = zext %i72 to i64
+  %i74 = getelementptr inbounds %t28, %a0, i64 0, i32 1, %i73
+  store %i34, %i74, align 4
+  %i76 = add i32 %a1, i32 160
+  %i77 = zext %i76 to i64
+  %i78 = getelementptr inbounds %t28, %a0, i64 0, i32 1, %i77
+  store %i22, %i78, align 4
+  ret void
+}
+
+define %t7 @f1 "a27_wide_and_float" "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="0" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a0( align 8 dereferenceable(12) nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = zext %a1 to i64
+  %i1 = shl i64 %i0, i64 33
+  %i2 = getelementptr inbounds %t33, %a0, i64 0, i32 0, i32 0
+  tail call void @f13 [air Atomic(Atomic { space: Global, op: Max, sign: Some(Unsigned), ty: NumTy { elem: I64, lanes: 1 }, order: Relaxed, failure: None, scope: Device, volatile: false, fetch: false, flags: Some(MemFlags { device: true, threadgroup: false, texture: false, threadgroup_imageblock: false, object_data: false }) })](%i2, %i1, i32 0, i32 2, i32 1, i1 0) arg0( nocapture )
+  %i4 = tail call reassoc nnan ninf nsz arcp contract afn float @f2 [air Convert(Convert { dst: NumTy { elem: F32, lanes: 1 }, dst_kind: Float, src: NumTy { elem: I32, lanes: 1 }, src_kind: Unsigned, src_fp8: None })](%a1)
+  %i5 = getelementptr inbounds %t33, %a0, i64 0, i32 1, i32 0
+  %i6 = tail call reassoc nnan ninf nsz arcp contract afn float @f14 [air Atomic(Atomic { space: Global, op: Add, sign: None, ty: NumTy { elem: F32, lanes: 1 }, order: SeqCst, failure: None, scope: Device, volatile: false, fetch: true, flags: Some(MemFlags { device: true, threadgroup: true, texture: true, threadgroup_imageblock: true, object_data: true }) })](%i5, %i4, i32 5, i32 2, i32 31, i1 0) arg0( nocapture )
+  ret void
+}
+
+declare %t9 @f2 "air.convert.f.f32.u.i32" memory(NoModRef, NoModRef, NoModRef)
+
+define %t10 @f3 "a27_fragment_atomics" "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="0" "no-builtins"="" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" %a0( nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = getelementptr inbounds %t2, %a0, i64 0, i32 0
+  %i1 = tail call i32 @f9 [air Atomic(Atomic { space: Global, op: Add, sign: Some(Unsigned), ty: NumTy { elem: I32, lanes: 1 }, order: SeqCst, failure: None, scope: Device, volatile: false, fetch: true, flags: Some(MemFlags { device: true, threadgroup: true, texture: true, threadgroup_imageblock: true, object_data: true }) })](%i0, i32 1, i32 5, i32 2, i32 31, i1 0) arg0( nocapture )
+  %i2 = getelementptr inbounds %t2, %a0, i64 1, i32 0
+  %i3 = tail call i32 @f15 [air Atomic(Atomic { space: Global, op: Load, sign: None, ty: NumTy { elem: I32, lanes: 1 }, order: SeqCst, failure: None, scope: Device, volatile: false, fetch: true, flags: Some(MemFlags { device: true, threadgroup: true, texture: true, threadgroup_imageblock: true, object_data: true }) })](%i2, i32 5, i32 2, i32 31, i1 0) arg0( nocapture )
+  %i4 = add i32 %i3, %i1
+  %i5 = getelementptr inbounds %t2, %a0, i64 2, i32 0
+  tail call void @f16 [air Atomic(Atomic { space: Global, op: Store, sign: None, ty: NumTy { elem: I32, lanes: 1 }, order: SeqCst, failure: None, scope: Device, volatile: false, fetch: false, flags: Some(MemFlags { device: true, threadgroup: true, texture: true, threadgroup_imageblock: true, object_data: true }) })](%i5, %i4, i32 5, i32 2, i32 31, i1 0) arg0( nocapture )
+  ret void
+}
+
+declare %t11 @f4 "air.wg.barrier" convergent
+
+declare %t11 @f5 "air.simdgroup.barrier" convergent
+
+declare %t13 @f6 "air.atomic.local.store.i32" %a0( nocapture )
+
+declare %t14 @f7 "air.atomic.local.add.u.i32" %a0( nocapture )
+
+declare %t15 @f8 "air.atomic.local.load.i32" %a0( nocapture )
+
+declare %t16 @f9 "air.atomic.global.add.u.i32" %a0( nocapture )
+
+declare %t16 @f10 "air.atomic.global.max.u.i32" %a0( nocapture )
+
+declare %t16 @f11 "air.atomic.global.or.u.i32" %a0( nocapture )
+
+declare %t17 @f12 "air.atomic.global.cmpxchg.weak.i32" %a0( nocapture ) %a1( nocapture )
+
+declare %t19 @f13 "air.atomic.global.max.u.i64" %a0( nocapture )
+
+declare %t20 @f14 "air.atomic.global.add.f32" %a0( nocapture )
+
+declare %t21 @f15 "air.atomic.global.load.i32" %a0( nocapture )
+
+declare %t22 @f16 "air.atomic.global.store.i32" %a0( nocapture )
+!md0 = !"SDK Version"
+!md1 = !"wchar_size"
+!md2 = !"frame-pointer"
+!md3 = !"air.max_device_buffers"
+!md4 = !"air.max_constant_buffers"
+!md5 = !"air.max_threadgroup_buffers"
+!md6 = !"air.max_textures"
+!md7 = !"air.max_read_write_textures"
+!md8 = !"air.max_samplers"
+!md9 = !"air.buffer"
+!md10 = !"air.buffer_size"
+!md11 = !"air.location_index"
+!md12 = !"air.read_write"
+!md13 = !"air.address_space"
+!md14 = !"air.struct_type_info"
+!md15 = !"uint"
+!md16 = !"__s"
+!md17 = !"metal::_atomic"
+!md18 = !"counters"
+!md19 = !"out"
+!md20 = !"air.arg_type_size"
+!md21 = !"air.arg_type_align_size"
+!md22 = !"air.arg_type_name"
+!md23 = !"Block"
+!md24 = !"air.arg_name"
+!md25 = !"b"
+!md26 = !"air.thread_position_in_threadgroup"
+!md27 = !"t"
+!md28 = !"ulong"
+!md29 = !"wide"
+!md30 = !"float"
+!md31 = !"sum"
+!md32 = !"Wide"
+!md33 = !"w"
+!md34 = !"air.thread_position_in_grid"
+!md35 = !"count"
+!md36 = !"air.compile.denorms_disable"
+!md37 = !"air.compile.fast_math_enable"
+!md38 = !"air.compile.framebuffer_fetch_enable"
+!md39 = !"Apple metal version 32023.921 (metalfe-32023.921.6)"
+!md40 = !"Metal"
+!md41 = i32 2
+!md42 = %t24 c24
+!md43 = i32 1
+!md44 = i32 4
+!md45 = i32 7
+!md46 = i32 31
+!md47 = i32 128
+!md48 = i32 8
+!md49 = i32 16
+!md50 = ptr addrspace(0) @f0
+!md51 = i32 0
+!md52 = i32 960
+!md53 = i32 48
+!md54 = i32 192
+!md55 = ptr addrspace(0) @f1
+!md56 = ptr addrspace(0) @f3
+!md57 = i32 9
+!md58 = !{!md41, !md0, !md42}
+!md59 = !{!md43, !md1, !md44}
+!md60 = !{!md45, !md2, !md41}
+!md61 = !{!md45, !md3, !md46}
+!md62 = !{!md45, !md4, !md46}
+!md63 = !{!md45, !md5, !md46}
+!md64 = !{!md45, !md6, !md47}
+!md65 = !{!md45, !md7, !md48}
+!md66 = !{!md45, !md8, !md49}
+!md67 = !{}
+!md68 = !{!md51, !md44, !md51, !md15, !md16}
+!md69 = !{!md14, !md68, !md51, !md44, !md53, !md17, !md18, !md54, !md44, !md54, !md15, !md19}
+!md70 = !{!md51, !md9, !md10, !md52, !md11, !md51, !md43, !md12, !md13, !md43, !md14, !md69, !md20, !md52, !md21, !md44, !md22, !md23, !md24, !md25}
+!md71 = !{!md43, !md26, !md22, !md15, !md24, !md27}
+!md72 = !{!md70, !md71}
+!md73 = !{!md50, !md67, !md72}
+!md74 = !{!md51, !md48, !md51, !md28, !md16}
+!md75 = !{!md51, !md44, !md51, !md30, !md16}
+!md76 = !{!md14, !md74, !md51, !md48, !md51, !md17, !md29, !md14, !md75, !md48, !md44, !md51, !md17, !md31}
+!md77 = !{!md51, !md9, !md10, !md49, !md11, !md51, !md43, !md12, !md13, !md43, !md14, !md76, !md20, !md49, !md21, !md48, !md22, !md32, !md24, !md33}
+!md78 = !{!md43, !md34, !md22, !md15, !md24, !md27}
+!md79 = !{!md77, !md78}
+!md80 = !{!md55, !md67, !md79}
+!md81 = !{!md51, !md9, !md11, !md51, !md43, !md12, !md13, !md43, !md14, !md68, !md20, !md44, !md21, !md44, !md22, !md17, !md24, !md35}
+!md82 = !{!md81}
+!md83 = !{!md56, !md67, !md82}
+!md84 = !{!md36}
+!md85 = !{!md37}
+!md86 = !{!md38}
+!md87 = !{!md39}
+!md88 = !{!md41, !md57, !md51}
+!md89 = !{!md40, !md44, !md43, !md51}
+!"llvm.module.flags" = !{!md58, !md59, !md60, !md61, !md62, !md63, !md64, !md65, !md66}
+!"air.kernel" = !{!md73, !md80}
+!"air.fragment" = !{!md83}
+!"air.compile_options" = !{!md84, !md85, !md86}
+!"llvm.ident" = !{!md87}
+!"air.version" = !{!md88}
+!"air.language_version" = !{!md89}

@@ -1,0 +1,153 @@
+{
+  "venues": [
+    {
+      "kind": "moltenvk",
+      "environment_id": "apple-m3-max-moltenvk",
+      "profile": "moltenvk-m3",
+      "population": "old_engine_matched",
+      "legs": [
+        "stated"
+      ],
+      "devices": [
+        {
+          "profile": "moltenvk-m3",
+          "identity": {
+            "device": "Apple M3 Max",
+            "vendor_id": 4203,
+            "device_id": 436601353,
+            "driver_id": 14,
+            "driver_version": 10401,
+            "driver_info": "1.4.1"
+          },
+          "metal_environment_id": "apple-m3-max-macos26.7"
+        }
+      ]
+    },
+    {
+      "kind": "cpu_icd",
+      "environment_id": "ubuntu-26.04-lavapipe",
+      "profile": "gate-lavapipe",
+      "population": "public",
+      "legs": [
+        "stated",
+        "robustness_off"
+      ],
+      "devices": [
+        {
+          "profile": "gate-lavapipe",
+          "identity": {
+            "device": "llvmpipe (LLVM 21.1.8, 128 bits)",
+            "vendor_id": 65541,
+            "device_id": 0,
+            "driver_id": 13,
+            "driver_version": 109051912,
+            "driver_info": "Mesa 26.0.8-1ubuntu0.3 (LLVM 21.1.8)"
+          }
+        }
+      ]
+    },
+    {
+      "kind": "native_gpu",
+      "environment_id": "amd-780m-radv",
+      "profile": "amd-780m-radv",
+      "population": "metal_qualified",
+      "legs": [
+        "stated",
+        "robustness_off"
+      ],
+      "devices": [
+        {
+          "profile": "amd-780m-radv",
+          "identity": {
+            "device": "AMD Radeon 780M Graphics (RADV PHOENIX)",
+            "vendor_id": 4098,
+            "device_id": 5567,
+            "driver_id": 3,
+            "driver_version": 109060100,
+            "driver_info": "Mesa 26.2.4-arch3.1"
+          }
+        }
+      ]
+    },
+    {
+      "kind": "native_gpu",
+      "environment_id": "intel-irisxe-rplp-anv",
+      "profile": "intel-irisxe-rplp-anv",
+      "population": "metal_qualified",
+      "legs": [
+        "stated",
+        "robustness_off"
+      ],
+      "devices": [
+        {
+          "profile": "intel-irisxe-rplp-anv",
+          "identity": {
+            "device": "Intel(R) Iris(R) Xe Graphics (RPL-P)",
+            "vendor_id": 32902,
+            "device_id": 42912,
+            "driver_id": 6,
+            "driver_version": 109060100,
+            "driver_info": "Mesa 26.2.4-arch3.1"
+          }
+        },
+        {
+          "profile": "intel-uhd770-rpls-anv",
+          "identity": {
+            "device": "Intel(R) Graphics (RPL-S)",
+            "vendor_id": 32902,
+            "device_id": 42880,
+            "driver_id": 6,
+            "driver_version": 109060100,
+            "driver_info": "Mesa 26.2.4-arch3.1"
+          }
+        }
+      ]
+    },
+    {
+      "kind": "cpu_icd",
+      "environment_id": "ubuntu-26.04-lavapipe-x86_64",
+      "profile": "gate-lavapipe-x86_64",
+      "population": "public",
+      "legs": [
+        "stated",
+        "robustness_off"
+      ],
+      "devices": [
+        {
+          "profile": "gate-lavapipe-x86_64",
+          "identity": {
+            "device": "llvmpipe (LLVM 21.1.8, 256 bits)",
+            "vendor_id": 65541,
+            "device_id": 0,
+            "driver_id": 13,
+            "driver_version": 109051912,
+            "driver_info": "Mesa 26.0.8-1ubuntu0.3 (LLVM 21.1.8)"
+          }
+        }
+      ]
+    },
+    {
+      "kind": "native_gpu",
+      "environment_id": "nvidia-rtx5080-laptop",
+      "profile": "nvidia-rtx5080-laptop",
+      "population": "metal_qualified",
+      "legs": [
+        "stated",
+        "robustness_off"
+      ],
+      "devices": [
+        {
+          "profile": "nvidia-rtx5080-laptop",
+          "identity": {
+            "device": "NVIDIA GeForce RTX 5080 Laptop GPU",
+            "vendor_id": 4318,
+            "device_id": 11289,
+            "driver_id": 4,
+            "driver_version": 2580660800,
+            "driver_info": "615.71.09"
+          }
+        }
+      ]
+    }
+  ]
+}

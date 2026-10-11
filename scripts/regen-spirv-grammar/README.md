@@ -1,48 +1,41 @@
 # regen-spirv-grammar
 
-Regenerates the checked-in SPIR-V decoder / grammar tables from the **Khronos SPIR-V
-core grammar JSON**, using the public [rspirv autogen](https://github.com/gfx-rs/rspirv/tree/master/autogen)
-tool as a generator. The generator is not a runtime dependency of `metal2vulkan`.
-
-## What gets rewritten
+Generates the translator's SPIR-V grammar items from **Khronos's machine-readable SPIR-V grammar**
+(SPIRV-Headers, MIT-licensed) with our own generator, `generate.py`. Nothing else feeds it.
 
 | Output | Role |
 |---|---|
-| `src/spirv_binary/decode_generated.rs` | Enum bit-decoder methods |
-| `src/spirv_binary/error_generated.rs` | Decoder error variants |
-| `src/spirv_binary/parse_generated.rs` | Operand parse dispatch |
-| `src/spirv_binary/grammar_generated.rs` | Core instruction table |
-| `src/spirv_disassemble_generated.rs` | Operand disassembly |
-| `src/spirv_operand_display_generated.rs` | `Display` for `Operand` |
+| `crates/metal2vulkan/src/spv.rs` | The opcodes (`Op`), enumerants (`Capability`, `Decoration`, `BuiltIn`, ...), masks and `GlslStd450Op` the translator names, with their grammar values |
+| `crates/metal2vulkan/src/spirv_binary/table.rs` | Test only: every core instruction's operands and every enumerant's parameters, which the test parser (`spirv_binary/`) reads |
 
-Hand-written crate code (`parser.rs`, `decoder.rs`, `grammar.rs`, …) is not touched.
+## What `spv.rs` holds
 
-## Defaults (locked to the `spirv` crate pin)
+Only what `items.txt` lists: each kind the code names, the values it names, and `from_u32` where
+the code converts words back. Values that only tests name are `cfg(test)`. The compiler checks the
+list: a value the code names that is missing fails to build, and a listed value nothing uses is
+dead code where rustc can see it. When code needs a new opcode or enumerant, add it to
+`items.txt` and regenerate.
 
-- rspirv tag: `rspirv-0.13.0` (ships `spirv` 0.4.0+sdk-1.4.341.0)
-- SPIRV-Headers tag: `vulkan-sdk-1.4.341.0`
+Names follow the grammar's, with a few changes Rust's and Clippy's naming rules need (see
+`variant_name` and `const_name` in `generate.py`): an opcode drops its `Op` prefix, leading digits
+move to the end (`Dim::D2`), a name of four or more capitals only is written with one capital
+(`Capability::Fmakhr`), `SpecConstantOp` is `SpecConstantOperation`, and a mask's bits are
+capitalized consts (`FPFastMathMode::NOT_NAN`). `Debug` always prints the grammar's own name.
 
-Override with `RSPIRV_REF` / `HEADERS_REF` if you deliberately bump both together with
-`Cargo.toml`'s `spirv` dependency.
+## Revision
 
-The script caches both repositories under `.cache/rspirv-autogen`. Set
-`METAL2VULKAN_AUTOGEN_CACHE` to use a different cache directory. It requires `git`, `cargo`,
-`rustfmt`, and Python 3, and requires network access when fetching missing revisions.
+SPIRV-Headers tag `vulkan-sdk-1.4.341.0` (SPIR-V 1.6 revision 4; GLSL.std.450 version 100
+revision 2). `HEADERS_REF=<tag>` selects another. Every generated file's header names the source,
+its revision and Khronos's MIT notice.
 
 ## Run
 
 ```sh
 ./scripts/regen-spirv-grammar/regen-spirv-grammar.sh
-cargo test -p metal2vulkan --lib spirv_module -- --test-threads=1
+cargo nextest run -p metal2vulkan --all-features
 ```
 
-The script runs `cargo fmt --all`. Review every generated diff and update the `spirv` dependency and
-locked revisions together.
-
-## Provenance
-
-- **Source of truth:** Khronos `spirv.core.grammar.json` (SPIRV-Headers).
-- **Generator:** `rspirv-autogen` (Apache-2.0 tool; not linked into this crate).
-- **Checked-in artifacts:** mechanical output of that generation + small renames for this
-  crate's API (`WORD_BYTES`, `Operand`, core-only `OperandKind`). They are not a vendored
-  copy of the rspirv library sources.
+The script fetches `spirv.core.grammar.json`, `extinst.glsl.std.450.grammar.json` and `LICENSE`
+once per tag into `.cache/spirv-headers/<tag>/` (gitignored; `METAL2VULKAN_GRAMMAR_CACHE` names
+another directory), runs `generate.py` and formats both outputs with `rustfmt`. It needs `curl`,
+Python 3 and `rustfmt`, and network access for a tag not yet fetched.

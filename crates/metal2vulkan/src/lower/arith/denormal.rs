@@ -1,0 +1,220 @@
+//! How Metal reads an `f32` denormal operand, per operation: the one table of the translation
+//! (the denormal-operand model extends it).
+//!
+//! Metal flushes most `float` operands whose exponent field is zero to a zero of their sign, but
+//! not every operation does, and the measured exceptions are per operation and per math mode:
+//! precise `asin` answers a denormal operand itself, where `fast::asin` answers `+0` for it (EV
+//! TRN-probe-mac, cases 087758cb and cc234732). A lowering that computes an operation itself,
+//! rather than leaving it to a device that is Metal's own (`FloatFunctions::Metal`), reads the
+//! operand as this table says, before its own special values. The table is decided on the exponent
+//! field, so the answer is the same whatever the device's own denormal mode. Only `float` operands
+//! are listed: a widened `half` is never an `f32` denormal, and Metal's `bfloat` and `double`
+//! environments are not measured.
+
+use crate::device::DeviceProfile;
+use crate::error::DriverDeviation;
+use crate::lower::arith::legal::Form;
+use crate::lower::arith::math::FloatFn;
+use crate::lower::arith::narrow::u32_form;
+use crate::lower::arith::ops::{splat, ty};
+use crate::spirv::builder::FunctionBuilder;
+use crate::spirv::error::BResult;
+use crate::spirv::ids::Value;
+use crate::spirv::ir::{BinOp, ConvOp};
+
+/// How Metal reads an `f32` denormal operand of one operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Operand {
+    /// As the zero of its sign.
+    Flush,
+    /// As itself.
+    Keep,
+}
+
+/// How Metal reads an `f32` denormal operand of float function `op`, where the table states it
+/// (`None` for an operation it does not list yet).
+///
+/// | operation | operand | Metal's answer for a denormal operand (cases 087758cb, cc234732) |
+/// |---|---|---|
+/// | `atan` | flushed | `+0`, whatever its sign (as `atan(-0)`) |
+/// | `fast::atan` | flushed | the zero of its sign |
+/// | `asin` | kept | the operand itself |
+/// | `fast::asin` | flushed | `+0`, whatever its sign (as `fast::asin(-0)`) |
+/// | `acos`, `fast::acos` | flushed | `π/2` (either reading gives it) |
+/// | `atan2`, `fast::atan2` | flushed | as a zero operand |
+/// | `sin`, `cos`, `tan` | kept | `sin` and `tan`: the operand itself; `cos`: 1 |
+/// | `fast::sin`, `fast::cos`, `fast::tan` | kept | as `sin`, `cos`, and `tan` (case cc234732, where RADV, ANV, and NVIDIA flush it) |
+/// | `sinpi`, `cospi`, `tanpi`, and their `fast::` forms | flushed | `sinpi` and `tanpi`: `+0`, whatever its sign; `cospi`: 1 (EV MBB-pi1-m3, both modes) |
+pub fn operand(op: FloatFn) -> Option<Operand> {
+    use FloatFn as F;
+    Some(match op {
+        F::Asin | F::Sin | F::Cos | F::Tan | F::FastSin | F::FastCos | F::FastTan { .. } => {
+            Operand::Keep
+        }
+        F::Atan
+        | F::FastAtan
+        | F::FastAsin
+        | F::Acos
+        | F::FastAcos
+        | F::Atan2
+        | F::FastAtan2 { .. }
+        | F::SinPi
+        | F::CosPi
+        | F::TanPi
+        | F::FastSinPi
+        | F::FastCosPi
+        | F::FastTanPi => Operand::Flush,
+        _ => return None,
+    })
+}
+
+/// `x` (`float` lanes of form `f`) as operation `op` reads it ([`operand`]): a denormal lane
+/// replaced by the zero of its sign where the table flushes it; `x` itself otherwise.
+pub fn read(fb: &mut FunctionBuilder<'_>, op: FloatFn, f: Form, x: Value) -> BResult<Value> {
+    if operand(op) != Some(Operand::Flush) {
+        return Ok(x);
+    }
+    flush(fb, f, x)
+}
+
+/// Whether profile `p`'s device reads the denormals of the operations [`Covered::Deviation`]
+/// names as Metal does: an `f32` denormal operand as the zero of its sign, a denormal result
+/// flushed to one (`DriverDeviation::MetalFloatDenormals`, a measured driver fact). Elsewhere
+/// the module flushes them itself ([`Flush`]).
+pub fn device_flushes(p: &DeviceProfile) -> bool {
+    p.takes_driver_deviation(DriverDeviation::MetalFloatDenormals)
+}
+
+/// Where an operation the device computes reads its `f32` denormals as Metal does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Covered {
+    /// On a device with the measured deviation ([`device_flushes`]); elsewhere the module
+    /// flushes them itself.
+    Deviation,
+    /// On no device measured: the module flushes them itself on every profile. `Floor` and
+    /// `Ceil` of a denormal give `-1` and `1` on NVIDIA's 615.71.09 and on lavapipe, where Metal
+    /// reads the operand as a zero (`floor(-2^-149)` is `-0`, `ceil(2^-149)` is `+0`).
+    Never,
+}
+
+/// How Metal reads the `f32` denormals of an operation the device computes, and where the
+/// device reads them so ([`coverage`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Reading {
+    /// Where the device's reading is Metal's.
+    pub covered: Covered,
+    /// A bit per operand Metal reads as the zero of its sign where it is a denormal.
+    pub operands: u8,
+    /// Whether Metal flushes a denormal result.
+    pub result: bool,
+}
+
+impl Reading {
+    /// `+ - *` and the comparisons (`result` false for a comparison, whose result is a `bool`):
+    /// both operands, on the deviation.
+    pub const fn binary(result: bool) -> Reading {
+        Reading {
+            covered: Covered::Deviation,
+            operands: 0b11,
+            result,
+        }
+    }
+}
+
+/// How the device's instruction for float function `op` (on `float` lanes, where the lowering
+/// leaves `op` to it) reads `f32` denormals against Metal, which reads each `float` operand of
+/// these as the zero of its sign and flushes a denormal result (the denormal probes,
+/// `nan_denormals` and `nan_denormals_fast`, every lane). `None` for a function whose lowering
+/// reads its denormals as Metal does itself (`FloatFn::metal_denormals`) or whose reading is not
+/// measured.
+///
+/// | function | operands | result | where the device's reading is Metal's |
+/// |---|---|---|---|
+/// | `floor`, `ceil` | the operand | integral | no device measured |
+/// | `trunc`, `rint` | the operand | integral | the deviation |
+/// | `sqrt`, `rsqrt`, `fast::rsqrt` | the operand | never denormal | the deviation |
+/// | `dot` | both vectors | flushed | the deviation |
+/// | `fma`, `llvm.fmuladd` (`OpFmaKHR`) | all three | flushed | the deviation |
+///
+/// `dot` is Metal's fused chain of its products: the device's own `OpDot` where it reaches Metal's
+/// `dot`, else the multiply and `OpFmaKHR`s the deviation also covers, or the routines, which read
+/// as Metal does; where the profile lacks the deviation, the chain flushes its values between the
+/// fused multiply-adds as well.
+///
+/// `trunc` and `rint` (`Trunc`, `RoundEven`) of a denormal answer the zero of its sign on every
+/// venue measured, as Metal does (the probes' words, both modes, all seven venues), but Vulkan
+/// states no sign for a flushed denormal, so where the profile lacks the deviation the module
+/// flushes the operand itself rather than trust the device's zero.
+pub fn coverage(op: FloatFn) -> Option<Reading> {
+    use FloatFn as F;
+    let (covered, operands, result) = match op {
+        F::Floor | F::Ceil => (Covered::Never, 0b1, false),
+        F::Trunc | F::Rint => (Covered::Deviation, 0b1, false),
+        F::Sqrt | F::Rsqrt | F::FastRsqrt => (Covered::Deviation, 0b1, false),
+        F::Dot => (Covered::Deviation, 0b11, true),
+        F::Fma | F::MulAdd => (Covered::Deviation, 0b111, true),
+        _ => return None,
+    };
+    Some(Reading {
+        covered,
+        operands,
+        result,
+    })
+}
+
+/// The `f32` denormals an operation flushes itself where the device may keep them
+/// (`ArithStrategy::Denormals`): the operands whose bit is set in `operands`, read by [`flush`]
+/// before the operation, and its result where `result`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Flush {
+    /// A bit per operand read as Metal reads it.
+    pub operands: u8,
+    /// Whether a denormal result is flushed.
+    pub result: bool,
+}
+
+impl Flush {
+    /// Nothing flushed.
+    pub const NONE: Flush = Flush {
+        operands: 0,
+        result: false,
+    };
+
+    /// Whether operand `i` is flushed.
+    pub fn operand(self, i: usize) -> bool {
+        i < 8 && self.operands & (1 << i) != 0
+    }
+
+    /// Whether anything is flushed.
+    pub fn any(self) -> bool {
+        self.operands != 0 || self.result
+    }
+
+    /// An upper estimate of the SPIR-V words of the flushes on lanes of form `f`: [`flush_words`]
+    /// each.
+    pub fn words(self, f: Form) -> u32 {
+        (self.operands.count_ones() + u32::from(self.result)) * flush_words(f)
+    }
+}
+
+/// An upper estimate of the SPIR-V words of one [`flush`] on form `f`: six instructions of at most
+/// six words, and the three masks' share (a vector's constants carry their lanes).
+pub fn flush_words(f: Form) -> u32 {
+    36 + 4 * u32::from(f.lanes)
+}
+
+/// `x` (`float` lanes of form `f`) with each denormal lane replaced by the zero of its sign,
+/// decided on the exponent field, so the same on every device and in every float mode.
+pub fn flush(fb: &mut FunctionBuilder<'_>, f: Form, x: Value) -> BResult<Value> {
+    let u = u32_form(f);
+    let (ut, ft) = (ty(fb, u)?, ty(fb, f)?);
+    let bits = fb.convert(ConvOp::Bitcast, x, ut)?;
+    let exponent = splat(fb, u, 0x7F80_0000)?;
+    let sign = splat(fb, u, 0x8000_0000)?;
+    let zero = splat(fb, u, 0)?;
+    let e = fb.binary(BinOp::BitwiseAnd, bits, exponent)?;
+    let denormal = fb.binary(BinOp::IEqual, e, zero)?;
+    let signed_zero = fb.binary(BinOp::BitwiseAnd, bits, sign)?;
+    let r = fb.select(denormal, signed_zero, bits)?;
+    fb.convert(ConvOp::Bitcast, r, ft)
+}
