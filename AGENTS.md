@@ -244,12 +244,15 @@ When chasing a hang, read the whole nextest output; do not pipe it through `head
 - Commit at every coherent step: a focused subject, and a body saying what, why and how it was
   verified.
 - Before each commit run `cargo fmt --all`, and nothing more.
-- **Merge into `master` at once**, with no pre-merge test, queue or gate. On a conflict, merge
-  `master` into your branch, resolve it there, commit, and merge again. `master` may be broken for
-  a while; a claim about a change still waits for its evidence.
-- **Checks run on `master` after the merge**: fmt, clippy in every configuration, Rustdoc, the
-  suites, the public-surface table, the authored compile census and the golden tables. The golden
-  tables and the compile census are re-blessed on `master`, not in the change.
+- **Never work on or advance `master` unless the user explicitly asks for it.** Work happens on
+  `development` (create it from `master` if it does not exist) or on your own branches off it.
+  Only the user's explicit request moves `master`: no commit, merge, fast-forward, reset or push.
+- **Merge into `development` at once**, with no pre-merge test, queue or gate. On a conflict, merge
+  `development` into your branch, resolve it there, commit, and merge again. `development` may be
+  broken for a while; a claim about a change still waits for its evidence.
+- **Checks run on `development` after the merge**: fmt, clippy in every configuration, Rustdoc,
+  the suites, the public-surface table, the authored compile census and the golden tables. The
+  golden tables and the compile census are re-blessed on `development`, not in the change.
 - **Fix forward.** Every failure the checks report is a work item for the change's owner, fixed by
   a new commit. Never amend, rebase published history, squash, force-push or revert by rewriting
   history. Never use `git stash`.
@@ -262,8 +265,8 @@ When chasing a hang, read the whole nextest output; do not pipe it through `head
 4. **Test** it with the test or measurable check it needs.
 5. **Document** it where a durable contract changed (and in `docs/FAST-PATHS.md` for any
    speed-for-accuracy choice).
-6. **Commit and merge** into `master`, then fix forward what `master`'s checks report.
+6. **Commit and merge** into `development`, then fix forward what `development`'s checks report.
 
-**Done** means merged into `master`, `master`'s checks green for it, claims matching evidence,
-translations in the touched scope within 20 seconds and 500 MiB, and capability audits still
-closed.
+**Done** means merged into `development`, `development`'s checks green for it, claims matching
+evidence, translations in the touched scope within 20 seconds and 500 MiB, and capability audits
+still closed.
