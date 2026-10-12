@@ -372,7 +372,7 @@ impl Shape<'_> {
                     fh.sum.iter().any(|&(u, home)| {
                         self.us.is_uniform_value(self.e, u)
                             && fl.below.contains(&(kl, u, ga.signed))
-                            && (!cross || home.is_none_or(&invariant))
+                            && (!cross || home.is_none_or(invariant))
                     })
                 };
                 let past = |o1: i64, o2: i64, s2: u64| {

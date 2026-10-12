@@ -1293,7 +1293,7 @@ fn a_compiled_stage_answers_as_its_function() {
             Case::Render(d) => {
                 let mut c = (**d).clone();
                 c.vertex = compile(&d.vertex);
-                c.fragment = d.fragment.as_ref().map(&compile);
+                c.fragment = d.fragment.as_ref().map(compile);
                 Case::Render(Box::new(c))
             }
             Case::Tile(d) => {
@@ -1303,9 +1303,9 @@ fn a_compiled_stage_answers_as_its_function() {
             }
             Case::Mesh(d) => {
                 let mut c = (**d).clone();
-                c.object = d.object.as_ref().map(&compile);
+                c.object = d.object.as_ref().map(compile);
                 c.mesh = compile(&d.mesh);
-                c.fragment = d.fragment.as_ref().map(&compile);
+                c.fragment = d.fragment.as_ref().map(compile);
                 Case::Mesh(Box::new(c))
             }
         };

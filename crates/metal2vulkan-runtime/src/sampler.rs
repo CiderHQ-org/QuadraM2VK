@@ -164,7 +164,7 @@ impl SamplerCount {
     /// Count one more live sampler, or refuse it where `limit` are live.
     pub(super) fn take(&self) -> Result<(), Error> {
         self.live
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |live| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |live| {
                 (live < self.limit).then_some(live + 1)
             })
             .map(|_| ())

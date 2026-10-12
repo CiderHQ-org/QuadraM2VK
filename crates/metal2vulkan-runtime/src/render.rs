@@ -3452,7 +3452,7 @@ impl RenderCommandEncoder {
             true => None,
             false => StandInCopies::plan_aspects(
                 &scratch(&|index, c| {
-                    stored(c) && !loaded(index, c) && c.stand_in.as_ref().is_some_and(&over_bytes)
+                    stored(c) && !loaded(index, c) && c.stand_in.as_ref().is_some_and(over_bytes)
                 }),
                 false,
             )?,

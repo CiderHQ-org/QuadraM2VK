@@ -90,7 +90,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
 
 /// Count `bytes` as live unless that would pass the limit; raise the peak.
 fn reserve(bytes: usize) -> bool {
-    match LIVE_BYTES.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
+    match LIVE_BYTES.try_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
         live.checked_add(bytes)
             .filter(|next| *next <= LIMIT_BYTES.load(Ordering::Relaxed))
     }) {

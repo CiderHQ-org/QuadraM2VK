@@ -464,7 +464,7 @@ impl VenueRekey {
                     rekey.stem, rekey.from.fingerprint
                 )
             };
-            let profile = VenueProfile::committed(&rekey.stem).map_err(&at)?;
+            let profile = VenueProfile::committed(&rekey.stem).map_err(at)?;
             let now = RecordedKey {
                 sha256: profile.sha256,
                 fingerprint: profile.fingerprint,
@@ -675,10 +675,10 @@ impl Venues {
         for venue in &self.venues {
             let at = |what: String| format!("C3 venue {:?}: {what}", venue.environment_id);
             let key = VenueProfile::committed(&venue.profile)
-                .map_err(&at)?
+                .map_err(at)?
                 .fingerprint;
             for device in &venue.devices {
-                let profile = VenueProfile::committed(&device.profile).map_err(&at)?;
+                let profile = VenueProfile::committed(&device.profile).map_err(at)?;
                 let differ = device.identity.differences(&profile.identity);
                 if !differ.is_empty() {
                     return Err(at(format!(
