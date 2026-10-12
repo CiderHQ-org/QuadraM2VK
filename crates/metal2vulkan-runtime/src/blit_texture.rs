@@ -72,7 +72,7 @@ use super::fresh_unwritten::FreshUnwritten;
 use super::mipmap::record_blit;
 use super::mipmap_plan::{leaves_as_is, not_implemented, plan_mipmaps, MipmapPlan, MipmapRefusal};
 use super::nan_clear;
-use super::pvrtc::{image_buffer_region, image_region, is_pvrtc};
+use super::pvrtc::{image_block_extent, image_buffer_region, image_region, is_pvrtc};
 use super::replay::{BlitCall, BufferToTexture, TextureToBuffer, TextureToTexture};
 use super::sample_copy;
 use super::sample_interleave;
@@ -311,7 +311,10 @@ fn buffer_copy(range: &BufferRange) -> vk::BufferCopy {
     }
 }
 
+/// `region` as one `VkImageCopy`, whose one extent is the source's: regions of one size only
+/// (others go through a buffer, `texture_copies_of_bytes`).
 fn image_copy(region: &ImageCopyRegion) -> vk::ImageCopy {
+    debug_assert_eq!(region.src.size, region.dst.size, "one extent, two sizes");
     let layers = |r: &ImageRegion| vk::ImageSubresourceLayers {
         aspect_mask: r.aspect.into(),
         mip_level: r.level,
@@ -952,16 +955,17 @@ impl BlitCommandEncoder {
     /// `Depth32Float` into `R32Float` or back).
     ///
     /// A size of 0 copies as the module docs say, as plain Metal does, and a compressed region
-    /// off its blocks copies the blocks it starts in on each side. Refused: what Metal stops
+    /// off its blocks copies the blocks it starts in on each side, a whole block of a level
+    /// smaller than one included, into or out of a larger level too. Refused: what Metal stops
     /// (`Invalid`: with a [`CopyProblem`], formats of different copy units, different sample
-    /// counts, a region past either level, blocks that end at one level's edge in part of a block
-    /// and not at the other's); a copy between overlapping regions of one multisampled texture
-    /// (`NotImplemented(OverlappingTextureCopies)`), other than of a region onto itself (one
-    /// texture's other overlapping regions copy as `memmove` does, the module docs); a copy through
-    /// a scratch buffer of 24-bit depth, whose bytes Metal's reference GPUs give no answer for
-    /// (`NotImplemented(Format)`: an Apple M3 Max and an M4 make no `Depth24Unorm_Stencil8`
-    /// texture); a multisampled copy between a depth or stencil aspect and a colour format, or
-    /// between two depth/stencil formats, on a device without `VK_KHR_maintenance8` or whose driver
+    /// counts, a region past either level); a copy between overlapping regions of one
+    /// multisampled texture (`NotImplemented(OverlappingTextureCopies)`), other than of a region
+    /// onto itself (one texture's other overlapping regions copy as `memmove` does, the module
+    /// docs); a copy through a scratch buffer of 24-bit depth, whose bytes Metal's reference GPUs
+    /// give no answer for (`NotImplemented(Format)`: an Apple M3 Max and an M4 make no
+    /// `Depth24Unorm_Stencil8` texture); a multisampled copy between a depth or stencil aspect and
+    /// a colour format, or between two depth/stencil formats, on a device without
+    /// `VK_KHR_maintenance8` or whose driver
     /// copies such images wrong, where its sample-rate draws cannot copy it exactly either: a
     /// 16-bit depth, a 32-bit float depth written where the driver's fragment depth changes values,
     /// a source the draws cannot sample or a destination they cannot render to (`Unsupported`,
@@ -1113,10 +1117,10 @@ impl BlitCommandEncoder {
     /// presents, a texture with a depth twin by its twin, each in its texture's aspect. Each image
     /// holding the destination's texels ([`held`]: both of a texture with a twin) takes them from
     /// an image of the source Vulkan copies into it (colour into colour, a depth or stencil aspect
-    /// into the same aspect of the same format), else through a scratch buffer of the encoder out
-    /// of the image the source's texels are read from. So out of a texture with a twin into a depth
-    /// texture without one they read its twin, and into it from a depth texture they write its twin
-    /// directly and its image through the buffer.
+    /// into the same aspect of the same format, regions of one size), else through a scratch
+    /// buffer of the encoder out of the image the source's texels are read from. So out of a
+    /// texture with a twin into a depth texture without one they read its twin, and into it from a
+    /// depth texture they write its twin directly and its image through the buffer.
     fn texture_copies(
         &mut self,
         call: &'static str,
@@ -1236,13 +1240,17 @@ impl BlitCommandEncoder {
                 dst: image_region(destination_plan, copy.dst),
             })
             .collect();
+        // A pair of regions of different sizes (a compressed region that ends at its level's edge
+        // inside a block on one side only, `ImageCopyRegion`) has no one Vulkan extent: it goes
+        // through the scratch buffer too, which holds the blocks both cover.
+        let one_extent = in_images.iter().all(|copy| copy.src.size == copy.dst.size);
         let samples = source.record().samples;
         let mut bits = Vec::new();
         for to in &into {
             match from
                 .iter()
                 .find(|from| from.copies_into(to))
-                .filter(|_| !overlap)
+                .filter(|_| !overlap && one_extent)
             {
                 Some(from) => {
                     let mut regions: Vec<ImageCopyRegion> =
@@ -1374,8 +1382,13 @@ impl BlitCommandEncoder {
         let staging = match staged.is_empty() {
             true => None,
             false => Some(
-                through_buffer(&in_images, &from[0], &staged)
-                    .map_err(|refusal| copy_error(call, refusal))?,
+                through_buffer(
+                    &in_images,
+                    &from[0],
+                    image_block_extent(from[0].format, source.pixel_format()).unwrap_or([1, 1]),
+                    &staged,
+                )
+                .map_err(|refusal| copy_error(call, refusal))?,
             ),
         };
         let scratch = match &staging {
@@ -1966,7 +1979,10 @@ struct Staging {
 /// `copies` from `from` into each of `into` through a scratch buffer: Vulkan copies a depth or
 /// stencil aspect only into the same aspect of the same format, so the bytes go out of the
 /// source and back into each destination image by buffer copies, which carry Metal's copy units
-/// as Vulkan lays them out in a buffer. Single-sampled textures only: multisampled ones, which
+/// as Vulkan lays them out in a buffer; and a compressed pair of regions of different sizes, which
+/// no one extent states, goes the same way, the blocks both cover out of one and into the other.
+/// `block` is the texel extent of `from`'s blocks ([`image_block_extent`]; 1 x 1 uncompressed),
+/// each a texel's bytes in the buffer. Single-sampled textures only: multisampled ones, which
 /// Vulkan copies into no buffer, copy through colour images (`sample_copy.rs`). Refused
 /// `NotImplemented(Format)` where a side's buffer texels are not the copy unit: both aspects of a
 /// combined format, and 24-bit depth, whose bytes in a buffer Metal's reference GPUs give no
@@ -1974,6 +1990,7 @@ struct Staging {
 fn through_buffer(
     copies: &[ImageCopyRegion],
     from: &Held,
+    block: [u32; 2],
     into: &[Held],
 ) -> Result<Staging, CopyRefusal> {
     let not_implemented =
@@ -1982,10 +1999,18 @@ fn through_buffer(
     if into.iter().any(|to| to.texel_bytes() != Some(bytes)) {
         return Err(not_implemented());
     }
-    let mut length = 0;
+    // Each copy starts where Vulkan takes either side's bytes: at a multiple of the texel block,
+    // and of 4 for a depth or stencil aspect.
+    let align = u64::from(if bytes.is_multiple_of(4) {
+        bytes
+    } else {
+        bytes * 4
+    });
+    let mut length: u64 = 0;
     let mut out_of = Vec::with_capacity(copies.len());
     let mut regions = vec![Vec::with_capacity(copies.len()); into.len()];
     for copy in copies {
+        length = length.next_multiple_of(align);
         let [width, height, depth] = copy.src.size;
         out_of.push(vk::BufferImageCopy {
             buffer_offset: length,
@@ -2003,7 +2028,8 @@ fn through_buffer(
                 })
             });
         }
-        length += [width, height, depth, copy.src.layers]
+        let blocks = [width.div_ceil(block[0]), height.div_ceil(block[1])];
+        length += [blocks[0], blocks[1], depth, copy.src.layers]
             .iter()
             .map(|&n| u64::from(n))
             .product::<u64>()

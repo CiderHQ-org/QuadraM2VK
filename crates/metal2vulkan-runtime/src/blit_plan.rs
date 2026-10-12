@@ -416,7 +416,12 @@ pub(super) fn later_rows_win(rows: &[BufferRange]) -> Vec<BufferRange> {
     kept
 }
 
-/// One Vulkan image-image copy region (`VkImageCopy`).
+/// One Vulkan image-image copy region (`VkImageCopy`). The two regions cover the same blocks; a
+/// compressed pair differs in size where one ends at its level's edge inside a block and the
+/// other does not (a whole block of a 4 x 2 level and of a larger one). No one extent states
+/// such a pair: Vulkan bounds each region by its level's texels and asks each for whole blocks
+/// except at its image's edge, so 4 x 2 is a part block inside the larger level and 4 x 4 passes
+/// the smaller (`blit_texture.rs` copies such a pair through a buffer).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) struct ImageCopyRegion {
     pub(super) src: ImageRegion,
@@ -530,7 +535,12 @@ fn pair_unit(record: &ViewRecord, image: Option<&ImagePlan>) -> Result<CopyUnit,
 }
 
 /// `copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toTexture:...`: `region` of
-/// the source to the same size at `dst_origin` of `dst_level` and `dst_slice` of the destination.
+/// the source to the same size at `dst_origin` of `dst_level` and `dst_slice` of the destination,
+/// each side as the blocks it starts in ([`check_region`]). Where those end at one side's level
+/// edge inside a block and not at the other's, the sides differ in size and cover the same blocks,
+/// which plain Metal copies whole (an Apple M3 Max under macOS 26.7, a probe: a whole block of a
+/// 4 x 2 level into one of an 8 x 8 level and back, which its validation takes, and 4 x 2 of
+/// either, which it stops).
 pub(super) fn plan_region_copy(
     pair: &CopyPair<'_>,
     region: &TextureRegion,
@@ -549,12 +559,6 @@ pub(super) fn plan_region_copy(
     let dst = check_region(pair.dst, &dst_region, &dst_unit)?;
     if region.size.contains(&0) {
         return Ok(Vec::new());
-    }
-    // A region off its blocks is copied by the blocks it starts in on each side; where those end at
-    // one side's level edge in part of a block and not at the other's, one Vulkan extent cannot
-    // state both.
-    if src.size != dst.size {
-        return Err(CopyProblem::BlockAlignment.into());
     }
     Ok(vec![ImageCopyRegion { src, dst }])
 }

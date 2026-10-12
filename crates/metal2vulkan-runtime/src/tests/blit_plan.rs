@@ -771,6 +771,63 @@ fn copies_between_textures_of_different_sizes_follow_metal() {
     );
 }
 
+/// A whole block of a compressed level smaller than one copied between textures (an Apple M3 Max
+/// under macOS 26.7, a probe): each side the blocks it starts in, ending at its level's edge, so
+/// a whole block of a 4 x 2 level and one of an 8 x 8 level differ in size and cover the same
+/// block, each way and from 4 x 4 or 4 x 2 (`t2t_small_to_big_*`, `t2t_big_to_small_*`), and
+/// levels that end alike stay one size (`t2t_same_l9_4x4`).
+#[test]
+fn whole_blocks_of_small_levels_copy_between_textures() {
+    let bc3 = |side: [u64; 2], levels: u64| {
+        texture(TextureDescriptor {
+            texture_type: TextureType::Type2D,
+            pixel_format: PixelFormat::BC3RGBA,
+            width: side[0],
+            height: side[1],
+            mipmap_level_count: levels,
+            ..TextureDescriptor::default()
+        })
+    };
+    let (mipped, other, big) = (bc3([2048, 1024], 12), bc3([2048, 1024], 12), bc3([8, 8], 1));
+    let copy = |src: &Texture, level, origin, size, dst: &Texture, to_level, to| {
+        let region = TextureRegion {
+            level,
+            slice: 0,
+            origin,
+            size,
+        };
+        plan_region_copy(&pair(src, dst), &region, to_level, 0, to).map(|regions| {
+            regions
+                .iter()
+                .map(|r| ((r.src.origin, r.src.size), (r.dst.origin, r.dst.size)))
+                .collect::<Vec<_>>()
+        })
+    };
+    let (zero, corner) = ([0, 0, 0], [4, 4, 0]);
+    let (small, whole) = ((zero, [4, 2, 1]), (corner, [4, 4, 1]));
+    for size in [[4, 4, 1], [4, 2, 1]] {
+        assert_eq!(
+            copy(&mipped, 9, zero, size, &big, 0, corner),
+            Ok(vec![(small, whole)]),
+            "{size:?}"
+        );
+        assert_eq!(
+            copy(&big, 0, corner, size, &other, 9, zero),
+            Ok(vec![(whole, small)]),
+            "{size:?}"
+        );
+    }
+    assert_eq!(
+        copy(&mipped, 9, zero, [4, 4, 1], &other, 9, zero),
+        Ok(vec![(small, small)])
+    );
+    // `t2t_l9_to_l10_4x4`: level 10 is 2 x 1.
+    assert_eq!(
+        copy(&mipped, 9, zero, [4, 4, 1], &other, 10, zero),
+        Ok(vec![(small, (zero, [2, 1, 1]))])
+    );
+}
+
 /// A 4x4 `RGBA8Unorm` texture over a buffer at offset 256, rows 32 bytes apart (TOB probe 1's
 /// layout), two slices 128 bytes apart for an array.
 fn over_buffer(slices: u64) -> (Texture, TexelsLayout) {

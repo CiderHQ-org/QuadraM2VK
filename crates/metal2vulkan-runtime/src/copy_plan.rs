@@ -9,12 +9,16 @@
 //!
 //! Metal's rules (API validation, measured on an Apple M3 Max and M4):
 //!
-//! - **Regions** stay in the level; a compressed region starts on a block and covers whole
-//!   blocks, except where it reaches the level's edge. Plain Metal copies a region off its blocks
-//!   as the blocks it starts in: the origin rounded down to its block and the size rounded up to
-//!   whole blocks, each on its own (EV SPCrp-probe1-m4), so does the runtime, ending at the level's
-//!   edge where the blocks pass it, in every copy between buffers and textures, between textures,
-//!   and of the CPU.
+//! - **Regions** stay in the level, a compressed region in the level's blocks: a level that ends
+//!   inside a block holds that whole block, so a region may name it past the level's texels (4 x 4
+//!   of a 4 x 2 level). Metal's validation takes such a region out of a texture, between textures
+//!   and of the CPU, and stops it into a texture from a buffer, which plain Metal copies all the
+//!   same (an Apple M3 Max under macOS 26.7, a probe). A compressed region starts on a block and
+//!   covers whole blocks, except where it reaches the level's edge. Plain Metal copies a region off
+//!   its blocks as the blocks it starts in: the origin rounded down to its block and the size
+//!   rounded up to whole blocks, each on its own (EV SPCrp-probe1-m4), so does the runtime, ending
+//!   at the level's edge where the blocks pass it, in every copy between buffers and textures,
+//!   between textures, and of the CPU.
 //! - **Buffer layouts:** the offset and `bytesPerRow` are multiples of the copy unit;
 //!   `bytesPerRow` covers a row when the region has more than one; `bytesPerImage` is a multiple
 //!   of the copy unit covering the region's rows when the region has more than one image (one
@@ -86,13 +90,9 @@ pub enum CopyProblem {
     /// KiB and more end the process, a 64x64 one with `ShaderWrite` of 4 bytes a texel copies
     /// nothing, and a combined depth/stencil one copies nothing at 2x2.
     CpuAccessPrivate,
-    /// A level or slice past the texture, or a region past its level.
+    /// A level or slice past the texture, or a region past its level (a compressed region past
+    /// the level's last block).
     Region,
-    /// A texture-to-texture copy of a compressed region off its blocks whose blocks end at one
-    /// texture's level edge in part of a block but not at the other's: one Vulkan copy extent
-    /// cannot state both, and plain Metal's answer is not measured (other regions off their
-    /// blocks are copied as Metal copies them, by the blocks they start in).
-    BlockAlignment,
     /// A buffer offset that is not a multiple of the copy unit, of a blit whose plain Metal
     /// answer is not measured: a depth or stencil format other than `Depth32Float`, or a
     /// texture over a buffer (other blits copy where plain Metal places the rows).
@@ -392,6 +392,15 @@ pub(super) fn level_extent(record: &ViewRecord, level: u32) -> [u32; 3] {
 /// the size rounded up to whole blocks, each on its own (an origin of 5 and a size of 4 copy the
 /// one block from 4), ending at the level's edge where the blocks pass it. The region's blocks, and
 /// so its buffer layout ([`shape`]), are the same.
+///
+/// A compressed region is bounded by the level's blocks, not its texels: a level that ends inside
+/// a block holds that whole block, and a region of it past the level's texels (4 x 4 of a 4 x 2
+/// level, or 4 x 2 from y = 2) copies the block, ending at the level's edge, as plain Metal copies
+/// it (an Apple M3 Max under macOS 26.7, a probe; Metal's validation takes a whole block of such a
+/// level out of a texture, between textures and of the CPU). Its blocks, and so its buffer layout,
+/// are the whole block's. Vulkan bounds a copy by the level's texels, hence the edge; between two
+/// textures where only one region ends at its level's edge inside a block, the two regions differ
+/// in size and cover the same blocks (`blit_texture.rs` copies them through a buffer).
 pub(super) fn check_region(
     record: &ViewRecord,
     region: &TextureRegion,
@@ -401,15 +410,18 @@ pub(super) fn check_region(
         return Err(CopyProblem::Region);
     }
     let extent = level_extent(record, region.level);
-    let axes = || region.origin.iter().zip(&region.size).zip(&extent);
-    if axes().any(|((&o, &s), &e)| u64::from(o) + u64::from(s) > u64::from(e)) {
+    let block = [unit.extent[0], unit.extent[1], 1];
+    let blocks = [0, 1, 2].map(|axis| extent[axis].div_ceil(block[axis]) * block[axis]);
+    let axes = || region.origin.iter().zip(&region.size).zip(&blocks);
+    if axes().any(|((&o, &s), &b)| u64::from(o) + u64::from(s) > u64::from(b)) {
         return Err(CopyProblem::Region);
     }
     let (mut origin, mut size) = (region.origin, region.size);
     for axis in 0..2 {
-        let block = unit.extent[axis];
-        origin[axis] -= origin[axis] % block;
-        size[axis] = (size[axis].div_ceil(block) * block).min(extent[axis] - origin[axis]);
+        let b = block[axis];
+        origin[axis] -= origin[axis] % b;
+        // Only an empty region starts past the level's edge (at the blocks' end).
+        size[axis] = (size[axis].div_ceil(b) * b).min(extent[axis].saturating_sub(origin[axis]));
     }
     Ok(ImageRegion {
         aspect: unit.aspect,

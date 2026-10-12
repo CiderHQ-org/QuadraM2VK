@@ -380,6 +380,63 @@ fn compressed_regions_off_their_blocks_copy_the_blocks_they_start_in() {
     );
 }
 
+/// A compressed region is bounded by its level's blocks, as plain Metal bounds it (an Apple M3 Max
+/// under macOS 26.7, a probe; its validation takes a whole block out of a texture, between
+/// textures and of the CPU): a whole block of a level smaller than one (4 x 4 of level 9 of a
+/// 2048 x 1024 `BC3_RGBA` texture, 4 x 2, and of levels 10 and 11) copies the block, ending at the
+/// level's edge, and so does a region of it from past the level's texels. A region past the
+/// level's last block stays refused, and an uncompressed format keeps its texels as the bound.
+#[test]
+fn compressed_regions_are_bounded_by_their_levels_blocks() {
+    let bc3 = texture(TextureDescriptor {
+        texture_type: TextureType::Type2D,
+        pixel_format: PixelFormat::BC3RGBA,
+        width: 2048,
+        height: 1024,
+        mipmap_level_count: 12,
+        ..TextureDescriptor::default()
+    });
+    let u = unit(&bc3, BlitOption::None).unwrap();
+    let at = |level, origin, size| {
+        let region = TextureRegion {
+            level,
+            slice: 0,
+            origin,
+            size,
+        };
+        check_region(&bc3.record, &region, &u).map(|r| (r.level, r.origin, r.size))
+    };
+    // `t2b_l9_4x4`, `t2b_l10_4x4`, `t2b_l11_4x4`: the one block, to the level's edge.
+    assert_eq!(at(9, [0, 0, 0], [4, 4, 1]), Ok((9, [0, 0, 0], [4, 2, 1])));
+    assert_eq!(at(10, [0, 0, 0], [4, 4, 1]), Ok((10, [0, 0, 0], [2, 1, 1])));
+    assert_eq!(at(11, [0, 0, 0], [4, 4, 1]), Ok((11, [0, 0, 0], [1, 1, 1])));
+    // `t2b_l9_o2_4x2`: from past the level's texels, the block it starts in.
+    assert_eq!(at(9, [0, 2, 0], [4, 2, 1]), Ok((9, [0, 0, 0], [4, 2, 1])));
+    // The region's buffer layout is the block's.
+    assert_eq!(shape([4, 4, 1], &u), shape([4, 2, 1], &u));
+    // Past the level's last block.
+    for (origin, size) in [
+        ([0, 0, 0], [4, 5, 1]),
+        ([4, 0, 0], [4, 4, 1]),
+        ([0, 0, 0], [8, 4, 1]),
+    ] {
+        assert_eq!(
+            at(9, origin, size),
+            Err(CopyProblem::Region),
+            "{origin:?} {size:?}"
+        );
+    }
+    // An empty region at the blocks' end, past the level's edge, is empty.
+    assert_eq!(at(9, [0, 4, 0], [4, 0, 1]), Ok((9, [0, 4, 0], [4, 0, 1])));
+    // An uncompressed format keeps its texels as the bound.
+    let rgba = tex(PixelFormat::RGBA8Unorm, TextureType::Type2D, [4, 2, 1]);
+    let ru = unit(&rgba, BlitOption::None).unwrap();
+    assert_eq!(
+        check_region(&rgba.record, &region([0, 0, 0], [4, 4, 1]), &ru),
+        Err(CopyProblem::Region)
+    );
+}
+
 /// A 4:2:2 texture's copy unit is its 2-byte texel, one texel of its `R8G8_UNORM` carrier: plain
 /// Metal copies it at any x and width (EV RRP-probe11-m4), its validation's 2 x 1 blocks aside.
 #[test]

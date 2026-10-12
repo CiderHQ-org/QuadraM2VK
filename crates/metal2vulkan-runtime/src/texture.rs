@@ -5464,8 +5464,11 @@ impl Texture {
         if cpu_order.is_some() {
             // Metal's order of a region other than a whole level, which its validation stops,
             // follows no rule the runtime has found (EV CFR-probe7-m4), and another pitch than 0
-            // and the level's row is not measured.
-            let whole = region.origin == [0; 3] && region.size == extent;
+            // and the level's row is not measured. A whole block of a level smaller than one is
+            // the whole level (plain Metal's bytes on an Apple M3 Max under macOS 26.7, a probe;
+            // its validation stops it).
+            let reaches = region.size.iter().zip(&extent).all(|(s, e)| s >= e);
+            let whole = region.origin == [0; 3] && reaches;
             if !whole || ![0, pitch].contains(&bytes_per_row) {
                 return Err(Error::NotImplemented(RuntimeGap::PvrtcBlockOrder));
             }

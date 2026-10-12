@@ -784,6 +784,215 @@ fn copies_off_metals_rules_land_where_plain_metal_puts_them() {
     );
 }
 
+/// Block `i` of `level` of a `BC3_RGBA` texture of [`seeded_bc3`] `seed` (below 4): 16 bytes, each
+/// unique to the block.
+fn bc3_block(seed: u64, level: u64, i: u64) -> Vec<u8> {
+    let tag = (seed * 64 + level * 8 + i) as u8;
+    (0..16u8).map(|b| b.wrapping_mul(17) ^ tag).collect()
+}
+
+/// The blocks of `level` of a `BC3_RGBA` texture of [`seeded_bc3`] `seed`, `extent` large at level
+/// 0, rows tightly packed: their texel extent, and their bytes.
+fn seeded_level(seed: u64, extent: [u64; 2], level: u64) -> ([u64; 2], Vec<u8>) {
+    let [w, h] = extent.map(|e| (e >> level).max(1));
+    let blocks = w.div_ceil(4) * h.div_ceil(4);
+    let bytes = (0..blocks)
+        .flat_map(|i| bc3_block(seed, level, i))
+        .collect();
+    ([w, h], bytes)
+}
+
+/// A Shared `BC3_RGBA` texture `extent` large, of `levels` levels, each block of each level
+/// [`bc3_block`] of `seed`.
+fn seeded_bc3(device: &Device, seed: u64, extent: [u64; 2], levels: u64) -> Texture {
+    let (bc3, d2, shared) = (
+        PixelFormat::BC3RGBA,
+        TextureType::Type2D,
+        StorageMode::Shared,
+    );
+    let t = texture(
+        device,
+        bc3,
+        d2,
+        [extent[0], extent[1], 1],
+        levels,
+        1,
+        shared,
+    )
+    .unwrap();
+    for level in 0..levels {
+        let ([w, h], bytes) = seeded_level(seed, extent, level);
+        let row = w.div_ceil(4) * 16;
+        t.replace_region(Region::new_2d(0, 0, w, h), level, 0, &bytes, row, 0)
+            .unwrap();
+    }
+    t
+}
+
+/// The blocks of `level` of a `BC3_RGBA` texture `extent` large at level 0, rows tightly packed.
+fn bc3_blocks(t: &Texture, extent: [u64; 2], level: u64) -> Vec<u8> {
+    let [w, h] = extent.map(|e| (e >> level).max(1));
+    let row = w.div_ceil(4) * 16;
+    let mut b = vec![0u8; (row * h.div_ceil(4)) as usize];
+    t.get_bytes(&mut b, row, 0, Region::new_2d(0, 0, w, h), level, 0)
+        .unwrap();
+    b
+}
+
+/// Whole blocks of compressed levels smaller than a block copy as plain Metal copies them (an
+/// Apple M3 Max under macOS 26.7, a probe; its validation takes all but the copy into a texture
+/// from a buffer and the 4 x 2 regions): a 4 x 4 region of a 4 x 2, 2 x 1 or 1 x 1 level of a
+/// `BC3_RGBA` texture out of it, into it, between levels of one size, into a whole block of a
+/// larger level and back (whose Vulkan extents differ: through a scratch buffer), and on the CPU,
+/// each moving the block's 16 bytes and nothing else.
+#[test]
+fn whole_blocks_of_levels_smaller_than_a_block_copy_whole() {
+    let cache = ScratchCache::new().unwrap();
+    let messages = Messages::default();
+    {
+        let device = validated_device(TEST_DEVICE, &messages, cache.path()).unwrap();
+        let queue = device.new_command_queue().unwrap();
+        // Levels 16 x 8, 8 x 4, 4 x 2, 2 x 1 and 1 x 1; and one 8 x 8 level of 2 x 2 blocks.
+        let (small, large) = ([16, 8], [8, 8]);
+        let source = seeded_bc3(&device, 0, small, 5);
+        let same = seeded_bc3(&device, 1, small, 5);
+        let other = seeded_bc3(&device, 2, small, 5);
+        let big = seeded_bc3(&device, 3, large, 1);
+        let out = device.new_buffer(96, ResourceOptions::shared()).unwrap();
+        with_bytes(&out, |b| b.fill(0xee));
+        let written: Vec<u8> = (0..16u8).map(|b| 0xa5 ^ b).collect();
+        let input = device.new_buffer(16, ResourceOptions::shared()).unwrap();
+        with_bytes(&input, |b| b.copy_from_slice(&written));
+        let (zero, none) = (Origin::new(0, 0, 0), BlitOption::None);
+        let (block, half) = (Size::new(4, 4, 1), Size::new(4, 2, 1));
+
+        let command_buffer = queue.command_buffer().unwrap();
+        let mut blit = command_buffer.blit_command_encoder().unwrap();
+        // Out of the texture (`t2b_l9_4x4`, `t2b_l11_4x4`, `t2b_l9_o2_4x2`), 32 bytes apart:
+        // a second row of blocks would land in the 16 bytes after each.
+        blit.copy_from_texture_to_buffer(&source, 0, 2, zero, block, &out, 0, 16, 0, none)
+            .unwrap();
+        blit.copy_from_texture_to_buffer(&source, 0, 4, zero, block, &out, 32, 16, 0, none)
+            .unwrap();
+        let below = Origin::new(0, 2, 0);
+        blit.copy_from_texture_to_buffer(&source, 0, 2, below, half, &out, 64, 16, 0, none)
+            .unwrap();
+        // Into it (`b2t_l9_4x4`), at the 2 x 1 level.
+        blit.copy_from_buffer_to_texture(&input, 0, 16, 0, block, &same, 0, 3, zero, none)
+            .unwrap();
+        // Between levels of one size (`t2t_same_l9_4x4`).
+        blit.copy_from_texture_to_texture(&source, 0, 2, zero, block, &same, 0, 2, zero)
+            .unwrap();
+        // Into a whole block of a larger level, and back (`t2t_small_to_big_*`,
+        // `t2t_big_to_small_*`).
+        let corner = Origin::new(4, 4, 0);
+        blit.copy_from_texture_to_texture(&source, 0, 2, zero, block, &big, 0, 0, corner)
+            .unwrap();
+        blit.copy_from_texture_to_texture(&source, 0, 3, zero, half, &big, 0, 0, zero)
+            .unwrap();
+        let right = Origin::new(4, 0, 0);
+        blit.copy_from_texture_to_texture(&big, 0, 0, right, block, &other, 0, 2, zero)
+            .unwrap();
+        let low = Origin::new(0, 4, 0);
+        blit.copy_from_texture_to_texture(&big, 0, 0, low, half, &other, 0, 4, zero)
+            .unwrap();
+        blit.end_encoding().unwrap();
+        run(&command_buffer);
+
+        let seeded = |seed, extent, level| seeded_level(seed, extent, level).1;
+        let copied = with_bytes(&out, |b| b.to_vec());
+        for (at, want) in [
+            (0, bc3_block(0, 2, 0)),
+            (32, bc3_block(0, 4, 0)),
+            (64, bc3_block(0, 2, 0)),
+        ] {
+            assert_eq!(copied[at..at + 16], want, "{at}");
+            assert_eq!(copied[at + 16..at + 32], [0xee; 16], "{at}");
+        }
+        assert_eq!(bc3_blocks(&same, small, 3), written);
+        assert_eq!(bc3_blocks(&same, small, 2), bc3_block(0, 2, 0));
+        let mut want = seeded(3, large, 0);
+        want[48..].copy_from_slice(&bc3_block(0, 2, 0));
+        want[..16].copy_from_slice(&bc3_block(0, 3, 0));
+        assert_eq!(bc3_blocks(&big, large, 0), want);
+        assert_eq!(bc3_blocks(&other, small, 2), bc3_block(3, 0, 1));
+        assert_eq!(bc3_blocks(&other, small, 4), bc3_block(3, 0, 2));
+        for (t, seed, kept) in [(&same, 1, [0, 1, 4]), (&other, 2, [0, 1, 3])] {
+            for l in kept {
+                assert_eq!(
+                    bc3_blocks(t, small, l),
+                    seeded(seed, small, l),
+                    "{seed} {l}"
+                );
+            }
+        }
+
+        // On the CPU (`cpu_get_l9_4x4`, `cpu_replace_l9_4x4`).
+        let mut got = vec![0xeeu8; 32];
+        source
+            .get_bytes(&mut got, 16, 0, Region::new_2d(0, 0, 4, 4), 2, 0)
+            .unwrap();
+        assert_eq!(got[..16], bc3_block(0, 2, 0));
+        assert_eq!(got[16..], [0xee; 16]);
+        source
+            .replace_region(Region::new_2d(0, 0, 4, 4), 4, 0, &written, 16, 0)
+            .unwrap();
+        assert_eq!(bc3_blocks(&source, small, 4), written);
+        assert_eq!(bc3_blocks(&source, small, 3), seeded(0, small, 3));
+    }
+    let messages = messages.take();
+    assert!(
+        messages.is_empty(),
+        "the validation layer reported: {messages:#?}"
+    );
+}
+
+/// Copies through the encoder's scratch buffer each start where Vulkan takes a depth aspect's
+/// bytes, at a multiple of 4: both levels of a 3 x 3 `Depth16Unorm` texture into an `R16Unorm`
+/// one, level 0's 18 bytes before level 1's.
+#[test]
+fn depth_copies_through_the_scratch_buffer_start_at_multiples_of_four() {
+    let cache = ScratchCache::new().unwrap();
+    let messages = Messages::default();
+    {
+        let device = validated_device(TEST_DEVICE, &messages, cache.path()).unwrap();
+        let queue = device.new_command_queue().unwrap();
+        let d2 = TextureType::Type2D;
+        let (shared, private) = (StorageMode::Shared, StorageMode::Private);
+        let depth = texture(
+            &device,
+            PixelFormat::Depth16Unorm,
+            d2,
+            [3, 3, 1],
+            2,
+            1,
+            private,
+        );
+        let colour = texture(&device, PixelFormat::R16Unorm, d2, [3, 3, 1], 2, 1, shared);
+        let (depth, colour) = (depth.unwrap(), colour.unwrap());
+        let source = counting(&device, 64);
+        let (zero, none) = (Origin::new(0, 0, 0), BlitOption::None);
+        let command_buffer = queue.command_buffer().unwrap();
+        let mut blit = command_buffer.blit_command_encoder().unwrap();
+        let three = Size::new(3, 3, 1);
+        blit.copy_from_buffer_to_texture(&source, 0, 6, 0, three, &depth, 0, 0, zero, none)
+            .unwrap();
+        let one = Size::new(1, 1, 1);
+        blit.copy_from_buffer_to_texture(&source, 32, 2, 0, one, &depth, 0, 1, zero, none)
+            .unwrap();
+        blit.copy_texture(&depth, &colour).unwrap();
+        blit.end_encoding().unwrap();
+        run(&command_buffer);
+        assert_eq!(level_bytes(&colour, 0, 0, 3, 3, 2), counted(0, 18));
+        assert_eq!(level_bytes(&colour, 1, 0, 1, 1, 2), counted(32, 2));
+    }
+    let messages = messages.take();
+    assert!(
+        messages.is_empty(),
+        "the validation layer reported: {messages:#?}"
+    );
+}
+
 /// Copies between textures of different sizes copy what plain Metal copies (an M4 under macOS
 /// 27.0.1, EV SPCrp-probe3-m4 `sz_*`; its validation stops the level copies): a level copy the
 /// region common to both levels from their origins, the rest of the larger kept
