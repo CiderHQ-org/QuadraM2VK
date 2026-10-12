@@ -131,10 +131,32 @@ pub(super) fn allocatable(flags: vk::MemoryPropertyFlags) -> bool {
 /// device-local host-visible memory (resizable BAR), in 127 ms from uncached system memory and in
 /// 2.9 ms from host-cached system memory; on a Radeon 780M in 144 ms from RADV's device-local
 /// host-visible type and in 4.6 ms from its host-cached one (EVs XSH-hrp2-3090, XSH-hrp4-radv).
+///
+/// Only coherent ones: the runtime flushes and invalidates no mapped range, as Metal's `Shared`
+/// and `Managed` textures need no flush, so a cached type that is not coherent leaves the image's
+/// texels to the driver's own cache upkeep around each host copy. ANV (Mesa 26.2.4) on Arrow
+/// Lake-S's Xe-LPG (`deviceID` 0x7d67), which has no last-level cache shared with the GPU, lists
+/// such a type (`HOST_CACHED` without `HOST_COHERENT`): with images there, the GPU read stale
+/// 64-byte lines of the consumer's macOS guest's textures (4x4 texels of a Tile4 32-bit image; a
+/// third of the boot logo's interior), and none once they took its coherent type.
 pub(super) fn host_cached(types: &[vk::MemoryType]) -> u32 {
-    let cached = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_CACHED;
+    use vk::MemoryPropertyFlags as P;
+    let cached = P::HOST_VISIBLE | P::HOST_COHERENT | P::HOST_CACHED;
     (types.iter().enumerate())
         .filter(|(_, ty)| ty.property_flags.contains(cached))
+        .fold(0, |bits, (index, _)| bits | 1 << index)
+}
+
+/// The memory types among `types` the host maps without coherence (`HOST_VISIBLE` without
+/// `HOST_COHERENT`), as bits: those no image with host-transfer usage takes, cached or not, as
+/// the runtime flushes no mapped range ([`host_cached`]).
+pub(super) fn host_incoherent(types: &[vk::MemoryType]) -> u32 {
+    use vk::MemoryPropertyFlags as P;
+    (types.iter().enumerate())
+        .filter(|(_, ty)| {
+            ty.property_flags.contains(P::HOST_VISIBLE)
+                && !ty.property_flags.contains(P::HOST_COHERENT)
+        })
         .fold(0, |bits, (index, _)| bits | 1 << index)
 }
 
@@ -672,6 +694,11 @@ impl Memory {
         class: MemoryClass,
     ) -> Option<(MemoryClass, u32)> {
         host_cached_placement(&self.types, allowed, class, self.unified)
+    }
+
+    /// The memory types the host maps without coherence, as bits ([`host_incoherent`]).
+    pub(super) fn host_incoherent(&self) -> u32 {
+        host_incoherent(&self.types)
     }
 
     /// The memory types of `class` among those `allowed` names, as bits.

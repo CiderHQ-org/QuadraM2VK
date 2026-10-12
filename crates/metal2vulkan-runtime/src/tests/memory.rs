@@ -1,4 +1,6 @@
-use crate::memory::{candidates, host_cached, host_cached_placement, MemoryClass, Pool};
+use crate::memory::{
+    candidates, host_cached, host_cached_placement, host_incoherent, MemoryClass, Pool,
+};
 use ash::vk;
 
 fn ty(flags: vk::MemoryPropertyFlags) -> vk::MemoryType {
@@ -161,10 +163,11 @@ fn no_class_takes_amd_device_coherent_memory() {
     }
 }
 
-/// A texture's image with host-transfer usage takes host-cached memory of its class (`Private`)
-/// where the device has it among the image's types, else, with unified memory, host-cached
-/// `Shared` memory where the device has it among them, else the class's memory as any image does
-/// (a copy through a submission could queue behind the program's work). On the memory types and
+/// A texture's image with host-transfer usage takes host-cached coherent memory of its class
+/// (`Private`) where the device has it among the image's types, else, with unified memory,
+/// host-cached `Shared` memory where the device has it among them, else the class's memory as any
+/// image does (a copy through a submission could queue behind the program's work), never a type
+/// the host maps without coherence (ANV's cached type on Arrow Lake-S). On the memory types and
 /// host-transfer image memory type bits measured (EVs XSH-hrp2-3090, XSH-hrp4-radv), the RTX 3090
 /// has none, so its images take resizable BAR, and the Radeon 780M (unified) takes its host-cached
 /// system memory, type 5, where it took RADV's uncached device-local type before. MoltenVK's shared
@@ -215,6 +218,20 @@ fn host_transfer_images_prefer_host_cached_memory() {
     let both = types(&[0x1, 0x7, 0xf]);
     assert_eq!(candidates(&both, 0b110, private, true), [1, 2]);
     assert_eq!(picked(&both, 0b110, true), (private, vec![2]));
+    // ANV (Mesa 26.2.4) on Arrow Lake-S's Xe-LPG (0x7d67), which shares no cache with the host:
+    // coherent write-combined types 0 and 3, cached type 1 without coherence, protected type 2.
+    // No type is host-cached and coherent, so the image takes its class's memory, without the
+    // incoherent type (`placed_image` strips it): the coherent type 0 first.
+    let arl = types(&[0x7, 0xb, 0x21, 0x7]);
+    assert_eq!(host_cached(&arl), 0);
+    assert_eq!(host_incoherent(&arl), 0b0010);
+    assert_eq!(host_cached_placement(&arl, 0b1011, private, true), None);
+    let coherent = 0b1011 & !host_incoherent(&arl);
+    assert_eq!(picked(&arl, coherent, true), (private, vec![0, 3]));
+    // Every device above lists only coherent host-visible types.
+    for listed in [nvidia, radv, moltenvk, types(&[0xf]), both] {
+        assert_eq!(host_incoherent(&listed), 0);
+    }
 }
 
 #[test]

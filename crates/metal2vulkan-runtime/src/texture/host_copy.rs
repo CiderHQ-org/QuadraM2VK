@@ -19,7 +19,10 @@
 //!   and RADV on a Radeon 780M in its uncached device-local type (144 ms). The image takes memory
 //!   of its class the host caches where the device has it among the image's types
 //!   (`memory::host_cached_placement`; MoltenVK's shared type on Apple GPUs and lavapipe's one type
-//!   are); else, on a device with unified memory, `Shared` memory the host caches (a Radeon 780M's
+//!   are), only of a coherent type: the runtime flushes no mapped range, and ANV's cached type on
+//!   a GPU without a cache shared with the host (Arrow Lake-S's Xe-LPG), which is not coherent,
+//!   left the GPU reading stale 64-byte lines of such images (`memory::host_cached`); else, on a
+//!   device with unified memory, `Shared` memory the host caches (a Radeon 780M's
 //!   system memory, where its GPU uses the image as fast as in device-local memory or faster, and a
 //!   1080p `get_bytes` takes 2.6 ms where it took 108 ms from RADV's uncached device-local type);
 //!   else the class's memory as before, counted (`WorkCounts::uncached_host_images`): the copies

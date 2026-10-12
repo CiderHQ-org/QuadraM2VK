@@ -2910,11 +2910,14 @@ impl Device {
         // Its host copies read and write through the host's mapping of its memory, which the
         // host reads slowly where it does not cache it: such memory of the class where the
         // device has it, else `Shared` memory's with unified memory
-        // (`memory::host_cached_placement`).
+        // (`memory::host_cached_placement`). Never memory the host maps without coherence, cached
+        // or not: the runtime flushes no mapped range (`memory::host_cached`).
         let hosted = plan.usage.contains(ImageUsageFlags::HOST_TRANSFER);
         let cached = match hosted {
             true => {
-                lock(&shared.memory).host_cached_placement(requirements.memory_type_bits, class)
+                let memory = lock(&shared.memory);
+                requirements.memory_type_bits &= !memory.host_incoherent();
+                memory.host_cached_placement(requirements.memory_type_bits, class)
             }
             false => None,
         };
