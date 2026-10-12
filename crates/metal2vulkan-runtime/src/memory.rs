@@ -12,7 +12,9 @@
 //!   [`MemoryClass`]; [`Memory::free`] with the placement it gave. Buffers use it in step 1;
 //!   textures and heaps add their classes and callers in their own steps. Imported host memory
 //!   has its own entry, [`Memory::import_host`]: one dedicated block per import, never
-//!   pooled, freed through the same [`Memory::free`].
+//!   pooled, freed through the same [`Memory::free`]. A dma-buf's import
+//!   (`Memory::import_dma_buf`) is in no block: the placement in it keeps it, and frees it as it
+//!   goes (`dma_buf.rs`'s `DmaBufPages`).
 //!
 //! - **Addresses** ([`allocate_addressed`]). A buffer placed for a device address gets it from its
 //!   block: a block that holds such a buffer has one buffer over its whole memory with the
@@ -33,6 +35,8 @@
 
 use super::buffer::usage;
 use super::device::lock;
+#[cfg(unix)]
+use super::dma_buf::DmaBufPages;
 use super::error::{internal, vulkan, Error, MemoryKind};
 use super::range::RangeAllocator;
 use super::sharing::Sharing;
@@ -40,6 +44,8 @@ use super::work_counts::Counters;
 use crate::release;
 use ash::vk;
 use std::ptr::NonNull;
+#[cfg(unix)]
+use std::sync::Arc;
 use std::sync::Mutex;
 
 /// The size of a pooled block, at most the device's `maxMemoryAllocationSize`.
@@ -469,6 +475,11 @@ pub(super) struct Placement {
     /// asked for one ([`allocate_addressed`]) on a device that enables
     /// `bufferDeviceAddress`.
     pub(super) address: Option<u64>,
+    /// The imports of the caller's dma-bufs the placement lies in, with the source that made them
+    /// (`dma_buf.rs`), which no block of the runtime's holds: kept until the placement goes, and
+    /// freed, the source dropped, when their last holder goes.
+    #[cfg(unix)]
+    dma_buf: Option<Arc<DmaBufPages>>,
 }
 
 impl Placement {
@@ -491,6 +502,35 @@ impl Placement {
             offset,
             mapped: mapped.map(Mapped),
             address: None,
+            #[cfg(unix)]
+            dma_buf: None,
+        }
+    }
+
+    /// The placement of a no-copy buffer's `size` bytes of host pages in the imports of the
+    /// caller's dma-bufs of them, `pages`: at offset 0 of `memory`, of type `type_index`, where
+    /// they are one import, or no memory (`VK_NULL_HANDLE`) where they are several bound to a
+    /// sparse buffer; their host address is `mapped`, the pages' pointer (the runtime never maps
+    /// a dma-buf). No block of the runtime's, so freeing it returns nothing; it keeps the imports
+    /// until it goes.
+    #[cfg(unix)]
+    pub(super) fn dma_buf(
+        pages: Arc<DmaBufPages>,
+        memory: vk::DeviceMemory,
+        type_index: u32,
+        size: u64,
+        mapped: NonNull<u8>,
+    ) -> Placement {
+        Placement {
+            type_index,
+            holds: Holds::Buffers,
+            block: None,
+            size,
+            memory,
+            offset: 0,
+            mapped: Some(Mapped(mapped)),
+            address: None,
+            dma_buf: Some(pages),
         }
     }
 
@@ -502,6 +542,36 @@ impl Placement {
     /// The bytes placed.
     pub(super) fn size(&self) -> u64 {
         self.size
+    }
+
+    /// Whether the placement lies in imports of the caller's dma-bufs (`dma_buf.rs`), to which no
+    /// image is bound (an image over them is bound to a dma-buf of its own pages).
+    pub(super) fn over_dma_buf(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.dma_buf.is_some()
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
+    /// The imports of the caller's dma-bufs the placement lies in, with their source
+    /// (`dma_buf.rs`); `None` for any other placement.
+    #[cfg(unix)]
+    pub(super) fn dma_buf_pages(&self) -> Option<&Arc<DmaBufPages>> {
+        self.dma_buf.as_ref()
+    }
+
+    /// Wait until the sparse binding of the buffer over the placement's dma-bufs completed,
+    /// where it may not have (`dma_buf.rs`'s `DmaBufPages::settle`): before that buffer is
+    /// destroyed. Any other placement has nothing to wait for.
+    pub(super) fn settle(&self) {
+        #[cfg(unix)]
+        if let Some(pages) = &self.dma_buf {
+            pages.settle();
+        }
     }
 
     /// The same placement, for another owner to free from now on: an image's first memory, which
@@ -518,6 +588,8 @@ impl Placement {
             offset: self.offset,
             mapped: self.mapped,
             address: self.address,
+            #[cfg(unix)]
+            dma_buf: self.dma_buf.clone(),
         }
     }
 }
@@ -767,6 +839,8 @@ impl Memory {
                 .as_ref()
                 .filter(|_| addressed)
                 .map(|addresses| addresses.address + offset),
+            #[cfg(unix)]
+            dma_buf: None,
         }
     }
 
@@ -874,6 +948,58 @@ impl Memory {
                         .pool(Holds::Buffers, type_index)
                         .add(size, true, block, size);
                     return Ok(self.placement((Holds::Buffers, type_index), index, 0, size, false));
+                }
+                Err(error) => failure = ImportFailure::Vulkan(error),
+            }
+        }
+        Err(failure)
+    }
+
+    /// Import the dma-buf `fd`, `size` bytes, as memory of the best type of `class` among
+    /// `allowed` (the types both the dma-buf and what is bound in it take): the memory and its
+    /// type, the caller's to free (`dma_buf.rs`'s `DmaBufPages`), in no block and never mapped.
+    /// For a buffer, allocated with the device-address flag where the device enables
+    /// `bufferDeviceAddress`; for `image`, its dedicated allocation (`size` its requirements').
+    /// Refused when no type of `class` is among `allowed`, else with the failure of the last type
+    /// tried; the descriptor is Vulkan's once imported, and closed on failure.
+    #[cfg(unix)]
+    pub(super) fn import_dma_buf(
+        &self,
+        device: &ash::Device,
+        fd: std::os::fd::OwnedFd,
+        size: u64,
+        (allowed, class): (u32, MemoryClass),
+        image: Option<vk::Image>,
+    ) -> Result<(vk::DeviceMemory, u32), ImportFailure> {
+        use std::os::fd::{AsRawFd, IntoRawFd};
+        let mut failure = ImportFailure::NoMemoryType;
+        for type_index in candidates(&self.types, allowed, class, self.unified) {
+            let mut import = vk::ImportMemoryFdInfoKHR::default()
+                .handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT)
+                .fd(fd.as_raw_fd());
+            let mut flags = vk::MemoryAllocateFlagsInfo::default()
+                .flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
+            let mut dedicated = vk::MemoryDedicatedAllocateInfo::default();
+            let mut info = vk::MemoryAllocateInfo::default()
+                .allocation_size(size)
+                .memory_type_index(type_index)
+                .push_next(&mut import);
+            match image {
+                Some(image) => {
+                    dedicated = dedicated.image(image);
+                    info = info.push_next(&mut dedicated);
+                }
+                None if self.device_address => info = info.push_next(&mut flags),
+                None => {}
+            }
+            // SAFETY: `info` and its chain live for the call; the type index is the device's and
+            // allows the dma-buf (and the image, unbound and made for dma-bufs, whose size this
+            // is). A failed import leaves the descriptor open, the caller's.
+            match unsafe { device.allocate_memory(&info, None) } {
+                Ok(memory) => {
+                    // A successful import owns the descriptor: Vulkan closes it with the memory.
+                    let _ = fd.into_raw_fd();
+                    return Ok((memory, type_index));
                 }
                 Err(error) => failure = ImportFailure::Vulkan(error),
             }

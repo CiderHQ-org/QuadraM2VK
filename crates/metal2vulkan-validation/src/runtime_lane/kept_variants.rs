@@ -17,9 +17,9 @@ use metal2vulkan::pipeline::{
 };
 use metal2vulkan_devtools::llvm_assemble;
 use metal2vulkan_runtime::{
-    Buffer, ClearColor, CommandBuffer, CommandBufferStatus, ComputePipelineState, Device, Library,
-    LoadAction, PipelineOptions, RenderPassDescriptor, RenderPipelineState, ResourceOptions, Size,
-    StoreAction, Texture, TextureDescriptor, WorkCounts,
+    Buffer, ClearColor, CommandBuffer, CommandBufferStatus, ComputePipelineState, Device,
+    HostMemory, Library, LoadAction, PipelineOptions, RenderPassDescriptor, RenderPipelineState,
+    ResourceOptions, Size, StoreAction, Texture, TextureDescriptor, WorkCounts,
 };
 use std::alloc::Layout;
 use std::cell::RefCell;
@@ -93,7 +93,7 @@ fn no_copy_buffer(device: &Device, freed: &Arc<AtomicBool>) -> Buffer {
     // deallocator unrun, and the memory then leaks.
     unsafe {
         device.new_buffer_with_bytes_no_copy(
-            memory,
+            HostMemory::new(memory),
             NO_COPY as u64,
             ResourceOptions::shared(),
             Some(Box::new(move |pointer, _| {

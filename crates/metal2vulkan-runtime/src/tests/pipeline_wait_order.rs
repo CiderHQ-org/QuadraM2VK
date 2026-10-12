@@ -16,7 +16,7 @@
 use crate::pipeline::pool::held;
 use crate::{
     BlitOption, Buffer, ClearColor, CommandBufferStatus, Device, DeviceKind, DeviceOptions,
-    LoadAction, Origin, PipelineOptions, RenderPassDescriptor, RenderPipelineState,
+    HostMemory, LoadAction, Origin, PipelineOptions, RenderPassDescriptor, RenderPipelineState,
     ResourceOptions, ShaderCacheOptions, Size, StoreAction, Texture, TextureDescriptor,
 };
 use metal2vulkan::metal::{PixelFormat, PrimitiveType, TextureUsage};
@@ -122,7 +122,7 @@ fn no_copy_texture(device: &Device, freed: &Arc<AtomicBool>) -> (Buffer, Texture
     // deallocator unrun, and the memory then leaks.
     let buffer = unsafe {
         device.new_buffer_with_bytes_no_copy(
-            memory,
+            HostMemory::new(memory),
             NO_COPY as u64,
             ResourceOptions::shared(),
             Some(Box::new(move |pointer, _| {

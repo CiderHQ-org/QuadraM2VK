@@ -25,7 +25,7 @@ use super::{validated_device, Messages, ScratchCache};
 use crate::gpu::{DeviceType, TEST_DEVICE};
 use metal2vulkan_runtime::{
     Buffer, CommandBuffer, CommandBufferStatus, CommandQueue, Deallocator, Device, DeviceKind,
-    EventRef, ResourceOptions, SharedEvent, SharedEventListener,
+    EventRef, HostMemory, ResourceOptions, SharedEvent, SharedEventListener,
 };
 use std::io::Read;
 use std::path::PathBuf;
@@ -322,7 +322,7 @@ fn child() {
             // SAFETY: the pages stay mapped for the life of the process.
             let made = unsafe {
                 device.new_buffer_with_bytes_no_copy(
-                    memory,
+                    HostMemory::new(memory),
                     page as u64,
                     ResourceOptions::default(),
                     Some(deallocator),

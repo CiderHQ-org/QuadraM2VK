@@ -25,8 +25,9 @@ use crate::executor_contract::out_of_bounds::{GUARD_FILL, PAD_FILL};
 use crate::gpu::TEST_DEVICE;
 use metal2vulkan_runtime::{
     Buffer, CommandBufferStatus, CommandQueue, CpuCacheMode, Degradation, Device, Error,
-    HazardTrackingMode, Heap, HeapDescriptor, HeapProblem, HeapType, Invalid, MemoryKind, Nil,
-    Problem, PurgeableState, ResourceOptions, RuntimeGap, SizeAndAlign, StorageMode,
+    HazardTrackingMode, Heap, HeapDescriptor, HeapProblem, HeapType, HostMemory, Invalid,
+    MemoryKind, Nil, Problem, PurgeableState, ResourceOptions, RuntimeGap, SizeAndAlign,
+    StorageMode,
 };
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -1405,7 +1406,7 @@ fn a_loaded_pointer_reaches_a_rebound_no_copy_buffer_once_a_command_used_it_agai
         let new = Mapping::anonymous(len);
         new.write(0, &bytes);
         // SAFETY: `new` outlives the buffer, which is dropped first, and no other thread uses it.
-        unsafe { pages.rebind_bytes_no_copy(new.pointer(), None, None) }.unwrap();
+        unsafe { pages.rebind_bytes_no_copy(HostMemory::new(new.pointer()), None, None) }.unwrap();
         old.write(0, &bytes);
         let produced = walk_unnamed(device, &queue, &walker, &pages, None);
         assert!(
@@ -1443,7 +1444,7 @@ fn a_loaded_pointer_reaches_a_no_copy_buffer_rebound_before_its_use_once_a_comma
         let new = Mapping::anonymous(len);
         new.write(0, &bytes);
         // SAFETY: `new` outlives the buffer, which is dropped first, and no other thread uses it.
-        unsafe { pages.rebind_bytes_no_copy(new.pointer(), None, None) }.unwrap();
+        unsafe { pages.rebind_bytes_no_copy(HostMemory::new(new.pointer()), None, None) }.unwrap();
         let produced = walk_unnamed(device, &queue, &walker, &pages, None);
         assert!(produced != walker.metal_output, "no command used it");
         gpu_read(&queue, &pages, 0..4);
@@ -1493,7 +1494,7 @@ fn a_loaded_pointer_reaches_a_rebound_heap_s_buffer_once_a_command_used_the_heap
         let new = Mapping::anonymous(HEAP);
         new.write(AT, &bytes);
         // SAFETY: `new` outlives the heap, which is dropped first, and no other thread uses it.
-        unsafe { heap.rebind_bytes_no_copy(new.pointer(), None, None) }.unwrap();
+        unsafe { heap.rebind_bytes_no_copy(HostMemory::new(new.pointer()), None, None) }.unwrap();
         old.write(AT, &bytes);
         let produced = walk_unnamed(device, &queue, &walker, &placed, None);
         assert!(
@@ -1537,7 +1538,8 @@ fn a_rebind_of_one_of_two_buffers_over_a_memory_ends_only_its_use() {
         let new = Mapping::anonymous(len);
         new.write(0, &bytes);
         // SAFETY: `new` outlives the buffer, which is dropped first, and no other thread uses it.
-        unsafe { rebound.rebind_bytes_no_copy(new.pointer(), None, None) }.unwrap();
+        unsafe { rebound.rebind_bytes_no_copy(HostMemory::new(new.pointer()), None, None) }
+            .unwrap();
         memory.write(0, &bytes);
         let produced = walk_unnamed(device, &queue, &walker, &rebound, None);
         assert!(

@@ -930,19 +930,22 @@ impl Texels {
     }
 
     /// The attachment twin of `pixel_format` kept with the texels (a texture buffer's, or a
-    /// rotated texture's), made by `make` at the first pass that needs it.
+    /// rotated texture's), made by `make` at the first pass that needs it, with the twins'
+    /// lock not held: a twin over dma-buf pages calls the program's source (`dma_buf.rs`). Where
+    /// another pass made one meanwhile, that one is kept and `make`'s goes, with no lock held.
     pub(super) fn twin(
         &self,
         pixel_format: PixelFormat,
         make: impl FnOnce() -> Result<Texture, Error>,
     ) -> Result<Texture, Error> {
-        let mut twins = lock(&self.twins);
-        if let Some(twin) = twins.get(&pixel_format) {
+        if let Some(twin) = lock(&self.twins).get(&pixel_format) {
             return Ok(twin.clone());
         }
-        let twin = make()?;
-        twins.insert(pixel_format, twin.clone());
-        Ok(twin)
+        let made = make()?;
+        let kept = (lock(&self.twins).entry(pixel_format))
+            .or_insert_with(|| made.clone())
+            .clone();
+        Ok(kept)
     }
 
     /// The copies of a rotated texture's image of its pass's frame (`image` of `identity`, of

@@ -47,7 +47,9 @@
 //!   a heap's rebind keeps (its first byte at the import's unit); a no-copy buffer with a texture
 //!   over it is rebound only to memory at the same offset in its page
 //!   (`NotImplemented(RebindTextures)` else), as is one whose aliasing image the device cannot make
-//!   again over the new pages (their memory type is not one it takes).
+//!   again over the new pages (their memory type is not one it takes). Over new pages imported as
+//!   dma-bufs, each such image is made again over a dma-buf of its own new pages before the rebind
+//!   settles (`Device::dma_buf_images_again`, `dma_buf.rs`), and refused likewise where it is not.
 
 use super::buffer::{Buffer, Detached, HostCell, HostPages, Lying, WeakBuffer};
 use super::command_buffer::CommandBufferShared;
@@ -60,7 +62,6 @@ use super::Device;
 use metal2vulkan::bind::ResidentRange;
 use std::any::Any;
 use std::collections::{BTreeSet, HashMap};
-use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 
@@ -691,23 +692,23 @@ impl Drop for Holds {
 
 impl Buffer {
     /// Give the no-copy buffer other host memory of its length from now on (a runtime extension;
-    /// the module docs of `rebind.rs` state the rule): `bytes`, under [`HostMemory::new`]'s
-    /// contract for the buffer's [`length`](Buffer::length), imported as
+    /// the module docs of `rebind.rs` state the rule): `memory` ([`HostMemory`]), under its
+    /// constructor's contract for the buffer's [`length`](Buffer::length), imported as
     /// [`Device::new_buffer_with_bytes_no_copy`] imports memory. The buffer, its `gpu_address` and
-    /// its options stay; `contents` answers `bytes` from now on. Command buffers first submitted
-    /// before the call keep the old memory until they complete; one committed before it and first
-    /// submitted after reaches the new memory through what it made resident and what its commands
-    /// reach unnamed, and through what its compute, blit and render encoders named, which this call
-    /// encodes again; it fails `CommandBufferError::EncodedUseRebound` where an encoder this call
-    /// cannot encode again named the buffer (one of a command buffer that used command predication,
-    /// among others); commands encoded after it use the new. The old memory's deallocator runs once
-    /// every command buffer submitted before the call that used it completed (in the call, where
-    /// none holds it); `deallocator` runs for `bytes` at the next rebind's turn, or when the buffer
-    /// goes. A refused call runs neither and changes nothing. `keep_alive` ([`KeepAlive`]) is
-    /// dropped once the device's import of `bytes` is freed: with one, `deallocator` runs at that
-    /// turn though something still holds the import (a command buffer submitted before a texture
-    /// over the bytes was released); with none, `deallocator` waits for the import
-    /// (`host-deallocator-delayed`).
+    /// its options stay; `contents` answers `memory.pointer()` from now on. Command buffers first
+    /// submitted before the call keep the old memory until they complete; one committed before it
+    /// and first submitted after reaches the new memory through what it made resident and what its
+    /// commands reach unnamed, and through what its compute, blit and render encoders named, which
+    /// this call encodes again; it fails `CommandBufferError::EncodedUseRebound` where an encoder
+    /// this call cannot encode again named the buffer (one of a command buffer that used command
+    /// predication, among others); commands encoded after it use the new. The old memory's
+    /// deallocator runs once every command buffer submitted before the call that used it completed
+    /// (in the call, where none holds it); `deallocator` runs for the new memory at the next
+    /// rebind's turn, or when the buffer goes. A refused call runs neither and changes nothing.
+    /// `keep_alive` ([`KeepAlive`]) is dropped once the device's import of the new memory is freed:
+    /// with one, `deallocator` runs at that turn though something still holds the import (a command
+    /// buffer submitted before a texture over the bytes was released); with none, `deallocator`
+    /// waits for the import (`host-deallocator-delayed`).
     ///
     /// A texture over the buffer (a shadow of its bytes, or a texture buffer) reads the new
     /// memory from its next use, and one whose linear image aliases its bytes has its image made
@@ -719,18 +720,20 @@ impl Buffer {
     /// memory at another offset in its page than the old where a texture over the buffer lives
     /// (`NotImplemented(RebindTextures)`: the texture's copies, views and aliasing image are
     /// planned at that offset), or where the device cannot make a texture's aliasing image again
-    /// over the new memory (`NotImplemented(RebindTextures)`); memory the device cannot import
-    /// exactly, as `new_buffer_with_bytes_no_copy` refuses it; a lost device.
+    /// over the new memory (`NotImplemented(RebindTextures)`, which says when); memory the device
+    /// cannot import exactly, as `new_buffer_with_bytes_no_copy` refuses it; a lost device.
     ///
     /// # Safety
     ///
-    /// `bytes` meets [`HostMemory::new`]'s contract for the buffer's length. The old memory stays
-    /// mapped until its keep-alive is dropped, else until its deallocator runs, or with neither
-    /// until every command buffer first submitted before the call completed. No command that uses the buffer is encoded, and no command
-    /// buffer that uses it committed, on another thread during the call.
+    /// `memory` meets the contract of the [`HostMemory`] constructor that made it
+    /// ([`HostMemory::new`], [`HostMemory::with_dma_buf`]) for the buffer's length. The old memory
+    /// stays mapped until its keep-alive is dropped, else until its deallocator runs, or with
+    /// neither until every command buffer first submitted before the call completed. No command
+    /// that uses the buffer is encoded, and no command buffer that uses it committed, on another
+    /// thread during the call.
     pub unsafe fn rebind_bytes_no_copy(
         &self,
-        bytes: NonNull<u8>,
+        memory: HostMemory,
         deallocator: Option<Deallocator>,
         keep_alive: Option<KeepAlive>,
     ) -> Result<(), Error> {
@@ -744,7 +747,7 @@ impl Buffer {
                 CALL,
                 self,
                 cell,
-                HostMemory::new(bytes),
+                memory,
                 HostRelease {
                     deallocator,
                     keep_alive,
@@ -758,14 +761,15 @@ impl Buffer {
 impl Heap {
     /// Give the heap over the caller's host memory (`Device::new_heap_with_bytes_no_copy`) other
     /// host memory of its size from now on (a runtime extension), as
-    /// [`Buffer::rebind_bytes_no_copy`] gives a no-copy buffer: `bytes`, its first byte at a
-    /// multiple of the import's unit as the heap's was. Every buffer and texture placed in the
-    /// heap stays, at its offset, with its `gpu_address` and resource ID; a buffer's `contents`
-    /// answers its offset in `bytes` from now on. A texture bound to the heap's bytes has its
-    /// image made again over the new memory, at its offset, before the call returns, as has a
-    /// texture over one of the heap's buffers whose linear image aliases its bytes; a texture
-    /// held as a shadow of the heap's bytes, a texture buffer and a shadowed texture over one of
-    /// the heap's buffers read them from their next use. Nothing of the old contents is copied.
+    /// [`Buffer::rebind_bytes_no_copy`] gives a no-copy buffer: `memory` ([`HostMemory`]), its
+    /// first byte at a multiple of the import's unit as the heap's was. Every buffer and texture
+    /// placed in the heap stays, at its offset, with its `gpu_address` and resource ID; a buffer's
+    /// `contents` answers its offset from `memory.pointer()` from now on. A texture bound to the
+    /// heap's bytes has its image made again over the new memory, at its offset, before the call
+    /// returns, as has a texture over one of the heap's buffers whose linear image aliases its
+    /// bytes; a texture held as a shadow of the heap's bytes, a texture buffer and a shadowed
+    /// texture over one of the heap's buffers read them from their next use. Nothing of the old
+    /// contents is copied.
     ///
     /// Refused: a heap not over the caller's host memory (`Invalid`,
     /// [`RebindProblem::NotHostMemory`]); a command buffer not yet committed whose commands used
@@ -781,7 +785,7 @@ impl Heap {
     /// of the heap and its resources.
     pub unsafe fn rebind_bytes_no_copy(
         &self,
-        bytes: NonNull<u8>,
+        memory: HostMemory,
         deallocator: Option<Deallocator>,
         keep_alive: Option<KeepAlive>,
     ) -> Result<(), Error> {
@@ -798,7 +802,7 @@ impl Heap {
                 CALL,
                 own,
                 cell,
-                HostMemory::new(bytes),
+                memory,
                 HostRelease {
                     deallocator,
                     keep_alive,

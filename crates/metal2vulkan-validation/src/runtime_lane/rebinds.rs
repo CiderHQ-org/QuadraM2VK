@@ -45,8 +45,8 @@ use metal2vulkan::metal::TextureType;
 use metal2vulkan::metal::{PixelFormat, TextureUsage};
 use metal2vulkan_runtime::{
     Buffer, CommandBuffer, CommandBufferStatus, CommandQueue, Deallocator, Device, Error, EventRef,
-    Heap, HeapDescriptor, HeapProblem, HeapType, Invalid, Origin, Problem, RebindProblem,
-    ResourceOptions, RuntimeGap, SharedEvent, Size, Texture, TextureDescriptor,
+    Heap, HeapDescriptor, HeapProblem, HeapType, HostMemory, Invalid, Origin, Problem,
+    RebindProblem, ResourceOptions, RuntimeGap, SharedEvent, Size, Texture, TextureDescriptor,
 };
 use std::collections::BTreeMap;
 use std::ptr::NonNull;
@@ -112,14 +112,26 @@ pub(super) fn rebind(buffer: &Buffer, mapping: Mapping, seen: &Arc<Seen>) -> Res
     let pointer = mapping.pointer();
     // SAFETY: the mapping holds the buffer's length until the deallocator releases it, and no
     // other thread encodes or commits meanwhile.
-    unsafe { buffer.rebind_bytes_no_copy(pointer, Some(recording(seen, mapping)), None) }
+    unsafe {
+        buffer.rebind_bytes_no_copy(
+            HostMemory::new(pointer),
+            Some(recording(seen, mapping)),
+            None,
+        )
+    }
 }
 
 /// Rebind `heap` to `mapping`, whose deallocator records into `seen` and releases it.
 pub(super) fn rebind_heap(heap: &Heap, mapping: Mapping, seen: &Arc<Seen>) -> Result<(), Error> {
     let pointer = mapping.pointer();
     // SAFETY: as `rebind`'s, for the heap's size.
-    unsafe { heap.rebind_bytes_no_copy(pointer, Some(recording(seen, mapping)), None) }
+    unsafe {
+        heap.rebind_bytes_no_copy(
+            HostMemory::new(pointer),
+            Some(recording(seen, mapping)),
+            None,
+        )
+    }
 }
 
 /// Where a deallocator ran.
@@ -547,7 +559,8 @@ fn only_the_caller_s_memory_is_rebound() {
             count.runs.fetch_add(1, Ordering::SeqCst);
         });
         // SAFETY: the mapping holds the heap's size past `off` and outlives any rebind.
-        let made = unsafe { over.rebind_bytes_no_copy(off, Some(deallocator), None) };
+        let made =
+            unsafe { over.rebind_bytes_no_copy(HostMemory::new(off), Some(deallocator), None) };
         let Err(Error::Invalid(invalid)) = &made else {
             panic!("an unaligned rebind: {made:?}");
         };
@@ -603,7 +616,9 @@ fn a_texture_over_a_rebound_buffer_reads_the_new_pages() {
             "REBIND texture over a no-copy buffer: {}",
             if aliased { "aliased" } else { "shadowed" }
         );
-        let read = |texture: &Texture| blit_texels(&queue, texture, side as u64, bytes as u64);
+        let read = |texture: &Texture| {
+            blit_texels(&queue, texture, (side as u64, side as u64), bytes as u64)
+        };
         assert_eq!(read(&texture), rows(&counting(LEN, 1), side, bytes, pitch));
 
         // Memory 256 bytes into a page.
@@ -614,7 +629,8 @@ fn a_texture_over_a_rebound_buffer_reads_the_new_pages() {
         let count = DropRecord(Arc::clone(&seen));
         let deallocator: Deallocator = Box::new(move |_, _| drop(count));
         // SAFETY: the mapping holds the length past `off` and outlives any rebind.
-        let made = unsafe { buffer.rebind_bytes_no_copy(off, Some(deallocator), None) };
+        let made =
+            unsafe { buffer.rebind_bytes_no_copy(HostMemory::new(off), Some(deallocator), None) };
         assert_eq!(made, Err(Error::NotImplemented(RuntimeGap::RebindTextures)));
         assert_eq!(seen.dropped.load(Ordering::SeqCst), 1);
         drop(off_page);
@@ -624,7 +640,13 @@ fn a_texture_over_a_rebound_buffer_reads_the_new_pages() {
         rebind(&buffer, next, &Arc::default()).unwrap();
         assert_eq!(read(&texture), rows(&counting(LEN, 2), side, bytes, pitch));
         let written: Vec<u8> = (0..side * side * bytes).map(|i| (i % 199) as u8).collect();
-        blit_into(&queue, &texture, side as u64, bytes as u64, &written);
+        blit_into(
+            &queue,
+            &texture,
+            (side as u64, side as u64),
+            bytes as u64,
+            &written,
+        );
         // SAFETY: the new mapping lives until the buffer goes; no command writes it now.
         let now = unsafe { at(pointer, 0..side * pitch) };
         assert_eq!(rows(&now, side, bytes, pitch), written);
@@ -658,7 +680,9 @@ fn a_texture_over_a_no_copy_heap_s_buffer_follows_a_rebind() {
         let texture = buffer.new_texture(&descriptor, 0, pitch as u64).unwrap();
         // SAFETY: the handle is only compared, while the texture lives.
         let aliased = unsafe { texture.vk_image() }.is_some();
-        let read = |texture: &Texture| blit_texels(&queue, texture, side as u64, bytes as u64);
+        let read = |texture: &Texture| {
+            blit_texels(&queue, texture, (side as u64, side as u64), bytes as u64)
+        };
         assert_eq!(
             read(&texture),
             rows(&counting(HEAP, 1)[offset..], side, bytes, pitch)
@@ -673,7 +697,13 @@ fn a_texture_over_a_no_copy_heap_s_buffer_follows_a_rebind() {
             "the texels of the new pages"
         );
         let written: Vec<u8> = (0..side * side * bytes).map(|i| (i % 199) as u8).collect();
-        blit_into(&queue, &texture, side as u64, bytes as u64, &written);
+        blit_into(
+            &queue,
+            &texture,
+            (side as u64, side as u64),
+            bytes as u64,
+            &written,
+        );
         // SAFETY: the new mapping lives until the heap goes; no command writes it now.
         let now = unsafe { at(next_pointer, offset..offset + side * pitch) };
         assert_eq!(rows(&now, side, bytes, pitch), written);
@@ -838,7 +868,7 @@ fn a_rebound_heap_keeps_its_resources() {
             let id = texture.gpu_resource_id();
             let len = (side * side * bytes) as usize;
             let first: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
-            blit_into(&queue, &texture, side, bytes, &first);
+            blit_into(&queue, &texture, (side, side), bytes, &first);
             let size = device
                 .heap_texture_size_and_align(&heap_descriptor(format, side))
                 .unwrap()
@@ -853,7 +883,11 @@ fn a_rebound_heap_keeps_its_resources() {
             let next_pointer = next.pointer();
             // SAFETY: the test keeps the mapping until the heap is gone.
             unsafe {
-                heap.rebind_bytes_no_copy(next_pointer, Some(recording(&next_seen, ())), None)
+                heap.rebind_bytes_no_copy(
+                    HostMemory::new(next_pointer),
+                    Some(recording(&next_seen, ())),
+                    None,
+                )
             }
             .unwrap_or_else(|error| panic!("{format:?}: {error:?}"));
             ran(
@@ -868,12 +902,12 @@ fn a_rebound_heap_keeps_its_resources() {
             mappings[old].fill(0);
             assert_eq!(texture.gpu_resource_id(), id);
             assert_eq!(
-                blit_texels(&queue, &texture, side, bytes),
+                blit_texels(&queue, &texture, (side, side), bytes),
                 first,
                 "{format:?}: the texels of the new pages"
             );
             let second: Vec<u8> = (0..len).map(|i| (i % 241) as u8 ^ 0x5a).collect();
-            blit_into(&queue, &texture, side, bytes, &second);
+            blit_into(&queue, &texture, (side, side), bytes, &second);
             let current = mappings.len() - 1;
             assert_ne!(
                 mappings[current].read(range.clone()),
@@ -891,7 +925,11 @@ fn a_rebound_heap_keeps_its_resources() {
             let next_seen = Arc::new(Seen::default());
             // SAFETY: the test keeps the mapping until the heap is gone.
             unsafe {
-                heap.rebind_bytes_no_copy(next.pointer(), Some(recording(&next_seen, ())), None)
+                heap.rebind_bytes_no_copy(
+                    HostMemory::new(next.pointer()),
+                    Some(recording(&next_seen, ())),
+                    None,
+                )
             }
             .unwrap();
             mappings.push(next);
@@ -1025,8 +1063,14 @@ fn a_texture_sampled_before_its_first_submission_reads_its_heap_s_new_pages() {
         second.write(0, &laid);
         let before = device.work_counts();
         // SAFETY: the test keeps the mapping until the heap is gone.
-        unsafe { heap.rebind_bytes_no_copy(second.pointer(), Some(recording(&seen[1], ())), None) }
-            .unwrap();
+        unsafe {
+            heap.rebind_bytes_no_copy(
+                HostMemory::new(second.pointer()),
+                Some(recording(&seen[1], ())),
+                None,
+            )
+        }
+        .unwrap();
         // Its last use, the copy in, completed before the rebind.
         ran(&seen[0], first.pointer(), HEAP, &laid[..16], Thread::Any);
         assert_eq!(held.status(), CommandBufferStatus::Committed);
@@ -1100,7 +1144,8 @@ fn a_heap_rebind_costs_an_image_per_bound_texture() {
                 let next = Mapping::anonymous(HEAP);
                 let start = Instant::now();
                 // SAFETY: the test keeps the mapping until the heap is gone.
-                unsafe { heap.rebind_bytes_no_copy(next.pointer(), None, None) }.unwrap();
+                unsafe { heap.rebind_bytes_no_copy(HostMemory::new(next.pointer()), None, None) }
+                    .unwrap();
                 times.push(format!("{:.0}", start.elapsed().as_secs_f64() * 1e6));
                 mappings.push(next);
             }

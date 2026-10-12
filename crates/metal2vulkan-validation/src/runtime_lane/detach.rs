@@ -41,9 +41,9 @@ use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor
 use metal2vulkan_devtools::{engine_dir, llvm_assemble};
 use metal2vulkan_runtime::{
     Buffer, ClearColor, CommandBuffer, CommandBufferError, CommandBufferStatus, CommandQueue,
-    Degradation, Device, Error, EventRef, Heap, HeapDescriptor, HeapType, Invalid, LoadAction,
-    PipelineOptions, Problem, RebindProblem, Region, RenderPassDescriptor, ResourceOptions,
-    SharedEvent, StoreAction, TextureDescriptor,
+    Degradation, Device, Error, EventRef, Heap, HeapDescriptor, HeapType, HostMemory, Invalid,
+    LoadAction, PipelineOptions, Problem, RebindProblem, Region, RenderPassDescriptor,
+    ResourceOptions, SharedEvent, StoreAction, TextureDescriptor,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -535,7 +535,7 @@ fn large_heap(device: &Device) -> Option<(Heap, Buffer)> {
     // SAFETY: the deallocator releases the mapping once the heap's pages go.
     let made = unsafe {
         device.new_heap_with_bytes_no_copy(
-            pointer,
+            HostMemory::new(pointer),
             &descriptor,
             Some(recording(&seen, mapping)),
             None,
@@ -573,7 +573,7 @@ fn a_detach_of_a_large_heap_allocates_no_device_memory() {
         // SAFETY: the deallocator releases the mapping once the buffer's pages go.
         let large = unsafe {
             device.new_buffer_with_bytes_no_copy(
-                pointer,
+                HostMemory::new(pointer),
                 LARGE as u64,
                 ResourceOptions::default(),
                 Some(recording(&seen, mapping)),

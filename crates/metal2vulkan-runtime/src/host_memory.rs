@@ -1,5 +1,6 @@
 //! Buffers over the caller's host memory without a copy (`newBufferWithBytesNoCopy:`), through
-//! `VK_EXT_external_memory_host`.
+//! `VK_EXT_external_memory_host`, or, where the device refuses the pointer, dma-buf memory of the
+//! pages the caller imports (`VK_EXT_external_memory_dma_buf`, [`DmaBufSource`], `dma_buf.rs`).
 //!
 //! - **What Metal takes** (measured on an Apple M3 Max and an M4, plain and under API validation):
 //!   any pointer and any length but 0; the buffer covers the whole host pages its range touches
@@ -29,9 +30,16 @@
 //!   there the rule refuses a little more than the driver would. On macOS, MoltenVK hands the
 //!   range to Metal, which reads read-only pages, so there is no check.
 //! - **What drivers answered**. Private anonymous memory was imported on every venue measured. RADV
-//!   refused shared memory (anonymous shared, or a mapping of a shared memory object) typed: Mesa
-//!   26.2.4 answers `VK_ERROR_INVALID_EXTERNAL_HANDLE`, 26.0.8 `VK_ERROR_UNKNOWN`, and both are
-//!   refusals ([`import_refused`]).
+//!   refused shared memory typed: anonymous shared memory, and any mapping of a file, a shared
+//!   memory object or a `memfd` among them (QEMU's `memory-backend-memfd,share=on` guest RAM). It
+//!   imports a host pointer through amdgpu's userptr, which the kernel takes only over anonymous
+//!   pages. Mesa 26.2.4 answers `VK_ERROR_INVALID_EXTERNAL_HANDLE`, 26.0.8 `VK_ERROR_UNKNOWN`, and
+//!   both are refusals ([`import_refused`]). NVIDIA and lavapipe imported the same shared memory.
+//! - **Dma-bufs of the pages** ([`HostMemory::with_dma_buf`]), the last resort before that
+//!   refusal: where the device refuses the pointer ([`refused`]: the import window, the buffer's
+//!   binding in it, the memory types, or the driver) and imports dma-bufs, the buffer is bound in
+//!   imports of the source's dma-bufs of the pages instead (`dma_buf.rs`). Every import the device
+//!   takes by its pointer is made exactly as before, with no call more.
 //! - **When**. The pages are imported when the buffer is made, on every platform, as Metal wires
 //!   them then: the GPU uses the pages mapped at the pointer when the buffer was made, whatever is
 //!   mapped there later, and memory the device cannot import is refused by the call that makes the
@@ -58,6 +66,8 @@
 //!   contract keeps mapped: its deallocator runs at its release either way.
 
 use super::device::lock;
+#[cfg(unix)]
+use super::dma_buf::DmaBufSource;
 use super::error::{vulkan, Error};
 use super::exit_guard;
 use super::loader_word::LoaderWord;
@@ -68,16 +78,40 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::Mutex;
 
-/// Host memory a buffer wraps without a copy: a pointer whose bytes the caller vouches for (the
-/// `pointer` of `newBufferWithBytesNoCopy:length:options:deallocator:`).
-#[derive(Debug)]
-pub struct HostMemory(NonNull<u8>);
+/// Host memory a buffer or heap wraps without a copy: a pointer whose bytes the caller vouches for
+/// (the `pointer` of `newBufferWithBytesNoCopy:length:options:deallocator:`), and, as a runtime
+/// extension, a source of dma-bufs of its pages for a device that refuses the pointer itself
+/// ([`HostMemory::with_dma_buf`]).
+pub struct HostMemory {
+    pointer: NonNull<u8>,
+    source: Option<Source>,
+}
 
-// SAFETY: a `HostMemory` is an address and the caller's guarantee for it (`HostMemory::new`); the
-// runtime touches the bytes only as a buffer of them, under that guarantee.
+/// What a [`HostMemory`] may carry besides its pointer: a [`DmaBufSource`] where the system has
+/// file descriptors, nothing elsewhere.
+#[cfg(unix)]
+pub(super) type Source = DmaBufSource;
+
+/// What a [`HostMemory`] may carry besides its pointer: nothing on this system.
+#[cfg(not(unix))]
+pub(super) type Source = std::convert::Infallible;
+
+// SAFETY: a `HostMemory` is an address and the caller's guarantee for it (`HostMemory::new`),
+// and a source that is `Send`; the runtime touches the bytes only as a buffer of them, under that
+// guarantee.
 unsafe impl Send for HostMemory {}
-// SAFETY: as above.
+// SAFETY: as above; a shared `HostMemory` answers its pointer alone, and its source is reached
+// only by value ([`HostMemory::into_parts`]).
 unsafe impl Sync for HostMemory {}
+
+impl std::fmt::Debug for HostMemory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostMemory")
+            .field("pointer", &self.pointer)
+            .field("dma_buf", &self.source.is_some())
+            .finish()
+    }
+}
 
 impl HostMemory {
     /// The host memory at `pointer`, for a buffer of some length `length` made from it.
@@ -101,14 +135,53 @@ impl HostMemory {
     /// (`Unsupported`, `HostMemory`), though Metal reads such pages: Linux drivers pin imported
     /// pages for writing, and one (ANV) imported a read-only page and then lost the device at the
     /// GPU's first read. Some drivers also refuse shared memory (RADV refused anonymous shared
-    /// memory and mappings of shared memory objects); private memory imports everywhere measured.
+    /// memory and mappings of shared memory objects, `memfd` mappings among them); private memory
+    /// imports everywhere measured. [`HostMemory::with_dma_buf`] imports such memory where the
+    /// device imports dma-bufs.
     pub unsafe fn new(pointer: NonNull<u8>) -> HostMemory {
-        HostMemory(pointer)
+        HostMemory {
+            pointer,
+            source: None,
+        }
+    }
+
+    /// As [`HostMemory::new`], plus a source of dma-bufs of the pages for a device that refuses
+    /// the pointer (a runtime extension, [`DmaBufSource`]). The runtime first imports the pointer
+    /// exactly as [`HostMemory::new`]'s; only where the device refuses it (a driver refusal, or a
+    /// range its import alignment cannot cover) and enables `VK_EXT_external_memory_dma_buf`, it
+    /// imports the source's chunks instead: one chunk binds a plain buffer, several a sparse one.
+    /// A texture over such pages (over the buffer, placed in the heap, or a view of one) is an
+    /// image over a dma-buf of its own pages where the device lists
+    /// `VK_EXT_image_drm_format_modifier` and `VK_EXT_queue_family_foreign`, else a shadow of the
+    /// bytes (announced `shadowed-texture`). Refused as [`HostMemory::new`]'s memory is
+    /// (`Unsupported`, `HostMemory`) where the device imports no chunk or the source fails; chunks
+    /// that break the source's contract are misuse (`Invalid`, `Problem::DmaBuf`). Measured: RADV
+    /// refuses the pointer of `memfd` and other shared mappings and imports `udmabuf`s of their
+    /// pages; NVIDIA and lavapipe import the pointer and never call the source.
+    ///
+    /// # Safety
+    ///
+    /// [`HostMemory::new`]'s contract for the bytes at `pointer`, holding while the chunks are
+    /// imported as while the pointer is; and the chunks `source` returns hold exactly the pages it
+    /// is asked for, in order (then padding, [`DmaBufRequest`](crate::DmaBufRequest)), the same
+    /// pieces of the same files for every request over the same pages, so that the GPU's bytes,
+    /// the buffer's and its textures', are the CPU's.
+    #[cfg(unix)]
+    pub unsafe fn with_dma_buf(pointer: NonNull<u8>, source: DmaBufSource) -> HostMemory {
+        HostMemory {
+            pointer,
+            source: Some(source),
+        }
     }
 
     /// The pointer.
     pub fn pointer(&self) -> NonNull<u8> {
-        self.0
+        self.pointer
+    }
+
+    /// The pointer, and the dma-buf source where the caller gave one.
+    pub(super) fn into_parts(self) -> (NonNull<u8>, Option<Source>) {
+        (self.pointer, self.source)
     }
 }
 
@@ -172,7 +245,8 @@ pub(super) enum WindowRefusal {
 
 /// The import of `length` bytes at `pointer` on a host of `page`-byte pages and a device that
 /// imports at multiples of `alignment`: the range rounded out to the larger of the two. Refused
-/// when the rounding would take pages the range does not touch.
+/// when the rounding would take pages the range does not touch, so a window made is always the
+/// pages the range touches, the one an `alignment` of 1 makes (a dma-buf's, which has none).
 pub(super) fn import_window(
     pointer: u64,
     length: u64,
@@ -253,6 +327,13 @@ pub(super) fn host_page() -> Option<u64> {
 /// The refusal of host memory this device cannot import exactly.
 pub(super) fn not_importable() -> Error {
     Error::Unsupported(Unsupported::not_representable(Feature::HostMemory))
+}
+
+/// Whether `error` is the refusal of host memory this device cannot import exactly
+/// ([`not_importable`]): the window, the buffer's binding in it, the memory types or the driver
+/// refused the pointer, which a dma-buf of its pages may serve ([`DmaBufSource`]).
+pub(super) fn refused(error: &Error) -> bool {
+    *error == not_importable()
 }
 
 /// The error of a failed import call (`vkGetMemoryHostPointerPropertiesEXT` or the allocation): a
@@ -427,6 +508,16 @@ pub(super) struct Importer {
     /// instance reports through `VK_EXT_debug_utils`: an image made of a Metal texture is named
     /// [`METAL_TEXTURE_IMAGE`] for the layers' messages.
     names: Option<ash::ext::debug_utils::DeviceFn>,
+    /// `vkGetMemoryFdPropertiesKHR`, where the device enables the dma-buf route (`dma_buf.rs`).
+    dma_buf: Option<ash::khr::external_memory_fd::DeviceFn>,
+    /// Whether the device also enables the route's image extensions (`create.rs`'s
+    /// `dma_buf_image_names`), for images of textures over dma-buf pages (`dma_buf.rs`).
+    dma_buf_images: bool,
+    /// The granule a dma-buf source's chunks split at, where the device assembles a buffer of
+    /// several (`dma_buf.rs`): the alignment of a sparse buffer made for dma-bufs. Asked once,
+    /// the first time a pointer is refused and a source called; `None` where the device makes no
+    /// such buffer.
+    pub(super) sparse_granule: std::sync::OnceLock<Option<u64>>,
 }
 
 /// The debug name of an image the runtime made of a Metal texture over an import's `MTLBuffer`
@@ -445,7 +536,8 @@ impl Importer {
     /// # Safety
     ///
     /// `device` is a live device of `physical`, made from `instance` with `enabled` enabled, and
-    /// `loader_word` is its loader word.
+    /// `loader_word` is its loader word; made with the dma-buf route's extensions where `dma_buf`,
+    /// and its image extensions where `dma_buf_images` (`create.rs`).
     pub(super) unsafe fn new(
         instance: &ash::Instance,
         physical: vk::PhysicalDevice,
@@ -455,6 +547,8 @@ impl Importer {
         loader_word: &LoaderWord,
         metal_objects: bool,
         debug_names: bool,
+        dma_buf: bool,
+        dma_buf_images: bool,
     ) -> Result<Importer, Unsupported> {
         if !enabled
             .extensions
@@ -499,13 +593,61 @@ impl Importer {
         let metal = metal_objects.then(|| ash::ext::metal_objects::DeviceFn::load(load));
         let names =
             (metal_objects && debug_names).then(|| ash::ext::debug_utils::DeviceFn::load(load));
+        let dma_buf = dma_buf.then(|| ash::khr::external_memory_fd::DeviceFn::load(load));
+        let dma_buf_images = dma_buf.is_some() && dma_buf_images;
         Ok(Importer {
             functions,
             page,
             alignment,
             metal,
             names,
+            dma_buf,
+            dma_buf_images,
+            sparse_granule: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Whether the device imports dma-bufs (`VK_EXT_external_memory_dma_buf`), which a no-copy
+    /// buffer's pages may come as where it refuses their pointer ([`DmaBufSource`]).
+    pub(super) fn imports_dma_bufs(&self) -> bool {
+        self.dma_buf.is_some()
+    }
+
+    /// Whether the device makes images over dma-bufs of host pages (`dma_buf.rs`): it imports
+    /// dma-bufs and enables `VK_EXT_image_drm_format_modifier` and `VK_EXT_queue_family_foreign`.
+    pub(super) fn makes_dma_buf_images(&self) -> bool {
+        self.dma_buf_images
+    }
+
+    /// The memory types the dma-buf `fd` can be imported into (`vkGetMemoryFdPropertiesKHR`);
+    /// `ERROR_FEATURE_NOT_PRESENT` where the device imports no dma-bufs.
+    ///
+    /// # Safety
+    ///
+    /// `device` is the importer's device.
+    #[cfg(unix)]
+    pub(super) unsafe fn dma_buf_types(
+        &self,
+        device: &ash::Device,
+        fd: std::os::fd::BorrowedFd<'_>,
+    ) -> Result<u32, vk::Result> {
+        use std::os::fd::AsRawFd;
+        let functions = self
+            .dma_buf
+            .as_ref()
+            .ok_or(vk::Result::ERROR_FEATURE_NOT_PRESENT)?;
+        let mut properties = vk::MemoryFdPropertiesKHR::default();
+        // SAFETY: the caller's contract; the function was loaded for this device, and the
+        // descriptor is open for the call (the query does not take it).
+        let result = unsafe {
+            (functions.get_memory_fd_properties_khr)(
+                device.handle(),
+                vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT,
+                fd.as_raw_fd(),
+                &mut properties,
+            )
+        };
+        result.result_with_success(properties.memory_type_bits)
     }
 
     /// Whether the device's imports are allocated for export of their `MTLBuffer`

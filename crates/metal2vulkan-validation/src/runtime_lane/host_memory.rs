@@ -355,7 +355,14 @@ pub(super) unsafe fn no_copy(
     deallocator: Option<Deallocator>,
 ) -> Result<Buffer, Error> {
     // SAFETY: the caller's contract.
-    unsafe { device.new_buffer_with_bytes_no_copy(pointer, len as u64, options, deallocator) }
+    unsafe {
+        device.new_buffer_with_bytes_no_copy(
+            HostMemory::new(pointer),
+            len as u64,
+            options,
+            deallocator,
+        )
+    }
 }
 
 /// Commit `command_buffer`, wait for it, and check it completed without error.
@@ -1878,7 +1885,7 @@ fn refused_no_copy_buffers_never_run_their_deallocator() {
             // SAFETY: the mapping outlives the call, which makes nothing.
             let refused = unsafe {
                 device.new_buffer_with_bytes_no_copy(
-                    memory.pointer(),
+                    HostMemory::new(memory.pointer()),
                     length,
                     made,
                     Some(recording(&seen, ())),

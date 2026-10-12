@@ -66,6 +66,8 @@ mod depth_stencil_scratch;
 mod descriptor_arena;
 mod detach;
 mod device;
+#[cfg(unix)]
+mod dma_buf;
 mod draw_source;
 mod driver_defects;
 mod driver_facts;
@@ -215,6 +217,8 @@ pub use device::{
     DebugMessage, Device, DeviceHandles, DeviceKind, DeviceOptions, LayerSetting,
     LayerSettingValue, MessageKind, MessageSeverity, MessageSink, RawDevice,
 };
+#[cfg(unix)]
+pub use dma_buf::{DmaBufChunk, DmaBufRequest, DmaBufSource};
 pub use dynamic_library::DynamicLibrary;
 pub use error::DynamicLibraryError;
 pub use error::ExtensionFeature;

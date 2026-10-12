@@ -178,10 +178,18 @@ impl Busy {
     /// word after the spin's flag, ordered after the spin by the buffer both use. The command
     /// buffer, and the buffer of the mark.
     pub(super) fn commit(&self, device: &Device, queue: &CommandQueue) -> (CommandBuffer, Buffer) {
+        let command_buffer = queue.command_buffer().unwrap();
+        let words = self.encode(device, &command_buffer);
+        command_buffer.commit().unwrap();
+        (command_buffer, words)
+    }
+
+    /// Encode the busy work into `command_buffer`, as [`commit`](Busy::commit) commits it: the
+    /// spin and the end mark's blit. The buffer of the mark.
+    pub(super) fn encode(&self, device: &Device, command_buffer: &CommandBuffer) -> Buffer {
         let ticket = buffer_with(device, &1u32.to_le_bytes()).unwrap();
         let words = buffer_with(device, &[0; 8]).unwrap();
         let cap = buffer_with(device, &self.cap.to_le_bytes()).unwrap();
-        let command_buffer = queue.command_buffer().unwrap();
         let mut encoder = command_buffer.compute_command_encoder().unwrap();
         encoder.set_compute_pipeline_state(&self.state).unwrap();
         encoder.set_buffer(Some(&ticket), 0, 0).unwrap();
@@ -193,8 +201,7 @@ impl Busy {
         let mut blit = command_buffer.blit_command_encoder().unwrap();
         blit.fill_buffer(&words, 4..8, 1).unwrap();
         blit.end_encoding().unwrap();
-        command_buffer.commit().unwrap();
-        (command_buffer, words)
+        words
     }
 }
 

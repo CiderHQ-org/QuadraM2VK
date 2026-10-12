@@ -402,6 +402,13 @@ impl CommandBufferShared {
             wait_values.push(value);
             wait_stages.push(vk::PipelineStageFlags::ALL_COMMANDS);
         }
+        // And the last binding of a no-copy buffer's dma-bufs, on every `VkQueue`, the first
+        // too (a binding is ordered with no later submission), until it completed.
+        if let Some((timeline, value)) = device.binding_wait() {
+            wait_semaphores.push(timeline);
+            wait_values.push(value);
+            wait_stages.push(vk::PipelineStageFlags::ALL_COMMANDS);
+        }
         // The first work waits for what the batch's commands wait for (a heap's fill another
         // queue did comes before a move of an image placed in it; an event the program waits
         // for before reusing a heap's memory), but a binary semaphore, which one wait consumes;

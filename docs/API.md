@@ -140,6 +140,12 @@ bit-exact `fneg`, `fabs` and `half`-to-`float` widening of NaNs and denormals. U
 switches it also keeps Metal's canonical NaNs and Metal's operand choice in `fmin`, `fmax`,
 `min3`, `max3` and `clamp`.
 
+What the runtime enables for itself outside the vocabulary enters no enable set, compile profile
+or fingerprint: among it the extensions of its dma-buf fallback for no-copy memory whose pointer
+the device refuses (`HostMemory::with_dma_buf`), `VK_EXT_external_memory_dma_buf` with
+`VK_KHR_external_memory_fd`, and `VK_EXT_image_drm_format_modifier` with
+`VK_EXT_queue_family_foreign` beside them, wherever a device lists them.
+
 ## 2. A library
 
 `Library::parse` takes a metallib, a bitcode wrapper or a raw AIR module; `Library::from_air`
@@ -680,8 +686,10 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   buffer is a shadow image: no linear image of the device lays its texels out as Metal does in the
   buffer's memory (over a no-copy buffer's imported host memory, no linear image made for host
   allocations does), or the buffer is over the caller's `VkBuffer`, whose memory backs no image of
-  the runtime's. Cost: its texels are copied into an image before each use and back after each
-  write.
+  the runtime's, or over host pages imported as dma-bufs (`HostMemory::with_dma_buf`) where the
+  device makes no image over a dma-buf of the texture's own pages (the notice names why;
+  `WorkCounts::dma_buf_image_fallbacks` counts it). Cost: its texels are copied into an image before
+  each use and back after each write.
 - `metal2vulkan-degrade-staged-texture-buffer` (performance). `StagedTextureBuffer`: A texture
   buffer is viewed through a staging buffer: its texels start where the device views none
   (`minTexelBufferOffsetAlignment`). Cost: its texels are copied into a staging buffer before each

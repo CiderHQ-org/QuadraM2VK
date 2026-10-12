@@ -2,8 +2,8 @@
 //! binds in them, the memory types an import may use, and the host's page.
 
 use crate::host_memory::{
-    based_size, binds_in, buffer_base, host_page, import_refused, import_window, ImportWindow,
-    WindowRefusal,
+    based_size, binds_in, buffer_base, host_page, import_refused, import_window, refused,
+    ImportWindow, WindowRefusal,
 };
 use crate::memory::{candidates, MemoryClass};
 use crate::{Error, MemoryKind, VkResultCode};
@@ -489,4 +489,112 @@ fn a_driver_s_refused_import_is_a_device_gap_and_other_failures_are_vulkan_s() {
             vk::Result::ERROR_INITIALIZATION_FAILED.as_raw()
         ))
     );
+}
+
+/// The refusals a dma-buf of the pages may serve are exactly the device's refusal of the memory
+/// (`not_importable`): a Vulkan failure, running out of memory, a refusal of another feature or
+/// of another kind, and a nil answer are final.
+#[test]
+fn only_the_device_s_refusal_of_the_memory_falls_back_to_a_dma_buf() {
+    assert!(refused(&Error::Unsupported(
+        Unsupported::not_representable(Feature::HostMemory)
+    )));
+    assert!(refused(&import_refused(
+        vk::Result::ERROR_INVALID_EXTERNAL_HANDLE
+    )));
+    assert!(refused(&import_refused(vk::Result::ERROR_UNKNOWN)));
+    for error in [
+        import_refused(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY),
+        import_refused(vk::Result::ERROR_INITIALIZATION_FAILED),
+        Error::Unsupported(Unsupported::not_implemented(Feature::HostMemory)),
+        Error::Unsupported(Unsupported::not_representable(Feature::GpuTimes)),
+        Error::DeviceLost,
+    ] {
+        assert!(!refused(&error), "{error:?}");
+    }
+}
+
+/// A dma-buf's window is the range rounded out to the host page alone (`import_window` at an
+/// alignment of 1): where the device's import alignment for host pointers refuses a range
+/// (`BeyondPages`), it still covers exactly the pages the range touches, and where the alignment
+/// takes one, the two windows agree (`host_window` keeps one).
+#[test]
+fn a_dma_buf_window_is_the_pages_the_range_touches() {
+    let (page, unit, at) = (4096, 64 << 10, 0x7f00_0000_0000);
+    assert_eq!(
+        import_window(at, unit, page, unit),
+        import_window(at, unit, page, 1)
+    );
+    assert_eq!(
+        import_window(at + page + 100, page, page, unit),
+        Err(WindowRefusal::BeyondPages)
+    );
+    assert_eq!(
+        import_window(at + page + 100, page, page, 1),
+        Ok(ImportWindow {
+            start: at + page,
+            size: 2 * page,
+            offset: 100,
+        })
+    );
+}
+
+/// A source's chunks must cover the request, each a whole number of host pages, every boundary at
+/// a multiple of the granule; several chunks cover the request rounded up to the granule (the
+/// last one padded past the pages, as a sparse buffer binds whole granules), one chunk the request
+/// or that rounding; one chunk is the only answer where the granule is the length.
+#[cfg(unix)]
+#[test]
+fn a_source_s_chunks_cover_the_request_at_its_granule() {
+    use crate::dma_buf::{chunks_cover, DmaBufRequest};
+    let page = 4096;
+    let start = std::ptr::NonNull::<u8>::dangling();
+    let request = |length, granule| DmaBufRequest {
+        start,
+        length,
+        granule,
+    };
+    let one = request(8 * page, 8 * page);
+    assert!(chunks_cover(&[8 * page], &one, page));
+    assert!(!chunks_cover(&[], &one, page));
+    assert!(!chunks_cover(&[4 * page, 4 * page], &one, page));
+    assert!(!chunks_cover(&[7 * page], &one, page));
+    assert!(!chunks_cover(&[9 * page], &one, page));
+    let paged = request(8 * page, page);
+    assert!(chunks_cover(&[3 * page, page, 4 * page], &paged, page));
+    assert!(!chunks_cover(&[3 * page, 0, 5 * page], &paged, page));
+    assert!(!chunks_cover(
+        &[3 * page + 512, 5 * page - 512],
+        &paged,
+        page
+    ));
+    let coarse = request(8 * page, 2 * page);
+    assert!(chunks_cover(&[2 * page, 6 * page], &coarse, page));
+    assert!(!chunks_cover(&[3 * page, 5 * page], &coarse, page));
+    // Several chunks end at the request rounded up to the granule: the last one is padded.
+    let ragged = request(5 * page, 2 * page);
+    assert!(chunks_cover(&[4 * page, 2 * page], &ragged, page));
+    assert!(chunks_cover(&[2 * page, 2 * page, 2 * page], &ragged, page));
+    assert!(!chunks_cover(&[4 * page, page], &ragged, page));
+    assert!(!chunks_cover(&[4 * page, 4 * page], &ragged, page));
+    // One chunk is the pages, or the pages padded to the granule.
+    assert!(chunks_cover(&[5 * page], &ragged, page));
+    assert!(chunks_cover(&[6 * page], &ragged, page));
+    assert!(!chunks_cover(&[7 * page], &ragged, page));
+    assert!(!chunks_cover(
+        &[u64::MAX - page + 1, 2 * page],
+        &ragged,
+        page
+    ));
+    // A 64 KiB granule on 4 KiB pages, as RADV of Mesa 26.2.4 binds sparse buffers.
+    let granule = 64 << 10;
+    let window = request(16_201 * page, granule);
+    let rounded = (16_201 * page).next_multiple_of(granule);
+    let mut lengths = vec![4 << 20; 15];
+    lengths.push(rounded - 15 * (4 << 20));
+    assert!(chunks_cover(&lengths, &window, page));
+    assert!(chunks_cover(&[16_201 * page], &window, page));
+    lengths.pop();
+    lengths.push(16_201 * page - 15 * (4 << 20));
+    assert!(!chunks_cover(&lengths, &window, page));
 }

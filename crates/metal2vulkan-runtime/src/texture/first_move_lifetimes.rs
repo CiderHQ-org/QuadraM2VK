@@ -20,8 +20,8 @@ use super::{Image, Owner, Storage, Texture};
 use crate::buffer::MemoryHold;
 use crate::device::lock;
 use crate::{
-    Device, DeviceKind, DeviceOptions, HeapDescriptor, HeapType, Region, ResourceOptions,
-    ShaderCacheOptions, TextureDescriptor,
+    Device, DeviceKind, DeviceOptions, HeapDescriptor, HeapType, HostMemory, Region,
+    ResourceOptions, ShaderCacheOptions, TextureDescriptor,
 };
 use metal2vulkan::metal::PixelFormat;
 use std::alloc::Layout;
@@ -139,7 +139,12 @@ fn a_waiting_move_of_an_image_a_detach_let_go_of_is_dropped() {
     let device = device(&scratch.0);
     // SAFETY: the memory outlives the device (dropped after it), and nothing else uses it.
     let made = unsafe {
-        device.new_buffer_with_bytes_no_copy(host.0, BYTES as u64, ResourceOptions::shared(), None)
+        device.new_buffer_with_bytes_no_copy(
+            HostMemory::new(host.0),
+            BYTES as u64,
+            ResourceOptions::shared(),
+            None,
+        )
     };
     let Ok(buffer) = made else {
         eprintln!(
@@ -184,7 +189,9 @@ fn a_host_copy_makes_the_waiting_move_of_an_image_over_host_pages() {
     let heap_descriptor =
         HeapDescriptor::new(HeapType::Automatic, BYTES as u64, ResourceOptions::shared());
     // SAFETY: the memory outlives the device (dropped after it), and nothing else uses it.
-    let made = unsafe { device.new_heap_with_bytes_no_copy(host.0, &heap_descriptor, None, None) };
+    let made = unsafe {
+        device.new_heap_with_bytes_no_copy(HostMemory::new(host.0), &heap_descriptor, None, None)
+    };
     let Ok(heap) = made else {
         eprintln!(
             "first move lifetimes: no heap over host memory on {}",

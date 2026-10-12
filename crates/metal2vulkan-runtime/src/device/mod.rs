@@ -222,6 +222,10 @@ pub(super) struct DeviceShared {
     /// a dispatch of the state that made it (`function_table.rs`).
     pub(super) function_tables: Mutex<BTreeMap<u64, Weak<TableShared>>>,
     internal: Mutex<Option<Internal>>,
+    /// The last sparse binding of a no-copy buffer's dma-bufs (`dma_buf.rs`) the host has not
+    /// seen complete: the internal timeline and the value it signals, which every later
+    /// submission that may use the buffer waits for (`submit.rs`).
+    bound_at: Mutex<Option<(vk::Semaphore, u64)>>,
     /// The queue reserved for staging copies, where the device has one (`staging.rs`).
     staging: Option<staging::StagingQueue>,
     pub(super) scheduler: Scheduler,
@@ -767,6 +771,11 @@ pub(super) struct Parts {
     /// vocabulary, wherever listed: each making of a program's pipeline reads whether its cache
     /// held the pipeline (`shader_cache/mod.rs`).
     pub(super) creation_feedback: bool,
+    /// It enables the dma-buf route's extensions (`create.rs`'s `dma_buf_names`), outside
+    /// `enabled`'s vocabulary (`dma_buf.rs`).
+    pub(super) dma_buf: bool,
+    /// It enables the route's image extensions (`create.rs`'s `dma_buf_image_names`), likewise.
+    pub(super) dma_buf_images: bool,
     /// The sparse members of the core features it enables, outside `enabled`'s vocabulary
     /// (`sparse/device.rs`).
     pub(super) sparse_features: vk::PhysicalDeviceFeatures,
@@ -810,6 +819,8 @@ impl Device {
             graphics_pipeline_library,
             metal_objects,
             creation_feedback,
+            dma_buf,
+            dma_buf_images,
             sparse_features,
             owned,
             cache,
@@ -1012,6 +1023,8 @@ impl Device {
                 &loader_word,
                 metal_objects,
                 instance.sink().is_some(),
+                dma_buf,
+                dma_buf_images,
             )
         };
         // SAFETY: as above; the loader serves `vkGetDeviceProcAddr` once the word is put back.
@@ -1202,6 +1215,7 @@ impl Device {
             heap_nan_residue: NanResidue::default(),
             function_tables: Mutex::default(),
             internal: Mutex::new(None),
+            bound_at: Mutex::new(None),
             staging,
             scheduler,
             completion,

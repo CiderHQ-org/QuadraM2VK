@@ -16,14 +16,15 @@ fn the_registry_id_folds_the_uuid_and_is_never_zero() {
 }
 
 use crate::device::create::{
-    default_loaders, enable_set, host_image_copy, instance_version, layer_settings,
-    linear_color_attachment, open_loader, queue_plan, setting_values, timeline_difference,
-    QueuePlan,
+    default_loaders, dma_buf_image_names, dma_buf_names, enable_set, host_image_copy,
+    instance_version, layer_settings, linear_color_attachment, open_loader, queue_plan,
+    setting_values, timeline_difference, QueuePlan,
 };
 use crate::enables::host_image_copy_names;
 use crate::{DeviceOptions, Error, InstanceApiVersion, LayerSetting, LayerSettingValue};
 use ash::vk;
 use metal2vulkan::device::{ApiVersion, DeviceDescription, VkExtension, VkFeature};
+use std::collections::BTreeSet;
 use std::ffi::{CStr, CString};
 
 /// Every committed profile's description at the runtime's Vulkan 1.2 instance, as `(file,
@@ -46,6 +47,75 @@ fn descriptions() -> Vec<(std::path::PathBuf, DeviceDescription)> {
     }
     assert!(out.len() > 3, "read {} committed profiles", out.len());
     out
+}
+
+/// The dma-buf route's extensions: `VK_KHR_external_memory_fd` and
+/// `VK_EXT_external_memory_dma_buf`.
+const DMA_BUF: [&CStr; 2] = [
+    c"VK_KHR_external_memory_fd",
+    c"VK_EXT_external_memory_dma_buf",
+];
+
+/// The extensions of the images of textures over the route's pages:
+/// `VK_EXT_image_drm_format_modifier` and `VK_EXT_queue_family_foreign`.
+const DMA_BUF_IMAGES: [&CStr; 2] = [
+    c"VK_EXT_image_drm_format_modifier",
+    c"VK_EXT_queue_family_foreign",
+];
+
+/// The dma-buf route of a no-copy buffer (`dma_buf.rs`), the last resort where a device refuses
+/// the pointer, takes its two extensions on every committed profile that lists both (RADV's,
+/// NVIDIA's, lavapipe's and ANV's among them), on no profile that lacks either, and outside the
+/// vocabulary; the images of textures over its pages take theirs
+/// (`VK_EXT_image_drm_format_modifier`, `VK_EXT_queue_family_foreign`) on every profile that
+/// lists those two and the route's, and on no other. Every profile's enable set is the
+/// recommendation and `VK_EXT_external_memory_host` where listed, as before the route, so no
+/// compile profile or fingerprint (the shader cache's key) moves with them.
+#[test]
+fn the_dma_buf_route_is_enabled_wherever_listed_outside_the_profile() {
+    let (mut lists_both, mut lists_all) = (0, 0);
+    for (path, description) in descriptions() {
+        let text = std::fs::read_to_string(&path).unwrap();
+        let listed: BTreeSet<CString> = DMA_BUF
+            .iter()
+            .chain(&DMA_BUF_IMAGES)
+            .filter(|name| text.contains(&format!("\"{}\"", name.to_str().unwrap())))
+            .map(|name| (*name).to_owned())
+            .collect();
+        let lists = DMA_BUF.iter().all(|name| listed.contains(*name));
+        let lists_images = DMA_BUF_IMAGES.iter().all(|name| listed.contains(*name));
+        assert_eq!(dma_buf_names(&listed).is_some(), lists, "{path:?}");
+        assert_eq!(
+            dma_buf_image_names(&listed).is_some(),
+            lists && lists_images,
+            "{path:?}"
+        );
+        for name in DMA_BUF.iter().chain(&DMA_BUF_IMAGES) {
+            let mut one_short = listed.clone();
+            one_short.remove(*name);
+            assert_eq!(dma_buf_image_names(&one_short), None, "{path:?}");
+            if DMA_BUF.contains(name) {
+                assert_eq!(dma_buf_names(&one_short), None, "{path:?}");
+            }
+        }
+        lists_both += usize::from(lists);
+        lists_all += usize::from(lists && lists_images);
+        let options = DeviceOptions::default();
+        let mut before = description.recommended_enables(&options.policy);
+        let host_memory = VkExtension::ExtExternalMemoryHost;
+        if description.extensions.contains(&host_memory) {
+            before.extensions.insert(host_memory);
+        }
+        assert_eq!(enable_set(&description, &options), before, "{path:?}");
+    }
+    assert!(
+        lists_both > 1,
+        "fewer than two committed profiles list both"
+    );
+    assert!(
+        lists_all > 1,
+        "fewer than two committed profiles list all four"
+    );
 }
 
 /// The robustness features.
@@ -416,7 +486,6 @@ fn equivalent_queue_families_are_all_taken_in_turn() {
 #[test]
 fn host_image_copy_is_enabled_wherever_the_device_has_it() {
     use std::cell::Cell;
-    use std::collections::BTreeSet;
     let names = host_image_copy_names(ApiVersion::V1_2);
     assert_eq!(names.len(), 3);
     let listed: BTreeSet<CString> = names.iter().map(|&name| name.to_owned()).collect();
@@ -443,7 +512,6 @@ fn host_image_copy_is_enabled_wherever_the_device_has_it() {
 #[test]
 fn linear_color_attachment_is_enabled_where_the_device_has_it_at_vulkan_1_3() {
     use std::cell::Cell;
-    use std::collections::BTreeSet;
     let listed: BTreeSet<CString> = [c"VK_NV_linear_color_attachment".to_owned()].into();
     let asked = Cell::new(false);
     assert!(linear_color_attachment(ApiVersion::V1_3, &listed, || {

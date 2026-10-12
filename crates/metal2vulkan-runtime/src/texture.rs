@@ -134,6 +134,7 @@ use stand_in::StandIn;
 use std::any::Any;
 use std::collections::{BTreeSet, HashMap};
 use std::ops::Range;
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use wrapped::WrappedImage;
@@ -448,7 +449,8 @@ struct Image {
     /// It was made with host-transfer usage, moved to `GENERAL` and zeroed on the host, so its
     /// CPU copies may run there (`texture/host_copy.rs`).
     host_copies: bool,
-    /// Its `VkImage` has linear tiling: a texture over a buffer's memory (`alias_image`), or a
+    /// Its `VkImage` has linear tiling, or `DRM_FORMAT_MOD_LINEAR`'s, whose rows lie as a linear
+    /// image's: a texture over a buffer's memory (`alias_image`, `dma_buf_alias_image`), or a
     /// heap's linear image (`texture/heap.rs`). Not a Metal texture over a buffer
     /// (`metal_alias_image`), which renders where Metal's textures do.
     linear: bool,
@@ -484,17 +486,61 @@ enum RawGoes {
 }
 
 /// An image's `VkImage`: its own for good, but for a texture bound to the bytes of a heap over
-/// host pages, whose image a rebind re-makes over the new pages ([`Image::swap_in`]).
-struct Raw(AtomicU64);
+/// host pages, whose image a rebind re-makes over the new pages ([`Image::swap_in`]). With it, the
+/// dedicated import its `VkImage` is bound to, for an image over dma-buf pages (`dma_buf.rs`),
+/// which goes with that `VkImage`, after it.
+struct Raw {
+    image: AtomicU64,
+    import: Mutex<Option<ImageImport>>,
+}
+
+/// The dedicated import of the pages a texture's image over dma-buf pages is bound to
+/// (`dma_buf.rs`), freed after the image is destroyed.
+#[cfg(unix)]
+pub(super) type ImageImport = Arc<crate::dma_buf::DmaBufPages>;
+
+/// No image is made over dma-buf pages on this system.
+#[cfg(not(unix))]
+pub(super) type ImageImport = std::convert::Infallible;
 
 impl Raw {
     fn new(raw: vk::Image) -> Raw {
-        Raw(AtomicU64::new(raw.as_raw()))
+        Raw {
+            image: AtomicU64::new(raw.as_raw()),
+            import: Mutex::new(None),
+        }
+    }
+
+    /// `raw`, bound to `import`, its dedicated import.
+    #[cfg(unix)]
+    fn imported(raw: vk::Image, import: ImageImport) -> Raw {
+        Raw {
+            image: AtomicU64::new(raw.as_raw()),
+            import: Mutex::new(Some(import)),
+        }
+    }
+
+    /// Whether the `VkImage` now is bound to a dedicated import of its own pages.
+    fn dedicated(&self) -> bool {
+        lock(&self.import).is_some()
     }
 
     /// The `VkImage` now.
     fn get(&self) -> vk::Image {
-        vk::Image::from_raw(self.0.load(Ordering::Acquire))
+        vk::Image::from_raw(self.image.load(Ordering::Acquire))
+    }
+
+    /// Hold `raw`, bound to `import` where it has a dedicated one, from now on: the `VkImage` it
+    /// held and that one's import.
+    fn swap(
+        &self,
+        raw: vk::Image,
+        import: Option<ImageImport>,
+    ) -> (vk::Image, Option<ImageImport>) {
+        let mut held = lock(&self.import);
+        let old = self.image.swap(raw.as_raw(), Ordering::AcqRel);
+        let old_import = std::mem::replace(&mut *held, import);
+        (vk::Image::from_raw(old), old_import)
     }
 }
 
@@ -507,6 +553,9 @@ pub(super) struct ImageObjects {
     views: Vec<vk::ImageView>,
     /// What becomes of `raw` as this goes.
     raw_goes: RawGoes,
+    /// The dedicated import `raw` is bound to, an image over dma-buf pages (`dma_buf.rs`): freed
+    /// as this goes, after `raw` is destroyed.
+    import: Option<ImageImport>,
 }
 
 impl Drop for ImageObjects {
@@ -640,19 +689,50 @@ fn first_color_subresource() -> vk::ImageSubresource {
 /// (`shadowed-texture`) names.
 type Aliased = Result<Arc<Image>, String>;
 
-/// A linear image aliasing the host pages of a no-copy buffer (or of a no-copy heap, for a
-/// texture over one of its buffers), noted in the pages' hold (`buffer.rs`'s `HostCell`) so that
-/// a rebind makes it again over the new pages ([`Device::rebound_alias_images`]): the image, and
-/// where it is bound, in bytes from where the pages' bytes start in their memory.
+/// An image aliasing the host pages of a no-copy buffer (or of a no-copy heap, for a texture over
+/// one of its buffers), noted in the pages' hold (`buffer.rs`'s `HostCell`) so that a rebind makes
+/// it again over the new pages ([`Device::rebound_alias_images`]): the image, and where its texels
+/// lie, in bytes from where the pages' bytes start (in their memory, and in the host addresses
+/// they lie at).
 #[derive(Clone)]
 pub(super) struct AliasWatch {
     image: Weak<Image>,
     from_base: u64,
     /// The texture's type: a 2D texture or array.
     texture_type: TextureType,
-    /// The Metal texture over the import's `MTLBuffer` the image is made of, where it is one
-    /// (`metal_texture.rs`); else a linear image made for host allocations.
-    metal: Option<MetalOver>,
+    /// What the image is made as.
+    kind: AliasKind,
+}
+
+/// What an aliasing image over host pages is made as ([`AliasWatch`]).
+#[derive(Clone)]
+pub(super) enum AliasKind {
+    /// A linear image, its rows (and slices) the texels' pitches apart: over pages imported by
+    /// their pointer, one made for host allocations and bound in the pages' import
+    /// ([`Device::alias_image`]); over pages imported as dma-bufs, a `DRM_FORMAT_MOD_LINEAR` image
+    /// bound to a dedicated import of a dma-buf of its own pages
+    /// ([`Device::dma_buf_alias_image`]). A rebind makes the kind its new pages take.
+    Linear { row_pitch: u64, slice_pitch: u64 },
+    /// A Metal texture over the import's `MTLBuffer` (`metal_texture.rs`).
+    Metal(MetalOver),
+}
+
+/// The images a rebind made for the textures over the bytes it gives pages it imported as
+/// dma-bufs ([`Device::dma_buf_images_again`]), before it settled: each texture's image with its
+/// new `VkImage`, bound to a dedicated import of its own pages (`dma_buf.rs`). Dropped unused,
+/// they go.
+#[derive(Default)]
+pub(super) struct Remade(Vec<(Arc<Image>, ImageObjects)>);
+
+impl Remade {
+    /// The objects made for `image`, where some were.
+    fn take(&mut self, image: &Arc<Image>) -> Option<ImageObjects> {
+        let at = self
+            .0
+            .iter()
+            .position(|(made, _)| Arc::ptr_eq(made, image))?;
+        Some(self.0.swap_remove(at).1)
+    }
 }
 
 impl AliasWatch {
@@ -670,6 +750,20 @@ impl ImageObjects {
             raw,
             views: Vec::new(),
             raw_goes: RawGoes::Destroyed,
+            import: None,
+        }
+    }
+
+    /// `raw`, a new image of `device`'s bound to `import`, its dedicated import of dma-buf pages
+    /// (`dma_buf.rs`), with no views yet.
+    #[cfg(unix)]
+    fn imported(device: &Device, raw: vk::Image, import: ImageImport) -> ImageObjects {
+        ImageObjects {
+            device: device.clone(),
+            raw,
+            views: Vec::new(),
+            raw_goes: RawGoes::Destroyed,
+            import: Some(import),
         }
     }
 
@@ -699,6 +793,22 @@ impl ImageSwap {
             objects,
             first,
             memory,
+        }
+    }
+
+    /// `objects`, a new image for `image` over `pages`, dma-buf pages, bound to a dedicated import
+    /// of them (`dma_buf.rs`) and made `UNDEFINED`, to swap in: its first move acquires it from
+    /// `VK_QUEUE_FAMILY_FOREIGN_EXT` for `family` (`Device::foreign_acquirer`).
+    fn acquired(
+        image: Arc<Image>,
+        objects: ImageObjects,
+        pages: &HostPages,
+        family: u32,
+    ) -> ImageSwap {
+        let swap = ImageSwap::new(image, objects, vk::ImageLayout::UNDEFINED, pages);
+        ImageSwap {
+            first: swap.first.acquired(family),
+            ..swap
         }
     }
 
@@ -798,8 +908,9 @@ impl Image {
     fn swap_in(&self, objects: &mut ImageObjects) {
         let mut views = lock(&self.views);
         self.views_go();
-        let old = self.raw.0.swap(objects.raw.as_raw(), Ordering::AcqRel);
-        objects.raw = vk::Image::from_raw(old);
+        let (old, import) = self.raw.swap(objects.raw, objects.import.take());
+        objects.raw = old;
+        objects.import = import;
         objects.views.extend(views.drain().map(|(_, view)| view));
         // A stand-in's read image swapped out goes as the stand-in's (an image in memory of its
         // own swaps its own back instead, `present_own`).
@@ -894,7 +1005,9 @@ impl Image {
             return None;
         }
         self.views_go();
-        let old = vk::Image::from_raw(self.raw.0.swap(stand_in.read().as_raw(), Ordering::AcqRel));
+        let (old, import) = self.raw.swap(stand_in.read(), None);
+        // An image in memory of its own keeps its `VkImage`, which no dedicated import is bound
+        // to (only an image over dma-buf pages has one).
         let own = self.own_memory().then_some(old);
         // An image bound to the detached pages lets go of their memory: its `VkImage` goes with
         // the pages.
@@ -906,11 +1019,13 @@ impl Image {
             None => RawGoes::Destroyed,
         };
         *detached = Some(DetachedImage { stand_in, own });
+        // A dedicated import of dma-buf pages goes with the `VkImage` bound to it.
         Some(ImageObjects {
             device: self.device.clone(),
             raw: old,
             views: views.drain().map(|(_, view)| view).collect(),
             raw_goes,
+            import,
         })
     }
 
@@ -925,12 +1040,13 @@ impl Image {
         let own = detached.as_ref()?.own?;
         let stand_in = detached.take()?.stand_in;
         self.views_go();
-        let old = vk::Image::from_raw(self.raw.0.swap(own.as_raw(), Ordering::AcqRel));
+        let (old, import) = self.raw.swap(own, None);
         Some(ImageObjects {
             device: self.device.clone(),
             raw: old,
             views: views.drain().map(|(_, view)| view).collect(),
             raw_goes: RawGoes::WithStandIn(stand_in),
+            import,
         })
     }
 
@@ -1815,20 +1931,35 @@ impl Device {
         // Over bytes detached from their pages (`detach.rs`) no image aliases them: the texture
         // is their shadow, which presents a stand-in until they lie in pages again.
         let detached = texels.buffer.detached();
-        if wider != plan && !detached {
-            if let Ok(image) = self.alias_image(wider, layout, descriptor, &texels, &facts)? {
-                return Ok(Storage::Alias { image, texels });
-            }
-        }
+        let dma_buf = texels.buffer.over_dma_buf();
         // Where no image aliases the bytes, the reason the plan's attempt gives is the notice's.
-        let why = match detached {
-            true => "the buffer's bytes were detached from their pages (detach_backing) as the \
-                     texture was made"
-                .to_owned(),
-            false => match self.alias_image(plan.clone(), layout, descriptor, &texels, &facts)? {
+        let why = if detached {
+            "the buffer's bytes were detached from their pages (detach_backing) as the texture \
+             was made"
+                .to_owned()
+        } else if dma_buf {
+            // Over dma-buf pages, one image of the two plans at most, its pages' source called
+            // once (`dma_buf.rs`).
+            let plans = [&wider, &plan];
+            let plans = if wider != plan {
+                &plans[..]
+            } else {
+                &plans[1..]
+            };
+            match self.dma_buf_alias_image(plans, layout, descriptor, &texels, &facts)? {
                 Ok(image) => return Ok(Storage::Alias { image, texels }),
                 Err(why) => why,
-            },
+            }
+        } else {
+            if wider != plan {
+                if let Ok(image) = self.alias_image(wider, layout, descriptor, &texels, &facts)? {
+                    return Ok(Storage::Alias { image, texels });
+                }
+            }
+            match self.alias_image(plan.clone(), layout, descriptor, &texels, &facts)? {
+                Ok(image) => return Ok(Storage::Alias { image, texels }),
+                Err(why) => why,
+            }
         };
         let plan = self.with_undeclared_usage(plan, layout, usage, false, &facts)?;
         if !plan
@@ -2028,7 +2159,8 @@ impl Device {
     /// makes it again over ([`Device::rebound_alias_images`]); on a device whose imports give
     /// their `MTLBuffer`s it is instead made of a Metal texture over the import's `MTLBuffer`
     /// ([`Device::metal_alias_image`]), which renders where the driver's linear images do not.
-    /// The image's hazard tracking is the buffer's.
+    /// Pages the runtime imported as dma-buf memory take [`Device::dma_buf_alias_image`]'s image
+    /// instead. The image's hazard tracking is the buffer's.
     fn alias_image(
         &self,
         plan: ImagePlan,
@@ -2158,7 +2290,10 @@ impl Device {
                 image: Arc::downgrade(&image),
                 from_base: memory_offset - base,
                 texture_type: layout.texture_type,
-                metal: None,
+                kind: AliasKind::Linear {
+                    row_pitch: texels.layout.row_pitch,
+                    slice_pitch: texels.layout.slice_pitch,
+                },
             });
         }
         Ok(Ok(image))
@@ -2239,9 +2374,138 @@ impl Device {
             image: Arc::downgrade(&image),
             from_base: memory_offset - base,
             texture_type: layout.texture_type,
-            metal: Some(over),
+            kind: AliasKind::Metal(over),
         });
         Ok(Ok(image))
+    }
+
+    /// The image of the first of `plans` the device makes over `texels`, whose bytes lie in host
+    /// pages the runtime imported as dma-buf memory (`dma_buf.rs`): a `DRM_FORMAT_MOD_LINEAR`
+    /// image bound to a dedicated import of a dma-buf of its own pages, which the pages' source
+    /// makes (called once), its rows the texels' rows; noted in the pages' hold, which a rebind
+    /// makes it again over ([`Device::rebound_alias_images`]). Its first move acquires it from
+    /// `VK_QUEUE_FAMILY_FOREIGN_EXT` into `GENERAL`, keeping the bytes. It aliases the buffer's
+    /// bytes through another import of the same pages, so its hazard tracking is the buffer's (its
+    /// key), as every image aliasing a buffer's bytes is: a write through the one orders before a
+    /// read through the other in a command buffer, by the tracker's memory barriers. Where the
+    /// device makes none, why, the fallback counted (`WorkCounts::dma_buf_image_fallbacks`): the
+    /// texture takes the way a texture over memory no image aliases takes.
+    #[cfg(unix)]
+    fn dma_buf_alias_image(
+        &self,
+        plans: &[&ImagePlan],
+        layout: &TextureLayout,
+        descriptor: &TextureDescriptor,
+        texels: &Texels,
+        facts: &ImageFacts<'_>,
+    ) -> Result<Aliased, Error> {
+        let pages = texels.buffer.host_pages();
+        let over = pages.as_deref().and_then(HostPages::dma_buf);
+        let Some((imports, start, type_index)) = over else {
+            return Err(internal(
+                "a texture over dma-buf pages the buffer does not lie in",
+            ));
+        };
+        let base = texels.buffer.pages_base()?;
+        let (_, buffer_offset, _) = texels.buffer.memory();
+        let from_base = buffer_offset + texels.layout.offset - base;
+        let (row_pitch, slice_pitch) = (texels.layout.row_pitch, texels.layout.slice_pitch);
+        let place = crate::dma_buf::DmaBufTexels {
+            pages: imports,
+            type_index,
+            at: start + from_base,
+            row_pitch,
+            slice_pitch,
+        };
+        let made = match self.dma_buf_image(plans, facts, &place)? {
+            Ok(made) => made,
+            Err(why) => {
+                self.shared().counts.dma_buf_image_fell_back();
+                return Ok(Err(format!(
+                    "the buffer's host pages are imported as dma-buf memory, and {why}"
+                )));
+            }
+        };
+        let (index, made) = made;
+        let owner = Owner::Buffer {
+            memory: Mutex::new(texels.buffer.memory_hold()),
+        };
+        let image = self.dma_buf_texture_image(
+            made,
+            plans[index].clone(),
+            owner,
+            (texels.options(), descriptor.allow_gpu_optimized_contents),
+            // The buffer's bytes, tracked as the texture is.
+            Identity {
+                tracked: texels.tracked(),
+                ..texels.buffer.identity()
+            },
+        );
+        let image = image.shared();
+        texels.buffer.watch_alias(AliasWatch {
+            image: Arc::downgrade(&image),
+            from_base,
+            texture_type: layout.texture_type,
+            kind: AliasKind::Linear {
+                row_pitch,
+                slice_pitch,
+            },
+        });
+        Ok(Ok(image))
+    }
+
+    /// The image of a texture over dma-buf pages (over a buffer, or placed in a heap), `made` of
+    /// `plan` (`dma_buf.rs`), with its `owner`, its options and whether it allows GPU-optimized
+    /// contents, and the `identity` of its bytes: a `DRM_FORMAT_MOD_LINEAR` image, whose rows are a
+    /// linear image's (a write of its bytes is a write of its texels), its first move acquiring
+    /// it from `VK_QUEUE_FAMILY_FOREIGN_EXT` into `GENERAL`, keeping the bytes.
+    #[cfg(unix)]
+    fn dma_buf_texture_image(
+        &self,
+        made: crate::dma_buf::DmaBufImage,
+        plan: ImagePlan,
+        owner: Owner,
+        (options, allow_gpu_optimized_contents): (ResourceOptions, bool),
+        identity: Identity,
+    ) -> Image {
+        let crate::dma_buf::DmaBufImage { raw, import } = made;
+        let image = Image {
+            device: self.clone(),
+            raw: Raw::imported(raw, import),
+            owner,
+            plan,
+            options,
+            allow_gpu_optimized_contents,
+            identity,
+            views: Mutex::new(HashMap::new()),
+            twin: None,
+            decoded: None,
+            form: Default::default(),
+            kept_outside: AtomicBool::new(false),
+            detached: Mutex::new(None),
+            first_move: Mutex::new(None),
+            host_copies: false,
+            linear: true,
+            staging_copies: false,
+            objects: ObjectsToken::default(),
+        };
+        let first = FirstMove::new(raw, image.plan().format, vk::ImageLayout::UNDEFINED, true)
+            .acquired(self.foreign_acquirer());
+        *lock(&image.first_move) = Some(first);
+        image
+    }
+
+    /// No host pages are imported as dma-bufs on this system.
+    #[cfg(not(unix))]
+    fn dma_buf_alias_image(
+        &self,
+        _plans: &[&ImagePlan],
+        _layout: &TextureLayout,
+        _descriptor: &TextureDescriptor,
+        _texels: &Texels,
+        _facts: &ImageFacts<'_>,
+    ) -> Result<Aliased, Error> {
+        Err(internal("a texture over dma-buf pages on a system of none"))
     }
 
     /// A `VkImage` of `plan` (of Metal's `texture_type`), made of the Metal texture `over`
@@ -2395,16 +2659,25 @@ impl Device {
 
     /// The aliasing images of `watches`, over a no-copy buffer's (or a no-copy heap's) host
     /// pages, made again over a rebind's new `pages` (`rebind.rs`): each of the same plan, made
-    /// for host allocations as [`alias_image`](Self::alias_image) made it, bound as far from the
-    /// new pages' first byte as it was from the old's; swapped in once the rebind is made, the
-    /// device's next submission that names it moving it to `GENERAL`. Refused
-    /// (`NotImplemented(RebindTextures)`) where the device makes no such image there: the new
-    /// import's memory type is not one the image takes, or the image's alignment misses its place.
+    /// as the new pages take it, its texels as far from the new pages' first byte as they were
+    /// from the old's; swapped in once the rebind is made, the device's next submission that
+    /// names it moving it to `GENERAL`. Over pages imported by their pointer, an image made for
+    /// host allocations as [`alias_image`](Self::alias_image) made it, bound in their import (or
+    /// a Metal texture over its `MTLBuffer`, as [`metal_alias_image`](Self::metal_alias_image)
+    /// made it); over pages imported as dma-bufs (`dma_buf.rs`), the `DRM_FORMAT_MOD_LINEAR`
+    /// image `remade` holds for it, made before the rebind settled
+    /// ([`dma_buf_images_again`](Self::dma_buf_images_again)), which its first move acquires
+    /// from `VK_QUEUE_FAMILY_FOREIGN_EXT`. Refused (`NotImplemented(RebindTextures)`) where the
+    /// device makes no such image there: the new import's memory type is not one the image
+    /// takes, the image's alignment misses its place, `remade` holds none for it, or a Metal
+    /// texture's pages are imported as dma-bufs.
     pub(super) fn rebound_alias_images(
         &self,
         watches: &[AliasWatch],
         pages: &HostPages,
+        mut remade: Remade,
     ) -> Result<Vec<ImageSwap>, Error> {
+        let dma_buf = pages.over_dma_buf();
         let (memory, base) = pages.memory();
         let type_index = pages.type_index();
         let raw_device = self.shared().vk();
@@ -2414,32 +2687,59 @@ impl Device {
                 continue;
             };
             let at = base + watch.from_base;
-            if let Some(over) = &watch.metal {
-                let made = self.metal_image(image.plan(), over, watch.texture_type, memory, at)?;
-                let Ok(raw) = made else {
+            if dma_buf {
+                let objects = match &watch.kind {
+                    AliasKind::Linear { .. } => remade.take(&image),
+                    AliasKind::Metal(_) => None,
+                };
+                let Some(objects) = objects else {
                     return Err(Error::NotImplemented(RuntimeGap::RebindTextures));
                 };
+                let family = self.foreign_acquirer();
                 // Dropped on a later failure, the images made so far go.
-                swaps.push(ImageSwap::new(
-                    Arc::clone(&image),
-                    ImageObjects::new(self, raw),
-                    vk::ImageLayout::UNDEFINED,
-                    pages,
-                ));
+                swaps.push(ImageSwap::acquired(image, objects, pages, family));
                 continue;
             }
+            let (row_pitch, slice_pitch) = match &watch.kind {
+                AliasKind::Linear {
+                    row_pitch,
+                    slice_pitch,
+                } => (*row_pitch, *slice_pitch),
+                AliasKind::Metal(over) => {
+                    let made =
+                        self.metal_image(image.plan(), over, watch.texture_type, memory, at)?;
+                    let Ok(raw) = made else {
+                        return Err(Error::NotImplemented(RuntimeGap::RebindTextures));
+                    };
+                    // Dropped on a later failure, the images made so far go.
+                    swaps.push(ImageSwap::new(
+                        Arc::clone(&image),
+                        ImageObjects::new(self, raw),
+                        vk::ImageLayout::UNDEFINED,
+                        pages,
+                    ));
+                    continue;
+                }
+            };
             let made = self.host_linear_image(image.plan())?;
             let Ok(LinearMade {
                 raw,
                 requirements,
+                report,
                 initial,
-                ..
             }) = made
             else {
                 return Err(Error::NotImplemented(RuntimeGap::RebindTextures));
             };
+            // Its rows (and slices) must lie as the old image's did: a `DRM_FORMAT_MOD_LINEAR`
+            // image's are the texture's, which the driver's linear image may not take.
+            let plan = image.plan();
+            let slices = plan.layers.max(plan.extent[2]);
             if requirements.memory_type_bits & (1 << type_index) == 0
                 || !at.is_multiple_of(requirements.alignment.max(1))
+                || report.offset != 0
+                || report.row_pitch != row_pitch
+                || (slices > 1 && report.array_pitch != slice_pitch)
             {
                 // SAFETY: the image is live and unbound, and no command uses it.
                 unsafe { release::object(raw_device, raw) };
@@ -2462,6 +2762,76 @@ impl Device {
             ));
         }
         Ok(swaps)
+    }
+
+    /// The images of the textures over a no-copy buffer's (or a no-copy heap's) bytes, made for a
+    /// rebind's new pages, which it imported as dma-bufs (`placement`), the bytes at `pointer`:
+    /// for each linear one `watches` note, a `DRM_FORMAT_MOD_LINEAR` image of its plan over the
+    /// one dma-buf the pages' source makes of its own pages ([`Device::dma_buf_image`]), its
+    /// texels as far from the new bytes' first as they were from the old's, and its rows as far
+    /// apart; and for each of `heap`'s textures bound to its bytes, one in the driver's layout at
+    /// its offset (`texture/heap.rs`). Made before the rebind settles, with no lock of the
+    /// runtime's held: the source is called once for each. Nothing for pages imported by their
+    /// pointer. Refused (`NotImplemented(RebindTextures)`), what was made released, where the
+    /// device makes no such image of one (`dma_buf_image`'s reasons).
+    #[cfg(unix)]
+    pub(super) fn dma_buf_images_again(
+        &self,
+        watches: &[AliasWatch],
+        heap: Option<&Heap>,
+        placement: &Placement,
+        pointer: NonNull<u8>,
+    ) -> Result<Remade, Error> {
+        let mut remade = Remade::default();
+        let Some(imports) = placement.dma_buf_pages() else {
+            return Ok(remade);
+        };
+        if let Some(heap) = heap {
+            let type_index = placement.type_index();
+            self.dma_buf_heap_images_again(heap, imports, type_index, pointer, &mut remade)?;
+        }
+        let facts = self
+            .shared()
+            .textures
+            .facts(self.compile_device().profile());
+        for watch in watches {
+            let Some(image) = watch.image.upgrade() else {
+                continue;
+            };
+            // A Metal texture's rebind to dma-buf pages is refused as the swaps are made.
+            let AliasKind::Linear {
+                row_pitch,
+                slice_pitch,
+            } = watch.kind
+            else {
+                continue;
+            };
+            let texels = crate::dma_buf::DmaBufTexels {
+                pages: imports,
+                type_index: placement.type_index(),
+                at: pointer.as_ptr() as u64 + watch.from_base,
+                row_pitch,
+                slice_pitch,
+            };
+            let Ok((_, made)) = self.dma_buf_image(&[image.plan()], &facts, &texels)? else {
+                return Err(Error::NotImplemented(RuntimeGap::RebindTextures));
+            };
+            let objects = ImageObjects::imported(self, made.raw, made.import);
+            remade.0.push((image, objects));
+        }
+        Ok(remade)
+    }
+
+    /// No pages are imported as dma-bufs on this system: nothing is made.
+    #[cfg(not(unix))]
+    pub(super) fn dma_buf_images_again(
+        &self,
+        _watches: &[AliasWatch],
+        _heap: Option<&Heap>,
+        _placement: &Placement,
+        _pointer: NonNull<u8>,
+    ) -> Result<Remade, Error> {
+        Ok(Remade::default())
     }
 
     /// The image of `plan` for a texture of `layout` made with `descriptor` (and its hazard

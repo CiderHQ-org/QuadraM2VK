@@ -222,9 +222,10 @@ degradations! {
         /// A 2D texture over a buffer is a shadow image: no linear image of the device lays its
         /// texels out as Metal does in the buffer's memory (over a no-copy buffer's imported
         /// host memory, no linear image made for host allocations does), or the buffer is over
-        /// the caller's `VkBuffer`, whose memory backs no image of the runtime's. Also a heap's
-        /// depth or stencil texture on a device whose driver lays
-        /// such images apart from their memory
+        /// the caller's `VkBuffer`, whose memory backs no image of the runtime's, or over host
+        /// pages imported as dma-bufs (`HostMemory::with_dma_buf`) where the device makes no image
+        /// over a dma-buf of the texture's own pages (the notice names why). Also a heap's depth
+        /// or stencil texture on a device whose driver lays such images apart from their memory
         /// ([`metal2vulkan::device::DriverFact::DepthStencilImagesLieApart`]): its image is a
         /// shadow of the heap's bytes in its range. Also a heap's 2D texture of one level of
         /// `RGB10A8_2P_XR10` or its sRGB twin: its image is a shadow of its two planes in the

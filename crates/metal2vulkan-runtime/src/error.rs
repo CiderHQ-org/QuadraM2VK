@@ -499,6 +499,11 @@ pub enum Problem {
     AlreadyCommitted,
     /// An object made by another device.
     ForeignObject,
+    /// Dma-bufs a `DmaBufSource` returned (a runtime extension: Metal has none,
+    /// `HostMemory::with_dma_buf`) that break its contract: chunks that do not cover the pages
+    /// asked for, split off the granule, or of lengths off the host page, and a descriptor that
+    /// is no dma-buf or holds fewer bytes than its chunk.
+    DmaBuf,
     /// An image the caller made that cannot be wrapped as a texture of the descriptor
     /// (`new_texture_with_vk_image`).
     WrappedImage(WrappedImageProblem),
@@ -1294,7 +1299,15 @@ pub enum RuntimeGap {
     OverlappingTextureCopies,
     /// `Buffer::rebind_bytes_no_copy` of a no-copy buffer with a live texture over its bytes,
     /// given memory at another offset in its page than the old: the texture's copies and texel
-    /// views are planned at the bytes' offset in their `VkBuffer` (`rebind.rs`).
+    /// views are planned at the bytes' offset in their `VkBuffer` (`rebind.rs`). Also a rebind
+    /// of a no-copy buffer or heap with a texture whose image is bound to its bytes, where the
+    /// device makes no such image over the new memory: over memory it imports by its pointer, one
+    /// that takes the import's type and lies where the texture's texels do, its rows (and slices)
+    /// as far apart as the old image's, and never for a heap's texture whose image lay over
+    /// dma-bufs, whose rows the driver's `DRM_FORMAT_MOD_LINEAR` layout spaces; over memory it
+    /// imports as dma-bufs (`HostMemory::with_dma_buf`), an image of `DRM_FORMAT_MOD_LINEAR` over
+    /// a dma-buf of the texture's own new pages, which needs `VK_EXT_image_drm_format_modifier`
+    /// and `VK_EXT_queue_family_foreign`, a layout the driver takes and the source's dma-buf.
     RebindTextures,
     /// A PVRTC texture's blocks in a Metal block order the runtime does not lay out:
     /// `replaceRegion` and `getBytes` of a region other than a whole level, which Metal's API

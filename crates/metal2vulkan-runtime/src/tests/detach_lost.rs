@@ -8,7 +8,9 @@
 //! `m2v_cpu_icd`), on the kind of device the cfg selects.
 
 use crate::error::Error;
-use crate::{Device, DeviceKind, DeviceOptions, EventRef, ResourceOptions, ShaderCacheOptions};
+use crate::{
+    Device, DeviceKind, DeviceOptions, EventRef, HostMemory, ResourceOptions, ShaderCacheOptions,
+};
 use std::alloc::Layout;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
@@ -91,7 +93,12 @@ fn a_detach_waiting_for_a_submitted_command_buffer_settles_on_a_lost_device() {
     // SAFETY: the memory outlives the device (dropped after it, below), and nothing else uses
     // it meanwhile.
     let made = unsafe {
-        device.new_buffer_with_bytes_no_copy(host.0, BYTES as u64, ResourceOptions::default(), None)
+        device.new_buffer_with_bytes_no_copy(
+            HostMemory::new(host.0),
+            BYTES as u64,
+            ResourceOptions::default(),
+            None,
+        )
     };
     let buffer = match made {
         Ok(buffer) => buffer,

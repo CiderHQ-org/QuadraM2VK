@@ -205,7 +205,7 @@ use metal2vulkan::Budget;
 use metal2vulkan_devtools::{engine_dir, llvm_assemble};
 use metal2vulkan_runtime::{
     BlitOption, CpuCacheMode, DebugMessage, Degradation, DegradationCategory, Device,
-    DeviceOptions, DriverSetting, Error, HazardTrackingMode, HeapDescriptor, HeapType,
+    DeviceOptions, DriverSetting, Error, HazardTrackingMode, HeapDescriptor, HeapType, HostMemory,
     LayerSetting, LayerSettingValue, LoadAction, MessageSeverity, MetalLevel,
     MultisampleStencilResolveFilter, Origin, PipelineOptions, RenderPassDescriptor,
     ResourceOptions, RuntimeGap, Size, StorageMode, StoreAction, TextureDescriptor,
@@ -753,7 +753,12 @@ fn the_private_option_bit_is_ignored_once() {
         let memory = Mapping::anonymous(GUEST_PAGE);
         // SAFETY: the mapping outlives the buffer, which is dropped first.
         let no_copy = unsafe {
-            device.new_buffer_with_bytes_no_copy(memory.pointer(), GUEST_PAGE as u64, shared, None)
+            device.new_buffer_with_bytes_no_copy(
+                HostMemory::new(memory.pointer()),
+                GUEST_PAGE as u64,
+                shared,
+                None,
+            )
         };
         match no_copy {
             Err(error) if not_importable(&error) => {}

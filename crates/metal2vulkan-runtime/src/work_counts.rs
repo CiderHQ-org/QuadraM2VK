@@ -79,6 +79,10 @@ pub(crate) struct Counters {
     linear_passes_through_copies: AtomicU64,
     draw_states_recorded: AtomicU64,
     host_deallocators_delayed: AtomicU64,
+    dma_buf_imports: AtomicU64,
+    dma_buf_sparse_buffers: AtomicU64,
+    dma_buf_images: AtomicU64,
+    dma_buf_image_fallbacks: AtomicU64,
     replay_logs_kept: AtomicU64,
     replay_log_bytes: AtomicU64,
     encoders_reencoded: AtomicU64,
@@ -415,6 +419,31 @@ impl Counters {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    /// `chunks` chunks of host pages a caller's source made were imported as dma-buf memory, and
+    /// a buffer bound in them, where the device refused the pages' pointer (`dma_buf.rs`).
+    pub(crate) fn dma_buf_imported(&self, chunks: usize) {
+        self.dma_buf_imports
+            .fetch_add(chunks as u64, Ordering::Relaxed);
+    }
+
+    /// A no-copy buffer's (or heap's, or rebind's) `VkBuffer` was assembled from several chunks'
+    /// imports as a sparse buffer (`dma_buf.rs`).
+    pub(crate) fn dma_buf_sparse_buffer_made(&self) {
+        self.dma_buf_sparse_buffers.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A texture's image over dma-buf pages was made and bound to a dedicated import of a dma-buf
+    /// of its own pages (`dma_buf.rs`).
+    pub(crate) fn dma_buf_image_made(&self) {
+        self.dma_buf_images.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A texture over dma-buf pages that such an image would alias took the path of a texture
+    /// over memory no image aliases instead: the device made no such image of it (`dma_buf.rs`).
+    pub(crate) fn dma_buf_image_fell_back(&self) {
+        self.dma_buf_image_fallbacks.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// A command buffer kept an ended encoder's log of `bytes` bytes (`replay.rs`).
     pub(crate) fn replay_log_kept(&self, bytes: usize) {
         self.replay_logs_kept.fetch_add(1, Ordering::Relaxed);
@@ -737,6 +766,23 @@ pub struct WorkCounts {
     /// it runs once the import is freed (`host-deallocator-delayed`). With a keep-alive the
     /// deallocator runs at the release, and none is counted.
     pub host_deallocators_delayed: u64,
+    /// Chunks of host pages imported as dma-buf memory from a caller's source
+    /// (`HostMemory::with_dma_buf`), where the device refused the pages' pointer: no-copy
+    /// buffers', heaps' and rebinds' alike, one per chunk. None where every pointer was imported.
+    pub dma_buf_imports: u64,
+    /// Of those buffers, heaps and rebinds, the ones whose `VkBuffer` is a sparse buffer
+    /// assembled from several chunks.
+    pub dma_buf_sparse_buffers: u64,
+    /// Images of textures over such dma-buf memory (over a no-copy buffer, placed in a no-copy
+    /// heap, a view of either), each a `DRM_FORMAT_MOD_LINEAR` image bound to a dedicated import
+    /// of a dma-buf of its own pages from the caller's source, aliasing the buffer's bytes: one per
+    /// image made, a rebind's too. Not counted in `dma_buf_imports`.
+    pub dma_buf_images: u64,
+    /// Textures over such dma-buf memory that such an image would alias but the device made none
+    /// (the source failed, the format, usage, extent or plane layout is not supported, or the
+    /// driver refused the import): each takes the path of a texture over memory no image aliases
+    /// (`shadowed-texture`).
+    pub dma_buf_image_fallbacks: u64,
     /// Ended compute and blit encoders whose logs their command buffers kept, as a rebind before
     /// the first submission may encode them again (`replay.rs`), and the bytes of those logs.
     pub replay_logs_kept: u64,
@@ -865,6 +911,10 @@ impl Device {
                 .load(Ordering::Relaxed),
             draw_states_recorded: counters.draw_states_recorded.load(Ordering::Relaxed),
             host_deallocators_delayed: counters.host_deallocators_delayed.load(Ordering::Relaxed),
+            dma_buf_imports: counters.dma_buf_imports.load(Ordering::Relaxed),
+            dma_buf_sparse_buffers: counters.dma_buf_sparse_buffers.load(Ordering::Relaxed),
+            dma_buf_images: counters.dma_buf_images.load(Ordering::Relaxed),
+            dma_buf_image_fallbacks: counters.dma_buf_image_fallbacks.load(Ordering::Relaxed),
             replay_logs_kept: counters.replay_logs_kept.load(Ordering::Relaxed),
             replay_log_bytes: counters.replay_log_bytes.load(Ordering::Relaxed),
             encoders_reencoded: counters.encoders_reencoded.load(Ordering::Relaxed),

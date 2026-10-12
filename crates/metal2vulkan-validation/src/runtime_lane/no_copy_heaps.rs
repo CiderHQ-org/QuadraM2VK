@@ -29,9 +29,10 @@ use crate::gpu::TEST_DEVICE;
 use metal2vulkan::metal::format::is_depth_stencil;
 use metal2vulkan::metal::{PixelFormat, TextureUsage};
 use metal2vulkan_runtime::{
-    BlitOption, Buffer, CommandQueue, CpuCacheMode, Deallocator, Degradation, Device, Error,
-    HazardTrackingMode, Heap, HeapDescriptor, HeapProblem, HeapType, Invalid, Nil, Origin, Problem,
-    Region, ResourceOptions, RuntimeGap, Size, StorageMode, Texture, TextureDescriptor,
+    BlitOption, Buffer, CommandBuffer, CommandQueue, CpuCacheMode, Deallocator, Degradation,
+    Device, Error, HazardTrackingMode, Heap, HeapDescriptor, HeapProblem, HeapType, HostMemory,
+    Invalid, Nil, Origin, Problem, Region, ResourceOptions, RuntimeGap, Size, StorageMode, Texture,
+    TextureDescriptor,
 };
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -97,7 +98,9 @@ pub(super) unsafe fn no_copy_heap(
 ) -> Option<Heap> {
     let descriptor = HeapDescriptor::new(heap_type, HEAP as u64, shared());
     // SAFETY: the caller's contract.
-    match unsafe { device.new_heap_with_bytes_no_copy(pointer, &descriptor, deallocator, None) } {
+    match unsafe {
+        device.new_heap_with_bytes_no_copy(HostMemory::new(pointer), &descriptor, deallocator, None)
+    } {
         Ok(heap) => Some(heap),
         Err(error) if not_importable(&error) => {
             eprintln!("NOCOPYHEAP: the device imports no host memory: {error:?}");
@@ -122,7 +125,7 @@ pub(super) fn band(len: usize, base: u8) -> Vec<u8> {
 }
 
 /// A Shared buffer holding `bytes`.
-fn staged(device: &Device, bytes: &[u8]) -> Buffer {
+pub(super) fn staged(device: &Device, bytes: &[u8]) -> Buffer {
     let buffer = device
         .new_buffer(bytes.len() as u64, ResourceOptions::shared())
         .unwrap();
@@ -237,54 +240,48 @@ fn a_no_copy_heap_s_buffers_are_the_caller_s_bytes() {
     assert_eq!(seen.dropped.load(Ordering::SeqCst), 0);
 }
 
-/// The texels of `texture`'s first level (`side` square, `bytes` a texel), read back through a
-/// blit.
-pub(super) fn blit_texels(
-    queue: &CommandQueue,
+/// Encode a blit of `texture`'s first level, `size` texels of `bytes` bytes, into `out`, rows
+/// packed.
+pub(super) fn encode_texels_out(
+    command_buffer: &CommandBuffer,
     texture: &Texture,
-    side: u64,
+    (width, height): (u64, u64),
     bytes: u64,
-) -> Vec<u8> {
-    let device = queue.device();
-    let len = side * side * bytes;
-    let copy = device.new_buffer(len, ResourceOptions::shared()).unwrap();
-    let command_buffer = queue.command_buffer().unwrap();
+    out: &Buffer,
+) {
     let mut blit = command_buffer.blit_command_encoder().unwrap();
     blit.copy_from_texture_to_buffer(
         texture,
         0,
         0,
         Origin::new(0, 0, 0),
-        Size::new(side, side, 1),
-        &copy,
+        Size::new(width, height, 1),
+        out,
         0,
-        side * bytes,
-        len,
+        width * bytes,
+        width * height * bytes,
         BlitOption::None,
     )
     .unwrap();
     blit.end_encoding().unwrap();
-    run(&command_buffer);
-    read_buffer(&copy, 0, len).unwrap()
 }
 
-/// Blit `texels` (`side` square, `bytes` a texel) into `texture`'s first level.
-pub(super) fn blit_into(
-    queue: &CommandQueue,
-    texture: &Texture,
-    side: u64,
+/// Encode a blit of `from`'s bytes, rows packed, into `texture`'s first level, `size` texels of
+/// `bytes` bytes.
+pub(super) fn encode_texels_in(
+    command_buffer: &CommandBuffer,
+    from: &Buffer,
+    (width, height): (u64, u64),
     bytes: u64,
-    texels: &[u8],
+    texture: &Texture,
 ) {
-    let source = staged(queue.device(), texels);
-    let command_buffer = queue.command_buffer().unwrap();
     let mut blit = command_buffer.blit_command_encoder().unwrap();
     blit.copy_from_buffer_to_texture(
-        &source,
+        from,
         0,
-        side * bytes,
-        side * side * bytes,
-        Size::new(side, side, 1),
+        width * bytes,
+        width * height * bytes,
+        Size::new(width, height, 1),
         texture,
         0,
         0,
@@ -293,6 +290,37 @@ pub(super) fn blit_into(
     )
     .unwrap();
     blit.end_encoding().unwrap();
+}
+
+/// The texels of `texture`'s first level (`size` texels, `bytes` a texel), read back through a
+/// blit, rows packed.
+pub(super) fn blit_texels(
+    queue: &CommandQueue,
+    texture: &Texture,
+    size: (u64, u64),
+    bytes: u64,
+) -> Vec<u8> {
+    let len = size.0 * size.1 * bytes;
+    let copy = (queue.device())
+        .new_buffer(len, ResourceOptions::shared())
+        .unwrap();
+    let command_buffer = queue.command_buffer().unwrap();
+    encode_texels_out(&command_buffer, texture, size, bytes, &copy);
+    run(&command_buffer);
+    read_buffer(&copy, 0, len).unwrap()
+}
+
+/// Blit `texels` (`size` texels, `bytes` a texel, rows packed) into `texture`'s first level.
+pub(super) fn blit_into(
+    queue: &CommandQueue,
+    texture: &Texture,
+    size: (u64, u64),
+    bytes: u64,
+    texels: &[u8],
+) {
+    let source = staged(queue.device(), texels);
+    let command_buffer = queue.command_buffer().unwrap();
+    encode_texels_in(&command_buffer, &source, size, bytes, texture);
     run(&command_buffer);
 }
 
@@ -355,8 +383,12 @@ fn texture_round_trip(pf: PixelFormat, side: u64, bytes: u64, offset: u64) -> Op
         // The GPU writes the texture: the caller's bytes and the buffer's change.
         mapping.fill(0);
         let first = band(len, 0x00);
-        blit_into(&queue, &texture, side, bytes, &first);
-        assert_eq!(blit_texels(&queue, &texture, side, bytes), first, "{what}");
+        blit_into(&queue, &texture, (side, side), bytes, &first);
+        assert_eq!(
+            blit_texels(&queue, &texture, (side, side), bytes),
+            first,
+            "{what}"
+        );
         let host = mapping.read(range.clone());
         let changed = host.iter().filter(|&&byte| byte != 0).count();
         assert!(
@@ -375,7 +407,7 @@ fn texture_round_trip(pf: PixelFormat, side: u64, bytes: u64, offset: u64) -> Op
         // The CPU writes the caller's bytes: every texel changes.
         let second = band(size as usize, 0x80);
         mapping.write(start, &second);
-        let read = blit_texels(&queue, &texture, side, bytes);
+        let read = blit_texels(&queue, &texture, (side, side), bytes);
         assert_eq!(
             same_texels(&read, &first, bytes),
             0,
@@ -384,7 +416,7 @@ fn texture_round_trip(pf: PixelFormat, side: u64, bytes: u64, offset: u64) -> Op
 
         // The GPU writes through the buffer: every texel changes again.
         gpu_fill(&queue, &buffer, 0..size, 0x5A);
-        let after = blit_texels(&queue, &texture, side, bytes);
+        let after = blit_texels(&queue, &texture, (side, side), bytes);
         assert_eq!(
             same_texels(&after, &read, bytes),
             0,
@@ -406,7 +438,11 @@ fn texture_round_trip(pf: PixelFormat, side: u64, bytes: u64, offset: u64) -> Op
             .get_bytes(&mut texels, row, 0, region, 0, 0)
             .unwrap();
         assert_eq!(texels, third, "{what}: getBytes after replaceRegion");
-        assert_eq!(blit_texels(&queue, &texture, side, bytes), third, "{what}");
+        assert_eq!(
+            blit_texels(&queue, &texture, (side, side), bytes),
+            third,
+            "{what}"
+        );
         laid = if tiled {
             let n = bytes as usize;
             (0..side).all(|y| {
@@ -474,7 +510,12 @@ fn a_no_copy_heap_is_refused_as_its_rules_say() {
             let deallocator: Deallocator = Box::new(move |_, _| drop(count));
             // SAFETY: the mapping holds every byte asked for and outlives any heap.
             let made = unsafe {
-                device.new_heap_with_bytes_no_copy(at, &descriptor, Some(deallocator), None)
+                device.new_heap_with_bytes_no_copy(
+                    HostMemory::new(at),
+                    &descriptor,
+                    Some(deallocator),
+                    None,
+                )
             };
             assert_eq!(seen.runs.load(Ordering::SeqCst), 0);
             assert_eq!(seen.dropped.load(Ordering::SeqCst), 1, "{descriptor:?}");

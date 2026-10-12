@@ -17,7 +17,12 @@
 //!   too; its image of a format a clear writes is cleared ([`FirstMove::cleared`]) rather than
 //!   copied over, single- or multisampled. An image that takes a rebind's new `VkImage` notes that
 //!   one's (`rebind.rs`). The image (or stand-in) is registered weakly once it is shared
-//!   ([`FirstMoves::register`]). A new buffer whose bytes the host cannot write (`Private`, and a
+//!   ([`FirstMoves::register`]). An image over a dma-buf of its own pages (`dma_buf.rs`) starts
+//!   `UNDEFINED` too, and its move is an acquire from `VK_QUEUE_FAMILY_FOREIGN_EXT` for the
+//!   device's queue family (`VK_QUEUE_FAMILY_IGNORED` where its images are concurrent among
+//!   several), from `GENERAL` (which keeps its bytes, as Vulkan's foreign images keep theirs only
+//!   through such an acquire) to `GENERAL` ([`FirstMove::acquired`]); it rests there.
+//!   A new buffer whose bytes the host cannot write (`Private`, and a
 //!   `Managed` buffer's device copy) notes its fill with zeros ([`FirstFill`]) the same way
 //!   (`Buffer::clear_first`), and a new `Private` buffer made with bytes then the copy of a staging
 //!   buffer's (`Buffer::fill_first_from`). So do a sparse texture's image (its move; an emulated
@@ -97,6 +102,9 @@ pub(crate) struct FirstMove {
     /// Metal's pattern over the image's first levels, which the zeros then leave
     /// ([`FirstMove::patterned`]).
     pattern: Option<Patterned>,
+    /// The queue family the move acquires the image for from `VK_QUEUE_FAMILY_FOREIGN_EXT`, an
+    /// image over dma-buf pages the CPU writes ([`FirstMove::acquired`]).
+    acquire: Option<u32>,
 }
 
 /// How a first move writes Metal's pattern into the first `levels` levels of its image, of
@@ -208,7 +216,21 @@ impl FirstMove {
             zero: None,
             rebindable,
             pattern: None,
+            acquire: None,
         }
+    }
+
+    /// The move, an acquire of the image from `VK_QUEUE_FAMILY_FOREIGN_EXT` for `family` (the
+    /// device's one queue family, or `VK_QUEUE_FAMILY_IGNORED` for an image concurrent among
+    /// several, `sharing.rs`): an image over dma-buf pages (`dma_buf.rs`), made `UNDEFINED` as
+    /// Vulkan makes an image of external memory, whose bytes the CPU wrote outside Vulkan. It
+    /// moves from `GENERAL`, the layout of the bytes as they lie, which an acquire keeps; a move
+    /// from `UNDEFINED` may discard them, and so may a queue family that takes an exclusive
+    /// image without one.
+    pub(crate) fn acquired(mut self, family: u32) -> FirstMove {
+        self.old = vk::ImageLayout::GENERAL;
+        self.acquire = Some(family);
+        self
     }
 
     /// The move, which also writes every texel `copies` reach (`zero_copies`) with zero bytes
@@ -486,15 +508,19 @@ impl FirstMove {
         exit_guard::called(Call::CmdPipelineBarrier);
     }
 
-    /// The barrier of the move.
+    /// The barrier of the move: an acquire from `VK_QUEUE_FAMILY_FOREIGN_EXT` where it is one.
     fn barrier(&self) -> vk::ImageMemoryBarrier<'static> {
+        let (source, target) = match self.acquire {
+            Some(family) => (vk::QUEUE_FAMILY_FOREIGN_EXT, family),
+            None => (vk::QUEUE_FAMILY_IGNORED, vk::QUEUE_FAMILY_IGNORED),
+        };
         vk::ImageMemoryBarrier::default()
             .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
             .dst_access_mask(vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE)
             .old_layout(self.old)
             .new_layout(vk::ImageLayout::GENERAL)
-            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .src_queue_family_index(source)
+            .dst_queue_family_index(target)
             .image(self.image)
             .subresource_range(self.whole())
     }

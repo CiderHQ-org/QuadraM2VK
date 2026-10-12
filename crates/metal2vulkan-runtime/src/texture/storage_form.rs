@@ -78,7 +78,6 @@ use crate::tracker::Access;
 use crate::values::StorageMode;
 use crate::Device;
 use ash::vk;
-use ash::vk::Handle;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, Instant};
@@ -446,11 +445,10 @@ impl Prepared {
             return None;
         }
         image.views_go();
-        let first = image
-            .raw
-            .0
-            .swap(swapped.objects.raw.as_raw(), Ordering::AcqRel);
-        swapped.objects.raw = vk::Image::from_raw(first);
+        let objects = &mut swapped.objects;
+        let (first, import) = image.raw.swap(objects.raw, objects.import.take());
+        objects.raw = first;
+        objects.import = import;
         swapped
             .objects
             .views

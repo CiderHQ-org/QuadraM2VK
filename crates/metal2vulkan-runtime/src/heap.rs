@@ -67,7 +67,6 @@ use super::values::{CpuCacheMode, HazardTrackingMode, ResourceOptions, StorageMo
 use super::Device;
 use metal2vulkan::device::AllocationLimits;
 use std::collections::HashMap;
-use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -482,24 +481,27 @@ impl Device {
     }
 
     /// A heap over the caller's host memory (a runtime extension, the heap twin of
-    /// [`Device::new_buffer_with_bytes_no_copy`]): an automatic or placement heap of the
-    /// descriptor's size rounded up to 16 KiB whose bytes are the caller's, from `bytes`. Its
-    /// buffers and textures alias at their offsets as in any heap of its type, and the CPU's
-    /// writes through `bytes` are what its resources' commands read. `deallocator` runs once,
-    /// with `bytes` and the heap's size, when the heap's last reference goes (its resources hold
-    /// it): on a runtime thread when that is a command buffer completing. A refused call never
-    /// runs it. `keep_alive` ([`KeepAlive`]) is dropped once the device's import of the memory is
-    /// freed: with one, `deallocator` runs at the heap's release, though a command buffer submitted
-    /// before a texture placed in the heap was released may hold the import until it completes;
-    /// with none, `deallocator` waits for the import (`host-deallocator-delayed`).
+    /// [`Device::new_buffer_with_bytes_no_copy`]), its pointer wrapped in `memory`
+    /// ([`HostMemory`]): an automatic or placement heap of the descriptor's size rounded up to 16
+    /// KiB whose bytes are the caller's, from `memory.pointer()`. Its buffers and textures alias at
+    /// their offsets as in any heap of its type, and the CPU's writes through the pointer are what
+    /// its resources' commands read. `deallocator` runs once, with the pointer and the heap's size,
+    /// when the heap's last reference goes (its resources hold it): on a runtime thread when that
+    /// is a command buffer completing. A refused call never runs it. `keep_alive` ([`KeepAlive`])
+    /// is dropped once the device's import of the memory is freed: with one, `deallocator` runs at
+    /// the heap's release, though a command buffer submitted before a texture placed in the heap
+    /// was released may hold the import until it completes; with none, `deallocator` waits for the
+    /// import (`host-deallocator-delayed`).
     ///
-    /// The memory is imported here, as a no-copy buffer's is (`host_memory.rs`). A buffer
-    /// placed in the heap is its bytes; a texture is an image bound to them where the device
-    /// binds such an image to imported host memory (its optimal image, else a linear one), else
-    /// an image of its own whose texels the encoders copy from the heap's bytes and back, laid
-    /// out by level and layer from the texture's offset, which the device announces once
-    /// (`shadowed-texture`; `texture/heap.rs`). Its purgeable state answers as a no-copy
-    /// buffer's: non-volatile, and emptying it keeps the caller's bytes.
+    /// The memory is imported here, as a no-copy buffer's is (`host_memory.rs`): by its pointer, or
+    /// where the device refuses that and `memory` carries a dma-buf source
+    /// ([`HostMemory::with_dma_buf`]), by the dma-bufs it makes of the pages. A buffer placed in
+    /// the heap is its bytes; a texture is an image bound to them where the device binds such an
+    /// image to imported host memory (its optimal image, else a linear one; over dma-bufs, an
+    /// image over a dma-buf of its own pages), else an image of its own whose texels the encoders copy from
+    /// the heap's bytes and back, laid out by level and layer from the texture's offset, which the
+    /// device announces once (`shadowed-texture`; `texture/heap.rs`). Its purgeable state answers
+    /// as a no-copy buffer's: non-volatile, and emptying it keeps the caller's bytes.
     ///
     /// Refused: a size of 0 (`Nil`, as [`Device::new_heap`] answers it); storage other than
     /// `Shared`, a sparse heap, an undefined option (`Invalid`); memory whose first byte is not a multiple of the import's unit
@@ -512,10 +514,11 @@ impl Device {
     ///
     /// # Safety
     ///
-    /// The heap's [`size`](Heap::size) bytes at `bytes` meet [`HostMemory::new`]'s contract.
+    /// `memory` meets the contract of the [`HostMemory`] constructor that made it
+    /// ([`HostMemory::new`], [`HostMemory::with_dma_buf`]) for the heap's [`size`](Heap::size).
     pub unsafe fn new_heap_with_bytes_no_copy(
         &self,
-        bytes: NonNull<u8>,
+        memory: HostMemory,
         descriptor: &HeapDescriptor,
         deallocator: Option<Deallocator>,
         keep_alive: Option<KeepAlive>,
@@ -525,7 +528,7 @@ impl Device {
             keep_alive,
         };
         // SAFETY: the caller's contract.
-        unsafe { self.no_copy_heap_with_token(bytes, descriptor, release, None) }
+        unsafe { self.no_copy_heap_with_token(memory, descriptor, release, None) }
     }
 
     /// [`Device::new_heap_with_bytes_no_copy`] with `token` (a runtime extension), dropped once
@@ -537,7 +540,7 @@ impl Device {
     /// As [`Device::new_heap_with_bytes_no_copy`]'s.
     pub unsafe fn new_heap_with_bytes_no_copy_and_range_token(
         &self,
-        bytes: NonNull<u8>,
+        memory: HostMemory,
         descriptor: &HeapDescriptor,
         deallocator: Option<Deallocator>,
         keep_alive: Option<KeepAlive>,
@@ -548,7 +551,7 @@ impl Device {
             keep_alive,
         };
         // SAFETY: the caller's contract.
-        unsafe { self.no_copy_heap_with_token(bytes, descriptor, release, Some(token)) }
+        unsafe { self.no_copy_heap_with_token(memory, descriptor, release, Some(token)) }
     }
 
     /// [`Device::new_heap_with_bytes_no_copy`], given back to `release`, the heap's own bytes
@@ -559,7 +562,7 @@ impl Device {
     /// As [`Device::new_heap_with_bytes_no_copy`]'s.
     unsafe fn no_copy_heap_with_token(
         &self,
-        bytes: NonNull<u8>,
+        memory: HostMemory,
         descriptor: &HeapDescriptor,
         release: HostRelease,
         token: Option<RangeToken>,
@@ -578,7 +581,7 @@ impl Device {
         let bytes = unsafe {
             self.buffer_over_host_memory(
                 CALL,
-                HostMemory::new(bytes),
+                memory,
                 size,
                 options,
                 release,

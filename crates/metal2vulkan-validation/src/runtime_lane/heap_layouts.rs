@@ -43,9 +43,9 @@ use metal2vulkan::metal::{PixelFormat, TextureType, TextureUsage};
 use metal2vulkan_devtools::llvm_assemble;
 use metal2vulkan_runtime::{
     BlitOption, ClearColor, CommandQueue, Degradation, Device, DeviceOptions, Error, Heap,
-    HeapDescriptor, HeapType, LoadAction, MetalLevel, ObjectId, Origin, PipelineOptions, Region,
-    RenderPassDescriptor, ResourceOptions, RuntimeGap, Size, StoreAction, Texture,
-    TextureDescriptor, WorkCounts,
+    HeapDescriptor, HeapType, HostMemory, LoadAction, MetalLevel, ObjectId, Origin,
+    PipelineOptions, Region, RenderPassDescriptor, ResourceOptions, RuntimeGap, Size, StoreAction,
+    Texture, TextureDescriptor, WorkCounts,
 };
 use std::path::Path;
 
@@ -189,8 +189,14 @@ fn heap_over(device: &Device, mapping: &Mapping) -> Option<Heap> {
     let descriptor = HeapDescriptor::new(HeapType::Placement, HEAP as u64, shared());
     // SAFETY: the mapping holds `HEAP` writable bytes and outlives the heap (each test drops the
     // heap first).
-    match unsafe { device.new_heap_with_bytes_no_copy(mapping.pointer(), &descriptor, None, None) }
-    {
+    match unsafe {
+        device.new_heap_with_bytes_no_copy(
+            HostMemory::new(mapping.pointer()),
+            &descriptor,
+            None,
+            None,
+        )
+    } {
         Ok(heap) => Some(heap),
         Err(error) if not_importable(&error) => {
             eprintln!("HEAPLAYOUT: the device imports no host memory: {error:?}");

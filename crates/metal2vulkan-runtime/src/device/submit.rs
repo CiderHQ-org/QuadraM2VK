@@ -6,10 +6,16 @@
 //! work that waits (`texture/first_move.rs`), after the batches on other `VkQueue`s that did such
 //! work: no new resource waits for one, so making one waits for no GPU work. That work goes in a
 //! submission of its own just before the work's.
+//!
+//! The one submission no one waits for is a no-copy buffer's sparse binding of its dma-bufs
+//! (`dma_buf.rs`), on the same queue and timeline: it would wait behind the queue's work in
+//! flight. Every submission after it, on every `VkQueue`, waits for it until the host saw it
+//! complete, and the buffer's release waits for it.
 
 use super::relay::By;
 use super::{lock, Device};
 use crate::error::{vulkan, Error};
+use crate::exit_guard::{self, Call};
 use crate::release;
 use crate::resource::ResourceKey;
 use ash::vk;
@@ -170,10 +176,13 @@ impl Device {
         // SAFETY: the fence is unsignaled or signaled and not pending.
         unsafe { raw.reset_fences(&[objects.fence]) }.map_err(vulkan)?;
         let buffers = [objects.buffer];
-        let wait_semaphores: Vec<vk::Semaphore> = (waits.iter())
-            .map(|point| shared.queues[point.queue].timeline)
+        // And the last binding of a no-copy buffer's dma-bufs, until it completed.
+        let waits: Vec<(vk::Semaphore, u64)> = (waits.iter())
+            .map(|point| (shared.queues[point.queue].timeline, point.value))
+            .chain(self.binding_wait())
             .collect();
-        let wait_values: Vec<u64> = waits.iter().map(|point| point.value).collect();
+        let wait_semaphores: Vec<vk::Semaphore> = waits.iter().map(|wait| wait.0).collect();
+        let wait_values: Vec<u64> = waits.iter().map(|wait| wait.1).collect();
         let wait_stages = vec![vk::PipelineStageFlags::ALL_COMMANDS; waits.len()];
         // It signals its own timeline, which a batch on another `VkQueue` waits for where it did
         // first work.
@@ -259,6 +268,70 @@ impl Device {
                 Err(error) => return Err(self.failed(error)),
             }
         }
+    }
+
+    /// Bind `binds` to `buffer`, a sparse buffer no command has used, with one
+    /// `vkQueueBindSparse` on the device's first `VkQueue` that signals the internal timeline,
+    /// and return without waiting for it: every submission made after it, on every `VkQueue`,
+    /// waits for it until the host saw it complete ([`Device::binding_wait`]). The timeline and
+    /// the value it signals, which the buffer's release waits for.
+    pub(crate) fn bind_sparse_buffer(
+        &self,
+        buffer: vk::Buffer,
+        binds: &[vk::SparseMemoryBind],
+    ) -> Result<(vk::Semaphore, u64), Error> {
+        if self.is_lost() {
+            return Err(Error::DeviceLost);
+        }
+        let shared = self.shared();
+        let raw = shared.vk();
+        let mut internal = lock(&shared.internal);
+        if internal.is_none() {
+            *internal = Some(Internal::new(self)?);
+        }
+        let Some(objects) = internal.as_mut() else {
+            unreachable!("made above");
+        };
+        let buffer_binds = [vk::SparseBufferMemoryBindInfo::default()
+            .buffer(buffer)
+            .binds(binds)];
+        let value = objects.signalled + 1;
+        let signal_semaphores = [objects.timeline];
+        let signal_values = [value];
+        let mut timeline =
+            vk::TimelineSemaphoreSubmitInfo::default().signal_semaphore_values(&signal_values);
+        let info = vk::BindSparseInfo::default()
+            .buffer_binds(&buffer_binds)
+            .signal_semaphores(&signal_semaphores)
+            .push_next(&mut timeline);
+        // SAFETY: the buffer is live, made with `SPARSE_BINDING`, unused; every bind lies in it
+        // and in its memory at its alignment, of a type it takes (`dma_buf.rs`); the queue's
+        // family binds sparse memory, and the queue is used under its lock; the signal is above
+        // the timeline's value (the internal lock is held).
+        let bound = shared.use_queue(0, By::Runtime, |queue| unsafe {
+            raw.queue_bind_sparse(queue, &[info], vk::Fence::null())
+        });
+        exit_guard::called(Call::QueueBindSparse);
+        bound.map_err(|error| self.failed(error))?;
+        objects.signalled = value;
+        *lock(&shared.bound_at) = Some((objects.timeline, value));
+        Ok((objects.timeline, value))
+    }
+
+    /// The last binding of a no-copy buffer's dma-bufs ([`Device::bind_sparse_buffer`]) while
+    /// the host has not seen it complete: what a submission waits for, as the buffer may be
+    /// among what it uses.
+    pub(crate) fn binding_wait(&self) -> Option<(vk::Semaphore, u64)> {
+        let shared = self.shared();
+        let mut bound_at = lock(&shared.bound_at);
+        let (timeline, value) = (*bound_at)?;
+        // SAFETY: the timeline is the device's, live while the device is.
+        let reached = unsafe { shared.vk().get_semaphore_counter_value(timeline) };
+        if reached.is_ok_and(|reached| reached >= value) {
+            *bound_at = None;
+            return None;
+        }
+        Some((timeline, value))
     }
 
     /// The error of a failed submission or wait, recording a lost device.

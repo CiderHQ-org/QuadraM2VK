@@ -24,9 +24,9 @@ use metal2vulkan_devtools::{engine_dir, llvm_assemble};
 use metal2vulkan_runtime::{
     BlitCommandEncoder, BlitOption, Buffer, ClearColor, CommandBuffer, CommandBufferStatus,
     CommandQueue, ComputeCommandEncoder, ComputePipelineState, DebugMessage, Device, EventRef,
-    Fence, Heap, HeapDescriptor, HeapType, Library, LoadAction, Origin, PipelineOptions,
-    RenderCommandEncoder, RenderPassDescriptor, RenderPipelineState, ResourceOptions, SharedEvent,
-    Size, StoreAction, Texture, TextureDescriptor,
+    Fence, Heap, HeapDescriptor, HeapType, HostMemory, Library, LoadAction, Origin,
+    PipelineOptions, RenderCommandEncoder, RenderPassDescriptor, RenderPipelineState,
+    ResourceOptions, SharedEvent, Size, StoreAction, Texture, TextureDescriptor,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
@@ -202,7 +202,7 @@ impl SeqApi for RuntimeSeq {
         // SAFETY: the caller's contract, `HostMemory::new`'s.
         unsafe {
             self.device
-                .new_buffer_with_bytes_no_copy(bytes, length, options, None)
+                .new_buffer_with_bytes_no_copy(HostMemory::new(bytes), length, options, None)
         }
         .map_err(refused)
     }

@@ -143,7 +143,7 @@ use super::heap_two_planes::{HeapPlaneCopies, TwoPlaneHeapLayout};
 use super::stand_in::StandIn;
 use super::{
     copy_units, image_aspects, image_error, DetachedImage, IdUse, Image, ImageObjects,
-    ImagePlacement, ImageSwap, Owner, Raw, Storage, Texture, TextureDescriptor, ViewRecord,
+    ImagePlacement, ImageSwap, Owner, Raw, Remade, Storage, Texture, TextureDescriptor, ViewRecord,
 };
 use crate::address::ObjectsToken;
 use crate::buffer::{
@@ -748,6 +748,12 @@ fn initial_layout(tiling: vk::ImageTiling) -> vk::ImageLayout {
     } else {
         vk::ImageLayout::UNDEFINED
     }
+}
+
+/// Whether a heap texture's image of `tiling` lays its rows out linearly (`Image::linear`): linear
+/// tiling, or `DRM_FORMAT_MOD_LINEAR`'s, the one modifier a heap's image takes (`dma_buf.rs`).
+fn linear_tiling(tiling: vk::ImageTiling) -> bool {
+    tiling == vk::ImageTiling::LINEAR || tiling == vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT
 }
 
 /// Metal's answer for a texture buffer of `layout` in a heap (CRF heap probe 1, an M3 Max and an
@@ -1682,6 +1688,12 @@ impl Device {
     /// buffer), or ask a dedicated allocation (RADV). Elsewhere, and for a texture with a depth
     /// twin, `NotImplemented(HeapTextureMemory)`.
     ///
+    /// Over pages imported as dma-bufs (`dma_buf.rs`, where the device refused their pointer),
+    /// where the linear image would be: an image of the driver's `DRM_FORMAT_MOD_LINEAR` layout at
+    /// the texture's offset, bound to a dedicated import of a dma-buf of its own pages, where its
+    /// bytes and alignment fit the answer ([`dma_buf_heap_plan`](Self::dma_buf_heap_plan)); else,
+    /// and where it is not made after all as the texture is, the shadow, counted and announced.
+    ///
     /// A texture of a plain format Metal lays out tiled (`HeapLayout::Tiled`) is a shadow of its
     /// elements tiled in the heap's bytes (`AliasRoute::Tiled`, `heap_tiled.rs`), where its optimal
     /// image takes copies and the moves fit the device; elsewhere it takes the routes above,
@@ -1744,7 +1756,6 @@ impl Device {
             .shared()
             .textures
             .facts(self.compile_device().profile());
-        let texture_type = p.layout.texture_type;
         let (linear, _) = plan_texture_images(&p.layout, descriptor.image_usage(), false, &facts)
             .map_err(|refusal| image_error(call, refusal))?;
         let SizeAndAlign { size, align } = p.size_and_align;
@@ -1752,6 +1763,15 @@ impl Device {
         // one over it (MoltenVK: Metal makes no depth texture over a buffer).
         let driver = &self.properties().driver_facts;
         let apart = !colour(&linear) && driver.contains(&DriverFact::DepthStencilImagesLieApart);
+        // Over pages imported as dma-buf memory (`dma_buf.rs`), an image of the driver's
+        // `DRM_FORMAT_MOD_LINEAR` layout, bound to a dedicated import of a dma-buf of its own
+        // pages as the texture is made (`heap_texture_at`), where it fits the answer; else the
+        // shadow below, counted and announced.
+        let dma_buf = bytes.over_dma_buf();
+        if !apart && dma_buf {
+            let image = self.dma_buf_heap_plan(linear, &p, &facts)?;
+            return Ok(HeapPlan { image, ..p });
+        }
         if !apart && linear_lack(&linear, &facts).is_none() {
             let tiling = vk::ImageTiling::LINEAR;
             if let Some(requirements) = self.host_image_requirements(&linear)? {
@@ -1769,17 +1789,177 @@ impl Device {
                 }
             }
         }
-        let optimal = self.with_free_usage(linear, texture_type)?;
-        if !shadowable(&optimal, size) {
+        let image = self.memory_shadow(linear, &p)?;
+        Ok(HeapPlan { image, ..p })
+    }
+
+    /// The image of a texture of plan `p` in a heap over pages imported as dma-buf memory
+    /// (`dma_buf.rs`), `linear` its plan: an image of the driver's `DRM_FORMAT_MOD_LINEAR` layout
+    /// ([`Device::dma_buf_natural_layout`]) at the texture's offset, made and bound to a dedicated
+    /// import of a dma-buf of its own pages as the texture is made (`heap_texture_at`), where the
+    /// device makes one of the plan and its bytes and alignment fit the heap's answer; else a
+    /// shadow of the heap's bytes ([`dma_buf_heap_shadow`](Self::dma_buf_heap_shadow)).
+    #[cfg(unix)]
+    fn dma_buf_heap_plan(
+        &self,
+        linear: ImagePlan,
+        p: &HeapPlan,
+        facts: &crate::image_plan::ImageFacts<'_>,
+    ) -> Result<HeapImage, Error> {
+        let SizeAndAlign { size, align } = p.size_and_align;
+        let why = match self.dma_buf_natural_layout(&linear, facts)? {
+            Ok(natural) if natural.size <= size && natural.alignment <= align => {
+                return Ok(HeapImage {
+                    plan: linear,
+                    tiling: vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT,
+                    // The optimal image's, which its shadow takes where none is made.
+                    requirements: p.image.requirements,
+                    route: AliasRoute::Direct,
+                });
+            }
+            Ok(natural) => format!(
+                "the driver's DRM_FORMAT_MOD_LINEAR image of it takes {} bytes at an alignment \
+                 of {}, past the {size} at {align} the heap answers",
+                natural.size, natural.alignment
+            ),
+            Err(why) => why,
+        };
+        self.dma_buf_heap_shadow(linear, p, why)
+    }
+
+    /// No pages are imported as dma-bufs on this system: the shadow, as before.
+    #[cfg(not(unix))]
+    fn dma_buf_heap_plan(
+        &self,
+        linear: ImagePlan,
+        p: &HeapPlan,
+        _facts: &crate::image_plan::ImageFacts<'_>,
+    ) -> Result<HeapImage, Error> {
+        self.memory_shadow(linear, p)
+    }
+
+    /// The image of a texture of plan `p` whose route is a `DRM_FORMAT_MOD_LINEAR` image over
+    /// dma-buf pages ([`dma_buf_heap_plan`](Self::dma_buf_heap_plan)), at `offset` of the heap
+    /// whose buffer is `bytes`: made in the driver's layout and bound to a dedicated import of
+    /// the dma-buf the pages' source makes of its own pages ([`Device::dma_buf_image`]), with no
+    /// lock of the runtime's held. Where none is made, `p` takes the shadow of the heap's bytes
+    /// instead ([`dma_buf_heap_shadow`](Self::dma_buf_heap_shadow)), and nothing is answered.
+    #[cfg(unix)]
+    fn made_dma_buf_heap_image(
+        &self,
+        bytes: &Buffer,
+        p: &mut HeapPlan,
+        offset: u64,
+    ) -> Result<Option<crate::dma_buf::DmaBufImage>, Error> {
+        let pages = bytes.host_pages();
+        let facts = self
+            .shared()
+            .textures
+            .facts(self.compile_device().profile());
+        let made = match pages.as_deref().and_then(HostPages::dma_buf) {
+            None => Err("the heap's bytes lie in no dma-buf pages".to_owned()),
+            Some((imports, start, type_index)) => {
+                let pages = (&**imports, type_index, start + offset);
+                let size = p.size_and_align.size;
+                self.dma_buf_heap_image(&p.image.plan, &facts, pages, size)?
+            }
+        };
+        let why = match made {
+            Ok(made) => return Ok(Some(made)),
+            Err(why) => why,
+        };
+        p.image = self.dma_buf_heap_shadow(p.image.plan.clone(), p, why)?;
+        Ok(None)
+    }
+
+    /// The image of a heap texture of `plan` (viewed as `facts` says) in the driver's
+    /// `DRM_FORMAT_MOD_LINEAR` layout ([`Device::dma_buf_natural_layout`]), where it takes no more
+    /// than the texture's `size` bytes, over the one dma-buf the pages' source makes of its own
+    /// pages ([`Device::dma_buf_image`]): `pages` are the heap's imports, their memory type and
+    /// the host address of the texture's first byte. Why not, where none is made.
+    #[cfg(unix)]
+    fn dma_buf_heap_image(
+        &self,
+        plan: &ImagePlan,
+        facts: &crate::image_plan::ImageFacts<'_>,
+        (pages, type_index, at): (&crate::dma_buf::DmaBufPages, u32, u64),
+        size: u64,
+    ) -> Result<Result<crate::dma_buf::DmaBufImage, String>, Error> {
+        let natural = match self.dma_buf_natural_layout(plan, facts)? {
+            Ok(natural) if natural.size <= size => natural,
+            Ok(natural) => {
+                let taken = natural.size;
+                let why = format!("the driver's image of it takes {taken} bytes, past its {size}");
+                return Ok(Err(why));
+            }
+            Err(why) => return Ok(Err(why)),
+        };
+        let texels = crate::dma_buf::DmaBufTexels {
+            pages,
+            type_index,
+            at,
+            row_pitch: natural.row_pitch,
+            slice_pitch: natural.slice_pitch,
+        };
+        Ok((self.dma_buf_image(&[plan], facts, &texels)?).map(|(_, made)| made))
+    }
+
+    /// No pages are imported as dma-bufs on this system: never reached.
+    #[cfg(not(unix))]
+    fn made_dma_buf_heap_image(
+        &self,
+        _bytes: &Buffer,
+        _p: &mut HeapPlan,
+        _offset: u64,
+    ) -> Result<Option<std::convert::Infallible>, Error> {
+        Err(internal(
+            "a heap texture over dma-buf pages on a system of none",
+        ))
+    }
+
+    /// The image of a texture of plan `p` in a heap over host pages that is a shadow of the heap's
+    /// bytes in memory of its own (`AliasRoute::MemoryShadow`): `linear`'s plan as an optimal
+    /// image with the runtime's free usage, where Vulkan copies it to and from the bytes (one
+    /// sample) and its planes fit the answered size; else `NotImplemented(HeapTextureMemory)`.
+    fn memory_shadow(&self, linear: ImagePlan, p: &HeapPlan) -> Result<HeapImage, Error> {
+        let optimal = self.with_free_usage(linear, p.layout.texture_type)?;
+        if !shadowable(&optimal, p.size_and_align.size) {
             return Err(Error::NotImplemented(RuntimeGap::HeapTextureMemory));
         }
-        let image = HeapImage {
+        Ok(HeapImage {
             plan: optimal,
             tiling: vk::ImageTiling::OPTIMAL,
             requirements: p.image.requirements,
             route: AliasRoute::MemoryShadow,
-        };
-        Ok(HeapPlan { image, ..p })
+        })
+    }
+
+    /// [`memory_shadow`](Self::memory_shadow)'s image for a texture of plan `p` in a heap over
+    /// pages imported as dma-buf memory, of which no image over a dma-buf of its own pages is made
+    /// for `why` (`dma_buf.rs`): counted (`WorkCounts::dma_buf_image_fallbacks`) and announced
+    /// once per device (`shadowed-texture`).
+    fn dma_buf_heap_shadow(
+        &self,
+        linear: ImagePlan,
+        p: &HeapPlan,
+        why: String,
+    ) -> Result<HeapImage, Error> {
+        let image = self.memory_shadow(linear, p)?;
+        self.shared().counts.dma_buf_image_fell_back();
+        let layout = &p.layout;
+        self.degrade(Degradation::ShadowedTexture, || {
+            let [width, height, depth] = layout.extent;
+            let object = format!(
+                "a {:?} {:?} texture of {width}x{height}x{depth} in a heap",
+                layout.pixel_format, layout.texture_type
+            );
+            let why = format!(
+                "the heap's host pages are imported as dma-buf memory, and {why}: its image is \
+                 a shadow of the heap's bytes"
+            );
+            (object, why)
+        });
+        Ok(image)
     }
 
     /// The image of a texture of plan `p` laid out as `tiled` in a heap over host pages
@@ -1874,7 +2054,7 @@ impl Device {
         size: u64,
         owner: Owner,
     ) -> Result<Image, Error> {
-        let (raw, initial) = self.heap_raw_image(
+        let made = self.heap_raw_image(
             &image.plan,
             image.tiling,
             binding.host,
@@ -1882,6 +2062,9 @@ impl Device {
             at,
             size,
         )?;
+        let (raw, initial) = made.ok_or_else(|| {
+            internal("a heap texture's image does not lie where its plan placed it")
+        })?;
         let made = Image {
             device: self.clone(),
             raw: Raw::new(raw),
@@ -1898,7 +2081,7 @@ impl Device {
             detached: Mutex::new(None),
             first_move: Mutex::new(None),
             host_copies: false,
-            linear: image.tiling == vk::ImageTiling::LINEAR,
+            linear: linear_tiling(image.tiling),
             staging_copies: false,
             objects: ObjectsToken::default(),
         };
@@ -1937,7 +2120,7 @@ impl Device {
             })),
             first_move: Mutex::new(None),
             host_copies: false,
-            linear: image.tiling == vk::ImageTiling::LINEAR,
+            linear: linear_tiling(image.tiling),
             staging_copies: false,
             objects: ObjectsToken::default(),
         }
@@ -1945,7 +2128,8 @@ impl Device {
 
     /// A `VkImage` of `plan` and `tiling` (made for host allocations where `host`) bound at `at`
     /// of `memory`, whose requirements hold at most `size` bytes there, with the layout it
-    /// starts in, for its caller to move to `GENERAL`.
+    /// starts in, for its caller to move to `GENERAL`; `None`, nothing made, where its
+    /// requirements do not (its alignment misses `at`, or it takes more bytes).
     fn heap_raw_image(
         &self,
         plan: &ImagePlan,
@@ -1954,7 +2138,7 @@ impl Device {
         memory: vk::DeviceMemory,
         at: u64,
         size: u64,
-    ) -> Result<(vk::Image, vk::ImageLayout), Error> {
+    ) -> Result<Option<(vk::Image, vk::ImageLayout)>, Error> {
         let raw_device = self.shared().vk();
         let view_formats = plan.ash_view_formats();
         let mut list = vk::ImageFormatListCreateInfo::default();
@@ -1983,9 +2167,7 @@ impl Device {
         if !at.is_multiple_of(requirements.alignment.max(1)) || requirements.size > size {
             // SAFETY: the image is live and unbound, and no command uses it.
             unsafe { release::object(raw_device, raw) };
-            return Err(internal(
-                "a heap texture's image does not lie where its plan placed it",
-            ));
+            return Ok(None);
         }
         // SAFETY: the image is live and unbound; the memory is the heap's, which the texture
         // holds, of a type the image takes (`new_heap_texture`, `host_heap_plan`), at an offset
@@ -1995,22 +2177,29 @@ impl Device {
             unsafe { release::object(raw_device, raw) };
             return Err(vulkan(error));
         }
-        Ok((raw, initial))
+        Ok(Some((raw, initial)))
     }
 
     /// The images of `heap`'s live textures bound to its bytes, re-made over a rebind's new
-    /// pages, `pages` (`rebind.rs`): each
-    /// the same plan, linear and made for host allocations as `host_heap_plan` made it, bound at
-    /// the texture's offset; swapped in once the rebind is made, the device's next submission
-    /// that names it moving it to `GENERAL`. A texture held as a shadow of the heap's bytes, or a
-    /// texture buffer, takes none: the one's copies and the other's views read the heap's buffer as
-    /// they are recorded or made.
+    /// pages, `pages` (`rebind.rs`): each the same plan, bound at the texture's offset; swapped in
+    /// once the rebind is made, the device's next submission that names it moving it to
+    /// `GENERAL`. Over pages imported by their pointer, linear and made for host allocations as
+    /// `host_heap_plan` made it; over pages imported as dma-bufs (`dma_buf.rs`), the
+    /// `DRM_FORMAT_MOD_LINEAR` image `remade` holds for it, made before the rebind settled
+    /// ([`Device::dma_buf_images_again`]), which its first move acquires from
+    /// `VK_QUEUE_FAMILY_FOREIGN_EXT`. A texture held as a shadow of the heap's bytes, or a texture
+    /// buffer, takes none: the one's copies and the other's views read the heap's buffer as they
+    /// are recorded or made. Refused (`NotImplemented(RebindTextures)`) where no such image is made
+    /// for a texture bound to the bytes: `remade` holds none for it, or the image made for host
+    /// allocations does not lie in its place (one made over dma-buf pages before).
     pub(crate) fn rebound_heap_images(
         &self,
         heap: &Heap,
         pages: &HostPages,
+        remade: &mut Remade,
     ) -> Result<Vec<ImageSwap>, Error> {
         let (memory, base) = pages.memory();
+        let dma_buf = pages.over_dma_buf();
         let (textures, _) = heap.textures_from(0);
         let mut swaps: Vec<ImageSwap> = Vec::new();
         for texture in &textures {
@@ -2023,7 +2212,26 @@ impl Device {
             if swaps.iter().any(|swap| swap.is_of(image)) {
                 continue;
             }
-            let (raw, initial) = self.heap_raw_image(
+            if dma_buf {
+                let Some(objects) = remade.take(image) else {
+                    return Err(Error::NotImplemented(RuntimeGap::RebindTextures));
+                };
+                let family = self.foreign_acquirer();
+                // Dropped on a later failure, the images made so far go.
+                swaps.push(ImageSwap::acquired(
+                    Arc::clone(image),
+                    objects,
+                    pages,
+                    family,
+                ));
+                continue;
+            }
+            // An image over dma-buf pages lies in the layout the driver gives a
+            // `DRM_FORMAT_MOD_LINEAR` image, which its linear image need not keep.
+            if image.raw.dedicated() {
+                return Err(Error::NotImplemented(RuntimeGap::RebindTextures));
+            }
+            let made = self.heap_raw_image(
                 image.plan(),
                 vk::ImageTiling::LINEAR,
                 true,
@@ -2031,6 +2239,9 @@ impl Device {
                 base + place.offset,
                 place.size,
             )?;
+            let Some((raw, initial)) = made else {
+                return Err(Error::NotImplemented(RuntimeGap::RebindTextures));
+            };
             // Dropped on a later failure, the images made so far go.
             swaps.push(ImageSwap::new(
                 Arc::clone(image),
@@ -2040,6 +2251,46 @@ impl Device {
             ));
         }
         Ok(swaps)
+    }
+
+    /// The images of `heap`'s live textures bound to its bytes, made for a rebind's new pages,
+    /// which it imported as dma-bufs (`imports`, of memory type `type_index`), the heap's bytes at
+    /// `pointer`, into `remade`: for each, a `DRM_FORMAT_MOD_LINEAR` image of its plan in the
+    /// driver's layout ([`Device::dma_buf_natural_layout`]) at its offset, over the one dma-buf the
+    /// pages' source makes of its own pages ([`Device::dma_buf_image`]). With no lock of the
+    /// runtime's held, as the source is called once for each. Refused
+    /// (`NotImplemented(RebindTextures)`) where the device makes no such image of one.
+    #[cfg(unix)]
+    pub(super) fn dma_buf_heap_images_again(
+        &self,
+        heap: &Heap,
+        imports: &crate::dma_buf::DmaBufPages,
+        type_index: u32,
+        pointer: NonNull<u8>,
+        remade: &mut Remade,
+    ) -> Result<(), Error> {
+        let facts = self
+            .shared()
+            .textures
+            .facts(self.compile_device().profile());
+        let (textures, _) = heap.textures_from(0);
+        for texture in &textures {
+            let Storage::Image(image) = &texture.0.storage else {
+                continue;
+            };
+            let Owner::Heap(place) = &image.owner else {
+                continue;
+            };
+            if remade.0.iter().any(|(made, _)| Arc::ptr_eq(made, image)) {
+                continue;
+            }
+            let pages = (imports, type_index, pointer.as_ptr() as u64 + place.offset);
+            let made = self.dma_buf_heap_image(image.plan(), &facts, pages, place.size)?;
+            let made = made.map_err(|_| Error::NotImplemented(RuntimeGap::RebindTextures))?;
+            let objects = ImageObjects::imported(self, made.raw, made.import);
+            remade.0.push((Arc::clone(image), objects));
+        }
+        Ok(())
     }
 
     /// The texture of plan `p` bound at `place` of its heap, whose buffer is `bytes`, with
@@ -2071,6 +2322,16 @@ impl Device {
             allow_gpu_optimized_contents: descriptor.allow_gpu_optimized_contents,
             identity: bytes.identity(),
             host: bytes.caller_memory() == Some(CallerMemory::HostPages),
+        };
+        // Over dma-buf pages the image of the driver's `DRM_FORMAT_MOD_LINEAR` layout is made
+        // here, its pages' source called once; where none is, the texture is a shadow of the
+        // heap's bytes, as it was before such images.
+        let mut p = p;
+        let dma_buf_image = match p.image.tiling == vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT {
+            true if stand_in.is_none() => {
+                self.made_dma_buf_heap_image(bytes, &mut p, place.offset)?
+            }
+            _ => None,
         };
         let twin = p.twin;
         let route = p.image.route;
@@ -2118,11 +2379,19 @@ impl Device {
             *lock(&place.memory) = bytes.memory_hold();
             let owner = Owner::Heap(Box::new(place));
             let image_size = twin.as_ref().map_or(size, |&(_, offset)| offset);
-            let mut image = match &stand_in {
-                Some(stand_in) => {
+            let mut image = match (&stand_in, dma_buf_image) {
+                (Some(stand_in), _) => {
                     self.detached_heap_image(&binding, p.image, owner, Arc::clone(stand_in))
                 }
-                None => self.bind_heap_image(&binding, p.image, at, image_size, owner)?,
+                #[cfg(unix)]
+                (None, Some(made)) => self.dma_buf_texture_image(
+                    made,
+                    p.image.plan,
+                    owner,
+                    (binding.options, binding.allow_gpu_optimized_contents),
+                    binding.identity,
+                ),
+                _ => self.bind_heap_image(&binding, p.image, at, image_size, owner)?,
             };
             if let Some((twin, offset)) = twin {
                 let twin_size = size - offset;

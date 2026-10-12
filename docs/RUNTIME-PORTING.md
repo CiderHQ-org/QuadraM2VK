@@ -244,7 +244,7 @@ narrow refusal that the call's rustdoc describes.
 | Item | Metal | Runtime |
 |---|---|---|
 | `heap_texture_size_and_align` | `heapTextureSizeAndAlignWithDescriptor:` | `Device::heap_texture_size_and_align`: the device's own requirement |
-| `new_buffer_over_host_memory` | `newBufferWithBytesNoCopy:length:options:deallocator:` | `unsafe Device::new_buffer_with_bytes_no_copy` (`VK_EXT_external_memory_host`) *(partial)* |
+| `new_buffer_over_host_memory` | `newBufferWithBytesNoCopy:length:options:deallocator:` | `unsafe Device::new_buffer_with_bytes_no_copy` over a `HostMemory` (`VK_EXT_external_memory_host`; where the device refuses the pointer, the dma-bufs of `HostMemory::with_dma_buf`'s source, `VK_EXT_external_memory_dma_buf`) *(partial)* |
 | `new_buffer_of_length` | `newBufferWithLength:options:` | `Device::new_buffer` |
 | `new_command_queue` | `newCommandQueue` | `Device::new_command_queue` |
 | `new_compute_pipeline_state` | `newComputePipelineStateWithDescriptor:options:reflection:error:` | `Device::new_compute_pipeline_state` |
@@ -266,8 +266,8 @@ narrow refusal that the call's rustdoc describes.
 | `new_buffer` | `newBufferWithDescriptor:` (SPI) | `Device::new_buffer_with_descriptor` (`BufferDescriptor` by value, with host contents and an `AddressPlacement`) |
 | `new_heap` | `newHeapWithDescriptor:` | `Device::new_heap` (`HeapDescriptor::placement` pins its address range) |
 | `reserve_address_pool` | (none: a runtime extension; Metal's own pools of buffers shorter than a page) | `Device::reserve_address_pool` -> `AddressPool`, holding a pin's span; `BufferDescriptor::with_pool_slot(&pool, offset)` places a buffer at the pool's address plus a 256-byte-aligned offset, holding its length rounded up to 256 bytes |
-| `new_heap_over_host_memory` | (none: a runtime extension) | `unsafe Device::new_heap_with_bytes_no_copy`: a heap over the caller's page-aligned memory (`VK_EXT_external_memory_host`), the heap twin of `new_buffer_with_bytes_no_copy` |
-| `rebind_host_memory` | (none: a runtime extension) | `unsafe Buffer::rebind_bytes_no_copy`, `unsafe Heap::rebind_bytes_no_copy`: another range of the same length under the same objects and GPU addresses, in commit order (`RebindProblem::EncodedUses` while uncommitted work used them) |
+| `new_heap_over_host_memory` | (none: a runtime extension) | `unsafe Device::new_heap_with_bytes_no_copy`: a heap over the caller's page-aligned memory, a `HostMemory` (`VK_EXT_external_memory_host`, or dma-bufs as for a buffer), the heap twin of `new_buffer_with_bytes_no_copy` |
+| `rebind_host_memory` | (none: a runtime extension) | `unsafe Buffer::rebind_bytes_no_copy`, `unsafe Heap::rebind_bytes_no_copy`: another range of the same length, a `HostMemory`, under the same objects and GPU addresses, in commit order (`RebindProblem::EncodedUses` while uncommitted work used them) |
 | `new_sampler_state` | `newSamplerStateWithDescriptor:` | `Device::new_sampler_state`, or `Device::new_sampler_state_with_options` (argument-buffer support, placement) |
 | `new_depth_stencil_state` | `newDepthStencilStateWithDescriptor:` | `Device::new_depth_stencil_state` |
 | `new_indirect_command_buffer` | `newIndirectCommandBufferWithDescriptor:maxCommandCount:options:` | `Device::new_indirect_command_buffer` (placement as an option) |

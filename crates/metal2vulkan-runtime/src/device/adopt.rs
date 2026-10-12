@@ -50,7 +50,10 @@ pub struct RawDevice {
     /// buffer a Metal texture over the buffer's imported memory, without a copy;
     /// `VK_NV_linear_color_attachment`, with its `linearColorAttachment` feature enabled beside
     /// it (and, below Vulkan 1.3, `VK_KHR_format_feature_flags2`, which it requires there), makes
-    /// a texture over a buffer's memory render into its linear image in place.
+    /// a texture over a buffer's memory render into its linear image in place;
+    /// `VK_KHR_external_memory_fd` with `VK_EXT_external_memory_dma_buf` serve
+    /// `HostMemory::with_dma_buf`, and with them `VK_EXT_image_drm_format_modifier` with
+    /// `VK_EXT_queue_family_foreign` make textures over its pages images rather than shadows.
     pub device_extensions: Vec<CString>,
     /// Where the device keeps translated shaders: by default, the platform's per-user cache
     /// directory.
@@ -219,6 +222,9 @@ impl Device {
         // `VK_KHR_pipeline_library` with its feature, and the device's properties say whether it
         // links fast, as a made device takes it.
         let listed: BTreeSet<CString> = raw.device_extensions.iter().cloned().collect();
+        // Nor whether the dma-buf route's were (`dma_buf.rs`): the consumer lists them.
+        let dma_buf = super::create::dma_buf_names(&listed).is_some();
+        let dma_buf_images = super::create::dma_buf_image_names(&listed).is_some();
         let graphics_pipeline_library = super::create::graphics_pipeline_library(&listed, || {
             // SAFETY: the consumer's physical device of its instance, which lists the
             // extension (the consumer enabled it), at Vulkan 1.2 or later.
@@ -254,6 +260,8 @@ impl Device {
                 .device_extensions
                 .iter()
                 .any(|name| name.as_c_str() == ash::ext::pipeline_creation_feedback::NAME),
+            dma_buf,
+            dma_buf_images,
             calibration: gpu_time::Extension::among(&raw.device_extensions.into_iter().collect()),
             gpu_times_from_host: raw.gpu_times_from_host,
             // An adopted device keeps no execution record: validation makes its own devices.

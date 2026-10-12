@@ -57,8 +57,8 @@ use metal2vulkan::pipeline::{
 use metal2vulkan::Budget;
 use metal2vulkan_devtools::llvm_assemble_text;
 use metal2vulkan_runtime::{
-    CommandBufferStatus, ComputePipelineState, Degradation, Device, Error, PipelineOptions, Region,
-    ResourceOptions, SamplerState, Size, Texture, TextureDescriptor,
+    CommandBufferStatus, ComputePipelineState, Degradation, Device, Error, HostMemory,
+    PipelineOptions, Region, ResourceOptions, SamplerState, Size, Texture, TextureDescriptor,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -975,7 +975,7 @@ fn a_raw_texture_over_a_buffer_announces_its_shadow_only_where_not_named() {
                 // SAFETY: the mapping outlives the buffer and its view, dropped first.
                 "no-copy" => match unsafe {
                     device.new_buffer_with_bytes_no_copy(
-                        memory.pointer(),
+                        HostMemory::new(memory.pointer()),
                         GUEST_PAGE as u64,
                         ResourceOptions::shared(),
                         None,

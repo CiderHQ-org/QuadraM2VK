@@ -41,7 +41,7 @@ use metal2vulkan_devtools::{engine_dir, llvm_assemble};
 use metal2vulkan_runtime::{
     Buffer, CommandBuffer, CommandBufferStatus, ComputeCommandEncoder, ComputePipelineState,
     DebugMessage, Degradation, Device, DeviceOptions, Error, ExecutedPipeline, Execution, Heap,
-    HeapDescriptor, HeapType, IndirectCommand, IndirectCommandBuffer,
+    HeapDescriptor, HeapType, HostMemory, IndirectCommand, IndirectCommandBuffer,
     IndirectCommandBufferDescriptor, IndirectCommandBufferProblem, Invalid, PipelineOptions,
     Problem, Region, RenderPassDescriptor, ResourceOptions, Size, VisibleFunctionTableDescriptor,
 };
@@ -1386,7 +1386,8 @@ fn commands_reach_a_rebound_no_copy_buffer_once_a_command_used_it_again() {
             );
             // SAFETY: the mapping outlives the buffer, dropped first, and no other thread uses
             // the buffer.
-            unsafe { buffer.rebind_bytes_no_copy(memory.pointer(), None, None) }.unwrap();
+            unsafe { buffer.rebind_bytes_no_copy(HostMemory::new(memory.pointer()), None, None) }
+                .unwrap();
             new_pages.push(memory);
         }
         assert_eq!(output(&case.compute, &buffers), before);

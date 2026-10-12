@@ -590,6 +590,18 @@ pub(super) struct LinearLack {
 /// none of the features of a usage that format does not take, so only those it takes are asked of
 /// its linear tiling. `None` where the linear image lacks nothing.
 pub(super) fn linear_lack(plan: &ImagePlan, facts: &ImageFacts) -> Option<LinearLack> {
+    tiling_lack(plan, facts, |format| facts.linear(format))
+}
+
+/// What an image of `plan` in another tiling than optimal, whose features in a format are
+/// `tiling`'s answer, lacks of all its optimal image can do, as [`linear_lack`] asks it of linear
+/// tiling: a `DRM_FORMAT_MOD_LINEAR` image's features are its modifier's (`dma_buf.rs`). `None`
+/// where it lacks nothing.
+pub(super) fn tiling_lack(
+    plan: &ImagePlan,
+    facts: &ImageFacts,
+    tiling: impl Fn(Format) -> FormatFeatureFlags2,
+) -> Option<LinearLack> {
     let needed = USAGE_FEATURES
         .iter()
         .filter(|(usage, _)| plan.usage.contains(*usage))
@@ -604,7 +616,7 @@ pub(super) fn linear_lack(plan: &ImagePlan, facts: &ImageFacts) -> Option<Linear
     std::iter::once(plan.format)
         .chain(viewed_formats(plan, facts))
         .find_map(|format| {
-            let (optimal, linear) = (facts.optimal(format), facts.linear(format));
+            let (optimal, linear) = (facts.optimal(format), tiling(format));
             let features = optimal.intersection(needed).difference(linear);
             (!features.is_empty()).then_some(LinearLack { format, features })
         })
@@ -614,7 +626,7 @@ pub(super) fn linear_lack(plan: &ImagePlan, facts: &ImageFacts) -> Option<Linear
 /// format (a texture of `pixelFormatView` usage: `MUTABLE_FORMAT` without a list), each format
 /// the runtime views a texture of a pixel format as for the plan's usages (`view_formats`) that
 /// is compatible with the image's, of every pixel format.
-fn viewed_formats(plan: &ImagePlan, facts: &ImageFacts) -> Vec<Format> {
+pub(super) fn viewed_formats(plan: &ImagePlan, facts: &ImageFacts) -> Vec<Format> {
     if !plan.flags.contains(ImageCreateFlags::MUTABLE_FORMAT) || !plan.view_formats.is_empty() {
         return plan.view_formats.clone();
     }

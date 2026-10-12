@@ -742,6 +742,34 @@ pub(crate) fn enable_set(description: &DeviceDescription, options: &DeviceOption
     set
 }
 
+/// The extensions of the dma-buf route (`dma_buf.rs`) of a device listing `listed`:
+/// `VK_KHR_external_memory_fd` and the `VK_EXT_external_memory_dma_buf` that requires it, where the
+/// device lists both. The runtime's own need, outside the vocabulary, so outside the enable set,
+/// the compile profile and its fingerprint (the shader cache's key).
+pub(crate) fn dma_buf_names(listed: &BTreeSet<CString>) -> Option<[&'static CStr; 2]> {
+    let names = [
+        ash::khr::external_memory_fd::NAME,
+        ash::ext::external_memory_dma_buf::NAME,
+    ];
+    names
+        .iter()
+        .all(|name| listed.contains(*name))
+        .then_some(names)
+}
+
+/// The extensions of the images of textures over the dma-buf route's pages (`dma_buf.rs`) of a
+/// device listing `listed`: `VK_EXT_image_drm_format_modifier` and `VK_EXT_queue_family_foreign`,
+/// where the device lists both and the route's two ([`dma_buf_names`]). Outside the vocabulary as
+/// the route's are; what they require is core at the runtime's Vulkan 1.2 floor.
+pub(crate) fn dma_buf_image_names(listed: &BTreeSet<CString>) -> Option<[&'static CStr; 2]> {
+    let names = [
+        ash::ext::image_drm_format_modifier::NAME,
+        ash::ext::queue_family_foreign::NAME,
+    ];
+    (dma_buf_names(listed).is_some() && names.iter().all(|name| listed.contains(*name)))
+        .then_some(names)
+}
+
 /// Whether a device of `description` the runtime creates under `options` enables
 /// `VK_EXT_device_generated_commands`: where the description states it (the extension and its
 /// `deviceGeneratedCommands`), `options` do not withhold it, and `set` enables
@@ -1076,6 +1104,9 @@ fn create_on(
         .device_extensions
         .iter()
         .any(|name| name.as_c_str() == feedback_name);
+    // The runtime's own needs, outside the vocabulary, where listed (`dma_buf.rs`).
+    let dma_buf = dma_buf_names(&listed);
+    let dma_buf_images = dma_buf_image_names(&listed);
     let extra: Vec<CString> = options
         .device_extensions
         .iter()
@@ -1083,6 +1114,8 @@ fn create_on(
         .chain(calibration.map(|extension| extension.name().to_owned()))
         .chain((metal_objects && !metal_asked).then(|| metal_name.to_owned()))
         .chain((creation_feedback && !feedback_asked).then(|| feedback_name.to_owned()))
+        .chain(dma_buf.into_iter().flatten().map(CStr::to_owned))
+        .chain(dma_buf_images.into_iter().flatten().map(CStr::to_owned))
         .collect();
     let mut enables = Enables::of(&set, api, &listed, &extra)?;
     // The features of the caller's extensions whose structures the runtime knows, as the device
@@ -1222,6 +1255,8 @@ fn create_on(
         graphics_pipeline_library,
         metal_objects: metal_objects || metal_asked,
         creation_feedback: creation_feedback || feedback_asked,
+        dma_buf: dma_buf.is_some(),
+        dma_buf_images: dma_buf_images.is_some(),
         sparse_features,
         owned: true,
         cache: cache.clone(),

@@ -1,8 +1,8 @@
 # Integrating metal2vulkan
 
 The checklist around the library: the tools each piece needs, caching, failures, isolating a
-compile and checking an integration. The API itself is [API.md](API.md); the runtime's is
-[its README](../crates/metal2vulkan-runtime/README.md).
+compile, host memory a driver refuses, and checking an integration. The API itself is
+[API.md](API.md); the runtime's is [its README](../crates/metal2vulkan-runtime/README.md).
 
 ## 1. Tools
 
@@ -133,7 +133,49 @@ down, or a hard memory ceiling must hold, compile in a child process:
 The validation crate's worker (`crates/metal2vulkan-validation/src/worker/`) implements this,
 under 20 seconds and 500 MiB per attempt.
 
-## 6. Check the integration
+## 6. Host memory a driver refuses
+
+`Device::new_buffer_with_bytes_no_copy`, `new_heap_with_bytes_no_copy` and the
+`rebind_bytes_no_copy` calls import the caller's pages by their pointer
+(`VK_EXT_external_memory_host`). Some drivers refuse the pointer of shared memory: RADV (AMD on
+Linux) imports a pointer through amdgpu's userptr, which takes anonymous pages only, so it refuses
+`MAP_SHARED` mappings of a `memfd`, a shared memory object or any file (QEMU's
+`memory-backend-memfd,share=on` guest RAM among them) with `Unsupported`, `HostMemory`. NVIDIA and
+lavapipe import the same memory.
+
+A consumer whose memory is such a mapping passes `HostMemory::with_dma_buf(pointer, source)` instead
+of `HostMemory::new(pointer)`. The runtime still imports the pointer first, exactly as without a
+source, and calls the source only where the device refuses it: for dma-bufs of the pages the range
+touches, and again once for each texture's image over its own pages in them. The rustdoc of
+`HostMemory::with_dma_buf`, `DmaBufSource` and `DmaBufRequest` is the contract: when the source is
+called, the chunks it answers, and what is refused. In short, answer each `DmaBufRequest` with
+dma-bufs of exactly the pages asked for, in order, split only at multiples of its `granule`. Where
+the granule is less than the length (64 KiB on RADV of Mesa 26.2.4, 4 KiB on 26.0.8), several
+chunks are bound to one sparse buffer and must total the length rounded up to the granule: pad the
+last with a scratch page of your own, repeated. A texture's request takes one chunk, of the same
+file pieces the buffer's chunks hold there.
+
+On Linux, `udmabuf` makes such a dma-buf of the file pieces behind the pages: open `/dev/udmabuf`
+(the process needs read and write access to it) and issue `UDMABUF_CREATE_LIST` with one item per
+run of contiguous file pages; the `memfd` must be sealed against shrinking (`F_SEAL_SHRINK`, as QEMU
+seals it) and not against writing. The consumer knows the pieces behind every byte; the runtime runs
+no udmabuf code. Each udmabuf takes at most `list_limit` items and `size_limit_mb` MiB (the module's
+parameters under `/sys/module/udmabuf/parameters`, 1024 and 64 by default). Keep each chunk within
+the host's limits as they are: read them, never assume them raised. Scattered memory needs many
+items: a macOS desktop guest of 14 GiB was measured importing up to 63.3 MiB in one object, in up to
+16,201 separate 4 KiB runs, with 19 to 29 of its imports past 1024 runs; at a 64 KiB granule such an
+object takes 16 chunks.
+
+A texture over such memory is an image over a dma-buf of its own pages where the device also lists
+`VK_EXT_image_drm_format_modifier` and `VK_EXT_queue_family_foreign` (RADV does). RADV (Mesa 26.2.4
+and 26.0.8) lays such an image's plane only at an offset in its page that is a multiple of 256
+bytes, with rows a multiple of 256 bytes apart: keep a texture's offset and `bytes_per_row` so (a
+4 KiB-aligned surface with 256-byte-aligned rows always is). Elsewhere the texture takes a shadow of
+the bytes, announced (`shadowed-texture`, naming why), and a rebind that cannot make the image again
+is refused (`NotImplemented(RebindTextures)`). `WorkCounts::dma_buf_imports`,
+`dma_buf_sparse_buffers`, `dma_buf_images` and `dma_buf_image_fallbacks` count what the route did.
+
+## 7. Check the integration
 
 `spirv-val` checks structural validity, not agreement with Metal:
 

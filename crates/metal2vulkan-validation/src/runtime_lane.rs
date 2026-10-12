@@ -231,6 +231,8 @@ mod device_lockstep;
 mod discard_counts;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod discard_hoist;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd), target_os = "linux"))]
+mod dma_buf_imports;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod dont_care_stores;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]

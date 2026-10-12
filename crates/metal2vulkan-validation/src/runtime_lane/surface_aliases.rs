@@ -44,8 +44,8 @@ use metal2vulkan::pipeline::{ComputePipelineDescriptor, StageSource};
 use metal2vulkan_devtools::llvm_assemble_text;
 use metal2vulkan_runtime::{
     BlitOption, Buffer, ClearColor, CommandBuffer, CommandQueue, ComputePipelineState, Device,
-    EventRef, IoSurfacePlane, LoadAction, Origin, PipelineOptions, RenderPassDescriptor,
-    ResourceOptions, Size, StoreAction, Texture, TextureDescriptor,
+    EventRef, HostMemory, IoSurfacePlane, LoadAction, Origin, PipelineOptions,
+    RenderPassDescriptor, ResourceOptions, Size, StoreAction, Texture, TextureDescriptor,
 };
 
 /// The consumer's display surface: 1920x1080 `RGBA16Float`, 8 bytes a texel, rows packed.
@@ -205,7 +205,10 @@ impl Surface {
                 let second = import(other.pointer()).unwrap();
                 // SAFETY: the surface's mapping outlives the buffer, and the pages it leaves stay
                 // mapped until the surface goes; no command uses the buffer yet.
-                unsafe { second.rebind_bytes_no_copy(memory.pointer(), None, None) }.unwrap();
+                unsafe {
+                    second.rebind_bytes_no_copy(HostMemory::new(memory.pointer()), None, None)
+                }
+                .unwrap();
                 left = Some(other);
                 second
             }
