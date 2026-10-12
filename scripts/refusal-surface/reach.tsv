@@ -128,7 +128,7 @@ gap	SparseHeaps	rare	sparse heaps
 gap	SparseTileMaps	rare	sparse texture emulation's unbuilt pieces
 gap	HeapPastMaxBufferSize	rare	a heap past maxBufferSize
 gap	RotatedTexture	rare	a rotated drawable's views, blits with images over overlapping rows, rows past its buffer
-gap	HeapTextureAlignment	rare	a heap texture needing more than 64 KiB alignment
+gap	HeapTextureAlignment	rare	a heap texture needing more than 256 KiB alignment
 gap	HeapTextureMemory	app	a heap texture the heap's memory type does not take
 gap	FunctionTablePastMaxBufferLength	none	a function table past one buffer
 gap	IndirectCommandBufferPastMaxBufferLength	none	an ICB past one buffer

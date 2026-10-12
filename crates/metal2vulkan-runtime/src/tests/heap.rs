@@ -236,6 +236,47 @@ fn a_heap_rounds_to_16_kib_and_fits_one_allocation_and_one_buffer() {
     );
 }
 
+/// A heap's buffer takes whole units of the heap's base alignment in a pooled block, and its own
+/// size in a block of its own (`buffer.rs`'s `placed`), so the largest heap of every committed
+/// profile asks one allocation of at most `maxMemoryAllocationSize`, and its block's buffer of
+/// addresses, as long as the block, at most `maxBufferSize`. In whole units of the base, RADV's
+/// largest heap (4 GiB less 16 KiB) would ask 4 GiB of an allocation of at most 4 GiB less 4 bytes,
+/// and MoltenVK's 128 KiB past its largest allocation.
+#[test]
+fn the_largest_heap_asks_one_allocation_of_its_device() {
+    use crate::buffer::placed;
+    use crate::memory::BLOCK_BYTES;
+    use crate::texture::heap::HEAP_BASE_ALIGNMENT;
+    use ash::vk::MemoryRequirements;
+    let heap = |size| MemoryRequirements {
+        size,
+        alignment: HEAP_BASE_ALIGNMENT,
+        memory_type_bits: 1,
+    };
+    let half = BLOCK_BYTES / 2;
+    assert_eq!(placed(heap(16384)).size, HEAP_BASE_ALIGNMENT);
+    assert_eq!(placed(heap(half - 16384)).size, half);
+    assert_eq!(placed(heap(half + 16384)).size, half + 16384);
+    for (stem, description) in committed_descriptions() {
+        let limits = &description.allocation;
+        let buffer = match limits.max_buffer_size {
+            0 => u64::MAX,
+            size => size,
+        };
+        let largest = limits.max_memory_allocation_size.min(buffer) / 16384 * 16384;
+        assert_eq!(heap_size(largest, limits), Ok(largest), "{stem}");
+        let asked = placed(heap(largest));
+        assert_eq!(asked.alignment, HEAP_BASE_ALIGNMENT, "{stem}");
+        assert!(
+            asked.size <= limits.max_memory_allocation_size && asked.size <= buffer,
+            "{stem}: the largest heap, {largest} bytes, asks {} bytes of an allocation of at most \
+             {} and a buffer of at most {buffer}",
+            asked.size,
+            limits.max_memory_allocation_size
+        );
+    }
+}
+
 /// The descriptor's defaults are Metal's (probe 1's `defaults`): an automatic heap of size 0 in
 /// `Private` storage, options 32; heap types carry Metal's raw values.
 #[test]
@@ -404,7 +445,7 @@ fn a_depth_twin_lies_past_its_image_inside_the_heap_texture_s_bytes() {
         ImagePlacement::new(granularity, &BTreeSet::from([short]))
     };
     let answer = |size, align| SizeAndAlign { size, align };
-    // RADV's shape: 64 KiB alignment for the larger images, 4 KiB for the small.
+    // RADV's shape on the Radeon 780M: 64 KiB alignment for the larger images, 4 KiB for the small.
     let image = requirements(16512, 4096);
     let twin = requirements(16384, 65536);
     let (got, offset) = heap_extent(&image, Some(&twin), pages(1024));
@@ -435,6 +476,42 @@ fn a_depth_twin_lies_past_its_image_inside_the_heap_texture_s_bytes() {
         heap_extent(&compressed, None, pages(1)).0,
         answer(4112, 65536)
     );
+}
+
+/// A heap's memory starts at a multiple of every image alignment measured, so a heap texture of
+/// such an image is placed, not refused: RADV's on an RX 7900 XTX (Mesa 26.0.8), 128 KiB for a
+/// `D16`, `D32F` or `D32FS8` image of 8 x 8 texels or more and 256 KiB for a multisample image from
+/// about 128 x 128 texels, and the Radeon 780M's 64 KiB under the same driver (the alignments alone
+/// were measured; the sizes here stand in). An alignment past the base is refused typed.
+#[test]
+fn every_image_alignment_measured_fits_a_heap_s_base() {
+    use crate::error::{Error, RuntimeGap};
+    use crate::memory::BLOCK_BYTES;
+    use crate::texture::heap::{check_heap_base, heap_extent, HEAP_BASE_ALIGNMENT};
+    use crate::texture::ImagePlacement;
+    use ash::vk::MemoryRequirements;
+    use std::collections::BTreeSet;
+    let pages = ImagePlacement::new(1, &BTreeSet::new());
+    for alignment in [64 << 10, 128 << 10, 256 << 10] {
+        let image = MemoryRequirements {
+            size: 4 * alignment,
+            alignment,
+            memory_type_bits: 1,
+        };
+        let (answer, _) = heap_extent(&image, None, pages);
+        assert_eq!(answer.align, alignment);
+        assert_eq!(check_heap_base(answer.align), Ok(()), "{alignment:#x}");
+    }
+    let past = 2 * HEAP_BASE_ALIGNMENT;
+    assert_eq!(
+        check_heap_base(past),
+        Err(Error::NotImplemented(RuntimeGap::HeapTextureAlignment {
+            alignment: past
+        }))
+    );
+    // A heap's buffer takes whole units of the base (`buffer.rs`'s `placed`), so rounding never
+    // carries one past the size that takes a block of its own (half a pooled block).
+    assert!((BLOCK_BYTES / 2).is_multiple_of(HEAP_BASE_ALIGNMENT));
 }
 
 /// A heap's depth or stencil texture held as a shadow of the heap's bytes keeps each aspect in

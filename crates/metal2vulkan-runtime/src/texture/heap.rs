@@ -73,10 +73,14 @@
 //!   optimized texture's, larger than Metal's, and the device announces
 //!   `optimized-depth-stencil-texture` once.
 //! - **The heap's memory.** A heap's buffer lies at a multiple of [`HEAP_BASE_ALIGNMENT`] of its
-//!   memory, of a type optimal images take where its storage class has one, else of one linear
-//!   images take ([`HeapTypes::heap_memory`], `buffer.rs`), so a texture at any multiple of its
-//!   answered alignment binds at its offset. A texture whose alignment exceeds that base, or
-//!   whose image the heap's memory type does not take, is refused typed
+//!   memory (256 KiB, the largest image alignment measured), of a type optimal images take where
+//!   its storage class has one, else of one linear images take ([`HeapTypes::heap_memory`],
+//!   `buffer.rs`), so a texture at any multiple of its answered alignment binds at its offset. Up
+//!   to half a pooled block it takes whole units of the base of a pooled block; past that, a block
+//!   of its own of its own size (`buffer.rs`'s `placed`), so the largest heap stays one allocation
+//!   of the device. A heap over host pages starts at offset 0 of its own import
+//!   (`HeapProblem::HostMemoryAlignment`), which meets any alignment. A texture whose alignment
+//!   exceeds that base, or whose image the heap's memory type does not take, is refused typed
 //!   (`RuntimeGap::HeapTextureAlignment`, `HeapTextureMemory`), by the query and the call alike
 //!   where the cause is the descriptor.
 //! - **Linear images**. A texture whose optimal image does not take the heap's memory (any texture
@@ -181,8 +185,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// The alignment of a heap's memory: a heap texture whose answered alignment exceeds it is
-/// refused (`RuntimeGap::HeapTextureAlignment`).
-pub(crate) const HEAP_BASE_ALIGNMENT: u64 = 64 << 10;
+/// refused (`RuntimeGap::HeapTextureAlignment`, [`check_heap_base`]). It is the largest image
+/// alignment measured: RADV on an RX 7900 XTX (Mesa 26.0.8) asks 128 KiB of a `D16`, `D32F` or
+/// `D32FS8` image of 8 x 8 texels or more and 256 KiB of a multisample depth, stencil or color
+/// image from about 128 x 128 texels, where the Radeon 780M under the same driver asks at most
+/// 64 KiB of any.
+pub(crate) const HEAP_BASE_ALIGNMENT: u64 = 256 << 10;
 
 /// Where a heap texture's image lies: its heap, and its offset and size there. The range has
 /// this one owner from its allocation on, the texture's image once it is made. The last texture
@@ -941,6 +949,17 @@ pub(crate) fn heap_extent(
     (SizeAndAlign { size, align }, twin_offset)
 }
 
+/// Whether a heap texture of alignment `align` lies at a multiple of it wherever a heap's memory
+/// starts: refused past [`HEAP_BASE_ALIGNMENT`] (`RuntimeGap::HeapTextureAlignment`).
+pub(crate) fn check_heap_base(align: u64) -> Result<(), Error> {
+    if align > HEAP_BASE_ALIGNMENT {
+        return Err(Error::NotImplemented(RuntimeGap::HeapTextureAlignment {
+            alignment: align,
+        }));
+    }
+    Ok(())
+}
+
 /// Where a resource of `size` bytes at a multiple of `align` lies in `heap` for `call`: at
 /// `offset` of a placement heap, refused off the alignment or past the heap's end (`Nil`, as plain
 /// Metal answers nil, its validation stopping it), or at the lowest offset with room of an
@@ -1271,11 +1290,7 @@ impl Device {
             }
             size_and_align = metal;
         }
-        if size_and_align.align > HEAP_BASE_ALIGNMENT {
-            return Err(Error::NotImplemented(RuntimeGap::HeapTextureAlignment {
-                alignment: size_and_align.align,
-            }));
-        }
+        check_heap_base(size_and_align.align)?;
         // The size answered is the optimized texture's where the driver keeps the layout.
         self.degrade_optimized_layout(descriptor, &layout);
         if let Some(metal) = modelled {

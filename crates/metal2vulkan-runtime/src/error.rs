@@ -1087,7 +1087,8 @@ pub enum RuntimeGap {
         max_buffer_size: u64,
     },
     /// A heap texture whose image needs an alignment past the heap memory's base alignment
-    /// (64 KiB): no offset in the heap is sure to meet it.
+    /// (256 KiB): no offset in the heap is sure to meet it. The base is the largest image
+    /// alignment measured (an RX 7900 XTX's multisample images under RADV).
     HeapTextureAlignment {
         /// The alignment the image needs, in bytes.
         alignment: u64,

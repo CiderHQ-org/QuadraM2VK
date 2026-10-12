@@ -220,6 +220,58 @@ fn heaps_answer_as_metal_s_do() {
     });
 }
 
+/// The largest heap the device takes (the lower of one allocation and one `VkBuffer`, in whole
+/// 16 KiB) lies in one allocation of at most `maxMemoryAllocationSize` bytes, whose block's buffer
+/// of addresses, as long as the block, is at most `maxBufferSize` (the validation layer reports
+/// nothing): the runtime's memory grows by the heap's size and no more than one allocation. RADV's
+/// largest heap is 4 GiB less 16 KiB, of an allocation of at most 4 GiB less 4 bytes. Made where
+/// it is at most 4 GiB (RADV, ANV, lavapipe), else not; out of device memory is an answer too.
+#[test]
+fn the_largest_heap_lies_in_one_allocation() {
+    on_device(|device| {
+        let limits = device.compile_device().allocation();
+        let buffer = match limits.max_buffer_size {
+            0 => u64::MAX,
+            size => size,
+        };
+        let largest = limits.max_memory_allocation_size.min(buffer) / 16384 * 16384;
+        if largest > 4 << 30 {
+            eprintln!("HEAP the largest heap, {largest} bytes, is past 4 GiB: not made");
+            return;
+        }
+        // A heap first, so that the pools the runtime keeps room in have it before the count.
+        let _first = heap(
+            device,
+            HeapType::Placement,
+            16384,
+            ResourceOptions::private(),
+        );
+        let before = device.work_counts().device_memory_allocated;
+        let made = device.new_heap(&HeapDescriptor::new(
+            HeapType::Placement,
+            largest,
+            ResourceOptions::private(),
+        ));
+        let grown = device.work_counts().device_memory_allocated - before;
+        match made {
+            Ok(made) => {
+                eprintln!("HEAP the largest heap, {largest} bytes, took {grown} bytes of memory");
+                assert_eq!(made.size(), largest);
+                assert!(
+                    (largest..=limits.max_memory_allocation_size).contains(&grown),
+                    "the largest heap, {largest} bytes, took {grown} bytes, past one allocation \
+                     of {}",
+                    limits.max_memory_allocation_size
+                );
+            }
+            Err(Error::OutOfMemory(MemoryKind::Device)) => {
+                eprintln!("HEAP the largest heap, {largest} bytes: out of device memory");
+            }
+            Err(other) => panic!("the largest heap, {largest} bytes: {other:?}"),
+        }
+    });
+}
+
 /// A placement heap: offsets at multiples of 256 inside the heap, a buffer's address the heap's
 /// plus its offset, and its bytes the heap's there, a buffer of length 0 too (probes 1 and 2).
 fn placement_rules(device: &Device) {
