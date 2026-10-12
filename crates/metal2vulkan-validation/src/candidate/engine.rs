@@ -121,7 +121,7 @@ use tables::{function_tables, table_buffers, FunctionTable, TableBuffers};
 /// how it decides a match. A change no recorded row can observe (a case kind no earlier executor
 /// ran, or one it refused) needs no bump; its commit says why. The commit that bumps it says what
 /// changed; this comment keeps no history.
-pub const ENGINE_EXECUTOR_ABI: &str = "vulkan-engine-v180";
+pub const ENGINE_EXECUTOR_ABI: &str = "vulkan-engine-v181";
 
 /// One kernel case in the terms the binder takes: what this executor supports of an
 /// [`AuthoredCase`] (buffers, device buffer arrays, argument-buffer buffers and textures, command
@@ -971,9 +971,11 @@ pub fn records_ids(case: &ComputeCase) -> Result<BTreeMap<(u32, u32), u64>, Stri
 }
 
 /// A bound buffer's addresses: the Metal `gpuAddress` the guest sees and the host Vulkan device
-/// address when the buffer has one. The executor's allocations are their own guests: with
-/// device addresses the two are equal (no pointer bytes are authored in the buffers this
-/// executor supports), without them the guest address is a distinct synthetic base.
+/// address when the buffer has one. With device addresses an allocation's guest address is its
+/// device address, read as a signed number, moved up by [`BufferAddress::GUEST_OFFSET`]
+/// ([`BufferAddress::addressed`]): a Metal address whatever the device hands out, which the
+/// product translates through the resident set as it does the runtime's own address space.
+/// Without them the guest address is a distinct synthetic base.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BufferAddress {
     pub guest: u64,
@@ -981,6 +983,42 @@ pub struct BufferAddress {
 }
 
 impl BufferAddress {
+    /// How far above its device address, read as a signed number, an allocation's guest address
+    /// lies: 2^47 + 2^32. Vulkan bounds no device address, and devices hand out different ones:
+    /// NVIDIA's lie under 2^32 (0x5020000 for a vertex buffer on an RTX 3090 and 0x4af0000 on an
+    /// RTX 5080 Laptop GPU, 615.71.09), below the lowest address that names a buffer
+    /// (`BufferBinding::MIN_BUFFER_ADDRESS`, 2^32; below it a record's address is a nil buffer's
+    /// offset, as on Apple silicon, whose buffers all lie above it), and RADV gives the upper half
+    /// of its 48-bit space sign-extended (0xffff800100040000 on a Radeon 780M), where the records
+    /// of indirect command buffers lie (`records_address`, from 2^63). Read as signed, every
+    /// 48-bit sign-extended address and every address under 2^63 less this offset moves into
+    /// [2^32, 2^63), where Metal's buffers lie. One offset for every allocation keeps their guest
+    /// ranges as disjoint as their device ranges.
+    pub const GUEST_OFFSET: u64 =
+        (1 << 47) + metal2vulkan::bind::indirect_commands::BufferBinding::MIN_BUFFER_ADDRESS;
+
+    /// The addresses of an allocation at device address `host`: its guest address
+    /// [`GUEST_OFFSET`](Self::GUEST_OFFSET) above it, read as a signed number. Refused where that
+    /// guest address would lie below 2^32 (a device address sign-extended past 48 bits) or reach
+    /// 2^63, where the records of indirect command buffers and the synthetic windows of
+    /// [`BufferAddress::synthetic_used`] lie.
+    pub fn addressed(host: u64) -> Result<BufferAddress, String> {
+        let lowest = metal2vulkan::bind::indirect_commands::BufferBinding::MIN_BUFFER_ADDRESS;
+        match host
+            .cast_signed()
+            .checked_add(Self::GUEST_OFFSET.cast_signed())
+        {
+            Some(guest) if guest >= lowest.cast_signed() => Ok(BufferAddress {
+                guest: guest.cast_unsigned(),
+                host: Some(host),
+            }),
+            _ => Err(format!(
+                "device address {host:#x} has no guest address in [2^32, 2^63), where Metal's \
+                 buffers lie"
+            )),
+        }
+    }
+
     /// The synthetic guest base of Metal buffer `index` on a device without device addresses:
     /// disjoint 4-GiB windows, never 0.
     pub fn synthetic(index: u32) -> BufferAddress {

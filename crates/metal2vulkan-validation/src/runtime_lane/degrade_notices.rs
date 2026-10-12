@@ -268,7 +268,8 @@ pub(super) const CREATED: [Degradation; 2] = [
 pub(super) const PRIVATE_PROPERTIES: [Degradation; 1] = [Degradation::PrivatePropertiesUnknown];
 
 /// The kind `gpu_times` takes on a venue whose device calibrates no timestamps against a host
-/// clock the runtime reads (and expects absent where it does).
+/// clock the runtime reads (and expects absent where it does), as does `first_use`'s busy work,
+/// whose measurement reads GPU times (`gpu_times::read_kinds`).
 pub(super) const GPU_TIMES: [Degradation; 1] = [Degradation::UncalibratedGpuTimes];
 
 /// The kind `gpu_times` takes on every venue that writes timestamps, with more command buffers in
@@ -278,7 +279,9 @@ pub(super) const UNTIMED: [Degradation; 1] = [Degradation::UntimedCommandBuffer]
 /// The kind `color_fills` takes on every venue, with a color packed in a padded 10-bit format.
 pub(super) const UNPACKED_FILL: [Degradation; 1] = [Degradation::UnpackedFillColor];
 
-/// The kind `gpu_times` takes on every venue, on a device made with `gpu_times_from_host`.
+/// The kind `gpu_times` takes on every venue, on a device made with `gpu_times_from_host`, and
+/// `first_use`'s busy work where the driver answers GPU times from the host
+/// (`gpu_times::read_kinds`).
 pub(super) const FROM_HOST: [Degradation; 1] = [Degradation::GpuTimesFromHost];
 
 /// A non-uniform grid: 10 by 3 threads in threadgroups of 8 by 4.

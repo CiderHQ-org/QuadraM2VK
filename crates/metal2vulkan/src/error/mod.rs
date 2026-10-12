@@ -829,6 +829,13 @@ pub enum RuntimeDriverDefect {
     /// under [`RuntimeDriverDefect::MultisampledDepthStencilColourCopies`] (a kernel and draws, or
     /// a refusal), and their depths through the colour copies.
     MultisampledStencilColourCopies,
+    /// A `vkCmdExecuteGeneratedCommandsEXT` the driver preprocesses itself, recorded after an
+    /// execution whose execution set bound pipelines, runs that preprocessing with the shader the
+    /// earlier execution bound last rather than the driver's own, which then reads and writes
+    /// memory by the wrong arguments: the device faults or its queue hangs. Nothing is refused:
+    /// the runtime preprocesses every execution of an indirect command buffer's range apart
+    /// (`vkCmdPreprocessGeneratedCommandsEXT`) before the first of them runs.
+    ImplicitPreprocessAfterExecutionSet,
 }
 
 /// One device capability a refusal can name.

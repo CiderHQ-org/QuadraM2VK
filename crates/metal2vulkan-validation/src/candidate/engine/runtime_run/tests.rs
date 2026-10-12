@@ -392,6 +392,60 @@ fn render_commands_and_render_states_run_as_the_executor_compiles_them() {
     }
 }
 
+/// Public cases whose command buffers execute ranges of two or more compute commands, a kernel's
+/// and the host's, run through the runtime path and on the executor's own context (its device
+/// replay), each output Metal's. Where the context enables `VK_EXT_device_generated_commands`, the
+/// executor runs each range as one command buffer's executions, one after another, as the runtime
+/// does: on RADV before 26.2 the driver's own preprocessing of every execution after the first ran
+/// the shader the one before bound last, and the device faulted
+/// (`RuntimeDriverDefect::ImplicitPreprocessAfterExecutionSet`), so both preprocess the
+/// executions apart there. The rows' artifacts are not compared: the executor's digests what it
+/// compiled for the commands, and the runtime path's records no digest (as
+/// [`runs_as_the_executor_compiles_it`] states).
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+#[test]
+fn compute_command_ranges_run_on_both_paths_as_metal_ran_them() {
+    use crate::candidate::tests::compile_worker;
+    use crate::candidate::tests::engine_compute::BACKEND;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus");
+    let device = crate::gpu::TEST_DEVICE;
+    let store = CorpusStore::new(&root);
+    let cases = store.read_all_cases().unwrap();
+    for name in [
+        "execute-two-gpu-encoded-template-dispatches",
+        "gpu-encoded-buffers-keep-the-host-encoded-dispatches",
+        "gpu-encoded-ragged-grids-replay-with-the-inherited-pipeline-and-buffers",
+        "host-encoded-over-limit-and-ragged-dispatches-in-two-command-buffers",
+    ] {
+        let case = cases
+            .iter()
+            .find(|case| case.name == name)
+            .expect("the committed public case")
+            .clone();
+        assert!(case.out_of_bounds.is_none(), "{name}");
+        let metal = crate::runtime_lane::metal_output(&store, &case).unwrap();
+        let admitted = admit(&root, case, ExecutionRequest::EngineCandidate { device }).unwrap();
+        let prepared = super::super::prepare_case(device, admitted).unwrap();
+        assert_eq!(route(&prepared), Route::Runtime, "{name}");
+        let RuntimeOutcome::Ran(attempt) = run(&prepared, BACKEND) else {
+            panic!("{name}: the runtime raised a gap");
+        };
+        let ran = attempt
+            .result
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_eq!(ran.output, metal, "{name}: the runtime path's output");
+        let on_context = super::super::run_on_context(&prepared, BACKEND, compile_worker())
+            .result
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        // Which replay ran each command buffer the case executes, for the lane's record.
+        eprintln!(
+            "{name}: the executor's command replay {}",
+            on_context.environment["command_replay"]
+        );
+        assert_eq!(on_context.output, metal, "{name}: the executor's output");
+    }
+}
+
 /// A public render case runs through the runtime path, drawn as the case runner draws it
 /// (`runtime_case::encoded_render`), as
 /// [`a_public_kernel_case_runs_through_the_runtime_as_the_executor_compiles_it`] runs its case:

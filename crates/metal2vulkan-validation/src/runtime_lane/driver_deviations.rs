@@ -100,7 +100,7 @@ use crate::observation::MetalObservation;
 use crate::store::CorpusStore;
 use base64::Engine as _;
 use metal2vulkan::cache::VariantKey;
-use metal2vulkan::device::VkProperty;
+use metal2vulkan::device::{VkFeature, VkProperty};
 use metal2vulkan::error::{Capability, DriverDeviation, Error as CompileError, Feature, Needs};
 use metal2vulkan::library::Library;
 use metal2vulkan::metal::{PixelFormat, PrimitiveType, TextureUsage};
@@ -698,24 +698,37 @@ fn half_fused_multiply_adds_the_device_answers_are_metals() {
 // The `float` denormals, the `half` quantize, and the fused pair's NaN.
 
 /// The NaN model's denormal probe (`nan_denormals`, `nan_denormals_fast`): 256 threads of 48
-/// words over operand triples rich in denormals of both signs and the smallest normals.
-const DENORMAL_PROBES: [&str; 2] = [
-    "nan-model-float-denormals-per-operation",
-    "nan-model-float-denormals-per-operation-under-fast-math",
+/// words over operand triples rich in denormals of both signs and the smallest normals; the
+/// second is the first's program under fast math.
+const DENORMAL_PROBES: [(&str, bool); 2] = [
+    ("nan-model-float-denormals-per-operation", false),
+    (
+        "nan-model-float-denormals-per-operation-under-fast-math",
+        true,
+    ),
 ];
 
 /// The words of a [`DENORMAL_PROBES`] thread whose operations read `float` denormals as Metal
-/// does on every profile: `a + b`, `a - b`, `a * b`, `a / b`, `0 - a`, `a < b`, `a == b`, `floor`,
-/// `ceil`, `trunc`, `round`, `rint`, `ldexp`, `step`, `smoothstep`, `(a * b) * c`, `(a / b) * c`,
-/// `a < b ? a : b`, `-(a * b)` and `fabs(a - b)`; `sqrt` and `rsqrt` ([`DENORMAL_PROBE_ROOTS`])
-/// where Metal answers a zero, an infinity or a NaN; and `pow` and `powr`
-/// ([`DENORMAL_PROBE_POWERS`]) where it answers a zero, a denormal, an infinity or a NaN. Not the
-/// fused multiply-adds (4, 5), `dot` and `length` (36, 37) and `mix` (38): their fused sums flush
-/// at the tininess edge before rounding on Metal, which no device measured matches on every lane,
-/// nor the math library's functions.
+/// does on every profile: `a + b`, `a - b`, `a * b`, `0 - a`, `a < b`, `a == b`, `floor`, `ceil`,
+/// `trunc`, `round`, `rint`, `ldexp`, `step`, `(a * b) * c`, `a < b ? a : b`, `-(a * b)` and
+/// `fabs(a - b)`; the quotients ([`DENORMAL_PROBE_QUOTIENTS`]); `sqrt` and `rsqrt`
+/// ([`DENORMAL_PROBE_ROOTS`]) where Metal answers a zero, an infinity or a NaN; and `pow` and
+/// `powr` ([`DENORMAL_PROBE_POWERS`]) where it answers a zero, a denormal, an infinity or a NaN.
+/// Not the fused multiply-adds (4, 5), `dot` and `length` (36, 37) and `mix` (38): their fused
+/// sums flush at the tininess edge before rounding on Metal, which no device measured matches on
+/// every lane, nor the math library's functions.
 const DENORMAL_PROBE_WORDS: &[usize] = &[
-    0, 1, 2, 3, 7, 10, 11, 12, 13, 14, 15, 16, 35, 39, 40, 43, 44, 45, 46, 47,
+    0, 1, 2, 7, 10, 11, 12, 13, 14, 15, 16, 35, 39, 43, 45, 46, 47,
 ];
+
+/// The quotient words of a [`DENORMAL_PROBES`] thread: `a / b`, `smoothstep` and `(a / b) * c`.
+/// Under fast math each divides by Metal's fast reciprocal, which a profile whose `float`
+/// functions are not Metal's and that has no `OpFmaKHR` (`shaderFmaFloat32`) takes as the
+/// device's `OpFDiv(1, y)`, within Vulkan's 2.5 ulp, not `RN(1 / y)` (the translator's
+/// `divide::Reciprocal::Device`, recorded `PrecisionNote::DeviceArithmetic`): on such a profile
+/// the fast probe's quotients are checked where Metal answers a zero, a denormal, an infinity or
+/// a NaN, and everywhere else every word of them.
+const DENORMAL_PROBE_QUOTIENTS: &[usize] = &[3, 40, 44];
 
 /// The `pow` and `powr` words of a [`DENORMAL_PROBES`] thread: checked where Metal answers a
 /// zero, a denormal, an infinity or a NaN, among them `pow(x, 1)` of a denormal `x`, which
@@ -732,6 +745,8 @@ const DENORMAL_PROBE_ROOTS: &[usize] = &[20, 21];
 /// Both probes answer Metal's `float` denormals on every profile: the device's where the profile
 /// takes the deviation (the kernels then require `VkProperty::MetalFloatDenormals`), the
 /// module's own flushes elsewhere. Every word of [`DENORMAL_PROBE_WORDS`], each word of
+/// [`DENORMAL_PROBE_QUOTIENTS`] (in the fast probe on a profile whose fast reciprocal is the
+/// device's, where Metal answers a zero, a denormal, an infinity or a NaN), each word of
 /// [`DENORMAL_PROBE_ROOTS`] where Metal answers a zero, an infinity or a NaN, and each word of
 /// [`DENORMAL_PROBE_POWERS`] where it answers one of those or a denormal, is the Metal row's of
 /// the same chip; the test prints how many of the other words differ.
@@ -743,8 +758,17 @@ fn float_denormals_read_as_metal_reads_them() {
         let device = validated_device(TEST_DEVICE, &messages, cache.path()).unwrap();
         let name = device.name().to_owned();
         let metals = takes(&device, DriverDeviation::MetalFloatDenormals);
+        // Whether Metal's fast reciprocal is the device's `OpFDiv(1, y)`: neither Metal's own
+        // float functions nor `OpFmaKHR`, whose refinement makes it `RN(1 / y)`.
+        let device_reciprocal = !takes(&device, DriverDeviation::MetalFloatFunctions)
+            && !device
+                .compile_device()
+                .profile()
+                .enabled()
+                .features
+                .contains(&VkFeature::ShaderFmaFloat32);
         let mut failures = Vec::new();
-        for case_name in DENORMAL_PROBES {
+        for (case_name, fast) in DENORMAL_PROBES {
             let case = public_case(case_name).unwrap();
             assert_eq!(
                 requires_property(&device, &case, VkProperty::MetalFloatDenormals),
@@ -765,7 +789,10 @@ fn float_denormals_read_as_metal_reads_them() {
             for i in 0..metal.len() / 4 {
                 let w = i % 48;
                 let (got, want) = (word(&run.output, i), word(&metal, i));
+                let quotient = DENORMAL_PROBE_QUOTIENTS.contains(&w);
                 if DENORMAL_PROBE_WORDS.contains(&w)
+                    || (quotient && !(fast && device_reciprocal))
+                    || (quotient && edge(want))
                     || (DENORMAL_PROBE_ROOTS.contains(&w) && special(want))
                     || (DENORMAL_PROBE_POWERS.contains(&w) && edge(want))
                 {
@@ -778,9 +805,9 @@ fn float_denormals_read_as_metal_reads_them() {
                 }
             }
             eprintln!(
-                "float denormals {case_name} on {name} (the device's: {metals}): {} of \
-                 {checked} checked words differ from Metal; other words differing, by word: \
-                 {by_word:?}",
+                "float denormals {case_name} on {name} (the device's: {metals}; the device's \
+                 fast reciprocal: {device_reciprocal}): {} of {checked} checked words differ \
+                 from Metal; other words differing, by word: {by_word:?}",
                 differ.len()
             );
             if !differ.is_empty() {

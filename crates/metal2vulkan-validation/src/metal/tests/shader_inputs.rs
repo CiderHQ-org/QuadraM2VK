@@ -330,6 +330,9 @@ fn argument_buffer_intersection_table_is_encoded_at_reflected_field() {
     };
     use crate::source::SourceRow;
 
+    // The fixture's interface as Metal's compiler states it (`xcrun metal -c` of
+    // `kernel_argument_buffer_intersection_table.metal`, metalfe-32023.921): the argument buffer's
+    // `table` member is an `air.intersection_function_table`, the role the executor encodes it by.
     let air_ll = r#"
 %struct.RayResources = type { ptr addrspace(1) }
 define void @argument_buffer_intersection_table(ptr addrspace(1) %as, ptr addrspace(2) %resources, ptr addrspace(1) %output) {
@@ -340,11 +343,11 @@ entry:
 !0 = !{ptr @argument_buffer_intersection_table, !1, !2}
 !1 = !{}
 !2 = !{!3, !4, !7}
-!3 = !{i32 0, !"air.instance_acceleration_structure", !"air.location_index", i32 5, i32 1, !"air.read", !"air.arg_type_name", !"instance_acceleration_structure"}
-!4 = !{i32 1, !"air.indirect_buffer", !"air.buffer_size", i32 256, !"air.location_index", i32 6, i32 1, !"air.read", !"air.address_space", i32 2, !"air.struct_type_info", !5, !"air.arg_type_name", !"RayResources"}
-!5 = !{i32 0, i32 8, i32 0, !"void", !"table", !"air.indirect_argument", !6}
-!6 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read", !"air.arg_type_name", !"void"}
-!7 = !{i32 2, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.write", !"air.address_space", i32 1, !"air.arg_type_name", !"uint"}
+!3 = !{i32 0, !"air.instance_acceleration_structure", !"air.location_index", i32 5, i32 1, !"air.read", !"air.arg_type_name", !"acceleration_structure<instancing>", !"air.arg_name", !"acceleration_structure"}
+!4 = !{i32 1, !"air.indirect_buffer", !"air.buffer_size", i32 8, !"air.location_index", i32 6, i32 1, !"air.read", !"air.address_space", i32 2, !"air.struct_type_info", !5, !"air.arg_type_size", i32 8, !"air.arg_type_align_size", i32 8, !"air.arg_type_name", !"RayResources", !"air.arg_name", !"resources"}
+!5 = !{i32 0, i32 8, i32 0, !"intersection_function_table<instancing, triangle_data>", !"table", !"air.indirect_argument", !6}
+!6 = !{i32 0, !"air.intersection_function_table", !"air.location_index", i32 0, i32 1, !"air.read_write", !"air.arg_type_name", !"intersection_function_table<instancing, triangle_data>", !"air.arg_name", !"table"}
+!7 = !{i32 2, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read_write", !"air.address_space", i32 1, !"air.arg_type_size", i32 4, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"uint", !"air.arg_name", !"output"}
 "#;
     let source =
         SourceRow {

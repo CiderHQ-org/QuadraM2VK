@@ -175,6 +175,26 @@ pub(super) struct Affected {
 ///   driver ends a command buffer at its value alone: Vulkan makes the value enough, and their
 ///   fences are signaled with it, so a fence there only added a `vkCreateFence` to the commit
 ///   path, which NVIDIA's 615.71.09 held for up to 1.9 s while other processes' work ran.
+///
+/// `ImplicitPreprocessAfterExecutionSet`:
+/// - Mesa's RADV (`MESA_RADV`): `vkCmdExecuteGeneratedCommandsEXT` of a layout not made for
+///   explicit preprocessing dispatches the layout's preprocessing pipeline itself
+///   (`radv_prepare_dgc`), and `radv_emit_compute_pipeline` skips a pipeline equal to
+///   `emitted_compute_pipeline`. The execution's own commands then bind each sequence's pipeline
+///   of the execution set on the GPU, which that field does not see, so the next execution's
+///   preprocessing in the command buffer, with nothing dispatched between, runs the shader the
+///   execution set bound last with the preprocessing's arguments. A range of two commands, an
+///   execution each, faulted (`[gfxhub] page fault`, client `TCP`, permission faults) and timed out
+///   the ring (`runtime_lane::generated_executions`, both of its tests that execute, on every run),
+///   where explicit preprocessing runs them right. Read in 25.0.0's,
+///   26.0.8's and 26.1.5's source (the field is tracked alike); 26.2.0 tracks a dirty bit instead,
+///   which the preprocessing's own bind sets. Measured on 26.0.8 (driverVersion 0x6800008) on the
+///   Radeon 780M (`deviceID` 0x15bf) and the RX 7900 XTX (0x744c): known broken through 26.0.8.
+///   Measured clean on 26.2.4 (driverVersion 0x6802004) on both. Nothing is refused: the runtime
+///   preprocesses every execution of the range apart, before the first runs
+///   (`generated_execute.rs`). Every RADV GPU and release but the measured identity found clean,
+///   the 780M at 26.2.4, takes it; the RX 7900 XTX is no measured identity, so it takes it at
+///   every release.
 pub(super) const AFFECTED: &[Affected] = &[
     Affected {
         defect: RuntimeDriverDefect::MultisampledDepthStencilColourCopies,
@@ -231,6 +251,12 @@ pub(super) const AFFECTED: &[Affected] = &[
         defect: RuntimeDriverDefect::ReadsCommandBuffersAfterTheirSignal,
         driver: DriverId::MOLTENVK,
         clean: &[],
+    },
+    Affected {
+        defect: RuntimeDriverDefect::ImplicitPreprocessAfterExecutionSet,
+        driver: DriverId::MESA_RADV,
+        // The Radeon 780M at 26.2.4, measured clean.
+        clean: &[(0x15bf, (26 << 22) | (2 << 12) | 4)],
     },
 ];
 

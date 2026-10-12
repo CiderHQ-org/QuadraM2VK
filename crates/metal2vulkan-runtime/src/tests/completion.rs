@@ -8,15 +8,31 @@
 //! wait ran out. This test makes that shape: four queues, three of them in use and idle, and the
 //! fourth committing a few fills back to back each round, then waiting for the last. The
 //! completion thread finishes the first and waits again while the next one's signal lands, its
-//! moment swept across rounds by the fills' sizes, which is when a wait for any loses it. Every
-//! round must be seen completed well within the wait's 100 ms slice; a lost wake shows as a round
-//! of about 100 ms. A summary of the rounds' times is printed (`ROUNDS`).
+//! moment swept across rounds by the fills' sizes, which is when a wait for any loses it.
+//!
+//! Every command buffer must be seen completed well within the wait's 100 ms slice of the moment
+//! it could first be seen, once its work ended and the submission that signals its end returned;
+//! a lost wake shows as about 100 ms. That moment is the later of its GPU end time and its kernel
+//! end time where the device places its timestamps on the host's clock by a calibration
+//! (`gpu_time.rs`), and the round's commit elsewhere, which comes before it: a device that answers
+//! its GPU times from the host, or calibrates none, ends them where the completion was seen. The
+//! round's own time is no measure of the completion, as neither the GPU's other work nor the
+//! driver's submission is the completion thread's: on an RTX 3090 (NVIDIA 615.71.09) beside the
+//! lane tests' busy kernels, rounds of 190 to 202 ms were submitted within 0.1 ms, their GPU work
+//! begun as long after the commit, as another process's busy kernel runs, and each command buffer
+//! seen within 0.7 ms of its GPU end; and rounds of 57 to 64 ms ran their first command buffer's
+//! work at the commit while the driver's submission of it returned 57 to 64 ms later, each command
+//! buffer seen within 0.3 ms of that. A summary of the rounds' times and of how late each round's
+//! command buffers were seen is printed (`ROUNDS`), and each round that took 50 ms or more with
+//! its command buffers' kernel start and end, GPU start and end, and the moment each was seen, from
+//! the round's commit (`SLOW-ROUND`).
 //!
 //! A device test: compiled only under the validation crate's GPU safety cfgs (`m2v_gpu`,
 //! `m2v_cpu_icd`), on the kind of device the cfg selects.
 
 use crate::{
-    CommandBufferStatus, Device, DeviceKind, DeviceOptions, ResourceOptions, ShaderCacheOptions,
+    host_time, CommandBuffer, CommandBufferStatus, Device, DeviceKind, DeviceOptions,
+    ResourceOptions, ShaderCacheOptions,
 };
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -41,8 +57,8 @@ const SIZES: [u64; 7] = [
     8 << 20,
 ];
 
-/// The longest a round may take: half the completion wait's 100 ms slice, far above a round's
-/// own time (three fills of at most 8 MiB).
+/// The latest a command buffer may be seen completed after it could first be seen: half the
+/// completion wait's 100 ms slice.
 const STALL: Duration = Duration::from_millis(50);
 
 /// A scratch directory for the device's shader cache, removed when dropped.
@@ -83,10 +99,36 @@ fn device(cache: &Path) -> Device {
     Device::system_default_with(&options).unwrap()
 }
 
+/// Whether `device`'s GPU end times are when the GPU ended the work: its timestamps, placed on
+/// the host's clock by a calibration (`gpu_time.rs`).
+fn calibrated(device: &Device) -> bool {
+    let timing = &device.shared().timing;
+    !timing.answers_from_host()
+        && timing
+            .clock()
+            .is_some_and(|clock| clock.calibration.is_some())
+}
+
+/// A completed command buffer's times, in milliseconds from `from`, a host time: its kernel start
+/// and end, GPU start and end, and `seen`, when its wait returned.
+fn times(command_buffer: &CommandBuffer, from: f64, seen: f64) -> String {
+    let ms = |at: f64| (at - from) * 1e3;
+    let gpu = |at: Result<f64, _>| at.map_or("-".to_owned(), |at| format!("{:.1}", ms(at)));
+    format!(
+        "[ks {:.1} ke {:.1} gs {} ge {} seen {:.1}]",
+        ms(command_buffer.kernel_start_time()),
+        ms(command_buffer.kernel_end_time()),
+        gpu(command_buffer.gpu_start_time()),
+        gpu(command_buffer.gpu_end_time()),
+        ms(seen)
+    )
+}
+
 #[test]
 fn a_completion_on_one_queue_is_seen_while_other_queues_are_waited_for() {
     let scratch = Scratch::new();
     let device = device(&scratch.0);
+    let calibrated = calibrated(&device);
     let buffer = device
         .new_buffer(SIZES[SIZES.len() - 1], ResourceOptions::private())
         .unwrap();
@@ -110,39 +152,80 @@ fn a_completion_on_one_queue_is_seen_while_other_queues_are_waited_for() {
         assert_eq!(command_buffer.status(), CommandBufferStatus::Completed);
     }
     let mut times = Vec::with_capacity(ROUNDS);
+    let mut lates = Vec::with_capacity(ROUNDS);
     for round in 0..ROUNDS {
         let size = SIZES[round % SIZES.len()];
         let command_buffers: Vec<_> = (0..IN_FLIGHT)
             .map(|_| fill(&queues[0], size, round as u8))
             .collect();
         let start = Instant::now();
+        let committed = host_time();
         for command_buffer in &command_buffers {
             command_buffer.commit().unwrap();
         }
+        let mut seen = Vec::with_capacity(IN_FLIGHT);
         for command_buffer in &command_buffers {
             command_buffer.wait_until_completed_for(WAIT).unwrap();
+            seen.push(host_time());
             assert_eq!(command_buffer.status(), CommandBufferStatus::Completed);
         }
-        times.push(start.elapsed());
+        let took = start.elapsed();
+        // How late each was seen after it could first be seen: the latest of the round.
+        let late = (command_buffers.iter().zip(&seen))
+            .map(|(command_buffer, &seen)| {
+                let seeable = match calibrated {
+                    true => (command_buffer.gpu_end_time().unwrap())
+                        .max(command_buffer.kernel_end_time()),
+                    false => committed,
+                };
+                Duration::from_secs_f64((seen - seeable).max(0.0))
+            })
+            .max()
+            .unwrap();
+        if took >= STALL || late >= STALL {
+            let each: Vec<String> = (command_buffers.iter().zip(&seen))
+                .map(|(command_buffer, &seen)| self::times(command_buffer, committed, seen))
+                .collect();
+            println!(
+                "SLOW-ROUND {round} ({size} bytes a fill): {took:?}, seen {late:?} late; ms from \
+                 the commit: {}",
+                each.join(" ")
+            );
+        }
+        times.push(took);
+        lates.push(late);
     }
-    let stalls: Vec<(usize, Duration)> = times
+    let stalls: Vec<(usize, Duration)> = lates
         .iter()
         .copied()
         .enumerate()
-        .filter(|&(_, time)| time >= STALL)
+        .filter(|&(_, late)| late >= STALL)
         .collect();
-    let mut sorted = times.clone();
-    sorted.sort();
+    let summary = |durations: &[Duration]| {
+        let mut sorted = durations.to_vec();
+        sorted.sort();
+        format!(
+            "p50 {:?} p90 {:?} p99 {:?} max {:?}",
+            sorted[ROUNDS / 2],
+            sorted[ROUNDS * 9 / 10],
+            sorted[ROUNDS * 99 / 100],
+            sorted[ROUNDS - 1],
+        )
+    };
+    let after = match calibrated {
+        true => "the later of its GPU end and kernel end",
+        false => "the round's commit",
+    };
     println!(
-        "ROUNDS {ROUNDS}: p50 {:?} p90 {:?} p99 {:?} max {:?}; {} at or over {STALL:?}",
-        sorted[ROUNDS / 2],
-        sorted[ROUNDS * 9 / 10],
-        sorted[ROUNDS * 99 / 100],
-        sorted[ROUNDS - 1],
+        "ROUNDS {ROUNDS}: {}, {} at or over {STALL:?}; seen after {after}: {}, {} at or over \
+         {STALL:?}",
+        summary(&times),
+        times.iter().filter(|&&took| took >= STALL).count(),
+        summary(&lates),
         stalls.len()
     );
     assert!(
         stalls.is_empty(),
-        "commits seen completed only after {STALL:?} or more (round, time): {stalls:?}"
+        "command buffers seen completed {STALL:?} or more after {after} (round, time): {stalls:?}"
     );
 }

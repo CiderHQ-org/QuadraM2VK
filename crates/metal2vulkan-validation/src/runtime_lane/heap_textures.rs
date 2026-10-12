@@ -387,18 +387,20 @@ fn heap_textures_answer_and_place_as_metal_s_do() {
                     assert_eq!(texture.usage(), shape.usage, "{}", shape.name);
                 }
                 // The view's answer announces only a size's kinds, and the textures' makings
-                // a heap texture's route where the device's driver facts force one.
+                // the heap texture's route where the device's driver facts force one: an image
+                // the driver may compress one of `ALIASES`; a depth or stencil texture's image
+                // the driver lays apart from its memory a shadow of the heap's bytes
+                // (`shadowed-texture`, as the heap depth lane measures on MoltenVK) or, where no
+                // shadow serves it, `heap-depth-stencil-apart`.
                 let facts = &device.properties().driver_facts;
+                let apart = is_depth_stencil(shape.pixel_format)
+                    && facts.contains(&DriverFact::DepthStencilImagesLieApart);
                 let routes = facts
                     .contains(&DriverFact::CompressedImagesHideAliasedWrites)
                     .then_some(&ALIASES[..])
                     .into_iter()
-                    .flatten()
-                    .chain(
-                        facts
-                            .contains(&DriverFact::DepthStencilImagesLieApart)
-                            .then_some(&Degradation::HeapDepthStencilApart),
-                    );
+                    .chain(apart.then_some(&DEPTH_STENCIL_ROUTES[..]))
+                    .flatten();
                 let allowed: BTreeSet<Degradation> =
                     SIZE_NOTICES.iter().chain(routes).copied().collect();
                 let more = announced();
@@ -885,6 +887,14 @@ fn an_adopted_device_stating_host_image_copy_aliases_its_heap_textures() {
 
 /// The kind a heap's depth or stencil texture laid apart from the heap announces.
 pub(super) const APART: [Degradation; 1] = [Degradation::HeapDepthStencilApart];
+
+/// The kinds a heap's depth or stencil texture announces where the driver lays such images apart
+/// from their memory (`DriverFact::DepthStencilImagesLieApart`): its image a shadow of the heap's
+/// bytes (one sample, its texels inside its bytes), else laid apart.
+const DEPTH_STENCIL_ROUTES: [Degradation; 2] = [
+    Degradation::ShadowedTexture,
+    Degradation::HeapDepthStencilApart,
+];
 
 /// The kind a depth or stencil texture without GPU-optimized contents announces where the driver
 /// keeps its layout optimized.

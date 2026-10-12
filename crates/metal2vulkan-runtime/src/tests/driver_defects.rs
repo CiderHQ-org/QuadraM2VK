@@ -17,14 +17,16 @@ const CACHE_LOAD: RuntimeDriverDefect = RuntimeDriverDefect::PipelineCacheDataCo
 const COPY_REWRITES: RuntimeDriverDefect = RuntimeDriverDefect::CompressedImageCopiesRewriteTexels;
 const NAN_COPIES: RuntimeDriverDefect = RuntimeDriverDefect::MultisampledCopiesConvertFloatNans;
 const LATE_READS: RuntimeDriverDefect = RuntimeDriverDefect::ReadsCommandBuffersAfterTheirSignal;
+const PREPROCESS: RuntimeDriverDefect = RuntimeDriverDefect::ImplicitPreprocessAfterExecutionSet;
 
 /// Every committed profile's driver has its defects at every release and GPU but those a probe
 /// found clean: MoltenVK the multisampled depth/stencil colour copies, the inexact depths past
 /// `[0, 1]`, the crashing 2D views of a 3D image in lazily allocated memory, the pipeline cache
 /// compiled at load, the copies of compressed images that rewrite texels and the reads of command
 /// buffers after their signal; lavapipe the colour copies and the depth/stencil resolve of the
-/// first layer and level; RADV the multisampled copies that convert float NaNs; ANV the
-/// compressed image's short size on every GPU (Arrow Lake's, not measured, too); NVIDIA's the
+/// first layer and level; RADV the multisampled copies that convert float NaNs, and the implicit
+/// preprocessing after an execution set on every GPU but the 780M at 26.2.4, measured clean; ANV
+/// the compressed image's short size on every GPU (Arrow Lake's, not measured, too); NVIDIA's the
 /// stencil colour copies on every GPU but the RTX 5080 Laptop GPU at 615.71.09, measured clean (the
 /// GTX 1060 and the RTX 5080 desktop GPU, not measured, take them); SwiftShader none.
 #[test]
@@ -50,7 +52,12 @@ fn the_committed_profiles_drivers_have_their_defects() {
                 ]
             }
             Some(DriverId::MESA_LLVMPIPE) => vec![COPIES, RESOLVES],
-            Some(DriverId::MESA_RADV) => vec![NAN_COPIES],
+            Some(DriverId::MESA_RADV)
+                if (desc.device_id, desc.driver_version) == (0x15bf, MESA_26_2_4) =>
+            {
+                vec![NAN_COPIES]
+            }
+            Some(DriverId::MESA_RADV) => vec![NAN_COPIES, PREPROCESS],
             Some(DriverId::INTEL_OPEN_SOURCE_MESA) => vec![COMPRESSION],
             Some(DriverId::NVIDIA_PROPRIETARY)
                 if (desc.device_id, desc.driver_version) == (0x2c19, NVIDIA_615_71_09) =>
@@ -69,6 +76,9 @@ fn the_committed_profiles_drivers_have_their_defects() {
         "lavapipe's three, MoltenVK's two, ANV's four, RADV's three and NVIDIA's two"
     );
 }
+
+/// Mesa's `driverVersion` of 26.2.4: `VK_MAKE_API_VERSION(0, 26, 2, 4)`.
+const MESA_26_2_4: u32 = (26 << 22) | (2 << 12) | 4;
 
 /// NVIDIA's `driverVersion` of 615.71.09: the release's major, minor and patch in 10, 8 and 6 bits
 /// from bit 22, 14 and 6.
@@ -122,6 +132,36 @@ fn nvidia_s_colour_copies_are_clean_on_the_identity_measured_alone() {
         NVIDIA_615_71_09,
     );
     assert!(!radv.contains(&COPIES) && !radv.contains(&STENCIL_COPIES));
+}
+
+/// RADV's implicit preprocessing after an execution set, measured broken on the Radeon 780M
+/// (`deviceID` 0x15bf) and the RX 7900 XTX (0x744c) at 26.0.8, is every RADV GPU's at every release
+/// but the 780M's at 26.2.4, measured clean: the 780M at 26.0.8 and 26.2.5 and the RX 7900 XTX at
+/// 26.2.4 (not a measured identity) take it; a device that runs another driver has none.
+#[test]
+fn radv_s_preprocessing_is_clean_on_the_identity_measured_alone() {
+    let radv = Some(DriverId::MESA_RADV);
+    let of = |device, release| among(AFFECTED, radv, device, release);
+    let mesa_26_0_8 = (26 << 22) | 8;
+    for (device, release) in [
+        (0x15bf, mesa_26_0_8),
+        (0x744c, mesa_26_0_8),
+        (0x744c, MESA_26_2_4),
+        (0x15bf, MESA_26_2_4 + 1),
+    ] {
+        assert!(
+            of(device, release).contains(&PREPROCESS),
+            "{device:#x} {release:#x}"
+        );
+    }
+    assert!(!of(0x15bf, MESA_26_2_4).contains(&PREPROCESS));
+    let nvidia = among(
+        AFFECTED,
+        Some(DriverId::NVIDIA_PROPRIETARY),
+        0x15bf,
+        mesa_26_0_8,
+    );
+    assert!(!nvidia.contains(&PREPROCESS));
 }
 
 /// Each clean identity is a measured one: a committed profile of the driver, GPU and release

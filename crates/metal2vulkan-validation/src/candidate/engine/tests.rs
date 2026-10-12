@@ -2482,3 +2482,41 @@ fn only_the_default_fetch_policys_runs_are_stored() {
         false
     ));
 }
+
+/// An allocation's guest address names a buffer whatever device address it has: NVIDIA's lie
+/// below 2^32 (a vertex buffer at 0x5020000 on an RTX 3090), where a guest address equal to it
+/// was a nil buffer's offset to a record, and RADV's sign-extended upper half
+/// (0xffff800100040000 on a Radeon 780M) lies among the records, from 2^63. One offset for all,
+/// on the address read as signed, keeps them apart and in [2^32, 2^63); an address it cannot move
+/// there is refused.
+#[test]
+fn addressed_allocations_take_metal_addresses() {
+    use metal2vulkan::bind::indirect_commands::{records_address, BufferBinding};
+    let metal = |address: BufferAddress| {
+        let names = BufferBinding {
+            address: address.guest,
+            attribute_stride: None,
+        }
+        .names_buffer();
+        names && address.guest < records_address(0)
+    };
+    let low = BufferAddress::addressed(0x502_0000).unwrap();
+    assert_eq!(low.host, Some(0x502_0000));
+    assert!(metal(low), "{low:x?}");
+    let next = BufferAddress::addressed(0x502_0000 + 256).unwrap();
+    assert_eq!(next.guest - low.guest, 256);
+    let radv = BufferAddress::addressed(0xffff_8001_0004_0000).unwrap();
+    assert!(metal(radv) && radv.guest < low.guest, "{radv:x?}");
+    // The top of the device's space and its bottom stay next to each other.
+    let top = BufferAddress::addressed(u64::MAX).unwrap();
+    let bottom = BufferAddress::addressed(0).unwrap();
+    assert!(metal(top) && metal(bottom), "{top:x?} {bottom:x?}");
+    assert_eq!(bottom.guest - top.guest, 1);
+    let lowest = BufferAddress::addressed(0xffff_8000_0000_0000).unwrap();
+    assert_eq!(lowest.guest, BufferBinding::MIN_BUFFER_ADDRESS);
+    let highest = BufferAddress::addressed(records_address(0) - BufferAddress::GUEST_OFFSET - 1);
+    assert_eq!(highest.unwrap().guest, records_address(0) - 1);
+    assert!(BufferAddress::addressed(0xffff_7fff_ffff_ffff).is_err());
+    assert!(BufferAddress::addressed(records_address(0) - BufferAddress::GUEST_OFFSET).is_err());
+    assert!(BufferAddress::addressed(records_address(1)).is_err());
+}

@@ -12,3 +12,14 @@ slow-timeout = { period = "60s", terminate-after = 20 }
 [[profile.default.overrides]]
 filter = 'test(/::soak_/)'
 slow-timeout = { period = "300s", terminate-after = 24 }
+
+# The exit lanes' timing checks each run alone. Each measures a child process's exit, from its
+# last line to its end, against 1.5 s: below the exit hook's own bound, so a hook that waited it
+# out fails. That time holds the driver's device destruction and process teardown, which the
+# runtime does not set: on an RTX 3090 (NVIDIA 615.71.09) `vkDestroyDevice` took 54 ms alone (63
+# devices, at most 57 ms) and up to 2 s while other lane processes used the GPU (over 500 ms for
+# 39 of 72 beside `runtime_lane::framebuffer_fetch`); exits that took 87 to 97 ms alone took 0.3
+# to 3.1 s beside other lanes there, and 1.8 to 2 s in an RTX 5080 Laptop GPU's whole suite.
+[[profile.default.overrides]]
+filter = 'package(metal2vulkan-validation) & test(/^runtime_lane::exits::(pending_work_stays_pending_at_exit|exits_from_the_runtime_s_threads_are_clean|an_exit_while_a_host_step_waits_is_clean|an_exit_waits_for_a_cpu_device_s_work|an_exit_while_submitting_is_clean|exits_right_after_learning_of_completion_are_clean)$/)'
+threads-required = 'num-test-threads'

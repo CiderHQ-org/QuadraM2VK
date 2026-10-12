@@ -51,8 +51,10 @@ use ash::vk;
 use metal2vulkan::device::DriverFact;
 use metal2vulkan::error::Feature;
 use metal2vulkan_runtime::{
-    host_time, CommandBuffer, CommandQueue, Device, Error, EventRef, ResourceOptions, SharedEvent,
+    host_time, CommandBuffer, CommandQueue, Degradation, Device, Error, EventRef, ResourceOptions,
+    SharedEvent,
 };
+use std::collections::BTreeSet;
 use std::ffi::{CStr, CString};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -189,6 +191,22 @@ fn from_host_by_driver(device: &Device) -> bool {
         .properties()
         .driver_facts
         .contains(&DriverFact::TimestampsWaitForEveryQueue)
+}
+
+/// The kind a read of a timed command buffer's GPU times announces on `device`, made with the
+/// default options, as `command_buffers_are_timed_in_the_hosts_time_base` checks: [`FROM_HOST`]'s
+/// where its driver answers them from the host, [`GPU_TIMES`]' where it writes timestamps it does
+/// not calibrate, none elsewhere (a calibrating device, or one that writes no timestamps and
+/// refuses the read).
+pub(super) fn read_kinds(device: &Device) -> BTreeSet<Degradation> {
+    if from_host_by_driver(device) {
+        return BTreeSet::from(FROM_HOST);
+    }
+    let venue = Venue::of(device);
+    match venue.bits > 0 && !venue.calibrates() {
+        true => BTreeSet::from(GPU_TIMES),
+        false => BTreeSet::new(),
+    }
 }
 
 /// `cb`'s four times: GPU start and end, kernel start and end.

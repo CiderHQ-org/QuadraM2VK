@@ -13,10 +13,16 @@
 //!   making is no longer the record's bytes (RADV's after its first hit from a compile's record is
 //!   not, and settles: EVs PRDP-hl3-radv, PRDP-hl4-radv), and counts every other read unchanged
 //!   (`driver_data_unchanged`).
-//! - **Overwrite.** A record holding another pipeline's data (another state's record copied over
-//!   it) is loaded: the driver's miss where the other's data lacks this pipeline, and the making
-//!   writes the record again, holding its own pipeline now; its hit where the two states' data
-//!   are alike. A later device then hits it, writing it again only where the data changed.
+//! - **Overwrite.** A record holding another pipeline's data (a dispatch's compute pipeline's
+//!   record copied over each of a render state's) is loaded: the driver's miss, and where the
+//!   driver's data holds its pipelines the making adds its own, so the record is written again,
+//!   holding this pipeline now. A later device then hits it, writing it again only where the data
+//!   changed. The other pipeline is a compute pipeline, which no making of a render state is on
+//!   any driver: another render state's would not do, since a driver may key that state's
+//!   libraries as this one's (NVIDIA does for `RGBA8Unorm` and `BGRA8Unorm` targets) and its
+//!   data for one pipeline need not be the same bytes from one making to the next (NVIDIA
+//!   615.71.09's on an RTX 3090 and an RTX 5080 Laptop are not), so no comparison of two
+//!   makings' bytes tells whether one's data holds the other's pipeline.
 //! - **Makings at once.** Two processes making the same pipeline on one directory at the same
 //!   time leave one whole record of it and no temporary file, which a later device hits.
 //!
@@ -25,8 +31,9 @@
 //! state's creation makes two, its pre-rasterization and fragment shader libraries, and the points'
 //! draw one, its pre-rasterization library (Metal biases depth for triangles only, so the points'
 //! pre-rasterization state is another, and their fragment's is the state's). Every count above is
-//! of those makings there; a record written over another's holds another pipeline's data whichever
-//! pairs them. The driver reports no hit or miss of a library, which [`assert_reported`] takes.
+//! of those makings there; a library's record written over with the compute pipeline's data holds
+//! another pipeline's data, whichever library it is. The driver reports no hit or miss of a
+//! library, which [`assert_reported`] takes.
 //!
 //! **The driver's own cache is fresh for each device**: Mesa's and NVIDIA's shader disk caches are
 //! pointed into a new scratch directory before each device or maker process is made
@@ -246,6 +253,33 @@ fn draw(
     // SAFETY: the buffer's contents hold its `row * SIDE` bytes, and the command buffer that
     // wrote them completed.
     unsafe { std::slice::from_raw_parts(contents.as_ptr(), (row * SIDE) as usize) }.to_vec()
+}
+
+/// Dispatch the fixture's `scale_and_offset` over four values and wait: the making of its
+/// compute pipeline, which no making of a render state is.
+fn dispatch(device: &Device, library: &Library) {
+    let function = library.new_function_with_name("scale_and_offset").unwrap();
+    let state = device
+        .new_compute_pipeline_state_with_function(&function, &PipelineOptions::default())
+        .unwrap();
+    let input = device
+        .new_buffer_with_bytes(&[0u8; 16], ResourceOptions::shared())
+        .unwrap();
+    let output = device.new_buffer(16, ResourceOptions::shared()).unwrap();
+    let queue = device.new_command_queue().unwrap();
+    let command_buffer = queue.command_buffer().unwrap();
+    let mut encoder = command_buffer.compute_command_encoder().unwrap();
+    encoder.set_compute_pipeline_state(&state).unwrap();
+    encoder.set_buffer(Some(&input), 0, 0).unwrap();
+    encoder.set_buffer(Some(&output), 0, 1).unwrap();
+    encoder.set_bytes(&1.0f32.to_le_bytes(), 2).unwrap();
+    encoder
+        .dispatch_threads(Size::new(4, 1, 1), Size::new(4, 1, 1))
+        .unwrap();
+    encoder.end_encoding().unwrap();
+    command_buffer.commit().unwrap();
+    command_buffer.wait_until_completed_for(WAIT).unwrap();
+    assert_eq!(command_buffer.status(), CommandBufferStatus::Completed);
 }
 
 /// The driver cache counts of `statistics`, printed for `which`.
@@ -685,17 +719,17 @@ fn a_later_device_makes_every_pipeline_an_earlier_one_made_from_its_records() {
 #[test]
 fn a_record_holding_another_pipeline_s_data_is_written_again() {
     let messages = Messages::default();
-    // The record of an `RGBA8Unorm` state's making, in a directory of its own.
+    // The record of a dispatch's compute pipeline, in a directory of its own.
     let other = ScratchCache::new().unwrap();
-    let (driver, foreign, makings) = {
+    let (driver, foreign) = {
         let _driver_cache = DriverCache::fresh();
         let device = validated_device_with(TEST_DEVICE, &messages, other.path(), |_| {}).unwrap();
         let driver = DriverData::of(&device);
-        let _state = state(&device, &library(&device), PixelFormat::RGBA8Unorm);
+        dispatch(&device, &library(&device));
         let made = device.shader_cache_statistics();
-        report("the other state", &made);
+        report("the compute pipeline", &made);
         assert_eq!(kept(&made), driver.whole(), "the driver's data: {driver:?}");
-        (driver, records(other.path()), Makings::of(&device))
+        (driver, records(other.path()))
     };
     // Data that ends inside its header is never kept (the module docs): no record to copy.
     if !driver.whole() {
@@ -708,22 +742,23 @@ fn a_record_holding_another_pipeline_s_data_is_written_again() {
         return;
     }
     let foreign: Vec<Vec<u8>> = foreign.into_values().collect();
-    assert_eq!(
-        foreign.len() as u64,
-        makings.creation,
-        "the other state's records"
-    );
-    // A `BGRA8Unorm` state's makings: their records, then the other's bytes put in their places,
-    // each record in path order taking the other's in path order: another pipeline's data.
+    assert_eq!(foreign.len(), 1, "the compute pipeline's record");
+    let foreign = &foreign[0];
+    // A `BGRA8Unorm` state's makings: their records, then the compute pipeline's bytes put in
+    // each one's place: another pipeline's data.
     let cache = ScratchCache::new().unwrap();
     let format = PixelFormat::BGRA8Unorm;
-    let target = {
+    let (target, makings) = {
         let _driver_cache = DriverCache::fresh();
         let device = validated_device_with(TEST_DEVICE, &messages, cache.path(), |_| {}).unwrap();
         let state = state(&device, &library(&device), format);
+        let makings = Makings::of(&device);
         let made = device.shader_cache_statistics();
         assert_reported("its own state", &made, (0, makings.creation));
-        draw(&device, &state, (format, PrimitiveType::Triangle))
+        (
+            draw(&device, &state, (format, PrimitiveType::Triangle)),
+            makings,
+        )
     };
     let own: Vec<(PathBuf, Vec<u8>)> = records(cache.path()).into_iter().collect();
     assert_eq!(
@@ -731,38 +766,29 @@ fn a_record_holding_another_pipeline_s_data_is_written_again() {
         makings.creation,
         "its own state's records"
     );
-    // Each record holds the driver's data; where that holds no pipeline, the other's record is
-    // this one's own bytes, which the making loads and finds its data, writing nothing.
-    let all: Vec<&[u8]> = foreign
-        .iter()
-        .chain(own.iter().map(|(_, bytes)| bytes))
-        .map(|bytes| &bytes[..])
+    // Each record holds the driver's data; where that holds no pipeline, the compute pipeline's
+    // record is each one's own bytes, which the making loads and finds its data, writing nothing.
+    let all: Vec<&[u8]> = std::iter::once(&foreign[..])
+        .chain(own.iter().map(|(_, bytes)| &bytes[..]))
         .collect();
     driver.assert_records(&all);
-    for ((path, _), foreign) in own.iter().zip(&foreign) {
+    for (path, _) in &own {
         std::fs::write(cache.path().join(path), foreign).unwrap();
     }
-    // Loaded, then the driver's: its hit where the other's data holds this pipeline too (the two
-    // states' records alike: a driver that keeps one binary for both), else its miss; where it
-    // holds pipelines, a miss adds this one, so the record is written again. Written again
-    // exactly where the data changed.
-    let hits: Vec<bool> = own
-        .iter()
-        .zip(&foreign)
-        .map(|((_, own), foreign)| driver.holds() && own == foreign)
-        .collect();
-    let hit_count = hits.iter().filter(|&&hit| hit).count() as u64;
+    // Loaded, then the driver's miss: the compute pipeline's data holds no making of a render
+    // state. Where the driver's data holds its pipelines, the miss adds this one, so each record
+    // is written again; where it holds none, the data stays the record's bytes.
     let rewritten = {
         let _driver_cache = DriverCache::fresh();
         let device = validated_device_with(TEST_DEVICE, &messages, cache.path(), |_| {}).unwrap();
         let none = device.shader_cache_statistics();
         let state = state(&device, &library(&device), format);
         let made = device.shader_cache_statistics();
-        report("the other's data in its place", &made);
+        report("the compute pipeline's data in its place", &made);
         assert_reported(
-            "the other's data in its place",
+            "the compute pipeline's data in its place",
             &made,
-            (hit_count, makings.creation - hit_count),
+            (0, makings.creation),
         );
         let rewritten: Vec<Vec<u8>> = own
             .iter()
@@ -770,23 +796,22 @@ fn a_record_holding_another_pipeline_s_data_is_written_again() {
             .collect();
         let changed = rewritten
             .iter()
-            .zip(&foreign)
-            .filter(|(rewritten, foreign)| rewritten != foreign)
+            .filter(|rewritten| *rewritten != foreign)
             .count() as u64;
         assert_loaded(
-            "the other's data in its place",
+            "the compute pipeline's data in its place",
             (&none, &made),
             makings.creation,
             changed,
         );
-        for ((rewritten, foreign), hit) in rewritten.iter().zip(&foreign).zip(&hits) {
-            if driver.holds() && !hit {
-                assert_ne!(
-                    rewritten, foreign,
-                    "the driver's miss added this pipeline to the record"
-                );
-            }
-        }
+        assert_eq!(
+            changed,
+            match driver.holds() {
+                true => makings.creation,
+                false => 0,
+            },
+            "the driver's misses added this pipeline to each record"
+        );
         assert_eq!(
             draw(&device, &state, (format, PrimitiveType::Triangle)),
             target

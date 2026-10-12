@@ -593,13 +593,11 @@ fn execute(
         .enabled
         .features
         .contains(&VkFeature::BufferDeviceAddress);
-    // An allocation is its own guest: with a device address the guest address is that address.
+    // With a device address an allocation's guest address lies a fixed offset above it
+    // (`BufferAddress::addressed`), else at its synthetic base.
     let own_guest = |allocation: &Allocation, synthetic: BufferAddress| match allocation.address {
-        Some(host) => BufferAddress {
-            guest: host,
-            host: Some(host),
-        },
-        None => synthetic,
+        Some(host) => BufferAddress::addressed(host).map_err(ExecutorError::Failed),
+        None => Ok(synthetic),
     };
     let synthetic_used = synthetic_used_addresses(case).map_err(ExecutorError::Failed)?;
     let records = records_ids(case).map_err(ExecutorError::Failed)?;
@@ -618,7 +616,7 @@ fn execute(
         // A command buffer's record storage lies at its ID's records address.
         let address = match records.get(&key) {
             Some(&id) => records_storage(id, allocation.address),
-            None => own_guest(&allocation, synthetic_used[&key]),
+            None => own_guest(&allocation, synthetic_used[&key])?,
         };
         embedded_addresses.insert(key, address);
         embedded.insert(key, allocation);
@@ -662,12 +660,12 @@ fn execute(
         .iter()
         .chain(&table_buffers)
         .map(|(&index, allocation)| {
-            (
+            Ok((
                 index,
-                own_guest(allocation, BufferAddress::synthetic(index)),
-            )
+                own_guest(allocation, BufferAddress::synthetic(index))?,
+            ))
         })
-        .collect();
+        .collect::<Result<_, ExecutorError>>()?;
     // The commands the host encodes, written into their record storage before the producer runs,
     // each buffer at its case buffer's guest address.
     for (key, command) in &case.command_buffers {

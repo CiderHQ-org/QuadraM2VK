@@ -1432,6 +1432,19 @@ impl VulkanContext {
             .unwrap_or_default()
     }
 
+    /// Whether the device replay's generated-commands executions are preprocessed apart, as the
+    /// runtime's are on the driver that executes (`generated_commands::preprocess_apart` of its
+    /// queried description, the device as it is, under a restriction too); also where the query
+    /// failed, since preprocessing apart runs right on every driver.
+    pub(super) fn preprocesses_generated_commands_apart(&self) -> bool {
+        match &self.queried_description {
+            Ok(description) => {
+                metal2vulkan_runtime::generated_commands::preprocess_apart(description)
+            }
+            Err(_) => true,
+        }
+    }
+
     /// Open a device of `device_type` for `purpose`: the only Vulkan device creation in this crate,
     /// and with its probes the only caller of [`create_instance`].
     fn new(device_type: DeviceType, purpose: Purpose) -> Result<Self, String> {

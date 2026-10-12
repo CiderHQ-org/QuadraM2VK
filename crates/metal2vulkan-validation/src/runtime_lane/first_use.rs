@@ -51,6 +51,7 @@
 use super::degrade_notices::{
     assert_once_allowing, forced, made_compute_kinds, shared_in_system_memory,
 };
+use super::gpu_times::read_kinds;
 use super::host_memory::{no_copy, not_importable, recording, Mapping, Seen, GUEST_PAGE};
 use super::rebind_reach::{node, walk, Outputs, Uses, A, POINTER_WALKER};
 use super::rebinds::rebind;
@@ -68,7 +69,7 @@ use metal2vulkan::pipeline::{ComputePipelineDescriptor, StageSource};
 use metal2vulkan::vk::DriverId;
 use metal2vulkan_devtools::llvm_assemble;
 use metal2vulkan_runtime::{
-    BlitOption, Buffer, CommandBuffer, CommandBufferStatus, CommandQueue, CommitFailure,
+    host_time, BlitOption, Buffer, CommandBuffer, CommandBufferStatus, CommandQueue, CommitFailure,
     ComputePipelineState, CpuCacheMode, DebugMessage, Degradation, Device, Error,
     HazardTrackingMode, HeapDescriptor, HeapType, LoadAction, Origin, PipelineOptions, Region,
     RenderPassDescriptor, ResourceOptions, Size, StorageMode, StoreAction, Submission,
@@ -85,8 +86,11 @@ use std::time::{Duration, Instant};
 /// ([`release`]): far longer than every call a test makes while it runs.
 const BUSY: Duration = Duration::from_secs(2);
 
-/// The least time the busy kernel's rate is measured over.
+/// The least GPU time the busy kernel's rate is measured over, at that rate.
 const MEASURED: Duration = Duration::from_millis(50);
+
+/// The most runs at one cap the busy kernel's rate is measured by.
+const RUNS: usize = 3;
 
 /// The textures' side, format and bytes per row: one guest page of texels.
 const SIDE: u64 = 64;
@@ -111,21 +115,34 @@ const UNBOUND_CASES: [&str; 3] = [
 /// test raises it ([`release`]) or its cap of loads runs out, then gives up (as
 /// `framebuffer_fetch::storage_forms` holds a copy), and its cap for about [`BUSY`]. Shared with
 /// `compressed_decode`'s lane of writes behind work in flight.
+///
+/// Its cap, not the flag, ends it on an RTX 3090 (NVIDIA 615.71.09): alone, each of six busy
+/// works released 0 to 50 ms into its spin ran its whole cap, 2.0 s on the GPU, and published
+/// nothing.
 pub(super) struct Busy {
     state: ComputePipelineState,
     cap: u32,
     /// The kinds its pipeline state's making announced where the device had not
-    /// (`made_compute_kinds`).
+    /// (`made_compute_kinds`), and its measurement's reads of GPU times (`gpu_times::read_kinds`).
     pub(super) made: BTreeSet<Degradation>,
 }
 
 impl Busy {
-    /// The kernel, its cap grown until a run takes [`MEASURED`], then scaled to [`BUSY`]: a
-    /// run's wall time bounds its GPU time, so the busy work lasts at least about that long.
-    /// The first run is not measured: it holds the device's first use of the pipeline and of a
-    /// command buffer, which on a loaded host took past [`MEASURED`] by themselves, and a cap
-    /// scaled from it spun for microseconds (lavapipe in master's gate at 409546f2: a test of a 0.5
-    /// s busy work took 0.35 s whole, and its calls saw the end mark).
+    /// The kernel, its cap the loads of [`BUSY`] at its rate: the fastest of every measured run,
+    /// in loads per second of the run's time on the GPU where the device answers it
+    /// ([`gpu_took`]). The cap grows sixteenfold until a run takes [`MEASURED`] at that rate, and
+    /// a cap whose run takes it is run again, up to [`RUNS`] times. The GPU's other work only
+    /// slows a run, so the fastest is the kernel's own rate unless every run was slowed; and a
+    /// run's wall time held that work too: on an RTX 3090 (NVIDIA 615.71.09) beside the lane's
+    /// other tests, which run such kernels too, a run of 4096 loads, under a millisecond on the
+    /// GPU, took about 200 ms from its commit, as long as another process's run, and the cap
+    /// scaled from that wall time, 37559 loads, spun for about 7 ms, less than a call took there
+    /// (7.6 ms); and three runs of 65536 loads, about 12 ms alone, each took 200 to 420 ms from
+    /// their GPU start to their GPU end. The first run is not measured: it holds the
+    /// device's first use of the pipeline and of a command buffer, which on a loaded host took
+    /// past [`MEASURED`] by themselves, and a cap scaled from it spun for microseconds (lavapipe in
+    /// master's gate at 409546f2: a test of a 0.5 s busy work took 0.35 s whole, and its calls
+    /// saw the end mark).
     pub(super) fn new(device: &Device, queue: &CommandQueue) -> Busy {
         let ll =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/public/engine/rfs_agx_yield.ll");
@@ -143,35 +160,57 @@ impl Busy {
                 &PipelineOptions::default(),
             )
             .unwrap();
+        let mut made = made_compute_kinds(device, function.function_descriptor());
+        made.extend(read_kinds(device));
         let mut busy = Busy {
             state,
             cap: 1 << 12,
-            made: made_compute_kinds(device, function.function_descriptor()),
+            made,
         };
-        let (first, _) = busy.commit(device, queue);
-        first.wait_until_completed_for(WAIT).unwrap();
-        assert_eq!(first.error(), None, "the busy work");
-        let took = loop {
-            let at = Instant::now();
-            let (command_buffer, mark) = busy.commit(device, queue);
-            command_buffer.wait_until_completed_for(WAIT).unwrap();
-            let took = at.elapsed();
-            assert_eq!(command_buffer.error(), None, "the busy work");
-            assert_eq!(read_mark(&mark), ENDED, "the busy work's end mark");
-            if took >= MEASURED || busy.cap >= 1 << 28 {
-                break took;
+        busy.run(device, queue);
+        // The fastest rate of every run, in loads per second, and each run's loads, time on the
+        // GPU and time from commit to completion, for the printed line.
+        let mut rate = 0.0_f64;
+        let mut runs = Vec::new();
+        let at_rate = |cap: u32, rate: f64| f64::from(cap) / rate >= MEASURED.as_secs_f64();
+        loop {
+            for _ in 0..RUNS {
+                let (took, wall) = busy.run(device, queue);
+                rate = rate.max(f64::from(busy.cap) / took.as_secs_f64());
+                runs.push((busy.cap, took, wall));
+                if !at_rate(busy.cap, rate) {
+                    break;
+                }
+            }
+            if at_rate(busy.cap, rate) || busy.cap >= 1 << 28 {
+                break;
             }
             busy.cap <<= 4;
-        };
-        let cap = f64::from(busy.cap) * BUSY.as_secs_f64() / took.as_secs_f64();
-        let measured = busy.cap;
-        busy.cap = cap.clamp(1.0, f64::from(u32::MAX)) as u32;
+        }
+        busy.cap = (rate * BUSY.as_secs_f64()).clamp(1.0, f64::from(u32::MAX)) as u32;
+        let runs: Vec<String> = (runs.iter())
+            .map(|(cap, took, wall)| format!("{cap} in {took:.2?} ({wall:.2?})"))
+            .collect();
         println!(
-            "BUSY-CAP on {}: {} loads, from {measured} in {took:?}",
+            "BUSY-CAP on {}: {} loads, at the fastest rate of the runs of loads in GPU time (from \
+             commit to completion): {}",
             device.name(),
-            busy.cap
+            busy.cap,
+            runs.join(", ")
         );
         busy
+    }
+
+    /// Run the busy work once, released by nothing: the time it took on the GPU ([`gpu_took`]),
+    /// and from its commit to its completion.
+    fn run(&self, device: &Device, queue: &CommandQueue) -> (Duration, Duration) {
+        let at = Instant::now();
+        let (command_buffer, mark) = self.commit(device, queue);
+        command_buffer.wait_until_completed_for(WAIT).unwrap();
+        let wall = at.elapsed();
+        assert_eq!(command_buffer.error(), None, "the busy work");
+        assert_eq!(read_mark(&mark), ENDED, "the busy work's end mark");
+        (gpu_took(&command_buffer, wall), wall)
     }
 
     /// Commit the busy work on `queue`: the spin, then a blit that writes the end mark into the
@@ -202,6 +241,19 @@ impl Busy {
         blit.fill_buffer(&words, 4..8, 1).unwrap();
         blit.end_encoding().unwrap();
         words
+    }
+}
+
+/// The time `command_buffer`, completed in `wall` from its commit, took on the GPU: its GPU end
+/// less its GPU start, where the device answers them (`CommandBuffer::gpu_start_time`) apart,
+/// else `wall`, which holds it.
+fn gpu_took(command_buffer: &CommandBuffer, wall: Duration) -> Duration {
+    match (
+        command_buffer.gpu_start_time(),
+        command_buffer.gpu_end_time(),
+    ) {
+        (Ok(start), Ok(end)) if end > start => Duration::from_secs_f64(end - start).min(wall),
+        _ => wall,
     }
 }
 
@@ -346,6 +398,8 @@ fn zero_contents(buffer: &Buffer, len: u64) -> bool {
 /// (`Calls::announced_wait`) and must be a test's last timed call.
 struct Calls<'a> {
     device: &'a Device,
+    /// The busy work, and the buffer of its end mark.
+    busy: &'a CommandBuffer,
     mark: Buffer,
     took: Vec<(String, Duration)>,
     /// Whether the device's driver is lavapipe, whose object making waits for its queue's work.
@@ -360,10 +414,11 @@ struct Calls<'a> {
 }
 
 impl<'a> Calls<'a> {
-    fn new(device: &'a Device, mark: Buffer) -> Self {
+    fn new(device: &'a Device, busy: &'a CommandBuffer, mark: Buffer) -> Self {
         let driver = device.properties().description.driver_id;
         Calls {
             device,
+            busy,
             mark,
             took: Vec::new(),
             queue_lock: driver == Some(DriverId::MESA_LLVMPIPE),
@@ -402,9 +457,9 @@ impl<'a> Calls<'a> {
             self.notices.extend(messages.take_notices());
         }
         let before = self.device.work_counts().internal_submissions;
-        let at = Instant::now();
+        let (at, begun) = (Instant::now(), host_time());
         let made = call();
-        let took = at.elapsed();
+        let (took, returned) = (at.elapsed(), host_time());
         let internal = self.device.work_counts().internal_submissions - before;
         let announced = announcing.and_then(|(messages, kind)| {
             let notices = messages.take_notices();
@@ -437,15 +492,34 @@ impl<'a> Calls<'a> {
             self.took.push((what, took));
             return made;
         }
-        assert_eq!(
-            read_mark(&self.mark),
-            0,
-            "{what} returned only once the GPU's busy work ended ({took:?}, {internal} internal \
-             submissions) on {}: it waited for it, where Metal's returns at once",
-            self.device.name()
-        );
+        if read_mark(&self.mark) != 0 {
+            panic!(
+                "{what} returned only once the GPU's busy work ended ({took:?}, {internal} \
+                 internal submissions) on {}: it waited for it, where Metal's returns at once; {}",
+                self.device.name(),
+                self.span(begun, returned)
+            );
+        }
         self.took.push((what, took));
         made
+    }
+
+    /// Where the busy work ran on the GPU against a call from host time `begun` to `returned`,
+    /// once it completed, in milliseconds from the call's start: a failure's report.
+    fn span(&self, begun: f64, returned: f64) -> String {
+        self.busy.wait_until_completed_for(WAIT).unwrap();
+        let ms = |at: f64| (at - begun) * 1e3;
+        match (self.busy.gpu_start_time(), self.busy.gpu_end_time()) {
+            (Ok(start), Ok(end)) => format!(
+                "the busy work ran on the GPU from {:.1} ms to {:.1} ms ({:.1} ms), and the call \
+                 returned at {:.1} ms, from the call's start",
+                ms(start),
+                ms(end),
+                (end - start) * 1e3,
+                ms(returned)
+            ),
+            (start, _) => format!("the busy work's GPU times: {start:?}"),
+        }
     }
 
     /// How the calls returned against the busy work, for the test's summary line.
@@ -525,7 +599,7 @@ fn new_resources_wait_for_no_gpu_work() {
 
         let (busy_work, mark) = busy.commit(device, &queue);
         scheduled(&busy_work);
-        let mut calls = Calls::new(device, mark);
+        let mut calls = Calls::new(device, &busy_work, mark);
         assert_eq!(
             read_mark(&calls.mark),
             0,
@@ -923,7 +997,7 @@ fn neutrals_and_sparse_textures_wait_for_no_gpu_work() {
 
         let (busy_work, mark) = busy.commit(device, &queue);
         scheduled(&busy_work);
-        let mut calls = Calls::new(device, mark);
+        let mut calls = Calls::new(device, &busy_work, mark);
         assert_eq!(
             read_mark(&calls.mark),
             0,

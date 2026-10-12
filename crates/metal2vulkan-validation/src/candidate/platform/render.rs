@@ -287,13 +287,11 @@ fn execute(
         class,
         index,
     };
-    // An allocation is its own guest: with a device address the guest address is that address.
+    // With a device address an allocation's guest address lies a fixed offset above it
+    // (`BufferAddress::addressed`), else at its synthetic base.
     let own_guest = |allocation: &Allocation, synthetic: BufferAddress| match allocation.address {
-        Some(host) => BufferAddress {
-            guest: host,
-            host: Some(host),
-        },
-        None => synthetic,
+        Some(host) => BufferAddress::addressed(host).map_err(ExecutorError::Failed),
+        None => Ok(synthetic),
     };
     let synthetic_used = graphics::synthetic_used_addresses(case).map_err(ExecutorError::Failed)?;
     let records = graphics::records_ids(case).map_err(ExecutorError::Failed)?;
@@ -312,7 +310,7 @@ fn execute(
         // A command buffer's record storage lies at its ID's records address.
         let address = match records.get(&key) {
             Some(&id) => records_storage(id, allocation.address),
-            None => own_guest(&allocation, synthetic_used[&key]),
+            None => own_guest(&allocation, synthetic_used[&key])?,
         };
         embedded_addresses.insert(key, address);
         embedded.insert(key, allocation);
@@ -406,12 +404,10 @@ fn execute(
         .iter()
         .chain(&table_buffers)
         .map(|(&(stage, index), allocation)| {
-            (
-                (stage, index),
-                own_guest(allocation, graphics::synthetic_address(stage, index)),
-            )
+            let address = own_guest(allocation, graphics::synthetic_address(stage, index))?;
+            Ok(((stage, index), address))
         })
-        .collect();
+        .collect::<Result<_, ExecutorError>>()?;
     // The guest address of a case buffer of the stage that owns a command buffer.
     let case_address = |(stage, _, _): (Stage, u32, u32), buffer: u32| {
         addresses.get(&(stage, buffer)).map(|a| a.guest)

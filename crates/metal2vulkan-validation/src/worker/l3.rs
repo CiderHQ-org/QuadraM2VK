@@ -14,7 +14,8 @@
 //! The stage keeps the worker's pid and process group, so the parent's deadline and memory
 //! sampling go on uninterrupted, runs `spirv-val` on the module's file without reading it
 //! ([`serve`]), folds L3's result into the attempt ([`crate::engine::Attempt::settle_l3`]), and
-//! writes the worker's one report, its allocator peak the larger of the translation's and its own.
+//! writes the worker's one report, its allocator peak and resident high water each the larger of
+//! the translation's and its own.
 
 use crate::engine::{Attempt, L3Plan, PendingL3};
 use serde::de::DeserializeOwned;
@@ -28,8 +29,9 @@ pub const STAGE_ARG: &str = "--l3-stage";
 /// What the translation hands the L3 stage, in the pending file.
 #[derive(Serialize, Deserialize)]
 struct Pending<R> {
-    /// The translation's counting-allocator process peak ([`super::alloc::peak_bytes`]).
-    allocator_peak_bytes: Option<u64>,
+    /// The translation's counting-allocator process peak and resident high water
+    /// ([`super::Peaks::now`]), which the exec ends.
+    peaks: super::Peaks,
     /// The worker's result, its attempt as it stands if `spirv-val` accepts the module.
     result: R,
     plan: L3Plan,
@@ -58,7 +60,7 @@ pub fn report_after_l3<R: Serialize>(
     std::fs::write(&words_path, bytes)
         .map_err(|error| format!("write {}: {error}", words_path.display()))?;
     let text = serde_json::to_vec(&Pending {
-        allocator_peak_bytes: super::alloc::peak_bytes(),
+        peaks: super::Peaks::now(),
         result,
         plan,
         words: words_path,
@@ -88,7 +90,8 @@ pub fn report_after_l3<R: Serialize>(
 
 /// The L3 stage of a worker whose result is an `R`: read the pending file `pending`, run
 /// `spirv-val` on the module, fold its result into the attempt `attempt` finds in the result, and
-/// [`super::report`] it, its allocator peak the larger of the translation's and this stage's.
+/// [`super::report`] it, its allocator peak and resident high water each the larger of the
+/// translation's and this stage's.
 pub fn serve<R: Serialize + DeserializeOwned>(
     pending: &Path,
     attempt: impl FnOnce(&mut R) -> &mut Attempt,
@@ -98,7 +101,7 @@ pub fn serve<R: Serialize + DeserializeOwned>(
         std::fs::read(pending).map_err(|error| format!("read {}: {error}", pending.display()))?;
     let _ = std::fs::remove_file(pending);
     let Pending {
-        allocator_peak_bytes,
+        peaks,
         mut result,
         plan,
         words,
@@ -109,8 +112,5 @@ pub fn serve<R: Serialize + DeserializeOwned>(
     let checked = std::panic::catch_unwind(|| plan.check_file(&words));
     let _ = std::fs::remove_file(&words);
     attempt(&mut result).settle_l3(checked);
-    super::report_with_peak(
-        &result,
-        allocator_peak_bytes.max(super::alloc::peak_bytes()),
-    )
+    super::report_with_peaks(&result, peaks.max(super::Peaks::now()))
 }

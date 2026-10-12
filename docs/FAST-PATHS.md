@@ -124,3 +124,17 @@ driver's. Each is open work.
   (as the legacy texture read and the AIR 2.7 and 2.8 forms are), decoded to the same operation and
   tested with a synthetic fixture; a declaration whose operands mean something else stays refused.
   It is not built.
+- **A loop that Apple's MSL compiler folds into 33-bit arithmetic fails to make on MoltenVK.**
+  Apple's MSL front end (Metal compiler 32023.921) can rewrite a loop that sums its counter
+  (`1 + 2 + ... + n`) into a closed form computed in 33-bit integers (`zext i32` to `i33`,
+  `mul i33`, `lshr i33`). Where that form lands in the kernel's constant program, the M3 Max's back
+  end (`applegpu_g15s`) cannot legalize the 33-bit zero extension ("unable to legalize
+  instruction ... (s33)", in `agc.main.constant_program`). Metal's compiler service then ends,
+  and MoltenVK fails the pipeline's making (`VK_ERROR_INITIALIZATION_FAILED`,
+  `XPC_ERROR_CONNECTION_INTERRUPTED`). The runtime returns that failure: a dispatch's command
+  buffer completes with `CommandBufferError::PipelineCreation`, and an indirect command's commit
+  returns `Error::Vulkan`. Hand-written MSL of the same loop fails the same way on Metal. The AIR
+  Metal compiles directly gets no such rewrite, and runs. Measured on the committed case
+  `authored-four-iteration-loop`: offline with `xcrun metal` and `metal-tt -arch applegpu_g15s`,
+  and in the runtime lane on an M3 Max with macOS 26.7. No form of the loop is known that avoids
+  the rewrite for every such loop, so it is not built.

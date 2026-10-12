@@ -120,14 +120,59 @@ fn the_dispatch_words_are_distinct_and_their_results_are_three_x_plus_one() {
     }
 }
 
+/// The GPUs (`VkPhysicalDeviceDriverProperties::driverID`, `deviceID`) whose driver, measured, does
+/// not make a copy's write into a linear image visible to a later copy out of a buffer over the
+/// same memory in the same submission, across a global memory barrier from the transfer stage's
+/// writes to its reads: Vulkan makes the two host-accessible aliases (a buffer, and a linear image
+/// in `GENERAL`) read each other's writes, and the barrier orders all memory. The copy out reads
+/// the bytes from before the image's copy (the alias's `buffer_reads_image` mismatches every byte
+/// whose old and new values differ: 68 of 68 for `R8`, 271 of 272 for `RGBA8`), while the host
+/// reads the image's new texels once the submission completed (`host_reads_image`).
+///
+/// - NVIDIA's (`NVIDIA_PROPRIETARY`) 615.71.09 on the RTX 3090 (0x2204, Ampere's GA102): every
+///   format the probe aliases; `R8` and `RGBA8` in each of the three host-visible memory types,
+///   with a buffer and an image barrier in place of the global one or beside it; `R8` in 20 runs
+///   of 20, also with the barrier's stages every stage for the transfer accesses. A submission
+///   between the two copies, a barrier from every stage's memory writes, or one from the transfer
+///   and a shader stage's writes made the texels visible, 20 runs of 20. The RTX 5080 Laptop GPU
+///   (0x2c19, Blackwell) on the same release reads them.
+///
+/// The runtime records no such pair: a blit naming a texture over a buffer copies the buffer's
+/// bytes, whatever image aliases them (`blit_texture.rs`).
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+const STALE_LINEAR_IMAGE_COPIES: &[(i32, u64)] = &[(4, 0x2204)];
+
+/// The drivers (`driverID`) that, measured, accept an explicit `DRM_FORMAT_MOD_LINEAR` layout of a
+/// row pitch they do not lay images out at and lay the image out at their own linear pitch for its
+/// width, which `vkGetImageSubresourceLayout` then reports, where Vulkan has them refuse the layout
+/// (`VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT`):
+///
+/// - NVIDIA's (`NVIDIA_PROPRIETARY`) 615.71.09 on the RTX 5080 Laptop GPU and the RTX 3090: every
+///   pitch short of its own or off a multiple of 128 bytes (a 17-texel `R8` row asked at 17, 20, 32
+///   or 64 bytes lies 128 apart; a 100-texel `RGBA8` row asked at 400 or 448 lies 512 apart), while
+///   multiples of 128 from its own up are laid out as asked.
+///
+/// The runtime takes the image's own report of its pitch (`linear_plan::aliases`), so such an image
+/// aliases nothing, and the probe's alias round trip runs only at a pitch the driver kept.
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+const LINEAR_PITCH_FOR_EXPLICIT: &[i32] = &[4];
+
 /// On the test device the probe runs to the end without a validation message, and what it measured
 /// holds together: where the context imported host memory, both dispatches wrote every word into
 /// the host's own allocation; every linear row holds its packed texels; every alias round trip that
-/// ran matched both ways; and every explicit layout the driver accepted has the pitch asked for.
+/// ran matched both ways (but for a copy out of the buffer behind a copy into the image on a GPU
+/// of [`STALE_LINEAR_IMAGE_COPIES`], which reads the bytes from before it); and every explicit
+/// layout the driver accepted has the pitch asked for (or, on a driver of
+/// [`LINEAR_PITCH_FOR_EXPLICIT`], its own linear pitch for the width).
 #[cfg(any(m2v_gpu, m2v_cpu_icd))]
 #[test]
 fn the_runtime_probe_measures_the_test_device_consistently() {
     let report = probe_runtime(crate::gpu::TEST_DEVICE).unwrap();
+    let identity = &report["device"];
+    let driver = identity["driver_id"].as_i64().unwrap() as i32;
+    let stale =
+        STALE_LINEAR_IMAGE_COPIES.contains(&(driver, identity["device_id"].as_u64().unwrap()));
+    let linear_pitch = LINEAR_PITCH_FOR_EXPLICIT.contains(&driver);
     eprintln!("{}", serde_json::to_string_pretty(&report).unwrap());
     assert_eq!(report["validation_messages"], 0, "{report:#}");
     let host = &report["host_memory"];
@@ -144,7 +189,8 @@ fn the_runtime_probe_measures_the_test_device_consistently() {
     assert_eq!(textures["error"], serde_json::Value::Null);
     for format in textures["formats"].as_array().unwrap() {
         assert_eq!(format["error"], serde_json::Value::Null, "{format:#}");
-        for pitch in format["pitches"].as_array().unwrap() {
+        let pitches = format["pitches"].as_array().unwrap();
+        for pitch in pitches {
             assert!(pitch["row_pitch"].as_u64() >= pitch["packed"].as_u64());
         }
         let aliases = [&format["alias"], &format["drm_linear"]["alias"]];
@@ -155,13 +201,29 @@ fn the_runtime_probe_measures_the_test_device_consistently() {
                 "buffer_reads_image",
                 "host_reads_image",
             ] {
-                assert_eq!(alias[check]["mismatched"], 0, "{alias:#}");
+                let mismatched = alias[check]["mismatched"].as_u64().unwrap();
+                if check == "buffer_reads_image" && stale {
+                    // Where a byte's old and new values agree it matches: most bytes differ.
+                    let bytes = alias[check]["bytes"].as_u64().unwrap();
+                    assert!(
+                        mismatched * 2 > bytes,
+                        "the GPU of STALE_LINEAR_IMAGE_COPIES read the image's copy: {alias:#}"
+                    );
+                } else {
+                    assert_eq!(mismatched, 0, "{check}: {alias:#}");
+                }
                 assert_ne!(alias[check]["bytes"], 0);
             }
         }
         if let Some(explicit) = format["drm_linear"]["explicit"].as_array() {
             for attempt in explicit.iter().filter(|a| a["outcome"] == "accepted") {
-                assert_eq!(attempt["row_pitch"], attempt["requested"], "{attempt:#}");
+                let own = pitches
+                    .iter()
+                    .find(|pitch| pitch["width"] == attempt["width"])
+                    .map(|pitch| &pitch["row_pitch"]);
+                if !(linear_pitch && own == Some(&attempt["row_pitch"])) {
+                    assert_eq!(attempt["row_pitch"], attempt["requested"], "{attempt:#}");
+                }
             }
         }
     }

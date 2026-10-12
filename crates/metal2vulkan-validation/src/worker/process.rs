@@ -378,6 +378,32 @@ pub fn own_resident_bytes() -> Option<u64> {
     }
 }
 
+/// The most this process has held resident since its image was installed; `None` where it cannot
+/// be read. A worker states it in its report (`worker::report`): the parent's sampler misses a
+/// worker that execs and exits between two samples, and on Linux the kernel's figure at the reap
+/// may be the parent's own (`own_kernel_peak`), but the worker knows its own high water. On Linux
+/// it is the image's own `VmHWM`, not `getrusage`'s `ru_maxrss`, which holds the spawner's high
+/// water folded in at the exec; on macOS it is `ru_maxrss`, which is the process's own
+/// (`member_resident_bytes`).
+pub fn own_peak_resident_bytes() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        own_high_water_bytes()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+        // SAFETY: `usage` is valid for the write, which a success makes.
+        let read = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+        // SAFETY: `getrusage` filled `usage` when it succeeded.
+        (read == 0).then(|| max_rss_bytes(unsafe { usage.assume_init() }.ru_maxrss))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        None
+    }
+}
+
 /// A leader [`try_reap`] found exited.
 struct Reaped {
     status: ExitStatus,
@@ -905,6 +931,45 @@ mod tests {
                 .is_some_and(|peak| peak >= 256 * 1024 * 1024),
             "{exit:?}"
         );
+    }
+
+    /// Run as a worker by [`a_workers_own_high_water_is_its_images_alone`]: write this
+    /// process's [`own_peak_resident_bytes`] to the file the variable names.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn own_peak_fixture() {
+        let Some(path) = std::env::var_os("M2V_TEST_OWN_PEAK_FILE") else {
+            return;
+        };
+        let peak = own_peak_resident_bytes().unwrap_or(0);
+        fs::write(path, peak.to_string()).unwrap();
+    }
+
+    /// A worker's own high water ([`own_peak_resident_bytes`]) is its image's alone: spawned by a
+    /// supervisor that held 256 MiB, which on Linux the exec folds into the worker's `ru_maxrss`
+    /// (`own_kernel_peak`), it states less than that, and more than nothing.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_workers_own_high_water_is_its_images_alone() {
+        const HELD: u64 = 256 * 1024 * 1024;
+        let mut held = vec![0u8; HELD as usize];
+        for page in held.chunks_mut(4096) {
+            page[0] = 1;
+        }
+        std::hint::black_box(&held);
+        let scratch = crate::ScratchDir::new("process-test").unwrap();
+        let path = scratch.path().join("peak");
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "worker::process::tests::own_peak_fixture"])
+            .env("M2V_TEST_OWN_PEAK_FILE", &path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        drop(held);
+        assert!(status.success());
+        let stated: u64 = fs::read_to_string(&path).unwrap().parse().unwrap();
+        assert!(stated > 0 && stated < HELD, "{stated}");
     }
 
     /// On Linux the kernel's figure for a reaped worker counts only above this process's own

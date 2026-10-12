@@ -22,10 +22,15 @@
 //!   owned kernel) over the range, reading the records where the GPU and the CPU left them and
 //!   writing each command's slot table, region record and sequences; a barrier; then per command
 //!   of the range one `vkCmdExecuteGeneratedCommandsEXT` of the sequences the preprocess counted
-//!   for it, a compute barrier before each but the first. A record the preprocess cannot run (a
-//!   header with the producers' fault, a record that does not decode or names no variant's
-//!   state) runs nothing, and the command buffer's execution report states why, from the status
-//!   words the preprocess wrote (`bind::ReplayFaults`): an invalid record is a skip on the GPU.
+//!   for it, a compute barrier before each but the first. Where the driver's own preprocessing of
+//!   an execution after another goes wrong (`generated_commands::preprocess_apart`), the
+//!   commands layout is made for explicit preprocessing: every execution of the range is
+//!   preprocessed (`vkCmdPreprocessGeneratedCommandsEXT`) after the barrier, then a barrier, then
+//!   the executions run preprocessed, so no preprocessing follows an execution. A record the
+//!   preprocess cannot run (a header with the producers' fault, a record that does not decode or
+//!   names no variant's state) runs nothing, and the command buffer's execution report states
+//!   why, from the status words the preprocess wrote (`bind::ReplayFaults`): an invalid record is
+//!   a skip on the GPU.
 //! - **What the commands reach.** The replay's resident set, which the preprocess resolves each
 //!   record's buffer addresses in and the commands' kernels search for the pointers they load,
 //!   holds the resources the command buffer's encoders made resident and the device's live
@@ -49,10 +54,10 @@ use super::executed_commands::RecordsRead;
 use super::execution::{ExecutedPipeline, Execution};
 use super::fetch_reach;
 use super::generated_commands::{
-    Commands, Execution as GeneratedExecution, ExecutionSetCreateInfo, ExecutionSetPipelineInfo,
-    ExecutionSetToken, GeneratedCommandsInfo, Handle, LayoutCreateInfo, LayoutToken,
-    MemoryRequirementsInfo, PushConstantToken, WriteExecutionSetPipeline, EXECUTION_SET_PIPELINES,
-    TOKEN_DISPATCH, TOKEN_EXECUTION_SET, TOKEN_PUSH_CONSTANT,
+    preprocess_apart, Commands, Execution as GeneratedExecution, ExecutionSetCreateInfo,
+    ExecutionSetPipelineInfo, ExecutionSetToken, GeneratedCommandsInfo, Handle, LayoutCreateInfo,
+    LayoutToken, MemoryRequirementsInfo, PushConstantToken, WriteExecutionSetPipeline,
+    EXECUTION_SET_PIPELINES, TOKEN_DISPATCH, TOKEN_EXECUTION_SET, TOKEN_PUSH_CONSTANT,
 };
 use super::indirect_execute::{Execute, ExecutionRange};
 use super::live_buffers::LiveTable;
@@ -292,12 +297,13 @@ impl Drop for GeneratedObjects {
 impl GeneratedObjects {
     /// The execution set of `pipelines` (the first its initial pipeline, each at its variant's
     /// index) and the commands layout of `layout`'s three tokens under `pipeline_layout`, which
-    /// every pipeline's layout is defined as.
+    /// every pipeline's layout is defined as, made for explicit preprocessing where `explicit`.
     fn create(
         device: &Device,
         pipelines: &[RawPipeline],
         pipeline_layout: vk::PipelineLayout,
         layout: &GeneratedLayout,
+        explicit: bool,
     ) -> Result<GeneratedObjects, Error> {
         let commands = device
             .shared()
@@ -351,6 +357,10 @@ impl GeneratedObjects {
             LayoutToken::new(TOKEN_DISPATCH, std::ptr::null(), layout.dispatch_offset()),
         ];
         let info = LayoutCreateInfo::new(layout.stride, pipeline_layout, &tokens);
+        let info = match explicit {
+            true => info.explicitly_preprocessed(),
+            false => info,
+        };
         // SAFETY: `info`, its tokens, and their data are live for the call.
         objects.commands_layout =
             unsafe { commands.create_commands_layout(&info) }.map_err(vulkan)?;
@@ -497,7 +507,11 @@ fn record_total(
         .first()
         .ok_or_else(|| internal("a replay of no variant"))?
         .layout();
-    let generated = GeneratedObjects::create(&device, &pipelines, pipeline_layout, &layout)?;
+    // Where the driver's own preprocessing of an execution after another runs the wrong shader,
+    // every execution is preprocessed apart before the first runs.
+    let explicit = preprocess_apart(&device.properties().description);
+    let generated =
+        GeneratedObjects::create(&device, &pipelines, pipeline_layout, &layout, explicit)?;
     let (memory, reserved) = generated.preprocess_memory(&device, &layout)?;
     let kernel = device.owned_kernel(OwnedModule::ReplayPreprocess)?;
     let no_address = || internal("a replay on a device without device addresses");
@@ -589,15 +603,27 @@ fn record_total(
     let zeros = vec![0u8; layout.push_bytes as usize];
     let initial = pipelines[0].raw;
     let (execution_set, commands_layout) = (generated.execution_set, generated.commands_layout);
+    // Each command's execution: its sequences, its count and its own preprocess memory.
+    let execution = |slot: u32| {
+        let sequences = layout.max_sequences(slot);
+        GeneratedExecution {
+            indirect: (
+                scratch + layout.sequence_offset(slot, 0),
+                u64::from(layout.stride) * u64::from(sequences),
+            ),
+            preprocess: reserved[slot as usize],
+            max_sequences: sequences,
+            count_address: scratch + layout.count_offset(slot),
+        }
+    };
     core.command(compute, &uses, |raw, command_buffer| {
-        // SAFETY: as above; every object the executions name is held until the command buffer
-        // completes, and each command's preprocess memory is its own.
-        unsafe {
-            for slot in 0..layout.slots {
-                if slot > 0 {
-                    Barrier::between_dispatches().record(raw, command_buffer);
-                }
-                // An execution leaves the bound pipeline and push constants undefined.
+        // The state every preprocessing and execution takes: the execution set's initial
+        // pipeline and zeroed push constants (the tokens write every byte). An execution leaves
+        // the bound pipeline and push constants undefined.
+        let bind = || {
+            // SAFETY: the segment's command buffer is recording; the pipeline and its layout are
+            // held until the command buffer completes.
+            unsafe {
                 raw.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::COMPUTE, initial);
                 raw.cmd_push_constants(
                     command_buffer,
@@ -606,18 +632,36 @@ fn record_total(
                     0,
                     &zeros,
                 );
-                let sequences = layout.max_sequences(slot);
-                let execution = GeneratedExecution {
-                    indirect: (
-                        scratch + layout.sequence_offset(slot, 0),
-                        u64::from(layout.stride) * u64::from(sequences),
-                    ),
-                    preprocess: reserved[slot as usize],
-                    max_sequences: sequences,
-                    count_address: scratch + layout.count_offset(slot),
-                };
-                let info = GeneratedCommandsInfo::new(execution_set, commands_layout, &execution);
-                commands.execute(command_buffer, &info);
+            }
+        };
+        // SAFETY: as above; every object the executions name is held until the command buffer
+        // completes, and each command's preprocess memory is its own. Where `explicit`, the
+        // layout was made for explicit preprocessing, every execution is preprocessed with the
+        // state it then runs with, and a barrier orders those writes before every execution.
+        unsafe {
+            if explicit {
+                bind();
+                for slot in 0..layout.slots {
+                    let info = GeneratedCommandsInfo::new(
+                        execution_set,
+                        commands_layout,
+                        &execution(slot),
+                    );
+                    commands.preprocess(command_buffer, &info);
+                }
+                Barrier::everything().record(raw, command_buffer);
+            }
+            for slot in 0..layout.slots {
+                if slot > 0 {
+                    Barrier::between_dispatches().record(raw, command_buffer);
+                }
+                bind();
+                let info =
+                    GeneratedCommandsInfo::new(execution_set, commands_layout, &execution(slot));
+                match explicit {
+                    true => commands.execute_preprocessed(command_buffer, &info),
+                    false => commands.execute(command_buffer, &info),
+                }
             }
         }
     });

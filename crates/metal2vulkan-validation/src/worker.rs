@@ -9,15 +9,17 @@
 //!
 //! [`run_json`] is the one parent-side exchange: the input goes to the child's stdin from a
 //! scratch file (no feeder thread per row), the child writes one JSON report to stdout
-//! ([`report`]: its result and its counting allocator's process peak), and every scratch file is
-//! removed before the call returns. The parent samples the group's RSS every 10 ms, which can
-//! miss a short peak; the allocator's peak, counted exactly in the child, is recorded beside it
-//! in every result ([`Measured`]). Each member is charged only memory of its own, never its
-//! parent's while it still runs in it ([`process`]), and a supervising process gives its large
-//! freed buffers back to the system ([`alloc::release_large_frees`]), so its own RSS does not grow
-//! from sweep to sweep. [`compile`] runs every engine pipeline compile of a device-holding tool
-//! (L4 acceptance, the engine candidate, the device tests) through it, and [`audit`] every
-//! attempt of the canon and bitcode-reader audit lanes. [`device`] is the other boundary: the
+//! ([`report`]: its result, its counting allocator's process peak and its resident high water),
+//! and every scratch file is removed before the call returns. The parent samples the group's RSS
+//! every 10 ms, which can miss a short peak or a whole worker that runs between two samples: the
+//! result's peak also takes the high water the worker states, and the allocator's peak, counted
+//! exactly in the child, is recorded beside it in every result ([`Measured`]). Each member is
+//! charged only memory of its own, never its parent's while it still runs in it ([`process`]),
+//! and a supervising process gives its large freed buffers back to the system
+//! ([`alloc::release_large_frees`]), so its own RSS does not grow from sweep to sweep.
+//! [`compile`] runs every engine pipeline compile of a device-holding tool (L4 acceptance, the
+//! engine candidate, the device tests) through it, and [`audit`] every attempt of the canon and
+//! bitcode-reader audit lanes. [`device`] is the other boundary: the
 //! engine candidate's device work runs in a child that the parent waits for without a deadline
 //! or a ceiling (the child bounds its own device waits), so a driver fault ends the child, not the
 //! tool. A translation worker whose attempt linked a module runs `spirv-val` in a fresh image of
@@ -56,8 +58,9 @@ pub struct Measured {
     pub elapsed: Duration,
     /// The peak resident size up to the result or the stop: for a worker that exited, the larger
     /// of the sampled process-group RSS and the kernel's peak for the worker at its reap
-    /// ([`ProcessExit::peak_resident_bytes`]), so known for every reaped worker on unix; for a
-    /// stopped one, the sampled peak alone.
+    /// ([`ProcessExit::peak_resident_bytes`]), and for one that reported, of its own resident
+    /// high water as its report states it ([`report`]), so known for every worker that reported
+    /// on Linux and macOS; for a stopped one, the sampled peak alone.
     pub peak_resident_bytes: Option<u64>,
     /// The worker's counting-allocator peak ([`alloc::peak_bytes`]): the most live heap bytes it
     /// held at once, which the RSS sampler can miss. `None` when the worker reported no result
@@ -73,11 +76,12 @@ impl Measured {
     }
 }
 
-/// What a worker writes to stdout ([`report`]): its result and its counting allocator's process
-/// peak.
+/// What a worker writes to stdout ([`report`]): its result, its counting allocator's process
+/// peak, and its own resident high water.
 #[derive(Serialize)]
 struct Report<'a, R> {
     allocator_peak_bytes: Option<u64>,
+    resident_peak_bytes: Option<u64>,
     result: &'a R,
 }
 
@@ -85,27 +89,53 @@ struct Report<'a, R> {
 #[derive(Deserialize)]
 struct Reported<R> {
     allocator_peak_bytes: Option<u64>,
+    resident_peak_bytes: Option<u64>,
     result: R,
 }
 
-/// Write `result` to stdout as this worker's one report, with its counting allocator's process
-/// peak ([`alloc::peak_bytes`]), for [`run_json`] to decode. Every worker child reports through
-/// this, as its last act.
-pub fn report<R: Serialize>(result: &R) -> Result<(), String> {
-    report_with_peak(result, alloc::peak_bytes())
+/// What a worker states of its own memory in its report: its counting allocator's process peak
+/// ([`alloc::peak_bytes`]) and its resident high water ([`process::own_peak_resident_bytes`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct Peaks {
+    allocator_peak_bytes: Option<u64>,
+    resident_peak_bytes: Option<u64>,
 }
 
-/// [`report`] with the allocator peak `allocator_peak_bytes`: the L3 stage's, which states the
-/// larger of the translation's and its own ([`l3::serve`]).
-fn report_with_peak<R: Serialize>(
-    result: &R,
-    allocator_peak_bytes: Option<u64>,
-) -> Result<(), String> {
+impl Peaks {
+    /// This process's, now.
+    fn now() -> Peaks {
+        Peaks {
+            allocator_peak_bytes: alloc::peak_bytes(),
+            resident_peak_bytes: process::own_peak_resident_bytes(),
+        }
+    }
+
+    /// The larger of each of `self`'s and `other`'s.
+    fn max(self, other: Peaks) -> Peaks {
+        Peaks {
+            allocator_peak_bytes: self.allocator_peak_bytes.max(other.allocator_peak_bytes),
+            resident_peak_bytes: self.resident_peak_bytes.max(other.resident_peak_bytes),
+        }
+    }
+}
+
+/// Write `result` to stdout as this worker's one report, with its counting allocator's process
+/// peak ([`alloc::peak_bytes`]) and its own resident high water
+/// ([`process::own_peak_resident_bytes`]), for [`run_json`] to decode. Every worker child reports
+/// through this, as its last act.
+pub fn report<R: Serialize>(result: &R) -> Result<(), String> {
+    report_with_peaks(result, Peaks::now())
+}
+
+/// [`report`] with the peaks `peaks`: the L3 stage's, which states the larger of the
+/// translation's and its own ([`l3::serve`]).
+fn report_with_peaks<R: Serialize>(result: &R, peaks: Peaks) -> Result<(), String> {
     let mut stdout = std::io::stdout().lock();
     serde_json::to_writer(
         &mut stdout,
         &Report {
-            allocator_peak_bytes,
+            allocator_peak_bytes: peaks.allocator_peak_bytes,
+            resident_peak_bytes: peaks.resident_peak_bytes,
             result,
         },
     )
@@ -212,8 +242,9 @@ impl WorkerFailure {
 pub struct WorkerRun<R> {
     pub result: R,
     /// The larger of the peak sampled process-group RSS (the worker and every descendant, e.g.
-    /// `spirv-val`, summed) and the kernel's peak for the worker alone at its reap
-    /// ([`ProcessExit::peak_resident_bytes`]).
+    /// `spirv-val`, summed), the kernel's peak for the worker alone at its reap
+    /// ([`ProcessExit::peak_resident_bytes`]), and the worker's own resident high water as its
+    /// report states it ([`report`]).
     pub peak_resident_bytes: Option<u64>,
     /// The worker's counting-allocator peak, as its report states it ([`report`]).
     pub allocator_peak_bytes: Option<u64>,
@@ -301,25 +332,31 @@ pub fn run_json_within<R: DeserializeOwned>(
             measured(stop.peak_resident_bytes),
         )
     })?;
-    let peak = exit.peak_resident_bytes;
+    let exited = exit.peak_resident_bytes;
     if !exit.status.success() {
-        return Err(WorkerFailure::Exit(single_line(&stderr()), measured(peak)));
+        return Err(WorkerFailure::Exit(
+            single_line(&stderr()),
+            measured(exited),
+        ));
     }
     let output = fs::read(&stdout_path).map_err(|error| {
         WorkerFailure::Output(
             format!("read {}: {error}", stdout_path.display()),
-            measured(peak),
+            measured(exited),
         )
     })?;
     let Reported {
         allocator_peak_bytes,
+        resident_peak_bytes,
         result,
     } = serde_json::from_slice(&output).map_err(|error| {
         WorkerFailure::Output(
             format!("decode translation worker result: {error}"),
-            measured(peak),
+            measured(exited),
         )
     })?;
+    // `None` orders below every `Some`.
+    let peak = exited.max(resident_peak_bytes);
     drop(scratch);
     control.check().map_err(|error| {
         WorkerFailure::Process(
@@ -380,12 +417,15 @@ mod tests {
         assert_eq!(measured.peak_resident_bytes, run.peak_resident_bytes);
     }
 
-    /// A worker's report states its counting allocator's process peak, which survives the
-    /// round trip; a peak the sampler missed still sets the ceiling measure.
+    /// A worker's report states its counting allocator's process peak and its resident high
+    /// water, which survive the round trip; a peak the sampler missed still sets the ceiling
+    /// measure.
     #[test]
     fn a_report_carries_the_allocator_peak_and_it_bounds_the_ceiling_measure() {
+        let peaks = Peaks::now();
         let bytes = serde_json::to_vec(&Report {
-            allocator_peak_bytes: alloc::peak_bytes(),
+            allocator_peak_bytes: peaks.allocator_peak_bytes,
+            resident_peak_bytes: peaks.resident_peak_bytes,
             result: &7u32,
         })
         .unwrap();
@@ -393,6 +433,10 @@ mod tests {
         assert_eq!(reported.result, 7);
         // The lib's test binary installs the counting allocator (`alloc::tests`).
         assert!(reported.allocator_peak_bytes.is_some_and(|peak| peak > 0));
+        if cfg!(any(target_os = "macos", target_os = "linux")) {
+            assert!(reported.resident_peak_bytes.is_some_and(|peak| peak > 0));
+        }
+        assert_eq!(reported.resident_peak_bytes, peaks.resident_peak_bytes);
 
         let sampled_low = Measured {
             elapsed: Duration::ZERO,
@@ -406,6 +450,30 @@ mod tests {
         };
         assert_eq!(unreported.peak_bytes(), Some(1 << 20));
         assert_eq!(Measured::default().peak_bytes(), None);
+    }
+
+    /// A worker that execs and exits between two of the sampler's ticks leaves no sample, and on
+    /// Linux the kernel's figure at its reap may be this supervisor's own high water, which is not
+    /// used (`process::own_kernel_peak`): the run's peak takes the high water the worker's report
+    /// states.
+    #[cfg(unix)]
+    #[test]
+    fn a_run_s_peak_takes_the_resident_high_water_its_report_states() {
+        // Far above anything `sh` holds and this process's own high water, so no sample and no
+        // kernel figure stands in for it.
+        let stated = 1u64 << 40;
+        let run: WorkerRun<u32> = run_json(
+            shell(&format!(
+                "echo '{{\"allocator_peak_bytes\": null, \"resident_peak_bytes\": {stated}, \
+                 \"result\": 7}}'"
+            )),
+            "worker-test",
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(run.result, 7);
+        assert_eq!(run.peak_resident_bytes, Some(stated));
+        assert_eq!(run.measured().peak_bytes(), Some(stated));
     }
 
     #[cfg(unix)]

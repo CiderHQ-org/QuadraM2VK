@@ -37,7 +37,14 @@
 //! it (`VK_PIPELINE_CREATE_2_INDIRECT_BINDABLE_BIT_EXT`), the first as the execution set's initial
 //! pipeline (bound before each execution) and the others written at their indices. The
 //! variants' descriptor sets are bound once: they are one set ([`GeneratedRefusal::Descriptors`]
-//! otherwise).
+//! otherwise). A consumer may preprocess the executions apart instead: the indirect commands
+//! layout made with `VK_INDIRECT_COMMANDS_LAYOUT_USAGE_EXPLICIT_PREPROCESS_BIT_EXT`, after the
+//! preprocess's barrier every execution's `vkCmdPreprocessGeneratedCommandsEXT` with the state it
+//! runs with, a barrier, then each execution as above, preprocessed. The runtime does so where the
+//! driver's own preprocessing after an execution goes wrong
+//! ([`ImplicitPreprocessAfterExecutionSet`]).
+//!
+//! [`ImplicitPreprocessAfterExecutionSet`]: crate::error::RuntimeDriverDefect::ImplicitPreprocessAfterExecutionSet
 //!
 //! **Its output is K14c's.** Each command's regions select the same variant with the same push
 //! values and group count as K14c's arguments; only the schedule between barriers differs, and a

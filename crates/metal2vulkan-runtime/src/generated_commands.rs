@@ -9,6 +9,8 @@
 
 use crate::release::{self, Generated};
 use ash::vk;
+use metal2vulkan::device::DeviceDescription;
+use metal2vulkan::error::RuntimeDriverDefect;
 use std::ffi::{c_void, CStr};
 
 /// `VkIndirectExecutionSetEXT` and `VkIndirectCommandsLayoutEXT`: non-dispatchable handles.
@@ -31,10 +33,26 @@ pub const INDIRECT_BINDABLE: vk::PipelineCreateFlags2KHR =
 /// `VK_BUFFER_USAGE_2_PREPROCESS_BUFFER_BIT_EXT`.
 pub const PREPROCESS_BUFFER: vk::BufferUsageFlags2KHR =
     vk::BufferUsageFlags2KHR::from_raw(0x8000_0000);
-/// `VK_PIPELINE_STAGE_COMMAND_PREPROCESS_BIT_EXT` and `VK_ACCESS_COMMAND_PREPROCESS_READ_BIT_EXT`
-/// (the values of the `NV` names `ash` has).
+/// `VK_INDIRECT_COMMANDS_LAYOUT_USAGE_EXPLICIT_PREPROCESS_BIT_EXT`: an execution of the layout
+/// is preprocessed apart (`vkCmdPreprocessGeneratedCommandsEXT`) before it runs.
+const LAYOUT_EXPLICIT_PREPROCESS: u32 = 0x1;
+/// `VK_PIPELINE_STAGE_COMMAND_PREPROCESS_BIT_EXT`, `VK_ACCESS_COMMAND_PREPROCESS_READ_BIT_EXT` and
+/// `VK_ACCESS_COMMAND_PREPROCESS_WRITE_BIT_EXT` (the values of the `NV` names `ash` has).
 pub const PREPROCESS_STAGE: vk::PipelineStageFlags = vk::PipelineStageFlags::COMMAND_PREPROCESS_NV;
 pub const PREPROCESS_READ: vk::AccessFlags = vk::AccessFlags::COMMAND_PREPROCESS_READ_NV;
+pub const PREPROCESS_WRITE: vk::AccessFlags = vk::AccessFlags::COMMAND_PREPROCESS_WRITE_NV;
+
+/// Whether the executions of a range are preprocessed apart on the device `description` names:
+/// where its driver's own preprocessing of an execution recorded after another runs the wrong
+/// shader (`RuntimeDriverDefect::ImplicitPreprocessAfterExecutionSet`, `driver_defects.rs`), the
+/// commands layout is made [`explicitly_preprocessed`](LayoutCreateInfo::explicitly_preprocessed),
+/// every execution of the range is preprocessed ([`Commands::preprocess`]) before the first runs,
+/// and each runs preprocessed ([`Commands::execute_preprocessed`]). Validation's executor decides
+/// its device replay's executions by it too.
+pub fn preprocess_apart(description: &DeviceDescription) -> bool {
+    crate::driver_defects::of(description)
+        .contains(&RuntimeDriverDefect::ImplicitPreprocessAfterExecutionSet)
+}
 
 /// `VkIndirectExecutionSetPipelineInfoEXT`.
 #[repr(C)]
@@ -162,6 +180,14 @@ impl LayoutCreateInfo {
             tokens: tokens.as_ptr(),
         }
     }
+
+    /// The layout with `VK_INDIRECT_COMMANDS_LAYOUT_USAGE_EXPLICIT_PREPROCESS_BIT_EXT`: each of
+    /// its executions is preprocessed apart ([`Commands::preprocess`]) and runs preprocessed
+    /// ([`Commands::execute_preprocessed`]).
+    pub fn explicitly_preprocessed(mut self) -> Self {
+        self.flags |= LAYOUT_EXPLICIT_PREPROCESS;
+        self
+    }
 }
 
 /// `VkGeneratedCommandsMemoryRequirementsInfoEXT`.
@@ -255,6 +281,8 @@ type MemoryRequirements = unsafe extern "system" fn(
 );
 type Execute =
     unsafe extern "system" fn(vk::CommandBuffer, vk::Bool32, *const GeneratedCommandsInfo);
+type Preprocess =
+    unsafe extern "system" fn(vk::CommandBuffer, *const GeneratedCommandsInfo, vk::CommandBuffer);
 
 /// The extension's commands, loaded for one device.
 #[derive(Clone, Copy)]
@@ -267,6 +295,7 @@ pub struct Commands {
     pub(crate) destroy_commands_layout: DestroyHandle,
     memory_requirements: MemoryRequirements,
     execute: Execute,
+    preprocess: Preprocess,
 }
 
 impl Commands {
@@ -304,6 +333,7 @@ impl Commands {
                 MemoryRequirements
             ),
             execute: command!(c"vkCmdExecuteGeneratedCommandsEXT", Execute),
+            preprocess: command!(c"vkCmdPreprocessGeneratedCommandsEXT", Preprocess),
         })
     }
 
@@ -400,5 +430,32 @@ impl Commands {
     pub unsafe fn execute(&self, command: vk::CommandBuffer, info: &GeneratedCommandsInfo) {
         // SAFETY: the caller's contract.
         unsafe { (self.execute)(command, vk::FALSE, info) }
+    }
+
+    /// `vkCmdPreprocessGeneratedCommandsEXT` of `info` into `command`, the state taken from
+    /// `command` itself.
+    ///
+    /// # Safety
+    /// `command` is recording, with the execution set's initial pipeline bound; `info`'s commands
+    /// layout is [`explicitly_preprocessed`](LayoutCreateInfo::explicitly_preprocessed), and its
+    /// handles and addresses are live until the work completes.
+    pub unsafe fn preprocess(&self, command: vk::CommandBuffer, info: &GeneratedCommandsInfo) {
+        // SAFETY: the caller's contract.
+        unsafe { (self.preprocess)(command, info, command) }
+    }
+
+    /// `vkCmdExecuteGeneratedCommandsEXT` of commands [`preprocess`](Self::preprocess) wrote.
+    ///
+    /// # Safety
+    /// As [`execute`](Self::execute); and `info` was preprocessed in `command`, with the same
+    /// contents and the same state bound, a barrier ordering that preprocessing's writes before
+    /// this execution.
+    pub unsafe fn execute_preprocessed(
+        &self,
+        command: vk::CommandBuffer,
+        info: &GeneratedCommandsInfo,
+    ) {
+        // SAFETY: the caller's contract.
+        unsafe { (self.execute)(command, vk::TRUE, info) }
     }
 }

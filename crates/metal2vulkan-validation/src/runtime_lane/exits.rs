@@ -6,7 +6,10 @@
 //! a device down. The parent checks that the child exited with status 0, not by a signal, and
 //! within [`EXIT_LIMIT`] of its last line: below the exit hook's own bound of 2 s, so a hook that
 //! waited out its bound fails too. Each child reports the validation layer's messages until then,
-//! which must be none. The parent prints each exit's time.
+//! which must be none. The parent prints each exit's time. Each test that checks that time runs
+//! alone in the suite (`.config/nextest.toml`): an exit's time holds the driver's device
+//! destruction, which other processes' GPU work slows (NVIDIA's `vkDestroyDevice` took 54 ms alone
+//! and up to 2 s beside other lanes on an RTX 3090).
 //!
 //! Metal's answers (EV `RT4-metal-teardown`, an M4 with macOS 27.0.1, each case without and with
 //! `MTL_DEBUG_LAYER=1`): every such exit was clean, in 15 to 45 ms, but one: a dropped command

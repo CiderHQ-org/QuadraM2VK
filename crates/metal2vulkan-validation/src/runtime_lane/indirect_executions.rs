@@ -39,13 +39,14 @@ use metal2vulkan::metal::{
 use metal2vulkan::pipeline::{ComputePipelineDescriptor, LinkedFunctions, StageSource};
 use metal2vulkan_devtools::{engine_dir, llvm_assemble};
 use metal2vulkan_runtime::{
-    Buffer, CommandBuffer, CommandBufferStatus, ComputeCommandEncoder, ComputePipelineState,
-    DebugMessage, Degradation, Device, DeviceOptions, Error, ExecutedPipeline, Execution, Heap,
-    HeapDescriptor, HeapType, HostMemory, IndirectCommand, IndirectCommandBuffer,
-    IndirectCommandBufferDescriptor, IndirectCommandBufferProblem, Invalid, PipelineOptions,
-    Problem, Region, RenderPassDescriptor, ResourceOptions, Size, VisibleFunctionTableDescriptor,
+    Buffer, CommandBuffer, CommandBufferError, CommandBufferStatus, ComputeCommandEncoder,
+    ComputePipelineState, DebugMessage, Degradation, Device, DeviceOptions, Error,
+    ExecutedPipeline, Execution, Heap, HeapDescriptor, HeapType, HostMemory, IndirectCommand,
+    IndirectCommandBuffer, IndirectCommandBufferDescriptor, IndirectCommandBufferProblem, Invalid,
+    PipelineCreationCause, PipelineOptions, Problem, Region, RenderPassDescriptor, ResourceOptions,
+    Size, VisibleFunctionTableDescriptor, VkResultCode,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// A kernel whose threads each write their threadgroup's size and position, over a ragged grid.
@@ -212,10 +213,12 @@ struct Run {
     executions: Vec<Execution>,
 }
 
-/// Why a run did not complete: the runtime's error at the dispatch or the commit, or anything
-/// else.
+/// Why a run did not complete: the runtime's error at the dispatch or the commit, the command
+/// buffer's error once it completed (with the driver's Vulkan error for the command whose
+/// pipeline it did not make, `CommandBuffer::failed_pipeline`), or anything else.
 enum Failed {
     Runtime(Error),
+    Command(Option<CommandBufferError>, Option<VkResultCode>),
     Other(String),
 }
 
@@ -223,6 +226,7 @@ impl std::fmt::Display for Failed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Failed::Runtime(error) => write!(f, "{error}"),
+            Failed::Command(error, _) => write!(f, "the command buffer failed: {error:?}"),
             Failed::Other(why) => f.write_str(why),
         }
     }
@@ -234,23 +238,47 @@ impl From<String> for Failed {
     }
 }
 
+/// The Vulkan error of a run that failed making the case's pipeline, in either of the runtime's
+/// forms: the commit's `Error::Vulkan` where the commit made it (an indirect command's variants,
+/// which the commit settles, `indirect_execute.rs`), or the command buffer's `PipelineCreation`
+/// where its dispatch's making went on after the dispatch and failed, then failed again when the
+/// recording made it once more (`pending_dispatch.rs`), naming that dispatch's pipeline with the
+/// same error (`CommandBuffer::failed_pipeline`).
+fn making_failed(failed: &Failed) -> Option<VkResultCode> {
+    match failed {
+        Failed::Runtime(Error::Vulkan(code)) => Some(*code),
+        Failed::Command(
+            Some(CommandBufferError::PipelineCreation(PipelineCreationCause::Vulkan(code))),
+            Some(made),
+        ) if made == code => Some(*code),
+        _ => None,
+    }
+}
+
 /// Whether the dispatch (`direct`, the device reporting `direct_reported`) and the command
 /// (`indirect`, `indirect_reported`) failed alike making the case's pipeline: the same Vulkan
-/// error from the runtime, and the same messages from the device for each, every one a pipeline
-/// compile's failure. The device's failure, which an indirect command neither causes nor hides.
+/// error from the runtime ([`making_failed`]), and the same messages from the device for each,
+/// every one a pipeline compile's failure. The device's failure, which an indirect command neither
+/// causes nor hides. The messages compare as sets: the dispatch's making, which failed once
+/// after the dispatch, is made again by its recording (`pending_dispatch.rs`), so the device
+/// reports the same failure once more for it.
 fn compile_failed_alike(
     direct: &Failed,
     indirect: &Failed,
     direct_reported: &[DebugMessage],
     indirect_reported: &[DebugMessage],
 ) -> bool {
-    let (Failed::Runtime(Error::Vulkan(a)), Failed::Runtime(Error::Vulkan(b))) = (direct, indirect)
-    else {
+    let (Some(a), Some(b)) = (making_failed(direct), making_failed(indirect)) else {
         return false;
+    };
+    let within = |some: &[DebugMessage], all: &[DebugMessage]| {
+        some.iter().all(|message| all.contains(message))
     };
     a == b
         && !direct_reported.is_empty()
-        && direct_reported == indirect_reported
+        && !indirect_reported.is_empty()
+        && within(direct_reported, indirect_reported)
+        && within(indirect_reported, direct_reported)
         && direct_reported
             .iter()
             .all(|message| message.text.contains("pipeline compile failed"))
@@ -295,10 +323,15 @@ fn run(
         .wait_until_completed_for(WAIT)
         .map_err(|_| "the command buffer did not complete".to_owned())?;
     if command_buffer.status() != CommandBufferStatus::Completed {
-        return Err(Failed::Other(format!(
-            "the command buffer failed: {:?}",
-            command_buffer.error()
-        )));
+        return Err(Failed::Command(
+            command_buffer.error(),
+            command_buffer
+                .failed_pipeline()
+                .and_then(|pipeline| match pipeline.error {
+                    Error::Vulkan(code) => Some(code),
+                    _ => None,
+                }),
+        ));
     }
     let report = command_buffer
         .execution_report()
@@ -439,11 +472,13 @@ fn every_case_of_buffers_alone_runs_from_a_command_as_its_dispatch(shard: usize)
                         &indirect_reported,
                     ) =>
                 {
-                    let texts: Vec<&str> =
+                    let texts: BTreeSet<&str> =
                         direct_reported.iter().map(|m| m.text.as_str()).collect();
+                    let (dispatch, command) = (direct_reported.len(), indirect_reported.len());
                     compile_failed.push(format!(
                         "{name}: {direct} (from the command: {indirect}); the device reported \
-                         for each {texts:?}"
+                         {dispatch} times for the dispatch and {command} for the command \
+                         {texts:?}"
                     ));
                     device_failure = true;
                 }
@@ -480,8 +515,8 @@ fn every_case_of_buffers_alone_runs_from_a_command_as_its_dispatch(shard: usize)
     }
     if !compile_failed.is_empty() {
         eprintln!(
-            "compile failed alike: the device's own pipeline compiles; docs/TODO.md 6.4 tracks \
-             3cf0a3f0's (Apple's compiler service, on MoltenVK)"
+            "compile failed alike: the device's own failure making the pipeline; \
+             docs/FAST-PATHS.md's known gaps record 3cf0a3f0's (Apple's compiler, on MoltenVK)"
         );
     }
     for why in &compile_failed {

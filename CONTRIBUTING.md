@@ -88,10 +88,10 @@ fixture entry point on every committed profile, in `crates/metal2vulkan/tests/go
 fixture and profile are unchanged must bump `SEMANTICS_VERSION`
 (`crates/metal2vulkan/src/cache/mod.rs`) in the same change. New, removed or edited fixtures and
 profiles need only the bless. The table records cells only, no version: a `SEMANTICS_VERSION` bump
-alone leaves it unchanged, and the bless on `master` refuses a cell that moved under an unchanged
-fixture and profile when `SEMANTICS_VERSION` is still its value at the table's last bless.
+alone leaves it unchanged, and the bless on `development` refuses a cell that moved under an
+unchanged fixture and profile when `SEMANTICS_VERSION` is still its value at the table's last bless.
 
-The table is re-blessed on `master` after merges, so a change need not carry its own bless. To
+The table is re-blessed on `development` after merges, so a change need not carry its own bless. To
 bless by hand (on macOS, which has `xcrun metal-as`):
 
 ```sh
@@ -99,7 +99,7 @@ PATH=/opt/homebrew/opt/llvm/bin:$PATH cargo nextest run -p metal2vulkan --all-fe
   --run-ignored ignored-only -E 'test(bless_golden_hashes)'
 ```
 
-Never merge the table by hand: after a merge take `master`'s table and bless again. The other
+Never merge the table by hand: after a merge take `development`'s table and bless again. The other
 versions move the same way when their behavior changes: `ARTIFACT_FORMAT_VERSION` (the artifact
 encoding) and `RUNTIME_VERSION` (what the runtime does with an unchanged artifact).
 
