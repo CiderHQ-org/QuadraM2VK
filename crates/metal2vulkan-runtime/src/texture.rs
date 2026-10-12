@@ -2911,7 +2911,9 @@ impl Device {
         // host reads slowly where it does not cache it: such memory of the class where the
         // device has it, else `Shared` memory's with unified memory
         // (`memory::host_cached_placement`). Never memory the host maps without coherence, cached
-        // or not: the runtime flushes no mapped range (`memory::host_cached`).
+        // or not: the runtime flushes no mapped range (`memory::host_cached`). Where only such
+        // memory is allowed, the placement fails and `host_placed_image` makes the image without
+        // host-transfer usage, its copies through submissions, as on a device without host copies.
         let hosted = plan.usage.contains(ImageUsageFlags::HOST_TRANSFER);
         let cached = match hosted {
             true => {
