@@ -1634,11 +1634,14 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   fragment's evaluated point lies within a bounded distance of Metal's.
 - `metal2vulkan-degrade-bicubic-filter-arithmetic` (precision).
   `PrecisionNote::BicubicFilterArithmetic`: Metal's bicubic filter, emulated by fetches with Metal's
-  weights, the 8- and 16-bit normalized formats' exact sum rounded half up onto the format's grid,
-  and the 32-bit float and half-float formats' sums through Metal's accumulators, differs from an
-  Apple M3 Max in what is not yet pinned: a 2D normalized sum within about `2^-21` of the format's
-  range (`1` unsigned, `2` signed) of a rounding tie: Metal may round it to the other side, one grid
-  step away (`1/65535` or `1/32767` for 16-bit, `1/4080` or `1/2032` for 8-bit).
+  weights, the 8- and 16-bit normalized and the extended-range formats' exact sum rounded half up
+  onto the format's grid, and the 32-bit float and half-float formats' sums through Metal's
+  accumulators, differs from an Apple M3 Max in what is not yet pinned: a 2D normalized sum within
+  about `2^-21` of the format's range (`1` unsigned, `2` signed) of a rounding tie: Metal may round
+  it to the other side, one grid step away (`1/65535` or `1/32767` for 16-bit, `1/4080` or `1/2032`
+  for 8-bit); an extended-range 2D sum (`BGR10_XR`, `BGRA10_XR`, `RGB10A8_2P_XR10` and their sRGB
+  twins) within 0.014 of a grid step of a tie likewise (`1/8160` a color lane, `1/8192` an sRGB
+  color lane, `1/4080` alpha).
 - `metal2vulkan-degrade-sparse-residency` (precision). `PrecisionNote::SparseResidency`: A stage
   samples or gathers a texture whose residency it observes (`sparse_color::resident()`) through the
   slot's sparse form, which the module has where the profile enables `shaderResourceResidency`.

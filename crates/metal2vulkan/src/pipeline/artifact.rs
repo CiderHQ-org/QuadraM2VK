@@ -563,7 +563,8 @@ pub enum PrecisionNote {
     /// data was this crate's own layout).
     RasterizationRateMap,
     /// Metal's bicubic filter, emulated by fetches with Metal's weights, the 8- and 16-bit
-    /// normalized formats' exact sum rounded half up onto the format's grid, and the 32-bit float
+    /// normalized and the extended-range formats' exact sum rounded half up onto the format's grid
+    /// (an extended-range one clamped into the format's decoded endpoints), and the 32-bit float
     /// and half-float formats' sums through Metal's accumulators (a 1D sum and a 32-bit float
     /// format's 2D bilinear one through its linear accumulator, a half format's 2D Catmull-Rom sum
     /// through its two-pass one, an axis whose four taps clamp onto one texel weighed as that texel
@@ -574,6 +575,12 @@ pub enum PrecisionNote {
     ///   signed) of a rounding tie: Metal may round it to the other side, one grid step away
     ///   (`1/65535` or `1/32767` for 16-bit, `1/4080` or `1/2032` for 8-bit). No model of Metal's
     ///   2D datapath tried fits; its 1D sums are exact.
+    /// - An extended-range texture's 2D sum (`BGR10_XR`, `BGRA10_XR`, `RGB10A8_2P_XR10` and their
+    ///   `_sRGB` twins, read through the slot's `extended_range` variant) within 0.014 of a grid
+    ///   step of a rounding tie: Metal may round it to the other side, one step away (`1/8160` a
+    ///   color lane, `1/8192` an `_sRGB` color lane, `1/4080` alpha); 4,050 of the 3,317,760 lanes
+    ///   measured (every one at most 0.013968 of a step from a tie), every other lane exact. No
+    ///   model of Metal's datapath tried fits.
     /// - An sRGB sum of an argument-buffer (heap) element, whose format is never known: Metal
     ///   decodes each tap's code through its twelve-bit table and sums the steps exactly; the
     ///   emulation sums the device's decoded values in `f32`, which Vulkan does not bound

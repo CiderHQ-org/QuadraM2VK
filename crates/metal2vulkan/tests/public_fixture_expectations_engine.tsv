@@ -2171,6 +2171,30 @@ engine/wrg_gather_depth_positions.air.ll	wrg_gather_depth_positions	ok	ok	ok	ok	
 engine/wrg_gather_depth_positions.ll	wrg_gather_depth_positions	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
 engine/wrg_sampler_positions.air.ll	wrg_sampler_positions	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
 engine/wrg_sampler_positions.ll	wrg_sampler_positions	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/xr_bicubic.air.ll	xrb_runtime	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/xr_bicubic.air.ll	xrb_runtime_half	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/xr_bicubic.air.ll	xrb_edge	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/xr_bicubic.air.ll	xrb_edge_half	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/xr_bicubic.air.ll	xrb_repeat	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/xr_bicubic.air.ll	xrb_mirror	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/xr_bicubic.air.ll	xrb_zero	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/xr_bicubic.air.ll	xrb_white	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/xr_bicubic.air.ll	xrb_black	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/xr_bicubic.air.ll	xrb_pixel	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/xr_bicubic.air.ll	xrb_edge_offset	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/xr_bicubic.air.ll	xrb_repeat_offset	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/xr_bicubic.ll	xrb_runtime	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/xr_bicubic.ll	xrb_runtime_half	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/xr_bicubic.ll	xrb_edge	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/xr_bicubic.ll	xrb_edge_half	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/xr_bicubic.ll	xrb_repeat	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/xr_bicubic.ll	xrb_mirror	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/xr_bicubic.ll	xrb_zero	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/xr_bicubic.ll	xrb_white	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/xr_bicubic.ll	xrb_black	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/xr_bicubic.ll	xrb_pixel	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/xr_bicubic.ll	xrb_edge_offset	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/xr_bicubic.ll	xrb_repeat_offset	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
 engine/xr_planes.air.ll	xr_planes_join	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	NeedsInput{StorageTextureFormat { slot: SlotRef { stage: Kernel, class: Texture, index: 2 } }}	ok	NeedsInput{StorageTextureFormat { slot: SlotRef { stage: Kernel, class: Texture, index: 2 } }}	ok
 engine/xr_planes.air.ll	xr_planes_split	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	NeedsInput{StorageTextureFormat { slot: SlotRef { stage: Kernel, class: Texture, index: 1 } }}	ok	NeedsInput{StorageTextureFormat { slot: SlotRef { stage: Kernel, class: Texture, index: 1 } }}	ok
 engine/xr_planes.ll	xr_planes_join	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	NeedsInput{StorageTextureFormat { slot: SlotRef { stage: Kernel, class: Texture, index: 2 } }}	ok	NeedsInput{StorageTextureFormat { slot: SlotRef { stage: Kernel, class: Texture, index: 2 } }}	ok

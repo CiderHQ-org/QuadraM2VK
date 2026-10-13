@@ -47,7 +47,7 @@ fn metal_linear() -> String {
 }
 
 /// The format of a raw format number of [`metal_linear`].
-fn form_of(raw: &str) -> ExtendedRange {
+pub(super) fn form_of(raw: &str) -> ExtendedRange {
     match raw {
         "550" => ExtendedRange::Planes { srgb: false },
         "551" => ExtendedRange::Planes { srgb: true },
@@ -61,7 +61,7 @@ fn form_of(raw: &str) -> ExtendedRange {
 
 /// The raw texel of codes `[r, g, b, a]` in `form`, as the view of its raw format reads it (a
 /// two-plane texel's `a` its alpha byte).
-fn raw_of(form: ExtendedRange, [r, g, b, a]: [u32; 4]) -> [u32; 4] {
+pub(super) fn raw_of(form: ExtendedRange, [r, g, b, a]: [u32; 4]) -> [u32; 4] {
     match form {
         ExtendedRange::Bgr10 { .. } => [r << 20 | g << 10 | b, 0, 0, 1],
         ExtendedRange::Bgra10 { .. } => [b << 6, g << 6, r << 6, a << 6],
@@ -76,7 +76,7 @@ fn raw_of(form: ExtendedRange, [r, g, b, a]: [u32; 4]) -> [u32; 4] {
 
 /// How a kernel's sample reaches its sampler.
 #[derive(Clone, Copy, Debug)]
-enum Through {
+pub(super) enum Through {
     /// A constexpr sampler of these AIR state words ([`words`]).
     Constexpr(u64),
     /// The runtime `[[sampler(0)]]`.
@@ -88,7 +88,7 @@ enum Through {
 /// the border of another color than transparent black; 1 clamp to edge; 2 repeat; 3 mirrored
 /// repeat), pixel coordinates where `pixel`, and border color `border` (0 transparent black, 1
 /// opaque black, 2 opaque white).
-fn words(linear: bool, code: u64, pixel: bool, border: u64) -> u64 {
+pub(super) fn words(linear: bool, code: u64, pixel: bool, border: u64) -> u64 {
     const BASE: u64 = 0x007b_ff00_0008_0000;
     let f = u64::from(linear);
     BASE | code | code << 3 | code << 6 | f << 9 | f << 11 | u64::from(pixel) << 15 | border << 56
@@ -114,7 +114,12 @@ fn word(linear: bool, mode: SamplerAddressMode, pixel: bool, border: SamplerBord
 /// A kernel sampling `texture2d<T, sample>` slot 0 (`half` texels, or `float`) through `through`
 /// at `float2` buffer 0's lane `tid` with constant texel offset `offset`, storing the texel to
 /// buffer 1; or with `gather`, gathering its red channel there.
-fn sample_kernel(through: Through, half: bool, offset: (i32, i32), gather: bool) -> String {
+pub(super) fn sample_kernel(
+    through: Through,
+    half: bool,
+    offset: (i32, i32),
+    gather: bool,
+) -> String {
     let (texel, vec4, size, suffix, out_ty) = if half {
         ("half", "<4 x half>", 8, "v4f16", "half4")
     } else {
@@ -183,9 +188,9 @@ declare {{ {vec4}, i8 }} {decl}
 
 /// A texture of `width` texels per row holding the codes `codes` (red, green, blue, alpha; row
 /// by row).
-struct Texels<'a> {
-    width: u32,
-    codes: &'a [[u32; 4]],
+pub(super) struct Texels<'a> {
+    pub(super) width: u32,
+    pub(super) codes: &'a [[u32; 4]],
 }
 
 /// The samples kernel `bc` takes on `p` of `tex` in `form` at `coords`, through a runtime
@@ -219,6 +224,22 @@ fn sample_swizzled(
     validate(bc, &inputs, p, what);
     let (plan, m) =
         typed_module_with(bc, "k", p, &inputs).unwrap_or_else(|e| panic!("{what}: {e}"));
+    run_samples(&plan, &m, (form, tex), (coords, half, word), swizzle, what)
+}
+
+/// The samples the module `m` of `plan` takes of `tex` in `form` at `coords` on the CPU
+/// interpreter, its `float2` coordinates at buffer 0 and results at buffer 1, one thread each,
+/// through a runtime sampler of word `word` where it has one and under the `TextureSwizzle` word
+/// `swizzle` where it has one: each result's lanes as bits (`half` lanes where `half`). Both
+/// scheduling orders must agree.
+pub(super) fn run_samples(
+    plan: &Plan,
+    m: &TypedModule,
+    (form, tex): (ExtendedRange, &Texels<'_>),
+    (coords, half, word): (&[[f32; 2]], bool, Option<u32>),
+    swizzle: Option<u32>,
+    what: &str,
+) -> Vec<[u32; 4]> {
     let mut spec = BTreeMap::new();
     for axis in [Axis::X, Axis::Y, Axis::Z] {
         spec.insert(SpecKey::LocalSize(axis), 1);
@@ -292,7 +313,7 @@ fn sample_swizzled(
             order,
             ..Config::default()
         };
-        let (o, _) = run_with_images(&m, &cfg, res.clone(), vec![img.clone()])
+        let (o, _) = run_with_images(m, &cfg, res.clone(), vec![img.clone()])
             .unwrap_or_else(|e| panic!("{what}: interpreter: {e:?}"));
         outs.push(o.buffers.into_iter().nth(1).expect("out"));
     }
@@ -1305,7 +1326,7 @@ fn replay_padded_samples(name: &str) {
 
 /// A kernel's state: texture slot 0 bound in `pf`, buffers 0 and 1, and sampler slot 0 bound to
 /// `desc`.
-fn sampled_state(pf: PixelFormat, desc: SamplerDescriptor) -> BindState {
+pub(super) fn sampled_state(pf: PixelFormat, desc: SamplerDescriptor) -> BindState {
     let mut t = StageTable::default();
     t.textures.insert(
         0,

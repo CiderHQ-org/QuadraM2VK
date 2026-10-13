@@ -83,7 +83,7 @@ fn samples() -> Vec<Sample> {
 }
 
 /// The pixel format of raw format `raw`.
-fn format(raw: u32) -> PixelFormat {
+pub(super) fn format(raw: u32) -> PixelFormat {
     match raw {
         552 => PixelFormat::BGRA10XR,
         553 => PixelFormat::BGRA10XRSRGB,
@@ -96,7 +96,7 @@ fn format(raw: u32) -> PixelFormat {
 /// The bytes of a texel of codes `[r, g, b, a]` in raw format `raw`: `BGRA10_XR`'s four 16-bit
 /// fields (blue, green, red, alpha), each code in bits 6 to 15; `BGR10_XR`'s word, blue in bits 0
 /// to 9, green 10 to 19, red 20 to 29.
-fn texel(raw: u32, [r, g, b, a]: [u32; 4]) -> Vec<u8> {
+pub(super) fn texel(raw: u32, [r, g, b, a]: [u32; 4]) -> Vec<u8> {
     match raw {
         552 | 553 => [b, g, r, a]
             .into_iter()
@@ -153,7 +153,12 @@ fn coords(device: &Device, rows: &[&Sample]) -> Buffer {
 
 /// The fixture's kernel `name`.
 pub(super) fn state(device: &Device, name: &str) -> ComputePipelineState {
-    let bitcode = llvm_assemble(&engine_dir().join("xr_samples.ll")).unwrap();
+    state_of(device, "xr_samples", name)
+}
+
+/// The kernel `name` of the owned fixture `fixture`.
+pub(super) fn state_of(device: &Device, fixture: &str, name: &str) -> ComputePipelineState {
+    let bitcode = llvm_assemble(&engine_dir().join(format!("{fixture}.ll"))).unwrap();
     let library = device.new_library_with_air(&bitcode).unwrap();
     let function = library.new_function_with_name(name).unwrap();
     device

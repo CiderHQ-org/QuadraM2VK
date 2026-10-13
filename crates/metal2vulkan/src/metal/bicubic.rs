@@ -57,8 +57,10 @@
 //! texture's swizzle. The channels are the bits from [`PRESENT`]; the texel for each border color
 //! is the bits from [`BORDER`], which [`texels`] sets for a texture without a swizzle and the
 //! binder for the bound texture's (`BicubicTexels::with_border`). A format of no measured family
-//! (compressed, YUV, extended range, stencil, integer) has no treatment: [`texels`] is `None` and
-//! the binder refuses it.
+//! (compressed, YUV, stencil, integer) has no treatment: [`texels`] is `None` and the binder
+//! refuses it. An extended-range format has none here either: its slot's variant fetches the raw
+//! texels and filters their decoded values under the format's bits, known as it is emitted
+//! (`lower::sampler::extended`, measured).
 //!
 //! [`LINEAR`]: BicubicTexels::LINEAR
 //! [`UNORM`]: BicubicTexels::UNORM
@@ -112,10 +114,12 @@ impl BicubicTexels {
     /// of the raw code): a color lane's `(c - 384) / 510` on the grid `1/(16 · 510)` (an `_sRGB`
     /// twin's `±s / 8192` on `1/8192`), and alpha's `(c - 384) / 510`, its code clamped to `[384,
     /// 894]` first, on `1/(8 · 510)`. The sums are signed and reach past `±1` (up to twice the
-    /// grid); a 2D or 3D sum truncates a color lane's terms onto `2^-7` of its grid steps and
-    /// alpha's onto `2^-4`; and a `half` result rounds an `_sRGB` color lane's value with ties away
-    /// from zero (EVs TXN-xrprobe3 and TXN-xrprobe4, an Apple M3 Max and an Apple M4). [`texels`]
-    /// never sets it.
+    /// grid); a 2D or 3D linear sum truncates a color lane's terms onto `2^-7` of its grid steps
+    /// and alpha's onto `2^-4`, where a bicubic sum (the 2D exact routine's) truncates none; and a
+    /// `half` result rounds an `_sRGB` color lane's value with ties away from zero (EVs
+    /// TXN-xrprobe3 and TXN-xrprobe4, an Apple M3 Max and an Apple M4; the bicubic filter's,
+    /// `lower::sampler::extended`). [`texels`] never sets it: an extended-range slot's samples
+    /// read the format's bits as constants under its variant.
     pub const EXTENDED: u32 = 1 << 11;
     /// Bit `BORDER + 3c + b` is set when channel `c` (0 red to 3 alpha) of a tap outside the
     /// texture under a border address reads 1, not 0, for border color `b`, `MTLSamplerBorderColor`'s

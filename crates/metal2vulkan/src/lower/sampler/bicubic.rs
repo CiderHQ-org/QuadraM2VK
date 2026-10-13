@@ -50,7 +50,9 @@
 //! **The arithmetic after the fetches** is Metal's, in module routines every sample calls
 //! ([`routines`]): Metal's fixed-point weights (`metal::bicubic::weights`), then, by the bound
 //! format, an exact integer sum rounded half up onto the format's grid (the 8- and 16-bit
-//! normalized formats, `BicubicTexels::EXACT`), a 32-bit float or half sum through Metal's
+//! normalized formats, `BicubicTexels::EXACT`; an extended-range texture's decoded taps, whose
+//! sample `super::extended` emits through [`filter`] and clamps into the format's endpoints, under
+//! its format's bits), a 32-bit float or half sum through Metal's
 //! accumulators in integer operations (a 1D sum and a 32-bit float format's 2D bilinear one through
 //! its linear accumulator, a half format's 2D Catmull-Rom sum through its two-pass one), or a sum
 //! in `f32` operations with `NoContraction` (every other format), and Metal's rounding to `half`,
@@ -377,7 +379,7 @@ pub(super) fn plan(
 
 /// Scalar and vector types and constants the emission uses.
 pub(super) struct Tys {
-    f32_: TypeId,
+    pub(super) f32_: TypeId,
     i32_: TypeId,
     pub(super) u32_: TypeId,
     pub(super) bool_: TypeId,
@@ -974,18 +976,21 @@ impl Footprint {
 }
 
 /// Where an emulation reads its taps: the image of its own binding, or, in the shared emulation of
-/// a switch-at-use (SEMANTICS 1012), each candidate's image in its own arm.
+/// a switch-at-use, each candidate's image in its own arm, or an extended-range
+/// texture's raw texels, each decoded (`super::extended`).
 #[derive(Clone, Copy)]
 pub(super) enum Texels<'a> {
     Own(SValue),
     Candidates(&'a super::Candidates<'a>),
+    Extended(&'a super::extended::Texture),
 }
 
 impl Texels<'_> {
     /// The texels at `sites` (each a tap of every plane axis, `s` first), each passed through
     /// `post`: from the own image, a fetch per site in turn; from the candidates, one dispatch
     /// whose arms each fetch every site from their image (the null arm zeros), then each site's
-    /// border color and `post` in turn.
+    /// border color and `post` in turn; from an extended-range texture, each site's raw texel
+    /// decoded to its `float` value, or the border texel, in turn.
     pub(super) fn fetch<S: AsRef<[Tap]>>(
         self,
         cx: &mut EmitCx<'_>,
@@ -999,6 +1004,12 @@ impl Texels<'_> {
             Texels::Own(img) => {
                 for site in sites {
                     let v = fp.fetch(fb, img, site.as_ref())?;
+                    out.push(post(cx, fb, v)?);
+                }
+            }
+            Texels::Extended(tex) => {
+                for site in sites {
+                    let v = super::extended::texel(cx, fb, fp, tex, site.as_ref(), false)?;
                     out.push(post(cx, fb, v)?);
                 }
             }
@@ -1392,7 +1403,7 @@ fn half_result(cx: &mut EmitCx<'_>, s: &Sampling) -> BResult<bool> {
 impl Bicubic {
     /// The taps `i + d` of each axis: `i .. i + 1` for a 1D texture's bilinear filter,
     /// `i - 1 .. i + 2` otherwise.
-    fn span(&self) -> &'static [i32] {
+    pub(super) fn span(&self) -> &'static [i32] {
         if self.linear_only() {
             &[0, 1]
         } else {
@@ -1401,7 +1412,7 @@ impl Bicubic {
     }
 
     /// The taps the filter reads over `span`.
-    fn taps<'a>(&'a self, span: &'a [i32]) -> Taps<'a> {
+    pub(super) fn taps<'a>(&'a self, span: &'a [i32]) -> Taps<'a> {
         Taps {
             addressing: Addressing::Modes {
                 address: &self.address,
@@ -1418,8 +1429,9 @@ impl Bicubic {
 
 /// The filter's texel over footprint `fp` (types `t`) on a base level of `size` (the `uint`
 /// lanes `ImageQuerySizeLod` gives), under the bound format's treatment `bits`, a `half` result
-/// when `half`, its taps read from `texels` (module docs).
-fn filter(
+/// when `half`, its taps read from `texels` (module docs). A raw sample, and an extended-range
+/// texture's, whose `bits` are its format's, takes the exact routines alone.
+pub(super) fn filter(
     cx: &mut EmitCx<'_>,
     fb: &mut FunctionBuilder<'_>,
     (t, fp, size): (&Tys, &Footprint, SValue),
@@ -1433,6 +1445,7 @@ fn filter(
     };
     let kx = *kx;
     let vertical = axes.next().map(|(k, row)| (*k, row));
+    let exact_only = b.raw || matches!(texels, Texels::Extended(_));
     // A raw sample's taps are the table's steps.
     let post = |cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>, v: SValue| {
         if b.raw {
@@ -1474,7 +1487,7 @@ fn filter(
         let mut args = texels.fetch(cx, fb, (t, fp), &sites, &post)?;
         args.extend([kx, flags, half]);
         let e = call(fb, line.exact, &args)?;
-        if b.raw {
+        if exact_only {
             return Ok(e);
         }
         let f = call(fb, line.float, &args)?;
@@ -1522,7 +1535,7 @@ fn filter(
     let (ky, [y0, y1, y2, y3]) = pin(fb, 1, ky, [y0, y1, y2, y3])?;
     // The `t` axis's taps as vectors, for a row a loop's counter names: their indices, and on a
     // border axis whether each lies inside the level.
-    let rows = if b.raw {
+    let rows = if exact_only {
         None
     } else {
         let vector = |fb: &mut FunctionBuilder<'_>, elem: TypeId| {
@@ -1555,7 +1568,7 @@ fn filter(
                 (fb.vector_extract_dynamic(at, k)?, inside)
             }
             (RowIndex::Counter(_), None) => {
-                return Err(cx.fail("a raw bicubic sample reads no row by a counter"));
+                return Err(cx.fail("an exact bicubic sample reads no row by a counter"));
             }
         };
         let sites = [x0, x1, x2, x3].map(|x| [x, y]);
@@ -1585,7 +1598,7 @@ fn filter(
         (lkx, lky),
         whole,
         (flags, half),
-        b.raw,
+        exact_only,
     )?;
     let cubic = match sums.float {
         None => sums.exact,

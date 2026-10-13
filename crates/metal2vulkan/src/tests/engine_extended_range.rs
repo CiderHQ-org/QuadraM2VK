@@ -43,6 +43,7 @@ use crate::pipeline::{ComputePipeline, ComputePipelineDescriptor, FunctionDescri
 use crate::spirv::interp::{run_with_images, Buffer, Config, Image, Order, Resources};
 use crate::spirv::ir::TypedModule;
 
+mod bicubic;
 mod heap;
 mod samples;
 mod targets;
@@ -189,8 +190,19 @@ fn validate(
     p: &crate::device::profile::DeviceProfile,
     what: &str,
 ) {
+    validate_entry(bc, "k", inputs, p, what);
+}
+
+/// [`validate`] of the kernel `entry` of `bc`: its artifact.
+fn validate_entry(
+    bc: &[u8],
+    entry: &str,
+    inputs: &LowerInputs,
+    p: &crate::device::profile::DeviceProfile,
+    what: &str,
+) -> std::sync::Arc<crate::library::FunctionArtifact> {
     let consts = FunctionConstantValues::defaults();
-    let entry = EntryRef::Name("k");
+    let entry = EntryRef::Name(entry);
     let plan = plan_bitcode(bc, entry, &consts, p, inputs, &mut meter())
         .unwrap_or_else(|e| panic!("{what}: {e}"));
     let a = compile_bitcode(bc, entry, &consts, p, inputs, &mut meter(), SPIRV_WORDS)
@@ -202,6 +214,7 @@ fn validate(
         plan.estimate.words
     );
     link_and_validate(&a, p).unwrap_or_else(|e| panic!("{what}: {e}"));
+    a
 }
 
 // ---- The reference ----------------------------------------------------------------------------
@@ -841,8 +854,18 @@ fn devices() -> Vec<(String, Device)> {
 /// The kernel compiled into a compute pipeline under `inputs`, or `None` where the device needs a
 /// storage slot's format as an input (it accesses no storage image without one).
 fn pipeline(dev: &Device, bc: &[u8], inputs: &LowerInputs) -> Option<ComputePipeline> {
+    pipeline_entry(dev, bc, "k", inputs)
+}
+
+/// [`pipeline`] of the kernel `entry` of `bc`.
+fn pipeline_entry(
+    dev: &Device,
+    bc: &[u8],
+    entry: &str,
+    inputs: &LowerInputs,
+) -> Option<ComputePipeline> {
     let lib = Library::from_air(bc).expect("library");
-    let f = lib.function("k").expect("function");
+    let f = lib.function(entry).expect("function");
     let compiled =
         match dev.compile_function(&FunctionDescriptor::new(f), inputs, &Budget::standard()) {
             Ok(c) => c,

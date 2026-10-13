@@ -456,8 +456,21 @@ impl Lane<'_> {
         seed: u64,
         (w, h): (u64, u64),
     ) -> (Texture, Vec<u8>, Vec<u8>) {
-        let t = texture(self.device, format, w, h);
         let (words, alpha) = planes(seed, w * h);
+        let t = self.holding(format, (&words, &alpha), (w, h));
+        (t, words, alpha)
+    }
+
+    /// A `w` x `h` texture of `format` holding the color words `words` (4 bytes each) and the
+    /// alpha bytes `alpha`, written as the probe writes them: the alpha bytes by a kernel's
+    /// `float` write of `b / 255`, then the words by `replace_region`.
+    pub(super) fn holding(
+        &self,
+        format: PixelFormat,
+        (words, alpha): (&[u8], &[u8]),
+        (w, h): (u64, u64),
+    ) -> Texture {
+        let t = texture(self.device, format, w, h);
         let values: Vec<u8> = alpha
             .iter()
             .flat_map(|&b| [0.0, 0.0, 0.0, f32::from(b) / 255.0])
@@ -472,9 +485,9 @@ impl Lane<'_> {
             (&values, false),
             dispatch,
         );
-        t.replace_region(Region::new_2d(0, 0, w, h), 0, 0, &words, 4 * w, 0)
+        t.replace_region(Region::new_2d(0, 0, w, h), 0, 0, words, 4 * w, 0)
             .unwrap();
-        (t, words, alpha)
+        t
     }
 
     /// The planes of `t`, 48 x 20, read back as the probe reads them.

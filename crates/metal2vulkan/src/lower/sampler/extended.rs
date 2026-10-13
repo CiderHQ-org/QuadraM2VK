@@ -1,6 +1,6 @@
-//! Samples of an extended-range texture: Metal's nearest and linear filters of a `BGR10_XR`,
-//! `BGRA10_XR` or `RGB10A8_2P_XR10` texture (or an `_sRGB` twin), emulated by fetches of the raw
-//! texels the slot's variant holds (`LoweringInputs::extended_range`).
+//! Samples of an extended-range texture: Metal's nearest, linear and bicubic filters of a
+//! `BGR10_XR`, `BGRA10_XR` or `RGB10A8_2P_XR10` texture (or an `_sRGB` twin), emulated by fetches
+//! of the raw texels the slot's variant holds (`LoweringInputs::extended_range`).
 //!
 //! **Why fetches on every device.** No Vulkan format holds these codes: the image holds the
 //! texels' bytes in an unsigned integer format, which no device filters, so the shader reads
@@ -29,7 +29,31 @@
 //! **A runtime sampler** reads its slot's `SamplerState` word: the sample is linear where the word
 //! states linear minification and magnification, else nearest; the taps follow the word's address
 //! modes, border color, and coordinates. The binder refuses a bound sampler whose word states
-//! anything else (`ResourcePlanner::pair`).
+//! anything else (`ResourcePlanner::pair`) but a cubic filter (below).
+//!
+//! **Bicubic samples** (an Apple M3 Max on macOS 26.7, the owned fixture `xr_bicubic`: random codes
+//! of each `BGR10_XR`, `BGRA10_XR` and two-plane format and `_sRGB` twin at 16 x 16, 7 x 5, 3 x 3,
+//! 2 x 6 and 1 x 1, sampled at each texel's centre and at random coordinates up to 0.15 of the
+//! texture past its edges, 2,304 per texture, through constexpr bicubic samplers under clamp to
+//! edge, repeat, mirrored repeat, clamp to zero and the opaque-black and opaque-white borders, with
+//! pixel coordinates, and with a constant offset under clamp to edge and repeat, and through a
+//! runtime sampler whose filters are `Cubic` (a constexpr sampler of its state, as for the other
+//! formats, `bicubic::cubic_state`), with `float` results and, under clamp to edge, `half` ones:
+//! 3,317,760 lanes): the footprint, the weights, the addressing, a mirrored axis and a level below
+//! four texels are the other formats' (`bicubic`), each tap the decoded texel or the border texel
+//! through the format's channels. A level below four texels sums as this module's linear filter.
+//! Otherwise the sum is the exact routine's (`bicubic::routines::Plane::exact`, under the format's
+//! bits): each tap's step weighed by the product of Metal's weights and summed exactly, no term
+//! truncated as the linear filter's are, the step rounded half up, then clamped into the steps of
+//! the format's codes 0 and 1023 (a color lane's decoded endpoints: `(0 - 384) / 510` and
+//! `(1023 - 384) / 510`, an `_sRGB` twin's table steps; alpha's `[0, 1]`), and divided by the grid
+//! exactly, its `half` rounded as a linear sample's. The clamp is applied to the routine's result:
+//! each rounding is monotonic, so clamping the rounded sum into the rounded endpoints is clamping
+//! the step. Every lane but 4,050 matched; each of those is one step from Metal's, its exact sum
+//! within 0.014 of a step of a rounding tie, which Metal rounds to the other side. No model of
+//! Metal's datapath tried fits, so the sample records `PrecisionNote::BicubicFilterArithmetic`. A
+//! bfloat or padded form's bicubic sample, a gather through a bicubic sampler, and a swizzled
+//! texture's bicubic sample are not measured, and are refused.
 //!
 //! **The bfloat formats** (EV FPV-pf5-m4, an Apple M4 under macOS 27.0.1, every code of
 //! `R16Bfloat`, `RG16Bfloat` and `RGBA16Bfloat`; EV FPV-pf8-m4, 18, 432 positions of each under
@@ -57,6 +81,7 @@ use crate::air::abi::BorderColor;
 use crate::air::ir::ValueId;
 use crate::lower::emit::EmitCx;
 use crate::metal::bicubic::BicubicTexels;
+use crate::metal::format::extended_srgb::SRGB_DECODE_STEPS;
 use crate::metal::format::ExtendedRange;
 use crate::metal::sampler::SamplerWord;
 use crate::metal::{PixelFormat, TextureSwizzleChannels};
@@ -64,11 +89,11 @@ use crate::spirv::builder::constructs::{ArmEnd, ArmFn, Merged};
 use crate::spirv::builder::FunctionBuilder;
 use crate::spirv::error::BResult;
 use crate::spirv::ids::{DemoteTy, FuncId, GlobalId, Value as SValue};
-use crate::spirv::ir::{BinOp, ConstBits, Constant};
+use crate::spirv::ir::{BinOp, ConstBits, Constant, GlslOp, ImageQuery};
 
 use super::bicubic::{
-    footprint_of_image, missing_routine, scalar, value, Addressing, Bits, Footprint, Tap,
-    TapAddress, TapBase, Taps, Tys,
+    footprint_of_image, missing_routine, scalar, value, Addressing, Bicubic, Bits, Footprint, Tap,
+    TapAddress, TapBase, Taps, Texels, Tys,
 };
 use super::{CombinedImage, Pixel};
 
@@ -81,6 +106,9 @@ pub struct Sample {
     pub form: ExtendedRange,
     /// The sampler's state the sample follows.
     pub state: State,
+    /// Metal's bicubic filter of the decoded texels, a constexpr bicubic sampler's or a runtime
+    /// cubic sampler's state (module docs); its addressing is also [`state`](Self::state)'s.
+    pub cubic: Option<Bicubic>,
     /// A gather of this component (0 to 3, red first) instead of a sample: a bfloat form's,
     /// or another's but a two-plane form's, with a `float` result.
     pub gather: Option<u32>,
@@ -135,9 +163,15 @@ pub(super) const BRANCH_WORDS: u32 = 48;
 /// selects of each lane's source.
 pub(super) const SWIZZLE_WORDS: u32 = 192;
 
+/// The census words of a bicubic sample's clamp: the bounds' constants and the clamp.
+const CLAMP_WORDS: u32 = 32;
+
 impl Sample {
     /// The census name.
     pub(crate) fn name(&self) -> &'static str {
+        if self.cubic.is_some() {
+            return "sampler.extended_range.bicubic";
+        }
         if self.gather.is_some() {
             return "sampler.extended_range.gather";
         }
@@ -154,10 +188,15 @@ impl Sample {
     /// their decodes, the routine's call (whose own words the module counts once,
     /// `Routine::words`), and Metal's offset rule on each axis an offset moves (with the slot's
     /// parent tests, `position::PARENT_RULE_WORDS`); a runtime sampler's word's tests and its
-    /// branch; and the status composite.
+    /// branch; and the status composite. A bicubic sample's are its filter's
+    /// (`Bicubic::words`), a decode per tap it reads (the footprint's 16 and a small level's four
+    /// inner ones), the clamp, and the status composite.
     pub(crate) fn words(&self) -> u32 {
         let axes = AXES as u32;
         let decode = crate::lower::arith::extended_range::DECODE_WORDS;
+        if let Some(cubic) = &self.cubic {
+            return cubic.words() + 20 * decode + CLAMP_WORDS + 16;
+        }
         let moved = self
             .offset
             .as_deref()
@@ -324,6 +363,10 @@ pub(crate) fn emit(
         offset: e.offset.as_deref(),
         half: e.half,
     };
+    if let Some(cubic) = &e.cubic {
+        let x = bicubic(cx, fb, &t, &at, &tex, (e.form, cubic))?;
+        return crate::lower::texture::with_word(cx, fb, &e.result, x, None);
+    }
     // A gather, and a bfloat form's sample, follow no filter.
     if e.gather.is_some() || e.form.bfloat() {
         let addressing = match &e.state {
@@ -462,6 +505,112 @@ pub(super) fn filtered(
     fb.call(quad.exact, &args)?.ok_or_else(missing_routine)
 }
 
+/// The bicubic sample `cubic` at `at` of `tex` in `form` (module docs): Metal's bicubic filter of
+/// the decoded taps, through the exact routines alone, clamped into the format's endpoints.
+fn bicubic(
+    cx: &mut EmitCx<'_>,
+    fb: &mut FunctionBuilder<'_>,
+    t: &Tys,
+    at: &At<'_>,
+    tex: &Texture,
+    (form, cubic): (ExtendedRange, &Bicubic),
+) -> BResult<SValue> {
+    let span = cubic.span();
+    let taps = cubic.taps(span);
+    let bits = Bits::Value(tex.flags);
+    let fp = footprint_of_image(
+        cx,
+        fb,
+        t,
+        (at.coord, None),
+        (tex.img, tex.image),
+        bits,
+        (&taps, tex.parent),
+    )?;
+    let zero = fb.u32_const(0)?;
+    let zero = value(fb, zero)?;
+    let size = fb.query(ImageQuery::SizeLod(zero), tex.img)?;
+    let x = super::bicubic::filter(
+        cx,
+        fb,
+        (t, &fp, size),
+        cubic,
+        (bits, at.half),
+        Texels::Extended(tex),
+    )?;
+    let [lo, hi] = clamp_bounds(form, at.half).map(|lanes| {
+        let mut parts = Vec::with_capacity(lanes.len());
+        for x in lanes {
+            parts.push(scalar(fb, t.f32_, u64::from(x.to_bits()))?);
+        }
+        let k = fb.module().constant(Constant::Composite {
+            ty: t.vec4,
+            parts: parts.into(),
+        })?;
+        value(fb, k)
+    });
+    fb.glsl(GlslOp::NClamp, &[x, lo?, hi?])
+}
+
+/// The bounds a bicubic sample of `form` is clamped into, as its result reads them (a `half` one's
+/// where `half`): per lane, red to alpha, the values of the steps of the codes 0 and 1023 on the
+/// lane's grid (module docs), rounded as the exact routine rounds a step (`f32` correctly; `half`
+/// to nearest even, an `_sRGB` color lane's `f32` with ties away from zero). A lane the format
+/// lacks is 0 or 1 at every tap, within its bounds.
+fn clamp_bounds(form: ExtendedRange, half: bool) -> [[f32; 4]; 2] {
+    let color = |code: u32| -> f32 {
+        let n = code as i64 - 384;
+        let (steps, grid) = match form.srgb() {
+            true => {
+                // Codes 0 and 1023: the table's entries 384 and 639.
+                let at = n.unsigned_abs() as usize;
+                let s = SRGB_DECODE_STEPS.get(at).copied().map_or(0, i64::from);
+                (if n < 0 { -s } else { s }, 8192)
+            }
+            false => (16 * n, 16 * 510),
+        };
+        match (half, form.srgb()) {
+            (false, _) => steps as f32 / grid as f32,
+            // An `_sRGB` step over 8192 is an exact `f32`.
+            (true, true) => half_of(steps, grid, true),
+            (true, false) => half_of(steps, grid, false),
+        }
+    };
+    let (lo, hi) = (color(0), color(1023));
+    [[lo, lo, lo, 0.0], [hi, hi, hi, 1.0]]
+}
+
+/// `n / d` (nonzero, within `half`'s normal range) rounded to `half`, with ties away from zero
+/// where `away`, else to even, as an `f32`.
+fn half_of(n: i64, d: i64, away: bool) -> f32 {
+    let a = n.unsigned_abs();
+    let d = d.unsigned_abs();
+    // `e` with `2^e <= a / d < 2^(e + 1)`.
+    let mut e = i32::try_from(a.ilog2()).unwrap_or(0) - i32::try_from(d.ilog2()).unwrap_or(0);
+    let at_least = |e: i32| match e >= 0 {
+        true => a >= d << e,
+        false => a << -e >= d,
+    };
+    if !at_least(e) {
+        e -= 1;
+    }
+    // The significand's eleven bits and the remainder: `a · 2^(10 - e) = q · d + r`.
+    let (num, den) = match 10 - e >= 0 {
+        true => (a << (10 - e), d),
+        false => (a, d << (e - 10)),
+    };
+    let (mut q, r) = (num / den, num % den);
+    if 2 * r > den || (2 * r == den && (away || q & 1 == 1)) {
+        q += 1;
+    }
+    let m = q as f32 * 2f32.powi(e - 10);
+    if n < 0 {
+        -m
+    } else {
+        m
+    }
+}
+
 /// The nearest sample at `at` of `tex` under `addressing`: the texel at Metal's position, decoded.
 pub(super) fn nearest(
     cx: &mut EmitCx<'_>,
@@ -564,7 +713,7 @@ pub(super) fn gathered(
 /// The value of the tap at `site`: the raw texel fetched from the base level, decoded
 /// (`extended_range::decode`, rounded to `half` when `half`), or the border texel where the tap
 /// lies outside a border axis.
-fn texel(
+pub(super) fn texel(
     cx: &mut EmitCx<'_>,
     fb: &mut FunctionBuilder<'_>,
     fp: &Footprint,

@@ -183,7 +183,8 @@ pub struct Plane {
 pub struct PlaneSums {
     /// The `EXACT` formats' ([`Plane::exact`]).
     pub exact: Value,
-    /// Every other format's, by class; `None` for a raw sample, which takes the exact sum alone.
+    /// Every other format's, by class; `None` for a sample that takes the exact sum alone (a raw
+    /// sample, an extended-range texture's).
     pub float: Option<FloatSums>,
 }
 
@@ -227,7 +228,8 @@ pub type FetchRow<'a> = dyn FnMut(&mut FunctionBuilder<'_>, RowIndex) -> BResult
 impl Plane {
     /// A 2D sample's results (module docs) at the fractions `kx` and `ky` (`u32` 1/256 steps),
     /// for the format's `flags` (`u32`) and a `half` result (`bool`), reading the footprint
-    /// through `fetch`. A raw sample (`raw`) takes the exact sum alone. The 32-bit float formats'
+    /// through `fetch`. A sample of a format known as it is emitted (`exact_only`: a raw sample,
+    /// an extended-range texture's) takes the exact sum alone. The 32-bit float formats'
     /// bilinear sum ([`Plane::linear`]) takes the fractions `linear_k`: the sample's own, or, where
     /// the caller computes its small level's accumulated sum by the same call, those it selects
     /// for that level (`bicubic::filter`). `whole` says, per axis (`bool`), whether the axis's
@@ -250,7 +252,7 @@ impl Plane {
         (lkx, lky): (Value, Value),
         whole: (Value, Value),
         (flags, half): (Value, Value),
-        raw: bool,
+        exact_only: bool,
     ) -> BResult<PlaneSums> {
         let call = |fb: &mut FunctionBuilder<'_>, f: FuncId, args: &[Value]| -> BResult<Value> {
             fb.call(f, args)?.ok_or_else(super::missing_routine)
@@ -266,7 +268,7 @@ impl Plane {
         let mut args: Vec<Value> = grid.iter().flatten().copied().collect();
         args.extend([wx, wy, flags, half]);
         let exact = call(fb, self.exact, &args)?;
-        if raw {
+        if exact_only {
             return Ok(PlaneSums { exact, float: None });
         }
         let [_, [_, a11, a12, _], [_, a21, a22, _], _] = grid;

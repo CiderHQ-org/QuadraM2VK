@@ -2,8 +2,9 @@
 //! assemblers (`llvm-as`, `xcrun metal-as`, `spirv-as`), the committed fixture directories, a
 //! synthetic metallib writer ([`metallib`]), a tool's identity, the MoltenVK toolchain the MSL
 //! checks reproduce, and the generated-program fuzzers ([`fuzz`]) the product's CPU-interpreter
-//! tests and validation's device tests both run, the extended-range blend table both check
-//! ([`xr_blends`]), and the store-buffering litmus kernel both compile ([`litmus`]).
+//! tests and validation's device tests both run, the extended-range blend and bicubic tables both
+//! check ([`xr_blends`], [`xr_bicubic`]), and the store-buffering litmus kernel both compile
+//! ([`litmus`]).
 //!
 //! The product runs no external tool and takes this crate for its tests alone: it is the
 //! product's path-only dev-dependency, which `cargo publish` drops, and a dependency of
@@ -23,6 +24,7 @@ pub mod litmus;
 pub mod metallib;
 pub mod spirv;
 pub mod tools;
+pub mod xr_bicubic;
 pub mod xr_blends;
 
 /// The validation crate's `fixtures/public` beside this crate

@@ -981,10 +981,15 @@ fn select_slot(
 /// is not tangled. A bfloat form's sample is nearest under either filter, as Metal's, and its
 /// gather of a component is built, the taps of the linear footprint; so is another form's `float`
 /// gather, but a two-plane form's; and a swizzled texture of the slot's variant
-/// (`LoweringInputs::swizzled_storage`) swizzles the decoded texels. Every other sampling of the
-/// slot is `NotImplemented(Format)`: a two-plane form's gather, or another non-bfloat form's `half`
-/// one, an LOD query, a comparison, a 1D, 3D, cube, or array texture, a bicubic, mipmapped,
-/// anisotropic, or mixed filter, and a dynamic offset.
+/// (`LoweringInputs::swizzled_storage`) swizzles the decoded texels. A `BGR10_XR`, `BGRA10_XR` or
+/// two-plane form's (or `_sRGB` twin's) sample through a bicubic sampler, constexpr or a runtime
+/// one whose bound word states `Cubic` (`LoweringInputs::cubic_samplers`), is Metal's bicubic filter
+/// of the decoded texels (`extended`), under the bicubic filter's checks
+/// (`NotImplemented(SamplerBicubicFilter)`: `bicubic::check`), and refused there for a bfloat or
+/// padded form, a gather, and a swizzled texture (not measured). Every other sampling of the slot is
+/// `NotImplemented(Format)`: a two-plane form's gather, or another non-bfloat form's `half` one, an
+/// LOD query, a comparison, a 1D, 3D, cube, or array texture, a mipmapped, anisotropic, or mixed
+/// filter, and a dynamic offset.
 fn select_extended(
     cx: &mut SelectCx<'_>,
     call: Call<'_>,
@@ -1059,49 +1064,73 @@ fn select_extended(
     if gather.is_some() && half && !form.bfloat() {
         return Err(refused());
     }
-    let state = match sampler {
-        SamplerArg::Static(SamplerRef::Constexpr(words), _) => {
-            let s = super::state_of(words)?;
-            let linear = match (s.min_filter, s.mag_filter) {
-                (Filter::Linear, Filter::Linear) => true,
-                (Filter::Nearest, Filter::Nearest) => false,
-                _ => return Err(refused()),
-            };
-            // Metal's linear filter of a bfloat texture reads the nearest texel (EV FPV-pf5-m4),
-            // and a gather follows no filter.
-            let linear = linear && !form.bfloat() && gather.is_none();
-            if s.mip_filter != MipFilter::None || s.max_anisotropy > 1 {
-                return Err(refused());
-            }
-            let address = [s.address_s, s.address_t]
-                .into_iter()
-                .map(|m| match m {
-                    AddressMode::ClampToEdge => TapAddress::Edge,
-                    AddressMode::Repeat => TapAddress::Repeat,
-                    AddressMode::MirroredRepeat => TapAddress::Mirror,
-                    AddressMode::ClampToZero | AddressMode::ClampToBorder => TapAddress::Border,
-                })
-                .collect();
-            State::Constant {
-                linear,
-                address,
-                border: s.border_color,
-                pixel: s.coordinates == Coordinates::Pixel,
-            }
+    // Metal's bicubic filter: a constexpr bicubic sampler's, or a runtime sampler's whose bound
+    // word states it, under its slot's cubic-sampler variant (whose fact the function states).
+    let cubic = match sampler {
+        SamplerArg::Static(SamplerRef::Slot(n), _) => cubic_slot(cx, n)?,
+        SamplerArg::Static(r, _) => super::bicubic::state(r)?,
+        SamplerArg::Heap(_) => None,
+    };
+    let swizzle = crate::lower::texture::swizzled_storage(cx, ImageRef::Slot(index))?;
+    let cubic = match cubic {
+        None => None,
+        // Measured on the six `BGR10_XR`, `BGRA10_XR` and two-plane forms' samples alone.
+        Some(_) if form.bfloat() || form.padded() || gather.is_some() || swizzle => {
+            return Err(bicubic_refused());
         }
-        // The function reads the word's filter, coordinates, address modes, and border color. A
-        // cubic sampler's bicubic filter of the extended-range texels is not built.
-        SamplerArg::Static(SamplerRef::Slot(n), _) => {
-            if cubic_slot(cx, n)?.is_some() {
-                return Err(bicubic_refused());
-            }
-            let Some(s) = cx.families.sampler.slots.get_mut(&n) else {
-                return Err(cx.invariant("an unplanned sampler slot"));
-            };
-            s.linear = true;
-            State::Slot { sampler: n }
+        Some(s) => {
+            super::bicubic::check(&s, shape.dim, (false, false, false), true)?;
+            Some(super::bicubic::plan(&s, index, shape.dim, offset.clone())?)
         }
-        SamplerArg::Heap(_) => return Err(refused()),
+    };
+    let state = match &cubic {
+        // The bicubic filter's addressing, which places a constant offset (below).
+        Some(b) => State::Constant {
+            linear: false,
+            address: b.address.clone(),
+            border: b.border,
+            pixel: b.pixel,
+        },
+        None => match sampler {
+            SamplerArg::Static(SamplerRef::Constexpr(words), _) => {
+                let s = super::state_of(words)?;
+                let linear = match (s.min_filter, s.mag_filter) {
+                    (Filter::Linear, Filter::Linear) => true,
+                    (Filter::Nearest, Filter::Nearest) => false,
+                    _ => return Err(refused()),
+                };
+                // Metal's linear filter of a bfloat texture reads the nearest texel (EV FPV-pf5-m4),
+                // and a gather follows no filter.
+                let linear = linear && !form.bfloat() && gather.is_none();
+                if s.mip_filter != MipFilter::None || s.max_anisotropy > 1 {
+                    return Err(refused());
+                }
+                let address = [s.address_s, s.address_t]
+                    .into_iter()
+                    .map(|m| match m {
+                        AddressMode::ClampToEdge => TapAddress::Edge,
+                        AddressMode::Repeat => TapAddress::Repeat,
+                        AddressMode::MirroredRepeat => TapAddress::Mirror,
+                        AddressMode::ClampToZero | AddressMode::ClampToBorder => TapAddress::Border,
+                    })
+                    .collect();
+                State::Constant {
+                    linear,
+                    address,
+                    border: s.border_color,
+                    pixel: s.coordinates == Coordinates::Pixel,
+                }
+            }
+            // The function reads the word's filter, coordinates, address modes, and border color.
+            SamplerArg::Static(SamplerRef::Slot(n), _) => {
+                let Some(s) = cx.families.sampler.slots.get_mut(&n) else {
+                    return Err(cx.invariant("an unplanned sampler slot"));
+                };
+                s.linear = true;
+                State::Slot { sampler: n }
+            }
+            SamplerArg::Heap(_) => return Err(refused()),
+        },
     };
     if crate::lower::texture::residency(cx, at, ImageRef::Slot(index))? {
         return Err(refused());
@@ -1109,7 +1138,6 @@ fn select_extended(
     // A swizzled texture of the slot's variant: the sample swizzles its decoded texel, a border
     // texel included, and a gather of a component gathers the component its swizzle names, as
     // plain Metal does (EV FPV-sw1-m4).
-    let swizzle = crate::lower::texture::swizzled_storage(cx, ImageRef::Slot(index))?;
     if swizzle {
         crate::lower::texture::swizzles(cx, index)?;
     }
@@ -1140,6 +1168,15 @@ fn select_extended(
             .bicubic_routines
             .insert(super::bicubic::routines::Routine::Quad);
     }
+    // A bicubic sample takes the 2D routines, and a level below four texels on either axis the
+    // linear ones; its sum near a rounding tie is not Metal's datapath's.
+    if cubic.is_some() {
+        cx.families.sampler.bicubic_routines.extend([
+            super::bicubic::routines::Routine::Plane,
+            super::bicubic::routines::Routine::Quad,
+        ]);
+        cx.precision.insert(PrecisionNote::BicubicFilterArithmetic);
+    }
     let coord = ops
         .get(TexRole::Coord)
         .ok_or_else(|| cx.invariant("a sampling call without a coordinate"))?;
@@ -1147,6 +1184,7 @@ fn select_extended(
         texture: index,
         form,
         state,
+        cubic,
         gather,
         swizzle,
         offset,

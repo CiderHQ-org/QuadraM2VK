@@ -1692,14 +1692,17 @@ impl ResourcePlanner<'_> {
     /// fetches: its word must state one filter for minification and magnification (nearest or
     /// linear), no mip filter, and no anisotropy: else `NotImplemented(Format)`. Every address mode
     /// is the fetches' (a `MirrorClampToEdge` axis's taps mirrored once and clamped; a padded
-    /// form's under every mode, measured). An unbound slot's word is 0, a nearest sampler's.
+    /// form's under every mode, measured). An unbound slot's word is 0, a nearest sampler's. A word
+    /// that states a `Cubic` filter is the plan's cubic-sampler variant's
+    /// (`VariantKey::cubic_samplers`), whose function samples through Metal's bicubic filter of its
+    /// state and refuses what that filter's checks refuse (`lower::sampler::extended`).
     fn extended_sampler(&self, slot: SlotRef) -> Result<(), BindError> {
         let word = self
             .stage_shape(slot.stage)
             .and_then(|s| s.samplers.get(&slot.index))
             .map_or(0, |s| s.word.0);
         let filter = word & SamplerWord::LINEAR_FILTER;
-        if filter == 0 || filter == SamplerWord::LINEAR {
+        if word & SamplerWord::CUBIC != 0 || filter == 0 || filter == SamplerWord::LINEAR {
             return Ok(());
         }
         Err(BindError::Unsupported(Unsupported::not_implemented(
@@ -1744,9 +1747,11 @@ impl ResourcePlanner<'_> {
 
     /// The `BicubicTexels(slot)` specialization: how Metal's bicubic filter treats the texels of
     /// the format bound at texture `slot` (`metal::bicubic::texels`), with the border texels of the
-    /// bound texture's swizzle. A slot whose combined binding reads the neutral (unbound, or bound
-    /// incompatibly) takes `BicubicTexels::NEUTRAL`; a compatible format of no measured family is
-    /// refused `NotImplemented(SamplerBicubicFilter)`.
+    /// bound texture's swizzle. A slot whose combined binding reads the neutral (unbound, bound
+    /// incompatibly, or bound in an extended-range format, whose texels the slot's variant this
+    /// plan asks for samples itself, `VariantKey::extended_range`) takes `BicubicTexels::NEUTRAL`;
+    /// another compatible format of no measured family is refused
+    /// `NotImplemented(SamplerBicubicFilter)`.
     pub fn bicubic_texels(&self, slot: SlotRef) -> Result<u64, BindError> {
         let t = *self.texture_slot(slot)?;
         let class = declared(
@@ -1757,6 +1762,7 @@ impl ResourcePlanner<'_> {
             StorageFormatClass::NotStorage,
         )?;
         let texels = match self.texture_shape(slot) {
+            _ if self.variant.extended_range.contains_key(&slot) => BicubicTexels::NEUTRAL,
             Some(s @ TextureShape::Texture { pixel_format, .. }) if compatible(s, &t, &class) => {
                 bicubic_texels(*pixel_format)
                     .ok_or(BindError::Unsupported(Unsupported::not_implemented(
