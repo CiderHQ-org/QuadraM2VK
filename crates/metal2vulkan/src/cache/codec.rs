@@ -1175,6 +1175,7 @@ codec_enum! {
         AnisotropicSampler { slot },
         StorageTextureIntegerChannels { slot },
         HeapHalfTexelWrites { stage, packed },
+        MovableStorageWrites { early_variant },
     }
     UniformViewChoice { Viewed, Spare, Kept }
     Mechanism {

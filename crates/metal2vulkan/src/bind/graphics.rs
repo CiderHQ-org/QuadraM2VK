@@ -985,14 +985,35 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
     // pipeline with a depth or stencil attachment: Metal's store, as compiled, where the draw's
     // tests drop no fragment; where they drop some but write and count nothing, the variant whose
     // function declares early tests, which a pipeline compiled under it states; refused
-    // otherwise.
-    let tested = p.dependencies.iter().find_map(|d| match d.fact {
-        RuntimeFact::TestedStorageWrites {
-            early_tests,
-            early_variant,
-        } => Some((early_tests, early_variant)),
-        _ => None,
-    });
+    // otherwise. A draw that moves a color the function writes into that form (an interlocked
+    // color, a shadowed extended-range one) asks for the variant that stores it so: where the
+    // pipeline as compiled stores no color so, the function states that variant's tests
+    // (`RuntimeFact::MovableStorageWrites`), so this plan selects them, and the variant it names
+    // plans itself.
+    let moves = interlocked_colors
+        .iter()
+        .chain(&extended_shadows)
+        .any(|&c| {
+            1u32.checked_shl(c)
+                .is_some_and(|bit| p.graphics.color_outputs & bit != 0)
+        });
+    let tested = p
+        .dependencies
+        .iter()
+        .find_map(|d| match d.fact {
+            RuntimeFact::TestedStorageWrites {
+                early_tests,
+                early_variant,
+            } => Some((early_tests, early_variant)),
+            _ => None,
+        })
+        .or_else(|| {
+            let movable = p.dependencies.iter().find_map(|d| match d.fact {
+                RuntimeFact::MovableStorageWrites { early_variant } => Some((false, early_variant)),
+                _ => None,
+            });
+            movable.filter(|_| moves)
+        });
     let tested_attachments =
         p.graphics.depth_format.is_some() || p.graphics.stencil_format.is_some();
     // Where only the depth test can drop a fragment, the stencil test does nothing and nothing

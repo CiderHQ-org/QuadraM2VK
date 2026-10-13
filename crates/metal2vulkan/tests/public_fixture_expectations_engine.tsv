@@ -1865,6 +1865,20 @@ engine/smp_runtime_array.air.ll	smp_runtime_array	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	
 engine/smp_runtime_array.ll	smp_runtime_array	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	Unsupported{DescriptorCount; AnyOf[[Limit { limit: MaxPerStageDescriptorSampledImages, required: 32, available: 16 }]]}	Unsupported{DescriptorCount; AnyOf[[Limit { limit: MaxPerStageDescriptorSampledImages, required: 32, available: 16 }]]}
 engine/smp_shared_sampler.air.ll	smp_shared_sampler	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	Unsupported{DescriptorCount; AnyOf[[Limit { limit: MaxPerStageDescriptorSampledImages, required: 32, available: 16 }]]}	Unsupported{DescriptorCount; AnyOf[[Limit { limit: MaxPerStageDescriptorSampledImages, required: 32, available: 16 }]]}
 engine/smp_shared_sampler.ll	smp_shared_sampler	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	Unsupported{DescriptorCount; AnyOf[[Limit { limit: MaxPerStageDescriptorSampledImages, required: 32, available: 16 }]]}	Unsupported{DescriptorCount; AnyOf[[Limit { limit: MaxPerStageDescriptorSampledImages, required: 32, available: 16 }]]}
+engine/smw_writers.air.ll	smw_full	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/smw_writers.air.ll	smw_plain	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/smw_writers.air.ll	smw_discard	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/smw_writers.air.ll	smw_store	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	Unsupported{StageStoresAndAtomics; AnyOf[[Feature(FragmentStoresAndAtomics)]]}	Unsupported{StageStoresAndAtomics; AnyOf[[Feature(FragmentStoresAndAtomics)]]}
+engine/smw_writers.air.ll	smw_depth	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/smw_writers.air.ll	smw_mask	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/smw_writers.air.ll	smw_early	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	Unsupported{StageStoresAndAtomics; AnyOf[[Feature(FragmentStoresAndAtomics)]]}	Unsupported{StageStoresAndAtomics; AnyOf[[Feature(FragmentStoresAndAtomics)]]}
+engine/smw_writers.ll	smw_full	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/smw_writers.ll	smw_plain	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/smw_writers.ll	smw_discard	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/smw_writers.ll	smw_store	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	Unsupported{StageStoresAndAtomics; AnyOf[[Feature(FragmentStoresAndAtomics)]]}	Unsupported{StageStoresAndAtomics; AnyOf[[Feature(FragmentStoresAndAtomics)]]}
+engine/smw_writers.ll	smw_depth	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/smw_writers.ll	smw_mask	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/smw_writers.ll	smw_early	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	Unsupported{StageStoresAndAtomics; AnyOf[[Feature(FragmentStoresAndAtomics)]]}	Unsupported{StageStoresAndAtomics; AnyOf[[Feature(FragmentStoresAndAtomics)]]}
 engine/spc_bool_index.air.ll	spc_bool_index	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
 engine/spc_bool_index.ll	spc_bool_index	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
 engine/spc_num_samples.air.ll	spc_num_samples	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok

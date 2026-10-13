@@ -748,6 +748,41 @@ struct BodyFacts {
     side_effects: bool,
 }
 
+/// How the depth and stencil tests bear on the function's storage writes, which it makes before
+/// them where the module declares no early tests (module docs).
+#[derive(Clone, Copy)]
+struct StoredBeforeTests {
+    /// Only its discard keeps the function from early tests: its stores are Metal's where a
+    /// draw's tests drop no fragment, and under early tests where they write and count nothing.
+    tested: bool,
+    /// It writes other memory, or returns depth, stencil, or a sample mask, or early tests would
+    /// lose its writes (`dropped`): its stores are Metal's only where a draw's tests drop no
+    /// fragment.
+    untested: bool,
+}
+
+/// [`StoredBeforeTests`] of a function whose body holds `body`, that Metal runs under early tests
+/// where `declared_early` and returns depth, stencil, or a sample mask where `exports`, on `p`,
+/// in a pipeline with a depth or stencil attachment where `depth_or_stencil`, where early tests
+/// would drop its storage writes where `dropped`. Under `AcceptUnordered` neither: the function
+/// reads unordered, which no draw's tests refuse.
+fn stored_before_tests(
+    p: &DeviceProfile,
+    body: &BodyFacts,
+    (declared_early, exports): (bool, bool),
+    (depth_or_stencil, dropped): (bool, bool),
+) -> StoredBeforeTests {
+    let ordered = p.fields().framebuffer_fetch == FramebufferFetchPolicy::RequireOrdered;
+    let testable = depth_or_stencil && !(exports || body.side_effects);
+    StoredBeforeTests {
+        tested: !declared_early && testable && body.discards && ordered,
+        untested: !declared_early
+            && depth_or_stencil
+            && (exports || body.side_effects || dropped)
+            && ordered,
+    }
+}
+
 fn body_facts(cx: &SelectCx<'_>) -> BodyFacts {
     let mut out = BodyFacts::default();
     for (id, inst) in cx.body.insts.iter() {
@@ -844,6 +879,34 @@ pub(super) fn plan(cx: &mut SelectCx<'_>) -> Result<(), Error> {
         return Ok(());
     }
     let body = body_facts(cx);
+    let outputs = &cx.entry.ep.outputs;
+    let returns = |role: fn(&OutputRole) -> bool| outputs.iter().any(|o| role(&o.role));
+    let exports = returns(|r| {
+        matches!(
+            r,
+            OutputRole::Depth(_) | OutputRole::Stencil | OutputRole::SampleMask
+        )
+    });
+    let declared_early = matches!(
+        cx.entry.ep.stage,
+        crate::air::abi::Stage::Fragment {
+            early_fragment_tests: true
+        }
+    );
+    // A draw may move a color the function writes through its first output into the storage
+    // form: a color its render pass instance keeps out of its subpass for other draws'
+    // interlocked form (`VariantKey::interlocked_colors`), or an extended-range color whose `half`
+    // shadow the instance holds (`VariantKey::extended_shadows`), both single-sampled, so no
+    // driver drops their writes under early tests. The plan of the pipeline as compiled, which
+    // stores no color so, selects the tests such a draw's variant needs from this.
+    let movable = stored_before_tests(cx.profile, &body, (declared_early, exports), (true, false));
+    if (movable.tested || movable.untested)
+        && returns(|r| matches!(r, OutputRole::RenderTarget { index: 0, .. }))
+    {
+        cx.facts.insert(RuntimeFact::MovableStorageWrites {
+            early_variant: movable.tested && !movable.untested,
+        });
+    }
     let blended = blended_extended_range(cx)?;
     // A bfloat attachment's blend has no model (Metal's validation refuses one): no storage form
     // blends it.
@@ -860,17 +923,27 @@ pub(super) fn plan(cx: &mut SelectCx<'_>) -> Result<(), Error> {
     let mut read = colors_read(cx, &body.used)?;
     read.extend(blended.iter().map(|&(color, _)| color));
     // Every other attachment the pipeline's state names that the function writes through its
-    // first output: a color the draw's render pass instance keeps out of its subpass
-    // (`VariantKey::interlocked_colors`), written through the storage form as a fetched one is.
+    // first output: a color the draw moved into the storage form (above), written through it as a
+    // fetched one is, or one named for Metal's 16-bit float blend alone.
+    let mut moved = BTreeSet::new();
     if let Some(inputs) = &cx.inputs.framebuffer_fetch {
-        read.extend(cx.entry.ep.outputs.iter().filter_map(|o| match o.role {
-            OutputRole::RenderTarget {
-                attachment: AbiInt::Const(color),
-                index: 0,
-                ..
-            } if inputs.attachments.contains_key(&color) => Some(color),
-            _ => None,
-        }));
+        let written: BTreeSet<u32> = outputs
+            .iter()
+            .filter_map(|o| match o.role {
+                OutputRole::RenderTarget {
+                    attachment: AbiInt::Const(color),
+                    index: 0,
+                    ..
+                } if inputs.attachments.contains_key(&color) => Some(color),
+                _ => None,
+            })
+            .collect();
+        moved = written
+            .difference(&read)
+            .filter(|c| !inputs.half_blends.contains(c))
+            .copied()
+            .collect();
+        read.extend(written);
     }
     if read.is_empty() {
         return Ok(());
@@ -891,20 +964,6 @@ pub(super) fn plan(cx: &mut SelectCx<'_>) -> Result<(), Error> {
     let Some(inputs) = cx.inputs.framebuffer_fetch.clone() else {
         return Err(Error::NeedsInput(RuntimeInput::FramebufferFetch));
     };
-    let outputs = &cx.entry.ep.outputs;
-    let returns = |role: fn(&OutputRole) -> bool| outputs.iter().any(|o| role(&o.role));
-    let exports = returns(|r| {
-        matches!(
-            r,
-            OutputRole::Depth(_) | OutputRole::Stencil | OutputRole::SampleMask
-        )
-    });
-    let declared_early = matches!(
-        cx.entry.ep.stage,
-        crate::air::abi::Stage::Fragment {
-            early_fragment_tests: true
-        }
-    );
     // The module declares early fragment tests so that a depth or stencil test the fragment
     // fails drops its storage writes, as it drops Metal's color write; it may only where they
     // keep the function's writes Metal's (no discard, no depth, stencil, or coverage export, no
@@ -912,22 +971,6 @@ pub(super) fn plan(cx: &mut SelectCx<'_>) -> Result<(), Error> {
     // declaration would change nothing, and it is left out: Apple's GPU drops the image writes
     // of an early-tests fragment shader in a pass of more than one sample.
     let testable = inputs.depth_or_stencil && !(exports || body.side_effects);
-    // A function that only its discard keeps from them, on a device that requires ordered
-    // fetch: its storage writes are Metal's where its draws' tests drop no fragment, before
-    // the tests, and where they write neither attachment and count no visibility result, under
-    // early tests (`LoweringInputs::read_only_tests`), which then drop no fragment Metal's
-    // later tests keep and leave the attachments as Metal's do; the plan of each draw checks
-    // which (`RuntimeFact::TestedStorageWrites`). Under `AcceptUnordered` it reads unordered,
-    // as before, which no draw's tests refuse.
-    let tested = !declared_early
-        && testable
-        && body.discards
-        && cx.profile.fields().framebuffer_fetch == FramebufferFetchPolicy::RequireOrdered;
-    // A function that writes other memory, or returns depth, stencil, or a sample mask, beside a
-    // depth or stencil attachment: Metal runs its memory writes for every fragment, those its
-    // tests then drop included, and tests what it returns (EV XRR2-fx1-m4), which early tests
-    // would not. Its storage writes before the tests are Metal's where its draws' tests drop no
-    // fragment, which the plan of each draw checks; it has no early-tests variant.
     // A driver that drops the image writes of an early-tests fragment shader in a pass of more
     // than one sample would lose every storage write of a function that writes a fetched color
     // beside a depth or stencil attachment under early tests: such a function declares none (unless
@@ -957,10 +1000,24 @@ pub(super) fn plan(cx: &mut SelectCx<'_>) -> Result<(), Error> {
             .fields()
             .workarounds
             .contains(&DriverWorkaround::EarlyTestsDropMultisampledImageWrites);
-    let untested = !declared_early
-        && inputs.depth_or_stencil
-        && (exports || body.side_effects || dropped)
-        && cx.profile.fields().framebuffer_fetch == FramebufferFetchPolicy::RequireOrdered;
+    // A function that only its discard keeps from early tests, on a device that requires ordered
+    // fetch (`tested`): its storage writes are Metal's where its draws' tests drop no fragment,
+    // before the tests, and where they write neither attachment and count no visibility result,
+    // under early tests (`LoweringInputs::read_only_tests`), which then drop no fragment Metal's
+    // later tests keep and leave the attachments as Metal's do; the plan of each draw checks
+    // which (`RuntimeFact::TestedStorageWrites`). One that writes other memory, or returns depth,
+    // stencil, or a sample mask, beside a depth or stencil attachment, or whose driver would drop
+    // its writes under early tests (`untested`): Metal runs its memory writes for every fragment,
+    // those its tests then drop included, and tests what it returns (measured on Apple's M4), which
+    // early tests would not, so its storage writes before the tests are Metal's where its draws'
+    // tests drop no fragment, which the plan of each draw checks; it has no early-tests variant.
+    // Under `AcceptUnordered` it reads unordered, as before, which no draw's tests refuse.
+    let StoredBeforeTests { tested, untested } = stored_before_tests(
+        cx.profile,
+        &body,
+        (declared_early, exports),
+        (inputs.depth_or_stencil, dropped),
+    );
     let early_tests = declared_early
         || (testable && !body.discards && !untested)
         || (tested && cx.inputs.read_only_tests && !untested);
@@ -1097,13 +1154,15 @@ pub(super) fn plan(cx: &mut SelectCx<'_>) -> Result<(), Error> {
     if !cx.families.fragment.fetch.is_empty() {
         cx.families.fragment.fetch_early_tests = early_tests && !declared_early;
     }
-    // Whether a write stores is the draw's tests' to decide.
+    // Whether a write stores is the draw's tests' to decide. A moved color's write counts under
+    // any mask: the plan of the pipeline before the move selected its tests from the function
+    // alone (`RuntimeFact::MovableStorageWrites`), and its variant states them alike.
     let stores = cx
         .families
         .fragment
         .fetch
-        .values()
-        .any(|sc| sc.writes && !sc.view.stores_nothing());
+        .iter()
+        .any(|(color, sc)| sc.writes && (!sc.view.stores_nothing() || moved.contains(color)));
     if (tested || untested) && stores {
         cx.facts.insert(RuntimeFact::TestedStorageWrites {
             early_tests,

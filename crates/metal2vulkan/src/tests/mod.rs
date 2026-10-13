@@ -73,6 +73,7 @@ mod engine_metal_readings;
 mod engine_metal_routines;
 mod engine_metered_walks;
 mod engine_metering;
+mod engine_moved_writers;
 mod engine_multisample;
 mod engine_must_fallback;
 mod engine_name_independence;

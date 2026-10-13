@@ -484,6 +484,25 @@ pub enum RuntimeFact {
         early_tests: bool,
         early_variant: bool,
     },
+    /// On a device that orders framebuffer fetch only through the ordered pixel interlock and
+    /// requires it ordered (`FramebufferFetchPolicy::RequireOrdered`), the fragment function writes
+    /// a color through its first output and does not declare early fragment tests, and it
+    /// discards, writes other memory, or returns depth, stencil, or a sample mask. A draw may move
+    /// such a color into the interlocked storage form (`BindShape::interlocked_colors`, or an
+    /// extended-range color's `BindShape::extended_shadows`), whose variant then stores before the
+    /// depth and stencil tests and states [`TestedStorageWrites`](Self::TestedStorageWrites) with
+    /// this `early_variant`, under any write mask. So the plan of a pipeline that writes no color
+    /// so selects the tests of such a draw from this as from that fact, and the variant it names
+    /// plans itself.
+    ///
+    /// The plan reads it only for a draw that moves a color the function writes (and only where the
+    /// pipeline has a depth or stencil attachment, whose tests the variant then depends on). A
+    /// write whose mask covers none of the format's channels stores nothing, but its variant
+    /// selects the tests all the same: an early-tests variant or the function's own tests serve
+    /// it exactly. A draw whose tests neither serves (tests the draw does not state) is refused,
+    /// as any draw whose variant is refused: the runtime keeps the color out of the storage form
+    /// there (the pass splits, or the shadow ends).
+    MovableStorageWrites { early_variant: bool },
     /// On a device that samples through Metal's own sampler (`VkProperty::MetalSampler`:
     /// MoltenVK on Apple's GPU), the function samples the texture bound to the slot through a
     /// linear filter, which the device's filter answers as Metal does for every format but the

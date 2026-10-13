@@ -234,6 +234,9 @@ fn every_fact() -> Vec<RuntimeFact> {
             stage: Stage::Kernel,
             packed: true,
         },
+        RuntimeFact::MovableStorageWrites {
+            early_variant: true,
+        },
     ]
 }
 
@@ -324,6 +327,7 @@ fn variant(f: &RuntimeFact) -> usize {
         RuntimeFact::AnisotropicSampler { .. } => 80,
         RuntimeFact::StorageTextureIntegerChannels { .. } => 81,
         RuntimeFact::HeapHalfTexelWrites { .. } => 82,
+        RuntimeFact::MovableStorageWrites { .. } => 83,
     }
 }
 
@@ -331,7 +335,7 @@ fn variant(f: &RuntimeFact) -> usize {
 fn mechanism_is_total_over_every_fact_and_profile() {
     let facts = every_fact();
     let covered: std::collections::BTreeSet<usize> = facts.iter().map(variant).collect();
-    assert_eq!(covered, (0..83).collect(), "every_fact misses a variant");
+    assert_eq!(covered, (0..84).collect(), "every_fact misses a variant");
     for (stem, _) in super::committed_profiles() {
         let dev = device(&stem);
         let p = dev.profile();
@@ -404,6 +408,7 @@ fn mechanism_is_total_over_every_fact_and_profile() {
                 | RuntimeFact::DroppedColor { .. }
                 | RuntimeFact::DepthClampRange
                 | RuntimeFact::TestedStorageWrites { .. }
+                | RuntimeFact::MovableStorageWrites { .. }
                 | RuntimeFact::YCbCrTexture { .. }
                 | RuntimeFact::ConstexprSampled { .. }
                 | RuntimeFact::CubicSampler { .. }

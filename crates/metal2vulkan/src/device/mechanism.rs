@@ -197,6 +197,9 @@ pub fn mechanism(fact: &RuntimeFact, profile: &DeviceProfile) -> Mechanism {
         // but write and count nothing asks for; the planner refuses a draw whose tests may write
         // or count.
         RuntimeFact::TestedStorageWrites { .. } => Mechanism::Variant,
+        // The tests a draw that moves the function's color into the interlocked storage form
+        // selects: that variant's.
+        RuntimeFact::MovableStorageWrites { .. } => Mechanism::Variant,
         // The binder's regions carry the tile as Metal's threadgroup; the tile pipeline checks its
         // descriptor's flag.
         RuntimeFact::TileThreadgroup { .. } => Mechanism::RegionSelected,
