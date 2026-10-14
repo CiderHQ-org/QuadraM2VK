@@ -125,11 +125,7 @@ const TEXTURE_SIDE: u64 = 64;
 const SHAPE_BYTES: usize = 64;
 /// The most allocations a frame's draw makes on the encoding thread on average, its state changes
 /// and its draw call together, once every pipeline is made. Measured: 24.5 on RADV (Radeon 780M)
-/// and ANV (Iris Xe), 24.7 on lavapipe; 67.5 on RADV before a draw compared its
-/// pipeline key and bind shape in place, held what it retains by reference, kept its small lists,
-/// descriptor writes and push bytes on the stack, and found its pass colors' routing kept; 97.8
-/// before each texture kept its storage view formats, each encoder its pipeline state's routing,
-/// and the format table its entries.
+/// and ANV (Iris Xe), 24.7 on lavapipe.
 #[cfg(not(m2v_system_alloc))]
 const DRAW_ALLOCATIONS: f64 = 27.0;
 /// [`DRAW_ALLOCATIONS`] in a build with debug assertions, which CI's tests are: the draw path's
@@ -140,16 +136,13 @@ const DRAW_ALLOCATIONS: f64 = 27.0;
 const DRAW_ALLOCATIONS_DEBUG: f64 = 38.0;
 /// The most allocations a frame's pass open (`render_command_encoder`) makes on the encoding
 /// thread on average, once every pipeline is made. Measured: 13.0 on RADV (Radeon 780M), on
-/// lavapipe and on ANV (Iris Xe); 18.0 on RADV and ANV before the device kept each pass shape's
-/// compatible render pass.
+/// lavapipe and on ANV (Iris Xe).
 #[cfg(not(m2v_system_alloc))]
 const OPEN_ALLOCATIONS: f64 = 14.0;
 /// The most allocations a frame's pass end (`end_encoding`) makes on the encoding thread on
 /// average, once every pipeline is made. Measured: 36.6 on RADV (Radeon 780M) and ANV (Iris Xe),
 /// 38.6 on lavapipe, where an encoder's holds reach its command buffer as one entry, which starts
-/// the command buffer's list; 35.6 and 37.6 where the first encoder's list became the command
-/// buffer's as it was; 52.1 on RADV before a pass end retained what its commands use as one object
-/// and stopped making the lists it found empty.
+/// the command buffer's list.
 #[cfg(not(m2v_system_alloc))]
 const PASS_END_ALLOCATIONS: f64 = 40.0;
 /// The most command buffers a pass begins, from its opening through its end, once every pipeline
@@ -157,16 +150,13 @@ const PASS_END_ALLOCATIONS: f64 = 40.0;
 const PASS_BEGINS: u64 = 2;
 /// The most allocations a checked frame's commit makes on the encoding thread on average, once
 /// every pipeline is made. Measured: 4.7 to 5.0 on RADV (Radeon 780M), 5.0 on lavapipe and on ANV
-/// (Iris Xe); 19.0 on RADV before a commit listed only what it reaches among the live buffers and
-/// the scheduler kept its order's lines between passes.
+/// (Iris Xe).
 #[cfg(not(m2v_system_alloc))]
 const COMMIT_ALLOCATIONS: f64 = 6.0;
 /// The most allocations the process's other threads make per command buffer of a checked frame:
 /// its check and its batch's planning and submission on the scheduler thread, its completion and
 /// its handlers, which varies with how the threads take turns. Measured: 14.8 to 16.3 on RADV
-/// (Radeon 780M), 16.8 to 17.5 on lavapipe, 15.7 to 16.8 on ANV (Iris Xe); 46.9 on RADV before the
-/// hazard tracker planned without per-resource allocations, and 21.2 before the scheduler kept its
-/// order's lines between passes.
+/// (Radeon 780M), 16.8 to 17.5 on lavapipe, 15.7 to 16.8 on ANV (Iris Xe).
 #[cfg(not(m2v_system_alloc))]
 const SUBMIT_ALLOCATIONS: f64 = 20.0;
 

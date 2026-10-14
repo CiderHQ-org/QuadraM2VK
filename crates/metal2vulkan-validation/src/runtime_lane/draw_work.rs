@@ -583,3 +583,52 @@ fn a_texture_let_go_after_its_draw_lives_until_the_command_buffer_completes() {
         }
     });
 }
+
+/// A fragment table that binds two textures, one slot rebound mid-encoder to a texture the program
+/// lets go of after its draw: each draw that changed the slot retains the table, and one that
+/// changed nothing does not; the texture lives until the command buffer completes (its column is
+/// its own, and the validation layer reports no use of a destroyed object), as the other slot's,
+/// held from the first retain, does. The columns left of the first draw's keep the clear.
+#[test]
+fn a_slot_rebound_to_a_texture_let_go_after_its_draw_holds_it_until_completion() {
+    on_device(|device, _| {
+        let scene = Scene::new(device);
+        let green = solid(device, PixelFormat::RGBA8Unorm, GREEN);
+        // At slot 1, which the shader does not read: bound, and so held, throughout.
+        let unread = solid(device, PixelFormat::RGBA8Unorm, CLEAR);
+        let (command_buffer, mut encoder) = scene.encoder(device);
+        encoder.set_fragment_texture(Some(&unread), 1).unwrap();
+        let mut first = None;
+        for c in 1..SIDE {
+            encoder.set_vertex_bytes(&column(c), 0).unwrap();
+            if c % 2 == 1 {
+                let red = solid(device, PixelFormat::RGBA8Unorm, RED);
+                encoder.set_fragment_texture(Some(&red), 0).unwrap();
+                draw(&mut encoder);
+                first.get_or_insert_with(|| device.work_counts());
+                // The program's last handle goes, and the slot is rebound: the encoder alone
+                // holds it now.
+                drop(red);
+                encoder.set_fragment_texture(Some(&green), 0).unwrap();
+            } else {
+                // The rebound slot's draw, then one that changed nothing.
+                draw(&mut encoder);
+                draw(&mut encoder);
+            }
+        }
+        let (first, rest) = (first.unwrap(), device.work_counts());
+        encoder.end_encoding().unwrap();
+        // After the first draw: each odd column's draw and each even column's first.
+        let changed = SIDE - 2;
+        assert_eq!(grew(&first, &rest, |c| c.argument_tables_retained), changed);
+        let pixels = scene.pixels(&command_buffer);
+        for (at, &pixel) in pixels.iter().enumerate() {
+            let want = match at as u64 % SIDE {
+                0 => CLEAR,
+                c if c % 2 == 1 => RED,
+                _ => GREEN,
+            };
+            assert_eq!(pixel, want, "pixel {at}: {pixels:?}");
+        }
+    });
+}

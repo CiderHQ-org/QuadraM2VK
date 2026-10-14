@@ -415,7 +415,8 @@ assert!(plan.variant.is_empty(), "this shape needs no other variant");
 resource, formats, level counts, sampler modes, alignment classes). A plan is a pure function of the
 pipeline, the device and the shape: memoize it on `(PipelineKey, BindShape)`. A consumer that keeps
 the shapes it planned can find a state's among them without making it: `state.has_shape(&shape)`
-answers `state.shape() == shape`, compared in place.
+answers `state.shape() == shape`, compared in place, and `state.position_of_shape(&shapes)` finds
+it among many, making the shape of the resources the state lists at most once.
 
 The plan holds one `DescriptorWrite` per layout binding element (the resource at a slot, a buffer
 the binder synthesizes, or a neutral resource where nothing compatible is bound), the vertex

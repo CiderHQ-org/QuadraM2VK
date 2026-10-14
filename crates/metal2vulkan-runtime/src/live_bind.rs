@@ -14,7 +14,7 @@
 //!   are its slots' shapes, and a stage with none is left out). Where every changed slot keeps its
 //!   shape, no slot was bound or unbound, and no other field changed, the shape is the kept one.
 //!   After any other change, and at an encoder's first draw, it is one the drawing state settled
-//!   lately where the state has it (`BindState::has_shape`, compared in place:
+//!   lately where the state has it (`BindState::position_of_shape`, compared in place:
 //!   `GraphicsState::kept_shape`), so a pass that draws as the one before it makes none; else it
 //!   is made again, whole.
 

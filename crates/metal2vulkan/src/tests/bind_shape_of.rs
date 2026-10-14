@@ -261,3 +261,51 @@ fn a_state_has_exactly_the_shape_it_makes() {
     // against the others of its shape.
     assert_eq!(same, 6 * 5 + 2, "pairs of one shape");
 }
+
+/// A state that lists used resources is found among shapes that each match it in every other
+/// field, and differ in what it lists but the last, with its used resources' shape made once
+/// (`position_of_shape`), as allocating as one comparison (`has_shape`) is: compared one by one,
+/// each comparison makes it again.
+#[test]
+fn a_state_s_shape_is_found_among_many_with_its_used_resources_made_once() {
+    use super::constant_blob_footprint::allocations_during;
+    const SHAPES: u32 = 4;
+    let listing = |tokens: std::ops::Range<u32>| {
+        let mut state = base();
+        for token in tokens {
+            let mut used = UsedResource::new(ResourceClass::Buffer, token);
+            used.usage = ResourceUsage::READ;
+            used.stages = RenderStages::FRAGMENT;
+            state.used_resources.push(used);
+        }
+        state
+    };
+    // Each lists 16 resources; the state lists the last's.
+    let shapes: Vec<_> = (0..SHAPES)
+        .map(|at| listing(at * 16..at * 16 + 16).shape())
+        .collect();
+    let state = listing((SHAPES - 1) * 16..SHAPES * 16);
+    let last = SHAPES as usize - 1;
+
+    let (found, one_by_one) =
+        allocations_during(|| shapes.iter().position(|shape| state.has_shape(shape)));
+    assert_eq!(found, Some(last));
+    let (found, at_once) = allocations_during(|| state.position_of_shape(&shapes));
+    assert_eq!(found, Some(last));
+    let (has, one) = allocations_during(|| state.has_shape(&shapes[last]));
+    assert!(has);
+    assert!(one > 0, "a used resources' shape is made");
+    assert_eq!(
+        at_once, one,
+        "found among {SHAPES}: as allocating as one comparison"
+    );
+    assert_eq!(one_by_one, one * u64::from(SHAPES), "one by one: one each");
+    // A state that lists none makes nothing; nor does one whose shape differs in another field.
+    let none = base();
+    let (found, made) = allocations_during(|| none.position_of_shape(&shapes));
+    assert_eq!((found, made), (None, 0), "a state that lists none");
+    let mut other = listing(0..16);
+    other.render_target_array_length = 2;
+    let (found, made) = allocations_during(|| other.position_of_shape(&shapes));
+    assert_eq!((found, made), (None, 0), "a state of another field");
+}

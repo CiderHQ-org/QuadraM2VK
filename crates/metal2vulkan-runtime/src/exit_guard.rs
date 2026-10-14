@@ -675,8 +675,21 @@ pub fn process_exiting() -> bool {
 }
 
 /// Start one of the runtime's own threads, running `f`: every thread the runtime starts is
-/// started here, so it is known to [`may_call`]. On macOS it runs at no lower quality of service
-/// than the default ([`raise_quality_of_service`]).
+/// started here, so it is known to [`may_call`].
+///
+/// On macOS it starts at the default quality of service, whatever the class of the thread that
+/// started it: `std::thread` makes it with `pthread_create` and no class in its attributes, and
+/// such a thread starts at `QOS_CLASS_DEFAULT` (`<sys/qos.h>`). So none of the runtime's threads
+/// runs below that class for having been started from a program's thread at the utility or
+/// background class, which matters for one that serves the whole program for the device's life
+/// (the pipeline reaper, the shader cache's worker): on an Apple M4 a pipeline making on a
+/// background thread took 6.2 times as long through MoltenVK as at the default class. Some go
+/// higher once started: the pipeline pool's threads and a compile's own thread run at the
+/// user-initiated class ([`raise_to_user_initiated`]), and the threads that take command buffers
+/// to their handlers at the user-interactive class ([`spawn_user_interactive`]). A clamp on the
+/// whole process (`taskpolicy -c`, darwin background, App Nap) lowers every thread's priority
+/// whatever class the thread asks for: there a new thread still reads the default class, and
+/// asking for it again changes nothing (measured on macOS 27.0.1).
 pub(crate) fn spawn<F, T>(
     builder: std::thread::Builder,
     f: F,
@@ -687,7 +700,6 @@ where
 {
     builder.spawn(move || {
         RUNTIME.with(|runtime| runtime.set(true));
-        raise_quality_of_service();
         f()
     })
 }
@@ -706,7 +718,6 @@ where
 {
     builder.spawn_scoped(scope, move || {
         RUNTIME.with(|runtime| runtime.set(true));
-        raise_quality_of_service();
         f()
     })
 }
@@ -716,7 +727,9 @@ where
 /// with the utilization floor at its top on Linux, from its start ([`run_at_user_interactive`]):
 /// the scheduler's (`scheduler/`), the completion thread
 /// and each `VkQueue`'s waiter (`command_buffer/completion.rs`), and every thread of the handler
-/// pool (`contexts/`).
+/// pool (`contexts/`). A thread one of them starts (the reaper a pipeline state's last release
+/// starts on a handler thread, a program's thread made in a handler) does not take either: it
+/// starts at the default class on macOS ([`spawn`]), and with no floor on Linux.
 pub(crate) fn spawn_user_interactive<F, T>(
     builder: std::thread::Builder,
     f: F,
@@ -744,39 +757,6 @@ thread_local! {
     pub(crate) static ON_START: std::cell::RefCell<Option<std::sync::Arc<dyn Fn() + Send + Sync>>> =
         const { std::cell::RefCell::new(None) };
 }
-
-/// Raise this thread's quality of service to the default class where it is utility or
-/// background, and leave every other class as it is. On macOS a new thread takes the class of
-/// the thread that started it, and a thread of the runtime's may serve the whole program for the
-/// device's life (the pipeline reaper, the shader cache's worker): one started from a background
-/// thread would run all its later work at background, whoever waits on it. On an Apple M4 a
-/// pipeline making on a background thread took 6.2 times as long through MoltenVK as at the
-/// default class. Nothing elsewhere, where there is no such class.
-///
-/// The floor covers only the threads the runtime starts, and some of them then go higher. The
-/// pipeline pool's threads and a compile's own thread run at the user-initiated class
-/// ([`raise_to_user_initiated`]), and a pipeline the runtime makes on a program's thread below
-/// that class is made on a thread of the runtime's at it while the program's thread waits
-/// (`device/compiles.rs`). The threads that take command buffers to their handlers (the
-/// scheduler's, the completion thread, each `VkQueue`'s waiter and the handler pool's) run at the
-/// user-interactive class ([`spawn_user_interactive`]).
-#[cfg(target_os = "macos")]
-pub(crate) fn raise_quality_of_service() {
-    use libc::qos_class_t as Q;
-    let mut class = Q::QOS_CLASS_UNSPECIFIED;
-    let mut relative = 0;
-    // SAFETY: the calling thread's own handle, and two out-parameters that live for the call.
-    let read =
-        unsafe { libc::pthread_get_qos_class_np(libc::pthread_self(), &mut class, &mut relative) };
-    if read == 0 && matches!(class, Q::QOS_CLASS_UTILITY | Q::QOS_CLASS_BACKGROUND) {
-        // SAFETY: sets the calling thread's own class; no pointer.
-        unsafe { libc::pthread_set_qos_class_self_np(Q::QOS_CLASS_DEFAULT, 0) };
-    }
-}
-
-/// Nothing: no quality of service class here ([`raise_quality_of_service`] on macOS).
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn raise_quality_of_service() {}
 
 /// Raise this thread's quality of service to the user-initiated class where it is lower or
 /// unspecified, and leave the user-interactive class as it is: a thread of the runtime's own
@@ -814,49 +794,110 @@ fn run_at_user_interactive() {
     };
 }
 
-/// Ask the scheduler to treat this thread as fully busy whenever it runs: a thread of the
-/// runtime's own that takes command buffers to their handlers ([`spawn_user_interactive`]), as
-/// macOS runs them at the user-interactive class.
+/// Ask the scheduler to treat this thread as fully busy whenever it runs, and no thread it starts:
+/// a thread of the runtime's own that takes command buffers to their handlers
+/// ([`spawn_user_interactive`]), as macOS runs them at the user-interactive class.
 #[cfg(target_os = "linux")]
 fn run_at_user_interactive() {
-    // `struct sched_attr` of `sched_setattr(2)` (`<linux/sched/types.h>`), its 56-byte version,
-    // the first with the utilization clamps.
-    #[repr(C)]
-    struct SchedAttr {
-        size: u32,
-        sched_policy: u32,
-        sched_flags: u64,
-        sched_nice: i32,
-        sched_priority: u32,
-        sched_runtime: u64,
-        sched_deadline: u64,
-        sched_period: u64,
-        sched_util_min: u32,
-        sched_util_max: u32,
-    }
-    // `SCHED_FLAG_KEEP_POLICY`, `SCHED_FLAG_KEEP_PARAMS` and `SCHED_FLAG_UTIL_CLAMP_MIN`
-    // (`<linux/sched.h>`): only the utilization floor changes, not the policy, nice or priority.
-    const FLAGS: u64 = 0x08 | 0x10 | 0x20;
-    let attr = SchedAttr {
-        size: std::mem::size_of::<SchedAttr>() as u32,
-        sched_policy: 0,
-        sched_flags: FLAGS,
-        sched_nice: 0,
-        sched_priority: 0,
-        sched_runtime: 0,
-        sched_deadline: 0,
-        sched_period: 0,
-        // The top of the scale (`SCHED_CAPACITY_SCALE`, Documentation/scheduler/sched-util-clamp):
-        // where the kernel uses the floor (capacity-aware placement, the schedutil governor) the
-        // thread is placed and clocked as if fully busy. No CPU affinity: the system still places
-        // it, and no option or variable turns this off. An unprivileged thread may raise its own
-        // floor; a kernel without the clamps refuses it, and the thread runs as before.
-        sched_util_min: 1024,
-        sched_util_max: 0,
+    // `SCHED_FLAG_RESET_ON_FORK`, `SCHED_FLAG_KEEP_PARAMS` and `SCHED_FLAG_UTIL_CLAMP_MIN`
+    // (`<linux/sched.h>`).
+    const FLAGS: u64 = 0x01 | 0x10 | 0x20;
+    // The thread's policy is read and passed back as it is: `SCHED_OTHER`, `SCHED_BATCH`,
+    // `SCHED_IDLE` (where a daemon such as ananicy-cpp put the program's session there, it stays
+    // there) or a real-time one. `SCHED_FLAG_KEEP_POLICY` would keep it with no read, but the
+    // kernel then keeps the thread's reset-on-fork setting too, ignoring `SCHED_FLAG_RESET_ON_FORK`
+    // (`__sched_setscheduler`). `SCHED_FLAG_KEEP_PARAMS` keeps the nice value, the real-time
+    // priority and the slice, which the kernel reads for itself. Only the floor changes, and the
+    // reset-on-fork setting. Should another process change the thread's policy between the read
+    // and the call, the call puts the read one back where the thread may, and fails otherwise.
+    let Some(mut attr) = SchedAttr::own() else {
+        return;
     };
-    // SAFETY: `sched_setattr(0, &attr, 0)` sets the calling thread's own attributes from `attr`,
-    // which lives for the call and whose `size` is its own.
-    let _ = unsafe { libc::syscall(libc::SYS_sched_setattr, 0, &attr as *const SchedAttr, 0) };
+    attr.sched_flags = FLAGS;
+    // The top of the scale (`SCHED_CAPACITY_SCALE`, Documentation/scheduler/sched-util-clamp):
+    // where the kernel uses the floor (the schedutil governor's clocks, task placement on CPUs of
+    // different capacity) the thread is placed and clocked as if fully busy. No CPU affinity: the
+    // system still places it, and no option or variable turns this off. An unprivileged thread
+    // may raise its own floor; a kernel without the clamps refuses it (`EOPNOTSUPP`, or `EINVAL`
+    // and `E2BIG` before 5.3, without the flags or the struct's size), and the thread runs as
+    // before.
+    //
+    // Reset on fork: a thread this one starts begins with no floor (`uclamp_fork`). Without it,
+    // every thread started from one of these would keep the floor for its life: the reaper a
+    // pipeline state's last release starts on a handler thread, the notices thread, a pipeline
+    // pool's or a compile's thread started by a program's call in a handler, a program's own
+    // thread made there. The kernel's reset also starts such a thread at `SCHED_OTHER` where this
+    // one runs at a real-time policy, and at nice 0 where this one's nice is negative
+    // (`sched_fork`); `SCHED_BATCH`, `SCHED_IDLE` and a nice of 0 or more carry over as before. A
+    // thread without `CAP_SYS_NICE` cannot clear the setting again, the program's code in a
+    // handler included.
+    //
+    // Host-wide: the first call with a utilization clamp since the host booted turns the kernel's
+    // clamp accounting on (`static_branch_enable(&sched_uclamp_used)` in `uclamp_validate`) for
+    // every task of the host until it reboots, a little more work at each enqueue and dequeue,
+    // even where the floor acts on nothing (a governor other than schedutil, such as
+    // `intel_pstate` or `amd-pstate` in active mode, on CPUs of one capacity).
+    attr.sched_util_min = 1024;
+    attr.set_own();
+}
+
+/// `struct sched_attr` of `sched_setattr(2)` and `sched_getattr(2)` (`<linux/sched/types.h>`), its
+/// 56-byte version, the first with the utilization clamps.
+#[cfg(target_os = "linux")]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct SchedAttr {
+    pub(crate) size: u32,
+    pub(crate) sched_policy: u32,
+    pub(crate) sched_flags: u64,
+    pub(crate) sched_nice: i32,
+    pub(crate) sched_priority: u32,
+    pub(crate) sched_runtime: u64,
+    pub(crate) sched_deadline: u64,
+    pub(crate) sched_period: u64,
+    pub(crate) sched_util_min: u32,
+    pub(crate) sched_util_max: u32,
+}
+
+#[cfg(target_os = "linux")]
+impl SchedAttr {
+    /// Its size, which `size` states.
+    const SIZE: u32 = std::mem::size_of::<SchedAttr>() as u32;
+
+    /// The calling thread's attributes (`sched_getattr(2)`), `size` its own; `None` where the
+    /// kernel refuses.
+    pub(crate) fn own() -> Option<SchedAttr> {
+        let mut attr = SchedAttr {
+            size: Self::SIZE,
+            ..SchedAttr::default()
+        };
+        // SAFETY: `sched_getattr(0, &mut attr, size, 0)` writes at most `size` bytes, the calling
+        // thread's attributes, into `attr`, which lives for the call.
+        let read = unsafe {
+            libc::syscall(
+                libc::SYS_sched_getattr,
+                0,
+                &mut attr as *mut SchedAttr,
+                Self::SIZE,
+                0,
+            )
+        };
+        // A kernel's struct may be shorter (48 bytes before 5.3): what it wrote is what it has.
+        attr.size = Self::SIZE;
+        (read == 0).then_some(attr)
+    }
+
+    /// Set the calling thread's attributes to these (`sched_setattr(2)`); whether the kernel
+    /// took them.
+    pub(crate) fn set_own(mut self) -> bool {
+        // SAFETY: `sched_setattr(0, &mut attr, 0)` reads `attr`, whose `size` is its own, and sets
+        // the calling thread's attributes from it. A kernel whose struct is shorter, and that
+        // finds a field past its end set, writes its own size into `attr.size` before it refuses
+        // (`E2BIG`, `sched_copy_attr`): `attr` is mutable, and lives for the call.
+        let set =
+            unsafe { libc::syscall(libc::SYS_sched_setattr, 0, &mut self as *mut SchedAttr, 0) };
+        set == 0
+    }
 }
 
 /// Nothing: no such hint here ([`run_at_user_interactive`] on macOS and Linux).

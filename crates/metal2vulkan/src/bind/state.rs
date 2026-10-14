@@ -620,8 +620,30 @@ impl BindState {
 
     /// Whether `shape` is this state's shape: `self.shape() == *shape`, answered without making
     /// the shape, so a consumer that keeps the shapes it made can find a state's among them
-    /// without allocating. Its used resources' shape alone is made where it lists any.
+    /// without allocating. Its used resources' shape alone is made, where it lists any and every
+    /// other field matches; [`position_of_shape`](Self::position_of_shape) makes it once for
+    /// many shapes.
     pub fn has_shape(&self, shape: &BindShape) -> bool {
+        self.is_shape(shape, &mut None)
+    }
+
+    /// The position among `shapes` of the first that is this state's shape (of which
+    /// [`has_shape`](Self::has_shape) answers true), found without making the shape: its used
+    /// resources' shape is made at most once, however many shapes it is compared with, and only
+    /// where it lists any and a shape's every other field matches.
+    pub fn position_of_shape<'s>(
+        &self,
+        shapes: impl IntoIterator<Item = &'s BindShape>,
+    ) -> Option<usize> {
+        let mut used = None;
+        shapes
+            .into_iter()
+            .position(|shape| self.is_shape(shape, &mut used))
+    }
+
+    /// Whether `shape` is this state's shape ([`has_shape`](Self::has_shape)), its used
+    /// resources' shape taken from `made`, or made into it where it is needed first.
+    fn is_shape(&self, shape: &BindShape, made: &mut Option<BTreeMap<u32, UsedShape>>) -> bool {
         let BindShape {
             stages,
             used,
@@ -647,10 +669,6 @@ impl BindState {
             && tables
                 .zip(stages)
                 .all(|((stage, t), (of, s))| stage == of && t.has_shape(s))
-            && match self.used_resources.is_empty() {
-                true => used.is_empty(),
-                false => self.used_shape() == *used,
-            }
             && self.vertex_amplification == *vertex_amplification
             && self.imageblock_size == *imageblock_size
             && self.render_target_array_length == *render_target_array_length
@@ -667,6 +685,11 @@ impl BindState {
             && self.interlocked_colors == *interlocked_colors
             && self.fragment_tests == *fragment_tests
             && self.extended_shadows == *extended_shadows
+            // Last: the one field compared through a shape made of it.
+            && match self.used_resources.is_empty() {
+                true => used.is_empty(),
+                false => *made.get_or_insert_with(|| self.used_shape()) == *used,
+            }
     }
 
     /// `used_resources` by token ([`BindShape::used`]): one token names one resource, and listing

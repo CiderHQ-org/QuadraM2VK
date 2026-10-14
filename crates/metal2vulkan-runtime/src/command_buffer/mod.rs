@@ -104,6 +104,19 @@ use std::time::{Duration, Instant};
 /// device's handler threads, in its queue's order. A panic inside it is caught. A submission
 /// handler ([`CommandBuffer::add_submission_handler`]) is one too, called on the thread that
 /// submits the command buffer's last batch.
+///
+/// - **macOS.** The handler threads run at the user-interactive quality of service, whatever the
+///   class of the thread that committed, as Metal runs its handlers. A thread a handler starts
+///   starts at the default class, as a new thread does (`<sys/qos.h>`).
+/// - **Linux**, which Metal does not run on. Each handler thread asks the kernel to treat it as
+///   fully busy, as the user-interactive class does on macOS: a utilization floor of 1024
+///   (`sched_setattr(2)`), its policy and nice value as they were. A kernel built without the
+///   clamps refuses it, and the thread runs as before. The thread also has
+///   `SCHED_FLAG_RESET_ON_FORK`, so a thread a handler starts begins with no floor, and at
+///   `SCHED_OTHER` and nice 0 where the handler thread runs at a real-time policy or a negative
+///   nice value; a handler cannot clear the setting without `CAP_SYS_NICE`. The first such floor
+///   since the host booted turns the kernel's clamp accounting on for every task until it
+///   reboots.
 pub type Handler = Box<dyn FnOnce(&CommandBuffer) + Send + 'static>;
 
 /// A Metal command buffer (`MTLCommandBuffer`). Cheap to clone (a retain); `Send + Sync`.
@@ -1269,8 +1282,9 @@ impl CommandBuffer {
         self.0.allocate(state, vk::CommandBufferLevel::SECONDARY)
     }
 
-    /// `addScheduledHandler:`: call `handler` once the command buffer is scheduled. Refused once
-    /// the command buffer is committed.
+    /// `addScheduledHandler:`: call `handler` once the command buffer is scheduled, on one of the
+    /// device's handler threads, at the user-interactive class on macOS as in Metal, and with a
+    /// utilization floor on Linux ([`Handler`]). Refused once the command buffer is committed.
     pub fn add_scheduled_handler(&self, handler: Handler) -> Result<(), Error> {
         let mut state = self.state();
         if state.status != CommandBufferStatus::NotEnqueued {
@@ -1431,8 +1445,10 @@ impl CommandBuffer {
         Ok(())
     }
 
-    /// `addCompletedHandler:`: call `handler` once the command buffer completed or failed.
-    /// Refused once the command buffer is committed.
+    /// `addCompletedHandler:`: call `handler` once the command buffer completed or failed, on one
+    /// of the device's handler threads, at the user-interactive class on macOS as in Metal, and
+    /// with a utilization floor on Linux ([`Handler`]). Refused once the command buffer is
+    /// committed.
     pub fn add_completed_handler(&self, handler: Handler) -> Result<(), Error> {
         let mut state = self.state();
         if state.status != CommandBufferStatus::NotEnqueued {

@@ -68,6 +68,7 @@ mod inbox;
 mod indirect_command_buffer;
 mod interop;
 mod keeper;
+mod kept_barriers;
 mod linear_attachment;
 mod linear_plan;
 mod making;

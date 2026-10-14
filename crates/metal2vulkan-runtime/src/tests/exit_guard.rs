@@ -542,13 +542,15 @@ fn runtime_threads_reach_the_device_only_inside_sections() {
     assert_eq!(answers, (false, true, true, false, true));
 }
 
-/// A runtime thread started from a thread at the background or utility quality of service runs at
-/// the default class; from a thread at any other class it runs as a plain thread started there
-/// does. (On macOS 27.0.1, an Apple M4 mini, a plain thread started from a thread that set its own
-/// class to background or utility already started at the default class.)
+/// A runtime thread starts at the default quality of service, whatever the class of the thread
+/// that started it, as a plain thread does: `std::thread` makes both with `pthread_create` and no
+/// class in their attributes, and such a thread starts at `QOS_CLASS_DEFAULT` (`<sys/qos.h>`). So
+/// none runs below the default class for having been started from a program's thread at the
+/// background or utility class, with nothing done for it (`exit_guard::spawn`), and none takes a
+/// higher class from its creator.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_runtime_thread_runs_at_no_lower_quality_of_service_than_the_default() {
+fn a_runtime_thread_starts_at_the_default_quality_of_service_whoever_started_it() {
     use libc::qos_class_t as Q;
     fn class() -> u32 {
         let mut class = Q::QOS_CLASS_UNSPECIFIED;
@@ -560,9 +562,16 @@ fn a_runtime_thread_runs_at_no_lower_quality_of_service_than_the_default() {
         assert_eq!(read, 0, "pthread_get_qos_class_np");
         class as u32
     }
-    // A plain thread's class and a runtime thread's, each started from a thread at `start`.
-    let from = |start: Q| {
-        std::thread::spawn(move || {
+    let default = Q::QOS_CLASS_DEFAULT as u32;
+    for start in [
+        Q::QOS_CLASS_BACKGROUND,
+        Q::QOS_CLASS_UTILITY,
+        Q::QOS_CLASS_DEFAULT,
+        Q::QOS_CLASS_USER_INITIATED,
+        Q::QOS_CLASS_USER_INTERACTIVE,
+    ] {
+        // A plain thread's class and a runtime thread's, each started from a thread at `start`.
+        let (creator, plain, runtime) = std::thread::spawn(move || {
             // SAFETY: sets the calling thread's own class; no pointer.
             assert_eq!(unsafe { libc::pthread_set_qos_class_self_np(start, 0) }, 0);
             let plain = std::thread::spawn(class).join().unwrap();
@@ -570,30 +579,16 @@ fn a_runtime_thread_runs_at_no_lower_quality_of_service_than_the_default() {
                 .unwrap()
                 .join()
                 .unwrap();
-            (plain, runtime)
+            (class(), plain, runtime)
         })
         .join()
-        .unwrap()
-    };
-    for start in [Q::QOS_CLASS_BACKGROUND, Q::QOS_CLASS_UTILITY] {
-        let (plain, runtime) = from(start);
+        .unwrap();
+        assert_eq!(creator, start as u32, "the creator's class");
         assert_eq!(
-            runtime,
-            if plain == start as u32 {
-                Q::QOS_CLASS_DEFAULT as u32
-            } else {
-                plain
-            },
-            "from {start:?}: a plain thread {plain:#x}"
+            (plain, runtime),
+            (default, default),
+            "a plain thread's and a runtime thread's from {start:?}"
         );
-    }
-    for start in [
-        Q::QOS_CLASS_DEFAULT,
-        Q::QOS_CLASS_USER_INITIATED,
-        Q::QOS_CLASS_USER_INTERACTIVE,
-    ] {
-        let (plain, runtime) = from(start);
-        assert_eq!(runtime, plain, "from {start:?}");
     }
 }
 
@@ -602,7 +597,7 @@ fn a_runtime_thread_runs_at_no_lower_quality_of_service_than_the_default() {
 /// started them, as read from inside each: the scheduler's, the completion thread, each
 /// `VkQueue`'s waiter, and the handler pool's first thread and a later one, which also run their
 /// items there. Another of the runtime's threads, the reaper, runs as [`exit_guard::spawn`]
-/// starts a thread, below the user-interactive class unless started from it.
+/// starts a thread, at the default class.
 #[cfg(target_os = "macos")]
 #[test]
 fn the_threads_that_take_command_buffers_to_their_handlers_run_at_the_user_interactive_class() {
@@ -724,11 +719,192 @@ fn the_threads_that_take_command_buffers_to_their_handlers_run_at_the_user_inter
             (interactive, interactive),
             "the pool's items from {start:?}"
         );
-        assert_eq!(reaper, plain, "the reaper from {start:?}");
-        if start as u32 != interactive {
-            assert_ne!(reaper, interactive, "the reaper from {start:?}");
+        assert_eq!(
+            (reaper, plain),
+            (Q::QOS_CLASS_DEFAULT as u32, Q::QOS_CLASS_DEFAULT as u32),
+            "the reaper and a runtime thread from {start:?}"
+        );
+    }
+}
+
+/// On Linux the threads that take a command buffer from its commit to its handlers run with the
+/// utilization floor at its top from their start, as read from inside each (`sched_getattr(2)`):
+/// the scheduler's, the completion thread, each `VkQueue`'s waiter, and the handler pool's first
+/// thread and a later one, which also run their items there. Each keeps the policy and nice value
+/// of the thread that started it, and has `SCHED_FLAG_RESET_ON_FORK`: a thread one of them starts
+/// as the runtime starts its own ([`exit_guard::spawn`]) begins with no floor and without the
+/// setting, at the same policy and nice value. From threads at `SCHED_OTHER`, `SCHED_BATCH` and
+/// `SCHED_IDLE`, each where the test's thread may enter it (a session a daemon such as ananicy-cpp
+/// put in `SCHED_IDLE` may not leave it), `SCHED_IDLE` always. Where the kernel refuses the floor
+/// (built without the clamps), every thread reads none, and the kernel refuses one the test asks
+/// for itself.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_threads_that_take_command_buffers_to_their_handlers_run_with_the_utilization_floor() {
+    use crate::command_buffer::completion::Completion;
+    use crate::contexts::{Contexts, Run, THREADS};
+    use crate::exit_guard::SchedAttr;
+    use crate::scheduler::Scheduler;
+
+    // `<linux/sched.h>`.
+    const SCHED_OTHER: u32 = 0;
+    const SCHED_BATCH: u32 = 3;
+    const SCHED_IDLE: u32 = 5;
+    const RESET_ON_FORK: u64 = 0x01;
+    const KEEP_POLICY: u64 = 0x08;
+    const KEEP_PARAMS: u64 = 0x10;
+    const UTIL_CLAMP_MIN: u64 = 0x20;
+    const WAIT: Duration = Duration::from_secs(20);
+
+    /// A pool's item.
+    struct Item(Box<dyn FnOnce() + Send>);
+    impl Run for Item {
+        fn run(self) {
+            (self.0)();
         }
     }
+    /// What a thread reads of itself.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct Read {
+        policy: u32,
+        nice: i32,
+        floor: u32,
+        reset: bool,
+    }
+    fn read() -> Read {
+        let attr = SchedAttr::own().expect("sched_getattr");
+        Read {
+            policy: attr.sched_policy,
+            nice: attr.sched_nice,
+            floor: attr.sched_util_min,
+            reset: attr.sched_flags & RESET_ON_FORK != 0,
+        }
+    }
+    /// This thread's reading, and that of a thread it starts as the runtime starts its own.
+    fn with_child() -> (Read, Read) {
+        let child = exit_guard::spawn(std::thread::Builder::new(), read)
+            .unwrap()
+            .join()
+            .unwrap();
+        (read(), child)
+    }
+
+    let mut entered = Vec::new();
+    for policy in [SCHED_OTHER, SCHED_BATCH, SCHED_IDLE] {
+        // On a thread at `policy`, standing for the program's that makes a device.
+        let run = std::thread::spawn(move || {
+            let param = libc::sched_param { sched_priority: 0 };
+            // SAFETY: sets the calling thread's own policy from `param`, which lives for the call.
+            if unsafe { libc::sched_setscheduler(0, policy as i32, &param) } != 0 {
+                return None;
+            }
+            let creator = read();
+            assert_eq!(creator.policy, policy, "the creator's policy");
+            let (note, notes) = mpsc::channel();
+            exit_guard::ON_START.with(|on_start| {
+                *on_start.borrow_mut() = Some(Arc::new(move || {
+                    let thread = std::thread::current();
+                    let name = thread.name().unwrap_or_default().to_owned();
+                    let _ = note.send((name, with_child()));
+                }));
+            });
+            let scheduler = Scheduler::start(1).unwrap();
+            let completion = Completion::start(2).unwrap();
+            // The pool's first thread runs an item that blocks; another queue's item then starts
+            // a thread of its own.
+            let contexts: Contexts<Item> = Contexts::start(THREADS).unwrap();
+            let (ran, runs) = mpsc::channel();
+            let (release, released) = mpsc::channel::<()>();
+            let blocking = ran.clone();
+            contexts.post(
+                1,
+                Item(Box::new(move || {
+                    let reading = with_child();
+                    blocking
+                        .send((std::thread::current().id(), reading))
+                        .unwrap();
+                    released.recv_timeout(WAIT).unwrap();
+                })),
+            );
+            let first = runs.recv_timeout(WAIT).unwrap();
+            contexts.post(
+                2,
+                Item(Box::new(move || {
+                    let reading = with_child();
+                    ran.send((std::thread::current().id(), reading)).unwrap();
+                })),
+            );
+            let later = runs.recv_timeout(WAIT).unwrap();
+            release.send(()).unwrap();
+            contexts.stop();
+            scheduler.stop();
+            completion.stop();
+            exit_guard::ON_START.with(|on_start| on_start.borrow_mut().take());
+            let started: Vec<(String, (Read, Read))> = notes.try_iter().collect();
+            // Where the threads read no floor: whether the kernel takes one asked for here.
+            let mut ask = SchedAttr::own().expect("sched_getattr");
+            ask.sched_flags = KEEP_POLICY | KEEP_PARAMS | UTIL_CLAMP_MIN;
+            ask.sched_util_min = 1024;
+            let refused = started.iter().all(|(_, (own, _))| own.floor == 0) && !ask.set_own();
+            Some((creator, started, [first, later], refused))
+        })
+        .join()
+        .unwrap();
+        let Some((creator, started, items, refused)) = run else {
+            eprintln!("policy {policy}: this thread may not enter it");
+            continue;
+        };
+        entered.push(policy);
+
+        let mut names: Vec<&str> = started.iter().map(|(name, _)| name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "metal2vulkan-completion",
+                "metal2vulkan-handlers",
+                "metal2vulkan-handlers",
+                "metal2vulkan-queue-wait-0",
+                "metal2vulkan-queue-wait-1",
+                "metal2vulkan-scheduler",
+            ],
+            "from policy {policy}"
+        );
+        let [(first, first_read), (later, later_read)] = items;
+        assert_ne!(first, later, "the later item ran on a thread of its own");
+        let (floor, reset) = if refused { (0, false) } else { (1024, true) };
+        let readings = started
+            .iter()
+            .map(|(name, reading)| (name.as_str(), *reading))
+            .chain([
+                ("the first item", first_read),
+                ("the later item", later_read),
+            ]);
+        for (name, (own, child)) in readings {
+            let kept = Read {
+                floor,
+                reset,
+                ..creator
+            };
+            assert_eq!(own, kept, "{name} from policy {policy}: {creator:?}");
+            let started = Read {
+                floor: 0,
+                reset: false,
+                nice: if reset {
+                    creator.nice.max(0)
+                } else {
+                    creator.nice
+                },
+                ..creator
+            };
+            assert_eq!(
+                child, started,
+                "a thread {name} started, from policy {policy}"
+            );
+        }
+        eprintln!("policy {policy}: floor {floor}, {creator:?}");
+    }
+    assert!(entered.contains(&SCHED_IDLE), "entered {entered:?}");
 }
 
 /// In builds with debug assertions, a runtime thread that reaches the device outside a section

@@ -10,12 +10,13 @@
 //! is a property of the code, not of the host. It is the global allocator of the crate's whole
 //! test build, so it counts only inside `held_during`, and every other test allocates at the cost
 //! of one relaxed load. The counters are process-wide: a measurement assumes its test runs alone in
-//! its process, as nextest runs every test.
+//! its process, as nextest runs every test. Other tests count allocations with it
+//! ([`allocations_during`]).
 //!
 //! `llvm-as` assembles the kernel; without it the test skips visibly.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
 
 use crate::budget::{Budget, Meter, LEDGER_BYTES, SPIRV_WORDS, WORK_UNITS};
 use crate::cache::PipelineArtifact;
@@ -32,10 +33,16 @@ use crate::pipeline::{ComputePipelineDescriptor, FunctionDescriptor, StageSource
 static COUNTING: AtomicBool = AtomicBool::new(false);
 static LIVE: AtomicIsize = AtomicIsize::new(0);
 static PEAK: AtomicIsize = AtomicIsize::new(0);
+/// The allocations and reallocations made since `held_during` or `allocations_during` armed it.
+static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 
-/// `grown` bytes allocated and `freed` released, while the allocator counts.
+/// `grown` bytes allocated and `freed` released, while the allocator counts: an allocation or
+/// reallocation where `grown` is not 0.
 fn count(grown: usize, freed: usize) {
     if COUNTING.load(Ordering::Relaxed) {
+        if grown != 0 {
+            ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        }
         let delta = grown as isize - freed as isize;
         let live = LIVE.fetch_add(delta, Ordering::Relaxed) + delta;
         PEAK.fetch_max(live, Ordering::Relaxed);
@@ -82,10 +89,18 @@ static ALLOCATOR: Counting = Counting;
 fn held_during<T>(work: impl FnOnce() -> T) -> (T, u64) {
     LIVE.store(0, Ordering::Relaxed);
     PEAK.store(0, Ordering::Relaxed);
+    ALLOCATIONS.store(0, Ordering::Relaxed);
     COUNTING.store(true, Ordering::Relaxed);
     let value = work();
     COUNTING.store(false, Ordering::Relaxed);
     (value, PEAK.load(Ordering::Relaxed).max(0) as u64)
+}
+
+/// `work`'s result, and the allocations and reallocations made while it ran (every thread's: the
+/// test runs it alone in its process).
+pub(super) fn allocations_during<T>(work: impl FnOnce() -> T) -> (T, u64) {
+    let (value, _) = held_during(work);
+    (value, ALLOCATIONS.load(Ordering::Relaxed))
 }
 
 const DATALAYOUT: &str = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:1024-n8:16:32";

@@ -1267,11 +1267,13 @@ impl GraphicsState {
             let making = match (&kept, &reflection_key) {
                 (Some(None), Some(key)) => {
                     let budget = options.budget();
-                    std::thread::Builder::new()
-                        .name("metal2vulkan-reflection".into())
-                        .spawn_scoped(scope, move || descriptor.reflection(&budget))
-                        .ok()
-                        .map(|making| (*key, making))
+                    crate::exit_guard::spawn_scoped(
+                        scope,
+                        std::thread::Builder::new().name("metal2vulkan-reflection".into()),
+                        move || descriptor.reflection(&budget),
+                    )
+                    .ok()
+                    .map(|making| (*key, making))
                 }
                 _ => None,
             };
@@ -1792,13 +1794,13 @@ impl GraphicsState {
 
     /// The shape of `state` among those of what the state settled lately
     /// ([`settle_shape`](Self::settle_shape)), compared with the state in place
-    /// (`BindState::has_shape`): what a draw of `state` settles where it has one, and finds there,
+    /// (`BindState::position_of_shape`, which makes the shape of the resources it lists at most
+    /// once for all of them): what a draw of `state` settles where it has one, and finds there,
     /// without its shape made (`live_bind.rs`).
     pub(crate) fn kept_shape(&self, state: &BindState) -> Option<Arc<BindShape>> {
-        lock(&self.0.settled)
-            .iter()
-            .find(|(_, last)| state.has_shape(&last.shape))
-            .map(|(_, last)| Arc::clone(&last.shape))
+        let settled = lock(&self.0.settled);
+        let at = state.position_of_shape(settled.iter().map(|(_, last)| &*last.shape))?;
+        Some(Arc::clone(&settled[at].1.shape))
     }
 
     /// What a draw of bind shape `shape` runs on in `forms` ([`settle`](Self::settle)'s answer),
@@ -2156,11 +2158,13 @@ impl RenderVariant {
         let (objects, kept) = std::thread::scope(|scope| {
             if creation_log::enabled() && logged_spirv.get().is_none() {
                 // A thread that cannot be made leaves the hash to the log's first line.
-                let _ = std::thread::Builder::new()
-                    .name("metal2vulkan-log-hash".into())
-                    .spawn_scoped(scope, || {
+                let _ = crate::exit_guard::spawn_scoped(
+                    scope,
+                    std::thread::Builder::new().name("metal2vulkan-log-hash".into()),
+                    || {
                         let _ = logged_spirv.set(creation_log::spirv_hashes(&pipeline));
-                    });
+                    },
+                );
             }
             VariantObjects::kept_or_create(
                 device,
