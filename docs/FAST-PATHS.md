@@ -117,6 +117,18 @@ driver's. Each is open work.
   each timed command buffer writes: on an M4 a bare barrier took 14.7 µs alone and 167.8 µs with
   them. `DeviceOptions::gpu_times_from_host` (off by default, announced) answers GPU times from the
   host clock and spares them.
+- **A commit can wait for the driver's submission.** Where the device's scheduler is free (no host
+  step or submission check pending), `commit` submits the command buffer's ready batches itself,
+  on the committing thread, so that no thread wake lies on their path (`scheduler/mod.rs`). A
+  `vkQueueSubmit` the driver holds then holds `commit`, where Metal's `commit` returns at once. On
+  the RTX 5080 Laptop GPU (NVIDIA 615.71.09), beside about 20 other processes opening devices and
+  running work on it, 1 or 2 of the 1,800 commits of a run of the runtime's completion test took 58
+  to 226 ms, none handed to another thread. The committing thread slept in the driver meanwhile
+  (3.5 to 7.6 ms on the CPU, none of it waiting to run). Mostly the GPU ran the command buffer's
+  work within 0.1 ms of the call's start, and the one committed before it was seen complete 0.1 ms
+  after its own commit (its completed handler ran then); once, the work started only as the call
+  returned. Handing each commit's submission to the scheduler thread, or doing so once a device's
+  submission has stalled, would return at once; it is not built.
 - **A view of another format without `PixelFormatView` usage** is a shadow image whose texels are
   copied at each use (`shadowed-texture-view`): about 50 to 95 µs a command buffer for a 64x64
   texture, measured on the M3 Max and M4 (MoltenVK) and the Radeon 780M. Making the texture with
