@@ -923,8 +923,8 @@ fn went_off_thread(test: &str, device: &Device, on: &DroppedOn, what: &str) {
 /// bytes apart, released with the buffer while a blit out of the texture waits on an event (the
 /// consumer's display-path surface textures); a buffer assembled from several chunks, released
 /// so; and a buffer's old pages, rebound away while a command buffer first submitted before the
-/// rebind, which copies out of them, spins on the GPU (one that waits on an event is first
-/// submitted after the rebind, and reaches the new pages). Each blit reads the bytes the CPU
+/// rebind, which copies out of them, waits on the GPU behind the busy work (one that waits on an
+/// event is first submitted after the rebind, and reaches the new pages). Each blit reads the bytes the CPU
 /// wrote, and each source, retained with its import, goes on a thread other than the test's.
 /// Where the device imports the pointer the same holds of its import, and the source goes uncalled
 /// as the buffer is made.
@@ -1009,7 +1009,7 @@ fn dma_buf_pages_go_on_a_handler_thread_as_a_command_buffer_completes() {
         assert!(read == expected, "{TEST}: the assembled buffer's bytes");
         went_off_thread(TEST, device, &dropped, "the assembled buffer's chunks");
         // A buffer's old pages, rebound away while a command buffer that copies out of them,
-        // first submitted before the rebind, spins on the GPU.
+        // first submitted before the rebind, waits on the GPU behind the busy work.
         let busy = Busy::new(device, &queue);
         let length = 2 * page;
         let ram = Memfd::new(8 * page);
@@ -1033,8 +1033,8 @@ fn dma_buf_pages_go_on_a_handler_thread_as_a_command_buffer_completes() {
         let out = device
             .new_buffer(length as u64, ResourceOptions::shared())
             .unwrap();
+        let (busy_work, words) = busy.commit(device, &queue);
         let command_buffer = queue.command_buffer().unwrap();
-        let words = busy.encode(device, &command_buffer);
         let mut blit = command_buffer.blit_command_encoder().unwrap();
         blit.copy_from_buffer_to_buffer(&buffer, 0, &out, 0, length as u64)
             .unwrap();
@@ -1062,7 +1062,9 @@ fn dma_buf_pages_go_on_a_handler_thread_as_a_command_buffer_completes() {
             );
         }
         release(&words);
+        busy_work.wait_until_completed_for(WAIT).unwrap();
         command_buffer.wait_until_completed_for(WAIT).unwrap();
+        assert_eq!(busy_work.error(), None);
         assert_eq!(command_buffer.error(), None);
         assert_eq!(read_mark(&words), ENDED, "{TEST}: the busy work's end mark");
         let read = read_buffer(&out, 0, length as u64).unwrap();
@@ -1072,12 +1074,12 @@ fn dma_buf_pages_go_on_a_handler_thread_as_a_command_buffer_completes() {
     });
 }
 
-/// A no-copy buffer assembled from several chunks (a sparse buffer, RADV) made while a command
-/// buffer spins on the device's first `VkQueue` until the test releases it: the call returns while
-/// the work still spins (its binding waits for no GPU work in flight), and once it is released the
-/// GPU reads the buffer's bytes. The busy work gives up after about 2 s, so a call that waits for
-/// it fails the test rather than hangs it. Elsewhere the pointer is imported, which waits for
-/// nothing either.
+/// A no-copy buffer assembled from several chunks (a sparse buffer, RADV) made while the busy
+/// work's command buffers spin on the device's first `VkQueue` until the test releases them: the
+/// call returns while the work still spins (its binding waits for no GPU work in flight), and once
+/// it is released the GPU reads the buffer's bytes. The busy work gives up after about 2 s, so a
+/// call that waits for it fails the test rather than hangs it. Elsewhere the pointer is imported,
+/// which waits for nothing either.
 #[test]
 fn a_sparse_buffer_s_binding_waits_for_no_gpu_work() {
     const TEST: &str = "dma-buf binding behind GPU work";
@@ -1097,7 +1099,7 @@ fn a_sparse_buffer_s_binding_waits_for_no_gpu_work() {
         let calls = Calls::default();
         let before = dma_buf_counts(device);
         let (busy_work, mark) = busy.commit(device, &queue);
-        scheduled(&busy_work);
+        busy_work.scheduled();
         assert_eq!(read_mark(&mark), 0, "{TEST}: the busy work ended first");
         let at = Instant::now();
         let made = no_copy(device, &view, 0, span, ram.granules(&view, &calls));

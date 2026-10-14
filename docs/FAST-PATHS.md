@@ -97,20 +97,20 @@ driver's. Each is open work.
 - **Private memory past 16 KiB a thread on a device not measured.** A thread's private memory (its
   `alloca`s, a call stack among them, and constants held as `Private` variables) is scratch memory
   the driver backs, and Vulkan states no limit on it. Past a driver's capacity the answers are wrong
-  or the GPU hangs, with no error: the Radeon 780M (RADV) answered wrongly at 128 KiB over 4096
-  threads and the Iris Xe (ANV) at 48 KiB; the RTX 5080 Laptop GPU hung at 48 KiB and the RTX 3090
-  at 192 KiB (Xid 109). So the amount is measured per device by the validation lane
+  or the GPU hangs, with no error: the Radeon 780M and the RX 7900 XTX (RADV) answered wrongly at
+  128 KiB over 4096 threads and the Iris Xe (ANV) at 48 KiB; the RTX 5080 Laptop GPU hung at 48 KiB
+  and the RTX 3090 at 192 KiB (Xid 109). So the amount is measured per device by the validation lane
   `runtime_lane::private_memory`, never probed when a device opens, and `device::function_storage`
-  keys it on the driver, vendor and device ID. Measured: the Radeon 780M (96 KiB), the Iris Xe of
-  Raptor Lake-P and the UHD 770 of Raptor Lake-S (32 KiB each, the Intel venue's lower value), the
-  RTX 5080 Laptop GPU (32 KiB), the RTX 3090 (128 KiB), the M3 Max and the M4 under MoltenVK (192
-  KiB) and lavapipe (48 KiB). Every other device, the RX 7900 XTX among them, takes the floor of 16
-  KiB a thread: a stage that keeps private memory records `FunctionStorageAssumed`
-  (`function-storage-assumed`), and one that needs more is refused (`Unsupported{PrivateMemory}`,
-  or `Unsupported{Recursion}` for a call stack), where MoltenVK on the M3 Max holds 192 KiB.
-  Measuring a device and adding its row lifts it. The scratch costs device memory in proportion:
-  on the RTX 3090 a dispatch of a 128 KiB stage took about 4 GiB (4.2 GiB at its peak, about 31
-  MiB for each KiB a thread holds).
+  keys it on the driver, vendor and device ID. Measured: the Radeon 780M and the RX 7900 XTX (96 KiB
+  each), the Iris Xe of Raptor Lake-P and the UHD 770 of Raptor Lake-S (32 KiB each, the Intel
+  venue's lower value), the RTX 5080 Laptop GPU (32 KiB), the RTX 3090 (128 KiB), the M3 Max and the
+  M4 under MoltenVK (192 KiB) and lavapipe (48 KiB). Every other device takes the floor of 16 KiB a
+  thread: a stage that keeps private memory records `FunctionStorageAssumed`
+  (`function-storage-assumed`), and one that needs more is refused (`Unsupported{PrivateMemory}`, or
+  `Unsupported{Recursion}` for a call stack), where MoltenVK on the M3 Max holds 192 KiB. Measuring
+  a device and adding its row lifts it. The scratch costs device memory in proportion: on the RTX
+  3090 a dispatch of a 128 KiB stage took about 4 GiB (4.2 GiB at its peak, about 31 MiB for each
+  KiB a thread holds).
 - **Commit to completion.** A command buffer takes longer from commit to completion through the
   runtime than a bare driver submission: on a quiet Radeon 780M (RADV) an empty command buffer took
   51.6 µs against a bare barrier's 45.1 µs. On MoltenVK most of the rest is the two GPU timestamps

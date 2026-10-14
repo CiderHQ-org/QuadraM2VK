@@ -9,12 +9,12 @@
 //! destroyed is removed from it and the set committed at once, while the Metal command buffers
 //! in flight keep no references of their own (`retainedReferences` is off where the set exists):
 //! `MVKDevice::removeResidency`, `MVKDeviceMemory.mm`, `MVKImage.mm`, `MVKQueue.mm` in MoltenVK
-//! 1.4.1. Each leg here runs such changes while a command buffer spins on the GPU, then lets it
-//! end and checks its end and its error, and every other command buffer's (`FREE-IN-FLIGHT`
-//! lines). A host import's deallocator (no keep-alive) runs once its import is freed, so a leg
+//! 1.4.1. Each leg here runs such changes while the busy work's command buffers spin on the GPU,
+//! then lets them end and checks their end and their errors, and every other command buffer's
+//! (`FREE-IN-FLIGHT` lines). A host import's deallocator (no keep-alive) runs once its import is freed, so a leg
 //! counts the imports freed while the busy work still ran.
 
-use super::first_use::{read_mark, release, scheduled, Busy, ENDED};
+use super::first_use::{read_mark, release, Busy, ENDED};
 use super::host_memory::{
     no_copy, not_importable, on_device, recording, Mapping, Seen, GUEST_PAGE,
 };
@@ -216,7 +216,7 @@ fn release_held(device: &Device, held: Held) -> Changed {
 }
 
 /// Each [`Leg`]'s changes run on other threads while the busy work spins on the GPU, its command
-/// buffer committed and submitted: once released, the busy work completes, without an error,
+/// buffers committed and submitted: once released, the busy work completes, without an error,
 /// its end mark written, and so does every command buffer committed beside the changes. Prints
 /// each leg's outcome, with the host imports freed while the busy work ran (`FREE-IN-FLIGHT`).
 #[test]
@@ -240,7 +240,7 @@ fn frees_while_the_gpu_is_busy_fail_no_command_buffer() {
                 continue;
             };
             let (busy_work, words) = busy.commit(device, &queue);
-            scheduled(&busy_work);
+            busy_work.scheduled();
             let changed = change(device, &beside, leg, held);
             let running = read_mark(&words) == 0;
             release(&words);
@@ -331,7 +331,7 @@ fn addressed_import_released(device: &Device, queue: &CommandQueue, busy: &Busy)
     // The encoder names no use of the import: the walk reaches it through the address alone.
     drop(holding.argument_buffers.remove(&field));
     let (busy_work, words) = busy.commit(device, queue);
-    scheduled(&busy_work);
+    busy_work.scheduled();
     let walk = queue.command_buffer().unwrap();
     let mut encoder = walk.compute_command_encoder().unwrap();
     encode_case(&mut encoder, &state, &walker.compute, &buffers, &holding).unwrap();

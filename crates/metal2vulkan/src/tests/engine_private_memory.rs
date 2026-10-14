@@ -7,7 +7,8 @@
 //!
 //! - On a measured device (the RTX 5080: 32 KiB a thread) an array of exactly 32 KiB compiles
 //!   with no note, and 64 bytes more is `Unsupported{PrivateMemory}` needing that much. The RTX
-//!   3090, measured at 128 KiB, holds an array of 128 KiB alike, with no note.
+//!   3090, measured at 128 KiB, holds an array of 128 KiB alike, with no note, and the RX 7900 XTX,
+//!   measured at 96 KiB, one of 96 KiB.
 //! - On a device not measured (`amd-rdna3-radv`) the floor, 16 KiB, holds: an array of 16 KiB
 //!   compiles and records `PrecisionNote::FunctionStorageAssumed`, as does the constant table;
 //!   64 bytes more is refused needing it; a kernel without private memory records nothing.
@@ -141,13 +142,14 @@ fn notes_on(
     }))
 }
 
-/// The RTX 3090 (not a committed capture): the RTX 5080 Laptop GPU's capture with its id.
-fn rtx_3090() -> DeviceProfile {
+/// The profile of the committed capture `stem` under the device ID `id`: a device of no committed
+/// capture, through the capture of one of its driver and kind.
+fn captured_as(stem: &str, id: u32) -> DeviceProfile {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../metal2vulkan-validation/profiles/nvidia-rtx5080-laptop.json");
+        .join(format!("../metal2vulkan-validation/profiles/{stem}.json"));
     let text = std::fs::read_to_string(path).expect("profile");
     let mut d = DeviceDescription::from_khronos_json(&text, None).expect("description");
-    d.device_id = crate::device::driver_facts::NVIDIA_RTX_3090;
+    d.device_id = id;
     Device::new(d, DevicePolicy::default())
         .expect("device")
         .profile()
@@ -166,10 +168,14 @@ fn private_memory_past_a_measured_device_is_refused() {
     assert_eq!(past.map(|_| ()), needs(8208 * 4, 32 * 1024));
 }
 
-/// On the RTX 3090's measured 128 KiB a thread, 32768 words fit with no note; 32784 do not.
+/// On the RTX 3090's measured 128 KiB a thread, 32768 words fit with no note; 32784 do not. The
+/// 3090 has no committed capture: it is the RTX 5080 Laptop GPU's under the 3090's ID.
 #[test]
 fn private_memory_on_the_rtx_3090_rests_on_its_measurement() {
-    let p = rtx_3090();
+    let p = captured_as(
+        "nvidia-rtx5080-laptop",
+        crate::device::driver_facts::NVIDIA_RTX_3090,
+    );
     let Some(fits) = notes_on(&p, "rtx-3090", 32768, "words") else {
         return;
     };
@@ -180,6 +186,24 @@ fn private_memory_on_the_rtx_3090_rests_on_its_measurement() {
     );
     let past = notes_on(&p, "rtx-3090", 32784, "words").expect("assembled");
     assert_eq!(past.map(|_| ()), needs(32784 * 4, 128 * 1024));
+}
+
+/// On the RX 7900 XTX's measured 96 KiB a thread, 24576 words fit with no note; 24592 do not. The
+/// XTX has no committed capture: it is the RX 7800 XT's (`amd-rdna3-radv`, RDNA3 under RADV as
+/// the XTX is) under the XTX's ID, 0x744c.
+#[test]
+fn private_memory_on_the_rx_7900_xtx_rests_on_its_measurement() {
+    let p = captured_as("amd-rdna3-radv", 0x744c);
+    let Some(fits) = notes_on(&p, "rx-7900-xtx", 24576, "words") else {
+        return;
+    };
+    let fits = fits.unwrap_or_else(|e| panic!("24576 words: {e}"));
+    assert!(
+        !fits.contains(&PrecisionNote::FunctionStorageAssumed),
+        "{fits:?}"
+    );
+    let past = notes_on(&p, "rx-7900-xtx", 24592, "words").expect("assembled");
+    assert_eq!(past.map(|_| ()), needs(24592 * 4, 96 * 1024));
 }
 
 /// On a device not measured the floor holds: 4096 words, and the constant table, fit and record

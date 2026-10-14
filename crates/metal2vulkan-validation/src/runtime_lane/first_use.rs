@@ -4,8 +4,9 @@
 //!
 //! - **Making waits for nothing** (the consumer's PS ask: Metal made textures in 102 µs and 18 µs
 //!   with a 2 s kernel still scheduled, where the runtime blocked 2.07 s). GPU busy work is
-//!   committed that spins until the test releases it, at most about 2 s, and writes an end mark
-//!   when it ends. Then textures are made down every path (a texture of its own, `Private` and
+//!   committed that spins until the test releases it, at most about 2 s (in command buffers of a
+//!   quarter of a second each: a driver may end a longer submission), and writes an end mark when
+//!   it ends. Then textures are made down every path (a texture of its own, `Private` and
 //!   `Shared`; over a buffer; over a no-copy buffer; in a heap; over detached bytes, a stand-in), a
 //!   heap's buffer and new buffers are made (a `Private` one with bytes among them, and a `Managed`
 //!   one), a `Managed` buffer's `did_modify_range` is called (on a device without unified memory
@@ -69,11 +70,11 @@ use metal2vulkan::pipeline::{ComputePipelineDescriptor, StageSource};
 use metal2vulkan::vk::DriverId;
 use metal2vulkan_devtools::llvm_assemble;
 use metal2vulkan_runtime::{
-    host_time, BlitOption, Buffer, CommandBuffer, CommandBufferStatus, CommandQueue, CommitFailure,
-    ComputePipelineState, CpuCacheMode, DebugMessage, Degradation, Device, Error,
-    HazardTrackingMode, HeapDescriptor, HeapType, LoadAction, Origin, PipelineOptions, Region,
-    RenderPassDescriptor, ResourceOptions, Size, StorageMode, StoreAction, Submission,
-    SubmissionCheck, Texture, TextureDescriptor,
+    host_time, BlitOption, Buffer, CommandBuffer, CommandBufferError, CommandBufferStatus,
+    CommandQueue, CommitFailure, ComputePipelineState, CpuCacheMode, DebugMessage, Degradation,
+    Device, Error, HazardTrackingMode, HeapDescriptor, HeapType, LoadAction, Origin,
+    PipelineOptions, Region, RenderPassDescriptor, ResourceOptions, Size, StorageMode, StoreAction,
+    Submission, SubmissionCheck, Texture, TextureDescriptor, TimedOut,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
@@ -85,6 +86,13 @@ use std::time::{Duration, Instant};
 /// The most GPU time the busy work takes before it gives up, where nothing released it
 /// ([`release`]): far longer than every call a test makes while it runs.
 const BUSY: Duration = Duration::from_secs(2);
+
+/// The command buffers the busy work is committed as, one after another on its queue, each a spin
+/// of at most `BUSY / LINKS` at the kernel's measured rate: a driver may end any one submission
+/// that runs too long. Linux 7.0's amdgpu ends a job after 2 s by default (`lockup_timeout` unset),
+/// resetting the ring and losing the submitting context's device: the whole of [`BUSY`] in one
+/// command buffer did so on an RX 7900 XTX and a Radeon 780M (Mesa 26.0.8, kernel 7.0.0-38).
+const LINKS: u32 = 8;
 
 /// The least GPU time the busy kernel's rate is measured over, at that rate.
 const MEASURED: Duration = Duration::from_millis(50);
@@ -113,14 +121,16 @@ const UNBOUND_CASES: [&str; 3] = [
 /// The busy kernel: the owned fixture `rfs_agx_yield`'s `agx_yield_lookback` as one threadgroup
 /// that takes ticket 1 and spins for the flag of ticket 0 (the busy work's first word) until the
 /// test raises it ([`release`]) or its cap of loads runs out, then gives up (as
-/// `framebuffer_fetch::storage_forms` holds a copy), and its cap for about [`BUSY`]. Shared with
+/// `framebuffer_fetch::storage_forms` holds a copy), and its cap for about `BUSY / LINKS`: the
+/// busy work is [`LINKS`] such spins, a command buffer each, about [`BUSY`] in all. Shared with
 /// `compressed_decode`'s lane of writes behind work in flight.
 ///
-/// Its cap, not the flag, ends it on an RTX 3090 (NVIDIA 615.71.09): alone, each of six busy
-/// works released 0 to 50 ms into its spin ran its whole cap, 2.0 s on the GPU, and published
-/// nothing.
+/// Its cap, not the flag, ended it on an RTX 3090 (NVIDIA 615.71.09) when it was one spin of
+/// [`BUSY`]: alone, each of six busy works released 0 to 50 ms into its spin ran its whole cap,
+/// 2.0 s on the GPU, and published nothing.
 pub(super) struct Busy {
     state: ComputePipelineState,
+    /// The loads each spin makes at most.
     cap: u32,
     /// The kinds its pipeline state's making announced where the device had not
     /// (`made_compute_kinds`), and its measurement's reads of GPU times (`gpu_times::read_kinds`).
@@ -128,7 +138,7 @@ pub(super) struct Busy {
 }
 
 impl Busy {
-    /// The kernel, its cap the loads of [`BUSY`] at its rate: the fastest of every measured run,
+    /// The kernel, its cap the loads of `BUSY / LINKS` at its rate: the fastest of every measured run,
     /// in loads per second of the run's time on the GPU where the device answers it
     /// ([`gpu_took`]). The cap grows sixteenfold until a run takes [`MEASURED`] at that rate, and
     /// a cap whose run takes it is run again, up to [`RUNS`] times. The GPU's other work only
@@ -187,13 +197,14 @@ impl Busy {
             }
             busy.cap <<= 4;
         }
-        busy.cap = (rate * BUSY.as_secs_f64()).clamp(1.0, f64::from(u32::MAX)) as u32;
+        let link = BUSY / LINKS;
+        busy.cap = (rate * link.as_secs_f64()).clamp(1.0, f64::from(u32::MAX)) as u32;
         let runs: Vec<String> = (runs.iter())
             .map(|(cap, took, wall)| format!("{cap} in {took:.2?} ({wall:.2?})"))
             .collect();
         println!(
-            "BUSY-CAP on {}: {} loads, at the fastest rate of the runs of loads in GPU time (from \
-             commit to completion): {}",
+            "BUSY-CAP on {}: {LINKS} command buffers of {} loads ({link:?} each), at the fastest \
+             rate of the runs of loads in GPU time (from commit to completion): {}",
             device.name(),
             busy.cap,
             runs.join(", ")
@@ -201,46 +212,109 @@ impl Busy {
         busy
     }
 
-    /// Run the busy work once, released by nothing: the time it took on the GPU ([`gpu_took`]),
-    /// and from its commit to its completion.
+    /// Run one spin of the current cap, released by nothing, and its end mark: the time it took
+    /// on the GPU ([`gpu_took`]), and from its commit to its completion.
     fn run(&self, device: &Device, queue: &CommandQueue) -> (Duration, Duration) {
         let at = Instant::now();
-        let (command_buffer, mark) = self.commit(device, queue);
+        let words = buffer_with(device, &[0; 8]).unwrap();
+        let cap = buffer_with(device, &self.cap.to_le_bytes()).unwrap();
+        let command_buffer = queue.command_buffer().unwrap();
+        self.spin(device, &command_buffer, &words, &cap);
+        end_mark(&command_buffer, &words);
+        command_buffer.commit().unwrap();
         command_buffer.wait_until_completed_for(WAIT).unwrap();
         let wall = at.elapsed();
         assert_eq!(command_buffer.error(), None, "the busy work");
-        assert_eq!(read_mark(&mark), ENDED, "the busy work's end mark");
+        assert_eq!(read_mark(&words), ENDED, "the busy work's end mark");
         (gpu_took(&command_buffer, wall), wall)
     }
 
-    /// Commit the busy work on `queue`: the spin, then a blit that writes the end mark into the
-    /// word after the spin's flag, ordered after the spin by the buffer both use. The command
-    /// buffer, and the buffer of the mark.
-    pub(super) fn commit(&self, device: &Device, queue: &CommandQueue) -> (CommandBuffer, Buffer) {
-        let command_buffer = queue.command_buffer().unwrap();
-        let words = self.encode(device, &command_buffer);
-        command_buffer.commit().unwrap();
-        (command_buffer, words)
-    }
-
-    /// Encode the busy work into `command_buffer`, as [`commit`](Busy::commit) commits it: the
-    /// spin and the end mark's blit. The buffer of the mark.
-    pub(super) fn encode(&self, device: &Device, command_buffer: &CommandBuffer) -> Buffer {
-        let ticket = buffer_with(device, &1u32.to_le_bytes()).unwrap();
+    /// Commit the busy work on `queue`: [`LINKS`] command buffers, each a spin on the same flag,
+    /// the last then a blit that writes the end mark into the word after the flag, ordered after
+    /// its spin by the buffer both use. Once the flag is raised every spin still to run ends at
+    /// its first load. The command buffers, and the buffer of the flag and the mark.
+    pub(super) fn commit(&self, device: &Device, queue: &CommandQueue) -> (BusyWork, Buffer) {
         let words = buffer_with(device, &[0; 8]).unwrap();
         let cap = buffer_with(device, &self.cap.to_le_bytes()).unwrap();
+        let links = (0..LINKS)
+            .map(|link| {
+                let command_buffer = queue.command_buffer().unwrap();
+                self.spin(device, &command_buffer, &words, &cap);
+                if link + 1 == LINKS {
+                    end_mark(&command_buffer, &words);
+                }
+                command_buffer.commit().unwrap();
+                command_buffer
+            })
+            .collect();
+        (BusyWork { links }, words)
+    }
+
+    /// Encode one spin into `command_buffer`: one threadgroup with a ticket of its own (the kernel
+    /// takes the ticket's value and raises it), spinning on `words`' flag for at most `cap`'s loads.
+    fn spin(&self, device: &Device, command_buffer: &CommandBuffer, words: &Buffer, cap: &Buffer) {
+        let ticket = buffer_with(device, &1u32.to_le_bytes()).unwrap();
         let mut encoder = command_buffer.compute_command_encoder().unwrap();
         encoder.set_compute_pipeline_state(&self.state).unwrap();
         encoder.set_buffer(Some(&ticket), 0, 0).unwrap();
-        encoder.set_buffer(Some(&words), 0, 1).unwrap();
-        encoder.set_buffer(Some(&cap), 0, 2).unwrap();
+        encoder.set_buffer(Some(words), 0, 1).unwrap();
+        encoder.set_buffer(Some(cap), 0, 2).unwrap();
         let one = Size::new(1, 1, 1);
         encoder.dispatch_threadgroups(one, one).unwrap();
         encoder.end_encoding().unwrap();
-        let mut blit = command_buffer.blit_command_encoder().unwrap();
-        blit.fill_buffer(&words, 4..8, 1).unwrap();
-        blit.end_encoding().unwrap();
-        words
+    }
+}
+
+/// Encode the blit that writes [`ENDED`] into the word after `words`' flag.
+fn end_mark(command_buffer: &CommandBuffer, words: &Buffer) {
+    let mut blit = command_buffer.blit_command_encoder().unwrap();
+    blit.fill_buffer(words, 4..8, 1).unwrap();
+    blit.end_encoding().unwrap();
+}
+
+/// The busy work in flight ([`Busy::commit`]): its command buffers, in commit order on one queue.
+pub(super) struct BusyWork {
+    links: Vec<CommandBuffer>,
+}
+
+impl BusyWork {
+    /// The last command buffer, which writes the end mark.
+    fn last(&self) -> &CommandBuffer {
+        self.links.last().expect("the busy work's command buffers")
+    }
+
+    /// Wait until every command buffer of the busy work completed.
+    pub(super) fn wait_until_completed_for(&self, timeout: Duration) -> Result<(), TimedOut> {
+        (self.links.iter()).try_for_each(|link| link.wait_until_completed_for(timeout))
+    }
+
+    /// The first error of its command buffers, in commit order.
+    pub(super) fn error(&self) -> Option<CommandBufferError> {
+        self.links.iter().find_map(CommandBuffer::error)
+    }
+
+    /// The status of its first command buffer not completed, else `Completed`.
+    pub(super) fn status(&self) -> CommandBufferStatus {
+        (self.links.iter())
+            .map(CommandBuffer::status)
+            .find(|status| *status != CommandBufferStatus::Completed)
+            .unwrap_or(CommandBufferStatus::Completed)
+    }
+
+    /// Wait until every command buffer's batches are submitted: the last, committed last on the
+    /// queue, is submitted after the others.
+    pub(super) fn scheduled(&self) {
+        scheduled(self.last());
+    }
+
+    /// When its first command buffer started on the GPU.
+    fn gpu_start_time(&self) -> Result<f64, Error> {
+        self.links[0].gpu_start_time()
+    }
+
+    /// When its last command buffer ended on the GPU.
+    fn gpu_end_time(&self) -> Result<f64, Error> {
+        self.last().gpu_end_time()
     }
 }
 
@@ -399,7 +473,7 @@ fn zero_contents(buffer: &Buffer, len: u64) -> bool {
 struct Calls<'a> {
     device: &'a Device,
     /// The busy work, and the buffer of its end mark.
-    busy: &'a CommandBuffer,
+    busy: &'a BusyWork,
     mark: Buffer,
     took: Vec<(String, Duration)>,
     /// Whether the device's driver is lavapipe, whose object making waits for its queue's work.
@@ -414,7 +488,7 @@ struct Calls<'a> {
 }
 
 impl<'a> Calls<'a> {
-    fn new(device: &'a Device, busy: &'a CommandBuffer, mark: Buffer) -> Self {
+    fn new(device: &'a Device, busy: &'a BusyWork, mark: Buffer) -> Self {
         let driver = device.properties().description.driver_id;
         Calls {
             device,
@@ -598,7 +672,7 @@ fn new_resources_wait_for_no_gpu_work() {
         let modified_bytes = pattern(9);
 
         let (busy_work, mark) = busy.commit(device, &queue);
-        scheduled(&busy_work);
+        busy_work.scheduled();
         let mut calls = Calls::new(device, &busy_work, mark);
         assert_eq!(
             read_mark(&calls.mark),
@@ -996,7 +1070,7 @@ fn neutrals_and_sparse_textures_wait_for_no_gpu_work() {
         let before = device.work_counts();
 
         let (busy_work, mark) = busy.commit(device, &queue);
-        scheduled(&busy_work);
+        busy_work.scheduled();
         let mut calls = Calls::new(device, &busy_work, mark);
         assert_eq!(
             read_mark(&calls.mark),
@@ -1149,7 +1223,7 @@ fn a_heap_texture_s_replace_region_waits_for_no_gpu_work() {
         let region = Region::new_2d(0, 0, SIDE, SIDE);
         let (first, second) = (pattern(8), pattern(9));
         let (busy_work, mark) = busy.commit(device, &queue);
-        scheduled(&busy_work);
+        busy_work.scheduled();
         assert_eq!(read_mark(&mark), 0, "the busy work ended before the calls");
         let before = device.work_counts();
         let at = Instant::now();
@@ -1221,7 +1295,7 @@ fn shared_textures_copy_on_the_host_while_the_gpu_is_busy() {
                 }
             );
             let (busy_work, mark) = busy.commit(device, &queue);
-            scheduled(&busy_work);
+            busy_work.scheduled();
             assert_eq!(read_mark(&mark), 0, "the busy work ended before the calls");
             let mut read = vec![0xee; BYTES];
             let at = Instant::now();
@@ -1455,7 +1529,7 @@ fn frame_sized_textures_copy_texel_exact() {
             // reads go on until it ends, at most `LOADED_READS`; the times of those that
             // returned while it ran are their distribution under load.
             let (busy_work, mark) = busy.commit(device, &queue);
-            scheduled(&busy_work);
+            busy_work.scheduled();
             let mut loaded = Vec::new();
             let mut ended_after = None;
             for _ in 0..LOADED_READS {

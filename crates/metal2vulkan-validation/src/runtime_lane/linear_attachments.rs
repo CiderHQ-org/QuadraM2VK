@@ -363,6 +363,57 @@ fn reference(
     blit_out(queue, &texture)
 }
 
+/// Where `pages` differ from `expected`, the private texture's bytes of a `W` x `H` `BGRA8Unorm`
+/// pass through `scissor`: how many bytes and rows, and the first [`FIRST_DIFFERING`] bytes, each
+/// with its row, column and channel, the private pass's value and the pages', and where it lies
+/// against the scissor (inside, on its edge, or outside): stale or partial rows read as a missing
+/// barrier, values a little off as the blend.
+fn differing(pages: &[u8], expected: &[u8], scissor: Option<ScissorRect>) -> String {
+    let at = |i: usize| {
+        let texel = i as u64 / TEXEL;
+        (texel % W, texel / W, i as u64 % TEXEL)
+    };
+    let place = |x: u64, y: u64| match scissor {
+        None => "with no scissor",
+        Some(s) => {
+            let inside = (s.x..s.x + s.width).contains(&x) && (s.y..s.y + s.height).contains(&y);
+            let edge = x == s.x || x + 1 == s.x + s.width || y == s.y || y + 1 == s.y + s.height;
+            match (inside, edge) {
+                (true, true) => "on the scissor's edge",
+                (true, false) => "inside the scissor",
+                (false, _) => "outside the scissor",
+            }
+        }
+    };
+    let differ: Vec<usize> = (0..pages.len())
+        .filter(|&i| pages[i] != expected[i])
+        .collect();
+    let rows: std::collections::BTreeSet<u64> = differ.iter().map(|&i| at(i).1).collect();
+    let first: Vec<String> = (differ.iter().take(FIRST_DIFFERING))
+        .map(|&i| {
+            let (x, y, channel) = at(i);
+            format!(
+                "row {y} column {x} {} private {:#04x} pages {:#04x} {}",
+                ["B", "G", "R", "A"][channel as usize],
+                expected[i],
+                pages[i],
+                place(x, y)
+            )
+        })
+        .collect();
+    format!(
+        "{} bytes differ in {} rows (from {:?} to {:?}); the first: {}",
+        differ.len(),
+        rows.len(),
+        rows.first(),
+        rows.last(),
+        first.join("; ")
+    )
+}
+
+/// The differing bytes [`differing`] lists.
+const FIRST_DIFFERING: usize = 32;
+
 /// [`blend_pass`] over a render target over host pages (counting from `start`), twice, each time
 /// over fresh pages: the pages hold what the same pass leaves in a private texture of the same
 /// bytes, and the bytes past `scissor` keep theirs. Where the texture is aliased by the rule both
@@ -392,7 +443,8 @@ fn blends_over_the_pages(start: usize, scissor: Option<ScissorRect>, corners: &[
             let pages = mapping.read(0..n);
             assert!(
                 pages == expected,
-                "the pages differ from the private texture's pass"
+                "the pages differ from the private texture's pass: {}",
+                differing(&pages, &expected, scissor)
             );
             if let Some(s) = scissor {
                 let inside = |i: usize| {

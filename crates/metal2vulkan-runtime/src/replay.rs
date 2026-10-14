@@ -28,7 +28,8 @@
 //!   call's own arguments, so a log grows with its encoder's recording, as Metal's command buffer
 //!   holds what the same calls encode. The logs go at the command buffer's first submission, after
 //!   which no rebind can matter, without a lock: the scheduler drops them as it drops what a
-//!   submission spent (`Submission::logs`).
+//!   submission spent (`Submission::logs`), before its hold of the command buffer
+//!   (`scheduler::Spent`), so the command buffer's waiters return after them.
 //! - **Notices.** A call encoded again announces no kind its first encoding announced: each kind
 //!   at most once (`Device::degrade`), as the program's call already met it.
 

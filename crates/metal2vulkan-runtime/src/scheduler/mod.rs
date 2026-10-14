@@ -522,13 +522,29 @@ fn pass(
     }
 }
 
-/// What a pass of [`submit_ready`] lets go of, for the caller to drop without the lock: the
-/// holds of the command buffers its batches came from, and the logs their first submissions
-/// ended (`replay.rs`), either of which may hold a resource's last handle.
-#[derive(Default)]
-struct Spent {
-    buffers: Vec<Hold<CommandBufferShared>>,
-    logs: Vec<Arc<Replay>>,
+/// What a pass of [`submit_ready`] lets go of, for the caller to drop without the lock: the logs
+/// its batches' first submissions ended (`replay.rs`), then the holds of the command buffers its
+/// batches came from, either of which may hold a resource's last handle.
+///
+/// The logs go first, by their place: a struct's fields drop in declaration order. A log holds
+/// handles of what its command buffer's encoders named, and the last hold of a command buffer
+/// that finished opens its gate, so its waiters return only after its logs went, as they return
+/// after what it retained (`CommandBufferShared::complete`): a no-copy buffer the program lets go
+/// of once its command buffer completed goes, its deallocator with it, in the program's call.
+/// Generic for its unit test (`tests/gate.rs`): `L` is a first submission's log, `B` a command
+/// buffer's hold.
+pub(super) struct Spent<L = Arc<Replay>, B = Hold<CommandBufferShared>> {
+    pub(super) logs: Vec<L>,
+    pub(super) buffers: Vec<B>,
+}
+
+impl<L, B> Default for Spent<L, B> {
+    fn default() -> Self {
+        Spent {
+            logs: Vec::new(),
+            buffers: Vec::new(),
+        }
+    }
 }
 
 /// Submit every batch that is ready, in order, until none is; each submission is a section of

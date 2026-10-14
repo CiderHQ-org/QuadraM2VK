@@ -145,6 +145,7 @@ enum Thread {
 
 /// Check that `seen`'s deallocator ran once, for `len` bytes at `pointer`, on `thread`, seeing
 /// `first` as its first 16 bytes.
+#[track_caller]
 fn ran(seen: &Seen, pointer: NonNull<u8>, len: usize, first: &[u8], thread: Thread) {
     assert_eq!(
         seen.runs.load(Ordering::SeqCst),

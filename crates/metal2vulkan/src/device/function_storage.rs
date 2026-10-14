@@ -1,18 +1,18 @@
 //! The Function storage a thread holds correctly on each device:
 //! [`ProfileFields::function_storage`].
 //!
-//! A thread's private memory, its `alloca`s (a recursion's call stack among them) and the
-//! constants it holds as `Private` variables, is storage a driver backs with scratch memory. No
-//! Vulkan property states how much of it a thread holds, and past it a driver can answer wrongly
-//! or hang with no error: the Radeon 780M under RADV over 4096 threads at 128 KiB a thread, the
-//! Iris Xe under ANV at 48 KiB, the RTX 5080 at 48 KiB and the RTX 3090 at 192 KiB (both Xid 109).
-//! So the amount is measured, per device, by `validation`'s `runtime_lane::private_memory` (a
-//! private array of that many bytes a thread, every 64-byte line written and read back in an order
-//! no two threads share, over 1, 64, 4096 and 262144 threads, each size cut at 60 s). A device's
-//! value is its largest size answered correctly over every thread count below its first size that
-//! failed; a size cut at 60 s is not measured, never taken as correct. The table keys each value on
-//! the device's identity, its driver, vendor, and device ID, as the driver workarounds are keyed
-//! ([`DriverWorkaround`]), and on nothing else.
+//! A thread's private memory, its `alloca`s (a recursion's call stack among them) and the constants
+//! it holds as `Private` variables, is storage a driver backs with scratch memory. No Vulkan
+//! property states how much of it a thread holds, and past it a driver can answer wrongly or hang
+//! with no error: the Radeon 780M and the RX 7900 XTX under RADV over 4096 threads at 128 KiB a
+//! thread, the Iris Xe under ANV at 48 KiB, the RTX 5080 at 48 KiB and the RTX 3090 at 192 KiB
+//! (both Xid 109). So the amount is measured, per device, by `validation`'s
+//! `runtime_lane::private_memory` (a private array of that many bytes a thread, every 64-byte line
+//! written and read back in an order no two threads share, over 1, 64, 4096 and 262144 threads,
+//! each size cut at 60 s). A device's value is its largest size answered correctly over every
+//! thread count below its first size that failed; a size cut at 60 s is not measured, never taken
+//! as correct. The table keys each value on the device's identity, its driver, vendor, and device
+//! ID, as the driver workarounds are keyed ([`DriverWorkaround`]), and on nothing else.
 //!
 //! A device the table does not name is assumed to hold [`FLOOR`], 16 KiB a thread: half the
 //! least any measured device held (32 KiB), and below every size any of them failed at (48 KiB
@@ -40,13 +40,23 @@ struct Measured {
 const KIB: u64 = 1024;
 
 /// The devices measured, each with the build and the evidence it was measured on.
-const MEASURED: [Measured; 8] = [
+const MEASURED: [Measured; 9] = [
     // AMD Radeon 780M (RADV PHOENIX), RADV Mesa 26.2.4-arch3.1 (EV
-    // UNI-B3-pm-radv): 64 and 96 KiB correct over 262144 threads; 128 KiB wrong over 4096.
+    // UNI-B3-pm-radv): 64 and 96 KiB correct over 262144 threads; 128 KiB wrong over 4096. RADV
+    // Mesa 26.0.8-1ubuntu0.3 (homelab-um780): 4 to 96 KiB correct over 262144 threads.
     Measured {
         driver: vk::DriverId::MESA_RADV,
         vendor: 0x1002,
         device: 0x15bf,
+        bytes: 96 * KIB,
+    },
+    // AMD Radeon RX 7900 XTX (RADV NAVI31), RADV Mesa 26.0.8-1ubuntu0.3 (homelab-um780): 4 to 96
+    // KiB correct over 262144 threads; 128 KiB wrong over 4096 (53 to 55 of the 64 threads
+    // checked, in three runs).
+    Measured {
+        driver: vk::DriverId::MESA_RADV,
+        vendor: 0x1002,
+        device: 0x744c,
         bytes: 96 * KIB,
     },
     // Intel Iris Xe Graphics (RPL-P), ANV Mesa 26.2.4-arch3.1 (EV UNI-B4-pm-anv): 4

@@ -1163,9 +1163,10 @@ fn uniform_reads_outpace_storage_reads_on_anv_and_narrow_lavapipe() {
 
 /// The Function storage a thread holds is the measured value of the device's identity, and on every
 /// committed profile of a device not measured the assumed floor, 16 KiB. It is keyed on the driver,
-/// the vendor, and the device ID together: the Radeon 780M's description under another device ID
-/// (an unmeasured RADV GPU) or another driver is assumed. The Intel venue's two devices take one
-/// value, so they keep one translation key.
+/// the vendor, and the device ID together: the Radeon 780M's description under the RX 7900 XTX's
+/// device ID (a measured RADV GPU of no committed capture) takes the XTX's value, and under another
+/// device ID (an unmeasured RADV GPU, Navi 21's 0x73bf) or another driver is assumed. The Intel
+/// venue's two devices take one value, so they keep one translation key.
 #[test]
 fn function_storage_is_the_measured_value_of_the_device() {
     use crate::device::profile::FunctionStorage::{Assumed, Measured};
@@ -1197,6 +1198,8 @@ fn function_storage_is_the_measured_value_of_the_device() {
     }
     let mut desc = profile("amd-780m-radv");
     desc.device_id = 0x744c;
+    assert_eq!(storage(desc.clone()), Measured(96 * kib));
+    desc.device_id = 0x73bf;
     assert_eq!(storage(desc.clone()), Assumed(16 * kib));
     desc.device_id = 0x15bf;
     desc.driver_id = Some(vk::DriverId::AMD_OPEN_SOURCE);
