@@ -377,7 +377,15 @@ for dependency in &pipeline.dependencies {
   there.
 - The layout numbers set 0 densely, in `ResourceSlot` order. Set 1 holds the heap arrays (the
   resources reached through argument buffers and resource IDs). Push constants carry the values the
-  binder writes per command.
+  binder writes per command. A stage that writes the command buffer's `ExecutionStatus` (an absent
+  argument's read, a `seq_cst` fence, an argument buffer's cubic sampler) reaches it by device
+  address, a push hole, where the device addresses buffers (`bufferDeviceAddress` and
+  `shaderInt64`), and through a set-0 storage buffer of its own
+  (`SyntheticBinding::ExecutionStatus`) where it does not. That binding counts against the
+  stage's storage-buffer limits: past one, an absent read or a fence is refused
+  (`DescriptorCount`), and a stage that would bind it only to test its argument samplers for a
+  cubic filter binds nothing, so the plan refuses a cubic sampler listed beside it
+  (`SamplerBicubicFilter`).
 - `dependencies` lists the bind-time state the pipeline depends on (`RuntimeFact`: threadgroup
   sizes, sampler coordinate modes, buffer ranges, ...) and how this profile honors each
   (`Mechanism`: a specialization constant, a push field, a plan-time check, a variant). The plan
@@ -508,7 +516,9 @@ What you record from `DispatchCommands` or `DrawCommands`:
 - **The dispatch or draw.** Record `regions` or `draw` as given: the binder has already applied
   Metal's offsets, bases and clamps.
 - **Status.** Per command buffer, keep one `ExecutionStatus` buffer for what translated shaders
-  report (a resident-set miss, for one), and read it when the command buffer completes.
+  report (a resident-set miss, for one), and read it when the command buffer completes. A plan
+  binds it as `WriteSource::ExecutionStatus` on a device that does not address buffers: bind the
+  same buffer there, its `ExecutionStatus::BYTES` bytes.
 
 ### Indirect command buffers
 

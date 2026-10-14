@@ -183,9 +183,10 @@ impl HandleClass {
 pub enum SyntheticBinding {
     /// Per-stage uniform buffer holding the push fields that did not fit the push window.
     ArgumentTable,
-    /// The command buffer's `ExecutionStatus` buffer: the indirect-clamp prepass's status binding.
-    /// A stage module reaches the buffer by device address ([`PushField::ExecutionStatusAddress`]),
-    /// never through a binding.
+    /// The command buffer's `ExecutionStatus` buffer: the product's prepasses' status binding, and
+    /// a stage module's on a device that does not address buffers, a storage buffer the binder
+    /// writes as `WriteSource::ExecutionStatus`. A stage module of a device that addresses buffers
+    /// reaches the buffer by device address ([`PushField::ExecutionStatusAddress`]) instead.
     ExecutionStatus,
     /// The resident root table.
     RootTable,

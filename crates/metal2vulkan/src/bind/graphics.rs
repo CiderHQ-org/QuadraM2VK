@@ -1618,6 +1618,8 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
                     SyntheticBinding::ColorWriteTable if stage == Stage::Fragment => {
                         WriteSource::ColorWriteTable
                     }
+                    // The command buffer's status, on a device that does not address buffers.
+                    SyntheticBinding::ExecutionStatus => WriteSource::ExecutionStatus,
                     other => return Err(internal(format!("a render binding {other:?}"))),
                 },
                 BindingSource::Heap(_) | BindingSource::HeapSampler { .. } => {

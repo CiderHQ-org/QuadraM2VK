@@ -361,6 +361,7 @@ fn submit_child(
             texel_guards: &BTreeMap::new(),
             tile_attachments: &BTreeMap::new(),
             shadow_stencil: None,
+            status: Some(status.buffer.buffer),
             used_textures: &BTreeMap::new(),
             samplers: &BTreeMap::new(),
             argument_samplers: &state.argument_samplers,

@@ -16,9 +16,9 @@
 //! - `at_stores`: `tg[tid] = 5` and `atomic_store(&tg[1], 2)`, then `out[1] = 7`: only writes;
 //! - `at_compared`: `out[1] = (tg == null)`, a use that is no access.
 //!
-//! With `has_tg` false `at_accesses` compiles, on every committed profile that addresses buffers,
-//! into a kernel that states its absent read and validates; a profile that does not address
-//! buffers refuses it as `FunctionConstantArgument`, naming what it needs. `at_stores` compiles
+//! With `has_tg` false `at_accesses` compiles, on every committed profile, into a kernel that
+//! states its absent read and validates, reaching the status by address where the profile
+//! addresses buffers and through the stage's binding of it elsewhere. `at_stores` compiles
 //! everywhere without an absent read: its writes go. `at_compared` stays refused
 //! `FunctionConstantArgument` while specializing. With `has_tg` true each kernel reads its
 //! memory, none absent.
@@ -28,9 +28,8 @@
 use std::sync::Arc;
 
 use crate::budget::SPIRV_WORDS;
-use crate::device::profile::BufferAccess;
 use crate::device::DeviceProfile;
-use crate::error::{Error, Feature, Needs};
+use crate::error::{Error, Feature};
 use crate::library::{FunctionArtifact, FunctionConstantValue, FunctionConstantValues};
 use crate::metal::DataType;
 use crate::pipeline::compile::{compile_bitcode, EntryRef};
@@ -39,7 +38,9 @@ use crate::pipeline::link::{link, LinkInputs};
 use crate::pipeline::lower_inputs::LoweringInputs;
 use crate::pipeline::relocate::relocate;
 use crate::pipeline::sym::Stage;
-use crate::pipeline::testing::{llvm_assemble, meter, AssembleError};
+use crate::pipeline::testing::{
+    llvm_assemble, meter, status_reach, status_reach_on, AssembleError, StatusReach,
+};
 use crate::spirv::testing::{check_words_valid, committed_profiles};
 
 /// The kernels (module docs). Argument 0 is the removed threadgroup memory `tg`, gated by
@@ -199,34 +200,26 @@ fn absent(a: &FunctionArtifact) -> bool {
     })
 }
 
-/// With `has_tg` false, the loads and the atomic of `at_accesses` are absent reads where the
-/// profile addresses buffers: the kernel states the status it marks and validates; elsewhere it is
-/// refused with the addresses it needs. The writes of `at_stores` go, so it marks nothing and
-/// compiles on every profile.
+/// With `has_tg` false, the loads and the atomic of `at_accesses` are absent reads on every
+/// profile: the kernel states the status it marks, reached by address where the profile addresses
+/// buffers and through the stage's binding of it elsewhere, and validates. The writes of
+/// `at_stores` go, so it marks nothing and reaches no status.
 #[test]
 fn absent_threadgroup_memory_marks_its_reads_and_drops_its_writes() {
     let Some(bc) = module() else { return };
-    let mut compiled = 0;
+    let mut bound = 0;
     for (stem, p) in committed_profiles().expect("profiles") {
-        let addressed = p.fields().buffer_access == BufferAccess::Addressed;
-        match compile(&bc, "at_accesses", false, &p) {
-            Ok(a) => {
-                assert!(addressed, "{stem}: an absent read without addresses");
-                assert!(absent(&a), "{stem}: {:?}", a.facts);
-                assert!(
-                    a.facts.contains(&RuntimeFact::ExecutionStatus),
-                    "{stem}: {:?}",
-                    a.facts
-                );
-                validate(&a, &p);
-                compiled += 1;
-            }
-            Err(Error::Unsupported(u)) if !addressed => {
-                assert_eq!(u.feature, Feature::FunctionConstantArgument, "{stem}");
-                assert!(matches!(u.needs, Needs::AnyOf(_)), "{stem}: {:?}", u.needs);
-            }
-            other => panic!("{stem}: {:?}", other.map(|_| ())),
-        }
+        let a = compile(&bc, "at_accesses", false, &p).unwrap_or_else(|e| panic!("{stem}: {e}"));
+        assert!(absent(&a), "{stem}: {:?}", a.facts);
+        assert!(
+            a.facts.contains(&RuntimeFact::ExecutionStatus),
+            "{stem}: {:?}",
+            a.facts
+        );
+        let reach = status_reach(&a);
+        assert_eq!(reach, status_reach_on(&p), "{stem}");
+        bound += usize::from(reach == StatusReach::Binding);
+        validate(&a, &p);
         let a = compile(&bc, "at_stores", false, &p).unwrap_or_else(|e| panic!("{stem}: {e}"));
         assert!(!absent(&a), "{stem}: {:?}", a.facts);
         assert!(
@@ -234,9 +227,10 @@ fn absent_threadgroup_memory_marks_its_reads_and_drops_its_writes() {
             "{stem}: {:?}",
             a.facts
         );
+        assert_eq!(status_reach(&a), StatusReach::None, "{stem}");
         validate(&a, &p);
     }
-    assert!(compiled > 0, "no committed profile addresses buffers");
+    assert!(bound > 0, "no committed profile without buffer addresses");
 }
 
 /// Removed threadgroup memory used other than as an access's address stays refused while

@@ -56,8 +56,9 @@ use crate::check::admission::{ExecutorError, NotSupported};
 use crate::literal::LiteralTexture;
 use ash::vk;
 use metal2vulkan::bind::{
-    sampler_desc, ArgumentSampler, DescriptorBytes, DescriptorRange, DescriptorWrite, HeapSource,
-    ImageSource, ImageViewDesc, NeutralResource, SamplerDescriptor, SamplerSource, WriteSource,
+    sampler_desc, ArgumentSampler, DescriptorBytes, DescriptorRange, DescriptorWrite,
+    ExecutionStatus, HeapSource, ImageSource, ImageViewDesc, NeutralResource, SamplerDescriptor,
+    SamplerSource, WriteSource,
 };
 use metal2vulkan::device::Device;
 use metal2vulkan::metal::sampler::OpaqueBlackBorder;
@@ -154,6 +155,10 @@ pub(super) struct Guest<'a> {
     /// fragment function tests the stencil itself. A dispatch, and a draw without the shader-side
     /// stencil, have none.
     pub(super) shadow_stencil: Option<vk::ImageView>,
+    /// The run's `ExecutionStatus` buffer, which a stage binds on a device that does not address
+    /// buffers (`WriteSource::ExecutionStatus`). A device replay, which needs the addresses,
+    /// has none.
+    pub(super) status: Option<vk::Buffer>,
 }
 
 /// What one descriptor write points at.
@@ -493,6 +498,18 @@ impl<'a> PlanResources<'a> {
                 let blob = blob.clone();
                 let buffer = self.buffer(context, "constant blob", &blob)?;
                 whole(buffer)
+            }
+            // The run's status words, the ones every command of it writes.
+            WriteSource::ExecutionStatus => {
+                let status = guest
+                    .status
+                    .ok_or("the plan binds an execution status the run has none of")?;
+                Info::Buffer(
+                    vk::DescriptorBufferInfo::default()
+                        .buffer(status)
+                        .offset(0)
+                        .range(ExecutionStatus::BYTES as u64),
+                )
             }
             // The fragment stage's sRGB color table.
             WriteSource::ColorWriteTable => {

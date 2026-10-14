@@ -68,10 +68,14 @@ pub fn mechanism(fact: &RuntimeFact, profile: &DeviceProfile) -> Mechanism {
         },
         RuntimeFact::TexelBufferRange { .. } => Mechanism::PlanTimeCheck,
         RuntimeFact::FramebufferFetch { .. } => Mechanism::RenderPassContract,
-        // A function that counts resident-set misses reaches the status buffer at the device
-        // address the binder writes into its push field (`PushField::ExecutionStatusAddress`);
-        // no stage module binds it.
-        RuntimeFact::ExecutionStatus => Mechanism::PushConstant,
+        // A function that writes the status buffer reaches it at the device address the binder
+        // writes into its push field (`PushField::ExecutionStatusAddress`), or, on a device that
+        // does not address buffers, through the stage's binding of it
+        // (`SyntheticBinding::ExecutionStatus`).
+        RuntimeFact::ExecutionStatus => match f.buffer_access {
+            BufferAccess::Addressed => Mechanism::PushConstant,
+            BufferAccess::Floor => Mechanism::SyntheticBinding,
+        },
         // The binder writes each heap element from the texture's facts and reports a texture
         // the class cannot hold.
         RuntimeFact::HeapNumericType { .. } => Mechanism::BinderView,

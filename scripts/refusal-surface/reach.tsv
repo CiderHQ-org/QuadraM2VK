@@ -224,7 +224,7 @@ feature	TileReach	app	the tiles a pass's draws reach, binned on a device without
 gap	HostHeapUncompressedMultisample	none	a multisample texture Metal keeps uncompressed in a runtime extension's heap over host pages
 feature	CommandPredication	none	Apple-private command predication on a device without buffer device addresses
 feature	ProgramScopeBinding	app	MSL 3.2 program-scope buffer bindings (macOS 15 and later)
-feature	SeqCstFence	rare	a seq_cst fence on a device without buffer device addresses or the stage's stores
+feature	SeqCstFence	rare	a seq_cst fence in a vertex or fragment stage without its stores and atomics
 gap	PredicationUnbalanced	none	an unbalanced Apple-private command-predication record, whose dropped work Metal decides by no rule measured
 gap	PredicationOpenAtUnitEnd	none	an Apple-private predication If left open, live, where its unit ends
 gap	PredicationWordPastBuffer	none	an Apple-private predication condition word past its buffer

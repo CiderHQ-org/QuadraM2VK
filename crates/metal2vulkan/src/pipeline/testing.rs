@@ -76,6 +76,34 @@ pub fn profile(stem: &str, policy: DevicePolicy) -> Result<DeviceProfile, String
     Ok(dev.profile().clone())
 }
 
+/// Committed profile `stem` derived under `policy`, with `storage` storage buffers a stage
+/// (`maxPerStageDescriptorStorageBuffers`).
+pub fn profile_with_storage_buffers(
+    stem: &str,
+    policy: DevicePolicy,
+    storage: u32,
+) -> Result<DeviceProfile, String> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../metal2vulkan-validation/profiles")
+        .join(format!("{stem}.json"));
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut desc =
+        DeviceDescription::from_khronos_json(&text, None).map_err(|e| format!("{stem}: {e}"))?;
+    desc.limits.max_per_stage_descriptor_storage_buffers = storage;
+    let dev = Device::new(desc, policy).map_err(|e| format!("{stem}: {e}"))?;
+    Ok(dev.profile().clone())
+}
+
+/// The storage-buffer descriptors the stage of `a` declares.
+pub fn storage_buffers(a: &FunctionArtifact) -> u32 {
+    a.interface
+        .descriptors
+        .iter()
+        .filter(|d| d.ty == crate::vk::DescriptorType::STORAGE_BUFFER)
+        .map(|d| d.count)
+        .sum()
+}
+
 /// The default policy with the translation's routines of Metal's maths
 /// (`FloatMathsPolicy::Exact`), Metal's `half` rounding (`HalfRoundingPolicy::Exact`), and Metal's
 /// NaN, minimum and maximum and rounding order (`NanMinMaxPolicy::Exact`,
@@ -979,6 +1007,48 @@ pub fn moltenvk_msl_compile(words: &[u32]) -> Result<(), AssembleError> {
         .collect::<Vec<_>>();
     compile.extend([msl.as_os_str(), "-o".as_ref(), air.as_os_str()]);
     msl_tool("xcrun", &compile)
+}
+
+/// How a compiled stage reaches the command buffer's `ExecutionStatus` buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatusReach {
+    /// It does not.
+    None,
+    /// By the device address in its push field (`PushField::ExecutionStatusAddress`).
+    Address,
+    /// Through its storage-buffer binding (`SyntheticBinding::ExecutionStatus`).
+    Binding,
+}
+
+/// How the stage of `a` reaches the `ExecutionStatus` buffer: by address or through its binding,
+/// never both (a stage with both panics).
+pub fn status_reach(a: &FunctionArtifact) -> StatusReach {
+    use crate::pipeline::sym::{PushField, ResourceKind, SyntheticBinding};
+    let address = a
+        .interface
+        .push
+        .fields
+        .iter()
+        .any(|f| f.field == PushField::ExecutionStatusAddress);
+    let binding = a.interface.descriptors.iter().any(|d| {
+        d.slot.kind == ResourceKind::Synthetic(SyntheticBinding::ExecutionStatus)
+            && d.ty == crate::vk::DescriptorType::STORAGE_BUFFER
+    });
+    match (address, binding) {
+        (false, false) => StatusReach::None,
+        (true, false) => StatusReach::Address,
+        (false, true) => StatusReach::Binding,
+        (true, true) => panic!("a stage reaches its status by address and through a binding"),
+    }
+}
+
+/// The reach of the `ExecutionStatus` buffer a stage that writes it has on `p`: by address where
+/// `p` addresses buffers, else through its binding.
+pub fn status_reach_on(p: &DeviceProfile) -> StatusReach {
+    match p.fields().buffer_access {
+        crate::device::profile::BufferAccess::Addressed => StatusReach::Address,
+        crate::device::profile::BufferAccess::Floor => StatusReach::Binding,
+    }
 }
 
 mod tests;

@@ -783,6 +783,10 @@ pub struct AccessPlan {
     /// The relaxed atomic loads an exit of a loop holding them depends on ([`atomic::spin`]): each
     /// acquires its memory. Planned before any instruction is selected.
     pub spins: BTreeSet<InstId>,
+    /// The stage binds the command buffer's `ExecutionStatus` buffer
+    /// (`SyntheticBinding::ExecutionStatus`), one more storage descriptor, on a device that does
+    /// not address buffers, and why ([`absent::StatusBinding`]).
+    pub status_binding: Option<absent::StatusBinding>,
 }
 
 impl AccessPlan {
@@ -835,6 +839,9 @@ pub struct Declared {
     /// The stage's function-table directory and search and the heap's function-table array,
     /// when a table is read by its resource id.
     pub function_tables: Option<function_table::FunctionTables>,
+    /// The stage's view of the command buffer's `ExecutionStatus` buffer, where it binds the
+    /// buffer ([`absent::declare`]).
+    pub status: Option<View>,
 }
 
 /// The module's routines the access family's strategies call, each charged once to the census: the
@@ -1694,6 +1701,7 @@ pub fn declare(
         },
         tile: tile::declare(mb, &plan.families.access)?,
         function_tables: function_table::declare(mb, plan)?,
+        status: absent::declare(mb, plan.stage, &plan.families.access)?,
         ..Declared::default()
     };
     for (i, s) in plan.slots.iter().enumerate() {

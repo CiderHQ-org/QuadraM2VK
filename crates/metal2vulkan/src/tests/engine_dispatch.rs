@@ -13,7 +13,6 @@
 
 use std::collections::BTreeMap;
 
-use crate::device::profile::BufferAccess;
 use crate::device::requirements::VkFeature;
 use crate::device::subgroup::{self, OpBits, SimdClass, SubgroupRequirement, Tier};
 use crate::device::DevicePolicy;
@@ -24,7 +23,8 @@ use crate::pipeline::facts::RuntimeFact;
 use crate::pipeline::interface::PushLoc;
 use crate::pipeline::sym::{Axis, PushField, ResourceKind, ResourceSlot, SpecKey, Stage};
 use crate::pipeline::testing::{
-    compile, engine_dir, link_and_validate, llvm_assemble, profile, typed_module, AssembleError,
+    compile, engine_dir, link_and_validate, llvm_assemble, profile, status_reach, status_reach_on,
+    typed_module, AssembleError, StatusReach,
 };
 use crate::spirv::interp::{run, Buffer, Config, Order, Resources, SubgroupSize, TrapKind};
 use crate::spirv::ir::{Inst, StorageClass, Type, TypedModule};
@@ -116,8 +116,10 @@ fn run_word0(plan: &Plan, m: &TypedModule, d: &Dispatch) -> u32 {
                 address: None,
                 bytes: vec![0; 16],
             },
+            // At its address, and at the kernel's binding of it where the device does not
+            // address buffers.
             Buffer {
-                slot: None,
+                slot: Some(crate::lower::access::absent::symbol(Stage::Kernel)),
                 address: Some(STATUS_AT),
                 bytes: vec![0; crate::bind::status::ExecutionStatus::BYTES],
             },
@@ -153,19 +155,15 @@ fn dispatch_kernels_compile_link_and_validate() {
             .iter()
             .chain(&["threadgroup_barrier_store", "device_fence_store"])
         {
-            // The `seq_cst` fence needs the status word's device address.
-            let addressed = p.fields().buffer_access == BufferAccess::Addressed;
-            if *entry == "device_fence_store" && !addressed {
-                match compile(&bc, entry, &p) {
-                    Err(Error::Unsupported(u)) => {
-                        assert_eq!(u.feature, Feature::SeqCstFence, "{stem} {entry}")
-                    }
-                    other => panic!("{stem} {entry}: {:?}", other.map(|_| "compiled")),
-                }
-                continue;
-            }
             let a = compile(&bc, entry, &p).unwrap_or_else(|e| panic!("{stem} {entry}: {e}"));
             link_and_validate(&a, &p).unwrap_or_else(|e| panic!("{stem} {entry}: {e}"));
+            // The `seq_cst` fence reaches the status word by address, or through the kernel's
+            // binding of it where the device does not address buffers.
+            let reach = match *entry == "device_fence_store" {
+                true => status_reach_on(&p),
+                false => StatusReach::None,
+            };
+            assert_eq!(status_reach(&a), reach, "{stem} {entry}");
             for f in [
                 RuntimeFact::ThreadsPerThreadgroup,
                 RuntimeFact::LocalSizeLimits,
@@ -358,6 +356,15 @@ fn barrier_kernels_run_on_the_interpreter() {
             "{entry}: barriers are tangled, fences not"
         );
     }
+    // The `seq_cst` fence orders through the kernel's binding of the status word where the device
+    // does not address buffers.
+    let floor = profile("vk12-floor", DevicePolicy::default()).expect("profile");
+    let (plan, m) = typed_module(&bc, "device_fence_store", &floor).expect("device_fence_store");
+    assert_eq!(
+        plan.families.access.status_binding,
+        Some(crate::lower::access::absent::StatusBinding::Required)
+    );
+    assert_eq!(run_word0(&plan, &m, &single([16, 1, 1], [2, 1, 1])), 42);
 }
 
 /// `store_const` with extra calls before its return (a synthetic kernel: Metal does not expose

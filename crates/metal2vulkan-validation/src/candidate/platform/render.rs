@@ -599,6 +599,7 @@ fn execute(
             imageblock: imageblock.as_ref(),
             tile_attachments: &storage_attachments,
             shadow_stencil: shadow.as_ref().map(|shadow| shadow.view),
+            status: Some(status.buffer.buffer),
         },
         observed,
     )?;
@@ -1008,6 +1009,7 @@ pub(super) fn submit_draw_child(
             imageblock: None,
             tile_attachments: &BTreeMap::new(),
             shadow_stencil: None,
+            status: Some(status.buffer.buffer),
         },
         None,
     )?;

@@ -435,24 +435,15 @@ fn select_fence(
 pub const SEQ_CST_WORDS: u32 = 48;
 
 /// What a sequentially consistent fence needs ([`seq_cst_order`]): the command buffer's
-/// `ExecutionStatus` word, by device address, and the stage's atomics; a device without them
+/// `ExecutionStatus` word (`absent::state_status`), and the stage's atomics; a device without them
 /// refuses the fence as `SeqCstFence`, naming what it needs.
 pub fn require_seq_cst(cx: &mut SelectCx<'_>) -> Result<(), Error> {
-    use crate::lower::access::absent::{state_status, status_short, StatusShort};
-    match status_short(cx) {
-        Some(StatusShort::Addresses) => Err(Unsupported::needs_any_of(
-            Feature::SeqCstFence,
-            vec![cx.profile.addressed_needs()],
-        )
-        .into()),
-        Some(StatusShort::Stores(f)) => {
-            Err(Unsupported::needs(Feature::SeqCstFence, Capability::Feature(f)).into())
-        }
-        None => {
-            state_status(cx);
-            Ok(())
-        }
+    use crate::lower::access::absent::{state_status, status_short, StatusBinding, StatusShort};
+    if let Some(StatusShort::Stores(f)) = status_short(cx) {
+        return Err(Unsupported::needs(Feature::SeqCstFence, Capability::Feature(f)).into());
     }
+    state_status(cx, StatusBinding::Required);
+    Ok(())
 }
 
 /// Order a sequentially consistent fence of `flags`' memories at `scope` with every other such

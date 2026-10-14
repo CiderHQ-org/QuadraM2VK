@@ -1096,8 +1096,8 @@ pub enum Feature {
     /// argument is not declared (MSL 5.8.1.2) and Metal defines no value for it (its compiler drops
     /// a store of such a read and gives arithmetic on it NaN), and no contained answer for a
     /// dereference is established. An absent read sets `StatusBits::ABSENT_ARGUMENT_READ` where it
-    /// runs and yields zero (`RuntimeFact::AbsentArgumentRead`); on a device that does not address
-    /// buffers, or whose vertex or fragment stage has no stores, it is refused with what it needs.
+    /// runs and yields zero (`RuntimeFact::AbsentArgumentRead`); in a vertex or fragment stage
+    /// without its stores and atomics it is refused with what it needs.
     /// An absent argument passed by value (its parameter is not a pointer: a vertex attribute, a
     /// stage input, a varying, a color input, a builtin, imageblock data, an indirect constant, a
     /// per-patch attribute) reads zero instead. A read nothing observes is `undef`, or goes; a
@@ -1292,8 +1292,7 @@ pub enum Feature {
     /// A sequentially consistent fence (`seq_cst` `atomic_thread_fence`, an LLVM `fence seq_cst`,
     /// or a `seq_cst` barrier ordering device memory), whose total order with the command
     /// buffer's other such fences the translation keeps through an atomic of the command buffer's
-    /// `ExecutionStatus` word: on a device without device addresses ([`Needs::AnyOf`]) or the
-    /// stage's stores and atomics.
+    /// `ExecutionStatus` word: in a vertex or fragment stage without its stores and atomics.
     SeqCstFence,
 }
 

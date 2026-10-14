@@ -1344,6 +1344,9 @@ fn descriptor(
                 .ok_or_else(|| internal("a constant-blob write without its stage's blob"))?;
             whole(upload(blob, padded(blob.len()))?)
         }
+        // The command buffer's status words, the ones every command of it writes, on a device
+        // that does not address buffers (`status_address` elsewhere).
+        WriteSource::ExecutionStatus => whole(state.status_words(device)?),
         // The fragment stage's sRGB color table, the same bytes for every pipeline.
         WriteSource::ColorWriteTable => {
             let table = metal2vulkan::bind::color_write_table();

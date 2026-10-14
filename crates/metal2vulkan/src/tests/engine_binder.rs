@@ -29,7 +29,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::bind::indirect_clamp;
 use crate::bind::{
     BindState, BoundBuffer, Dispatch, DispatchCommands, ExecutionStatus, IndirectArgs, IndirectRef,
-    PushHole, ResourceClass, RootTable, StageTable, StatusReport, UsedResource, WriteSource,
+    PushHole, ResourceClass, RootTable, StageTable, StatusReport, StatusWord, UsedResource,
+    WriteSource,
 };
 use crate::budget::Budget;
 use crate::device::requirements::VkFeature;
@@ -296,6 +297,7 @@ fn execute(
                     }),
                     Back::Nowhere,
                 ),
+                WriteSource::ExecutionStatus => (world.status.to_vec(), Back::Status),
                 other => panic!("unexpected write {other:?}"),
             };
             buffers.push(Buffer {
@@ -608,6 +610,54 @@ fn dispatch_threads_edges_and_group_splits_compute_metal_grid_builtins() {
             "{stem}: NumWorkgroups grid of the clamped counts"
         );
         assert!(got[16..].iter().all(|&x| x == 0));
+    }
+}
+
+/// A kernel's `seq_cst` fence orders through the command buffer's status: on a device that does
+/// not address buffers (`vk12-floor`, `lunarg-desktop-baseline-2023`) the plan binds it
+/// (`WriteSource::ExecutionStatus`) and pushes no status address, and where the device addresses
+/// buffers (`moltenvk-m3`) it pushes the address and binds nothing. Either way each of the
+/// dispatch's threads increments `StatusWord::SeqCstFences` of the one status the command buffer
+/// keeps, and the store after the fence lands.
+#[test]
+fn a_seq_cst_fence_reaches_the_status_by_binding_or_address_as_the_device_allows() {
+    let Some(bc) = fixture("dispatch_builtins") else {
+        return;
+    };
+    for (stem, bound) in [
+        ("vk12-floor", true),
+        ("lunarg-desktop-baseline-2023", true),
+        ("moltenvk-m3", false),
+    ] {
+        let dev = device(stem, |_| {});
+        let pipe = pipeline(&dev, &bc, "device_fence_store").expect(stem);
+        let (_, m) = typed_module(&bc, "device_fence_store", dev.profile()).expect("module");
+        let mut w = World::new([(0, Alloc::new(16, 0))]);
+        let d = Dispatch::Threads {
+            threads: [24, 1, 1],
+            threads_per_group: [8, 1, 1],
+        };
+        let c = execute(&dev, &pipe, &m, &mut w, &d).expect(stem);
+        let plan = pipe.plan(&dev, &w.state().shape()).expect(stem);
+        let writes = plan
+            .descriptors
+            .iter()
+            .filter(|write| write.source == WriteSource::ExecutionStatus)
+            .count();
+        let holes = c
+            .push_holes
+            .iter()
+            .filter(|hole| matches!(hole, PushHole::ExecutionStatusAddress { .. }))
+            .count();
+        assert_eq!(
+            (writes, holes),
+            (usize::from(bound), usize::from(!bound)),
+            "{stem}"
+        );
+        let at = StatusWord::SeqCstFences.byte_offset() as usize;
+        let fences = u32::from_le_bytes(w.status[at..at + 4].try_into().expect("a word"));
+        assert_eq!(fences, 24, "{stem}: one increment a thread");
+        assert_eq!(words(&w.buffers[&0].bytes)[0], 42, "{stem}");
     }
 }
 

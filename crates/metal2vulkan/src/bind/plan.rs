@@ -739,6 +739,15 @@ pub enum WriteSource {
     /// stages' alike): the draw's region of `MeshDispatch::work_bytes`, holding
     /// `MeshDispatch::work`, bound whole ([`MeshDispatch`](crate::bind::MeshDispatch)).
     MeshWork,
+    /// The command buffer's execution status (`SyntheticBinding::ExecutionStatus`) of a stage on
+    /// a device that does not address buffers: a storage buffer of the
+    /// [`ExecutionStatus`](crate::bind::ExecutionStatus) words, the same buffer every command of
+    /// the command buffer writes (where the device addresses buffers, the one whose address
+    /// `PushHole::ExecutionStatusAddress` takes), its
+    /// [`ExecutionStatus::BYTES`](crate::bind::ExecutionStatus::BYTES) bytes bound, starting all
+    /// zero ([`ExecutionStatus::initial`](crate::bind::ExecutionStatus::initial)). The consumer
+    /// reads it once the command buffer completes.
+    ExecutionStatus,
     /// The fragment stage's sRGB color table (`SyntheticBinding::ColorWriteTable`): a read-only
     /// buffer holding exactly [`color_write_table`](crate::bind::color_write_table)'s bytes,
     /// bound whole, as the write's descriptor type says (a uniform buffer, or a storage buffer).

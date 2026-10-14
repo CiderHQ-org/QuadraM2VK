@@ -49,8 +49,9 @@ use crate::pipeline::sym::{
 };
 use crate::pipeline::testing::EXACT_SAMPLING;
 use crate::pipeline::testing::{
-    compile, engine_dir, fixtures_dir, link_and_validate, llvm_assemble, profile, typed_module,
-    AssembleError,
+    compile, engine_dir, fixtures_dir, link_and_validate, llvm_assemble, profile,
+    profile_with_storage_buffers, status_reach, status_reach_on, storage_buffers, typed_module,
+    AssembleError, StatusReach,
 };
 use crate::pipeline::{
     ComputePipelineDescriptor, FunctionDescriptor, RenderPipelineDescriptor, StageSource,
@@ -4608,21 +4609,17 @@ fn argument_buffer_samplers_are_heap_lookups() {
 }
 
 /// A sample through an argument buffer's sampler tests the sampler's entry for a cubic filter
-/// (`RuntimeFact::CubicArgumentSampler`) in a kernel wherever the device addresses buffers, the
-/// status write's need; a fragment function's never does, whose store would cost it the
-/// device's hidden-surface removal (EVs GSM2-crcb-mvk4 and GSM2-crcn-mvk4), so the planner
-/// refuses a listed cubic sampler beside it.
+/// (`RuntimeFact::CubicArgumentSampler`) in a kernel on every profile with the heap, marking the
+/// status by address where the device addresses buffers and through the kernel's binding of it
+/// elsewhere; a fragment function's never does, whose store would cost it the device's
+/// hidden-surface removal (EVs GSM2-crcb-mvk4 and GSM2-crcn-mvk4), so the planner refuses a listed
+/// cubic sampler beside it.
 #[test]
 fn only_non_fragment_stages_test_argument_samplers_for_a_cubic_filter() {
     let Some(bc) = argument_samplers_fixture() else {
         return;
     };
-    let tests = |a: &FunctionArtifact| {
-        a.facts
-            .iter()
-            .any(|f| matches!(f, RuntimeFact::CubicArgumentSampler { .. }))
-    };
-    let mut compiled = 0;
+    let (mut compiled, mut bound) = (0, 0);
     for (stem, p) in committed_exact_profiles().expect("profiles") {
         let (Ok(kernel), Ok(fragment)) = (
             compile(&bc, "argument_sampler_sample", &p),
@@ -4631,12 +4628,75 @@ fn only_non_fragment_stages_test_argument_samplers_for_a_cubic_filter() {
             assert!(!has_sampled_heap(&p), "{stem}");
             continue;
         };
-        let addressed = p.fields().buffer_access == crate::device::profile::BufferAccess::Addressed;
-        assert_eq!(tests(&kernel), addressed, "{stem}: the kernel");
-        assert!(!tests(&fragment), "{stem}: the fragment function");
+        assert!(tests_cubic(&kernel), "{stem}: the kernel");
+        let reach = status_reach(&kernel);
+        assert_eq!(reach, status_reach_on(&p), "{stem}: the kernel");
+        assert!(!tests_cubic(&fragment), "{stem}: the fragment function");
+        assert_eq!(status_reach(&fragment), StatusReach::None, "{stem}");
+        link_and_validate(&kernel, &p).unwrap_or_else(|e| panic!("{stem}: L3: {e}"));
         compiled += 1;
+        bound += usize::from(reach == StatusReach::Binding);
     }
     assert!(compiled > 0, "no committed profile has the heap");
+    assert!(
+        bound > 0,
+        "no committed profile with the heap but no addresses"
+    );
+}
+
+/// Whether `a` tests an argument buffer's sampler for a cubic filter.
+fn tests_cubic(a: &FunctionArtifact) -> bool {
+    a.facts
+        .iter()
+        .any(|f| matches!(f, RuntimeFact::CubicArgumentSampler { .. }))
+}
+
+/// Where the cubic test's binding of the status would take a kernel past its storage buffers (a
+/// device that does not address buffers, `lunarg-desktop-baseline-2023` with its limit lowered
+/// step by step), the kernel gives the binding back: it compiles without the test, as a fragment
+/// function does, so the planner refuses a listed cubic sampler beside it. Every compile stays
+/// within the limit, and at the full kernel's own count of storage buffers the kernel keeps the
+/// binding.
+#[test]
+fn the_cubic_tests_binding_gives_way_to_the_storage_buffer_limit() {
+    let Some(bc) = argument_samplers_fixture() else {
+        return;
+    };
+    let stem = "lunarg-desktop-baseline-2023";
+    let full = profile(stem, EXACT_SAMPLING).expect("profile");
+    assert!(has_sampled_heap(&full), "{stem}");
+    let kernel = compile(&bc, "argument_sampler_sample", &full).expect("kernel");
+    assert_eq!(status_reach(&kernel), StatusReach::Binding);
+    let with = storage_buffers(&kernel);
+    let mut given_back = None;
+    for limit in (0..=with).rev() {
+        let p = profile_with_storage_buffers(stem, EXACT_SAMPLING, limit).expect("profile");
+        let a = match compile(&bc, "argument_sampler_sample", &p) {
+            Ok(a) => a,
+            Err(Error::Unsupported(u)) if u.feature == Feature::DescriptorCount => break,
+            Err(e) => panic!("limit {limit}: {e}"),
+        };
+        assert!(storage_buffers(&a) <= limit, "limit {limit}");
+        match status_reach(&a) {
+            StatusReach::Binding => {
+                assert!(tests_cubic(&a), "limit {limit}");
+                assert!(given_back.is_none(), "limit {limit}: the binding back");
+            }
+            StatusReach::None => {
+                assert!(!tests_cubic(&a), "limit {limit}");
+                assert!(
+                    !a.facts.contains(&RuntimeFact::ExecutionStatus),
+                    "limit {limit}"
+                );
+                assert!(limit < with, "limit {limit}: given back at the full count");
+                given_back.get_or_insert(limit);
+            }
+            StatusReach::Address => panic!("limit {limit}: an address without addresses"),
+        }
+        link_and_validate(&a, &p).unwrap_or_else(|e| panic!("limit {limit}: L3: {e}"));
+    }
+    let limit = given_back.expect("the binding is never given back");
+    println!("{stem}: the cubic test's binding given back at {limit} storage buffers of {with}");
 }
 
 /// Synthetic AIR written for this test: kernel `k` samples the `texture2d<float>` its argument

@@ -3,8 +3,8 @@
 //! acquire-release increment of the command buffer's `StatusWord::SeqCstFences` at the fence's
 //! scope, which keeps them in one total order, as Metal's are: Vulkan's `SequentiallyConsistent` is
 //! `AcquireRelease`, which lets a store-buffering pair both read the old values. An `acq_rel` fence
-//! takes no increment, and a device without device addresses refuses the `seq_cst` one as
-//! `SeqCstFence`, naming what it needs.
+//! takes no increment. The increment reaches the status word by its device address where the device
+//! addresses buffers, and through the stage's binding of the status buffer elsewhere.
 //!
 //! The kernel is the store-buffering litmus of EV SDX-p1-m3
 //! (`metal2vulkan_devtools::litmus::store_buffering`; `runtime_lane::seq_cst_fences` runs it on
@@ -13,7 +13,9 @@
 use crate::device::profile::BufferAccess;
 use crate::error::{Error, Feature};
 use crate::pipeline::facts::RuntimeFact;
-use crate::pipeline::testing::{compile, link_and_validate};
+use crate::pipeline::testing::{
+    compile, link_and_validate, status_reach, status_reach_on, StatusReach,
+};
 use crate::spirv::testing::committed_profiles;
 use metal2vulkan_devtools::litmus::store_buffering;
 use metal2vulkan_devtools::{llvm_assemble_text, AssembleError};
@@ -65,12 +67,11 @@ fn increments_and_fences(words: &[u32]) -> (Vec<u32>, usize) {
     (scopes, fences)
 }
 
-/// On every committed profile with device addresses, each `seq_cst` fence of the store-buffering
-/// kernel (`air.atomic.fence` at device and at threadgroup scope, and an LLVM `fence seq_cst`) is
-/// an `OpMemoryBarrier` and an increment of the status word at the fence's scope, the module
-/// reaching the `ExecutionStatus` buffer; an `acq_rel` fence is the barrier alone. A profile
-/// without device addresses refuses the `seq_cst` fences as `SeqCstFence` and compiles the
-/// `acq_rel` one.
+/// On every committed profile, each `seq_cst` fence of the store-buffering kernel
+/// (`air.atomic.fence` at device and at threadgroup scope, and an LLVM `fence seq_cst`) is an
+/// `OpMemoryBarrier` and an increment of the status word at the fence's scope, the module reaching
+/// the `ExecutionStatus` buffer by address where the profile addresses buffers and through the
+/// stage's binding of it elsewhere; an `acq_rel` fence is the barrier alone, reaching no status.
 #[test]
 fn a_seq_cst_fence_is_ordered_with_the_command_buffers_others() {
     let device = "  tail call void @air.atomic.fence(i32 1, i32 5, i32 2)";
@@ -91,20 +92,15 @@ fn a_seq_cst_fence_is_ordered_with_the_command_buffers_others() {
     }
     let (mut addressed, mut floor) = (0, 0);
     for (stem, p) in committed_profiles().expect("committed profiles") {
-        let has_addresses = p.fields().buffer_access == BufferAccess::Addressed;
         for (fence, scope, bc) in &kernels {
             let what = format!("{stem}, {}", fence.trim());
-            let a = match (compile(bc, "sb", &p), scope, has_addresses) {
-                (Ok(a), _, true) | (Ok(a), None, false) => a,
-                (Err(Error::Unsupported(u)), Some(_), false) => {
-                    assert_eq!(u.feature, Feature::SeqCstFence, "{what}");
-                    continue;
-                }
-                (Err(Error::Unsupported(u)), ..) if u.feature != Feature::SeqCstFence => {
+            let a = match compile(bc, "sb", &p) {
+                Ok(a) => a,
+                Err(Error::Unsupported(u)) if u.feature != Feature::SeqCstFence => {
                     eprintln!("{what}: refused for {u:?}");
                     continue;
                 }
-                (got, ..) => panic!("{what}: {:?}", got.map(|_| "compiled")),
+                Err(e) => panic!("{what}: {e}"),
             };
             let (scopes, fences) = increments_and_fences(&a.module.words);
             assert_eq!(fences, 2, "{what}: one barrier a side");
@@ -112,12 +108,16 @@ fn a_seq_cst_fence_is_ordered_with_the_command_buffers_others() {
                 Some(s) => {
                     assert_eq!(scopes, [*s, *s], "{what}: one increment a side");
                     assert!(a.facts.contains(&RuntimeFact::ExecutionStatus), "{what}");
+                    assert_eq!(status_reach(&a), status_reach_on(&p), "{what}");
                 }
-                None => assert!(scopes.is_empty(), "{what}: {scopes:?}"),
+                None => {
+                    assert!(scopes.is_empty(), "{what}: {scopes:?}");
+                    assert_eq!(status_reach(&a), StatusReach::None, "{what}");
+                }
             }
             link_and_validate(&a, &p).unwrap_or_else(|e| panic!("{what}: L3: {e}"));
         }
-        match has_addresses {
+        match p.fields().buffer_access == BufferAccess::Addressed {
             true => addressed += 1,
             false => floor += 1,
         }

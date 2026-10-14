@@ -581,6 +581,8 @@ fn plan(p: &ComputePipeline, device: &Device, shape: &BindShape) -> Result<Bindi
                     },
                     // The pass's imageblock storage, a tile function's explicit imageblock.
                     SyntheticBinding::Imageblock => WriteSource::Imageblock,
+                    // The command buffer's status, on a device that does not address buffers.
+                    SyntheticBinding::ExecutionStatus => WriteSource::ExecutionStatus,
                     other => return Err(internal(format!("a compute binding {other:?}"))),
                 },
                 BindingSource::Texture(slot) => {

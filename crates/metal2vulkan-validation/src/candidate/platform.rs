@@ -19,6 +19,8 @@ pub use acceptance::create_acceptance_pipeline;
 pub use compute::execute_engine;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 pub use compute::opened_worker_device;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+pub(crate) use device::lane_restriction;
 pub use device::{capture_formats, echo_validation_messages, venue_check};
 pub use device::{requested_leg, run_robustness_off};
 pub(crate) use device::{runtime_restriction, Restricting, RuntimeRestriction};

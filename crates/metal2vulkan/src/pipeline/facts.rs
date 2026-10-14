@@ -53,8 +53,11 @@ pub enum RuntimeFact {
     TexelBufferRange { slot: SlotRef },
     /// Framebuffer fetch of this color index.
     FramebufferFetch { color: u32 },
-    /// The function writes the command buffer's `ExecutionStatus` buffer: it counts resident-set
-    /// misses through the buffer's device address.
+    /// The function writes the command buffer's `ExecutionStatus` buffer (resident-set misses,
+    /// absent reads, sequentially consistent fences, an argument buffer's cubic sampler): through
+    /// the buffer's device address (`PushField::ExecutionStatusAddress`), or, on a device that
+    /// does not address buffers, through the stage's binding of it
+    /// (`SyntheticBinding::ExecutionStatus`).
     ExecutionStatus,
     /// The set-1 heap array of `class` is declared with the default `Float` sampled type because
     /// some heap group of that class is only queried: nothing structural types it (the
@@ -737,8 +740,7 @@ pub enum Mechanism {
     RegionSelected,
     /// The indirect-clamp prepass.
     IndirectClamp,
-    /// A synthetic binding. No fact maps to it (the `ExecutionStatus` fact is a push field); the
-    /// variant stays in the artifact encoding.
+    /// A synthetic binding: the `ExecutionStatus` fact on a device that does not address buffers.
     SyntheticBinding,
     /// Graphics state plus the render-pass contract.
     RenderPassContract,

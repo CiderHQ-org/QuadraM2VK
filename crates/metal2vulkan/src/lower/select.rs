@@ -1608,6 +1608,7 @@ fn finish(
     arith::finish(&mut cx)?;
 
     let slots = access::finish_slots(&mut cx, m)?;
+    access::absent::finish(&mut cx);
     sync::memory_model::finish_interlock(&mut cx, &slots)?;
     charge_facts(&cx, fact_bytes, m)?;
     let descriptors = cx.descriptors;

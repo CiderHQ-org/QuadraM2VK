@@ -34,8 +34,10 @@
 //! [`Device::neutral_kinds`](crate::device::Device::neutral_kinds) once. Per command buffer, bind
 //! one [`ExecutionStatus`] buffer: initialize it with [`ExecutionStatus::initial`], and read it
 //! back with [`ExecutionStatus::decode`], which reports clamped indirect counts and resident-set
-//! misses. An indirect dispatch can carry an [`IndirectClamp`] prepass
-//! of [`indirect_clamp_module`] to record first. An indexed indirect draw whose index fetch
+//! misses. A command reaches it by its device address where the device addresses buffers, and
+//! through the binding [`WriteSource::ExecutionStatus`] names where it does not. An indirect
+//! dispatch can carry an [`IndirectClamp`] prepass of [`indirect_clamp_module`] to record first.
+//! An indexed indirect draw whose index fetch
 //! nothing bounds (`DrawCommands::index_bounds_pass`) can bound it on the GPU instead of reading
 //! its arguments: an [`IndexBoundsPass`] of [`index_bounds_plan_module`] and
 //! [`index_bounds_fill_module`] before the render pass instance, and two indirect draws. An

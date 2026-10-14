@@ -7,12 +7,14 @@
 //! and an image write.
 //!
 //! The product also writes one buffer the guest never names: the command buffer's
-//! `ExecutionStatus` buffer, whose words the resident-miss count updates. Those writes are the
-//! product's, wherever lowering places them, so a write whose address derives from that buffer does
-//! not count. A stage module reaches the buffer by the device address in the push block's
+//! `ExecutionStatus` buffer, whose words the resident-miss count, an absent read's mark and a
+//! `seq_cst` fence's order update. Those writes are the product's, wherever lowering places them,
+//! so a write whose address derives from that buffer does not count. A stage module of a device
+//! that addresses buffers reaches the buffer by the device address in the push block's
 //! `ExecutionStatusAddress` member, which the placement order always puts in the push block
-//! (`lower::push`'s `the_status_address_is_always_placed_in_the_push_block`); the
-//! `Synthetic(ExecutionStatus)` storage buffer, the buffer's binding, counts as the buffer too. A
+//! (`lower::push`'s `the_status_address_is_always_placed_in_the_push_block`); one of a device that
+//! does not reaches it through its `Synthetic(ExecutionStatus)` storage buffer, the buffer's
+//! binding, which counts as the buffer too. A
 //! written pointer is traced back through access chains, `OpConvertUToPtr`, and an `OpIAdd` of a
 //! constant; it addresses the status buffer exactly when the trace ends at that binding or at a
 //! load of that member. A pointer that traces anywhere else, or not at all (a phi, a parameter, a

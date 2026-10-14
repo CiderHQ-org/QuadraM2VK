@@ -804,6 +804,7 @@ fn execute(
             imageblock: None,
             tile_attachments,
             shadow_stencil: None,
+            status: Some(status.buffer.buffer),
         },
         observed,
     )?;

@@ -448,7 +448,10 @@ fn mechanism_is_total_over_every_fact_and_profile() {
                 | RuntimeFact::ShaderStencilTest { .. }
                 | RuntimeFact::TileImageblock { .. }
                 | RuntimeFact::ExtendedRangeInputBlend { .. } => Mechanism::RenderPassContract,
-                RuntimeFact::ExecutionStatus => Mechanism::PushConstant,
+                RuntimeFact::ExecutionStatus => match f.buffer_access {
+                    crate::device::profile::BufferAccess::Addressed => Mechanism::PushConstant,
+                    _ => Mechanism::SyntheticBinding,
+                },
                 RuntimeFact::HeapNumericType { .. }
                 | RuntimeFact::HeapHalfTexelWrites { .. } => Mechanism::BinderView,
                 RuntimeFact::StageInRegion

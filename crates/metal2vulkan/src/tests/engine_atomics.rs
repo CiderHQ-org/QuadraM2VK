@@ -38,8 +38,8 @@ use crate::pipeline::sym::{
     Axis, PushField, ResourceKind, ResourceSlot, SlotClass, SlotRef, SpecKey, Stage,
 };
 use crate::pipeline::testing::{
-    compile, fixtures_dir, link_and_validate, llvm_assemble, meter, profile, typed_module,
-    AssembleError,
+    compile, fixtures_dir, link_and_validate, llvm_assemble, meter, profile, status_reach,
+    status_reach_on, typed_module, AssembleError,
 };
 use crate::spirv::interp::{run, Buffer, Config, InterpError, Order, Resources};
 use crate::spirv::ir::TypedModule;
@@ -207,8 +207,10 @@ fn resources(plan: &Plan, init: &[Vec<u32>], threads: u32) -> Resources {
         address: Some(TABLE_AT),
         bytes: table,
     });
+    // At its address, and at the kernel's binding of it where the device does not address
+    // buffers.
     buffers.push(Buffer {
-        slot: None,
+        slot: Some(crate::lower::access::absent::symbol(Stage::Kernel)),
         address: Some(STATUS_AT),
         bytes: vec![0; crate::bind::status::ExecutionStatus::BYTES],
     });
@@ -1057,8 +1059,8 @@ entry:
 
 /// A system-scope LLVM fence is a device-scope `OpMemoryBarrier`; a single-thread fence is nothing;
 /// both pass L3 on every profile under `GLSL450`. The `seq_cst` one is also ordered through the
-/// command buffer's status word (`memory_model.fence.seq_cst`), which a profile without device
-/// addresses refuses as `SeqCstFence`.
+/// command buffer's status word (`memory_model.fence.seq_cst`), reached by address where the
+/// profile addresses buffers and through the kernel's binding of it elsewhere.
 #[test]
 fn llvm_fences_lower_to_memory_barriers() {
     let Some(bc) = assemble("fences", FENCES) else {
@@ -1066,14 +1068,9 @@ fn llvm_fences_lower_to_memory_barriers() {
     };
     for stem in PROFILES {
         let prof = p(stem);
-        if prof.fields().buffer_access != crate::device::profile::BufferAccess::Addressed {
-            match compile(&bc, "fences", &prof) {
-                Err(Error::Unsupported(u)) => assert_eq!(u.feature, Feature::SeqCstFence, "{stem}"),
-                other => panic!("{stem}: {:?}", other.map(|_| "compiled")),
-            }
-            continue;
-        }
         l3(&bc, "fences", &prof, stem);
+        let a = compile(&bc, "fences", &prof).unwrap_or_else(|e| panic!("{stem}: {e}"));
+        assert_eq!(status_reach(&a), status_reach_on(&prof), "{stem}");
         let (plan, m) = typed_module(&bc, "fences", &prof).expect("module");
         let census = plan.census();
         assert_eq!(census["memory_model.fence"].0, 1, "{stem}");

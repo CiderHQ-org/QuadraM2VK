@@ -9,8 +9,9 @@
 //!   behaviour's fallout (a store of the value dropped, arithmetic on it NaN, a texture write of it
 //!   zero: the write of `kernel_absent_texture_reads_zero`'s authored case). The kernel sets
 //!   `StatusBits::ABSENT_ARGUMENT_READ` where the read runs and takes zero for it, and states
-//!   `RuntimeFact::AbsentArgumentRead`; a profile that does not address buffers refuses it as
-//!   `FunctionConstantArgument` with what it needs. An element of a gated-off texture table, and a
+//!   `RuntimeFact::AbsentArgumentRead`, reaching the status by address where the profile addresses
+//!   buffers and through the stage's binding of it elsewhere. An element of a gated-off texture
+//!   table, and a
 //!   gated-off sampler merged with a present one before the sample, are the absent handle where the
 //!   read reaches them (`src/tests/engine_absent_handles.rs` follows the handle through memory,
 //!   aggregates and merges). A write to (or fence of) the gated-off texture itself is dropped, as
@@ -35,9 +36,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::budget::SPIRV_WORDS;
-use crate::device::profile::BufferAccess;
 use crate::device::{DevicePolicy, DeviceProfile};
-use crate::error::{DescriptorError, Error, Feature, Needs, RuntimeInput};
+use crate::error::{DescriptorError, Error, Feature, RuntimeInput};
 use crate::library::{FunctionArtifact, FunctionConstantValue, FunctionConstantValues};
 use crate::metal::DataType;
 use crate::pipeline::compile::{compile_bitcode, EntryRef};
@@ -49,7 +49,8 @@ use crate::pipeline::relocate::relocate;
 use crate::pipeline::stage_io::{IoRole, StageBuiltin};
 use crate::pipeline::sym::{SlotClass, Stage};
 use crate::pipeline::testing::{
-    engine_dir, fixtures_dir, llvm_assemble, meter, profile, AssembleError,
+    engine_dir, fixtures_dir, llvm_assemble, meter, profile, status_reach, status_reach_on,
+    AssembleError,
 };
 use crate::spirv::testing::{check_words_valid, committed_profiles};
 
@@ -252,16 +253,14 @@ fn compile_result(
     )
 }
 
-/// Assert that `entry` with `bools` set compiles, on every committed profile that addresses
-/// buffers, into a kernel that states its absent reads (`AbsentArgumentRead`, and the
-/// `ExecutionStatus` address the read marks) and validates, or needs a storage texture's format;
-/// and is refused as `FunctionConstantArgument`, needing buffer addresses, on every other.
+/// Assert that `entry` with `bools` set compiles, on every committed profile, into a kernel that
+/// states its absent reads (`AbsentArgumentRead`, and the `ExecutionStatus` the read marks,
+/// reached by address where the profile addresses buffers and through the stage's binding of it
+/// elsewhere) and validates, or needs a storage texture's format.
 fn absent_read(bc: &[u8], entry: &str, bools: &[(u32, bool)]) {
     for (stem, p) in committed_profiles().expect("profiles") {
-        let addressed = p.fields().buffer_access == BufferAccess::Addressed;
         match compile_result(bc, entry, bools, &p) {
             Ok(a) => {
-                assert!(addressed, "{stem}: an absent read without buffer addresses");
                 let fact = RuntimeFact::AbsentArgumentRead {
                     stage: Stage::Kernel,
                 };
@@ -271,11 +270,8 @@ fn absent_read(bc: &[u8], entry: &str, bools: &[(u32, bool)]) {
                     "{stem}: {:?}",
                     a.facts
                 );
+                assert_eq!(status_reach(&a), status_reach_on(&p), "{stem}: {entry}");
                 validate(&a, &p);
-            }
-            Err(Error::Unsupported(u)) if !addressed => {
-                assert_eq!(u.feature, Feature::FunctionConstantArgument, "{stem}");
-                assert!(matches!(u.needs, Needs::AnyOf(_)), "{stem}: {:?}", u.needs);
             }
             Err(Error::NeedsInput(_)) => {}
             other => panic!("{stem}: {entry} {bools:?}: {:?}", other.map(|_| ())),

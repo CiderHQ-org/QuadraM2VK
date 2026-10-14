@@ -1275,6 +1275,44 @@ pub(crate) fn runtime_restriction(
     let Some(restriction) = profiles::current_restriction() else {
         return Ok(None);
     };
+    restricting(restriction, device_type, executor).map(Some)
+}
+
+/// The runtime path's restriction to committed profile `stem` for a lane test, whatever this
+/// process's own restriction is (a test does not restrict its process): `None` where
+/// `VK_LAYER_KHRONOS_profiles` is not installed, and an error where the device `device_type`
+/// selects cannot take the profile.
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+pub(crate) fn lane_restriction(
+    stem: &str,
+    device_type: DeviceType,
+) -> Result<Option<RuntimeRestriction>, String> {
+    let entry = load_entry()?;
+    // SAFETY: a global command of a loaded entry.
+    let layers = unsafe { entry.enumerate_instance_layer_properties() }
+        .map_err(|error| format!("enumerate Vulkan instance layers: {error}"))?;
+    if !layers
+        .iter()
+        .any(|layer| extension_name(&layer.layer_name) == PROFILES_LAYER)
+    {
+        return Ok(None);
+    }
+    // A restriction lives as long as the process, as this process's own would.
+    let restriction: &'static ProfileRestriction =
+        Box::leak(Box::new(profiles::presentable(stem)?));
+    match restricting(restriction, device_type, "runtime-lane")? {
+        Restricting::Takes(restriction) => Ok(Some(*restriction)),
+        Restricting::Refused(_) => Err(format!("the device cannot take {stem}")),
+    }
+}
+
+/// [`runtime_restriction`]'s steps for `restriction`: the first check decides between a typed
+/// refusal and a restriction the device takes.
+fn restricting(
+    restriction: &'static ProfileRestriction,
+    device_type: DeviceType,
+    executor: &str,
+) -> Result<Restricting, String> {
     if device_type == DeviceType::Gpu {
         crate::gpu::tripwire::refuse_if_tripped()?;
     }
@@ -1298,18 +1336,18 @@ pub(crate) fn runtime_restriction(
                 identity,
             };
             let attempt = super::compute::restriction_refusal(&refused, executor);
-            return Ok(Some(Restricting::Refused(Box::new(attempt))));
+            return Ok(Restricting::Refused(Box::new(attempt)));
         }
         Err(error) => return Err(error.to_string()),
     }
     let presented = presented_extensions(&entry, device_type, portability, restriction)?;
     let hidden = restriction.hidden(presented.iter().map(String::as_str));
-    Ok(Some(Restricting::Takes(Box::new(RuntimeRestriction {
+    Ok(Restricting::Takes(Box::new(RuntimeRestriction {
         restriction,
         native,
         identity,
         hidden,
-    }))))
+    })))
 }
 
 impl RuntimeRestriction {

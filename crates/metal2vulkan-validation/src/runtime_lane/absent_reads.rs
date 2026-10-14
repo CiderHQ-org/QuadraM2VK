@@ -9,30 +9,39 @@
 //! announces [`Degradation::AbsentArgumentRead`] once; a command buffer whose flag is 0 completes
 //! with Metal's answer (its authored cases' Metal rows), and one whose flag is 1 runs the read,
 //! which takes zero (Metal's answer under its debug layer), and completes too, its execution
-//! report stating the read (it failed before). A device that does not address buffers refuses the
-//! states, typed (`FunctionConstantArgument`, needing the addresses).
+//! report stating the read (it failed before). The kernel marks the command buffer's status by the
+//! status buffer's device address where the device addresses buffers, and through its binding of
+//! the buffer (`SyntheticBinding::ExecutionStatus`) where it does not: the device as it is, the
+//! device without `shaderInt64`, and the device restricted to `vk12-floor` (where the profiles
+//! layer is installed) run the same kernels.
 
-use super::degrade_notices::{assert_once, counts, on_device};
+use super::degrade_notices::{assert_once, counts, on_device, on_device_with};
 use super::shared_kinds;
+use super::Messages;
 use super::{buffer_with, read_buffer};
 use crate::air_library::AirLibrary;
-use metal2vulkan::error::{Feature, Needs};
+use metal2vulkan::device::VkFeature;
 use metal2vulkan::library::{FunctionConstantValue, FunctionConstantValues};
 use metal2vulkan::metal::{DataType, PixelFormat, TextureUsage};
-use metal2vulkan::pipeline::{ComputePipelineDescriptor, StageSource};
+use metal2vulkan::pipeline::{
+    BindingSource, ComputePipelineDescriptor, PushField, StageSource, SyntheticBinding,
+};
 use metal2vulkan_devtools::{engine_dir, llvm_assemble};
 use metal2vulkan_runtime::{
-    CommandBufferError, CommandBufferStatus, ComputePipelineState, Degradation, Device, Error,
-    PipelineOptions, Region, ResourceOptions, Size, Texture, TextureDescriptor,
+    CommandBufferError, CommandBufferStatus, ComputePipelineState, Degradation, Device,
+    DeviceOptions, ExecutedPipeline, PipelineOptions, Region, ResourceOptions, Size, Texture,
+    TextureDescriptor,
 };
 
 /// What one run of a kernel left: the command buffer's status and error, whether its execution
-/// report states a removed argument's read, and the words of `out`.
+/// report states a removed argument's read, the words of `out`, and how the dispatch's pipeline
+/// reached the command buffer's status.
 type Ran = (
     CommandBufferStatus,
     Option<CommandBufferError>,
     Option<bool>,
     Vec<u32>,
+    Reach,
 );
 use std::time::Duration;
 
@@ -45,8 +54,17 @@ const WAIT: Duration = Duration::from_secs(60);
 /// Threads per dispatch, one threadgroup.
 const THREADS: u64 = 4;
 
-/// The state of `name` in the fixture with `has_source` false, or the device's typed refusal.
-fn state(device: &Device, name: &str) -> Result<ComputePipelineState, Error> {
+/// How a dispatch's pipeline reached the command buffer's `ExecutionStatus` buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reach {
+    /// By its device address, a push field.
+    Address,
+    /// Through the kernel's binding of it.
+    Binding,
+}
+
+/// The state of `name` in the fixture with `has_source` false.
+fn state(device: &Device, name: &str) -> ComputePipelineState {
     let bitcode = llvm_assemble(&engine_dir().join("rfs_absent_reads.ll")).unwrap();
     let library = device.new_library_with_air(&bitcode).unwrap();
     let constants = FunctionConstantValues::defaults()
@@ -54,10 +72,12 @@ fn state(device: &Device, name: &str) -> Result<ComputePipelineState, Error> {
     let function = library
         .new_function_with_name_constant_values(name, &constants)
         .unwrap();
-    device.new_compute_pipeline_state(
-        &ComputePipelineDescriptor::new(StageSource::Function(function.function_descriptor())),
-        &PipelineOptions::default(),
-    )
+    device
+        .new_compute_pipeline_state(
+            &ComputePipelineDescriptor::new(StageSource::Function(function.function_descriptor())),
+            &PipelineOptions::default(),
+        )
+        .unwrap_or_else(|error| panic!("{name} on {}: {error}", device.name()))
 }
 
 /// `tex`: 4x1 `RGBA32Float`, texel `i` = `(i + 1) * (1, 2, 3, 4)`.
@@ -118,79 +138,152 @@ fn run(device: &Device, state: &ComputePipelineState, flag: u32, tex: Option<&Te
     let absent = command_buffer
         .execution_report()
         .map(|report| report.absent_argument_read);
+    let executions = command_buffer.executions();
+    let [execution] = executions.as_slice() else {
+        panic!("{} executions of one dispatch", executions.len());
+    };
+    let ExecutedPipeline::Compute(pipeline) = execution.pipeline() else {
+        panic!("a dispatch of a render pipeline");
+    };
+    let bound = pipeline.layout.sets.iter().any(|set| {
+        set.bindings.iter().any(|b| {
+            b.source
+                == BindingSource::Synthetic {
+                    stage: metal2vulkan::pipeline::Stage::Kernel,
+                    binding: SyntheticBinding::ExecutionStatus,
+                }
+        })
+    });
+    let pushed = pipeline
+        .interface
+        .push
+        .iter()
+        .flat_map(|placement| &placement.fields)
+        .any(|f| f.field == PushField::ExecutionStatusAddress);
+    let reach = match (bound, pushed) {
+        (true, false) => Reach::Binding,
+        (false, true) => Reach::Address,
+        other => panic!("the status reached as (binding, address) {other:?}"),
+    };
     (
         command_buffer.status(),
         command_buffer.error(),
         absent,
         words,
+        reach,
     )
 }
 
 /// The three kernels' states are announced once; flag 0 completes with what each writes without
 /// the read, its report stating no such read, and flag 1 completes too, each read zero (the
-/// width 0, the texel and the sample `(0, 0, 0, 0)`), its report stating the read: the path ran.
-/// Over the whole test every kind is announced at most once: the runs may announce a kind of
-/// their own for the first time (on a device without unified memory, the `Shared` buffers and
-/// texture they make in system memory, `SharedInSystemMemory`), never one announced before.
+/// width 0, the texel and the sample `(0, 0, 0, 0)`), its report stating the read: the path ran,
+/// through the status as `reach`. Over the whole test every kind is announced at most once: the
+/// runs may announce a kind of their own for the first time (on a device without unified memory,
+/// the `Shared` buffers and texture they make in system memory, `SharedInSystemMemory`), never one
+/// announced before.
+fn reads_zero_and_completes(device: &Device, messages: &Messages, reach: Reach) {
+    let names = ["rfs_absent_query", "rfs_absent_read", "rfs_absent_sampler"];
+    let states: Vec<_> = names.iter().map(|name| state(device, name)).collect();
+    let mut notices = messages.take_notices();
+    assert_once(&notices, &ABSENT_READS);
+    let tex = texture(device);
+    let as_words = |floats: &[f32]| floats.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+    let query: Vec<u32> = (0..THREADS as u32).map(|i| 7 + i).collect();
+    let read: Vec<f32> = (0..THREADS)
+        .flat_map(|i| [i as f32, 0.5, 0.25, 1.0])
+        .collect();
+    let expected = [
+        (None, query),
+        (None, as_words(&read)),
+        (Some(&tex), as_words(&texels())),
+    ];
+    for ((name, state), (tex, want)) in names.iter().zip(&states).zip(expected) {
+        let (status, error, absent, words, ran) = run(device, state, 0, tex);
+        assert_eq!(status, CommandBufferStatus::Completed, "{name}: {error:?}");
+        assert_eq!(error, None, "{name}");
+        assert_eq!(absent, Some(false), "{name}: flag 0");
+        assert_eq!(&words[..want.len()], &want[..], "{name}: flag 0");
+        assert_eq!(ran, reach, "{name}: flag 0");
+        let (status, error, absent, words, ran) = run(device, state, 1, tex);
+        assert_eq!(
+            status,
+            CommandBufferStatus::Completed,
+            "{name}: flag 1: {error:?}"
+        );
+        assert_eq!(error, None, "{name}: flag 1");
+        assert_eq!(absent, Some(true), "{name}: flag 1");
+        assert_eq!(
+            &words[..want.len()],
+            &vec![0; want.len()][..],
+            "{name}: flag 1"
+        );
+        assert_eq!(ran, reach, "{name}: flag 1");
+        println!(
+            "ABSENT-READ-COMPLETED {}: {name}, the status reached {reach:?}",
+            device.name()
+        );
+    }
+    notices.extend(messages.take_notices());
+    println!("ANNOUNCED {}: {:?}", device.name(), counts(&notices));
+    let mut kinds = ABSENT_READS.to_vec();
+    kinds.extend(shared_kinds(device));
+    assert_once(&notices, &kinds);
+}
+
+/// [`reads_zero_and_completes`] on the device as it is, which marks the status by address where
+/// it addresses buffers (`bufferDeviceAddress` and `shaderInt64`) and through its binding
+/// elsewhere.
 #[test]
 fn a_read_of_a_removed_argument_reads_zero_and_its_command_buffer_completes() {
     on_device(|device, messages| {
-        let names = ["rfs_absent_query", "rfs_absent_read", "rfs_absent_sampler"];
-        let mut states = Vec::new();
-        for name in names {
-            match state(device, name) {
-                Ok(state) => states.push(state),
-                Err(Error::Unsupported(u))
-                    if u.feature == Feature::FunctionConstantArgument
-                        && matches!(u.needs, Needs::AnyOf(_)) =>
-                {
-                    println!(
-                        "NO-DEVICE-ADDRESSES {}: {name} is refused, typed: {u:?}",
-                        device.name()
-                    );
-                    return;
-                }
-                Err(error) => panic!("{name}: {error}"),
-            }
-        }
-        let mut notices = messages.take_notices();
-        assert_once(&notices, &ABSENT_READS);
-        let tex = texture(device);
-        let as_words = |floats: &[f32]| floats.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
-        let query: Vec<u32> = (0..THREADS as u32).map(|i| 7 + i).collect();
-        let read: Vec<f32> = (0..THREADS)
-            .flat_map(|i| [i as f32, 0.5, 0.25, 1.0])
-            .collect();
-        let expected = [
-            (None, query),
-            (None, as_words(&read)),
-            (Some(&tex), as_words(&texels())),
-        ];
-        for ((name, state), (tex, want)) in names.iter().zip(&states).zip(expected) {
-            let (status, error, absent, words) = run(device, state, 0, tex);
-            assert_eq!(status, CommandBufferStatus::Completed, "{name}: {error:?}");
-            assert_eq!(error, None, "{name}");
-            assert_eq!(absent, Some(false), "{name}: flag 0");
-            assert_eq!(&words[..want.len()], &want[..], "{name}: flag 0");
-            let (status, error, absent, words) = run(device, state, 1, tex);
-            assert_eq!(
-                status,
-                CommandBufferStatus::Completed,
-                "{name}: flag 1: {error:?}"
-            );
-            assert_eq!(error, None, "{name}: flag 1");
-            assert_eq!(absent, Some(true), "{name}: flag 1");
-            assert_eq!(
-                &words[..want.len()],
-                &vec![0; want.len()][..],
-                "{name}: flag 1"
-            );
-            println!("ABSENT-READ-COMPLETED {}: {name}", device.name());
-        }
-        notices.extend(messages.take_notices());
-        println!("ANNOUNCED {}: {:?}", device.name(), counts(&notices));
-        let mut kinds = ABSENT_READS.to_vec();
-        kinds.extend(shared_kinds(device));
-        assert_once(&notices, &kinds);
+        let addressed = device
+            .compile_device()
+            .profile()
+            .addressed_needs()
+            .is_empty();
+        let reach = match addressed {
+            true => Reach::Address,
+            false => Reach::Binding,
+        };
+        reads_zero_and_completes(device, messages, reach);
     });
+}
+
+/// [`reads_zero_and_completes`] on the device without `shaderInt64`, which then addresses no
+/// buffer: the kernels mark the status through their binding of it.
+#[test]
+fn without_buffer_addresses_a_removed_arguments_read_marks_through_the_status_binding() {
+    on_device_with(
+        |options| {
+            options.withheld_features.insert(VkFeature::ShaderInt64);
+        },
+        |device, messages| reads_zero_and_completes(device, messages, Reach::Binding),
+    );
+}
+
+/// [`reads_zero_and_completes`] on the device restricted to `vk12-floor` through the profiles
+/// layer (Vulkan 1.2 and nothing optional: no buffer device address, no 64-bit integers, 4 storage
+/// buffers a stage): the kernels mark the status through their binding of it. Skipped, visibly,
+/// where the profiles layer is not installed.
+#[test]
+fn on_vk12_floor_a_removed_arguments_read_marks_through_the_status_binding() {
+    let Some(restriction) =
+        crate::candidate::lane_restriction("vk12-floor", crate::gpu::TEST_DEVICE).unwrap()
+    else {
+        println!("SKIPPED: VK_LAYER_KHRONOS_profiles is not installed");
+        return;
+    };
+    on_device_with(
+        |options: &mut DeviceOptions| restriction.restrict(options).unwrap(),
+        |device, messages| {
+            let restricted = restriction.check(device).unwrap();
+            println!(
+                "RESTRICTED {}: {}, kept {:?}",
+                device.name(),
+                restricted.record,
+                restricted.kept
+            );
+            reads_zero_and_completes(device, messages, Reach::Binding);
+        },
+    );
 }
