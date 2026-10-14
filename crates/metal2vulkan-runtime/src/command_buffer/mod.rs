@@ -1318,11 +1318,14 @@ impl CommandBuffer {
     ///   submission or host step that fails, a lost device); they are dropped with it. A command
     ///   buffer committed as failed ([`commit_failed`](Self::commit_failed)) submits its batches
     ///   and runs them.
-    /// - **Keep it short.** It holds back its command buffer's scheduling, `commit` where the
-    ///   commit submits, and on the scheduler thread the device's other submissions (a commit
-    ///   meanwhile still submits its own ready batches). A wait in it for a command buffer, or
-    ///   for a slot of a full queue, that has not happened yet is refused (`WaitWouldDeadlock` of
-    ///   [`DeadlockCause::SubmissionHandler`]); it must not wait for GPU work otherwise.
+    /// - **Keep it short.** It holds back its command buffer's scheduling, `commit` where a
+    ///   commit's thread runs it, and on the scheduler thread the device's other submissions,
+    ///   among them those of a commit left to the pass that submitted this command buffer, which
+    ///   the thread may take in only after its handlers (`scheduler/inbox.rs`). A commit made
+    ///   while it runs that finds no pass under way submits its own ready batches. A wait in it
+    ///   for a command buffer, or for a slot of a full queue, that has not happened yet is refused
+    ///   (`WaitWouldDeadlock` of [`DeadlockCause::SubmissionHandler`]); it must not wait for GPU
+    ///   work otherwise.
     ///
     /// Refused once the command buffer is committed (`Invalid`, `Problem::HandlerAfterCommit`),
     /// as [`add_scheduled_handler`](Self::add_scheduled_handler) is.

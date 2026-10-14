@@ -61,8 +61,9 @@
 //!   `switching`, up only during a switch. Counting the uncommitted command buffers adds one
 //!   atomic add to a slot's taking and one subtraction to its commit (or its drop uncommitted),
 //!   under its queue's lock. The stall: once per texture, the next command buffer made after a
-//!   checked commit that took a switch waits until the scheduler's thread ran its check and
-//!   submitted it.
+//!   commit that took a switch and did not submit it itself waits until it is submitted: a
+//!   checked commit's, until the scheduler's thread ran its check and submitted it; one left to
+//!   another thread's pass (`scheduler/inbox.rs`), until that thread's next pass submitted it.
 
 use super::{texture_aspects, Image, ImageObjects, Owner, Storage, Texture, TextureShared};
 use crate::degradation::Degradation;

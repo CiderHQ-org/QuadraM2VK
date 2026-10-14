@@ -790,8 +790,10 @@ pub struct WorkCounts {
     /// copy through the GPU, a clear of a live buffer, a neutral's making.
     pub internal_submissions: u64,
     /// `vkQueueSubmit` and `vkQueueBindSparse` calls the runtime made on the device's queues once
-    /// it was made: every batch's, its new resources' first work's apart (`texture/first_move.rs`),
-    /// internal and staging submissions, sparse binds, and fences submitted with no work. Each is a
+    /// it was made: every batch's (its new resources' first work rides in the same call, in a
+    /// `VkSubmitInfo` of its own before the batch's, `texture/first_move.rs`), internal and
+    /// staging submissions (an internal submission's first work likewise), sparse binds, and
+    /// fences submitted with no work. Each is a
     /// submission of its own to the driver; Mesa's drivers merge the `VkSubmitInfo`s of one call
     /// where no signal lies between a command and a later one, and no further (`vk_queue.c`).
     pub queue_submissions: u64,

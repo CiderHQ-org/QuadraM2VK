@@ -14,8 +14,11 @@
 //!   what is ready in a pass of its own, as the commit would once it had the lock. The order sees
 //!   every commit in commit order, and every batch is planned as it is submitted, as before. This
 //!   thread stops looking at the inbox again at a pass that leaves it a check or a host step, and
-//!   looks at it before each one it runs and before it sleeps: a commit left to it waits for the
-//!   pass under way and the submission handlers that pass leaves, never for a wake.
+//!   before each one it runs passes again for as long as the inbox holds commits, and looks at it
+//!   before it sleeps ([`left`]): a commit left to it waits for the pass under way, the submission
+//!   handlers that pass leaves, and the pass that takes it in, never for a wake or a check or a
+//!   step. A committing thread passes at most once for what others left it; what is left to that
+//!   pass it hands to this thread with a wake ([`inbox::Outcome::unattended`]).
 //!
 //! - **The order** ([`Order`]). Each logical queue's batches wait in commit order; the head
 //!   committed first among those ready goes next. A batch is ready once every event it waits for
@@ -76,6 +79,7 @@
 
 pub(super) mod binary;
 pub(super) mod inbox;
+pub(super) mod left;
 pub(super) mod order;
 
 use super::command_buffer::gate::Hold;
@@ -92,10 +96,11 @@ use super::tracker::{self, Footprint, Tracker};
 use ash::vk;
 use binary::{BinarySignals, Needs};
 use inbox::Inbox;
+use left::{work_through, Kind, Left};
 use order::{Behind, Order};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::sync::atomic::{fence, AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, TryLockError};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -244,11 +249,15 @@ impl Scheduler {
             batches,
         };
         let (mut passed, mut left) = (Passed::default(), Left::default());
-        let handed_off = (shared.inbox).commit(committed, |state, commits| {
+        let outcome = (shared.inbox).commit(committed, |state, commits| {
             pass(state, commits, (&mut passed, &mut left), shared, false);
         });
-        if handed_off {
+        if outcome.left {
             buffer.device().shared().counts.commit_handed_off();
+        }
+        // What other threads left to this thread's last pass goes to the scheduler's thread.
+        if outcome.unattended {
+            self.wake();
         }
         let Passed {
             spent,
@@ -322,26 +331,16 @@ impl Scheduler {
             .is_some_and(|handle| handle.thread().id() == std::thread::current().id())
     }
 
-    /// Look for work again: an event's value rose, or a batch completed. Where a pass is under
-    /// way, it passes again once done ([`Inbox::nudge`]), and wakes the thread for a step or a
-    /// check that finds; else the thread is woken here, under the lock, which then only a short
-    /// hold or a pass made after this one's change has: the waker never waits for a pass's
-    /// submissions.
+    /// Look for work again: an event's value rose, a batch completed, or a commit's thread left
+    /// what other threads committed to the thread ([`inbox::Outcome::unattended`]). Where a pass
+    /// is under way, it passes again once done, and wakes the thread for a step or a check that
+    /// finds; else the thread is woken here, under the lock, which then only a short hold or a
+    /// pass made after this one's change has ([`Inbox::wake`]): the waker never waits for a
+    /// pass's submissions.
     pub(crate) fn wake(&self) {
-        let inbox = &self.shared.inbox;
-        if inbox.nudge() {
-            return;
+        if (self.shared.inbox).wake(|state| state.dirty = true) {
+            self.shared.wake.notify_all();
         }
-        let mut state = match inbox.state().try_lock() {
-            Ok(state) => state,
-            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            // A pass counted since: it took the nudge in, after the change.
-            Err(TryLockError::WouldBlock) if inbox.passing() => return,
-            Err(TryLockError::WouldBlock) => lock(inbox.state()),
-        };
-        state.dirty = true;
-        drop(state);
-        self.shared.wake.notify_all();
     }
 
     /// Batches completed, their queues' completed values and their event signals published: look
@@ -401,46 +400,36 @@ fn run(shared: &SchedulerShared) {
         // The pass takes the lock again, counted as a passer from before (`inbox.rs`): a commit
         // that finds it taken leaves its batches to this thread.
         drop(state);
-        let mut left = Left::default();
-        if !round(shared, &mut left) {
-            return;
+        match work_through(&shared.inbox, |left| round(shared, left), run_work) {
+            None => return,
+            Some(false) => {}
+            // What the work did may let batches go.
+            Some(true) => lock(shared.inbox.state()).dirty = true,
         }
-        if left.is_empty() {
-            continue;
-        }
-        loop {
-            // A commit left to this thread meanwhile goes before the next piece of work.
-            if shared.inbox.holds_commits() && !round(shared, &mut left) {
-                return;
-            }
-            // The submission checks, then the host steps, without the lock (a check runs the
-            // program's code; a step records, and may make what a dispatch makes), each a
-            // section; once the process is exiting the thread ends at the next.
-            let (work, step) = match left.checks.pop_front() {
-                Some(check) => (check, false),
-                None => match left.steps.pop_front() {
-                    Some(step) => (step, true),
-                    None => break,
-                },
-            };
-            let Some(busy) = exit_guard::enter() else {
-                return;
-            };
-            let (buffer, index) = &work;
-            if step {
-                buffer.host_step(*index);
-                for &call in exit_guard::HOST_STEP {
-                    exit_guard::called(call);
-                }
-            } else {
-                buffer.run_checks(*index);
-            }
-            drop(busy);
-            // Out of the section: it may be the command buffer's last reference.
-            drop(work);
-        }
-        lock(shared.inbox.state()).dirty = true;
     }
+}
+
+/// Run one piece of work the thread's passes left it, without the lock (a check runs the program's
+/// code; a step records, and may make what a dispatch makes), a section of the exit guard; false,
+/// with nothing run, once the process is exiting.
+fn run_work(kind: Kind, work: Work) -> bool {
+    let Some(busy) = exit_guard::enter() else {
+        return false;
+    };
+    let (buffer, index) = &work;
+    match kind {
+        Kind::Step => {
+            buffer.host_step(*index);
+            for &call in exit_guard::HOST_STEP {
+                exit_guard::called(call);
+            }
+        }
+        Kind::Check => buffer.run_checks(*index),
+    }
+    drop(busy);
+    // Out of the section: it may be the command buffer's last reference.
+    drop(work);
+    true
 }
 
 /// One round of the thread's: a pass, looking at the inbox again while the passes leave the
@@ -450,7 +439,7 @@ fn run(shared: &SchedulerShared) {
 /// more, their command buffers staying `Committed`), the holds dropped (the last reference to a
 /// command buffer may be among them, and with it its device, whose drop stops this thread).
 /// False once the process is exiting.
-fn round(shared: &SchedulerShared, left: &mut Left) -> bool {
+fn round(shared: &SchedulerShared, left: &mut Left<Work>) -> bool {
     let mut passed = Passed::default();
     (shared.inbox).pass(|state, commits| {
         pass(state, commits, (&mut passed, &mut *left), shared, true);
@@ -482,20 +471,6 @@ struct Passed {
     exiting: bool,
 }
 
-/// What passes leave the scheduler's thread to run without the lock before the batches go: the
-/// submission checks, then the host steps ([`submit_ready`]'s outputs).
-#[derive(Default)]
-struct Left {
-    steps: Steps,
-    checks: Steps,
-}
-
-impl Left {
-    fn is_empty(&self) -> bool {
-        self.steps.is_empty() && self.checks.is_empty()
-    }
-}
-
 /// A pass: take `commits` into the order, in commit order, then submit what is ready
 /// ([`submit_ready`]) into `passed` and `left`. A pass on a thread other than the scheduler's
 /// (`own` false) was the thread's but for what it leaves it: the thread looks again only for
@@ -504,7 +479,7 @@ impl Left {
 fn pass(
     state: &mut State,
     commits: Vec<Committed>,
-    (passed, left): (&mut Passed, &mut Left),
+    (passed, left): (&mut Passed, &mut Left<Work>),
     shared: &SchedulerShared,
     own: bool,
 ) {
@@ -535,7 +510,7 @@ fn pass(
     let exiting = submit_ready(
         state,
         (&mut passed.spent, &mut passed.settled),
-        (&mut left.steps, &mut left.checks),
+        left,
         &mut passed.handlers,
         &shared.gated,
     )
@@ -562,9 +537,9 @@ struct Spent {
 /// learn of it (`exit_guard`). A batch's events are let go of before its command buffer
 /// (`gate`), whose holds go to `spent`, for the caller to drop without the lock, as do the logs
 /// a command buffer's first submission ended (`replay.rs`). A batch whose
-/// host step may run now goes to `steps` (once), for the caller to record without the lock;
-/// `gated` says whether one still waits at its gate. A batch whose submission checks may run
-/// now goes to `checks` (once), for the caller to run without the lock. A command buffer whose
+/// host step may run now goes to `left` as a step (once), for the caller to record without the
+/// lock; `gated` says whether one still waits at its gate. A batch whose submission checks may run
+/// now goes to `left` as a check (once), for the caller to run without the lock. A command buffer whose
 /// last batch was submitted, or that failed, and on which a fetched target's storage form rides
 /// (`texture/storage_form.rs`) is settled and goes to `settled`, for the caller to announce
 /// without the lock ([`settle`]). A command buffer whose last batch was submitted with
@@ -573,7 +548,7 @@ struct Spent {
 fn submit_ready(
     state: &mut State,
     (spent, settled): (&mut Spent, &mut Settled),
-    (steps, checks): (&mut Steps, &mut Steps),
+    left: &mut Left<Work>,
     handlers: &mut Handlers,
     gated: &AtomicBool,
 ) -> Result<(), Exiting> {
@@ -595,8 +570,8 @@ fn submit_ready(
             .filter(|&sequence| is_behind(&state.order, &state.binary, &mut memo, sequence))
             .collect(),
         };
-        let waiting = gate_heads(state, &behind, steps, gated);
-        let landing = check_heads(state, &behind, checks, gated);
+        let waiting = gate_heads(state, &behind, left, gated);
+        let landing = check_heads(state, &behind, left, gated);
         let binary = &state.binary;
         let decodes = &state.decodes;
         let untracked_decodes = state.untracked_decodes;
@@ -723,17 +698,22 @@ fn run_submission_handlers(handlers: Handlers) {
     }
 }
 
-/// Batches for the thread to work on without its lock: each command buffer with the batch's
-/// index.
-type Steps = VecDeque<(Hold<CommandBufferShared>, usize)>;
+/// A batch for the thread to work on without its lock: its command buffer with the batch's index.
+type Work = (Hold<CommandBufferShared>, usize);
 
 /// Look at each line's head of a command buffer with a submission check that is otherwise
 /// ready (its binary semaphores' signals submitted, its events' values reached, its host step
 /// recorded, not `behind` an earlier commit) and waits for its checks: once every value it waits
 /// for was reached on the device or by the host, not only by a submitted GPU signal (or the device
-/// is lost), it goes to `checks`, unless there already. `gated` is set before the events are read
-/// again, as [`Scheduler::completions`] says. Whether a head still waits for a GPU signal to land.
-fn check_heads(state: &mut State, behind: &[u64], checks: &mut Steps, gated: &AtomicBool) -> bool {
+/// is lost), it goes to `left` as a check, unless there already. `gated` is set before the events
+/// are read again, as [`Scheduler::completions`] says. Whether a head still waits for a GPU signal
+/// to land.
+fn check_heads(
+    state: &mut State,
+    behind: &[u64],
+    left: &mut Left<Work>,
+    gated: &AtomicBool,
+) -> bool {
     let State { order, binary, .. } = state;
     let mut landing = false;
     for held in order.heads_mut(behind) {
@@ -741,9 +721,9 @@ fn check_heads(state: &mut State, behind: &[u64], checks: &mut Steps, gated: &At
             || !binary.ready(&held.binary_needs)
             || (held.segments && held.buffer.needs_host_step(held.index))
             || !held.buffer.needs_check(held.index)
-            || checks
-                .iter()
-                .any(|(buffer, index)| buffer.same(&held.buffer) && *index == held.index)
+            || left.holds(Kind::Check, |(buffer, index)| {
+                buffer.same(&held.buffer) && *index == held.index
+            })
         {
             continue;
         }
@@ -759,7 +739,7 @@ fn check_heads(state: &mut State, behind: &[u64], checks: &mut Steps, gated: &At
             }
             Some(_) => {}
         }
-        checks.push_back((held.buffer.hold(), held.index));
+        left.push(Kind::Check, (held.buffer.hold(), held.index));
     }
     landing
 }
@@ -767,10 +747,15 @@ fn check_heads(state: &mut State, behind: &[u64], checks: &mut Steps, gated: &At
 /// Look at each line's head that is otherwise ready (not `behind` an earlier commit either,
 /// its gate then covers that commit's work) and needs a host step: its gate is taken (the queues'
 /// submitted values, the first time), and once every `VkQueue`'s completed value reached it (or the
-/// device is lost), its step goes to `steps`, unless there already. `gated` is set before the
+/// device is lost), its step goes to `left`, unless there already. `gated` is set before the
 /// completed values are read, as [`Scheduler::completions`] says. Whether a head still waits at its
 /// gate.
-fn gate_heads(state: &mut State, behind: &[u64], steps: &mut Steps, gated: &AtomicBool) -> bool {
+fn gate_heads(
+    state: &mut State,
+    behind: &[u64],
+    left: &mut Left<Work>,
+    gated: &AtomicBool,
+) -> bool {
     let State {
         order,
         values,
@@ -783,9 +768,9 @@ fn gate_heads(state: &mut State, behind: &[u64], steps: &mut Steps, gated: &Atom
             || !binary.ready(&held.binary_needs)
             || event_waits(held).is_none()
             || !held.buffer.needs_host_step(held.index)
-            || steps
-                .iter()
-                .any(|(buffer, index)| buffer.same(&held.buffer) && *index == held.index)
+            || left.holds(Kind::Step, |(buffer, index)| {
+                buffer.same(&held.buffer) && *index == held.index
+            })
         {
             continue;
         }
@@ -796,7 +781,7 @@ fn gate_heads(state: &mut State, behind: &[u64], steps: &mut Steps, gated: &Atom
             continue;
         }
         if !waits.gpu {
-            steps.push_back((held.buffer.hold(), held.index));
+            left.push(Kind::Step, (held.buffer.hold(), held.index));
             continue;
         }
         let gate = held.gate.get_or_insert_with(|| values.clone());
@@ -811,7 +796,7 @@ fn gate_heads(state: &mut State, behind: &[u64], steps: &mut Steps, gated: &Atom
                 .zip(gate.iter())
                 .all(|(queue, &value)| queue.completed_value() >= value);
         if reached {
-            steps.push_back((held.buffer.hold(), held.index));
+            left.push(Kind::Step, (held.buffer.hold(), held.index));
         } else {
             waiting = true;
         }
