@@ -31,6 +31,12 @@
 //! - **Who runs the after-work.** A pass's thread lets go, outside the lock, of what its passes
 //!   submitted (the holds, the submission handlers) in submission order, as the scheduler does
 //!   for its own: a commit handed off runs its submission handlers on that thread.
+//! - **A wake is handed off too** ([`Inbox::nudge`]). What a pass reads may change without a
+//!   commit: an event's value rises, a batch completes (a check waits for its signal to land).
+//!   Where a passer is counted, the waker leaves it a nudge and returns, as a commit does: the
+//!   passer looks again for it once done, by the same fences, and each pass takes it in first.
+//!   The completion thread so never waits for a pass's submissions before it finishes the batches
+//!   it saw complete, whose completed handlers wait for it.
 
 use crate::device::lock;
 use std::sync::atomic::{fence, AtomicBool, AtomicUsize, Ordering};
@@ -43,6 +49,8 @@ pub(crate) struct Inbox<S, C> {
     commits: Mutex<Vec<C>>,
     /// `commits` holds one (read without its lock; written under it).
     posted: AtomicBool,
+    /// A waker asked for a pass since the last one took the inbox in ([`Inbox::nudge`]).
+    nudged: AtomicBool,
     /// The threads making a pass or trying the lock for one.
     passers: AtomicUsize,
 }
@@ -53,6 +61,7 @@ impl<S, C> Inbox<S, C> {
             state: Mutex::new(state),
             commits: Mutex::new(Vec::new()),
             posted: AtomicBool::new(false),
+            nudged: AtomicBool::new(false),
             passers: AtomicUsize::new(0),
         }
     }
@@ -65,6 +74,26 @@ impl<S, C> Inbox<S, C> {
     /// Whether a commit waits in the inbox, not yet taken in.
     pub(crate) fn holds_commits(&self) -> bool {
         self.posted.load(Ordering::SeqCst)
+    }
+
+    /// Whether a waker asked for a pass that no pass took in yet.
+    pub(crate) fn nudged(&self) -> bool {
+        self.nudged.load(Ordering::SeqCst)
+    }
+
+    /// Ask for a pass: what a pass reads changed. Where a passer is counted, it looks again once
+    /// done and passes for this, as for a commit, and this answers true. Else false: the caller
+    /// wakes the thread that makes passes itself, under the lock, which only a short hold or a
+    /// passer counted since (whose pass, made after this, reads the change) may have.
+    pub(crate) fn nudge(&self) -> bool {
+        self.nudged.store(true, Ordering::SeqCst);
+        fence(Ordering::SeqCst);
+        self.passing()
+    }
+
+    /// Whether a passer is counted.
+    pub(crate) fn passing(&self) -> bool {
+        self.passers.load(Ordering::SeqCst) > 0
     }
 
     /// Commit `commit`: where the lock is free, make the pass on this thread, `pass` taking in
@@ -120,14 +149,16 @@ impl<S, C> Inbox<S, C> {
         }
     }
 
-    /// After a passer is counted out: while the inbox holds a commit and no other passer is
-    /// counted, take the lock and pass for it (waiting only for a holder that makes no pass),
-    /// until a pass answers not to look again. Whether this made a pass.
+    /// After a passer is counted out: while the inbox holds a commit or a nudge and no other
+    /// passer is counted, take the lock and pass for it (waiting only for a holder that makes no
+    /// pass), until a pass answers not to look again. Whether this made a pass that took commits
+    /// in.
     fn look_again(&self, pass: &mut impl FnMut(&mut S, Vec<C>) -> bool) -> bool {
         let mut passed = false;
         loop {
             fence(Ordering::SeqCst);
-            if !self.posted.load(Ordering::SeqCst) || self.passers.load(Ordering::SeqCst) > 0 {
+            let asked = self.posted.load(Ordering::SeqCst) || self.nudged.load(Ordering::SeqCst);
+            if !asked || self.passers.load(Ordering::SeqCst) > 0 {
                 return passed;
             }
             self.passers.fetch_add(1, Ordering::SeqCst);
@@ -143,9 +174,9 @@ impl<S, C> Inbox<S, C> {
                 Err(TryLockError::WouldBlock) => lock(&self.state),
             };
             let commits = self.take();
+            passed |= !commits.is_empty();
             let again = pass(&mut state, commits);
             drop(state);
-            passed = true;
             self.passers.fetch_sub(1, Ordering::SeqCst);
             if !again {
                 return passed;
@@ -153,8 +184,10 @@ impl<S, C> Inbox<S, C> {
         }
     }
 
-    /// The commits in the inbox, in commit order, taken out; called under the state's lock.
+    /// The commits in the inbox, in commit order, taken out, and its nudge with them; called under
+    /// the state's lock, before the pass reads anything.
     fn take(&self) -> Vec<C> {
+        self.nudged.store(false, Ordering::SeqCst);
         if !self.posted.load(Ordering::SeqCst) {
             return Vec::new();
         }

@@ -3,7 +3,8 @@
 //! itself; the scheduler's pass looks again for a commit left to it until a pass answers it has
 //! work of its own first; and commits from many threads racing passes, ones that stop looking
 //! again, and short holds are all passed, each thread's in its order, with no pass made for them
-//! at the end.
+//! at the end; and a nudge finding a pass under way returns at once and is passed for once that
+//! pass ends.
 
 use crate::device::lock;
 use crate::scheduler::inbox::Inbox;
@@ -200,4 +201,47 @@ fn commits_racing_passes_and_short_holds_are_all_passed_each_thread_s_in_its_ord
         let ordered: Vec<u32> = (index * COMMITS..(index + 1) * COMMITS).collect();
         assert_eq!(own, ordered, "thread {index}'s commits in its order");
     }
+}
+
+/// A nudge (an event's value rose, a batch completed) that finds a pass under way returns at once,
+/// left to it, and the passer passes again once done, with no commit; one that finds no passer
+/// answers so, for its caller to wake the thread, and the next pass takes it in.
+#[test]
+fn a_nudge_finding_a_pass_under_way_is_passed_for_once_it_ends() {
+    let inbox = Arc::new(Log::new(Vec::new()));
+    let (entered, in_pass) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    let passer = {
+        let inbox = Arc::clone(&inbox);
+        thread::spawn(move || {
+            let mut passes = 0;
+            inbox.commit(0, |log, commits| {
+                take_in(log, commits);
+                passes += 1;
+                if passes == 1 {
+                    entered.send(()).unwrap();
+                    released.recv_timeout(WAIT).unwrap();
+                }
+            });
+            passes
+        })
+    };
+    in_pass.recv_timeout(WAIT).unwrap();
+    assert!(inbox.nudge(), "the nudge was left to the pass under way");
+    release.send(()).unwrap();
+    assert_eq!(
+        passer.join().unwrap(),
+        2,
+        "the passer passed again for the nudge"
+    );
+    assert!(!inbox.nudged());
+    assert_eq!(*lock(inbox.state()), [0]);
+
+    assert!(!inbox.nudge(), "no passer: the caller wakes the thread");
+    assert!(inbox.nudged());
+    inbox.pass(|log, commits| {
+        take_in(log, commits);
+        false
+    });
+    assert!(!inbox.nudged(), "the next pass took it in");
 }

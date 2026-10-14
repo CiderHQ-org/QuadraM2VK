@@ -95,7 +95,7 @@ use inbox::Inbox;
 use order::{Behind, Order};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{fence, AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, TryLockError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -322,9 +322,25 @@ impl Scheduler {
             .is_some_and(|handle| handle.thread().id() == std::thread::current().id())
     }
 
-    /// Look for work again: an event's value rose.
+    /// Look for work again: an event's value rose, or a batch completed. Where a pass is under
+    /// way, it passes again once done ([`Inbox::nudge`]), and wakes the thread for a step or a
+    /// check that finds; else the thread is woken here, under the lock, which then only a short
+    /// hold or a pass made after this one's change has: the waker never waits for a pass's
+    /// submissions.
     pub(crate) fn wake(&self) {
-        lock(self.shared.inbox.state()).dirty = true;
+        let inbox = &self.shared.inbox;
+        if inbox.nudge() {
+            return;
+        }
+        let mut state = match inbox.state().try_lock() {
+            Ok(state) => state,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            // A pass counted since: it took the nudge in, after the change.
+            Err(TryLockError::WouldBlock) if inbox.passing() => return,
+            Err(TryLockError::WouldBlock) => lock(inbox.state()),
+        };
+        state.dirty = true;
+        drop(state);
         self.shared.wake.notify_all();
     }
 
@@ -367,8 +383,12 @@ impl Scheduler {
 fn run(shared: &SchedulerShared) {
     loop {
         let mut state = lock(shared.inbox.state());
-        // A commit left to this thread's pass may wait in the inbox (`inbox.rs`).
-        while !state.dirty && !state.stopping && !shared.inbox.holds_commits() {
+        // A commit, or a nudge, left to this thread's pass may wait in the inbox (`inbox.rs`).
+        while !state.dirty
+            && !state.stopping
+            && !shared.inbox.holds_commits()
+            && !shared.inbox.nudged()
+        {
             state = shared
                 .wake
                 .wait_timeout(state, WAIT_SLICE)
