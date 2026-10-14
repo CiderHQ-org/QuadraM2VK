@@ -252,6 +252,11 @@ impl EncoderCore {
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         // SAFETY: the command buffer was just allocated from the pool, under the state lock.
         unsafe { device.begin_command_buffer(raw, &begin) }.map_err(vulkan)?;
+        command_buffer
+            .device()
+            .shared()
+            .counts
+            .command_buffer_begun();
         state.encoder_open = true;
         drop(state);
         command_buffer
@@ -323,6 +328,11 @@ impl EncoderCore {
         // SAFETY: the command buffer was just allocated from the pool, and only this core
         // records it.
         unsafe { device.begin_command_buffer(raw, &begin) }.map_err(vulkan)?;
+        command_buffer
+            .device()
+            .shared()
+            .counts
+            .command_buffer_begun();
         Ok(EncoderCore {
             open: OpenGuard {
                 command_buffer: command_buffer.clone(),
@@ -777,6 +787,7 @@ impl EncoderCore {
                 .begin_command_buffer(next, &begin)
         }
         .map_err(vulkan)?;
+        self.device().shared().counts.command_buffer_begun();
         Ok(Continuation(next))
     }
 
@@ -937,7 +948,12 @@ impl EncoderCore {
                 sparse: Vec::new(),
             });
         }
-        state.retained.extend(retained);
+        // The command buffer's first encoder hands over its list as it is.
+        if state.retained.is_empty() {
+            state.retained = retained;
+        } else {
+            state.retained.extend(retained);
+        }
         state.executions.extend(executions);
         if !holds.is_empty() {
             state.holds.push(holds);

@@ -165,6 +165,7 @@ impl Device {
         // SAFETY: the command buffer is not pending (every submission is waited for below) and
         // the staging lock is held; beginning it resets it (the pool resets command buffers).
         unsafe { raw.begin_command_buffer(made.buffer, &begin) }.map_err(vulkan)?;
+        shared.counts.command_buffer_begun();
         record(raw, made.buffer);
         // SAFETY: as above.
         unsafe { raw.end_command_buffer(made.buffer) }.map_err(vulkan)?;

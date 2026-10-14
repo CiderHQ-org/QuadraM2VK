@@ -335,7 +335,24 @@ impl DrawnArea {
     /// not bounded, or the pass's sample count has no measured tile size.
     pub(super) fn tiles(&self, layout: &PassLayout) -> Option<DrawnTiles> {
         let tile = layout.tile.tile.filter(|_| !self.whole)?;
-        let [per_row, rows] = [0, 1].map(|axis| layout.extent[axis].div_ceil(tile[axis]));
+        self.tiles_of(tile, layout.extent)
+    }
+
+    /// The tiles of `tile` pixels a side of a render area of `extent` the rectangles reach:
+    /// `None` where that is every one ([`tiles`](Self::tiles)).
+    fn tiles_of(&self, tile: [u32; 2], extent: [u32; 2]) -> Option<DrawnTiles> {
+        let [per_row, rows] = [0, 1].map(|axis| extent[axis].div_ceil(tile[axis]));
+        // A rectangle that reaches every tile on its own (a draw over the whole render area, as
+        // most are): every tile, with no grid made.
+        let every = |&[x0, y0, x1, y1]: &[u32; 4]| {
+            x0 < tile[0]
+                && y0 < tile[1]
+                && x1.div_ceil(tile[0]) >= per_row
+                && y1.div_ceil(tile[1]) >= rows
+        };
+        if per_row == 0 || rows == 0 || self.rects.iter().any(every) {
+            return None;
+        }
         let mut tiles = DrawnTiles {
             tile,
             per_row,
@@ -677,7 +694,8 @@ fn rect([width, height]: [u32; 2]) -> vk::Rect2D {
 
 #[cfg(test)]
 mod tests {
-    use super::dont_care_clear;
+    use super::{dont_care_clear, DrawnArea};
+    use ash::vk;
     use metal2vulkan::metal::format::{ClearRoute, ExtendedRange};
     use metal2vulkan::metal::PixelFormat;
 
@@ -718,6 +736,59 @@ mod tests {
         let form = ExtendedRange::Rgba16Bfloat;
         for rule in [ClearRoute::ThroughHalf, ClearRoute::Straight] {
             assert_eq!(form.clear_texel([0.0; 4], rule), [0; 4], "{rule:?}");
+        }
+    }
+
+    /// The tiles a pass's rectangles reach are the tiles each overlaps, whether one of them
+    /// reaches every tile (no grid made) or none does: checked tile by tile.
+    #[test]
+    fn drawn_tiles_are_the_tiles_the_rectangles_overlap() {
+        let rect = |x: i32, y: i32, w: u32, h: u32| vk::Rect2D {
+            offset: vk::Offset2D { x, y },
+            extent: vk::Extent2D {
+                width: w,
+                height: h,
+            },
+        };
+        let tile = [32u32, 16];
+        let extent = [100u32, 70];
+        let cases = [
+            vec![rect(0, 0, 100, 70)],
+            vec![rect(31, 15, 69, 55)],
+            vec![rect(32, 0, 68, 70)],
+            vec![rect(0, 16, 100, 54)],
+            vec![rect(0, 0, 96, 64)],
+            vec![rect(0, 0, 97, 65)],
+            vec![rect(5, 5, 10, 10), rect(0, 0, 100, 70)],
+            vec![rect(0, 0, 50, 70), rect(50, 0, 50, 70)],
+            vec![rect(40, 20, 10, 10)],
+            vec![],
+        ];
+        for (case, rects) in cases.iter().enumerate() {
+            let mut area = DrawnArea::default();
+            area.add(rects);
+            let [per_row, rows] = [0, 1].map(|axis| extent[axis].div_ceil(tile[axis]));
+            let reached = |tx: u32, ty: u32| {
+                area.rects.iter().any(|&[x0, y0, x1, y1]| {
+                    x0 < (tx + 1) * tile[0]
+                        && tx * tile[0] < x1
+                        && y0 < (ty + 1) * tile[1]
+                        && ty * tile[1] < y1
+                })
+            };
+            let every = (0..rows).all(|ty| (0..per_row).all(|tx| reached(tx, ty)));
+            match area.tiles_of(tile, extent) {
+                None => assert!(every, "case {case}"),
+                Some(tiles) => {
+                    assert!(!every, "case {case}");
+                    for ty in 0..rows {
+                        for tx in 0..per_row {
+                            let reach = reached(tx, ty);
+                            assert_eq!(tiles.contains(tx, ty), reach, "case {case}: {tx}, {ty}");
+                        }
+                    }
+                }
+            }
         }
     }
 }

@@ -470,6 +470,8 @@ impl Drop for DeviceShared {
             // with its state.
             self.timing.release(self.vk());
         }
+        // Nor a kept barrier command buffer: the queues are idle.
+        self.scheduler.release_kept(self.vk());
         // No command buffer is left to give back a spare, or to hold one.
         self.spares.release(self);
         if let Some(internal) = lock(&self.internal).take() {

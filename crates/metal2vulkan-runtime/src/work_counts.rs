@@ -63,6 +63,8 @@ pub(crate) struct Counters {
     internal_submissions: AtomicU64,
     queue_submissions: AtomicU64,
     command_buffers_submitted: AtomicU64,
+    command_buffers_begun: AtomicU64,
+    barrier_buffers_kept: AtomicU64,
     commits_handed_off: AtomicU64,
     images_started_on_the_host: AtomicU64,
     host_texel_copies: AtomicU64,
@@ -333,6 +335,17 @@ impl Counters {
     pub(crate) fn queue_submitted(&self, command_buffers: usize) {
         self.queue_submissions.fetch_add(1, Ordering::Relaxed);
         (self.command_buffers_submitted).fetch_add(command_buffers as u64, Ordering::Relaxed);
+    }
+
+    /// A `VkCommandBuffer` was begun (`vkBeginCommandBuffer`).
+    pub(crate) fn command_buffer_begun(&self) {
+        self.command_buffers_begun.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A batch's barrier command buffer was recorded to be kept and submitted again
+    /// (`command_buffer/kept_barriers.rs`).
+    pub(crate) fn barrier_buffer_kept(&self) {
+        self.barrier_buffers_kept.fetch_add(1, Ordering::Relaxed);
     }
 
     /// A commit found another thread making the scheduler's pass and left its batches to it
@@ -731,6 +744,15 @@ pub struct WorkCounts {
     pub queue_submissions: u64,
     /// The `VkCommandBuffer`s those calls submitted.
     pub command_buffers_submitted: u64,
+    /// `VkCommandBuffer`s the runtime began once the device was made: each encoder's, a render
+    /// encoder's draws' secondary ones, segments', a batch's barrier and first-work ones, internal
+    /// and staging submissions'. A driver may clear a command buffer's state as it begins one
+    /// (ANV, Mesa 26.2.4: `anv_cmd_state_init` at each begin after a reset).
+    pub command_buffers_begun: u64,
+    /// Barrier command buffers of batches recorded once, kept, and submitted again by later
+    /// batches once the batch that last took one completed (`command_buffer/kept_barriers.rs`):
+    /// each is among `command_buffers_begun` once.
+    pub barrier_buffers_kept: u64,
     /// Commits that found another thread submitting for the device's scheduler (a pass of the
     /// scheduler's thread, or another commit's) and returned at once, their batches left to that
     /// thread, which submits them in commit order as soon as its pass ends
@@ -936,6 +958,8 @@ impl Device {
             internal_submissions: counters.internal_submissions.load(Ordering::Relaxed),
             queue_submissions: counters.queue_submissions.load(Ordering::Relaxed),
             command_buffers_submitted: counters.command_buffers_submitted.load(Ordering::Relaxed),
+            command_buffers_begun: counters.command_buffers_begun.load(Ordering::Relaxed),
+            barrier_buffers_kept: counters.barrier_buffers_kept.load(Ordering::Relaxed),
             commits_handed_off: counters.commits_handed_off.load(Ordering::Relaxed),
             images_started_on_the_host: counters.images_started_on_the_host.load(Ordering::Relaxed),
             host_texel_copies: counters.host_texel_copies.load(Ordering::Relaxed),

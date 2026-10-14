@@ -26,8 +26,14 @@
 //! pass's opening (`render_command_encoder`), of a draw (its state changes and its draw call), of
 //! a pass's end (`end_encoding`) and of a commit; where the lib test binary counts its
 //! allocations (a build without `--cfg m2v_system_alloc`), the encoding thread's allocations of
-//! each; the notices the sink took per frame; and a frame's share of the device's work counts
-//! (`Device::work_counts`) the draw and commit paths keep.
+//! each; where the kernel lets a thread count its own (Linux), the user-space instructions the
+//! encoding thread retired in each, on average and their 50th percentile, and in a frame's steps
+//! together (steady where the times are not, so a change shows run to run), counted in
+//! [`COUNTED`] frames of their own after the timed ones: each read of the counter is a system
+//! call, which a timed frame's CPU time would hold; the notices the sink took per frame; and a
+//! frame's share of the device's work counts
+//! (`Device::work_counts`) the draw and commit paths keep, the command buffers begun and submitted
+//! among them.
 //!
 //! `frame_costs` measures the plain device then the announced one, each in turn on one device of
 //! its own; `frame_costs_plain` and `frame_costs_announced` measure one alone, in a process of its
@@ -39,15 +45,21 @@
 //! its time), and in one without it for the allocations.
 //!
 //! One check runs by default where the allocations are counted:
-//! `a_frame_s_draws_allocate_within_their_bound` holds a frame's draws to [`DRAW_ALLOCATIONS`]
-//! on the encoding thread, a draw's state changes and its draw call together, on average. It
-//! counts, and times nothing.
+//! `a_frame_s_draws_and_pass_ends_allocate_within_their_bounds` holds a frame's draws to
+//! [`DRAW_ALLOCATIONS`] on the encoding thread, a draw's state changes and its draw call
+//! together, and its passes' ends to [`PASS_END_ALLOCATIONS`], each on average. Another
+//! runs by default on every device,
+//! `a_frame_s_passes_and_commits_begin_their_command_buffers_within_their_bound`: each pass, from
+//! its opening through its end, begins at most [`PASS_BEGINS`] command buffers, and each commit
+//! none but the barrier command buffers it records to keep, on a device that keeps them
+//! (`Device::work_counts`). They count, and time nothing.
 
 use super::{buffer_with, loader, open_device, ScratchCache, WAIT};
 use crate::air_library::AirLibrary;
 use crate::gpu::TEST_DEVICE;
 use crate::worker::alloc;
 use metal2vulkan::bind::SamplerDescriptor;
+use metal2vulkan::error::RuntimeDriverDefect;
 use metal2vulkan::library::{FunctionConstantValue, FunctionConstantValues};
 use metal2vulkan::metal::{
     BlendFactor, DataType, IndexType, PixelFormat, PrimitiveType, SamplerMinMagFilter, TextureType,
@@ -65,9 +77,10 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// The untimed and the timed frames of a run.
+/// The untimed and the timed frames of a run, and the frames whose instructions it counts.
 const WARM: usize = 20;
 const TIMED: usize = 100;
+const COUNTED: usize = 20;
 /// The command buffers of a frame, each one pass.
 const BUFFERS: usize = 67;
 /// The draws of a pass.
@@ -88,6 +101,15 @@ const SHAPE_BYTES: usize = 64;
 /// encoder its pipeline state's routing, and the format table its entries.
 #[cfg(not(m2v_system_alloc))]
 const DRAW_ALLOCATIONS: f64 = 72.0;
+/// The most allocations a frame's pass end (`end_encoding`) makes on the encoding thread on
+/// average, once every pipeline is made. Measured: 35.6 on RADV (Radeon 780M) and ANV (Iris Xe),
+/// 37.6 on lavapipe; 52.1 on RADV before a pass end retained what its commands use as one object
+/// and stopped making the lists it found empty.
+#[cfg(not(m2v_system_alloc))]
+const PASS_END_ALLOCATIONS: f64 = 40.0;
+/// The most command buffers a pass begins, from its opening through its end, once every pipeline
+/// is made: its primary and its draws' secondary.
+const PASS_BEGINS: u64 = 2;
 
 /// The pipelines of one raster sample count: the rectangle's, the mask's and the panel's.
 struct Pipelines {
@@ -348,26 +370,52 @@ impl Workload {
 
     /// Encode and commit one frame, then wait for its last command buffer: what each step cost.
     fn frame(&self) -> Frame {
+        self.frame_reading(Reads::default())
+    }
+
+    /// [`frame`](Self::frame), reading `reads` around each step too (so its times are not the
+    /// plain frame's).
+    fn frame_reading(&self, reads: Reads) -> Frame {
         let mut frame = Frame::default();
         let mut last: Option<CommandBuffer> = None;
+        let counts = || reads.work_counts.then(|| self.device.work_counts());
         let cpu = thread_cpu();
         let start = Instant::now();
+        let mut begun = [Begun::default(); 4];
         for pass in 0..BUFFERS {
             let command_buffer = self.queue.command_buffer().unwrap();
             let descriptor = self.pass(pass);
-            let (mut encoder, open) =
-                step(|| command_buffer.render_command_encoder(&descriptor).unwrap());
+            let before = counts();
+            let (mut encoder, open) = step(reads.instructions, || {
+                command_buffer.render_command_encoder(&descriptor).unwrap()
+            });
             frame.open.push(open);
-            for draw in 0..DRAWS {
-                let ((), drawn) = step(|| self.draw(&mut encoder, pass, draw));
-                frame.draws.push(drawn);
+            if let Some(before) = &before {
+                begun[0].add(Begun::since(&self.device, before));
             }
-            let ((), ended) = step(|| encoder.end_encoding().unwrap());
+            for draw in 0..DRAWS {
+                let before = counts();
+                let ((), drawn) = step(reads.instructions, || self.draw(&mut encoder, pass, draw));
+                frame.draws.push(drawn);
+                if let Some(before) = &before {
+                    begun[1].add(Begun::since(&self.device, before));
+                }
+            }
+            let before = counts();
+            let ((), ended) = step(reads.instructions, || encoder.end_encoding().unwrap());
             frame.end.push(ended);
-            let ((), committed) = step(|| command_buffer.commit().unwrap());
+            if let Some(before) = &before {
+                begun[2].add(Begun::since(&self.device, before));
+            }
+            let before = counts();
+            let ((), committed) = step(reads.instructions, || command_buffer.commit().unwrap());
             frame.commit.push(committed);
+            if let Some(before) = &before {
+                begun[3].add(Begun::since(&self.device, before));
+            }
             last = Some(command_buffer);
         }
+        frame.begun = begun;
         frame.wall = start.elapsed();
         frame.cpu = thread_cpu().saturating_sub(cpu);
         let last = last.unwrap();
@@ -377,21 +425,163 @@ impl Workload {
     }
 }
 
-/// One step's wall time, and the encoding thread's allocations in it where they are counted.
+/// One step's wall time, and the encoding thread's allocations and user-space instructions in it
+/// where they are counted.
 #[derive(Clone, Copy)]
 struct Step {
     wall: Duration,
     allocations: Option<u64>,
+    instructions: Option<u64>,
 }
 
-/// Run `body` as one step.
-fn step<R>(body: impl FnOnce() -> R) -> (R, Step) {
+/// Run `body` as one step, counting its instructions where `counted`.
+fn step<R>(counted: bool, body: impl FnOnce() -> R) -> (R, Step) {
     let allocations = alloc::thread_allocations();
+    let instructions = counted.then(instructions::read).flatten();
     let start = Instant::now();
     let result = body();
     let wall = start.elapsed();
+    let instructions = instructions.map(|before| instructions::read().unwrap() - before);
     let allocations = allocations.map(|before| alloc::thread_allocations().unwrap() - before);
-    (result, Step { wall, allocations })
+    (
+        result,
+        Step {
+            wall,
+            allocations,
+            instructions,
+        },
+    )
+}
+
+/// The calling thread's count of the instructions it retired in user space, where the kernel lets
+/// a thread count its own (Linux's `perf_event_open`, `kernel.perf_event_paranoid` at most 2):
+/// steady where a step's time is not, so a change to the encode path shows in it run to run. On a
+/// hybrid CPU (Intel's P and E cores) it counts on the P cores alone (`cpu_core`), where a run is
+/// pinned (`taskset`).
+#[cfg(target_os = "linux")]
+mod instructions {
+    use std::cell::Cell;
+
+    /// `struct perf_event_attr` as its first published size (`PERF_ATTR_SIZE_VER0`).
+    #[repr(C)]
+    struct Attr {
+        kind: u32,
+        size: u32,
+        config: u64,
+        sample_period: u64,
+        sample_type: u64,
+        read_format: u64,
+        flags: u64,
+        wakeup_events: u32,
+        bp_type: u32,
+        config1: u64,
+    }
+
+    /// `PERF_TYPE_HARDWARE`, `PERF_COUNT_HW_INSTRUCTIONS`, and the `exclude_kernel` and
+    /// `exclude_hv` flags.
+    const HARDWARE: u32 = 0;
+    const INSTRUCTIONS: u64 = 1;
+    const EXCLUDE_KERNEL_HV: u64 = (1 << 5) | (1 << 6);
+
+    thread_local! {
+        /// The thread's counter: its descriptor, or -1 where none opened; opened at its first read.
+        static COUNTER: Cell<Option<i32>> = const { Cell::new(None) };
+    }
+
+    /// The counter's descriptor for the calling thread, opened at its first call.
+    fn counter() -> i32 {
+        COUNTER.with(|cell| {
+            if let Some(fd) = cell.get() {
+                return fd;
+            }
+            // A hybrid CPU's P cores' PMU, in the config's upper half; none elsewhere.
+            let pmu = std::fs::read_to_string("/sys/bus/event_source/devices/cpu_core/type")
+                .ok()
+                .and_then(|text| text.trim().parse::<u64>().ok())
+                .unwrap_or(0);
+            let attr = Attr {
+                kind: HARDWARE,
+                size: std::mem::size_of::<Attr>() as u32,
+                config: INSTRUCTIONS | (pmu << 32),
+                sample_period: 0,
+                sample_type: 0,
+                read_format: 0,
+                flags: EXCLUDE_KERNEL_HV,
+                wakeup_events: 0,
+                bp_type: 0,
+                config1: 0,
+            };
+            // SAFETY: `attr` is a valid `perf_event_attr` of its stated size, live for the call;
+            // the calling thread (0), any CPU (-1), no group (-1), no flags.
+            let fd = unsafe {
+                libc::syscall(
+                    libc::SYS_perf_event_open,
+                    &attr as *const Attr,
+                    0,
+                    -1,
+                    -1,
+                    0,
+                )
+            };
+            let fd = i32::try_from(fd).unwrap_or(-1);
+            cell.set(Some(fd));
+            fd
+        })
+    }
+
+    /// The instructions the calling thread retired in user space since its counter opened.
+    pub(super) fn read() -> Option<u64> {
+        let fd = counter();
+        if fd < 0 {
+            return None;
+        }
+        let mut count = 0u64;
+        // SAFETY: `count` is 8 writable bytes, the size of the counter's value.
+        let read = unsafe { libc::read(fd, (&mut count as *mut u64).cast(), 8) };
+        (read == 8).then_some(count)
+    }
+}
+
+/// Elsewhere none is counted.
+#[cfg(not(target_os = "linux"))]
+mod instructions {
+    pub(super) fn read() -> Option<u64> {
+        None
+    }
+}
+
+/// What a frame reads around each step beside its wall time ([`Workload::frame_reading`]): none
+/// in a timed frame, as each read costs the encoding thread.
+#[derive(Clone, Copy, Default)]
+struct Reads {
+    /// The device's work counts: the command buffers each step began ([`Frame::begun`]).
+    work_counts: bool,
+    /// The encoding thread's user-space instructions in each ([`Step::instructions`]).
+    instructions: bool,
+}
+
+/// The command buffers the device began, and of those the barrier command buffers it recorded to
+/// keep, in a step a frame that read the work counts ran ([`Workload::frame_reading`]).
+#[derive(Clone, Copy, Default)]
+struct Begun {
+    all: u64,
+    kept: u64,
+}
+
+impl Begun {
+    /// What `device` began since `before`, its work counts then.
+    fn since(device: &Device, before: &WorkCounts) -> Begun {
+        let now = device.work_counts();
+        Begun {
+            all: now.command_buffers_begun - before.command_buffers_begun,
+            kept: now.barrier_buffers_kept - before.barrier_buffers_kept,
+        }
+    }
+
+    fn add(&mut self, other: Begun) {
+        self.all += other.all;
+        self.kept += other.kept;
+    }
 }
 
 /// A frame's steps of one kind ([`Frame`]'s `open`, `draws`, `end` or `commit`).
@@ -406,6 +596,10 @@ struct Frame {
     commit: Vec<Step>,
     wall: Duration,
     cpu: Duration,
+    /// The command buffers its passes' openings, their draws, their ends and its commits began,
+    /// in that order, where it read the work counts ([`Workload::frame_reading`]); none
+    /// elsewhere.
+    begun: [Begun; 4],
 }
 
 /// The calling thread's CPU time so far.
@@ -476,6 +670,11 @@ fn measure(runs: &[bool]) {
         let frames: Vec<Frame> = (0..TIMED).map(|_| work.frame()).collect();
         let counts = work.device.work_counts();
         let notices: u64 = heard.lock().unwrap().values().map(|(n, _)| n).sum();
+        let reads = Reads {
+            instructions: true,
+            ..Reads::default()
+        };
+        let counted: Vec<Frame> = (0..COUNTED).map(|_| work.frame_reading(reads)).collect();
         let ms = |d: Duration| d.as_secs_f64() * 1e3;
         let [cpu, cpu_high] = percentiles(frames.iter().map(|f| ms(f.cpu)).collect());
         let [wall, wall_high] = percentiles(frames.iter().map(|f| ms(f.wall)).collect());
@@ -501,8 +700,38 @@ fn measure(runs: &[bool]) {
                 Some(total) => format!("{:.2} allocations each", total as f64 / all.len() as f64),
                 None => "allocations not counted".to_owned(),
             };
+            let read: Vec<Step> = counted.iter().flat_map(|f| of(f).iter().copied()).collect();
+            let instructions = match read.iter().map(|s| s.instructions).sum::<Option<u64>>() {
+                Some(total) => {
+                    let [p50, _] = percentiles(
+                        read.iter()
+                            .filter_map(|s| s.instructions)
+                            .map(|n| n as f64)
+                            .collect(),
+                    );
+                    format!(
+                        "{:.0} user-space instructions each (p50 {p50:.0})",
+                        total as f64 / read.len() as f64
+                    )
+                }
+                None => "instructions not counted".to_owned(),
+            };
             eprintln!(
-                "FRAME-COST {name} {label}: {step}: {p50:.2} us (p90 {p90:.2}); {allocations}"
+                "FRAME-COST {name} {label}: {step}: {p50:.2} us (p90 {p90:.2}); {allocations}; \
+                 {instructions}"
+            );
+        }
+        let instructions: Option<u64> = counted
+            .iter()
+            .flat_map(|f| f.open.iter().chain(&f.draws).chain(&f.end).chain(&f.commit))
+            .map(|s| s.instructions)
+            .sum();
+        if let Some(total) = instructions {
+            eprintln!(
+                "FRAME-COST {name} {label}: the encoding thread's user-space instructions in a \
+                 frame's steps, over {COUNTED} frames of their own: {:.0} a frame, {:.0} a pass",
+                total as f64 / COUNTED as f64,
+                total as f64 / (COUNTED * BUFFERS) as f64,
             );
         }
         let per_frame = |count: fn(&WorkCounts) -> u64| {
@@ -521,6 +750,17 @@ fn measure(runs: &[bool]) {
             per_frame(|c| c.command_pools_made),
             per_frame(|c| c.timeline_waits),
             per_frame(|c| c.addressable_buffers_made),
+        );
+        eprintln!(
+            "FRAME-COST {name} {label}: a frame's command buffers: {:.1} begun ({:.2} a pass), \
+             {:.1} of them barrier command buffers recorded to keep; {:.1} submitted ({:.2} a \
+             pass) in {:.1} vkQueueSubmit calls",
+            per_frame(|c| c.command_buffers_begun),
+            per_frame(|c| c.command_buffers_begun) / BUFFERS as f64,
+            per_frame(|c| c.barrier_buffers_kept),
+            per_frame(|c| c.command_buffers_submitted),
+            per_frame(|c| c.command_buffers_submitted) / BUFFERS as f64,
+            per_frame(|c| c.queue_submissions),
         );
         if announced {
             for (kind, (count, _)) in heard.lock().unwrap().iter() {
@@ -554,10 +794,13 @@ fn frame_costs_announced() {
 /// A frame's draws allocate at most [`DRAW_ALLOCATIONS`] each on average on the encoding thread,
 /// once every pipeline is made: what the draw path keeps of what it found before (each texture's
 /// storage view formats, the pipeline state's routing into the pass's colors, the settles of its
-/// latest bind shapes, the format table) is not made again at each draw.
+/// latest bind shapes, the format table) is not made again at each draw. Its passes' ends
+/// allocate at most [`PASS_END_ALLOCATIONS`] each: a pass end retains what its commands use as one
+/// object, and makes no tile grid where a draw reaches every tile, no sample planes' steps in a
+/// pass without planes, and no scrub's list for a texture that is not sparse.
 #[cfg(not(m2v_system_alloc))]
 #[test]
-fn a_frame_s_draws_allocate_within_their_bound() {
+fn a_frame_s_draws_and_pass_ends_allocate_within_their_bounds() {
     let cache = ScratchCache::new().unwrap();
     let heard = Heard::default();
     let work = Workload::new(device(&cache, false, &heard));
@@ -576,4 +819,63 @@ fn a_frame_s_draws_allocate_within_their_bound() {
         each <= DRAW_ALLOCATIONS,
         "{each:.2} allocations a draw, more than {DRAW_ALLOCATIONS}"
     );
+    let allocations: u64 = frame.end.iter().map(|s| s.allocations.unwrap()).sum();
+    let each = allocations as f64 / frame.end.len() as f64;
+    eprintln!(
+        "FRAME-COST {}: {each:.2} allocations a pass end, at most {PASS_END_ALLOCATIONS} kept",
+        work.device.name()
+    );
+    assert!(
+        each <= PASS_END_ALLOCATIONS,
+        "{each:.2} allocations a pass end, more than {PASS_END_ALLOCATIONS}"
+    );
+}
+
+/// A frame's passes each begin at most [`PASS_BEGINS`] command buffers on the encoding thread,
+/// from the opening through the end, once every pipeline is made; and its commits begin none but
+/// the barrier command buffers they record to keep (`command_buffer/kept_barriers.rs`), where the
+/// device keeps them: every device whose driver reads no command buffer after its timeline's
+/// signal (`RuntimeDriverDefect::ReadsCommandBuffersAfterTheirSignal`), where a commit records
+/// its batch's two barrier command buffers, before its pass and after it.
+#[test]
+fn a_frame_s_passes_and_commits_begin_their_command_buffers_within_their_bound() {
+    let cache = ScratchCache::new().unwrap();
+    let heard = Heard::default();
+    let work = Workload::new(device(&cache, false, &heard));
+    // Every pipeline made, and every pool piece done, before the frame that counts.
+    for _ in 0..WARM {
+        work.frame();
+    }
+    let frame = work.frame_reading(Reads {
+        work_counts: true,
+        ..Reads::default()
+    });
+    let [open, draws, end, commit] = frame.begun;
+    let passes = BUFFERS as u64;
+    let late_reads = (work.device.properties().driver_defects)
+        .contains(&RuntimeDriverDefect::ReadsCommandBuffersAfterTheirSignal);
+    eprintln!(
+        "FRAME-COST {}: command buffers begun a pass: {:.2} opening, {:.2} drawing, {:.2} ending, \
+         {:.2} committing ({:.2} of them barrier command buffers recorded to keep), the bound \
+         {PASS_BEGINS} a pass; the driver reads command buffers after their signal: {late_reads}",
+        work.device.name(),
+        open.all as f64 / passes as f64,
+        draws.all as f64 / passes as f64,
+        end.all as f64 / passes as f64,
+        commit.all as f64 / passes as f64,
+        commit.kept as f64 / passes as f64,
+    );
+    let pass = open.all + draws.all + end.all;
+    assert!(
+        pass <= PASS_BEGINS * passes,
+        "{pass} command buffers begun by {passes} passes, more than {PASS_BEGINS} each"
+    );
+    let own = commit.all - commit.kept;
+    match late_reads {
+        true => assert_eq!(own, 2 * passes, "a commit's two barrier command buffers"),
+        false => assert_eq!(
+            own, 0,
+            "{own} command buffers begun by {passes} commits, not kept"
+        ),
+    }
 }

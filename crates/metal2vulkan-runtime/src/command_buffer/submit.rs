@@ -13,6 +13,11 @@
 //!    `VkQueue`, this part waits for it, so the event's semaphore is signaled in index order
 //!    without holding back the work.
 //!
+//! Each barrier goes in a command buffer of barriers alone, which the scheduler records once per
+//! list of barriers and submits again once the batch that last carried it completed
+//! ([`kept_barriers`](super::kept_barriers)); one that also writes timestamps or moves the caller's
+//! images is recorded by its batch.
+//!
 //! A batch with no work is one `VkSubmitInfo` of every wait, the end and the signals: a wait
 //! orders only its own `VkSubmitInfo`'s commands, and a signal follows commands, not waits
 //! (`vkQueueSubmit`'s synchronization scopes), so a signal after a wait needs both in one, with
@@ -71,6 +76,7 @@
 //! thread, once the scheduler's lock is free; its transition to `Scheduled` waits for them.
 
 use super::completion::Submitted;
+use super::kept_barriers::KeptBarriers;
 use super::{lock, recording_error, submission_error, CommandBufferShared, State};
 use crate::deferred::Deferred;
 use crate::encoder::RecordedSegment;
@@ -320,7 +326,8 @@ impl CommandBufferShared {
                     start: start_stamp.take(),
                     end: None,
                 };
-                work.push(self.record_barriers(&mut state, &globals, &[], stamps)?);
+                let kept = &mut scheduler.kept;
+                work.push(self.barrier_buffer(&mut state, kept, at, &globals, &[], stamps)?);
             }
             work.extend(&state.recorded[start + offset].raws);
         }
@@ -458,7 +465,8 @@ impl CommandBufferShared {
                     .into_iter()
                     .chain([Barrier::to_host()])
                     .collect();
-                vec![self.record_barriers(&mut state, &finale_barriers, &exits, stamps)?]
+                let kept = &mut scheduler.kept;
+                vec![self.barrier_buffer(&mut state, kept, at, &finale_barriers, &exits, stamps)?]
             }
             false => Vec::new(),
         };
@@ -660,6 +668,7 @@ impl CommandBufferShared {
         let begun = unsafe { raw.begin_command_buffer(buffer, &begin) };
         exit_guard::called(Call::BeginCommandBuffer);
         begun.map_err(|error| submission_error(device, error))?;
+        device.shared().counts.command_buffer_begun();
         record(state, buffer).map_err(|error| recording_error(device, error))?;
         // SAFETY: as above.
         let ended = unsafe { raw.end_command_buffer(buffer) };
@@ -704,6 +713,34 @@ impl CommandBufferShared {
         Ok(())
     }
 
+    /// A command buffer holding only `barriers`, in order, then `transitions` of the caller's
+    /// images, between the `stamps` it writes, for the batch that signals `at`: where it holds
+    /// barriers alone, one the scheduler keeps (`kept_barriers.rs`) on a queue whose command
+    /// buffers end at their timeline's value (`fences::ends_at_fence`), and else, or past the
+    /// kept ones' bounds, one recorded into this command buffer's pool
+    /// ([`record_barriers`](Self::record_barriers)).
+    fn barrier_buffer(
+        &self,
+        state: &mut State,
+        kept: &mut KeptBarriers,
+        at: Point,
+        barriers: &[Barrier],
+        transitions: &[Transition],
+        stamps: Stamps,
+    ) -> Result<vk::CommandBuffer, CommandBufferError> {
+        let device = &self.device;
+        let alone = transitions.is_empty() && stamps.start.is_none() && stamps.end.is_none();
+        if alone && !super::fences::ends_at_fence(device, at.queue) {
+            let taken = kept
+                .take(device, at.queue, barriers, at.value)
+                .map_err(|error| recording_error(device, error))?;
+            if let Some(buffer) = taken {
+                return Ok(buffer);
+            }
+        }
+        self.record_barriers(state, barriers, transitions, stamps)
+    }
+
     /// A command buffer of this command buffer's pool holding only `barriers`, in order, then
     /// `transitions` of the caller's images, from all commands before to all commands after,
     /// between the `stamps` it writes.
@@ -727,6 +764,7 @@ impl CommandBufferShared {
             let begun = raw.begin_command_buffer(buffer, &begin);
             exit_guard::called(Call::BeginCommandBuffer);
             begun.map_err(|error| submission_error(device, error))?;
+            device.shared().counts.command_buffer_begun();
             if let Some((queries, first)) = stamps.start {
                 raw.cmd_reset_query_pool(buffer, queries, first, 2);
                 exit_guard::called(Call::CmdResetQueryPool);

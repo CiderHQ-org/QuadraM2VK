@@ -1381,6 +1381,7 @@ impl CommandBuffer {
                 .begin_command_buffer(draws, &begin)
         }
         .map_err(vulkan)?;
+        self.device().shared().counts.command_buffer_begun();
         Ok(draws)
     }
 }
@@ -3274,12 +3275,16 @@ impl RenderCommandEncoder {
             .iter()
             .map(|instance| instance.shape.clone())
             .collect();
-        // The sample planes' steps before each instance and after the last.
-        let planes = PlanesCommands::plan(
-            &device,
-            &layout,
-            &sample_planes::steps(&layout, &shapes.iter().collect::<Vec<_>>()),
-        )?;
+        // The sample planes' steps before each instance and after the last: none in a pass
+        // without planes.
+        let planes = match layout.colors.iter().flatten().any(|c| c.planes.is_some()) {
+            true => PlanesCommands::plan(
+                &device,
+                &layout,
+                &sample_planes::steps(&layout, &shapes.iter().collect::<Vec<_>>()),
+            )?,
+            false => None,
+        };
         if resolve_after {
             shapes.push(resolving.clone());
         }
@@ -3681,7 +3686,7 @@ impl RenderCommandEncoder {
         // (`render/extended_shadow.rs`).
         let (shadow_fills, fill_uses) = extended.settings(&device, &layout, instances.len())?;
         uses.extend(fill_uses);
-        core.retain(extended.textures());
+        let extended_textures = extended.textures();
         // The copies of each color an instance renders through a stand-in of another format:
         // from the attachment before it, and back after it but where it is the pass's last and
         // the color's store discards it. Never the pass's first instance clearing that color
@@ -3734,7 +3739,6 @@ impl RenderCommandEncoder {
             .filter(|r| r.copies)
             .map(|r| r.target.texture.clone())
             .collect();
-        core.retain(stand_ins);
         for instance in &instances {
             let pieces = instance.pieces.iter().filter_map(|piece| match *piece {
                 Piece::Draws(draws) => Some(draws),
@@ -3852,6 +3856,8 @@ impl RenderCommandEncoder {
         };
         // The passes of the runs an execution may split an instance into (`render/executions.rs`).
         let mut run_objects = Vec::new();
+        // The steps of a pass recorded now, or the pass that records later.
+        let (mut recorded_steps, mut deferred) = (None, None);
         // A pass of a draw whose pipeline is being made records later too, once it is made
         // (`render/pending.rs`).
         if executions.is_empty() && pending.is_empty() {
@@ -3890,7 +3896,7 @@ impl RenderCommandEncoder {
                     }
                 },
             );
-            core.retain(steps);
+            recorded_steps = Some(steps);
         } else {
             // The pass records later, as a segment of its own: its visibility results are reset
             // before it here, as query commands run in submission order.
@@ -3958,7 +3964,7 @@ impl RenderCommandEncoder {
                 texels_shadowed,
             ));
             // The steps' objects, held with the pass until the command buffer completes.
-            core.retain(Arc::clone(&pass));
+            deferred = Some(Arc::clone(&pass));
             core.defer(Deferred::RenderPass(pass))?;
         }
         if let Some(resolves) = exact_resolves {
@@ -3975,9 +3981,6 @@ impl RenderCommandEncoder {
         }
         for (_, merge) in &merged {
             merge.record_merge(&mut core);
-        }
-        if !merged.is_empty() {
-            core.retain(merged);
         }
         if let Some(copies) = resolve_copies {
             copies.record(&mut core);
@@ -4079,21 +4082,25 @@ impl RenderCommandEncoder {
             .chain(stood_in)
             .chain(planes_images)
             .collect();
-        core.retain(targets);
-        core.retain(tile_scratch);
-        core.retain(layout.visibility);
-        core.retain(passes);
-        core.retain(objects);
-        core.retain(run_objects);
-        if let Some(shadow) = shadow {
-            core.retain(shadow.held());
-        }
-        if let Some(stand_in) = depth_stand_in {
-            core.retain(stand_in.held());
-        }
-        if let Some(imageblock) = imageblock {
-            core.retain(imageblock.held());
-        }
+        // What the pass's commands use, held until the command buffer completes as one object,
+        // which lets go of them in this order: the command buffer lets go of what it holds from
+        // the last retained back.
+        core.retain((
+            imageblock.as_ref().map(PassImageblock::held),
+            depth_stand_in.as_ref().map(DepthStandIn::held),
+            shadow.as_ref().map(ShadowStencil::held),
+            run_objects,
+            objects,
+            passes,
+            layout.visibility,
+            tile_scratch,
+            targets,
+            merged,
+            deferred,
+            recorded_steps,
+            stand_ins,
+            extended_textures,
+        ));
         // What it made resident joins its command buffer's (`residency.rs`), and is its own
         // (`CommandBuffer::ended_encoders`).
         let log = log.filter(|_| captured.is_none());

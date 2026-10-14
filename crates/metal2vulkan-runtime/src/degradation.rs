@@ -3175,7 +3175,7 @@ impl Device {
                 })
                 .map(|color| {
                     (
-                        format!("color attachment {index}"),
+                        StoredAttachment::Color(index),
                         color.target.texture.pixel_format(),
                         color.store,
                     )
@@ -3205,7 +3205,7 @@ impl Device {
                         .filter(|aspect| !metals(&pick, aspect.load, aspect.store))
                         .map(|aspect| {
                             (
-                                format!("the {name} attachment"),
+                                StoredAttachment::Aspect(name),
                                 ds.target.texture.pixel_format(),
                                 aspect.store,
                             )
@@ -3221,6 +3221,10 @@ impl Device {
                 }
             };
             self.degrade(Degradation::DontCareStore, || {
+                let which = match which {
+                    StoredAttachment::Color(index) => format!("color attachment {index}"),
+                    StoredAttachment::Aspect(name) => format!("the {name} attachment"),
+                };
                 (
                     format!("{which} of a render pass, a {format:?} texture"),
                     format!("it is stored with `{store:?}`, {how}"),
@@ -3242,6 +3246,14 @@ impl Device {
             });
         }
     }
+}
+
+/// The attachment a `DontCare` store's notice names (`Device::degrade_pass`), named only where
+/// the notice is made: a color attachment by index, or the depth or the stencil aspect.
+#[derive(Clone, Copy)]
+enum StoredAttachment {
+    Color(usize),
+    Aspect(&'static str),
 }
 
 /// A pass recorded as one render pass instance in which the runtime recorded nothing a driver

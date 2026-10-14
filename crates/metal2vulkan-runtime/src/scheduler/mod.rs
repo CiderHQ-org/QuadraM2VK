@@ -74,6 +74,7 @@ pub(super) mod inbox;
 pub(super) mod order;
 
 use super::command_buffer::gate::Hold;
+use super::command_buffer::kept_barriers::KeptBarriers;
 use super::command_buffer::CommandBufferShared;
 use super::device::lock;
 use super::error::{Error, MemoryKind};
@@ -129,6 +130,9 @@ pub(crate) struct State {
     /// How many of `decodes` are of untracked textures, whose uses no footprint names: every
     /// batch waits while one is left.
     untracked_decodes: usize,
+    /// The batches' barrier command buffers, recorded once and submitted again
+    /// (`command_buffer/kept_barriers.rs`).
+    pub(crate) kept: KeptBarriers,
 }
 
 /// A commit not yet taken into the order: the command buffer, its logical queue, its batches.
@@ -196,6 +200,7 @@ impl Scheduler {
                 stopping: false,
                 decodes: BTreeMap::new(),
                 untracked_decodes: 0,
+                kept: KeptBarriers::default(),
             }),
             wake: Condvar::new(),
             gated: AtomicBool::new(false),
@@ -334,6 +339,12 @@ impl Scheduler {
         if self.shared.gated.load(Ordering::SeqCst) {
             self.wake();
         }
+    }
+
+    /// Release the kept barrier command buffers (`command_buffer/kept_barriers.rs`): the device is
+    /// being torn down, its queues idle.
+    pub(crate) fn release_kept(&self, raw: &ash::Device) {
+        lock(self.shared.inbox.state()).kept.release(raw);
     }
 
     /// Ask the thread to end, and wait for it unless this is the thread. The device is being

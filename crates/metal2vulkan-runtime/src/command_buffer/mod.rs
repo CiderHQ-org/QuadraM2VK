@@ -30,6 +30,7 @@ pub(super) mod completion;
 pub(super) mod fences;
 mod first_submission;
 pub(super) mod gate;
+pub(super) mod kept_barriers;
 pub(super) mod own;
 mod reencode;
 mod storage_form;

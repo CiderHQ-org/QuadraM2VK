@@ -284,15 +284,15 @@ pub(crate) struct Scrub {
 }
 
 impl Scrub {
-    /// The scrub of `written` of `texture`, or `None` for a texture that is not a sparse texture
-    /// the runtime zeroes.
-    pub(crate) fn of(texture: &Texture, written: Vec<Written>) -> Option<Scrub> {
+    /// The scrub of `written` of `texture` (made only for one), or `None` for a texture that is
+    /// not a sparse texture the runtime zeroes.
+    pub(crate) fn of(texture: &Texture, written: impl FnOnce() -> Vec<Written>) -> Option<Scrub> {
         texture
             .sparse_image()
             .filter(|image| image.zeroed)
             .map(|_| Scrub {
                 texture: texture.clone(),
-                written,
+                written: written(),
             })
     }
 
@@ -309,13 +309,14 @@ impl Scrub {
         targets
             .into_iter()
             .filter_map(|target| {
-                let written = Written {
-                    level: target.level,
-                    layers: target.layer..target.layer + target.layers,
-                    origin: [0; 3],
-                    size: [extent[0], extent[1], 1],
-                };
-                Scrub::of(&target.texture, vec![written])
+                Scrub::of(&target.texture, || {
+                    vec![Written {
+                        level: target.level,
+                        layers: target.layer..target.layer + target.layers,
+                        origin: [0; 3],
+                        size: [extent[0], extent[1], 1],
+                    }]
+                })
             })
             .collect()
     }
