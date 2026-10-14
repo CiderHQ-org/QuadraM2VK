@@ -366,10 +366,11 @@ fn exactness_flips() -> [(&'static str, fn(DevicePolicy) -> DevicePolicy); 6] {
 }
 
 /// On MoltenVK on the M3, whose functions, NaN, minimum and maximum and `half` rounding are
-/// measured to be Metal's, the maths functions', the `half` rounding's, the NaN and minimum and
-/// maximum's and the rounding order's choices change nothing, so each keys as the default does; the
-/// texel conversions' is the policy's own field there, as the 16-bit float blend's is (MoltenVK's
-/// blend is measured to store Metal's bytes, but no profile fact states it).
+/// measured to be Metal's, the maths functions', the `half` rounding's and the rounding order's
+/// choices change nothing, so each keys as the default does; the texel conversions' is the policy's
+/// own field there, as the 16-bit float blend's is (MoltenVK's blend is measured to store Metal's
+/// bytes, but no profile fact states it), and the NaN and minimum and maximum's moves the texel NaN
+/// route (`TexelNanRoute`): a texel's NaN is the image's decode, which no arithmetic fact covers.
 #[test]
 fn metal_s_own_answers_key_the_same_under_either_choice() {
     let desc = profile("moltenvk-m3");
@@ -383,7 +384,7 @@ fn metal_s_own_answers_key_the_same_under_either_choice() {
     for (name, flip) in exactness_flips() {
         assert_eq!(
             fp(flip(base)) == fp(base),
-            !matches!(name, "texel_conversion" | "half_blend"),
+            !matches!(name, "texel_conversion" | "half_blend" | "nan_and_min_max"),
             "{name}"
         );
     }

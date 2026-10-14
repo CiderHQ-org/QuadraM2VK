@@ -418,6 +418,10 @@ pub struct ProfileFields {
     /// translation leaves it to the device, or the device's own, so the translation selects Metal's
     /// where a result's bits are observed.
     pub nan_encoding: NanEncoding,
+    /// Whose NaN a `half` read, sample or gather hands back for a NaN texel: Metal's, by the
+    /// class of the texture bound, where the policy's `NanMinMaxPolicy::Exact` asks for it, on
+    /// every device, or the device's decode (the default).
+    pub texel_nans: TexelNanRoute,
     /// Whose operand Metal's minimum and maximum functions pick (`lower::arith::native_min_max`):
     /// Metal's, or the device's `NMin`, `NMax` and `NClamp` as they are (the policy's
     /// `NanMinMaxPolicy::Native`). Derived, so a device that keeps Metal's picks keys the same
@@ -592,6 +596,24 @@ pub enum NanEncoding {
     /// The device's own, taken as it is (`NanMinMaxPolicy::Native`, the default), noted
     /// `PrecisionNote::NativeNanEncoding` with its bound.
     Native,
+}
+
+/// Whose NaN a `half` texel access hands back for a NaN texel ([`ProfileFields::texel_nans`]).
+/// A texel's NaN is the image's decode, which the access narrows itself, not a result of the
+/// device's arithmetic, so [`ProfileFields::nan_encoding`] does not decide it: a device measured
+/// to answer Metal's canonical NaN in its arithmetic (`NanEncoding::MetalCanonical`) need not
+/// answer it for a texel, and MoltenVK on the Apple M3 Max does not (a 32-bit float texel's NaN
+/// read as `half` keeps its payload's top bits).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TexelNanRoute {
+    /// Metal's rule (`NanMinMaxPolicy::Exact`): a 16-bit float texel's own NaN where the access
+    /// reads one texel, and `0x7e00` for every other NaN, by the class of the texture bound
+    /// (`lower::texture::texel_nans_class`).
+    Metal,
+    /// The device's decode (`NanMinMaxPolicy::Native`, the default), noted
+    /// `PrecisionNote::DeviceNanEncoding`.
+    Device,
 }
 
 /// What the consumer enabled, as the capability vocabulary `Requirements` uses

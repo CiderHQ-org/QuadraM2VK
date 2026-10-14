@@ -300,7 +300,9 @@ fn ulps(got: f32, want: f64) -> f64 {
 
 /// On every committed profile but the MoltenVK captures, whose functions, NaN and minimum and
 /// maximum are Metal's own, each choice takes its device forms exactly where it is on, and moves
-/// the fingerprint; on the MoltenVK captures neither setting moves it.
+/// the fingerprint; on the MoltenVK captures neither setting takes them, and only the NaN choice
+/// moves the fingerprint: a texel's NaN, the image's decode, follows it on every device
+/// (`TexelNanRoute`).
 #[test]
 fn each_choice_takes_the_device_s_forms_where_it_is_on() {
     for choice in Choice::ALL {
@@ -313,7 +315,11 @@ fn each_choice_takes_the_device_s_forms_where_it_is_on() {
             assert_eq!(choice.taken(p), !metal, "{stem} {choice:?} on");
             assert!(!choice.taken(q), "{stem} {choice:?} off");
             let moved = p.fingerprint() != q.fingerprint();
-            assert_eq!(moved, !metal, "{stem} {choice:?}");
+            assert_eq!(
+                moved,
+                !metal || choice == Choice::NanMinMax,
+                "{stem} {choice:?}"
+            );
         }
     }
 }

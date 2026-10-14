@@ -427,6 +427,17 @@ fn a_half_texel_reads_metals_nan_under_the_nan_switch() {
     );
 }
 
+/// NaNs of a 32-bit float texel: signalling NaNs of the smallest payload, the quiet NaN, and
+/// NaNs whose payload's top bits a narrowing to `half` would keep.
+const FLOAT_NANS: [u32; 6] = [
+    0x7f80_0001,
+    0x7fc0_0000,
+    0xff80_0001,
+    0x7fbf_ffff,
+    0x7fc1_2345,
+    0xffff_ffff,
+];
+
 /// A read of a 32-bit float texel on the interpreter, on lavapipe's and the RTX 5080's profiles:
 /// under `NanMinMaxPolicy::Exact` its every NaN, in any lane, signalling NaNs of the smallest
 /// payload included, reads back as `0x7e00`, beside a `1.0` and beside the largest `float`, which
@@ -446,17 +457,9 @@ fn a_32_bit_float_texels_nans_read_metals_canonical_nan_in_every_lane() {
         };
         (stem, profile(stem, switched).expect("profile"))
     });
-    const NANS: [u32; 6] = [
-        0x7f80_0001,
-        0x7fc0_0000,
-        0xff80_0001,
-        0x7fbf_ffff,
-        0x7fc1_2345,
-        0xffff_ffff,
-    ];
     // Beside a `1.0`, and beside the largest `float`, which overflows a `half`.
     for (beside, rounded) in [(0x3f80_0000, 0x3c00), (0x7f7f_ffff, 0x7c00)] {
-        for nan in NANS {
+        for nan in FLOAT_NANS {
             for lane in 0..4 {
                 let mut texel = [beside; 4];
                 texel[lane] = nan;
@@ -569,5 +572,104 @@ fn a_half_texels_sample_and_gather_take_metals_nan_under_the_nan_switch() {
             0,
             "{what}: the default holds 0x7e00"
         );
+    }
+}
+
+/// On the MoltenVK captures, whose arithmetic answers Metal's canonical NaN
+/// (`NanEncoding::MetalCanonical`), a texel's NaN is still the image's decode, which the access
+/// narrows itself (through MoltenVK on the Apple M3 Max a 32-bit float texel's NaN read as `half`
+/// kept its payload's top bits). So under `NanMinMaxPolicy::Exact` the access takes Metal's rule
+/// there too (`TexelNanRoute::Metal`): a read, on the interpreter, hands back a 16-bit float
+/// texel's NaN as its own bits and every NaN of a 32-bit float texel, in any lane, as `0x7e00`,
+/// where under the default some such NaN reads back otherwise; a read, a nearest sample and a
+/// gather read the slot's class, and every access holds more `0x7e00` than under the default (the
+/// default's half texel conversion reads the class too, so its reading proves nothing there).
+/// Every module validates and the plan's estimate bounds it.
+#[test]
+fn a_half_texels_nan_is_metals_under_the_nan_switch_where_the_arithmetic_answers_metals() {
+    use crate::device::profile::{NanEncoding, TexelNanRoute};
+    let half16 = texel_format(PixelFormat::RGBA16Float).0;
+    let float32 = texel_format(PixelFormat::RGBA32Float).0;
+    let switched = DevicePolicy {
+        nan_and_min_max: NanMinMaxPolicy::Exact,
+        ..DevicePolicy::default()
+    };
+    for stem in ["moltenvk-m3", "moltenvk-m4"] {
+        let exact = profile(stem, switched).expect("profile");
+        let native = profile(stem, DevicePolicy::default()).expect("profile");
+        for p in [&exact, &native] {
+            assert_eq!(
+                p.fields().nan_encoding,
+                NanEncoding::MetalCanonical,
+                "{stem}"
+            );
+        }
+        assert_eq!(exact.fields().texel_nans, TexelNanRoute::Metal, "{stem}");
+        assert_eq!(native.fields().texel_nans, TexelNanRoute::Device, "{stem}");
+        for access in [
+            Access::Read,
+            Access::Nearest,
+            Access::Linear,
+            Access::Gather,
+        ] {
+            let what = format!("{access:?} on {stem}");
+            let Some(bc) = assemble(&what, &kernel(access)) else {
+                return;
+            };
+            validate(&bc, &exact, &format!("{what} exact"));
+            validate(&bc, &native, &format!("{what} native"));
+            let typed = |p: &DeviceProfile| {
+                typed_module_with(&bc, "k", p, &LowerInputs::new())
+                    .unwrap_or_else(|e| panic!("{what}: {e}"))
+            };
+            let (exact_plan, exact_module) = typed(&exact);
+            let (_, native_module) = typed(&native);
+            if access.one_texel() {
+                assert!(
+                    reads_class(&exact_plan),
+                    "{what}: the switch reads no class"
+                );
+            }
+            let (held, held_by_default) = (
+                canonical_nans(&exact_module),
+                canonical_nans(&native_module),
+            );
+            assert!(
+                held > held_by_default,
+                "{what}: the switch holds {held} 0x7e00, the default {held_by_default}"
+            );
+            if access != Access::Read {
+                continue;
+            }
+            for texel in TEXELS {
+                for (class, halves) in [(half16, true), (float32, false)] {
+                    let at = format!("{what} {texel:04x?} halves {halves}");
+                    let want = metal(access, texel, halves);
+                    for got in run(&bc, &exact, texel, class, &at) {
+                        assert_eq!(got, want, "{at}: got {got:04x?}, Metal {want:04x?}");
+                    }
+                }
+            }
+            let mut native_differs = false;
+            for nan in FLOAT_NANS {
+                for lane in 0..4 {
+                    let mut texel = [0x3f80_0000; 4];
+                    texel[lane] = nan;
+                    let at = format!("{what} {texel:08x?}");
+                    let mut want = [0x3c00; 4];
+                    want[lane] = 0x7e00;
+                    for got in run_words(&bc, &exact, texel, float32, &at) {
+                        assert_eq!(got, want, "{at}: got {got:04x?}, Metal {want:04x?}");
+                    }
+                    native_differs |= run_words(&bc, &native, texel, float32, &at)
+                        .iter()
+                        .any(|got| *got != want);
+                }
+            }
+            assert!(
+                native_differs,
+                "{what}: the default answered Metal's NaNs too"
+            );
+        }
     }
 }

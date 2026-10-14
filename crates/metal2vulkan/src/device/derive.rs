@@ -21,7 +21,7 @@ use crate::device::profile::{
     BufferAccess, Containment, CubeGradientRoute, CubeGradients, DescriptorCaps, DeviceProfile,
     DriverWorkaround, EnabledCaps, FloatFunctions, FormatTable, FragmentCaps, GuestIsolation,
     HalfRoundingRoute, ImageCaps, Independence, LeafCaps, MinMaxRoute, NanEncoding, ProfileFields,
-    Robustness, RoundingOrderRoute,
+    Robustness, RoundingOrderRoute, TexelNanRoute,
 };
 use crate::device::requirements::{
     ApiVersion, FloatControl, FloatWidth, FormatUsage, ResolveMode, SubgroupOp, VkExtension,
@@ -376,6 +376,13 @@ fn derive_fields(
             NanEncoding::Device
         } else {
             NanEncoding::Native
+        },
+        // Metal's NaN of a texel where the policy asks for Metal's, on every device: no device
+        // fact decides it.
+        texel_nans: if policy.nan_and_min_max == NanMinMaxPolicy::Exact {
+            TexelNanRoute::Metal
+        } else {
+            TexelNanRoute::Device
         },
         // Metal's picks where the device's minimum and maximum are measured to be Metal's or its
         // functions are Metal's own; elsewhere the device's where the policy takes them.

@@ -1723,7 +1723,8 @@ pub(crate) fn half_texel_nans(
 
 /// How a `half` read, sample or gather of `image` (shape `shape`), which reads one texel where
 /// `one` says, answers a NaN texel where the NaN switch asks for Metal's NaN
-/// (`NanMinMaxPolicy::Exact`, the profile's `NanEncoding::Device`): by Metal's rule (EV
+/// (`NanMinMaxPolicy::Exact`, the profile's `TexelNanRoute::Metal`, on every device: whatever
+/// NaN the device's arithmetic answers, the texel's is the image's decode): by Metal's rule (EV
 /// NAN-hrn1-m3), a NaN texel read, sampled or gathered one texel at a time from a texture of
 /// 16-bit float channels is its own (the device's decode, which a device that widens a half
 /// texel exactly decodes to its bits), and every other NaN `0x7e00`. The class of the texture
@@ -1738,8 +1739,8 @@ pub(crate) fn texel_nans_class(
     shape: ImageShape,
     one: OneTexel,
 ) -> Result<Option<NanClass>, Error> {
-    use crate::device::profile::NanEncoding;
-    if crate::lower::arith::nan::encoding(cx.profile) != NanEncoding::Device {
+    use crate::device::profile::TexelNanRoute;
+    if cx.profile.fields().texel_nans != TexelNanRoute::Metal {
         return Ok(None);
     }
     Ok(Some(match image {

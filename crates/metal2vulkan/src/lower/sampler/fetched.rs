@@ -286,16 +286,16 @@ pub(super) fn select(
 
 /// Whether `op` is a gather with a `half` result whose texels the shader fetches where the bound
 /// class is a 16-bit float one: where the NaN switch asks for Metal's NaN
-/// (`NanMinMaxPolicy::Exact`, the profile's `NanEncoding::Device`) on a device without Metal's
+/// (`NanMinMaxPolicy::Exact`, the profile's `TexelNanRoute::Metal`) on a device without Metal's
 /// own sampler. Metal's gather hands back a 16-bit float texel's own NaN; a device's gather need
 /// not (NVIDIA's hands back every NaN as `0x7fffffff`, EV `NKP-lane1-nv3090`), and its fetch does
 /// where its read does.
 fn half_gather(cx: &SelectCx<'_>, op: &SampleOp, form: Option<TexelForm>) -> bool {
-    use crate::device::profile::NanEncoding;
+    use crate::device::profile::TexelNanRoute;
     use crate::device::requirements::VkProperty;
     matches!(op, SampleOp::Gather { dref: None, .. })
         && form.map(|f| f.conv) == Some(TexelConv::F16)
-        && crate::lower::arith::nan::encoding(cx.profile) == NanEncoding::Device
+        && cx.profile.fields().texel_nans == TexelNanRoute::Metal
         && !cx
             .profile
             .fields()
