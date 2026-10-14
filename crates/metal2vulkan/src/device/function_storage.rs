@@ -5,14 +5,14 @@
 //! constants it holds as `Private` variables, is storage a driver backs with scratch memory. No
 //! Vulkan property states how much of it a thread holds, and past it a driver can answer wrongly
 //! or hang with no error: the Radeon 780M under RADV over 4096 threads at 128 KiB a thread, the
-//! Iris Xe under ANV at 48 KiB, the RTX 5080 at 48 KiB (Xid 109). So the amount is measured, per
-//! device, by `validation`'s `runtime_lane::private_memory` (a private array of that many bytes a
-//! thread, every 64-byte line written and read back in an order no two threads share, over 1, 64,
-//! 4096 and 262144 threads, each size cut at 60 s). A device's value is its largest size answered
-//! correctly over every thread count below its first size that failed; a size cut at 60 s is not
-//! measured, never taken as correct. The table keys each value on the device's identity, its
-//! driver, vendor, and device ID, as the driver workarounds are keyed ([`DriverWorkaround`]), and
-//! on nothing else.
+//! Iris Xe under ANV at 48 KiB, the RTX 5080 at 48 KiB and the RTX 3090 at 192 KiB (both Xid 109).
+//! So the amount is measured, per device, by `validation`'s `runtime_lane::private_memory` (a
+//! private array of that many bytes a thread, every 64-byte line written and read back in an order
+//! no two threads share, over 1, 64, 4096 and 262144 threads, each size cut at 60 s). A device's
+//! value is its largest size answered correctly over every thread count below its first size that
+//! failed; a size cut at 60 s is not measured, never taken as correct. The table keys each value on
+//! the device's identity, its driver, vendor, and device ID, as the driver workarounds are keyed
+//! ([`DriverWorkaround`]), and on nothing else.
 //!
 //! A device the table does not name is assumed to hold [`FLOOR`], 16 KiB a thread: half the
 //! least any measured device held (32 KiB), and below every size any of them failed at (48 KiB
@@ -40,7 +40,7 @@ struct Measured {
 const KIB: u64 = 1024;
 
 /// The devices measured, each with the build and the evidence it was measured on.
-const MEASURED: [Measured; 7] = [
+const MEASURED: [Measured; 8] = [
     // AMD Radeon 780M (RADV PHOENIX), RADV Mesa 26.2.4-arch3.1 (EV
     // UNI-B3-pm-radv): 64 and 96 KiB correct over 262144 threads; 128 KiB wrong over 4096.
     Measured {
@@ -75,6 +75,15 @@ const MEASURED: [Measured; 7] = [
         vendor: 0x10de,
         device: 0x2c19,
         bytes: 32 * KIB,
+    },
+    // NVIDIA GeForce RTX 3090, NVIDIA 615.71.09 (homelab-gem10): 4 to 128 KiB correct over 262144
+    // threads; 192 KiB hung over 4096 threads (no completion within 50 s, Xid 109 CTX SWITCH
+    // TIMEOUT).
+    Measured {
+        driver: vk::DriverId::NVIDIA_PROPRIETARY,
+        vendor: 0x10de,
+        device: 0x2204,
+        bytes: 128 * KIB,
     },
     // Apple M4, MoltenVK 1.4.1 under macOS 27.0.1 (EV UNI-B3-pm-mvkm4): 64 to
     // 192 KiB correct over 262144 threads; 256 KiB refused at pipeline creation

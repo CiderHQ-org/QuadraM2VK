@@ -6,7 +6,8 @@
 //! array of `N` words it reaches only at constant indices; `plain` keeps no private memory.
 //!
 //! - On a measured device (the RTX 5080: 32 KiB a thread) an array of exactly 32 KiB compiles
-//!   with no note, and 64 bytes more is `Unsupported{PrivateMemory}` needing that much.
+//!   with no note, and 64 bytes more is `Unsupported{PrivateMemory}` needing that much. The RTX
+//!   3090, measured at 128 KiB, holds an array of 128 KiB alike, with no note.
 //! - On a device not measured (`amd-rdna3-radv`) the floor, 16 KiB, holds: an array of 16 KiB
 //!   compiles and records `PrecisionNote::FunctionStorageAssumed`, as does the constant table;
 //!   64 bytes more is refused needing it; a kernel without private memory records nothing.
@@ -15,7 +16,7 @@
 //!
 //! `llvm-as` assembles the kernels; a missing tool skips visibly.
 
-use crate::device::VkLimit;
+use crate::device::{Device, DeviceDescription, DevicePolicy, DeviceProfile, VkLimit};
 use crate::error::{Capability, Error, Feature, Unsupported};
 use crate::pipeline::artifact::PrecisionNote;
 use crate::pipeline::testing::{compile, link_and_validate, profile, AssembleError};
@@ -117,12 +118,40 @@ fn needs(required: u64, available: u64) -> Result<(), Error> {
 
 /// Kernel `entry` of [`module`]`(n)` on `stem`: its precision notes, or what refused it.
 fn notes(stem: &str, n: u32, entry: &str) -> Option<Result<Vec<PrecisionNote>, Error>> {
+    notes_on(
+        &profile(stem, Default::default()).expect("profile"),
+        stem,
+        n,
+        entry,
+    )
+}
+
+/// Kernel `entry` of [`module`]`(n)` on profile `p`, named `name`: its precision notes, or what
+/// refused it.
+fn notes_on(
+    p: &DeviceProfile,
+    name: &str,
+    n: u32,
+    entry: &str,
+) -> Option<Result<Vec<PrecisionNote>, Error>> {
     let bitcode = module(n)?;
-    let p = profile(stem, Default::default()).expect("profile");
-    Some(compile(&bitcode, entry, &p).map(|a| {
-        link_and_validate(&a, &p).unwrap_or_else(|e| panic!("{stem} {entry} {n}: L3: {e}"));
+    Some(compile(&bitcode, entry, p).map(|a| {
+        link_and_validate(&a, p).unwrap_or_else(|e| panic!("{name} {entry} {n}: L3: {e}"));
         a.precision.clone()
     }))
+}
+
+/// The RTX 3090 (not a committed capture): the RTX 5080 Laptop GPU's capture with its id.
+fn rtx_3090() -> DeviceProfile {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../metal2vulkan-validation/profiles/nvidia-rtx5080-laptop.json");
+    let text = std::fs::read_to_string(path).expect("profile");
+    let mut d = DeviceDescription::from_khronos_json(&text, None).expect("description");
+    d.device_id = crate::device::driver_facts::NVIDIA_RTX_3090;
+    Device::new(d, DevicePolicy::default())
+        .expect("device")
+        .profile()
+        .clone()
 }
 
 /// On the RTX 5080's measured 32 KiB a thread, 8192 words fit with no note; 8208 do not.
@@ -135,6 +164,22 @@ fn private_memory_past_a_measured_device_is_refused() {
     assert!(!fits.contains(&PrecisionNote::FunctionStorageAssumed));
     let past = notes("nvidia-rtx5080-laptop", 8208, "words").expect("assembled");
     assert_eq!(past.map(|_| ()), needs(8208 * 4, 32 * 1024));
+}
+
+/// On the RTX 3090's measured 128 KiB a thread, 32768 words fit with no note; 32784 do not.
+#[test]
+fn private_memory_on_the_rtx_3090_rests_on_its_measurement() {
+    let p = rtx_3090();
+    let Some(fits) = notes_on(&p, "rtx-3090", 32768, "words") else {
+        return;
+    };
+    let fits = fits.unwrap_or_else(|e| panic!("32768 words: {e}"));
+    assert!(
+        !fits.contains(&PrecisionNote::FunctionStorageAssumed),
+        "{fits:?}"
+    );
+    let past = notes_on(&p, "rtx-3090", 32784, "words").expect("assembled");
+    assert_eq!(past.map(|_| ()), needs(32784 * 4, 128 * 1024));
 }
 
 /// On a device not measured the floor holds: 4096 words, and the constant table, fit and record
