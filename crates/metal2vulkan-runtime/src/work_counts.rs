@@ -82,6 +82,7 @@ pub(crate) struct Counters {
     graphics_pipelines_looked_up: AtomicU64,
     linear_passes_in_place: AtomicU64,
     linear_passes_through_copies: AtomicU64,
+    kept_bytes_passes: AtomicU64,
     draw_states_recorded: AtomicU64,
     host_deallocators_delayed: AtomicU64,
     dma_buf_imports: AtomicU64,
@@ -430,6 +431,12 @@ impl Counters {
             true => &self.linear_passes_through_copies,
         };
         counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A pass rendered a texture over a buffer it does not store through the image its texture
+    /// keeps (`kept_bytes.rs`).
+    pub(crate) fn kept_bytes_pass(&self) {
+        self.kept_bytes_passes.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Draws recorded `count` state commands into their secondary command buffers
@@ -816,6 +823,10 @@ pub struct WorkCounts {
     /// Those that rendered one through the image its texture keeps: copied in and its changed
     /// words merged back, or cleared there and copied back.
     pub linear_passes_through_copies: u64,
+    /// Passes that rendered a color attachment over a buffer's bytes, which they do not store
+    /// (`DontCare`, `MultisampleResolve`), through the image its texture keeps, so that the buffer
+    /// keeps its bytes (`kept_bytes.rs`).
+    pub kept_bytes_passes: u64,
     /// State commands draws recorded into their secondary command buffers: pipeline binds,
     /// descriptor set binds, their push constants, vertex and index buffer binds, and dynamic
     /// states. None for a command that sets what its command buffer already holds from an
@@ -983,6 +994,7 @@ impl Device {
             linear_passes_through_copies: counters
                 .linear_passes_through_copies
                 .load(Ordering::Relaxed),
+            kept_bytes_passes: counters.kept_bytes_passes.load(Ordering::Relaxed),
             draw_states_recorded: counters.draw_states_recorded.load(Ordering::Relaxed),
             host_deallocators_delayed: counters.host_deallocators_delayed.load(Ordering::Relaxed),
             dma_buf_imports: counters.dma_buf_imports.load(Ordering::Relaxed),

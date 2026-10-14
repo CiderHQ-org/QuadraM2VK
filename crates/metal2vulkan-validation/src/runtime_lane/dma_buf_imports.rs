@@ -155,7 +155,7 @@ fn udmabuf_openable(test: &str) -> bool {
 struct Memfd {
     fd: OwnedFd,
     len: usize,
-    whole: View,
+    pub(super) whole: View,
 }
 
 /// What a test's source saw: each request, with the number of chunks it answered (0 for an
@@ -383,7 +383,7 @@ impl View {
     }
 
     /// A copy of the view's bytes `range`.
-    fn read(&self, range: std::ops::Range<usize>) -> Vec<u8> {
+    pub(super) fn read(&self, range: std::ops::Range<usize>) -> Vec<u8> {
         assert!(range.start <= range.end && range.end <= self.len);
         // SAFETY: the range lies in the view; each test orders the accesses.
         unsafe {
@@ -392,7 +392,7 @@ impl View {
     }
 
     /// Write `bytes` into the view at `offset`.
-    fn write(&self, offset: usize, bytes: &[u8]) {
+    pub(super) fn write(&self, offset: usize, bytes: &[u8]) {
         assert!(offset + bytes.len() <= self.len);
         // SAFETY: as in `read`.
         unsafe {
@@ -487,7 +487,7 @@ fn check_route(
 }
 
 /// A no-copy buffer over `length` bytes of `view` from `offset`, with `source`.
-fn no_copy(
+pub(super) fn no_copy(
     device: &Device,
     view: &View,
     offset: usize,

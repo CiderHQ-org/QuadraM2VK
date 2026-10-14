@@ -53,7 +53,7 @@
 //!   otherwise than Metal where the device makes it (`texture.rs`, `texture/shared.rs`,
 //!   `texture/heap.rs`).
 
-use super::attachment_stand_in::Cause;
+use super::attachment_stand_in::{Cause, StandIn};
 use super::color_resolve;
 use super::device::{DebugMessage, Device, MessageKind, MessageSeverity};
 use super::fragment_imageblock::PassImageblock;
@@ -625,7 +625,9 @@ degradations! {
         /// texels unless its tiler overflows. Only on a driver measured to keep the earlier texel
         /// or the stored one at each texel (`DriverFact::DontCareStoreIsOneOfMetals`); every other
         /// device stores it (`STORE`), Metal's answer where its tiler overflows
-        /// (`render_target.rs`).
+        /// (`render_target.rs`). Not a texture over a buffer the pass renders through an image it
+        /// copies nothing back from (a shadow, a stand-in: `kept_bytes.rs`), which keeps the
+        /// buffer's bytes, Metal's answer; only one whose image the pass renders in place.
         DontCareStore = "dont-care-store", Precision,
             "the attachment's texels after the pass are each its earlier texel or the one the \
              pass rendered, both Metal's answers, but not always the one Metal's tiler keeps";
@@ -1397,6 +1399,19 @@ degradations! {
         LinearAttachmentClearCopies = "linear-attachment-clear-copies", Performance,
             "the pass clears an image of the device's and copies it back after, as clearing the \
              texture's linear image in place costs more";
+        /// A pass renders a color attachment that it stores with `DontCare` (or resolves alone,
+        /// `MultisampleResolve`) and whose texture's image lies over the buffer the texture lies
+        /// in (a linear image over an ordinary buffer's memory, a no-copy buffer's host pages, a
+        /// dma-buf's, a surface's; on MoltenVK, a Metal texture over a no-copy or surface buffer's
+        /// `MTLBuffer`) through an image its texture keeps, so that the buffer keeps its bytes, as
+        /// Metal's does (`kept_bytes.rs`): rendered in place, the pass would write them. Not where
+        /// the pass hands the attachment to a driver that stores `DONT_CARE` as Metal's own
+        /// `DontCare` (`DriverFact::DontCareStoreIsMetals`), one render pass instance the driver
+        /// runs unbroken: Metal keeps the bytes itself.
+        DontCareStandIn = "dont-care-stand-in", Performance,
+            "an image of the attachment's size, which its texture keeps for the queue, renders the \
+             pass; a `Load` copies the buffer's texels over the render area into it before the \
+             pass, and nothing is copied back";
         /// A no-copy buffer or heap released with a deallocator and no keep-alive
         /// ([`KeepAlive`](crate::KeepAlive)) while the device's import of its pages is still held:
         /// a command buffer submitted before a texture over them was released may still read
@@ -3131,32 +3146,13 @@ impl Device {
                 StoreAction::DontCare | StoreAction::MultisampleResolve
             )
         };
-        // On a driver that stores `DONT_CARE` as Metal's own `DontCare` on the same GPU
-        // (`DriverFact::DontCareStoreIsMetals`), what a pass it runs whole hands it so is stored
-        // as Metal's. But an attachment the pass clears, draws nothing into, and resolves alone:
-        // Metal leaves the clear in it where it compresses the texture and keeps its texels where
-        // it does not (EVs DGC-dcs1-m4, DGC-dcs2-m4), and the driver's image of the texture may
-        // be compressed otherwise.
-        let handed = whole
-            .filter(|_| {
-                self.properties()
-                    .driver_facts
-                    .contains(&DriverFact::DontCareStoreIsMetals)
-            })
-            .map(|whole| {
-                (
-                    render_target::handed_dont_care(self, layout, whole.shape),
-                    whole.drew,
-                )
-            });
         // Whether the attachment `pick` names, loaded by `load` and stored by `store`, is stored
-        // as Metal's.
+        // as Metal's (`HandedToMetal`).
+        let handed = HandedToMetal::of(self, layout, whole);
         let metals = |pick: &dyn Fn(&HandedDontCare) -> bool, load, store| {
-            handed.as_ref().is_some_and(|(handed, drew)| {
-                let resolved_clear =
-                    load == LoadAction::Clear && store == StoreAction::MultisampleResolve;
-                pick(handed) && (*drew || !resolved_clear)
-            })
+            handed
+                .as_ref()
+                .is_some_and(|handed| handed.stores(pick, load, store))
         };
         // An attachment cleared and resolved into another pixel format by a pass without a draw
         // call renders into a backing of its own, which copies nothing back: its texture keeps
@@ -3165,14 +3161,20 @@ impl Device {
             color.clears_and_resolves_across_formats()
                 && color.stand_in.as_ref().is_some_and(|s| !s.copies())
         };
+        // A texture over a buffer rendered through an image the pass copies nothing back from
+        // where it does not store it (a shadow, `render/shadows.rs`; a stand-in, which copies
+        // back only what Metal stores) keeps the buffer's bytes, Metal's answer (`kept_bytes.rs`).
+        let keeps_bytes = |target: &Target, stand_in: Option<&StandIn>| {
+            let own = stand_in.map_or(target, |s| &s.own);
+            own.texture.buffer_texels().is_some()
+                && (stand_in.is_some_and(StandIn::copies) || own.texture.shadow().is_some())
+        };
         let color = layout.colors.iter().enumerate().find_map(|(index, color)| {
             color
                 .as_ref()
                 .filter(|color| !color.memoryless && dont_care(color.store) && !kept(color))
-                .filter(|color| {
-                    let pick = |h: &HandedDontCare| h.colors.get(index).copied().unwrap_or(false);
-                    !metals(&pick, color.load, color.store)
-                })
+                .filter(|color| !keeps_bytes(&color.target, color.stand_in.as_ref()))
+                .filter(|color| !handed.as_ref().is_some_and(|h| h.color(index, color)))
                 .map(|color| {
                     (
                         StoredAttachment::Color(index),
@@ -3191,6 +3193,7 @@ impl Device {
         // program's (`DepthStencilTarget::hidden`).
         let aspect = depth_stencil
             .filter(|ds| ds.separate.is_none() && !ds.hidden)
+            .filter(|ds| !keeps_bytes(&ds.target, ds.stand_in.as_ref()))
             .and_then(|ds| {
                 let stored_stencil = patterned.is_some();
                 let picks: [(&str, _, fn(&HandedDontCare) -> bool); 2] = [
@@ -3266,6 +3269,56 @@ pub(super) struct WholePass<'a> {
     pub(super) shape: &'a PassShape,
     /// The pass draws (the render encoder's `drew`).
     pub(super) drew: bool,
+}
+
+/// What a pass recorded whole ([`WholePass`]) hands a driver that stores `DONT_CARE` as Metal's
+/// own `DontCare` on the same GPU (`DriverFact::DontCareStoreIsMetals`): the attachments it
+/// stores so, as Metal's (`Device::degrade_pass`; a texture over a buffer keeps its bytes there,
+/// `kept_bytes.rs`). But an attachment the pass clears, draws nothing into, and resolves alone:
+/// Metal leaves the clear in it where it compresses the texture and keeps its texels where it
+/// does not (EVs DGC-dcs1-m4, DGC-dcs2-m4), and the driver's image of the texture may be
+/// compressed otherwise.
+pub(super) struct HandedToMetal {
+    /// The attachments the pass hands the driver as `DONT_CARE`.
+    handed: HandedDontCare,
+    /// The pass draws.
+    drew: bool,
+}
+
+impl HandedToMetal {
+    /// What `layout`'s pass, recorded `whole`, hands `device`'s driver as Metal's; `None` for a
+    /// pass not recorded whole or a driver without the fact.
+    pub(super) fn of(
+        device: &Device,
+        layout: &PassLayout,
+        whole: Option<WholePass>,
+    ) -> Option<Self> {
+        let facts = &device.properties().driver_facts;
+        whole
+            .filter(|_| facts.contains(&DriverFact::DontCareStoreIsMetals))
+            .map(|whole| HandedToMetal {
+                handed: render_target::handed_dont_care(device, layout, whole.shape),
+                drew: whole.drew,
+            })
+    }
+
+    /// Whether the attachment `pick` names, loaded by `load` and stored by `store`, is stored as
+    /// Metal's.
+    fn stores(
+        &self,
+        pick: &dyn Fn(&HandedDontCare) -> bool,
+        load: LoadAction,
+        store: StoreAction,
+    ) -> bool {
+        let resolved_clear = load == LoadAction::Clear && store == StoreAction::MultisampleResolve;
+        pick(&self.handed) && (self.drew || !resolved_clear)
+    }
+
+    /// Whether color attachment `index`, `color`, is stored as Metal's.
+    pub(super) fn color(&self, index: usize, color: &ColorTarget) -> bool {
+        let pick = |h: &HandedDontCare| h.colors.get(index).copied().unwrap_or(false);
+        self.stores(&pick, color.load, color.store)
+    }
 }
 
 /// A depth or stencil resolve mode as a notice names it.
@@ -3584,8 +3637,8 @@ impl Device {
                         ),
                     )
                 });
-            } else if stand_in.cause == Cause::Linear {
-                // Announced where `linear_attachment.rs` chose the kept image.
+            } else if matches!(stand_in.cause, Cause::Linear | Cause::KeptBytes) {
+                // Announced where `linear_attachment.rs` or `kept_bytes.rs` chose the kept image.
             } else if memoryless
                 && (index.is_some_and(fetched) || (index.is_none() && shadow) || !chosen)
             {

@@ -4161,6 +4161,16 @@ impl Texture {
         matches!(self.0.storage, Storage::Alias { .. }) && self.linear_image().unwrap_or(false)
     }
 
+    /// Whether the texture's image lies over its buffer's bytes now: an aliasing image, linear
+    /// or a Metal texture over the import's `MTLBuffer` (`AliasKind`), not presenting a stand-in
+    /// while its bytes are detached (`detach.rs`), so a pass that renders it writes those bytes.
+    pub(super) fn image_over_buffer(&self) -> bool {
+        match &self.0.storage {
+            Storage::Alias { image, .. } => lock(&image.detached).is_none(),
+            _ => false,
+        }
+    }
+
     /// Whether the texture is a buffer's bytes: a texture buffer or a shadowed texture.
     pub(super) fn over_buffer(&self) -> bool {
         !matches!(self.0.storage, Storage::Image(_))

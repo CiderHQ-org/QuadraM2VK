@@ -45,6 +45,10 @@
 //!   through their combined scratch image (`depth_stencil_scratch.rs`), which copies them alike. A
 //!   texture whose format the device does not copy both ways, and a memoryless one, stay refused
 //!   (`NotImplemented(Render)`).
+//! - **A texture over a buffer a pass does not store** (`DontCare`, or `MultisampleResolve`), whose
+//!   image is linear over the buffer's bytes: Metal leaves the buffer's bytes, so the pass renders
+//!   it through the image its texture keeps, copied into where the pass loads it (`Load`), and
+//!   never back (`kept_bytes.rs`).
 //! - **A pass's hidden depth and stencil**. In a pass without a depth/stencil attachment, plain
 //!   Metal tests a draw whose state uses depth or the stencil against a hidden depth of `float`,
 //!   1.0 at the pass's start, and a stencil of 0, kept per sample through the pass. Such a draw
@@ -130,6 +134,10 @@ pub(super) enum Cause {
     /// A bound linear attachment's image its texture keeps (`linear_attachment.rs`, which
     /// announces it under its own kinds).
     Linear,
+    /// The image a texture over a buffer keeps for a pass that does not store it, so that the
+    /// buffer keeps its bytes (`kept_bytes.rs`, which announces it, `dont-care-stand-in`): copied
+    /// into where the pass loads it, and never back.
+    KeptBytes,
 }
 
 impl StandIn {
@@ -182,7 +190,8 @@ impl KeptBacking {
 /// (`linear_attachment.rs`), copied in where the pass loads it and back where it stores it, as a
 /// texture without render target usage is: the copies, and the clears of the tiles a `DontCare`
 /// load reaches (`clear_reach.rs`), give each pass all it reads of the backing first, so one serves
-/// them too.
+/// them too. So does a texture over a buffer that a pass does not store (`kept_bytes.rs`), copied
+/// in where the pass loads it and never back: nothing reads what such a pass leaves there.
 pub(super) fn kept_backing(
     maker: &CommandBuffer,
     own: &Target,

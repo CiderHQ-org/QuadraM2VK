@@ -365,6 +365,8 @@ mod inline_bytes;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod int_attributes;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod kept_buffer_bytes;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod kept_variants;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod kernel_imageblocks;

@@ -12,12 +12,13 @@
 //! only `vkBindImageMemory` marks bound (Vulkan-ValidationLayers v1.4.357,
 //! `layers/state_tracker/image_state.cpp`, the `Image` constructors; its Metal code there handles
 //! exports alone, `GetMetalExport`; unchanged in main of 2026-10-07). So every barrier, view,
-//! framebuffer and descriptor of such an image reports it "used with no memory bound".
+//! framebuffer and descriptor of such an image, and every copy from it, reports it "used with no
+//! memory bound".
 //!
 //! The runtime makes such an image for a texture over a no-copy buffer on a driver that runs on
 //! Metal (`runtime/src/metal_texture.rs`) and names it [`NAME`] where its instance reports
 //! messages (`runtime/src/host_memory.rs`, `METAL_TEXTURE_IMAGE`). [`shape`] matches exactly the
-//! four messages the layer gives such an image, and only when the image they name bears that
+//! five messages the layer gives such an image, and only when the image they name bears that
 //! name; [`read`] keys the layer releases whose source was read with the gap in place. On any
 //! other release such a message fails, marked "re-read the image state in layer X.Y.Z", so a
 //! fixed or changed layer is checked again rather than trusted.
@@ -25,12 +26,15 @@
 use ash::vk;
 
 /// The messages the layer gives an image it believes unbound, as the lanes saw them on MoltenVK
-/// (EV `ZCI-mvkprobe1-mvk4`): a barrier, a view, a framebuffer attachment, a descriptor.
-const ID_NAMES: [&str; 4] = [
+/// (EV `ZCI-mvkprobe1-mvk4`): a barrier, a view, a framebuffer attachment, a descriptor; and the
+/// source of an image copy, as the kept-bytes lanes saw it there (a pass copying the texels of
+/// such a texture into the image its texture keeps, `runtime/src/kept_bytes.rs`).
+const ID_NAMES: [&str; 5] = [
     "VUID-VkImageMemoryBarrier-image-01932",
     "VUID-VkImageViewCreateInfo-image-01020",
     "UNASSIGNED-VkFramebufferCreateInfo-BoundResourceFreedMemoryAccess",
     "UNASSIGNED-VkDescriptorImageInfo-BoundResourceFreedMemoryAccess",
+    "VUID-vkCmdCopyImage-srcImage-07966",
 ];
 
 /// The runtime's name for an image made of a Metal texture (`runtime/src/host_memory.rs`,
@@ -49,7 +53,7 @@ pub(super) const SOURCE: &str = "Vulkan-ValidationLayers v1.4.357 \
     layers/state_tracker/image_state.cpp, vvl::Image::Image: the memory tracker is chosen from \
     the create flags alone; no VkImportMetalTextureInfoEXT handling";
 
-/// Whether a message with this id name and text is the gap's: one of the four messages, about a
+/// Whether a message with this id name and text is the gap's: one of the five messages, about a
 /// `VkImage` the runtime named [`NAME`], used with no memory bound: the `VkImage` the text names
 /// last before that phrase must bear the name.
 pub(super) fn shape(id_name: &str, text: &str) -> bool {
@@ -95,6 +99,12 @@ mod tests {
             "VUID-VkImageViewCreateInfo-image-01020" => format!(
                 "vkCreateImageView(): pCreateInfo->image {image} used with no memory bound. \
                  Memory should be bound by calling vkBindImageMemory()."
+            ),
+            "VUID-vkCmdCopyImage-srcImage-07966" => format!(
+                "vkCmdCopyImage(): srcImage {image} used with no memory bound. Memory should be \
+                 bound by calling vkBindImageMemory().\nThe Vulkan spec states: If srcImage is \
+                 non-sparse then the image or each specified disjoint plane must be bound \
+                 completely and contiguously to a single VkDeviceMemory object"
             ),
             _ => format!(
                 "vkCreateFramebuffer(): pCreateInfo->pAttachments[0] {image} used with no memory \

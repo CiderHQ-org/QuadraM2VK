@@ -104,6 +104,17 @@ driver's. Each is open work.
   copied at each use (`shadowed-texture-view`): about 50 to 95 µs a command buffer for a 64x64
   texture, measured on the M3 Max and M4 (MoltenVK) and the Radeon 780M. Making the texture with
   `PixelFormatView` usage avoids it.
+- **A pass that loads a texture over a buffer and does not store it** renders through an image its
+  texture keeps, the buffer's texels copied into it first (`dont-care-stand-in`), so that the
+  buffer keeps its bytes as Metal's does. In the frame-cost benchmark's window server frame (67
+  passes, 50 of them over a 512x512 `BGRA8Unorm_sRGB` layer that is a texture over a `Shared`
+  buffer), loading the layer and storing it `DontCare` takes about 0.5 ms more of the encoding
+  thread a frame and 0.6 ms more through the GPU's completion than rendering it in place on the
+  Iris Xe (ANV), some 10 µs a pass each; on a busy Radeon 780M (RADV) a pass's end takes 8 to 18
+  µs more. A pass that clears the layer and stores it `DontCare` costs no more (on ANV, 1.1 ms of
+  the encoding thread and 2.7 ms through completion less a frame, as nothing is copied back), and
+  one that stores it renders in place at no added cost. Where MoltenVK runs the pass as one
+  unbroken instance, Metal keeps the bytes at no cost.
 - **A cold pipeline making on NVIDIA grows with a module's sampling sites.** NVIDIA's compiler
   (615.71.09) takes about 1 s for macOS 26's largest CoreAnimation fragment (210,033 words) on the
   RTX 5080 Laptop GPU, made once per cold cache (the first boot, and after an update changes the

@@ -12,8 +12,10 @@
 //!   copied in before the first, so a load, a clear, and the texels the pass leaves alone are the
 //!   buffer's; copied back at the end where the pass stores it (`Store`,
 //!   `StoreAndMultisampleResolve`) or resolves into it. A `DontCare` store copies nothing back: the
-//!   buffer keeps its bytes, Metal's answer (TOB probe 1). A texture over a buffer with an aliasing
-//!   image renders into that image: the buffer's bytes, with no copy.
+//!   buffer keeps its bytes, Metal's answer (TOB probe 1, and the DontCare-store probe,
+//!   `kept_bytes.rs`). A texture over a buffer with an aliasing image renders into that image:
+//!   the buffer's bytes, with no copy; but a pass that does not store it renders through an image
+//!   its texture keeps, from which nothing is copied back either (`kept_bytes.rs`).
 //! - **Two ways.** An instance that writes through a shadowed texture (in a draw, or as an
 //!   attachment it stores) and also writes its bytes another way keeps the texture before it
 //!   and merges it after it, as `shadow.rs` does for a command: the merge goes between it and the

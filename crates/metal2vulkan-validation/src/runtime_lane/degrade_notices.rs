@@ -92,7 +92,9 @@
 //! does in `compressed_decode` ([`BLOCK_DECODES`]) and writes into their decoded twins behind
 //! work in flight there ([`BEHIND_WRITES`]), passes rendering a linear image apart in
 //! `linear_attachments` ([`LINEAR_COPIES`]) and those rendering one through copies as they clear
-//! it and no command of them may read it, there too ([`CHOSEN_COPIES`]), the device's
+//! it and no command of them may read it, there too ([`CHOSEN_COPIES`]), passes rendering a texture
+//! over a buffer they do not store through the image its texture keeps in `kept_buffer_bytes`
+//! ([`KEPT_BYTES`]), the device's
 //! first sparse texture on a driver whose first sparse resource waits for every queue's work in
 //! `first_use` ([`FIRST_SPARSE`]),
 //! and
@@ -150,6 +152,7 @@ use super::indirect_command_buffers::{PAST_RECORD, UNMEASURED_IDENTIFIERS};
 use super::indirect_dispatches::INDIRECT_DISPATCHES;
 use super::indirect_executions::{NIL_OFFSETS, RELEASED_STATES};
 use super::indirect_host_steps::HOST_STEPS;
+use super::kept_buffer_bytes::KEPT_BYTES;
 use super::linear_attachments::{CHOSEN_COPIES, LINEAR_COPIES};
 use super::mesh_draws::EMULATED_MESH;
 use super::mipmaps_exact::{M3_MIPMAPS, TIE_MIPMAPS};
@@ -496,6 +499,7 @@ fn every_kind_has_a_site_a_lane_test_takes() {
         &PAST_METAL_SIZES,
         &LINEAR_COPIES,
         &CHOSEN_COPIES,
+        &KEPT_BYTES,
         &DELAYED_DEALLOCATORS,
         &MISPLACED,
         &DEPTH_DENORMALS,

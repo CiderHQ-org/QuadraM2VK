@@ -261,7 +261,7 @@ use super::color_reformat::{self, Routing};
 use super::color_resolve::{self, ShaderResolves};
 use super::command_buffer::CommandBuffer;
 use super::deferred::Deferred;
-use super::degradation::{BoundFormats, Degradation, SplitCauses, WholePass};
+use super::degradation::{BoundFormats, Degradation, HandedToMetal, SplitCauses, WholePass};
 use super::depth_stand_in::DepthStandIn;
 use super::depth_stencil::{DepthStencilState, FailingDraw};
 use super::depth_stencil_resolve::DrawnResolve;
@@ -279,6 +279,7 @@ use super::function_table::VisibleFunctionTable;
 use super::heap_sets;
 use super::index_bounds::{self, BoundsPass, BoundsSteps};
 use super::index_rewrite::{self, RewritePass, RewriteSteps};
+use super::kept_bytes;
 use super::linear_attachment;
 use super::linear_merge::LinearMerge;
 use super::live_bind::{LiveBind, Reshape};
@@ -1088,6 +1089,10 @@ pub struct RenderCommandEncoder {
     /// What the pass's draws write of each color, and blend, for the choice of a bound linear
     /// attachment's rendering (`linear_attachment::Coverage`).
     coverage: linear_attachment::Coverage,
+    /// The color indices a draw of the pass read as input attachments (framebuffer fetch's input
+    /// form): its descriptor sets view the attachment's image, which then stays the pass's
+    /// (`kept_bytes.rs`).
+    inputs_read: BTreeSet<u32>,
     /// The pass has a draw call, whether or not it draws anything, or an execution of render
     /// commands: Metal's pass rewrites the unused bits of an extended-range or padded attachment
     /// it loads in the tiles its draws reach (`render/unused_bits_load.rs`).
@@ -1372,6 +1377,7 @@ impl CommandBuffer {
             drew: false,
             drawn: clear_reach::DrawnArea::default(),
             coverage: linear_attachment::Coverage::default(),
+            inputs_read: BTreeSet::new(),
             rewrites_unused_bits: false,
             extended_written: cleared_off_codes(descriptor),
             extended,
@@ -3033,6 +3039,7 @@ impl RenderCommandEncoder {
             drew,
             drawn,
             coverage,
+            inputs_read,
             rewrites_unused_bits,
             residency,
             extended,
@@ -3131,12 +3138,16 @@ impl RenderCommandEncoder {
                 reformats.filter(|r| r.copies).map(|r| r.index).collect()
             })
             .collect();
-        let taken: BTreeSet<usize> = (0..layout.colors.len())
+        // The colors a draw took a view of: read as input attachments or in the pixel
+        // interlock, as sample planes, through a view of another format, or its extended-range
+        // shadow. A pass whose draws fetch through input attachments counts every color taken
+        // for its bound linear ones (`linear_attachment.rs`).
+        let viewed: BTreeSet<usize> = (0..layout.colors.len())
             .filter(|&index| {
                 let planes = layout.colors[index]
                     .as_ref()
                     .is_some_and(|color| color.planes.is_some());
-                layout.fetch_inputs
+                inputs_read.contains(&(index as u32))
                     || planes
                     || extended.made(index as u32)
                     || instances.iter().any(|instance| {
@@ -3148,6 +3159,46 @@ impl RenderCommandEncoder {
                     })
             })
             .collect();
+        let taken: BTreeSet<usize> = match layout.fetch_inputs {
+            true => (0..layout.colors.len()).collect(),
+            false => viewed.clone(),
+        };
+        // Whether a draw renders views, and the pass executes render commands, whose commands
+        // record later, whatever they record (`render/executions.rs`).
+        let views = instances
+            .iter()
+            .any(|instance| instance.views != ViewSetup::default());
+        let executes = !executions.is_empty();
+        // Nothing recorded restarts a driver's Metal pass (`WholePass`).
+        let unbroken =
+            !executes && !driver_restarts && !views && layout.sample_positions.is_empty();
+        // The colors a pass of one unbroken instance hands a driver that stores `DONT_CARE` as
+        // Metal's own `DontCare` so (`HandedToMetal`): none on another driver.
+        let whole = match instances.as_slice() {
+            [only] if unbroken => Some(WholePass {
+                shape: &only.shape,
+                drew,
+            }),
+            _ => None,
+        };
+        let handed = HandedToMetal::of(core.device(), &layout, whole);
+        let handed: BTreeSet<usize> = (layout.colors.iter().enumerate())
+            .filter_map(|(index, color)| Some((index, color.as_ref()?)))
+            .filter(|&(index, color)| handed.as_ref().is_some_and(|h| h.color(index, color)))
+            .map(|(index, _)| index)
+            .collect();
+        // A texture over a buffer the pass does not store renders through an image its texture
+        // keeps, so the buffer keeps its bytes, as Metal's does, where the pass does not hand it
+        // to Metal's own `DontCare` and no draw took a view of its image (`kept_bytes.rs`).
+        // Before the linear attachments settle: it is not linear.
+        kept_bytes::settle(
+            core.command_buffer(),
+            &mut layout.colors,
+            executes,
+            |index| handed.contains(&index),
+            |index| viewed.contains(&index),
+            |index| taken.contains(&index),
+        )?;
         linear_attachment::settle(
             core.command_buffer(),
             &mut layout.colors,
@@ -3784,11 +3835,6 @@ impl RenderCommandEncoder {
             offset: vk::Offset2D { x: 0, y: 0 },
             extent: vk::Extent2D { width, height },
         };
-        let viewed = instances
-            .iter()
-            .any(|instance| instance.views != ViewSetup::default());
-        // An execution's commands record later, whatever they record (`render/executions.rs`).
-        let executes = !executions.is_empty();
         if let Some(first) = &first_texel_copies {
             core.shadow_copies(first);
         }
@@ -4045,12 +4091,7 @@ impl RenderCommandEncoder {
         // unwritten pattern (`fresh_unwritten.rs`).
         FreshUnwritten::resolved(&device, &resolved, layout.extent)?;
         // The pass's one instance, where nothing recorded restarts a driver's Metal pass.
-        let whole = (shapes.len() == 1
-            && !executes
-            && !driver_restarts
-            && !viewed
-            && layout.sample_positions.is_empty())
-        .then(|| WholePass {
+        let whole = (shapes.len() == 1 && unbroken).then(|| WholePass {
             shape: &shapes[0],
             drew,
         });
@@ -4064,7 +4105,7 @@ impl RenderCommandEncoder {
                 dispatches: dispatch_count,
                 barriers: barrier_splits,
                 tile_memory: tile_memory_splits,
-                viewed,
+                viewed: views,
             },
         );
         device.degrade_planes(&layout);
@@ -6082,6 +6123,9 @@ impl RenderCommandEncoder {
         };
         fetched.sort_unstable();
         fetched.dedup();
+        if self.layout.fetch_inputs {
+            self.inputs_read.extend(fetched.iter().copied());
+        }
         // A draw that reads and writes some of the instance's interlocked colors and writes none
         // of the others records in it, as one that reads them all would.
         if !self.layout.fetch_inputs && self.fits_storage(&fetched, graphics.color_outputs) {

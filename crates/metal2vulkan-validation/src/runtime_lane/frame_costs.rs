@@ -52,6 +52,14 @@
 //! `frame_costs_announced` measure one alone, in a process of its own, for a profile of it
 //! (`perf record -g` of the test's process).
 //!
+//! `frame_costs_over_buffers` measures the plain device with window layers that are textures over
+//! `Shared` buffers at tight rows (2048 bytes, which RADV and ANV render in place, as linear images
+//! over the buffers' memory) in place of private textures, their passes loaded and stored, loaded
+//! and stored `DontCare`, and cleared and stored `DontCare`, each on a device of its own: what a
+//! pass that does not store such a layer costs, rendered through the image its texture keeps so
+//! that the buffer keeps its bytes. Its lines also give a frame's wall time through its last
+//! command buffer's completion, the GPU's work included.
+//!
 //! Ignored by default: a measurement, not a check. Run it by name with `--run-ignored all`, in a
 //! build with `--cfg m2v_system_alloc` for the times, whose lib test binary keeps the system
 //! allocator as a consumer's process does (the counting one costs the draw path about a sixth of
@@ -155,36 +163,64 @@ const COMMIT_ALLOCATIONS: f64 = 6.0;
 #[cfg(not(m2v_system_alloc))]
 const SUBMIT_ALLOCATIONS: f64 = 20.0;
 
-/// One run's device and commits: whether the device announces every precision kind, and whether
-/// each command buffer commits with a submission check ([`Checks`]).
+/// One run's device, commits and layers: whether the device announces every precision kind,
+/// whether each command buffer commits with a submission check ([`Checks`]), and what the window
+/// layers are.
 #[derive(Clone, Copy)]
 struct Run {
     announced: bool,
     checked: bool,
+    layers: Layers,
 }
 
 impl Run {
     const PLAIN: Run = Run {
         announced: false,
         checked: false,
+        layers: Layers::Private,
     };
     const CHECKED: Run = Run {
         announced: false,
         checked: true,
+        layers: Layers::Private,
     };
     const ANNOUNCED: Run = Run {
         announced: true,
         checked: false,
+        layers: Layers::Private,
     };
 
-    fn label(self) -> &'static str {
-        match (self.announced, self.checked) {
+    /// The plain device's run with layers over buffers, its passes loading and storing them so.
+    const fn over_buffers(load: LoadAction, store: StoreAction) -> Run {
+        Run {
+            layers: Layers::OverBuffers(load, store),
+            ..Run::PLAIN
+        }
+    }
+
+    fn label(self) -> String {
+        let device = match (self.announced, self.checked) {
             (false, false) => "plain",
             (false, true) => "checked",
             (true, false) => "announced",
             (true, true) => "announced checked",
+        };
+        match self.layers {
+            Layers::Private => device.to_owned(),
+            Layers::OverBuffers(load, store) => {
+                format!("{device}, layers over buffers, {load:?} load, {store:?} store")
+            }
         }
     }
+}
+
+/// What the window layers are, and how a pass that is not resolved loads and stores its layer.
+#[derive(Clone, Copy, Debug)]
+enum Layers {
+    /// Private textures, loaded and stored.
+    Private,
+    /// Textures over `Shared` buffers at tight rows, loaded and stored by these.
+    OverBuffers(LoadAction, StoreAction),
 }
 
 /// The submissions the checks of a checked run saw: each the encoders it named, noted under a
@@ -222,6 +258,9 @@ struct Pipelines {
 /// The device, its queue, and what the frames draw with.
 struct Workload {
     device: Device,
+    layers: Layers,
+    /// The buffers the layers lie over, where they do.
+    layer_buffers: Vec<Buffer>,
     queue: CommandQueue,
     /// A checked run's submissions checked.
     checks: Option<Arc<Checks>>,
@@ -305,6 +344,20 @@ fn target(device: &Device, samples: u64) -> Texture {
     device.new_texture(&descriptor).unwrap()
 }
 
+/// A `TARGET_SIDE` square `BGRA8Unorm_sRGB` render target over a new `Shared` buffer at tight
+/// rows, and the buffer.
+fn target_over_buffer(device: &Device) -> (Texture, Buffer) {
+    let rows = 4 * TARGET_SIDE;
+    let buffer = device
+        .new_buffer(rows * TARGET_SIDE, ResourceOptions::shared())
+        .unwrap();
+    let mut descriptor =
+        TextureDescriptor::texture_2d(PixelFormat::BGRA8UnormSRGB, TARGET_SIDE, TARGET_SIDE, false);
+    descriptor.usage = TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ;
+    descriptor.resource_options = buffer.resource_options();
+    (buffer.new_texture(&descriptor, 0, rows).unwrap(), buffer)
+}
+
 /// `ZwdShape`'s bytes: draw `n`'s box in a pass of the target's size, a fill and an outline.
 fn shape(n: usize) -> [u8; SHAPE_BYTES] {
     let x = (n % 8) as f32 * 60.0;
@@ -335,7 +388,7 @@ fn shape(n: usize) -> [u8; SHAPE_BYTES] {
 }
 
 impl Workload {
-    fn new(device: Device, checked: bool) -> Workload {
+    fn new(device: Device, checked: bool, layers: Layers) -> Workload {
         let library = |name: &str| {
             device.new_library_with_air(&llvm_assemble(&engine_dir().join(name)).unwrap())
         };
@@ -383,14 +436,23 @@ impl Workload {
             })
             .flat_map(f32::to_le_bytes)
             .collect();
+        let (targets, layer_buffers) = match layers {
+            Layers::Private => (
+                (0..TARGETS).map(|_| target(&device, 1)).collect(),
+                Vec::new(),
+            ),
+            Layers::OverBuffers(..) => (0..TARGETS).map(|_| target_over_buffer(&device)).unzip(),
+        };
         Workload {
+            layers,
+            layer_buffers,
             queue: device.new_command_queue().unwrap(),
             checks: checked.then(Arc::default),
             pipelines,
             sampler,
             textures,
             mask: sampled(&device, [255, 255, 255, 128]),
-            targets: (0..TARGETS).map(|_| target(&device, 1)).collect(),
+            targets,
             multisampled: target(&device, 4),
             indices: buffer_with(&device, &indices).unwrap(),
             rects: buffer_with(&device, &rects).unwrap(),
@@ -398,8 +460,9 @@ impl Workload {
         }
     }
 
-    /// Pass `pass`'s descriptor: its layer loaded and stored, or, for a resolved pass, the
-    /// 4-sample texture cleared and resolved into the layer.
+    /// Pass `pass`'s descriptor: its layer loaded and stored (by the layers' actions where they
+    /// lie over buffers), or, for a resolved pass, the 4-sample texture cleared and resolved into
+    /// the layer.
     fn pass(&self, pass: usize) -> RenderPassDescriptor {
         let mut descriptor = RenderPassDescriptor::new();
         let color = &mut descriptor.color_attachments[0];
@@ -411,9 +474,14 @@ impl Workload {
             color.clear_color = ClearColor::new(0.0, 0.0, 0.0, 0.0);
             color.store_action = StoreAction::MultisampleResolve;
         } else {
+            let (load, store) = match self.layers {
+                Layers::Private => (LoadAction::Load, StoreAction::Store),
+                Layers::OverBuffers(load, store) => (load, store),
+            };
             color.texture = Some(layer);
-            color.load_action = LoadAction::Load;
-            color.store_action = StoreAction::Store;
+            color.load_action = load;
+            color.clear_color = ClearColor::new(0.0, 0.0, 0.0, 0.0);
+            color.store_action = store;
         }
         descriptor
     }
@@ -540,6 +608,7 @@ impl Workload {
             .map(|(before, after)| after.since(before));
         let last = last.unwrap();
         last.wait_until_completed_for(WAIT).unwrap();
+        frame.done = start.elapsed();
         assert_eq!(last.status(), CommandBufferStatus::Completed);
         frame
     }
@@ -716,6 +785,8 @@ struct Frame {
     commit: Vec<Step>,
     wall: Duration,
     cpu: Duration,
+    /// Through the last command buffer's completion.
+    done: Duration,
     /// The command buffers its passes' openings, their draws, their ends and its commits began,
     /// in that order, where it read the work counts ([`Workload::frame_reading`]); none
     /// elsewhere.
@@ -917,7 +988,11 @@ fn measure(runs: &[Run]) {
     for &run in runs {
         let cache = ScratchCache::new().unwrap();
         let heard = Heard::default();
-        let work = Workload::new(device(&cache, run.announced, &heard), run.checked);
+        let work = Workload::new(
+            device(&cache, run.announced, &heard),
+            run.checked,
+            run.layers,
+        );
         let label = run.label();
         let name = work.device.name().to_owned();
         let ms = |d: Duration| d.as_secs_f64() * 1e3;
@@ -964,12 +1039,14 @@ fn measure(runs: &[Run]) {
         let counted: Vec<Frame> = (0..COUNTED).map(|_| work.frame_reading(reads)).collect();
         let [cpu, cpu_high] = percentiles(frames.iter().map(|f| ms(f.cpu)).collect());
         let [wall, wall_high] = percentiles(frames.iter().map(|f| ms(f.wall)).collect());
+        let [done, done_high] = percentiles(frames.iter().map(|f| ms(f.done)).collect());
         eprintln!(
             "FRAME-COST {name} {label}: {BUFFERS} command buffers of one pass of {DRAWS} indexed \
              draws a frame, every {RESOLVED}th pass resolved, {WARM} untimed and {TIMED} timed \
              frames: the encoding thread's CPU {cpu:.2} ms a frame (p90 {cpu_high:.2}), wall \
-             {wall:.2} ms (p90 {wall_high:.2}), {} a frame; {:.1} us of CPU a draw over the \
-             frame; {:.1} notices a frame",
+             {wall:.2} ms (p90 {wall_high:.2}), through completion {done:.2} ms (p90 \
+             {done_high:.2}), {} a frame; {:.1} us of CPU a draw over the frame; {:.1} notices \
+             a frame",
             blocks(&frames),
             cpu * 1e3 / (BUFFERS * DRAWS) as f64,
             (notices - notices_before) as f64 / TIMED as f64,
@@ -1080,7 +1157,7 @@ fn measure(runs: &[Run]) {
             "FRAME-COST {name} {label}: the other threads a command buffer: {threads}; \
              {allocations}"
         );
-        if run.announced {
+        if run.announced || work.layer_buffers.len() == TARGETS {
             for (kind, (count, _)) in heard.lock().unwrap().iter() {
                 eprintln!(
                     "FRAME-COST {name} {label}: heard {} {count} times",
@@ -1142,13 +1219,23 @@ fn frame_costs_announced() {
     measure(&[Run::ANNOUNCED]);
 }
 
+#[test]
+#[ignore = "a measurement, not a check: run by name with --run-ignored all"]
+fn frame_costs_over_buffers() {
+    measure(&[
+        Run::over_buffers(LoadAction::Load, StoreAction::Store),
+        Run::over_buffers(LoadAction::Load, StoreAction::DontCare),
+        Run::over_buffers(LoadAction::Clear, StoreAction::DontCare),
+    ]);
+}
+
 /// One frame of a plain device, once every pipeline is made and every pool piece done, its
 /// allocations counted; and the device's name.
 #[cfg(not(m2v_system_alloc))]
 fn counted() -> (String, Frame) {
     let cache = ScratchCache::new().unwrap();
     let heard = Heard::default();
-    let work = Workload::new(device(&cache, false, &heard), false);
+    let work = Workload::new(device(&cache, false, &heard), false, Layers::Private);
     for _ in 0..WARM {
         work.frame();
     }
@@ -1203,7 +1290,7 @@ fn a_frame_s_draws_and_pass_ends_allocate_within_their_bounds() {
 fn a_frame_s_passes_and_commits_begin_their_command_buffers_within_their_bound() {
     let cache = ScratchCache::new().unwrap();
     let heard = Heard::default();
-    let work = Workload::new(device(&cache, false, &heard), false);
+    let work = Workload::new(device(&cache, false, &heard), false, Layers::Private);
     // Every pipeline made, and every pool piece done, before the frame that counts.
     for _ in 0..WARM {
         work.frame();
@@ -1269,7 +1356,7 @@ fn a_frame_s_pass_opens_allocate_within_their_bound() {
 fn a_frame_s_commits_allocate_within_their_bound() {
     let cache = ScratchCache::new().unwrap();
     let heard = Heard::default();
-    let work = Workload::new(device(&cache, false, &heard), true);
+    let work = Workload::new(device(&cache, false, &heard), true, Layers::Private);
     // Every pipeline made, and every pool piece done, before the frames that count.
     for _ in 0..WARM {
         work.frame();

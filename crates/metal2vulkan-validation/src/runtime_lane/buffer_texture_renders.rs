@@ -364,11 +364,14 @@ fn each_kind(device: &Device, cases: impl Fn(&Lane, Kind)) {
 }
 
 /// A texture over a buffer as a color attachment stores Metal's bytes: clears at rows of 32,
-/// 256 and 16 bytes write the texel rows alone; a `DontCare` store leaves the bytes; a load keeps
-/// the texels a draw leaves; a view of the texture's own format renders into it; slice 1 of a
-/// linear array renders there (TOB probe 1's `r.clear*`, `r.load_draw`, `r.clear_draw`,
-/// `r.dontcare_full`, `r.view_same`, `r.slice1`). After a `DontCare` load, the texels outside
-/// the draw are the buffer's or zero (Metal's), which is printed (`r.dontcare_half`).
+/// 256 and 16 bytes write the texel rows alone; a `DontCare` store leaves the bytes, after a clear
+/// with no draw, a clear and a draw over the whole texture, a `DontCare` load and a draw over its
+/// left half, and a load and a draw over the whole (the DontCare-store probe, an M3 Max under
+/// macOS 27.0.1, 20 times each alike); a load keeps the texels a draw leaves; a view of the
+/// texture's own format renders into it; slice 1 of a linear array renders there (TOB probe 1's
+/// `r.clear*`, `r.load_draw`, `r.clear_draw`, `r.dontcare_full`, `r.view_same`, `r.slice1`).
+/// After a `DontCare` load, the texels outside the draw are the buffer's or zero (Metal's), which
+/// is printed (`r.dontcare_half`).
 #[test]
 fn attachments_over_buffers_store_metals_bytes() {
     on_device(|device| each_kind(device, attachments));
@@ -397,6 +400,20 @@ fn attachments(lane: &Lane, kind: Kind) {
         let descriptor = pass(&t, LoadAction::Clear, StoreAction::DontCare, CLEAR);
         lane.run(&descriptor, |_, _, _| {}).unwrap();
         Expect::of(&b.model).check(&b.bytes(), &name("clear_dontcare"));
+    }
+    for (case, load, rect) in [
+        ("clear_draw_dontcare", LoadAction::Clear, FULL),
+        ("dontcare_half_dontcare", LoadAction::DontCare, LEFT),
+        ("load_draw_dontcare", LoadAction::Load, FULL),
+    ] {
+        let b = Held::new(device, kind).unwrap();
+        let t = over(&b, BPR);
+        let descriptor = pass(&t, load, StoreAction::DontCare, CLEAR);
+        lane.run(&descriptor, |l, e, h| {
+            l.rect(e, h, &solid, rect, Some(COLOR))
+        })
+        .unwrap();
+        Expect::of(&b.model).check(&b.bytes(), &name(case));
     }
     for case in ["load_draw", "clear_draw", "dontcare_full", "view_same"] {
         let mut b = Held::new(device, kind).unwrap();

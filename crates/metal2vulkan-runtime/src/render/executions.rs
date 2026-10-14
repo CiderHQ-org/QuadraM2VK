@@ -2076,6 +2076,9 @@ impl RenderExecution {
             drew: true,
             drawn: crate::clear_reach::DrawnArea::unbounded(),
             coverage: crate::linear_attachment::Coverage::unbounded(),
+            // A pass that executes render commands keeps its attachments over buffers in place
+            // (`kept_bytes.rs`), whatever its draws read.
+            inputs_read: BTreeSet::new(),
             // The encoder that executes the commands records the pass's load pass
             // (`defer_execution`); this one records only the commands' draws.
             rewrites_unused_bits: false,

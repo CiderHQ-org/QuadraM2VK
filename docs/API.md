@@ -984,9 +984,17 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   answer confirms at this count.
 - `metal2vulkan-degrade-dont-care-store` (precision). `DontCareStore`: An attachment stored with
   `DontCare` (or the multisampled attachment of `MultisampleResolve`) is Vulkan's `DONT_CARE`, where
-  Apple's GPU keeps the earlier texels unless its tiler overflows. Cost: the attachment's texels
-  after the pass are each its earlier texel or the one the pass rendered, both Metal's answers, but
-  not always the one Metal's tiler keeps.
+  Apple's GPU keeps the earlier texels unless its tiler overflows. Not a texture over a buffer: Metal
+  leaves the buffer's bytes in it (on an M3 Max, every texel of 926 such passes alike, and of 36
+  with a memory barrier between two draws, 20 times each, but that the first pass in a process to
+  overflow Apple's tiler leaves the rendered texels, which no call can predict or detect), and the
+  runtime gives the buffer's bytes, exactly, through an image the pass copies nothing back from
+  (`dont-care-stand-in` below, or the texture's shadow), or by handing the attachment to Metal's
+  own `DontCare` where the driver stores it so; only where the pass cannot (a draw took a view of
+  the texture's own image before its store action was known, the pass executes render commands,
+  or the device copies no image of the format) does the pass render in place, announced so. Cost:
+  the attachment's texels after the pass are each its earlier texel or the one the pass rendered,
+  both Metal's answers, but not always the one Metal's tiler keeps.
 - `metal2vulkan-degrade-dont-care-load-tiles` (precision). `DontCareLoadTiles`: An attachment loaded
   with `DontCare` and stored, in a pass that draws, is cleared before the draws to zero (a color) or
   its clear value (depth, stencil) over the render area and the tiles past it a clear reaches, where
@@ -1504,6 +1512,17 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   place: it clears an image its texture keeps and copies it back after, as clearing a linear image
   of host memory in place measured slower than that copy. Cost: the pass clears an image of the
   device's and copies it back after, as clearing the texture's linear image in place costs more.
+- `metal2vulkan-degrade-dont-care-stand-in` (performance). `DontCareStandIn`: A pass renders a color
+  attachment that it stores with `DontCare` (or resolves alone, `MultisampleResolve`) and whose
+  texture's image lies over the buffer the texture lies in (a linear image over an ordinary buffer's
+  memory, a no-copy buffer's host pages, a dma-buf's, a surface's; on MoltenVK, a Metal texture over
+  a no-copy or surface buffer's `MTLBuffer`) through an image its texture keeps, so that the buffer
+  keeps its bytes, as Metal's does: rendered in place, the pass would write them. A pass that stores
+  the attachment renders it in place, at no cost; so does one that hands it to a driver that stores
+  `DONT_CARE` as Metal's own `DontCare` (MoltenVK on the M3 Max and the M4), as one render pass
+  instance the driver runs unbroken, where Metal keeps the bytes itself. Cost: an image of the
+  attachment's size, which its texture keeps for the queue, renders the pass; a `Load` copies the
+  buffer's texels over the render area into it before the pass, and nothing is copied back.
 - `metal2vulkan-degrade-host-deallocator-delayed` (precision). `HostDeallocatorDelayed`: A no-copy
   buffer or heap released with a deallocator and no keep-alive (`KeepAlive`) while the device's
   import of its pages is still held: a command buffer submitted before a texture over them was
@@ -2040,6 +2059,16 @@ each item named states the rule in full.
   copy into a 32-bit float depth on a driver not measured to store fragment depths unchanged.
 - **A blit copy of 24-bit depth between textures of different formats is refused**: Apple's
   reference GPUs make no `Depth24Unorm_Stencil8` texture, so there is no Metal answer to match.
+
+**Render passes**
+
+- **A texture over a buffer that a pass stores `DontCare` keeps the buffer's bytes**, in every
+  texel, with or without memory barriers between the pass's draws: Metal's answer, but that the
+  first pass in a process to overflow Apple's tiler (some 2 to 4 million triangle-tile entries)
+  leaves the rendered texels in every texel, which no call can predict or detect. The runtime does
+  not model the overflow, but where it hands the attachment to Metal's own `DontCare` (MoltenVK),
+  which decides it. A pass that renders such a texture in place otherwise announces
+  `dont-care-store`.
 
 **Heaps and memory**
 

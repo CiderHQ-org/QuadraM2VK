@@ -31,7 +31,10 @@
 //! Each announces `linear-attachment-copies` (`Degradation::LinearAttachmentCopies`), naming the
 //! rule. A device whose linear tiling has the color attachment feature renders a linear image
 //! beside any other, so no attachment is bound there; a format whose linear tiling has neither
-//! keeps its texture's shadow (`shadowed-texture`).
+//! keeps its texture's shadow (`shadowed-texture`). On every device, a pass that does not store
+//! such an attachment renders it through the image its texture keeps, copied nothing back, so
+//! that its buffer keeps its bytes (`kept_bytes.rs`, settled before these as the pass ends): an
+//! attachment that is not linear beside the others.
 //!
 //! **Where the rule allows it, the pass renders in place** ([`choose`], as it ends). A pass that
 //! loads a bound attachment renders it in place: a copy of it into the image its texture keeps

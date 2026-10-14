@@ -78,20 +78,23 @@
 //!   unless its tiler overflows, when it writes the rendered ones (measured), a choice no program
 //!   sees or controls; so is `MultisampleResolve`'s, whose samples Metal leaves undefined. On
 //!   MoltenVK on the Apple M4 and M3 Max it is Metal's own store where the pass's one instance
-//!   hands it so ([`handed_dont_care`], `DriverFact::DontCareStoreIsMetals`). A resolve attachment
-//!   is written whole over the render area (`DONT_CARE` then `STORE`), but an aspect of a
-//!   depth/stencil resolve that does not resolve keeps its texels. An aspect of the attached
-//!   texture's Metal format that no attachment names keeps its texels (loaded and stored); an
-//!   aspect only the Vulkan format has (the depth of a `Stencil8` texture held in a combined
-//!   format) is `DONT_CARE` both ways.
+//!   hands it so ([`handed_dont_care`], `DriverFact::DontCareStoreIsMetals`). A texture over a
+//!   buffer, which Metal leaves holding the buffer's bytes, renders through an image the pass
+//!   copies nothing back from (its shadow, or the image it keeps: `kept_bytes.rs`): the buffer's
+//!   bytes, exactly. A resolve attachment is written whole over the render area (`DONT_CARE` then
+//!   `STORE`), but an aspect of a depth/stencil resolve that does not resolve keeps its texels.
+//!   An aspect of the attached texture's Metal format that no attachment names keeps its texels
+//!   (loaded and stored); an aspect only the Vulkan format has (the depth of a `Stencil8` texture
+//!   held in a combined format) is `DONT_CARE` both ways.
 //! - **Where `DONT_CARE` is no answer of Metal's**. Vulkan leaves a `DONT_CARE` attachment's
 //!   contents undefined, and a driver may leave a third answer, neither texel Metal keeps (NVIDIA's
 //!   left a pass's clear under its draw). Metal's `DontCare` and `MultisampleResolve` are
 //!   `DONT_CARE` only on a driver measured to keep one of Metal's two answers
 //!   (`DriverFact::DontCareStoreIsOneOfMetals`) or to store as Metal's own
 //!   (`DriverFact::DontCareStoreIsMetals`); every other device stores the attachment (`STORE`),
-//!   the answer Metal gives where its tiler overflows ([`DontCare`]). A memoryless attachment
-//!   and the hidden depth and stencil keep `DONT_CARE`: no texture of the program's holds them.
+//!   the answer Metal gives where its tiler overflows ([`DontCare`]). A memoryless attachment,
+//!   the hidden depth and stencil, and the image a texture over a buffer keeps for a pass that
+//!   does not store it (`kept_bytes.rs`) keep `DONT_CARE`: no texture of the program's holds them.
 //! - **The compatible pass** has the same formats and sample counts with every operation `LOAD`
 //!   and `STORE`: render pass compatibility ignores the operations, so the draws' secondary
 //!   command buffer and the encoder's graphics pipelines record against it while the store
@@ -102,6 +105,7 @@
 //!   first needs one and destroyed with the device, for at most [`KEPT_SHAPES`] shapes; an
 //!   encoder of a shape past them makes its own, which its command buffer holds so.
 
+use super::attachment_stand_in::Cause;
 use super::attachmentless;
 use super::binding_view::VkView;
 use super::device::lock;
@@ -750,11 +754,18 @@ pub(super) fn final_pass(
 }
 
 /// The operations of color attachment `color` in an instance at `at`, the sample planes'
-/// `anchor` or not, its `DontCare` `dont_care`'s. An attachment the exact resolve reads after the
-/// pass keeps its samples for it, and one whose texels are copied as its resolve its texels.
+/// `anchor` or not, its `DontCare` `dont_care`'s, but the image a texture over a buffer keeps for
+/// a pass that does not store it, which nothing reads after the pass (`kept_bytes.rs`). An
+/// attachment the exact resolve reads after the pass keeps its samples for it, and one whose
+/// texels are copied as its resolve its texels.
 fn color_ops(color: &ColorTarget, anchor: bool, at: Position, dont_care: DontCare) -> Ops {
     let exact = color.resolve.as_ref().is_some_and(|r| r.shader.is_some())
         || color.copied_resolve.is_some();
+    let unheld = color.memoryless
+        || color
+            .stand_in
+            .as_ref()
+            .is_some_and(|s| s.cause == Cause::KeptBytes);
     if anchor {
         ANCHORED
     } else {
@@ -762,7 +773,7 @@ fn color_ops(color: &ColorTarget, anchor: bool, at: Position, dont_care: DontCar
             load: load_at(color.load, at),
             store: match exact {
                 true => vk::AttachmentStoreOp::STORE,
-                false => store_at(color.store, at, dont_care.unless(color.memoryless)),
+                false => store_at(color.store, at, dont_care.unless(unheld)),
             },
             stencil_load: vk::AttachmentLoadOp::DONT_CARE,
             stencil_store: vk::AttachmentStoreOp::DONT_CARE,
