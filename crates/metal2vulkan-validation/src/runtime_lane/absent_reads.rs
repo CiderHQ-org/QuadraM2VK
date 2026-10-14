@@ -20,6 +20,7 @@ use super::shared_kinds;
 use super::Messages;
 use super::{buffer_with, read_buffer};
 use crate::air_library::AirLibrary;
+use crate::candidate::LaneRestriction;
 use metal2vulkan::device::VkFeature;
 use metal2vulkan::library::{FunctionConstantValue, FunctionConstantValues};
 use metal2vulkan::metal::{DataType, PixelFormat, TextureUsage};
@@ -264,15 +265,25 @@ fn without_buffer_addresses_a_removed_arguments_read_marks_through_the_status_bi
 /// [`reads_zero_and_completes`] on the device restricted to `vk12-floor` through the profiles
 /// layer (Vulkan 1.2 and nothing optional: no buffer device address, no 64-bit integers, 4 storage
 /// buffers a stage): the kernels mark the status through their binding of it. Skipped, visibly,
-/// where the profiles layer is not installed.
+/// where the profiles layer is not installed or the device lacks a capability the profile states
+/// (the restricted context's first check refuses it); every other failure fails.
 #[test]
 fn on_vk12_floor_a_removed_arguments_read_marks_through_the_status_binding() {
-    let Some(restriction) =
-        crate::candidate::lane_restriction("vk12-floor", crate::gpu::TEST_DEVICE).unwrap()
-    else {
-        println!("SKIPPED: VK_LAYER_KHRONOS_profiles is not installed");
-        return;
-    };
+    let restriction =
+        match crate::candidate::lane_restriction("vk12-floor", crate::gpu::TEST_DEVICE).unwrap() {
+            LaneRestriction::Takes(restriction) => restriction,
+            LaneRestriction::Lacks { device, gaps } => {
+                println!(
+                    "SKIPPED {device}: cannot take vk12-floor: lacks {}",
+                    gaps.join(", ")
+                );
+                return;
+            }
+            LaneRestriction::NoLayer => {
+                println!("SKIPPED: VK_LAYER_KHRONOS_profiles is not installed");
+                return;
+            }
+        };
     on_device_with(
         |options: &mut DeviceOptions| restriction.restrict(options).unwrap(),
         |device, messages| {

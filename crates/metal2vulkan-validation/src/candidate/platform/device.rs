@@ -1278,15 +1278,27 @@ pub(crate) fn runtime_restriction(
     restricting(restriction, device_type, executor).map(Some)
 }
 
+/// What [`lane_restriction`] finds for a lane test's committed profile.
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+pub(crate) enum LaneRestriction {
+    /// `VK_LAYER_KHRONOS_profiles` is not installed.
+    NoLayer,
+    /// The device lacks capabilities the profile states (the first check's refusal, which a
+    /// restricted context records as a typed refusal): the device's name and the members it
+    /// lacks.
+    Lacks { device: String, gaps: Vec<String> },
+    /// The device takes the profile: what the runtime device's options and its second check need.
+    Takes(Box<RuntimeRestriction>),
+}
+
 /// The runtime path's restriction to committed profile `stem` for a lane test, whatever this
-/// process's own restriction is (a test does not restrict its process): `None` where
-/// `VK_LAYER_KHRONOS_profiles` is not installed, and an error where the device `device_type`
-/// selects cannot take the profile.
+/// process's own restriction is (a test does not restrict its process), on the device
+/// `device_type` selects. Every failure other than the first check's refusal is an error.
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 pub(crate) fn lane_restriction(
     stem: &str,
     device_type: DeviceType,
-) -> Result<Option<RuntimeRestriction>, String> {
+) -> Result<LaneRestriction, String> {
     let entry = load_entry()?;
     // SAFETY: a global command of a loaded entry.
     let layers = unsafe { entry.enumerate_instance_layer_properties() }
@@ -1295,24 +1307,54 @@ pub(crate) fn lane_restriction(
         .iter()
         .any(|layer| extension_name(&layer.layer_name) == PROFILES_LAYER)
     {
-        return Ok(None);
+        return Ok(LaneRestriction::NoLayer);
     }
     // A restriction lives as long as the process, as this process's own would.
     let restriction: &'static ProfileRestriction =
         Box::leak(Box::new(profiles::presentable(stem)?));
-    match restricting(restriction, device_type, "runtime-lane")? {
-        Restricting::Takes(restriction) => Ok(Some(*restriction)),
-        Restricting::Refused(_) => Err(format!("the device cannot take {stem}")),
-    }
+    Ok(match first_check(restriction, device_type)? {
+        FirstCheck::Takes(restriction) => LaneRestriction::Takes(restriction),
+        FirstCheck::Lacks(refused) => LaneRestriction::Lacks {
+            device: refused.identity["device"]
+                .as_str()
+                .unwrap_or("the device")
+                .to_owned(),
+            gaps: refused.gaps,
+        },
+    })
 }
 
 /// [`runtime_restriction`]'s steps for `restriction`: the first check decides between a typed
-/// refusal and a restriction the device takes.
+/// refusal, recorded as `executor`'s context records it, and a restriction the device takes.
 fn restricting(
     restriction: &'static ProfileRestriction,
     device_type: DeviceType,
     executor: &str,
 ) -> Result<Restricting, String> {
+    Ok(match first_check(restriction, device_type)? {
+        FirstCheck::Takes(restriction) => Restricting::Takes(restriction),
+        FirstCheck::Lacks(refused) => Restricting::Refused(Box::new(
+            super::compute::restriction_refusal(&refused, executor),
+        )),
+    })
+}
+
+/// The first check's ([`profiles::check_within`]) verdict on a restriction.
+enum FirstCheck {
+    /// The device takes P.
+    Takes(Box<RuntimeRestriction>),
+    /// The device lacks capabilities P states: what a typed refusal of it records.
+    Lacks(Box<RefusedRestriction>),
+}
+
+/// The restricted context's steps before its device for `restriction`, on the device
+/// `device_type` selects: the first check ([`profiles::check_within`]) decides between a refusal
+/// and a restriction the device takes, whose hidden extensions are read as a context reads them.
+/// Every other failure is an error, as in the context.
+fn first_check(
+    restriction: &'static ProfileRestriction,
+    device_type: DeviceType,
+) -> Result<FirstCheck, String> {
     if device_type == DeviceType::Gpu {
         crate::gpu::tripwire::refuse_if_tripped()?;
     }
@@ -1329,20 +1371,18 @@ fn restricting(
     match profiles::check_within(restriction, &native, version) {
         Ok(()) => {}
         Err(RestrictionError::Exceeds { gaps, .. }) => {
-            let refused = RefusedRestriction {
+            return Ok(FirstCheck::Lacks(Box::new(RefusedRestriction {
                 restriction,
                 gaps,
                 native,
                 identity,
-            };
-            let attempt = super::compute::restriction_refusal(&refused, executor);
-            return Ok(Restricting::Refused(Box::new(attempt)));
+            })));
         }
         Err(error) => return Err(error.to_string()),
     }
     let presented = presented_extensions(&entry, device_type, portability, restriction)?;
     let hidden = restriction.hidden(presented.iter().map(String::as_str));
-    Ok(Restricting::Takes(Box::new(RuntimeRestriction {
+    Ok(FirstCheck::Takes(Box::new(RuntimeRestriction {
         restriction,
         native,
         identity,
