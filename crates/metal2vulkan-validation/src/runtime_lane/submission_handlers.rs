@@ -29,6 +29,10 @@ use std::time::Duration;
 /// The longest a command buffer of these tests may take.
 const WAIT: Duration = Duration::from_secs(60);
 
+/// The most commits of one case [`a_commit_that_submits_runs_them_in_order_before_it_returns`]
+/// makes until one submits itself rather than leave its batches to another thread's pass.
+const ATTEMPTS: u32 = 16;
+
 /// The name of the device's scheduler thread.
 const SCHEDULER: &str = "metal2vulkan-scheduler";
 
@@ -138,6 +142,12 @@ impl Log {
 /// the submission handlers on the committing thread before `commit` returns, once each, in the
 /// order added, each seeing the command buffer `Committed`; its scheduled handlers run after
 /// them on a handler thread, seeing it `Scheduled`.
+///
+/// A commit made while another thread makes a pass (the scheduler's, woken by the event's raise
+/// or a completion) leaves its batches to that pass instead (`WorkCounts::commits_handed_off`),
+/// whose thread runs the submission handlers, in order, seeing it `Committed`, before its
+/// scheduled handlers: such an attempt is checked as that, and the case is made again, up to
+/// [`ATTEMPTS`] times, until a commit submits itself.
 #[test]
 fn a_commit_that_submits_runs_them_in_order_before_it_returns() {
     on_device(|device| {
@@ -147,35 +157,56 @@ fn a_commit_that_submits_runs_them_in_order_before_it_returns() {
         met.set_signaled_value(1);
         for wait in [None, Some((&met, false)), Some((&met, true))] {
             let case = format!("wait {:?}", wait.map(|(_, work_first)| work_first));
-            let log = Log::default();
-            let command_buffer = fill(&queue, &buffer, 1, wait);
-            for name in ["first", "second", "third"] {
+            for attempt in 1.. {
+                assert!(attempt <= ATTEMPTS, "{case}: every commit was handed off");
+                let log = Log::default();
+                let command_buffer = fill(&queue, &buffer, 1, wait);
+                for name in ["first", "second", "third"] {
+                    command_buffer
+                        .add_submission_handler(log.handler(name))
+                        .unwrap();
+                }
                 command_buffer
-                    .add_submission_handler(log.handler(name))
+                    .add_scheduled_handler(log.handler("scheduled"))
                     .unwrap();
+                let handed_off = device.work_counts().commits_handed_off;
+                command_buffer.commit().unwrap();
+                let calls = log.calls();
+                if device.work_counts().commits_handed_off > handed_off {
+                    command_buffer.wait_until_scheduled().unwrap();
+                    let calls = log.calls();
+                    assert_eq!(
+                        log.names(),
+                        ["first", "second", "third", "scheduled"],
+                        "{case}, handed off: {calls:?}"
+                    );
+                    for call in &calls[..3] {
+                        assert_ne!(call.thread, thread::current().id(), "{case}: {calls:?}");
+                        assert_eq!(call.status, CommandBufferStatus::Committed, "{case}");
+                    }
+                    completed(&command_buffer);
+                    println!("{case}: attempt {attempt} was handed off");
+                    continue;
+                }
+                assert!(calls.len() >= 3, "{case}: {calls:?}");
+                for (call, name) in calls.iter().zip(["first", "second", "third"]) {
+                    assert_eq!(call.name, name, "{case}: {calls:?}");
+                    assert_eq!(call.thread, thread::current().id(), "{case}: {calls:?}");
+                    assert_eq!(call.status, CommandBufferStatus::Committed, "{case}");
+                }
+                command_buffer.wait_until_scheduled().unwrap();
+                assert_eq!(
+                    log.names(),
+                    ["first", "second", "third", "scheduled"],
+                    "{case}"
+                );
+                let scheduled = log.call("scheduled");
+                assert_ne!(scheduled.thread, thread::current().id(), "{case}");
+                assert_eq!(scheduled.status, CommandBufferStatus::Scheduled, "{case}");
+                completed(&command_buffer);
+                assert_eq!(log.calls().len(), 4, "{case}: each ran once");
+                break;
             }
-            command_buffer
-                .add_scheduled_handler(log.handler("scheduled"))
-                .unwrap();
-            command_buffer.commit().unwrap();
-            let calls = log.calls();
-            assert!(calls.len() >= 3, "{case}: {calls:?}");
-            for (call, name) in calls.iter().zip(["first", "second", "third"]) {
-                assert_eq!(call.name, name, "{case}: {calls:?}");
-                assert_eq!(call.thread, thread::current().id(), "{case}: {calls:?}");
-                assert_eq!(call.status, CommandBufferStatus::Committed, "{case}");
-            }
-            command_buffer.wait_until_scheduled().unwrap();
-            assert_eq!(
-                log.names(),
-                ["first", "second", "third", "scheduled"],
-                "{case}"
-            );
-            let scheduled = log.call("scheduled");
-            assert_ne!(scheduled.thread, thread::current().id(), "{case}");
-            assert_eq!(scheduled.status, CommandBufferStatus::Scheduled, "{case}");
-            completed(&command_buffer);
-            assert_eq!(log.calls().len(), 4, "{case}: each ran once");
         }
     });
 }

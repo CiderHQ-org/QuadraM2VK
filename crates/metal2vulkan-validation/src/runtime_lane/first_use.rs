@@ -24,7 +24,8 @@
 //!   stay: the heap's fill comes before its first command.
 //! - **A heap texture's `replace_region` waits for nothing**: its copy is staged for the device's
 //!   next submission; a later command buffer reads the later of two calls' bytes, and `get_bytes`
-//!   the staged bytes.
+//!   the staged bytes. A new heap texture's staged copy lands where that submission also carries
+//!   the texture's first move, a command buffer's or `get_bytes`'s, in one `vkQueueSubmit`.
 //! - **Neutrals and sparse textures wait for nothing**: kernels whose texture and texel-buffer
 //!   slots nothing is bound to are encoded and committed, and a sparse texture is made, while the
 //!   busy work runs, with no internal submission; the kernels then complete cleanly and the sparse
@@ -49,6 +50,7 @@
 //!   Such textures are made, started neither on the host nor on the staging queue, and resolve to
 //!   zero through a pass that loads them.
 
+use super::commit_work::relay_marks;
 use super::degrade_notices::{
     assert_once_allowing, forced, made_compute_kinds, shared_in_system_memory,
 };
@@ -1264,6 +1266,91 @@ fn a_heap_texture_s_replace_region_waits_for_no_gpu_work() {
         texture.get_bytes(&mut read, ROW, 0, region, 0, 0).unwrap();
         assert_eq!(read, first, "get_bytes on {name} reads the staged bytes");
         drop((texture, heap));
+    });
+}
+
+/// A new heap texture's staged copy goes in the same `vkQueueSubmit` as its first move, and
+/// lands: with no submission between the texture's making and `replace_region`, the copy is
+/// staged (no host copy, no internal or staging submission), and the device's next submission
+/// carries the move, in a `VkSubmitInfo` of its own, and the copy at its work's start
+/// (`texture/first_move.rs`). MoltenVK runs each `VkSubmitInfo` as a Metal command buffer of its
+/// own, and lost such a copy recorded in the same Metal command buffer as the image's move.
+/// Down both submissions that take first work: a committed command buffer's blit
+/// (`command_buffer/submit.rs`) and `get_bytes`'s internal submission (`device/submit.rs`) each
+/// read the copy's bytes, in one `vkQueueSubmit` (the internal one followed by the relay's mark of
+/// no work where the runtime relays the driver's failures, `commit_work::relay_marks`).
+#[test]
+fn a_new_heap_texture_s_staged_copy_lands_in_its_first_move_s_submission() {
+    on_device(|device| {
+        let name = device.name();
+        let queue = device.new_command_queue().unwrap();
+        let d = descriptor(ResourceOptions::shared());
+        let size = device.heap_texture_size_and_align(&d).unwrap().size;
+        let region = Region::new_2d(0, 0, SIDE, SIDE);
+        let marks = relay_marks(device, &queue);
+        for (salt, by_get_bytes) in [(10, false), (11, true)] {
+            let options = ResourceOptions::shared();
+            let heap = (device.new_heap(&HeapDescriptor::new(HeapType::Placement, size, options)))
+                .unwrap();
+            let before = device.work_counts();
+            let texture = heap.new_texture_at_offset(&d, 0).unwrap();
+            let written = pattern(salt);
+            texture
+                .replace_region(region, 0, 0, &written, ROW, 0)
+                .unwrap();
+            let staged = device.work_counts();
+            let path = if by_get_bytes { "get_bytes" } else { "a blit" };
+            assert_eq!(
+                (
+                    staged.queue_submissions,
+                    staged.host_texel_copies,
+                    staged.staging_submissions
+                ),
+                (
+                    before.queue_submissions,
+                    before.host_texel_copies,
+                    before.staging_submissions
+                ),
+                "{path} on {name}: the texture's making or replace_region submitted or copied"
+            );
+            let read = if by_get_bytes {
+                let mut read = vec![0xee; BYTES];
+                texture.get_bytes(&mut read, ROW, 0, region, 0, 0).unwrap();
+                read
+            } else {
+                let command_buffer = queue.command_buffer().unwrap();
+                let out = copy_out(&command_buffer, &texture);
+                command_buffer.commit().unwrap();
+                command_buffer.wait_until_completed_for(WAIT).unwrap();
+                assert_eq!(command_buffer.error(), None, "{path} on {name}");
+                read_buffer(&out, 0, BYTES as u64).unwrap()
+            };
+            let after = device.work_counts();
+            let wrong = read.iter().zip(&written).filter(|(r, w)| r != w).count();
+            assert_eq!(
+                wrong,
+                0,
+                "{path} on {name}: bytes other than the copy's (the first texel read {:?}, \
+                 written {:?})",
+                &read[..4],
+                &written[..4]
+            );
+            assert_eq!(
+                after.host_texel_copies, before.host_texel_copies,
+                "{path} on {name}: a host copy"
+            );
+            assert_eq!(
+                after.internal_submissions - before.internal_submissions,
+                u64::from(by_get_bytes),
+                "{path} on {name}: internal submissions"
+            );
+            assert_eq!(
+                after.queue_submissions - before.queue_submissions,
+                1 + if by_get_bytes { marks } else { 0 },
+                "{path} on {name}: the move and the copy in one vkQueueSubmit"
+            );
+            drop((texture, heap));
+        }
     });
 }
 

@@ -449,7 +449,9 @@ pub fn run(prepared: &PreparedCase, backend: Backend) -> RuntimeOutcome {
         Err(error) => Err(Stop::Error(ExecutorError::Failed(error.clone()))),
     };
     // Every object of the run is destroyed with the device, whose instance reports its
-    // destruction to the sink too; then the sink has no other holder.
+    // destruction to the sink too; then the sink has no other holder. The teardown may run after
+    // this last handle goes, on the runtime's thread that lets go of the device's last share
+    // (`messages_check`).
     drop(device);
     let checked = messages_check(&messages);
     let degrades = degrades(&messages);
@@ -496,15 +498,19 @@ fn degrades(messages: &Messages) -> Vec<&'static str> {
     codes.into_iter().collect()
 }
 
-/// The failure of a run whose validation layer reported a message, or whose device's instance
-/// outlived its last handle (its messages may be incomplete).
+/// The failure of a run whose validation layer reported a message, or whose device's teardown
+/// did not end within the wait bound after its last handle dropped (its messages may be
+/// incomplete). The teardown may end on another of the runtime's threads a little after the last
+/// handle goes: one that held the device's last share as the handle dropped (a pipeline making
+/// still running) runs it once it lets go, as the runtime's teardown lane waits for
+/// (`runtime_lane::teardown_holders`).
 fn messages_check(messages: &Messages) -> Result<(), String> {
-    if messages.holders() != 1 {
-        return Err(
-            "the runtime's device was not destroyed when its last handle dropped; its validation \
-             messages are incomplete, so the run is not evidence"
-                .into(),
-        );
+    if !messages.unshared_within(crate::gpu::wait::wait_timeout()) {
+        return Err(format!(
+            "the runtime's device was not torn down within {:?} of its last handle's drop; its \
+             validation messages are incomplete, so the run is not evidence",
+            crate::gpu::wait::wait_timeout()
+        ));
     }
     let reported = messages.take();
     if reported.is_empty() {

@@ -2,9 +2,9 @@
 //! replaced the translating one, so the validator never runs beside the translation's memory: an
 //! attempt's peak is the larger of the two, not their sum.
 //!
-//! A stand-in `spirv-val` (`METAL2VULKAN_SPIRV_VAL`) records its parent's command line and accepts
-//! or rejects every module. The census of one public row must find the module validated by a
-//! child of the L3 stage, and a rejection there must still be the row's recorded L3 outcome.
+//! A stand-in `spirv-val` (`METAL2VULKAN_SPIRV_VAL`) records whether its parent is the L3 stage and
+//! accepts or rejects every module. The census of one public row must find the module validated
+//! by a child of the L3 stage, and a rejection there must still be the row's recorded L3 outcome.
 
 #![cfg(unix)]
 
@@ -13,8 +13,13 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// A stand-in `spirv-val` in `dir`: `--version` prints `version`; otherwise it appends its
-/// parent's command line to `calls` and exits with `status`, printing `diagnostic`.
+/// A stand-in `spirv-val` in `dir`: `--version` prints `version`; otherwise it appends a line to
+/// `calls` saying whether its parent is the L3 stage (a process whose arguments hold
+/// `--l3-stage engine`) and exits with `status`, printing `diagnostic`.
+///
+/// It finds its parent with `pgrep`, never `ps`: macOS's `ps` is setuid root, and the worker's
+/// process-group monitor cannot read a root process's memory (`proc_pid_rusage` answers `EPERM`),
+/// which fails the attempt as a tooling error whenever a sample lands while `ps` runs.
 fn stand_in(
     dir: &Path,
     name: &str,
@@ -27,7 +32,11 @@ fn stand_in(
     let script = format!(
         "#!/bin/sh\n\
          if [ \"$1\" = --version ]; then echo '{version}'; exit 0; fi\n\
-         ps -o args= -p \"$PPID\" >> '{calls}'\n\
+         if pgrep -f -- '--l3-stage engine' | grep -qx \"$PPID\"; then\n\
+         echo \"$PPID: --l3-stage engine\" >> '{calls}'\n\
+         else\n\
+         echo \"$PPID: not the L3 stage\" >> '{calls}'\n\
+         fi\n\
          echo '{diagnostic}'\n\
          exit {status}\n",
         calls = calls.display(),

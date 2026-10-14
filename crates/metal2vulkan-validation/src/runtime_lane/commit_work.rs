@@ -13,7 +13,9 @@
 //!   one of none.
 //! - **First work rides along.** A new texture's first work (`texture/first_move.rs`) is a
 //!   `VkSubmitInfo` of the next submission's own `vkQueueSubmit`, a commit's or an internal one's
-//!   (handing its `VkImage` out): one call each, which Mesa's drivers run as one kernel submission.
+//!   (handing its `VkImage` out): one call each, which Mesa's drivers run as one kernel submission;
+//!   on MoltenVK the internal one is followed by the relay's mark of no work, as every use of a
+//!   queue outside a batch is there (`device/relay.rs`).
 //!   Before, it was a `vkQueueSubmit` of its own, a second kernel submission listing every buffer
 //!   object of the device on ANV over i915.
 //! - **Fences.** Command buffers that each end in one submission complete at their fences where
@@ -41,7 +43,8 @@ use super::{bound_buffers, encode_case, pipeline_state, public_case, CaseResourc
 use metal2vulkan::error::RuntimeDriverDefect;
 use metal2vulkan::metal::{PixelFormat, TextureUsage};
 use metal2vulkan_runtime::{
-    Buffer, CommandBuffer, CommandBufferStatus, CommandQueue, ResourceOptions, TextureDescriptor,
+    Buffer, CommandBuffer, CommandBufferStatus, CommandQueue, Device, ResourceOptions,
+    TextureDescriptor,
 };
 
 /// A kernel whose root table searches the device's live buffers: its pointer walk reaches
@@ -53,6 +56,17 @@ fn finish(command_buffer: &CommandBuffer) {
     command_buffer.commit().unwrap();
     command_buffer.wait_until_completed_for(WAIT).unwrap();
     assert_eq!(command_buffer.status(), CommandBufferStatus::Completed);
+}
+
+/// The submissions of no work the runtime adds after a use of `queue` outside a batch, read from
+/// a use that submits nothing: one where it relays the driver's failures, a mark with a fence of
+/// its own under the queue's lock (MoltenVK, `device/relay.rs`), and none elsewhere. An internal
+/// submission is such a use.
+pub(super) fn relay_marks(device: &Device, queue: &CommandQueue) -> u64 {
+    let before = device.work_counts().queue_submissions;
+    // SAFETY: the handle is not kept, and nothing is called or waited for under the lock.
+    unsafe { queue.with_vk_queue(|_, _| ()) };
+    device.work_counts().queue_submissions - before
 }
 
 /// A command buffer of a blit that fills `buffer`.
@@ -105,12 +119,14 @@ fn empty_command_buffers_submit_no_command_buffer() {
 /// A commit after a new `Private` texture was made, and the internal submission that hands
 /// another's `VkImage` out, are one `vkQueueSubmit` each, the texture's first work in it: the
 /// empty command buffer's submission carries the first work's `VkCommandBuffer` alone (the module
-/// docs).
+/// docs). The internal submission, a use of the queue outside a batch, is followed by the relay's
+/// mark of no work where the runtime relays the driver's failures ([`relay_marks`]).
 #[test]
 fn a_new_texture_s_first_work_rides_in_the_next_submission() {
     on_device(|device, _| {
         let queue = device.new_command_queue().unwrap();
         finish(&queue.command_buffer().unwrap());
+        let marks = relay_marks(device, &queue);
         let texture = || {
             let mut descriptor =
                 TextureDescriptor::texture_2d(PixelFormat::RGBA8Unorm, 64, 64, false);
@@ -134,7 +150,10 @@ fn a_new_texture_s_first_work_rides_in_the_next_submission() {
         assert!(image.is_some(), "a texture of its own image");
         let after = device.work_counts();
         assert_eq!(after.internal_submissions - before.internal_submissions, 1);
-        assert_eq!(after.queue_submissions - before.queue_submissions, 1);
+        assert_eq!(
+            after.queue_submissions - before.queue_submissions,
+            1 + marks
+        );
         drop((committed, handed));
     });
 }
