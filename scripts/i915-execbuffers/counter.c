@@ -1,17 +1,19 @@
-// A counter of the i915 kernel submissions a process makes, loaded with LD_PRELOAD: each
-// DRM_IOCTL_I915_GEM_EXECBUFFER2, the buffer objects it lists (by how each was made: created with
-// its size, a userptr import, a dma-buf import) and the time the ioctl took, by thread. It reads
-// the ioctls' arguments and results and changes nothing. ANV on i915 lists every VkDeviceMemory
-// of the device, and its own buffer objects, in every execbuffer (Mesa 26.2.4,
-// src/intel/vulkan/i915/anv_batch_chain.c, setup_execbuf_for_cmd_buffers), and the kernel's cost
-// of each is per object.
+// A counter of the kernel submissions a process makes on i915 and amdgpu, loaded with LD_PRELOAD:
+// each DRM_IOCTL_I915_GEM_EXECBUFFER2 and DRM_IOCTL_AMDGPU_CS, the buffer objects it lists (by how
+// each was made: created with its size, a userptr import, a dma-buf import) and the time the ioctl
+// took, by thread. It reads the ioctls' arguments and results and changes nothing. ANV on i915
+// lists every VkDeviceMemory of the device, and its own buffer objects, in every execbuffer (Mesa
+// 26.2.4, src/intel/vulkan/i915/anv_batch_chain.c, setup_execbuf_for_cmd_buffers), RADV on amdgpu
+// in every command submission's BO list (src/amd/vulkan/winsys/amdgpu), and the kernel's cost of
+// each is per object.
 //
 //   gcc -O2 -Wall -shared -fPIC -o counter.so counter.c
 //   LD_PRELOAD=$PWD/counter.so M2V_I915_SHIM_OUT=counts.txt <program>
 //
 // At exit it appends its totals, the objects' origins and sizes, and the execbuffers per thread to
-// M2V_I915_SHIM_OUT (stderr without it). A program reads the totals so far through the exported
-// m2v_i915_shim_counts (the validation lane runtime_lane::submit_costs does).
+// M2V_I915_SHIM_OUT (stderr without it); "execbuffers" counts amdgpu's command submissions too. A
+// program reads the totals so far through the exported m2v_i915_shim_counts (the validation lanes
+// runtime_lane::submit_costs and runtime_lane::commit_latency do).
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <stdarg.h>
@@ -25,6 +27,7 @@
 #include <sys/syscall.h>
 #include <drm/drm.h>
 #include <drm/i915_drm.h>
+#include <drm/amdgpu_drm.h>
 
 enum origin { O_NONE = 0, O_CREATE, O_CREATE_EXT, O_USERPTR, O_PRIME, O_COUNT };
 static const char *origin_names[] = {"unknown", "create", "create_ext", "userptr", "prime"};
@@ -56,6 +59,28 @@ static int ntids;
 
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
 static int (*real_ioctl)(int, unsigned long, ...);
+
+// Each file descriptor's kernel driver, by DRM_IOCTL_VERSION, so one driver's ioctl numbers are
+// not read as another's.
+enum driver { D_UNKNOWN = 0, D_OTHER, D_I915, D_AMDGPU };
+#define MAX_DRIVER_FDS 1024
+static uint8_t drivers[MAX_DRIVER_FDS];
+
+static enum driver driver_of(int fd) {
+  if (fd < 0 || fd >= MAX_DRIVER_FDS) return D_OTHER;
+  if (drivers[fd] != D_UNKNOWN) return (enum driver)drivers[fd];
+  char name[32] = {0};
+  struct drm_version v = {0};
+  v.name = name;
+  v.name_len = sizeof name - 1;
+  enum driver d = D_OTHER;
+  if (real_ioctl(fd, DRM_IOCTL_VERSION, &v) == 0) {
+    if (strcmp(name, "i915") == 0) d = D_I915;
+    else if (strcmp(name, "amdgpu") == 0) d = D_AMDGPU;
+  }
+  drivers[fd] = d;
+  return d;
+}
 
 static struct bo *table_for(int fd, int make) {
   for (int i = 0; i < nfds; i++)
@@ -91,30 +116,20 @@ void m2v_i915_shim_counts(struct m2v_shim_counts *out) {
   pthread_mutex_unlock(&mu);
 }
 
-int ioctl(int fd, unsigned long request, ...) {
-  va_list ap;
-  va_start(ap, request);
-  void *arg = va_arg(ap, void *);
-  va_end(ap);
-  if (!real_ioctl) real_ioctl = (int (*)(int, unsigned long, ...))dlsym(RTLD_NEXT, "ioctl");
-  if (request == DRM_IOCTL_I915_GEM_EXECBUFFER2 || request == DRM_IOCTL_I915_GEM_EXECBUFFER2_WR) {
-    struct drm_i915_gem_execbuffer2 *eb = arg;
-    uint64_t t0 = now_ns();
-    int r = real_ioctl(fd, request, arg);
-    uint64_t dt = now_ns() - t0;
+// One kernel submission of `n` objects, the handle of object i at `handles + i * stride`, that
+// took `dt` nanoseconds; under `mu`.
+static void count_submission(int fd, uint32_t n, const uint8_t *handles, size_t stride, uint64_t dt) {
     pid_t tid = (pid_t)syscall(SYS_gettid);
-    pthread_mutex_lock(&mu);
     struct bo *t = table_for(fd, 1);
-    uint32_t n = eb->buffer_count;
     counts.execbuffers++;
     counts.objects += n;
     counts.nanos += dt;
     if (n > counts.max_objects) counts.max_objects = n;
     if (n < counts.min_objects) counts.min_objects = n;
     per_eb[n < 2047 ? n : 2047]++;
-    struct drm_i915_gem_exec_object2 *objs = (void *)(uintptr_t)eb->buffers_ptr;
     for (uint32_t i = 0; i < n; i++) {
-      uint32_t h = objs[i].handle;
+      uint32_t h;
+      memcpy(&h, handles + (size_t)i * stride, sizeof h);
       struct bo b = (t && h < MAX_HANDLES) ? t[h] : (struct bo){0, O_NONE};
       switch (b.origin) {
       case O_USERPTR: counts.userptr++; break;
@@ -137,6 +152,91 @@ int ioctl(int fd, unsigned long request, ...) {
       if (f) { if (fgets(tids[ntids].comm, sizeof tids[ntids].comm, f)) tids[ntids].comm[strcspn(tids[ntids].comm, "\n")] = 0; fclose(f); }
       ntids++;
     }
+}
+
+// The objects of an amdgpu command submission: its BO handles chunk's entries.
+static void count_cs(int fd, union drm_amdgpu_cs *cs, uint64_t dt) {
+  const uint64_t *chunks = (const uint64_t *)(uintptr_t)cs->in.chunks;
+  uint32_t n = 0;
+  const uint8_t *entries = NULL;
+  size_t stride = sizeof(struct drm_amdgpu_bo_list_entry);
+  for (uint32_t i = 0; i < cs->in.num_chunks; i++) {
+    const struct drm_amdgpu_cs_chunk *chunk = (const void *)(uintptr_t)chunks[i];
+    if (chunk->chunk_id != AMDGPU_CHUNK_ID_BO_HANDLES) continue;
+    const struct drm_amdgpu_bo_list_in *list = (const void *)(uintptr_t)chunk->chunk_data;
+    n = list->bo_number;
+    stride = list->bo_info_size;
+    entries = (const uint8_t *)(uintptr_t)list->bo_info_ptr;
+  }
+  count_submission(fd, entries ? n : 0, entries, stride, dt);
+}
+
+// An amdgpu file's ioctl: its command submissions counted, its buffers' origins noted.
+static int amdgpu_ioctl(int fd, unsigned long request, void *arg) {
+  if (request == DRM_IOCTL_AMDGPU_CS) {
+    // The result overwrites the argument's first words; the chunks stay.
+    union drm_amdgpu_cs copy = *(union drm_amdgpu_cs *)arg;
+    uint64_t t0 = now_ns();
+    int r = real_ioctl(fd, request, arg);
+    uint64_t dt = now_ns() - t0;
+    pthread_mutex_lock(&mu);
+    count_cs(fd, &copy, dt);
+    pthread_mutex_unlock(&mu);
+    return r;
+  }
+  // A buffer's size is in the argument the result overwrites.
+  uint64_t size = 0;
+  if (request == DRM_IOCTL_AMDGPU_GEM_CREATE)
+    size = ((union drm_amdgpu_gem_create *)arg)->in.bo_size;
+  int r = real_ioctl(fd, request, arg);
+  if (r != 0) return r;
+  if (request == DRM_IOCTL_AMDGPU_GEM_CREATE)
+    note(fd, ((union drm_amdgpu_gem_create *)arg)->out.handle, size, O_CREATE);
+  if (request == DRM_IOCTL_AMDGPU_GEM_USERPTR) {
+    struct drm_amdgpu_gem_userptr *u = arg;
+    note(fd, u->handle, u->size, O_USERPTR);
+  }
+  return r;
+}
+
+int ioctl(int fd, unsigned long request, ...) {
+  va_list ap;
+  va_start(ap, request);
+  void *arg = va_arg(ap, void *);
+  va_end(ap);
+  if (!real_ioctl) real_ioctl = (int (*)(int, unsigned long, ...))dlsym(RTLD_NEXT, "ioctl");
+  // Only a DRM driver's own ioctls, of a DRM device's file.
+  if (_IOC_TYPE(request) != DRM_IOCTL_BASE) return real_ioctl(fd, request, arg);
+  if (request == DRM_IOCTL_GEM_CLOSE) {
+    int r = real_ioctl(fd, request, arg);
+    if (r == 0) {
+      struct drm_gem_close *c = arg;
+      pthread_mutex_lock(&mu);
+      struct bo *t = table_for(fd, 0);
+      if (t && c->handle < MAX_HANDLES) t[c->handle] = (struct bo){0, O_NONE};
+      pthread_mutex_unlock(&mu);
+    }
+    return r;
+  }
+  if (request == DRM_IOCTL_PRIME_FD_TO_HANDLE) {
+    int r = real_ioctl(fd, request, arg);
+    if (r == 0) {
+      struct drm_prime_handle *p = arg;
+      note(fd, p->handle, 0, O_PRIME);
+    }
+    return r;
+  }
+  enum driver driver = driver_of(fd);
+  if (driver == D_AMDGPU) return amdgpu_ioctl(fd, request, arg);
+  if (driver != D_I915) return real_ioctl(fd, request, arg);
+  if (request == DRM_IOCTL_I915_GEM_EXECBUFFER2 || request == DRM_IOCTL_I915_GEM_EXECBUFFER2_WR) {
+    struct drm_i915_gem_execbuffer2 *eb = arg;
+    uint64_t t0 = now_ns();
+    int r = real_ioctl(fd, request, arg);
+    uint64_t dt = now_ns() - t0;
+    pthread_mutex_lock(&mu);
+    count_submission(fd, eb->buffer_count, (const uint8_t *)(uintptr_t)eb->buffers_ptr,
+                     sizeof(struct drm_i915_gem_exec_object2), dt);
     pthread_mutex_unlock(&mu);
     return r;
   }
@@ -156,19 +256,6 @@ int ioctl(int fd, unsigned long request, ...) {
   case DRM_IOCTL_I915_GEM_USERPTR: {
     struct drm_i915_gem_userptr *u = arg;
     note(fd, u->handle, u->user_size, O_USERPTR);
-    break;
-  }
-  case DRM_IOCTL_PRIME_FD_TO_HANDLE: {
-    struct drm_prime_handle *p = arg;
-    note(fd, p->handle, 0, O_PRIME);
-    break;
-  }
-  case DRM_IOCTL_GEM_CLOSE: {
-    struct drm_gem_close *c = arg;
-    pthread_mutex_lock(&mu);
-    struct bo *t = table_for(fd, 0);
-    if (t && c->handle < MAX_HANDLES) t[c->handle] = (struct bo){0, O_NONE};
-    pthread_mutex_unlock(&mu);
     break;
   }
   }

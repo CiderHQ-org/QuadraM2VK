@@ -5,12 +5,17 @@
 //!   thread, under the scheduler's lock, where it finds the lock free: the batches ready then go
 //!   to the `VkQueue` before it returns, in the same order, with no wake of the thread on their
 //!   path. The thread runs what that pass leaves (a host step, a submission check, a wait for an
-//!   event the host raises later), as before.
+//!   event the host raises later), as before: the pass that finds a step or a check wakes it at
+//!   once, under the lock, not after the committing thread's further passes or its submission
+//!   handlers.
 //! - **Handed to the pass under way** ([`Inbox`]). Where another thread holds the lock for a pass
 //!   (this one, or another commit), `commit` leaves its batches in the inbox and returns at once:
 //!   that thread takes them in, in commit order, as soon as it lets go of the lock, and submits
 //!   what is ready in a pass of its own, as the commit would once it had the lock. The order sees
-//!   every commit in commit order, and every batch is planned as it is submitted, as before.
+//!   every commit in commit order, and every batch is planned as it is submitted, as before. This
+//!   thread stops looking at the inbox again at a pass that leaves it a check or a host step, and
+//!   looks at it before each one it runs and before it sleeps: a commit left to it waits for the
+//!   pass under way and the submission handlers that pass leaves, never for a wake.
 //!
 //! - **The order** ([`Order`]). Each logical queue's batches wait in commit order; the head
 //!   committed first among those ready goes next. A batch is ready once every event it waits for
@@ -88,7 +93,7 @@ use ash::vk;
 use binary::{BinarySignals, Needs};
 use inbox::Inbox;
 use order::{Behind, Order};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{fence, AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -225,7 +230,7 @@ impl Scheduler {
     /// the `VkQueue` before `commit` returns, without the thread's wake on its path. Where another
     /// thread is making a pass, leave the batches to it and return at once (the module docs). A
     /// host step or a submission check found ready, and the process's exit, are left to the
-    /// thread, which this wakes for them.
+    /// thread, which the pass that found them wakes for them at once.
     pub(crate) fn commit(
         &self,
         buffer: &Arc<CommandBufferShared>,
@@ -238,19 +243,16 @@ impl Scheduler {
             queue,
             batches,
         };
-        let mut passed = Passed::default();
-        let left = (shared.inbox).commit(committed, |state, commits| {
-            pass(state, commits, &mut passed, &shared.gated, false);
+        let (mut passed, mut left) = (Passed::default(), Left::default());
+        let handed_off = (shared.inbox).commit(committed, |state, commits| {
+            pass(state, commits, (&mut passed, &mut left), shared, false);
         });
-        if left {
+        if handed_off {
             buffer.device().shared().counts.commit_handed_off();
         }
-        let thread = passed.for_thread();
         let Passed {
             spent,
             settled,
-            steps,
-            checks,
             handlers,
             ..
         } = passed;
@@ -258,13 +260,9 @@ impl Scheduler {
         // On the committing thread, before `commit` returns.
         run_submission_handlers(handlers);
         // Without the lock, as the thread lets go of them: the thread finds the steps and the
-        // checks again in its own pass.
+        // checks again in its own pass, which the pass that found them woke it for.
         drop(spent);
-        drop(steps);
-        drop(checks);
-        if thread {
-            shared.wake.notify_all();
-        }
+        drop(left);
     }
 
     /// What makes the thread look for work again from any thread: a pipeline a held batch's
@@ -369,7 +367,8 @@ impl Scheduler {
 fn run(shared: &SchedulerShared) {
     loop {
         let mut state = lock(shared.inbox.state());
-        while !state.dirty && !state.stopping {
+        // A commit left to this thread's pass may wait in the inbox (`inbox.rs`).
+        while !state.dirty && !state.stopping && !shared.inbox.holds_commits() {
             state = shared
                 .wake
                 .wait_timeout(state, WAIT_SLICE)
@@ -382,88 +381,111 @@ fn run(shared: &SchedulerShared) {
         // The pass takes the lock again, counted as a passer from before (`inbox.rs`): a commit
         // that finds it taken leaves its batches to this thread.
         drop(state);
-        let mut passed = Passed::default();
-        (shared.inbox).pass(|state, commits| {
-            pass(state, commits, &mut passed, &shared.gated, true);
-        });
-        let Passed {
-            spent,
-            settled,
-            steps,
-            checks,
-            handlers,
-            exiting,
-        } = passed;
-        settle(settled);
-        // On this thread, before its next pass; none once the process is exiting, as the thread
-        // then runs nothing more (their command buffers stay `Committed`).
-        if exiting {
-            drop(handlers);
-        } else {
-            run_submission_handlers(handlers);
-        }
-        // Without the lock: the last reference to a command buffer may be among them, and with
-        // it its device, whose drop stops this thread.
-        drop(spent);
-        if exiting {
+        let mut left = Left::default();
+        if !round(shared, &mut left) {
             return;
         }
-        if steps.is_empty() && checks.is_empty() {
+        if left.is_empty() {
             continue;
         }
-        // The submission checks, without the lock (they run the program's code), each pass a
-        // section; once the process is exiting the thread ends at the next.
-        for (buffer, index) in &checks {
-            let Some(_busy) = exit_guard::enter() else {
+        loop {
+            // A commit left to this thread meanwhile goes before the next piece of work.
+            if shared.inbox.holds_commits() && !round(shared, &mut left) {
                 return;
-            };
-            buffer.run_checks(*index);
-        }
-        drop(checks);
-        // The host steps, without the lock (they record, and may make what a dispatch makes),
-        // each a section; once the process is exiting the thread ends at the next.
-        for (buffer, index) in &steps {
-            let Some(_busy) = exit_guard::enter() else {
-                return;
-            };
-            buffer.host_step(*index);
-            for &call in exit_guard::HOST_STEP {
-                exit_guard::called(call);
             }
+            // The submission checks, then the host steps, without the lock (a check runs the
+            // program's code; a step records, and may make what a dispatch makes), each a
+            // section; once the process is exiting the thread ends at the next.
+            let (work, step) = match left.checks.pop_front() {
+                Some(check) => (check, false),
+                None => match left.steps.pop_front() {
+                    Some(step) => (step, true),
+                    None => break,
+                },
+            };
+            let Some(busy) = exit_guard::enter() else {
+                return;
+            };
+            let (buffer, index) = &work;
+            if step {
+                buffer.host_step(*index);
+                for &call in exit_guard::HOST_STEP {
+                    exit_guard::called(call);
+                }
+            } else {
+                buffer.run_checks(*index);
+            }
+            drop(busy);
+            // Out of the section: it may be the command buffer's last reference.
+            drop(work);
         }
-        drop(steps);
         lock(shared.inbox.state()).dirty = true;
     }
 }
 
-/// What passes leave for their thread to do without the lock ([`submit_ready`]'s outputs), and
-/// whether the process is exiting.
+/// One round of the thread's: a pass, looking at the inbox again while the passes leave the
+/// thread no work ([`Inbox::pass`]), what they leave added to `left`; then, without the lock,
+/// what they let go of: the storage forms settled, the submission handlers run (on this thread,
+/// before its next pass; none once the process is exiting, as the thread then runs nothing
+/// more, their command buffers staying `Committed`), the holds dropped (the last reference to a
+/// command buffer may be among them, and with it its device, whose drop stops this thread).
+/// False once the process is exiting.
+fn round(shared: &SchedulerShared, left: &mut Left) -> bool {
+    let mut passed = Passed::default();
+    (shared.inbox).pass(|state, commits| {
+        pass(state, commits, (&mut passed, &mut *left), shared, true);
+        !passed.exiting && left.is_empty()
+    });
+    let Passed {
+        spent,
+        settled,
+        handlers,
+        exiting,
+    } = passed;
+    settle(settled);
+    if exiting {
+        drop(handlers);
+    } else {
+        run_submission_handlers(handlers);
+    }
+    drop(spent);
+    !exiting
+}
+
+/// What passes let go of for their thread to finish without the lock ([`submit_ready`]'s
+/// outputs), and whether the process is exiting.
 #[derive(Default)]
 struct Passed {
     spent: Spent,
     settled: Settled,
-    steps: Steps,
-    checks: Steps,
     handlers: Handlers,
     exiting: bool,
 }
 
-impl Passed {
-    /// Whether the thread has work the passes found for it: a host step, a check, the exit.
-    fn for_thread(&self) -> bool {
-        self.exiting || !self.steps.is_empty() || !self.checks.is_empty()
+/// What passes leave the scheduler's thread to run without the lock before the batches go: the
+/// submission checks, then the host steps ([`submit_ready`]'s outputs).
+#[derive(Default)]
+struct Left {
+    steps: Steps,
+    checks: Steps,
+}
+
+impl Left {
+    fn is_empty(&self) -> bool {
+        self.steps.is_empty() && self.checks.is_empty()
     }
 }
 
 /// A pass: take `commits` into the order, in commit order, then submit what is ready
-/// ([`submit_ready`]) into `passed`. A pass on a thread other than the scheduler's (`own` false)
-/// was the thread's but for what it runs without the lock: the thread looks again only for that,
-/// or for the exit, and the caller wakes it (what woke it before, this pass saw).
+/// ([`submit_ready`]) into `passed` and `left`. A pass on a thread other than the scheduler's
+/// (`own` false) was the thread's but for what it leaves it: the thread looks again only for
+/// that, or for the exit, for which this wakes it at once, under the lock (what woke it before,
+/// this pass saw).
 fn pass(
     state: &mut State,
     commits: Vec<Committed>,
-    passed: &mut Passed,
-    gated: &AtomicBool,
+    (passed, left): (&mut Passed, &mut Left),
+    shared: &SchedulerShared,
     own: bool,
 ) {
     for Committed {
@@ -493,14 +515,15 @@ fn pass(
     let exiting = submit_ready(
         state,
         (&mut passed.spent, &mut passed.settled),
-        (&mut passed.steps, &mut passed.checks),
+        (&mut left.steps, &mut left.checks),
         &mut passed.handlers,
-        gated,
+        &shared.gated,
     )
     .is_err();
     passed.exiting |= exiting;
-    if !own {
-        state.dirty = passed.for_thread();
+    if !own && (passed.exiting || !left.is_empty()) {
+        state.dirty = true;
+        shared.wake.notify_all();
     }
 }
 
@@ -682,7 +705,7 @@ fn run_submission_handlers(handlers: Handlers) {
 
 /// Batches for the thread to work on without its lock: each command buffer with the batch's
 /// index.
-type Steps = Vec<(Hold<CommandBufferShared>, usize)>;
+type Steps = VecDeque<(Hold<CommandBufferShared>, usize)>;
 
 /// Look at each line's head of a command buffer with a submission check that is otherwise
 /// ready (its binary semaphores' signals submitted, its events' values reached, its host step
@@ -716,7 +739,7 @@ fn check_heads(state: &mut State, behind: &[u64], checks: &mut Steps, gated: &At
             }
             Some(_) => {}
         }
-        checks.push((held.buffer.hold(), held.index));
+        checks.push_back((held.buffer.hold(), held.index));
     }
     landing
 }
@@ -753,7 +776,7 @@ fn gate_heads(state: &mut State, behind: &[u64], steps: &mut Steps, gated: &Atom
             continue;
         }
         if !waits.gpu {
-            steps.push((held.buffer.hold(), held.index));
+            steps.push_back((held.buffer.hold(), held.index));
             continue;
         }
         let gate = held.gate.get_or_insert_with(|| values.clone());
@@ -768,7 +791,7 @@ fn gate_heads(state: &mut State, behind: &[u64], steps: &mut Steps, gated: &Atom
                 .zip(gate.iter())
                 .all(|(queue, &value)| queue.completed_value() >= value);
         if reached {
-            steps.push((held.buffer.hold(), held.index));
+            steps.push_back((held.buffer.hold(), held.index));
         } else {
             waiting = true;
         }

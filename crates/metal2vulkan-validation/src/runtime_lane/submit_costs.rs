@@ -80,14 +80,19 @@ enum Kind {
     Fresh,
 }
 
-/// The counts of the i915 counter (`scripts/i915-execbuffers/counter.c`), as it exports them.
+/// The counts of the kernel-submission counter (`scripts/i915-execbuffers/counter.c`), as it
+/// exports them.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
-struct Execbuffers {
-    execbuffers: u64,
-    objects: u64,
-    nanos: u64,
-    userptr: u64,
+pub(super) struct Execbuffers {
+    /// The kernel submissions: i915's execbuffers, amdgpu's command submissions.
+    pub(super) execbuffers: u64,
+    /// The buffer objects they listed.
+    pub(super) objects: u64,
+    /// The nanoseconds they spent in the ioctl.
+    pub(super) nanos: u64,
+    /// The listed objects that were host imports (userptrs).
+    pub(super) userptr: u64,
     prime: u64,
     block64: u64,
     created_other: u64,
@@ -98,7 +103,7 @@ struct Execbuffers {
 
 impl Execbuffers {
     /// The counter's counts so far, where it is loaded.
-    fn read() -> Option<Execbuffers> {
+    pub(super) fn read() -> Option<Execbuffers> {
         // SAFETY: a lookup of a symbol by its name among the process's loaded objects.
         let found = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"m2v_i915_shim_counts".as_ptr()) };
         if found.is_null() {
@@ -132,7 +137,7 @@ impl Execbuffers {
 }
 
 /// The calling thread's CPU time so far, in microseconds.
-fn thread_cpu_us() -> f64 {
+pub(super) fn thread_cpu_us() -> f64 {
     let mut now = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
@@ -143,18 +148,18 @@ fn thread_cpu_us() -> f64 {
     now.tv_sec as f64 * 1e6 + now.tv_nsec as f64 / 1e3
 }
 
-/// A no-copy buffer over pages of its own, which its deallocator unmaps.
-fn import(work: &Workload) -> Buffer {
-    let pages = Mapping::anonymous(IMPORT_BYTES);
+/// A no-copy buffer of `device` over `bytes` of pages of its own, which its deallocator unmaps.
+pub(super) fn import(device: &Device, bytes: usize) -> Buffer {
+    let pages = Mapping::anonymous(bytes);
     pages.fill(0x5a);
     let pointer = pages.pointer();
     // SAFETY: the pages are this process's, mapped read and write, and unmapped only by the
     // deallocator, once the runtime let go of them.
     unsafe {
         no_copy(
-            &work.device,
+            device,
             pointer,
-            IMPORT_BYTES,
+            bytes,
             ResourceOptions::shared(),
             Some(Box::new(move |_, _| drop(pages))),
         )
@@ -208,7 +213,7 @@ impl Lane {
     fn churn_imports(&mut self, frame: usize) {
         for at in 0..IMPORTS_A_FRAME {
             let at = (frame * IMPORTS_A_FRAME + at) % IMPORTS;
-            self.imports[at] = import(&self.work);
+            self.imports[at] = import(&self.work.device, IMPORT_BYTES);
         }
     }
 }
@@ -337,7 +342,7 @@ fn handed_off(lane: &Lane) -> u64 {
 
 /// Keep the device's scheduler thread busy until `stop` (the module docs): the batches it had
 /// it submit.
-fn side_load(device: &Device, stop: &AtomicBool) -> u64 {
+pub(super) fn side_load(device: &Device, stop: &AtomicBool) -> u64 {
     let queue = device.new_command_queue().unwrap();
     let event = device.new_shared_event().unwrap();
     let target = device.new_buffer(4096, ResourceOptions::private()).unwrap();
@@ -380,7 +385,9 @@ fn submit_costs() {
     })
     .unwrap();
     let work = Workload::new(device);
-    let imports = (0..IMPORTS).map(|_| import(&work)).collect();
+    let imports = (0..IMPORTS)
+        .map(|_| import(&work.device, IMPORT_BYTES))
+        .collect();
     let mut lane = Lane {
         work,
         imports,

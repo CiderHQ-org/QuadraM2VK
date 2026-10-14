@@ -1,7 +1,9 @@
 //! `scheduler/inbox.rs`: a commit that finds a pass under way on another thread returns at once
 //! and its commit goes next, in commit order; one that finds the lock held for no pass passes
-//! itself; and commits from many threads racing passes and short holds are all passed, each
-//! thread's in its order, with no pass made for them at the end.
+//! itself; the scheduler's pass looks again for a commit left to it until a pass answers it has
+//! work of its own first; and commits from many threads racing passes, ones that stop looking
+//! again, and short holds are all passed, each thread's in its order, with no pass made for them
+//! at the end.
 
 use crate::device::lock;
 use crate::scheduler::inbox::Inbox;
@@ -91,6 +93,53 @@ fn a_commit_finding_the_lock_held_for_no_pass_passes_itself() {
 }
 
 #[test]
+fn the_scheduler_s_pass_looks_again_until_a_pass_answers_it_has_work_first() {
+    for again in [true, false] {
+        let inbox = Arc::new(Log::new(Vec::new()));
+        let (entered, in_pass) = mpsc::channel();
+        let (release, released) = mpsc::channel::<()>();
+        let scheduler = {
+            let inbox = Arc::clone(&inbox);
+            thread::spawn(move || {
+                let mut passes = 0;
+                inbox.pass(|log, commits| {
+                    take_in(log, commits);
+                    passes += 1;
+                    // The first pass stays under way until the test lets it end.
+                    if passes == 1 {
+                        entered.send(()).unwrap();
+                        released.recv_timeout(WAIT).unwrap();
+                    }
+                    again
+                });
+                passes
+            })
+        };
+        in_pass.recv_timeout(WAIT).unwrap();
+        assert!(inbox.commit(1, take_in), "left to the pass under way");
+        release.send(()).unwrap();
+        let passes = scheduler.join().unwrap();
+        if again {
+            // It looked again and took the commit in.
+            assert_eq!(passes, 2);
+            assert_eq!(*lock(inbox.state()), [1]);
+            assert!(!inbox.holds_commits());
+        } else {
+            // It stopped: the commit waits for its own look.
+            assert_eq!(passes, 1);
+            assert!(lock(inbox.state()).is_empty());
+            assert!(inbox.holds_commits());
+            inbox.pass(|log, commits| {
+                take_in(log, commits);
+                true
+            });
+            assert_eq!(*lock(inbox.state()), [1]);
+            assert!(!inbox.holds_commits());
+        }
+    }
+}
+
+#[test]
 fn commits_racing_passes_and_short_holds_are_all_passed_each_thread_s_in_its_order() {
     const THREADS: u32 = 4;
     const COMMITS: u32 = 2000;
@@ -112,12 +161,17 @@ fn commits_racing_passes_and_short_holds_are_all_passed_each_thread_s_in_its_ord
             })
         })
         .collect();
-    // The scheduler's thread: passes of its own.
+    // The scheduler's thread: passes of its own, every other one answering it has work first,
+    // which the thread's next pass follows, as its own look before it sleeps would; the last one
+    // looks again.
     let scheduler = {
         let inbox = Arc::clone(&inbox);
         thread::spawn(move || {
-            for _ in 0..COMMITS {
-                inbox.pass(slow);
+            for round in 0..COMMITS {
+                inbox.pass(|log, commits| {
+                    slow(log, commits);
+                    round % 2 == 0 || round + 1 == COMMITS
+                });
                 thread::yield_now();
             }
         })
