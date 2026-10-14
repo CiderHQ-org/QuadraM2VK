@@ -157,6 +157,10 @@ the runtime made.
 - `Device::raw()` gives the entry, instance, physical device, `ash::Device` and queue family.
   `CommandQueue::with_vk_queue` lends a queue's `VkQueue` under the runtime's lock.
 - `Texture::vk_image`, `Buffer::vk_buffer` and `SharedEvent::vk_semaphore` give an object's handle.
+  A texture over a buffer's bytes that aliases them gives a linear image, which over a no-copy
+  buffer's or dma-buf host pages may be of `VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT`
+  (`DRM_FORMAT_MOD_LINEAR`, its one memory plane at the texture's `bytes_per_row`): ask its layout
+  of memory plane 0.
 - `CommandBuffer::encode_wait_for_vk_semaphore` and `encode_signal_vk_semaphore` order a command
   buffer against the consumer's own work.
 - `Device::new_texture_with_vk_image` makes a `Private` texture over the consumer's `VkImage` (a

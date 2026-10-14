@@ -86,6 +86,8 @@ mod own;
 mod pipeline;
 #[cfg(any(m2v_gpu, m2v_cpu_icd))]
 mod pipeline_wait_order;
+#[cfg(unix)]
+mod pitch_refusals;
 mod pixel_format_info;
 mod private_properties;
 mod queue;

@@ -175,6 +175,25 @@ the bytes, announced (`shadowed-texture`, naming why), and a rebind that cannot 
 is refused (`NotImplemented(RebindTextures)`). `WorkCounts::dma_buf_imports`,
 `dma_buf_sparse_buffers`, `dma_buf_images` and `dma_buf_image_fallbacks` count what the route did.
 
+A texture over pages imported by their pointer aliases them where the device lays an image's rows
+at the texture's `bytes_per_row`: the driver's own linear image, or, where that lays its rows
+otherwise, a `DRM_FORMAT_MOD_LINEAR` image at that pitch, which the driver may refuse. Measured
+(`runtime_lane::surface_texture_costs::pitch_classes`, nine formats, four usages, rows padded by
+each power of two from 16 to 4096 bytes):
+
+- ANV (Mesa 26.2.4) packs its own rows tight and takes every pitch asked.
+- NVIDIA (615.71.09) aligns its own rows to 128 bytes and takes any larger pitch for a texture it
+  samples or writes, in `BGRA8Unorm`, `RGBA8Unorm`, `RGB10A2Unorm`, `RGBA16Float`, `R8Unorm` and
+  `RG8Unorm`; not for a render target, and not in `R16Float`, `R32Float` or `RGBA32Float`, whose
+  `DRM_FORMAT_MOD_LINEAR` tiling it gives no sampling or transfers.
+- RADV (Mesa 26.2.4) aligns its own rows to 256 bytes, refuses a pitch that is not a multiple of
+  256, and asks a dedicated allocation of an image at any other, so it takes no pitch but its own.
+
+The own rows' alignments are as measured for `BGRA8Unorm`. Elsewhere the texture is a shadow
+(`shadowed-texture`): a `BGRA8Unorm` surface whose rows are its texels' bytes rounded up to 256
+bytes on RADV, or 128 on NVIDIA, is aliased. `WorkCounts::pitched_host_images` and
+`pitched_host_image_refusals` count the images at Metal's pitch made and refused.
+
 ## 7. Check the integration
 
 `spirv-val` checks structural validity, not agreement with Metal:

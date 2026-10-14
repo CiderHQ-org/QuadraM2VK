@@ -148,6 +148,8 @@ pub(super) mod heap;
 pub(super) mod heap_tiled;
 pub(super) mod heap_two_planes;
 pub(crate) mod host_copy;
+#[cfg(unix)]
+pub(crate) mod pitch_refusals;
 mod rotation;
 mod shared;
 mod staging_copy;
@@ -187,6 +189,16 @@ pub(super) struct TextureState {
     /// Each pixel format's texture capabilities, worked out at its first query
     /// (`families/formats.rs`).
     pub(super) format_answers: Mutex<HashMap<PixelFormat, FormatAnswers>>,
+    /// Each Vulkan format's `DRM_FORMAT_MOD_LINEAR` tiling features, asked of the driver at the
+    /// first image of that tiling planned in it (`dma_buf.rs`'s `modifier_features`): one entry
+    /// per format at most.
+    #[cfg(unix)]
+    pub(super) modifier_features: Mutex<HashMap<Format, FormatFeatureFlags2>>,
+    /// The layouts the driver refused a `DRM_FORMAT_MOD_LINEAR` image for host allocations at
+    /// Metal's row pitch (`texture/pitch_refusals.rs`): a texture of a kept layout is not tried at
+    /// its pitch again.
+    #[cfg(unix)]
+    pitch_refusals: pitch_refusals::PitchRefusals,
     /// The memory types a heap's buffer and its textures' images take, worked out at the first
     /// heap's (`texture/heap.rs`).
     pub(super) heap_types: std::sync::OnceLock<heap::HeapTypes>,
@@ -220,6 +232,10 @@ impl TextureState {
             neutrals: Mutex::new(Neutrals::default()),
             usage_answers: Mutex::new(UsageAnswers::default()),
             format_answers: Mutex::new(HashMap::new()),
+            #[cfg(unix)]
+            modifier_features: Mutex::new(HashMap::new()),
+            #[cfg(unix)]
+            pitch_refusals: pitch_refusals::PitchRefusals::default(),
             heap_types: std::sync::OnceLock::new(),
             storage_forms: storage_form::StorageForms::default(),
             first_moves: first_move::FirstMoves::default(),
@@ -606,13 +622,16 @@ pub(super) struct ImageSwap {
 }
 
 /// A linear image for a texture over a buffer's bytes, made and not yet bound
-/// ([`Device::linear_image`], [`Device::host_linear_image`]): its memory requirements, the
-/// layout of its first subresource, and the layout it starts in.
+/// ([`Device::linear_image`], [`Device::host_linear_image`], [`Device::host_pitched_image`]): its
+/// memory requirements, the layout of its first subresource, and the layout it starts in.
 struct LinearMade {
     raw: vk::Image,
     requirements: vk::MemoryRequirements,
     report: vk::SubresourceLayout,
     initial: vk::ImageLayout,
+    /// It is a `DRM_FORMAT_MOD_LINEAR` image laid out at Metal's pitches
+    /// ([`Device::host_pitched_image`]), not the driver's linear image.
+    pitched: bool,
 }
 
 /// Why a texture over a buffer takes no linear image: the need that failed, which the
@@ -1976,15 +1995,26 @@ impl Device {
             return Err(Error::NotImplemented(RuntimeGap::Textures));
         }
         let hazard = texels.options().hazard_tracking_mode()?;
-        let image = self.new_image(plan, layout, descriptor, hazard)?;
         // A depth or stencil texture over a surface's plane copies the aspect the plane holds
         // alone (`copy_plan::surface_depth_unit`); its image's other aspect stays the zeros it
         // was made with, as Metal reads the stencil of `Depth32Float_Stencil8` there.
-        let aspects = texture_aspects(image.plan());
+        let every = texture_aspects(&plan);
         let held = surface_depth_unit(layout.pixel_format).map(|unit| unit.aspect.into());
         let aspects = match held {
-            Some(held) if aspects.contains(held) => held,
-            _ => aspects,
+            Some(held) if every.contains(held) => held,
+            _ => every,
+        };
+        // Every other shadow's copy in writes each of its texels before any command reads it
+        // (`shadow.rs`), so it starts as its memory lies: zeros there would never be read, and
+        // writing them took most of the making (the host's zeros copied into a 1307x512 image
+        // took 0.9 ms of 1 ms on ANV).
+        let image = match aspects == every {
+            true => {
+                let identity = Identity::new(hazard, false);
+                let owner = Device::runtime_owner;
+                self.new_image_as_it_lies(plan, layout, descriptor, identity, owner)?
+            }
+            false => self.new_image(plan, layout, descriptor, hazard)?,
         };
         let copies = texels.shadow_copies(image.raw.get(), image.identity, aspects)?;
         // Its copies keep its own image, which it presents again once the bytes lie in pages.
@@ -1999,6 +2029,7 @@ impl Device {
             );
             (object, why)
         });
+        self.shared().counts.shadowed_texture_made(aspects != every);
         Ok(Storage::Shadow {
             image: image.shared(),
             texels,
@@ -2195,27 +2226,29 @@ impl Device {
         } else {
             "the device"
         };
-        let made = if let Some(LinearLack { format, features }) = linear_lack(&plan, facts) {
-            Err(LinearRefusal::Need(LinearNeed::Features {
-                format,
-                features,
-            }))
-        } else if host {
-            self.host_linear_image(&plan)?
+        let made = if host {
+            let (row_pitch, slice_pitch) = (texels.layout.row_pitch, texels.layout.slice_pitch);
+            self.host_alias_unbound(&plan, row_pitch, slice_pitch, facts)?
+        } else if let Some(LinearLack { format, features }) = linear_lack(&plan, facts) {
+            Err(
+                LinearRefusal::Need(LinearNeed::Features { format, features })
+                    .describe(&plan, host),
+            )
         } else {
             self.linear_image(&plan)?
+                .map_err(|refusal| refusal.describe(&plan, host))
         };
         let LinearMade {
             raw,
             requirements,
             report,
             initial,
+            pitched,
         } = match made {
             Ok(made) => made,
-            Err(refusal) => {
+            Err(why) => {
                 return Ok(Err(format!(
-                    "{who} makes no linear image of the texture: {}",
-                    refusal.describe(&plan, host)
+                    "{who} makes no linear image of the texture: {why}"
                 )));
             }
         };
@@ -2256,6 +2289,9 @@ impl Device {
             // SAFETY: the image is live and unbound, and no command uses it.
             unsafe { release::object(raw_device, raw) };
             return Err(vulkan(error));
+        }
+        if pitched {
+            self.shared().counts.pitched_host_image_made();
         }
         let image = Image {
             device: self.clone(),
@@ -2606,6 +2642,7 @@ impl Device {
             requirements,
             report,
             initial: vk::ImageLayout::PREINITIALIZED,
+            pitched: false,
         }))
     }
 
@@ -2661,7 +2698,195 @@ impl Device {
             requirements,
             report,
             initial: vk::ImageLayout::UNDEFINED,
+            pitched: false,
         }))
+    }
+
+    /// The unbound image of `plan` made for host allocations whose texels lie at Metal's layout
+    /// in a no-copy buffer's pages, its rows `row_pitch` apart (and slices `slice_pitch`): the
+    /// driver's linear image ([`Device::host_linear_image`]) where it lays them out so, its
+    /// subresource at offset 0; else, where the device enables `VK_EXT_image_drm_format_modifier`,
+    /// a `DRM_FORMAT_MOD_LINEAR` image whose one plane the runtime lays out at those pitches
+    /// ([`Device::host_pitched_image`]). Why not, each attempt's refusal named, where the device
+    /// makes neither. The caller checks the image's alignment, size and memory types against the
+    /// buffer's.
+    fn host_alias_unbound(
+        &self,
+        plan: &ImagePlan,
+        row_pitch: u64,
+        slice_pitch: u64,
+        facts: &ImageFacts<'_>,
+    ) -> Result<Result<LinearMade, String>, Error> {
+        let slices = plan.layers.max(plan.extent[2]);
+        let lies = |report: &vk::SubresourceLayout| {
+            report.offset == 0
+                && report.row_pitch == row_pitch
+                && (slices == 1 || report.array_pitch == slice_pitch)
+        };
+        let made = match linear_lack(plan, facts) {
+            Some(LinearLack { format, features }) => {
+                Err(LinearRefusal::Need(LinearNeed::Features {
+                    format,
+                    features,
+                }))
+            }
+            None => self.host_linear_image(plan)?,
+        };
+        let linear = match made {
+            Ok(made) if lies(&made.report) => return Ok(Ok(made)),
+            Ok(made) => {
+                // SAFETY: the image is live and unbound, and no command uses it.
+                unsafe { release::object(self.shared().vk(), made.raw) };
+                format!(
+                    "its linear image for host allocations lays rows {} bytes apart (slices {}) \
+                     from offset {}",
+                    made.report.row_pitch, made.report.array_pitch, made.report.offset
+                )
+            }
+            Err(refusal) => refusal.describe(plan, true),
+        };
+        Ok(self
+            .host_pitched_image(plan, row_pitch, slice_pitch, facts)?
+            .map_err(|pitched| format!("{linear}; and {pitched}")))
+    }
+
+    /// A `DRM_FORMAT_MOD_LINEAR` image of `plan` made for host allocations, unbound, whose one
+    /// plane lies at offset 0 with rows `row_pitch` apart (and slices `slice_pitch`, for a plan of
+    /// several layers): a texture over a no-copy buffer's host pages where the driver's own linear
+    /// image lays its rows out otherwise than Metal (ANV packs them tight, where a surface's rows
+    /// are padded). Its memory requirements and its plane's layout as the driver reports them,
+    /// starting `UNDEFINED` as Vulkan has an image of external memory made. Why not where the
+    /// device does not enable the extension, makes no such image for host allocations
+    /// (`Device::modifier_image_checks`), refuses the layout, lays it out otherwise (NVIDIA lays
+    /// rows closer than its own linear image's at its own), or asks a dedicated allocation of it:
+    /// the runtime asks the driver and takes its answer, never a rule of its own. A layout the
+    /// driver refused is kept and refused again unasked (`texture/pitch_refusals.rs`).
+    #[cfg(unix)]
+    fn host_pitched_image(
+        &self,
+        plan: &ImagePlan,
+        row_pitch: u64,
+        slice_pitch: u64,
+        facts: &ImageFacts<'_>,
+    ) -> Result<Result<LinearMade, String>, Error> {
+        use crate::dma_buf::{memory_plane_0, ModifierMemory, DRM_FORMAT_MOD_LINEAR};
+        let raw_device = self.shared().vk();
+        let enabled = (self.shared().host_import.as_ref())
+            .is_ok_and(|importer| importer.makes_modifier_images());
+        if !enabled {
+            return Ok(Err(
+                "the device enables no VK_EXT_image_drm_format_modifier for an image at Metal's \
+                 row pitch"
+                    .to_owned(),
+            ));
+        }
+        // A layout the driver refused before is refused again, unasked.
+        let layout = pitch_refusals::PitchedLayout::of(plan, row_pitch);
+        let refusals = &self.shared().textures.pitch_refusals;
+        if layout
+            .as_ref()
+            .is_some_and(|layout| refusals.refused(layout))
+        {
+            self.shared().counts.pitched_host_image_refusal_recalled();
+            return Ok(Err(format!(
+                "the driver refused this DRM_FORMAT_MOD_LINEAR image for host allocations with \
+                 rows {row_pitch} bytes apart before"
+            )));
+        }
+        let host = ModifierMemory::Host;
+        let view_formats = match self.modifier_image_checks(plan, facts, host)? {
+            Ok(view_formats) => view_formats,
+            Err(why) => return Ok(Err(why)),
+        };
+        let array_pitch = if plan.layers > 1 { slice_pitch } else { 0 };
+        let planes = [vk::SubresourceLayout {
+            offset: 0,
+            size: 0,
+            row_pitch,
+            array_pitch,
+            depth_pitch: 0,
+        }];
+        let mut explicit = vk::ImageDrmFormatModifierExplicitCreateInfoEXT::default()
+            .drm_format_modifier(DRM_FORMAT_MOD_LINEAR)
+            .plane_layouts(&planes);
+        // The driver's refusal of the image itself (of its layout, or of an allocation it is not
+        // dedicated) is kept (`texture/pitch_refusals.rs`), and counted.
+        let refused_image = |layout: Option<pitch_refusals::PitchedLayout>| {
+            self.shared().counts.pitched_host_image_refused();
+            if let Some(layout) = layout {
+                refusals.keep(layout);
+            }
+        };
+        let raw = match self.drm_linear_image(plan, &view_formats, &mut explicit, host)? {
+            Ok(raw) => raw,
+            Err(error) => {
+                if error == vk::Result::ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT {
+                    refused_image(layout);
+                }
+                return Ok(Err(format!(
+                    "the driver refuses a DRM_FORMAT_MOD_LINEAR image for host allocations with \
+                     rows {row_pitch} bytes apart ({error:?})"
+                )));
+            }
+        };
+        let mut dedicated = vk::MemoryDedicatedRequirements::default();
+        let requirements = {
+            let mut requirements = vk::MemoryRequirements2::default().push_next(&mut dedicated);
+            let query = vk::ImageMemoryRequirementsInfo2::default().image(raw);
+            // SAFETY: `raw` is a live image of this device; the query is core in Vulkan 1.1.
+            unsafe { raw_device.get_image_memory_requirements2(&query, &mut requirements) };
+            requirements.memory_requirements
+        };
+        // SAFETY: `raw` is a live image of a DRM format modifier's tiling, whose one memory plane
+        // is plane 0 (`VUID-vkGetImageSubresourceLayout-tiling-09433`).
+        let report = unsafe { raw_device.get_image_subresource_layout(raw, memory_plane_0()) };
+        let why = if dedicated.requires_dedicated_allocation != vk::FALSE {
+            refused_image(layout);
+            Some(format!(
+                "it asks a dedicated allocation of a DRM_FORMAT_MOD_LINEAR image of {:?} for \
+                 host allocations, which one bound at an offset of the buffer's import is not",
+                plan.format
+            ))
+        } else if report.offset != 0
+            || report.row_pitch != row_pitch
+            || (plan.layers > 1 && report.array_pitch != array_pitch)
+        {
+            refused_image(layout);
+            Some(format!(
+                "the driver lays a DRM_FORMAT_MOD_LINEAR plane for host allocations out at offset \
+                 {}, rows {} and slices {} bytes apart, where the texels lie at offset 0, rows \
+                 {row_pitch} and slices {array_pitch} apart",
+                report.offset, report.row_pitch, report.array_pitch
+            ))
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            // SAFETY: the image is live and unbound, and no command uses it.
+            unsafe { release::object(raw_device, raw) };
+            return Ok(Err(why));
+        }
+        Ok(Ok(LinearMade {
+            raw,
+            requirements,
+            report,
+            initial: vk::ImageLayout::UNDEFINED,
+            pitched: true,
+        }))
+    }
+
+    /// No image is laid out by DRM format modifier on this system.
+    #[cfg(not(unix))]
+    fn host_pitched_image(
+        &self,
+        _plan: &ImagePlan,
+        _row_pitch: u64,
+        _slice_pitch: u64,
+        _facts: &ImageFacts<'_>,
+    ) -> Result<Result<LinearMade, String>, Error> {
+        Ok(Err(
+            "the system lays out no image by DRM format modifier".to_owned()
+        ))
     }
 
     /// The aliasing images of `watches`, over a no-copy buffer's (or a no-copy heap's) host
@@ -2688,6 +2913,10 @@ impl Device {
         let (memory, base) = pages.memory();
         let type_index = pages.type_index();
         let raw_device = self.shared().vk();
+        let facts = self
+            .shared()
+            .textures
+            .facts(self.compile_device().profile());
         let mut swaps: Vec<ImageSwap> = Vec::new();
         for watch in watches {
             let Some(image) = watch.image.upgrade() else {
@@ -2728,25 +2957,22 @@ impl Device {
                     continue;
                 }
             };
-            let made = self.host_linear_image(image.plan())?;
+            // Its rows (and slices) lie as the old image's did: the texture's, in the driver's
+            // linear image where it lays them out so, else in a `DRM_FORMAT_MOD_LINEAR` image
+            // at those pitches.
+            let made = self.host_alias_unbound(image.plan(), row_pitch, slice_pitch, &facts)?;
             let Ok(LinearMade {
                 raw,
                 requirements,
-                report,
                 initial,
+                pitched,
+                ..
             }) = made
             else {
                 return Err(Error::NotImplemented(RuntimeGap::RebindTextures));
             };
-            // Its rows (and slices) must lie as the old image's did: a `DRM_FORMAT_MOD_LINEAR`
-            // image's are the texture's, which the driver's linear image may not take.
-            let plan = image.plan();
-            let slices = plan.layers.max(plan.extent[2]);
             if requirements.memory_type_bits & (1 << type_index) == 0
                 || !at.is_multiple_of(requirements.alignment.max(1))
-                || report.offset != 0
-                || report.row_pitch != row_pitch
-                || (slices > 1 && report.array_pitch != slice_pitch)
             {
                 // SAFETY: the image is live and unbound, and no command uses it.
                 unsafe { release::object(raw_device, raw) };
@@ -2759,6 +2985,9 @@ impl Device {
                 // SAFETY: the image is live and unbound, and no command uses it.
                 unsafe { release::object(raw_device, raw) };
                 return Err(vulkan(error));
+            }
+            if pitched {
+                self.shared().counts.pitched_host_image_made();
             }
             // Dropped on a later failure, the images made so far go.
             swaps.push(ImageSwap::new(
@@ -3012,7 +3241,8 @@ impl Device {
     /// [`new_image_owned`](Self::new_image_owned)'s image holding what its memory held, whatever
     /// its storage mode: a heap texture's in memory of its own where its bytes in the heap are no
     /// layout of its texels (`texture/heap.rs`, `AliasRoute::Lossless`), as a heap's textures hold
-    /// what their bytes held.
+    /// what their bytes held; and the shadow of a texture over a buffer whose copy in writes every
+    /// texel of every aspect before any command reads it (`storage_over_buffer`).
     fn new_image_as_it_lies(
         &self,
         plan: ImagePlan,

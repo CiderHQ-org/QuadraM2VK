@@ -135,7 +135,7 @@ fn udmabuf(memfd: BorrowedFd<'_>, pieces: &[(u64, u64)]) -> std::io::Result<Owne
 }
 
 /// Whether this process can make a udmabuf; printed, as the test's skip, where it cannot.
-fn udmabuf_openable(test: &str) -> bool {
+pub(super) fn udmabuf_openable(test: &str) -> bool {
     match std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -152,7 +152,7 @@ fn udmabuf_openable(test: &str) -> bool {
 /// Guest RAM: a sealed `memfd` of `len` bytes and one scratch page past them, which no view maps
 /// and which pads a source's last chunk where it makes several; and the file's own whole shared
 /// mapping of the `len` bytes.
-struct Memfd {
+pub(super) struct Memfd {
     fd: OwnedFd,
     len: usize,
     pub(super) whole: View,
@@ -160,10 +160,10 @@ struct Memfd {
 
 /// What a test's source saw: each request, with the number of chunks it answered (0 for an
 /// `Err`).
-type Calls = Arc<Mutex<Vec<(DmaBufRequest, usize)>>>;
+pub(super) type Calls = Arc<Mutex<Vec<(DmaBufRequest, usize)>>>;
 
 impl Memfd {
-    fn new(len: usize) -> Memfd {
+    pub(super) fn new(len: usize) -> Memfd {
         // SAFETY: a new anonymous file, owned at once.
         let fd = unsafe {
             let fd = libc::memfd_create(
@@ -185,7 +185,7 @@ impl Memfd {
     }
 
     /// A view of the file's `pieces` `(offset, size)`, mapped contiguously in that order.
-    fn view(&self, pieces: &[(usize, usize)]) -> View {
+    pub(super) fn view(&self, pieces: &[(usize, usize)]) -> View {
         assert!(pieces
             .iter()
             .all(|&(offset, size)| offset + size <= self.len));
@@ -196,7 +196,7 @@ impl Memfd {
     /// the request, split at multiples of its granule into as few chunks as keep each within the
     /// host's udmabuf limits (an `Err` where one granule alone exceeds them), the last of several
     /// padded with the scratch page. It records each request in `calls`.
-    fn source(&self, view: &View, calls: &Calls) -> DmaBufSource {
+    pub(super) fn source(&self, view: &View, calls: &Calls) -> DmaBufSource {
         self.source_split(view, calls, false)
     }
 
@@ -324,7 +324,7 @@ fn file_pieces(pieces: &[(usize, usize)], at: usize, len: usize) -> Option<Vec<(
 }
 
 /// Pieces of a file mapped shared and contiguously at one address, unmapped when dropped.
-struct View {
+pub(super) struct View {
     at: NonNull<u8>,
     len: usize,
     pieces: Vec<(usize, usize)>,
@@ -376,7 +376,7 @@ impl View {
     }
 
     /// The view's address `offset` bytes in.
-    fn pointer(&self, offset: usize) -> NonNull<u8> {
+    pub(super) fn pointer(&self, offset: usize) -> NonNull<u8> {
         assert!(offset < self.len);
         // SAFETY: inside the view.
         unsafe { NonNull::new_unchecked(self.at.as_ptr().add(offset)) }
@@ -1208,11 +1208,13 @@ fn check_texture_request(
 /// fallback. Each reads the bytes the CPU wrote; the CPU's later writes, with no call between, are
 /// what the next command buffer reads (the image rests in `GENERAL` after its one acquire from the
 /// foreign queue family); a blit's write into it lands in the file's pages at the texels' places,
-/// the padding past each row keeping the CPU's bytes. The one over three pages, `BGRA8Unorm` made
-/// without `PixelFormatView` usage, is read and written through a view in `RGBA8Unorm`
-/// (`texture/view_shadow.rs`), an image over a dma-buf of its own pages too, counted, whose write
-/// the texture then reads. Where the device imports the pointer (NVIDIA, lavapipe) the textures
-/// take the path they took before: the source uncalled, nothing counted.
+/// the padding past each row keeping the CPU's bytes; the same texture made again asks the driver
+/// no format's modifier features (`WorkCounts::modifier_feature_queries`, which RADV's images
+/// ask). The one over three pages, `BGRA8Unorm` made without `PixelFormatView` usage, is read and
+/// written through a view in `RGBA8Unorm` (`texture/view_shadow.rs`), an image over a dma-buf of
+/// its own pages too, counted, whose write the texture then reads. Where the device imports the
+/// pointer (NVIDIA, lavapipe) the textures take the path they took before: the source uncalled,
+/// nothing counted.
 #[test]
 fn a_texture_over_dma_buf_pages_is_an_image_over_its_own_pages() {
     const TEST: &str = "dma-buf texture";
@@ -1341,6 +1343,19 @@ fn a_texture_over_dma_buf_pages_is_an_image_over_its_own_pages() {
                     0 => "the path taken before",
                     _ => "an image over a dma-buf of its own pages",
                 }
+            );
+            // A format's modifier features are asked of the driver once: the same texture made
+            // again asks none.
+            let queries = device.work_counts().modifier_feature_queries;
+            drop(
+                buffer
+                    .new_texture(&descriptor, offset as u64, pitch as u64)
+                    .unwrap(),
+            );
+            assert_eq!(
+                device.work_counts().modifier_feature_queries,
+                queries,
+                "{test}: the same texture made again asked the driver's modifier features"
             );
         }
         drop(buffer);

@@ -433,6 +433,8 @@ mod pipeline_creation;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod pipeline_records;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod pitched_surfaces;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod pixel_downscales;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod pixel_samplers;
@@ -532,6 +534,8 @@ mod submit_costs;
 mod sum_regroup;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod surface_aliases;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd), target_os = "linux"))]
+mod surface_texture_costs;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod swizzled_storage;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]

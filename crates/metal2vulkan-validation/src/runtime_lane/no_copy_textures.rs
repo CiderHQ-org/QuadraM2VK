@@ -7,25 +7,35 @@
 //!
 //! - [`textures_over_no_copy_buffers_read_and_write_the_caller_s_pages`], under the validation
 //!   layer: the consumer's surface formats (and `BGR10_XR`, an extended-range format held in an
-//!   integer image) at 1920x1080 with packed rows, as render targets the shaders read (and write),
-//!   and as textures the shaders only read (and write): the bytes the caller wrote before the
-//!   texture was made are what a blit reads out of it (a linear image made for host allocations
+//!   integer image) at 1920x1080 with packed rows, and with rows padded by 64 bytes as a guest
+//!   browser's surfaces have them (the `_padded` tests), as render targets the shaders read (and
+//!   write), and as textures the shaders only read (and write): the bytes the caller wrote before
+//!   the texture was made are what a blit reads out of it (a linear image made for host allocations
 //!   starts `UNDEFINED`, and its move to `GENERAL` must keep them); a render pass's clear (a blit's
 //!   write, without render target usage) lands in the pages, as the next blit reads the texture;
 //!   the caller's later writes are what the next blit reads; and a blit's write through the texture
 //!   read through the buffer by a blit, and the other way round, in one blit encoder and in two of
 //!   one command buffer, read the write (the texture and its buffer are one resource to hazard
-//!   tracking, which on MoltenVK leaves blits to Metal's tracking). Each texture's form is printed
-//!   (`NOCOPY-TEXTURE`): aliased where `vk_image` answers its own image over the pages, shadowed
-//!   where it answers none.
+//!   tracking, which on MoltenVK leaves blits to Metal's tracking). Padded rows' bytes between
+//!   the rows are never written. Each texture's form is printed (`NOCOPY-TEXTURE`): aliased where
+//!   `vk_image` answers its own image over the pages, shadowed where it answers none, and the
+//!   images the making counted (`WorkCounts::pitched_host_images`, `shadowed_textures`). A shadow
+//!   is made without zeroing its image (`shadows_zeroed`, `images_started_on_the_host`: its copy
+//!   in writes every texel first); on ANV, whose own linear images pack rows tight, a padded
+//!   texture is an image at Metal's row pitch (`DRM_FORMAT_MOD_LINEAR`), never a shadow; and
+//!   making the same texture again asks the driver no format's modifier features
+//!   (`modifier_feature_queries`), nor a layout at Metal's row pitch it refused
+//!   (`pitched_host_image_refusals`, `pitched_host_image_refusals_recalled`), and takes the same
+//!   form.
 //! - [`two_slice_arrays_over_no_copy_buffers_read_and_write_the_caller_s_pages`], under the
 //!   validation layer: two-slice `RGBA8Unorm` 2D arrays made by the linear call, a 4x4 sampled one
 //!   and an 8x8 render target, read and written a slice at a time at Metal's slice places
 //!   (`NOCOPY-ARRAY`: the form, and a shadow's reason).
 //! - [`passes_blend_load_and_store_as_private_textures`], under the validation layer, one process
-//!   per format: render passes over the texture that load, blend and store, and clear and blend,
-//!   match a private texture of the same bytes byte for byte, read through the texture and
-//!   through the buffer (`NOCOPY-BLEND`).
+//!   per format and row pitch (packed, and padded by 64 bytes): render passes over the texture that
+//!   load, blend and store, and clear and blend, match a private texture of the same bytes byte
+//!   for byte, read through the texture and through the buffer, the bytes between padded rows
+//!   untouched (`NOCOPY-BLEND`).
 //! - [`surface_frame_costs`], without the validation layer, report only (built in release for the
 //!   numbers): the consumer's display surface, a 1920x1080 `RGBA16Float` or `BGRA8Unorm` texture
 //!   of an IOSurface plane over a no-copy buffer of the surface's pages, written each frame by a
@@ -43,6 +53,7 @@ use crate::air_library::AirLibrary;
 use crate::gpu::TEST_DEVICE;
 use metal2vulkan::metal::{BlendFactor, PixelFormat, PrimitiveType, TextureType, TextureUsage};
 use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};
+use metal2vulkan::vk::DriverId;
 use metal2vulkan_devtools::llvm_assemble;
 use metal2vulkan_runtime::{
     BlitOption, Buffer, ClearColor, CommandQueue, Degradation, Device, IoSurfacePlane, LoadAction,
@@ -149,17 +160,45 @@ fn clear(queue: &CommandQueue, texture: &Texture, color: [f64; 4]) {
     assert_eq!(command_buffer.error(), None);
 }
 
-/// A test of each of the consumer's surface formats, with its texels' bytes, each in a process of
-/// its own: `$test(pf, texel)` as `$name_<format>`.
+/// A test of each of the consumer's surface formats, with its texels' bytes and the bytes its rows
+/// are padded by, each in a process of its own: `$test(pf, texel, pad)` as `$name`.
 macro_rules! per_format {
-    ($test:ident: $($name:ident => $pf:ident, $texel:expr;)*) => {
+    ($test:ident: $($name:ident => $pf:ident, $texel:expr, $pad:expr;)*) => {
         $(
             #[test]
             fn $name() {
-                $test(PixelFormat::$pf, $texel);
+                $test(PixelFormat::$pf, $texel, $pad);
             }
         )*
     };
+}
+
+/// The texels of `bytes` laid out in rows `bpr` apart, each row's `row` bytes of texels, of the
+/// [`H`] rows: what a texture over them reads and writes.
+fn texel_rows(bytes: &[u8], bpr: u64, row: u64) -> Vec<u8> {
+    bytes
+        .chunks(bpr as usize)
+        .take(H as usize)
+        .flat_map(|r| &r[..row as usize])
+        .copied()
+        .collect()
+}
+
+/// The bytes of `bytes` between rows `bpr` apart of `row` bytes of texels, of the [`H`] rows: what
+/// no texture over them writes.
+fn padding(bytes: &[u8], bpr: u64, row: u64) -> Vec<u8> {
+    bytes
+        .chunks(bpr as usize)
+        .take(H as usize)
+        .flat_map(|r| &r[(row as usize).min(r.len())..])
+        .copied()
+        .collect()
+}
+
+/// Whether the device is ANV, whose own linear images pack rows tight: a texture over host
+/// pages with padded rows is there an image at Metal's row pitch.
+fn anv(device: &Device) -> bool {
+    device.properties().description.driver_id == Some(DriverId::INTEL_OPEN_SOURCE_MESA)
 }
 
 /// A `Shared` buffer holding `bytes`.
@@ -180,11 +219,18 @@ fn bytes_of(buffer: &Buffer) -> Vec<u8> {
     unsafe { std::slice::from_raw_parts(contents.as_ptr(), buffer.length() as usize) }.to_vec()
 }
 
-/// A write of `texture` (rows `bpr` bytes apart) through a blit, then a read of `under`, the
-/// no-copy buffer it lies over, by a blit, and the other way round (a write of `under`, then a
-/// read of `texture`), each pair in one blit encoder when `one_encoder`, else in two encoders of
-/// one command buffer: each read sees its write, as one resource's accesses are ordered.
-fn ordered(queue: &CommandQueue, texture: &Texture, under: &Buffer, bpr: u64, one_encoder: bool) {
+/// A write of `texture` (rows `bpr` bytes apart, `row` bytes of texels each) through a blit, then
+/// a read of `under`, the no-copy buffer it lies over, by a blit, and the other way round (a write
+/// of `under`, then a read of `texture`), each pair in one blit encoder when `one_encoder`, else in
+/// two encoders of one command buffer: each read sees its write's texels, as one resource's
+/// accesses are ordered.
+fn ordered(
+    queue: &CommandQueue,
+    texture: &Texture,
+    under: &Buffer,
+    (bpr, row): (u64, u64),
+    one_encoder: bool,
+) {
     let device = queue.device();
     let n = bpr * H;
     let (origin, size) = whole();
@@ -239,7 +285,7 @@ fn ordered(queue: &CommandQueue, texture: &Texture, under: &Buffer, bpr: u64, on
         command_buffer.wait_until_completed_for(WAIT).unwrap();
         assert_eq!(command_buffer.error(), None);
         assert!(
-            bytes_of(&out) == pattern,
+            texel_rows(&bytes_of(&out), bpr, row) == texel_rows(&pattern, bpr, row),
             "a {} write read through the {} in {}: stale bytes",
             if texture_first { "texture" } else { "buffer" },
             if texture_first { "buffer" } else { "texture" },
@@ -252,11 +298,13 @@ fn ordered(queue: &CommandQueue, texture: &Texture, under: &Buffer, bpr: u64, on
     }
 }
 
-/// A texture over a no-copy buffer reads the caller's bytes and writes into them as Metal's
-/// does, aliased or shadowed (the module docs), as a render target or not; a write through it
-/// read through the buffer, and the other way round, in one blit encoder and in two, each see
-/// the write. The form of each is printed. One test a format, each its own process.
-fn read_and_write_the_caller_s_pages(pf: PixelFormat, texel: u64) {
+/// A texture over a no-copy buffer, its rows padded by `pad` bytes, reads the caller's bytes and
+/// writes into them as Metal's does, aliased or shadowed (the module docs), as a render target or
+/// not, never the bytes between its rows; a write through it read through the buffer, and the
+/// other way round, in one blit encoder and in two, each see the write. A shadow is made without
+/// zeroing its image; on ANV a padded texture is an image at Metal's row pitch. The form of each
+/// is printed. One test a format and pitch, each its own process.
+fn read_and_write_the_caller_s_pages(pf: PixelFormat, texel: u64, pad: u64) {
     let cache = ScratchCache::new().unwrap();
     let messages = Messages::default();
     {
@@ -269,7 +317,9 @@ fn read_and_write_the_caller_s_pages(pf: PixelFormat, texel: u64) {
             TextureUsage::SHADER_READ | TextureUsage::SHADER_WRITE,
         ];
         for usage in usages {
-            let bpr = W * texel;
+            let row = W * texel;
+            let bpr = row + pad;
+            let rows = |bytes: &[u8]| texel_rows(bytes, bpr, row);
             let n = (bpr * H) as usize;
             let len = n.next_multiple_of(GUEST_PAGE);
             let mapping = Mapping::anonymous(len);
@@ -280,20 +330,79 @@ fn read_and_write_the_caller_s_pages(pf: PixelFormat, texel: u64) {
             let mut d = TextureDescriptor::texture_2d(pf, W, H, false);
             d.usage = usage;
             d.resource_options = buffer.resource_options();
+            let before = device.work_counts();
             let texture = buffer.new_texture(&d, 0, bpr).unwrap();
+            let counted = device.work_counts();
             let made = aliased(&texture);
-            let what = format!("{} usage {usage:?}", pf.name());
+            let what = format!("{} usage {usage:?}, rows of {bpr} bytes", pf.name());
+            let pitched = counted.pitched_host_images - before.pitched_host_images;
+            let shadowed = counted.shadowed_textures - before.shadowed_textures;
+            if made {
+                assert_eq!(
+                    shadowed, 0,
+                    "{what}: an aliased texture counted as shadowed"
+                );
+            } else {
+                // Its copy in writes every texel before any command reads it: no zeros first.
+                assert_eq!(shadowed, 1, "{what}: a shadow not counted");
+                assert_eq!(
+                    counted.shadows_zeroed - before.shadows_zeroed,
+                    0,
+                    "{what}: the shadow's image was zeroed"
+                );
+                assert_eq!(
+                    counted.images_started_on_the_host - before.images_started_on_the_host,
+                    0,
+                    "{what}: the shadow's image was zeroed on the host"
+                );
+            }
+            if pad != 0 && anv(&device) {
+                assert!(
+                    made && pitched == 1,
+                    "{what}: on ANV not an image at Metal's row pitch (aliased {made}, pitched \
+                     images {pitched})"
+                );
+            }
+            // A format's modifier features are asked of the driver once, and a layout it refused
+            // is not asked again: making the same texture again asks neither, and takes the same
+            // form.
+            let again = buffer.new_texture(&d, 0, bpr).unwrap();
+            let asked = device.work_counts();
+            assert_eq!(
+                asked.modifier_feature_queries - counted.modifier_feature_queries,
+                0,
+                "{what}: the same texture's making asked the driver's modifier features again"
+            );
+            // The first making's refusal was asked or recalled (an earlier usage's image may be
+            // this one's); the second recalls it.
+            let refused = (counted.pitched_host_image_refusals
+                - before.pitched_host_image_refusals)
+                + (counted.pitched_host_image_refusals_recalled
+                    - before.pitched_host_image_refusals_recalled);
+            assert_eq!(
+                (
+                    asked.pitched_host_image_refusals - counted.pitched_host_image_refusals,
+                    asked.pitched_host_image_refusals_recalled
+                        - counted.pitched_host_image_refusals_recalled,
+                ),
+                (0, refused),
+                "{what}: the same texture's making asked the driver a layout it refused (refused \
+                 or recalled at first {refused})"
+            );
+            assert_eq!(aliased(&again), made, "{what}: made again in another form");
+            drop(again);
+            let between = padding(&mapping.read(0..n), bpr, row);
             // The caller's bytes from before the texture was made.
             assert!(
-                blit_out(&queue, &texture, bpr) == mapping.read(0..n),
+                rows(&blit_out(&queue, &texture, bpr)) == rows(&mapping.read(0..n)),
                 "{what}: a blit does not read the caller's bytes"
             );
             if usage.contains(TextureUsage::RENDER_TARGET) {
                 // A render pass's clear, in the pages.
                 clear(&queue, &texture, [0.25, 0.5, 0.75, 1.0]);
-                let cleared = blit_out(&queue, &texture, bpr);
+                let cleared = rows(&blit_out(&queue, &texture, bpr));
                 assert!(
-                    cleared == mapping.read(0..n),
+                    cleared == rows(&mapping.read(0..n)),
                     "{what}: the clear is not in the pages"
                 );
                 let first = &cleared[..texel as usize];
@@ -331,21 +440,26 @@ fn read_and_write_the_caller_s_pages(pf: PixelFormat, texel: u64) {
                 command_buffer.wait_until_completed_for(WAIT).unwrap();
                 assert_eq!(command_buffer.error(), None);
                 assert!(
-                    mapping.read(0..n) == written,
+                    rows(&mapping.read(0..n)) == rows(&written),
                     "{what}: the blit's write is not in the pages"
                 );
             }
+            assert!(
+                padding(&mapping.read(0..n), bpr, row) == between,
+                "{what}: a write through the texture reached the bytes between its rows"
+            );
             // The caller's later bytes.
             mapping.write(0, &counting(len, 11));
             assert!(
-                blit_out(&queue, &texture, bpr) == mapping.read(0..n),
+                rows(&blit_out(&queue, &texture, bpr)) == rows(&mapping.read(0..n)),
                 "{what}: a blit does not read the caller's later bytes"
             );
             // Writes through the texture and the buffer, read the other way.
-            ordered(&queue, &texture, &buffer, bpr, true);
-            ordered(&queue, &texture, &buffer, bpr, false);
+            ordered(&queue, &texture, &buffer, (bpr, row), true);
+            ordered(&queue, &texture, &buffer, (bpr, row), false);
             eprintln!(
-                "NOCOPY-TEXTURE on {}: {what} {W}x{H}, rows of {bpr} bytes: {}",
+                "NOCOPY-TEXTURE on {}: {what} {W}x{H}: {} (pitched host images {pitched}, \
+                 refused {refused}, shadows {shadowed})",
                 device.name(),
                 form(made)
             );
@@ -362,11 +476,16 @@ fn read_and_write_the_caller_s_pages(pf: PixelFormat, texel: u64) {
 
 per_format! {
     read_and_write_the_caller_s_pages:
-    textures_over_no_copy_buffers_read_and_write_the_caller_s_pages_bgra8 => BGRA8Unorm, 4;
-    textures_over_no_copy_buffers_read_and_write_the_caller_s_pages_rgba16f => RGBA16Float, 8;
-    textures_over_no_copy_buffers_read_and_write_the_caller_s_pages_rgb10a2 => RGB10A2Unorm, 4;
-    textures_over_no_copy_buffers_read_and_write_the_caller_s_pages_rgba8 => RGBA8Unorm, 4;
-    textures_over_no_copy_buffers_read_and_write_the_caller_s_pages_bgr10_xr => BGR10XR, 4;
+    textures_over_no_copy_buffers_read_and_write_the_caller_s_pages_bgra8 => BGRA8Unorm, 4, 0;
+    textures_over_no_copy_buffers_read_and_write_the_caller_s_pages_rgba16f => RGBA16Float, 8, 0;
+    textures_over_no_copy_buffers_read_and_write_the_caller_s_pages_rgb10a2 => RGB10A2Unorm, 4, 0;
+    textures_over_no_copy_buffers_read_and_write_the_caller_s_pages_rgba8 => RGBA8Unorm, 4, 0;
+    textures_over_no_copy_buffers_read_and_write_the_caller_s_pages_bgr10_xr => BGR10XR, 4, 0;
+    textures_over_no_copy_buffers_read_and_write_the_caller_s_pages_bgra8_padded => BGRA8Unorm, 4, 64;
+    textures_over_no_copy_buffers_read_and_write_the_caller_s_pages_rgba16f_padded => RGBA16Float, 8, 64;
+    textures_over_no_copy_buffers_read_and_write_the_caller_s_pages_rgb10a2_padded => RGB10A2Unorm, 4, 64;
+    textures_over_no_copy_buffers_read_and_write_the_caller_s_pages_rgba8_padded => RGBA8Unorm, 4, 64;
+    textures_over_no_copy_buffers_read_and_write_the_caller_s_pages_bgr10_xr_padded => BGR10XR, 4, 64;
 }
 
 /// `texture`'s slice `slice`, `w`x`h` texels with rows `bpr` bytes apart, blitted out into a new
@@ -769,22 +888,23 @@ fn differing(a: &[u8], b: &[u8], texel: u64) -> (usize, Option<usize>) {
     (count, first)
 }
 
-/// A render pass over a texture over a no-copy buffer (a surface's render target) loads, blends
-/// and stores as one over a private texture of the same bytes does, byte for byte on the same
-/// device, aliased or shadowed: a pass that loads the caller's bytes and blends over the left
-/// half, read through the texture and through the buffer in the same command buffer; a blit's
-/// write of the buffer, then a pass that loads it and blends over the right half, in one command
-/// buffer; and a pass that clears and blends over the left half. The pages hold the reference's
-/// bytes after each. The form is printed (`NOCOPY-BLEND`). One test a format, each its own
-/// process.
-fn passes_blend_load_and_store_as_private_textures(pf: PixelFormat, texel: u64) {
+/// A render pass over a texture over a no-copy buffer (a surface's render target), its rows padded
+/// by `pad` bytes, loads, blends and stores as one over a private texture of the same bytes does,
+/// byte for byte on the same device, aliased or shadowed: a pass that loads the caller's bytes and
+/// blends over the left half, read through the texture and through the buffer in the same command
+/// buffer; a blit's write of the buffer, then a pass that loads it and blends over the right half,
+/// in one command buffer; and a pass that clears and blends over the left half. The pages hold the
+/// reference's texels after each, and the bytes between the rows stay the caller's. The form is
+/// printed (`NOCOPY-BLEND`). One test a format and pitch, each its own process.
+fn passes_blend_load_and_store_as_private_textures(pf: PixelFormat, texel: u64, pad: u64) {
     let cache = ScratchCache::new().unwrap();
     let messages = Messages::default();
     {
         let device = validated_device(TEST_DEVICE, &messages, cache.path()).unwrap();
         let queue = device.new_command_queue().unwrap();
         let pipeline = blending(&device, pf);
-        let bpr = W * texel;
+        let row = W * texel;
+        let bpr = row + pad;
         let n = (bpr * H) as usize;
         let len = n.next_multiple_of(GUEST_PAGE);
         let mapping = Mapping::anonymous(len);
@@ -799,13 +919,25 @@ fn passes_blend_load_and_store_as_private_textures(pf: PixelFormat, texel: u64) 
         let texture = buffer.new_texture(&d, 0, bpr).unwrap();
         d.resource_options = ResourceOptions::private();
         let private = device.new_texture(&d).unwrap();
-        let what = format!("{} {W}x{H} ({})", pf.name(), form(aliased(&texture)));
+        let what = format!(
+            "{} {W}x{H}, rows of {bpr} bytes ({})",
+            pf.name(),
+            form(aliased(&texture))
+        );
         let check = |round: &str, ours: &[u8], reference: &[u8]| {
-            let (count, first) = differing(ours, reference, texel);
+            let (ours, reference) = (texel_rows(ours, bpr, row), texel_rows(reference, bpr, row));
+            let (count, first) = differing(&ours, &reference, texel);
             assert!(
                 count == 0,
                 "{what}, {round}: {count} texels differ from the private texture's, the first \
                  at texel {first:?}"
+            );
+        };
+        // The bytes between the rows, which no pass or blit through the texture writes.
+        let between = |round: &str, expected: &[u8]| {
+            assert!(
+                padding(&mapping.read(0..n), bpr, row) == padding(expected, bpr, row),
+                "{what}, {round}: the bytes between the rows changed"
             );
         };
         let second = texels_of(texel, n, 2);
@@ -853,6 +985,7 @@ fn passes_blend_load_and_store_as_private_textures(pf: PixelFormat, texel: u64) 
             &mapping.read(0..n),
             &reference,
         );
+        between("the first pass", &initial);
         // A blit's write of the buffer, then a pass that loads it, in one command buffer.
         let (reference, _) = round(
             &queue,
@@ -884,6 +1017,7 @@ fn passes_blend_load_and_store_as_private_textures(pf: PixelFormat, texel: u64) 
             &reference,
         );
         check("that pass, in the pages", &mapping.read(0..n), &reference);
+        between("the blit's write and the pass", &second);
         // A pass that clears and blends.
         let (reference, _) = round(
             &queue,
@@ -911,6 +1045,7 @@ fn passes_blend_load_and_store_as_private_textures(pf: PixelFormat, texel: u64) 
         );
         check("a pass that clears and blends", &ours, &reference);
         check("that pass, in the pages", &mapping.read(0..n), &reference);
+        between("the pass that clears", &second);
         eprintln!(
             "NOCOPY-BLEND on {}: {what}: every round as a private texture's",
             device.name()
@@ -927,10 +1062,14 @@ fn passes_blend_load_and_store_as_private_textures(pf: PixelFormat, texel: u64) 
 
 per_format! {
     passes_blend_load_and_store_as_private_textures:
-    passes_over_no_copy_textures_blend_load_and_store_as_private_ones_bgra8 => BGRA8Unorm, 4;
-    passes_over_no_copy_textures_blend_load_and_store_as_private_ones_rgba16f => RGBA16Float, 8;
-    passes_over_no_copy_textures_blend_load_and_store_as_private_ones_rgb10a2 => RGB10A2Unorm, 4;
-    passes_over_no_copy_textures_blend_load_and_store_as_private_ones_rgba8 => RGBA8Unorm, 4;
+    passes_over_no_copy_textures_blend_load_and_store_as_private_ones_bgra8 => BGRA8Unorm, 4, 0;
+    passes_over_no_copy_textures_blend_load_and_store_as_private_ones_rgba16f => RGBA16Float, 8, 0;
+    passes_over_no_copy_textures_blend_load_and_store_as_private_ones_rgb10a2 => RGB10A2Unorm, 4, 0;
+    passes_over_no_copy_textures_blend_load_and_store_as_private_ones_rgba8 => RGBA8Unorm, 4, 0;
+    passes_over_no_copy_textures_blend_load_and_store_as_private_ones_bgra8_padded => BGRA8Unorm, 4, 64;
+    passes_over_no_copy_textures_blend_load_and_store_as_private_ones_rgba16f_padded => RGBA16Float, 8, 64;
+    passes_over_no_copy_textures_blend_load_and_store_as_private_ones_rgb10a2_padded => RGB10A2Unorm, 4, 64;
+    passes_over_no_copy_textures_blend_load_and_store_as_private_ones_rgba8_padded => RGBA8Unorm, 4, 64;
 }
 
 /// How a frame's render pass writes the surface.

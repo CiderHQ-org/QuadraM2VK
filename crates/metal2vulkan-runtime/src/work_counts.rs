@@ -89,6 +89,12 @@ pub(crate) struct Counters {
     dma_buf_sparse_buffers: AtomicU64,
     dma_buf_images: AtomicU64,
     dma_buf_image_fallbacks: AtomicU64,
+    pitched_host_images: AtomicU64,
+    pitched_host_image_refusals: AtomicU64,
+    pitched_host_image_refusals_recalled: AtomicU64,
+    modifier_feature_queries: AtomicU64,
+    shadowed_textures: AtomicU64,
+    shadows_zeroed: AtomicU64,
     replay_logs_kept: AtomicU64,
     replay_log_bytes: AtomicU64,
     encoders_reencoded: AtomicU64,
@@ -480,6 +486,46 @@ impl Counters {
         self.dma_buf_image_fallbacks.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// A texture's image over a no-copy buffer's host pages imported by their pointer was made a
+    /// `DRM_FORMAT_MOD_LINEAR` image at Metal's row pitch and bound there (`texture.rs`'s
+    /// `host_pitched_image`).
+    pub(crate) fn pitched_host_image_made(&self) {
+        self.pitched_host_images.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The driver refused a `DRM_FORMAT_MOD_LINEAR` image at Metal's row pitch (`texture.rs`'s
+    /// `host_pitched_image`).
+    #[cfg(unix)]
+    pub(crate) fn pitched_host_image_refused(&self) {
+        self.pitched_host_image_refusals
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A texture's image at Metal's row pitch was not asked of the driver, which refused the same
+    /// image before (`texture/pitch_refusals.rs`).
+    #[cfg(unix)]
+    pub(crate) fn pitched_host_image_refusal_recalled(&self) {
+        self.pitched_host_image_refusals_recalled
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The driver was asked a format's `DRM_FORMAT_MOD_LINEAR` tiling features (`dma_buf.rs`'s
+    /// `modifier_features`).
+    #[cfg(unix)]
+    pub(crate) fn modifier_features_asked(&self) {
+        self.modifier_feature_queries
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A texture over a buffer's bytes was made a shadow of them (`shadow.rs`), its image zeroed
+    /// first where `zeroed` (its copies leave an aspect out).
+    pub(crate) fn shadowed_texture_made(&self, zeroed: bool) {
+        self.shadowed_textures.fetch_add(1, Ordering::Relaxed);
+        if zeroed {
+            self.shadows_zeroed.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     /// A command buffer kept an ended encoder's log of `bytes` bytes (`replay.rs`).
     pub(crate) fn replay_log_kept(&self, bytes: usize) {
         self.replay_logs_kept.fetch_add(1, Ordering::Relaxed);
@@ -855,6 +901,32 @@ pub struct WorkCounts {
     /// driver refused the import): each takes the path of a texture over memory no image aliases
     /// (`shadowed-texture`).
     pub dma_buf_image_fallbacks: u64,
+    /// Images of textures over no-copy buffers' host pages imported by their pointer made
+    /// `DRM_FORMAT_MOD_LINEAR` images at Metal's row pitch, where the driver's own linear image
+    /// lays the rows out otherwise (ANV packs them tight), each bound in the buffer's import and
+    /// aliasing its bytes: one per image made, a rebind's too.
+    pub pitched_host_images: u64,
+    /// Images at Metal's row pitch the driver refused (with
+    /// `VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT`, by laying the plane out at another
+    /// offset or pitch, or by asking a dedicated allocation of it): one per image asked of the
+    /// driver, and a texture asks up to two (with a usage it did not declare, then without).
+    pub pitched_host_image_refusals: u64,
+    /// Images at Metal's row pitch not asked of the driver, which refused the same image (format,
+    /// extent, usage, flags, view formats and row pitch) before (`texture/pitch_refusals.rs`).
+    pub pitched_host_image_refusals_recalled: u64,
+    /// Formats whose `DRM_FORMAT_MOD_LINEAR` tiling features the driver was asked, for an image
+    /// over dma-bufs or one at Metal's row pitch over host pages: each format once at most, as
+    /// the answer is kept.
+    pub modifier_feature_queries: u64,
+    /// Textures over a buffer's bytes (a 2D texture or array over a buffer, a no-copy buffer or an
+    /// IOSurface plane, or a view of another layout of one) that no image aliases, each an image
+    /// of its own that the encoders copy the bytes into and back (`shadowed-texture`).
+    pub shadowed_textures: u64,
+    /// Of `shadowed_textures`, those whose image was zeroed as it was made: its copies leave an
+    /// aspect out (a depth texture over a surface's plane, whose image's stencil reads zero).
+    /// Every other shadow's copy in writes each texel before any command reads it, so its image
+    /// starts as its memory lies.
+    pub shadows_zeroed: u64,
     /// Ended compute and blit encoders whose logs their command buffers kept, as a rebind before
     /// the first submission may encode them again (`replay.rs`), and the bytes of those logs.
     pub replay_logs_kept: u64,
@@ -1001,6 +1073,16 @@ impl Device {
             dma_buf_sparse_buffers: counters.dma_buf_sparse_buffers.load(Ordering::Relaxed),
             dma_buf_images: counters.dma_buf_images.load(Ordering::Relaxed),
             dma_buf_image_fallbacks: counters.dma_buf_image_fallbacks.load(Ordering::Relaxed),
+            pitched_host_images: counters.pitched_host_images.load(Ordering::Relaxed),
+            pitched_host_image_refusals: counters
+                .pitched_host_image_refusals
+                .load(Ordering::Relaxed),
+            pitched_host_image_refusals_recalled: counters
+                .pitched_host_image_refusals_recalled
+                .load(Ordering::Relaxed),
+            modifier_feature_queries: counters.modifier_feature_queries.load(Ordering::Relaxed),
+            shadowed_textures: counters.shadowed_textures.load(Ordering::Relaxed),
+            shadows_zeroed: counters.shadows_zeroed.load(Ordering::Relaxed),
             replay_logs_kept: counters.replay_logs_kept.load(Ordering::Relaxed),
             replay_log_bytes: counters.replay_log_bytes.load(Ordering::Relaxed),
             encoders_reencoded: counters.encoders_reencoded.load(Ordering::Relaxed),

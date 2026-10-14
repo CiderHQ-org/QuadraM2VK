@@ -619,6 +619,14 @@ impl Importer {
         self.dma_buf_images
     }
 
+    /// Whether the device enables `VK_EXT_image_drm_format_modifier` (with the dma-buf route's
+    /// image extensions, `create.rs`'s `dma_buf_image_names`): a texture over host pages imported
+    /// by their pointer may then be a `DRM_FORMAT_MOD_LINEAR` image at Metal's row pitch
+    /// (`texture.rs`'s `host_pitched_image`).
+    pub(super) fn makes_modifier_images(&self) -> bool {
+        self.dma_buf_images
+    }
+
     /// The memory types the dma-buf `fd` can be imported into (`vkGetMemoryFdPropertiesKHR`);
     /// `ERROR_FEATURE_NOT_PRESENT` where the device imports no dma-bufs.
     ///

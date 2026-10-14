@@ -144,7 +144,13 @@ What the runtime enables for itself outside the vocabulary enters no enable set,
 or fingerprint: among it the extensions of its dma-buf fallback for no-copy memory whose pointer
 the device refuses (`HostMemory::with_dma_buf`), `VK_EXT_external_memory_dma_buf` with
 `VK_KHR_external_memory_fd`, and `VK_EXT_image_drm_format_modifier` with
-`VK_EXT_queue_family_foreign` beside them, wherever a device lists them.
+`VK_EXT_queue_family_foreign` beside them, wherever a device lists them. With them enabled, a
+texture over a no-copy buffer's pages imported by their pointer is also a `DRM_FORMAT_MOD_LINEAR`
+image made for host allocations at Metal's row pitch where the driver's own linear image lays its
+rows out otherwise (ANV packs them tight) and the driver takes that layout
+(`WorkCounts::pitched_host_images`; HOWTO.md section 6 lists what each measured driver takes).
+`Texture::vk_image` then gives that image. A layout the driver refused is kept per device and not
+asked again (`pitched_host_image_refusals`, `pitched_host_image_refusals_recalled`).
 
 ## 2. A library
 
@@ -687,7 +693,11 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
 - `metal2vulkan-degrade-shadowed-texture` (performance). `ShadowedTexture`: A 2D texture over a
   buffer is a shadow image: no linear image of the device lays its texels out as Metal does in the
   buffer's memory (over a no-copy buffer's imported host memory, no linear image made for host
-  allocations does), or the buffer is over the caller's `VkBuffer`, whose memory backs no image of
+  allocations does: neither the driver's own nor, where the device enables
+  `VK_EXT_image_drm_format_modifier`, a `DRM_FORMAT_MOD_LINEAR` image laid out at Metal's row
+  pitch, which the driver may refuse for the texture's format, usage or pitch;
+  `WorkCounts::pitched_host_images` counts those made, `pitched_host_image_refusals` those the
+  driver refused), or the buffer is over the caller's `VkBuffer`, whose memory backs no image of
   the runtime's, or over host pages imported as dma-bufs (`HostMemory::with_dma_buf`) where the
   device makes no image over a dma-buf of the texture's own pages (the notice names why;
   `WorkCounts::dma_buf_image_fallbacks` counts it). Cost: its texels are copied into an image before

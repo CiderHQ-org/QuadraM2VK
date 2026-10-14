@@ -1177,7 +1177,10 @@ fn tiled_at(unit: u64, [w, h]: [u64; 2], x: u64, y: u64) -> u64 {
 /// same bytes; and the stencil of `Depth32Float_Stencil8`, which is not in the plane, loads as 0
 /// whatever a pass stored, through the texture and its `X32_Stencil8` view alike (a draw testing
 /// it equal to 0 draws every texel, equal to the stored value none), the depth loaded and stored
-/// again unchanged and no byte changed by the view's pass.
+/// again unchanged and no byte changed by the view's pass. A shadow of such a texture is zeroed as
+/// it is made for `Depth32Float_Stencil8` (`WorkCounts::shadows_zeroed`), and never for
+/// `Depth16Unorm` or `Depth32Float`, whose making starts no image on the host
+/// (`images_started_on_the_host`).
 #[test]
 fn a_planar_surface_s_depth_or_stencil_texture_s_passes_write_metal_s_elements_alone() {
     use super::render_state::{library, stencil, Probe, WHITE};
@@ -1216,10 +1219,36 @@ fn a_planar_surface_s_depth_or_stencil_texture_s_passes_write_metal_s_elements_a
                         _ => TextureUsage::RENDER_TARGET,
                     };
                     d.resource_options = held.buffer.resource_options();
+                    let before = device.work_counts();
                     let t = held
                         .buffer
                         .new_texture_with_iosurface_plane(&d, IoSurfacePlane::new(0, bpr, true))
                         .unwrap_or_else(|e| panic!("{what}: {e}"));
+                    // A shadow's image is zeroed as it is made only where its copies leave an
+                    // aspect out: always the stencil of `Depth32Float_Stencil8`, which reads 0;
+                    // never a one-aspect depth format's, nor is any image started on the host
+                    // for one. (`Stencil8` and `X32Stencil8` leave out the depth of an image of
+                    // both aspects where the device holds them in one: ANV's `X32Stencil8`.)
+                    let counted = device.work_counts();
+                    let shadowed = counted.shadowed_textures - before.shadowed_textures;
+                    let zeroed = counted.shadows_zeroed - before.shadows_zeroed;
+                    let hosted =
+                        counted.images_started_on_the_host - before.images_started_on_the_host;
+                    match pf {
+                        PixelFormat::Depth32FloatStencil8 => assert_eq!(
+                            zeroed, shadowed,
+                            "{what}: the shadows zeroed as made ({shadowed} shadows)"
+                        ),
+                        PixelFormat::Depth16Unorm | PixelFormat::Depth32Float => {
+                            assert_eq!(
+                                (zeroed, hosted),
+                                (0, 0),
+                                "{what}: the shadows zeroed as made, and the images started on \
+                                 the host ({shadowed} shadows)"
+                            )
+                        }
+                        _ => {}
+                    }
                     let depth = !matches!(pf, PixelFormat::Stencil8 | PixelFormat::X32Stencil8);
                     let has_stencil =
                         !matches!(pf, PixelFormat::Depth16Unorm | PixelFormat::Depth32Float);
