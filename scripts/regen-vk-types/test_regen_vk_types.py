@@ -181,24 +181,27 @@ class FormatBlockTests(unittest.TestCase):
         rows = format_blocks(Registry(format_registry(BLOCKS)))
         core = (1, 0)
         self.assertEqual(rows, [
-            ("R8_UNORM", 1, 1, "8-bit", None, 8, "Unorm", None, None, core, []),
-            ("A2B10G10R10_UNORM_PACK32", 4, 1, "32-bit", 32, None, "Unorm", None, None, core,
+            ("R8_UNORM", 1, 1, "8-bit", None, 8, "R", "Unorm", None, None, core, []),
+            ("A2B10G10R10_UNORM_PACK32", 4, 1, "32-bit", 32, None, "BA", "Unorm", None, None,
+             core, []),
+            ("BC1_RGB_UNORM_BLOCK", 8, 16, "BC1_RGB", None, None, "R", "Unorm", None, None, core,
              []),
-            ("BC1_RGB_UNORM_BLOCK", 8, 16, "BC1_RGB", None, None, "Unorm", None, None, core, []),
-            ("D16_UNORM_S8_UINT", 3, 1, "D16S8", None, None, None, "Unorm", "Uint", core, []),
-            ("R8G8B8A8_SRGB", 4, 1, "32-bit", None, 8, "Srgb", None, None, (1, 4),
+            ("D16_UNORM_S8_UINT", 3, 1, "D16S8", None, None, "", None, "Unorm", "Uint", core, []),
+            ("R8G8B8A8_SRGB", 4, 1, "32-bit", None, 8, "RGBA", "Srgb", None, None, (1, 4),
              ["VK_KHR_srgb"]),
-            ("BC_IMG", 8, 16, "BC", None, None, "Unorm", None, None, None, ["VK_IMG_bc"]),
+            ("BC_IMG", 8, 16, "BC", None, None, "R", "Unorm", None, None, None, ["VK_IMG_bc"]),
         ])
         self.assertEqual(render_format_blocks(Registry(format_registry(BLOCKS))), [
             "vk_format_blocks! {",
-            '    R8_UNORM = 1, 1, class "8-bit", bits 8, color Unorm, core 1 0;',
-            '    A2B10G10R10_UNORM_PACK32 = 4, 1, class "32-bit", packed 32, color Unorm, core 1 0;',
-            '    BC1_RGB_UNORM_BLOCK = 8, 16, class "BC1_RGB", color Unorm, core 1 0;',
+            '    R8_UNORM = 1, 1, class "8-bit", bits 8, components [R], color Unorm, core 1 0;',
+            '    A2B10G10R10_UNORM_PACK32 = 4, 1, class "32-bit", packed 32, components [B A],'
+            ' color Unorm, core 1 0;',
+            '    BC1_RGB_UNORM_BLOCK = 8, 16, class "BC1_RGB", components [R], color Unorm,'
+            ' core 1 0;',
             '    D16_UNORM_S8_UINT = 3, 1, class "D16S8", depth Unorm, stencil Uint, core 1 0;',
-            '    R8G8B8A8_SRGB = 4, 1, class "32-bit", bits 8, color Srgb, core 1 4,'
-            ' ext "VK_KHR_srgb";',
-            '    BC_IMG = 8, 16, class "BC", color Unorm, ext "VK_IMG_bc";',
+            '    R8G8B8A8_SRGB = 4, 1, class "32-bit", bits 8, components [R G B A], color Srgb,'
+            ' core 1 4, ext "VK_KHR_srgb";',
+            '    BC_IMG = 8, 16, class "BC", components [R], color Unorm, ext "VK_IMG_bc";',
             "}",
             "",
         ])

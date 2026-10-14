@@ -925,25 +925,15 @@ pub(super) fn plan(cx: &mut SelectCx<'_>) -> Result<(), Error> {
     // Every other attachment the pipeline's state names that the function writes through its
     // first output: a color the draw moved into the storage form (above), written through it as a
     // fetched one is, or one named for Metal's 16-bit float blend alone.
-    let mut moved = BTreeSet::new();
     if let Some(inputs) = &cx.inputs.framebuffer_fetch {
-        let written: BTreeSet<u32> = outputs
-            .iter()
-            .filter_map(|o| match o.role {
-                OutputRole::RenderTarget {
-                    attachment: AbiInt::Const(color),
-                    index: 0,
-                    ..
-                } if inputs.attachments.contains_key(&color) => Some(color),
-                _ => None,
-            })
-            .collect();
-        moved = written
-            .difference(&read)
-            .filter(|c| !inputs.half_blends.contains(c))
-            .copied()
-            .collect();
-        read.extend(written);
+        read.extend(outputs.iter().filter_map(|o| match o.role {
+            OutputRole::RenderTarget {
+                attachment: AbiInt::Const(color),
+                index: 0,
+                ..
+            } if inputs.attachments.contains_key(&color) => Some(color),
+            _ => None,
+        }));
     }
     if read.is_empty() {
         return Ok(());
@@ -1154,15 +1144,16 @@ pub(super) fn plan(cx: &mut SelectCx<'_>) -> Result<(), Error> {
     if !cx.families.fragment.fetch.is_empty() {
         cx.families.fragment.fetch_early_tests = early_tests && !declared_early;
     }
-    // Whether a write stores is the draw's tests' to decide. A moved color's write counts under
-    // any mask: the plan of the pipeline before the move selected its tests from the function
-    // alone (`RuntimeFact::MovableStorageWrites`), and its variant states them alike.
+    // Whether a write stores is the draw's tests' to decide. A write whose mask covers none of
+    // its attachment's channels stores nothing, so no test bears on it: a moved color's neither,
+    // for which the plan of the pipeline before the move selects no tests either
+    // (`RuntimeFact::MovableStorageWrites`).
     let stores = cx
         .families
         .fragment
         .fetch
-        .iter()
-        .any(|(color, sc)| sc.writes && (!sc.view.stores_nothing() || moved.contains(color)));
+        .values()
+        .any(|sc| sc.writes && !sc.view.stores_nothing());
     if (tested || untested) && stores {
         cx.facts.insert(RuntimeFact::TestedStorageWrites {
             early_tests,

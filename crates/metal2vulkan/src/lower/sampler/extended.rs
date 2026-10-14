@@ -55,6 +55,24 @@
 //! bfloat or padded form's bicubic sample, a gather through a bicubic sampler, and a swizzled
 //! texture's bicubic sample are not measured, and are refused.
 //!
+//! The bicubic paragraph above is Metal's reading on these formats, except inferences, each the
+//! other formats' bicubic reading (`bicubic`; EV GSM2-bcs2-m4 for a runtime sampler) carried to
+//! these formats' decoded taps, which no reading of them covers:
+//! - a runtime `Cubic` sampler whose other filter is not `Cubic` (the readings' runtime sampler
+//!   had both filters `Cubic`): the other formats' runtime sampler answers as both filters bicubic
+//!   whatever its other filter;
+//! - a runtime sampler under another address mode than clamp to edge, a border color, or pixel
+//!   coordinates (the readings' runtime sampler clamped to the edge at normalized coordinates):
+//!   the constexpr samplers of those states were read on these formats, and the other formats'
+//!   runtime sampler answers as the constexpr sampler of its state;
+//! - a `half` result under another address mode than clamp to edge (the readings' `half` results
+//!   were all under clamp to edge, constexpr and runtime): rounded as under clamp to edge;
+//! - a sample at an explicit level, with a bias or with gradients, and a fragment function's
+//!   sample at its implicit level (the readings are kernels' samples, which select level 0): the
+//!   other formats' bicubic filter reads the base level whatever the level asked for;
+//! - a texture of more than one level, read at its base level (the readings' textures had one
+//!   level), as the other formats' bicubic filter reads it.
+//!
 //! **The bfloat formats** (EV FPV-pf5-m4, an Apple M4 under macOS 27.0.1, every code of
 //! `R16Bfloat`, `RG16Bfloat` and `RGBA16Bfloat`; EV FPV-pf8-m4, 18, 432 positions of each under
 //! every address mode and border color): a sample is nearest under either filter, Metal's linear

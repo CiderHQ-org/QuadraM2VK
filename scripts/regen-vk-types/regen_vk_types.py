@@ -452,8 +452,9 @@ def aspect_numeric_formats(name, components):
 
 def format_blocks(registry):
     """(const, blockSize, texelsPerBlock, class, packed bits or None, shared component bits or
-    None, color, depth, stencil numeric format or None, core version or None, extension names)
-    for every canonical `VkFormat` value the registry's `<formats>` describes, in enum order.
+    None, color components, color, depth, stencil numeric format or None, core version or None,
+    extension names) for every canonical `VkFormat` value the registry's `<formats>` describes,
+    in enum order.
 
     The class is the format's compatibility class (the spec's "Compatible Formats" table, the
     registry's `class`): a view's format must share its image's, so a format of the same block
@@ -464,7 +465,9 @@ def format_blocks(registry):
 
     The shared component width is the one bit count every `<component>` has, when there is one
     and it is a number (compressed formats and mixed widths such as `D24_UNORM_S8_UINT` have
-    none). The numeric formats are each aspect's `numericFormat` ([`aspect_numeric_formats`]).
+    none). The color components are the names of its `R`, `G`, `B` and `A` `<component>`s, in
+    that order (`""` for a depth or stencil format): those a color write mask's bits name. The
+    numeric formats are each aspect's `numericFormat` ([`aspect_numeric_formats`]).
     A `<format>` of a value the enum excludes (beta, disabled) is skipped; one naming an alias, a
     duplicate, or an unknown attribute or child fails generation.
     """
@@ -508,7 +511,9 @@ def format_blocks(registry):
                 shared = int(width)
         if name in described:
             raise ValueError(f"{name} described twice")
-        described[name] = (size, texels, cls, packed, shared,
+        named = {component for component, _ in numerics}
+        components = "".join(c for c in "RGBA" if c in named)
+        described[name] = (size, texels, cls, packed, shared, components,
                            *aspect_numeric_formats(name, numerics))
     rows, aliases = registry.entries("VkFormat", is_bits=False)
     for alias, _ in aliases:
@@ -523,15 +528,18 @@ def format_blocks(registry):
 
 def render_format_blocks(registry):
     """One `vk_format_blocks!` invocation: `Format::block` and `Format::exposure` for every
-    described format: its texel block, each aspect's numeric format, and where it is defined."""
+    described format: its texel block, its color components, each aspect's numeric format, and
+    where it is defined."""
     out = ["vk_format_blocks! {"]
-    for (const, size, texels, cls, packed, shared, color, depth, stencil, core,
+    for (const, size, texels, cls, packed, shared, components, color, depth, stencil, core,
          extensions) in format_blocks(registry):
         row = f'    {const} = {size}, {texels}, class "{cls}"'
         if packed is not None:
             row += f", packed {packed}"
         if shared is not None:
             row += f", bits {shared}"
+        if components:
+            row += f", components [{' '.join(components)}]"
         for aspect, numeric in (("color", color), ("depth", depth), ("stencil", stencil)):
             if numeric is not None:
                 row += f", {aspect} {numeric}"

@@ -1867,6 +1867,8 @@ engine/smp_runtime_array.air.ll	smp_runtime_array	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	
 engine/smp_runtime_array.ll	smp_runtime_array	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	Unsupported{DescriptorCount; AnyOf[[Limit { limit: MaxPerStageDescriptorSampledImages, required: 32, available: 16 }]]}	Unsupported{DescriptorCount; AnyOf[[Limit { limit: MaxPerStageDescriptorSampledImages, required: 32, available: 16 }]]}
 engine/smp_shared_sampler.air.ll	smp_shared_sampler	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	Unsupported{DescriptorCount; AnyOf[[Limit { limit: MaxPerStageDescriptorSampledImages, required: 32, available: 16 }]]}	Unsupported{DescriptorCount; AnyOf[[Limit { limit: MaxPerStageDescriptorSampledImages, required: 32, available: 16 }]]}
 engine/smp_shared_sampler.ll	smp_shared_sampler	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	Unsupported{DescriptorCount; AnyOf[[Limit { limit: MaxPerStageDescriptorSampledImages, required: 32, available: 16 }]]}	Unsupported{DescriptorCount; AnyOf[[Limit { limit: MaxPerStageDescriptorSampledImages, required: 32, available: 16 }]]}
+engine/smw_unread.air.ll	smw_unread	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/smw_unread.ll	smw_unread	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
 engine/smw_writers.air.ll	smw_full	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
 engine/smw_writers.air.ll	smw_plain	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
 engine/smw_writers.air.ll	smw_discard	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok

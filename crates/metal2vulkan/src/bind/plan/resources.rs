@@ -1695,7 +1695,9 @@ impl ResourcePlanner<'_> {
     /// form's under every mode, measured). An unbound slot's word is 0, a nearest sampler's. A word
     /// that states a `Cubic` filter is the plan's cubic-sampler variant's
     /// (`VariantKey::cubic_samplers`), whose function samples through Metal's bicubic filter of its
-    /// state and refuses what that filter's checks refuse (`lower::sampler::extended`).
+    /// state: the plan refuses a word whose state that filter is not measured under before it names
+    /// the variant (`slots::cubic_variant`), and the variant's function refuses what else the
+    /// filter's checks refuse for its sample (`lower::sampler::extended`).
     fn extended_sampler(&self, slot: SlotRef) -> Result<(), BindError> {
         let word = self
             .stage_shape(slot.stage)

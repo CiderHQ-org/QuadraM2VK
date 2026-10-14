@@ -401,11 +401,16 @@ macro_rules! vk_bit {
 
 /// Defines [`Format::block`] and [`Format::exposure`] from the registry's `<formats>`: per
 /// format, `blockSize`, `texelsPerBlock`, its compatibility `class`, the `packed` width when
-/// present, the bit width every component shares when there is one, the `numericFormat` of each
-/// aspect it has, and the core version and extensions that define the enum value.
+/// present, the bit width every component shares when there is one, its color components, the
+/// `numericFormat` of each aspect it has, and the core version and extensions that define the enum
+/// value.
 macro_rules! vk_format_blocks {
     (@opt) => { None };
     (@opt $v:literal) => { Some($v) };
+    (@components) => { $crate::vk::ColorComponentFlags::empty() };
+    (@components $($c:ident)*) => {
+        $crate::vk::ColorComponentFlags::empty()$(.union($crate::vk::ColorComponentFlags::$c))*
+    };
     (@numeric) => { None };
     (@numeric $v:ident) => { Some($crate::vk::NumericFormat::$v) };
     (@core) => { None };
@@ -415,6 +420,7 @@ macro_rules! vk_format_blocks {
     (
         $($konst:ident = $size:literal, $texels:literal, class $class:literal
             $(, packed $packed:literal)? $(, bits $bits:literal)?
+            $(, components [$($component:ident)*])?
             $(, color $color:ident)? $(, depth $depth:ident)? $(, stencil $stencil:ident)?
             $(, core $major:literal $minor:literal)? $(, ext $ext:literal)*;)*
     ) => {
@@ -430,6 +436,7 @@ macro_rules! vk_format_blocks {
                         class: $class,
                         packed_bits: vk_format_blocks!(@opt $($packed)?),
                         component_bits: vk_format_blocks!(@opt $($bits)?),
+                        color_components: vk_format_blocks!(@components $($($component)*)?),
                         color: vk_format_blocks!(@numeric $($color)?),
                         depth: vk_format_blocks!(@numeric $($depth)?),
                         stencil: vk_format_blocks!(@numeric $($stencil)?),

@@ -166,6 +166,40 @@ const RGB: u32 = 0b0111;
 const RGBA: u32 = 0b1111;
 const A: u32 = 0b1000;
 
+/// Whether Metal's bicubic filter is measured through a runtime sampler whose min or mag filter
+/// is `Cubic` and whose word (`metal::sampler::SamplerWord`, its `CUBIC_STATE` bits or all of
+/// them) is `word`, whatever a function samples through it: no mip filter, isotropic, the
+/// weighted-average reduction, a border color Metal names, and on every axis an address mode the
+/// bicubic readings cover (not `MirrorClampToEdge`). A function that samples through such a
+/// sampler refuses any other word (`lower::sampler::bicubic`), so the binder refuses it before it
+/// names the cubic-sampler variant (`VariantKey::cubic_samplers`).
+pub(crate) fn runtime_cubic_measured(word: u32) -> bool {
+    use crate::metal::sampler::SamplerWord;
+    use crate::metal::{SamplerAddressMode, SamplerBorderColor};
+    let field = |shift: u32, mask: u32| (word & mask) >> shift;
+    let addressed = SamplerWord::ADDRESS_SHIFT
+        .into_iter()
+        .zip(SamplerWord::ADDRESS)
+        .all(|(shift, mask)| {
+            matches!(
+                SamplerAddressMode::try_from(field(shift, mask)),
+                Ok(SamplerAddressMode::ClampToEdge
+                    | SamplerAddressMode::Repeat
+                    | SamplerAddressMode::MirrorRepeat
+                    | SamplerAddressMode::ClampToZero
+                    | SamplerAddressMode::ClampToBorderColor)
+            )
+        });
+    let bordered = matches!(
+        SamplerBorderColor::try_from(field(SamplerWord::BORDER_SHIFT, SamplerWord::BORDER)),
+        Ok(SamplerBorderColor::TransparentBlack
+            | SamplerBorderColor::OpaqueBlack
+            | SamplerBorderColor::OpaqueWhite)
+    );
+    let unfiltered = SamplerWord::MIP_FILTER | SamplerWord::ANISOTROPIC | SamplerWord::REDUCTION;
+    word & unfiltered == 0 && addressed && bordered
+}
+
 /// How Metal's bicubic filter treats the texels of `pf` (module docs), or `None` for a format of
 /// no measured family.
 pub fn texels(pf: PixelFormat) -> Option<BicubicTexels> {

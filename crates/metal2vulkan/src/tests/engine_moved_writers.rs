@@ -15,24 +15,29 @@
 //! a depth and stencil attachment, under each kind of draw tests: the plan of the pipeline as
 //! compiled selects the variant the moved writer needs at once, and that variant, compiled, plans
 //! itself (a fixed point, which the runtime requires of every variant it compiles), or both refuse
-//! the draw. No GPU is used.
+//! the draw. A writer whose write mask covers none of the color's channels stores nothing, so no
+//! test bears on its write: its plan selects no tests under any draw tests, and its variant states
+//! no store before them. So does a writer that declares the color as an input it never reads (the
+//! owned fixture `smw_unread`), which takes the storage form as compiled. No GPU is used.
 
 use std::path::Path;
 
 use crate::bind::{BindState, FragmentTests};
 use crate::budget::Budget;
+use crate::cache::VariantKey;
 use crate::device::profile::FramebufferFetchPolicy;
 use crate::device::{Device, DeviceDescription, DevicePolicy};
 use crate::error::BindError;
 use crate::library::Library;
 use crate::lower::fragment::interlock_orders;
-use crate::metal::PixelFormat;
+use crate::metal::{ColorWriteMask, PixelFormat};
 use crate::pipeline::descriptor::{
     ColorAttachmentDescriptor, FunctionDescriptor, RenderPipelineDescriptor, StageSource,
 };
 use crate::pipeline::facts::RuntimeFact;
 use crate::pipeline::testing::{engine_dir, llvm_assemble, AssembleError};
 use crate::spirv::testing::{check_words_valid, committed_profiles};
+use crate::vk;
 
 /// How the depth and stencil tests bear on a writer's store before them.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -72,6 +77,78 @@ const TESTS: [FragmentTests; 6] = [
     FragmentTests::Any,
 ];
 
+/// The library of the owned fixture `name`, assembled with `llvm-as`; `None` where the tool is
+/// missing (the test then skips visibly).
+fn fixture_library(name: &str) -> Option<Library> {
+    match llvm_assemble(&engine_dir().join(format!("{name}.ll"))) {
+        Ok(bc) => Some(Library::from_air(&bc).expect("library")),
+        Err(AssembleError::Missing(why)) => {
+            eprintln!("SKIPPED: {why}");
+            None
+        }
+        Err(AssembleError::Rejected(why)) => panic!("llvm-as rejected {name}: {why}"),
+    }
+}
+
+/// The function `name` of `library`, as a stage of a render pipeline descriptor.
+fn stage(library: &Library, name: &str) -> StageSource {
+    StageSource::Function(FunctionDescriptor::new(
+        library.function(name).expect("function"),
+    ))
+}
+
+/// The committed profiles that order fetch through the pixel interlock and require it ordered,
+/// each with its device.
+fn ordering_devices() -> Vec<(String, Device)> {
+    let profiles = committed_profiles().expect("profiles");
+    profiles
+        .iter()
+        .filter(|(_, profile)| {
+            interlock_orders(profile)
+                && profile.fields().framebuffer_fetch == FramebufferFetchPolicy::RequireOrdered
+        })
+        .map(|(stem, _)| (stem.clone(), device(stem)))
+        .collect()
+}
+
+/// The bind state of a draw under `tests` that moves color 0 as `moved` does (none for `None`).
+fn moving(tests: FragmentTests, moved: Option<Move>) -> BindState {
+    let mut state = BindState {
+        fragment_tests: tests,
+        ..Default::default()
+    };
+    match moved {
+        Some(Move::Interlocked) => {
+            state.interlocked_colors.insert(0);
+        }
+        Some(Move::Shadow) => {
+            state.extended_shadows.insert(0);
+        }
+        None => {}
+    }
+    state
+}
+
+/// The `early_variant` of the store before the tests `pipeline` states, if it states one.
+fn stored_before_tests(pipeline: &crate::pipeline::artifact::RenderPipeline) -> Option<bool> {
+    pipeline.dependencies.iter().find_map(|d| match d.fact {
+        RuntimeFact::TestedStorageWrites { early_variant, .. } => Some(early_variant),
+        _ => None,
+    })
+}
+
+/// Whether `pipeline` writes color 0 through the storage form, and the channels that write keeps.
+fn storage_write(
+    pipeline: &crate::pipeline::artifact::RenderPipeline,
+) -> Option<vk::ColorComponentFlags> {
+    pipeline
+        .graphics
+        .storage_attachments
+        .iter()
+        .find(|a| a.color_index == 0 && a.writes)
+        .map(|a| a.kept)
+}
+
 fn device(stem: &str) -> Device {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join(format!("../metal2vulkan-validation/profiles/{stem}.json"));
@@ -96,37 +173,20 @@ fn wanted(class: Class, tests: FragmentTests) -> Option<(bool, bool)> {
 
 #[test]
 fn a_moved_writer_selects_its_tests_in_its_first_plan() {
-    let bc = match llvm_assemble(&engine_dir().join("smw_writers.ll")) {
-        Ok(bc) => bc,
-        Err(AssembleError::Missing(why)) => {
-            eprintln!("SKIPPED: {why}");
-            return;
-        }
-        Err(AssembleError::Rejected(why)) => panic!("llvm-as rejected smw_writers: {why}"),
+    let Some(library) = fixture_library("smw_writers") else {
+        return;
     };
-    let library = Library::from_air(&bc).expect("library");
-    let function = |name: &str| {
-        StageSource::Function(FunctionDescriptor::new(
-            library.function(name).expect("function"),
-        ))
-    };
-    let profiles = committed_profiles().expect("profiles");
+    let devices = ordering_devices();
     // The profiles checked, and the writers' variants that planned themselves, by the tests
     // they run (`read_only_tests`, `shader_tests`).
     let mut checked = Vec::new();
     let mut fixed_points = std::collections::BTreeSet::<(&str, (bool, bool))>::new();
-    for (stem, profile) in &profiles {
-        if !interlock_orders(profile)
-            || profile.fields().framebuffer_fetch != FramebufferFetchPolicy::RequireOrdered
-        {
-            continue;
-        }
-        let dev = device(stem);
+    for (stem, dev) in &devices {
         checked.push(stem.as_str());
         for (writer, class) in WRITERS {
             for moved in [Move::Interlocked, Move::Shadow] {
-                let mut d = RenderPipelineDescriptor::new(function("smw_full"));
-                d.fragment = Some(function(writer));
+                let mut d = RenderPipelineDescriptor::new(stage(&library, "smw_full"));
+                d.fragment = Some(stage(&library, writer));
                 d.color_attachments[0] = Some(ColorAttachmentDescriptor::new(match moved {
                     Move::Interlocked => PixelFormat::RGBA16Float,
                     Move::Shadow => PixelFormat::BGRA10XR,
@@ -155,24 +215,16 @@ fn a_moved_writer_selects_its_tests_in_its_first_plan() {
                 });
                 assert_eq!(movable, stated, "{what}: the function's movable writes");
                 for tests in TESTS {
-                    let mut state = BindState {
-                        fragment_tests: tests,
-                        ..Default::default()
-                    };
-                    match moved {
-                        Move::Interlocked => state.interlocked_colors.insert(0),
-                        Move::Shadow => state.extended_shadows.insert(0),
-                    };
-                    let shape = state.shape();
+                    let shape = moving(tests, Some(moved)).shape();
                     let what = format!("{what} {tests:?}");
-                    let planned = base.plan(&dev, &shape);
+                    let planned = base.plan(dev, &shape);
                     // The variant the plan names, compiled, plans itself: the runtime fails a draw
                     // whose compiled variant asks for another one.
                     let variant = planned.as_ref().ok().map(|plan| {
                         let variant = dev
                             .compile_render_variant(&d, &plan.variant, &Budget::standard())
                             .unwrap_or_else(|e| panic!("{what}: the variant: {e}"));
-                        let again = variant.plan(&dev, &shape).unwrap_or_else(|e| {
+                        let again = variant.plan(dev, &shape).unwrap_or_else(|e| {
                             panic!("{what}: the variant planned refuses the draw: {e}")
                         });
                         assert_eq!(again.variant, plan.variant, "{what}: a fixed point");
@@ -201,21 +253,12 @@ fn a_moved_writer_selects_its_tests_in_its_first_plan() {
                     );
                     let variant = variant.expect("compiled for the plan");
                     assert!(
-                        variant
-                            .graphics
-                            .storage_attachments
-                            .iter()
-                            .any(|a| a.color_index == 0 && a.writes),
+                        storage_write(&variant).is_some(),
                         "{what}: the variant writes color 0 through the storage form"
                     );
-                    let stored_before = variant.dependencies.iter().find_map(|d| match d.fact {
-                        RuntimeFact::TestedStorageWrites { early_variant, .. } => {
-                            Some(early_variant)
-                        }
-                        _ => None,
-                    });
                     assert_eq!(
-                        stored_before, stated,
+                        stored_before_tests(&variant),
+                        stated,
                         "{what}: the variant's store before the tests"
                     );
                     for m in &variant.stages {
@@ -242,4 +285,162 @@ fn a_moved_writer_selects_its_tests_in_its_first_plan() {
             );
         }
     }
+}
+
+/// A moved writer whose write mask covers none of color 0's channels stores nothing there, so the
+/// depth and stencil tests bear on nothing it stores: under every kind of draw tests, `Any`
+/// included, the plan of the pipeline as compiled names the variant that moves the color and
+/// selects no tests, and that variant, compiled, writes color 0 through the storage form keeping
+/// every channel, states no store before the tests, and plans itself. Every state is checked and
+/// the misses are counted by kind before the test fails, so its output says how far a plan strays.
+#[test]
+fn a_moved_writer_that_stores_nothing_selects_no_tests() {
+    let Some(library) = fixture_library("smw_writers") else {
+        return;
+    };
+    let devices = ordering_devices();
+    let mut planned = std::collections::BTreeSet::<(&str, String, String)>::new();
+    // The states that miss, by kind of miss.
+    let mut misses = std::collections::BTreeMap::<&str, Vec<String>>::new();
+    let mut states = 0usize;
+    for (stem, dev) in &devices {
+        for (writer, _) in WRITERS {
+            for moved in [Move::Interlocked, Move::Shadow] {
+                let mut d = RenderPipelineDescriptor::new(stage(&library, "smw_full"));
+                d.fragment = Some(stage(&library, writer));
+                let mut color = ColorAttachmentDescriptor::new(match moved {
+                    Move::Interlocked => PixelFormat::RGBA16Float,
+                    Move::Shadow => PixelFormat::BGRA10XR,
+                });
+                color.write_mask = ColorWriteMask::NONE;
+                d.color_attachments[0] = Some(color);
+                d.depth_format = Some(PixelFormat::Depth32FloatStencil8);
+                d.stencil_format = Some(PixelFormat::Depth32FloatStencil8);
+                let what = format!("{stem} {writer} {moved:?} (write mask none)");
+                let base = match dev.compile_render_pipeline(&d, &Budget::standard()) {
+                    Ok(base) => base,
+                    Err(e) => {
+                        eprintln!("{what}: refused as compiled: {e}");
+                        continue;
+                    }
+                };
+                assert_eq!(stored_before_tests(&base), None, "{what}");
+                for tests in TESTS {
+                    states += 1;
+                    let shape = moving(tests, Some(moved)).shape();
+                    let what = format!("{what} {tests:?}");
+                    let mut miss = |kind: &'static str| {
+                        misses.entry(kind).or_default().push(what.clone());
+                    };
+                    let plan = match base.plan(dev, &shape) {
+                        Ok(plan) => plan,
+                        Err(e) => {
+                            miss("the plan refuses the draw");
+                            eprintln!("{what}: the plan refuses the draw: {e}");
+                            continue;
+                        }
+                    };
+                    let key = &plan.variant;
+                    if key.read_only_tests || key.shader_tests || key.shader_stencil {
+                        miss("the plan selects tests");
+                    }
+                    let variant = dev
+                        .compile_render_variant(&d, key, &Budget::standard())
+                        .unwrap_or_else(|e| panic!("{what}: the variant: {e}"));
+                    assert_eq!(
+                        storage_write(&variant),
+                        Some(vk::ColorComponentFlags::known_bits()),
+                        "{what}: the variant's write of color 0 keeps every channel"
+                    );
+                    if stored_before_tests(&variant).is_some() {
+                        miss("the variant states a store before the tests");
+                    }
+                    match variant.plan(dev, &shape) {
+                        Ok(again) if again.variant == *key => {}
+                        Ok(_) => miss("the variant's plan asks for another variant"),
+                        Err(_) => miss("the variant's plan refuses the draw"),
+                    }
+                    planned.insert((writer, format!("{moved:?}"), format!("{tests:?}")));
+                }
+            }
+        }
+    }
+    eprintln!(
+        "moved writers storing nothing: {states} states on {} profiles",
+        devices.len()
+    );
+    for (kind, whats) in &misses {
+        eprintln!("{} states: {kind} (first: {})", whats.len(), whats[0]);
+    }
+    assert!(misses.is_empty(), "{misses:#?}");
+    // Not vacuous: every writer, move and kind of tests planned on some profile.
+    assert_eq!(
+        planned.len(),
+        WRITERS.len() * 2 * TESTS.len(),
+        "{planned:?}"
+    );
+}
+
+/// A writer that declares color 0 as an input it never reads (`smw_unread`, which discards) takes
+/// the storage form there as compiled, so it stores before the tests where its write mask stores
+/// something (`TestedStorageWrites` with the early-tests variant). Under a write mask that covers
+/// none of the color's channels it stores nothing: it states no store before the tests, and every
+/// draw, one whose tests may count what they keep (`Any`) included, runs it as compiled. The
+/// misses are counted by kind before the test fails.
+#[test]
+fn an_unread_color_input_that_stores_nothing_selects_no_tests() {
+    let (Some(writers), Some(unread)) = (
+        fixture_library("smw_writers"),
+        fixture_library("smw_unread"),
+    ) else {
+        return;
+    };
+    let devices = ordering_devices();
+    let mut misses = std::collections::BTreeMap::<&str, Vec<String>>::new();
+    let mut states = 0usize;
+    for (stem, dev) in &devices {
+        for (mask, stores) in [(ColorWriteMask::ALL, true), (ColorWriteMask::NONE, false)] {
+            let mut d = RenderPipelineDescriptor::new(stage(&writers, "smw_full"));
+            d.fragment = Some(stage(&unread, "smw_unread"));
+            let mut color = ColorAttachmentDescriptor::new(PixelFormat::RGBA16Float);
+            color.write_mask = mask;
+            d.color_attachments[0] = Some(color);
+            d.depth_format = Some(PixelFormat::Depth32FloatStencil8);
+            d.stencil_format = Some(PixelFormat::Depth32FloatStencil8);
+            let what = format!("{stem} smw_unread under {mask:?}");
+            let base = dev
+                .compile_render_pipeline(&d, &Budget::standard())
+                .unwrap_or_else(|e| panic!("{what}: refused as compiled: {e}"));
+            assert!(storage_write(&base).is_some(), "{what}: the storage form");
+            if stores {
+                assert_eq!(stored_before_tests(&base), Some(true), "{what}");
+                continue;
+            }
+            if stored_before_tests(&base).is_some() {
+                misses
+                    .entry("it states a store before the tests")
+                    .or_default()
+                    .push(what.clone());
+            }
+            for tests in TESTS {
+                states += 1;
+                let what = format!("{what} {tests:?}");
+                let kind = match base.plan(dev, &moving(tests, None).shape()) {
+                    Ok(plan) if plan.variant == VariantKey::new() => continue,
+                    Ok(_) => "the plan asks for a variant",
+                    Err(_) => "the plan refuses the draw",
+                };
+                misses.entry(kind).or_default().push(what);
+            }
+        }
+    }
+    eprintln!(
+        "unread color input storing nothing: {states} draws on {} profiles",
+        devices.len()
+    );
+    for (kind, whats) in &misses {
+        eprintln!("{}: {kind} (first: {})", whats.len(), whats[0]);
+    }
+    assert!(misses.is_empty(), "{misses:#?}");
+    assert!(states > 0, "no profile checked");
 }

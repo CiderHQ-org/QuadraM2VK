@@ -36,6 +36,10 @@ pub struct FormatBlock {
     /// The bit width every component has, when they share one (none for compressed formats and
     /// mixed widths such as `D24_UNORM_S8_UINT`).
     pub component_bits: Option<u32>,
+    /// The color components the format has (`R`, `G`, `B`, `A`, as the registry's `<component>`s
+    /// name them), which a color write mask's bits name: a write whose mask names none of them
+    /// stores nothing. Empty for a depth or stencil format.
+    pub color_components: super::ColorComponentFlags,
     /// The numeric format of the color components (`R`, `G`, `B`, `A`), for a color format. The
     /// registry records an sRGB format's alpha as `UNORM`; the spec's `SRGB` numeric format covers
     /// that, so such a format is `Srgb`.

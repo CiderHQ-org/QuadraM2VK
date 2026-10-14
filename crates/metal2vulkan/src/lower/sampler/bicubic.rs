@@ -229,11 +229,16 @@ pub(super) fn state(r: SamplerRef) -> Result<Option<SamplerState>, Error> {
 /// lanes, nine formats, every address mode and border color, normalized and pixel coordinates,
 /// min/mag pairs `(2, 2)`, `(2, 1)`, `(1, 2)`, `(2, 0)` and `(0, 2)`, implicit, explicit and
 /// gradient levels, bit for bit; through an argument buffer alike). `clamp_to_zero` reads the
-/// sampler's border color, as a runtime sampler's does. The state is both filters bicubic with the
-/// word's mip filter, anisotropy, and reduction, which [`check`] refuses where they are not the
-/// measured ones; `MirrorClampToEdge`, which no bicubic reading covers, is refused here.
+/// sampler's border color, as a runtime sampler's does. The state is both filters bicubic, without
+/// a mip filter, isotropic, under the weighted-average reduction: a word that states anything else
+/// is not measured (a mip filter, anisotropy, another reduction, an unnamed border color, or a
+/// `MirrorClampToEdge` axis, which no bicubic reading covers), and is refused here by the rule the
+/// binder refuses it by before it names the variant (`metal::bicubic::runtime_cubic_measured`).
 pub(super) fn cubic_state(word: u32) -> Result<SamplerState, Error> {
     use crate::air::abi::{CompareFunction, Coordinates, Half, MipFilter, Reduction};
+    if !crate::metal::bicubic::runtime_cubic_measured(word) {
+        return Err(refuse());
+    }
     let field = |shift: u32, mask: u32| (word & mask) >> shift;
     let address = |shift: u32, mask: u32| -> Result<AddressMode, Error> {
         match SamplerAddressMode::try_from(field(shift, mask)) {
@@ -252,20 +257,6 @@ pub(super) fn cubic_state(word: u32) -> Result<SamplerState, Error> {
             Ok(SamplerBorderColor::OpaqueWhite) => BorderColor::OpaqueWhite,
             _ => return Err(refuse()),
         };
-    let mip_filter = match field(SamplerWord::MIP_FILTER_SHIFT, SamplerWord::MIP_FILTER) {
-        0 => MipFilter::None,
-        1 => MipFilter::Nearest,
-        _ => MipFilter::Linear,
-    };
-    let reduction = match field(SamplerWord::REDUCTION_SHIFT, SamplerWord::REDUCTION) {
-        0 => Reduction::WeightedAverage,
-        1 => Reduction::Minimum,
-        _ => Reduction::Maximum,
-    };
-    // A reduction other than the weighted average is not measured through the bicubic filter.
-    if reduction != Reduction::WeightedAverage {
-        return Err(refuse());
-    }
     let [s_shift, t_shift, r_shift] = SamplerWord::ADDRESS_SHIFT;
     let [s_mask, t_mask, r_mask] = SamplerWord::ADDRESS;
     Ok(SamplerState {
@@ -274,22 +265,18 @@ pub(super) fn cubic_state(word: u32) -> Result<SamplerState, Error> {
         address_r: address(r_shift, r_mask)?,
         mag_filter: Filter::Bicubic,
         min_filter: Filter::Bicubic,
-        mip_filter,
+        mip_filter: MipFilter::None,
         coordinates: if word & SamplerWord::PIXEL_COORDINATES != 0 {
             Coordinates::Pixel
         } else {
             Coordinates::Normalized
         },
         compare: CompareFunction::Never,
-        max_anisotropy: if word & SamplerWord::ANISOTROPIC != 0 {
-            2
-        } else {
-            1
-        },
+        max_anisotropy: 1,
         lod_min_clamp: Half(0),
         lod_max_clamp: Half(0),
         border_color,
-        reduction,
+        reduction: Reduction::WeightedAverage,
         lod_bias: Half(0),
     })
 }

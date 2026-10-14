@@ -491,17 +491,18 @@ pub enum RuntimeFact {
     /// such a color into the interlocked storage form (`BindShape::interlocked_colors`, or an
     /// extended-range color's `BindShape::extended_shadows`), whose variant then stores before the
     /// depth and stencil tests and states [`TestedStorageWrites`](Self::TestedStorageWrites) with
-    /// this `early_variant`, under any write mask. So the plan of a pipeline that writes no color
-    /// so selects the tests of such a draw from this as from that fact, and the variant it names
-    /// plans itself.
+    /// this `early_variant`, where the write stores something. So the plan of a pipeline that
+    /// writes no color so selects the tests of such a draw from this as from that fact, and the
+    /// variant it names plans itself.
     ///
-    /// The plan reads it only for a draw that moves a color the function writes (and only where the
-    /// pipeline has a depth or stencil attachment, whose tests the variant then depends on). A
-    /// write whose mask covers none of the format's channels stores nothing, but its variant
-    /// selects the tests all the same: an early-tests variant or the function's own tests serve
-    /// it exactly. A draw whose tests neither serves (tests the draw does not state) is refused,
-    /// as any draw whose variant is refused: the runtime keeps the color out of the storage form
-    /// there (the pass splits, or the shadow ends).
+    /// The plan reads it only for a draw that moves a color the function writes as an ordinary
+    /// output under a write mask that names some of the attachment's components (and only where
+    /// the pipeline has a depth or stencil attachment, whose tests the variant then depends on). A
+    /// write whose mask names none of them stores nothing: no test bears on it, its variant states
+    /// no store before the tests, and the plan selects none for it, as for a draw that moves
+    /// nothing. A draw whose tests neither the early-tests variant nor the function's own tests
+    /// serve (tests the draw does not state) is refused, as any draw whose variant is refused: the
+    /// runtime keeps the color out of the storage form there (the pass splits, or the shadow ends).
     MovableStorageWrites { early_variant: bool },
     /// On a device that samples through Metal's own sampler (`VkProperty::MetalSampler`:
     /// MoltenVK on Apple's GPU), the function samples the texture bound to the slot through a

@@ -17,7 +17,8 @@ the non-beta C header. Unknown registry forms and conflicting redefinitions fail
 The registry's `<formats>` element becomes one `vk_format_blocks!` invocation, which defines
 `vk::Format::block`: per named format its `blockSize`, `texelsPerBlock`, compatibility `class`
 (which a view's format must share), `packed` width, the bit width every component
-shares (when one does), and the `numericFormat` of each aspect (color, depth, stencil; an sRGB
+shares (when one does), its color components (the `R`, `G`, `B` and `A` it has, which a color
+write mask names), and the `numericFormat` of each aspect (color, depth, stencil; an sRGB
 format's `UNORM` alpha belongs to its `SRGB` color numeric format, as the spec's numeric-format
 table defines). The binder counts texel-buffer elements and aligns vertex
 attributes with it, and `vk::Format::numeric_type` reads the numeric formats. The same invocation defines `vk::Format::exposure`: the lowest core version whose

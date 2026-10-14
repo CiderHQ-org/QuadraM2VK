@@ -369,11 +369,15 @@ pub(crate) fn address_map_variant(
 /// at which `shape` binds a sampler whose min or mag filter is `Cubic`, each with the bound word
 /// masked by `SamplerWord::CUBIC_STATE`: the plan's `VariantKey::cubic_samplers`. Metal samples
 /// through such a sampler with its bicubic filter of that state (EV GSM2-bcs2-m4). The variant's
-/// compile states the same facts, so its plan for the same shape states the same key.
+/// compile states the same facts, so its plan for the same shape states the same key. A bound
+/// word whose state the bicubic filter is not measured under, whatever the function samples
+/// (`metal::bicubic::runtime_cubic_measured`: a mip filter, anisotropy, another reduction), is
+/// `NotImplemented(SamplerBicubicFilter)` here, as the variant's compile would refuse it: the
+/// draw is refused before any variant is compiled for it.
 pub(crate) fn cubic_variant(
     dependencies: &[RuntimeDependency],
     shape: &BindShape,
-) -> std::collections::BTreeMap<SlotRef, u32> {
+) -> Result<std::collections::BTreeMap<SlotRef, u32>, BindError> {
     use crate::metal::sampler::SamplerWord;
     dependencies
         .iter()
@@ -386,10 +390,15 @@ pub(crate) fn cubic_variant(
                 .stages
                 .get(&slot.stage)
                 .and_then(|s| s.samplers.get(&slot.index))?;
-            bound
-                .shape
-                .cubic
-                .then_some((slot, bound.word.0 & SamplerWord::CUBIC_STATE))
+            let word = bound.word.0 & SamplerWord::CUBIC_STATE;
+            bound.shape.cubic.then(
+                || match crate::metal::bicubic::runtime_cubic_measured(word) {
+                    true => Ok((slot, word)),
+                    false => Err(BindError::Unsupported(Unsupported::not_implemented(
+                        Feature::SamplerBicubicFilter,
+                    ))),
+                },
+            )
         })
         .collect()
 }

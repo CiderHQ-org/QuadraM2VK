@@ -102,8 +102,12 @@
 //! - **Interlocked colors**. A draw into a render pass instance that leaves color attachments out
 //!   of its subpass for other draws' interlocked storage form (`BindShape::interlocked_colors`)
 //!   runs the variant whose fragment function writes those it writes through that form too
-//!   (`VariantKey::interlocked_colors`), so the draw records in the instance. A mesh pipeline's is
-//!   not implemented, nor a multisampled, layered or amplified draw's.
+//!   (`VariantKey::interlocked_colors`), so the draw records in the instance. That variant stores
+//!   them before the depth and stencil tests (tested storage writes, below), and so does the
+//!   variant of a draw that holds the `half` shadow of an extended-range color the function writes
+//!   (`BindShape::extended_shadows`): the plan of the pipeline as compiled selects such a moved
+//!   writer's tests from `RuntimeFact::MovableStorageWrites`. A mesh pipeline's is not
+//!   implemented, nor a multisampled, layered or amplified draw's.
 //! - **Depth clamp range**. A draw in depth clamp mode through a range above 0 whose Vulkan depth
 //!   clamp holds 0 (`BindShape::depth_clamp_range`) runs the variant whose fragment function, where
 //!   it writes its depth, clamps that depth to the draw's range itself
@@ -120,13 +124,17 @@
 //!   depth, stencil, or a sample mask, states the fact without that variant (`early_variant`): a
 //!   draw whose tests drop no fragment runs it as compiled, and any other is
 //!   `NotImplemented(FramebufferFetch)` at the depth attachment (the stencil one where the pipeline
-//!   has no depth attachment). (A draw whose depth test alone acts, `Depth`, runs the variant whose
-//!   function runs it itself, `VariantKey::shader_tests`, unless it writes nothing and the
-//!   early-tests variant serves it; one whose stencil test acts and whose tests write, `Stencil`,
-//!   or a `Drop` draw of a function without the early-tests variant, runs the variant whose
-//!   function runs both, `VariantKey::shader_stencil`, in a pass with a depth and a stencil
-//!   attachment; a pass with a stencil attachment alone is `NotImplemented(FramebufferFetch)` at
-//!   it.)
+//!   has no depth attachment). A draw that moves a color the function writes as an ordinary output
+//!   into the storage form (interlocked colors, above) takes its tests alike from
+//!   `RuntimeFact::MovableStorageWrites`, which states the `early_variant` the moved writer's
+//!   variant states, where the pipeline as compiled states no `TestedStorageWrites`; a moved write
+//!   whose mask names none of the attachment's components stores nothing, and takes no tests. (A
+//!   draw whose depth test alone acts, `Depth`, runs the variant whose function runs it itself,
+//!   `VariantKey::shader_tests`, unless it writes nothing and the early-tests variant serves it;
+//!   one whose stencil test acts and whose tests write, `Stencil`, or a `Drop` draw of a function
+//!   without the early-tests variant, runs the variant whose function runs both,
+//!   `VariantKey::shader_stencil`, in a pass with a depth and a stencil attachment; a pass with a
+//!   stencil attachment alone is `NotImplemented(FramebufferFetch)` at it.)
 //! - **Capture form**. A pipeline compiled under `VariantKey::captured_positions`
 //!   (`RuntimeFact::CapturedPositions`), which a consumer asks for and no bind shape does, plans
 //!   its own variant. Its draws leave `PushHole::CaptureAddress` to the consumer (the first
@@ -741,6 +749,16 @@ fn vertex_layer(p: &RenderPipeline) -> Option<bool> {
     })
 }
 
+/// Whether a draw's write to the ordinary color attachment of state `a` stores something: its
+/// mask names some of the format's color components (Vulkan writes nothing to a component the
+/// mask leaves out, nor to one the format lacks), as the storage form's write stores something
+/// where its mask covers some of the format's channels (`StorageView::stores_nothing`).
+fn stores(a: crate::pipeline::graphics::ColorAttachmentState) -> bool {
+    a.format
+        .block()
+        .is_some_and(|b| a.write_mask.intersects(b.color_components))
+}
+
 fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<BindingPlan, BindError> {
     check_slots(shape)?;
     let records = p.graphics.mesh_records.as_ref();
@@ -985,17 +1003,26 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
     // pipeline with a depth or stencil attachment: Metal's store, as compiled, where the draw's
     // tests drop no fragment; where they drop some but write and count nothing, the variant whose
     // function declares early tests, which a pipeline compiled under it states; refused
-    // otherwise. A draw that moves a color the function writes into that form (an interlocked
-    // color, a shadowed extended-range one) asks for the variant that stores it so: where the
-    // pipeline as compiled stores no color so, the function states that variant's tests
-    // (`RuntimeFact::MovableStorageWrites`), so this plan selects them, and the variant it names
-    // plans itself.
+    // otherwise. A draw that moves a color the function writes as an ordinary output into that
+    // form (an interlocked color, a shadowed extended-range one) asks for the variant that stores
+    // it so: where the pipeline as compiled stores no color so, the function states that variant's
+    // tests (`RuntimeFact::MovableStorageWrites`), so this plan selects them, and the variant it
+    // names plans itself. A moved write whose mask names none of its attachment's components
+    // stores nothing, so no test bears on it: its variant states none, and this plan selects none
+    // for it. (A color the pipeline as compiled already writes through the storage form has no
+    // ordinary attachment state; its stores state their own tests.)
     let moves = interlocked_colors
         .iter()
         .chain(&extended_shadows)
         .any(|&c| {
             1u32.checked_shl(c)
                 .is_some_and(|bit| p.graphics.color_outputs & bit != 0)
+                && p.graphics
+                    .color_attachments
+                    .get(c as usize)
+                    .copied()
+                    .flatten()
+                    .is_some_and(stores)
         });
     let tested = p
         .dependencies
@@ -1906,7 +1933,7 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
     variant.srgb_textures = srgb_variant(&p.dependencies, shape, &variant.cross_class);
     variant.ycbcr_textures = ycbcr_variant(&p.dependencies, shape);
     variant.address_maps = address_map_variant(&p.dependencies, shape);
-    variant.cubic_samplers = cubic_variant(&p.dependencies, shape);
+    variant.cubic_samplers = cubic_variant(&p.dependencies, shape)?;
     variant.anisotropic_samplers = anisotropic_variant(&p.dependencies, shape);
     // A layout the variant newly pulls is read through a `Whole` storage slot, which declares
     // `BufferRangeLimit`: the variant's pipeline would ask for its device address when the bound

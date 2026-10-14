@@ -276,3 +276,100 @@ fn a_bicubic_sample_s_slots_join_the_variants() {
     }
     assert!(planned > 0);
 }
+
+/// A runtime sampler whose filters are `Cubic` and whose state Metal's bicubic filter is not
+/// measured under whatever a function samples (a mip filter, anisotropy, a minimum reduction) is
+/// refused by the plan of the pipeline as compiled, `NotImplemented(SamplerBicubicFilter)`, before
+/// the plan names a variant: a dispatch of it compiles nothing, where the variant it would name
+/// refuses the same word only once compiled, and the runtime keeps no compile that refused. At an
+/// extended-range slot (which refused every `Cubic` word at planning before Metal's bicubic filter
+/// of its texels was built) as at a slot of another format. On every committed profile, the
+/// lowering refuses that variant by the same rule (`metal::bicubic::runtime_cubic_measured`). A
+/// device without `samplerAnisotropy` refuses an anisotropic sampler earlier in the plan, for that
+/// lack (`vk12-bare`): no variant either.
+#[test]
+fn an_unmeasured_cubic_sampler_is_refused_before_any_variant() {
+    let bc = match llvm_assemble(&engine_dir().join("xr_bicubic.ll")) {
+        Ok(bc) => bc,
+        Err(AssembleError::Missing(why)) => {
+            eprintln!("SKIPPED: {why}");
+            return;
+        }
+        Err(AssembleError::Rejected(why)) => panic!("llvm-as rejected xr_bicubic: {why}"),
+    };
+    let mut cubic = SamplerDescriptor::new();
+    cubic.min_filter = SamplerMinMagFilter::Cubic;
+    cubic.mag_filter = SamplerMinMagFilter::Cubic;
+    cubic.s_address_mode = SamplerAddressMode::ClampToEdge;
+    cubic.t_address_mode = SamplerAddressMode::ClampToEdge;
+    let mut mipmapped = cubic;
+    mipmapped.mip_filter = crate::metal::SamplerMipFilter::Nearest;
+    let mut anisotropic = cubic;
+    anisotropic.max_anisotropy = 4;
+    let mut minimum = cubic;
+    minimum.reduction_mode = crate::metal::SamplerReductionMode::Minimum;
+    let unmeasured = [
+        ("a mip filter", mipmapped),
+        ("anisotropy", anisotropic),
+        ("a minimum reduction", minimum),
+    ];
+    let formats = [
+        (PixelFormat::BGRA10XR, Some(form_of("552"))),
+        (PixelFormat::RGB10A82PXR10, Some(form_of("550"))),
+        (PixelFormat::RGBA8Unorm, None),
+    ];
+    let want = Unsupported::not_implemented(Feature::SamplerBicubicFilter);
+    let mut refused = 0;
+    let mut device_refused = 0;
+    for (stem, dev) in devices() {
+        let plain = pipeline_entry(&dev, &bc, "xrb_runtime", &LowerInputs::new())
+            .expect("a sampling kernel");
+        // The measured word plans its variant (`a_bicubic_sample_s_slots_join_the_variants`).
+        let measured = sampled_state(PixelFormat::BGRA10XR, cubic).shape();
+        plain
+            .plan(&dev, &measured)
+            .unwrap_or_else(|e| panic!("the measured cubic word on {stem}: {e}"));
+        for (state, sampler) in unmeasured {
+            let word = SamplerWord::of(&sampler).0;
+            assert!(word & SamplerWord::CUBIC != 0, "{state}");
+            for (pf, form) in formats {
+                let what = format!("a cubic sampler with {state}, {pf:?}, on {stem}");
+                match plain.plan(&dev, &sampled_state(pf, sampler).shape()) {
+                    Err(crate::error::BindError::Unsupported(u))
+                        if sampler.max_anisotropy > 1
+                            && u.feature == Feature::SamplerAnisotropy =>
+                    {
+                        device_refused += 1;
+                    }
+                    Err(crate::error::BindError::Unsupported(u)) => {
+                        assert_eq!(
+                            (&u.feature, &u.needs),
+                            (&want.feature, &want.needs),
+                            "{what}"
+                        )
+                    }
+                    other => panic!("{what}: planned {:?}", other.map(|p| p.variant)),
+                }
+                // The variant the word would name refuses it.
+                let mut inputs = LowerInputs::new();
+                inputs
+                    .cubic_samplers
+                    .insert(SAMPLER, word & SamplerWord::CUBIC_STATE);
+                if let Some(form) = form {
+                    inputs.extended_range.insert(SOURCE, form);
+                }
+                match typed_module_with(&bc, "xrb_runtime", dev.profile(), &inputs) {
+                    Err(crate::error::Error::Unsupported(u)) => assert_eq!(
+                        (&u.feature, &u.needs),
+                        (&want.feature, &want.needs),
+                        "{what}: the variant"
+                    ),
+                    other => panic!("{what}: the variant: {:?}", other.map(|_| ())),
+                }
+                refused += 1;
+            }
+        }
+    }
+    eprintln!("{refused} unmeasured cubic words refused, {device_refused} of them for the device");
+    assert!(refused > device_refused, "no profile checked");
+}
