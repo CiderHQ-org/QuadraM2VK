@@ -191,7 +191,7 @@ impl<I: Run> Contexts<I> {
 /// Start one of `shared`'s threads (counted already); `first` stays until the pool stops.
 fn spawn<I: Run>(shared: &Arc<Shared<I>>, first: bool) -> std::io::Result<()> {
     let shared = Arc::clone(shared);
-    exit_guard::spawn(
+    exit_guard::spawn_user_interactive(
         std::thread::Builder::new()
             .name("metal2vulkan-handlers".into())
             .stack_size(STACK),

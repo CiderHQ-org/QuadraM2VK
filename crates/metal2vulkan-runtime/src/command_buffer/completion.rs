@@ -137,7 +137,7 @@ impl Completion {
         let spawned: std::io::Result<()> = (|| {
             let thread = {
                 let watch = Arc::clone(&watch);
-                exit_guard::spawn(
+                exit_guard::spawn_user_interactive(
                     std::thread::Builder::new().name("metal2vulkan-completion".into()),
                     move || run(&watch),
                 )?
@@ -145,7 +145,7 @@ impl Completion {
             lock(&completion.threads).push(thread);
             for queue in 0..queues {
                 let watch = Arc::clone(&watch);
-                let waiter = exit_guard::spawn(
+                let waiter = exit_guard::spawn_user_interactive(
                     std::thread::Builder::new().name(format!("metal2vulkan-queue-wait-{queue}")),
                     move || wait_for_queue(&watch, queue),
                 )?;

@@ -212,7 +212,7 @@ impl Scheduler {
         });
         let thread = {
             let shared = Arc::clone(&shared);
-            exit_guard::spawn(
+            exit_guard::spawn_user_interactive(
                 std::thread::Builder::new().name("metal2vulkan-scheduler".into()),
                 move || run(&shared),
             )

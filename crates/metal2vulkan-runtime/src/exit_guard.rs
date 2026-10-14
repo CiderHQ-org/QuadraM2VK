@@ -711,6 +711,39 @@ where
     })
 }
 
+/// Start one of the runtime's threads that take a command buffer from its commit to its handlers,
+/// running `f`, as [`spawn`] does, but at the user-interactive quality of service on macOS from
+/// its start ([`run_at_user_interactive`]): the scheduler's (`scheduler/`), the completion thread
+/// and each `VkQueue`'s waiter (`command_buffer/completion.rs`), and every thread of the handler
+/// pool (`contexts/`).
+pub(crate) fn spawn_user_interactive<F, T>(
+    builder: std::thread::Builder,
+    f: F,
+) -> std::io::Result<std::thread::JoinHandle<T>>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    #[cfg(test)]
+    let on_start = ON_START.with(|on_start| on_start.borrow().clone());
+    spawn(builder, move || {
+        run_at_user_interactive();
+        #[cfg(test)]
+        if let Some(on_start) = on_start {
+            on_start();
+        }
+        f()
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What each thread [`spawn_user_interactive`] starts from this thread runs once its class is
+    /// set, before `f`: a test's reading of the class from inside the thread.
+    pub(crate) static ON_START: std::cell::RefCell<Option<std::sync::Arc<dyn Fn() + Send + Sync>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// Raise this thread's quality of service to the default class where it is utility or
 /// background, and leave every other class as it is. On macOS a new thread takes the class of
 /// the thread that started it, and each of the runtime's threads (the pool's, the scheduler's,
@@ -723,7 +756,8 @@ where
 /// The floor covers only the threads the runtime starts. The pool's threads run at the
 /// user-initiated class ([`raise_to_user_initiated`]), and a pipeline the runtime makes on a
 /// program's thread below that class is made on a thread of the runtime's at it while the
-/// program's thread waits (`device/compiles.rs`).
+/// program's thread waits (`device/compiles.rs`). The threads that take command buffers to their
+/// handlers run at the user-interactive class ([`spawn_user_interactive`]).
 #[cfg(target_os = "macos")]
 pub(crate) fn raise_quality_of_service() {
     use libc::qos_class_t as Q;
@@ -761,6 +795,26 @@ pub(crate) fn raise_to_user_initiated() {
 /// Nothing: no quality of service class here ([`raise_to_user_initiated`] on macOS).
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn raise_to_user_initiated() {}
+
+/// Run this thread at the user-interactive quality of service, whatever its class: a thread of
+/// the runtime's own that takes command buffers to their handlers ([`spawn_user_interactive`]).
+#[cfg(target_os = "macos")]
+fn run_at_user_interactive() {
+    // Metal runs every command buffer's scheduled and completed handlers at the user-interactive
+    // class, whatever the class of the thread that committed it: measured on an M3 Max, macOS
+    // 27.0.1, committing from threads at each class from background to user-interactive. So the
+    // threads that bring a command buffer to its handlers, and run them, run there too. It is a
+    // request of the documented `pthread_set_qos_class_self_np` (`<pthread/qos.h>`): the system
+    // still places the thread, which is bound to no CPU, and no option or variable turns it off.
+    // SAFETY: sets the calling thread's own class; no pointer.
+    unsafe {
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0)
+    };
+}
+
+/// Nothing: no quality of service class here ([`run_at_user_interactive`] on macOS).
+#[cfg(not(target_os = "macos"))]
+fn run_at_user_interactive() {}
 
 /// Whether this thread runs at the user-initiated quality of service or above: its class is
 /// user-initiated or user-interactive. Always where there is no such class.

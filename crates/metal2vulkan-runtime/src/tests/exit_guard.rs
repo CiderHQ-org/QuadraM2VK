@@ -597,6 +597,140 @@ fn a_runtime_thread_runs_at_no_lower_quality_of_service_than_the_default() {
     }
 }
 
+/// The threads that take a command buffer from its commit to its handlers run at the
+/// user-interactive quality of service from their start, whatever the class of the thread that
+/// started them, as read from inside each: the scheduler's, the completion thread, each
+/// `VkQueue`'s waiter, and the handler pool's first thread and a later one, which also run their
+/// items there. Another of the runtime's threads, the reaper, runs as [`exit_guard::spawn`]
+/// starts a thread, below the user-interactive class unless started from it.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_threads_that_take_command_buffers_to_their_handlers_run_at_the_user_interactive_class() {
+    use crate::command_buffer::completion::Completion;
+    use crate::contexts::{Contexts, Run, THREADS};
+    use crate::pipeline::reaper::Reaper;
+    use crate::scheduler::Scheduler;
+    use libc::qos_class_t as Q;
+    use std::thread::ThreadId;
+
+    // The calling thread's requested class (`<sys/qos.h>`), which `libc` does not declare.
+    unsafe extern "C" {
+        safe fn qos_class_self() -> u32;
+    }
+    /// A pool's item.
+    struct Item(Box<dyn FnOnce() + Send>);
+    impl Run for Item {
+        fn run(self) {
+            (self.0)();
+        }
+    }
+    /// Sends the class of the thread that drops it: the reaper's, which lets go of it.
+    struct Reaped(mpsc::Sender<u32>);
+    impl Drop for Reaped {
+        fn drop(&mut self) {
+            let _ = self.0.send(qos_class_self());
+        }
+    }
+    const WAIT: Duration = Duration::from_secs(20);
+    let interactive = Q::QOS_CLASS_USER_INTERACTIVE as u32;
+
+    for start in [
+        Q::QOS_CLASS_BACKGROUND,
+        Q::QOS_CLASS_UTILITY,
+        Q::QOS_CLASS_DEFAULT,
+        Q::QOS_CLASS_USER_INITIATED,
+        Q::QOS_CLASS_USER_INTERACTIVE,
+    ] {
+        // On a thread at `start`, standing for the program's that makes a device.
+        let (started, items, reaper, plain) = std::thread::spawn(move || {
+            // SAFETY: sets the calling thread's own class; no pointer.
+            assert_eq!(unsafe { libc::pthread_set_qos_class_self_np(start, 0) }, 0);
+            let (note, notes) = mpsc::channel();
+            exit_guard::ON_START.with(|on_start| {
+                *on_start.borrow_mut() = Some(Arc::new(move || {
+                    let thread = std::thread::current();
+                    let name = thread.name().unwrap_or_default().to_owned();
+                    let _ = note.send((name, qos_class_self()));
+                }));
+            });
+            let scheduler = Scheduler::start(1).unwrap();
+            let completion = Completion::start(2).unwrap();
+            // The pool's first thread runs an item that blocks; another queue's item then starts
+            // a thread of its own.
+            let contexts: Contexts<Item> = Contexts::start(THREADS).unwrap();
+            let (ran, runs) = mpsc::channel::<(ThreadId, u32)>();
+            let (release, released) = mpsc::channel::<()>();
+            let blocking = ran.clone();
+            contexts.post(
+                1,
+                Item(Box::new(move || {
+                    blocking
+                        .send((std::thread::current().id(), qos_class_self()))
+                        .unwrap();
+                    released.recv_timeout(WAIT).unwrap();
+                })),
+            );
+            let first = runs.recv_timeout(WAIT).unwrap();
+            contexts.post(
+                2,
+                Item(Box::new(move || {
+                    ran.send((std::thread::current().id(), qos_class_self()))
+                        .unwrap();
+                })),
+            );
+            let later = runs.recv_timeout(WAIT).unwrap();
+            release.send(()).unwrap();
+            contexts.stop();
+            scheduler.stop();
+            completion.stop();
+            exit_guard::ON_START.with(|on_start| on_start.borrow_mut().take());
+            let started: Vec<(String, u32)> = notes.try_iter().collect();
+
+            let reaper = Reaper::default();
+            let (dropped, drops) = mpsc::channel();
+            reaper.start().unwrap().reap(Box::new(Reaped(dropped)));
+            let reaped = drops.recv_timeout(WAIT).unwrap();
+            reaper.stop();
+            let plain = exit_guard::spawn(std::thread::Builder::new(), || qos_class_self())
+                .unwrap()
+                .join()
+                .unwrap();
+            (started, [first, later], reaped, plain)
+        })
+        .join()
+        .unwrap();
+
+        let mut names: Vec<&str> = started.iter().map(|(name, _)| name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "metal2vulkan-completion",
+                "metal2vulkan-handlers",
+                "metal2vulkan-handlers",
+                "metal2vulkan-queue-wait-0",
+                "metal2vulkan-queue-wait-1",
+                "metal2vulkan-scheduler",
+            ],
+            "from {start:?}"
+        );
+        for (name, class) in &started {
+            assert_eq!(*class, interactive, "{name} from {start:?}");
+        }
+        let [(first, first_class), (later, later_class)] = items;
+        assert_ne!(first, later, "the later item ran on a thread of its own");
+        assert_eq!(
+            (first_class, later_class),
+            (interactive, interactive),
+            "the pool's items from {start:?}"
+        );
+        assert_eq!(reaper, plain, "the reaper from {start:?}");
+        if start as u32 != interactive {
+            assert_ne!(reaper, interactive, "the reaper from {start:?}");
+        }
+    }
+}
+
 /// In builds with debug assertions, a runtime thread that reaches the device outside a section
 /// ends the process.
 #[cfg(all(unix, debug_assertions))]
