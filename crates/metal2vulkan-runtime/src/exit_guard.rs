@@ -712,8 +712,9 @@ where
 }
 
 /// Start one of the runtime's threads that take a command buffer from its commit to its handlers,
-/// running `f`, as [`spawn`] does, but at the user-interactive quality of service on macOS from
-/// its start ([`run_at_user_interactive`]): the scheduler's (`scheduler/`), the completion thread
+/// running `f`, as [`spawn`] does, but at the user-interactive quality of service on macOS, and
+/// with the utilization floor at its top on Linux, from its start ([`run_at_user_interactive`]):
+/// the scheduler's (`scheduler/`), the completion thread
 /// and each `VkQueue`'s waiter (`command_buffer/completion.rs`), and every thread of the handler
 /// pool (`contexts/`).
 pub(crate) fn spawn_user_interactive<F, T>(
@@ -812,8 +813,53 @@ fn run_at_user_interactive() {
     };
 }
 
-/// Nothing: no quality of service class here ([`run_at_user_interactive`] on macOS).
-#[cfg(not(target_os = "macos"))]
+/// Ask the scheduler to treat this thread as fully busy whenever it runs: a thread of the
+/// runtime's own that takes command buffers to their handlers ([`spawn_user_interactive`]), as
+/// macOS runs them at the user-interactive class.
+#[cfg(target_os = "linux")]
+fn run_at_user_interactive() {
+    // `struct sched_attr` of `sched_setattr(2)` (`<linux/sched/types.h>`), its 56-byte version,
+    // the first with the utilization clamps.
+    #[repr(C)]
+    struct SchedAttr {
+        size: u32,
+        sched_policy: u32,
+        sched_flags: u64,
+        sched_nice: i32,
+        sched_priority: u32,
+        sched_runtime: u64,
+        sched_deadline: u64,
+        sched_period: u64,
+        sched_util_min: u32,
+        sched_util_max: u32,
+    }
+    // `SCHED_FLAG_KEEP_POLICY`, `SCHED_FLAG_KEEP_PARAMS` and `SCHED_FLAG_UTIL_CLAMP_MIN`
+    // (`<linux/sched.h>`): only the utilization floor changes, not the policy, nice or priority.
+    const FLAGS: u64 = 0x08 | 0x10 | 0x20;
+    let attr = SchedAttr {
+        size: std::mem::size_of::<SchedAttr>() as u32,
+        sched_policy: 0,
+        sched_flags: FLAGS,
+        sched_nice: 0,
+        sched_priority: 0,
+        sched_runtime: 0,
+        sched_deadline: 0,
+        sched_period: 0,
+        // The top of the scale (`SCHED_CAPACITY_SCALE`, Documentation/scheduler/sched-util-clamp):
+        // where the kernel uses the floor (capacity-aware placement, the schedutil governor) the
+        // thread is placed and clocked as if fully busy. No CPU affinity: the system still places
+        // it, and no option or variable turns this off. An unprivileged thread may raise its own
+        // floor; a kernel without the clamps refuses it, and the thread runs as before.
+        sched_util_min: 1024,
+        sched_util_max: 0,
+    };
+    // SAFETY: `sched_setattr(0, &attr, 0)` sets the calling thread's own attributes from `attr`,
+    // which lives for the call and whose `size` is its own.
+    let _ = unsafe { libc::syscall(libc::SYS_sched_setattr, 0, &attr as *const SchedAttr, 0) };
+}
+
+/// Nothing: no such hint here ([`run_at_user_interactive`] on macOS and Linux).
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn run_at_user_interactive() {}
 
 /// Whether this thread runs at the user-initiated quality of service or above: its class is
