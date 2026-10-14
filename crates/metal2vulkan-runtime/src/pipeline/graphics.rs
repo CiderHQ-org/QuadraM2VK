@@ -51,6 +51,55 @@ pub(crate) struct GraphicsKey {
     pub(crate) sample_positions: Vec<[u8; 2]>,
 }
 
+/// A [`GraphicsKey`] of a draw's own values, borrowed: what a draw compares with the key its state
+/// last found made, and makes a key of only where it looks one up (`begin_graphics_pipeline`).
+/// Each field is the key's of the same name.
+#[derive(Clone, Copy)]
+pub(crate) struct DrawKey<'a> {
+    pub(crate) specialization: &'a SpecializationKey,
+    pub(crate) topology: metal2vulkan::vk::PrimitiveTopology,
+    pub(crate) primitive_restart: bool,
+    pub(crate) pass: &'a PassShape,
+    pub(crate) strides: &'a [(u32, u32)],
+    pub(crate) fixed: FixedState,
+    pub(crate) sample_positions: &'a [[u8; 2]],
+}
+
+impl DrawKey<'_> {
+    /// Whether `key` is this one.
+    pub(crate) fn is(&self, key: &GraphicsKey) -> bool {
+        let GraphicsKey {
+            specialization,
+            topology,
+            primitive_restart,
+            pass,
+            strides,
+            fixed,
+            sample_positions,
+        } = key;
+        self.specialization == specialization
+            && self.topology == *topology
+            && self.primitive_restart == *primitive_restart
+            && self.pass == pass
+            && self.strides == &strides[..]
+            && self.fixed == *fixed
+            && self.sample_positions == &sample_positions[..]
+    }
+
+    /// The key, owned.
+    pub(crate) fn key(&self) -> GraphicsKey {
+        GraphicsKey {
+            specialization: self.specialization.clone(),
+            topology: self.topology,
+            primitive_restart: self.primitive_restart,
+            pass: self.pass.clone(),
+            strides: self.strides.to_vec(),
+            fixed: self.fixed,
+            sample_positions: self.sample_positions.to_vec(),
+        }
+    }
+}
+
 /// The input assembly a key takes for a draw of `topology` with `primitive_restart` through a
 /// pipeline making `dynamic` dynamic: where the pipeline makes the topology dynamic, its class's
 /// list topology, and no restart where it makes the restart dynamic, so every draw of the class

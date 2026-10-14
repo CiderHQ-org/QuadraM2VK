@@ -57,10 +57,11 @@
 //! allocator as a consumer's process does (the counting one costs the draw path about a sixth of
 //! its time), and in one without it for the allocations.
 //!
-//! Two checks run by default where the allocations are counted:
+//! Three checks run by default where the allocations are counted:
 //! `a_frame_s_draws_and_pass_ends_allocate_within_their_bounds` holds a frame's draws to
 //! [`DRAW_ALLOCATIONS`] on the encoding thread, a draw's state changes and its draw call
-//! together, and its passes' ends to [`PASS_END_ALLOCATIONS`], each on average; and
+//! together, and its passes' ends to [`PASS_END_ALLOCATIONS`], each on average;
+//! `a_frame_s_pass_opens_allocate_within_their_bound` its pass opens to [`OPEN_ALLOCATIONS`]; and
 //! `a_frame_s_commits_allocate_within_their_bound` holds a checked frame's commits to
 //! [`COMMIT_ALLOCATIONS`] on the encoding thread and to [`SUBMIT_ALLOCATIONS`] on the others
 //! (the scheduler's checks and submissions, the completion), per command buffer on average.
@@ -114,14 +115,25 @@ const TEXTURE_SIDE: u64 = 64;
 /// The bytes of `zwd_shapes`' `ZwdShape`: rectangle, fill, outline and shape.
 const SHAPE_BYTES: usize = 64;
 /// The most allocations a frame's draw makes on the encoding thread on average, its state changes
-/// and its draw call together, once every pipeline is made. Measured: 67.5 on RADV (Radeon 780M)
-/// and 67.6 on lavapipe; 97.8 on RADV before each texture kept its storage view formats, each
-/// encoder its pipeline state's routing, and the format table its entries.
+/// and its draw call together, once every pipeline is made. Measured: 24.5 on RADV (Radeon 780M)
+/// and ANV (Iris Xe), 24.7 on lavapipe; 67.5 on RADV before a draw compared its
+/// pipeline key and bind shape in place, held what it retains by reference, kept its small lists,
+/// descriptor writes and push bytes on the stack, and found its pass colors' routing kept; 97.8
+/// before each texture kept its storage view formats, each encoder its pipeline state's routing,
+/// and the format table its entries.
 #[cfg(not(m2v_system_alloc))]
-const DRAW_ALLOCATIONS: f64 = 72.0;
+const DRAW_ALLOCATIONS: f64 = 27.0;
+/// The most allocations a frame's pass open (`render_command_encoder`) makes on the encoding
+/// thread on average, once every pipeline is made. Measured: 13.0 on RADV (Radeon 780M), on
+/// lavapipe and on ANV (Iris Xe); 18.0 on RADV and ANV before the device kept each pass shape's
+/// compatible render pass.
+#[cfg(not(m2v_system_alloc))]
+const OPEN_ALLOCATIONS: f64 = 14.0;
 /// The most allocations a frame's pass end (`end_encoding`) makes on the encoding thread on
-/// average, once every pipeline is made. Measured: 35.6 on RADV (Radeon 780M) and ANV (Iris Xe),
-/// 37.6 on lavapipe; 52.1 on RADV before a pass end retained what its commands use as one object
+/// average, once every pipeline is made. Measured: 36.6 on RADV (Radeon 780M) and ANV (Iris Xe),
+/// 38.6 on lavapipe, where an encoder's holds reach its command buffer as one entry, which starts
+/// the command buffer's list; 35.6 and 37.6 where the first encoder's list became the command
+/// buffer's as it was; 52.1 on RADV before a pass end retained what its commands use as one object
 /// and stopped making the lists it found empty.
 #[cfg(not(m2v_system_alloc))]
 const PASS_END_ALLOCATIONS: f64 = 40.0;
@@ -129,16 +141,17 @@ const PASS_END_ALLOCATIONS: f64 = 40.0;
 /// is made: its primary and its draws' secondary.
 const PASS_BEGINS: u64 = 2;
 /// The most allocations a checked frame's commit makes on the encoding thread on average, once
-/// every pipeline is made. Measured: 5.0 on RADV (Radeon 780M), on lavapipe and on ANV (Iris Xe);
-/// 19.0 on RADV before a commit listed only what it reaches among the live buffers and the
-/// scheduler kept its order's lines between passes.
+/// every pipeline is made. Measured: 4.7 to 5.0 on RADV (Radeon 780M), 5.0 on lavapipe and on ANV
+/// (Iris Xe); 19.0 on RADV before a commit listed only what it reaches among the live buffers and
+/// the scheduler kept its order's lines between passes.
 #[cfg(not(m2v_system_alloc))]
 const COMMIT_ALLOCATIONS: f64 = 6.0;
 /// The most allocations the process's other threads make per command buffer of a checked frame:
 /// its check and its batch's planning and submission on the scheduler thread, its completion and
-/// its handlers. Measured: 16.0-16.2 on RADV (Radeon 780M), 17.5 on lavapipe, 15.7 on ANV
-/// (Iris Xe); 46.9 on RADV before the hazard tracker planned without per-resource allocations,
-/// and 21.2 before the scheduler kept its order's lines between passes.
+/// its handlers, which varies with how the threads take turns. Measured: 14.8 to 16.3 on RADV
+/// (Radeon 780M), 16.8 to 17.5 on lavapipe, 15.7 to 16.8 on ANV (Iris Xe); 46.9 on RADV before the
+/// hazard tracker planned without per-resource allocations, and 21.2 before the scheduler kept its
+/// order's lines between passes.
 #[cfg(not(m2v_system_alloc))]
 const SUBMIT_ALLOCATIONS: f64 = 20.0;
 
@@ -1129,39 +1142,50 @@ fn frame_costs_announced() {
     measure(&[Run::ANNOUNCED]);
 }
 
-/// A frame's draws allocate at most [`DRAW_ALLOCATIONS`] each on average on the encoding thread,
-/// once every pipeline is made: what the draw path keeps of what it found before (each texture's
-/// storage view formats, the pipeline state's routing into the pass's colors, the settles of its
-/// latest bind shapes, the format table) is not made again at each draw. Its passes' ends
-/// allocate at most [`PASS_END_ALLOCATIONS`] each: a pass end retains what its commands use as one
-/// object, and makes no tile grid where a draw reaches every tile, no sample planes' steps in a
-/// pass without planes, and no scrub's list for a texture that is not sparse.
+/// One frame of a plain device, once every pipeline is made and every pool piece done, its
+/// allocations counted; and the device's name.
 #[cfg(not(m2v_system_alloc))]
-#[test]
-fn a_frame_s_draws_and_pass_ends_allocate_within_their_bounds() {
+fn counted() -> (String, Frame) {
     let cache = ScratchCache::new().unwrap();
     let heard = Heard::default();
     let work = Workload::new(device(&cache, false, &heard), false);
-    // Every pipeline made, and every pool piece done, before the frame that counts.
     for _ in 0..WARM {
         work.frame();
     }
     let frame = work.frame();
-    let allocations: u64 = frame.draws.iter().map(|s| s.allocations.unwrap()).sum();
-    let each = allocations as f64 / frame.draws.len() as f64;
-    eprintln!(
-        "FRAME-COST {}: {each:.2} allocations a draw, at most {DRAW_ALLOCATIONS} kept",
-        work.device.name()
-    );
+    (work.device.name().to_string(), frame)
+}
+
+/// The allocations each step of `steps` of `frame` made on the encoding thread, on average.
+#[cfg(not(m2v_system_alloc))]
+fn allocations_each(frame: &Frame, steps: StepsOf) -> f64 {
+    let steps = steps(frame);
+    let allocations: u64 = steps.iter().map(|s| s.allocations.unwrap()).sum();
+    allocations as f64 / steps.len() as f64
+}
+
+/// A frame's draws allocate at most [`DRAW_ALLOCATIONS`] each on average on the encoding thread,
+/// once every pipeline is made: what the draw path keeps of what it found before (each texture's
+/// storage view formats, the pipeline state's routing into the pass's colors, the settles of its
+/// latest bind shapes and the shapes themselves, the format table) is not made again at each
+/// draw, and what a draw retains, binds and records it holds and builds without allocating where
+/// the object or the list allows. Its passes' ends allocate at most [`PASS_END_ALLOCATIONS`] each:
+/// a pass end retains what its commands use as one object, and makes no tile grid where a draw
+/// reaches every tile, no sample planes' steps in a pass without planes, and no scrub's list for a
+/// texture that is not sparse.
+#[cfg(not(m2v_system_alloc))]
+#[test]
+fn a_frame_s_draws_and_pass_ends_allocate_within_their_bounds() {
+    let (device, frame) = counted();
+    let each = allocations_each(&frame, |f| &f.draws);
+    eprintln!("FRAME-COST {device}: {each:.2} allocations a draw, at most {DRAW_ALLOCATIONS} kept");
     assert!(
         each <= DRAW_ALLOCATIONS,
         "{each:.2} allocations a draw, more than {DRAW_ALLOCATIONS}"
     );
-    let allocations: u64 = frame.end.iter().map(|s| s.allocations.unwrap()).sum();
-    let each = allocations as f64 / frame.end.len() as f64;
+    let each = allocations_each(&frame, |f| &f.end);
     eprintln!(
-        "FRAME-COST {}: {each:.2} allocations a pass end, at most {PASS_END_ALLOCATIONS} kept",
-        work.device.name()
+        "FRAME-COST {device}: {each:.2} allocations a pass end, at most {PASS_END_ALLOCATIONS} kept"
     );
     assert!(
         each <= PASS_END_ALLOCATIONS,
@@ -1216,6 +1240,23 @@ fn a_frame_s_passes_and_commits_begin_their_command_buffers_within_their_bound()
             "{own} command buffers begun by {passes} commits, not kept"
         ),
     }
+}
+
+/// A frame's pass opens (`render_command_encoder`) allocate at most [`OPEN_ALLOCATIONS`] each on
+/// average on the encoding thread, once every pipeline is made: an encoder takes the compatible
+/// render pass the device keeps for its shape instead of making one.
+#[cfg(not(m2v_system_alloc))]
+#[test]
+fn a_frame_s_pass_opens_allocate_within_their_bound() {
+    let (device, frame) = counted();
+    let each = allocations_each(&frame, |f| &f.open);
+    eprintln!(
+        "FRAME-COST {device}: {each:.2} allocations a pass open, at most {OPEN_ALLOCATIONS} kept"
+    );
+    assert!(
+        each <= OPEN_ALLOCATIONS,
+        "{each:.2} allocations a pass open, more than {OPEN_ALLOCATIONS}"
+    );
 }
 
 /// A checked frame's commits allocate at most [`COMMIT_ALLOCATIONS`] each on average on the

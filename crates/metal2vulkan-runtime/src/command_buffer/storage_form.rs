@@ -86,7 +86,7 @@ impl CommandBuffer {
             summary: recorded.summary,
             sparse: Vec::new(),
         });
-        state.retained.extend(recorded.retained);
+        state.retained.extend(recorded.retained.into_entry());
         // What its commands took is the encoder's, as the switch's commands are.
         if let Some(record) = state.ended.get_mut(encoder) {
             record.taken.join(recorded.taken);

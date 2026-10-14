@@ -157,6 +157,7 @@ mod residency;
 mod resolve;
 mod resource;
 mod resource_ids;
+mod retained;
 mod rotated;
 mod sample_copy;
 mod sample_interleave;

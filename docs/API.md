@@ -405,7 +405,9 @@ assert!(plan.variant.is_empty(), "this shape needs no other variant");
 
 `state.shape()` keeps only what can change a plan (which slots are bound with what kind of
 resource, formats, level counts, sampler modes, alignment classes). A plan is a pure function of the
-pipeline, the device and the shape: memoize it on `(PipelineKey, BindShape)`.
+pipeline, the device and the shape: memoize it on `(PipelineKey, BindShape)`. A consumer that keeps
+the shapes it planned can find a state's among them without making it: `state.has_shape(&shape)`
+answers `state.shape() == shape`, compared in place.
 
 The plan holds one `DescriptorWrite` per layout binding element (the resource at a slot, a buffer
 the binder synthesizes, or a neutral resource where nothing compatible is bound), the vertex

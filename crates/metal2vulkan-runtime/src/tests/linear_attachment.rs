@@ -3,7 +3,7 @@
 //! [`pass_writes`]) and the box the pass's draws write each in ([`Coverage`]).
 
 use super::super::color_reformat::Routing;
-use super::super::linear_attachment::{pass_writes, writes, Coverage};
+use super::super::linear_attachment::{pass_writes, writes, ColorWrites, Coverage};
 use ash::vk;
 use metal2vulkan::metal::PixelFormat;
 use metal2vulkan::pipeline::ColorAttachmentState;
@@ -11,6 +11,15 @@ use metal2vulkan::vk::{ColorComponentFlags as Mask, Format};
 
 const BLENDED: Option<bool> = Some(true);
 const OPAQUE: Option<bool> = Some(false);
+
+/// `writes` to its last color written.
+fn listed(writes: ColorWrites) -> Vec<Option<bool>> {
+    let count = writes
+        .iter()
+        .rposition(Option::is_some)
+        .map_or(0, |at| at + 1);
+    writes[..count].to_vec()
+}
 
 fn rect(x: i32, y: i32, width: u32, height: u32) -> vk::Rect2D {
     vk::Rect2D {
@@ -35,7 +44,8 @@ fn a_mask_keeping_channels_reads_and_an_empty_one_writes_nothing() {
         color(Mask::empty()),
         None,
     ];
-    assert_eq!(writes(&states), [OPAQUE, BLENDED, None, None]);
+    assert_eq!(listed(writes(&states)), [OPAQUE, BLENDED]);
+    assert!(writes(&states)[2..].iter().all(Option::is_none));
 }
 
 #[test]
@@ -66,20 +76,26 @@ fn a_draw_writes_the_pass_colors_its_routing_places_and_its_variant_zeroes() {
     // Each state color at its own index; one the pass lacks is dropped.
     let same = Routing::by_index(&[bgra, rg], &[bgra, rg]);
     assert_eq!(
-        pass_writes(&[BLENDED, OPAQUE], &same, false),
+        listed(pass_writes(&[BLENDED, OPAQUE], &same, false)),
         [BLENDED, OPAQUE]
     );
     let dropped = Routing::by_index(&[bgra, rg], &[bgra]);
-    assert_eq!(pass_writes(&[OPAQUE, BLENDED], &dropped, false), [OPAQUE]);
+    assert_eq!(
+        listed(pass_writes(&[OPAQUE, BLENDED], &dropped, false)),
+        [OPAQUE]
+    );
     // A state lacking color 0 beside its color 1 stores its color 1 into the pass's color 0.
     let mut moved = Routing::default();
     moved.placed.insert(1, 0);
-    assert_eq!(pass_writes(&[None, BLENDED], &moved, false), [BLENDED]);
+    assert_eq!(
+        listed(pass_writes(&[None, BLENDED], &moved, false)),
+        [BLENDED]
+    );
     // A state of no color whose variant zeroes the pass's color 0 writes it, reading nothing;
     // one Metal keeps the color under writes none.
     let bare = Routing::by_index(&[], &[bgra]);
-    assert_eq!(pass_writes(&[], &bare, true), [OPAQUE]);
-    assert_eq!(pass_writes(&[], &bare, false), []);
+    assert_eq!(listed(pass_writes(&[], &bare, true)), [OPAQUE]);
+    assert_eq!(listed(pass_writes(&[], &bare, false)), []);
     // Its writes widen the pass's box: copies of the box would otherwise drop them.
     let mut coverage = Coverage::default();
     coverage.add(

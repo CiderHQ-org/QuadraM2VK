@@ -38,6 +38,7 @@ use super::rebind::{Holds, Taken};
 use super::replay::Replay;
 use super::residency::Residency;
 use super::resource::ResourceKey;
+use super::retained::Retained;
 use super::shadow::{ShadowCopy, ShadowSync, ShadowUse, Step};
 use super::shadow_merge::ShadowMerge;
 use super::sparse::encoder::SparseUpdate;
@@ -142,7 +143,7 @@ pub(super) struct Continuation(vk::CommandBuffer);
 pub(super) struct RecordedSegment {
     pub(super) raw: vk::CommandBuffer,
     pub(super) summary: Summary<ResourceKey>,
-    pub(super) retained: Vec<Box<dyn Any + Send + Sync>>,
+    pub(super) retained: Retained,
     pub(super) executions: Vec<Execution>,
     /// The keys its commands' uses named (`used_resources.rs`).
     pub(super) keys: BTreeSet<ResourceKey>,
@@ -167,7 +168,7 @@ pub(super) struct EncoderCore {
     /// The order of the encoder's commands, and its summary.
     uses: EncoderUses<ResourceKey>,
     /// What the encoder's commands use; `end` hands it to the command buffer.
-    retained: Vec<Box<dyn Any + Send + Sync>>,
+    retained: Retained,
     /// What its dispatches and draws executed; `end` hands it to the command buffer.
     executions: Vec<Execution>,
     /// Where the shadowed textures the encoder used stand.
@@ -207,7 +208,7 @@ pub(super) struct EncoderCore {
 pub(super) struct Replayed {
     pub(super) raws: Vec<vk::CommandBuffer>,
     pub(super) summary: Summary<ResourceKey>,
-    pub(super) retained: Vec<Box<dyn Any + Send + Sync>>,
+    pub(super) retained: Retained,
     pub(super) executions: Vec<Execution>,
     pub(super) keys: BTreeSet<ResourceKey>,
     pub(super) taken: Taken,
@@ -273,7 +274,7 @@ impl EncoderCore {
             ended: Vec::new(),
             segments: Vec::new(),
             uses: EncoderUses::new(ordered),
-            retained: Vec::new(),
+            retained: Retained::default(),
             executions: Vec::new(),
             shadows: ShadowSync::default(),
             keys: BTreeSet::new(),
@@ -342,7 +343,7 @@ impl EncoderCore {
             ended: Vec::new(),
             segments: Vec::new(),
             uses: EncoderUses::new(ordered),
-            retained: Vec::new(),
+            retained: Retained::default(),
             executions: Vec::new(),
             shadows: ShadowSync::default(),
             keys: BTreeSet::new(),
@@ -390,7 +391,13 @@ impl EncoderCore {
 
     /// Hold `object` until the command buffer completes: the encoder's commands use it.
     pub(super) fn retain(&mut self, object: impl Any + Send + Sync) {
-        self.retained.push(Box::new(object));
+        self.retained.boxed(Box::new(object));
+    }
+
+    /// Hold `object`, a shared one (`Buffer::held` and its kin), until the command buffer
+    /// completes: by another reference to it, without a box of its own (`retained.rs`).
+    pub(super) fn retain_shared(&mut self, object: Arc<dyn Any + Send + Sync>) {
+        self.retained.shared(object);
     }
 
     /// Add a dispatch or draw the encoder took to the command buffer's execution record, as
@@ -948,12 +955,7 @@ impl EncoderCore {
                 sparse: Vec::new(),
             });
         }
-        // The command buffer's first encoder hands over its list as it is.
-        if state.retained.is_empty() {
-            state.retained = retained;
-        } else {
-            state.retained.extend(retained);
-        }
+        state.retained.extend(retained.into_entry());
         state.executions.extend(executions);
         if !holds.is_empty() {
             state.holds.push(holds);
@@ -1026,7 +1028,7 @@ impl EncoderCore {
         record(device, core.raw);
         // SAFETY: as in `barrier`.
         unsafe { device.end_command_buffer(core.raw) }.map_err(vulkan)?;
-        core.retained.push(retained);
+        core.retained.boxed(retained);
         let EncoderCore {
             raw,
             uses,

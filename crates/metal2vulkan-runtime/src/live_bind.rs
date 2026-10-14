@@ -9,11 +9,14 @@
 //!   No `set*` call marks a slot: a bound buffer's pages may be rebound or detached between draws,
 //!   which changes its binding with no call, so deriving the binding is the check. While the same
 //!   slots stay bound, nothing is allocated.
-//! - **The shape made again only where it may have changed.** A bind shape is each bound slot's
+//! - **The shape found again only where it may have changed.** A bind shape is each bound slot's
 //!   shape beside the shapes of the state's other fields (`BindState::shape`: a stage's tables
 //!   are its slots' shapes, and a stage with none is left out). Where every changed slot keeps its
 //!   shape, no slot was bound or unbound, and no other field changed, the shape is the kept one.
-//!   Any other change makes it again, whole.
+//!   After any other change, and at an encoder's first draw, it is one the drawing state settled
+//!   lately where the state has it (`BindState::has_shape`, compared in place:
+//!   `GraphicsState::kept_shape`), so a pass that draws as the one before it makes none; else it
+//!   is made again, whole.
 
 use metal2vulkan::bind::{BindShape, BindState};
 use std::collections::btree_map::Entry;
@@ -84,8 +87,13 @@ impl LiveBind {
         }
     }
 
-    /// The state's shape: the kept one, else made again (counted in `counts`).
-    pub(super) fn shape(&mut self, counts: &Counters) -> Arc<BindShape> {
+    /// The state's shape: the kept one, else the one `found` finds of the state, else made
+    /// again (counted in `counts`).
+    pub(super) fn shape(
+        &mut self,
+        counts: &Counters,
+        found: impl FnOnce(&BindState) -> Option<Arc<BindShape>>,
+    ) -> Arc<BindShape> {
         if let Some(shape) = &self.shape {
             debug_assert!(
                 **shape == self.state.shape(),
@@ -93,8 +101,19 @@ impl LiveBind {
             );
             return Arc::clone(shape);
         }
-        counts.draw_shape_made();
-        let shape = Arc::new(self.state.shape());
+        let shape = match found(&self.state) {
+            Some(shape) => {
+                debug_assert!(
+                    *shape == self.state.shape(),
+                    "a bind shape found that is not its state's"
+                );
+                shape
+            }
+            None => {
+                counts.draw_shape_made();
+                Arc::new(self.state.shape())
+            }
+        };
         self.shape = Some(Arc::clone(&shape));
         shape
     }

@@ -1825,6 +1825,17 @@ impl Buffer {
         }
     }
 
+    /// Another reference to the buffer, which a command buffer holds it by
+    /// (`EncoderCore::retain_shared`).
+    pub(super) fn held(&self) -> Arc<dyn Any + Send + Sync> {
+        self.0.clone()
+    }
+
+    /// The buffer's address: no other object's while it lives.
+    pub(super) fn address(&self) -> usize {
+        Arc::as_ptr(&self.0) as usize
+    }
+
     /// The buffer's identity for hazard tracking: a heap buffer's is its heap's, as Metal tracks
     /// a heap's resources as one ([`Buffer::tracked`]).
     pub(super) fn identity(&self) -> Identity {

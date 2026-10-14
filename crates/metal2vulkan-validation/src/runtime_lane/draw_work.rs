@@ -7,9 +7,10 @@
 //! - **Settles.** A draw whose bind state is its encoder's last draw's makes no bind shape and
 //!   settles no variant (`WorkCounts::draw_shapes_made`, `draws_settled`); nor does one that
 //!   binds another texture of the same type, format and usage, whose slot keeps its shape; one of
-//!   another shape (a texture of another format, a slot's binding of another class) makes its shape,
-//!   and settles it unless the state settled it among its latest shapes: draws alternating between
-//!   two shapes settle each once.
+//!   another shape (a texture of another format, a slot's binding of another class) finds its
+//!   shape among those the state settled lately, or makes it and settles it: draws alternating
+//!   between two shapes make and settle each once, and a pass that draws as the one before it
+//!   makes and settles none.
 //! - **Pipelines.** A draw of a pipeline state whose last draw found its `VkPipeline` made, of
 //!   the same variant and an equal key, finds that entry again without looking the key up
 //!   (`WorkCounts::graphics_pipelines_looked_up`), states switched between included.
@@ -248,9 +249,9 @@ fn draws_of_other_objects_of_one_shape_make_and_settle_nothing() {
     });
 }
 
-/// Draws that bind textures of two formats in turn make their bind shapes at each draw, a shape of
-/// the other format not the last draw's, and settle each shape once: the state keeps the settles
-/// of its latest shapes. Before, each draw settled again. Each column is its own draw's texture's.
+/// Draws that bind textures of two formats in turn make and settle each bind shape once: the state
+/// keeps the settles of its latest shapes, among which a draw finds its shape. Before, each draw
+/// made its shape, and before that settled it again. Each column is its own draw's texture's.
 #[test]
 fn draws_of_another_shape_settle_again() {
     on_device(|device, _| {
@@ -271,7 +272,7 @@ fn draws_of_another_shape_settle_again() {
         }
         let after = device.work_counts();
         encoder.end_encoding().unwrap();
-        assert_eq!(grew(&before, &after, |c| c.draw_shapes_made), SIDE);
+        assert_eq!(grew(&before, &after, |c| c.draw_shapes_made), 2);
         assert_eq!(grew(&before, &after, |c| c.draws_settled), 2);
         let pixels = scene.pixels(&command_buffer);
         assert!(pixels.iter().all(|&p| p == GREEN), "{pixels:?}");
@@ -282,10 +283,51 @@ fn draws_of_another_shape_settle_again() {
     });
 }
 
+/// A pass that draws as the one before it, each of its encoder's draws of a bind state a draw of
+/// the pass before had, makes no bind shape and settles nothing: its first draw, whose encoder
+/// keeps no shape, and its draw of the other shape find theirs among those the state settled.
+/// Before, each pass's encoder made its shapes again. Every column is drawn.
+#[test]
+fn a_pass_that_draws_as_the_one_before_makes_no_shape() {
+    on_device(|device, _| {
+        let scene = Scene::new(device);
+        let textures = [
+            solid(device, PixelFormat::RGBA8Unorm, GREEN),
+            solid(device, PixelFormat::BGRA8Unorm, GREEN),
+        ];
+        let pass = || {
+            let (command_buffer, mut encoder) = scene.encoder(device);
+            for c in 0..SIDE {
+                encoder.set_vertex_bytes(&column(c), 0).unwrap();
+                encoder
+                    .set_fragment_texture(Some(&textures[(c % 2) as usize]), 0)
+                    .unwrap();
+                draw(&mut encoder);
+            }
+            encoder.end_encoding().unwrap();
+            command_buffer
+        };
+        let first = pass();
+        let pixels = scene.pixels(&first);
+        assert!(pixels.iter().all(|&p| p == GREEN), "{pixels:?}");
+        let before = device.work_counts();
+        let second = pass();
+        let after = device.work_counts();
+        assert_eq!(grew(&before, &after, |c| c.draw_shapes_made), 0);
+        assert_eq!(grew(&before, &after, |c| c.draws_settled), 0);
+        let pixels = scene.pixels(&second);
+        assert!(pixels.iter().all(|&p| p == GREEN), "{pixels:?}");
+        let (first, second) = (first.executions(), second.executions());
+        assert_eq!(second.len(), SIDE as usize);
+        assert_eq!(first[0].shape(), second[0].shape());
+        assert_eq!(first[1].shape(), second[1].shape());
+    });
+}
+
 /// Draws whose vertex buffer slot 0 binds a buffer and inline bytes in turn, a binding of another
-/// class at the slot each draw, make their bind shapes at each draw, a slot's class being of its
-/// shape, and settle each shape once (the state keeps the settles of its latest shapes). Every
-/// column is drawn, from the buffer's corners or the bytes'.
+/// class at the slot each draw, a slot's class being of its shape, make and settle each shape
+/// once (the state keeps the settles of its latest shapes, among which a draw finds its shape).
+/// Every column is drawn, from the buffer's corners or the bytes'.
 #[test]
 fn draws_that_change_a_slot_s_class_make_their_shapes_again() {
     on_device(|device, _| {
@@ -307,7 +349,7 @@ fn draws_that_change_a_slot_s_class_make_their_shapes_again() {
         }
         let after = device.work_counts();
         encoder.end_encoding().unwrap();
-        assert_eq!(grew(&before, &after, |c| c.draw_shapes_made), SIDE);
+        assert_eq!(grew(&before, &after, |c| c.draw_shapes_made), 2);
         assert_eq!(grew(&before, &after, |c| c.draws_settled), 2);
         let pixels = scene.pixels(&command_buffer);
         assert!(pixels.iter().all(|&p| p == RED), "{pixels:?}");

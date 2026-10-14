@@ -549,7 +549,8 @@ fn record_total(
     }
     // What the executions use: the resident resources each variant's plan reaches.
     let empty = ArgumentTable::default();
-    let tables = binding::Tables::new(vec![(Stage::Kernel, &empty)]).with_residency(residency);
+    let stages = [(Stage::Kernel, &empty)];
+    let tables = binding::Tables::new(&stages).with_residency(residency);
     let none = binding::Command {
         descriptor_bytes: &[],
         descriptor_ranges: &[],

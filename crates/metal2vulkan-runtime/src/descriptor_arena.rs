@@ -22,7 +22,7 @@
 //!   pools back to the device's spares, and one that failed or was dropped unsubmitted releases
 //!   them.
 
-use super::error::{internal, vulkan, Error};
+use super::error::{vulkan, Error};
 use super::spares::{release_in_section, DescriptorPool};
 use super::Device;
 use ash::vk;
@@ -205,12 +205,15 @@ impl DescriptorArena {
         let info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(self.pools[at].raw)
             .set_layouts(&layouts);
-        // SAFETY: the pool has room for the set (counted); its sets go with it.
-        let sets = unsafe { raw.allocate_descriptor_sets(&info) }.map_err(vulkan)?;
+        // The set straight into a local: `ash`'s wrapper collects it into a `Vec`.
+        let mut set = vk::DescriptorSet::null();
+        // SAFETY: the pool has room for the set (counted); its sets go with it. `info` names one
+        // layout, so the driver writes one set.
+        unsafe { (raw.fp_v1_0().allocate_descriptor_sets)(raw.handle(), &info, &mut set) }
+            .result()
+            .map_err(vulkan)?;
         self.book.take(at, needs);
-        sets.first()
-            .copied()
-            .ok_or_else(|| internal("the driver allocated no descriptor set"))
+        Ok(set)
     }
 
     /// Give every pool to the device's spares: the command buffer completed, so no command uses

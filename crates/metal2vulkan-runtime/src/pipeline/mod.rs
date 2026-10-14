@@ -70,7 +70,7 @@ pub use additions::{
     RequiredThreadsProblem,
 };
 pub(super) use dispatch_making::RegionPipeline;
-pub(super) use graphics::{keyed_assembly, DepthRange, FixedState, GraphicsKey};
+pub(super) use graphics::{keyed_assembly, DepthRange, DrawKey, FixedState, GraphicsKey};
 pub(super) use making::Pending;
 pub(super) use objects::ShaderModules;
 pub(super) use objects::{create_set_layout, set_needs, RawPipeline, VariantObjects};

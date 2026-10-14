@@ -76,7 +76,7 @@ use std::sync::Arc;
 
 /// What an encoder binds: each stage's argument table.
 pub(super) struct Tables<'a> {
-    stages: Vec<(Stage, &'a ArgumentTable)>,
+    stages: &'a [(Stage, &'a ArgumentTable)],
     /// The resources the encoder made resident, which the bind state lists as used.
     residency: Option<&'a Residency>,
     /// A render encoder's pass, whose attachments a draw's input and storage attachments read,
@@ -132,7 +132,7 @@ pub(super) struct Tables<'a> {
 
 impl<'a> Tables<'a> {
     /// The tables of `stages`.
-    pub(super) fn new(stages: Vec<(Stage, &'a ArgumentTable)>) -> Tables<'a> {
+    pub(super) fn new(stages: &'a [(Stage, &'a ArgumentTable)]) -> Tables<'a> {
         Tables {
             stages,
             residency: None,
@@ -732,14 +732,15 @@ fn heap_texture<'a>(tables: &Tables<'a>, source: HeapSource) -> Result<&'a Textu
 }
 
 /// The push writes of `writes` (one region's, or one draw's) with `holes` filled: each hole in
-/// the write of its own stages that covers its eight bytes.
+/// the write of its own stages that covers its eight bytes. Its writes' bytes become theirs, in
+/// their storage.
 pub(super) fn push_writes(
-    writes: &[PushConstantWrite],
+    writes: Vec<PushConstantWrite>,
     holes: &[Hole],
 ) -> Result<Vec<PushWrite>, Error> {
     let mut filled: Vec<PushWrite> = writes
-        .iter()
-        .map(|write| (write.stages.into(), write.offset, write.bytes.clone()))
+        .into_iter()
+        .map(|write| (write.stages.into(), write.offset, write.bytes))
         .collect();
     for hole in holes {
         let write = filled
@@ -756,7 +757,11 @@ pub(super) fn push_writes(
     Ok(filled)
 }
 
-/// Write `writes` into `sets`, the descriptor sets of their layout by set number.
+/// The descriptor writes [`write_sets`] hands the driver in one call: their infos sit on the stack.
+const WRITES_AT_ONCE: usize = 16;
+
+/// Write `writes` into `sets`, the descriptor sets of their layout by set number: in order,
+/// [`WRITES_AT_ONCE`] at a time.
 ///
 /// # Safety
 ///
@@ -770,45 +775,38 @@ pub(super) unsafe fn write_sets(
     if writes.iter().any(|write| write.set as usize >= sets.len()) {
         return Err(internal("a descriptor write to a set the layout lacks"));
     }
-    let buffer_infos: Vec<[vk::DescriptorBufferInfo; 1]> = writes
-        .iter()
-        .map(|write| match write.info {
-            Info::Buffer(info) => [info],
-            _ => [vk::DescriptorBufferInfo::default()],
-        })
-        .collect();
-    let image_infos: Vec<[vk::DescriptorImageInfo; 1]> = writes
-        .iter()
-        .map(|write| match write.info {
-            Info::Image(info) => [info],
-            _ => [vk::DescriptorImageInfo::default()],
-        })
-        .collect();
-    let texel_views: Vec<[vk::BufferView; 1]> = writes
-        .iter()
-        .map(|write| match write.info {
-            Info::Texel(view) => [view],
-            _ => [vk::BufferView::null()],
-        })
-        .collect();
-    let raw: Vec<vk::WriteDescriptorSet<'_>> = writes
-        .iter()
-        .enumerate()
-        .map(|(i, write)| {
+    for writes in writes.chunks(WRITES_AT_ONCE) {
+        let mut buffer_infos = [[vk::DescriptorBufferInfo::default()]; WRITES_AT_ONCE];
+        let mut image_infos = [[vk::DescriptorImageInfo::default()]; WRITES_AT_ONCE];
+        let mut texel_views = [[vk::BufferView::null()]; WRITES_AT_ONCE];
+        for (i, write) in writes.iter().enumerate() {
+            match write.info {
+                Info::Buffer(info) => buffer_infos[i] = [info],
+                Info::Image(info) => image_infos[i] = [info],
+                Info::Texel(view) => texel_views[i] = [view],
+            }
+        }
+        let mut raw = [vk::WriteDescriptorSet::default(); WRITES_AT_ONCE];
+        for (i, write) in writes.iter().enumerate() {
             let set = vk::WriteDescriptorSet::default()
                 .dst_set(sets[write.set as usize])
                 .dst_binding(write.binding)
                 .dst_array_element(write.element)
                 .descriptor_type(write.ty);
-            match write.info {
+            raw[i] = match write.info {
                 Info::Buffer(_) => set.buffer_info(&buffer_infos[i]),
                 Info::Image(_) => set.image_info(&image_infos[i]),
                 Info::Texel(_) => set.texel_buffer_view(&texel_views[i]),
-            }
-        })
-        .collect();
-    // SAFETY: the caller's contract; every array `raw` points at is live for the call.
-    unsafe { device.shared().vk().update_descriptor_sets(&raw, &[]) };
+            };
+        }
+        // SAFETY: the caller's contract; every array `raw` points at is live for the call.
+        unsafe {
+            device
+                .shared()
+                .vk()
+                .update_descriptor_sets(&raw[..writes.len()], &[])
+        };
+    }
     Ok(())
 }
 
@@ -1459,8 +1457,14 @@ pub(super) fn command_uses(
     let mut uses = Vec::new();
     // The keys of the buffers made resident the command reaches through the resident set, by
     // address; every other use names its resource (a descriptor, a root table's static, a view).
+    // Those it names are gathered once it reaches one so: until then each use names its key.
     let mut reached = BTreeSet::new();
     let mut named = BTreeSet::new();
+    let name = |named: &mut BTreeSet<ResourceKey>, reached: &BTreeSet<ResourceKey>, key| {
+        if !reached.is_empty() {
+            named.insert(key);
+        }
+    };
     for resource in plan.uses.iter().chain(command.uses) {
         if !resource.access.read && !resource.access.write {
             continue;
@@ -1495,7 +1499,7 @@ pub(super) fn command_uses(
                             access(read, resource.access.read),
                             access(write, resource.access.write),
                         )?;
-                        named.insert(used.key);
+                        name(&mut named, &reached, used.key);
                         uses.push(used);
                     }
                     continue;
@@ -1518,7 +1522,7 @@ pub(super) fn command_uses(
                         access(read, resource.access.read),
                         access(write, resource.access.write),
                     );
-                    named.insert(used.key);
+                    name(&mut named, &reached, used.key);
                     uses.push(used);
                     continue;
                 }
@@ -1551,9 +1555,15 @@ pub(super) fn command_uses(
         let (read, write) = buffer_access(resource.class)?;
         let (identity, range) = buffer.tracked(range);
         match resource.resource {
-            UseTarget::Used(_) => reached.insert(identity.key),
-            _ => named.insert(identity.key),
-        };
+            UseTarget::Used(_) => {
+                // The first reached: every use before it named its key.
+                if reached.is_empty() {
+                    named.extend(uses.iter().map(|used: &Use<ResourceKey>| used.key));
+                }
+                reached.insert(identity.key);
+            }
+            _ => name(&mut named, &reached, identity.key),
+        }
         uses.push(Use {
             key: identity.key,
             tracked: identity.tracked,

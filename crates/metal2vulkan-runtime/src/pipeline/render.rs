@@ -36,7 +36,7 @@
 //! [`Function::function_descriptor`]: crate::Function::function_descriptor
 
 use super::creation_log::{self, StateLog};
-use super::graphics::{GraphicsKey, Notices};
+use super::graphics::{DrawKey, GraphicsKey, Notices};
 use super::kept::{Compiled, Place};
 use super::libraries::Linked;
 use super::making::{Begun, Making, Pending, Ticket};
@@ -50,10 +50,12 @@ use super::tile::TileState;
 use super::BufferForms;
 use super::{compile_error, stand_in, PipelineOptions, PIPELINES, PLANS, VARIANTS};
 use crate::binary_archive::{self, Used};
+use crate::color_reformat::Routing;
 use crate::degradation::{BoundFormats, Degradation, Occurrence};
 use crate::device::{device_error, lock};
 use crate::error::{internal, invalid, ArchivedPipeline, Error, Problem, RuntimeGap};
 use crate::framebuffer_fetch;
+use crate::render_pass::MAX_COLOR_ATTACHMENTS;
 use crate::render_target::RenderPassObject;
 use crate::residency::{every_render_stage, handle_stages};
 use crate::resource_ids::{
@@ -63,7 +65,7 @@ use crate::resource_ids::{
 use crate::unique_identifier::UniqueIdentifier;
 use crate::values::Size;
 use crate::Device;
-use metal2vulkan::bind::{BindShape, BindingPlan, FragmentTests};
+use metal2vulkan::bind::{BindShape, BindState, BindingPlan, FragmentTests};
 use metal2vulkan::cache::{PipelineKey, SpecializationKey, VariantKey};
 use metal2vulkan::metal::{BindingAccess, PixelFormat, PrimitiveTopologyClass, RenderStages};
 use metal2vulkan::pipeline::{
@@ -72,6 +74,7 @@ use metal2vulkan::pipeline::{
     TessellationDescriptor,
 };
 use metal2vulkan::reflection::{LinkedUseAnswers, RenderPipelineReflection};
+use std::any::Any;
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
@@ -193,6 +196,8 @@ pub(crate) struct Program {
     settled: Mutex<VecDeque<(BufferForms, Settled)>>,
     /// The `VkPipeline` its last draw found made (`RenderVariant::begin_graphics_pipeline`).
     last_pipeline: Mutex<Option<LastPipeline>>,
+    /// Its routing into the pass colors it was last set in a pass of (`GraphicsState::routed`).
+    routed: Mutex<Option<(PassColors, Result<Arc<Routing>, u32>)>>,
     /// What its pool pieces hold (`piece_holds.rs`): its draws' makings and its capture forms'
     /// translations, kept here so a pool thread never holds the device's last reference.
     pieces: Arc<PieceHolds<PieceHeld>>,
@@ -224,6 +229,10 @@ pub(crate) enum PieceHeld {
     /// A capture form's translation: the state's device, which its sources read.
     Capture(Device),
 }
+
+/// A pass's color formats, by index: what a state's routing is found for
+/// ([`GraphicsState::routed`]).
+pub(crate) type PassColors = [Option<PixelFormat>; MAX_COLOR_ATTACHMENTS];
 
 /// The `VkPipeline` a state's last draw found made in its variant's memo: the variant (held
 /// weakly, so the state holds it no longer than before, and its address stays its own while
@@ -1532,6 +1541,7 @@ impl GraphicsState {
                 captures: Mutex::new(Lru::counted(CAPTURES)),
                 settled: Mutex::new(VecDeque::with_capacity(SETTLED)),
                 last_pipeline: Mutex::new(None),
+                routed: Mutex::new(None),
                 pieces: PieceHolds::new(),
             };
             StateShared {
@@ -1696,6 +1706,29 @@ impl GraphicsState {
         Arc::ptr_eq(&self.0, &other.0)
     }
 
+    /// Another reference to the state, which a command buffer holds it by
+    /// (`EncoderCore::retain_shared`).
+    pub(crate) fn held(&self) -> Arc<dyn Any + Send + Sync> {
+        self.0.clone()
+    }
+
+    /// Its routing into a pass of the colors `pass` (`RenderCommandEncoder::routing`), as `route`
+    /// finds it: a function of the state and the pass's colors alone, so it is found once for the
+    /// latest pass colors and kept, and a pass of other colors finds it again.
+    pub(crate) fn routed(
+        &self,
+        pass: &PassColors,
+        route: impl FnOnce() -> Result<Routing, u32>,
+    ) -> Result<Arc<Routing>, u32> {
+        let mut routed = lock(&self.0.routed);
+        if let Some((_, routing)) = routed.as_ref().filter(|(colors, _)| colors == pass) {
+            return routing.clone();
+        }
+        let routing = route().map(Arc::new);
+        *routed = Some((*pass, routing.clone()));
+        routing
+    }
+
     pub(crate) fn texture_handle_stages(&self) -> RenderStages {
         self.0.base.handle_stages
     }
@@ -1755,6 +1788,17 @@ impl GraphicsState {
             ));
         }
         Ok((variant, plan))
+    }
+
+    /// The shape of `state` among those of what the state settled lately
+    /// ([`settle_shape`](Self::settle_shape)), compared with the state in place
+    /// (`BindState::has_shape`): what a draw of `state` settles where it has one, and finds there,
+    /// without its shape made (`live_bind.rs`).
+    pub(crate) fn kept_shape(&self, state: &BindState) -> Option<Arc<BindShape>> {
+        lock(&self.0.settled)
+            .iter()
+            .find(|(_, last)| state.has_shape(&last.shape))
+            .map(|(_, last)| Arc::clone(&last.shape))
     }
 
     /// What a draw of bind shape `shape` runs on in `forms` ([`settle`](Self::settle)'s answer),
@@ -2342,7 +2386,7 @@ impl RenderVariant {
     pub(crate) fn first_use(
         &self,
         made: &RawPipeline,
-        key: &GraphicsKey,
+        specialization: &SpecializationKey,
         formats: BoundFormats<'_>,
     ) {
         if made.first_drawn() {
@@ -2353,7 +2397,7 @@ impl RenderVariant {
                 .creation_pipeline_drawn();
             self.objects.device.degrade_specialized(
                 &self.objects.specialized,
-                &key.specialization,
+                specialization,
                 Some(formats),
                 Occurrence::Made,
             );
@@ -2371,22 +2415,23 @@ impl RenderVariant {
     pub(crate) fn begin_graphics_pipeline(
         self: &Arc<Self>,
         device: &Device,
-        key: &GraphicsKey,
+        key: &DrawKey<'_>,
         compatible: &Arc<RenderPassObject>,
         (state, formats): (&GraphicsState, crate::degradation::BoundFormats<'_>),
     ) -> DrawPipeline {
         // A draw of this variant and a key equal to the state's last draw's finds that entry
         // again, made, where it stays, and uses it as a lookup of the key would: the key is
-        // compared, not hashed.
+        // compared, not hashed, nor made.
         let last = lock(&state.0.last_pipeline)
             .as_ref()
             .filter(|last| std::ptr::eq(last.variant.as_ptr(), Arc::as_ptr(self)))
-            .filter(|last| last.key == *key)
+            .filter(|last| key.is(&last.key))
             .map(|last| last.at);
         if let Some(made) = last.and_then(|at| self.pipelines.made_at(at)) {
             return DrawPipeline::Made(made);
         }
         device.shared().counts.graphics_pipeline_looked_up();
+        let key = &key.key();
         match self.pipelines.begin_at(key) {
             (Begun::Made(made), at) => {
                 if let Some(at) = at {

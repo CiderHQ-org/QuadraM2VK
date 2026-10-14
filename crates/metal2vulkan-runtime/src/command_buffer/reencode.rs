@@ -182,7 +182,7 @@ impl State {
         // recording does.
         for segment in recorded.segments.drain(..) {
             if let Some(mut before) = segment.recorded {
-                self.retained.extend(before.retained);
+                self.retained.extend(before.retained.into_entry());
                 before.taken.retain_into(&mut self.retained);
             }
             self.retained.push(Box::new(segment.work));
@@ -215,7 +215,7 @@ impl State {
                 self.retained.push(Box::new(first));
             }
         }
-        self.retained.extend(retained);
+        self.retained.extend(retained.into_entry());
         self.retained.push(Box::new(heaps));
         Ok(())
     }

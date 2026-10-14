@@ -83,6 +83,7 @@ use metal2vulkan::metal::{
     CompareFunction, SamplerAddressMode, SamplerBorderColor, SamplerMinMagFilter, SamplerMipFilter,
     SamplerReductionMode,
 };
+use std::any::Any;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -472,6 +473,17 @@ impl Device {
 }
 
 impl SamplerState {
+    /// Another reference to the sampler state, which a command buffer holds it by
+    /// (`EncoderCore::retain_shared`).
+    pub(super) fn held(&self) -> Arc<dyn Any + Send + Sync> {
+        self.0.clone()
+    }
+
+    /// The sampler state's address: no other object's while it lives.
+    pub(super) fn address(&self) -> usize {
+        Arc::as_ptr(&self.0) as usize
+    }
+
     /// `device`: the device that made the state.
     pub fn device(&self) -> &Device {
         &self.0.device

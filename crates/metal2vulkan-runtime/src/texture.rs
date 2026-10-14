@@ -4754,6 +4754,17 @@ impl Texture {
         }
     }
 
+    /// Another reference to the texture, which a command buffer holds it by
+    /// (`EncoderCore::retain_shared`).
+    pub(super) fn held(&self) -> Arc<dyn Any + Send + Sync> {
+        self.0.clone()
+    }
+
+    /// The texture's address: no other object's while it lives.
+    pub(super) fn address(&self) -> usize {
+        Arc::as_ptr(&self.0) as usize
+    }
+
     /// The key the texture's uses name (`bound_use`): its image's, or the bytes' of the buffer
     /// it is over, where its image aliases them or it has none.
     pub(super) fn use_key(&self) -> ResourceKey {

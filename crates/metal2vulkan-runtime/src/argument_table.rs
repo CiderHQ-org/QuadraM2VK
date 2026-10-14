@@ -35,8 +35,9 @@ use metal2vulkan::bind::{BoundBuffer, BoundSampler, BoundTexture, StageTable};
 use metal2vulkan::pipeline::{
     BufferKind, PipelineInterface, SlotClass, SlotInterface, SlotRef, Stage,
 };
+use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 
 /// Entries of a buffer table (`setBuffer:offset:atIndex:` and its stage forms).
 pub(super) const BUFFER_SLOTS: u32 = 31;
@@ -83,11 +84,13 @@ pub(super) struct ArgumentTable {
     retained: Retained,
 }
 
-/// The core an argument table was last retained into ([`EncoderCore::id`]), and the objects it
-/// bound then, which that core holds ([`ArgumentTable::retain`]): held weakly, so the table never
-/// holds an object longer than the core does.
+/// The core an argument table was last retained into ([`EncoderCore::id`]) and the objects it
+/// bound then, by slot and address in its order ([`ArgumentTable::retain`]). The table holds none
+/// of them, so it never holds an object longer than the core does: the core holds each from that
+/// retain or an earlier one until its command buffer completes, and nothing is retained into it
+/// once it ends, so while it is the core named here no other object has one of the addresses.
 #[derive(Default)]
-struct Retained(Mutex<Option<(u64, Weak<RetainedObjects>)>>);
+struct Retained(Mutex<RetainedBy>);
 
 impl Clone for Retained {
     fn clone(&self) -> Retained {
@@ -95,25 +98,37 @@ impl Clone for Retained {
     }
 }
 
-/// The objects an argument table bound, which an encoder's core holds until its command buffer
-/// completes ([`ArgumentTable::retain`]), each in the table's order.
-struct RetainedObjects {
-    buffers: Vec<Buffer>,
-    textures: Vec<Texture>,
-    samplers: Vec<SamplerState>,
+#[derive(Clone, Default)]
+struct RetainedBy {
+    core: Option<u64>,
+    /// Each object's slot (its table, then its index) and address; its storage is kept from
+    /// one retain to the next.
+    bound: Vec<((SlotClass, u32), usize)>,
 }
 
-impl RetainedObjects {
-    /// Whether `table` binds exactly these objects (by identity), in its order.
-    fn bound_by(&self, table: &ArgumentTable) -> bool {
-        self.buffers
-            .iter()
-            .eq(table.buffers.values().map(|(b, _)| b))
-            && self.textures.iter().eq(table.textures.values())
-            && self
-                .samplers
-                .iter()
-                .eq(table.samplers.values().map(|(s, _)| s))
+/// An object an argument table binds, which a command that uses the table holds.
+#[derive(Clone, Copy)]
+enum Bound<'a> {
+    Buffer(&'a Buffer),
+    Texture(&'a Texture),
+    Sampler(&'a SamplerState),
+}
+
+impl Bound<'_> {
+    fn address(self) -> usize {
+        match self {
+            Bound::Buffer(buffer) => buffer.address(),
+            Bound::Texture(texture) => texture.address(),
+            Bound::Sampler(sampler) => sampler.address(),
+        }
+    }
+
+    fn held(self) -> Arc<dyn Any + Send + Sync> {
+        match self {
+            Bound::Buffer(buffer) => buffer.held(),
+            Bound::Texture(texture) => texture.held(),
+            Bound::Sampler(sampler) => sampler.held(),
+        }
     }
 }
 
@@ -789,30 +804,55 @@ impl ArgumentTable {
         }
     }
 
+    /// Each object bound, by slot, in the table's order: its buffers, then its textures, then
+    /// its sampler states, each by index.
+    fn bound(&self) -> impl DoubleEndedIterator<Item = ((SlotClass, u32), Bound<'_>)> {
+        let buffers = self
+            .buffers
+            .iter()
+            .map(|(&index, (buffer, _))| ((SlotClass::Buffer, index), Bound::Buffer(buffer)));
+        let textures = self
+            .textures
+            .iter()
+            .map(|(&index, texture)| ((SlotClass::Texture, index), Bound::Texture(texture)));
+        let samplers = self
+            .samplers
+            .iter()
+            .map(|(&index, (sampler, _))| ((SlotClass::Sampler, index), Bound::Sampler(sampler)));
+        buffers.chain(textures).chain(samplers)
+    }
+
     /// Hold everything bound until `core`'s command buffer completes: a command uses it, and
     /// the command buffer lists it among its used resources (`used_resources.rs`). Once while it
     /// binds the same objects: where `core` retained the table before and it binds exactly the
     /// objects it bound then (by identity), `core` holds them and keeps their keys, each a function
-    /// of its object, until the command buffer completes, so nothing is retained again.
+    /// of its object, until the command buffer completes, so nothing is retained again. Where it
+    /// binds others, `core` holds each object the table bound at its slot then already, and takes
+    /// the rest, each by another reference to it (`retained.rs`): its last first, so they go in
+    /// the table's order, as one hold of them all went.
     pub(super) fn retain(&self, core: &mut EncoderCore) {
         let mut retained = lock(&self.retained.0);
-        let held = retained
-            .as_ref()
-            .filter(|(id, _)| *id == core.id())
-            .and_then(|(_, objects)| objects.upgrade());
-        if held.is_some_and(|objects| objects.bound_by(self)) {
+        let RetainedBy { core: by, bound } = &mut *retained;
+        let same_core = *by == Some(core.id());
+        let now = self.bound().map(|(slot, object)| (slot, object.address()));
+        if same_core && bound.iter().copied().eq(now) {
             return;
         }
         let keys = self.buffers.values().map(|(b, _)| b.identity().key);
         let texture_keys = self.textures.values().map(Texture::use_key);
         core.touch_keys(keys.chain(texture_keys));
-        let objects = Arc::new(RetainedObjects {
-            buffers: self.buffers.values().map(|(b, _)| b.clone()).collect(),
-            textures: self.textures.values().cloned().collect(),
-            samplers: self.samplers.values().map(|(s, _)| s.clone()).collect(),
-        });
-        *retained = Some((core.id(), Arc::downgrade(&objects)));
-        core.retain(objects);
+        for (slot, object) in self.bound().rev() {
+            let held = same_core
+                && bound
+                    .binary_search_by_key(&slot, |&(slot, _)| slot)
+                    .is_ok_and(|at| bound[at].1 == object.address());
+            if !held {
+                core.retain_shared(object.held());
+            }
+        }
+        bound.clear();
+        bound.extend(self.bound().map(|(slot, object)| (slot, object.address())));
+        *by = Some(core.id());
         core.device().shared().counts.argument_table_retained();
     }
 }

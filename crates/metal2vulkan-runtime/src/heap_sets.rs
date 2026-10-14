@@ -1443,14 +1443,24 @@ fn same(a: &Info, b: &Info) -> bool {
 /// (`resource_ids.rs`; one past every array's capacity at `u32::MAX`, which [`fit_samplers`]
 /// leaves out).
 pub(super) fn listed(samplers: &[SamplerState]) -> Vec<ArgumentSampler> {
-    samplers
-        .iter()
-        .map(|sampler| {
-            let element = u32::try_from(sampler.heap_element()).unwrap_or(u32::MAX);
-            ArgumentSampler::new(*sampler.descriptor(), sampler.gpu_resource_id().0)
-                .at_element(element)
+    samplers.iter().map(argument_sampler).collect()
+}
+
+/// `sampler` as one of the bind state's argument samplers ([`listed`]).
+fn argument_sampler(sampler: &SamplerState) -> ArgumentSampler {
+    let element = u32::try_from(sampler.heap_element()).unwrap_or(u32::MAX);
+    ArgumentSampler::new(*sampler.descriptor(), sampler.gpu_resource_id().0).at_element(element)
+}
+
+/// Whether `kept` is `samplers` [`listed`], bit for bit (a float of the other sign, which
+/// compares equal, is another listing): what a kept bind state need not take again.
+pub(super) fn lists(kept: &[ArgumentSampler], samplers: &[SamplerState]) -> bool {
+    let bits = |s: &ArgumentSampler| [s.desc.lod_min_clamp, s.desc.lod_max_clamp].map(f32::to_bits);
+    kept.len() == samplers.len()
+        && kept.iter().zip(samplers).all(|(kept, sampler)| {
+            let listed = argument_sampler(sampler);
+            *kept == listed && bits(kept) == bits(&listed)
         })
-        .collect()
 }
 
 /// Where `plan`'s heap writes go for `state`, each heap array holding the capacity of set 1 of

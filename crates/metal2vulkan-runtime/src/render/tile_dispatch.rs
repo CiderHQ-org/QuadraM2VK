@@ -1041,7 +1041,8 @@ impl RenderCommandEncoder {
                 .collect(),
             mesh: None,
         };
-        let mut tables = binding::Tables::new(vec![(Stage::Kernel, &self.tile)])
+        let stages = [(Stage::Kernel, &self.tile)];
+        let mut tables = binding::Tables::new(&stages)
             .with_pass(&self.layout, ViewSetup::default())
             .with_tile_scratch(&staged)
             .with_residency(&self.residency)
@@ -1113,7 +1114,7 @@ impl RenderCommandEncoder {
         let mut regions = Vec::with_capacity(commands.regions.len());
         let mut pipelines = Vec::with_capacity(commands.regions.len());
         for region in &commands.regions {
-            let push = binding::push_writes(&region.push_constants, &bound.holes)?;
+            let push = binding::push_writes(region.push_constants.clone(), &bound.holes)?;
             let pipeline = variant.region_pipeline(region, &|slot| tables.bound_format(slot))?;
             regions.push((pipeline.raw, push, region.group_count));
             pipelines.push(pipeline);

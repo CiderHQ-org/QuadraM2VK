@@ -1514,7 +1514,8 @@ fn record(
     // table at the texture handle tables.
     let heap = heap_sets::heap_elements(&variant.pipeline().layout, &plan, &state)?;
     let texture_table = heap_sets::texture_table(core.device(), &variant.pipeline().layout)?;
-    let mut bound_tables = binding::Tables::new(vec![(Stage::Kernel, tables.table)])
+    let stages = [(Stage::Kernel, tables.table)];
+    let mut bound_tables = binding::Tables::new(&stages)
         .with_residency(tables.residency)
         .with_texture_table(texture_table.as_ref())
         .with_sampler_maps(sampler_maps);
@@ -1608,7 +1609,7 @@ fn record(
     };
     let mut push = Vec::with_capacity(commands.regions.len());
     for region in &commands.regions {
-        let writes = binding::push_writes(&region.push_constants, &bound.holes)?;
+        let writes = binding::push_writes(region.push_constants.clone(), &bound.holes)?;
         push.push((region.group_count, writes));
     }
     let objects = std::sync::Arc::clone(variant.objects());

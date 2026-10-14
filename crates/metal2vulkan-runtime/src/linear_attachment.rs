@@ -66,7 +66,7 @@ use super::color_reformat::Routing;
 use super::command_buffer::CommandBuffer;
 use super::degradation::Degradation;
 use super::error::{Error, RuntimeGap};
-use super::render_pass::{ColorTarget, Target};
+use super::render_pass::{ColorTarget, Target, MAX_COLOR_ATTACHMENTS};
 use super::render_values::LoadAction;
 use super::Device;
 use ash::vk;
@@ -134,18 +134,23 @@ impl Coverage {
     }
 }
 
+/// What a draw writes of each color, by color index: `Some(reads)` where it writes the color,
+/// reading it where `reads`; `None` where it writes none, past its colors too.
+pub(super) type ColorWrites = [Option<bool>; MAX_COLOR_ATTACHMENTS];
+
 /// What a draw of a state with color attachments `colors` (by color index) writes of each:
 /// `Some(reads)` where it writes the color (a present attachment with a write mask), reading it as
 /// it does where `reads` (a blend, or a write mask that keeps some of its channels).
-pub(super) fn writes(colors: &[Option<ColorAttachmentState>]) -> Vec<Option<bool>> {
+pub(super) fn writes(colors: &[Option<ColorAttachmentState>]) -> ColorWrites {
     let all = metal2vulkan::vk::ColorComponentFlags::known_bits();
-    colors
-        .iter()
-        .map(|state| {
-            let state = state.as_ref().filter(|s| !s.write_mask.is_empty())?;
-            Some(state.blend.is_some() || !state.write_mask.contains(all))
-        })
-        .collect()
+    let mut writes = [None; MAX_COLOR_ATTACHMENTS];
+    for (write, state) in writes.iter_mut().zip(colors) {
+        *write = state
+            .as_ref()
+            .filter(|s| !s.write_mask.is_empty())
+            .map(|state| state.blend.is_some() || !state.write_mask.contains(all));
+    }
+    writes
 }
 
 /// What a draw writes of each of the pass's colors, by pass color index: each state color's
@@ -153,18 +158,13 @@ pub(super) fn writes(colors: &[Option<ColorAttachmentState>]) -> Vec<Option<bool
 /// (`routing.placed`), none for a dropped one; and, where its variant zeroes the pass colors at no
 /// place of its record (`zeroed`), each of those (`routing.uncovered`), written without a read. A
 /// pass color two of them reach reads where either does.
-pub(super) fn pass_writes(
-    state: &[Option<bool>],
-    routing: &Routing,
-    zeroed: bool,
-) -> Vec<Option<bool>> {
-    let mut out: Vec<Option<bool>> = Vec::new();
+pub(super) fn pass_writes(state: &[Option<bool>], routing: &Routing, zeroed: bool) -> ColorWrites {
+    let mut out = [None; MAX_COLOR_ATTACHMENTS];
     let mut put = |index: u32, reads: bool| {
-        let index = index as usize;
-        if out.len() <= index {
-            out.resize(index + 1, None);
+        // A pass color's index: less than its colors'.
+        if let Some(write) = out.get_mut(index as usize) {
+            *write = Some(write.unwrap_or(false) || reads);
         }
-        out[index] = Some(out[index].unwrap_or(false) || reads);
     };
     for (color, &placed) in &routing.placed {
         if let Some(Some(reads)) = state.get(*color as usize) {

@@ -287,7 +287,7 @@ use super::pipeline::Settled;
 use super::pipeline::{BufferForms, DrawPipeline};
 use super::pipeline::{DrawDynamic, RawPipeline, RenderVariant, VariantObjects};
 use super::pipeline::{
-    FixedState, GraphicsKey, GraphicsState as DrawingState, RenderPipelineState, RenderStateKind,
+    DrawKey, FixedState, GraphicsState as DrawingState, RenderPipelineState, RenderStateKind,
     TileState,
 };
 use super::rate_mapped_pass::{self, RateMappedPass};
@@ -295,7 +295,7 @@ use super::render_pass::{
     self, check_memoryless, AspectTarget, Attachment, DepthStencilTarget, PassLayout,
     RenderPassDescriptor, RenderPassProblem, Target, HIDDEN_DEPTH_FORMAT, MAX_COLOR_ATTACHMENTS,
 };
-use super::render_state::{self, DepthBiasRecord, EncoderState};
+use super::render_state::{self, DepthBiasRecord, EncoderState, MAX_VIEWPORTS};
 use super::render_state::{Compensation, DepthBiasEffect, WrittenDepthClamp};
 use super::render_target::{self, covers, PassShape, Position, RenderPassObject};
 use super::render_values::{LoadAction, ScissorRect, StoreAction, StoreActionOptions, Viewport};
@@ -619,6 +619,32 @@ struct DrawState {
     /// The depth bias's factors and the command they record by.
     depth_bias: DepthBiasRecord,
     blend_color: [f32; 4],
+}
+
+/// The states a draw records with (`draw_resident`): the whole draw's, or in a rate-mapped pass
+/// each region's of each amplification drawn alone, in order (`rate_mapped_pass.rs`).
+enum DrawStates {
+    Whole([DrawState; 1]),
+    Regions(Vec<Vec<DrawState>>),
+}
+
+impl DrawStates {
+    /// The states amplification `a` records with: the last amplification's for any past it.
+    fn of(&self, a: usize) -> &[DrawState] {
+        match self {
+            DrawStates::Whole(whole) => whole,
+            DrawStates::Regions(regions) => &regions[a.min(regions.len() - 1)],
+        }
+    }
+
+    /// Every state.
+    fn iter_mut(&mut self) -> impl Iterator<Item = &mut DrawState> {
+        let (whole, regions) = match self {
+            DrawStates::Whole(whole) => (&mut whole[..], &mut [][..]),
+            DrawStates::Regions(regions) => (&mut [][..], &mut regions[..]),
+        };
+        whole.iter_mut().chain(regions.iter_mut().flatten())
+    }
 }
 
 /// The storage the pixel interlock orders that the draws of a render pass instance reach, kind
@@ -1098,7 +1124,7 @@ pub struct RenderCommandEncoder {
 
 /// What a render encoder's last draw retained of its own (its pipeline state, its variant's
 /// objects, its `VkPipeline` and the samplers its bind named), held: a draw retains each again
-/// only where it is another object. What an encoder retains goes to its command buffer, which
+/// only where it is another object, by another reference to it (`retained.rs`). What an encoder retains goes to its command buffer, which
 /// holds it until it completes, so an object retained once is held for every later draw of the
 /// encoder; and as each is held here, an object seen again is the same one.
 #[derive(Default)]
@@ -1122,7 +1148,7 @@ impl LastRetained {
             .as_ref()
             .is_some_and(|kept| kept.same(&pipeline))
         {
-            core.retain(pipeline.clone());
+            core.retain_shared(pipeline.held());
             self.pipeline = Some(pipeline);
         }
         if !self
@@ -1130,7 +1156,7 @@ impl LastRetained {
             .as_ref()
             .is_some_and(|kept| Arc::ptr_eq(kept, &objects))
         {
-            core.retain(Arc::clone(&objects));
+            core.retain_shared(objects.clone());
             self.objects = Some(objects);
         }
         if let Some(made) = made {
@@ -1139,14 +1165,15 @@ impl LastRetained {
                 .as_ref()
                 .is_some_and(|kept| Arc::ptr_eq(kept, &made))
             {
-                core.retain(Arc::clone(&made));
+                core.retain_shared(made.clone());
                 self.made = Some(made);
             }
         }
     }
 
     /// Retain into `core` the samplers a draw's bind named, unless they are the ones the last
-    /// draw's named, in order.
+    /// draw's named, in order: each by another reference to it, the last first, so they go in
+    /// their order (`retained.rs`).
     fn retain_samplers(&mut self, core: &mut EncoderCore, samplers: Vec<Arc<OwnedSampler>>) {
         let same = samplers.len() == self.samplers.len()
             && samplers
@@ -1154,7 +1181,9 @@ impl LastRetained {
                 .zip(&self.samplers)
                 .all(|(a, b)| Arc::ptr_eq(a, b));
         if !same {
-            core.retain(samplers.clone());
+            for sampler in samplers.iter().rev() {
+                core.retain_shared(sampler.clone());
+            }
             self.samplers = samplers;
         }
     }
@@ -1243,7 +1272,7 @@ impl CommandBuffer {
         };
         let rate_map = RateMappedPass::of(CALL, descriptor, &layout)?;
         let shape = PassShape::of(&layout)?;
-        let compatible = Arc::new(render_target::compatible_pass(device, &shape)?);
+        let compatible = render_target::shared_compatible_pass(device, &shape)?;
         if again.is_none() {
             if let Some(problem) = self.state().refusal() {
                 return Err(invalid(CALL, problem));
@@ -1515,7 +1544,7 @@ impl RenderCommandEncoder {
         if let RenderStateKind::Graphics(graphics) = state.kind() {
             let pass = self.pass_formats();
             self.routed = Some(Routed {
-                routing: Self::route(graphics, &pass).map(Arc::new),
+                routing: graphics.routed(&pass, || Self::route(graphics, &pass)),
                 state: graphics.clone(),
                 pass,
             });
@@ -4158,10 +4187,13 @@ impl RenderCommandEncoder {
             table.refresh_reading(kept, (stage, interface), maps, &mut reshape);
         }
         reshape.field(&mut state.used_resources, self.residency.used_resources());
-        reshape.field(
-            &mut state.argument_samplers,
-            heap_sets::listed(argument_samplers),
-        );
+        // Listed again only where the device's sampler states changed since.
+        if !heap_sets::lists(&state.argument_samplers, argument_samplers) {
+            reshape.field(
+                &mut state.argument_samplers,
+                heap_sets::listed(argument_samplers),
+            );
+        }
         let listed = function_tables
             .iter()
             .map(VisibleFunctionTable::listed)
@@ -4589,7 +4621,7 @@ impl RenderCommandEncoder {
         }
         let compatible = match self.passes.iter().find(|(s, _)| *s == shape) {
             Some((_, pass)) => Arc::clone(pass),
-            None => Arc::new(render_target::compatible_pass(device, &shape)?),
+            None => render_target::shared_compatible_pass(device, &shape)?,
         };
         let draws = self.core.command_buffer().begin_draws(&compatible)?;
         let instance = Instance {
@@ -4864,7 +4896,7 @@ impl RenderCommandEncoder {
             Some(routed) if routed.state.same(pipeline) && routed.pass == pass => {
                 routed.routing.clone()
             }
-            _ => Self::route(pipeline, &pass).map(Arc::new),
+            _ => pipeline.routed(&pass, || Self::route(pipeline, &pass)),
         }
     }
 
@@ -5588,8 +5620,9 @@ impl RenderCommandEncoder {
                 }
                 false => {
                     let selects = selects || self.amplification.offsets_viewports();
-                    let rects = self.state.vk_scissors(selects);
-                    self.drawn.add(&rects);
+                    let mut scissors = [vk::Rect2D::default(); MAX_VIEWPORTS];
+                    let rects = self.state.vk_scissors_in(selects, &mut scissors);
+                    self.drawn.add(rects);
                     // What it writes of each color, and blends, inside its Vulkan scissors
                     // (`linear_attachment::Coverage`).
                     // Of each pass color its draws store into: a state color where its routing
@@ -5603,7 +5636,7 @@ impl RenderCommandEncoder {
                             let zeroed = !self.zeroed_colors(state, &routing).is_empty();
                             let writes = linear_attachment::writes(colors);
                             let writes = linear_attachment::pass_writes(&writes, &routing, zeroed);
-                            self.coverage.add(&writes, &rects)
+                            self.coverage.add(&writes, rects)
                         }
                         _ => self.coverage.everywhere(),
                     }
@@ -6206,16 +6239,17 @@ impl RenderCommandEncoder {
             })
             .map(|bytes| self.tile_memory.buffer(&device, bytes))
             .transpose()?;
-        let mut tables = binding::Tables::new(vec![
+        let stages = [
             (Stage::Vertex, pass_start.or(Stage::Vertex, &self.vertex)),
             (Stage::Fragment, &self.fragment),
             (Stage::Object, pass_start.or(Stage::Object, &self.object)),
             (Stage::Mesh, pass_start.or(Stage::Mesh, &self.mesh)),
-        ])
-        .with_pass(layout, views)
-        .with_residency(&self.residency)
-        .with_texture_table(texture_table.as_ref())
-        .with_sampler_maps(self.sampler_maps(&pipeline, &pass_start)?);
+        ];
+        let mut tables = binding::Tables::new(&stages)
+            .with_pass(layout, views)
+            .with_residency(&self.residency)
+            .with_texture_table(texture_table.as_ref())
+            .with_sampler_maps(self.sampler_maps(&pipeline, &pass_start)?);
         // The listed function tables: set 1's elements, or the snapshot a variant without the
         // function-table array reads in set 0, which has no heap of its own.
         tables = tables.with_function_tables(&function_tables);
@@ -6424,9 +6458,9 @@ impl RenderCommandEncoder {
         // slice's, else the draw's one slice, or none known where its primitives choose.
         // `draw_states` holds the recordings of each amplification drawn alone, in order, or of
         // the whole draw.
-        let mut draw_states: Vec<Vec<DrawState>> = match &self.rate_map {
-            None => vec![vec![draw_state]],
-            Some(pass) => {
+        let mut draw_states = match &self.rate_map {
+            None => DrawStates::Whole([draw_state]),
+            Some(pass) => DrawStates::Regions({
                 let length = self.render_target_array_length;
                 let slices: Vec<Option<u32>> =
                     match pipeline.vertex_chooses_slice() || views.view_mask != 0 {
@@ -6467,12 +6501,12 @@ impl RenderCommandEncoder {
                             .collect())
                     })
                     .collect::<Result<_, Error>>()?
-            }
+            }),
         };
         // A draw that reaches no fragment runs its vertex function alone, through empty scissors,
         // and so do unsized points, and a capture draw, which writes its records alone.
         if failing == Some(FailingDraw::Untouched) || unsized_points || capture.is_some() {
-            for state in draw_states.iter_mut().flatten() {
+            for state in draw_states.iter_mut() {
                 for scissor in &mut state.scissors {
                     *scissor = vk::Rect2D::default();
                 }
@@ -6485,22 +6519,23 @@ impl RenderCommandEncoder {
         // The class's list topology where the pipeline makes the topology dynamic.
         let (keyed_topology, keyed_restart) =
             super::pipeline::keyed_assembly(topology, primitive_restart, &graphics.dynamic_states);
-        let key = GraphicsKey {
-            // A mesh draw's own complete key (its threadgroup size), else the plan's.
-            specialization: commands
-                .specialization
-                .clone()
-                .unwrap_or_else(|| plan.specialization.clone()),
+        // A mesh draw's own complete key (its threadgroup size), else the plan's.
+        let specialization = commands
+            .specialization
+            .as_ref()
+            .unwrap_or(&plan.specialization);
+        // The draw's graphics key, borrowed: made only where the draw looks it up.
+        let key = DrawKey {
+            specialization,
             topology: keyed_topology,
             primitive_restart: keyed_restart,
-            pass: instance.shape.clone(),
-            strides: if dynamic_strides {
-                Vec::new()
-            } else {
-                commands.vertex_strides.clone()
+            pass: &instance.shape,
+            strides: match dynamic_strides {
+                true => &[],
+                false => &commands.vertex_strides,
             },
             fixed: FixedState::without_dynamic(fixed, &graphics.dynamic_states),
-            sample_positions: self.layout.sample_positions.clone(),
+            sample_positions: &self.layout.sample_positions,
         };
         // The formats the draw binds, which a specialized notice names.
         let formats = |slot| tables.bound_format(slot);
@@ -6509,11 +6544,11 @@ impl RenderCommandEncoder {
         let quiet = self
             .quiet_bound_values
             .as_ref()
-            .is_some_and(|q| q.holds(&variant, &plan, &key.specialization));
+            .is_some_and(|q| q.holds(&variant, &plan, specialization));
         if !quiet
             && device.degrade_bound_values(
                 &variant.pipeline().stages,
-                &key.specialization,
+                specialization,
                 &|k| plan.specialized_value(k),
                 Some(&formats),
             )
@@ -6521,7 +6556,7 @@ impl RenderCommandEncoder {
             self.quiet_bound_values = Some(QuietBoundValues {
                 variant: Arc::clone(&variant),
                 plan: Arc::clone(&plan),
-                specialization: key.specialization.clone(),
+                specialization: specialization.clone(),
             });
         }
         device.degrade_cross_class(&plan.diagnostics, &formats);
@@ -6548,7 +6583,7 @@ impl RenderCommandEncoder {
                 variant.begin_graphics_pipeline(&device, &key, &compatible, (&pipeline, &formats))
             }
             false => DrawPipeline::Made(variant.graphics_pipeline(
-                &key,
+                &key.key(),
                 &compatible,
                 (&pipeline, &formats),
             )?),
@@ -6562,32 +6597,34 @@ impl RenderCommandEncoder {
         // A pipeline made at the state's creation announces its notices at the first draw that
         // finds it made; a draw that began a making announced them as it began it.
         if let DrawPipeline::Made(made) = &draw_pipeline {
-            variant.first_use(made, &key, &formats);
+            variant.first_use(made, specialization, &formats);
         }
         let bound = {
             let mut state = self.core.command_buffer().state();
             let memo = Some(&mut self.bind_memo);
             binding::bind(call, &device, &mut state, &plan, &command, &tables, memo)?
         };
-        let push = binding::push_writes(&commands.push_constants, &bound.holes)?;
+        // The draw's push bytes, filled in place.
+        let push = binding::push_writes(commands.push_constants, &bound.holes)?;
         // A plan that draws one amplification at a time records the draw once per amplification,
         // in order, each after that amplification's push writes.
-        let pushes = match commands.amplifications.is_empty() {
-            true => vec![push],
-            false => commands
-                .amplifications
-                .iter()
-                .map(|writes| {
-                    let mut all = push.clone();
-                    all.extend(binding::push_writes(writes, &[])?);
-                    Ok(all)
-                })
-                .collect::<Result<Vec<_>, Error>>()?,
+        let amplified = commands
+            .amplifications
+            .iter()
+            .map(|writes| {
+                let mut all = push.clone();
+                all.extend(binding::push_writes(writes.clone(), &[])?);
+                Ok(all)
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        let pushes = match amplified.is_empty() {
+            true => std::slice::from_ref(&push),
+            false => &amplified[..],
         };
         let objects = Arc::clone(variant.objects());
         // Set 0 per draw; set 1 the device's (written below, once nothing refuses).
-        let (heap_writes, writes): (Vec<_>, Vec<_>) =
-            bound.writes.into_iter().partition(|write| write.set > 0);
+        let mut writes = bound.writes;
+        let heap_writes: Vec<_> = writes.extract_if(.., |write| write.set > 0).collect();
         let set = objects.set_zero(&mut self.core.command_buffer().state().descriptors)?;
         // SAFETY: the set was just allocated and no command uses it yet; every buffer, view
         // and sampler written is live (the command buffer retains them below, and a refusal
@@ -6596,11 +6633,10 @@ impl RenderCommandEncoder {
         // The Vulkan draws: the binder's, the index bounds pass's two, or the index rewrite
         // pass's one.
         let sized = device.shared().sized_index_bind;
-        let vk_draws = match (&rewrite, &bounds, index, &mesh_work, commands.draw) {
-            (Some(pass), ..) => vec![pass.draw(sized)],
-            (_, Some(pass), Some(source), _, _) => {
-                pass.draws(source, commands.draw, sized)?.to_vec()
-            }
+        let one = |draw| ([draw; 2], 1);
+        let (vk_draws, count) = match (&rewrite, &bounds, index, &mesh_work, commands.draw) {
+            (Some(pass), ..) => one(pass.draw(sized)),
+            (_, Some(pass), Some(source), _, _) => (pass.draws(source, commands.draw, sized)?, 2),
             // A scanned emulated mesh draw's arguments are its work buffer's.
             (
                 _,
@@ -6614,7 +6650,7 @@ impl RenderCommandEncoder {
                 },
             ) => {
                 let (raw, at) = work.at(offset);
-                vec![(
+                one((
                     None,
                     Some(raw),
                     metal2vulkan::vk::DrawCommand::DrawIndirect {
@@ -6622,14 +6658,15 @@ impl RenderCommandEncoder {
                         draw_count,
                         stride,
                     },
-                )]
+                ))
             }
-            _ => vec![(
+            _ => one((
                 index.and_then(|source| IndexBind::of(source, commands.draw, sized)),
                 indirect.map(|source| source.raw),
                 commands.draw,
-            )],
+            )),
         };
+        let vk_draws = &vk_draws[..count];
         // The draw's steps before the pass (its copies, its index bounds or rewrite pass) read
         // what an earlier draw or tile dispatch of the encoder wrote behind a memory barrier: they
         // record before the draw's render pass instance instead, which follows the writer's.
@@ -7005,8 +7042,8 @@ impl RenderCommandEncoder {
             // Amplification by amplification, each through its recordings' regions: Metal
             // renders every primitive of one before the next's, and a pixel's regions are one.
             for (a, push) in pushes.iter().enumerate() {
-                for state in &draw_states[a.min(draw_states.len() - 1)] {
-                    for &(index, indirect, draw) in &vk_draws {
+                for state in draw_states.of(a) {
+                    for &(index, indirect, draw) in vk_draws {
                         if indirect.is_some()
                             && matches!(
                                 draw,
@@ -7081,7 +7118,7 @@ impl RenderCommandEncoder {
                     encoder,
                     draw: self.draw_calls,
                     variant: variant.key().clone(),
-                    specialization: variant.constants(&key.specialization),
+                    specialization: variant.constants(specialization),
                     storage_barrier,
                     query,
                     recordings: owned,
@@ -7143,7 +7180,7 @@ impl RenderCommandEncoder {
             let compiled = variant.pipeline();
             objects.announce_bound(
                 (&compiled.stages, Some(&compiled.requirements)),
-                [(&key.specialization, Some(&formats as BoundFormats<'_>))],
+                [(specialization, Some(&formats as BoundFormats<'_>))],
             );
         }
         // A pipeline being made: its creation times once made, and the pass holds it
@@ -7171,10 +7208,10 @@ impl RenderCommandEncoder {
         self.object.retain(&mut self.core);
         self.mesh.retain(&mut self.core);
         for source in index.into_iter().chain(indirect) {
-            self.core.retain(source.buffer.clone());
+            self.core.retain_shared(source.buffer.held());
         }
         if let Some(factors) = factors {
-            self.core.retain(factors.buffer);
+            self.core.retain_shared(factors.buffer.held());
         }
         // The pass's tile memory, untracked: live until the command buffer completes.
         if let Some(buffer) = tile_buffer {
@@ -7185,7 +7222,7 @@ impl RenderCommandEncoder {
             .into_iter()
             .chain(buffers.control_point_indices)
         {
-            self.core.retain(buffer.clone());
+            self.core.retain_shared(buffer.held());
         }
         self.last_retained
             .retain_samplers(&mut self.core, bound.samplers);
@@ -7521,7 +7558,8 @@ impl RenderCommandEncoder {
             reshape.field(&mut state.render_area, render_area);
             reshape.field(&mut state.tile_threadgroup, tile_threadgroup);
             live.reshaped(reshape);
-            let shape = live.shape(&self.core.device().shared().counts);
+            let counts = &self.core.device().shared().counts;
+            let shape = live.shape(counts, |state| pipeline.kept_shape(state));
             // Through what the pipeline state settled lately (`GraphicsState::settle_shape`).
             let settled = match pipeline.settle_shape(&shape, self.forms) {
                 // A variant whose shadows the storage form or the bind layer refuses (a mesh

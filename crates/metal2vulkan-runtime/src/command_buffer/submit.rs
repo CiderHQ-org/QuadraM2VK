@@ -87,6 +87,7 @@ use crate::exit_guard::{self, Call};
 use crate::gpu_time;
 use crate::release;
 use crate::replay::Replay;
+use crate::retained::Retained;
 use crate::scheduler;
 use crate::sparse::bind::{bind_batch, BindFailure, Bound};
 use crate::sparse::encoder::SparseUpdate;
@@ -702,7 +703,7 @@ impl CommandBufferShared {
             state.recorded[encoder].segments[at].recorded = Some(RecordedSegment {
                 raw,
                 summary: EncoderUses::new(true).finish(),
-                retained: Vec::new(),
+                retained: Retained::default(),
                 executions: Vec::new(),
                 keys: Default::default(),
                 taken: Default::default(),

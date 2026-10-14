@@ -1645,10 +1645,11 @@ impl RenderCommandEncoder {
             sample_positions: self.layout.sample_positions.clone(),
         };
         // The formats the encoder's tables bind, which are the command's own.
-        let tables = crate::binding::Tables::new(vec![
+        let stages = [
             (metal2vulkan::pipeline::Stage::Vertex, &self.vertex),
             (metal2vulkan::pipeline::Stage::Fragment, &self.fragment),
-        ]);
+        ];
+        let tables = crate::binding::Tables::new(&stages);
         let formats = |slot| tables.bound_format(slot);
         self.core
             .device()
@@ -1663,7 +1664,7 @@ impl RenderCommandEncoder {
             Some(&formats),
         );
         let raw = variant.graphics_pipeline(&key, &self.current.compatible, (state, &formats))?;
-        variant.first_use(&raw, &key, &formats);
+        variant.first_use(&raw, &key.specialization, &formats);
         Ok((variant, Some(raw)))
     }
 }

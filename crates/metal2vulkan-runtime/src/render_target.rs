@@ -96,11 +96,15 @@
 //!   and `STORE`: render pass compatibility ignores the operations, so the draws' secondary
 //!   command buffer and the encoder's graphics pipelines record against it while the store
 //!   actions may still change.
-//! - Both passes and the framebuffer are made per encoder, but for a kept pass; its command buffer
-//!   holds them until it completes.
+//! - **Made and kept.** The pass `end_encoding` begins and the framebuffer are made per encoder,
+//!   but for a kept pass; its command buffer holds them until it completes. The compatible pass of
+//!   a shape the device keeps ([`shared_compatible_pass`]): made when an encoder of the shape
+//!   first needs one and destroyed with the device, for at most [`KEPT_SHAPES`] shapes; an
+//!   encoder of a shape past them makes its own, which its command buffer holds so.
 
 use super::attachmentless;
 use super::binding_view::VkView;
+use super::device::lock;
 use super::error::{internal, Error};
 use super::exit_guard;
 use super::framebuffer_fetch;
@@ -116,6 +120,8 @@ use crate::release;
 use ash::vk;
 use metal2vulkan::bind::ViewSetup;
 use metal2vulkan::device::{DeviceProfile, DriverFact};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// What makes two passes compatible: each color index's format (`None` without a texture), the
 /// depth/stencil attachment's format, the samples of every attachment, the draws' subpass's
@@ -634,6 +640,47 @@ pub(super) fn compatible_pass(
         Some(kept) => Ok(kept),
         None => made_compatible_pass(device, shape),
     }
+}
+
+/// The most shapes whose compatible pass a device keeps (the module docs): far more than a
+/// program's passes take, which a few formats and sample counts make.
+const KEPT_SHAPES: usize = 64;
+
+/// The compatible passes a device keeps, by shape ([`shared_compatible_pass`]).
+#[derive(Default)]
+pub(super) struct KeptCompatible(HashMap<PassShape, vk::RenderPass>);
+
+impl KeptCompatible {
+    /// Destroy every kept pass; the device is idle, and is destroyed next.
+    pub(super) fn destroy(&self, raw: &ash::Device) {
+        for &pass in self.0.values() {
+            // SAFETY: the device is idle, so no pending command uses the pass, and a pipeline
+            // made with it does not keep it.
+            unsafe { release::object(raw, pass) };
+        }
+    }
+}
+
+/// [`compatible_pass`], kept: the device's pass of `shape` (the module docs), made now where it
+/// keeps none. Every pass of a shape is compatible with every other, so one serves every encoder.
+pub(super) fn shared_compatible_pass(
+    device: &Device,
+    shape: &PassShape,
+) -> Result<Arc<RenderPassObject>, Error> {
+    let kept = &device.shared().compatible_passes;
+    if let Some(&raw) = lock(kept).0.get(shape) {
+        return Ok(Arc::new(RenderPassObject::kept(device, raw)));
+    }
+    let pass = compatible_pass(device, shape)?;
+    let mut passes = lock(kept);
+    // Another encoder's may have come first; a kept pass (without attachments) is kept already.
+    if pass.owner == Owner::Holders && passes.0.len() < KEPT_SHAPES && !passes.0.contains_key(shape)
+    {
+        let raw = pass.into_kept();
+        passes.0.insert(shape.clone(), raw);
+        return Ok(Arc::new(RenderPassObject::kept(device, raw)));
+    }
+    Ok(Arc::new(pass))
 }
 
 /// The pass of `shape` with every operation `LOAD` and `STORE`, made now.

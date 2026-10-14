@@ -636,10 +636,15 @@ impl EncoderState {
                 guard: None,
             }))
         };
+        // Each viewport's, in order (the first refusal is the answer), compared as they come.
         let used = self.used_viewports(selects);
-        let each = used.iter().map(one).collect::<Result<Vec<_>, Error>>()?;
-        let first = each.first().copied().flatten();
-        if each.iter().all(|c| *c == first) {
+        let mut each = used.iter().map(&one);
+        let first = each.next().transpose()?.flatten();
+        let mut same = true;
+        for compensation in each {
+            same &= compensation? == first;
+        }
+        if same {
             return Ok(first);
         }
         // Viewports that differ in their mirror alone: one compensation of `sx` 1, the vertex
@@ -652,8 +657,10 @@ impl EncoderState {
             Compensation { viewport, ..c }
         };
         let base = unmirrored(first);
-        if each.iter().any(|c| unmirrored(*c) != base) {
-            return Err(Error::NotImplemented(RuntimeGap::ViewportDepthRange));
+        for viewport in used {
+            if unmirrored(one(viewport)?) != base {
+                return Err(Error::NotImplemented(RuntimeGap::ViewportDepthRange));
+            }
         }
         Ok(Some(base.mirrored_by_index(used)))
     }
@@ -802,12 +809,32 @@ impl EncoderState {
     /// more (the module docs), each clipped to the pixels its viewport overlaps, Metal's implicit
     /// scissor ([`viewport_pixels`]).
     pub(super) fn vk_scissors(&self, selects: bool) -> Vec<vk::Rect2D> {
+        self.each_vk_scissor(selects).collect()
+    }
+
+    /// [`vk_scissors`](Self::vk_scissors) into `rects`, of [`MAX_VIEWPORTS`] (the most a draw
+    /// uses), without allocating.
+    pub(super) fn vk_scissors_in<'a>(
+        &self,
+        selects: bool,
+        rects: &'a mut [vk::Rect2D; MAX_VIEWPORTS],
+    ) -> &'a [vk::Rect2D] {
+        let count = rects
+            .iter_mut()
+            .zip(self.each_vk_scissor(selects))
+            .map(|(rect, scissor)| *rect = scissor)
+            .count();
+        &rects[..count]
+    }
+
+    /// Each of [`vk_scissors`](Self::vk_scissors), in order.
+    fn each_vk_scissor(&self, selects: bool) -> impl Iterator<Item = vk::Rect2D> + '_ {
         let extent = self.extent.map(i64::from);
         let none = ScissorRect::new(0, 0, 0, 0);
         self.used_viewports(selects)
             .iter()
             .enumerate()
-            .map(|(i, viewport)| {
+            .map(move |(i, viewport)| {
                 let s = match self.scissors.len() {
                     1 => &self.scissors[0],
                     _ => self.scissors.get(i).unwrap_or(&none),
@@ -835,7 +862,6 @@ impl EncoderState {
                     },
                 }
             })
-            .collect()
     }
 
     /// The draw's viewport count. More than one needs `multiViewport`, which a pipeline that

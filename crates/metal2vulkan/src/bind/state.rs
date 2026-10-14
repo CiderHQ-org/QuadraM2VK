@@ -596,25 +596,9 @@ impl BindState {
             .map(|(stage, t)| (*stage, t.shape()))
             .filter(|(_, s)| *s != StageShape::default())
             .collect();
-        let mut used: BTreeMap<u32, UsedShape> = BTreeMap::new();
-        for u in &self.used_resources {
-            let class = match u.class {
-                ResourceClass::Buffer => UsedClass::Buffer,
-                ResourceClass::Texture(facts) => UsedClass::Texture(facts.shape()),
-                ResourceClass::Heap => UsedClass::Heap,
-            };
-            // One token names one resource; listing it twice unions its usage and stages.
-            let e = used.entry(u.token).or_insert(UsedShape {
-                class,
-                usage: metal::ResourceUsage::empty(),
-                stages: metal::RenderStages::empty(),
-            });
-            e.usage |= u.usage;
-            e.stages |= u.stages;
-        }
         BindShape {
             stages,
-            used,
+            used: self.used_shape(),
             vertex_amplification: self.vertex_amplification.clone(),
             imageblock_size: self.imageblock_size,
             render_target_array_length: self.render_target_array_length,
@@ -632,6 +616,78 @@ impl BindState {
             fragment_tests: self.fragment_tests,
             extended_shadows: self.extended_shadows.clone(),
         }
+    }
+
+    /// Whether `shape` is this state's shape: `self.shape() == *shape`, answered without making
+    /// the shape, so a consumer that keeps the shapes it made can find a state's among them
+    /// without allocating. Its used resources' shape alone is made where it lists any.
+    pub fn has_shape(&self, shape: &BindShape) -> bool {
+        let BindShape {
+            stages,
+            used,
+            vertex_amplification,
+            imageblock_size,
+            render_target_array_length,
+            tessellation_factor_buffer,
+            render_area,
+            argument_samplers,
+            function_tables,
+            tile_threadgroup,
+            viewport_compensation,
+            zeroed_colors,
+            dropped_colors,
+            kept_imageblock_bytes,
+            depth_clamp_range,
+            interlocked_colors,
+            fragment_tests,
+            extended_shadows,
+        } = shape;
+        let tables = self.stages.iter().filter(|(_, t)| !t.has_empty_shape());
+        tables.clone().count() == stages.len()
+            && tables
+                .zip(stages)
+                .all(|((stage, t), (of, s))| stage == of && t.has_shape(s))
+            && match self.used_resources.is_empty() {
+                true => used.is_empty(),
+                false => self.used_shape() == *used,
+            }
+            && self.vertex_amplification == *vertex_amplification
+            && self.imageblock_size == *imageblock_size
+            && self.render_target_array_length == *render_target_array_length
+            && self.tessellation_factors.buffer.is_some() == *tessellation_factor_buffer
+            && self.render_area == *render_area
+            && argument_samplers.is_of(&self.argument_samplers)
+            && FunctionTablesShape::of(&self.function_tables) == *function_tables
+            && self.tile_threadgroup == *tile_threadgroup
+            && self.viewport_compensation.map(|c| c.compensation) == *viewport_compensation
+            && self.zeroed_colors == *zeroed_colors
+            && self.dropped_colors == *dropped_colors
+            && self.kept_imageblock_bytes == *kept_imageblock_bytes
+            && self.depth_clamp_range.is_some() == *depth_clamp_range
+            && self.interlocked_colors == *interlocked_colors
+            && self.fragment_tests == *fragment_tests
+            && self.extended_shadows == *extended_shadows
+    }
+
+    /// `used_resources` by token ([`BindShape::used`]): one token names one resource, and listing
+    /// it twice unions its usage and stages.
+    fn used_shape(&self) -> BTreeMap<u32, UsedShape> {
+        let mut used: BTreeMap<u32, UsedShape> = BTreeMap::new();
+        for u in &self.used_resources {
+            let class = match u.class {
+                ResourceClass::Buffer => UsedClass::Buffer,
+                ResourceClass::Texture(facts) => UsedClass::Texture(facts.shape()),
+                ResourceClass::Heap => UsedClass::Heap,
+            };
+            let e = used.entry(u.token).or_insert(UsedShape {
+                class,
+                usage: metal::ResourceUsage::empty(),
+                stages: metal::RenderStages::empty(),
+            });
+            e.usage |= u.usage;
+            e.stages |= u.stages;
+        }
+        used
     }
 }
 
@@ -811,6 +867,31 @@ impl StageTable {
             samplers: self.samplers.iter().map(|(i, s)| (*i, s.shape())).collect(),
             threadgroup_lengths: self.threadgroup_lengths.clone(),
         }
+    }
+
+    /// Whether its shape is the empty one, which [`BindState::shape`] leaves out.
+    fn has_empty_shape(&self) -> bool {
+        self.buffers.is_empty()
+            && self.textures.is_empty()
+            && self.samplers.is_empty()
+            && self.threadgroup_lengths.is_empty()
+    }
+
+    /// Whether `shape` is its shape ([`BindState::has_shape`]).
+    fn has_shape(&self, shape: &StageShape) -> bool {
+        let StageShape {
+            buffers,
+            textures,
+            samplers,
+            threadgroup_lengths,
+        } = shape;
+        let buffer_shapes = self.buffers.iter().map(|(i, b)| (*i, b.shape()));
+        let texture_shapes = self.textures.iter().map(|(i, t)| (*i, t.shape()));
+        let sampler_shapes = self.samplers.iter().map(|(i, s)| (*i, s.shape()));
+        buffer_shapes.eq(buffers.iter().map(|(i, b)| (*i, *b)))
+            && texture_shapes.eq(textures.iter().map(|(i, t)| (*i, *t)))
+            && sampler_shapes.eq(samplers.iter().map(|(i, s)| (*i, *s)))
+            && self.threadgroup_lengths == *threadgroup_lengths
     }
 }
 
@@ -1457,6 +1538,30 @@ impl ArgumentSamplersShape {
             shapes: samplers.iter().map(|s| s.desc.shape()).collect(),
         }
     }
+
+    /// Whether it is the shape of `samplers` (`ArgumentSamplersShape::of(samplers) == *self`),
+    /// answered without making that shape for up to [`SHAPES_AT_ONCE`](Self::SHAPES_AT_ONCE)
+    /// samplers: each sampler's shape is among `shapes`, and each of `shapes` is some sampler's.
+    /// More are answered by making it.
+    fn is_of(&self, samplers: &[ArgumentSampler]) -> bool {
+        if samplers.len() > Self::SHAPES_AT_ONCE {
+            return Self::of(samplers) == *self;
+        }
+        let mut seen = [None; Self::SHAPES_AT_ONCE];
+        for (shape, sampler) in seen.iter_mut().zip(samplers) {
+            *shape = Some(sampler.desc.shape());
+        }
+        let seen = &seen[..samplers.len()];
+        self.class == capacity_class(samplers.len())
+            && seen
+                .iter()
+                .flatten()
+                .all(|shape| self.shapes.contains(shape))
+            && self.shapes.iter().all(|shape| seen.contains(&Some(*shape)))
+    }
+
+    /// The most samplers [`is_of`](Self::is_of) answers for without making their shape.
+    const SHAPES_AT_ONCE: usize = 64;
 
     /// The entries of the class (the null entry included): `MIN_ENTRIES << class`.
     pub fn entries(&self) -> u64 {

@@ -924,7 +924,7 @@ impl State {
         for segment in part.segments.drain(..) {
             retained.push(Box::new((segment.work, segment.inputs)));
             if let Some(mut done) = segment.recorded {
-                retained.extend(done.retained);
+                retained.extend(done.retained.into_entry());
                 done.taken.retain_into(retained);
             }
         }
@@ -1015,7 +1015,7 @@ impl State {
                 let at = executions_at + *placed;
                 *placed += done.executions.len();
                 executions.splice(at..at, done.executions);
-                retained.extend(done.retained);
+                retained.extend(done.retained.into_entry());
                 // The segment's keys are its encoder's.
                 if let Some(record) = ended.get_mut(encoder.encoder) {
                     record.keys.extend(done.keys);
@@ -1043,7 +1043,7 @@ impl State {
             } = segment;
             self.retained.push(Box::new((work, inputs)));
             if let Some(mut done) = recorded {
-                self.retained.extend(done.retained);
+                self.retained.extend(done.retained.into_entry());
                 done.taken.retain_into(&mut self.retained);
             }
         }
@@ -2201,7 +2201,7 @@ impl CommandBufferShared {
                     segment.stepped = true;
                     let before = segment.recorded.replace(done);
                     if let Some(mut before) = before {
-                        state.retained.extend(before.retained);
+                        state.retained.extend(before.retained.into_entry());
                         before.taken.retain_into(&mut state.retained);
                     }
                 }
