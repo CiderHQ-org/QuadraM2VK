@@ -232,6 +232,23 @@ fn bound_texture(texture: &Texture) -> BoundTexture {
     }
 }
 
+/// Whether `a` and `b` print alike (`{:?}`), told without printing them
+/// ([`ArgumentTable::check_reading`]): every field as `==` compares it, but the descriptor's LOD
+/// clamps, which print a float's sign (`0.0` and `-0.0` differ, where `==` takes them for equal)
+/// and print every NaN alike (where `==` takes no NaN for equal). `tests/argument_table.rs` fails
+/// when `BoundSampler` or `SamplerDescriptor` gains a field, so a new one is compared here too.
+#[cfg(debug_assertions)]
+pub(super) fn same_as_printed(a: &BoundSampler, b: &BoundSampler) -> bool {
+    let alike = |x: f32, y: f32| x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan());
+    let clamps = alike(a.desc.lod_min_clamp, b.desc.lod_min_clamp)
+        && alike(a.desc.lod_max_clamp, b.desc.lod_max_clamp);
+    let [mut a, mut b] = [*a, *b];
+    for desc in [&mut a.desc, &mut b.desc] {
+        [desc.lod_min_clamp, desc.lod_max_clamp] = [0.0; 2];
+    }
+    clamps && a == b
+}
+
 impl ArgumentTable {
     /// A compute encoder's table (the module docs).
     pub(super) fn compute() -> ArgumentTable {
@@ -783,25 +800,104 @@ impl ArgumentTable {
                 BoundSampler::shape,
             );
         }
-        // The table read whole, as before (debug builds): the same bindings, a float's sign and
-        // a NaN's included (compared as printed).
         #[cfg(debug_assertions)]
-        {
-            let mut whole = self.stage_table_reading(stage, interface);
-            for (&index, bound) in &mut whole.samplers {
+        self.check_reading(kept, read, maps);
+    }
+
+    /// That `kept`, brought in place by [`refresh_reading`](Self::refresh_reading), is the table
+    /// `stage`'s function of `interface` reads whole
+    /// ([`stage_table_reading`](Self::stage_table_reading)), each sampler as `maps` binds it
+    /// (debug builds): the same slots, each bound alike as its value prints (a float's sign told
+    /// apart, every NaN alike: [`same_as_printed`]), and nothing else in the table. Compared slot
+    /// by slot, with no table read whole made and nothing printed unless a slot differs, so a
+    /// draw allocates as many times with debug assertions as without (`runtime_lane::frame_costs`
+    /// holds its bound in every build). A slot that differs is named in the panic.
+    #[cfg(debug_assertions)]
+    fn check_reading(
+        &self,
+        kept: &StageTable,
+        read: (Stage, &PipelineInterface),
+        maps: &SamplerMaps,
+    ) {
+        let (stage, _) = read;
+        const DIFFERS: &str = "a stage table brought in place that is not the table read whole";
+        // A buffer slot as `stage_table_reading` reads it: inline bytes where they are bound,
+        // else the buffer within its length, and nothing where the function reads it unbound.
+        let buffer = |index: u32| {
+            if self.reads_unbound(read, index) {
+                return None;
+            }
+            match self.bytes.get(&index) {
+                Some(bytes) => Some(bound_bytes(bytes)),
+                None => self.buffers.get(&index).and_then(|(buffer, offset)| {
+                    let stride = self.attribute_strides.get(&index).copied();
+                    bound_buffer(buffer, *offset, stride)
+                }),
+            }
+        };
+        for (&index, bound) in &kept.buffers {
+            let whole = buffer(index);
+            assert!(
+                whole.as_ref() == Some(bound),
+                "{DIFFERS}: {stage:?} buffer {index} kept as {bound:?}, read whole as {whole:?}"
+            );
+        }
+        for &index in self.buffers.keys().chain(self.bytes.keys()) {
+            if let Some(whole) = buffer(index) {
+                assert!(
+                    kept.buffers.contains_key(&index),
+                    "{DIFFERS}: {stage:?} buffer {index} not kept, read whole as {whole:?}"
+                );
+            }
+        }
+        for (&index, bound) in &kept.textures {
+            let whole = self.textures.get(&index).map(bound_texture);
+            assert!(
+                whole.as_ref() == Some(bound),
+                "{DIFFERS}: {stage:?} texture {index} kept as {bound:?}, read whole as {whole:?}"
+            );
+        }
+        for (&index, texture) in &self.textures {
+            assert!(
+                kept.textures.contains_key(&index),
+                "{DIFFERS}: {stage:?} texture {index} not kept, read whole as {:?}",
+                bound_texture(texture)
+            );
+        }
+        let sampler = |index: u32| {
+            self.samplers.get(&index).map(|(sampler, clamps)| {
                 let slot = SlotRef {
                     stage,
                     class: SlotClass::Sampler,
                     index,
                 };
-                bound.desc = maps.sampler(slot, bound.desc);
-            }
-            debug_assert_eq!(
-                format!("{kept:?}"),
-                format!("{whole:?}"),
-                "a stage table brought in place that is not the table read whole"
+                let mut whole = BoundSampler::new(bound_sampler(sampler, *clamps));
+                whole.desc = maps.sampler(slot, whole.desc);
+                whole
+            })
+        };
+        for (&index, bound) in &kept.samplers {
+            let whole = sampler(index);
+            assert!(
+                whole.is_some_and(|whole| same_as_printed(&whole, bound)),
+                "{DIFFERS}: {stage:?} sampler {index} kept as {bound:?}, read whole as {whole:?}"
             );
         }
+        for &index in self.samplers.keys() {
+            assert!(
+                kept.samplers.contains_key(&index),
+                "{DIFFERS}: {stage:?} sampler {index} not kept, read whole as {:?}",
+                sampler(index)
+            );
+        }
+        // A table read whole binds nothing else (`stage_table` starts from the empty table).
+        assert!(
+            kept.threadgroup_lengths.is_empty() && kept.acceleration_structures.is_empty(),
+            "{DIFFERS}: {stage:?} keeps threadgroup lengths {:?} and acceleration structures {:?}, \
+             where the table read whole has none",
+            kept.threadgroup_lengths,
+            kept.acceleration_structures
+        );
     }
 
     /// Each object bound, by slot, in the table's order: its buffers, then its textures, then

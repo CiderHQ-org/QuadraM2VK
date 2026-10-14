@@ -147,7 +147,9 @@ the device refuses (`HostMemory::with_dma_buf`), `VK_EXT_external_memory_dma_buf
 `VK_EXT_queue_family_foreign` beside them, wherever a device lists them. With them enabled, a
 texture over a no-copy buffer's pages imported by their pointer is also a `DRM_FORMAT_MOD_LINEAR`
 image made for host allocations at Metal's row pitch where the driver's own linear image lays its
-rows out otherwise (ANV packs them tight) and the driver takes that layout
+rows out otherwise (ANV packs them tight) and the driver takes that layout, of a format with no depth
+or stencil component (Vulkan has no query of where such a format's memory plane lies, so the runtime
+makes no `DRM_FORMAT_MOD_LINEAR` image of one)
 (`WorkCounts::pitched_host_images`; HOWTO.md section 6 lists what each measured driver takes).
 `Texture::vk_image` then gives that image. A layout the driver refused is kept per device and not
 asked again (`pitched_host_image_refusals`, `pitched_host_image_refusals_recalled`).
@@ -695,7 +697,8 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   buffer's memory (over a no-copy buffer's imported host memory, no linear image made for host
   allocations does: neither the driver's own nor, where the device enables
   `VK_EXT_image_drm_format_modifier`, a `DRM_FORMAT_MOD_LINEAR` image laid out at Metal's row
-  pitch, which the driver may refuse for the texture's format, usage or pitch;
+  pitch, which the driver may refuse for the texture's format, usage or pitch, and which the
+  runtime makes of no depth or stencil format;
   `WorkCounts::pitched_host_images` counts those made, `pitched_host_image_refusals` those the
   driver refused), or the buffer is over the caller's `VkBuffer`, whose memory backs no image of
   the runtime's, or over host pages imported as dma-bufs (`HostMemory::with_dma_buf`) where the

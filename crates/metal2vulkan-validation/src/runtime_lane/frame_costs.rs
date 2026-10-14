@@ -68,7 +68,8 @@
 //! Three checks run by default where the allocations are counted:
 //! `a_frame_s_draws_and_pass_ends_allocate_within_their_bounds` holds a frame's draws to
 //! [`DRAW_ALLOCATIONS`] on the encoding thread, a draw's state changes and its draw call
-//! together, and its passes' ends to [`PASS_END_ALLOCATIONS`], each on average;
+//! together ([`DRAW_ALLOCATIONS_DEBUG`] in a build with debug assertions), and its passes' ends
+//! to [`PASS_END_ALLOCATIONS`], each on average;
 //! `a_frame_s_pass_opens_allocate_within_their_bound` its pass opens to [`OPEN_ALLOCATIONS`]; and
 //! `a_frame_s_commits_allocate_within_their_bound` holds a checked frame's commits to
 //! [`COMMIT_ALLOCATIONS`] on the encoding thread and to [`SUBMIT_ALLOCATIONS`] on the others
@@ -131,6 +132,12 @@ const SHAPE_BYTES: usize = 64;
 /// and the format table its entries.
 #[cfg(not(m2v_system_alloc))]
 const DRAW_ALLOCATIONS: f64 = 27.0;
+/// [`DRAW_ALLOCATIONS`] in a build with debug assertions, which CI's tests are: the draw path's
+/// allocations and those of `LiveBind::shape`'s checks there, which build the state's whole bind
+/// shape at each draw to compare the kept or found one with it. Measured: 35.93 on lavapipe
+/// (llvmpipe, LLVM 23.1.1, Mesa 26.2.4), where a build without debug assertions makes 24.62.
+#[cfg(not(m2v_system_alloc))]
+const DRAW_ALLOCATIONS_DEBUG: f64 = 38.0;
 /// The most allocations a frame's pass open (`render_command_encoder`) makes on the encoding
 /// thread on average, once every pipeline is made. Measured: 13.0 on RADV (Radeon 780M), on
 /// lavapipe and on ANV (Iris Xe); 18.0 on RADV and ANV before the device kept each pass shape's
@@ -1251,24 +1258,28 @@ fn allocations_each(frame: &Frame, steps: StepsOf) -> f64 {
     allocations as f64 / steps.len() as f64
 }
 
-/// A frame's draws allocate at most [`DRAW_ALLOCATIONS`] each on average on the encoding thread,
-/// once every pipeline is made: what the draw path keeps of what it found before (each texture's
-/// storage view formats, the pipeline state's routing into the pass's colors, the settles of its
-/// latest bind shapes and the shapes themselves, the format table) is not made again at each
-/// draw, and what a draw retains, binds and records it holds and builds without allocating where
-/// the object or the list allows. Its passes' ends allocate at most [`PASS_END_ALLOCATIONS`] each:
-/// a pass end retains what its commands use as one object, and makes no tile grid where a draw
-/// reaches every tile, no sample planes' steps in a pass without planes, and no scrub's list for a
-/// texture that is not sparse.
+/// A frame's draws allocate at most [`DRAW_ALLOCATIONS`] each on average on the encoding thread
+/// ([`DRAW_ALLOCATIONS_DEBUG`] with debug assertions), once every pipeline is made: what the draw
+/// path keeps of what it found before (each texture's storage view formats, the pipeline state's
+/// routing into the pass's colors, the settles of its latest bind shapes and the shapes
+/// themselves, the format table) is not made again at each draw, and what a draw retains, binds
+/// and records it holds and builds without allocating where the object or the list allows. Its
+/// passes' ends allocate at most [`PASS_END_ALLOCATIONS`] each: a pass end retains what its
+/// commands use as one object, and makes no tile grid where a draw reaches every tile, no sample
+/// planes' steps in a pass without planes, and no scrub's list for a texture that is not sparse.
 #[cfg(not(m2v_system_alloc))]
 #[test]
 fn a_frame_s_draws_and_pass_ends_allocate_within_their_bounds() {
     let (device, frame) = counted();
     let each = allocations_each(&frame, |f| &f.draws);
-    eprintln!("FRAME-COST {device}: {each:.2} allocations a draw, at most {DRAW_ALLOCATIONS} kept");
+    let bound = match cfg!(debug_assertions) {
+        true => DRAW_ALLOCATIONS_DEBUG,
+        false => DRAW_ALLOCATIONS,
+    };
+    eprintln!("FRAME-COST {device}: {each:.2} allocations a draw, at most {bound} kept");
     assert!(
-        each <= DRAW_ALLOCATIONS,
-        "{each:.2} allocations a draw, more than {DRAW_ALLOCATIONS}"
+        each <= bound,
+        "{each:.2} allocations a draw, more than {bound}"
     );
     let each = allocations_each(&frame, |f| &f.end);
     eprintln!(

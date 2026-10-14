@@ -12,6 +12,8 @@ mod amplification;
 mod apple_only;
 mod argument_buffers;
 mod argument_encoder;
+#[cfg(debug_assertions)]
+mod argument_table;
 mod attachmentless;
 mod attributes;
 mod batches;

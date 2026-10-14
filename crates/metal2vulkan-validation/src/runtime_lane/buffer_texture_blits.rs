@@ -1402,6 +1402,68 @@ fn a_planar_surface_s_depth_or_stencil_texture_s_passes_write_metal_s_elements_a
     );
 }
 
+/// No depth or stencil texture over a buffer's bytes asks the driver for a
+/// `DRM_FORMAT_MOD_LINEAR` image, at Metal's row pitch over host pages or over dma-buf pages, even
+/// where the driver lists the modifier for its format (lavapipe does): the runtime asks the layout
+/// of every such image it makes of a memory plane (`VUID-vkGetImageSubresourceLayout-tiling-09433`),
+/// and Vulkan has no such query of a format with depth or stencil, whose aspect it must name
+/// (`-format-04462`, `-format-04463`). Each texture of a surface's plane is made, at a padded row
+/// pitch and a browser's, and the work counts show no such image made or refused.
+#[test]
+fn no_depth_or_stencil_texture_over_a_buffer_asks_for_a_modifier_image() {
+    use metal2vulkan_runtime::WorkCounts;
+    let asked = |counts: &WorkCounts| {
+        (
+            counts.pitched_host_images,
+            counts.pitched_host_image_refusals,
+            counts.dma_buf_images,
+        )
+    };
+    let messages = Messages::default();
+    let cache = ScratchCache::new().unwrap();
+    {
+        let device = validated_device(TEST_DEVICE, &messages, cache.path()).unwrap();
+        eprintln!("device {}", device.name());
+        for kind in [Kind::Ordinary, Kind::NoCopy] {
+            let Some(held) = Held::new(&device, kind) else {
+                eprintln!("{}: no {kind:?} buffer", device.name());
+                continue;
+            };
+            for pf in [
+                PixelFormat::Depth16Unorm,
+                PixelFormat::Depth32Float,
+                PixelFormat::Depth32FloatStencil8,
+                PixelFormat::Stencil8,
+                PixelFormat::X32Stencil8,
+            ] {
+                for usage in [TextureUsage::SHADER_READ, TextureUsage::RENDER_TARGET] {
+                    for bpr in [64, 256] {
+                        let what = format!("{kind:?} {pf:?} {usage:?}, rows {bpr} bytes apart");
+                        let mut d = TextureDescriptor::texture_2d(pf, 4, 4, false);
+                        d.usage = usage;
+                        d.resource_options = held.buffer.resource_options();
+                        let before = device.work_counts();
+                        held.buffer
+                            .new_texture_with_iosurface_plane(&d, IoSurfacePlane::new(0, bpr, true))
+                            .unwrap_or_else(|e| panic!("{what}: {e}"));
+                        assert_eq!(
+                            asked(&device.work_counts()),
+                            asked(&before),
+                            "{what}: DRM_FORMAT_MOD_LINEAR images asked of the driver (made at \
+                             Metal's row pitch, refused there, made over dma-bufs)"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    let messages = messages.take();
+    assert!(
+        messages.is_empty(),
+        "the validation layer reported: {messages:#?}"
+    );
+}
+
 /// The rows of a `w`x`h` plane `row` bytes wide, from `offset`, `pitch` bytes apart.
 fn plane_rows(offset: u64, pitch: u64, row: u64, h: u64) -> Vec<Range<usize>> {
     (0..h)

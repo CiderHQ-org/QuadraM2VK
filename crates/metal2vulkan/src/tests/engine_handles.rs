@@ -2867,14 +2867,14 @@ fn heap_linear_kernel(through: CompareThrough, three: bool) -> String {
         true => (
             "texture3d<float, sample>",
             format!(
-                "@air.sample_texture_3d.v4f32(ptr addrspace(1) %t, ptr addrspace(2) {operand}, <3 x float> <float 0.3, float 0.6, float 0.45>, i1 true, <3 x i32> zeroinitializer, i1 true, float 0.0, float 0.0, i32 0)"
+                "@air.sample_texture_3d.v4f32(ptr addrspace(1) %t, ptr addrspace(2) {operand}, <3 x float> <float 0x3FD3333340000000, float 0x3FE3333340000000, float 0x3FDCCCCCC0000000>, i1 true, <3 x i32> zeroinitializer, i1 true, float 0.0, float 0.0, i32 0)"
             ),
             "declare { <4 x float>, i8 } @air.sample_texture_3d.v4f32(ptr addrspace(1), ptr addrspace(2), <3 x float>, i1, <3 x i32>, i1, float, float, i32)",
         ),
         false => (
             "texture2d<float, sample>",
             format!(
-                "@air.sample_texture_2d.v4f32(ptr addrspace(1) %t, ptr addrspace(2) {operand}, <2 x float> <float 0.3, float 0.6>, i1 true, <2 x i32> zeroinitializer, i1 true, float 0.0, float 0.0, i32 0)"
+                "@air.sample_texture_2d.v4f32(ptr addrspace(1) %t, ptr addrspace(2) {operand}, <2 x float> <float 0x3FD3333340000000, float 0x3FE3333340000000>, i1 true, <2 x i32> zeroinitializer, i1 true, float 0.0, float 0.0, i32 0)"
             ),
             "declare { <4 x float>, i8 } @air.sample_texture_2d.v4f32(ptr addrspace(1), ptr addrspace(2), <2 x float>, i1, <2 x i32>, i1, float, float, i32)",
         ),

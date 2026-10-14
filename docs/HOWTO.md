@@ -177,7 +177,9 @@ is refused (`NotImplemented(RebindTextures)`). `WorkCounts::dma_buf_imports`,
 
 A texture over pages imported by their pointer aliases them where the device lays an image's rows
 at the texture's `bytes_per_row`: the driver's own linear image, or, where that lays its rows
-otherwise, a `DRM_FORMAT_MOD_LINEAR` image at that pitch, which the driver may refuse. Measured
+otherwise, a `DRM_FORMAT_MOD_LINEAR` image at that pitch, which the driver may refuse (and which
+the runtime makes of no depth or stencil format, as it makes no image over a dma-buf of one: Vulkan
+has no query of where such a format's memory plane lies). Measured
 (`runtime_lane::surface_texture_costs::pitch_classes`, nine formats, four usages, rows padded by
 each power of two from 16 to 4096 bytes):
 

@@ -48,6 +48,25 @@ cpu_icd_tests() {
         cargo nextest run -p metal2vulkan-validation --all-features --build-jobs "$jobs"
 }
 
+feature_clippy() {
+    local features
+    for features in "" serde ash cli; do
+        echo "::group::features=${features:-none}"
+        cargo clippy -p metal2vulkan --all-targets --no-default-features --features "$features" \
+            -j "$jobs" -- -D warnings
+        echo "::endgroup::"
+    done
+    echo "::group::metal2vulkan-runtime"
+    cargo clippy -p metal2vulkan-runtime --all-targets -j "$jobs" -- -D warnings
+    echo "::endgroup::"
+    for features in "" serde; do
+        echo "::group::metal2vulkan-air features=${features:-none}"
+        cargo clippy -p metal2vulkan-air --all-targets --no-default-features --features "$features" \
+            -j "$jobs" -- -D warnings
+        echo "::endgroup::"
+    done
+}
+
 gpu_cfg_clippy() {
     # As cpu_icd_tests, a sibling target dir keeps the ordinary build warm.
     CARGO_TARGET_DIR="${CARGO_TARGET_DIR}-gpucfg" RUSTFLAGS='-Dwarnings --cfg m2v_gpu' \
@@ -63,10 +82,17 @@ step "Install LLVM + SPIR-V tools (probe)" tools_probe
 step "Format" cargo fmt --all -- --check
 step "Clippy (warnings denied)" \
     cargo clippy --workspace --all-targets --all-features -j "$jobs" -- -D warnings
+step "Clippy under each feature alone (warnings denied)" feature_clippy
 step "Clippy under --cfg m2v_gpu (warnings denied)" gpu_cfg_clippy
 step "Build public documentation (warnings denied)" \
     env RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --all-features --no-deps -j "$jobs"
-step "Test metal2vulkan" cargo nextest run -p metal2vulkan --all-features --build-jobs "$jobs"
+step "Build the new API's consumer reference (warnings denied)" scripts/api-docs
+step "Package the published crates" \
+    cargo package --workspace --exclude metal2vulkan-validation --exclude metal2vulkan-devtools \
+    -j "$jobs"
+step "Test metal2vulkan" \
+    cargo nextest run -p metal2vulkan -p metal2vulkan-air -p metal2vulkan-runtime \
+    -p metal2vulkan-devtools --all-features --build-jobs "$jobs"
 step "Test validation suite" \
     cargo nextest run -p metal2vulkan-validation --all-features --build-jobs "$jobs"
 step "Doc tests" cargo test --workspace --all-features --doc -j "$jobs"

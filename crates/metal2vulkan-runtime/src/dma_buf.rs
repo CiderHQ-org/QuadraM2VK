@@ -907,9 +907,17 @@ impl Device {
     /// What a `DRM_FORMAT_MOD_LINEAR` image of `plan` for `memory` takes before its plane is laid
     /// out, on a device that enables `VK_EXT_image_drm_format_modifier`: the formats it lists for
     /// its views; why not where the device makes none: the plan has several levels, depth or
-    /// samples, or a mutable format with no list of its views; the modifier's tiling lacks a
-    /// feature the plan's optimal tiling has for its usage; the format query refuses such an
-    /// image for `memory`, or the plan passes its limits.
+    /// samples, or a mutable format with no list of its views; its format has a depth or stencil
+    /// component; the modifier's tiling lacks a feature the plan's optimal tiling has for its
+    /// usage; the format query refuses such an image for `memory`, or the plan passes its limits.
+    ///
+    /// The runtime takes a modifier image's plane layout from the driver
+    /// (`vkGetImageSubresourceLayout`), and Vulkan has no valid such query of a format with a
+    /// depth or stencil component: of a DRM format modifier's tiling its aspect must be a memory
+    /// plane's (`VUID-vkGetImageSubresourceLayout-tiling-09433`), of a format with depth or
+    /// stencil it must contain that aspect (`-format-04462`, `-format-04463`), and it is one bit
+    /// (`-aspectMask-00997`). So it makes none of such a format, wherever a driver lists the
+    /// modifier for it.
     pub(super) fn modifier_image_checks(
         &self,
         plan: &ImagePlan,
@@ -921,6 +929,15 @@ impl Device {
                 "its image has {} levels, a depth of {} and {:?} samples, where a \
                  DRM_FORMAT_MOD_LINEAR image over the pages has one of each",
                 plan.levels, plan.extent[2], plan.samples
+            )));
+        }
+        if (plan.format.block())
+            .is_some_and(|block| block.depth.is_some() || block.stencil.is_some())
+        {
+            return Ok(Err(format!(
+                "{:?} has a depth or stencil component, and Vulkan has no query of where a \
+                 DRM_FORMAT_MOD_LINEAR plane of such a format lies",
+                plan.format
             )));
         }
         // A DRM format modifier's mutable image lists its views' formats
