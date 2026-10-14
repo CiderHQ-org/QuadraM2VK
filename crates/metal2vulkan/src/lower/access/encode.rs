@@ -22,7 +22,9 @@
 //! helpers do (`CommandEncoderOperation::helper`), so the host's `CommandBuffer::decode` fails the
 //! run. A buffer setter writes its buffer's guest address (the pointer escapes, so it is wide) and,
 //! for a kernel or vertex buffer, its attribute stride (a fragment, object or mesh buffer has
-//! none); a pipeline setter the pipeline state's word; a dispatch its grid, local size, and action;
+//! none; AIR 2.5's kernel or vertex setter takes none and writes the pipeline's own, all ones, as
+//! the stride today's compiler spells MSL's plain setter with); a pipeline setter the pipeline
+//! state's word; a dispatch its grid, local size, and action;
 //! a draw its five arguments and action (on a buffer of mesh draws alone, nothing and no fault, as
 //! a kernel's draw there draws nothing on Metal: `Policy::dropped_on`); a mesh draw its grid, its
 //! object and mesh threadgroups' threads, and its action; an indexed draw its five arguments, its
@@ -109,7 +111,8 @@ pub struct Command {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Fields {
     /// A buffer's guest address at `binding`, and for a kernel or vertex buffer its attribute
-    /// stride (`i64`); a fragment, object or mesh buffer has none.
+    /// stride (`i64`); a fragment, object or mesh buffer has none, nor has AIR 2.5's kernel or
+    /// vertex setter.
     Buffer {
         address: Side,
         stride: Option<ValueId>,
@@ -446,10 +449,15 @@ fn select_command(
     // Each operation in the host contract's terms (its policy), and what it writes.
     use CommandEncoderOperation as Op;
     let (operation, fields) = match op {
-        IndirectCommand::SetBuffer { stage, space } => {
+        IndirectCommand::SetBuffer {
+            stage,
+            space,
+            strided,
+        } => {
             // A kernel or vertex buffer's setter takes a stride before the binding; a fragment,
-            // object or mesh buffer's takes none.
-            let strided = matches!(stage, CommandStage::Kernel | CommandStage::Vertex);
+            // object or mesh buffer's takes none, nor does AIR 2.5's kernel or vertex setter,
+            // MSL's plain setter, which writes the pipeline's own stride as today's spelling of it
+            // (an `i64` of all ones) does.
             let fields = Fields::Buffer {
                 address: dynamic::plan_address(cx, arg(2)?)?,
                 stride: match strided {

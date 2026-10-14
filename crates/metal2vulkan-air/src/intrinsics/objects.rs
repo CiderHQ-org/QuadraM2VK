@@ -343,13 +343,18 @@ pub enum IndirectCommand {
     SetRenderPipeline,
     /// `air.reset_render_command`: `void (cmd, i32)`.
     ResetRenderCommand,
-    /// `air.set_{kernel,vertex}_buffer_*_command.p<space>i8`: `void (cmd, i32, ptr, i64, i32)`;
-    /// the fragment, object and mesh forms have no `i64`.
+    /// `air.set_{kernel,vertex}_buffer_*_command.p<space>i8`: `void (cmd, i32, ptr, i64, i32)`,
+    /// the attribute stride before the buffer index (`strided`); the fragment, object and mesh
+    /// forms have no `i64`. AIR 2.5 (Metal compiler 31001.723) declares the kernel and vertex
+    /// setters without it too: MSL's plain setter, which today's compiler spells with an `i64` of
+    /// all ones, the pipeline's own stride.
     SetBuffer {
         /// The stage whose buffer the command sets.
         stage: CommandStage,
         /// The address space of the buffer: device or constant.
         space: AddrSpace,
+        /// Whether the declaration takes the attribute stride (`i64`) before the buffer index.
+        strided: bool,
     },
     /// A render command's fixed-function state setter ([`RenderState`]).
     SetRenderState(RenderState),
@@ -526,8 +531,30 @@ impl IndirectCommand {
             _ => return None,
         };
         let space = byte_ptr(ptr)?;
-        matches!(space, AddrSpace::Device | AddrSpace::Constant)
-            .then_some(IndirectCommand::SetBuffer { stage, space })
+        matches!(space, AddrSpace::Device | AddrSpace::Constant).then_some(
+            IndirectCommand::SetBuffer {
+                stage,
+                space,
+                strided: matches!(stage, CommandStage::Kernel | CommandStage::Vertex),
+            },
+        )
+    }
+
+    /// The other declaration the same name may have: AIR 2.5's kernel or vertex buffer setter,
+    /// without the attribute stride (`void (cmd, i32, ptr, i32)`), MSL's plain setter.
+    pub(super) fn alternative(self) -> Option<IndirectCommand> {
+        match self {
+            IndirectCommand::SetBuffer {
+                stage,
+                space,
+                strided: true,
+            } => Some(IndirectCommand::SetBuffer {
+                stage,
+                space,
+                strided: false,
+            }),
+            _ => None,
+        }
     }
 
     /// The typed signature.
@@ -608,10 +635,15 @@ impl IndirectCommand {
                 Signature::new(void, &[cmd, i32s, i32s, i32s, i32s, i32s, i32s])
             }
             IndirectCommand::SetBuffer {
-                stage: CommandStage::Fragment | CommandStage::Object | CommandStage::Mesh,
                 space,
+                strided: false,
+                ..
             } => Signature::new(void, &[cmd, i32s, Operand::Ptr(space), i32s]),
-            IndirectCommand::SetBuffer { space, .. } => Signature::new(
+            IndirectCommand::SetBuffer {
+                space,
+                strided: true,
+                ..
+            } => Signature::new(
                 void,
                 &[cmd, i32s, Operand::Ptr(space), num(Elem::I64, 1), i32s],
             ),

@@ -874,6 +874,24 @@ const OBSERVED: &[(&str, &str)] = &[
         "air.set_fragment_buffer_render_command.p1i8",
         "void (p1, i32, p1, i32)",
     ),
+    // AIR 2.5's kernel and vertex buffer setters (Metal compiler 31001.723, the local corpus
+    // census): no attribute stride.
+    (
+        "air.set_kernel_buffer_compute_command.p1i8",
+        "void (p1, i32, p1, i32)",
+    ),
+    (
+        "air.set_kernel_buffer_compute_command.p2i8",
+        "void (p1, i32, p2, i32)",
+    ),
+    (
+        "air.set_vertex_buffer_render_command.p1i8",
+        "void (p1, i32, p1, i32)",
+    ),
+    (
+        "air.set_vertex_buffer_render_command.p2i8",
+        "void (p1, i32, p2, i32)",
+    ),
     (
         "air.draw_primitives_render_command",
         "void (p1, i32, i32, i32, i32, i32, i32)",
@@ -1089,6 +1107,74 @@ fn observed_declarations_decode() {
         ("air.get_read_sampler", "p1 ()"),
     ] {
         assert_eq!(declared(name, decl), DeclClass::Mismatch, "{name} {decl}");
+    }
+}
+
+/// A kernel or vertex buffer setter is the strided form when declared with the attribute stride,
+/// and AIR 2.5's form, MSL's plain setter, when declared without it; the fragment, object and mesh
+/// setters have the stride-less form alone, and no other operand list binds.
+#[test]
+fn buffer_setter_forms_are_chosen_by_the_declaration() {
+    use AddrSpace::{Constant, Device};
+    use CommandStage::{Fragment, Kernel, Mesh, Object, Vertex};
+    let setter = |stage, space, strided| {
+        AirIntrinsic::IndirectCommand(IndirectCommand::SetBuffer {
+            stage,
+            space,
+            strided,
+        })
+    };
+    for (family, stage) in [
+        ("set_kernel_buffer_compute_command", Kernel),
+        ("set_vertex_buffer_render_command", Vertex),
+    ] {
+        for (space, overload) in [(Device, "p1i8"), (Constant, "p2i8")] {
+            let name = format!("air.{family}.{overload}");
+            let ptr = &overload[..2];
+            let strided = format!("void (p1, i32, {ptr}, i64, i32)");
+            let plain = format!("void (p1, i32, {ptr}, i32)");
+            assert_eq!(
+                declared_air(&name, &strided),
+                setter(stage, space, true),
+                "{name}"
+            );
+            assert_eq!(
+                declared_air(&name, &plain),
+                setter(stage, space, false),
+                "{name}"
+            );
+            // The plain form keeps the command handle at 0 and the buffer at 2, as the strided.
+            let sig = setter(stage, space, false).signature();
+            assert_eq!(
+                sig.handles().collect::<Vec<_>>(),
+                vec![(0, HandleKind::Command)]
+            );
+            assert_eq!(sig.param(2), Some(Operand::Ptr(space)), "{name}");
+            for decl in [
+                format!("void (p1, i32, {ptr})"),
+                format!("void (p1, i32, {ptr}, i32, i32)"),
+                format!("void (p1, i32, {ptr}, i64)"),
+            ] {
+                assert_eq!(declared(&name, &decl), DeclClass::Mismatch, "{name} {decl}");
+            }
+        }
+    }
+    for (family, stage) in [
+        ("set_fragment_buffer_render_command", Fragment),
+        ("set_object_buffer_render_command", Object),
+        ("set_mesh_buffer_render_command", Mesh),
+    ] {
+        let name = format!("air.{family}.p1i8");
+        assert_eq!(
+            declared_air(&name, "void (p1, i32, p1, i32)"),
+            setter(stage, Device, false),
+            "{name}"
+        );
+        assert_eq!(
+            declared(&name, "void (p1, i32, p1, i64, i32)"),
+            DeclClass::Mismatch,
+            "{name}"
+        );
     }
 }
 
@@ -2236,6 +2322,7 @@ fn handles_are_typed_seeds() {
             IndirectCommand::SetBuffer {
                 stage: CommandStage::Object,
                 space: AddrSpace::Constant,
+                strided: false,
             },
         ),
         (
@@ -2243,6 +2330,7 @@ fn handles_are_typed_seeds() {
             IndirectCommand::SetBuffer {
                 stage: CommandStage::Mesh,
                 space: AddrSpace::Device,
+                strided: false,
             },
         ),
     ] {

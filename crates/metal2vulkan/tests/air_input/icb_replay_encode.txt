@@ -27,10 +27,10 @@ bb0:
   %i6 = zext %i5 to i64
   %i7 = getelementptr inbounds i32, %a1, %i6
   %i8 = bitcast %i7 to ptr addrspace(2)
-  tail call void @f6 [air IndirectCommand(SetBuffer { stage: Kernel, space: Constant })](%i1, %a3, %i8, i64 18446744073709551615, i32 0) arg0( nocapture )
+  tail call void @f6 [air IndirectCommand(SetBuffer { stage: Kernel, space: Constant, strided: true })](%i1, %a3, %i8, i64 18446744073709551615, i32 0) arg0( nocapture )
   %i10 = getelementptr inbounds i32, %a2, %i6
   %i11 = bitcast %i10 to ptr addrspace(1)
-  tail call void @f7 [air IndirectCommand(SetBuffer { stage: Kernel, space: Device })](%i1, %a3, %i11, i64 18446744073709551615, i32 1) arg0( nocapture )
+  tail call void @f7 [air IndirectCommand(SetBuffer { stage: Kernel, space: Device, strided: true })](%i1, %a3, %i11, i64 18446744073709551615, i32 1) arg0( nocapture )
   tail call void @f2 [air IndirectCommand(SetThreadgroupMemoryLength)](%i1, %a3, i32 32, i32 0) arg0( nocapture )
   %i14 = and i32 %a3, i32 1
   %i15 = icmp eq %i14, i32 0

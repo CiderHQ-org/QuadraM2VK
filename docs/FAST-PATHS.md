@@ -146,13 +146,27 @@ driver's. Each is open work.
   declaration whose own function type fits none of the operand forms `intrinsics::classify`
   derives from its name (`DeclClass::Mismatch`). It is not a call at a type other than its
   declaration's: decode binds a call to an intrinsic only when the two types are equal (pointee
-  types erased), and `canon::post_check` refuses any other at a function location. The
-  declaration and its form are unverified: no recorded translation of the private corpus (14,787
-  rows, AIR 2.5 from Metal compiler 31001.723 among them) is refused this way. A fix needs the
-  guest's library bytes to name the declaration, then that form as an `alternative()` of its family
-  (as the legacy texture read and the AIR 2.7 and 2.8 forms are), decoded to the same operation and
-  tested with a synthetic fixture; a declaration whose operands mean something else stays refused.
-  It is not built.
+  types erased), and `canon::post_check` refuses any other at a function location. AIR 2.5 (Metal
+  compiler 31001.723) declares an indirect command's kernel and vertex buffer setters,
+  `air.set_kernel_buffer_compute_command` and `air.set_vertex_buffer_render_command`, without the
+  `i64` attribute stride before the buffer index. Decode takes that form as MSL's plain setter,
+  which today's compiler spells with a stride of all ones (the pipeline's own), and encodes the
+  same record. Of the seven private corpus rows that declare those setters, one translates on
+  every committed profile that runs GPU-encoded commands, and six are refused with
+  `Unsupported(ArgumentBufferObjects)` (not implemented), as other compilers' builds of the same
+  functions are. One private corpus row is refused with `SignatureMismatch` on every committed
+  profile, AIR 2.5 as well: a kernel declares `air.intersect.triangle_data` with six trailing `i32`
+  settings where decode's form has nine (the curve settings among them), and ray tracing is out of
+  scope. Whether the consumer's Contacts kernels are the setters, and so translate, is unverified.
+- **A direct call whose arguments do not line up with its callee's parameters** is refused with
+  `InvalidInput(Canon(CallTypeMismatch))` (`canon::post_check`): a call to a defined function at
+  a function type other than the definition's, its arguments differing from the parameters in
+  number or type beyond pointee types. LLVM leaves such a call undefined, and what Metal runs for
+  it is whatever Apple's back end makes of the mismatch, which nothing documents, so no exact form
+  exists. Its likely source (unverified) is two structures of one name that differ between the
+  translation units a library links, with one instance of a function taking the structure by
+  value kept for both. Four private corpus rows, one fragment function from Metal compilers
+  32023.622 to 32023.886, are refused this way on every committed profile.
 - **A loop that Apple's MSL compiler folds into 33-bit arithmetic fails to make on MoltenVK.**
   Apple's MSL front end (Metal compiler 32023.921) can rewrite a loop that sums its counter
   (`1 + 2 + ... + n`) into a closed form computed in 33-bit integers (`zext i32` to `i33`,

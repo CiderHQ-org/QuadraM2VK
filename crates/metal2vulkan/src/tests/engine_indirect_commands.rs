@@ -788,6 +788,134 @@ fn encoded_render_records_round_trip_through_the_host_contract() {
     }
 }
 
+/// `line` without the `i64` operand of its buffer setter: a declaration's `, i64` or a call's
+/// `, i64 <value>`.
+fn drop_stride(line: &str) -> String {
+    let Some(at) = line.find(", i64") else {
+        return line.to_string();
+    };
+    let rest = &line[at + 2..];
+    let end = rest.find(", ").expect("an operand follows the stride");
+    format!("{}{}", &line[..at], &rest[end..])
+}
+
+/// `text` as AIR 2.5 (Metal compiler 31001.723) spells it: its kernel and vertex buffer setters
+/// declared and called without the attribute stride, MSL's plain setter, and the module's AIR
+/// version 2.5 of language Metal 2.4.
+fn stride_less(text: &str) -> String {
+    let lines = text.lines().map(|line| {
+        let setter = ["@air.set_kernel_buffer_", "@air.set_vertex_buffer_"]
+            .iter()
+            .any(|family| line.contains(family));
+        match setter {
+            true => drop_stride(line),
+            false => line.to_string(),
+        }
+    });
+    let mut out = lines.collect::<Vec<_>>().join("\n");
+    for (from, to) in [
+        (
+            "!20 = !{i32 2, i32 8, i32 0}",
+            "!20 = !{i32 2, i32 5, i32 0}",
+        ),
+        (
+            "!21 = !{!\"Metal\", i32 4, i32 0, i32 0}",
+            "!21 = !{!\"Metal\", i32 2, i32 4, i32 0}",
+        ),
+    ] {
+        assert!(out.contains(from), "{from}");
+        out = out.replace(from, to);
+    }
+    assert!(!out.contains(", i64 %stride") && !out.contains("i64, i32)"));
+    out
+}
+
+/// AIR 2.5's kernel and vertex buffer setters, which take no attribute stride (MSL's plain
+/// setter), write exactly the records of today's form called with a stride of all ones, as Metal's
+/// compiler spells the plain setter now, on every profile with device addresses: the buffer's
+/// address at its slot and the pipeline's own stride, the slot `set_kernel_buffer` (Metal's
+/// `setKernelBuffer:offset:atIndex:`) leaves on the host, over a dynamic stride set before too (EV
+/// API-icbget2-m4: the kernel-side plain setter writes all ones over it).
+#[test]
+fn air_2_5_buffer_setters_write_the_plain_setters_records() {
+    let (Some(today_runs), Some(air25_runs)) = (
+        compiled("compute", &compute_kernel()),
+        compiled("compute-air25", &stride_less(&compute_kernel())),
+    ) else {
+        return;
+    };
+    for ((stem, _, sp, sm), (_, _, pp, pm)) in today_runs.iter().zip(&air25_runs) {
+        for dynamic in [false, true] {
+            let descriptor = compute_descriptor(dynamic);
+            let params: Vec<Params> = (0..THREADS).map(Params::valid).collect();
+            // Each command's slot holds a dynamic stride before, where the descriptor allows one.
+            let before: Vec<CommandRecord> = (0..THREADS)
+                .map(|i| {
+                    let mut r = CommandRecord::default();
+                    if dynamic {
+                        let at = params.iter().find(|p| p.index == i).expect("a writer");
+                        r.bindings.buffers_mut(BufferStage::Kernel)[at.binding as usize] =
+                            Some(BufferBinding {
+                                address: DATA_GUEST,
+                                attribute_stride: Some(48),
+                            });
+                    }
+                    r
+                })
+                .collect();
+            let initial = encoded(&descriptor, OWNED, &before);
+            let today = run_encoder(sp, sm, initial.clone(), &params, true)
+                .unwrap_or_else(|e| panic!("{stem}: {e}"));
+            let air25 = run_encoder(pp, pm, initial, &params, true)
+                .unwrap_or_else(|e| panic!("{stem} AIR 2.5: {e}"));
+            assert_eq!(air25.records, today.records, "{stem} dynamic={dynamic}");
+            let mut want = vec![CommandRecord::default(); THREADS as usize];
+            for (t, p) in params.iter().enumerate() {
+                want[p.index as usize] = compute_record(t as u32, *p);
+                let kernel = want[p.index as usize]
+                    .bindings
+                    .buffers_mut(BufferStage::Kernel);
+                let address = DATA_GUEST + 16 * t as u64;
+                assert_eq!(kernel[p.binding as usize], plain(address), "{stem}");
+            }
+            let got = decoded(&air25.records, &descriptor)
+                .unwrap_or_else(|e| panic!("{stem} dynamic={dynamic}: {e}"));
+            assert_eq!(got, want, "{stem} dynamic={dynamic}");
+            assert!(air25.sink.iter().all(|b| *b == 0), "{stem}: sink written");
+        }
+    }
+    let (Some(today_runs), Some(air25_runs)) = (
+        compiled("render", &render_kernel()),
+        compiled("render-air25", &stride_less(&render_kernel())),
+    ) else {
+        return;
+    };
+    let descriptor = CommandDescriptor::Render {
+        draws: RenderDraws::PRIMITIVES,
+        max_vertex_buffer_bind_count: 1,
+        max_fragment_buffer_bind_count: 2,
+        max_object_buffer_bind_count: 0,
+        max_mesh_buffer_bind_count: 0,
+        support_dynamic_attribute_stride: false,
+    };
+    for ((stem, _, sp, sm), (_, _, pp, pm)) in today_runs.iter().zip(&air25_runs) {
+        let today = run_encoder(sp, sm, storage(&descriptor, OWNED), &[], true)
+            .unwrap_or_else(|e| panic!("{stem}: {e}"));
+        let air25 = run_encoder(pp, pm, storage(&descriptor, OWNED), &[], true)
+            .unwrap_or_else(|e| panic!("{stem} AIR 2.5: {e}"));
+        assert_eq!(air25.records, today.records, "{stem}");
+        let got = decoded(&air25.records, &descriptor).unwrap_or_else(|e| panic!("{stem}: {e}"));
+        for (t, r) in got.iter().enumerate() {
+            let address = DATA_GUEST + 16 * t as u64;
+            assert_eq!(
+                r.bindings.buffers(BufferStage::Vertex)[0],
+                plain(address),
+                "{stem}"
+            );
+        }
+    }
+}
+
 /// A render descriptor of mesh draws (of threadgroups where `threadgroups`, else of threads)
 /// alone, with one object and one mesh buffer, `primitive` vertex buffers and twice as many
 /// fragment buffers.

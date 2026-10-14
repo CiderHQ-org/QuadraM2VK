@@ -17,18 +17,18 @@ bb0:
   %i3 = zext %i2 to i64
   %i4 = getelementptr inbounds i32, %a1, %i3
   %i5 = bitcast %i4 to ptr addrspace(2)
-  tail call void @f1 [air IndirectCommand(SetBuffer { stage: Kernel, space: Constant })](%i1, %a3, %i5, i64 18446744073709551615, i32 0) arg0( nocapture )
+  tail call void @f1 [air IndirectCommand(SetBuffer { stage: Kernel, space: Constant, strided: true })](%i1, %a3, %i5, i64 18446744073709551615, i32 0) arg0( nocapture )
   %i7 = getelementptr inbounds i32, %a2, %i3
   %i8 = bitcast %i7 to ptr addrspace(1)
-  tail call void @f2 [air IndirectCommand(SetBuffer { stage: Kernel, space: Device })](%i1, %a3, %i8, i64 18446744073709551615, i32 1) arg0( nocapture )
+  tail call void @f2 [air IndirectCommand(SetBuffer { stage: Kernel, space: Device, strided: true })](%i1, %a3, %i8, i64 18446744073709551615, i32 1) arg0( nocapture )
   %i10 = getelementptr inbounds %t12, %a0, i64 0, i32 1, i32 0
   %i11 = load ptr addrspace(1), %i10, align 8
-  tail call void @f1 [air IndirectCommand(SetBuffer { stage: Kernel, space: Constant })](%i11, %a3, %i5, i64 18446744073709551615, i32 0) arg0( nocapture )
+  tail call void @f1 [air IndirectCommand(SetBuffer { stage: Kernel, space: Constant, strided: true })](%i11, %a3, %i5, i64 18446744073709551615, i32 0) arg0( nocapture )
   %i13 = add i32 %i2, i32 128
   %i14 = zext %i13 to i64
   %i15 = getelementptr inbounds i32, %a2, %i14
   %i16 = bitcast %i15 to ptr addrspace(1)
-  tail call void @f2 [air IndirectCommand(SetBuffer { stage: Kernel, space: Device })](%i11, %a3, %i16, i64 18446744073709551615, i32 1) arg0( nocapture )
+  tail call void @f2 [air IndirectCommand(SetBuffer { stage: Kernel, space: Device, strided: true })](%i11, %a3, %i16, i64 18446744073709551615, i32 1) arg0( nocapture )
   ret void
 }
 

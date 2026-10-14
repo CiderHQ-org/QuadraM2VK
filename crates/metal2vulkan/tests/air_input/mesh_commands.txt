@@ -36,7 +36,7 @@ bb1:
   %i5 = load ptr addrspace(1), %i4, align 8
   tail call void @f7 [air IndirectCommand(SetRenderPipeline)](%i1, i32 0, %i5) arg0( nocapture ) arg2( Ref )
   %i7 = bitcast %a1 to ptr addrspace(1)
-  tail call void @f13 [air IndirectCommand(SetBuffer { stage: Object, space: Device })](%i1, i32 0, %i7, i32 0) arg0( nocapture )
+  tail call void @f13 [air IndirectCommand(SetBuffer { stage: Object, space: Device, strided: false })](%i1, i32 0, %i7, i32 0) arg0( nocapture )
   tail call void @f8 [air IndirectCommand(DrawMesh { threads: false })](%i1, i32 0, <3 x i32> c31, <3 x i32> c32, <3 x i32> c33) arg0( nocapture )
   br bb3
 bb2:
@@ -57,7 +57,7 @@ bb0:
   %i3 = load ptr addrspace(1), %i2, align 8
   tail call void @f7 [air IndirectCommand(SetRenderPipeline)](%i1, i32 0, %i3) arg0( nocapture ) arg2( Ref )
   %i5 = bitcast %a1 to ptr addrspace(1)
-  tail call void @f14 [air IndirectCommand(SetBuffer { stage: Mesh, space: Device })](%i1, i32 0, %i5, i32 0) arg0( nocapture )
+  tail call void @f14 [air IndirectCommand(SetBuffer { stage: Mesh, space: Device, strided: false })](%i1, i32 0, %i5, i32 0) arg0( nocapture )
   tail call void @f8 [air IndirectCommand(DrawMesh { threads: false })](%i1, i32 0, <3 x i32> c35, <3 x i32> c35, <3 x i32> c35) arg0( nocapture )
   %i8 = load ptr addrspace(1), %i0, align 8
   %i9 = load i32, %a2, align 4
@@ -70,7 +70,7 @@ bb2:
   %i14 = getelementptr inbounds %t23, %a0, i64 0, i32 2, i32 0
   %i15 = load ptr addrspace(1), %i14, align 8
   tail call void @f7 [air IndirectCommand(SetRenderPipeline)](%i8, i32 1, %i15) arg0( nocapture ) arg2( Ref )
-  tail call void @f13 [air IndirectCommand(SetBuffer { stage: Object, space: Device })](%i8, i32 1, %i5, i32 0) arg0( nocapture )
+  tail call void @f13 [air IndirectCommand(SetBuffer { stage: Object, space: Device, strided: false })](%i8, i32 1, %i5, i32 0) arg0( nocapture )
   tail call void @f8 [air IndirectCommand(DrawMesh { threads: false })](%i8, i32 1, <3 x i32> c35, <3 x i32> c35, <3 x i32> c35) arg0( nocapture )
   ret void
 }
