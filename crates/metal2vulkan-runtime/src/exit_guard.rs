@@ -747,18 +747,19 @@ thread_local! {
 
 /// Raise this thread's quality of service to the default class where it is utility or
 /// background, and leave every other class as it is. On macOS a new thread takes the class of
-/// the thread that started it, and each of the runtime's threads (the pool's, the scheduler's,
-/// a command buffer's completion) serves the whole program for the device's life: one started
-/// from a background thread would run every later making, scheduling and completion at
-/// background, whoever waits on it. On an Apple M4 a pipeline making on a background thread took
-/// 6.2 times as long through MoltenVK as at the default class (EV TTG-qos-m4). Nothing elsewhere,
-/// where there is no such class.
+/// the thread that started it, and a thread of the runtime's may serve the whole program for the
+/// device's life (the pipeline reaper, the shader cache's worker): one started from a background
+/// thread would run all its later work at background, whoever waits on it. On an Apple M4 a
+/// pipeline making on a background thread took 6.2 times as long through MoltenVK as at the
+/// default class. Nothing elsewhere, where there is no such class.
 ///
-/// The floor covers only the threads the runtime starts. The pool's threads run at the
-/// user-initiated class ([`raise_to_user_initiated`]), and a pipeline the runtime makes on a
-/// program's thread below that class is made on a thread of the runtime's at it while the
-/// program's thread waits (`device/compiles.rs`). The threads that take command buffers to their
-/// handlers run at the user-interactive class ([`spawn_user_interactive`]).
+/// The floor covers only the threads the runtime starts, and some of them then go higher. The
+/// pipeline pool's threads and a compile's own thread run at the user-initiated class
+/// ([`raise_to_user_initiated`]), and a pipeline the runtime makes on a program's thread below
+/// that class is made on a thread of the runtime's at it while the program's thread waits
+/// (`device/compiles.rs`). The threads that take command buffers to their handlers (the
+/// scheduler's, the completion thread, each `VkQueue`'s waiter and the handler pool's) run at the
+/// user-interactive class ([`spawn_user_interactive`]).
 #[cfg(target_os = "macos")]
 pub(crate) fn raise_quality_of_service() {
     use libc::qos_class_t as Q;
