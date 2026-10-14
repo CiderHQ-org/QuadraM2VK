@@ -706,6 +706,8 @@ impl EncoderCore {
         let copies = self.shadows.before(shadows, uses, |copies| {
             ShadowMerge::new(&device, copies).map(Arc::new)
         })?;
+        let texels = copies.iter().map(ShadowCopy::texels_back).sum();
+        (device.shared().counts).shadow_copies_planned(copies.len(), texels);
         for copy in &copies {
             if let Step::Keep(merge) = &copy.step {
                 self.retain(Arc::clone(merge));
@@ -875,6 +877,9 @@ impl EncoderCore {
                 && !self.taken.named_pins().is_empty()
         });
         let copies = self.shadows.finish();
+        let texels = copies.iter().map(ShadowCopy::texels_back).sum();
+        let counts = &self.device().shared().counts;
+        counts.shadow_copies_planned(copies.len(), texels);
         self.shadow_copies(&copies);
         // SAFETY: as in `barrier`.
         unsafe { self.device().shared().vk().end_command_buffer(self.raw) }.map_err(vulkan)?;
@@ -973,6 +978,9 @@ impl EncoderCore {
     /// buffer: its first encoding kept none of those, so its place stays as it was.
     pub(super) fn finish_replay(mut self) -> Result<Replayed, Error> {
         let copies = self.shadows.finish();
+        let texels = copies.iter().map(ShadowCopy::texels_back).sum();
+        let counts = &self.device().shared().counts;
+        counts.shadow_copies_planned(copies.len(), texels);
         self.shadow_copies(&copies);
         // SAFETY: as in `barrier`.
         unsafe { self.device().shared().vk().end_command_buffer(self.raw) }.map_err(vulkan)?;
@@ -1054,6 +1062,9 @@ impl EncoderCore {
     /// back are copied back, then a barrier to everything recorded after it.
     pub(super) fn end_segment(mut self) -> Result<RecordedSegment, Error> {
         let copies = self.shadows.finish();
+        let texels = copies.iter().map(ShadowCopy::texels_back).sum();
+        let counts = &self.device().shared().counts;
+        counts.shadow_copies_planned(copies.len(), texels);
         self.shadow_copies(&copies);
         self.barrier(Barrier::everything());
         // SAFETY: as in `barrier`.

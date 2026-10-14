@@ -4,9 +4,9 @@
 
 use super::super::image_plan::plan_image;
 use super::super::linear_plan::{
-    aliases, check_linear_limits, linear_alignment, linear_lack, plan_buffer_texture, BufferFacts,
-    BufferLayout, BufferRefusal, BufferTexture, BufferTextureCall, BufferTextureProblem,
-    LinearImage, LinearLack, Placed, LINEAR_ALIGNMENT,
+    aliases, check_linear_limits, linear_alignment, linear_lack, padding, plan_buffer_texture,
+    BufferFacts, BufferLayout, BufferRefusal, BufferTexture, BufferTextureCall,
+    BufferTextureProblem, LinearImage, LinearLack, Placed, LINEAR_ALIGNMENT,
 };
 use super::super::texture_descriptor::{no_texture_alone, TextureDescriptor};
 use super::super::values::StorageMode;
@@ -677,14 +677,14 @@ fn an_array_ends_where_metal_lets_it() {
 }
 
 /// A linear image aliases a texture's place in its buffer only where every one of its reports
-/// is Metal's layout's.
+/// is Metal's layout's, and its subresources hold no byte but the texture's texels.
 #[test]
 fn a_linear_image_aliases_only_metals_layout() {
     let single = BufferLayout {
         offset: 256,
         row_pitch: 80,
         slice_pitch: 320,
-        row_bytes: 68,
+        row_bytes: 80,
         rows: 4,
         slices: 1,
     };
@@ -692,6 +692,7 @@ fn a_linear_image_aliases_only_metals_layout() {
         alignment: 16,
         size: 320,
         offset: 0,
+        subresource: 320,
         row_pitch: 80,
         array_pitch: 320,
     };
@@ -727,24 +728,102 @@ fn a_linear_image_aliases_only_metals_layout() {
         }
     ));
     assert!(!aliases(&single, 4096, 319, &image));
+    // Memory past the subresource, within the buffer's: no write through the image reaches it.
+    assert!(aliases(
+        &single,
+        4096,
+        4096,
+        &LinearImage {
+            size: 4096,
+            ..image
+        }
+    ));
+    // A subresource past the texels (lavapipe's rows rounded up to 4, of a texture of 3).
+    let three = BufferLayout { rows: 3, ..single };
+    assert!(!aliases(&three, 4096, 320, &image));
+    assert!(aliases(
+        &three,
+        4096,
+        320,
+        &LinearImage {
+            subresource: 240,
+            ..image
+        }
+    ));
+    // Rows with the buffer's bytes between them, at Metal's pitch and the image's alike.
+    let padded = BufferLayout {
+        row_bytes: 68,
+        ..single
+    };
+    assert!(!aliases(&padded, 4096, 320, &image));
+    assert!(padding(&padded, true).is_some());
+    assert!(padding(&single, true).is_none());
+    // One row has nothing between rows, but its pitch's padding past the texels.
+    let row = BufferLayout {
+        rows: 1,
+        slice_pitch: 80,
+        ..padded
+    };
+    assert!(padding(&row, true).is_none());
+    assert!(!aliases(
+        &row,
+        4096,
+        80,
+        &LinearImage {
+            size: 80,
+            subresource: 80,
+            ..image
+        }
+    ));
+    assert!(aliases(
+        &row,
+        4096,
+        80,
+        &LinearImage {
+            size: 80,
+            subresource: 68,
+            ..image
+        }
+    ));
     // An array's slices at Metal's stride, and at no other.
     let slices = BufferLayout {
         slices: 3,
-        slice_pitch: 384,
         ..single
     };
-    let stacked = LinearImage {
-        size: 1088,
-        array_pitch: 384,
-        ..image
-    };
-    assert!(aliases(&slices, 4096, 1088, &stacked));
+    let stacked = LinearImage { size: 960, ..image };
+    assert!(aliases(&slices, 4096, 960, &stacked));
     assert!(!aliases(
         &slices,
         4096,
+        960,
+        &LinearImage {
+            array_pitch: 384,
+            ..stacked
+        }
+    ));
+    // Slices with the buffer's bytes between them (an array's slices rounded up to 128).
+    let apart = BufferLayout {
+        slice_pitch: 384,
+        ..slices
+    };
+    assert!(padding(&apart, true).is_some());
+    assert!(!aliases(
+        &apart,
+        4096,
         1088,
         &LinearImage {
-            array_pitch: 320,
+            size: 1088,
+            array_pitch: 384,
+            ..image
+        }
+    ));
+    // A driver that reports the array's whole bytes as its first subresource's.
+    assert!(!aliases(
+        &slices,
+        4096,
+        960,
+        &LinearImage {
+            subresource: 960,
             ..stacked
         }
     ));
@@ -758,6 +837,36 @@ fn a_linear_image_aliases_only_metals_layout() {
             ..image
         }
     ));
+}
+
+/// A texture over padded rows is a shadow for the operations Vulkan lets write the padding: a
+/// texture that only reads names its image's layout transitions (its first move among them), not a
+/// render pass, which no image of its takes; a render target names both.
+#[test]
+fn a_padded_texture_s_shadow_names_what_may_write_its_padding() {
+    let padded = BufferLayout {
+        offset: 0,
+        row_pitch: 80,
+        slice_pitch: 320,
+        row_bytes: 68,
+        rows: 4,
+        slices: 1,
+    };
+    let reads = padding(&padded, false).unwrap();
+    assert_eq!(
+        reads,
+        "its rows lie 80 bytes apart, 68 bytes of texels each: an image over them holds the \
+         bytes between them, which Vulkan lets its layout transitions read and write, its first \
+         move from the layout it is made in among them"
+    );
+    assert!(!reads.contains("render pass"), "{reads}");
+    let renders = padding(&padded, true).unwrap();
+    assert_eq!(
+        renders,
+        "its rows lie 80 bytes apart, 68 bytes of texels each: an image over them holds the \
+         bytes between them, which Vulkan lets its layout transitions read and write, and a render \
+         pass's load and store operations write back"
+    );
 }
 
 /// A linear image serves a texture where its tiling has every feature the optimal one has for

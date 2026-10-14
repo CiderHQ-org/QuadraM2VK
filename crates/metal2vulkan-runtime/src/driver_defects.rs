@@ -195,6 +195,19 @@ pub(super) struct Affected {
 ///   (`generated_execute.rs`). Every RADV GPU and release but the measured identity found clean,
 ///   the 780M at 26.2.4, takes it; the RX 7900 XTX is no measured identity, so it takes it at
 ///   every release.
+///
+/// `ExplicitPlaneRowsPastHeight`:
+/// - Mesa's lavapipe (`MESA_LLVMPIPE`): a `DRM_FORMAT_MOD_LINEAR` image made for host allocations
+///   with an explicit plane at a texture's packed rows, reported at `rows × rowPitch` bytes in its
+///   subresource and within its memory requirements, is rendered in blocks of 4 rows: a pass that
+///   loads, blends and stores a 658x126 `RGBA16Float` tile (rows of 5264 bytes) rewrote rows 126
+///   and 127 past it (signaling NaNs quieted), and one over a 1308x510 `BGRA8Unorm` tile (rows of
+///   5232 bytes) wrote rows 510 and 511 past the no-copy buffer's mapping, and the process took a
+///   `SIGSEGV` (`runtime_lane::pitched_surfaces`, packed odd-height layouts). Its own linear images
+///   report the rounded rows in their subresource. Measured on 26.2.4 (llvmpipe, LLVM 23.1.1, 256
+///   bits; gem10): known broken through 26.2.4; 26.0.8 unprobed. Nothing is refused: no such
+///   image of a height that is no multiple of 4 is made there (`dma_buf.rs`'s
+///   `explicit_plane_rows`), and the texture takes its shadow.
 pub(super) const AFFECTED: &[Affected] = &[
     Affected {
         defect: RuntimeDriverDefect::MultisampledDepthStencilColourCopies,
@@ -250,6 +263,11 @@ pub(super) const AFFECTED: &[Affected] = &[
     Affected {
         defect: RuntimeDriverDefect::ReadsCommandBuffersAfterTheirSignal,
         driver: DriverId::MOLTENVK,
+        clean: &[],
+    },
+    Affected {
+        defect: RuntimeDriverDefect::ExplicitPlaneRowsPastHeight,
+        driver: DriverId::MESA_LLVMPIPE,
         clean: &[],
     },
     Affected {

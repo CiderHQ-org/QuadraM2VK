@@ -129,12 +129,12 @@ fn heap_texture_kinds(device: &Device, descriptor: &TextureDescriptor) -> BTreeS
 }
 
 /// The kinds a texture over a buffer of [`RGBA8Uint`](PixelFormat::RGBA8Uint) rows
-/// [`ROW_BYTES`] apart, [`ROW_TEXELS`] wide and 2 high, forces where its device's linear rows lie
-/// otherwise ([`linear_rows_differ`]): its shadow (`shadowed-texture`), and the heap set holding
-/// it as its ID's holder (`UNNAMED_SHADOWS`).
+/// [`ROW_BYTES`] apart, [`ROW_TEXELS`] wide and 2 high, forces where no linear image of its device
+/// holds its texels alone ([`linear_rows_differ`]): its shadow (`shadowed-texture`), and the heap
+/// set holding it as its ID's holder (`UNNAMED_SHADOWS`).
 fn row_shadow_kinds(device: &Device) -> Vec<Degradation> {
     let rows = [ROW_TEXELS as u32, 2];
-    match linear_rows_differ(device, PixelFormat::RGBA8Uint, rows, ROW_BYTES) {
+    match linear_rows_differ(device, PixelFormat::RGBA8Uint, rows, 4, ROW_BYTES) {
         true => [Degradation::ShadowedTexture, UNNAMED_SHADOWS[0]].into(),
         false => Vec::new(),
     }

@@ -43,9 +43,13 @@
 //!   other layout (`VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT`): the runtime asks the
 //!   driver and takes its answer, never a rule of its own. The source is called only once the image
 //!   is made and checked; the import keeps it, and goes after the image. Counted:
-//!   `WorkCounts::dma_buf_images`. Over pages imported by their pointer, a texture over a buffer
-//!   whose rows the driver's linear image lays out otherwise (ANV packs them tight) is likewise a
-//!   `DRM_FORMAT_MOD_LINEAR` image, its plane at the texture's pitches, made for host allocations
+//!   `WorkCounts::dma_buf_images`. A texture whose rows (or slices) lie with the buffer's bytes
+//!   between them takes no such image, nor one whose plane holds bytes past its texels: Vulkan
+//!   lets an image's layout transitions and a render pass's load and store operations write any
+//!   byte of its subresource (`linear_plan::padding`, `texels_alone`); it is a shadow, the source
+//!   not asked, counted as a fallback. Over pages imported by their pointer, a texture over a
+//!   buffer, its rows packed, whose rows the driver's linear image lays out otherwise is likewise
+//!   a `DRM_FORMAT_MOD_LINEAR` image, its plane at the texture's pitches, made for host allocations
 //!   ([`ModifierMemory::Host`]) and bound in the buffer's import, its features and limits checked
 //!   the same way (`texture.rs`'s `host_pitched_image`; counted:
 //!   `WorkCounts::pitched_host_images`), where the driver takes that layout. Measured
@@ -90,11 +94,14 @@ use super::error::{invalid, vulkan, Error, Problem};
 use super::exit_guard::{self, Call};
 use super::host_memory::{based_size, import_refused, not_importable, ImportWindow, Importer};
 use super::image_plan::{ImageFacts, ImagePlan};
-use super::linear_plan::{check_linear_limits, tiling_lack, viewed_formats, LinearLack};
+use super::linear_plan::{
+    check_linear_limits, texels_alone, tiling_lack, viewed_formats, BufferLayout, LinearLack,
+};
 use super::memory::{ImportFailure, MemoryClass, Placement};
 use super::Device;
 use crate::release;
 use ash::vk;
+use metal2vulkan::error::RuntimeDriverDefect;
 use metal2vulkan::vk::{Format, FormatFeatureFlags2, ImageCreateFlags, SampleCountFlags};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::ptr::NonNull;
@@ -610,6 +617,10 @@ pub(super) struct DmaBufTexels<'a> {
     pub(super) row_pitch: u64,
     /// The bytes from a slice's first texel to the next slice's, for a plan of several layers.
     pub(super) slice_pitch: u64,
+    /// For a texture over a buffer, its texels' layout, which the image's plane holds alone
+    /// (`linear_plan::texels_alone`): the buffer's other bytes are the program's. `None` for a
+    /// heap's texture, whose image's bytes are its own.
+    pub(super) alone: Option<BufferLayout>,
 }
 
 /// A texture's image over dma-buf pages, made and bound ([`Device::dma_buf_image`]): its
@@ -712,6 +723,9 @@ impl Device {
             Ok(checked) => checked,
             Err(why) => return Ok(Err(why)),
         };
+        if let Some(why) = self.explicit_plane_rows(plan) {
+            return Ok(Err(why));
+        }
         let offset = texels.at % page;
         let array_pitch = if plan.layers > 1 {
             texels.slice_pitch
@@ -759,6 +773,15 @@ impl Device {
                  where the texels lie at offset {offset}, rows {} and slices {array_pitch} apart",
                 report.offset, report.row_pitch, report.array_pitch, texels.row_pitch
             ));
+        }
+        if let Some(layout) = &texels.alone {
+            if !texels_alone(layout, report.size, report.array_pitch) {
+                return refuse(format!(
+                    "the driver's plane takes {} bytes, past the texels' {}",
+                    report.size,
+                    layout.end() - layout.offset
+                ));
+            }
         }
         // The pages from the texels' first, through the image's memory.
         let first = texels.at - offset;
@@ -1195,6 +1218,25 @@ impl Device {
             ));
         }
         Ok(limits)
+    }
+}
+
+impl Device {
+    /// Why the device makes no `DRM_FORMAT_MOD_LINEAR` image of `plan` with an explicit plane,
+    /// where its driver renders such an image's rows past its height
+    /// ([`RuntimeDriverDefect::ExplicitPlaneRowsPastHeight`]) and the plan's height is no multiple
+    /// of 4: `None` elsewhere.
+    pub(super) fn explicit_plane_rows(&self, plan: &ImagePlan) -> Option<String> {
+        let defect = RuntimeDriverDefect::ExplicitPlaneRowsPastHeight;
+        let height = plan.extent[1];
+        (!height.is_multiple_of(4) && self.properties().driver_defects.contains(&defect)).then(
+            || {
+                format!(
+                    "the driver renders an explicit DRM_FORMAT_MOD_LINEAR plane's rows past its \
+                 height of {height} to a multiple of 4 ({defect:?})"
+                )
+            },
+        )
     }
 }
 

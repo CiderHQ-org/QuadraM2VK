@@ -95,6 +95,8 @@ pub(crate) struct Counters {
     modifier_feature_queries: AtomicU64,
     shadowed_textures: AtomicU64,
     shadows_zeroed: AtomicU64,
+    shadow_copies: AtomicU64,
+    shadow_texels_copied_back: AtomicU64,
     replay_logs_kept: AtomicU64,
     replay_log_bytes: AtomicU64,
     encoders_reencoded: AtomicU64,
@@ -526,6 +528,14 @@ impl Counters {
         }
     }
 
+    /// An encoder planned `n` copies between shadowed textures' truths and their shadows
+    /// (`shadow.rs`), whose copies back of buffers' textures' images move `texels_back` texels.
+    pub(crate) fn shadow_copies_planned(&self, n: usize, texels_back: u64) {
+        self.shadow_copies.fetch_add(n as u64, Ordering::Relaxed);
+        self.shadow_texels_copied_back
+            .fetch_add(texels_back, Ordering::Relaxed);
+    }
+
     /// A command buffer kept an ended encoder's log of `bytes` bytes (`replay.rs`).
     pub(crate) fn replay_log_kept(&self, bytes: usize) {
         self.replay_logs_kept.fetch_add(1, Ordering::Relaxed);
@@ -929,6 +939,15 @@ pub struct WorkCounts {
     /// Every other shadow's copy in writes each texel before any command reads it, so its image
     /// starts as its memory lies.
     pub shadows_zeroed: u64,
+    /// Copies between a shadowed texture's truth and its shadow that encoders planned
+    /// (`shadow.rs`): copies in before a command, copies back after one or as the encoder ends,
+    /// and the keeps and merges of a command that writes the bytes two ways. Each is a command of
+    /// its encoder over the texture's texels.
+    pub shadow_copies: u64,
+    /// The texels those copies back move from a 2D texture's image to its buffer's bytes (a
+    /// texture over a buffer, a no-copy buffer or an IOSurface plane): every texel, or those
+    /// inside the rectangle bounding a pass's draws' scissors over an attachment it loads.
+    pub shadow_texels_copied_back: u64,
     /// Ended compute and blit encoders whose logs their command buffers kept, as a rebind before
     /// the first submission may encode them again (`replay.rs`), and the bytes of those logs.
     pub replay_logs_kept: u64,
@@ -1085,6 +1104,8 @@ impl Device {
             modifier_feature_queries: counters.modifier_feature_queries.load(Ordering::Relaxed),
             shadowed_textures: counters.shadowed_textures.load(Ordering::Relaxed),
             shadows_zeroed: counters.shadows_zeroed.load(Ordering::Relaxed),
+            shadow_copies: counters.shadow_copies.load(Ordering::Relaxed),
+            shadow_texels_copied_back: counters.shadow_texels_copied_back.load(Ordering::Relaxed),
             replay_logs_kept: counters.replay_logs_kept.load(Ordering::Relaxed),
             replay_log_bytes: counters.replay_log_bytes.load(Ordering::Relaxed),
             encoders_reencoded: counters.encoders_reencoded.load(Ordering::Relaxed),

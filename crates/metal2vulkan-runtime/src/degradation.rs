@@ -219,13 +219,24 @@ macro_rules! degradations {
 
 degradations! {
     runtime {
-        /// A 2D texture over a buffer is a shadow image: no linear image of the device lays its
-        /// texels out as Metal does in the buffer's memory (over a no-copy buffer's imported
+        /// A 2D texture over a buffer is a shadow image: its rows (or an array's slices) lie with
+        /// the buffer's bytes between them, which an image over them would hold in its
+        /// subresource, where Vulkan lets the image's layout transitions (its first move among
+        /// them, which a texture that only reads takes too) read and write any byte of its
+        /// subresources, and a render pass's load and store operations read and write back any
+        /// byte of an attachment's image subresource, and Metal leaves them as the program writes
+        /// them (but where the device's image of it is a Metal texture over the
+        /// buffer, on MoltenVK); or no linear image of the device
+        /// lays its texels out as Metal does in the buffer's memory, holding no byte past them
+        /// (over a no-copy buffer's imported
         /// host memory, no linear image made for host allocations does: neither the driver's own
         /// nor, where the device enables `VK_EXT_image_drm_format_modifier`, a
         /// `DRM_FORMAT_MOD_LINEAR` image laid out at Metal's row pitch, which the driver may refuse
         /// for the texture's format, usage or pitch, and which the runtime makes of no depth or
-        /// stencil format), or the buffer is over
+        /// stencil format, nor of a height that is no multiple of 4 where the driver renders an
+        /// explicit plane's rows past its height
+        /// ([`metal2vulkan::error::RuntimeDriverDefect::ExplicitPlaneRowsPastHeight`])), or the
+        /// buffer is over
         /// the caller's `VkBuffer`, whose memory backs no image of the runtime's, or over host
         /// pages imported as dma-bufs (`HostMemory::with_dma_buf`) where the device makes no image
         /// over a dma-buf of the texture's own pages (the notice names why). Also a heap's depth

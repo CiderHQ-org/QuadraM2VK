@@ -323,6 +323,20 @@ impl DrawnArea {
         }
     }
 
+    /// The rectangle `[x0, y0, x1, y1)` bounding every rectangle, half-open in the render area's
+    /// pixels: `None` where the area bounds nothing, or holds no rectangle.
+    pub(super) fn bounds(&self) -> Option<[u32; 4]> {
+        if self.whole {
+            return None;
+        }
+        self.rects
+            .iter()
+            .copied()
+            .reduce(|[a0, a1, a2, a3], [b0, b1, b2, b3]| {
+                [a0.min(b0), a1.min(b1), a2.max(b2), a3.max(b3)]
+            })
+    }
+
     /// Bound nothing: the draws may write anywhere in the render area.
     pub(super) fn everywhere(&mut self) {
         self.whole = true;

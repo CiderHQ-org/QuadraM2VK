@@ -614,16 +614,11 @@ impl Importer {
     }
 
     /// Whether the device makes images over dma-bufs of host pages (`dma_buf.rs`): it imports
-    /// dma-bufs and enables `VK_EXT_image_drm_format_modifier` and `VK_EXT_queue_family_foreign`.
+    /// dma-bufs and enables `VK_EXT_image_drm_format_modifier` and `VK_EXT_queue_family_foreign`
+    /// (`create.rs`'s `dma_buf_image_names`). A texture over host pages imported by their pointer
+    /// may then be a `DRM_FORMAT_MOD_LINEAR` image at Metal's row pitch too (`texture.rs`'s
+    /// `host_pitched_image`).
     pub(super) fn makes_dma_buf_images(&self) -> bool {
-        self.dma_buf_images
-    }
-
-    /// Whether the device enables `VK_EXT_image_drm_format_modifier` (with the dma-buf route's
-    /// image extensions, `create.rs`'s `dma_buf_image_names`): a texture over host pages imported
-    /// by their pointer may then be a `DRM_FORMAT_MOD_LINEAR` image at Metal's row pitch
-    /// (`texture.rs`'s `host_pitched_image`).
-    pub(super) fn makes_modifier_images(&self) -> bool {
         self.dma_buf_images
     }
 

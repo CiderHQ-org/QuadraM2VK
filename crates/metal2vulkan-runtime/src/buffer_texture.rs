@@ -1248,6 +1248,7 @@ impl Texels {
                     image,
                     regions,
                     staging,
+                    texel: Some(self.texel_bytes),
                 },
                 alias: self.buffer.alias().map(|alias| alias.key),
             },

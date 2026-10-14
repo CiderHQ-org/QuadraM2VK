@@ -21,9 +21,10 @@
 //!   `vk_image` answers its own image over the pages, shadowed where it answers none, and the
 //!   images the making counted (`WorkCounts::pitched_host_images`, `shadowed_textures`). A shadow
 //!   is made without zeroing its image (`shadows_zeroed`, `images_started_on_the_host`: its copy
-//!   in writes every texel first); on ANV, whose own linear images pack rows tight, a padded
-//!   texture is an image at Metal's row pitch (`DRM_FORMAT_MOD_LINEAR`), never a shadow; and
-//!   making the same texture again asks the driver no format's modifier features
+//!   in writes every texel first); a padded texture is a shadow but on a driver that runs on
+//!   Metal (a linear image over the pages would hold the bytes between the rows, which Vulkan
+//!   lets a render pass write back); and making the same texture again asks the driver no
+//!   format's modifier features
 //!   (`modifier_feature_queries`), nor a layout at Metal's row pitch it refused
 //!   (`pitched_host_image_refusals`, `pitched_host_image_refusals_recalled`), and takes the same
 //!   form.
@@ -195,10 +196,11 @@ fn padding(bytes: &[u8], bpr: u64, row: u64) -> Vec<u8> {
         .collect()
 }
 
-/// Whether the device is ANV, whose own linear images pack rows tight: a texture over host
-/// pages with padded rows is there an image at Metal's row pitch.
-fn anv(device: &Device) -> bool {
-    device.properties().description.driver_id == Some(DriverId::INTEL_OPEN_SOURCE_MESA)
+/// Whether the device runs on Metal (MoltenVK), where a texture over host pages is an image of a
+/// Metal texture over the buffer, which keeps the bytes between its rows as Metal does: anywhere
+/// else a texture over padded rows is a shadow.
+fn on_metal(device: &Device) -> bool {
+    device.properties().description.driver_id == Some(DriverId::MOLTENVK)
 }
 
 /// A `Shared` buffer holding `bytes`.
@@ -356,10 +358,10 @@ fn read_and_write_the_caller_s_pages(pf: PixelFormat, texel: u64, pad: u64) {
                     "{what}: the shadow's image was zeroed on the host"
                 );
             }
-            if pad != 0 && anv(&device) {
+            if pad != 0 && !on_metal(&device) {
                 assert!(
-                    made && pitched == 1,
-                    "{what}: on ANV not an image at Metal's row pitch (aliased {made}, pitched \
+                    !made && pitched == 0,
+                    "{what}: rows with bytes between them aliased by a linear image (pitched \
                      images {pitched})"
                 );
             }

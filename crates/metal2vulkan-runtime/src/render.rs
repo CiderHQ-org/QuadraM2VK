@@ -3253,6 +3253,16 @@ impl RenderCommandEncoder {
         // tiles their primitives touch, at most those their viewports and scissors reach, and
         // none where those reach none.
         let reach = clear_reach::PassReach::of(&layout, called, drew);
+        // The color attachments the pass loads as the encoder set them, before its `DontCare`
+        // loads and reach clears below give any a clear before the pass and a load
+        // (`render/shadows.rs` bounds the others' copies back by the draws' scissors).
+        let loaded_colors: Vec<bool> = (layout.colors.iter())
+            .map(|color| {
+                color
+                    .as_ref()
+                    .is_some_and(|color| color.load == LoadAction::Load)
+            })
+            .collect();
         let tiles = match reach {
             clear_reach::PassReach::Draws => drawn.tiles(&layout),
             _ => None,
@@ -3733,8 +3743,18 @@ impl RenderCommandEncoder {
                 order.extend(after.map(|dispatch| (&dispatch.shadows, true)));
             }
             let reached = reach != clear_reach::PassReach::Nothing;
-            let planned =
-                shadows::plan(&mut core, order.iter().map(|&(s, _)| s), &layout, reached)?;
+            // Where nothing but the draws writes the loaded colors: no reach clear before the
+            // pass.
+            let drawn_bounds = match (reach, &reach_clears) {
+                (clear_reach::PassReach::Draws, None) => drawn.bounds(),
+                _ => None,
+            };
+            let planned = shadows::plan(
+                &mut core,
+                order.iter().map(|&(s, _)| s),
+                &layout,
+                (reached, drawn_bounds.map(|area| (area, &loaded_colors[..]))),
+            )?;
             let (mut texel_copies, mut dispatch_copies) = (Vec::new(), Vec::new());
             for (&(_, of_dispatch), copies) in order.iter().zip(planned) {
                 match of_dispatch {

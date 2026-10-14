@@ -145,9 +145,9 @@ or fingerprint: among it the extensions of its dma-buf fallback for no-copy memo
 the device refuses (`HostMemory::with_dma_buf`), `VK_EXT_external_memory_dma_buf` with
 `VK_KHR_external_memory_fd`, and `VK_EXT_image_drm_format_modifier` with
 `VK_EXT_queue_family_foreign` beside them, wherever a device lists them. With them enabled, a
-texture over a no-copy buffer's pages imported by their pointer is also a `DRM_FORMAT_MOD_LINEAR`
-image made for host allocations at Metal's row pitch where the driver's own linear image lays its
-rows out otherwise (ANV packs them tight) and the driver takes that layout, of a format with no depth
+texture over a no-copy buffer's pages imported by their pointer, its rows packed, is also a
+`DRM_FORMAT_MOD_LINEAR` image made for host allocations at Metal's row pitch where the driver's own
+linear image lays its rows out otherwise and the driver takes that layout, of a format with no depth
 or stencil component (Vulkan has no query of where such a format's memory plane lies, so the runtime
 makes no `DRM_FORMAT_MOD_LINEAR` image of one)
 (`WorkCounts::pitched_host_images`; HOWTO.md section 6 lists what each measured driver takes).
@@ -694,18 +694,26 @@ how to avoid it in full. [FAST-PATHS.md](FAST-PATHS.md) lists which notes the de
 fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
 
 - `metal2vulkan-degrade-shadowed-texture` (performance). `ShadowedTexture`: A 2D texture over a
-  buffer is a shadow image: no linear image of the device lays its texels out as Metal does in the
-  buffer's memory (over a no-copy buffer's imported host memory, no linear image made for host
-  allocations does: neither the driver's own nor, where the device enables
-  `VK_EXT_image_drm_format_modifier`, a `DRM_FORMAT_MOD_LINEAR` image laid out at Metal's row
-  pitch, which the driver may refuse for the texture's format, usage or pitch, and which the
-  runtime makes of no depth or stencil format;
-  `WorkCounts::pitched_host_images` counts those made, `pitched_host_image_refusals` those the
-  driver refused), or the buffer is over the caller's `VkBuffer`, whose memory backs no image of
-  the runtime's, or over host pages imported as dma-bufs (`HostMemory::with_dma_buf`) where the
-  device makes no image over a dma-buf of the texture's own pages (the notice names why;
-  `WorkCounts::dma_buf_image_fallbacks` counts it). Cost: its texels are copied into an image before
-  each use and back after each write.
+  buffer is a shadow image: its rows (or an array's slices) lie with the buffer's bytes between
+  them, which an image over them would hold in its subresource, where Vulkan lets the image's
+  layout transitions (its first move among them, which a texture that only reads takes too) read
+  and write any byte of its subresources, and a render pass's load and store operations read and
+  write back any byte of an attachment's image subresource, and Metal leaves them as the program
+  writes them (but where the device's image of it is a Metal
+  texture over the buffer, on MoltenVK); or no linear image of the device lays its texels out as
+  Metal does in the buffer's memory, holding no byte past them (over a no-copy buffer's imported
+  host memory, no linear image made for host allocations does: neither the driver's own nor, where
+  the device enables `VK_EXT_image_drm_format_modifier`, a `DRM_FORMAT_MOD_LINEAR` image laid out
+  at Metal's row pitch, which the driver may refuse for the texture's format, usage or pitch, and
+  which the runtime makes of no depth or stencil format, nor of a height that is no multiple of 4
+  where the driver renders an explicit plane's rows past its height
+  (`RuntimeDriverDefect::ExplicitPlaneRowsPastHeight`, lavapipe); `WorkCounts::pitched_host_images`
+  counts those made, `pitched_host_image_refusals` those the driver refused), or the buffer is
+  over the caller's `VkBuffer`, whose memory backs no image of the runtime's, or over host pages
+  imported as dma-bufs (`HostMemory::with_dma_buf`) where the device makes no image over a dma-buf
+  of the texture's own pages (the notice names why; `WorkCounts::dma_buf_image_fallbacks` counts
+  it).
+  Cost: its texels are copied into an image before each use and back after each write.
 - `metal2vulkan-degrade-staged-texture-buffer` (performance). `StagedTextureBuffer`: A texture
   buffer is viewed through a staging buffer: its texels start where the device views none
   (`minTexelBufferOffsetAlignment`). Cost: its texels are copied into a staging buffer before each

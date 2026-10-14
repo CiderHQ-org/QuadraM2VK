@@ -144,6 +144,46 @@ driver's. Each is open work.
   the encoding thread and 2.7 ms through completion less a frame, as nothing is copied back), and
   one that stores it renders in place at no added cost. Where MoltenVK runs the pass as one
   unbroken instance, Metal keeps the bytes at no cost.
+- **A texture over a buffer whose rows lie with bytes between them** (a guest browser's padded
+  surfaces, an array whose slices are rounded up to 128 bytes) is a shadow on every device but
+  MoltenVK (`shadowed-texture`), its texels copied in before each use and back after each write.
+  An image over those rows would hold the bytes between them in its subresource, where Metal
+  leaves them as the program writes them, and Vulkan lets two kinds of operation write them: the
+  image's layout transitions "may perform read and write accesses on all memory bound to the image
+  subresource range", and every image takes one, its first move from the layout it is made in,
+  before any use (so a texture that only reads is a shadow too); and a render pass's load and store
+  operations "read and write back any memory locations within the image subresource bound for that
+  attachment" (lavapipe writes back those its 4-texel blocks reach, a signaling NaN's bits
+  quieted). No query of the device's promises otherwise. On ANV (Mesa 26.2.4) making the browser's 1307x512
+  tile took about 135 µs as a shadow against 41 µs as an image at its row pitch. Packed rows
+  (`bytes_per_row` the texels' bytes) avoid it where the device lays an image's rows there.
+- **A shadow's copy back after a pass that draws covers every texel inside the draws'
+  scissors**, where Metal's store writes back only the 32x32 tiles a draw's primitives touch
+  (reims-vgpu's padding probe on an M3 Max, macOS 27.0.1: a tile with geometry stores its
+  undrawn texels back, a tile without stores nothing, and the bytes between rows are never
+  written). Without a CPU write to the texture's texels during the pass, both leave the same
+  bytes. With one, to an undrawn texel in a tile no primitive touches but inside the scissors, the
+  copy back can undo it where Metal keeps it: the host does not know which tiles the primitives
+  touch. A pass that reaches no tile copies nothing back, and no copy reaches the bytes between
+  rows.
+- **A texture's image over pages imported by their pointer keeps their bytes past its first
+  move only because the drivers do.** Vulkan makes an image of host allocations start in
+  `UNDEFINED` (`VUID-VkImageCreateInfo-pNext-01443`), and a move from `UNDEFINED` "will cause the
+  contents of the image's memory to be undefined"; memory imported from a host pointer "shares
+  ownership of the memory between the host and the Vulkan implementation", host access as to any
+  memory, so no queue-family acquire from outside keeps them either. That holds for the driver's
+  own linear image for host allocations (`texture.rs`'s `host_linear_image`), the
+  `DRM_FORMAT_MOD_LINEAR` image at Metal's row pitch (`host_pitched_image`), and, on MoltenVK,
+  the image of a Metal texture over the import's `MTLBuffer` (`metal_alias_image`; Vulkan says
+  nothing of such an image's contents). lavapipe (Mesa 26.2.4) keeps the bytes
+  (`runtime_lane::pitched_surfaces::a_texture_s_first_use_reads_the_bytes_it_was_made_over`, a
+  first use that reads through the image, fails where a driver drops them). Spec-backed: an
+  image over a dma-buf of its own pages, which its first move acquires from
+  `VK_QUEUE_FAMILY_FOREIGN_EXT` in `GENERAL` (the external memory chapter: "acquire exclusive
+  ownership in the destination instance or API", the `UNDEFINED` initial layout "a placeholder"),
+  and a linear image of the runtime's own memory, made `PREINITIALIZED`. The exact form, a shadow
+  of every texture over such pages (on ANV a tile's making about 135 µs against 41 µs, and a copy
+  in and back at each use), is the owner's call.
 - **A cold pipeline making on NVIDIA grows with a module's sampling sites.** NVIDIA's compiler
   (615.71.09) takes about 1 s for macOS 26's largest CoreAnimation fragment (210,033 words) on the
   RTX 5080 Laptop GPU, made once per cold cache (the first boot, and after an update changes the

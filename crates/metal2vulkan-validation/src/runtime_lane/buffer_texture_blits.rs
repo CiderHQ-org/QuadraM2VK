@@ -31,14 +31,18 @@ const USAGE: TextureUsage = TextureUsage::SHADER_READ
     .union(TextureUsage::SHADER_WRITE)
     .union(TextureUsage::PIXEL_FORMAT_VIEW);
 
-/// Whether `device`'s driver lays the rows of a linear 2D image of `pf`, `width` x `height`
-/// texels, otherwise than `row` bytes apart, read through Vulkan apart from the runtime: then no
-/// linear image of the device aliases a texture over a buffer whose rows are `row` bytes apart,
-/// and the texture is a shadow image (`shadowed-texture`).
+/// Whether no linear 2D image of `pf` on `device`, `width` x `height` texels of `texel` bytes,
+/// holds a texture's texels alone over an ordinary buffer whose rows lie `row` bytes apart, as the
+/// runtime's rule has it (`linear_plan::aliases`): where the rows lie with bytes between them, or
+/// where the driver's own image, read through Vulkan apart from the runtime, starts its texels
+/// past its binding, lays its rows otherwise than `row` bytes apart, or holds bytes past its last
+/// texel in its subresource (lavapipe's does, its height rounded up to 4 rows). The texture is then
+/// a shadow image (`shadowed-texture`).
 pub(super) fn linear_rows_differ(
     device: &Device,
     pf: PixelFormat,
     [width, height]: [u32; 2],
+    texel: u64,
     row: u64,
 ) -> bool {
     let format = metal2vulkan::metal::format::direct_format(pf).expect("a format a buffer backs");
@@ -67,7 +71,7 @@ pub(super) fn linear_rows_differ(
     };
     // SAFETY: an image of the test's own on the live device, made, read and destroyed here; none
     // of the device's objects is destroyed.
-    let pitch = unsafe {
+    let layout = unsafe {
         let raw = device.raw();
         let image = raw
             .device
@@ -75,9 +79,14 @@ pub(super) fn linear_rows_differ(
             .expect("a linear image");
         let layout = raw.device.get_image_subresource_layout(image, subresource);
         raw.device.destroy_image(image, None);
-        layout.row_pitch
+        layout
     };
-    pitch != row
+    let row_bytes = u64::from(width) * texel;
+    let texels = u64::from(height - 1) * row + row_bytes;
+    (height > 1 && row != row_bytes)
+        || layout.offset != 0
+        || layout.row_pitch != row
+        || layout.size > texels
 }
 
 /// The probe's buffer pattern.
@@ -891,7 +900,7 @@ fn an_overlapping_texel_copy_is_announced_once() {
         let first = forced(&[
             (
                 Degradation::ShadowedTexture,
-                linear_rows_differ(&device, PixelFormat::RGBA8Unorm, [4, 4], 32),
+                linear_rows_differ(&device, PixelFormat::RGBA8Unorm, [4, 4], 4, 32),
             ),
             (
                 Degradation::SharedInSystemMemory,
@@ -984,7 +993,7 @@ fn iosurface_planes_lie_where_metal_puts_them() {
         }
         let shadowed = planes
             .iter()
-            .any(|&(pf, _, _, bpr)| linear_rows_differ(&device, pf, [4, 4], bpr));
+            .any(|&(pf, texel, _, bpr)| linear_rows_differ(&device, pf, [4, 4], texel, bpr));
         let first = forced(&[
             (Degradation::ShadowedTexture, shadowed),
             (

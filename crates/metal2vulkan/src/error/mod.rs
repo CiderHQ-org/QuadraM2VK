@@ -836,6 +836,13 @@ pub enum RuntimeDriverDefect {
     /// the runtime preprocesses every execution of an indirect command buffer's range apart
     /// (`vkCmdPreprocessGeneratedCommandsEXT`) before the first of them runs.
     ImplicitPreprocessAfterExecutionSet,
+    /// A render pass over an image of `VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT` whose one plane
+    /// the caller laid out (`VkImageDrmFormatModifierExplicitCreateInfoEXT`) writes the rows past
+    /// its height up to a multiple of 4, past its subresource and its memory requirements (into
+    /// another resource's bytes, or unmapped memory). Nothing is refused: the runtime makes no
+    /// such image of a height that is no multiple of 4 there, and a texture over a buffer or a
+    /// heap's pages takes its shadow (`shadowed-texture`).
+    ExplicitPlaneRowsPastHeight,
 }
 
 /// One device capability a refusal can name.

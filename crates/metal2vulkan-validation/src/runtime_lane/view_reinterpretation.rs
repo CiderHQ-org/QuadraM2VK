@@ -650,14 +650,14 @@ fn a_shadowed_view_answers_as_a_view_of_the_image_does() {
             host_access_through_a_view(&device);
             // The view's shadow where withheld, nothing of it where the device views the image;
             // and what the steps force: the texture over a buffer's shadow where no linear image
-            // lays its rows as Metal does, and the `Shared` buffers' system memory.
+            // holds its texels alone, and the `Shared` buffers' system memory.
             let kinds: &[Degradation] = if withheld { &VIEW_SHADOWS } else { &[] };
             let row = SIDE * 4 + 16;
             let side = SIDE as u32;
             let first = forced(&[
                 (
                     Degradation::ShadowedTexture,
-                    linear_rows_differ(&device, PixelFormat::RGBA8Unorm, [side, side], row),
+                    linear_rows_differ(&device, PixelFormat::RGBA8Unorm, [side, side], 4, row),
                 ),
                 (
                     Degradation::SharedInSystemMemory,

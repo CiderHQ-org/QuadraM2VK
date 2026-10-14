@@ -1915,6 +1915,7 @@ impl Device {
             at,
             row_pitch: natural.row_pitch,
             slice_pitch: natural.slice_pitch,
+            alone: None,
         };
         Ok((self.dma_buf_image(&[plan], facts, &texels)?).map(|(_, made)| made))
     }
@@ -2533,6 +2534,7 @@ impl Device {
                         image,
                         regions,
                         staging: None,
+                        texel: None,
                     },
                     // A heap's bytes join no other memory (`host_aliases.rs`).
                     alias: None,

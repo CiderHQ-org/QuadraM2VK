@@ -1199,15 +1199,16 @@ fn check_texture_request(
 }
 
 /// Textures over a no-copy buffer of memfd memory (the consumer's display-path surfaces), rows 256
-/// bytes apart: where the device imports the buffer's pages as dma-bufs (RADV), each is an image of
-/// `DRM_FORMAT_MOD_LINEAR` bound to a dedicated import of a dma-buf of its own pages, which the
-/// source is asked for once, counted, its plane at the texels' offset in their first page: over one
-/// page; over three, a page into the buffer; 256 bytes into a page; one a shader writes, whose
-/// modifier's storage features above bit 31 the device reports only in the 64-bit list
-/// (`STORAGE_*_WITHOUT_FORMAT`, which the optimal tiling has). One 64 bytes into a page, at which
-/// RADV lays no plane (Mesa 26.2.4 and 26.0.8 took plane offsets that are multiples of 256 and
-/// refused 4 to 128 and 4032), takes its shadow instead, the source not called, counted as a
-/// fallback. Each reads the bytes the CPU wrote; the CPU's later writes, with no call between, are
+/// bytes apart: where the device imports the buffer's pages as dma-bufs (RADV), each whose rows
+/// are 256 bytes of texels is an image of `DRM_FORMAT_MOD_LINEAR` bound to a dedicated import of a
+/// dma-buf of its own pages, which the source is asked for once, counted, its plane at the texels'
+/// offset in their first page: over three pages, a page into the buffer; 256 bytes into a page;
+/// one a shader writes, whose modifier's storage features above bit 31 the device reports only in
+/// the 64-bit list (`STORAGE_*_WITHOUT_FORMAT`, which the optimal tiling has). One over one page,
+/// whose rows of 240 bytes of texels have 16 of the file's between them, and one 64 bytes into a
+/// page, of 64-byte rows, take their shadows instead (an image over them would hold the bytes
+/// between the rows, which Vulkan lets a render pass write back), the source not called, counted
+/// as fallbacks. Each reads the bytes the CPU wrote; the CPU's later writes, with no call between, are
 /// what the next command buffer reads (the image rests in `GENERAL` after its one acquire from the
 /// foreign queue family); a blit's write into it lands in the file's pages at the texels' places,
 /// the padding past each row keeping the CPU's bytes; the same texture made again asks the driver
@@ -1248,7 +1249,7 @@ fn a_texture_over_dma_buf_pages_is_an_image_over_its_own_pages() {
                 "one page",
                 read_only(PixelFormat::RGBA8Unorm, 60, 16),
                 0,
-                true,
+                false,
                 false,
             ),
             (

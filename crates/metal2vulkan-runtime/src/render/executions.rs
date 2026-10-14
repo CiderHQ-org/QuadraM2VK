@@ -633,6 +633,7 @@ impl RenderCommandEncoder {
                     writes,
                     overwrites: false,
                     kept: false,
+                    area: None,
                 };
                 shadow::join(&mut shadows, &used);
             }

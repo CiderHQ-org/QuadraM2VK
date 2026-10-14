@@ -107,10 +107,13 @@ impl Texture {
     /// A texture over a buffer's bytes whose image aliases them gives a linear image: of
     /// `VK_IMAGE_TILING_LINEAR`, or of `VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT` with
     /// `DRM_FORMAT_MOD_LINEAR` and one memory plane laid out at the texels' offset and the
-    /// texture's `bytes_per_row`. The second is the image over host pages imported as dma-bufs
-    /// (`HostMemory::with_dma_buf`), and over a no-copy buffer's host pages where the driver's own
-    /// linear image lays its rows out otherwise than `bytes_per_row` (ANV packs them tight;
-    /// `WorkCounts::pitched_host_images` counts them). Ask such an image's layout of its memory
+    /// texture's `bytes_per_row`. Such a texture's rows lie one after another and its image's
+    /// subresource holds no byte but its texels: a texture whose rows lie with the buffer's bytes
+    /// between them gives none (it is a shadow, `shadowed-texture`) but on MoltenVK, whose image
+    /// is a Metal texture over the buffer. The second is the image over host pages imported as
+    /// dma-bufs (`HostMemory::with_dma_buf`), and over a no-copy buffer's host pages where the
+    /// driver's own linear image lays its rows out otherwise than `bytes_per_row`
+    /// (`WorkCounts::pitched_host_images` counts them). Ask such an image's layout of its memory
     /// plane (`VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT`, not the color aspect), and its modifier
     /// with `vkGetImageDrmFormatModifierPropertiesEXT`.
     ///

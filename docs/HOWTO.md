@@ -170,13 +170,29 @@ A texture over such memory is an image over a dma-buf of its own pages where the
 `VK_EXT_image_drm_format_modifier` and `VK_EXT_queue_family_foreign` (RADV does). RADV (Mesa 26.2.4
 and 26.0.8) lays such an image's plane only at an offset in its page that is a multiple of 256
 bytes, with rows a multiple of 256 bytes apart: keep a texture's offset and `bytes_per_row` so (a
-4 KiB-aligned surface with 256-byte-aligned rows always is). Elsewhere the texture takes a shadow of
-the bytes, announced (`shadowed-texture`, naming why), and a rebind that cannot make the image again
-is refused (`NotImplemented(RebindTextures)`). `WorkCounts::dma_buf_imports`,
-`dma_buf_sparse_buffers`, `dma_buf_images` and `dma_buf_image_fallbacks` count what the route did.
+4 KiB-aligned surface with 256-byte-aligned rows always is), with no byte between its rows (below).
+Elsewhere the texture takes a shadow of the bytes, announced (`shadowed-texture`, naming why), and a
+rebind that cannot make the image again is refused (`NotImplemented(RebindTextures)`).
+`WorkCounts::dma_buf_imports`, `dma_buf_sparse_buffers`, `dma_buf_images` and
+`dma_buf_image_fallbacks` count what the route did.
 
-A texture over pages imported by their pointer aliases them where the device lays an image's rows
-at the texture's `bytes_per_row`: the driver's own linear image, or, where that lays its rows
+A texture over a buffer's bytes is an image over them only where its rows lie one after another
+(`bytes_per_row` is its texels' bytes, or it has one row; an array's slices likewise) and the
+image holds no byte past its texels. A texture whose rows lie with bytes between them, as a guest
+browser's padded surfaces' do, is a shadow (`shadowed-texture`) on every device but MoltenVK, whose
+image is a Metal texture over the buffer: an image at that pitch holds the bytes between the rows
+in its subresource (`VkSubresourceLayout`: "size includes any extra memory that is required based
+on rowPitch"), and Vulkan lets two kinds of operation write them, where Metal leaves them as the
+program writes them. The image's layout transitions "may perform read and write accesses on all
+memory bound to the image subresource range", and every image takes one, its first move from the
+layout it is made in, before any use, so a texture that only reads is a shadow too. A render pass's
+load and store operations "read and write back any memory locations within the image subresource
+bound for that attachment" (lavapipe writes back the bytes its 4-texel blocks reach past a row, a
+signaling NaN's bits quieted). No query of the device's states otherwise. To keep a surface
+aliased, lay its rows packed.
+
+Over pages imported by their pointer, such a texture aliases them where the device lays an image's
+rows at the texture's `bytes_per_row`: the driver's own linear image, or, where that lays its rows
 otherwise, a `DRM_FORMAT_MOD_LINEAR` image at that pitch, which the driver may refuse (and which
 the runtime makes of no depth or stencil format, as it makes no image over a dma-buf of one: Vulkan
 has no query of where such a format's memory plane lies). Measured
@@ -192,9 +208,11 @@ each power of two from 16 to 4096 bytes):
   256, and asks a dedicated allocation of an image at any other, so it takes no pitch but its own.
 
 The own rows' alignments are as measured for `BGRA8Unorm`. Elsewhere the texture is a shadow
-(`shadowed-texture`): a `BGRA8Unorm` surface whose rows are its texels' bytes rounded up to 256
-bytes on RADV, or 128 on NVIDIA, is aliased. `WorkCounts::pitched_host_images` and
-`pitched_host_image_refusals` count the images at Metal's pitch made and refused.
+(`shadowed-texture`): a `BGRA8Unorm` surface with packed rows takes the driver's own linear image
+on RADV where its texels' bytes are a multiple of 256, and on NVIDIA where they are a multiple of
+128 (their own rows' alignments).
+`WorkCounts::pitched_host_images` and `pitched_host_image_refusals` count the images at Metal's
+pitch made and refused.
 
 ## 7. Check the integration
 

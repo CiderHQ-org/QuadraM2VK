@@ -117,9 +117,13 @@
 //! **Aliasing**. A 2D texture or array over a buffer is a linear image bound to the buffer's memory
 //! where the device's linear image has every feature its optimal image has for the texture's uses
 //! (it lacks nothing, [`linear_lack`]), and the image the device made, at the pitch it chose
-//! itself, sits exactly on Metal's layout ([`aliases`]). Otherwise it is a shadow image the
-//! encoders copy from and to the buffer (`shadow.rs`), which is exact for Metal's defined
-//! behaviour.
+//! itself, sits exactly on Metal's layout and holds no byte but the texels ([`aliases`]): a
+//! texture whose rows or slices lie with the buffer's bytes between them is never one
+//! ([`padding`]), as Vulkan lets an image's layout transitions, and a render pass's load and store
+//! operations, write every byte of its subresource, and Metal leaves those bytes as the program
+//! writes them. Otherwise it is a shadow image the encoders copy from and to the buffer
+//! (`shadow.rs`), whose copies address the buffer's texels alone, which is exact for Metal's
+//! defined behaviour.
 
 use super::chroma_pairs::is_four_two_two;
 use super::copy_plan::block_extent;
@@ -679,12 +683,14 @@ pub(super) fn check_linear_limits(
 
 /// A linear image the device made for a texture over a buffer, as Vulkan reports it: its memory
 /// requirements' alignment and size, and the layout of its first subresource
-/// (`vkGetImageSubresourceLayout`).
+/// (`vkGetImageSubresourceLayout`), its bytes (`subresource`, `VkSubresourceLayout::size`) among
+/// them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct LinearImage {
     pub(super) alignment: u64,
     pub(super) size: u64,
     pub(super) offset: u64,
+    pub(super) subresource: u64,
     pub(super) row_pitch: u64,
     pub(super) array_pitch: u64,
 }
@@ -692,10 +698,10 @@ pub(super) struct LinearImage {
 /// Whether `image`, bound where `layout` starts in its buffer's memory (`memory_offset` in the
 /// memory block), holds exactly Metal's texels in the `room` bytes from there to the end of the
 /// buffer's memory: the binding is a multiple of the image's alignment, its texels start at the
-/// binding, its row pitch is Metal's and so is its slice pitch where it has several slices, and
-/// its memory stays in the buffer's. A driver may report a pitch other than the one asked of it
-/// (NVIDIA does for explicit layouts it does not support), so the image's own report
-/// decides.
+/// binding, its row pitch is Metal's and so is its slice pitch where it has several slices, its
+/// subresources hold no byte but the texture's texels ([`texels_alone`]), and its memory stays in
+/// the buffer's. A driver may report a pitch other than the one asked of it (NVIDIA does for
+/// explicit layouts it does not support), so the image's own report decides.
 pub(super) fn aliases(
     layout: &BufferLayout,
     memory_offset: u64,
@@ -707,5 +713,83 @@ pub(super) fn aliases(
         && image.offset == 0
         && image.row_pitch == layout.row_pitch
         && (layout.slices == 1 || image.array_pitch == layout.slice_pitch)
+        && texels_alone(layout, image.subresource, image.array_pitch)
         && image.size <= room
+}
+
+/// Why no image over `layout`'s texels holds them alone, where its rows or slices lie with bytes
+/// between them that are not texels (the buffer's, which Metal's writes of the texture never
+/// reach): `None` where they lie one after another, or the texture has one row (one slice).
+/// `renders`: the texture's usage holds `RenderTarget`, so a render pass may take its image as an
+/// attachment.
+///
+/// An image whose rows lie `row_pitch` apart holds those bytes in its subresource
+/// (`VkSubresourceLayout`: "size includes any extra memory that is required based on rowPitch"),
+/// and Vulkan lets two kinds of operation write them, against which no query of the device states
+/// otherwise:
+///
+/// - Every image's layout transitions, its first move into `GENERAL` among them (the
+///   Synchronization chapter's Image Layout Transitions): "Image layout transitions may perform
+///   read and write accesses on all memory bound to the image subresource range", and "If the old
+///   layout is VK_IMAGE_LAYOUT_UNDEFINED, the contents of that range may be discarded". No
+///   operation lets an image be read before it leaves `UNDEFINED` or `PREINITIALIZED`, the layouts
+///   it is made in, so a texture that only reads takes a transition too.
+/// - A render pass's attachments (the Render Pass chapter's Load Operations, Store Operations and
+///   Multisample Resolve Operations): "any writes performed by a load operation (as defined by its
+///   access masks) to a given attachment may read and write back any memory locations within the
+///   image subresource bound for that attachment", and a store and a resolve operation alike.
+///
+/// A copy and a shader's read or write of the image touch its texels alone (the Memory
+/// Model: "A memory operation must not affect memory at a memory location not within its set of
+/// memory locations"). So such a texture is a shadow: a write back of what was read would undo the
+/// program's write of the bytes meanwhile, which Metal keeps, and lavapipe reads the bytes its
+/// 4-texel blocks reach past a row's texels and writes them back, a signaling NaN's bits quieted.
+pub(super) fn padding(layout: &BufferLayout, renders: bool) -> Option<String> {
+    let (rows, slices) = apart(layout);
+    let apart = if rows {
+        format!(
+            "its rows lie {} bytes apart, {} bytes of texels each",
+            layout.row_pitch, layout.row_bytes
+        )
+    } else if slices {
+        format!(
+            "its slices lie {} bytes apart, {} rows {} bytes apart each",
+            layout.slice_pitch, layout.rows, layout.row_pitch
+        )
+    } else {
+        return None;
+    };
+    let writers = if renders {
+        "its layout transitions read and write, and a render pass's load and store operations \
+         write back"
+    } else {
+        "its layout transitions read and write, its first move from the layout it is made in \
+         among them"
+    };
+    Some(format!(
+        "{apart}: an image over them holds the bytes between them, which Vulkan lets {writers}"
+    ))
+}
+
+/// Whether a linear image over `layout`'s texels, whose subresources take `size` bytes each from
+/// the first texel of their slice, `array_pitch` apart, holds no byte but the texture's texels:
+/// the texels lie with no byte between them ([`padding`]), and its last subresource ends at their
+/// last byte or before. A driver may lay rows out past the texture's (lavapipe rounds the height
+/// up to 4), where the buffer's later bytes lie (a surface's next plane). A byte of the image's
+/// memory past every subresource is no texel's, and no write through the image reaches it:
+/// Vulkan's Memory Aliasing has the bytes a write through an image affects be "those overlapped
+/// by the image subresources that were written". A driver that reports one array's whole bytes
+/// as its first subresource's has the array refused (the texture is a shadow).
+pub(super) fn texels_alone(layout: &BufferLayout, size: u64, array_pitch: u64) -> bool {
+    let texels = layout.end() - layout.offset;
+    let last = array_pitch.saturating_mul(layout.slices - 1);
+    apart(layout) == (false, false) && last.saturating_add(size) <= texels
+}
+
+/// Whether `layout`'s rows, and its slices, lie with bytes between them that are not texels.
+fn apart(layout: &BufferLayout) -> (bool, bool) {
+    let rows = layout.rows > 1 && layout.row_pitch != layout.row_bytes;
+    let slices =
+        layout.slices > 1 && layout.slice_pitch != layout.row_pitch.saturating_mul(layout.rows);
+    (rows, slices)
 }

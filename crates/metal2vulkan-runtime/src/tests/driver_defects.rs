@@ -18,13 +18,14 @@ const COPY_REWRITES: RuntimeDriverDefect = RuntimeDriverDefect::CompressedImageC
 const NAN_COPIES: RuntimeDriverDefect = RuntimeDriverDefect::MultisampledCopiesConvertFloatNans;
 const LATE_READS: RuntimeDriverDefect = RuntimeDriverDefect::ReadsCommandBuffersAfterTheirSignal;
 const PREPROCESS: RuntimeDriverDefect = RuntimeDriverDefect::ImplicitPreprocessAfterExecutionSet;
+const PAST_HEIGHT: RuntimeDriverDefect = RuntimeDriverDefect::ExplicitPlaneRowsPastHeight;
 
 /// Every committed profile's driver has its defects at every release and GPU but those a probe
 /// found clean: MoltenVK the multisampled depth/stencil colour copies, the inexact depths past
 /// `[0, 1]`, the crashing 2D views of a 3D image in lazily allocated memory, the pipeline cache
 /// compiled at load, the copies of compressed images that rewrite texels and the reads of command
-/// buffers after their signal; lavapipe the colour copies and the depth/stencil resolve of the
-/// first layer and level; RADV the multisampled copies that convert float NaNs, and the implicit
+/// buffers after their signal; lavapipe the colour copies, the depth/stencil resolve of the
+/// first layer and level and the explicit plane's rows past its height; RADV the multisampled copies that convert float NaNs, and the implicit
 /// preprocessing after an execution set on every GPU but the 780M at 26.2.4, measured clean; ANV
 /// the compressed image's short size on every GPU (Arrow Lake's, not measured, too); NVIDIA's the
 /// stencil colour copies on every GPU but the RTX 5080 Laptop GPU at 615.71.09, measured clean (the
@@ -51,7 +52,7 @@ fn the_committed_profiles_drivers_have_their_defects() {
                     LATE_READS,
                 ]
             }
-            Some(DriverId::MESA_LLVMPIPE) => vec![COPIES, RESOLVES],
+            Some(DriverId::MESA_LLVMPIPE) => vec![COPIES, RESOLVES, PAST_HEIGHT],
             Some(DriverId::MESA_RADV)
                 if (desc.device_id, desc.driver_version) == (0x15bf, MESA_26_2_4) =>
             {

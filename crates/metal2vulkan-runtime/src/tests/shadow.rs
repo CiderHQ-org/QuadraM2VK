@@ -34,6 +34,7 @@ fn shadow_joined(
                 image: vk::Image::null(),
                 regions: Vec::new(),
                 staging: None,
+                texel: Some(4),
             },
             alias,
         },
@@ -69,6 +70,7 @@ fn through(texture: &Arc<ShadowCopies>, writes: bool) -> (ShadowUse, Use<Resourc
             writes,
             overwrites: false,
             kept: false,
+            area: None,
         },
         used,
     )
@@ -182,6 +184,114 @@ fn an_encoder_copies_a_texture_in_before_its_first_use_and_back_after_its_writes
     assert_eq!(named(&sync.finish()), []);
 }
 
+/// The areas of the copies back `sync` makes as its encoder ends.
+fn back_areas(sync: &mut ShadowSync<u32>) -> Vec<Option<[u32; 4]>> {
+    sync.finish().iter().map(|copy| copy.area).collect()
+}
+
+/// A copy back covers only where the commands since the last wrote through the texture, where
+/// each bounds its writes (a pass's attachment it loads, inside its draws' scissors): the
+/// rectangle bounding their areas, or every texel where one does not bound them. A copy in is of
+/// every texel, and joining a use that reads keeps the area of the one that writes.
+#[test]
+fn a_copy_back_covers_only_where_the_commands_wrote() {
+    let buffer = ResourceKey::new();
+    let t = shadow(buffer, 256..1280);
+    let writing = |area: Option<[u32; 4]>| ShadowUse {
+        copies: Arc::clone(&t),
+        writes: true,
+        overwrites: false,
+        kept: false,
+        area,
+    };
+    let (_, written) = through(&t, true);
+    let run = |areas: &[Option<[u32; 4]>]| {
+        let mut sync = ShadowSync::<u32>::default();
+        for &area in areas {
+            let shadows = [writing(area)];
+            let uses = [written.clone()];
+            let copies = sync.before(&shadows, &uses, |_| Ok(0)).unwrap();
+            assert!(copies.iter().all(|copy| copy.area.is_none()), "a copy in");
+            sync.after(&shadows, &uses);
+        }
+        back_areas(&mut sync)
+    };
+    assert_eq!(run(&[Some([0, 0, 8, 4])]), [Some([0, 0, 8, 4])]);
+    assert_eq!(
+        run(&[Some([0, 0, 8, 4]), Some([4, 2, 16, 8])]),
+        [Some([0, 0, 16, 8])]
+    );
+    assert_eq!(run(&[Some([0, 0, 8, 4]), None]), [None]);
+    assert_eq!(run(&[None]), [None]);
+    // Joined with a use that reads, the write keeps its area; with another write that does not
+    // bound it, it has none.
+    let mut joined = vec![writing(Some([2, 2, 6, 6]))];
+    shadow::join(&mut joined, &through(&t, false).0);
+    assert_eq!(joined[0].area, Some([2, 2, 6, 6]));
+    let mut joined = vec![through(&t, false).0];
+    shadow::join(&mut joined, &writing(Some([2, 2, 6, 6])));
+    assert_eq!(joined[0].area, Some([2, 2, 6, 6]));
+    shadow::join(&mut joined, &through(&t, true).0);
+    assert_eq!(joined[0].area, None);
+}
+
+/// A copy back of a part of a one-level, one-slice texture's image is its region cut to the
+/// rectangle: the buffer's offset moved to the rectangle's first texel at the region's row length,
+/// clamped to the image, and nothing where no texel lies inside.
+#[test]
+fn a_part_of_a_region_starts_at_its_first_texel() {
+    let region = vk::BufferImageCopy {
+        buffer_offset: 256,
+        buffer_row_length: 20,
+        buffer_image_height: 0,
+        image_subresource: vk::ImageSubresourceLayers {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            mip_level: 0,
+            base_array_layer: 0,
+            layer_count: 1,
+        },
+        image_offset: vk::Offset3D::default(),
+        image_extent: vk::Extent3D {
+            width: 16,
+            height: 8,
+            depth: 1,
+        },
+    };
+    let part = shadow::part_of(&region, [2, 1, 6, 3], 4).unwrap();
+    assert_eq!(part.buffer_offset, 256 + (20 + 2) * 4);
+    assert_eq!(part.buffer_row_length, 20);
+    assert_eq!(
+        (
+            part.image_offset.x,
+            part.image_offset.y,
+            part.image_offset.z
+        ),
+        (2, 1, 0)
+    );
+    assert_eq!(
+        (
+            part.image_extent.width,
+            part.image_extent.height,
+            part.image_extent.depth
+        ),
+        (4, 2, 1)
+    );
+    let clamped = shadow::part_of(&region, [12, 6, 40, 40], 4).unwrap();
+    assert_eq!(
+        (clamped.image_extent.width, clamped.image_extent.height),
+        (4, 2)
+    );
+    assert!(shadow::part_of(&region, [16, 0, 20, 8], 4).is_none());
+    assert!(shadow::part_of(&region, [3, 3, 3, 5], 4).is_none());
+    // A region of tight rows (row length 0) steps by its width.
+    let tight = vk::BufferImageCopy {
+        buffer_row_length: 0,
+        ..region
+    };
+    let part = shadow::part_of(&tight, [0, 2, 16, 3], 4).unwrap();
+    assert_eq!(part.buffer_offset, 256 + 2 * 16 * 4);
+}
+
 /// A shadow whose writes Metal drops (a rotated texture's functions' image) is copied in as any
 /// shadow, never copied back, and copied in again at its next use after a command that wrote
 /// through it; a command writing it and its bytes another way is no two-way write.
@@ -223,6 +333,7 @@ fn a_use_that_overwrites_every_texel_takes_no_copy_in() {
         writes,
         overwrites: true,
         kept: false,
+        area: None,
     };
     let (_, written) = through(&t, true);
     for stores in [true, false] {

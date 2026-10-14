@@ -24,8 +24,8 @@
 //! process's CPU time; and the device's work counts per frame that the path moves (dma-buf images
 //! and fallbacks, shadows and those zeroed as made, images at Metal's row pitch over host pages
 //! and the driver's refusals of them, asked and recalled, images started on the host, internal
-//! submissions). `SURFTEX-QUERY` lines print what the driver answers for a `DRM_FORMAT_MOD_LINEAR`
-//! image of host allocations.
+//! submissions, shadows' copies and the texels their copies back move). `SURFTEX-QUERY` lines
+//! print what the driver answers for a `DRM_FORMAT_MOD_LINEAR` image of host allocations.
 //!
 //! [`pitch_classes`] asks which row pitches the device lays a texture over a no-copy buffer's
 //! host pages at: for each of a few formats and usages (a device each), widths, and pitches of
@@ -38,20 +38,29 @@
 //! own linear image does not alias took one answer; per format and usage (`SURFTEX-PITCH-RULE`)
 //! the classes at Metal's pitch, shadowed and mixed, and the reason the first shadow announced.
 //!
-//! Both are ignored by default: measurements, not checks. Run them by name with `--run-ignored all`, in a
+//! [`surface_texture_cost_parts`] takes the frame apart over anonymous pages: the textures' making
+//! around an empty command buffer, the passes that store, the passes that store `DontCare`, the
+//! passes that draw and store, the blits, and both, so a shadow's copies in and back show apart
+//! from the rest (`SURFTEX-PART`).
+//!
+//! [`shadow_copy_costs`] times a shadow's copies alone, and the same bytes moved between other
+//! memories, to tell the image's tiling from the pages' memory (`SURFTEX-COPY`).
+//!
+//! All four are ignored by default: measurements, not checks. Run them by name with `--run-ignored all`, in a
 //! build with `--cfg m2v_system_alloc`, whose lib test binary keeps the system allocator as a
 //! consumer's process does.
 
 use super::dma_buf_imports::{udmabuf_openable, Calls, Memfd, View};
 use super::host_memory::{host_page, Mapping, GUEST_PAGE};
+use super::no_copy_textures::{blending, floats, staged};
 use super::{validated_device_with, Messages, ScratchCache, WAIT};
 use crate::gpu::TEST_DEVICE;
 use ash::vk;
-use metal2vulkan::metal::{PixelFormat, TextureUsage};
+use metal2vulkan::metal::{PixelFormat, PrimitiveType, TextureUsage};
 use metal2vulkan_runtime::{
-    Buffer, CommandQueue, Device, HostMemory, IoSurfacePlane, LoadAction, Origin,
-    RenderPassDescriptor, ResourceOptions, Size, StoreAction, Texture, TextureDescriptor,
-    WorkCounts,
+    BlitOption, Buffer, CommandQueue, Device, HostMemory, IoSurfacePlane, LoadAction, Origin,
+    RenderPassDescriptor, RenderPipelineState, ResourceOptions, ScissorRect, Size, StoreAction,
+    Texture, TextureDescriptor, WorkCounts,
 };
 use std::time::Instant;
 
@@ -162,29 +171,104 @@ fn aliased(texture: &Texture) -> bool {
     unsafe { texture.vk_image() }.is_some()
 }
 
-/// One frame's work over `textures`: a pass loading and storing each, and a blit reading each into
-/// its private texture of `privates`, in one command buffer, committed and waited for. The host's
-/// time encoding, and from the commit until the wait returned.
-fn frame(queue: &CommandQueue, textures: &[Texture], privates: &[Texture]) -> (f64, f64) {
+/// What a frame encodes over its textures: [`Part::Both`] is the consumer's frame, the others
+/// its parts apart ([`surface_texture_cost_parts`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Part {
+    /// Nothing: an empty command buffer, committed and waited for, after the textures are made.
+    Empty,
+    /// A pass loading and storing each texture: a shadow's copy in before it and copy back after.
+    PassesStored,
+    /// A pass loading each texture and storing it `DontCare`: a shadow's copy in, and no copy back.
+    PassesNotStored,
+    /// A pass loading each texture, blending a rectangle over its left half, and storing it, as a
+    /// browser's pass draws: a shadow's copy in and copy back.
+    PassesDrawn,
+    /// As [`Part::PassesDrawn`], under a scissor of the left half, as a browser's pass redrawing a
+    /// damaged part of a tile draws.
+    PassesScissored,
+    /// A blit reading each texture into its private texture, which reads a texture over a buffer
+    /// as its bytes: no shadow's copy.
+    Blits,
+    /// The passes that store, then the blits.
+    Both,
+}
+
+/// A pipeline blending a rectangle over a `BGRA8Unorm` attachment, and its rectangle's corners
+/// and color ([`Part::PassesDrawn`]).
+struct Drawing {
+    pipeline: RenderPipelineState,
+    corners: Buffer,
+    color: Buffer,
+}
+
+impl Drawing {
+    fn new(device: &Device) -> Drawing {
+        Drawing {
+            pipeline: blending(device, PixelFormat::BGRA8Unorm),
+            corners: staged(device, &floats([-1.0, -1.0, 0.0, 1.0])),
+            color: staged(device, &floats([0.25, 0.5, 0.75, 0.5])),
+        }
+    }
+}
+
+/// One frame's `part` of the work over `textures`: a pass loading and storing each, and a blit
+/// reading each into its private texture of `privates`, in one command buffer, committed and
+/// waited for; a drawn pass draws through `drawing`. The host's time encoding, and from the commit
+/// until the wait returned.
+fn frame(
+    queue: &CommandQueue,
+    textures: &[Texture],
+    privates: &[Texture],
+    (part, drawing): (Part, Option<&Drawing>),
+) -> (f64, f64) {
     let began = Instant::now();
     let command_buffer = queue.command_buffer().unwrap();
-    for texture in textures {
+    let store_action = match part {
+        Part::PassesStored | Part::PassesDrawn | Part::PassesScissored | Part::Both => {
+            Some(StoreAction::Store)
+        }
+        Part::PassesNotStored => Some(StoreAction::DontCare),
+        Part::Empty | Part::Blits => None,
+    };
+    for texture in textures.iter().filter(|_| store_action.is_some()) {
         let mut pass = RenderPassDescriptor::new();
         let attachment = &mut pass.color_attachments[0];
         attachment.texture = Some(texture.clone());
         attachment.load_action = LoadAction::Load;
-        attachment.store_action = StoreAction::Store;
-        let encoder = command_buffer.render_command_encoder(&pass).unwrap();
+        attachment.store_action = store_action.unwrap_or(StoreAction::Store);
+        let mut encoder = command_buffer.render_command_encoder(&pass).unwrap();
+        if matches!(part, Part::PassesDrawn | Part::PassesScissored) {
+            let drawing = drawing.expect("a drawn pass's pipeline");
+            encoder
+                .set_render_pipeline_state(&drawing.pipeline)
+                .unwrap();
+            if part == Part::PassesScissored {
+                let left = ScissorRect::new(0, 0, texture.width() / 2, texture.height());
+                encoder.set_scissor_rect(left).unwrap();
+            }
+            encoder
+                .set_vertex_buffer(Some(&drawing.corners), 0, 0)
+                .unwrap();
+            encoder
+                .set_fragment_buffer(Some(&drawing.color), 0, 0)
+                .unwrap();
+            encoder
+                .draw_primitives(PrimitiveType::Triangle, 0, 6, 1, 0)
+                .unwrap();
+        }
         encoder.end_encoding().unwrap();
     }
-    let mut blit = command_buffer.blit_command_encoder().unwrap();
-    for (texture, private) in textures.iter().zip(privates) {
-        let size = Size::new(texture.width(), texture.height(), 1);
-        let origin = Origin::new(0, 0, 0);
-        blit.copy_from_texture_to_texture(texture, 0, 0, origin, size, private, 0, 0, origin)
-            .unwrap();
+    if matches!(part, Part::Blits | Part::Both) {
+        let mut blit = command_buffer.blit_command_encoder().unwrap();
+        for (texture, private) in textures.iter().zip(privates) {
+            let size = Size::new(texture.width(), texture.height(), 1);
+            let origin = Origin::new(0, 0, 0);
+            blit.copy_from_texture_to_texture(texture, 0, 0, origin, size, private, 0, 0, origin)
+                .unwrap();
+        }
+        blit.end_encoding().unwrap();
     }
-    blit.end_encoding().unwrap();
     let encoded = since(began);
     let committed = Instant::now();
     command_buffer.commit().unwrap();
@@ -200,7 +284,7 @@ fn counts_per_frame(before: &WorkCounts, after: &WorkCounts, frames: usize) -> S
         "shadowed textures {:.2} (zeroed {:.2}), pitched host images {:.2} (refused {:.2}, \
          recalled {:.2}), dma-buf images {:.2}, dma-buf image fallbacks {:.2}, dma-buf imports \
          {:.2}, images started on the host {:.2}, internal submissions {:.2}, staging submissions \
-         {:.2}",
+         {:.2}, shadow copies {:.2} (texels copied back {:.0})",
         per(after.shadowed_textures, before.shadowed_textures),
         per(after.shadows_zeroed, before.shadows_zeroed),
         per(after.pitched_host_images, before.pitched_host_images),
@@ -224,6 +308,11 @@ fn counts_per_frame(before: &WorkCounts, after: &WorkCounts, frames: usize) -> S
         ),
         per(after.internal_submissions, before.internal_submissions),
         per(after.staging_submissions, before.staging_submissions),
+        per(after.shadow_copies, before.shadow_copies),
+        per(
+            after.shadow_texels_copied_back,
+            before.shadow_texels_copied_back
+        ),
     )
 }
 
@@ -382,7 +471,7 @@ fn surface_texture_costs() {
                     textures.push(texture);
                     buffers.push(buffer);
                 }
-                let (encoded, waited) = frame(&queue, &textures, &privates);
+                let (encoded, waited) = frame(&queue, &textures, &privates, (Part::Both, None));
                 for (index, (texture, buffer)) in textures.into_iter().zip(buffers).enumerate() {
                     let began = Instant::now();
                     drop((texture, buffer));
@@ -439,6 +528,231 @@ fn surface_texture_costs() {
     }
     let notices = super::degrade_notices::counts(&messages.take_notices());
     println!("SURFTEX-NOTICES on {}: {notices:?}", device.name());
+}
+
+/// [`surface_texture_costs`]' frame over anonymous pages, a new buffer and texture of each of
+/// [`LAYOUTS`] each frame, taken apart ([`Part`]): the textures made and released around an empty
+/// command buffer, the passes that store, the passes that store `DontCare`, the passes that draw a
+/// rectangle and store (also under a scissor of the left half), the blits, and both;
+/// then the same over the packed layouts alone, which no shadow is made beside. Where a texture is
+/// a shadow, the passes that store less the empty frame are its copies in and back and the pass,
+/// the passes that do not store less the empty frame its copies in and the pass; the blits read
+/// the bytes either way. Printed per set and part (`SURFTEX-PART`): the textures' forms, the
+/// medians and 90th percentiles of each one's making (its buffer and texture), of the frame's
+/// release, encoding, commit to completion and process CPU time, and the work counts per frame.
+#[test]
+#[ignore = "a release-mode measurement: run by name"]
+fn surface_texture_cost_parts() {
+    let cache = ScratchCache::new().unwrap();
+    let messages = Messages::default();
+    let device = validated_device_with(TEST_DEVICE, &messages, cache.path(), |options| {
+        options.layers.clear();
+    })
+    .unwrap();
+    messages.take_notices();
+    let queue = device.new_command_queue().unwrap();
+    let lens: Vec<usize> = LAYOUTS
+        .iter()
+        .map(|&(_, _, h, bpr)| Surface::len(bpr, h))
+        .collect();
+    let privates: Vec<Texture> = LAYOUTS
+        .iter()
+        .map(|&(_, w, h, _)| {
+            let mut d = TextureDescriptor::texture_2d(PixelFormat::BGRA8Unorm, w, h, false);
+            d.usage = TextureUsage::SHADER_READ;
+            d.resource_options = ResourceOptions::private();
+            device.new_texture(&d).unwrap()
+        })
+        .collect();
+    let surfaces: Vec<Surface> = lens
+        .iter()
+        .map(|&len| Surface::Anonymous(Mapping::anonymous(len)))
+        .collect();
+    // Every layout, then the packed ones alone (rows one after another, no texture a shadow).
+    let every: Vec<usize> = (0..LAYOUTS.len()).collect();
+    let packed: Vec<usize> = every
+        .iter()
+        .copied()
+        .filter(|&index| LAYOUTS[index].3 == LAYOUTS[index].1 * 4)
+        .collect();
+    let parts = [
+        Part::Empty,
+        Part::PassesStored,
+        Part::PassesNotStored,
+        Part::PassesDrawn,
+        Part::PassesScissored,
+        Part::Blits,
+        Part::Both,
+    ];
+    let drawing = Drawing::new(&device);
+    let drawing = Some(&drawing);
+    for (set, chosen) in [("every layout", &every), ("packed layouts", &packed)] {
+        let privates: Vec<Texture> = chosen.iter().map(|&i| privates[i].clone()).collect();
+        for part in parts {
+            let mut forms = Vec::new();
+            let mut makes = vec![Vec::new(); chosen.len()];
+            let (mut releases, mut encodes, mut waits, mut cpus) =
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            let mut before = device.work_counts();
+            for k in 0..WARM + FRAMES {
+                if k == WARM {
+                    before = device.work_counts();
+                }
+                let cpu = process_cpu_us();
+                let mut made = Vec::new();
+                for (at, &index) in chosen.iter().enumerate() {
+                    let (_, w, h, bpr) = LAYOUTS[index];
+                    let began = Instant::now();
+                    let buffer = surfaces[index].buffer(&device, lens[index], None);
+                    let texture = plane_texture(&buffer, w, h, bpr);
+                    if k >= WARM {
+                        makes[at].push(since(began));
+                    }
+                    made.push((texture, buffer));
+                }
+                if k == 0 {
+                    forms = made
+                        .iter()
+                        .map(|(texture, _)| if aliased(texture) { 'a' } else { 's' })
+                        .collect();
+                }
+                let textures: Vec<Texture> =
+                    made.iter().map(|(texture, _)| texture.clone()).collect();
+                let (encoded, waited) = frame(&queue, &textures, &privates, (part, drawing));
+                let began = Instant::now();
+                drop((textures, made));
+                let released = since(began);
+                if k >= WARM {
+                    releases.push(released);
+                    encodes.push(encoded);
+                    waits.push(waited);
+                    cpus.push(process_cpu_us() - cpu);
+                }
+            }
+            let after = device.work_counts();
+            let forms: String = forms.into_iter().collect();
+            let makes: Vec<String> = chosen
+                .iter()
+                .zip(makes)
+                .map(|(&index, times)| {
+                    let (median, p90) = median_p90(times);
+                    format!("{} {median:.0} (p90 {p90:.0})", LAYOUTS[index].0)
+                })
+                .collect();
+            let (release, release90) = median_p90(releases);
+            let (encode, encode90) = median_p90(encodes);
+            let (wait, wait90) = median_p90(waits);
+            let (cpu, cpu90) = median_p90(cpus);
+            println!(
+                "SURFTEX-PART on {}: {set}, {part:?}, forms {forms} (a aliased, s shadowed): \
+                 making us {}; release {release:.0} us (p90 {release90:.0}), encode {encode:.0} us \
+                 (p90 {encode90:.0}), commit to completion {wait:.0} us (p90 {wait90:.0}), process \
+                 CPU {cpu:.0} us (p90 {cpu90:.0}); per frame: {}",
+                device.name(),
+                makes.join(", "),
+                counts_per_frame(&before, &after, FRAMES),
+            );
+        }
+    }
+    drop(surfaces);
+    let notices = super::degrade_notices::counts(&messages.take_notices());
+    println!("SURFTEX-NOTICES on {}: {notices:?}", device.name());
+}
+
+/// What a shadow's copies cost apart from the passes around them, on the browser's 1307x512
+/// `BGRA8Unorm` tile at rows of 5248 bytes: each copy alone in a command buffer, committed and
+/// waited for, between a private texture made as a shadow is (render target and shader read
+/// usage) and a no-copy buffer over anonymous pages (a copy back's way, and a copy in's), and, to
+/// tell the image's tiling from the pages' memory, between the texture and a private buffer and a
+/// `Shared` one, and between a private buffer and the pages. Printed per copy
+/// (`SURFTEX-COPY`): the median and 90th percentile of commit to completion.
+#[test]
+#[ignore = "a release-mode measurement: run by name"]
+fn shadow_copy_costs() {
+    const BLITS: usize = 50;
+    let (w, h, bpr) = (1307, 512, 5248);
+    let cache = ScratchCache::new().unwrap();
+    let messages = Messages::default();
+    let device = validated_device_with(TEST_DEVICE, &messages, cache.path(), |options| {
+        options.layers.clear();
+    })
+    .unwrap();
+    let queue = device.new_command_queue().unwrap();
+    let len = Surface::len(bpr, h);
+    let pages = Surface::Anonymous(Mapping::anonymous(len));
+    let host = pages.buffer(&device, len, None);
+    let private = device
+        .new_buffer(len as u64, ResourceOptions::private())
+        .unwrap();
+    let shared = device
+        .new_buffer(len as u64, ResourceOptions::shared())
+        .unwrap();
+    let mut d = TextureDescriptor::texture_2d(PixelFormat::BGRA8Unorm, w, h, false);
+    d.usage = TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ;
+    d.resource_options = ResourceOptions::private();
+    let image = &device.new_texture(&d).unwrap();
+    let size = Size::new(w, h, 1);
+    let origin = Origin::new(0, 0, 0);
+    // Each copy: the texture into a buffer, a buffer into the texture, or one buffer into another.
+    let copies: [(&str, Option<&Buffer>, Option<&Buffer>); 6] = [
+        ("image to pages (a copy back)", None, Some(&host)),
+        ("pages to image (a copy in)", Some(&host), None),
+        ("image to private buffer", None, Some(&private)),
+        ("image to shared buffer", None, Some(&shared)),
+        ("private buffer to pages", Some(&private), Some(&host)),
+        ("pages to private buffer", Some(&host), Some(&private)),
+    ];
+    for (name, from, to) in copies {
+        let mut waits = Vec::new();
+        for k in 0..WARM + BLITS {
+            let command_buffer = queue.command_buffer().unwrap();
+            let mut blit = command_buffer.blit_command_encoder().unwrap();
+            match (from, to) {
+                (None, Some(to)) => blit.copy_from_texture_to_buffer(
+                    image,
+                    0,
+                    0,
+                    origin,
+                    size,
+                    to,
+                    0,
+                    bpr,
+                    bpr * h,
+                    BlitOption::None,
+                ),
+                (Some(from), None) => blit.copy_from_buffer_to_texture(
+                    from,
+                    0,
+                    bpr,
+                    bpr * h,
+                    size,
+                    image,
+                    0,
+                    0,
+                    origin,
+                    BlitOption::None,
+                ),
+                (Some(from), Some(to)) => blit.copy_from_buffer_to_buffer(from, 0, to, 0, bpr * h),
+                (None, None) => unreachable!("every copy has a buffer"),
+            }
+            .unwrap();
+            blit.end_encoding().unwrap();
+            let committed = Instant::now();
+            command_buffer.commit().unwrap();
+            command_buffer.wait_until_completed_for(WAIT).unwrap();
+            assert_eq!(command_buffer.error(), None);
+            if k >= WARM {
+                waits.push(since(committed));
+            }
+        }
+        let (wait, wait90) = median_p90(waits);
+        println!(
+            "SURFTEX-COPY on {}: {name}, {w}x{h} at {bpr} bytes a row: commit to completion \
+             {wait:.0} us (p90 {wait90:.0})",
+            device.name()
+        );
+    }
+    // The copies, then the buffers, then the pages they lie over go, in that order.
 }
 
 /// The formats [`pitch_classes`] asks about, with their texel bytes.

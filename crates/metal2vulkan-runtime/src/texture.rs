@@ -82,7 +82,10 @@ use super::image_plan::{
     check_image_limits, plan_image, plan_images, plan_texture_images, DepthImageFacts, ImageFacts,
     ImagePlan, ImageRefusal,
 };
-use super::linear_plan::{aliases, check_linear_limits, linear_lack, LinearImage, LinearLack};
+use super::linear_plan::{
+    aliases, check_linear_limits, linear_lack, padding, texels_alone, BufferLayout, LinearImage,
+    LinearLack,
+};
 use super::memory::{MemoryClass, Placement};
 use super::metal_texture::{self, MetalOver};
 use super::mipmap::MipmapChecks;
@@ -737,8 +740,9 @@ pub(super) enum AliasKind {
     /// their pointer, one made for host allocations and bound in the pages' import
     /// ([`Device::alias_image`]); over pages imported as dma-bufs, a `DRM_FORMAT_MOD_LINEAR` image
     /// bound to a dedicated import of a dma-buf of its own pages
-    /// ([`Device::dma_buf_alias_image`]). A rebind makes the kind its new pages take.
-    Linear { row_pitch: u64, slice_pitch: u64 },
+    /// ([`Device::dma_buf_alias_image`]). A rebind makes the kind its new pages take, over the
+    /// same texels (`layout`, whose offset is in the buffer the texture was made over).
+    Linear { layout: BufferLayout },
     /// A Metal texture over the import's `MTLBuffer` (`metal_texture.rs`).
     Metal(MetalOver),
 }
@@ -2221,14 +2225,17 @@ impl Device {
         if host && self.exports_metal() {
             return self.metal_alias_image(plan, layout, descriptor, texels);
         }
+        let renders = descriptor.usage.contains(TextureUsage::RENDER_TARGET);
+        if let Some(why) = padding(&texels.layout, renders) {
+            return Ok(Err(why));
+        }
         let who = if host {
             "the buffer is a no-copy buffer, and the device"
         } else {
             "the device"
         };
         let made = if host {
-            let (row_pitch, slice_pitch) = (texels.layout.row_pitch, texels.layout.slice_pitch);
-            self.host_alias_unbound(&plan, row_pitch, slice_pitch, facts)?
+            self.host_alias_unbound(&plan, &texels.layout, facts)?
         } else if let Some(LinearLack { format, features }) = linear_lack(&plan, facts) {
             Err(
                 LinearRefusal::Need(LinearNeed::Features { format, features })
@@ -2260,14 +2267,16 @@ impl Device {
             alignment: requirements.alignment,
             size: requirements.size,
             offset: report.offset,
+            subresource: report.size,
             row_pitch: report.row_pitch,
             array_pitch: report.array_pitch,
         };
         let why = if !aliases(&texels.layout, memory_offset, room, &image) {
             Some(format!(
                 "{who}'s linear image of the texture lays its texels out otherwise than Metal \
-                 at the texels' offset and row pitch (rows {} bytes apart, aligned to {})",
-                report.row_pitch, requirements.alignment
+                 at the texels' offset and row pitch, or holds other bytes than its texels \
+                 (rows {} bytes apart, a subresource of {} bytes, aligned to {})",
+                report.row_pitch, report.size, requirements.alignment
             ))
         } else if requirements.memory_type_bits & (1 << type_index) == 0 {
             Some(format!(
@@ -2334,8 +2343,7 @@ impl Device {
                 from_base: memory_offset - base,
                 texture_type: layout.texture_type,
                 kind: AliasKind::Linear {
-                    row_pitch: texels.layout.row_pitch,
-                    slice_pitch: texels.layout.slice_pitch,
+                    layout: texels.layout,
                 },
             });
         }
@@ -2449,16 +2457,23 @@ impl Device {
                 "a texture over dma-buf pages the buffer does not lie in",
             ));
         };
+        // Rows (or slices) with the buffer's bytes between them take no image (`linear_plan.rs`):
+        // the pages' source is not asked.
+        let renders = descriptor.usage.contains(TextureUsage::RENDER_TARGET);
+        if let Some(why) = padding(&texels.layout, renders) {
+            self.shared().counts.dma_buf_image_fell_back();
+            return Ok(Err(why));
+        }
         let base = texels.buffer.pages_base()?;
         let (_, buffer_offset, _) = texels.buffer.memory();
         let from_base = buffer_offset + texels.layout.offset - base;
-        let (row_pitch, slice_pitch) = (texels.layout.row_pitch, texels.layout.slice_pitch);
         let place = crate::dma_buf::DmaBufTexels {
             pages: imports,
             type_index,
             at: start + from_base,
-            row_pitch,
-            slice_pitch,
+            row_pitch: texels.layout.row_pitch,
+            slice_pitch: texels.layout.slice_pitch,
+            alone: Some(texels.layout),
         };
         let made = match self.dma_buf_image(plans, facts, &place)? {
             Ok(made) => made,
@@ -2490,8 +2505,7 @@ impl Device {
             from_base,
             texture_type: layout.texture_type,
             kind: AliasKind::Linear {
-                row_pitch,
-                slice_pitch,
+                layout: texels.layout,
             },
         });
         Ok(Ok(image))
@@ -2702,26 +2716,26 @@ impl Device {
         }))
     }
 
-    /// The unbound image of `plan` made for host allocations whose texels lie at Metal's layout
-    /// in a no-copy buffer's pages, its rows `row_pitch` apart (and slices `slice_pitch`): the
-    /// driver's linear image ([`Device::host_linear_image`]) where it lays them out so, its
-    /// subresource at offset 0; else, where the device enables `VK_EXT_image_drm_format_modifier`,
-    /// a `DRM_FORMAT_MOD_LINEAR` image whose one plane the runtime lays out at those pitches
+    /// The unbound image of `plan` made for host allocations whose texels lie at Metal's `layout`
+    /// in a no-copy buffer's pages, its rows `layout.row_pitch` apart (and slices
+    /// `layout.slice_pitch`), holding no byte but them (`linear_plan::texels_alone`): the driver's
+    /// linear image ([`Device::host_linear_image`]) where it lays them out so, its subresource at
+    /// offset 0; else, where the device enables `VK_EXT_image_drm_format_modifier`, a
+    /// `DRM_FORMAT_MOD_LINEAR` image whose one plane the runtime lays out at those pitches
     /// ([`Device::host_pitched_image`]). Why not, each attempt's refusal named, where the device
     /// makes neither. The caller checks the image's alignment, size and memory types against the
     /// buffer's.
     fn host_alias_unbound(
         &self,
         plan: &ImagePlan,
-        row_pitch: u64,
-        slice_pitch: u64,
+        layout: &BufferLayout,
         facts: &ImageFacts<'_>,
     ) -> Result<Result<LinearMade, String>, Error> {
-        let slices = plan.layers.max(plan.extent[2]);
         let lies = |report: &vk::SubresourceLayout| {
             report.offset == 0
-                && report.row_pitch == row_pitch
-                && (slices == 1 || report.array_pitch == slice_pitch)
+                && report.row_pitch == layout.row_pitch
+                && (layout.slices == 1 || report.array_pitch == layout.slice_pitch)
+                && texels_alone(layout, report.size, report.array_pitch)
         };
         let made = match linear_lack(plan, facts) {
             Some(LinearLack { format, features }) => {
@@ -2739,40 +2753,45 @@ impl Device {
                 unsafe { release::object(self.shared().vk(), made.raw) };
                 format!(
                     "its linear image for host allocations lays rows {} bytes apart (slices {}) \
-                     from offset {}",
-                    made.report.row_pitch, made.report.array_pitch, made.report.offset
+                     from offset {}, a subresource of {} bytes",
+                    made.report.row_pitch,
+                    made.report.array_pitch,
+                    made.report.offset,
+                    made.report.size
                 )
             }
             Err(refusal) => refusal.describe(plan, true),
         };
         Ok(self
-            .host_pitched_image(plan, row_pitch, slice_pitch, facts)?
+            .host_pitched_image(plan, layout, facts)?
             .map_err(|pitched| format!("{linear}; and {pitched}")))
     }
 
     /// A `DRM_FORMAT_MOD_LINEAR` image of `plan` made for host allocations, unbound, whose one
-    /// plane lies at offset 0 with rows `row_pitch` apart (and slices `slice_pitch`, for a plan of
-    /// several layers): a texture over a no-copy buffer's host pages where the driver's own linear
-    /// image lays its rows out otherwise than Metal (ANV packs them tight, where a surface's rows
-    /// are padded). Its memory requirements and its plane's layout as the driver reports them,
-    /// starting `UNDEFINED` as Vulkan has an image of external memory made. Why not where the
-    /// device does not enable the extension, makes no such image for host allocations
+    /// plane lies at offset 0 with rows `texels.row_pitch` apart (and slices `texels.slice_pitch`,
+    /// for a plan of several layers), holding no byte but the texels: a texture over a no-copy
+    /// buffer's host pages, its rows one after another, where the driver's own linear image lays
+    /// them out otherwise (further apart, its row pitch rounded up to an alignment of its own).
+    /// Its memory requirements and its plane's layout as the driver reports
+    /// them, starting `UNDEFINED` as Vulkan has an image of external memory made. Why not where
+    /// the device does not enable the extension, makes no such image for host allocations
     /// (`Device::modifier_image_checks`), refuses the layout, lays it out otherwise (NVIDIA lays
-    /// rows closer than its own linear image's at its own), or asks a dedicated allocation of it:
-    /// the runtime asks the driver and takes its answer, never a rule of its own. A layout the
-    /// driver refused is kept and refused again unasked (`texture/pitch_refusals.rs`).
+    /// rows closer than its own linear image's at its own) or past the texels
+    /// (`linear_plan::texels_alone`), or asks a dedicated allocation of it: the runtime asks the
+    /// driver and takes its answer, never a rule of its own. A layout the driver refused is kept
+    /// and refused again unasked (`texture/pitch_refusals.rs`).
     #[cfg(unix)]
     fn host_pitched_image(
         &self,
         plan: &ImagePlan,
-        row_pitch: u64,
-        slice_pitch: u64,
+        texels: &BufferLayout,
         facts: &ImageFacts<'_>,
     ) -> Result<Result<LinearMade, String>, Error> {
         use crate::dma_buf::{memory_plane_0, ModifierMemory, DRM_FORMAT_MOD_LINEAR};
+        let (row_pitch, slice_pitch) = (texels.row_pitch, texels.slice_pitch);
         let raw_device = self.shared().vk();
         let enabled = (self.shared().host_import.as_ref())
-            .is_ok_and(|importer| importer.makes_modifier_images());
+            .is_ok_and(|importer| importer.makes_dma_buf_images());
         if !enabled {
             return Ok(Err(
                 "the device enables no VK_EXT_image_drm_format_modifier for an image at Metal's \
@@ -2798,6 +2817,9 @@ impl Device {
             Ok(view_formats) => view_formats,
             Err(why) => return Ok(Err(why)),
         };
+        if let Some(why) = self.explicit_plane_rows(plan) {
+            return Ok(Err(why));
+        }
         let array_pitch = if plan.layers > 1 { slice_pitch } else { 0 };
         let planes = [vk::SubresourceLayout {
             offset: 0,
@@ -2858,6 +2880,13 @@ impl Device {
                  {row_pitch} and slices {array_pitch} apart",
                 report.offset, report.row_pitch, report.array_pitch
             ))
+        } else if !texels_alone(texels, report.size, report.array_pitch) {
+            Some(format!(
+                "the driver's DRM_FORMAT_MOD_LINEAR plane for host allocations takes {} bytes, \
+                 past the texels' {}",
+                report.size,
+                texels.end() - texels.offset
+            ))
         } else {
             None
         };
@@ -2880,8 +2909,7 @@ impl Device {
     fn host_pitched_image(
         &self,
         _plan: &ImagePlan,
-        _row_pitch: u64,
-        _slice_pitch: u64,
+        _texels: &BufferLayout,
         _facts: &ImageFacts<'_>,
     ) -> Result<Result<LinearMade, String>, Error> {
         Ok(Err(
@@ -2936,11 +2964,8 @@ impl Device {
                 swaps.push(ImageSwap::acquired(image, objects, pages, family));
                 continue;
             }
-            let (row_pitch, slice_pitch) = match &watch.kind {
-                AliasKind::Linear {
-                    row_pitch,
-                    slice_pitch,
-                } => (*row_pitch, *slice_pitch),
+            let layout = match &watch.kind {
+                AliasKind::Linear { layout } => *layout,
                 AliasKind::Metal(over) => {
                     let made =
                         self.metal_image(image.plan(), over, watch.texture_type, memory, at)?;
@@ -2959,8 +2984,8 @@ impl Device {
             };
             // Its rows (and slices) lie as the old image's did: the texture's, in the driver's
             // linear image where it lays them out so, else in a `DRM_FORMAT_MOD_LINEAR` image
-            // at those pitches.
-            let made = self.host_alias_unbound(image.plan(), row_pitch, slice_pitch, &facts)?;
+            // at those pitches; either holding no byte but the texels.
+            let made = self.host_alias_unbound(image.plan(), &layout, &facts)?;
             let Ok(LinearMade {
                 raw,
                 requirements,
@@ -3035,19 +3060,16 @@ impl Device {
                 continue;
             };
             // A Metal texture's rebind to dma-buf pages is refused as the swaps are made.
-            let AliasKind::Linear {
-                row_pitch,
-                slice_pitch,
-            } = watch.kind
-            else {
+            let AliasKind::Linear { layout } = watch.kind else {
                 continue;
             };
             let texels = crate::dma_buf::DmaBufTexels {
                 pages: imports,
                 type_index: placement.type_index(),
                 at: pointer.as_ptr() as u64 + watch.from_base,
-                row_pitch,
-                slice_pitch,
+                row_pitch: layout.row_pitch,
+                slice_pitch: layout.slice_pitch,
+                alone: Some(layout),
             };
             let Ok((_, made)) = self.dma_buf_image(&[image.plan()], &facts, &texels)? else {
                 return Err(Error::NotImplemented(RuntimeGap::RebindTextures));
