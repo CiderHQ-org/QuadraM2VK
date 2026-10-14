@@ -199,8 +199,10 @@ the runtime made.
   bytes widened to 16-byte granules from the device's offset alignment, so it reports hazards
   between commands whose bytes are apart, as it does between untracked uses Metal leaves to the
   program; no order of either changes a result.
-- **Textures over buffers** share the buffer's bytes; where the device's linear images cannot hold
-  Metal's layout the runtime keeps a copy and announces it (`shadowed-texture`).
+- **Textures over buffers** share the buffer's bytes. The runtime keeps a copy and announces it
+  (`shadowed-texture`) where the device's linear images cannot hold Metal's layout, and where the
+  rows lie with bytes between them and the texture renders or a shader writes it (or it only
+  reads, under `PaddedReadsPolicy::Shadow`).
 
 ## Runtime extensions
 

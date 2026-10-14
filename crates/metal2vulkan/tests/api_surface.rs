@@ -228,6 +228,7 @@ surface! {
         enum NanMinMaxPolicy N;
         enum RoundingOrderPolicy N;
         enum HalfBlendPolicy N;
+        enum PaddedReadsPolicy N;
         struct DeviceProfile O;
         struct SpirvValidation N;
         struct EnabledCaps N;

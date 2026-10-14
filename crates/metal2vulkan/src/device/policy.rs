@@ -3,8 +3,10 @@
 
 use crate::device::profile::{FramebufferFetchPolicy, GuestIsolation, HandleDomain, PointerDomain};
 
-/// Policy inputs of `Device::new`. Every field can change emitted code, so the profile carries it
-/// (containment as the encoding it selects) and its fingerprint covers it.
+/// Policy inputs of `Device::new`. Every field but `padded_reads` can change emitted code, so the
+/// profile carries it (containment as the encoding it selects) and its fingerprint covers it;
+/// `padded_reads` is the runtime's alone (how it makes a texture over a buffer), and no profile
+/// carries it.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -52,6 +54,12 @@ pub struct DevicePolicy {
     /// attachment in the device's blend (the default) or in Metal's `half` arithmetic, which the
     /// function computes in the shader.
     pub half_blend: HalfBlendPolicy,
+    /// Whether a texture over a buffer whose rows (or slices) lie with bytes between them, and
+    /// which only reads (its usage holds no `RenderTarget`, `ShaderWrite`, `ShaderAtomic` or block
+    /// writes), is an image over the buffer's bytes at Metal's row pitch (the default) or the
+    /// runtime's shadow of them, copied in before each use. The runtime's choice alone: no
+    /// emitted code changes.
+    pub padded_reads: PaddedReadsPolicy,
 }
 
 impl DevicePolicy {
@@ -59,7 +67,8 @@ impl DevicePolicy {
     /// ordered framebuffer fetch required, Metal's 8-bit linear filter emulated exactly where the
     /// emulation runs, native device sampling, native device maths, the device's own texel
     /// conversions, native half rounding, the device's NaN and minimum and maximum, the device's
-    /// rounding order, and the device's blend of a `half` output into a 16-bit float attachment.
+    /// rounding order, the device's blend of a `half` output into a 16-bit float attachment, and
+    /// an image over a texture's padded rows where the texture only reads.
     pub const UNTRUSTED: DevicePolicy = DevicePolicy {
         pointer_domain: PointerDomain::ResidentTable,
         handle_domain: HandleDomain::Table,
@@ -74,14 +83,17 @@ impl DevicePolicy {
         nan_and_min_max: NanMinMaxPolicy::Native,
         rounding_order: RoundingOrderPolicy::Native,
         half_blend: HalfBlendPolicy::Device,
+        padded_reads: PaddedReadsPolicy::Alias,
     };
 
     /// This policy with Metal's answer wherever the choices offer it: its maths functions,
     /// divisions and fused multiply-adds ([`FloatMathsPolicy::Exact`]), its texel conversions
     /// ([`TexelConversionPolicy::Exact`]), its `half` rounding ([`HalfRoundingPolicy::Exact`]), its
     /// NaN and minimum and maximum ([`NanMinMaxPolicy::Exact`]), its rounding order
-    /// ([`RoundingOrderPolicy::Exact`]), and its 16-bit float blend of a `half` output
-    /// ([`HalfBlendPolicy::Exact`]). Sampling and every other field are kept.
+    /// ([`RoundingOrderPolicy::Exact`]), its 16-bit float blend of a `half` output
+    /// ([`HalfBlendPolicy::Exact`]), and the bytes between a texture's rows that no first move of
+    /// an image over them reaches ([`PaddedReadsPolicy::Shadow`]). Sampling and every other field
+    /// are kept.
     pub const fn exact_answers(self) -> DevicePolicy {
         DevicePolicy {
             float_maths: FloatMathsPolicy::Exact,
@@ -90,6 +102,7 @@ impl DevicePolicy {
             nan_and_min_max: NanMinMaxPolicy::Exact,
             rounding_order: RoundingOrderPolicy::Exact,
             half_blend: HalfBlendPolicy::Exact,
+            padded_reads: PaddedReadsPolicy::Shadow,
             ..self
         }
     }
@@ -322,4 +335,32 @@ pub enum HalfBlendPolicy {
     /// second source), the device blends and the pipeline records the note as under
     /// [`HalfBlendPolicy::Device`].
     Exact,
+}
+
+/// How the runtime makes a texture over a buffer whose rows (or an array's slices) lie with bytes
+/// between them that are not its texels (a guest browser's padded surfaces), and which only reads:
+/// its usage, as Metal reports it (`Unknown` reads as `ShaderRead | ShaderWrite | RenderTarget |
+/// PixelFormatView`), holds no `RenderTarget`, `ShaderWrite`, `ShaderAtomic` or block writes.
+/// Metal never writes those bytes. A render target, or a texture a shader writes, is a shadow
+/// under either value: a render pass's load and store operations may write back any byte of an
+/// attachment's subresource.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum PaddedReadsPolicy {
+    /// An image over the buffer's bytes at Metal's row pitch, as a texture whose rows lie one
+    /// after another has (the default): the device's own linear image, a `DRM_FORMAT_MOD_LINEAR`
+    /// image at that pitch, or one over a dma-buf of the pages, holding the bytes between the
+    /// rows in its subresource. After its first move every command uses it in `GENERAL`, and
+    /// copies and shader reads touch its texels alone; the first move, a layout transition, "may
+    /// perform read and write accesses on all memory bound to the image subresource range"
+    /// (Vulkan's Image Layout Transitions), and from `UNDEFINED` may discard it. So the bytes
+    /// between the rows stay the program's only as far as the driver's move keeps them, which
+    /// the validation lane checks per driver (docs/FAST-PATHS.md, its known gaps).
+    #[default]
+    Alias,
+    /// The runtime's shadow image of the texels, copied in from the buffer before each use: the
+    /// copies address the texels alone, so no byte between the rows is ever read or written
+    /// through an image.
+    Shadow,
 }

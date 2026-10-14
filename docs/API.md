@@ -93,6 +93,13 @@ compile does. `DevicePolicy::default()` is `DevicePolicy::UNTRUSTED`:
   [FAST-PATHS.md](FAST-PATHS.md) lists every choice, its bound and the measured cost of its exact
   form. On MoltenVK on an Apple GPU, whose sampler and `float` functions are Metal's own, most of
   these choices change nothing.
+- **An image over a padded texture that only reads** (`PaddedReadsPolicy::Alias`, the runtime's
+  choice; no pipeline differs). A texture over a buffer whose rows lie with bytes between them,
+  and whose usage holds no `RenderTarget`, `ShaderWrite`, `ShaderAtomic` or block writes, is an
+  image over the buffer's bytes at its row pitch where the device lays one there. Its subresources
+  hold the bytes between the rows, which they keep as far as the driver's first move of the image
+  does (FAST-PATHS.md's known gaps). `padded_reads = PaddedReadsPolicy::Shadow`, which
+  `exact_answers()` selects, makes it the runtime's shadow, copied in before each use.
 
 Loops run as written: no execution bound is translated in.
 
@@ -705,12 +712,12 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
 
 - `metal2vulkan-degrade-shadowed-texture` (performance). `ShadowedTexture`: A 2D texture over a
   buffer is a shadow image: its rows (or an array's slices) lie with the buffer's bytes between
-  them, which an image over them would hold in its subresource, where Vulkan lets the image's
-  layout transitions (its first move among them, which a texture that only reads takes too) read
-  and write any byte of its subresources, and a render pass's load and store operations read and
-  write back any byte of an attachment's image subresource, and Metal leaves them as the program
-  writes them (but where the device's image of it is a Metal
-  texture over the buffer, on MoltenVK); or no linear image of the device lays its texels out as
+  them, and it renders or a shader writes it (or it only reads, under `padded_reads =
+  PaddedReadsPolicy::Shadow`), which an image over them would hold in its subresource, where
+  Vulkan lets the image's layout transitions (its first move among them) read and write any byte
+  of its subresources, and a render pass's load and store operations read and write back any byte
+  of an attachment's image subresource, and Metal leaves them as the program writes them (but
+  where the device's image of it is a Metal texture over the buffer, on MoltenVK); or no linear image of the device lays its texels out as
   Metal does in the buffer's memory, holding no byte past them (over a no-copy buffer's imported
   host memory, no linear image made for host allocations does: neither the driver's own nor, where
   the device enables `VK_EXT_image_drm_format_modifier`, a `DRM_FORMAT_MOD_LINEAR` image laid out

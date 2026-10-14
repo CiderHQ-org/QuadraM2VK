@@ -4,15 +4,17 @@
 
 use super::super::image_plan::plan_image;
 use super::super::linear_plan::{
-    aliases, check_linear_limits, linear_alignment, linear_lack, padding, plan_buffer_texture,
-    BufferFacts, BufferLayout, BufferRefusal, BufferTexture, BufferTextureCall,
-    BufferTextureProblem, LinearImage, LinearLack, Placed, LINEAR_ALIGNMENT,
+    aliases, check_linear_limits, holding, linear_alignment, linear_lack, only_reads,
+    plan_buffer_texture, BufferFacts, BufferLayout, BufferRefusal, BufferTexture,
+    BufferTextureCall, BufferTextureProblem, Holds, LinearImage, LinearLack, Placed,
+    LINEAR_ALIGNMENT,
 };
-use super::super::texture_descriptor::{no_texture_alone, TextureDescriptor};
+use super::super::texture_descriptor::{effective_usage, no_texture_alone, TextureDescriptor};
 use super::super::values::StorageMode;
 use super::image_plan::{committed, facts};
 use super::texture_descriptor::APPLE;
 use crate::MetalLevel;
+use metal2vulkan::device::PaddedReadsPolicy;
 use metal2vulkan::metal::format::direct_format;
 use metal2vulkan::metal::PixelFormat as P;
 use metal2vulkan::metal::TextureType;
@@ -696,10 +698,11 @@ fn a_linear_image_aliases_only_metals_layout() {
         row_pitch: 80,
         array_pitch: 320,
     };
-    assert!(aliases(&single, 4096 + 256, 320, &image));
+    assert!(aliases(&single, Holds::Texels, 4096 + 256, 320, &image));
     // The binding off the image's alignment (RADV's 256 at a 16-byte offset).
     assert!(!aliases(
         &single,
+        Holds::Texels,
         4096 + 272,
         320,
         &LinearImage {
@@ -710,6 +713,7 @@ fn a_linear_image_aliases_only_metals_layout() {
     // The driver's own pitch where another was asked for (NVIDIA's explicit layouts).
     assert!(!aliases(
         &single,
+        Holds::Texels,
         4096,
         320,
         &LinearImage {
@@ -720,6 +724,7 @@ fn a_linear_image_aliases_only_metals_layout() {
     // Texels not at the binding, or memory past the buffer's.
     assert!(!aliases(
         &single,
+        Holds::Texels,
         4096,
         320,
         &LinearImage {
@@ -727,10 +732,11 @@ fn a_linear_image_aliases_only_metals_layout() {
             ..image
         }
     ));
-    assert!(!aliases(&single, 4096, 319, &image));
+    assert!(!aliases(&single, Holds::Texels, 4096, 319, &image));
     // Memory past the subresource, within the buffer's: no write through the image reaches it.
     assert!(aliases(
         &single,
+        Holds::Texels,
         4096,
         4096,
         &LinearImage {
@@ -740,9 +746,10 @@ fn a_linear_image_aliases_only_metals_layout() {
     ));
     // A subresource past the texels (lavapipe's rows rounded up to 4, of a texture of 3).
     let three = BufferLayout { rows: 3, ..single };
-    assert!(!aliases(&three, 4096, 320, &image));
+    assert!(!aliases(&three, Holds::Texels, 4096, 320, &image));
     assert!(aliases(
         &three,
+        Holds::Texels,
         4096,
         320,
         &LinearImage {
@@ -755,18 +762,45 @@ fn a_linear_image_aliases_only_metals_layout() {
         row_bytes: 68,
         ..single
     };
-    assert!(!aliases(&padded, 4096, 320, &image));
-    assert!(padding(&padded, true).is_some());
-    assert!(padding(&single, true).is_none());
+    assert!(!aliases(&padded, Holds::Texels, 4096, 320, &image));
+    let renders = TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ;
+    let alias = PaddedReadsPolicy::Alias;
+    assert!(holding(&padded, renders, alias).is_err());
+    assert_eq!(holding(&single, renders, alias), Ok(Holds::Texels));
+    // A texture that only reads may hold the bytes between its rows, its last row's to its pitch
+    // among them, but none past them.
+    assert!(aliases(&padded, Holds::Padding, 4096, 320, &image));
+    assert!(!aliases(
+        &padded,
+        Holds::Padding,
+        4096,
+        400,
+        &LinearImage {
+            size: 400,
+            subresource: 400,
+            ..image
+        }
+    ));
+    assert!(!aliases(
+        &padded,
+        Holds::Padding,
+        4096,
+        320,
+        &LinearImage {
+            row_pitch: 96,
+            ..image
+        }
+    ));
     // One row has nothing between rows, but its pitch's padding past the texels.
     let row = BufferLayout {
         rows: 1,
         slice_pitch: 80,
         ..padded
     };
-    assert!(padding(&row, true).is_none());
+    assert_eq!(holding(&row, renders, alias), Ok(Holds::Texels));
     assert!(!aliases(
         &row,
+        Holds::Texels,
         4096,
         80,
         &LinearImage {
@@ -777,6 +811,7 @@ fn a_linear_image_aliases_only_metals_layout() {
     ));
     assert!(aliases(
         &row,
+        Holds::Texels,
         4096,
         80,
         &LinearImage {
@@ -791,9 +826,10 @@ fn a_linear_image_aliases_only_metals_layout() {
         ..single
     };
     let stacked = LinearImage { size: 960, ..image };
-    assert!(aliases(&slices, 4096, 960, &stacked));
+    assert!(aliases(&slices, Holds::Texels, 4096, 960, &stacked));
     assert!(!aliases(
         &slices,
+        Holds::Texels,
         4096,
         960,
         &LinearImage {
@@ -806,9 +842,25 @@ fn a_linear_image_aliases_only_metals_layout() {
         slice_pitch: 384,
         ..slices
     };
-    assert!(padding(&apart, true).is_some());
+    assert!(holding(&apart, renders, alias).is_err());
+    assert_eq!(
+        holding(&apart, TextureUsage::SHADER_READ, alias),
+        Ok(Holds::Padding)
+    );
+    assert!(aliases(
+        &apart,
+        Holds::Padding,
+        4096,
+        1088,
+        &LinearImage {
+            size: 1088,
+            array_pitch: 384,
+            ..image
+        }
+    ));
     assert!(!aliases(
         &apart,
+        Holds::Texels,
         4096,
         1088,
         &LinearImage {
@@ -820,6 +872,7 @@ fn a_linear_image_aliases_only_metals_layout() {
     // A driver that reports the array's whole bytes as its first subresource's.
     assert!(!aliases(
         &slices,
+        Holds::Texels,
         4096,
         960,
         &LinearImage {
@@ -830,6 +883,7 @@ fn a_linear_image_aliases_only_metals_layout() {
     // A single slice ignores the array pitch a driver reports.
     assert!(aliases(
         &single,
+        Holds::Texels,
         4096,
         320,
         &LinearImage {
@@ -840,8 +894,11 @@ fn a_linear_image_aliases_only_metals_layout() {
 }
 
 /// A texture over padded rows is a shadow for the operations Vulkan lets write the padding: a
-/// texture that only reads names its image's layout transitions (its first move among them), not a
-/// render pass, which no image of its takes; a render target names both.
+/// render target names its image's layout transitions (its first move among them) and a render
+/// pass's load and store operations; a texture a shader writes names its layout transitions alone,
+/// as one that only reads does under `PaddedReadsPolicy::Shadow`, which says the policy asked it.
+/// A texture that only reads, under `PaddedReadsPolicy::Alias`, may hold the bytes between its
+/// rows: its usage as Metal reports it decides, `Unknown` a render target's.
 #[test]
 fn a_padded_texture_s_shadow_names_what_may_write_its_padding() {
     let padded = BufferLayout {
@@ -852,21 +909,50 @@ fn a_padded_texture_s_shadow_names_what_may_write_its_padding() {
         rows: 4,
         slices: 1,
     };
-    let reads = padding(&padded, false).unwrap();
+    let (alias, shadow) = (PaddedReadsPolicy::Alias, PaddedReadsPolicy::Shadow);
+    let transitions = "its rows lie 80 bytes apart, 68 bytes of texels each: an image over them \
+                       holds the bytes between them, which Vulkan lets its layout transitions \
+                       read and write, its first move from the layout it is made in among them";
+    let reads = holding(&padded, TextureUsage::SHADER_READ, shadow).unwrap_err();
     assert_eq!(
         reads,
-        "its rows lie 80 bytes apart, 68 bytes of texels each: an image over them holds the \
-         bytes between them, which Vulkan lets its layout transitions read and write, its first \
-         move from the layout it is made in among them"
+        format!(
+            "{transitions} (the device's policy asks no image over them for a texture that only \
+             reads, `PaddedReadsPolicy::Shadow`)"
+        )
     );
     assert!(!reads.contains("render pass"), "{reads}");
-    let renders = padding(&padded, true).unwrap();
-    assert_eq!(
-        renders,
-        "its rows lie 80 bytes apart, 68 bytes of texels each: an image over them holds the \
-         bytes between them, which Vulkan lets its layout transitions read and write, and a render \
-         pass's load and store operations write back"
-    );
+    let writes = TextureUsage::SHADER_READ | TextureUsage::SHADER_WRITE;
+    for policy in [alias, shadow] {
+        assert_eq!(
+            holding(&padded, writes, policy),
+            Err(transitions.to_owned())
+        );
+        let renders = TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ;
+        assert_eq!(
+            holding(&padded, renders, policy).unwrap_err(),
+            "its rows lie 80 bytes apart, 68 bytes of texels each: an image over them holds the \
+             bytes between them, which Vulkan lets its layout transitions read and write, and a \
+             render pass's load and store operations write back"
+        );
+    }
+    for usage in [
+        TextureUsage::SHADER_READ,
+        TextureUsage::SHADER_READ | TextureUsage::PIXEL_FORMAT_VIEW,
+    ] {
+        assert!(only_reads(usage), "{usage:?}");
+        assert_eq!(holding(&padded, usage, alias), Ok(Holds::Padding));
+    }
+    for usage in [
+        TextureUsage::RENDER_TARGET,
+        TextureUsage::SHADER_WRITE,
+        TextureUsage::SHADER_ATOMIC,
+        TextureUsage::BLOCK_WRITES_ONLY,
+        effective_usage(TextureUsage::UNKNOWN),
+    ] {
+        assert!(!only_reads(usage), "{usage:?}");
+        assert!(holding(&padded, usage, alias).is_err(), "{usage:?}");
+    }
 }
 
 /// A linear image serves a texture where its tiling has every feature the optimal one has for

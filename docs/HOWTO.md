@@ -176,19 +176,25 @@ rebind that cannot make the image again is refused (`NotImplemented(RebindTextur
 `WorkCounts::dma_buf_imports`, `dma_buf_sparse_buffers`, `dma_buf_images` and
 `dma_buf_image_fallbacks` count what the route did.
 
-A texture over a buffer's bytes is an image over them only where its rows lie one after another
+A texture over a buffer's bytes is an image over them where its rows lie one after another
 (`bytes_per_row` is its texels' bytes, or it has one row; an array's slices likewise) and the
 image holds no byte past its texels. A texture whose rows lie with bytes between them, as a guest
-browser's padded surfaces' do, is a shadow (`shadowed-texture`) on every device but MoltenVK, whose
-image is a Metal texture over the buffer: an image at that pitch holds the bytes between the rows
-in its subresource (`VkSubresourceLayout`: "size includes any extra memory that is required based
-on rowPitch"), and Vulkan lets two kinds of operation write them, where Metal leaves them as the
-program writes them. The image's layout transitions "may perform read and write accesses on all
-memory bound to the image subresource range", and every image takes one, its first move from the
-layout it is made in, before any use, so a texture that only reads is a shadow too. A render pass's
-load and store operations "read and write back any memory locations within the image subresource
-bound for that attachment" (lavapipe writes back the bytes its 4-texel blocks reach past a row, a
-signaling NaN's bits quieted). No query of the device's states otherwise. To keep a surface
+browser's padded surfaces' do, is one only where it only reads (no `RenderTarget`, `ShaderWrite`,
+`ShaderAtomic` or block-write usage; `Unknown` usage counts as all of them), under the default
+`padded_reads = PaddedReadsPolicy::Alias`; otherwise it is a shadow (`shadowed-texture`) on every
+device but MoltenVK, whose image is a Metal texture over the buffer. An image at that pitch holds
+the bytes between the rows in its subresource (`VkSubresourceLayout`: "size includes any extra
+memory that is required based on rowPitch"), and Vulkan lets two kinds of operation write them,
+where Metal leaves them as the program writes them. The image's layout transitions "may perform
+read and write accesses on all memory bound to the image subresource range", and every image takes
+one, its first move from the layout it is made in, before any use; the runtime's images take no
+other. A render pass's load and store operations "read and write back any memory locations within
+the image subresource bound for that attachment" (lavapipe writes back the bytes its 4-texel blocks
+reach past a row, a signaling NaN's bits quieted). No query of the device's states otherwise. So a
+texture that renders or that a shader writes is a shadow, and one that only reads keeps the bytes
+between its rows as far as the driver's first move does (docs/FAST-PATHS.md's known gap, checked
+per driver by the validation lane); `padded_reads = PaddedReadsPolicy::Shadow`, which
+`DevicePolicy::exact_answers()` selects, makes it a shadow too. To keep a surface that renders
 aliased, lay its rows packed.
 
 Over pages imported by their pointer, such a texture aliases them where the device lays an image's

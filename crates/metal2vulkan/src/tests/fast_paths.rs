@@ -8,7 +8,7 @@
 
 use crate::device::{
     DevicePolicy, FloatMathsPolicy, FramebufferFetchPolicy, HalfBlendPolicy, HalfRoundingPolicy,
-    NanMinMaxPolicy, RoundingOrderPolicy, SamplingPolicy, TexelConversionPolicy,
+    NanMinMaxPolicy, PaddedReadsPolicy, RoundingOrderPolicy, SamplingPolicy, TexelConversionPolicy,
     Unorm8LinearFilterPolicy,
 };
 use crate::pipeline::PrecisionNote;
@@ -68,6 +68,8 @@ fn choices() -> Vec<Choice> {
         nan_and_min_max: _,
         rounding_order: _,
         half_blend: _,
+        // The runtime's: whether a texture over padded rows that only reads aliases them.
+        padded_reads: _,
     } = p;
     vec![
         choice!(p.framebuffer_fetch: FramebufferFetchPolicy { RequireOrdered, AcceptUnordered }),
@@ -79,6 +81,7 @@ fn choices() -> Vec<Choice> {
         choice!(p.nan_and_min_max: NanMinMaxPolicy { Native, Exact }),
         choice!(p.rounding_order: RoundingOrderPolicy { Native, Exact }),
         choice!(p.half_blend: HalfBlendPolicy { Device, Exact }),
+        choice!(p.padded_reads: PaddedReadsPolicy { Alias, Shadow }),
     ]
 }
 
@@ -367,4 +370,24 @@ fn the_ledger_readers_read_names_and_switches() {
         assignments(text),
         BTreeSet::from([("sampling".to_owned(), "SamplingPolicy::Exact".to_owned())])
     );
+}
+
+/// The runtime's choice for a texture over padded rows that only reads (`padded_reads`) moves no
+/// committed profile's fingerprint: no profile carries it, so no translation, cache key or
+/// recorded row follows it, and the ledger's row is the runtime's alone.
+#[test]
+fn the_runtime_s_padded_reads_choice_keys_no_profile() {
+    use crate::spirv::testing::committed_profiles_with;
+    let alias = committed_profiles_with(DevicePolicy::UNTRUSTED).expect("profiles");
+    let shadow = committed_profiles_with(DevicePolicy {
+        padded_reads: PaddedReadsPolicy::Shadow,
+        ..DevicePolicy::UNTRUSTED
+    })
+    .expect("profiles");
+    assert!(alias.len() >= 10, "{} profiles", alias.len());
+    assert_eq!(alias.len(), shadow.len());
+    for ((stem, a), (other, s)) in alias.iter().zip(&shadow) {
+        assert_eq!(stem, other);
+        assert_eq!(a.fingerprint(), s.fingerprint(), "{stem}");
+    }
 }

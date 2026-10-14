@@ -39,6 +39,7 @@ a cell that names another source took its numbers there.
 | The `half` conversion converts the value itself (no `NoContraction` barrier), so the device's compiler may fold it into the instruction computing the value, rounding once. | `half_rounding = HalfRoundingPolicy::Native` | `half_rounding = HalfRoundingPolicy::Exact` (with the rows above) | The row above's: on NVIDIA (RTX 3090), and on lavapipe for a loaded texel (Mesa 26.0.8), the pair is dropped whether or not the barrier stands, so the barrier does not restore the rounding there. `NativeHalfConversion` (`native-half-conversion`) | At its merge: A2X 0.99-1.02 s without the barrier against 1.00-1.05 s with it; Xgc within a round's spread |
 | A `half` texel's NaN is the rounding's own NaN, not the texel's bits (the keep's four instructions a texel are left out). | `half_rounding = HalfRoundingPolicy::Native` and `nan_and_min_max = NanMinMaxPolicy::Native` | `nan_and_min_max = NanMinMaxPolicy::Exact` (the keep under native half rounding, master ecd39568bb); `half_rounding = HalfRoundingPolicy::Exact` also keeps it, at that row's cost. The same switch also gives Metal's full rule: `0x7e00` for every NaN but a one-texel read, nearest sample or gather of a 16-bit float texture, by the slot's format class read as data, a heap handle's class index and a runtime sampler's filter. A gather with a `half` result fetches its four texels where the class is a half-float one, since NVIDIA's gather hands back every NaN as `0x7fffffff`. **Not yet exact:** a cube gather, bicubic and emulated linear, fetched or compared samples. Possible, not built: the runtime sampler's filter read as push data rather than specialized, which would spare the remake below. Measured on the RTX 5080: under the switch no `half` lane of the runtime lane's texel reads, samples and gathers differs from Metal's (1,469 differ by default). Under the switch `DeviceNanEncoding` is still announced; the consumer logs notes, so no device fact is built to drop it | NaN bits the device's (`0x7FFF` on the RTX 5080), where Metal hands back a 16-bit float texel's own bits on a read, nearest sample or gather, and `0x7e00` for a 32-bit or small float texel's NaN and a linear sample's. `NativeHalfConversion` (`native-half-conversion`); the read also records `DeviceNanEncoding` (`device-nan-encoding`) | Measured on top of the NaN switch's own row (its probe with the keep, c0a814a13, against its probe without, 3e8a01c54): A2X 341,299 → 347,519 words, 1.82-1.86 → 1.81-1.87 s, GPU 0.115-0.117 → 0.115-0.116 ms, within noise; Xgc14 and Xgc15 read no `half` texel (words unchanged). The full rule (its probe a5c642ebe against the same tip without it, 851650c81): A2X 347,519 → 372,429 words (+7.2%), creation 1.85-1.88 → 1.99-2.04 s; where a linear runtime sampler is bound at the draw the sampler word's filter is now specialized, so the first draw remakes (1.94-1.96 s) and its GPU time rises 0.115-0.117 → 0.124-0.125 ms; with a nearest sampler GPU 0.115-0.116 → 0.115-0.117 ms; Xgc14 and Xgc15 words unchanged. On the RTX 3090 the same pair: A2X creation 2.91-3.06 → 3.17-3.23 s, the first draw's remake 3.0 s and its GPU time 0.17-0.18 → 0.79-1.15 ms, with a nearest sampler 0.17-0.18 ms both |
 | A fragment function without fast math returns a `half` color to a blended attachment: the device blends in its own arithmetic and rounds once, where Metal blends a 16-bit float attachment in `half` arithmetic (each factor, product and sum rounded to `half`). | `half_blend = HalfBlendPolicy::Device` | `half_blend = HalfBlendPolicy::Exact`: the function computes Metal's blend in the interlocked storage form, for a `half4` output into `R16Float`, `RG16Float` or `RGBA16Float` where that form is exact for the pipeline (RADV, ANV, NVIDIA, MoltenVK); elsewhere, and for lavapipe, 32-bit float, 8-bit, a module naming no math mode or a blend of the second source, the device's blend and its note stay | 2.5 `half` ulps at the largest operand on NVIDIA (the blend color and one minus it), two on RADV, ANV and lavapipe (16-bit float); two `float` ulps (32-bit float, one on NVIDIA); one or two codes (8-bit, extended range); MoltenVK stores Metal's bytes. Measured with and without the factors' magnitudes at 0bcc0163e5. `HalfOutputPrecision` (`half-output-precision`) | A probe at 924fc11603 (a `half4` over a 1920x1080 `RGBA16Float` target, One / OneMinusSourceAlpha): making 11.1 → 24.0 ms; GPU 25 → 82 us one draw, 506 → 2291 us 32 overlapping draws (the interlock orders them). RTX 3090 (the same draw at 50a065eb98): making 12.9 → 27.4 ms; GPU 45 → 115 us one draw, 648 → 3268 us 32 overlapping draws |
+| A texture over a buffer whose rows (or an array's slices) lie with bytes between them, and which only reads (its usage, as Metal reports it, holds no `RenderTarget`, `ShaderWrite`, `ShaderAtomic` or block writes; `Unknown` holds them all), is an image over the buffer's bytes at Metal's row pitch, as one of packed rows is: the driver's own linear image, a `DRM_FORMAT_MOD_LINEAR` image at that pitch, or one over a dma-buf of the pages. Its subresources hold the bytes between its rows, which Metal never writes, and its first move reaches them. The runtime's choice: no pipeline differs. | `padded_reads = PaddedReadsPolicy::Alias` | `padded_reads = PaddedReadsPolicy::Shadow`: the runtime's shadow image of the texels, copied in from the buffer before each use (`shadowed-texture`), whose copies address the texels alone | The bytes between the rows stay the program's as far as the driver's first move of the image keeps them, unannounced, as for packed rows (the known gap below); `runtime_lane::pitched_surfaces::a_texture_that_only_reads_keeps_every_byte_of_its_pages` fails on a driver whose move changes one | Measured on ANV (Iris Xe, Mesa 26.2.4; `surface_texture_costs::read_only_padded_costs`): a frame that samples four `BGRA8Unorm` tiles over no-copy pages (1307x512 at 5248- and 5376-byte rows, 300x200 at 1216, 1913x96 at 7680) in one pass completes about 0.36 ms later as shadows (the median of 15 interleaved pairs, 0.08 to 0.60 ms), with about 56 µs more encoding and 91 µs more process CPU; a texture's making costs the same either way, about 45 µs |
 | A computed `half` or `float` color blended into an extended-range attachment (`BGR10_XR`, `BGRA10_XR`, `RGB10A8_2P_XR10`) rounds the blend's source as a loaded one; Metal's compiler rounds it by how it computed it. Every device. | The in-shader blend's loaded rounding (no switch) | **Not built yet:** Metal's rounding per shape is probed, not modelled | One code. `ExtendedRangeBlendSource` (`extended-range-blend-source`), `ExtendedRangeFloatBlendSource` (`extended-range-float-blend-source`) | Not measured |
 | A bicubic sample of an 8- or 16-bit normalized texture sums its taps exactly and rounds half up; Metal truncates its row terms, row sums and column terms first. Every device. | The exact sum (no switch) | **Not built yet:** Metal's datapath is pinned (17.75M lanes measured, no miss); its emitter is not written | One grid step (1/4080 at 8 bits) within about 2^-21 of a tie. `BicubicFilterArithmetic` (`bicubic-filter-arithmetic`) | Not measured (Metal's form is expected no larger) |
 | A bicubic sample of an extended-range texture (`BGR10_XR`, `BGRA10_XR`, `RGB10A8_2P_XR10` and their sRGB twins) sums its taps' steps exactly, rounds half up and clamps into the format's decoded endpoints; within 0.014 of a grid step of a rounding tie Metal may round the other way. Every device. | The exact sum (no switch) | **None known:** no model of Metal's datapath tried fits; 3,317,760 lanes measured on the M3 Max (macOS 26.7) | One grid step (1/8160 a color lane, 1/8192 an sRGB color lane, 1/4080 alpha), 4,050 of the lanes measured, each within 0.014 of a step of a tie. `BicubicFilterArithmetic` (`bicubic-filter-arithmetic`) | No accurate form |
@@ -144,19 +145,20 @@ driver's. Each is open work.
   the encoding thread and 2.7 ms through completion less a frame, as nothing is copied back), and
   one that stores it renders in place at no added cost. Where MoltenVK runs the pass as one
   unbroken instance, Metal keeps the bytes at no cost.
-- **A texture over a buffer whose rows lie with bytes between them** (a guest browser's padded
-  surfaces, an array whose slices are rounded up to 128 bytes) is a shadow on every device but
-  MoltenVK (`shadowed-texture`), its texels copied in before each use and back after each write.
-  An image over those rows would hold the bytes between them in its subresource, where Metal
-  leaves them as the program writes them, and Vulkan lets two kinds of operation write them: the
-  image's layout transitions "may perform read and write accesses on all memory bound to the image
-  subresource range", and every image takes one, its first move from the layout it is made in,
-  before any use (so a texture that only reads is a shadow too); and a render pass's load and store
-  operations "read and write back any memory locations within the image subresource bound for that
-  attachment" (lavapipe writes back those its 4-texel blocks reach, a signaling NaN's bits
-  quieted). No query of the device's promises otherwise. On ANV (Mesa 26.2.4) making the browser's 1307x512
-  tile took about 135 µs as a shadow against 41 µs as an image at its row pitch. Packed rows
-  (`bytes_per_row` the texels' bytes) avoid it where the device lays an image's rows there.
+- **A texture over a buffer whose rows lie with bytes between them, which renders or which a
+  shader writes** (a guest browser's padded surfaces, an array whose slices are rounded up to 128
+  bytes) is a shadow on every device but MoltenVK (`shadowed-texture`), its texels copied in
+  before each use and back after each write. An image over those rows would hold the bytes between
+  them in its subresource, where Metal leaves them as the program writes them, and a render pass's
+  load and store operations "read and write back any memory locations within the image subresource
+  bound for that attachment" (lavapipe writes back those its 4-texel blocks reach, a signaling
+  NaN's bits quieted). No query of the device's promises otherwise. A texture a shader writes and
+  no render pass takes meets them only at its image's first move, as one that only reads does, and
+  is a shadow all the same. One that only reads is an image over its rows by default (the fast
+  default above, `padded_reads = PaddedReadsPolicy::Alias`; the known gap below), and a shadow
+  under the switch. On ANV (Mesa 26.2.4) making the browser's 1307x512 tile took about 135 µs as a
+  shadow against 41 µs as an image at its row pitch. Packed rows (`bytes_per_row` the texels'
+  bytes) avoid it where the device lays an image's rows there.
 - **A shadow's copy back after a pass that draws covers every texel inside the draws'
   scissors**, where Metal's store writes back only the 32x32 tiles a draw's primitives touch
   (reims-vgpu's padding probe on an M3 Max, macOS 27.0.1: a tile with geometry stores its
@@ -166,24 +168,42 @@ driver's. Each is open work.
   copy back can undo it where Metal keeps it: the host does not know which tiles the primitives
   touch. A pass that reaches no tile copies nothing back, and no copy reaches the bytes between
   rows.
-- **A texture's image over pages imported by their pointer keeps their bytes past its first
-  move only because the drivers do.** Vulkan makes an image of host allocations start in
-  `UNDEFINED` (`VUID-VkImageCreateInfo-pNext-01443`), and a move from `UNDEFINED` "will cause the
-  contents of the image's memory to be undefined"; memory imported from a host pointer "shares
-  ownership of the memory between the host and the Vulkan implementation", host access as to any
-  memory, so no queue-family acquire from outside keeps them either. That holds for the driver's
-  own linear image for host allocations (`texture.rs`'s `host_linear_image`), the
-  `DRM_FORMAT_MOD_LINEAR` image at Metal's row pitch (`host_pitched_image`), and, on MoltenVK,
-  the image of a Metal texture over the import's `MTLBuffer` (`metal_alias_image`; Vulkan says
-  nothing of such an image's contents). lavapipe (Mesa 26.2.4) keeps the bytes
-  (`runtime_lane::pitched_surfaces::a_texture_s_first_use_reads_the_bytes_it_was_made_over`, a
-  first use that reads through the image, fails where a driver drops them). Spec-backed: an
-  image over a dma-buf of its own pages, which its first move acquires from
-  `VK_QUEUE_FAMILY_FOREIGN_EXT` in `GENERAL` (the external memory chapter: "acquire exclusive
-  ownership in the destination instance or API", the `UNDEFINED` initial layout "a placeholder"),
-  and a linear image of the runtime's own memory, made `PREINITIALIZED`. The exact form, a shadow
-  of every texture over such pages (on ANV a tile's making about 135 µs against 41 µs, and a copy
-  in and back at each use), is the owner's call.
+- **A texture's image over a buffer's bytes keeps them past its first move only because the
+  drivers do**, its texels and, for a texture that only reads over padded rows, the bytes between
+  its rows (which its subresources hold). The first move is the one layout transition such an
+  image takes: every command that uses it after names `GENERAL` (each copy into or out of it, its
+  descriptors), and the encoders' barriers are memory barriers, which transition no layout. A copy
+  writes its region alone ("Each source region specified by pRegions is copied from the source
+  buffer to the destination region of the destination image"; the Memory Model: "A memory
+  operation must not affect memory at a memory location not within its set of memory locations"),
+  and a texture over a buffer has one level, so no mipmap blit reaches it. But the move "may
+  perform read and write accesses on all memory bound to the image subresource range", and Metal
+  never writes the bytes between a texture's rows, keeping a CPU write to them under any GPU work
+  (reims-vgpu's padding probe on an M3 Max, macOS 27.0.1): a move that discards them, or reads and
+  writes them back across a CPU write, differs from Metal there alone. Vulkan makes an image of
+  host allocations start in `UNDEFINED` (`VUID-VkImageCreateInfo-pNext-01443`), and a move from
+  `UNDEFINED` "will cause the contents of the image's memory to be undefined"; memory imported
+  from a host pointer "shares ownership of the memory between the host and the Vulkan
+  implementation", host access as to any memory, so no queue-family acquire from outside keeps
+  them either. That holds for the driver's own linear image for host allocations (`texture.rs`'s
+  `host_linear_image`), the `DRM_FORMAT_MOD_LINEAR` image at Metal's row pitch
+  (`host_pitched_image`), and, on MoltenVK, the image of a Metal texture over the import's
+  `MTLBuffer` (`metal_alias_image`; Vulkan says nothing of such an image's contents). lavapipe
+  and ANV (Mesa 26.2.4), RADV (Mesa 26.2.4 on the Radeon 780M, 26.0.8 on the RX 7900 XTX) and
+  NVIDIA 615.71.09 (RTX 3090, RTX 5080 Laptop GPU) keep the bytes, the bytes between the rows of
+  every padded layout each aliases among them
+  (`runtime_lane::pitched_surfaces::a_texture_s_first_use_reads_the_bytes_it_was_made_over`, and
+  for padded rows `a_texture_that_only_reads_keeps_every_byte_of_its_pages` and
+  `a_padded_texture_that_only_reads_over_an_ordinary_buffer_keeps_its_bytes`, each a first use
+  that reads through the image and then every byte of the pages checked, fail where a driver
+  changes one; their blits into the image check that a copy writes its region alone). Spec-backed for the contents, not for a CPU write during the move: an image over a dma-buf
+  of its own pages, which its first move acquires from `VK_QUEUE_FAMILY_FOREIGN_EXT` in `GENERAL`
+  (the external memory chapter: "acquire exclusive ownership in the destination instance or API",
+  the `UNDEFINED` initial layout "a placeholder"), and a linear image of the runtime's own memory,
+  made `PREINITIALIZED`. The exact form, a shadow of every texture over such pages (on ANV a
+  tile's making about 135 µs against 41 µs, and a copy in and back at each use), is the owner's
+  call for packed rows; for padded rows that only read it is `padded_reads =
+  PaddedReadsPolicy::Shadow`.
 - **A cold pipeline making on NVIDIA grows with a module's sampling sites.** NVIDIA's compiler
   (615.71.09) takes about 1 s for macOS 26's largest CoreAnimation fragment (210,033 words) on the
   RTX 5080 Laptop GPU, made once per cold cache (the first boot, and after an update changes the

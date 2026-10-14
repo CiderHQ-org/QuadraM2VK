@@ -220,13 +220,13 @@ macro_rules! degradations {
 degradations! {
     runtime {
         /// A 2D texture over a buffer is a shadow image: its rows (or an array's slices) lie with
-        /// the buffer's bytes between them, which an image over them would hold in its
-        /// subresource, where Vulkan lets the image's layout transitions (its first move among
-        /// them, which a texture that only reads takes too) read and write any byte of its
-        /// subresources, and a render pass's load and store operations read and write back any
-        /// byte of an attachment's image subresource, and Metal leaves them as the program writes
-        /// them (but where the device's image of it is a Metal texture over the
-        /// buffer, on MoltenVK); or no linear image of the device
+        /// the buffer's bytes between them, and it renders or a shader writes it (or it only
+        /// reads, under [`metal2vulkan::device::PaddedReadsPolicy::Shadow`]), which an image over
+        /// them would hold in its subresource, where Vulkan lets the image's layout transitions
+        /// (its first move among them) read and write any byte of its subresources, and a render
+        /// pass's load and store operations read and write back any byte of an attachment's image
+        /// subresource, and Metal leaves them as the program writes them (but where the device's
+        /// image of it is a Metal texture over the buffer, on MoltenVK); or no linear image of the device
         /// lays its texels out as Metal does in the buffer's memory, holding no byte past them
         /// (over a no-copy buffer's imported
         /// host memory, no linear image made for host allocations does: neither the driver's own

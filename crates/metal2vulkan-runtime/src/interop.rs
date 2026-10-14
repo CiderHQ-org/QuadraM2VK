@@ -108,9 +108,12 @@ impl Texture {
     /// `VK_IMAGE_TILING_LINEAR`, or of `VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT` with
     /// `DRM_FORMAT_MOD_LINEAR` and one memory plane laid out at the texels' offset and the
     /// texture's `bytes_per_row`. Such a texture's rows lie one after another and its image's
-    /// subresource holds no byte but its texels: a texture whose rows lie with the buffer's bytes
-    /// between them gives none (it is a shadow, `shadowed-texture`) but on MoltenVK, whose image
-    /// is a Metal texture over the buffer. The second is the image over host pages imported as
+    /// subresource holds no byte but its texels, or, for a texture that only reads under
+    /// `PaddedReadsPolicy::Alias` (the default), its rows lie apart and its subresource holds the
+    /// buffer's bytes between them too, up to its last row's pitch. A texture whose rows lie with
+    /// the buffer's bytes between them and which renders or which a shader writes gives none (it
+    /// is a shadow, `shadowed-texture`) but on MoltenVK, whose image is a Metal texture over the
+    /// buffer. The second is the image over host pages imported as
     /// dma-bufs (`HostMemory::with_dma_buf`), and over a no-copy buffer's host pages where the
     /// driver's own linear image lays its rows out otherwise than `bytes_per_row`
     /// (`WorkCounts::pitched_host_images` counts them). Ask such an image's layout of its memory

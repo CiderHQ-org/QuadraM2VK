@@ -11,10 +11,11 @@
 //! Whatever form the device gives the texture (its own linear image, a `DRM_FORMAT_MOD_LINEAR`
 //! image laid out at Metal's row pitch, or a shadow), every step reads and writes Metal's bytes at
 //! Metal's places, and no write reaches the bytes between the rows or past the last. A texture
-//! whose rows lie with bytes between them is never a linear image over the pages (Vulkan lets an
-//! image's layout transitions, and a render pass's load and store operations, write every byte of
-//! its subresource), but on a driver that runs on Metal, whose image is a Metal texture over the
-//! buffer:
+//! that renders or writes, whose rows lie with bytes between them, is never a linear image over
+//! the pages (Vulkan lets a render pass's load and store operations write every byte of an
+//! attachment's subresource), but on a driver that runs on Metal, whose image is a Metal texture
+//! over the buffer; nor is one that only reads under the lane's policy (`exact_answers`,
+//! `PaddedReadsPolicy::Shadow`). The steps:
 //!
 //! - **reads**: a blit out, `get_bytes`, a fragment function's `read`, and its `sample` through a
 //!   nearest sampler give the caller's texels; a linear sampler gives what it gives over a private
@@ -36,15 +37,30 @@
 //! an ordinary buffer's padded rows: a texture that only reads names its layout transitions, a
 //! render target a render pass's load and store operations too.
 //!
+//! Under the policy's default (`PaddedReadsPolicy::Alias`), a texture that only reads (`ShaderRead`
+//! usage) is an image over its padded rows where the device lays one at their pitch.
+//! [`a_texture_that_only_reads_keeps_every_byte_of_its_pages`] makes one over each layout and
+//! reads it first through its image, before anything else touches the pages: its image's first
+//! move keeps every byte only where the driver's does (docs/FAST-PATHS.md's known gap), and a
+//! driver that does not fails here, naming the bytes. Then it samples, blits out, reads the
+//! caller's later bytes (the bytes between the rows rewritten too), blits a buffer's box and a
+//! private texture's box in and replaces a box: after each, every byte of the pages is checked.
+//! [`a_padded_texture_that_only_reads_copies_no_shadow_by_default`] counts its copies
+//! (`WorkCounts::shadow_copies`: none across its uses, and a shadow's under
+//! `PaddedReadsPolicy::Shadow`), and
+//! [`a_padded_texture_that_renders_or_writes_is_a_shadow_under_either_policy`] keeps a render
+//! target's, a written texture's and an `Unknown` usage's shadow.
+//!
 //! Printed per layout (`PITCHED-SURFACE`): the form, the images the making counted
 //! (`WorkCounts::pitched_host_images`, `shadowed_textures`), and a shadow's reason.
 
 use super::host_memory::{counting, no_copy, not_importable, Mapping, GUEST_PAGE};
 use super::no_copy_textures::{blending, floats, staged};
-use super::{validated_device, Messages, ScratchCache, WAIT};
+use super::{validated_device, validated_device_with, Messages, ScratchCache, WAIT};
 use crate::air_library::AirLibrary;
 use crate::gpu::TEST_DEVICE;
 use metal2vulkan::bind::SamplerDescriptor;
+use metal2vulkan::device::PaddedReadsPolicy;
 use metal2vulkan::metal::{PixelFormat, PrimitiveType, SamplerMinMagFilter, TextureUsage};
 use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};
 use metal2vulkan::vk::DriverId;
@@ -301,7 +317,7 @@ fn private_with(queue: &CommandQueue, layout: &Layout, texels: &[u8]) -> Texture
 
 /// The owned fixture's `tob_rect` over the whole target with `fragment` (`tob_read` or
 /// `tob_sample`), into one attachment of `pf`.
-fn reading(device: &Device, pf: PixelFormat, fragment: &str) -> RenderPipelineState {
+pub(super) fn reading(device: &Device, pf: PixelFormat, fragment: &str) -> RenderPipelineState {
     let library = device
         .new_library_with_air(&llvm_assemble(&engine_dir().join("tob_renders.ll")).unwrap())
         .unwrap();
@@ -395,7 +411,7 @@ fn blend_pass(
 }
 
 /// A sampler of `filter`, clamped to the edge.
-fn sampler(device: &Device, filter: SamplerMinMagFilter) -> SamplerState {
+pub(super) fn sampler(device: &Device, filter: SamplerMinMagFilter) -> SamplerState {
     let mut d = SamplerDescriptor::new();
     d.min_filter = filter;
     d.mag_filter = filter;
@@ -412,8 +428,14 @@ fn on_metal(device: &Device) -> bool {
 /// `usage`: the pages hold a pattern of their own, the texels `texels_of(.., 1)` laid at the rows;
 /// with the buffer, the mapping and the pages as written. `None` where the device imports no host
 /// memory. Its form is checked against the making's counts: a shadow counted where it is not
-/// aliased, and never a linear image over padded rows off Metal.
-fn surface(device: &Device, layout: &Layout, usage: TextureUsage) -> Option<Surface> {
+/// aliased, and never a linear image over padded rows off Metal but where `padded_alias` (a
+/// texture that only reads, under `PaddedReadsPolicy::Alias`).
+fn surface(
+    device: &Device,
+    layout: &Layout,
+    usage: TextureUsage,
+    padded_alias: bool,
+) -> Option<Surface> {
     let len = layout.len().next_multiple_of(GUEST_PAGE);
     let mapping = Mapping::anonymous(len);
     // The pages: texels a blend keeps finite, and the bytes between the rows a pattern of
@@ -462,7 +484,7 @@ fn surface(device: &Device, layout: &Layout, usage: TextureUsage) -> Option<Surf
         "{what}: aliased {aliased}, but {shadowed} shadows counted"
     );
     assert!(
-        !(aliased && layout.padded()) || on_metal(device),
+        !(aliased && layout.padded()) || on_metal(device) || padded_alias,
         "{what}: rows with bytes between them aliased by a linear image (pitched images \
          {pitched})"
     );
@@ -550,7 +572,7 @@ fn reads_writes_and_renders_as_metal(layout: Layout) {
         let queue = device.new_command_queue().unwrap();
         let texel = layout.texel;
         let usage = TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ;
-        let Some(surface) = surface(&device, &layout, usage) else {
+        let Some(surface) = surface(&device, &layout, usage, false) else {
             return;
         };
         let (texture, what) = (&surface.texture, &surface.what);
@@ -723,7 +745,7 @@ fn first_use_reads_the_bytes(layout: Layout) {
         let device = validated_device(TEST_DEVICE, &messages, cache.path()).unwrap();
         let queue = device.new_command_queue().unwrap();
         let usage = TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ;
-        let Some(surface) = surface(&device, &layout, usage) else {
+        let Some(surface) = surface(&device, &layout, usage, false) else {
             return;
         };
         let texels = rows(&layout, &surface.pages);
@@ -979,7 +1001,7 @@ fn writes_as_metal(layout: Layout) {
         let device = validated_device(TEST_DEVICE, &messages, cache.path()).unwrap();
         let queue = device.new_command_queue().unwrap();
         let usage = TextureUsage::SHADER_READ | TextureUsage::SHADER_WRITE;
-        let Some(surface) = surface(&device, &layout, usage) else {
+        let Some(surface) = surface(&device, &layout, usage, false) else {
             return;
         };
         let mut expected = surface.pages.clone();
@@ -1039,5 +1061,431 @@ per_layout! {
 fn a_fragment_function_s_writes_leave_the_bytes_between_rows() {
     for index in [0, 6, 7, 8, 9, 10] {
         writes_as_metal(LAYOUTS[index]);
+    }
+}
+
+/// A lane device whose policy takes `padded_reads` (the lane's own takes
+/// `PaddedReadsPolicy::Shadow`, with `exact_answers`).
+fn device_with(
+    messages: &Messages,
+    cache: &ScratchCache,
+    padded_reads: PaddedReadsPolicy,
+) -> Device {
+    validated_device_with(TEST_DEVICE, messages, cache.path(), |options| {
+        options.policy.padded_reads = padded_reads;
+    })
+    .unwrap()
+}
+
+/// `boxed` (rows of `bw` texels) laid into `expected` at texel (`bx`, `by`) of `layout`'s rows.
+fn lay_box(layout: &Layout, expected: &mut [u8], (bx, by, bw): (u64, u64, u64), boxed: &[u8]) {
+    for (y, row) in boxed.chunks((bw * layout.texel) as usize).enumerate() {
+        let at = ((by + y as u64) * layout.bpr + bx * layout.texel) as usize;
+        expected[at..at + row.len()].copy_from_slice(row);
+    }
+}
+
+/// A texture of `layout` that only reads (`ShaderRead` usage), over a no-copy buffer, on a device
+/// of the policy's default (`PaddedReadsPolicy::Alias`): its first use reads it through its image
+/// (a fragment function's `read`) before any command reads or writes the pages another way, and
+/// must read the pages' texels and leave every byte of the pages, the bytes between the rows
+/// among them, as it was: the image's first move keeps them only as far as the driver's does
+/// (docs/FAST-PATHS.md's known gap). Then its reads (a nearest and a linear sample, `get_bytes`,
+/// a blit out), the caller's later bytes (texels and the bytes between the rows alike) read by a
+/// sample and a blit, and its writes that Metal makes of any texture (a buffer's box blitted in
+/// at an odd origin, `replace_region` of a box, a private texture's box blitted in): each reads
+/// Metal's texels, and after each every byte of the pages is the program's. Whether it aliased,
+/// and whether the device runs on Metal; `None` where it imports no host memory.
+fn reads_and_blits_as_metal(layout: Layout) -> Option<(bool, bool)> {
+    let cache = ScratchCache::new().unwrap();
+    let messages = Messages::default();
+    let made = {
+        let device = device_with(&messages, &cache, PaddedReadsPolicy::Alias);
+        let queue = device.new_command_queue().unwrap();
+        let texel = layout.texel;
+        let surface = surface(&device, &layout, TextureUsage::SHADER_READ, true)?;
+        let (texture, what) = (&surface.texture, &surface.what);
+        let mut expected = surface.pages.clone();
+        let check = |step: &str, expected: &[u8]| surface.check(&layout, step, expected);
+        let read = |step: &str, ours: &[u8], theirs: &[u8]| {
+            let (count, first) = differing(ours, theirs, texel);
+            assert!(
+                count == 0,
+                "{what}, {step}: {count} texels differ, the first at texel {first:?}"
+            );
+        };
+
+        // The first use, through the image, before anything else touches the pages.
+        let texels = rows(&layout, &expected);
+        let reads = reading(&device, layout.pf, "tob_read");
+        read(
+            "its first use, a fragment function's read",
+            &drawn(&queue, &layout, &reads, texture, None),
+            &texels,
+        );
+        check("its first use", &expected);
+
+        // Its other reads.
+        let samples = reading(&device, layout.pf, "tob_sample");
+        let nearest = sampler(&device, SamplerMinMagFilter::Nearest);
+        let linear = sampler(&device, SamplerMinMagFilter::Linear);
+        read(
+            "a nearest sample",
+            &drawn(&queue, &layout, &samples, texture, Some(&nearest)),
+            &texels,
+        );
+        let private = private_with(&queue, &layout, &texels);
+        read(
+            "a linear sample, against a private texture's",
+            &drawn(&queue, &layout, &samples, texture, Some(&linear)),
+            &drawn(&queue, &layout, &samples, &private, Some(&linear)),
+        );
+        let mut got = vec![0u8; texels.len()];
+        let whole = Region::new_2d(0, 0, layout.w, layout.h);
+        texture
+            .get_bytes(&mut got, layout.row(), 0, whole, 0, 0)
+            .unwrap();
+        read("get_bytes", &got, &texels);
+        read("a blit out", &blit_out(&queue, &layout, texture), &texels);
+        check("the reads", &expected);
+
+        // The caller's later bytes: new texels, and new bytes between the rows, which no later
+        // command may move.
+        let mut later_pages = counting(surface.len, 9);
+        let later = texels_of(&layout, texels.len(), 2);
+        lay(&layout, &mut later_pages, &later);
+        expected.copy_from_slice(&later_pages);
+        surface.mapping.write(0, &expected);
+        read(
+            "a nearest sample of the caller's later bytes",
+            &drawn(&queue, &layout, &samples, texture, Some(&nearest)),
+            &later,
+        );
+        read(
+            "a fragment function's read of the caller's later bytes",
+            &drawn(&queue, &layout, &reads, texture, None),
+            &later,
+        );
+        check("the reads of the caller's later bytes", &expected);
+
+        // Writes Metal makes of any texture: a buffer's box blitted in at an odd origin.
+        let (bx, by, bw, bh) = (3, 5, layout.w / 2 + 1, layout.h / 3 + 1);
+        let boxed = texels_of(&layout, (bw * bh * texel) as usize, 3);
+        let source = staged(&device, &boxed);
+        let command_buffer = queue.command_buffer().unwrap();
+        let mut blit = command_buffer.blit_command_encoder().unwrap();
+        blit.copy_from_buffer_to_texture(
+            &source,
+            0,
+            bw * texel,
+            boxed.len() as u64,
+            Size::new(bw, bh, 1),
+            texture,
+            0,
+            0,
+            Origin::new(bx, by, 0),
+            BlitOption::None,
+        )
+        .unwrap();
+        blit.end_encoding().unwrap();
+        run(&command_buffer);
+        lay_box(&layout, &mut expected, (bx, by, bw), &boxed);
+        check("a buffer's box blitted in", &expected);
+        // `replace_region` of a box.
+        let (rx, ry, rw, rh) = (layout.w / 3, 1, layout.w / 4 + 1, layout.h / 2);
+        let replaced = texels_of(&layout, (rw * rh * texel) as usize, 4);
+        texture
+            .replace_region(
+                Region::new_2d(rx, ry, rw, rh),
+                0,
+                0,
+                &replaced,
+                rw * texel,
+                0,
+            )
+            .unwrap();
+        lay_box(&layout, &mut expected, (rx, ry, rw), &replaced);
+        check("replace_region", &expected);
+        // A private texture's box blitted in.
+        let other = private_with(&queue, &layout, &texels_of(&layout, texels.len(), 5));
+        let (fx, fy, tx, ty) = (7, 1, layout.w / 3, 2);
+        let size = Size::new(layout.w / 2, layout.h / 2, 1);
+        blit_box(
+            &queue,
+            (&other, Origin::new(fx, fy, 0)),
+            (texture, Origin::new(tx, ty, 0)),
+            size,
+        );
+        let from = blit_out(&queue, &layout, &other);
+        for y in 0..size.height {
+            let start = ((fy + y) * layout.row() + fx * texel) as usize;
+            let row = &from[start..start + (size.width * texel) as usize];
+            let at = ((ty + y) * layout.bpr + tx * texel) as usize;
+            expected[at..at + row.len()].copy_from_slice(row);
+        }
+        check("a private texture's box blitted in", &expected);
+        // And the writes read back through the image.
+        read(
+            "a fragment function's read after the writes",
+            &drawn(&queue, &layout, &reads, texture, None),
+            &rows(&layout, &expected),
+        );
+        check("the last read", &expected);
+        let made = (surface.form.0, on_metal(&device));
+        surface.report(&device, &messages);
+        made
+    };
+    let messages = messages.take();
+    assert!(
+        messages.is_empty(),
+        "the validation layer reported: {messages:#?}"
+    );
+    Some(made)
+}
+
+/// [`reads_and_blits_as_metal`] over each of [`LAYOUTS`]: a texture that only reads, aliased
+/// where the device lays an image at the rows' pitch, keeps every byte of its pages through its
+/// first move, its reads, the caller's writes and Metal's blits into it. Printed: how many of the
+/// padded layouts aliased (`PITCHED-READS`); off Metal at least one must, or no first move over
+/// padded rows was checked.
+#[test]
+fn a_texture_that_only_reads_keeps_every_byte_of_its_pages() {
+    let (mut aliased, mut padded, mut metal) = (0, 0, false);
+    for layout in LAYOUTS {
+        let Some((alias, on_metal)) = reads_and_blits_as_metal(layout) else {
+            return;
+        };
+        metal = on_metal;
+        if layout.padded() {
+            aliased += u64::from(alias);
+            padded += 1;
+        }
+    }
+    eprintln!("PITCHED-READS: {aliased} of {padded} padded layouts that only read aliased");
+    assert!(
+        aliased > 0 || metal,
+        "no padded layout that only reads was aliased, so no first move over padded rows was \
+         checked"
+    );
+}
+
+/// A texture that only reads over padded rows (each padded layout of [`LAYOUTS`] over a no-copy
+/// buffer) copies no shadow under the policy's default where it is aliased:
+/// `WorkCounts::shadow_copies` stays the same across three sampling passes and a blit out. Under
+/// `PaddedReadsPolicy::Shadow` the same texture is a shadow (but on Metal, whose image of it is a
+/// Metal texture over the buffer either way), copied in for its uses. Off Metal at least one layout
+/// is aliased by default.
+#[test]
+fn a_padded_texture_that_only_reads_copies_no_shadow_by_default() {
+    let mut aliased_layouts = 0;
+    let mut metal = false;
+    for layout in LAYOUTS.into_iter().filter(Layout::padded) {
+        for policy in [PaddedReadsPolicy::Alias, PaddedReadsPolicy::Shadow] {
+            let cache = ScratchCache::new().unwrap();
+            let messages = Messages::default();
+            {
+                let device = device_with(&messages, &cache, policy);
+                metal = on_metal(&device);
+                let queue = device.new_command_queue().unwrap();
+                let alias = policy == PaddedReadsPolicy::Alias;
+                let usage = TextureUsage::SHADER_READ;
+                let Some(surface) = surface(&device, &layout, usage, alias) else {
+                    return;
+                };
+                let (aliased, _, _) = surface.form;
+                let what = format!("{} under {policy:?}", surface.what);
+                if !alias {
+                    assert!(!aliased || metal, "{what}: aliased");
+                }
+                let texels = rows(&layout, &surface.pages);
+                let samples = reading(&device, layout.pf, "tob_sample");
+                let nearest = sampler(&device, SamplerMinMagFilter::Nearest);
+                let copies = || device.work_counts().shadow_copies;
+                let before = copies();
+                for _ in 0..3 {
+                    let got = drawn(&queue, &layout, &samples, &surface.texture, Some(&nearest));
+                    assert!(
+                        got == texels,
+                        "{what}: a sample differs from the pages' texels"
+                    );
+                }
+                assert!(
+                    blit_out(&queue, &layout, &surface.texture) == texels,
+                    "{what}"
+                );
+                let copied = copies() - before;
+                eprintln!(
+                    "PITCHED-READS on {}: {what}: {}, {copied} shadow copies over three samples \
+                     and a blit out",
+                    device.name(),
+                    if aliased { "aliased" } else { "shadowed" }
+                );
+                if aliased {
+                    assert_eq!(copied, 0, "{what}: an aliased texture copied a shadow");
+                    aliased_layouts += u64::from(alias);
+                } else {
+                    assert!(copied > 0, "{what}: a shadow its uses copied nothing into");
+                }
+                surface.check(&layout, "its uses", &surface.pages);
+                surface.report(&device, &messages);
+            }
+            let messages = messages.take();
+            assert!(
+                messages.is_empty(),
+                "the validation layer reported: {messages:#?}"
+            );
+        }
+    }
+    assert!(
+        aliased_layouts > 0 || metal,
+        "no padded layout that only reads was aliased by default"
+    );
+}
+
+/// A padded texture that renders (`RenderTarget`), that a shader writes (`ShaderWrite`), or of
+/// `Unknown` usage (which Metal reports as both) is a shadow under either policy, off Metal: over
+/// a no-copy buffer's pages and over an ordinary buffer alike (the browser's tile, [`LAYOUTS`]'
+/// first).
+#[test]
+fn a_padded_texture_that_renders_or_writes_is_a_shadow_under_either_policy() {
+    let layout = LAYOUTS[0];
+    assert!(layout.padded(), "{}", layout.name);
+    for policy in [PaddedReadsPolicy::Alias, PaddedReadsPolicy::Shadow] {
+        for usage in [
+            TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ,
+            TextureUsage::SHADER_READ | TextureUsage::SHADER_WRITE,
+            TextureUsage::UNKNOWN,
+        ] {
+            let cache = ScratchCache::new().unwrap();
+            let messages = Messages::default();
+            {
+                let device = device_with(&messages, &cache, policy);
+                // Over a no-copy buffer's pages (`surface` checks the form against the counts).
+                if let Some(surface) = surface(&device, &layout, usage, false) {
+                    surface.report(&device, &messages);
+                }
+                // Over an ordinary buffer.
+                let buffer = device
+                    .new_buffer(layout.bpr * layout.h, ResourceOptions::default())
+                    .unwrap();
+                let mut d = TextureDescriptor::texture_2d(layout.pf, layout.w, layout.h, false);
+                d.usage = usage;
+                d.resource_options = buffer.resource_options();
+                let texture = buffer.new_texture(&d, 0, layout.bpr).unwrap();
+                // SAFETY: the handle is only compared, while the texture lives.
+                let aliased = unsafe { texture.vk_image() }.is_some();
+                assert!(
+                    !aliased,
+                    "{} ({usage:?}) under {policy:?}, an ordinary buffer's: aliased",
+                    layout.name
+                );
+                messages.take_notices();
+                drop((texture, buffer));
+            }
+            let messages = messages.take();
+            assert!(
+                messages.is_empty(),
+                "the validation layer reported: {messages:#?}"
+            );
+        }
+    }
+}
+
+/// A texture that only reads over an ordinary `Shared` buffer's padded rows (each padded layout
+/// of [`LAYOUTS`]): under the policy's default it is the device's own linear image over the
+/// buffer's memory, made `PREINITIALIZED`, where the device lays one at the rows' pitch, and its
+/// first use, a fragment function's read through it, reads the buffer's texels and leaves every
+/// byte of the buffer, the bytes between the rows among them, as it was; an aliased one copies
+/// no shadow over that read and a nearest sample. Under `PaddedReadsPolicy::Shadow` it is a
+/// shadow on every device. Printed (`PITCHED-READS`): each layout's form, and a shadow's reason.
+#[test]
+fn a_padded_texture_that_only_reads_over_an_ordinary_buffer_keeps_its_bytes() {
+    for layout in LAYOUTS.into_iter().filter(Layout::padded) {
+        for policy in [PaddedReadsPolicy::Alias, PaddedReadsPolicy::Shadow] {
+            let cache = ScratchCache::new().unwrap();
+            let messages = Messages::default();
+            {
+                let device = device_with(&messages, &cache, policy);
+                let queue = device.new_command_queue().unwrap();
+                let len = layout.bpr * layout.h;
+                let buffer = device.new_buffer(len, ResourceOptions::default()).unwrap();
+                let mut bytes = counting(len as usize, 11);
+                lay(
+                    &layout,
+                    &mut bytes,
+                    &texels_of(&layout, (layout.row() * layout.h) as usize, 6),
+                );
+                let contents = buffer.contents().unwrap();
+                // SAFETY: a new `Shared` buffer of `len` bytes, which no command uses yet.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), contents.as_ptr(), bytes.len())
+                };
+                let mut d = TextureDescriptor::texture_2d(layout.pf, layout.w, layout.h, false);
+                d.usage = TextureUsage::SHADER_READ;
+                d.resource_options = buffer.resource_options();
+                let texture = buffer.new_texture(&d, 0, layout.bpr).unwrap();
+                // SAFETY: the handle is only compared, while the texture lives.
+                let aliased = unsafe { texture.vk_image() }.is_some();
+                let what = format!(
+                    "{} (ShaderRead) under {policy:?}, an ordinary buffer's",
+                    layout.name
+                );
+                if policy == PaddedReadsPolicy::Shadow {
+                    assert!(!aliased, "{what}: aliased");
+                }
+                let texels = rows(&layout, &bytes);
+                let copies = || device.work_counts().shadow_copies;
+                let before = copies();
+                let reads = reading(&device, layout.pf, "tob_read");
+                let read = drawn(&queue, &layout, &reads, &texture, None);
+                let (count, first) = differing(&read, &texels, layout.texel);
+                assert!(
+                    count == 0,
+                    "{what}, its first use: {count} texels read differ from the buffer's, the \
+                     first at texel {first:?}"
+                );
+                let now = bytes_of(&buffer);
+                assert!(
+                    now == bytes,
+                    "{what}, its first use: the bytes between the rows (or past the last) \
+                     changed: {}",
+                    padding_changes(&layout, &now, &bytes)
+                );
+                let samples = reading(&device, layout.pf, "tob_sample");
+                let nearest = sampler(&device, SamplerMinMagFilter::Nearest);
+                let got = drawn(&queue, &layout, &samples, &texture, Some(&nearest));
+                assert!(
+                    got == texels,
+                    "{what}: a sample differs from the buffer's texels"
+                );
+                let copied = copies() - before;
+                if aliased {
+                    assert_eq!(copied, 0, "{what}: an aliased texture copied a shadow");
+                }
+                assert!(
+                    bytes_of(&buffer) == bytes,
+                    "{what}: the buffer's bytes changed"
+                );
+                let reason = messages
+                    .take_notices()
+                    .into_iter()
+                    .filter_map(|message| message.degradation)
+                    .find(|notice| notice.degradation == Degradation::ShadowedTexture)
+                    .map(|notice| format!(": {}", notice.reason))
+                    .unwrap_or_default();
+                eprintln!(
+                    "PITCHED-READS on {}: {what}: {}, {copied} shadow copies over a read and a \
+                     sample{reason}",
+                    device.name(),
+                    if aliased { "aliased" } else { "shadowed" }
+                );
+                drop((texture, buffer));
+            }
+            let messages = messages.take();
+            assert!(
+                messages.is_empty(),
+                "the validation layer reported: {messages:#?}"
+            );
+        }
     }
 }
