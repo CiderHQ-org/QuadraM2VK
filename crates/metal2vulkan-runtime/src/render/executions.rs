@@ -2022,6 +2022,7 @@ impl RenderExecution {
             render_target_array_length: snapshot.render_target_array_length,
             state: snapshot.state.clone(),
             pipeline: None,
+            routed: None,
             vertex: snapshot.vertex.clone(),
             fragment: snapshot.fragment.clone(),
             object: snapshot.object.clone(),

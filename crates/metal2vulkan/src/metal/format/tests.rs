@@ -105,7 +105,7 @@ fn refused_formats_are_exactly_the_documented_set() {
 fn direct_formats_round_trip() {
     let mut back: BTreeMap<vk::Format, Vec<PixelFormat>> = BTreeMap::new();
     for &pf in PixelFormat::ALL {
-        let Repr::Candidates(aspects, candidates) = repr(pf) else {
+        let Repr::Candidates(aspects, candidates) = make_repr(pf) else {
             continue;
         };
         assert!(!candidates.is_empty(), "{pf:?}");
@@ -183,7 +183,7 @@ fn swap_red_blue(name: &str) -> String {
 fn swizzled_twins_share_the_bit_layout() {
     use vk::ComponentSwizzle as S;
     for &pf in PixelFormat::ALL {
-        let Repr::Candidates(_, candidates) = repr(pf) else {
+        let Repr::Candidates(_, candidates) = make_repr(pf) else {
             continue;
         };
         for c in candidates.iter().filter(|c| {
@@ -240,7 +240,7 @@ fn swizzled_twins_share_the_bit_layout() {
 #[test]
 fn numeric_types_and_packed_layouts_agree() {
     for &pf in PixelFormat::ALL {
-        let Repr::Candidates(aspects, candidates) = repr(pf) else {
+        let Repr::Candidates(aspects, candidates) = make_repr(pf) else {
             continue;
         };
         let ty = sampled_type(pf).unwrap();
@@ -419,7 +419,7 @@ fn selection_on_every_committed_profile_is_sound() {
     for (stem, dev) in committed_devices() {
         let profile = dev.profile();
         for &pf in PixelFormat::ALL {
-            let Repr::Candidates(aspects, candidates) = repr(pf) else {
+            let Repr::Candidates(aspects, candidates) = make_repr(pf) else {
                 continue;
             };
             for set in &sets {
@@ -1034,7 +1034,7 @@ fn padded_formats_are_held_raw() {
 fn swizzled_views_read_metal_s_opaque_black_border() {
     let mut views = 0;
     for &pf in PixelFormat::ALL {
-        let Repr::Candidates(_, candidates) = repr(pf) else {
+        let Repr::Candidates(_, candidates) = make_repr(pf) else {
             continue;
         };
         for c in candidates.iter().filter(|c| {
@@ -1353,7 +1353,7 @@ fn bfloat_formats_are_held_raw() {
         assert_eq!(byte_format(pf), Some(raw), "{pf:?}");
         assert_eq!(sampled_type(pf), Some(SampledType::Float), "{pf:?}");
         assert_eq!(out_of_bounds_alpha_one(pf), Some(components < 4), "{pf:?}");
-        let Repr::Candidates(aspects, candidates) = repr(pf) else {
+        let Repr::Candidates(aspects, candidates) = make_repr(pf) else {
             panic!("{pf:?} has no candidate");
         };
         assert_eq!(aspects, vk::ImageAspectFlags::COLOR);
@@ -1511,7 +1511,7 @@ fn rgbx_formats_are_held_in_their_rgba_twins() {
         assert_eq!(sampled_type(pf), sampled_type(twin), "{pf:?}");
         assert_eq!(out_of_bounds_alpha_one(pf), Some(true), "{pf:?}");
         assert_eq!(channels(pf), Some([true, true, true, false]), "{pf:?}");
-        let Repr::Candidates(aspects, candidates) = repr(pf) else {
+        let Repr::Candidates(aspects, candidates) = make_repr(pf) else {
             panic!("{pf:?} has no candidate");
         };
         assert_eq!(aspects, vk::ImageAspectFlags::COLOR);
@@ -2536,4 +2536,23 @@ fn clears_store_metal_s_texels_on_each_route() {
         codes(bgr.clear_texel([0.25, -0.25, f64::NAN, 0.0], ClearRoute::ThroughHalf)),
         [512, 256, 384, 3]
     );
+}
+
+/// The table [`repr`] reads holds [`make_repr`]'s entry of every format, at its raw value.
+#[test]
+fn the_format_table_holds_each_format_s_entry() {
+    let summary = |repr: &Repr| match repr {
+        Repr::Candidates(aspects, candidates) => format!(
+            "{aspects:?} {:?}",
+            candidates
+                .iter()
+                .map(|c| (c.format, c.emulation))
+                .collect::<Vec<_>>()
+        ),
+        Repr::NotImplemented => "not implemented".to_owned(),
+        Repr::NotAFormat => "not a format".to_owned(),
+    };
+    for &pf in PixelFormat::ALL {
+        assert_eq!(summary(repr(pf)), summary(&make_repr(pf)), "{pf:?}");
+    }
 }

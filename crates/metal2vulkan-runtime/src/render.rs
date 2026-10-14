@@ -602,7 +602,7 @@ struct DrawSettings {
     /// The depth bias its primitives take: none for points and lines.
     bias: Option<DepthBiasEffect>,
     /// Where its colors go among the pass's, the pass's colors it zeroes and its own it drops.
-    routing: Routing,
+    routing: Arc<Routing>,
     zeroed_colors: BTreeMap<u32, PixelFormat>,
     dropped_colors: BTreeSet<u32>,
 }
@@ -924,6 +924,9 @@ pub struct RenderCommandEncoder {
     render_target_array_length: u32,
     state: EncoderState,
     pipeline: Option<RenderPipelineState>,
+    /// The routing of the drawing state last set ([`routing`](Self::routing)), which its check
+    /// and each of its draws (their settings and their coverage) read.
+    routed: Option<Routed>,
     vertex: ArgumentTable,
     fragment: ArgumentTable,
     /// The object and mesh stages' tables, which a mesh render pipeline's draws bind
@@ -1181,6 +1184,14 @@ impl QuietBoundValues {
     }
 }
 
+/// A drawing state's routing into a pass's colors ([`RenderCommandEncoder::routing`]), with the
+/// state and the pass's color formats it was found for: a function of those alone.
+struct Routed {
+    state: DrawingState,
+    pass: [Option<PixelFormat>; MAX_COLOR_ATTACHMENTS],
+    routing: Result<Arc<Routing>, u32>,
+}
+
 impl std::fmt::Debug for RenderCommandEncoder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RenderCommandEncoder")
@@ -1285,6 +1296,7 @@ impl CommandBuffer {
             layout,
             passes: vec![(shape, compatible)],
             pipeline: None,
+            routed: None,
             vertex: ArgumentTable::default(),
             fragment: ArgumentTable::default(),
             object: ArgumentTable::default(),
@@ -1498,6 +1510,15 @@ impl RenderCommandEncoder {
         const CALL: &str = "set_render_pipeline_state";
         self.core.check_device(CALL, state.device())?;
         let state = self.drawn_as(state)?;
+        // Routed once here: the check and each draw read it (`routing`).
+        if let RenderStateKind::Graphics(graphics) = state.kind() {
+            let pass = self.pass_formats();
+            self.routed = Some(Routed {
+                routing: Self::route(graphics, &pass).map(Arc::new),
+                state: graphics.clone(),
+                pass,
+            });
+        }
         self.check_pipeline(CALL, &state)?;
         self.pipeline = Some(state);
         Ok(())
@@ -4827,18 +4848,30 @@ impl RenderCommandEncoder {
     /// state that writes colors (Metal probes); each color at its own index for one that writes
     /// none. `Err(index)`, refused `AttachmentFormat(Color(index))`, where plain Metal stores part
     /// of a color, or more than one, into an attachment (`color_reformat::routing`), `index` the
-    /// lowest color that moves.
-    fn routing(&self, pipeline: &DrawingState) -> Result<Routing, u32> {
-        let state = pipeline.descriptor().color_formats();
+    /// lowest color that moves. The one the encoder kept as `pipeline` was set
+    /// ([`set_render_pipeline_state`](Self::set_render_pipeline_state)) where the pass's colors
+    /// are still the ones it was found for, else found again.
+    fn routing(&self, pipeline: &DrawingState) -> Result<Arc<Routing>, u32> {
         let pass = self.pass_formats();
-        if !Self::writes_colors(pipeline) {
-            return Ok(Routing::by_index(&state, &pass));
+        match &self.routed {
+            Some(routed) if routed.state.same(pipeline) && routed.pass == pass => {
+                routed.routing.clone()
+            }
+            _ => Self::route(pipeline, &pass).map(Arc::new),
         }
-        match color_reformat::routing(&state, &pass) {
+    }
+
+    /// [`routing`](Self::routing), found for a pass of the colors `pass`.
+    fn route(pipeline: &DrawingState, pass: &[Option<PixelFormat>]) -> Result<Routing, u32> {
+        let state = pipeline.descriptor().color_formats();
+        if !Self::writes_colors(pipeline) {
+            return Ok(Routing::by_index(&state, pass));
+        }
+        match color_reformat::routing(&state, pass) {
             Some(routing) => Ok(routing),
-            None => match color_reformat::misplaced(&state, &pass) {
+            None => match color_reformat::misplaced(&state, pass) {
                 Some(index) => Err(index),
-                None => Ok(Routing::by_index(&state, &pass)),
+                None => Ok(Routing::by_index(&state, pass)),
             },
         }
     }
@@ -5392,13 +5425,11 @@ impl RenderCommandEncoder {
     }
 
     /// The pass's color attachments' pixel formats by index, `None` where it has none.
-    fn pass_formats(&self) -> Vec<Option<PixelFormat>> {
-        (0..MAX_COLOR_ATTACHMENTS)
-            .map(|index| {
-                let color = self.layout.colors.get(index).and_then(Option::as_ref);
-                color.map(|c| c.target.texture.pixel_format())
-            })
-            .collect()
+    fn pass_formats(&self) -> [Option<PixelFormat>; MAX_COLOR_ATTACHMENTS] {
+        std::array::from_fn(|index| {
+            let color = self.layout.colors.get(index).and_then(Option::as_ref);
+            color.map(|c| c.target.texture.pixel_format())
+        })
     }
 
     /// The imageblock bytes per sample the pass gives a pipeline: the larger of its
@@ -5564,10 +5595,8 @@ impl RenderCommandEncoder {
                                 .map_err(|_| internal("a draw of a state its pass refuses"))?;
                             let zeroed = !self.zeroed_colors(state, &routing).is_empty();
                             let writes = linear_attachment::writes(colors);
-                            self.coverage.add(
-                                &linear_attachment::pass_writes(&writes, &routing, zeroed),
-                                &rects,
-                            )
+                            let writes = linear_attachment::pass_writes(&writes, &routing, zeroed);
+                            self.coverage.add(&writes, &rects)
                         }
                         _ => self.coverage.everywhere(),
                     }
@@ -7486,7 +7515,7 @@ impl RenderCommandEncoder {
             reshape.field(&mut state.tile_threadgroup, tile_threadgroup);
             live.reshaped(reshape);
             let shape = live.shape(&self.core.device().shared().counts);
-            // Through what the pipeline state last settled (`GraphicsState::settle_shape`).
+            // Through what the pipeline state settled lately (`GraphicsState::settle_shape`).
             let settled = match pipeline.settle_shape(&shape, self.forms) {
                 // A variant whose shadows the storage form or the bind layer refuses (a mesh
                 // pipeline's, an amplified draw's): the draw binds none, and its caller gives

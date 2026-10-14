@@ -18,6 +18,7 @@
 //! and a refusal names the version or extension that would expose it.
 
 use std::collections::BTreeSet;
+use std::sync::OnceLock;
 
 use crate::bind::neutral::numeric_type;
 use crate::device::enables::format_exposure_gap;
@@ -1158,8 +1159,28 @@ pub fn to_rotated_image<T: Copy>(metal: [T; 4]) -> [T; 4] {
     [metal[3], metal[0], metal[1], metal[2]]
 }
 
+/// The candidate table's entry for `pf` ([`make_repr`]): the table is made once, for every format,
+/// at the first ask. A draw asks it of its pass's and its textures' formats, a dozen times each,
+/// and each entry made anew allocated its candidates.
+fn repr(pf: PixelFormat) -> &'static Repr {
+    static TABLE: OnceLock<Vec<Repr>> = OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        let len = PixelFormat::ALL
+            .iter()
+            .map(|pf| pf.as_raw() as usize + 1)
+            .max()
+            .unwrap_or(0);
+        let mut table: Vec<Repr> = (0..len).map(|_| Repr::NotAFormat).collect();
+        for &pf in PixelFormat::ALL {
+            table[pf.as_raw() as usize] = make_repr(pf);
+        }
+        table
+    });
+    &table[pf.as_raw() as usize]
+}
+
 /// The candidate table. Order is preference: the direct format first.
-fn repr(pf: PixelFormat) -> Repr {
+fn make_repr(pf: PixelFormat) -> Repr {
     use vk::ComponentSwizzle as S;
     use vk::Format as F;
     use FormatEmulation as E;
@@ -1539,9 +1560,9 @@ fn exposure_gap(format: vk::Format, profile: &DeviceProfile) -> Option<Capabilit
 }
 
 /// The candidates of `pf`, or the refusal for a format without one.
-fn candidates(pf: PixelFormat) -> Result<(vk::ImageAspectFlags, Vec<Candidate>), Error> {
+fn candidates(pf: PixelFormat) -> Result<(vk::ImageAspectFlags, &'static [Candidate]), Error> {
     match repr(pf) {
-        Repr::Candidates(aspects, candidates) => Ok((aspects, candidates)),
+        Repr::Candidates(aspects, candidates) => Ok((*aspects, candidates)),
         Repr::NotImplemented => Err(Unsupported::not_implemented(Feature::Format).into()),
         Repr::NotAFormat => Err(Error::InvalidDescriptor(
             DescriptorError::PlaceholderEnumValue {
@@ -1810,7 +1831,7 @@ pub fn explicit_imageblock_sample_length(
 /// Vulkan representation.
 pub fn aspects(pf: PixelFormat) -> Option<vk::ImageAspectFlags> {
     match repr(pf) {
-        Repr::Candidates(aspects, _) => Some(aspects),
+        Repr::Candidates(aspects, _) => Some(*aspects),
         _ => None,
     }
 }

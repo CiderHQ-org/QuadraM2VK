@@ -775,7 +775,7 @@ pub struct WorkCounts {
     /// shapes and whose other bind state is its encoder's last draw's.
     pub draw_shapes_made: u64,
     /// Draws that settled their variant and plan from their bind shapes: none for a draw whose
-    /// bind shape is the one its pipeline state last settled in the same buffer forms.
+    /// bind shape is one of the latest its pipeline state settled in the same buffer forms.
     pub draws_settled: u64,
     /// Notices of a variant's that a bind announces at every occurrence
     /// (`DeviceOptions::announce_each`), made for a bind: once per variant until the

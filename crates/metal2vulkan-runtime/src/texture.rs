@@ -136,7 +136,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::ops::Range;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use wrapped::WrappedImage;
 
 mod attributes;
@@ -333,6 +333,13 @@ pub(super) struct TextureShared {
     /// `HeapPlace::heap`), so a command buffer that keeps the image keeps nothing of the heap but
     /// its memory, and the heap goes at the program's release, as Metal frees it.
     heap: Option<Heap>,
+    /// The formats a storage binding views the texture's pixel format in
+    /// (`storage_view_formats`), found at the first binding plan that reads them ([`facts`]) and
+    /// kept: they follow from the pixel format and the device's profile alone, and finding them
+    /// again at every draw was 2.2% of the thread encoding a window server's frame on RADV.
+    ///
+    /// [`facts`]: Texture::facts
+    storage_formats: OnceLock<Vec<metal2vulkan::vk::Format>>,
 }
 
 impl Drop for TextureShared {
@@ -4021,6 +4028,7 @@ impl Texture {
             kept_backings: Mutex::new(Vec::new()),
             render_shadow: Mutex::new(None),
             heap,
+            storage_formats: OnceLock::new(),
         }));
         if let Some(objects) = texture.0.storage.objects() {
             objects.object_made();
@@ -4405,10 +4413,13 @@ impl Texture {
         // the shadow, made with them.
         facts.own_format_views = !self.needs_usage_shadow(true)
             && self.image().is_ok_and(|image| {
-                let profile = self.device().compile_device().profile();
-                storage_view_formats(self.0.record.pixel_format, profile)
-                    .into_iter()
-                    .any(|format| !views_as(image.plan(), format, false))
+                let formats = self.0.storage_formats.get_or_init(|| {
+                    let profile = self.device().compile_device().profile();
+                    storage_view_formats(self.0.record.pixel_format, profile)
+                });
+                formats
+                    .iter()
+                    .any(|&format| !views_as(image.plan(), format, false))
             });
         facts
     }

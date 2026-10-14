@@ -72,7 +72,7 @@ use metal2vulkan::pipeline::{
     TessellationDescriptor,
 };
 use metal2vulkan::reflection::{LinkedUseAnswers, RenderPipelineReflection};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 /// A Metal render pipeline state (`MTLRenderPipelineState`): one that draws, or a tile pipeline's
@@ -188,8 +188,9 @@ pub(crate) struct Program {
     /// Its variants' capture forms (`VariantKey::captured_positions`), as capture replay asked for
     /// them (`GraphicsState::capture_variant`): at most [`CAPTURES`].
     captures: Mutex<Lru<VariantKey, Capture>>,
-    /// What its last settle settled, in which buffer forms (`GraphicsState::settle_shape`).
-    last_settled: Mutex<Option<(BufferForms, Settled)>>,
+    /// What its last [`SETTLED`] settles of other shapes settled, in which buffer forms, the
+    /// latest used first (`GraphicsState::settle_shape`).
+    settled: Mutex<VecDeque<(BufferForms, Settled)>>,
     /// The `VkPipeline` its last draw found made (`RenderVariant::begin_graphics_pipeline`).
     last_pipeline: Mutex<Option<LastPipeline>>,
     /// What its pool pieces hold (`piece_holds.rs`): its draws' makings and its capture forms'
@@ -242,6 +243,11 @@ pub(crate) struct Settled {
     pub(crate) variant: Arc<RenderVariant>,
     pub(crate) plan: Arc<BindingPlan>,
 }
+
+/// The most settles a state keeps (`GraphicsState::settle_shape`). A window server's draws of one
+/// state take a few shapes in turn: a pass's first draw binds nothing else, and a later one finds
+/// what the draws of other states left bound (their bytes), which is of its shape.
+const SETTLED: usize = 4;
 
 /// The most capture forms of its variants a state keeps (`GraphicsState::capture_variant`): a
 /// settled key's and the key its plan asks for, of each form a pass draws.
@@ -1524,7 +1530,7 @@ impl GraphicsState {
                 texture_accesses: TextureAccessMemo::new(),
                 refused_interlocks: Mutex::new(Vec::new()),
                 captures: Mutex::new(Lru::counted(CAPTURES)),
-                last_settled: Mutex::new(None),
+                settled: Mutex::new(VecDeque::with_capacity(SETTLED)),
                 last_pipeline: Mutex::new(None),
                 pieces: PieceHolds::new(),
             };
@@ -1752,21 +1758,26 @@ impl GraphicsState {
     }
 
     /// What a draw of bind shape `shape` runs on in `forms` ([`settle`](Self::settle)'s answer),
-    /// through what the state last settled: a draw of an equal shape in the same forms (the very
-    /// one, which its encoder kept, `live_bind.rs`, or an equal one) settles as it did, not
-    /// planned again; any other settles, and is kept. Exact: what `settle` answers is a function
-    /// of the shape and `forms` alone. A refused settle keeps nothing, and is answered as `settle`
-    /// refuses it.
+    /// through what the state settled last for its latest [`SETTLED`] shapes: a draw of an equal
+    /// shape in the same forms (the very one, which its encoder kept, `live_bind.rs`, or an equal
+    /// one) settles as it did, not planned again; any other settles, and is kept in place of the
+    /// one used least lately. Exact: what `settle` answers is a function of the shape and `forms`
+    /// alone. A refused settle keeps nothing, and is answered as `settle` refuses it.
     pub(crate) fn settle_shape(
         &self,
         shape: &Arc<BindShape>,
         forms: BufferForms,
     ) -> Result<Settled, Error> {
-        if let Some((_, last)) = lock(&self.0.last_settled)
-            .as_ref()
-            .filter(|(kept, last)| *kept == forms && last.shape == *shape)
         {
-            return Ok(last.clone());
+            let mut kept = lock(&self.0.settled);
+            let found = kept
+                .iter()
+                .position(|(kept, last)| *kept == forms && last.shape == *shape);
+            if let Some(entry) = found.and_then(|at| kept.remove(at)) {
+                let last = entry.1.clone();
+                kept.push_front(entry);
+                return Ok(last);
+            }
         }
         self.0.device.shared().counts.draw_settled();
         let (variant, plan) = self.settle(shape, forms)?;
@@ -1775,7 +1786,11 @@ impl GraphicsState {
             variant,
             plan,
         };
-        *lock(&self.0.last_settled) = Some((forms, settled.clone()));
+        let mut kept = lock(&self.0.settled);
+        if kept.len() == SETTLED {
+            kept.pop_back();
+        }
+        kept.push_front((forms, settled.clone()));
         Ok(settled)
     }
 

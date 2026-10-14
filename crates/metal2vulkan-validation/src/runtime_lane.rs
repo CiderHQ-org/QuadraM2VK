@@ -289,6 +289,8 @@ mod fragment_imageblocks;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod fragment_tile_memory;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod frame_costs;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod framebuffer_fetch;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod frees_in_flight;
