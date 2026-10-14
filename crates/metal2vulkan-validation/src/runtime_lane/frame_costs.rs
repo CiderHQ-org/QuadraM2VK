@@ -18,37 +18,53 @@
 //! The device is made as the consumer makes its own: the default policy (the fast forms), GPU
 //! times from the host's clock, no execution record, no layer. The `announced` runs add every
 //! precision kind to `DeviceOptions::announce_each`, delivered to a sink that counts each kind and
-//! keeps its last text, as the consumer's does.
+//! keeps its last text, as the consumer's does. The `checked` runs give each command buffer a
+//! submission check of its own before its commit (`CommandBuffer::set_submission_check`), as the
+//! consumer commits every command buffer: a check that notes the submission under a lock and
+//! lets it run, as the consumer's does while nothing is detached. The device's scheduler thread
+//! then runs each check and submits each batch, so the commit hands its batches off to it.
 //!
-//! [`WARM`] frames run untimed (every pipeline is made), then [`TIMED`] frames are printed as
-//! `FRAME-COST` lines: the encoding thread's CPU time and wall time per frame (from the first
-//! pass's opening through the last commit); the 50th and 90th percentiles of the wall time of a
-//! pass's opening (`render_command_encoder`), of a draw (its state changes and its draw call), of
-//! a pass's end (`end_encoding`) and of a commit; where the lib test binary counts its
-//! allocations (a build without `--cfg m2v_system_alloc`), the encoding thread's allocations of
-//! each; where the kernel lets a thread count its own (Linux), the user-space instructions the
-//! encoding thread retired in each, on average and their 50th percentile, and in a frame's steps
-//! together (steady where the times are not, so a change shows run to run), counted in
-//! [`COUNTED`] frames of their own after the timed ones: each read of the counter is a system
-//! call, which a timed frame's CPU time would hold; the notices the sink took per frame; and a
-//! frame's share of the device's work counts
-//! (`Device::work_counts`) the draw and commit paths keep, the command buffers begun and submitted
-//! among them.
+//! [`WARM`] frames run untimed (every pipeline is made), the first of them reported alone (its CPU
+//! and wall time, its blocks, its commits' median and longest wall time), then [`TIMED`] frames are
+//! printed as `FRAME-COST` lines: the encoding thread's CPU time and wall time per frame (from the
+//! first pass's opening through the last commit), and how often it blocked, inside its commits too,
+//! and was preempted meanwhile (on Linux, its voluntary and involuntary context switches, from
+//! `getrusage`: a commit that waits for the scheduler's lock blocks); the 50th and 90th percentiles
+//! of the wall time of a pass's opening (`render_command_encoder`), of a draw (its state changes
+//! and its draw call), of a pass's end (`end_encoding`) and of a commit; where the lib test binary
+//! counts its allocations (a build without `--cfg m2v_system_alloc`), the encoding thread's
+//! allocations of each; where the kernel lets a thread count its own (Linux), the user-space
+//! instructions the encoding thread retired in each, on average and their 50th percentile, and in
+//! a frame's steps together (steady where the times are not, so a change shows run to run),
+//! counted in [`COUNTED`] frames of their own after the timed ones: each read of the counter is a
+//! system call, which a timed frame's CPU time would hold; the notices the sink took per frame;
+//! and a frame's share of the device's work counts (`Device::work_counts`) the draw and commit
+//! paths keep, the command buffers begun and submitted among them. Then the CPU time of the
+//! process's other threads over the timed frames, their waits included, per command buffer (on
+//! Linux, from each thread's `schedstat`), with its user-space part (from its `stat`, in clock
+//! ticks) and how often they slept (their voluntary context switches, from their `status`: the
+//! scheduler's are the wakes it took, a commit's among them): the runtime's scheduler, completion,
+//! queue-wait and handler threads by name, and the rest (the driver's) together; with their
+//! allocations per command buffer where they are counted, and the submission checks run per frame.
 //!
-//! `frame_costs` measures the plain device then the announced one, each in turn on one device of
-//! its own; `frame_costs_plain` and `frame_costs_announced` measure one alone, in a process of its
-//! own, for a profile of it (`perf record -g` of the test's process).
+//! `frame_costs` measures the plain device, the checked one, then the announced one, each in turn
+//! on one device of its own; `frame_costs_plain`, `frame_costs_checked` and
+//! `frame_costs_announced` measure one alone, in a process of its own, for a profile of it
+//! (`perf record -g` of the test's process).
 //!
 //! Ignored by default: a measurement, not a check. Run it by name with `--run-ignored all`, in a
 //! build with `--cfg m2v_system_alloc` for the times, whose lib test binary keeps the system
 //! allocator as a consumer's process does (the counting one costs the draw path about a sixth of
 //! its time), and in one without it for the allocations.
 //!
-//! One check runs by default where the allocations are counted:
+//! Two checks run by default where the allocations are counted:
 //! `a_frame_s_draws_and_pass_ends_allocate_within_their_bounds` holds a frame's draws to
 //! [`DRAW_ALLOCATIONS`] on the encoding thread, a draw's state changes and its draw call
-//! together, and its passes' ends to [`PASS_END_ALLOCATIONS`], each on average. Another
-//! runs by default on every device,
+//! together, and its passes' ends to [`PASS_END_ALLOCATIONS`], each on average; and
+//! `a_frame_s_commits_allocate_within_their_bound` holds a checked frame's commits to
+//! [`COMMIT_ALLOCATIONS`] on the encoding thread and to [`SUBMIT_ALLOCATIONS`] on the others
+//! (the scheduler's checks and submissions, the completion), per command buffer on average.
+//! Another runs by default on every device,
 //! `a_frame_s_passes_and_commits_begin_their_command_buffers_within_their_bound`: each pass, from
 //! its opening through its end, begins at most [`PASS_BEGINS`] command buffers, and each commit
 //! none but the barrier command buffers it records to keep, on a device that keeps them
@@ -71,9 +87,11 @@ use metal2vulkan_runtime::{
     Buffer, ClearColor, CommandBuffer, CommandBufferStatus, CommandQueue, Degradation,
     DegradationCategory, Device, DeviceOptions, Library, LoadAction, MessageSink, PipelineOptions,
     Region, RenderCommandEncoder, RenderPassDescriptor, RenderPipelineState, ResourceOptions,
-    SamplerState, ShaderCacheOptions, StoreAction, Texture, TextureDescriptor, WorkCounts,
+    SamplerState, ShaderCacheOptions, StoreAction, SubmissionCheck, Texture, TextureDescriptor,
+    WorkCounts,
 };
 use std::collections::BTreeMap;
+use std::ops::Range;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -110,6 +128,76 @@ const PASS_END_ALLOCATIONS: f64 = 40.0;
 /// The most command buffers a pass begins, from its opening through its end, once every pipeline
 /// is made: its primary and its draws' secondary.
 const PASS_BEGINS: u64 = 2;
+/// The most allocations a checked frame's commit makes on the encoding thread on average, once
+/// every pipeline is made. Measured: 5.0 on RADV (Radeon 780M), on lavapipe and on ANV (Iris Xe);
+/// 19.0 on RADV before a commit listed only what it reaches among the live buffers and the
+/// scheduler kept its order's lines between passes.
+#[cfg(not(m2v_system_alloc))]
+const COMMIT_ALLOCATIONS: f64 = 6.0;
+/// The most allocations the process's other threads make per command buffer of a checked frame:
+/// its check and its batch's planning and submission on the scheduler thread, its completion and
+/// its handlers. Measured: 16.0-16.2 on RADV (Radeon 780M), 17.5 on lavapipe, 15.7 on ANV
+/// (Iris Xe); 46.9 on RADV before the hazard tracker planned without per-resource allocations,
+/// and 21.2 before the scheduler kept its order's lines between passes.
+#[cfg(not(m2v_system_alloc))]
+const SUBMIT_ALLOCATIONS: f64 = 20.0;
+
+/// One run's device and commits: whether the device announces every precision kind, and whether
+/// each command buffer commits with a submission check ([`Checks`]).
+#[derive(Clone, Copy)]
+struct Run {
+    announced: bool,
+    checked: bool,
+}
+
+impl Run {
+    const PLAIN: Run = Run {
+        announced: false,
+        checked: false,
+    };
+    const CHECKED: Run = Run {
+        announced: false,
+        checked: true,
+    };
+    const ANNOUNCED: Run = Run {
+        announced: true,
+        checked: false,
+    };
+
+    fn label(self) -> &'static str {
+        match (self.announced, self.checked) {
+            (false, false) => "plain",
+            (false, true) => "checked",
+            (true, false) => "announced",
+            (true, true) => "announced checked",
+        }
+    }
+}
+
+/// The submissions the checks of a checked run saw: each the encoders it named, noted under a
+/// lock, as the consumer's check notes each submission it lets run.
+#[derive(Default)]
+struct Checks {
+    seen: Mutex<(u64, Range<usize>)>,
+}
+
+impl Checks {
+    /// A command buffer's check: note the submission, and let it run.
+    fn check(self: &Arc<Self>) -> SubmissionCheck {
+        let checks = Arc::clone(self);
+        Arc::new(move |submission| {
+            let mut seen = checks.seen.lock().unwrap();
+            seen.0 += 1;
+            seen.1 = submission.encoders();
+            None
+        })
+    }
+
+    /// The checks run so far.
+    fn count(&self) -> u64 {
+        self.seen.lock().unwrap().0
+    }
+}
 
 /// The pipelines of one raster sample count: the rectangle's, the mask's and the panel's.
 struct Pipelines {
@@ -122,6 +210,8 @@ struct Pipelines {
 struct Workload {
     device: Device,
     queue: CommandQueue,
+    /// A checked run's submissions checked.
+    checks: Option<Arc<Checks>>,
     /// One sample, and four.
     pipelines: [Pipelines; 2],
     sampler: SamplerState,
@@ -232,7 +322,7 @@ fn shape(n: usize) -> [u8; SHAPE_BYTES] {
 }
 
 impl Workload {
-    fn new(device: Device) -> Workload {
+    fn new(device: Device, checked: bool) -> Workload {
         let library = |name: &str| {
             device.new_library_with_air(&llvm_assemble(&engine_dir().join(name)).unwrap())
         };
@@ -282,6 +372,7 @@ impl Workload {
             .collect();
         Workload {
             queue: device.new_command_queue().unwrap(),
+            checks: checked.then(Arc::default),
             pipelines,
             sampler,
             textures,
@@ -379,6 +470,7 @@ impl Workload {
         let mut frame = Frame::default();
         let mut last: Option<CommandBuffer> = None;
         let counts = || reads.work_counts.then(|| self.device.work_counts());
+        let switches = thread_switches();
         let cpu = thread_cpu();
         let start = Instant::now();
         let mut begun = [Begun::default(); 4];
@@ -407,8 +499,20 @@ impl Workload {
             if let Some(before) = &before {
                 begun[2].add(Begun::since(&self.device, before));
             }
+            // The consumer makes each command buffer's check before its commit call.
+            let check = self.checks.as_ref().map(Checks::check);
             let before = counts();
-            let ((), committed) = step(reads.instructions, || command_buffer.commit().unwrap());
+            let switches = thread_switches();
+            let ((), committed) = step(reads.instructions, || {
+                if let Some(check) = check {
+                    command_buffer.set_submission_check(check).unwrap();
+                }
+                command_buffer.commit().unwrap()
+            });
+            if let Some((before, after)) = switches.zip(thread_switches()) {
+                let blocked = after.since(before).voluntary;
+                *frame.commit_blocks.get_or_insert(0) += blocked;
+            }
             frame.commit.push(committed);
             if let Some(before) = &before {
                 begun[3].add(Begun::since(&self.device, before));
@@ -418,6 +522,9 @@ impl Workload {
         frame.begun = begun;
         frame.wall = start.elapsed();
         frame.cpu = thread_cpu().saturating_sub(cpu);
+        frame.switches = switches
+            .zip(thread_switches())
+            .map(|(before, after)| after.since(before));
         let last = last.unwrap();
         last.wait_until_completed_for(WAIT).unwrap();
         assert_eq!(last.status(), CommandBufferStatus::Completed);
@@ -600,6 +707,61 @@ struct Frame {
     /// in that order, where it read the work counts ([`Workload::frame_reading`]); none
     /// elsewhere.
     begun: [Begun; 4],
+    /// The encoding thread's context switches over the same span as `cpu`, where they are read.
+    switches: Option<Switches>,
+    /// Its voluntary ones inside its commits.
+    commit_blocks: Option<u64>,
+}
+
+/// A thread's context switches: the voluntary ones (it blocked: on a lock, a condition variable, a
+/// sleep, I/O) and the involuntary ones (it was preempted).
+#[derive(Clone, Copy, Default)]
+struct Switches {
+    voluntary: u64,
+    involuntary: u64,
+}
+
+impl Switches {
+    /// The switches from `before` to these.
+    fn since(self, before: Switches) -> Switches {
+        Switches {
+            voluntary: self.voluntary.saturating_sub(before.voluntary),
+            involuntary: self.involuntary.saturating_sub(before.involuntary),
+        }
+    }
+
+    /// A thread's switches so far, from its `status` text.
+    fn of_status(status: &str) -> Option<Switches> {
+        let field = |name: &str| {
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix(name)?.trim().parse().ok())
+        };
+        Some(Switches {
+            voluntary: field("voluntary_ctxt_switches:")?,
+            involuntary: field("nonvoluntary_ctxt_switches:")?,
+        })
+    }
+}
+
+/// The calling thread's context switches so far ([`Switches`]), from `getrusage`: a system call,
+/// which a frame makes twice a commit, outside its times. `None` off Linux.
+#[cfg(target_os = "linux")]
+fn thread_switches() -> Option<Switches> {
+    // SAFETY: `rusage` is plain integers, for which zeros are a value.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    // SAFETY: `getrusage` writes the struct it is given and has no other effect.
+    let rc = unsafe { libc::getrusage(libc::RUSAGE_THREAD, &mut usage) };
+    (rc == 0).then(|| Switches {
+        voluntary: u64::try_from(usage.ru_nvcsw).unwrap_or(0),
+        involuntary: u64::try_from(usage.ru_nivcsw).unwrap_or(0),
+    })
+}
+
+/// The calling thread's context switches so far: not read off Linux.
+#[cfg(not(target_os = "linux"))]
+fn thread_switches() -> Option<Switches> {
+    None
 }
 
 /// The calling thread's CPU time so far.
@@ -623,6 +785,92 @@ fn percentiles(mut values: Vec<f64>) -> [f64; 2] {
 
 /// The kinds announced, each with its count and last text: the consumer's sink.
 type Heard = Arc<Mutex<BTreeMap<Degradation, (u64, String)>>>;
+
+/// A thread's CPU time: all of it, from its `schedstat` (nanoseconds), and the user-space part,
+/// from its `stat` (`utime`, in clock ticks: 10 ms on a common kernel, a coarse share); and how
+/// often it slept, its voluntary context switches, from its `status`.
+#[derive(Clone, Copy, Default)]
+struct Cpu {
+    all: Duration,
+    user: Duration,
+    sleeps: u64,
+}
+
+/// The process's other threads' CPU time so far ([`Cpu`]), each by its name (cut to 15 bytes, as
+/// Linux keeps it): every thread but the calling one. `None` off Linux.
+fn other_threads_cpu() -> Option<BTreeMap<String, Cpu>> {
+    // `<pid>/task/<tid>`: the calling thread's own.
+    let own = std::fs::read_link("/proc/thread-self").ok()?;
+    // SAFETY: `sysconf` reads a constant of the system and has no other effect.
+    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    let tick = Duration::from_secs(1) / u32::try_from(ticks).ok().filter(|&t| t > 0)?;
+    let mut threads = BTreeMap::new();
+    for task in std::fs::read_dir("/proc/self/task").ok()? {
+        let task = task.ok()?.path();
+        if task.file_name() == own.file_name() {
+            continue;
+        }
+        // A thread that ended meanwhile is left out.
+        let (Ok(name), Ok(schedstat), Ok(stat), Ok(status)) = (
+            std::fs::read_to_string(task.join("comm")),
+            std::fs::read_to_string(task.join("schedstat")),
+            std::fs::read_to_string(task.join("stat")),
+            std::fs::read_to_string(task.join("status")),
+        ) else {
+            continue;
+        };
+        let nanos: u64 = schedstat.split_whitespace().next()?.parse().ok()?;
+        // The fields after the name's closing parenthesis start at the third, the state;
+        // `utime` is the fourteenth.
+        let utime: u32 = stat
+            .rsplit_once(')')?
+            .1
+            .split_whitespace()
+            .nth(11)?
+            .parse()
+            .ok()?;
+        let sleeps = Switches::of_status(&status)?.voluntary;
+        let cpu: &mut Cpu = threads.entry(name.trim().to_owned()).or_default();
+        cpu.all += Duration::from_nanos(nanos);
+        cpu.user += tick * utime;
+        cpu.sleeps += sleeps;
+    }
+    Some(threads)
+}
+
+/// The groups of the process's other threads [`other_threads_cpu`] reports: the runtime's by the
+/// prefix of their names, and the rest.
+const THREAD_GROUPS: [(&str, &str); 4] = [
+    ("scheduler", "metal2vulkan-sc"),
+    ("completion", "metal2vulkan-co"),
+    ("queue waits", "metal2vulkan-qu"),
+    ("handlers", "metal2vulkan-ha"),
+];
+
+/// What the other threads spent between `before` and `after` ([`other_threads_cpu`]), by
+/// [`THREAD_GROUPS`] and the rest, `other`: a thread that ended meanwhile is left out, one that
+/// started counts from 0.
+fn spent_by_group(
+    before: &BTreeMap<String, Cpu>,
+    after: &BTreeMap<String, Cpu>,
+) -> Vec<(&'static str, Cpu)> {
+    let mut groups: Vec<(&'static str, Cpu)> = THREAD_GROUPS
+        .iter()
+        .map(|(group, _)| (*group, Cpu::default()))
+        .chain([("other", Cpu::default())])
+        .collect();
+    for (name, now) in after {
+        let then = before.get(name).copied().unwrap_or_default();
+        let at = THREAD_GROUPS
+            .iter()
+            .position(|(_, prefix)| name.starts_with(prefix))
+            .unwrap_or(THREAD_GROUPS.len());
+        groups[at].1.all += now.all.saturating_sub(then.all);
+        groups[at].1.user += now.user.saturating_sub(then.user);
+        groups[at].1.sleeps += now.sleeps.saturating_sub(then.sleeps);
+    }
+    groups
+}
 
 /// A device as the consumer makes its own (the module docs), announcing every precision kind at
 /// every occurrence where `announced`, into `heard`.
@@ -650,24 +898,50 @@ fn device(cache: &ScratchCache, announced: bool, heard: &Heard) -> Device {
     open_device(TEST_DEVICE, options).unwrap()
 }
 
-/// The frame's costs, printed (the module docs): a run of each of `runs` (whether it announces)
-/// in turn, each on a device of its own.
-fn measure(runs: &[bool]) {
-    for &announced in runs {
+/// The frame's costs, printed (the module docs): a run of each of `runs` in turn, each on a device
+/// of its own.
+fn measure(runs: &[Run]) {
+    for &run in runs {
         let cache = ScratchCache::new().unwrap();
         let heard = Heard::default();
-        let work = Workload::new(device(&cache, announced, &heard));
-        let label = match announced {
-            true => "announced",
-            false => "plain",
-        };
+        let work = Workload::new(device(&cache, run.announced, &heard), run.checked);
+        let label = run.label();
         let name = work.device.name().to_owned();
-        for _ in 0..WARM {
+        let ms = |d: Duration| d.as_secs_f64() * 1e3;
+        let first = work.frame();
+        let [commit, _] = percentiles(
+            first
+                .commit
+                .iter()
+                .map(|s| s.wall.as_secs_f64() * 1e6)
+                .collect(),
+        );
+        let longest = first
+            .commit
+            .iter()
+            .map(|s| s.wall)
+            .max()
+            .unwrap_or_default();
+        eprintln!(
+            "FRAME-COST {name} {label}: the first frame: the encoding thread's CPU {:.2} ms, wall \
+             {:.2} ms, {}; its commits {commit:.2} us (longest {:.2})",
+            ms(first.cpu),
+            ms(first.wall),
+            blocks([&first]),
+            longest.as_secs_f64() * 1e6,
+        );
+        for _ in 1..WARM {
             work.frame();
         }
         let notices_before: u64 = heard.lock().unwrap().values().map(|(n, _)| n).sum();
         let counts_before = work.device.work_counts();
+        let checks_before = work.checks.as_ref().map_or(0, |checks| checks.count());
+        let threads_before = other_threads_cpu();
+        let allocations_before = others_allocations();
         let frames: Vec<Frame> = (0..TIMED).map(|_| work.frame()).collect();
+        let allocations = others_allocations();
+        let threads = other_threads_cpu();
+        let checks = work.checks.as_ref().map_or(0, |checks| checks.count());
         let counts = work.device.work_counts();
         let notices: u64 = heard.lock().unwrap().values().map(|(n, _)| n).sum();
         let reads = Reads {
@@ -675,15 +949,15 @@ fn measure(runs: &[bool]) {
             ..Reads::default()
         };
         let counted: Vec<Frame> = (0..COUNTED).map(|_| work.frame_reading(reads)).collect();
-        let ms = |d: Duration| d.as_secs_f64() * 1e3;
         let [cpu, cpu_high] = percentiles(frames.iter().map(|f| ms(f.cpu)).collect());
         let [wall, wall_high] = percentiles(frames.iter().map(|f| ms(f.wall)).collect());
         eprintln!(
             "FRAME-COST {name} {label}: {BUFFERS} command buffers of one pass of {DRAWS} indexed \
              draws a frame, every {RESOLVED}th pass resolved, {WARM} untimed and {TIMED} timed \
              frames: the encoding thread's CPU {cpu:.2} ms a frame (p90 {cpu_high:.2}), wall \
-             {wall:.2} ms (p90 {wall_high:.2}); {:.1} us of CPU a draw over the frame; {:.1} \
-             notices a frame",
+             {wall:.2} ms (p90 {wall_high:.2}), {} a frame; {:.1} us of CPU a draw over the \
+             frame; {:.1} notices a frame",
+            blocks(&frames),
             cpu * 1e3 / (BUFFERS * DRAWS) as f64,
             (notices - notices_before) as f64 / TIMED as f64,
         );
@@ -741,7 +1015,8 @@ fn measure(runs: &[bool]) {
             "FRAME-COST {name} {label}: a frame's work: {:.0} bind shapes made, {:.0} draws \
              settled, {:.0} pipelines looked up, {:.0} draw states recorded, {:.0} argument \
              tables retained, {:.1} command pools made, {:.1} timeline waits, {:.1} addressable \
-             buffers made",
+             buffers made, {:.1} queue submissions, {:.1} commits handed off, {:.1} submission \
+             checks",
             per_frame(|c| c.draw_shapes_made),
             per_frame(|c| c.draws_settled),
             per_frame(|c| c.graphics_pipelines_looked_up),
@@ -750,6 +1025,9 @@ fn measure(runs: &[bool]) {
             per_frame(|c| c.command_pools_made),
             per_frame(|c| c.timeline_waits),
             per_frame(|c| c.addressable_buffers_made),
+            per_frame(|c| c.queue_submissions),
+            per_frame(|c| c.commits_handed_off),
+            (checks - checks_before) as f64 / TIMED as f64,
         );
         eprintln!(
             "FRAME-COST {name} {label}: a frame's command buffers: {:.1} begun ({:.2} a pass), \
@@ -762,7 +1040,34 @@ fn measure(runs: &[bool]) {
             per_frame(|c| c.command_buffers_submitted) / BUFFERS as f64,
             per_frame(|c| c.queue_submissions),
         );
-        if announced {
+        let buffers = (TIMED * BUFFERS) as f64;
+        let threads = match (&threads_before, &threads) {
+            (Some(before), Some(after)) => spent_by_group(before, after)
+                .iter()
+                .map(|(group, spent)| {
+                    let us = |d: Duration| d.as_secs_f64() * 1e6 / buffers;
+                    format!(
+                        "{group} {:.1} us ({:.1} user, {:.2} sleeps)",
+                        us(spent.all),
+                        us(spent.user),
+                        spent.sleeps as f64 / buffers
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+            _ => "not measured".to_owned(),
+        };
+        let allocations = match (allocations_before, allocations) {
+            (Some(before), Some(after)) => {
+                format!("{:.2} allocations", (after - before) as f64 / buffers)
+            }
+            _ => "allocations not counted".to_owned(),
+        };
+        eprintln!(
+            "FRAME-COST {name} {label}: the other threads a command buffer: {threads}; \
+             {allocations}"
+        );
+        if run.announced {
             for (kind, (count, _)) in heard.lock().unwrap().iter() {
                 eprintln!(
                     "FRAME-COST {name} {label}: heard {} {count} times",
@@ -773,22 +1078,55 @@ fn measure(runs: &[bool]) {
     }
 }
 
+/// How often the encoding thread blocked (in its commits too) and was preempted in `frames`, on
+/// average, where it was read.
+fn blocks<'a>(frames: impl IntoIterator<Item = &'a Frame>) -> String {
+    let (mut count, mut total, mut in_commits) = (0u64, Switches::default(), 0);
+    for frame in frames {
+        let (Some(switches), Some(commits)) = (frame.switches, frame.commit_blocks) else {
+            return "blocks not read".to_owned();
+        };
+        count += 1;
+        total.voluntary += switches.voluntary;
+        total.involuntary += switches.involuntary;
+        in_commits += commits;
+    }
+    let each = |n: u64| n as f64 / count.max(1) as f64;
+    format!(
+        "blocked {:.2} times ({:.2} in commits), preempted {:.2}",
+        each(total.voluntary),
+        each(in_commits),
+        each(total.involuntary)
+    )
+}
+
+/// The allocations the process's threads but this one made so far, where they are counted.
+fn others_allocations() -> Option<u64> {
+    Some(alloc::process_allocations()? - alloc::thread_allocations()?)
+}
+
 #[test]
 #[ignore = "a measurement, not a check: run by name with --run-ignored all"]
 fn frame_costs() {
-    measure(&[false, true]);
+    measure(&[Run::PLAIN, Run::CHECKED, Run::ANNOUNCED]);
 }
 
 #[test]
 #[ignore = "a measurement, not a check: run by name with --run-ignored all"]
 fn frame_costs_plain() {
-    measure(&[false]);
+    measure(&[Run::PLAIN]);
+}
+
+#[test]
+#[ignore = "a measurement, not a check: run by name with --run-ignored all"]
+fn frame_costs_checked() {
+    measure(&[Run::CHECKED]);
 }
 
 #[test]
 #[ignore = "a measurement, not a check: run by name with --run-ignored all"]
 fn frame_costs_announced() {
-    measure(&[true]);
+    measure(&[Run::ANNOUNCED]);
 }
 
 /// A frame's draws allocate at most [`DRAW_ALLOCATIONS`] each on average on the encoding thread,
@@ -803,7 +1141,7 @@ fn frame_costs_announced() {
 fn a_frame_s_draws_and_pass_ends_allocate_within_their_bounds() {
     let cache = ScratchCache::new().unwrap();
     let heard = Heard::default();
-    let work = Workload::new(device(&cache, false, &heard));
+    let work = Workload::new(device(&cache, false, &heard), false);
     // Every pipeline made, and every pool piece done, before the frame that counts.
     for _ in 0..WARM {
         work.frame();
@@ -841,7 +1179,7 @@ fn a_frame_s_draws_and_pass_ends_allocate_within_their_bounds() {
 fn a_frame_s_passes_and_commits_begin_their_command_buffers_within_their_bound() {
     let cache = ScratchCache::new().unwrap();
     let heard = Heard::default();
-    let work = Workload::new(device(&cache, false, &heard));
+    let work = Workload::new(device(&cache, false, &heard), false);
     // Every pipeline made, and every pool piece done, before the frame that counts.
     for _ in 0..WARM {
         work.frame();
@@ -878,4 +1216,44 @@ fn a_frame_s_passes_and_commits_begin_their_command_buffers_within_their_bound()
             "{own} command buffers begun by {passes} commits, not kept"
         ),
     }
+}
+
+/// A checked frame's commits allocate at most [`COMMIT_ALLOCATIONS`] each on average on the
+/// encoding thread, and the process's other threads at most [`SUBMIT_ALLOCATIONS`] per command
+/// buffer (its check, its batch's planning and submission, its completion), once every pipeline is
+/// made. The other threads' count is the process's: the test needs a process of its own, as
+/// nextest runs each test in.
+#[cfg(not(m2v_system_alloc))]
+#[test]
+fn a_frame_s_commits_allocate_within_their_bound() {
+    let cache = ScratchCache::new().unwrap();
+    let heard = Heard::default();
+    let work = Workload::new(device(&cache, false, &heard), true);
+    // Every pipeline made, and every pool piece done, before the frames that count.
+    for _ in 0..WARM {
+        work.frame();
+    }
+    const FRAMES: usize = 4;
+    let before = others_allocations().unwrap();
+    let frames: Vec<Frame> = (0..FRAMES).map(|_| work.frame()).collect();
+    let others = others_allocations().unwrap() - before;
+    let commits: u64 = (frames.iter().flat_map(|frame| &frame.commit))
+        .map(|s| s.allocations.unwrap())
+        .sum();
+    let buffers = (FRAMES * BUFFERS) as f64;
+    let (each, other) = (commits as f64 / buffers, others as f64 / buffers);
+    eprintln!(
+        "FRAME-COST {}: {each:.2} allocations a commit, at most {COMMIT_ALLOCATIONS} kept; \
+         {other:.2} on the other threads a command buffer, at most {SUBMIT_ALLOCATIONS} kept",
+        work.device.name()
+    );
+    assert!(
+        each <= COMMIT_ALLOCATIONS,
+        "{each:.2} allocations a commit, more than {COMMIT_ALLOCATIONS}"
+    );
+    assert!(
+        other <= SUBMIT_ALLOCATIONS,
+        "{other:.2} allocations on the other threads a command buffer, more than \
+         {SUBMIT_ALLOCATIONS}"
+    );
 }

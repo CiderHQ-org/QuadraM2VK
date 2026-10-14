@@ -74,7 +74,7 @@ use super::texture::storage_form::Riding;
 use super::texture::Texture;
 use super::tracker::Footprint;
 use super::upload::{Upload, Uploads};
-use super::used_resources::{EncoderKind, EncoderRecord, ReadRecord};
+use super::used_resources::{EncoderKind, EncoderRecord, Reached, ReadRecord};
 use super::values::CommandBufferStatus;
 use super::{CommandQueue, Device};
 use crate::release;
@@ -611,6 +611,28 @@ impl State {
             }
         }
         read
+    }
+
+    /// What the commands of its ended encoders that `runs` (by their place among them) use and a
+    /// command reaches unnamed only once used, gathered weakly under this lock ([`Reached`]): what
+    /// their keys name, as [`read_ended`](Self::read_ended) reads them (each segment's recorded
+    /// and not yet placed with its encoder's), and what they made resident.
+    fn reached(
+        &self,
+        shared: &super::device::DeviceShared,
+        runs: impl Fn(usize) -> bool,
+    ) -> Reached {
+        let mut reached = Reached::default();
+        for (_, record) in (self.ended.iter().enumerate()).filter(|(at, _)| runs(*at)) {
+            reached.gather(shared, &record.keys, record.residency.as_ref());
+        }
+        for part in self.recorded.iter().filter(|part| runs(part.encoder)) {
+            let segments = part.segments.iter();
+            for done in segments.filter_map(|segment| segment.recorded.as_ref()) {
+                reached.gather(shared, &done.keys, None);
+            }
+        }
+        reached
     }
 
     /// Let go of what its ended encoders' commands use, as it completes: their keys, and what
@@ -1496,7 +1518,7 @@ impl CommandBuffer {
     /// [`commit_as`](Self::commit_as) itself.
     fn commit_now(&self, call: &'static str, failure: Option<CommitFailure>) -> Result<(), Error> {
         let device = &self.0.device;
-        let (segments, failure): (Vec<(Deferred, bool)>, _) = {
+        let (segments, failure, reached): (Vec<(Deferred, bool)>, _, _) = {
             let mut state = self.state();
             if let Some(problem) = state.refusal() {
                 return Err(invalid(call, problem));
@@ -1526,12 +1548,16 @@ impl CommandBuffer {
                 .flat_map(|encoder| &encoder.segments)
                 .map(|segment| (segment.work.clone(), segment.needs_step()))
                 .collect();
-            (segments, failure)
+            // What of it the live buffers list once used, held weakly: the device's registries'
+            // locks, which take no other, inside this one.
+            let reached = state.reached(device.shared(), runs);
+            (segments, failure, reached)
         };
         // What the commands of its encoders that run use is resident from its commit on, as
         // Metal's is: a no-copy buffer or a heap among it is reached unnamed from here, by its
-        // own commands too, the work recorded below included (`live_buffers.rs`).
-        let used = self.used_by(|encoder| Failure::runs(failure.as_ref(), encoder));
+        // own commands too, the work recorded below included (`live_buffers.rs`). Listed without
+        // the lock: what it upgrades may be a resource's last hold.
+        let used = reached.list();
         device.shared().live_buffers.reach(&used);
         // Listed again at its first submission where the list changed since (a rebind ends a
         // use).

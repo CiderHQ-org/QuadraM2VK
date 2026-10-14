@@ -37,8 +37,18 @@
 //! no footprint at all: it was every head against every earlier batch of every other line, each
 //! pass (16385 command buffers in flight over 261 queues took about 55 s to commit and did not
 //! drain within 60 s).
+//!
+//! **Kept between passes.** A program that commits one command buffer at a time empties its
+//! queue's line at each submission and makes it again at its next commit: an emptied line's
+//! storage is kept for the next line made ([`SPARE_LINES`] of them, each small), as is the list
+//! [`next`](Order::next) orders the heads in.
 
 use std::collections::{BTreeMap, VecDeque};
+
+/// The most emptied lines an order keeps for lines made later, and the most batches one of them
+/// may have room for.
+const SPARE_LINES: usize = 4;
+const SPARE_ROOM: usize = 64;
 
 /// The committed batches not yet submitted, by logical queue.
 #[derive(Debug)]
@@ -47,6 +57,10 @@ pub(crate) struct Order<B> {
     lines: Vec<(u64, VecDeque<(u64, B)>)>,
     /// The commit sequence number the next batch takes.
     next: u64,
+    /// Emptied lines, kept for lines made later (the module docs).
+    spare: Vec<VecDeque<(u64, B)>>,
+    /// The heads [`next`](Order::next) orders, by commit sequence number and line.
+    heads: Vec<(u64, usize)>,
 }
 
 impl<B> Default for Order<B> {
@@ -54,17 +68,40 @@ impl<B> Default for Order<B> {
         Order {
             lines: Vec::new(),
             next: 0,
+            spare: Vec::new(),
+            heads: Vec::new(),
         }
     }
 }
 
 impl<B> Order<B> {
+    /// A new line's storage: an emptied one where one is kept.
+    fn new_line(&mut self) -> VecDeque<(u64, B)> {
+        self.spare.pop().unwrap_or_default()
+    }
+
+    /// Line `at`, empty, goes: its storage is kept for a later line while few are, and it has
+    /// little room.
+    fn remove_line(&mut self, at: usize) {
+        let (_, line) = self.lines.swap_remove(at);
+        if self.spare.len() < SPARE_LINES && line.capacity() <= SPARE_ROOM {
+            self.spare.push(line);
+        }
+    }
+
+    /// Whether two lines or more hold batches: with one, no head waits behind another line's
+    /// batch ([`is_behind`](Self::is_behind)).
+    pub(crate) fn several_lines(&self) -> bool {
+        self.lines.len() > 1
+    }
+
     /// Append the batches of one command buffer committed now on logical queue `queue`.
     pub(crate) fn push(&mut self, queue: u64, batches: impl IntoIterator<Item = B>) {
         let at = match self.lines.iter().position(|(line, _)| *line == queue) {
             Some(at) => at,
             None => {
-                self.lines.push((queue, VecDeque::new()));
+                let line = self.new_line();
+                self.lines.push((queue, line));
                 self.lines.len() - 1
             }
         };
@@ -169,9 +206,11 @@ impl<B> Order<B> {
     pub(crate) fn put_back(&mut self, queue: u64, sequence: u64, batch: B) {
         match self.lines.iter_mut().find(|(line, _)| *line == queue) {
             Some((_, line)) => line.push_front((sequence, batch)),
-            None => self
-                .lines
-                .push((queue, std::iter::once((sequence, batch)).collect())),
+            None => {
+                let mut line = self.new_line();
+                line.push_back((sequence, batch));
+                self.lines.push((queue, line));
+            }
         }
     }
 
@@ -184,12 +223,15 @@ impl<B> Order<B> {
         mut behind: impl FnMut(&Self, u64) -> bool,
         mut ready: impl FnMut(&B) -> Option<T>,
     ) -> Option<(u64, u64, B, T)> {
-        let mut heads: Vec<(u64, usize)> = (self.lines.iter().enumerate())
-            .filter_map(|(at, (_, line))| line.front().map(|(sequence, _)| (*sequence, at)))
-            .collect();
+        let Order { lines, heads, .. } = self;
+        heads.clear();
+        heads.extend(
+            (lines.iter().enumerate())
+                .filter_map(|(at, (_, line))| line.front().map(|(sequence, _)| (*sequence, at))),
+        );
         heads.sort_unstable();
         let order: &Self = self;
-        let (at, prepared) = heads.into_iter().find_map(|(sequence, at)| {
+        let (at, prepared) = order.heads.iter().find_map(|&(sequence, at)| {
             let (_, head) = order.lines[at].1.front()?;
             let prepared = ready(head)?;
             (!behind(order, sequence)).then_some((at, prepared))
@@ -197,7 +239,7 @@ impl<B> Order<B> {
         let queue = self.lines[at].0;
         let (sequence, batch) = self.lines[at].1.pop_front()?;
         if self.lines[at].1.is_empty() {
-            self.lines.swap_remove(at);
+            self.remove_line(at);
         }
         Some((queue, sequence, batch, prepared))
     }
@@ -227,7 +269,7 @@ impl<B> Order<B> {
             }
         }
         if self.lines[at].1.is_empty() {
-            self.lines.swap_remove(at);
+            self.remove_line(at);
         }
         dropped
     }

@@ -725,6 +725,163 @@ fn the_state_retires_only_through_the_completed_value() {
     assert_eq!(queue.entries(), 0);
 }
 
+/// A completion looks only at the resources its batches touched: a thousand batches in flight,
+/// each reading a resource of its own, and the first one's completion retires its resource alone.
+#[test]
+fn a_completion_looks_only_at_what_its_batches_touched() {
+    let mut queue = Tracker::default();
+    for serial in 1..=1000u64 {
+        let read = one(&[reads(serial, bytes(0..64), copy_read())]);
+        assert_eq!(commit(&mut queue, &[read], serial), [None]);
+    }
+    assert_eq!((queue.entries(), queue.to_retire()), (1000, 1000));
+    queue.completed(0, 1);
+    assert_eq!((queue.entries(), queue.to_retire()), (999, 999));
+    queue.completed(0, 1000);
+    assert_eq!((queue.entries(), queue.to_retire()), (0, 0));
+}
+
+/// Batches of reads and writes of a few resources' ranges and fences, over three queues, each
+/// plan applied or dropped, and each queue's batches completing in runs: after every completion
+/// the state holds no access or fence update of a completed batch, as a look at every resource
+/// and fence would leave it, though each completion looks only at what its batches touched.
+#[test]
+fn completions_leave_no_access_of_a_completed_batch() {
+    let mut next = numbers();
+    let mut queue = Tracker::default();
+    let (mut submitted, mut completed) = ([0u64; 3], [0u64; 3]);
+    let mut retired = 0;
+    for _ in 0..2000 {
+        let encoders: Vec<Summary<Key>> = (0..1 + next(3))
+            .map(|_| random_encoder(&mut next))
+            .collect();
+        let on_queue = next(3) as usize;
+        let plan = queue.plan(&encoders, on(on_queue, submitted[on_queue] + 1));
+        if next(8) == 0 {
+            drop(plan);
+        } else {
+            queue.apply(plan);
+            submitted[on_queue] += 1;
+        }
+        let done = next(3) as usize;
+        if completed[done] < submitted[done] {
+            completed[done] += 1 + next(submitted[done] - completed[done]);
+            let before = queue.entries();
+            queue.completed(done, completed[done]);
+            retired += before - queue.entries();
+            assert!(!queue.holds_completed());
+        }
+    }
+    // The run retired entries, and kept a bounded state.
+    assert!(retired > 0);
+    assert!(queue.entries() <= 6 * ENTRIES_PER_KEY + 2);
+}
+
+/// A batch of one encoder is planned against the state itself and admitted into it as its plan
+/// is applied; the same encoder followed by an empty one is planned through copies of the
+/// entries. Over random batches on three queues, plans applied or dropped and completions in
+/// runs, both plan the same barriers and waits and leave the same state.
+#[test]
+fn a_batch_of_one_encoder_plans_as_one_of_several_does() {
+    let mut next = numbers();
+    let empty = EncoderUses::<Key>::new(true).finish();
+    let (mut alone, mut copied) = (Tracker::default(), Tracker::default());
+    let (mut submitted, mut completed) = ([0u64; 3], [0u64; 3]);
+    let mut applied = 0;
+    for _ in 0..3000 {
+        let encoder = random_encoder(&mut next);
+        let on_queue = next(3) as usize;
+        let point = on(on_queue, submitted[on_queue] + 1);
+        let one = alone.plan([&encoder], point);
+        let two = copied.plan([&encoder, &empty], point);
+        assert_eq!(one.barriers(), &two.barriers()[..1]);
+        assert_eq!(two.barriers()[1], None);
+        assert_eq!(one.waits(), two.waits());
+        if next(8) == 0 {
+            drop((one, two));
+        } else {
+            alone.apply(one);
+            copied.apply(two);
+            submitted[on_queue] += 1;
+            applied += 1;
+        }
+        let done = next(3) as usize;
+        if completed[done] < submitted[done] {
+            completed[done] += 1 + next(submitted[done] - completed[done]);
+            alone.completed(done, completed[done]);
+            copied.completed(done, completed[done]);
+        }
+        assert!(alone.same_state(&copied));
+        assert_eq!(alone.to_retire(), copied.to_retire());
+    }
+    assert!(applied > 2000);
+}
+
+/// A batch of one encoder copies no entry of the state: it is planned against the state and
+/// admitted into it as its plan is applied. A batch of several copies those of the resources it
+/// uses.
+#[test]
+fn a_batch_of_one_encoder_copies_no_entries() {
+    let mut queue = Tracker::default();
+    let write = one(&[writes(1, bytes(0..256), shader_write())]);
+    let read = one(&[
+        reads(1, bytes(0..256), shader_read()),
+        reads(2, bytes(0..64), shader_read()),
+    ]);
+    assert_eq!(commit(&mut queue, std::slice::from_ref(&write), 1), [None]);
+    let plan = queue.plan([&read], at(2));
+    assert_eq!(plan.copied(), 0);
+    assert_eq!(plan.barriers(), [barrier(shader_write(), shader_read())]);
+    queue.apply(plan);
+    let plan = queue.plan([&write, &read], at(3));
+    assert_eq!(plan.copied(), 2);
+    assert_eq!(
+        plan.barriers(),
+        [
+            barrier(shader_write(), shader_write()),
+            barrier(shader_write(), shader_read())
+        ]
+    );
+}
+
+/// A run's pseudo-random numbers below a bound: xorshift, from a fixed seed.
+fn numbers() -> impl FnMut(u64) -> u64 {
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    move |bound: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % bound
+    }
+}
+
+/// An encoder, ordered or not, of one to four commands, each reading or writing one of six
+/// resources' byte ranges, which may wait for and update one of two fences.
+fn random_encoder(next: &mut impl FnMut(u64) -> u64) -> Summary<Key> {
+    let mut uses = EncoderUses::<Key>::new(next(2) == 0);
+    for _ in 0..1 + next(4) {
+        let start = next(8) * 32;
+        let range = bytes(start..start + 32 * (1 + next(4)));
+        let key = next(6);
+        let used = match next(4) {
+            0 => writes(key, range, copy_write()),
+            1 => writes(key, range, shader_write()),
+            2 => reads(key, range, copy_read()),
+            _ => reads(key, range, shader_read()),
+        };
+        let command = [used];
+        let barrier = uses.barrier(&command);
+        uses.record(vk::PipelineStageFlags2::NONE, &command, barrier);
+    }
+    if next(4) == 0 {
+        uses.wait_for_fence(100 + next(2));
+    }
+    if next(4) == 0 {
+        uses.update_fence(100 + next(2));
+    }
+    uses.finish()
+}
+
 #[test]
 fn each_queue_retires_by_its_own_timeline() {
     let mut queue = Tracker::default();

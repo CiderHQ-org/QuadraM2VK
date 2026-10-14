@@ -136,9 +136,10 @@ impl LiveBuffers {
         }
     }
 
-    /// List what the commands of a command buffer about to commit use (`used`, as
-    /// `CommandBuffer::used_resources` lists them) that a command reaches unnamed only once
-    /// used: each no-copy buffer, and each buffer the program placed in a heap they used, each
+    /// List what the commands of a command buffer about to commit use (`used`, of what
+    /// `CommandBuffer::used_resources` lists them, at least the no-copy buffers and the heaps:
+    /// `used_resources::Reached`) that a command reaches unnamed only once used: each no-copy
+    /// buffer, and each buffer the program placed in a heap they used, each
     /// at its own range (The heap's whole buffer, which the runtime once listed, let an
     /// access past a placed buffer reach the heap's other bytes, where a bound one's is contained).
     /// Listed from this commit on, for its own commands too; a buffer placed in such a heap later,

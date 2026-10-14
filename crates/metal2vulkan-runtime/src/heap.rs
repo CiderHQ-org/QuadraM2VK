@@ -328,6 +328,18 @@ impl HeapKeys {
         lock(&self.heaps).remove(&key);
     }
 
+    /// Each heap `keys` name, held weakly, to `found`: no heap is let go under this lock.
+    pub(super) fn each_among<'a>(
+        &self,
+        keys: impl IntoIterator<Item = &'a ResourceKey>,
+        mut found: impl FnMut(WeakHeap),
+    ) {
+        let heaps = lock(&self.heaps);
+        for heap in keys.into_iter().filter_map(|key| heaps.get(key)) {
+            found(WeakHeap(heap.clone()));
+        }
+    }
+
     /// The live heaps `keys` name.
     pub(super) fn among(&self, keys: impl IntoIterator<Item = ResourceKey>) -> Vec<Heap> {
         let heaps = lock(&self.heaps);

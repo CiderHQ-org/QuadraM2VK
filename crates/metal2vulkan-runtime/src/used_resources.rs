@@ -31,7 +31,7 @@
 //!   the commit or by a host step: read from the recording until it is placed, then from the record
 //!   (`State::read_ended`).
 
-use super::buffer::{Buffer, WeakBuffer};
+use super::buffer::{Buffer, CallerMemory, WeakBuffer};
 use super::command_buffer::CommandBuffer;
 use super::device::lock;
 use super::heap::{Heap, WeakHeap};
@@ -120,7 +120,9 @@ pub(super) struct EncoderRecord {
 /// What owns the memory under a key, held without keeping it.
 #[derive(Clone)]
 enum Owner {
-    Buffer(WeakBuffer),
+    /// A buffer not placed in a heap, and whether it lies over the caller's host pages (a no-copy
+    /// buffer, which a commit lists among the live buffers once used: [`Reached`]).
+    Buffer(WeakBuffer, bool),
     Texture(Weak<TextureShared>),
     Heap(WeakHeap),
 }
@@ -130,7 +132,20 @@ impl Owner {
     fn of_buffer(buffer: &Buffer) -> Owner {
         match buffer.heap() {
             Some(heap) => Owner::Heap(heap.downgrade()),
-            None => Owner::Buffer(buffer.downgrade()),
+            None => Owner::Buffer(
+                buffer.downgrade(),
+                buffer.caller_memory() == Some(CallerMemory::HostPages),
+            ),
+        }
+    }
+
+    /// Whether a commit lists it among the live buffers once used ([`Reached`]): a buffer over
+    /// the caller's host pages, or a heap.
+    fn reached(&self) -> bool {
+        match self {
+            Owner::Buffer(_, host_pages) => *host_pages,
+            Owner::Texture(_) => false,
+            Owner::Heap(_) => true,
         }
     }
 
@@ -146,7 +161,7 @@ impl Owner {
     /// Whether the owner lives.
     fn lives(&self) -> bool {
         match self {
-            Owner::Buffer(buffer) => buffer.lives(),
+            Owner::Buffer(buffer, _) => buffer.lives(),
             Owner::Texture(texture) => texture.strong_count() > 0,
             Owner::Heap(heap) => heap.lives(),
         }
@@ -155,7 +170,7 @@ impl Owner {
     /// Add the owner to `used`, once, while it lives.
     fn list(&self, used: &mut Listing) {
         match self {
-            Owner::Buffer(buffer) => {
+            Owner::Buffer(buffer, _) => {
                 if let Some(buffer) = buffer.upgrade() {
                     used.buffers.insert(buffer);
                 }
@@ -207,7 +222,7 @@ impl Owners {
     /// `HeapKeys` holds.
     pub(super) fn buffer(&self, buffer: &Buffer) {
         if buffer.heap().is_none() {
-            self.insert(buffer.identity().key, Owner::Buffer(buffer.downgrade()));
+            self.insert(buffer.identity().key, Owner::of_buffer(buffer));
         }
     }
 
@@ -216,6 +231,16 @@ impl Owners {
     /// aliasing a buffer's bytes) the buffer or its heap has it already.
     pub(super) fn texture(&self, texture: &Texture) {
         self.insert(texture.use_key(), Owner::of_texture(texture));
+    }
+
+    /// Add the owners of `keys` that a commit lists among the live buffers once used to
+    /// `reached` ([`Reached`]), held weakly: no owner is let go under this lock.
+    fn reached<'a>(&self, keys: impl IntoIterator<Item = &'a ResourceKey>, reached: &mut Reached) {
+        let registry = lock(&self.inner);
+        let owners = keys.into_iter().filter_map(|key| registry.owners.get(key));
+        reached
+            .0
+            .extend(owners.filter(|owner| owner.reached()).cloned());
     }
 
     /// Add the owners of `keys` to `used`.
@@ -229,6 +254,71 @@ impl Owners {
         for owner in &owners {
             owner.list(used);
         }
+    }
+}
+
+/// What the commands of a committing command buffer's encoders that run use and a command reaches
+/// unnamed only once used (`LiveBuffers::reach`): of what [`CommandBuffer::used_resources`] would
+/// list, the buffers over the caller's host pages and the heaps, each as what owns its memory and
+/// held weakly. Gathered under the command buffer's lock ([`Reached::gather`]), and listed without
+/// it ([`Reached::list`]): its commit and its first submission list what this holds among the
+/// live buffers, and nothing else of the listing. A command buffer that uses neither gathers
+/// nothing.
+#[derive(Default)]
+pub(super) struct Reached(Vec<Owner>);
+
+impl Reached {
+    /// Add what the commands use that `keys` name, and what `residency` made resident.
+    pub(super) fn gather<'a>(
+        &mut self,
+        shared: &super::device::DeviceShared,
+        keys: impl IntoIterator<Item = &'a ResourceKey> + Clone,
+        residency: Option<&Residency>,
+    ) {
+        shared.owners.reached(keys.clone(), self);
+        shared
+            .heap_keys
+            .each_among(keys, |heap| self.0.push(Owner::Heap(heap)));
+        let Some(residency) = residency else {
+            return;
+        };
+        for used in residency.resources() {
+            let owner = match used {
+                Used::Buffer(buffer) => Owner::of_buffer(buffer),
+                Used::Texture(texture) => Owner::of_texture(texture),
+                Used::Heap { heap, .. } => Owner::Heap(heap.downgrade()),
+                Used::IndirectCommandBuffer(icb) => match icb.heap() {
+                    Some(heap) => Owner::Heap(heap.downgrade()),
+                    None => continue,
+                },
+            };
+            if owner.reached() {
+                self.0.push(owner);
+            }
+        }
+        let heaps = residency
+            .used_heaps()
+            .map(|heap| Owner::Heap(heap.downgrade()));
+        self.0.extend(heaps);
+    }
+
+    /// What it holds that lives, listed as [`CommandBuffer::used_resources`] lists it, each once:
+    /// the buffers over host pages and the heaps, no texture. Without the command buffer's lock:
+    /// what it upgrades may be a resource's last hold once let go.
+    pub(super) fn list(self) -> UsedResources {
+        let mut used = UsedResources::default();
+        for owner in self.0 {
+            match owner {
+                Owner::Buffer(buffer, _) => used.buffers.extend(buffer.upgrade()),
+                Owner::Heap(heap) => used.heaps.extend(heap.upgrade()),
+                Owner::Texture(_) => {}
+            }
+        }
+        used.buffers.sort_unstable_by_key(Buffer::object_id);
+        used.buffers.dedup_by_key(|buffer| buffer.object_id());
+        used.heaps.sort_unstable_by_key(Heap::object_id);
+        used.heaps.dedup_by_key(|heap| heap.object_id());
+        used
     }
 }
 
@@ -342,18 +432,7 @@ impl CommandBuffer {
     /// For an indirect command buffer the GPU may write, what its commands reach is listed once
     /// the host step before its batch recorded them.
     pub fn used_resources(&self) -> UsedResources {
-        self.used_by(|_| true)
-    }
-
-    /// What the commands of its ended encoders that `runs` (by their place among them) use, as
-    /// [`used_resources`](Self::used_resources) lists them.
-    pub(super) fn used_by(&self, runs: impl Fn(usize) -> bool) -> UsedResources {
-        let mut ended = self.state().read_ended(None);
-        let mut at = 0;
-        ended.retain(|_| {
-            at += 1;
-            runs(at - 1)
-        });
+        let ended = self.state().read_ended(None);
         let used = union_of(self.device().shared(), &ended);
         // Released without the lock: what it holds may be a resource's last handle.
         drop(ended);

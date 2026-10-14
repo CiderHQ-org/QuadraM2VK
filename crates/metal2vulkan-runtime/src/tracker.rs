@@ -43,11 +43,26 @@
 //! each `VkQueue`'s batches complete in its timeline's order. A queue submission orders
 //! everything that happened before it on the host, and every batch starts with
 //! [`Barrier::after_completed`], so later work needs no barrier from it.
+//!
+//! **Kept cheap per batch.** The scheduler plans every batch on its thread (a commit's own, where
+//! it submits inline), so the state's upkeep is held to what a batch touches. Each resource's state
+//! is found through [`KeyMap`]'s hash of the runtime's own keys. A batch of one summary (a command
+//! buffer of one encoder) is planned against the state itself, and admitted into it as its plan is
+//! applied, with the barrier and waits planned (the scheduler does nothing else with the tracker in
+//! between, `command_buffer/submit.rs`). A batch of several copies the entries of the resources it
+//! uses into a list sorted by resource (one batch's few), not a map, and plans each summary against
+//! what the earlier ones made of them. A plan's lists, and the copies', are buffers a plan applied
+//! before gave back ([`Spares`]). An entry's writers, reads and waits are kept one per `VkQueue` in
+//! a [`Few`], whose first is inline: on a device of one `VkQueue` a copy allocates nothing. And a
+//! batch's completion retires only the resources and fences batches up to it touched, each
+//! `VkQueue`'s listed in its submission order as their plans were applied, not every resource the
+//! state holds.
 
+use crate::key_hash::KeyMap;
 use ash::vk;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::hash::Hash;
+use std::hash::{BuildHasher, Hash};
 use std::ops::Range;
 
 /// The most entries the state keeps for one resource before it merges them.
@@ -544,8 +559,73 @@ struct Needs {
     waits: Vec<Wait>,
 }
 
+/// A short list kept one per `VkQueue` (an entry's writers and reads, a writer's waits), its first
+/// value inline: on a device of one `VkQueue` it never allocates, and copying it allocates nothing
+/// (the module docs). It keeps the order values were pushed in, as a `Vec` would.
+#[derive(Clone)]
+#[cfg_attr(test, derive(PartialEq))]
+struct Few<T> {
+    /// The first value; `None` only while `rest` is empty.
+    first: Option<T>,
+    rest: Vec<T>,
+}
+
+impl<T> Default for Few<T> {
+    fn default() -> Few<T> {
+        Few {
+            first: None,
+            rest: Vec::new(),
+        }
+    }
+}
+
+impl<T> Few<T> {
+    fn is_empty(&self) -> bool {
+        self.first.is_none()
+    }
+
+    /// Add `value` last.
+    fn push(&mut self, value: T) {
+        match self.first {
+            None => self.first = Some(value),
+            Some(_) => self.rest.push(value),
+        }
+    }
+
+    fn iter(&self) -> std::iter::Chain<std::option::Iter<'_, T>, std::slice::Iter<'_, T>> {
+        self.first.iter().chain(&self.rest)
+    }
+
+    fn iter_mut(
+        &mut self,
+    ) -> std::iter::Chain<std::option::IterMut<'_, T>, std::slice::IterMut<'_, T>> {
+        self.first.iter_mut().chain(&mut self.rest)
+    }
+
+    /// Keep the values `keep` holds for, in order.
+    fn retain_mut(&mut self, mut keep: impl FnMut(&mut T) -> bool) {
+        if !self.first.as_mut().is_some_and(&mut keep) {
+            self.first = None;
+        }
+        self.rest.retain_mut(keep);
+        if self.first.is_none() && !self.rest.is_empty() {
+            self.first = Some(self.rest.remove(0));
+        }
+    }
+}
+
+impl<T> IntoIterator for Few<T> {
+    type Item = T;
+    type IntoIter = std::iter::Chain<std::option::IntoIter<T>, std::vec::IntoIter<T>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.first.into_iter().chain(self.rest)
+    }
+}
+
 /// One queue's last write over a range.
 #[derive(Clone)]
+#[cfg_attr(test, derive(PartialEq))]
 struct Writer {
     /// The batch that wrote.
     at: Point,
@@ -553,7 +633,7 @@ struct Writer {
     visible: Access,
     /// The other queues that waited for the write, with the stages their waits cover: a timeline
     /// wait makes the write visible to every access of those stages.
-    waited: Vec<(usize, vk::PipelineStageFlags2)>,
+    waited: Few<(usize, vk::PipelineStageFlags2)>,
 }
 
 impl Writer {
@@ -578,6 +658,7 @@ impl Writer {
 
 /// One queue's reads of a range since the last write: their stages, and the latest batch.
 #[derive(Clone, Copy)]
+#[cfg_attr(test, derive(PartialEq))]
 struct Reads {
     at: Point,
     stages: vk::PipelineStageFlags2,
@@ -585,15 +666,16 @@ struct Reads {
 
 /// What the state knows of one range of one resource.
 #[derive(Clone)]
+#[cfg_attr(test, derive(PartialEq))]
 struct Entry {
     range: UseRange,
     /// The access types and stages of the last writes, empty when none is known.
     write: Access,
     /// The last write on each queue that wrote the range, one per queue: one queue's unless
     /// entries were merged.
-    writers: Vec<Writer>,
+    writers: Few<Writer>,
     /// The reads since the last write, one per queue.
-    reads: Vec<Reads>,
+    reads: Few<Reads>,
 }
 
 impl Entry {
@@ -602,14 +684,14 @@ impl Entry {
         let mut entry = Entry {
             range: used.range.clone(),
             write: used.write,
-            writers: Vec::new(),
-            reads: Vec::new(),
+            writers: Few::default(),
+            reads: Few::default(),
         };
         if !used.write.is_empty() {
             entry.writers.push(Writer {
                 at,
                 visible: Access::NONE,
-                waited: Vec::new(),
+                waited: Few::default(),
             });
         }
         entry.add_reads(at, used.read.stages);
@@ -623,7 +705,7 @@ impl Entry {
         }
         if !write.is_empty() {
             self.after_writes(write, at, needs);
-            for reads in &self.reads {
+            for reads in self.reads.iter() {
                 if reads.at.queue == at.queue {
                     needs.barrier.add(
                         Access::new(reads.stages, vk::AccessFlags2::NONE),
@@ -645,7 +727,7 @@ impl Entry {
     /// What `access` at `at` needs after the last writes: a barrier from a write of its own
     /// queue not yet visible to it, and a wait for a write of another queue not yet waited for.
     fn after_writes(&self, access: Access, at: Point, needs: &mut Needs) {
-        for writer in &self.writers {
+        for writer in self.writers.iter() {
             if writer.at.queue == at.queue {
                 if !writer.visible.covers(access) {
                     needs.barrier.add(self.write, access);
@@ -666,7 +748,7 @@ impl Entry {
     /// `at.queue`, and the batch's `waits` for other queues.
     fn ordered(&mut self, barrier: Option<Barrier>, waits: &[Wait], at: Point) {
         let write = self.write;
-        for writer in &mut self.writers {
+        for writer in self.writers.iter_mut() {
             if writer.at.queue == at.queue {
                 if let Some(barrier) = barrier {
                     if barrier.src.covers(write) {
@@ -730,21 +812,41 @@ impl Entry {
                 .get(at.queue)
                 .is_some_and(|&through| at.value <= through)
         };
-        self.writers.retain(|writer| !done(writer.at));
+        self.writers.retain_mut(|writer| !done(writer.at));
         if self.writers.is_empty() {
             self.write = Access::NONE;
         }
-        self.reads.retain(|reads| !done(reads.at));
+        self.reads.retain_mut(|reads| !done(reads.at));
         self.writers.is_empty() && self.reads.is_empty()
+    }
+}
+
+/// Where entries of the hazard state are kept by resource: an encoder's map, the tracker's, or a
+/// plan's copies ([`Overlay`]).
+trait Entries<S> {
+    /// The entries of `key`, where it has some.
+    fn of(&self, key: &S) -> Option<&Vec<Entry>>;
+
+    /// The entries of `key`, none at first.
+    fn of_mut(&mut self, key: S) -> &mut Vec<Entry>;
+}
+
+impl<S: Eq + Hash, H: BuildHasher> Entries<S> for HashMap<S, Vec<Entry>, H> {
+    fn of(&self, key: &S) -> Option<&Vec<Entry>> {
+        self.get(key)
+    }
+
+    fn of_mut(&mut self, key: S) -> &mut Vec<Entry> {
+        self.entry(key).or_default()
     }
 }
 
 /// What the uses (sorted by key, one per key and range) at `at` need after the accesses in
 /// `state`.
-fn depend<S: Eq + Hash>(state: &HashMap<S, Vec<Entry>>, uses: &[Use<S>], at: Point) -> Needs {
+fn depend<S>(state: &impl Entries<S>, uses: &[Use<S>], at: Point) -> Needs {
     let mut needs = Needs::default();
     for used in uses {
-        for entry in state.get(&used.key).into_iter().flatten() {
+        for entry in state.of(&used.key).into_iter().flatten() {
             if entry.range.overlaps(&used.range) {
                 entry.depend(used.read, used.write, at, &mut needs);
             }
@@ -755,15 +857,15 @@ fn depend<S: Eq + Hash>(state: &HashMap<S, Vec<Entry>>, uses: &[Use<S>], at: Poi
 
 /// Add the uses (sorted by key, one per key and range) of a batch at `at` to `state`, after
 /// `barrier` was recorded before them and with the batch's `waits`.
-fn admit<S: Copy + Eq + Hash>(
-    state: &mut HashMap<S, Vec<Entry>>,
+fn admit<S: Copy + Eq>(
+    state: &mut impl Entries<S>,
     uses: &[Use<S>],
     barrier: Option<Barrier>,
     waits: &[Wait],
     at: Point,
 ) {
     for group in uses.chunk_by(|a, b| a.key == b.key) {
-        let entries = state.entry(group[0].key).or_default();
+        let entries = state.of_mut(group[0].key);
         for entry in entries.iter_mut() {
             entry.ordered(barrier, waits, at);
         }
@@ -1394,6 +1496,7 @@ pub(super) fn ordered<K: Copy + Ord>(
 
 /// A fence's last update in the device's submission order.
 #[derive(Clone, Copy)]
+#[cfg_attr(test, derive(PartialEq))]
 struct FenceUpdate {
     /// The stages it covers: the updating encoder's, and those of the fences it waited for.
     stages: vk::PipelineStageFlags2,
@@ -1404,18 +1507,84 @@ struct FenceUpdate {
 /// The device's hazard state, in the scheduler's submission order: every logical queue's batches,
 /// on every `VkQueue`.
 pub(super) struct Tracker<K> {
-    resources: HashMap<K, Vec<Entry>>,
-    fences: HashMap<K, FenceUpdate>,
+    resources: KeyMap<K, Vec<Entry>>,
+    fences: KeyMap<K, FenceUpdate>,
     /// Per `VkQueue`: the timeline value through which every batch completed, as the host saw.
     completed: Vec<u64>,
+    /// Per `VkQueue`: the resources and fences each applied plan touched, by its timeline value,
+    /// in submission order: what its batch's completion may retire ([`Tracker::completed`]).
+    touched: Vec<VecDeque<(u64, Touched<K>)>>,
+    /// Lists a plan applied before gave back, cleared, for the next plans to fill
+    /// ([`Spares`]).
+    spares: Spares<K>,
+}
+
+/// A resource or a fence an applied plan touched ([`Tracker::touched`]).
+#[derive(Clone, Copy)]
+enum Touched<K> {
+    Resource(K),
+    Fence(K),
+}
+
+/// The most lists of entries a tracker keeps for plans to fill: more than a batch's resources
+/// usually are, a bounded few hundred kilobytes at most.
+const SPARE_ENTRIES: usize = 64;
+
+/// The cleared lists a tracker keeps for its next plans: resources' entries (each list with the
+/// capacity its last resource's grew to, at most what [`ENTRIES_PER_KEY`] lets one reach), and a
+/// plan's own lists, the last applied plan's.
+struct Spares<K> {
+    entries: Vec<Vec<Entry>>,
+    plans: Vec<PlanLists<K>>,
+}
+
+impl<K> Default for Spares<K> {
+    fn default() -> Spares<K> {
+        Spares {
+            entries: Vec::new(),
+            plans: Vec::new(),
+        }
+    }
+}
+
+/// A plan's own lists ([`Plan`]): its barriers, its waits, its resources' entries and the uses
+/// of a batch of one summary.
+struct PlanLists<K> {
+    barriers: Vec<Option<Barrier>>,
+    waits: Vec<Wait>,
+    resources: Vec<(K, Vec<Entry>)>,
+    uses: Vec<Use<K>>,
+}
+
+impl<K> Default for PlanLists<K> {
+    fn default() -> PlanLists<K> {
+        PlanLists {
+            barriers: Vec::new(),
+            waits: Vec::new(),
+            resources: Vec::new(),
+            uses: Vec::new(),
+        }
+    }
+}
+
+impl<K> Spares<K> {
+    /// Keep `entries` for a later plan, cleared, while fewer than [`SPARE_ENTRIES`] are kept.
+    fn keep(&mut self, mut entries: Vec<Entry>) {
+        if self.entries.len() < SPARE_ENTRIES {
+            entries.clear();
+            self.entries.push(entries);
+        }
+    }
 }
 
 impl<K> Default for Tracker<K> {
     fn default() -> Tracker<K> {
         Tracker {
-            resources: HashMap::new(),
-            fences: HashMap::new(),
+            resources: KeyMap::default(),
+            fences: KeyMap::default(),
             completed: Vec::new(),
+            touched: Vec::new(),
+            spares: Spares::default(),
         }
     }
 }
@@ -1430,14 +1599,78 @@ impl<K> fmt::Debug for Tracker<K> {
     }
 }
 
+/// The entries of the resources one batch uses, as its plan changes them: copies of the state's,
+/// sorted by resource. A batch uses a few resources, so a search of the sorted list finds one
+/// where a map would hash.
+struct Overlay<K>(Vec<(K, Vec<Entry>)>);
+
+impl<K: Ord> Overlay<K> {
+    /// Where `key` is, or would go.
+    fn find(&self, key: &K) -> Result<usize, usize> {
+        self.0.binary_search_by(|(known, _)| known.cmp(key))
+    }
+
+    /// Add `key` with the entries `fill` makes, unless it is listed.
+    fn add(&mut self, key: K, fill: impl FnOnce() -> Vec<Entry>) {
+        if let Err(at) = self.find(&key) {
+            self.0.insert(at, (key, fill()));
+        }
+    }
+}
+
+/// The state's own entries, as a plan of one summary is applied to them ([`Plan::uses`]): a
+/// resource they gain takes a list a plan gave back.
+struct Kept<'a, K> {
+    resources: &'a mut KeyMap<K, Vec<Entry>>,
+    spares: &'a mut Spares<K>,
+}
+
+impl<K: Eq + Hash> Entries<K> for Kept<'_, K> {
+    fn of(&self, key: &K) -> Option<&Vec<Entry>> {
+        self.resources.get(key)
+    }
+
+    fn of_mut(&mut self, key: K) -> &mut Vec<Entry> {
+        let spares = &mut self.spares.entries;
+        (self.resources)
+            .entry(key)
+            .or_insert_with(|| spares.pop().unwrap_or_default())
+    }
+}
+
+impl<K: Ord> Entries<K> for Overlay<K> {
+    fn of(&self, key: &K) -> Option<&Vec<Entry>> {
+        self.find(key).ok().map(|at| &self.0[at].1)
+    }
+
+    fn of_mut(&mut self, key: K) -> &mut Vec<Entry> {
+        let at = match self.find(&key) {
+            Ok(at) => at,
+            Err(at) => {
+                self.0.insert(at, (key, Vec::new()));
+                at
+            }
+        };
+        &mut self.0[at].1
+    }
+}
+
 /// The barriers before each encoder of a batch submitted next, the batch's waits for other
 /// queues, and the state after it. [`Tracker::apply`] keeps the state once the batch is
 /// submitted; a batch that is never submitted drops its plan, and the state is as before.
 pub(super) struct Plan<K> {
+    /// The batch's place.
+    at: Point,
     barriers: Vec<Option<Barrier>>,
     waits: Vec<Wait>,
-    resources: HashMap<K, Vec<Entry>>,
-    fences: HashMap<K, FenceUpdate>,
+    resources: Overlay<K>,
+    /// A batch of one summary: its uses, which [`Tracker::apply`] admits into the state itself,
+    /// after the plan's barrier and with its waits, as the plan would have admitted them into its
+    /// copies (`resources`, then empty) and the copies would have replaced the state's: the
+    /// scheduler does nothing else with the tracker between a plan and its application. A batch
+    /// of several summaries plans each against the copies the earlier ones changed.
+    uses: Vec<Use<K>>,
+    fences: KeyMap<K, FenceUpdate>,
 }
 
 impl<K> fmt::Debug for Plan<K> {
@@ -1459,11 +1692,19 @@ impl<K> Plan<K> {
     pub(super) fn waits(&self) -> &[Wait] {
         &self.waits
     }
+
+    /// How many resources' entries the plan copied from the state.
+    #[cfg(test)]
+    pub(super) fn copied(&self) -> usize {
+        self.resources.0.len()
+    }
 }
 
 impl<K: Copy + Ord + Hash> Tracker<K> {
     /// Every batch of `queue` through timeline value `value` completed, and the host saw it: the
-    /// state forgets what they did.
+    /// state forgets what they did. Only the resources and fences those batches touched are looked
+    /// at: every write or read the state holds is at the place of a batch that touched its
+    /// resource, so the completion of each such batch looks at the resource again.
     pub(super) fn completed(&mut self, queue: usize, value: u64) {
         if self.completed.len() <= queue {
             self.completed.resize(queue + 1, 0);
@@ -1472,35 +1713,71 @@ impl<K: Copy + Ord + Hash> Tracker<K> {
             return;
         }
         self.completed[queue] = value;
+        let Some(touched) = self.touched.get_mut(queue) else {
+            return;
+        };
         let completed = &self.completed;
-        self.resources.retain(|_, entries| {
-            entries.retain_mut(|entry| !entry.retire(completed));
-            !entries.is_empty()
-        });
-        self.fences.retain(|_, update| {
-            completed
-                .get(update.at.queue)
-                .is_none_or(|&through| update.at.value > through)
-        });
+        while let Some(&(at, what)) = touched.front() {
+            if at > value {
+                break;
+            }
+            touched.pop_front();
+            match what {
+                Touched::Resource(key) => {
+                    let Some(entries) = self.resources.get_mut(&key) else {
+                        continue;
+                    };
+                    entries.retain_mut(|entry| !entry.retire(completed));
+                    if entries.is_empty() {
+                        if let Some(entries) = self.resources.remove(&key) {
+                            self.spares.keep(entries);
+                        }
+                    }
+                }
+                Touched::Fence(fence) => {
+                    let done = self.fences.get(&fence).is_some_and(|update| {
+                        completed
+                            .get(update.at.queue)
+                            .is_some_and(|&through| update.at.value <= through)
+                    });
+                    if done {
+                        self.fences.remove(&fence);
+                    }
+                }
+            }
+        }
     }
 
     /// The barriers before the `encoders` of the batch submitted next, at `at`, and its waits.
-    /// The state is unchanged.
+    /// The state is unchanged; the plan's lists come from those plans applied before gave back.
     pub(super) fn plan<'a>(
-        &self,
+        &mut self,
         encoders: impl IntoIterator<Item = &'a Summary<K>>,
         at: Point,
     ) -> Plan<K>
     where
         K: 'a,
     {
+        let spares = &mut self.spares;
+        let PlanLists {
+            barriers,
+            waits,
+            resources,
+            uses,
+        } = spares.plans.pop().unwrap_or_default();
         let mut plan = Plan {
-            barriers: Vec::new(),
-            waits: Vec::new(),
-            resources: HashMap::new(),
-            fences: HashMap::new(),
+            at,
+            barriers,
+            waits,
+            resources: Overlay(resources),
+            uses,
+            fences: KeyMap::default(),
         };
-        for summary in encoders {
+        let mut encoders = encoders.into_iter().peekable();
+        while let Some(summary) = encoders.next() {
+            // A batch of one summary: planned against the state, admitted into it as the plan
+            // is applied ([`Plan::uses`]), its entries not copied.
+            let alone = plan.barriers.is_empty() && encoders.peek().is_none();
             let mut barrier = Barrier::default();
             let mut waited = vk::PipelineStageFlags2::NONE;
             for fence in &summary.waits {
@@ -1526,18 +1803,30 @@ impl<K: Copy + Ord + Hash> Tracker<K> {
                     }
                 }
             }
-            for used in &summary.uses {
-                plan.resources
-                    .entry(used.key)
-                    .or_insert_with(|| self.resources.get(&used.key).cloned().unwrap_or_default());
+            if !alone {
+                for used in &summary.uses {
+                    plan.resources.add(used.key, || {
+                        let mut entries = spares.entries.pop().unwrap_or_default();
+                        if let Some(known) = self.resources.get(&used.key) {
+                            entries.extend(known.iter().cloned());
+                        }
+                        entries
+                    });
+                }
             }
-            let needs = depend(&plan.resources, &summary.uses, at);
+            let needs = match alone {
+                true => depend(&self.resources, &summary.uses, at),
+                false => depend(&plan.resources, &summary.uses, at),
+            };
             barrier.add(needs.barrier.src, needs.barrier.dst);
             for wait in needs.waits {
                 add_wait(&mut plan.waits, wait);
             }
             let barrier = barrier.needed();
-            admit(&mut plan.resources, &summary.uses, barrier, &plan.waits, at);
+            match alone {
+                true => plan.uses.extend(summary.uses.iter().cloned()),
+                false => admit(&mut plan.resources, &summary.uses, barrier, &plan.waits, at),
+            }
             for &fence in &summary.updates {
                 let stages = summary.stages | waited;
                 plan.fences.insert(fence, FenceUpdate { stages, at });
@@ -1547,21 +1836,99 @@ impl<K: Copy + Ord + Hash> Tracker<K> {
         plan
     }
 
-    /// Keep the state after a planned batch that was submitted.
+    /// Keep the state after a planned batch that was submitted, and what it touched for its
+    /// completion to retire ([`Tracker::completed`]); its lists, and those its resources held
+    /// before, go back for later plans.
     pub(super) fn apply(&mut self, plan: Plan<K>) {
-        for (key, entries) in plan.resources {
-            if entries.is_empty() {
-                self.resources.remove(&key);
-            } else {
-                self.resources.insert(key, entries);
+        let Plan {
+            at,
+            mut barriers,
+            mut waits,
+            resources: Overlay(mut resources),
+            mut uses,
+            fences,
+        } = plan;
+        if self.touched.len() <= at.queue {
+            self.touched.resize_with(at.queue + 1, VecDeque::new);
+        }
+        let touched = &mut self.touched[at.queue];
+        // A batch of one summary, after its one barrier ([`Plan::uses`]).
+        if !uses.is_empty() {
+            let mut kept = Kept {
+                resources: &mut self.resources,
+                spares: &mut self.spares,
+            };
+            let barrier = barriers.first().copied().flatten();
+            admit(&mut kept, &uses, barrier, &waits, at);
+            for group in uses.chunk_by(|a, b| a.key == b.key) {
+                touched.push_back((at.value, Touched::Resource(group[0].key)));
             }
         }
-        self.fences.extend(plan.fences);
+        for (key, entries) in resources.drain(..) {
+            touched.push_back((at.value, Touched::Resource(key)));
+            let before = if entries.is_empty() {
+                self.spares.keep(entries);
+                self.resources.remove(&key)
+            } else {
+                self.resources.insert(key, entries)
+            };
+            if let Some(before) = before {
+                self.spares.keep(before);
+            }
+        }
+        for (fence, update) in fences {
+            touched.push_back((update.at.value, Touched::Fence(fence)));
+            self.fences.insert(fence, update);
+        }
+        barriers.clear();
+        waits.clear();
+        uses.clear();
+        self.spares.plans.push(PlanLists {
+            barriers,
+            waits,
+            resources,
+            uses,
+        });
+    }
+
+    /// Whether `other` holds the same state: every resource's entries and every fence's update,
+    /// and the completed values.
+    #[cfg(test)]
+    pub(super) fn same_state(&self, other: &Tracker<K>) -> bool {
+        type Sorted<'a, K> = (Vec<(&'a K, &'a Vec<Entry>)>, Vec<(&'a K, &'a FenceUpdate)>);
+        fn sorted<K: Copy + Ord>(tracker: &Tracker<K>) -> Sorted<'_, K> {
+            let mut resources: Vec<_> = tracker.resources.iter().collect();
+            resources.sort_by_key(|&(key, _)| *key);
+            let mut fences: Vec<_> = tracker.fences.iter().collect();
+            fences.sort_by_key(|&(key, _)| *key);
+            (resources, fences)
+        }
+        sorted(self) == sorted(other) && self.completed == other.completed
     }
 
     /// How many entries the state holds, over all resources and fences.
     #[cfg(test)]
     pub(super) fn entries(&self) -> usize {
         self.resources.values().map(Vec::len).sum::<usize>() + self.fences.len()
+    }
+
+    /// How many resources and fences the completions of the batches applied so far will look at
+    /// ([`Tracker::completed`]).
+    #[cfg(test)]
+    pub(super) fn to_retire(&self) -> usize {
+        self.touched.iter().map(VecDeque::len).sum()
+    }
+
+    /// Whether the state holds a write, a read or a fence update of a batch the host saw
+    /// complete: what a look at every resource and fence would retire.
+    #[cfg(test)]
+    pub(super) fn holds_completed(&self) -> bool {
+        let done =
+            |at: Point| (self.completed.get(at.queue)).is_some_and(|&through| at.value <= through);
+        let accesses = self.resources.values().flatten().any(|entry| {
+            entry.writers.iter().any(|writer| done(writer.at))
+                || entry.reads.iter().any(|reads| done(reads.at))
+        });
+        accesses || self.fences.values().any(|update| done(update.at))
     }
 }

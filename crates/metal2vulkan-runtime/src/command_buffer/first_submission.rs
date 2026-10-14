@@ -353,8 +353,12 @@ impl State {
         for done in segments {
             done.taken.judged();
         }
-        if let Some(listing) = listing.take() {
-            retained.push(Box::new(listing.used));
+        // An empty listing (a command buffer that used no no-copy buffer and no heap) holds
+        // nothing to let go of.
+        if let Some(Listing { used, .. }) = listing.take() {
+            if used != UsedResources::default() {
+                retained.push(Box::new(used));
+            }
         }
         self.root_tables.clear();
         self.root_ranges.clear();

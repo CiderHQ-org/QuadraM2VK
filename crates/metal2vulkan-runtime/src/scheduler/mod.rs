@@ -473,23 +473,19 @@ fn pass(
     } in commits
     {
         let count = batches.len();
-        let binary = &mut state.binary;
-        let held: Vec<Held> = batches
-            .into_iter()
-            .enumerate()
-            .map(|(index, batch)| Held {
-                buffer: buffer.hold(),
-                index,
-                last: index + 1 == count,
-                binary_needs: binary.commit(&batch.binary_waits, &batch.binary_signals),
-                waits: batch.waits,
-                binary_signals: batch.binary_signals,
-                segments: batch.segments,
-                gate: None,
-                checked: batch.checked,
-            })
-            .collect();
-        state.order.push(queue, held);
+        let State { order, binary, .. } = &mut *state;
+        let held = batches.into_iter().enumerate().map(|(index, batch)| Held {
+            buffer: buffer.hold(),
+            index,
+            last: index + 1 == count,
+            binary_needs: binary.commit(&batch.binary_waits, &batch.binary_signals),
+            waits: batch.waits,
+            binary_signals: batch.binary_signals,
+            segments: batch.segments,
+            gate: None,
+            checked: batch.checked,
+        });
+        order.push(queue, held);
         // The commit's own hold goes without the lock: its batches hold the command buffer now.
         passed.spent.buffers.push(buffer);
     }
@@ -545,13 +541,17 @@ fn submit_ready(
         // Of those whose host step or checks may start (`gate_heads`, `check_heads`), and of the
         // ready ones in commit order until one goes (`Order::next`); `memo` holds what this pass
         // found.
+        // With one line no head waits behind another line's batch.
         let mut memo = Behind::default();
-        let behind: Vec<u64> = (state
-            .order
-            .heads_where(|held| held.segments || held.checked))
-        .into_iter()
-        .filter(|&sequence| is_behind(&state.order, &state.binary, &mut memo, sequence))
-        .collect();
+        let behind: Vec<u64> = match state.order.several_lines() {
+            false => Vec::new(),
+            true => (state
+                .order
+                .heads_where(|held| held.segments || held.checked))
+            .into_iter()
+            .filter(|&sequence| is_behind(&state.order, &state.binary, &mut memo, sequence))
+            .collect(),
+        };
         let waiting = gate_heads(state, &behind, steps, gated);
         let landing = check_heads(state, &behind, checks, gated);
         let binary = &state.binary;
