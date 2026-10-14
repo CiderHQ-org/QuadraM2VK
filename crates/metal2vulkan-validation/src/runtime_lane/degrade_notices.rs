@@ -239,9 +239,9 @@ const BLITS: [Degradation; 3] = [
 const DISPATCHES: [Degradation; 2] = [Degradation::SplitDispatch, Degradation::EmulatedSimdgroups];
 
 /// The kinds [`passes_degrade_once_per_kind`] takes (the second where the device resolves a
-/// combined format's aspects one at a time; the exact resolve where the driver's average of
-/// `RGBA8Unorm` at 4 samples is not measured as Metal's; the unmeasured resolve where the device
-/// makes a texture of 8 samples).
+/// combined format's aspects one at a time; the exact resolve and the device's rounded one where
+/// the driver's average of `RGBA8Unorm` at 4 samples is not measured as Metal's, or where the
+/// device makes a texture of 8 samples; the unmeasured resolve where it makes one).
 const PASSES: [Degradation; 7] = [
     Degradation::SeparateDepthStencil,
     Degradation::OneAspectResolve,
@@ -1349,7 +1349,12 @@ fn passes_degrade_once_per_kind() {
         .into_iter()
         .filter(|&kind| match kind {
             Degradation::OneAspectResolve => one_aspect,
-            Degradation::ShaderResolve => exact || eight_samples.is_some(),
+            // Where the device's average is Metal's (MoltenVK's is Metal's own resolve) and it
+            // makes no texture of 8 samples (an Apple GPU: Metal makes none past 4), every resolve
+            // here is Metal's own and none rounds by the device.
+            Degradation::ShaderResolve | Degradation::DeviceRoundedResolve => {
+                exact || eight_samples.is_some()
+            }
             Degradation::UnmeasuredResolve => eight_samples.is_some(),
             _ => true,
         })

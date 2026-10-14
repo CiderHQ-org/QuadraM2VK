@@ -134,10 +134,12 @@ println!("  Metal properties: {:?}", device.metal_properties());
 
 Where Vulkan leaves an answer to the driver and a driver's answer is Metal's, the profile relies on
 it only where that driver was measured to give it, keyed on the description's driver identity
-(`driver_id`, `vendor_id`, `driver_version`, and `device_id` where one GPU differs from another),
-never on a claim of the description itself. These are `DriverDeviation`s (simdgroups that run in
-lockstep, Metal's own `float` functions, sampler and canonical NaNs, color writes, ...), measured
-on MoltenVK 1.4.1 on Apple's M3 Max and M4, with a few per-GPU facts measured elsewhere. A driver,
+(`driver_id`, `vendor_id`, `driver_version`, and `device_id` where one GPU differs from another;
+MoltenVK's `device_id` is the macOS release and the Apple GPU family, so the M3 Max and the M4 share
+one under macOS 27 and a macOS release not measured is another identity), never on a claim of the
+description itself. These are `DriverDeviation`s (simdgroups that run in lockstep, Metal's own
+`float` functions, sampler and canonical NaNs, color writes, ...), measured on MoltenVK 1.4.1 on
+Apple's M3 Max and M4, with a few per-GPU facts measured elsewhere. A driver,
 GPU or release that was not measured takes the conservative, exact route. A newer MoltenVK release
 takes the measured facts and records `PrecisionNote::BeyondMeasuredDeviation`.
 

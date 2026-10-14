@@ -49,7 +49,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 /// The Metal environment whose committed observations the lane compares with.
-pub const METAL_ENVIRONMENT: &str = "apple-m3-max-macos26.7";
+pub const METAL_ENVIRONMENT: &str = "apple-m3-max-macos27.0.1";
 
 /// The longest a lane command buffer may take.
 const WAIT: Duration = Duration::from_secs(60);

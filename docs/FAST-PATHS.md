@@ -253,3 +253,16 @@ driver's. Each is open work.
   `authored-four-iteration-loop`: offline with `xcrun metal` and `metal-tt -arch applegpu_g15s`,
   and in the runtime lane on an M3 Max with macOS 26.7. No form of the loop is known that avoids
   the rewrite for every such loop, so it is not built.
+- **An anisotropic sampler without a mip filter whose min and mag filters differ, through
+  Metal's own sampler (MoltenVK).** Vulkan has no sampler without mipmapping, so the runtime hands
+  MoltenVK a nearest mip filter with a level clamp. Where the two filters agree, the clamp `[0, 0]`
+  reads Metal's `NotMipmapped` bit for bit at every anisotropy, on an M3 Max under macOS 27.0.1.
+  Where they differ, the sampler keeps the clamp `[0, 0.25]` that chooses Metal's filter, and at
+  `maxAnisotropy` 2 to 16 no clamp Metal takes reads its `NotMipmapped` answer: at the
+  anisotropic lane's footprints, 4,097 of 5,072 channels differ at `maxAnisotropy` 2 and 2,763 at
+  16. No note announces it.
+- **The interlocked pass's cost on the M4 under macOS 27.** On macOS 27 MoltenVK gives the M3 Max
+  and the M4 one device identity, so both split a pass the pixel interlock would split
+  (`DriverFact::InterlockedPassSplitNoSlower`), the faster form on the M3 Max (about a quarter
+  faster, wall and GPU). The M4 measured that pass faster kept whole (wall 1383 µs against 1499),
+  a cost its shared identity does not take; its answers are exact either way.

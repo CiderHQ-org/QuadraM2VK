@@ -307,7 +307,9 @@ pub(crate) fn vk_filtering(
 /// (`DeviceProperties::supports_sampler_reduction_mode`).
 ///
 /// Without a mip filter it reads the base level, and its clamp keeps Metal's choice between the
-/// two filters (`not_mipmapped_lods`).
+/// two filters (`not_mipmapped_lods`); through Metal's own sampler with anisotropy and equal
+/// filters its clamp is `[0, 0]`, where that sampler reads Metal's `NotMipmapped`. With filters
+/// that differ there, no clamp reads Metal's answer (`docs/FAST-PATHS.md`, known gaps).
 ///
 /// Its level clamp is Metal's on Metal's level grid for a texture whose texels it filters, with a
 /// mip filter. Under a nearest mip filter each bound is the level the filter reads at it (Metal
@@ -389,7 +391,24 @@ pub fn vk_sampler(
             level
         }
     };
+    // Metal's own sampler (MoltenVK) handed anisotropy reads a sampler without a mip filter whose
+    // filters agree as Metal's `NotMipmapped` at the clamp `[0, 0]`, whatever the descriptor's
+    // clamps, and otherwise at none it takes: a bound of a sixty-fourth or more (`0.25` included)
+    // changes Metal's anisotropic footprint (an Apple M3 Max on macOS 27.0.1, the anisotropic
+    // lane's 1268 footprints at `maxAnisotropy` 2, 8 and 16, gradients scaled by 1 to 1/32,
+    // linear and nearest filters, clamps from `[0, 0.25]` to `[3, 8]`: every channel Metal's).
+    // Equal filters leave the device's level no filter to choose.
+    let own_anisotropic = max_anisotropy.is_some()
+        && desc.min_filter == desc.mag_filter
+        && profile
+            .fields()
+            .enabled
+            .properties
+            .contains(&VkProperty::MetalSampler);
     let (mipmap_mode, min_lod, max_lod) = match desc.mip_filter {
+        SamplerMipFilter::NotMipmapped if own_anisotropic => {
+            (vk::SamplerMipmapMode::NEAREST, 0.0, 0.0)
+        }
         SamplerMipFilter::NotMipmapped => {
             let (min_lod, max_lod) = not_mipmapped_lods(lo, hi);
             (vk::SamplerMipmapMode::NEAREST, min_lod, max_lod)
@@ -1237,6 +1256,75 @@ mod tests {
                 let metal = l.max(lo).min(hi) > 0.0;
                 assert_eq!(device, metal, "{lo} {hi} at {l}");
             }
+        }
+    }
+
+    /// Through Metal's own sampler, an anisotropic sampler without a mip filter whose filters
+    /// agree is clamped to `[0, 0]` whatever its clamps, where that sampler reads Metal's
+    /// `NotMipmapped`; one whose filters differ, an isotropic one, and every sampler off Metal's
+    /// sampler keep the clamp that chooses Metal's filter.
+    #[test]
+    fn metals_own_anisotropic_sampler_reads_not_mipmapped_at_level_zero() {
+        use SamplerMinMagFilter::{Linear, Nearest};
+        let with = |metal_sampler: bool| {
+            let (_, mut desc) = committed_descriptions()
+                .into_iter()
+                .find(|(s, _)| s == "vk12-floor")
+                .unwrap();
+            desc.features.insert(VkFeature::SamplerAnisotropy);
+            desc.limits.max_sampler_anisotropy_bits = 16f32.to_bits();
+            Device::with_deviation(
+                desc,
+                DevicePolicy::default(),
+                DriverDeviation::MetalSampler,
+                metal_sampler,
+            )
+            .unwrap()
+        };
+        for (metal_sampler, min, mag, anisotropy, lo, hi, lods) in [
+            (true, Linear, Linear, 8, 0.0, f32::MAX, (0.0, 0.0)),
+            (true, Nearest, Nearest, 16, 0.0, f32::MAX, (0.0, 0.0)),
+            (true, Linear, Linear, 2, 1.0, f32::MAX, (0.0, 0.0)),
+            (true, Linear, Linear, 8, 0.125, 2.0, (0.0, 0.0)),
+            (
+                true,
+                Linear,
+                Nearest,
+                8,
+                0.0,
+                f32::MAX,
+                (0.0, NOT_MIPMAPPED_MAX_LOD),
+            ),
+            (
+                true,
+                Linear,
+                Linear,
+                1,
+                0.0,
+                f32::MAX,
+                (0.0, NOT_MIPMAPPED_MAX_LOD),
+            ),
+            (
+                false,
+                Linear,
+                Linear,
+                8,
+                0.0,
+                f32::MAX,
+                (0.0, NOT_MIPMAPPED_MAX_LOD),
+            ),
+        ] {
+            let dev = with(metal_sampler);
+            let mut d = metal_default();
+            d.min_filter = min;
+            d.mag_filter = mag;
+            d.max_anisotropy = anisotropy;
+            d.lod_min_clamp = lo;
+            d.lod_max_clamp = hi;
+            let s = vk_sampler(&d, SamplerUse::default(), dev.profile()).unwrap();
+            let what = format!("{min:?} {mag:?} {anisotropy} [{lo}, {hi}], {metal_sampler}");
+            assert_eq!(s.mipmap_mode, vk::SamplerMipmapMode::NEAREST, "{what}");
+            assert_eq!((s.min_lod, s.max_lod), lods, "{what}");
         }
     }
 

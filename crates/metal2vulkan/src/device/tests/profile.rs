@@ -479,9 +479,9 @@ fn streamed_fingerprint_equals_the_hash_of_the_rendering() {
 /// Two committed profiles share a fingerprint only when their descriptions differ in nothing a
 /// translation reads: at most in the device's identity (vendor, device, driver version, type) and
 /// its allocation sizes, as two captures of one GPU family on one driver do
-/// (`intel-irisxe-rplp-anv` and `intel-uhd770-rpls-anv`, the one Intel venue). `moltenvk-m3` and
-/// `moltenvk-m4` (MoltenVK 1.4.1 on the Apple M3 Max and the Apple M4) differ since the graphics
-/// cube route is measured per GPU: the M4's is unmeasured.
+/// (`intel-irisxe-rplp-anv` and `intel-uhd770-rpls-anv`, the one Intel venue), and `moltenvk-m3`
+/// and `moltenvk-m4` (MoltenVK 1.4.1 on the Apple M3 Max and the Apple M4 under macOS 27, whose
+/// `deviceID` MoltenVK makes one: the macOS release and the GPU family).
 #[test]
 fn fingerprints_distinguish_committed_profiles() {
     let translated = |stem: &str| {
@@ -505,10 +505,13 @@ fn fingerprints_distinguish_committed_profiles() {
     }
     assert_eq!(
         shared,
-        [(
-            "intel-irisxe-rplp-anv".to_string(),
-            "intel-uhd770-rpls-anv".to_string()
-        ),],
+        [
+            (
+                "intel-irisxe-rplp-anv".to_string(),
+                "intel-uhd770-rpls-anv".to_string()
+            ),
+            ("moltenvk-m3".to_string(), "moltenvk-m4".to_string()),
+        ],
         "the committed profiles that share a fingerprint"
     );
 }

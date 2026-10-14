@@ -1008,9 +1008,9 @@ fn a_callers_image_without_the_fetch_usage_fetches_through_a_scratch() {
 /// A pass of a 4² `R32Float` target cleared to 0.75 and stored, beside a memoryless `R32Float`
 /// attachment its pipelines have and never write: `rt6_resolve_white`, `fetch_scalar`, the white
 /// again and `fetch_scalar` twice (0.25); the white drawn of indices, then `fetch_scalar` (0.5).
-/// In the pixel interlock, on a device whose driver runs such a pass faster whole (MoltenVK on the
-/// M4, ANV on the RPL-S), the fetch's first draw records the pass's draws before it again, and
-/// later whites record, through the variant that writes color 0 in the fetch's storage form, so
+/// In the pixel interlock, on a device whose driver runs such a pass faster whole (ANV on the
+/// RPL-S), the fetch's first draw records the pass's draws before it again, and later whites
+/// record, through the variant that writes color 0 in the fetch's storage form, so
 /// each pass runs whole: none splits or backs its memoryless attachment. Elsewhere in the interlock
 /// each splits at the fetch, which backs the memoryless attachment. The white under a blend the
 /// storage form does not build ([`blended_white`]), then `fetch_scalar`, holds 0.5 too, and in the

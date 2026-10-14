@@ -721,19 +721,21 @@ fn one_intel_venue_allows_both_devices_and_stops_any_other() {
     );
 }
 
-/// The committed captures of the Apple M3 Max and the Apple M4 under MoltenVK 1.4.1 describe the
-/// same capabilities but for the allocation sizes, which no translation reads
-/// (`DeviceDescription::allocation`), yet derive different translation keys: the graphics cube
-/// gradient route is measured on the M3 Max's device ID alone
-/// (`DriverDeviation::GraphicsCubeGradientRoute`). So a run held to each capture on its own device
-/// proceeds, reporting nothing, and a run on the M4 held to the M3 Max's venue stops on the key
-/// even where the venue allowed the M4's identity, and on its name and device ID too where it did
-/// not.
+/// The committed captures of the Apple M3 Max and the Apple M4 under MoltenVK 1.4.1 and macOS 27
+/// describe the same capabilities but for the allocation sizes, which no translation reads
+/// (`DeviceDescription::allocation`), and share one device ID (MoltenVK's is the macOS release and
+/// the GPU family), so they derive one translation key. So a run held to each capture on its own
+/// device proceeds, reporting nothing, and a run on the M4 held to the M3 Max's venue proceeds
+/// where the venue allows the M4's identity, reporting the allocation sizes it does not read, and
+/// stops on the M4's name alone where the venue does not. The name is the venue's identity guard
+/// (which device's runs a venue's records hold), not product behaviour: translation answers the
+/// two GPUs alike.
 #[test]
-fn a_run_on_the_m4_stops_at_the_m3_max_venue() {
+fn a_run_on_the_m4_at_the_m3_max_venue_stops_on_its_name_alone() {
     let m3 = crate::c3::VenueProfile::committed("moltenvk-m3").unwrap();
     let m4 = crate::c3::VenueProfile::committed("moltenvk-m4").unwrap();
-    assert_ne!(m4.fingerprint, m3.fingerprint);
+    assert_eq!(m4.fingerprint, m3.fingerprint);
+    assert_eq!(m4.identity.device_id, m3.identity.device_id);
     let described = differences(&m3.description, &m4.description)
         .iter()
         .map(ToString::to_string)
@@ -756,12 +758,15 @@ fn a_run_on_the_m4_stops_at_the_m3_max_venue() {
         let check = venue_check(venue, own, &venue.identity, &venue.description).unwrap();
         assert_eq!(check, crate::c3::VenueCheck::default(), "{}", venue.stem);
     }
-    let key = format!("translation key: {} ({})", m3.fingerprint, m4.fingerprint);
     let both = [m3.identity.clone(), m4.identity.clone()];
     let check = venue_check(&m3, &both, &m4.identity, &m4.description).unwrap();
-    let mut expected = vec![key.clone()];
-    expected.extend(described.iter().cloned());
-    assert_eq!(check.stops, expected);
+    assert_eq!(
+        check,
+        crate::c3::VenueCheck {
+            stops: Vec::new(),
+            unread: described.clone(),
+        }
+    );
     let check = venue_check(
         &m3,
         std::slice::from_ref(&m3.identity),
@@ -769,19 +774,16 @@ fn a_run_on_the_m4_stops_at_the_m3_max_venue() {
         &m4.description,
     )
     .unwrap();
-    let mut expected = vec![
-        format!(
-            "identity device: {} ({})",
-            m3.identity.device, m4.identity.device
-        ),
-        format!(
-            "identity device_id: {} ({})",
-            m3.identity.device_id, m4.identity.device_id
-        ),
-        key,
-    ];
-    expected.extend(described);
-    assert_eq!(check.stops, expected);
+    assert_eq!(
+        check,
+        crate::c3::VenueCheck {
+            stops: vec![format!(
+                "identity device: {} ({})",
+                m3.identity.device, m4.identity.device
+            )],
+            unread: described,
+        }
+    );
 }
 
 /// The restricted context requires the description it queries through the layer to be the profile

@@ -38,7 +38,7 @@ use crate::pipeline::testing::{
     compile, engine_dir, link_and_validate, llvm_assemble, AssembleError,
 };
 use crate::pipeline::PrecisionNote;
-use crate::spirv::testing::committed_exact_profiles;
+use crate::spirv::testing::{committed_descriptions, committed_exact_profiles};
 
 const OP_EXT_INST: u16 = 12;
 const OP_CONSTANT: u16 = 43;
@@ -478,11 +478,11 @@ fn an_unmeasured_cube_gradient_route_refuses_an_anisotropic_constexpr_sampler() 
             .clone()
     };
     let (measured, unmeasured) = (profile(measured.clone(), true), profile(measured, false));
-    // The graphics route is its own deviation, still taken here.
+    // The graphics route is its own deviation, unmeasured on macOS 27's identity either way.
     assert_eq!(
         unmeasured.fields().cube_gradients,
         CubeGradients {
-            graphics: CubeGradientRoute::AppleSwizzled,
+            graphics: CubeGradientRoute::Unmeasured,
             compute: CubeGradientRoute::Unmeasured,
         }
     );
@@ -505,12 +505,14 @@ fn an_unmeasured_cube_gradient_route_refuses_an_anisotropic_constexpr_sampler() 
     }
 }
 
-/// The graphics cube route is measured per GPU. On `moltenvk-m3` (the Apple M3 Max's `deviceID`) a
-/// fragment function's explicit cube gradients through an anisotropic constexpr sampler take
-/// SPIRV-Cross's fixup in the transposed form; on `moltenvk-m4` (the M4's), whose graphics route is
-/// unmeasured (that form misses Metal's sample on 96 and 48 of 144 samples, EV RTL-lane2-mvk4), the
-/// same fragment is refused naming `GraphicsCubeGradientRoute`, while the M4's kernel route stays
-/// Metal's and the kernel of the same samples compiles. The cover vertex function compiles on both.
+/// The graphics cube route is measured per GPU and macOS release (MoltenVK's `deviceID` names
+/// both). On the Apple M3 Max under macOS 26.7 (`moltenvk-m3`'s capture at that release's
+/// `deviceID`) a fragment function's explicit cube gradients through an anisotropic constexpr
+/// sampler take SPIRV-Cross's fixup in the transposed form; on `moltenvk-m4` (macOS 27's identity,
+/// the M4's and, as `moltenvk-m3` now is, the M3 Max's), whose graphics route is unmeasured (that
+/// form misses Metal's sample on 96 and 48 of 144 samples on the M4, EV RTL-lane2-mvk4), the same
+/// fragment is refused naming `GraphicsCubeGradientRoute`, while the kernel route stays Metal's and
+/// the kernel of the same samples compiles. The cover vertex function compiles on both.
 #[test]
 fn the_graphics_cube_route_is_measured_on_the_m3_max_alone() {
     use crate::error::{DriverDeviation, Feature};
@@ -526,7 +528,22 @@ fn the_graphics_cube_route_is_measured_on_the_m3_max_alone() {
             .map(|(_, p)| p.clone())
             .expect(stem)
     };
-    let (m3, m4) = (of("moltenvk-m3"), of("moltenvk-m4"));
+    let m4 = of("moltenvk-m4");
+    assert_eq!(
+        of("moltenvk-m3").fields().cube_gradients,
+        m4.fields().cube_gradients
+    );
+    let mut m3_macos26 = committed_descriptions()
+        .expect("descriptions")
+        .iter()
+        .find(|(s, _)| s == "moltenvk-m3")
+        .map(|(_, d)| d.clone())
+        .expect("moltenvk-m3");
+    m3_macos26.device_id = crate::device::driver_facts::APPLE_M3_MAX;
+    let m3 = Device::new(m3_macos26, EXACT_SAMPLING)
+        .expect("device")
+        .profile()
+        .clone();
     assert_eq!(
         (
             m3.fields().cube_gradients.graphics,

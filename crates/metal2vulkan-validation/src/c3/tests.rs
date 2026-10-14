@@ -3784,10 +3784,11 @@ fn a_rekey_list_moves_records_only_to_this_builds_keys() {
 
 /// The Apple M3 Max's MoltenVK runs (`apple-m3-max-moltenvk`) compare with its own Metal rows: a
 /// run compared with another Metal environment allows no device, and a device stating no Metal
-/// environment is allowed under any. The list refuses the Apple M4's capture as a second device of
-/// the venue ("needs a venue of its own": the M4's graphics cube gradient route is unmeasured, so
-/// its capture derives another translation key), a venue whose device names another GPU's Metal
-/// environment, and a device whose Metal environment is no C3 reference environment.
+/// environment is allowed under any. The Apple M4's capture derives the venue's translation key
+/// (under macOS 27 the two GPUs share one MoltenVK device ID and differ only in allocation sizes),
+/// yet the list refuses it as a device naming the M3 Max's Metal environment, as a second device of
+/// the venue or in a venue of its own, and a device whose Metal environment is no C3 reference
+/// environment.
 #[test]
 fn each_moltenvk_device_compares_with_its_own_gpus_metal() {
     let committed = Venues::load(&Venues::committed_path()).unwrap();
@@ -3818,8 +3819,8 @@ fn each_moltenvk_device_compares_with_its_own_gpus_metal() {
             "apple-m3-max-moltenvk",
             vec![(
                 "moltenvk-m3".to_string(),
-                436601353,
-                Some("apple-m3-max-macos26.7".to_string())
+                452985353,
+                Some("apple-m3-max-macos27.0.1".to_string())
             )]
         )]
     );
@@ -3832,7 +3833,8 @@ fn each_moltenvk_device_compares_with_its_own_gpus_metal() {
             .map(|identity| identity.device)
             .collect::<Vec<_>>()
     };
-    assert_eq!(names(m3, "apple-m3-max-macos26.7"), ["Apple M3 Max"]);
+    assert_eq!(names(m3, "apple-m3-max-macos27.0.1"), ["Apple M3 Max"]);
+    assert_eq!(names(m3, "apple-m3-max-macos26.7"), Vec::<String>::new());
     assert_eq!(names(m3, "apple-m3-max-macos26.5.2"), Vec::<String>::new());
     let mut stating_none = m3.clone();
     stating_none.devices[0].metal_environment_id = None;
@@ -3840,7 +3842,8 @@ fn each_moltenvk_device_compares_with_its_own_gpus_metal() {
         names(&stating_none, "apple-m3-max-macos26.5.2"),
         ["Apple M3 Max"]
     );
-    // The M4's capture as a second device of the venue: translation tells them apart.
+    // The M4's capture as a second device of the venue: translation cannot tell them apart, but
+    // its device names another GPU's Metal environment.
     let m4 = crate::c3::VenueProfile::committed("moltenvk-m4").unwrap();
     let mut m4_device = m3.devices[0].clone();
     m4_device.profile = "moltenvk-m4".into();
@@ -3853,8 +3856,12 @@ fn each_moltenvk_device_compares_with_its_own_gpus_metal() {
         .unwrap()
         .devices
         .push(m4_device.clone());
-    let error = shared.check_profiles().unwrap_err();
-    assert!(error.contains("needs a venue of its own"), "{error}");
+    shared.check_profiles().expect("one translation key");
+    let error = shared.check().unwrap_err();
+    assert!(
+        error.contains("which is another GPU's (Apple M3 Max)"),
+        "{error}"
+    );
     // A venue of its own whose device names the M3 Max's Metal environment.
     let mut own = committed.clone();
     let mut venue = m3.clone();

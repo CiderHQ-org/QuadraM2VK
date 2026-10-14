@@ -3,23 +3,23 @@
   "provenance": {
     "source": "vulkaninfo",
     "command": "vulkaninfo --json",
-    "sha256": "29dd5b5c317672fc72ff1d304add1c65636533a24598f6024269170b99043af5",
+    "sha256": "707f2c9936db17af75fbe55986a091a7f0e2e93fb61affa880d98c996c93933b",
     "source_profile": "VP_VULKANINFO_Apple_M3_Max_0_2_2209_portability_subset",
     "device_name": "Apple M3 Max",
     "vendor_id": 4203,
-    "device_id": 436601353,
+    "device_id": 452985353,
     "driver_name": "MoltenVK",
     "driver_info": "1.4.1",
     "driver_version": "10401",
     "api_version": "1.4.334",
-    "host": "Apple M3 Max, macOS 26.7 (25G229), Homebrew molten-vk 1.4.1, vulkan-tools 1.4.350.1",
-    "captured": "2026-10-6",
+    "host": "Apple M3 Max, macOS 27.0.1 (26A434), Homebrew molten-vk 1.4.1, vulkan-tools 1.4.350.1",
+    "captured": "2026-10-14",
     "transforms": [
       "queueFamiliesProperties: dropped 3 entries identical to an earlier family (schema uniqueItems)"
     ],
     "formats": {
       "command": "corpus-vulkan --capture-formats OUT --device-type gpu",
-      "sha256": "bd70b20bbe48284b6666af4f3471027aca93ac64768fe1ef47ff110769ecafca",
+      "sha256": "07b6f2e730ee77d047380f694fdcb1177455f4df34bc41726fd3e59497892e48",
       "queried": 248,
       "stated": 201,
       "color_attachment_sample_counts": 56
@@ -459,7 +459,7 @@
       "properties": {
         "VkPhysicalDeviceProperties": {
           "apiVersion": 4211022,
-          "deviceID": 436601353,
+          "deviceID": 452985353,
           "deviceName": "Apple M3 Max",
           "deviceType": "VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU",
           "driverVersion": 10401,
@@ -648,7 +648,7 @@
           "pLayeredApis": [
             {
               "vendorID": 4203,
-              "deviceID": 436601353,
+              "deviceID": 452985353,
               "layeredAPI": "VK_PHYSICAL_DEVICE_LAYERED_API_METAL_KHR",
               "deviceName": "Apple M3 Max"
             }
@@ -8592,7 +8592,7 @@
       "history": [
         {
           "revision": 1,
-          "date": "2026-10-6",
+          "date": "2026-10-14",
           "author": "Automated export from vulkaninfo",
           "comment": ""
         }

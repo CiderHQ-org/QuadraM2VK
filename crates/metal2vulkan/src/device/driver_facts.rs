@@ -121,11 +121,12 @@ pub(crate) fn among<F: Copy + Ord>(
 /// - `CubeGradientRoute`, a kernel's: EV RT13-ani-mvk (cases `a54af728` and `315ca8b0` match
 ///   through MoltenVK on the M3 Max), and the same cases against the M4's own Metal rows on the M4.
 /// - `GraphicsCubeGradientRoute`, a vertex or fragment function's: measured on the M3 Max's GPU
-///   alone ([`APPLE_M3_MAX`]): SPIRV-Cross's `spvGradientCube` read in its source, its transposed
-///   form measured in a Metal kernel (EV RT13-ag3-probe-m3), and the owned fixture
-///   `rtl_cube_grad_fragment` matching Metal's kernel rows. On the M4 the same form differs on 96
-///   and 48 of 144 samples (EV RTL-lane2-mvk4), and no form matched every lane offline
-///   (RT13-ag3-probe-m4), so its route is unmeasured there.
+///   under macOS 26.7 alone ([`APPLE_M3_MAX`]): SPIRV-Cross's `spvGradientCube` read in its
+///   source, its transposed form measured in a Metal kernel (EV RT13-ag3-probe-m3), and the owned
+///   fixture `rtl_cube_grad_fragment` matching Metal's kernel rows. On the M4 the same form differs
+///   on 96 and 48 of 144 samples (EV RTL-lane2-mvk4), and no form matched every lane offline
+///   (RT13-ag3-probe-m4), so its route is unmeasured on the macOS 27 identity ([`APPLE_M4`]),
+///   the M3 Max's there included.
 /// - `MetalColorWrites`: `runtime_lane::color_writes` through MoltenVK stored Metal's code for
 ///   every input of probes (every code's exact value and every tie with two `f32` steps either
 ///   side, of the 8- and 16-bit unorm and snorm, 10:10:10:2, 8-bit sRGB and half-float formats),
@@ -364,7 +365,10 @@ pub(crate) fn among<F: Copy + Ord>(
 /// `StorageImageClass::OneBitAlpha` there). ANV, Mesa 26.2.4 on the Iris Xe (RPL-P), and lavapipe
 /// (Mesa 26.0.8 on LLVM 21.1.8, x86_64) round the `f32` product with ties to even, and NVIDIA's
 /// 615.71.09 on the RTX 3090 stores the code below many values just past a tie (EVs
-/// `FRT3-nsw2-anv`, `-lvpx86`, `-nv3090`), so none is listed. The M3 Max is not measured.
+/// `FRT3-nsw2-anv`, `-lvpx86`, `-nv3090`), so none is listed. MoltenVK 1.4.1 on the M3 Max under
+/// macOS 27.0.1, of the M4's identity ([`APPLE_M4`]), stores every channel as Metal does too
+/// (2026-10-14: both of `norm_storage_writes`' tests with the fact taken, 0 channels off in every
+/// form and format it stores, the packed 16-bit ones refused for storage as on the M4).
 ///
 /// `Unorm8LinearFilter`, measured by the deviation probe (`probes/shb-dev` at the scratch commit
 /// `aa944573d` and its `cell` variant, the translator's native coordinate; EVs `SHB-dw-*` against
@@ -728,12 +732,20 @@ const fn mesa_2624(
     }
 }
 
-/// The `deviceID` MoltenVK 1.4.1 reports for the Apple M3 Max (the committed capture
-/// `moltenvk-m3`).
+/// The `deviceID` MoltenVK 1.4.1 reports for an Apple GPU of the Apple9 family under macOS 26.7:
+/// the Apple M3 Max's identity where its facts were measured, before its macOS 27 capture. On an
+/// Apple GPU MoltenVK's `deviceID` is not the GPU's: it is the macOS version and the GPU's highest
+/// families, `(major << 24) + (minor << 16) + (Mac family << 8) + Apple family`, the minor taken
+/// from `major + minor / 100` scaled and truncated, so 26.7 reads 6
+/// (`MVKPhysicalDevice::getHighestGPUCapability`, MoltenVK 1.4.1). Every GPU of a family on one
+/// macOS release has one identity.
 pub(crate) const APPLE_M3_MAX: u32 = 0x1A06_0209;
 
-/// The `deviceID` MoltenVK 1.4.1 reports for the Apple M4 (the committed capture
-/// `moltenvk-m4`).
+/// The `deviceID` MoltenVK 1.4.1 reports for an Apple GPU of the Apple9 family under macOS 27.0
+/// ([`APPLE_M3_MAX`]'s rule): the Apple M4's (the committed capture `moltenvk-m4`) and the Apple
+/// M3 Max's under macOS 27.0.1 (the committed capture `moltenvk-m3`, 26A434), one identity. A
+/// fact of this identity's rows that decides an answer is measured on both GPUs; a cost fact on
+/// the M3 Max, or named as the M4's alone.
 pub(crate) const APPLE_M4: u32 = 0x1B00_0209;
 
 /// The row of `fact` measured on MoltenVK 1.4.1 on Apple's GPUs.
@@ -1317,7 +1329,9 @@ const DYNAMIC_RESTART_WARNING: DriverDiagnostic = DriverDiagnostic {
 /// - MoltenVK 1.4.1 on an Apple M4 (EV `ZIN2-dn2-mvk4`) keeps each one the clear, the copy and
 ///   the CPU store, and its test passes against every positive one and fails against every
 ///   negative one: Metal's answers, as Metal's own depth test makes them. Its draw at a denormal
-///   depth stores 0, as Metal's rasterizer makes it, so a draw's is no difference anywhere.
+///   depth stores 0, as Metal's rasterizer makes it, so a draw's is no difference anywhere. On the
+///   M3 Max under macOS 27.0.1, of the M4's identity ([`APPLE_M4`]), the same, 16 of 16 texels
+///   each (2026-10-14, with the fact taken: no `depth-denormals` announced).
 /// - NVIDIA's 615.71.09 on the RTX 3090 (EV `ZIN2-dn2-nvidia`) and lavapipe, Mesa 26.2.4 with
 ///   LLVM 23.1.1 on an Iris Xe (RPL-P) host, keep each one, and their tests fail against every one.
 /// - RADV, Mesa 26.2.4 on the Radeon 780M (EV `ZIN2-dn1-radv`), stores the clear's and the
@@ -1511,11 +1525,15 @@ const DYNAMIC_RESTART_WARNING: DriverDiagnostic = DriverDiagnostic {
 /// first, split against whole, in microseconds. Whole's first frame compiles each plain pipeline's
 /// variant at the fetching call (that call about 56 ms on MoltenVK, 8 to 22 ms on the Linux
 /// drivers, where split's took 1 to 2 ms); split's compiles none. One row per GPU, as measured:
-/// - `InterlockedPassWholeFaster`: MoltenVK 1.4.1 on the M4 (EV `RRS2-rcost2-mvk4`; wall 1499
-///   against 1383, though the GPU's span 12 against 82); ANV, Mesa 26.2.4, on Intel Graphics
-///   (RPL-S) (EV `RRS2-rcost3-anv`; wall 3529 against 1940, GPU 3133 against 1717).
-/// - `InterlockedPassSplitNoSlower`: MoltenVK 1.4.1 on the M3 Max (EV `RRS2-rcost2-mvk3`; wall
-///   871 against 968, GPU 94 against 261); RADV, Mesa 26.2.4, on the Radeon 780M (EV
+/// - `InterlockedPassWholeFaster`: ANV, Mesa 26.2.4, on Intel Graphics (RPL-S) (EV
+///   `RRS2-rcost3-anv`; wall 3529 against 1940, GPU 3133 against 1717).
+/// - `InterlockedPassSplitNoSlower`: MoltenVK 1.4.1 on the M3 Max under macOS 26.7 (EV
+///   `RRS2-rcost2-mvk3`; wall 871 against 968, GPU 94 against 261) and under macOS 27.0.1, the
+///   M4's identity (2026-10-14, the same pass at 8b1f8606 with the scratch test's two runs of
+///   three rounds: wall 721 to 769 against 974 to 1045, GPU 671 to 719 against 914 to 964, and
+///   whole's first frame 7.7 to 7.9 ms against 1.2 to 1.8 ms; the M4 itself ran it faster whole,
+///   EV `RRS2-rcost2-mvk4`, wall 1499 against 1383, though the GPU's span 12 against 82, which its
+///   shared identity does not take); RADV, Mesa 26.2.4, on the Radeon 780M (EV
 ///   `RRS2-rcost3-radv`; wall 1183 against 1332, GPU 1045 against 1033); NVIDIA's 615.71.09 on
 ///   the RTX 5080 Laptop GPU (EV `RRS2-rcost3-nv5080`; wall 251 against 289, GPU 86 against 140);
 ///   and, tied in steady frames and so split for whole's first frame, NVIDIA's 615.71.09 on the
@@ -1826,14 +1844,6 @@ pub(crate) const MEASURED: &[Measured<DriverFact>] = &[
     },
     Measured {
         fact: DriverFact::InterlockedPassWholeFaster,
-        driver: DriverId::MOLTENVK,
-        vendor: Some(APPLE_VENDOR_ID),
-        device: Some(APPLE_M4),
-        first: moltenvk(1, 4, 1),
-        last: moltenvk(1, 4, 1),
-    },
-    Measured {
-        fact: DriverFact::InterlockedPassWholeFaster,
         driver: DriverId::INTEL_OPEN_SOURCE_MESA,
         vendor: Some(INTEL_VENDOR_ID),
         device: Some(INTEL_UHD_770_RPL_S),
@@ -1845,6 +1855,14 @@ pub(crate) const MEASURED: &[Measured<DriverFact>] = &[
         driver: DriverId::MOLTENVK,
         vendor: Some(APPLE_VENDOR_ID),
         device: Some(APPLE_M3_MAX),
+        first: moltenvk(1, 4, 1),
+        last: moltenvk(1, 4, 1),
+    },
+    Measured {
+        fact: DriverFact::InterlockedPassSplitNoSlower,
+        driver: DriverId::MOLTENVK,
+        vendor: Some(APPLE_VENDOR_ID),
+        device: Some(APPLE_M4),
         first: moltenvk(1, 4, 1),
         last: moltenvk(1, 4, 1),
     },
@@ -2087,10 +2105,11 @@ pub(crate) struct MeasuredDevice {
 }
 
 /// Every device identity the runtime lanes measure the driver facts on: the C3 venues' devices
-/// (`validation/cutover/c3-venues.json`), the RTX 3090 development venue, and lavapipe at Mesa
-/// 26.2.4 (the Linux hosts' own, beside the gate container's 26.0.8). A fact measured nowhere else
-/// is taken nowhere else. lavapipe's identity is Mesa's release alone: its LLVM and CPU are in no
-/// field of it.
+/// (`validation/cutover/c3-venues.json`), the M3 Max under macOS 26.7 (the MoltenVK venue's device
+/// before its macOS 27 capture, which is the M4's identity), the RTX 3090 development venue, and
+/// lavapipe at Mesa 26.2.4 (the Linux hosts' own, beside the gate container's 26.0.8). A fact
+/// measured nowhere else is taken nowhere else. lavapipe's identity is Mesa's release alone: its
+/// LLVM and CPU are in no field of it.
 pub(crate) const MEASURED_DEVICES: &[MeasuredDevice] = &[
     MeasuredDevice {
         driver: DriverId::MOLTENVK,

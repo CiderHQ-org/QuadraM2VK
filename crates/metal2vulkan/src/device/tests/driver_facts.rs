@@ -219,27 +219,28 @@ fn taken(p: &crate::device::DeviceProfile) -> Vec<crate::error::DriverDeviation>
 }
 
 /// The profile takes each deviation its driver's release is measured with, never one a description
-/// states: every committed MoltenVK capture (MoltenVK 1.4.1 on Apple's M3 Max and M4) takes the
-/// nineteen of every Apple GPU measured (the 16-bit color outputs' bits, the `half` fused
-/// multiply-add, the `float` denormals and the `half` quantize, the `half` conversion, 4.15, the
-/// center varyings, the minimum and maximum family, the `half` arithmetic, the three half-float
-/// storage writes, the fragment simdgroups, and the vertex simdgroups, among them), the M3 Max's
-/// also its graphics cube route, the RTX 5080 Laptop GPU's (NVIDIA's 615.71.09) the two color-NaN
-/// stores, the `float` denormals and the half-float storage writes and their `0x7fc00000` and the
-/// half texel writes' NaN bits, as the RTX 3090 would, with the small float color writes, and
-/// another RTX 50 does not, lavapipe's (Mesa 26.0.8 and 26.2.3) the `float` color NaNs, Mesa
-/// 26.2.4's on the Radeon 780M (RADV) and on the Iris Xe of RPL-P and the UHD 770 of RPL-S (ANV)
-/// the `float` denormals, the `half` quantize and the half-float storage writes, the 780M's also
-/// their `0x7fc00000` and the half texel writes' NaN bits, the 780M's and the Iris Xe's also the
-/// small float color writes and the 780M's the 16-bit norm ones, the M4's and the 780M's the
-/// normalized storage writes, the RTX GPUs', the 780M's, the Iris Xe's and the UHD 770's the 8-bit
-/// linear filter's bound (lavapipe's at Mesa 26.2.4, past the committed captures' 26.0.8 and
-/// 26.2.3) under a policy that accepts it (`Unorm8LinearFilterPolicy::DeviceWithinOneCode`; the
-/// default takes it nowhere), and no other committed profile takes any. A later MoltenVK release
-/// takes them past the measurement, listed in `deviations_beyond` with the last release measured.
-/// An earlier release, and MoltenVK on another vendor's GPU, take none, each with its conservative
-/// route (the cube routes unmeasured); another driver on Apple's vendor takes none, with Vulkan's
-/// cube rule. `InterpolateAtOffsetCentered` follows the driver alone.
+/// states: every committed MoltenVK capture (MoltenVK 1.4.1 on Apple's M3 Max and M4 under macOS
+/// 27, one identity) takes the nineteen of every Apple GPU measured (the 16-bit color outputs'
+/// bits, the `half` fused multiply-add, the `float` denormals and the `half` quantize, the `half`
+/// conversion, 4.15, the center varyings, the minimum and maximum family, the `half` arithmetic,
+/// the three half-float storage writes, the fragment simdgroups, and the vertex simdgroups, among
+/// them), the M3 Max's under macOS 26.7 (no committed capture) also its graphics cube route, the
+/// RTX 5080 Laptop GPU's (NVIDIA's 615.71.09) the two color-NaN stores, the `float` denormals and
+/// the half-float storage writes and their `0x7fc00000` and the half texel writes' NaN bits, as the
+/// RTX 3090 would, with the small float color writes, and another RTX 50 does not, lavapipe's (Mesa
+/// 26.0.8 and 26.2.3) the `float` color NaNs, Mesa 26.2.4's on the Radeon 780M (RADV) and on the
+/// Iris Xe of RPL-P and the UHD 770 of RPL-S (ANV) the `float` denormals, the `half` quantize and
+/// the half-float storage writes, the 780M's also their `0x7fc00000` and the half texel writes' NaN
+/// bits, the 780M's and the Iris Xe's also the small float color writes and the 780M's the 16-bit
+/// norm ones, macOS 27's Apple identity's and the 780M's the normalized storage writes, the RTX
+/// GPUs', the 780M's, the Iris Xe's and the UHD 770's the 8-bit linear filter's bound (lavapipe's
+/// at Mesa 26.2.4, past the committed captures' 26.0.8 and 26.2.3) under a policy that accepts it
+/// (`Unorm8LinearFilterPolicy::DeviceWithinOneCode`; the default takes it nowhere), and no other
+/// committed profile takes any. A later MoltenVK release takes them past the measurement, listed in
+/// `deviations_beyond` with the last release measured. An earlier release, and MoltenVK on another
+/// vendor's GPU, take none, each with its conservative route (the cube routes unmeasured); another
+/// driver on Apple's vendor takes none, with Vulkan's cube rule. `InterpolateAtOffsetCentered`
+/// follows the driver alone.
 #[test]
 fn the_profile_takes_the_deviations_its_driver_release_is_measured_with() {
     use crate::device::profile::{CubeGradientRoute, CubeGradients};
@@ -372,8 +373,7 @@ fn the_profile_takes_the_deviations_its_driver_release_is_measured_with() {
         (m4.driver_id, m4.vendor_id, m4.driver_version),
         (Some(DriverId::MOLTENVK), APPLE, 10401)
     );
-    // The M4's graphics cube route is unmeasured, its compute route Metal's; the M3 Max's capture
-    // is the one the graphics row names.
+    // The M4's graphics cube route is unmeasured, its compute route Metal's.
     assert_eq!(
         profile_of(m4.clone()).fields().cube_gradients,
         CubeGradients {
@@ -381,8 +381,22 @@ fn the_profile_takes_the_deviations_its_driver_release_is_measured_with() {
             compute: CubeGradientRoute::Metal,
         }
     );
+    // MoltenVK's deviceID is the macOS release and the GPU family: the M3 Max's capture under
+    // macOS 27 is the M4's identity, and the graphics row names the M3 Max under macOS 26.7, whose
+    // capture that one replaced.
     let m3 = super::profile("moltenvk-m3");
-    assert_eq!(m3.device_id, crate::device::driver_facts::APPLE_M3_MAX);
+    assert_eq!(m3.device_id, crate::device::driver_facts::APPLE_M4);
+    let mut m3_macos26 = m3;
+    m3_macos26.device_id = crate::device::driver_facts::APPLE_M3_MAX;
+    let p = profile_of(m3_macos26);
+    assert_eq!(taken(&p), m3_max);
+    assert_eq!(
+        p.fields().cube_gradients,
+        CubeGradients {
+            graphics: CubeGradientRoute::AppleSwizzled,
+            compute: CubeGradientRoute::Metal,
+        }
+    );
     let all = m4_measured.clone();
     let unmeasured = CubeGradients {
         graphics: CubeGradientRoute::Unmeasured,
@@ -479,27 +493,27 @@ const ONE_OF_METALS: DriverFact = DriverFact::DontCareStoreIsOneOfMetals;
 /// Every committed profile's driver has exactly its measured facts (on a measured identity those
 /// its rows name, on any other its driver's defects alone). A profile of a measured identity: the
 /// 780M (RADV 26.2.4), the gate's lavapipe 26.0.8 (both CPUs), the RPL-P and the RPL-S (ANV
-/// 26.2.4), the M3 Max and the M4 (MoltenVK 1.4.1) and the RTX 5080 Laptop GPU (NVIDIA's
-/// 615.71.09). It reads zero past the bound index range on the 780M, the RPL-S and the RTX 5080
-/// Laptop GPU, the GPUs measured; its depth images keep denormals on the RTX 5080 Laptop GPU,
-/// lavapipe and both MoltenVK GPUs, and values outside `[0, 1]` on MoltenVK; lavapipe stores
-/// fragment depth unchanged and keeps a 16-bit depth's codes; MoltenVK's depth and stencil images
-/// lie apart and stay GPU-optimized, and its color resolve's average is Metal's; the constant depth
-/// bias on a 16-bit unorm depth stores Metal's codes on the 780M and the M4, and the unbiased one
-/// on the 780M, the RPL-P, the RPL-S and the M4 (the M3 Max is not measured for either); ANV's
-/// compressed images hide aliased writes and its host-transfer images keep their bytes; a pass the
-/// interlock would split runs faster whole on the M4 and the RPL-S and no slower split on the M3
-/// Max, the 780M, the RPL-P and the RTX 5080 Laptop GPU; MoltenVK warns of a dynamic restart,
-/// compiles its fill per command pool, stores `DONT_CARE` as Metal's own and orders its timestamps
-/// across queues; BC1 to BC3 decode as Metal's on the 780M and MoltenVK, BC4 and BC5 on MoltenVK;
-/// NVIDIA's reads a depth rendered at custom sample positions at the standard ones; ANV's first
-/// sparse resource waits for every queue; BC6H decodes as Metal's on the 780M, the RPL-P, lavapipe
-/// 26.0.8, both MoltenVK GPUs and the RTX 5080 Laptop GPU, and BC7 on the same but lavapipe;
-/// `DONT_CARE` keeps one of Metal's two answers on the 780M and the RPL-S. Every other profile is
-/// an unmeasured identity and takes its driver's defects alone: the GTX 1060 (580.178.04) and the
-/// RTX 5080 desktop GPU (another GPU at 615.71.09) NVIDIA's custom-position depth, the ARL
-/// (26.2.3) and the Tiger Lake Iris Xe (26.2.2) ANV's hidden aliased writes; the RDNA2 and RDNA3
-/// RADV profiles (26.2.3), lavapipe 26.2.3 and SwiftShader take nothing.
+/// 26.2.4), the M3 Max and the M4 (MoltenVK 1.4.1, one identity under macOS 27) and the RTX 5080
+/// Laptop GPU (NVIDIA's 615.71.09). It reads zero past the bound index range on the 780M, the RPL-S
+/// and the RTX 5080 Laptop GPU, the GPUs measured; its depth images keep denormals on the RTX 5080
+/// Laptop GPU, lavapipe and both MoltenVK GPUs, and values outside `[0, 1]` on MoltenVK; lavapipe
+/// stores fragment depth unchanged and keeps a 16-bit depth's codes; MoltenVK's depth and stencil
+/// images lie apart and stay GPU-optimized, and its color resolve's average is Metal's; the
+/// constant depth bias on a 16-bit unorm depth stores Metal's codes on the 780M and the M4, and the
+/// unbiased one on the 780M, the RPL-P, the RPL-S and the M4; ANV's compressed images hide aliased
+/// writes and its host-transfer images keep their bytes; a pass the interlock would split runs
+/// faster whole on the RPL-S and no slower split on the M3 Max (under macOS 26.7, and under 27 the
+/// M4's identity), the 780M, the RPL-P and the RTX 5080 Laptop GPU; MoltenVK warns of a dynamic
+/// restart, compiles its fill per command pool, stores `DONT_CARE` as Metal's own and orders its
+/// timestamps across queues; BC1 to BC3 decode as Metal's on the 780M and MoltenVK, BC4 and BC5 on
+/// MoltenVK; NVIDIA's reads a depth rendered at custom sample positions at the standard ones; ANV's
+/// first sparse resource waits for every queue; BC6H decodes as Metal's on the 780M, the RPL-P,
+/// lavapipe 26.0.8, both MoltenVK GPUs and the RTX 5080 Laptop GPU, and BC7 on the same but
+/// lavapipe; `DONT_CARE` keeps one of Metal's two answers on the 780M and the RPL-S. Every other
+/// profile is an unmeasured identity and takes its driver's defects alone: the GTX 1060
+/// (580.178.04) and the RTX 5080 desktop GPU (another GPU at 615.71.09) NVIDIA's custom-position
+/// depth, the ARL (26.2.3) and the Tiger Lake Iris Xe (26.2.2) ANV's hidden aliased writes; the
+/// RDNA2 and RDNA3 RADV profiles (26.2.3), lavapipe 26.2.3 and SwiftShader take nothing.
 #[test]
 fn the_committed_profiles_drivers_have_their_facts() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../metal2vulkan-validation/profiles");
@@ -586,6 +600,7 @@ fn the_committed_profiles_drivers_have_their_facts() {
                 STAMPS,
                 COLOR_BLOCKS,
                 CHANNEL_BLOCKS,
+                TESTS_DENORMALS,
                 BC6H,
                 BC7,
                 SCARCE_POOLS,
@@ -602,7 +617,7 @@ fn the_committed_profiles_drivers_have_their_facts() {
                 UNORM_BIAS,
                 UNORM_STORES,
                 FETCH,
-                WHOLE,
+                SPLIT,
                 RESTART,
                 FILL,
                 DONT_CARE,
@@ -643,7 +658,7 @@ fn an_unmeasured_identity_takes_its_drivers_defects_alone() {
     };
     let mut desc = read("moltenvk-m4");
     assert!(desc.measured_identity());
-    assert!(desc.driver_facts().contains(&WHOLE));
+    assert!(desc.driver_facts().contains(&SPLIT));
     assert!(desc.driver_facts().contains(&FETCH));
     for release in [10402, 10400] {
         desc.driver_version = release;
@@ -714,8 +729,9 @@ fn the_measured_identities_are_the_committed_profiles() {
 }
 
 /// The identities measured whose venue has no committed profile: the RTX 3090 (gem10) at NVIDIA's
-/// 615.71.09, and lavapipe at Mesa 26.2.4 (the Linux venues' own lavapipe).
-const MEASURED_WITHOUT_PROFILE: [(DriverId, u32, u32, u32); 2] = [
+/// 615.71.09, lavapipe at Mesa 26.2.4 (the Linux venues' own lavapipe), and the M3 Max under macOS
+/// 26.7 at MoltenVK 1.4.1 (its venue's capture is now macOS 27's, the M4's identity).
+const MEASURED_WITHOUT_PROFILE: [(DriverId, u32, u32, u32); 3] = [
     (
         DriverId::NVIDIA_PROPRIETARY,
         0x10de,
@@ -723,6 +739,12 @@ const MEASURED_WITHOUT_PROFILE: [(DriverId, u32, u32, u32); 2] = [
         nvidia(615, 71, 9),
     ),
     (DriverId::MESA_LLVMPIPE, 0x10005, 0, mesa(26, 2, 4)),
+    (
+        DriverId::MOLTENVK,
+        APPLE,
+        crate::device::driver_facts::APPLE_M3_MAX,
+        moltenvk(1, 4, 1),
+    ),
 ];
 
 /// A driver measured to lay depth and stencil images apart from their memory is measured to keep

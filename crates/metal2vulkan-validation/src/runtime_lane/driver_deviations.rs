@@ -24,8 +24,10 @@
 //!   anisotropic constexpr sampler in a fragment function, over the inputs of the committed kernel
 //!   cases `anisotropic-cube-gradients-along-face-rows` and `-columns`, which run too. Where the
 //!   profile takes a route's deviation, each pixel or kernel lane is the Metal kernel's sample of
-//!   its lane on the Apple M3 Max, the lane's Metal environment. MoltenVK's graphics route is measured on the M3 Max alone, so on
-//!   the M4 the fragment's pipeline is refused, naming the unmeasured deviation. Elsewhere the
+//!   its lane on the Apple M3 Max, the lane's Metal environment. MoltenVK's graphics route is
+//!   measured on the M3 Max under macOS 26.7 alone (MoltenVK's device ID is the macOS release and
+//!   the GPU family), so on the M4, and on the M3 Max under macOS 27, the fragment's pipeline is
+//!   refused, naming the unmeasured deviation. Elsewhere the
 //!   sample is a near-equivalent (`CubeGradientFootprint`) or refused; the test prints which.
 //! - **The `half` fused multiply-add** (`MetalHalfFma`): the committed cases of a probe
 //!   (`fmx_fma_precise`, `fmx_fma_fast`), whose half word is a `half` `fma` and a `half` `a * b +
@@ -536,8 +538,9 @@ fn differing_samples(samples: &[u8], metal: &[u8]) -> (Vec<usize>, Vec<usize>) {
 /// Where the profile takes each route's deviation, the fragment function's samples (the graphics
 /// route, `GraphicsCubeGradientRoute`) and the committed kernel's (the compute route,
 /// `CubeGradientRoute`) are the Metal kernel's of the same lanes on the Apple M3 Max. On MoltenVK
-/// where the graphics route is unmeasured (any Apple GPU but the M3 Max), the fragment's pipeline
-/// is refused naming it. Every case and route is measured and printed before any is judged.
+/// where the graphics route is unmeasured (any Apple GPU and macOS release but the M3 Max under
+/// macOS 26.7: MoltenVK's device ID is both), the fragment's pipeline is refused naming it. Every
+/// case and route is measured and printed before any is judged.
 #[test]
 fn cube_gradients_through_an_anisotropic_sampler_answer_as_metal() {
     let messages = Messages::default();

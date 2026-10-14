@@ -17,7 +17,7 @@ validation uses them for per-profile checks.
 | `amd-rdna2-apu-radv` | gpuinfo report 51886 | AMD Radeon 680M (RADV REMBRANDT) | Mesa 26.2.3 | 1.4.354 |
 | `intel-arl-anv` | gpuinfo report 52029 | Intel(R) Graphics (ARL), ANV | Mesa 26.2.3 | 1.4.354 |
 | `intel-irisxe-anv` | gpuinfo report 51836 | Intel(R) Iris(R) Xe Graphics (TGL GT2), ANV | Mesa 26.2.2 | 1.4.354 |
-| `moltenvk-m3` | local `vulkaninfo --json`, portability-subset profile, plus its `--capture-formats` supplement | Apple M3 Max, macOS 26.7 | MoltenVK 1.4.1 | 1.4.334 |
+| `moltenvk-m3` | local `vulkaninfo --json`, portability-subset profile, plus its `--capture-formats` supplement | Apple M3 Max, macOS 27.0.1 | MoltenVK 1.4.1 | 1.4.334 |
 | `moltenvk-m4` | local `vulkaninfo --json`, portability-subset profile, plus its `--capture-formats` supplement | Apple M4 (a cloud Mac mini), macOS 27.0.1 | MoltenVK 1.4.1 | 1.4.334 |
 | `lavapipe` | gpuinfo report 51983 | llvmpipe (LLVM 23.1.1, 256 bits) | Mesa 26.2.3 | 1.4.354 |
 | `swiftshader` | gpuinfo report 38278 | SwiftShader Device (Subzero), Linux | 5.0.0 | 1.3.0 |
@@ -38,7 +38,8 @@ refuses a file that is not such a capture, whose device identity is not the one 
 declares for it, or that derives another translation key than the venue's profile. The gpuinfo
 files above are census profiles of devices in the wild; no venue names them. Nor does it name
 `moltenvk-m4`, the capture of the Apple M4 whose measured MoltenVK answers the product's driver
-facts name beside the M3 Max's.
+facts name beside the M3 Max's. MoltenVK's `deviceID` is the macOS release and the Apple GPU family,
+so under macOS 27 the two captures share one identity and differ only in allocation sizes.
 
 Reading notes for consumers of these files:
 

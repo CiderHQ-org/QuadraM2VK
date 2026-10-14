@@ -29,7 +29,7 @@
 #   descendant that changes no product source). Any product change between recording and that
 #   commit leaves every row stale.
 # - Metal is never run. The batch selects the cases with a current Metal row in
-#   --metal-environment-id (default apple-m3-max-macos26.7), or each --case-id (each must have
+#   --metal-environment-id (default apple-m3-max-macos27.0.1), or each --case-id (each must have
 #   one), and compares against the committed row.
 # - Where it runs. native-gpu: this host's GPU, `corpus-vulkan --batch --device-type gpu`.
 #   moltenvk: this Mac's GPU, `corpus-moltenvk --batch --device-type gpu`, with Homebrew's
@@ -81,7 +81,7 @@ budget=1800
 cpus=6
 slot=rerecord
 private=
-metal=apple-m3-max-macos26.7
+metal=apple-m3-max-macos27.0.1
 retry=
 profile=
 while [ "$#" -gt 0 ]; do

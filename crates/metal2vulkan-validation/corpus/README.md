@@ -16,10 +16,11 @@ crates/metal2vulkan-validation/corpus/
   .index.sqlite                                     # generated, gitignored
 ```
 
-`observations/parity/sequences.jsonl` holds one line, recorded on the Apple M3 Max under macOS
-26.7. Seeds 32, 51 and 62 are Metal-side gaps there: Metal's driver crashes on an indirect dispatch
-in each, and the line records the crash in place of the seed's records. The sequences lane still
-runs those seeds on the runtime and names them in its output.
+`observations/parity/sequences.jsonl` holds one line per Metal environment recorded on the Apple
+M3 Max. Under macOS 27.0.1, the reference, every seed ran and matches the model. Under macOS 26.7
+seeds 32, 51 and 62 are Metal-side gaps: Metal's driver crashed on an indirect dispatch in each,
+and that line records the crash in place of the seed's records. The sequences lane names a gap
+seed of the line it compares with in its output.
 
 `authored-compile.tsv` is the authored compile census's expectation file: one line
 per committed case, its outcome on each profile-leg of its header, `compiled` or the executor's

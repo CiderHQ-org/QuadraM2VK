@@ -2335,16 +2335,23 @@ mod tests {
         assert!(description.has_format_feature_flags2());
         let formats = captured["formats"].as_object().unwrap();
         for (format, props) in &description.formats.formats {
-            let masks = &formats[format.name().unwrap()];
-            assert_eq!(masks["linearTilingFeatures"], props.linear_tiling.as_raw());
+            let name = format.name().unwrap();
+            let masks = &formats[name];
+            assert_eq!(
+                masks["linearTilingFeatures"],
+                props.linear_tiling.as_raw(),
+                "{name}"
+            );
             assert_eq!(
                 masks["optimalTilingFeatures"],
-                props.optimal_tiling.as_raw()
+                props.optimal_tiling.as_raw(),
+                "{name}"
             );
-            assert_eq!(masks["bufferFeatures"], props.buffer.as_raw());
+            assert_eq!(masks["bufferFeatures"], props.buffer.as_raw(), "{name}");
             assert_eq!(
                 masks["colorAttachmentSampleCounts"],
-                props.color_attachment_sample_counts.as_raw()
+                props.color_attachment_sample_counts.as_raw(),
+                "{name}"
             );
         }
         let queried = mvk::Format::KNOWN.iter().filter(|format| {

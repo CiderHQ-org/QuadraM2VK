@@ -14,12 +14,12 @@
           "identity": {
             "device": "Apple M3 Max",
             "vendor_id": 4203,
-            "device_id": 436601353,
+            "device_id": 452985353,
             "driver_id": 14,
             "driver_version": 10401,
             "driver_info": "1.4.1"
           },
-          "metal_environment_id": "apple-m3-max-macos26.7"
+          "metal_environment_id": "apple-m3-max-macos27.0.1"
         }
       ]
     },

@@ -384,14 +384,14 @@ SOURCES = [
     {
         "name": "moltenvk-m3",
         "kind": "vulkaninfo",
-        "sha256": "29dd5b5c317672fc72ff1d304add1c65636533a24598f6024269170b99043af5",
+        "sha256": "707f2c9936db17af75fbe55986a091a7f0e2e93fb61affa880d98c996c93933b",
         "profile": "VP_VULKANINFO_Apple_M3_Max_0_2_2209_portability_subset",
         "command": "vulkaninfo --json",
-        "host": ("Apple M3 Max, macOS 26.7 (25G229), Homebrew molten-vk 1.4.1, "
+        "host": ("Apple M3 Max, macOS 27.0.1 (26A434), Homebrew molten-vk 1.4.1, "
                  "vulkan-tools 1.4.350.1"),
         "formats": {
             "command": "corpus-vulkan --capture-formats OUT --device-type gpu",
-            "sha256": "bd70b20bbe48284b6666af4f3471027aca93ac64768fe1ef47ff110769ecafca",
+            "sha256": "07b6f2e730ee77d047380f694fdcb1177455f4df34bc41726fd3e59497892e48",
         },
     },
     {

@@ -56,7 +56,10 @@ fn a_row_is_held_to_the_identity_it_records() {
 #[test]
 fn the_committed_reference_list_parses() {
     let references = References::load(&References::committed_path()).unwrap();
-    assert_eq!(references.primary.environment_id, "apple-m3-max-macos26.7");
+    assert_eq!(
+        references.primary.environment_id,
+        "apple-m3-max-macos27.0.1"
+    );
     assert_eq!(references.primary.identity.device, "Apple M3 Max");
 }
 

@@ -129,6 +129,9 @@ fn authored_tessellation_executes_native_patch_inputs() {
     use crate::library_module::ResolvedLinkedFunctions;
     use crate::source::SourceRow;
 
+    // The entry's metadata as Metal's compiler writes it for `tessellation_literal.metal` (Xcode
+    // 27, every deployment target from macOS 13 to 27): a control point's field and the patch
+    // input carry a location index, the vertex output none.
     let air_ll = r#"
 define <{ <4 x float>, <4 x float> }> @tessellation_literal(ptr %control, <4 x float> %patch, <2 x float> %coordinate) { ret <{ <4 x float>, <4 x float> }> zeroinitializer }
 declare { <3 x float> } @control.MTL_CONTROL_POINT_FN(i32, ptr) section "air.externally_defined"
@@ -143,7 +146,7 @@ declare { <3 x float> } @control.MTL_CONTROL_POINT_FN(i32, ptr) section "air.ext
 !7 = !{i32 1, !"air.patch_input", !"air.location_index", i32 4, i32 1, !"air.arg_type_name", !"float4"}
 !8 = !{!"air.patch", !"quad", !"air.patch_control_point", i32 16}
 !9 = !{i32 2, !"air.position_in_patch", !"air.arg_type_name", !"float2"}
-!12 = !{!"air.vertex_output", !"user(locn0)", !"air.location_index", i32 0, i32 1, !"air.arg_type_name", !"float4", !"air.arg_name", !"color"}
+!12 = !{!"air.vertex_output", !"user(locn0)", !"air.arg_type_name", !"float4", !"air.arg_name", !"color"}
 "#;
     let source = SourceRow {
         air_sha256: crate::hash::sha256_bytes(air_ll.as_bytes()),
