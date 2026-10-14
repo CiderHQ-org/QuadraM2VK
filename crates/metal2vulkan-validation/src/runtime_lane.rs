@@ -698,12 +698,21 @@ pub(crate) fn creation_checked(
     }
 }
 
+/// The id name of the informational message a device sends as it is made where its driver keeps
+/// its internal pipeline cache and that cache is Metal's own ([`metal_cache_kept`]); the runtime's
+/// `device/create.rs` names it so.
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+const METAL_CACHE_KEPT: &str = "metal2vulkan-driver-pipeline-cache-kept";
+
 /// [`creation_checked`] of `heard`, every message `device`'s making delivered to a sink that hears
 /// every message (not the lane's, which keeps notices and failures alone): its notices exactly
 /// its [`creation_kinds`], one each, and its other messages exactly the informational ones the
-/// device sends as it is made, each once: `metal2vulkan-unmeasured-driver` exactly where its
-/// identity is not measured, as the runtime reads it (`unmeasured_driver_message`, the fact the
-/// device's own message reads), and nothing else.
+/// device sends as it is made, each once and in this order: `metal2vulkan-unmeasured-driver`
+/// exactly where its identity is not measured, as the runtime reads it
+/// (`unmeasured_driver_message`, the fact the device's own message reads); then
+/// [`METAL_CACHE_KEPT`] exactly where its driver keeps its internal pipeline cache and that cache
+/// is Metal's own ([`metal_cache_kept`], read from the driver apart from the runtime), an
+/// informational message naming the device and ending in its id name; and nothing else.
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 pub(crate) fn creation_heard_checked(
     device: &Device,
@@ -715,28 +724,48 @@ pub(crate) fn creation_heard_checked(
         .cloned()
         .partition(|message| message.degradation.is_some());
     creation_checked(device, level_named, &notices)?;
-    let expected: Vec<DebugMessage> =
-        metal2vulkan_runtime::unmeasured_driver_message(device.properties())
-            .into_iter()
-            .collect();
-    let same = |a: &DebugMessage, b: &DebugMessage| {
-        (a.severity, &a.id_name, &a.text) == (b.severity, &b.id_name, &b.text)
-    };
-    match informed.len() == expected.len()
-        && informed.iter().zip(&expected).all(|(a, b)| same(a, b))
-    {
+    let unmeasured = metal2vulkan_runtime::unmeasured_driver_message(device.properties());
+    let cache_kept = metal_cache_kept(device);
+    let mut expected: Vec<String> = Vec::new();
+    let mut rest = &informed[..];
+    if let Some(message) = &unmeasured {
+        expected.push(message.text.clone());
+        match rest.split_first() {
+            Some((first, after))
+                if (first.severity, &first.id_name, &first.text)
+                    == (message.severity, &message.id_name, &message.text) =>
+            {
+                rest = after;
+            }
+            _ => rest = &[],
+        }
+    }
+    if cache_kept {
+        let tag = format!("[{METAL_CACHE_KEPT}]");
+        let on = format!("the device, on {}", device.name());
+        expected.push(format!("an informational message on {on}, ending {tag}"));
+        match rest.split_first() {
+            Some((first, after))
+                if first.severity == metal2vulkan_runtime::MessageSeverity::Info
+                    && first.id_name == METAL_CACHE_KEPT
+                    && first.text.contains(&on)
+                    && first.text.ends_with(&tag) =>
+            {
+                rest = after;
+            }
+            _ => rest = &[],
+        }
+    }
+    let whole = rest.is_empty() && informed.len() == expected.len();
+    match whole {
         true => Ok(()),
         false => Err(format!(
-            "{}: made saying {:?}, not the device's own {:?}",
+            "{}: made saying {:?}, not the device's own {expected:?}",
             device.name(),
             informed
                 .iter()
                 .map(|message| &message.text)
                 .collect::<Vec<_>>(),
-            expected
-                .iter()
-                .map(|message| &message.text)
-                .collect::<Vec<_>>()
         )),
     }
 }
@@ -871,12 +900,29 @@ pub fn creation_kinds(device: &Device, level_named: bool) -> BTreeSet<Degradatio
             }
         }
     }
-    // MoltenVK's kept cache is Metal's own, said in an informational message, no notice.
-    let moltenvk = description.driver_id == Some(metal2vulkan::vk::DriverId::MOLTENVK);
-    if driver_keeps_pipeline_cache(device) && !moltenvk {
+    // MoltenVK's kept cache is Metal's own, said in an informational message, no notice
+    // (`creation_heard_checked`).
+    if driver_keeps_pipeline_cache(device) && !kept_cache_is_metals(device) {
         kinds.insert(Degradation::DriverPipelineCacheKept);
     }
     kinds
+}
+
+/// Whether the internal pipeline cache `device`'s driver keeps is Metal's own shader cache, as the
+/// runtime decides it (`device/create.rs`'s `kept_cache_is_metals`): MoltenVK's, whose pipelines
+/// are Metal pipeline states that Metal caches on the host.
+fn kept_cache_is_metals(device: &Device) -> bool {
+    device.properties().description.driver_id == Some(metal2vulkan::vk::DriverId::MOLTENVK)
+}
+
+/// Whether `device`, as it was made, said in an informational message ([`METAL_CACHE_KEPT`], no
+/// notice) that its driver keeps its internal pipeline cache, which is Metal's own: the driver
+/// keeps it ([`driver_keeps_pipeline_cache`], read from the driver: it lists no
+/// `VK_KHR_pipeline_binary`, the device has no `VK_KHR_maintenance5`, or the driver does not let it
+/// be turned off) and the cache is Metal's ([`kept_cache_is_metals`]).
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+fn metal_cache_kept(device: &Device) -> bool {
+    driver_keeps_pipeline_cache(device) && kept_cache_is_metals(device)
 }
 
 /// The options of a lane device: the validation layer reporting to `messages`, its shader cache in

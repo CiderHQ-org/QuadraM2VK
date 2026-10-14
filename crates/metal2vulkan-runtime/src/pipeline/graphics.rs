@@ -24,6 +24,7 @@ use crate::degradation::BoundFormats;
 use crate::error::{internal, vulkan, Error};
 use crate::render_target::{PassShape, RenderPassObject};
 use crate::shader_cache::driver::Making;
+use crate::shader_cache::REPORTED_STAGES;
 use ash::vk;
 use metal2vulkan::cache::Hash256;
 use metal2vulkan::cache::SpecializationKey;
@@ -887,8 +888,13 @@ impl VariantObjects {
         let content = self.graphics_content(pipeline, key)?;
         let shared = self.device.shared();
         let libraries = shared.libraries.as_ref().filter(|_| content.links());
-        // Whether the making's cache held it, where the making reports it.
+        // Whether the making's cache held it and each of its stages, where the making reports
+        // them (`shader_cache::found_in_cache`): its stages' feedback where it has at most
+        // `REPORTED_STAGES`, none where more (a count of 0 is valid, one equal to `stageCount`
+        // else: VUID-VkGraphicsPipelineCreateInfo-pipelineStageCreationFeedbackCount-06594).
         let mut whole = vk::PipelineCreationFeedback::default();
+        let mut stages = [vk::PipelineCreationFeedback::default(); REPORTED_STAGES];
+        let mut reported_stages = 0;
         let driver_reports = shared.shader_cache.driver_reports() && libraries.is_none();
         // Its record is named by the variant's content and what this making adds to it.
         let making = self
@@ -921,8 +927,11 @@ impl VariantObjects {
                 }
                 None => {
                     let mut info = infos.whole();
+                    let count = info.stage_count as usize;
+                    reported_stages = if count <= REPORTED_STAGES { count } else { 0 };
                     let mut feedback = vk::PipelineCreationFeedbackCreateInfo::default()
-                        .pipeline_creation_feedback(&mut whole);
+                        .pipeline_creation_feedback(&mut whole)
+                        .pipeline_stage_creation_feedbacks(&mut stages[..reported_stages]);
                     if driver_reports {
                         info = info.push_next(&mut feedback);
                     }
@@ -949,7 +958,9 @@ impl VariantObjects {
         drop(turn);
         shared.counts.variant_pipeline_made();
         if driver_reports {
-            shared.shader_cache.driver_reported(&whole);
+            shared
+                .shader_cache
+                .driver_reported(&whole, &stages[..reported_stages]);
         }
         let made = RawPipeline {
             device: self.device.clone(),

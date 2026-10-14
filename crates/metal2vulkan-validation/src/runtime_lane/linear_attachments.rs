@@ -53,8 +53,9 @@
 //!   apart beside a stencil, merged over a box that holds the zeroing.
 //! - [`a_cpu_write_at_an_undrawn_pixel_survives_a_loaded_pass`] and
 //!   [`a_cpu_write_at_an_undrawn_pixel_survives_a_pass_apart`]: the CPU writes the surface's last
-//!   rows, which no draw reaches, while a long loaded pass runs (after a shared event the command
-//!   buffer signals before it): Metal keeps them, and so do the pass in place and the merge.
+//!   64 rows, in no tile a draw reaches, while a long loaded pass runs (after a shared event the
+//!   command buffer signals before it): Metal keeps them, and so do the pass in place and the
+//!   merge.
 //! - [`a_pass_sampling_its_surface_after_a_barrier_reads_its_draws`],
 //!   [`a_cleared_pass_sampling_its_surface_after_a_barrier_renders_in_place`] and
 //!   [`a_pass_apart_sampling_its_surface_after_a_barrier_reads_its_draws`] (loaded and cleared):
@@ -860,8 +861,14 @@ fn a_colorless_clip_beside_a_stencil_zeroes_past_the_blends_box() {
 const WIDE: [u64; 2] = [512, 256];
 
 /// The rows at the bottom of [`WIDE`] no draw of the CPU-write lanes reaches, and the byte the
-/// CPU writes there while the pass runs.
-const UNDRAWN: u64 = 8;
+/// CPU writes there while the pass runs. Enough rows that no tile a draw reaches holds them:
+/// Metal stores each tile a draw reaches whole, its rows no draw reaches too, so a CPU write to
+/// such a row while the pass runs is kept or lost by when it lands, on Metal as anywhere; a tile
+/// no draw reaches it never stores. Measured on an M3 Max, macOS 27.0.1, through Metal alone
+/// with this lane's pass at 6000 panels: with the last 8 rows left out, a write late in the pass
+/// kept 5163, 11282 and 13322 of 16384 bytes; with the last 64, every byte at each of 11 delays
+/// across the pass, and of 7 beside the stencil attachment.
+const UNDRAWN: u64 = 64;
 const MARK: u8 = 0xab;
 
 /// The blended panels of the CPU-write lanes' pass: enough that the pass runs while the CPU
@@ -873,8 +880,9 @@ const LAYERS: usize = 600;
 /// that leaves out the last [`UNDRAWN`] rows, in a command buffer that signals a shared event
 /// before it: once the event is signalled the CPU writes [`MARK`] over those rows, which the
 /// pass never writes, while the pass runs (the more likely the longer it runs). Metal keeps what
-/// the CPU wrote there; so does the pass in place and apart, merged (a copy back of the area would
-/// put the rows' old bytes back where the write landed after its copy in). Every other byte
+/// the CPU wrote there, as it stores no tile no draw reaches; so does the pass in place and apart,
+/// merged (a copy back of the area would put the rows' old bytes back where the write landed
+/// after its copy in). Every other byte
 /// holds what the same pass leaves in a private texture of the same bytes.
 fn cpu_write(start: usize, stencil: bool) {
     on_device(|device, _| {

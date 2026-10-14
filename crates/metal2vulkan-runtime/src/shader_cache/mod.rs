@@ -101,6 +101,40 @@ impl ShaderCacheOptions {
     }
 }
 
+/// The most stages a graphics pipeline has (vertex, two tessellation stages, geometry,
+/// fragment; or task, mesh and fragment): a making reports each one's feedback where its
+/// pipeline has no more ([`found_in_cache`]).
+pub(crate) const REPORTED_STAGES: usize = 5;
+
+/// What a making's `VK_EXT_pipeline_creation_feedback` says of its pipeline: found in the cache
+/// the making handed the driver, `Some(true)`; compiled, `Some(false)`; `None` where the whole
+/// pipeline's feedback is not valid, so the driver reported nothing.
+///
+/// Found where the whole pipeline's feedback says `APPLICATION_PIPELINE_CACHE_HIT`, or where
+/// `stages` (each stage's feedback, empty where the making chained none) is not empty and every
+/// one is valid and says it. The specification lets a driver say it either way:
+/// `APPLICATION_PIPELINE_CACHE_HIT` "specifies that a readily usable pipeline or pipeline stage
+/// was found in the `pipelineCache` specified by the application in the pipeline creation
+/// command", and "when an implementation sets this bit for the entire pipeline, it may leave it
+/// unset for any stage" (`VkPipelineCreationFeedbackFlagBits`). A driver that sets it for the
+/// whole pipeline counts as before; MoltenVK 1.4.1 sets it for each stage alone, where it found
+/// the stage's converted Metal function in the cache (`MVKPipelineCache::getShaderLibraryImpl`),
+/// and leaves the whole pipeline's feedback valid alone (`MVKGraphicsPipeline`,
+/// `MVKComputePipeline`).
+pub(crate) fn found_in_cache(
+    whole: &vk::PipelineCreationFeedback,
+    stages: &[vk::PipelineCreationFeedback],
+) -> Option<bool> {
+    let valid = vk::PipelineCreationFeedbackFlags::VALID;
+    let hit = vk::PipelineCreationFeedbackFlags::APPLICATION_PIPELINE_CACHE_HIT;
+    if !whole.flags.contains(valid) {
+        return None;
+    }
+    let every_stage =
+        !stages.is_empty() && stages.iter().all(|stage| stage.flags.contains(valid | hit));
+    Some(whole.flags.contains(hit) || every_stage)
+}
+
 /// A device's shader cache counts since it was made ([`Device::shader_cache_statistics`]). No
 /// Metal counterpart.
 #[non_exhaustive]
@@ -124,11 +158,15 @@ pub struct ShaderCacheStatistics {
     /// whether the device's one driver cache did, 0 or 1).
     pub driver_loads: u64,
     /// Pipelines of the program's states that the driver reports it found in their making's
-    /// cache, seeded from the making's record (`VK_EXT_pipeline_creation_feedback`'s
-    /// `APPLICATION_PIPELINE_CACHE_HIT`, where the device lists the extension): made without
-    /// compiling. (On every driver, MoltenVK's included.)
+    /// cache, seeded from the making's record (`VK_EXT_pipeline_creation_feedback`, where the
+    /// device lists the extension): the whole pipeline's feedback is valid and says
+    /// `APPLICATION_PIPELINE_CACHE_HIT`, or every stage's feedback is valid and says it. Drivers
+    /// differ in where they say it: most for the whole pipeline; MoltenVK 1.4.1 for each stage
+    /// alone, whose Metal function it found converted in the cache (its whole pipeline's
+    /// feedback is only ever valid).
     pub driver_pipeline_hits: u64,
-    /// Such pipelines the driver reports it did not find there: compiled.
+    /// Such pipelines whose valid feedback says no hit, for the whole pipeline or for every
+    /// stage: compiled, or a stage converted again.
     pub driver_pipeline_misses: u64,
     /// Records of the driver's pipeline cache data written: one per making that added to its
     /// cache's data (no record, or its pipeline not in it). (It was the saves of the device's one
@@ -320,31 +358,27 @@ impl ShaderCache {
         made
     }
 
-    /// Whether a making chains a `VkPipelineCreationFeedbackCreateInfo` whose whole-pipeline
-    /// feedback [`driver_reported`](Self::driver_reported) counts.
+    /// Whether a making chains a `VkPipelineCreationFeedbackCreateInfo`, its whole pipeline's
+    /// feedback and its stages', which [`driver_reported`](Self::driver_reported) counts.
     pub(crate) fn driver_reports(&self) -> bool {
         self.driver_reports
     }
 
-    /// Count what a making reported of its pipeline, `whole`: found in its cache, or compiled;
-    /// nothing where the driver left it unreported.
-    pub(crate) fn driver_reported(&self, whole: &vk::PipelineCreationFeedback) {
+    /// Count what a making reported of its pipeline, `whole`, and of its stages, `stages` (empty
+    /// where it chained none): found in its cache, or compiled ([`found_in_cache`]); nothing
+    /// where the driver left it unreported.
+    pub(crate) fn driver_reported(
+        &self,
+        whole: &vk::PipelineCreationFeedback,
+        stages: &[vk::PipelineCreationFeedback],
+    ) {
         let counters = &self.store.counters;
-        if !whole
-            .flags
-            .contains(vk::PipelineCreationFeedbackFlags::VALID)
-        {
-            return;
-        }
-        count(
-            match whole
-                .flags
-                .contains(vk::PipelineCreationFeedbackFlags::APPLICATION_PIPELINE_CACHE_HIT)
-            {
+        if let Some(found) = found_in_cache(whole, stages) {
+            count(match found {
                 true => &counters.driver_pipeline_hits,
                 false => &counters.driver_pipeline_misses,
-            },
-        );
+            });
+        }
     }
 
     /// The function `compile` compiled under `key`, from the cache, and its encoded length.

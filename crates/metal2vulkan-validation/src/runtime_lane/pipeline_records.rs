@@ -8,8 +8,9 @@
 //!   stages). A later device over the same directory makes each from its record, the first at
 //!   the state's creation and the points' at their draw (nothing is kept from earlier draws): both
 //!   loaded, both the driver's cache hits where it reports them
-//!   (`VK_EXT_pipeline_creation_feedback`), and each draw's target byte for byte the first
-//!   device's. A making from a record writes it again exactly where the driver's data after the
+//!   (`VK_EXT_pipeline_creation_feedback`: the whole pipeline's hit, or every stage's, as the
+//!   runtime counts them; MoltenVK 1.4.1 says it for each stage alone), and each draw's target
+//!   byte for byte the first device's. A making from a record writes it again exactly where the driver's data after the
 //!   making is no longer the record's bytes (RADV's after its first hit from a compile's record is
 //!   not, and settles: EVs PRDP-hl3-radv, PRDP-hl4-radv), and counts every other read unchanged
 //!   (`driver_data_unchanged`).

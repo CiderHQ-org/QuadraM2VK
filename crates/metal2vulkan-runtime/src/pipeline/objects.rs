@@ -867,10 +867,14 @@ impl VariantObjects {
         if bindable {
             info = info.push_next(&mut flags);
         }
-        // Whether the making's cache held it, where the making reports it.
+        // Whether the making's cache held it and its one stage, where the making reports them
+        // (`shader_cache::found_in_cache`; one stage's feedback, as
+        // VUID-VkComputePipelineCreateInfo-pipelineStageCreationFeedbackCount-06566 allows).
         let mut whole = vk::PipelineCreationFeedback::default();
+        let mut stage = [vk::PipelineCreationFeedback::default()];
         let mut feedback = vk::PipelineCreationFeedbackCreateInfo::default()
-            .pipeline_creation_feedback(&mut whole);
+            .pipeline_creation_feedback(&mut whole)
+            .pipeline_stage_creation_feedbacks(&mut stage);
         let shared = self.device.shared();
         let driver_reports = shared.shader_cache.driver_reports();
         if driver_reports {
@@ -899,7 +903,7 @@ impl VariantObjects {
         let created_in = started.elapsed();
         drop(turn);
         if driver_reports {
-            shared.shader_cache.driver_reported(&whole);
+            shared.shader_cache.driver_reported(&whole, &stage);
         }
         let raw = created
             .first()

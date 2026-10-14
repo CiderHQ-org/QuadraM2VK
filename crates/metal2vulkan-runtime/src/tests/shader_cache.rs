@@ -699,3 +699,42 @@ fn driver_data_refusals_name_their_reason() {
         Err(Refusal::Mismatched)
     );
 }
+
+/// What a making's creation feedback says of its pipeline (`shader_cache::found_in_cache`): found
+/// where the whole pipeline's feedback is valid and says `APPLICATION_PIPELINE_CACHE_HIT`, whatever
+/// its stages' say (the form RADV, ANV and NVIDIA give); found where the whole pipeline's is valid
+/// and every stage's is valid and says it (MoltenVK 1.4.1's form, its whole pipeline's only ever
+/// valid); compiled where the whole pipeline's is valid otherwise (no stages, one stage not a
+/// valid hit); unreported where the whole pipeline's is not valid.
+#[test]
+fn a_pipeline_is_found_in_its_cache_by_its_whole_feedback_or_every_stage_s() {
+    use crate::shader_cache::found_in_cache;
+    use ash::vk::{PipelineCreationFeedback, PipelineCreationFeedbackFlags as Flags};
+    let feedback = |flags: Flags| PipelineCreationFeedback { flags, duration: 1 };
+    let valid = feedback(Flags::VALID);
+    let hit = feedback(Flags::VALID | Flags::APPLICATION_PIPELINE_CACHE_HIT);
+    let unset = feedback(Flags::empty());
+    // A hit that is not valid: the driver reported nothing.
+    let unvalidated = feedback(Flags::APPLICATION_PIPELINE_CACHE_HIT);
+    // The whole pipeline's hit.
+    assert_eq!(found_in_cache(&hit, &[]), Some(true));
+    assert_eq!(found_in_cache(&hit, &[valid, valid]), Some(true));
+    assert_eq!(found_in_cache(&hit, &[unset, unset, unset]), Some(true));
+    assert_eq!(found_in_cache(&hit, &[hit, valid]), Some(true));
+    // The whole pipeline's valid, every stage's a valid hit.
+    assert_eq!(found_in_cache(&valid, &[hit]), Some(true));
+    assert_eq!(found_in_cache(&valid, &[hit, hit]), Some(true));
+    assert_eq!(found_in_cache(&valid, &[hit; 5]), Some(true));
+    // Mixed stages, or a stage's hit that is not valid: compiled.
+    assert_eq!(found_in_cache(&valid, &[hit, valid]), Some(false));
+    assert_eq!(found_in_cache(&valid, &[valid, hit]), Some(false));
+    assert_eq!(found_in_cache(&valid, &[hit, unset]), Some(false));
+    assert_eq!(found_in_cache(&valid, &[hit, unvalidated]), Some(false));
+    assert_eq!(found_in_cache(&valid, &[valid]), Some(false));
+    // No stage's feedback chained: the whole pipeline's alone.
+    assert_eq!(found_in_cache(&valid, &[]), Some(false));
+    // The whole pipeline's not valid: unreported, whatever the stages say.
+    assert_eq!(found_in_cache(&unset, &[hit, hit]), None);
+    assert_eq!(found_in_cache(&unvalidated, &[hit]), None);
+    assert_eq!(found_in_cache(&unset, &[]), None);
+}

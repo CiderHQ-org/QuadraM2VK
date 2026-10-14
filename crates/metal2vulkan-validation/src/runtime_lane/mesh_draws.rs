@@ -39,6 +39,7 @@
 //! with the extension.
 
 use super::degrade_notices::{assert_made_once, made_mesh_kinds};
+use super::gpu_times::read_kinds;
 use super::render_state::{texels, texture};
 use super::shared_kinds;
 use super::{buffer_with, validated_device, Messages, ScratchCache, WAIT};
@@ -498,11 +499,14 @@ fn object_draws_store_metals_words() {
             }
         }
         // Exactly the emulation's kind where it draws, beside what the state's making forces
-        // (its stages' notes: `FastMathRewrites` on ANV) and the `Shared` buffers; before, a
-        // device that does not emulate let any kind pass.
+        // (its stages' notes: `FastMathRewrites` on ANV), the `Shared` buffers, and the reads of
+        // each pass's GPU times its timing line prints (`gpu_times::read_kinds`:
+        // `GpuTimesFromHost` on MoltenVK); before, a device that does not emulate let any kind
+        // pass.
         let descriptor = lane.descriptor(Some("mesh_draws_object"), "mesh_draws_mesh");
         let mut made = made_mesh_kinds(&lane.device, &descriptor);
         made.extend(shared_kinds(&lane.device));
+        made.extend(read_kinds(&lane.device));
         let emulated: &[Degradation] = match emulates(&lane.device) {
             true => &EMULATED_MESH,
             false => &[],
