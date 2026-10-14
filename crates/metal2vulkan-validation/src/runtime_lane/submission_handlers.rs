@@ -4,9 +4,10 @@
 //!
 //! A submission handler runs once the command buffer's last batch reached its `VkQueue`, on the
 //! thread that submitted it, before the command buffer is `Scheduled`: inside `commit` where the
-//! commit submits it (its waits met, nothing earlier of its queue held), on the scheduler thread
-//! where an event the host raised releases it, and inside another `commit` whose GPU signal
-//! releases it. Never for a command buffer that fails before its last batch is submitted.
+//! commit submits it (its waits met, nothing earlier of its queue held, no other thread
+//! submitting), on the scheduler thread where an event the host raised releases it, and inside
+//! another `commit` whose GPU signal releases it, or that was submitting as it was committed.
+//! Never for a command buffer that fails before its last batch is submitted.
 //!
 //! Metal's answers (EV SUB-sched1-m4: an M4, macOS 27.0.1): `commit` returns before the command
 //! buffer is scheduled, on Metal's own thread; its status reads `Scheduled` just before its first

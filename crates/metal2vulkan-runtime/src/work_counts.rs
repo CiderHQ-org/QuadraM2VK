@@ -61,6 +61,9 @@ pub(crate) struct Counters {
     visibility_queries_begun: AtomicU64,
     indirect_draws_recorded: AtomicU64,
     internal_submissions: AtomicU64,
+    queue_submissions: AtomicU64,
+    command_buffers_submitted: AtomicU64,
+    commits_handed_off: AtomicU64,
     images_started_on_the_host: AtomicU64,
     host_texel_copies: AtomicU64,
     staging_submissions: AtomicU64,
@@ -323,6 +326,19 @@ impl Counters {
     /// An internal submission was made (`device/submit.rs`): one a host call waits for.
     pub(crate) fn internal_submission(&self) {
         self.internal_submissions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A `vkQueueSubmit` or `vkQueueBindSparse` call was made with `command_buffers`
+    /// `VkCommandBuffer`s among its `VkSubmitInfo`s.
+    pub(crate) fn queue_submitted(&self, command_buffers: usize) {
+        self.queue_submissions.fetch_add(1, Ordering::Relaxed);
+        (self.command_buffers_submitted).fetch_add(command_buffers as u64, Ordering::Relaxed);
+    }
+
+    /// A commit found another thread making the scheduler's pass and left its batches to it
+    /// (`scheduler/inbox.rs`).
+    pub(crate) fn commit_handed_off(&self) {
+        self.commits_handed_off.fetch_add(1, Ordering::Relaxed);
     }
 
     /// A submission on the staging queue was made (`device/staging.rs`).
@@ -651,6 +667,16 @@ pub struct WorkCounts {
     /// blocks, pooled or dedicated, freed since or not): none for host memory it imports. A
     /// detach allocates none for the bytes it detaches (`detach.rs`).
     pub device_memory_allocated: u64,
+    /// The runtime's live pooled `VkDeviceMemory` blocks with a placement in them (`memory.rs`):
+    /// with the blocks below and every dma-buf import, the allocations ANV on i915 lists in each
+    /// of its kernel submissions, beside its own buffer objects.
+    pub memory_blocks_live: u64,
+    /// Its live pooled blocks with no placement, kept for the next.
+    pub empty_memory_blocks_live: u64,
+    /// Its live dedicated blocks: a placement larger than half a block, or one placed apart.
+    pub dedicated_memory_blocks_live: u64,
+    /// Its live imports of the caller's host memory, a block each (`Memory::import_host`).
+    pub host_imports_live: u64,
     /// Stand-ins made for textures over detached bytes (`texture/stand_in.rs`): one per distinct
     /// image plan among the textures detached at once.
     pub stand_ins_made: u64,
@@ -697,6 +723,19 @@ pub struct WorkCounts {
     /// Internal submissions made (`device/submit.rs`), each one a host call waits for: a host
     /// copy through the GPU, a clear of a live buffer, a neutral's making.
     pub internal_submissions: u64,
+    /// `vkQueueSubmit` and `vkQueueBindSparse` calls the runtime made on the device's queues once
+    /// it was made: every batch's, its new resources' first work's apart (`texture/first_move.rs`),
+    /// internal and staging submissions, sparse binds, and fences submitted with no work. Each is a
+    /// submission of its own to the driver; Mesa's drivers merge the `VkSubmitInfo`s of one call
+    /// where no signal lies between a command and a later one, and no further (`vk_queue.c`).
+    pub queue_submissions: u64,
+    /// The `VkCommandBuffer`s those calls submitted.
+    pub command_buffers_submitted: u64,
+    /// Commits that found another thread submitting for the device's scheduler (a pass of the
+    /// scheduler's thread, or another commit's) and returned at once, their batches left to that
+    /// thread, which submits them in commit order as soon as its pass ends
+    /// (`scheduler/inbox.rs`). Each other commit made the pass itself.
+    pub commits_handed_off: u64,
     /// New `Shared` and `Managed` textures' images moved to `GENERAL` and zeroed on the host, with
     /// no submission (`texture/host_copy.rs`).
     pub images_started_on_the_host: u64,
@@ -819,6 +858,10 @@ impl Device {
     #[doc(hidden)]
     pub fn work_counts(&self) -> WorkCounts {
         let counters = &self.shared().counts;
+        let (allocated, census) = {
+            let memory = lock(&self.shared().memory);
+            (memory.allocated(), memory.census())
+        };
         WorkCounts {
             command_pools_made: counters.command_pools_made.load(Ordering::Relaxed),
             live_tables_uploaded: counters.live_tables_uploaded.load(Ordering::Relaxed),
@@ -862,7 +905,11 @@ impl Device {
             driver_diagnostics_withheld: counters
                 .driver_diagnostics_withheld
                 .load(Ordering::Relaxed),
-            device_memory_allocated: lock(&self.shared().memory).allocated(),
+            device_memory_allocated: allocated,
+            memory_blocks_live: census.pooled,
+            empty_memory_blocks_live: census.empty,
+            dedicated_memory_blocks_live: census.dedicated,
+            host_imports_live: census.imported,
             stand_ins_made: counters.stand_ins_made.load(Ordering::Relaxed),
             stand_in_bytes: counters.stand_in_bytes.load(Ordering::Relaxed),
             stale_detached_reaches: counters.stale_detached_reaches.load(Ordering::Relaxed),
@@ -887,6 +934,9 @@ impl Device {
             visibility_queries_begun: counters.visibility_queries_begun.load(Ordering::Relaxed),
             indirect_draws_recorded: counters.indirect_draws_recorded.load(Ordering::Relaxed),
             internal_submissions: counters.internal_submissions.load(Ordering::Relaxed),
+            queue_submissions: counters.queue_submissions.load(Ordering::Relaxed),
+            command_buffers_submitted: counters.command_buffers_submitted.load(Ordering::Relaxed),
+            commits_handed_off: counters.commits_handed_off.load(Ordering::Relaxed),
             images_started_on_the_host: counters.images_started_on_the_host.load(Ordering::Relaxed),
             host_texel_copies: counters.host_texel_copies.load(Ordering::Relaxed),
             staging_submissions: counters.staging_submissions.load(Ordering::Relaxed),

@@ -3,7 +3,7 @@
 //!
 //! Each shape makes [`Shape::count`] textures of one descriptor, then commits a command buffer of
 //! one 16-byte buffer fill and waits for it. The submission records the textures' first work
-//! (`texture/first_move.rs`) in a `vkQueueSubmit` of its own before the fill's: Metal's pattern
+//! (`texture/first_move.rs`) in a `VkSubmitInfo` of its own before the fill's: Metal's pattern
 //! where Metal compresses a `Private` texture, cleared or copied, a clear of its other levels and
 //! of the other `Private` ones, and zeros copied into a `Shared` one, or written by the host as it
 //! is made where the device copies texels from the host. Each sample is the host's time to make the

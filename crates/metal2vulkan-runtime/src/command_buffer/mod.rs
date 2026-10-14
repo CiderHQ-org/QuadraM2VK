@@ -1267,10 +1267,12 @@ impl CommandBuffer {
     /// program that models what Metal does as it submits takes that point here.
     ///
     /// - **The thread.** The committing thread, inside `commit`, where the commit submits the
-    ///   last batch itself (its every wait met, and nothing earlier of its queue held); else the
-    ///   thread that submits it later: the device's scheduler thread (after an event's value
-    ///   rose, a host step, a check), or the thread of another `commit` that submits it in its
-    ///   pass. It runs with no lock of the runtime's held, after the submission's call returned.
+    ///   last batch itself (its every wait met, nothing earlier of its queue held, and no other
+    ///   thread submitting for the device as it commits); else the thread that submits it later:
+    ///   the device's scheduler thread (after an event's value rose, a host step, a check, or a
+    ///   commit that found it submitting), or the thread of another `commit` that submits it in
+    ///   its pass (one that released it, or that was submitting as this commit was made). It
+    ///   runs with no lock of the runtime's held, after the submission's call returned.
     /// - **Before.** Its handlers run, in the order added, before the status reads `Scheduled`,
     ///   before [`wait_until_scheduled`](Self::wait_until_scheduled) returns, before its
     ///   scheduled handlers run, and before it can complete. The GPU may run the work meanwhile:
@@ -2515,6 +2517,7 @@ impl CommandBufferShared {
         let fence = unsafe { shared.fences.take(raw) }.ok()?;
         // SAFETY: a submission of no batch with an unsignaled fence in no pending submission;
         // the `VkQueue` is used under its lock.
+        shared.counts.queue_submitted(0);
         let submitted =
             shared.submit_logged(queue, Some(fence), &self.relayed, |vk_queue| unsafe {
                 raw.queue_submit(vk_queue, &[], fence)

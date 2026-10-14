@@ -14,8 +14,15 @@
 //!    without holding back the work.
 //!
 //! A batch with no work is one `VkSubmitInfo` of every wait, the end and the signals: a wait
-//! orders only its own `VkSubmitInfo`'s commands, so a signal after a wait with nothing between
-//! needs both in one.
+//! orders only its own `VkSubmitInfo`'s commands, and a signal follows commands, not waits
+//! (`vkQueueSubmit`'s synchronization scopes), so a signal after a wait needs both in one, with
+//! the end's barrier, a command, between. Where it has no wait, no image to move back and no
+//! timestamp to write either (an empty command buffer's batch, one of signals alone), its end
+//! records nothing and the `VkSubmitInfo` holds no `VkCommandBuffer`: none of its commands wrote
+//! anything, every batch before it made its own writes visible to the host before its signals,
+//! and its signals follow every command submitted before them. ANV on i915 lists every
+//! `VkDeviceMemory` of the device, and its own buffer objects, in each kernel submission of
+//! commands, and two objects in one of none (Mesa 26.2.4, `i915/anv_batch_chain.c`).
 //!
 //! **The caller's images** ([`Device::new_texture_with_vk_image`]). A batch whose encoders use a
 //! wrapped image that is not at rest in `GENERAL` moves it there before its first encoder and back
@@ -31,7 +38,12 @@
 //! of the batch, whether a use names the resource or not (a command may reach a texture through its
 //! resource ID, a buffer through its address), and the batch holds what it worked on until it
 //! completes. On a device of several `VkQueue`s every batch on another one waits for it until it
-//! completed.
+//! completed. It is a `VkSubmitInfo` of its own, first in the batch's `vkQueueSubmit`, waiting for
+//! what the work waits for but a binary semaphore: MoltenVK 1.4.1 runs each `VkSubmitInfo` as a
+//! Metal command buffer of its own (`MVKQueue::submit`), and lost a copy into a new image
+//! recorded in the same one as the image's move (EVs STL-p4a-mvk4, STL-p4b-mvk4); Mesa's drivers
+//! merge it with the work, as it signals nothing (`vk_queue_submits_merge`), so it costs no
+//! kernel submission of its own. A failed `vkQueueSubmit` made none of it, or lost the device.
 //!
 //! [`Device::new_texture_with_vk_image`]: crate::Device::new_texture_with_vk_image
 //!
@@ -312,15 +324,6 @@ impl CommandBufferShared {
             }
             work.extend(&state.recorded[start + offset].raws);
         }
-        let finale_barriers: Vec<Barrier> = exit_barrier
-            .into_iter()
-            .chain([Barrier::to_host()])
-            .collect();
-        let stamps = Stamps {
-            start: start_stamp.take(),
-            end: slot.filter(|_| last),
-        };
-        let finale = [self.record_barriers(&mut state, &finale_barriers, &exits, stamps)?];
         // The new resources' first work, before every command (`texture/first_move.rs`), given
         // back if the submission is not made. A move of an image bound to host pages goes only
         // with a batch whose encoders name its key, and so hold its pages.
@@ -332,9 +335,8 @@ impl CommandBufferShared {
                         .is_some_and(|ended| ended.keys.contains(&key))
             })
         });
-        // The first work goes in a `vkQueueSubmit` of its own just before the batch's, under the
-        // queue's lock: MoltenVK lost a copy into a new image submitted with the image's move.
-        // Host calls' staged copies go at the batch's start.
+        // The first work goes in a `VkSubmitInfo` of its own just before the batch's, in its
+        // `vkQueueSubmit` (the module docs). Host calls' staged copies go at the batch's start.
         let lead = match first_work.has_first() {
             true => Some(self.record_raw(&mut state, |_, buffer| {
                 // SAFETY: the command buffer is recording, outside a render pass; it is
@@ -348,13 +350,12 @@ impl CommandBufferShared {
         if first_work.has_staged() {
             let staged = self.record_raw(&mut state, |_, buffer| {
                 // SAFETY: the command buffer is recording, outside a render pass; every image's
-                // move is in the first work's submission or one before.
+                // move is in the first work's `VkSubmitInfo` or a submission before.
                 unsafe { first_work.record_staged(raw, buffer) };
                 Ok(())
             })?;
             work.insert(0, staged);
         }
-
         let mut wait_semaphores = Vec::new();
         let mut wait_values = Vec::new();
         let mut wait_stages = Vec::new();
@@ -436,6 +437,31 @@ impl CommandBufferShared {
             order_values.append(&mut wait_values);
             order_stages.append(&mut wait_stages);
         }
+        // The end, where the batch has something to end. A batch with no work, no wait, no image
+        // to move back and no timestamp records none: none of its commands wrote anything, every
+        // batch before it on any `VkQueue` made its own writes visible to the host before its
+        // signals, and its signals follow every command submitted before them. A wait needs it:
+        // a wait orders the commands of its batch, and a signal follows those, not the wait.
+        let stamps = Stamps {
+            start: start_stamp.take(),
+            end: slot.filter(|_| last),
+        };
+        let ends = !single
+            || !order_semaphores.is_empty()
+            || exit_barrier.is_some()
+            || !exits.is_empty()
+            || stamps.start.is_some()
+            || stamps.end.is_some();
+        let finale: Vec<vk::CommandBuffer> = match ends {
+            true => {
+                let finale_barriers: Vec<Barrier> = exit_barrier
+                    .into_iter()
+                    .chain([Barrier::to_host()])
+                    .collect();
+                vec![self.record_barriers(&mut state, &finale_barriers, &exits, stamps)?]
+            }
+            false => Vec::new(),
+        };
         let signal_semaphores: Vec<vk::Semaphore> = kept
             .iter()
             .map(|(event, _, _)| event.semaphore())
@@ -489,7 +515,15 @@ impl CommandBufferShared {
             .wait_dst_stage_mask(&lead_stages)
             .command_buffers(&lead_buffers)
             .push_next(&mut lead_timeline);
-        let (mut lead_made, mut closing) = (false, None);
+        // The first work's `VkSubmitInfo` leads the batch's, in one `vkQueueSubmit`.
+        let submits: Vec<vk::SubmitInfo<'_>> = (!lead_buffers.is_empty())
+            .then_some(lead_info)
+            .into_iter()
+            .chain(infos.iter().copied())
+            .collect();
+        let buffers = (submits.iter())
+            .map(|info| info.command_buffer_count as usize)
+            .sum();
         // From here its heap set versions may be pending: nothing writes them any more, and its
         // first batch takes the ticket a texture that goes from now on waits for
         // (`heap_sets.rs`). One committed and not yet submitted holds no gone texture.
@@ -505,31 +539,9 @@ impl CommandBufferShared {
         // transition is of a live image of the caller's in the layout it is in (its contract,
         // `new_texture_with_vk_image`); the fence is unsignaled and in no pending submission;
         // the `VkQueue` is used under its lock.
-        // The first work's submission, with no fence, is the batch's lead: where the batch's
-        // fails after it was made, a submission of no work signals a fence of its own once the
-        // first work completed (the device's fences, inside the scheduler's section).
         let submitted = shared.submit_logged(queue, fence, &self.relayed, |vk_queue| unsafe {
-            if !lead_buffers.is_empty() {
-                raw.queue_submit(
-                    vk_queue,
-                    std::slice::from_ref(&lead_info),
-                    vk::Fence::null(),
-                )?;
-                lead_made = true;
-            }
-            let made = raw.queue_submit(vk_queue, infos, fence.unwrap_or(vk::Fence::null()));
-            if made.is_err() && lead_made {
-                if let Ok(ending) = shared.fences.take(raw) {
-                    match raw.queue_submit(vk_queue, &[], ending) {
-                        Ok(()) => closing = Some(ending),
-                        // SAFETY: the failed submission is not pending.
-                        Err(_) => {
-                            release::object(raw, ending);
-                        }
-                    }
-                }
-            }
-            made
+            shared.counts.queue_submitted(buffers);
+            raw.queue_submit(vk_queue, &submits, fence.unwrap_or(vk::Fence::null()))
         });
         exit_guard::called(Call::QueueSubmit);
         if let Err(error) = submitted {
@@ -538,32 +550,16 @@ impl CommandBufferShared {
                 // not kept: Vulkan leaves a fence's state after a failed submission unsaid.
                 unsafe { release::object(raw, fence) };
             }
-            // The first work went: what it holds goes once it completed. Where nothing ends its
-            // submission that a wait could see, the device is taken as lost.
-            if lead_made {
-                // The first work's command buffer is of this command buffer's pool, which goes
-                // as the command buffer fails: where the device is lost, once the driver's own
-                // completion of the first work ran (`Device::drain_queues`).
-                let ended = match closing {
-                    Some(ending) => {
-                        // SAFETY: the fence was submitted just now; inside the section.
-                        let waited = unsafe { raw.wait_for_fences(&[ending], true, u64::MAX) };
-                        exit_guard::called(Call::WaitForFences);
-                        // SAFETY: signaled or the device lost: not pending.
-                        unsafe { release::object(raw, ending) };
-                        waited.is_ok()
-                    }
-                    None => {
-                        device.mark_lost();
-                        false
-                    }
-                };
-                if !ended {
-                    device.drain_queues();
-                }
-                drop(first_work.submitted(None));
+            // A `vkQueueSubmit` that fails leaves what its submissions reference as it was, or
+            // loses the device: the first work goes back, still to be done, as `first_work`
+            // drops. Where the device is lost, its command buffers, of this command buffer's pool
+            // that goes as the command buffer fails, go once the driver's own completion of what
+            // the call ran did (`Device::drain_queues`).
+            let error = submission_error(device, error);
+            if matches!(error, CommandBufferError::DeviceLost) {
+                device.drain_queues();
             }
-            return Err(submission_error(device, error));
+            return Err(error);
         }
         if last {
             state.times.kernel_end = gpu_time::host_nanos();

@@ -521,6 +521,8 @@ mod submission_checks;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod submission_handlers;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod submit_costs;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod sum_regroup;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod surface_aliases;

@@ -38,12 +38,14 @@
 //!   moved only by a batch whose commands name its key (and so hold its pages), or by none until
 //!   then: an unnamed read of it meanwhile reads a linear image in `UNDEFINED`, which keeps its
 //!   bytes on every device the lanes run on (`runtime_lane::no_copy_textures`). The work goes in
-//!   a `vkQueueSubmit` of its own just before the submission's, under the queue's lock, waiting
-//!   for what that one waits for but a binary semaphore.
+//!   a `VkSubmitInfo` of its own just before the submission's, first in its `vkQueueSubmit`,
+//!   waiting for what that one waits for but a binary semaphore: MoltenVK runs each
+//!   `VkSubmitInfo` as a Metal command buffer of its own, and Mesa's drivers merge it with the
+//!   submission's into one kernel submission (`command_buffer/submit.rs`).
 //! - **Staged copies**. `replace_region` of a texture whose `VkImage` is its own for good (in
 //!   memory of its own, or a heap's own pages) and takes no host copies stages the bytes
 //!   ([`TexelCopy`], [`FirstMoves::register_texels`]): the next submission copies them in at
-//!   the start of its work, after the first work's submission, each copy after the writes before
+//!   the start of its work, after the first work's `VkSubmitInfo`, each copy after the writes before
 //!   it, and holds the image and the staging buffer until it completed.
 //! - **Bounded**. Past [`STAGED_BYTES`] bytes, or [`STAGED_COPIES`] copies, staged for the next
 //!   submission (staged bytes' copies into buffers, a `Managed` buffer's uploads, and staged texel
@@ -1223,10 +1225,10 @@ impl Taken<'_> {
     }
 
     /// Record the host calls' staged copies it took into `command_buffer`, each after every
-    /// write before it (the first work, which a submission of its own made before; the copy
-    /// before), then the barrier that makes them visible to every command after and to the
+    /// write before it (the first work, which a `VkSubmitInfo` of its own submitted before; the
+    /// copy before), then the barrier that makes them visible to every command after and to the
     /// host. Apart from [`record`](Self::record)'s work: MoltenVK lost a copy into a new image
-    /// submitted with the image's move.
+    /// recorded in the same Metal command buffer as the image's move.
     ///
     /// # Safety
     ///

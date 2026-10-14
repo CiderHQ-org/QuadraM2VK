@@ -3,9 +3,19 @@
 //! of its live buffers, to a bound, through the device's work counts (`Device::work_counts`, not
 //! part of the API). Deterministic: they count, and time nothing.
 //!
-//! - **Command pools.** A command buffer that encoded nothing records its submission's barriers
-//!   into the spare command pool the one before gave back; before, it made one in the
-//!   scheduler's section, where no spare is taken.
+//! - **Command pools.** A command buffer that encoded nothing takes, for any barrier its
+//!   submission records, the spare command pool the one before gave back; before, it made one in
+//!   the scheduler's section, where no spare is taken.
+//! - **Empty submissions.** A command buffer that encoded nothing and waits for nothing is one
+//!   `vkQueueSubmit` of no `VkCommandBuffer`: its signals alone. Before, it carried one of the
+//!   barrier to the host, and ANV on i915 lists every `VkDeviceMemory` of the device in a kernel
+//!   submission of commands (47 objects at 32 host imports on an Iris Xe), where it lists two in
+//!   one of none.
+//! - **First work rides along.** A new texture's first work (`texture/first_move.rs`) is a
+//!   `VkSubmitInfo` of the next submission's own `vkQueueSubmit`, a commit's or an internal one's
+//!   (handing its `VkImage` out): one call each, which Mesa's drivers run as one kernel submission.
+//!   Before, it was a `vkQueueSubmit` of its own, a second kernel submission listing every buffer
+//!   object of the device on ANV over i915.
 //! - **Fences.** Command buffers that each end in one submission complete at their fences where
 //!   the driver reads their objects after their values (MoltenVK): the completion thread waits
 //!   for no timeline value; before, it waited for one each, which MoltenVK wakes through a shared
@@ -29,8 +39,9 @@
 use super::degrade_notices::on_device;
 use super::{bound_buffers, encode_case, pipeline_state, public_case, CaseResources, WAIT};
 use metal2vulkan::error::RuntimeDriverDefect;
+use metal2vulkan::metal::{PixelFormat, TextureUsage};
 use metal2vulkan_runtime::{
-    Buffer, CommandBuffer, CommandBufferStatus, CommandQueue, ResourceOptions,
+    Buffer, CommandBuffer, CommandBufferStatus, CommandQueue, ResourceOptions, TextureDescriptor,
 };
 
 /// A kernel whose root table searches the device's live buffers: its pointer walk reaches
@@ -67,6 +78,64 @@ fn empty_command_buffers_take_the_spare_command_pool() {
         }
         let after = device.work_counts();
         assert_eq!(after.command_pools_made, before.command_pools_made);
+    });
+}
+
+/// Empty command buffers one after another submit no `VkCommandBuffer`: each is one
+/// `vkQueueSubmit` of its signals alone (the module docs).
+#[test]
+fn empty_command_buffers_submit_no_command_buffer() {
+    on_device(|device, _| {
+        let queue = device.new_command_queue().unwrap();
+        // The first takes any first work the device's creation left.
+        finish(&queue.command_buffer().unwrap());
+        let before = device.work_counts();
+        for _ in 0..8 {
+            finish(&queue.command_buffer().unwrap());
+        }
+        let after = device.work_counts();
+        assert_eq!(after.queue_submissions - before.queue_submissions, 8);
+        assert_eq!(
+            after.command_buffers_submitted,
+            before.command_buffers_submitted
+        );
+    });
+}
+
+/// A commit after a new `Private` texture was made, and the internal submission that hands
+/// another's `VkImage` out, are one `vkQueueSubmit` each, the texture's first work in it: the
+/// empty command buffer's submission carries the first work's `VkCommandBuffer` alone (the module
+/// docs).
+#[test]
+fn a_new_texture_s_first_work_rides_in_the_next_submission() {
+    on_device(|device, _| {
+        let queue = device.new_command_queue().unwrap();
+        finish(&queue.command_buffer().unwrap());
+        let texture = || {
+            let mut descriptor =
+                TextureDescriptor::texture_2d(PixelFormat::RGBA8Unorm, 64, 64, false);
+            descriptor.usage = TextureUsage::SHADER_READ;
+            descriptor.resource_options = ResourceOptions::private();
+            device.new_texture(&descriptor).unwrap()
+        };
+        let before = device.work_counts();
+        let committed = texture();
+        finish(&queue.command_buffer().unwrap());
+        let after = device.work_counts();
+        assert_eq!(after.queue_submissions - before.queue_submissions, 1);
+        assert_eq!(
+            after.command_buffers_submitted - before.command_buffers_submitted,
+            1
+        );
+        let handed = texture();
+        let before = device.work_counts();
+        // SAFETY: the image is only read for its handle; the texture lives past the read.
+        let image = unsafe { handed.vk_image() };
+        assert!(image.is_some(), "a texture of its own image");
+        let after = device.work_counts();
+        assert_eq!(after.internal_submissions - before.internal_submissions, 1);
+        assert_eq!(after.queue_submissions - before.queue_submissions, 1);
+        drop((committed, handed));
     });
 }
 

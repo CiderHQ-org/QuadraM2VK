@@ -81,7 +81,7 @@ const LIVE_BUFFERS: usize = 256;
 const BUFFER_BYTES: u64 = 16 * 1024;
 /// The working set's sampled textures, `RGBA8Unorm`, [`TEXTURE_SIDE`] texels a side.
 const LIVE_TEXTURES: usize = 128;
-const TEXTURE_SIDE: u64 = 64;
+pub(super) const TEXTURE_SIDE: u64 = 64;
 /// The render targets the passes draw into, [`TARGET_SIDE`] texels a side.
 const TARGETS: usize = 4;
 const TARGET_SIDE: u64 = 256;
@@ -97,7 +97,7 @@ const DRAWS: usize = 3;
 const POINTER_WALKER: &str = "walk-a-device-pointer-chain-through-a-loop-phi";
 
 /// The process's CPU time so far, every thread's, in microseconds.
-fn process_cpu_us() -> f64 {
+pub(super) fn process_cpu_us() -> f64 {
     let mut now = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
@@ -109,12 +109,12 @@ fn process_cpu_us() -> f64 {
 }
 
 /// Microseconds since `at`.
-fn since(at: Instant) -> f64 {
+pub(super) fn since(at: Instant) -> f64 {
     at.elapsed().as_secs_f64() * 1e6
 }
 
 /// The 10th, 50th and 90th percentiles of `values`.
-fn percentiles(mut values: Vec<f64>) -> [f64; 3] {
+pub(super) fn percentiles(mut values: Vec<f64>) -> [f64; 3] {
     values.sort_by(f64::total_cmp);
     let at = |p: usize| values[(values.len() * p / 100).min(values.len() - 1)];
     [at(10), at(50), at(90)]
@@ -130,7 +130,7 @@ struct Sample {
 
 /// The shapes of one command buffer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Shape {
+pub(super) enum Shape {
     Empty,
     Blit,
     Draw,
@@ -142,13 +142,13 @@ enum Shape {
 }
 
 /// The device, its queue, and what the shapes use.
-struct Workload {
-    device: Device,
-    queue: CommandQueue,
+pub(super) struct Workload {
+    pub(super) device: Device,
+    pub(super) queue: CommandQueue,
     pipeline: RenderPipelineState,
     sampler: SamplerState,
     buffers: Vec<Buffer>,
-    textures: Vec<Texture>,
+    pub(super) textures: Vec<Texture>,
     targets: Vec<Texture>,
     /// A `BGRA8Unorm` view of an `RGBA8Unorm` texture without `PixelFormatView` usage (a shadow
     /// of its texels, 10.6), and an `RGBA8Unorm` one (the same image); each holds the texture.
@@ -171,7 +171,7 @@ struct Walk {
 const RECT: [f32; 4] = [-0.5, -0.5, 0.5, 0.5];
 
 impl Workload {
-    fn new(device: Device) -> Workload {
+    pub(super) fn new(device: Device) -> Workload {
         let queue = device.new_command_queue().unwrap();
         let ll =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/public/engine/tob_renders.ll");
@@ -230,13 +230,13 @@ impl Workload {
     }
 
     /// The next index into a working-set list of `len` members.
-    fn take(&mut self, len: usize) -> usize {
+    pub(super) fn take(&mut self, len: usize) -> usize {
         self.next = self.next.wrapping_add(7);
         self.next % len
     }
 
     /// Encode `shape` into a new command buffer: the command buffer.
-    fn encode(&mut self, shape: Shape) -> CommandBuffer {
+    pub(super) fn encode(&mut self, shape: Shape) -> CommandBuffer {
         let command_buffer = self.queue.command_buffer().unwrap();
         match shape {
             Shape::Empty => {}
@@ -358,7 +358,7 @@ impl Workload {
     /// Release two buffers and a texture of the working set and make them again, and make two
     /// views of another of its textures, which the frame's passes sample through: a
     /// `BGRA8Unorm` one (a shadow, 10.6) and one of the texture's own format.
-    fn churn(&mut self, frame: usize) {
+    pub(super) fn churn(&mut self, frame: usize) {
         for at in [frame % LIVE_BUFFERS, (frame * 31 + 5) % LIVE_BUFFERS] {
             self.buffers[at] = buffer(&self.device);
         }
@@ -384,7 +384,7 @@ fn buffer(device: &Device) -> Buffer {
 }
 
 /// A `Private` square `RGBA8Unorm` texture of `usage`, `side` texels a side.
-fn texture(device: &Device, side: u64, usage: TextureUsage) -> Texture {
+pub(super) fn texture(device: &Device, side: u64, usage: TextureUsage) -> Texture {
     let mut d = TextureDescriptor::texture_2d(PixelFormat::RGBA8Unorm, side, side, false);
     d.usage = usage;
     d.resource_options = ResourceOptions::private();

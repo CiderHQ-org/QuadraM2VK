@@ -10,6 +10,10 @@
 //!   (`indirect_host_steps.rs`), behind fills of a ballast: its batch waits at its gate for A's
 //!   earlier work to complete, and for its host step, while B commits.
 //! - **Held for its submission check.** A's fill has a check that waits until B committed.
+//!
+//! And within one queue, commits from two threads while one's submission waits for the `VkQueue`
+//! (the test holds it): the other's commits return at once, left to the submitting thread
+//! (`scheduler/inbox.rs`), and every command buffer runs in commit order.
 
 use super::degrade_notices::{assert_made_once, on_device};
 use super::indirect_host_steps::{expected, Setup, HOST_STEPS};
@@ -19,6 +23,7 @@ use metal2vulkan_runtime::{
     Buffer, CommandBuffer, CommandBufferStatus, CommandQueue, Device, ResourceOptions, Submission,
     SubmissionCheck,
 };
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -166,5 +171,125 @@ fn a_copy_committed_while_a_write_waits_for_its_check_holds_it() {
             "on {}",
             device.name()
         );
+    });
+}
+
+/// Command buffer `number` (from 1) of `queue`: a copy of `tracked`'s 4 bytes into `seen` at
+/// `4 * (number - 1)`, then a fill of `tracked` with `number`. Its copy holds the number of the
+/// command buffer that ran before it, 0 for the first.
+fn numbered(queue: &CommandQueue, tracked: &Buffer, seen: &Buffer, number: u8) -> CommandBuffer {
+    let command_buffer = queue.command_buffer().unwrap();
+    let mut blit = command_buffer.blit_command_encoder().unwrap();
+    let at = 4 * u64::from(number - 1);
+    blit.copy_from_buffer_to_buffer(tracked, 0, seen, at, 4)
+        .unwrap();
+    blit.fill_buffer(tracked, 0..4, number).unwrap();
+    blit.end_encoding().unwrap();
+    command_buffer
+}
+
+/// Two threads each commit [`EACH`] command buffers of one queue while the test holds its
+/// `VkQueue`: the first commit to take the scheduler's lock submits, its `vkQueueSubmit` waiting
+/// for the `VkQueue`, and every commit of the other thread returns at once, left to it. Once the
+/// `VkQueue` is free, the command buffers run in commit order: each that returned before another
+/// started runs before it, as each one's copy of the number the one before it wrote shows.
+#[test]
+fn commits_made_while_another_thread_submits_return_at_once_and_run_in_commit_order() {
+    const EACH: u8 = 4;
+    on_device(|device, _| {
+        let queue = device.new_command_queue().unwrap();
+        let tracked = buffer_with(device, &[0; 4]).unwrap();
+        let seen = buffer_with(device, &[0xff; 4 * 2 * EACH as usize]).unwrap();
+        // Made and encoded first: the threads only commit them.
+        let lines: Vec<Vec<(u8, CommandBuffer)>> = (0..2)
+            .map(|line| {
+                (1..=EACH)
+                    .map(|k| line * EACH + k)
+                    .map(|number| (number, numbered(&queue, &tracked, &seen, number)))
+                    .collect()
+            })
+            .collect();
+        let handed_off = || device.work_counts().commits_handed_off;
+        let before = handed_off();
+        let (held, holding) = mpsc::channel();
+        let (release, released) = mpsc::channel::<()>();
+        let holder = {
+            let queue = queue.clone();
+            std::thread::spawn(move || {
+                // SAFETY: the closure keeps no handle and calls nothing of the runtime's; it waits
+                // only for this test's release.
+                unsafe {
+                    queue.with_vk_queue(|_, _| {
+                        held.send(()).unwrap();
+                        let _ = released.recv_timeout(WAIT);
+                    })
+                }
+            })
+        };
+        holding.recv_timeout(WAIT).unwrap();
+        // Each commit's start and return on one clock.
+        let clock = Arc::new(AtomicU64::new(0));
+        let (returned, returns) = mpsc::channel();
+        let committers: Vec<_> = lines
+            .into_iter()
+            .map(|line| {
+                let (clock, returned) = (Arc::clone(&clock), returned.clone());
+                std::thread::spawn(move || {
+                    let mut times = Vec::new();
+                    for (number, command_buffer) in &line {
+                        let start = clock.fetch_add(1, Ordering::SeqCst);
+                        command_buffer.commit().unwrap();
+                        let end = clock.fetch_add(1, Ordering::SeqCst);
+                        times.push((*number, start, end));
+                        returned.send(()).unwrap();
+                    }
+                    (line, times)
+                })
+            })
+            .collect();
+        drop(returned);
+        for commit in 1..=EACH {
+            returns.recv_timeout(WAIT).unwrap_or_else(|_| {
+                panic!(
+                    "commit {commit} of the thread not submitting waited for the other's \
+                     submission"
+                )
+            });
+        }
+        assert!(
+            handed_off() - before >= u64::from(EACH),
+            "the other thread's commits were left to the submitting one"
+        );
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        let (mut command_buffers, mut times) = (Vec::new(), Vec::new());
+        for committer in committers {
+            let (line, line_times) = committer.join().unwrap();
+            command_buffers.extend(line.into_iter().map(|(_, command_buffer)| command_buffer));
+            times.extend(line_times);
+        }
+        completed(&command_buffers.iter().collect::<Vec<_>>());
+        // The order they ran in: each copy names the one before it.
+        let before_of = read_buffer(&seen, 0, seen.length()).unwrap();
+        let mut ran = vec![0u8];
+        while ran.len() <= 2 * EACH as usize {
+            let last = *ran.last().unwrap();
+            let next: Vec<u8> = (1..=2 * EACH)
+                .filter(|&number| before_of[4 * usize::from(number - 1)] == last)
+                .collect();
+            assert_eq!(next.len(), 1, "one ran after {last}: {before_of:?}");
+            ran.push(next[0]);
+        }
+        let place = |number: u8| ran.iter().position(|&n| n == number).unwrap();
+        for &(first, _, returned) in &times {
+            for &(later, started, _) in &times {
+                if returned < started {
+                    assert!(
+                        place(first) < place(later),
+                        "{first} returned before {later} was committed, so runs first: {ran:?}"
+                    );
+                }
+            }
+        }
     });
 }

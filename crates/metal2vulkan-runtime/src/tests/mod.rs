@@ -62,6 +62,7 @@ mod host_memory;
 #[cfg(any(m2v_gpu, m2v_cpu_icd))]
 mod host_step_neutrals;
 mod image_plan;
+mod inbox;
 mod indirect_command_buffer;
 mod interop;
 mod keeper;

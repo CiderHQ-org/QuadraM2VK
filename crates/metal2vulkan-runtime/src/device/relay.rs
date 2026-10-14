@@ -432,6 +432,7 @@ impl super::DeviceShared {
             if let (Some(fence), Some(_busy)) = (fence, exit_guard::enter()) {
                 let raw = self.vk();
                 flights.push(fence, by);
+                self.counts.queue_submitted(0);
                 // SAFETY: a submission of no work with an unsignaled fence in no pending
                 // submission; the queue is used under its lock.
                 let submitted = unsafe { raw.queue_submit(vk_queue, &[], fence) };

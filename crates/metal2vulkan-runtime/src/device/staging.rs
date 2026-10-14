@@ -188,6 +188,7 @@ impl Device {
             .push_next(&mut timeline);
         // SAFETY: the queue is used under the staging lock alone; the command buffer is
         // executable; every value waited for was signalled (the host saw it).
+        shared.counts.queue_submitted(buffers.len());
         let submitted = unsafe {
             staging.word.restore();
             raw.queue_submit(queue, &[submit], made.fence)

@@ -380,6 +380,34 @@ impl<T> Pool<T> {
     pub(super) fn blocks(&self) -> usize {
         self.blocks.iter().flatten().count()
     }
+
+    /// Its live blocks, by kind, into `census`: those whose payload `imported` names count as
+    /// imports, whatever else they are.
+    fn count_into(&self, census: &mut Census, imported: impl Fn(&T) -> bool) {
+        for block in self.blocks.iter().flatten() {
+            let count = match (imported(&block.payload), block.dedicated) {
+                (true, _) => &mut census.imported,
+                (false, true) => &mut census.dedicated,
+                (false, false) if block.ranges.is_empty() => &mut census.empty,
+                (false, false) => &mut census.pooled,
+            };
+            *count += 1;
+        }
+    }
+}
+
+/// A device's live `VkDeviceMemory` blocks, by kind ([`Memory::census`]): each one buffer
+/// object the driver lists in every submission where it lists every allocation (ANV on i915).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Census {
+    /// Pooled blocks with a placement in them.
+    pub(super) pooled: u64,
+    /// Pooled blocks with none, kept for the next placement ([`Pool::release`]).
+    pub(super) empty: u64,
+    /// Dedicated blocks: a placement larger than half a block, or one placed apart.
+    pub(super) dedicated: u64,
+    /// The caller's host memory imported ([`Memory::import_host`]), a block each.
+    pub(super) imported: u64,
 }
 
 /// A host pointer the runtime may send between threads: the mapping of a block it owns.
@@ -408,6 +436,8 @@ pub(super) struct Block {
     /// Its buffer of addresses, from the first placement that needs an address (the module
     /// docs).
     addresses: Option<BlockAddresses>,
+    /// It is the caller's host memory, imported ([`Memory::import_host`]).
+    imported: bool,
 }
 
 /// A buffer over the first `Block::size` bytes of a block, with every usage of an addressed
@@ -673,6 +703,15 @@ impl Memory {
     /// pooled or dedicated, whether freed since or not: host memory imported counts in none.
     pub(super) fn allocated(&self) -> u64 {
         self.allocated
+    }
+
+    /// Its live blocks, by kind.
+    pub(super) fn census(&self) -> Census {
+        let mut census = Census::default();
+        for pool in &self.pools {
+            pool.count_into(&mut census, |block| block.imported);
+        }
+        census
     }
 
     /// Whether one of the memory types `allowed` names is of `class`.
@@ -970,6 +1009,7 @@ impl Memory {
                         size,
                         mapped: Some(Mapped(pointer)),
                         addresses: None,
+                        imported: true,
                     };
                     let index = self
                         .pool(Holds::Buffers, type_index)
@@ -1164,6 +1204,7 @@ impl BlockMaker {
             size,
             mapped,
             addresses,
+            imported: false,
         })
     }
 }
