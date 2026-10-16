@@ -148,6 +148,9 @@ impl UlpTable {
 ///   `TessellationFactorInstance`: unbounded until Metal readings settle a tessellation
 ///   pipeline's winding and factor rules: another vertex order, level, or culled patch changes
 ///   whole primitives, not lanes.
+/// - `TessellationTriangleOrder`: unbounded: the device's tessellator's triangle order, first
+///   corners and ring triangulation change flat varyings, interpolated values and blend order by
+///   whole primitives, not lanes.
 /// - `Fp8Value`: unbounded until a Metal device that implements 8-bit float conversions reads
 ///   them: Metal on Apple M3 returns the carrier byte's integer extension, which differs from the
 ///   format's value by any amount.
@@ -280,6 +283,7 @@ pub fn allowance(note: PrecisionNote) -> Allowance {
         | N::TessellationFactorEdgeCases
         | N::TessellationFactorScale
         | N::TessellationFactorInstance
+        | N::TessellationTriangleOrder
         | N::Fp8Value
         | N::MultisamplePosition
         | N::RasterizationRateMap

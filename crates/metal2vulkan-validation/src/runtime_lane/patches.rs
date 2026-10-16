@@ -27,6 +27,7 @@ use metal2vulkan::pipeline::{
     RenderPipelineDescriptor, StageSource, TessellationDescriptor, VertexAttributeDescriptor,
     VertexBufferLayoutDescriptor, VertexDescriptor,
 };
+use metal2vulkan::vk::DriverId;
 use metal2vulkan_devtools::{engine_dir, llvm_assemble};
 use metal2vulkan_runtime::{
     Buffer, CommandBuffer, CommandBufferStatus, CommandQueue, Degradation, Device, DeviceOptions,
@@ -62,28 +63,44 @@ pub(super) fn options_of(path: Path) -> impl FnOnce(&mut DeviceOptions) {
     }
 }
 
-/// `check` on the lane device of `path` and its name; then the validation layer was silent, and on
-/// the emulated path the device announced the emulation once.
+/// `check` on the lane device of `path` and its name; then the validation layer was silent, on
+/// the emulated path the device announced the emulation once, and the device's triangle order
+/// (`tessellation-triangle-order`) was announced at most once, only on the native path of a
+/// device whose tessellator is not Apple's (MoltenVK on an Apple GPU hands the patches to Metal's):
+/// the emulation draws Metal's order.
 pub(super) fn on_path(path: Path, check: impl FnOnce(Device, &str)) {
     let cache = ScratchCache::new().unwrap();
     let messages = Messages::default();
+    let apple_tessellator;
     {
         let device =
             validated_device_with(TEST_DEVICE, &messages, cache.path(), options_of(path)).unwrap();
+        let description = &device.properties().description;
+        apple_tessellator =
+            description.driver_id == Some(DriverId::MOLTENVK) && description.vendor_id == 0x106B;
         let name = device.name().to_owned();
         check(device, &name);
     }
-    if path == Path::Emulated {
-        let announced = messages
-            .take_notices()
+    let notices = messages.take_notices();
+    let announced = |kind: Degradation| {
+        notices
             .iter()
             .filter(|m| {
                 m.degradation
                     .as_ref()
-                    .is_some_and(|d| EMULATED_TESSELLATION.contains(&d.degradation))
+                    .is_some_and(|d| d.degradation == kind)
             })
-            .count();
-        assert_eq!(announced, 1, "the emulation's notice");
+            .count()
+    };
+    if path == Path::Emulated {
+        let emulated: usize = EMULATED_TESSELLATION.iter().map(|&k| announced(k)).sum();
+        assert_eq!(emulated, 1, "the emulation's notice");
+    }
+    let order = announced(Degradation::TessellationTriangleOrder);
+    if path == Path::Emulated || apple_tessellator {
+        assert_eq!(order, 0, "the triangle order on {path:?}");
+    } else {
+        assert!(order <= 1, "the triangle order announced {order} times");
     }
     let reported = messages.take();
     assert!(

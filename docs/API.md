@@ -176,8 +176,11 @@ first move, made by the next submission that may reach it (any command buffer's,
 submission of a host call on the texture, or `Texture::vk_image`), keeps the bytes the image is
 bound to, through the host: before that submission, once every submission made before it on each
 queue completed, the runtime reads them through the host pointer, submits the move alone and waits
-for it, and writes them back, every one; no GPU command writes them, and no byte outside them is
-touched (`WorkCounts::first_move_keeps`, `first_move_kept_bytes`). The submission waits for that,
+for it, and writes back the bytes the move changed, so none is stored where it changed none (pages
+the process cannot write stay untouched); no GPU command writes them, and no byte outside them is
+touched (`WorkCounts::first_move_keeps`, `first_move_kept_bytes`, `first_move_restored_bytes`).
+Changed bytes on pages the process no longer maps writable keep the move's values, announced
+(`unrestored-first-move-bytes`). The submission waits for that,
 `commit` never. A rebind's new image keeps its new pages' bytes the same way. An image
 over a dma-buf of its own pages keeps them through its acquire from `VK_QUEUE_FAMILY_FOREIGN_EXT`,
 and a linear image of the runtime's own memory through its move from `PREINITIALIZED`.
@@ -445,7 +448,8 @@ let pipeline = device.compile_render_pipeline(&descriptor, &Budget::standard())?
 
 Its `stages` are a synthesized vertex and tessellation control stage, the function as the
 evaluation stage, and the fragment stage. It draws patches only (`DrawCall::Patches` or
-`PatchesIndirect`), with the factors from a tessellation factor buffer.
+`PatchesIndirect`), with the factors from a tessellation factor buffer. The device's tessellator
+orders the triangles (`PrecisionNote::TessellationTriangleOrder` where it is not Apple's).
 
 On a device without `tessellationShader` the pipeline is an emulation with no tessellation stage:
 the function is its vertex stage (`TRIANGLE_LIST`), and `graphics.emulated_tessellation` states
@@ -1795,12 +1799,14 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   Vulkan frees no memory that submitted commands may still use (`VUID-vkFreeMemory-memory-00677`),
   so the pages stay: with no keep-alive (`KeepAlive`), while a command buffer submitted before a
   texture over them was released may still read that texture through its resource ID (its image
-  holds the import); with or without one, while a command buffer whose commands may reach the buffer
+  holds the import); with no keep-alive, while a command buffer whose commands may reach the buffer
   unnamed holds a table of the live buffers that lists it (its first submission's and its host
   steps', until it completes; one a rebind encoded again before its first submission, until then);
   with no keep-alive on MoltenVK (`RuntimeDriverDefect::FreedAddressMemoryFailsPendingWork`), while
   the batches submitted before the import's memory went are in flight, as MoltenVK fails pending work
-  that reads device addresses where such memory is freed.
+  that reads device addresses where such memory is freed. With a keep-alive the deallocator runs at
+  the release, as Metal's, and the import keeps the keep-alive, which keeps the pages mapped, until
+  it is freed: not announced.
   Cost: the deallocator runs once every such command buffer lets go of the pages, or those batches
   complete, where Metal's runs at the release; the pages stay mapped until then.
 - `metal2vulkan-degrade-misplaced-notice` (performance). `MisplacedNotice`: In a build without debug
@@ -1878,6 +1884,14 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   draw counted by a `Counting` visibility result whose fragment function writes more than one color
   attachment, on ANV (`RuntimeDriverDefect::OcclusionCountPerColorOutput`). Cost: the result is
   Metal's count multiplied by the colors the draw writes; a `Boolean` result is Metal's.
+- `metal2vulkan-degrade-unrestored-first-move-bytes` (precision). `UnrestoredFirstMoveBytes`: A
+  texture's first move over a no-copy buffer's host pages changed bytes the host kept across it, on
+  pages the process maps without write permission when the host writes them back: on Linux, pages
+  made read-only after the buffer was made (Linux refuses read-only pages at the import); on macOS
+  also pages read-only from the start, which Metal reads (a GPU write into them fails its command
+  buffer). Not observed on RADV, which fails the command buffers submitted after a page of an
+  import loses write permission (`HostMemory::new`). Cost: those bytes keep what the image's move
+  from `UNDEFINED` wrote, where Metal's texture leaves its pages as they were.
 - `metal2vulkan-degrade-f16-fma-double-rounding` (precision). `PrecisionNote::F16FmaDoubleRounding`:
   Widened half fma rounds twice.
 - `metal2vulkan-degrade-f16-int-conv-double-rounding` (precision).
@@ -1946,6 +1960,15 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   `PrecisionNote::TessellationFactorInstance`: A tessellation pipeline whose factor step function is
   per instance reads instance `i`'s factors at `i · instanceStride`, `i` counting the draw's base
   instance as `[[instance_id]]` does.
+- `metal2vulkan-degrade-tessellation-triangle-order` (precision).
+  `PrecisionNote::TessellationTriangleOrder`: A tessellation pipeline drawn through the device's
+  tessellation stages (a device with `tessellationShader`) whose tessellator is not Apple's (every
+  driver but MoltenVK on an Apple GPU, `DriverWorkaround::TessellatorNotMetals`): the device's
+  tessellator orders each patch's triangles, picks each one's first corner, and joins the patch's
+  rings where Vulkan leaves that to the implementation. The domain points are Metal's; a flat
+  varying, a value interpolated across another triangulation, and the order a patch's triangles
+  blend in may differ. A device without `tessellationShader` draws Metal's order through the
+  emulation (`emulated-tessellation-draws`) and records none.
 - `metal2vulkan-degrade-fp8-value` (precision). `PrecisionNote::Fp8Value`: An 8-bit float converts
   to an integer from the format's documented value with Metal's saturating float-to-integer rule,
   where Metal's device here answers otherwise: Metal on Apple M3 compiles these reads but extends

@@ -449,9 +449,11 @@ fn derive_fields(
 fn workarounds(desc: &DeviceDescription) -> Vec<DriverWorkaround> {
     let mut found = by_identity(desc);
     // Every rasterizer but Apple's hands a clipped primitive's fragments their coverage by the
-    // whole primitive (or, lavapipe, by its own pieces), never by Apple's pieces.
+    // whole primitive (or, lavapipe, by its own pieces), never by Apple's pieces; and every
+    // tessellator but Apple's orders a patch's triangles its own way.
     if !(desc.driver_id == Some(vk::DriverId::MOLTENVK) && desc.vendor_id == APPLE_VENDOR_ID) {
         found.push(DriverWorkaround::ClippedCoverageNotMetals);
+        found.push(DriverWorkaround::TessellatorNotMetals);
     }
     found.extend(super::driver_facts::defects(desc));
     found.sort();

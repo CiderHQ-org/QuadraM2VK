@@ -23,10 +23,11 @@
 //!   keeps the table and the pages it took then for every later batch (the split: a wait for an
 //!   event after an encoder), named or resident (table 3: a running command buffer reads the old
 //!   pages until it completes). The old pages' deallocator runs once it completed; so does a
-//!   released buffer's that its table lists, announced once (Metal's runs at the release), while a
-//!   buffer released beside it that no submitted table lists goes at once. One released after a rebind encoded a pending command buffer
-//!   again goes at that command buffer's first submission, before it completes, its deallocator
-//!   free to read it. One a submitted command buffer's command names goes as that command buffer
+//!   released buffer's that its table lists, announced once (Metal's runs at the release), unless
+//!   the caller gave a keep-alive, which keeps the pages mapped while the deallocator runs at the
+//!   release, while a buffer released beside it that no submitted table lists goes at once. One
+//!   released after a rebind encoded a pending command buffer again goes at that command buffer's
+//!   first submission, before it completes, its deallocator free to read it. One a submitted command buffer's command names goes as that command buffer
 //!   completes, as Metal's does, unannounced.
 //!
 //! The walker (`walk-a-device-pointer-chain-through-a-loop-phi`, an owned case) reaches its
@@ -53,11 +54,11 @@ use metal2vulkan::metal::{IndexType, PixelFormat, PrimitiveType, TextureUsage};
 use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};
 use metal2vulkan_devtools::{engine_dir, llvm_assemble};
 use metal2vulkan_runtime::{
-    Buffer, ClearColor, CommandBuffer, CommandBufferError, CommandBufferStatus, CommandQueue,
-    CommitFailure, Deallocator, Degradation, Device, EventRef, FailedEncoders, Heap, HeapType,
-    LoadAction, PipelineOptions, Region, RenderCommandEncoder, RenderPassDescriptor,
-    RenderPipelineState, ResourceOptions, StoreAction, Submission, SubmissionCheck,
-    TextureDescriptor,
+    Buffer, BufferContents, BufferDescriptor, ClearColor, CommandBuffer, CommandBufferError,
+    CommandBufferStatus, CommandQueue, CommitFailure, Deallocator, Degradation, Device, EventRef,
+    FailedEncoders, Heap, HeapType, HostMemory, KeepAlive, LoadAction, PipelineOptions, Region,
+    RenderCommandEncoder, RenderPassDescriptor, RenderPipelineState, ResourceOptions, StoreAction,
+    Submission, SubmissionCheck, TextureDescriptor,
 };
 use std::collections::BTreeMap;
 use std::num::NonZeroU64;
@@ -304,6 +305,44 @@ pub(super) fn member_over(device: &Device, value: u32) -> Option<(Buffer, Arc<Se
     let seen = Arc::new(Seen::default());
     let buffer = buffer_over(device, pages(buffer_len(), 0, &node(value)), &seen)?;
     Some((buffer, seen))
+}
+
+/// Sets its flag as it drops.
+struct DropFlag(Arc<AtomicBool>);
+
+impl Drop for DropFlag {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// A no-copy buffer over a node of `value`, its deallocator's runs in a `Seen` of its own, whose
+/// keep-alive holds the mapping and sets the flag returned as it drops; `None`, printed, where the
+/// device imports no host memory.
+fn kept_member_over(device: &Device, value: u32) -> Option<(Buffer, Arc<Seen>, Arc<AtomicBool>)> {
+    let seen = Arc::new(Seen::default());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let mapping = pages(buffer_len(), 0, &node(value));
+    let pointer = mapping.pointer();
+    // The mapping goes first, then the flag is set.
+    let keep_alive: KeepAlive = Box::new((mapping, DropFlag(Arc::clone(&dropped))));
+    // SAFETY: the keep-alive releases the mapping, after the buffer's last use of it.
+    let memory = unsafe { HostMemory::new(pointer) };
+    let contents = BufferContents::NoCopy {
+        memory,
+        deallocator: Some(recording(&seen, ())),
+        keep_alive: Some(keep_alive),
+    };
+    let descriptor =
+        BufferDescriptor::new(buffer_len() as u64, ResourceOptions::default(), contents);
+    match device.new_buffer_with_descriptor(descriptor) {
+        Ok(buffer) => Some((buffer, seen, dropped)),
+        Err(error) if not_importable(&error) => {
+            eprintln!("REBIND-REACH: the device imports no host memory: {error:?}");
+            None
+        }
+        Err(error) => panic!("new_buffer_with_descriptor: {error:?}"),
+    }
 }
 
 /// Rebind `buffer` to fresh pages holding a node of `value`.
@@ -1276,11 +1315,32 @@ fn a_command_buffer_first_submitted_before_a_rebind_keeps_its_pages_in_every_lat
 /// GPU never saw; an event wait between two batches holds the command buffer here.)
 #[test]
 fn a_released_buffer_s_pages_wait_for_the_submitted_command_buffer_whose_table_lists_it() {
+    released_while_listed(false);
+}
+
+/// A no-copy buffer given a keep-alive, released while a command buffer whose first batch was
+/// submitted holds the table that lists it, runs its deallocator at the release, as Metal's runs
+/// (probe `dealloc-probe4`), unannounced: the import of its pages keeps the keep-alive, which
+/// keeps them mapped for that command buffer's walk, until it is freed after the command buffer
+/// completes.
+#[test]
+fn a_released_buffer_s_keep_alive_holds_its_listed_pages_while_its_deallocator_runs_at_once() {
+    released_while_listed(true);
+}
+
+/// The release of a no-copy buffer a submitted command buffer's table lists, with a keep-alive
+/// or without one, and of one beside it that no submitted table lists.
+fn released_while_listed(keep_alive: bool) {
     on_device_noticed(|device, messages| {
         let queue = device.new_command_queue().unwrap();
         let walker = public_case(POINTER_WALKER).unwrap();
         let outputs = Outputs::new(device, &queue, &walker);
-        let Some((listed, listed_seen)) = member_over(device, A) else {
+        let made = match keep_alive {
+            true => kept_member_over(device, A),
+            false => member_over(device, A)
+                .map(|(buffer, seen)| (buffer, seen, Arc::new(AtomicBool::new(false)))),
+        };
+        let Some((listed, listed_seen, kept_dropped)) = made else {
             return;
         };
         gpu_read(&queue, &listed, 0..16);
@@ -1316,17 +1376,30 @@ fn a_released_buffer_s_pages_wait_for_the_submitted_command_buffer_whose_table_l
         }
         let before = device.work_counts();
         drop(listed);
-        assert_eq!(
-            device.work_counts().host_deallocators_delayed - before.host_deallocators_delayed,
-            1,
-            "the release waits for the submitted table"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-        assert_eq!(
-            listed_seen.runs.load(Ordering::SeqCst),
-            0,
-            "ran though a submitted command buffer's table listed it"
-        );
+        let after = device.work_counts();
+        let delayed = after.host_deallocators_delayed - before.host_deallocators_delayed;
+        let kept = after.host_keep_alives_kept - before.host_keep_alives_kept;
+        match keep_alive {
+            // The deallocator runs in the release; the import keeps the keep-alive.
+            true => {
+                assert_eq!(delayed, 0, "a deallocator with a keep-alive waited");
+                assert_eq!(kept, 1, "the import keeps the keep-alive");
+                assert_eq!(
+                    listed_seen.runs.load(Ordering::SeqCst),
+                    1,
+                    "the deallocator did not run at the release, as Metal's runs"
+                );
+            }
+            false => {
+                assert_eq!(delayed, 1, "the release waits for the submitted table");
+                std::thread::sleep(Duration::from_millis(50));
+                assert_eq!(
+                    listed_seen.runs.load(Ordering::SeqCst),
+                    0,
+                    "ran though a submitted command buffer's table listed it"
+                );
+            }
+        }
         // Beside it: a buffer listed after that submission, released; read on another queue,
         // since this one's next command buffer waits behind the held one.
         let Some((beside, beside_seen)) = member_over(device, B) else {
@@ -1337,7 +1410,12 @@ fn a_released_buffer_s_pages_wait_for_the_submitted_command_buffer_whose_table_l
         drop(beside);
         deallocated(&beside_seen);
         assert_eq!(command_buffer.status(), CommandBufferStatus::Committed);
-        assert_eq!(listed_seen.runs.load(Ordering::SeqCst), 0);
+        let ran = usize::from(keep_alive);
+        assert_eq!(listed_seen.runs.load(Ordering::SeqCst), ran);
+        assert!(
+            !kept_dropped.load(Ordering::SeqCst),
+            "the keep-alive went while a submitted command buffer's table listed its pages"
+        );
         event.set_signaled_value(1);
         command_buffer.wait_until_completed_for(WAIT).unwrap();
         assert_eq!(command_buffer.error(), None);
@@ -1346,6 +1424,26 @@ fn a_released_buffer_s_pages_wait_for_the_submitted_command_buffer_whose_table_l
         assert_eq!(read_buffer(&unrelated, 0, 16).unwrap(), [0x3c; 16]);
         deallocated(&listed_seen);
         assert_eq!(listed_seen.runs.load(Ordering::SeqCst), 1);
+        if keep_alive {
+            // The import is freed as the command buffer lets go of its table, and drops the
+            // keep-alive (a runtime thread may free it).
+            let deadline = Instant::now() + WAIT;
+            while !kept_dropped.load(Ordering::SeqCst) {
+                assert!(
+                    Instant::now() < deadline,
+                    "the keep-alive was never dropped"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(
+                device.work_counts().host_keep_alives_kept,
+                before.host_keep_alives_kept
+            );
+            // No wait past Metal's release, nothing announced.
+            assert_made_once(messages, &[], &shared_kinds(device));
+            eprintln!("REBIND-REACH released: the keep-alive held the listed pages");
+            return;
+        }
         // The wait past Metal's release, announced once; the buffer beside it waited for none.
         assert_made_once(messages, &DELAYED_DEALLOCATORS, &shared_kinds(device));
         eprintln!("REBIND-REACH released: the pages waited for the submitted table's holder");

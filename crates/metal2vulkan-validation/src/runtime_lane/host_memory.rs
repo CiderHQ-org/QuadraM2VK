@@ -239,7 +239,7 @@ impl Mapping {
     }
 
     /// Make the mapping read-only.
-    fn protect_read_only(&self) {
+    pub(super) fn protect_read_only(&self) {
         // SAFETY: the mapping is this object's.
         let done = unsafe { libc::mprotect(self.at.as_ptr().cast(), self.len, libc::PROT_READ) };
         assert_eq!(done, 0, "mprotect");

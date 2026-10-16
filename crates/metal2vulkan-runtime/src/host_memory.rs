@@ -148,7 +148,9 @@ impl HostMemory {
     /// On Linux a buffer over a page this process maps without write permission is refused
     /// (`Unsupported`, `HostMemory`), though Metal reads such pages: Linux drivers pin imported
     /// pages for writing, and one (ANV) imported a read-only page and then lost the device at the
-    /// GPU's first read. Some drivers also refuse shared memory (RADV refused anonymous shared
+    /// GPU's first read. So on Linux the pages also stay writable while they are imported: RADV
+    /// failed every command buffer submitted after a page of an import was made read-only
+    /// (`mprotect`). Some drivers also refuse shared memory (RADV refused anonymous shared
     /// memory and mappings of shared memory objects, `memfd` mappings among them); private memory
     /// imports everywhere measured. [`HostMemory::with_dma_buf`] imports such memory where the
     /// device imports dma-bufs.
@@ -395,22 +397,97 @@ pub(super) fn import_refused(error: vk::Result) -> Error {
 /// refused as not implemented here.
 #[cfg(target_os = "linux")]
 pub(super) fn refuse_unwritable(window: &ImportWindow) -> Result<(), Error> {
+    match host_writable(window.start, window.start + window.size) {
+        Some(true) => Ok(()),
+        Some(false) => Err(not_importable()),
+        None => Err(Error::Unsupported(Unsupported::not_implemented(
+            Feature::HostMemory,
+        ))),
+    }
+}
+
+/// Whether the process maps `[start, end)` without a gap, each page with write permission, as the
+/// kernel answers now: on Linux for the mappings over it ([`queried_writable`]), or from the lines
+/// of `/proc/self/maps` where the kernel predates the query ([`writable`]); `None` when that file
+/// cannot be opened.
+#[cfg(target_os = "linux")]
+pub(crate) fn host_writable(start: u64, end: u64) -> Option<bool> {
     use std::io::BufRead;
-    let maps = std::fs::File::open("/proc/self/maps")
-        .map_err(|_| Error::Unsupported(Unsupported::not_implemented(Feature::HostMemory)))?;
-    let end = window.start + window.size;
-    let writable = match queried_writable(&maps, window.start, end) {
+    let maps = std::fs::File::open("/proc/self/maps").ok()?;
+    Some(match queried_writable(&maps, start, end) {
         Some(writable) => writable,
         None => {
             let lines = std::io::BufReader::new(maps).lines().map_while(Result::ok);
-            writable(lines, window.start, end)
+            writable(lines, start, end)
         }
-    };
-    if writable {
-        Ok(())
-    } else {
-        Err(not_importable())
+    })
+}
+
+/// Whether the process maps `[start, end)` without a gap, each page with write permission, as the
+/// kernel answers now: on Apple's systems the current protection of each region of the task's map
+/// over it (`mach_vm_region`, `VM_REGION_BASIC_INFO_64`); `None` where the kernel fails the query
+/// otherwise than for a missing region.
+#[cfg(target_vendor = "apple")]
+pub(crate) fn host_writable(start: u64, end: u64) -> Option<bool> {
+    /// `VM_REGION_BASIC_INFO_COUNT_64`: the `int`s of `vm_region_basic_info_data_64_t` (of
+    /// `<mach/vm_region.h>`, under its `#pragma pack(4)`), whose first is the region's current
+    /// protection.
+    const BASIC_INFO_COUNT_64: usize = 9;
+    /// `VM_REGION_BASIC_INFO_64`.
+    const BASIC_INFO_64: i32 = 9;
+    /// `KERN_INVALID_ADDRESS`: no region at or above the address.
+    const INVALID_ADDRESS: i32 = 1;
+    /// `VM_PROT_WRITE`.
+    const PROT_WRITE: i32 = 0x02;
+    unsafe extern "C" {
+        /// The task's own port, `mach_task_self()`'s answer (`<mach/mach_init.h>`).
+        static mach_task_self_: u32;
+        fn mach_vm_region(
+            task: u32,
+            address: *mut u64,
+            size: *mut u64,
+            flavor: i32,
+            info: *mut i32,
+            count: *mut u32,
+            object_name: *mut u32,
+        ) -> i32;
     }
+    let mut covered = start;
+    while covered < end {
+        let (mut address, mut size) = (covered, 0u64);
+        let mut info = [0i32; BASIC_INFO_COUNT_64];
+        let mut count = BASIC_INFO_COUNT_64 as u32;
+        let mut object_name = 0u32;
+        // SAFETY: `mach_task_self_` is set as the task starts and only read after; every pointer
+        // is to a local of the type and size the call reads and writes; `count` holds `info`'s
+        // size in `int`s.
+        let result = unsafe {
+            mach_vm_region(
+                mach_task_self_,
+                &mut address,
+                &mut size,
+                BASIC_INFO_64,
+                info.as_mut_ptr(),
+                &mut count,
+                &mut object_name,
+            )
+        };
+        if result != 0 {
+            return (result == INVALID_ADDRESS).then_some(false);
+        }
+        // The call answers the region at the address, or the first above it: a gap.
+        if address > covered || info[0] & PROT_WRITE == 0 {
+            return Some(false);
+        }
+        covered = address.saturating_add(size);
+    }
+    Some(true)
+}
+
+/// No answer on other systems.
+#[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
+pub(crate) fn host_writable(_start: u64, _end: u64) -> Option<bool> {
+    None
 }
 
 /// `struct procmap_query` of Linux's `include/uapi/linux/fs.h` (Linux 6.11): the argument of

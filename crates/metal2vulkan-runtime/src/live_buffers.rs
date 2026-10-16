@@ -37,10 +37,12 @@
 //!   resolves against the table current as it runs, which the command buffer holds from then on
 //!   too (`CommandBuffer::residency`): the commands the step records may reach its buffers. So a
 //!   buffer released while a submitted command buffer may reach it keeps its memory until that
-//!   command buffer completed, announced (`host-deallocator-delayed`): Metal's deallocator runs at
-//!   the release, and the command buffer's later accesses reach nothing (the M3 Max under macOS
-//!   27.0.1, probe `dealloc-probe4`), where Vulkan frees no memory that submitted commands may
-//!   still use (`VUID-vkFreeMemory-memory-00677`). One the command buffer's commands name goes as
+//!   command buffer completed: Metal's deallocator runs at the release, and the command buffer's
+//!   later accesses reach nothing (the M3 Max under macOS 27.0.1, probe `dealloc-probe4`), where
+//!   Vulkan frees no memory that submitted commands may still use
+//!   (`VUID-vkFreeMemory-memory-00677`). With the caller's keep-alive the deallocator runs at the
+//!   release all the same, and the import keeps the keep-alive; without one it waits, announced
+//!   (`host-deallocator-delayed`). One the command buffer's commands name goes as
 //!   it completes, where Metal's goes too, announced only where another submitted command buffer's
 //!   table lists it: a command buffer lets go of its tables before what it retained
 //!   (`CommandBufferShared::complete`). One released while only command buffers not

@@ -135,6 +135,7 @@ pub(crate) struct Counters {
     pitched_host_image_refusals_recalled: AtomicU64,
     first_move_keeps: AtomicU64,
     first_move_kept_bytes: AtomicU64,
+    first_move_restored_bytes: AtomicU64,
     shared_alias_images: AtomicU64,
     shared_alias_moves_waited: AtomicU64,
     modifier_feature_queries: AtomicU64,
@@ -839,6 +840,15 @@ impl Counters {
         }
     }
 
+    /// The host stored `bytes` of the kept bytes again, those first moves changed
+    /// (`texture/first_move.rs`'s `KeptBytes::write_back`).
+    pub(crate) fn first_move_restored(&self, bytes: u64) {
+        if bytes > 0 {
+            self.first_move_restored_bytes
+                .fetch_add(bytes, Ordering::Relaxed);
+        }
+    }
+
     /// A texture over host pages took the `VkImage` another texture of the same image over the
     /// same bytes made (`texture/shared_alias.rs`).
     pub(crate) fn shared_alias_taken(&self) {
@@ -1444,15 +1454,16 @@ pub struct WorkCounts {
     /// texture over them went, through the texture's image), until the import is freed, or, on a
     /// device whose driver has `RuntimeDriverDefect::FreedAddressMemoryFailsPendingWork`, for the
     /// batches submitted before the import's memory went, until they completed (with a keep-alive
-    /// it runs at the release there); or, with or without one, for a live buffers' table that
-    /// listed their pages, which a command buffer that may reach them unnamed held, until it let
-    /// go of it (`live_buffers.rs`).
+    /// it runs at the release there); or, given none, for a live buffers' table that listed their
+    /// pages, which a command buffer that may reach them unnamed held, until it let go of it
+    /// (`live_buffers.rs`; with a keep-alive it runs at the release there too).
     pub host_deallocators_delayed: u64,
     /// Keep-alives of no-copy buffers and heaps (`KeepAlive`) held now past their release: each
     /// by the import of its pages, whose last buffer it was while something else (a texture's
-    /// image a submitted command buffer may still read) held the import, until the import is
-    /// freed. One per import at most: a later keep-alive over the same import is dropped at its
-    /// release (`host_keep_alives_covered`).
+    /// image a submitted command buffer may still read) held the import, or that a live buffers'
+    /// table a command buffer that may reach them unnamed holds listed as it was released, until
+    /// the import is freed. One per import at most: a later keep-alive over the same import is
+    /// dropped at its release (`host_keep_alives_covered`).
     pub host_keep_alives_kept: u64,
     /// Keep-alives dropped at their buffer's release, after its deallocator ran, because the
     /// import of its pages stays mapped without them: another no-copy buffer made over the same
@@ -1515,11 +1526,14 @@ pub struct WorkCounts {
     /// First moves of images over a no-copy buffer's host pages (or a rebind's new pages) across
     /// which the host kept the bytes the image is bound to, which a move from `UNDEFINED` may
     /// discard: read through the host pointer once the submissions before completed, the move
-    /// submitted alone and waited for, the bytes written back. One per image moved, a rebind's
-    /// too.
+    /// submitted alone and waited for, the bytes it changed written back. One per image moved, a
+    /// rebind's too.
     pub first_move_keeps: u64,
-    /// The bytes those moves kept, each read and written back once.
+    /// The bytes those moves kept, each read once, and read again after the move.
     pub first_move_kept_bytes: u64,
+    /// The kept bytes a move changed that the host stored again: none where the driver's moves
+    /// change no byte of the memory bound to the image.
+    pub first_move_restored_bytes: u64,
     /// Textures over a no-copy buffer's host pages that took the `VkImage` another texture of the
     /// same image over the same bytes of the same import made, which the import or a texture
     /// holds, rather than make one (and move it, keep its texels or, over dma-buf pages, ask the
@@ -1801,6 +1815,7 @@ impl Device {
                 .load(Ordering::Relaxed),
             first_move_keeps: counters.first_move_keeps.load(Ordering::Relaxed),
             first_move_kept_bytes: counters.first_move_kept_bytes.load(Ordering::Relaxed),
+            first_move_restored_bytes: counters.first_move_restored_bytes.load(Ordering::Relaxed),
             shared_alias_images: counters.shared_alias_images.load(Ordering::Relaxed),
             shared_alias_moves_waited: counters.shared_alias_moves_waited.load(Ordering::Relaxed),
             modifier_feature_queries: counters.modifier_feature_queries.load(Ordering::Relaxed),

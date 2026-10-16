@@ -408,6 +408,7 @@ fn a_restricted_context_runs_only_on_a_device_that_has_and_reports_its_profile()
             metal2vulkan::device::DriverWorkaround::ClippedTrianglesSplitPixelFragments,
             metal2vulkan::device::DriverWorkaround::MeshIndexComponentStoresMisplaced,
             metal2vulkan::device::DriverWorkaround::ClippedCoverageNotMetals,
+            metal2vulkan::device::DriverWorkaround::TessellatorNotMetals,
         ]
     );
     let mut swiftshader_native = native.clone();
@@ -420,6 +421,7 @@ fn a_restricted_context_runs_only_on_a_device_that_has_and_reports_its_profile()
         [
             metal2vulkan::device::DriverWorkaround::BufferAtomicsUncontained,
             metal2vulkan::device::DriverWorkaround::ClippedCoverageNotMetals,
+            metal2vulkan::device::DriverWorkaround::TessellatorNotMetals,
         ]
     );
     assert!(matches!(

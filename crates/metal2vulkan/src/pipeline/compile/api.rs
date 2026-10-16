@@ -811,7 +811,7 @@ impl Device {
         }
         // A tessellation pipeline's synthesized vertex and control stages come first.
         if let Some(c) = &linked.control {
-            note_evaluation_stage(c, &mut stages);
+            note_evaluation_stage(c, p, &mut stages);
             let synthesized = synthesized_stages(c, &linked, p, m)?;
             let mut all = Vec::with_capacity(synthesized.len() + stages.len());
             for (module, r) in synthesized {

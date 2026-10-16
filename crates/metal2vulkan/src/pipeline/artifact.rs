@@ -1622,6 +1622,21 @@ pub enum PrecisionNote {
     /// the driver compiles the variants differently. Nothing broader. Recorded only by a fragment
     /// stage of such a pipeline. Validation derives no tolerance from it.
     ColorAttachmentGroups,
+    /// A tessellation pipeline drawn through the device's tessellation stages (a device with
+    /// `tessellationShader`) whose tessellator is not Apple's
+    /// ([`DriverWorkaround::TessellatorNotMetals`](crate::device::DriverWorkaround::TessellatorNotMetals)):
+    /// the device's tessellator orders each patch's triangles and picks each one's first corner,
+    /// and where Vulkan leaves it to the implementation chooses the triangles that join a patch's
+    /// rings, where Metal's tessellator draws the D3D11 reference's triangles in its own order,
+    /// each triangle's first corner by its stitch step (`lower::tessellation::tessellator`). The
+    /// domain points are Metal's; a flat varying (the first corner's), a value interpolated across
+    /// another triangulation, and the order in which a patch's triangles reach the blend or the
+    /// depth test may differ: every patch measured differs on the RTX 3090, 55-95% of them on RADV
+    /// and lavapipe. MoltenVK on an Apple GPU hands the patches to Metal's own tessellator and
+    /// records none; so does a pipeline on a device without `tessellationShader`, which draws
+    /// Metal's triangles in Metal's order through the emulation. Recorded on the evaluation stage.
+    /// Validation derives no tolerance from it.
+    TessellationTriangleOrder,
 }
 
 /// The math mode of an entry's module, which decides, on a device whose `float` functions are

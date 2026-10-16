@@ -3134,7 +3134,7 @@ impl CommandBufferShared {
             let _running = Running::enter(self.marker(Step::Release));
             // Its live buffers' tables first: a buffer whose last hold goes below then counts
             // only the tables of other command buffers, which may still reach its pages, as
-            // holding them past its release (`HostPages::announce_listed`); this one's wait ends
+            // holding them past its release (`HostPages::released_listed`); this one's wait ends
             // here, at its completion, where Metal's hold of what it retained ends too.
             let resident = lock(&self.state).resident.take();
             drop(resident);

@@ -190,6 +190,7 @@ fn notes() -> Vec<(&'static str, Ledger)> {
             DeviceAnisotropicFilter,
             DevicePointSize,
             ClippedCoverageSplit,
+            TessellationTriangleOrder,
         ],
     }
 }

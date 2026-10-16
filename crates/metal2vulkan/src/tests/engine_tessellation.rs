@@ -20,7 +20,7 @@ use crate::bind::{
 };
 use crate::budget::{Budget, SPIRV_WORDS};
 use crate::device::requirements::{VkFeature, VkLimit};
-use crate::device::{Device, DeviceDescription, DevicePolicy, DeviceProfile};
+use crate::device::{Device, DeviceDescription, DevicePolicy, DeviceProfile, DriverWorkaround};
 use crate::error::{
     BindError, Capability, DescriptorError, Error, Feature, LowerFamily, Needs, RuntimeInput,
 };
@@ -807,8 +807,16 @@ fn a_tessellation_pipeline_links_four_stages_on_every_profile_with_tessellation(
             ],
         ),
     ];
+    // The device's tessellator orders the triangles on every profile with it but MoltenVK's on an
+    // Apple GPU, which hands the patches to Metal's tessellator.
+    let mut ordered = [0usize; 2];
     for (stem, _) in &with {
         let dev = device(stem);
+        let own_order = dev
+            .profile()
+            .workarounds()
+            .contains(&DriverWorkaround::TessellatorNotMetals);
+        ordered[usize::from(own_order)] += 1;
         for (entry, t, domain, points, expected) in &cases {
             let d = tessellation_pipeline(&bc, &fragments, entry, Some("tess_fragment"), Some(*t));
             let p = dev
@@ -915,14 +923,16 @@ fn a_tessellation_pipeline_links_four_stages_on_every_profile_with_tessellation(
                 control_modes.contains(&vec![crate::spv::ExecutionMode::OutputVertices as u32, 1])
             );
             // The readings no Metal observation settles are noted on the evaluation stage alone:
-            // the winding and the factors' edge cases always, the scale and the per-instance
-            // step where the descriptor asks for them.
+            // the winding and the factors' edge cases always, the scale and the per-instance step
+            // where the descriptor asks for them, and the device's triangle order where its
+            // tessellator is not Apple's.
             let tessellation_notes = |m: &StageModule| -> Vec<PrecisionNote> {
                 let ours = [
                     PrecisionNote::TessellationWinding,
                     PrecisionNote::TessellationFactorEdgeCases,
                     PrecisionNote::TessellationFactorScale,
                     PrecisionNote::TessellationFactorInstance,
+                    PrecisionNote::TessellationTriangleOrder,
                 ];
                 m.precision_notes
                     .iter()
@@ -944,6 +954,10 @@ fn a_tessellation_pipeline_links_four_stages_on_every_profile_with_tessellation(
             ) {
                 notes.push(PrecisionNote::TessellationFactorInstance);
             }
+            if own_order {
+                notes.push(PrecisionNote::TessellationTriangleOrder);
+            }
+            notes.sort_unstable();
             assert_eq!(tessellation_notes(&p.stages[2]), notes, "{stem} {entry}");
             for i in [0, 1, 3] {
                 assert_eq!(tessellation_notes(&p.stages[i]), [], "{stem} {entry} {i}");
@@ -954,6 +968,10 @@ fn a_tessellation_pipeline_links_four_stages_on_every_profile_with_tessellation(
             }
         }
     }
+    assert!(
+        ordered.iter().all(|&n| n > 0),
+        "profiles with Metal's tessellator and with their own: {ordered:?}"
+    );
     // Without it, two stages: the vertex function draws the tessellator's triangles as a
     // triangle list from the draw's work buffer and records, and owns the index buffers.
     let mut compiled = vec![0; cases.len()];
@@ -1020,6 +1038,7 @@ fn a_tessellation_pipeline_links_four_stages_on_every_profile_with_tessellation(
                     assert_eq!(b.stages, vertex, "{stem} {entry} {binding:?}");
                 }
             }
+            // The emulation draws Metal's triangles in Metal's order: no tessellation note.
             for m in &p.stages {
                 assert_eq!(
                     m.precision_notes
@@ -1028,6 +1047,7 @@ fn a_tessellation_pipeline_links_four_stages_on_every_profile_with_tessellation(
                             n,
                             PrecisionNote::TessellationWinding
                                 | PrecisionNote::TessellationFactorEdgeCases
+                                | PrecisionNote::TessellationTriangleOrder
                         ))
                         .count(),
                     0,

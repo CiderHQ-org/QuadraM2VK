@@ -66,14 +66,21 @@
 //!   once every submission made before on each `VkQueue` completed (each batch's last barrier
 //!   makes its writes available to the host), it reads the bytes the image's subresources reach
 //!   through the host pointer, submits the moves alone (and a barrier that makes their writes
-//!   available to the host) and waits for them, then writes the bytes back, every one: a linear
-//!   image's subresource in `GENERAL` is host-accessible, and the host's writes are what it then
-//!   holds. No GPU command writes the bytes, so none writes back a cache line that also holds
-//!   another's bytes: ANV did, the texels' copies back undoing the CPU's writes of the bytes
-//!   beside them in their 64-byte lines (Mesa 26.2.4, the lane's
+//!   available to the host) and waits for them, then writes back the bytes the moves changed
+//!   ([`KeptBytes::write_back`]), so the memory holds every byte read: a linear image's
+//!   subresource in `GENERAL` is host-accessible, and the host's writes are what it then holds. A
+//!   move that changed nothing has nothing stored, so pages the process cannot write stay
+//!   untouched (Metal makes a buffer over read-only pages, and MoltenVK imports them in place;
+//!   Linux refuses them at the import, `host_memory.rs`). Changed bytes on pages the process maps
+//!   without write permission when the write back comes (a program's later `mprotect`) keep what
+//!   the move wrote, announced once (`Degradation::UnrestoredFirstMoveBytes`). No GPU command
+//!   writes the bytes, so none writes back a cache line that also holds another's bytes: ANV did,
+//!   the texels' copies back undoing the CPU's writes of the bytes beside them in their 64-byte
+//!   lines (Mesa 26.2.4, the lane's
 //!   `a_cpu_write_during_a_texture_s_first_move_stays_outside_its_bytes`). A CPU write to the bytes
 //!   between their read and their write back is undone: once per image, in the submission that
-//!   makes its move. Counted: `WorkCounts::first_move_keeps` and `first_move_kept_bytes`.
+//!   makes its move. Counted: `WorkCounts::first_move_keeps`, `first_move_kept_bytes` and
+//!   `first_move_restored_bytes`.
 //! - **The work.** A barrier from every command before (memory other commands wrote), then the
 //!   buffers' fills with zeros, then their copies of staged bytes after a barrier, then a
 //!   barrier carrying each image's move (after the fills: an image placed in a new heap moves
@@ -103,6 +110,7 @@ use super::super::creation;
 use super::super::device::lock;
 use super::super::error::{internal, vulkan, Error, MemoryKind};
 use super::super::exit_guard::{self, Call};
+use super::super::host_memory::host_writable;
 use super::super::image_barrier::{image_barrier, ImageDst};
 use super::super::memory::{Mapped, Memory, MemoryClass, Placement};
 use super::super::release;
@@ -115,6 +123,7 @@ use crate::device::functions::Vk;
 use ash::vk;
 use metal2vulkan::vk::Format;
 use std::any::Any;
+use std::ops::Range;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
@@ -146,7 +155,7 @@ pub(crate) struct FirstMove {
 /// The bytes an image bound to host pages is bound to, which its move from `UNDEFINED` may
 /// discard, kept across it by the host ([`FirstMove::keeping`]; the module docs): read through
 /// the host pointer once every submission before completed, the move submitted alone and waited
-/// for, then written back, every byte of them.
+/// for, then written back where the move changed them ([`KeptBytes::write_back`]).
 pub(crate) struct Keep {
     /// The host address of the first byte the image is bound to.
     at: Mapped,
@@ -161,18 +170,97 @@ pub(crate) struct Keep {
 pub(crate) struct KeptBytes(Vec<(Mapped, Vec<u8>)>);
 
 impl KeptBytes {
-    /// Write each keep's bytes back where they lie: once their moves completed, their writes
-    /// available to the host, before any submission after them, while the pages they lie in are
-    /// held (with the moves, `Taken::submitted_internally`).
-    pub(crate) fn write_back(self) {
-        for (at, bytes) in self.0 {
-            // SAFETY: the bytes lie in host pages the caller holds, mapped for as long; the move
-            // that may have written them completed and its writes were made available to the
-            // host, so no write of the device's lands over these. A CPU write to them meanwhile
-            // is the program's (the known gap the module docs name).
-            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), at.as_ptr(), bytes.len()) };
+    /// Put each keep's bytes back where their moves changed them: once the moves completed, their
+    /// writes available to the host, before any submission after them, while the pages they lie
+    /// in are held (with the moves, `Taken::submitted_internally`). Only the bytes that differ
+    /// from those read are stored ([`changed_runs`]), so the pages end holding every byte read,
+    /// and a move that changed none stores nothing: the pages may be ones the process cannot
+    /// write (Metal makes a buffer over read-only pages, and MoltenVK imports them). A run of
+    /// changed bytes is stored where the process maps its pages writable now
+    /// (`host_memory::host_writable`), else left as the move left it and counted for the caller
+    /// to announce ([`Restored::unwritable`]).
+    pub(crate) fn write_back(self) -> Restored {
+        let mut restored = Restored::default();
+        for (at, kept) in self.0 {
+            // SAFETY: the bytes lie in host pages the caller holds, mapped and readable for as
+            // long; the moves that may have written them completed and their writes were made
+            // available to the host. A CPU write to them meanwhile is the program's (the known gap
+            // the module docs name).
+            let one = unsafe { put_back(at.as_ptr(), &kept) };
+            restored.stored += one.stored;
+            restored.unwritable += one.unwritable;
+        }
+        restored
+    }
+}
+
+/// Store `kept` again at `at` where the bytes there now differ from it ([`changed_runs`]), each
+/// run where the process maps its pages writable now (`host_memory::host_writable`, asked once
+/// for the span of every run, then run by run where that span is not all writable).
+///
+/// # Safety
+///
+/// The `kept.len()` bytes at `at` are mapped and readable for the call, and nothing writes them
+/// meanwhile but the program, whose write is a race as on Metal.
+pub(crate) unsafe fn put_back(at: *mut u8, kept: &[u8]) -> Restored {
+    let runs = {
+        // SAFETY: the caller's.
+        let now = unsafe { std::slice::from_raw_parts(at.cast_const(), kept.len()) };
+        changed_runs(kept, now)
+    };
+    let mut restored = Restored::default();
+    let (Some(first), Some(last)) = (runs.first(), runs.last()) else {
+        return restored;
+    };
+    let address = |offset: usize| at as u64 + offset as u64;
+    let all = host_writable(address(first.start), address(last.end)) == Some(true);
+    for run in runs {
+        let len = run.len() as u64;
+        if all || host_writable(address(run.start), address(run.end)) == Some(true) {
+            // SAFETY: the caller's, and the process maps the run's pages writable.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    kept[run.clone()].as_ptr(),
+                    at.add(run.start),
+                    run.len(),
+                );
+            }
+            restored.stored += len;
+        } else {
+            restored.unwritable += len;
         }
     }
+    restored
+}
+
+/// What [`KeptBytes::write_back`] put back of the bytes the moves changed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Restored {
+    /// The changed bytes it stored again (`WorkCounts::first_move_restored_bytes`).
+    pub(crate) stored: u64,
+    /// The changed bytes on pages the process does not map writable, which keep what the move
+    /// wrote (`Degradation::UnrestoredFirstMoveBytes`).
+    pub(crate) unwritable: u64,
+}
+
+/// The ranges of bytes where `now` differs from `kept`, in order, each as long as it runs.
+pub(crate) fn changed_runs(kept: &[u8], now: &[u8]) -> Vec<Range<usize>> {
+    /// The bytes compared at once before a byte-by-byte look.
+    const BLOCK: usize = 64;
+    let mut runs: Vec<Range<usize>> = Vec::new();
+    for (block, (kept, now)) in kept.chunks(BLOCK).zip(now.chunks(BLOCK)).enumerate() {
+        if kept == now {
+            continue;
+        }
+        for (i, _) in (kept.iter().zip(now).enumerate()).filter(|(_, (k, n))| k != n) {
+            let at = block * BLOCK + i;
+            match runs.last_mut() {
+                Some(run) if run.end == at => run.end = at + 1,
+                _ => runs.push(at..at + 1),
+            }
+        }
+    }
+    runs
 }
 
 /// How a first move writes Metal's pattern into the first `levels` levels of its image, of

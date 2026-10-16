@@ -45,13 +45,15 @@ use std::collections::BTreeMap;
 
 use crate::budget::Meter;
 use crate::device::requirements::{Requirements, VkFeature, VkLimit};
-use crate::device::DeviceProfile;
+use crate::device::{DeviceProfile, DriverWorkaround};
 use crate::error::{
     Capability, DescriptorError, Error, Feature, LowerFamily, RuntimeInput, Unsupported,
 };
 use crate::lower::stage_io::fetch::encoding;
 use crate::metal::{TessellationControlPointIndexType, TessellationPartitionMode as Partition};
-use crate::pipeline::artifact::{Reconvergence, SpecializationLayout, StageModule, StrategyCensus};
+use crate::pipeline::artifact::{
+    PrecisionNote, Reconvergence, SpecializationLayout, StageModule, StrategyCensus,
+};
 use crate::pipeline::descriptor::{TessellationDescriptor, VertexDescriptor};
 use crate::pipeline::graphics::{EmulatedTessellation, TessellationState};
 use crate::pipeline::interface::{StageInterface, TessellationStage};
@@ -324,17 +326,24 @@ pub fn push_offset(ranges: &[PushConstantRange], p: &DeviceProfile) -> Result<u3
 }
 
 /// Note what control stage `c` takes without a Metal observation ([`Control::notes`]) on the
-/// pipeline's evaluation stage among `modules`: its output is what the readings change, and the
+/// pipeline's evaluation stage among `modules`, and, on profile `p` whose tessellator is not
+/// Apple's (`DriverWorkaround::TessellatorNotMetals`), the device's triangle order
+/// (`PrecisionNote::TessellationTriangleOrder`): its output is what the readings change, and the
 /// synthesized stages are no function's module (a census leaves them out).
-pub fn note_evaluation_stage(c: &Control, modules: &mut [StageModule]) {
+pub fn note_evaluation_stage(c: &Control, p: &DeviceProfile, modules: &mut [StageModule]) {
+    let mut notes = c.notes();
+    if p.workarounds()
+        .contains(&DriverWorkaround::TessellatorNotMetals)
+    {
+        notes.push(PrecisionNote::TessellationTriangleOrder);
+    }
     for m in modules
         .iter_mut()
         .filter(|m| m.stage == vk::ShaderStage::TESSELLATION_EVALUATION)
     {
-        let notes = c.notes();
         // Unconditional on the stage: no specialization removes them.
         m.specialized_notes.retain(|s| !notes.contains(&s.note));
-        m.precision_notes.extend(notes);
+        m.precision_notes.extend(notes.iter().copied());
         m.precision_notes.sort_unstable();
         m.precision_notes.dedup();
     }

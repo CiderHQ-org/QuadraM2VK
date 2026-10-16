@@ -824,14 +824,18 @@ fn moltenvk_on_apple_carries_the_early_tests_image_write_defect() {
             W::FunctionsInlinedAtEveryCall,
             W::LoadsForwardedIntoLoops,
             W::LocalizedLoadsForwardedPastAtomicsAndCalls,
-            W::ClippedCoverageNotMetals
+            W::ClippedCoverageNotMetals,
+            W::TessellatorNotMetals
         ]
     );
     desc.vendor_id = 0x106B;
     desc.driver_id = Some(vk::DriverId::MESA_RADV);
     // Every rasterizer but Apple's hands a clipped primitive's fragments other coverage than
-    // Metal's pieces.
-    assert_eq!(workarounds(&desc), [W::ClippedCoverageNotMetals]);
+    // Metal's pieces, and every tessellator but Apple's orders a patch's triangles its own way.
+    assert_eq!(
+        workarounds(&desc),
+        [W::ClippedCoverageNotMetals, W::TessellatorNotMetals]
+    );
 }
 
 /// `DriverWorkaround::BothBarycentricFormsRejected`,
@@ -995,37 +999,48 @@ fn the_profile_holds_the_largest_whole_point_size() {
     }
 }
 
-/// Every driver carries `DriverWorkaround::ClippedCoverageNotMetals` but MoltenVK on an Apple GPU,
-/// which draws through Metal and splits a clipped primitive as Metal does: MoltenVK on another
-/// vendor's GPU carries it, and so does every other driver on an Apple vendor ID.
+/// Every driver carries `DriverWorkaround::ClippedCoverageNotMetals` and
+/// `DriverWorkaround::TessellatorNotMetals` but MoltenVK on an Apple GPU, which draws through Metal
+/// and splits a clipped primitive and orders a patch's triangles as Metal does: MoltenVK on another
+/// vendor's GPU carries them, and so does every other driver on an Apple vendor ID.
 #[test]
-fn every_rasterizer_but_apples_hands_other_clipped_coverage() {
+fn every_rasterizer_and_tessellator_but_apples_answer_their_own_way() {
     use crate::device::profile::DriverWorkaround;
-    let answer = DriverWorkaround::ClippedCoverageNotMetals;
-    let carries = |desc: &DeviceDescription| {
-        Device::new(desc.clone(), DevicePolicy::default())
-            .unwrap()
-            .profile()
-            .fields()
-            .workarounds
-            .contains(&answer)
-    };
-    for stem in [
-        "nvidia-rtx5080-laptop",
-        "amd-rdna3-radv",
-        "intel-irisxe-rplp-anv",
-        "lavapipe",
-        "swiftshader",
+    for answer in [
+        DriverWorkaround::ClippedCoverageNotMetals,
+        DriverWorkaround::TessellatorNotMetals,
     ] {
-        assert!(carries(&profile(stem)), "{stem}");
+        let carries = |desc: &DeviceDescription| {
+            Device::new(desc.clone(), DevicePolicy::default())
+                .unwrap()
+                .profile()
+                .fields()
+                .workarounds
+                .contains(&answer)
+        };
+        for stem in [
+            "nvidia-rtx5080-laptop",
+            "amd-rdna3-radv",
+            "intel-irisxe-rplp-anv",
+            "lavapipe",
+            "swiftshader",
+        ] {
+            assert!(carries(&profile(stem)), "{answer:?} {stem}");
+        }
+        let mut desc = profile("moltenvk-m3");
+        assert!(!carries(&desc), "{answer:?}: MoltenVK on an Apple GPU");
+        desc.vendor_id = 0x1002;
+        assert!(
+            carries(&desc),
+            "{answer:?}: MoltenVK on another vendor's GPU"
+        );
+        desc.vendor_id = 0x106B;
+        desc.driver_id = Some(vk::DriverId::MESA_RADV);
+        assert!(
+            carries(&desc),
+            "{answer:?}: another driver on an Apple vendor ID"
+        );
     }
-    let mut desc = profile("moltenvk-m3");
-    assert!(!carries(&desc), "MoltenVK on an Apple GPU");
-    desc.vendor_id = 0x1002;
-    assert!(carries(&desc), "MoltenVK on another vendor's GPU");
-    desc.vendor_id = 0x106B;
-    desc.driver_id = Some(vk::DriverId::MESA_RADV);
-    assert!(carries(&desc), "another driver on an Apple vendor ID");
 }
 
 /// Lavapipe carries `DriverWorkaround::ClippedTrianglesSplitPixelFragments` (the defect is the
@@ -1046,11 +1061,13 @@ fn lavapipe_carries_the_split_pixel_fragments_defect() {
     // The committed lavapipe's release (Mesa 26.2.3) also carries the mesh index defect, kept
     // past the release measured with it (`lavapipe_carries_the_mesh_index_defect_from_its_
     // measured_release`).
-    // And, as every rasterizer but Apple's, `ClippedCoverageNotMetals`.
+    // And, as every rasterizer and tessellator but Apple's, `ClippedCoverageNotMetals` and
+    // `TessellatorNotMetals`.
     let both = [
         defect,
         DriverWorkaround::MeshIndexComponentStoresMisplaced,
         DriverWorkaround::ClippedCoverageNotMetals,
+        DriverWorkaround::TessellatorNotMetals,
     ];
     let mut desc = profile("lavapipe");
     assert_eq!(desc.driver_id, Some(vk::DriverId::MESA_LLVMPIPE));

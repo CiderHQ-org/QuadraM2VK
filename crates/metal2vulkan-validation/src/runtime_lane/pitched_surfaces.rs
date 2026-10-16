@@ -885,8 +885,10 @@ fn first_move_keeps_the_bytes(
                  at most the last row's pitch ({span} to {rows})",
                 surface.what
             );
+            let restored = after.first_move_restored_bytes - before.first_move_restored_bytes;
             eprintln!(
-                "FIRST-MOVE-KEEP on {}: {}, {use_}: {} ({kept} kept, {bytes} bytes)",
+                "FIRST-MOVE-KEEP on {}: {}, {use_}: {} ({kept} kept, {bytes} bytes, {restored} \
+                 restored)",
                 device.name(),
                 surface.what,
                 if aliased { "aliased" } else { "shadowed" },
@@ -939,6 +941,158 @@ fn a_texture_s_first_move_keeps_the_bytes_it_lies_over() {
         assert!(
             aliased > 0,
             "no texture was aliased, so no keep was checked"
+        );
+    });
+}
+
+/// A texture that only reads, of `layout`, over a no-copy buffer whose pages the process maps
+/// read-only by its first use: made read-only after the buffer was made (Linux refuses read-only
+/// pages at the import, `a_read_only_page_is_refused_on_linux_and_read_elsewhere`, but not later),
+/// or, where `from_the_start`, before it (a guest's pages the host maps read-only, which MoltenVK
+/// imports in place). Its first use makes the image's first move, across which the host keeps the
+/// bytes the image is bound to and stores back only those the move changed
+/// (`texture/first_move.rs`'s `KeptBytes::write_back`): a store into the read-only pages would end
+/// the process (`SIGBUS` on macOS, `SIGSEGV` on Linux), as every byte's store did. The read gives
+/// the pages' texels and every byte of the pages stays, unless the move changed some, which the
+/// device then announces (`unrestored-first-move-bytes`). Printed (`FIRST-MOVE-READ-ONLY`): the
+/// form and the kept and restored bytes. Whether it was aliased; `None` where the device makes no
+/// buffer over the pages.
+fn first_move_over_read_only_pages(
+    device: &Device,
+    messages: &Messages,
+    layout: Layout,
+    from_the_start: bool,
+) -> Option<bool> {
+    let queue = device.new_command_queue().unwrap();
+    let reads = reading(device, layout.pf, "tob_read");
+    let len = layout.len().next_multiple_of(GUEST_PAGE);
+    let mapping = Mapping::anonymous(len);
+    let mut pages = counting(len, 7);
+    lay(
+        &layout,
+        &mut pages,
+        &texels_of(&layout, (layout.row() * layout.h) as usize, 1),
+    );
+    mapping.write(0, &pages);
+    if from_the_start {
+        mapping.protect_read_only();
+    }
+    // SAFETY: the mapping outlives the buffer and the texture (dropped first), and nothing writes
+    // the buffer.
+    let made = unsafe {
+        no_copy(
+            device,
+            mapping.pointer(),
+            len,
+            ResourceOptions::default(),
+            None,
+        )
+    };
+    let buffer = match made {
+        Ok(buffer) => buffer,
+        Err(error) if not_importable(&error) => {
+            eprintln!("FIRST-MOVE-READ-ONLY: no buffer over the pages: {error:?}");
+            return None;
+        }
+        Err(error) => panic!("new_buffer_with_bytes_no_copy: {error:?}"),
+    };
+    if !from_the_start {
+        mapping.protect_read_only();
+    }
+    let mut d = TextureDescriptor::texture_2d(layout.pf, layout.w, layout.h, false);
+    d.usage = TextureUsage::SHADER_READ;
+    d.resource_options = buffer.resource_options();
+    let before = device.work_counts();
+    let texture = buffer
+        .new_texture_with_iosurface_plane(&d, IoSurfacePlane::new(0, layout.bpr, false))
+        .unwrap();
+    let aliased = device.work_counts().shadowed_textures == before.shadowed_textures;
+    let what = format!(
+        "{} ({}), read-only {}",
+        layout.name,
+        layout.pf.name(),
+        if from_the_start {
+            "from the start"
+        } else {
+            "after the buffer"
+        }
+    );
+    let read = drawn(&queue, &layout, &reads, &texture, None);
+    let (count, first) = differing(&read, &rows(&layout, &pages), layout.texel);
+    let after = device.work_counts();
+    let kept = after.first_move_kept_bytes - before.first_move_kept_bytes;
+    let restored = after.first_move_restored_bytes - before.first_move_restored_bytes;
+    let unrestored = messages
+        .take_notices()
+        .into_iter()
+        .filter_map(|message| message.degradation)
+        .any(|notice| notice.degradation == Degradation::UnrestoredFirstMoveBytes);
+    eprintln!(
+        "FIRST-MOVE-READ-ONLY on {}: {what}: {} ({kept} bytes kept, {restored} restored, \
+         unrestored announced {unrestored})",
+        device.name(),
+        if aliased { "aliased" } else { "shadowed" },
+    );
+    let keeps = after.first_move_keeps - before.first_move_keeps;
+    assert_eq!(
+        keeps,
+        u64::from(aliased),
+        "{what}: {keeps} first moves kept their bytes (aliased {aliased})"
+    );
+    if !unrestored {
+        assert!(
+            count == 0,
+            "{what}: {count} texels read differ from the pages', the first at texel {first:?}"
+        );
+        let now = mapping.read(0..len);
+        assert!(
+            now == pages,
+            "{what}: the read-only pages changed: {}",
+            padding_changes(&layout, &now, &pages)
+        );
+    }
+    drop((texture, buffer));
+    drop(mapping);
+    Some(aliased)
+}
+
+/// [`first_move_over_read_only_pages`] over [`PACKED`], with the pages made read-only after the
+/// buffer, and off Linux also before it, on one device of the policy's default. Where the device
+/// imports host memory, at least one texture is aliased, or no keep over read-only pages was
+/// checked. On Linux only lavapipe and NVIDIA's driver keep an import running once its pages lose
+/// write permission (`HostMemory::new`'s Linux contract: RADV failed the command buffers submitted
+/// after it), so only they take the case.
+#[test]
+fn a_texture_over_read_only_pages_takes_its_first_move() {
+    on_shared_device(Some(PaddedReadsPolicy::Alias), |device, messages| {
+        let driver = device.properties().description.driver_id;
+        let keeps_running = matches!(
+            driver,
+            Some(DriverId::MESA_LLVMPIPE | DriverId::NVIDIA_PROPRIETARY)
+        );
+        if cfg!(target_os = "linux") && !keeps_running {
+            eprintln!(
+                "FIRST-MOVE-READ-ONLY on {}: {driver:?} is held to the writable pages of \
+                 HostMemory::new's Linux contract",
+                device.name()
+            );
+            return;
+        }
+        let mut aliased = 0;
+        for layout in PACKED {
+            for from_the_start in [false, true] {
+                if from_the_start && cfg!(target_os = "linux") {
+                    continue;
+                }
+                match first_move_over_read_only_pages(device, messages, layout, from_the_start) {
+                    Some(alias) => aliased += u64::from(alias),
+                    None => return,
+                }
+            }
+        }
+        assert!(
+            aliased > 0,
+            "no texture over read-only pages was aliased, so no keep over them was checked"
         );
     });
 }

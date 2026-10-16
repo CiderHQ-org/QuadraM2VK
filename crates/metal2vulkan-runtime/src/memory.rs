@@ -1196,12 +1196,12 @@ impl Memory {
 
     /// Return `placement`'s memory, freeing its block when it empties.
     pub(super) fn free(&mut self, device: &ash::Device, placement: &Placement) {
-        drop(self.free_then(device, placement, None));
+        drop(self.release_then(device, placement, None));
     }
 
     /// [`free`](Self::free), and `after` goes once the block is freed: given back for the caller
     /// to let go of with no lock held, unless the block waits with it (`freed_memory.rs`).
-    pub(super) fn free_then(
+    pub(super) fn release_then(
         &mut self,
         device: &ash::Device,
         placement: &Placement,

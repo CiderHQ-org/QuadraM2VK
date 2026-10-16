@@ -285,10 +285,11 @@ driver's. Each is open work.
   (`VUID-VkImageCreateInfo-pNext-01443`), and its first move may read and write all the memory
   bound to it, so the host keeps those bytes (`texture/first_move.rs`, `device/submit.rs`): once
   the submissions before have completed, it reads them through the host pointer, submits the moves
-  alone, waits, and writes them back. A CPU write to them in between, within one submission's round
-  trip of the commit that makes the move, is undone, once per image (`texture/shared_alias.rs`);
-  Metal keeps it, and never writes the bytes between a texture's rows. No byte outside them is read
-  or written (`runtime_lane::pitched_surfaces`: `a_texture_s_first_move_keeps_the_bytes_it_lies_over`,
+  alone, waits, and writes back those that differ. A CPU write to them in between, within one
+  submission's round trip of the commit that makes the move, is undone, once per image
+  (`texture/shared_alias.rs`); Metal keeps it, and never writes the bytes between a texture's rows.
+  No byte outside them is read or written (`runtime_lane::pitched_surfaces`:
+  `a_texture_s_first_move_keeps_the_bytes_it_lies_over`,
   `a_cpu_write_during_a_texture_s_first_move_stays_outside_its_bytes`).
 - **A cold pipeline making on NVIDIA grows with a module's sampling sites.** NVIDIA's compiler takes
   about 1 s for macOS 26's largest CoreAnimation fragment (210,033 words) on the RTX 5080 Laptop
@@ -335,11 +336,12 @@ driver's. Each is open work.
 - **macOS 27.0.1 answers measured only on an Apple M4.** The level answers an Apple M4's block
   placement of a heap's block-compressed textures and its compressed-texture blits until an M3 Max
   probe replaces them.
+- **Tessellation's triangle order.** On a device with `tessellationShader` but MoltenVK on an
+  Apple GPU, the device's tessellator orders a patch's triangles, picks their first corners and
+  joins its rings itself, announced as `TessellationTriangleOrder`
+  (`tessellation-triangle-order`): every patch differs on the RTX 3090, 55-95% on RADV and
+  lavapipe.
 - **lavapipe aborts on the owned fixture `mesh_order`'s mesh functions.** Compiling
   `mesh_order_mesh` or `mesh_order_solo` ends the process inside lavapipe's compiler ("LLVM ERROR:
   Cannot emit physreg copy instruction"); the validation case `mesh_order_mesh-payload-mesh-draw`
   runs on a GPU only. The construct behind the abort is not isolated yet.
-- **Tessellation's triangle order.** On a device with `tessellationShader` the device's
-  tessellator orders a patch's triangles and picks each one's first corner itself (Vulkan leaves
-  the order to the implementation), not as Metal does: every patch differs on the RTX 3090, 55-95%
-  of them on RADV and lavapipe. No note announces it.

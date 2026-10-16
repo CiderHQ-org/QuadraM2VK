@@ -416,7 +416,7 @@ pub(super) enum PagesHold {
 
 /// A live buffers' table's hold on host pages (`PagesHold::Host`), counted
 /// (`HostPages::listed`): one left as the buffer is released is a table a command buffer that may
-/// reach the pages unnamed holds, past Metal's release (`HostPages::announce_listed`).
+/// reach the pages unnamed holds, past Metal's release (`HostPages::released_listed`).
 pub(super) struct ListedPages(Arc<HostPages>);
 
 impl ListedPages {
@@ -581,13 +581,30 @@ impl HostPages {
     /// buffer's included), its listing let go of: a live buffers' table that still lists them is a
     /// command buffer's, one that may reach them unnamed (its first submission's, a host step's,
     /// or one a root table recorded before its first submission holds, `live_buffers.rs`), and
-    /// the pages stay, their deallocator waiting, until it lets go of it, where Metal's runs at
-    /// the release. Announced once per device (`Degradation::HostDeallocatorDelayed`).
-    fn announce_listed(&self, device: &Device) {
+    /// the pages stay until it lets go of it. Where the caller gave a keep-alive, that keeps the
+    /// pages mapped until the import is freed, so the deallocator runs here, at Metal's moment
+    /// ([`HostPages::run_kept`]), and the import keeps the keep-alive unless it keeps another's.
+    /// Else the deallocator waits for the pages to go, where Metal's runs at the release:
+    /// announced once per device (`Degradation::HostDeallocatorDelayed`).
+    fn released_listed(&self, device: &Device) {
         let Some(release) = self.release.get() else {
             return;
         };
-        if !release.deallocates() || self.listed.load(Ordering::Acquire) == 0 {
+        if self.listed.load(Ordering::Acquire) == 0 {
+            return;
+        }
+        // The exit guard runs no deallocator and drops no keep-alive: the pages' drop keeps them.
+        let Some(busy) = exit_guard::enter() else {
+            return;
+        };
+        drop(busy);
+        if let Some(keep_alive) = release.keep_alive() {
+            // These pages still lie in the import, and another buffer lying there may have let go
+            // of its keep-alive here too: only a keep-alive the import keeps covers this one.
+            self.run_kept(release, keep_alive, false);
+            return;
+        }
+        if !release.deallocates() {
             return;
         }
         device.shared().counts.host_deallocator_delayed();
@@ -596,10 +613,37 @@ impl HostPages {
             (
                 format!("a no-copy buffer of {length} bytes"),
                 "a command buffer that may reach its pages unnamed (a live buffers' table it \
-                 holds lists them) holds them as it is released"
+                 holds lists them) holds them as it is released, and the caller gave no \
+                 keep-alive"
                     .to_owned(),
             )
         });
+    }
+
+    /// Run `release`'s deallocator now, at Metal's moment, the caller's `keep_alive` keeping the
+    /// pages mapped until the import is freed: the import keeps it, unless it keeps another's
+    /// already, or `others` (another buffer lies in the import, whose own contract keeps the same
+    /// bytes mapped until it is freed); then it is dropped after the deallocator, which may read
+    /// the bytes.
+    fn run_kept(&self, release: &Release, keep_alive: ProgramObject<KeepAlive>, others: bool) {
+        let counts = &self.import.device.shared().counts;
+        let covered = {
+            let mut kept = lock(&self.import.kept);
+            match others || kept.is_some() {
+                true => Some(keep_alive),
+                false => {
+                    // Counted before the free can take it.
+                    counts.host_keep_alive_kept();
+                    *kept = Some(keep_alive);
+                    None
+                }
+            }
+        };
+        release.run();
+        if let Some(keep_alive) = covered {
+            counts.host_keep_alive_covered();
+            exit_guard::program_release(move || drop(keep_alive));
+        }
     }
 
     /// Release the pages to `release` when they go.
@@ -990,27 +1034,10 @@ impl Drop for HostPages {
             // The caller's keep-alive keeps the pages mapped until the import is freed: the
             // deallocator runs now, at Metal's moment. Where another buffer lies in the import,
             // or the import keeps another's keep-alive, that keeps the same bytes mapped until it
-            // is freed: this one goes now too, after the deallocator, which may read the bytes.
-            Some(keep_alive) => {
-                let counts = &import.device.shared().counts;
-                let covered = {
-                    let mut kept = lock(&import.kept);
-                    match others || kept.is_some() {
-                        true => Some(keep_alive),
-                        false => {
-                            // Counted before the free can take it.
-                            counts.host_keep_alive_kept();
-                            *kept = Some(keep_alive);
-                            None
-                        }
-                    }
-                };
-                release.run();
-                if let Some(keep_alive) = covered {
-                    counts.host_keep_alive_covered();
-                    exit_guard::program_release(move || drop(keep_alive));
-                }
-            }
+            // is freed: this one goes now too, after the deallocator, which may read the bytes. (A
+            // buffer released while a table listed its pages ran this at its release,
+            // `released_listed`, and left the import a keep-alive: none is left here.)
+            Some(keep_alive) => self.run_kept(&release, keep_alive, others),
             // Another buffer lies in the import, whose contract keeps the pages mapped: the
             // deallocator runs now, as with an import of its own (`host_aliases.rs`).
             None if others => release.run(),
@@ -1064,7 +1091,7 @@ impl Pages {
         self.memory.placement.settle();
         // SAFETY: the caller's.
         unsafe { release::object(shared.vk(), self.raw) };
-        let after = lock(&shared.memory).free_then(shared.vk(), &self.memory.placement, after);
+        let after = lock(&shared.memory).release_then(shared.vk(), &self.memory.placement, after);
         drop(busy);
         device.note_import_freed(self.memory.placement.size());
         after
@@ -1225,7 +1252,7 @@ impl Drop for BufferShared {
         own.range_token.release();
         if let Lie::Host(cell) = &own.lie {
             if let Lying::In(pages) = cell.lying() {
-                pages.announce_listed(&self.device);
+                pages.released_listed(&self.device);
             }
         }
     }

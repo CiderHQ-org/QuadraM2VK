@@ -1394,6 +1394,16 @@ pub enum DriverWorkaround {
     /// function compiled for a multisampled pipeline that reads `[[sample_mask]]` records
     /// `PrecisionNote::ClippedCoverageSplit` there (`lower::fragment::coverage`).
     ClippedCoverageNotMetals,
+    /// The device's tessellator does not draw a patch's triangles as Apple's does: Metal's
+    /// tessellator draws the D3D11 reference's triangles in its own order, each one's first corner
+    /// by its stitch step (`lower::tessellation::tessellator`), where Vulkan leaves a patch's
+    /// triangle order, first corners and ring triangulation to the implementation (every patch
+    /// differs on the RTX 3090, 55-95% of them on RADV and lavapipe). The device's answer, not a
+    /// defect. Every driver has it but MoltenVK (`VK_DRIVER_ID_MOLTENVK`) on an Apple GPU
+    /// (`vendor_id` 0x106B), which hands the patches to Metal's tessellator. A pipeline drawn
+    /// through the device's tessellation stages records `PrecisionNote::TessellationTriangleOrder`
+    /// there (`link::tessellation::note_evaluation_stage`).
+    TessellatorNotMetals,
 }
 
 #[cfg(test)]

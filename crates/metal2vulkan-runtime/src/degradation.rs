@@ -1495,7 +1495,7 @@ degradations! {
         ///   them is held: a command buffer submitted before a texture over them was released may
         ///   still read that texture through its resource ID, and its image holds the import until
         ///   the command buffer completes (`heap_sets.rs`);
-        /// - with or without one, while a live buffers' table that lists them is held: a command
+        /// - with no keep-alive, while a live buffers' table that lists them is held: a command
         ///   buffer whose commands may reach the buffer unnamed holds its first submission's table
         ///   and its host steps' until it completes, and one a rebind encoded again, or a host
         ///   step recorded, before its first submission until then (`live_buffers.rs`);
@@ -1503,6 +1503,9 @@ degradations! {
         ///   device-address buffer lay in is freed
         ///   (`RuntimeDriverDefect::FreedAddressMemoryFailsPendingWork`: MoltenVK), while the
         ///   batches submitted before the import's memory went are in flight (`freed_memory.rs`).
+        ///
+        /// With a keep-alive the deallocator runs at the release, as Metal's, and the import keeps
+        /// the keep-alive, which keeps the pages mapped, until it is freed: not announced.
         ///
         /// Announced once per device, on the thread that lets go of the buffer last, whatever
         /// `DeviceOptions::announce_each` says: that may be a runtime thread, as a command
@@ -1647,6 +1650,17 @@ degradations! {
         VisibilityCountPerColor = "visibility-count-per-color", Precision,
             "the result is Metal's count multiplied by the colors the draw writes; a `Boolean` \
              result is Metal's";
+        /// A texture's first move over a no-copy buffer's host pages (or a rebind's new pages)
+        /// changed bytes the host kept across it, on pages the process maps without write
+        /// permission when the host writes them back: on Linux, pages made read-only after the
+        /// buffer was made (Linux refuses read-only pages at the import); on macOS also pages
+        /// read-only from the start, which Metal reads (a GPU write into them fails its command
+        /// buffer). Not observed on RADV, which fails the command buffers submitted after a page
+        /// of an import loses write permission (`HostMemory::new`). Announced once per device, on
+        /// the thread that makes the submission; the payload counts the bytes.
+        UnrestoredFirstMoveBytes = "unrestored-first-move-bytes", Precision,
+            "those bytes keep what the image's move from `UNDEFINED` wrote, where Metal's \
+             texture leaves its pages as they were";
     }
     notes {
         F16FmaDoubleRounding = "f16-fma-double-rounding";
@@ -1808,6 +1822,14 @@ degradations! {
         /// depth and stencil. Recorded bound: groups past the first may differ at discard or
         /// depth edges if the driver compiles the variants differently; nothing broader.
         ColorAttachmentGroups = "color-attachment-groups";
+        /// A tessellation pipeline drawn through the device's tessellation stages, on a device
+        /// whose tessellator is not Apple's (every one but MoltenVK on an Apple GPU): the device's
+        /// tessellator orders each patch's triangles, picks their first corners and joins its
+        /// rings where Vulkan leaves that to the implementation, not as Metal's tessellator does.
+        /// The domain points are Metal's; flat varyings, interpolation across another
+        /// triangulation and the order a patch's triangles blend in may differ. On a device
+        /// without `tessellationShader` the emulation draws Metal's order and records none.
+        TessellationTriangleOrder = "tessellation-triangle-order";
     }
 }
 

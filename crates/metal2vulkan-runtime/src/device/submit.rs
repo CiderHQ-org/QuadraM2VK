@@ -20,6 +20,7 @@
 use super::functions::Vk;
 use super::relay::By;
 use super::{lock, Device};
+use crate::degradation::Degradation;
 use crate::error::{vulkan, Error};
 use crate::exit_guard::{self, Call};
 use crate::release;
@@ -315,9 +316,11 @@ impl Device {
     /// made by the host before a submission takes the rest of the first work: once every
     /// submission made before on each `VkQueue` completed ([`drain_submitted`]), each image's
     /// bytes are read through the host pointer, the moves alone are submitted and waited for, and
-    /// the bytes are written back, every one. Nothing where no such move waits. The bytes the
-    /// move may write are its image's own: "Image layout transitions may perform read and write
-    /// accesses on all memory bound to the image subresource range"; and a linear image's
+    /// the bytes the moves changed are written back (`KeptBytes::write_back`: none where they
+    /// changed none; a run on pages the process cannot write stays as the move left it, announced
+    /// once as `Degradation::UnrestoredFirstMoveBytes`). Nothing where no such move waits. The
+    /// bytes the move may write are its image's own: "Image layout transitions may perform read and
+    /// write accesses on all memory bound to the image subresource range"; and a linear image's
     /// subresource in `GENERAL` is host-accessible, its memory "interpreted" as its subresource
     /// layout lays it, so the host's writes are what the image then holds.
     ///
@@ -405,8 +408,19 @@ impl Device {
         }
         firsts.internal_completed(value);
         shared.internal_done.reached(value);
-        kept.write_back();
+        let restored = kept.write_back();
         drop(held);
+        shared.counts.first_move_restored(restored.stored);
+        if restored.unwritable > 0 {
+            self.degrade_once(Degradation::UnrestoredFirstMoveBytes, || {
+                (
+                    format!("{} bytes of host pages", restored.unwritable),
+                    "a texture's first move changed them, and the process maps their pages \
+                     without write permission, so the host could not put back the bytes it kept"
+                        .to_owned(),
+                )
+            });
+        }
         Ok(())
     }
 

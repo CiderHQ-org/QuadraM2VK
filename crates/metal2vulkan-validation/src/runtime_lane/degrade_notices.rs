@@ -411,7 +411,8 @@ pub(super) fn on_device_with(
 
 /// Every kind is taken by a lane test's site: listed above, or a stage's precision note or
 /// reconvergence; no kind is in two lists, and no list names a kind twice. `misplaced-notice`
-/// ([`MISPLACED`]) alone is taken by the runtime's own test instead, as no lane can meet it.
+/// ([`MISPLACED`]) and `unrestored-first-move-bytes` ([`UNRESTORED`]) are taken by the runtime's
+/// own tests instead, as no lane can meet them.
 #[test]
 fn every_kind_has_a_site_a_lane_test_takes() {
     let stage_kinds = Degradation::ALL.iter().copied().filter(|kind| {
@@ -515,6 +516,7 @@ fn every_kind_has_a_site_a_lane_test_takes() {
         &KEPT_BYTES,
         &DELAYED_DEALLOCATORS,
         &MISPLACED,
+        &UNRESTORED,
         &DEPTH_DENORMALS,
         &SIGNED_DEPTH_TESTS,
         &FIRST_SPARSE,
@@ -734,6 +736,13 @@ fn an_anisotropy_past_the_devices_largest_is_announced_once() {
 /// test `a_misplaced_notice_reaches_the_sink_unchanged_from_the_notice_thread_and_is_recorded_once`
 /// takes its site, as a build without debug assertions does.
 const MISPLACED: [Degradation; 1] = [Degradation::MisplacedNotice];
+
+/// The kind a first move's write back announces where the move changed kept bytes on pages the
+/// process no longer maps writable. No lane meets it: no measured driver's move changes a byte of
+/// the memory bound to the image, and none can be made to. The runtime's own test
+/// `the_write_back_stores_only_what_the_move_changed_and_only_where_the_host_may_write` takes its
+/// site (the write back over read-only pages it changed), as such a move would.
+const UNRESTORED: [Degradation; 1] = [Degradation::UnrestoredFirstMoveBytes];
 
 /// The kind Metal's private option bit takes ([`the_private_option_bit_is_ignored_once`]).
 const PRIVATE_OPTION: [Degradation; 1] = [Degradation::PrivateResourceOption];
