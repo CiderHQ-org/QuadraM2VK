@@ -176,11 +176,11 @@ fn the_interface_contract_describes_every_key() {
             StageBuiltin::PointSize { default: true },
         ],
         "a vertex function without a point-size output writes the default; its position is \
-         invariant, `[[invariant]]` or not (D671 item 11)"
+         invariant, `[[invariant]]` or not"
     );
     assert!(
         decorates_invariant(&validate(&bare, &alone(&bare, &p), &p)),
-        "a position not `[[invariant]]` in Metal carries `Invariant` too (D671 item 11)"
+        "a position not `[[invariant]]` in Metal carries `Invariant` too"
     );
 
     let f = compile(&bc, "stage_io_fragment", &p).expect("fragment");
@@ -270,30 +270,34 @@ fn feature_dependent_entries_name_their_capability() {
         Feature::ClipDistance,
         Capability::Feature(F::ShaderClipDistance),
     );
-    needs(
-        "stage_io_vertex_layer",
-        Feature::LayeredRendering,
-        Capability::Feature(F::ShaderOutputLayer),
-    );
+    // A vertex `Layer` takes the output feature or a geometry stage that writes it.
+    match compile(&bc, "stage_io_vertex_layer", &floor) {
+        Err(Error::Unsupported(u)) => {
+            assert_eq!(u.feature, Feature::LayeredRendering);
+            assert_eq!(
+                u.needs,
+                Needs::AnyOf(vec![
+                    vec![Capability::Feature(F::ShaderOutputLayer)],
+                    vec![Capability::Feature(F::GeometryShader)],
+                ])
+            );
+        }
+        other => panic!("stage_io_vertex_layer: {other:?}"),
+    }
     needs(
         "stage_io_fragment_point",
         Feature::SampleRateShading,
         Capability::Feature(F::SampleRateShading),
     );
-    // Either enabling capability of a fragment `PrimitiveId` will do.
-    match compile(&bc, "stage_io_fragment_primitive", &floor) {
-        Err(Error::Unsupported(u)) => {
-            assert_eq!(u.feature, Feature::PrimitiveId);
-            assert_eq!(
-                u.needs,
-                Needs::AnyOf(vec![
-                    vec![Capability::Feature(F::GeometryShader)],
-                    vec![Capability::Feature(F::TessellationShader)],
-                ])
-            );
-        }
-        other => panic!("stage_io_fragment_primitive: {other:?}"),
-    }
+    // Without either enabling capability of a fragment `PrimitiveId`, the ID is the flat varying
+    // the pipeline's vertex function writes (`engine_primitive_ids`).
+    let a = compile(&bc, "stage_io_fragment_primitive", &floor).expect("primitive");
+    assert!(a
+        .interface
+        .io
+        .inputs
+        .iter()
+        .any(|v| v.role == crate::pipeline::stage_io::IoRole::PrimitiveId));
     needs(
         "stage_io_fragment_dual_source",
         Feature::DualSourceBlending,
@@ -878,14 +882,15 @@ fn a_bfloat_color_output_is_not_metal() {
 }
 
 /// A fragment function that returns a `half` color output to an attachment the pipeline has
-/// records a note, decided by the output's AIR type (`stage_io_fragment_point`'s `half4` to color
-/// 0); not where the pipeline has no attachment there, nor for `float` and `uint` outputs
-/// (`stage_io_fragment`'s). The note is the module's math mode's: the fixture states fast math
-/// (`air.compile.fast_math_enable`) and records `PrecisionNote::HalfOutputFastMathBlend` alone; the
-/// same module stating no math mode records `PrecisionNote::HalfOutputPrecision` alone. Stating
-/// `fast_math_disable` it records no note and lists the attachment (`StageIo::half_blend_colors`),
-/// whose blend decides the pipeline's note
-/// (`a_half_output_without_fast_math_is_noted_where_its_attachment_blends`).
+/// records a note or lists the attachment for the pipeline's, decided by the output's AIR type
+/// (`stage_io_fragment_point`'s `half4` to color 0); neither where the pipeline has no attachment
+/// there, nor for `float` and `uint` outputs (`stage_io_fragment`'s). Which is the module's math
+/// mode's: the fixture states fast math (`air.compile.fast_math_enable`), records no note and lists
+/// the attachment (`StageIo::half_fast_colors`), whose write mask decides the pipeline's note
+/// (`a_half_output_with_fast_math_is_noted_where_its_attachment_stores`); the same module stating
+/// no math mode records `PrecisionNote::HalfOutputPrecision` alone. Stating `fast_math_disable` it
+/// records no note and lists the attachment (`StageIo::half_blend_colors`), whose blend decides the
+/// pipeline's note (`a_half_output_without_fast_math_is_noted_where_its_attachment_blends`).
 #[test]
 fn a_half_color_output_records_its_precision() {
     use crate::lower::select::LowerInputs;
@@ -904,23 +909,30 @@ fn a_half_color_output_records_its_precision() {
     for stem in ["moltenvk-m3", "moltenvk-m4", "amd-rdna3-radv", "lavapipe"] {
         let p = prof(stem);
         let half = compile(&bc, "stage_io_fragment_point", &p).expect("half");
-        assert!(half.precision.contains(&fast), "{stem}");
+        assert!(!half.precision.contains(&fast), "{stem}");
         assert!(!half.precision.contains(&safe), "{stem}");
         assert!(half.interface.io.half_blend_colors.is_empty(), "{stem}");
+        assert_eq!(half.interface.io.half_fast_colors, [0], "{stem}");
         let half = compile(&unstated, "stage_io_fragment_point", &p).expect("no math mode");
         assert!(half.precision.contains(&safe), "{stem}: no math mode");
         assert!(!half.precision.contains(&fast), "{stem}: no math mode");
         assert!(half.interface.io.half_blend_colors.is_empty(), "{stem}");
+        assert!(half.interface.io.half_fast_colors.is_empty(), "{stem}");
         let half = compile(&disabled, "stage_io_fragment_point", &p).expect("without fast math");
         assert!(!half.precision.contains(&safe), "{stem}: without fast math");
         assert!(!half.precision.contains(&fast), "{stem}: without fast math");
         assert_eq!(half.interface.io.half_blend_colors, [0], "{stem}");
+        assert!(half.interface.io.half_fast_colors.is_empty(), "{stem}");
         let mut inputs = LowerInputs::new();
         inputs.unattached_colors.insert(0);
         let unattached =
             compile_with(&bc, "stage_io_fragment_point", &p, &inputs).expect("unattached");
         assert!(!unattached.precision.contains(&fast), "{stem}");
         assert!(!unattached.precision.contains(&safe), "{stem}");
+        assert!(
+            unattached.interface.io.half_fast_colors.is_empty(),
+            "{stem}"
+        );
         let float = compile(&bc, "stage_io_fragment", &p).expect("float");
         assert!(!float.precision.contains(&fast), "{stem}");
         assert!(!float.precision.contains(&safe), "{stem}");
@@ -979,6 +991,65 @@ fn a_half_output_without_fast_math_is_noted_where_its_attachment_blends() {
         let p = prof(stem);
         let f = compile(&disabled, "stage_io_fragment_point", &p).expect("half");
         assert_eq!(f.interface.io.half_blend_colors, [0], "{stem}");
+        assert!(!f.precision.contains(&note), "{stem}");
+        let descriptors = [Some(ColorAttachmentDescriptor::new(
+            PixelFormat::RGBA16Float,
+        ))];
+        let rounding = (false, TextureWriteRoundingMode::TowardZero);
+        let rules = rule_words(&f.interface.io, &descriptors, rounding, &p).expect("rules");
+        for (what, mask, b, want) in cases {
+            let colors = [Some(ColorAttachmentState::new(
+                Format::R16G16B16A16_SFLOAT,
+                mask,
+                b,
+            ))];
+            let (notes, _) = pipeline_writes(&f, &rules, &colors).expect(what);
+            assert_eq!(notes.contains(&note), want, "{stem}: {what}: {notes:?}");
+        }
+        // A pipeline without the attachment's state (none listed) records none.
+        let (notes, _) = pipeline_writes(&f, &rules, &[]).expect("no attachments");
+        assert!(!notes.contains(&note), "{stem}: no attachments");
+    }
+}
+
+/// A `half` color output of a module with fast math (the `stage_io` fixture) lists its attachment
+/// (`StageIo::half_fast_colors`), and the pipeline's stage records
+/// `PrecisionNote::HalfOutputFastMathBlend` only where that attachment stores some channel
+/// (`color_writes::pipeline_writes`, `stores_output`): unblended or blended alike, but not under a
+/// write mask of none, blended or not, nor where the pipeline lacks the attachment's state. An
+/// attachment that stores nothing holds nothing the output could differ by (the macOS 26
+/// window-server pass's colors of mask none beside its fetched one).
+#[test]
+fn a_half_output_with_fast_math_is_noted_where_its_attachment_stores() {
+    use crate::metal::{PixelFormat, TextureWriteRoundingMode};
+    use crate::pipeline::artifact::PrecisionNote;
+    use crate::pipeline::color_writes::{pipeline_writes, rule_words};
+    use crate::pipeline::descriptor::ColorAttachmentDescriptor;
+    use crate::pipeline::graphics::{BlendState, ColorAttachmentState};
+    use crate::vk::{BlendFactor as F, BlendOp as O, ColorComponentFlags, Format};
+    let Some(bc) = fixture() else { return };
+    let note = PrecisionNote::HalfOutputFastMathBlend;
+    let over = Some(BlendState {
+        src_color: F::ONE,
+        dst_color: F::ONE_MINUS_SRC_ALPHA,
+        color_op: O::ADD,
+        src_alpha: F::ONE,
+        dst_alpha: F::ONE_MINUS_SRC_ALPHA,
+        alpha_op: O::ADD,
+    });
+    let all = ColorComponentFlags::known_bits();
+    let none = ColorComponentFlags::empty();
+    let cases = [
+        ("unblended", all, None, true),
+        ("over", all, over, true),
+        ("red alone", ColorComponentFlags::R, over, true),
+        ("no channel written", none, None, false),
+        ("no channel written, blended", none, over, false),
+    ];
+    for stem in ["moltenvk-m3", "amd-rdna3-radv", "lavapipe"] {
+        let p = prof(stem);
+        let f = compile(&bc, "stage_io_fragment_point", &p).expect("half");
+        assert_eq!(f.interface.io.half_fast_colors, [0], "{stem}");
         assert!(!f.precision.contains(&note), "{stem}");
         let descriptors = [Some(ColorAttachmentDescriptor::new(
             PixelFormat::RGBA16Float,
@@ -1102,7 +1173,8 @@ fn an_exact_half_blend_is_computed_in_the_storage_form() {
                 [0],
                 "{what}"
             );
-            // With fast math the device blends, and the note is the function's.
+            // With fast math the device blends, and the function lists the attachment for the
+            // pipeline's note.
             let fast = compile_with(&enabled, "stage_io_fragment_point", &p, &inputs(&r, &p))
                 .unwrap_or_else(|e| panic!("{what}: fast: {e}"));
             assert!(fast
@@ -1110,10 +1182,12 @@ fn an_exact_half_blend_is_computed_in_the_storage_form() {
                 .iter()
                 .all(|fact| !matches!(fact, RuntimeFact::InterlockedFramebufferFetch { .. })));
             assert!(
-                fast.precision
+                !fast
+                    .precision
                     .contains(&PrecisionNote::HalfOutputFastMathBlend),
                 "{what}: fast"
             );
+            assert_eq!(fast.interface.io.half_fast_colors, [0], "{what}: fast");
             // Under alpha to coverage the storage form is not exact: the device blends.
             r.alpha_to_coverage = true;
             let covered = compile_with(&disabled, "stage_io_fragment_point", &p, &inputs(&r, &p))
@@ -1243,12 +1317,13 @@ fn half_returned(to: &str) -> Option<Vec<u8>> {
 }
 
 /// A `half` output's last operation Metal computes at `float` precision into a 32-bit float
-/// attachment is selected in `float` (`ArithPlan::unrounded`), and the output records no
-/// `PrecisionNote::HalfOutputFastMathBlend` (the fixture's module states fast math) where every
-/// stored channel takes such a lane: a product into channels unblended, blended one and one, or of
-/// `RG32Float`; a sum unblended. A sum into a blended channel, an operation without every fast-math
-/// flag, and one with another use keep the `half` and the note; so does a pipeline without the map.
-/// Each module validates.
+/// attachment is selected in `float` (`ArithPlan::unrounded`), and the output lists no attachment
+/// for `PrecisionNote::HalfOutputFastMathBlend` (`StageIo::half_fast_colors`; the fixture's module
+/// states fast math) where every stored channel takes such a lane: a product into channels
+/// unblended, blended one and one, or of `RG32Float`; a sum unblended. A sum into a blended
+/// channel, an operation without every fast-math flag, and one with another use keep the `half`
+/// and list the attachment; so does a pipeline without the map. No function records the note
+/// itself. Each module validates.
 #[test]
 fn a_half_output_into_a_float32_attachment_keeps_metals_float() {
     use crate::pipeline::artifact::PrecisionNote;
@@ -1303,7 +1378,9 @@ fn a_half_output_into_a_float32_attachment_keeps_metals_float() {
             );
             let art = compile_with(&bc, entry, &p, &inputs)
                 .unwrap_or_else(|e| panic!("{what} on {stem}: {e}"));
-            assert_eq!(art.precision.contains(&note), !marked, "{what} on {stem}");
+            assert!(!art.precision.contains(&note), "{what} on {stem}");
+            let listed = art.interface.io.half_fast_colors == [0];
+            assert_eq!(listed, !marked, "{what} on {stem}");
             assert_eq!(
                 art.interface.io.half_output_lanes,
                 BTreeMap::from([(0, lanes)]),
@@ -1312,13 +1389,16 @@ fn a_half_output_into_a_float32_attachment_keeps_metals_float() {
             let t = alone(&art, &p);
             assert!(!validate(&art, &t, &p).is_empty(), "{what} on {stem}");
             let none = compile(&bc, entry, &p).unwrap_or_else(|e| panic!("{what}: {e}"));
-            assert!(none.precision.contains(&note), "{what} on {stem}: no map");
+            assert!(!none.precision.contains(&note), "{what} on {stem}: no map");
+            let listed = none.interface.io.half_fast_colors == [0];
+            assert!(listed, "{what} on {stem}: no map");
         }
     }
 }
 
 /// A missing half-output map loses Metal's `float`, never the pipeline: a `half` product compiled
-/// without the map records none, keeps the note, and links into a pipeline whose `RGBA32Float`
+/// without the map records none, lists its attachment for the note (`StageIo::half_fast_colors`),
+/// and links into a pipeline whose `RGBA32Float`
 /// attachment lists it, unblended or added (the added one compiled under its color writes, whose
 /// channels are the device's where the profile does not store Metal's); one compiled under the
 /// unblended attachment's entry links into that pipeline unnoted and is refused against the added
@@ -1351,7 +1431,8 @@ fn a_missing_half_output_map_links() {
         let p = prof(stem);
         let none = compile(&bc, HALF_ENTRY, &p).unwrap_or_else(|e| panic!("{stem}: {e}"));
         assert!(none.interface.io.half_output_lanes.is_empty(), "{stem}");
-        assert!(none.precision.contains(&note), "{stem}");
+        assert!(!none.precision.contains(&note), "{stem}");
+        assert_eq!(none.interface.io.half_fast_colors, [0], "{stem}");
         check(Some(&none), &plain, rounding, &p).unwrap_or_else(|e| panic!("{stem}: no map: {e}"));
         let mut added_writes = LoweringInputs::new();
         added_writes.color_writes = color_writes([0], &added, rounding, &p);
@@ -1373,11 +1454,13 @@ fn a_missing_half_output_map_links() {
         let none = compile_with(&bc, HALF_ENTRY, &p, &added_writes)
             .unwrap_or_else(|e| panic!("{stem}: {e}"));
         assert!(none.interface.io.half_output_lanes.is_empty(), "{stem}");
-        assert!(none.precision.contains(&note), "{stem}");
+        assert!(!none.precision.contains(&note), "{stem}");
+        assert_eq!(none.interface.io.half_fast_colors, [0], "{stem}");
         check(Some(&none), &added, rounding, &p).unwrap_or_else(|e| panic!("{stem}: no map: {e}"));
         let with =
             compile_with(&bc, HALF_ENTRY, &p, &inputs).unwrap_or_else(|e| panic!("{stem}: {e}"));
         assert!(!with.precision.contains(&note), "{stem}");
+        assert!(with.interface.io.half_fast_colors.is_empty(), "{stem}");
         check(Some(&with), &plain, rounding, &p).unwrap_or_else(|e| panic!("{stem}: {e}"));
         assert!(
             matches!(

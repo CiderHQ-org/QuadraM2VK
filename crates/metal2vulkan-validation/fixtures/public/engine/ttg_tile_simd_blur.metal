@@ -1,4 +1,4 @@
-// Owned fixture (WP-TTG): a SIMD blur through a tile function, one tile run by a threadgroup of
+// Owned fixture: a SIMD blur through a tile function, one tile run by a threadgroup of
 // the tile's size, up to 32x32 threads. Thread (lane, simdgroup) owns the cell (lane, simdgroup),
 // or (simdgroup, lane) when `transpose` is set: the simdgroup is a row (or a column) of the tile.
 // It reads its texel of `source`, at `origin` plus its tile's place plus its cell, and the texel

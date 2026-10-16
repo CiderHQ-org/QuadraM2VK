@@ -74,16 +74,22 @@ impl<W> Left<W> {
 
 /// The thread's way through its work once woken: a `round` (a pass of its own, looking at the inbox
 /// again while it leaves the thread no work, and what it lets go of, `scheduler/mod.rs`), which adds
-/// what it leaves to a [`Left`]; then, while work is left, rounds for as long as `inbox` holds
-/// commits, and the oldest piece, which `run` runs (the module docs). `round` and `run` answer
-/// false once the process is exiting, and this then answers `None`; else whether a piece ran.
+/// what it leaves to `left`, the thread's own, empty, which it keeps with its room from one waking
+/// to the next; then, while work is left, rounds for as long as `inbox` holds commits, and the
+/// oldest piece, which `run` runs (the module docs). `round` and `run` answer false once the process
+/// is exiting, and this then answers `None`, what is left staying in `left`; else whether a piece
+/// ran, `left` emptied.
 pub(crate) fn work_through<S, C, W>(
     inbox: &Inbox<S, C>,
+    left: &mut Left<W>,
     mut round: impl FnMut(&mut Left<W>) -> bool,
     mut run: impl FnMut(Kind, W) -> bool,
 ) -> Option<bool> {
-    let mut left = Left::default();
-    if !round(&mut left) {
+    debug_assert!(
+        left.is_empty(),
+        "the thread's work left from an earlier waking"
+    );
+    if !round(left) {
         return None;
     }
     left.end_round();
@@ -92,7 +98,7 @@ pub(crate) fn work_through<S, C, W>(
         // A commit left to this thread meanwhile goes before the next piece of work, as does one
         // left to it during the round that took that one in.
         while inbox.holds_commits() {
-            if !round(&mut left) {
+            if !round(left) {
                 return None;
             }
             left.end_round();

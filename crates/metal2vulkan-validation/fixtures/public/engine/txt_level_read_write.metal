@@ -1,4 +1,4 @@
-// Owned fixture (WP-TXT, DESIGN D230): a `read_write` texture read and written at a level read
+// Owned fixture: a `read_write` texture read and written at a level read
 // from a buffer: thread (x, y) reads texel (x, y) of level `lod` and writes back 2 v + 1. A read
 // or write at a level the texture lacks is out of bounds (MSL 4.1 §6.13): Metal reads zero
 // components (alpha 1 where the format has none) and ignores the write. A case passes level 0.

@@ -1,5 +1,5 @@
-// Owned fixture (WP-A1, D126): `a1_sign_and_division` without fast math (`-fno-fast-math`: `sign`
-// carries no `nsz`, so D52.2's exact sequence, which keeps -0, is the lowering, and the module
+// Owned fixture: `a1_sign_and_division` without fast math (`-fno-fast-math`: `sign`
+// carries no `nsz`, so the exact sequence, which keeps -0, is the lowering, and the module
 // records `air.compile.fast_math_disable`, so Metal's division is its precise one). The same
 // program; the pair separates what fast math changes in the zero's sign and the division range.
 // metal-fast-math: off

@@ -1,5 +1,5 @@
-// Owned fixture (WP-DSM2, DESIGN D278): what a simdgroup shuffle reads from a lane past the
-// threadgroup's thread count (D154.4: Metal leaves the value undefined, and the translator's
+// Owned fixture: what a simdgroup shuffle reads from a lane past the
+// threadgroup's thread count (Metal leaves the value undefined, and the translator's
 // emulated simdgroups read the calling lane's). Every thread runs the shuffles, in
 // workgroup-uniform control flow; a threadgroup whose size is not a multiple of 32 leaves its
 // last simdgroup partial, and its lanes past the thread count do not exist.

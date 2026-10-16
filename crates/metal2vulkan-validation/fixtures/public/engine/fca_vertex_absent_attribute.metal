@@ -1,4 +1,4 @@
-// Owned fixture (WP-FCA, DESIGN D233): a vertex attribute a function constant gates, read without
+// Owned fixture: a vertex attribute a function constant gates, read without
 // a guard into a varying. MSL 5.8.1.3: with `has_tint` false (or undefined) the element is not
 // declared in the input assembly structure, so the pipeline fetches nothing for it and the
 // language gives its read no value; the engine reads zero and declares no attribute 1. With

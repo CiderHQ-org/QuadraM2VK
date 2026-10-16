@@ -830,6 +830,57 @@ fn only_storage_images_are_volatile_and_never_under_the_vulkan_model() {
     );
 }
 
+/// `coherent` decorates the one storage image it names `Coherent`, leaving the module's other
+/// shared resources plain, and refuses a sampled image.
+#[test]
+fn coherent_decorates_one_storage_image_alone() {
+    let texture = |index| ResourceSlot {
+        stage: Stage::Fragment,
+        kind: ResourceKind::Texture,
+        index,
+    };
+    let image = |t: &mut T, usage, format| {
+        let u = t.u32();
+        t.ty(Type::Image(ImageType {
+            sampled_type: u,
+            dim: Dim::D2,
+            depth: false,
+            arrayed: false,
+            multisampled: false,
+            usage,
+            format,
+        }))
+    };
+    let mut t = T::new();
+    let storage = image(
+        &mut t,
+        ImageUsage::Storage,
+        crate::spv::ImageFormat::Rgba32ui,
+    );
+    let sampled = image(
+        &mut t,
+        ImageUsage::Sampled,
+        crate::spv::ImageFormat::Unknown,
+    );
+    let one =
+        t.b.resource(texture(0), StorageClass::UniformConstant, storage)
+            .expect("image");
+    let other =
+        t.b.resource(texture(1), StorageClass::UniformConstant, storage)
+            .expect("other image");
+    let read =
+        t.b.resource(texture(2), StorageClass::UniformConstant, sampled)
+            .expect("sampled");
+    t.b.coherent(one).expect("a storage image");
+    assert_eq!(
+        t.b.coherent(read).err(),
+        Some(BuildError::Global(GlobalRule::CoherentTarget))
+    );
+    let m = finish_compute(t.b).expect("a GLSL450 module with one coherent image");
+    assert_eq!(m.coherent, BTreeSet::from([one]));
+    assert!(!m.coherent.contains(&other));
+}
+
 /// `coherent_resources` decorates every storage buffer and storage image resource of the module
 /// `Coherent` (a descriptor array of storage images included, those declared after it too), and no
 /// uniform buffer or sampled image; a module under the Vulkan memory model, which bans the
@@ -977,15 +1028,19 @@ fn a_push_block_that_is_not_std430_uses_scalar_layout() {
     assert_eq!(m.push_members().len(), 2);
 }
 
-/// Only the `Position` output can be decorated `Invariant` (Metal `[[invariant]]`).
+/// Only the `Position` output (Metal `[[invariant]]`) and a fragment's per-fragment outputs (the
+/// variants of a render pipeline's color groups) can be decorated `Invariant`.
 #[test]
-fn only_the_position_output_is_invariant() {
+fn only_the_position_and_per_fragment_outputs_are_invariant() {
     let mut t = T::new();
     let f = t.f32();
     let v4 = t.vec(f, 4);
     let pos =
         t.b.builtin(BuiltIn::Position, IoDir::Output, v4)
             .expect("position");
+    let depth =
+        t.b.builtin(BuiltIn::FragDepth, IoDir::Output, f)
+            .expect("depth");
     let size =
         t.b.builtin(BuiltIn::PointSize, IoDir::Output, f)
             .expect("point size");
@@ -993,6 +1048,7 @@ fn only_the_position_output_is_invariant() {
         t.b.io(key("color"), IoDir::Output, v4, IoDecor::default())
             .expect("varying");
     assert_eq!(t.b.invariant(pos), Ok(()));
+    assert_eq!(t.b.invariant(depth), Ok(()));
     for g in [size, color] {
         assert_eq!(
             t.b.invariant(g),

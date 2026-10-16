@@ -1,5 +1,5 @@
 // Sixteen screen coordinates mapped to physical coordinates through one of two rasterization-rate
-// maps, picked from a thread-memory array of their pointers (DESIGN D240).
+// maps, picked from a thread-memory array of their pointers.
 //
 // Both maps are buffer arguments, `left` at buffer 0 and `right` at buffer 1. The kernel stores
 // their addresses in a local `maps[2]` array and maps through `*maps[tid.y]`; the compiler keeps
@@ -8,7 +8,7 @@
 // offset 0, so a case authors both buffers as `rasterization_rate_map`, and each executor writes
 // its own implementation's parameter data of the same maps.
 //
-// The maps are the two whose tiles this crate compiles as Apple M3 does (DESIGN D235.8): `left` is
+// The maps are the two whose tiles this crate compiles as Apple M3 does: `left` is
 // a 64x64 map of uniform quality 1.0 (the identity), and `right` is 37x23 with horizontal samples
 // [0.5, 1] and vertical samples [1, 0.5] (physical size 36x23). The eight coordinates lie inside
 // both screens, at exact binary fractions; row y = 0 answers through `left` (each coordinate

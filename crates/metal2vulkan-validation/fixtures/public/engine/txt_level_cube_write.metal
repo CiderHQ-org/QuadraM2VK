@@ -1,4 +1,4 @@
-// Owned fixture (WP-TXT, DESIGN D230): a write to a storage cube at a level read from a buffer.
+// Owned fixture: a write to a storage cube at a level read from a buffer.
 // The cube is the binder's 2D-array view (layer = face), one per level. Thread (x, y, face)
 // writes (x, y, face, 1) at texel (x, y) of that face of level `lod`. A case passes level 0.
 // Loop-free.

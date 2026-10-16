@@ -268,6 +268,52 @@ fn ones_ratio_to_half_is_exact_on_every_step() {
     }
 }
 
+/// `ones_ratio_factor`'s product of every step `m` of the 16-bit normalized grids rounds to `half`
+/// as `m / D` does, from either `f32` neighbour of the exact product; and the factors `2^-b · (1 +
+/// k · 2^-23)` that do so are exactly those its note states, strictly between `2^-b` (`k = 0`)
+/// and the reciprocal `RN(1 / D)` (`k = 128` on `65535`, `256` on `32767`). Exact: the product of
+/// a step below `2^16` and a 24-bit factor has at most 40 bits, and the `half` of an `f32` and of
+/// `f64`'s correctly rounded quotient are single roundings (the module note).
+#[test]
+fn the_ones_ratio_factor_rounds_every_step() {
+    for (b, last) in [(16u32, 127u32), (15, 255)] {
+        let d = (1u32 << b) - 1;
+        let want: Vec<u16> = (0..=d)
+            .map(|m| f64_to_f16(f64::from(m) / f64::from(d)))
+            .collect();
+        let holds = |k: u32| {
+            let c = f64::from(f32::from_bits(((127 - b) << 23) | k));
+            (0..=d).all(|m| {
+                let exact = f64::from(m) * c;
+                let near = exact as f32;
+                let other = match f64::from(near).partial_cmp(&exact) {
+                    Some(std::cmp::Ordering::Greater) => f32::from_bits(near.to_bits() - 1),
+                    Some(std::cmp::Ordering::Less) => f32::from_bits(near.to_bits() + 1),
+                    _ => near,
+                };
+                [near, other]
+                    .iter()
+                    .all(|v| f64_to_f16(f64::from(*v)) == want[m as usize])
+            })
+        };
+        let reciprocal = (1.0 / d as f32).to_bits();
+        assert_eq!(reciprocal, ((127 - b) << 23) | (last + 1), "RN(1 / {d})");
+        assert!(!holds(0), "2^-{b} itself");
+        assert!(!holds(last + 1), "RN(1 / {d}) itself");
+        let failing: Vec<u32> = (1..=last).filter(|k| !holds(*k)).collect();
+        assert!(
+            failing.is_empty(),
+            "1 / {d}: factors {failing:?} below RN(1 / D)"
+        );
+        let k = texel_round::ONES_RATIO_FACTOR_ULPS;
+        assert!((1..=last).contains(&k), "the factor's {k} ulps on {d}");
+        assert_eq!(
+            texel_round::ones_ratio_factor(b).to_bits(),
+            ((127 - b) << 23) | k
+        );
+    }
+}
+
 /// The normalized grids the bicubic filter's exact sums land on: `16 · 255`, `16 · 127`, `65535`,
 /// `32767`, and the sRGB step scale 4095. The grids: a texture's `half` conversion's, the sRGB
 /// table's, and the normalized formats' fields' that a tile function's `half` member reads, down to

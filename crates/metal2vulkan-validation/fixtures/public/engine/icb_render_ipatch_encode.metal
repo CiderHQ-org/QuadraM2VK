@@ -1,4 +1,4 @@
-// Owned fixture (WP-ICBV, DESIGN D336 item 9): a kernel whose only effect is the indexed patch
+// Owned fixture: a kernel whose only effect is the indexed patch
 // draws it encodes. Thread `tid` encodes command `tid`'s indexed patch draw of `draws[tid]`'s
 // control-point count, patch start and count, instance count and base instance, with no factor
 // instance stride and `draws[tid]`'s factor scale: thread 0's patch indices (from `uint`

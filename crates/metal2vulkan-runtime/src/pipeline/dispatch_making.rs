@@ -128,15 +128,20 @@ impl Variant {
             };
             let (variant, key, ticket) = match held {
                 RegionHeld::Making(variant, key, ticket) => (variant, key, *ticket),
-                other => return lease.give_back(other),
+                other => return lease.give_back(other, None),
             };
             let made = variant
                 .objects
                 .pipeline(&key, Notices::Announced)
                 .map(|made| made.kept_at(&variant.objects, kept::Place::Region(key.clone())));
-            // Its callers take it from the making.
+            // Its callers take it from the making: from the settle, the batches that wait for it
+            // may run and complete while this piece still holds the variant, and the device with
+            // it, until it gave it back. A trail spans that (`trails.rs`).
+            let trail = variant.objects.device.shared().trails.open();
             drop(ticket.settle(made));
-            lease.give_back(RegionHeld::Made { _variant: variant });
+            #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+            super::pool::held::settled();
+            lease.give_back(RegionHeld::Made { _variant: variant }, Some(trail));
         }))
     }
 }

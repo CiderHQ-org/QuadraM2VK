@@ -57,6 +57,7 @@ use super::buffer::{buffer_class, Buffer, Modes, WeakBuffer};
 use super::device::lock;
 use super::error::{invalid, nil, Error, MemoryKind, Problem, RuntimeGap};
 use super::host_memory::{Deallocator, HostMemory, HostRelease, KeepAlive};
+use super::key_hash::KeyMap;
 use super::range::RangeAllocator;
 use super::resource::{ObjectId, ResourceKey};
 use super::sparse::heap::SparseHeap;
@@ -66,7 +67,6 @@ use super::texture::{Texture, TextureShared};
 use super::values::{CpuCacheMode, HazardTrackingMode, ResourceOptions, StorageMode};
 use super::Device;
 use metal2vulkan::device::AllocationLimits;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -316,7 +316,7 @@ impl Drop for HeapShared {
 /// their uses' keys (`EncoderCore::end_with_replay`).
 #[derive(Default)]
 pub(super) struct HeapKeys {
-    heaps: Mutex<HashMap<ResourceKey, Weak<HeapShared>>>,
+    heaps: Mutex<KeyMap<ResourceKey, Weak<HeapShared>>>,
 }
 
 impl HeapKeys {
@@ -535,10 +535,7 @@ impl Device {
         deallocator: Option<Deallocator>,
         keep_alive: Option<KeepAlive>,
     ) -> Result<Heap, Error> {
-        let release = HostRelease {
-            deallocator,
-            keep_alive,
-        };
+        let release = HostRelease::new(deallocator, keep_alive);
         // SAFETY: the caller's contract.
         unsafe { self.no_copy_heap_with_token(memory, descriptor, release, None) }
     }
@@ -558,10 +555,7 @@ impl Device {
         keep_alive: Option<KeepAlive>,
         token: RangeToken,
     ) -> Result<Heap, Error> {
-        let release = HostRelease {
-            deallocator,
-            keep_alive,
-        };
+        let release = HostRelease::new(deallocator, keep_alive);
         // SAFETY: the caller's contract.
         unsafe { self.no_copy_heap_with_token(memory, descriptor, release, Some(token)) }
     }
@@ -952,8 +946,8 @@ impl Heap {
     /// `newBufferWithLength:options:offset:` of a placement heap: a buffer of `length` bytes
     /// `offset` bytes into the heap. Its bytes are the heap's as they are: a buffer over bytes
     /// another wrote reads them. A length of 0 makes a buffer of no bytes at `offset`, as plain
-    /// Metal makes it where its validation stops it (RT7 heap probe `length_zero`: length and
-    /// `allocatedSize` 0).
+    /// Metal makes it where its validation stops it (Metal heap probe `length_zero` on an M4:
+    /// length and `allocatedSize` 0).
     ///
     /// Refused: a length past the device's `max_buffer_length` (`Problem::BufferLength`), an
     /// offset that is not a multiple of 256 (`HeapProblem::Offset`), bytes past the heap's end

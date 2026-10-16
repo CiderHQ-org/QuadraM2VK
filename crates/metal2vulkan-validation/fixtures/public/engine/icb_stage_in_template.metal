@@ -1,4 +1,4 @@
-// Owned fixture (WP-ICBV, DESIGN D336): the compute template of commands whose stage-in region a
+// Owned fixture: the compute template of commands whose stage-in region a
 // kernel encodes. Each thread fetches its `[[stage_in]]` attribute (a case's descriptor: one uint
 // stepping by thread position in the grid on x, so the element at the region's origin plus the
 // thread's position) and reports it with the region's origin and size, at the slot the origin

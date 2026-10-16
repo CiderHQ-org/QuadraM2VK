@@ -1,6 +1,6 @@
-// Owned fixture (WP-RRX, docs/TODO.md 8.27): program-scope constants a module's static initializer
-// computes from function constants in the shapes the crate's dependency analysis refused (DESIGN
-// D384 item 9): a definedness query a global stores, a loop whose trip count is a constant (a
+// Owned fixture: program-scope constants a module's static initializer
+// computes from function constants in the shapes the crate's dependency analysis refused: a
+// definedness query a global stores, a loop whose trip count is a constant (a
 // branch on it), and a choice between constants. Each is read by a kernel of its own, so Metal's
 // functionConstantsDictionary (the metallib's CNST tag) answers which constants each kernel reads.
 // Written for this repository; no third-party source.

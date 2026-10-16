@@ -1,17 +1,16 @@
-# The metallib function tags Metal answers MTLFunction's properties from (DESIGN D311 item 5,
-# S2): tags.py over the metallibs probe.swift's answers came from (metal-answers.txt), on an M4
-# (macOS 27.0.1, the toolchain TOOLCHAIN records; EV UNI-reflfix-7, for encoders and encoder_types
-# EV UNI-reflfix-14, for encoder_arrays EV UNI-reflfix-15, for leftovers EV RTL-refl-m4c, the
-# same on the M3 Max's toolchain in EV RTL-refl-m3c, for tables_in_arguments EV
-# RFL-refltab3-m4, the same in EV RFL-refltab-m3, for annotations, specialized_reads and
-# mesh_functions EV RFL-reflr2b-m4, the same in EV RFL-reflr2-m3, and for specialized_inputs EV
-# RRX-refl2-m4, the same in EV RRX-refl2-m3, for constant_pointers, function_addresses and
-# constant_initializers EV RRX-ci2-m4, the same in EV RRX-ci2-m3, for constant_loops EV
-# RRX-ci3-m4, the same in EV RRX-ci3-m3, and for constant_branches EV RRX-ci4-m4, the same in EV
-# RRX-ci4-m3). Per function, in function-list
-# order: the TYPE and TESS function-list tags and the CNST, VATT and VATY public-metadata tags, as
-# hex bytes, and the names of its other tags. src/reflection/tests.rs builds metallibs carrying
-# these tags and compares the crate's answers with Metal's.
+# The metallib function tags Metal answers MTLFunction's properties from: tags.py over the metallibs
+# probe.swift's answers came from (metal-answers.txt), on an M4 (macOS 27.0.1, the toolchain
+# TOOLCHAIN records; EV UNI-reflfix-7, for encoders and encoder_types EV UNI-reflfix-14, for
+# encoder_arrays EV UNI-reflfix-15, for leftovers EV RTL-refl-m4c, the same on the M3 Max's
+# toolchain in EV RTL-refl-m3c, for tables_in_arguments EV RFL-refltab3-m4, the same in EV
+# RFL-refltab-m3, for annotations, specialized_reads and mesh_functions EV RFL-reflr2b-m4, the same
+# in EV RFL-reflr2-m3, and for specialized_inputs EV RRX-refl2-m4, the same in EV RRX-refl2-m3, for
+# constant_pointers, function_addresses and constant_initializers EV RRX-ci2-m4, the same in EV
+# RRX-ci2-m3, for constant_loops EV RRX-ci3-m4, the same in EV RRX-ci3-m3, and for constant_branches
+# EV RRX-ci4-m4, the same in EV RRX-ci4-m3). Per function, in function-list order: the TYPE and TESS
+# function-list tags and the CNST, VATT and VATY public-metadata tags, as hex bytes, and the names
+# of its other tags. src/reflection/tests.rs builds metallibs carrying these tags and compares the
+# crate's answers with Metal's.
 == argument_buffers
 function reflection_argument_buffers TYPE=02 other=RFLT
 == buffers

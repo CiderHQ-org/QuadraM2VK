@@ -1,4 +1,4 @@
-// Owned fixture (WP-EXF, DESIGN D198): three color attachments of three numeric classes (float,
+// Owned fixture: three color attachments of three numeric classes (float,
 // unsigned integer, half) read and written by one fragment. Each output mixes values the fragment
 // read from the others: `color` averages itself with `tint` (one rounded sum scaled by a power of
 // two; no multiply feeds an add, so nothing can contract), `tag` adds the bits of `color.x` to

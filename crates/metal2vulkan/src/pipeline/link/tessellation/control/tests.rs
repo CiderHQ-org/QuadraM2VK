@@ -1,8 +1,8 @@
 //! The control stage's factor rules run in the interpreter against a model of Metal's stated rules:
 //! the half decode over every `half`, the triangle and quad layouts, the cull, the scale, each
 //! partition's clamp, `pow2`'s rounding, the step functions' addresses, the pushed residual, and
-//! containment; and its patch index and control-point elements against Metal's (RT6 Metal probes 14
-//! to 14e).
+//! containment; and its patch index and control-point elements against Metal's (Metal probes on an
+//! M4).
 
 use super::*;
 use crate::float16::{f16_bits_to_f32, f32_to_f16_bits};
@@ -552,9 +552,9 @@ fn each_step_function_addresses_its_factors() {
     assert_eq!(got[1], [0.0, 0.0, 0.0, 0.0, 1.0, 1.0]);
 }
 
-/// Factors at any even byte are read from that byte, each `half` its own: an offset or an
-/// instance stride 2 past a multiple of 4, which plain Metal reads at that byte (RT6 Metal probe
-/// 10 `factor_offset_2`), as one at a multiple of 4, for each step function and both domains.
+/// Factors at any even byte are read from that byte, each `half` its own: an offset or an instance
+/// stride 2 past a multiple of 4, which plain Metal reads at that byte (Metal probe case
+/// `factor_offset_2` on an M4), as one at a multiple of 4, for each step function and both domains.
 /// Each `half` of the buffer is a distinct factor, so a read one `half` off answers other levels.
 #[test]
 fn factors_at_an_even_byte_are_read_from_it() {
@@ -654,9 +654,9 @@ fn run_patch_index(indices: &[u32], push: (u32, u32), positions: u32) -> Vec<u32
     words_of(&o.buffers[1])
 }
 
-/// Metal's patch index (RT6 Metal probe 14): the position without a patch index buffer, and with
-/// one the word at the position from the buffer's residual offset, 0 outside the bound range. A
-/// residual below the range's start (a direct draw's from its patch start) wraps.
+/// Metal's patch index (a Metal probe on an M4): the position without a patch index buffer, and
+/// with one the word at the position from the buffer's residual offset, 0 outside the bound range.
+/// A residual below the range's start (a direct draw's from its patch start) wraps.
 #[test]
 fn the_patch_index_is_the_bound_word_at_the_position() {
     let indices = [7, 7, 1, 3, 0, 2];
@@ -743,11 +743,10 @@ fn run_elements(
         .collect()
 }
 
-/// Metal's control points (RT6 Metal probes 14c to 14e): control point `k` of patch `p` is
-/// element `p · N + k` without a control-point index type, and with one the `uint` or `ushort`
-/// at that position from the buffer's residual offset (a `ushort` in either half of a word), 0
-/// outside the bound range. A residual below the range's start (a direct draw's from its patch
-/// start) wraps.
+/// Metal's control points (Metal probes on an M4): control point `k` of patch `p` is element `p ·
+/// N + k` without a control-point index type, and with one the `uint` or `ushort` at that position
+/// from the buffer's residual offset (a `ushort` in either half of a word), 0 outside the bound
+/// range. A residual below the range's start (a direct draw's from its patch start) wraps.
 #[test]
 fn control_points_are_the_indices_at_the_patch_positions() {
     assert_eq!(

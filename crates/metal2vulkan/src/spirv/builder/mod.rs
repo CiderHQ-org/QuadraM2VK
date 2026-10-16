@@ -10,7 +10,7 @@ mod module;
 pub mod ops;
 
 pub use function::FunctionBuilder;
-pub(crate) use module::{mesh_arrayed, mesh_per_primitive};
+pub(crate) use module::{geometry_per_vertex, mesh_arrayed, mesh_per_primitive};
 pub use module::{MaskForm, ModuleBuilder, NarrowFmt, ProductForm, QuantizeForm};
 
 #[cfg(test)]

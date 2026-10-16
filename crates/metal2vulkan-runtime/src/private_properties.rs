@@ -20,11 +20,13 @@
 //!   (`metal2vulkan-degrade-private-properties-unknown`).
 //!
 //! [`MetalLevel::private_count`], [`MetalLevel::private_flag`] and
-//! [`MetalLevel::supports_primitive_type`] are Metal's measured answers (EVs API-props1-m3:
-//! macOS 26.7 on an Apple M3 Max; API-props1-m4: macOS 27.0.1 on an Apple M4; each getter in a
-//! process of its own, none faulted). Like [`MetalLevel`] itself, a level conflates the chip and
-//! the release: Metal's `gpuCoreCount` is the measured chip's, and the device's own is its
-//! driver's ([`DeviceProperties::gpu_core_count`]), where it reports one.
+//! [`MetalLevel::supports_primitive_type`] are Metal's measured answers on an Apple M3 Max (EVs
+//! API-props1-m3: macOS 26.7, each getter in a process of its own, none faulted; M27-props1-m3:
+//! macOS 27.0.1). An Apple M4 under 27.0.1 answers every one alike (EV API-props1-m4) but
+//! `gpuCoreCount` (10) and `supportsComputeCompressedTextureWrite` (yes). Like [`MetalLevel`]
+//! itself, a level conflates the chip and the release: Metal's `gpuCoreCount` is the measured
+//! chip's, and the device's own is its driver's ([`DeviceProperties::gpu_core_count`]), where it
+//! reports one.
 //!
 //! Metal's public properties are [`DeviceProperties`]'s, not repeated here.
 
@@ -219,12 +221,12 @@ impl PrivateCount {
         self.measured().0
     }
 
-    /// The selector and Metal's measured answers: on an Apple M3 Max under macOS 26.7, and on
-    /// an Apple M4 under 27.0.1.
+    /// The selector and Metal's measured answers on an Apple M3 Max: under macOS 26.7, and under
+    /// 27.0.1.
     fn measured(self) -> (&'static str, [u64; 2]) {
         use PrivateCount as C;
         match self {
-            C::GpuCoreCount => ("gpuCoreCount", [40, 10]),
+            C::GpuCoreCount => ("gpuCoreCount", [40, 40]),
             C::MaxVertexAmplificationCount => ("maxVertexAmplificationCount", [2, 2]),
             C::DeviceLinearTextureAlignmentBytes => ("deviceLinearTextureAlignmentBytes", [16, 16]),
             C::LinearTextureAlignmentBytes => ("linearTextureAlignmentBytes", [16, 16]),
@@ -376,8 +378,8 @@ impl PrivateFlag {
         self.measured().0
     }
 
-    /// The selector and Metal's measured answers: on an Apple M3 Max under macOS 26.7, and on
-    /// an Apple M4 under 27.0.1.
+    /// The selector and Metal's measured answers on an Apple M3 Max: under macOS 26.7, and under
+    /// 27.0.1.
     fn measured(self) -> (&'static str, [bool; 2]) {
         use PrivateFlag as F;
         match self {
@@ -388,7 +390,7 @@ impl PrivateFlag {
             F::SupportsBufferWithIosurface => ("supportsBufferWithIOSurface", [true, true]),
             F::SupportsCommandBufferJump => ("supportsCommandBufferJump", [true, true]),
             F::SupportsComputeCompressedTextureWrite => {
-                ("supportsComputeCompressedTextureWrite", [false, true])
+                ("supportsComputeCompressedTextureWrite", [false, false])
             }
             F::SupportsConditionalLoadStore => ("supportsConditionalLoadStore", [true, true]),
             F::SupportsDynamicAttributeStride => ("supportsDynamicAttributeStride", [true, true]),
@@ -423,8 +425,8 @@ fn at(level: MetalLevel) -> usize {
 }
 
 /// The primitive types Metal's `supportsPrimitiveType:` answers yes for at each measured level:
-/// raw 0 to 8, the five public types and four private ones (EVs API-props1-m3 and API-props1-m4,
-/// raw 0 to 12).
+/// raw 0 to 8, the five public types and four private ones (EVs API-props1-m3 and M27-props1-m3,
+/// raw 0 to 12; an Apple M4 alike, API-props1-m4).
 const MEASURED_PRIMITIVE_TYPES: [u64; 2] = [9, 9];
 
 impl MetalLevel {

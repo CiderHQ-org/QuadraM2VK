@@ -135,6 +135,7 @@ use super::texture_descriptor::TextureLayout;
 use super::tracker::{Access, Barrier, Use, UseRange};
 use super::values::ResourceOptions;
 use super::Device;
+use crate::device::functions::Vk;
 use ash::vk;
 use metal2vulkan::bind::{
     YCbCrCodes, YCbCrConvertModule, YCbCrMatrix, YCbCrPlanes, YCbCrRange, YCbCrWriteModule,
@@ -537,7 +538,7 @@ impl YCbCrConversion {
     /// the image are live until it completes, and the image is in the `GENERAL` layout.
     pub(super) unsafe fn record(
         &self,
-        device: &ash::Device,
+        device: &Vk,
         command_buffer: vk::CommandBuffer,
         source: vk::Buffer,
     ) {
@@ -714,7 +715,7 @@ impl YCbCrWriteBack {
     /// the shadow are live until it completes, and the shadow is in the `GENERAL` layout.
     pub(super) unsafe fn record(
         &self,
-        device: &ash::Device,
+        device: &Vk,
         command_buffer: vk::CommandBuffer,
         source: vk::Buffer,
     ) {

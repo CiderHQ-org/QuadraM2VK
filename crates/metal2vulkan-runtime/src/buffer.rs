@@ -31,10 +31,14 @@ use super::generated_commands::PREPROCESS_BUFFER;
 use super::heap::{Heap, HeapType};
 use super::host_aliases::Alias;
 use super::host_memory::{KeepAlive, Release};
-use super::memory::{MemoryClass, Placement, BLOCK_BYTES};
+#[cfg(unix)]
+use super::host_residency::{Again, Imported, Residency};
+use super::memory::{Mapped, MemoryClass, Placement, BLOCK_BYTES};
+use super::program_objects::ProgramObject;
 use super::rebind::Unexact;
 use super::resource::{Identity, ObjectId, ResourceKey};
 use super::texture::first_move::Filled;
+use super::texture::shared_alias::SharedImages;
 use super::texture::AliasWatch;
 use super::values::{CpuCacheMode, HazardTrackingMode, ResourceOptions, StorageMode};
 use super::Device;
@@ -145,6 +149,9 @@ pub(super) struct HostCell {
     /// and in it), which a detach makes present stand-ins (`detach.rs`), and the textures being
     /// made over them, which a detach refuses while one is.
     textures: Mutex<TexturesOver>,
+    /// The buffer's Metal address was handed out (`Buffer::gpu_address`): its import is kept
+    /// imported for good (`host_residency.rs`), and the call need not look again.
+    exposed: AtomicBool,
 }
 
 /// The textures over a buffer's host pages ([`HostCell`]): their images, which a detach makes
@@ -279,7 +286,7 @@ impl Detached {
         let Bytes::Own(own) = &stand_in.0.bytes else {
             return Err(internal("a detached buffer's stand-in placed in a heap"));
         };
-        let old = &from.import.pages;
+        let old = from.import.shape;
         let pages = own.with(|pages| {
             let placement = &pages.memory.placement;
             Pages {
@@ -327,10 +334,10 @@ impl HostCell {
     pub(super) fn host_range(&self) -> Option<std::ops::Range<usize>> {
         match self.lying() {
             Lying::In(pages) => {
-                let pages = &pages.import.pages;
-                let mapped = pages.memory.placement.mapped?;
-                let start = (mapped.as_ptr() as usize).checked_add(pages.offset as usize)?;
-                Some(start..start.checked_add(pages.reach as usize)?)
+                let shape = pages.import.shape;
+                let mapped = shape.mapped?;
+                let start = (mapped.as_ptr() as usize).checked_add(shape.offset as usize)?;
+                Some(start..start.checked_add(shape.reach as usize)?)
             }
             Lying::Detached(_) => None,
         }
@@ -404,7 +411,31 @@ impl HostCell {
 #[derive(Clone)]
 pub(super) enum PagesHold {
     Fixed { _pages: Arc<FixedPages> },
-    Host { _pages: Arc<HostPages> },
+    Host { _pages: ListedPages },
+}
+
+/// A live buffers' table's hold on host pages (`PagesHold::Host`), counted
+/// (`HostPages::listed`): one left as the buffer is released is a table a command buffer that may
+/// reach the pages unnamed holds, past Metal's release (`HostPages::announce_listed`).
+pub(super) struct ListedPages(Arc<HostPages>);
+
+impl ListedPages {
+    fn new(pages: Arc<HostPages>) -> ListedPages {
+        pages.listed.fetch_add(1, Ordering::AcqRel);
+        ListedPages(pages)
+    }
+}
+
+impl Clone for ListedPages {
+    fn clone(&self) -> ListedPages {
+        ListedPages::new(Arc::clone(&self.0))
+    }
+}
+
+impl Drop for ListedPages {
+    fn drop(&mut self) {
+        self.0.listed.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// A hold on the memory a buffer's bytes lie in now, and on nothing else of the buffer
@@ -460,13 +491,17 @@ impl Drop for FixedPages {
 /// The import may outlive them: a texture over the pages whose image a command buffer submitted
 /// before the texture's release may still read through its resource ID holds it (`heap_sets.rs`).
 /// Vulkan requires the pages to stay mapped while imported, so the deallocator runs as they go only
-/// where the caller's keep-alive keeps the pages mapped (the import drops it once freed), or
+/// where the caller's keep-alive keeps the pages mapped (the import keeps it until freed), or
 /// another buffer lies in the import, whose contract keeps them mapped; else it runs once the
 /// import is freed, at once where nothing else holds it, and announced where something does
-/// (`host-deallocator-delayed`).
+/// (`host-deallocator-delayed`). A keep-alive goes as they go where the import's pages stay mapped
+/// without it: another buffer lies in the import, or the import keeps another's keep-alive already
+/// (every buffer in it was made over the same bytes, `host_aliases.rs`). So an import keeps one
+/// keep-alive at most, however many buffers come and go over its bytes while it lives.
 pub(super) struct HostPages {
-    /// The images and views over them a rebind replaced (a no-copy heap's textures', texel
-    /// buffer views), which commands recorded before it may use: destroyed with them, first.
+    /// The images and views over them a rebind or a detach replaced (a no-copy heap's textures',
+    /// texel buffer views), which commands recorded before it may use: destroyed with them,
+    /// first.
     parked: Mutex<Vec<Box<dyn Any + Send + Sync>>>,
     /// Their `VkBuffer` and its memory, which no-copy buffers made over the same bytes share
     /// (`host_aliases.rs`).
@@ -474,16 +509,22 @@ pub(super) struct HostPages {
     /// Their release to the caller's deallocator and keep-alive, set once they are the buffer's
     /// (a refused rebind drops its pages without it, and the deallocator unrun).
     release: OnceLock<Release>,
+    /// The live buffers' tables' holds on them ([`ListedPages`]).
+    listed: AtomicUsize,
 }
 
 impl HostPages {
     /// New pages lying in `import`, with no release yet.
     fn new(import: Arc<HostImport>) -> HostPages {
-        import.lying.fetch_add(1, Ordering::AcqRel);
+        if import.lying.fetch_add(1, Ordering::AcqRel) > 0 {
+            // Another buffer lies in it: imported for good (`host_residency.rs`).
+            import.expose();
+        }
         HostPages {
             parked: Mutex::new(Vec::new()),
             import,
             release: OnceLock::new(),
+            listed: AtomicUsize::new(0),
         }
     }
 
@@ -492,38 +533,73 @@ impl HostPages {
         lock(&self.parked).push(Box::new(objects));
     }
 
-    /// Their memory and where the bytes start in it (a heap's textures bind images there).
+    /// Their memory and where the bytes start in it (a heap's textures bind images there): a
+    /// read that keeps the import imported for good (`host_residency.rs`).
     pub(super) fn memory(&self) -> (vk::DeviceMemory, u64) {
-        let pages = &self.import.pages;
+        let pages = self.import.pages();
         let placement = &pages.memory.placement;
         (placement.memory, placement.offset + pages.offset)
     }
 
     /// Where the bytes start in their first imported page.
     pub(super) fn offset(&self) -> u64 {
-        self.import.pages.offset
+        self.import.shape.offset
+    }
+
+    /// The host address of the byte `from_base` bytes past their bytes' start
+    /// ([`HostPages::memory`]): where an image bound there lies for the host. `None` where the
+    /// import is not mapped.
+    pub(super) fn host_at(&self, from_base: u64) -> Option<Mapped> {
+        let shape = &self.import.shape;
+        Some(shape.mapped?.add(shape.offset + from_base))
     }
 
     /// The index of their memory's type.
     pub(super) fn type_index(&self) -> u32 {
-        self.import.pages.memory.placement.type_index()
+        self.import.shape.type_index
     }
 
     /// Whether they were imported as dma-bufs (`dma_buf.rs`), not by their pointer.
     pub(super) fn over_dma_buf(&self) -> bool {
-        self.import.pages.memory.placement.over_dma_buf()
+        self.import.shape.over_dma_buf
     }
 
     /// Where they lie as dma-bufs (`dma_buf.rs`): the imports, with the caller's source; the host
     /// address where their bytes start (from which an image over them reckons its texels'); and
-    /// the imports' memory type. `None` for pages imported by their pointer.
+    /// the imports' memory type. `None` for pages imported by their pointer. A read that keeps
+    /// the import imported for good (`host_residency.rs`).
     #[cfg(unix)]
-    pub(super) fn dma_buf(&self) -> Option<(&Arc<crate::dma_buf::DmaBufPages>, u64, u32)> {
-        let pages = &self.import.pages;
+    pub(super) fn dma_buf(&self) -> Option<(Arc<crate::dma_buf::DmaBufPages>, u64, u32)> {
+        let pages = self.import.pages();
         let placement = &pages.memory.placement;
-        let imports = placement.dma_buf_pages()?;
+        let imports = Arc::clone(placement.dma_buf_pages()?);
         let start = (placement.mapped?.as_ptr() as u64).checked_add(pages.offset)?;
         Some((imports, start, placement.type_index()))
+    }
+
+    /// As the buffer that lies in them is released (`BufferShared`'s drop, a no-copy heap's own
+    /// buffer's included), its listing let go of: a live buffers' table that still lists them is a
+    /// command buffer's, one that may reach them unnamed (its first submission's, a host step's,
+    /// or one a root table recorded before its first submission holds, `live_buffers.rs`), and
+    /// the pages stay, their deallocator waiting, until it lets go of it, where Metal's runs at
+    /// the release. Announced once per device (`Degradation::HostDeallocatorDelayed`).
+    fn announce_listed(&self, device: &Device) {
+        let Some(release) = self.release.get() else {
+            return;
+        };
+        if !release.deallocates() || self.listed.load(Ordering::Acquire) == 0 {
+            return;
+        }
+        device.shared().counts.host_deallocator_delayed();
+        let length = release.length();
+        device.degrade_once(Degradation::HostDeallocatorDelayed, || {
+            (
+                format!("a no-copy buffer of {length} bytes"),
+                "a command buffer that may reach its pages unnamed (a live buffers' table it \
+                 holds lists them) holds them as it is released"
+                    .to_owned(),
+            )
+        });
     }
 
     /// Release the pages to `release` when they go.
@@ -543,17 +619,113 @@ impl HostPages {
 /// memory imported from them. Every no-copy buffer made over the same bytes as a live one, of
 /// its memory class, lies in its import (`host_aliases.rs`): one resource to the driver, as one
 /// IOSurface's memory is to Metal. The last hold on it destroys the `VkBuffer` and frees the
-/// import.
+/// import, but for a releasable one's, which the command buffers that read them hold too
+/// (`host_residency.rs`).
 pub(super) struct HostImport {
     device: Device,
-    pages: Pages,
+    /// Where the bytes lie in its `VkBuffer` and memory: the same in each import of them again.
+    shape: Shape,
+    /// Its `VkBuffer` and memory.
+    objects: Objects,
     /// The [`HostPages`] lying in it.
     lying: AtomicUsize,
-    /// The keep-alives of pages that went while it lived, dropped once it is freed.
-    kept: Mutex<Vec<KeepAlive>>,
+    /// The keep-alive of the pages that went while it lived with none other lying in it, dropped
+    /// once it is freed: it keeps the bytes mapped for every buffer made over them, since all were
+    /// made over the same bytes, so a later one's keep-alive is dropped as its pages go
+    /// ([`HostPages`]).
+    kept: Mutex<Option<ProgramObject<KeepAlive>>>,
     /// The releases of pages that went while it lived with no keep-alive: their deallocators
     /// run once it is freed.
     after_free: Mutex<Vec<Release>>,
+    /// The `VkImage`s textures of one image over the same bytes of it share
+    /// (`texture/shared_alias.rs`), held while it lives, and dropped before its memory is freed.
+    shared: SharedImages,
+}
+
+/// Where a host import's bytes lie in its `VkBuffer` and memory, which reading needs no
+/// `VkBuffer`: the same in each import of them again (`host_residency.rs`).
+#[derive(Clone, Copy)]
+pub(super) struct Shape {
+    /// Where the bytes start in the first imported page.
+    pub(super) offset: u64,
+    /// Where the buffer's byte 0 lies in its `VkBuffer`.
+    pub(super) base: u64,
+    /// The bytes from byte 0 a copy reads ([`Buffer::copy_reach`]).
+    pub(super) reach: u64,
+    /// The host address of the first imported byte.
+    pub(super) mapped: Option<Mapped>,
+    /// The index of the memory's type.
+    pub(super) type_index: u32,
+    /// The pages were imported as dma-bufs (`dma_buf.rs`), not by their pointer.
+    pub(super) over_dma_buf: bool,
+}
+
+impl Shape {
+    /// The shape of `pages`.
+    pub(super) fn of(pages: &Pages) -> Shape {
+        let placement = &pages.memory.placement;
+        Shape {
+            offset: pages.offset,
+            base: pages.base,
+            reach: pages.reach,
+            mapped: placement.mapped,
+            type_index: placement.type_index(),
+            over_dma_buf: placement.over_dma_buf(),
+        }
+    }
+
+    /// Whether `other` lays the bytes as this does: an import again of them as their first.
+    pub(super) fn same(&self, other: &Shape) -> bool {
+        let at = |shape: &Shape| shape.mapped.map(Mapped::as_ptr);
+        (
+            self.offset,
+            self.base,
+            self.reach,
+            self.type_index,
+            self.over_dma_buf,
+        ) == (
+            other.offset,
+            other.base,
+            other.reach,
+            other.type_index,
+            other.over_dma_buf,
+        ) && at(self) == at(other)
+    }
+}
+
+/// A host import's `VkBuffer` and memory.
+enum Objects {
+    /// Imported until the import goes.
+    Fixed(Pages),
+    /// Released while idle, and imported again at the next read (`host_residency.rs`).
+    #[cfg(unix)]
+    Releasable(Residency),
+}
+
+/// A host import's `VkBuffer` and memory as one read takes them: borrowed from an import that
+/// keeps them, or held, from one that may release them, for as long as the read lasts.
+pub(super) enum ImportPages<'a> {
+    Fixed(&'a Pages),
+    #[cfg(unix)]
+    Held(Arc<Imported>),
+    /// The device's stand-in, which a read of a released import takes where the device cannot
+    /// import it again ([`HostImport::pages`]).
+    #[cfg(unix)]
+    StandIn(Arc<FixedPages>),
+}
+
+impl std::ops::Deref for ImportPages<'_> {
+    type Target = Pages;
+
+    fn deref(&self) -> &Pages {
+        match self {
+            ImportPages::Fixed(pages) => pages,
+            #[cfg(unix)]
+            ImportPages::Held(imported) => &imported.pages,
+            #[cfg(unix)]
+            ImportPages::StandIn(stand_in) => &stand_in.pages,
+        }
+    }
 }
 
 impl HostImport {
@@ -561,11 +733,104 @@ impl HostImport {
     fn new(device: &Device, pages: Pages) -> HostImport {
         HostImport {
             device: device.clone(),
-            pages,
+            shape: Shape::of(&pages),
+            objects: Objects::Fixed(pages),
             lying: AtomicUsize::new(0),
-            kept: Mutex::new(Vec::new()),
+            kept: Mutex::new(None),
             after_free: Mutex::new(Vec::new()),
+            shared: SharedImages::default(),
         }
+    }
+
+    /// The import of `pages`, no pages lying in it yet, which the device releases while idle and
+    /// `again` imports again (`host_residency.rs`).
+    #[cfg(unix)]
+    fn releasable(
+        device: &Device,
+        pages: Pages,
+        again: Again,
+        stand_in: Arc<FixedPages>,
+    ) -> HostImport {
+        HostImport {
+            device: device.clone(),
+            shape: Shape::of(&pages),
+            objects: Objects::Releasable(Residency::new(device, pages, again, stand_in)),
+            lying: AtomicUsize::new(0),
+            kept: Mutex::new(None),
+            after_free: Mutex::new(Vec::new()),
+            shared: SharedImages::default(),
+        }
+    }
+
+    /// Its residency, where the device may release it while idle.
+    #[cfg(unix)]
+    pub(super) fn residency(&self) -> Option<&Residency> {
+        match &self.objects {
+            Objects::Fixed(_) => None,
+            Objects::Releasable(residency) => Some(residency),
+        }
+    }
+
+    /// Its `VkBuffer` and memory for a read other than a blit's, which keeps a releasable import
+    /// imported for good from then on (`host_residency.rs`). Released, it is imported again
+    /// first; where the device cannot, the device is lost (its work no longer runs) and the read
+    /// takes the device's stand-in.
+    pub(super) fn pages(&self) -> ImportPages<'_> {
+        match &self.objects {
+            Objects::Fixed(pages) => ImportPages::Fixed(pages),
+            #[cfg(unix)]
+            Objects::Releasable(residency) => match residency.exposed() {
+                Some(held) => ImportPages::Held(held),
+                None => {
+                    // No work that read it runs on a lost device.
+                    self.device.mark_lost();
+                    self.device.shared().counts.host_import_lost();
+                    ImportPages::StandIn(residency.stand_in())
+                }
+            },
+        }
+    }
+
+    /// Its `VkBuffer` and memory for a blit's command (`Buffer::blit_at`), imported again where
+    /// released, with what the command buffer holds of them until it completed: nothing of an
+    /// import that keeps them. Refused where the device cannot import them again.
+    pub(super) fn blit_pages(
+        &self,
+    ) -> Result<(ImportPages<'_>, Option<Arc<dyn Any + Send + Sync>>), Error> {
+        match &self.objects {
+            Objects::Fixed(pages) => Ok((ImportPages::Fixed(pages), None)),
+            #[cfg(unix)]
+            Objects::Releasable(residency) => {
+                let held = residency.for_blit()?;
+                let hold: Arc<dyn Any + Send + Sync> = Arc::clone(&held) as _;
+                Ok((ImportPages::Held(held), Some(hold)))
+            }
+        }
+    }
+
+    /// Its `VkBuffer` and memory for a live-table listing (`live_buffers.rs`), which reads them
+    /// without exposing them: `None` while a releasable import is released.
+    fn listing(&self) -> Option<ImportPages<'_>> {
+        match &self.objects {
+            Objects::Fixed(pages) => Some(ImportPages::Fixed(pages)),
+            #[cfg(unix)]
+            Objects::Releasable(residency) => residency.listing().map(ImportPages::Held),
+        }
+    }
+
+    /// Keep it imported for good from now on (`host_residency.rs`): whether it was ever
+    /// released, so a range of it noted before may be stale.
+    pub(super) fn expose(&self) -> bool {
+        match &self.objects {
+            Objects::Fixed(_) => false,
+            #[cfg(unix)]
+            Objects::Releasable(residency) => residency.expose(),
+        }
+    }
+
+    /// The shared images of textures over its bytes (`texture/shared_alias.rs`).
+    pub(super) fn shared_images(&self) -> &SharedImages {
+        &self.shared
     }
 }
 
@@ -574,7 +839,7 @@ impl Device {
     /// device's message sink (`Verbose`, id name `metal2vulkan-host-import-freed`) for a host
     /// import of `bytes` freed: MoltenVK removes its buffer from the set and commits the set at
     /// once, with the submissions in flight on the device's queues it names. Elsewhere nothing.
-    fn note_import_freed(&self, bytes: u64) {
+    pub(super) fn note_import_freed(&self, bytes: u64) {
         let facts = super::device::argument_buffers::Facts::of(&self.properties().description);
         if !facts.keeps_residency_set() {
             return;
@@ -614,32 +879,92 @@ impl Drop for HostImport {
             for release in lock(&self.after_free).iter() {
                 release.keep();
             }
-            for kept in lock(&self.kept).drain(..) {
+            if let Some(kept) = lock(&self.kept).take() {
                 std::mem::forget(kept);
             }
             return;
         };
+        // Its shared images go before the memory they are bound in is freed: nothing else holds
+        // one, as every holder of one holds the import.
+        self.shared.clear();
         let shared = self.device.shared();
-        // A submission that used the pages waited for their sparse binding: waited for here
-        // where none did.
-        self.pages.memory.placement.settle();
-        // SAFETY: no pending command buffer uses the pages: one whose commands used them holds
-        // them until it completed (`rebind.rs`), one that may read a texture's image over them
-        // holds the image, which holds the import (`heap_sets.rs`), and every buffer over them
-        // let go of them; their binding completed.
-        unsafe { release::object(shared.vk(), self.pages.raw) };
-        lock(&shared.memory).free(shared.vk(), &self.pages.memory.placement);
         drop(busy);
-        self.device
-            .note_import_freed(self.pages.memory.placement.size());
-        // Freed: the keep-alives go, and the deallocators that waited for the free run, each
-        // panic caught.
-        let kept: Vec<KeepAlive> = lock(&self.kept).drain(..).collect();
-        for keep_alive in kept {
-            exit_guard::program(move || drop(keep_alive));
+        // Once freed, the keep-alive goes, and the deallocators that waited for the free run.
+        let kept = lock(&self.kept).take();
+        if kept.is_some() {
+            shared.counts.host_keep_alive_freed();
         }
-        let after_free: Vec<Release> = lock(&self.after_free).drain(..).collect();
-        for release in &after_free {
+        let releases: Vec<Release> = lock(&self.after_free).drain(..).collect();
+        let delayed = releases.iter().find(|release| release.deallocates());
+        let length = delayed.map(Release::length);
+        let after = AfterFree { kept, releases };
+        let freed = match &self.objects {
+            // SAFETY: no pending command buffer uses the pages: one whose commands used them
+            // holds them until it completed (`rebind.rs`), one that may read a texture's image
+            // over them holds the image, which holds the import (`heap_sets.rs`), and every
+            // buffer over them let go of them.
+            Objects::Fixed(pages) => unsafe {
+                pages.release_import(&self.device, Some(Box::new(after)))
+            },
+            // Its objects go now, or with the last command buffer that read them, which
+            // completes before the buffers over it let go (each holds its buffer too).
+            #[cfg(unix)]
+            Objects::Releasable(residency) => {
+                residency.let_go();
+                Some(Box::new(after) as Box<dyn Send>)
+            }
+        };
+        match (freed, length) {
+            // Freed now: what waited goes here.
+            (Some(after), _) => drop(after),
+            // Its memory waits for the batches in flight (`freed_memory.rs`), and a deallocator
+            // with it, past Metal's release.
+            (None, Some(length)) => {
+                shared.counts.host_deallocator_delayed();
+                self.device
+                    .degrade_once(Degradation::HostDeallocatorDelayed, || {
+                        (
+                            format!("a no-copy buffer of {length} bytes"),
+                            "its pages' import, freed, waits for the batches submitted before \
+                             its release: the device's driver fails pending work whose \
+                             pipelines read device addresses where such memory is freed, and \
+                             the caller gave no keep-alive"
+                                .to_owned(),
+                        )
+                    });
+            }
+            (None, None) => {}
+        }
+    }
+}
+
+/// What goes once a host import's memory is freed: the keep-alive of the pages that went while it
+/// lived, and the deallocators that waited for the free, each panic caught. It waits with the
+/// memory where that waits for the batches in flight (`freed_memory.rs`).
+struct AfterFree {
+    kept: Option<ProgramObject<KeepAlive>>,
+    releases: Vec<Release>,
+}
+
+impl Drop for AfterFree {
+    fn drop(&mut self) {
+        let kept = self.kept.take();
+        let Some(busy) = exit_guard::enter() else {
+            // The process is exiting: the pages stay imported to its end (`exit_guard`), so no
+            // deallocator runs and no keep-alive goes.
+            for release in &self.releases {
+                release.keep();
+            }
+            if let Some(kept) = kept {
+                std::mem::forget(kept);
+            }
+            return;
+        };
+        drop(busy);
+        if let Some(keep_alive) = kept {
+            exit_guard::program_release(move || drop(keep_alive));
+        }
+        for release in &self.releases {
             release.run();
         }
     }
@@ -647,7 +972,7 @@ impl Drop for HostImport {
 
 impl Drop for HostPages {
     fn drop(&mut self) {
-        // The images and views a rebind parked go first: they may hold the import.
+        // The images and views a rebind or a detach parked go first: they may hold the import.
         lock(&self.parked).clear();
         let others = self.import.lying.fetch_sub(1, Ordering::AcqRel) > 1;
         let Some(release) = self.release.take() else {
@@ -663,10 +988,28 @@ impl Drop for HostPages {
         let import = &self.import;
         match release.keep_alive() {
             // The caller's keep-alive keeps the pages mapped until the import is freed: the
-            // deallocator runs now, at Metal's moment.
+            // deallocator runs now, at Metal's moment. Where another buffer lies in the import,
+            // or the import keeps another's keep-alive, that keeps the same bytes mapped until it
+            // is freed: this one goes now too, after the deallocator, which may read the bytes.
             Some(keep_alive) => {
-                lock(&import.kept).push(keep_alive);
+                let counts = &import.device.shared().counts;
+                let covered = {
+                    let mut kept = lock(&import.kept);
+                    match others || kept.is_some() {
+                        true => Some(keep_alive),
+                        false => {
+                            // Counted before the free can take it.
+                            counts.host_keep_alive_kept();
+                            *kept = Some(keep_alive);
+                            None
+                        }
+                    }
+                };
                 release.run();
+                if let Some(keep_alive) = covered {
+                    counts.host_keep_alive_covered();
+                    exit_guard::program_release(move || drop(keep_alive));
+                }
             }
             // Another buffer lies in the import, whose contract keeps the pages mapped: the
             // deallocator runs now, as with an import of its own (`host_aliases.rs`).
@@ -696,6 +1039,38 @@ impl Drop for HostPages {
     }
 }
 
+impl Pages {
+    /// Destroy the `VkBuffer` of a host import's pages and free their memory, on `device`, once
+    /// their sparse binding completed, and note it (`Device::note_import_freed`): an import's
+    /// last hold lets go. Left to the process's end while it exits. `after` goes once the memory
+    /// is freed: given back for the caller to let go of, unless it waits with the memory for the
+    /// batches in flight (`freed_memory.rs`).
+    ///
+    /// # Safety
+    ///
+    /// No pending command buffer uses the pages, and nothing else frees them.
+    pub(super) unsafe fn release_import(
+        &self,
+        device: &Device,
+        after: Option<Box<dyn Send>>,
+    ) -> Option<Box<dyn Send>> {
+        // The Vulkan teardown is a section of the exit guard.
+        let Some(busy) = exit_guard::enter() else {
+            return after;
+        };
+        let shared = device.shared();
+        // A submission that used the pages waited for their sparse binding: waited for here where
+        // none did.
+        self.memory.placement.settle();
+        // SAFETY: the caller's.
+        unsafe { release::object(shared.vk(), self.raw) };
+        let after = lock(&shared.memory).free_then(shared.vk(), &self.memory.placement, after);
+        drop(busy);
+        device.note_import_freed(self.memory.placement.size());
+        after
+    }
+}
+
 /// A buffer's bound memory: its placement, and its Vulkan device address where the device
 /// enables `bufferDeviceAddress`.
 pub(super) struct Bound {
@@ -704,13 +1079,27 @@ pub(super) struct Bound {
 }
 
 impl OwnBytes {
-    /// `f` of the pages the buffer lies in now: a detached buffer's stand-in (`Detached`).
+    /// `f` of the pages the buffer lies in now: a detached buffer's stand-in (`Detached`). A
+    /// read of a no-copy buffer's import other than a blit's, which keeps it imported for good
+    /// (`HostImport::pages`).
     fn with<R>(&self, f: impl FnOnce(&Pages) -> R) -> R {
         match &self.lie {
             Lie::Fixed(fixed) => f(&fixed.pages),
             Lie::Host(cell) => match cell.lying() {
-                Lying::In(pages) => f(&pages.import.pages),
+                Lying::In(pages) => f(&pages.import.pages()),
                 Lying::Detached(detached) => f(&detached.pages),
+            },
+        }
+    }
+
+    /// Where the bytes lie in the pages the buffer lies in now ([`Shape`]), read without their
+    /// `VkBuffer`.
+    fn shape(&self) -> Shape {
+        match &self.lie {
+            Lie::Fixed(fixed) => Shape::of(&fixed.pages),
+            Lie::Host(cell) => match cell.lying() {
+                Lying::In(pages) => pages.import.shape,
+                Lying::Detached(detached) => Shape::of(&detached.pages),
             },
         }
     }
@@ -834,6 +1223,11 @@ impl Drop for BufferShared {
         // The range is free and no lock is held: the caller's token goes, so a creation at the
         // range from its drop on succeeds.
         own.range_token.release();
+        if let Lie::Host(cell) = &own.lie {
+            if let Lying::In(pages) = cell.lying() {
+                pages.announce_listed(&self.device);
+            }
+        }
     }
 }
 
@@ -870,6 +1264,10 @@ pub(super) struct BufferParts {
     pub(super) of_heap: bool,
     /// A `Managed` buffer's host copy, on a device without unified memory.
     pub(super) mirror: Option<Arc<Mirror>>,
+    /// What imports a no-copy buffer's dma-bufs again, where the device may release its import
+    /// while idle (`host_residency.rs`).
+    #[cfg(unix)]
+    pub(super) again: Option<Again>,
 }
 
 impl std::fmt::Debug for Buffer {
@@ -1192,6 +1590,8 @@ impl Device {
             release: None,
             of_heap,
             mirror,
+            #[cfg(unix)]
+            again: None,
         }))
     }
 
@@ -1312,6 +1712,8 @@ impl Device {
             release: None,
             of_heap: false,
             mirror: None,
+            #[cfg(unix)]
+            again: None,
         }))
     }
 
@@ -1331,12 +1733,17 @@ impl Device {
             release,
             of_heap,
             mirror,
+            #[cfg(unix)]
+            again,
         } = parts;
         let pages = self.pages_of(raw, memory, offset, base, reach);
         let identity = Identity::new(modes.hazard, of_heap);
         let lie = match owner {
             // A no-copy buffer's pages are its until a rebind (`rebind.rs`).
             Owner::Caller => {
+                #[cfg(unix)]
+                let import = self.host_import(pages, again);
+                #[cfg(not(unix))]
                 let import = Arc::new(HostImport::new(self, pages));
                 self.host_lie(identity.key, import, release)
             }
@@ -1355,6 +1762,25 @@ impl Device {
             range_token: KeptToken::default(),
         };
         self.buffer_lying(own, length, modes, address)
+    }
+
+    /// The import of a no-copy buffer's `pages`: one the device releases while idle where
+    /// `again` imports them again and the device keeps a stand-in for it and a thread to release
+    /// it (`host_residency.rs`), else one it keeps.
+    #[cfg(unix)]
+    fn host_import(&self, pages: Pages, again: Option<Again>) -> Arc<HostImport> {
+        let stand_in = again.as_ref().and_then(|_| self.detach_stand_in().ok());
+        let (Some(again), Some(stand_in)) =
+            (again, stand_in.as_ref().and_then(Buffer::fixed_pages))
+        else {
+            return Arc::new(HostImport::new(self, pages));
+        };
+        let import = Arc::new(HostImport::releasable(self, pages, again, stand_in));
+        if !self.shared().residency.note(&import) {
+            // No thread releases it: kept imported.
+            import.expose();
+        }
+        import
     }
 
     /// A no-copy buffer of `length` bytes lying in `import`, the import of the same bytes a live
@@ -1393,6 +1819,7 @@ impl Device {
             texels: Mutex::new(Vec::new()),
             aliases: Mutex::new(Vec::new()),
             textures: Mutex::new(TexturesOver::default()),
+            exposed: AtomicBool::new(false),
         });
         self.shared().rebinds.register(key, &cell);
         Lie::Host(cell)
@@ -1420,7 +1847,7 @@ impl Device {
 
     /// The pages of a buffer `raw` in `memory`, its bytes `offset` bytes into its placement and
     /// `base` bytes into `raw`, `reach` bytes from byte 0 copied out.
-    fn pages_of(
+    pub(super) fn pages_of(
         &self,
         raw: vk::Buffer,
         placement: Placement,
@@ -1707,7 +2134,7 @@ impl Buffer {
     /// written past the length, or another resource's: refused (`Invalid`).
     pub(super) fn copy_reach(&self) -> u64 {
         match &self.0.bytes {
-            Bytes::Own(own) => own.with(|pages| pages.reach),
+            Bytes::Own(own) => own.shape().reach,
             Bytes::Heap(_) => self.0.length,
         }
     }
@@ -1719,6 +2146,16 @@ impl Buffer {
         match &self.0.bytes {
             Bytes::Own(own) => own.with(|pages| (pages.raw, pages.base + offset)),
             Bytes::Heap(bytes) => bytes.bytes.at(bytes.offset + offset),
+        }
+    }
+
+    /// Where the buffer's byte 0 lies in its `VkBuffer` ([`Buffer::at`]'s offset of byte 0), read
+    /// without the `VkBuffer`: a no-copy buffer's [`Buffer::base`], a heap buffer's offset in its
+    /// heap's.
+    pub(super) fn start(&self) -> u64 {
+        match &self.0.bytes {
+            Bytes::Own(own) => own.shape().base,
+            Bytes::Heap(bytes) => bytes.bytes.start() + bytes.offset,
         }
     }
 
@@ -1736,7 +2173,7 @@ impl Buffer {
     /// below it). An alignment Vulkan asks of an offset holds of `base` plus Metal's offset.
     pub(super) fn base(&self) -> u64 {
         match &self.0.bytes {
-            Bytes::Own(own) => own.with(|pages| pages.base),
+            Bytes::Own(own) => own.shape().base,
             Bytes::Heap(_) => 0,
         }
     }
@@ -1907,9 +2344,18 @@ impl Buffer {
                     _pages: Arc::clone(fixed),
                 },
             )),
+            // A releasable import released is listed without a range: no shader reaches it
+            // unnamed (`host_residency.rs`).
             Lie::Host(cell) => {
                 let host = cell.current()?;
-                Some((range(&host.import.pages)?, PagesHold::Host { _pages: host }))
+                let listing = host.import.listing()?;
+                let listed = range(&listing)?;
+                Some((
+                    listed,
+                    PagesHold::Host {
+                        _pages: ListedPages::new(host),
+                    },
+                ))
             }
         }
     }
@@ -1964,6 +2410,19 @@ impl Buffer {
         }
     }
 
+    /// The pages a buffer of its own lies in for good (the runtime's memory, or the caller's
+    /// `VkBuffer`); `None` for a no-copy buffer and a heap's.
+    #[cfg(unix)]
+    fn fixed_pages(&self) -> Option<Arc<FixedPages>> {
+        match &self.0.bytes {
+            Bytes::Own(OwnBytes {
+                lie: Lie::Fixed(fixed),
+                ..
+            }) => Some(Arc::clone(fixed)),
+            Bytes::Own(_) | Bytes::Heap(_) => None,
+        }
+    }
+
     /// The buffer's hold on its host pages: a no-copy buffer's, or a no-copy heap's own
     /// buffer's; `None` for any other buffer, a heap's buffer among them.
     pub(super) fn host_cell(&self) -> Option<&Arc<HostCell>> {
@@ -2001,6 +2460,52 @@ impl Buffer {
             Bytes::Own(_) => None,
             Bytes::Heap(bytes) => bytes.bytes.pages_cell(),
         }
+    }
+
+    /// The buffer's Metal address, read for the runtime's own bookkeeping (a live-table key, a
+    /// lookup), which hands it out to no one: [`Buffer::gpu_address`] without its exposure.
+    pub(super) fn metal_address(&self) -> GpuAddress {
+        self.0.address
+    }
+
+    /// Keep a no-copy buffer's import imported for good from now on, its Metal address handed
+    /// out (`host_residency.rs`): imported again now where the device released it, and its
+    /// live-table range read again where one was noted before a release.
+    fn expose(&self) {
+        let Some(cell) = self.host_cell() else {
+            return;
+        };
+        if cell.exposed.load(Ordering::Acquire) {
+            return;
+        }
+        if let Some(pages) = cell.current() {
+            if pages.import.expose() {
+                self.device().shared().live_buffers.refresh(self);
+            }
+        }
+        cell.exposed.store(true, Ordering::Release);
+    }
+
+    /// [`Buffer::at`] for a blit's command, which reads the `VkBuffer` without exposing the
+    /// buffer: a no-copy buffer's import the device released while idle is imported again first
+    /// (`host_residency.rs`). With what the command buffer holds until it completed: the
+    /// import's objects, where the device may release them. Refused where the device cannot
+    /// import them again.
+    pub(super) fn blit_at(
+        &self,
+        offset: u64,
+    ) -> Result<((vk::Buffer, u64), Option<Arc<dyn Any + Send + Sync>>), Error> {
+        if let Bytes::Own(OwnBytes {
+            lie: Lie::Host(cell),
+            ..
+        }) = &self.0.bytes
+        {
+            if let Lying::In(pages) = cell.lying() {
+                let (held, hold) = pages.import.blit_pages()?;
+                return Ok(((held.raw, held.base + offset), hold));
+            }
+        }
+        Ok((self.at(offset), None))
     }
 
     /// The host pages the buffer's bytes lie in now ([`Buffer::pages_cell`]): a no-copy
@@ -2113,10 +2618,11 @@ impl Buffer {
                 .mapped
                 .and_then(|mapped| NonNull::new(mapped.as_ptr())),
             // The offset is inside the placement, which the mapping covers.
-            Bytes::Own(own) => own.with(|pages| {
-                let mapped = pages.memory.placement.mapped?;
-                NonNull::new(mapped.as_ptr().wrapping_add(pages.offset as usize))
-            }),
+            Bytes::Own(own) => {
+                let shape = own.shape();
+                let mapped = shape.mapped?;
+                NonNull::new(mapped.as_ptr().wrapping_add(shape.offset as usize))
+            }
             // The heap's storage mode is the buffer's, and the offset lies inside the heap.
             Bytes::Heap(bytes) => bytes.bytes.contents().and_then(|contents| {
                 NonNull::new(contents.as_ptr().wrapping_add(bytes.offset as usize))
@@ -2133,7 +2639,13 @@ impl Buffer {
 
     /// `gpuAddress`: the buffer's address in the device's Metal address space. A heap buffer's
     /// is its heap's plus its offset there (`Heap::gpu_address`).
+    ///
+    /// A no-copy buffer whose import the device may release while idle and import again at its
+    /// next blit (an import of dma-bufs: a runtime-internal residency, which nothing of Metal's
+    /// observes) is kept imported for good from this call on: a command may reach it unnamed by
+    /// this address.
     pub fn gpu_address(&self) -> GpuAddress {
+        self.expose();
         self.0.address
     }
 

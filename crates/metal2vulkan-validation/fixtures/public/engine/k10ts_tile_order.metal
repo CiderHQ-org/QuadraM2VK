@@ -1,4 +1,4 @@
-// Owned fixture (WP-K10TS, DESIGN D205): which thread of a tile dispatch is which. Each thread
+// Owned fixture: which thread of a tile dispatch is which. Each thread
 // adds one to its own cell of an `r32float` attachment and records, at its
 // `thread_index_in_threadgroup`, its `thread_position_in_threadgroup`, its lane and simdgroup, and
 // the position of its simdgroup's first active lane (`simd_broadcast_first`), so a case shows how

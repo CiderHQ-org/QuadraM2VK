@@ -290,7 +290,23 @@ pub const UNDECODED: &[(&str, &str)] = &[
     ("air.convert.f.f8e4m3.", FP8_NARROWING),
     ("air.convert.f.f8e4m3fn.", FP8_NARROWING),
     ("air.convert.f.f8e5m2.", FP8_NARROWING),
+    // A multisample imageblock's operations: its sample count (`get_num_samples`), the colors its
+    // pixel holds and each one's coverage mask (`get_num_colors`, `get_color_coverage_mask`), and
+    // a store to the samples a coverage mask names. Typed as [`UNDECODED_FEATURES`].
+    ("air.get_imageblock_samples", MULTISAMPLE_IMAGEBLOCK),
+    ("air.get_imageblock_num_colors", MULTISAMPLE_IMAGEBLOCK),
+    ("air.get_color_coverage_mask", MULTISAMPLE_IMAGEBLOCK),
+    (
+        "air.store.implicit_imageblock.mask.",
+        MULTISAMPLE_IMAGEBLOCK,
+    ),
 ];
+
+/// The reason a multisample imageblock's operations are [`UNDECODED`].
+const MULTISAMPLE_IMAGEBLOCK: &str = "a multisample imageblock's sample count, colors, coverage \
+                                      masks and masked stores: tile functions and fragment \
+                                      imageblocks run on single-sample passes only, and how many \
+                                      colors Metal keeps for a pixel is not probed";
 
 /// The reason the conversions to an 8-bit float are [`UNDECODED`].
 const FP8_NARROWING: &str = "Metal on M3 (AGXMetalG15X, macOS 26.7) does not compile a float \
@@ -318,6 +334,11 @@ pub const UNDECODED_FEATURES: &[(&str, Feature)] = &[
         "air.set_intersection_function_table.",
         Feature::IntersectionFunctionTable,
     ),
+    // A multisample imageblock's operations: imageblocks, on a single-sample pass only.
+    ("air.get_imageblock_samples", Feature::Imageblocks),
+    ("air.get_imageblock_num_colors", Feature::Imageblocks),
+    ("air.get_color_coverage_mask", Feature::Imageblocks),
+    ("air.store.implicit_imageblock.mask.", Feature::Imageblocks),
 ];
 
 /// The typed feature of the undecoded intrinsic `name` ([`UNDECODED_FEATURES`]), if it belongs

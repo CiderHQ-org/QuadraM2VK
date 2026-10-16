@@ -1,4 +1,4 @@
-// Owned fixture (WP-CFIT, DESIGN D345): a render pass's imageblock shared by its fragment
+// Owned fixture: a render pass's imageblock shared by its fragment
 // functions' `[[imageblock_data]]` and its tile functions' explicit imageblock, in the splat
 // rasterizer's shape: a tile function clears each pixel's cell, each draw's fragments set their
 // splat's bit in their pixel's cell under a raster order group, and a tile function resolves the

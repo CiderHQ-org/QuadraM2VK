@@ -1,4 +1,4 @@
-// WP-RFS (DESIGN D405 item 5): `calculate_clamped_lod` and `calculate_unclamped_lod` outside a
+// Owned fixture: `calculate_clamped_lod` and `calculate_unclamped_lod` outside a
 // fragment function, which MSL calls undefined and Metal answers deterministically (measured on the
 // M3 Max and an M4): the unclamped level is 0, and the clamped one is the sampler's minimum level
 // bounded by the texture's last level. Runtime samplers over 2D, 2D-array, 3D and cube textures;

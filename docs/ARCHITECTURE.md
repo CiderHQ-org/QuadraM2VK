@@ -25,7 +25,10 @@ metallib | AIR bitcode
   ── serialize ───► SPIR-V 1.5 words with typed relocations             spirv::serialize
   = CompiledFunction, keyed by FunctionCompileKey (the caller may cache it)
   ── link ────────► bindings, Locations, spec ids, the pipeline         pipeline::link
-                    layout, pipeline-wide limits
+                    layout, pipeline-wide limits, the generated         pipeline::link::geometry
+                    geometry stages (barycentric weights read as
+                    varyings, a selected slice or viewport stored
+                    from the first vertex)
   ── relocate ────► the final words of each stage                       pipeline::relocate
   = ComputePipeline | RenderPipeline | tile and mesh pipelines
 
@@ -60,7 +63,7 @@ rest is `crates/metal2vulkan/src/`.
 
 | Module | Role |
 |---|---|
-| `air` (`metal2vulkan-air`) | The container (metallib, bitcode wrapper, raw module), the bitstream and bitcode readers, the typed IR, the `air.*` and `llvm.*` intrinsic families, the metadata ABI (`AirAbi`), and canonicalization (`canon`: inlining, function constants, SCCP, devirtualization, linking, pruning, pointee erasure). Canonicalization also writes the formats the binder and runtime read: the visible-function table's words and the rasterization-rate map's parameter data |
+| `air` (`metal2vulkan-air`) | The container (metallib, bitcode wrapper, raw module), the bitstream and bitcode readers, the typed IR, the `air.*` and `llvm.*` intrinsic families, the metadata ABI (`AirAbi`), and canonicalization (`canon`: inlining, function constants, SCCP, devirtualization, linking, pruning, pointee erasure, and the speculation of the short branch arms Metal's backend runs in every lane). Canonicalization also writes the formats the binder and runtime read: the visible-function table's words and the rasterization-rate map's parameter data |
 | `graph` | The shared RPO, dominator tree, loop forest and SCC |
 | `budget` | `Budget`, `CancelToken`, and the per-attempt `Meter`: deadline, cancellation, work units, the byte ledger and every structural cap |
 | `memory/` | Pointer provenance, the `MemoryPlan`, leaf access emitters, arenas, root and handle lookups, word composition, atomics |

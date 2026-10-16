@@ -5,8 +5,8 @@ The refusal surface is read from the construction sites of the typed refusals, o
 
 - the translator's and the AIR front end's `Unsupported` (a `Feature` and its `Needs`): the
   constructors `Unsupported::not_implemented`, `not_representable`, `needs`, `needs_any_of`,
-  `driver_defect`, `runtime_driver_defect`, `metal_gpu_family`, `unmeasured_deviation`, and
-  `Unsupported { .. }` literals, in the `src` of crates/metal2vulkan-air, crates/metal2vulkan and
+  `driver_defect`, `runtime_driver_defect`, `metal_gpu_family`, and `Unsupported { .. }`
+  literals, in the `src` of crates/metal2vulkan-air, crates/metal2vulkan and
   crates/metal2vulkan-runtime;
 - the runtime's `RuntimeGap` (`Error::NotImplemented`) and `AppleOnly` (`Error::AppleOnly`);
 - the binder's refusals of valid bind states at a device limit (`BindError`);
@@ -54,7 +54,6 @@ CONSTRUCTORS = {
     "driver_defect": "DriverDefect",
     "runtime_driver_defect": "RuntimeDriverDefect",
     "metal_gpu_family": "MetalGpuFamily",
-    "unmeasured_deviation": "UnmeasuredDeviation",
 }
 
 # Binder refusals of a valid bind state: a device limit or an unestablished reading. The other
@@ -210,7 +209,7 @@ def split_args(s):
     return args
 
 
-CAP_TOKENS = r"(VkFeature|VkExtension|VkProperty|VkLimit|ApiVersion|DriverWorkaround|RuntimeDriverDefect|DriverDeviation)::([A-Za-z0-9_]+)"
+CAP_TOKENS = r"(VkFeature|VkExtension|VkProperty|VkLimit|ApiVersion|DriverWorkaround|RuntimeDriverDefect)::([A-Za-z0-9_]+)"
 
 
 def conditions(kind, needs_text):
@@ -243,9 +242,6 @@ def conditions(kind, needs_text):
         return {"drivers with defect " + w for w in ws} or {"drivers with a defect"}
     if kind == "MetalGpuFamily":
         return {"devices that do not claim the Metal GPU family"}
-    if kind == "UnmeasuredDeviation":
-        ws = sorted({b for a, b in toks if a == "DriverDeviation"})
-        return {"drivers departing by " + w + " on an unmeasured release" for w in ws}
     return {"varies (" + kind + ")"}
 
 

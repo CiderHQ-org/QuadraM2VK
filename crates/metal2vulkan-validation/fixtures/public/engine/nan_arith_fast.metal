@@ -1,4 +1,4 @@
-// Owned fixture (NaN model, DESIGN D293): `nan_arith`'s program under the default fast math, where
+// Owned fixture (NaN model): `nan_arith`'s program under the default fast math, where
 // the operations carry `fast` (`fadd`, `fsub`, `fmul`, `fdiv`, `air.fma`), `a * b + c` is an
 // `fmul fast` feeding an `fadd fast`, and sqrt and fmod are `air.fast_sqrt` and `air.fast_fmod`.
 // A NaN or infinite operand is undefined under fast math (MSL 7.1); the cases record what Metal

@@ -11,6 +11,7 @@
 use super::*;
 use crate::lower::arith::divide::{self, Path, Rough, Routine};
 use crate::lower::arith::legal::{f16_to_f64, f64_to_f16};
+use crate::lower::arith::narrow;
 
 /// `float` lanes of `lanes` lanes.
 fn floats(lanes: u8) -> Form {
@@ -304,6 +305,63 @@ fn markstein_reciprocal_is_correctly_rounded() {
     }
 }
 
+/// [`Path::Halves`]'s quotient of two `half` values rounds to their exact quotient's `half`, at
+/// every scale: for every pair of 11-bit significands `X / 2^10` and `Y / 2^10` (in `[1, 2)`) and
+/// every estimate of `1 / y` within 2.5 ulp of it, `q = x · r` and one fused step `q + r · (x -
+/// y · q)` give a quotient on the same point of the 12-bit grid as `X / Y` or strictly between
+/// the same two neighboring points. Every `half` value and every `half` rounding midpoint (the
+/// denormal ones and the overflow threshold 65520 included) is such a point at its scale, so the
+/// quotient and the exact one round to the same `half`. The routine's steps stay normal for every
+/// `half` operand (the divisor in `[2^-24, 65504]`, the quotient in `[2^-40, 2^40]`), where
+/// scaling an operand by a power of two scales every step and the set of estimates exactly, and
+/// negating one negates them, so these pairs cover every pair of finite nonzero `half` values.
+#[test]
+fn one_fused_correction_rounds_every_half_quotient() {
+    for my in 0u32..1024 {
+        let big_y = 1024 + my;
+        let y = big_y as f32 / 1024.0;
+        // RN(1 / y), and every float within 2.5 ulp of 1 / y around it (2^-24 in (1/2, 1); at
+        // y = 1, the ulp above one, 2^-23): `f64` holds each product `r · y` exactly (r has 24
+        // bits and y 11).
+        let rn = 1.0 / y;
+        let yf = f64::from(y);
+        let ulp = if my == 0 {
+            2f64.powi(-23)
+        } else {
+            2f64.powi(-24)
+        };
+        let estimates: Vec<f32> = (-5i32..=5)
+            .map(|d| f32::from_bits(rn.to_bits().wrapping_add_signed(d)))
+            .filter(|r| (f64::from(*r) * yf - 1.0).abs() <= 2.5 * ulp * yf)
+            .collect();
+        assert!(estimates.len() >= 4, "y = {y}: {estimates:?}");
+        for mx in 0u32..1024 {
+            let big_x = 1024 + mx;
+            let x = big_x as f32 / 1024.0;
+            // The 12-bit grid of X / Y's binade: spacing 2^-11 in [1, 2), 2^-12 in (1/2, 1).
+            let t = if big_x >= big_y { 11 } else { 12 };
+            let scaled = u64::from(big_x) << t;
+            let (lo, rem) = (scaled / u64::from(big_y), scaled % u64::from(big_y));
+            let point = |k: u64| k as f64 / f64::from(1u32 << t);
+            for &r in &estimates {
+                let q = x * r;
+                let e = (-y).mul_add(q, x);
+                let q = f64::from(e.mul_add(r, q));
+                if rem == 0 {
+                    assert_eq!(q, point(lo), "{big_x} / {big_y}, estimate {r:e}");
+                } else {
+                    assert!(
+                        point(lo) < q && q < point(lo + 1),
+                        "{big_x} / {big_y}, estimate {r:e}: {q:e} is not in ({:e}, {:e})",
+                        point(lo),
+                        point(lo + 1)
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Metal's `half` quotient of half bits `x` and `y`: the exact quotient rounded once to `half`
 /// (the host's `f64` quotient of two `half` values rounds to `half` once), `half` denormals kept.
 fn metal_div16(x: u64, y: u64) -> u64 {
@@ -331,14 +389,14 @@ fn pairs16() -> Vec<[u64; 2]> {
     out
 }
 
-/// A `half` quotient through either path is Metal's, the exact quotient rounded once to `half`,
+/// A `half` quotient through every path is Metal's, the exact quotient rounded once to `half`,
 /// with the device's `float` estimate exact and moved to the edge of 2.5 ulp (where the estimate
 /// rounded to `half` alone would cross a rounding midpoint), on scalars and vectors.
 #[test]
 fn precise_half_division_rounds_once() {
     let pairs = pairs16();
     let exact: Rough<'_> = &|fb, x, y| fb.binary(BinOp::FDiv, x, y);
-    for path in [Path::Integer, Path::Fused] {
+    for path in [Path::Integer, Path::Fused, Path::Halves] {
         for lanes in [1u8, 2] {
             let moved = move |fb: &mut FunctionBuilder<'_>, x: Value, y: Value| {
                 perturbed(fb, floats(lanes), x, y)
@@ -378,7 +436,7 @@ fn precise_half_division_rounds_once() {
 /// The routines' words stay within their estimates.
 #[test]
 fn precise_division_routines_fit_their_word_estimates() {
-    for path in [Path::Integer, Path::Fused] {
+    for path in [Path::Integer, Path::Fused, Path::Halves] {
         for lanes in [1u8, 4] {
             let r = Routine { lanes, path };
             let mut b = ModuleBuilder::new();
@@ -410,7 +468,8 @@ fn precise_division_routines_fit_their_word_estimates() {
 }
 
 /// The path follows the profile: fused where the `float` fused multiply-add is `OpFmaKHR`,
-/// integer elsewhere; both are some committed profile's.
+/// integer elsewhere; a `half` division on the fused path takes the halves' path where the
+/// profile's `half` rounding is not the device's own. Every path is some committed profile's.
 #[test]
 fn the_precise_division_path_follows_the_profile() {
     let mut seen = std::collections::BTreeSet::new();
@@ -428,12 +487,27 @@ fn the_precise_division_path_follows_the_profile() {
             },
             "{stem}"
         );
+        let native = narrow::native_rounding(&p, narrow::quantize_form(&p)).is_some();
+        let want_half = if want == Path::Fused && !native {
+            Path::Halves
+        } else {
+            want
+        };
+        assert_eq!(
+            Routine::on(&p, vec(float(16), 2)),
+            Routine {
+                lanes: 2,
+                path: want_half
+            },
+            "{stem}: half"
+        );
         seen.insert(want);
+        seen.insert(want_half);
     }
     assert_eq!(
         seen.len(),
-        2,
-        "both paths are some committed profile's: {seen:?}"
+        3,
+        "every path is some committed profile's: {seen:?}"
     );
 }
 

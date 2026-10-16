@@ -284,9 +284,8 @@ fn a_bicubic_sample_s_slots_join_the_variants() {
 /// refuses the same word only once compiled, and the runtime keeps no compile that refused. At an
 /// extended-range slot (which refused every `Cubic` word at planning before Metal's bicubic filter
 /// of its texels was built) as at a slot of another format. On every committed profile, the
-/// lowering refuses that variant by the same rule (`metal::bicubic::runtime_cubic_measured`). A
-/// device without `samplerAnisotropy` refuses an anisotropic sampler earlier in the plan, for that
-/// lack (`vk12-bare`): no variant either.
+/// lowering refuses that variant by the same rule (`metal::bicubic::runtime_cubic_measured`), a
+/// device without `samplerAnisotropy` (`vk12-floor`) an anisotropic one alike.
 #[test]
 fn an_unmeasured_cubic_sampler_is_refused_before_any_variant() {
     let bc = match llvm_assemble(&engine_dir().join("xr_bicubic.ll")) {
@@ -320,7 +319,6 @@ fn an_unmeasured_cubic_sampler_is_refused_before_any_variant() {
     ];
     let want = Unsupported::not_implemented(Feature::SamplerBicubicFilter);
     let mut refused = 0;
-    let mut device_refused = 0;
     for (stem, dev) in devices() {
         let plain = pipeline_entry(&dev, &bc, "xrb_runtime", &LowerInputs::new())
             .expect("a sampling kernel");
@@ -335,12 +333,6 @@ fn an_unmeasured_cubic_sampler_is_refused_before_any_variant() {
             for (pf, form) in formats {
                 let what = format!("a cubic sampler with {state}, {pf:?}, on {stem}");
                 match plain.plan(&dev, &sampled_state(pf, sampler).shape()) {
-                    Err(crate::error::BindError::Unsupported(u))
-                        if sampler.max_anisotropy > 1
-                            && u.feature == Feature::SamplerAnisotropy =>
-                    {
-                        device_refused += 1;
-                    }
                     Err(crate::error::BindError::Unsupported(u)) => {
                         assert_eq!(
                             (&u.feature, &u.needs),
@@ -370,6 +362,6 @@ fn an_unmeasured_cubic_sampler_is_refused_before_any_variant() {
             }
         }
     }
-    eprintln!("{refused} unmeasured cubic words refused, {device_refused} of them for the device");
-    assert!(refused > device_refused, "no profile checked");
+    eprintln!("{refused} unmeasured cubic words refused");
+    assert!(refused > 0, "no profile checked");
 }

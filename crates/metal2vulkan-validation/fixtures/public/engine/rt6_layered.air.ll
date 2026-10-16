@@ -8,10 +8,10 @@ target triple = "air64_v28-apple-macosx26.0.0"
 define <{ <4 x float>, i32, i32 }> @rt6_layered_vertex(i32 noundef %0, i32 noundef %1, i32 addrspace(2)* nocapture noundef readonly "air-buffer-no-alias" %2) local_unnamed_addr #0 {
   %4 = shl i32 %0, 1
   %5 = and i32 %4, 2
-  %6 = tail call fast float @air.convert.f.f32.u.i32(i32 %5) #3
+  %6 = tail call fast float @air.convert.f.f32.u.i32(i32 %5) #4
   %7 = insertelement <2 x float> undef, float %6, i64 0
   %8 = and i32 %0, 2
-  %9 = tail call fast float @air.convert.f.f32.u.i32(i32 %8) #3
+  %9 = tail call fast float @air.convert.f.f32.u.i32(i32 %8) #4
   %10 = insertelement <2 x float> %7, float %9, i64 1
   %11 = fmul fast <2 x float> %10, <float 2.000000e+00, float 2.000000e+00>
   %12 = fadd fast <2 x float> %11, <float -1.000000e+00, float -1.000000e+00>
@@ -19,7 +19,7 @@ define <{ <4 x float>, i32, i32 }> @rt6_layered_vertex(i32 noundef %0, i32 nound
   %14 = shufflevector <4 x float> %13, <4 x float> <float poison, float poison, float 5.000000e-01, float 1.000000e+00>, <4 x i32> <i32 0, i32 1, i32 6, i32 7>
   %15 = zext i32 %1 to i64
   %16 = getelementptr inbounds i32, i32 addrspace(2)* %2, i64 %15
-  %17 = load i32, i32 addrspace(2)* %16, align 4, !tbaa !31, !alias.scope !35
+  %17 = load i32, i32 addrspace(2)* %16, align 4, !tbaa !35, !alias.scope !39
   %18 = add i32 %1, 1
   %19 = insertvalue <{ <4 x float>, i32, i32 }> undef, <4 x float> %14, 0
   %20 = insertvalue <{ <4 x float>, i32, i32 }> %19, i32 %17, 1
@@ -37,18 +37,45 @@ define i32 @rt6_layered_fragment(<4 x float> %0, i32 %1, i32 %2) local_unnamed_a
   ret i32 %5
 }
 
+; Function Attrs: mustprogress nofree nosync nounwind readnone willreturn
+define i32 @rt6_layered_weights(<4 x float> %0, i32 %1, i32 %2, <3 x float> noundef %3, i32 noundef %4) local_unnamed_addr #3 {
+  %6 = fcmp fast oge <3 x float> %3, zeroinitializer
+  %7 = tail call i1 @air.all.v3i1(<3 x i1> %6) #4
+  br i1 %7, label %8, label %12
+
+8:                                                ; preds = %5
+  %9 = fcmp fast ole <3 x float> %3, <float 1.000000e+00, float 1.000000e+00, float 1.000000e+00>
+  %10 = tail call i1 @air.all.v3i1(<3 x i1> %9) #4
+  %11 = select i1 %10, i32 8388608, i32 0
+  br label %12
+
+12:                                               ; preds = %8, %5
+  %13 = phi i32 [ 0, %5 ], [ %11, %8 ]
+  %14 = shl i32 %4, 16
+  %15 = and i32 %14, 8323072
+  %16 = shl i32 %2, 8
+  %17 = or i32 %16, %1
+  %18 = or i32 %17, %15
+  %19 = or i32 %18, %13
+  ret i32 %19
+}
+
+; Function Attrs: mustprogress nofree nosync nounwind readnone willreturn
+declare i1 @air.all.v3i1(<3 x i1>) local_unnamed_addr #1
+
 attributes #0 = { mustprogress nofree nosync nounwind readnone willreturn "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="0" "no-builtins" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" }
 attributes #1 = { mustprogress nofree nosync nounwind readnone willreturn }
 attributes #2 = { mustprogress nofree norecurse nosync nounwind readnone willreturn "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" }
-attributes #3 = { nounwind readnone willreturn }
+attributes #3 = { mustprogress nofree nosync nounwind readnone willreturn "approx-func-fp-math"="true" "frame-pointer"="all" "min-legal-vector-width"="128" "no-builtins" "no-infs-fp-math"="true" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "unsafe-fp-math"="true" }
+attributes #4 = { nounwind readnone willreturn }
 
 !llvm.module.flags = !{!0, !1, !2, !3, !4, !5, !6, !7, !8}
 !air.vertex = !{!9}
-!air.fragment = !{!18}
-!air.compile_options = !{!25, !26, !27}
-!llvm.ident = !{!28}
-!air.version = !{!29}
-!air.language_version = !{!30}
+!air.fragment = !{!18, !25}
+!air.compile_options = !{!29, !30, !31}
+!llvm.ident = !{!32}
+!air.version = !{!33}
+!air.language_version = !{!34}
 
 !0 = !{i32 2, !"SDK Version", [2 x i32] [i32 27, i32 0]}
 !1 = !{i32 1, !"wchar_size", i32 4}
@@ -75,16 +102,20 @@ attributes #3 = { nounwind readnone willreturn }
 !22 = !{i32 0, !"air.position", !"air.center", !"air.no_perspective", !"air.arg_type_name", !"float4", !"air.arg_name", !"position", !"air.arg_unused"}
 !23 = !{i32 1, !"air.render_target_array_index", !"air.arg_type_name", !"uint", !"air.arg_name", !"layer"}
 !24 = !{i32 2, !"air.fragment_input", !"generated(3tagj)", !"air.flat", !"air.arg_type_name", !"uint", !"air.arg_name", !"tag"}
-!25 = !{!"air.compile.denorms_disable"}
-!26 = !{!"air.compile.fast_math_enable"}
-!27 = !{!"air.compile.framebuffer_fetch_enable"}
-!28 = !{!"Apple metal version 32023.921 (metalfe-32023.921.6)"}
-!29 = !{i32 2, i32 8, i32 0}
-!30 = !{!"Metal", i32 4, i32 0, i32 0}
-!31 = !{!32, !32, i64 0}
-!32 = !{!"int", !33, i64 0}
-!33 = !{!"omnipotent char", !34, i64 0}
-!34 = !{!"Simple C++ TBAA"}
-!35 = !{!36}
-!36 = distinct !{!36, !37, !"air-alias-scope-arg(2)"}
-!37 = distinct !{!37, !"air-alias-scopes(rt6_layered_vertex)"}
+!25 = !{i32 (<4 x float>, i32, i32, <3 x float>, i32)* @rt6_layered_weights, !19, !26}
+!26 = !{!22, !23, !24, !27, !28}
+!27 = !{i32 3, !"air.barycentric_coord", !"air.center", !"air.perspective", !"air.arg_type_name", !"float3", !"air.arg_name", !"weights"}
+!28 = !{i32 4, !"air.primitive_id", !"air.arg_type_name", !"uint", !"air.arg_name", !"primitive"}
+!29 = !{!"air.compile.denorms_disable"}
+!30 = !{!"air.compile.fast_math_enable"}
+!31 = !{!"air.compile.framebuffer_fetch_enable"}
+!32 = !{!"Apple metal version 32023.921 (metalfe-32023.921.6)"}
+!33 = !{i32 2, i32 8, i32 0}
+!34 = !{!"Metal", i32 4, i32 0, i32 0}
+!35 = !{!36, !36, i64 0}
+!36 = !{!"int", !37, i64 0}
+!37 = !{!"omnipotent char", !38, i64 0}
+!38 = !{!"Simple C++ TBAA"}
+!39 = !{!40}
+!40 = distinct !{!40, !41, !"air-alias-scope-arg(2)"}
+!41 = distinct !{!41, !"air-alias-scopes(rt6_layered_vertex)"}

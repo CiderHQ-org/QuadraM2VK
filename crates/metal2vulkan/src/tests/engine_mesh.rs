@@ -770,6 +770,110 @@ fn a_mesh_pipeline_reads_its_primitive_outputs_per_primitive() {
     }
 }
 
+/// `mesh_outputs` with its object function's payload declared 64 bytes, the four `float4`s its
+/// threads write, and its mesh functions' 16, one: the object function of a mesh render pipeline
+/// whose mesh function (`mesh_outputs_triangles`) reads its payload past its own type.
+fn wide_object_payload() -> Option<Vec<u8>> {
+    use metal2vulkan_devtools::llvm_assemble_text;
+    let text = std::fs::read_to_string(engine_dir().join("mesh_outputs.ll")).expect("fixture");
+    let object = "!{i32 0, !\"air.payload\", !\"air.struct_type_info\", !50, \
+                  !\"air.arg_type_size\", i32 16,";
+    assert_eq!(
+        text.matches(object).count(),
+        1,
+        "the object function's payload"
+    );
+    let text = text.replace(object, &object.replace("i32 16,", "i32 64,"));
+    match llvm_assemble_text(&text) {
+        Ok(b) => Some(b),
+        Err(AssembleError::Missing(why)) => {
+            eprintln!("SKIPPED: {why}");
+            None
+        }
+        Err(AssembleError::Rejected(why)) => panic!("llvm-as rejected the wide payload: {why}"),
+    }
+}
+
+/// A mesh function reads its payload within its pipeline's object function's, as Metal sizes the
+/// payload by the type the object function declares: in the mesh render pipeline of
+/// `mesh_outputs_object`, its payload declared 64 bytes ([`wide_object_payload`]), and
+/// `mesh_outputs_triangles`, which declares 16 and reads 64, the mesh function's payload arena
+/// holds the object function's 64 bytes (`LoweringInputs::object_payload`), emulated or not, and
+/// each stage is valid. Compiled on its own, the mesh function's arena is its own 32 (the
+/// smallest), and the pipeline refuses it as `NeedsInput(ObjectPayload)`; compiled under the object
+/// function's bytes it links. An object payload its own arena holds leaves its key as compiled
+/// alone.
+#[test]
+fn a_mesh_function_reads_its_payload_within_its_object_functions() {
+    use crate::budget::Budget;
+    use crate::error::RuntimeInput;
+    use crate::library::Library;
+    use crate::lower::mesh::work;
+    use crate::pipeline::descriptor::{FunctionDescriptor, MeshPipelineDescriptor, StageSource};
+    let Some(wide) = wide_object_payload() else {
+        return;
+    };
+    let wide = Library::from_air(&wide).expect("library");
+    let function = |name: &str| FunctionDescriptor::new(wide.function(name).expect("function"));
+    let budget = Budget::standard();
+    for (stem, p) in mesh_profiles().into_iter().chain(emulating_profiles()) {
+        let dev = device(&stem);
+        let emulated = crate::lower::mesh::emulates(&p);
+        let compiled = |name: &str, inputs: &LoweringInputs| {
+            dev.compile_function(&function(name), inputs, &budget)
+                .unwrap_or_else(|e| panic!("{stem} {name}: {e}"))
+        };
+        let object = compiled("mesh_outputs_object", &LoweringInputs::new());
+        assert_eq!(object.artifact().interface.payload, Some(64), "{stem}");
+        let alone = compiled("mesh_outputs_triangles", &LoweringInputs::new());
+        assert_eq!(
+            alone.artifact().interface.payload,
+            Some(32),
+            "{stem}: the mesh function's own arena"
+        );
+        let mut inputs = LoweringInputs::new();
+        inputs.object_payload = Some(64);
+        let within = compiled("mesh_outputs_triangles", &inputs);
+        let a = within.artifact();
+        assert_eq!(a.interface.payload, Some(64), "{stem}");
+        assert_eq!(
+            a.interface.emulated_payload,
+            emulated.then_some(16),
+            "{stem}"
+        );
+        check_words_valid(&a.module.words, &a.module.requirements, &p)
+            .unwrap_or_else(|e| panic!("{stem}: L3: {e}"));
+        // An object payload the mesh function's own arena holds keeps its key.
+        inputs.object_payload = Some(32);
+        assert_eq!(
+            compiled("mesh_outputs_triangles", &inputs).key(),
+            alone.key(),
+            "{stem}"
+        );
+        let pipeline = |mesh: StageSource| {
+            let mut d = MeshPipelineDescriptor::new(mesh);
+            d.object = Some(StageSource::Function(function("mesh_outputs_object")));
+            d.rasterization_enabled = false;
+            dev.compile_mesh_pipeline(&d, &budget)
+        };
+        let made = pipeline(StageSource::Function(function("mesh_outputs_triangles")))
+            .unwrap_or_else(|e| panic!("{stem}: {e}"));
+        for m in &made.stages {
+            check_words_valid(&m.spirv, &made.requirements, dev.profile())
+                .unwrap_or_else(|e| panic!("{stem} {:?}: L3: {e}", m.stage));
+        }
+        let slot = made.graphics.mesh_records.as_ref().map(|r| r.slot_words);
+        assert_eq!(slot, emulated.then_some(work::GRID + 16), "{stem}");
+        assert_eq!(
+            pipeline(StageSource::Compiled(alone)).err(),
+            Some(Error::NeedsInput(RuntimeInput::ObjectPayload)),
+            "{stem}"
+        );
+        pipeline(StageSource::Compiled(within))
+            .unwrap_or_else(|e| panic!("{stem}: the mesh function compiled for the payload: {e}"));
+    }
+}
+
 /// Without the extension a mesh render pipeline is emulated. Its mesh function is a compute stage
 /// writing records, a synthesized vertex stage draws them and the fragment reads the primitive's
 /// outputs flat (no `PerPrimitiveEXT`); every stage is valid under the pipeline's requirements, the
@@ -1578,4 +1682,194 @@ fn a_mesh_function_stages_its_indices_where_the_driver_misplaces_component_store
         };
         assert_eq!(got, want, "{available} bytes");
     }
+}
+
+/// A mesh function's buffer writes need no stage store feature: Vulkan's
+/// `vertexPipelineStoresAndAtomics` and `fragmentStoresAndAtomics` name no task or mesh stage, and
+/// the emulation runs the function as a compute entry. `mesh_barrier_writer`, whose one store is
+/// to its device buffer, compiles on every committed profile with both features removed, as a
+/// `MeshEXT` entry or the emulation's compute entry, and passes L3 within that profile.
+#[test]
+fn a_mesh_functions_buffer_writes_need_no_stage_store_feature() {
+    use crate::device::{Device, DeviceDescription, DevicePolicy};
+    let Some(barrier) = fixture("mesh_barrier") else {
+        return;
+    };
+    for (stem, _) in committed_profiles().expect("committed profiles") {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../metal2vulkan-validation/profiles/{stem}.json"));
+        let text = std::fs::read_to_string(path).expect("profile");
+        let mut desc = DeviceDescription::from_khronos_json(&text, None).expect("description");
+        for f in [
+            VkFeature::VertexPipelineStoresAndAtomics,
+            VkFeature::FragmentStoresAndAtomics,
+        ] {
+            desc.features.remove(&f);
+        }
+        let dev = Device::new(desc, DevicePolicy::default()).expect("device");
+        let p = dev.profile();
+        let a =
+            compile(&barrier, "mesh_barrier_writer", p).unwrap_or_else(|e| panic!("{stem}: {e}"));
+        assert_eq!(a.interface.stage, Stage::Mesh, "{stem}");
+        let r = &a.module.requirements;
+        for f in [
+            VkFeature::VertexPipelineStoresAndAtomics,
+            VkFeature::FragmentStoresAndAtomics,
+        ] {
+            assert!(!r.features.contains(&f), "{stem}: {f:?}");
+        }
+        check_words_valid(&a.module.words, r, p).unwrap_or_else(|e| panic!("{stem}: L3: {e}"));
+    }
+}
+
+/// An object function's `[[threadgroup(n)]]` arguments take the render encoder's lengths
+/// (`setObjectThreadgroupMemoryLength:atIndex:`, the object stage's `threadgroup_lengths`): in the
+/// pipeline of `mesh_outputs_object` (its payload 64 bytes, [`wide_object_payload`]) and
+/// `mesh_outputs_triangles`, a draw specializes `TgLength(0)` to the length rounded up to 16, as
+/// a kernel's, and to 0 where it is unset, emulated or not. The artifact states the arena's static
+/// part and its payload (`RuntimeFact::ObjectThreadgroupArena`). The plan checks the arena with the
+/// lengths against the object stage's workgroup memory limit: the task stage's
+/// (`maxTaskSharedMemorySize`, beside the wrapper's 12-byte grid), whose 76 bytes fit a 64-byte
+/// length and not a 65-byte one, or, emulated, the compute stage's.
+#[test]
+fn an_object_functions_threadgroup_memory_is_the_encoders_lengths() {
+    use crate::bind::{BindState, DrawCall};
+    use crate::budget::Budget;
+    use crate::device::requirements::VkLimit;
+    use crate::device::{Device, DeviceDescription, DevicePolicy};
+    use crate::error::{BindError, Unsupported};
+    use crate::library::Library;
+    use crate::pipeline::descriptor::{FunctionDescriptor, MeshPipelineDescriptor, StageSource};
+    let Some(wide) = wide_object_payload() else {
+        return;
+    };
+    let wide = Library::from_air(&wide).expect("library");
+    let function = |name: &str| {
+        StageSource::Function(FunctionDescriptor::new(
+            wide.function(name).expect("function"),
+        ))
+    };
+    let budget = Budget::standard();
+    let pipeline = |dev: &Device| {
+        let mut d = MeshPipelineDescriptor::new(function("mesh_outputs_triangles"));
+        d.object = Some(function("mesh_outputs_object"));
+        d.rasterization_enabled = false;
+        dev.compile_mesh_pipeline(&d, &budget)
+    };
+    let with_length = |len: Option<u32>| {
+        let mut state = BindState::default();
+        if let Some(len) = len {
+            state
+                .stages
+                .entry(Stage::Object)
+                .or_default()
+                .threadgroup_lengths
+                .insert(0, len);
+        }
+        state
+    };
+    let draw = DrawCall::MeshThreadgroups {
+        groups: [1, 1, 1],
+        threads_per_object_group: [4, 1, 1],
+        threads_per_mesh_group: [8, 1, 1],
+    };
+    let refused_limit = |r: Result<crate::bind::BindingPlan, BindError>| match r {
+        Err(BindError::Unsupported(Unsupported {
+            feature: Feature::ThreadgroupMemorySize,
+            needs: Needs::AnyOf(alternatives),
+            ..
+        })) => match alternatives.as_slice() {
+            [one] => match one.as_slice() {
+                [Capability::Limit {
+                    limit,
+                    required,
+                    available,
+                }] => Some((*limit, *required, *available)),
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
+    };
+    for (stem, p) in mesh_profiles().into_iter().chain(emulating_profiles()) {
+        let dev = device(&stem);
+        let emulated = crate::lower::mesh::emulates(&p);
+        let made = pipeline(&dev).unwrap_or_else(|e| panic!("{stem}: {e}"));
+        let arena: Vec<_> = made
+            .dependencies
+            .iter()
+            .filter_map(|d| match d.fact {
+                RuntimeFact::ObjectThreadgroupArena {
+                    static_bytes,
+                    payload,
+                } => Some((static_bytes, payload)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(arena, [(0, Some(64))], "{stem}");
+        let id = made
+            .stages
+            .iter()
+            .flat_map(|s| s.specialization.constants.iter())
+            .find(|c| c.key == SpecKey::TgLength(0))
+            .map(|c| c.id)
+            .unwrap_or_else(|| panic!("{stem}: the object function's TgLength(0)"));
+        for (len, want) in [(None, 0), (Some(20), 32), (Some(64), 64)] {
+            let state = with_length(len);
+            let plan = made
+                .plan(&dev, &state.shape())
+                .unwrap_or_else(|e| panic!("{stem} {len:?}: plan: {e}"));
+            let cmds = plan
+                .instantiate_draw(&state, &draw)
+                .unwrap_or_else(|e| panic!("{stem} {len:?}: draw: {e}"));
+            let key = cmds.specialization.as_ref().expect("a mesh draw's key");
+            let value = key.entries.iter().find(|e| e.constant_id == id).map(|e| {
+                let at = e.offset as usize;
+                u32::from_le_bytes(key.data[at..at + 4].try_into().expect("4 bytes"))
+            });
+            assert_eq!(
+                value,
+                Some(want),
+                "{stem} {len:?}: Metal's 16-byte rounding"
+            );
+        }
+        // Past the object stage's limit, refused at plan naming it.
+        let l = &p.fields().limits;
+        let past = if emulated {
+            l.max_compute_shared_memory_size
+        } else {
+            l.mesh.max_task_shared_memory_size
+        };
+        let refused = refused_limit(made.plan(&dev, &with_length(Some(past)).shape()));
+        let named = refused.map(|(limit, _, _)| limit);
+        if emulated {
+            assert_eq!(named, Some(VkLimit::MaxComputeSharedMemorySize), "{stem}");
+        } else {
+            assert!(
+                matches!(
+                    named,
+                    Some(VkLimit::MaxTaskSharedMemorySize)
+                        | Some(VkLimit::MaxTaskPayloadAndSharedMemorySize)
+                ),
+                "{stem}: {refused:?}"
+            );
+        }
+    }
+    // The task stage's limit: 76 bytes hold the wrapper's 12 and a 64-byte length, and a 65-byte
+    // length, 80 rounded, is refused naming it.
+    let (stem, _) = &mesh_profiles()[0];
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(format!("../metal2vulkan-validation/profiles/{stem}.json"));
+    let text = std::fs::read_to_string(path).expect("profile");
+    let mut desc = DeviceDescription::from_khronos_json(&text, None).expect("description");
+    desc.limits.mesh.max_task_shared_memory_size = 76;
+    let dev = Device::new(desc, DevicePolicy::default()).expect("device");
+    let made = pipeline(&dev).unwrap_or_else(|e| panic!("{stem} at 76: {e}"));
+    made.plan(&dev, &with_length(Some(64)).shape())
+        .unwrap_or_else(|e| panic!("{stem} at 76: 64 bytes: {e}"));
+    assert_eq!(
+        refused_limit(made.plan(&dev, &with_length(Some(65)).shape())),
+        Some((VkLimit::MaxTaskSharedMemorySize, 92, 76)),
+        "{stem} at 76: 65 bytes"
+    );
 }

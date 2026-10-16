@@ -1,4 +1,4 @@
-// Owned fixture (WP-RFL, DESIGN D384 item 3, docs/TODO.md 8.27): a post-tessellation vertex
+// Owned fixture: a post-tessellation vertex
 // function whose patch states no control-point count, as a raw module. It is
 // metallib-only/function_types.metal's `types_quad_any`, word for word, whose metallib answers
 // Metal recorded (`== functions_function_types` in metal-answers.txt): the raw module answers the

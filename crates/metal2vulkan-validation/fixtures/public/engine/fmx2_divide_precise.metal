@@ -1,4 +1,4 @@
-// Owned fixture (WP-FMX2, DESIGN D279): `fmx2_divide_fast` without fast math (`-fno-fast-math`),
+// Owned fixture: `fmx2_divide_fast` without fast math (`-fno-fast-math`),
 // where the plain operator carries no flag and only `fast::divide` grants some. Each quotient
 // divides by its own load of the divisor (every copy holds the same value), except in words 4
 // and 5:
@@ -20,7 +20,7 @@
 // thread), so every path into the switch bypasses its declaration and Clang emits no lifetime
 // marker for it (as in trn_math_fast.metal): LLVM 22 and later read a marker in a one-argument
 // form, so a fixture holding one may decode to other type numbers under each `llvm-as` major a
-// gate assembles it with (DESIGN D306).
+// gate assembles it with.
 // metal-fast-math: off
 #include <metal_stdlib>
 using namespace metal;

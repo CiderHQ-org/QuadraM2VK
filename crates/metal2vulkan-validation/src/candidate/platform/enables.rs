@@ -233,6 +233,10 @@ pub(super) enum Structure {
     ExtendedDynamicState,
     /// `VkPhysicalDeviceExtendedDynamicState2FeaturesEXT`.
     ExtendedDynamicState2,
+    /// `VkPhysicalDeviceExtendedDynamicState3FeaturesEXT`.
+    ExtendedDynamicState3,
+    /// `VkPhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT`.
+    FeedbackLoop,
     /// `VkPhysicalDeviceRobustness2FeaturesEXT` (`robustBufferAccess2`, `robustImageAccess2`).
     Robustness2,
     /// `VkPhysicalDeviceImageRobustnessFeatures` (`robustImageAccess`, core only from 1.3).
@@ -245,7 +249,7 @@ pub(super) enum Structure {
 
 impl Structure {
     /// Every extension structure, in chain order.
-    const EXTENSIONS: [Structure; 39] = [
+    const EXTENSIONS: [Structure; 41] = [
         Structure::SubgroupSizeControl,
         Structure::Demote,
         Structure::Terminate,
@@ -281,6 +285,8 @@ impl Structure {
         Structure::Acceleration,
         Structure::ExtendedDynamicState,
         Structure::ExtendedDynamicState2,
+        Structure::ExtendedDynamicState3,
+        Structure::FeedbackLoop,
         Structure::Robustness2,
         Structure::ImageRobustness,
         Structure::PortabilitySubset,
@@ -338,6 +344,8 @@ impl Structure {
             Structure::Acceleration => &[c"VK_KHR_acceleration_structure"],
             Structure::ExtendedDynamicState => &[c"VK_EXT_extended_dynamic_state"],
             Structure::ExtendedDynamicState2 => &[c"VK_EXT_extended_dynamic_state2"],
+            Structure::ExtendedDynamicState3 => &[c"VK_EXT_extended_dynamic_state3"],
+            Structure::FeedbackLoop => &[c"VK_EXT_attachment_feedback_loop_layout"],
             // One structure type serves both (vk.xml aliases the `EXT` type to the `KHR` one).
             Structure::Robustness2 => &[c"VK_EXT_robustness2", c"VK_KHR_robustness2"],
             Structure::ImageRobustness => &[c"VK_EXT_image_robustness"],
@@ -574,6 +582,8 @@ pub(super) struct FeatureChain {
     pub(super) acceleration_structure: vk::PhysicalDeviceAccelerationStructureFeaturesKHR<'static>,
     pub(super) extended_dynamic_state: vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT<'static>,
     pub(super) extended_dynamic_state2: vk::PhysicalDeviceExtendedDynamicState2FeaturesEXT<'static>,
+    pub(super) extended_dynamic_state3: vk::PhysicalDeviceExtendedDynamicState3FeaturesEXT<'static>,
+    pub(super) feedback_loop: vk::PhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT<'static>,
     pub(super) robustness2: vk::PhysicalDeviceRobustness2FeaturesEXT<'static>,
     pub(super) image_robustness: vk::PhysicalDeviceImageRobustnessFeatures<'static>,
     /// A portable implementation reports here everything it CANNOT do, and the structure
@@ -623,6 +633,8 @@ macro_rules! link_extensions {
             Acceleration => acceleration_structure,
             ExtendedDynamicState => extended_dynamic_state,
             ExtendedDynamicState2 => extended_dynamic_state2,
+            ExtendedDynamicState3 => extended_dynamic_state3,
+            FeedbackLoop => feedback_loop,
             Robustness2 => robustness2,
             ImageRobustness => image_robustness,
             PortabilitySubset => portability_subset,
@@ -684,6 +696,8 @@ impl FeatureChain {
             acceleration_structure,
             extended_dynamic_state,
             extended_dynamic_state2,
+            extended_dynamic_state3,
+            feedback_loop,
             robustness2,
             image_robustness,
             portability_subset,
@@ -944,6 +958,8 @@ members! {
     Core.core.multi_viewport => Some(F::MultiViewport);
     Core.core.occlusion_query_precise => Some(F::OcclusionQueryPrecise);
     Core.core.full_draw_index_uint32 => Some(F::FullDrawIndexUint32);
+    Core.core.shader_tessellation_and_geometry_point_size =>
+        Some(F::ShaderTessellationAndGeometryPointSize);
     Core.core.sparse_binding => None, X::SparseBinding;
     Core.core.sparse_residency_image2_d => None, X::SparseResidencyImage2D;
     Core.core.sparse_residency_image3_d => None, X::SparseResidencyImage3D;
@@ -953,6 +969,7 @@ members! {
     V11.v11.storage_input_output16 => Some(F::StorageInputOutput16);
     V11.v11.multiview => Some(F::Multiview);
     V11.v11.multiview_tessellation_shader => Some(F::MultiviewTessellationShader);
+    V11.v11.multiview_geometry_shader => Some(F::MultiviewGeometryShader);
     V11.v11.shader_draw_parameters => Some(F::ShaderDrawParameters);
     V11.v11.variable_pointers => None;
     V11.v11.variable_pointers_storage_buffer => None;
@@ -1109,6 +1126,10 @@ members! {
         Some(F::ExtendedDynamicState);
     ExtendedDynamicState2.extended_dynamic_state2.extended_dynamic_state2 =>
         Some(F::ExtendedDynamicState2);
+    ExtendedDynamicState3.extended_dynamic_state3.extended_dynamic_state3_color_write_mask =>
+        Some(F::ExtendedDynamicState3ColorWriteMask);
+    FeedbackLoop.feedback_loop.attachment_feedback_loop_layout =>
+        Some(F::AttachmentFeedbackLoopLayout);
     Robustness2.robustness2.robust_buffer_access2 => Some(F::RobustBufferAccess2);
     Robustness2.robustness2.robust_image_access2 => Some(F::RobustImageAccess2);
     Robustness2.robustness2.null_descriptor => Some(F::NullDescriptor);
@@ -1272,6 +1293,14 @@ const EXTENSIONS: &[ExtensionName] = {
         e(
             c"VK_EXT_extended_dynamic_state2",
             Some(X::ExtExtendedDynamicState2),
+        ),
+        e(
+            c"VK_EXT_extended_dynamic_state3",
+            Some(X::ExtExtendedDynamicState3),
+        ),
+        e(
+            c"VK_EXT_attachment_feedback_loop_layout",
+            Some(X::ExtAttachmentFeedbackLoopLayout),
         ),
         e(c"VK_KHR_push_descriptor", Some(X::KhrPushDescriptor)),
         e(

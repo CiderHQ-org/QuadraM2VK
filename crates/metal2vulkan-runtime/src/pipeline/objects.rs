@@ -238,6 +238,16 @@ impl VariantObjects {
         Making::new(kind).digest(&self.content)
     }
 
+    /// The flight of a making of one of its `VkPipeline`s whose own part of the driver's compile
+    /// is `own` (its specialization, a region's stage): its content ([`variant_content`]) and
+    /// that, which a twin's making shares (`flight.rs`).
+    pub(super) fn flight(&self, own: &dyn std::fmt::Debug) -> super::flight::FlightKey {
+        Making::new("flight")
+            .digest(&self.content)
+            .text(own)
+            .finish()
+    }
+
     /// The digests of `pipeline`'s (its compiled pipeline's) layout and stages
     /// ([`PartsContent`]), taken once.
     pub(super) fn parts_content(&self, pipeline: &RenderPipeline) -> &PartsContent {
@@ -889,9 +899,19 @@ impl VariantObjects {
             c.required_subgroup_size,
             bindable,
         ));
-        // The turn first (none where a piece's thread holds one): the driver's time alone is
-        // timed, not the wait for a turn.
-        let turn = super::budget::program_turn();
+        // The turn first (none where a piece's thread holds one), once no twin's making is in the
+        // air (`flight.rs`): the driver's time alone is timed, not the wait for a turn or a twin.
+        let flight = self.flight(&(
+            c.object.stage.as_raw(),
+            &c.object.entry,
+            c.specialization,
+            c.stage_flags.as_raw(),
+            c.required_subgroup_size,
+        ));
+        let (turn, leader, followed) = shared.flights.board(flight);
+        if followed {
+            shared.counts.flight_followed();
+        }
         let started = std::time::Instant::now();
         let created = shared
             .make_pipelines(making, |cache| {
@@ -901,6 +921,7 @@ impl VariantObjects {
             })
             .map_err(|(_, error)| vulkan(error))?;
         let created_in = started.elapsed();
+        drop(leader);
         drop(turn);
         if driver_reports {
             shared.shader_cache.driver_reported(&whole, &stage);

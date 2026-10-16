@@ -14,13 +14,19 @@
 //!   because `double` keeps more than `24 + 2` significand bits (Boldo and Melquiond);
 //! - [`Route::Soft`]: in 32-bit integers on every other profile: the 48-bit product of the
 //!   significands, the addend aligned to it with a sticky bit, one 64-bit sum or difference, and
-//!   one rounding to nearest even, with denormal results and overflow to infinity.
+//!   one rounding to nearest even, with overflow to infinity.
 //!
 //! The two routes the translation computes itself answer as Metal's `fma` does (a probe cases
 //! e98b103f and f7850ba7, every lane): an `f32` denormal operand is read as a zero of its sign, a
-//! denormal result is flushed to a zero of its sign, and a NaN result is `0x7FC00000` (as Metal's
-//! functions read their operands). `OpFmaKHR` keeps the device's denormal mode and NaN encoding, as
-//! the device's other `float` arithmetic does; on MoltenVK it is Metal's own `fma`.
+//! result whose exact value is below `2^-126` in magnitude is a zero of its sign, flushed before
+//! it is rounded (EV DNR-dn2-m3: Metal's `fma(-2^-126, 2^-126, 2^-126)` is `+0`, where the
+//! correctly rounded sum is `2^-126`), and a NaN result is `0x7FC00000` (as Metal's functions read
+//! their operands). `OpFmaKHR` keeps the device's denormal mode and NaN encoding, as the device's
+//! other `float` arithmetic does; on MoltenVK it is Metal's own `fma`. Elsewhere it rounds before
+//! it flushes, if it flushes: an exact value just below `2^-126` answers `2^-126`. Where the
+//! profile asks Metal's answers (`FloatMathsPolicy::Exact`), a result of `OpFmaKHR` at most
+//! `2^-126` in magnitude is recomputed by the routine ([`tiny_route`], [`checked`]); every larger
+//! one is Metal's already.
 //!
 //! The wide and integer routes are one module-scope function per lane count ([`Routine`]),
 //! which every use calls, so a module holds each once (as the wide divisions are). A module that
@@ -57,9 +63,11 @@
 use crate::device::profile::FloatFunctions;
 use crate::device::DeviceProfile;
 use crate::error::DriverDeviation;
+use crate::lower::arith::denormal;
 use crate::lower::arith::legal::{FloatFmt, Form, Held};
 use crate::lower::arith::narrow::{self, u32_form};
 use crate::lower::arith::ops::{fsplat, splat, ty};
+use crate::spirv::builder::constructs::{ArmEnd, ArmFn, Merged};
 use crate::spirv::builder::{FunctionBuilder, ModuleBuilder, QuantizeForm};
 use crate::spirv::error::{BResult, BuildError, TypeRule};
 use crate::spirv::ids::{FuncId, Value};
@@ -97,6 +105,8 @@ impl Route {
 
 /// The census names of the fused multiply-add strategies (one per [`Route`]).
 pub const KHR: &str = "arith.fma.khr";
+/// See [`KHR`]: `OpFmaKHR` with the routine of its results at most `2^-126` ([`tiny_route`]).
+pub const KHR_CHECKED: &str = "arith.fma.khr.checked";
 /// See [`KHR`].
 pub const WIDE: &str = "arith.fma.double";
 /// See [`KHR`].
@@ -128,6 +138,29 @@ pub fn float_route(p: &DeviceProfile) -> Route {
     }
 }
 
+/// The route of the routine that recomputes a `float` fused multiply-add by `OpFmaKHR` whose result
+/// is at most `2^-126` in magnitude ([`checked`]), on profile `p`: where its `float` route is
+/// [`Route::Khr`], its functions are to answer as Metal's (`FloatFunctions::Device`, the policy's
+/// `FloatMathsPolicy::Exact`) and the device is not measured to read `f32` denormals as Metal does
+/// ([`denormal::device_flushes`]), [`Route::Wide`] where `shaderFloat64` and `shaderInt64` are
+/// enabled, else [`Route::Soft`]. `None` elsewhere: `OpFmaKHR` is then Metal's `fma` (MoltenVK),
+/// or the device's rounding before its flush is left to it (native device maths,
+/// `docs/FAST-PATHS.md`).
+pub fn tiny_route(p: &DeviceProfile) -> Option<Route> {
+    let fields = p.fields();
+    if float_route(p) != Route::Khr
+        || fields.float_functions != FloatFunctions::Device
+        || denormal::device_flushes(p)
+    {
+        return None;
+    }
+    Some(if fields.leaf.float64 && fields.leaf.int64 {
+        Route::Wide
+    } else {
+        Route::Soft
+    })
+}
+
 /// The `half` route profile `p` offers: [`Route::F16`] where the driver is measured to compute a
 /// 16-bit `Fma` as Metal's own `half` `fma` (`DriverDeviation::MetalHalfFma`) and `shaderFloat16`
 /// is enabled, else the device's `float` `Fma` rounded to `half` under native device maths, else
@@ -149,6 +182,9 @@ pub struct Routes {
     pub float: Route,
     /// A `half` one's: [`half_route`].
     pub half: Route,
+    /// The routine route a `float` one by [`Route::Khr`] recomputes its results at most `2^-126`
+    /// in magnitude by: [`tiny_route`].
+    pub tiny: Option<Route>,
 }
 
 /// The routes profile `p` offers ([`float_route`], [`half_route`]).
@@ -156,6 +192,7 @@ pub fn routes(p: &DeviceProfile) -> Routes {
     Routes {
         float: float_route(p),
         half: half_route(p),
+        tiny: tiny_route(p),
     }
 }
 
@@ -164,6 +201,9 @@ pub fn routes(p: &DeviceProfile) -> Routes {
 pub struct Fma {
     pub form: Form,
     pub route: Route,
+    /// On [`Route::Khr`], the route of the routine that recomputes a result at most `2^-126` in
+    /// magnitude ([`tiny_route`], [`checked`]); `None` on every other route.
+    pub tiny: Option<Route>,
 }
 
 impl Fma {
@@ -176,28 +216,49 @@ impl Fma {
     /// The fused multiply-add on `form` by `routes` (a profile's [`routes`]): `half` by its
     /// `half` route, `float` by its `float` route. `None` for any other form.
     pub fn by(routes: Routes, form: Form) -> Option<Fma> {
-        let route = match form.float_fmt()? {
-            FloatFmt::Half => routes.half,
-            FloatFmt::F32 => routes.float,
+        let (route, tiny) = match form.float_fmt()? {
+            FloatFmt::Half => (routes.half, None),
+            FloatFmt::F32 => (
+                routes.float,
+                routes.tiny.filter(|_| routes.float == Route::Khr),
+            ),
             FloatFmt::BFloat | FloatFmt::F64 => return None,
         };
-        Some(Fma { form, route })
+        Some(Fma { form, route, tiny })
     }
 
-    /// The shared routine the operation calls, if its route has one.
+    /// Whether it is `OpFmaKHR` whose results at most `2^-126` in magnitude its routine recomputes
+    /// ([`checked`]): on operands read as Metal reads them, Metal's `fma` exactly, never a
+    /// denormal.
+    pub fn checked(self) -> bool {
+        self.route == Route::Khr && self.tiny.is_some()
+    }
+
+    /// This fused multiply-add without the check of its small results ([`checked`]), for a use
+    /// whose exact result is never below `2^-126` in magnitude but zero, where `OpFmaKHR` is
+    /// Metal's `fma` already, and which must stay in one block.
+    pub fn unchecked(self) -> Fma {
+        Fma { tiny: None, ..self }
+    }
+
+    /// The shared routine the operation calls, if its route has one: the route's, or on
+    /// [`Route::Khr`] the routine of its small results ([`Fma::tiny`]).
     pub fn routine(self) -> Option<Routine> {
-        match self.route {
-            Route::Wide | Route::Soft | Route::HalfOdd => Some(Routine {
-                route: self.route,
-                lanes: self.form.lanes,
-            }),
-            Route::Khr | Route::F16 | Route::Native => None,
-        }
+        let route = match (self.route, self.tiny) {
+            (Route::Wide | Route::Soft | Route::HalfOdd, _) => self.route,
+            (Route::Khr, Some(tiny)) => tiny,
+            (Route::Khr | Route::F16 | Route::Native, _) => return None,
+        };
+        Some(Routine {
+            route,
+            lanes: self.form.lanes,
+        })
     }
 
     /// The census name.
     pub fn name(self) -> &'static str {
         match self.route {
+            Route::Khr if self.checked() => KHR_CHECKED,
             Route::Khr => KHR,
             Route::Wide => WIDE,
             Route::Soft => SOFT,
@@ -208,10 +269,12 @@ impl Fma {
     }
 
     /// An upper estimate of the SPIR-V words per use: the instruction or the call; on
-    /// [`Route::F16`] the three conversions, the instruction and the widening. A routine's own
-    /// words are the module's, charged once ([`Routine::words`]).
+    /// [`Route::F16`] the three conversions, the instruction and the widening; checked
+    /// ([`checked`]), the instruction, the test of its magnitude, the selection, the call and the
+    /// merge. A routine's own words are the module's, charged once ([`Routine::words`]).
     pub fn words(self) -> u32 {
         match self.route {
+            Route::Khr if self.checked() => 112,
             Route::Khr => 16,
             Route::Wide | Route::Soft | Route::HalfOdd => 24,
             Route::F16 => 32,
@@ -409,7 +472,7 @@ pub fn emit(
     match (fma.route, fma.form.float_fmt()) {
         (Route::HalfOdd, Some(FloatFmt::Half))
         | (Route::Khr | Route::Wide | Route::Soft, Some(FloatFmt::F32)) => {
-            float(fb, fma.route, a, b, c, routine)
+            float(fb, fma, a, b, c, routine)
         }
         (Route::F16, Some(FloatFmt::Half)) => f16(fb, fma.form.lanes, a, b, c),
         // Native device maths: the device's `Fma`; on `half` operands held in `float` the product
@@ -460,23 +523,78 @@ fn f32_form(lanes: u8) -> Form {
     }
 }
 
-/// The correctly rounded fused multiply-add of `a`, `b`, `c` by `route`: `OpFmaKHR`, or a call of
-/// the route's routine.
+/// The correctly rounded fused multiply-add of `a`, `b`, `c` by `fma`'s route: `OpFmaKHR`
+/// ([`checked`] where [`Fma::checked`]), or a call of the route's routine.
 fn float(
     fb: &mut FunctionBuilder<'_>,
-    route: Route,
+    fma: Fma,
     a: Value,
     b: Value,
     c: Value,
     routine: Option<FuncId>,
 ) -> BResult<Value> {
-    match (route, routine) {
-        (Route::Khr, _) => fb.fma(a, b, c),
-        (Route::Wide | Route::Soft | Route::HalfOdd, Some(r)) => fb
+    match (fma.route, fma.tiny, routine) {
+        (Route::Khr, None, _) => fb.fma(a, b, c),
+        (Route::Khr, Some(_), Some(r)) => checked(fb, fma.form, [a, b, c], r),
+        (Route::Wide | Route::Soft | Route::HalfOdd, _, Some(r)) => fb
             .call(r, &[a, b, c])?
             .ok_or(BuildError::Type(TypeRule::FunctionSignature)),
         _ => Err(BuildError::Type(TypeRule::FunctionSignature)),
     }
+}
+
+/// Metal's `fma` of `a`, `b` and `c` (`float` lanes of form `f`, each read as Metal reads it: no
+/// denormal) by `OpFmaKHR`, its result `r` recomputed by `routine` (Metal's, [`tiny_route`]) where
+/// any lane's is at most `2^-126` in magnitude, zero included, and taken on those lanes.
+///
+/// Every other lane's `r` is Metal's answer. `OpFmaKHR` is correctly rounded (Vulkan's precision
+/// table), and the device may only replace a denormal it reads or answers by a zero (Vulkan's
+/// float controls without `DenormPreserve`). Its operands are no denormal, so with `v` the exact
+/// `a * b + c`, `r` is the correctly rounded `v`, or a zero. A finite `r` above `2^-126` in
+/// magnitude is no flushed zero, so it is the correctly rounded `v` and at least the float after
+/// `2^-126`, `2^-126 + 2^-149`. Rounding to nearest gives that only for `|v|` above the midpoint,
+/// `2^-126 + 2^-150`, which is above `2^-126`. Metal flushes only an exact value below `2^-126`,
+/// so it rounds `v` too and answers `r`. An infinite or NaN `r` is likewise kept: Metal's
+/// infinity, and a NaN Metal's NaN answer replaces. The lanes at most `2^-126` are those the
+/// device's rounding and its denormal mode decide: `v` just below `2^-126` rounded up to it, a
+/// denormal kept or flushed, a zero whose sign the device's flush chose, and an exact zero. The
+/// routine answers each of them as Metal does. The test is on `r`'s bits, so no float mode
+/// changes it.
+fn checked(
+    fb: &mut FunctionBuilder<'_>,
+    f: Form,
+    [a, b, c]: [Value; 3],
+    routine: FuncId,
+) -> BResult<Value> {
+    let r = fb.fma(a, b, c)?;
+    let u = u32_form(f);
+    let ut = ty(fb, u)?;
+    let bits = fb.convert(ConvOp::Bitcast, r, ut)?;
+    let magnitude = splat(fb, u, 0x7FFF_FFFF)?;
+    let least = splat(fb, u, 0x0080_0000)?;
+    let m = bin(fb, BinOp::BitwiseAnd, bits, magnitude)?;
+    let small = bin(fb, BinOp::ULessThanEqual, m, least)?;
+    let any = match f.lanes {
+        1 => small,
+        _ => fb.unary(UnOp::Any, small)?,
+    };
+    let lanes = f.lanes;
+    let recompute: ArmFn<'_, ()> = Box::new(move |fb, _| {
+        let metal = fb
+            .call(routine, &[a, b, c])?
+            .ok_or(BuildError::Type(TypeRule::FunctionSignature))?;
+        let v = match lanes {
+            1 => metal,
+            _ => fb.select(small, metal, r)?,
+        };
+        Ok(ArmEnd::FallThrough(vec![v]))
+    });
+    let keep: ArmFn<'_, ()> = Box::new(move |_, _| Ok(ArmEnd::FallThrough(vec![r])));
+    let Merged(merged) = fb.if_(&mut (), any, recompute, Some(keep))?;
+    merged
+        .first()
+        .copied()
+        .ok_or(BuildError::Type(TypeRule::FunctionSignature))
 }
 
 fn bin(fb: &mut FunctionBuilder<'_>, op: BinOp, a: Value, b: Value) -> BResult<Value> {
@@ -571,7 +689,18 @@ pub(crate) fn half_sum(
 /// to odd (IEEE TC 57(4), 2008): `(th, tl) = TwoSum(c, ph)`, `v = RO(tl + pl)` ([`half_sum`]'s
 /// odd sum, its product `tl · 1` exact), and `RN(th + v)`. Exact where no part underflows: an
 /// extended-range blend of a `float4` output, whose operands are at most 2 in magnitude and whose
-/// result is rounded to `half` next, far above a part that small.
+/// result is rounded to `half` next, far above a part that small. An infinite or NaN result (an
+/// infinite or NaN operand's: the operands lie far below `float`'s overflow) is the device's
+/// `Fma`'s, decided on its bits, as [`half_sum`]'s is: an infinity of the exact sum's sign, or a
+/// NaN, whose encoding the caller chooses.
+///
+/// A zero result has the sign IEEE 754-2008 (6.3) gives a fused multiply-add's exact zero, put on
+/// the bits as an integer ([`zero_sign`]). The emulation's own zero has no defined sign: `th + v`
+/// adds a `+0` `v` to a `-0` `th` (`-0 · 1 + -0`), whose sum is `+0` under roundTiesToEven;
+/// SPIRV-Cross renders the `NoContraction` product `ph` as `fma(a, b, 0)`, a `+0` for a `-0`
+/// product ([`half_sum`]); and a module without `SignedZeroInfNanPreserve` lets the device ignore
+/// the sign of a zero in any float instruction (Vulkan's Precision and Operation of SPIR-V
+/// Instructions). `OpBitcast` keeps the bits, and the integer instructions are exact.
 pub(crate) fn float_fma_exact(
     fb: &mut FunctionBuilder<'_>,
     f: Form,
@@ -593,7 +722,45 @@ pub(crate) fn float_fma_exact(
     let (th, tl) = two_sum(fb, c, ph)?;
     let one = fsplat(fb, f, 1.0)?;
     let v = half_sum(fb, f.with(Held::Float(FloatFmt::Half)), tl, one, pl)?;
-    exact_op(fb, BinOp::FAdd, th, v)
+    let r = exact_op(fb, BinOp::FAdd, th, v)?;
+    let r = zero_sign(fb, f, [a, b, c], r)?;
+    // An infinite or NaN result, only from such an operand, is the device's `Fma`'s, which IEEE 754
+    // gives exactly: the emulation's own steps subtract an infinity from itself there, a NaN.
+    let s = fb.glsl(GlslOp::Fma, &[a, b, c])?;
+    let finite = all_finite(fb, f, &[s])?;
+    fb.select(finite, r, s)
+}
+
+/// `r`, a multiply-add of `a`, `b`, `c` (`float` lanes of form `f`) rounded once, with a zero
+/// result given IEEE 754-2008's sign (6.3): where the exact `a · b + c` is zero, a fused
+/// multiply-add's zero is the sign of that sum, the product signed by the rules for
+/// multiplication, so under roundTiesToEven `-0` only where the product's sign (`a`'s and `b`'s
+/// differing) and `c`'s are both negative, and `+0` otherwise: opposite zeros, or a product that
+/// `c` cancels, whose signs differ. The test and the sign are on the bits, as integers
+/// (`OpBitcast`, `OpBitwiseAnd`, `OpBitwiseXor`, `OpIEqual`, and `OpSelect` of integers), so the
+/// sign is the same whatever the device's float modes.
+fn zero_sign(
+    fb: &mut FunctionBuilder<'_>,
+    f: Form,
+    [a, b, c]: [Value; 3],
+    r: Value,
+) -> BResult<Value> {
+    let u = u32_form(f);
+    let (ut, ft) = (ty(fb, u)?, ty(fb, f)?);
+    let [ab, bb, cb, rb] = [a, b, c, r].map(|x| fb.convert(ConvOp::Bitcast, x, ut));
+    let (ab, bb, cb, rb) = (ab?, bb?, cb?, rb?);
+    let (mag, sign, z) = (
+        splat(fb, u, 0x7FFF_FFFF)?,
+        splat(fb, u, 0x8000_0000)?,
+        splat(fb, u, 0)?,
+    );
+    let m = bin(fb, BinOp::BitwiseAnd, rb, mag)?;
+    let zero = bin(fb, BinOp::IEqual, m, z)?;
+    let p = bin(fb, BinOp::BitwiseXor, ab, bb)?;
+    let both = bin(fb, BinOp::BitwiseAnd, p, cb)?;
+    let signed = bin(fb, BinOp::BitwiseAnd, both, sign)?;
+    let w = fb.select(zero, signed, rb)?;
+    fb.convert(ConvOp::Bitcast, w, ft)
 }
 
 /// `x`'s high 12 significand bits and the rest, `x = hi + lo` exactly (Veltkamp's split by
@@ -625,12 +792,11 @@ fn flush(fb: &mut FunctionBuilder<'_>, f: Form, x: Value) -> BResult<Value> {
     fb.convert(ConvOp::Bitcast, r, ft)
 }
 
-/// `x` (`float` lanes of form `f`) as Metal answers a result: a denormal flushed to a zero of
-/// its sign, and every NaN `0x7FC00000`.
+/// `x` (`float` lanes of form `f`, never a denormal) as Metal answers a result: every NaN
+/// `0x7FC00000`.
 fn metal_result(fb: &mut FunctionBuilder<'_>, f: Form, x: Value) -> BResult<Value> {
     let u = u32_form(f);
     let (ut, ft) = (ty(fb, u)?, ty(fb, f)?);
-    let x = flush(fb, f, x)?;
     let bits = fb.convert(ConvOp::Bitcast, x, ut)?;
     let (mag, inf, quiet) = (
         splat(fb, u, 0x7FFF_FFFF)?,
@@ -699,10 +865,12 @@ fn outside(
 /// `double` (48 bits, between `2^-298` and `2^256`), `s = p + c` with its exact error is
 /// FastTwoSum's (no `double` denormal or overflow is reachable), [`to_odd`] in `u64` bits
 /// makes it the round-to-odd sum, and its conversion to `float` is then the correctly rounded
-/// result, overflow and `float` denormals included. An exact zero sum takes the unfused `float`
-/// result, which is the fused one there: it is of two exact zeros (signed as IEEE adds them) or
-/// of a product that is a `float` cancelling `c` (`+0`), and needs no `double` signed zero.
-/// Infinite and NaN operands take [`Outside::special`].
+/// result, overflow included. The round-to-odd sum is below `2^-126` in magnitude exactly where
+/// the exact one is (it rounds no value onto `2^-126`, whose significand is even), and there the
+/// result is a zero of its sign, as Metal flushes it before rounding. An exact zero sum takes the
+/// unfused `float` result, which is the fused one there: it is of two exact zeros (signed as IEEE
+/// adds them) or of a product that is a `float` cancelling `c` (`+0`), and needs no `double`
+/// signed zero. Infinite and NaN operands take [`Outside::special`].
 fn wide(fb: &mut FunctionBuilder<'_>, f: Form, a: Value, b: Value, c: Value) -> BResult<Value> {
     let d = f.with(Held::Float(FloatFmt::F64));
     let w = f.with(Held::Int {
@@ -719,6 +887,16 @@ fn wide(fb: &mut FunctionBuilder<'_>, f: Form, a: Value, b: Value, c: Value) -> 
     let (s, e) = two_sum(fb, p, z)?;
     let odd = to_odd(fb, d, w, s, e)?;
     let r = fb.convert(ConvOp::FConvert, odd, tf)?;
+    let magnitude = fb.glsl(GlslOp::FAbs, &[odd])?;
+    let normal = fsplat(fb, d, f64::from(f32::MIN_POSITIVE))?;
+    let tiny = bin(fb, BinOp::FOrdLessThan, magnitude, normal)?;
+    let u = u32_form(f);
+    let ut = ty(fb, u)?;
+    let bits = fb.convert(ConvOp::Bitcast, r, ut)?;
+    let sign = splat(fb, u, 0x8000_0000)?;
+    let signed_zero = bin(fb, BinOp::BitwiseAnd, bits, sign)?;
+    let bits = fb.select(tiny, signed_zero, bits)?;
+    let r = fb.convert(ConvOp::Bitcast, bits, tf)?;
     let zd = fsplat(fb, d, 0.0)?;
     let zero = bin(fb, BinOp::FOrdEqual, s, zd)?;
     let r = fb.select(zero, out.unfused, r)?;
@@ -830,9 +1008,10 @@ impl Words {
 /// decision), both are doubled so the sticky bit sits below the smaller one's last bit, and one
 /// 64-bit sum or difference (of operands below `2^63`, so no carry is lost) holds the exact
 /// result up to that sticky bit. It rounds to nearest even at the bit that keeps 24 significant
-/// bits, or the `2^-149` bit for a denormal result, into the exponent on a carry and to
-/// infinity past the largest finite `float`. An exact cancellation is `+0`; a result below
-/// `2^-150` is a zero of the sum's sign. A zero factor takes the unfused result, which is the
+/// bits, into the exponent on a carry and to infinity past the largest finite `float`. An exact
+/// cancellation is `+0`; a result whose exact value is below `2^-126` (its leading bit's, the
+/// sticky bit keeping it below where the exact one is) is a zero of the sum's sign, as Metal
+/// flushes it before rounding. A zero factor takes the unfused result, which is the
 /// fused one there (`±0 + c`, no rounding); infinite and NaN operands take
 /// [`Outside::special`].
 fn soft(fb: &mut FunctionBuilder<'_>, f: Form, a: Value, b: Value, c: Value) -> BResult<Value> {
@@ -949,16 +1128,14 @@ fn soft(fb: &mut FunctionBuilder<'_>, f: Form, a: Value, b: Value, c: Value) -> 
     let r_any = bin(fb, B::BitwiseOr, rlo, rhi)?;
     let cancelled = bin(fb, B::IEqual, r_any, z)?;
     let m = w.msb(fb, (rhi, rlo))?;
-    // The exponent of the leading bit (+ 512); below 2^-150 the result is a signed zero.
+    // The exponent of the leading bit (+ 512); below 2^-126 the result is a signed zero, so a
+    // result kept is normal.
     let emsb = bin(fb, B::IAdd, m, er)?;
-    let k362b = k(fb, 512 - 150)?;
-    let tiny = bin(fb, B::ULessThan, emsb, k362b)?;
+    let k386 = k(fb, 512 - 126)?;
+    let tiny = bin(fb, B::ULessThan, emsb, k386)?;
 
-    // Bits to drop: k = max(m - 23, -149 - (er - 512)), a signed count in [-23, 63].
-    let k1 = bin(fb, B::ISub, m, k23)?;
-    let k363 = k(fb, 363)?;
-    let k2 = bin(fb, B::ISub, k363, er)?;
-    let kk = fb.glsl(GlslOp::SMax, &[k1, k2])?;
+    // Bits to drop: k = m - 23, a signed count in [-23, 40].
+    let kk = bin(fb, B::ISub, m, k23)?;
     let pos = bin(fb, B::SGreaterThan, kk, z)?;
     // k <= 0: the sum is below 2^24 and moves left by -k.
     let nk = bin(fb, B::ISub, z, kk)?;
@@ -982,12 +1159,9 @@ fn soft(fb: &mut FunctionBuilder<'_>, f: Form, a: Value, b: Value, c: Value) -> 
     let q_right = bin(fb, B::IAdd, q_right, inc)?;
     let q = fb.select(pos, q_right, q_left)?;
 
-    // Pack: a normal's leading bit lands on the exponent field's lowest bit, so the field is
-    // emsb + 126 (+ the carry of a rounding); a denormal's field is zero.
-    let k386 = k(fb, 512 - 126)?;
-    let normal = bin(fb, B::UGreaterThanEqual, emsb, k386)?;
+    // Pack: the leading bit lands on the exponent field's lowest bit, so the field is emsb + 126
+    // (+ the carry of a rounding); a tiny result's wrapped field is selected away below.
     let base = bin(fb, B::ISub, emsb, k386)?;
-    let base = fb.select(normal, base, z)?;
     let base = bin(fb, B::ShiftLeftLogical, base, k23)?;
     let bits = bin(fb, B::IAdd, base, q)?;
     let inf = k(fb, 0x7F80_0000)?;

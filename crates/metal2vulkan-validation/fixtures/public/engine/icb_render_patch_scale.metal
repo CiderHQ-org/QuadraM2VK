@@ -1,4 +1,4 @@
-// Owned fixture (WP-RT7, DESIGN D317 part 5g): a kernel whose only effect is the patch draws it
+// Owned fixture: a kernel whose only effect is the patch draws it
 // encodes. Thread `tid` encodes command `tid`'s draw of one patch of one control point (patch 0,
 // one instance, no patch index buffer), its triangle tessellation factors those at `factors`
 // with no instance stride, scaled by `scales[tid]`. The pipeline and the vertex buffers are the

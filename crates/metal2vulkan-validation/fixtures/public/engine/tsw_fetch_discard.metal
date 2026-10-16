@@ -1,4 +1,4 @@
-// Owned fixture (WP-RRS2, DESIGN D590): a fragment function without early fragment tests that
+// Owned fixture: a fragment function without early fragment tests that
 // reads a two-channel `half` color attachment (`[[color(1)]]`), discards a fragment whose lane `x`
 // there is zero, and writes it back beside a four-channel `half` color 0 it does not read. With
 // `w = coverage.x / 2 + coverage.y`, it writes `tint * w` to color 0 and `(w, coverage.y / 4)` to

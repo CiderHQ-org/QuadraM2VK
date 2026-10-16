@@ -67,6 +67,7 @@
 use super::device::lock;
 use super::error::{internal, Error, MemoryKind};
 use super::exit_guard;
+use super::program_objects::ProgramObject;
 use super::range::RangeAllocator;
 use super::resource_ids::Pool;
 use metal2vulkan::bind::indirect_commands::{
@@ -160,12 +161,12 @@ impl From<AddressPlacement> for Place {
 /// buffer that only names it in an argument buffer still runs (an Apple M4, EV XRB-tok1-m4).
 pub type RangeToken = Box<dyn std::any::Any + Send + Sync>;
 
-/// Where a resource keeps its caller's [`RangeToken`]: set once as the resource is made
-/// ([`keep`](Self::keep)), and dropped by [`release`](Self::release), which the resource's
+/// Where a resource keeps its caller's [`RangeToken`], held as the program's object
+/// (`program_objects.rs`): set once as the resource is made ([`keep`](Self::keep)), and dropped by [`release`](Self::release), which the resource's
 /// teardown calls once its range is free. Never dropped otherwise: a resource the runtime leaves
 /// to the process's exit leaks its token with it (`ManuallyDrop`).
 #[derive(Default)]
-pub(super) struct KeptToken(ManuallyDrop<Mutex<Option<RangeToken>>>);
+pub(super) struct KeptToken(ManuallyDrop<Mutex<Option<ProgramObject<RangeToken>>>>);
 
 impl KeptToken {
     /// Keep `token`. Internal where one is kept already: no creator gives two.
@@ -174,7 +175,7 @@ impl KeptToken {
         if kept.is_some() {
             return Err(internal("a resource's range token kept twice"));
         }
-        *kept = Some(token);
+        *kept = Some(ProgramObject::new(token));
         Ok(())
     }
 
@@ -189,7 +190,7 @@ impl KeptToken {
         }
         let token = lock(&self.0).take();
         if let Some(token) = token {
-            exit_guard::program(move || drop(token));
+            exit_guard::program_release(move || drop(token));
         }
     }
 }

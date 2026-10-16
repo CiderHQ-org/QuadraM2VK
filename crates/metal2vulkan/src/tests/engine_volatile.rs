@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::device::profile::DeviceProfile;
+use crate::device::requirements::VkFeature;
 use crate::device::DevicePolicy;
 use crate::error::{Error, Feature, LowerFamily, Needs};
 use crate::lower::select::Plan;
@@ -560,9 +561,12 @@ fn volatile_copies_between_arenas_are_volatile_units() {
     }
 }
 
-/// Under the Vulkan memory model (a coherent store elsewhere selects it): a volatile access keeps
-/// the function's `NonPrivatePointer` and gains `Volatile`, with no availability or visibility
-/// operand of its own; the coherent volatile load keeps both.
+/// Under the Vulkan memory model (a coherent store elsewhere selects it where the profile has the
+/// model and its device scope): a volatile access keeps the function's `NonPrivatePointer` and
+/// gains `Volatile`, with no availability or visibility operand of its own; the coherent volatile
+/// load keeps both. Elsewhere (the floor) the function keeps `GLSL450` and its storage buffers are
+/// decorated `Coherent`: every volatile access, the coherent one included, gains only `Volatile`.
+/// Both forms run exactly.
 #[test]
 fn volatile_under_the_vulkan_model_adds_only_volatile() {
     let text = kernel(
@@ -586,20 +590,26 @@ fn volatile_under_the_vulkan_model_adds_only_volatile() {
         return;
     };
     let inp = input(5);
-    let mut modeled = 0;
+    let mut forms = [0; 2];
     for stem in PROFILES {
         let prof = p(stem);
-        if !prof.fields().vulkan_memory_model {
-            let Err(Error::Unsupported(u)) = compile(&bc, "model", &prof) else {
-                panic!("{stem}: the coherent access needs the Vulkan model");
-            };
-            assert_eq!(u.feature, Feature::CoherentMemory, "{stem}");
-            continue;
-        }
+        let fields = prof.fields();
+        let vulkan = fields.vulkan_memory_model
+            && fields
+                .enabled
+                .features
+                .contains(&VkFeature::VulkanMemoryModelDeviceScope);
+        forms[usize::from(vulkan)] += 1;
         let a = compile(&bc, "model", &prof).unwrap_or_else(|e| panic!("{stem}: {e}"));
-        link_and_validate(&a, &prof).unwrap_or_else(|e| panic!("{stem}: L3: {e}"));
+        let (_, words) = link_and_validate(&a, &prof).unwrap_or_else(|e| panic!("{stem}: L3: {e}"));
+        if !vulkan {
+            let coherent = crate::pipeline::testing::interlocked_coherence(&words)
+                .unwrap_or_else(|e| panic!("{stem}: {e}"));
+            assert!(!coherent.vulkan, "{stem}: the memory model");
+            assert!(coherent.buffer >= 2, "{stem}: {coherent:?}");
+        }
         let (plan, m) = typed_module(&bc, "model", &prof).expect("module");
-        assert!(vulkan_model(&m), "{stem}");
+        assert_eq!(vulkan_model(&m), vulkan, "{stem}");
         let (mut plain_volatile, mut coherent_volatile) = (0, 0);
         for b in m.blocks() {
             for n in &b.insts {
@@ -609,7 +619,7 @@ fn volatile_under_the_vulkan_model_adds_only_volatile() {
                 if !access.volatile {
                     continue;
                 }
-                assert!(access.non_private, "{stem}: {access:?}");
+                assert_eq!(access.non_private, vulkan, "{stem}: {access:?}");
                 if access.make_visible.is_some() {
                     coherent_volatile += 1;
                 } else {
@@ -618,9 +628,10 @@ fn volatile_under_the_vulkan_model_adds_only_volatile() {
                 }
             }
         }
+        let want_counts = if vulkan { (2, 1) } else { (3, 0) };
         assert_eq!(
             (plain_volatile, coherent_volatile),
-            (2, 1),
+            want_counts,
             "{stem}: the volatile load and store, and the coherent volatile load"
         );
         let out = run_both(
@@ -629,9 +640,11 @@ fn volatile_under_the_vulkan_model_adds_only_volatile() {
         );
         let want: Vec<u32> = inp.iter().map(|v| v.wrapping_add(1)).collect();
         assert_eq!((&out[0], &out[1]), (&inp, &want), "{stem}");
-        modeled += 1;
     }
-    assert!(modeled > 0, "no profile has the Vulkan memory model");
+    assert!(
+        forms.iter().all(|&n| n > 0),
+        "both memory-model forms run: {forms:?}"
+    );
 }
 
 /// A volatile load of read-only memory (a typed constant object, and the constant blob a copied

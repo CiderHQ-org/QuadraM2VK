@@ -1,10 +1,10 @@
 //! Visibility results (`setVisibilityResultMode:offset:`).
 //!
-//! Metal writes, at the end of a pass, one 64-bit result at each offset the encoder set a mode
-//! at: in `Boolean` mode 1 when any sample of the draws while it was set passed and 0 otherwise,
-//! in `Counting` mode the samples that passed; an offset set with no draw after it gets 0, an
-//! offset the encoder never set keeps its bytes, and a later pass rewrites only its own offsets
-//! (measured on an M4, RT6 probes 1 and 5).
+//! Metal writes, at the end of a pass, one 64-bit result at each offset the encoder set a mode at:
+//! in `Boolean` mode 1 when any sample of the draws while it was set passed and 0 otherwise, in
+//! `Counting` mode the samples that passed; an offset set with no draw after it gets 0, an offset
+//! the encoder never set keeps its bytes, and a later pass rewrites only its own offsets (measured
+//! on an M4 with macOS 27.0.1).
 //!
 //! - **Queries.** Each mode set is an occlusion query of the encoder's own pools, begun in the
 //!   draws' secondary command buffer when the mode is set and ended when the next one is set, at
@@ -37,21 +37,26 @@
 //!   whose 8 bytes run past the buffer, and an offset the encoder took before in the other mode.
 //!   `Counting` needs a precise query: `Unsupported`, naming `occlusionQueryPrecise`, where the
 //!   device lacks it.
+//! - **A driver that counts per color** (`RuntimeDriverDefect::OcclusionCountPerColorOutput`,
+//!   ANV): its precise query counts each sample once for every color output the fragment shader
+//!   writes. A draw counted by a `Counting` query whose fragment variant writes more than one
+//!   color attachment runs, and the device announces `Degradation::VisibilityCountPerColor`: its
+//!   result is the samples times those colors, not divided back. `Boolean` results are exact.
 //! - **An offset taken again in its mode** stops Metal's validation ("using the same offset ...
 //!   twice in the same command encoder is not allowed"); plain Metal adds the draws since to its
 //!   result: `Counting` sums them (16 and 16 write 32), `Boolean` writes 1 when either passed a
-//!   sample, `Disabled` between them or not (RT6 probe 5's `vis_revisit_counting`,
-//!   `vis_revisit_boolean_then_none`, `vis_revisit_none_then_boolean`,
-//!   `vis_revisit_after_disabled`). The encoder takes it as a continuation of the offset's
-//!   result. In the other mode plain Metal answers in order (`Boolean` then `Counting` writes 1
-//!   plus the count, `Counting` then `Boolean` 1: `vis_boolean_then_counting`,
-//!   `vis_counting_then_boolean`), which the combine does not build: refused.
+//!   sample, `Disabled` between them or not (Metal probe cases `vis_revisit_counting`,
+//!   `vis_revisit_boolean_then_none`, `vis_revisit_none_then_boolean` and
+//!   `vis_revisit_after_disabled`). The encoder takes it as a continuation of the offset's result.
+//!   In the other mode plain Metal answers in order (`Boolean` then `Counting` writes 1 plus the
+//!   count, `Counting` then `Boolean` 1: `vis_boolean_then_counting`, `vis_counting_then_boolean`),
+//!   which the combine does not build: refused.
 //! - **An offset that is not a multiple of 8** stops Metal's validation; plain Metal writes the
-//!   result at the offset rounded down to 8 (RT6 probe 1's `visibility_misaligned`: `Counting`
+//!   result at the offset rounded down to 8 (Metal probe case `visibility_misaligned`: `Counting`
 //!   at 4 writes the samples at 0), and the encoder takes that offset (`result_offset`).
-//! - **`Disabled`** ends the current query. Its offset is no use of the offset: Metal takes it
-//!   past the buffer, twice, before a mode at the same offset, and without a buffer, and plain
-//!   Metal at an offset that is not a multiple of 8, which its validation stops (RT6 probe 5d).
+//! - **`Disabled`** ends the current query. Its offset is no use of the offset: Metal takes it past
+//!   the buffer, twice, before a mode at the same offset, and without a buffer, and plain Metal at
+//!   an offset that is not a multiple of 8, which its validation stops (a Metal probe).
 
 use super::degradation::Degradation;
 use super::encoder::EncoderCore;
@@ -506,6 +511,21 @@ impl Visibility {
         self.active.is_some()
     }
 
+    /// Whether the active query counts samples: a `Counting` result's precise query, which the
+    /// draws recorded now count in.
+    pub(super) fn counting(&self) -> bool {
+        self.active.is_some() && !self.boolean()
+    }
+
+    /// Whether the current offset's queries are `Boolean` ones: the borrowed execution's offset,
+    /// else the one last set (`true` before any is set).
+    fn boolean(&self) -> bool {
+        match &self.borrowed {
+            Some(borrowed) => borrowed.boolean,
+            None => self.taken.get(self.current).is_none_or(|t| t.boolean),
+        }
+    }
+
     /// The query that will continue the active one in the render pass instance a split opens,
     /// taken now, before anything of the split records: `None` when no query is active. In an
     /// encoder replaying an execution's commands (`borrowing`), whose active query is the
@@ -562,10 +582,7 @@ impl Visibility {
         next: Continuation,
     ) {
         let pool = next.raw;
-        let boolean = match &self.borrowed {
-            Some(borrowed) => borrowed.boolean,
-            None => self.taken.get(self.current).is_none_or(|t| t.boolean),
-        };
+        let boolean = self.boolean();
         // SAFETY: `into` is recording inside its render pass instance, and only this encoder
         // records it; no query is active in it (a new one, or the one the caller ended the
         // query in); the pool lives until the command buffer completes, and `end_encoding`

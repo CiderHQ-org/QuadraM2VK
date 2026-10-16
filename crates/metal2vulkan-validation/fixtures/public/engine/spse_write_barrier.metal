@@ -1,4 +1,4 @@
-// Owned fixture (WP-SPSE, DESIGN D270): a thread's own write to a read_write 2D texture, read back
+// Owned fixture: a thread's own write to a read_write 2D texture, read back
 // after a texture fence and a threadgroup barrier on texture memory, sparse or not. Thread `i` runs
 // probe `i` of buffer 0: kind 0 writes `value` at texel `(x, y)` and fences the texture, kind 1
 // does not; every thread then reaches `threadgroup_barrier(mem_flags::mem_texture)` (outside the

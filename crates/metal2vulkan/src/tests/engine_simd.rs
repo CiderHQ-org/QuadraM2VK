@@ -258,12 +258,14 @@ fn expected(kernel: &str, t: u32) -> u32 {
             up + down * 1000 + rot * 1_000_000
         }
         "quad_dynamic_k" => (t ^ ((t >> 2) & 3)) + (qb + 3) * 1000,
+        // Metal's backend speculates the branch's arm (`air::canon::speculate`), so every lane of
+        // the quad votes, one that skips the arm too: the M3 Max (macOS 27.0.1) answers 95 on
+        // thread 0 (its mask 0xF) and 159 on thread 8 (lane 9 in the mask and the `any`).
         "quad_ballot_k" => {
-            let active = |u: u32| u % 7 != 2;
-            if !active(t) {
+            if t % 7 == 2 {
                 return 99;
             }
-            let quad: Vec<u32> = (qb..qb + 4).filter(|&u| active(u)).collect();
+            let quad: Vec<u32> = (qb..qb + 4).collect();
             let mask = quad.iter().fold(0u32, |a, &u| a | (1 << (u & 3)));
             let first = quad.first().copied() == Some(t);
             u32::from(first)
@@ -311,7 +313,7 @@ fn run_kernels(p: &DeviceProfile, tier: Tier, lanes: SubgroupSize, locals: &[[u3
         assert_eq!(
             plan.dispatch.as_ref().map(|d| d.local_size),
             Some(LocalSizeForm::Flat),
-            "{kernel}: flattened (D3)"
+            "{kernel}: flattened"
         );
         for &local in locals {
             let out = run_all(&plan, &m, local, lanes);
@@ -1131,7 +1133,9 @@ fn mask_expected(kernel: &str, n: u32, t: u32) -> u32 {
     match kernel {
         "mask_quad_ballot_k" => ballot(&|_| true),
         "mask_quad_ballot_divergent_k" if t % 7 == 2 => 99,
-        "mask_quad_ballot_divergent_k" => ballot(&|u| u % 7 != 2),
+        // Metal's backend speculates the branch's arm (`air::canon::speculate`): a lane that skips
+        // it votes too (the M3 Max, macOS 27.0.1, answers 2 on thread 8, the skipping lane 9's).
+        "mask_quad_ballot_divergent_k" => ballot(&|_| true),
         "mask_simd_active_k" => mask(&|_| true),
         "mask_simd_active_divergent_k" if t & 31 < 3 => 1,
         "mask_simd_active_divergent_k" => mask(&|u| u & 31 >= 3),

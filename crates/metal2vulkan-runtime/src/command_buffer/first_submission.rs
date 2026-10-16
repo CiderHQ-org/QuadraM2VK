@@ -9,7 +9,14 @@
 //!   lets the pages go, their deallocator run, where no submitted command buffer holds them
 //!   (the question, answered without revoking anything). From the first submission on it holds them
 //!   until it completes, so a submitted command buffer keeps the pages it took, as Metal's does
-//!   (table 3: a submitted command buffer never sees the new pages).
+//!   (table 3: a submitted command buffer never sees the new pages). A root table recorded
+//!   before then, by a rebind's encoding again (`reencode.rs`) or a host step, holds the table
+//!   (`State::hold_live`) until the first submission, which lets go of it where the list changed
+//!   meanwhile: at once, as Metal lets a released buffer go, but on a handler thread
+//!   (`Device::let_go_elsewhere`), as its last hold of a released buffer's pages runs that
+//!   buffer's deallocator, which may not run on the scheduler's thread under its locks. The
+//!   deallocator's wait from the release until then, past Metal's, is announced
+//!   (`host-deallocator-delayed`).
 //! - **Resolved again where the list changed.** Where the live buffers' list changed since the
 //!   commit (a buffer made or gone, a rebind), the submission lists again what the commit listed
 //!   (`LiveBuffers::reach`, a rebind having ended its use), makes its resident set again of the
@@ -176,8 +183,11 @@ impl State {
                 ..
             }) => {
                 // The list unchanged, the device keeps the table: the upgrade is not its last
-                // hold.
-                if let Some(table) = table.upgrade().filter(|_| *generation == now) {
+                // hold. Changed, the table is not upgraded at all: an upgrade let go of here,
+                // under the scheduler's lock and this state's, could be the last hold of a gone
+                // buffer's pages, whose release runs the program's code.
+                let kept = (*generation == now).then(|| table.upgrade()).flatten();
+                if let Some(table) = kept {
                     if let Some(resident) = &mut self.resident {
                         resident.live = Live::Held(table);
                     }
@@ -203,7 +213,8 @@ impl State {
     }
 
     /// Its resident set made again of the live buffers as they stand now and `fresh`, what its
-    /// encoders made resident as it lies now, and every noted root table pointed at it.
+    /// encoders made resident as it lies now, and every noted root table pointed at it. A table
+    /// it held goes at once, on a handler thread.
     fn remake_resident(&mut self, device: &Device, fresh: &[ResidentRange]) -> Result<(), Error> {
         let live = device.shared().live_buffers.table(device)?;
         let set = live.set();
@@ -234,12 +245,24 @@ impl State {
                 count,
             )?;
         }
-        self.resident = Some(Resident {
+        let replaced = self.resident.replace(Resident {
             live: Live::Held(live),
             merged,
             address,
             count,
         });
+        // A table held already, made of the list before it changed, may hold a gone buffer's
+        // pages last, whose release runs the program's code (a deallocator), which may not run
+        // here: on the scheduler's thread, under its lock and this state's. It goes at once all
+        // the same, as Metal lets go of a buffer no submitted command buffer holds, on a handler
+        // thread.
+        if let Some(Resident {
+            live: Live::Held(table),
+            ..
+        }) = replaced
+        {
+            device.let_go_elsewhere(Box::new(table));
+        }
         Ok(())
     }
 
@@ -253,8 +276,8 @@ impl State {
     /// `Ok(false)`, changing nothing, while a rebind since its commit has encoders of it, which
     /// `buffer`'s rebinds mark, to encode again (`reencode.rs`): read under the lock its rebinds
     /// mark them under, so a rebind comes either before this submission (which waits for them)
-    /// or after it (which keeps the old pages). From here it waits for no rebind's replay, and
-    /// its encoders' logs go with this batch's submission (`Submission::logs`).
+    /// or after it (which keeps the old pages). From here it waits for no rebind's replay; its
+    /// encoders' logs stay until its release (`CommandBufferShared::complete`).
     pub(super) fn first_submission(
         &mut self,
         device: &Device,
@@ -308,6 +331,12 @@ impl State {
             }
         }
         self.hold_live(device)?;
+        // The tables host steps before now resolved against go at once, off this thread, under
+        // whose locks the last hold of a released buffer's pages may not go
+        // (`State::keep_stepped_table`).
+        for earlier in self.stepped_tables.drain(..) {
+            device.let_go_elsewhere(Box::new(earlier));
+        }
         // A replay's resident set holds where every range of it lies as it did at the commit.
         if replays {
             let live = shared.live_buffers.table(device)?;

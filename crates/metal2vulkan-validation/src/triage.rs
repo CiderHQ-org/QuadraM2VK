@@ -73,9 +73,16 @@ pub struct StructuralTriage {
     /// The entry is a tile function: a kernel with implicit imageblock attachments (the
     /// reflection's `implicit_imageblock_attachments`, which the checker pairs with render targets
     /// and `imageblock.implicit_coverage`). Descriptive, like `fragment_imageblock`: every executor
-    /// runs the family.
+    /// runs the family, and the focused audit selects it by this fact
+    /// ([`AuditTarget::TileFunctions`]) whatever its requirements.
     #[serde(default)]
     pub tile_function: bool,
+    /// An object or mesh entry's draw: its stage, its payload, and the stages a row of it needs
+    /// that nothing supplies ([`crate::executor_contract::mesh::MeshDrawFacts`]). Descriptive, like
+    /// `tile_function`: the focused audit selects the family by this fact
+    /// ([`AuditTarget::MeshDraws`]) whatever its requirements.
+    #[serde(default)]
+    pub mesh_draw: Option<crate::executor_contract::mesh::MeshDrawFacts>,
     /// The module maps coordinates through a rasterization-rate map (an
     /// `air.map_screen_to_physical_coordinates` or `air.map_physical_to_screen_coordinates` call,
     /// any overload). Descriptive, like `tile_function`: where the calls read their maps decides
@@ -142,6 +149,11 @@ pub enum AuditTarget {
     /// Entries that reference visible functions of another module
     /// ([`StructuralTriage::linked_functions`]).
     LinkedFunctions,
+    /// Tile functions: kernels with implicit imageblock attachments
+    /// ([`StructuralTriage::tile_function`]).
+    TileFunctions,
+    /// Object and mesh functions ([`StructuralTriage::mesh_draw`]).
+    MeshDraws,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -269,6 +281,8 @@ pub fn select_cached_audit_target_after(
         AuditTarget::LinkedFunctions => {
             "coalesce(json_array_length(t.result_json, '$.linked_functions'), 0) > 0"
         }
+        AuditTarget::TileFunctions => "json_extract(t.result_json, '$.tile_function') = 1",
+        AuditTarget::MeshDraws => "json_type(t.result_json, '$.mesh_draw') = 'object'",
     };
     let sql = format!(
         "SELECT s.air_sha256 FROM sources s JOIN triage_analysis t USING (air_sha256) \
@@ -702,6 +716,9 @@ fn classify_inner(source: &SourceRow, include_signature: bool) -> StructuralTria
         *stage == crate::case::Stage::Kernel
             && !reflection.implicit_imageblock_attachments.is_empty()
     });
+    let mesh_draw = reflection.as_ref().and_then(|(_, reflection)| {
+        crate::executor_contract::mesh::mesh_draw_facts(&source.air_ll, reflection)
+    });
     let rasterization_rate_map = crate::executor_contract::rate_map::maps_coordinates(&calls);
     let sample_rate = crate::executor_contract::sample_rate::sample_rate_uses(
         &source.stage,
@@ -730,6 +747,7 @@ fn classify_inner(source: &SourceRow, include_signature: bool) -> StructuralTria
         fragment_imageblock,
         pipeline_state_members,
         tile_function,
+        mesh_draw,
         rasterization_rate_map,
         sample_rate,
         ulong_texture,
@@ -774,10 +792,7 @@ fn finalize_requirements(result: &mut StructuralTriage) {
 fn reflect(
     source: &SourceRow,
 ) -> Option<(crate::case::Stage, crate::air::reflect::ShaderInterface)> {
-    // An object or mesh function's interface is not reflected: its stage's requirement
-    // ([`crate::executor_contract::stage_requirements`]) stops every executor first.
-    let stage = crate::case::Stage::from_metadata_label(&source.stage)
-        .filter(|stage| !stage.is_mesh_pipeline_stage())?;
+    let stage = crate::case::Stage::from_metadata_label(&source.stage)?;
     crate::air::reflect::inspect(&source.air_ll, stage, &source.entry, &[])
         .ok()
         .map(|reflection| (stage, reflection))
@@ -791,8 +806,19 @@ fn tooling_requirements(
     let mut requirements = crate::executor_contract::unsupported_air_requirements(calls)
         .into_iter()
         .collect::<Vec<_>>();
-    if let Some(stage) = crate::case::Stage::from_metadata_label(&source.stage) {
-        requirements.extend(crate::executor_contract::stage_requirements(stage));
+    // A mesh render pipeline's draw, from the entry's reflected structure with no partner named
+    // (a row names none). An object or mesh row whose interface does not reflect has no stage a
+    // case could be checked against, so every stage it needs is one nothing supplies.
+    match reflection {
+        Some((_, reflection)) => requirements.extend(
+            crate::executor_contract::mesh::mesh_requirements(&source.air_ll, reflection, None),
+        ),
+        None if crate::case::Stage::from_metadata_label(&source.stage)
+            .is_some_and(crate::case::Stage::is_mesh_pipeline_stage) =>
+        {
+            requirements.push(ToolingRequirement::MeshCompanion)
+        }
+        None => {}
     }
     // Outside the inspection gate: a module that only encodes commands is not resolved because the
     // product could not reflect it.
@@ -1096,7 +1122,7 @@ entry:
         connection
             .execute_batch(
                 "CREATE TABLE sources (air_sha256 TEXT PRIMARY KEY, stage TEXT NOT NULL);\n\
-                 INSERT INTO sources VALUES ('device', 'Kernel'), ('ray', 'Kernel'), ('visible', 'Kernel'), ('command-call', 'Kernel'), ('command-resource', 'Kernel'), ('imageblock', 'Fragment'), ('pipelines', 'Kernel'), ('tile', 'Kernel'), ('rate-map', 'Kernel'), ('sample-rate', 'Fragment'), ('ulong', 'Kernel'), ('varyings', 'Fragment'), ('linked', 'Kernel');",
+                 INSERT INTO sources VALUES ('device', 'Kernel'), ('ray', 'Kernel'), ('visible', 'Kernel'), ('command-call', 'Kernel'), ('command-resource', 'Kernel'), ('imageblock', 'Fragment'), ('pipelines', 'Kernel'), ('tile', 'Kernel'), ('rate-map', 'Kernel'), ('sample-rate', 'Fragment'), ('ulong', 'Kernel'), ('varyings', 'Fragment'), ('linked', 'Kernel'), ('mesh', 'Mesh');",
             )
             .unwrap();
         drop(connection);
@@ -1220,6 +1246,8 @@ entry:
             ["linked_sample"]
         );
         assert!(visible.linked_functions.is_empty() && varyings.linked_functions.is_empty());
+        let mesh = classify(&entry_of("engine/mesh_draws.ll", "mesh_draws_mesh")).unwrap();
+        assert!(mesh.mesh_draw.is_some() && tile.mesh_draw.is_none());
         write_cached(
             &index,
             [
@@ -1236,13 +1264,22 @@ entry:
                 ("ulong", &ulong),
                 ("varyings", &varyings),
                 ("linked", &linked),
+                ("mesh", &mesh),
             ],
         )
         .unwrap();
         assert_eq!(
+            select_cached_audit_target_after(&index, AuditTarget::MeshDraws, None, 10).unwrap(),
+            ["mesh"]
+        );
+        assert_eq!(
             select_cached_audit_target_after(&index, AuditTarget::LinkedFunctions, None, 10)
                 .unwrap(),
             ["linked"]
+        );
+        assert_eq!(
+            select_cached_audit_target_after(&index, AuditTarget::TileFunctions, None, 10).unwrap(),
+            ["tile"]
         );
         assert_eq!(
             select_cached_audit_target_after(&index, AuditTarget::FragmentVaryings, None, 10)
@@ -1705,6 +1742,11 @@ entry:
             .unwrap()
             .tooling_requirements
             .is_empty());
+        // A `float2` color's plane is `RG32Float`, which a case authors.
+        let float2 = source(
+            "define void @main() { %v = call <2 x float> @air.load.implicit_imageblock.v2f32(i32 0, <2 x i16> zeroinitializer, i32 0, i16 0) ret void }\ndeclare <2 x float> @air.load.implicit_imageblock.v2f32(i32, <2 x i16>, i32, i16)",
+        );
+        assert!(classify(&float2).unwrap().tooling_requirements.is_empty());
 
         let unknown = source(
             "define void @main() { %v = call <3 x half> @air.load.implicit_imageblock.v3f16(i32 0, <2 x i16> zeroinitializer, i32 0, i16 0) ret void }\ndeclare <3 x half> @air.load.implicit_imageblock.v3f16(i32, <2 x i16>, i32, i16)",
@@ -1713,6 +1755,34 @@ entry:
             classify(&unknown).unwrap().tooling_requirements,
             [ToolingRequirement::ImplicitImageblockLiteral]
         );
+    }
+
+    /// A tile function's multisample operations (the pixel's sample count, colors and their
+    /// coverage masks, a store to the samples of a mask) are named: the product refuses them by
+    /// feature, so the row states no tooling requirement and no unrecognized intrinsic, and its
+    /// masked store still reflects its attachment's plane.
+    #[test]
+    fn multisample_tile_operations_are_named_product_refusals_not_tooling_gaps() {
+        let tile = source(
+            "define void @main() {\n\
+             %s = call i16 @air.get_imageblock_samples()\n\
+             %n = call i16 @air.get_imageblock_num_colors(<2 x i16> zeroinitializer)\n\
+             %c = call i16 @air.get_color_coverage_mask(<2 x i16> zeroinitializer, i16 0)\n\
+             call void @air.store.implicit_imageblock.mask.v4f16(<4 x half> zeroinitializer, i32 0, <2 x i16> zeroinitializer, i16 %c)\n\
+             ret void\n\
+             }\n\
+             declare i16 @air.get_imageblock_samples()\n\
+             declare i16 @air.get_imageblock_num_colors(<2 x i16>)\n\
+             declare i16 @air.get_color_coverage_mask(<2 x i16>, i16)\n\
+             declare void @air.store.implicit_imageblock.mask.v4f16(<4 x half>, i32, <2 x i16>, i16)\n\
+             !air.kernel = !{!0}\n\
+             !0 = !{ptr @main, !1, !1}\n\
+             !1 = !{}",
+        );
+        let triage = classify(&tile).unwrap();
+        assert!(triage.tooling_requirements.is_empty());
+        assert!(triage.unrecognized_air_intrinsics.is_empty());
+        assert!(triage.tile_function);
     }
 
     /// Cache validity follows semantics: the key is the classifier's version, the product
@@ -1833,6 +1903,12 @@ entry:
                 "src/executor_contract/tessellation.rs",
                 "the executors' tessellation pipeline state and patch draw; classification draws \
                  no patch",
+            ),
+            (
+                "src/budgets.rs",
+                "the shared pipeline-creation ceiling, which the case checker holds a case's own \
+                 creation bound above and the executors fall back to; classification checks no \
+                 case and makes no pipeline",
             ),
         ]);
         let dependencies =
@@ -2162,6 +2238,54 @@ define void @{name}(ptr addrspace(2) %ab, ptr addrspace(1) %out) {{
         plain.stage = stage.into();
         plain.entry = entry;
         assert!(!classify(&plain).unwrap().fragment_imageblock);
+    }
+
+    /// An object or mesh row is described by its draw: its stage, its payload, and the stages a row
+    /// of it needs that nothing supplies, as the requirement it carries says (the object function
+    /// draws with the generated launch observer of its payload, the mesh function with a generated
+    /// object function that writes its payload); any other row has no mesh draw.
+    #[test]
+    fn a_mesh_row_is_described_by_the_stages_it_needs() {
+        use crate::case::Stage;
+        use crate::executor_contract::mesh::MeshDrawFacts;
+        let facts = |entry: &str| {
+            let classified = classify(&entry_of("engine/mesh_draws.ll", entry)).unwrap();
+            let unresolved = classified
+                .tooling_requirements
+                .contains(&ToolingRequirement::MeshCompanion);
+            let draw = classified.mesh_draw.expect("a mesh draw");
+            assert_eq!(unresolved, !draw.missing.is_empty(), "{entry}");
+            draw
+        };
+        assert_eq!(
+            facts("mesh_draws_object"),
+            MeshDrawFacts {
+                stage: Stage::Object,
+                payload: true,
+                payload_size: Some(32),
+                missing: vec![],
+            }
+        );
+        assert_eq!(
+            facts("mesh_draws_mesh"),
+            MeshDrawFacts {
+                stage: Stage::Mesh,
+                payload: true,
+                payload_size: Some(32),
+                missing: vec![],
+            }
+        );
+        assert_eq!(
+            facts("mesh_draws_grid"),
+            MeshDrawFacts {
+                stage: Stage::Mesh,
+                payload: false,
+                payload_size: None,
+                missing: vec![],
+            }
+        );
+        let fragment = classify(&entry_of("engine/mesh_draws.ll", "mesh_draws_fragment")).unwrap();
+        assert_eq!(fragment.mesh_draw, None);
     }
 
     /// A tile function (a kernel's implicit imageblock over render targets) carries

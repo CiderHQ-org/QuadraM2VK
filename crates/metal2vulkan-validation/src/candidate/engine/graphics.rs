@@ -363,12 +363,16 @@ impl RenderCase {
     }
 
     /// The stage of the generated companion's function, which links nothing: the vertex stage of a
-    /// passthrough vertex, the fragment stage of an observer fragment, none without a companion.
+    /// passthrough vertex, the fragment stage of an observer fragment, none without a companion
+    /// (a render case's is never a mesh render pipeline's stages, which [`render_case`] refuses).
     pub fn companion_stage(&self) -> Option<ShaderStage> {
-        self.companion.as_ref().map(|companion| match companion {
-            Companion::PassthroughVertex(_) => ShaderStage::Vertex,
-            Companion::ObserverFragment(_) => ShaderStage::Fragment,
-        })
+        self.companion
+            .as_ref()
+            .and_then(|companion| match companion {
+                Companion::PassthroughVertex(_) => Some(ShaderStage::Vertex),
+                Companion::ObserverFragment(_) => Some(ShaderStage::Fragment),
+                Companion::MeshStages(_) => None,
+            })
     }
 }
 
@@ -525,66 +529,9 @@ pub fn render_case(
         }
         _ => None,
     };
-    let output =
-        match case.output {
-            OutputSelection::None => RenderOutput::None,
-            OutputSelection::Buffer {
-                binding,
-                offset,
-                length,
-            } => RenderOutput::Buffer {
-                stage,
-                binding,
-                offset,
-                length,
-            },
-            OutputSelection::Texture {
-                binding,
-                origin,
-                dimensions,
-            } => RenderOutput::Texture {
-                stage,
-                binding,
-                origin,
-                dimensions,
-            },
-            // The element is the texture bound at its slot (`resources::bound_textures`).
-            OutputSelection::TextureArrayElement {
-                binding,
-                element,
-                origin,
-                dimensions,
-            } => RenderOutput::Texture {
-                stage,
-                binding: resources::texture_array_slot(binding, element)
-                    .ok_or_else(|| gap("a texture-array element slot overflows"))?,
-                origin,
-                dimensions,
-            },
-            OutputSelection::ArgumentBufferBuffer {
-                buffer_binding,
-                field_offset,
-                offset,
-                length,
-            } => RenderOutput::ArgumentBufferBuffer {
-                stage,
-                owner: buffer_binding,
-                field_offset,
-                offset,
-                length,
-            },
-            OutputSelection::ArgumentBufferTexture {
-                buffer_binding,
-                field_offset,
-                origin,
-                dimensions,
-            } => RenderOutput::ArgumentBufferTexture {
-                stage,
-                owner: buffer_binding,
-                field_offset,
-                origin,
-                dimensions,
-            },
+    let output = match stage_output(&case.output, stage).map_err(|error| gap(&error))? {
+        Some(output) => output,
+        None => match case.output {
             OutputSelection::RenderTarget {
                 index,
                 origin,
@@ -628,92 +575,16 @@ pub fn render_case(
                  its imageblock",
             )
             .into()),
-        };
+        },
+    };
     let literal =
         LiteralResources::prepare(case).map_err(|error| gap(&format!("resources: {error}")))?;
-    let mut resources = StageResources::default();
-    for buffer in &literal.buffers {
-        if resources
-            .buffers
-            .insert(buffer.binding, buffer.bytes.clone())
-            .is_some()
-        {
-            return Err(gap(&format!("buffer {} bound twice", buffer.binding)).into());
-        }
-    }
-    resources.argument_buffer_buffers =
-        argument_buffers::embed(&mut resources.buffers, &literal.argument_buffer_buffers)
-            .map_err(|error| gap(&error))?;
-    resources.argument_buffer_textures =
-        argument_buffers::embed_textures(&mut resources.buffers, &literal.argument_buffer_textures)
-            .map_err(|error| gap(&error))?;
-    resources.argument_buffer_samplers =
-        argument_buffers::embed_samplers(&mut resources.buffers, &case.argument_buffer_samplers)
-            .map_err(|error| gap(&error))?;
-    let objects = argument_buffers::embed_objects(
-        &mut resources.buffers,
-        &mut resources.argument_buffer_buffers,
-        &case.command_buffers,
-        &case.pipeline_states,
-    )
-    .map_err(|error| gap(&error))?;
-    resources.objects = objects.pipeline_tokens;
-    resources.command_buffers = objects.command_buffers;
-    resources.textures = resources::bound_textures(&literal.textures, &literal.texture_arrays)
-        .map_err(|error| gap(&error))?;
-    for sampler in &case.samplers {
-        if resources
-            .samplers
-            .insert(sampler.binding, sampler.clone())
-            .is_some()
-        {
-            return Err(gap(&format!("sampler {} bound twice", sampler.binding)).into());
-        }
-    }
-    resources.function_tables = function_tables(&case.visible_function_tables)?;
-    if let Some(binding) = resources
-        .function_tables
-        .keys()
-        .find(|binding| resources.buffers.contains_key(binding))
-    {
-        return Err(gap(&format!(
-            "buffer {binding} is also a visible function table"
-        ))
-        .into());
-    }
+    let resources = stage_resources(case, &literal)?;
     if stage == ShaderStage::Fragment && !literal.vertex_inputs.is_empty() {
         return Err(gap("vertex inputs of a fragment case").into());
     }
     let vertex_buffers = vertex_buffers(case, &literal, interface)?;
-    let color_targets = if generated.is_some() {
-        literal
-            .render_targets
-            .iter()
-            .map(|target| {
-                (
-                    target.index,
-                    ColorTarget {
-                        format: target.format,
-                        dimensions: target.dimensions,
-                        samples: target.samples,
-                        bytes: target.bytes.clone(),
-                    },
-                )
-            })
-            .collect()
-    } else {
-        // The oracle's private 1×1 sink: Metal needs an attachment to encode a render pass. It
-        // cannot be observed, since rasterization is disabled.
-        BTreeMap::from([(
-            0,
-            ColorTarget {
-                format: TextureFormat::R8Unorm,
-                dimensions: [1, 1],
-                samples: 1,
-                bytes: vec![0],
-            },
-        )])
-    };
+    let color_targets = color_targets(&literal, generated.is_some());
     let imageblock = match (&literal.fragment_imageblock, &imageblock_layout) {
         (None, _) => None,
         (Some(authored), Some(layout)) => {
@@ -775,6 +646,173 @@ pub fn render_case(
             .map_err(|error| gap(&error))?,
         raster_sample_count: case.raster_sample_count,
     })
+}
+
+/// The color attachments of a pass that rasterizes (`rasterizes`): the case's render targets, by
+/// Metal index; or, without rasterization, the oracle's private 1×1 `R8Unorm` sink, since Metal
+/// needs an attachment to encode a render pass and nothing rasterizes into it.
+pub fn color_targets(literal: &LiteralResources, rasterizes: bool) -> BTreeMap<u32, ColorTarget> {
+    if !rasterizes {
+        return BTreeMap::from([(
+            0,
+            ColorTarget {
+                format: TextureFormat::R8Unorm,
+                dimensions: [1, 1],
+                samples: 1,
+                bytes: vec![0],
+            },
+        )]);
+    }
+    literal
+        .render_targets
+        .iter()
+        .map(|target| {
+            (
+                target.index,
+                ColorTarget {
+                    format: target.format,
+                    dimensions: target.dimensions,
+                    samples: target.samples,
+                    bytes: target.bytes.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
+/// The output `output` selects of the case's own function at `stage`, when it is a resource of that
+/// function's (a buffer range, a region of a texture or a texture-array element, an argument
+/// buffer's buffer range or texture region) or no output; `None` for an output of the pass (a
+/// render target, the depth/stencil attachment, an imageblock). The one mapping a render case's
+/// and a mesh case's own stage share.
+pub fn stage_output(
+    output: &OutputSelection,
+    stage: ShaderStage,
+) -> Result<Option<RenderOutput>, String> {
+    Ok(Some(match *output {
+        OutputSelection::None => RenderOutput::None,
+        OutputSelection::Buffer {
+            binding,
+            offset,
+            length,
+        } => RenderOutput::Buffer {
+            stage,
+            binding,
+            offset,
+            length,
+        },
+        OutputSelection::Texture {
+            binding,
+            origin,
+            dimensions,
+        } => RenderOutput::Texture {
+            stage,
+            binding,
+            origin,
+            dimensions,
+        },
+        // The element is the texture bound at its slot (`resources::bound_textures`).
+        OutputSelection::TextureArrayElement {
+            binding,
+            element,
+            origin,
+            dimensions,
+        } => RenderOutput::Texture {
+            stage,
+            binding: resources::texture_array_slot(binding, element)
+                .ok_or("a texture-array element slot overflows")?,
+            origin,
+            dimensions,
+        },
+        OutputSelection::ArgumentBufferBuffer {
+            buffer_binding,
+            field_offset,
+            offset,
+            length,
+        } => RenderOutput::ArgumentBufferBuffer {
+            stage,
+            owner: buffer_binding,
+            field_offset,
+            offset,
+            length,
+        },
+        OutputSelection::ArgumentBufferTexture {
+            buffer_binding,
+            field_offset,
+            origin,
+            dimensions,
+        } => RenderOutput::ArgumentBufferTexture {
+            stage,
+            owner: buffer_binding,
+            field_offset,
+            origin,
+            dimensions,
+        },
+        _ => return Ok(None),
+    }))
+}
+
+/// What the case's own function binds, from its literals `literal`: its buffers (an argument
+/// buffer's owner covering each pointer field), its argument buffers' members, the pipeline states
+/// and command buffers its argument buffers hold, its textures (texture-array elements each at its
+/// own slot), samplers and visible-function tables. The one mapping a render case's and a mesh
+/// case's own stage share.
+pub fn stage_resources(
+    case: &AuthoredCase,
+    literal: &LiteralResources,
+) -> Result<StageResources, ExecutorError> {
+    let gap = |what: &str| NotSupported::NotImplemented(format!("engine candidate: {what}"));
+    let mut resources = StageResources::default();
+    for buffer in &literal.buffers {
+        if resources
+            .buffers
+            .insert(buffer.binding, buffer.bytes.clone())
+            .is_some()
+        {
+            return Err(gap(&format!("buffer {} bound twice", buffer.binding)).into());
+        }
+    }
+    resources.argument_buffer_buffers =
+        argument_buffers::embed(&mut resources.buffers, &literal.argument_buffer_buffers)
+            .map_err(|error| gap(&error))?;
+    resources.argument_buffer_textures =
+        argument_buffers::embed_textures(&mut resources.buffers, &literal.argument_buffer_textures)
+            .map_err(|error| gap(&error))?;
+    resources.argument_buffer_samplers =
+        argument_buffers::embed_samplers(&mut resources.buffers, &case.argument_buffer_samplers)
+            .map_err(|error| gap(&error))?;
+    let objects = argument_buffers::embed_objects(
+        &mut resources.buffers,
+        &mut resources.argument_buffer_buffers,
+        &case.command_buffers,
+        &case.pipeline_states,
+    )
+    .map_err(|error| gap(&error))?;
+    resources.objects = objects.pipeline_tokens;
+    resources.command_buffers = objects.command_buffers;
+    resources.textures = resources::bound_textures(&literal.textures, &literal.texture_arrays)
+        .map_err(|error| gap(&error))?;
+    for sampler in &case.samplers {
+        if resources
+            .samplers
+            .insert(sampler.binding, sampler.clone())
+            .is_some()
+        {
+            return Err(gap(&format!("sampler {} bound twice", sampler.binding)).into());
+        }
+    }
+    resources.function_tables = function_tables(&case.visible_function_tables)?;
+    if let Some(binding) = resources
+        .function_tables
+        .keys()
+        .find(|binding| resources.buffers.contains_key(binding))
+    {
+        return Err(gap(&format!(
+            "buffer {binding} is also a visible function table"
+        ))
+        .into());
+    }
+    Ok(resources)
 }
 
 /// The region plan the render executor draws a rate-mapped pass of `map` with: the map's screen as
@@ -1204,40 +1242,9 @@ pub fn bind_state(
         );
     }
     for (stage, function) in case.stages() {
-        let mut table = StageTable::default();
-        let lengths = function
-            .resources
-            .buffers
-            .iter()
-            .map(|(&index, bytes)| (index, bytes.len() as u64))
-            .chain(
-                function
-                    .resources
-                    .function_tables
-                    .iter()
-                    .map(|(&index, function_table)| (index, function_table.byte_len())),
-            );
-        for (index, length) in lengths {
-            if table
-                .buffers
-                .insert(index, bound(stage, index, length, None))
-                .is_some()
-            {
-                return Err(format!(
-                    "{stage:?} buffer {index} is also a visible function table"
-                ));
-            }
-        }
-        for (&index, texture) in &function.resources.textures {
-            table
-                .textures
-                .insert(index, resources::bound_texture(texture)?);
-        }
-        for (&index, sampler) in &function.resources.samplers {
-            table
-                .samplers
-                .insert(index, resources::bound_sampler(sampler));
-        }
+        let table = stage_table(stage, function, |index, length| {
+            bound(stage, index, length, None)
+        })?;
         state.stages.insert(stage, table);
     }
     let table = state.stages.entry(ShaderStage::Vertex).or_default();
@@ -1276,6 +1283,47 @@ pub fn bind_state(
     state.argument_samplers = argument_buffers::argument_samplers(case.argument_buffer_samplers())?;
     state.depth_stencil = case.depth_stencil_state.descriptor;
     Ok(state)
+}
+
+/// The bind table of `function`'s own resources at `stage`: its buffers and visible function
+/// tables, each bound as `bound` binds a buffer of its index and length, its textures and its
+/// samplers.
+pub fn stage_table(
+    stage: ShaderStage,
+    function: &RenderFunction,
+    bound: impl Fn(u32, u64) -> BoundBuffer,
+) -> Result<StageTable, String> {
+    let mut table = StageTable::default();
+    let lengths = function
+        .resources
+        .buffers
+        .iter()
+        .map(|(&index, bytes)| (index, bytes.len() as u64))
+        .chain(
+            function
+                .resources
+                .function_tables
+                .iter()
+                .map(|(&index, function_table)| (index, function_table.byte_len())),
+        );
+    for (index, length) in lengths {
+        if table.buffers.insert(index, bound(index, length)).is_some() {
+            return Err(format!(
+                "{stage:?} buffer {index} is also a visible function table"
+            ));
+        }
+    }
+    for (&index, texture) in &function.resources.textures {
+        table
+            .textures
+            .insert(index, resources::bound_texture(texture)?);
+    }
+    for (&index, sampler) in &function.resources.samplers {
+        table
+            .samplers
+            .insert(index, resources::bound_sampler(sampler));
+    }
+    Ok(table)
 }
 
 /// The id of each argument-buffer sampler of `case`, by `(stage, owner, field offset)`: its
@@ -1497,7 +1545,8 @@ pub fn select_target(
 /// The Metal stage whose function `module` runs in a render pipeline that is `tessellated` or
 /// not, `None` for a stage the link synthesized: a tessellation pipeline's Metal stages are its
 /// evaluation stage (the vertex function) and its fragment stage, and its vertex and control
-/// stages run no Metal function.
+/// stages run no Metal function, nor do the geometry stages of barycentric weights read as
+/// varyings.
 pub fn stage_of(
     module: &StageModule,
     tessellated: bool,
@@ -1509,6 +1558,7 @@ pub fn stage_of(
             Ok(Some(ShaderStage::Vertex))
         }
         s if tessellated && (s == S::VERTEX || s == S::TESSELLATION_CONTROL) => Ok(None),
+        s if s == S::GEOMETRY => Ok(None),
         other => Err(format!("a render pipeline stage {other:?}").into()),
     }
 }

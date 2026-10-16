@@ -1,4 +1,4 @@
-// Owned fixture (WP-RTL, docs/TODO.md 8.30, DESIGN D262 item 11): threadgroup accesses that only
+// Owned fixture: threadgroup accesses that only
 // a simdgroup's lockstep orders, inside loops each thread leaves after its own number of
 // iterations, so no barrier the translation may insert there is uniform in the simdgroup: a device
 // that runs a simdgroup in lockstep itself orders them, and every other device takes emulated

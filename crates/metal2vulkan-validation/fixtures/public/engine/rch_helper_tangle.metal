@@ -1,4 +1,4 @@
-// Owned fixture (WP-RCH, DESIGN D788): fragment functions that read a coverage texture, sample a
+// Owned fixture: fragment functions that read a coverage texture, sample a
 // texture at LOD 0, take a branch where the coverage is not 1 (where every covered pixel's
 // coverage is 1, only the quad helpers past a primitive's edges take it), round to `half` there
 // (a conversion SPIRV-Cross writes through its `optnone` `spvFAdd`) beside a tangled instruction,

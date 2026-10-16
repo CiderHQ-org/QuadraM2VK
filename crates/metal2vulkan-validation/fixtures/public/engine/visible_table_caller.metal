@@ -1,4 +1,4 @@
-// Owned MSL for WP-K2 (D157): kernels that call visible functions through a
+// Owned MSL: kernels that call visible functions through a
 // `visible_function_table` and through function pointers. The functions come from
 // `visible_table_functions.metal`, which the pipeline links; the table's entries are its
 // function handles. Loop-free.

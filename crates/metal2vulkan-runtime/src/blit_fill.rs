@@ -337,12 +337,14 @@ impl BlitCommandEncoder {
             .collect();
         let staging = self.staged(&bytes)?;
         let (source, from) = staging.at(0);
-        let (destination, _) = buffer.at(range.start);
+        // Read as a blit's (`host_residency.rs`): where the range starts in the `VkBuffer`, and
+        // each byte past it as far on.
+        let (destination, origin) = self.core().blit_at(buffer, range.start)?;
         let mut regions = Vec::new();
         if head > 0 {
             regions.push(vk::BufferCopy {
                 src_offset: from,
-                dst_offset: buffer.at(range.start).1,
+                dst_offset: origin,
                 size: head,
             });
         }
@@ -351,7 +353,7 @@ impl BlitCommandEncoder {
             let size = (range.end - at).min(chunk);
             regions.push(vk::BufferCopy {
                 src_offset: from + head,
-                dst_offset: buffer.at(at).1,
+                dst_offset: origin + (at - range.start),
                 size,
             });
             at += size;

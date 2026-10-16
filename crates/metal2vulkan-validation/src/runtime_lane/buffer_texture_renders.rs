@@ -1,12 +1,12 @@
 //! Device tests of textures over buffers in render passes on the device the cfg selects, under the
-//! validation layer. TOB probe 1's render cases (`r.*`) run on the runtime with the probe's
-//! functions (the owned fixture `tob_renders`), over its bytes: a buffer whose byte `i` is `7i +
-//! 3`, holding 4x4 `RGBA8Unorm` textures at offset 256 with rows 32 bytes apart (and 256 and 16 for
-//! the clears), two-slice linear arrays and 16-texel texture buffers, filled with texels that name
-//! themselves. The textures are color attachments, resolve targets, and textures a fragment
-//! function reads, samples and writes, and their bytes are ordered with blits in one command
-//! buffer. Each case runs over an ordinary buffer and a no-copy one, so each texture takes the
-//! aliasing or the shadow form the device gives it.
+//! validation layer. The render cases (`r.*`) of a Metal probe on the M3 Max and an M4 run on the
+//! runtime with the probe's functions (the owned fixture `tob_renders`), over its bytes: a buffer
+//! whose byte `i` is `7i + 3`, holding 4x4 `RGBA8Unorm` textures at offset 256 with rows 32 bytes
+//! apart (and 256 and 16 for the clears), two-slice linear arrays and 16-texel texture buffers,
+//! filled with texels that name themselves. The textures are color attachments, resolve targets,
+//! and textures a fragment function reads, samples and writes, and their bytes are ordered with
+//! blits in one command buffer. Each case runs over an ordinary buffer and a no-copy one, so each
+//! texture takes the aliasing or the shadow form the device gives it.
 //!
 //! Every byte of the buffer, and of the ordinary texture a pass renders into, is checked against
 //! Metal's answer, the bytes the probe recorded on the M4 and the M3 Max rebuilt by a model at the
@@ -15,8 +15,8 @@
 //! other byte, the bytes between rows among them, exactly.
 //!
 //! One command that writes a buffer's bytes through a texture over it and also another way keeps
-//! both writes, as Metal does (TOB probe 1's `k.two_ways_*`): a dispatch that writes a texel and
-//! the next texel's bytes or those between rows, and a pass that stores a texture while its draw
+//! both writes, as Metal does (probe cases `k.two_ways_*`): a dispatch that writes a texel and the
+//! next texel's bytes or those between rows, and a pass that stores a texture while its draw
 //! writes, through another texture over the buffer, the texels between the first's rows. Where a
 //! texture is shadowed, the runtime merges its writes into the buffer and announces it once
 //! ([`MERGES`]).
@@ -67,9 +67,9 @@ const LEFT: [f32; 4] = [-1.0, -1.0, 0.0, 1.0];
 
 /// The degrade a command writing a shadowed texture's bytes two ways announces.
 pub(super) const MERGES: [Degradation; 1] = [Degradation::ShadowMerge];
-/// The rows TOB probe 1 recorded on the M4 and the M3 Max after `tob_two_ways` wrote texel
-/// (0, 0) and the bytes of texel (1, 0) (`k.two_ways_disjoint`), or the four bytes after row 0's
-/// texels (`k.two_ways_gap`).
+/// The rows the probe recorded on the M4 and the M3 Max after `tob_two_ways` wrote texel (0, 0) and
+/// the bytes of texel (1, 0) (`k.two_ways_disjoint`), or the four bytes after row 0's texels
+/// (`k.two_ways_gap`).
 const PROBE_TWO_WAYS_DISJOINT: &str =
     "ff0000ff5a5b5c5d122042c2132043c3737a81888f969da4abb2b9c0c7ced5dc|\
 102144c4112145c5122146c6132147c7535a61686f767d848b9299a0a7aeb5bc|\
@@ -92,8 +92,8 @@ fn written(x: u64, y: u64) -> [u8; 4] {
 }
 
 /// The probe's resolve of its triangle, (-1, -1), (1, -1), (-1, 0.9), drawn in `COLOR` into a 4x
-/// target cleared to opaque black: covered below the diagonal, half covered on it (two samples
-/// of four), uncovered above (TOB probe 1's `r.resolve`).
+/// target cleared to opaque black: covered below the diagonal, half covered on it (two samples of
+/// four), uncovered above (probe case `r.resolve`).
 fn resolved(x: u64, y: u64) -> [u8; 4] {
     match x.cmp(&y) {
         std::cmp::Ordering::Less => unorm(COLOR),
@@ -363,15 +363,15 @@ fn each_kind(device: &Device, cases: impl Fn(&Lane, Kind)) {
     }
 }
 
-/// A texture over a buffer as a color attachment stores Metal's bytes: clears at rows of 32,
-/// 256 and 16 bytes write the texel rows alone; a `DontCare` store leaves the bytes, after a clear
-/// with no draw, a clear and a draw over the whole texture, a `DontCare` load and a draw over its
-/// left half, and a load and a draw over the whole (the DontCare-store probe, an M3 Max under
-/// macOS 27.0.1, 20 times each alike); a load keeps the texels a draw leaves; a view of the
-/// texture's own format renders into it; slice 1 of a linear array renders there (TOB probe 1's
-/// `r.clear*`, `r.load_draw`, `r.clear_draw`, `r.dontcare_full`, `r.view_same`, `r.slice1`).
-/// After a `DontCare` load, the texels outside the draw are the buffer's or zero (Metal's), which
-/// is printed (`r.dontcare_half`).
+/// A texture over a buffer as a color attachment stores Metal's bytes: clears at rows of 32, 256
+/// and 16 bytes write the texel rows alone; a `DontCare` store leaves the bytes, after a clear with
+/// no draw, a clear and a draw over the whole texture, a `DontCare` load and a draw over its left
+/// half, and a load and a draw over the whole (the DontCare-store probe, an M3 Max under macOS
+/// 27.0.1, 20 times each alike); a load keeps the texels a draw leaves; a view of the texture's own
+/// format renders into it; slice 1 of a linear array renders there (probe cases `r.clear*`,
+/// `r.load_draw`, `r.clear_draw`, `r.dontcare_full`, `r.view_same`, `r.slice1`). After a `DontCare`
+/// load, the texels outside the draw are the buffer's or zero (Metal's), which is printed
+/// (`r.dontcare_half`).
 #[test]
 fn attachments_over_buffers_store_metals_bytes() {
     on_device(|device| each_kind(device, attachments));
@@ -498,8 +498,8 @@ fn attachments(lane: &Lane, kind: Kind) {
     }
 }
 
-/// A multisample resolve into a texture over a buffer, and into slice 1 of a linear array over
-/// one, writes Metal's resolved texels (TOB probe 1's `r.resolve`, `r.resolve_store` and
+/// A multisample resolve into a texture over a buffer, and into slice 1 of a linear array over one,
+/// writes Metal's resolved texels (probe cases `r.resolve`, `r.resolve_store` and
 /// `r.resolve_slice`).
 #[test]
 fn resolves_into_textures_over_buffers_write_metals_bytes() {
@@ -546,10 +546,10 @@ fn resolves(lane: &Lane, kind: Kind) {
     want.check(&b.bytes(), &name("resolve_slice"));
 }
 
-/// Fragment functions read, sample (nearest and linear) and write textures over buffers and
-/// texture buffers as Metal does (TOB probe 1's `r.read`, `r.sample`, `r.sample_linear`,
-/// `r.read_tb`, `r.frag_write`, `r.frag_write_tb`, and `r.efi`, the consumer's EFI frame: a
-/// 20x4 `BGRA8Unorm` texture at offset 0 with packed rows, read alone).
+/// Fragment functions read, sample (nearest and linear) and write textures over buffers and texture
+/// buffers as Metal does (probe cases `r.read`, `r.sample`, `r.sample_linear`, `r.read_tb`,
+/// `r.frag_write`, `r.frag_write_tb`, and `r.efi`, the consumer's EFI frame: a 20x4 `BGRA8Unorm`
+/// texture at offset 0 with packed rows, read alone).
 #[test]
 fn fragment_functions_read_and_write_textures_over_buffers() {
     on_device(|device| each_kind(device, fragments));
@@ -682,12 +682,11 @@ fn fragments(lane: &Lane, kind: Kind) {
     }
 }
 
-/// A pass's bytes are ordered with the other encoders' uses of the buffer in one command
-/// buffer: a pass, then a pass that reads the texture; a pass, then a blit of the buffer's
-/// bytes; a blit into the bytes, then a pass that reads them; a blit into the texture, then a
-/// pass that loads it; a pass, then a blit out of the texture (TOB probe 1's `r.chain`,
-/// `r.then_kernel` and `r.kernel_then_read` with blits for the kernels, `r.blit_then_attach`,
-/// `r.attach_then_blit`).
+/// A pass's bytes are ordered with the other encoders' uses of the buffer in one command buffer: a
+/// pass, then a pass that reads the texture; a pass, then a blit of the buffer's bytes; a blit into
+/// the bytes, then a pass that reads them; a blit into the texture, then a pass that loads it; a
+/// pass, then a blit out of the texture (probe cases `r.chain`, `r.then_kernel` and
+/// `r.kernel_then_read` with blits for the kernels, `r.blit_then_attach`, `r.attach_then_blit`).
 #[test]
 fn passes_over_buffers_order_with_the_other_uses_of_the_bytes() {
     on_device(|device| each_kind(device, ordered));
@@ -912,17 +911,17 @@ fn texture_buffers(lane: &Lane, kind: Kind) {
     want.check(&b.bytes(), &name("tb_resolve"));
 }
 
-/// One command writes a buffer's bytes through a texture over it and another way, and Metal
-/// keeps both writes: `tob_two_ways` writes texel (0, 0) of a texture over the buffer and four
-/// bytes of the buffer, those of texel (1, 0) or those after row 0's texels, in one dispatch,
-/// leaving the rows TOB probe 1 recorded on the M4 and the M3 Max (`k.two_ways_disjoint`,
-/// `k.two_ways_gap`) and every other byte the buffer's; and a pass stores a texture over the
-/// buffer while its draw writes, through a second texture over the same buffer 16 bytes on, the
-/// texels between the first's rows, leaving each texture's texels as its writer left them, and
-/// the same pass split by a memory barrier before a draw that reads the second texture's texels
-/// into the first sees them (the merge between the instances). Where
-/// a texture is shadowed (the device announces `shadowed-texture`), the runtime merges its writes
-/// into the buffer and announces that once ([`MERGES`]); where none is, nothing is merged.
+/// One command writes a buffer's bytes through a texture over it and another way, and Metal keeps
+/// both writes: `tob_two_ways` writes texel (0, 0) of a texture over the buffer and four bytes of
+/// the buffer, those of texel (1, 0) or those after row 0's texels, in one dispatch, leaving the
+/// rows the probe recorded on the M4 and the M3 Max (`k.two_ways_disjoint`, `k.two_ways_gap`) and
+/// every other byte the buffer's; and a pass stores a texture over the buffer while its draw
+/// writes, through a second texture over the same buffer 16 bytes on, the texels between the
+/// first's rows, leaving each texture's texels as its writer left them, and the same pass split by
+/// a memory barrier before a draw that reads the second texture's texels into the first sees them
+/// (the merge between the instances). Where a texture is shadowed (the device announces
+/// `shadowed-texture`), the runtime merges its writes into the buffer and announces that once
+/// ([`MERGES`]); where none is, nothing is merged.
 #[test]
 fn a_command_writing_a_buffers_bytes_two_ways_keeps_both_writes() {
     let messages = Messages::default();
@@ -980,7 +979,7 @@ fn two_ways(lane: &Lane, kind: Kind) {
         assert_eq!(
             hex_rows(&bytes, OFF, BPR, 4),
             rows,
-            "{what}: the rows TOB probe 1 recorded"
+            "{what}: the rows Metal's probe recorded"
         );
         let mut want = Expect::of(&b.model);
         want.set(

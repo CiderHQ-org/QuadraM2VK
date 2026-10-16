@@ -16,19 +16,13 @@ const INHERIT_BUFFERS: u32 = 128;
 const DRAW_INDEXED: u32 = 256;
 const DRAW_PATCHES: u32 = 512;
 const DRAW_INDEXED_PATCHES: u32 = 1024;
-
-/// Which header count bounds an operation's binding index.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum BindingCount {
-    /// Byte `n` of the header's packed counts.
-    Byte(u8),
-    /// No count: the stage has no descriptor representation, so every binding faults.
-    None,
-}
+const DRAW_MESH_THREADGROUPS: u32 = 2048;
+const DRAW_MESH_THREADS: u32 = 4096;
 
 /// The descriptor policy an encoder operation's write requires of the record header: its
 /// policy bits masked with `required | forbidden` equal `required`, and hold one of `any` where
-/// `any` is not 0, the command index is below the capacity, a binding index is below its count, a dynamic stride is all ones unless the
+/// `any` is not 0, the command index is below the capacity, a binding index is below its count
+/// (byte `binding` of the header's packed counts), a dynamic stride is all ones unless the
 /// descriptor enables dynamic strides, and a threadgroup length is a multiple of 16. A write
 /// that fails any of them sets the fault flag instead and writes nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,7 +33,7 @@ pub(super) struct Policy {
     /// Metal record holds the operation's draw, as the product's lowering checks them
     /// (`indirect_commands::DrawKind::holders`).
     pub(super) any: u32,
-    pub(super) binding: Option<BindingCount>,
+    pub(super) binding: Option<u8>,
     pub(super) dynamic_stride: bool,
     pub(super) length: bool,
 }
@@ -60,6 +54,9 @@ impl CommandEncoderOperation {
                 format!(", ptr addrspace({address_space}) %buffer{stride}, i32 %binding")
             }
             Self::Dispatch { .. } => ", <3 x i32> %grid, <3 x i32> %local".to_string(),
+            Self::DrawMesh { .. } => {
+                ", <3 x i32> %grid, <3 x i32> %object_threads, <3 x i32> %mesh_threads".to_string()
+            }
             Self::Pipeline { .. } => ", ptr addrspace(1) %pipeline".to_string(),
             Self::Barrier { .. } | Self::Reset { .. } => String::new(),
             Self::ThreadgroupMemory => ", i32 %length, i32 %binding".to_string(),
@@ -114,8 +111,11 @@ impl CommandEncoderOperation {
         };
         // A draw needs a render descriptor whose records hold its kind: primitives every render
         // buffer's, indexed draws an indexed or a patch buffer's, patch and indexed patch draws a
-        // patch buffer's.
+        // patch buffer's, mesh draws a buffer of either mesh kind's. A draw of primitives on a
+        // buffer of mesh draws alone writes too: Metal draws nothing for it, and the product's
+        // lowering drops it (`dropped_on`).
         let patch_records = DRAW_PATCHES | DRAW_INDEXED_PATCHES;
+        let mesh_records = DRAW_MESH_THREADGROUPS | DRAW_MESH_THREADS;
         let draw = |any| Policy {
             any,
             ..plain(RENDER)
@@ -125,12 +125,13 @@ impl CommandEncoderOperation {
                 required: family(stage != BufferStage::Kernel),
                 forbidden: INHERIT_BUFFERS,
                 any: 0,
+                // A render descriptor's object and mesh counts take the bytes of the kernel and
+                // threadgroup counts, which a compute descriptor's alone hold.
                 binding: Some(match stage {
-                    BufferStage::Kernel => BindingCount::Byte(0),
-                    BufferStage::Vertex => BindingCount::Byte(1),
-                    BufferStage::Fragment => BindingCount::Byte(2),
-                    // Object commands have no descriptor representation yet.
-                    BufferStage::Object => BindingCount::None,
+                    BufferStage::Kernel | BufferStage::Object => 0,
+                    BufferStage::Vertex => 1,
+                    BufferStage::Fragment => 2,
+                    BufferStage::Mesh => 3,
                 }),
                 dynamic_stride: matches!(stage, BufferStage::Kernel | BufferStage::Vertex),
                 length: false,
@@ -143,14 +144,15 @@ impl CommandEncoderOperation {
             },
             Self::Barrier { render, .. } | Self::Reset { render } => plain(family(render)),
             Self::ThreadgroupMemory => Policy {
-                binding: Some(BindingCount::Byte(3)),
+                binding: Some(3),
                 length: true,
                 ..plain(COMPUTE)
             },
             Self::StageInRegion | Self::ImageblockSize | Self::Copy => plain(COMPUTE),
-            Self::Draw => draw(DRAW | DRAW_INDEXED | patch_records),
+            Self::Draw => draw(DRAW | DRAW_INDEXED | patch_records | mesh_records),
             Self::DrawIndexed { .. } => draw(DRAW_INDEXED | patch_records),
             Self::DrawPatches { .. } | Self::DrawIndexedPatches { .. } => draw(patch_records),
+            Self::DrawMesh { .. } => draw(mesh_records),
             Self::UnsupportedBufferEncoding | Self::Unmodeled => return None,
         })
     }
@@ -217,16 +219,9 @@ impl CommandEncoderOperation {
             writeln!(body, "  %held_kinds = and i32 %policy, {any}\n  %kind_held = icmp ne i32 %held_kinds, 0\n  %valid_kind = and i1 {valid}, %kind_held").unwrap();
             valid = "%valid_kind";
         }
-        if let Some(count) = binding {
-            match count {
-                BindingCount::None => {
-                    body.push_str("  %binding_valid = icmp ult i32 %binding, 0\n")
-                }
-                BindingCount::Byte(byte) => {
-                    header_field(body, "counts_ptr", 3, typed);
-                    writeln!(body, "  %counts = load i32, {pointer} %counts_ptr, align 4\n  %shifted_count = lshr i32 %counts, {}\n  %binding_count = and i32 %shifted_count, 255\n  %binding_valid = icmp ult i32 %binding, %binding_count", u32::from(byte) * 8).unwrap();
-                }
-            }
+        if let Some(byte) = binding {
+            header_field(body, "counts_ptr", 3, typed);
+            writeln!(body, "  %counts = load i32, {pointer} %counts_ptr, align 4\n  %shifted_count = lshr i32 %counts, {}\n  %binding_count = and i32 %shifted_count, 255\n  %binding_valid = icmp ult i32 %binding, %binding_count", u32::from(byte) * 8).unwrap();
             body.push_str("  %valid1 = and i1 %valid0, %binding_valid\n");
             valid = "%valid1";
         }
@@ -378,12 +373,14 @@ mod tests {
                         assert_eq!(counts & 255, 5, "kernel buffers: byte 0");
                         assert_eq!(counts >> 24 & 255, 3, "threadgroup memory: byte 3");
                     }
-                    for (primitives, indexed, patches, indexed_patches) in [
-                        (true, false, false, false),
-                        (false, true, false, false),
-                        (false, false, true, false),
-                        (false, false, false, true),
-                        (true, true, true, true),
+                    for (primitives, indexed, patches, indexed_patches, groups, threads) in [
+                        (true, false, false, false, false, false),
+                        (false, true, false, false, false, false),
+                        (false, false, true, false, false, false),
+                        (false, false, false, true, false, false),
+                        (false, false, false, false, true, false),
+                        (false, false, false, false, false, true),
+                        (true, true, true, true, true, true),
                     ] {
                         let header = CommandDescriptor::Render {
                             draws: RenderDraws {
@@ -391,13 +388,13 @@ mod tests {
                                 indexed,
                                 patches,
                                 indexed_patches,
-                                mesh_threadgroups: false,
-                                mesh_threads: false,
+                                mesh_threadgroups: groups,
+                                mesh_threads: threads,
                             },
                             max_vertex_buffer_bind_count: 6,
                             max_fragment_buffer_bind_count: 4,
-                            max_object_buffer_bind_count: 0,
-                            max_mesh_buffer_bind_count: 0,
+                            max_object_buffer_bind_count: 2,
+                            max_mesh_buffer_bind_count: 5,
                             support_dynamic_attribute_stride: dynamic,
                         }
                         .encode_header(9, inheritance)
@@ -407,6 +404,8 @@ mod tests {
                             (indexed, DRAW_INDEXED),
                             (patches, DRAW_PATCHES),
                             (indexed_patches, DRAW_INDEXED_PATCHES),
+                            (groups, DRAW_MESH_THREADGROUPS),
+                            (threads, DRAW_MESH_THREADS),
                         ]
                         .into_iter()
                         .filter(|&(allowed, _)| allowed)
@@ -415,31 +414,33 @@ mod tests {
                         assert_eq!(word(&header, 1), 0);
                         assert_eq!(word(&header, 2), RENDER | draws | stride | inherited);
                         let counts = word(&header, 3);
+                        assert_eq!(counts & 255, 2, "object buffers: byte 0");
                         assert_eq!(counts >> 8 & 255, 6, "vertex buffers: byte 1");
                         assert_eq!(counts >> 16 & 255, 4, "fragment buffers: byte 2");
+                        assert_eq!(counts >> 24 & 255, 5, "mesh buffers: byte 3");
                     }
                 }
             }
         }
         // The bytes `Policy` reads its binding counts from.
         let byte = |stage| {
-            let operation = CommandEncoderOperation::Buffer {
+            CommandEncoderOperation::Buffer {
                 stage,
                 address_space: 1,
-            };
-            match operation.policy().and_then(|policy| policy.binding) {
-                Some(BindingCount::Byte(byte)) => Some(byte),
-                _ => None,
             }
+            .policy()
+            .and_then(|policy| policy.binding)
         };
         assert_eq!(byte(BufferStage::Kernel), Some(0));
         assert_eq!(byte(BufferStage::Vertex), Some(1));
         assert_eq!(byte(BufferStage::Fragment), Some(2));
+        assert_eq!(byte(BufferStage::Object), Some(0));
+        assert_eq!(byte(BufferStage::Mesh), Some(3));
         assert_eq!(
             CommandEncoderOperation::ThreadgroupMemory
                 .policy()
                 .and_then(|policy| policy.binding),
-            Some(BindingCount::Byte(3))
+            Some(3)
         );
         // Each draw requires its own kind's bit, as the product's lowering does
         // (`indirect_commands::CommandEncoderOperation::policy`).
@@ -449,11 +450,17 @@ mod tests {
         // product's lowering does (`indirect_commands::CommandEncoderOperation::policy`); a
         // dispatch, a compute one.
         let patch_records = DRAW_PATCHES | DRAW_INDEXED_PATCHES;
+        let mesh_records = DRAW_MESH_THREADGROUPS | DRAW_MESH_THREADS;
         assert_eq!(required(CommandEncoderOperation::Draw), RENDER);
         assert_eq!(
             any(CommandEncoderOperation::Draw),
-            DRAW | DRAW_INDEXED | patch_records
+            DRAW | DRAW_INDEXED | patch_records | mesh_records
         );
+        for threads in [false, true] {
+            let mesh = CommandEncoderOperation::DrawMesh { threads };
+            assert_eq!(required(mesh), RENDER);
+            assert_eq!(any(mesh), mesh_records);
+        }
         for exact_threads in [false, true] {
             let dispatch = CommandEncoderOperation::Dispatch { exact_threads };
             assert_eq!(required(dispatch), COMPUTE);

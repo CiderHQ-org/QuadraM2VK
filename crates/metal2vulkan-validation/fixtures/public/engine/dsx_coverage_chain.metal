@@ -1,4 +1,4 @@
-// Owned fixture (WP-DSX; written for this repository, no third-party source): a coverage chain
+// Owned fixture (written for this repository, no third-party source): a coverage chain
 // through an RG16Float attachment, as a path renderer builds one. Instanced rectangles add their
 // weights to the attachment's green under additive blending (`chain_edges`); a pass over each
 // cell reads the sum back by framebuffer fetch under early fragment tests and leaves its absolute

@@ -1,5 +1,5 @@
 // Sixteen physical coordinates mapped to screen coordinates through one of two rasterization-rate
-// maps that an argument buffer holds (DESIGN D240).
+// maps that an argument buffer holds.
 //
 // The map pointers are members of an argument buffer, as in the corpus rows that keep their maps
 // beside their other per-pass resources: `left` at byte 8 and `right` at byte 16, after a
@@ -10,7 +10,7 @@
 // `copyParameterDataToBuffer:offset:` writes for the map, and a Vulkan executor one holding this
 // crate's parameter data of the same map (`bind::RasterizationRateMap`).
 //
-// The maps are the two whose tiles this crate compiles as Apple M3 does (DESIGN D235.8): `left` is
+// The maps are the two whose tiles this crate compiles as Apple M3 does: `left` is
 // a 64x64 map of uniform quality 1.0 (the identity), and `right` is 37x23 with horizontal samples
 // [0.5, 1] and vertical samples [1, 0.5], whose physical size is 36x23 (in this crate's compile,
 // x maps 33 screen pixels onto the first 32 physical ones and 4 onto the last 4, and y is the

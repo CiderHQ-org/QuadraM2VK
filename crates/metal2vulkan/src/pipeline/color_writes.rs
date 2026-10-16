@@ -204,9 +204,11 @@ pub(crate) fn selected_notes(sel: &SelectedWrite, word: u32) -> BTreeSet<Precisi
 /// are `colors` (`GraphicsState::color_attachments`): the function's own
 /// (`FunctionArtifact::precision`, `StageIo::rounded_colors`), for each attachment whose
 /// rules it selects (`StageIo::selected_colors`) those its rule word selects
-/// ([`selected_notes`], [`selected_rounds`]), and `PrecisionNote::HalfOutputPrecision` where an
-/// attachment of `StageIo::half_blend_colors` blends ([`blends_output`]). Each sorted, each entry
-/// once. `None` where such an attachment has no rule word.
+/// ([`selected_notes`], [`selected_rounds`]), `PrecisionNote::HalfOutputPrecision` where an
+/// attachment of `StageIo::half_blend_colors` blends ([`blends_output`]), and
+/// `PrecisionNote::HalfOutputFastMathBlend` where one of `StageIo::half_fast_colors` stores some
+/// channel ([`stores_output`]). Each sorted, each entry once. `None` where such an attachment has
+/// no rule word.
 pub(crate) fn pipeline_writes(
     a: &FunctionArtifact,
     rules: &[(u32, u32)],
@@ -219,15 +221,26 @@ pub(crate) fn pipeline_writes(
             v.insert(at, x);
         }
     }
-    let blended = |c: &u32| {
+    let attachment = |c: &u32| {
         usize::try_from(*c)
             .ok()
             .and_then(|i| colors.get(i))
             .and_then(Option::as_ref)
-            .is_some_and(blends_output)
     };
+    let blended = |c: &u32| attachment(c).is_some_and(blends_output);
     if a.interface.io.half_blend_colors.iter().any(blended) {
         insert(&mut notes, PrecisionNote::HalfOutputPrecision);
+    }
+    // A `float` output of a module without fast math into a 16-bit float attachment's blend of one
+    // and zero, which the pipeline blends ([`keeps_zero`]); its other blends record the device's
+    // conversion already.
+    let one_zero = |c: &u32| attachment(c).is_some_and(|s| blends_output(s) && one_zero_half(s));
+    if a.interface.io.float_blend_colors.iter().any(one_zero) {
+        insert(&mut notes, PrecisionNote::HalfOutputPrecision);
+    }
+    let stored = |c: &u32| attachment(c).is_some_and(stores_output);
+    if a.interface.io.half_fast_colors.iter().any(stored) {
+        insert(&mut notes, PrecisionNote::HalfOutputFastMathBlend);
     }
     for (&color, sel) in &a.interface.io.selected_colors {
         let &(_, word) = rules.iter().find(|(c, _)| *c == color)?;
@@ -531,8 +544,9 @@ pub(crate) fn half_output_lanes(
 /// (`StageIo::half_output_lanes`): each attachment the function recorded has the same entry of
 /// [`half_output_lanes`]. An attachment it recorded none for, every one where it compiled without
 /// the map, takes the `half` the function rounds, and the function records
-/// `PrecisionNote::HalfOutputPrecision` for it (`HalfOutputFastMathBlend` under fast math): a
-/// missing map loses Metal's `float`, never the pipeline.
+/// `PrecisionNote::HalfOutputPrecision` for it (under fast math it lists the attachment,
+/// `StageIo::half_fast_colors`, for `HalfOutputFastMathBlend`): a missing map loses Metal's
+/// `float`, never the pipeline.
 pub(crate) fn half_output_lanes_hold(
     fragment: &FunctionArtifact,
     colors: &[Option<ColorAttachmentDescriptor>],
@@ -786,6 +800,44 @@ fn attachment_write(
 /// 32-bit float attachment's channels (EV HOP-hb2-lvpx86).
 pub(crate) fn blends_output(c: &ColorAttachmentState) -> bool {
     c.blend.is_some() && !c.write_mask.is_empty()
+}
+
+/// Whether the pipeline's attachment `c` stores some channel of the fragment function's output,
+/// blended or not: its write mask is not empty. Where it stores none, a `half` output of a module
+/// with fast math leaves nothing Metal's compiler could fold otherwise
+/// (`StageIo::half_fast_colors`).
+pub(crate) fn stores_output(c: &ColorAttachmentState) -> bool {
+    !c.write_mask.is_empty()
+}
+
+/// Whether a 16-bit float attachment `c` at `color` blends the output of the fragment stage of
+/// interface `io` by one and zero though [`replaces`] holds of it: an output of a module without
+/// fast math (`StageIo::half_blend_colors`, `StageIo::float_blend_colors`), whose blend there
+/// Metal computes keeping the destination's product by zero (a NaN of an infinite or NaN texel,
+/// `+0` of a `-0` output over a texel of `+0` or above; EV FBL-zf1-m3), which no write of the
+/// output alone stores. The pipeline blends it and announces `PrecisionNote::HalfOutputPrecision`;
+/// the storage form computes Metal's (`lower::fragment::fetch`).
+pub(crate) fn keeps_zero(
+    io: &crate::pipeline::stage_io::StageIo,
+    color: u32,
+    c: &ColorAttachmentDescriptor,
+) -> bool {
+    crate::lower::fragment::half_float_format(c.pixel_format)
+        && (io.half_blend_colors.contains(&color) || io.float_blend_colors.contains(&color))
+}
+
+/// Whether the linked attachment `s` is a 16-bit float one blended by one and zero, added, for
+/// color and alpha ([`keeps_zero`]'s).
+fn one_zero_half(s: &ColorAttachmentState) -> bool {
+    use crate::vk::{BlendFactor as F, BlendOp as O, Format};
+    let half = matches!(
+        s.format,
+        Format::R16_SFLOAT | Format::R16G16_SFLOAT | Format::R16G16B16A16_SFLOAT
+    );
+    half && s.blend.as_ref().is_some_and(|b| {
+        (b.src_color, b.dst_color, b.color_op) == (F::ONE, F::ZERO, O::ADD)
+            && (b.src_alpha, b.dst_alpha, b.alpha_op) == (F::ONE, F::ZERO, O::ADD)
+    })
 }
 
 /// Whether `c`'s blend stores the source as it is: factors one and zero, added, for color and

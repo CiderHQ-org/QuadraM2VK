@@ -1,6 +1,6 @@
 // metal-std: metal4.0
 // metal-macos-min: 26.2
-// Owned fixture (WP-EVG, DESIGN D351 item 4): what constructing a cooperative tensor leaves in its
+// Owned fixture: what constructing a cooperative tensor leaves in its
 // storage. Function constant 0 (0 when absent) selects a descriptor, an execution scope, element
 // types, and an operand (the destination, or the right input). For each of `rounds` rounds (a
 // buffer, so the loop stays a loop), each thread constructs the operand's cooperative tensor in the

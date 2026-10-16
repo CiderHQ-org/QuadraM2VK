@@ -1,6 +1,6 @@
 //! An event's signal indices and Metal's values (`event_timeline.rs`): monotone values, dropped
-//! signals, the order of kept signals across `VkQueue`s, the host's floor, and the waits a batch
-//! is submitted with.
+//! signals, the order of kept signals across `VkQueue`s, the host's floor, the waits a batch is
+//! submitted with, and a counter read observed only once a host wait returned for it.
 
 use crate::event_timeline::{EventTimeline, Signal, WaitFor};
 
@@ -203,4 +203,34 @@ fn the_largest_value_is_kept() {
     assert_eq!(timeline.value(), u64::MAX);
     assert_eq!(submit(&mut timeline, u64::MAX, 0), Signal::Dropped);
     assert!(!timeline.set(u64::MAX));
+}
+
+/// A counter read past the index last seen raises the value only once a host wait returned for
+/// it (`event.rs`): a read alone orders no host operation after the signal. A read the index
+/// last seen covers asks for no wait, and a failed wait observes nothing.
+#[test]
+fn a_counter_read_is_observed_only_once_a_host_wait_returned_for_it() {
+    let mut timeline = EventTimeline::default();
+    submit(&mut timeline, 3, 0);
+    submit(&mut timeline, 5, 0);
+    let mut asked = Vec::new();
+    let mut observe = |timeline: &mut EventTimeline<usize>, read: u64, returned: bool| {
+        timeline.observe_read::<()>(read, |index| {
+            asked.push(index);
+            Ok(returned)
+        })
+    };
+    // The read shows both signals; the wait for them does not return: nothing is observed.
+    assert_eq!(observe(&mut timeline, 2, false), Ok(false));
+    assert_eq!(timeline.value(), 0);
+    // It returns: both are.
+    assert_eq!(observe(&mut timeline, 2, true), Ok(true));
+    assert_eq!(timeline.value(), 5);
+    // A read the index last seen covers needs no wait.
+    assert_eq!(observe(&mut timeline, 2, true), Ok(false));
+    assert_eq!(asked, [2, 2]);
+    // A failed wait (a lost device) observes nothing.
+    submit(&mut timeline, 7, 0);
+    assert_eq!(timeline.observe_read(3, |_| Err("lost")), Err("lost"));
+    assert_eq!(timeline.value(), 5);
 }

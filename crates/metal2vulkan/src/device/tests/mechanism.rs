@@ -237,6 +237,30 @@ fn every_fact() -> Vec<RuntimeFact> {
         RuntimeFact::MovableStorageWrites {
             early_variant: true,
         },
+        RuntimeFact::Depth16Codes { biased: true },
+        RuntimeFact::Depth16Codes { biased: false },
+        RuntimeFact::Depth16Pass { depth16: true },
+        RuntimeFact::Depth16Biased,
+        RuntimeFact::Depth16BiasSide { raises: true },
+        RuntimeFact::Depth16BiasSide { raises: false },
+        RuntimeFact::SynthesizedGeometry {
+            weights: true,
+            layer: false,
+            viewport: false,
+        },
+        RuntimeFact::SynthesizedGeometry {
+            weights: false,
+            layer: true,
+            viewport: true,
+        },
+        RuntimeFact::ObjectThreadgroupArena {
+            static_bytes: 16,
+            payload: Some(64),
+        },
+        RuntimeFact::ObjectThreadgroupArena {
+            static_bytes: 0,
+            payload: None,
+        },
     ]
 }
 
@@ -328,6 +352,12 @@ fn variant(f: &RuntimeFact) -> usize {
         RuntimeFact::StorageTextureIntegerChannels { .. } => 81,
         RuntimeFact::HeapHalfTexelWrites { .. } => 82,
         RuntimeFact::MovableStorageWrites { .. } => 83,
+        RuntimeFact::Depth16Codes { .. } => 84,
+        RuntimeFact::Depth16Pass { .. } => 85,
+        RuntimeFact::Depth16Biased => 86,
+        RuntimeFact::Depth16BiasSide { .. } => 87,
+        RuntimeFact::SynthesizedGeometry { .. } => 88,
+        RuntimeFact::ObjectThreadgroupArena { .. } => 89,
     }
 }
 
@@ -335,7 +365,7 @@ fn variant(f: &RuntimeFact) -> usize {
 fn mechanism_is_total_over_every_fact_and_profile() {
     let facts = every_fact();
     let covered: std::collections::BTreeSet<usize> = facts.iter().map(variant).collect();
-    assert_eq!(covered, (0..84).collect(), "every_fact misses a variant");
+    assert_eq!(covered, (0..90).collect(), "every_fact misses a variant");
     for (stem, _) in super::committed_profiles() {
         let dev = device(&stem);
         let p = dev.profile();
@@ -382,7 +412,8 @@ fn mechanism_is_total_over_every_fact_and_profile() {
                 | RuntimeFact::HeapRawSamples { .. }
                 | RuntimeFact::StorageTextureWriteRounding { .. }
                 | RuntimeFact::HeapWriteRounding { .. }
-                | RuntimeFact::HeapCrossClassNeutral { .. } => Mechanism::PlanTimeCheck,
+                | RuntimeFact::HeapCrossClassNeutral { .. }
+                | RuntimeFact::ObjectThreadgroupArena { .. } => Mechanism::PlanTimeCheck,
                 RuntimeFact::DispatchGrid | RuntimeFact::TileThreadgroup { .. } => {
                     Mechanism::RegionSelected
                 }
@@ -407,6 +438,9 @@ fn mechanism_is_total_over_every_fact_and_profile() {
                 | RuntimeFact::ZeroedColor { .. }
                 | RuntimeFact::DroppedColor { .. }
                 | RuntimeFact::DepthClampRange
+                | RuntimeFact::Depth16Pass { .. }
+                | RuntimeFact::Depth16Biased
+                | RuntimeFact::Depth16BiasSide { .. }
                 | RuntimeFact::TestedStorageWrites { .. }
                 | RuntimeFact::MovableStorageWrites { .. }
                 | RuntimeFact::YCbCrTexture { .. }
@@ -461,12 +495,14 @@ fn mechanism_is_total_over_every_fact_and_profile() {
                 | RuntimeFact::StorageTextureIntegerChannels { .. }
                 | RuntimeFact::AccelerationStructureInstanceCount { .. }
                 | RuntimeFact::ViewportCount
+                | RuntimeFact::Depth16Codes { biased: true }
                 // The bound texture's format class, which the binder pushes.
                 | RuntimeFact::TexelFormat { .. } => Mechanism::PushConstant,
                 RuntimeFact::AliasedImageblock { .. } => Mechanism::None,
-                RuntimeFact::CallStackDepth { .. } | RuntimeFact::AbsentArgumentRead { .. } => {
-                    Mechanism::None
-                }
+                RuntimeFact::CallStackDepth { .. }
+                | RuntimeFact::AbsentArgumentRead { .. }
+                | RuntimeFact::SynthesizedGeometry { .. }
+                | RuntimeFact::Depth16Codes { biased: false } => Mechanism::None,
             };
             assert_eq!(m, expected, "{stem}: {fact:?}");
         }

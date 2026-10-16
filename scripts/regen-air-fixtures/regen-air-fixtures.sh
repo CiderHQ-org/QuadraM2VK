@@ -4,7 +4,7 @@
 # (`--dir`) (CPU only; never touches a GPU).
 #
 # For every <name>.metal it writes, next to the source:
-#   <name>.air     Apple AIR bitcode from `xcrun metal` (gitignored until user decision U4)
+#   <name>.air     Apple AIR bitcode from `xcrun metal` (gitignored until the user decides)
 #   <name>.ll      review companion: `llvm-dis` of <name>.air (opaque-pointer text)
 #   <name>.air.ll  typed-pointer text from `xcrun metal -S -emit-llvm`; `xcrun metal-as`
 #                  reassembles it into the same module, so macOS tests get typed-pointer
@@ -14,7 +14,8 @@
 # (the module then records `air.compile.fast_math_disable` and its float operations carry no
 # fast-math flags), and a line `// metal-macos-min: <version>` passes
 # `-mmacosx-version-min=<version>` (a fixture whose framework headers spell their ABI by deployment
-# target, such as MetalPerformancePrimitives' 26.2 tensor-op names). A line
+# target, such as MetalPerformancePrimitives' 26.2 tensor-op names); a source without one compiles
+# for the pinned deployment target (default_macos_min below). A line
 # `// air-rename: <declared> <intrinsic>` renames a function the source declares and never defines
 # to an `llvm.*` or `air.*` intrinsic MSL cannot spell (such as `llvm.agx3.yield`) in the typed
 # text; <name>.air is then metal-as of the renamed typed text, and <name>.ll its disassembly.
@@ -41,7 +42,8 @@
 #   --check  regenerate into a scratch directory the fixtures TOOLCHAIN records under the host's
 #            Metal toolchain and fail if a committed companion differs, naming each other fixture
 #            "not checked"; fail also when a fixture's module records another Metal version or
-#            SDK version than TOOLCHAIN records for it, or when the host's LLVM tools differ.
+#            SDK version than TOOLCHAIN records for it, or targets another macOS version than its
+#            source selects, or when the host's LLVM tools differ.
 #   <name>   regenerate only these fixtures (`<name>.metal`).
 set -euo pipefail
 
@@ -50,6 +52,13 @@ set -euo pipefail
 # llvm-dis may use spellings an older llvm-as rejects (LLVM 23 writes `splat (float f0x...)`),
 # so llvm-dis of exactly this major writes each .ll and llvm-as of this major must accept it.
 llvm_major=21
+
+# The deployment target of a fixture whose source has no `// metal-macos-min:` line: the one the
+# committed companions were compiled for. Without the flag the compiler takes
+# MACOSX_DEPLOYMENT_TARGET or a default that follows the host (27.0 on a macOS 27 host), which
+# moves the triple (`air64_v29-apple-macosx27.0.0` for `air64_v28-apple-macosx26.0.0`) and the AIR
+# and language versions the module records; the flag outranks the variable.
+default_macos_min=26.0
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 usage() { echo "usage: $0 [--dir <directory>] [--check | <name>...]" >&2; exit 2; }
@@ -147,10 +156,11 @@ if [[ ${#sources[@]} -eq 0 ]]; then
   exit 1
 fi
 
-# Sets `flags` to the compile flags the source $1's directives select, and `renames` to its
-# `air-rename` pairs (declared, intrinsic, ...), or fails naming a bad one.
+# Sets `flags` to the compile flags the source $1's directives select, `renames` to its
+# `air-rename` pairs (declared, intrinsic, ...), and `macos_min` to the deployment target it
+# compiles for (`macos_min_from` saying what selected it), or fails naming a bad directive.
 directive_flags() {
-  local source="$1" name std fast_math macos_min from to rest
+  local source="$1" name std fast_math from to rest
   name="$(basename "$source" .metal)"
   flags=()
   renames=()
@@ -179,14 +189,18 @@ directive_flags() {
     *) echo "$name.metal: metal-fast-math must be off, not $fast_math" >&2; exit 1 ;;
   esac
   # An optional `// metal-macos-min: <version>` line sets the deployment target, a dotted
-  # version such as 26.2; the compiler's default (the SDK's minimum) applies otherwise.
+  # version such as 26.2; the pinned default_macos_min applies otherwise.
   macos_min="$(sed -n 's|^// metal-macos-min: *\([A-Za-z0-9.-]*\) *$|\1|p' "$source" | head -n 1)"
   if [[ -n "$macos_min" ]]; then
     if [[ ! "$macos_min" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
       echo "$name.metal: metal-macos-min must be a dotted version, not $macos_min" >&2; exit 1
     fi
-    flags+=("-mmacosx-version-min=$macos_min")
+    macos_min_from="its metal-macos-min line"
+  else
+    macos_min="$default_macos_min"
+    macos_min_from="the pinned default"
   fi
+  flags+=("-mmacosx-version-min=$macos_min")
 }
 
 # Every source's directives are checked before anything is compiled, whichever fixtures a run
@@ -316,6 +330,12 @@ module_toolchain() {
     }' "$1"
 }
 
+# Prints the macOS version of the `target triple` in module text $1 (`26.0.0` for
+# `air64_v28-apple-macosx26.0.0`), or nothing when it records none.
+module_macos() {
+  sed -n 's/^target triple = "[^"]*-apple-macosx\([0-9.]*\)"$/\1/p' "$1" | head -n 1
+}
+
 # Whether dotted versions $1 and $2 are equal, a missing component reading 0 (`27.0` is `27`).
 same_version() {
   awk -v a="$1" -v b="$2" 'BEGIN {
@@ -351,6 +371,7 @@ if [[ $check -eq 1 ]]; then
       echo "not checked: $name (compiled by $record)"
       unchecked=$((unchecked + 1))
     fi
+    directive_flags "$source"
     # Each committed module must record the Metal version and SDK its TOOLCHAIN record names.
     metal_version="${record#metal: }"
     metal_version="${metal_version%%; macosx-sdk: *}"
@@ -369,6 +390,14 @@ if [[ $check -eq 1 ]]; then
       then
         echo "toolchain mismatch: $file records ${module_metal:-no Metal version}, SDK" \
           "${module_sdk:-none}; TOOLCHAIN records $record" >&2
+        status=1
+      fi
+      # Each committed module must target the macOS version its source selects, so a compile
+      # that took the host's default instead fails here rather than drifting.
+      module_target="$(module_macos "$dir/$file")"
+      if [[ -z "$module_target" ]] || ! same_version "$module_target" "$macos_min"; then
+        echo "deployment target mismatch: $file targets macOS ${module_target:-nothing}; $name.metal" \
+          "selects $macos_min ($macos_min_from)" >&2
         status=1
       fi
     done

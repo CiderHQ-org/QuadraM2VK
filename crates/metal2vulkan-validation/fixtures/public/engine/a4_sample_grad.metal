@@ -1,4 +1,4 @@
-// Owned fixture (WP-A4, DESIGN D213): a kernel sample with explicit gradients
+// Owned fixture: a kernel sample with explicit gradients
 // (`sampler.sample_grad`). Thread g samples an 8 x 1 texture at the centre of texel g; through a
 // nearest sampler of a texture of one level the gradients choose no other texel:
 // out[g] = t(g, 0). Loop-free.

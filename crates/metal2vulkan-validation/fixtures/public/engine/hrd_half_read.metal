@@ -1,4 +1,4 @@
-// Owned fixture (WP-HRD, DESIGN D286): the `half` a texture access hands the function for a
+// Owned fixture: the `half` a texture access hands the function for a
 // half-float texel, every half subnormal, both zeros, both infinities, the largest half, and NaNs
 // included. Lane `i` reads texel `(i mod 64, i div 64)` of a 64 x 16 texture through
 // `access::sample` (a read, and a nearest sample at the texel's centre with normalized

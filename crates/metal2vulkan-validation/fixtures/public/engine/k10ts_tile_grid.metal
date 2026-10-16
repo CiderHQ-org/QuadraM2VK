@@ -1,4 +1,4 @@
-// Owned fixture (WP-K10TS, DESIGN D205): a tile function over a render area of several tiles,
+// Owned fixture: a tile function over a render area of several tiles,
 // some of them partial, with fewer threads per tile than cells. It measures what a tile dispatch
 // gives a tile function: which pixel each imageblock coordinate is, what each builtin reads, and
 // whether a cell past the render area holds a write until the dispatch ends.

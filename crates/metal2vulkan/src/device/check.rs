@@ -292,6 +292,9 @@ impl DeviceProfile {
             VkLimit::MaxFramebufferLayers => up(l.max_framebuffer_layers),
             VkLimit::MaxDrawIndexedIndexValue => up(l.max_draw_indexed_index_value),
             VkLimit::MaxTessellationPatchSize => up(l.max_tessellation_patch_size),
+            VkLimit::MaxGeometryInputComponents => up(l.max_geometry_input_components),
+            VkLimit::MaxGeometryOutputComponents => up(l.max_geometry_output_components),
+            VkLimit::MaxGeometryTotalOutputComponents => up(l.max_geometry_total_output_components),
             VkLimit::FunctionStorageBytesPerThread => {
                 (self.fields.function_storage.bytes(), AtLeast)
             }

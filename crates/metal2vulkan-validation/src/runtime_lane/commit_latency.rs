@@ -16,18 +16,34 @@
 //!   at its share of the rate.
 //! - **Waiting for the GPU** (`event waits`): one thread whose every other command buffer waits
 //!   for an event the one before it signals on another queue: the check waits until that signal
-//!   landed, so the completion thread's wakes release it.
+//!   landed, so the completion turns' wakes release it.
 //!
 //! Printed as `COMMIT-LATENCY` lines, per phase: the commits a millisecond the threads kept; per
 //! command buffer, the time from the host's clock just before `commit` to its `kernelStartTime`
 //! (the scheduler began submitting it), its `kernelEndTime` (its `vkQueueSubmit` returned) and its
 //! completed handler, as their 50th and 95th percentiles and their longest; and per frame, the CPU
-//! time of the device's scheduler thread, of its completion thread, of the process and of the
+//! time of the device's scheduler thread, of its queues' waiters (which make the completion
+//! turns), of the process and of the
 //! committing threads (and their wall time in `commit`), the runtime's `vkQueueSubmit` calls
-//! (`WorkCounts::queue_submissions`), the commits handed off to another thread's pass
-//! (`WorkCounts::commits_handed_off`), and where the kernel-submission counter
-//! (`scripts/i915-execbuffers/counter.c`) is preloaded, the kernel's submissions, the buffer
-//! objects each lists and the host imports among them, and the time each spent in the ioctl.
+//! (`WorkCounts::queue_submissions`), the commits handed to the scheduler's thread
+//! (`WorkCounts::commits_handed_off`: every commit), the `VkCommandBuffer`s begun
+//! (`WorkCounts::command_buffers_begun`), the barrier command buffers that write timestamps
+//! recorded to keep and taken again (`WorkCounts::stamped_buffers_kept`,
+//! `WorkCounts::stamped_buffers_reused`), the command pools made and the spare ones taken
+//! (`WorkCounts::command_pools_made`, `WorkCounts::spare_command_pools_taken`) and those reset
+//! as taken (`WorkCounts::spare_command_pools_reset`), the render pass instances whose draws
+//! recording ended unrun (`WorkCounts::unrun_instances_ended`), the batches whose end went into
+//! their last command buffer and those whose end was a command buffer of its own
+//! (`WorkCounts::finales_folded`, `WorkCounts::finales_apart`), the batches that began with no
+//! command buffer of their own and the waits on completed work's timelines their submissions held
+//! (`WorkCounts::bare_starts`, `WorkCounts::completed_waits`), the timed command buffers whose
+//! first encoder wrote their start (`WorkCounts::prefixed_starts`), and where the
+//! kernel-submission counter (`scripts/i915-execbuffers/counter.c`) is preloaded, the kernel's
+//! submissions, the buffer objects each lists and the host imports among them, and the time each
+//! spent in the ioctl.
+//!
+//! `commit_latency_without_imports` runs the same phases with no host import alive: the
+//! submissions' own cost, without the per-object cost of the kernel's lists.
 //!
 //! Ignored by default: a measurement, not a check. Run it by name with `--run-ignored all`.
 
@@ -62,8 +78,8 @@ const THREADS: usize = 3;
 const FLIGHT: usize = 2 * PER_FRAME;
 /// The linux name (15 bytes) of the device's scheduler thread.
 const SCHEDULER: &str = "metal2vulkan-sc";
-/// The linux name (15 bytes) of the device's completion thread.
-const COMPLETION: &str = "metal2vulkan-co";
+/// The linux name (15 bytes) of the device's queues' waiters, which make the completion turns.
+const WAITERS: &str = "metal2vulkan-qu";
 
 /// A check that lets every submission run.
 fn check() -> SubmissionCheck {
@@ -205,7 +221,7 @@ fn event_waits(device: &Device) -> Thread {
 
 /// The CPU time so far of the process's threads named `name`, in microseconds (0 where Linux's
 /// `/proc` is not).
-fn named_cpu_us(name: &str) -> f64 {
+pub(super) fn named_cpu_us(name: &str) -> f64 {
     let Ok(tasks) = std::fs::read_dir("/proc/self/task") else {
         return 0.0;
     };
@@ -234,7 +250,7 @@ struct Phase {
     execbuffers: Option<Execbuffers>,
     process: f64,
     scheduler: f64,
-    completion: f64,
+    waiters: f64,
 }
 
 impl Phase {
@@ -244,7 +260,7 @@ impl Phase {
             execbuffers: Execbuffers::read(),
             process: process_cpu_us(),
             scheduler: named_cpu_us(SCHEDULER),
-            completion: named_cpu_us(COMPLETION),
+            waiters: named_cpu_us(WAITERS),
         }
     }
 
@@ -290,16 +306,47 @@ impl Phase {
             .unwrap_or_default();
         eprintln!(
             "COMMIT-LATENCY {}: {what}: a frame of {PER_FRAME}: scheduler thread cpu {:.2} ms, \
-             completion thread {:.2} ms, process {:.2} ms, committing threads {:.2} ms ({:.2} ms \
-             in commit); {:.1} vkQueueSubmit calls, {:.1} commits handed off{kernel}",
+             queue waiters {:.2} ms, process {:.2} ms, committing threads {:.2} ms ({:.2} ms \
+             in commit); {:.1} vkQueueSubmit calls, {:.1} commits handed off, {:.1} command \
+             buffers begun, {:.1} stamped barrier command buffers kept, {:.1} reused, {:.1} \
+             command pools made, {:.1} spare ones taken, {:.1} of them reset, {:.1} unrun render \
+             pass instances ended, {:.1} batch ends in the work, {:.1} apart, {:.1} bare starts, \
+             {:.1} waits on completed work, {:.1} starts in the first encoder{kernel}",
             device.name(),
             ms(named_cpu_us(SCHEDULER), self.scheduler),
-            ms(named_cpu_us(COMPLETION), self.completion),
+            ms(named_cpu_us(WAITERS), self.waiters),
             ms(process_cpu_us(), self.process),
             threads_ms(|thread| thread.cpu) / frames,
             threads_ms(|thread| thread.in_commit) / frames,
             per_frame(after.queue_submissions, self.counts.queue_submissions),
             per_frame(after.commits_handed_off, self.counts.commits_handed_off),
+            per_frame(
+                after.command_buffers_begun,
+                self.counts.command_buffers_begun
+            ),
+            per_frame(after.stamped_buffers_kept, self.counts.stamped_buffers_kept),
+            per_frame(
+                after.stamped_buffers_reused,
+                self.counts.stamped_buffers_reused
+            ),
+            per_frame(after.command_pools_made, self.counts.command_pools_made),
+            per_frame(
+                after.spare_command_pools_taken,
+                self.counts.spare_command_pools_taken
+            ),
+            per_frame(
+                after.spare_command_pools_reset,
+                self.counts.spare_command_pools_reset
+            ),
+            per_frame(
+                after.unrun_instances_ended,
+                self.counts.unrun_instances_ended
+            ),
+            per_frame(after.finales_folded, self.counts.finales_folded),
+            per_frame(after.finales_apart, self.counts.finales_apart),
+            per_frame(after.bare_starts, self.counts.bare_starts),
+            per_frame(after.completed_waits, self.counts.completed_waits),
+            per_frame(after.prefixed_starts, self.counts.prefixed_starts),
         );
     }
 }
@@ -308,6 +355,18 @@ impl Phase {
 #[test]
 #[ignore = "a measurement, not a check: run by name with --run-ignored all"]
 fn commit_latency() {
+    latencies(IMPORTS);
+}
+
+/// The latencies with no host import alive, printed (the module docs).
+#[test]
+#[ignore = "a measurement, not a check: run by name with --run-ignored all"]
+fn commit_latency_without_imports() {
+    latencies(0);
+}
+
+/// The phases with `imports` live host imports, printed (the module docs).
+fn latencies(imports: usize) {
     let cache = ScratchCache::new().unwrap();
     let messages = Messages::default();
     let device = validated_device_with(TEST_DEVICE, &messages, cache.path(), |options| {
@@ -316,7 +375,7 @@ fn commit_latency() {
         options.record_executions = false;
     })
     .unwrap();
-    let imports: Vec<Buffer> = (0..IMPORTS)
+    let live: Vec<Buffer> = (0..imports)
         .map(|_| import(&device, IMPORT_BYTES))
         .collect();
     // Warm: the fills' pipelines and the pools.
@@ -338,6 +397,6 @@ fn commit_latency() {
     let phase = Phase::start(&device);
     let waits = event_waits(&device);
     phase.print(&device, "event waits", &[waits]);
-    assert_eq!(device.work_counts().host_imports_live, IMPORTS as u64);
-    drop(imports);
+    assert_eq!(device.work_counts().host_imports_live, imports as u64);
+    drop(live);
 }

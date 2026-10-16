@@ -1,5 +1,5 @@
 // metal-std: macos-metal2.2
-// Owned fixture (WP-REF, DESIGN D327 item 6, TODO 5.3): simdgroup counts around an MSL 2.2
+// Owned fixture: simdgroup counts around an MSL 2.2
 // discard, as differences that hold whatever the simdgroup's size and however quads pack into it.
 // Written for this repository; no third-party source. Loop-free.
 #include <metal_stdlib>

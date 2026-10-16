@@ -13,6 +13,8 @@
 //!   contention, and contained out of bounds.
 //! - 64-bit atomics refuse by the profile's int64-atomic features (the matrix per profile).
 //! - LLVM `fence` instructions: a system fence is `OpMemoryBarrier`, a single-thread one nothing.
+//! - Coherent accesses take the Vulkan memory model where the profile has it with its device
+//!   scope, and `GLSL450` with `Coherent` storage buffers elsewhere, exact either way.
 //! - A coherent access beside a storage image is `NotImplemented{Lowering(MemoryModel)}` (its
 //!   image accesses would need `NonPrivateTexel` under the Vulkan model).
 //!
@@ -1705,11 +1707,13 @@ declare i32 @air.load.system_coherent.volatile.i32.p1i32(ptr addrspace(1))
 "#;
 
 /// A function with `*_coherent` accesses selects the Vulkan memory model where the profile has
-/// `vulkanMemoryModel` (and its device scope) and refuses naming the feature otherwise. Under it,
-/// coherent stores carry `MakePointerAvailable` and coherent loads `MakePointerVisible` (both
-/// `NonPrivatePointer`, `Device` scope), every other buffer and threadgroup access is
-/// `NonPrivatePointer` (so the barrier orders it as under `GLSL450`), and the kernel's neighbour
-/// exchange through the barrier is exact in both scheduling orders.
+/// `vulkanMemoryModel` and its device scope. Under it, coherent stores carry
+/// `MakePointerAvailable` and coherent loads `MakePointerVisible` (both `NonPrivatePointer`,
+/// `Device` scope), and every other buffer and threadgroup access is `NonPrivatePointer` (so the
+/// barrier orders it as under `GLSL450`). Elsewhere (the floor) it keeps `GLSL450`: no access
+/// carries a memory-model operand, and every storage buffer is decorated `Coherent`. Either way the
+/// kernel's neighbour exchange through the barrier is exact in both scheduling orders, and each
+/// form is exercised.
 #[test]
 fn coherent_accesses_select_the_vulkan_memory_model() {
     use crate::spirv::ir::Inst;
@@ -1717,30 +1721,40 @@ fn coherent_accesses_select_the_vulkan_memory_model() {
         return;
     };
     const N: usize = 64;
+    let mut forms = [0; 2];
     for stem in PROFILES {
         let prof = p(stem);
         let fields = prof.fields();
-        if !fields.vulkan_memory_model {
-            let e = compile(&bc, "coherent", &prof).expect_err("refused");
-            let want = Unsupported::needs(
-                Feature::CoherentMemory,
-                Capability::Feature(VkFeature::VulkanMemoryModel),
-            );
-            let Error::Unsupported(u) = e else {
-                panic!("{stem}: {e:?}");
-            };
-            assert_eq!((u.feature, u.needs), (want.feature, want.needs), "{stem}");
-            continue;
+        let vulkan = fields.vulkan_memory_model
+            && fields
+                .enabled
+                .features
+                .contains(&VkFeature::VulkanMemoryModelDeviceScope);
+        forms[usize::from(vulkan)] += 1;
+        if !vulkan {
+            // Every buffer access goes through a `Coherent` variable (the interlock's check).
+            let a = compile(&bc, "coherent", &prof).unwrap_or_else(|e| panic!("{stem}: {e}"));
+            let (_, words) =
+                link_and_validate(&a, &prof).unwrap_or_else(|e| panic!("{stem}: L3: {e}"));
+            let coherent = crate::pipeline::testing::interlocked_coherence(&words)
+                .unwrap_or_else(|e| panic!("{stem}: {e}"));
+            assert!(!coherent.vulkan, "{stem}: the memory model");
+            assert!(coherent.buffer >= 4, "{stem}: {coherent:?}");
         }
         l3(&bc, "coherent", &prof, stem);
         let (plan, m) = typed_module(&bc, "coherent", &prof).expect("module");
+        assert_eq!(
+            plan.families.memory_model.coherent_resources, !vulkan,
+            "{stem}"
+        );
         assert!(plan.families.memory_model.device_scope, "{stem}");
         let caps = &m.requirements().spirv_capabilities;
-        assert!(
+        assert_eq!(
             caps.iter().any(|c| format!("{c:?}") == "VulkanMemoryModel"),
+            vulkan,
             "{stem}: {caps:?}"
         );
-        let (mut available, mut visible, mut plain_shared) = (0, 0, 0);
+        let (mut available, mut visible, mut plain_shared, mut volatile) = (0, 0, 0, 0);
         for b in m.blocks() {
             for n in &b.insts {
                 match &n.inst {
@@ -1757,13 +1771,20 @@ fn coherent_accesses_select_the_vulkan_memory_model() {
                     {
                         plain_shared += 1;
                     }
+                    Inst::Load { access, .. } if access.volatile => volatile += 1,
                     _ => {}
                 }
             }
         }
-        assert!(available >= 1 && visible >= 1, "{stem}");
-        // The threadgroup store and load, and the two plain buffer stores.
-        assert!(plain_shared >= 4, "{stem}: {plain_shared}");
+        if vulkan {
+            assert!(available >= 1 && visible >= 1, "{stem}");
+            // The threadgroup store and load, and the two plain buffer stores.
+            assert!(plain_shared >= 4, "{stem}: {plain_shared}");
+        } else {
+            assert_eq!((available, visible, plain_shared), (0, 0, 0), "{stem}");
+            // The volatile coherent load keeps its `Volatile` operand.
+            assert!(volatile >= 1, "{stem}");
+        }
         let res = resources(&plan, &[vec![0; 3 * N]], N as u32);
         for out in run_orders(&m, &res).expect("run") {
             let w = &out[0];
@@ -1775,6 +1796,7 @@ fn coherent_accesses_select_the_vulkan_memory_model() {
             }
         }
     }
+    assert!(forms.iter().all(|&n| n > 0), "{forms:?}");
 }
 
 /// A `texture2d<uint, access::read_write>` read and written at the thread's position, and a word
@@ -1813,8 +1835,8 @@ declare void @air.store.device_coherent.i32.p1i32(i32, ptr addrspace(1))
 
 /// Under the Vulkan memory model a storage image's accesses would need `NonPrivateTexel` to stay
 /// ordered by barriers, which is not emitted, so a function with a coherent access and a storage
-/// image is `NotImplemented{Lowering(MemoryModel)}` on every profile with `vulkanMemoryModel` (and
-/// on the others, where the model cannot be chosen either). The same kernel with a plain store
+/// image is `NotImplemented{Lowering(MemoryModel)}` on every profile with `vulkanMemoryModel`, and
+/// on the others, whose `GLSL450` form keeps the same rule. The same kernel with a plain store
 /// instead of the coherent one compiles and passes L3 everywhere.
 #[test]
 fn a_coherent_access_beside_a_storage_image_is_refused() {

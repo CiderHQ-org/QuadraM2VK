@@ -57,6 +57,7 @@ use super::texture_descriptor::TextureDescriptor;
 use super::tracker::{Access, Barrier, Use};
 use super::values::ResourceOptions;
 use super::Device;
+use crate::device::functions::Vk;
 use ash::vk;
 use metal2vulkan::bind::DepthStandInForm;
 use metal2vulkan::device::VkProperty;
@@ -495,12 +496,7 @@ impl StandInCopies {
     /// encoder records; the stand-in, its staging buffer, the depth's image and the copies'
     /// objects live until it completes and rest in `GENERAL`; the encoder refused every draw
     /// whose instance needs a copy in that cannot run ([`DepthStandIn::check_filled`]).
-    pub(super) unsafe fn record_in(
-        &self,
-        device: &ash::Device,
-        raw: vk::CommandBuffer,
-        first: bool,
-    ) {
+    pub(super) unsafe fn record_in(&self, device: &Vk, raw: vk::CommandBuffer, first: bool) {
         let fill = match first {
             true => self.fill,
             false => FirstFill::Copy,
@@ -538,7 +534,7 @@ impl StandInCopies {
     /// # Safety
     ///
     /// As for [`StandInCopies::record_in`].
-    pub(super) unsafe fn record_out(&self, device: &ash::Device, raw: vk::CommandBuffer) {
+    pub(super) unsafe fn record_out(&self, device: &Vk, raw: vk::CommandBuffer) {
         Barrier::everything().record(device, raw);
         match &self.back {
             Some(back) => back.record(device, raw),
@@ -553,7 +549,7 @@ impl StandInCopies {
     /// # Safety
     ///
     /// As for [`StandInCopies::record_in`].
-    unsafe fn copy(&self, device: &ash::Device, raw: vk::CommandBuffer, inward: bool) {
+    unsafe fn copy(&self, device: &Vk, raw: vk::CommandBuffer, inward: bool) {
         let general = vk::ImageLayout::GENERAL;
         let stand_in_layers = vk::ImageSubresourceLayers {
             aspect_mask: vk::ImageAspectFlags::COLOR,

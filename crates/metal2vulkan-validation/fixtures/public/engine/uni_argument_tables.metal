@@ -1,4 +1,4 @@
-// Owned MSL for WP-UNI (D316): kernels that call visible functions through
+// Owned MSL: kernels that call visible functions through
 // `visible_function_table`s held in argument buffers. The functions come from
 // `visible_table_functions.metal`, which the pipeline links; the tables' entries are its function
 // handles. Each kernel writes, per thread, entry `i % size` of its table called with (tid, k), or

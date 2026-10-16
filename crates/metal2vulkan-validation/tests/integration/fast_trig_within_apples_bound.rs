@@ -199,8 +199,7 @@ fn fast_trig_differs_from_metal_only_within_apples_bound_or_where_it_states_none
     assert!(
         failures.is_empty(),
         "{} fast trigonometric word(s) of committed rows are outside Apple's bound or not \
-         checkable, so the device's instruction is not an accepted near-equivalent there (DESIGN \
-         D436 item 5):\n{}",
+         checkable, so the device's instruction is not an accepted near-equivalent there:\n{}",
         failures.len(),
         failures.join("\n")
     );

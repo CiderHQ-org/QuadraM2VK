@@ -21,7 +21,7 @@
 //!   one command buffer of the test's own a run, recorded, submitted with a fence and waited for
 //!   (bounded, through `gpu/wait.rs`: one `vkWaitForFences` with a finite timeout), one at a
 //!   time: a barrier alone, waited for at its fence and (`timeline wait`) at a timeline
-//!   semaphore's value it signals, as the runtime's completion thread waits for a batch; with GPU
+//!   semaphore's value it signals, as the runtime's queue waiter waits for a batch; with GPU
 //!   timestamps written as the runtime's timed command buffer writes them, their queries reset
 //!   in the same command buffer (`timestamps reset`) or ahead in a submission of their own
 //!   (`timestamps reset ahead`); a clear of a working-set texture (`Clear`: a render pass of its
@@ -443,7 +443,7 @@ enum BareStamps {
 enum BareWait {
     /// Its fence.
     Fence,
-    /// Its timeline semaphore's value, as the runtime's completion thread waits for a batch;
+    /// Its timeline semaphore's value, as the runtime's queue waiter waits for a batch;
     /// then its fence, after the latency is taken.
     Timeline,
 }

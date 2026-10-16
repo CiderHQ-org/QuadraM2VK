@@ -1,4 +1,4 @@
-// Owned fixture (WP-TXT, DESIGN D230): the level count of storage textures, which a storage image
+// Owned fixture: the level count of storage textures, which a storage image
 // cannot query, and a storage texture's size at a level read from a buffer. The binder pushes the
 // bound texture's level count; the size query reads the level's view. out = (levels of t, width
 // and height of t at level `lod`, levels of the cube c). A case passes level 0. Loop-free.

@@ -33,12 +33,12 @@
 //!   buffer, binds the neutrals the state's creation made, and makes none.
 
 use super::degrade_notices::{
-    assert_made_once, forced, made_render_kinds, on_device, shared_in_system_memory,
+    assert_made_once, forced, made_render_kinds, on_device, on_device_with, shared_in_system_memory,
 };
 use super::indirect_command_buffers::{render_template_descriptor, render_template_state};
 use super::indirect_host_steps::{self, complete, param, HOST_STEPS};
 use super::patch_indices::Lane;
-use super::patches;
+use super::patches::{self, options_of, Path};
 use super::render_arguments::{output, Members, SAMPLED};
 use super::render_state::texture;
 use super::renders::public_render;
@@ -1106,14 +1106,24 @@ fn indexed_commands_draw_their_indices() {
 /// refuses it. A device without tessellation shaders refuses the pipeline, reported as its refusal.
 #[test]
 fn patch_commands_draw_with_their_own_factors() {
-    on_device(|device, _| {
+    patch_commands_draw_with_their_own_factors_on(Path::Native);
+}
+
+/// [`patch_commands_draw_with_their_own_factors`], emulated.
+#[test]
+fn emulated_patch_commands_draw_with_their_own_factors() {
+    patch_commands_draw_with_their_own_factors_on(Path::Emulated);
+}
+
+fn patch_commands_draw_with_their_own_factors_on(path: Path) {
+    on_device_with(options_of(path), |device, _| {
         let lane = Lane::new(device.clone());
         let mut descriptor = lane.descriptor(TessellationControlPointIndexType::None);
         descriptor.support_indirect_command_buffers = true;
         let made = device.new_render_pipeline_state(&descriptor, &PipelineOptions::default());
         let state = match made {
             Ok(state) => state,
-            Err(Error::Unsupported(u)) => {
+            Err(Error::Unsupported(u)) if path == Path::Native => {
                 eprintln!(
                     "patch commands on {}: the pipeline is refused, {u:?}",
                     device.name()
@@ -1206,20 +1216,20 @@ fn patch_commands_draw_with_their_own_factors() {
     });
 }
 
-/// Patch commands a kernel writes with a factor scale (`icb_render_patch_scale`: thread `tid`
-/// sets command `tid`'s draw of one patch of the owned `k7_tess_triangle_domain` fixture, its
-/// triangle factors 1, scaled by `scales[tid]`), executed one at a time by an encoder
-/// whose pipeline state, made with `supportIndirectCommandBuffers` and so never enabling the
-/// scale, and buffers the commands inherit. As Metal's (probe `RT7-icb-probe8-m4`, an M4): a
-/// scale of 2 marks what factors of 2 mark, 0.5 what factors of 1 mark (integer partitioning
-/// rounds 0.5 up to 1), and 0, -1 and NaN mark nothing. Metal rounds the scale to `half` first
-/// (EVs ICBV-scale-m3 and -m4, the M3 Max and the M4 alike): 1.0004 marks what 1 marks, 1.3 and
-/// 2.0005 what 2 marks, 10^-6 and 2^-24 (subnormal `half`s) what factors of 1 mark, 70000 and
-/// `+∞` (infinite `half`s) what the maximum factor, 64, marks, and 2^-30 (0 as a `half`)
-/// nothing. The marks for factors of 1 and 2 are `patches.rs`'s (RT6 Metal probe 11), those of
-/// the maximum factor the count and FNV-1a hash the EVs' probe printed for them (its grid is the
-/// fixture's: its hashes of factors 1, 2 and 3 are those of `patches.rs`'s marks). A device
-/// without tessellation shaders refuses the pipeline, reported as its refusal.
+/// Patch commands a kernel writes with a factor scale (`icb_render_patch_scale`: thread `tid` sets
+/// command `tid`'s draw of one patch of the owned `k7_tess_triangle_domain` fixture, its triangle
+/// factors 1, scaled by `scales[tid]`), executed one at a time by an encoder whose pipeline state,
+/// made with `supportIndirectCommandBuffers` and so never enabling the scale, and buffers the
+/// commands inherit. As Metal's (probe `RT7-icb-probe8-m4`, an M4): a scale of 2 marks what factors
+/// of 2 mark, 0.5 what factors of 1 mark (integer partitioning rounds 0.5 up to 1), and 0, -1 and
+/// NaN mark nothing. Metal rounds the scale to `half` first (EVs ICBV-scale-m3 and -m4, the M3 Max
+/// and the M4 alike): 1.0004 marks what 1 marks, 1.3 and 2.0005 what 2 marks, 10^-6 and 2^-24
+/// (subnormal `half`s) what factors of 1 mark, 70000 and `+∞` (infinite `half`s) what the maximum
+/// factor, 64, marks, and 2^-30 (0 as a `half`) nothing. The marks for factors of 1 and 2 are
+/// `patches.rs`'s (a Metal probe on an M4), those of the maximum factor the count and FNV-1a hash
+/// the EVs' probe printed for them (its grid is the fixture's: its hashes of factors 1, 2 and 3 are
+/// those of `patches.rs`'s marks). A device without tessellation shaders refuses the pipeline,
+/// reported as its refusal.
 #[test]
 fn patch_commands_scale_their_factors_as_metal_does() {
     on_device(|device, messages| {
@@ -1335,15 +1345,25 @@ fn patch_commands_scale_their_factors_as_metal_does() {
 /// without tessellation shaders refuses the pipeline, reported as its refusal.
 #[test]
 fn patch_commands_read_their_factors_as_metal_s_did() {
+    patch_commands_read_their_factors_as_metal_s_did_on(Path::Native);
+}
+
+/// [`patch_commands_read_their_factors_as_metal_s_did`], emulated.
+#[test]
+fn emulated_patch_commands_read_their_factors_as_metal_s_did() {
+    patch_commands_read_their_factors_as_metal_s_did_on(Path::Emulated);
+}
+
+fn patch_commands_read_their_factors_as_metal_s_did_on(path: Path) {
     use patches::{CORNERS, ONE, TWO, TWOS};
-    on_device(|device, _| {
+    on_device_with(options_of(path), |device, _| {
         let lane = patches::Lane::new(device.clone());
         let mut descriptor = lane.descriptor(TessellationFactorStepFunction::PerInstance, false);
         descriptor.support_indirect_command_buffers = true;
         let made = device.new_render_pipeline_state(&descriptor, &PipelineOptions::default());
         let state = match made {
             Ok(state) => state,
-            Err(Error::Unsupported(u)) => {
+            Err(Error::Unsupported(u)) if path == Path::Native => {
                 eprintln!(
                     "patch commands' factors on {}: the pipeline is refused, {u:?}",
                     device.name()
@@ -1657,8 +1677,18 @@ const REVERSED: &[u32] = &[9, 10, 11, 6, 7, 8, 3, 4, 5, 0, 1, 2];
 /// shaders refuses the pipeline, reported as its refusal.
 #[test]
 fn indexed_patch_commands_draw_as_metal_s_did() {
+    indexed_patch_commands_draw_as_metal_s_did_on(Path::Native);
+}
+
+/// [`indexed_patch_commands_draw_as_metal_s_did`], emulated.
+#[test]
+fn emulated_indexed_patch_commands_draw_as_metal_s_did() {
+    indexed_patch_commands_draw_as_metal_s_did_on(Path::Emulated);
+}
+
+fn indexed_patch_commands_draw_as_metal_s_did_on(path: Path) {
     use TessellationControlPointIndexType as T;
-    on_device(|device, _| {
+    on_device_with(options_of(path), |device, _| {
         let lane = Lane::new(device.clone());
         let mut states = Vec::new();
         for index_type in [T::None, T::UInt16, T::UInt32] {
@@ -1666,7 +1696,7 @@ fn indexed_patch_commands_draw_as_metal_s_did() {
             descriptor.support_indirect_command_buffers = true;
             match device.new_render_pipeline_state(&descriptor, &PipelineOptions::default()) {
                 Ok(state) => states.push((index_type, state)),
-                Err(Error::Unsupported(u)) => {
+                Err(Error::Unsupported(u)) if path == Path::Native => {
                     eprintln!(
                         "indexed patch commands on {}: the pipeline is refused, {u:?}",
                         device.name()

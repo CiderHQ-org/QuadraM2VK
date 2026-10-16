@@ -1,4 +1,4 @@
-// Owned fixture (DESIGN D25): the storage-texture pair. MSL cannot name a pixel format, so the
+// Owned fixture: the storage-texture pair. MSL cannot name a pixel format, so the
 // bgra8/rgba8 pair is this one kernel bound once to a bgra8Unorm and once to an rgba8Unorm
 // texture. On a profile where bgra8 lacks STORAGE_IMAGE the two pipelines must get distinct keys
 // and distinct OpTypeImage/swizzle code. Channel values are distinct, so a swizzle error is

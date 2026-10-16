@@ -36,7 +36,7 @@
 //! Each case prints a `DEPTH-BUFFER` line, and each edge value a `DEPTH-EDGE` line (what the
 //! kernel read and what came back), so a lane's log shows every device's answer.
 
-use super::degrade_notices::{assert_made_once, forced, loses_depth_denormals};
+use super::degrade_notices::{assert_made_once, forced, loses_depth_denormals, signs_depth_tests};
 use super::degrade_notices::{made_compute_kinds, shared_in_system_memory};
 use super::{buffer_with, read_buffer, validated_device, Messages, ScratchCache, WAIT};
 use crate::candidate::runtime_samples::{encode, read_function};
@@ -506,6 +506,10 @@ fn a_buffer_copies_every_sample_of_a_multisampled_depth_or_stencil_both_ways() {
             (
                 Degradation::DepthDenormals,
                 float_depth && loses_depth_denormals(&device, false),
+            ),
+            (
+                Degradation::SignedDepthTest,
+                float_depth && signs_depth_tests(&device),
             ),
             (
                 Degradation::SharedInSystemMemory,

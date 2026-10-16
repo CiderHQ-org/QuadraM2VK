@@ -1,5 +1,5 @@
 // metal-std: macos-metal2.2
-// Owned fixture (WP-L9b2, DESIGN D6, D30, D86): a terminate-semantics discard (before MSL 2.3,
+// Owned fixture: a terminate-semantics discard (before MSL 2.3,
 // compiled with the standard named on the first line) in a raster order group. Loop-free.
 #include <metal_stdlib>
 using namespace metal;

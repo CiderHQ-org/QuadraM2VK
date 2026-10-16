@@ -1,4 +1,4 @@
-// Owned fixture (WP-FMX2, DESIGN D279): a timing kernel for float division without fast math
+// Owned fixture: a timing kernel for float division without fast math
 // (`-fno-fast-math`) whose divisor is the running value, so neither the division nor any part
 // of it is loop-invariant (fmx2_divide_timing's divisor is, and a device compiler may hoist its
 // reciprocal). Each thread runs, each step waiting for the last:

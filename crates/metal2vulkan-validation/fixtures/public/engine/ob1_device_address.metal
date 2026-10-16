@@ -1,4 +1,4 @@
-// Owned fixture (WP-OB1, DESIGN D225): loads and stores past a `device` buffer whose address
+// Owned fixture: loads and stores past a `device` buffer whose address
 // escapes (its pointer is converted to an integer), so the product reaches it by its device
 // address (a wide pointer through its root entry), the device address containment form. Eight
 // threads; thread t loads buf[idx[t]] into out[t], writes the low four bits of that element's

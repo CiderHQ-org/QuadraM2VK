@@ -23,6 +23,7 @@
 //! early by a later host set above its value: it waits for that GPU signal, which was submitted
 //! before it and so comes. Metal releases it at the host set.
 
+use crate::command_buffer::completion::seen;
 use std::collections::VecDeque;
 
 /// One kept GPU signal the semaphore has not been seen to reach.
@@ -102,6 +103,19 @@ impl<Q: Copy + Eq> EventTimeline<Q> {
             self.reached_value = front.value;
         }
         self.value() > before
+    }
+
+    /// The semaphore's counter read `read`: observed only up to the index a host wait returned
+    /// for (`reaches`, the answer of `command_buffer/completion.rs`'s `seen`), as a read alone
+    /// orders no host operation after the signal; a read past the index last seen is waited for
+    /// first. Whether the value rose.
+    pub(super) fn observe_read<E>(
+        &mut self,
+        read: u64,
+        reaches: impl FnOnce(u64) -> Result<bool, E>,
+    ) -> Result<bool, E> {
+        let index = seen(self.reached, None, read, reaches)?;
+        Ok(self.observe(index))
     }
 
     /// The host set `value`. Whether the value rose.

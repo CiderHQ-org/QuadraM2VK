@@ -379,7 +379,7 @@ impl Residency {
                     Used::Heap { bytes, .. } => bytes,
                     Used::Texture(_) | Used::IndirectCommandBuffer(_) => return None,
                 };
-                let offset = address.checked_sub(buffer.gpu_address().0)?;
+                let offset = address.checked_sub(buffer.metal_address().0)?;
                 (offset <= buffer.length()).then_some((buffer, offset))
             })
         };

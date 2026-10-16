@@ -33,12 +33,20 @@
 //!   every command buffer committed meanwhile. A command buffer holds it weakly from its commit
 //!   to its first submission, which takes the table of the list then, the same one where the
 //!   list is unchanged, and holds it, and with it each listed buffer's pages, until it completes
-//!   (Metal resolves what a command buffer reaches as it submits it). So a buffer released while a
-//!   submitted command buffer may reach it keeps its memory until that command buffer completed,
-//!   and one released while only command buffers not yet submitted reach it goes at once, as
-//!   Metal's does (the consumer's G344: a release after the commit lets the pages go, and the reach
-//!   reads 0). A commit while the list is unchanged makes nothing (the cost, measured on an Apple
-//!   M4 and a Radeon 780M).
+//!   (Metal resolves what a command buffer reaches as it submits it). A host step after then
+//!   resolves against the table current as it runs, which the command buffer holds from then on
+//!   too (`CommandBuffer::residency`): the commands the step records may reach its buffers. So a
+//!   buffer released while a submitted command buffer may reach it keeps its memory until that
+//!   command buffer completed, announced (`host-deallocator-delayed`): Metal's deallocator runs at
+//!   the release, and the command buffer's later accesses reach nothing (the M3 Max under macOS
+//!   27.0.1, probe `dealloc-probe4`), where Vulkan frees no memory that submitted commands may
+//!   still use (`VUID-vkFreeMemory-memory-00677`). One the command buffer's commands name goes as
+//!   it completes, where Metal's goes too, announced only where another submitted command buffer's
+//!   table lists it: a command buffer lets go of its tables before what it retained
+//!   (`CommandBufferShared::complete`). One released while only command buffers not
+//!   yet submitted reach it goes at once, as Metal's does (the consumer's G344: a release after the
+//!   commit lets the pages go, and the reach reads 0). A commit while the list is unchanged makes
+//!   nothing (the cost, measured on an Apple M4 and a Radeon 780M).
 //! - **Kept as the list changes**. The device keeps the list sorted, each buffer with its range and
 //!   a hold on its pages from its listing on, in chunks the tables share (`sorted_chunks.rs`): a
 //!   buffer made or gone changes one chunk, and the next table copies none of the others, upgrades
@@ -167,7 +175,7 @@ impl LiveBuffers {
 
     /// List `buffer`, unless it is: a change of the list only where it was not.
     fn register(&self, buffer: &Buffer) {
-        let key = (buffer.gpu_address().0, buffer.object_id());
+        let key = (buffer.metal_address().0, buffer.object_id());
         if lock(&self.inner).listed.contains(&key) {
             return;
         }
@@ -182,6 +190,17 @@ impl LiveBuffers {
             inner.listed.insert(key, listed).then(|| inner.change())
         };
         self.let_go(stale);
+    }
+
+    /// `buffer`'s import was released while idle and imported again before its Metal address was
+    /// handed out (`host_residency.rs`): where it is listed, its range is read again, its new
+    /// `VkBuffer`'s, or none while it is released.
+    pub(super) fn refresh(&self, buffer: &Buffer) {
+        let (address, id) = (buffer.metal_address().0, buffer.object_id());
+        if lock(&self.inner).listed.contains(&(address, id)) {
+            self.forget(address, id);
+            self.register(buffer);
+        }
     }
 
     /// The buffer `id` at Metal address `address` is gone.
@@ -216,7 +235,7 @@ impl LiveBuffers {
             let mut inner = lock(&self.inner);
             let mut listed = Vec::new();
             for buffer in &gone {
-                let key = (buffer.gpu_address().0, buffer.object_id());
+                let key = (buffer.metal_address().0, buffer.object_id());
                 listed.extend(inner.listed.remove(&key));
             }
             let mut stale = inner.change();

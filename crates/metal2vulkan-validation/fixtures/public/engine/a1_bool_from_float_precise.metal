@@ -1,4 +1,4 @@
-// Owned fixture (WP-A1, D126): `air.convert` from a float to `i1`, without fast math. The same
+// Owned fixture: `air.convert` from a float to `i1`, without fast math. The same
 // program as `a1_bool_from_float`, compiled `-fno-fast-math` (the module records
 // `air.compile.fast_math_disable`), so a disagreement between the two on a NaN, an infinity, or a
 // denormal lane shows the conversion depends on the module's fast-math option. Loop-free.

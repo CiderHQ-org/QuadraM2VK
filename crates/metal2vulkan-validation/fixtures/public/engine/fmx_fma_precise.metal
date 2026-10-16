@@ -1,4 +1,4 @@
-// Owned fixture (WP-FMX, DESIGN D253): `fmx_fma_fast` without fast math (`-fno-fast-math`). The
+// Owned fixture: `fmx_fma_fast` without fast math (`-fno-fast-math`). The
 // same program: `fma` is still `air.fma.f32` / `air.fma.f16`, and `a * b + c` is now
 // `llvm.fmuladd.f32` / `llvm.fmuladd.f16` (the front end contracts the written expression into
 // one call that the implementation may fuse or not), so the pair reads whether Metal fuses

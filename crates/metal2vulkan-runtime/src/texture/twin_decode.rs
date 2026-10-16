@@ -15,7 +15,9 @@
 //! **Who waits.** The scheduler holds each batch whose footprint names a texture with a job
 //! queued or running until its jobs finished (`Scheduler::decode_queued`), so the first GPU work
 //! that may read the twin waits, and nothing else; a job of an untracked texture, whose uses no
-//! footprint names, holds every batch. The call waits for nothing but room (the owner's rule:
+//! footprint names, holds every batch. A job's end opens a trail (`trails.rs`) that closes once
+//! the thread dropped the job, which holds the image and so the device: a wait for a command
+//! buffer that read the twin returns only then. The call waits for nothing but room (the owner's rule:
 //! Metal's `replaceRegion` is an unsynchronized CPU write and never waits for GPU work): a batch
 //! already submitted that reads the texture reads the twin as the thread's copies stand when it
 //! runs. A CPU read of the texture reads its blocks and waits for nothing.
@@ -192,12 +194,12 @@ fn run(shared: &Shared) {
             shared.done.notify_all();
             return;
         };
-        match covered {
-            true => job.image.skip_twin_decode(),
-            false => job
-                .image
-                .finish_twin_decode(&job.region, job.blocks.as_deref()),
+        if !covered {
+            job.image
+                .finish_twin_decode(&job.region, job.blocks.as_deref());
         }
+        // The batches that wait for it may go; the trail closes once the job went.
+        let trail = job.image.twin_decoded();
         drop(busy);
         {
             let mut queue = lock(&shared.queue);
@@ -205,8 +207,9 @@ fn run(shared: &Shared) {
         }
         shared.done.notify_all();
         // Last: it may be the image's last hold, and with it the device's, whose drop stops this
-        // thread.
+        // thread; then the trail.
         drop(job);
+        drop(trail);
     }
 }
 

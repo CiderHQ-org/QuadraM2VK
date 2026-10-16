@@ -176,6 +176,26 @@ rebind that cannot make the image again is refused (`NotImplemented(RebindTextur
 `WorkCounts::dma_buf_imports`, `dma_buf_sparse_buffers`, `dma_buf_images` and
 `dma_buf_image_fallbacks` count what the route did.
 
+RADV lists every memory a device imported in every kernel submission, and amdgpu's work for a
+submission grows with each entry, whether a command uses it or not. So the runtime releases a
+no-copy buffer's import of dma-bufs that only blits have read (copies and fills of the buffer,
+copies between it and a texture) and no pending command buffer holds, once it has stayed idle for
+its window (2 seconds at first, doubled at each import again, up to 64 seconds), and imports it
+again at the buffer's next blit, on the thread that encodes it, which pays that time. The new
+import comes from the same dma-bufs, never from the source, so the buffer keeps the pages it was
+made over even after `host_range_remapped`. Nothing of Metal's observes the release: the buffer's
+bytes, its Metal address and its pages stay, and the CPU's writes made meanwhile are read. The
+runtime holds a duplicate descriptor of each released chunk, within a quarter of the process's
+`RLIMIT_NOFILE` soft limit (an import past it stays imported), and changes no limit: where many
+no-copy buffers stand at once, raise the soft limit toward the hard one at startup (`setrlimit`),
+as QEMU does. A buffer stays imported for good once its Metal address is handed out
+(`gpu_address`, a binding, an argument buffer or table, an indirect command buffer,
+`use_resource`), its `VkBuffer` is read, a texture is made over its bytes, or a second buffer lies
+in its import; so do a heap's and a rebind's imports and memory imported by its pointer. A blit
+whose released buffer the device cannot import again (out of memory) is refused.
+`WorkCounts::host_imports_released`, `host_imports_reimported`, `host_imports_resident` and
+`host_import_fds_kept` count it.
+
 A texture over a buffer's bytes is an image over them where its rows lie one after another
 (`bytes_per_row` is its texels' bytes, or it has one row; an array's slices likewise) and the
 image holds no byte past its texels. A texture whose rows lie with bytes between them, as a guest
@@ -192,8 +212,9 @@ other. A render pass's load and store operations "read and write back any memory
 the image subresource bound for that attachment" (lavapipe writes back the bytes its 4-texel blocks
 reach past a row, a signaling NaN's bits quieted). No query of the device's states otherwise. So a
 texture that renders or that a shader writes is a shadow, and one that only reads keeps the bytes
-between its rows as far as the driver's first move does (docs/FAST-PATHS.md's known gap, checked
-per driver by the validation lane); `padded_reads = PaddedReadsPolicy::Shadow`, which
+between its rows across its first move (the host keeps the bytes the image is bound to through
+it, so a CPU write between its rows meanwhile is undone, once per image; docs/API.md section 1,
+docs/FAST-PATHS.md's known gaps); `padded_reads = PaddedReadsPolicy::Shadow`, which
 `DevicePolicy::exact_answers()` selects, makes it a shadow too. To keep a surface that renders
 aliased, lay its rows packed.
 
@@ -234,3 +255,7 @@ for the device is valid under; the command line runs each.
 For a claim about behavior, follow [VALIDATION.md](VALIDATION.md): a synthetic regression test,
 the golden output hashes where output must not move, and an authored case run on Metal and Vulkan
 where it should.
+
+A host note: on a Radeon 780M under Ubuntu 26.04's kernel 7.0.0-38 and linux-firmware 20260319, a
+copy's write is sometimes lost under multi-process GPU load, with no error; kernel 7.2.9 with
+linux-firmware 20260916 loses none.

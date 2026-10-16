@@ -87,6 +87,7 @@ use super::tracker::{Access, Barrier, Use, UseRange};
 use super::upload::Upload;
 use super::values::ResourceOptions;
 use super::Device;
+use crate::device::functions::Vk;
 use ash::vk;
 use metal2vulkan::bind::{
     Dispatch, FlatArguments, FlatDispatchModule, FlatIndirect, ImageblockSize, PredicationStep,
@@ -470,7 +471,7 @@ impl FlatPreprocess {
     /// gate lies in the command buffer's arena.
     pub(super) unsafe fn record(
         &self,
-        raw: &ash::Device,
+        raw: &Vk,
         command_buffer: vk::CommandBuffer,
         gate: Option<&Upload>,
     ) {

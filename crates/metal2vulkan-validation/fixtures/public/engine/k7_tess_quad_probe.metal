@@ -1,4 +1,4 @@
-// Owned fixture (WP-EXT, DESIGN D195): a quad patch's tessellation, read through its draw. Each
+// Owned fixture: a quad patch's tessellation, read through its draw. Each
 // patch covers the clip-space rectangle its per-patch attribute states (origin `rect.xy`, signed
 // extent `rect.zw`, so a negative extent mirrors the patch), with `position_in_patch` mapped
 // affinely onto it. `shade` (locn0) holds products of the domain coordinates: interpolated over

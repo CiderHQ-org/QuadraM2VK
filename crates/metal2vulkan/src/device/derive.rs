@@ -405,21 +405,30 @@ fn derive_fields(
         },
         // The device's measured value, keyed on its identity as the workarounds are, or the floor.
         function_storage: function_storage::of(desc),
-        // The measured deviations, one per pipeline kind. Unmeasured, a MoltenVK driver's route is
-        // unknown, since it hands the gradients to Metal by some route; another driver's is
-        // Vulkan's rule.
+        // The measured deviations, one per pipeline kind (the graphics one per macOS release's
+        // reading of SPIRV-Cross's fixup). Unmeasured, a MoltenVK driver's route is unknown, since
+        // it hands the gradients to Metal by some route; another driver's is Vulkan's rule.
         cube_gradients: {
-            let route = |deviation, measured| match (deviates(deviation), desc.driver_id) {
-                (true, _) => measured,
-                (false, Some(vk::DriverId::MOLTENVK)) => CubeGradientRoute::Unmeasured,
-                (false, _) => CubeGradientRoute::Vulkan,
+            let route = |measured: &[(DriverDeviation, CubeGradientRoute)]| match (
+                measured.iter().find(|(deviation, _)| deviates(*deviation)),
+                desc.driver_id,
+            ) {
+                (Some(&(_, route)), _) => route,
+                (None, Some(vk::DriverId::MOLTENVK)) => CubeGradientRoute::Unmeasured,
+                (None, _) => CubeGradientRoute::Vulkan,
             };
             CubeGradients {
-                graphics: route(
-                    DriverDeviation::GraphicsCubeGradientRoute,
-                    CubeGradientRoute::AppleSwizzled,
-                ),
-                compute: route(DriverDeviation::CubeGradientRoute, CubeGradientRoute::Metal),
+                graphics: route(&[
+                    (
+                        DriverDeviation::GraphicsCubeGradientRoute,
+                        CubeGradientRoute::AppleSwizzled,
+                    ),
+                    (
+                        DriverDeviation::GraphicsCubeGradientTangents,
+                        CubeGradientRoute::AppleProjected,
+                    ),
+                ]),
+                compute: route(&[(DriverDeviation::CubeGradientRoute, CubeGradientRoute::Metal)]),
             }
         },
         // The deviations taken past their last measured release, which a module records
@@ -869,6 +878,18 @@ fn enabled_caps(
     }
     if deviations.contains_key(&DriverDeviation::Unorm8LinearFilter) {
         properties.insert(VkProperty::Unorm8LinearFilter);
+    }
+    if deviations.contains_key(&DriverDeviation::MetalDepth16Stores) {
+        properties.insert(VkProperty::MetalDepth16Stores);
+    }
+    if deviations.contains_key(&DriverDeviation::MetalDepth16BiasedStores) {
+        properties.insert(VkProperty::MetalDepth16BiasedStores);
+    }
+    if deviations.contains_key(&DriverDeviation::MetalInterpolation) {
+        properties.insert(VkProperty::MetalInterpolation);
+    }
+    if deviations.contains_key(&DriverDeviation::MetalFirstVertexIndices) {
+        properties.insert(VkProperty::MetalFirstVertexIndices);
     }
     let l = &desc.limits;
     let sample_counts: [(vk::SampleCountFlags, fn(u32) -> VkProperty); 6] = [

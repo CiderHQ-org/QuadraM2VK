@@ -1,15 +1,15 @@
-// Owned fixture (WP-A1, D126): half denormal results of arithmetic and conversions, the D57.12
-// table, without fast math (`-fno-fast-math`: no `nsz` on the operations whose result is a
-// zero). D57.1 rounds every `half` result with `OpQuantizeToF16`, which SPIR-V lets flush a
-// result below the smallest normal half to either signed zero (`F16DenormFlush`, D57.4, the
-// comparison class D113 derives); D110.6 observed Metal keeping a half denormal from a `bfloat`
-// conversion. This kernel asks the rest: products, sums, and differences that land on a half
-// denormal (including a tie to even), conversions from `float` into the denormal range
-// (including a tie to zero), widening denormals to `float`, and a load/store round trip.
+// Owned fixture: half denormal results of arithmetic and conversions, in a table, without fast math
+// (`-fno-fast-math`: no `nsz` on the operations whose result is a zero). The translator rounds
+// every `half` result with `OpQuantizeToF16`, which SPIR-V lets flush a result below the smallest
+// normal half to either signed zero (`F16DenormFlush`, the comparison class it derives); Metal was
+// observed keeping a half denormal from a `bfloat` conversion. This kernel asks the rest: products,
+// sums, and differences that land on a half denormal (including a tie to even), conversions from
+// `float` into the denormal range (including a tie to zero), widening denormals to `float`, and a
+// load/store round trip.
 //
-// One thread. `a` and `b` are half patterns, `w` float patterns; `out` holds the D57.12 rows
+// One thread. `a` and `b` are half patterns, `w` float patterns; `out` holds the table's rows
 // h[0..11] as zero-extended half patterns in words 0..11 and f[0], f[1] in words 12 and 13
-// (D57.12 names two output buffers; a case observes one). Loop-free.
+// (the table names two output buffers; a case observes one). Loop-free.
 // metal-fast-math: off
 #include <metal_stdlib>
 using namespace metal;

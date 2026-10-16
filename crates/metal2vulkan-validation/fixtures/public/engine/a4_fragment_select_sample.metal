@@ -1,6 +1,6 @@
-// Owned fixture (WP-A4, DESIGN D213): an implicit-LOD sample through a texture selected per
-// fragment (`sampler.sample_hoisted_grad.switch`: the gradients are hoisted before the switch,
-// D19 rule 2). Pixel (x, y) of a 16 x 16 target samples a when its centre's x exceeds 8, else b,
+// Owned fixture: an implicit-LOD sample through a texture selected per
+// fragment (`sampler.sample_hoisted_grad.switch`: the gradients are hoisted before the switch).
+// Pixel (x, y) of a 16 x 16 target samples a when its centre's x exceeds 8, else b,
 // at the centre of texel (x, y); through a nearest sampler of 16 x 16 textures of one level that
 // is texel (x, y) of the chosen texture. Loop-free.
 #include <metal_stdlib>

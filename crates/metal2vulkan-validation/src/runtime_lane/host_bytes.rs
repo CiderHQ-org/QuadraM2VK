@@ -424,13 +424,13 @@ fn prepare(probe: &Probe, encoder: &mut RenderCommandEncoder, depth: &Buffer) {
     encoder.set_vertex_buffer(Some(depth), 0, 0).unwrap();
 }
 
-/// Draws over buffers 1 to 4 bytes past a page, each one RT6 probe 5 measured or its direct
-/// form, with the fixture's fullscreen triangle (vertices 0 to 2; 3 and up land outside the
-/// target): the vertex function's depth buffer; 32-bit indices 2 bytes past a page (read
-/// through a copy) and 4 past it (in place); arguments 2 bytes past a page (a copy), whose
-/// second set draws; and an indexed indirect draw of 16-bit indices 1 byte past a page (a copy,
-/// which the index bounds pass reads where the device lacks `robustBufferAccess2`). Each stores
-/// the texels Metal stored.
+/// Draws over buffers 1 to 4 bytes past a page, each one a Metal probe on an M4 measured or its
+/// direct form, with the fixture's fullscreen triangle (vertices 0 to 2; 3 and up land outside the
+/// target): the vertex function's depth buffer; 32-bit indices 2 bytes past a page (read through a
+/// copy) and 4 past it (in place); arguments 2 bytes past a page (a copy), whose second set draws;
+/// and an indexed indirect draw of 16-bit indices 1 byte past a page (a copy, which the index
+/// bounds pass reads where the device lacks `robustBufferAccess2`). Each stores the texels Metal
+/// stored.
 #[test]
 fn draws_read_indices_and_arguments_where_their_bytes_lie() {
     let (messages, _cache, probe) = validated();

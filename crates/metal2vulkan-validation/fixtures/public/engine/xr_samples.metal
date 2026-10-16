@@ -1,4 +1,4 @@
-// Owned fixture (WP-TXN, DESIGN D398 item 8, TODO 4.17; written for this repository): 2D linear
+// Owned fixture (written for this repository): 2D linear
 // samples of an extended-range texture (`BGRA10_XR`, `BGR10_XR` or an `_sRGB` twin), through the
 // runtime sampler at `[[sampler(0)]]` and through a constexpr linear clamp-to-edge sampler, with
 // `float` and `half` results. One thread per coordinate. Loop-free.

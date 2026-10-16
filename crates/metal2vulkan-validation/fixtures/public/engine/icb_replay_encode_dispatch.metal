@@ -1,4 +1,4 @@
-// Owned fixture (WP-K14d, DESIGN D268): a kernel that encodes only the dispatches of commands
+// Owned fixture: a kernel that encodes only the dispatches of commands
 // whose pipeline and buffers the executing encoder supplies (inherited). Thread `tid` encodes
 // command `tid`: a 128-byte threadgroup length and a dispatch in threadgroups of 8 x 4 of the
 // grid `grids[tid].xyz`, of threads when `grids[tid].w` is 0 and of threadgroups otherwise, with

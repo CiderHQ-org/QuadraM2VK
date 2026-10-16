@@ -39,7 +39,6 @@
 use super::engine_argument_tables::{bytes_at, capable_profiles, device, one_group, table_layout};
 use crate::bind::{ArgumentFunctionTable, BindState, FunctionTableWords};
 use crate::budget::{Budget, SPIRV_WORDS};
-use crate::device::profile::FunctionStorage;
 use crate::device::VkLimit;
 use crate::error::{Capability, DescriptorError, Error, Feature, Limit, Unsupported};
 use crate::library::{FunctionConstantValues, Library};
@@ -78,7 +77,7 @@ const SUMS: [&str; 3] = ["rec_sum", "rec_even", "rec_odd"];
 const T: u64 = 0x10;
 
 /// The owned synthetic module.
-const MODULE: &str = r#"; Owned synthetic AIR (WP-UNI, D316 step B), in the form Apple's compiler emits for the MSL
+const MODULE: &str = r#"; Owned synthetic AIR, in the form Apple's compiler emits for the MSL
 ; each function's comment quotes.
 source_filename = "uni_recursion.metal"
 target datalayout = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:1024-n8:16:32"
@@ -801,7 +800,7 @@ fn needs_storage(required: u64, available: u64) -> Result<(), Error> {
 /// The kernels at depth 8 pass L3 on every committed profile that reads tables from argument
 /// buffers (the direct one on every profile), and compute there what they compute on the first.
 /// Their stacks fit every device's Function storage, the floor of a device not measured among
-/// them, where they record that they rest on it (`PrecisionNote::FunctionStorageAssumed`).
+/// them, which holds them with no note (`PrecisionNote::FunctionStorageAssumed` is past it).
 #[test]
 fn recursive_kernels_validate_and_agree_on_every_profile() {
     let Some(bitcode) = module() else {
@@ -812,9 +811,8 @@ fn recursive_kernels_validate_and_agree_on_every_profile() {
     let check = |stem: &str, entry: &str, p: &crate::device::DeviceProfile| {
         let a = compile(&bitcode, entry, 8, p).unwrap_or_else(|e| panic!("{stem}: {e}"));
         link_and_validate(&a, p).unwrap_or_else(|e| panic!("{stem} {entry}: L3: {e}"));
-        let assumed = matches!(p.fields().function_storage, FunctionStorage::Assumed(_));
         let noted = a.precision.contains(&PrecisionNote::FunctionStorageAssumed);
-        assert_eq!(noted, assumed, "{stem} {entry}");
+        assert!(!noted, "{stem} {entry}");
     };
     for (stem, p) in committed_profiles().expect("profiles") {
         check(&stem, DIRECT, &p);

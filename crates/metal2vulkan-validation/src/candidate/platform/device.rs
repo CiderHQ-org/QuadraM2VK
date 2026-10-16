@@ -1299,14 +1299,7 @@ pub(crate) fn lane_restriction(
     stem: &str,
     device_type: DeviceType,
 ) -> Result<LaneRestriction, String> {
-    let entry = load_entry()?;
-    // SAFETY: a global command of a loaded entry.
-    let layers = unsafe { entry.enumerate_instance_layer_properties() }
-        .map_err(|error| format!("enumerate Vulkan instance layers: {error}"))?;
-    if !layers
-        .iter()
-        .any(|layer| extension_name(&layer.layer_name) == PROFILES_LAYER)
-    {
+    if !profiles_layer_installed()? {
         return Ok(LaneRestriction::NoLayer);
     }
     // A restriction lives as long as the process, as this process's own would.
@@ -1322,6 +1315,19 @@ pub(crate) fn lane_restriction(
             gaps: refused.gaps,
         },
     })
+}
+
+/// Whether `VK_LAYER_KHRONOS_profiles` is installed, for a lane test that restricts its device
+/// through it.
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+pub(crate) fn profiles_layer_installed() -> Result<bool, String> {
+    let entry = load_entry()?;
+    // SAFETY: a global command of a loaded entry.
+    let layers = unsafe { entry.enumerate_instance_layer_properties() }
+        .map_err(|error| format!("enumerate Vulkan instance layers: {error}"))?;
+    Ok(layers
+        .iter()
+        .any(|layer| extension_name(&layer.layer_name) == PROFILES_LAYER))
 }
 
 /// [`runtime_restriction`]'s steps for `restriction`: the first check decides between a typed
@@ -2104,13 +2110,15 @@ fn extension_name(raw: &[std::ffi::c_char]) -> &CStr {
 /// `VkFormatFeatureFlags2` masks and the sample counts of a color attachment of it
 /// (`VkImageFormatProperties::sampleCounts` of a 2D, optimal-tiling image with `COLOR_ATTACHMENT`
 /// usage and no flags, where its optimal tiling has `COLOR_ATTACHMENT`, and 0 otherwise or where
-/// the device takes no such image). Physical-device queries only: no device is created and nothing
-/// is submitted; a GPU capture checks the hang tripwire first, as every device open does, and
-/// opens its instance through [`create_instance`]. The instance runs at the loader's version, as
-/// `vulkaninfo`'s does, so a format
-/// the device exposes only at its own core version is queried too. Each mask is its raw 64-bit
-/// value; `scripts/regen-device-profiles` names the bits with the pinned registry and checks the
-/// low 32 against the capture's `VkFormatProperties`. The identity is the device's, as a row's
+/// the device takes no such image). The linear-tiling mask leaves out the features the product's
+/// description does for the driver (`DeviceDescription::unreliable_linear_tiling`: MoltenVK's
+/// attachment features, which it reads uninitialized). Physical-device queries only: no device is
+/// created and nothing is submitted; a GPU capture checks the hang tripwire first, as every device
+/// open does, and opens its instance through [`create_instance`]. The instance runs at the
+/// loader's version, as `vulkaninfo`'s does, so a format the device exposes only at its own core
+/// version is queried too. Each mask is its raw 64-bit value; `scripts/regen-device-profiles`
+/// names the bits with the pinned registry and checks the low 32 against the capture's
+/// `VkFormatProperties`, leaving out the same features for MoltenVK. The identity is the device's, as a row's
 /// `environment` records it, so the regeneration can check both files describe one device.
 pub fn capture_formats(device_type: DeviceType) -> Result<serde_json::Value, String> {
     if device_type == DeviceType::Gpu {
@@ -2173,6 +2181,14 @@ unsafe fn describe_formats(
             effective.major, effective.minor
         ));
     }
+    // The linear-tiling features the product's description leaves out for this driver
+    // (`DeviceDescription::unreliable_linear_tiling`), left out here alike.
+    let mut identity = metal2vulkan::device::DeviceDescription::new(effective);
+    identity.driver_id = Some(mvk::DriverId::from_raw(driver.driver_id.as_raw()));
+    identity.driver_version = core.driver_version;
+    identity.vendor_id = core.vendor_id;
+    identity.device_id = core.device_id;
+    let unreliable = identity.unreliable_linear_tiling().as_raw();
     let mut formats = serde_json::Map::new();
     for &format in mvk::Format::KNOWN {
         let (Some(name), Some(exposure)) = (format.name(), format.exposure()) else {
@@ -2221,7 +2237,7 @@ unsafe fn describe_formats(
         formats.insert(
             name.to_string(),
             serde_json::json!({
-                "linearTilingFeatures": p3.linear_tiling_features.as_raw(),
+                "linearTilingFeatures": p3.linear_tiling_features.as_raw() & !unreliable,
                 "optimalTilingFeatures": p3.optimal_tiling_features.as_raw(),
                 "bufferFeatures": p3.buffer_features.as_raw(),
                 "colorAttachmentSampleCounts": samples,
@@ -2300,7 +2316,9 @@ mod tests {
     /// The formats supplement describes the device a venue run selects, and its masks are what the
     /// product's own query reads for every format it queries: each format of the description is in
     /// the capture with the same three `VkFormatFeatureFlags2` masks, and each format the capture
-    /// reports with a feature that the description queries is in it.
+    /// reports with a feature that the description queries is in it. Neither holds a linear-tiling
+    /// feature the driver reports unreliably (`DeviceDescription::unreliable_linear_tiling`), which
+    /// on MoltenVK are its attachment features, so two instances' answers agree there too.
     #[test]
     fn the_formats_capture_is_the_product_queried_formats_of_the_venue_device() {
         use metal2vulkan::vk as mvk;
@@ -2333,9 +2351,23 @@ mod tests {
         }
         .unwrap();
         assert!(description.has_format_feature_flags2());
+        let unreliable = description.unreliable_linear_tiling();
+        eprintln!(
+            "the driver's unreliable linear-tiling features: {:#x}",
+            unreliable.as_raw()
+        );
+        assert_eq!(
+            unreliable.is_empty(),
+            context.driver.driver_id != vk::DriverId::MOLTENVK.as_raw(),
+            "MoltenVK's linear-tiling attachment features are left out, and no other driver's"
+        );
         let formats = captured["formats"].as_object().unwrap();
         for (format, props) in &description.formats.formats {
             let name = format.name().unwrap();
+            assert!(
+                props.linear_tiling.intersection(unreliable).is_empty(),
+                "{name}"
+            );
             let masks = &formats[name];
             assert_eq!(
                 masks["linearTilingFeatures"],

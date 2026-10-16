@@ -32,6 +32,7 @@ use super::device::lock;
 use super::error::{internal, invalid, nil, vulkan, Error, Problem, RuntimeGap};
 use super::exit_guard;
 use super::image_plan::check_own_memory;
+use super::key_hash::KeyMap;
 use super::linear_plan::{
     is_linear, plan_buffer_texture, BufferFacts, BufferLayout, BufferRefusal, BufferTexture,
     BufferTextureCall, BufferTextureProblem, Placed, LINEAR_ALIGNMENT,
@@ -39,6 +40,7 @@ use super::linear_plan::{
 use super::resource::{Identity, ResourceKey};
 use super::rotated::{self, Frame, RotatedCopies};
 use super::shadow::{ShadowBuffer, ShadowCopies, ShadowSource, ShadowStaging, ShadowTarget};
+use super::shadow_copy_back::WordView;
 use super::texture::surface_two_planes;
 use super::texture::{IdUse, Texture};
 use super::texture_descriptor::{
@@ -107,7 +109,7 @@ pub(super) struct Texels {
 /// with those pages (`rebind.rs`), and the next bind makes them again over the new ones.
 pub(super) struct TexelViews {
     device: Device,
-    views: Mutex<HashMap<(Format, bool, u64, u64), vk::BufferView>>,
+    views: Mutex<KeyMap<(Format, bool, u64, u64), vk::BufferView>>,
 }
 
 impl TexelViews {
@@ -1056,7 +1058,7 @@ impl Texels {
     ) -> Texels {
         let views = Arc::new(TexelViews {
             device: buffer.device().clone(),
-            views: Mutex::new(HashMap::new()),
+            views: Mutex::new(KeyMap::default()),
         });
         // A rebind of the buffer's host pages empties the views (`rebind.rs`).
         buffer.watch_views(&views);
@@ -1190,13 +1192,16 @@ impl Texels {
     /// of `identity`, with `aspects`: one region per slice, the slice's rows of texels. Where
     /// the texels start in the buffer's `VkBuffer` at an offset that is not a multiple of their
     /// size, which Vulkan copies texels at (a no-copy buffer's bytes need not start at one), the
-    /// copies go through a staging buffer of the texture's ([`ShadowStaging`]). Refused as
-    /// `new_buffer` refuses the staging buffer.
+    /// copies go through a staging buffer of the texture's ([`ShadowStaging`]). Its copies back
+    /// dispatch through `words`, its image's integer view, where given and its one slice is
+    /// copied in place (`shadow_copy_back.rs`). Refused as `new_buffer` refuses the staging
+    /// buffer.
     pub(super) fn shadow_copies(
         &self,
         image: vk::Image,
         identity: Identity,
         aspects: vk::ImageAspectFlags,
+        words: Option<WordView>,
     ) -> Result<ShadowCopies, Error> {
         let layout = &self.layout;
         let (buffer, at) = self.buffer.at(layout.offset);
@@ -1245,6 +1250,8 @@ impl Texels {
                 key: bytes.key,
                 bytes: tracked,
                 target: ShadowTarget::Image {
+                    // A copy back dispatches over one region copied in place alone.
+                    words: words.filter(|_| slices == 1 && staging.is_none()),
                     image,
                     regions,
                     staging,

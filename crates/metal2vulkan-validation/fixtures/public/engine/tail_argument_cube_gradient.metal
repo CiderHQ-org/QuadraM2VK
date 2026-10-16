@@ -1,4 +1,4 @@
-// Owned MSL for WP-TAIL's cube gradient through an argument buffer's sampler (DESIGN D285.21): a
+// Owned MSL for a cube gradient through an argument buffer's sampler: a
 // cube sampled with explicit gradients through a sampler loaded from an argument buffer beside
 // it, in a form whose answer is exact on Metal, so Metal's output is the comparison's reference.
 #include <metal_stdlib>

@@ -1,4 +1,4 @@
-// Owned fixture (WP-UNK, DESIGN D283): reads of a depth cube and a depth cube array
+// Owned fixture: reads of a depth cube and a depth cube array
 // (`air.read_depth_cube`, `air.read_depth_cube_array`) at 32- and 16-bit coordinates. Lane i
 // reads face i mod 6 at texel ((i / 6) mod w, (i / 6w) mod h) of a w x h depth cube, and of cube
 // (i / 6wh) mod n of a depth cube array of n cubes, and writes the four depths' words to

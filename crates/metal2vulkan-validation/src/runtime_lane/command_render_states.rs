@@ -1,6 +1,6 @@
 //! A render command's own render states and object threadgroup lengths on the device the cfg
-//! selects, under the validation layer, with RT6 probe 4's functions (`render_state.rs`) in its 4x4
-//! pass of a `Depth32Float` attachment cleared to 1.0.
+//! selects, under the validation layer, with the functions of a Metal probe on an M4
+//! (`render_state.rs`) in its 4x4 pass of a `Depth32Float` attachment cleared to 1.0.
 //!
 //! Every answer is plain Metal's on an M4 with macOS 27.0.1 (EVs IRX-inh1-m4 and IRX-inh2-m4, each
 //! case plain and under Metal's validation):

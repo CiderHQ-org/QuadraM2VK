@@ -656,7 +656,7 @@ fn run_matmads(p: &DeviceProfile, tier: Tier, lanes: SubgroupSize, locals: &[u32
         assert_eq!(
             plan.simd.0,
             SimdClass::CrossLane(OpBits::SHUFFLE),
-            "{op}: the class names the shuffles (D70.1)"
+            "{op}: the class names the shuffles"
         );
         for &n in locals {
             let (a, b, c) = (operand(n, 1), operand(n, 2), operand(n, 3));

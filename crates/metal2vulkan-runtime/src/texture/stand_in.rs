@@ -227,7 +227,7 @@ impl Device {
             }
         };
         let undefined = vk::ImageLayout::UNDEFINED;
-        let first = FirstMove::new(raw, plan.format, undefined, false).zeroed(zeros, &copies);
+        let first = FirstMove::new(raw, plan.format, undefined, None).zeroed(zeros, &copies);
         Ok((image, first))
     }
 
@@ -248,7 +248,8 @@ impl Device {
             return Err(Error::NotImplemented(RuntimeGap::DetachTextures));
         }
         let stand_in = self.stand_in(image.plan())?;
-        // Its own `VkImage` stays its own; it has no views yet.
+        // Its own `VkImage` stays its own, with the views its copies hold of it
+        // (`Image::own_view`); it has no other views yet.
         drop(image.present_stand_in(stand_in));
         Ok(())
     }

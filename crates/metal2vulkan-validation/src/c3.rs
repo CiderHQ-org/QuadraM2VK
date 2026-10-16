@@ -557,7 +557,7 @@ impl List for ReviewedList {
             if gap.review.sign_off.is_signed_off() {
                 return Err(at(format!(
                     "is signed off, but an answer gap ({}) stays open until an exact emulation \
-                     exists (the user's decision of 2026-10-06, DESIGN D341 item 7)",
+                     exists (the user's decision of 2026-10-06)",
                     gap.gap.as_str()
                 )));
             }
@@ -723,9 +723,6 @@ pub struct SlotRow {
 /// - A bicubic sample's unpinned arithmetic (`BicubicFilterArithmetic`): a 2D normalized sum near a
 ///   rounding tie lands one grid step from Metal's, whose 2D rounding no model fitted, and the
 ///   sampled value is ordinary data later words use.
-/// - A varying the device interpolates where its interpolation is measured not to be Metal's
-///   (`DeviceInterpolation`): open until the shader interpolates each varying by Metal's formula,
-///   and the interpolated value is ordinary data later words use.
 /// - A vertex function's simdgroup operation on a device that groups vertices otherwise than
 ///   Apple's GPUs and cannot pin the vertex stage's subgroup size (`VertexSimdgroupGrouping`): the
 ///   operation combines the device's group of vertices, a simdgroup Metal allows, and its value is
@@ -748,11 +745,16 @@ pub struct SlotRow {
 ///   may decide otherwise and keep or drop a sample's color. Open until the sample's own depth is
 ///   read exactly.
 ///
+/// A varying the device interpolates (`DeviceInterpolation`) is not deferred: every fragment
+/// function that reads one records it on every device but MoltenVK's, so a row-level deferral
+/// would hold any mismatch of such a function open as the interpolation's, a coverage or a
+/// rate-map difference among them. Its differences stay mismatches for review.
+///
 /// Row-level only. A note whose difference can be attributed word by word (a NaN encoding, a
 /// denormal, a `half` rounding) belongs in a per-word judgement of a reading's differing words,
 /// beside the check of each against Apple's bound, never in this list: a row-level match would
 /// reopen every signed-off reading whose row merely records the note.
-pub const DEFERRED_NEAR_EQUIVALENTS: [PrecisionNote; 13] = [
+pub const DEFERRED_NEAR_EQUIVALENTS: [PrecisionNote; 12] = [
     PrecisionNote::RasterizationRateMap,
     PrecisionNote::SparseResidency,
     PrecisionNote::CubeGradientFootprint,
@@ -760,7 +762,6 @@ pub const DEFERRED_NEAR_EQUIVALENTS: [PrecisionNote; 13] = [
     PrecisionNote::QuadsCountedBeforeDiscard,
     PrecisionNote::DeviceDepthComparison,
     PrecisionNote::BicubicFilterArithmetic,
-    PrecisionNote::DeviceInterpolation,
     PrecisionNote::VertexSimdgroupGrouping,
     PrecisionNote::FragmentSimdgroupGrouping,
     PrecisionNote::BlendedWriteRounding,
@@ -806,8 +807,7 @@ fn near_equivalent_bound(note: PrecisionNote) -> &'static str {
              physical to screen and 0.002 px screen to physical of Apple's GPU on the maps \
              measured; a rate-mapped pass's points within 0.025 px of Metal's where the device \
              keeps the viewport's fractions, and an axis's last physical line, where its last \
-             tile maps under 2 screen pixels to one, shaded where Metal may leave it (DESIGN \
-             D269.4, D269.6, D269.10)"
+             tile maps under 2 screen pixels to one, shaded where Metal may leave it"
         }
         PrecisionNote::SparseResidency => {
             "no bound: outside Metal's measured footprint rule (a runtime sampler, a mip level, \
@@ -817,14 +817,14 @@ fn near_equivalent_bound(note: PrecisionNote) -> &'static str {
              finer: values within 2^-9 on the cases measured, and a gather's texels one over \
              where its position crosses a texel's center), and an unmapped texel's sampled value \
              is the device's without residencyNonResidentStrict; exact path: an emulation of \
-             Metal's measured filter (DESIGN D270.4, D270.9, D270.10)"
+             Metal's measured filter"
         }
         PrecisionNote::CubeGradientFootprint => {
             "a cube gradient's footprint from the Euclidean length of its two counted components, \
              where Apple M3 Max's lies 2.2% below to 1.7% above it by their ratio, and the level the \
              device's own threshold above 0, where Apple's minifies from a footprint of \
              1 + 3/2048: a sample near a level or filter boundary can take another level or \
-             filter (DESIGN D283.5)"
+             filter"
         }
         PrecisionNote::CubeFaceReciprocal => {
             "a nearest cube texel from Metal's position floor(RN(RN(1 + sc * r) / 2 * n)) with r \
@@ -832,13 +832,12 @@ fn near_equivalent_bound(note: PrecisionNote) -> &'static str {
              M4's texture unit's is one or two ulps off on 208 of 2,001 majors measured (204 up, 4 \
              down, each within about 0.2 ulp of a rounding midpoint): on such a major a position \
              within about n * 2^-23 of a texel edge reads the next texel; no exact form of Apple's \
-             reciprocal is known (DESIGN D307 item 16)"
+             reciprocal is known"
         }
         PrecisionNote::DeviceDepthComparison => {
             "a depth comparison the device makes differs from Apple M4's on up to 584 of 9,024 \
              Depth16Unorm comparisons (ANV; RADV 71, the RTX 3090 474, lavapipe 1,203); every \
-             comparison the shader makes is Metal's, on texels it fetches or the device reads \
-             (DESIGN D333 items 1, 5, 10 and 14)"
+             comparison the shader makes is Metal's, on texels it fetches or the device reads"
         }
         PrecisionNote::QuadsCountedBeforeDiscard => {
             "a non-quad simdgroup operation before a discard, in a shape whose placement by \
@@ -848,8 +847,7 @@ fn near_equivalent_bound(note: PrecisionNote) -> &'static str {
              thread the discard drops, where Apple M3 Max's and M4's may leave it out: its count \
              is up to the dropped quads' lanes over Metal's (16 of 32 on RADV, NVIDIA and \
              MoltenVK, 8 of 16 on ANV, 4 of 8 on x86 lavapipe, with every other quad \
-             discarded); after the discard every venue measured counts Metal's lanes (DESIGN \
-             D327 item 6)"
+             discarded); after the discard every venue measured counts Metal's lanes"
         }
         PrecisionNote::BicubicFilterArithmetic => {
             "a 2D bicubic sum of an 8- or 16-bit normalized or sRGB format near a rounding tie \
@@ -857,51 +855,41 @@ fn near_equivalent_bound(note: PrecisionNote) -> &'static str {
              format, 1/4080 or 1/2032 of an 8-bit one, an sRGB table step), on 824 words of the \
              five cases measured; a 2D float or half sum's accumulator, a 1D half sum near a tie \
              and its non-finite results, the packed formats and Depth16Unorm unpinned; exact \
-             path: Apple's 2D rounding, which no model fitted (DESIGN D248 items 5 and 12, D425)"
-        }
-        PrecisionNote::DeviceInterpolation => {
-            "a varying the device interpolates is one f32 ulp toward zero from Metal's exact value \
-             on NVIDIA's 615.71.09 (the RTX 5080 Laptop GPU: 12 of 64 words of c011369b, exact \
-             vertices and an affine varying); exact path: interpolating each varying in the \
-             shader from its per-vertex values by Metal's formula, which is not measured \
-             (DESIGN D435, docs/TODO.md 5.10)"
+             path: Apple's 2D rounding, which no model fitted"
         }
         PrecisionNote::VertexSimdgroupGrouping => {
             "a vertex function's simdgroup holds the device's group of vertices: 8 a subgroup, \
              interleaved (vertices 0, 2, ..., 14 and 1, 3, ..., 15), on ANV's Mesa 26.2.4, where \
              Apple M4's holds 32 consecutive vertices (rvc_simd_vertex: its sums, ballots and \
              shuffles combine those 8); no exact path: the vertex stage takes no required \
-             subgroup size there (DESIGN D494, docs/TODO.md 6.2)"
+             subgroup size there"
         }
         PrecisionNote::FragmentSimdgroupGrouping => {
             "a fragment function's simdgroup holds the pixels the device's rasterizer packs into a \
              subgroup, where Apple's GPUs run an aligned 8x4 block one primitive covers whole as \
              one simdgroup and pack other quads by their own rasterizer (gsm2_fragment_lanes); no \
-             exact path: no Vulkan device states or pins its packing (DESIGN D561, docs/TODO.md \
-             5.15)"
+             exact path: no Vulkan device states or pins its packing"
         }
         PrecisionNote::BlendedWriteRounding => {
             "a half-float color channel under textureWriteRoundingMode 2 blended with factors \
              other than one and zero stores the device's rounding of the blend's result, where \
              Metal rounds it to nearest even (MoltenVK's toward zero; under a constant factor \
              Metal's result is neither rule's on 2,376 of 580,508 RGBA16Float channels, EV \
-             TXN2-twr-m4); exact path: the blend in the function under the pixel interlock \
-             (DESIGN D581, docs/TODO.md 8.50)"
+             TXN2-twr-m4); exact path: the blend in the function under the pixel interlock"
         }
         PrecisionNote::RotatedBlendRounding => {
             "an ARGB8Unorm attachment blended in none of the measured forms may store a channel \
              one code apart from Metal's: Apple's blend computes a factor pair apart in its color \
              and alpha arithmetic, and the rotation moves Metal's blue into the image's alpha \
              and Metal's alpha into its red (up to 1,767 of 65,536 tie-heavy texels over 440 \
-             swept states, EV GSM2-f84e-m4); exact path: a measured form for the state (DESIGN \
-             D629)"
+             swept states, EV GSM2-f84e-m4); exact path: a measured form for the state"
         }
         PrecisionNote::ComputedSampleDepth => {
             "a fragment function that runs its draw's depth test itself at more than one sample \
              computes each sample's depth from its vertex function's window depth; under \
              perspective, a slope-scaled bias or another depth range it may be up to 2 ulp from \
              the depth the device stores (EV DSX-dz5-mvk4), so a close test may decide \
-             otherwise; exact path: the sample's own depth read exactly (DESIGN D672 item 10)"
+             otherwise; exact path: the sample's own depth read exactly"
         }
         _ => "unbounded",
     }

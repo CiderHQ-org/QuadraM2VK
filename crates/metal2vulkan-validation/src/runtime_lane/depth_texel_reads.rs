@@ -35,7 +35,7 @@ const METAL: &str = "a940e05b402805a0f114a2009566daa556ac9cc732c04127d1cfaf7d98c
 /// slot 0 at `(g + (0.25, 0.75)) / 16`, the `depth2d<float>` its argument buffer (buffer 0, `{
 /// depth2d<float> d; }`) holds at texel `g`, storing the depth to buffer 1's `float` `16 g.y +
 /// g.x`: the scout's `scout_read_d` and `scout_sample_d` through an argument buffer.
-const HEAP: &str = r#"; Owned synthetic kernels (WP-SID).
+const HEAP: &str = r#"; Owned synthetic kernels.
 source_filename = "depth_texel_reads.metal"
 
 %struct.R = type { ptr addrspace(1) }

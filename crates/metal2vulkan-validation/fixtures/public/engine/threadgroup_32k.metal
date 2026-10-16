@@ -1,4 +1,4 @@
-// Owned fixture (DESIGN D10): a static threadgroup array of exactly 32768 bytes, the whole
+// Owned fixture: a static threadgroup array of exactly 32768 bytes, the whole
 // maxComputeSharedMemorySize of MoltenVK M3 and lavapipe. The arena must be the exact sum of the
 // Metal allocations (no sink word), so this compiles for moltenvk-m3 and lavapipe.
 // With a threadgroup of 1024 threads, thread t writes words t + 1024 k (k = 0..7), covering all

@@ -253,7 +253,8 @@ fn a_four_channel_srgb_attachment_takes_a_uint_view() {
 
 /// A blend of one and zero, added, for color and alpha stores the source as no blend does, so a
 /// written attachment under it takes the storage form, but for a signed normalized format (its NaN
-/// stores another code under the blend); one and zero for color alone is a blend. A write whose
+/// stores another code under the blend); one and zero for color alone is a blend, which a format
+/// whose blend the shader does not compute refuses. A write whose
 /// mask covers none of the format's channels stores nothing: no blend, alpha to coverage, one
 /// sample's returned mask, or late depth test bears on it, but an `Unspecialized` mask stays
 /// refused.
@@ -274,12 +275,12 @@ fn a_replacing_blend_and_a_write_that_stores_nothing_take_the_storage_form() {
         form(&replacing(PixelFormat::RG8Snorm), false, WRITES, &p),
         ni
     );
-    let alpha_adds = state(PixelFormat::RG16Float, |c| {
+    let alpha_adds = state(PixelFormat::R32Float, |c| {
         c.blending_enabled = true;
         c.destination_alpha_blend_factor = BlendFactor::One;
     });
     assert_eq!(form(&alpha_adds, false, WRITES, &p), ni);
-    let subtracts = state(PixelFormat::RG16Float, |c| {
+    let subtracts = state(PixelFormat::R32Float, |c| {
         c.blending_enabled = true;
         c.rgb_blend_operation = BlendOperation::Subtract;
     });
@@ -316,6 +317,114 @@ fn a_replacing_blend_and_a_write_that_stores_nothing_take_the_storage_form() {
     });
     assert_eq!(form(&unspecialized, false, WRITES, &p), ni);
     assert!(form(&unspecialized, false, READS, &p).is_ok());
+}
+
+/// A blend into a 16-bit float attachment that the write stores takes the storage form with the
+/// blend the shader computes (`StorageView::blend`), under either blend math, on every device that
+/// orders fetch through the pixel interlock alone: for each 16-bit float format, the macOS 27
+/// window server's one over one minus the source alpha among the factors and operations Metal's
+/// model holds, the blend color's difference with its one minus (under fast math Metal's form, the
+/// minuend's product fused and the subtrahend's rounded), and a write mask that keeps some
+/// channels. A factor of the second source is
+/// refused by name. A read-only attachment, a replacing blend under fast math and a write that
+/// stores nothing take the form without one; a replacing blend without fast math keeps the
+/// destination's product by zero (EV FBL-zf1-m3), so the shader computes it.
+#[test]
+fn a_sixteen_bit_float_blend_is_computed_in_the_storage_form() {
+    use crate::metal::{BlendFactor as F, BlendOperation as O};
+    let descriptor = |pf: PixelFormat, (s, d, op): (F, F, O), mask: ColorWriteMask| {
+        let mut c = ColorAttachmentDescriptor::new(pf);
+        c.blending_enabled = true;
+        c.source_rgb_blend_factor = s;
+        c.destination_rgb_blend_factor = d;
+        c.rgb_blend_operation = op;
+        c.source_alpha_blend_factor = s;
+        c.destination_alpha_blend_factor = d;
+        c.alpha_blend_operation = op;
+        c.write_mask = mask;
+        c
+    };
+    let of =
+        |c: ColorAttachmentDescriptor| FramebufferFetchInputs::of([0], &[Some(c)], false, false, 1);
+    let equations = [
+        (F::One, F::OneMinusSourceAlpha, O::Add),
+        (F::SourceAlpha, F::OneMinusSourceAlpha, O::Subtract),
+        (
+            F::DestinationColor,
+            F::OneMinusDestinationAlpha,
+            O::ReverseSubtract,
+        ),
+        (F::BlendColor, F::OneMinusBlendAlpha, O::Add),
+        (F::SourceAlphaSaturated, F::One, O::Add),
+        (F::One, F::One, O::Max),
+    ];
+    let refused = |gap| {
+        Err(Unsupported::not_implemented(Feature::ExtendedRangeBlend(
+            gap,
+        )))
+    };
+    let partial = ColorWriteMask::RED.union(ColorWriteMask::ALPHA);
+    for stem in [
+        "moltenvk-m3",
+        "amd-rdna3-radv",
+        "intel-arl-anv",
+        "nvidia-rtx50-linux",
+    ] {
+        let p = profile(stem, &[]);
+        assert!(interlock_orders(&p), "{stem}");
+        for pf in [
+            PixelFormat::R16Float,
+            PixelFormat::RG16Float,
+            PixelFormat::RGBA16Float,
+        ] {
+            for math in [BlendMath::Fast, BlendMath::Rounded] {
+                let writes = ColorUse { math, ..WRITES };
+                let reads = ColorUse { math, ..READS };
+                for eq in equations {
+                    for mask in [ColorWriteMask::ALL, partial] {
+                        let what = format!("{stem} {pf:?} {math:?} {eq:?} {mask:?}");
+                        let c = descriptor(pf, eq, mask);
+                        let view = form(&of(c), false, writes, &p)
+                            .unwrap_or_else(|e| panic!("{what}: {e:?}"));
+                        assert_eq!(view.blend, BlendEquation::of(&c), "{what}");
+                        assert_eq!(view.extended, None, "{what}");
+                        let view = form(&of(c), false, reads, &p)
+                            .unwrap_or_else(|e| panic!("{what}: read: {e:?}"));
+                        assert_eq!(view.blend, None, "{what}: read");
+                    }
+                }
+                let what = format!("{stem} {pf:?} {math:?}");
+                let dual = descriptor(pf, (F::Source1Color, F::Zero, O::Add), ColorWriteMask::ALL);
+                assert_eq!(
+                    form(&of(dual), false, writes, &p),
+                    refused(ExtendedRangeBlend::DualSource),
+                    "{what}"
+                );
+                let differs = descriptor(
+                    pf,
+                    (F::BlendColor, F::OneMinusBlendColor, O::Subtract),
+                    ColorWriteMask::ALL,
+                );
+                // Under fast math too: Metal's form, the minuend's product fused, the
+                // subtrahend's rounded.
+                assert!(
+                    form(&of(differs), false, writes, &p).is_ok_and(|v| v.blend.is_some()),
+                    "{what}"
+                );
+                let replacing = descriptor(pf, (F::One, F::Zero, O::Add), ColorWriteMask::ALL);
+                let view = form(&of(replacing), false, writes, &p).expect(&what);
+                let kept_zero = math == BlendMath::Rounded;
+                let want = BlendEquation::of(&replacing).filter(|_| kept_zero);
+                assert_eq!(view.blend, want, "{what}: replacing");
+                let none = descriptor(pf, equations[0], ColorWriteMask::NONE);
+                let view = form(&of(none), false, writes, &p).expect(&what);
+                assert!(
+                    view.stores_nothing() && view.blend.is_none(),
+                    "{what}: none"
+                );
+            }
+        }
+    }
 }
 
 /// A write mask short of the format's channels keeps the others: the view names them, an empty set
@@ -594,7 +703,7 @@ fn an_extended_range_blend_follows_the_ordered_storage_form() {
         Feature::FramebufferFetch,
         Capability::Feature(VkFeature::FragmentShaderPixelInterlock),
     );
-    for stem in ["vk12-bare", "roadmap-2022"] {
+    for stem in ["vk12-floor", "roadmap-2022"] {
         let p = profile(stem, &[]);
         assert_eq!(
             extended_range_blend(PixelFormat::BGRA10XR, &p),

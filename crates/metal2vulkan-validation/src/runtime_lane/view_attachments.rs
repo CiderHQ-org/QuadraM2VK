@@ -966,17 +966,17 @@ fn a_texture_made_in_x32_stencil8_is_a_stencil_texture() {
     });
 }
 
-/// An sRGB view of a texture over a buffer renders its encoding into the buffer's texel bytes
-/// and leaves the bytes between its rows, over an ordinary and a no-copy buffer (the aliasing
-/// image or the shadow; TOB probe 1's `r.view_srgb`, and `CFB-probe1b`'s values).
-/// A render pipeline whose attachment is in a pixel format the device's Metal level describes
-/// none of is stopped, as plain Metal's descriptor validation stops it ("is not a valid
-/// MTLPixelFormat"; EV XRR2-ol4-m4 on an Apple M4 under macOS 27.0.1, the consumer's run on an
-/// M3 Max under 26.7), on every venue: a color attachment of `RGB8Unorm`, which no level
-/// describes, blended or not; a depth or a stencil attachment of `Depth24Unorm_Stencil8` or
-/// `X24_Stencil8`, which an Apple GPU has neither of, whatever the Vulkan driver has; and at
-/// macOS 26.7's level (`DeviceOptions::metal_level`) a color attachment of each of 630 to 650,
-/// blended or not, of which 27.0.1's level stops only 646 to 650.
+/// An sRGB view of a texture over a buffer renders its encoding into the buffer's texel bytes and
+/// leaves the bytes between its rows, over an ordinary and a no-copy buffer (the aliasing image or
+/// the shadow; Metal probe case `r.view_srgb` on the M3 Max and an M4, and `CFB-probe1b`'s values).
+/// A render pipeline whose attachment is in a pixel format the device's Metal level describes none
+/// of is stopped, as plain Metal's descriptor validation stops it ("is not a valid MTLPixelFormat";
+/// EV XRR2-ol4-m4 on an Apple M4 under macOS 27.0.1, the consumer's run on an M3 Max under 26.7),
+/// on every venue: a color attachment of `RGB8Unorm`, which no level describes, blended or not; a
+/// depth or a stencil attachment of `Depth24Unorm_Stencil8` or `X24_Stencil8`, which an Apple GPU
+/// has neither of, whatever the Vulkan driver has; and at macOS 26.7's level
+/// (`DeviceOptions::metal_level`) a color attachment of each of 630 to 650, blended or not, of
+/// which 27.0.1's level stops only 646 to 650.
 #[test]
 fn an_attachment_in_a_format_the_level_describes_none_of_stops_the_pipeline() {
     let messages = Messages::default();
@@ -1101,10 +1101,10 @@ fn an_srgb_view_of_a_texture_over_a_buffer_renders_its_bytes() {
     });
 }
 
-/// A `BGRA8Unorm` view of an `RGBA8Unorm` texture made without `PixelFormatView` usage, which
-/// plain Metal makes and presents frames through (its API validation stops it; RT5 probes 1 and
-/// 2): a draw through the view, red cleared and blue drawn, stores `BGRA8Unorm`'s bytes in the
-/// texture, and a present-like blit of the view into a `BGRA8Unorm` texture copies them; for an
+/// A `BGRA8Unorm` view of an `RGBA8Unorm` texture made without `PixelFormatView` usage, which plain
+/// Metal makes and presents frames through (its API validation stops it; Metal probes on the M3 Max
+/// and the M4): a draw through the view, red cleared and blue drawn, stores `BGRA8Unorm`'s bytes in
+/// the texture, and a present-like blit of the view into a `BGRA8Unorm` texture copies them; for an
 /// ordinary texture, and for a texture over an ordinary and a no-copy buffer (the consumer's
 /// frame), whose bytes between rows stay.
 #[test]

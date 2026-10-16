@@ -19,8 +19,8 @@
 //!   Before, it was a `vkQueueSubmit` of its own, a second kernel submission listing every buffer
 //!   object of the device on ANV over i915.
 //! - **Fences.** Command buffers that each end in one submission complete at their fences where
-//!   the driver reads their objects after their values (MoltenVK): the completion thread waits
-//!   for no timeline value; before, it waited for one each, which MoltenVK wakes through a shared
+//!   the driver reads their objects after their values (MoltenVK): the queues' waiters wait
+//!   for no timeline value; before, they waited for one each, which MoltenVK wakes through a shared
 //!   event's listener. Elsewhere they end at their values, and the device makes no fence for
 //!   them; before, each commit could make one, which NVIDIA's driver held for up to 1.9 s while
 //!   other processes' work ran.
@@ -33,18 +33,35 @@
 //!   Previously a pool given back past the spares (or that made more than 64 command buffers) was
 //!   destroyed as its command buffer completed, where NVIDIA 615.71.09's `vkDestroyCommandPool`
 //!   intermittently never returned.
+//! - **The end in the work.** A batch that signals no event ends in its last command buffer: the
+//!   barrier to the host (and a timed command buffer's end timestamp) go there as the batch
+//!   ends, and its submission holds no end of its own (`WorkCounts::finales_folded`); before, each
+//!   batch's end was a command buffer of its own, about 9 us of GPU time on an Iris Xe. A batch
+//!   that signals an event keeps its end apart (`WorkCounts::finales_apart`). The host reads what
+//!   either wrote once it completed.
+//! - **Completed work, waited for.** A batch's submission waits for each timeline whose
+//!   completed value the host saw move since a batch of its `VkQueue` last waited for it, each
+//!   queue's and the device's own (`WorkCounts::completed_waits`), which makes what completed
+//!   work wrote visible to it. A batch with nothing planned before its first encoder and no start
+//!   timestamp to write then begins with no command buffer of barriers
+//!   (`WorkCounts::bare_starts`); before, each began with one that made completed work's writes
+//!   visible, about 12 us of GPU time on an Iris Xe. Where the driver's submissions stall on
+//!   semaphore operations (`DriverFact::SemaphoreOperationsStallSubmits`) each still begins with
+//!   that command buffer and waits for nothing completed. Copies read what completed fills on
+//!   another command queue and a host copy into a texture wrote.
 //! - **Addressable buffers**. The program's buffers take their device addresses from their memory
 //!   blocks, so making them makes no buffer with the device-address usage beyond a new block's;
 //!   before, each was one, which MoltenVK made resident one by one in every encoder whose pipeline
 //!   reads pointers (2.5 ms a commit at 32768 live buffers on an Apple M4).
 
-use super::degrade_notices::on_device;
+use super::degrade_notices::{on_device, on_device_with};
 use super::{bound_buffers, encode_case, pipeline_state, public_case, CaseResources, WAIT};
+use metal2vulkan::device::DriverFact;
 use metal2vulkan::error::RuntimeDriverDefect;
 use metal2vulkan::metal::{PixelFormat, TextureUsage};
 use metal2vulkan_runtime::{
-    Buffer, CommandBuffer, CommandBufferStatus, CommandQueue, Device, ResourceOptions,
-    TextureDescriptor,
+    BlitOption, Buffer, CommandBuffer, CommandBufferStatus, CommandQueue, Device, EventRef, Origin,
+    Region, ResourceOptions, Size, TextureDescriptor,
 };
 
 /// A kernel whose root table searches the device's live buffers: its pointer walk reaches
@@ -227,11 +244,166 @@ fn fills_across_rounds_reuse_a_bounded_set_of_command_pools() {
     });
 }
 
+/// The bytes of `buffer`, a shared one no command buffer uses now.
+fn bytes(buffer: &Buffer) -> Vec<u8> {
+    let contents = buffer.contents().expect("a shared buffer");
+    // SAFETY: the buffer holds `length` bytes at `contents`, alive with the buffer; no command
+    // buffer uses it now.
+    unsafe { std::slice::from_raw_parts(contents.as_ptr(), buffer.length() as usize) }.to_vec()
+}
+
+/// A fill's batch ends in the fill's own command buffer, and one that signals an event in a
+/// command buffer of its own (the module docs): the host reads each fill once it completed.
+#[test]
+fn a_batch_ends_in_its_last_command_buffer_unless_it_signals_an_event() {
+    on_device(|device, _| {
+        let queue = device.new_command_queue().unwrap();
+        let buffer = device.new_buffer(4096, ResourceOptions::shared()).unwrap();
+        // The first takes any first work the device's creation left.
+        finish(&fill(&queue, &buffer));
+        let filled = |byte: u8, signal: Option<u64>| {
+            let command_buffer = queue.command_buffer().unwrap();
+            let mut blit = command_buffer.blit_command_encoder().unwrap();
+            blit.fill_buffer(&buffer, 0..buffer.length(), byte).unwrap();
+            blit.end_encoding().unwrap();
+            let event = device.new_event().unwrap();
+            if let Some(value) = signal {
+                command_buffer
+                    .encode_signal_event(EventRef::from(&event), value)
+                    .unwrap();
+            }
+            let before = device.work_counts();
+            finish(&command_buffer);
+            let after = device.work_counts();
+            assert!(bytes(&buffer).iter().all(|&b| b == byte), "{byte:#x}");
+            (
+                after.finales_folded - before.finales_folded,
+                after.finales_apart - before.finales_apart,
+            )
+        };
+        assert_eq!(filled(0x11, None), (1, 0), "a fill");
+        assert_eq!(
+            filled(0x22, Some(1)),
+            (0, 1),
+            "a fill that signals an event"
+        );
+        assert_eq!(filled(0x33, None), (1, 0), "a fill after it");
+    });
+}
+
+/// On a device made with `gpu_times_from_host`, whose command buffers write no start timestamp, a
+/// batch with nothing planned before its first encoder begins with no command buffer of barriers,
+/// and its submission waits for the timelines the host saw complete (the module docs): fills on
+/// one command queue and copies of what each wrote on another each start bare and wait at least
+/// once, and each copy reads its fill's bytes. Where the driver's submissions stall on semaphore
+/// operations (`DriverFact::SemaphoreOperationsStallSubmits`), each instead begins with a
+/// command buffer of barriers and waits for nothing completed, and reads the same bytes. A copy
+/// out of a texture after `replace_region`, which may be the device's own submission or the
+/// staging queue's, reads its bytes.
+#[test]
+fn batches_with_nothing_planned_wait_for_completed_work_instead_of_a_barrier() {
+    on_device_with(
+        |options| options.gpu_times_from_host = true,
+        |device, _| {
+            let by_barrier = device
+                .properties()
+                .driver_facts
+                .contains(&DriverFact::SemaphoreOperationsStallSubmits);
+            // Bare starts and at least one wait each, or none of either.
+            let form = |what: &str, (bare, waits): (u64, u64)| match by_barrier {
+                false => {
+                    assert_eq!(bare, 1, "{what}: a bare start");
+                    assert!(waits >= 1, "{what}: {waits} waits for completed work");
+                }
+                true => assert_eq!((bare, waits), (0, 0), "{what}: a barrier, no wait"),
+            };
+            let filling = device.new_command_queue().unwrap();
+            let copying = device.new_command_queue().unwrap();
+            let source = device.new_buffer(4096, ResourceOptions::private()).unwrap();
+            let read = device.new_buffer(4096, ResourceOptions::shared()).unwrap();
+            // The first takes any first work the device's creation left, and each buffer's.
+            finish(&fill(&filling, &source));
+            finish(&fill(&copying, &read));
+            // The batches each began bare, and the waits for completed work they held.
+            let counted = |command_buffer: CommandBuffer| {
+                let before = device.work_counts();
+                finish(&command_buffer);
+                let after = device.work_counts();
+                (
+                    after.bare_starts - before.bare_starts,
+                    after.completed_waits - before.completed_waits,
+                )
+            };
+            for round in 0..4u8 {
+                let byte = 0x10 + round;
+                let command_buffer = filling.command_buffer().unwrap();
+                let mut blit = command_buffer.blit_command_encoder().unwrap();
+                blit.fill_buffer(&source, 0..source.length(), byte).unwrap();
+                blit.end_encoding().unwrap();
+                form(&format!("fill {round}"), counted(command_buffer));
+                let command_buffer = copying.command_buffer().unwrap();
+                let mut blit = command_buffer.blit_command_encoder().unwrap();
+                blit.copy_from_buffer_to_buffer(&source, 0, &read, 0, source.length())
+                    .unwrap();
+                blit.end_encoding().unwrap();
+                form(&format!("copy {round}"), counted(command_buffer));
+                assert!(
+                    bytes(&read).iter().all(|&b| b == byte),
+                    "copy {round}: the fill's {byte:#x}"
+                );
+            }
+            // A host copy into a texture, then a copy out of it.
+            const SIDE: u64 = 16;
+            let mut descriptor =
+                TextureDescriptor::texture_2d(PixelFormat::RGBA8Unorm, SIDE, SIDE, false);
+            descriptor.usage = TextureUsage::SHADER_READ;
+            let texture = device.new_texture(&descriptor).unwrap();
+            let texels: Vec<u8> = (0..SIDE * SIDE * 4).map(|i| (i * 7 % 251) as u8).collect();
+            let before = device.work_counts();
+            texture
+                .replace_region(Region::new_2d(0, 0, SIDE, SIDE), 0, 0, &texels, SIDE * 4, 0)
+                .unwrap();
+            let command_buffer = copying.command_buffer().unwrap();
+            let mut blit = command_buffer.blit_command_encoder().unwrap();
+            blit.copy_from_texture_to_buffer(
+                &texture,
+                0,
+                0,
+                Origin::new(0, 0, 0),
+                Size::new(SIDE, SIDE, 1),
+                &read,
+                0,
+                SIDE * 4,
+                0,
+                BlitOption::None,
+            )
+            .unwrap();
+            blit.end_encoding().unwrap();
+            finish(&command_buffer);
+            let after = device.work_counts();
+            eprintln!(
+                "COMPLETED-WAITS {}: a host copy into a texture: {} internal submissions, {} \
+                 staging ones; the copy out: {} bare starts, {} waits for completed work",
+                device.name(),
+                after.internal_submissions - before.internal_submissions,
+                after.staging_submissions - before.staging_submissions,
+                after.bare_starts - before.bare_starts,
+                after.completed_waits - before.completed_waits,
+            );
+            assert_eq!(
+                &bytes(&read)[..texels.len()],
+                &texels[..],
+                "the texture's bytes"
+            );
+        },
+    );
+}
+
 /// Command buffers that each end in one submission, empty or of a blit, complete at their
 /// fences where the driver reads a command buffer's objects after its value
-/// (`RuntimeDriverDefect::ReadsCommandBuffersAfterTheirSignal`): the completion thread waits for
+/// (`RuntimeDriverDefect::ReadsCommandBuffersAfterTheirSignal`): the queues' waiters wait for
 /// no timeline value. Elsewhere they end at their values alone: the device makes no fence for
-/// any of them, from its creation on, and the completion thread waits for their values.
+/// any of them, from its creation on, and the queues' waiters wait for their values.
 #[test]
 fn command_buffers_end_at_fences_only_where_the_driver_reads_them_later() {
     on_device(|device, _| {

@@ -177,45 +177,42 @@ unsafe impl vk::TaggedStructure for DepthClampControlCreateInfo {
 unsafe impl vk::ExtendsPipelineViewportStateCreateInfo for DepthClampControlCreateInfo {}
 
 impl FixedState {
-    /// `state` with what `dynamic` (the pipeline's dynamic states) covers left out.
+    /// `state` with what `dynamic` (the pipeline's dynamic states) covers left out, in one pass
+    /// over `dynamic`.
     pub(crate) fn without_dynamic(
         state: FixedState,
         dynamic: &[metal2vulkan::vk::DynamicState],
     ) -> FixedState {
-        use metal2vulkan::vk::DynamicState as D;
-        let has = |s: D| dynamic.contains(&s);
+        use metal2vulkan::vk::{CompareOp, CullModeFlags, DynamicState as D, FrontFace, StencilOp};
         let mut fixed = state;
-        if has(D::CULL_MODE) {
-            fixed.cull_mode = metal2vulkan::vk::CullModeFlags::NONE;
-        }
-        if has(D::FRONT_FACE) {
-            fixed.front_face = metal2vulkan::vk::FrontFace::COUNTER_CLOCKWISE;
-        }
         let ds = &mut fixed.depth_stencil;
-        if has(D::DEPTH_TEST_ENABLE) {
-            ds.depth_test_enable = false;
-        }
-        if has(D::DEPTH_WRITE_ENABLE) {
-            ds.depth_write_enable = false;
-        }
-        if has(D::DEPTH_COMPARE_OP) {
-            ds.depth_compare_op = metal2vulkan::vk::CompareOp::NEVER;
-        }
-        if has(D::STENCIL_TEST_ENABLE) {
-            ds.stencil_test_enable = false;
-        }
-        for face in [&mut ds.front, &mut ds.back] {
-            if has(D::STENCIL_OP) {
-                face.fail_op = metal2vulkan::vk::StencilOp::KEEP;
-                face.pass_op = metal2vulkan::vk::StencilOp::KEEP;
-                face.depth_fail_op = metal2vulkan::vk::StencilOp::KEEP;
-                face.compare_op = metal2vulkan::vk::CompareOp::NEVER;
-            }
-            if has(D::STENCIL_COMPARE_MASK) {
-                face.compare_mask = 0;
-            }
-            if has(D::STENCIL_WRITE_MASK) {
-                face.write_mask = 0;
+        for &s in dynamic {
+            match s {
+                D::CULL_MODE => fixed.cull_mode = CullModeFlags::NONE,
+                D::FRONT_FACE => fixed.front_face = FrontFace::COUNTER_CLOCKWISE,
+                D::DEPTH_TEST_ENABLE => ds.depth_test_enable = false,
+                D::DEPTH_WRITE_ENABLE => ds.depth_write_enable = false,
+                D::DEPTH_COMPARE_OP => ds.depth_compare_op = CompareOp::NEVER,
+                D::STENCIL_TEST_ENABLE => ds.stencil_test_enable = false,
+                D::STENCIL_OP => {
+                    for face in [&mut ds.front, &mut ds.back] {
+                        face.fail_op = StencilOp::KEEP;
+                        face.pass_op = StencilOp::KEEP;
+                        face.depth_fail_op = StencilOp::KEEP;
+                        face.compare_op = CompareOp::NEVER;
+                    }
+                }
+                D::STENCIL_COMPARE_MASK => {
+                    for face in [&mut ds.front, &mut ds.back] {
+                        face.compare_mask = 0;
+                    }
+                }
+                D::STENCIL_WRITE_MASK => {
+                    for face in [&mut ds.front, &mut ds.back] {
+                        face.write_mask = 0;
+                    }
+                }
+                _ => {}
             }
         }
         fixed
@@ -279,6 +276,10 @@ pub(crate) struct GraphicsContent {
     patch_control_points: Option<u32>,
     /// A mesh pipeline: no vertex input and no input assembly.
     meshes: bool,
+    /// The pipeline reads textures its pass renders through snapshots
+    /// (`GraphicsState::snapshot_reads`, `render/snapshot.rs`): made whole, with
+    /// `VK_PIPELINE_CREATE_COLOR_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT`.
+    feedback_loop: bool,
 }
 
 /// One stage of a [`GraphicsContent`]: its index among the variant's modules, its flags, its
@@ -332,12 +333,15 @@ pub(crate) struct Infos<'a> {
     layout: vk::PipelineLayout,
     render_pass: vk::RenderPass,
     meshes: bool,
+    /// The whole pipeline's flags ([`GraphicsContent::feedback_loop`]).
+    flags: vk::PipelineCreateFlags,
 }
 
 impl<'a> Infos<'a> {
     /// The whole pipeline's create info.
     fn whole(&self) -> vk::GraphicsPipelineCreateInfo<'a> {
         let mut info = vk::GraphicsPipelineCreateInfo::default()
+            .flags(self.flags)
             .stages(self.stages)
             .viewport_state(self.viewport)
             .rasterization_state(self.raster)
@@ -407,9 +411,12 @@ impl<'a> Infos<'a> {
 
 impl GraphicsContent {
     /// Whether its pipeline links from the four libraries: one with vertex input that rasterizes
-    /// (a mesh pipeline, or one that discards every primitive, is made whole).
+    /// (a mesh pipeline, or one that discards every primitive, is made whole), and that reads no
+    /// texture through a snapshot, whose creation flag is made whole too ([`feedback_loop`]).
+    ///
+    /// [`feedback_loop`]: GraphicsContent::feedback_loop
     pub(crate) fn links(&self) -> bool {
-        !self.meshes && !self.rasterizer_discard
+        !self.meshes && !self.rasterizer_discard && !self.feedback_loop
     }
 
     /// The digest of each part's state, in [`Part::ALL`]'s order: the names of its libraries
@@ -660,8 +667,70 @@ impl GraphicsContent {
             layout: objects.layout(),
             render_pass,
             meshes: self.meshes,
+            // A draw of the pipeline samples a color attachment of its subpass in the feedback
+            // loop layout, which "For every image aspect accessed with feedback loops" requires:
+            // "The feedback loop attachment is a color attachment, and the bound pipeline was
+            // created with VK_PIPELINE_CREATE_COLOR_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT" (the Render
+            // Pass chapter, feedback loops). The device enabled `attachmentFeedbackLoopLayout`
+            // wherever a draw asks for the variant (`render/snapshot.rs`).
+            flags: match self.feedback_loop {
+                true => vk::PipelineCreateFlags::COLOR_ATTACHMENT_FEEDBACK_LOOP_EXT,
+                false => vk::PipelineCreateFlags::empty(),
+            },
         })
     }
+}
+
+/// The write mask and blend state of each element of the color blend state of a pipeline of
+/// `graphics` made against `pass`, one per location of the draws' subpass
+/// (`PassShape::subpass_colors`). An absent attachment's element is the artifact's too: identical
+/// to the others on a device without `independentBlend`. A color of the pipeline past the pass's
+/// has no element: the pass lacks it, and its output is dropped, as plain Metal drops it (a Metal
+/// probe). A location the pipeline has no color at that references a pass color the draw keeps
+/// writes nothing and blends nothing: the fragment function has no output there, whose value
+/// Vulkan leaves undefined (lavapipe blended and stored one). The check of the state refuses it on
+/// a device without `independentBlend` where the others differ (`render.rs`).
+fn blend_elements(
+    graphics: &metal2vulkan::pipeline::GraphicsState,
+    pass: &PassShape,
+) -> Vec<(
+    metal2vulkan::vk::ColorComponentFlags,
+    Option<metal2vulkan::pipeline::BlendState>,
+)> {
+    let elements = graphics.color_blend_attachments();
+    let absent = graphics.color_attachments.iter().flatten().next().map_or(
+        (metal2vulkan::vk::ColorComponentFlags::empty(), None),
+        |a| (a.write_mask, a.blend),
+    );
+    let untouched = (metal2vulkan::vk::ColorComponentFlags::empty(), None);
+    (0..pass.subpass_colors())
+        .map(|location| {
+            let own = graphics.color_attachments.get(location).copied().flatten();
+            match own.is_none() && pass.references(location as u32) {
+                true => untouched,
+                false => elements.get(location).copied().unwrap_or(absent),
+            }
+        })
+        .collect()
+}
+
+/// The color write mask of each element of the color blend state of a pipeline of `graphics`
+/// made against `pass` ([`blend_elements`]), every one empty where the draw `masks_color`
+/// (`FixedState::masks_color`): what a pipeline that makes the masks dynamic
+/// (`GraphicsState::snapshot_reads`) takes from the draw that writes as the pipeline would
+/// (`render/snapshot.rs`), one per location of the draws' subpass.
+pub(crate) fn color_write_masks(
+    graphics: &metal2vulkan::pipeline::GraphicsState,
+    pass: &PassShape,
+    masks_color: bool,
+) -> Vec<vk::ColorComponentFlags> {
+    blend_elements(graphics, pass)
+        .into_iter()
+        .map(|(write_mask, _)| match masks_color {
+            true => vk::ColorComponentFlags::empty(),
+            false => write_mask.into(),
+        })
+        .collect()
 }
 
 impl VariantObjects {
@@ -726,13 +795,17 @@ impl VariantObjects {
             })
             .collect();
         // An emulated object or mesh function's compute stage runs in its own pipeline
-        // (`mesh_pipelines`).
+        // (`mesh_pipelines`), and of a pipeline's barycentric geometry stages only its draw's
+        // class's runs (`RenderPipeline::runs_stage`).
         let stages = pipeline
             .stages
             .iter()
             .zip(&self.stages)
             .enumerate()
-            .filter(|(_, (_, object))| object.stage != vk::ShaderStageFlags::COMPUTE)
+            .filter(|(at, (_, object))| {
+                object.stage != vk::ShaderStageFlags::COMPUTE
+                    && pipeline.runs_stage(*at, key.topology)
+            })
             .map(|(at, (stage, _))| StageState {
                 at,
                 flags: stage.stage_flags.into(),
@@ -764,50 +837,29 @@ impl VariantObjects {
                 .compare_mask(ops.compare_mask)
                 .write_mask(ops.write_mask)
         };
-        // An absent attachment's element is the artifact's too: identical to the others on a
-        // device without `independentBlend`. A color of the pipeline past the pass's has no
-        // element: the pass lacks it, and its output is dropped, as plain Metal drops it (a Metal
-        // probe). One element per location of the draws' subpass (`PassShape::subpass_colors`). A
-        // location the pipeline has no color at that references a pass color the draw keeps
-        // writes nothing and blends nothing: the fragment function has no output there, whose
-        // value Vulkan leaves undefined (lavapipe blended and stored one). The check of the
-        // state refuses it on a device without `independentBlend` where the others differ
-        // (`render.rs`).
-        let subpass_colors = key.pass.subpass_colors();
-        let elements = graphics.color_blend_attachments();
-        let absent = graphics.color_attachments.iter().flatten().next().map_or(
-            (metal2vulkan::vk::ColorComponentFlags::empty(), None),
-            |a| (a.write_mask, a.blend),
-        );
-        let untouched = (metal2vulkan::vk::ColorComponentFlags::empty(), None);
-        let blends: Vec<vk::PipelineColorBlendAttachmentState> = (0..subpass_colors)
-            .map(|location| {
-                let own = graphics.color_attachments.get(location).copied().flatten();
-                match own.is_none() && key.pass.references(location as u32) {
-                    true => untouched,
-                    false => elements.get(location).copied().unwrap_or(absent),
-                }
-            })
-            .map(|(write_mask, state)| {
-                let write_mask = match key.fixed.masks_color {
-                    true => vk::ColorComponentFlags::empty(),
-                    false => write_mask.into(),
-                };
-                let blend =
-                    vk::PipelineColorBlendAttachmentState::default().color_write_mask(write_mask);
-                match state {
-                    None => blend,
-                    Some(b) => blend
-                        .blend_enable(true)
-                        .src_color_blend_factor(b.src_color.into())
-                        .dst_color_blend_factor(b.dst_color.into())
-                        .color_blend_op(b.color_op.into())
-                        .src_alpha_blend_factor(b.src_alpha.into())
-                        .dst_alpha_blend_factor(b.dst_alpha.into())
-                        .alpha_blend_op(b.alpha_op.into()),
-                }
-            })
-            .collect();
+        // One element per location of the draws' subpass ([`blend_elements`]), each with its
+        // write mask ([`color_write_masks`]).
+        let masks = color_write_masks(graphics, &key.pass, key.fixed.masks_color);
+        let blends: Vec<vk::PipelineColorBlendAttachmentState> =
+            blend_elements(graphics, &key.pass)
+                .into_iter()
+                .zip(masks)
+                .map(|((_, state), write_mask)| {
+                    let blend = vk::PipelineColorBlendAttachmentState::default()
+                        .color_write_mask(write_mask);
+                    match state {
+                        None => blend,
+                        Some(b) => blend
+                            .blend_enable(true)
+                            .src_color_blend_factor(b.src_color.into())
+                            .dst_color_blend_factor(b.dst_color.into())
+                            .color_blend_op(b.color_op.into())
+                            .src_alpha_blend_factor(b.src_alpha.into())
+                            .dst_alpha_blend_factor(b.dst_alpha.into())
+                            .alpha_blend_op(b.alpha_op.into()),
+                    }
+                })
+                .collect();
         // In a pass whose draws fetch through input attachments every pipeline orders its color
         // attachment accesses by rasterization (`framebuffer_fetch.rs`), so a fetch reads what an
         // earlier fragment of any pipeline wrote.
@@ -868,6 +920,7 @@ impl VariantObjects {
                 .stages
                 .iter()
                 .any(|stage| stage.stage == metal2vulkan::vk::ShaderStage::MESH_EXT),
+            feedback_loop: graphics.snapshot_reads,
         })
     }
 
@@ -913,9 +966,20 @@ impl VariantObjects {
                 fact.pipeline_creation_diagnostic(&graphics.dynamic_states, key.topology)
             })
             .collect();
-        // The turn first (none where a piece's thread holds one): the driver's time alone is
-        // timed, not the wait for a turn.
-        let turn = super::budget::program_turn();
+        // The turn first (none where a piece's thread holds one), once no twin's making is in the
+        // air (`flight.rs`): the driver's time alone is timed, not the wait for a turn or a twin.
+        // A pipeline linked from libraries shares its parts' makings already.
+        let (turn, leader) = match libraries {
+            None => {
+                let (turn, leader, followed) =
+                    shared.flights.board(self.flight(&key.specialization));
+                if followed {
+                    shared.counts.flight_followed();
+                }
+                (turn, Some(leader))
+            }
+            Some(_) => (super::budget::program_turn(), None),
+        };
         let started = std::time::Instant::now();
         let (created, withheld) = crate::driver_facts::expecting(expected, || {
             content.with_infos(self, render_pass.raw, |infos| match libraries {
@@ -955,6 +1019,7 @@ impl VariantObjects {
         shared.counts.driver_diagnostics_withheld(withheld);
         let (raw, linked) = created?;
         let created_in = started.elapsed();
+        drop(leader);
         drop(turn);
         shared.counts.variant_pipeline_made();
         if driver_reports {

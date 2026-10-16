@@ -143,6 +143,8 @@ pub struct KernMeta {
     /// Every resource-handle member carried by an `air.indirect_buffer`, including handles whose
     /// concrete kind is supplied by an authored manifest and verified from its AIR use.
     pub embedded_arguments: Vec<EmbeddedArgument>,
+    /// What an object or mesh entry declares beyond a kernel's parameters (empty for a kernel).
+    pub mesh_stage: MeshStageMeta,
     /// Resource handles an argument buffer declares inside a nested `air.struct_type_info` member,
     /// which the embedded-argument walk does not surface. Non-empty means every texture operation on
     /// an unrecovered handle has to refuse rather than take the "resource is absent" path -- see
@@ -250,9 +252,20 @@ impl KernMeta {
 
 /// Parse kernel metadata and its entry name from one AIR metadata-node table.
 pub fn parse_air_kernel_meta(ll: &str) -> (Option<KernMeta>, Option<String>) {
+    parse_air_compute_like_meta(ll, Stage::Kernel)
+}
+
+/// Parse an object or mesh entry's metadata and its entry name: a kernel's parameters, with the
+/// roles of its own stage in [`KernMeta::mesh_stage`].
+pub fn parse_air_mesh_stage_meta(ll: &str, stage: Stage) -> (Option<KernMeta>, Option<String>) {
+    debug_assert!(stage.is_mesh_pipeline_stage());
+    parse_air_compute_like_meta(ll, stage)
+}
+
+fn parse_air_compute_like_meta(ll: &str, stage: Stage) -> (Option<KernMeta>, Option<String>) {
     let nodes = collect_nodes(ll);
-    let entry = entry_name_from_nodes(ll, "kernel", &nodes);
-    let meta = parse_air_kernel_meta_with_nodes(ll, &nodes, entry.as_deref());
+    let entry = entry_name_from_nodes(ll, stage.entry_list(), &nodes);
+    let meta = parse_air_kernel_meta_with_nodes(ll, &nodes, entry.as_deref(), stage);
     (meta, entry)
 }
 
@@ -260,10 +273,11 @@ fn parse_air_kernel_meta_with_nodes(
     ll: &str,
     nodes: &HashMap<u32, String>,
     entry: Option<&str>,
+    stage: Stage,
 ) -> Option<KernMeta> {
     #[cfg(test)]
     KERNEL_META_DECODE_COUNT.with(|count| count.set(count.get() + 1));
-    let root = stage_root(ll, "kernel")?;
+    let root = stage_root(ll, stage.entry_list())?;
     let rootc = nodes.get(&root)?;
     let static_int_globals = static_init_int_global_values(ll);
     let resource_location =
@@ -276,9 +290,13 @@ fn parse_air_kernel_meta_with_nodes(
     let in_ref = *refs.get(1)?;
     let mut max_work_group_size = None;
     let mut unmodelled_stage_attributes = vec![];
+    let mut mesh_stage = MeshStageMeta::default();
     for attribute in stage_root_attributes(rootc, nodes) {
         match attribute {
             StageAttribute::MaxWorkGroupSize(size) => max_work_group_size = Some(size),
+            StageAttribute::MaxMeshWorkGroups(count) if stage == Stage::Object => {
+                mesh_stage.max_mesh_work_groups = Some(count)
+            }
             other => unmodelled_stage_attributes.push(other.describe()),
         }
     }
@@ -328,12 +346,16 @@ fn parse_air_kernel_meta_with_nodes(
         let first = present_gated_buffer_role(first, &strs, node, nodes, &static_int_globals);
         let first = present_system_value_role(first, node, nodes, &static_int_globals);
         if let Some(declared) = unmodelled_declared_role(
-            |role| air_input_role_is_modelled(Stage::Kernel, role),
+            |role| air_input_role_is_modelled(stage, role),
             node,
             nodes,
             &static_int_globals,
         ) {
             unmodelled_input_params.push((idx, declared));
+        }
+        if stage.is_mesh_pipeline_stage() && mesh_stage.record(first, idx, node, nodes) {
+            roles.push((idx, KernRole::Other));
+            continue;
         }
         let role = match first {
             "buffer" | "indirect_buffer" => {
@@ -425,10 +447,11 @@ fn parse_air_kernel_meta_with_nodes(
             // that rewrite the wrapped role is unreadable -- so the demotion above never runs and
             // this is the only place the fact survives.
             _ if declares_disabled_texture(&strs) => KernRole::VariantAbsentTexture,
-            other => stage_execution_group_role(Stage::Kernel, other).map_or(
-                KernRole::Other,
-                |(fact, lanes)| KernRole::ExecutionGroup { fact, lanes },
-            ),
+            other => {
+                stage_execution_group_role(stage, other).map_or(KernRole::Other, |(fact, lanes)| {
+                    KernRole::ExecutionGroup { fact, lanes }
+                })
+            }
         };
         roles.push((idx, role));
     }
@@ -461,7 +484,6 @@ fn parse_air_kernel_meta_with_nodes(
             implicit_imageblock_attachments.push(ImplicitImageblockAttachment {
                 attachment: plane.attachment,
                 data_rate: 0,
-                max_index: Some(0),
                 format: plane.format,
                 reads: true,
                 writes: true,
@@ -491,5 +513,6 @@ fn parse_air_kernel_meta_with_nodes(
         embedded_textures,
         embedded_arguments,
         unsurfaced_embedded_resources: unsurfaced,
+        mesh_stage,
     })
 }

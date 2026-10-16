@@ -1,4 +1,4 @@
-// Owned fixture (WP-A4, DESIGN D213): textures of an argument buffer (the D38 heap): a read, a
+// Owned fixture: textures of an argument buffer (its heap): a read, a
 // size query, a null test, and a write (`access.handle.lookup`, `texture.read.heap`,
 // `texture.query.heap`, `texture.is_null.heap`, `texture.write.heap`). The argument buffer holds a
 // sampled texture and a storage texture. Thread g writes texel g of the sampled texture plus

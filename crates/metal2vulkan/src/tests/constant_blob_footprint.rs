@@ -86,7 +86,7 @@ unsafe impl GlobalAlloc for Counting {
 static ALLOCATOR: Counting = Counting;
 
 /// `work`'s result, and the most bytes it held at once beyond what was live when it started.
-fn held_during<T>(work: impl FnOnce() -> T) -> (T, u64) {
+pub(crate) fn held_during<T>(work: impl FnOnce() -> T) -> (T, u64) {
     LIVE.store(0, Ordering::Relaxed);
     PEAK.store(0, Ordering::Relaxed);
     ALLOCATIONS.store(0, Ordering::Relaxed);

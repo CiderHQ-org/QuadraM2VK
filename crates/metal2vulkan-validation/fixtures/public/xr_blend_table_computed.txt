@@ -1,10 +1,10 @@
-# WP-XRB's extended-range blend table of a computed float4 output under fast math (DESIGN D760;
-# D678 item 7's table, metal2vulkan-devtools `xr_blends`). Metal's answers: EV XRB-xrtc-m4, plain
-# Metal on an Apple M4 under macOS 27.0.1 (26A434), the lane-table probe's configurations with its
-# float4 output computed as the source times a loaded vector of ones (whole-vector arithmetic over
-# loads), our own probe over synthetic inputs, each into its own 64 x 4 band of every case's target
-# (the same 256 raw texels and outputs in every band) under its scissor and blend color, in one
-# pass that loads and stores it. The configurations and inputs are xr_blend_table.txt's.
+# The extended-range blend table of a computed float4 output under fast math (the blend table's
+# configurations, metal2vulkan-devtools `xr_blends`). Metal's answers: EV XRB-xrtc-m4, plain Metal
+# on an Apple M4 under macOS 27.0.1 (26A434), the lane-table probe's configurations with its float4
+# output computed as the source times a loaded vector of ones (whole-vector arithmetic over loads),
+# our own probe over synthetic inputs, each into its own 64 x 4 band of every case's target (the
+# same 256 raw texels and outputs in every band) under its scissor and blend color, in one pass that
+# loads and stores it. The configurations and inputs are xr_blend_table.txt's.
 #   cfg <index> <source rgb> <destination rgb> <rgb op> <source alpha> <destination alpha>
 #       <alpha op> <write mask> <blend color: 4 f32 bits>      (Metal's enum numbers)
 #   inputs <format> f <FNV-1a 64 of a band's plane 0> <of its alpha bytes> <of its outputs>

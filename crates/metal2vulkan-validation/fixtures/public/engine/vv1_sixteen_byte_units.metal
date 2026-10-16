@@ -1,8 +1,8 @@
-// Owned fixture (WP-VV1, DESIGN D220): 16-byte buffer leaves aligned to 16, moved as `uvec4`s.
+// Owned fixture: 16-byte buffer leaves aligned to 16, moved as `uvec4`s.
 // The `uint4` loads of `w` and `src` and the stores to `out` lie at bytes 32 and up of their
 // buffers, so the binder's descriptor ranges start 32 bytes in where the device's offset alignment
-// is 16 and those leaves sit at a nonzero residual (D220.1, D220.3); the struct assignment is a
-// 64-byte `align 16` copy from a `constant` buffer to `out[4..8]` (D220.5). One thread writes
+// is 16 and those leaves sit at a nonzero residual; the struct assignment is a
+// 64-byte `align 16` copy from a `constant` buffer to `out[4..8]`. One thread writes
 // out[2] = (src[2] & w.mask) + w.bias, out[3] = src[3] ^ w.bias, and out[4 + i] = rows.r[i].
 // Loop-free.
 #include <metal_stdlib>

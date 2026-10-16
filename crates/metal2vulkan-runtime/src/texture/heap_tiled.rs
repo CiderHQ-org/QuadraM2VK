@@ -137,6 +137,7 @@ use super::super::values::{CpuCacheMode, HazardTrackingMode, ResourceOptions, St
 use super::super::Device;
 use super::copy_units;
 use super::heap::HeapPlane;
+use crate::device::functions::Vk;
 use ash::vk;
 use metal2vulkan::bind::{TiledLevelMove, TiledTexelsModule};
 use metal2vulkan::metal::format::{byte_format, is_depth_stencil, srgb_raw_twin};
@@ -1330,7 +1331,7 @@ impl HeapTiledCopies {
     ///
     /// `command_buffer` is recording, outside a render pass, with every write the dispatch
     /// reads made visible to it; the buffers and the sets are live until it completes.
-    unsafe fn dispatch(&self, device: &ash::Device, command_buffer: vk::CommandBuffer, into: bool) {
+    unsafe fn dispatch(&self, device: &Vk, command_buffer: vk::CommandBuffer, into: bool) {
         let (step, set) = match into {
             true => (&self.moves[0], self.sets.sets[0]),
             false => (&self.moves[1], self.sets.sets[1]),
@@ -1367,7 +1368,7 @@ impl HeapTiledCopies {
     /// sets are live until it completes, and the image rests in `GENERAL`.
     pub(crate) unsafe fn record(
         &self,
-        device: &ash::Device,
+        device: &Vk,
         command_buffer: vk::CommandBuffer,
         image: vk::Image,
         (bytes, staging): (vk::Buffer, &ShadowStaging),
@@ -1415,7 +1416,7 @@ impl HeapTiledCopies {
     /// As `record`; `to` holds the texture's bytes from `at`, a multiple of 4.
     pub(crate) unsafe fn record_out(
         &self,
-        device: &ash::Device,
+        device: &Vk,
         command_buffer: vk::CommandBuffer,
         image: vk::Image,
         staging: &ShadowStaging,

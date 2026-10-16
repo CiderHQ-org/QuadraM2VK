@@ -1,4 +1,4 @@
-// Owned fixture (WP-ICBV, DESIGN D336 item 4): a kernel that copies compute commands between
+// Owned fixture: a kernel that copies compute commands between
 // three indirect command buffers: `source`, whose commands the host encodes; `commands`, of the
 // same descriptor; and `inheriting`, which inherits its pipeline and buffers. Thread `tid` reads
 // its operation `ops[tid]` and, in order: sets kernel buffer 0 of command `within` of `commands`

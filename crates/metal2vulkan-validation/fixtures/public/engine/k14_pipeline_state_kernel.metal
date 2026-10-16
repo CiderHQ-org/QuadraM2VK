@@ -1,4 +1,4 @@
-// Owned fixture (WP-K14, DESIGN D206): a kernel whose constant argument buffer holds two
+// Owned fixture: a kernel whose constant argument buffer holds two
 // stages, each a render pipeline state, a compute pipeline state, and a `scale`, then a `bias`
 // (Metal's layout: the stages at 0 and 24, `bias` at 48). Each thread writes
 // `tid * stages[tid & 1].scale + bias`: it reads only the data members, at a dynamic index over

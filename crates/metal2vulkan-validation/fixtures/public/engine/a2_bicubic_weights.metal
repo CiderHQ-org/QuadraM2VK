@@ -1,5 +1,5 @@
-// Owned fixture (WP-A2, DESIGN D127): recovers the weights of Metal's bicubic filter
-// (`filter::bicubic`), which WP-L7e needs to decide whether Vulkan's cubic filter reproduces it.
+// Owned fixture: recovers the weights of Metal's bicubic filter
+// (`filter::bicubic`), which decides whether Vulkan's cubic filter reproduces it.
 //
 // Each texture is a pattern of single-texel impulses, so a filtered sample returns filter weights
 // rather than a blend of colours:

@@ -1071,7 +1071,13 @@ fn two_plane_ycbcr_textures_follow_metal_s_rules() {
                 Err(Refused::Nil(TextureProblem::NoTextureOfFormat)),
                 "{pf:?} {ty:?}"
             );
-            assert_eq!(no_texture_alignment(pf, ty), align, "{pf:?} {ty:?}");
+            for level in MetalLevel::ALL {
+                assert_eq!(
+                    no_texture_alignment(pf, ty, level),
+                    align,
+                    "{pf:?} {ty:?} {level}"
+                );
+            }
             // Each rule Metal stops comes first (Y3): an extent of 0 here.
             d.width = 0;
             assert_eq!(

@@ -1,12 +1,12 @@
-// Owned fixture (WP-A1, D126): what Metal's `half` `tanh` computes under fast math. MSL has no
-// half fast `tanh`: `tanh(half)` in a fast-math module is `air.tanh.f16` (or `air.tanh.v4f16`)
-// with the `fast` flags, the form of every half `tanh` in the corpus, while `fast::tanh` of a
-// half promotes it to `float` (`air.fast_tanh.f32`). D110.2 lowers `air.fast_tanh.f32` as the
-// fast-math formula `(t - 1) / (t + 1)`, `t = exp(2x)` (which answers 0 near x = 44 and NaN from
-// 44.4 on), and keeps `Tanh` for the half symbols; whether Metal's half `tanh` follows the `f32`
-// formula, a half-precision formula (whose `exp(2x)` overflows past x = 5.55), or `tanh` itself
-// is unmeasured (Q1F-math handback; L1d lowers the narrow forms through the `f32` formula only if
-// this reading agrees). Compiled with the default fast math, as the corpus is.
+// Owned fixture: what Metal's `half` `tanh` computes under fast math. MSL has no half fast `tanh`:
+// `tanh(half)` in a fast-math module is `air.tanh.f16` (or `air.tanh.v4f16`) with the `fast` flags,
+// the form of every half `tanh` in the corpus, while `fast::tanh` of a half promotes it to `float`
+// (`air.fast_tanh.f32`). The translator lowers `air.fast_tanh.f32` as the fast-math formula `(t -
+// 1) / (t + 1)`, `t = exp(2x)` (which answers 0 near x = 44 and NaN from 44.4 on), and keeps `Tanh`
+// for the half symbols; whether Metal's half `tanh` follows the `f32` formula, a half-precision
+// formula (whose `exp(2x)` overflows past x = 5.55), or `tanh` itself is unmeasured (the narrow
+// forms are lowered through the `f32` formula only if this reading agrees). Compiled with the
+// default fast math, as the corpus is.
 //
 // Thread t (0..4095) takes the half h of pattern 16t (every sixteenth pattern: both signs, every
 // binade from the denormals to 65504 at 64 points, the infinities, and NaNs) and writes two words:

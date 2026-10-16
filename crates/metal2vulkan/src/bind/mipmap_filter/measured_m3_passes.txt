@@ -1,13 +1,13 @@
 # Plain Metal's generateMipmapsForTexture: on an Apple M3 Max (macOS 26.7, 25G229): 2D textures,
-# arrays and cubes whose first level is wider or taller than 64 texels (WP-FXR's share-mips-m3,
-# our own probe, DESIGN D703). Each chain ran Private (written and read by blits) and the
-# 256x256 BGRA8Unorm one of nine levels Shared and again Private too, byte-identical. The first level
-# of every layer, in turn, comes from one splitmix64 stream seeded by the FNV-1a 64 hash of the
-# chain's key: `u8` random bytes (each the top byte of one draw), `h16` halves
-# `((r >> 40) % 16) << 10 | (r & 0x3ff)`, `f32` floats `(100 + (r >> 40) % 28) << 23 |
-# (r & 0x7fffff)`, `ramp` (x, y) and `xramp` x and `yramp` y of each texel's coordinates as
-# floats. Each level's digest is the first 12 hex digits of the SHA-256 of its bytes, every
-# layer in turn, rows tight; level 0's is the first level as generated (and read back unchanged).
+# arrays and cubes whose first level is wider or taller than 64 texels (share-mips-m3, our own
+# probe). Each chain ran Private (written and read by blits) and the 256x256 BGRA8Unorm one of nine
+# levels Shared and again Private too, byte-identical. The first level of every layer, in turn,
+# comes from one splitmix64 stream seeded by the FNV-1a 64 hash of the chain's key: `u8` random
+# bytes (each the top byte of one draw), `h16` halves `((r >> 40) % 16) << 10 | (r & 0x3ff)`, `f32`
+# floats `(100 + (r >> 40) % 28) << 23 | (r & 0x7fffff)`, `ramp` (x, y) and `xramp` x and `yramp` y
+# of each texel's coordinates as floats. Each level's digest is the first 12 hex digits of the
+# SHA-256 of its bytes, every layer in turn, rows tight; level 0's is the first level as generated
+# (and read back unchanged).
 # Format:
 #   <key> <format> <2d|2darray|cube> <width>x<height> <layers> <pattern> <digest of level 0> ...
 f80-2d-256x256-l9-u8 MTLPixelFormatBGRA8Unorm 2d 256x256 1 u8 5a1f19dc90ac 420ce3996bfd 3f78f77acbea 5cedb44aac28 888c996606b3 c34bebe667ad e8474e898211 e195db999c45 ea4521d97009

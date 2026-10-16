@@ -1,4 +1,4 @@
-// Owned fixture (WP-RTL, docs/TODO.md 8.30, DESIGN D283 item 8): `ani_cube_grad`'s samples in a
+// Owned fixture: `ani_cube_grad`'s samples in a
 // fragment function, so a graphics pipeline hands the explicit cube gradients to the GPU. Pixel
 // (i, 0) samples a cube (texture 0) and pixel (i, 1) layer 1 of a cube array (texture 1) at
 // direction in[3i] with gradients in[3i + 1] (dP/dx) and in[3i + 2] (dP/dy), through

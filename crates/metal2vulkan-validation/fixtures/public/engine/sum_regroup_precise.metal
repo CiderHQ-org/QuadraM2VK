@@ -1,6 +1,6 @@
 // metal-fast-math: off
-// sum_regroup_precise: `sum_regroup`'s `regroup` fragment compiled without fast math (DESIGN D786,
-// `lower::arith::reassoc`): no operation carries `reassoc`, so the translator regroups no sum, and
+// sum_regroup_precise: `sum_regroup`'s `regroup` fragment compiled without fast math
+// (`lower::arith::reassoc`): no operation carries `reassoc`, so the translator regroups no sum, and
 // each keeps the source's grouping
 //
 //   gx = ((wR + TR) + BR) - (BL + (wL + TL)),   gy = ((wD + BL) + BR) - (TR + (wU + TL)).

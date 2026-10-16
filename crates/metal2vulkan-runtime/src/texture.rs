@@ -34,7 +34,7 @@
 //!   (`shadow.rs`).
 //! - **Memoryless** textures are transient attachments (`VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT`)
 //!   in lazily allocated memory where the device has it, else in device-local memory, and start
-//!   undefined: Metal keeps no contents for them (RT6 probes 6b to 6d). Metal makes them of
+//!   undefined: Metal keeps no contents for them (a Metal probe on an M4). Metal makes them of
 //!   every type, with any usage (its validation stops all but the 2D, 2D array and multisample
 //!   types; plain Metal renders through a 1D, 3D or cube one); anything but a render pass's
 //!   attachment is refused (`Invalid`, `StorageMode`), as Metal's validation refuses CPU access,
@@ -64,6 +64,7 @@ use super::binding_view::{binding_view, texture_facts, views_as, VkView};
 use super::buffer::{Buffer, CallerMemory, HostPages, MemoryHold, NotedTexture};
 use super::buffer_texture::{Texels, TexelsHome};
 use super::clear_value;
+use super::color_resolve::KeptResolves;
 use super::command_buffer::CommandBuffer;
 use super::copy_plan::{
     check_region, copy_unit, level_extent, plan_host_copy, surface_depth_unit, BlitOption,
@@ -82,6 +83,7 @@ use super::image_plan::{
     check_image_limits, plan_image, plan_images, plan_texture_images, DepthImageFacts, ImageFacts,
     ImagePlan, ImageRefusal,
 };
+use super::key_hash::KeyMap;
 use super::linear_plan::{
     aliases, check_linear_limits, holding, linear_lack, BufferLayout, Holds, LinearImage,
     LinearLack,
@@ -97,6 +99,7 @@ use super::pvrtc::{
 use super::resource::{Identity, ObjectId, ResourceKey};
 use super::resource_ids::{Holder, IdHold, IdPlacement, IdSpace, ResourceId};
 use super::shadow::ShadowCopies;
+use super::shadow_copy_back::{self, with_word_view, WordView};
 use super::sharing::Sharing;
 use super::sparse::emulated::TileMapBuffer;
 use super::sparse::texture::{sparse_refusal, SparseExtras, SparseImage, SparseShape};
@@ -113,11 +116,12 @@ use super::view_plan::{
     check_view, keeps_components, reinterpretation_refused, ViewRecord, ViewRefusal, ViewRequest,
 };
 use super::Device;
+use crate::device::functions::Vk;
 use crate::release;
 use ash::vk;
 use ash::vk::Handle;
 use decoded_twin::{Decoded, PassScratch};
-use first_move::{FirstMove, Fresh, Pattern, Patterned, TexelCopy, PATTERN_BYTES};
+use first_move::{FirstMove, Fresh, Keep, Pattern, Patterned, TexelCopy, PATTERN_BYTES};
 use heap_tiled::{FreshDepth, FreshPattern};
 use metal2vulkan::bind::{ImageViewDesc, TextureFacts};
 use metal2vulkan::device::{
@@ -131,8 +135,9 @@ use metal2vulkan::metal::format::{
 };
 use metal2vulkan::metal::{PixelFormat, TextureType, TextureUsage};
 use metal2vulkan::vk::{
-    ComponentMapping, Format, FormatFeatureFlags2, ImageAspectFlags, ImageUsageFlags,
+    ComponentMapping, Format, FormatFeatureFlags2, ImageAspectFlags, ImageUsageFlags, ImageViewType,
 };
+use shared_alias::{AliasForm, AliasKey, SharedAlias};
 use stand_in::StandIn;
 use std::any::Any;
 use std::collections::{BTreeSet, HashMap};
@@ -142,6 +147,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use wrapped::WrappedImage;
 
+mod attached_reads;
 mod attributes;
 pub(crate) mod decoded_twin;
 pub(crate) mod first_move;
@@ -155,6 +161,8 @@ pub(crate) mod host_copy;
 pub(crate) mod pitch_refusals;
 mod rotation;
 mod shared;
+pub(super) mod shared_alias;
+pub(super) mod signed_depth;
 mod staging_copy;
 pub(super) mod stand_in;
 pub(super) mod storage_form;
@@ -166,6 +174,7 @@ mod view_shadow;
 pub(super) mod wrapped;
 mod ycbcr_image;
 
+pub(crate) use attached_reads::feedback_candidate;
 pub use shared::SharedTextureHandle;
 pub use wrapped::{VkImageLayouts, WrappedImageProblem};
 
@@ -341,11 +350,16 @@ pub(super) struct TextureShared {
     /// The image a slot binding takes where the texture's image and usage both lack the usage
     /// the binding needs (`texture/usage_shadow.rs`), made at the first such binding.
     usage_shadow: Mutex<Option<Arc<usage_shadow::UsageShadow>>>,
+    /// The storage images a draw that reads the texture where its pass renders it takes the
+    /// texture's texels into before it reads them (`texture/attached_reads.rs`), one a form, each
+    /// made at the first such draw: on the texture a view was made from, never a view's own.
+    snapshot: Mutex<Vec<Texture>>,
     /// A memoryless texture's backings, one per queue and subresource, made at the first pass
     /// that needs one and kept with the texture (`attachment_stand_in::kept_backing`).
     kept_backings: Mutex<Vec<KeptBacking>>,
     /// A two-plane YCbCr texture's render shadow, which its passes render into
-    /// (`texture/ycbcr_image.rs`), made at the first pass that renders it.
+    /// (`texture/ycbcr_image.rs`), or that of a view its bindings present in its image's own
+    /// format (`Texture::view_render_shadow`), made at the first pass that renders it.
     render_shadow: Mutex<Option<Texture>>,
     /// A heap's texture's heap (a sparse, automatic or placement heap's), which the texture
     /// object keeps, as Metal's does; its image holds it weakly (`SparseImage::heap`,
@@ -451,8 +465,19 @@ struct Image {
     allow_gpu_optimized_contents: bool,
     identity: Identity,
     /// The `VkImageView`s bindings of the image's textures needed (`binding_view.rs`), made at
-    /// their first bind. A finite set per image: its view types, formats and level ranges.
-    views: Mutex<HashMap<VkView, vk::ImageView>>,
+    /// their first bind. A finite set per image: its view types, formats and level ranges. Views
+    /// of the `VkImage` it presents: they go as it presents another (a stand-in, its own again, a
+    /// rebind's or a storage form's), each binding making its view again.
+    views: Mutex<KeyMap<VkView, vk::ImageView>>,
+    /// The `VkImageView`s of its own `VkImage` that the runtime's copies of its texels hold for
+    /// the image's life ([`own_view`](Self::own_view)): a shadow's word view
+    /// (`shadow_copy_back.rs`), a YCbCr conversion's (`texture/ycbcr_image.rs`). Never of a
+    /// stand-in, and never let go as the image presents one or its own again: its drop destroys
+    /// them, before its `VkImage`.
+    own_views: Mutex<KeyMap<VkView, vk::ImageView>>,
+    /// The objects of exact color resolves into the image that its passes made, kept for its next
+    /// pass of the same views (`color_resolve.rs`).
+    resolves: KeptResolves,
     /// The image's depth twin: a `D32_SFLOAT` image of the same texels, which the views a
     /// comparison reads present, for an `R32_SFLOAT` image holding a `Depth32Float` texture.
     twin: Option<Box<Image>>,
@@ -465,6 +490,13 @@ struct Image {
     /// Whether a blit wrote bytes outside the image's texels, which Metal's blit of a two-plane
     /// extended-range texture keeps and the runtime does not hold (`two_planes.rs`).
     kept_outside: AtomicBool,
+    /// Its 32-bit float depth may hold a value whose magnitude stand-in is not itself (a negative
+    /// value, a NaN, or, where the device's depth test compares a denormal as zero, a denormal),
+    /// which a write that may store one set: a pass that loads it renders over its magnitude
+    /// stand-in, or its words are stripped of their signs after a pass with depth writes whose
+    /// stores the device's pass leaves signed (`signed_depth.rs`). Set once, never cleared; only
+    /// on an image with a form ([`Texture::magnitude_form`]).
+    signed_depth: AtomicBool,
     /// While the bytes of its texture are detached (`detach.rs`): the stand-in it presents
     /// (`stand_in.rs`), whose read image is its `VkImage` meanwhile, and, for an image in memory of
     /// its own, its own image and views, which a reattach swaps back. Locked under `views`.
@@ -512,12 +544,27 @@ enum RawGoes {
 }
 
 /// An image's `VkImage`: its own for good, but for a texture bound to the bytes of a heap over
-/// host pages, whose image a rebind re-makes over the new pages ([`Image::swap_in`]). With it, the
-/// dedicated import its `VkImage` is bound to, for an image over dma-buf pages (`dma_buf.rs`),
-/// which goes with that `VkImage`, after it.
+/// host pages, whose image a rebind re-makes over the new pages ([`Image::swap_in`]). With it,
+/// what keeps that `VkImage` beside the image ([`RawHold`]).
 struct Raw {
     image: AtomicU64,
-    import: Mutex<Option<ImageImport>>,
+    import: Mutex<Option<RawHold>>,
+}
+
+/// What keeps an image's `VkImage` beside the image: the dedicated import of dma-buf pages it is
+/// bound to (`dma_buf.rs`), freed after it is destroyed; or the shared image that owns it
+/// (`texture/shared_alias.rs`), which destroys it once nothing holds it, so that its holders
+/// never do.
+pub(super) enum RawHold {
+    Import { _pages: ImageImport },
+    Shared(Arc<SharedAlias>),
+}
+
+impl RawHold {
+    /// Whether `hold` is a shared image's, whose `VkImage` its holders never destroy.
+    fn is_shared(hold: &Option<RawHold>) -> bool {
+        matches!(hold, Some(RawHold::Shared(_)))
+    }
 }
 
 /// The dedicated import of the pages a texture's image over dma-buf pages is bound to
@@ -542,13 +589,38 @@ impl Raw {
     fn imported(raw: vk::Image, import: ImageImport) -> Raw {
         Raw {
             image: AtomicU64::new(raw.as_raw()),
-            import: Mutex::new(Some(import)),
+            import: Mutex::new(Some(RawHold::Import { _pages: import })),
+        }
+    }
+
+    /// The `VkImage` of `alias`, a shared image, which `alias` keeps.
+    fn of_shared(alias: Arc<SharedAlias>) -> Raw {
+        Raw {
+            image: AtomicU64::new(alias.raw().as_raw()),
+            import: Mutex::new(Some(RawHold::Shared(alias))),
         }
     }
 
     /// Whether the `VkImage` now is bound to a dedicated import of its own pages.
     fn dedicated(&self) -> bool {
-        lock(&self.import).is_some()
+        match &*lock(&self.import) {
+            Some(RawHold::Import { .. }) => true,
+            Some(RawHold::Shared(alias)) => alias.dedicated(),
+            None => false,
+        }
+    }
+
+    /// The shared image whose `VkImage` it holds now, where it holds one.
+    fn shared(&self) -> Option<Arc<SharedAlias>> {
+        match &*lock(&self.import) {
+            Some(RawHold::Shared(alias)) => Some(Arc::clone(alias)),
+            Some(RawHold::Import { .. }) | None => None,
+        }
+    }
+
+    /// Whether the `VkImage` now is a shared image's, which the image never destroys.
+    fn is_shared(&self) -> bool {
+        RawHold::is_shared(&lock(&self.import))
     }
 
     /// The `VkImage` now.
@@ -558,11 +630,7 @@ impl Raw {
 
     /// Hold `raw`, bound to `import` where it has a dedicated one, from now on: the `VkImage` it
     /// held and that one's import.
-    fn swap(
-        &self,
-        raw: vk::Image,
-        import: Option<ImageImport>,
-    ) -> (vk::Image, Option<ImageImport>) {
+    fn swap(&self, raw: vk::Image, import: Option<RawHold>) -> (vk::Image, Option<RawHold>) {
         let mut held = lock(&self.import);
         let old = self.image.swap(raw.as_raw(), Ordering::AcqRel);
         let old_import = std::mem::replace(&mut *held, import);
@@ -579,9 +647,10 @@ pub(super) struct ImageObjects {
     views: Vec<vk::ImageView>,
     /// What becomes of `raw` as this goes.
     raw_goes: RawGoes,
-    /// The dedicated import `raw` is bound to, an image over dma-buf pages (`dma_buf.rs`): freed
-    /// as this goes, after `raw` is destroyed.
-    import: Option<ImageImport>,
+    /// What keeps `raw` beside these objects ([`RawHold`]): a dedicated import, freed as this goes,
+    /// after `raw` is destroyed; or a shared image, which destroys `raw` itself once nothing holds
+    /// it.
+    import: Option<RawHold>,
 }
 
 impl Drop for ImageObjects {
@@ -601,6 +670,7 @@ impl Drop for ImageObjects {
             // A stand-in's read image goes with the stand-in, once its last holder lets go (this
             // one's after the views above).
             match &self.raw_goes {
+                RawGoes::Destroyed if RawHold::is_shared(&self.import) => {}
                 RawGoes::Destroyed => {
                     release::object(raw, self.raw);
                 }
@@ -731,6 +801,9 @@ pub(super) struct AliasWatch {
     texture_type: TextureType,
     /// What the image is made as.
     kind: AliasKind,
+    /// The bytes from `from_base` an image of the kind made again is bound to, its subresources'
+    /// reach, which its first move from `UNDEFINED` keeps (`texture/first_move.rs`'s `Keep`).
+    reach: u64,
 }
 
 /// What an aliasing image over host pages is made as ([`AliasWatch`]).
@@ -794,7 +867,7 @@ impl ImageObjects {
             raw,
             views: Vec::new(),
             raw_goes: RawGoes::Destroyed,
-            import: Some(import),
+            import: Some(RawHold::Import { _pages: import }),
         }
     }
 
@@ -807,15 +880,14 @@ impl ImageObjects {
 }
 
 impl ImageSwap {
-    /// `objects`, a new image for `image` bound to `pages`, host pages, and in layout `initial`,
-    /// to swap in.
+    /// `objects`, a new image for `image` bound to `pages`, host pages, whose move is `first`
+    /// (holding the pages), to swap in.
     fn new(
         image: Arc<Image>,
         objects: ImageObjects,
-        initial: vk::ImageLayout,
+        first: FirstMove,
         pages: &HostPages,
     ) -> ImageSwap {
-        let first = FirstMove::new(objects.raw, image.plan().format, initial, true);
         let memory = MemoryHold::Host {
             _import: Arc::clone(pages.import()),
         };
@@ -833,14 +905,17 @@ impl ImageSwap {
     fn acquired(
         image: Arc<Image>,
         objects: ImageObjects,
-        pages: &HostPages,
+        pages: &Arc<HostPages>,
         family: u32,
     ) -> ImageSwap {
-        let swap = ImageSwap::new(image, objects, vk::ImageLayout::UNDEFINED, pages);
-        ImageSwap {
-            first: swap.first.acquired(family),
-            ..swap
-        }
+        let undefined = vk::ImageLayout::UNDEFINED;
+        let first = FirstMove::new(
+            objects.raw,
+            image.plan().format,
+            undefined,
+            pages_hold(pages),
+        );
+        ImageSwap::new(image, objects, first.acquired(family), pages)
     }
 
     /// Whether the swap is `image`'s.
@@ -893,6 +968,48 @@ impl Image {
         if let Some(&raw) = views.get(view) {
             return Ok(raw);
         }
+        self.may_view(view)?;
+        let image = match &*lock(&self.detached) {
+            Some(detached) => detached.stand_in.for_usage(view.usage),
+            None => self.raw.get(),
+        };
+        // SAFETY: the image is live; the caller checked the view against the image's plan
+        // (format, usage, levels and layers), which a stand-in's images share, the sink holding
+        // every usage of the plan and the read image every one but `STORAGE`.
+        let raw = unsafe { self.make_view(image, view) }?;
+        views.insert(*view, raw);
+        Ok(raw)
+    }
+
+    /// The `VkImageView` `view` of the image's own `VkImage`, from its own views or made now,
+    /// which stays until the image drops ([`Image::own_views`]): for a copy of the image's texels
+    /// that holds the view as long as it holds the image. Only for an image in memory of its own
+    /// that took no storage form, whose `VkImage` is its own for its life: a detach keeps it while
+    /// the image presents a stand-in (`present_stand_in`), and no rebind swaps another in; a
+    /// texture's own image, which alone may take a storage form (`texture/storage_form.rs`), holds
+    /// no such copy. `view` is checked against the image's plan by the caller.
+    fn own_view(&self, view: &VkView) -> Result<vk::ImageView, Error> {
+        // Under the views lock, as every change of the `VkImage` the image presents.
+        let _presented = lock(&self.views);
+        let mut own = lock(&self.own_views);
+        if let Some(&raw) = own.get(view) {
+            return Ok(raw);
+        }
+        if !self.own_memory() || self.form.plan().is_some() {
+            return Err(internal(
+                "a held view of an image whose VkImage is not its own for its life",
+            ));
+        }
+        self.may_view(view)?;
+        // SAFETY: the image's own `VkImage` is live while the image is; the caller checked the
+        // view against the image's plan.
+        let raw = unsafe { self.make_view(self.own_raw(), view) }?;
+        own.insert(*view, raw);
+        Ok(raw)
+    }
+
+    /// Whether the device makes `view` of the image: `Ok` where it does.
+    fn may_view(&self, view: &VkView) -> Result<(), Error> {
         // A device that reinterprets no image's components makes no view that would
         // (`view_plan.rs`).
         if !self.device.shared().view_reinterpretation
@@ -918,19 +1035,19 @@ impl Image {
                 Capability::Feature(swizzle),
             )));
         }
-        let image = match &*lock(&self.detached) {
-            Some(detached) => detached.stand_in.for_usage(view.usage),
-            None => self.raw.get(),
-        };
+        Ok(())
+    }
+
+    /// Make the `VkImageView` `view` of `image`.
+    ///
+    /// # Safety
+    ///
+    /// `image` is live, and `view` fits its plan (format, usage, levels and layers).
+    unsafe fn make_view(&self, image: vk::Image, view: &VkView) -> Result<vk::ImageView, Error> {
         let mut usage = vk::ImageViewUsageCreateInfo::default();
         let info = view.create_info(image, &mut usage);
-        // SAFETY: the image is live; the caller checked the view against the image's plan
-        // (format, usage, levels and layers), which a stand-in's images share, the sink holding
-        // every usage of the plan and the read image every one but `STORAGE`.
-        let raw =
-            unsafe { self.device.shared().vk().create_image_view(&info, None) }.map_err(vulkan)?;
-        views.insert(*view, raw);
-        Ok(raw)
+        // SAFETY: the caller's.
+        unsafe { self.device.shared().vk().create_image_view(&info, None) }.map_err(vulkan)
     }
 
     /// Exchange the image's `VkImage` and views with `objects`'s: the image is `objects`'s new
@@ -980,7 +1097,8 @@ impl Image {
     fn settle(&self) -> Result<(), Error> {
         let firsts = &self.device.shared().textures.first_moves;
         let at: *const Image = self;
-        if !self.move_waits() && !firsts.texels_wait(at.cast()) {
+        let shared = self.raw.shared().and_then(|alias| alias.move_waits());
+        if !self.move_waits() && shared.is_none() && !firsts.texels_wait(at.cast()) {
             return Ok(());
         }
         self.submit_copy(|_, _| {})
@@ -988,15 +1106,13 @@ impl Image {
 
     /// Record a host call's copy of its texels with `record`, on an internal submission the call
     /// waits for, which makes its own waiting move first, one of an image over host pages
-    /// included: the call holds its texture, and so the pages, until the submission completed.
-    /// So the copy finds it in `GENERAL`.
-    fn submit_copy(
-        &self,
-        record: impl FnOnce(&ash::Device, vk::CommandBuffer),
-    ) -> Result<(), Error> {
+    /// included (a shared image's, `texture/shared_alias.rs`, too): the call holds its texture,
+    /// and so the pages, until the submission completed. So the copy finds it in `GENERAL`.
+    fn submit_copy(&self, record: impl FnOnce(&Vk, vk::CommandBuffer)) -> Result<(), Error> {
         let key = self.identity.key;
+        let shared = self.raw.shared().and_then(|alias| alias.move_waits());
         self.device
-            .submit_internal_naming(|named| named == key, record)
+            .submit_internal_naming(|named| named == key || Some(named) == shared, record)
     }
 
     /// Whether `raw` is its `VkImage`: the one it presents, or its own while it presents a
@@ -1026,7 +1142,8 @@ impl Image {
     /// is the stand-in's read image, and its views are made anew of the stand-in. The views it
     /// had are answered, to go once no command buffer may read them; with its own `VkImage` too
     /// where that is bound to the detached pages, while an image in memory of its own keeps its
-    /// `VkImage` for a reattach to swap back. Nothing where it presents a stand-in already.
+    /// `VkImage` for a reattach to swap back, and the views its copies hold of it
+    /// ([`own_view`](Self::own_view)). Nothing where it presents a stand-in already.
     fn present_stand_in(&self, stand_in: Arc<StandIn>) -> Option<ImageObjects> {
         // Declared first, the hold on the detached pages' memory goes after the locks below.
         let mut _let_go = None;
@@ -1113,12 +1230,19 @@ impl Drop for Image {
         // own; the image only where it made it.
         // An image presenting a stand-in destroys its own `VkImage` where it kept one, and
         // never the stand-in's.
+        // A shared image's `VkImage` goes with the shared image, once nothing holds it.
         let raw = match &*lock(&self.detached) {
             Some(detached) => detached.own,
+            None if self.raw.is_shared() => None,
             None => Some(self.raw.get()),
         };
+        // The kept resolve objects go before the views they were made of.
+        self.resolves.clear();
         unsafe {
             for &view in lock(&self.views).values() {
+                release::object(shared.vk(), view);
+            }
+            for &view in lock(&self.own_views).values() {
                 release::object(shared.vk(), view);
             }
             if let Some(raw) = raw.filter(|_| image) {
@@ -1178,7 +1302,7 @@ impl Fresh for Image {
     fn rebindable(&self) -> Option<ResourceKey> {
         let waiting = lock(&self.first_move);
         (waiting.as_ref())
-            .is_some_and(|first| first.rebindable)
+            .is_some_and(|first| first.rebindable())
             .then_some(self.identity.key)
     }
 }
@@ -1633,7 +1757,7 @@ impl Device {
         let sparse = unsafe { SparseImage::new(heap, raw, (shape, plan.layers), mask, extras) }?;
         let hazard = heap.hazard_tracking_mode();
         // Moved by the device's next submission; it holds no memory yet, so nothing is zeroed.
-        let first = FirstMove::new(raw, plan.format, vk::ImageLayout::UNDEFINED, false);
+        let first = FirstMove::new(raw, plan.format, vk::ImageLayout::UNDEFINED, None);
         let image = Image {
             device: self.clone(),
             raw: Raw::new(raw),
@@ -1642,11 +1766,14 @@ impl Device {
             options: ResourceOptions::new(StorageMode::Private, cache, hazard),
             allow_gpu_optimized_contents: allow,
             identity: Identity::new(hazard, false),
-            views: Mutex::new(HashMap::new()),
+            views: Mutex::new(KeyMap::default()),
+            own_views: Mutex::new(KeyMap::default()),
+            resolves: KeptResolves::new(),
             twin: None,
             decoded: None,
             form: Default::default(),
             kept_outside: AtomicBool::new(false),
+            signed_depth: AtomicBool::new(false),
             detached: Mutex::new(None),
             first_move: Mutex::new(Some(first)),
             host_copies: false,
@@ -1723,7 +1850,7 @@ impl Device {
             return Err(vulkan(error));
         }
         // Moved, and zeroed where the runtime zeroes it, by the device's next submission.
-        let first = FirstMove::new(raw, plan.format, vk::ImageLayout::UNDEFINED, false);
+        let first = FirstMove::new(raw, plan.format, vk::ImageLayout::UNDEFINED, None);
         let first = if extras.zeroed {
             let units = copy_units(plan.format, plan.pixel_format);
             let volume = shape.texture_type == TextureType::Type3D;
@@ -1765,11 +1892,14 @@ impl Device {
             options: ResourceOptions::new(StorageMode::Private, cache, hazard),
             allow_gpu_optimized_contents,
             identity: Identity::new(hazard, false),
-            views: Mutex::new(HashMap::new()),
+            views: Mutex::new(KeyMap::default()),
+            own_views: Mutex::new(KeyMap::default()),
+            resolves: KeptResolves::new(),
             twin: None,
             decoded: None,
             form: Default::default(),
             kept_outside: AtomicBool::new(false),
+            signed_depth: AtomicBool::new(false),
             detached: Mutex::new(None),
             first_move: Mutex::new(Some(first)),
             host_copies: false,
@@ -2005,6 +2135,12 @@ impl Device {
         {
             return Err(Error::NotImplemented(RuntimeGap::Textures));
         }
+        // Where the device copies a shadow back faster by a dispatch, the image takes the
+        // integer view the dispatch reads (`shadow_copy_back.rs`).
+        let (plan, word) = match shadow_copy_back::dispatches(self) {
+            true => with_word_view(plan, &facts),
+            false => (plan, None),
+        };
         let hazard = texels.options().hazard_tracking_mode()?;
         // A depth or stencil texture over a surface's plane copies the aspect the plane holds
         // alone (`copy_plan::surface_depth_unit`); its image's other aspect stays the zeros it
@@ -2027,7 +2163,23 @@ impl Device {
             }
             false => self.new_image(plan, layout, descriptor, hazard)?,
         };
-        let copies = texels.shadow_copies(image.raw.get(), image.identity, aspects)?;
+        // A view the device does not make leaves the copies back copies. The copies hold it as
+        // long as the image, which keeps it through a detach (`Image::own_view`).
+        let words = word.and_then(|(format, words)| {
+            let view = image.own_view(&VkView {
+                view_type: ImageViewType::TYPE_2D,
+                format,
+                components: ComponentMapping::IDENTITY,
+                aspect: ImageAspectFlags::COLOR,
+                base_level: 0,
+                level_count: 1,
+                base_layer: 0,
+                layer_count: 1,
+                usage: ImageUsageFlags::SAMPLED,
+            });
+            view.ok().map(|view| WordView { view, words })
+        });
+        let copies = texels.shadow_copies(image.raw.get(), image.identity, aspects, words)?;
         // Its copies keep its own image, which it presents again once the bytes lie in pages.
         self.stand_in_while_detached(&texels.buffer, &image)?;
         let (offset, bytes_per_row) = (texels.layout.offset, texels.layout.row_pitch);
@@ -2237,6 +2389,21 @@ impl Device {
             Ok(holds) => *holds,
             Err(why) => return Ok(Err(why.clone())),
         };
+        let (memory, buffer_offset, type_index) = texels.buffer.memory();
+        let memory_offset = buffer_offset + texels.layout.offset;
+        let kind = AliasKind::Linear {
+            layout: texels.layout,
+            holds,
+        };
+        // Over host pages, the image of the same plan over the same bytes their import holds
+        // (`texture/shared_alias.rs`).
+        let form = AliasForm::Linear(holds);
+        let key = host.then(|| AliasKey::new(memory_offset, &plan, &texels.layout, form));
+        let over = (layout, descriptor, texels);
+        if let Some(alias) = (key.as_ref()).and_then(|key| self.take_shared_alias(texels, key)) {
+            let image = self.over_shared_alias(alias, plan, over, (memory_offset, kind));
+            return image.map(Ok);
+        }
         let who = if host {
             "the buffer is a no-copy buffer, and the device"
         } else {
@@ -2268,8 +2435,6 @@ impl Device {
             }
         };
         let raw_device = self.shared().vk();
-        let (memory, buffer_offset, type_index) = texels.buffer.memory();
-        let memory_offset = buffer_offset + texels.layout.offset;
         let room = texels.buffer.padded_length() - texels.layout.offset;
         let image = LinearImage {
             alignment: requirements.alignment,
@@ -2298,6 +2463,23 @@ impl Device {
             unsafe { release::object(raw_device, raw) };
             return Ok(Err(why));
         }
+        // Over host pages, its move keeps the texels it lies over, as it starts `UNDEFINED`
+        // (`VUID-VkImageCreateInfo-pNext-01443`; `texture/first_move.rs`'s `Keep`).
+        let first = match host {
+            false => None,
+            true => {
+                let moved = (raw, plan.format, initial);
+                let reach = holds.reach(&texels.layout);
+                match self.shared_first_move(moved, texels, (memory_offset, reach)) {
+                    Ok(first) => Some(first),
+                    Err(error) => {
+                        // SAFETY: the image is live and unbound, and no command uses it.
+                        unsafe { release::object(raw_device, raw) };
+                        return Err(error);
+                    }
+                }
+            }
+        };
         // SAFETY: the image is live and unbound; the memory is the buffer's, which outlives the
         // texture holding it, in a type the image takes, at an offset `aliases` checked against
         // the image's alignment and size. An image bound to imported host memory was made for
@@ -2309,6 +2491,12 @@ impl Device {
         }
         if pitched {
             self.shared().counts.pitched_host_image_made();
+        }
+        // Over host pages, shared by the textures of the same plan over the same bytes.
+        if let (Some((first, named)), Some(key)) = (first, key) {
+            let alias = self.new_shared_alias(texels, (raw, None), (key, named), first);
+            let image = self.over_shared_alias(alias, plan, over, (memory_offset, kind));
+            return image.map(Ok);
         }
         let image = Image {
             device: self.clone(),
@@ -2324,11 +2512,14 @@ impl Device {
                 tracked: texels.tracked(),
                 ..texels.buffer.identity()
             },
-            views: Mutex::new(HashMap::new()),
+            views: Mutex::new(KeyMap::default()),
+            own_views: Mutex::new(KeyMap::default()),
+            resolves: KeptResolves::new(),
             twin: None,
             decoded: None,
             form: Default::default(),
             kept_outside: AtomicBool::new(false),
+            signed_depth: AtomicBool::new(false),
             detached: Mutex::new(None),
             first_move: Mutex::new(None),
             host_copies: false,
@@ -2336,27 +2527,147 @@ impl Device {
             staging_copies: false,
             objects: ObjectsToken::default(),
         };
-        // Leaving `PREINITIALIZED` keeps the bytes the image holds: the buffer's. An image made
-        // for host allocations starts `UNDEFINED`, as Vulkan has it
-        // (`VUID-VkImageCreateInfo-pNext-01443`); a linear image has no metadata a move from
-        // `UNDEFINED` could initialize, and its move keeps the bytes on every device the lanes
-        // run on (`runtime_lane::buffer_textures`, a texture made over bytes already written).
-        let first = FirstMove::new(raw, image.plan().format, initial, host);
+        // Leaving `PREINITIALIZED` keeps the bytes the image holds: the buffer's.
+        let first = FirstMove::new(raw, image.plan().format, initial, None);
         *lock(&image.first_move) = Some(first);
-        let image = image.shared();
-        if host {
-            let base = texels.buffer.pages_base()?;
-            texels.buffer.watch_alias(AliasWatch {
-                image: Arc::downgrade(&image),
-                from_base: memory_offset - base,
-                texture_type: layout.texture_type,
-                kind: AliasKind::Linear {
-                    layout: texels.layout,
-                    holds,
-                },
-            });
+        Ok(Ok(image.shared()))
+    }
+
+    /// The shared image of `key` over the host pages `texels` lie in, where their import holds
+    /// one (`texture/shared_alias.rs`): counted as taken.
+    fn take_shared_alias(&self, texels: &Texels, key: &AliasKey) -> Option<Arc<SharedAlias>> {
+        let pages = texels.buffer.host_pages()?;
+        let alias = pages.import().shared_images().find(key)?;
+        self.shared().counts.shared_alias_taken();
+        Some(alias)
+    }
+
+    /// The shared image `made` (a `VkImage`, and the dedicated import it is bound to where it has
+    /// one) of `key`, whose move is `first`, which a host call naming `named` makes: held by the
+    /// import of the host pages `texels` lie in (`texture/shared_alias.rs`).
+    fn new_shared_alias(
+        &self,
+        texels: &Texels,
+        made: (vk::Image, Option<ImageImport>),
+        (key, named): (AliasKey, ResourceKey),
+        first: FirstMove,
+    ) -> Arc<SharedAlias> {
+        let alias = SharedAlias::new(self, made, (key, named), first);
+        if let Some(pages) = texels.buffer.host_pages() {
+            pages.import().shared_images().hold(&alias);
         }
-        Ok(Ok(image))
+        alias
+    }
+
+    /// The image of a texture of `plan` over `over`'s texels whose `VkImage` is `alias`'s, shared
+    /// with the other textures of its key (`texture/shared_alias.rs`): the texture's own image
+    /// otherwise (its views, its hazard identity, the buffer's memory it holds), noted in its
+    /// pages' hold as `kind` at `memory_offset`, keeping its own texels (`AliasWatch`), so that a
+    /// rebind makes it an image of its own over the new pages; its pages noted with the shared
+    /// image, for the submission that takes the image's move to hold (`SharedAlias::taken_over`).
+    fn over_shared_alias(
+        &self,
+        alias: Arc<SharedAlias>,
+        plan: ImagePlan,
+        (layout, descriptor, texels): (&TextureLayout, &TextureDescriptor, &Texels),
+        (memory_offset, kind): (u64, AliasKind),
+    ) -> Result<Arc<Image>, Error> {
+        let base = texels.buffer.pages_base()?;
+        let linear = !matches!(kind, AliasKind::Metal(_));
+        // A detached buffer's bytes are in no memory: no texture is made over them.
+        let pages = (texels.buffer.host_pages())
+            .ok_or(Error::NotImplemented(RuntimeGap::DetachTextures))?;
+        alias.taken_over(&pages);
+        let image = Image {
+            device: self.clone(),
+            raw: Raw::of_shared(alias),
+            owner: Owner::Buffer {
+                memory: Mutex::new(texels.buffer.memory_hold()),
+            },
+            plan,
+            options: texels.options(),
+            allow_gpu_optimized_contents: descriptor.allow_gpu_optimized_contents,
+            // The buffer's bytes, tracked as the texture is.
+            identity: Identity {
+                tracked: texels.tracked(),
+                ..texels.buffer.identity()
+            },
+            views: Mutex::new(KeyMap::default()),
+            own_views: Mutex::new(KeyMap::default()),
+            resolves: KeptResolves::new(),
+            twin: None,
+            decoded: None,
+            form: Default::default(),
+            kept_outside: AtomicBool::new(false),
+            signed_depth: AtomicBool::new(false),
+            detached: Mutex::new(None),
+            first_move: Mutex::new(None),
+            host_copies: false,
+            linear,
+            staging_copies: false,
+            objects: ObjectsToken::default(),
+        };
+        let image = image.shared();
+        let reach = alias_reach(&kind, texels);
+        texels.buffer.watch_alias(AliasWatch {
+            image: Arc::downgrade(&image),
+            from_base: memory_offset - base,
+            texture_type: layout.texture_type,
+            kind,
+            reach,
+        });
+        Ok(image)
+    }
+
+    /// The key of the memory `texels`' bytes lie in, which every buffer made over them joins
+    /// (`HostAliases::of`): their buffer's own where it joined none.
+    fn memory_key(&self, texels: &Texels) -> ResourceKey {
+        let own = texels.buffer.identity().key;
+        (self.shared().aliases.of(own)).map_or(own, |alias| alias.key)
+    }
+
+    /// The first move of `moved`, a shared image (of a format, from a layout), bound to the host
+    /// pages `texels` lie in at `memory_offset`, where they start, its subresources reaching
+    /// `reach` bytes from there (`texture/shared_alias.rs`): noting those pages weakly (the
+    /// submission that takes it holds the pages of a texture over the image that lives then,
+    /// `SharedAlias::take`), and keeping those bytes
+    /// ([`pages_first_move`](Self::pages_first_move)); with the key of the memory they lie in
+    /// ([`memory_key`](Self::memory_key)), which a host call that makes the move names.
+    fn shared_first_move(
+        &self,
+        moved: (vk::Image, Format, vk::ImageLayout),
+        texels: &Texels,
+        (memory_offset, reach): (u64, u64),
+    ) -> Result<(FirstMove, ResourceKey), Error> {
+        // A detached buffer's bytes are in no memory: no texture is made over them.
+        let pages = (texels.buffer.host_pages())
+            .ok_or(Error::NotImplemented(RuntimeGap::DetachTextures))?;
+        let from_base = memory_offset - pages.memory().1;
+        let held = (&*pages, pages_hold(&pages));
+        let first = self.pages_first_move(moved, held, from_base, reach)?;
+        Ok((first, self.memory_key(texels)))
+    }
+
+    /// The first move of `moved`, an image (of a format) from a layout, bound to host `pages` at
+    /// `from_base` from their bytes' start, its subresources reaching `reach` bytes from there:
+    /// noting `hold` (the pages, which a rebind may swap it out of) weakly while it waits
+    /// (`texture/first_move.rs`), and, from `UNDEFINED`, keeping those bytes, every one, through
+    /// the host (`Keep`).
+    fn pages_first_move(
+        &self,
+        (raw, format, initial): (vk::Image, Format, vk::ImageLayout),
+        (pages, hold): (&HostPages, Option<Weak<dyn Any + Send + Sync>>),
+        from_base: u64,
+        reach: u64,
+    ) -> Result<FirstMove, Error> {
+        let first = FirstMove::new(raw, format, initial, hold);
+        if initial != vk::ImageLayout::UNDEFINED {
+            return Ok(first);
+        }
+        let at = (pages.host_at(from_base))
+            .ok_or_else(|| internal("an image over host pages the host does not reach"))?;
+        let keep = Keep::new(&self.shared().textures.first_moves, at, reach);
+        Ok(first.keeping(keep))
     }
 
     /// Whether the device's host imports give their `MTLBuffer`s (`VK_EXT_metal_objects`): a
@@ -2393,50 +2704,32 @@ impl Device {
         };
         let (memory, buffer_offset, _) = texels.buffer.memory();
         let memory_offset = buffer_offset + texels.layout.offset;
+        let place = (layout, descriptor, texels);
+        let kind = AliasKind::Metal(over);
+        // The Metal texture of the same plan over the same bytes their import holds
+        // (`texture/shared_alias.rs`).
+        let form = AliasForm::Metal(over, layout.texture_type);
+        let key = AliasKey::new(memory_offset, &plan, &texels.layout, form);
+        if let Some(alias) = self.take_shared_alias(texels, &key) {
+            let image = self.over_shared_alias(alias, plan, place, (memory_offset, kind));
+            return image.map(Ok);
+        }
+        // The Metal texture is the buffer's bytes, whose texels its move from `UNDEFINED` keeps
+        // (`texture/first_move.rs`'s `Keep`).
+        let (first, named) = {
+            let moved = (vk::Image::null(), plan.format, vk::ImageLayout::UNDEFINED);
+            let reach = texels.layout.end() - texels.layout.offset;
+            self.shared_first_move(moved, texels, (memory_offset, reach))?
+        };
         let made = self.metal_image(&plan, &over, layout.texture_type, memory, memory_offset)?;
         let raw = match made {
             Ok(raw) => raw,
             Err(why) => return refused(why),
         };
-        let image = Image {
-            device: self.clone(),
-            raw: Raw::new(raw),
-            owner: Owner::Buffer {
-                memory: Mutex::new(texels.buffer.memory_hold()),
-            },
-            plan,
-            options: texels.options(),
-            allow_gpu_optimized_contents: descriptor.allow_gpu_optimized_contents,
-            // The buffer's bytes, tracked as the texture is.
-            identity: Identity {
-                tracked: texels.tracked(),
-                ..texels.buffer.identity()
-            },
-            views: Mutex::new(HashMap::new()),
-            twin: None,
-            decoded: None,
-            form: Default::default(),
-            kept_outside: AtomicBool::new(false),
-            detached: Mutex::new(None),
-            first_move: Mutex::new(None),
-            host_copies: false,
-            linear: false,
-            staging_copies: false,
-            objects: ObjectsToken::default(),
-        };
-        // The Metal texture is the buffer's bytes; the move from `UNDEFINED` keeps them (the
-        // lanes check it, `runtime_lane::no_copy_textures`).
-        let first = FirstMove::new(raw, image.plan().format, vk::ImageLayout::UNDEFINED, true);
-        *lock(&image.first_move) = Some(first);
-        let image = image.shared();
-        let base = texels.buffer.pages_base()?;
-        texels.buffer.watch_alias(AliasWatch {
-            image: Arc::downgrade(&image),
-            from_base: memory_offset - base,
-            texture_type: layout.texture_type,
-            kind: AliasKind::Metal(over),
-        });
-        Ok(Ok(image))
+        let first = first.of_image(raw);
+        let alias = self.new_shared_alias(texels, (raw, None), (key, named), first);
+        let image = self.over_shared_alias(alias, plan, place, (memory_offset, kind));
+        image.map(Ok)
     }
 
     /// The image of the first of `plans` the device makes over `texels`, whose bytes lie in host
@@ -2461,8 +2754,10 @@ impl Device {
         facts: &ImageFacts<'_>,
     ) -> Result<Aliased, Error> {
         let pages = texels.buffer.host_pages();
-        let over = pages.as_deref().and_then(HostPages::dma_buf);
-        let Some((imports, start, type_index)) = over else {
+        let over = pages
+            .as_ref()
+            .and_then(|pages| Some((pages, pages.dma_buf()?)));
+        let Some((pages, (imports, start, type_index))) = over else {
             return Err(internal(
                 "a texture over dma-buf pages the buffer does not lie in",
             ));
@@ -2479,9 +2774,33 @@ impl Device {
         };
         let base = texels.buffer.pages_base()?;
         let (_, buffer_offset, _) = texels.buffer.memory();
-        let from_base = buffer_offset + texels.layout.offset - base;
+        let memory_offset = buffer_offset + texels.layout.offset;
+        let from_base = memory_offset - base;
+        let over = (layout, descriptor, texels);
+        let kind = AliasKind::Linear {
+            layout: texels.layout,
+            holds,
+        };
+        // The image of the same plan over the same bytes of these pages their import holds
+        // (`texture/shared_alias.rs`): the source is not asked again.
+        let key_of = |plan: &ImagePlan| {
+            AliasKey::new(
+                start + from_base,
+                plan,
+                &texels.layout,
+                AliasForm::DmaBuf(holds),
+            )
+        };
+        let found = (plans.iter())
+            .find_map(|&plan| Some((plan, self.take_shared_alias(texels, &key_of(plan))?)));
+        if let Some((plan, alias)) = found {
+            let place = (memory_offset, kind);
+            return self
+                .over_shared_alias(alias, plan.clone(), over, place)
+                .map(Ok);
+        }
         let place = crate::dma_buf::DmaBufTexels {
-            pages: imports,
+            pages: &imports,
             type_index,
             at: start + from_base,
             row_pitch: texels.layout.row_pitch,
@@ -2497,39 +2816,27 @@ impl Device {
                 )));
             }
         };
-        let (index, made) = made;
-        let owner = Owner::Buffer {
-            memory: Mutex::new(texels.buffer.memory_hold()),
-        };
-        let image = self.dma_buf_texture_image(
-            made,
-            plans[index].clone(),
-            owner,
-            (texels.options(), descriptor.allow_gpu_optimized_contents),
-            // The buffer's bytes, tracked as the texture is.
-            Identity {
-                tracked: texels.tracked(),
-                ..texels.buffer.identity()
-            },
-        );
-        let image = image.shared();
-        texels.buffer.watch_alias(AliasWatch {
-            image: Arc::downgrade(&image),
-            from_base,
-            texture_type: layout.texture_type,
-            kind: AliasKind::Linear {
-                layout: texels.layout,
-                holds,
-            },
-        });
-        Ok(Ok(image))
+        let (index, crate::dma_buf::DmaBufImage { raw, import }) = made;
+        let plan = plans[index];
+        // Its acquire keeps the bytes; the submission that takes it holds the pages of a texture
+        // over it that lives then (`SharedAlias::take`).
+        let undefined = vk::ImageLayout::UNDEFINED;
+        let first = FirstMove::new(raw, plan.format, undefined, pages_hold(pages))
+            .acquired(self.foreign_acquirer());
+        let named = self.memory_key(texels);
+        let made = (raw, Some(import));
+        let alias = self.new_shared_alias(texels, made, (key_of(plan), named), first);
+        let place = (memory_offset, kind);
+        self.over_shared_alias(alias, plan.clone(), over, place)
+            .map(Ok)
     }
 
     /// The image of a texture over dma-buf pages (over a buffer, or placed in a heap), `made` of
     /// `plan` (`dma_buf.rs`), with its `owner`, its options and whether it allows GPU-optimized
     /// contents, and the `identity` of its bytes: a `DRM_FORMAT_MOD_LINEAR` image, whose rows are a
     /// linear image's (a write of its bytes is a write of its texels), its first move acquiring
-    /// it from `VK_QUEUE_FAMILY_FOREIGN_EXT` into `GENERAL`, keeping the bytes.
+    /// it from `VK_QUEUE_FAMILY_FOREIGN_EXT` into `GENERAL`, keeping the bytes, and holding
+    /// `pages`, the host pages its bytes lie in.
     #[cfg(unix)]
     fn dma_buf_texture_image(
         &self,
@@ -2538,6 +2845,7 @@ impl Device {
         owner: Owner,
         (options, allow_gpu_optimized_contents): (ResourceOptions, bool),
         identity: Identity,
+        pages: &Arc<HostPages>,
     ) -> Image {
         let crate::dma_buf::DmaBufImage { raw, import } = made;
         let image = Image {
@@ -2548,11 +2856,14 @@ impl Device {
             options,
             allow_gpu_optimized_contents,
             identity,
-            views: Mutex::new(HashMap::new()),
+            views: Mutex::new(KeyMap::default()),
+            own_views: Mutex::new(KeyMap::default()),
+            resolves: KeptResolves::new(),
             twin: None,
             decoded: None,
             form: Default::default(),
             kept_outside: AtomicBool::new(false),
+            signed_depth: AtomicBool::new(false),
             detached: Mutex::new(None),
             first_move: Mutex::new(None),
             host_copies: false,
@@ -2560,7 +2871,8 @@ impl Device {
             staging_copies: false,
             objects: ObjectsToken::default(),
         };
-        let first = FirstMove::new(raw, image.plan().format, vk::ImageLayout::UNDEFINED, true)
+        let undefined = vk::ImageLayout::UNDEFINED;
+        let first = FirstMove::new(raw, image.plan().format, undefined, pages_hold(pages))
             .acquired(self.foreign_acquirer());
         *lock(&image.first_move) = Some(first);
         image
@@ -2952,7 +3264,7 @@ impl Device {
     pub(super) fn rebound_alias_images(
         &self,
         watches: &[AliasWatch],
-        pages: &HostPages,
+        pages: &Arc<HostPages>,
         mut remade: Remade,
     ) -> Result<Vec<ImageSwap>, Error> {
         let dma_buf = pages.over_dma_buf();
@@ -2990,13 +3302,13 @@ impl Device {
                     let Ok(raw) = made else {
                         return Err(Error::NotImplemented(RuntimeGap::RebindTextures));
                     };
+                    let objects = ImageObjects::new(self, raw);
+                    let moved = (raw, image.plan().format, vk::ImageLayout::UNDEFINED);
+                    let held = (&**pages, pages_hold(pages));
+                    let at = watch.from_base;
+                    let first = self.pages_first_move(moved, held, at, watch.reach)?;
                     // Dropped on a later failure, the images made so far go.
-                    swaps.push(ImageSwap::new(
-                        Arc::clone(&image),
-                        ImageObjects::new(self, raw),
-                        vk::ImageLayout::UNDEFINED,
-                        pages,
-                    ));
+                    swaps.push(ImageSwap::new(Arc::clone(&image), objects, first, pages));
                     continue;
                 }
             };
@@ -3032,13 +3344,13 @@ impl Device {
             if pitched {
                 self.shared().counts.pitched_host_image_made();
             }
+            let objects = ImageObjects::new(self, raw);
+            let moved = (raw, image.plan().format, initial);
+            let held = (&**pages, pages_hold(pages));
+            let at = watch.from_base;
+            let first = self.pages_first_move(moved, held, at, watch.reach)?;
             // Dropped on a later failure, the images made so far go.
-            swaps.push(ImageSwap::new(
-                Arc::clone(&image),
-                ImageObjects::new(self, raw),
-                initial,
-                pages,
-            ));
+            swaps.push(ImageSwap::new(Arc::clone(&image), objects, first, pages));
         }
         Ok(swaps)
     }
@@ -3365,7 +3677,7 @@ impl Device {
         } else {
             None
         };
-        let first = FirstMove::new(raw, plan.format, vk::ImageLayout::UNDEFINED, false);
+        let first = FirstMove::new(raw, plan.format, vk::ImageLayout::UNDEFINED, None);
         let aspects: vk::ImageAspectFlags = image_aspects(plan.format).into();
         let image = Image {
             device: self.clone(),
@@ -3375,11 +3687,14 @@ impl Device {
             options: descriptor.resource_options,
             allow_gpu_optimized_contents: descriptor.allow_gpu_optimized_contents,
             identity,
-            views: Mutex::new(HashMap::new()),
+            views: Mutex::new(KeyMap::default()),
+            own_views: Mutex::new(KeyMap::default()),
+            resolves: KeptResolves::new(),
             twin: None,
             decoded: None,
             form: Default::default(),
             kept_outside: AtomicBool::new(false),
+            signed_depth: AtomicBool::new(false),
             detached: Mutex::new(None),
             first_move: Mutex::new(None),
             host_copies,
@@ -3427,8 +3742,8 @@ impl Device {
         if moved && staging_copies {
             // SAFETY: the staging command buffer is recording; the image is live, bound to
             // memory of its own, which nothing used yet, in `UNDEFINED`, which the move leaves.
-            self.submit_staging(|raw, command_buffer| unsafe {
-                first.record_alone(raw, command_buffer)
+            self.submit_staging(|raw, command_buffer, family| unsafe {
+                first.record_alone(raw, command_buffer, family)
             })?;
             return Ok(image);
         }
@@ -3441,8 +3756,8 @@ impl Device {
             // SAFETY: the staging command buffer is recording; the image is live, bound to
             // memory of its own, which nothing used yet, and made with transfer usage; every
             // copy lies within it and reads within the zeros.
-            self.submit_staging(|raw, command_buffer| unsafe {
-                first.record_alone(raw, command_buffer)
+            self.submit_staging(|raw, command_buffer, family| unsafe {
+                first.record_alone(raw, command_buffer, family)
             })?;
             return Ok(image);
         }
@@ -4137,6 +4452,22 @@ impl Drop for Staging<'_> {
     }
 }
 
+/// The host pages an image is bound to, as its first move notes them (`texture/first_move.rs`).
+fn pages_hold(pages: &Arc<HostPages>) -> Option<Weak<dyn Any + Send + Sync>> {
+    let pages: Weak<dyn Any + Send + Sync> = Arc::downgrade(pages) as _;
+    Some(pages)
+}
+
+/// The bytes from an aliasing image's first texel its subresources reach, by its kind
+/// (`AliasWatch::reach`): a linear image's as what it holds beside the texels lets them, a Metal
+/// texture's to its last texel.
+fn alias_reach(kind: &AliasKind, texels: &Texels) -> u64 {
+    match kind {
+        AliasKind::Linear { layout, holds } => holds.reach(layout),
+        AliasKind::Metal(_) => texels.layout.end() - texels.layout.offset,
+    }
+}
+
 /// The barrier ordering a copy of the internal submission after every earlier access of the
 /// device's memory, and every later access after the copy.
 pub(super) fn transfer_barrier(
@@ -4295,6 +4626,7 @@ impl Texture {
             label: Mutex::new(None),
             object_id: ObjectId::new(),
             usage_shadow: Mutex::new(None),
+            snapshot: Mutex::new(Vec::new()),
             kept_backings: Mutex::new(Vec::new()),
             render_shadow: Mutex::new(None),
             heap,
@@ -4370,9 +4702,9 @@ impl Texture {
         Texture::made(&device, storage, record, None, id_use)
     }
 
-    /// Refused (`Invalid`, `StorageMode`) for a memoryless texture: Metal's validation stops
-    /// every use of one but as a render pass's attachment (RT6 probes 6b and 6c: CPU access,
-    /// blits, mipmaps, views and bindings).
+    /// Refused (`Invalid`, `StorageMode`) for a memoryless texture: Metal's validation stops every
+    /// use of one but as a render pass's attachment (a Metal probe on an M4: CPU access, blits,
+    /// mipmaps, views and bindings).
     pub(super) fn check_not_memoryless(&self, call: &'static str) -> Result<(), Error> {
         if self.storage_mode() == StorageMode::Memoryless {
             return Err(invalid(call, Problem::StorageMode));
@@ -4587,12 +4919,23 @@ impl Texture {
         Some(self.image().ok()?.twin.as_ref()?.raw.get())
     }
 
-    /// Announce `restricted-depth-upload` for `call`'s upload into `aspect` of the texture's image:
-    /// the depth of a 32-bit float depth image, on a device without
+    /// Announce what `call`'s upload into `aspect` of the texture's image may store otherwise than
+    /// Metal's, in the depth of a 32-bit float depth image: on a device without
     /// `VK_EXT_depth_range_unrestricted` enabled whose driver is not measured to keep a value
-    /// outside `[0, 1]` there (`ImageFacts::depth_clamps`). A texture with a depth twin holds its
-    /// texels in colour (its twin's clamping is announced with the twin).
-    pub(super) fn degrade_depth_upload(&self, call: &'static str, aspect: ImageAspectFlags) {
+    /// outside `[0, 1]` there (`ImageFacts::depth_clamps`), `restricted-depth-upload`. On any
+    /// other, an upload that may store a negative value or a NaN (`signed`) in a render target's
+    /// depth, which a depth test reads, switches it on to render over its magnitude stand-in, so
+    /// the device's test answers as Metal's, which compares the value's magnitude
+    /// (`texture/signed_depth.rs`; `encoding` where a command buffer of the program's records the
+    /// upload); a target that takes no stand-in announces `signed-depth-test`. A texture with a
+    /// depth twin holds its texels in colour (its twin's clamping is announced with the twin).
+    pub(super) fn degrade_depth_upload(
+        &self,
+        call: &'static str,
+        aspect: ImageAspectFlags,
+        signed: bool,
+        encoding: bool,
+    ) {
         let Ok(image) = self.image() else {
             return;
         };
@@ -4600,30 +4943,100 @@ impl Texture {
             image.plan().format,
             Format::D32_SFLOAT | Format::D32_SFLOAT_S8_UINT
         );
+        if aspect != ImageAspectFlags::DEPTH || !float_depth {
+            return;
+        }
         let device = self.device();
         let profile = device.compile_device().profile();
         let restricted = device.shared().textures.facts(profile).depth_clamps();
-        if aspect == ImageAspectFlags::DEPTH && float_depth && restricted {
+        let format = self.pixel_format();
+        if restricted {
             device.degrade(Degradation::RestrictedDepthUpload, || {
-                let format = self.pixel_format();
                 let why = format!(
                     "{call} wrote its depth image on a device without \
                      VK_EXT_depth_range_unrestricted"
                 );
                 (format!("a {format:?} texture"), why)
             });
+        } else if signed {
+            self.degrade_signed_depth(call, encoding);
         }
+    }
+
+    /// Switch the texture's depth on for `call`'s write into it, which may store a negative value
+    /// or a NaN, on a device that keeps such a value in a depth image (`texture/signed_depth.rs`;
+    /// `encoding` where a command buffer of the program's records the write): a render target's
+    /// 32-bit float depth, which a depth test reads and a pass with depth writes stores. One whose
+    /// device's depth test then answers as Metal's (it takes the magnitude stand-in, or the
+    /// device's test is Metal's own, `DriverFact::DepthTestComparesMagnitudes`) announces
+    /// nothing; one that takes no stand-in (multisampled, or a combined depth/stencil format)
+    /// announces `signed-depth-test`, as the device's test compares the value as it is, where
+    /// Metal's compares its magnitude, and names whether its passes' stores are Metal's (the
+    /// strip) or keep the sign.
+    pub(super) fn degrade_signed_depth(&self, call: &'static str, encoding: bool) {
+        let Ok(image) = self.image() else {
+            return;
+        };
+        let float_depth = matches!(
+            image.plan().format,
+            Format::D32_SFLOAT | Format::D32_SFLOAT_S8_UINT
+        );
+        if !float_depth
+            || !self.usage().contains(TextureUsage::RENDER_TARGET)
+            || self.switch_on_signed_depth(call, encoding)
+        {
+            return;
+        }
+        let device = self.device();
+        let profile = device.compile_device().profile();
+        let facts = device.shared().textures.facts(profile);
+        if facts.depth_clamps() {
+            return;
+        }
+        let stripped = self.magnitude_form().is_some();
+        let format = self.pixel_format();
+        device.degrade(Degradation::SignedDepthTest, || {
+            let why = match (facts.depth_images.test_magnitudes, stripped) {
+                (false, true) => format!(
+                    "{call} may store a negative or NaN depth in a render target's depth image, \
+                     which the device's depth test compares as it is, where Metal's compares its \
+                     magnitude: a multisampled or combined depth/stencil target renders over no \
+                     magnitude stand-in (a pass with depth writes stores it without its sign, as \
+                     Metal's)"
+                ),
+                (false, false) => format!(
+                    "{call} may store a negative or NaN depth in a render target's depth image, \
+                     which the device's depth test compares as it is, where Metal's compares its \
+                     magnitude, and which a pass with depth writes keeps with its sign, where \
+                     Metal stores it without"
+                ),
+                (true, _) => format!(
+                    "{call} may store a negative or NaN depth in a render target's depth image, \
+                     which a pass with depth writes that draws under none keeps with its sign, \
+                     where Metal stores it without"
+                ),
+            };
+            (format!("a {format:?} texture"), why)
+        });
     }
 
     /// Announce `depth-denormals` for `call`'s write into `aspect` of the texture's image that may
     /// store a denormal (`on_host`: by a host copy): the 32-bit float depth of a depth image, on
     /// a device whose driver may store it or test it otherwise than Metal's
     /// ([`ImageFacts::denormal_loss`]). A texture with a depth twin holds its texels in colour.
+    /// Where the driver stores it and only its depth test compares it otherwise, a render target
+    /// that takes a magnitude stand-in is switched on (`texture/signed_depth.rs`, `encoding` as
+    /// [`degrade_depth_upload`](Self::degrade_depth_upload) takes it): its passes test the
+    /// smallest normal in a denormal's place, Metal's answer but for a fragment at exactly 2^-126,
+    /// which the notice names. A host copy's denormal on a driver whose GPU copies store one as a
+    /// zero switches it on too, but the stand-in's copies read it as a zero: the notice names the
+    /// loss.
     pub(super) fn degrade_depth_denormals(
         &self,
         call: &'static str,
         aspect: ImageAspectFlags,
         on_host: bool,
+        encoding: bool,
     ) {
         let Ok(image) = self.image() else {
             return;
@@ -4638,13 +5051,29 @@ impl Texture {
         let device = self.device();
         let profile = device.compile_device().profile();
         let facts = device.shared().textures.facts(profile);
-        if let Some(loss) = facts.denormal_loss(on_host) {
-            device.degrade(Degradation::DepthDenormals, || {
-                let format = self.pixel_format();
-                let why = format!("{call} may store a denormal depth: {loss}");
-                (format!("a {format:?} texture"), why)
-            });
-        }
+        let Some(loss) = facts.denormal_loss(on_host) else {
+            return;
+        };
+        let stored = on_host || facts.depth_images.denormals;
+        let switched = stored
+            && self.usage().contains(TextureUsage::RENDER_TARGET)
+            && self.switch_on_signed_depth(call, encoding)
+            && self.takes_magnitude_stand_in();
+        // The stand-in's copies keep a denormal only where the device's GPU copies do.
+        let tested = switched && facts.depth_images.denormals;
+        device.degrade(Degradation::DepthDenormals, || {
+            let format = self.pixel_format();
+            let why = match tested {
+                true => format!(
+                    "{call} may store a denormal depth in a render target, whose passes test it \
+                     over the smallest normal, as the device's depth test compares a stored \
+                     denormal as zero: a fragment at exactly 2^-126 passes `Equal` and fails \
+                     `Greater` against it, where Metal's fails and passes"
+                ),
+                false => format!("{call} may store a denormal depth: {loss}"),
+            };
+            (format!("a {format:?} texture"), why)
+        });
     }
 
     /// The `VkImageView` a binding write of `call` needs of the texture: `desc` is the binding
@@ -4670,7 +5099,7 @@ impl Texture {
                 .as_deref()
                 .ok_or_else(|| internal("a depth twin's view of a texture without one"))?;
         }
-        let view = binding_view(image.plan(), &self.0.record, desc, storage)
+        let view = binding_view(image.plan(), &self.0.record.bound(), desc, storage)
             .map_err(|refusal| view_error(call, refusal))?;
         image.view(&view)
     }
@@ -4682,9 +5111,17 @@ impl Texture {
         self.image()?.view(view)
     }
 
+    /// The objects of exact color resolves into the texture's image that its passes made
+    /// (`color_resolve.rs`), which the image keeps until it drops. Refused as
+    /// [`image`](Self::image) is.
+    pub(super) fn kept_resolves(&self) -> Result<&KeptResolves, Error> {
+        Ok(&self.image()?.resolves)
+    }
+
     /// The facts a binding plan reads of the texture.
     pub(super) fn facts(&self) -> TextureFacts {
-        let mut facts = texture_facts(&self.0.record);
+        let record = self.0.record.bound();
+        let mut facts = texture_facts(&record);
         facts.depth_twin = self.twin_image().is_some();
         facts.sparse = self.is_sparse();
         // A wrapped image made without `MUTABLE_FORMAT` takes no view in a storage binding's
@@ -4695,7 +5132,7 @@ impl Texture {
             && self.image().is_ok_and(|image| {
                 let formats = self.0.storage_formats.get_or_init(|| {
                     let profile = self.device().compile_device().profile();
-                    storage_view_formats(self.0.record.pixel_format, profile)
+                    storage_view_formats(record.pixel_format, profile)
                 });
                 formats
                     .iter()
@@ -4953,9 +5390,9 @@ impl Texture {
         self.heap_texels().and_then(Buffer::heap)
     }
 
-    /// `heapOffset`: where the texture lies in a placement heap; 0 for a texture of an automatic
-    /// or sparse heap, as Metal answers (SPR-heaptex1, and CRF heap probe 1 for texture buffers),
-    /// and for one outside a heap.
+    /// `heapOffset`: where the texture lies in a placement heap; 0 for a texture of an automatic or
+    /// sparse heap, as Metal answers (SPR-heaptex1, and a Metal heap probe on the M3 Max and an M4
+    /// for texture buffers), and for one outside a heap.
     pub fn heap_offset(&self) -> u64 {
         if let Some(buffer) = self.heap_texels() {
             return buffer.heap_offset();
@@ -5264,9 +5701,10 @@ impl Texture {
         // texture's copies, so its uses are its texture's. Where the image takes no Vulkan view
         // of the view's format (the device reinterprets no image's components, or the texture's
         // image was made without `PixelFormatView` usage for other formats), the view has storage
-        // of its own (`texture/view_shadow.rs`); a binding's own view is checked again where it is
-        // made. A texture buffer's view is a texel buffer view of the same bytes, which takes any
-        // format of its class.
+        // of its own (`texture/view_shadow.rs`), but for one in other channels of its image's
+        // bits, which its bindings take as the image in its own format through a swizzle and a
+        // pass renders through a shadow; a binding's own view is checked again where it is made. A texture buffer's view is a
+        // texel buffer view of the same bytes, which takes any format of its class.
         let apart = match &self.0.storage {
             Storage::Texels(_) => false,
             Storage::Image(image)
@@ -5275,10 +5713,15 @@ impl Texture {
                 !self.device().image_takes_view(image, record.pixel_format)
             }
         };
-        let storage = if apart {
-            self.reinterpreted(call, &record)?
-        } else {
+        let mut record = record;
+        let storage = if !apart {
             self.0.storage.clone()
+        } else if let Some((image, read_as)) = self.read_through(&record) {
+            self.device().shared().counts.view_through_swizzle_made();
+            record.read_as = Some(read_as);
+            Storage::Image(image)
+        } else {
+            self.reinterpreted(call, &record)?
         };
         // A view of a texture with a decoded twin that does not present it reads the blocks.
         self.degrade_view_decode(&storage, &record);
@@ -5373,7 +5816,22 @@ impl Texture {
             host.pack(bytes, &mut words);
             return self.write_color_words(image, &image_region, &words);
         }
-        self.degrade_depth_upload(CALL, image_region.aspect);
+        // Bytes that hold a negative or NaN depth, which a depth test compares otherwise.
+        let signed =
+            image_region.aspect == ImageAspectFlags::DEPTH && host.holds_negative_or_nan(bytes);
+        self.degrade_depth_upload(CALL, image_region.aspect, signed, false);
+        // Bytes whose magnitude stand-in is not themselves (-0, a negative denormal, and, where the
+        // device's depth test compares a denormal as zero, a positive one) switch a render
+        // target's depth on too (`texture/signed_depth.rs`): none of them is announced as a sign.
+        if image_region.aspect == ImageAspectFlags::DEPTH
+            && !signed
+            && self.usage().contains(TextureUsage::RENDER_TARGET)
+        {
+            let flush = signed_depth::test_flushes_denormals(self.device());
+            if host.holds_unlike_its_stand_in(bytes, flush) {
+                self.switch_on_signed_depth(CALL, false);
+            }
+        }
         // Bytes that hold a denormal depth, announced as the copy below stores them.
         let denormal = image_region.aspect == ImageAspectFlags::DEPTH && host.holds_denormal(bytes);
         // A shadowed view's texels are its texture's (`texture/view_shadow.rs`).
@@ -5384,13 +5842,13 @@ impl Texture {
             host.pack(bytes, &mut packed);
             if truth.host_write(copy, &packed)? {
                 if denormal {
-                    self.degrade_depth_denormals(CALL, image_region.aspect, true);
+                    self.degrade_depth_denormals(CALL, image_region.aspect, true, false);
                 }
                 return truth.decode_written(&image_region, packed);
             }
         }
         if denormal {
-            self.degrade_depth_denormals(CALL, image_region.aspect, false);
+            self.degrade_depth_denormals(CALL, image_region.aspect, false, false);
         }
         if truth.takes_staging_copies() {
             let mut packed = vec![0; host.packed_len() as usize];

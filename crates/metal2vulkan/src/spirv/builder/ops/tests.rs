@@ -1509,6 +1509,67 @@ fn sampling_checks_forms_operands_and_block() {
     });
 }
 
+/// An armed offset (`FunctionBuilder::arm_offset`): an explicit-level sample with it is a
+/// switch-at-use of one arm a value of its dynamic lane (16), each making the sampled image again
+/// and sampling with that value as `ConstOffset` (none for 0), merged by one `OpPhi`; an
+/// implicit-level sample with it is refused in the switch; an offset without a dynamic lane, or of
+/// another lane count, is not armed.
+#[test]
+fn an_armed_offset_samples_in_constant_arms() {
+    use crate::spirv::builder::ops::image::ArmedOffset;
+    use crate::spirv::error::ControlRule;
+    in_fn(|f, t| {
+        let tex2d = image(f, t.f32_, Dim::D2, ImageUsage::Sampled, |_| {});
+        let sampler = mty(f, Type::Sampler);
+        let (img, smp) = (p(f, tex2d), p(f, sampler));
+        let (uv, x, off, sel) = (p(f, t.vec2), p(f, t.f32_), p(f, t.ivec2), p(f, t.u32_));
+        let lanes = vec![None, Some(0)];
+        assert!(f
+            .arm_offset(
+                off,
+                ArmedOffset {
+                    selector: sel,
+                    lanes: vec![Some(1), Some(0)],
+                }
+            )
+            .is_err());
+        assert!(f
+            .arm_offset(
+                off,
+                ArmedOffset {
+                    selector: sel,
+                    lanes: vec![None],
+                }
+            )
+            .is_err());
+        f.arm_offset(
+            off,
+            ArmedOffset {
+                selector: sel,
+                lanes,
+            },
+        )
+        .expect("armed");
+        let si = f.sampled_image(img, smp).expect("sampled image");
+        let lod = ImageOperands {
+            lod: Some(x),
+            offset: Some(off),
+            ..ImageOperands::default()
+        };
+        let r = f.sample(si, uv, None, false, &lod).expect("armed sample");
+        assert_eq!(ty(f, r), t.vec4);
+        let si = f.sampled_image(img, smp).expect("sampled image");
+        let implicit = ImageOperands {
+            offset: Some(off),
+            ..ImageOperands::default()
+        };
+        assert_eq!(
+            f.sample(si, uv, None, false, &implicit),
+            Err(BuildError::Control(ControlRule::TangledInSwitchAtUse))
+        );
+    });
+}
+
 #[test]
 fn fetch_gather_read_write_and_queries() {
     in_fn(|f, t| {

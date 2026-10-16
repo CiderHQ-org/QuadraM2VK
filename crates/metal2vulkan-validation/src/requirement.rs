@@ -105,9 +105,15 @@ pub enum ToolingRequirement {
     /// building its compute pipeline (`executor_contract::min_lod_clamp`), so no Metal reference
     /// exists for it ([`Limit::Metal`]).
     KernelMinLodClamp,
-    /// An object or mesh function: no case expresses a mesh render pipeline's draw (its object and
-    /// mesh threadgroup grids, payload and mesh outputs), and neither executor runs one yet.
-    MeshPipeline,
+    /// A stage of a mesh render pipeline that its row or case needs and nothing supplies
+    /// (`executor_contract::mesh`): the mesh stage of an object function whose payload the
+    /// generated launch observer cannot read, the object stage of a mesh function whose payload no
+    /// generated object function writes, or a row's fragment stage where its mesh function's
+    /// observable effect is its rasterized output. A case supplies one by naming a partner of its
+    /// own module (`MeshDraw`, whose rasterizing draw must name its fragment function), or by
+    /// stating the observation or object launch whose generated stages take the partners' places
+    /// (`companion::MeshStages`).
+    MeshCompanion,
 }
 
 /// Every executor (the requirement leaves no case to author, or none to observe).
@@ -137,7 +143,7 @@ impl ToolingRequirement {
         Self::RasterizationDisabledRenderTarget,
         Self::RasterizationRateMapPlacement,
         Self::KernelMinLodClamp,
-        Self::MeshPipeline,
+        Self::MeshCompanion,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -165,7 +171,7 @@ impl ToolingRequirement {
             Self::RasterizationDisabledRenderTarget => "rasterization_disabled_render_target",
             Self::RasterizationRateMapPlacement => "rasterization_rate_map_placement",
             Self::KernelMinLodClamp => "kernel_min_lod_clamp",
-            Self::MeshPipeline => "mesh_pipeline",
+            Self::MeshCompanion => "mesh_companion",
         }
     }
 
@@ -176,8 +182,8 @@ impl ToolingRequirement {
     ///   requirements), the only effect is encoded indirect commands no case executes
     ///   ([`ToolingRequirement::IndirectCommandBuffer`]), or the Metal oracle cannot build the
     ///   pipeline, so no candidate has a reference to be compared with
-    ///   ([`ToolingRequirement::KernelMinLodClamp`]), or no case expresses the stage's draw
-    ///   ([`ToolingRequirement::MeshPipeline`]).
+    ///   ([`ToolingRequirement::KernelMinLodClamp`]), or a mesh render pipeline lacks a stage
+    ///   nothing supplies ([`ToolingRequirement::MeshCompanion`]).
     /// - The engine's candidate: the families its case mapping and render executor do not
     ///   implement yet (`candidate::engine`), each of which the Metal oracle runs, and
     ///   rasterization-rate map data a case can author only as bytes, which hold one
@@ -200,7 +206,7 @@ impl ToolingRequirement {
             | Self::FragmentVaryingObservationType
             | Self::FragmentOutputObservationType
             | Self::KernelMinLodClamp
-            | Self::MeshPipeline => AUTHORING,
+            | Self::MeshCompanion => AUTHORING,
             Self::ArgumentBufferIntersectionFunctionTable
             | Self::LinkedIntersectionFunction
             | Self::RenderDeviceBufferArray
@@ -340,6 +346,17 @@ mod tests {
                 .iter()
                 .all(|requirement| requirement.as_str() != effect.as_str()));
         }
+    }
+
+    /// The mesh render pipeline's requirement: both executors draw one, an object function's
+    /// threadgroup memory among it, so only a stage nothing generates stops them
+    /// (`mesh_companion`), this crate's gap, never Metal's, which keeps the census open.
+    #[test]
+    fn mesh_requirements_stop_the_executors_that_do_not_draw_them_yet() {
+        let requirement = ToolingRequirement::MeshCompanion;
+        assert_eq!(requirement.stops(), Executor::ALL);
+        assert_eq!(requirement.limit(), Limit::Tooling, "{requirement}");
+        assert!(requirement.blocks_closure(), "{requirement}");
     }
 
     /// Every requirement stops some executor, and an executor's name is as stable as a

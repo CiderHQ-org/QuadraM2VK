@@ -1,4 +1,4 @@
-// Owned fixture (WP-UNK, DESIGN D283): the probe of the level of detail Metal derives from an
+// Owned fixture: the probe of the level of detail Metal derives from an
 // explicit cube gradient, face by face. A sampler that minifies linearly and magnifies nearest
 // over one level shows only whether the device minified, so sweeping a gradient's magnitude finds
 // where the device's footprint crosses one texel. Lane i takes face i % 6, gradient axis

@@ -1,4 +1,4 @@
-// Owned fixture (NaN model, DESIGN D293, class J): whether Metal flushes a `float` result that is
+// Owned fixture (NaN model, class J): whether Metal flushes a `float` result that is
 // below 2^-126 before rounding but rounds to 2^-126 (tininess before or after rounding), in its
 // compile without fast math. Lane `i` reads (a, b, c, n) from `in[i]` (n an `int`) and writes 8
 // words to `out[2i .. 2i + 1]`: a * b, a / b, fma(a, b, c), a * b + c, ldexp(a, n), -(a * b),

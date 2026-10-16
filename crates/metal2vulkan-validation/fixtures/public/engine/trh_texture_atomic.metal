@@ -1,4 +1,4 @@
-// Owned fixture (WP-TRH, DESIGN D250): texture atomics in and past read_write 2D textures, the
+// Owned fixture: texture atomics in and past read_write 2D textures, the
 // probe of what Metal's `atomic_fetch_max` returns out of bounds (MSL 4.1 states only that an
 // out-of-bounds write is ignored and an out-of-bounds read returns zero). Eight threads; thread t
 // maxes 0xA0000000 | t and then 0x90000000 | t into the uint texture u at texel idx[t] (x in the

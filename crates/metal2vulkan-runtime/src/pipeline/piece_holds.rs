@@ -24,9 +24,13 @@
 //!   back at once; a piece running then gives back to the device's reaper (`reaper.rs`), which
 //!   the release started, and its thread lets go of it. Where the host cannot start that thread,
 //!   the piece lets go of it itself. A piece that panics drops what it took on its thread.
+//! - **With its trail.** A piece that settled its making before it gives back gives back with the
+//!   trail it opened before the settle (`trails.rs`): it closes once the state keeps what was
+//!   given back, or once the reaper (or the piece, without one) let go of it.
 
 use super::reaper::{Reaper, Reaps};
 use crate::device::lock;
+use crate::trails::Trail;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -120,22 +124,36 @@ impl<T> Keeping<T> {
     }
 }
 
+/// What a piece of a released state hands the reaper: what it gave back, then its trail, which
+/// closes once that went (a struct's fields drop in the order they are declared).
+struct Reaped<T> {
+    _held: T,
+    _trail: Option<Trail>,
+}
+
 impl<T: Send + 'static> Lease<T> {
     /// Give back what remains of what the piece took, and end the lease: kept by the state until
     /// a hand-over's thread or the state's release lets go of it, or, once the state let go,
-    /// handed to the reaper.
-    pub(crate) fn give_back(self, held: T) {
+    /// handed to the reaper. `trail`, the piece's where it settled its making before, closes
+    /// once the state keeps it, or once it was let go of.
+    pub(crate) fn give_back(self, held: T, trail: Option<Trail>) {
         let mut state = lock(&self.holds.state);
         if !state.closed {
             state.given_back.push(held);
+            drop(state);
+            drop(trail);
             return;
         }
         match &state.reaps {
-            Some(reaps) => reaps.reap(Box::new(held)),
-            // No reaper thread: let go of it here, outside the lock.
+            Some(reaps) => reaps.reap(Box::new(Reaped {
+                _held: held,
+                _trail: trail,
+            })),
+            // No reaper thread: let go of it here, outside the lock, then of the trail.
             None => {
                 drop(state);
                 drop(held);
+                drop(trail);
             }
         }
     }
@@ -152,9 +170,10 @@ mod tests {
     use super::super::reaper::Reaper;
     use super::PieceHolds;
     use crate::exit_guard;
+    use crate::trails::Trails;
     use std::sync::{mpsc, Arc};
     use std::thread::{self, Builder};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     /// The longest a test waits for another thread.
     const WAIT: Duration = Duration::from_secs(60);
@@ -183,7 +202,7 @@ mod tests {
         let keeping = holds.keep(Noted(noted.clone()));
         exit_guard::spawn(Builder::new(), move || {
             let (lease, held) = keeping.start().expect("kept");
-            lease.give_back(held);
+            lease.give_back(held, None);
         })
         .unwrap()
         .join()
@@ -231,7 +250,7 @@ mod tests {
             let (lease, held) = keeping.start().expect("kept");
             started.send(()).unwrap();
             ending.recv_timeout(WAIT).unwrap();
-            lease.give_back(held);
+            lease.give_back(held, None);
         })
         .unwrap();
         running.recv_timeout(WAIT).unwrap();
@@ -243,6 +262,53 @@ mod tests {
         end.send(()).unwrap();
         piece.join().unwrap();
         assert_eq!(dropped.recv_timeout(WAIT).unwrap(), "metal2vulkan-reaper");
+        reaper.stop();
+    }
+
+    /// A piece of a state released while it ran gives back with its trail: the reaper lets go of
+    /// what it gave back while the trail is open, then the trail closes, and a wait at a mark
+    /// taken after the trail opened returns.
+    #[test]
+    fn a_trail_given_back_to_the_reaper_closes_after_what_it_held() {
+        /// Sends how many trails are open as it is dropped.
+        struct Counted(Arc<Trails>, mpsc::Sender<usize>);
+        impl Drop for Counted {
+            fn drop(&mut self) {
+                let _ = self.1.send(self.0.open_now());
+            }
+        }
+        let trails = Arc::new(Trails::default());
+        let (noted, dropped) = mpsc::channel();
+        let reaper = Reaper::default();
+        let holds = PieceHolds::new();
+        let keeping = holds.keep(Counted(Arc::clone(&trails), noted));
+        let (started, running) = mpsc::channel();
+        let (end, ending) = mpsc::channel::<()>();
+        let piece = {
+            let trails = Arc::clone(&trails);
+            exit_guard::spawn(Builder::new().name("piece".into()), move || {
+                let (lease, held) = keeping.start().expect("kept");
+                started.send(()).unwrap();
+                ending.recv_timeout(WAIT).unwrap();
+                let trail = trails.open();
+                lease.give_back(held, Some(trail));
+            })
+            .unwrap()
+        };
+        running.recv_timeout(WAIT).unwrap();
+        holds.close(&reaper);
+        end.send(()).unwrap();
+        piece.join().unwrap();
+        assert_eq!(
+            dropped.recv_timeout(WAIT).unwrap(),
+            1,
+            "the reaper let go of what was given back with its trail open"
+        );
+        assert_eq!(
+            trails.wait_below(trails.mark(), Some(Instant::now() + WAIT)),
+            Ok(())
+        );
+        assert_eq!(trails.open_now(), 0);
         reaper.stop();
     }
 

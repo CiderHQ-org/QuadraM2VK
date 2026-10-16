@@ -2,7 +2,7 @@
 //! statement the kernel is checked against, written plainly from the module docs.
 
 use super::layout::{
-    axis_tap, den, ties, widen, Field, Layout, Rule, XR_ALPHA_FLOOR, XR_COLOUR_FLOOR,
+    axis_tap, den, ties, widen, Field, Layout, Rule, XR_ALPHA_FLOOR, XR_COLOUR_FLOOR, XR_SRGB_FLOOR,
 };
 use super::reciprocal::Reciprocal;
 use super::tail::{self, Kept, Precision};
@@ -21,7 +21,8 @@ struct Tap {
 }
 
 /// The eight taps of destination texel `(x, y, z)` of `small` from `big`, from the coordinates of
-/// `reciprocal`'s GPU: each source texel's index within its layer and its weight.
+/// `reciprocal`'s GPU: each source texel's index within its layer and its weight
+/// ([`tap_weight`]).
 pub(super) fn taps(
     at: [u32; 3],
     big: [u32; 3],
@@ -32,15 +33,29 @@ pub(super) fn taps(
         std::array::from_fn(|a| axis_tap(at[a], big[a], small[a], reciprocal));
     std::array::from_fn(|k| {
         let mut pos = [0u32; 3];
-        let mut n = 1u32;
+        let mut w = [0u32; 3];
         for a in 0..3 {
             let (x0, q) = axes[a];
             let second = (k >> a) & 1 == 1;
             pos[a] = if second { (x0 + 1).min(big[a] - 1) } else { x0 };
-            n *= if second { q } else { 256 - q };
+            w[a] = if second { q } else { 256 - q };
         }
+        let n = tap_weight(w[0] * w[2], axes[1].1, (k >> 1) & 1 == 1);
         ((pos[2] * big[1] + pos[1]) * big[0] + pos[0], n)
     })
+}
+
+/// A tap's weight (of `2^24`) from its weights along x and z, `nxz` (of `2^16`), and the y
+/// split `qy` (of 256), on the second row along y where `far`: Metal splits `nxz` along y last,
+/// the far row's part rounded half down to `2^-16` and the near row's the rest (the module docs'
+/// "The taps"). A 2D level's depth weight is 256, so its weights are exact.
+pub(super) fn tap_weight(nxz: u32, qy: u32, far: bool) -> u32 {
+    let far_part = ((nxz * qy + 127) >> 8) << 8;
+    if far {
+        far_part
+    } else {
+        (nxz << 8) - far_part
+    }
 }
 
 /// The `width` bits at bit `offset` of a texel's little-endian bytes.
@@ -156,30 +171,50 @@ fn msb(v: u64) -> i32 {
     63 - v.leading_zeros() as i32
 }
 
-/// Metal's float accumulator over the finite taps: each term `M n 2^z` truncated toward zero to
-/// the quantum `2^sc`, `sc = e - fraction - guard` for the largest term's exponent estimate
-/// `e`, and summed: `(S, sc)`, or `None` with no live term.
+/// Metal's float accumulator over the finite taps, by depth slice (each four taps in turn: a 2D
+/// level's one, a 3D level's two): each slice's terms `M n 2^z` truncated toward zero to its
+/// quantum `2^(e_s - fraction - guard)`, `e_s` its largest term's exponent estimate, and summed;
+/// then each slice's sum truncated toward zero to the quantum `2^sc` of the largest estimate of
+/// all, `sc = e - fraction - guard`, and the slices summed: `(S, sc)`, or `None` with no live term.
 fn accumulate(terms: &[(bool, u64, i32, u32)], fraction: i32, guard: i32) -> Option<(i64, i32)> {
-    let live: Vec<_> = terms
-        .iter()
-        .filter(|(_, m, _, n)| *m != 0 && *n != 0)
+    let slices: Vec<(i64, i32)> = terms
+        .chunks(4)
+        .filter_map(|slice| {
+            let live: Vec<_> = slice
+                .iter()
+                .filter(|(_, m, _, n)| *m != 0 && *n != 0)
+                .collect();
+            let e = live
+                .iter()
+                .map(|(_, m, z, n)| msb(*m) + z + msb(u64::from(*n)) - 24)
+                .max()?;
+            let sc = e - fraction - guard;
+            let mut s = 0i64;
+            for (negative, m, z, n) in live {
+                let sh = z - 24 - sc;
+                let p = m * u64::from(*n);
+                let mag = if sh >= 0 {
+                    p << sh
+                } else {
+                    p.checked_shr((-sh) as u32).unwrap_or(0)
+                } as i64;
+                s += if *negative { -mag } else { mag };
+            }
+            Some((s, sc))
+        })
         .collect();
-    let e = live
+    let sc = slices.iter().map(|&(_, sc)| sc).max()?;
+    let s = slices
         .iter()
-        .map(|(_, m, z, n)| msb(*m) + z + msb(u64::from(*n)) - 24)
-        .max()?;
-    let sc = e - fraction - guard;
-    let mut s = 0i64;
-    for (negative, m, z, n) in live {
-        let sh = z - 24 - sc;
-        let p = m * u64::from(*n);
-        let mag = if sh >= 0 {
-            p << sh
-        } else {
-            p.checked_shr((-sh) as u32).unwrap_or(0)
-        } as i64;
-        s += if *negative { -mag } else { mag };
-    }
+        .map(|&(s, at)| {
+            let mag = s.unsigned_abs().checked_shr((sc - at) as u32).unwrap_or(0) as i64;
+            if s < 0 {
+                -mag
+            } else {
+                mag
+            }
+        })
+        .sum();
     Some((s, sc))
 }
 
@@ -249,13 +284,15 @@ fn special(values: &[Value], taps: &[Tap]) -> Option<Option<bool>> {
     }
 }
 
+/// Each tap's term `(negative, M, z, n)`, in tap order; an infinity's or a NaN's (of weight 0
+/// where [`special`] found none) a zero term.
 fn terms(values: &[Value], taps: &[Tap]) -> Vec<(bool, u64, i32, u32)> {
     values
         .iter()
         .zip(taps)
-        .filter_map(|(v, t)| match v {
-            Value::Finite { negative, m, z } => Some((*negative, *m, *z, t.n)),
-            _ => None,
+        .map(|(v, t)| match v {
+            Value::Finite { negative, m, z } => (*negative, *m, *z, t.n),
+            _ => (false, 0, 0, 0),
         })
         .collect()
 }
@@ -386,15 +423,20 @@ fn field(f: &Field, taps: &[Tap], carried: bool) -> (u32, f64) {
             (mask(c), tail::ratio(c, d as u64, Precision::F32))
         }
         Rule::XrSrgb => {
-            let q = per_term(taps, |b| {
-                let o = i64::from(b) - 384;
-                let d = i64::from(XR_DECODE[o.unsigned_abs().min(639) as usize]);
-                if o < 0 {
-                    -d
-                } else {
-                    d
-                }
-            });
+            let s = floored(
+                taps,
+                |b| {
+                    let o = i64::from(b) - 384;
+                    let d = i64::from(XR_DECODE[o.unsigned_abs().min(639) as usize]);
+                    if o < 0 {
+                        -d
+                    } else {
+                        d
+                    }
+                },
+                XR_SRGB_FLOOR,
+            );
+            let q = (s + (1 << 23)) >> 24;
             // The M3 Max rounds the sum's magnitude to a half float, half away from zero.
             let i = if carried {
                 half_away_11(q.abs())

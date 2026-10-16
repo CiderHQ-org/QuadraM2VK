@@ -1,4 +1,4 @@
-// Owned fixture (WP-RRX, docs/TODO.md 8.27): a kernel's stage inputs, a post-tessellation vertex
+// Owned fixture: a kernel's stage inputs, a post-tessellation vertex
 // function's control-point and per-patch inputs, and argument bindings of each kind (a buffer, a
 // texture, a sampler, threadgroup memory, an argument buffer, a constant reference), each read
 // only where a function constant says, so a function made with the constant false leaves them

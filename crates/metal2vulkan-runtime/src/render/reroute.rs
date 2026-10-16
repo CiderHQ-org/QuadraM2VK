@@ -215,15 +215,20 @@ impl RenderCommandEncoder {
         // the current one's (a shadow's start, whose color the current instance may already
         // leave out). The draws recorded again then record into it as their current one.
         self.rerouting = true;
-        let made = self.next_instance(
-            (&colors, Some(by)),
-            (false, false),
-            ViewSetup::default(),
-            true,
-            None,
-            &locations,
-            &[],
-        );
+        let made = self
+            .next_instance(
+                (&colors, Some(by)),
+                (false, false),
+                ViewSetup::default(),
+                true,
+                None,
+                &locations,
+                &[],
+            )
+            .and_then(|(mut next, stood)| {
+                self.begin_new_draws(&mut next)?;
+                Ok((next, stood))
+            });
         let (instance, stood) = match made {
             Ok((
                 Next::New {
@@ -256,12 +261,15 @@ impl RenderCommandEncoder {
                     let pass = (shape.clone(), Arc::clone(&self.current.compatible));
                     self.passes.push(pass);
                 }
+                // The instance it took the place of is never executed.
+                self.end_unrun(previous);
                 Ok(true)
             }
             // A draw that cannot record so leaves the instance and the pass's layout as they
             // were: the rerouted instance is never executed.
             Err(_) => {
-                self.current = previous;
+                let rerouted = std::mem::replace(&mut self.current, previous);
+                self.end_unrun(rerouted);
                 if let Some(layout) = previous_layout {
                     self.layout = layout;
                 }

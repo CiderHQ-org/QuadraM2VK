@@ -1,6 +1,6 @@
 // metal-std: metal4.1
 // metal-macos-min: 27.0
-// Owned fixture (WP-A27, DESIGN D301): MSL 4.1's memory orders, memory flags, and barrier memory
+// Owned fixture: MSL 4.1's memory orders, memory flags, and barrier memory
 // scopes, which only AIR 2.9 (deployment target macOS 27) spells. Every memory atomic carries its
 // `mem_flags` and every barrier its `memory_order` and memory scope:
 //

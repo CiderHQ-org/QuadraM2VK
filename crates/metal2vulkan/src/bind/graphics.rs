@@ -53,14 +53,14 @@
 //!   Amplification `a` renders into the layer of the pass its render target offset `rto[a]` (plus
 //!   the slice the vertex function chooses, if it does) names where that is below the pass's
 //!   `renderTargetArrayLength`, and into the first layer where it is not, every one in a pass of at
-//!   most one layer (`nil` mappings are offsets of 0; RT6 Metal probe 13, the rule for an index),
-//!   and a pipeline of `maxVertexAmplificationCount` 1 takes no mapping (its draws render the first
-//!   layer through viewport 0; Metal probes); through the viewport its viewport offset `vpo[a]`
-//!   plus the function's index names; and Metal renders every primitive of every instance of one
-//!   amplification before the next's (AMP Metal probe 1, an M3 Max and an M4, with and without API
-//!   validation). The plan's `views` are Vulkan multiview, amplification `a` view `a` in attachment
-//!   layer `a`, where that is exact: the mappings add no viewport offset, those layers are
-//!   consecutive (`l[a] = l[0] + a`, `l[0]` the views' base layer), the count is within the
+//!   most one layer (`nil` mappings are offsets of 0; a Metal probe on an M4, the rule for an
+//!   index), and a pipeline of `maxVertexAmplificationCount` 1 takes no mapping (its draws render
+//!   the first layer through viewport 0; Metal probes); through the viewport its viewport offset
+//!   `vpo[a]` plus the function's index names; and Metal renders every primitive of every instance
+//!   of one amplification before the next's (a Metal probe on an M3 Max and an M4, with and without
+//!   API validation). The plan's `views` are Vulkan multiview, amplification `a` view `a` in
+//!   attachment layer `a`, where that is exact: the mappings add no viewport offset, those layers
+//!   are consecutive (`l[a] = l[0] + a`, `l[0]` the views' base layer), the count is within the
 //!   device's `maxMultiviewViewCount`, the shape does not ask for one draw per amplification
 //!   (`VertexAmplification::one_at_a_time`, under a visibility query), and no stage declares
 //!   `Layer` and the vertex function chooses its slice in no variant (a multiview pipeline cannot
@@ -108,11 +108,42 @@
 //!   (`BindShape::extended_shadows`): the plan of the pipeline as compiled selects such a moved
 //!   writer's tests from `RuntimeFact::MovableStorageWrites`. A mesh pipeline's is not
 //!   implemented, nor a multisampled, layered or amplified draw's.
+//! - **Snapshot reads**. A draw the consumer reads a texture of its own subpass for through a
+//!   snapshot (`BindShape::snapshot_textures`) runs the variant whose fragment function reads it so
+//!   (`VariantKey::snapshot_textures`, `lower::fragment`'s `snapshot`), for each slot of the
+//!   fragment stage's `StageInterface::snapshot_textures`, where the pipeline's two draws are
+//!   Metal's one: a device with `fragmentShaderPixelInterlock`, `fragmentStoresAndAtomics`,
+//!   `attachmentFeedbackLoopLayout` and `extendedDynamicState3ColorWriteMask` (the variant's
+//!   pipeline requires the last two: its feedback loop flag and dynamic write masks), one
+//!   sample, no depth or stencil attachment, no rasterizer discard, no memory the vertex or
+//!   fragment function writes, no attachment in the storage form or input attachment, no
+//!   imageblock, tile memory, shader-side stencil or tests, no interlocked or shadowed colors, no
+//!   capture form, no tessellation or mesh stages, and no amplified or layered draw. Every other
+//!   slot the shape names is left out, and the plan's `variant.snapshot_textures` says which it
+//!   kept. Its plan binds each slot's snapshot (`WriteSource::SnapshotTexels`) and leaves which of
+//!   the two draws runs to the consumer (`PushHole::SnapshotPhase`, zero in the plan's bytes);
+//!   `GraphicsState::snapshot_reads` states the consumer's part.
 //! - **Depth clamp range**. A draw in depth clamp mode through a range above 0 whose Vulkan depth
 //!   clamp holds 0 (`BindShape::depth_clamp_range`) runs the variant whose fragment function, where
 //!   it writes its depth, clamps that depth to the draw's range itself
 //!   (`VariantKey::depth_clamp_range`), from the draw's `PushField::DepthClampRange`
 //!   (`BindState::depth_clamp_range`), as Metal stores a negative NaN as 0 past the range.
+//! - **Pass depth**. Plain Metal stores into the render pass's depth whatever depth format the
+//!   pipeline names: a draw against a `Depth16Unorm` depth whose pipeline names another, or
+//!   against another depth (the hidden `float` one included) whose pipeline names `Depth16Unorm`
+//!   (`BindShape::depth16_pass`), runs the variant whose fragment stage takes Metal's 16-bit codes,
+//!   or leaves the depth to the device, by the pass's depth (`VariantKey::depth16_pass`), where the
+//!   two forms differ (`compile::depth16_stage_form`).
+//! - **Biased depth**. A draw that biases a `Depth16Unorm` depth (`BindShape::depth16_biased`) on
+//!   a profile whose device stores unbiased depths as Metal's codes but not biased ones
+//!   (`DriverDeviation::MetalDepth16Stores` without `DriverDeviation::MetalDepth16BiasedStores`)
+//!   runs the variant whose fragment stage adds Metal's bias and writes Metal's code
+//!   (`VariantKey::depth16_biased`), where its fragment function writes and reads no depth of its
+//!   own and declares no early tests; every other draw keeps the device's depth. A biased draw
+//!   whose fragment stage adds the bias itself (that variant, or any draw where the device stores
+//!   no depth as Metal's code) and whose bias's side the consumer proved
+//!   (`BindShape::depth16_bias_raises`) runs the variant whose stage declares the side
+//!   (`VariantKey::depth16_bias_raises`).
 //! - **Tested storage writes**. A fragment function that stores a color through the interlocked
 //!   storage form and declares no early tests only because it discards
 //!   (`RuntimeFact::TestedStorageWrites`), in a pipeline with a depth or stencil attachment, stores
@@ -151,8 +182,18 @@
 //!   and an amplified one are `NotImplemented(TileReach)`.
 //! - **Draws.** A Metal draw maps to the Vulkan draw of the same arguments; an indirect draw is
 //!   GPU-side unless a stage reads `BaseVertexInstance` from push constants or the plan is
-//!   multiview, in which case `indirect_needs_arguments` asks for the CPU read. A direct draw of a
-//!   multiview plan whose last instance index exceeds `maxMultiviewInstanceIndex` is
+//!   multiview, in which case `indirect_needs_arguments` asks for the CPU read.
+//!   `VerticesPerPrimitive` (a vertex function that writes the primitive ID,
+//!   `LoweringInputs::primitive_id_varying`) is the draw's primitive type's vertices per
+//!   primitive (`BindState::primitive_type`; `MissingPrimitiveType` without one), a direct or
+//!   indirect draw's alike. An indexed draw of such a pipeline, whose vertices primitives share,
+//!   runs its de-indexed variant of the draw's index type (`BindShape::primitive_id_indices`,
+//!   `VariantKey::primitive_id_indices`) as the indexed capture form's draw: `index count`
+//!   vertices from 0, layout `[0, index count, base instance, base vertex]`, its indices read in
+//!   the vertex stage at `PushHole::CaptureIndexAddress`; any other draw of that variant is
+//!   `NeedsVariant` without it. A strip, an indirect indexed draw, indices past their buffer and
+//!   an indexed draw of a plan without the form are `NotImplemented(PrimitiveId)`. A direct
+//!   draw of a multiview plan whose last instance index exceeds `maxMultiviewInstanceIndex` is
 //!   `Unsupported{VertexAmplification; Limit}`. `DrawCommands.uses` lists the draw's index buffer
 //!   and indirect arguments.
 //! - **Index buffer bounds**. A direct indexed draw whose indices run past where Metal's fetch
@@ -191,6 +232,18 @@
 //!   `half` (which Metal forbids, and which keeps every float the control stage computes finite)
 //!   are `BindError`s. On a device without `drawIndirectFirstInstance` an indirect draw asks for
 //!   its arguments on the CPU (`DrawCommands::indirect_needs_arguments`).
+//!
+//!   On a device without `tessellationShader` the pipeline is emulated
+//!   (`GraphicsState::emulated_tessellation`): its Metal stages are its vertex function, as a
+//!   `VERTEX` stage, and its fragment stage, and its plan binds the draw's work buffer and records
+//!   (`WriteSource::TessellationWork`, `TessellationRecords`) and the index buffers in the vertex
+//!   stage, which reads them (`VERTEX_SHADER`) where its function reads what they index. A patch
+//!   draw, checked as above, is a tessellation scan and chunk draws
+//!   (`DrawCommands::tessellation_dispatch`, [`TessellationDispatch`]): the scan reads the factors
+//!   and an indirect draw's arguments, which the consumer copies into its work buffer
+//!   (`COMPUTE_SHADER` uses, the scan's), so no draw asks for its arguments on the CPU, and `draw`
+//!   is chunk 0's `vkCmdDrawIndirect`. A direct draw whose records pass
+//!   `maxStorageBufferRange` is refused (`Unsupported`, `Feature::Tessellation`).
 //! - **Mesh draws**. A mesh render pipeline's Metal stages are its object function, when it has one
 //!   (`TASK_EXT`), its mesh function (`MESH_EXT`) and its fragment function. It draws only mesh
 //!   draws (`DrawCall::MeshThreadgroups`, `MeshThreads`, `MeshThreadgroupsIndirect`), and only it
@@ -205,13 +258,18 @@
 //!   Metal's 1024, a grid of none, and indirect arguments at an offset that is not a multiple of 4
 //!   launch nothing, as plain Metal draws nothing. A threadgroup or a grid past the device's limits
 //!   for its stage is `Unsupported{MeshShading}` naming the limit. An object function's threadgroup
-//!   memory arguments are not implemented. An indirect draw asks for its arguments on the CPU,
-//!   since nothing bounds its GPU-written counts by the device's limits yet. A mesh function writes
-//!   `Layer` in every variant: a pass of more layers than `maxMeshOutputLayers`, into which a mesh
-//!   function choosing its slice could render, is `Unsupported{MeshShading}` naming it. A view
-//!   mapping with a viewport offset, or with a slice offset where the mesh function chooses its
-//!   slice, is not implemented: the mesh function does not add it. A mesh pipeline draws with an
-//!   amplification count of 1 (its `maxVertexAmplificationCount`).
+//!   memory arguments are the encoder's lengths (`setObjectThreadgroupMemoryLength:atIndex:`, the
+//!   object stage's `threadgroup_lengths`, 0 where unset), each rounded up to 16 as a kernel's
+//!   are; its arena with them past the object stage's workgroup memory limit is
+//!   `Unsupported{ThreadgroupMemorySize}` naming it (`RuntimeFact::ObjectThreadgroupArena`). A
+//!   mesh function's arguments, which no encoder sets, are not implemented. An indirect draw asks
+//!   for its arguments on the CPU, since nothing bounds its GPU-written counts by the device's
+//!   limits yet. A mesh function writes `Layer` in every variant: a pass of more layers than
+//!   `maxMeshOutputLayers`, into which a mesh function choosing its slice could render, is
+//!   `Unsupported{MeshShading}` naming it. A view mapping with a viewport offset, or with a slice
+//!   offset where the mesh function chooses its slice, is not implemented: the mesh function does
+//!   not add it. A mesh pipeline draws with an amplification count of 1 (its
+//!   `maxVertexAmplificationCount`).
 //!
 //!   An emulated mesh pipeline (`GraphicsState::mesh_records`) is different in these ways:
 //!   - Its object and mesh functions are `COMPUTE` stages, the object function's first, and
@@ -243,12 +301,12 @@ use crate::bind::plan::resources::{separate_samplers, ResourcePlanner};
 use crate::bind::plan::slots::{
     address_map_variant, anisotropic_variant, bindings, bound_value, buffer_use, check_slots,
     check_sparse_textures, cross_variant, cubic_variant, large_view_candidates, mark_disjoint,
-    plan_buffer, psb_variant, range_variant, record_specialized, srgb_variant,
+    plan_buffer, psb_variant, range_variant, record_specialized, snapshot_forms, srgb_variant,
     storage_view_variant, used_uses, ycbcr_variant,
 };
 use crate::bind::plan::{
-    AccessClass, BindingPlan, BoundKind, ByteRange, DescriptorWrite, FactorTemplate, FieldLocation,
-    GraphicsTemplate, GroupLimits, GroupStage, MeshTemplate, PlannedVertexBuffer,
+    AccessClass, BindingPlan, BoundKind, ByteRange, DescriptorWrite, FactorSite, FactorTemplate,
+    FieldLocation, GraphicsTemplate, GroupLimits, GroupStage, MeshTemplate, PlannedVertexBuffer,
     PushFieldPlacement, PushTemplate, RecordsTemplate, ResourceUse, ShaderTestsTemplate,
     ShadowTemplate, StageTemplate, StrideRules, UseTarget, VertexBufferBind, ViewSetup,
     WriteSource,
@@ -272,7 +330,6 @@ use crate::pipeline::interface::{
     AccessSet, BufferForm, BufferSlot, PushLoc, SlotInterface, Window,
 };
 use crate::pipeline::layout::BindingSource;
-use crate::pipeline::link::tessellation::control::Control;
 use crate::pipeline::sym::{
     Axis, DispatchKeys, PushField, SlotClass, SlotRef, SpecKey, Stage, SyntheticBinding,
 };
@@ -421,15 +478,14 @@ pub struct DrawCommands {
     /// pass instead of the CPU read (`IndexBoundsPass`), which draws each position past the buffer
     /// at index 0 plus the base vertex.
     pub index_bounds_pass: bool,
-    /// A plan that draws each vertex amplification as a draw of its own
-    /// (`BindingPlan::variant`'s `amplification_draws`): one entry per amplification, in order,
-    /// the push writes that make the next draw that amplification's (its id and its view
-    /// mapping's offsets, in each stage that reads them). The consumer records `draw` once per
-    /// entry, each after `push_constants` and the entry's writes, all in one render pass
-    /// instance: Metal renders every primitive of every instance of one amplification before the
-    /// next amplification's (AMP Metal probe 1), which these draws reproduce. An indirect draw is
-    /// recorded from the same arguments each time. Empty for every other plan, whose draw is
-    /// recorded once.
+    /// A plan that draws each vertex amplification as a draw of its own (`BindingPlan::variant`'s
+    /// `amplification_draws`): one entry per amplification, in order, the push writes that make the
+    /// next draw that amplification's (its id and its view mapping's offsets, in each stage that
+    /// reads them). The consumer records `draw` once per entry, each after `push_constants` and the
+    /// entry's writes, all in one render pass instance: Metal renders every primitive of every
+    /// instance of one amplification before the next amplification's (a Metal probe on the M3 Max
+    /// and an M4), which these draws reproduce. An indirect draw is recorded from the same
+    /// arguments each time. Empty for every other plan, whose draw is recorded once.
     pub amplifications: Vec<Vec<PushConstantWrite>>,
     /// A mesh draw's complete specialization, which replaces the plan's: the plan's constants,
     /// the mesh threadgroup's size (`SpecKey::LocalSize`, and its product where the stage's local
@@ -441,6 +497,11 @@ pub struct DrawCommands {
     /// compute dispatch that runs its mesh threadgroups before `draw` draws their primitives
     /// ([`MeshDispatch`] states the consumer contract). `None` for every other draw.
     pub mesh_dispatch: Option<MeshDispatch>,
+    /// A patch draw of an emulated tessellation pipeline
+    /// (`GraphicsState::emulated_tessellation`): the scan that runs before the draw and the
+    /// chunk draws that replace `draw` ([`TessellationDispatch`] states the consumer contract).
+    /// `None` for every other draw.
+    pub tessellation_dispatch: Option<TessellationDispatch>,
 }
 
 /// The compute work of a mesh draw whose mesh function is emulated: its object threadgroups, where
@@ -551,6 +612,153 @@ pub enum MeshRecordsRegion {
     Pool,
 }
 
+/// The work of a patch draw whose pipeline's post-tessellation vertex function runs as a plain
+/// vertex function (`GraphicsState::emulated_tessellation`, on a device without
+/// `tessellationShader`): the tessellation scan
+/// ([`tessellation_scan_module`](crate::bind::tessellation_scan_module) of
+/// [`kernel`](Self::kernel)) processes each patch's factors into the draw's records, one per
+/// instance and patch, and writes the draw's chunks' `VkDrawIndirectCommand`s; each chunk's draw
+/// then draws up to `2^30` of the draw's triangles, three vertices each, which the vertex function
+/// finds in the records (`lower::tessellation`'s module docs).
+///
+/// The consumer, outside the render pass instance the draw records into, and after every command
+/// of the pass that writes the factor buffer or Metal's indirect arguments:
+///
+/// - takes `K` = [`chunks`](Self::chunks) of the records pool's bytes (for
+///   [`TessellationRecords::Pool`]; any value for `Exact`), and makes the draw's work buffer of
+///   [`work`](Self::work)`(K)`'s words, in which it writes its number for the draw at word
+///   [`DRAW_ID`](Self::DRAW_ID), which a records fault reports
+///   (`StatusReport::tessellation_records_overflow`), and for records in the pool the pool's words
+///   at word [`POOL_WORDS`](Self::POOL_WORDS);
+/// - makes the records ([`records`](Self::records)), and writes the work buffer and the records to
+///   the plan's `WriteSource::TessellationWork` and `WriteSource::TessellationRecords` bindings of
+///   the draw's set 0, each bound whole;
+/// - for an indirect draw, copies the 16 bytes of Metal's arguments at
+///   [`arguments`](Self::arguments) into the work buffer's first 16 bytes, after the arguments'
+///   writes, and orders the copy before the scan's reads;
+/// - dispatches the scan (one workgroup) with its set over the work buffer, the records, the
+///   command buffer's `ExecutionStatus` buffer and the factor buffer's [`factors`](Self::factors)
+///   range (the zero buffer, at least 16 bytes, where it is `None`), each scan after the command
+///   buffer's earlier scans, mesh or tessellation (each reads and writes the pool's cursor);
+/// - orders the scan's writes before the draws' indirect command reads (`DRAW_INDIRECT`) and
+///   vertex shader reads (`VERTEX_SHADER`), and the factors' writes before the scan's reads
+///   (`COMPUTE_SHADER`);
+/// - then in the render pass instance records, in place of `DrawCommands::draw`, each chunk
+///   `k < K` in order: the push writes [`draw`](Self::draw)`(k)` gives, then its
+///   `vkCmdDrawIndirect` from the work buffer. A chunk past the draw's triangles draws no vertex.
+///
+/// The scan's reads of the factors and of the arguments (through their copy, which the consumer
+/// records with the scan) are `COMPUTE_SHADER` uses of the draw (`DrawCommands::uses`), and the
+/// vertex stage's of the patch and control-point index buffers `VERTEX_SHADER` ones.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TessellationDispatch {
+    /// The scan's pipeline state.
+    pub kernel: crate::bind::TessellationScanKernel,
+    /// The work buffer's header (`lower::tessellation::work::HEADER` words): the draw's
+    /// arguments (a direct draw's; zero for an indirect one, whose copy fills them), and the
+    /// factor buffer's residual bind offset, instance stride and scale.
+    pub header: Vec<u32>,
+    /// The records.
+    pub records: TessellationRecords,
+    /// The range of the factor buffer the scan binds, from its bind offset aligned down to
+    /// `minStorageBufferOffsetAlignment` over the factors the draw reads; `None` where the
+    /// encoder set no factor buffer, whose zero factors cull every patch.
+    pub factors: Option<BufferRange>,
+    /// For an indirect draw, the offset of Metal's arguments (`MTLDrawPatchIndirectArguments`,
+    /// 16 bytes) in the indirect buffer's `VkBuffer`, a multiple of 4, which the consumer copies
+    /// into the work buffer's first 16 bytes before the scan. `None` for a direct draw.
+    pub arguments: Option<u64>,
+    /// Where each stage that reads `PushField::TessellationChunk` holds it, in its push window.
+    pub(crate) chunk_fields: Vec<(vk::ShaderStageFlags, u32)>,
+    /// The most triangles one patch of the pipeline draws.
+    pub(crate) patch_triangles: u32,
+}
+
+impl TessellationDispatch {
+    /// The work buffer's word where the consumer writes its records pool's words, for
+    /// [`TessellationRecords::Pool`].
+    pub const POOL_WORDS: usize = crate::lower::tessellation::work::POOL_WORDS as usize;
+    /// The work buffer's word where the consumer writes its number for the draw.
+    pub const DRAW_ID: usize = crate::lower::tessellation::work::DRAW_ID as usize;
+
+    /// `K`, the draw's chunks: enough for every triangle its records can draw, at most the
+    /// pipeline's most per patch for each record. For [`TessellationRecords::Pool`] that is every
+    /// record a pool of `pool_bytes` bytes holds; `pool_bytes` is not read otherwise.
+    pub fn chunks(&self, pool_bytes: u64) -> u32 {
+        use crate::lower::tessellation::work;
+        let records = match self.records {
+            TessellationRecords::Exact { records } => u64::from(records),
+            TessellationRecords::Pool => pool_bytes / (4 * u64::from(work::RECORD_WORDS)),
+        };
+        let triangles = records.saturating_mul(u64::from(self.patch_triangles));
+        u32::try_from(work::chunks(triangles)).unwrap_or(u32::MAX)
+    }
+
+    /// The work buffer's words for `chunks` chunks: the header with `K` in it, then each
+    /// chunk's slot, zero. Its bytes are 4 per word, which the consumer binds whole.
+    pub fn work(&self, chunks: u32) -> Vec<u32> {
+        use crate::lower::tessellation::work;
+        let words = usize::try_from(work::words(chunks)).unwrap_or(usize::MAX);
+        let mut out = Vec::with_capacity(words);
+        out.extend_from_slice(&self.header);
+        out.resize(words, 0);
+        out[work::CHUNKS as usize] = chunks;
+        out
+    }
+
+    /// Chunk `k`'s draw: the push writes that make the draw chunk `k`'s
+    /// (`PushField::TessellationChunk`, in each stage that reads it), and its `vkCmdDrawIndirect`
+    /// of one command from the work buffer, whose offset is the chunk slot's.
+    pub fn draw(&self, k: u32) -> (Vec<PushConstantWrite>, vk::DrawCommand) {
+        let writes = self
+            .chunk_fields
+            .iter()
+            .map(|&(stages, offset)| PushConstantWrite {
+                stages,
+                offset,
+                bytes: k.to_le_bytes().to_vec(),
+            })
+            .collect();
+        let command = vk::DrawCommand::DrawIndirect {
+            offset: crate::lower::tessellation::work::draw_offset(k),
+            draw_count: 1,
+            stride: 16,
+        };
+        (writes, command)
+    }
+}
+
+/// The records of an emulated tessellation draw ([`TessellationDispatch`]), `32` bytes per
+/// instance and patch, which its scan and its draws bind whole.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum TessellationRecords {
+    /// A direct draw's `records` (`patchCount · instanceCount`), in a region of the draw's own
+    /// of [`bytes`](Self::bytes) bytes.
+    Exact { records: u32 },
+    /// An indirect draw's, in the command buffer's records pool (the emulated mesh draws' pool,
+    /// `MeshRecordsRegion::Pool`), which its scan reserves them from: a draw that does not fit
+    /// draws nothing and fails the command buffer
+    /// (`StatusReport::tessellation_records_overflow`).
+    Pool,
+}
+
+impl TessellationRecords {
+    /// The bytes of an `Exact` region, at least 16 (the smallest binding); 0 for the pool.
+    pub fn bytes(&self) -> u64 {
+        match *self {
+            TessellationRecords::Exact { records } => {
+                (u64::from(records) * 4 * u64::from(crate::lower::tessellation::work::RECORD_WORDS))
+                    .max(16)
+            }
+            TessellationRecords::Pool => 0,
+        }
+    }
+}
+
 /// How a direct indexed draw treats its index positions past the index buffer: the positions whose
 /// bytes do not lie wholly before where Metal's fetch stops reading it
 /// ([`IndexBufferRef::fetch_end`], the length rounded up to 4 bytes). Metal's API validation
@@ -596,7 +804,9 @@ impl RenderPipeline {
 /// vertex and control stages run none, and its post-tessellation vertex function is its
 /// evaluation stage; a mesh render pipeline's object and mesh functions are its task and mesh
 /// stages, and an emulated pipeline's (`emulated`) are its compute stages, the object function's
-/// first where it has one, and its synthesized vertex stage runs none.
+/// first where it has one, and its synthesized vertex stage runs none; the geometry stages link
+/// generates (`link::geometry`: barycentric weights read as varyings, a selected slice or
+/// viewport) run none and bind nothing.
 fn metal_stages(
     stages: impl ExactSizeIterator<Item = vk::ShaderStage>,
     tessellated: bool,
@@ -623,6 +833,7 @@ fn metal_stages(
             Stage::Vertex
         } else if tessellated
             && (s == vk::ShaderStage::VERTEX || s == vk::ShaderStage::TESSELLATION_CONTROL)
+            || s == vk::ShaderStage::GEOMETRY && !emulated
         {
             continue;
         } else {
@@ -631,6 +842,24 @@ fn metal_stages(
         out.push((stage, s));
     }
     Ok(out)
+}
+
+/// Whether a module of mesh render pipeline `p` other than its object function's declares
+/// threadgroup memory arguments (`SpecKey::TgLength`): a mesh function's, whose lengths no encoder
+/// setter sets. The object module is the task stage, or, `emulated`, the first of the two compute
+/// stages, as [`metal_stages`] names them.
+fn other_stage_lengths(p: &RenderPipeline, emulated: bool) -> bool {
+    p.stages.iter().enumerate().any(|(i, m)| {
+        let object = m.stage == vk::ShaderStage::TASK_EXT
+            || emulated
+                && m.stage == vk::ShaderStage::COMPUTE
+                && p.stages.get(i + 1).map(|n| n.stage) == Some(vk::ShaderStage::COMPUTE);
+        !object
+            && m.specialization
+                .constants
+                .iter()
+                .any(|c| matches!(c.key, SpecKey::TgLength(_)))
+    })
 }
 
 /// The vertex-stage buffer slot of Metal buffer index `index`.
@@ -703,8 +932,8 @@ fn route(
         });
     }
     // A pipeline of `maxVertexAmplificationCount` 1 takes no mapping; the layer amplification `a`
-    // renders into is its offset below the pass's layers, the first layer at or past them (RT6
-    // Metal probe 13).
+    // renders into is its offset below the pass's layers, the first layer at or past them (a Metal
+    // probe on an M4).
     let mapping = |a: u32| amp.mapping(a, max);
     let layer = |a: u32| amp.layer(a, length, max);
     let base_layer = layer(0);
@@ -715,8 +944,9 @@ fn route(
         && (count == 1 || (count <= max_views && !amp.one_at_a_time))
         && !(declares_layer && (count > 1 || base_layer != 0));
     if !as_views {
-        // Metal renders amplification-major, every primitive of every instance of one
-        // amplification before the next's (AMP Metal probe 1): exactly a draw of each in turn.
+        // Metal renders amplification-major, every primitive of every instance of one amplification
+        // before the next's (a Metal probe on the M3 Max and an M4): exactly a draw of each in
+        // turn.
         return Ok(Route::Draws {
             offsets: (0..count)
                 .map(|a| {
@@ -762,6 +992,10 @@ fn stores(a: crate::pipeline::graphics::ColorAttachmentState) -> bool {
 fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<BindingPlan, BindError> {
     check_slots(shape)?;
     let records = p.graphics.mesh_records.as_ref();
+    // An emulated tessellation pipeline: its post-tessellation vertex function is its vertex
+    // stage, and its draws scan their patches first.
+    let emulated_tessellation = p.graphics.emulated_tessellation;
+    let tessellation = p.graphics.tessellation.is_some() || emulated_tessellation.is_some();
     let modules = metal_stages(
         p.stages.iter().map(|m| m.stage),
         p.graphics.tessellation.is_some(),
@@ -791,6 +1025,16 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
     if captured_positions.is_some() && shape.vertex_amplification.count > 1 {
         return Err(not_implemented(Feature::TileReach));
     }
+    // A pipeline whose vertex function writes the primitive ID's varying runs an indexed draw
+    // in its de-indexed form, of the draw's index type.
+    let writes_primitive_ids = p.interface.push.iter().any(|pl| {
+        pl.stage == Stage::Vertex
+            && pl
+                .fields
+                .iter()
+                .any(|f| f.field == PushField::VerticesPerPrimitive)
+    });
+    let primitive_id_indices = shape.primitive_id_indices.filter(|_| writes_primitive_ids);
     let route = route(
         &shape.vertex_amplification,
         p.graphics.max_vertex_amplification_count,
@@ -801,7 +1045,7 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
     let (views, amplification_draws, amplifications) = match route {
         Route::Views(views) => (views, None, Vec::new()),
         // A tessellation pipeline's patches are not drawn one amplification at a time.
-        Route::Draws { .. } if p.graphics.tessellation.is_some() => {
+        Route::Draws { .. } if tessellation => {
             return Err(not_implemented(Feature::VertexAmplification))
         }
         // A mesh function does not add a view mapping's offsets yet.
@@ -990,6 +1234,72 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
             _ => None,
         })
         .collect();
+    // The fragment texture slots the draw reads through a snapshot: those the shape names that
+    // the fragment function can read so, where the pipeline's two draws are Metal's one. The two
+    // run the same fragments (the pipeline differs only in its dynamic write masks), the first
+    // with every mask 0 running none of the function past its copy, so the pipeline may hold
+    // nothing else either draw writes, tests, or orders: one sample, no depth or stencil, no
+    // memory either function writes, no attachment, imageblock, tile memory, stencil shadow or
+    // stand-in of the storage form or an input attachment, and no other interlock. A tessellation
+    // or mesh pipeline's, a capture variant's, and an amplified or layered draw's are not built.
+    // The device makes the variant's pipeline: its feedback loop flag and dynamic write masks
+    // need `attachmentFeedbackLoopLayout` and `extendedDynamicState3ColorWriteMask`.
+    // Every other slot the shape names is left out, and the consumer reads it as it would without
+    // a snapshot.
+    let enabled = &profile.fields().enabled.features;
+    let snapshot_able = profile.fields().fragment.pixel_interlock
+        && enabled.contains(&VkFeature::FragmentStoresAndAtomics)
+        && enabled.contains(&VkFeature::AttachmentFeedbackLoopLayout)
+        && enabled.contains(&VkFeature::ExtendedDynamicState3ColorWriteMask)
+        && p.graphics.rasterization_samples.as_raw() <= 1
+        && p.graphics.depth_format.is_none()
+        && p.graphics.stencil_format.is_none()
+        && !p.graphics.rasterizer_discard
+        && !p.graphics.vertex_writes_memory
+        && !p.graphics.fragment_writes_memory
+        && p.graphics.storage_attachments.is_empty()
+        && p.graphics.input_attachments.is_empty()
+        && p.graphics.fragment_imageblock.is_none()
+        && p.graphics.shader_tests.is_none()
+        && p.graphics.tessellation.is_none()
+        && shadow.is_none()
+        && tile_memory.is_none()
+        && records.is_none()
+        && !mesh
+        && captured_positions.is_none()
+        && interlocked_colors.is_empty()
+        && extended_shadows.is_empty()
+        && shape.vertex_amplification.count <= 1
+        && shape.render_target_array_length <= 1;
+    let snapshot_textures: std::collections::BTreeSet<SlotRef> = match snapshot_able {
+        true => p
+            .stages
+            .iter()
+            .filter(|m| m.stage == vk::ShaderStage::FRAGMENT)
+            .flat_map(|m| &m.snapshot_textures)
+            .filter(|index| shape.snapshot_textures.contains(index))
+            .map(|&index| SlotRef {
+                stage: Stage::Fragment,
+                class: SlotClass::Texture,
+                index,
+            })
+            .collect(),
+        false => std::collections::BTreeSet::new(),
+    };
+    let compiled_snapshots: std::collections::BTreeSet<SlotRef> = p
+        .layout
+        .sets
+        .iter()
+        .flat_map(|set| &set.bindings)
+        .filter_map(|b| match b.source {
+            BindingSource::SnapshotTexels(index) => Some(SlotRef {
+                stage: Stage::Fragment,
+                class: SlotClass::Texture,
+                index,
+            }),
+            _ => None,
+        })
+        .collect();
     // A draw in depth clamp mode through a range above 0 whose Vulkan depth clamp holds 0: the
     // variant whose fragment function clamps the depth it writes to the draw's range. A pipeline
     // whose fragment function writes no depth has none to clamp.
@@ -998,6 +1308,57 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
         .dependencies
         .iter()
         .any(|d| d.fact == RuntimeFact::DepthClampRange);
+    // A draw that biases a `Depth16Unorm` depth on a profile that stores its unbiased depths as
+    // Metal's codes but not its biased ones: the variant whose fragment stage adds the bias and
+    // writes Metal's code, where its function can take that form (`LoweringInputs::depth16_codes`):
+    // it writes and reads no depth of its own (a written depth takes no bias, and one read from
+    // the position keeps the device's) and declares no early tests.
+    let named_depth16 = p.graphics.depth_format == Some(vk::Format::D16_UNORM);
+    let pass_depth16 = shape.depth16_pass.unwrap_or(named_depth16);
+    let stage_form = |biased| {
+        crate::pipeline::compile::depth16_stage_form(
+            !p.graphics.rasterizer_discard,
+            p.graphics.rasterization_samples.as_raw(),
+            biased,
+            profile,
+        )
+    };
+    let depth16_biased = shape.depth16_biased
+        && pass_depth16
+        && !p.graphics.writes_depth
+        && !p.graphics.reads_position_depth
+        && !p.graphics.early_fragment_tests
+        && stage_form(true)
+        && !stage_form(false);
+    let compiled_biased = p
+        .dependencies
+        .iter()
+        .any(|d| d.fact == RuntimeFact::Depth16Biased);
+    // A biased draw of proven side whose fragment stage adds the bias itself (the variant above,
+    // or every draw where the device stores no depth as Metal's code): the variant whose stage
+    // declares the side.
+    let depth16_bias_raises = shape.depth16_bias_raises.filter(|_| {
+        shape.depth16_biased
+            && pass_depth16
+            && !p.graphics.writes_depth
+            && !p.graphics.reads_position_depth
+            && !p.graphics.early_fragment_tests
+            && stage_form(depth16_biased)
+    });
+    let compiled_bias_raises = p.dependencies.iter().find_map(|d| match d.fact {
+        RuntimeFact::Depth16BiasSide { raises } => Some(raises),
+        _ => None,
+    });
+    // A draw against a depth whose format is `Depth16Unorm` where the pipeline names another, or
+    // the other way round: the variant whose fragment stage takes Metal's codes by the pass's
+    // depth, where the pipeline's fragment stage can take them at all.
+    let depth16_pass = shape
+        .depth16_pass
+        .filter(|&depth16| depth16 != named_depth16 && stage_form(depth16_biased));
+    let compiled_depth16_pass = p.dependencies.iter().find_map(|d| match d.fact {
+        RuntimeFact::Depth16Pass { depth16 } => Some(depth16),
+        _ => None,
+    });
     // A fragment function that stores a color through the interlocked storage form before the
     // depth and stencil tests, since it discards (`RuntimeFact::TestedStorageWrites`), in a
     // pipeline with a depth or stencil attachment: Metal's store, as compiled, where the draw's
@@ -1233,6 +1594,7 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
                     | PushField::ExecutionStatusAddress
                     | PushField::CaptureAddress
                     | PushField::CaptureIndexAddress
+                    | PushField::SnapshotPhase
             );
             match field.field {
                 PushField::RootTableAddress => reads_root_table = true,
@@ -1245,6 +1607,11 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
                 | PushField::CaptureLayout
                     if stage == Stage::Vertex => {}
                 PushField::BaseVertexInstance if stage == Stage::Vertex => {}
+                // The draw's vertices per primitive, which instantiation writes from its
+                // primitive type.
+                PushField::VerticesPerPrimitive if stage == Stage::Vertex => {}
+                // Which of a snapshot variant's draws runs: the consumer's hole.
+                PushField::SnapshotPhase if stage == Stage::Fragment => {}
                 PushField::SlotBindOffset(slot)
                     if planned(slot).is_some_and(|b| b.binding.is_some()) => {}
                 // The bound buffer's Metal address; a `set*Bytes` binding has none.
@@ -1295,6 +1662,8 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
                 // The encoder's blend color, which instantiation reads from the state.
                 PushField::BlendColor if stage == Stage::Fragment => {}
                 PushField::HalfBlendColor if stage == Stage::Fragment => {}
+                // The draw's depth bias, which instantiation reads from the state.
+                PushField::DepthBias if stage == Stage::Fragment => {}
                 // The storage form's kept channels, which instantiation reads from the template.
                 PushField::StorageKeptChannels if stage == Stage::Fragment => {}
                 // An attachment's rule word, which instantiation reads from the template.
@@ -1306,6 +1675,17 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
                 | PushField::AmplificationLayerOffset
                 | PushField::AmplificationViewportOffset
                     if matches!(field.loc, PushLoc::Push { .. }) => {}
+                // An emulated tessellation draw's chunk, which instantiation writes before each
+                // chunk's draw, in the window as the amplification fields are; and its index
+                // buffers' fields, which it writes from the draw.
+                PushField::TessellationChunk
+                    if stage == Stage::Vertex
+                        && emulated_tessellation.is_some()
+                        && matches!(field.loc, PushLoc::Push { .. }) => {}
+                PushField::PatchIndexOffset
+                | PushField::PatchIndexBound
+                | PushField::ControlPointIndexOffset
+                    if stage == Stage::Vertex && emulated_tessellation.is_some() => {}
                 PushField::VertexBufferStride(layout) if stage == Stage::Vertex => {
                     match pulled_stride(layout) {
                         Some(VertexStride::Static(_)) => {}
@@ -1532,7 +1912,7 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
                         }
                     }
                     // The draw's patch index buffer, or the zero buffer for a draw without one.
-                    SyntheticBinding::PatchIndices if p.graphics.tessellation.is_some() => {
+                    SyntheticBinding::PatchIndices if tessellation => {
                         patch_index_binding = Some((set.set, b.binding));
                         WriteSource::PatchIndices {
                             min_bytes: zero_buffer_bytes(profile),
@@ -1540,13 +1920,20 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
                     }
                     // The draw's control-point index buffer, of a pipeline with a control-point
                     // index type.
-                    SyntheticBinding::ControlPointIndices if p.graphics.tessellation.is_some() => {
+                    SyntheticBinding::ControlPointIndices if tessellation => {
                         control_point_index_binding = Some((set.set, b.binding));
                         WriteSource::ControlPointIndices
                     }
                     // An emulated mesh function's records and work buffer, each draw's own.
                     SyntheticBinding::MeshRecords if records.is_some() => WriteSource::MeshRecords,
                     SyntheticBinding::MeshWork if records.is_some() => WriteSource::MeshWork,
+                    // An emulated tessellation draw's work buffer and records, each its own.
+                    SyntheticBinding::TessellationWork if emulated_tessellation.is_some() => {
+                        WriteSource::TessellationWork
+                    }
+                    SyntheticBinding::TessellationRecords if emulated_tessellation.is_some() => {
+                        WriteSource::TessellationRecords
+                    }
                     SyntheticBinding::HandleTable => {
                         planner(&mut heap)?.table(stage, set.set, b.binding)?
                     }
@@ -1663,6 +2050,8 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
                 BindingSource::ExtendedShadow(color_index) => {
                     WriteSource::ExtendedShadow { color_index }
                 }
+                // A texture's snapshot, which the draw reads the texture through.
+                BindingSource::SnapshotTexels(slot) => WriteSource::SnapshotTexels { slot },
             };
             descriptors.push(DescriptorWrite {
                 set: set.set,
@@ -1767,6 +2156,21 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
     layout.dedup_by_key(|c| c.id);
     let samples = u64::from(p.graphics.rasterization_samples.as_raw().max(1));
     check_sparse_textures(&p.dependencies, profile, shape)?;
+    // An object function's threadgroup memory arguments, whose lengths the encoder sets
+    // (`setObjectThreadgroupMemoryLength:atIndex:`): its arena's facts, and the total of its
+    // specialized lengths.
+    let object_arena = p.dependencies.iter().find_map(|d| match d.fact {
+        RuntimeFact::ObjectThreadgroupArena {
+            static_bytes,
+            payload,
+        } => Some((static_bytes, payload)),
+        _ => None,
+    });
+    if mesh && other_stage_lengths(p, records.is_some()) {
+        // A mesh function's arguments, whose lengths no Metal setter sets.
+        return Err(not_implemented(Feature::MeshShading));
+    }
+    let mut object_regions: Option<u64> = None;
     let mut fixed = Vec::new();
     for c in &layout {
         if let Some(v) = bound_value(c.key, shape, &resources)? {
@@ -1788,8 +2192,16 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
             {
                 continue
             }
-            // An object function's threadgroup memory arguments
-            // (`setObjectThreadgroupMemoryLength:atIndex:`), which the bind state does not carry.
+            // An object function's threadgroup memory arguments: the encoder's lengths, each
+            // rounded up to 16 as a kernel's are (an unset one is 0).
+            SpecKey::TgLength(n) if mesh && object_arena.is_some() => {
+                let len = stage_shape(Stage::Object)
+                    .and_then(|s| s.threadgroup_lengths.get(&n))
+                    .map_or(0, |&len| u64::from(len))
+                    .next_multiple_of(crate::memory::arena::REGION_ALIGN);
+                object_regions = Some(object_regions.unwrap_or(0).saturating_add(len));
+                len
+            }
             SpecKey::TgLength(_) if mesh => return Err(not_implemented(Feature::MeshShading)),
             // A fragment function's tile threadgroup memory and the pass's tile.
             SpecKey::TgOffset(_)
@@ -1807,6 +2219,20 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
             }
         };
         fixed.push((c.key, v));
+    }
+    // The object function's arena with those lengths, within its stage's workgroup memory limit.
+    if let (Some((static_bytes, payload)), Some(regions)) = (object_arena, object_regions) {
+        crate::lower::mesh::stage_workgroup_limit(
+            Stage::Object,
+            profile,
+            payload.map(u64::from),
+            0,
+        )
+        .check(u64::from(static_bytes).saturating_add(regions))
+        .map_err(|e| match e {
+            crate::error::Error::Unsupported(u) => BindError::Unsupported(u),
+            other => internal(format!("an object function's threadgroup memory: {other}")),
+        })?;
     }
     record_specialized(&push, shape, &mut resources)?;
     let specialization = spec_key(&layout, |k| {
@@ -1877,12 +2303,18 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
         .filter(|b| matches!(b.bound, BoundKind::Buffer { .. }))
         .map(|b| buffer_use(b, stage_flags(b.slot.stage)))
         .collect();
-    if factor_binding.is_some() {
+    // The factors: the control stage's, or an emulated pipeline's scan's.
+    if factor_binding.is_some()
+        || emulated_tessellation.is_some() && shape.tessellation_factor_buffer
+    {
         uses.push(ResourceUse {
             resource: UseTarget::TessellationFactors,
             access: AccessSet::READ,
             class: AccessClass::Storage,
-            stages: vk::PipelineStageFlags2::TESSELLATION_CONTROL_SHADER,
+            stages: match emulated_tessellation {
+                Some(_) => vk::PipelineStageFlags2::COMPUTE_SHADER,
+                None => vk::PipelineStageFlags2::TESSELLATION_CONTROL_SHADER,
+            },
             range: None,
         });
     }
@@ -1969,12 +2401,23 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
     let other_colors = compiled_zeroed != zeroed_colors
         || compiled_dropped != dropped_colors
         || compiled_interlocked != interlocked_colors
-        || compiled_shadows != extended_shadows;
+        || compiled_shadows != extended_shadows
+        || compiled_snapshots != snapshot_textures;
     variant.zeroed_colors = zeroed_colors;
     variant.dropped_colors = dropped_colors;
     variant.interlocked_colors = interlocked_colors;
     variant.extended_shadows = extended_shadows;
+    variant.snapshot_textures = snapshot_forms(
+        profile,
+        &snapshot_textures,
+        &p.interface.slots,
+        shape,
+        (&variant.srgb_textures, &variant.cross_class),
+    );
     variant.depth_clamp_range = depth_clamp_range;
+    variant.depth16_pass = depth16_pass;
+    variant.depth16_biased = depth16_biased;
+    variant.depth16_bias_raises = depth16_bias_raises;
     variant.read_only_tests = read_only_tests;
     variant.shader_tests = shader_tests;
     variant.shader_stencil = shader_stencil;
@@ -1982,6 +2425,7 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
     // A pipeline compiled in the capture form states its variant: a consumer asks for it, and no
     // bind shape does.
     variant.captured_positions = captured_positions;
+    variant.primitive_id_indices = primitive_id_indices;
     // Tables that may pass `maxStorageBufferRange`: the variant that reads them at their
     // addresses (and a pipeline compiled so states it).
     variant.addressed_function_tables = crate::bind::heap::addressed_function_tables(
@@ -2013,6 +2457,9 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
                 || compiled_compensation != viewport_compensation
                 || other_colors
                 || compiled_range != depth_clamp_range
+                || compiled_depth16_pass != depth16_pass
+                || compiled_biased != depth16_biased
+                || compiled_bias_raises != depth16_bias_raises
                 || compiled_tests != read_only_tests
                 || compiled_shader_tests != shader_tests
                 || compiled_shader_stencil != shader_stencil,
@@ -2027,28 +2474,19 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
                 .enabled
                 .features
                 .contains(&VkFeature::RobustBufferAccess2),
-            tessellation: match (p.graphics.tessellation, patch_index_binding) {
-                (Some(t), Some(patch_indices)) => Some(FactorTemplate {
-                    push_offset: t.push_offset,
-                    step: t.factor_step_function,
-                    patch_bytes: Control::factor_bytes(t.domain),
-                    binding: factor_binding,
-                    alignment: limits.min_storage_buffer_offset_alignment,
-                    max_range: u64::from(limits.max_storage_buffer_range),
-                    control_points: t.control_points,
-                    patch_indices,
-                    control_point_indices: control_point_indices(
-                        t.control_point_index_type,
-                        control_point_index_binding,
-                    )?,
-                }),
-                (None, _) => None,
-                (Some(_), None) => {
-                    return Err(internal(
-                        "a tessellation pipeline's layout without its patch index buffer",
-                    ))
-                }
-            },
+            tessellation: factor_template(
+                p,
+                (
+                    factor_binding,
+                    patch_index_binding,
+                    control_point_index_binding,
+                ),
+                (
+                    limits.min_storage_buffer_offset_alignment,
+                    u64::from(limits.max_storage_buffer_range),
+                ),
+                shape.tessellation_factor_buffer,
+            )?,
             shadow_stencil: shadow,
             mesh,
             shader_tests: p
@@ -2057,6 +2495,7 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
                 .is_some()
                 .then_some(ShaderTestsTemplate),
             capture: captured_positions,
+            deindexed: primitive_id_indices,
             storage_kept: storage_kept(p)?,
             color_write_rules: p.graphics.color_write_rules.clone(),
         }),
@@ -2217,6 +2656,22 @@ impl BindingPlan {
             return Err(BindError::NeedsVariant {
                 variant: Box::new(self.variant.clone()),
             });
+        }
+        // An indexed draw of a pipeline that writes the primitive ID runs on its de-indexed
+        // variant of the draw's index type, and every other draw on the variant without it.
+        if t.capture.is_none() && t.deindexed.is_some() {
+            let asked = match *draw {
+                DrawCall::Indexed { .. } => capture_form(draw)?.index_type(),
+                _ => None,
+            };
+            if asked != t.deindexed {
+                return Err(BindError::NeedsVariant {
+                    variant: Box::new(VariantKey {
+                        primitive_id_indices: asked,
+                        ..self.variant.clone()
+                    }),
+                });
+            }
         }
         // A draw of the other capture form runs on that form's variant.
         if let Some(form) = t.capture {
@@ -2835,21 +3290,74 @@ fn emulated_draw(
 /// them (the smallest binding).
 const MIN_RECORDS_BYTES: u64 = 16;
 
-/// The layout's control-point index binding of a pipeline of control-point index type `ty`,
-/// with the bytes of one index: one exactly for a type other than `None`.
-fn control_point_indices(
-    ty: metal::TessellationControlPointIndexType,
-    binding: Option<(u32, u32)>,
-) -> Result<Option<((u32, u32), u64)>, BindError> {
+/// What a patch draw of `p` instantiates ([`FactorTemplate`]), from the layout's factor, patch
+/// index and control-point index bindings, the device's `(minStorageBufferOffsetAlignment,
+/// maxStorageBufferRange)`, and whether the shape sets a factor buffer: `None` for a pipeline
+/// that draws no patches. A native pipeline's control stage binds the patch index buffer, and the
+/// control-point index buffer exactly when the pipeline has a control-point index type; an
+/// emulated pipeline's vertex stage binds each only where it reads it.
+fn factor_template(
+    p: &RenderPipeline,
+    (factors, patch_indices, control_point_indices): (
+        Option<(u32, u32)>,
+        Option<(u32, u32)>,
+        Option<(u32, u32)>,
+    ),
+    (alignment, max_range): (u64, u64),
+    factor_buffer: bool,
+) -> Result<Option<FactorTemplate>, BindError> {
     use metal::TessellationControlPointIndexType as T;
-    match (ty, binding) {
-        (T::None, None) => Ok(None),
-        (T::UInt16, Some(b)) => Ok(Some((b, 2))),
-        (T::UInt32, Some(b)) => Ok(Some((b, 4))),
-        _ => Err(internal(format!(
-            "a tessellation pipeline of control-point index type {ty:?} with binding {binding:?}"
-        ))),
-    }
+    let (domain, step, control_points, ty, site) =
+        match (p.graphics.tessellation, p.graphics.emulated_tessellation) {
+            (Some(t), None) => {
+                if patch_indices.is_none() {
+                    return Err(internal(
+                        "a tessellation pipeline's layout without its patch index buffer",
+                    ));
+                }
+                let site = FactorSite::Control {
+                    push_offset: t.push_offset,
+                    binding: factors,
+                };
+                let ty = t.control_point_index_type;
+                (t.domain, t.factor_step_function, t.control_points, ty, site)
+            }
+            (None, Some(e)) => {
+                let site = FactorSite::Scan {
+                    kernel: e.scan_kernel(),
+                    factors: factor_buffer,
+                };
+                let d = e.descriptor;
+                let ty = d.control_point_index_type;
+                (e.domain, d.factor_step_function, e.control_points, ty, site)
+            }
+            (None, None) => return Ok(None),
+            (Some(_), Some(_)) => {
+                return Err(internal("a tessellation pipeline both native and emulated"))
+            }
+        };
+    let read = matches!(site, FactorSite::Scan { .. }) || control_point_indices.is_some();
+    let control_point_indices = match (ty, read) {
+        (T::None, _) if control_point_indices.is_none() => None,
+        (T::UInt16, true) => Some((control_point_indices, 2)),
+        (T::UInt32, true) => Some((control_point_indices, 4)),
+        _ => {
+            return Err(internal(format!(
+                "a tessellation pipeline of control-point index type {ty:?} with binding \
+                 {control_point_indices:?}"
+            )))
+        }
+    };
+    Ok(Some(FactorTemplate {
+        step,
+        patch_bytes: crate::lower::tessellation::factors::factor_bytes(domain),
+        alignment,
+        max_range,
+        control_points,
+        patch_indices,
+        control_point_indices,
+        site,
+    }))
 }
 
 /// `+∞` as a `half`'s bits.
@@ -2862,22 +3370,64 @@ const HALF_INFINITY: u16 = 0x7c00;
 /// 2^-24, is 2^8, past every level (at most 64), and with the largest finite one below 2^48.
 const INFINITE_SCALE: f32 = 4_294_967_296.0;
 
-/// The control stage of a patch draw of a tessellation pipeline (`factors` is the plan's, `None`
-/// for any other pipeline): the draw draws patches exactly when the pipeline is one, with the
-/// control points the function states, indexed exactly when the pipeline has a control-point index
-/// type. Its push range holds the factor buffer's residual bind offset, instance stride (rounded
-/// down to a multiple of 4), and the scale rounded to `half` as Metal rounds it (an infinite one as
-/// `INFINITE_SCALE`), then the patch index buffer's residual bind offset and whether the draw has
-/// one, then the control-point index buffer's residual bind offset (0 without one); the factor
-/// buffer is bound over the factors the draw reads ([`factor_window`]), the patch index buffer over
-/// the indices it reads (a direct draw's from its patch start, an indirect one's from the offset to
-/// the buffer's end), and the control-point index buffer over the indices it reads
-/// ([`control_point_window`]).
+/// What a patch draw binds and writes ([`patch_binding`]): the factor buffer's range, residual bind
+/// offset, instance stride and scale, and the patch and control-point index buffers' ranges and
+/// fields.
+struct PatchBinding {
+    /// The factor buffer's range, where the encoder set one.
+    factors: Option<BufferRange>,
+    /// The factor buffer's residual bind offset.
+    residual: u32,
+    /// Its instance stride, rounded down to a multiple of 4.
+    stride: u32,
+    /// The scale, rounded to `half` as Metal rounds it, an infinite one as `INFINITE_SCALE`.
+    scale: f32,
+    /// The patch index buffer's descriptor range, where a stage binds it and the draw has one.
+    patch_indices: Option<DescriptorRange>,
+    /// Its residual bind offset.
+    index_residual: u32,
+    /// Whether the draw has a patch index buffer (1 or 0).
+    indexed: u32,
+    /// The control-point index buffer's descriptor range, where a stage binds it.
+    control_point_indices: Option<DescriptorRange>,
+    /// Its residual bind offset (0 without one).
+    point_residual: u32,
+}
+
+/// The control stage's writes of a patch draw of a native tessellation pipeline (`factors` is
+/// the plan's, `None` for any other pipeline): [`patch_binding`]'s, as [`control_writes`] pushes
+/// and binds them.
 fn patch_draw(
     factors: Option<&FactorTemplate>,
     state: &BindState,
     draw: &DrawCall,
 ) -> Result<Option<(PushConstantWrite, Vec<DescriptorRange>)>, BindError> {
+    let Some(b) = patch_binding(factors, state, draw)? else {
+        return Ok(None);
+    };
+    match factors.map(|t| t.site) {
+        Some(FactorSite::Control {
+            push_offset,
+            binding,
+        }) => control_writes(b, push_offset, binding).map(Some),
+        _ => Err(internal("a native patch draw of an emulated pipeline")),
+    }
+}
+
+/// The bindings of a patch draw of a tessellation pipeline (`factors` is the plan's, `None` for
+/// any other pipeline): the draw draws patches exactly when the pipeline is one, with the control
+/// points the function states, indexed exactly when the pipeline has a control-point index type.
+/// The factor buffer is bound over the factors the draw reads ([`factor_window`]), from any even
+/// byte, at an instance stride rounded down to a multiple of 4, its scale rounded to `half` as
+/// Metal rounds it (an infinite one as `INFINITE_SCALE`); the patch index buffer over the indices
+/// it reads (a direct draw's from its patch start, an indirect one's from the offset to the
+/// buffer's end), and the control-point index buffer over the indices it reads
+/// ([`control_point_window`]), each where a stage binds it.
+fn patch_binding(
+    factors: Option<&FactorTemplate>,
+    state: &BindState,
+    draw: &DrawCall,
+) -> Result<Option<PatchBinding>, BindError> {
     let (control_points, patch_index, control_point_index) = match *draw {
         DrawCall::Patches {
             control_points,
@@ -2918,14 +3468,17 @@ fn patch_draw(
             bits: f.scale.to_bits(),
         });
     }
-    let mut ranges = Vec::with_capacity(3);
-    let (residual, stride) =
-        match (t.binding, f.buffer) {
-            (None, None) => (0, 0),
-            (Some((set, binding)), Some(b)) => {
-                // The control stage reads the factors from any even byte: an odd offset from the
-                // byte below, and each instance's at the stride rounded down to a multiple of 4, an
-                // odd one too, as plain Metal reads them.
+    let factors_bound = match t.site {
+        FactorSite::Control { binding, .. } => binding.is_some(),
+        FactorSite::Scan { factors, .. } => factors,
+    };
+    let (factor_range, residual, stride) =
+        match (factors_bound, f.buffer) {
+            (false, None) => (None, 0, 0),
+            (true, Some(b)) => {
+                // The factors are read from any even byte: an odd offset from the byte below, and
+                // each instance's at the stride rounded down to a multiple of 4, an odd one too, as
+                // plain Metal reads them.
                 let offset = b.offset - b.offset % 2;
                 let instance_stride = b.instance_stride - b.instance_stride % 4;
                 let window = factor_window(t, instance_stride, draw);
@@ -2941,16 +3494,11 @@ fn patch_draw(
                             ),
                         },
                     )?;
-                // The control stage adds `instance · stride` in `u32`: a direct draw's factors lie
+                // The reading stage adds `instance · stride` in `u32`: a direct draw's factors lie
                 // within the bound range, whose end is below 2^32; an indirect draw's beyond it are
                 // past the buffer's end, a read Metal leaves undefined.
                 let stride = (instance_stride & u64::from(u32::MAX)) as u32;
-                ranges.push(DescriptorRange {
-                    set,
-                    binding,
-                    range,
-                });
-                (residual, stride)
+                (Some(range), residual, stride)
             }
             _ => return Err(internal(
                 "the bind state's shape differs from the plan's at the tessellation factor buffer",
@@ -2958,92 +3506,219 @@ fn patch_draw(
         };
     // The patch index buffer: its words from the offset (a multiple of 4, as Metal requires),
     // over the indices the draw reads.
-    let (index_residual, indexed) = match patch_index {
-        None => (0, 0),
+    let (patch_indices, index_residual, indexed) = match patch_index {
+        None => (None, 0, 0),
         Some((buffer, offset)) => {
             if !offset.is_multiple_of(4) {
                 return Err(BindError::InvalidPatchIndexBuffer { offset });
             }
-            let window = match *draw {
-                DrawCall::Patches {
-                    patch_start,
-                    patch_count,
-                    ..
-                } => Window::Bounded {
-                    start: 4 * i64::from(patch_start),
-                    len: 4 * u64::from(patch_count),
-                },
-                _ => Window::Whole,
-            };
-            let (range, residual) =
-                descriptor_range(offset, buffer.length, window, t.alignment, t.max_range).map_err(
-                    |e| match e {
-                        RangeError::TooLarge { needed } => BindError::PatchIndexRange {
-                            needed,
-                            limit: t.max_range,
+            match t.patch_indices {
+                None => (None, 0, 1u32),
+                Some((set, binding)) => {
+                    let window = match *draw {
+                        DrawCall::Patches {
+                            patch_start,
+                            patch_count,
+                            ..
+                        } => Window::Bounded {
+                            start: 4 * i64::from(patch_start),
+                            len: 4 * u64::from(patch_count),
                         },
-                        RangeError::Empty => BindError::Unsupported(
-                            Unsupported::not_representable(Feature::BufferRange),
-                        ),
-                    },
-                )?;
-            let (set, binding) = t.patch_indices;
-            ranges.push(DescriptorRange {
-                set,
-                binding,
-                range,
-            });
-            (residual, 1u32)
+                        _ => Window::Whole,
+                    };
+                    let (range, residual) =
+                        descriptor_range(offset, buffer.length, window, t.alignment, t.max_range)
+                            .map_err(|e| match e {
+                            RangeError::TooLarge { needed } => BindError::PatchIndexRange {
+                                needed,
+                                limit: t.max_range,
+                            },
+                            RangeError::Empty => BindError::Unsupported(
+                                Unsupported::not_representable(Feature::BufferRange),
+                            ),
+                        })?;
+                    let range = DescriptorRange {
+                        set,
+                        binding,
+                        range,
+                    };
+                    (Some(range), residual, 1u32)
+                }
+            }
         }
     };
     // The control-point index buffer: its indices from the offset (a multiple of the index
     // size, as Metal requires), over the indices the draw reads.
-    let point_residual = match (control_point_index, t.control_point_indices) {
-        (Some((buffer, offset)), Some(((set, binding), size))) => {
-            if !offset.is_multiple_of(size) {
-                return Err(BindError::InvalidControlPointIndexBuffer { offset });
+    let (control_point_indices, point_residual) =
+        match (control_point_index, t.control_point_indices) {
+            (Some((buffer, offset)), Some((binding, size))) => {
+                if !offset.is_multiple_of(size) {
+                    return Err(BindError::InvalidControlPointIndexBuffer { offset });
+                }
+                match binding {
+                    None => (None, 0),
+                    Some((set, binding)) => {
+                        let window = control_point_window(size, draw);
+                        let (range, residual) = descriptor_range(
+                            offset,
+                            buffer.length,
+                            window,
+                            t.alignment,
+                            t.max_range,
+                        )
+                        .map_err(|e| match e {
+                            RangeError::TooLarge { needed } => BindError::ControlPointIndexRange {
+                                needed,
+                                limit: t.max_range,
+                            },
+                            RangeError::Empty => BindError::Unsupported(
+                                Unsupported::not_representable(Feature::BufferRange),
+                            ),
+                        })?;
+                        let range = DescriptorRange {
+                            set,
+                            binding,
+                            range,
+                        };
+                        (Some(range), residual)
+                    }
+                }
             }
-            let window = control_point_window(size, draw);
-            let (range, residual) =
-                descriptor_range(offset, buffer.length, window, t.alignment, t.max_range).map_err(
-                    |e| match e {
-                        RangeError::TooLarge { needed } => BindError::ControlPointIndexRange {
-                            needed,
-                            limit: t.max_range,
-                        },
-                        RangeError::Empty => BindError::Unsupported(
-                            Unsupported::not_representable(Feature::BufferRange),
-                        ),
-                    },
-                )?;
-            ranges.push(DescriptorRange {
-                set,
-                binding,
-                range,
-            });
-            residual
-        }
-        _ => 0,
-    };
+            _ => (None, 0),
+        };
     let scale = match scale {
         HALF_INFINITY => INFINITE_SCALE,
         finite => f16_bits_to_f32(finite),
     };
+    Ok(Some(PatchBinding {
+        factors: factor_range,
+        residual,
+        stride,
+        scale,
+        patch_indices,
+        index_residual,
+        indexed,
+        control_point_indices,
+        point_residual,
+    }))
+}
+
+/// A native tessellation pipeline's control stage's writes for a patch draw `b`
+/// ([`patch_binding`]), whose control stage's push range is at `push_offset` and whose factor
+/// buffer binds at `binding`: its push range holds the factor buffer's residual bind offset,
+/// instance stride and scale, then the patch index buffer's residual bind offset and whether the
+/// draw has one, then the control-point index buffer's residual bind offset (0 without one); and
+/// the factor, patch index and control-point index buffers' descriptor ranges.
+fn control_writes(
+    b: PatchBinding,
+    push_offset: u32,
+    binding: Option<(u32, u32)>,
+) -> Result<(PushConstantWrite, Vec<DescriptorRange>), BindError> {
+    let mut ranges = Vec::with_capacity(3);
+    match (b.factors, binding) {
+        (Some(range), Some((set, binding))) => ranges.push(DescriptorRange {
+            set,
+            binding,
+            range,
+        }),
+        (None, None) => {}
+        _ => {
+            return Err(internal(
+                "a factor range without its control stage's binding",
+            ))
+        }
+    }
+    ranges.extend(b.patch_indices);
+    ranges.extend(b.control_point_indices);
     let mut bytes = Vec::with_capacity(24);
-    bytes.extend_from_slice(&residual.to_le_bytes());
-    bytes.extend_from_slice(&stride.to_le_bytes());
-    bytes.extend_from_slice(&scale.to_bits().to_le_bytes());
-    bytes.extend_from_slice(&index_residual.to_le_bytes());
-    bytes.extend_from_slice(&indexed.to_le_bytes());
-    bytes.extend_from_slice(&point_residual.to_le_bytes());
-    Ok(Some((
+    bytes.extend_from_slice(&b.residual.to_le_bytes());
+    bytes.extend_from_slice(&b.stride.to_le_bytes());
+    bytes.extend_from_slice(&b.scale.to_bits().to_le_bytes());
+    bytes.extend_from_slice(&b.index_residual.to_le_bytes());
+    bytes.extend_from_slice(&b.indexed.to_le_bytes());
+    bytes.extend_from_slice(&b.point_residual.to_le_bytes());
+    Ok((
         PushConstantWrite {
             stages: vk::ShaderStageFlags::TESSELLATION_CONTROL,
-            offset: t.push_offset,
+            offset: push_offset,
             bytes,
         },
         ranges,
-    )))
+    ))
+}
+
+/// The scan of a patch draw `draw` of an emulated tessellation pipeline of `kernel`
+/// ([`TessellationDispatch`]), whose patch and factor buffers `b` binds ([`patch_binding`]) and
+/// whose vertex stage reads the chunk at `chunk_fields`, on a device of `max_range`
+/// (`maxStorageBufferRange`). A direct draw's records are the host's to size: `patchCount ·
+/// instanceCount` of them, refused past `maxStorageBufferRange` (`Unsupported{Tessellation}`
+/// naming it with their bytes). An indirect draw's lie in the command buffer's records pool, and
+/// the consumer copies Metal's arguments from their offset, a multiple of 4, into the header.
+fn tessellation_dispatch(
+    kernel: crate::bind::TessellationScanKernel,
+    b: &PatchBinding,
+    draw: &DrawCall,
+    chunk_fields: Vec<(vk::ShaderStageFlags, u32)>,
+    max_range: u64,
+) -> Result<TessellationDispatch, BindError> {
+    use crate::lower::tessellation::work;
+    let mut header = vec![0u32; work::HEADER as usize];
+    header[work::FACTOR_OFFSET as usize] = b.residual;
+    header[work::FACTOR_STRIDE as usize] = b.stride;
+    header[work::SCALE as usize] = b.scale.to_bits();
+    let (records, arguments) = match *draw {
+        DrawCall::Patches {
+            patch_start,
+            patch_count,
+            instance_count,
+            base_instance,
+            ..
+        } => {
+            for (word, value) in [
+                (work::PATCH_COUNT, patch_count),
+                (work::INSTANCE_COUNT, instance_count),
+                (work::PATCH_START, patch_start),
+                (work::BASE_INSTANCE, base_instance),
+            ] {
+                header[word as usize] = value;
+            }
+            let total = u64::from(patch_count) * u64::from(instance_count);
+            let bytes = total * 4 * u64::from(work::RECORD_WORDS);
+            let records = u32::try_from(total)
+                .ok()
+                .filter(|_| bytes <= max_range)
+                .ok_or_else(|| {
+                    BindError::Unsupported(Unsupported::needs(
+                        Feature::Tessellation,
+                        Capability::Limit {
+                            limit: VkLimit::MaxStorageBufferRange,
+                            required: bytes,
+                            available: max_range,
+                        },
+                    ))
+                })?;
+            (TessellationRecords::Exact { records }, None)
+        }
+        DrawCall::PatchesIndirect { indirect, .. } => {
+            if !indirect.offset.is_multiple_of(4) {
+                return Err(internal(format!(
+                    "an indirect patch draw's arguments at offset {}, not a multiple of 4",
+                    indirect.offset
+                )));
+            }
+            (TessellationRecords::Pool, Some(indirect.offset))
+        }
+        _ => return Err(internal(format!("a tessellation scan of {draw:?}"))),
+    };
+    Ok(TessellationDispatch {
+        kernel,
+        header,
+        records,
+        factors: b.factors,
+        arguments,
+        chunk_fields,
+        patch_triangles: kernel.max_patch_triangles(),
+    })
 }
 
 /// The bytes of the control-point index buffer an indexed patch draw reads, relative to its
@@ -3202,13 +3877,14 @@ struct CaptureDraw {
 /// with layout `[restarts, index count, base instance, base vertex]`, `restarts` 1 for a line or
 /// triangle strip, which Metal restarts at the all-ones index (`MissingPrimitiveType` without a
 /// primitive type). An indexed draw whose indices run past its buffer, or whose index offset is
-/// not a multiple of the index size, is not implemented (`Feature::TileReach`). A draw of another
-/// form never reaches here (`instantiate_draw` asks for its variant).
+/// not a multiple of the index size, is not implemented (`feature`, the form's). A draw of
+/// another form never reaches here (`instantiate_draw` asks for its variant).
 fn capture_draw(
     form: CaptureForm,
     draw: &DrawCall,
     overrun: Option<IndexOverrun>,
     primitive: Option<metal::PrimitiveType>,
+    feature: Feature,
 ) -> Result<CaptureDraw, BindError> {
     match (capture_form(draw)?, *draw) {
         (
@@ -3239,7 +3915,7 @@ fn capture_draw(
             let size = index_bytes(index_type)
                 .ok_or_else(|| internal("an indexed capture draw without an index size"))?;
             if overrun.is_some() || !index_offset.is_multiple_of(size) {
-                return Err(not_implemented(Feature::TileReach));
+                return Err(not_implemented(feature));
             }
             let restarts = match primitive.ok_or(BindError::MissingPrimitiveType)? {
                 metal::PrimitiveType::LineStrip | metal::PrimitiveType::TriangleStrip => 1,
@@ -3272,6 +3948,62 @@ fn capture_draw(
     }
 }
 
+/// `PushField::VerticesPerPrimitive` for `draw` of primitive type `primitive`
+/// (`MissingPrimitiveType` without one): 3 for a triangle list, 2 for a line list and 1 for a
+/// strip or points. The vertex function reads the draw's first vertex as its base vertex, an
+/// indirect draw's from its arguments as the GPU draws it. An indexed draw shares a vertex among
+/// primitives, whose flat inputs read it alike: it runs `from_zero`, its indices drawn as
+/// vertices from 0 (the de-indexed or the indexed capture form, [`capture_draw`]), and is
+/// otherwise `NotImplemented(PrimitiveId)`.
+fn vertices_per_primitive(
+    draw: &DrawCall,
+    primitive: Option<metal::PrimitiveType>,
+    from_zero: bool,
+) -> Result<u32, BindError> {
+    let per_primitive = match primitive.ok_or(BindError::MissingPrimitiveType)? {
+        metal::PrimitiveType::Triangle => 3,
+        metal::PrimitiveType::Line => 2,
+        metal::PrimitiveType::Point
+        | metal::PrimitiveType::LineStrip
+        | metal::PrimitiveType::TriangleStrip => 1,
+    };
+    match draw {
+        DrawCall::Primitives { .. } | DrawCall::Indirect { indexed: None, .. } => Ok(per_primitive),
+        DrawCall::Indexed { .. } if from_zero => Ok(per_primitive),
+        _ => Err(not_implemented(Feature::PrimitiveId)),
+    }
+}
+
+/// How an indexed draw runs on the primitive ID's de-indexed variant of index type `ty`
+/// (`VariantKey::primitive_id_indices`): as the indexed capture form's draw ([`capture_draw`]),
+/// `index count` vertices from 0 without indices, with layout `[0, index count, base instance,
+/// base vertex]`, its indices read in the vertex stage. A line or triangle strip, which Metal
+/// restarts at the all-ones index, an indexed draw whose indices run past its buffer or whose
+/// index offset is not a multiple of the index size, and any other draw are
+/// `NotImplemented(PrimitiveId)` (`MissingPrimitiveType` without a primitive type).
+fn deindexed_draw(
+    ty: metal::IndexType,
+    draw: &DrawCall,
+    overrun: Option<IndexOverrun>,
+    primitive: Option<metal::PrimitiveType>,
+) -> Result<CaptureDraw, BindError> {
+    match (primitive.ok_or(BindError::MissingPrimitiveType)?, draw) {
+        (
+            metal::PrimitiveType::Point
+            | metal::PrimitiveType::Line
+            | metal::PrimitiveType::Triangle,
+            DrawCall::Indexed { .. },
+        ) => capture_draw(
+            CaptureForm::Indexed(ty),
+            draw,
+            overrun,
+            primitive,
+            Feature::PrimitiveId,
+        ),
+        _ => Err(not_implemented(Feature::PrimitiveId)),
+    }
+}
+
 fn instantiate(
     t: &GraphicsTemplate,
     state: &BindState,
@@ -3279,9 +4011,16 @@ fn instantiate(
 ) -> Result<DrawCommands, BindError> {
     let overrun = index_overrun(t.robust_index_fetch, draw);
     let (command, base) = vk_draw(draw, overrun);
-    let capture = match t.capture {
-        Some(form) => Some(capture_draw(form, draw, overrun, state.primitive_type)?),
-        None => None,
+    let capture = match (t.capture, t.deindexed) {
+        (Some(form), _) => Some(capture_draw(
+            form,
+            draw,
+            overrun,
+            state.primitive_type,
+            Feature::TileReach,
+        )?),
+        (None, Some(ty)) => Some(deindexed_draw(ty, draw, overrun, state.primitive_type)?),
+        (None, None) => None,
     };
     let command = capture.as_ref().and_then(|c| c.command).unwrap_or(command);
     // A mesh render pipeline makes mesh draws, and only it does.
@@ -3300,8 +4039,18 @@ fn instantiate(
     descriptor_ranges.extend(crate::bind::instantiate::texel_ranges(&t.resources, state)?);
     let tables = crate::bind::heap::table_bytes(&t.resources, state)?;
     let mut extents = bound.extents;
-    let factors = patch_draw(t.tessellation.as_ref(), state, draw)?;
-    multiview_instances(t.multiview_instance_limit, draw)?;
+    // A patch draw: a native pipeline's control stage's writes, or an emulated one's scan.
+    let (control, scan) = match t.tessellation.map(|t| t.site) {
+        Some(FactorSite::Scan { kernel, .. }) => {
+            let b = patch_binding(t.tessellation.as_ref(), state, draw)?;
+            (None, b.map(|b| (b, kernel)))
+        }
+        _ => (patch_draw(t.tessellation.as_ref(), state, draw)?, None),
+    };
+    // An emulated draw's instances are records, drawn as one instance.
+    if scan.is_none() {
+        multiview_instances(t.multiview_instance_limit, draw)?;
+    }
     let resident = if t.stages.iter().any(|s| s.root_first.is_some()) {
         Some(resident_entries(state))
     } else {
@@ -3330,7 +4079,8 @@ fn instantiate(
                 PushField::RootTableAddress
                 | PushField::ExecutionStatusAddress
                 | PushField::CaptureAddress
-                | PushField::CaptureIndexAddress => {
+                | PushField::CaptureIndexAddress
+                | PushField::SnapshotPhase => {
                     let PushLoc::Push { offset } = f.loc else {
                         return Err(not_implemented(Feature::Lowering(LowerFamily::StageIo)));
                     };
@@ -3343,6 +4093,7 @@ fn instantiate(
                             PushHole::ExecutionStatusAddress { stages, offset }
                         }
                         PushField::CaptureAddress => PushHole::CaptureAddress { stages, offset },
+                        PushField::SnapshotPhase => PushHole::SnapshotPhase { stages, offset },
                         _ => PushHole::CaptureIndexAddress { stages, offset },
                     });
                     continue;
@@ -3434,6 +4185,13 @@ fn instantiate(
                     .iter()
                     .flat_map(|c| c.to_bits().to_le_bytes())
                     .collect(),
+                // The draw's depth bias, and a zero word.
+                PushField::DepthBias => state
+                    .depth_bias
+                    .iter()
+                    .chain(&[0.0])
+                    .flat_map(|v| v.to_bits().to_le_bytes())
+                    .collect(),
                 // The first amplification's; `amplifications` writes each before its draw.
                 PushField::AmplificationId
                 | PushField::AmplificationLayerOffset
@@ -3447,6 +4205,32 @@ fn instantiate(
                     let mut b = base[0].to_le_bytes().to_vec();
                     b.extend_from_slice(&base[1].to_le_bytes());
                     b
+                }
+                PushField::VerticesPerPrimitive => {
+                    let from_zero = capture.as_ref().is_some_and(|c| c.command.is_some());
+                    vertices_per_primitive(draw, state.primitive_type, from_zero)?
+                        .to_le_bytes()
+                        .to_vec()
+                }
+                // An emulated tessellation draw's first chunk (`TessellationDispatch::draw`
+                // writes each), and its index buffers' fields.
+                PushField::TessellationChunk
+                | PushField::PatchIndexOffset
+                | PushField::PatchIndexBound
+                | PushField::ControlPointIndexOffset => {
+                    let Some((b, _)) = &scan else {
+                        return Err(internal(format!(
+                            "{:?} outside an emulated patch draw",
+                            f.field
+                        )));
+                    };
+                    let word = match f.field {
+                        PushField::PatchIndexOffset => b.index_residual,
+                        PushField::PatchIndexBound => b.indexed,
+                        PushField::ControlPointIndexOffset => b.point_residual,
+                        _ => 0,
+                    };
+                    word.to_le_bytes().to_vec()
                 }
                 PushField::VertexBufferStride(layout) => {
                     let fixed = t.pulled_strides.iter().find(|(l, _)| *l == layout);
@@ -3574,10 +4358,36 @@ fn instantiate(
         }
     }
     descriptor_bytes.extend(tables);
-    if let Some((push, ranges)) = factors {
+    if let Some((push, ranges)) = control {
         push_constants.push(push);
         descriptor_ranges.extend(ranges);
     }
+    let tessellation_dispatch = match scan {
+        Some((b, kernel)) => {
+            let chunk_fields = t
+                .stages
+                .iter()
+                .flat_map(|st| {
+                    st.fields.iter().filter_map(|f| match (f.field, f.loc) {
+                        (PushField::TessellationChunk, PushLoc::Push { offset }) => {
+                            Some((st.flags, offset))
+                        }
+                        _ => None,
+                    })
+                })
+                .collect();
+            let max_range = t.tessellation.map(|f| f.max_range).unwrap_or_default();
+            let dispatch = tessellation_dispatch(kernel, &b, draw, chunk_fields, max_range)?;
+            descriptor_ranges.extend(b.patch_indices);
+            descriptor_ranges.extend(b.control_point_indices);
+            Some(dispatch)
+        }
+        None => None,
+    };
+    // An emulated tessellation draw draws its first chunk in place of the Metal draw's command.
+    let command = tessellation_dispatch
+        .as_ref()
+        .map_or(command, |d| d.draw(0).1);
 
     // The CPU reads the arguments of an indirect draw whose base vertex and instance the profile
     // emulates, of a multiview plan, or without `drawIndirectFirstInstance`, and of an indexed one
@@ -3585,12 +4395,15 @@ fn instantiate(
     // draw's GPU-written group counts must lie within the device's limits
     // (`VUID-VkDrawMeshTasksIndirectCommandEXT-TaskEXT-07326` and its siblings), which nothing
     // bounds yet.
+    // An emulated tessellation draw's scan reads its arguments (through their copy), and its
+    // chunk draws are one instance each, from 0.
     let arguments_elsewhere =
         (reads_base || t.multiview_instance_limit.is_some() || t.indirect_first_instance_missing)
             && matches!(
                 draw,
                 DrawCall::Indirect { .. } | DrawCall::PatchesIndirect { .. }
             )
+            && tessellation_dispatch.is_none()
             || matches!(command, vk::DrawCommand::DrawMeshTasksIndirect { .. });
     let index_unbounded = indirect_indices_unbounded(t.robust_index_fetch, draw);
     let amplifications = amplification_writes(t)?;
@@ -3640,6 +4453,7 @@ fn instantiate(
         amplifications,
         mesh_dispatch,
         specialization,
+        tessellation_dispatch,
     })
 }
 
@@ -3885,15 +4699,16 @@ fn indirect_use(len: u64) -> ResourceUse {
 
 /// The draw's own resources: its index buffer (`INDEX_INPUT`; the indices of a direct draw from the
 /// index offset, the rest of the buffer for an indirect one), a patch draw's patch index buffer
-/// (`TESSELLATION_CONTROL_SHADER`, as storage; the indices of a direct draw's patches, the rest of
-/// the buffer for an indirect one) and control-point index buffer (likewise; the indices
-/// [`control_point_window`] bounds, of the size `factors` states), and its indirect arguments
-/// (`DRAW_INDIRECT`; 16 bytes, 20 indexed; a mesh draw's are its pipeline's to decide,
-/// `instantiate`), all read. Ranges are relative to the draw's index offset, patch index offset,
-/// control-point index offset, and argument offset. A direct draw whose indices run past the buffer
-/// (`overrun`) reads the bytes from the index offset to [`IndexBufferRef::fetch_end`] when it is
-/// `Robust`, and only the indices it draws when it is `Clamped` (none, from offset 0, when it draws
-/// none).
+/// (`TESSELLATION_CONTROL_SHADER`, an emulated tessellation pipeline's `VERTEX_SHADER`, as
+/// storage; the indices of a direct draw's patches, the rest of the buffer for an indirect one)
+/// and control-point index buffer (likewise; the indices [`control_point_window`] bounds, of the
+/// size `factors` states), and its indirect arguments (`DRAW_INDIRECT`; 16 bytes, 20 indexed; an
+/// emulated tessellation pipeline's scan reads a patch draw's 16 in `COMPUTE_SHADER`, through their
+/// copy into its work buffer; a mesh draw's are its pipeline's to decide, `instantiate`), all read.
+/// Ranges are relative to the draw's index offset, patch index offset, control-point index offset,
+/// and argument offset. A direct draw whose indices run past the buffer (`overrun`) reads the bytes
+/// from the index offset to [`IndexBufferRef::fetch_end`] when it is `Robust`, and only the indices
+/// it draws when it is `Clamped` (none, from offset 0, when it draws none).
 fn draw_uses(
     draw: &DrawCall,
     overrun: Option<IndexOverrun>,
@@ -3906,23 +4721,33 @@ fn draw_uses(
         stages: vk::PipelineStageFlags2::INDEX_INPUT,
         range,
     };
-    // A patch draw's index buffers, read by the control stage.
+    let scanned = factors.is_some_and(|t| matches!(t.site, FactorSite::Scan { .. }));
+    // A patch draw's index buffers, read by the control stage, or an emulated pipeline's vertex
+    // stage.
     let control = |resource, range| ResourceUse {
         resource,
         access: AccessSet::READ,
         class: AccessClass::Storage,
-        stages: vk::PipelineStageFlags2::TESSELLATION_CONTROL_SHADER,
+        stages: match scanned {
+            true => vk::PipelineStageFlags2::VERTEX_SHADER,
+            false => vk::PipelineStageFlags2::TESSELLATION_CONTROL_SHADER,
+        },
         range,
     };
     let mut uses = Vec::new();
-    if let DrawCall::Patches {
-        patch_index: Some(_),
-        ..
-    }
-    | DrawCall::PatchesIndirect {
-        patch_index: Some(_),
-        ..
-    } = *draw
+    // Where a stage reads it: an emulated function may not.
+    let reads_patch_indices = factors.is_some_and(|t| t.patch_indices.is_some());
+    if let (
+        DrawCall::Patches {
+            patch_index: Some(_),
+            ..
+        }
+        | DrawCall::PatchesIndirect {
+            patch_index: Some(_),
+            ..
+        },
+        true,
+    ) = (*draw, reads_patch_indices)
     {
         // A direct draw's indices from its patch start, an indirect one's from the offset on.
         let range = match *draw {
@@ -3948,7 +4773,7 @@ fn draw_uses(
             ..
         },
         Some(&FactorTemplate {
-            control_point_indices: Some((_, size)),
+            control_point_indices: Some((Some(_), size)),
             ..
         }),
     ) = (*draw, factors)
@@ -3988,6 +4813,15 @@ fn draw_uses(
                 },
             }
         }))],
+        // An emulated tessellation pipeline's scan reads a patch draw's arguments, through the
+        // copy into its work buffer the consumer records with it.
+        DrawCall::PatchesIndirect { .. } if scanned => vec![ResourceUse {
+            resource: UseTarget::Indirect,
+            access: AccessSet::READ,
+            class: AccessClass::Storage,
+            stages: vk::PipelineStageFlags2::COMPUTE_SHADER,
+            range: Some(ByteRange { offset: 0, len: 16 }),
+        }],
         DrawCall::Indirect { indexed: None, .. } | DrawCall::PatchesIndirect { .. } => {
             vec![indirect_use(16)]
         }

@@ -49,6 +49,12 @@
 //!   image is linear over the buffer's bytes: Metal leaves the buffer's bytes, so the pass renders
 //!   it through the image its texture keeps, copied into where the pass loads it (`Load`), and
 //!   never back (`kept_bytes.rs`).
+//! - **A render target's depth that may hold a negative value or a NaN**
+//!   (`texture/signed_depth.rs`), which a pass loads: it renders over its magnitude stand-in, the
+//!   image its texture keeps for the queue (`kept_backing`), whose words the pass writes from the
+//!   depth's before it and merges back after it where it stores the depth and may have written
+//!   it: its depth test is Metal's, and so is what it keeps, but for the merge's corner, which
+//!   `signed-depth-test` names.
 //! - **A pass's hidden depth and stencil**. In a pass without a depth/stencil attachment, plain
 //!   Metal tests a draw whose state uses depth or the stencil against a hidden depth of `float`,
 //!   1.0 at the pass's start, and a stencil of 0, kept per sample through the pass. Such a draw
@@ -90,6 +96,7 @@ use super::texture_descriptor::TextureDescriptor;
 use super::tracker::{Access, Barrier, Use};
 use super::values::ResourceOptions;
 use super::Device;
+use crate::device::functions::Vk;
 use ash::vk;
 use metal2vulkan::device::FormatUsage;
 use metal2vulkan::metal::format::{aspects, FormatMapping};
@@ -138,6 +145,11 @@ pub(super) enum Cause {
     /// buffer keeps its bytes (`kept_bytes.rs`, which announces it, `dont-care-stand-in`): copied
     /// into where the pass loads it, and never back.
     KeptBytes,
+    /// A render target's 32-bit float depth that may hold a negative value or a NaN, which the
+    /// pass loads: it renders over the magnitude stand-in its texture keeps for the queue, written
+    /// from the depth before the pass and merged back after it (`texture/signed_depth.rs`), not
+    /// by the stand-in's own copies.
+    Magnitude,
 }
 
 impl StandIn {
@@ -658,7 +670,7 @@ impl StandInCopies {
     ///
     /// `command_buffer` is recording outside a render pass, and only the caller records it; the
     /// images are live until it completes and rest in `GENERAL`.
-    pub(super) unsafe fn record_in(&self, raw: &ash::Device, command_buffer: vk::CommandBuffer) {
+    pub(super) unsafe fn record_in(&self, raw: &Vk, command_buffer: vk::CommandBuffer) {
         let general = vk::ImageLayout::GENERAL;
         // SAFETY: the caller's contract; every image has the transfer usage its copy needs
         // (checked when the stand-in was made), and each region lies in both images.

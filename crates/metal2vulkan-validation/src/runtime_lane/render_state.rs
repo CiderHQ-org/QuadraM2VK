@@ -1,17 +1,17 @@
 //! Device tests of the render encoder's state (its second part: the depth/stencil state and the
 //! rest of the render state) on the device the cfg selects, under the validation layer.
 //!
-//! Each draw is one RT6 Metal probe 4 measured (probes 4, 4b and 4c on an M4 with macOS 27.0.1,
-//! each case with and without Metal's API validation), drawn with the same functions (the owned
-//! fixture `rt6_render_state`) into the same pass: a `size`² `RGBA8Unorm` target cleared to zero,
-//! and the depth and stencil textures the case names, cleared and stored. Its texels are compared
-//! with the ones Metal stored. The cases cover scissor rectangles (one past the render area
-//! clipped to it, as plain Metal draws it where its validation stops it), viewports (with the implicit
-//! scissor of fractional edges, and a point cut to the pixels its viewport overlaps), culling
-//! and winding, depth bias and clip modes, the blend color, depth/stencil states and saturated
-//! references, and separate depth and stencil textures, cleared, loaded with a `DontCare`
-//! stencil store, and of different sizes (which Metal's validation stops and plain Metal renders
-//! over the smaller, its clear reaching the larger's first tile).
+//! Each draw is one that a Metal probe measured (on an M4 with macOS 27.0.1, each case with and
+//! without Metal's API validation), drawn with the same functions (the owned fixture
+//! `rt6_render_state`) into the same pass: a `size`² `RGBA8Unorm` target cleared to zero, and the
+//! depth and stencil textures the case names, cleared and stored. Its texels are compared with the
+//! ones Metal stored. The cases cover scissor rectangles (one past the render area clipped to it,
+//! as plain Metal draws it where its validation stops it), viewports (with the implicit scissor of
+//! fractional edges, and a point cut to the pixels its viewport overlaps), culling and winding,
+//! depth bias and clip modes, the blend color, depth/stencil states and saturated references, and
+//! separate depth and stencil textures, cleared, loaded with a `DontCare` stencil store, and of
+//! different sizes (which Metal's validation stops and plain Metal renders over the smaller, its
+//! clear reaching the larger's first tile).
 //!
 //! Five draws are the device's where Vulkan leaves the answer to it: a point wider than a viewport
 //! with fractional edges, a constant bias on `Depth16Unorm` whose depth is a tie, and blended
@@ -19,10 +19,10 @@
 //! runtime owns: no pixel outside Metal's, a depth within Vulkan's permitted bias units, and a
 //! channel within one unit of Metal's.
 //!
-//! A vertex function that selects its viewport (the owned fixture `rt6_viewports`) draws as RT6
-//! Metal probes 7, 7b and 7c measured: each instance through the viewport of its index and that
-//! viewport's scissor rectangle, an index at or past the viewports set through the first viewport
-//! and its scissor rectangle, and a fragment function reads the index as written.
+//! A vertex function that selects its viewport (the owned fixture `rt6_viewports`) draws as Metal
+//! probes on an M4 and the M3 Max measured: each instance through the viewport of its index and
+//! that viewport's scissor rectangle, an index at or past the viewports set through the first
+//! viewport and its scissor rectangle, and a fragment function reads the index as written.
 //!
 //! What Metal's validation stops, the runtime refuses typed, before anything draws; that includes
 //! 17 viewports, which hung the GPU without validation, so they are never drawn. A triangle fill
@@ -31,22 +31,25 @@
 
 use super::degrade_notices::made_render_kinds;
 use super::viewport_ranges::{depth_ranges_refused, native_depth_range};
-use super::{buffer_with, validated_device, Messages, ScratchCache, WAIT};
+use super::{buffer_with, validated_device_with, Messages, ScratchCache, WAIT};
 use crate::air_library::AirLibrary;
 use crate::gpu::TEST_DEVICE;
+use metal2vulkan::device::VkFeature;
+use metal2vulkan::error::{Capability, Feature};
 use metal2vulkan::metal::state::{DepthStencilDescriptor, StencilDescriptor};
 use metal2vulkan::metal::{
     BlendFactor, CompareFunction, CullMode, DepthClipMode, PixelFormat, PrimitiveTopologyClass,
     PrimitiveType, StencilOperation, TextureUsage, TriangleFillMode, Winding,
 };
 use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};
+use metal2vulkan::vk;
 use metal2vulkan_devtools::llvm_assemble;
 use metal2vulkan_runtime::Degradation;
 use metal2vulkan_runtime::{
-    Buffer, ClearColor, CommandQueue, Device, Error, Invalid, Library, LoadAction, PipelineOptions,
-    Problem, Region, RenderCommandEncoder, RenderPassDescriptor, RenderPipelineState,
-    RenderStateProblem, ResourceOptions, RuntimeGap, ScissorRect, StoreAction, Texture,
-    TextureDescriptor, Viewport,
+    Buffer, ClearColor, CommandBuffer, CommandQueue, Device, Error, ExecutedPipeline, Invalid,
+    Library, LoadAction, PipelineOptions, Problem, Region, RenderCommandEncoder,
+    RenderPassDescriptor, RenderPipelineState, RenderStateProblem, ResourceOptions, RuntimeGap,
+    ScissorRect, StoreAction, Texture, TextureDescriptor, Viewport,
 };
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -278,6 +281,31 @@ impl Probe {
         self.try_run_with(pass, None, body)
     }
 
+    /// [`Probe::run`], and how many geometry stages the render pipeline of each draw it executed
+    /// carries, in order.
+    pub(super) fn run_staged(
+        &self,
+        pass: Pass,
+        body: impl FnOnce(&Probe, &mut RenderCommandEncoder, &mut Vec<Buffer>),
+    ) -> (Stored, Vec<usize>) {
+        let (stored, command_buffer) = self.encoded(pass, None, body).unwrap();
+        let stages = command_buffer
+            .executions()
+            .iter()
+            .filter_map(|execution| match execution.pipeline() {
+                ExecutedPipeline::Render(pipeline) => Some(
+                    pipeline
+                        .stages
+                        .iter()
+                        .filter(|s| s.stage == vk::ShaderStage::GEOMETRY)
+                        .count(),
+                ),
+                _ => None,
+            })
+            .collect();
+        (stored, stages)
+    }
+
     /// [`Probe::try_run`] with `visibility` as the pass's visibility result buffer.
     pub(super) fn try_run_with(
         &self,
@@ -285,6 +313,17 @@ impl Probe {
         visibility: Option<&Buffer>,
         body: impl FnOnce(&Probe, &mut RenderCommandEncoder, &mut Vec<Buffer>),
     ) -> Result<Stored, Error> {
+        self.encoded(pass, visibility, body)
+            .map(|(stored, _)| stored)
+    }
+
+    /// [`Probe::try_run_with`], and the command buffer it committed.
+    fn encoded(
+        &self,
+        pass: Pass,
+        visibility: Option<&Buffer>,
+        body: impl FnOnce(&Probe, &mut RenderCommandEncoder, &mut Vec<Buffer>),
+    ) -> Result<(Stored, CommandBuffer), Error> {
         let color = texture(&self.device, PixelFormat::RGBA8Unorm, pass.size);
         let depth = pass.depth.map(|pf| texture(&self.device, pf, pass.size));
         let stencil = pass
@@ -313,7 +352,7 @@ impl Probe {
         command_buffer.wait_until_completed_for(WAIT).unwrap();
         assert_eq!(command_buffer.error(), None);
         drop(held);
-        Ok(Stored {
+        let stored = Stored {
             color: texels(&color, 4),
             depth: depth.map(|t| {
                 let bytes = if t.pixel_format() == PixelFormat::Depth16Unorm {
@@ -324,7 +363,8 @@ impl Probe {
                 texels(&t, bytes)
             }),
             stencil: stencil.map(|t| texels(&t, 1)),
-        })
+        };
+        Ok((stored, command_buffer))
     }
 
     /// The probe's `draw`: `pipe`'s pipeline, the depth buffer of `z` and `slope`, one triangle.
@@ -403,9 +443,17 @@ pub(super) const FULL: [&str; 4] = ["####", "####", "####", "####"];
 pub(super) const EMPTY: [&str; 4] = ["....", "....", "....", "...."];
 
 pub(super) fn validated() -> (Messages, ScratchCache, Probe) {
+    validated_without(&[])
+}
+
+/// [`validated`] on the test device without `withheld`.
+pub(super) fn validated_without(withheld: &[VkFeature]) -> (Messages, ScratchCache, Probe) {
     let messages = Messages::default();
     let cache = ScratchCache::new().unwrap();
-    let device = validated_device(TEST_DEVICE, &messages, cache.path()).unwrap();
+    let device = validated_device_with(TEST_DEVICE, &messages, cache.path(), |options| {
+        options.withheld_features.extend(withheld.iter().copied())
+    })
+    .unwrap();
     let probe = Probe {
         queue: device.new_command_queue().unwrap(),
         library: library(&device),
@@ -870,9 +918,9 @@ fn render_state_draws_store_metals_texels() {
         stored.depth.unwrap(),
         depths(0x3f40_0000, 16),
     );
-    // NaN and infinite bias factors take Metal's measured effect (CRF probes 2 to 4, an M3 Max
-    // and an M4 alike): a NaN constant biases as +inf; an unbounded infinite or NaN bias saturates
-    // the depth at 1 or 0, in depth clamp mode at the range's larger or smaller depth; a NaN or
+    // NaN and infinite bias factors take Metal's measured effect (Metal probes on an M3 Max and an
+    // M4 alike): a NaN constant biases as +inf; an unbounded infinite or NaN bias saturates the
+    // depth at 1 or 0, in depth clamp mode at the range's larger or smaller depth; a NaN or
     // infinite clamp clamps nothing; and a clamp that bounds an infinite or NaN bias is added to
     // the depth, here through a range it keeps inside [0, 1].
     let (inf, nan) = (f32::INFINITY, f32::NAN);
@@ -1415,8 +1463,9 @@ fn render_state_is_refused_as_metal_refuses_it() {
             }
             Some(error) => assert_eq!(e.set_viewport(range), Err(error)),
         }
-        // An infinite slope factor biases a flat triangle to NaN and a sloped one to -inf,
-        // which Metal stores as 1 and 0 (CRF probes 2 and 3): no static state gives both.
+        // An infinite slope factor biases a flat triangle to NaN and a sloped one to -inf, which
+        // Metal stores as 1 and 0 (Metal probes on the M3 Max and an M4): no static state gives
+        // both.
         assert_eq!(
             e.set_depth_bias(0.0, f32::NEG_INFINITY, 0.0),
             Err(Error::NotImplemented(RuntimeGap::NonFiniteDepthBias))
@@ -1576,13 +1625,15 @@ fn separate_sizes(probe: &Probe) {
 }
 
 /// A vertex function that selects its viewport (`[[viewport_array_index]]`, the owned fixture
-/// `rt6_viewports`): each draw one RT6 Metal probe 7 measured (an M4, macOS 27.0.1, with and
+/// `rt6_viewports`): each draw one that a Metal probe measured (an M4, macOS 27.0.1, with and
 /// without Metal's API validation), the fullscreen triangle into the probe's 4² target, one
-/// instance a viewport. Each instance draws through the viewport of its index and that
-/// viewport's scissor rectangle, or the one rectangle set: through two viewports, the second
-/// alone (base instance 1), two scissors, one scissor, the default viewport, and sixteen
-/// viewports of one pixel each. A device without viewport selection (`multiViewport`, a
-/// `ViewportIndex` output) refuses the pipeline, typed, printed.
+/// instance a viewport. Each instance draws through the viewport of its index and that viewport's
+/// scissor rectangle, or the one rectangle set: through two viewports, the second alone (base
+/// instance 1), two scissors, one scissor, the default viewport, and sixteen viewports of one pixel
+/// each. A device without `multiViewport` draws through one viewport
+/// ([`with_one_viewport_every_index_draws_through_it`]) and skips these draws, printed; one with it
+/// but without a `ViewportIndex` output or a geometry stage to store one refuses the pipeline,
+/// typed, printed.
 ///
 /// Scissor counts other than 1 and the viewport count, which Metal's validation stops, draw as
 /// plain Metal drew them (probes `vs_*`, an M4 with macOS 27.0.1): each viewport through the
@@ -1598,7 +1649,21 @@ fn separate_sizes(probe: &Probe) {
 /// sixteen, 5 with the default viewport alone, and 1 of two inside the count (probe 7c).
 #[test]
 fn a_vertex_function_draws_through_the_viewport_it_selects() {
-    let (messages, _cache, probe) = validated();
+    viewport_selection(&[]);
+}
+
+/// [`a_vertex_function_draws_through_the_viewport_it_selects`] with `shaderOutputViewportIndex`
+/// withheld: the vertex function stores the viewport it selects to a varying and the synthesized
+/// geometry stages store `ViewportIndex` from it, every draw (asserted from the pipeline it
+/// executed). A device without `geometryShader` refuses the pipeline, typed, printed.
+#[test]
+fn through_a_geometry_stage_a_vertex_function_draws_through_the_viewport_it_selects() {
+    viewport_selection(&[VkFeature::ShaderOutputViewportIndex]);
+}
+
+/// The probe over `rt6_viewports` on the test device without `withheld`.
+fn viewports_probe(withheld: &[VkFeature]) -> (Messages, ScratchCache, Probe) {
+    let (messages, cache, probe) = validated_without(withheld);
     let Probe { device, queue, .. } = probe;
     let ll = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/public/engine/rt6_viewports.ll");
     let library = device
@@ -1609,15 +1674,41 @@ fn a_vertex_function_draws_through_the_viewport_it_selects() {
         queue,
         library,
     };
+    (messages, cache, probe)
+}
+
+/// [`a_vertex_function_draws_through_the_viewport_it_selects`]'s draws on the test device without
+/// `withheld`.
+fn viewport_selection(withheld: &[VkFeature]) {
+    let (messages, _cache, probe) = viewports_probe(withheld);
     let select = WHITE.vertex("rt6_select");
     let name = probe.device.name();
     let pipeline = match select.state(&probe.device, &probe.library) {
         Ok(pipeline) => pipeline,
         Err(Error::Unsupported(u)) => {
-            eprintln!("refused: viewport selection on {name}: {u:?}");
+            eprintln!("refused: viewport selection on {name} without {withheld:?}: {u:?}");
             return quiet(probe, &messages);
         }
         Err(other) => panic!("viewport selection on {name}: {other}"),
+    };
+    let enabled = |feature| {
+        probe
+            .device
+            .compile_device()
+            .profile()
+            .enabled()
+            .features
+            .contains(&feature)
+    };
+    if !enabled(VkFeature::MultiViewport) {
+        eprintln!("SKIPPED viewport selection on {name}: one viewport (no multiViewport)");
+        return quiet(probe, &messages);
+    }
+    // The synthesized geometry stages store the index where the device has no
+    // `shaderOutputViewportIndex`.
+    let stages = match enabled(VkFeature::ShaderOutputViewportIndex) {
+        true => 0,
+        false => 3,
     };
     let reading = Pipe {
         fragment: "rt6_viewport_read",
@@ -1736,7 +1827,7 @@ fn a_vertex_function_draws_through_the_viewport_it_selects() {
                 scissors: &[ScissorRect],
                 instances,
                 base| {
-        probe.run(PASS, |p, e, h| {
+        let (stored, executed) = probe.run_staged(PASS, |p, e, h| {
             e.set_render_pipeline_state(pipeline).unwrap();
             if !viewports.is_empty() {
                 e.set_viewports(viewports).unwrap();
@@ -1749,7 +1840,13 @@ fn a_vertex_function_draws_through_the_viewport_it_selects() {
             e.draw_primitives(PrimitiveType::Triangle, 0, 3, instances, base)
                 .unwrap();
             h.push(depth);
-        })
+        });
+        assert_eq!(
+            executed,
+            [stages],
+            "the geometry stages of the draw on {name}"
+        );
+        stored
     };
     for (case, viewports, scissors, instances, base, metal) in cases {
         let stored = draw(&pipeline, &viewports, &scissors, instances, base);
@@ -1809,7 +1906,7 @@ fn a_vertex_function_draws_through_the_viewport_it_selects() {
             .into_iter()
             .zip(metal)
         {
-            let stored = probe.run(PASS, |p, e, h| {
+            let (stored, executed) = probe.run_staged(PASS, |p, e, h| {
                 e.set_render_pipeline_state(&pipeline).unwrap();
                 e.set_viewports(&viewports).unwrap();
                 e.set_cull_mode(cull);
@@ -1819,6 +1916,7 @@ fn a_vertex_function_draws_through_the_viewport_it_selects() {
                     .unwrap();
                 h.push(depth);
             });
+            assert_eq!(executed, [stages], "{case} {cull:?} on {name}");
             assert_eq!(
                 picture(&stored.color, 4),
                 metal,
@@ -1827,5 +1925,97 @@ fn a_vertex_function_draws_through_the_viewport_it_selects() {
             eprintln!("mirrored viewports {case} {cull:?} on {name}: Metal's texels");
         }
     }
+    quiet(probe, &messages);
+}
+
+/// On a device without `multiViewport` a draw has one viewport, so `rt6_select` stores no
+/// `ViewportIndex` (no geometry stage either) and every index draws through viewport 0, as Metal
+/// draws an index at or past the viewports set (probe 7, an M4; a Metal probe on an M3 Max with
+/// macOS 27.0.1 drew index 2 of one viewport through it and read 2), the fragment function reading
+/// the index as written. The pipeline still states that its vertex function writes the index, and a
+/// draw of it while the encoder holds two viewports, where Metal would select the second, is
+/// refused, `Unsupported(LayeredRendering)` needing `multiViewport`.
+#[test]
+fn with_one_viewport_every_index_draws_through_it() {
+    let withheld = [
+        VkFeature::ShaderOutputViewportIndex,
+        VkFeature::MultiViewport,
+    ];
+    let (messages, _cache, probe) = viewports_probe(&withheld);
+    let name = probe.device.name();
+    let select = WHITE.vertex("rt6_select");
+    let pipeline = select.state(&probe.device, &probe.library).unwrap();
+    let reading = Pipe {
+        fragment: "rt6_viewport_read",
+        ..select
+    }
+    .state(&probe.device, &probe.library)
+    .unwrap();
+    for state in [&pipeline, &reading] {
+        assert!(state.writes_viewport_array_index());
+    }
+    let one = vec![Viewport::new(0.0, 0.0, 2.0, 2.0, 0.0, 1.0)];
+    let first = ["##..", "##..", "....", "...."];
+    let draw = |pipeline: &RenderPipelineState, viewports: &[Viewport], base| {
+        let (stored, executed) = probe.run_staged(PASS, |p, e, h| {
+            e.set_render_pipeline_state(pipeline).unwrap();
+            if !viewports.is_empty() {
+                e.set_viewports(viewports).unwrap();
+            }
+            let depth = p.depth(0.5, 0.0);
+            e.set_vertex_buffer(Some(&depth), 0, 0).unwrap();
+            e.draw_primitives(PrimitiveType::Triangle, 0, 3, 1, base)
+                .unwrap();
+            h.push(depth);
+        });
+        assert_eq!(executed, [0], "no geometry stage on {name}");
+        stored
+    };
+    for (case, viewports, base, metal) in [
+        ("select_one_viewport", vec![], 0, FULL),
+        ("past_2_of_1", one.clone(), 2, first),
+    ] {
+        let stored = draw(&pipeline, &viewports, base);
+        assert_eq!(
+            picture(&stored.color, 4),
+            metal,
+            "{case} on {name}: Metal's texels"
+        );
+    }
+    for (case, viewports, index, drawn) in [
+        ("read_5_of_default", vec![], 5u32, FULL),
+        ("read_2_of_1", one, 2, first),
+    ] {
+        let stored = draw(&reading, &viewports, index);
+        let metal: Vec<u8> = drawn
+            .iter()
+            .flat_map(|row| row.chars())
+            .flat_map(|c| match c {
+                '#' => [index as u8, 0xff, 0, 0xff],
+                _ => [0; 4],
+            })
+            .collect();
+        assert_eq!(stored.color, metal, "{case} on {name}: Metal's texels");
+    }
+    let two = [
+        Viewport::new(0.0, 0.0, 2.0, 2.0, 0.0, 1.0),
+        Viewport::new(2.0, 2.0, 2.0, 2.0, 0.0, 1.0),
+    ];
+    probe.run(PASS, |p, e, h| {
+        e.set_render_pipeline_state(&pipeline).unwrap();
+        e.set_viewports(&two).unwrap();
+        let depth = p.depth(0.5, 0.0);
+        e.set_vertex_buffer(Some(&depth), 0, 0).unwrap();
+        assert_eq!(
+            e.draw_primitives(PrimitiveType::Triangle, 0, 3, 2, 0),
+            Err(Error::Unsupported(metal2vulkan::error::Unsupported::needs(
+                Feature::LayeredRendering,
+                Capability::Feature(VkFeature::MultiViewport),
+            ))),
+            "two viewports on {name}"
+        );
+        h.push(depth);
+    });
+    eprintln!("one viewport on {name}: Metal's texels, two refused");
     quiet(probe, &messages);
 }

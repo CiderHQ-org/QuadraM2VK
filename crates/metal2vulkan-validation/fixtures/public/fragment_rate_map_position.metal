@@ -1,14 +1,14 @@
 // Where each fragment of a render pass with a rasterization-rate map lands and where its
-// attributes are evaluated (DESIGN D265).
+// attributes are evaluated.
 //
-// A case draws the generated fullscreen triangle (DESIGN D155) through this function in a pass
-// whose `rasterizationRateMap` the case authors (`render_pass_rate_map`), into an `rgba32_float`
-// target of the map's screen size. The passthrough vertex writes `uv = (x / W, 1 - y / H)` for
-// the screen point `(x, y)` of each vertex, linear in screen space, so a fragment reads back the
-// screen point its attributes were evaluated at. Each fragment writes its `[[position]]` (on
-// Apple M3, the center of its pixel in the physical target: D265's probe) and that screen point
-// rounded down to whole pixels, which keeps the observation exact where the interpolation rounds
-// in its last bits. `screen` is the map's screen size.
+// A case draws the generated fullscreen triangle through this function in a pass whose
+// `rasterizationRateMap` the case authors (`render_pass_rate_map`), into an `rgba32_float` target
+// of the map's screen size. The passthrough vertex writes `uv = (x / W, 1 - y / H)` for the screen
+// point `(x, y)` of each vertex, linear in screen space, so a fragment reads back the screen point
+// its attributes were evaluated at. Each fragment writes its `[[position]]` (on Apple M3, the
+// center of its pixel in the physical target, as our probe measured) and that screen point rounded
+// down to whole pixels, which keeps the observation exact where the interpolation rounds in its
+// last bits. `screen` is the map's screen size.
 #include <metal_stdlib>
 using namespace metal;
 

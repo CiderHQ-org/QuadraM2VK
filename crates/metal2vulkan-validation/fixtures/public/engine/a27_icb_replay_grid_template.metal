@@ -1,13 +1,13 @@
 // metal-std: metal4.0
 // metal-macos-min: 27.0
-// Owned fixture (WP-A27, DESIGN D301): the AIR 2.9 twin of
+// Owned fixture: the AIR 2.9 twin of
 // validation/fixtures/public/engine/icb_replay_grid_template.metal. Below the next blank line
 // is that file, unchanged; the directives above compile it as MSL 4.0 for macOS 27, where Apple's
 // compiler writes AIR 2.9 (each memory atomic with its `mem_flags`, each barrier with its
 // `memory_order`). It compiles on every committed profile to the same words as its original
 // (tests/engine_air_2_9.rs), so the original's cases and rows speak for it.
 
-// Owned fixture (WP-K14d, DESIGN D268): a compute template whose output observes the region of
+// Owned fixture: a compute template whose output observes the region of
 // the dispatch each of its threads runs in. Each thread stages its index in its threadgroup in
 // threadgroup memory, waits for its group, and reads its neighbour's (so a threadgroup of another
 // size reads another index). It then adds, atomically, a weighted sum of its threadgroup's size,

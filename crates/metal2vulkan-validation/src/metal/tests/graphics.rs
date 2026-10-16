@@ -224,6 +224,7 @@ declare { <3 x float> } @control.MTL_CONTROL_POINT_FN(i32, ptr) section "air.ext
             output_winding: Default::default(),
             cull_mode: Default::default(),
         }),
+        mesh_draw: None,
         output: OutputSelection::RenderTarget {
             index: 0,
             origin: [0, 0],
@@ -239,6 +240,7 @@ declare { <3 x float> } @control.MTL_CONTROL_POINT_FN(i32, ptr) section "air.ext
         raster_sample_count: None,
         public_source: None,
         no_effect: None,
+        creation_bound: None,
     };
     let reflection =
         crate::air::reflect::inspect_stage(source.air_ll.as_str(), crate::case::Stage::Vertex)

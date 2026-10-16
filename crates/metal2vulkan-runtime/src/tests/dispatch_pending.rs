@@ -71,7 +71,7 @@ fn device(cache: &Path) -> Device {
 }
 
 /// A state of the fixture's `scale_and_offset`.
-fn state(device: &Device) -> ComputePipelineState {
+pub(super) fn state(device: &Device) -> ComputePipelineState {
     let ll = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../metal2vulkan-validation/fixtures/public/examples/runtime_examples.ll");
     let bitcode = metal2vulkan_devtools::llvm_assemble(&ll).unwrap();
@@ -84,14 +84,14 @@ fn state(device: &Device) -> ComputePipelineState {
 }
 
 /// The kernel's buffers: its input `0, 1, 2, ...`, its output, and its scale.
-struct Buffers {
+pub(super) struct Buffers {
     input: Buffer,
     output: Buffer,
     scale: Buffer,
 }
 
 impl Buffers {
-    fn new(device: &Device) -> Buffers {
+    pub(super) fn new(device: &Device) -> Buffers {
         let input: Vec<u8> = (0..COUNT).flat_map(|i| (i as f32).to_le_bytes()).collect();
         Buffers {
             input: device
@@ -122,7 +122,7 @@ impl Buffers {
 }
 
 /// How a command buffer dispatches.
-enum Grid {
+pub(super) enum Grid {
     /// `dispatchThreads`: this many threads, in threadgroups of this many.
     Threads(Size, Size),
     /// `dispatchThreadgroups`: one threadgroup of this many threads.
@@ -130,7 +130,7 @@ enum Grid {
 }
 
 /// A command buffer of `queue` that dispatches `state` over `buffers` as `grid` says.
-fn dispatch(
+pub(super) fn dispatch(
     queue: &CommandQueue,
     state: &ComputePipelineState,
     buffers: &Buffers,

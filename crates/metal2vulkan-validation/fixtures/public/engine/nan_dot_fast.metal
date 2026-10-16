@@ -1,4 +1,4 @@
-// Owned fixture (WP-NAN, DESIGN D486 item 3, docs/TODO.md 2.4): `nan_dot`'s program under the
+// Owned fixture: `nan_dot`'s program under the
 // default fast math, its flagged state: how Metal sums `dot` on `float` and `half` vectors of two,
 // three and four lanes where the calls carry every fast-math flag. Thread `i` reads x and y from
 // `in[2i]` and `in[2i + 1]` and writes `nan_dot`'s 8 words. Loop-free.

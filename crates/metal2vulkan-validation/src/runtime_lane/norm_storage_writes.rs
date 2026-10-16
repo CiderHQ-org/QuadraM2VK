@@ -42,7 +42,8 @@ fn stored_code(channel: Channel, x: f32) -> Option<u64> {
 }
 
 /// Every form into every normalized format of `color_writes`' cases, printed against Metal's
-/// conversion and held to it. Each case runs on a device of its own.
+/// conversion and held to it. The cases share one device (they read no notice), and each case's
+/// validation messages fail it by name.
 #[test]
 fn kernel_writes_store_metals_normalized_codes() {
     let mut differ = Vec::new();
@@ -55,15 +56,21 @@ fn kernel_writes_store_metals_normalized_codes() {
                 )
             })
     });
-    for case in normalized {
-        let values = (case.values)();
-        for form in Form::ALL {
-            on_device(|device, _| {
-                let name = device.name().to_owned();
+    on_device(|device, messages| {
+        let name = device.name().to_owned();
+        for case in normalized {
+            let values = (case.values)();
+            for form in Form::ALL {
                 let label = format!("{:?} by {}", case.pf, form.kernel());
-                let Some(stored) = written(device, form, case.pf, case.bytes, &values) else {
+                let stored = written(device, form, case.pf, case.bytes, &values);
+                assert_eq!(
+                    messages.take(),
+                    Vec::new(),
+                    "{label}: the validation layer reported"
+                );
+                let Some(stored) = stored else {
                     eprintln!("NORM-STORAGE-WRITE {label} on {name}: refused");
-                    return;
+                    continue;
                 };
                 let (mut wrong, mut examples) = (0usize, Vec::new());
                 for (i, &x) in values.iter().enumerate() {
@@ -94,9 +101,9 @@ fn kernel_writes_store_metals_normalized_codes() {
                 if wrong > 0 {
                     differ.push(format!("{label}: {wrong} of {channels}"));
                 }
-            });
+            }
         }
-    }
+    });
     assert!(
         differ.is_empty(),
         "kernel normalized writes not Metal's: {differ:#?}"
@@ -112,8 +119,8 @@ const FIELDS: [(PixelFormat, [u32; 4]); 2] = [
 ];
 
 /// Every form's write of texels whose red, green, blue and alpha are distinct codes' values stores
-/// each channel's code in its own field of both 10:10:10:2 formats. Each case runs on a device of
-/// its own.
+/// each channel's code in its own field of both 10:10:10:2 formats. The cases share one device
+/// (they read no notice), and each case's validation messages fail it by name.
 #[test]
 fn kernel_writes_store_each_channel_in_its_field() {
     let texels: Vec<[f32; 4]> = (0..1024u32)
@@ -128,14 +135,20 @@ fn kernel_writes_store_each_channel_in_its_field() {
         })
         .collect();
     let mut differ = Vec::new();
-    for (pf, fields) in FIELDS {
-        for form in Form::ALL {
-            on_device(|device, _| {
-                let name = device.name().to_owned();
+    on_device(|device, messages| {
+        let name = device.name().to_owned();
+        for (pf, fields) in FIELDS {
+            for form in Form::ALL {
                 let label = format!("{pf:?} by {}", form.kernel());
-                let Some(stored) = written_texels(device, form, pf, 4, &texels) else {
+                let stored = written_texels(device, form, pf, 4, &texels);
+                assert_eq!(
+                    messages.take(),
+                    Vec::new(),
+                    "{label}: the validation layer reported"
+                );
+                let Some(stored) = stored else {
                     eprintln!("NORM-STORAGE-FIELDS {label} on {name}: refused");
-                    return;
+                    continue;
                 };
                 let (mut wrong, mut examples) = (0usize, Vec::new());
                 for (texel, values) in stored.as_chunks::<4>().0.iter().zip(&texels) {
@@ -162,8 +175,8 @@ fn kernel_writes_store_each_channel_in_its_field() {
                 if wrong > 0 {
                     differ.push(format!("{label}: {wrong}"));
                 }
-            });
+            }
         }
-    }
+    });
     assert!(differ.is_empty(), "fields not Metal's: {differ:#?}");
 }

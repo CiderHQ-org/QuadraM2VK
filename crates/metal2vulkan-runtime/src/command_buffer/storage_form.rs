@@ -79,13 +79,16 @@ impl CommandBuffer {
             device.give_up_switch(switch, prepared);
             return false;
         };
-        state.end_encoder(Recorded {
-            encoder,
-            raws: vec![recorded.raw],
-            segments: Vec::new(),
-            summary: recorded.summary,
-            sparse: Vec::new(),
-        });
+        state.end_encoder(
+            self,
+            Recorded {
+                encoder,
+                raws: recorded.raws,
+                segments: Vec::new(),
+                summary: recorded.summary,
+                sparse: Vec::new(),
+            },
+        );
         state.retained.extend(recorded.retained.into_entry());
         // What its commands took is the encoder's, as the switch's commands are.
         if let Some(record) = state.ended.get_mut(encoder) {

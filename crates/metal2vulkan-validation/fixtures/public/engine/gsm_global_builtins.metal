@@ -1,4 +1,4 @@
-// Owned fixture (WP-GSM, DESIGN D525 item 2; written for this repository): Metal 3.1's
+// Owned fixture (written for this repository): Metal 3.1's
 // program-scope built-in variables in a kernel. Every kernel built-in is declared as a global
 // variable (each vector one as uint3) and read in the kernel, the simdgroup and quad lanes in a
 // helper Metal keeps out of line. Thread t of the grid (t = x + width * (y + height * z) of its

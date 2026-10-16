@@ -157,8 +157,9 @@ the runtime made.
 - `Device::raw()` gives the entry, instance, physical device, `ash::Device` and queue family.
   `CommandQueue::with_vk_queue` lends a queue's `VkQueue` under the runtime's lock.
 - `Texture::vk_image`, `Buffer::vk_buffer` and `SharedEvent::vk_semaphore` give an object's handle.
-  A texture over a buffer's bytes that aliases them gives a linear image, which over a no-copy
-  buffer's or dma-buf host pages may be of `VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT`
+  A texture over a buffer's bytes that aliases them gives a linear image (the same one for textures
+  of one image over the same bytes of one import of host pages, which share it), which over a
+  no-copy buffer's or dma-buf host pages may be of `VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT`
   (`DRM_FORMAT_MOD_LINEAR`, its one memory plane at the texture's `bytes_per_row`): ask its layout
   of memory plane 0.
 - `CommandBuffer::encode_wait_for_vk_semaphore` and `encode_signal_vk_semaphore` order a command
@@ -185,9 +186,15 @@ the runtime made.
   memory, given as a `HostMemory`, through `VK_EXT_external_memory_host`; memory the device cannot
   import exactly is refused. `unsafe Device::new_heap_with_bytes_no_copy` is its heap twin.
   `Buffer::rebind_bytes_no_copy` and `Heap::rebind_bytes_no_copy` move either to another range,
-  keeping the objects, addresses and IDs. Where a driver refuses the pointer (RADV refuses shared
-  mappings, a `memfd`'s among them), memory made with `HostMemory::with_dma_buf` is imported from
-  dma-bufs of its pages instead ([HOWTO](../../docs/HOWTO.md#6-host-memory-a-driver-refuses)).
+  keeping the objects, addresses and IDs. A rebind is refused (`RebindProblem::EncodedUses`) while
+  a command buffer not yet committed, or an open encoder, used the bytes; a render encoder whose
+  attachment lies in them uses them from its open. Where a driver refuses the pointer (RADV
+  refuses shared mappings, a `memfd`'s among them), memory made with `HostMemory::with_dma_buf` is
+  imported from dma-bufs of its pages instead
+  ([HOWTO](../../docs/HOWTO.md#6-host-memory-a-driver-refuses)). A no-copy buffer's import of such
+  dma-bufs that only blits have read may be released while idle and imported again at its next
+  blit, which then costs time: RADV lists every import in every submission. Nothing of Metal's
+  observes it.
   `CommandBuffer::used_resources` lists what a command buffer uses until it completes, so a
   program knows when it may take memory away.
 - **Hazards** are tracked as Metal tracks them. A heap's resources are untracked by default, so
@@ -199,7 +206,10 @@ the runtime made.
   bytes widened to 16-byte granules from the device's offset alignment, so it reports hazards
   between commands whose bytes are apart, as it does between untracked uses Metal leaves to the
   program; no order of either changes a result.
-- **Textures over buffers** share the buffer's bytes. The runtime keeps a copy and announces it
+- **Textures over buffers** share the buffer's bytes. An image over a no-copy buffer's host pages
+  starts `UNDEFINED`, as Vulkan makes an image for host allocations; the host keeps the bytes it
+  is bound to across its first move, reading them before and writing them back after
+  (`WorkCounts::first_move_keeps`). The runtime keeps a copy and announces it
   (`shadowed-texture`) where the device's linear images cannot hold Metal's layout, and where the
   rows lie with bytes between them and the texture renders or a shader writes it (or it only
   reads, under `PaddedReadsPolicy::Shadow`).

@@ -1,4 +1,4 @@
-// Owned fixture (WP-OB2, DESIGN D245): reads through an index past a texture handle array held in
+// Owned fixture: reads through an index past a texture handle array held in
 // an argument buffer, the handle array index containment form. The argument buffer `ts` holds the
 // two-texture array `tex` and, after it, the two-texture array `spare`, so an index of 2 or 3 into
 // `tex` names a handle inside the argument buffer (one of `spare`'s). Eight threads; thread t reads

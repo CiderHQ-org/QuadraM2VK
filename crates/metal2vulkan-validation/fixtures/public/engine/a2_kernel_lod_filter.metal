@@ -1,5 +1,5 @@
-// Owned fixture (WP-A2, DESIGN D127): level of detail in a kernel, read through the choice
-// between the magnification and minification filters (DESIGN D73.2, D90.3). The sampler magnifies
+// Owned fixture: level of detail in a kernel, read through the choice
+// between the magnification and minification filters. The sampler magnifies
 // with `nearest` and minifies with `linear`, so a sample 1/4 texel past a texel centre returns the
 // texel alone when its level of detail is at most 0 and a bilinear blend when it is above 0. The
 // texture has one level, so this reads the sign of the level of detail, not the level itself.

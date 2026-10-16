@@ -442,10 +442,11 @@ pub(super) fn encode_host_commands(
 /// its own command buffer, waited for before the next: compute commands in a compute encoder,
 /// render commands in a render encoder of a pass whose one attachment is the oracle's own 1x1
 /// `R8Unorm` sink (`make_rasterization_sink`, shared storage; the checker admits only
-/// rasterization-disabled vertex templates, whose pipelines name that attachment and draw nothing
-/// into it). The encoder takes the parent pipeline and buffers the execution states, makes every
-/// buffer of the case and every argument-buffer buffer resident for reading and writing
-/// (`useResource:usage:`, for the vertex and fragment stages of a render encoder), and calls
+/// rasterization-disabled vertex and mesh templates, whose pipelines name that attachment and draw
+/// nothing into it). The encoder takes the parent pipeline and buffers the execution states, makes
+/// every buffer of the case and every argument-buffer buffer resident for reading and writing
+/// (`useResource:usage:`, for the vertex and fragment stages of a render encoder, and the object
+/// and mesh stages too where its descriptor allows mesh draws), and calls
 /// `executeCommandsInBuffer:withRange:` over the execution range.
 pub(super) fn execute_host_commands(
     device: &ProtocolObject<dyn MTLDevice>,
@@ -518,7 +519,7 @@ pub(super) fn execute_host_commands(
                 unsafe { encoder.executeCommandsInBuffer_withRange(native, range) };
                 encoder.endEncoding();
             }
-            CommandDescriptor::Render { .. } => {
+            CommandDescriptor::Render { draws, .. } => {
                 let sink = super::attachments::make_rasterization_sink(device)?;
                 let pass = MTLRenderPassDescriptor::renderPassDescriptor();
                 let attachment = unsafe { pass.colorAttachments().objectAtIndexedSubscript(0) };
@@ -551,11 +552,39 @@ pub(super) fn execute_host_commands(
                         )
                     };
                 }
+                for binding in &execution.object_buffers {
+                    let buffer = case_buffer(buffers, binding.buffer, "parent")?;
+                    unsafe {
+                        encoder.setObjectBuffer_offset_atIndex(
+                            Some(buffer),
+                            binding.offset as usize,
+                            binding.index as usize,
+                        )
+                    };
+                }
+                for binding in &execution.mesh_buffers {
+                    let buffer = case_buffer(buffers, binding.buffer, "parent")?;
+                    unsafe {
+                        encoder.setMeshBuffer_offset_atIndex(
+                            Some(buffer),
+                            binding.offset as usize,
+                            binding.index as usize,
+                        )
+                    };
+                }
+                let stages = if draws.mesh() {
+                    MTLRenderStages::Vertex
+                        | MTLRenderStages::Fragment
+                        | MTLRenderStages::Object
+                        | MTLRenderStages::Mesh
+                } else {
+                    MTLRenderStages::Vertex | MTLRenderStages::Fragment
+                };
                 for buffer in resident() {
                     encoder.useResource_usage_stages(
                         ProtocolObject::from_ref(&**buffer),
                         usage,
-                        MTLRenderStages::Vertex | MTLRenderStages::Fragment,
+                        stages,
                     );
                 }
                 unsafe { encoder.executeCommandsInBuffer_withRange(native, range) };

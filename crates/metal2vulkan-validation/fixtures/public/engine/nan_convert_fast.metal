@@ -1,4 +1,4 @@
-// Owned fixture (NaN model, DESIGN D293): `nan_convert`'s program under the default fast math,
+// Owned fixture (NaN model): `nan_convert`'s program under the default fast math,
 // the flag state of Metal's vector conversions between `float` and `half` that `nan_convert`
 // (without fast math) does not measure. Lane `i` reads a float4 a (the bits in `in[2i]`) and a
 // half4 h (the four halves of `in[2i + 1].xy`, the first in the low half) and writes eight words

@@ -28,7 +28,7 @@
 //! the written green's half in its fourth channel, Metal's X field (EV FPV-pf1-m4), and reads
 //! alpha 1.
 
-use super::degrade_notices::{counts, on_device};
+use super::degrade_notices::{counts, on_device_with};
 use super::{buffer_with_options, read_buffer, WAIT};
 use crate::air_library::AirLibrary;
 use metal2vulkan::metal::{PixelFormat, TextureUsage};
@@ -65,7 +65,7 @@ fn texel(i: usize) -> [u16; 4] {
 }
 
 /// Synthetic AIR written for this lane (the module docs).
-const KERNELS: &str = r#"; Owned synthetic kernels (WP-LTF, DESIGN D870).
+const KERNELS: &str = r#"; Owned synthetic kernels.
 source_filename = "half_slice_nans.metal"
 
 %"struct.metal::_imageblock_base" = type { ptr addrspace(4) }
@@ -320,11 +320,28 @@ fn written(
     command_buffer.commit().unwrap();
     command_buffer.wait_until_completed_for(WAIT).unwrap();
     assert_eq!(command_buffer.status(), CommandBufferStatus::Completed);
-    let levels = outs
+    let levels: Vec<Vec<u8>> = outs
         .iter()
         .enumerate()
         .map(|(level, out)| read_buffer(out, 0, bytes(level as u64)).unwrap())
         .collect();
+    // The outputs read again after a later command buffer of the queue completed: bytes that
+    // changed reached the host after the wait returned; bytes that differ from the halves stored
+    // and did not change were never written (seen once on the Radeon 780M under a full suite's
+    // load: the outputs held their zeros).
+    let later = queue.command_buffer().unwrap();
+    later.commit().unwrap();
+    later.wait_until_completed_for(WAIT).unwrap();
+    for (level, (out, read)) in outs.iter().zip(&levels).enumerate() {
+        let again = read_buffer(out, 0, bytes(level as u64)).unwrap();
+        assert!(
+            again == *read,
+            "level {level}: its bytes reached the host after the wait returned ({} of {} \
+             changed)",
+            again.iter().zip(read).filter(|(a, r)| a != r).count(),
+            read.len()
+        );
+    }
     (texture, levels)
 }
 
@@ -428,86 +445,105 @@ fn half_nans_written_through_the_blur_keep_their_bits() {
     ];
     let mut report = Vec::new();
     let mut failures = Vec::new();
-    for kind in Kind::ALL {
-        let name = kind.name();
-        for (format, channels) in formats {
-            let rgbx = format == PixelFormat::RGBX16Float;
-            for usage in usages {
-                let what = format!("{name} {format:?} usage {:#x}", usage.as_raw());
-                on_device(|device, messages| {
-                    let state = kernel(device, name);
-                    let reader = kernel(device, "read");
-                    let made = counts(&messages.take_notices());
-                    let (texture, levels) =
-                        written(device, (&state, kind), (format, channels), usage);
-                    let dispatched = counts(&messages.take_notices());
-                    let mut differ = Vec::new();
-                    for (level, bytes) in levels.iter().enumerate() {
-                        let s = side(level as u64);
-                        for (i, t) in bytes.chunks_exact(2 * channels as usize).enumerate() {
-                            let (x, y) = (i as u64 % s, i as u64 / s);
-                            for (c, got) in halves(t, channels as usize).into_iter().enumerate() {
-                                // A level the kernel does not write keeps its fill.
-                                let w = match level as u64 >= kind.levels() {
-                                    true => u16::from_le_bytes([FILL, FILL]),
-                                    false => stored(x, y, c, rgbx),
-                                };
-                                if got != w {
-                                    differ.push(format!("{w:04x}->{got:04x}"));
+    // Every case on one device. A device announces a kind once unless its options ask for each
+    // occurrence: with `device-nan-encoding` announced at each dispatch that binds a variant
+    // taking it, each case reads its own making's, dispatch's and read's notices as on a device
+    // of its own, and its validation messages fail it by name.
+    on_device_with(
+        |options| {
+            options.announce_each.insert(Degradation::DeviceNanEncoding);
+        },
+        |device, messages| {
+            for kind in Kind::ALL {
+                let name = kind.name();
+                for (format, channels) in formats {
+                    let rgbx = format == PixelFormat::RGBX16Float;
+                    for usage in usages {
+                        let what = format!("{name} {format:?} usage {:#x}", usage.as_raw());
+                        {
+                            let state = kernel(device, name);
+                            let reader = kernel(device, "read");
+                            let made = counts(&messages.take_notices());
+                            let (texture, levels) =
+                                written(device, (&state, kind), (format, channels), usage);
+                            let dispatched = counts(&messages.take_notices());
+                            let mut differ = Vec::new();
+                            for (level, bytes) in levels.iter().enumerate() {
+                                let s = side(level as u64);
+                                for (i, t) in bytes.chunks_exact(2 * channels as usize).enumerate()
+                                {
+                                    let (x, y) = (i as u64 % s, i as u64 / s);
+                                    for (c, got) in
+                                        halves(t, channels as usize).into_iter().enumerate()
+                                    {
+                                        // A level the kernel does not write keeps its fill.
+                                        let w = match level as u64 >= kind.levels() {
+                                            true => u16::from_le_bytes([FILL, FILL]),
+                                            false => stored(x, y, c, rgbx),
+                                        };
+                                        if got != w {
+                                            differ.push(format!("{w:04x}->{got:04x}"));
+                                        }
+                                    }
                                 }
                             }
-                        }
-                    }
-                    differ.sort();
-                    differ.dedup();
-                    let read = read_back(device, &reader, &texture);
-                    let read_notices = counts(&messages.take_notices());
-                    let mut read_differ = Vec::new();
-                    for (i, got) in read.iter().enumerate() {
-                        let (x, y) = (i as u64 % SIDE, i as u64 / SIDE);
-                        for (c, &g) in got.iter().enumerate().take(channels as usize) {
-                            let w = read_half(x, y, c, rgbx);
-                            if g != w {
-                                read_differ.push(format!("{w:04x}->{g:04x}"));
+                            differ.sort();
+                            differ.dedup();
+                            let read = read_back(device, &reader, &texture);
+                            let read_notices = counts(&messages.take_notices());
+                            let mut read_differ = Vec::new();
+                            for (i, got) in read.iter().enumerate() {
+                                let (x, y) = (i as u64 % SIDE, i as u64 / SIDE);
+                                for (c, &g) in got.iter().enumerate().take(channels as usize) {
+                                    let w = read_half(x, y, c, rgbx);
+                                    if g != w {
+                                        read_differ.push(format!("{w:04x}->{g:04x}"));
+                                    }
+                                }
                             }
-                        }
-                    }
-                    read_differ.sort();
-                    read_differ.dedup();
-                    eprintln!(
+                            read_differ.sort();
+                            read_differ.dedup();
+                            eprintln!(
                         "HALF-SLICE-NANS {what}: making {made:?}, dispatch {dispatched:?}; {} \
                          stored halves differ: {differ:?}; read back: {} differ, notices \
                          {read_notices:?}: {read_differ:?}",
                         differ.len(),
                         read_differ.len()
                     );
-                    if !differ.is_empty() || !made.is_empty() || !dispatched.is_empty() {
-                        failures.push(format!(
-                            "{what}: {} stored halves differ, making announced {made:?}, \
+                            if !differ.is_empty() || !made.is_empty() || !dispatched.is_empty() {
+                                failures.push(format!(
+                                    "{what}: {} stored halves differ, making announced {made:?}, \
                              dispatch {dispatched:?}",
-                            differ.len()
-                        ));
-                    }
-                    let read_kinds: Vec<_> = read_notices.keys().copied().collect();
-                    let read_announced = read_kinds == [Degradation::DeviceNanEncoding];
-                    if !(read_kinds.is_empty() || read_announced)
-                        || (!read_differ.is_empty() && !read_announced)
-                    {
-                        failures.push(format!(
+                                    differ.len()
+                                ));
+                            }
+                            let read_kinds: Vec<_> = read_notices.keys().copied().collect();
+                            let read_announced = read_kinds == [Degradation::DeviceNanEncoding];
+                            if !(read_kinds.is_empty() || read_announced)
+                                || (!read_differ.is_empty() && !read_announced)
+                            {
+                                failures.push(format!(
                             "{what}: read back {} halves differ, announced {read_notices:?}",
                             read_differ.len()
                         ));
+                            }
+                            report.push(format!(
+                                "{what}: stored {} differ, read {} differ{}",
+                                differ.len(),
+                                read_differ.len(),
+                                if read_announced { " (announced)" } else { "" }
+                            ));
+                        }
+                        assert_eq!(
+                            messages.take(),
+                            Vec::new(),
+                            "{what}: the validation layer reported"
+                        );
                     }
-                    report.push(format!(
-                        "{what}: stored {} differ, read {} differ{}",
-                        differ.len(),
-                        read_differ.len(),
-                        if read_announced { " (announced)" } else { "" }
-                    ));
-                });
+                }
             }
-        }
-    }
+        },
+    );
     eprintln!("half slice NaNs: {report:#?}");
     assert!(failures.is_empty(), "{failures:#?}");
 }

@@ -1,4 +1,4 @@
-// Owned fixture (WP-HRD, DESIGN D286.10): whether Metal's half-to-float widening of a NaN answers
+// Owned fixture: whether Metal's half-to-float widening of a NaN answers
 // the canonical NaN outside any texture path. Lane `i` loads the raw 16-bit pattern `in[i]` from a
 // buffer, reinterprets it as `half`, widens it to `float`, and stores to `out[i]` the widened bits,
 // the bits of the widening times the literal 1.0f, the bits of the widening times `one[0]` (a

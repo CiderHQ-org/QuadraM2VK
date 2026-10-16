@@ -1,4 +1,4 @@
-// Owned fixture (WP-UNK, DESIGN D283): the LOD queries the decoder lacked before D283 -- the
+// Owned fixture: the LOD queries the decoder once lacked -- the
 // clamped and unclamped LOD of 2D array, 3D, cube, and cube array textures and of depth 2D,
 // 2D array, cube, and cube array textures -- in a fragment function, at coordinates linear in
 // the fragment's position: the plane coordinate pos.xy / 16 (a 2D array and a 3D texture, whose

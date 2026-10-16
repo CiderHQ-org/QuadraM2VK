@@ -1,4 +1,4 @@
-// Owned fixture (WP-TTG, DESIGN D589 item 8): a compute kernel whose static threadgroup memory
+// Owned fixture: a compute kernel whose static threadgroup memory
 // (a float4 array of 1536, 24 KiB) and a float4 simdgroup shuffle leave a device that emulates
 // 32-lane simdgroups in 32 KiB of shared memory fewer threads a threadgroup than Metal's 1024:
 // each emulated simdgroup takes 512 scratch bytes beside the array, so 16 fit (512 threads).

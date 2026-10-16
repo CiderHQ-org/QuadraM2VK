@@ -1,4 +1,4 @@
-// Owned fixture (WP-EXT, DESIGN D195): a triangle patch's tessellation, read through its draw.
+// Owned fixture: a triangle patch's tessellation, read through its draw.
 // Each patch covers the clip-space right triangle its per-patch attribute states: the domain's
 // corner (1, 0, 0) at `rect.xy + (rect.z, 0)`, (0, 1, 0) at `rect.xy + (0, rect.w)`, and
 // (0, 0, 1) at `rect.xy` (a negative extent mirrors the patch). `shade` (locn0) holds the squares

@@ -1,7 +1,7 @@
-// Owned fixture (WP-A1, D126): Metal's sRGB encode over a dense sweep. D57.10 encodes a color
+// Owned fixture: Metal's sRGB encode over a dense sweep. The translator encodes a color
 // channel with the MSL transfer (`12.92 c` below 0.0031308, else `1.055 c^(1/2.4) - 0.055`) and
 // rounds `c * 255` to nearest even; whether Metal rounds half up instead is open, and so is
-// whether the encode, like the decode (D110.5), goes through a table. Compiled with the default
+// whether the encode, like the decode, goes through a table. Compiled with the default
 // fast math, as the corpus's packs are.
 //
 // Thread t (0..5503) packs two vectors and writes two words:

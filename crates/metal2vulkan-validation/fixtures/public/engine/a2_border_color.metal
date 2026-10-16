@@ -1,5 +1,5 @@
-// Owned fixture (WP-A2, DESIGN D127): `clamp_to_border` with each Metal border colour per bound
-// pixel format (DESIGN D62.7 and the B3b handback's border and alpha observations). Vulkan's
+// Owned fixture: `clamp_to_border` with each Metal border colour per bound
+// pixel format (from earlier border and alpha observations). Vulkan's
 // border colours are RGBA constants, so what a format without alpha, or with fewer channels,
 // returns at the border is a reading. One float, one uint, and one int texture are sampled at
 // coordinates inside, outside, and on each edge through constexpr nearest samplers with the

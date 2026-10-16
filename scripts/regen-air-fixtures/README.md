@@ -8,7 +8,7 @@ translator's fixture sweeps do not read.
 
 | Output | Produced by | Committed |
 |---|---|---|
-| `<name>.air` | `xcrun metal -c` (Apple AIR bitcode, typed pointers) | no (`*.air` is gitignored; see U4 below) |
+| `<name>.air` | `xcrun metal -c` (Apple AIR bitcode, typed pointers) | no (`*.air` is gitignored; see "Committed `.air`" below) |
 | `<name>.ll` | `llvm-dis` of `<name>.air` (opaque-pointer review text) | yes |
 | `<name>.air.ll` | `xcrun metal -S -emit-llvm` (typed-pointer text) | yes |
 | `TOOLCHAIN` | `xcrun metal --version`, SDK version, LLVM pin, `llvm-dis`/`llvm-as` versions, and each fixture compiled by another Metal toolchain | yes |
@@ -32,6 +32,15 @@ compiles. It compiles with the compiler's default fast math unless it has the li
 operation carries a fast-math flag, so a lane whose input is a NaN, an infinity, or a signed zero
 asks a defined question (under `nnan` or `ninf` such an operand or result is poison, and under
 `nsz` either zero is correct). No other value is accepted.
+
+Every source compiles for a stated macOS deployment target: the version of a line
+`// metal-macos-min: <version>` (a fixture whose framework headers spell their ABI by deployment
+target, such as MetalPerformancePrimitives' 26.2 tensor-op names, or one that needs AIR 2.9's
+27.0), else 26.0, the target the other fixtures were compiled for (`default_macos_min` in the
+script). Both compiles get `-mmacosx-version-min=<version>`, which outranks
+`MACOSX_DEPLOYMENT_TARGET`. Without it the compiler's default follows the host: on macOS 27 it is
+27.0, which moves the triple from `air64_v28-apple-macosx26.0.0` to `air64_v29-apple-macosx27.0.0`
+along with the AIR and language versions the module records.
 
 A line `// air-rename: <declared> <intrinsic>` (any number of them) names a function the source
 declares and never defines (its mangled name, such as `_Z9rfs_yieldt` for `void rfs_yield(ushort)`)
@@ -68,14 +77,13 @@ one, so adding a fixture after an Xcode update does not mean recompiling every o
   toolchain, prints `not checked: <name> (compiled by <toolchain>)` for each other one, and ends
   with the counts of checked and unchecked fixtures. It fails on a stale companion, on a fixture
   whose `.ll` or `.air.ll` records another Metal version (`!llvm.ident`) or SDK (`SDK Version`)
-  than `TOOLCHAIN` records for it, and when the host's LLVM tools differ from the recorded ones.
+  than `TOOLCHAIN` records for it, on one whose `target triple` names another macOS version than
+  its source selects (checked for every fixture, compiled or not), and when the host's LLVM tools
+  differ from the recorded ones.
 
-On the macOS host after its Xcode update (Metal 32023.921, SDK 27.0), `--check` checks only the
-45 fixtures recorded under that toolchain (`bcx_*`, `dsm_*`, `fca_*`, `fmx_*`,
-`icb_render_replay_*`, `icb_replay_*`, `ob1_*`, `ob2_*`, `ob3_*`, `rt_instance_count`,
-`sps2_residency_probes`, `sxc_taps_before_step`, `trh_*`, and `vv1_sixteen_byte_units`) and
-lists the 120 compiled by Metal 32023.883 (SDK 26.5) as not checked. Re-keying those 120 is a
-separate, deliberate regeneration that has not been done.
+Fixtures recorded under another Metal toolchain than the host's (those compiled by Metal
+32023.883, SDK 26.5, on a host with 32023.921) are listed as not checked; re-keying them is a
+separate, deliberate regeneration.
 
 **The pinned LLVM.** The `.ll` companions are written for LLVM 21 (`llvm_major` in the script),
 the oldest LLVM whose `llvm-as` the gates assemble them with: Linux CI and the Linux gate image
@@ -102,6 +110,6 @@ PATH="$PATH:$(brew --prefix llvm@21)/bin" scripts/regen-air-fixtures/regen-air-f
 Moving the pin to a newer major is a regeneration like any other toolchain change, and is only
 sound once every gate's `llvm-as` is at least that major.
 
-**U4 (user decision pending).** Committing the Apple-compiled `.air` binaries needs a narrow
-`.gitignore` exception that amends `AGENTS.md` ("What not to commit"). Until the user answers
-U4, only MSL, `.ll`, `.air.ll`, and `TOOLCHAIN` are committed and `.air` stays local.
+**Committed `.air`.** Only MSL, `.ll`, `.air.ll`, and `TOOLCHAIN` are committed; `.air` stays
+local. Committing the Apple-compiled `.air` binaries would need a narrow `.gitignore` exception
+and a change to `AGENTS.md` ("What not to commit").

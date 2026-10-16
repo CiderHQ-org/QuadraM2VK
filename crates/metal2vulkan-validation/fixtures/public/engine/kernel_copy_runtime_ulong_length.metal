@@ -1,6 +1,6 @@
-// Owned MSL for WP-L2c (D141.2): memory intrinsics of a runtime length. Thread 0 copies
+// Owned MSL: memory intrinsics of a runtime length. Thread 0 copies
 // `lengths.copy` bytes (a `ulong`: an `i64` length, held as two 32-bit words on a device without
-// `shaderInt64`, D95, D99.7) from `src` to `dst`, both word-aligned, so the copy is whole words
+// `shaderInt64`) from `src` to `dst`, both word-aligned, so the copy is whole words
 // then tail bytes; then it fills `lengths.fill` bytes (a `uint` count widened to `i64`) at byte
 // 512 of `dst` with 0x5a. Every other thread returns. The only loops are the lowered copy and
 // fill, which the execution bound instruments.

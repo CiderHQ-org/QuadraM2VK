@@ -46,12 +46,14 @@ use std::collections::BTreeMap;
 use crate::budget::Meter;
 use crate::device::requirements::{Requirements, VkFeature, VkLimit};
 use crate::device::DeviceProfile;
-use crate::error::{Capability, DescriptorError, Error, Feature, LowerFamily, Unsupported};
+use crate::error::{
+    Capability, DescriptorError, Error, Feature, LowerFamily, RuntimeInput, Unsupported,
+};
 use crate::lower::stage_io::fetch::encoding;
 use crate::metal::{TessellationControlPointIndexType, TessellationPartitionMode as Partition};
 use crate::pipeline::artifact::{Reconvergence, SpecializationLayout, StageModule, StrategyCensus};
 use crate::pipeline::descriptor::{TessellationDescriptor, VertexDescriptor};
-use crate::pipeline::graphics::TessellationState;
+use crate::pipeline::graphics::{EmulatedTessellation, TessellationState};
 use crate::pipeline::interface::{StageInterface, TessellationStage};
 use crate::pipeline::layout::PushConstantRange;
 use crate::pipeline::lower_inputs::{VertexFetch, VertexFetchProjection};
@@ -200,22 +202,8 @@ pub fn control_plan(
     amplification: u32,
     p: &DeviceProfile,
 ) -> Result<ControlPlan, Error> {
-    let desc = desc.copied().unwrap_or_default();
+    let desc = checked(desc)?;
     let max = desc.max_tessellation_factor;
-    let valid = (1..=64).contains(&max)
-        && match desc.partition_mode {
-            Partition::Pow2 => max.is_power_of_two(),
-            Partition::FractionalOdd | Partition::FractionalEven => max % 2 == 0,
-            _ => true,
-        };
-    if !valid {
-        return Err(Error::InvalidDescriptor(
-            DescriptorError::MaxTessellationFactor {
-                factor: max,
-                partition_mode: desc.partition_mode,
-            },
-        ));
-    }
     let f = p.fields();
     let level = f.limits.max_tessellation_generation_level;
     if max > level {
@@ -244,10 +232,61 @@ pub fn control_plan(
     Ok(ControlPlan { desc, stage })
 }
 
-/// A fragment stage `fs` behind an evaluation stage: one that reads `[[primitive_id]]` is not
-/// implemented (the module docs).
+/// The descriptor's tessellation state `desc` (`None`: Metal's defaults), held to Metal's rules: a
+/// `maxTessellationFactor` between 1 and 64, a power of two for `pow2` and even for the
+/// fractional partitions (`InvalidDescriptor(MaxTessellationFactor)` otherwise).
+fn checked(desc: Option<&TessellationDescriptor>) -> Result<TessellationDescriptor, Error> {
+    let desc = desc.copied().unwrap_or_default();
+    let max = desc.max_tessellation_factor;
+    let valid = (1..=64).contains(&max)
+        && match desc.partition_mode {
+            Partition::Pow2 => max.is_power_of_two(),
+            Partition::FractionalOdd | Partition::FractionalEven => max % 2 == 0,
+            _ => true,
+        };
+    if !valid {
+        return Err(Error::InvalidDescriptor(
+            DescriptorError::MaxTessellationFactor {
+                factor: max,
+                partition_mode: desc.partition_mode,
+            },
+        ));
+    }
+    Ok(desc)
+}
+
+/// The emulated tessellation state of a pipeline whose evaluation stage `stage` was compiled for
+/// a device without `tessellationShader` (`TessellationStage::emulated`): the descriptor's
+/// tessellation state `desc` (`None`: Metal's defaults), held to Metal's rules as
+/// [`control_plan`] holds it, but not to the device's tessellation limits (the emulation uses no
+/// tessellation stage), and the state the stage baked in (`NeedsInput(TessellationDescriptor)`
+/// otherwise: compiled for another state, the function draws another tessellation).
+pub fn emulated_state(
+    desc: Option<&TessellationDescriptor>,
+    stage: TessellationStage,
+) -> Result<EmulatedTessellation, Error> {
+    let desc = checked(desc)?;
+    if stage.emulated != Some(desc) {
+        return Err(Error::NeedsInput(RuntimeInput::TessellationDescriptor));
+    }
+    Ok(EmulatedTessellation {
+        domain: stage.domain,
+        control_points: stage.control_points,
+        descriptor: desc,
+    })
+}
+
+/// A fragment stage `fs` behind an evaluation stage: one that reads `[[primitive_id]]`, from the
+/// builtin or from its varying (`IoRole::PrimitiveId`), is not implemented (the module docs).
 pub fn check_fragment(fs: Option<&StageInterface>) -> Result<(), Error> {
-    if fs.is_some_and(|f| f.io.builtins.contains(&StageBuiltin::PrimitiveId)) {
+    let reads = |f: &StageInterface| {
+        f.io.builtins.contains(&StageBuiltin::PrimitiveId)
+            || f.io
+                .inputs
+                .iter()
+                .any(|v| v.role == crate::pipeline::stage_io::IoRole::PrimitiveId)
+    };
+    if fs.is_some_and(reads) {
         return Err(Unsupported::not_implemented(Feature::Tessellation).into());
     }
     Ok(())
@@ -337,6 +376,9 @@ pub fn synthesized_stages(
                 rounded_colors: Vec::new(),
                 specialized_notes: Vec::new(),
                 half_bit_colors: Vec::new(),
+                own_pixel_textures: Vec::new(),
+                snapshot_textures: Vec::new(),
+                private_bytes: 0,
             },
             module.requirements,
         ));

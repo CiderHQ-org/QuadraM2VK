@@ -1,12 +1,12 @@
 //! Device tests of multisample resolves (its fourth part) on the device the cfg selects, under the
 //! validation layer.
 //!
-//! Each pass is one RT6 Metal probe 6 measured (an M4 with macOS 27.0.1, each case with and
+//! Each pass is one that a Metal probe measured (an M4 with macOS 27.0.1, each case with and
 //! without Metal's API validation), drawn with the same per-sample values (the owned fixture
 //! `rt6_resolves`) into a 4x 4² target cleared to zero, and resolved; the resolve texture is
-//! compared with the one Metal resolved. A depth/stencil pass gives its samples the probe's
-//! depths 0.5, 0.1, 0.9 and 0.3 and stencils 20 to 23, one sample a draw through a returned
-//! sample mask, the depth from the vertex and the stencil from the reference.
+//! compared with the one Metal resolved. A depth/stencil pass gives its samples the probe's depths
+//! 0.5, 0.1, 0.9 and 0.3 and stencils 20 to 23, one sample a draw through a returned sample mask,
+//! the depth from the vertex and the stencil from the reference.
 //!
 //! A color resolve averages: Vulkan leaves the average's rounding (and an sRGB average's space)
 //! to the device, and Metal rounds a unorm tie up (127.5 to 128). The runtime resolves a unorm,
@@ -1502,12 +1502,12 @@ fn a_resolve_into_the_srgb_twin_keeps_the_attachment_s_encoding() {
     quiet(lane, &messages);
 }
 
-/// A color texture without `RenderTarget` usage, which Metal's validation stops, renders as
-/// plain Metal renders it (EV RRS-probe-1-m4's `usage_*`, an M4; RT6 probe 1's
-/// `usage_missing`), through a stand-in: cleared and drawn white, then stored, it holds the
-/// draw; loaded and stored, its texels; cleared and drawn, then stored `DontCare`, its texels
-/// (each byte 0x11 before the pass); cleared and stored, the clear. A depth or stencil texture
-/// without it is [`a_depth_or_stencil_texture_without_render_target_usage_renders_as_metal`]'s.
+/// A color texture without `RenderTarget` usage, which Metal's validation stops, renders as plain
+/// Metal renders it (EV RRS-probe-1-m4's `usage_*`, an M4; Metal probe case `usage_missing` on an
+/// M4), through a stand-in: cleared and drawn white, then stored, it holds the draw; loaded and
+/// stored, its texels; cleared and drawn, then stored `DontCare`, its texels (each byte 0x11 before
+/// the pass); cleared and stored, the clear. A depth or stencil texture without it is
+/// [`a_depth_or_stencil_texture_without_render_target_usage_renders_as_metal`]'s.
 #[test]
 fn a_colour_texture_without_render_target_usage_renders_as_metal() {
     let (messages, _cache, lane) = lane();
@@ -1761,15 +1761,16 @@ enum Split {
     TwoSlices,
 }
 
-/// A pass whose depth and stencil resolve into different textures resolves each as Metal does
-/// (a probe RRS-dsres on an M3 Max and an M4: separate textures resolve each aspect by its filter;
-/// one combined attachment's two resolve textures each take their aspect alone, the other aspect
+/// A pass whose depth and stencil resolve into different textures resolves each as Metal does (a
+/// probe RRS-dsres on an M3 Max and an M4: separate textures resolve each aspect by its filter; one
+/// combined attachment's two resolve textures each take their aspect alone, the other aspect
 /// keeping its texels, which Metal's debug layer stops and plain Metal runs; two slices of one
-/// array likewise, CRF probe 5). The samples are probe 6's (depths 0.5, 0.1, 0.9 and 0.3, stencils
-/// 20 to 23); each resolve texture holds depth 0.75 and stencil 7 before the pass. A stencil drawn
-/// after the pass (`DepthResolvedSample` after `Min` or `Max`, or a depth the device has no mode
-/// for) is `NotImplemented(DepthStencilResolve)` in a split resolve, as is a pair of modes the
-/// device lacks; a device that refuses the separate textures' sample copies prints its refusal.
+/// array likewise, a Metal probe on the M3 Max and an M4). The samples are those of a Metal probe
+/// on an M4 (depths 0.5, 0.1, 0.9 and 0.3, stencils 20 to 23); each resolve texture holds depth
+/// 0.75 and stencil 7 before the pass. A stencil drawn after the pass (`DepthResolvedSample` after
+/// `Min` or `Max`, or a depth the device has no mode for) is `NotImplemented(DepthStencilResolve)`
+/// in a split resolve, as is a pair of modes the device lacks; a device that refuses the separate
+/// textures' sample copies prints its refusal.
 #[test]
 fn split_depth_and_stencil_resolves_are_metals() {
     use MultisampleDepthResolveFilter as D;

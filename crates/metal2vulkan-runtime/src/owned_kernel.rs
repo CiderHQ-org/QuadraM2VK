@@ -22,8 +22,8 @@ use super::Device;
 use crate::shader_cache::driver::Making;
 use ash::vk;
 use metal2vulkan::bind::{
-    BlockDecode, CompressedBlit, MipmapFilterKernel, RewritePhase, RewriteProgram, TexelWords,
-    YCbCrOutput,
+    BlockDecode, CompressedBlit, MipmapFilterKernel, RewritePhase, RewriteProgram,
+    TessellationScanKernel, TexelWords, YCbCrOutput,
 };
 use metal2vulkan::metal::format::ExtendedRange;
 use std::collections::HashMap;
@@ -52,6 +52,15 @@ pub(super) enum OwnedModule {
     /// `bind::shadow_merge_module`: a shadowed texture's writes merged into its buffer's bytes
     /// after a command that also wrote them another way (`shadow_merge.rs`).
     ShadowMerge,
+    /// `bind::depth_magnitude_module`: a 32-bit float depth's magnitude stand-in, written before a
+    /// pass that renders over it, and the pass's words merged back into the depth after it
+    /// (`signed_depth.rs`).
+    DepthMagnitude,
+    /// `bind::shadow_copy_back_module` of one texel width (1, 2 or 4 words): a shadowed
+    /// texture's texels stored back into its buffer's rows by a dispatch, where the device copies
+    /// back faster so (`shadow_copy_back.rs`). Its shadow's unsigned-integer view is its sampled
+    /// image.
+    ShadowCopyBack(u32),
     /// `bind::mipmap_filter_module` of one kernel: a level of a mipmap chain from the level
     /// above it, as Metal's filter computes it (`mipmap_filter.rs`); a kernel that fetches the
     /// first level binds its sampled view first. Needs `shaderInt64`: a device without it fails
@@ -115,6 +124,11 @@ pub(super) enum OwnedModule {
     /// `bind::block_decode_module` of one decode: a BC1 to BC5 texture's written region decoded
     /// as Metal decodes it into its decoded twin (`texture/decoded_twin.rs`).
     BlockDecode(BlockDecode),
+    /// `bind::tessellation_scan_module` of one pipeline's tessellation state: an emulated patch
+    /// draw's records and chunk draws (`render/tessellation_scan.rs`). One per state a pipeline
+    /// of the device draws with (its domain, partition, winding, maximum factor, step function
+    /// and scale: a few).
+    TessellationScan(TessellationScanKernel),
 }
 
 impl OwnedModule {
@@ -122,6 +136,7 @@ impl OwnedModule {
     fn images(self) -> u32 {
         match self {
             OwnedModule::MipmapFilter(kernel) => u32::from(kernel.fetches()),
+            OwnedModule::ShadowCopyBack(_) => 1,
             _ => 0,
         }
     }
@@ -179,6 +194,19 @@ impl OwnedModule {
                     .map_err(Error::Compile)?;
                 let push_bytes = metal2vulkan::bind::ShadowMergeModule::PUSH_BYTES;
                 Ok((module.spirv.to_vec(), 3, push_bytes))
+            }
+            OwnedModule::DepthMagnitude => {
+                let module = metal2vulkan::bind::depth_magnitude_module(device.compile_device())
+                    .map_err(Error::Compile)?;
+                let push_bytes = metal2vulkan::bind::DepthMagnitudeModule::PUSH_BYTES;
+                Ok((module.spirv.to_vec(), 2, push_bytes))
+            }
+            OwnedModule::ShadowCopyBack(words) => {
+                let module =
+                    metal2vulkan::bind::shadow_copy_back_module(device.compile_device(), words)
+                        .map_err(Error::Compile)?;
+                let push_bytes = metal2vulkan::bind::ShadowCopyBackModule::PUSH_BYTES;
+                Ok((module.spirv.to_vec(), 1, push_bytes))
             }
             OwnedModule::MipmapFilter(kernel) => {
                 let module =
@@ -283,6 +311,12 @@ impl OwnedModule {
                         .map_err(Error::Compile)?;
                 Ok((module.spirv.to_vec(), 3, 0))
             }
+            OwnedModule::TessellationScan(kernel) => {
+                let module =
+                    metal2vulkan::bind::tessellation_scan_module(device.compile_device(), &kernel)
+                        .map_err(Error::Compile)?;
+                Ok((module.spirv.to_vec(), 4, 0))
+            }
         }
     }
 }
@@ -326,6 +360,8 @@ pub(super) struct OwnedKernels {
     replay_preprocess: Option<OwnedKernel>,
     flat_dispatch: Option<OwnedKernel>,
     shadow_merge: Option<OwnedKernel>,
+    depth_magnitude: Option<OwnedKernel>,
+    shadow_copy_backs: HashMap<u32, OwnedKernel>,
     mipmap_filters: HashMap<MipmapFilterKernel, OwnedKernel>,
     mesh_scan: Option<OwnedKernel>,
     plane_words: Option<OwnedKernel>,
@@ -345,6 +381,7 @@ pub(super) struct OwnedKernels {
     extended_shadow_loads: HashMap<ExtendedRange, OwnedKernel>,
     predication_step: Option<OwnedKernel>,
     block_decodes: HashMap<BlockDecode, OwnedKernel>,
+    tessellation_scans: HashMap<TessellationScanKernel, OwnedKernel>,
 }
 
 impl OwnedKernels {
@@ -358,6 +395,7 @@ impl OwnedKernels {
             self.replay_preprocess,
             self.flat_dispatch,
             self.shadow_merge,
+            self.depth_magnitude,
             self.mesh_scan,
             self.plane_words,
             self.plane_copy,
@@ -373,6 +411,7 @@ impl OwnedKernels {
         ]
         .into_iter()
         .flatten()
+        .chain(self.shadow_copy_backs.values().copied())
         .chain(self.mipmap_filters.values().copied())
         .chain(self.index_rewrites.values().copied())
         .chain(self.ycbcr_converts.values().copied())
@@ -380,6 +419,7 @@ impl OwnedKernels {
         .chain(self.compressed_blits.values().copied())
         .chain(self.extended_shadow_loads.values().copied())
         .chain(self.block_decodes.values().copied())
+        .chain(self.tessellation_scans.values().copied())
         {
             kernel.destroy(raw);
         }
@@ -388,6 +428,7 @@ impl OwnedKernels {
     /// The kernel of `which`, where the device has made it.
     fn get(&mut self, which: OwnedModule) -> Option<OwnedKernel> {
         match which {
+            OwnedModule::ShadowCopyBack(words) => self.shadow_copy_backs.get(&words).copied(),
             OwnedModule::MipmapFilter(kernel) => self.mipmap_filters.get(&kernel).copied(),
             OwnedModule::IndexRewrite(program, phase) => {
                 self.index_rewrites.get(&(program, phase)).copied()
@@ -397,6 +438,7 @@ impl OwnedKernels {
             OwnedModule::CompressedBlit(rule) => self.compressed_blits.get(&rule).copied(),
             OwnedModule::ExtendedShadowLoad(form) => self.extended_shadow_loads.get(&form).copied(),
             OwnedModule::BlockDecode(decode) => self.block_decodes.get(&decode).copied(),
+            OwnedModule::TessellationScan(kernel) => self.tessellation_scans.get(&kernel).copied(),
             _ => self.slot(which).and_then(|slot| *slot),
         }
     }
@@ -404,6 +446,9 @@ impl OwnedKernels {
     /// Keep `kernel`, the kernel of `which`.
     fn put(&mut self, which: OwnedModule, kernel: OwnedKernel) {
         match which {
+            OwnedModule::ShadowCopyBack(words) => {
+                self.shadow_copy_backs.insert(words, kernel);
+            }
             OwnedModule::MipmapFilter(key) => {
                 self.mipmap_filters.insert(key, kernel);
             }
@@ -425,6 +470,9 @@ impl OwnedKernels {
             OwnedModule::BlockDecode(decode) => {
                 self.block_decodes.insert(decode, kernel);
             }
+            OwnedModule::TessellationScan(key) => {
+                self.tessellation_scans.insert(key, kernel);
+            }
             _ => {
                 if let Some(slot) = self.slot(which) {
                     *slot = Some(kernel);
@@ -433,9 +481,10 @@ impl OwnedKernels {
         }
     }
 
-    /// The slot of a kernel the device makes once (none for the mipmap filter's, the index
-    /// rewrite's, the YCbCr conversion's, the unused bits', the compressed blit's, the
-    /// extended shadow load's or the block decode's, one per key).
+    /// The slot of a kernel the device makes once (none for the shadow copy back's, the mipmap
+    /// filter's, the index rewrite's, the YCbCr conversion's, the unused bits', the compressed
+    /// blit's, the extended shadow load's, the block decode's or the tessellation scan's, one
+    /// per key).
     fn slot(&mut self, which: OwnedModule) -> Option<&mut Option<OwnedKernel>> {
         Some(match which {
             OwnedModule::VisibilityResolve => &mut self.visibility_resolve,
@@ -445,13 +494,16 @@ impl OwnedKernels {
             OwnedModule::ReplayPreprocess => &mut self.replay_preprocess,
             OwnedModule::FlatDispatch => &mut self.flat_dispatch,
             OwnedModule::ShadowMerge => &mut self.shadow_merge,
-            OwnedModule::MipmapFilter(_)
+            OwnedModule::DepthMagnitude => &mut self.depth_magnitude,
+            OwnedModule::ShadowCopyBack(_)
+            | OwnedModule::MipmapFilter(_)
             | OwnedModule::IndexRewrite(..)
             | OwnedModule::YCbCrConvert(_)
             | OwnedModule::UnusedBits(..)
             | OwnedModule::CompressedBlit(_)
             | OwnedModule::ExtendedShadowLoad(_)
-            | OwnedModule::BlockDecode(_) => return None,
+            | OwnedModule::BlockDecode(_)
+            | OwnedModule::TessellationScan(_) => return None,
             OwnedModule::MeshScan => &mut self.mesh_scan,
             OwnedModule::PlaneWords => &mut self.plane_words,
             OwnedModule::PlaneCopy => &mut self.plane_copy,

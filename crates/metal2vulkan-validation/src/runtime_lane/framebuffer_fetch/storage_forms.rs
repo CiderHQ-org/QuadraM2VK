@@ -186,21 +186,28 @@ fn a_fetched_target_takes_its_storage_form_once() {
         pooled,
         "the first pass of the target found its pipeline made on {device}"
     );
-    // Finished by the commit where the commit submitted it, else by the next command buffer made,
-    // once the scheduler's thread submitted it (the module docs).
-    let at_commit = taken(&lane) - before;
-    let at = Instant::now();
-    drop(lane.queue.command_buffer().unwrap());
-    let waited = at.elapsed();
+    // Ended, and announced, by the time the pass's command buffer completed (the scheduler's
+    // thread ends it before the command buffer's transition to `Scheduled`), with no other command
+    // buffer made since (the module docs).
     let notices = messages.take_notices();
     let through_scratch = scratched(&notices);
+    let completed_announced = (notices.iter())
+        .filter_map(|message| message.degradation.as_ref())
+        .any(|notice| notice.degradation == Degradation::FetchedTargetStorage);
     // The pass's command buffer was the device's only uncommitted one.
     let switched = u64::from(through_scratch);
     assert_eq!(
+        (taken(&lane) - before, completed_announced),
+        (switched, through_scratch),
+        "the switch and its announcement by its first pass's completion on {device}"
+    );
+    let at = Instant::now();
+    drop(lane.queue.command_buffer().unwrap());
+    let waited = at.elapsed();
+    assert_eq!(
         taken(&lane),
         before + switched,
-        "at its first pass's commit on {device} ({at_commit} by the commit itself, the next \
-         command buffer waited {waited:?})"
+        "at its first pass's commit on {device} (the next command buffer waited {waited:?})"
     );
     assert_eq!(read(&lane, &plain, 0, 0), level_of(SIDE, 0.5));
     for value in [0.25, 0.125, 0.0625] {
@@ -260,7 +267,7 @@ fn a_fetched_target_takes_its_storage_form_once() {
     );
     eprintln!(
         "storage form on {device}: the 2D target through a scratch {through_scratch}, took its \
-         form {switched} time(s) ({at_commit} finished by its commit, the next command buffer \
+         form {switched} time(s) (ended by its first pass's completion, the next command buffer \
          waited {waited:?}); the array {array_switched} time(s); its texels kept"
     );
     drop(cache);
@@ -432,10 +439,17 @@ struct Spin {
 /// word before its own is odd, then publishes its own, [`PUBLISHED`]; after its cap of loads it
 /// gives up and publishes nothing. Made, and run once released from the start, before the stream: a
 /// command buffer whose `VkPipeline` is still being made waits for a host step, which holds a
-/// switch off (the module docs). Then run unreleased, its cap growing until the run takes
-/// [`MEASURED`]: the cap is the loads of [`HOLD`] at that rate. A run's wall time bounds its GPU
-/// time, so the rate is never overstated and the hold lasts about [`HOLD`], longer only as far as
-/// other work on the GPU slows the spin.
+/// switch off (the module docs). Then run unreleased, its cap growing until the least of three
+/// runs' GPU windows takes [`MEASURED`]: the cap is the loads of [`HOLD`] at that rate. A run's
+/// GPU window, from its GPU start time to its GPU end time, bounds its GPU time: the device's
+/// timestamps where it writes them, else a window its work ran in (`gpu_time.rs`). So the rate is
+/// never overstated, and the hold lasts about [`HOLD`], longer only as far as other work on the
+/// GPU slows the spin. The window leaves out the commit's and the wait's own time, which a host
+/// loaded by other processes stretches: on an RTX 3090 beside two GPUs' lane suites (a load of 25
+/// on 16 hardware threads) a run of one load took 35.8 ms from its commit to its wait's return,
+/// its GPU window 0.02 ms, and one such run at the first cap would end the growth with the rate
+/// understated as many times over. Where the window comes from the host it holds the
+/// completion's latency, which only adds, so the least of three runs is taken.
 fn spinning(lane: &Lane, queue: &CommandQueue) -> Spin {
     let device = lane.device.name();
     let function = library(lane, "rfs_agx_yield")
@@ -449,16 +463,22 @@ fn spinning(lane: &Lane, queue: &CommandQueue) -> Spin {
         )
         .unwrap();
     // One run of `cap` loads, the flag up from the start where `up`: whether the kernel saw it,
-    // and the run's time from its commit to its completion.
+    // and the run's GPU window.
     let run = |cap: u32, up: bool| {
         let command_buffer = queue.command_buffer().unwrap();
         let gate = Gate::encode(lane, &command_buffer, (&state, cap), up);
-        let at = Instant::now();
         command_buffer.commit().unwrap();
         command_buffer.wait_until_completed_for(WAIT).unwrap();
-        let took = at.elapsed();
         assert_eq!(command_buffer.error(), None, "the spin on {device}");
-        (gate.published(), took)
+        let (start, end) = (
+            command_buffer.gpu_start_time(),
+            command_buffer.gpu_end_time(),
+        );
+        let window = match (start, end) {
+            (Ok(start), Ok(end)) => Duration::from_secs_f64((end - start).max(0.0)),
+            times => panic!("the spin's GPU times on {device}: {times:?}"),
+        };
+        (gate.published(), window)
     };
     assert!(
         run(1, true).0,
@@ -466,11 +486,17 @@ fn spinning(lane: &Lane, queue: &CommandQueue) -> Spin {
     );
     let mut loads = 1u32 << 12;
     let took = loop {
-        let (published, took) = run(loads, false);
-        assert!(
-            !published,
-            "an unreleased spin of {loads} loads publishes nothing, on {device}"
-        );
+        let took = (0..3)
+            .map(|_| {
+                let (published, took) = run(loads, false);
+                assert!(
+                    !published,
+                    "an unreleased spin of {loads} loads publishes nothing, on {device}"
+                );
+                took
+            })
+            .min()
+            .unwrap();
         if took >= MEASURED || loads >= 1 << 28 {
             break took;
         }
@@ -662,7 +688,11 @@ fn a_steady_stream_takes_the_storage_form_at_its_first_lone_commit() {
             .map_or(Duration::ZERO, |(_, _, at)| at.elapsed());
         (in_flight, held_pending, after)
     };
-    let mut look = |frame: usize, queue: char, (in_flight, held_pending, after)| {
+    // Read once the command buffer just committed is scheduled: a switch riding on it ends by
+    // then, on the scheduler's thread (the module docs).
+    let mut look = |frame: usize, queue: char, committed: &CommandBuffer, seen| {
+        committed.wait_until_scheduled().unwrap();
+        let (in_flight, held_pending, after) = seen;
         if switched.is_none() && taken(&lane) > before {
             switched = Some((frame, queue, in_flight, held_pending, after));
         }
@@ -697,7 +727,7 @@ fn a_steady_stream_takes_the_storage_form_at_its_first_lone_commit() {
             None => a.commit().unwrap(),
         }
         through_scratch.get_or_insert_with(|| scratched(&messages.take_notices()));
-        look(frame, 'A', seen);
+        look(frame, 'A', &a, seen);
         frames.push((frame, 'A', a.clone()));
         flight.push_back((frame, a));
 
@@ -733,7 +763,7 @@ fn a_steady_stream_takes_the_storage_form_at_its_first_lone_commit() {
         if let Some(gate) = gate {
             held = Some((b.clone(), gate, Instant::now()));
         }
-        look(frame, 'B', seen);
+        look(frame, 'B', &b, seen);
         frames.push((frame, 'B', b.clone()));
         flight.push_back((frame, b));
     }

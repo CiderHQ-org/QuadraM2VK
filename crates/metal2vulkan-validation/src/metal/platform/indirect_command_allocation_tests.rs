@@ -620,6 +620,8 @@ fn tiny_native_allocations_preserve_authored_capacity_without_submission() {
             draws: crate::case::indirect_commands::RenderDraws::default(),
             max_vertex_buffer_bind_count: 0,
             max_fragment_buffer_bind_count: 0,
+            max_object_buffer_bind_count: 0,
+            max_mesh_buffer_bind_count: 0,
             support_dynamic_attribute_stride: false,
         },
     ] {

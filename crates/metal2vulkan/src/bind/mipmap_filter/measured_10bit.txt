@@ -1,9 +1,9 @@
 # Plain Metal's generateMipmapsForTexture: of RGB10A2Unorm on an Apple M3 Max (macOS 26.7) and an
-# Apple M4 (macOS 27.0.1), the first computed level of share-mips-m3d's textures of two levels
-# (WP-FXR, our own probe and first levels, DESIGN D726): 10-bit sums placed a hair from
-# quarter-code halves. Each row is one field's sum: on each GPU every term (code times weight) is
-# floored to 2^-14 code before the sum, and the rows are a sample of the sums where that floor
-# and the exact sum give different codes, with near-tie sums where they agree.
+# Apple M4 (macOS 27.0.1), the first computed level of share-mips-m3d's textures of two levels (our
+# own probe and first levels): 10-bit sums placed a hair from quarter-code halves. Each row is one
+# field's sum: on each GPU every term (code times weight) is floored to 2^-14 code before the sum,
+# and the rows are a sample of the sums where that floor and the exact sum give different codes,
+# with near-tie sums where they agree.
 # Format:
 #   <m3|m4> <width>x<height> <x> <y> <field> <tap codes: (x0, y0) (x1, y0) (x0, y1) (x1, y1)>
 #   <the measured code>

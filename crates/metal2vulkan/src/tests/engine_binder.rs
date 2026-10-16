@@ -775,7 +775,7 @@ fn threadgroup_lengths_specialize_the_arena_and_are_checked() {
         let pipe = pipeline(&dev, &bc, "tg_region").expect(stem);
         assert_eq!(
             pipe.metal_info.static_threadgroup_memory_length, 16,
-            "{stem}: the regions start at 16 (D60.4)"
+            "{stem}: the regions start at 16"
         );
         let (_, m) = typed_module(&bc, "tg_region", dev.profile()).expect("module");
         let mut w = World::new([(0, Alloc::new(4 * 64, 0))]);
@@ -1267,7 +1267,7 @@ fn limit_pipeline(
     )
 }
 
-/// On Profile F (`vk12-floor`, `vk12-bare`: four storage buffers per stage) the fixture's six
+/// On Profile F (`vk12-floor`: four storage buffers per stage) the fixture's six
 /// buffer slots fit because the per-stage fallback views two read-only slots as uniform buffers:
 /// the `device` struct first (its window bounds its range), then the `constant` array (its `Whole`
 /// window leaves the range to the binder). The `device` view depends on the alias check, the
@@ -1282,12 +1282,7 @@ fn profile_f_views_read_only_slots_as_uniform_buffers_over_the_storage_limit() {
     let n = 64;
     let uniform = BufferForm::Descriptor(DescriptorView::UniformWords);
     let storage = BufferForm::Descriptor(DescriptorView::Storage);
-    for stem in [
-        "vk12-floor",
-        "vk12-bare",
-        "lunarg-desktop-baseline-2023",
-        "moltenvk-m3",
-    ] {
+    for stem in ["vk12-floor", "lunarg-desktop-baseline-2023", "moltenvk-m3"] {
         let dev = device(stem, |_| {});
         let pipe = pipeline(&dev, &bc, LIMIT_ENTRY).unwrap_or_else(|e| panic!("{stem}: {e}"));
         let small = dev

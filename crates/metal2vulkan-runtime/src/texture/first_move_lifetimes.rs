@@ -126,7 +126,7 @@ fn image_of(texture: &Texture) -> Option<&Arc<Image>> {
 fn waits_for_its_name(image: &Image) -> bool {
     lock(&image.first_move)
         .as_ref()
-        .is_some_and(|first| first.rebindable)
+        .is_some_and(|first| first.rebindable())
 }
 
 /// A texture over a no-copy buffer that only the host wrote keeps its image's move waiting (no

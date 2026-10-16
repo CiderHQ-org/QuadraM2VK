@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 
 use crate::metal;
+use crate::pipeline::descriptor::TessellationDescriptor;
 use crate::pipeline::sym::{PushField, ResourceSlot, SampledType, SlotRef, SpecKey, Stage};
 use crate::vk;
 
@@ -299,6 +300,13 @@ pub struct StageInterface {
     /// for any other function.
     #[cfg_attr(feature = "serde", serde(default))]
     pub emulated_payload: Option<u32>,
+    /// An object or mesh function's payload arena's bytes (`memory::arena::payload_bytes` of its
+    /// `[[payload]]` parameter's `air.arg_type_size`, a mesh function's at least
+    /// `LoweringInputs::object_payload`), which its accesses of the payload read and write; `None`
+    /// for a function without a payload. Link holds a mesh function's to at least its pipeline's
+    /// object function's (`NeedsInput(ObjectPayload)`).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub payload: Option<u32>,
     /// The function may reach an indirect command buffer, of the entry its function constants
     /// specialized (a constant that gates an argument or a path off leaves it out); `false` only
     /// where the function provably touches none. It is `true` where the function takes one
@@ -328,6 +336,30 @@ pub struct StageInterface {
     /// sampler resource ID as Metal's pipeline creation does.
     #[cfg_attr(feature = "serde", serde(default))]
     pub numbered_samplers: Vec<NumberedSampler>,
+    /// A fragment function's texture slots whose every texel read is at the fragment's own pixel,
+    /// sorted: an `OpImageFetch` at level 0, with no offset, of a single-sampled, non-arrayed 2D
+    /// image, at Metal's saturating `uint2` of `[[position]]`'s x and y (`read(uint2(p.xy))`),
+    /// clamped into the image or not. On a framebuffer below `2^24` pixels a side, such a slot's
+    /// reads lie inside the rectangle bounding the draw's scissors, a pixel wider each way for
+    /// its helper invocations, clamped as the coordinate is. Empty for every other stage.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub own_pixel_textures: Vec<u32>,
+    /// Those of `own_pixel_textures` a draw can read through a snapshot an earlier draw of the
+    /// same primitives took, sorted (`spirv::requirements::snapshot_textures`): no value a fetch
+    /// of the slot returns reaches, directly or through a call, a derivative, a sample, a quad or
+    /// subgroup operation, a branch, an integer divisor, a dynamic vector index, or a store other
+    /// than to a `Function`, `Private` or `Output` variable, so a helper invocation's value of it
+    /// reaches no fragment's result and gives it no undefined behavior; and the function writes no
+    /// memory and holds no interlock. Its variant (`LoweringInputs::snapshot_textures`) reads the slot through
+    /// the snapshot. Empty for every other stage.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub snapshot_textures: Vec<u32>,
+    /// The private memory a thread of the function keeps, in bytes: its `thread` variables and
+    /// arrays a run-time index reaches, its call stacks, and the constants it holds per thread so
+    /// (`ProfileFields::function_storage` holds it). What
+    /// `PrecisionNote::FunctionStorageAssumed`'s announcement names.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub private_bytes: u64,
 }
 
 /// An emulated mesh function's records: what each of its threadgroups writes to the draw's records
@@ -438,6 +470,12 @@ pub struct TessellationStage {
     /// `[[patch(_, N)]]`: the control points of each patch the function reads (0 when the
     /// function does not state it).
     pub control_points: u32,
+    /// `Some` for a function compiled for a device without `tessellationShader`: the module is a
+    /// plain `Vertex` entry that draws the tessellator's triangles itself
+    /// (`GraphicsState::emulated_tessellation`), baking in this render pipeline descriptor
+    /// tessellation state (`LoweringInputs::tessellation`).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub emulated: Option<TessellationDescriptor>,
 }
 
 impl TessellationStage {
@@ -455,6 +493,15 @@ impl TessellationStage {
         TessellationStage {
             domain,
             control_points,
+            emulated: None,
+        }
+    }
+
+    /// This stage, emulated under the descriptor tessellation state `desc`.
+    pub fn emulated(self, desc: TessellationDescriptor) -> TessellationStage {
+        TessellationStage {
+            emulated: Some(desc),
+            ..self
         }
     }
 }
@@ -472,9 +519,11 @@ pub enum PatchDomain {
 
 impl StageInterface {
     /// The Vulkan stage of the module: the evaluation stage for a post-tessellation vertex
-    /// function, the compute stage for an emulated object or mesh function, else the Metal stage's.
+    /// function (the vertex stage where it is emulated), the compute stage for an emulated object
+    /// or mesh function, else the Metal stage's.
     pub fn vk_stage(&self) -> vk::ShaderStage {
         match (self.tessellation, self.emulated_payload) {
+            (Some(t), _) if t.emulated.is_some() => vk::ShaderStage::VERTEX,
             (Some(_), _) => vk::ShaderStage::TESSELLATION_EVALUATION,
             (None, Some(_)) => vk::ShaderStage::COMPUTE,
             (None, None) => crate::device::derive::vk_stage(self.stage),

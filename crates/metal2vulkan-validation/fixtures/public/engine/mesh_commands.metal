@@ -1,4 +1,4 @@
-// Owned fixture (WP-MESH, DESIGN D334 item 6): kernels that encode mesh draws into an indirect
+// Owned fixture: kernels that encode mesh draws into an indirect
 // command buffer of render commands, for the runtime lane and Metal probe 6, whose kernels these
 // are. Each takes its command buffer, and the render pipeline states its commands set, in an
 // argument buffer at buffer 0. `enc_own`'s thread 0 sets command 0's object pipeline state, its

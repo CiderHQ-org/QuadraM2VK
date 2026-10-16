@@ -10,12 +10,12 @@ Every public item of the macOS 27.0 SDK (Xcode 27.0, 27A266a)'s Metal headers, b
 
 | Status | Items | Of which deprecated |
 |---|---|---|
-| implemented | 957 | 36 |
-| missing | 829 | 27 |
+| implemented | 958 | 36 |
+| missing | 828 | 27 |
 | out of scope | 349 | 5 |
 | all | 2135 | 68 |
 
-Implemented by the runtime: 634; by the translator's values: 323. Missing by size: S 145, M 148, L 160, XL 376.
+Implemented by the runtime: 635; by the translator's values: 323. Missing by size: S 145, M 147, L 160, XL 376.
 
 ## Missing, in build order
 
@@ -40,7 +40,6 @@ Cheap items a plain app calls first, then medium pieces by how often a plain app
 | placement sparse page sizes | S | 2 | `MTLHeapDescriptor.maxCompatiblePlacementSparsePageSize`, `MTLTextureDescriptor.placementSparsePageSize` |
 | parallel render encoding | M | 9 | `MTLCommandBuffer.parallelRenderCommandEncoderWithDescriptor:`, `MTLParallelRenderCommandEncoder`, `MTLParallelRenderCommandEncoder.renderCommandEncoder`, ... |
 | depth/stencil states in argument buffers | M | 2 | `MTLArgumentEncoder.setDepthStencilState:atIndex:`, `MTLArgumentEncoder.setDepthStencilStates:withRange:` |
-| object threadgroup memory | M | 1 | `MTLRenderCommandEncoder.setObjectThreadgroupMemoryLength:atIndex:` |
 | a sampler's LOD bias | M | 1 | `MTLSamplerDescriptor.lodBias` |
 | depth bounds | M | 1 | `MTLRenderCommandEncoder.setDepthTestMinBound:maxBound:` |
 | a texture's minimum LOD (macOS 27) | M | 2 | `MTLTextureViewDescriptor.minLOD`, `MTLTexture.minLOD` |
@@ -2061,7 +2060,7 @@ Cheap items a plain app calls first, then medium pieces by how often a plain app
 | `MTLRenderCommandEncoder.setObjectSamplerStates:withRange:` | method | implemented | `RenderCommandEncoder::set_object_sampler_states` (runtime) |
 | `MTLRenderCommandEncoder.setObjectSamplerState:lodMinClamp:lodMaxClamp:atIndex:` | method | implemented | `RenderCommandEncoder::set_object_sampler_states` (runtime): a range of one with clamps |
 | `MTLRenderCommandEncoder.setObjectSamplerStates:lodMinClamps:lodMaxClamps:withRange:` | method | implemented | `RenderCommandEncoder::set_object_sampler_states` (runtime) |
-| `MTLRenderCommandEncoder.setObjectThreadgroupMemoryLength:atIndex:` | method | missing | M: an object function's threadgroup memory, refused today at the pipeline (`NotImplemented(MeshShading)`) |
+| `MTLRenderCommandEncoder.setObjectThreadgroupMemoryLength:atIndex:` | method | implemented | `RenderCommandEncoder::set_object_threadgroup_memory_length` (runtime) |
 | `MTLRenderCommandEncoder.setMeshBytes:length:atIndex:` | method | implemented | `RenderCommandEncoder::set_mesh_bytes` (runtime): copied at the call; more than 4096 bytes refused |
 | `MTLRenderCommandEncoder.setMeshBuffer:offset:atIndex:` | method | implemented | `RenderCommandEncoder::set_mesh_buffer` (runtime) |
 | `MTLRenderCommandEncoder.setMeshBufferOffset:atIndex:` | method | implemented | `RenderCommandEncoder::set_mesh_buffer_offset` (runtime) |

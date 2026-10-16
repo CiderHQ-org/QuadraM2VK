@@ -24,7 +24,7 @@
 //! process's CPU time; and the device's work counts per frame that the path moves (dma-buf images
 //! and fallbacks, shadows and those zeroed as made, images at Metal's row pitch over host pages
 //! and the driver's refusals of them, asked and recalled, images started on the host, internal
-//! submissions, shadows' copies and the texels their copies back move). `SURFTEX-QUERY` lines
+//! submissions, shadows' copies and the texels their copies in and back move). `SURFTEX-QUERY` lines
 //! print what the driver answers for a `DRM_FORMAT_MOD_LINEAR` image of host allocations.
 //!
 //! [`pitch_classes`] asks which row pitches the device lays a texture over a no-copy buffer's
@@ -51,7 +51,12 @@
 //! over the rows (`Alias`, the default) against the shadow copied in at each use (`Shadow`),
 //! interleaved (`SURFTEX-READS`).
 //!
-//! All five are ignored by default: measurements, not checks. Run them by name with `--run-ignored all`, in a
+//! [`tight_keep_costs`] times what a first move that keeps its image's bytes costs, over packed
+//! rows: a 1080p surface, a 720p one and four tiles, each texture new each frame over a new buffer
+//! (the surface's pages held by nothing else, or joining a buffer kept over them, as a consumer
+//! makes one at each present) or made once every 60 frames (`SURFTEX-KEEP`).
+//!
+//! All six are ignored by default: measurements, not checks. Run them by name with `--run-ignored all`, in a
 //! build with `--cfg m2v_system_alloc`, whose lib test binary keeps the system allocator as a
 //! consumer's process does.
 
@@ -289,7 +294,8 @@ fn counts_per_frame(before: &WorkCounts, after: &WorkCounts, frames: usize) -> S
         "shadowed textures {:.2} (zeroed {:.2}), pitched host images {:.2} (refused {:.2}, \
          recalled {:.2}), dma-buf images {:.2}, dma-buf image fallbacks {:.2}, dma-buf imports \
          {:.2}, images started on the host {:.2}, internal submissions {:.2}, staging submissions \
-         {:.2}, shadow copies {:.2} (texels copied back {:.0})",
+         {:.2}, shadow copies {:.2} (texels copied in {:.0}, back {:.0}; copies back dispatched \
+         {:.2})",
         per(after.shadowed_textures, before.shadowed_textures),
         per(after.shadows_zeroed, before.shadows_zeroed),
         per(after.pitched_host_images, before.pitched_host_images),
@@ -315,8 +321,16 @@ fn counts_per_frame(before: &WorkCounts, after: &WorkCounts, frames: usize) -> S
         per(after.staging_submissions, before.staging_submissions),
         per(after.shadow_copies, before.shadow_copies),
         per(
+            after.shadow_texels_copied_in,
+            before.shadow_texels_copied_in
+        ),
+        per(
             after.shadow_texels_copied_back,
             before.shadow_texels_copied_back
+        ),
+        per(
+            after.shadow_copies_back_dispatched,
+            before.shadow_copies_back_dispatched
         ),
     )
 }
@@ -959,12 +973,14 @@ fn pitch_classes() {
 /// [`LAYOUTS`] (the tight one left out), a no-copy buffer over its surface's anonymous pages and a
 /// texture of its plane over it with `ShaderRead` usage alone; one pass into a private target of
 /// the browser's tile, drawing each texture over the whole target through a nearest sampler; one
-/// command buffer, committed and waited for; then the textures and buffers are released. Run under
-/// `PaddedReadsPolicy::Alias` (an image over the rows where the device lays one) and `Shadow` (the
-/// shadow, copied in before the pass), a device each, the two interleaved in rounds so a drift of
-/// the host's falls on both. Printed per policy and round (`SURFTEX-READS`): the textures' forms,
-/// the medians and 90th percentiles of a texture's making, the frame's encoding, commit to
-/// completion and process CPU time, and the shadow copies a frame.
+/// command buffer, committed and waited for; then the textures and buffers are released. Or, where
+/// `reused`, the textures are made once and every frame samples them. Run under
+/// `PaddedReadsPolicy::Alias` (an image over the rows where the device lays one, whose first move
+/// keeps its texels) and `Shadow` (the shadow, copied in before the pass), a device each, the two
+/// interleaved in rounds so a drift of the host's falls on both. Printed per policy, reuse and
+/// round (`SURFTEX-READS`): the textures' forms, the medians and 90th percentiles of a texture's
+/// making, the frame's encoding, commit to completion and process CPU time, and the shadow copies
+/// and first moves' keeps a frame.
 #[test]
 #[ignore = "a release-mode measurement: run by name"]
 fn read_only_padded_costs() {
@@ -978,8 +994,12 @@ fn read_only_padded_costs() {
         .iter()
         .map(|&(_, _, h, bpr)| Surface::Anonymous(Mapping::anonymous(Surface::len(bpr, h))))
         .collect();
+    let modes = [false, true].into_iter().flat_map(|reused| {
+        [PaddedReadsPolicy::Alias, PaddedReadsPolicy::Shadow].map(|policy| (reused, policy))
+    });
+    let modes: Vec<(bool, PaddedReadsPolicy)> = modes.collect();
     for round in 0..3 {
-        for policy in [PaddedReadsPolicy::Alias, PaddedReadsPolicy::Shadow] {
+        for &(reused, policy) in &modes {
             let cache = ScratchCache::new().unwrap();
             let messages = Messages::default();
             let device = validated_device_with(TEST_DEVICE, &messages, cache.path(), |options| {
@@ -1001,13 +1021,14 @@ fn read_only_padded_costs() {
             let mut makes = Vec::new();
             let (mut encodes, mut waits, mut cpus) = (Vec::new(), Vec::new(), Vec::new());
             let mut before = device.work_counts();
+            let mut made = Vec::new();
             for k in 0..WARM + FRAMES {
                 if k == WARM {
                     before = device.work_counts();
                 }
                 let cpu = process_cpu_us();
-                let mut made = Vec::new();
-                for &index in &chosen {
+                let making = if reused { k == 0 } else { true };
+                for &index in chosen.iter().filter(|_| making) {
                     let (_, w, h, bpr) = LAYOUTS[index];
                     let len = Surface::len(bpr, h);
                     let began = Instant::now();
@@ -1018,7 +1039,7 @@ fn read_only_padded_costs() {
                     let texture = buffer
                         .new_texture_with_iosurface_plane(&d, IoSurfacePlane::new(0, bpr, false))
                         .unwrap();
-                    if k >= WARM {
+                    if k >= WARM || reused {
                         makes.push(since(began));
                     }
                     made.push((texture, buffer));
@@ -1055,27 +1076,201 @@ fn read_only_padded_costs() {
                 command_buffer.wait_until_completed_for(WAIT).unwrap();
                 assert_eq!(command_buffer.error(), None);
                 let waited = since(committed);
-                drop(made);
+                if !reused {
+                    made.clear();
+                }
                 if k >= WARM {
                     encodes.push(encoded);
                     waits.push(waited);
                     cpus.push(process_cpu_us() - cpu);
                 }
             }
+            drop(made);
             let after = device.work_counts();
             let copies = (after.shadow_copies - before.shadow_copies) as f64 / FRAMES as f64;
+            let keeps = (after.first_move_keeps - before.first_move_keeps) as f64 / FRAMES as f64;
             let (make, make90) = median_p90(makes);
             let (encode, encode90) = median_p90(encodes);
             let (wait, wait90) = median_p90(waits);
             let (cpu, cpu90) = median_p90(cpus);
             println!(
-                "SURFTEX-READS on {}: round {round}, {policy:?}, forms {forms} (a aliased, s \
-                 shadowed): making {make:.0} us a texture (p90 {make90:.0}), encode {encode:.0} \
-                 us (p90 {encode90:.0}), commit to completion {wait:.0} us (p90 {wait90:.0}), \
-                 process CPU {cpu:.0} us (p90 {cpu90:.0}); shadow copies a frame {copies:.2}",
+                "SURFTEX-READS on {}: round {round}, {policy:?}, reused {reused}, forms {forms} \
+                 (a aliased, s shadowed): making {make:.0} us a texture (p90 {make90:.0}), encode \
+                 {encode:.0} us (p90 {encode90:.0}), commit to completion {wait:.0} us (p90 \
+                 {wait90:.0}), process CPU {cpu:.0} us (p90 {cpu90:.0}); shadow copies a frame \
+                 {copies:.2}, keeps a frame {keeps:.2}",
                 device.name(),
             );
         }
     }
     drop(surfaces);
+}
+
+/// A surface's plane: its width, height and bytes per row (`BGRA8Unorm`).
+type Plane = (u64, u64, u64);
+
+/// The packed-row surfaces [`tight_keep_costs`] samples, by shape, at pitches every measured
+/// driver lays a linear image at.
+const TIGHT: [(&str, &[Plane]); 3] = [
+    ("1920x1080", &[(1920, 1080, 7680)]),
+    ("1280x720", &[(1280, 720, 5120)]),
+    ("4x512x512", &[(512, 512, 2048); 4]),
+];
+
+/// How [`tight_keep_costs`] makes its textures, each after the ones before were released: a new
+/// buffer and texture over each surface each frame, its pages held by nothing else (`OneUse`); the
+/// same while a buffer over each surface's pages lives across frames, whose import the new buffers
+/// join (`PerPresent`: a consumer's texture over the presented surface at each present, beside its
+/// buffer over the whole surface, where they share one image, `texture/shared_alias.rs`); or as
+/// `OneUse` once every 60 frames (`SixtyUses`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Making {
+    OneUse,
+    PerPresent,
+    SixtyUses,
+}
+
+/// The first moves that kept their bytes so far, the bytes (`WorkCounts::first_move_keeps`), and
+/// the textures that took a shared image (`shared_alias_images`).
+fn keeps(counts: &WorkCounts) -> (u64, u64, u64) {
+    (
+        counts.first_move_keeps,
+        counts.first_move_kept_bytes,
+        counts.shared_alias_images,
+    )
+}
+
+/// What a texture's first move that keeps its image's bytes costs (`texture/first_move.rs`'s
+/// `Keep`), on the device the cfg selects. For each shape of [`TIGHT`] (a 1080p surface, a 720p
+/// one, four 512x512 tiles) over anonymous pages, textures with `ShaderRead` usage over no-copy
+/// buffers of the surfaces' packed rows, each sampled by a draw of one pass a frame into a private
+/// target of the first surface's size, committed and waited for, made as each [`Making`] says; each
+/// shape and making on a device of its own, interleaved in rounds so a drift of the host's falls
+/// on all. Printed per round, shape and making (`SURFTEX-KEEP`): the textures' forms (shadows
+/// counted), the medians and 90th percentiles of a texture's making, the frame's commit to
+/// completion and process CPU time, and the keeps, kept bytes and shared images taken a frame.
+#[test]
+#[ignore = "a release-mode measurement: run by name"]
+fn tight_keep_costs() {
+    use super::pitched_surfaces::{reading, sampler};
+    use metal2vulkan::metal::SamplerMinMagFilter;
+    for round in 0..3 {
+        for (shape, planes) in TIGHT {
+            let surfaces: Vec<Surface> = planes
+                .iter()
+                .map(|&(_, h, bpr)| Surface::Anonymous(Mapping::anonymous(Surface::len(bpr, h))))
+                .collect();
+            for making in [Making::OneUse, Making::PerPresent, Making::SixtyUses] {
+                let cache = ScratchCache::new().unwrap();
+                let messages = Messages::default();
+                let device = validated_device_with(TEST_DEVICE, &messages, cache.path(), |o| {
+                    o.layers.clear();
+                })
+                .unwrap();
+                let queue = device.new_command_queue().unwrap();
+                let pipeline = reading(&device, PixelFormat::BGRA8Unorm, "tob_sample");
+                let nearest = sampler(&device, SamplerMinMagFilter::Nearest);
+                let corners = staged(&device, &floats([-1.0, -1.0, 1.0, 1.0]));
+                let (tw, th, _) = planes[0];
+                let mut d = TextureDescriptor::texture_2d(PixelFormat::BGRA8Unorm, tw, th, false);
+                d.usage = TextureUsage::RENDER_TARGET;
+                d.resource_options = ResourceOptions::private();
+                let target = device.new_texture(&d).unwrap();
+                let texture_over = |buffer: &Buffer, (w, h, bpr): Plane| {
+                    let mut d = TextureDescriptor::texture_2d(PixelFormat::BGRA8Unorm, w, h, false);
+                    d.usage = TextureUsage::SHADER_READ;
+                    d.resource_options = buffer.resource_options();
+                    buffer
+                        .new_texture_with_iosurface_plane(&d, IoSurfacePlane::new(0, bpr, false))
+                        .unwrap()
+                };
+                let buffers = |device: &Device| -> Vec<Buffer> {
+                    (surfaces.iter().zip(planes))
+                        .map(|(surface, &(_, h, bpr))| {
+                            surface.buffer(device, Surface::len(bpr, h), None)
+                        })
+                        .collect()
+                };
+                let kept_buffers = match making {
+                    Making::PerPresent => buffers(&device),
+                    Making::OneUse | Making::SixtyUses => Vec::new(),
+                };
+                let mut made: Vec<(Texture, Buffer)> = Vec::new();
+                let (mut makes, mut waits, mut cpus) = (Vec::new(), Vec::new(), Vec::new());
+                let mut before = device.work_counts();
+                let mut shadows = 0;
+                for k in 0..WARM + FRAMES {
+                    if k == WARM {
+                        before = device.work_counts();
+                    }
+                    let cpu = process_cpu_us();
+                    let anew = match making {
+                        Making::OneUse | Making::PerPresent => true,
+                        Making::SixtyUses => k % 60 == 0,
+                    };
+                    if anew {
+                        made.clear();
+                        let counted = device.work_counts().shadowed_textures;
+                        let began = Instant::now();
+                        made = (buffers(&device).into_iter().zip(planes))
+                            .map(|(buffer, &plane)| (texture_over(&buffer, plane), buffer))
+                            .collect();
+                        if k >= WARM {
+                            makes.push(since(began) / planes.len() as f64);
+                        }
+                        shadows = device.work_counts().shadowed_textures - counted;
+                    }
+                    let command_buffer = queue.command_buffer().unwrap();
+                    let mut pass = RenderPassDescriptor::new();
+                    let attachment = &mut pass.color_attachments[0];
+                    attachment.texture = Some(target.clone());
+                    attachment.load_action = LoadAction::Clear;
+                    attachment.store_action = StoreAction::Store;
+                    let mut encoder = command_buffer.render_command_encoder(&pass).unwrap();
+                    encoder.set_render_pipeline_state(&pipeline).unwrap();
+                    encoder.set_vertex_buffer(Some(&corners), 0, 0).unwrap();
+                    encoder
+                        .set_fragment_sampler_state(Some(&nearest), 0)
+                        .unwrap();
+                    for (texture, _) in &made {
+                        encoder.set_fragment_texture(Some(texture), 0).unwrap();
+                        encoder
+                            .draw_primitives(PrimitiveType::Triangle, 0, 6, 1, 0)
+                            .unwrap();
+                    }
+                    encoder.end_encoding().unwrap();
+                    let committed = Instant::now();
+                    command_buffer.commit().unwrap();
+                    command_buffer.wait_until_completed_for(WAIT).unwrap();
+                    assert_eq!(command_buffer.error(), None);
+                    let waited = since(committed);
+                    if k >= WARM {
+                        waits.push(waited);
+                        cpus.push(process_cpu_us() - cpu);
+                    }
+                }
+                drop(made);
+                let after = device.work_counts();
+                let ((kept, bytes, took), (kept0, bytes0, took0)) = (keeps(&after), keeps(&before));
+                let frames = FRAMES as f64;
+                let (make, make90) = median_p90(makes);
+                let (wait, wait90) = median_p90(waits);
+                let (cpu, cpu90) = median_p90(cpus);
+                println!(
+                    "SURFTEX-KEEP on {}: round {round}, {shape}, {making:?}: {} textures, {shadows} \
+                     shadowed; making {make:.0} us a texture (p90 {make90:.0}), commit to \
+                     completion {wait:.0} us (p90 {wait90:.0}), process CPU {cpu:.0} us (p90 \
+                     {cpu90:.0}); keeps a frame {:.2}, kept MB a frame {:.2}, shared images a \
+                     frame {:.2}",
+                    device.name(),
+                    planes.len(),
+                    (kept - kept0) as f64 / frames,
+                    (bytes - bytes0) as f64 / frames / 1e6,
+                    (took - took0) as f64 / frames,
+                );
+                drop(kept_buffers);
+            }
+            drop(surfaces);
+        }
+    }
 }

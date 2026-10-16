@@ -1,5 +1,5 @@
-//! What an encoder holds until its command buffer completes: the objects its commands use, in the
-//! order it retained them.
+//! What an encoder holds until its command buffer completes: the objects its commands use, and the
+//! ones it was handed that none used (`argument_table.rs`), in the order it retained them.
 //!
 //! - **Without a box each.** A shared object (a buffer, a texture, a sampler state, a pipeline
 //!   state, a variant's objects, a made `VkPipeline`) is held by another reference to it, which

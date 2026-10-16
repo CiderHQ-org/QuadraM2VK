@@ -148,7 +148,7 @@ narrow refusal that the call's rustdoc describes.
 | `compute_encoder_for_pass` | `computeCommandEncoderWithDescriptor:` | `CommandBuffer::compute_command_encoder_with_dispatch_type` |
 | `used_resources` | (none: a runtime extension) | `CommandBuffer::used_resources`: the buffers, textures and heaps its ended encoders' commands use, each as what owns its memory, until it completes; what `detach_backing` waits on |
 | `ended_encoders` | (none: a runtime extension) | `CommandBuffer::ended_encoders`: each ended encoder's kind, the event waits and signals before it, and what its own commands use; with `commit_failed`'s `FailedEncoders::Set`, what fails the one submission that uses a detached resource |
-| `add_submission_handler` | (none: a runtime extension) | `CommandBuffer::add_submission_handler`: a handler run once the command buffer's last batch reached its `VkQueue`, on the thread that submitted it, before it is `Scheduled`; never for one that fails before |
+| `add_submission_handler` | (none: a runtime extension) | `CommandBuffer::add_submission_handler`: a handler run once the command buffer's last batch reached its `VkQueue`, on the device's scheduler thread, which submitted it, before it is `Scheduled`; never for one that fails before |
 | `set_submission_check` | (none: a runtime extension) | `CommandBuffer::set_submission_check`: a check of each of Metal's submissions of the command buffer, run once its event waits are met, just before it is submitted; a code it answers fails that submission alone, as Metal fails one that uses a resource detached by then |
 | `object_id` | (none: Metal names an object by pointer) | `Buffer::object_id`, `Texture::object_id`, `Heap::object_id`: an `ObjectId` unique for the object's life, never reused (a sparse heap's `gpu_address` is 0) |
 
@@ -267,7 +267,7 @@ narrow refusal that the call's rustdoc describes.
 | `new_heap` | `newHeapWithDescriptor:` | `Device::new_heap` (`HeapDescriptor::placement` pins its address range) |
 | `reserve_address_pool` | (none: a runtime extension; Metal's own pools of buffers shorter than a page) | `Device::reserve_address_pool` -> `AddressPool`, holding a pin's span; `BufferDescriptor::with_pool_slot(&pool, offset)` places a buffer at the pool's address plus a 256-byte-aligned offset, holding its length rounded up to 256 bytes |
 | `new_heap_over_host_memory` | (none: a runtime extension) | `unsafe Device::new_heap_with_bytes_no_copy`: a heap over the caller's page-aligned memory, a `HostMemory` (`VK_EXT_external_memory_host`, or dma-bufs as for a buffer), the heap twin of `new_buffer_with_bytes_no_copy` |
-| `rebind_host_memory` | (none: a runtime extension) | `unsafe Buffer::rebind_bytes_no_copy`, `unsafe Heap::rebind_bytes_no_copy`: another range of the same length, a `HostMemory`, under the same objects and GPU addresses, in commit order (`RebindProblem::EncodedUses` while uncommitted work used them) |
+| `rebind_host_memory` | (none: a runtime extension) | `unsafe Buffer::rebind_bytes_no_copy`, `unsafe Heap::rebind_bytes_no_copy`: another range of the same length, a `HostMemory`, under the same objects and GPU addresses, in commit order (`RebindProblem::EncodedUses` while uncommitted work or an open encoder used them; a render encoder uses its attachments' bytes from its open) |
 | `new_sampler_state` | `newSamplerStateWithDescriptor:` | `Device::new_sampler_state`, or `Device::new_sampler_state_with_options` (argument-buffer support, placement) |
 | `new_depth_stencil_state` | `newDepthStencilStateWithDescriptor:` | `Device::new_depth_stencil_state` |
 | `new_indirect_command_buffer` | `newIndirectCommandBufferWithDescriptor:maxCommandCount:options:` | `Device::new_indirect_command_buffer` (placement as an option) |
@@ -287,7 +287,7 @@ narrow refusal that the call's rustdoc describes.
 |---|---|---|
 | `gpu_resource_id` | `gpuResourceID` | `IndirectCommandBuffer::gpu_resource_id` |
 | `compute_command` | `indirectComputeCommandAtIndex:` | `IndirectCommandBuffer::indirect_compute_command_at` |
-| `render_command` | `indirectRenderCommandAtIndex:` | `IndirectCommandBuffer::indirect_render_command_at`; a descriptor of mesh draws is `NotImplemented(IndirectRenderCommands)` at creation |
+| `render_command` | `indirectRenderCommandAtIndex:` | `IndirectCommandBuffer::indirect_render_command_at` |
 | `size` | `size` | `IndirectCommandBuffer::size` |
 
 ### `IcbRenderCmd`: `MTLIndirectRenderCommand` commands

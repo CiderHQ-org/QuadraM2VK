@@ -10,7 +10,7 @@
 //! pipeline on a device without the commands is an internal error, never a guess.
 
 use ash::vk;
-use metal2vulkan::device::{EnableSet, VkExtension};
+use metal2vulkan::device::{EnableSet, VkExtension, VkFeature};
 use metal2vulkan::vk::ApiVersion;
 
 /// The extended dynamic state commands a device has.
@@ -88,5 +88,46 @@ impl ExtendedDynamicState {
                         .cmd_set_primitive_restart_enable_ext
                 }),
         })
+    }
+}
+
+/// `VK_EXT_extended_dynamic_state3`'s `vkCmdSetColorWriteMaskEXT`, which a draw that reads a
+/// texture its pass renders through a snapshot records twice (`render/snapshot.rs`): loaded only
+/// where the device enabled everything that path takes, `attachmentFeedbackLoopLayout`,
+/// `extendedDynamicState3ColorWriteMask` and `fragmentShaderPixelInterlock`, so its presence is
+/// the device's answer to whether a draw may take it.
+#[derive(Clone, Copy)]
+pub(super) struct ColorWriteMasks(pub(super) vk::PFN_vkCmdSetColorWriteMaskEXT);
+
+impl ColorWriteMasks {
+    /// The command of a device with `enabled` enabled, where it enabled the three features.
+    ///
+    /// # Safety
+    ///
+    /// `device` was made from `instance` with `enabled` enabled, and the loader serves
+    /// `vkGetDeviceProcAddr` for it (its loader word is in place).
+    pub(super) unsafe fn load(
+        instance: &ash::Instance,
+        device: &ash::Device,
+        enabled: &EnableSet,
+    ) -> Option<ColorWriteMasks> {
+        let needed = [
+            VkFeature::AttachmentFeedbackLoopLayout,
+            VkFeature::ExtendedDynamicState3ColorWriteMask,
+            VkFeature::FragmentShaderPixelInterlock,
+        ];
+        if !needed.iter().all(|f| enabled.features.contains(f)) {
+            return None;
+        }
+        // SAFETY: the caller's; a command the device does not have is null.
+        let command = unsafe {
+            instance.get_device_proc_addr(device.handle(), c"vkCmdSetColorWriteMaskEXT".as_ptr())
+        }?;
+        // SAFETY: the device gave the command of this name, whose signature this is.
+        Some(ColorWriteMasks(unsafe {
+            std::mem::transmute::<unsafe extern "system" fn(), vk::PFN_vkCmdSetColorWriteMaskEXT>(
+                command,
+            )
+        }))
     }
 }

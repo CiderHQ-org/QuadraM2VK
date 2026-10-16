@@ -32,8 +32,9 @@ use metal2vulkan::error::{DescriptorError, Error, InternalError, InternalKind, R
 use metal2vulkan::metal::format::storage_image_choice;
 use metal2vulkan::metal::PixelFormat;
 use metal2vulkan::pipeline::{
-    ComputePipeline, ComputePipelineDescriptor, FunctionDescriptor, RenderPipeline,
-    RenderPipelineDescriptor, StageInputDescriptor, StageSource, TileRenderPipelineDescriptor,
+    ComputePipeline, ComputePipelineDescriptor, FunctionDescriptor, MeshPipelineDescriptor,
+    RenderPipeline, RenderPipelineDescriptor, StageInputDescriptor, StageSource,
+    TileRenderPipelineDescriptor,
 };
 use metal2vulkan::pipeline::{SlotClass, SlotRef, Stage};
 use metal2vulkan::Budget;
@@ -241,6 +242,24 @@ pub fn compile_render_for_shape(
             large_key = Some(key.clone());
             Some(key)
         },
+    )
+}
+
+/// The mesh render pipeline `descriptor` compiled for the bind shape `shape` as the runtime compiles
+/// a mesh draw's: [`compile_for_bind_state`] of `Device::compile_mesh_variant`, each storage
+/// texture's representation from its bound format, until the variant its plan for `shape` asks
+/// for is the one compiled.
+pub fn compile_mesh_for_shape(
+    device: &Device,
+    descriptor: &MeshPipelineDescriptor,
+    shape: &BindShape,
+    budget: &Budget,
+) -> Result<(RenderPipeline, VariantKey), Error> {
+    compile_for_bind_state(
+        |slot| bound_format(shape, slot),
+        device.profile(),
+        |key| device.compile_mesh_variant(descriptor, key, budget),
+        |pipeline| pipeline.plan(device, shape).ok().map(|plan| plan.variant),
     )
 }
 

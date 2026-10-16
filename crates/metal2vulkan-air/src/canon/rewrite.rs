@@ -33,6 +33,8 @@ pub(super) struct BodyEdit {
     /// order. The pass guarantees that every operand still dominates the new place and that the
     /// new place dominates every use.
     pub moved: BTreeMap<InstId, BlockId>,
+    /// Instructions whose rewritten operation (`rewrite`) has another type than the old one.
+    pub retype: BTreeMap<InstId, TypeId>,
 }
 
 impl BodyEdit {
@@ -44,6 +46,7 @@ impl BodyEdit {
             keep: filled(m, held, body.blocks.len(), true)?,
             delete: filled(m, held, body.insts.len(), false)?,
             moved: BTreeMap::new(),
+            retype: BTreeMap::new(),
         })
     }
 
@@ -247,7 +250,8 @@ fn apply_in(
             if let Some(e) = failed {
                 return Err(e);
             }
-            out.push_inst(Inst { ty: old.ty, kind }, m)?;
+            let ty = edit.retype.get(&i).copied().unwrap_or(old.ty);
+            out.push_inst(Inst { ty, kind }, m)?;
         }
         let end = InstId::new(u32::try_from(out.insts.len()).map_err(|_| invariant("ids"))?);
         out.blocks.push(

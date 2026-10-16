@@ -1,6 +1,6 @@
-// Owned fixture (WP-RT6, DESIGN D305 item 22): the functions the runtime's resolve lane draws
-// with, the per-sample values of RT6 Metal probe 6 (an M4, macOS 27.0.1), so each lane resolve
-// asks the question the probe measured. Loop-free.
+// Owned fixture: the functions the runtime's resolve lane draws with, the per-sample values of a
+// Metal probe on an M4 (macOS 27.0.1), so each lane resolve asks the question the probe measured.
+// Loop-free.
 #include <metal_stdlib>
 using namespace metal;
 

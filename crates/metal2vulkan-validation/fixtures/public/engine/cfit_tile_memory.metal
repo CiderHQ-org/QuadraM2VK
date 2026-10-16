@@ -1,4 +1,4 @@
-// Owned fixture (WP-CFIT, DESIGN D332): tile functions over their tile's threadgroup memory,
+// Owned fixture: tile functions over their tile's threadgroup memory,
 // which a render pass keeps across its tile dispatches. Metal gives each tile one allocation of
 // the pass's `threadgroupMemoryLength` bytes, zero when the pass begins, and places each
 // `[[threadgroup(n)]]` argument at the byte offset `setThreadgroupMemoryLength:offset:atIndex:`

@@ -1,9 +1,15 @@
 //! A command buffer's GPU times (`gpu_time.rs`): timestamps placed on the host's clock by a
-//! calibration pair or by the completion, across a wrap of the timestamps' bits; the host time
-//! domain a calibration reads; the extension's preferred form; and the device's timestamp pools,
-//! their slots held by the command buffers in flight, made as those need them up to the most.
+//! calibration pair or by the completion, across a wrap of the timestamps' bits; a pair that
+//! places them outside the command buffer's life by more than its deviation and the clocks'
+//! drift allow set aside for the completion; the pair, the
+//! reading of the least deviation; the host time domain a calibration reads; the extension's
+//! preferred form; and the device's timestamp pools, their slots held by the command buffers in
+//! flight, made as those need them up to the most.
 
-use crate::gpu_time::{host_domain, host_time, Extension, GpuClock, Pair, Pool, Pools, SLOTS};
+use crate::gpu_time::{
+    host_domain, host_time, least_deviation, Extension, GpuClock, Life, Pair, Placement, Pool,
+    Pools, Reading, DRIFT_PPM, PLAIN, PREFIXED, SLOTS,
+};
 use ash::vk;
 use std::collections::BTreeSet;
 use std::ffi::CString;
@@ -55,17 +61,154 @@ fn a_pair_places_timestamps_on_the_hosts_clock_either_side_of_it() {
     assert_eq!(narrow.place(pair, 244), 994);
 }
 
+/// A calibration pair is read again while each reading halves the deviation the one before it
+/// stated, `READINGS` (4) at most, and the reading of the smallest deviation is kept: the Iris Xe's
+/// first reading after an idle GPU (165 us) is followed by one of 7.6 us, kept, and one more that
+/// halves nothing. A failed reading ends them, the least so far kept; a failed first is none.
+#[test]
+fn a_pair_is_the_reading_of_the_least_deviation() {
+    let least = |deviations: &[Option<u64>]| {
+        let mut readings = deviations.iter().enumerate().map(|(at, deviation)| {
+            deviation.map(|deviation| Reading {
+                pair: Pair {
+                    ticks: at as u64,
+                    host: 1_000 * at as u64,
+                },
+                deviation,
+            })
+        });
+        least_deviation(|| readings.next().flatten())
+            .map(|(reading, calls)| (reading.pair.ticks, reading.deviation, calls))
+    };
+    assert_eq!(
+        least(&[Some(165_000), Some(7_600), Some(7_600)]),
+        Some((1, 7_600, 3))
+    );
+    assert_eq!(least(&[Some(7_600), Some(7_500)]), Some((1, 7_500, 2)));
+    assert_eq!(least(&[Some(7_500), Some(7_600)]), Some((0, 7_500, 2)));
+    assert_eq!(least(&[Some(100_000), Some(60_000)]), Some((1, 60_000, 2)));
+    assert_eq!(
+        least(&[Some(100), Some(40), Some(15), Some(6), Some(1)]),
+        Some((3, 6, 4))
+    );
+    assert_eq!(least(&[Some(100), None, Some(1)]), Some((0, 100, 2)));
+    assert_eq!(least(&[None, Some(1)]), None);
+}
+
+/// A command buffer's life from `kernel_start` to `completed`.
+fn life(kernel_start: u64, completed: u64) -> Life {
+    Life {
+        kernel_start,
+        completed,
+    }
+}
+
 #[test]
 fn a_span_is_placed_by_the_pair_or_ends_at_the_completion() {
     let clock = clock(64, 1.0);
-    let pair = Pair {
-        ticks: 100,
-        host: 10_000,
+    let reading = Reading {
+        pair: Pair {
+            ticks: 100,
+            host: 10_000,
+        },
+        deviation: 0,
     };
-    assert_eq!(clock.span(Some(pair), 150, 400, 99_999), (10_050, 10_300));
+    assert_eq!(
+        clock.span(Some(reading), 150, 400, life(10_000, 99_999)),
+        ((10_050, 10_300), Placement::Calibrated)
+    );
     // Uncalibrated: the end is the completion seen, the start its exact duration before.
-    assert_eq!(clock.span(None, 150, 400, 20_000), (19_750, 20_000));
-    assert_eq!(clock.span(None, 150, 400, 100), (0, 100));
+    assert_eq!(
+        clock.span(None, 150, 400, life(0, 20_000)),
+        ((19_750, 20_000), Placement::Uncalibrated)
+    );
+    assert_eq!(
+        clock.span(None, 150, 400, life(0, 100)),
+        ((0, 100), Placement::Uncalibrated)
+    );
+}
+
+/// A pair whose placement leaves the command buffer's life (before its kernel start, or after
+/// its completion seen) by more than its stated deviation and the drift since it
+/// ([`DRIFT_PPM`] of the time from the pair to that bound) disagrees with the device's
+/// timestamps: the times are placed by the completion, as without a pair. Within the allowance
+/// they stay the pair's. A pair 65 s off, as a Radeon 780M's after two MODE2 resets: every time
+/// set aside, however the drift is counted.
+#[test]
+fn a_pair_that_places_times_outside_the_life_is_set_aside() {
+    let clock = clock(64, 1.0);
+    let at = |ticks: u64, host: u64, deviation: u64| Reading {
+        pair: Pair { ticks, host },
+        deviation,
+    };
+    // The work ran 1_000 ns from 2_000_100 to 2_001_100 (ticks equal host nanoseconds by the
+    // sound pair), inside a life from 2_000_000 to 2_002_000, 1 ms after the pair.
+    let sound = at(1_000_000, 1_000_000, 50);
+    let (start, end, inside) = (2_000_100, 2_001_100, life(2_000_000, 2_002_000));
+    let by_completion = ((2_001_000, 2_002_000), Placement::Uncalibrated);
+    assert_eq!(
+        clock.span(Some(sound), start, end, inside),
+        ((2_000_100, 2_001_100), Placement::Calibrated)
+    );
+    // The drift since the pair to the bound: 500 ppm of 1 ms, 500 ns, beside the 50 ns stated.
+    let allowance = 50 + 1_000_000 * DRIFT_PPM / 1_000_000;
+    assert_eq!(allowance, 550);
+    // Early by the allowance and no more: the pair's.
+    let early = at(1_000_000 + 100 + allowance, 1_000_000, 50);
+    assert_eq!(
+        clock.span(Some(early), start, end, inside),
+        (
+            (2_000_000 - allowance, 2_001_000 - allowance),
+            Placement::Calibrated
+        )
+    );
+    // Early by one more: set aside, by its completion.
+    let earlier = at(1_000_000 + 100 + allowance + 1, 1_000_000, 50);
+    assert_eq!(
+        clock.span(Some(earlier), start, end, inside),
+        (
+            by_completion.0,
+            Placement::Disagreed {
+                by: allowance + 1,
+                deviation: 50
+            }
+        )
+    );
+    // Late past the completion by the allowance at the end (50 ns, and the drift to 2_002_000,
+    // 1.002 ms after the pair: 501 ns), and by one more.
+    let allowance = 50 + 1_002_000 * DRIFT_PPM / 1_000_000;
+    assert_eq!(allowance, 551);
+    let late = at(1_000_000 - 900 - allowance, 1_000_000, 50);
+    assert_eq!(
+        clock.span(Some(late), start, end, inside),
+        ((2_001_551, 2_002_551), Placement::Calibrated)
+    );
+    let later = at(1_000_000 - 900 - allowance - 1, 1_000_000, 50);
+    assert_eq!(
+        clock.span(Some(later), start, end, inside),
+        (
+            by_completion.0,
+            Placement::Disagreed {
+                by: allowance + 1,
+                deviation: 50
+            }
+        )
+    );
+    // 65 s ahead: the device's timestamps run 65.15 s past the domain the pair read.
+    let ahead = 65_152_099_677;
+    let off = at(1_000_000, 1_000_000, 3_578);
+    let (times, placement) = clock.span(Some(off), start + ahead, end + ahead, inside);
+    assert_eq!(times, by_completion.0);
+    assert!(
+        matches!(placement, Placement::Disagreed { by, deviation: 3_578 } if by > 65_000_000_000),
+        "{placement:?}"
+    );
+    // 65 s behind, the start before the kernel start: set aside too.
+    let behind = at(1_000_000 + ahead, 1_000_000, 3_578);
+    assert!(matches!(
+        clock.span(Some(behind), start, end, inside).1,
+        Placement::Disagreed { .. }
+    ));
 }
 
 #[cfg(unix)]
@@ -116,17 +259,28 @@ fn an_uncalibrated_clock_takes_no_pair() {
     assert_eq!(clock(64, 1.0).pair(), None);
 }
 
-/// The pool hands out each slot once, two queries apart, slot 0 first; none once every slot is
+/// The pool hands out each slot once, its queries apart, slot 0 first; none once every slot is
 /// held; and a slot dropped is given back, so the slots held are the command buffers in flight,
-/// however many were committed.
+/// however many were committed. A slot of three queries has the first encoder's start after its
+/// end; one of two has none.
 #[test]
 fn a_slot_is_held_until_dropped_and_then_given_back() {
-    let pool = Pool::new(vk::QueryPool::null(), SLOTS);
+    let plain = Pool::new(vk::QueryPool::null(), SLOTS, PLAIN);
+    let slot = plain.take().unwrap();
+    assert_eq!((slot.first(), slot.prefix()), (0, None));
+    let slot = plain.take().unwrap();
+    assert_eq!((slot.first(), slot.prefix()), (2, None));
+    let pool = Pool::new(vk::QueryPool::null(), SLOTS, PREFIXED);
     let held: Vec<_> = (0..SLOTS).map(|_| pool.take().unwrap()).collect();
-    let firsts: Vec<u32> = held.iter().map(|slot| slot.first()).collect();
+    let firsts: Vec<(u32, Option<u32>)> = held
+        .iter()
+        .map(|slot| (slot.first(), slot.prefix()))
+        .collect();
     assert_eq!(
         firsts,
-        (0..SLOTS).map(|index| 2 * index).collect::<Vec<_>>()
+        (0..SLOTS)
+            .map(|index| (3 * index, Some(3 * index + 2)))
+            .collect::<Vec<_>>()
     );
     assert!(pool.take().is_none());
     let mut held = held;
@@ -156,11 +310,13 @@ fn pools_are_made_as_the_command_buffers_in_flight_need_them() {
     use ash::vk::Handle;
     const MADE: u64 = 5;
     let made = std::cell::Cell::new(0u64);
-    let make = || {
+    // Each pool of three queries a slot.
+    let make = |count: u32| {
+        assert_eq!(count, PREFIXED * SLOTS);
         made.set(made.get() + 1);
         Some(vk::QueryPool::from_raw(made.get()))
     };
-    let mut pools = Pools::new(None);
+    let mut pools = Pools::new(None, PREFIXED);
     assert_eq!(pools.slots(), 0);
     let mut held = Vec::new();
     for pool in 1..=MADE {
@@ -198,18 +354,19 @@ fn pools_are_made_as_the_command_buffers_in_flight_need_them() {
 }
 
 /// A pool the device refuses ends the making: the commit gets no slot, and no later commit tries
-/// again while every slot of the pools made is held. A device of scarce pools makes one.
+/// again while every slot of the pools made is held. A device of scarce pools makes one, of two
+/// queries a slot: 4096 timestamps, as a Metal counter sample buffer holds.
 #[test]
 fn a_refused_pool_ends_the_making_and_scarce_pools_are_one() {
     use ash::vk::Handle;
-    let mut pools = Pools::new(None);
+    let mut pools = Pools::new(None, PREFIXED);
     let held: Vec<_> = (0..SLOTS)
-        .map(|_| pools.take(|| Some(vk::QueryPool::from_raw(1))).unwrap())
+        .map(|_| pools.take(|_| Some(vk::QueryPool::from_raw(1))).unwrap())
         .collect();
-    assert!(pools.take(|| None).is_none());
+    assert!(pools.take(|_| None).is_none());
     let mut asked = false;
     assert!(pools
-        .take(|| {
+        .take(|_| {
             asked = true;
             Some(vk::QueryPool::from_raw(2))
         })
@@ -217,15 +374,22 @@ fn a_refused_pool_ends_the_making_and_scarce_pools_are_one() {
     assert!(!asked);
     assert_eq!(pools.slots(), SLOTS as usize);
     drop(held);
-    assert!(pools.take(|| None).is_some());
+    assert!(pools.take(|_| None).is_some());
 
-    let mut scarce = Pools::new(Some(1));
+    let mut scarce = Pools::new(Some(1), PLAIN);
     let held: Vec<_> = (0..SLOTS)
-        .map(|_| scarce.take(|| Some(vk::QueryPool::from_raw(1))).unwrap())
+        .map(|_| {
+            scarce
+                .take(|count| {
+                    assert_eq!(count, 4096);
+                    Some(vk::QueryPool::from_raw(1))
+                })
+                .unwrap()
+        })
         .collect();
     let mut asked = false;
     assert!(scarce
-        .take(|| {
+        .take(|_| {
             asked = true;
             Some(vk::QueryPool::from_raw(2))
         })

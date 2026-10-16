@@ -1,9 +1,11 @@
-// Owned fixture (WP-MM8, DESIGN D191): quad_ballot, simd_active_threads_mask, and a fragment's
+// Owned fixture: quad_ballot, simd_active_threads_mask, and a fragment's
 // thread_index_in_quadgroup. Every kernel writes out[t], t = thread_index_in_threadgroup; compute
-// quads are four consecutive threads and simdgroup k is the linear threads [32k, 32k + 32) (D3).
-// The divergent kernels run the operation only on some lanes, so inactive lanes must not set
-// their bits. The expected values are derived from t alone in tests/engine_simd.rs and
-// tests/engine_simd_emulated.rs. Loop-free.
+// quads are four consecutive threads and simdgroup k is the linear threads [32k, 32k + 32).
+// The divergent kernels run the operation only on some lanes. Metal's backend speculates
+// `mask_quad_ballot_divergent_k`'s arm, so a lane that skips it still sets its bit in the quad's
+// ballot; the lanes `mask_simd_active_divergent_k` skips set no bit of its mask. The expected
+// values are derived from t alone in tests/engine_simd.rs and tests/engine_simd_emulated.rs.
+// Loop-free.
 #include <metal_stdlib>
 using namespace metal;
 

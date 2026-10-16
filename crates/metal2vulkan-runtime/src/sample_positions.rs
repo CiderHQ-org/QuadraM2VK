@@ -1,18 +1,18 @@
 //! Sample positions (`setSamplePositions:count:`) and the store action option that names them,
 //! `MTLStoreActionOptionCustomSamplePositions`.
 //!
-//! **Metal**, measured on an M4 with macOS 27.0.1 (RT6 Metal probes 15, 15d and 15e, each case
-//! with and without API validation):
+//! **Metal**, measured on an M4 with macOS 27.0.1 (Metal probes, each case with and without API
+//! validation):
 //!
 //! - `areProgrammableSamplePositionsSupported` is true. Custom positions take the device's sample
-//!   counts above 1 (2 and 4); one position, or a count the device has not, is refused, and so
-//!   is a coordinate outside `[0, 1)` (each an assertion of `setSamplePositions:count:`, or of the
-//!   encoder's creation). The positions' count must be the pass's samples for Metal's
-//!   validation; plain Metal takes fewer and puts the samples past them at the pixel's corner,
-//!   (0, 0), and so does the runtime (EV RRS-probe-4-m4, an M4 with macOS 27.0.1: 2 positions in
-//!   a pass of 4 samples, each sample's position read through a varying at it). Plain Metal stops
-//!   at a count of 1 or 3 (`setSamplePositions:count:`), and the runtime keeps refusing more
-//!   positions than samples (RT6 probe 15: Metal ends the process).
+//!   counts above 1 (2 and 4); one position, or a count the device has not, is refused, and so is a
+//!   coordinate outside `[0, 1)` (each an assertion of `setSamplePositions:count:`, or of the
+//!   encoder's creation). The positions' count must be the pass's samples for Metal's validation;
+//!   plain Metal takes fewer and puts the samples past them at the pixel's corner, (0, 0), and so
+//!   does the runtime (EV RRS-probe-4-m4, an M4 with macOS 27.0.1: 2 positions in a pass of 4
+//!   samples, each sample's position read through a varying at it). Plain Metal stops at a count of
+//!   1 or 3 (`setSamplePositions:count:`), and the runtime keeps refusing more positions than
+//!   samples (a Metal probe on an M4: Metal ends the process).
 //! - The descriptor keeps the positions as set (`getSamplePositions` answers 0.53 for 0.53),
 //!   and the pass samples at each coordinate rounded to the nearest sixteenth of a pixel, a tie
 //!   up (0.53 at 0.5; 0.53125, 0.55 and 0.5624 at 0.5625), and at most 15/16 (0.97 and 0.99).
@@ -22,11 +22,11 @@
 //!   attachment; under `DontCare` or `MultisampleResolve` it stops, the descriptor's at the
 //!   encoder's creation and a late one at `endEncoding`, and so does the descriptor's without
 //!   sample positions (a late one set without them is taken), and options set late over a store
-//!   action the descriptor knew ("store actions known at render command encoder init time may
-//!   not be mutated"). The option changes nothing on Apple silicon ("Store action options have
-//!   no effect on Apple Silicon", Apple's deprecation notice), and plain Metal runs each of those
-//!   forms of a color or depth attachment as it runs the pass without the option (RT6 probes 15
-//!   and 15d: `opt_dontcare`, `opt_late_dontcare`, `opt_store_no_positions`, `sp_options_only`,
+//!   action the descriptor knew ("store actions known at render command encoder init time may not
+//!   be mutated"). The option changes nothing on Apple silicon ("Store action options have no
+//!   effect on Apple Silicon", Apple's deprecation notice), and plain Metal runs each of those
+//!   forms of a color or depth attachment as it runs the pass without the option (Metal probe cases
+//!   on an M4: `opt_dontcare`, `opt_late_dontcare`, `opt_store_no_positions`, `sp_options_only`,
 //!   `sp_custom_storeopt`, `sp_late_options`, `opt_late_over_known`, `opt_depth_dontcare`): the
 //!   runtime does too, and checks only a stencil attachment's, unmeasured, as Metal's validation
 //!   does; a depth or stencil attachment's set late over a known store action stays refused.

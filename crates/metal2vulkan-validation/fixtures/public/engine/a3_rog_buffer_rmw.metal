@@ -1,4 +1,4 @@
-// Owned fixture (WP-A3, DESIGN D86, D128): a non-atomic read-modify-write of a device buffer in
+// Owned fixture: a non-atomic read-modify-write of a device buffer in
 // raster order group 0. Every fragment of every overlapping primitive applies v -> 3v + 1 to the
 // word of its pixel (8 words per row); the group orders the overlapping fragments' accesses, so no
 // update is lost. Loop-free.

@@ -6,9 +6,12 @@
 //! not loaded past its restart size.
 
 use crate::error::{Error, Problem, ShaderCacheError};
-use crate::shader_cache::driver::{open, seal, Identity, Making, Records, Refusal};
+use crate::shader_cache::driver::{make, open, seal, Identity, Making, Records, Refusal};
 use crate::shader_cache::store::{entry_name, Directory, Lookup, Store, LAYOUT, UNUSED_BUILD};
 use crate::shader_cache::{CacheSetup, EntryKind, ShaderCacheOptions};
+use ash::vk::{self, Handle};
+use std::cell::{Cell, RefCell};
+use std::ffi::c_void;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -737,4 +740,144 @@ fn a_pipeline_is_found_in_its_cache_by_its_whole_feedback_or_every_stage_s() {
     assert_eq!(found_in_cache(&unset, &[hit, hit]), None);
     assert_eq!(found_in_cache(&unvalidated, &[hit]), None);
     assert_eq!(found_in_cache(&unset, &[]), None);
+}
+
+thread_local! {
+    /// The fake driver's entry points called on this thread ([`fake_driver`]), in order.
+    static CALLS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The fake driver's `vkCreatePipelineCache`: a cache of handle 1.
+unsafe extern "system" fn create_cache(
+    _: vk::Device,
+    _: *const vk::PipelineCacheCreateInfo<'_>,
+    _: *const vk::AllocationCallbacks<'_>,
+    cache: *mut vk::PipelineCache,
+) -> vk::Result {
+    CALLS.with(|calls| calls.borrow_mut().push("vkCreatePipelineCache"));
+    // SAFETY: the caller's out pointer, valid for one handle.
+    unsafe { cache.write(vk::PipelineCache::from_raw(1)) };
+    vk::Result::SUCCESS
+}
+
+/// The fake driver's `vkGetPipelineCacheData`: device 1's data.
+unsafe extern "system" fn cache_data(
+    _: vk::Device,
+    _: vk::PipelineCache,
+    size: *mut usize,
+    out: *mut c_void,
+) -> vk::Result {
+    CALLS.with(|calls| calls.borrow_mut().push("vkGetPipelineCacheData"));
+    let bytes = data(1, b"made");
+    // SAFETY: the caller's size, and its buffer of that many bytes where it hands one.
+    unsafe {
+        if !out.is_null() {
+            let length = bytes.len().min(*size);
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), out.cast::<u8>(), length);
+        }
+        *size = bytes.len();
+    }
+    vk::Result::SUCCESS
+}
+
+/// The fake driver's `vkDestroyPipelineCache`.
+unsafe extern "system" fn destroy_cache(
+    _: vk::Device,
+    _: vk::PipelineCache,
+    _: *const vk::AllocationCallbacks<'_>,
+) {
+    CALLS.with(|calls| calls.borrow_mut().push("vkDestroyPipelineCache"));
+}
+
+/// A device whose driver has only a pipeline cache's entry points, each noting its call on the
+/// calling thread ([`CALLS`]).
+fn fake_driver() -> ash::Device {
+    // SAFETY: a table of the fakes above and ash's stubs; no other entry point is called.
+    unsafe {
+        ash::Device::load_with(
+            |name| match name.to_bytes() {
+                b"vkCreatePipelineCache" => {
+                    create_cache as vk::PFN_vkCreatePipelineCache as *const c_void
+                }
+                b"vkGetPipelineCacheData" => {
+                    cache_data as vk::PFN_vkGetPipelineCacheData as *const c_void
+                }
+                b"vkDestroyPipelineCache" => {
+                    destroy_cache as vk::PFN_vkDestroyPipelineCache as *const c_void
+                }
+                _ => std::ptr::null(),
+            },
+            vk::Device::from_raw(1),
+        )
+    }
+}
+
+/// One making on the fake driver with a store of `store`, the process exiting `before` it began
+/// and `after` its `vkCreate*Pipelines` returned: the driver's entry points it called (a run of
+/// calls of one, as `ash` reads data in two, counted once) and the cache that call was handed.
+fn made(store: &Store, before: bool, after: bool) -> (Vec<&'static str>, vk::PipelineCache) {
+    CALLS.with(|calls| calls.borrow_mut().clear());
+    let records = Records {
+        identity: identity(1),
+        settings: [0; 32],
+        profile: NO_PROFILE,
+    };
+    let created = Cell::new(false);
+    let mut handed = None;
+    let result: Result<(), ()> = make(
+        store,
+        &records,
+        &fake_driver(),
+        Making::new("compute").words(&[1, 2, 3]),
+        || match created.get() {
+            false => before,
+            true => after,
+        },
+        |cache| {
+            created.set(true);
+            handed = Some(cache);
+            Ok(())
+        },
+    );
+    assert_eq!(result, Ok(()));
+    let mut calls = CALLS.with(|calls| calls.take());
+    calls.dedup();
+    (calls, handed.expect("the making ran"))
+}
+
+/// Once the process is exiting, a making calls the driver for its pipelines alone: one that ends
+/// after the close (a pool piece's section runs on past it, `exit_guard`) neither reads its cache
+/// for the record nor releases it, and one that begins after makes no cache. Before, it makes its
+/// cache, reads it, saves the record and releases it.
+#[test]
+fn a_making_once_the_process_is_exiting_calls_the_driver_for_its_pipelines_alone() {
+    let scratch = Scratch::new();
+    let store = store(scratch.path(), BUILD, 1 << 20);
+    let saves = || store.counters.driver_saves.load(Ordering::Relaxed);
+    let (calls, cache) = made(&store, false, false);
+    assert_eq!(
+        calls,
+        [
+            "vkCreatePipelineCache",
+            "vkGetPipelineCacheData",
+            "vkDestroyPipelineCache"
+        ]
+    );
+    assert_ne!(cache, vk::PipelineCache::null());
+    assert_eq!(saves(), 1);
+    // The same making again, its record loaded, closed while the driver makes it.
+    let (calls, cache) = made(&store, false, true);
+    assert_eq!(
+        calls,
+        ["vkCreatePipelineCache"],
+        "a making that ended after the close read or released its cache"
+    );
+    assert_ne!(cache, vk::PipelineCache::null());
+    let (calls, cache) = made(&store, true, true);
+    assert!(
+        calls.is_empty(),
+        "a making begun after the close called {calls:?}"
+    );
+    assert_eq!(cache, vk::PipelineCache::null());
+    assert_eq!(saves(), 1, "a making saved once the process was exiting");
 }

@@ -1,11 +1,11 @@
-// Owned fixture (WP-A1, D126): Metal's `pow` at every special operand of C99 Annex F (F.9.4.4),
-// without fast math (`-fno-fast-math`: no call carries `nnan` or `ninf`, so a NaN or infinite
-// operand asks a defined question, and the symbols are the precise ones). D57.8 lowers `pow` as
-// C99 around `GLSL.std.450 Pow(|x|, y)`: `pow(x, +-0) = 1` and `pow(+1, y) = 1` even for a NaN,
-// `pow(-1, +-inf) = 1`, signed zeros and infinities by the exponent's parity, NaN for a negative
-// finite base to a non-integral exponent, and NaN for any other NaN operand; the Metal side of
-// each of those rules is unmeasured. The public `kernel_pow_signed_zero_and_infinite_base` asks
-// a 7 x 12 grid under fast math, where a NaN or infinite operand is poison.
+// Owned fixture: Metal's `pow` at every special operand of C99 Annex F (F.9.4.4), without fast math
+// (`-fno-fast-math`: no call carries `nnan` or `ninf`, so a NaN or infinite operand asks a defined
+// question, and the symbols are the precise ones). The translator lowers `pow` as C99 around
+// `GLSL.std.450 Pow(|x|, y)`: `pow(x, +-0) = 1` and `pow(+1, y) = 1` even for a NaN, `pow(-1,
+// +-inf) = 1`, signed zeros and infinities by the exponent's parity, NaN for a negative finite base
+// to a non-integral exponent, and NaN for any other NaN operand; the Metal side of each of those
+// rules is unmeasured. The public `kernel_pow_signed_zero_and_infinite_base` asks a 7 x 12 grid
+// under fast math, where a NaN or infinite operand is poison.
 //
 // Lane i reads `in[i]` = (float base bits, float exponent bits, half base bits | half exponent
 // bits << 16, 0) and writes three words: `precise::pow` (`air.pow.f32`), `fast::pow`

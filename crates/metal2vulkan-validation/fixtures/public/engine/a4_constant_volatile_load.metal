@@ -1,7 +1,7 @@
-// Owned fixture (WP-A4, DESIGN D213): a volatile load of a program-scope `constant` array element
+// Owned fixture: a volatile load of a program-scope `constant` array element
 // at a constant index. The compiler folds an ordinary load of a constant initializer, so only a
 // volatile one reaches the AIR as a load of the closed constant object (`access.constant.load`;
-// D142: a load of a read-only typed constant object carries no `Volatile`). Each thread writes
+// a load of a read-only typed constant object carries no `Volatile`). Each thread writes
 // out[t] = table[1] + t = (5 + t, 6 + t, 7 + t, 8 + t). Loop-free.
 #include <metal_stdlib>
 using namespace metal;

@@ -4,13 +4,15 @@
 //! a 2D, 2D array, cube, cube array or 3D texture or a view of its texture's format, whatever its
 //! levels' sizes.
 //!
-//! Each level is the Apple M3 Max's: its bilinear (trilinear in 3D) filter of the level above
+//! Each level is the Apple M3 Max's at the device's Metal level (`MetalLevel::mipmap_rule`,
+//! `bind::MipmapRule`). Under macOS 26.7: its bilinear (trilinear in 3D) filter of the level above
 //! at each texel's centre for the first computed level and every level of a 3D chain, and its
 //! own shader arithmetic below the first level of a 2D chain, an array or a cube whose first
 //! level is at most 64 texels wide and tall, and of the wider and taller ones whose M3 Max passes
 //! are known (`bind::MipmapFilterChain`'s docs). Those passes depend on whether Metal keeps the
 //! texture losslessly compressed (`texture/heap_tiled.rs`'s `metal_compresses`). Below the first
-//! level of another chain an Apple M4's filter stands in.
+//! level of another chain an Apple M4's filter stands in. Under macOS 27.0.1: its filter of the
+//! level above at every level of every chain.
 //!
 //! **The command.** One blit command, between barriers from the commands before it and to the
 //! ones after it ([`BlitCommandEncoder::command`]), over a scratch block the device keeps between
@@ -117,6 +119,7 @@ impl BlitCommandEncoder {
             record.level_count,
             volume,
             compressed,
+            device.properties().metal_level.mipmap_rule(),
             limits.min_storage_buffer_offset_alignment,
             limits.max_storage_buffer_range,
             [

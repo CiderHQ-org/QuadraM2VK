@@ -28,6 +28,9 @@ mod color_reformat;
 mod command_buffer;
 #[cfg(any(m2v_gpu, m2v_cpu_icd))]
 mod completion;
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+mod completion_here;
+mod completion_seen;
 mod compute;
 mod contexts;
 mod copy_plan;
@@ -50,6 +53,8 @@ mod fences;
 mod fill_value;
 mod first_moves;
 mod framebuffer_fetch;
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+mod freed_memory;
 mod fresh_unwritten;
 mod function_table;
 mod gate;
@@ -61,11 +66,18 @@ mod heap_tiled_blocks;
 mod heap_usage;
 mod host_aliases;
 mod host_memory;
+#[cfg(all(any(m2v_gpu, m2v_cpu_icd), target_os = "linux"))]
+mod host_residency;
 #[cfg(any(m2v_gpu, m2v_cpu_icd))]
 mod host_step_neutrals;
+mod image_barriers;
 mod image_plan;
 mod inbox;
 mod indirect_command_buffer;
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+mod inline_continues;
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+mod inline_splits;
 mod interop;
 mod keeper;
 mod kept_barriers;
@@ -76,6 +88,7 @@ mod making;
 mod managed;
 mod memo;
 mod memory;
+mod memory_reads;
 mod metal_level;
 mod mipmap;
 mod mipmap_plan;
@@ -97,6 +110,7 @@ mod private_properties;
 mod queue;
 mod range;
 mod rate_map;
+mod reader_sizes;
 mod resource;
 mod resource_ids;
 mod rotated;
@@ -114,6 +128,7 @@ mod sparse;
 #[cfg(any(m2v_gpu, m2v_cpu_icd))]
 mod srgb_fetch_images;
 mod stand_in;
+mod storage_form;
 mod surface_depth;
 mod surface_two_planes;
 #[cfg(any(m2v_gpu, m2v_cpu_icd))]
@@ -121,6 +136,9 @@ mod teardown_threads;
 mod texture;
 mod texture_descriptor;
 mod tracker;
+mod trails;
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+mod twin_flights;
 mod unique_identifier;
 mod values;
 mod view_plan;

@@ -33,8 +33,12 @@
 //! stores the `half` it returns, so only a blend can store another value. It lists the attachment
 //! (`StageIo::half_blend_colors`, [`note_half_output`]), and the pipeline's stage records
 //! `PrecisionNote::HalfOutputPrecision` where that attachment blends
-//! (`color_writes::blends_output`). A module naming no math mode keeps the note at any
-//! attachment: what Metal's compiler does there was not measured.
+//! (`color_writes::blends_output`). A module with fast math lists an attachment it reaches as a
+//! color attachment too (`StageIo::half_fast_colors`), and the pipeline's stage records
+//! `PrecisionNote::HalfOutputFastMathBlend` where that attachment stores some channel
+//! (`color_writes::stores_output`): one whose write mask stores none holds nothing the output could
+//! differ by. A module naming no math mode keeps the note at any attachment: what Metal's compiler
+//! does there was not measured.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -259,22 +263,33 @@ pub(crate) fn half_output_note(cx: &SelectCx<'_>) -> PrecisionNote {
 /// the attachment itself (`StageIo::half_blend_colors`), whose note the pipeline decides by
 /// whether the attachment blends, since Metal stores the `half` the function returns wherever it
 /// does not (the sweep, EV FLT-hb2-m3: the `half4` output and a `float4` of its `half` store alike
-/// under every blend and format); in any other module [`half_output_note`] itself. Nothing where
-/// the function computes Metal's 16-bit float blend there itself (`DevicePolicy::half_blend`),
-/// which stores Metal's value.
+/// under every blend and format); in a module compiled with fast math the attachment too
+/// (`StageIo::half_fast_colors`), whose note the pipeline decides by whether the attachment stores
+/// some channel, since one that stores none (its write mask none, or absent from the pipeline)
+/// holds nothing the output could differ by, but [`half_output_note`] itself for an attachment
+/// the function writes in the storage form, which the pipeline's color attachments do not show;
+/// in a module naming no math mode [`half_output_note`] itself. Nothing where the function
+/// computes Metal's 16-bit float blend there itself (`DevicePolicy::half_blend`, or a fetched
+/// attachment's blend), which stores Metal's value.
 pub(crate) fn note_half_output(cx: &mut SelectCx<'_>, color: u32) {
     // Metal's 16-bit float blend, computed by the function: the attachment stores Metal's value.
     if crate::lower::fragment::blends_half_in_storage(cx, color) {
         return;
     }
-    if cx.entry.compile.fast_math == Some(false) {
-        let colors = &mut cx.families.stage_io.interface.half_blend_colors;
-        if let Err(at) = colors.binary_search(&color) {
-            colors.insert(at, color);
-        }
-    } else {
+    let math = cx.entry.compile.fast_math;
+    let in_storage = crate::lower::fragment::written_in_storage(cx, color);
+    if math.is_none() || (math == Some(true) && in_storage) {
         let note = half_output_note(cx);
         cx.precision.insert(note);
+        return;
+    }
+    let io = &mut cx.families.stage_io.interface;
+    let colors = match math {
+        Some(false) => &mut io.half_blend_colors,
+        _ => &mut io.half_fast_colors,
+    };
+    if let Err(at) = colors.binary_search(&color) {
+        colors.insert(at, color);
     }
 }
 

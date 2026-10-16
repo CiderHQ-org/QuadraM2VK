@@ -19,9 +19,12 @@
 //! (`memory::arena`, `Arena::Payload`): a `TaskPayloadWorkgroupEXT` array of whole words of its
 //! parameter's `air.arg_type_size` (at least the smallest arena), which the object function's
 //! threads read and write as threadgroup memory and its wrapper passes to
-//! `OpEmitMeshTasksEXT`; a mesh function declares the same array and reads it (a store into it is
-//! refused: Vulkan's mesh payload is read-only, and Metal's mesh function takes it `const`). A
-//! payload pointer is an offset into it, the parameter's 0. Its accesses are word-composed as the
+//! `OpEmitMeshTasksEXT`; a mesh function declares such an array of its own parameter's size, or
+//! of its pipeline's object function's arena where that is larger ([`payload_extent`]: Metal sizes
+//! the payload by the type the object function declares, and a mesh function reads past its own
+//! type within it), and reads it (a store into it is refused: Vulkan's mesh payload is read-only,
+//! and Metal's mesh function takes it `const`). A payload pointer is an offset into it, the
+//! parameter's 0. Its accesses are word-composed as the
 //! threadgroup arena's, under the Vulkan memory model as relaxed `Workgroup` word atomics (no
 //! payload access may carry `NonPrivatePointer`); `mem_object_data` orders it with
 //! `WorkgroupMemory`. Its arena lies within `maxTaskPayloadSize`, and with the entry's workgroup
@@ -253,6 +256,9 @@ pub struct MeshPlan {
     /// payload parameter's size), 0 without one: the words its wrapper copies out of or into
     /// its object threadgroup's slot.
     pub payload_words: u32,
+    /// An object or mesh function's payload arena's bytes (`arena::payload_bytes` of
+    /// [`payload_extent`]), `None` without a payload (`StageInterface::payload`).
+    pub payload: Option<u32>,
 }
 
 /// The index in [`MeshPlan::outputs`] of every mesh entry's `CullPrimitiveEXT`.
@@ -395,29 +401,63 @@ pub fn payload_size(e: &Entry) -> Option<u64> {
     })
 }
 
-/// The workgroup memory limit of the entry ([`arena::workgroup_limit`]), with its payload
-/// arena's bytes where it has a payload (`arena::payload_bytes`): an object or mesh entry's
-/// workgroup memory and payload share a limit. An emulated mesh function's is the compute stage's,
-/// with its count word.
+/// The bytes the entry's payload arena holds, if it has a payload: its own ([`payload_size`]),
+/// and a mesh function's at least its pipeline's object function's
+/// (`LoweringInputs::object_payload`). Metal sizes a pipeline's payload by the type its object
+/// function declares (`payloadMemoryLength` 0), and a mesh function's read of its payload past the
+/// type it declares itself reads the object function's within it (measured on the M3 Max under
+/// macOS 27.0.1).
+pub fn payload_extent(cx: &SelectCx<'_>) -> Option<u64> {
+    let own = payload_size(cx.entry)?;
+    let object = match cx.stage {
+        Stage::Mesh => cx.inputs.object_payload.map_or(0, u64::from),
+        _ => 0,
+    };
+    Some(own.max(object))
+}
+
+/// The workgroup memory limit of the entry ([`stage_workgroup_limit`] of its stage, payload and
+/// staged indices).
 pub fn workgroup_limit(cx: &SelectCx<'_>) -> WorkgroupLimit {
-    let limits = &cx.profile.fields().limits;
+    stage_workgroup_limit(
+        cx.stage,
+        cx.profile,
+        payload_extent(cx),
+        staged_index_bytes(cx),
+    )
+}
+
+/// The workgroup memory limit of a `stage` entry on `profile` ([`arena::workgroup_limit`]), with
+/// its payload arena's bytes where it has a payload of `payload` bytes (`arena::payload_bytes`):
+/// an object or mesh entry's workgroup memory and payload share a limit. `staged` is a mesh
+/// entry's staged index words' bytes ([`staged_index_bytes`]). An emulated object or mesh
+/// function's is the compute stage's, with its grid or count words and its payload. The binder
+/// checks an object function's arena with the encoder's lengths against it
+/// (`RuntimeFact::ObjectThreadgroupArena`).
+pub fn stage_workgroup_limit(
+    stage: Stage,
+    profile: &DeviceProfile,
+    payload: Option<u64>,
+    staged: u64,
+) -> WorkgroupLimit {
+    let limits = &profile.fields().limits;
     // An emulated entry's: the compute stage's, with its wrapper's words (an object function's
     // grid, a mesh function's count) and its payload, which is workgroup memory there.
-    if emulated(cx) {
+    if matches!(stage, Stage::Object | Stage::Mesh) && emulates(profile) {
         let w = arena::workgroup_limit(Stage::Kernel, limits);
-        let words = if cx.stage == Stage::Object { 12 } else { 4 };
-        let payload = payload_size(cx.entry).map_or(0, arena::payload_bytes);
+        let words = if stage == Stage::Object { 12 } else { 4 };
+        let payload = payload.map_or(0, arena::payload_bytes);
         return WorkgroupLimit {
             wrapper: w.wrapper.saturating_add(words).saturating_add(payload),
             ..w
         };
     }
-    let w = arena::workgroup_limit(cx.stage, limits);
+    let w = arena::workgroup_limit(stage, limits);
     let w = WorkgroupLimit {
-        wrapper: w.wrapper.saturating_add(staged_index_bytes(cx)),
+        wrapper: w.wrapper.saturating_add(staged),
         ..w
     };
-    match payload_size(cx.entry) {
+    match payload {
         Some(size) => w.with_payload(arena::payload_bytes(size)),
         None => w,
     }
@@ -478,10 +518,12 @@ pub fn plan_entry(cx: &mut SelectCx<'_>) -> Result<(), Error> {
         return Ok(());
     }
     let emulated = emulated(cx);
-    let payload_words = payload_size(cx.entry)
-        .map(arena::payload_bytes)
-        .map_or(Ok(0), |b| u32::try_from(b / 4))
-        .map_err(|_| cx.invariant("a payload past a u32's words"))?;
+    let payload = payload_extent(cx)
+        .map(|size| u32::try_from(arena::payload_bytes(size)))
+        .transpose()
+        .map_err(|_| cx.invariant("a payload past a u32's bytes"))?;
+    let payload_words = payload.map_or(0, |bytes| bytes / 4);
+    cx.families.mesh.payload = payload;
     if cx.stage != Stage::Mesh {
         // An emulated object function writes its grid and payload to its slot, which its
         // threadgroup's position in the grid places (the module docs).

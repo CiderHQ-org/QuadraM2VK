@@ -90,8 +90,8 @@ fn sample_flags(samples: u32) -> Result<vk::SampleCountFlags, ExecutorError> {
         2 => Ok(vk::SampleCountFlags::TYPE_2),
         4 => Ok(vk::SampleCountFlags::TYPE_4),
         other => Err(not_implemented(format!(
-            "a pass of {other} samples: a case authors {RASTER_SAMPLE_COUNTS:?} (DESIGN D292: the \
-             Metal reference device rasterizes 1, 2, and 4)"
+            "a pass of {other} samples: a case authors {RASTER_SAMPLE_COUNTS:?} (the Metal \
+             reference device rasterizes 1, 2, and 4)"
         ))),
     }
 }

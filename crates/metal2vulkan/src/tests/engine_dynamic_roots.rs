@@ -828,22 +828,19 @@ fn profile_f_refuses_a_loaded_pointer_dereference() {
     ) else {
         return;
     };
-    for stem in ["vk12-floor", "vk12-bare"] {
-        let p = profile(stem, true, DevicePolicy::default());
-        match compile(&bc, leaf.name, &p) {
-            Err(Error::Unsupported(u)) => {
-                assert_eq!(u.feature, Feature::DereferenceLoadedPointer, "{stem}");
-                assert_eq!(
-                    u.needs,
-                    Needs::AnyOf(vec![vec![
-                        Capability::Feature(VkFeature::BufferDeviceAddress),
-                        Capability::Feature(VkFeature::ShaderInt64),
-                    ]]),
-                    "{stem}"
-                );
-            }
-            other => panic!("{stem}: expected a refusal, got {other:?}"),
+    let p = profile("vk12-floor", true, DevicePolicy::default());
+    match compile(&bc, leaf.name, &p) {
+        Err(Error::Unsupported(u)) => {
+            assert_eq!(u.feature, Feature::DereferenceLoadedPointer);
+            assert_eq!(
+                u.needs,
+                Needs::AnyOf(vec![vec![
+                    Capability::Feature(VkFeature::BufferDeviceAddress),
+                    Capability::Feature(VkFeature::ShaderInt64),
+                ]])
+            );
         }
+        other => panic!("expected a refusal, got {other:?}"),
     }
 }
 

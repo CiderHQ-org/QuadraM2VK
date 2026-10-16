@@ -232,7 +232,8 @@ fn moltenvk_msl_writes_no_member_of_a_value_declared_before_the_loop() {
     let writes = loop_writes_to_outer_values(&plain);
     assert!(
         !writes.is_empty(),
-        "spirv-cross no longer writes this loop's insert in place: re-measure D453\n{plain}"
+        "spirv-cross no longer writes this loop's insert in place: re-measure whether MoltenVK \
+         needs `CompositeInsertsWrittenInPlace`\n{plain}"
     );
 }
 
@@ -401,6 +402,7 @@ fn moltenvk_msl_reads_no_memory_again_for_a_value_loaded_before_the_loop() {
     assert_eq!(loop_reads_of_its_store(&materialized), 1, "{materialized}");
     assert!(
         loop_reads_of_its_store(&plain) > 1,
-        "spirv-cross no longer forwards these loads into the loop: re-measure D453\n{plain}"
+        "spirv-cross no longer forwards these loads into the loop: re-measure whether MoltenVK \
+         needs `LoadsForwardedIntoLoops`\n{plain}"
     );
 }

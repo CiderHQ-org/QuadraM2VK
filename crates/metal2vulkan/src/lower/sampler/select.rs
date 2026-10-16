@@ -3,9 +3,9 @@
 
 use crate::air::abi::{AddressMode, Coordinates, Filter, MipFilter};
 use crate::air::intrinsics::{ImageDim, ImageShape, LodMode, TexOp, TexRole, Texture};
-use crate::air::ir::{Const, Inst, InstId, Value, ValueId};
+use crate::air::ir::{BinOp, Const, Inst, InstId, InstKind, Value, ValueId};
 use crate::budget::Meter;
-use crate::device::profile::{CubeGradientRoute, CubeGradients};
+use crate::device::profile::CubeGradientRoute;
 use crate::device::requirements::{VkFeature, VkLimit};
 use crate::error::{
     Capability, Error, Feature, InternalError, InternalKind, LowerFamily, Unsupported,
@@ -17,7 +17,7 @@ use crate::lower::texture::{
     TexelForm, TextureStrategy,
 };
 use crate::memory::handles::Candidate;
-use crate::metal::sampler::SamplerWord;
+use crate::metal::sampler::{SamplerUse, SamplerWord};
 use crate::pipeline::artifact::PrecisionNote;
 use crate::pipeline::sym::{ImageAccess, SamplerRef, SlotClass, SlotRef, Stage};
 
@@ -169,31 +169,6 @@ fn is_zero_float(cx: &SelectCx<'_>, v: Value) -> bool {
         // An `f32` constant's bit pattern; zero with either sign.
         Some(Const::Float(bits)) => bits & 0x7fff_ffff == 0,
         _ => false,
-    }
-}
-
-/// The 32-bit integer lanes of constant `v` (a scalar or vector), as signed values.
-fn const_ints(cx: &SelectCx<'_>, v: Value, lanes: u8) -> Option<Vec<i32>> {
-    let lane = |c: &Const| match c {
-        Const::Null => Some(0),
-        // Integers are zero-extended bit patterns: the low 32 bits are the value.
-        Const::Int(u) => Some(*u as u32 as i32),
-        _ => None,
-    };
-    match konst(cx, v)? {
-        Const::Null => Some(vec![0; usize::from(lanes)]),
-        Const::Aggregate(parts) => parts
-            .iter()
-            .map(|p| {
-                cx.entry
-                    .module
-                    .consts()
-                    .get(*p)
-                    .and_then(|k| lane(&k.value))
-            })
-            .collect(),
-        c if lanes == 1 => lane(c).map(|x| vec![x]),
-        _ => None,
     }
 }
 
@@ -606,7 +581,7 @@ fn heap_raw_sample(
     let offset = match fetch_offset(cx, &ops, has_offset, plane(shape.dim))? {
         None => None,
         Some(Offset::Const(k)) => Some(k),
-        Some(Offset::Dynamic(_)) => return Ok(None),
+        Some(Offset::Dynamic(..)) => return Ok(None),
     };
     let half = match texel(t, 4)?.0.conv {
         TexelConv::F16 => true,
@@ -733,7 +708,7 @@ fn plane(dim: ImageDim) -> u8 {
 /// `gather` have no offset parameter and SPIR-V admits no offset on a cube image, so a set flag
 /// with a nonzero or dynamic offset there (malformed AIR) is `NotRepresentable`.
 fn offset(
-    cx: &SelectCx<'_>,
+    cx: &mut SelectCx<'_>,
     ops: &Operands<'_>,
     present: bool,
     lanes: u8,
@@ -750,21 +725,30 @@ fn offset(
         return Err(Unsupported::not_representable(Feature::TexelOffset).into());
     }
     let Some(k) = k else {
-        return dynamic_offset(cx, v, gather).map(Some);
+        return dynamic_offset(cx, v, lanes, gather).map(Some);
     };
     in_device_range(cx, &k, gather)?;
     Ok(Some(Offset::Const(k)))
 }
 
 /// A dynamic texel offset: the `Offset` image operand, which needs `shaderImageGatherExtended`, and
-/// on a sample also `maintenance8` (VUID-RuntimeSpirv-Offset-10213); without them a gather is
+/// on a sample also `maintenance8` (VUID-RuntimeSpirv-Offset-10213). Without them the access takes
+/// the offset's arms ([`super::OffsetArms`]): a switch over the values Metal reads on its dynamic
+/// lanes, each arm the access with its value as `ConstOffset`, which Vulkan 1.0 admits on every
+/// sample and gather. A function whose armed accesses take more than
+/// [`super::OFFSET_ARMS_PER_FUNCTION`] arms together is refused as without the arms: a gather
 /// `GatherExtended` and a sample `TexelOffset`, naming the missing features. Emission reads the
 /// value as Metal does ([`super::metal_offset`]), which lies in Metal's range
-/// [`super::METAL_TEXEL_OFFSET`], and Vulkan requires the runtime value within the device's range
-/// (VUID-RuntimeSpirv-OpImageSample-06435/06436, gathers 06376/06377), so the device's range must
-/// contain all of Metal's. A nearest pixel sampler's fetch adds the offset to the texel coordinate
-/// instead (`fetch_offset`).
-fn dynamic_offset(cx: &SelectCx<'_>, v: Value, gather: bool) -> Result<Offset, Error> {
+/// [`super::METAL_TEXEL_OFFSET`], and Vulkan requires the runtime value, and a constant, within the
+/// device's range (VUID-RuntimeSpirv-OpImageSample-06435/06436, gathers 06376/06377), so the
+/// device's range must contain all of Metal's. A nearest pixel sampler's fetch adds the offset to
+/// the texel coordinate instead (`fetch_offset`).
+fn dynamic_offset(
+    cx: &mut SelectCx<'_>,
+    v: Value,
+    lanes: u8,
+    gather: bool,
+) -> Result<Offset, Error> {
     let images = &cx.profile.fields().images;
     let missing: Vec<Capability> = [
         (
@@ -777,7 +761,17 @@ fn dynamic_offset(cx: &SelectCx<'_>, v: Value, gather: bool) -> Result<Offset, E
     .filter(|(enabled, _)| !enabled)
     .map(|(_, f)| Capability::Feature(f))
     .collect();
-    if !missing.is_empty() {
+    let (lo, hi) = super::METAL_TEXEL_OFFSET;
+    in_device_range(cx, &[lo, hi], gather)?;
+    let value = id(cx, v)?;
+    if missing.is_empty() {
+        return Ok(Offset::Dynamic(value, None));
+    }
+    let arms = super::OffsetArms {
+        lanes: offset_lanes(cx, v, lanes),
+    };
+    let total = cx.families.sampler.offset_arms.saturating_add(arms.arms());
+    if total > super::OFFSET_ARMS_PER_FUNCTION {
         let feature = if gather {
             Feature::GatherExtended
         } else {
@@ -785,9 +779,96 @@ fn dynamic_offset(cx: &SelectCx<'_>, v: Value, gather: bool) -> Result<Offset, E
         };
         return Err(Unsupported::needs_any_of(feature, vec![missing]).into());
     }
-    let (lo, hi) = super::METAL_TEXEL_OFFSET;
-    in_device_range(cx, &[lo, hi], gather)?;
-    Ok(Offset::Dynamic(id(cx, v)?))
+    cx.families.sampler.offset_arms = total;
+    Ok(Offset::Dynamic(value, Some(arms)))
+}
+
+/// How many instructions [`offset_lane`] reads back from one lane of an offset: a chain that sets
+/// each lane of a 3D offset, shuffles it and adds constants to it, and no more.
+const OFFSET_LANE_STEPS: usize = 16;
+
+/// Each of the `lanes` lanes of dynamic offset `v` as Metal reads it ([`super::metal_offset`])
+/// where the IR states it constant, else `None`.
+fn offset_lanes(cx: &SelectCx<'_>, v: Value, lanes: u8) -> Vec<Option<i32>> {
+    (0..u32::from(lanes))
+        .map(|j| {
+            let mut steps = OFFSET_LANE_STEPS;
+            offset_lane(cx, v, lanes, j, &mut steps).map(super::metal_offset)
+        })
+        .collect()
+}
+
+/// Lane `lane` of `v`, a vector of `n` lanes (a scalar when `n` is 1), where the IR states it
+/// constant: a constant's lane, a lane that inserts and shuffles carry from one, or a lane-wise
+/// `add`, `sub`, `mul`, `and`, `or` or `xor` of two such lanes, reading at most `steps` more
+/// instructions. A shuffle's poison lane is its first source's lane 0, the value the arithmetic
+/// family gives it (`lower::arith::chunk`); integer operations wrap at 32 bits, as the lowered
+/// operations do, which refines an overflow's poison.
+fn offset_lane(cx: &SelectCx<'_>, v: Value, n: u8, lane: u32, steps: &mut usize) -> Option<i32> {
+    let Value::Inst(i) = v else {
+        return const_lane(cx, v, n, lane);
+    };
+    *steps = steps.checked_sub(1)?;
+    match &cx.body.insts.get(i)?.kind {
+        InstKind::InsertElement { vec, elt, idx } if n > 1 => {
+            let Const::Int(k) = konst(cx, *idx)? else {
+                return None;
+            };
+            if *k == u64::from(lane) {
+                offset_lane(cx, *elt, 1, 0, steps)
+            } else {
+                offset_lane(cx, *vec, n, lane, steps)
+            }
+        }
+        InstKind::ShuffleVector { a, b, mask } => {
+            let m = mask.get(usize::try_from(lane).ok()?)?.unwrap_or(0);
+            // Both sources have one vector type.
+            let from_a = match cx.entry.module.types().get(cx.value_ty(*a)?)? {
+                crate::air::ir::Type::Vector { len, .. } => *len,
+                _ => return None,
+            };
+            let n = u8::try_from(from_a).ok()?;
+            if m < from_a {
+                offset_lane(cx, *a, n, m, steps)
+            } else {
+                offset_lane(cx, *b, n, m - from_a, steps)
+            }
+        }
+        InstKind::BinOp { op, a, b, .. } => {
+            let fold: fn(i32, i32) -> i32 = match op {
+                BinOp::Add => i32::wrapping_add,
+                BinOp::Sub => i32::wrapping_sub,
+                BinOp::Mul => i32::wrapping_mul,
+                BinOp::And => |x, y| x & y,
+                BinOp::Or => |x, y| x | y,
+                BinOp::Xor => |x, y| x ^ y,
+                _ => return None,
+            };
+            let x = offset_lane(cx, *a, n, lane, steps)?;
+            Some(fold(x, offset_lane(cx, *b, n, lane, steps)?))
+        }
+        _ => None,
+    }
+}
+
+/// Lane `lane` of constant `v`, a vector of `n` lanes (a scalar when `n` is 1), when it is an
+/// integer (zero for `zeroinitializer`), else `None`: an `undef` or `poison` lane among others.
+fn const_lane(cx: &SelectCx<'_>, v: Value, n: u8, lane: u32) -> Option<i32> {
+    // Integers are zero-extended bit patterns: the low 32 bits are the value.
+    let int = |c: &Const| match c {
+        Const::Null => Some(0),
+        Const::Int(u) => Some(*u as u32 as i32),
+        _ => None,
+    };
+    match konst(cx, v)? {
+        Const::Null => Some(0),
+        Const::Aggregate(parts) => {
+            let part = parts.get(usize::try_from(lane).ok()?)?;
+            int(&cx.entry.module.consts().get(*part)?.value)
+        }
+        c if n == 1 => int(c),
+        _ => None,
+    }
 }
 
 /// Every offset component in `k` lies in the device's texel offset range (`gather`: the gather
@@ -849,14 +930,15 @@ fn fetch_offset(
     Ok(match metal_const_offset(cx, v, lanes) {
         Some(k) if k.iter().all(|x| *x == 0) => None,
         Some(k) => Some(Offset::Const(k)),
-        None => Some(Offset::Dynamic(id(cx, v)?)),
+        None => Some(Offset::Dynamic(id(cx, v)?, None)),
     })
 }
 
 /// The offset Metal applies for constant offset `v` of `lanes` components
-/// ([`super::metal_offset`] per component), or `None` when `v` is not a constant.
+/// ([`super::metal_offset`] per component), or `None` when the IR does not state each lane
+/// constant ([`offset_lanes`]).
 fn metal_const_offset(cx: &SelectCx<'_>, v: Value, lanes: u8) -> Option<Vec<i32>> {
-    const_ints(cx, v, lanes).map(|k| k.into_iter().map(super::metal_offset).collect())
+    offset_lanes(cx, v, lanes).into_iter().collect()
 }
 
 /// The reference value of a comparison (`compare`), else `None`.
@@ -1051,7 +1133,7 @@ fn select_extended(
     let offset = match fetch_offset(cx, &ops, has_offset, plane(shape.dim))? {
         None => None,
         Some(Offset::Const(k)) => Some(k),
-        Some(Offset::Dynamic(_)) => return Err(refused()),
+        Some(Offset::Dynamic(..)) => return Err(refused()),
     };
     let (texel_form, class) = texel(t, 4)?;
     let half = match texel_form.conv {
@@ -1306,7 +1388,7 @@ fn select_one(
             let offset = match fetch_offset(cx, &ops, has_offset, lanes)? {
                 None => None,
                 Some(Offset::Const(k)) => Some(k),
-                Some(Offset::Dynamic(_)) => return Err(bicubic_refused()),
+                Some(Offset::Dynamic(..)) => return Err(bicubic_refused()),
             };
             let b = super::bicubic::plan(state, index, shape.dim, offset)?;
             let (form, class) = texel_in(t, cross, 4)?;
@@ -1396,6 +1478,14 @@ fn select_one(
             };
             let dref = compare_ref(cx, &ops, compare)?;
             let off = offset(cx, &ops, has_offset, lanes, false)?;
+            // An armed offset's switch holds no implicit level: the sample takes the fragment's
+            // derivatives in its own position as gradients, Metal's bias scaling them
+            // (`emit::sample_operands`).
+            if matches!(off, Some(Offset::Dynamic(_, Some(_))))
+                && matches!(lod, Lod::Implicit { .. })
+            {
+                cx.precision.insert(PrecisionNote::GradFromBias);
+            }
             let (form, class) = texel_in(t, cross, if shape.depth { 1 } else { 4 })?;
             let tangled = matches!(lod, Lod::Implicit { .. } | Lod::Hoisted);
             (
@@ -1422,11 +1512,12 @@ fn select_one(
             let dref = compare_ref(cx, &ops, compare)?;
             let off = offset(cx, &ops, has_offset, lanes, false)?;
             let (form, class) = texel_in(t, cross, if shape.depth { 1 } else { 4 })?;
-            // A cube's gradients are sampled with Metal's footprint, a near-equivalent; an
-            // anisotropic sampler's keep Metal's face gradients, a constexpr sampler's by its state
-            // and a runtime or argument buffer's by its word. Where the driver hands the
-            // stage's gradients to Metal's `gradientcube` as given, the function hands Metal's own,
-            // exactly.
+            // A cube's gradients are sampled with Metal's footprint, a near-equivalent: an
+            // isotropic sampler's as its length, an anisotropic one's as its face gradients, a
+            // constexpr sampler's by its state and a runtime or argument buffer's by its word.
+            // Where the driver hands the stage's gradients to Metal's `gradientcube` as given, the
+            // function hands Metal's own, exactly; through MoltenVK's graphics fixup, the form
+            // that fixup hands Metal on the stage's identity.
             let lod = if shape.dim == ImageDim::Cube {
                 let anisotropic = match sampler {
                     SamplerArg::Static(SamplerRef::Constexpr(words), _) => {
@@ -1434,33 +1525,26 @@ fn select_one(
                     }
                     SamplerArg::Static(SamplerRef::Slot(_), _) | SamplerArg::Heap(_) => None,
                 };
-                // A route the device's description does not state keeps the isotropic form, whose
-                // footprint's length every known route keeps, and refuses an anisotropic one: a
-                // constexpr sampler here, and a runtime one where it is bound (`cube_gradient`).
+                // A route the device's description does not state takes the isotropic form, whose
+                // length every known route reads alike (but a `y` face's through macOS 27's
+                // fixup), through every sampler: Metal's footprint emulated replaces it where the
+                // emulation reaches the sample (`anisotropic::select`), and elsewhere an
+                // anisotropic sampler is made isotropic for it (`cube_gradient`).
                 let route = cx.profile.fields().cube_gradients.route(cx.stage);
                 let form = match (route, anisotropic) {
                     (CubeGradientRoute::Metal, _) => CubeFootprint::Metal,
-                    (_, Some(false)) | (CubeGradientRoute::Unmeasured, None) => {
-                        CubeFootprint::Isotropic
-                    }
-                    (CubeGradientRoute::Unmeasured, Some(true)) => {
-                        return Err(Unsupported::unmeasured_deviation(
-                            Feature::SamplerAnisotropy,
-                            CubeGradients::deviation(cx.stage),
-                        )
-                        .into())
-                    }
+                    (CubeGradientRoute::AppleProjected, _) => CubeFootprint::Projected,
+                    (CubeGradientRoute::Vulkan, Some(false))
+                    | (CubeGradientRoute::Unmeasured, _) => CubeFootprint::Length,
+                    (CubeGradientRoute::Vulkan, Some(true)) => CubeFootprint::Face,
+                    (CubeGradientRoute::AppleSwizzled, Some(false)) => CubeFootprint::Isotropic,
                     (CubeGradientRoute::AppleSwizzled, Some(true)) => {
                         CubeFootprint::AnisotropicSwizzled
                     }
-                    (CubeGradientRoute::Vulkan, Some(true)) => CubeFootprint::Anisotropic,
                     (route, None) => CubeFootprint::Word {
                         swizzled: route == CubeGradientRoute::AppleSwizzled,
                     },
                 };
-                if form != CubeFootprint::Metal {
-                    cx.precision.insert(PrecisionNote::CubeGradientFootprint);
-                }
                 Lod::CubeGrad(dx, dy, form)
             } else {
                 Lod::Grad(dx, dy)
@@ -2031,17 +2115,25 @@ fn select_one(
             }
         }
     }
-    // A binding sampling a cube with explicit gradients through a runtime sampler in the
-    // isotropic form (a device whose route is not measured) refuses an anisotropic one where it
-    // is bound; a constexpr sampler's footprint is its state's, a runtime sampler's elsewhere its
-    // word's, and Metal's own gradients are Metal's footprint through any sampler.
+    // A binding sampling a cube with explicit gradients in the `Length` form through a sampler
+    // that may be anisotropic (a runtime or argument buffer's, or an anisotropic constexpr one, on
+    // a device whose route is not measured) makes it isotropic: the device filters the major axis
+    // the form hands it, Metal's isotropic footprint, where the emulation does not answer the
+    // sample, and the emulation's taps read explicit levels. An isotropic constexpr sampler's
+    // binding is the plain one, a sampler's elsewhere its state's or word's, and Metal's own
+    // gradients are Metal's footprint through any sampler.
     let cube_gradient = match &op {
         SampleOp::Sample {
             lod: Lod::CubeGrad(_, _, form),
             ..
         } => {
-            *form == CubeFootprint::Isotropic
-                && !matches!(sampler, SamplerArg::Static(SamplerRef::Constexpr(_), _))
+            *form == CubeFootprint::Length
+                && match sampler {
+                    SamplerArg::Static(SamplerRef::Constexpr(words), _) => {
+                        super::state_of(words)?.max_anisotropy > 1
+                    }
+                    SamplerArg::Static(SamplerRef::Slot(_), _) | SamplerArg::Heap(_) => true,
+                }
         }
         _ => false,
     };
@@ -2068,8 +2160,8 @@ fn select_one(
             Source::Heap { handle, key }
         }
         // An argument buffer's sampler is read from the sampler array of its use, whose class
-        // carries the cube-gradient bit, so the plan refuses an anisotropic listed state for a
-        // cube's explicit gradients in the isotropic form there alone.
+        // carries the cube-gradient bit, so the plan makes an anisotropic listed state isotropic
+        // for a cube's explicit gradients in the isotropic form there alone.
         (ImageRef::Heap { group, handle }, SamplerArg::Heap(sampler)) => {
             let key = HeapSamplerKey {
                 group,
@@ -2318,14 +2410,31 @@ fn select_one(
         _ => false,
     };
     // Metal's anisotropic filter emulated by the device's samples at explicit levels, where it
-    // reaches the sample; the device's anisotropic filter, recorded, where it does not.
+    // reaches the sample; the device's anisotropic filter, recorded, where it does not. An
+    // isotropic cube's level too, where no exact path of its own answers it.
+    let answered = linear.is_some() || snap.is_some() || fetched.is_some() || centred;
     let anisotropic = super::anisotropic::select(
         cx,
         &op,
         (stat.map(|(r, _)| r), image, shape),
-        (integer, observed, cross.is_some(), swizzle),
+        (integer, observed, cross.is_some(), swizzle, answered),
+        SamplerUse::new(compare, integer).with_cube_gradient(cube_gradient),
         m,
     )?;
+    // A cube's explicit gradients handed to the device in a form other than Metal's own: the
+    // footprint's note, but where a constexpr sampler's emulation answers every word of the
+    // sample (a runtime sampler's answers only the words its variant names).
+    if let SampleOp::Sample {
+        lod: Lod::CubeGrad(_, _, form),
+        ..
+    } = &op
+    {
+        let emulated =
+            anisotropic.is_some_and(|a| matches!(a.degree, super::anisotropic::Degree::Const(_)));
+        if *form != CubeFootprint::Metal && !emulated {
+            cx.precision.insert(PrecisionNote::CubeGradientFootprint);
+        }
+    }
     let result = cx.lowered_repr(Value::Inst(at), inst.ty)?;
     // A texture of another class: its own result, handed back as the declared one.
     let (result, declared) = match (cross, form) {
@@ -2500,7 +2609,7 @@ fn places_wrapped_offset(
     let offset = match op {
         SampleOp::Sample { offset, .. } | SampleOp::Gather { offset, .. } => match offset {
             Some(Offset::Const(k)) => moved(k),
-            Some(Offset::Dynamic(_)) => true,
+            Some(Offset::Dynamic(..)) => true,
             None => false,
         },
         SampleOp::Bicubic(b) => {

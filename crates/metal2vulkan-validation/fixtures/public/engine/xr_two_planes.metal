@@ -1,4 +1,4 @@
-// Owned fixture (WP-TXN, DESIGN D398 item 9, TODO 4.17; written for this repository): kernel writes
+// Owned fixture (written for this repository): kernel writes
 // and reads of a texture of Apple's two-plane extended-range format (`RGB10A8_2P_XR10` or its sRGB
 // twin) as `texture2d<half>` and `texture2d<float>`, one thread per texel of a grid row `w` texels
 // wide, as a consumer runs them (threadgroups of 32 x 32, threads past the texture included).

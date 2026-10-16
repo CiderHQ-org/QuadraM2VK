@@ -152,7 +152,7 @@ mod tests {
 
     fn review(sign_off: SignOff) -> Review {
         Review {
-            evidence: vec!["DESIGN D151.4".into()],
+            evidence: vec!["a device probe".into()],
             note: "the device lacks it".into(),
             sign_off,
         }

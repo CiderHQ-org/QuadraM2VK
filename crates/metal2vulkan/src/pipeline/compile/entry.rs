@@ -159,7 +159,7 @@ impl DeviceProfile {
         let mut m = Meter::new(budget);
         let variant = VariantKey::new();
         guarded(|| {
-            let r = d.request(InputsFrom::Vertex(vertex, &variant, 1));
+            let r = d.request(InputsFrom::Vertex(vertex, &variant, 1, false, None));
             let spec = specialize_one(&r, &mut m)?.spec;
             lower_inputs(&spec, r.inputs, self, &mut m)
         })

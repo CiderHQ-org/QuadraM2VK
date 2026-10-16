@@ -1,4 +1,4 @@
-// Owned fixture (DESIGN D339 item 2): a texture chosen between two adjacent members of an
+// Owned fixture: a texture chosen between two adjacent members of an
 // argument buffer (`cond ? m.second : m.first`). Metal's front end selects between the two
 // members' addresses, loads the chosen member's resource id as a 64-bit integer, and turns the
 // integer back into the texture (`inttoptr`): the corpus shape this fixture stands for. Thread t

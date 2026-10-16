@@ -29,10 +29,15 @@
 //!   part is the runtime's: no submission check sees it (it is no encoder of the program's, and
 //!   lists no use). The switch rides on the command buffer ([`Riding`]) until its last batch is
 //!   submitted, its checks run: the scheduler then settles it, the swap's verdict being whether
-//!   every encoder of it ran. A program thread finishes it (the swap makes Vulkan calls, which
-//!   the scheduler's thread makes only for submissions): the committing one, where its commit
-//!   submitted it, else the next that makes a command buffer or commits. Where every encoder
-//!   ran, under the image's views lock (which [`Texture::vk_image`](crate::Texture::vk_image)
+//!   every encoder of it ran, and its thread ends it once that pass let go of the lock, before
+//!   the command buffer's transition to `Scheduled`, which waits for it as for submission
+//!   handlers (`scheduler/mod.rs`): so the program sees the swap, and its announcement, by the
+//!   time it can see the command buffer scheduled or completed. A thread that makes a command
+//!   buffer meanwhile waits until the switch ended, ending it itself once settled
+//!   ([`Device::storage_form_wait`]): it then sees the swap and its count
+//!   (`WorkCounts::storage_forms_taken`), which the switch makes before its flag drops; where the
+//!   scheduler's thread ended it, the announcement may follow on that thread, still before the
+//!   committing command buffer is scheduled. Where every encoder ran, under the image's views lock (which [`Texture::vk_image`](crate::Texture::vk_image)
 //!   takes to hand the image out) the new `VkImage` swaps in and the plan with `STORAGE` is the
 //!   image's from then on; the old image's views are emptied. The old image, its views and its
 //!   memory go as the committing command buffer completes, after every earlier use of them: its
@@ -61,9 +66,9 @@
 //!   `switching`, up only during a switch. Counting the uncommitted command buffers adds one
 //!   atomic add to a slot's taking and one subtraction to its commit (or its drop uncommitted),
 //!   under its queue's lock. The stall: once per texture, the next command buffer made after a
-//!   commit that took a switch and did not submit it itself waits until it is submitted: a
-//!   checked commit's, until the scheduler's thread ran its check and submitted it; one left to
-//!   another thread's pass (`scheduler/inbox.rs`), until that thread's next pass submitted it.
+//!   commit that took a switch waits until the scheduler's thread submitted it (a checked
+//!   commit's after its check ran) and ended the switch, as a commit submits nothing itself
+//!   (`scheduler/inbox.rs`).
 
 use super::{texture_aspects, Image, ImageObjects, Owner, Storage, Texture, TextureShared};
 use crate::degradation::Degradation;
@@ -73,10 +78,12 @@ use crate::error::Error;
 use crate::exit_guard;
 use crate::framebuffer_fetch::storage_candidate;
 use crate::heap_sets;
+use crate::image_barrier::{image_barrier, ImageDst};
 use crate::image_plan::ImagePlan;
 use crate::memory::Placement;
 use crate::tracker::Access;
 use crate::values::StorageMode;
+use crate::work_counts::Counters;
 use crate::Device;
 use ash::vk;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -90,7 +97,7 @@ const SWITCH_WAIT: Duration = Duration::from_millis(100);
 /// The device's textures waiting for their storage form (the module docs), in its
 /// `TextureState`.
 #[derive(Default)]
-pub(super) struct StorageForms {
+pub(crate) struct StorageForms {
     /// How many textures wait: [`waiting`](Self::waiting)'s length, set under its lock and read
     /// without it, the gate each commit reads.
     wanted: AtomicUsize,
@@ -103,6 +110,10 @@ pub(super) struct StorageForms {
     changed: Condvar,
     /// The textures waiting, and the switch under way: the switch's lock.
     waiting: Mutex<Waiting>,
+    /// Run by [`close`](Self::close) right after the flag dropped and the lock went, before
+    /// the wake: where a thread that ends a switch may be held up (`tests/storage_forms.rs`).
+    #[cfg(test)]
+    pause: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 /// What [`StorageForms`]'s lock guards.
@@ -188,8 +199,8 @@ pub(crate) struct Switch {
 }
 
 /// A switch that rides on a command buffer's commit (the module docs), which holds it: its
-/// storage forms made and their copy appended to the command buffer, until a program thread
-/// finishes it once the scheduler settled it. Dropped unfinished (the command buffer went before
+/// storage forms made and their copy appended to the command buffer, until a thread ends it
+/// once the scheduler settled it. Dropped unfinished (the command buffer went before
 /// any thread finished it), it gives the switch up: nothing swaps, and the textures wait again.
 pub(crate) struct Riding {
     device: Device,
@@ -219,7 +230,7 @@ impl Riding {
     }
 
     /// The scheduler submitted the command buffer's last batch (or failed it), `ran` whether
-    /// every encoder of it ran: a program thread may finish the switch now.
+    /// every encoder of it ran: a thread may end the switch now.
     pub(crate) fn settle(&self, ran: bool) {
         let mut inner = lock(&self.inner);
         inner.settled.get_or_insert(ran);
@@ -335,25 +346,27 @@ impl Texture {
         let from = image.raw.get();
         let aspects = texture_aspects(&plan);
         let regions = whole_copy(&plan, aspects);
+        let family = core.queue_flags();
         core.command(
             crate::blit::TRANSFER,
             &[written],
             |device, command_buffer| {
-                let made = vk::ImageMemoryBarrier::default()
-                    .src_access_mask(vk::AccessFlags::empty())
-                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                    .old_layout(vk::ImageLayout::UNDEFINED)
-                    .new_layout(vk::ImageLayout::GENERAL)
-                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .image(raw)
-                    .subresource_range(vk::ImageSubresourceRange {
-                        aspect_mask: aspects,
-                        base_mip_level: 0,
-                        level_count: vk::REMAINING_MIP_LEVELS,
-                        base_array_layer: 0,
-                        layer_count: vk::REMAINING_ARRAY_LAYERS,
-                    });
+                let range = vk::ImageSubresourceRange {
+                    aspect_mask: aspects,
+                    base_mip_level: 0,
+                    level_count: vk::REMAINING_MIP_LEVELS,
+                    base_array_layer: 0,
+                    layer_count: vk::REMAINING_ARRAY_LAYERS,
+                };
+                let layouts = (vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL);
+                let made = image_barrier(
+                    raw,
+                    range,
+                    layouts,
+                    vk::AccessFlags::empty(),
+                    ImageDst::TransferWrite,
+                    family,
+                );
                 // SAFETY: the part's command buffer is recording, after a barrier from everything
                 // recorded before it; the new image is live and unused, the old one live and in
                 // `GENERAL` (every image rests there outside render passes); both are of one format,
@@ -501,9 +514,9 @@ impl Device {
         }
     }
 
-    /// Finish the switch under way where its command buffer's scheduler settled it (the module
-    /// docs), on the program's thread: at each commit, before it looks for a switch of its own,
-    /// and after one whose commit submitted its own. Two atomic reads where none is under way.
+    /// End the switch under way where its command buffer's scheduler settled it (the module
+    /// docs): on the scheduler's thread once the pass that settled it let go of the lock, before
+    /// the command buffer's transition to `Scheduled`. One atomic read where none is under way.
     pub(crate) fn finish_storage_forms(&self) {
         let forms = &self.shared().textures.storage_forms;
         if !forms.switching.load(Ordering::SeqCst) {
@@ -517,15 +530,6 @@ impl Device {
         }
         // The command buffer's handle goes with the lock free (`Riding`'s drop takes it).
         drop(riding);
-    }
-
-    /// The scheduler settled the switch riding on a command buffer of this device: wake the
-    /// command buffers waiting for it. Called with no lock held.
-    pub(crate) fn storage_form_settled(&self) {
-        let forms = &self.shared().textures.storage_forms;
-        // Taken so that a waiter reads the switch settled or is waiting when this notifies.
-        drop(lock(&forms.waiting));
-        forms.changed.notify_all();
     }
 
     /// Whether a texture waits for its storage form: one atomic read, each commit's gate.
@@ -577,7 +581,8 @@ impl Device {
     /// End the switch under way (`waiting` its lock, held), `ran` whether every encoder of its
     /// command buffer ran, which settled it, or `false` where it rides on none (the module
     /// docs): the storage forms swap in where it ran and no new command buffer gave it up, the
-    /// heap's elements are written again, and, once the lock is free, the switch is announced;
+    /// heap's elements are written again, the swaps are counted before the flag drops, and, once
+    /// the lock is free, the switch is announced;
     /// else the textures it made forms for wait again, and the images made for them go with the
     /// command buffer.
     fn end_switch(
@@ -603,17 +608,12 @@ impl Device {
             lock(&shared.resource_ids).renew_textures();
             heap_sets::renew(self);
         }
-        waiting.riding = Weak::new();
-        waiting.given_up = false;
-        forms.wanted.store(waiting.textures.len(), Ordering::SeqCst);
-        forms.switching.store(false, Ordering::SeqCst);
         // The lock goes, then the announcements, which run the program's callback.
-        drop(waiting);
-        forms.changed.notify_all();
+        forms.close(waiting, &shared.counts, swapped.len());
         for (form, (old_bytes, bytes)) in swapped {
-            shared.counts.storage_form_taken();
             let texture = &form.texture;
-            self.degrade(Degradation::FetchedTargetStorage, || {
+            // Once per device: the scheduler's thread, outside any program call, may end it.
+            self.degrade_once(Degradation::FetchedTargetStorage, || {
                 let object = format!(
                     "a {:?} {}x{} render target",
                     texture.pixel_format(),
@@ -648,6 +648,55 @@ impl Device {
         let again = switch.textures.iter().map(Texture::downgrade);
         waiting.textures.extend(again);
         self.end_switch(waiting, (switch, Vec::new(), false));
+    }
+}
+
+impl StorageForms {
+    /// Close the switch under way, `waiting` its lock (held), that swapped `swaps` storage forms
+    /// in: count them (`counts`), let go of its command buffer's handle and of a new command
+    /// buffer's giving it up, gate the commits on the textures still waiting, drop the flag and
+    /// the lock, and wake every new command buffer waiting it out. Counted before the flag drops:
+    /// a new command buffer that reads it down reads the count, whichever thread ended the
+    /// switch.
+    fn close(&self, mut waiting: MutexGuard<'_, Waiting>, counts: &Counters, swaps: usize) {
+        for _ in 0..swaps {
+            counts.storage_form_taken();
+        }
+        waiting.riding = Weak::new();
+        waiting.given_up = false;
+        self.wanted.store(waiting.textures.len(), Ordering::SeqCst);
+        self.switching.store(false, Ordering::SeqCst);
+        drop(waiting);
+        #[cfg(test)]
+        if let Some(pause) = &self.pause {
+            pause();
+        }
+        self.changed.notify_all();
+    }
+}
+
+#[cfg(test)]
+impl StorageForms {
+    /// A switch under way, its flag up as [`Device::storage_form_switch`] raises it, whose
+    /// [`close`](Self::close) runs `pause` right after the flag dropped.
+    pub(crate) fn under_way(pause: impl Fn() + Send + Sync + 'static) -> StorageForms {
+        let forms = StorageForms {
+            pause: Some(Box::new(pause)),
+            ..StorageForms::default()
+        };
+        forms.switching.store(true, Ordering::SeqCst);
+        forms
+    }
+
+    /// Whether the switch's flag is up: the gate a new command buffer reads first
+    /// ([`Device::storage_form_wait`]).
+    pub(crate) fn switching(&self) -> bool {
+        self.switching.load(Ordering::SeqCst)
+    }
+
+    /// End the switch under way's bookkeeping, `swaps` storage forms swapped in.
+    pub(crate) fn close_after(&self, counts: &Counters, swaps: usize) {
+        self.close(lock(&self.waiting), counts, swaps);
     }
 }
 

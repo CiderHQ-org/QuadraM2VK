@@ -49,6 +49,12 @@ pub(super) const XR_COLOUR_FLOOR: u32 = 11;
 /// `c - 384` (`[0, 510]`) times its weight were held to 24 bits.
 pub(super) const XR_ALPHA_FLOOR: u32 = 9;
 
+/// The shift an extended-range sRGB colour's term, its signed linear step (of `2^-13`) times its
+/// weight of `2^24`, is floored by before the sum: to `2^-9` step (EV M27-mips4-m3: every one of
+/// 167,136 values of five chains of the M3 Max's under macOS 27.0.1, each level from Metal's level
+/// above).
+pub(super) const XR_SRGB_FLOOR: u32 = 15;
+
 /// One field of a texel: `width` bits at bit `offset` of the texel's little-endian bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Field {
@@ -668,7 +674,17 @@ pub(super) fn record(layout: &Layout, f: &Field, tie_at: u32) -> [u32; RECORD_WO
             integer(&mut w, signed, lo, d, decode::CODE, 16, encode::CLAMP);
         }
         Rule::XrSrgb => {
-            integer(&mut w, false, 0, 1023, decode::XR_SRGB, 16, encode::XR_SRGB);
+            integer(
+                &mut w,
+                false,
+                0,
+                1023,
+                decode::XR_SRGB,
+                XR_SRGB_FLOOR,
+                encode::XR_SRGB,
+            );
+            w[r::ADD as usize] = 1 << (23 - XR_SRGB_FLOOR);
+            w[r::SHIFT as usize] = 24 - XR_SRGB_FLOOR;
         }
         Rule::Float32 => {
             float(

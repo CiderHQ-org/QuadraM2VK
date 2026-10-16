@@ -1,5 +1,5 @@
 // metal-std: macos-metal2.2
-// Owned fixture (WP-L9b, DESIGN D6, D74): `discard_fragment` with terminate semantics (before
+// Owned fixture: `discard_fragment` with terminate semantics (before
 // MSL 2.3), compiled with the standard named on the first line. Loop-free.
 #include <metal_stdlib>
 using namespace metal;
@@ -30,7 +30,7 @@ fragment float4 discard_derivative(Surface in [[stage_in]]) {
 }
 
 // A derivative inside a loop follows the discard: demote or predication, as at MSL 2.3, since
-// Metal runs a discarded MSL 2.2 thread on as a helper through the loop (D327 item 6).
+// Metal runs a discarded MSL 2.2 thread on as a helper through the loop.
 fragment float4 discard_loop(Surface in [[stage_in]], constant uint &n [[buffer(0)]]) {
     float4 c = in.color;
     if (c.a < 0.5) {
@@ -44,7 +44,7 @@ fragment float4 discard_loop(Surface in [[stage_in]], constant uint &n [[buffer(
 }
 
 // A derivative and a simdgroup reduction follow the discard: demote, as at MSL 2.3 (the
-// discarded thread stays a lane of the reduction on Metal, D327 item 6); refused without it.
+// discarded thread stays a lane of the reduction on Metal); refused without it.
 fragment float4 discard_simd(Surface in [[stage_in]]) {
     float4 c = in.color;
     if (c.a < 0.5) {

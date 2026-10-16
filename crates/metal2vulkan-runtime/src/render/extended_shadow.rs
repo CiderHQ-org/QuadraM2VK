@@ -40,6 +40,7 @@
 use super::RenderCommandEncoder;
 use crate::blit::TRANSFER;
 use crate::command_buffer::CommandBuffer;
+use crate::device::functions::Vk;
 use crate::error::{internal, Error};
 use crate::image_plan::ImagePlan;
 use crate::owned_kernel::{OwnedKernel, OwnedModule};
@@ -334,7 +335,7 @@ impl ShadowFill {
     /// `raw` is the encoder's command buffer, recording outside a render pass, which only the
     /// encoder records; the shadow, the codes and the setting's objects are live until it
     /// completes and rest in `GENERAL`.
-    pub(super) unsafe fn record_in(&self, device: &ash::Device, raw: vk::CommandBuffer) {
+    pub(super) unsafe fn record_in(&self, device: &Vk, raw: vk::CommandBuffer) {
         // SAFETY: the caller's.
         unsafe {
             Barrier::everything().record(device, raw);

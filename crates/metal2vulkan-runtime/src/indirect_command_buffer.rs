@@ -41,13 +41,14 @@
 //!   draw with their own, both are `NotImplemented(IndirectRenderCommands)`. A buffer that supports
 //!   color attachment mapping executes as any other in an encoder that maps none, the runtime's
 //!   every encoder, as Metal's does. An object threadgroup length a render command sets is taken at
-//!   any index, as plain Metal takes one past the descriptor's count, and kept by none: no pipeline
-//!   the runtime makes reads one. Apple's private properties (EV APX2-spi1-m4, the same M4):
-//!   stencil reference values, depth test bounds, scissor rectangles, viewports and the blend color
-//!   left to the command are taken as the render states above (validation stops each "must be
-//!   inherited on this device"; plain Metal draws with the encoder's viewport, scissor, cull mode
-//!   and winding); the scissor rectangle and viewport counts and `allowOverrideRenderStates` are
-//!   kept, and change nothing a command draws.
+//!   any index, as plain Metal takes one past the descriptor's count, and kept by none: an executed
+//!   command whose mesh draw's object function reads one is
+//!   `NotImplemented(IndirectRenderCommands)`. Apple's private properties (EV APX2-spi1-m4, the
+//!   same M4): stencil reference values, depth test bounds, scissor rectangles, viewports and the
+//!   blend color left to the command are taken as the render states above (validation stops each
+//!   "must be inherited on this device"; plain Metal draws with the encoder's viewport, scissor,
+//!   cull mode and winding); the scissor rectangle and viewport counts and
+//!   `allowOverrideRenderStates` are kept, and change nothing a command draws.
 //! - **Read-back.** [`IndirectCommandBuffer::commands`] decodes a range of records into typed
 //!   commands, a runtime extension standing for Metal's private getters.
 //! - **Execution.** A compute encoder's `execute_commands_in_buffer` runs a range of the records
@@ -3541,9 +3542,9 @@ impl IndirectRenderCommand {
 
     /// `setObjectThreadgroupMemoryLength:atIndex:`: taken at any index, as plain Metal takes one
     /// at or past the descriptor's `max_object_threadgroup_memory_bind_count`, where its
-    /// validation stops it, and runs the command as before (EV IRX-inh2-m4, an M4). No pipeline
-    /// the runtime makes reads it: an object function's threadgroup memory is refused
-    /// (`NotImplemented(MeshShading)`), so the command keeps none. Refused (`Invalid`): a command
+    /// validation stops it, and runs the command as before (EV IRX-inh2-m4, an M4). The command
+    /// keeps none: an executed command whose mesh draw's object function has threadgroup memory
+    /// arguments is `NotImplemented(IndirectRenderCommands)`. Refused (`Invalid`): a command
     /// of a buffer whose command types hold no mesh draw (`ObjectThreadgroupMemory`), where
     /// Metal's process ends, and of a buffer of dispatches (`CommandKind`).
     pub fn set_object_threadgroup_memory_length(

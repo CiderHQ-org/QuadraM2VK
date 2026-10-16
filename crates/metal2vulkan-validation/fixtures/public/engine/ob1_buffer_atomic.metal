@@ -1,4 +1,4 @@
-// Owned fixture (WP-OB1, DESIGN D225): atomics past a `device` buffer, the buffer atomic
+// Owned fixture: atomics past a `device` buffer, the buffer atomic
 // containment form. Eight threads; thread t adds 1 + t to counter idx[t] of ctr and stores the
 // value the add returned to ctr[4 + t]. The case's idx puts adds 0 to 3 on counters 0 to 3 (one
 // thread each) and adds 4 to 7 past ctr's end (words 12, 13, 40, 75 of a 12-word ctr: up to byte

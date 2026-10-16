@@ -2,6 +2,7 @@
 //! limits (the sweep over every committed profile), stage-interface locations and packing, vertex
 //! input, graphics state, and the property over random pipelines.
 
+mod geometry;
 mod property;
 mod render;
 mod sweep;
@@ -117,9 +118,13 @@ pub(super) fn iface(
         writes_memory: false,
         mesh_records: None,
         emulated_payload: None,
+        payload: None,
         reaches_command_buffers: false,
         writes_textures: false,
         numbered_samplers: Vec::new(),
+        own_pixel_textures: Vec::new(),
+        snapshot_textures: Vec::new(),
+        private_bytes: 0,
     }
 }
 

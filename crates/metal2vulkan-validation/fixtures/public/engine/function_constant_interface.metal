@@ -1,11 +1,11 @@
-// Owned fixture (WP-L9f, DESIGN D140): stage outputs and arguments a function constant gates.
+// Owned fixture: stage outputs and arguments a function constant gates.
 // With no constant supplied every gate is off (MSL 5.8.1.2: an undefined constant behaves as if
 // `is_function_constant_defined` were false), so each gated output and argument is absent:
 // - a gated varying and a gated point size leave the vertex interface (MSL 5.8.1.6);
 // - a gated color output leaves the fragment interface;
 // - a gated buffer that the body reads without a guard reads as null (a read through the null
 //   buffer pointer is the access family's null root, zero); a gated texture's observed read is
-//   refused (`FunctionConstantArgument`, DESIGN D291.7: its value is undefined); a present
+//   refused (`FunctionConstantArgument`: its value is undefined); a present
 //   texture sampled through a gated sampler is refused: `Lowering(Sampler)`;
 // - a gated color input whose read only feeds a blend the frontend selects away is never observed;
 // - a gated input that only feeds an output gated by the same constant is never observed (the
@@ -56,7 +56,7 @@ fragment GatedTargets fc_fragment_gated_color(float4 pos [[position]]) {
 }
 
 // A read and a sample of a gated texture and sampler, neither guarded: Metal leaves both
-// undefined, so the translation refuses the read (`FunctionConstantArgument`, DESIGN D291.7).
+// undefined, so the translation refuses the read (`FunctionConstantArgument`).
 kernel void fc_kernel_absent_resources(
     texture2d<float, access::read> source [[texture(0), function_constant(has_source)]],
     texture2d<float, access::sample> sampled [[texture(1), function_constant(has_source)]],

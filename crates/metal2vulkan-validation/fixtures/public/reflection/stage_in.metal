@@ -1,4 +1,4 @@
-// Owned fixture (WP-UNI, DESIGN D311 item 5, S2): a kernel's stage input, for which Metal's
+// Owned fixture: a kernel's stage input, for which Metal's
 // pipeline reflection lists the stage input descriptor's buffers (`stageInBuffer.N`) and the
 // function its stage input attributes. Written for this repository; no third-party source.
 // Loop-free.

@@ -1,4 +1,4 @@
-// Owned fixture (WP-UNI, DESIGN D311 item 5, S2): the function kinds whose metallib `TYPE` tag
+// Owned fixture: the function kinds whose metallib `TYPE` tag
 // and MTLFunction.functionType the other reflection fixtures do not show (mesh, object and
 // intersection functions), and a post-tessellation vertex function whose patch states no
 // control-point count. Written for this repository; no third-party source. Loop-free.

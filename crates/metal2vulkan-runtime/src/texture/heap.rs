@@ -104,11 +104,11 @@
 //! - **Depth twins**. A `Depth32Float` texture the device holds with a depth twin takes both images
 //!   of the heap: the image at the texture's offset and the twin past it, at the next multiple of
 //!   the twin's alignment ([`heap_extent`]), so the answered size covers both and the texture's
-//!   bytes are its range alone, as Metal's placement and aliasing rules need (CRF heap probe 1: two
-//!   `Depth32Float` textures side by side keep their texels, and a buffer filled over the first
-//!   changes every texel of it and none of the second's). Each image takes the heap's memory or its
-//!   linear tiling as above. Both are the heap buffer's resource to hazard tracking, and
-//!   `depth-twin` is announced as for `new_texture`.
+//!   bytes are its range alone, as Metal's placement and aliasing rules need (a Metal heap probe on
+//!   the M3 Max and an M4: two `Depth32Float` textures side by side keep their texels, and a buffer
+//!   filled over the first changes every texel of it and none of the second's). Each image takes
+//!   the heap's memory or its linear tiling as above. Both are the heap buffer's resource to hazard
+//!   tracking, and `depth-twin` is announced as for `new_texture`.
 //! - **Depth and stencil images apart**. On a driver that lays depth and stencil images apart from
 //!   the memory they are bound to ([`DriverFact::DepthStencilImagesLieApart`]: MoltenVK, measured),
 //!   a heap's texture with such an image (its own or its twin) aliases none of the heap's other
@@ -130,13 +130,13 @@
 //!   texel (the heap depth lane).
 //! - **Texture buffers**. A heap's texture buffer is a buffer of the heap's at the texture's
 //!   offset, its row of texels long, with the texture buffer over its bytes as
-//!   `Buffer::new_texture` makes one: Metal's answers, measured (CRF heap probe 1, an M3 Max and
-//!   an M4 alike, plain and validated): the size is the row exactly and the alignment 16 bytes,
-//!   for every format and storage mode; the texels are the heap's bytes from the offset, in
-//!   order, so a buffer over them and the texture alias byte for byte; an automatic heap answers
-//!   `heapOffset` 0 and counts the row in `usedSize`, and `makeAliasable` gives the range back.
-//!   The texture answers `heap`, `heap_offset`, `make_aliasable` and `is_aliasable` through the
-//!   buffer, which is no resource of the program's (Metal's texture answers `buffer` nil).
+//!   `Buffer::new_texture` makes one: Metal's answers, measured (a Metal heap probe, an M3 Max and
+//!   an M4 alike, plain and validated): the size is the row exactly and the alignment 16 bytes, for
+//!   every format and storage mode; the texels are the heap's bytes from the offset, in order, so a
+//!   buffer over them and the texture alias byte for byte; an automatic heap answers `heapOffset` 0
+//!   and counts the row in `usedSize`, and `makeAliasable` gives the range back. The texture
+//!   answers `heap`, `heap_offset`, `make_aliasable` and `is_aliasable` through the buffer, which
+//!   is no resource of the program's (Metal's texture answers `buffer` nil).
 
 use super::first_move::FirstMove;
 use super::heap_tiled::{
@@ -146,8 +146,9 @@ use super::heap_tiled::{
 use super::heap_two_planes::{HeapPlaneCopies, TwoPlaneHeapLayout};
 use super::stand_in::StandIn;
 use super::{
-    copy_units, image_aspects, image_error, DetachedImage, IdUse, Image, ImageObjects,
-    ImagePlacement, ImageSwap, Owner, Raw, Remade, Storage, Texture, TextureDescriptor, ViewRecord,
+    copy_units, image_aspects, image_error, pages_hold, DetachedImage, IdUse, Image, ImageObjects,
+    ImagePlacement, ImageSwap, KeptResolves, Owner, Raw, Remade, Storage, Texture,
+    TextureDescriptor, ViewRecord,
 };
 use crate::address::ObjectsToken;
 use crate::buffer::{
@@ -161,8 +162,10 @@ use crate::device::lock;
 use crate::error::{internal, invalid, nil, vulkan, Error, MemoryKind, Nil, Problem, RuntimeGap};
 use crate::heap::{Heap, HeapProblem, HeapType, SizeAndAlign, WeakHeap};
 use crate::image_plan::{check_image_limits, plan_texture_images, ImagePlan};
+use crate::key_hash::KeyMap;
 use crate::linear_plan::{check_linear_limits, linear_lack, LinearLack, LINEAR_ALIGNMENT};
 use crate::memory::{Memory, MemoryClass, Placement};
+use crate::metal_level::MetalLevel;
 use crate::release;
 use crate::resource::{Identity, ResourceKey};
 use crate::shadow::{ShadowBuffer, ShadowCopies, ShadowSource, ShadowTarget};
@@ -179,7 +182,6 @@ use metal2vulkan::metal::{PixelFormat, TextureType, TextureUsage};
 use metal2vulkan::vk::{
     Format, FormatFeatureFlags2, ImageAspectFlags, ImageUsageFlags, SampleCountFlags,
 };
-use std::collections::HashMap;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -487,6 +489,9 @@ struct HeapBinding {
     /// The memory is host memory the heap imported (`Device::new_heap_with_bytes_no_copy`): an
     /// image bound to it is made for host allocations.
     host: bool,
+    /// The host pages the heap's bytes lie in now, where `host`: a submission that takes the move
+    /// of an image bound to them holds them (`texture/first_move.rs`).
+    pages: Option<Arc<HostPages>>,
 }
 
 /// What a texture of a descriptor takes of a heap.
@@ -764,7 +769,7 @@ fn linear_tiling(tiling: vk::ImageTiling) -> bool {
     tiling == vk::ImageTiling::LINEAR || tiling == vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT
 }
 
-/// Metal's answer for a texture buffer of `layout` in a heap (CRF heap probe 1, an M3 Max and an
+/// Metal's answer for a texture buffer of `layout` in a heap (a Metal heap probe, an M3 Max and an
 /// M4 alike): its row of texels exactly, at a multiple of 16 bytes
 /// (`minimumTextureBufferAlignmentForPixelFormat:`, `LINEAR_ALIGNMENT`) for every format and
 /// storage mode. The texels are a buffer of the heap's (`Device::new_heap_texture_buffer`), which
@@ -811,13 +816,13 @@ fn four_two_two_heap_answer(layout: &TextureLayout) -> SizeAndAlign {
 /// - a two-plane extended-range cube or cube array's ([`TextureProblem::TypeForFormat`]): 16
 ///   (an M4, EV `APX2-xr1-m4`, plain and validated);
 /// - `Unspecialized`'s, `RGBA16Float_XR`'s, `AnyDepth`'s and `AnyStencil`'s: 128 for a 1D, 2D
-///   and 2D multisample texture, 16 for a texture buffer, 16 KiB for the arrays, cubes and 3D
-///   textures, as for a texture of a format (an M3 Max under macOS 26.7, EVs `APX2-un2-m3` and
-///   TTG-nil2-m3, the consumer's report alike; plain and validated, every usage and storage
-///   mode). An M4 under macOS 27.0.1 answers 128 for all but the texture buffer (EVs
-///   `APX2-un1-m4`, TTG-nil1-m4, TTG-nil4-m4); the runtime answers the M3 Max's, its
-///   consumer's.
-pub(crate) fn no_texture_alignment(pf: PixelFormat, ty: TextureType) -> u64 {
+///   and 2D multisample texture, 16 for a texture buffer, and for the arrays, cubes and 3D
+///   textures the level's answer (`MetalLevel::no_texture_stack_alignment`): 16 KiB, as for a
+///   texture of a format, on an M3 Max under macOS 26.7 (EVs `APX2-un2-m3` and TTG-nil2-m3, the
+///   consumer's report alike; plain and validated, every usage and storage mode), and 128 under
+///   macOS 27.0.1 (EV M27-heap1-m3, and an M4 alike, EVs `APX2-un1-m4`, TTG-nil1-m4,
+///   TTG-nil4-m4).
+pub(crate) fn no_texture_alignment(pf: PixelFormat, ty: TextureType, level: MetalLevel) -> u64 {
     use TextureType as T;
     if ycbcr_format(pf).is_some() {
         return if ty == T::Type2DArray { 128 } else { 16 };
@@ -833,7 +838,7 @@ pub(crate) fn no_texture_alignment(pf: PixelFormat, ty: TextureType) -> u64 {
         | T::Cube
         | T::CubeArray
         | T::Type3D
-        | T::Type2DMultisampleArray => 16 << 10,
+        | T::Type2DMultisampleArray => level.no_texture_stack_alignment(),
     }
 }
 
@@ -1029,7 +1034,7 @@ impl Device {
                 let (pf, ty) = (descriptor.pixel_format, descriptor.texture_type);
                 return Ok(SizeAndAlign {
                     size: 0,
-                    align: no_texture_alignment(pf, ty),
+                    align: no_texture_alignment(pf, ty, self.properties().metal_level),
                 });
             }
             layout => layout?,
@@ -1070,7 +1075,7 @@ impl Device {
                 let (pf, ty) = (descriptor.pixel_format, descriptor.texture_type);
                 return Ok(Some(SizeAndAlign {
                     size: 0,
-                    align: no_texture_alignment(pf, ty),
+                    align: no_texture_alignment(pf, ty, self.properties().metal_level),
                 }));
             }
             layout => layout?,
@@ -1874,7 +1879,7 @@ impl Device {
         let made = match pages.as_deref().and_then(HostPages::dma_buf) {
             None => Err("the heap's bytes lie in no dma-buf pages".to_owned()),
             Some((imports, start, type_index)) => {
-                let pages = (&**imports, type_index, start + offset);
+                let pages = (&*imports, type_index, start + offset);
                 let size = p.size_and_align.size;
                 self.dma_buf_heap_image(&p.image.plan, &facts, pages, size)?
             }
@@ -2089,11 +2094,14 @@ impl Device {
             options: binding.options,
             allow_gpu_optimized_contents: binding.allow_gpu_optimized_contents,
             identity: binding.identity,
-            views: Mutex::new(HashMap::new()),
+            views: Mutex::new(KeyMap::default()),
+            own_views: Mutex::new(KeyMap::default()),
+            resolves: KeptResolves::new(),
             twin: None,
             decoded: None,
             form: Default::default(),
             kept_outside: AtomicBool::new(false),
+            signed_depth: AtomicBool::new(false),
             detached: Mutex::new(None),
             first_move: Mutex::new(None),
             host_copies: false,
@@ -2101,7 +2109,8 @@ impl Device {
             staging_copies: false,
             objects: ObjectsToken::default(),
         };
-        let first = FirstMove::new(raw, made.plan().format, initial, binding.host);
+        let pages = binding.pages.as_ref().filter(|_| binding.host);
+        let first = FirstMove::new(raw, made.plan().format, initial, pages.and_then(pages_hold));
         *lock(&made.first_move) = Some(first);
         Ok(made)
     }
@@ -2125,11 +2134,14 @@ impl Device {
             options: binding.options,
             allow_gpu_optimized_contents: binding.allow_gpu_optimized_contents,
             identity: binding.identity,
-            views: Mutex::new(HashMap::new()),
+            views: Mutex::new(KeyMap::default()),
+            own_views: Mutex::new(KeyMap::default()),
+            resolves: KeptResolves::new(),
             twin: None,
             decoded: None,
             form: Default::default(),
             kept_outside: AtomicBool::new(false),
+            signed_depth: AtomicBool::new(false),
             detached: Mutex::new(Some(DetachedImage {
                 stand_in,
                 own: None,
@@ -2211,7 +2223,7 @@ impl Device {
     pub(crate) fn rebound_heap_images(
         &self,
         heap: &Heap,
-        pages: &HostPages,
+        pages: &Arc<HostPages>,
         remade: &mut Remade,
     ) -> Result<Vec<ImageSwap>, Error> {
         let (memory, base) = pages.memory();
@@ -2258,13 +2270,10 @@ impl Device {
             let Some((raw, initial)) = made else {
                 return Err(Error::NotImplemented(RuntimeGap::RebindTextures));
             };
+            let first = FirstMove::new(raw, image.plan().format, initial, pages_hold(pages));
             // Dropped on a later failure, the images made so far go.
-            swaps.push(ImageSwap::new(
-                Arc::clone(image),
-                ImageObjects::new(self, raw),
-                initial,
-                pages,
-            ));
+            let objects = ImageObjects::new(self, raw);
+            swaps.push(ImageSwap::new(Arc::clone(image), objects, first, pages));
         }
         Ok(swaps)
     }
@@ -2338,6 +2347,7 @@ impl Device {
             allow_gpu_optimized_contents: descriptor.allow_gpu_optimized_contents,
             identity: bytes.identity(),
             host: bytes.caller_memory() == Some(CallerMemory::HostPages),
+            pages: bytes.host_pages(),
         };
         // Over dma-buf pages the image of the driver's `DRM_FORMAT_MOD_LINEAR` layout is made
         // here, its pages' source called once; where none is, the texture is a shadow of the
@@ -2400,13 +2410,19 @@ impl Device {
                     self.detached_heap_image(&binding, p.image, owner, Arc::clone(stand_in))
                 }
                 #[cfg(unix)]
-                (None, Some(made)) => self.dma_buf_texture_image(
-                    made,
-                    p.image.plan,
-                    owner,
-                    (binding.options, binding.allow_gpu_optimized_contents),
-                    binding.identity,
-                ),
+                (None, Some(made)) => {
+                    let pages = binding.pages.as_ref().ok_or_else(|| {
+                        internal("a heap texture over dma-buf pages the heap does not lie in")
+                    })?;
+                    self.dma_buf_texture_image(
+                        made,
+                        p.image.plan,
+                        owner,
+                        (binding.options, binding.allow_gpu_optimized_contents),
+                        binding.identity,
+                        pages,
+                    )
+                }
                 _ => self.bind_heap_image(&binding, p.image, at, image_size, owner)?,
             };
             if let Some((twin, offset)) = twin {
@@ -2535,6 +2551,7 @@ impl Device {
                         regions,
                         staging: None,
                         texel: None,
+                        words: None,
                     },
                     // A heap's bytes join no other memory (`host_aliases.rs`).
                     alias: None,

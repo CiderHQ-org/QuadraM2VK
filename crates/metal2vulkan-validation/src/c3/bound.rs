@@ -468,14 +468,14 @@ fn value_near_equivalent(
             ValueDifference::NanEncoding => format!(
                 "both answers are NaNs, and the row records {note:?}, which the product records \
                  for its lowering of {named}: Metal answers the canonical 0x7fc00000, the device \
-                 its own encoding (D253.8). A near-equivalent, open until an exact path exists: \
-                 D253.12's canonicalizing select after each operation"
+                 its own encoding. A near-equivalent, open until an exact path exists: a \
+                 canonicalizing select after each operation"
             ),
             ValueDifference::Denormal => format!(
                 "a subnormal is an operand, an operation's exact value, or an answer, and the row \
                  records {note:?}, which the product records for its lowering of {named}: Metal \
-                 flushes float denormals, the device need not (D253.8). A near-equivalent, open \
-                 until an exact path exists: D253.12's flushing select after each operation, or \
+                 flushes float denormals, the device need not. A near-equivalent, open until an \
+                 exact path exists: a flushing select after each operation, or \
                  DenormFlushToZero where a profile offers it"
             ),
         });

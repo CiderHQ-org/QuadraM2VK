@@ -1,4 +1,4 @@
-// Owned fixture (WP-SMP, DESIGN D299): a kernel that samples one element of a 32-texture array,
+// Owned fixture: a kernel that samples one element of a 32-texture array,
 // picked per thread, through one runtime sampler. Where 32 combined image samplers exceed the
 // stage's samplers the stage samples 32 separate textures through one separate sampler, which
 // the binder writes with the sampler bound at slot 0 made for the use; elsewhere the 32 combined

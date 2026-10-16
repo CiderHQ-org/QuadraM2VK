@@ -1,4 +1,4 @@
-// Owned fixture (WP-K10, DESIGN D187): fragment imageblocks through the imageblock storage.
+// Owned fixture: fragment imageblocks through the imageblock storage.
 //
 // `imageblock_transition` reads one view of a master layout and writes another: the input view
 // holds `b` (a half at byte 2, the high half of word 0) and `sum` (a float at byte 8), the output

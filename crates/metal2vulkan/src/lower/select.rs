@@ -46,7 +46,8 @@ use crate::air::ir::{
 };
 use crate::air::Entry;
 use crate::budget::{tree_bytes, Growth, Meter};
-use crate::device::profile::{FunctionStorage, Limits};
+use crate::device::function_storage;
+use crate::device::profile::Limits;
 use crate::device::requirements::{VkFeature, VkLimit};
 use crate::device::subgroup::{self, SimdClass, SubgroupRequirement, Tier};
 use crate::device::DeviceProfile;
@@ -403,6 +404,9 @@ pub struct Plan {
     /// with their conditions ([`resolve_notes`]).
     pub specialized: Vec<SpecializedNote>,
     pub estimate: SizeEstimate,
+    /// The private memory a thread keeps, in bytes, as selection holds it to the device's
+    /// Function storage (`MemoryPlan::private_bytes`).
+    pub private_bytes: u64,
 }
 
 impl Plan {
@@ -1129,14 +1133,15 @@ pub fn selector_form(
 
 /// Whether `p`'s device holds `e`'s private memory: what a driver backs with scratch, the plan's
 /// `private_bytes` (the private arena, and each typed `alloca`, call stacks among them, and each
-/// constant held as a `Private` variable that an access indexes at run time), is held correctly
-/// only up to the profile's `function_storage`. Past it the entry is `Unsupported{PrivateMemory}`,
-/// or `Unsupported{Recursion}` with a call stack, needing more. Within an assumed value (a device
-/// not measured) an entry that counts any private memory records
-/// `PrecisionNote::FunctionStorageAssumed`, which it returns. A private arena past its `u32`
-/// offsets is first the translator's own bound, a property of its encoding that selection refuses
-/// at the arena's first pointer (`LimitExceeded(PrivateArenaBytes)`), so the device's storage is
-/// not asked.
+/// constant held as a `Private` variable that an access indexes at run time), may take a thread
+/// up to `device::function_storage::ceiling`: the profile's `function_storage`, or Metal's 192 KiB
+/// for a vertex or fragment function on a device not measured. Past it the entry is
+/// `Unsupported{PrivateMemory}`, or `Unsupported{Recursion}` with a call stack, needing more.
+/// Past the profile's own value (a device not measured holds the floor, 16 KiB) an entry within
+/// that ceiling records `PrecisionNote::FunctionStorageAssumed`, which it returns. A private arena
+/// past its `u32` offsets is first the translator's own bound, a property of its encoding that
+/// selection refuses at the arena's first pointer (`LimitExceeded(PrivateArenaBytes)`), so the
+/// device's storage is not asked.
 fn function_storage(
     e: &Entry,
     mp: &MemoryPlan,
@@ -1147,7 +1152,8 @@ fn function_storage(
     if mp.priv_arena.static_size > crate::budget::PRIVATE_ARENA_BYTES {
         return Ok(None);
     }
-    if required > storage.bytes() {
+    let available = function_storage::ceiling(storage, static_root::stage_of(e));
+    if required > available {
         let feature = match e.call_stack {
             Some(_) => Feature::Recursion,
             None => Feature::PrivateMemory,
@@ -1155,14 +1161,11 @@ fn function_storage(
         let limit = Capability::Limit {
             limit: VkLimit::FunctionStorageBytesPerThread,
             required,
-            available: storage.bytes(),
+            available,
         };
         return Err(Unsupported::needs(feature, limit).into());
     }
-    Ok(match storage {
-        FunctionStorage::Assumed(_) if required > 0 => Some(PrecisionNote::FunctionStorageAssumed),
-        _ => None,
-    })
+    Ok((required > storage.bytes()).then_some(PrecisionNote::FunctionStorageAssumed))
 }
 
 /// Select the plan of `e`.
@@ -1215,8 +1218,8 @@ pub fn select(
         facts: (e.call_stack.into_iter())
             .map(|stack| RuntimeFact::CallStackDepth { depth: stack.depth })
             .collect(),
-        // Private memory on a device not measured rests on the assumed Function storage. A rate-map
-        // decoder canon compiled is Apple's over Metal's bytes: no note.
+        // Private memory past the floor of a device not measured rests on no measurement. A
+        // rate-map decoder canon compiled is Apple's over Metal's bytes: no note.
         precision: storage_note.into_iter().collect(),
         specialized: BTreeMap::new(),
         noted: 0,
@@ -1244,6 +1247,15 @@ fn select_entry(
     params: usize,
     m: &mut Meter,
 ) -> Result<Plan, Error> {
+    // The varyings a vertex function writes the same at every vertex of a primitive, which a
+    // fragment function of its pipeline reads flat where it interpolates them, and which decide
+    // where it stores the slice and viewport indices it writes.
+    if cx.stage == Stage::Vertex {
+        cx.families.stage_io.interface.uniform_outputs =
+            stage_io::uniform_varyings(cx.entry, cx.inputs, m)?
+                .into_iter()
+                .collect();
+    }
     tessellation::plan_entry(&mut cx).map_err(|e| located_param(e, &cx, None))?;
     // The framebuffer-fetch forms first: an output to a storage-form attachment is no interface
     // variable.
@@ -1581,13 +1593,7 @@ fn finish(
     // Each family completes its own plan and contributes its descriptors, facts, simd class,
     // and tangled instructions before the combined checks below.
     stage_io::finish(&mut cx)?;
-    // The varyings a vertex function writes the same at every vertex of a primitive, which a
-    // fragment function of its pipeline reads flat where it interpolates them.
     if stage == Stage::Vertex {
-        cx.families.stage_io.interface.uniform_outputs =
-            stage_io::uniform_varyings(cx.entry, cx.inputs, m)?
-                .into_iter()
-                .collect();
         cx.families.stage_io.interface.instanced_attributes =
             cx.inputs.instanced_attributes.iter().copied().collect();
     }
@@ -1758,6 +1764,7 @@ fn finish(
         precision,
         specialized,
         estimate,
+        private_bytes: cx.memory.private_bytes,
     })
 }
 

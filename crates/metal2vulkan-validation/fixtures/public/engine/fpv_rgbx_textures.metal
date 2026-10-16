@@ -1,4 +1,4 @@
-// fpv_rgbx_textures.metal (metal2vulkan, WP-FPV, DESIGN D691): kernels reading, sampling and
+// fpv_rgbx_textures.metal (metal2vulkan): kernels reading, sampling and
 // writing a texture, written from scratch for the RGBX lane (`runtime_lane::rgbx_textures`). Each
 // thread takes its texel at `gid` of a row `width` texels wide, element `gid.y * width + gid.x`
 // of buffer 0.

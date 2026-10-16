@@ -15,12 +15,12 @@
 // reduce to log(1), whose fast error is at most 2^-21 absolute on [0.5, 2] (asinh(+0) through the
 // fast sqrt(1) = 1 * rsqrt(1), within 2 ulp, and atanh(+0) through the fast division 1 / 1), and
 // to sin(+0), at most 2^-13 absolute. A small non-zero result would conform, and so would -0.
-// Metal answers +0 in every row (DESIGN D208).
+// Metal answers +0 in every row.
 //
 // The first version also asked acosh(+inf), asinh(-0), asinh(-inf), atanh(-0), atanh(+-1),
 // tan(-0) and tan(2^-20). The first seven are undefined under these flags (Metal answered
 // asinh(-inf) with NaN, its log formula at -inf), and tan(2^-20) is bounded, not pinned
-// (DESIGN D204.6, D208).
+//.
 //
 // `has_bias` is a `short` function constant that gates the `bias` argument. That is the spelling
 // that makes Metal emit `air.normalize_function_constant_predicate.i16` into `air.static_init`:

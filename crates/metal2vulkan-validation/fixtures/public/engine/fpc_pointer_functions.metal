@@ -1,4 +1,4 @@
-// Owned MSL for WP-FPC (D316 item 27, TODO 8.18): visible functions that `fpc_chosen_pointers`'s
+// Owned MSL: visible functions that `fpc_chosen_pointers`'s
 // kernels call through pointers chosen at run time. Three have the type `uint(uint)` a pointer
 // holds; `fpc_rec_even` and `fpc_rec_odd` recurse through a pointer each chooses between them,
 // `n` of `fpc_rec_even` and `2 n` of `fpc_rec_odd` per call, to depth `n`. The kernel only gives

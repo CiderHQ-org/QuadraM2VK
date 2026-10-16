@@ -1,4 +1,4 @@
-// Owned fixture (WP-DSM2, DESIGN D278): an 8x8 simdgroup multiply-add, in float and in half,
+// Owned fixture: an 8x8 simdgroup multiply-add, in float and in half,
 // under a branch on a simdgroup collective's result that differs by lane, after a loop whose
 // exit differs by lane.
 // metal-fast-math: off
@@ -12,7 +12,7 @@
 // that of the half d's, widened, at thread g of a grid of n threads (g = thread_position_in_grid).
 // A lane that does not run it writes nothing. Lane L of a simdgroup holds cells
 // (row(L), col(L) + j), row(L) = ((L >> 1) & 3) | ((L >> 4) << 2),
-// col(L) = ((L >> 3) & 1) * 4 + (L & 1) * 2 (D91.1).
+// col(L) = ((L >> 3) & 1) * 4 + (L & 1) * 2.
 #include <metal_stdlib>
 using namespace metal;
 

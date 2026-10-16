@@ -11,14 +11,30 @@
 //! first level is at most 65 texels wide and tall, and of the wider and taller ones whose passes
 //! are known (below).
 //!
+//! **By release** ([`MipmapRule`]). The passes, the tail and the half below are macOS 26.7's
+//! ([`MipmapRule::AppleM3MaxPasses`]). Under macOS 27.0.1 the M3 Max makes every level of every
+//! chain by its filter of the level above, carrying no field through a half
+//! ([`MipmapRule::Filter`]; EVs M27-mips1-m3 to M27-mips4-m3, our own probes: the 679 chains of
+//! the 26.7 tables rerun and 182 3D chains of 14 formats at 13 extents, `measured_m3_27.txt`, and
+//! 556 chains of random bytes, 2D textures to 16384x64 and 4096x4096, arrays, cubes and 3D textures
+//! of 32 formats). Every level of every chain matched, `A1BGR5Unorm`'s and `ABGR4Unorm`'s, the 3D
+//! chains of odd widths and heights and the half-float ones among them, but at two 8-bit sRGB near
+//! ties (below). Its reciprocal is not separated from an Apple M4's by those chains (levels 41 and
+//! 61 texels wide among them); the chain takes the M3 Max's.
+//!
 //! **The taps.** Along each axis, destination texel `i` of `w` from `W` reads source texels
 //! `x0` and `min(x0 + 1, W - 1)` with weights `256 - q` and `q`: the centre's coordinate is
 //! computed in `f32`, `u = (i + 0.5) * r` and `c = u * W - 0.5` (each operation rounded to
 //! nearest even), `x0 = floor(c)`, and the fraction is rounded half up to `q / 256`. `r` is the
 //! GPU's reciprocal of `w`: the M4's is `1 / w` rounded to nearest even, the M3 Max's one unit in
 //! the last place off it at 1531 of the sizes up to 16384 (`reciprocal.rs`). An axis of one texel
-//! that stays one has one tap. A texel's eight taps weigh `n = ax ay az` (of `2^24`; a 2D level's
-//! depth taps weigh 256 and 0). Each layer of an array or cube is filtered alone.
+//! that stays one has one tap. A texel's eight taps weigh `ax ay az` (of `2^24`; a 2D level's
+//! depth taps weigh 256 and 0) split along y last: the second row's part of `ax az` (of `2^16`)
+//! is `ax az qy` rounded half down to `2^-16`, the first row's the rest of `ax az`. Only a 3D level
+//! of a width, height or depth that does not halve has a split that is not exact (EV M27-imp1-m3,
+//! an Apple M3 Max under macOS 27.0.1: every weight of a 41x61x5 `RGBA32Float` chain's first
+//! computed level, one tap a channel, read back exactly). Each layer of an array or cube is filtered
+//! alone.
 //!
 //! **Whose answer.** The Apple M3 Max is the reference. Its filter (its coordinates, and its
 //! half below) gives the first level of each of its passes and every level of a 3D chain; its
@@ -64,13 +80,16 @@
 //! **Near ties** ([`MipmapFilterChain::near_ties`]). Some roundings miss a few values on an Apple
 //! M3 Max, one unit each, at sums a hair from a rounding boundary, by no rule fit yet:
 //! - the filter's 8-bit sRGB colour code (a linear sum of 906.5002 steps stored as byte 129, the
-//!   chain's 130: 1 of 5,331,270 values of share-mips-m3; on an Apple M4 too);
+//!   chain's 130: 1 of 5,331,270 values of share-mips-m3; on an Apple M4 too; under macOS 27.0.1
+//!   one texel in each of 2 of the 588 2D chains of `measured_m3_27.txt`, sums of 906.5002 and
+//!   413.5002 steps);
 //! - a 16-bit float tail level read from kept values (one unit in the last place: 8 of 538,088;
 //!   on an Apple M4 too; share-mips-m3b's 54 of 3,326,656 tail values, every one a level read
 //!   from kept values);
-//! - the extended-range sRGB formats, which the M3 Max carries through a half: its filter's levels
-//!   and the levels its tail reads from kept values (their first computed levels miss at odd
-//!   weights, on an Apple M4 too).
+//! - the extended-range sRGB formats, which the M3 Max carries through a half under macOS 26.7:
+//!   its filter's levels and the levels its tail reads from kept values (their first computed
+//!   levels miss at odd weights, on an Apple M4 too). Under macOS 27.0.1, which carries no field
+//!   through a half, none missed.
 //!
 //! The other formats are exact:
 //! - the filter's 10-bit grid (`BGR10A2Unorm`'s 193x193 sum of `S = 283.375015` codes, 2^-16 code
@@ -136,7 +155,11 @@
 //!   of the live terms' exponent estimates `msb(M) + z + msb(n) - 24` (the value `M 2^z`), each
 //!   term `M n 2^z` is truncated toward zero to `2^(e - 38)` and summed; the sum is rounded half
 //!   away from zero to 24 bits, `+0` where it lies below `2^-126` before rounding. A NaN tap
-//!   of nonzero weight, or both infinities, gives `0x7fc00000`; one infinity gives itself.
+//!   of nonzero weight, or both infinities, gives `0x7fc00000`; one infinity gives itself. A 3D
+//!   level sums each depth slice's four terms so, at the slice's own `e`, then truncates each
+//!   slice's sum toward zero to `2^(e - 38)` of the larger `e` and adds them (EV M27-mips4-m3:
+//!   every value of the 3D `RGBA32Float` and `R16Float` chains, halving and not, on an Apple M3
+//!   Max under macOS 27.0.1).
 //! - **16-bit float**: the same accumulator at `2^(e - 17)`, rounded half away from zero to a
 //!   half, subnormals kept; a NaN gives `0x7e00`.
 //! - **`RG11B10Float`**: each field's half-float answer as above (infinities and NaNs as a
@@ -147,8 +170,9 @@
 //!   `2^-13` code first, rounded half up to 1/16 code, and at an exact half the code of `RNE((x +
 //!   1/2 - 384) / 510)`; alpha clamped to `[384, 894]` first, each term floored to `2^-15` code, on
 //!   a 1/8 grid. The `_sRGB` colour codes sum their linear steps
-//!   (`lower::arith::extended_range::table`, signed about code 384) term by term as the 16-bit
-//!   formats do, and take the code whose encode range holds the magnitude. `BGR10_XR`'s two
+//!   (`lower::arith::extended_range::table`, signed about code 384), each term floored to `2^-9`
+//!   step, rounded half up to a step, and take the code whose encode range holds the magnitude
+//!   (`layout::XR_SRGB_FLOOR`). `BGR10_XR`'s two
 //!   padding bits are set; `BGRA10_XR`'s low six bits of each lane are 0.
 //!
 //! `B5G6R5Unorm` and `BGR5A1Unorm` are left out: their 5-bit fields miss this rule at a few grid
@@ -195,7 +219,7 @@ mod soft;
 mod tail;
 mod tail_kernel;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use std::sync::Arc;
 
@@ -208,6 +232,21 @@ use crate::pipeline::sym::{ResourceKind, ResourceSlot, Stage, Symbol};
 use crate::vk::Format;
 use layout::{axis_tap, header, tie_tables, Layout, Rule, HEADER_WORDS, KEPT_WORDS};
 use reciprocal::Reciprocal;
+
+/// How a Metal release makes each level of a chain after the first (the module docs' "By
+/// release"). No Metal counterpart: Metal answers as the release it runs on.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum MipmapRule {
+    /// macOS 26.7 on an Apple M3 Max: its filter, carrying the formats it carries through a half,
+    /// at the first level of each of its passes over a 2D chain, array or cube and at every level
+    /// of a 3D chain, and its tail at the other levels.
+    AppleM3MaxPasses,
+    /// macOS 27.0.1 on an Apple M3 Max: its filter of the level above at every level of every
+    /// chain, every field at its own precision.
+    Filter,
+}
 
 /// The crate-owned mipmap filter module of one device, validated like any output.
 #[non_exhaustive]
@@ -295,13 +334,13 @@ pub struct MipmapFilterChain {
     /// 65 texels of a compressed texture with a pass from a level more than 128 times wider than
     /// tall or taller than wide), in `A1BGR5Unorm`'s 2D chains and below the first level of
     /// `ABGR4Unorm`'s (a few measured values unexplained), and in a 3D chain of a format summed as
-    /// half floats (two).
+    /// half floats (two); never under [`MipmapRule::Filter`] (the module docs' "By release").
     pub unlike_an_m3: bool,
     /// Whether a level may be one unit from Metal's where its sum lies a hair from a rounding
     /// boundary, by a rounding the chain does not fit yet (the module docs' "Near ties"): a level
-    /// of the filter's (any 3D level, the first computed level of any chain) of a format with an
-    /// 8-bit sRGB colour field or of an extended-range sRGB format (which the M3 Max carries
-    /// through a half), one code; or a tail level of a 16-bit float format or an extended-range
+    /// of the filter's (any 3D level, the first computed level of any chain, every level under
+    /// [`MipmapRule::Filter`]) of a format with an 8-bit sRGB colour field or of an extended-range
+    /// sRGB format, one code; or a tail level of a 16-bit float format or an extended-range
     /// sRGB one read from the level above's kept values (one unit in the last place, or one code).
     /// Not a 10-bit field's (`RGB10A2Unorm`, `BGR10A2Unorm`; exact), nor `BGR10_XR`'s and
     /// `BGRA10_XR`'s, nor `ABGR4Unorm`'s and `A1BGR5Unorm`'s.
@@ -314,6 +353,8 @@ pub struct MipmapFilterChain {
     volume: bool,
     /// Whether Metal keeps the texture losslessly compressed (`plan`'s `compressed`).
     compressed: bool,
+    /// The release's rule (`plan`'s `rule`).
+    rule: MipmapRule,
     /// The format of the sampled view the first later level fetches the first level through,
     /// where the chain reads its first level in place (`plan`'s `fetch`): the first level then
     /// has no bytes in the scratch buffer (its offset is 0 and nothing is copied in), and the
@@ -444,20 +485,22 @@ fn square_power_of_two(e: [u32; 3]) -> bool {
 }
 
 /// The step of level `level` (after the first) of the M3 Max's chain of `extents` of a format of
-/// `layout`, of a 3D texture where `volume`: its own where its passes are known ([`m3_passes`]),
-/// an Apple M4's filter in their place below the first level where they are not.
+/// `layout`, of a 3D texture where `volume`, under `rule`: its filter at every level under
+/// [`MipmapRule::Filter`]; else its own where its passes are known ([`m3_passes`]), an Apple M4's
+/// filter in their place below the first level where they are not.
 fn step_of(
     extents: &[[u32; 3]],
     level: usize,
     volume: bool,
     compressed: bool,
     layout: &Layout,
+    rule: MipmapRule,
 ) -> Step {
     let m3 = Step::Sampler {
         reciprocal: Reciprocal::AppleM3Max,
-        half: true,
+        half: rule == MipmapRule::AppleM3MaxPasses,
     };
-    if volume || level == 1 {
+    if rule == MipmapRule::Filter || volume || level == 1 {
         return m3;
     }
     match m3_passes(extents, compressed, layout).map(|passes| passes[level]) {
@@ -632,6 +675,8 @@ impl MipmapFilterChain {
     /// conversion, which Vulkan does not state: the consumer asks for one only on a device
     /// measured to return values whose recovery reads every code back.
     ///
+    /// `rule` is the release's ([`MipmapRule`]), which Metal level the consumer answers as.
+    ///
     /// `compressed` says whether Metal keeps the texture losslessly compressed: with
     /// `allowGPUOptimizedContents`, a first level 16 texels or more on its shorter side, and a
     /// usage of neither `ShaderWrite` nor `PixelFormatView` (the runtime's measured rule). The
@@ -650,6 +695,7 @@ impl MipmapFilterChain {
         levels: u32,
         volume: bool,
         compressed: bool,
+        rule: MipmapRule,
         alignment: u64,
         max_range: u32,
         max_groups: [u32; 2],
@@ -689,7 +735,7 @@ impl MipmapFilterChain {
             at = at.checked_add(bytes)?.checked_next_multiple_of(alignment)?;
         }
         let extents: Vec<[u32; 3]> = placed.iter().map(|p| p.2).collect();
-        let step = |level: usize| step_of(&extents, level, volume, compressed, &layout);
+        let step = |level: usize| step_of(&extents, level, volume, compressed, &layout, rule);
         let keeps = |level: usize| {
             level + 1 < placed.len() && matches!(step(level + 1), Step::Tail { kept: true })
         };
@@ -764,21 +810,25 @@ impl MipmapFilterChain {
         let below_first = levels >= 3;
         let known = m3_passes(&extents, compressed, &layout).is_some();
         let has = |rule: fn(Rule) -> bool| layout.fields.iter().any(|f| rule(f.rule));
-        // A format the M3 Max carries through a half misses a few filtered values a hair from a
-        // boundary, and a few tail values read from kept values: only an extended-range sRGB one.
-        // The 10-bit grid is exact.
-        let half_ties = layout.half && has(|r| r == Rule::XrSrgb);
+        // A format the M3 Max carries through a half (macOS 26.7's) misses a few filtered values a
+        // hair from a boundary, and a few tail values read from kept values: only an
+        // extended-range sRGB one. The 10-bit grid is exact.
+        let half_ties =
+            rule == MipmapRule::AppleM3MaxPasses && layout.half && has(|r| r == Rule::XrSrgb);
         let filter_ties = half_ties || has(|r| r == Rule::Srgb8);
         let kept_ties = half_ties || has(|r| r == Rule::Float16);
         let near_ties = (1..placed.len()).any(|level| match step(level) {
             Step::Sampler { .. } => filter_ties,
             Step::Tail { kept } => kept && kept_ties,
         });
-        let unlike_an_m3 = if volume {
-            half_sums
-        } else {
-            pixel_format == PixelFormat::A1BGR5Unorm
-                || (below_first && (pixel_format == PixelFormat::ABGR4Unorm || !known))
+        let unlike_an_m3 = match rule {
+            // Every level the filter's (the module docs).
+            MipmapRule::Filter => false,
+            MipmapRule::AppleM3MaxPasses if volume => half_sums,
+            MipmapRule::AppleM3MaxPasses => {
+                pixel_format == PixelFormat::A1BGR5Unorm
+                    || (below_first && (pixel_format == PixelFormat::ABGR4Unorm || !known))
+            }
         };
         Some(MipmapFilterChain {
             levels: out,
@@ -790,6 +840,7 @@ impl MipmapFilterChain {
             zeroed: layout.bytes < 4,
             volume,
             compressed,
+            rule,
             fetch,
         })
     }
@@ -814,7 +865,14 @@ impl MipmapFilterChain {
     /// The step of level `level` (after the first).
     fn step(&self, level: usize, layout: &Layout) -> Step {
         let extents: Vec<[u32; 3]> = self.levels.iter().map(|l| l.extent).collect();
-        step_of(&extents, level, self.volume, self.compressed, layout)
+        step_of(
+            &extents,
+            level,
+            self.volume,
+            self.compressed,
+            layout,
+            self.rule,
+        )
     }
 
     /// Metal's levels of this chain on the CPU, from the bytes of the first level (every layer,

@@ -41,7 +41,10 @@ pub const REGISTRY: &[EnvVar] = &[
                  makes, through the device's message sink or on stderr: its state, its key, the \
                  key's fields that differ from the state's closest earlier pipeline, and the \
                  creation's time, split by MoltenVK's activities where its performance tracking \
-                 is on (MVK_CONFIG_PERFORMANCE_TRACKING=1); set to anything but empty or 0",
+                 is on (MVK_CONFIG_PERFORMANCE_TRACKING=1); and once per reason, why a draw \
+                 that reads its own pass's color attachment after a barrier took the split rather \
+                 than a snapshot, and how many such draws the snapshot's area rule weighed at each \
+                 share of their colors' pixels and texel bytes; set to anything but empty or 0",
     },
 ];
 

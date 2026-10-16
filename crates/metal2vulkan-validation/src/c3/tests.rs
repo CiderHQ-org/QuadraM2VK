@@ -162,6 +162,7 @@ fn case(tag: u8, name: &str) -> AuthoredCase {
         }),
         draw: None,
         tessellation: None,
+        mesh_draw: None,
         output: OutputSelection::Buffer {
             binding: 0,
             offset: 0,
@@ -177,6 +178,7 @@ fn case(tag: u8, name: &str) -> AuthoredCase {
         raster_sample_count: None,
         public_source: None,
         no_effect: None,
+        creation_bound: None,
     };
     case.case_id = case.computed_case_id().unwrap();
     case
@@ -388,7 +390,7 @@ fn reading(case: &AuthoredCase, observations: Vec<ReviewedObservation>) -> Readi
 /// A review the user signed off.
 fn signed(note: &str) -> Review {
     Review {
-        evidence: vec!["D0".into()],
+        evidence: vec!["a probe".into()],
         note: note.into(),
         sign_off: SignOff::SignedOff {
             decision: "C3 and Apple readings".into(),
@@ -1117,7 +1119,7 @@ fn reviewed_lists_are_schema_checked() {
             "bound": "4 ulp",
             "observations": observations,
             "review": {
-                "evidence": ["D0"],
+                "evidence": ["a probe"],
                 "note": "reviewed",
                 "sign_off": {"state": "awaiting_user", "decision": "C3"},
             },
@@ -1128,7 +1130,7 @@ fn reviewed_lists_are_schema_checked() {
         "old_mismatches": [{
             "case_id": hash("bb"), "name": "old", "cause": "fast_math_regrouping",
             "review": {
-                "evidence": ["D175"], "note": "regrouped",
+                "evidence": ["a regrouping probe"], "note": "regrouped",
                 "sign_off": {"state": "signed_off", "decision": "C3", "date": "2026-10-02"},
             },
         }],
@@ -1304,7 +1306,7 @@ fn reviewed_lists_are_schema_checked() {
 fn an_entry_in_the_shape_before_the_shared_review_is_rejected() {
     let hash = |tag: &str| tag.repeat(32);
     let flat = serde_json::json!({
-        "evidence": ["D175"],
+        "evidence": ["a regrouping probe"],
         "note": "regrouped",
         "sign_off": {"state": "awaiting_user", "decision": "C3"},
     });
@@ -1385,14 +1387,65 @@ fn a_bicubic_filter_arithmetic_row_is_deferred_and_never_a_reviewed_reading() {
     );
 }
 
-/// A varying a device interpolates where its interpolation is measured not to be Metal's
-/// (`DeviceInterpolation`) is deferred the same way, with its measured bound.
+/// A varying the device interpolates (`DeviceInterpolation`), which nearly every fragment function
+/// records off MoltenVK, defers nothing: a mismatching row recording it stays a mismatch with no
+/// reason, never held open as the interpolation's, and one that matches Metal is a match.
 #[test]
-fn a_device_interpolation_row_is_deferred_and_never_a_reviewed_reading() {
-    deferred_and_never_reviewed(
-        PrecisionNote::DeviceInterpolation,
-        "DeviceInterpolation:a varying the device interpolates",
-    );
+fn a_device_interpolation_row_stays_a_mismatch() {
+    use crate::coverage::{ExecutedCensus, ModuleCensus};
+    let note = PrecisionNote::DeviceInterpolation;
+    assert!(!DEFERRED_NEAR_EQUIVALENTS.contains(&note));
+    let drawn = case(1, "drawn");
+    let noted = |output: &[u8]| {
+        let mut row = new_row(&drawn, Backend::Vulkan, LAVAPIPE, output, &METAL);
+        row.census = Some(ExecutedCensus {
+            out_of_bounds: None,
+            rate_map_pass: None,
+            device: None,
+            product: crate::observation::TRANSLATOR_FINGERPRINT.into(),
+            restricted_to: None,
+            leg: None,
+            modules: vec![ModuleCensus {
+                stage: crate::case::Stage::Fragment,
+                subgroup: crate::coverage::SubgroupShape {
+                    full_subgroups: false,
+                    required_size: None,
+                },
+                strategies: Default::default(),
+                precision: [note].into(),
+                containment: None,
+            }],
+            artifact: None,
+        });
+        row.comparison = ComparisonClass::Unbounded([note].into());
+        assert!(row.class_holds());
+        row
+    };
+    for (output, want) in [(&DEVICE, Verdict::Mismatch), (&METAL, Verdict::Match)] {
+        let input = C3Input {
+            cases: vec![drawn.clone()],
+            metals: vec![metal(&drawn, &METAL)],
+            public_air: [drawn.air_sha256.clone()].into(),
+            vulkan: vec![noted(output)],
+            ..C3Input::default()
+        };
+        let report = report_of(
+            &input,
+            &ReviewedList::default(),
+            &C1List::default(),
+            &venues(),
+            &VenueKeys::default(),
+        );
+        let stated = slot(&report, LAVAPIPE, Leg::Stated);
+        assert_eq!(verdict_of(stated, &drawn), want);
+        let open = stated
+            .rows
+            .iter()
+            .find(|row| row.case_id == drawn.case_id)
+            .map(|row| (row.verdict, row.reason.clone()));
+        let want_open = (want == Verdict::Mismatch).then_some((Verdict::Mismatch, None));
+        assert_eq!(open, want_open);
+    }
 }
 
 /// A vertex function's simdgroup operation on a device that groups vertices otherwise than
@@ -1929,7 +1982,7 @@ fn a_word_within_apples_bound_that_shows_a_recorded_near_equivalent_keeps_its_re
     assert_eq!(check.count("near_equivalent"), 1);
     assert_eq!(report.refused.len(), 1);
     let words = &report.refused[0].words[0];
-    for part in ["DeviceDenormals", "D253.12", "air.fast_sinpi.f32"] {
+    for part in ["DeviceDenormals", "flushing select", "air.fast_sinpi.f32"] {
         assert!(words.contains(part), "{part}: {words}");
     }
     assert!(!report.holds());
@@ -3115,7 +3168,7 @@ fn c1_entry(
         new_census: "22".repeat(32),
         old_l3: "33".repeat(32),
         review: Review {
-            evidence: vec!["D0".into()],
+            evidence: vec!["a probe".into()],
             note: "the device has no ordered attachment access".into(),
             sign_off,
         },

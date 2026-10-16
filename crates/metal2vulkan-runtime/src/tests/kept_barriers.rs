@@ -2,10 +2,13 @@
 //! buffers (`QueueKept::take`) as the queue's timeline moves: a kept one only once the batch that
 //! last took it completed, so none is pending twice; a list met twice in one batch, and a value a
 //! failed submission left to the next batch; where a batch records its own, past the bounds; and
-//! which list a new one replaces once the kept ones fill the places. The command buffers are
-//! handles the test makes: no device records or submits them.
+//! which list a new one replaces once the kept ones fill the places. One that writes a timed
+//! command buffer's timestamps is kept per slot and taken again only by a later holding of the
+//! slot, once its timestamps were read. The command buffers are handles the test makes: no device
+//! records or submits them.
 
-use crate::command_buffer::kept_barriers::{QueueKept, Take, KEPT, LISTS, STALE};
+use crate::command_buffer::kept_barriers::{QueueKept, SlotStamps, Take, KEPT, LISTS, STALE};
+use crate::gpu_time::{Pool, PREFIXED, SLOTS};
 use crate::tracker::{Access, Barrier};
 use ash::vk::{self, Handle};
 
@@ -42,7 +45,18 @@ impl Queue {
     /// What the batch that signals `at` takes for `barriers`, the timeline completed through
     /// `completed`, as `KeptBarriers::take` does: one recorded is a spare one where there is one.
     fn take(&mut self, barriers: &[Barrier], at: u64, completed: u64) -> Got {
-        match self.kept.take(barriers, at, completed) {
+        self.take_stamped(barriers, None, at, completed)
+    }
+
+    /// As [`take`](Self::take), for a command buffer that writes `stamps` where given.
+    fn take_stamped(
+        &mut self,
+        barriers: &[Barrier],
+        stamps: Option<SlotStamps>,
+        at: u64,
+        completed: u64,
+    ) -> Got {
+        match self.kept.take(barriers, stamps, at, completed) {
             Take::Kept(raw) => Got::Kept(raw.as_raw()),
             Take::Past => Got::Own,
             Take::Record(list) => {
@@ -50,7 +64,7 @@ impl Queue {
                     self.recorded += 1;
                     vk::CommandBuffer::from_raw(self.recorded)
                 });
-                self.kept.recorded(list, raw, at);
+                self.kept.recorded(list, raw, at, stamps);
                 Got::Recorded {
                     n: raw.as_raw(),
                     list,
@@ -215,4 +229,105 @@ fn lists_in_use_in_turn_replace_none() {
         }
     }
     assert_eq!(kept.len(), LISTS);
+}
+
+/// A start command buffer of the slot whose first query is `first`, for the holding `lease`.
+fn start(first: u32, lease: u64) -> Option<SlotStamps> {
+    Some(SlotStamps {
+        queries: vk::QueryPool::from_raw(7),
+        first,
+        lease,
+        start: true,
+        after: false,
+        end: false,
+    })
+}
+
+/// A command buffer that writes a slot's timestamps is taken again only by a later holding of the
+/// slot (its timestamps read, the slot given back), once the batch that last took it completed:
+/// never by the holding that took it, though its batch completed, nor while it is pending. Each
+/// slot has its own; the end's are apart from the start's, and from the barriers alone.
+#[test]
+fn a_stamped_command_buffer_waits_for_its_slot_s_timestamps_to_be_read() {
+    let mut queue = Queue::default();
+    let barriers = list(0);
+    // Holding 1 of slot 0: its first batch, value 1.
+    assert_eq!(
+        queue.take_stamped(&barriers, start(0, 1), 1, 0),
+        Got::Recorded { n: 1, list: 0 }
+    );
+    // Its batch completed, the slot still held, its timestamps not read: not taken again.
+    assert_eq!(queue.take_stamped(&barriers, start(0, 1), 2, 1), Got::Own);
+    // Holding 2 of slot 0 (holding 1 read and gave it back), while value 1 is pending: not yet.
+    assert_eq!(queue.take_stamped(&barriers, start(0, 2), 3, 0), Got::Own);
+    // Once value 1 completed: the kept one.
+    assert_eq!(
+        queue.take_stamped(&barriers, start(0, 2), 3, 1),
+        Got::Kept(1)
+    );
+    // Slot 1 has its own; so has the end of slot 0, and the barriers alone.
+    assert_eq!(
+        queue.take_stamped(&barriers, start(2, 3), 4, 3),
+        Got::Recorded { n: 2, list: 0 }
+    );
+    let end = Some(SlotStamps {
+        start: false,
+        end: true,
+        ..start(0, 2).unwrap()
+    });
+    assert_eq!(
+        queue.take_stamped(&barriers, end, 3, 1),
+        Got::Recorded { n: 3, list: 1 }
+    );
+    assert_eq!(queue.take(&barriers, 4, 3), Got::Recorded { n: 4, list: 0 });
+    // Holding 4 of slot 0 takes the start that holding 2 last took, once value 3 completed.
+    assert_eq!(queue.take_stamped(&barriers, start(0, 4), 5, 2), Got::Own);
+    assert_eq!(
+        queue.take_stamped(&barriers, start(0, 4), 5, 3),
+        Got::Kept(1)
+    );
+}
+
+/// The holdings of one slot rise: a slot is handed out again only once the command buffer that
+/// held it dropped it, after the completion turn read its timestamps, and the next holding's
+/// lease is above every earlier one's, so a kept command buffer's slot was read before it is
+/// taken again.
+#[test]
+fn a_slot_s_next_holding_has_a_higher_lease() {
+    let pool = Pool::new(vk::QueryPool::null(), SLOTS, PREFIXED);
+    let held = pool.take().unwrap();
+    let other = pool.take().unwrap();
+    assert_ne!(held.first(), other.first());
+    assert!(other.lease() > held.lease());
+    let (first, lease) = (held.first(), held.lease());
+    drop(held);
+    let again = pool.take().unwrap();
+    assert_eq!(again.first(), first);
+    assert!(again.lease() > lease && again.lease() > other.lease());
+}
+
+/// Past [`KEPT`] slots' command buffers of a list, a batch of another slot records its own;
+/// every slot kept is taken again by its next holding.
+#[test]
+fn past_kept_slots_a_batch_records_its_own() {
+    let mut queue = Queue::default();
+    let barriers = list(0);
+    for slot in 0..KEPT as u32 {
+        let got = queue.take_stamped(&barriers, start(2 * slot, 1), 1, 0);
+        assert_eq!(
+            got,
+            Got::Recorded {
+                n: u64::from(slot) + 1,
+                list: 0
+            }
+        );
+    }
+    assert_eq!(
+        queue.take_stamped(&barriers, start(2 * KEPT as u32, 1), 1, 0),
+        Got::Own
+    );
+    for slot in 0..KEPT as u32 {
+        let got = queue.take_stamped(&barriers, start(2 * slot, 2), 2, 1);
+        assert_eq!(got, Got::Kept(u64::from(slot) + 1));
+    }
 }

@@ -1,4 +1,4 @@
-// Owned fixture (WP-OB3, DESIGN D258): control-point and patch-input fetches past their buffers,
+// Owned fixture: control-point and patch-input fetches past their buffers,
 // the control point containment form. A rasterization-disabled post-tessellation vertex function
 // of three control points per triangle patch; every invocation of patch p writes the patch's
 // three control-point words and its patch-input word to out[4p .. 4p + 4] (each store is the same

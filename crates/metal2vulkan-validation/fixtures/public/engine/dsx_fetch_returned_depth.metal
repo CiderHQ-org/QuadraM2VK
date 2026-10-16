@@ -1,4 +1,4 @@
-// Owned fixture (WP-DSX, DESIGN D672 item 13): a fragment function without early fragment tests
+// Owned fixture: a fragment function without early fragment tests
 // that reads its color attachment (`[[color(0)]]`), writes back half of it plus a quarter, and
 // returns the depth its buffer holds (`[[depth(any)]]`). Beside a depth attachment its color store
 // in the interlocked storage form precedes the depth test, which then tests the depth it returns.

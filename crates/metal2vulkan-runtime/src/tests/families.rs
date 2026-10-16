@@ -356,9 +356,9 @@ fn states_follow_their_sources() {
 }
 
 /// Vertex amplification: Apple7's count of 8 is exact on a device with `multiview`, through the
-/// layer output where the device has fewer views; the feature row needs the layer and viewport
-/// index outputs of the variant that draws one amplification at a time, and then waits on
-/// tessellation pipelines drawn so.
+/// layer output or the generated geometry stage where the device has fewer views; the feature row
+/// needs `multiViewport` and the slice and viewport stores of the variant that draws one
+/// amplification at a time, and then waits on tessellation pipelines drawn so.
 #[test]
 fn vertex_amplification_draws_past_the_views_one_at_a_time() {
     for (stem, desc) in committed_descriptions() {
@@ -373,22 +373,28 @@ fn vertex_amplification_draws_past_the_views_one_at_a_time() {
                 Feature::VertexAmplification,
                 Capability::Feature(VkFeature::Multiview),
             )
-        } else if views < 8 && !enabled.has(VkFeature::ShaderOutputLayer) {
-            refused(
+        } else if views < 8
+            && !enabled.has(VkFeature::ShaderOutputLayer)
+            && !enabled.has(VkFeature::GeometryShader)
+        {
+            RowState::Refused(Refusal::Unsupported(Unsupported::needs_any_of(
                 Feature::VertexAmplification,
-                Capability::Feature(VkFeature::ShaderOutputLayer),
-            )
+                vec![
+                    vec![Capability::Feature(VkFeature::ShaderOutputLayer)],
+                    vec![Capability::Feature(VkFeature::GeometryShader)],
+                ],
+            )))
         } else {
             RowState::Exact
         };
         assert_eq!(count, want, "{stem}");
         let row = state(apple7, feature(FeatureRow::VertexAmplification)).unwrap();
-        let outputs = [
-            VkFeature::Multiview,
-            VkFeature::ShaderOutputLayer,
-            VkFeature::ShaderOutputViewportIndex,
-        ];
-        if outputs.iter().all(|&f| enabled.has(f)) {
+        let either = |output| enabled.has(output) || enabled.has(VkFeature::GeometryShader);
+        if enabled.has(VkFeature::Multiview)
+            && enabled.has(VkFeature::MultiViewport)
+            && either(VkFeature::ShaderOutputLayer)
+            && either(VkFeature::ShaderOutputViewportIndex)
+        {
             assert_eq!(row, not_implemented(Feature::VertexAmplification), "{stem}");
         } else {
             assert!(
@@ -720,15 +726,15 @@ fn indirect_command_buffer_rows_name_what_is_still_missing() {
 
 /// Rows built since the audit began are exact or the compile layer's: the render encoder's
 /// memory barriers and per-bind attribute strides are exact on every device, and tessellation
-/// is the compile layer's refusal (a patch of no control-point count, a fragment function's
-/// `[[primitive_id]]` behind one) where the device has `tessellationShader`, as is the render
-/// function pointer row the compute one's.
+/// is the compile layer's refusal (a patch of no control-point count, and with the device's
+/// tessellation stages a fragment function's `[[primitive_id]]` behind one) on every device,
+/// with `tessellationShader` or emulated without it, as is the render function pointer row the
+/// compute one's.
 #[test]
 fn rows_built_since_are_exact_or_the_compile_layer_s() {
     use FeatureRow as F;
     for (stem, desc) in committed_descriptions() {
         let all = all_audits(&stem, &desc);
-        let (enabled, _) = created(&stem, &desc);
         let apple6 = &all[&GpuFamily::Apple6];
         for row in [F::MemoryBarriers, F::DynamicAttributeStride] {
             assert_eq!(
@@ -737,14 +743,7 @@ fn rows_built_since_are_exact_or_the_compile_layer_s() {
                 "{stem} {row:?}"
             );
         }
-        let tessellation = if enabled.has(VkFeature::TessellationShader) {
-            not_implemented(Feature::Tessellation)
-        } else {
-            refused(
-                Feature::Tessellation,
-                Capability::Feature(VkFeature::TessellationShader),
-            )
-        };
+        let tessellation = not_implemented(Feature::Tessellation);
         for row in [F::Tessellation, F::IndirectTessellationArguments] {
             assert_eq!(
                 state(apple6, feature(row)),

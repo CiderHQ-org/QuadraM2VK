@@ -1120,8 +1120,10 @@ pub enum RuntimeGap {
         /// The device's `max_buffer_length`.
         max_buffer_length: u64,
     },
-    /// What indirect command buffers lack of their render commands: a descriptor of mesh draws,
-    /// which the record format does not hold; an execution of a range a draw of the encoder before
+    /// What indirect command buffers lack of their render commands: a command whose mesh draw's
+    /// object function has threadgroup memory arguments, whose lengths (the command's
+    /// `setObjectThreadgroupMemoryLength:atIndex:` or the encoder's) are not measured; an
+    /// execution of a range a draw of the encoder before
     /// it may write, or of commands that need a render pass instance of their own (a fetched
     /// attachment, the shader-side stencil, views, a fragment imageblock, a texture whose shadow
     /// the pass does not hold, or a memoryless attachment the pass backs and reads past its
@@ -1219,7 +1221,10 @@ pub enum RuntimeGap {
     /// multiview, or lacks `drawIndirectFirstInstance`, whose path is a prepass that writes what
     /// the draw needs. The runtime never reads arguments an earlier command may write. An index
     /// bounds pass whose arguments or indices a draw of the encoder wrote since its last memory
-    /// barrier, which Metal does not order before the draw's fetch, is refused too.
+    /// barrier, which Metal does not order before the draw's fetch, is refused too. So is an
+    /// indirect patch draw whose post-tessellation function reads `[[base_instance]]` through the
+    /// device's tessellation stages, which take it from push constants; on a device without
+    /// `tessellationShader` the draw's tessellation scan reads it on the GPU, and none is refused.
     IndirectDrawArguments,
     /// A depth/stencil resolve no Vulkan resolve mode of the device states: a filter or pair of
     /// filters the device's `supportedDepthResolveModes`, `supportedStencilResolveModes` or
@@ -1262,8 +1267,8 @@ pub enum RuntimeGap {
     /// A sparse texture's access counters (`getTextureAccessCounters:...` and
     /// `resetTextureAccessCounters:...` of a blit encoder). Not scheduled (orchestrator,
     /// 2026-10-06): Metal's counts are its texture hardware's units, not a count of accesses,
-    /// nondeterministic for large dispatches and different on an M3 Max and an M4 (AMP sparse
-    /// probe 1), so no exact answer exists, and Vulkan counts nothing of the kind.
+    /// nondeterministic for large dispatches and different on an M3 Max and an M4 (a Metal sparse
+    /// probe on both), so no exact answer exists, and Vulkan counts nothing of the kind.
     TextureAccessCounters,
     /// Fast resource loading: `MTLIOCommandQueue`, its command buffers and file handles. Not
     /// scheduled.
@@ -1378,6 +1383,14 @@ pub enum RuntimeGap {
     /// barrier, which Metal does not order before the draw's fetch, read in place; and an
     /// argument or index range the binding layer cannot bind.
     RestartedStrip,
+    /// An indexed draw (`drawIndexedPrimitives:`) of a pipeline whose fragment function reads
+    /// `[[primitive_id]]` on a device whose fragment stage cannot declare it (neither
+    /// `geometryShader` nor `tessellationShader`), which draws its indices as vertices from 0 in
+    /// the de-indexed form, its vertex function reading the indices in place at their device
+    /// address (`VariantKey::primitive_id_indices`): indices a draw of the encoder wrote since
+    /// its last memory barrier, which Metal does not order before the draw's fetch and the draw
+    /// would read as a copy, and indices without a device address.
+    PrimitiveIdIndices,
     /// A rotated texture (`TextureDescriptor::rotation`) where the runtime does not build what
     /// Metal does: CPU access or a blit of a quarter-turned one whose rows, as those uses address
     /// them (the texture's `height` rows of `width` texels at the plane's `bytesPerRow`), run
@@ -1490,6 +1503,21 @@ pub enum RuntimeGap {
     /// where previously the runtime recorded invalid Vulkan and some drivers hung instead of
     /// failing (the consumer's NVIDIA Xid 32 stall).
     MultisampledBufferCopy,
+    /// What a render pass the device draws in color groups does not build: a pass of more color
+    /// attachments with a texture than the lesser of the device's `maxColorAttachments` and
+    /// `maxFragmentOutputAttachments` (four on a device at Vulkan's floor), or of one at an index
+    /// at or past it, where Metal takes eight, draws each group's colors in a pass of its own
+    /// (`render/color_groups.rs`). Refused there: a render pipeline state whose colors with a
+    /// pixel format are not the pass's colors with a texture (or one the device draws in groups
+    /// in a pass it draws in one), a tile pipeline's state, an execution of render commands in a
+    /// pass of several groups, a depth or stencil the pass loads from a texture without the
+    /// transfer usage its later groups' copy needs, and in a pass of several groups a draw that
+    /// reads what another group writes (a color of another group, its own group's colors or the
+    /// depth and stencil where it draws in a later group too, a resolve texture, the visibility
+    /// result buffer, memory it reaches through a handle table, or a texture over a buffer's
+    /// bytes it may reach through a root table), and a resolve target set on a texture a draw of
+    /// the pass read.
+    ColorAttachmentGroups,
 }
 
 /// The kind of memory that ran out.
@@ -1567,6 +1595,12 @@ pub enum CommandBufferError {
     /// runtime's pool is the device's budget, so nothing is drawn short silently. The first such
     /// draw, as its scan saw it.
     MeshRecordsOverflow(MeshRecordsOverflow),
+    /// An emulated tessellation draw's records (an indirect patch draw's, on a device without
+    /// `tessellationShader`) did not fit the rest of the command buffer's records pool, the one
+    /// emulated mesh draws share: such draws drew nothing. Metal draws them; the runtime's pool is
+    /// the device's budget, so nothing is drawn short silently. The first records fault of the
+    /// command buffer, where it is a tessellation draw's, as its scan saw it.
+    TessellationRecordsOverflow(TessellationRecordsOverflow),
     /// A host step refused a command it recorded from an indirect command buffer's records
     /// (`Degradation::HostReplayedIndirectCommands`): what `commit` refuses where the CPU wrote
     /// the records, such as a command's pipeline state of other color formats than the pass's.
@@ -1792,7 +1826,7 @@ pub enum FailedState {
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MeshRecordsOverflow {
-    /// The draw's order among the command buffer's emulated mesh draws, from 0.
+    /// The draw's order among the command buffer's emulated mesh and tessellation draws, from 0.
     pub draw: u32,
     /// Its object threadgroups (1 for a pipeline without an object function).
     pub object_threadgroups: u32,
@@ -1802,15 +1836,28 @@ pub struct MeshRecordsOverflow {
     pub budget: u64,
 }
 
+/// The first emulated tessellation draw of a command buffer whose records did not fit
+/// ([`CommandBufferError::TessellationRecordsOverflow`]).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TessellationRecordsOverflow {
+    /// The draw's order among the command buffer's emulated mesh and tessellation draws, from 0.
+    pub draw: u32,
+    /// Its records, `patchCount · instanceCount`, saturated at `u32::MAX`.
+    pub records: u32,
+    /// The bytes of the command buffer's records pool, the device's budget.
+    pub budget: u64,
+}
+
 impl CommandBufferError {
     /// Metal's `MTLCommandBufferError` code for this error: `MTLCommandBufferErrorDeviceRemoved`
-    /// (11) for a lost device, `OutOfMemory` (8) for the device's memory, the index pool's and
-    /// the mesh records pool's, and a detached buffer's, `PageFault` (3), and `Internal` (1), also
-    /// for the runtime's refusals (a cubic argument sampler's reach among them, a sampler state
-    /// left out of an argument-sampler listing, a host step's object nothing made, a named use
-    /// rebound before the submission, and a predicated loop past its copies); a command buffer
-    /// committed as failed, the code the program chose; a pipeline's failed making, its cause's; a
-    /// failure the driver relayed, Metal's.
+    /// (11) for a lost device, `OutOfMemory` (8) for the device's memory, the index pool's and the
+    /// records pool's (mesh and tessellation), and a detached buffer's, `PageFault` (3), and
+    /// `Internal` (1), also for the runtime's refusals (a cubic argument sampler's reach among
+    /// them, a sampler state left out of an argument-sampler listing, a host step's object nothing
+    /// made, a named use rebound before the submission, and a predicated loop past its copies); a
+    /// command buffer committed as failed, the code the program chose; a pipeline's failed making,
+    /// its cause's; a failure the driver relayed, Metal's.
     ///
     /// The code is Metal's answer only where [`origin`](Self::origin) is
     /// [`FailureOrigin::Metal`]. A [`FailureOrigin::Runtime`] error's code is the nearest of
@@ -1822,6 +1869,7 @@ impl CommandBufferError {
             CommandBufferError::OutOfMemory
             | CommandBufferError::IndexPoolOverflow
             | CommandBufferError::MeshRecordsOverflow(_)
+            | CommandBufferError::TessellationRecordsOverflow(_)
             | CommandBufferError::DetachedBacking => 8,
             CommandBufferError::Internal(_)
             | CommandBufferError::SparseHeapSplit
@@ -1868,6 +1916,7 @@ impl CommandBufferError {
             | CommandBufferError::CubicArgumentSampler
             | CommandBufferError::UnlistedArgumentSampler
             | CommandBufferError::MeshRecordsOverflow(_)
+            | CommandBufferError::TessellationRecordsOverflow(_)
             | CommandBufferError::Refused
             | CommandBufferError::PipelineCreation(_)
             | CommandBufferError::HostStepObject(_)

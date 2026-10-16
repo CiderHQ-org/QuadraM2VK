@@ -1375,6 +1375,7 @@ impl Ser<'_> {
             ExecModel::TessellationControl => crate::spv::ExecutionModel::TessellationControl,
             ExecModel::TaskEXT => crate::spv::ExecutionModel::TaskEXT,
             ExecModel::MeshEXT => crate::spv::ExecutionModel::MeshEXT,
+            ExecModel::Geometry => crate::spv::ExecutionModel::Geometry,
         };
         let f = self.ids.func(e.func)?;
         let mut ops = vec![model as u32, f];
@@ -1430,6 +1431,11 @@ impl Ser<'_> {
             ExecMode::OutputPoints => plain(w, M::OutputPoints, &[]),
             ExecMode::OutputLines => plain(w, M::OutputLinesEXT, &[]),
             ExecMode::OutputTriangles => plain(w, M::OutputTrianglesEXT, &[]),
+            ExecMode::InputPoints => plain(w, M::InputPoints, &[]),
+            ExecMode::InputLines => plain(w, M::InputLines, &[]),
+            ExecMode::OutputLineStrip => plain(w, M::OutputLineStrip, &[]),
+            ExecMode::OutputTriangleStrip => plain(w, M::OutputTriangleStrip, &[]),
+            ExecMode::Invocations { n } => plain(w, M::Invocations, &[n]),
         }
     }
 
@@ -1528,7 +1534,8 @@ impl Ser<'_> {
                                 (
                                     ExecModel::Vertex
                                         | ExecModel::TessellationEvaluation
-                                        | ExecModel::MeshEXT,
+                                        | ExecModel::MeshEXT
+                                        | ExecModel::Geometry,
                                     IoDir::Output
                                 ) | (ExecModel::Fragment, IoDir::Input)
                             );
@@ -2504,6 +2511,8 @@ impl Ser<'_> {
                 vertices,
                 primitives,
             } => w.inst(Op::SetMeshOutputsEXT, &[v(*vertices)?, v(*primitives)?]),
+            Inst::EmitVertex => w.inst(Op::EmitVertex, &[]),
+            Inst::EndPrimitive => w.inst(Op::EndPrimitive, &[]),
             Inst::RayQuery(op) => {
                 let o = match op {
                     RayQueryInst::Initialize { .. } | RayQueryInst::Confirm { .. } => {

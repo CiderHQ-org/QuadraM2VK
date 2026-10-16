@@ -249,8 +249,9 @@ pub enum RuntimeFact {
     /// does not write the attachment); a pipeline of another mask is `NeedsInput(FramebufferFetch)`
     /// too. `blend`: the blend the function computes in the shader, from the texel it reads first,
     /// for an extended-range attachment it writes under blending, which the function then need not
-    /// read; a pipeline of another blend there is `NeedsInput(FramebufferFetch)` too. `rounded`:
-    /// that blend is computed without fast math, each product rounded to `half` before the sum
+    /// read, or a 16-bit float one (Metal's blend in the output's arithmetic); a pipeline of another
+    /// blend there is `NeedsInput(FramebufferFetch)` too. `rounded`: that blend is computed
+    /// without fast math, each product rounded before the sum
     /// (`lower::arith::extended_range::blend::BlendMath::Rounded`), whose model holds blends the
     /// fast one refuses; link checks the blend under that math.
     InterlockedFramebufferFetch {
@@ -383,13 +384,13 @@ pub enum RuntimeFact {
     TileImageblock { data_size: u32, alignment: u32 },
     /// The vertex function was compiled under `VariantKey::amplification_draws`
     /// (`LoweringInputs::amplification_draws` of these fields): its pipeline draws each vertex
-    /// amplification as a draw of its own, amplification-major as Metal renders them (AMP Metal
-    /// probe 1), and reads the amplification and its view mapping's offsets from
-    /// `PushField::AmplificationId`, `AmplificationLayerOffset` and
-    /// `AmplificationViewportOffset`, which the binder writes before each of those draws. With
-    /// `layered` it writes `Layer` (the pass has at least two layers), and with `viewports` it
-    /// writes `ViewportIndex` where it writes no viewport index of its own (a mapping offsets the
-    /// viewport). Its plans state the variant the shape's amplification asks for.
+    /// amplification as a draw of its own, amplification-major as Metal renders them (a Metal probe
+    /// on the M3 Max and an M4), and reads the amplification and its view mapping's offsets from
+    /// `PushField::AmplificationId`, `AmplificationLayerOffset` and `AmplificationViewportOffset`,
+    /// which the binder writes before each of those draws. With `layered` it writes `Layer` (the
+    /// pass has at least two layers), and with `viewports` it writes `ViewportIndex` where it
+    /// writes no viewport index of its own (a mapping offsets the viewport). Its plans state the
+    /// variant the shape's amplification asks for.
     AmplificationDraws { layered: bool, viewports: bool },
     /// The vertex function was compiled under `VariantKey::viewport_compensation`
     /// (`LoweringInputs::viewport_compensation` of `depth`): it negates its position's `x` and,
@@ -698,6 +699,56 @@ pub enum RuntimeFact {
     /// no `PrecisionNote::DeviceNanEncoding` for these writes: the consumer announces it at a
     /// draw or dispatch whose heap holds such a texture.
     HeapHalfTexelWrites { stage: Stage, packed: bool },
+    /// The fragment stage writes each depth of a `Depth16Unorm` attachment as Metal's code
+    /// (`LoweringInputs::depth16_codes`), so the device stores Metal's codes without its own
+    /// conversion deciding them. Where `biased`, it stores the depth Metal stores for each fragment,
+    /// its depth bias included: it reads the draw's bias from `PushField::DepthBias`, which the
+    /// binder writes from `BindState::depth_bias`, and adds it to `FragCoord.z` itself, so the
+    /// consumer records the draw's Vulkan depth bias as zero. Otherwise the function returns its
+    /// own depth, which Metal does not bias.
+    Depth16Codes { biased: bool },
+    /// The render pipeline was compiled under `VariantKey::depth16_pass` holding `depth16`: for a
+    /// render pass whose depth is (`depth16`) or is not `Depth16Unorm`, where its own depth format
+    /// says otherwise, so its fragment stage takes Metal's 16-bit codes by the pass's depth
+    /// (`LoweringInputs::depth16_codes`). Its plans state the variant the shape asks for
+    /// (`BindShape::depth16_pass`).
+    Depth16Pass { depth16: bool },
+    /// The render pipeline was compiled under `VariantKey::depth16_biased`: for a draw that biases
+    /// a `Depth16Unorm` depth, on a profile whose unbiased depths the device stores as Metal's
+    /// codes but not its biased ones (`DriverDeviation::MetalDepth16Stores` without
+    /// `DriverDeviation::MetalDepth16BiasedStores`), so its fragment stage adds the bias and
+    /// writes Metal's code itself (`LoweringInputs::depth16_codes`). Its plans state the variant
+    /// the shape asks for (`BindShape::depth16_biased`).
+    Depth16Biased,
+    /// The render pipeline was compiled under `VariantKey::depth16_bias_raises` holding `raises`:
+    /// for a draw whose bias of a `Depth16Unorm` depth the runtime proved never lowers the depth
+    /// (`raises`) or never raises it, so a fragment stage that adds the bias itself declares that
+    /// side (`LoweringInputs::depth16_bias_raises`). Its plans state the variant the shape asks for
+    /// (`BindShape::depth16_bias_raises`).
+    Depth16BiasSide { raises: bool },
+    /// The render pipeline draws through synthesized geometry stages, one per topology class, of
+    /// which a draw runs its class's (`RenderPipeline::runs_stage`): its fragment function reads
+    /// `[[barycentric_coord]]` on a device without `fragmentShaderBarycentric` (`weights`), or its
+    /// vertex function selects its primitive's render target slice (`layer`) or viewport
+    /// (`viewport`) on a device that cannot store `Layer` or `ViewportIndex` from a vertex
+    /// function (`pipeline::link::geometry`). Each draw runs a stage Metal's draw does not, at the
+    /// stage's cost, with Metal's answer; the consumer announces it. Nothing binds it.
+    SynthesizedGeometry {
+        weights: bool,
+        layer: bool,
+        viewport: bool,
+    },
+    /// An object function's `[[threadgroup(n)]]` arguments, whose lengths the render encoder sets
+    /// (`setObjectThreadgroupMemoryLength:atIndex:`, the object stage's
+    /// `StageTable::threadgroup_lengths`), each a `ThreadgroupMemoryLength`: the static part of
+    /// its threadgroup arena (`memory::arena::TgShape::static_bytes`) and its payload's bytes
+    /// (`lower::mesh::payload_extent`), beside which the binder places the lengths, each rounded
+    /// up to 16, and checks the total against the object stage's workgroup memory limit
+    /// (`lower::mesh::stage_workgroup_limit`).
+    ObjectThreadgroupArena {
+        static_bytes: u32,
+        payload: Option<u32>,
+    },
 }
 
 /// What one compile made of a slot of a `RuntimeFact::UniformViewRange`.

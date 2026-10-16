@@ -1,4 +1,4 @@
-// Owned fixture (WP-ICBV, DESIGN D336): the compute template of commands whose imageblock size a
+// Owned fixture: the compute template of commands whose imageblock size a
 // kernel encodes. Every thread stages a mark of its position in its threadgroup in its own cell of
 // the explicit imageblock, then, after the imageblock barrier, reads its right-hand neighbour's
 // (wrapping at the threadgroup's width, so only cells the threadgroup wrote are read, whatever

@@ -198,14 +198,14 @@ impl List for ReviewedList {
                 .ok_or_else(|| at("not a gap outcome".into()))?;
             if let Some(scope) = OutOfScope::of_recorded(&entry.outcome, &entry.key) {
                 return Err(at(format!(
-                    "{} is out of scope for the launch (DESIGN D285): its rows are reported apart, never listed",
+                    "{} is out of scope for the launch: its rows are reported apart, never listed",
                     scope.as_str()
                 )));
             }
             match class {
                 GapClass::NeedsInput => {
                     return Err(at(
-                        "needs_input rows are counted apart (U10), never listed".into()
+                        "needs_input rows are counted apart, never listed".into()
                     ))
                 }
                 GapClass::Defect => {
@@ -297,7 +297,7 @@ mod tests {
             new_census: "1".repeat(64),
             old_l3: "2".repeat(64),
             review: Review {
-                evidence: vec!["DESIGN D151.4".into()],
+                evidence: vec!["a device probe".into()],
                 note: "reviewed".into(),
                 sign_off: SignOff::AwaitingUser {
                     decision: "U11".into(),

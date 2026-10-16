@@ -45,6 +45,7 @@ fn example() -> AuthoredCase {
         }),
         draw: None,
         tessellation: None,
+        mesh_draw: None,
         output: OutputSelection::Buffer {
             binding: 0,
             offset: 0,
@@ -60,6 +61,7 @@ fn example() -> AuthoredCase {
         raster_sample_count: None,
         public_source: None,
         no_effect: None,
+        creation_bound: None,
     }
 }
 
@@ -68,6 +70,7 @@ mod depth_stencil_state;
 mod function_tables;
 mod identity;
 mod indirect_commands;
+mod mesh_draws;
 mod mips;
 mod out_of_bounds;
 mod raster_sample_count;

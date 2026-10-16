@@ -21,13 +21,14 @@
 //!   by the host's signal of the event, which wakes the scheduler's thread to submit it, every
 //!   [`SIDE_PACE`]. The committing thread's time off the CPU in `commit` (its wall time less its
 //!   CPU time: waits for a lock, and for the CPU), per commit and per frame, the commits a frame
-//!   that were off it over [`WAITED_US`], and the commits a frame of either thread handed off to
-//!   another's pass (`WorkCounts::commits_handed_off`).
+//!   that were off it over [`WAITED_US`], and the commits a frame of either thread handed to the
+//!   scheduler's thread (`WorkCounts::commits_handed_off`: every commit).
 //!
 //! For the first two: the runtime's `vkQueueSubmit` and `vkQueueBindSparse` calls and the `VkCommandBuffer`s
 //! they submitted per command buffer (`WorkCounts::queue_submissions`,
-//! `command_buffers_submitted`), the committing thread's CPU time in `commit` (which submits
-//! what is ready then, `scheduler`), and the process's CPU time per command buffer. Where the i915
+//! `command_buffers_submitted`), the committing thread's CPU time in `commit` (which hands the
+//! batches to the scheduler's thread, which submits them, `scheduler`), and the process's CPU time
+//! per command buffer. Where the i915
 //! counter (`scripts/i915-execbuffers/counter.c`) is preloaded: the kernel's execbuffers per
 //! command buffer, the buffer objects each lists, by origin (host imports, the runtime's 64-MiB
 //! blocks, the rest: ANV's own and the runtime's other blocks), and the microseconds each spent
@@ -93,7 +94,8 @@ pub(super) struct Execbuffers {
     pub(super) nanos: u64,
     /// The listed objects that were host imports (userptrs).
     pub(super) userptr: u64,
-    prime: u64,
+    /// The listed objects that were dma-buf imports.
+    pub(super) prime: u64,
     block64: u64,
     created_other: u64,
     unknown: u64,
@@ -314,7 +316,7 @@ fn frames(lane: &mut Lane) -> Vec<Frame> {
 }
 
 /// The committing thread's time off the CPU in `commit` over `frames`, printed as `what`, with
-/// the commits of any thread `handed_off` to another's pass meanwhile.
+/// the commits of any thread `handed_off` to the scheduler's thread meanwhile.
 fn print_off_cpu(lane: &Lane, what: &str, frames: &[Frame], handed_off: u64) {
     let commits = frames.iter().flat_map(|frame| &frame.commits);
     let off = |&(cpu, wall): &(f64, f64)| (wall - cpu).max(0.0);
@@ -335,7 +337,7 @@ fn print_off_cpu(lane: &Lane, what: &str, frames: &[Frame], handed_off: u64) {
     );
 }
 
-/// The commits handed off to another thread's pass so far (`WorkCounts::commits_handed_off`).
+/// The commits handed to the scheduler's thread so far (`WorkCounts::commits_handed_off`).
 fn handed_off(lane: &Lane) -> u64 {
     lane.work.device.work_counts().commits_handed_off
 }

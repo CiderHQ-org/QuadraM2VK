@@ -1,4 +1,4 @@
-// Owned fixture (WP-DFL, docs/TODO.md 2.2 to 2.5): `dfl_float_denormals`' program under the
+// Owned fixture: `dfl_float_denormals`' program under the
 // default fast math, its flagged state: how Metal reads `float` denormals in vector arithmetic,
 // comparisons and functions, and in operations whose operand is another operation's result, where
 // the calls are the `fast_` ones and the arithmetic carries every flag. Thread `i` reads (a, b, c,

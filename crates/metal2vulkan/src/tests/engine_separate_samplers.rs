@@ -291,6 +291,7 @@ fn the_binder_writes_a_runtime_separate_sampler_and_its_textures() {
                 slot: s0,
                 compare: false,
                 integer: false,
+                cube_gradient: false,
                 opaque_black: crate::metal::sampler::OpaqueBlackBorder::Stated,
             },
         ),

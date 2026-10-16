@@ -1,7 +1,7 @@
-// Owned fixture (WP-FMX2, DESIGN D279): which multiply-add pairs Metal fuses without fast math
-// (`-fno-fast-math`), where an operation carries only the flags a `#pragma clang fp` grants. WP-FMX's
-// probe (D253.2) measured `llvm.fmuladd`, the written `a * b + c`, which Metal rounds once. Each
-// shape k reads its own operands `v = x + 8k` (`a, b, c, d = v[0 .. 3]`):
+// Owned fixture: which multiply-add pairs Metal fuses without fast math (`-fno-fast-math`), where
+// an operation carries only the flags a `#pragma clang fp` grants. A Metal probe measured
+// `llvm.fmuladd`, the written `a * b + c`, which Metal rounds once. Each shape k reads its own
+// operands `v = x + 8k` (`a, b, c, d = v[0 .. 3]`):
 //
 //   k  word   shape
 //   0  0      p = a * b; p + c                     no flags (two statements)

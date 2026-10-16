@@ -1,7 +1,7 @@
-// Owned fixture (WP-TRH, DESIGN D250): a thread writes a texel of a read_write 2D texture and of a
+// Owned fixture: a thread writes a texel of a read_write 2D texture and of a
 // read_write texture buffer and then reads a texel of each, where a thread writing out of bounds
 // reads back the location it wrote. Metal ignores the out-of-bounds write and reads zero there
-// (MSL 4.1 sections 2.9.1 and 6.13; measured, D236.2); Vulkan's robustness may return the value
+// (MSL 4.1 sections 2.9.1 and 6.13; measured); Vulkan's robustness may return the value
 // the thread stored unless the load is volatile. Eight threads; thread t writes 0xB0000000 | t to
 // img at texel w = idx[t] (x in the low 16 bits, y in the high), reads img at texel idx[8 + t]
 // into out[2t], writes 0xC0000000 | t to tb at element idx[16 + t], and reads tb at element

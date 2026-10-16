@@ -386,8 +386,8 @@ fn multisampled_fragments_read_the_pixel_center_or_are_refused() {
 /// samples reads them through `InterpolateAtOffset` on every committed profile with interpolation
 /// functions and a centered offset, requiring the property, and as they are on each MoltenVK
 /// capture ([`MOLTENVK_CAPTURES`]), whose driver reads them at the pixel center itself, requiring
-/// `VkProperty::MetalCenterVaryings`; at one sample nowhere. (`roadmap-2022`, `vk12-bare`, and
-/// `vk12-floor` lack the pipeline's depth format.) The three lavapipe profiles refuse it at four
+/// `VkProperty::MetalCenterVaryings`; at one sample nowhere. (`roadmap-2022` and `vk12-floor` lack
+/// the pipeline's depth format.) The three lavapipe profiles refuse it at four
 /// samples: the function reads `[[sample_mask]]`, which lavapipe splits.
 #[test]
 fn a_pixel_rate_center_varying_reads_the_pixel_center_where_the_device_has_the_form() {

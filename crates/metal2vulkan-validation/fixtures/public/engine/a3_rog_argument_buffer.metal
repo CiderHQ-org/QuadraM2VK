@@ -1,4 +1,4 @@
-// Owned fixture (WP-A3, DESIGN D86.1, D128): a raster order group on an argument-buffer member.
+// Owned fixture: a raster order group on an argument-buffer member.
 // The same read-modify-write as a3_rog_buffer_rmw (v -> 3v + 1 on the word of the fragment's
 // pixel, 8 words per row), through a device pointer held in an argument buffer whose member
 // carries raster_order_group(0). Loop-free.

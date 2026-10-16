@@ -1,4 +1,4 @@
-// Owned fixture (WP-RTL, DESIGN D311 item 5, docs/TODO.md 8.27): the bindings whose reflection no
+// Owned fixture: the bindings whose reflection no
 // earlier probe measured: an explicit imageblock argument of a tile function and of a compute
 // kernel, a fragment function's imageblock data (read only: Metal rejects raster-order-group
 // members in a fragment function's output), render pipeline states (one and an array of two)

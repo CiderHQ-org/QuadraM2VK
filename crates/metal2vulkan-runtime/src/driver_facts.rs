@@ -23,7 +23,7 @@
 //! message from its sink ([`expecting`], [`withholds`]) and counts it
 //! (`WorkCounts::driver_diagnostics_withheld`).
 
-use crate::{DebugMessage, MessageKind, MessageSeverity};
+use crate::{DebugMessage, MessageKind, MessageSeverity, MessageSink};
 use metal2vulkan::device::DriverDiagnostic;
 
 impl super::Device {
@@ -41,10 +41,15 @@ impl super::Device {
     /// Hand the informational message `text`, id name `id_name`, to the device's sink, else to
     /// stderr: what the runtime says that degrades nothing (the pipeline creation log).
     pub(crate) fn inform(&self, id_name: &str, text: String) {
-        match self.shared().instance.sink() {
-            Some(sink) => sink.deliver(&informational(id_name, text)),
-            None => eprintln!("{text}"),
-        }
+        inform_through(self.shared().instance.sink(), id_name, text);
+    }
+}
+
+/// [`Device::inform`] through `sink`, else on stderr, where the device is ending.
+pub(crate) fn inform_through(sink: Option<&MessageSink>, id_name: &str, text: String) {
+    match sink {
+        Some(sink) => sink.deliver(&informational(id_name, text)),
+        None => eprintln!("{text}"),
     }
 }
 

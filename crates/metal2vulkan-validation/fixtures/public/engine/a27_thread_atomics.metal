@@ -1,6 +1,6 @@
 // metal-std: metal4.1
 // metal-macos-min: 27.0
-// Owned fixture (WP-A27, DESIGN D301): MSL 4.1's atomics on thread memory, which only AIR 2.9
+// Owned fixture: MSL 4.1's atomics on thread memory, which only AIR 2.9
 // (deployment target macOS 27) spells, as `air.atomic.private.*`. Each thread runs every
 // operation on its own `thread` atomics of `uint`, `int`, `float`, and `bool`, with the
 // non-explicit (`seq_cst`, every memory) and explicit orders and memory flags, and records each
@@ -16,7 +16,7 @@
 //
 // The fixture holds no lifetime marker: LLVM 22 and later read a marker in a one-argument form, so
 // a fixture holding one may decode to other type numbers under each `llvm-as` major a gate
-// assembles it with (DESIGN D306). The atomics and the compare-exchanges' `expected` words are
+// assembles it with. The atomics and the compare-exchanges' `expected` words are
 // declared ahead of the switch's only label (on t >> 31, zero for every thread), so every path into
 // the switch bypasses their declarations and Clang emits no marker for them (as in
 // ob2_sized_array.metal). The header's compare-exchange copies `*expected` into a local of its own,

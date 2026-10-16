@@ -329,7 +329,7 @@ pub(super) fn plan(
     let constant = |offset: &Option<Offset>| match offset {
         None => Some(None),
         Some(Offset::Const(k)) => Some(Some(k.clone())),
-        Some(Offset::Dynamic(_)) => None,
+        Some(Offset::Dynamic(..)) => None,
     };
     let (offset, level) = match op {
         SampleOp::Gather { offset, .. } => match constant(offset) {
@@ -427,7 +427,7 @@ pub(super) fn plan_word(op: &SampleOp, address: FetchAddress) -> Option<Fetch> {
     let offset = match offset {
         None => None,
         Some(Offset::Const(k)) => Some(k.clone()),
-        Some(Offset::Dynamic(_)) => return None,
+        Some(Offset::Dynamic(..)) => return None,
     };
     Some(Fetch {
         address,

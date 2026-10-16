@@ -1,4 +1,4 @@
-// sum_regroup: Metal's regrouping of a fast-math sum (DESIGN D786, `lower::arith::reassoc`). A
+// sum_regroup: Metal's regrouping of a fast-math sum (`lower::arith::reassoc`). A
 // gradient filter's seed pass, written from a structural description of its shape (no guest code
 // or constants): each fragment reads seven constant-buffer floats (an offset, the bounds and a
 // step), samples one channel of the nine nearest texels around its pixel, keeps a neighbour only

@@ -1,6 +1,6 @@
-// Owned fixture (WP-A4, DESIGN D213): an array of textures indexed dynamically
+// Owned fixture: an array of textures indexed dynamically
 // (`access.handle.array_load.clamped`: the index into the sized handle array is clamped under
-// isolation, D10). Thread g reads texel (g >> 2, 0) of texture g & 3: out[g] = ts[g & 3](g >> 2).
+// isolation). Thread g reads texel (g >> 2, 0) of texture g & 3: out[g] = ts[g & 3](g >> 2).
 // Loop-free.
 #include <metal_stdlib>
 using namespace metal;

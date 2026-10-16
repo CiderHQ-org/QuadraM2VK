@@ -1,5 +1,5 @@
-// Owned fixture (WP-A4, DESIGN D213): an argument-buffer texture sampled through constexpr
-// samplers (`sampler.heap.sample`, `sampler.heap.pixel_fetch`, D162): a normalized nearest sample
+// Owned fixture: an argument-buffer texture sampled through constexpr
+// samplers (`sampler.heap.sample`, `sampler.heap.pixel_fetch`): a normalized nearest sample
 // and a nearest pixel sample (an exact fetch), each at the centre of texel (x, y) of a 4 x 2
 // texture, so both read that texel: target(x, y) = 3 source(x, y). Loop-free.
 #include <metal_stdlib>

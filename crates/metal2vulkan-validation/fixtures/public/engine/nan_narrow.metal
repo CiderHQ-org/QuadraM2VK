@@ -1,4 +1,4 @@
-// Owned fixture (NaN model, DESIGN D293): which `half` Metal's narrowing of a float NaN answers,
+// Owned fixture (NaN model): which `half` Metal's narrowing of a float NaN answers,
 // and which NaN its `half` arithmetic answers. Lane `i` reads a float a, halves ha and hb (the
 // low and high halves of `in[i].y`), and a half hc, and writes four words to `out[i]`: half(a)
 // (`fptrunc`), float(half(a)), ha + hb | ha * hb << 16, and fma(ha, hb, hc) | -ha << 16 (`fneg`).

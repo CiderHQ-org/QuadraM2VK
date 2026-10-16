@@ -85,6 +85,8 @@ pub struct ModuleBuilder {
     /// Every storage buffer and storage image resource is decorated `Coherent`
     /// (`ModuleBuilder::coherent_resources`).
     coherent: bool,
+    /// Storage-image resources decorated `Coherent` one by one (`ModuleBuilder::coherent`).
+    coherent_images: BTreeSet<GlobalId>,
     /// Storage-image resources decorated `Volatile` (`ModuleBuilder::volatile`).
     volatile: BTreeSet<GlobalId>,
     /// The enabling capability lowering chose for a builtin whose registry offers alternatives
@@ -121,6 +123,9 @@ pub struct ModuleBuilder {
     pub(super) inserts: HashMap<Value, (Value, Value, u32)>,
     /// Every `OpUndef` result (`FunctionBuilder::is_undef`).
     pub(super) undefs: HashSet<Value>,
+    /// The dynamic texel offsets the lowering asked to be taken as constants, by offset value
+    /// (`FunctionBuilder::arm_offset`).
+    pub(super) offset_arms: HashMap<Value, crate::spirv::builder::ops::image::ArmedOffset>,
     /// The equal values the lowering offered (`FunctionBuilder::offer`), in offer order.
     pub(super) offers: Vec<Offer>,
     /// The offer groups handed out (`FunctionBuilder::offer_group`).
@@ -788,13 +793,16 @@ impl ModuleBuilder {
         Ok(true)
     }
 
-    /// Decorate builtin output `g` `Invariant`: its value is computed identically wherever the
-    /// same expression computes it (Metal's `[[invariant]]` position). Only the `Position` output
-    /// can be invariant.
+    /// Decorate builtin output `g` `Invariant`: SPIR-V's "expressions computing its value be
+    /// computed invariantly with respect to other shaders computing the same expressions". Only
+    /// the `Position` output (Metal's `[[invariant]]` position) and a fragment's per-fragment
+    /// outputs, `FragDepth`, `SampleMask` and `FragStencilRefEXT` (the variants of one render
+    /// pipeline's color groups, `LoweringInputs::color_group`), can be invariant.
     pub fn invariant(&mut self, g: GlobalId) -> BResult<()> {
+        use crate::spv::BuiltIn as B;
         match self.global(g)?.kind {
             GlobalKind::BuiltIn {
-                builtin: crate::spv::BuiltIn::Position,
+                builtin: B::Position | B::FragDepth | B::SampleMask | B::FragStencilRefEXT,
                 dir: IoDir::Output,
             } => {
                 self.invariant.insert(g);
@@ -824,6 +832,31 @@ impl ModuleBuilder {
     /// ([`ModuleBuilder::finalize`]); its accesses carry the per-access operands instead.
     pub fn coherent_resources(&mut self) {
         self.coherent = true;
+    }
+
+    /// Decorate storage-image resource `g` `Coherent`: under the `GLSL450` memory model each access
+    /// to its texels is made available and visible at device scope, as
+    /// [`coherent_resources`](ModuleBuilder::coherent_resources) makes every shared resource's,
+    /// for one image whose accesses an ordered fragment-interlock critical section orders while
+    /// the module's other resources keep plain accesses. Only a `UniformConstant` resource whose
+    /// type is a storage image can be; the Vulkan memory model bans the decoration
+    /// ([`ModuleBuilder::finalize`]).
+    pub fn coherent(&mut self, g: GlobalId) -> BResult<()> {
+        let gv = self.global(g)?;
+        let storage = gv.class == StorageClass::UniformConstant
+            && matches!(gv.kind, GlobalKind::Resource(_))
+            && matches!(
+                self.types.get(gv.pointee)?,
+                Type::Image(ImageType {
+                    usage: ImageUsage::Storage,
+                    ..
+                })
+            );
+        if !storage {
+            return Err(BuildError::Global(GlobalRule::CoherentTarget));
+        }
+        self.coherent_images.insert(g);
+        Ok(())
     }
 
     /// Decorate storage-image resource `g` `Volatile`: under the `GLSL450` memory model every
@@ -883,8 +916,9 @@ impl ModuleBuilder {
     /// Declare builtin `b` in direction `dir` with data type `ty`. Declaring the same builtin and
     /// direction again returns the first variable. A mesh entry's outputs are arrays of the
     /// builtin's type, one element per vertex or primitive; a mesh-only builtin
-    /// (`CullPrimitiveEXT`, the primitive indices) exists only so. Which model may declare which
-    /// form is the verifier's.
+    /// (`CullPrimitiveEXT`, the primitive indices) exists only so. A geometry entry's per-vertex
+    /// inputs are arrays of the builtin's type, one element per vertex of its input primitive.
+    /// Which model may declare which form is the verifier's.
     pub fn builtin(&mut self, b: crate::spv::BuiltIn, dir: IoDir, ty: TypeId) -> BResult<GlobalId> {
         let (dirs, shape) =
             builtin_contract(b).ok_or(BuildError::Global(GlobalRule::UnsupportedBuiltIn(b)))?;
@@ -899,8 +933,8 @@ impl ModuleBuilder {
                 Err(BuildError::Global(GlobalRule::BuiltInType(b)))
             };
         }
-        let arrayed = dir == IoDir::Output
-            && mesh_arrayed(b)
+        let arrayed = ((dir == IoDir::Output && mesh_arrayed(b))
+            || (dir == IoDir::Input && geometry_per_vertex(b)))
             && match *self.types.get(ty)? {
                 Type::Array {
                     elem, stride: None, ..
@@ -1100,8 +1134,15 @@ impl ModuleBuilder {
                         return err(EntryRule::LocalSize);
                     }
                 }
-                ExecMode::OutputVertices { n } if !mesh && (*n == 0 || *n > 32) => {
+                ExecMode::OutputVertices { n }
+                    if model == ExecModel::TessellationControl && (*n == 0 || *n > 32) =>
+                {
                     return err(EntryRule::TessellationModes);
+                }
+                ExecMode::OutputVertices { n: 0 } | ExecMode::Invocations { n: 0 }
+                    if model == ExecModel::Geometry =>
+                {
+                    return err(EntryRule::GeometryModes);
                 }
                 ExecMode::OutputVertices { n: 0 } | ExecMode::OutputPrimitives { n: 0 } => {
                     return err(EntryRule::MeshModes);
@@ -1139,6 +1180,26 @@ impl ModuleBuilder {
                 }));
         if !mesh_ok {
             return err(EntryRule::MeshModes);
+        }
+        // A geometry entry states its input and output primitives and the most vertices it emits.
+        let geometry_ok = model != ExecModel::Geometry
+            || (patch_size
+                && modes.iter().any(|m| {
+                    matches!(
+                        m,
+                        ExecMode::InputPoints | ExecMode::InputLines | ExecMode::Triangles
+                    )
+                })
+                && modes.iter().any(|m| {
+                    matches!(
+                        m,
+                        ExecMode::OutputPoints
+                            | ExecMode::OutputLineStrip
+                            | ExecMode::OutputTriangleStrip
+                    )
+                }));
+        if !geometry_ok {
+            return err(EntryRule::GeometryModes);
         }
         let has_local_size = has_local_size || self.consts.workgroup_size_const().is_some();
         let workgroups = matches!(
@@ -1231,14 +1292,15 @@ impl ModuleBuilder {
         if !self.volatile.is_empty() && vulkan {
             return Err(BuildError::Global(GlobalRule::VolatileTarget));
         }
-        if self.coherent && vulkan {
+        if (self.coherent || !self.coherent_images.is_empty()) && vulkan {
             return Err(BuildError::Global(GlobalRule::CoherentTarget));
         }
-        let coherent = if self.coherent {
+        let mut coherent = if self.coherent {
             shared_resources(&self.types, &self.globals)?
         } else {
             BTreeSet::new()
         };
+        coherent.extend(self.coherent_images);
         Ok(TypedModule {
             types: self.types,
             consts: self.consts,
@@ -1319,8 +1381,10 @@ fn builtin_contract(b: crate::spv::BuiltIn) -> Option<(&'static [IoDir], BuiltIn
         B::TessLevelOuter | B::TessLevelInner => (OUT, BuiltInShape::F32Array),
         B::PointCoord | B::SamplePosition => (IN, BuiltInShape::Vec(2)),
         B::FrontFacing | B::HelperInvocation => (IN, BuiltInShape::Bool),
-        B::Position => (OUT, BuiltInShape::Vec(4)),
-        B::PointSize | B::FragDepth => (OUT, BuiltInShape::F32),
+        // A geometry entry's per-vertex inputs, as well as outputs.
+        B::Position => (BOTH, BuiltInShape::Vec(4)),
+        B::PointSize => (BOTH, BuiltInShape::F32),
+        B::FragDepth => (OUT, BuiltInShape::F32),
         B::FragStencilRefEXT => (OUT, BuiltInShape::Int32),
         B::Layer | B::ViewportIndex => (BOTH, BuiltInShape::Int32),
         B::ClipDistance | B::CullDistance => (BOTH, BuiltInShape::F32Array),
@@ -1333,6 +1397,16 @@ fn builtin_contract(b: crate::spv::BuiltIn) -> Option<(&'static [IoDir], BuiltIn
         B::CullPrimitiveEXT => (OUT, BuiltInShape::Bool),
         _ => return None,
     })
+}
+
+/// Whether a geometry entry declares builtin input `b` as an array, one element per vertex of its
+/// input primitive (Vulkan's `gl_in`).
+pub(crate) fn geometry_per_vertex(b: crate::spv::BuiltIn) -> bool {
+    use crate::spv::BuiltIn as B;
+    matches!(
+        b,
+        B::Position | B::PointSize | B::ClipDistance | B::CullDistance
+    )
 }
 
 /// Whether a mesh entry declares builtin output `b` as an array, one element per vertex or
@@ -1387,6 +1461,8 @@ fn mode_contract(m: ExecMode) -> (u8, Option<u8>, &'static [ExecModel]) {
     const WORKGROUPS: &[ExecModel] =
         &[ExecModel::GLCompute, ExecModel::TaskEXT, ExecModel::MeshEXT];
     const MESH: &[ExecModel] = &[ExecModel::MeshEXT];
+    const GEOMETRY: &[ExecModel] = &[ExecModel::Geometry];
+    const MESH_OR_GEOMETRY: &[ExecModel] = &[ExecModel::MeshEXT, ExecModel::Geometry];
     const ALL: &[ExecModel] = &[
         ExecModel::Vertex,
         ExecModel::Fragment,
@@ -1395,6 +1471,7 @@ fn mode_contract(m: ExecMode) -> (u8, Option<u8>, &'static [ExecModel]) {
         ExecModel::TessellationControl,
         ExecModel::TaskEXT,
         ExecModel::MeshEXT,
+        ExecModel::Geometry,
     ];
     // Vulkan lets either tessellation stage declare the domain, spacing, and vertex order; the
     // output patch size is the control stage's.
@@ -1402,8 +1479,18 @@ fn mode_contract(m: ExecMode) -> (u8, Option<u8>, &'static [ExecModel]) {
         ExecModel::TessellationEvaluation,
         ExecModel::TessellationControl,
     ];
-    // The output patch size, or a mesh entry's most vertices.
-    const OUTPUT_VERTICES: &[ExecModel] = &[ExecModel::TessellationControl, ExecModel::MeshEXT];
+    // The triangle domain, or a geometry entry's triangle input.
+    const TRIANGLES: &[ExecModel] = &[
+        ExecModel::TessellationEvaluation,
+        ExecModel::TessellationControl,
+        ExecModel::Geometry,
+    ];
+    // The output patch size, or a mesh or geometry entry's most vertices.
+    const OUTPUT_VERTICES: &[ExecModel] = &[
+        ExecModel::TessellationControl,
+        ExecModel::MeshEXT,
+        ExecModel::Geometry,
+    ];
     match m {
         ExecMode::OriginUpperLeft => (0, None, FRAG),
         ExecMode::EarlyFragmentTests => (1, None, FRAG),
@@ -1416,17 +1503,20 @@ fn mode_contract(m: ExecMode) -> (u8, Option<u8>, &'static [ExecModel]) {
         ExecMode::SignedZeroInfNanPreserve { width } => (9, Some(width), ALL),
         ExecMode::SubgroupUniformControlFlow => (11, None, ALL),
         ExecMode::MaximallyReconverges => (12, None, ALL),
-        ExecMode::Triangles | ExecMode::Quads => (13, None, TESS),
+        ExecMode::Triangles => (13, None, TRIANGLES),
+        ExecMode::Quads => (13, None, TESS),
+        ExecMode::InputPoints | ExecMode::InputLines => (13, None, GEOMETRY),
         ExecMode::SpacingEqual
         | ExecMode::SpacingFractionalEven
         | ExecMode::SpacingFractionalOdd => (14, None, TESS),
         ExecMode::VertexOrderCw | ExecMode::VertexOrderCcw => (15, None, TESS),
         ExecMode::OutputVertices { .. } => (16, None, OUTPUT_VERTICES),
         ExecMode::OutputPrimitives { .. } => (17, None, MESH),
-        ExecMode::OutputPoints | ExecMode::OutputLines | ExecMode::OutputTriangles => {
-            (18, None, MESH)
-        }
+        ExecMode::OutputPoints => (18, None, MESH_OR_GEOMETRY),
+        ExecMode::OutputLines | ExecMode::OutputTriangles => (18, None, MESH),
+        ExecMode::OutputLineStrip | ExecMode::OutputTriangleStrip => (18, None, GEOMETRY),
         ExecMode::RequireFullQuads => (19, None, FRAG),
+        ExecMode::Invocations { .. } => (20, None, GEOMETRY),
     }
 }
 

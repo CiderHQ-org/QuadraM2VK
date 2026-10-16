@@ -54,6 +54,95 @@ pub const METAL_ENVIRONMENT: &str = "apple-m3-max-macos27.0.1";
 /// The longest a lane command buffer may take.
 const WAIT: Duration = Duration::from_secs(60);
 
+/// What [`wait_for_device`] saw: whether the command buffer completed, the wall time it waited,
+/// and the longest wait for a CPU that one of the process's threads had meanwhile.
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+#[derive(Clone, Copy, Debug)]
+struct DeviceWait {
+    completed: bool,
+    wall: Duration,
+    queued: Duration,
+}
+
+/// The longest [`wait_for_device`] waits by the wall clock, as a multiple of its bound of the
+/// device's own time: a bound on the wait whatever the run-queue counts read.
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+const WALL_CAP: u32 = 5;
+
+/// Wait until `command_buffer` completed, for at most `bound` of the device's own time: the wall
+/// time less the longest wait for a CPU that any one of the process's threads had meanwhile, and
+/// at most [`WALL_CAP`] times `bound` by the wall clock.
+///
+/// A CPU device (lavapipe) runs a command buffer on the process's own threads, which a loaded
+/// host keeps off a CPU for much of the wall time: that wait is the host's, not the device's.
+/// Every other wait stays in the reading: a device that hangs blocked, or spins, still crosses the
+/// bound. On a GPU the threads wait for it blocked, and the reading is about the wall time.
+///
+/// Linux counts each thread's wait for a CPU: the second field of `/proc/self/task/*/schedstat`
+/// (the kernel's `Documentation/scheduler/sched-stats.rst`); where it gives none, the reading is
+/// the wall time. The counts are read after the start's instant and before the end's, so a wait
+/// between the two reads stays in the reading.
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+fn wait_for_device(
+    command_buffer: &metal2vulkan_runtime::CommandBuffer,
+    bound: Duration,
+) -> DeviceWait {
+    let started = std::time::Instant::now();
+    let before = run_queue_waits();
+    let cap = bound * WALL_CAP;
+    loop {
+        let queued = longest_wait_since(&before);
+        let wall = started.elapsed();
+        let own = wall.saturating_sub(queued);
+        if own >= bound || wall >= cap {
+            return DeviceWait {
+                completed: false,
+                wall,
+                queued,
+            };
+        }
+        let slice = (bound - own).min(cap - wall);
+        if command_buffer.wait_until_completed_for(slice).is_ok() {
+            let queued = longest_wait_since(&before);
+            return DeviceWait {
+                completed: true,
+                wall: started.elapsed(),
+                queued,
+            };
+        }
+    }
+}
+
+/// Each of the process's threads' wait for a CPU so far, by thread id, where Linux counts it
+/// ([`wait_for_device`]).
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+fn run_queue_waits() -> BTreeMap<u64, Duration> {
+    let Ok(tasks) = std::fs::read_dir("/proc/self/task") else {
+        return BTreeMap::new();
+    };
+    let wait = |task: std::fs::DirEntry| {
+        let id = task.file_name().to_str()?.parse().ok()?;
+        let stat = std::fs::read_to_string(task.path().join("schedstat")).ok()?;
+        let waited = stat.split_whitespace().nth(1)?.parse().ok()?;
+        Some((id, Duration::from_nanos(waited)))
+    };
+    tasks.flatten().filter_map(wait).collect()
+}
+
+/// The longest wait for a CPU that one of the process's threads had since `before` (its counts
+/// then, [`run_queue_waits`]); a thread started since counts all its wait.
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+fn longest_wait_since(before: &BTreeMap<u64, Duration>) -> Duration {
+    let since = |(id, waited): (u64, Duration)| {
+        waited.saturating_sub(before.get(&id).copied().unwrap_or_default())
+    };
+    run_queue_waits()
+        .into_iter()
+        .map(since)
+        .max()
+        .unwrap_or_default()
+}
+
 /// One lane test per shard of a census too long to run as one test (the Mac lane stops a test
 /// at 60 s): `census_shards!(census, SHARDS; test_0 = 0, test_1 = 1, ...)` makes each `test_n` a
 /// test that runs `census(n)`. It does not compile unless the shards listed are `0..SHARDS`, each
@@ -134,7 +223,11 @@ mod argument_buffers;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod argument_linear_samples;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod attachment_reads;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod attachmentless;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod barycentric_weights;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod bfloat_targets;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
@@ -169,6 +262,8 @@ mod chroma_pairs;
 mod clear_reach;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod color_fills;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod color_groups;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod color_reformat;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
@@ -285,6 +380,8 @@ mod fetch_costs;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod first_use;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod first_vertex;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod format_copies;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod fragment_imageblocks;
@@ -294,6 +391,8 @@ mod fragment_tile_memory;
 mod frame_costs;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod framebuffer_fetch;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod freed_memory;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod frees_in_flight;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
@@ -324,6 +423,8 @@ mod half_storage_writes;
 mod half_texel_nans;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod half_write_nans;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod handed_objects;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod handler_waits;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
@@ -365,7 +466,11 @@ mod inline_bytes;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod int_attributes;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod keep_alives;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod kept_buffer_bytes;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod kept_resolves;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod kept_variants;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
@@ -425,7 +530,11 @@ mod padded_loads;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod pass_start_reads;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod patch_culls;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod patch_indices;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod patch_primitive_ids;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod patches;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
@@ -447,6 +556,8 @@ mod predication;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod presenting;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod primitive_ids;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod private_memory;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod pvrtc_textures;
@@ -464,6 +575,8 @@ mod rate_mapped_layers;
 mod rate_mapped_passes;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod rate_maps;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod read_through_views;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod rebind_reach;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
@@ -515,6 +628,8 @@ mod shader_stencil;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod single_sample_passes;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod snapshot_reads;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod sparse_textures;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod srgb_storage;
@@ -530,6 +645,8 @@ mod submission_checks;
 mod submission_handlers;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod submit_costs;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd), target_os = "linux"))]
+mod submit_per_import;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod sum_regroup;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]

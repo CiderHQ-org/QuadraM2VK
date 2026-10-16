@@ -1,4 +1,4 @@
-// Owned MSL for WP-ICBV (DESIGN D317 part 8, WP-RT7's leftover): a vertex function that calls
+// Owned MSL: a vertex function that calls
 // visible functions through a `visible_function_table`, as `visible_table_caller`'s kernel does.
 // Vertex `vid` calls entry `vid % size` of the `uint(uint, uint)` table at vertex buffer 1 with
 // (vid, 3) and writes the result to word `vid` of vertex buffer 0 (0xfffffffd for a null entry,

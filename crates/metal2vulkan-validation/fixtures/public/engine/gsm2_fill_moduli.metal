@@ -1,4 +1,4 @@
-// Owned fixture (WP-GSM2, DESIGN D595 item 7; written for this repository): the quad and
+// Owned fixture (written for this repository): the quad and
 // simdgroup shuffle-and-fill under moduli Metal answers by whether they are constants, in kernels,
 // a fragment function and a vertex function, and a vertex function of quad fills, rotation, first
 // lane and prefix sums with no quad reduction.
@@ -52,7 +52,7 @@ kernel void fill_runtime_moduli(const device float *in [[buffer(0)]],
 }
 
 // A modulo the AIR gives as a function constant, which Metal specializes when it makes the
-// pipeline: the translation takes it as a runtime modulo (D595 item 7, the open part).
+// pipeline: the translation takes it as a runtime modulo (the open part).
 constant ushort fill_modulo [[function_constant(0)]];
 
 kernel void fill_function_constant_modulo(const device float *in [[buffer(0)]],

@@ -1,4 +1,4 @@
-// Owned fixture (WP-FMX2, DESIGN D279): an ordered not-equal and an unordered equal at NaN
+// Owned fixture: an ordered not-equal and an unordered equal at NaN
 // operands, without fast math (`-fno-fast-math`), so a NaN operand asks a defined question. The
 // front end folds `a < b || a > b` into `fcmp one` (false when either operand is a NaN) and
 // `!(a < b) && !(a > b)` into `fcmp ueq` (true when either is). SPIRV-Cross, which MoltenVK

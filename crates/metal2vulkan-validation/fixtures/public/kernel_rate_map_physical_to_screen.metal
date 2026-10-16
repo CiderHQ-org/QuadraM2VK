@@ -7,7 +7,7 @@
 // The old engine lowers the call to the identity, which is correct for a map whose every
 // horizontal and vertical rate is 1.0 and whose physical size equals its screen size; its
 // reflection reports buffer 0 Unused. The engine decodes buffer 0 as this crate's parameter
-// data (DESIGN D235), so the case authors buffer 0 as the map itself (`rasterization_rate_map`:
+// data, so the case authors buffer 0 as the map itself (`rasterization_rate_map`:
 // 64x64 screen, one layer, eight rates of 1.0 on each axis): the Metal oracle binds what
 // `MTLRasterizationRateMap.copyParameterDataToBuffer:offset:` writes for it, and a Vulkan executor
 // binds `bind::RasterizationRateMap`'s data of the same map. Both implementations compile it to

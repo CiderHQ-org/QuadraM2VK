@@ -154,6 +154,8 @@ fn feature_struct_size(ty: avk::StructureType) -> usize {
         avk::PhysicalDeviceRasterizationOrderAttachmentAccessFeaturesEXT<'static>,
         avk::PhysicalDeviceExtendedDynamicStateFeaturesEXT<'static>,
         avk::PhysicalDeviceExtendedDynamicState2FeaturesEXT<'static>,
+        avk::PhysicalDeviceExtendedDynamicState3FeaturesEXT<'static>,
+        avk::PhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT<'static>,
         Maintenance8Features,
         ShaderFmaFeatures,
         avk::PhysicalDeviceBorderColorSwizzleFeaturesEXT<'static>,
@@ -441,6 +443,8 @@ const EVERY_EXTENSION: &[&CStr] = &[
     c"VK_EXT_rasterization_order_attachment_access",
     c"VK_EXT_extended_dynamic_state",
     c"VK_EXT_extended_dynamic_state2",
+    c"VK_EXT_extended_dynamic_state3",
+    c"VK_EXT_attachment_feedback_loop_layout",
     c"VK_KHR_push_descriptor",
     c"VK_KHR_maintenance8",
     c"VK_KHR_shader_fma",
@@ -803,7 +807,7 @@ fn properties_limits_and_float_controls_are_read() {
     assert_eq!(
         d.allocation,
         AllocationLimits::new(1 << 32, 1 << 40),
-        "the allocation sizes are the description's, not the profile's (D318)"
+        "the allocation sizes are the description's, not the profile's"
     );
     assert_eq!(l.max_push_descriptors, 32);
     assert_eq!(

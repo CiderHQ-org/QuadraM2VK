@@ -1,4 +1,4 @@
-// Owned fixture (WP-UNK, DESIGN D283): the samples the decoder lacked before D283 -- gradient
+// Owned fixture: the samples the decoder once lacked -- gradient
 // samples of 3D, cube, and cube array textures, of depth 2D, 2D array, cube, and cube array
 // textures with and without comparison, and the depth cube array sample and depth cube and cube
 // array comparisons at level 0. Each lane reads its coordinates, gradients, layer, and comparison

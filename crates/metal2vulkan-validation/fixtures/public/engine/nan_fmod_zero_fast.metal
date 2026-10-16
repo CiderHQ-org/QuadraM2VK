@@ -1,4 +1,4 @@
-// Owned fixture (NaN model, DESIGN D293): `nan_fmod_zero`'s program under the default fast math
+// Owned fixture (NaN model): `nan_fmod_zero`'s program under the default fast math
 // (`float` `fmod` is `air.fast_fmod`, `half` `fmod` carries `fast`), the flag state that
 // `nan_fmod_zero` (without fast math) does not measure. Lane `i` reads floats a and b
 // (`in[i].xy`) and halves ha and hb (the low and high halves of `in[i].z`) and writes four words

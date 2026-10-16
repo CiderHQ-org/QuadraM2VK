@@ -1,5 +1,5 @@
-// Owned fixture (WP-UNM): how Metal groups a chain of fast-math additions over `contract`
-// products. WP-FMX2's probe (`fmx2_contract_fast`) read one chain, `a * b + c * d + e`, which Metal
+// Owned fixture: how Metal groups a chain of fast-math additions over `contract`
+// products. A Metal probe (`fmx2_contract_fast`) read one chain, `a * b + c * d + e`, which Metal
 // answers as `fma(a, b, fma(c, d, e))` where the pair rule alone gives `fma(c, d, a * b) + e`. This
 // kernel writes the chains around it, compiled with the default fast math. Each shape k reads its
 // own operands `v = x + 8k` (`a .. h = v[0 .. 7]`) unless the table says otherwise:

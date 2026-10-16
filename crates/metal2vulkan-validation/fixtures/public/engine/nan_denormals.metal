@@ -1,4 +1,4 @@
-// Owned fixture (NaN model, DESIGN D293, class J): which `float` operations read a denormal
+// Owned fixture (NaN model, class J): which `float` operations read a denormal
 // operand as a zero of its sign, and which flush a denormal result, in Metal's compile without
 // fast math. Lane `i` reads the float patterns (a, b, c) from `in[i]` and writes 48 words to
 // `out[12i .. 12i + 11]`: a + b, a - b, a * b, a / b, fma(a, b, c), a * b + c, -a, 0 - a,

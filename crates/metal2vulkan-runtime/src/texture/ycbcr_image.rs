@@ -158,7 +158,8 @@ impl Device {
         }
         let hazard = texels.options().hazard_tracking_mode()?;
         let image = self.new_image(plan, layout, descriptor, hazard)?;
-        let view = image.view(&VkView {
+        // The conversion's set holds it as long as the image (`Image::own_view`).
+        let view = image.own_view(&VkView {
             view_type: ImageViewType::TYPE_2D,
             format: written,
             components: ComponentMapping::IDENTITY,
@@ -312,7 +313,8 @@ impl Texture {
         descriptor.resource_options = ResourceOptions::private();
         let hazard = texels.options().hazard_tracking_mode()?;
         let image = device.new_image(plan, &layout, &descriptor, hazard)?;
-        let view = image.view(&VkView {
+        // The write-back's set holds it as long as the image (`Image::own_view`).
+        let view = image.own_view(&VkView {
             view_type: ImageViewType::TYPE_2D,
             format: Format::R32G32B32A32_UINT,
             components: ComponentMapping::IDENTITY,
@@ -440,7 +442,8 @@ impl Texture {
         descriptor.resource_options = ResourceOptions::private();
         let hazard = texels.options().hazard_tracking_mode()?;
         let image = device.new_image(plan, &layout, &descriptor, hazard)?;
-        let view = image.view(&VkView {
+        // The write-back's set holds it as long as the image (`Image::own_view`).
+        let view = image.own_view(&VkView {
             view_type: ImageViewType::TYPE_2D,
             format: bits,
             components: ComponentMapping::IDENTITY,

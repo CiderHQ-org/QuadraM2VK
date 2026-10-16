@@ -355,13 +355,13 @@ fn ulong_reads_join_the_two_words_and_writes_split_them() {
         }
         ran += 1;
     }
-    // Only `vk12-floor` (six storage images, four allowed) and `vk12-bare` (no declared `Rg32ui`
-    // and no formatless access) refuse it.
+    // Only `vk12-floor` (six storage images, four allowed; no declared `Rg32ui` and no formatless
+    // access) refuses it.
     assert!(
         ran > 0 && wide > 0,
         "ran {ran}, wide {wide}, device gaps {gaps:?}"
     );
-    assert!(gaps.iter().all(|g| g.starts_with("vk12-")), "{gaps:?}");
+    assert!(gaps.iter().all(|g| g == "vk12-floor"), "{gaps:?}");
 }
 
 /// A sample-access `ulong` read is a fetch of the sampled `RG32` view, a read-access one at

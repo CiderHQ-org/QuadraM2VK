@@ -1,4 +1,4 @@
-// Owned fixture (WP-OB3, DESIGN D258): vertex attribute fetches past their vertex buffer, the
+// Owned fixture: vertex attribute fetches past their vertex buffer, the
 // vertex input containment form. A rasterization-disabled point per vertex; vertex v writes the
 // attribute it fetched to out[v]. The case's vertex buffer holds four elements and the draw has
 // eight vertices, so vertices 4 to 7 fetch past it. Loop-free.

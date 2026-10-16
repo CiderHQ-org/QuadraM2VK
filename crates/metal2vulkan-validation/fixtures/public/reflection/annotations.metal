@@ -1,4 +1,4 @@
-// Owned fixture (WP-RFL, DESIGN D384, docs/TODO.md 8.27): a kernel with a user annotation
+// Owned fixture: a kernel with a user annotation
 // (MTLFunctionReflection.userAnnotation, the string the attribute passes) beside one without.
 // Written for this repository; no third-party source. Loop-free.
 #include <metal_stdlib>

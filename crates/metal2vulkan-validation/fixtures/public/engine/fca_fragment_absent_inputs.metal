@@ -1,4 +1,4 @@
-// Owned fixture (WP-FCA, DESIGN D233): fragment inputs four function constants gate, each read
+// Owned fixture: fragment inputs four function constants gate, each read
 // without a guard into one lane of the color output: a varying (MSL 5.8.1.3), a color input
 // (framebuffer fetch), `[[primitive_id]]`, and `[[barycentric_coord]]` (MSL 5.8.1.2). With a
 // constant false (or undefined) its input is not declared and the language gives its read no

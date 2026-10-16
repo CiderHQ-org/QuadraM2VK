@@ -1,4 +1,4 @@
-// Owned MSL for WP-FPC (D316 item 27, TODO 8.18): kernels that call through function pointers
+// Owned MSL: kernels that call through function pointers
 // chosen at run time among functions' addresses, not a table's entries alone. The visible
 // functions come from `fpc_pointer_functions.metal`, which the pipeline links; the `own_*`
 // functions are this module's and not visible. Each kernel writes word `tid` of buffer 0. Every

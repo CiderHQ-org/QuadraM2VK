@@ -27,8 +27,10 @@
 //!   hold and release: a command buffer lists and holds, and marks reached unnamed
 //!   (`live_buffers.rs`), the buffers its commands use, not their memory, as Metal marks them
 //!   (EV `IOS-pairreach1-m4`); its deallocator runs once nothing holds its pages, as an import
-//!   of its own would let it, while the import lives on in the buffers that still lie in it. Copies between two such buffers are copies within
-//!   one `VkBuffer`, moved as within one buffer (`blit.rs`, `blit_texture.rs`).
+//!   of its own would let it, while the import lives on in the buffers that still lie in it, and
+//!   its keep-alive goes then too, since those buffers keep the same bytes mapped (`buffer.rs`'s
+//!   `HostPages`). Copies between two such buffers are copies within one `VkBuffer`, moved as
+//!   within one buffer (`blit.rs`, `blit_texture.rs`).
 //! - **Ownership stays the buffer's.** The added uses are hazard tracking's alone: what a command
 //!   holds and lists (`EncoderCore::touch`, rebind holds, `used_resources`) is named by the
 //!   command's own uses, each buffer by its own key.
@@ -75,10 +77,11 @@
 
 use super::buffer::HostImport;
 use super::device::lock;
+use super::key_hash::KeyMap;
 use super::memory::MemoryClass;
 use super::resource::ResourceKey;
 use super::tracker::{Use, UseRange};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -108,7 +111,7 @@ impl<I> Default for HostAliases<I> {
             crowded: AtomicBool::new(false),
             noted: AtomicUsize::new(0),
             inner: Mutex::new(Inner {
-                made_over: HashMap::new(),
+                made_over: KeyMap::default(),
                 memories: Memories::default(),
                 aliases: Arc::default(),
                 serial: 0,
@@ -120,12 +123,12 @@ impl<I> Default for HostAliases<I> {
 
 struct Inner<I> {
     /// The memory each live buffer was made over, by its key, until it leaves it.
-    made_over: HashMap<ResourceKey, Over>,
+    made_over: KeyMap<ResourceKey, Over>,
     /// Each memory with a live buffer made over it, by its first byte's host address and its
     /// length.
     memories: Memories<Memory<I>>,
     /// The buffers that joined a memory, by their key: a snapshot each command reads.
-    aliases: Arc<HashMap<ResourceKey, Alias>>,
+    aliases: Arc<KeyMap<ResourceKey, Alias>>,
     /// The serial of the memory noted last.
     serial: u64,
     /// The bytes each buffer over host pages lies over now.
@@ -324,7 +327,7 @@ fn release<I>(memories: &mut Memories<Memory<I>>, over: Over) {
 
 /// [`HostAliases::augment`] over `aliases` and, where given, `placements`.
 pub(super) fn augmented(
-    aliases: &HashMap<ResourceKey, Alias>,
+    aliases: &KeyMap<ResourceKey, Alias>,
     placements: Option<&Placements>,
     uses: &[Use<ResourceKey>],
 ) -> Option<Vec<Use<ResourceKey>>> {
@@ -366,7 +369,7 @@ pub(super) fn augmented(
 #[derive(Default)]
 pub(super) struct Placements {
     /// Each placed key's bytes: their first byte's host address and their length.
-    at: HashMap<ResourceKey, (u64, u64)>,
+    at: KeyMap<ResourceKey, (u64, u64)>,
     /// Each range of bytes some key lies over, by its first byte's address and its length.
     ranges: Memories<Placed>,
     /// How many ranges are crowded ([`Placed::crowded`]).

@@ -52,7 +52,11 @@
 //! An attachment no lane of which rounds is not listed as rounded: it keeps its Vulkan blend of
 //! one and zero, through which the facts were measured too, and announces no shader conversion.
 //! A write in the storage form, or through a 16-bit output, rounds as before: the facts are of
-//! the device's conversion of an output variable.
+//! the device's conversion of an output variable. A storage write the shader blends into a 16-bit
+//! float attachment gives every NaN as `0x7fc00000`, which the storage image's store converts:
+//! Metal's `0x7e00` where the profile takes `DriverDeviation::MetalFloatStorageNans` (the module
+//! requires its property), else the device's NaN, noted `PrecisionNote::DeviceNanEncoding` (ANV
+//! stores `0xfe00`).
 //!
 //! Where the device does not store the output's NaN as Metal does, but is measured to store a
 //! 16-bit output's bits unchanged (`DriverDeviation::HalfColorOutputBits`: MoltenVK 1.4.1 on the
@@ -110,6 +114,10 @@ pub(crate) fn plan(cx: &mut SelectCx<'_>, color: u32, f: Form) {
     let metal_nans = metal_nans(cx, f);
     let half = half_output(cx, color, f);
     let storage = crate::lower::fragment::writes_through_storage(cx, color);
+    // A storage write the shader blends into a 16-bit float attachment stores the blend's `half`
+    // in every channel, which the device converts exactly, but for a NaN: no conversion of an
+    // output variable's bears on it, and its NaN is the storage image's store's ([`storage_nan`]).
+    let shader_blended = crate::lower::fragment::blends_sixteen_in_storage(cx, color);
     let mut lanes = [None; 4];
     let mut device = false;
     let mut blended = false;
@@ -118,7 +126,7 @@ pub(crate) fn plan(cx: &mut SelectCx<'_>, color: u32, f: Form) {
     let mut selected = None;
     for (slot, rule) in lanes.iter_mut().zip(rules).take(usize::from(f.lanes)) {
         let Some(rule) = rule else { continue };
-        half_nans |= color_writes::half_float(rule) && !metal_nans && !half;
+        half_nans |= !shader_blended && color_writes::half_float(rule) && !metal_nans && !half;
         if metal && rule == color_writes::HALF {
             continue;
         }
@@ -147,7 +155,7 @@ pub(crate) fn plan(cx: &mut SelectCx<'_>, color: u32, f: Form) {
                 Some(FloatFmt::Half),
             ) => None,
             (ChannelWrite::BlendedNearestEven { .. }, _) => {
-                blended = true;
+                blended |= !shader_blended;
                 None
             }
             (ChannelWrite::HalfUnorm { bits }, Some(fmt @ FloatFmt::Half)) => lane(
@@ -158,7 +166,7 @@ pub(crate) fn plan(cx: &mut SelectCx<'_>, color: u32, f: Form) {
                 &mut relied,
             ),
             (ChannelWrite::Device, _) => {
-                device = true;
+                device |= !shader_blended;
                 None
             }
             (rule, Some(fmt @ (FloatFmt::F32 | FloatFmt::Half))) => {
@@ -180,6 +188,9 @@ pub(crate) fn plan(cx: &mut SelectCx<'_>, color: u32, f: Form) {
     }
     if blended {
         cx.precision.insert(PrecisionNote::BlendedWriteRounding);
+    }
+    if shader_blended {
+        half_nans |= !storage_nan(cx, &mut relied);
     }
     if half_nans {
         cx.precision.insert(PrecisionNote::DeviceNanEncoding);
@@ -219,6 +230,24 @@ pub(crate) fn plan(cx: &mut SelectCx<'_>, color: u32, f: Form) {
     if let Err(at) = listed.binary_search(&color) {
         listed.insert(at, color);
     }
+}
+
+/// Whether a storage write the shader blends into a 16-bit float attachment stores its NaN as
+/// Metal does: the blend gives every NaN as `0x7fc00000` (`fetch::half_blended`; Metal stores
+/// every NaN of that blend as `0x7e00`, EV FBL-zf1-m3), which the storage image's store converts
+/// to Metal's `0x7e00` where the profile takes `DriverDeviation::MetalFloatStorageNans`, whose
+/// property the module then relies on (`relied`). Elsewhere the NaN stored is the device's (ANV
+/// stores every NaN as `0xfe00`, EV `TXN2-hsw2-anvp`), which the module notes
+/// (`PrecisionNote::DeviceNanEncoding`): no value written to a 16-bit float storage image stores
+/// another there.
+fn storage_nan(cx: &SelectCx<'_>, relied: &mut BTreeSet<VkProperty>) -> bool {
+    let metal = cx
+        .profile
+        .takes_driver_deviation(DriverDeviation::MetalFloatStorageNans);
+    if metal {
+        relied.insert(VkProperty::MetalFloatStorageNans);
+    }
+    metal
 }
 
 /// The `f32` NaN the rounding writes for a small float's NaN (`0x7fc00000`), whose store each

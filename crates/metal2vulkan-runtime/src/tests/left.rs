@@ -28,13 +28,14 @@ fn work(inbox: &Log, mut finds: impl FnMut(u32, &mut Left<u32>) -> bool) -> Opti
     let (mut rounds, mut commits) = (0, 0);
     work_through(
         inbox,
+        &mut Left::default(),
         |left| {
             rounds += 1;
             inbox.pass(|log, taken| {
-                log.extend(taken.into_iter().map(TakenIn));
+                log.extend(taken.drain(..).map(TakenIn));
                 if finds(rounds, left) {
                     commits += 1;
-                    assert!(commit_elsewhere(inbox, commits).left);
+                    commit_elsewhere(inbox, commits);
                 }
                 left.is_empty()
             });
@@ -112,12 +113,13 @@ fn nothing_left_or_the_exit_ends_it() {
     let inbox = Log::new(Vec::new());
     assert_eq!(work(&inbox, |_, _| false), Some(false));
     assert_eq!(
-        work_through(&inbox, |_: &mut Left<u32>| false, |_, _| true),
+        work_through(&inbox, &mut Left::<u32>::default(), |_| false, |_, _| true),
         None
     );
     let mut ran = Vec::new();
     let exiting = work_through(
         &inbox,
+        &mut Left::default(),
         |left| {
             left.push(Check, 1);
             left.push(Check, 2);

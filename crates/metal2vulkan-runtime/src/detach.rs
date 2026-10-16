@@ -11,14 +11,15 @@
 //!   heap's buffers included), or through what it made resident (`use_resource`, `use_heap`).
 //!   Then a buffer's call blocks until each such command buffer completed and answers `false`,
 //!   detaching nothing; a heap's answers `false` at once. A lost device ends the wait
-//!   (`Err(DeviceLost)`). The wait holds no lock of the runtime's: the completion thread lets go
+//!   (`Err(DeviceLost)`). The wait holds no lock of the runtime's: a completion turn lets go
 //!   of each command buffer's holds without one (`rebind::SubmittedHolds`).
 //! - **Pending work.** A command buffer whose first submission comes after the detach and whose
-//!   commands named the buffer or made it resident, encoded before the detach or after it, fails
-//!   at that submission with `CommandBufferError::DetachedBacking` (Metal's code 8) and runs
-//!   nothing of it; one that only reaches the bytes unnamed reads zeros there (`live_buffers.rs`
-//!   no longer lists them) and runs. A rebind before that submission gives a command encoded
-//!   while detached `EncodedUseRebound` instead, the gap until encoded uses resolve at submission.
+//!   commands named the buffer or made it resident (a render pass whose attachment lies in the
+//!   bytes names them from its open), encoded before the detach or after it, fails at that
+//!   submission with `CommandBufferError::DetachedBacking` (Metal's code 8) and runs nothing of it;
+//!   one that only reaches the bytes unnamed reads zeros there (`live_buffers.rs` no longer lists
+//!   them) and runs. A rebind before that submission gives a command encoded while detached
+//!   `EncodedUseRebound` instead, the gap until encoded uses resolve at submission.
 //! - **No memory.** A detached buffer takes the device's stand-in, a small buffer of the
 //!   runtime's own shared by every detached buffer (`buffer::Detached`), never memory of its
 //!   size. No command that takes the stand-in runs: an encoder whose command names a detached
@@ -28,9 +29,12 @@
 //!   in the heap) stays, and presents a stand-in of its image's plan while they are detached
 //!   (`texture/stand_in.rs`): its size and level queries answer its own, an unnamed read reads zero
 //!   bytes and an unnamed write lands where nothing reads. Its images bound to the old pages and
-//!   its views go with them; a command that names it fails as one naming the buffer does. A texture
-//!   being made over the bytes refuses the detach (`NotImplemented(DetachTextures)`), and no
-//!   texture is made over detached bytes yet.
+//!   its views go with them, once nothing holds the pages: an open encoder that named them (a
+//!   render pass over them from its open, whose first instance may have recorded with those
+//!   images, `render/inline_first.rs`) and a submitted command buffer hold them. A command that
+//!   names it fails as one naming the buffer does. A texture being made over the bytes refuses
+//!   the detach (`NotImplemented(DetachTextures)`), and no texture is made over detached bytes
+//!   yet.
 //! - **Attaching again.** `rebind_bytes_no_copy` gives a detached buffer or heap pages again.
 
 use super::buffer::{Buffer, Detached, HostCell, Lying};
@@ -57,13 +61,14 @@ impl Buffer {
     /// detached (at once, or it was already). Where a command buffer submitted and not yet
     /// complete took the buffer, the call blocks until each such command buffer completed and
     /// answers `false`, detaching nothing. The old memory's deallocator runs once every command
-    /// buffer submitted before the call that used it completed (in the call, where none holds
-    /// it). The buffer, its `gpu_address` and its options stay; `contents` answers `None` while
-    /// it is detached.
+    /// buffer submitted before the call that used it completed, and every open encoder that named
+    /// it was committed or dropped (in the call, where none holds it). The buffer, its
+    /// `gpu_address` and its options stay; `contents` answers `None` while it is detached.
     ///
     /// A command buffer first submitted after the call whose commands named the buffer or made
-    /// it resident fails there, `CommandBufferError::DetachedBacking`, and runs nothing of it;
-    /// one that reaches the buffer only by its address reads zeros there.
+    /// it resident (a render pass whose attachment lies over it names it from its open) fails
+    /// there, `CommandBufferError::DetachedBacking`, and runs nothing of it; one that reaches the
+    /// buffer only by its address reads zeros there.
     ///
     /// A texture over the buffer's bytes stays, and presents a stand-in until the buffer lies in
     /// pages again: its queries answer its own descriptor, an unnamed read reads zeros, and a
@@ -189,12 +194,19 @@ impl Device {
             lock(&shared.resource_ids).renew_textures();
             super::heap_sets::renew(self);
         }
+        // What lay in the old pages goes with them, as a rebind's swapped images do: once the
+        // command buffers that may read them through the heap sets completed, and once nothing
+        // holds the pages: an open encoder that took them (a render pass's attachments from its
+        // open, whose first instance may have recorded with their images,
+        // `render/inline_first.rs`), and a submitted command buffer until it completes.
         if !gone.is_empty() {
-            let pages = match &old {
-                Lying::In(pages) => Some(Arc::clone(pages)),
-                Lying::Detached(_) => None,
-            };
-            super::heap_sets::retire(self, Box::new((gone, pages)));
+            match &old {
+                Lying::In(pages) => {
+                    pages.park(gone);
+                    super::heap_sets::retire(self, Box::new(Arc::clone(pages)));
+                }
+                Lying::Detached(_) => super::heap_sets::retire(self, Box::new(gone)),
+            }
         }
         // The old pages go now where no command buffer holds them, their deallocator with them.
         drop(old);
@@ -203,7 +215,7 @@ impl Device {
 
     /// The device's stand-in, which detached buffers take (`buffer::Detached`): made once
     /// while one is detached, and again once every one let go of it.
-    fn detach_stand_in(&self) -> Result<Buffer, Error> {
+    pub(super) fn detach_stand_in(&self) -> Result<Buffer, Error> {
         let mut stand_in = lock(&self.shared().rebinds.stand_in);
         if let Some(buffer) = stand_in.as_ref().and_then(|weak| weak.upgrade()) {
             return Ok(buffer);

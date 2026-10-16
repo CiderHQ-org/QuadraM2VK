@@ -1,4 +1,4 @@
-// Owned fixture (WP-BCU, DESIGN D234): Metal's bicubic filter in a fragment function, the corpus's
+// Owned fixture: Metal's bicubic filter in a fragment function, the corpus's
 // other form: an implicit sample whose level of detail comes from the coordinate's derivatives.
 // The sampler has no mip filter and filters bicubic both ways, so the level should only choose
 // between two identical filters; the cases magnify (a quarter texel per pixel) and minify (two

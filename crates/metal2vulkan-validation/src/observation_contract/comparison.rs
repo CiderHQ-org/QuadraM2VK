@@ -203,9 +203,10 @@ impl UlpTable {
 ///   discard drops, which moves a count, a ballot, or a reduction by whole lanes.
 /// - `DeviceDepthComparison`: unbounded: a depth comparison the device makes passes or fails a
 ///   whole tap where Metal's does not.
-/// - `DeviceInterpolation`: unbounded: the device's interpolation of a varying is measured one
-///   `f32` ulp off Metal's exact value, and the interpolated value is ordinary data later words
-///   use, so no word's difference is bounded by it.
+/// - `DeviceInterpolation`: unbounded: the device's interpolation of a varying is measured up to
+///   about `3e-4` off Metal's on the probes (more where the varying's range is wider), and the
+///   interpolated value is ordinary data later words use, so no word's difference is bounded by
+///   it.
 /// - `QuadsSplitByClipping`: unbounded: a quad a clipping seam crosses runs once per piece, which
 ///   moves a count, a ballot, or a reduction by whole lanes.
 /// - `VertexSimdgroupGrouping`: unbounded: a vertex function's simdgroup holds the device's group
@@ -228,9 +229,9 @@ impl UlpTable {
 /// - `DeviceTexelDenormals`: [`Allowance::Recorded`]. A device's sample or gather may read a
 ///   denormal 32-bit float texel as zero where Metal's keeps it, and every `float` sample or gather
 ///   whose texels the device reads is exposed to it: a difference stays a mismatch for review.
-/// - `FunctionStorageAssumed`: [`Allowance::Recorded`]. The stage's private memory fits the
-///   Function storage assumed for a device not measured; a difference is a mismatch for review,
-///   never accepted or explained by the note.
+/// - `FunctionStorageAssumed`: [`Allowance::Recorded`]. A vertex or fragment function's private
+///   memory passes the floor of a device not measured, resting on no measurement; a difference is
+///   a mismatch for review, never accepted or explained by the note.
 /// - `BeyondMeasuredDeviation`: [`Allowance::Recorded`]. Every module compiled for a driver release
 ///   past its deviations' measurement records it; a difference is a mismatch for review, never
 ///   accepted or explained by the note.
@@ -242,6 +243,9 @@ impl UlpTable {
 ///   never accepted or explained by the note.
 /// - `LinkedSamplerNumbering`: [`Allowance::Recorded`]. Only sampler resource IDs may differ, no
 ///   shader value; a difference is a mismatch for review.
+/// - `ColorAttachmentGroups`: [`Allowance::Recorded`]. Only a group past the first may differ, at
+///   a discard or depth edge where the driver compiled the groups' variants apart; a difference is
+///   a mismatch for review.
 /// - Every other note, and any note this table does not know, bounds nothing on the stored
 ///   value: Vulkan's transcendental and arithmetic precision is stated per operation and input
 ///   range (absolute error for `sin`/`cos`, inherited bounds for `pow` and an unfused `Fma`, where
@@ -262,7 +266,7 @@ pub fn allowance(note: PrecisionNote) -> Allowance {
         | N::BeyondMeasuredDeviation
         | N::ViewBaseTexelOffset => Allowance::Recorded,
         N::DeviceColorConversion => Allowance::Recorded,
-        N::LinkedSamplerNumbering => Allowance::Recorded,
+        N::LinkedSamplerNumbering | N::ColorAttachmentGroups => Allowance::Recorded,
         N::GradFromBias
         | N::UnorderedFramebufferFetch
         | N::DeviceTranscendentals

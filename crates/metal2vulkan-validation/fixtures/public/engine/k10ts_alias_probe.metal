@@ -1,4 +1,4 @@
-// Owned fixture (WP-K10TS, DESIGN D205): a tile function's explicit imageblock aliased onto the
+// Owned fixture: a tile function's explicit imageblock aliased onto the
 // implicit one, whose members' C offsets (0, 4, 8, 16) differ from a packed layout of r16Float,
 // r32Float, rgba16Float, and r16Float attachments (0, 2, 6, 14). Each thread records the bits of
 // every member of its cell, so the record shows where each attachment's texel sits in the cell

@@ -103,6 +103,11 @@
 //! range. A dynamic offset is the `Offset` operand of that value (`OpBitFieldSExtract(v, 0, 4)`):
 //! on a gather it needs `shaderImageGatherExtended`, on a sample also `maintenance8`
 //! (`VK_KHR_maintenance8`); a nearest pixel fetch adds it to the texel coordinate on any profile.
+//! Without those features the access takes the offset's arms ([`OffsetArms`]): a switch over the
+//! values Metal reads on its dynamic lanes, each arm the access with its value as `ConstOffset`,
+//! which reads what the `Offset` operand of that value reads; a fragment's implicit-level sample
+//! takes its derivatives before the switch (`PrecisionNote::GradFromBias`), and a function past
+//! [`OFFSET_ARMS_PER_FUNCTION`] arms is refused as without them.
 //! Both operands are signed `int` vectors, as Metal's are (the builder admits no other: SPIRV-Cross
 //! would pass an unsigned one to MSL, which rejects it). A cube takes no offset in Metal or SPIR-V:
 //! a nonzero one there is `NotRepresentable(TexelOffset)`.
@@ -242,10 +247,10 @@ impl FamilyStrategy for SamplerStrategy {
 
 /// One combined image-sampler binding of the function, before its texture's numeric type is
 /// final: the texture slot index, the sampler, whether it samples with comparison, and whether it
-/// samples a cube with explicit gradients through a runtime sampler on a device whose cube-gradient
-/// route is not measured ([`Lod::CubeGrad`] in the isotropic form, whose sampler may not be
-/// anisotropic there: the form for its anisotropy is not known), and whether it samples the slot's
-/// raw view.
+/// samples a cube with explicit gradients in the `Length` form through a sampler that may be
+/// anisotropic, on a device whose cube-gradient route is not measured ([`Lod::CubeGrad`], whose
+/// sampler is made isotropic for it: `metal::sampler::SamplerUse::cube_gradient`), and whether it
+/// samples the slot's raw view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BindingKey {
     pub texture: u32,
@@ -374,30 +379,44 @@ pub enum Lod {
 }
 
 /// The footprint a cube's explicit gradients take, and the device rule it is handed for
-/// (`emit::cube_footprint`).
+/// (`emit::cube_footprint`): Metal's under macOS 27 (the oracle, the Apple M3 Max), but where the
+/// stage's route is MoltenVK's graphics fixup on macOS 26.7's identity, which hands that GPU its
+/// own earlier footprint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CubeFootprint {
-    /// Metal's isotropic footprint, through a runtime sampler or an isotropic constexpr one: the
-    /// length of the counted components on one tangent.
+    /// Metal's isotropic footprint, through an isotropic constexpr sampler: the Metal length of
+    /// each gradient's two tangent components, on one tangent, for Vulkan's cube derivative rule
+    /// (`CubeGradientRoute::Vulkan`); through any sampler on a route not measured, whose sampler
+    /// is made isotropic for it where it may be anisotropic (`BindingKey::cube_gradient`).
+    Length,
+    /// Metal's anisotropic face gradients through an anisotropic constexpr sampler: each gradient
+    /// without its normal component, mirrored on the faces Metal mirrors, for Vulkan's rule.
+    Face,
+    /// The gradients for MoltenVK's graphics fixup under macOS 27
+    /// (`CubeGradientRoute::AppleProjected`), through any sampler: an `x` or `z` face's without its
+    /// normal component, which Metal reads as its own; a `y` face's Metal length on `x`, which the
+    /// fixup hands Metal on both tangents (an isotropic sample's footprint kept, an anisotropic
+    /// one's ellipse on the diagonal).
+    Projected,
+    /// macOS 26.7's isotropic footprint on the Apple M3 Max, for MoltenVK's graphics fixup on that
+    /// identity (`CubeGradientRoute::AppleSwizzled`): the length of the normal and the tangent
+    /// `(a + 2) mod 3`, on that tangent.
     Isotropic,
-    /// Metal's anisotropic face gradients through an anisotropic constexpr sampler (the Apple M3
-    /// Max's), on the face's `s_c` and `t_c` axes for Vulkan's cube derivative rule.
-    Anisotropic,
-    /// The same face gradients for a driver that swizzles the stage's cube gradients for Apple's
-    /// isotropic reading (`CubeGradientRoute::AppleSwizzled`), transposed so that the swizzle
-    /// hands Apple's anisotropic reading Metal's.
+    /// macOS 26.7's anisotropic face gradients for the same fixup, transposed so that its swizzle
+    /// hands that GPU's anisotropic reading Metal's.
     AnisotropicSwizzled,
     /// Metal's gradients as the call states them, through any sampler: for a driver that hands
     /// the stage's cube gradients to Metal's own `gradientcube` unchanged
     /// (`CubeGradientRoute::Metal`), whose GPU reads them by Metal's own rule. Exact: the module
     /// records no `PrecisionNote::CubeGradientFootprint` for it.
     Metal,
-    /// A runtime or argument buffer's sampler's, by its word: [`Anisotropic`] (or
-    /// [`AnisotropicSwizzled`] where `swizzled`) where the word states `SamplerWord::ANISOTROPIC`,
-    /// else [`Isotropic`] (`emit::word_footprint`).
+    /// A runtime or argument buffer's sampler's, by its word: [`Face`] (or
+    /// [`AnisotropicSwizzled`] where `swizzled`) where the word states
+    /// `SamplerWord::ANISOTROPIC`, else [`Length`] (or [`Isotropic`]) (`emit::word_footprint`).
     ///
-    /// [`Anisotropic`]: CubeFootprint::Anisotropic
+    /// [`Face`]: CubeFootprint::Face
     /// [`AnisotropicSwizzled`]: CubeFootprint::AnisotropicSwizzled
+    /// [`Length`]: CubeFootprint::Length
     /// [`Isotropic`]: CubeFootprint::Isotropic
     Word { swizzled: bool },
 }
@@ -474,11 +493,48 @@ pub fn metal_offset(x: i32) -> i32 {
 pub enum Offset {
     /// A constant within the device's range (`ConstOffset`).
     Const(Vec<i32>),
-    /// A dynamic offset: the `Offset` operand of a gather (`ImageGatherExtended`) or a sample
-    /// (also `maintenance8`), read as [`metal_offset`] reads it; a pixel fetch adds that value to
-    /// the texel coordinate.
-    Dynamic(ValueId),
+    /// A dynamic offset, read as [`metal_offset`] reads it: the `Offset` operand of a gather
+    /// (`ImageGatherExtended`) or a sample (also `maintenance8`), or where the profile lacks that
+    /// operand's features its [`OffsetArms`]; a pixel fetch adds the value to the texel
+    /// coordinate.
+    Dynamic(ValueId, Option<OffsetArms>),
 }
+
+/// A dynamic texel offset on a profile without the `Offset` operand's features: the access is a
+/// switch over the values Metal reads on the offset's dynamic lanes, each arm the access with that
+/// value as `ConstOffset` (`spirv::builder::ops::image::ArmedOffset`), which reads the texels the
+/// `Offset` operand of the value reads. A lane the IR states as a constant takes its constant in
+/// every arm, so an offset of one dynamic lane has 16 arms and one of two 256.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct OffsetArms {
+    /// Each plane lane's offset as Metal reads it ([`metal_offset`]) where the IR states it
+    /// constant, else `None`.
+    pub lanes: Vec<Option<i32>>,
+}
+
+impl OffsetArms {
+    /// The number of arms: 16 to the power of the dynamic lanes.
+    pub fn arms(&self) -> u32 {
+        self.lanes
+            .iter()
+            .filter(|l| l.is_none())
+            .fold(1u32, |n, _| n.saturating_mul(OFFSET_ARM_VALUES))
+    }
+}
+
+/// The values one dynamic offset lane takes, Metal's range [`METAL_TEXEL_OFFSET`].
+pub const OFFSET_ARM_VALUES: u32 = 1 << METAL_TEXEL_OFFSET_BITS;
+
+/// The most arms of armed offsets ([`OffsetArms`]) one function's accesses take together: two
+/// accesses of two dynamic lanes, or 32 of one; past it the access is refused as without the arms
+/// (`docs/FAST-PATHS.md`, known gaps). A driver's pipeline making grows faster than the arms: ANV
+/// (Mesa 26.2.4, Iris Xe) made a kernel of 512 arms in 0.63 s (0.02 s with the `Offset` operand),
+/// of 1056 in 3.2 s and of 1536 in 5.9 s, past the 5-s making ceiling.
+pub const OFFSET_ARMS_PER_FUNCTION: u32 = 512;
+
+/// The estimated words of one arm of an armed offset: its case literal and label, its sampled
+/// image, the access with its `ConstOffset`, its branch, and its merge operands.
+pub const OFFSET_ARM_WORDS: u32 = 24;
 
 /// The level, in sixty-fourths, a clamped LOD query outside a fragment function answers before
 /// the texture's last level bounds it ([`SampleOp::QueryLevel`]).
@@ -1060,11 +1116,12 @@ impl Sampling {
             SampleOp::QueryLevel { .. } => (40, None),
             SampleOp::Bicubic(b) => (b.words(), None),
         };
-        // The bitcast, the `OpBitFieldSExtract`, and its two constants.
-        let wrap = if matches!(offset, Some(Offset::Dynamic(_))) {
-            24
-        } else {
-            0
+        // The bitcast, the `OpBitFieldSExtract`, and its two constants; an armed offset's
+        // selector and arms (each swizzled gather's own, `words`).
+        let wrap = match offset {
+            Some(Offset::Dynamic(_, None)) => 24,
+            Some(Offset::Dynamic(_, Some(a))) => 24 + 16 + a.arms() * OFFSET_ARM_WORDS,
+            _ => 0,
         };
         // An argument buffer's sampler adds its entry's element, the access chain, and the load;
         // and its word's cubic test, the selection, and the status mark.
@@ -1447,6 +1504,9 @@ pub struct CombinedDecl {
 pub struct SamplerPlan {
     /// Every runtime sampler slot the function uses, by slot index.
     pub slots: BTreeMap<u32, RuntimeSlot>,
+    /// The arms of the entry's armed offsets together ([`OffsetArms`]), at most
+    /// [`OFFSET_ARMS_PER_FUNCTION`].
+    pub offset_arms: u32,
     /// Every combined binding the sampling operations read.
     pub combined: BTreeSet<BindingKey>,
     /// Their declarations.

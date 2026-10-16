@@ -1,4 +1,4 @@
-// Owned fixture (WP-K13b, DESIGN D159): simdgroup and quad operations in divergent control
+// Owned fixture: simdgroup and quad operations in divergent control
 // flow, which a kernel whose simdgroups are emulated through workgroup memory runs predicated.
 // Every kernel writes out[t], t = thread_index_in_threadgroup, unless it returned first (out[t]
 // then keeps its initial 0); lane = t & 31 (Metal simdgroup k is the linear threads

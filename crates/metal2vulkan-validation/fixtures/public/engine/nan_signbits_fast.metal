@@ -1,4 +1,4 @@
-// Owned fixture (NaN model, DESIGN D293): `nan_signbits`' program under the default fast math,
+// Owned fixture (NaN model): `nan_signbits`' program under the default fast math,
 // where `fabs` is `air.fast_fabs`, `-a`, `0.0f - a`, and `-0.0f - a` are one `fneg fast`, and
 // `saturate` is `air.fast_saturate`. A NaN or infinite operand is undefined under fast math (MSL
 // 7.1); the case records what Metal answers, the flag state of class E that `nan_signbits`

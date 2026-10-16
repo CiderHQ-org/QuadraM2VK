@@ -439,7 +439,10 @@ fn an_observed_vertex_case_draws_into_an_observer_of_its_value() {
         panic!("an observed vertex case has an observer fragment");
     };
     assert_eq!(observer.output, ObserverOutput::Float);
-    let ObservedValue::Varying { key, ty, type_name } = &observer.input else {
+    let ObservedValue::Varying {
+        key, ty, type_name, ..
+    } = &observer.input
+    else {
         panic!("{observer:?}");
     };
     assert_eq!(key.0.as_ref(), b"generated(2uvDv2_f)");
@@ -499,6 +502,329 @@ fn an_observed_vertex_case_draws_into_an_observer_of_its_value() {
     // A case with neither a fragment stage nor an observation has no companion.
     observed.vertex_observation = None;
     assert_eq!(derived(&observed, &triangle).unwrap(), None);
+}
+
+/// A mesh case's observation reads its mesh function's output through the same observer fragment:
+/// its position, or a vertex or primitive data field under its user key and the type the mesh
+/// function writes it with (`air.set_primitive_data_mesh.v4i32`), a primitive data field read flat
+/// (`mesh_draws_grid` writes two `uint4` primitive fields and a position).
+#[test]
+fn an_observed_mesh_case_draws_into_an_observer_of_its_output() {
+    let test = "an_observed_mesh_case_draws_into_an_observer_of_its_output";
+    let Some(bitcode) = bitcode_of(test, &engine_dir().join("mesh_draws.ll")) else {
+        return;
+    };
+    let mut observed = case(Stage::Mesh, "mesh_draws_grid", TextureFormat::Rgba32Uint);
+    let observe = |case: &mut AuthoredCase, observation| {
+        case.mesh_draw = Some(crate::case::MeshDraw {
+            object: None,
+            mesh: None,
+            fragment: None,
+            grid: crate::case::MeshGrid::Threadgroups([1, 1, 1]),
+            threads_per_object_threadgroup: [1, 1, 1],
+            threads_per_mesh_threadgroup: [1, 1, 1],
+            rasterization: true,
+            observation: Some(observation),
+            object_launch: None,
+        });
+    };
+    observe(&mut observed, MeshObservation::PrimitiveData { index: 1 });
+    let Some(Companion::MeshStages(MeshStages {
+        object: None,
+        mesh: None,
+        fragment: Some(observer),
+    })) = derived(&observed, &bitcode).unwrap()
+    else {
+        panic!("an observed mesh case has an observer fragment");
+    };
+    let key = UserKey(b"generated(1bDv4_j)".as_slice().into());
+    assert_eq!(
+        observer,
+        ObserverFragment {
+            input: ObservedValue::Varying {
+                key: key.clone(),
+                ty: VaryingType {
+                    scalar: Scalar::I32,
+                    lanes: 4
+                },
+                type_name: "uint4".into(),
+                per_primitive: true,
+            },
+            output: ObserverOutput::Uint,
+        }
+    );
+    // The generated fragment reads the field flat, under its key.
+    let companion = Companion::MeshStages(MeshStages {
+        object: None,
+        mesh: None,
+        fragment: Some(observer),
+    });
+    if let Some(generated) = companion_module(test, &companion) {
+        let ep = only_entry(&generated, OBSERVER_FRAGMENT_ENTRY);
+        assert!(matches!(
+            &ep.params[0].role,
+            ParamRole::FragmentInput(varying) if varying.key == key
+                && varying.interpolation == Interpolation::Flat
+        ));
+    }
+
+    // The position.
+    observed.render_targets[0].format = TextureFormat::Rgba32Float;
+    observe(&mut observed, MeshObservation::Position);
+    assert_eq!(
+        derived(&observed, &bitcode).unwrap(),
+        Some(Companion::MeshStages(MeshStages {
+            object: None,
+            mesh: None,
+            fragment: Some(ObserverFragment {
+                input: ObservedValue::Position,
+                output: ObserverOutput::Float,
+            }),
+        }))
+    );
+    // What the mesh function does not declare, or no target can receive.
+    observe(&mut observed, MeshObservation::VertexData { index: 0 });
+    assert_eq!(
+        derived(&observed, &bitcode).unwrap_err(),
+        "mesh observation selects undeclared vertex data field 0"
+    );
+    observe(&mut observed, MeshObservation::PrimitiveData { index: 2 });
+    assert_eq!(
+        derived(&observed, &bitcode).unwrap_err(),
+        "mesh observation selects undeclared primitive data field 2"
+    );
+    observe(&mut observed, MeshObservation::PrimitiveData { index: 0 });
+    assert_eq!(
+        derived(&observed, &bitcode).unwrap_err(),
+        "mesh observation requires render target format Rgba32Uint, got Rgba32Float"
+    );
+    // A mesh case that names its fragment partner has no companion.
+    observed.mesh_draw.as_mut().unwrap().observation = None;
+    observed.mesh_draw.as_mut().unwrap().fragment = Some("mesh_draws_fragment".into());
+    assert_eq!(derived(&observed, &bitcode).unwrap(), None);
+}
+
+/// An object case's launch observation: a mesh function in its mesh partner's place that
+/// declares the object function's payload at its size and alignment, and draws one triangle a
+/// pixel with one `uint4` primitive data field, which the observer fragment reads flat under the
+/// same key; a payload needs whole words and a target wide enough for a row.
+#[test]
+fn an_object_case_s_launch_draws_through_a_generated_mesh_function() {
+    let test = "an_object_case_s_launch_draws_through_a_generated_mesh_function";
+    let Some(bitcode) = bitcode_of(test, &engine_dir().join("mesh_draws.ll")) else {
+        return;
+    };
+    let mut launched = case(
+        Stage::Object,
+        "mesh_draws_object",
+        TextureFormat::Rgba32Uint,
+    );
+    launched.render_targets[0].dimensions = [4, 8];
+    launched.mesh_draw = Some(crate::case::MeshDraw {
+        object: None,
+        mesh: None,
+        fragment: None,
+        grid: crate::case::MeshGrid::Threadgroups([1, 1, 1]),
+        threads_per_object_threadgroup: [4, 1, 1],
+        threads_per_mesh_threadgroup: [2, 1, 1],
+        rasterization: true,
+        observation: Some(MeshObservation::Launch),
+        object_launch: None,
+    });
+    let Some(Companion::MeshStages(stages)) = derived(&launched, &bitcode).unwrap() else {
+        panic!("a launch observation has generated mesh stages");
+    };
+    // `DrawsPayload` is two `uint4`s: 32 bytes, aligned to 16.
+    let observer = LaunchObserver {
+        payload: Some(LaunchPayload {
+            words: 8,
+            align: 16,
+        }),
+        target: [4, 8],
+    };
+    assert_eq!(stages.mesh, Some(observer.clone()));
+    assert_eq!(observer.pixels(), 3);
+    let key = UserKey(LAUNCH_KEY.into());
+    assert_eq!(
+        stages.fragment,
+        Some(ObserverFragment {
+            input: ObservedValue::Varying {
+                key: key.clone(),
+                ty: VaryingType {
+                    scalar: Scalar::I32,
+                    lanes: 4
+                },
+                type_name: "uint4".into(),
+                per_primitive: true,
+            },
+            output: ObserverOutput::Uint,
+        })
+    );
+    let companion = Companion::MeshStages(stages);
+    assert_eq!(companion.entry(), OBSERVER_MESH_ENTRY);
+    assert_eq!(
+        [Stage::Object, Stage::Mesh, Stage::Fragment].map(|stage| companion.stage_entry(stage)),
+        [
+            None,
+            Some(OBSERVER_MESH_ENTRY),
+            Some(OBSERVER_FRAGMENT_ENTRY)
+        ]
+    );
+    if let Some(generated) = companion_module(test, &companion) {
+        let abi = generated.abi().unwrap();
+        assert_eq!(abi.entries.len(), 2);
+        let mesh = entry_point(generated.module(), abi, OBSERVER_MESH_ENTRY).unwrap();
+        let outputs = mesh
+            .params
+            .iter()
+            .find_map(|binding| match &binding.role {
+                ParamRole::Mesh(outputs) => Some(outputs.as_ref()),
+                _ => None,
+            })
+            .unwrap();
+        // A triangle for the grid's pixel and each of the payload's two pixels.
+        assert_eq!(outputs.vertex.len(), 1);
+        assert!(matches!(
+            outputs.primitive.as_slice(),
+            [field] if matches!(&field.role, MeshFieldRole::PrimitiveData { slot: 0, key: k } if *k == key)
+        ));
+        let payload = mesh
+            .params
+            .iter()
+            .find(|binding| matches!(binding.role, ParamRole::Payload { .. }))
+            .unwrap();
+        assert_eq!((payload.ty.size, payload.ty.align), (Some(32), Some(16)));
+        let writes = MeshWrites::of(generated.module());
+        assert!(writes.position);
+        assert_eq!(
+            writes.data_type(0, true).map(mesh_data_type),
+            Ok(Some(VaryingType {
+                scalar: Scalar::I32,
+                lanes: 4
+            }))
+        );
+        let ep = entry_point(generated.module(), abi, OBSERVER_FRAGMENT_ENTRY).unwrap();
+        assert!(matches!(
+            &ep.params[0].role,
+            ParamRole::FragmentInput(varying) if varying.key == key
+                && varying.interpolation == Interpolation::Flat
+        ));
+        // The typed spelling differs only in its pointers.
+        let typed = companion.air_text(Spelling::Typed);
+        assert!(typed.contains("%struct._mesh_t addrspace(7)* %out"));
+        assert!(typed.contains("%struct.metal2vulkan_payload addrspace(6)* %payload"));
+    }
+
+    // What the observer cannot draw.
+    launched.render_targets[0].dimensions = [2, 8];
+    assert_eq!(
+        derived(&launched, &bitcode).unwrap_err(),
+        "launch observation draws 3 pixels a row, and render target 0 is 2 wide"
+    );
+    launched.render_targets[0].format = TextureFormat::Rgba32Float;
+    assert_eq!(
+        derived(&launched, &bitcode).unwrap_err(),
+        "launch observation requires render target format Rgba32Uint, got Rgba32Float"
+    );
+    // An object case that names its mesh and fragment partners has no companion.
+    let draw = launched.mesh_draw.as_mut().unwrap();
+    draw.observation = None;
+    draw.mesh = Some("mesh_draws_mesh".into());
+    draw.fragment = Some("mesh_draws_fragment".into());
+    assert_eq!(derived(&launched, &bitcode).unwrap(), None);
+}
+
+/// The draw of `mesh_draws_mesh` with its fragment partner and an object launch: a 32-byte payload
+/// (`DrawsPayload`'s `object` words 11 to 14, then `grid.x` 1) and 2 by 1 mesh threadgroups.
+fn payload_draw() -> crate::case::MeshDraw {
+    crate::case::MeshDraw {
+        object: None,
+        mesh: None,
+        fragment: Some("mesh_draws_fragment".into()),
+        grid: crate::case::MeshGrid::Threadgroups([1, 1, 1]),
+        threads_per_object_threadgroup: [1, 1, 1],
+        threads_per_mesh_threadgroup: [2, 1, 1],
+        rasterization: true,
+        observation: None,
+        object_launch: Some(crate::case::ObjectLaunch {
+            payload_b64: base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                [11u32, 12, 13, 14, 1, 0, 0, 0]
+                    .map(u32::to_le_bytes)
+                    .concat(),
+            ),
+            mesh_threadgroups: [2, 1, 1],
+        }),
+    }
+}
+
+/// A mesh case's object launch: an object function in its object partner's place that declares
+/// the payload at the authored length and the mesh function's alignment, stores its words and
+/// sets the authored grid; the launch holds at least what the mesh function reads.
+#[test]
+fn a_mesh_case_s_object_launch_draws_through_a_generated_object_function() {
+    let test = "a_mesh_case_s_object_launch_draws_through_a_generated_object_function";
+    let Some(bitcode) = bitcode_of(test, &engine_dir().join("mesh_draws.ll")) else {
+        return;
+    };
+    let mut payload = case(Stage::Mesh, "mesh_draws_mesh", TextureFormat::Rgba32Uint);
+    payload.mesh_draw = Some(payload_draw());
+    let Some(Companion::MeshStages(stages)) = derived(&payload, &bitcode).unwrap() else {
+        panic!("an object launch has generated mesh stages");
+    };
+    let object = PayloadObject {
+        words: vec![11, 12, 13, 14, 1, 0, 0, 0],
+        align: 16,
+        mesh_threadgroups: [2, 1, 1],
+    };
+    assert_eq!(
+        stages,
+        MeshStages {
+            object: Some(object),
+            mesh: None,
+            fragment: None,
+        }
+    );
+    let companion = Companion::MeshStages(stages);
+    assert_eq!(companion.entry(), PAYLOAD_OBJECT_ENTRY);
+    assert_eq!(
+        [Stage::Object, Stage::Mesh, Stage::Fragment].map(|stage| companion.stage_entry(stage)),
+        [Some(PAYLOAD_OBJECT_ENTRY), None, None]
+    );
+    if let Some(generated) = companion_module(test, &companion) {
+        let ep = only_entry(&generated, PAYLOAD_OBJECT_ENTRY);
+        let payload = ep
+            .params
+            .iter()
+            .find(|binding| matches!(binding.role, ParamRole::Payload { .. }))
+            .unwrap();
+        assert_eq!((payload.ty.size, payload.ty.align), (Some(32), Some(16)));
+        assert!(ep
+            .params
+            .iter()
+            .any(|binding| matches!(binding.role, ParamRole::MeshGridProperties)));
+        let typed = companion.air_text(Spelling::Typed);
+        assert!(typed.contains("%struct._mesh_grid_properties_t addrspace(3)* %grid"));
+        assert!(typed.contains("%struct.metal2vulkan_payload addrspace(6)* %payload"));
+    }
+
+    // With an observation in its fragment partner's place, the companion holds both.
+    let draw = payload.mesh_draw.as_mut().unwrap();
+    draw.fragment = None;
+    draw.observation = Some(MeshObservation::PrimitiveData { index: 0 });
+    let Some(Companion::MeshStages(stages)) = derived(&payload, &bitcode).unwrap() else {
+        panic!("an object launch has generated mesh stages");
+    };
+    assert!(stages.object.is_some() && stages.fragment.is_some());
+    // A launch that holds less than the mesh function reads.
+    payload.mesh_draw.as_mut().unwrap().object_launch = Some(crate::case::ObjectLaunch {
+        payload_b64: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [0u8; 16]),
+        mesh_threadgroups: [1, 1, 1],
+    });
+    assert_eq!(
+        derived(&payload, &bitcode).unwrap_err(),
+        "the object launch's payload holds 16 bytes, and the mesh function reads 32"
+    );
 }
 
 /// The IR carries no integer sign: the observed target's format states it.
@@ -623,6 +949,76 @@ fn generated_companions_link_with_their_cases_in_the_engine() {
         .unwrap();
         assert_eq!(linked.stages.len(), 2);
     }
+
+    // The launch observer's mesh function under the object function whose payload it reads, and
+    // its observer fragment of the primitive data it writes.
+    let Some(draws) = bitcode_of(test, &engine_dir().join("mesh_draws.ll")) else {
+        return;
+    };
+    let mut launched = case(
+        Stage::Object,
+        "mesh_draws_object",
+        TextureFormat::Rgba32Uint,
+    );
+    launched.render_targets[0].dimensions = [4, 8];
+    launched.mesh_draw = Some(crate::case::MeshDraw {
+        object: None,
+        mesh: None,
+        fragment: None,
+        grid: crate::case::MeshGrid::Threadgroups([1, 1, 1]),
+        threads_per_object_threadgroup: [4, 1, 1],
+        threads_per_mesh_threadgroup: [2, 1, 1],
+        rasterization: true,
+        observation: Some(MeshObservation::Launch),
+        object_launch: None,
+    });
+    let stages = derived(&launched, &draws).unwrap().unwrap();
+    let companion = stages.opaque_bitcode().unwrap();
+    let mut descriptor = metal2vulkan::pipeline::MeshPipelineDescriptor::new(
+        StageSource::Function(function(&companion, OBSERVER_MESH_ENTRY)),
+    );
+    descriptor.object = Some(StageSource::Function(function(&draws, "mesh_draws_object")));
+    descriptor.fragment = Some(StageSource::Function(function(
+        &companion,
+        OBSERVER_FRAGMENT_ENTRY,
+    )));
+    descriptor.color_attachments[0] = Some(metal2vulkan::pipeline::ColorAttachmentDescriptor::new(
+        metal2vulkan::metal::PixelFormat::RGBA32Uint,
+    ));
+    let linked = device
+        .compile_mesh_pipeline(&descriptor, &metal2vulkan::Budget::standard())
+        .unwrap();
+    // The object, mesh and fragment stages (with the mesh emulation's, where the device has no
+    // mesh shaders).
+    assert!(linked.stages.len() >= 3, "{}", linked.stages.len());
+
+    // The payload object under the mesh function that reads its payload, and that mesh
+    // function's fragment partner.
+    let mut payload = case(Stage::Mesh, "mesh_draws_mesh", TextureFormat::Rgba32Uint);
+    payload.mesh_draw = Some(payload_draw());
+    let stages = derived(&payload, &draws).unwrap().unwrap();
+    let companion = stages.opaque_bitcode().unwrap();
+    let mut descriptor = metal2vulkan::pipeline::MeshPipelineDescriptor::new(
+        StageSource::Function(function(&draws, "mesh_draws_mesh")),
+    );
+    descriptor.object = Some(StageSource::Function(function(
+        &companion,
+        PAYLOAD_OBJECT_ENTRY,
+    )));
+    descriptor.fragment = Some(StageSource::Function(function(
+        &draws,
+        "mesh_draws_fragment",
+    )));
+    for index in 0..2 {
+        descriptor.color_attachments[index] =
+            Some(metal2vulkan::pipeline::ColorAttachmentDescriptor::new(
+                metal2vulkan::metal::PixelFormat::RGBA32Uint,
+            ));
+    }
+    let linked = device
+        .compile_mesh_pipeline(&descriptor, &metal2vulkan::Budget::standard())
+        .unwrap();
+    assert!(linked.stages.len() >= 3, "{}", linked.stages.len());
 }
 
 /// The typed spelling is what the Metal oracle loads: `metal-as` assembles it, `metal-opt`
@@ -698,6 +1094,32 @@ fn the_typed_spelling_passes_the_metal_toolchain_at_full_verification() {
         });
         companions.push(derived(&observed, bitcode));
     }
+    // An object case's launch observer, of `mesh_draws_object`'s 32-byte payload.
+    let Some(draws) = bitcode_of(test, &engine_dir().join("mesh_draws.ll")) else {
+        return;
+    };
+    let mut launched = case(
+        Stage::Object,
+        "mesh_draws_object",
+        TextureFormat::Rgba32Uint,
+    );
+    launched.render_targets[0].dimensions = [4, 8];
+    launched.mesh_draw = Some(crate::case::MeshDraw {
+        object: None,
+        mesh: None,
+        fragment: None,
+        grid: crate::case::MeshGrid::Threadgroups([1, 1, 1]),
+        threads_per_object_threadgroup: [1, 1, 1],
+        threads_per_mesh_threadgroup: [1, 1, 1],
+        rasterization: true,
+        observation: Some(MeshObservation::Launch),
+        object_launch: None,
+    });
+    companions.push(derived(&launched, &draws));
+    // A mesh case's payload object, of `mesh_draws_mesh`'s 32-byte payload.
+    let mut payload = case(Stage::Mesh, "mesh_draws_mesh", TextureFormat::Rgba32Uint);
+    payload.mesh_draw = Some(payload_draw());
+    companions.push(derived(&payload, &draws));
     let scratch = crate::ScratchDir::new("companion-metal").unwrap();
     for (index, companion) in companions.into_iter().enumerate() {
         let companion = companion.unwrap().unwrap();

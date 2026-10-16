@@ -2457,6 +2457,7 @@ mod tests {
             }),
             draw: None,
             tessellation: None,
+            mesh_draw: None,
             output: OutputSelection::Buffer {
                 binding: 0,
                 offset: 0,
@@ -2472,6 +2473,7 @@ mod tests {
             raster_sample_count: None,
             public_source: None,
             no_effect: None,
+            creation_bound: None,
         };
         case.case_id = case.computed_case_id().unwrap();
         case

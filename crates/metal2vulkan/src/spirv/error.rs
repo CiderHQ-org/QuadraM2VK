@@ -206,14 +206,16 @@ pub enum GlobalRule {
     /// implicitly laid-out variables (`SPV_KHR_workgroup_memory_explicit_layout` allows all or
     /// none).
     MixedWorkgroupLayout,
-    /// `Invariant` on a variable other than the `Position` output.
+    /// `Invariant` on a variable other than the `Position`, `FragDepth`, `SampleMask` and
+    /// `FragStencilRefEXT` outputs.
     InvariantTarget,
     /// `PerPrimitiveEXT` on a variable other than a user varying.
     PerPrimitiveTarget,
     /// More than one `TaskPayloadWorkgroupEXT` variable in an entry's interface, or an
     /// `OpEmitMeshTasksEXT` payload that is not one.
     Payload,
-    /// `Coherent` resources in a module under the Vulkan memory model, which bans the decoration.
+    /// `Coherent` resources in a module under the Vulkan memory model, which bans the decoration,
+    /// or `Coherent` on a variable other than a storage-image resource.
     CoherentTarget,
     /// `Volatile` on a variable other than a storage-image resource or a descriptor array of
     /// them, or in a module under the Vulkan memory model, which bans the decoration.
@@ -250,6 +252,9 @@ pub enum EntryRule {
     TessellationModes,
     /// A mesh entry without a nonzero vertex and primitive count and its primitive kind.
     MeshModes,
+    /// A geometry entry without its input primitive, its output primitive, and a nonzero count of
+    /// output vertices and invocations.
+    GeometryModes,
     /// An instruction the entry's execution model (and modes) cannot run: implicit derivatives
     /// outside fragment (or derivative-group compute), fragment-only operations elsewhere, or
     /// interlock without an interlock mode.

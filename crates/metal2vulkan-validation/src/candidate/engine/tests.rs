@@ -1621,6 +1621,7 @@ fn the_binder_plans_the_executors_state() {
     };
     let case = ComputeCase {
         out_of_bounds: Vec::new(),
+        creation_bound: crate::budgets::PIPELINE_CREATION_CEILING,
         entry: "count".into(),
         constants: FunctionConstantValues::defaults(),
         buffers: BTreeMap::from([(0, vec![0; 4])]),
@@ -1838,6 +1839,7 @@ fn checked_pipeline_state_cases_prepare_with_their_tokens_in_their_owners() {
                 &render.vertex.resources.objects,
                 &render.vertex.resources.buffers,
             ),
+            Mapped::Mesh(_) => panic!("{name}: a kernel or vertex case maps onto no mesh draw"),
         };
         assert_eq!(objects, &expected, "{name}");
         let fields = argument_buffers::field_words(
@@ -2271,6 +2273,8 @@ fn executed_command_buffer(
             buffers: vec![],
             vertex_buffers: vec![],
             fragment_buffers: vec![],
+            object_buffers: vec![],
+            mesh_buffers: vec![],
         }),
     }
 }
@@ -2343,6 +2347,8 @@ fn replay_templates_map_only_the_families_executed_commands_run() {
         draws: crate::case::indirect_commands::RenderDraws::default(),
         max_vertex_buffer_bind_count: 1,
         max_fragment_buffer_bind_count: 0,
+        max_object_buffer_bind_count: 0,
+        max_mesh_buffer_bind_count: 0,
         support_dynamic_attribute_stride: false,
     });
     let error = replay_templates(&checked).err().unwrap().to_string();

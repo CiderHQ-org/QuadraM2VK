@@ -7,6 +7,8 @@ major M rejects text marked by a newer `llvm-dis` (as LLVM 21's rejects LLVM 23'
 `splat (float f0x...)`) and text containing `REJECT` (a verifier failure). The fake Metal
 toolchain's version and SDK come from FAKE_METAL, FAKE_SDK, and FAKE_SDK_BUILD (default 1.0, 99.0,
 99A1), and its modules record them as Apple's do (`!llvm.ident`, the `SDK Version` module flag).
+Its modules target the macOS version `-mmacosx-version-min` names, else FAKE_HOST_MACOS (default
+99.0), as Apple's compiler takes a host-dependent default.
 """
 
 import os
@@ -21,6 +23,7 @@ HERE = Path(__file__).resolve().parent
 SCRIPT = HERE / "regen-air-fixtures.sh"
 REPO = HERE.parent.parent
 PIN = int(re.search(r"^llvm_major=(\d+)$", SCRIPT.read_text(), re.M).group(1))
+MACOS_MIN = re.search(r"^default_macos_min=([0-9.]+)$", SCRIPT.read_text(), re.M).group(1)
 NEWER = PIN + 2
 # What the script and the fake run.
 UTILITIES = ["awk", "basename", "bash", "cat", "cmp", "cp", "diff", "dirname", "grep", "head",
@@ -32,11 +35,12 @@ NEW_RECORD = "metal: Fake metal version 2.0; macosx-sdk: 100.0 (100A1)"
 
 # One fake for every tool, reached through symlinks: the invoked name picks the tool, and a
 # VERSION file next to an LLVM tool's link gives its version. xcrun's bitcode is the source
-# text, and its typed text is that behind a `; typed` line, followed by the module's toolchain
-# metadata; either ends with a `; flags` line naming the language-standard, fast-math, and
+# text, and its typed text is that behind a `; typed` line, followed by the module's target triple
+# and toolchain metadata; either ends with a `; flags` line naming the language-standard, fast-math, and
 # deployment-target flags the compile received, if any.
 FAKE = r"""#!/bin/sh
 metal="${FAKE_METAL:-1.0}"; sdk="${FAKE_SDK:-99.0}"; build="${FAKE_SDK_BUILD:-99A1}"
+target="${FAKE_HOST_MACOS:-99.0}"
 case "$(basename "$0")" in
   xcrun)
     [ "$1" = -sdk ] && shift 2
@@ -51,7 +55,8 @@ case "$(basename "$0")" in
         --version) echo "Fake metal version $metal"; exit 0 ;;
         -o) out="$2"; shift ;;
         -S) typed=1 ;;
-        -std=*|-fno-fast-math|-mmacosx-version-min=*) flags="$flags $1" ;;
+        -mmacosx-version-min=*) flags="$flags $1"; target="${1#*=}" ;;
+        -std=*|-fno-fast-math) flags="$flags $1" ;;
         -*) ;;
         *) input="$1" ;;
       esac
@@ -60,7 +65,8 @@ case "$(basename "$0")" in
     case "$tool" in
       metal)
         if [ $typed -eq 1 ]; then { echo "; typed"; cat; } >"$out"; else cat >"$out"; fi
-        printf '%s\n' '!llvm.ident = !{!90}' "!90 = !{!\"Fake metal version $metal\"}" \
+        printf '%s\n' "target triple = \"air64_v1-apple-macosx$target.0\"" \
+          '!llvm.ident = !{!90}' "!90 = !{!\"Fake metal version $metal\"}" \
           "!91 = !{i32 2, !\"SDK Version\", [2 x i32] [i32 ${sdk%%.*}, i32 ${sdk#*.}]}" >>"$out"
         if [ -n "$flags" ]; then echo "; flags$flags" >>"$out"; fi ;;
       metal-as) sed 1d "$input" >"$out" ;;
@@ -181,17 +187,16 @@ class RegenAirFixturesTests(unittest.TestCase):
         result = self.run_script([self.pinned])
         self.assertEqual(result.returncode, 0, result.stderr)
         files = self.committed()
-        for name, flags in (("kernel", None), ("legacy", " -std=macos-metal2.2"),
-                            ("precise", " -fno-fast-math"),
-                            ("both", " -std=macos-metal2.2 -fno-fast-math"),
+        # A source without a deployment target compiles for the pinned one, whatever the host's
+        # default is.
+        pinned = f" -mmacosx-version-min={MACOS_MIN}"
+        for name, flags in (("kernel", pinned), ("legacy", " -std=macos-metal2.2" + pinned),
+                            ("precise", " -fno-fast-math" + pinned),
+                            ("both", " -std=macos-metal2.2 -fno-fast-math" + pinned),
                             ("targeted", " -std=metal4.0 -mmacosx-version-min=26.2")):
             for suffix in (".ll", ".air.ll"):
                 with self.subTest(fixture=name + suffix):
-                    last = files[name + suffix].splitlines()[-1]
-                    if flags is None:
-                        self.assertFalse(last.startswith("; flags"), last)
-                    else:
-                        self.assertEqual(last, "; flags" + flags)
+                    self.assertEqual(files[name + suffix].splitlines()[-1], "; flags" + flags)
 
     def test_a_rename_reaches_both_companions_and_the_check(self):
         (self.fixtures / "agx.metal").write_text(
@@ -249,6 +254,52 @@ class RegenAirFixturesTests(unittest.TestCase):
                 self.assertIn("kernel.metal: metal-macos-min must be a dotted version, not 26.x",
                               result.stderr)
                 self.assertEqual(self.committed(), {})
+
+    def test_check_fails_when_a_module_targets_another_macos_than_its_source(self):
+        (self.fixtures / "targeted.metal").write_text("// metal-macos-min: 26.2\nkernel\n")
+        self.assertEqual(self.run_script([self.pinned]).returncode, 0)
+        self.mixed_record("legacy")
+        pristine = self.committed()
+        self.assertIn(f'target triple = "air64_v1-apple-macosx{MACOS_MIN}.0"', pristine["kernel.ll"])
+        self.assertIn('target triple = "air64_v1-apple-macosx26.2.0"', pristine["targeted.ll"])
+        # Each module is held to its source's target, whether or not this host checks it (legacy
+        # is recorded under another toolchain), and a module without one fails too.
+        edits = (
+            ("kernel.ll", f"macosx{MACOS_MIN}.0", "macosx27.0.0",
+             f"deployment target mismatch: kernel.ll targets macOS 27.0.0; kernel.metal selects "
+             f"{MACOS_MIN} (the pinned default)"),
+            ("targeted.air.ll", "macosx26.2.0", "macosx26.0.0",
+             "deployment target mismatch: targeted.air.ll targets macOS 26.0.0; targeted.metal "
+             "selects 26.2 (its metal-macos-min line)"),
+            ("legacy.ll", f'target triple = "air64_v1-apple-macosx{MACOS_MIN}.0"\n', "",
+             "deployment target mismatch: legacy.ll targets macOS nothing; legacy.metal selects "
+             f"{MACOS_MIN} (the pinned default)"),
+        )
+        for file, old, new, message in edits:
+            with self.subTest(file=file):
+                for name, text in pristine.items():
+                    (self.fixtures / name).write_text(text)
+                self.assertEqual(self.run_script([self.pinned], "--check").returncode, 0)
+                self.assertIn(old, pristine[file])
+                (self.fixtures / file).write_text(pristine[file].replace(old, new, 1))
+                check = self.run_script([self.pinned], "--check")
+                self.assertEqual(check.returncode, 1)
+                self.assertIn(message, check.stderr.splitlines())
+        # A host whose own default is another macOS version still compiles the pinned one.
+        for name, text in pristine.items():
+            (self.fixtures / name).write_text(text)
+        check = self.run_script([self.pinned], "--check", env={"FAKE_HOST_MACOS": "27.0"})
+        self.assertEqual(check.returncode, 0, check.stderr)
+
+    def mixed_record(self, name):
+        """Records fixture `name` under another Metal toolchain, so `--check` does not compile it."""
+        toolchain = self.fixtures / "TOOLCHAIN"
+        toolchain.write_text(toolchain.read_text() + "# Fixtures compiled by another Metal toolchain "
+                             f"(regen-air-fixtures.sh <name>...).\nfixture {name}: {NEW_RECORD}\n")
+        for suffix in (".ll", ".air.ll"):
+            path = self.fixtures / (name + suffix)
+            path.write_text(path.read_text().replace("Fake metal version 1.0", "Fake metal version 2.0")
+                            .replace("[i32 99, i32 0]", "[i32 100, i32 0]"))
 
     def test_no_pinned_llvm_is_refused_before_writing(self):
         for args in ((), ("--check",)):

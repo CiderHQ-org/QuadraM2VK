@@ -1,4 +1,4 @@
-// Owned fixture (NaN model, DESIGN D293): `nan_narrow`'s program under the default fast math,
+// Owned fixture (NaN model): `nan_narrow`'s program under the default fast math,
 // where the half `+`, `*`, `air.fma`, and `fneg` carry `fast`. A NaN or infinite operand is
 // undefined under fast math (MSL 7.1); the case records what Metal answers, the flag state of
 // classes B to D that `nan_narrow` (without fast math) does not measure. Lane `i` reads a float

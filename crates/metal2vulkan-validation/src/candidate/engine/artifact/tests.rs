@@ -127,7 +127,7 @@ fn the_runtime_sources_are_the_committed_ones() {
         "the product's runtime sources changed (the validation crate's build.rs runtime inputs). If the \
          edit changes no behaviour of a run, write {now} to crates/metal2vulkan-validation/runtime-sources.sha256 \
          and say why in the commit; otherwise also bump metal2vulkan::cache::RUNTIME_VERSION \
-         (ask the orchestrator for the number). DESIGN D300, docs/VALIDATION.md \"The runtime \
+         (ask the orchestrator for the number). See docs/VALIDATION.md \"The runtime \
          guard\"."
     );
 
@@ -143,9 +143,10 @@ fn the_runtime_sources_are_the_committed_ones() {
         ("metal2vulkan-air/src/lib.rs", compile),
         ("metal2vulkan/src/cache/digest.rs", "the content digest, which defines the artifact rather than acting on it"),
         ("metal2vulkan/src/cache/mod.rs", "the plan's specialization and variant keys, whose values the plan digest holds, and RUNTIME_VERSION itself, which cannot be among the sources it versions"),
-        ("metal2vulkan/src/env_vars.rs", "the operational variables' accessors: the runtime reads only METAL2VULKAN_LOG_PIPELINES, a default-off diagnostic that prints and changes no run (D550)"),
+        ("metal2vulkan/src/env_vars.rs", "the operational variables' accessors: the runtime reads only METAL2VULKAN_LOG_PIPELINES, a default-off diagnostic that prints and changes no run"),
         ("metal2vulkan/src/error/mod.rs", "the error vocabulary: the runtime's code decides which error a run reports, and a record keeps the error as reported"),
         ("metal2vulkan/src/library/mod.rs", compile),
+        ("metal2vulkan/src/lower/access/imageblock.rs", compile),
         ("metal2vulkan/src/lower/access/tile.rs", "compile-time translation, reached only from the compile-time parts of mixed runtime files; what it produces is in the pipeline the artifact digests; the tile staging format reaches a run through the plan"),
         ("metal2vulkan/src/lower/arith/aggregate.rs", compile),
         ("metal2vulkan/src/lower/arith/extended_range.rs", "the extended-range arithmetic, compile-time translation: the runtime reaches it only through the half shadow's load (bind/extended_shadow.rs), which emits tile_value, the fetch's own decode that every pipeline reading such an attachment compiles, so a change to it is a translation change (SEMANTICS_VERSION) that moves the artifact digests"),
@@ -161,7 +162,7 @@ fn the_runtime_sources_are_the_committed_ones() {
         ("metal2vulkan/src/lower/fragment/mod.rs", "the fragment lowering's module root: the runtime reaches it only through its re-exports of the shader-side stencil's shadow format and state word, whose module is an input"),
         ("metal2vulkan/src/lower/mesh/mod.rs", "compile-time translation, reached only from the compile-time part of lower/dispatch.rs (plan_kernel's mesh wrapper builtins) and as the parent of its work-buffer layout (lower/mesh/work.rs, an input); what it produces is in the pipeline the artifact digests"),
         ("metal2vulkan/src/lower/select.rs", compile),
-        ("metal2vulkan/src/lower/simd/divergent.rs", "compile-time translation (the predicated walk, D304); the runtime reads only VOTE_BYTES, the vote word's size, which the compile also adds to the static threadgroup length the artifact reports, so a change to it moves the artifact digest"),
+        ("metal2vulkan/src/lower/simd/divergent.rs", "compile-time translation (the predicated walk); the runtime reads only VOTE_BYTES, the vote word's size, which the compile also adds to the static threadgroup length the artifact reports, so a change to it moves the artifact digest"),
         ("metal2vulkan/src/lower/simd/workgroup.rs","binding-plan construction; the artifact digests the plan it makes (the workgroup arena size)"),
         ("metal2vulkan/src/lower/stage_io/mod.rs", compile),
         ("metal2vulkan/src/lower/sync/memory_model.rs", compile),
@@ -180,7 +181,6 @@ fn the_runtime_sources_are_the_committed_ones() {
         ("metal2vulkan/src/pipeline/graphics.rs", "the compiled pipeline's value types; the artifact digests their values (the graphics state)"),
         ("metal2vulkan/src/pipeline/interface.rs", values),
         ("metal2vulkan/src/pipeline/layout.rs", values),
-        ("metal2vulkan/src/pipeline/link/tessellation/control.rs", "the compiled pipeline's value types; the artifact digests their values (the tessellation control stage)"),
         ("metal2vulkan/src/pipeline/lower_inputs.rs", "the compiled pipeline's value types; the artifact digests their values (the storage image classes)"),
         ("metal2vulkan/src/pipeline/mod.rs", values),
         ("metal2vulkan/src/pipeline/sym.rs", "the compiled pipeline's value types; the artifact digests their values (slots, push fields, handle classes)"),

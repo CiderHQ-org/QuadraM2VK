@@ -1,4 +1,4 @@
-// Owned fixture (WP-UNI, DESIGN D311 item 5, S2): a visible function table argument, whose
+// Owned fixture: a visible function table argument, whose
 // reflection Metal answers as MTLBindingTypeVisibleFunctionTable, and the visible function it
 // calls. Written for this repository; no third-party source. Loop-free.
 #include <metal_stdlib>

@@ -8,7 +8,7 @@ use crate::air::abi::{
 use crate::air::ir::{ArgIdx, Type, TypeId as AirTypeId, Value};
 use crate::device::profile::DriverWorkaround;
 use crate::device::requirements::{VkExtension, VkFeature, VkLimit, VkProperty};
-use crate::error::{Attachment, Capability, Error, Feature, Unsupported};
+use crate::error::{Attachment, Capability, DriverDeviation, Error, Feature, Unsupported};
 use crate::lower::arith::legal::{form_on, refuse_bfloat_color, refuse_int64_interface};
 use crate::lower::arith::{FloatFmt, Form, Held};
 use crate::lower::select::SelectCx;
@@ -92,6 +92,9 @@ pub enum Place {
     /// The leading lanes of a vector input, this many (1 or 2): a `float` or `float2` read of the
     /// three barycentric weights.
     Prefix(u8),
+    /// A `float3` read of the three barycentric weights: the variable's first two lanes, and
+    /// `1 - (x + y)` of them as the third, which is Metal's third weight (see `input_builtin`).
+    Weights,
 }
 
 /// How an AIR value (a parameter or an output part) reaches its interface object.
@@ -440,11 +443,11 @@ pub fn param(cx: &mut SelectCx<'_>, b: &ParamBinding) -> Result<(), Error> {
                 .copied()
                 .filter(|f| matches!(f, VertexFetch::Pulled { .. }));
             let f = io_form(cx, ty)?;
-            // The indexed capture form's draw has no indices, so fixed-function input would
-            // fetch at the stream position: its projection pulls every attribute, and a
-            // hand-built one that does not is refused.
+            // The indexed capture form's and the de-indexed form's draws have no indices, so
+            // fixed-function input would fetch at the stream position: their projection pulls
+            // every attribute, and a hand-built one that does not is refused.
             if pulled.is_none() && captured_index_type(cx).is_some() {
-                return Err(Unsupported::not_implemented(Feature::TileReach).into());
+                return Err(Unsupported::not_implemented(indices_feature(cx)).into());
             }
             if let Some(fetch) = pulled {
                 // Fetched in the shader from its source buffer, no interface variable.
@@ -504,17 +507,7 @@ pub fn param(cx: &mut SelectCx<'_>, b: &ParamBinding) -> Result<(), Error> {
                 v.interpolation
             };
             let (deco, interp) = fragment_input_deco(cx, interpolation, f)?;
-            // The device interpolates it: where its interpolation is measured not to be Metal's,
-            // the module records so.
-            if matches!(interp, Interpolation::Smooth { .. })
-                && cx
-                    .profile
-                    .fields()
-                    .workarounds
-                    .contains(&DriverWorkaround::InterpolationNotMetals)
-            {
-                cx.precision.insert(PrecisionNote::DeviceInterpolation);
-            }
+            note_device_interpolation(cx, interp);
             at_loop_sample = crate::lower::fragment::loops_samples(cx)
                 && matches!(
                     interp,
@@ -640,9 +633,29 @@ pub fn param(cx: &mut SelectCx<'_>, b: &ParamBinding) -> Result<(), Error> {
                 form: f,
             }
         }
-        // Drawn one amplification at a time beside a vertex function that writes no such index,
-        // a fragment function reads the amplification's offset as the index, as Metal adds it to
-        // the index the vertex function writes, 0 (AMP Metal probe 1).
+        // Metal's `[[primitive_id]]` is the flat varying the pipeline's vertex function writes
+        // (`IoRole::PrimitiveId`) on a device that cannot declare a fragment `PrimitiveId`
+        // (neither `geometryShader` nor `tessellationShader`), where the vertex function computes
+        // the primitive each vertex provokes, and under `LoweringInputs::primitive_id_varying`
+        // behind an emulated post-tessellation vertex function, which writes its patch's position:
+        // Metal's primitive id behind the tessellator, while Vulkan's `PrimitiveId` without a
+        // tessellation stage counts the draw's triangles.
+        (ParamRole::Builtin(Builtin::PrimitiveId), Stage::Fragment)
+            if !declarable(cx, B::PrimitiveId) || cx.inputs.primitive_id_varying =>
+        {
+            refuse_int64_interface(cx.entry, ty)?;
+            let f = form_on(cx.entry, cx.profile, ty)?;
+            int_scalar(f)?;
+            let object = primitive_id(&mut cx.families.stage_io, IoDir::Input)?;
+            Link {
+                object,
+                place: Place::Whole,
+                form: f,
+            }
+        }
+        // Drawn one amplification at a time beside a vertex function that writes no such index, a
+        // fragment function reads the amplification's offset as the index, as Metal adds it to the
+        // index the vertex function writes, 0 (a Metal probe on the M3 Max and an M4).
         (ParamRole::Builtin(Builtin::RenderTargetArrayIndex), Stage::Fragment)
             if cx.inputs.amplification_draws.is_some() =>
         {
@@ -652,6 +665,20 @@ pub fn param(cx: &mut SelectCx<'_>, b: &ParamBinding) -> Result<(), Error> {
             if cx.inputs.amplification_draws.is_some() =>
         {
             return pushed(cx, b, ty, PushField::AmplificationViewportOffset);
+        }
+        // Beside a vertex function that writes no such index, on a device that cannot declare the
+        // builtin, a fragment function reads 0, which the builtin would hold and Metal's function
+        // reads there (Metal probes on the M3 Max, macOS 27.0.1: in a pass of four layers with
+        // four viewports, and of no layers with one).
+        (ParamRole::Builtin(Builtin::RenderTargetArrayIndex), Stage::Fragment)
+            if !declarable(cx, B::Layer) =>
+        {
+            return zero_index(cx, b, ty, StageBuiltin::Layer);
+        }
+        (ParamRole::Builtin(Builtin::ViewportArrayIndex), Stage::Fragment)
+            if !declarable(cx, B::ViewportIndex) =>
+        {
+            return zero_index(cx, b, ty, StageBuiltin::ViewportIndex);
         }
         // The indexed capture form draws without indices: its vertex is the one its index names,
         // and its base vertex the layout's, whatever the profile's draw parameters.
@@ -676,6 +703,45 @@ pub fn param(cx: &mut SelectCx<'_>, b: &ParamBinding) -> Result<(), Error> {
             if !cx.profile.fields().draw_parameters =>
         {
             return draw_base(cx, b, ty, DrawBase::Instance);
+        }
+        // Without `fragmentShaderBarycentric`, the weights are the `float2` varying of their form
+        // that the pipeline's synthesized geometry stage writes (`IoRole::Barycentric`,
+        // `link::geometry`): `(1, 0)`, `(0, 1)` and `(0, 0)` at the primitive's vertices in its
+        // order, whose interpolation is Metal's first two weights, read at the pixel center as a
+        // center varying is.
+        (ParamRole::Builtin(Builtin::BarycentricCoord(i)), Stage::Fragment)
+            if !frag.barycentric =>
+        {
+            refuse_int64_interface(cx.entry, ty)?;
+            let f = form_on(cx.entry, cx.profile, ty)?;
+            let (perspective, place) = barycentric_read(*i, f)?;
+            if !frag.geometry_shader {
+                return Err(Unsupported::needs_any_of(
+                    Feature::Barycentrics,
+                    vec![
+                        vec![Capability::Feature(VkFeature::FragmentShaderBarycentric)],
+                        vec![Capability::Feature(VkFeature::GeometryShader)],
+                    ],
+                )
+                .into());
+            }
+            let interp = Interpolation::Smooth {
+                sampling: Sampling::Center,
+                perspective,
+            };
+            note_device_interpolation(cx, interp);
+            let center = cx.inputs.multisampled;
+            let by_device = center && device_reads_center_varyings_at_pixel(cx);
+            at_pixel = center && !by_device && interpolation_functions(cx);
+            let sp = &mut cx.families.stage_io;
+            sp.interface.varyings_at_pixel |= at_pixel || by_device;
+            sp.center_varyings_by_device |= by_device;
+            let object = barycentric_weights(sp, perspective)?;
+            Link {
+                object,
+                place,
+                form: f,
+            }
         }
         (ParamRole::Builtin(bi), _) => {
             refuse_int64_interface(cx.entry, ty)?;
@@ -846,47 +912,41 @@ fn zeroed_output(
 }
 
 /// Plan output `index` of a vertex function compiled under `LoweringInputs::amplification_draws`
-/// that writes no such index: its builtin, which the profile must be able to write, stored as
-/// the amplification's offset below its count push field ([`AmplifiedOutput`]). Metal renders the
-/// amplification through the slice or viewport its offset names, the first at or past the count
-/// (AMP Metal probe 1).
+/// that writes no such index: stored as the amplification's offset below its count push field
+/// ([`AmplifiedOutput`]) where [`index_store`] stores it, to its builtin or its selected index.
+/// Metal renders the amplification through the slice or viewport its offset names, the first at or
+/// past the count (a Metal probe on the M3 Max and an M4).
 fn amplified_output(cx: &mut SelectCx<'_>, index: AmplifiedIndex) -> Result<(), Error> {
-    let frag = cx.profile.fields().fragment;
-    let (spirv, contract, offset, below) = match index {
-        AmplifiedIndex::Layer => {
-            if !frag.output_layer {
-                return Err(needs(
-                    Feature::VertexAmplification,
-                    VkFeature::ShaderOutputLayer,
-                ));
-            }
-            (
-                B::Layer,
-                StageBuiltin::Layer,
-                PushField::AmplificationLayerOffset,
-                PushField::RenderTargetArrayLength,
-            )
-        }
-        AmplifiedIndex::Viewport => {
-            if !frag.output_viewport_index {
-                return Err(needs(
-                    Feature::VertexAmplification,
-                    VkFeature::ShaderOutputViewportIndex,
-                ));
-            }
-            cx.facts.insert(RuntimeFact::ViewportCount);
-            (
-                B::ViewportIndex,
-                StageBuiltin::ViewportIndex,
-                PushField::AmplificationViewportOffset,
-                PushField::ViewportCount,
-            )
-        }
+    let (raw, spirv, contract, offset, below) = match index {
+        AmplifiedIndex::Layer => (
+            RawIndex::Layer,
+            B::Layer,
+            StageBuiltin::Layer,
+            PushField::AmplificationLayerOffset,
+            PushField::RenderTargetArrayLength,
+        ),
+        AmplifiedIndex::Viewport => (
+            RawIndex::Viewport,
+            B::ViewportIndex,
+            StageBuiltin::ViewportIndex,
+            PushField::AmplificationViewportOffset,
+            PushField::ViewportCount,
+        ),
     };
+    let store = index_store(cx, raw, true, true)?;
+    if store == IndexStore::Nowhere {
+        return Ok(());
+    }
+    if matches!(index, AmplifiedIndex::Viewport) {
+        cx.facts.insert(RuntimeFact::ViewportCount);
+    }
     cx.push.insert(offset);
     cx.push.insert(below);
     let sp = &mut cx.families.stage_io;
-    let object = builtin(sp, spirv, IoDir::Output, Shape::U32, contract);
+    let object = match store {
+        IndexStore::Selected => selected_index(sp, raw)?,
+        _ => builtin(sp, spirv, IoDir::Output, Shape::U32, contract),
+    };
     sp.amplified.push(AmplifiedOutput {
         link: Link {
             object,
@@ -1119,6 +1179,201 @@ enum RawIndex {
     Layer,
 }
 
+/// Where a vertex function stores the index it selects its primitive's render target slice or
+/// viewport with ([`index_store`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IndexStore {
+    /// To its builtin, `Layer` or `ViewportIndex`.
+    Builtin,
+    /// To its selected index (`IoRole::SelectedLayer`, `IoRole::SelectedViewport`), which the
+    /// pipeline's synthesized geometry stage stores to the builtin from the primitive's first
+    /// vertex (`pipeline::link::geometry`).
+    Selected,
+    /// Nowhere: a viewport index on a device without `multiViewport`, whose draws have one
+    /// viewport (the runtime refuses more), so Metal's index selects viewport 0 whatever it is,
+    /// the viewport Vulkan uses where no stage writes `ViewportIndex`.
+    Nowhere,
+}
+
+/// Where a vertex function on `cx`'s profile stores index `index`, which it writes the same at
+/// every vertex of a primitive where `uniform` ([`uniform_index`]): to its selected index where
+/// the function stores another there ([`StageIoPlan::indices_selected`]), and otherwise where
+/// [`own_index_store`] puts it.
+fn index_store(
+    cx: &SelectCx<'_>,
+    index: RawIndex,
+    uniform: bool,
+    amplification: bool,
+) -> Result<IndexStore, Error> {
+    match own_index_store(cx, index, uniform, amplification)? {
+        IndexStore::Builtin if cx.families.stage_io.indices_selected => Ok(IndexStore::Selected),
+        store => Ok(store),
+    }
+}
+
+/// Where a vertex function on `cx`'s profile stores index `index` taken alone. Vulkan takes a
+/// primitive's `Layer` and `ViewportIndex` only where every vertex of it stores the same, Metal
+/// the primitive's first vertex's whatever the others store. So: to its builtin where the profile
+/// enables `shaderOutputLayer` (`shaderOutputViewportIndex` for a viewport index) and the function
+/// writes the index the same at every vertex of a primitive (`uniform`), or the profile takes
+/// `DriverDeviation::MetalFirstVertexIndices`; nowhere, a viewport index on a profile without
+/// `multiViewport`; else to its selected index where the profile enables `geometryShader`.
+/// Otherwise refused, as `VertexAmplification` for an index the function stores from the
+/// amplification's offset alone (`amplification`), else as `LayeredRendering`: one written alike
+/// needing the output feature or `geometryShader`, one not needing `geometryShader`.
+fn own_index_store(
+    cx: &SelectCx<'_>,
+    index: RawIndex,
+    uniform: bool,
+    amplification: bool,
+) -> Result<IndexStore, Error> {
+    let f = cx.profile.fields();
+    let (native, output) = match index {
+        RawIndex::Layer => (f.fragment.output_layer, VkFeature::ShaderOutputLayer),
+        RawIndex::Viewport => (
+            f.fragment.output_viewport_index,
+            VkFeature::ShaderOutputViewportIndex,
+        ),
+    };
+    let first_vertex = cx
+        .profile
+        .takes_driver_deviation(DriverDeviation::MetalFirstVertexIndices);
+    if native && (uniform || first_vertex) {
+        return Ok(IndexStore::Builtin);
+    }
+    if matches!(index, RawIndex::Viewport)
+        && !f.enabled.features.contains(&VkFeature::MultiViewport)
+    {
+        return Ok(IndexStore::Nowhere);
+    }
+    if f.fragment.geometry_shader {
+        return Ok(IndexStore::Selected);
+    }
+    let geometry = vec![Capability::Feature(VkFeature::GeometryShader)];
+    let needs = match uniform {
+        true => vec![vec![Capability::Feature(output)], geometry],
+        false => vec![geometry],
+    };
+    Err(match amplification {
+        true => Unsupported::needs_any_of(Feature::VertexAmplification, needs),
+        false => Unsupported::needs_any_of(Feature::LayeredRendering, needs),
+    }
+    .into())
+}
+
+/// Whether vertex function `cx` writes index `index` the same at every vertex of a primitive
+/// (its raw varying is among `StageIo::uniform_outputs`).
+fn uniform_index(cx: &SelectCx<'_>, index: RawIndex) -> bool {
+    let key = match index {
+        RawIndex::Layer => VaryingKey::render_target_array_index(),
+        RawIndex::Viewport => VaryingKey::viewport_index(),
+    };
+    (cx.families.stage_io.interface.uniform_outputs)
+        .binary_search(&key)
+        .is_ok()
+}
+
+/// Whether vertex function `cx`, with outputs `outputs`, drawn under `amplified` (`None` where it
+/// returns nothing), stores one of the slice and viewport indices it stores to its selected index
+/// ([`own_index_store`]). The pipeline's geometry stage then stores both builtins, and a vertex
+/// function's own would not reach the rasterizer past it, so it stores every one there
+/// ([`StageIoPlan::indices_selected`]). An index it writes and stores is uniform as written; one
+/// it stores from the amplification's offset alone is uniform; a slice it writes in a pass of one
+/// layer is stored nowhere. A refusal is left to the output that stores the index.
+fn indices_selected(
+    cx: &SelectCx<'_>,
+    outputs: &[OutputBinding],
+    amplified: Option<crate::pipeline::lower_inputs::AmplificationDraws>,
+) -> bool {
+    let writes = |role: fn(&OutputRole) -> bool| outputs.iter().any(|o| role(&o.role));
+    let layer = writes(|r| matches!(r, OutputRole::RenderTargetArrayIndex));
+    let viewport = writes(|r| matches!(r, OutputRole::ViewportArrayIndex));
+    let dropped = cx.inputs.dropped_vertex_layer || amplified.is_some_and(|d| !d.layered);
+    let stored = [
+        (
+            RawIndex::Layer,
+            if layer {
+                !dropped
+            } else {
+                amplified.is_some_and(|d| d.layered)
+            },
+            !layer || uniform_index(cx, RawIndex::Layer),
+        ),
+        (
+            RawIndex::Viewport,
+            viewport || amplified.is_some_and(|d| d.viewports),
+            !viewport || uniform_index(cx, RawIndex::Viewport),
+        ),
+    ];
+    stored.into_iter().any(|(index, stored, uniform)| {
+        stored
+            && matches!(
+                own_index_store(cx, index, uniform, false),
+                Ok(IndexStore::Selected)
+            )
+    })
+}
+
+/// The selected index's flat `uint` vertex output (`IoRole::SelectedLayer`,
+/// `IoRole::SelectedViewport`), which the pipeline's synthesized geometry stage reads.
+fn selected_index(sp: &mut StageIoPlan, index: RawIndex) -> Result<usize, Error> {
+    let (key, role) = match index {
+        RawIndex::Viewport => (VaryingKey::selected_viewport(), IoRole::SelectedViewport),
+        RawIndex::Layer => (VaryingKey::selected_layer(), IoRole::SelectedLayer),
+    };
+    let ty = IoType {
+        numeric: IoNumeric::Uint,
+        components: 1,
+        source_bits: 32,
+        bits: 32,
+    };
+    let deco = IoDecor {
+        packed: true,
+        ..IoDecor::default()
+    };
+    push_var(
+        &mut sp.interface.outputs,
+        IoVariable {
+            key: key.clone(),
+            role,
+            ty,
+        },
+    );
+    user(sp, key, IoDir::Output, ty, deco)
+}
+
+/// Whether the profile can declare fragment input builtin `b`: one of its enabling
+/// capabilities' features ([`builtin_enablers`]) is enabled.
+fn declarable(cx: &SelectCx<'_>, b: crate::spv::BuiltIn) -> bool {
+    let enabled = &cx.profile.fields().enabled.features;
+    builtin_enablers(b, IoDir::Input)
+        .iter()
+        .any(|(_, f)| enabled.contains(f))
+}
+
+/// Plan fragment parameter `b` of AIR type `ty`, a scalar integer, reading index `builtin` as 0
+/// (`Source::Absent`) on a profile that cannot declare it, listing it among
+/// `StageIo::zero_indices`.
+fn zero_index(
+    cx: &mut SelectCx<'_>,
+    b: &ParamBinding,
+    ty: AirTypeId,
+    builtin: StageBuiltin,
+) -> Result<(), Error> {
+    refuse_int64_interface(cx.entry, ty)?;
+    let f = form_on(cx.entry, cx.profile, ty)?;
+    int_scalar(f)?;
+    let zeros = &mut cx.families.stage_io.interface.zero_indices;
+    if let Err(at) = zeros.binary_search(&builtin) {
+        zeros.insert(at, builtin);
+    }
+    cx.families.stage_io.params.push(PlannedParam {
+        param: b.param,
+        source: Source::Absent(f),
+    });
+    Ok(())
+}
+
 /// The window depth's `float` variable in direction `dir` (`IoRole::WindowDepth`): a vertex
 /// function's output, or the no-perspective input of a fragment function that computes each
 /// sample's depth from it.
@@ -1152,6 +1407,138 @@ pub(super) fn window_depth(sp: &mut StageIoPlan, dir: IoDir) -> Result<usize, Er
     user(sp, key, dir, ty, deco)
 }
 
+/// The primitive ID's flat `uint` variable in direction `dir` (`IoRole::PrimitiveId`): the input a
+/// fragment function reads as `[[primitive_id]]` on a device without a fragment `PrimitiveId` or
+/// under `LoweringInputs::primitive_id_varying`, or the output of a vertex function compiled under
+/// that field.
+pub(super) fn primitive_id(sp: &mut StageIoPlan, dir: IoDir) -> Result<usize, Error> {
+    flat_uint(sp, VaryingKey::primitive_id(), IoRole::PrimitiveId, dir)
+}
+
+/// Plan a vertex function's primitive ID (`LoweringInputs::primitive_id_varying`,
+/// [`super::PrimitiveIdStore`]): its varying, the vertex index it divides, the draw's first
+/// vertex (the `BaseVertex` builtin with `shaderDrawParameters`, lane 0 of
+/// `PushField::BaseVertexInstance` without, as for `[[base_vertex]]`), and
+/// `PushField::VerticesPerPrimitive`. A post-tessellation vertex function's vertices are the
+/// tessellator's: one the device emulates writes its patch's position to the varying instead
+/// (`lower::tessellation::emulated`), and one drawn through the device's tessellation stages,
+/// whose primitive IDs are not built, is `NotImplemented(Tessellation)`, as for a fragment
+/// function that reads `[[primitive_id]]` behind one (`link::tessellation`). A form
+/// that reads its draw's indices at their address ([`captured_index_type`]) draws them as
+/// `index count` vertices from vertex 0: its first vertex is 0
+/// ([`super::FirstVertex::Zero`]).
+fn primitive_id_output(cx: &mut SelectCx<'_>) -> Result<(), Error> {
+    if matches!(cx.entry.ep.stage, AirStage::Vertex { patch: Some(_) }) {
+        return match crate::lower::tessellation::emulates(cx.profile) {
+            true => Ok(()),
+            false => Err(Unsupported::not_implemented(Feature::Tessellation).into()),
+        };
+    }
+    cx.push.insert(PushField::VerticesPerPrimitive);
+    let deindexed = captured_index_type(cx).is_some();
+    let draw_parameters = cx.profile.fields().draw_parameters;
+    if !deindexed {
+        cx.facts.insert(RuntimeFact::BaseVertexInstance);
+        if !draw_parameters {
+            cx.push.insert(PushField::BaseVertexInstance);
+        }
+    }
+    let sp = &mut cx.families.stage_io;
+    let vertex = builtin(
+        sp,
+        B::VertexIndex,
+        IoDir::Input,
+        Shape::U32,
+        StageBuiltin::VertexIndex,
+    );
+    let first = match (deindexed, draw_parameters) {
+        (true, _) => super::FirstVertex::Zero,
+        (false, true) => super::FirstVertex::Builtin {
+            index: builtin(
+                sp,
+                B::BaseVertex,
+                IoDir::Input,
+                Shape::U32,
+                StageBuiltin::BaseVertex,
+            ),
+        },
+        (false, false) => super::FirstVertex::Push,
+    };
+    let object = primitive_id(sp, IoDir::Output)?;
+    sp.primitive_id = Some(super::PrimitiveIdStore {
+        vertex,
+        first,
+        object,
+    });
+    sp.words = sp.words.saturating_add(super::PRIMITIVE_ID_WORDS);
+    Ok(())
+}
+
+/// The barycentric weights' `float2` input of form `perspective` (`IoRole::Barycentric`): a
+/// center-sampled varying, perspective-correct or not, which the pipeline's synthesized geometry
+/// stage writes.
+fn barycentric_weights(sp: &mut StageIoPlan, perspective: bool) -> Result<usize, Error> {
+    let key = VaryingKey::barycentric(perspective);
+    let ty = IoType {
+        numeric: IoNumeric::Float,
+        components: 2,
+        source_bits: 32,
+        bits: 32,
+    };
+    let deco = IoDecor {
+        interpolation: if perspective {
+            SInterp::Smooth
+        } else {
+            SInterp::NoPerspective
+        },
+        ..IoDecor::default()
+    };
+    push_var(
+        &mut sp.interface.inputs,
+        IoVariable {
+            key: key.clone(),
+            role: IoRole::Barycentric { perspective },
+            ty,
+        },
+    );
+    user(sp, key, IoDir::Input, ty, deco)
+}
+
+/// The perspective and place of a `[[barycentric_coord]]` read of interpolation `i` into form
+/// `f`. Metal declares the weights at the pixel center (MSL 5.2.3.4) and reads them there under
+/// every qualifier: a `centroid` or `sample` one reads the center's (Metal probes on the Apple M3
+/// Max, macOS 27.0.1, at one sample and at four). A `float` or `float2` reads the leading
+/// weights, a `float3` all three ([`Place::Weights`]).
+fn barycentric_read(i: AirInterp, f: Form) -> Result<(bool, Place), Error> {
+    let AirInterp::Smooth { perspective, .. } = i else {
+        return Err(not_lowered());
+    };
+    let place = match f.held {
+        Held::Float(ff) if ff.container() == 32 && f.lanes == 3 => Place::Weights,
+        Held::Float(ff) if ff.container() == 32 && (1..3).contains(&f.lanes) => {
+            Place::Prefix(f.lanes)
+        }
+        _ => return Err(not_lowered()),
+    };
+    Ok((perspective, place))
+}
+
+/// Records that the device interpolates a fragment input of interpolation `interp`: a smooth one
+/// takes Metal's answer only where the device is measured to interpolate as Metal does (the module
+/// then requires that), elsewhere the device's, which the module records.
+fn note_device_interpolation(cx: &mut SelectCx<'_>, interp: Interpolation) {
+    if matches!(interp, Interpolation::Smooth { .. }) {
+        if cx
+            .profile
+            .takes_driver_deviation(DriverDeviation::MetalInterpolation)
+        {
+            cx.families.stage_io.interpolation_by_metal = true;
+        } else {
+            cx.precision.insert(PrecisionNote::DeviceInterpolation);
+        }
+    }
+}
+
 /// The raw index's flat `uint` variable in direction `dir`: a vertex function's output, or the
 /// input of a fragment function compiled under `LoweringInputs::viewport_index_varying` or
 /// `LoweringInputs::render_target_array_index_varying`. Its type is fixed, so a `ushort` index on
@@ -1165,6 +1552,16 @@ fn raw_index(sp: &mut StageIoPlan, index: RawIndex, dir: IoDir) -> Result<usize,
             IoRole::RenderTargetArrayIndex,
         ),
     };
+    flat_uint(sp, key, role, dir)
+}
+
+/// The flat `uint` variable of `key` in role `role` in direction `dir`.
+fn flat_uint(
+    sp: &mut StageIoPlan,
+    key: VaryingKey,
+    role: IoRole,
+    dir: IoDir,
+) -> Result<usize, Error> {
     let ty = IoType {
         numeric: IoNumeric::Uint,
         components: 1,
@@ -1430,26 +1827,20 @@ fn input_builtin(
         Bi::BarycentricCoord(i) if !vertex => {
             // Metal declares the weights only at the pixel center, perspective-correct or not
             // (MSL 5.2.3.4); a `float` or `float2` reads the leading weights (the rest are
-            // ignored), a `float3` all three.
-            let perspective = match i {
-                AirInterp::Smooth {
-                    sampling: AirSampling::Center,
-                    perspective,
-                } => perspective,
-                _ => return Err(not_lowered()),
-            };
-            let place = match f.held {
-                Held::Float(ff) if ff.container() == 32 && f.lanes == 3 => Place::Whole,
-                Held::Float(ff) if ff.container() == 32 && (1..3).contains(&f.lanes) => {
-                    Place::Prefix(f.lanes)
-                }
-                _ => return Err(not_lowered()),
-            };
+            // ignored), a `float3` all three. Metal's third weight is `1 - (x + y)` of the first
+            // two in `float`, at every pixel and sample of triangles and lines, perspective or
+            // not, where its first two are the interpolation of a varying that holds `(1, 0)`,
+            // `(0, 1)` and `(0, 0)` at the primitive's vertices (Metal probes on the Apple M3 Max,
+            // macOS 27.0.1: 574 of 574 pixels at one sample, 2,341 of 2,341 samples at four, 86
+            // of 86 line pixels). `BaryCoordKHR`'s first two lanes are that interpolation (every
+            // pixel of every topology on the RTX 5080 Laptop GPU), its third the device's own
+            // (there 42 of 574 pixels `1 - (x + y)`, and a line's exactly 0), so a `float3` read
+            // takes the first two and computes the third ([`Place::Weights`]). Both orders are
+            // the primitive's vertex order, Vulkan's first-vertex order, which is Metal's.
+            let (perspective, place) = barycentric_read(i, f)?;
+            // `param` reads the weights from a varying without `fragmentShaderBarycentric`.
             if !frag.barycentric {
-                return Err(needs(
-                    Feature::Barycentrics,
-                    VkFeature::FragmentShaderBarycentric,
-                ));
+                return Err(cx.invariant("a barycentric builtin without the feature"));
             }
             // A driver that rejects a shader reading both forms refuses the second.
             let defect = DriverWorkaround::BothBarycentricFormsRejected;
@@ -1520,6 +1911,19 @@ pub(crate) fn output_types(cx: &SelectCx<'_>) -> Result<(Returned, Vec<AirTypeId
 pub fn entry(cx: &mut SelectCx<'_>) -> Result<(), Error> {
     let (returned, tys) = output_types(cx)?;
     cx.families.stage_io.returned = returned;
+    // A fragment function of one of its pipeline's color groups (`LoweringInputs::color_group`),
+    // its colors renumbered before planning (`pipeline::compile::color_group::entry`): stated for
+    // link, and, where the pipeline takes more than one group, its per-fragment outputs invariant
+    // across the groups' variants, and the note of what is not.
+    if cx.stage == Stage::Fragment {
+        if let Some(group) = cx.inputs.color_group.clone() {
+            if group.groups() > 1 {
+                cx.families.stage_io.invariant_fragment_outputs = true;
+                cx.precision.insert(PrecisionNote::ColorAttachmentGroups);
+            }
+            cx.families.stage_io.interface.color_group = Some(group);
+        }
+    }
     // A fragment function compiled for a multisampled pipeline reads `[[position]]` at the pixel
     // center.
     cx.families.stage_io.interface.multisampled =
@@ -1538,6 +1942,13 @@ pub fn entry(cx: &mut SelectCx<'_>) -> Result<(), Error> {
         });
     }
     let offset = |field| amplified.map(|_| field);
+    if cx.stage == Stage::Vertex {
+        cx.families.stage_io.indices_selected = indices_selected(
+            cx,
+            &outputs,
+            amplified.filter(|_| returned != Returned::Void),
+        );
+    }
     // The pipeline's colors the pass lacks, whose writes plain Metal drops: stated whether or
     // not the function writes them, so the plan settles on the variant.
     let dropped = match cx.stage {
@@ -1587,6 +1998,17 @@ pub fn entry(cx: &mut SelectCx<'_>) -> Result<(), Error> {
                         crate::lower::arith::output_precision::note_half_output(cx, color);
                     }
                     None => {}
+                }
+                // A `float` output of a module without fast math: the pipeline decides by the
+                // attachment's blend whether Metal stores it otherwise (`float_blend_colors`).
+                if cx.entry.compile.fast_math == Some(false)
+                    && float_color(cx.entry, ty)
+                    && !unattached.contains(&color)
+                {
+                    let colors = &mut cx.families.stage_io.interface.float_blend_colors;
+                    if let Err(at) = colors.binary_search(&color) {
+                        colors.insert(at, color);
+                    }
                 }
             }
         }
@@ -1735,6 +2157,41 @@ pub fn entry(cx: &mut SelectCx<'_>) -> Result<(), Error> {
             if cx.stage == Stage::Fragment && cx.inputs.extended_range_colors.contains_key(&color) {
                 continue;
             }
+        }
+        // On a device without `multiViewport` a draw has one viewport, so the index selects
+        // viewport 0 whatever it is: no `ViewportIndex` is stored, and the raw varying holds the
+        // index as written, which Metal's fragment function reads. Drawn one amplification at a
+        // time, it holds the index plus the amplification's offset.
+        if matches!(o.role, OutputRole::ViewportArrayIndex)
+            && cx.stage == Stage::Vertex
+            && index_store(
+                cx,
+                RawIndex::Viewport,
+                uniform_index(cx, RawIndex::Viewport),
+                false,
+            )? == IndexStore::Nowhere
+        {
+            let f = io_form(cx, ty)?;
+            int_scalar(f)?;
+            if amplified.is_some() {
+                cx.push.insert(PushField::AmplificationViewportOffset);
+            }
+            let sp = &mut cx.families.stage_io;
+            let object = raw_index(sp, RawIndex::Viewport, IoDir::Output)?;
+            sp.outputs.push(PlannedOutput {
+                field: o.field,
+                link: Link {
+                    object,
+                    place: Place::Whole,
+                    form: f,
+                },
+                below: None,
+                color: None,
+                rotated: false,
+                premultiplied: false,
+                offset: offset(PushField::AmplificationViewportOffset),
+            });
+            continue;
         }
         // A color output's refusal is tied to its attachment.
         let link = output(cx, o, ty).map_err(|e| match o.role {
@@ -1887,6 +2344,11 @@ pub fn entry(cx: &mut SelectCx<'_>) -> Result<(), Error> {
     if let (Some(form), Stage::Vertex) = (cx.inputs.captured_positions, cx.stage) {
         capture(cx, form)?;
     }
+    // The primitive ID a fragment function reads from its varying (an emulated post-tessellation
+    // vertex function's is its patch's position, `lower::tessellation::emulated`).
+    if cx.inputs.primitive_id_varying && cx.stage == Stage::Vertex {
+        primitive_id_output(cx)?;
+    }
     // The pass's colors the pipeline lacks, which plain Metal zeroes where a draw covers them.
     if cx.stage == Stage::Fragment {
         let zeroed = cx.inputs.zeroed_colors.clone();
@@ -1998,21 +2460,36 @@ fn capture(cx: &mut SelectCx<'_>, form: CaptureForm) -> Result<(), Error> {
     Ok(())
 }
 
-/// The index type of the indexed capture form a vertex function compiles in
-/// (`CaptureForm::Indexed`); `None` for any other function.
+/// The index type of the draw whose indices a vertex function reads at their address: the
+/// indexed capture form's (`CaptureForm::Indexed`), else the primitive ID's de-indexed form's
+/// (`LoweringInputs::primitive_id_indices`, under `primitive_id_varying`); `None` for any other
+/// function.
 pub(super) fn captured_index_type(cx: &SelectCx<'_>) -> Option<crate::metal::IndexType> {
-    match cx.stage {
-        Stage::Vertex => cx.inputs.captured_positions?.index_type(),
+    match (cx.stage, cx.inputs.captured_positions) {
+        (Stage::Vertex, Some(form)) => form.index_type(),
+        (Stage::Vertex, None) => cx
+            .inputs
+            .primitive_id_indices
+            .filter(|_| cx.inputs.primitive_id_varying),
         _ => None,
     }
 }
 
-/// Refuse the capture form on a device without device addresses, naming what it needs: the
-/// records and the indices are reached by address.
+/// The feature a form that reads a draw's indices or records at their addresses serves: tile
+/// reach for the capture form, the primitive ID for its de-indexed form.
+fn indices_feature(cx: &SelectCx<'_>) -> Feature {
+    match cx.inputs.captured_positions {
+        Some(_) => Feature::TileReach,
+        None => Feature::PrimitiveId,
+    }
+}
+
+/// Refuse the capture form or the de-indexed form ([`indices_feature`]) on a device without
+/// device addresses, naming what it needs: the records and the indices are reached by address.
 fn refuse_unaddressed(cx: &SelectCx<'_>) -> Result<(), Error> {
     if cx.profile.fields().buffer_access != crate::device::profile::BufferAccess::Addressed {
         return Err(Unsupported::needs_any_of(
-            Feature::TileReach,
+            indices_feature(cx),
             vec![cx.profile.addressed_needs()],
         )
         .into());
@@ -2020,9 +2497,9 @@ fn refuse_unaddressed(cx: &SelectCx<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-/// Plan the indexed capture form's index read of type `ty` once ([`super::CapturedIndex`]): its
-/// address and layout push fields and the vertex index builtin. Refused [`Feature::TileReach`]
-/// on a device without device addresses.
+/// Plan the index read of type `ty` of the indexed capture form or the de-indexed form once
+/// ([`super::CapturedIndex`]): its address and layout push fields and the vertex index builtin.
+/// Refused ([`indices_feature`]) on a device without device addresses.
 pub(super) fn captured_index(
     cx: &mut SelectCx<'_>,
     ty: crate::metal::IndexType,
@@ -2289,41 +2766,37 @@ fn output(cx: &mut SelectCx<'_>, o: &OutputBinding, ty: AirTypeId) -> Result<Lin
                 StageBuiltin::ClipDistance { count },
             )
         }
-        OutputRole::RenderTargetArrayIndex if vertex => {
-            if !frag.output_layer {
-                return Err(needs(
-                    Feature::LayeredRendering,
-                    VkFeature::ShaderOutputLayer,
-                ));
-            }
+        OutputRole::RenderTargetArrayIndex | OutputRole::ViewportArrayIndex if vertex => {
+            let (index, spirv, contract) = match o.role {
+                OutputRole::RenderTargetArrayIndex => {
+                    (RawIndex::Layer, B::Layer, StageBuiltin::Layer)
+                }
+                _ => (
+                    RawIndex::Viewport,
+                    B::ViewportIndex,
+                    StageBuiltin::ViewportIndex,
+                ),
+            };
+            let uniform = uniform_index(cx, index);
+            let store = index_store(cx, index, uniform, false)?;
             let f = io_form(cx, ty)?;
             int_scalar(f)?;
-            out(
-                cx,
-                B::Layer,
-                Shape::U32,
-                Place::Whole,
-                f,
-                StageBuiltin::Layer,
-            )
-        }
-        OutputRole::ViewportArrayIndex if vertex => {
-            if !frag.output_viewport_index {
-                return Err(needs(
-                    Feature::LayeredRendering,
-                    VkFeature::ShaderOutputViewportIndex,
-                ));
+            match store {
+                IndexStore::Builtin => {
+                    // Differing among a primitive's vertices, stored to the builtin only on a
+                    // device that takes the first vertex's as Metal does.
+                    cx.families.stage_io.first_vertex_indices_by_device |= !uniform;
+                    out(cx, spirv, Shape::U32, Place::Whole, f, contract)
+                }
+                IndexStore::Selected => Link {
+                    object: selected_index(&mut cx.families.stage_io, index)?,
+                    place: Place::Whole,
+                    form: f,
+                },
+                IndexStore::Nowhere => {
+                    return Err(cx.invariant("a viewport index stored nowhere as an output"))
+                }
             }
-            let f = io_form(cx, ty)?;
-            int_scalar(f)?;
-            out(
-                cx,
-                B::ViewportIndex,
-                Shape::U32,
-                Place::Whole,
-                f,
-                StageBuiltin::ViewportIndex,
-            )
         }
         // A raster order group on the output is the fragment family's: it runs the whole body,
         // these stores included, inside the interlock.
@@ -2398,9 +2871,12 @@ fn output(cx: &mut SelectCx<'_>, o: &OutputBinding, ty: AirTypeId) -> Result<Lin
                 DepthQualifier::Greater => (DepthMode::Greater, Some(ExecMode::DepthGreater)),
                 DepthQualifier::Less => (DepthMode::Less, Some(ExecMode::DepthLess)),
             };
+            // A depth rounded to Metal's code can land below the fragment's own, or above it, so
+            // the function promises neither.
+            let codes = depth16_codes(cx);
             let sp = &mut cx.families.stage_io;
             sp.modes.push(ExecMode::DepthReplacing);
-            sp.modes.extend(extra);
+            sp.modes.extend(extra.filter(|_| !codes));
             let link = out(
                 cx,
                 B::FragDepth,
@@ -2414,10 +2890,14 @@ fn output(cx: &mut SelectCx<'_>, o: &OutputBinding, ty: AirTypeId) -> Result<Lin
                 cx.facts.insert(RuntimeFact::DepthClampRange);
                 cx.push.insert(PushField::DepthClampRange);
             }
+            if codes {
+                cx.facts.insert(RuntimeFact::Depth16Codes { biased: false });
+            }
             cx.families.stage_io.depth_clamp = Some(DepthClamp {
                 object: link.object,
                 clamps: clamps_fragment_depth(cx),
                 range,
+                codes,
             });
             cx.families.fragment.depth_output = true;
             link
@@ -2479,22 +2959,34 @@ pub fn finish(cx: &mut SelectCx<'_>) -> Result<(), Error> {
         cx.families.stage_io.words = param_words(cx);
         return Ok(());
     }
-    // Buffer writes and atomics in a graphics stage need the stage's store feature (the
-    // requirement derivation adds it for every such store; refuse it here with its name).
+    // Buffer writes and atomics in a vertex or fragment function need the stage's store feature
+    // (the requirement derivation adds it for every such store; refuse it here with its name).
+    // Vulkan's stage store features name no task or mesh stage, and the emulation runs object
+    // and mesh functions as compute entries: their stores need none.
     let leaf = &cx.profile.fields().leaf;
-    let (on, feature) = match cx.stage {
-        Stage::Vertex => (
+    let store = match cx.stage {
+        Stage::Vertex => Some((
             leaf.vertex_stores_and_atomics,
             VkFeature::VertexPipelineStoresAndAtomics,
-        ),
-        _ => (
+        )),
+        Stage::Fragment => Some((
             leaf.fragment_stores_and_atomics,
             VkFeature::FragmentStoresAndAtomics,
-        ),
+        )),
+        Stage::Kernel | Stage::Object | Stage::Mesh => None,
     };
     let writes = cx.memory.slots.iter().any(|s| s.access.write || s.atomic);
-    if writes && !on {
+    if let Some((false, feature)) = store.filter(|_| writes) {
         return Err(needs(Feature::StageStoresAndAtomics, feature));
+    }
+    // The primitive ID's de-indexed form runs the vertex function once per index of the draw,
+    // where Metal shades each vertex the indices name as its GPU shades it: a function that
+    // writes memory would write once per index.
+    let deindexed = cx.stage == Stage::Vertex
+        && cx.inputs.captured_positions.is_none()
+        && captured_index_type(cx).is_some();
+    if deindexed && writes {
+        return Err(Unsupported::not_implemented(Feature::PrimitiveId).into());
     }
     let l = cx.profile.fields().limits;
     let io = &cx.families.stage_io.interface;
@@ -2507,7 +2999,9 @@ pub fn finish(cx: &mut SelectCx<'_>) -> Result<(), Error> {
             .map(|v| u64::from(v.ty.components))
             .sum()
     };
-    let evaluation = matches!(cx.entry.ep.stage, AirStage::Vertex { patch: Some(_) });
+    // An emulated post-tessellation vertex function is a plain vertex function.
+    let evaluation = matches!(cx.entry.ep.stage, AirStage::Vertex { patch: Some(_) })
+        && !crate::lower::tessellation::emulates(cx.profile);
     let checks = match cx.stage {
         // A post-tessellation vertex function's outputs are an evaluation shader's; it has no
         // input variable of this family's.
@@ -2564,6 +3058,31 @@ pub fn finish(cx: &mut SelectCx<'_>) -> Result<(), Error> {
         sp.private_mask = Some((object, mask));
         sp.interface.sample_mask = Some(mask);
     }
+    // A fragment function that returns no depth under `LoweringInputs::depth16_codes` stores the
+    // depth Metal stores for the fragment at entry, its Vulkan bias recorded as zero: objects of
+    // its own, not the function's interface, which writes no depth. One that reads its position's
+    // depth keeps the device's conversion: whether Metal's position takes the draw's bias is
+    // unmeasured, and without the Vulkan bias it would not. Under a bias of known side
+    // (`LoweringInputs::depth16_bias_raises`) it declares the side (`depth16::bias_side_mode`).
+    if cx.stage == Stage::Fragment
+        && depth16_codes(cx)
+        && !cx.families.fragment.depth_output
+        && !cx.families.stage_io.interface.position_depth
+    {
+        let raises = cx.inputs.depth16_bias_raises;
+        let sp = &mut cx.families.stage_io;
+        let depth = builtin_object(sp, B::FragDepth, IoDir::Output, Shape::F32);
+        let coord = builtin_object(sp, B::FragCoord, IoDir::Input, Shape::FVec(4));
+        sp.modes.push(ExecMode::DepthReplacing);
+        sp.modes.extend(raises.map(super::depth16::bias_side_mode));
+        sp.depth16 = Some(super::Depth16Store {
+            depth,
+            coord,
+            raises,
+        });
+        cx.facts.insert(RuntimeFact::Depth16Codes { biased: true });
+        cx.push.insert(PushField::DepthBias);
+    }
     // Size: every object, the parameters' words, and a store per output element; a count's
     // compare and select (and its constant 0) are a store's words more, and so is an
     // amplification's offset added; an amplified output is a store, an add and a count's.
@@ -2595,7 +3114,7 @@ pub fn finish(cx: &mut SelectCx<'_>) -> Result<(), Error> {
         // The private sample mask's AND and store.
         + 2 * u64::from(sp.private_mask.is_some())
         + compensation_stores(sp.compensation)
-        + sp.depth_clamp.map_or(0, |d| match (d.range, d.clamps) {
+        + sp.depth_clamp.map_or(0, |d| match (d.range, d.clamps || d.codes) {
             // The `[0, 1]` selects, the range's two clamps and the negative NaN's select.
             (true, _) => 14,
             (false, true) => 5,
@@ -2615,7 +3134,12 @@ pub fn finish(cx: &mut SelectCx<'_>) -> Result<(), Error> {
             crate::lower::arith::color_write::HALF_BITS_WORDS
                 .saturating_mul(sp.halves.len() as u64),
         )
-        .saturating_add(super::extended_color::WORDS.saturating_mul(sp.extended.len() as u64));
+        .saturating_add(super::extended_color::WORDS.saturating_mul(sp.extended.len() as u64))
+        // A returned depth's code.
+        .saturating_add(match sp.depth_clamp.is_some_and(|d| d.codes) {
+            true => super::depth16::CODE_WORDS,
+            false => 0,
+        });
     sp.words = (sp.objects.len() as u64)
         .saturating_mul(OBJECT_WORDS)
         .saturating_add(params)
@@ -2625,8 +3149,34 @@ pub fn finish(cx: &mut SelectCx<'_>) -> Result<(), Error> {
                 .saturating_mul(rets)
                 .saturating_mul(STORE_WORDS),
         )
-        .saturating_add(rounding.saturating_mul(rets));
+        .saturating_add(rounding.saturating_mul(rets))
+        // The depth stored at entry.
+        .saturating_add(match sp.depth16 {
+            Some(d) if d.raises.is_some() => {
+                super::depth16::STORE_WORDS + super::depth16::SIDE_WORDS
+            }
+            Some(_) => super::depth16::STORE_WORDS,
+            None => 0,
+        });
     Ok(())
+}
+
+/// Whether a fragment function stores Metal's `Depth16Unorm` codes itself
+/// (`LoweringInputs::depth16_codes`): compiled under the input, it neither declares nor takes
+/// early fragment tests (the storage form's, `fetch_early_tests`) nor runs its draw's tests itself,
+/// where the device's tests take its depth before it runs.
+fn depth16_codes(cx: &SelectCx<'_>) -> bool {
+    let early = matches!(
+        cx.entry.ep.stage,
+        AirStage::Fragment {
+            early_fragment_tests: true
+        }
+    );
+    cx.stage == Stage::Fragment
+        && cx.inputs.depth16_codes
+        && !early
+        && !cx.families.fragment.fetch_early_tests
+        && !cx.inputs.shader_tests
 }
 
 /// Whether AIR type `ty` of entry `e` is `half` or a vector of it: a `half` color output
@@ -2638,6 +3188,16 @@ fn half_color(e: &crate::air::Entry, ty: AirTypeId) -> bool {
         other => other,
     };
     matches!(scalar, Some(Type::Half))
+}
+
+/// Whether `ty` is a `float` color output: a scalar or vector of AIR's `float`.
+fn float_color(e: &crate::air::Entry, ty: AirTypeId) -> bool {
+    let types = e.module.types();
+    let scalar = match types.get(ty) {
+        Some(Type::Vector { elem, .. }) => types.get(*elem),
+        other => other,
+    };
+    matches!(scalar, Some(Type::Float))
 }
 
 /// The stores' worth of words a compensated position adds to each return: the field's lanes and

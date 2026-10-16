@@ -76,7 +76,8 @@ fn draws_map_to_the_vulkan_draw_of_the_same_arguments() {
 }
 
 /// A render plan names only vertex and fragment stages; a tessellation pipeline's vertex
-/// function is its evaluation stage, and its synthesized vertex and control stages are none.
+/// function is its evaluation stage, and its synthesized vertex and control stages are none, as
+/// are the geometry stages of barycentric weights read as varyings.
 #[test]
 fn only_vertex_and_fragment_stages_are_render_stages() {
     use vk::ShaderStage as S;
@@ -101,6 +102,22 @@ fn only_vertex_and_fragment_stages_are_render_stages() {
         ),
         Ok(vec![
             (Stage::Vertex, S::TESSELLATION_EVALUATION),
+            (Stage::Fragment, S::FRAGMENT)
+        ])
+    );
+    assert_eq!(
+        stages(
+            &[
+                S::VERTEX,
+                S::GEOMETRY,
+                S::GEOMETRY,
+                S::GEOMETRY,
+                S::FRAGMENT
+            ],
+            false
+        ),
+        Ok(vec![
+            (Stage::Vertex, S::VERTEX),
             (Stage::Fragment, S::FRAGMENT)
         ])
     );
@@ -548,6 +565,7 @@ fn instantiation_bounds_a_draw_by_its_index_buffer() {
         mesh: None,
         shader_tests: None,
         capture: None,
+        deindexed: None,
         storage_kept: 0,
         color_write_rules: Vec::new(),
     };
@@ -596,6 +614,7 @@ fn a_draw_of_no_index_binds_inside_the_buffer() {
         mesh: None,
         shader_tests: None,
         capture: None,
+        deindexed: None,
         storage_kept: 0,
         color_write_rules: Vec::new(),
     };
@@ -679,6 +698,7 @@ fn an_unbounded_indexed_indirect_draw_reads_its_arguments() {
         mesh: None,
         shader_tests: None,
         capture: None,
+        deindexed: None,
         storage_kept: 0,
         color_write_rules: Vec::new(),
     };
@@ -736,6 +756,7 @@ fn draws_bind_vertex_buffers_at_aligned_offsets_with_their_windows() {
         mesh: None,
         shader_tests: None,
         capture: None,
+        deindexed: None,
         storage_kept: 0,
         color_write_rules: Vec::new(),
     };
@@ -826,6 +847,7 @@ fn inline_vertex_bytes_bind_the_strides_a_dynamic_layout_reads() {
         mesh: None,
         shader_tests: None,
         capture: None,
+        deindexed: None,
         storage_kept: 0,
         color_write_rules: Vec::new(),
     };
@@ -877,15 +899,17 @@ fn inline_vertex_bytes_bind_the_strides_a_dynamic_layout_reads() {
 
 fn factor_template(step: metal::TessellationFactorStepFunction, bound: bool) -> FactorTemplate {
     FactorTemplate {
-        push_offset: 20,
         step,
         patch_bytes: 12,
-        binding: bound.then_some((0, 3)),
         alignment: 16,
         max_range: 1 << 20,
         control_points: 4,
-        patch_indices: (0, 4),
+        patch_indices: Some((0, 4)),
         control_point_indices: None,
+        site: FactorSite::Control {
+            push_offset: 20,
+            binding: bound.then_some((0, 3)),
+        },
     }
 }
 
@@ -983,7 +1007,7 @@ fn patch_draws_bind_their_patch_index_buffers() {
     assert_eq!(push.bytes.len(), 24);
     assert_eq!((word(3), word(4)), (36u32.wrapping_sub(48), 1));
     assert_eq!(
-        draw_uses(&indexed(36), None, None),
+        draw_uses(&indexed(36), None, Some(&t)),
         [ResourceUse {
             resource: UseTarget::PatchIndices,
             access: AccessSet::READ,
@@ -1010,11 +1034,42 @@ fn patch_draws_bind_their_patch_index_buffers() {
     // From 32 (the offset aligned down) to the padded end, 112.
     assert_eq!((range.range.offset, range.range.range), (32, 80));
     assert_eq!(push.bytes[12..], [8, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
-    let uses = draw_uses(&indirect, None, None);
+    let uses = draw_uses(&indirect, None, Some(&t));
     assert_eq!(uses.len(), 2);
     assert_eq!(
         (uses[0].resource, uses[0].range),
         (UseTarget::PatchIndices, None)
+    );
+    // An emulated pipeline's vertex stage reads them, where its function reads what they index,
+    // and the scan reads the arguments.
+    let mut emulated = t;
+    emulated.site = FactorSite::Scan {
+        kernel: crate::pipeline::graphics::EmulatedTessellation {
+            domain: crate::pipeline::interface::PatchDomain::Quad,
+            control_points: 4,
+            descriptor: Default::default(),
+        }
+        .scan_kernel(),
+        factors: false,
+    };
+    let uses = draw_uses(&indirect, None, Some(&emulated));
+    assert_eq!(
+        uses.iter()
+            .map(|u| (u.resource, u.stages))
+            .collect::<Vec<_>>(),
+        [
+            (
+                UseTarget::PatchIndices,
+                vk::PipelineStageFlags2::VERTEX_SHADER
+            ),
+            (UseTarget::Indirect, vk::PipelineStageFlags2::COMPUTE_SHADER)
+        ]
+    );
+    emulated.patch_indices = None;
+    let uses = draw_uses(&indirect, None, Some(&emulated));
+    assert_eq!(
+        uses.iter().map(|u| u.resource).collect::<Vec<_>>(),
+        [UseTarget::Indirect]
     );
     assert_eq!(
         patch_draw(Some(&t), &BindState::default(), &indexed(2)),
@@ -1032,7 +1087,7 @@ fn patch_draws_bind_their_patch_index_buffers() {
 fn indexed_patch_draws_bind_their_control_point_index_buffers() {
     use metal::TessellationFactorStepFunction as S;
     let mut t = factor_template(S::PerPatch, false);
-    t.control_point_indices = Some(((0, 5), 2));
+    t.control_point_indices = Some((Some((0, 5)), 2));
     let indexed = |offset, patch_index| DrawCall::Patches {
         control_points: 4,
         patch_start: 5,
@@ -1426,6 +1481,7 @@ fn mesh_template(flat: bool, multiples: Vec<u32>) -> GraphicsTemplate {
         }),
         shader_tests: None,
         capture: None,
+        deindexed: None,
         storage_kept: 0,
         color_write_rules: Vec::new(),
     }

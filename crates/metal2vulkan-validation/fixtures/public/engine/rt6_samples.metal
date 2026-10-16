@@ -1,4 +1,4 @@
-// Owned fixture (WP-RT6, DESIGN D305 item 22, D292): the runtime's per-sample fill and readback of a
+// Owned fixture: the runtime's per-sample fill and readback of a
 // multisampled texture, the Metal oracle's own (`metal::platform`: the multisample initializer of
 // `textures.rs` and the per-sample readback of `sample_readback.rs`), with the extent and sample
 // count read from a buffer where the oracle writes them into its source.

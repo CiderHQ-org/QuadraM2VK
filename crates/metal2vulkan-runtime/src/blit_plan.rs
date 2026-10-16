@@ -722,8 +722,8 @@ impl RowsCopy {
     }
 
     /// Whether a source row and a destination row share a byte, for a copy within one buffer:
-    /// Vulkan's copy forbids it, where Metal moves the bytes as a copy through a temporary does
-    /// (TOB probe 1).
+    /// Vulkan's copy forbids it, where Metal moves the bytes as a copy through a temporary does (a
+    /// Metal probe on the M3 Max and an M4).
     pub(super) fn meets(&self) -> bool {
         let mut src: Vec<Range<u64>> = self.rows.iter().map(|r| r.src..r.src + r.size).collect();
         let mut dst: Vec<Range<u64>> = self.rows.iter().map(|r| r.dst..r.dst + r.size).collect();

@@ -67,6 +67,7 @@ fn the_store_sweep_names_the_installed_cases_the_checker_now_rejects() {
             }),
             draw: None,
             tessellation: None,
+            mesh_draw: None,
             output: OutputSelection::Buffer {
                 binding: 1,
                 offset: 0,
@@ -82,6 +83,7 @@ fn the_store_sweep_names_the_installed_cases_the_checker_now_rejects() {
             raster_sample_count: None,
             public_source: None,
             no_effect: None,
+            creation_bound: None,
         };
         case.case_id = case.computed_case_id().expect("case id");
         case
@@ -205,6 +207,7 @@ fn an_output_declared_read_but_written_by_the_kernel_is_accepted() {
         }),
         draw: None,
         tessellation: None,
+        mesh_draw: None,
         output: OutputSelection::Buffer {
             binding: 1,
             offset: 0,
@@ -220,6 +223,7 @@ fn an_output_declared_read_but_written_by_the_kernel_is_accepted() {
         raster_sample_count: None,
         public_source: None,
         no_effect: None,
+        creation_bound: None,
     };
     case.case_id = case.computed_case_id().expect("case id");
     let none = conformance::ImageblockOutputs::default();
@@ -308,6 +312,7 @@ fn a_sparse_texture_the_function_declares_writable_is_an_input() {
         }),
         draw: None,
         tessellation: None,
+        mesh_draw: None,
         output: OutputSelection::Buffer {
             binding: 0,
             offset: 0,
@@ -323,6 +328,7 @@ fn a_sparse_texture_the_function_declares_writable_is_an_input() {
         authored_by: None,
         public_source: None,
         no_effect: None,
+        creation_bound: None,
     };
     let errors = |case: &AuthoredCase| {
         let mut errors = Vec::new();
@@ -502,6 +508,7 @@ fn rate_map_case(
         }),
         draw: None,
         tessellation: None,
+        mesh_draw: None,
         output: OutputSelection::Buffer {
             binding: 1,
             offset: 0,
@@ -517,6 +524,7 @@ fn rate_map_case(
         raster_sample_count: None,
         public_source: None,
         no_effect: None,
+        creation_bound: None,
     };
     case.case_id = case.computed_case_id().unwrap();
     case
@@ -1114,4 +1122,268 @@ fn a_tessellation_targets_input_has_an_air_type() {
     );
     // Not a target: its 16 bytes hold the 3 records the draw fetches, and no type is required.
     assert_eq!(errors_of(None, &[]), "");
+}
+
+/// A case of the owned fixture `engine/mesh_draws.ll`'s entry `entry` of `stage`, whose draw is
+/// `draw`, drawing into two 8x8 `RGBA32Uint` targets (the fragment function's two colors) and
+/// selecting the first: with `ctl` (buffer 0, `uint4`) for an object case.
+fn mesh_draws_case(
+    stage: Stage,
+    entry: &str,
+    draw: crate::case::MeshDraw,
+) -> (AuthoredCase, SourceRow) {
+    use crate::case::{
+        BufferResource, Comparison, ExecutionSafety, OutputSelection, RenderTargetResource,
+        ResourceRole,
+    };
+    let air_ll = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/fixtures/public/engine/mesh_draws.ll"
+    ))
+    .expect("public fixture");
+    let air_sha256 = crate::hash::sha256_bytes(air_ll.as_bytes());
+    let target = |index| RenderTargetResource {
+        index,
+        format: TextureFormat::Rgba32Uint,
+        dimensions: [8, 8],
+        initial_bytes_b64: base64::engine::general_purpose::STANDARD.encode([0u8; 8 * 8 * 16]),
+    };
+    let mut case = AuthoredCase {
+        air_sha256: air_sha256.clone(),
+        case_id: String::new(),
+        name: format!("{entry}-draw"),
+        entry: entry.into(),
+        stage,
+        buffers: (stage == Stage::Object)
+            .then(|| BufferResource {
+                binding: 0,
+                role: ResourceRole::Input,
+                bytes_b64: Some(
+                    base64::engine::general_purpose::STANDARD.encode([2u8, 0, 0, 0].repeat(4)),
+                ),
+                initial_bytes_b64: None,
+                rasterization_rate_map: None,
+            })
+            .into_iter()
+            .collect(),
+        argument_buffer_buffers: vec![],
+        device_buffer_arrays: vec![],
+        command_buffers: vec![],
+        pipeline_states: vec![],
+        threadgroup_memory: vec![],
+        imageblock: None,
+        fragment_imageblock: None,
+        acceleration_structures: vec![],
+        visible_function_references: vec![],
+        visible_function_tables: vec![],
+        intersection_function_tables: vec![],
+        argument_buffer_intersection_function_tables: vec![],
+        textures: vec![],
+        texture_arrays: vec![],
+        argument_buffer_textures: vec![],
+        argument_buffer_samplers: vec![],
+        samplers: vec![],
+        render_targets: vec![target(0), target(1)],
+        depth_stencil: None,
+        vertex_inputs: vec![],
+        vertex_observation: None,
+        varying_values: Vec::new(),
+        kernel_stage_inputs: vec![],
+        function_constants: vec![],
+        dispatch: None,
+        draw: None,
+        tessellation: None,
+        mesh_draw: Some(draw),
+        output: OutputSelection::RenderTarget {
+            index: 0,
+            origin: [0, 0],
+            dimensions: [8, 8],
+        },
+        compare: Comparison::Exact,
+        execution_safety: ExecutionSafety::LoopFree,
+        fuel: None,
+        out_of_bounds: None,
+        rationale: None,
+        authored_by: None,
+        render_pass_rate_map: None,
+        raster_sample_count: None,
+        public_source: None,
+        no_effect: None,
+        creation_bound: None,
+    };
+    case.case_id = case.computed_case_id().expect("case id");
+    let source = SourceRow {
+        air_sha256,
+        stage: stage.metadata_label().into(),
+        entry: entry.into(),
+        air_ll,
+        blob_b64: None,
+        lib_sha256s: Vec::new(),
+        label: "public/engine/mesh_draws.ll".into(),
+    };
+    (case, source)
+}
+
+fn mesh_draw(
+    object: Option<&str>,
+    mesh: Option<&str>,
+    fragment: Option<&str>,
+) -> crate::case::MeshDraw {
+    crate::case::MeshDraw {
+        object: object.map(str::to_string),
+        mesh: mesh.map(str::to_string),
+        fragment: fragment.map(str::to_string),
+        grid: crate::case::MeshGrid::Threadgroups([3, 2, 1]),
+        threads_per_object_threadgroup: [4, 1, 1],
+        threads_per_mesh_threadgroup: [2, 1, 1],
+        rasterization: true,
+        observation: None,
+        object_launch: None,
+    }
+}
+
+/// The checker's errors for the mesh case `case` over `source`.
+fn mesh_case_errors(case: AuthoredCase, source: &SourceRow) -> Vec<String> {
+    let scratch = crate::ScratchDir::new("mesh-case-check").expect("scratch");
+    match check_case_against_source(scratch.path(), case, source) {
+        Ok(_) => Vec::new(),
+        Err(errors) => errors,
+    }
+}
+
+/// The one error of a mesh case whose draw needs a stage it does not name: the evidence gap of
+/// `mesh_companion`, which stops the Metal oracle first.
+fn assert_only_the_companion_gap(errors: &[String]) {
+    let [error] = errors else {
+        panic!("{errors:?}");
+    };
+    assert!(error.contains("cannot evidence the case"), "{error}");
+    assert!(
+        error.contains("mesh_companion (the Metal oracle cannot run the case)"),
+        "{error}"
+    );
+}
+
+/// A mesh case over the owned fixture checks as Metal would link its pipeline, and both executors
+/// draw it: a mesh function with its fragment partner or with the generated observer fragment of
+/// its stated observation, and an object function with its mesh and fragment partners (the payload
+/// the mesh function reads is the object function's) or with the generated stages of its launch
+/// observation, whose observer fragment writes render target 0; and a mesh function whose payload a
+/// generated object function writes. An object case that names no mesh partner and states no
+/// launch observation needs a stage nothing supplies (`mesh_companion`).
+#[test]
+fn a_mesh_case_with_its_partners_checks_clean() {
+    use base64::Engine as _;
+    let (grid, source) = mesh_draws_case(
+        Stage::Mesh,
+        "mesh_draws_grid",
+        mesh_draw(None, None, Some("mesh_draws_fragment")),
+    );
+    assert_eq!(mesh_case_errors(grid, &source), Vec::<String>::new());
+    let (object, source) = mesh_draws_case(
+        Stage::Object,
+        "mesh_draws_object",
+        mesh_draw(None, Some("mesh_draws_mesh"), Some("mesh_draws_fragment")),
+    );
+    assert_eq!(mesh_case_errors(object, &source), Vec::<String>::new());
+    // A mesh case observed through the generated observer fragment in its fragment partner's
+    // place.
+    let mut observed = mesh_draw(None, None, None);
+    observed.observation = Some(crate::case::MeshObservation::PrimitiveData { index: 0 });
+    let (observed, source) = mesh_draws_case(Stage::Mesh, "mesh_draws_grid", observed);
+    assert_eq!(mesh_case_errors(observed, &source), Vec::<String>::new());
+    let mut launched = mesh_draw(None, None, None);
+    launched.grid = crate::case::MeshGrid::Threadgroups([1, 1, 1]);
+    launched.observation = Some(crate::case::MeshObservation::Launch);
+    let (launched, source) = mesh_draws_case(Stage::Object, "mesh_draws_object", launched);
+    assert_eq!(mesh_case_errors(launched, &source), Vec::<String>::new());
+    // A mesh case whose payload a generated object function writes, in its object partner's
+    // place; a launch shorter than the payload the mesh function reads is refused.
+    let mut payload = mesh_draw(None, None, Some("mesh_draws_fragment"));
+    payload.grid = crate::case::MeshGrid::Threadgroups([1, 1, 1]);
+    payload.object_launch = Some(crate::case::ObjectLaunch {
+        payload_b64: base64::engine::general_purpose::STANDARD.encode([0u8; 32]),
+        mesh_threadgroups: [2, 1, 1],
+    });
+    let (payload, source) = mesh_draws_case(Stage::Mesh, "mesh_draws_mesh", payload.clone());
+    assert_eq!(
+        mesh_case_errors(payload.clone(), &source),
+        Vec::<String>::new()
+    );
+    let mut short = payload;
+    short.mesh_draw.as_mut().unwrap().object_launch = Some(crate::case::ObjectLaunch {
+        payload_b64: base64::engine::general_purpose::STANDARD.encode([0u8; 16]),
+        mesh_threadgroups: [2, 1, 1],
+    });
+    short.case_id = short.computed_case_id().unwrap();
+    let errors = mesh_case_errors(short, &source);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("payload holds 16 bytes, and the mesh function reads 32")),
+        "{errors:?}"
+    );
+    let (meshless, source) = mesh_draws_case(
+        Stage::Object,
+        "mesh_draws_object",
+        mesh_draw(None, None, Some("mesh_draws_fragment")),
+    );
+    assert_only_the_companion_gap(&mesh_case_errors(meshless, &source));
+}
+
+/// The checker refuses a rasterizing mesh case that names no fragment function, as a schema error
+/// before any executor runs: Metal's descriptor validation aborts the process on such a pipeline
+/// ("fragmentFunction must not be nil", the M3 Max under macOS 27.0.1), so no executor may reach
+/// it.
+#[test]
+fn a_rasterizing_mesh_case_without_a_fragment_function_never_reaches_an_executor() {
+    let (unnamed, source) =
+        mesh_draws_case(Stage::Mesh, "mesh_draws_grid", mesh_draw(None, None, None));
+    let errors = mesh_case_errors(unnamed, &source);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("mesh_draw rasterizes and names no fragment function")),
+        "{errors:?}"
+    );
+}
+
+/// A partner the module declares at another stage, one it does not declare, and one that binds a
+/// resource (the case authors only its own entry's) are refused by name.
+#[test]
+fn a_mesh_case_s_partners_are_checked_against_its_module() {
+    let errors = |stage, entry: &str, draw| {
+        let (case, source) = mesh_draws_case(stage, entry, draw);
+        mesh_case_errors(case, &source)
+    };
+    let contains = |errors: Vec<String>, what: &str| {
+        assert!(
+            errors.iter().any(|error| error.contains(what)),
+            "{what:?} not among {errors:?}"
+        );
+    };
+    contains(
+        errors(
+            Stage::Mesh,
+            "mesh_draws_grid",
+            mesh_draw(None, None, Some("mesh_draws_mesh")),
+        ),
+        "names \"mesh_draws_mesh\", which the module declares as no fragment function",
+    );
+    contains(
+        errors(
+            Stage::Mesh,
+            "mesh_draws_mesh",
+            mesh_draw(Some("mesh_draws_object"), None, Some("mesh_draws_fragment")),
+        ),
+        "mesh_draw.object \"mesh_draws_object\" binds resources",
+    );
+    contains(
+        errors(
+            Stage::Mesh,
+            "mesh_draws_grid",
+            mesh_draw(None, None, Some("nowhere")),
+        ),
+        "names \"nowhere\", which the module declares as no fragment function",
+    );
 }

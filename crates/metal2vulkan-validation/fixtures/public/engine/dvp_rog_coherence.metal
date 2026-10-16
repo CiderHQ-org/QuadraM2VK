@@ -1,4 +1,4 @@
-// Owned fixture (WP-DVP, DESIGN D86.2, D287): every access inside a raster order group's
+// Owned fixture: every access inside a raster order group's
 // critical section is coherent at device scope. Each function needs the Vulkan memory model, so
 // its buffer, device-address, and storage-image accesses carry the per-access operands: a
 // coherent access selects the model, and so does a device address, which no decoration covers.

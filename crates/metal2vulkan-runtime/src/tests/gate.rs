@@ -1,10 +1,8 @@
 //! `command_buffer/gate.rs`: a command buffer's waiters return once it finished and every
-//! runtime thread let go of it, and a hold lets go of its value before the gate opens; and what a
-//! scheduler pass spent (`scheduler::Spent`) lets go of its logs before its holds.
+//! runtime thread let go of it, and a hold lets go of its value before the gate opens.
 
 use crate::command_buffer::gate::{Exiting, Gate, Hold};
 use crate::error::{DeadlockCause, Error, TimedOut};
-use crate::scheduler::Spent;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -143,27 +141,4 @@ fn a_wait_once_the_process_is_exiting_is_refused_for_that_cause() {
     // An open gate answers whatever the exit.
     gate.finish();
     assert_eq!(gate.wait_unless(|| true), Ok(()));
-}
-
-/// What a scheduler pass spent lets go of its logs before its holds: with the command buffer
-/// finished, its last hold opens the gate, and a log, which holds handles of what the command
-/// buffer's encoders named, going after it would go after the waiters returned (a no-copy
-/// buffer's deallocator then ran on the scheduler's thread, after the program let go of the
-/// buffer: `runtime_lane::rebinds` under load).
-#[test]
-fn a_pass_lets_go_of_its_logs_before_its_holds() {
-    let (log, gate, gone, gone_while_open) = probe();
-    let value = Arc::new(());
-    let mut spent = Spent::<Arc<Probe>, Hold<()>>::default();
-    spent.logs.push(log);
-    spent.buffers.push(Hold::new(&value, &gate));
-    gate.finish();
-    assert!(!gate.is_open());
-    drop(spent);
-    assert!(gone.load(Ordering::SeqCst));
-    assert!(
-        !gone_while_open.load(Ordering::SeqCst),
-        "a log went after the hold opened the gate"
-    );
-    assert!(gate.is_open());
 }

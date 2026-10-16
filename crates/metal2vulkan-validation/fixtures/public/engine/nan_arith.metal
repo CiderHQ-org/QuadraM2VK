@@ -1,4 +1,4 @@
-// Owned fixture (NaN model, DESIGN D293): which NaN Metal's float arithmetic answers. Lane `i`
+// Owned fixture (NaN model): which NaN Metal's float arithmetic answers. Lane `i`
 // reads the bit patterns (a, b, c) from `in[i]` and writes eight words to `out[2i .. 2i + 1]`:
 // a + b, a - b, a * b, a / b, fma(a, b, c) (`air.fma`), a * b + c (`llvm.fmuladd`), sqrt(a)
 // (`air.sqrt`), and fmod(a, b) (`air.fmod`). Every operand is loaded, so nothing folds.

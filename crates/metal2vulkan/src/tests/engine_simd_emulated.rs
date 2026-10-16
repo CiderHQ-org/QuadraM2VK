@@ -393,12 +393,14 @@ fn expected(kernel: &str, g: Group, t: u32, steps: u32) -> u32 {
                 u32::from(l == 5) + (b + 5) * 10
             }
         }
+        // Metal's backend speculates the branch's arm (`air::canon::speculate`), so every lane of
+        // the quad votes, one that skips the arm too: the M3 Max (macOS 27.0.1) answers 95 on
+        // thread 0 (its mask 0xF) and 159 on thread 8 (lane 9 in the mask and the `any`).
         "quad_ballot_k" => {
-            let active = |u: u32| u % 7 != 2;
-            if !active(t) {
+            if t % 7 == 2 {
                 return 99;
             }
-            let quad: Vec<u32> = g.quad(t).filter(|&u| active(u)).collect();
+            let quad: Vec<u32> = g.quad(t).collect();
             let mask = quad.iter().fold(0u32, |a, &u| a | (1 << (u & 3)));
             let first = quad.first().copied() == Some(t);
             u32::from(first)
@@ -559,14 +561,15 @@ fn expected(kernel: &str, g: Group, t: u32, steps: u32) -> u32 {
         }
         // `simd_masks`: a quad ballot's bit `j` is quad lane `j`; a simdgroup's active mask (its
         // zero upper half folded in) has bit `i` for each active lane `i`.
+        // The divergent kernel's arm is speculated as Metal's backend does
+        // (`air::canon::speculate`): a lane that skips it votes too (the M3 Max, macOS 27.0.1,
+        // answers 2 on thread 8, the skipping lane 9's).
         "mask_quad_ballot_k" | "mask_quad_ballot_divergent_k" => {
-            let divergent = kernel == "mask_quad_ballot_divergent_k";
-            let active = |u: u32| !divergent || u % 7 != 2;
-            if !active(t) {
+            if kernel == "mask_quad_ballot_divergent_k" && t % 7 == 2 {
                 return 99;
             }
             g.quad(t)
-                .filter(|&u| active(u) && u % 3 == 0)
+                .filter(|&u| u % 3 == 0)
                 .fold(0u32, |a, u| a | (1 << (u & 3)))
         }
         "mask_simd_active_k" | "mask_simd_active_divergent_k" => {

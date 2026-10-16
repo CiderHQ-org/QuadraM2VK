@@ -1,4 +1,4 @@
-// Owned fixture (WP-A4, DESIGN D213): a texture selected between two parameters, read, queried,
+// Owned fixture: a texture selected between two parameters, read, queried,
 // and tested for null through the handle (`texture.is_null.switch`), as `handles`'s `select_read`,
 // alone in its module so a case can name it. Thread g uses a when (g & 1) == pick, else b:
 // out[g] = t(g, 0) + (width, height, is_null, 0). Loop-free.

@@ -1,4 +1,4 @@
-// Owned fixture (WP-MEN2, DESIGN D281): 8-bit control-point and patch attributes of a
+// Owned fixture: 8-bit control-point and patch attributes of a
 // post-tessellation vertex function. A rasterization-disabled function of three control points per
 // triangle patch; every invocation of patch p writes what it fetched for the patch, each value
 // widened to a word, to out[8p .. 8p + 8] (each store is the same at every domain point of the

@@ -10,6 +10,14 @@ use std::path::Path;
 
 /// The route of each committed public case `names` names, prepared for the CPU device.
 fn routes(names: &[&str]) -> BTreeMap<String, Route> {
+    prepared(names)
+        .into_iter()
+        .map(|(name, prepared)| (name, route(&prepared)))
+        .collect()
+}
+
+/// Each committed public case `names` names, prepared for the CPU device.
+fn prepared(names: &[&str]) -> BTreeMap<String, PreparedCase> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus");
     let device = DeviceType::Cpu;
     let cases = CorpusStore::new(&root).read_all_cases().unwrap();
@@ -25,9 +33,25 @@ fn routes(names: &[&str]) -> BTreeMap<String, Route> {
                 .unwrap_or_else(|error| panic!("{name}: {error}"));
             let prepared = super::super::prepare_case(device, admitted)
                 .unwrap_or_else(|error| panic!("{name}: {error}"));
-            (name.to_owned(), route(&prepared))
+            (name.to_owned(), prepared)
         })
         .collect()
+}
+
+/// Under a restriction whose kept members the device holds otherwise, a patch draw of a profile
+/// without `tessellationShader` (which compiles it emulated) runs on the runtime, the only path
+/// that runs the emulation; one of a profile with the feature, and a draw of primitives, go to
+/// the executor's context as before.
+#[test]
+fn a_patch_draw_a_profile_emulates_runs_on_the_runtime() {
+    let patches = "back-culled-clockwise-quad-output-of-a-patch-and-its-mirror";
+    let primitives = "authored-fragment-constant-color";
+    let cases = prepared(&[patches, primitives]);
+    let floor = crate::engine::load_profile("vk12-floor").unwrap();
+    let lavapipe = crate::engine::load_profile("lavapipe").unwrap();
+    assert!(emulated_patches(&cases[patches].mapped, &floor));
+    assert!(!emulated_patches(&cases[patches].mapped, &lavapipe));
+    assert!(!emulated_patches(&cases[primitives].mapped, &floor));
 }
 
 /// The runtime runs a kernel case of buffers, of textures (sparse and multisampled ones included)
@@ -147,6 +171,140 @@ fn committed_cases_route_by_their_own_inputs() {
     let routes = routes(&names);
     for (name, route) in expected {
         assert_eq!(routes[name], route, "{name}");
+    }
+}
+
+/// A case the runtime runs replays its templates through the runtime's own pipeline states, so the
+/// executor's context's refusal of them (a compute template with a stage input or an imageblock, a
+/// render template with vertex inputs or a post-tessellation stage) is not that run's: the pipelines
+/// the authored compile census lists for it are its own, and each command buffer it executes is
+/// uncovered, never the context's refusal.
+#[test]
+fn a_runtime_case_compiles_its_own_pipeline_where_the_context_refuses_its_templates() {
+    use super::super::{case_compiles, CompileSubject};
+    use crate::worker::compile::WorkerDevice;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus");
+    let device = DeviceType::Cpu;
+    let cases = CorpusStore::new(&root).read_all_cases().unwrap();
+    let profile = WorkerDevice::new(
+        crate::engine::load_description("lavapipe").unwrap(),
+        metal2vulkan::device::DevicePolicy::default(),
+    )
+    .unwrap();
+    for name in [
+        "a-kernel-encodes-the-stage-in-regions-of-its-dispatches",
+        "host-encoded-stage-in-regions-and-attribute-strides-of-executed-commands",
+        "a-kernel-encodes-the-imageblock-sizes-of-its-dispatches",
+        "host-encoded-vertex-attribute-strides-of-executed-draws",
+        "patch-draws-a-kernel-encodes-at-factor-scales-and-the-host-encodes",
+        "indexed-patch-draws-a-kernel-encodes-on-a-template-without-control-point-indices",
+    ] {
+        let case = cases
+            .iter()
+            .find(|case| case.name == name)
+            .unwrap_or_else(|| panic!("the committed public case {name}"))
+            .clone();
+        let admitted = admit(&root, case, ExecutionRequest::EngineCandidate { device })
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        let prepared = super::super::prepare_case(device, admitted)
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_eq!(route(&prepared), Route::Runtime, "{name}");
+        assert!(
+            matches!(
+                prepared.templates(),
+                Err(ExecutorError::NotSupported(
+                    crate::check::admission::NotSupported::NotImplemented(_)
+                ))
+            ),
+            "{name}: the executor's context replays its templates"
+        );
+        let planned =
+            case_compiles(&prepared, &profile).unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_eq!(
+            planned
+                .compiles
+                .iter()
+                .map(|compile| compile.subject)
+                .collect::<Vec<_>>(),
+            [CompileSubject::Case],
+            "{name}"
+        );
+        assert_eq!(planned.host_replayed, 1, "{name}");
+    }
+}
+
+/// An object or mesh case compiles device-free as the runtime compiles its draw: the authored
+/// compile census plans one mesh draw request (`PipelineRequest::MeshDraw`) of its functions, its
+/// generated stages from its companion's source, for its own stage's bind shape, and that request
+/// compiles on a profile with mesh shaders and on one that emulates them, with no table handles.
+#[test]
+fn a_mesh_case_compiles_its_draw_device_free() {
+    use super::super::{case_compiles, CompileSubject, PlannedPipeline};
+    use crate::acceptance::{compile_pipeline, AcceptancePipeline, PipelineRequest};
+    use crate::worker::compile::WorkerDevice;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus");
+    let device = DeviceType::Cpu;
+    let profiles = ["lavapipe", "moltenvk-m3"].map(|stem| {
+        let worker = WorkerDevice::new(
+            crate::engine::load_description(stem).unwrap(),
+            metal2vulkan::device::DevicePolicy::default(),
+        )
+        .unwrap();
+        (stem, worker)
+    });
+    for fixture in [
+        crate::mesh_cases::grid(),
+        crate::mesh_cases::object(),
+        crate::mesh_cases::device_write(),
+        crate::mesh_cases::observed(),
+        crate::mesh_cases::launched(),
+        crate::mesh_cases::payload(),
+        crate::mesh_cases::payload_barrier(),
+        crate::mesh_cases::payload_outputs(),
+    ] {
+        let name = fixture.case.name.clone();
+        let admitted = admit(
+            &root,
+            fixture.case,
+            ExecutionRequest::EngineCandidate { device },
+        )
+        .unwrap_or_else(|error| panic!("{name}: {error}"));
+        let prepared = super::super::prepare_case(device, admitted)
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        for (stem, worker) in &profiles {
+            let planned = case_compiles(&prepared, worker)
+                .unwrap_or_else(|error| panic!("{name} {stem}: {error}"));
+            assert_eq!(planned.host_replayed, 0, "{name} {stem}");
+            let [compile] = planned.compiles.as_slice() else {
+                panic!("{name} {stem}: {} compiles", planned.compiles.len());
+            };
+            assert_eq!(compile.subject, CompileSubject::Case, "{name} {stem}");
+            let PlannedPipeline::Mesh {
+                request, libraries, ..
+            } = &compile.pipeline
+            else {
+                panic!("{name} {stem}: not a mesh draw's compile");
+            };
+            assert!(
+                matches!(request, PipelineRequest::MeshDraw { .. }),
+                "{name} {stem}"
+            );
+            let bitcode = libraries
+                .iter()
+                .map(|library| library.bitcode().unwrap())
+                .collect::<Vec<_>>();
+            let bitcode = bitcode.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            match compile_pipeline(&bitcode, request, worker.device(), None) {
+                Ok(compiled) => {
+                    assert!(
+                        matches!(compiled.pipeline, AcceptancePipeline::Render(_)),
+                        "{name} {stem}"
+                    );
+                    request.check_handles(&compiled.handles).unwrap();
+                }
+                Err(error) => panic!("{name} {stem}: {error:?}"),
+            }
+        }
     }
 }
 
@@ -486,12 +644,11 @@ fn runs_as_the_executor_compiles_it(name: &str) {
     let authored = case.clone();
     let executor = match case.stage {
         crate::case::Stage::Kernel => "engine-runtime-compute",
-        crate::case::Stage::Vertex | crate::case::Stage::Fragment => "engine-runtime-render",
-        // No runtime executor runs a mesh render pipeline's stages yet: a case naming one carries
-        // ToolingRequirement::MeshPipeline and stops before execution.
-        crate::case::Stage::Object | crate::case::Stage::Mesh => {
-            panic!("{name}: no runtime executor runs an object or mesh function yet (D334)")
-        }
+        // A mesh draw is a render encoder's draw (`runtime_case::encoded_mesh`).
+        crate::case::Stage::Vertex
+        | crate::case::Stage::Fragment
+        | crate::case::Stage::Object
+        | crate::case::Stage::Mesh => "engine-runtime-render",
     };
     let admitted = admit(&root, case, ExecutionRequest::EngineCandidate { device }).unwrap();
     let prepared = super::super::prepare_case(device, admitted).unwrap();
@@ -765,4 +922,70 @@ fn the_runtime_path_calls_the_functions_its_tables_hold() {
         reported.is_empty(),
         "the validation layer reported: {reported:#?}"
     );
+}
+
+/// The engine's candidate draws each owned object and mesh case through the runtime's mesh path
+/// (`runtime_case::encoded_mesh`) and reads what Metal drew ([`crate::mesh_cases`]): a mesh grid
+/// through its fragment partner, an object function's payload and grid through its mesh and
+/// fragment partners, a mesh function's device write with rasterization off, a mesh grid through
+/// the generated observer fragment in its fragment partner's place, an object function's launch
+/// through the generated launch observer and its observer fragment, and a mesh function's payload
+/// through the generated object function that writes it (the four payload cases the Metal
+/// executor's test draws, one of them on a GPU only, for the reason the list states), one read past
+/// the mesh function's own payload type within the object function's. A device without
+/// `VK_EXT_mesh_shader` draws through the runtime's emulation, whose notice the row records, and
+/// a device with it records none.
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+#[test]
+fn mesh_cases_draw_through_the_runtime_as_metal_drew_them() {
+    use crate::candidate::tests::engine_compute::BACKEND;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus");
+    let device = crate::gpu::TEST_DEVICE;
+    let mut emulated = BTreeSet::new();
+    for fixture in [
+        crate::mesh_cases::grid(),
+        crate::mesh_cases::object(),
+        crate::mesh_cases::device_write(),
+        crate::mesh_cases::observed(),
+        crate::mesh_cases::launched(),
+        crate::mesh_cases::payload(),
+        crate::mesh_cases::payload_barrier(),
+        crate::mesh_cases::payload_outputs(),
+        // On a GPU only: its mesh function (`mesh_order_mesh`, and `mesh_order_solo` without an
+        // object stage alike) aborts the CPU ICD's compiler ("Cannot emit physreg copy
+        // instruction"), docs/FAST-PATHS.md's known gaps.
+        #[cfg(m2v_gpu)]
+        crate::mesh_cases::payload_order(),
+    ] {
+        let name = fixture.case.name.clone();
+        let admitted = admit(
+            &root,
+            fixture.case,
+            ExecutionRequest::EngineCandidate { device },
+        )
+        .unwrap_or_else(|error| panic!("{name}: {error}"));
+        let prepared = super::super::prepare_case(device, admitted)
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_eq!(route(&prepared), Route::Runtime, "{name}");
+        let RuntimeOutcome::Ran(attempt) = run(&prepared, BACKEND) else {
+            panic!("{name}: the runtime raised a gap");
+        };
+        let run = attempt
+            .result
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_eq!(run.output, fixture.metal, "{name}");
+        assert_eq!(run.environment["executed_by"], "runtime", "{name}");
+        assert_eq!(
+            run.environment["executor"], "engine-runtime-render",
+            "{name}"
+        );
+        let notices = run.environment["runtime_degrades"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{name}: the row records the run's degrade notices"));
+        eprintln!("{name}: degrade notices {notices:?}");
+        let emulation = metal2vulkan_runtime::Degradation::EmulatedMeshDraws.code();
+        emulated.insert(notices.iter().any(|code| code == emulation));
+    }
+    // One device draws every case alike: natively, or through the emulation each time.
+    assert_eq!(emulated.len(), 1, "{emulated:?}");
 }

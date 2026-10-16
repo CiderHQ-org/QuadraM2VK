@@ -6,35 +6,73 @@
 //!   of Metal's times and `CACurrentMediaTime`; `CLOCK_MONOTONIC_RAW` elsewhere on Unix, its
 //!   counterpart (monotonic, never slewed, stopped while the system sleeps). Other platforms count
 //!   the runtime's own monotonic clock, which no device can calibrate against.
-//! - **GPU times.** The command buffer's first batch writes a timestamp at the top of its work,
-//!   and its last batch one after the barrier that ends it (`command_buffer/submit.rs`), into a
-//!   slot of two queries of one of the device's timestamp pools ([`Slot`]), which it takes at its
-//!   commit.
-//!   The completion thread reads the two once the command buffer completed, and gives the slot
+//! - **GPU times.** The command buffer's first batch writes a timestamp at the top of its work
+//!   (after a barrier its first encoder waits behind for earlier work, once every command before
+//!   it completed, where Metal's start follows such work's end), and its last batch one after the
+//!   barrier that ends it (`command_buffer/submit.rs`), into a slot of one of the device's
+//!   timestamp pools ([`Slot`]), which it takes as its first encoder opens where its slot holds
+//!   the start that encoder writes (below), else at its commit.
+//! - **The start in the first encoder.** A slot holds three queries ([`PREFIXED`]) where the
+//!   pools are not Metal counter sample buffers and the driver's submissions do not stall on
+//!   semaphore operations: the start a command buffer of barriers writes, the end, and the start
+//!   the first encoder's own command buffer writes as it opens, its first commands (its prefix:
+//!   the reset of the end and that start, then the start at the top of the pipe). Where the batch
+//!   plans no barrier before that encoder and its command buffer reaches the queue as recorded,
+//!   the batch begins with no command buffer of its own, and the prefix's start is the command
+//!   buffer's. It is the same place: either start is written at the top of the pipe, after every
+//!   command submitted before the batch's work and before any of it. Elsewhere (a barrier planned
+//!   there, a caller's image moved first, the encoder run again or not at all) a command buffer of
+//!   barriers writes the first start before the barrier, as without a prefix, and that start is
+//!   read; the prefix's is written after it and never read. A Metal counter sample buffer's slot
+//!   holds the two alone ([`PLAIN`]), as does a slot where every batch with work starts with a
+//!   command buffer of barriers anyway (`DriverFact::SemaphoreOperationsStallSubmits`,
+//!   `command_buffer/submit.rs`), and its starts are the barriers'. The completion turn reads
+//!   the start the batch took and the end once the command buffer completed, and gives the slot
 //!   back. Their difference, in ticks of `timestampPeriod` nanoseconds, is exact on every device
 //!   that writes timestamps.
 //! - **Pools made as needed**. Each pool holds [`SLOTS`] slots. The device makes its first at its
-//!   first timed commit, and another whenever a command buffer is committed while every slot of the
+//!   first timed command buffer, and another whenever one takes a slot while every slot of the
 //!   ones it has is held, until the device refuses one: its own limit, which Vulkan states nowhere
-//!   else (a pool is 4096 queries; the runtime bounds none, as Metal times every command buffer in
-//!   flight). It releases them at its teardown. A commit asks the pool that gave the last slot
-//!   first, and the others only when that one has none free: the pools are searched as one fills,
-//!   not at every commit. On a driver whose pools are Metal counter sample buffers
-//!   (`DriverFact::TimestampPoolsAreCounterSampleBuffers`: MoltenVK) it makes one, never more:
-//!   Metal keeps at most 32 of those live per GPU, each of at most 4096 timestamps (measured
-//!   through MoltenVK 1.4.1 on an M3 Max and an M4: the 33rd failed, as did a pool of 8192), so
-//!   a pool per command buffer ran out with 32 command buffers in flight, and each pool more is
-//!   one fewer for another device on the GPU. One pool of the most timestamps holds a slot for
-//!   2048 command buffers in flight. A command buffer committed while every slot is held and no
-//!   pool more can be made has no timestamps: its GPU times are refused as on a device that
-//!   writes none, and the device announces it once (`Degradation::UntimedCommandBuffer`).
+//!   else (a pool is 6144 queries where a slot holds three, else 4096; the runtime bounds none,
+//!   as Metal times every command buffer in flight). It releases them at its teardown. A slot is
+//!   taken from the pool that gave the last one first, and the others only when that one has none
+//!   free: the pools are searched as one fills, not for every slot. On a driver whose pools are Metal counter sample
+//!   buffers (`DriverFact::TimestampPoolsAreCounterSampleBuffers`: MoltenVK) it makes one, of
+//!   [`PLAIN`] queries a slot, never more: Metal keeps at most 32 of those live per GPU, each of
+//!   at most 4096 timestamps (measured through MoltenVK 1.4.1 on an M3 Max and an M4: the 33rd
+//!   failed, as did a pool of 8192), so a pool per command buffer ran out with 32 command buffers
+//!   in flight, and each pool more is one fewer for another device on the GPU. One pool of the
+//!   most timestamps holds a slot for 2048 command buffers in flight. A command buffer committed
+//!   while every slot is held and no pool more can be made has no timestamps: its GPU times are
+//!   refused as on a device that writes none, and the device announces it once
+//!   (`Degradation::UntimedCommandBuffer`).
 //!   Waiting for a slot instead could wait for work that needs the program to go on.
 //! - **Calibrated where the device can.** With `VK_KHR_calibrated_timestamps` (or its
 //!   `VK_EXT_` form) and a host time domain the runtime can read (`CLOCK_MONOTONIC_RAW` or
 //!   `CLOCK_MONOTONIC`), a pair of GPU and host readings taken at the commit places each
 //!   timestamp on the host's clock, within the pair's stated deviation: Metal's answer. A domain
 //!   that is not the host's clock is moved onto it by reading both clocks at once (MoltenVK's
-//!   `CLOCK_MONOTONIC_RAW` is macOS's, which counts sleep; Metal's does not).
+//!   `CLOCK_MONOTONIC_RAW` is macOS's, which counts sleep; Metal's does not). A pair is read again
+//!   while each reading halves the deviation the one before it stated, [`READINGS`] at most, and
+//!   the one of the smallest places the times ([`least_deviation`]). The specification leaves
+//!   that to the application, which "can choose to re-issue the timestamp calibration call
+//!   pursuing a lower deviation value" (`vkGetCalibratedTimestampsKHR`). A reading's two values
+//!   may stand as far apart as it states. On an Iris Xe (ANV, Mesa 26.2.4, i915), the first
+//!   reading after the GPU idled 100 ms stated 165 us at the median, and the device's timestamp
+//!   in it was read that much after its host time: placed by it, every GPU time came 156 us early
+//!   at the median (105 to 193 us over 200 readings). The reading after it stated 7.6 us and
+//!   agreed with the next ones within 0.4 us.
+//! - **Checked against the command buffer's life.** A time the pair places is the GPU's, and the
+//!   GPU ran the work between the first batch's submission (the kernel start) and the moment the
+//!   completion turn saw it complete. A pair that places the start before that start, or the
+//!   end after that completion, by more than its stated deviation and the clocks' drift since it
+//!   ([`DRIFT_PPM`]) allow, disagrees with the device's own timestamps: the command buffer is
+//!   placed as below, as on an uncalibrated device, counted
+//!   (`WorkCounts::calibration_disagreements`) and announced once
+//!   (`Degradation::UncalibratedGpuTimes`). A Radeon 780M (RADV PHOENIX, Mesa 26.0.8, Linux 7.0)
+//!   after two MODE2 GPU resets wrote timestamp queries 65.15 s ahead of its own calibrated
+//!   `DEVICE` domain, steadily, where an RX 7900 XTX beside it agreed within its deviation:
+//!   placed by the pair, every GPU time came 65 s after its command buffer completed.
 //! - **Uncalibrated otherwise.** Without them, the end is placed at the host time the command
 //!   buffer completed and the start the timestamps' difference before it: the duration exact,
 //!   both times late by the completion's latency. The device announces it once
@@ -51,7 +89,7 @@
 //!   Max): on its own, a microsecond after its `kernelEndTime`; committed behind a 2.5-ms fill, 112
 //!   us after the fill's `GPUEndTime`, 2.7 ms after its own `kernelEndTime`; waiting for an event
 //!   the host signals, 7 us after the signal, its `kernelEndTime` 6 us after it. The completion
-//!   thread places each command buffer as it completes, in its queue's order: each completed
+//!   turn places each command buffer as it completes, in its queue's order: each completed
 //!   command buffer moves its queue's latest GPU start and end. On MoltenVK the two timestamps cost
 //!   such a command buffer about 150 us of latency (each is sampled in a blit pass of its own),
 //!   against about 15 us without. One that waits keeps its timestamps: when the GPU passes a wait
@@ -72,7 +110,7 @@
 //!      `GPUEndTime` count on Apple's GPUs.
 //!   2. **Inside the command buffer's life.** Its commit <= `kernelStartTime` <= `kernelEndTime`
 //!      <= `GPUStartTime` <= `GPUEndTime` <= the moment its completion is observable: the end is
-//!      read on the completion thread before the command buffer's status becomes `Completed`
+//!      read in the completion turn before the command buffer's status becomes `Completed`
 //!      and before its completed handlers run, and the start is never later than the end.
 //!   3. **A serial queue.** In a queue's commit order, which is the order its command buffers
 //!      complete and are placed in (`command_buffer/completion.rs`), each one's GPU start is at
@@ -98,22 +136,41 @@
 
 use super::device::lock;
 use super::release;
+use super::work_counts::Counters;
 use ash::vk;
 use std::collections::BTreeSet;
 use std::ffi::{c_char, CStr, CString};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// The longest a device's calibration pair serves the commits after it.
 pub(crate) const REFRESH: Duration = Duration::from_millis(100);
 
-/// The slots of each of a device's timestamp pools, two queries each: 4096 timestamps, the most
-/// one Metal counter sample buffer holds (the module documentation).
+/// The most readings one calibration pair takes ([`least_deviation`]).
+pub(crate) const READINGS: u32 = 4;
+
+/// How far apart, in parts per million of the time since a pair, the GPU's clock and the host's
+/// may drift before a placed time counts as disagreeing with the command buffer's life (the module
+/// docs): above a crystal's tolerance, and NTP's own slew limit, so that a sound pair never trips
+/// the check, and far below a disagreement that places a time seconds away.
+pub(crate) const DRIFT_PPM: u64 = 500;
+
+/// The slots of each of a device's timestamp pools: of [`PLAIN`] queries each where its pools are
+/// Metal counter sample buffers, 4096 timestamps, the most one holds (the module documentation).
 pub(crate) const SLOTS: u32 = 2048;
+
+/// The queries of a slot where the pools are not Metal counter sample buffers: the start a
+/// command buffer of barriers writes, the end, and the start the first encoder writes (the module
+/// documentation).
+pub(crate) const PREFIXED: u32 = 3;
+
+/// The queries of a slot where the pools are Metal counter sample buffers: the start and the end.
+pub(crate) const PLAIN: u32 = 2;
 
 /// The most timestamps MoltenVK made one Metal counter sample buffer of, on an M3 Max and an M4.
 const SAMPLE_BUFFER_TIMESTAMPS: u32 = 4096;
-const _: () = assert!(2 * SLOTS <= SAMPLE_BUFFER_TIMESTAMPS);
+const _: () = assert!(PLAIN * SLOTS <= SAMPLE_BUFFER_TIMESTAMPS);
 
 /// The host time now, in seconds of the clock the runtime's GPU and kernel times count (the
 /// module documentation): `CLOCK_UPTIME_RAW` on macOS, which `mach_absolute_time` and
@@ -221,6 +278,60 @@ pub(crate) struct Pair {
     pub(crate) host: u64,
 }
 
+/// A calibration reading: its pair, and how far apart, in nanoseconds, its two values may stand:
+/// the deviation the call stated, and for a host domain that is not the host's clock, the span
+/// of the host's readings around the domain's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Reading {
+    pub(crate) pair: Pair,
+    pub(crate) deviation: u64,
+}
+
+/// A command buffer's life on the host's clock, in nanoseconds: from the moment the scheduler
+/// began submitting its first batch to the moment a completion turn saw its last complete.
+/// Its GPU work ran inside it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Life {
+    pub(crate) kernel_start: u64,
+    pub(crate) completed: u64,
+}
+
+/// How a command buffer's timestamps were placed on the host's clock ([`GpuClock::span`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Placement {
+    /// By the device's calibration pair.
+    Calibrated,
+    /// By its completion: the device had no pair at its commit.
+    Uncalibrated,
+    /// By its completion: the pair placed a time outside its life by `by` nanoseconds, more than
+    /// the pair's stated `deviation` and the clocks' drift allow (the module docs).
+    Disagreed { by: u64, deviation: u64 },
+}
+
+/// Of the readings `read` gives, the one of the smallest deviation, and how many `read` was
+/// called for: one more while the latest halved the deviation the one before it stated,
+/// [`READINGS`] at most (the module docs). `None` where the first fails; a later failure ends
+/// them.
+pub(crate) fn least_deviation(mut read: impl FnMut() -> Option<Reading>) -> Option<(Reading, u32)> {
+    let mut least = read()?;
+    let mut previous = least.deviation;
+    let mut calls = 1;
+    while calls < READINGS {
+        calls += 1;
+        let Some(next) = read() else {
+            break;
+        };
+        if next.deviation < least.deviation {
+            least = next;
+        }
+        if next.deviation.saturating_mul(2) > previous {
+            break;
+        }
+        previous = next.deviation;
+    }
+    Some((least, calls))
+}
+
 impl GpuClock {
     /// The clock of a queue family with `valid_bits` timestamp bits and `period` nanoseconds
     /// per tick; `None` where the family writes no timestamps.
@@ -236,9 +347,15 @@ impl GpuClock {
         })
     }
 
-    /// A calibrated pair now, where the device has calibration and the readings succeed.
-    pub(crate) fn pair(&self) -> Option<Pair> {
+    /// A calibrated pair now, where the device has calibration and the readings succeed: the
+    /// reading of the smallest deviation ([`least_deviation`]), and how many readings it took.
+    pub(crate) fn pair(&self) -> Option<(Reading, u32)> {
         let calibration = self.calibration?;
+        least_deviation(|| self.reading(calibration))
+    }
+
+    /// One reading of `calibration`, where it succeeds.
+    fn reading(&self, calibration: Calibration) -> Option<Reading> {
         let infos = [
             vk::CalibratedTimestampInfoKHR::default().time_domain(vk::TimeDomainKHR::DEVICE),
             vk::CalibratedTimestampInfoKHR::default().time_domain(calibration.domain),
@@ -264,19 +381,23 @@ impl GpuClock {
         #[cfg(unix)]
         {
             // The domain's clock onto the host's: both read at once, the host's around it.
-            let host = if domain == BASE {
-                values[1]
+            let (host, around) = if domain == BASE {
+                (values[1], 0)
             } else {
                 let first = read_clock(BASE)?;
                 let during = read_clock(domain)?;
                 let last = read_clock(BASE)?;
                 let middle = first + last.saturating_sub(first) / 2;
                 let offset = i128::from(middle) - i128::from(during);
-                u64::try_from(i128::from(values[1]) + offset).ok()?
+                let host = u64::try_from(i128::from(values[1]) + offset).ok()?;
+                (host, last.saturating_sub(first))
             };
-            Some(Pair {
-                ticks: values[0],
-                host,
+            Some(Reading {
+                pair: Pair {
+                    ticks: values[0],
+                    host,
+                },
+                deviation: deviation.saturating_add(around),
             })
         }
         #[cfg(not(unix))]
@@ -293,22 +414,38 @@ impl GpuClock {
     }
 
     /// The host times, in nanoseconds of the host's clock, of a command buffer's timestamps
-    /// `start` and `end`: placed by `pair` where calibrated, else ending at `completed`, the
-    /// host time its completion was seen, and starting their duration before.
+    /// `start` and `end`, and how they were placed: by `reading`'s pair where they lie inside the
+    /// command buffer's `life` within the reading's deviation and the clocks' drift since it
+    /// ([`DRIFT_PPM`]); else, and without a reading, ending where `life` ends, the host time its
+    /// completion was seen, and starting their duration before (the module docs).
     pub(crate) fn span(
         &self,
-        pair: Option<Pair>,
+        reading: Option<Reading>,
         start: u64,
         end: u64,
-        completed: u64,
-    ) -> (u64, u64) {
-        match pair {
-            Some(pair) => (self.place(pair, start), self.place(pair, end)),
-            None => (
-                completed.saturating_sub(self.duration(start, end)),
-                completed,
-            ),
+        life: Life,
+    ) -> ((u64, u64), Placement) {
+        let by_completion = (
+            life.completed.saturating_sub(self.duration(start, end)),
+            life.completed,
+        );
+        let Some(Reading { pair, deviation }) = reading else {
+            return (by_completion, Placement::Uncalibrated);
+        };
+        let placed = (self.place(pair, start), self.place(pair, end));
+        // How far each may stand from the truth: the deviation the pair stated, and the drift
+        // since the pair to the bound it is checked against.
+        let allowed = |bound: u64| {
+            let drift = bound.abs_diff(pair.host).saturating_mul(DRIFT_PPM) / 1_000_000;
+            deviation.saturating_add(drift)
+        };
+        let early = life.kernel_start.saturating_sub(placed.0);
+        let late = placed.1.saturating_sub(life.completed);
+        if early > allowed(life.kernel_start) || late > allowed(life.completed) {
+            let by = early.max(late);
+            return (by_completion, Placement::Disagreed { by, deviation });
         }
+        (placed, Placement::Calibrated)
     }
 
     /// The nanoseconds from timestamp `start` to `end`.
@@ -405,7 +542,9 @@ impl FromHost {
 pub(crate) struct Timing {
     clock: Option<GpuClock>,
     from_host: Option<FromHost>,
-    latest: Mutex<Option<(Instant, Pair)>>,
+    latest: Mutex<Option<(Instant, Reading)>>,
+    /// Its slots hold the start the first encoder writes ([`PREFIXED`]).
+    prefixed: bool,
     pools: Mutex<Pools>,
 }
 
@@ -418,23 +557,26 @@ pub(crate) struct Pools {
     /// One on a driver whose pools are Metal counter sample buffers; else none until the device
     /// refuses a pool, then the pools it made.
     most: Option<usize>,
+    /// The queries of each slot: [`PREFIXED`] or [`PLAIN`].
+    per_slot: u32,
 }
 
 impl Pools {
-    /// No pool yet, and at most `most` to be made where given.
-    pub(crate) fn new(most: Option<usize>) -> Pools {
+    /// No pool yet, and at most `most` to be made where given, each slot of `per_slot` queries.
+    pub(crate) fn new(most: Option<usize>, per_slot: u32) -> Pools {
         Pools {
             made: Vec::new(),
             at: 0,
             most,
+            per_slot,
         }
     }
 
     /// A free slot of a pool made, the one that gave the last slot asked first, else of a pool
-    /// `make` makes now where the device has made fewer than its most; `None` when every slot is
-    /// held and no pool more can be made. A pool `make` cannot make (`None`) ends the making: the
-    /// device makes no more.
-    pub(crate) fn take(&mut self, make: impl FnOnce() -> Option<vk::QueryPool>) -> Option<Slot> {
+    /// `make` makes now of the queries it is given where the device has made fewer than its most;
+    /// `None` when every slot is held and no pool more can be made. A pool `make` cannot make
+    /// (`None`) ends the making: the device makes no more.
+    pub(crate) fn take(&mut self, make: impl FnOnce(u32) -> Option<vk::QueryPool>) -> Option<Slot> {
         let count = self.made.len();
         for step in 0..count {
             let at = (self.at + step) % count;
@@ -446,11 +588,11 @@ impl Pools {
         if self.most.is_some_and(|most| count >= most) {
             return None;
         }
-        let Some(queries) = make() else {
+        let Some(queries) = make(self.per_slot * SLOTS) else {
             self.most = Some(count);
             return None;
         };
-        self.made.push(Pool::new(queries, SLOTS));
+        self.made.push(Pool::new(queries, SLOTS, self.per_slot));
         self.at = count;
         self.made.last()?.take()
     }
@@ -471,15 +613,22 @@ impl Pools {
 pub(crate) struct Pool {
     queries: vk::QueryPool,
     free: Arc<Mutex<Vec<u32>>>,
+    /// The slots taken so far: each take's lease is the count after it.
+    leases: AtomicU64,
+    /// The queries of each slot.
+    per_slot: u32,
 }
 
 impl Pool {
-    /// The `slots` slots of `queries`, a pool of `2 * slots` timestamp queries, every one free.
-    pub(crate) fn new(queries: vk::QueryPool, slots: u32) -> Pool {
+    /// The `slots` slots of `queries`, a pool of `per_slot * slots` timestamp queries, every one
+    /// free.
+    pub(crate) fn new(queries: vk::QueryPool, slots: u32, per_slot: u32) -> Pool {
         Pool {
             queries,
             // Popped from the end: slot 0 first.
             free: Arc::new(Mutex::new((0..slots).rev().collect())),
+            leases: AtomicU64::new(0),
+            per_slot,
         }
     }
 
@@ -489,18 +638,27 @@ impl Pool {
         Some(Slot {
             queries: self.queries,
             index,
+            per_slot: self.per_slot,
+            lease: self.leases.fetch_add(1, Ordering::Relaxed) + 1,
             free: Arc::clone(&self.free),
         })
     }
 }
 
-/// A slot of one of its device's timestamp pools: two queries, a command buffer's start and end.
-/// The command buffer holds it from its commit until the completion thread read them; dropping
-/// it gives it back.
+/// A slot of one of its device's timestamp pools: a command buffer's start and end, and where it
+/// has three queries, the start its first encoder writes (the module docs). The command buffer
+/// holds it from its first encoder's opening, or its commit, until the completion turn read
+/// them; dropping it gives it back.
 #[derive(Debug)]
 pub(crate) struct Slot {
     queries: vk::QueryPool,
     index: u32,
+    per_slot: u32,
+    /// This holding of the slot: above every earlier holding's of its pool. A slot is taken again
+    /// only once given back, so a holding of a slot with a higher lease began after every lower
+    /// one's command buffer had its timestamps read, or failed (`command_buffer/kept_barriers.rs`
+    /// takes a kept command buffer that writes the slot's queries again only then).
+    lease: u64,
     free: Arc<Mutex<Vec<u32>>>,
 }
 
@@ -510,9 +668,20 @@ impl Slot {
         self.queries
     }
 
-    /// Its first query, the start; the end is the next.
+    /// Its first query, the start a command buffer of barriers writes; the end is the next.
     pub(crate) fn first(&self) -> u32 {
-        self.index * 2
+        self.index * self.per_slot
+    }
+
+    /// The query of the start its command buffer's first encoder writes, where it has one (the
+    /// module docs): after the end's.
+    pub(crate) fn prefix(&self) -> Option<u32> {
+        (self.per_slot == PREFIXED).then(|| self.first() + 2)
+    }
+
+    /// This holding's lease (the field's docs).
+    pub(crate) fn lease(&self) -> u64 {
+        self.lease
     }
 }
 
@@ -530,7 +699,8 @@ impl Timing {
     /// times from the host and writes no timestamps (the module docs), for that reason. With
     /// `scarce_pools` (`DriverFact::TimestampPoolsAreCounterSampleBuffers`) it makes one
     /// timestamp pool at most, else as many as its command buffers in flight need until the
-    /// device refuses one.
+    /// device refuses one. With `prefixed`, a slot also holds the start its command buffer's
+    /// first encoder writes ([`PREFIXED`] queries; else [`PLAIN`]); never with `scarce_pools`.
     ///
     /// # Safety
     ///
@@ -546,6 +716,7 @@ impl Timing {
         extension: Option<Extension>,
         from_host: Option<FromHost>,
         scarce_pools: bool,
+        prefixed: bool,
     ) -> Timing {
         // SAFETY: the caller's.
         let calibration = extension.and_then(|extension| unsafe {
@@ -555,11 +726,22 @@ impl Timing {
             clock: GpuClock::new(valid_bits, period, calibration),
             from_host,
             latest: Mutex::new(None),
-            pools: Mutex::new(Pools::new(scarce_pools.then_some(1))),
+            prefixed: prefixed && !scarce_pools,
+            pools: Mutex::new(match (scarce_pools, prefixed) {
+                (true, _) => Pools::new(Some(1), PLAIN),
+                (false, true) => Pools::new(None, PREFIXED),
+                (false, false) => Pools::new(None, PLAIN),
+            }),
         }
     }
 
-    /// A slot for a command buffer committed now, from the device's pools, a pool made where
+    /// Whether its slots hold the start a command buffer's first encoder writes as it opens (the
+    /// module docs): its command buffers take their slots then.
+    pub(crate) fn prefixed(&self) -> bool {
+        self.prefixed
+    }
+
+    /// A slot for a timed command buffer, from the device's pools, a pool made where
     /// every slot of the ones made is held ([`Pools::take`]); `None` where the device writes no
     /// timestamps, or every slot is held and no pool more can be made.
     ///
@@ -568,10 +750,10 @@ impl Timing {
     /// `device` is the live device of this timing.
     pub(crate) unsafe fn slot(&self, device: &ash::Device) -> Option<Slot> {
         self.clock.as_ref()?;
-        lock(&self.pools).take(|| {
+        lock(&self.pools).take(|count| {
             let info = vk::QueryPoolCreateInfo::default()
                 .query_type(vk::QueryType::TIMESTAMP)
-                .query_count(2 * SLOTS);
+                .query_count(count);
             // SAFETY: the caller's; `info` is valid.
             unsafe { device.create_query_pool(&info, None) }.ok()
         })
@@ -610,20 +792,22 @@ impl Timing {
         self.from_host
     }
 
-    /// The device's latest calibration pair, taken now when the last is [`REFRESH`] old or
-    /// there is none; `None` where the device has no calibration or the reading fails.
-    pub(crate) fn pair(&self) -> Option<Pair> {
+    /// The device's latest calibration reading, its pair and stated deviation, taken now when
+    /// the last is [`REFRESH`] old or there is none, and counted in `counts`; `None` where the
+    /// device has no calibration or the reading fails.
+    pub(crate) fn pair(&self, counts: &Counters) -> Option<Reading> {
         let clock = self.clock.as_ref()?;
         clock.calibration?;
         let mut latest = lock(&self.latest);
-        if let Some((at, pair)) = *latest {
+        if let Some((at, reading)) = *latest {
             if at.elapsed() < REFRESH {
-                return Some(pair);
+                return Some(reading);
             }
         }
-        let pair = clock.pair()?;
-        *latest = Some((Instant::now(), pair));
-        Some(pair)
+        let (reading, readings) = clock.pair()?;
+        counts.calibrated(readings, reading.deviation);
+        *latest = Some((Instant::now(), reading));
+        Some(reading)
     }
 }
 
@@ -683,23 +867,26 @@ unsafe fn calibration(
 /// until known.
 #[derive(Debug, Default)]
 pub(crate) struct Times {
-    /// Its slot of the device's timestamp pool, from its commit until the completion thread read
-    /// its timestamps.
+    /// Its slot of the device's timestamp pool, from its first encoder's opening (or its commit)
+    /// until the completion turn read its timestamps.
     pub(crate) slot: Option<Slot>,
+    /// Its first batch wrote the start into the slot's third query alone, the first encoder's
+    /// prefix (the module docs): the start read is that one, not the first.
+    pub(crate) prefixed: bool,
     /// What its timestamps gave.
     pub(crate) stamped: Stamped,
-    /// The device's calibration pair at its commit, where the device has one.
-    pub(crate) pair: Option<Pair>,
+    /// The device's calibration reading at its commit, where the device has one.
+    pub(crate) pair: Option<Reading>,
     /// The scheduler began submitting its first batch.
     pub(crate) kernel_start: u64,
     /// The scheduler finished submitting its last batch.
     pub(crate) kernel_end: u64,
-    /// The completion thread saw its last batch complete.
+    /// A completion turn saw its last batch complete.
     pub(crate) completed: u64,
     /// Its GPU start and end, once read.
     pub(crate) gpu: Option<(u64, u64)>,
     /// Its GPU start and end where it wrote no timestamps: placed among its queue's command
-    /// buffers by the completion thread as it completed.
+    /// buffers by the completion turn as it completed.
     pub(crate) placed: Option<(u64, u64)>,
 }
 

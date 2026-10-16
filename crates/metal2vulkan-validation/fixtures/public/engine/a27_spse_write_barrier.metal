@@ -1,13 +1,13 @@
 // metal-std: metal4.0
 // metal-macos-min: 27.0
-// Owned fixture (WP-A27, DESIGN D301): the AIR 2.9 twin of
+// Owned fixture: the AIR 2.9 twin of
 // validation/fixtures/public/engine/spse_write_barrier.metal. Below the next blank line is that
 // file, unchanged; the directives above compile it as MSL 4.0 for macOS 27, where Apple's compiler
 // writes AIR 2.9 (each memory atomic with its `mem_flags`, each barrier with its `memory_order`).
 // It compiles on every committed profile to the same words as its original
 // (tests/engine_air_2_9.rs), so the original's cases and rows speak for it.
 
-// Owned fixture (WP-SPSE, DESIGN D270): a thread's own write to a read_write 2D texture, read back
+// Owned fixture: a thread's own write to a read_write 2D texture, read back
 // after a texture fence and a threadgroup barrier on texture memory, sparse or not. Thread `i` runs
 // probe `i` of buffer 0: kind 0 writes `value` at texel `(x, y)` and fences the texture, kind 1
 // does not; every thread then reaches `threadgroup_barrier(mem_flags::mem_texture)` (outside the

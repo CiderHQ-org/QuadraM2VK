@@ -58,13 +58,18 @@ fn kernel_function_constant_imageblock_keeps_its_cell_layout() {
     ));
 }
 
+/// Each call's plane is its attachment's at its data rate, the `i32` before the last operand
+/// (`(.., coord, data rate, index)`): a color-rate read and write of color 3 and 5 reach one
+/// plane, a sample-rate read of a sample the shader computes another, and a plain read of the
+/// pixel a third.
 #[test]
-fn kernel_implicit_imageblock_inventory_preserves_attachment_rate_index_and_access() {
+fn kernel_implicit_imageblock_inventory_preserves_attachment_rate_and_access() {
     let ll = r#"
-define void @k() {
-  %a = call <4 x half> @air.load.implicit_imageblock.v4f16(i32 2, <2 x i16> zeroinitializer, i32 3, i16 1)
-  call void @air.store.implicit_imageblock.v4f16(<4 x half> %a, i32 2, <2 x i16> zeroinitializer, i32 5, i16 1)
+define void @k(i16 %s) {
+  %a = call <4 x half> @air.load.implicit_imageblock.v4f16(i32 2, <2 x i16> zeroinitializer, i32 1, i16 3)
+  call void @air.store.implicit_imageblock.v4f16(<4 x half> %a, i32 2, <2 x i16> zeroinitializer, i32 1, i16 5)
   %b = call <2 x half> @air.load.implicit_imageblock.v2f16(i32 3, <2 x i16> zeroinitializer, i32 0, i16 0)
+  %c = call <2 x half> @air.load.implicit_imageblock.v2f16(i32 3, <2 x i16> zeroinitializer, i32 2, i16 %s)
   call void @air.store.implicit_imageblock.i32(i32 7, i32 4, <2 x i16> zeroinitializer, i32 0, i16 0)
   ret void
 }
@@ -84,7 +89,6 @@ declare void @air.store.implicit_imageblock.i32(i32, i32, <2 x i16>, i32, i16)
             ImplicitImageblockAttachment {
                 attachment: 2,
                 data_rate: 1,
-                max_index: Some(5),
                 format: TextureFormat::Rgba16f,
                 reads: true,
                 writes: true,
@@ -92,7 +96,13 @@ declare void @air.store.implicit_imageblock.i32(i32, i32, <2 x i16>, i32, i16)
             ImplicitImageblockAttachment {
                 attachment: 3,
                 data_rate: 0,
-                max_index: Some(0),
+                format: TextureFormat::Rg16f,
+                reads: true,
+                writes: false,
+            },
+            ImplicitImageblockAttachment {
+                attachment: 3,
+                data_rate: 2,
                 format: TextureFormat::Rg16f,
                 reads: true,
                 writes: false,
@@ -100,13 +110,130 @@ declare void @air.store.implicit_imageblock.i32(i32, i32, <2 x i16>, i32, i16)
             ImplicitImageblockAttachment {
                 attachment: 4,
                 data_rate: 0,
-                max_index: Some(0),
                 format: TextureFormat::R32ui,
                 reads: false,
                 writes: true,
             },
         ]
     );
+}
+
+/// Each texel type of the implicit-imageblock family names its exact plane, through one table for
+/// the intrinsic suffix and an aliased explicit imageblock's member: a `float2` color is an
+/// `RG32Float` plane either way.
+/// A store to the samples a coverage mask selects, `(value, attachment, coord, mask)`, writes its
+/// attachment's plane in the texel's format, as a plain store of the pixel does; a load has no
+/// masked form.
+#[test]
+fn coverage_masked_implicit_store_writes_its_attachment_plane() {
+    let ll = r#"
+define void @k(i16 %m) {
+  call void @air.store.implicit_imageblock.mask.v4f16(<4 x half> zeroinitializer, i32 1, <2 x i16> zeroinitializer, i16 %m)
+  call void @air.store.implicit_imageblock.mask.f32(float 0.0, i32 2, <2 x i16> zeroinitializer, i16 3)
+  %a = call float @air.load.implicit_imageblock.f32(i32 2, <2 x i16> zeroinitializer, i32 0, i16 0)
+  ret void
+}
+
+declare void @air.store.implicit_imageblock.mask.v4f16(<4 x half>, i32, <2 x i16>, i16)
+declare void @air.store.implicit_imageblock.mask.f32(float, i32, <2 x i16>, i16)
+declare float @air.load.implicit_imageblock.f32(i32, <2 x i16>, i32, i16)
+!air.kernel = !{!0}
+!0 = !{ptr @k, !1, !1}
+!1 = !{}
+"#;
+    let meta = parse_air_kernel_meta(ll).0.unwrap();
+    assert_eq!(
+        meta.implicit_imageblock_attachments,
+        [
+            ImplicitImageblockAttachment {
+                attachment: 1,
+                data_rate: 0,
+                format: TextureFormat::Rgba16f,
+                reads: false,
+                writes: true,
+            },
+            ImplicitImageblockAttachment {
+                attachment: 2,
+                data_rate: 0,
+                format: TextureFormat::R32f,
+                reads: true,
+                writes: true,
+            },
+        ]
+    );
+    assert_eq!(
+        implicit_imageblock_texture_format("air.store.implicit_imageblock.mask.v2f32"),
+        Ok(Some(TextureFormat::Rg32f))
+    );
+    assert!(implicit_imageblock_texture_format("air.load.implicit_imageblock.mask.f32").is_err());
+    assert!(
+        implicit_imageblock_texture_format("air.store.implicit_imageblock.mask.v3f16").is_err()
+    );
+}
+
+#[test]
+fn implicit_imageblock_texels_name_their_exact_planes() {
+    for (suffix, format) in [
+        ("f16", TextureFormat::R16f),
+        ("v2f16", TextureFormat::Rg16f),
+        ("v4f16", TextureFormat::Rgba16f),
+        ("f32", TextureFormat::R32f),
+        ("v2f32", TextureFormat::Rg32f),
+        ("v4f32", TextureFormat::Rgba32f),
+        ("i32", TextureFormat::R32ui),
+    ] {
+        for family in ["load", "store"] {
+            assert_eq!(
+                implicit_imageblock_texture_format(&format!(
+                    "air.{family}.implicit_imageblock.{suffix}"
+                )),
+                Ok(Some(format)),
+                "{family} {suffix}"
+            );
+        }
+    }
+    assert_eq!(
+        implicit_imageblock_texture_format("air.read.texture_2d"),
+        Ok(None)
+    );
+
+    let member = |offset, ty| AirMember { offset, ty };
+    let planes = aliased_imageblock_planes(&AirType::Struct(vec![
+        member(
+            0,
+            AirType::Vec {
+                scalar: Float,
+                lanes: 2,
+            },
+        ),
+        member(8, AirType::Scalar(Half)),
+    ]))
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        planes
+            .iter()
+            .map(|plane| (
+                plane.attachment,
+                plane.offset,
+                plane.format,
+                plane.intrinsic_suffix
+            ))
+            .collect::<Vec<_>>(),
+        [
+            (0, 0, TextureFormat::Rg32f, "v2f32"),
+            (1, 8, TextureFormat::R16f, "f16"),
+        ]
+    );
+    // A member no plane represents is an error, never a dropped plane.
+    assert!(aliased_imageblock_planes(&AirType::Struct(vec![member(
+        0,
+        AirType::Vec {
+            scalar: Half,
+            lanes: 3,
+        },
+    )]))
+    .is_err());
 }
 
 #[test]

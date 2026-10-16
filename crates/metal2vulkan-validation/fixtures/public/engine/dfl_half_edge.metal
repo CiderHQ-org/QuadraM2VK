@@ -1,4 +1,4 @@
-// Owned fixture (WP-DFL, docs/TODO.md 2.1): how Metal rounds a `float` to `half` at the edge of the
+// Owned fixture: how Metal rounds a `float` to `half` at the edge of the
 // half range and at the half denormals, in a conversion and in `half` arithmetic, in Metal's
 // compile without fast math. Thread `i` reads the float vectors (x, y, z) from `in[3i .. 3i + 2]`
 // and writes 16 words to `out[4i .. 4i + 3]`, each 4-lane `half` result as two words (lane 0 in

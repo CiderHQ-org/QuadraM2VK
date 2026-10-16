@@ -2002,9 +2002,11 @@ fn access_with_leaf(
 
 /// A `air.{load,store}.{device,system}_coherent` access through a static-root buffer pointer: the
 /// plain leaf access with `NonPrivatePointer` and `MakePointerVisible` (a load) or
-/// `MakePointerAvailable` (a store) at `Device` scope, which selects the Vulkan memory model.
-/// System coherence is `Device` scope, the widest of one logical device (the reading of Metal's
-/// all-devices scope). A coherent access of another memory is not implemented.
+/// `MakePointerAvailable` (a store) at `Device` scope, which selects the Vulkan memory model, on a
+/// profile with that model and its device scope; elsewhere the plain access through `Coherent`
+/// resources under `GLSL450` (`sync::memory_model::coherent_access`). System coherence is `Device`
+/// scope, the widest of one logical device (the reading of Metal's all-devices scope). A coherent
+/// access of another memory is not implemented.
 fn select_coherent(
     cx: &mut SelectCx<'_>,
     inst: &Inst,
@@ -2039,9 +2041,8 @@ fn select_coherent(
         .abi_align(ty)
         .and_then(crate::air::ir::Align::from_bytes);
     let mut a = select_access(cx, ptr, value, ty, align, m)?;
-    a.coherence = Some(Coherence::Device);
+    a.coherence = Some(crate::lower::sync::memory_model::coherent_access(cx));
     a.volatile = c.volatile;
-    crate::lower::sync::memory_model::require_vulkan(cx);
     Ok(match c.kind {
         AccessKind::Load => AccessStrategy::Load(a),
         AccessKind::Store => AccessStrategy::Store(a),

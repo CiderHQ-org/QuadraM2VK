@@ -1,4 +1,4 @@
-// Owned fixture (NaN model, DESIGN D293): which NaN Metal's `half` operations answer beside the
+// Owned fixture (NaN model): which NaN Metal's `half` operations answer beside the
 // ones `nan_narrow` measures, and its widening of a `half` NaN to `float`. Lane `i` reads the half
 // patterns a and b (the low and high halves of `in[i].x`) and t and c (of `in[i].y`) and writes
 // 32 words to `out[8i .. 8i + 7]`: float(a) and float(b) (`fpext`); then 50 half results, two

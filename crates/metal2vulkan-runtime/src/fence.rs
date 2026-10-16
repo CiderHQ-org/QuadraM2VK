@@ -18,10 +18,15 @@
 //!   targets alone, from the fragment stage to the fragment stage, is one of those: the pixels a
 //!   draw's fragments write as render targets are the pixels later fragments read as render
 //!   targets (blending, the depth and stencil tests, framebuffer fetch), so it records inside the
-//!   instance (`render_target::between_draws`). Any other (buffers or textures, which a fragment
-//!   may write at any address and a draw may read at any stage) splits the pass: the next draw
-//!   records into a new instance, after a barrier from everything before to everything after
-//!   (`render.rs`, the `render-pass-split` degradation).
+//!   instance (`render_target::between_draws`); a draw after it that samples an attachment's
+//!   texture, at any pixel, records into a new instance (`texture/attached_reads.rs`). Any other
+//!   (buffers or textures, which a fragment may write at any address and a draw may read at any
+//!   stage) splits the pass: the next draw records into a new instance, after a barrier from
+//!   everything before to everything after (`render.rs`, the `render-pass-split` degradation).
+//! - **Barriers over the render targets on Apple GPUs.** The Metal Feature Set Tables give that
+//!   scope to Mac2 GPUs, not to Apple3 to Apple10 ones: on the M3 Max under macOS 27.0.1 (probe
+//!   `rtbarrier`), a draw after one read its own pixel's texels from before the pass, as with no
+//!   barrier. The runtime orders what each barrier names, as a Mac2 GPU does.
 //! - **Barriers after the fragment stage.** On an Apple GPU Metal's validation stops one
 //!   ("afterStages (0x2) can not contain MTLRenderStageTile or MTLRenderStageFragment on this
 //!   device", M4, EV `CFIT-metal-probe-3`), and Metal without it did not order a fragment's
@@ -188,6 +193,12 @@ impl RenderCommandEncoder {
         self.log(|_| RenderCall::UpdateFence(fence.clone(), after_stages));
         // Every stage is ordered, a superset of the ones named.
         let _ = after_stages;
+        // The update follows the encoder's work, its later color groups' passes too, which
+        // record in its core after the first group's: their encoders' calls change nothing
+        // (`render/color_groups.rs`).
+        if self.later_group_encoder() {
+            return Ok(());
+        }
         self.core().update_fence("update_fence", fence)
     }
 
@@ -202,6 +213,11 @@ impl RenderCommandEncoder {
         self.log(|_| RenderCall::WaitForFence(fence.clone(), before_stages));
         // Every stage waits, a superset of the ones named.
         let _ = before_stages;
+        // All of the encoder's work waits, its later color groups' passes too
+        // (`render/color_groups.rs`).
+        if self.later_group_encoder() {
+            return Ok(());
+        }
         self.core().wait_for_fence("wait_for_fence", fence)
     }
 

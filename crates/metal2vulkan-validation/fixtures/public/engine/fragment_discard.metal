@@ -1,4 +1,4 @@
-// Owned fixture (WP-L9b, DESIGN D6, D74): `discard_fragment` with demote semantics (MSL 2.3 and
+// Owned fixture: `discard_fragment` with demote semantics (MSL 2.3 and
 // later; the compiler's default standard). Loop-free.
 #include <metal_stdlib>
 using namespace metal;

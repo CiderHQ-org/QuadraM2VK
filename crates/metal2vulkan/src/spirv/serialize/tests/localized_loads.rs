@@ -162,6 +162,6 @@ fn moltenvk_msl_reads_no_localized_variable_past_an_atomic_or_a_call() {
     assert!(
         reads.contains(&threadgroup) && reads.contains(&private),
         "spirv-cross no longer forwards these loads past the atomic and the call: re-measure \
-         D453 item 6 ({reads:?})\n{plain}"
+         whether MoltenVK needs `LocalizedLoadsForwardedPastAtomicsAndCalls` ({reads:?})\n{plain}"
     );
 }

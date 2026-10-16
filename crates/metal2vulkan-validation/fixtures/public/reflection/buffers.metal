@@ -1,4 +1,4 @@
-// Owned fixture (WP-UNI, DESIGN D311 item 5, S2): the buffer and threadgroup arguments whose
+// Owned fixture: the buffer and threadgroup arguments whose
 // reflection Metal answers (MTLBufferBinding, MTLThreadgroupBinding): struct, vector, matrix,
 // packed, atomic and byte pointees, constant and device address spaces, an unused argument, an
 // argument a function constant gates, and arguments declared out of index order. Written for this

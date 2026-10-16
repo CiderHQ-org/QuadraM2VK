@@ -378,7 +378,7 @@ pub(super) fn validate(case: &AuthoredCase, errors: &mut Vec<String>) {
         }
         if case.stage != target.form.stage() {
             errors.push(format!(
-                "{label}: form {} is authorable in {:?} cases only (DESIGN D225, D258)",
+                "{label}: form {} is authorable in {:?} cases only",
                 target.form,
                 target.form.stage()
             ));
@@ -500,7 +500,7 @@ fn validate_fetched_layout(
     if !length.is_multiple_of(u64::from(BUFFER_GRANULARITY)) {
         errors.push(format!(
             "{label}: its length {length} must be a multiple of {BUFFER_GRANULARITY} bytes, so the \
-             buffer is its own padded allocation (DESIGN D11) and past it is past every range the \
+             buffer is its own padded allocation and past it is past every range the \
              binder binds"
         ));
     }
@@ -629,14 +629,13 @@ fn validate_index_target(
     if !case.vertex_inputs.is_empty() || case.tessellation.is_some() {
         errors.push(format!(
             "{label}: an index read past the buffer is a vertex id Metal leaves undefined, so the \
-             draw fetches no vertex attribute (Metal's fetch at such an id is unchecked, DESIGN \
-             D219.3)"
+             draw fetches no vertex attribute (Metal's fetch at such an id is unchecked)"
         ));
     }
     if !index_buffer.indices_inside(draw.vertex_count).contains(&0) {
         errors.push(format!(
             "{label}: the indices the draw reads inside the buffer must include index 0, the \
-             contained result of a read past it under robustBufferAccess2 (DESIGN D223.3)"
+             contained result of a read past it under robustBufferAccess2"
         ));
     }
     let Some(bytes) = index_buffer.bytes() else {
@@ -799,7 +798,7 @@ fn validate_shadowed_buffer(
     if length.is_some_and(|length| length % BUFFER_GRANULARITY as usize != 0) {
         errors.push(format!(
             "{label}: its length must be a multiple of {BUFFER_GRANULARITY} bytes, so the buffer \
-             is its own padded allocation (DESIGN D11) and past it is past every range the binder \
+             is its own padded allocation and past it is past every range the binder \
              binds"
         ));
     }
@@ -925,7 +924,7 @@ fn validate_threadgroup_target(
     if case.threadgroup_memory.len() != 1 || memory.length == 0 {
         errors.push(format!(
             "{label}: a threadgroup target is the case's one threadgroup allocation, so past it is \
-             past the threadgroup arena (DESIGN D10: the arena is every allocation's)"
+             past the threadgroup arena (the arena is every allocation's)"
         ));
     }
 }

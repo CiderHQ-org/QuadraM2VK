@@ -1,4 +1,4 @@
-// Owned fixture (WP-GSM2, DESIGN D595; written for this repository): the quad group operations
+// Owned fixture (written for this repository): the quad group operations
 // Metal has beside the simdgroup ones, in kernels, vertex functions and fragment functions, and
 // the simdgroup fills in fragment functions.
 // - Kernels and vertex functions: thread or vertex t reads in[t]. The float and half inputs are
@@ -6,7 +6,7 @@
 //   exact; the integer inputs are odd, so no product is zero, and integer products wrap. The
 //   fills' filling data is the data plus 1000; buffer 2 holds four (delta, modulo) pairs, the
 //   runtime spelling of the fills' arguments. Every modulo is 2 or 4: Metal answers any other
-//   differently as a constant and as a runtime value (D595). A partial quad's cases run only the
+//   differently as a constant and as a runtime value. A partial quad's cases run only the
 //   operations that read no lane the quad lacks (a shuffle from one is undefined in Metal).
 // - Fragment functions are drawn over the whole target. A pixel's value is the same pattern by
 //   its position (`exact_at`), or its index x + 64y for the fills, whose filling data adds 10000.
@@ -14,9 +14,9 @@
 //   several stores, and `fragment_quad_ops_divergent` under a mask of pixels, with operations
 //   that read lanes by value alone.
 // - `quad_first_in_a_speculated_arm` and `fragment_quad_first_in_a_speculated_arm` are the shape
-//   in which Metal's backend speculates the arm (D595): quad_broadcast_first in a branch joined
-//   by a phi. The AIR keeps the call in the branch; the cases pin Metal's answer as a known
-//   difference.
+//   in which Metal's backend speculates the arm: quad_broadcast_first in a branch joined by a phi
+//   answers with the quad's lane 0 whether that lane takes the arm or not. The AIR keeps the call
+//   in the branch; the translation speculates the arm as Metal does (`air::canon::speculate`).
 // Loop-free.
 #include <metal_stdlib>
 using namespace metal;

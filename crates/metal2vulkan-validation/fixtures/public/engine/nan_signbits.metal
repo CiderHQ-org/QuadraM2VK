@@ -1,4 +1,4 @@
-// Owned fixture (NaN model, DESIGN D293): whether Metal's sign operations keep a NaN's bits. Lane
+// Owned fixture (NaN model): whether Metal's sign operations keep a NaN's bits. Lane
 // `i` reads (a, b) from `in[i]` and writes eight words to `out[2i .. 2i + 1]`: fabs(a)
 // (`air.fabs`; `abs` is the same call), -a (`fneg`), copysign(a, b) and copysign(b, a) (integer
 // operations in the AIR), 0.0f - a (an `fsub`), -0.0f - a (folded to the `fneg`, as `a * -1.0f`

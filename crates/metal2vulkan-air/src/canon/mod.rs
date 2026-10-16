@@ -42,7 +42,10 @@
 //!    declaration that stays is a post-tessellation entry's control-point fetch
 //!    (`air.patch_control_point_function`, whose body Metal synthesizes from the vertex descriptor)
 //!    with the entry's control-point input as its pointer operand; `lower::tessellation` lowers it.
-//! 9. **Rasterization-rate maps**: each `float2` `air.map_*_coordinates` call becomes Apple's GPU
+//! 9. **Arm speculation**: a branch whose short arms Metal's backend runs in every lane of the
+//!    branch's block, and whose arms hold a group operation that answers differently there,
+//!    becomes a jump into its arms with a `select` for each value they join with (`speculate`).
+//!    **Rasterization-rate maps**: each `float2` `air.map_*_coordinates` call becomes Apple's GPU
 //!    decoder of Metal's parameter data (`rate_map_data`) in plain AIR: word loads through the
 //!    call's map pointer and Apple's arithmetic. **AIR 2.7 simdgroup-matrix block loads and
 //!    stores** take their AIR 2.8 form, their extent, stride and origin built from the elements per
@@ -92,6 +95,9 @@ mod renumber;
 mod rewrite;
 mod routine;
 mod sccp;
+mod speculate;
+#[cfg(test)]
+mod speculate_tests;
 mod static_init;
 mod table_copy;
 #[cfg(test)]
@@ -592,6 +598,18 @@ pub fn specialize_dynamic(
     };
     matmul2d::refuse_left(&body, &parts, &ep.stage, &name, m)?;
     post_check(&body, &parts, &stubs, &name, &control_points(ep), m)?;
+    // A branch's short arms that Metal's backend speculates, where a group operation in them
+    // answers over the lanes of the branch's block.
+    let body = {
+        let f = parts
+            .funcs
+            .get(func)
+            .ok_or_else(|| invariant("entry out of range"))?;
+        let Some(Type::Function { params: tys, .. }) = parts.types.get(f.ty) else {
+            return Err(invariant("the entry's type is not a function"));
+        };
+        speculate::expand(body, (&parts.types, &parts.consts), (tys, &f.params), m)?
+    };
     // Rasterization-rate maps: each `float2` map call becomes Apple's GPU decoder of the parameter
     // data, word loads through its own map pointer.
     let body = rate_map::expand(body, &mut parts, m)?;

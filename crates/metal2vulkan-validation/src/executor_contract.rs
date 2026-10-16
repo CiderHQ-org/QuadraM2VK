@@ -1,5 +1,6 @@
 pub mod buffer_slots;
 pub mod depth_stencil;
+pub mod mesh;
 pub mod min_lod_clamp;
 pub mod multisample;
 pub mod out_of_bounds;
@@ -120,26 +121,20 @@ pub fn unobserved_calls(calls: &BTreeMap<String, usize>) -> BTreeMap<String, Uno
 /// an indexed draw as a draw of primitives is, over the index buffer its record names, and a patch
 /// draw as the encoder's patch draw is, over the patch index and factor buffers its record names,
 /// its factors scaled as Metal's, an indexed patch draw as a patch draw is, over the control-point
-/// index buffer its record names too, a reset as the empty command it leaves, which runs nothing, a
+/// index buffer its record names too, a mesh draw as the encoder's mesh draw of its grid form is,
+/// under the mesh render pipeline it runs, with the object and mesh buffers its record names (a
+/// render descriptor counts them), a reset as the empty command it leaves, which runs nothing, a
 /// stage-in region or an imageblock size as the command's dispatch takes the encoder's, and a copy
 /// as the command it copies; a copy whose result is Metal's private record layout faults on both
-/// sides. No descriptor family admits object-stage bindings, so such a setter faults on every call;
-/// a buffer setter, an indexed draw, a patch draw or an indexed patch draw with an unimplemented
-/// pointer encoding has no producer lowering on either side; and an operation neither models (a
-/// render state setter, among others) has no case schema or guard on either side.
+/// sides. A buffer setter, an indexed draw, a patch draw or an indexed patch draw with an
+/// unimplemented pointer encoding has no producer lowering on either side; and an operation neither
+/// models (a render state setter, an object threadgroup's memory length, among others) has no case
+/// schema or guard on either side.
 fn encoder_operation_is_executable(operation: crate::air::calls::CommandEncoderOperation) -> bool {
-    use crate::air::calls::{BufferStage, CommandEncoderOperation as Operation};
+    use crate::air::calls::CommandEncoderOperation as Operation;
     match operation {
-        Operation::Buffer {
-            stage: BufferStage::Object,
-            ..
-        }
-        | Operation::UnsupportedBufferEncoding
-        | Operation::Unmodeled => false,
-        Operation::Buffer {
-            stage: BufferStage::Kernel | BufferStage::Vertex | BufferStage::Fragment,
-            ..
-        }
+        Operation::UnsupportedBufferEncoding | Operation::Unmodeled => false,
+        Operation::Buffer { .. }
         | Operation::Dispatch { .. }
         | Operation::Pipeline { .. }
         | Operation::Barrier { .. }
@@ -148,6 +143,7 @@ fn encoder_operation_is_executable(operation: crate::air::calls::CommandEncoderO
         | Operation::DrawIndexed { .. }
         | Operation::DrawPatches { .. }
         | Operation::DrawIndexedPatches { .. }
+        | Operation::DrawMesh { .. }
         | Operation::Reset { .. }
         | Operation::StageInRegion
         | Operation::ImageblockSize
@@ -245,16 +241,17 @@ pub fn indirect_command_requirement(
 /// compute commands and its render commands after its producer: a kernel's dispatch or a vertex or
 /// fragment function's draw, never a tile function's (a render pass's tile dispatch, whose commands
 /// neither models). So the stage is one of those, every operation it encodes is a compute or a
-/// render command's (an object-stage binding has no descriptor), and one of them selects what a
-/// replayed command writes: a kernel buffer, a dispatch, or a compute pipeline for a replayed
-/// dispatch; a vertex buffer, a draw, or a render pipeline for a replayed draw, whose template is a
-/// rasterization-disabled vertex function, an indexed draw, whose indices are the vertex IDs that
-/// template writes by, or a patch draw or an indexed patch draw, whose patches, instances and
-/// factors are the domain points a rasterization-disabled post-tessellation template writes by; a
-/// reset, which leaves a command the host encoded running nothing; and a copy, which makes a
-/// command the one it copies. A barrier, a threadgroup length, a stage-in region, an imageblock
-/// size, or a fragment buffer alone changes no value a replayed command writes unless its template
-/// reads it, which the module does not decide.
+/// render command's, and one of them selects what a replayed command writes: a kernel buffer, a
+/// dispatch, or a compute pipeline for a replayed dispatch; a vertex buffer, a draw, or a render
+/// pipeline for a replayed draw, whose template is a rasterization-disabled vertex function, an
+/// indexed draw, whose indices are the vertex IDs that template writes by, or a patch draw or an
+/// indexed patch draw, whose patches, instances and factors are the domain points a
+/// rasterization-disabled post-tessellation template writes by; an object or mesh buffer or a mesh
+/// draw, whose grid and threadgroups are the positions a rasterization-disabled mesh template
+/// writes by, for a replayed mesh draw; a reset, which leaves a command the host encoded running
+/// nothing; and a copy, which makes a command the one it copies. A barrier, a threadgroup length,
+/// a stage-in region, an imageblock size, or a fragment buffer alone changes no value a replayed
+/// command writes unless its template reads it, which the module does not decide.
 fn replay_observes_commands(
     calls: &BTreeMap<String, usize>,
     reflection: Option<&ShaderInterface>,
@@ -268,7 +265,10 @@ fn replay_observes_commands(
         matches!(
             operation,
             Operation::Buffer {
-                stage: BufferStage::Kernel | BufferStage::Vertex,
+                stage: BufferStage::Kernel
+                    | BufferStage::Vertex
+                    | BufferStage::Object
+                    | BufferStage::Mesh,
                 ..
             } | Operation::Dispatch { .. }
                 | Operation::Pipeline { .. }
@@ -276,6 +276,7 @@ fn replay_observes_commands(
                 | Operation::DrawIndexed { .. }
                 | Operation::DrawPatches { .. }
                 | Operation::DrawIndexedPatches { .. }
+                | Operation::DrawMesh { .. }
                 | Operation::Reset { .. }
                 | Operation::Copy
         )
@@ -295,6 +296,8 @@ fn replay_observes_commands(
     let producer = reflection.is_some_and(|reflection| match reflection.stage {
         ShaderStage::Kernel => reflection.implicit_imageblock_attachments.is_empty(),
         ShaderStage::Vertex | ShaderStage::TessellationEvaluation | ShaderStage::Fragment => true,
+        // No executor encodes or replays an object or mesh function's commands.
+        ShaderStage::Object | ShaderStage::Mesh => false,
     });
     producer
         && operations
@@ -305,8 +308,9 @@ fn replay_observes_commands(
 
 /// Whether the module has an effect a case can observe besides the commands it encodes: a write
 /// of a comparable value into observable memory (`writes_observable_memory`) or a stage output the
-/// executors capture (a vertex position, which the rasterized attachments record, or a fragment
-/// color, depth, or stencil output). Without a reflection, stage outputs count as absent.
+/// executors capture (a vertex or mesh vertex position, which the rasterized attachments record,
+/// or a fragment color, depth, or stencil output). Without a reflection, stage outputs count as
+/// absent.
 ///
 /// A module that encodes commands and has neither has only [`UnobservedEffect`]s, so no case can
 /// observe a value that depends on it: that keeps [`ToolingRequirement::IndirectCommandBuffer`].
@@ -323,7 +327,11 @@ pub fn observable_beyond_indirect_commands(
                 || !reflection.depth_members.is_empty()
                 || !reflection.stencil_members.is_empty()
         }
-        ShaderStage::Kernel => false,
+        ShaderStage::Mesh => reflection
+            .mesh_stage
+            .as_ref()
+            .is_some_and(crate::air::reflect::MeshStageInterface::writes_position),
+        ShaderStage::Kernel | ShaderStage::Object => false,
     });
     stage_output || writes_observable_memory(source_ll)
 }
@@ -696,9 +704,9 @@ pub fn unsupported_source_requirements(
 /// candidate does not run, each one the checker requires a case to author whenever the interface
 /// has it:
 ///
-/// - [`ToolingRequirement::RenderDeviceBufferArray`]: a vertex or fragment function's buffer
-///   argument that is an array of device buffers (`array_ref<void>`, which the checker requires
-///   authored as a device-buffer array);
+/// - [`ToolingRequirement::RenderDeviceBufferArray`]: a vertex, fragment, object or mesh
+///   function's buffer argument that is an array of device buffers (`array_ref<void>`, which the
+///   checker requires authored as a device-buffer array);
 /// - [`ToolingRequirement::RenderAccelerationStructure`]: a vertex or fragment function's
 ///   acceleration-structure or intersection-function-table argument (the checker requires every
 ///   bound one).
@@ -716,7 +724,14 @@ pub fn unsupported_source_requirements(
 /// structures are opaque triangles, which call none), and a vertex case's depth/stencil
 /// attachment or a rasterization-disabled vertex case's render targets.
 pub fn engine_source_requirements(reflection: &ShaderInterface) -> BTreeSet<ToolingRequirement> {
-    let render = reflection.stage != ShaderStage::Kernel;
+    let render = matches!(
+        reflection.stage,
+        ShaderStage::Vertex | ShaderStage::TessellationEvaluation | ShaderStage::Fragment
+    );
+    // An object or mesh function binds through its render encoder's setters too. Metal's encoder
+    // has no object or mesh setter for an acceleration structure or a function table, so no case
+    // authors one at those stages (`case::MeshDraw`).
+    let drawn = render || matches!(reflection.stage, ShaderStage::Object | ShaderStage::Mesh);
     let device_buffer_array = reflection.bindings.iter().any(|binding| {
         binding.kind == ResourceKind::Buffer
             && binding
@@ -734,7 +749,7 @@ pub fn engine_source_requirements(reflection: &ShaderInterface) -> BTreeSet<Tool
     });
     [
         (
-            render && device_buffer_array,
+            drawn && device_buffer_array,
             ToolingRequirement::RenderDeviceBufferArray,
         ),
         (
@@ -749,10 +764,12 @@ pub fn engine_source_requirements(reflection: &ShaderInterface) -> BTreeSet<Tool
 
 /// The families of an authored case's own literals that an executor does not run: what the new
 /// engine's candidate refuses before it maps a case. The source's families are
-/// [`engine_source_requirements`]'s; each of them a case authors is also named here, so a case
-/// that was checked against an older reflection is refused all the same.
+/// [`engine_source_requirements`]'s and an object function's threadgroup memory
+/// ([`mesh::mesh_requirements`]); each of them a case authors is also named here, so a case that
+/// was checked against an older reflection is refused all the same.
 pub fn case_requirements(case: &AuthoredCase) -> BTreeSet<ToolingRequirement> {
-    let render = case.stage != Stage::Kernel;
+    let render = matches!(case.stage, Stage::Vertex | Stage::Fragment);
+    let drawn = render || case.stage.is_mesh_pipeline_stage();
     let linked = |entries: &[crate::case::IntersectionFunctionTableEntry]| {
         entries.iter().any(|entry| {
             matches!(
@@ -777,7 +794,7 @@ pub fn case_requirements(case: &AuthoredCase) -> BTreeSet<ToolingRequirement> {
             ToolingRequirement::LinkedIntersectionFunction,
         ),
         (
-            render && !case.device_buffer_arrays.is_empty(),
+            drawn && !case.device_buffer_arrays.is_empty(),
             ToolingRequirement::RenderDeviceBufferArray,
         ),
         (
@@ -800,29 +817,22 @@ pub fn case_requirements(case: &AuthoredCase) -> BTreeSet<ToolingRequirement> {
     .collect()
 }
 
-/// The requirements a row or case raises by its stage alone: an object or mesh function's
-/// ([`ToolingRequirement::MeshPipeline`]), which no case expresses. Classification and the case
-/// checker both read it, so an object or mesh row is classified, never skipped.
-pub fn stage_requirements(stage: Stage) -> BTreeSet<ToolingRequirement> {
-    stage
-        .is_mesh_pipeline_stage()
-        .then_some(ToolingRequirement::MeshPipeline)
-        .into_iter()
-        .collect()
-}
-
 /// Every requirement of `case` against its source: what the source's structure raises
-/// ([`unsupported_source_requirements`]), what its stage raises ([`stage_requirements`]), what its
-/// stage's observation needs ([`unsupported_observation_requirements`]), and the families of the
-/// case's own literals ([`case_requirements`]). The checker computes it once per checked shader;
-/// each executor refuses the ones that stop it.
+/// ([`unsupported_source_requirements`]), what its mesh draw needs ([`mesh::mesh_requirements`]),
+/// what its stage's observation needs ([`unsupported_observation_requirements`]), and the families
+/// of the case's own literals ([`case_requirements`]). The checker computes it once per checked
+/// shader; each executor refuses the ones that stop it.
 pub fn checked_requirements(
     case: &AuthoredCase,
     source_ll: &str,
     reflection: &ShaderInterface,
 ) -> BTreeSet<ToolingRequirement> {
     let mut requirements = unsupported_source_requirements(source_ll, reflection);
-    requirements.extend(stage_requirements(case.stage));
+    requirements.extend(mesh::mesh_requirements(
+        source_ll,
+        reflection,
+        case.mesh_draw.as_ref(),
+    ));
     requirements.extend(unsupported_observation_requirements(case.stage, reflection));
     requirements.extend(case_requirements(case));
     requirements
@@ -936,7 +946,8 @@ pub fn unsupported_observation_requirements(
                 requirements.insert(ToolingRequirement::FragmentOutputObservationType);
             }
         }
-        // An object or mesh function's requirement is its stage's ([`stage_requirements`]).
+        // An object or mesh function's observation is its mesh draw's stages'
+        // ([`mesh::mesh_requirements`]).
         Stage::Kernel | Stage::Object | Stage::Mesh => {}
     }
     requirements
@@ -1300,10 +1311,41 @@ pub fn require_case(case: &AuthoredCase, executor: &str) -> Result<(), String> {
             }
         }
         Stage::Object | Stage::Mesh => {
-            return Err(format!(
-                "{executor} executes no object or mesh case: no case expresses a mesh render \
-                 pipeline (mesh_pipeline, DESIGN D334)"
-            ))
+            // The case schema admits threadgroup memory only for an object case, whose setter
+            // `setObjectThreadgroupMemoryLength:atIndex:` is.
+            for resource in &case.threadgroup_memory {
+                if let Some(error) = threadgroup_memory_error(resource, executor) {
+                    return Err(error);
+                }
+            }
+            if !case.vertex_inputs.is_empty()
+                || !case.kernel_stage_inputs.is_empty()
+                || case.imageblock.is_some()
+                || case.fragment_imageblock.is_some()
+            {
+                return Err(format!(
+                    "{executor} mesh execution does not accept vertex or kernel stage inputs, or \
+                     imageblocks"
+                ));
+            }
+            let mut dimensions = case.render_targets.iter().map(|target| target.dimensions);
+            if let Some(first) = dimensions.next() {
+                if dimensions.any(|other| other != first) {
+                    return Err(format!(
+                        "{executor} mesh render targets must have identical dimensions"
+                    ));
+                }
+            }
+            if let Some(target) = case
+                .render_targets
+                .iter()
+                .find(|target| target.format == TextureFormat::Depth32Float)
+            {
+                return Err(format!(
+                    "{executor} color render target {} cannot use depth32_float",
+                    target.index
+                ));
+            }
         }
     }
     Ok(())
@@ -1460,6 +1502,7 @@ mod tests {
             }),
             draw: None,
             tessellation: None,
+            mesh_draw: None,
             output: OutputSelection::Buffer {
                 binding: 0,
                 offset: 0,
@@ -1475,6 +1518,7 @@ mod tests {
             raster_sample_count: None,
             public_source: None,
             no_effect: None,
+            creation_bound: None,
         }
     }
 
@@ -1553,7 +1597,7 @@ mod tests {
                 ToolingRequirement::ImplicitImageblockLiteral,
             ),
             (
-                "  call void @air.set_object_buffer_render_command.p1i8()",
+                "  call void @air.set_object_threadgroup_memory_length_render_command()",
                 ToolingRequirement::IndirectCommandBuffer,
             ),
         ] {
@@ -1595,6 +1639,8 @@ mod tests {
                 buffers: vec![],
                 vertex_buffers: vec![],
                 fragment_buffers: vec![],
+                object_buffers: vec![],
+                mesh_buffers: vec![],
             },
         )));
         assert_eq!(
@@ -1752,11 +1798,12 @@ mod tests {
             Some(ToolingRequirement::IndirectCommandBuffer)
         );
 
-        // No descriptor admits object-stage bindings, an unimplemented pointer encoding has no
-        // producer lowering, and neither executor models the other encoder operations: requirements
-        // whatever else the module writes.
+        // An unimplemented pointer encoding has no producer lowering, and neither executor models
+        // the other encoder operations: requirements whatever else the module writes.
         for unsupported in [
-            "  call void @air.set_object_buffer_render_command.p1i8()",
+            "  call void @air.set_object_buffer_render_command.p3i8()",
+            "  call void @air.set_mesh_buffer_render_command()",
+            "  call void @air.set_object_threadgroup_memory_length_render_command()",
             "  call void @air.set_kernel_buffer_compute_command.p3i8()",
             "  call void @air.set_kernel_buffer_compute_command()",
             "  call void @air.draw_indexed_primitives_render_command.p3i16()",
@@ -1767,7 +1814,6 @@ mod tests {
             "  call void @air.draw_indexed_patches_render_command.p1i32.p1i8()",
             "  call void @air.draw_indexed_patches_render_command.p1i32.p3i8.p1i8()",
             "  call void @air.set_cull_mode_render_command()",
-            "  call void @air.set_mesh_buffer_render_command.p1i8()",
         ] {
             let ll = format!("{unsupported}\n{device_store}");
             assert!(
@@ -1778,10 +1824,16 @@ mod tests {
             assert!(requirement(&ll));
         }
         // Both executors run an indexed draw of either index type and space, a patch draw and an
-        // indexed patch draw of either space for each buffer, a reset of either family, a
-        // stage-in region, an imageblock size and a copy: no requirement beside an observable
-        // write.
+        // indexed patch draw of either space for each buffer, a mesh draw of either grid form, an
+        // object or a mesh buffer of either space, a reset of either family, a stage-in region,
+        // an imageblock size and a copy: no requirement beside an observable write.
         for modeled in [
+            "  call void @air.draw_mesh_threadgroups_render_command()",
+            "  call void @air.draw_mesh_threads_render_command()",
+            "  call void @air.set_object_buffer_render_command.p1i8()",
+            "  call void @air.set_object_buffer_render_command.p2i8()",
+            "  call void @air.set_mesh_buffer_render_command.p1i8()",
+            "  call void @air.set_mesh_buffer_render_command.p2i8()",
             "  call void @air.draw_indexed_primitives_render_command.p1i16()",
             "  call void @air.draw_indexed_primitives_render_command.p1i32()",
             "  call void @air.draw_indexed_primitives_render_command.p2i16()",
@@ -1832,6 +1884,8 @@ mod tests {
                 buffers: vec![],
                 vertex_buffers: vec![],
                 fragment_buffers: vec![],
+                object_buffers: vec![],
+                mesh_buffers: vec![],
             })),
         ] {
             let mut authored = case();
@@ -1908,6 +1962,12 @@ mod tests {
             "air.draw_patches_render_command.p2i32.p2i8",
             "air.draw_indexed_patches_render_command.p1i32.p1i8.p1i8",
             "air.draw_indexed_patches_render_command.p2i32.p2i8.p2i8",
+            "air.set_object_buffer_render_command.p1i8",
+            "air.set_object_buffer_render_command.p2i8",
+            "air.set_mesh_buffer_render_command.p1i8",
+            "air.set_mesh_buffer_render_command.p2i8",
+            "air.draw_mesh_threadgroups_render_command",
+            "air.draw_mesh_threads_render_command",
             "air.reset_compute_command",
             "air.reset_render_command",
             "air.copy_compute_command",
@@ -1931,10 +1991,14 @@ mod tests {
             // A tile function's commands, or a module nobody reflected: no case executes them.
             assert_eq!(classify(&[selecting], Some(&tile)), buffer, "{selecting}");
             assert_eq!(classify(&[selecting], None), buffer, "{selecting}");
-            // An object-stage binding beside it has no descriptor: no case executes it.
+            // An object threadgroup's memory length beside it, which neither executor models: no
+            // case executes it.
             assert_eq!(
                 classify(
-                    &[selecting, "air.set_object_buffer_render_command.p1i8"],
+                    &[
+                        selecting,
+                        "air.set_object_threadgroup_memory_length_render_command"
+                    ],
                     Some(&kernel)
                 ),
                 buffer,
@@ -2493,7 +2557,8 @@ entry:
 
     /// Each family of a reflected interface the checker requires a case to author and the new
     /// engine's candidate does not run is a source requirement that stops that candidate alone; the
-    /// render families only in a vertex or fragment function.
+    /// render families only in a vertex or fragment function, and a device-buffer array in an
+    /// object or mesh function too.
     #[test]
     fn engine_source_families_follow_the_reflected_interface() {
         use crate::air::reflect::{
@@ -2581,6 +2646,18 @@ entry:
             let mut render = vertex.clone();
             render.bindings.push(binding.clone());
             only(&render, requirement);
+            // An object or mesh function's device-buffer array is a render family too; no case
+            // binds an acceleration structure or a function table at those stages.
+            let mut mesh = render.clone();
+            mesh.stage = ShaderStage::Mesh;
+            assert_eq!(
+                engine_source_requirements(&mesh),
+                BTreeSet::from_iter(
+                    (requirement == ToolingRequirement::RenderDeviceBufferArray)
+                        .then_some(requirement)
+                ),
+                "{kind:?}"
+            );
             let mut compute = kernel.clone();
             compute.bindings.push(binding);
             assert!(engine_source_requirements(&compute).is_empty(), "{kind:?}");
@@ -2614,7 +2691,8 @@ entry:
     }
 
     /// Each family of a case's literals the engine's candidate does not run is a case
-    /// requirement, the render families only in a vertex or fragment case.
+    /// requirement, the render families only in a vertex or fragment case, and a device-buffer
+    /// array in an object or mesh case too.
     #[test]
     fn engine_case_families_follow_the_case_literals() {
         use crate::case::{
@@ -2731,6 +2809,17 @@ entry:
         let mut arrays = kernel.clone();
         arrays.device_buffer_arrays = vec![device_buffer_array(0, 1, &[0])];
         assert!(case_requirements(&arrays).is_empty());
+        let mut mesh = arrays.clone();
+        mesh.stage = Stage::Mesh;
+        only(&mesh, ToolingRequirement::RenderDeviceBufferArray);
+        // An object case's threadgroup memory, which both executors set.
+        let mut object = kernel.clone();
+        object.threadgroup_memory = vec![crate::case::ThreadgroupMemoryResource {
+            binding: 0,
+            length: 16,
+        }];
+        object.stage = Stage::Object;
+        assert!(case_requirements(&object).is_empty());
         arrays.stage = Stage::Vertex;
         arrays.vertex_observation = Some(VertexObservation::Position);
         only(&arrays, ToolingRequirement::RenderDeviceBufferArray);

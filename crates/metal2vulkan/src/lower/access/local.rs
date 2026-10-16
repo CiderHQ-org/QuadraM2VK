@@ -570,6 +570,15 @@ pub(super) fn use_arena(cx: &mut SelectCx<'_>, arena: Arena) -> Result<(), Error
                 shape.fragment = Some(super::tile_memory::plan(cx));
             } else {
                 shape.check(crate::lower::mesh::workgroup_limit(cx))?;
+                // An object function's arguments, whose lengths the render encoder sets: the
+                // binder checks them beside its arena's static part and its payload.
+                if cx.stage == Stage::Object && !shape.regions.is_empty() {
+                    let word = |bytes: u64| u32::try_from(bytes).unwrap_or(u32::MAX);
+                    cx.facts.insert(RuntimeFact::ObjectThreadgroupArena {
+                        static_bytes: word(shape.static_bytes().unwrap_or(u64::MAX)),
+                        payload: crate::lower::mesh::payload_extent(cx).map(word),
+                    });
+                }
             }
             // A tile function's arguments are its tile's threadgroup memory, which the render
             // pass keeps across its tile dispatches (`tile::wrap_entry`), and so are a fragment
@@ -597,11 +606,12 @@ pub(super) fn use_arena(cx: &mut SelectCx<'_>, arena: Arena) -> Result<(), Error
                 cx.families.access.local.private = Some(size);
             }
         }
-        // An object or mesh function's payload, its parameter's size, within the device's
-        // payload limits (`lower::mesh::check_payload`).
+        // An object or mesh function's payload, its parameter's size (a mesh function's at least
+        // its pipeline's object function's), within the device's payload limits
+        // (`lower::mesh::check_payload`).
         Arena::Payload => {
             if cx.families.access.local.payload.is_none() {
-                let Some(size) = crate::lower::mesh::payload_size(cx.entry) else {
+                let Some(size) = crate::lower::mesh::payload_extent(cx) else {
                     return Err(cx.invariant("a payload pointer without a payload parameter"));
                 };
                 crate::lower::mesh::check_payload(cx, size)?;

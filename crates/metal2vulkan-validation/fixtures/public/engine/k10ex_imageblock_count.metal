@@ -1,4 +1,4 @@
-// Owned fixture (WP-K10EX, DESIGN D201): a read-modify-write of a whole explicit imageblock layout
+// Owned fixture: a read-modify-write of a whole explicit imageblock layout
 // (no master): `tally` (a uchar4 at byte 0) becomes `tally * 3 + (1, 2, 3, 4)` and `n` (a ushort
 // at byte 4) `n * 5 + 7`, both wrapping, and `h` (a half at byte 6, the high half of the word `n`
 // shares) `(h + h) - 1`, exact for the authored values; the color is the `h` the fragment read.

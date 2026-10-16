@@ -1,4 +1,4 @@
-// Owned fixture (WP-K6, DESIGN D180): a kernel's `[[stage_in]]` attributes, fetched under its
+// Owned fixture: a kernel's `[[stage_in]]` attributes, fetched under its
 // compute pipeline's stage-input descriptor.
 //
 // The descriptor, not the source, chooses each attribute's format, buffer, offset, and step

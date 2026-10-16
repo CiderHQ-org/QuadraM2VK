@@ -379,7 +379,9 @@ fn describe(fields: &Fields, earlier: &VecDeque<Fields>, number: u64) -> String 
 }
 
 /// `old` and `new` with the text they share at both ends elided, back to the part of a debug
-/// print they differ in (from after the separator before it to the separator after it).
+/// print they differ in (from after the separator before it to the separator after it). Where
+/// they differ right inside a field's bracketed value (`name: {…}`, a set, a list or a tuple), the
+/// part runs from the field's name to the value's closing bracket, so the line keeps the name.
 fn elided(old: &str, new: &str) -> (String, String) {
     let shared = old
         .char_indices()
@@ -389,7 +391,22 @@ fn elided(old: &str, new: &str) -> (String, String) {
         .map_or(0, |((at, a), _)| at + a.len_utf8());
     let opening = |c: char| matches!(c, ',' | '{' | '(' | '[');
     let closing = |c: char| matches!(c, ',' | '}' | ')' | ']');
-    let start = old[..shared].rfind(opening).map_or(0, |at| at + 1);
+    let separator = old[..shared].rfind(opening);
+    // The bracket a field's value opens with, where the two differ right after it.
+    let bracket = separator.and_then(|at| {
+        let named = old[at + 1..shared].trim().is_empty() && old[..at].trim_end().ends_with(':');
+        let close = match &old[at..=at] {
+            "{" => '}',
+            "(" => ')',
+            "[" => ']',
+            _ => return None,
+        };
+        named.then_some((at, close))
+    });
+    let start = match bracket {
+        Some((at, _)) => old[..at].rfind(opening).map_or(0, |at| at + 1),
+        None => separator.map_or(0, |at| at + 1),
+    };
     let start = shared - old[start..shared].trim_start().len();
     let suffix = old[shared..]
         .chars()
@@ -399,7 +416,13 @@ fn elided(old: &str, new: &str) -> (String, String) {
         .map(|(a, _)| a.len_utf8())
         .sum::<usize>();
     let tail = &old[old.len() - suffix..];
-    let dropped = suffix - tail.find(closing).unwrap_or(suffix);
+    let kept = match tail.find(closing) {
+        // The field's closing bracket goes with its value.
+        Some(at) if bracket.is_some_and(|(_, close)| tail[at..].starts_with(close)) => at + 1,
+        Some(at) => at,
+        None => suffix,
+    };
+    let dropped = suffix - kept;
     let cut = |text: &str| {
         format!(
             "{}{}{}",
@@ -623,7 +646,25 @@ mod tests {
                 "Pass { colors: [R8G8B8A8_UNORM], samples: 1 }",
                 "Pass { colors: [B8G8R8A8_UNORM], samples: 1 }"
             ),
-            ("…R8G8B8A8_UNORM…".into(), "…B8G8R8A8_UNORM…".into())
+            (
+                "…colors: [R8G8B8A8_UNORM]…".into(),
+                "…colors: [B8G8R8A8_UNORM]…".into()
+            )
+        );
+        // A value that differs right inside a field's set keeps the field's name.
+        assert_eq!(
+            elided(
+                "Variant { storage: {}, srgb_textures: {}, ycbcr_textures: {} }",
+                "Variant { storage: {}, srgb_textures: {Slot { index: 3 }}, ycbcr_textures: {} }"
+            ),
+            (
+                "…srgb_textures: {}…".into(),
+                "…srgb_textures: {Slot { index: 3 }}…".into()
+            )
+        );
+        assert_eq!(
+            elided("Pair { at: (1, 2) }", "Pair { at: (3, 2) }"),
+            ("…at: (1…".into(), "…at: (3…".into())
         );
         assert_eq!(
             elided(

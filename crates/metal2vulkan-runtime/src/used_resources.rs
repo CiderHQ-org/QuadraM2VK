@@ -35,13 +35,14 @@ use super::buffer::{Buffer, CallerMemory, WeakBuffer};
 use super::command_buffer::CommandBuffer;
 use super::device::lock;
 use super::heap::{Heap, WeakHeap};
+use super::key_hash::KeyMap;
 use super::rebind::Taken;
 use super::replay::Replay;
 use super::residency::{Residency, Used};
 use super::resource::ResourceKey;
 use super::texture::{Texture, TextureMemory, TextureShared};
 use super::Device;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashSet};
 use std::sync::{Mutex, Weak};
 
 /// The buffers, textures and heaps a command buffer's commands use, each listed as what owns
@@ -110,8 +111,9 @@ pub(super) struct EncoderRecord {
     /// and its placed segments': held weakly from the commit, and handed to what the command
     /// buffer retains at its first submission.
     pub(super) taken: Taken,
-    /// Its calls, logged (`replay.rs`), while a rebind before the command buffer's first
-    /// submission may need it encoded again; `None` where it cannot be, or need not.
+    /// Its calls, logged (`replay.rs`): a rebind before the command buffer's first submission
+    /// encodes it again from them. Kept, with what they hold, until the command buffer's release
+    /// (`CommandBufferShared::complete`); `None` where it cannot be encoded again, or need not.
     pub(super) replay: Option<std::sync::Arc<Replay>>,
     /// Its executions' place among the command buffer's (`State::executions`).
     pub(super) executions: std::ops::Range<usize>,
@@ -198,7 +200,7 @@ pub(super) struct Owners {
 
 #[derive(Default)]
 struct Registry {
-    owners: HashMap<ResourceKey, Owner>,
+    owners: KeyMap<ResourceKey, Owner>,
     /// The size at which the next insertion drops the gone owners' entries.
     prune_at: usize,
 }

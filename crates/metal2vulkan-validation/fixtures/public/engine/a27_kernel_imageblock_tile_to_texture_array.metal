@@ -1,6 +1,6 @@
 // metal-std: metal4.0
 // metal-macos-min: 27.0
-// Owned fixture (WP-A27, DESIGN D301): the AIR 2.9 twin of
+// Owned fixture: the AIR 2.9 twin of
 // validation/fixtures/public/kernel_imageblock_tile_to_texture_array.metal. Below the next blank
 // line is that file, unchanged; the directives above compile it as MSL 4.0 for macOS 27, where
 // Apple's compiler writes AIR 2.9 (each memory atomic with its `mem_flags`, each barrier with its

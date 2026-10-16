@@ -129,6 +129,7 @@ entry:
         }),
         draw: None,
         tessellation: None,
+        mesh_draw: None,
         output: OutputSelection::Buffer {
             binding: 0,
             offset: 0,
@@ -144,6 +145,7 @@ entry:
         raster_sample_count: None,
         public_source: None,
         no_effect: None,
+        creation_bound: None,
     };
     let module = LibraryModuleRow {
         module_sha256,
@@ -269,6 +271,7 @@ fn opaque_triangle_intersection_entry_uses_the_native_sentinel_contract() {
         }),
         draw: None,
         tessellation: None,
+        mesh_draw: None,
         output: OutputSelection::Buffer {
             binding: 0,
             offset: 0,
@@ -284,6 +287,7 @@ fn opaque_triangle_intersection_entry_uses_the_native_sentinel_contract() {
         raster_sample_count: None,
         public_source: None,
         no_effect: None,
+        creation_bound: None,
     };
     let function_tables = ResolvedLinkedFunctions {
         references: vec![],
@@ -436,6 +440,7 @@ entry:
         }),
         draw: None,
         tessellation: None,
+        mesh_draw: None,
         output: OutputSelection::Buffer {
             binding: 0,
             offset: 0,
@@ -451,6 +456,7 @@ entry:
         raster_sample_count: None,
         public_source: None,
         no_effect: None,
+        creation_bound: None,
     };
     let function_tables = ResolvedLinkedFunctions {
         references: vec![],

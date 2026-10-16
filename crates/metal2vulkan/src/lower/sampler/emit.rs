@@ -7,6 +7,7 @@ use crate::lower::texture::{
     tile_map, tiled_word, with_word, ImageRef,
 };
 use crate::spirv::builder::constructs::{ArmEnd, ArmFn, Merged};
+use crate::spirv::builder::ops::image::ArmedOffset;
 use crate::spirv::builder::FunctionBuilder;
 use crate::spirv::error::{BResult, BuildError, OperandRule};
 use crate::spirv::ids::{TypeId, Value as SValue};
@@ -434,147 +435,246 @@ fn scaled_axis_gradients(
     ))
 }
 
-/// Metal's footprint of the explicit gradients `dx`, `dy` of cube direction `p`, as the gradients
-/// from which a Vulkan device's cube derivative rule reads the same footprint.
+/// Metal's footprint of the explicit gradients `dx`, `dy` of cube direction `p`, in the form
+/// `form` names: the gradients from which the device's rule reads it.
 ///
-/// Metal (measured on an Apple M3 Max, authored cases `ae7aa91b`, `6ce71712`, `391fac4d`) takes
-/// each gradient `g`'s footprint as `‖(g_a, g_b)‖ / |m_a|` texel widths over half the face size,
-/// where `a` is the direction's major axis, `m_a` its component there, and `b = (a + 2) mod 3`:
-/// the face normal's component counts as a tangent step, the tangent `(a + 1) mod 3` counts
-/// nothing, and where on the face the direction points does not enter; the level of detail is
-/// that of the larger of the two. Vulkan's rule ("Cube Map Derivative Transformation") reads
-/// `∂s_c / (2 |m_a|)` for a gradient whose normal component `∂m_a` is zero, so the gradient
-/// `‖(g_a, g_b)‖ e_b` (zero but on the tangent `b`, which every face maps to `s_c` or `t_c`)
-/// gives the same footprint, whatever the device's approximation of each gradient's length (it
-/// has one component). The major axis is the one Vulkan's recommended choice names, `z` over `y`
-/// over `x` at equal magnitudes, which on a direction whose ties are broken as Metal breaks them
-/// (`face::metal_ties`) is Metal's, there being none left. Apple combines the two components by its
-/// own rule (2.2% below to 1.7% above their length) and minifies only past a footprint of about
-/// 1.00146, which this does not reproduce: `PrecisionNote::CubeGradientFootprint`. The Apple M4
-/// counts both tangents and not the normal, which this does not follow (the M3 Max is the
-/// reference).
+/// **Metal's rule** (an Apple M3 Max under macOS 27.0.1, the oracle; the Apple M4 under macOS 27
+/// read alike, its earlier probes): Metal drops each gradient's component on the direction's major
+/// axis `a` (the face normal), its share of the projection's quotient included, and reads the
+/// face's two tangent components `g[s]` and `g[t]`, on the axes of the face's `s_c` and `t_c`
+/// (Vulkan's "Cube Map Face Selection" table, which Metal's faces follow), over `2 |m_a|`. A
+/// probe of 12,288 lanes a sampler (random directions on every face at `|m_a|` of 0.5, 1 and 2,
+/// random gradients; isotropic, anisotropic of degree 2 to 16, nearest and linear mip filters, a
+/// 64x64 `RGBA8Unorm` cube of seven levels) found the cube's sample, on every lane whose filter
+/// stays inside the face, equal to the sample of a 2D array holding the faces at the face
+/// coordinate with the face gradients `(σ_s g[s], σ_t g[t]) / (2 |m_a|)` (`σ` the signs of the
+/// table's `s_c` and `t_c`) through an isotropic sampler, and through an anisotropic one with
+/// `dPdx`'s `t` component and `dPdy`'s `s` component times `ρ = σ_s σ_t` (-1 on the `-x`, `-y` and
+/// `+z` faces, whose ellipse Metal mirrors); every lane's sample with the normal component zeroed
+/// equal to its own. Under macOS 26.7 the same GPU counted the normal and the tangent
+/// `(a + 2) mod 3` instead ([`CubeFootprint::Isotropic`], [`CubeFootprint::AnisotropicSwizzled`]).
 ///
-/// Through a constexpr anisotropic sampler (`CubeFootprint::Anisotropic`; the RT13-ag2-probe on the
-/// Apple M3 Max: the cube's sample equals, on 1, 535 of 1, 536 lanes, the sample of a 2D array
-/// holding the faces at the face coordinate with these face gradients, and the last one with their
-/// opposite) Metal's footprint is the ellipse of the face gradients `σ (g[(s + 1) mod 3], g[(t + 1)
-/// mod 3])` in the face's `(s, t)`, `s` and `t` the axes of the face's `s_c` and `t_c`: `σ (g_x,
-/// g_z)` on an `x` face, `σ (g_y, g_x)` on a `y` face, and `σ (g_y, g_z)` on a `z` face (`σ` the
-/// sign of the face's `s_c`, which flips the ellipse as a whole and so moves nothing a filter reads
-/// but the order of its taps). The device is handed each gradient with a zero normal component and
-/// those two on the face's `s_c` and `t_c` axes, `t_c`'s through its sign: `(0, ρ g_z, g_x)` on an
-/// `x` face, `(g_y, 0, ρ g_x)` on a `y` face, and `(g_y, ρ g_z, 0)` on a `z` face, `ρ` the sign of
-/// `m_a` on an `x` or `y` face and its opposite on a `z` face. Vulkan's rule then reads Metal's
-/// face gradients over `2 |m_a|`, and the device filters that ellipse anisotropically by its own
-/// rule. The Apple M4 reads `σ (g[s], g[t])` instead, the gradient without its normal component,
-/// which this does not follow (the M3 Max is the reference).
+/// - [`CubeFootprint::Length`] (an isotropic sampler): each gradient's two tangent components
+///   combined by Metal's length, `max(M + 3m/16, 49M/64 + 21m/32)` of the larger and smaller
+///   magnitude (the anisotropic emulation's, measured on 2D textures), on the tangent `(a + 2) mod
+///   3` alone. Vulkan's rule ("Cube Map Derivative Transformation") reads a gradient whose normal
+///   component is zero as `∂s_c / (2 |m_a|)` and `∂t_c / (2 |m_a|)`, so the device reads Metal's
+///   length whatever its approximation of a vector's (one component is nonzero); its level is its
+///   own logarithm of it, where Metal's piecewise-linear one minifies only past a footprint of
+///   `1 + 3/2048` (`PrecisionNote::CubeGradientFootprint`). Every known route reads the one
+///   component alike, so a route not measured takes it too (but for a `y` face through
+///   [`CubeFootprint::Projected`]'s fixup, which reads it on both tangents).
+/// - [`CubeFootprint::Face`] (an anisotropic sampler): each gradient with its normal component
+///   zeroed and Metal's mirroring applied, `(0, ρ g_y, g_z)` and `(0, g_y, ρ g_z)` on an `x` face,
+///   `(g_x, 0, ρ g_z)` and `(ρ g_x, 0, g_z)` on a `y` face, `(g_x, ρ g_y, 0)` and `(ρ g_x, g_y, 0)`
+///   on a `z` face (`dPdx`'s and `dPdy`'s), from which Vulkan's rule reads Metal's face gradients;
+///   the device filters that ellipse by its own anisotropic rule.
+/// - [`CubeFootprint::Projected`] (MoltenVK's graphics route under macOS 27,
+///   `CubeGradientRoute::AppleProjected`): SPIRV-Cross's `spvGradientCube` (MoltenVK 1.4.1's
+///   `adec7acb`) projects each gradient onto the face and writes the two values where Apple's
+///   earlier reading took them: `(d_y, d_y, d_z)` on an `x` face, `(d_x, d_z, d_x)` on a `y` face
+///   and `(d_x, d_y, d_x)` on a `z` face. Metal under macOS 27 reads the tangents of those, so on
+///   an `x` or `z` face the gradient with its normal component zeroed reaches Metal as its own
+///   (the probe: every lane of every sampler equal), and is handed so. On a `y` face Metal reads
+///   `d_x` on both tangents, the `z` tangent lost: the function hands `(64/91 L, 0, 0)`, `L`
+///   Metal's length of `(g_x, g_z)`, whose length on both tangents is `L` again, so an isotropic
+///   sample keeps Metal's footprint up to that division's rounding (the probe: all 6,144 lanes of
+///   each of three isotropic samplers equal, every face); an anisotropic one's ellipse lies on the
+///   diagonal, 922 to 932 of a `y` face's 1,024 lanes differing
+///   (`PrecisionNote::CubeGradientFootprint`).
+/// - [`CubeFootprint::Metal`]: the gradients as the call states them, for a driver that hands them
+///   to Metal's own `gradientcube` unchanged (`CubeGradientRoute::Metal`): exact, no note.
+/// - [`CubeFootprint::Isotropic`] and [`CubeFootprint::AnisotropicSwizzled`]: macOS 26.7's
+///   footprint on the Apple M3 Max, which MoltenVK's graphics route hands its GPU there
+///   (`CubeGradientRoute::AppleSwizzled`, measured on that identity alone): the isotropic
+///   `‖(g_a, g_b)‖ e_b`, `b = (a + 2) mod 3`, and the anisotropic `(0, g_x, g_z)`, `(g_x, 0, g_y)`
+///   and `(g_z, g_y, 0)` on an `x`, `y` and `z` face, which the fixup's swizzle hands that GPU's
+///   transposed anisotropic reading as Metal's face gradients there (EV RT13-ag3-probe-m3).
 ///
-/// MoltenVK on an Apple GPU (`CubeFootprint::AnisotropicSwizzled`, a graphics stage on a profile
-/// whose route is `CubeGradientRoute::AppleSwizzled`) projects each gradient onto the face and swizzles
-/// the two values into the components Apple's isotropic reading takes, which the M3 Max's
-/// anisotropic reading takes transposed. There the device is handed `(0, g_x, g_z)` on an `x`
-/// face, `(g_x, 0, g_y)` on a `y` face, and `(g_z, g_y, 0)` on a `z` face, which that swizzle hands
-/// the M3 Max as Metal's face gradients (RT13-ag3-probe-m3: Metal's own sample on every lane of
-/// 1,536, through MoltenVK's swizzle copied verbatim). MoltenVK sets that swizzle for graphics
-/// pipelines alone (1.4.1's `MVKGraphicsPipeline::initShaderConversionConfig`): a compute
-/// pipeline's MSL calls `gradientcube` with the gradients as given (`CubeGradientRoute::Metal`),
-/// so a kernel there is handed Metal's own (`CubeFootprint::Metal`), which the GPU reads by
-/// Metal's rule: Metal's sample
-/// (the EV RT13-ani-m3, where the swizzled form, read unswizzled, missed on exactly the faces that
-/// reading predicts).
-///
-/// A footprint its sampler's word chooses (`CubeFootprint::Word`) is [`word_footprint`]'s, which
-/// reads the word; it has no form of its own here.
+/// The major axis is `z` over `y` over `x` at equal magnitudes, which on a direction whose ties are
+/// broken as Metal breaks them (`face::metal_ties`) is Metal's, there being none left. A footprint
+/// its sampler's word chooses (`CubeFootprint::Word`) is [`word_footprint`]'s; it has no form of
+/// its own here.
 pub(super) fn cube_footprint(
     fb: &mut FunctionBuilder<'_>,
     p: SValue,
-    (dx, dy): (SValue, SValue),
+    grads: (SValue, SValue),
     form: CubeFootprint,
 ) -> BResult<(SValue, SValue)> {
     match form {
-        CubeFootprint::Metal => return Ok((dx, dy)),
-        CubeFootprint::Word { .. } => {
-            return Err(BuildError::Operand {
-                op: crate::spv::Op::Select,
-                rule: OperandRule::Arity,
-            })
-        }
-        CubeFootprint::Isotropic
-        | CubeFootprint::Anisotropic
-        | CubeFootprint::AnisotropicSwizzled => {}
+        CubeFootprint::Metal => Ok(grads),
+        CubeFootprint::Word { .. } => Err(BuildError::Operand {
+            op: crate::spv::Op::Select,
+            rule: OperandRule::Arity,
+        }),
+        CubeFootprint::Face => face_gradients(fb, p, grads),
+        CubeFootprint::Length => tangent_length(fb, p, grads, false),
+        CubeFootprint::Projected => tangent_length(fb, p, grads, true),
+        CubeFootprint::AnisotropicSwizzled => transposed_face_gradients(fb, p, grads),
+        CubeFootprint::Isotropic => normal_and_tangent_length(fb, p, grads),
     }
+}
+
+/// The major axis of cube direction `p`, as `bool`s: `z` where `|z|` is at least `|x|` and `|y|`,
+/// else `y` where `|y|` is at least `|x|`, else `x`.
+pub(super) struct Major {
+    pub(super) y: SValue,
+    pub(super) z: SValue,
+    pub(super) y_or_z: SValue,
+}
+
+impl Major {
+    pub(super) fn of(fb: &mut FunctionBuilder<'_>, p: SValue) -> BResult<Major> {
+        let a = fb.glsl(GlslOp::FAbs, &[p])?;
+        let [ax, ay, az] = components(fb, a)?;
+        let z_x = fb.binary(BinOp::FOrdGreaterThanEqual, az, ax)?;
+        let z_y = fb.binary(BinOp::FOrdGreaterThanEqual, az, ay)?;
+        let z = fb.binary(BinOp::LogicalAnd, z_x, z_y)?;
+        let not_z = fb.unary(UnOp::LogicalNot, z)?;
+        let y_x = fb.binary(BinOp::FOrdGreaterThanEqual, ay, ax)?;
+        let y = fb.binary(BinOp::LogicalAnd, not_z, y_x)?;
+        let y_or_z = fb.binary(BinOp::LogicalOr, y, z)?;
+        Ok(Major { y, z, y_or_z })
+    }
+}
+
+/// The three components of the `vec3` `g`.
+pub(super) fn components(fb: &mut FunctionBuilder<'_>, g: SValue) -> BResult<[SValue; 3]> {
+    Ok([
+        fb.composite_extract(g, &[0])?,
+        fb.composite_extract(g, &[1])?,
+        fb.composite_extract(g, &[2])?,
+    ])
+}
+
+/// [`CubeFootprint::Face`]: each gradient without its normal component, `dPdx`'s `t` component
+/// and `dPdy`'s `s` component times `ρ`.
+fn face_gradients(
+    fb: &mut FunctionBuilder<'_>,
+    p: SValue,
+    (dx, dy): (SValue, SValue),
+) -> BResult<(SValue, SValue)> {
+    let f = f32_ty(fb)?;
+    let triple = vec(fb, f, 3)?;
+    let m = Major::of(fb, p)?;
+    let zero = f32_const(fb, 0)?;
+    // `ρ` is -1 where `m_a` is negative on an `x` or `y` face, positive on a `z` face.
+    let [px, py, pz] = components(fb, p)?;
+    let pa = fb.select(m.y, py, px)?;
+    let pa = fb.select(m.z, pz, pa)?;
+    let negative = fb.binary(BinOp::FOrdLessThan, pa, zero)?;
+    let flip = fb.binary(BinOp::LogicalNotEqual, negative, m.z)?;
+    // `dx`'s `t` component takes `ρ`: `y` on an `x` or `z` face, `z` on a `y` face. `dy`'s `s`
+    // component does: `z` on an `x` face, `x` on a `y` or `z` face.
+    let face = |fb: &mut FunctionBuilder<'_>, g: SValue, is_dx: bool| -> BResult<SValue> {
+        let [gx, gy, gz] = components(fb, g)?;
+        let rho = |fb: &mut FunctionBuilder<'_>, c: SValue| -> BResult<SValue> {
+            let n = fb.unary(UnOp::FNegate, c)?;
+            fb.select(flip, n, c)
+        };
+        let rgz = rho(fb, gz)?;
+        let (x_kept, y_kept, z_on_x, z_on_y) = match is_dx {
+            true => (gx, rho(fb, gy)?, gz, rgz),
+            false => (rho(fb, gx)?, gy, rgz, gz),
+        };
+        let on_x = fb.select(m.y_or_z, x_kept, zero)?;
+        let on_y = fb.select(m.y, zero, y_kept)?;
+        let on_z = fb.select(m.y, z_on_y, z_on_x)?;
+        let on_z = fb.select(m.z, zero, on_z)?;
+        fb.composite_construct(triple, &[on_x, on_y, on_z])
+    };
+    Ok((face(fb, dx, true)?, face(fb, dy, false)?))
+}
+
+/// [`CubeFootprint::Length`]: each gradient's two tangent components' Metal length on the
+/// tangent `(a + 2) mod 3`; or, `projected` ([`CubeFootprint::Projected`]), an `x` or `z` face's
+/// gradient without its normal component and a `y` face's length times `64/91` on `x`.
+fn tangent_length(
+    fb: &mut FunctionBuilder<'_>,
+    p: SValue,
+    (dx, dy): (SValue, SValue),
+    projected: bool,
+) -> BResult<(SValue, SValue)> {
+    let f = f32_ty(fb)?;
+    let triple = vec(fb, f, 3)?;
+    let m = Major::of(fb, p)?;
+    let zero = f32_const(fb, 0)?;
+    // Metal's length of a pair of equal components `c` is `91/64 c`.
+    let diagonal = f32_const(fb, (64.0f32 / 91.0).to_bits())?;
+    let one = |fb: &mut FunctionBuilder<'_>, g: SValue| -> BResult<SValue> {
+        let [gx, gy, gz] = components(fb, g)?;
+        // The face's two tangents: `y` and `z` on an `x` face, `x` and `z` on a `y` face, `x`
+        // and `y` on a `z` face.
+        let first = fb.select(m.y_or_z, gx, gy)?;
+        let second = fb.select(m.z, gy, gz)?;
+        let length = super::anisotropic::metal_length(fb, first, second)?;
+        if projected {
+            let on_y_face = fb.binary(BinOp::FMul, length, diagonal)?;
+            let on_x = fb.select(m.y, on_y_face, gx)?;
+            let on_x = fb.select(m.y_or_z, on_x, zero)?;
+            let on_y = fb.select(m.y, zero, gy)?;
+            let on_z = fb.select(m.y_or_z, zero, gz)?;
+            return fb.composite_construct(triple, &[on_x, on_y, on_z]);
+        }
+        // The tangent `(a + 2) mod 3`: `z` for an `x` face, `x` for a `y` face, `y` for a `z`
+        // face.
+        let on_x = fb.select(m.y, length, zero)?;
+        let on_y = fb.select(m.z, length, zero)?;
+        let on_z = fb.select(m.y_or_z, zero, length)?;
+        fb.composite_construct(triple, &[on_x, on_y, on_z])
+    };
+    Ok((one(fb, dx)?, one(fb, dy)?))
+}
+
+/// [`CubeFootprint::AnisotropicSwizzled`]: macOS 26.7's face gradients for the M3 Max's transposed
+/// reading through the fixup, `(0, g_x, g_z)`, `(g_x, 0, g_y)` and `(g_z, g_y, 0)` on an `x`, `y`
+/// and `z` face.
+fn transposed_face_gradients(
+    fb: &mut FunctionBuilder<'_>,
+    p: SValue,
+    (dx, dy): (SValue, SValue),
+) -> BResult<(SValue, SValue)> {
+    let f = f32_ty(fb)?;
+    let triple = vec(fb, f, 3)?;
+    let m = Major::of(fb, p)?;
+    let zero = f32_const(fb, 0)?;
+    let face = |fb: &mut FunctionBuilder<'_>, g: SValue| -> BResult<SValue> {
+        let [gx, gy, gz] = components(fb, g)?;
+        let on_x = fb.select(m.y, gx, zero)?;
+        let on_x = fb.select(m.z, gz, on_x)?;
+        let on_y = fb.select(m.z, gy, gx)?;
+        let on_y = fb.select(m.y, zero, on_y)?;
+        let on_z = fb.select(m.y, gy, gz)?;
+        let on_z = fb.select(m.z, zero, on_z)?;
+        fb.composite_construct(triple, &[on_x, on_y, on_z])
+    };
+    Ok((face(fb, dx)?, face(fb, dy)?))
+}
+
+/// [`CubeFootprint::Isotropic`]: macOS 26.7's footprint, the length of each gradient's normal
+/// component `g_a` and tangent `g_b`, `b = (a + 2) mod 3`, on that tangent.
+fn normal_and_tangent_length(
+    fb: &mut FunctionBuilder<'_>,
+    p: SValue,
+    (dx, dy): (SValue, SValue),
+) -> BResult<(SValue, SValue)> {
     let f = f32_ty(fb)?;
     let pair = vec(fb, f, 2)?;
     let triple = vec(fb, f, 3)?;
-    let a = fb.glsl(GlslOp::FAbs, &[p])?;
-    let ax = fb.composite_extract(a, &[0])?;
-    let ay = fb.composite_extract(a, &[1])?;
-    let az = fb.composite_extract(a, &[2])?;
-    // The major axis: `z` where `|z|` is at least `|x|` and `|y|`, else `y` where `|y|` is at
-    // least `|x|`, else `x`.
-    let z_x = fb.binary(BinOp::FOrdGreaterThanEqual, az, ax)?;
-    let z_y = fb.binary(BinOp::FOrdGreaterThanEqual, az, ay)?;
-    let z = fb.binary(BinOp::LogicalAnd, z_x, z_y)?;
-    let not_z = fb.unary(UnOp::LogicalNot, z)?;
-    let y_x = fb.binary(BinOp::FOrdGreaterThanEqual, ay, ax)?;
-    let y = fb.binary(BinOp::LogicalAnd, not_z, y_x)?;
-    let y_or_z = fb.binary(BinOp::LogicalOr, y, z)?;
+    let m = Major::of(fb, p)?;
     let zero = f32_const(fb, 0)?;
-    if form == CubeFootprint::AnisotropicSwizzled {
-        let face = |fb: &mut FunctionBuilder<'_>, g: SValue| -> BResult<SValue> {
-            let gx = fb.composite_extract(g, &[0])?;
-            let gy = fb.composite_extract(g, &[1])?;
-            let gz = fb.composite_extract(g, &[2])?;
-            let on_x = fb.select(y, gx, zero)?;
-            let on_x = fb.select(z, gz, on_x)?;
-            let on_y = fb.select(z, gy, gx)?;
-            let on_y = fb.select(y, zero, on_y)?;
-            let on_z = fb.select(y, gy, gz)?;
-            let on_z = fb.select(z, zero, on_z)?;
-            fb.composite_construct(triple, &[on_x, on_y, on_z])
-        };
-        return Ok((face(fb, dx)?, face(fb, dy)?));
-    }
-    if form == CubeFootprint::Anisotropic {
-        // `ρ` is negative where `m_a` is negative on an `x` or `y` face, positive on a `z` face.
-        let px = fb.composite_extract(p, &[0])?;
-        let py = fb.composite_extract(p, &[1])?;
-        let pz = fb.composite_extract(p, &[2])?;
-        let pa = fb.select(y, py, px)?;
-        let pa = fb.select(z, pz, pa)?;
-        let negative = fb.binary(BinOp::FOrdLessThan, pa, zero)?;
-        let flip = fb.binary(BinOp::LogicalNotEqual, negative, z)?;
-        let face = |fb: &mut FunctionBuilder<'_>, g: SValue| -> BResult<SValue> {
-            let gx = fb.composite_extract(g, &[0])?;
-            let gy = fb.composite_extract(g, &[1])?;
-            let gz = fb.composite_extract(g, &[2])?;
-            let ngx = fb.unary(UnOp::FNegate, gx)?;
-            let ngz = fb.unary(UnOp::FNegate, gz)?;
-            let rgx = fb.select(flip, ngx, gx)?;
-            let rgz = fb.select(flip, ngz, gz)?;
-            let on_x = fb.select(y_or_z, gy, zero)?;
-            let on_y = fb.select(y, zero, rgz)?;
-            let on_z = fb.select(y, rgx, gx)?;
-            let on_z = fb.select(z, zero, on_z)?;
-            fb.composite_construct(triple, &[on_x, on_y, on_z])
-        };
-        return Ok((face(fb, dx)?, face(fb, dy)?));
-    }
     let one = |fb: &mut FunctionBuilder<'_>, g: SValue| -> BResult<SValue> {
-        let gx = fb.composite_extract(g, &[0])?;
-        let gy = fb.composite_extract(g, &[1])?;
-        let gz = fb.composite_extract(g, &[2])?;
-        // The normal's component `g_a` and the counted tangent's `g_b`, `b = (a + 2) mod 3`:
-        // `z` for an `x` face, `x` for a `y` face, `y` for a `z` face.
-        let normal = fb.select(y, gy, gx)?;
-        let normal = fb.select(z, gz, normal)?;
-        let tangent = fb.select(y, gx, gz)?;
-        let tangent = fb.select(z, gy, tangent)?;
+        let [gx, gy, gz] = components(fb, g)?;
+        // `b`: `z` for an `x` face, `x` for a `y` face, `y` for a `z` face.
+        let normal = fb.select(m.y, gy, gx)?;
+        let normal = fb.select(m.z, gz, normal)?;
+        let tangent = fb.select(m.y, gx, gz)?;
+        let tangent = fb.select(m.z, gy, tangent)?;
         let counted = fb.composite_construct(pair, &[normal, tangent])?;
         let length = fb.glsl(GlslOp::Length, &[counted])?;
-        let on_x = fb.select(y, length, zero)?;
-        let on_y = fb.select(z, length, zero)?;
-        let on_z = fb.select(y_or_z, zero, length)?;
+        let on_x = fb.select(m.y, length, zero)?;
+        let on_y = fb.select(m.z, length, zero)?;
+        let on_z = fb.select(m.y_or_z, zero, length)?;
         fb.composite_construct(triple, &[on_x, on_y, on_z])
     };
     Ok((one(fb, dx)?, one(fb, dy)?))
@@ -582,10 +682,11 @@ pub(super) fn cube_footprint(
 
 /// The footprint of a cube's explicit gradients at direction `p` through a runtime or argument
 /// buffer's sampler of word `word` (a `u32`), by the word (`CubeFootprint::Word`): where it states
-/// `SamplerWord::ANISOTROPIC`, the anisotropic form a constexpr anisotropic sampler takes
-/// (`AnisotropicSwizzled` where `swizzled`), else the isotropic one, each [`cube_footprint`]'s. The
-/// device's sampler filters by the bound sampler's own anisotropy, as it does a constexpr
-/// sampler's.
+/// `SamplerWord::ANISOTROPIC`, the form an anisotropic constexpr sampler takes on the route, else
+/// the isotropic one, each [`cube_footprint`]'s: [`CubeFootprint::Face`] and
+/// [`CubeFootprint::Length`], or under the macOS 26.7 fixup (`swizzled`)
+/// [`CubeFootprint::AnisotropicSwizzled`] and [`CubeFootprint::Isotropic`]. The device's sampler
+/// filters by the bound sampler's own anisotropy, as it does a constexpr sampler's.
 pub(super) fn word_footprint(
     fb: &mut FunctionBuilder<'_>,
     p: SValue,
@@ -593,12 +694,12 @@ pub(super) fn word_footprint(
     swizzled: bool,
     word: SValue,
 ) -> BResult<(SValue, SValue)> {
-    let form = match swizzled {
-        true => CubeFootprint::AnisotropicSwizzled,
-        false => CubeFootprint::Anisotropic,
+    let (anisotropic, isotropic) = match swizzled {
+        true => (CubeFootprint::AnisotropicSwizzled, CubeFootprint::Isotropic),
+        false => (CubeFootprint::Face, CubeFootprint::Length),
     };
-    let anisotropic = cube_footprint(fb, p, grads, form)?;
-    let isotropic = cube_footprint(fb, p, grads, CubeFootprint::Isotropic)?;
+    let anisotropic = cube_footprint(fb, p, grads, anisotropic)?;
+    let isotropic = cube_footprint(fb, p, grads, isotropic)?;
     by_anisotropy(fb, word, anisotropic, isotropic)
 }
 
@@ -1684,7 +1785,7 @@ pub(super) fn snap_offsets(
                 out.push((v != 0).then(|| f32_const(fb, x.to_bits())).transpose()?);
             }
         }
-        Some(Offset::Dynamic(v)) => {
+        Some(Offset::Dynamic(v, _)) => {
             let ov = metal_offset(cx, fb, *v, lanes)?;
             let f = f32_ty(fb)?;
             for a in 0..u32::from(lanes) {
@@ -1701,7 +1802,9 @@ pub(super) fn snap_offsets(
 }
 
 /// The texel offset operand of `o` on a `lanes`-component plane: a constant's `ConstOffset`, a
-/// dynamic one's `Offset` as Metal reads it.
+/// dynamic one's `Offset` as Metal reads it, which an armed offset arms
+/// (`FunctionBuilder::arm_offset`, [`arm_selector`]): every access it is the operand of becomes
+/// the switch over its values.
 pub(super) fn offset_operands(
     cx: &mut EmitCx<'_>,
     fb: &mut FunctionBuilder<'_>,
@@ -1711,10 +1814,74 @@ pub(super) fn offset_operands(
 ) -> BResult<()> {
     match o {
         Some(Offset::Const(k)) => ops.const_offset = Some(const_offset(fb, k)?),
-        Some(Offset::Dynamic(v)) => ops.offset = Some(metal_offset(cx, fb, *v, lanes)?),
+        Some(Offset::Dynamic(v, arms)) => {
+            let value = metal_offset(cx, fb, *v, lanes)?;
+            if let Some(a) = arms {
+                let selector = arm_selector(fb, value, a, lanes)?;
+                fb.arm_offset(
+                    value,
+                    ArmedOffset {
+                        selector,
+                        lanes: a.lanes.clone(),
+                    },
+                )?;
+            }
+            ops.offset = Some(value);
+        }
         None => {}
     }
     Ok(())
+}
+
+/// The selector of armed offset `arms` whose value Metal reads is `value` (`lanes` signed lanes,
+/// each in `[-8, 7]`): a `u32` whose bits `4j .. 4j + 4` hold the `j`-th dynamic lane plus 8.
+fn arm_selector(
+    fb: &mut FunctionBuilder<'_>,
+    value: SValue,
+    arms: &super::OffsetArms,
+    lanes: u8,
+) -> BResult<SValue> {
+    let i32_ = fb.module().ty(SType::Int {
+        width: 32,
+        signed: true,
+    })?;
+    let u32_ = fb.module().ty(SType::Int {
+        width: 32,
+        signed: false,
+    })?;
+    let eight = fb.module().constant(Constant::Scalar {
+        ty: i32_,
+        bits: ConstBits(8),
+    })?;
+    let eight = fb.module().const_value(eight)?;
+    let mut selector = None;
+    let dynamic =
+        (0..u32::from(lanes)).filter(|k| arms.lanes.get(*k as usize).is_some_and(Option::is_none));
+    for (j, k) in dynamic.enumerate() {
+        let x = if lanes == 1 {
+            value
+        } else {
+            fb.composite_extract(value, &[k])?
+        };
+        let x = fb.binary(BinOp::IAdd, x, eight)?;
+        let x = fb.convert(ConvOp::Bitcast, x, u32_)?;
+        let x = match j {
+            0 => x,
+            _ => {
+                let shift = fb.u32_const(4 * j as u32)?;
+                let shift = fb.module().const_value(shift)?;
+                fb.binary(BinOp::ShiftLeftLogical, x, shift)?
+            }
+        };
+        selector = Some(match selector {
+            None => x,
+            Some(s) => fb.binary(BinOp::BitwiseOr, s, x)?,
+        });
+    }
+    selector.ok_or(BuildError::Operand {
+        op: crate::spv::Op::Switch,
+        rule: OperandRule::Arity,
+    })
 }
 
 /// A dynamic bias's test of the device's limit and the scaled derivatives a sample takes where
@@ -1814,6 +1981,35 @@ pub(super) fn sample_operands(
     }
     if let Some(m) = min_lod {
         ops.min_lod = Some(cx.operand(fb, m)?);
+    }
+    // An armed offset's switch holds no implicit level: the sample takes the gradients its bias
+    // takes past the device's limit (the derivatives scaled by `2^B`, or the axis gradients
+    // through an anisotropic word), or the plain derivatives without a bias, all in its own
+    // position (`PrecisionNote::GradFromBias`).
+    if matches!(offset, Some(Offset::Dynamic(_, Some(_))))
+        && ops.lod.is_none()
+        && ops.grad.is_none()
+    {
+        let grads = match (beyond.take(), ops.bias.take(), lod) {
+            (Some((_, grads)), _, _) => grads,
+            (
+                None,
+                Some(b),
+                Lod::Implicit {
+                    reach: BiasReach::Metal,
+                    ..
+                },
+            ) => {
+                let b = metal_bias(fb, b)?;
+                plane_bias_gradients(fb, plane, b, s.lanes)?
+            }
+            (None, Some(b), _) => plane_bias_gradients(fb, plane, b, s.lanes)?,
+            (None, None, _) => (
+                fb.derivative(DerivOp::DPdx, plane)?,
+                fb.derivative(DerivOp::DPdy, plane)?,
+            ),
+        };
+        ops.grad = Some(grads);
     }
     offset_operands(cx, fb, offset, s.lanes, &mut ops)?;
     let dref = match dref {
@@ -2172,7 +2368,7 @@ fn pixel_fetch(
             let k = const_offset(fb, k)?;
             texel = fb.binary(BinOp::IAdd, texel, k)?;
         }
-        Some(Offset::Dynamic(v)) => {
+        Some(Offset::Dynamic(v, _)) => {
             let v = metal_offset(cx, fb, *v, lanes)?;
             texel = fb.binary(BinOp::IAdd, texel, v)?;
         }

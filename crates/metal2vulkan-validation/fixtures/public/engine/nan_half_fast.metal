@@ -1,4 +1,4 @@
-// Owned fixture (NaN model, DESIGN D293): `nan_half`'s program under the default fast math, where
+// Owned fixture (NaN model): `nan_half`'s program under the default fast math, where
 // the half arithmetic and functions carry `fast` (a `half` function keeps the precise spelling)
 // and the widenings carry no flags. A NaN or infinite operand is undefined under fast math (MSL
 // 7.1); the case records what Metal answers, the flagged state of the half classes. Lane `i`

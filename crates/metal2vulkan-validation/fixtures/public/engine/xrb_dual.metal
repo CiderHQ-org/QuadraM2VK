@@ -1,4 +1,4 @@
-// Owned fixture (WP-XRB, DESIGN D748): a blend of the second source into an extended-range
+// Owned fixture: a blend of the second source into an extended-range
 // attachment without fast math, for the second-source lane of the extended-range blend table
 // (`metal2vulkan_devtools::xr_blends::dual_table`). The fullscreen triangle of `rt6_samples`;
 // each fragment returns its output and a second one (`[[color(0), index(1)]]`), each read from its

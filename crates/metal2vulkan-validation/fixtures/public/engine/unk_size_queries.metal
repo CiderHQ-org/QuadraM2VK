@@ -1,4 +1,4 @@
-// Owned fixture (WP-UNK, DESIGN D283): the size queries the decoder lacked before D283 -- the
+// Owned fixture: the size queries the decoder once lacked -- the
 // width and height of a multisampled texture array, of a depth multisampled texture and texture
 // array, and of a depth cube and cube array (at level 0), and the width of a texture buffer --
 // beside the array sizes and sample counts of the same textures. One lane writes them all.

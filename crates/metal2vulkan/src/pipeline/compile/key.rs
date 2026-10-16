@@ -25,6 +25,7 @@ use crate::library::{FunctionCompileKey, FunctionConstantValues};
 use crate::lower::select::LowerInputs;
 use crate::pipeline::descriptor::{
     LinkedList, PrivateRenderState, RenderPipelineDescriptor, StageInputDescriptor, StageSource,
+    TessellationDescriptor,
 };
 
 /// What a compile key records of one linked function: the list it is in, its name, its AIR hash,
@@ -96,6 +97,10 @@ pub fn canonical_inputs(inputs: &LowerInputs) -> LowerInputs {
         .map(StageInputDescriptor::canonical);
     // A depth of 0 is taken as 1, Metal's default, which is no depth at all.
     out.max_call_stack_depth = inputs.max_call_stack_depth.filter(|&k| k > 1);
+    // Metal's default tessellation state is no state at all.
+    out.tessellation = inputs
+        .tessellation
+        .filter(|d| *d != TessellationDescriptor::default());
     // Only a tile function's threadgroup is the tile.
     out.threadgroup_size_matches_tile_size =
         inputs.threadgroup_size_matches_tile_size && inputs.tile_attachments.is_some();
@@ -195,6 +200,11 @@ pub fn function_key(
             .bytes(format!("{:?}", inputs.srgb_textures).as_bytes());
     }
     // Appended only when set, as `storage_view_slots`.
+    if !inputs.snapshot_textures.is_empty() {
+        h.bytes(b"snapshot-textures")
+            .bytes(format!("{:?}", inputs.snapshot_textures).as_bytes());
+    }
+    // Appended only when set, as `storage_view_slots`.
     if !inputs.ycbcr_textures.is_empty() {
         h.bytes(b"ycbcr-textures")
             .bytes(format!("{:?}", inputs.ycbcr_textures).as_bytes());
@@ -243,6 +253,10 @@ pub fn function_key(
     if inputs.viewport_index_varying {
         h.bytes(b"viewport-index-varying");
     }
+    // Appended only when set: canonical, so never Metal's default state.
+    if let Some(d) = inputs.tessellation {
+        h.bytes(b"tessellation").bytes(format!("{d:?}").as_bytes());
+    }
     // Appended only when set: canonical, so never 1, Metal's default.
     if let Some(k) = inputs.max_call_stack_depth {
         h.bytes(b"max-call-stack-depth").u64(u64::from(k));
@@ -254,6 +268,14 @@ pub fn function_key(
     // Appended only when set.
     if inputs.render_target_array_index_varying {
         h.bytes(b"render-target-array-index-varying");
+    }
+    // Appended only when set.
+    if inputs.primitive_id_varying {
+        h.bytes(b"primitive-id-varying");
+    }
+    // Appended only when set, with its index type.
+    if let Some(ty) = inputs.primitive_id_indices {
+        h.bytes(b"primitive-id-indices").u64(u64::from(ty.as_raw()));
     }
     // Appended only when set.
     if let Some(d) = inputs.amplification_draws {
@@ -402,6 +424,23 @@ pub fn function_key(
     if !inputs.instanced_attributes.is_empty() {
         h.bytes(b"instanced-attributes")
             .bytes(format!("{:?}", inputs.instanced_attributes).as_bytes());
+    }
+    // Appended only when set: a fragment function of any other pipeline or profile keeps its key.
+    if inputs.depth16_codes {
+        h.bytes(b"depth16-codes");
+    }
+    if let Some(raises) = inputs.depth16_bias_raises {
+        h.bytes(b"depth16-bias-raises").u64(u64::from(raises));
+    }
+    // Appended only when set, in its derived `Debug` form (integers), as `dropped_colors` is.
+    if let Some(group) = &inputs.color_group {
+        h.bytes(b"color-group")
+            .bytes(format!("{group:?}").as_bytes());
+    }
+    // Appended only when set: a mesh function whose own payload arena holds its object
+    // function's keeps its key.
+    if let Some(bytes) = inputs.object_payload {
+        h.bytes(b"object-payload").u64(u64::from(bytes));
     }
     // Appended only when present, so a stage that links nothing keeps its key: the tag's length
     // prefix keeps the encoding unambiguous.

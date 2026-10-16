@@ -65,16 +65,26 @@ fn word(device: &Device) -> usize {
 
 /// The device's first word overwritten with the magic: on MoltenVK by MoltenVK, as it logs a
 /// submission's activities naming the device; elsewhere by the test.
+///
+/// On MoltenVK two command buffers run, one after the other. The runtime puts the word back
+/// before every call of its own that the loader serves (`loader_word.rs`), and a command buffer's
+/// completion gives its command pool back, which makes the pool a secondary command buffer
+/// (`vkAllocateCommandBuffers`, which the loader serves) where it has none (`spares.rs`): that
+/// happens before `wait_until_completed_for` returns. The first command buffer leaves its pool
+/// among the spares with a secondary, so the second takes a pool that needs none, and its
+/// completion calls nothing the loader serves: the magic MoltenVK wrote as it ran stays.
 fn overwrite(device: &Device, moltenvk: bool) {
     if moltenvk {
         let queue = device.new_command_queue().unwrap();
         let buffer = device.new_buffer(256, ResourceOptions::private()).unwrap();
-        let command_buffer = queue.command_buffer().unwrap();
-        let mut blit = command_buffer.blit_command_encoder().unwrap();
-        blit.fill_buffer(&buffer, 0..256, 0x5a).unwrap();
-        blit.end_encoding().unwrap();
-        command_buffer.commit().unwrap();
-        command_buffer.wait_until_completed_for(WAIT).unwrap();
+        for _ in 0..2 {
+            let command_buffer = queue.command_buffer().unwrap();
+            let mut blit = command_buffer.blit_command_encoder().unwrap();
+            blit.fill_buffer(&buffer, 0..256, 0x5a).unwrap();
+            blit.end_encoding().unwrap();
+            command_buffer.commit().unwrap();
+            command_buffer.wait_until_completed_for(WAIT).unwrap();
+        }
     } else {
         // SAFETY: the device's first word, which only the loader reads and the runtime puts back
         // before every call of its own the loader serves.

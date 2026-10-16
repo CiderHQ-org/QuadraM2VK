@@ -1,4 +1,4 @@
-// Owned fixture (WP-UNK, DESIGN D283): every texture atomic operation on the textures Metal's
+// Owned fixture: every texture atomic operation on the textures Metal's
 // atomics take, each result read at lane 0 only. Thread t works on texel t of an r32 read_write
 // 1D (uint), 1D array (int), 2D array (uint), 3D (int), buffer (uint), and 2D (int, 16-bit
 // coordinates) texture, at layer (or slice) t & 1, past the last one from thread 9 on: it

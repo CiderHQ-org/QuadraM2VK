@@ -22,8 +22,8 @@ use super::degrade_notices::counts;
 use super::host_memory::{host_page, no_copy, not_importable, Mapping};
 use super::{
     bound_buffers, compute_descriptor, encode_case, in_shard, public_case, public_cases,
-    read_buffer, validated_device, validated_device_with, CaseResources, Messages, PublicCase,
-    ScratchCache, WAIT,
+    read_buffer, validated_device, validated_device_with, wait_for_device, CaseResources,
+    DeviceWait, Messages, PublicCase, ScratchCache, WAIT,
 };
 use crate::air_library::AirLibrary;
 use crate::candidate::engine::{ComputeCase, ComputeOutput};
@@ -48,6 +48,7 @@ use metal2vulkan_runtime::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// A kernel whose threads each write their threadgroup's size and position, over a ragged grid.
 const RAGGED: &str = "a-ragged-thread-grid-observes-each-threadgroups-size-and-position";
@@ -215,10 +216,18 @@ struct Run {
 
 /// Why a run did not complete: the runtime's error at the dispatch or the commit, the command
 /// buffer's error once it completed (with the driver's Vulkan error for the command whose
-/// pipeline it did not make, `CommandBuffer::failed_pipeline`), or anything else.
+/// pipeline it did not make, `CommandBuffer::failed_pipeline`), its not completing within its
+/// bound of the device's own time (`wait_for_device`), or anything else.
 enum Failed {
     Runtime(Error),
     Command(Option<CommandBufferError>, Option<VkResultCode>),
+    /// The command buffer did not complete within `bound` of the device's own time; `drained`,
+    /// whether it then completed within as long again, which the run waited for so that the next
+    /// run's work never queues behind its own (`run`).
+    TimedOut {
+        bound: Duration,
+        drained: bool,
+    },
     Other(String),
 }
 
@@ -227,6 +236,16 @@ impl std::fmt::Display for Failed {
         match self {
             Failed::Runtime(error) => write!(f, "{error}"),
             Failed::Command(error, _) => write!(f, "the command buffer failed: {error:?}"),
+            Failed::TimedOut { bound, drained } => write!(
+                f,
+                "timed out: the command buffer did not complete within {} ms of the device's \
+                 own time{}",
+                bound.as_millis(),
+                match drained {
+                    true => "",
+                    false => ", nor within as long again",
+                }
+            ),
             Failed::Other(why) => f.write_str(why),
         }
     }
@@ -286,13 +305,56 @@ fn compile_failed_alike(
 
 /// `case` run on `device` with `pipeline` (the case's state, `icb_state`): its buffers made
 /// resident, then its dispatch from an indirect command when `indirect`, else as the encoder's
-/// own dispatch.
+/// own dispatch; with what the wait for its command buffer saw, where the run got that far
+/// ([`wait_for_device`]).
+///
+/// A command buffer that does not complete within `bound` of the device's own time is waited
+/// for as long again before the run returns, so that the next run's work does not queue behind
+/// it on the device (lavapipe runs one queue): its timeout fails its own run alone.
 fn run(
     device: &Device,
     case: &PublicCase,
     pipeline: &ComputePipelineState,
     indirect: bool,
-) -> Result<Run, Failed> {
+    bound: Duration,
+) -> (Result<Run, Failed>, Option<DeviceWait>) {
+    let committed = match commit(device, case, pipeline, indirect) {
+        Ok(committed) => committed,
+        Err(failed) => return (Err(failed), None),
+    };
+    let waited = wait_for_device(&committed.command_buffer, bound);
+    if !waited.completed {
+        let drained = wait_for_device(&committed.command_buffer, bound).completed;
+        return (Err(Failed::TimedOut { bound, drained }), Some(waited));
+    }
+    (finish(committed, &case.compute), Some(waited))
+}
+
+/// The bound of the dispatch form's run of a census case ([`run`]), of the device's own time: a
+/// guard against a hang alone. Generous, since how long a case's work takes is the device's (on
+/// lavapipe one core runs it, of the kind and at the clock the host's scheduler gives it); with
+/// the wait as long again after a timeout, within the test's own end (`.config/nextest.toml`), so
+/// the census names a hung case itself.
+const HANG: Duration = Duration::from_secs(300);
+
+/// The bound of the command form's run of a census case ([`run`]), of the device's own time,
+/// after the dispatch form's run waited as `direct`: the same work on the same device, so twice
+/// the dispatch's own time, for the device's speed changing between the runs, and [`WAIT`] more;
+/// [`WAIT`] where the dispatch reached no wait.
+fn command_bound(direct: Option<DeviceWait>) -> Duration {
+    let own = direct.map_or(Duration::ZERO, |waited| {
+        waited.wall.saturating_sub(waited.queued)
+    });
+    own * 2 + WAIT
+}
+
+/// [`run`]'s command buffer of `case`, encoded and committed.
+fn commit(
+    device: &Device,
+    case: &PublicCase,
+    pipeline: &ComputePipelineState,
+    indirect: bool,
+) -> Result<Committed, Failed> {
     let compute = &case.compute;
     let resources = CaseResources::new(device, case)?;
     let buffers = bound_buffers(device, compute, &resources).map_err(|e| format!("{e:?}"))?;
@@ -319,9 +381,18 @@ fn run(
     }
     encoder.end_encoding().map_err(|e| e.to_string())?;
     command_buffer.commit().map_err(Failed::Runtime)?;
-    command_buffer
-        .wait_until_completed_for(WAIT)
-        .map_err(|_| "the command buffer did not complete".to_owned())?;
+    Ok(Committed {
+        command_buffer,
+        buffers,
+        resources,
+        attachments: Default::default(),
+        executions: Vec::new(),
+    })
+}
+
+/// What [`run`]'s `committed` command buffer, which completed, observed of `compute`.
+fn finish(committed: Committed, compute: &ComputeCase) -> Result<Run, Failed> {
+    let command_buffer = &committed.command_buffer;
     if command_buffer.status() != CommandBufferStatus::Completed {
         return Err(Failed::Command(
             command_buffer.error(),
@@ -337,13 +408,6 @@ fn run(
         .execution_report()
         .ok_or_else(|| "no report".to_owned())?;
     let executions = command_buffer.executions();
-    let committed = Committed {
-        command_buffer,
-        buffers,
-        resources,
-        attachments: Default::default(),
-        executions: Vec::new(),
-    };
     let output = committed.output(compute).map_err(|e| format!("{e:?}"))?;
     Ok(Run {
         output,
@@ -391,7 +455,13 @@ fn same_variant(a: &Execution, b: &Execution) -> bool {
 /// encoder's own dispatch of it runs, on one pipeline state of the case: the same output (the
 /// bytes of its declared out-of-bounds reads, undefined, zeroed in both, `metal_recorded`), the
 /// same execution report, and one execution of the same compiled variant planned for the same
-/// shape. A case the runtime refuses directly is refused the same from a command.
+/// shape. A case the runtime refuses directly is refused the same from a command. A run whose
+/// command buffer does not complete within its bound of the device's own time ([`run`]) fails as
+/// timed out: the dispatch's, [`HANG`], against a hang alone; the command's, held to the
+/// dispatch's own time ([`command_bound`]). A case whose dispatch timed out runs no command;
+/// where the device still runs its work after as long again, the shard stops there and says how
+/// many of its cases did not run. Each case's waits print with their wall time and the part of it
+/// a thread of the process waited for a CPU.
 ///
 /// The cases are split into `SHARDS` tests by their place in the cases' order, every
 /// `SHARDS`th case to one, so nextest runs the pieces in parallel (one test of all of them took
@@ -407,14 +477,17 @@ fn every_case_of_buffers_alone_runs_from_a_command_as_its_dispatch(shard: usize)
     .unwrap();
     let messages = Messages::default();
     let (mut alike, mut refused, mut failed) = (Vec::new(), Vec::new(), Vec::new());
-    let mut compile_failed = Vec::new();
+    let (mut compile_failed, mut timed_out) = (Vec::new(), Vec::new());
     let mut skipped = 0;
+    // The case whose work the device still ran after its timeout, that timeout's bound, and how
+    // many cases followed it.
+    let mut stopped = None;
     let device_name;
     {
         let cache = ScratchCache::new().unwrap();
         let device = validated_device(TEST_DEVICE, &messages, cache.path()).unwrap();
         device_name = device.name().to_owned();
-        for (name, case) in &cases {
+        for (at, (name, case)) in cases.iter().enumerate() {
             let Ok(case) = case else {
                 skipped += 1;
                 continue;
@@ -430,10 +503,21 @@ fn every_case_of_buffers_alone_runs_from_a_command_as_its_dispatch(shard: usize)
                     continue;
                 }
             };
-            let direct = run(&device, case, &pipeline, false);
+            let (direct, direct_waited) = run(&device, case, &pipeline, false, HANG);
             let direct_reported = messages.take();
-            let indirect = run(&device, case, &pipeline, true);
+            let (indirect, indirect_waited) = match timed(&direct) {
+                true => (Err(Failed::Other("not run".to_owned())), None),
+                false => run(&device, case, &pipeline, true, command_bound(direct_waited)),
+            };
             let indirect_reported = messages.take();
+            eprintln!(
+                "{name}: {}; {}",
+                clocks("the dispatch", direct_waited),
+                clocks("the command", indirect_waited)
+            );
+            if let Some(bound) = still_running(&direct).or(still_running(&indirect)) {
+                stopped = Some((name, bound, cases.len() - at - 1));
+            }
             // The device's own failure making the pipeline, reported for both runs alike.
             let mut device_failure = false;
             match (direct, indirect) {
@@ -463,6 +547,13 @@ fn every_case_of_buffers_alone_runs_from_a_command_as_its_dispatch(shard: usize)
                     } else {
                         failed.push(format!("{name}: {}", differs.join("; ")));
                     }
+                }
+                (direct, indirect) if timed(&direct) || timed(&indirect) => {
+                    timed_out.push(format!(
+                        "{name}: the dispatch gave {:?}, the command {:?}",
+                        direct.err().map(|e| e.to_string()),
+                        indirect.err().map(|e| e.to_string())
+                    ))
                 }
                 (Err(direct), Err(indirect))
                     if compile_failed_alike(
@@ -497,37 +588,86 @@ fn every_case_of_buffers_alone_runs_from_a_command_as_its_dispatch(shard: usize)
                     "{name}: the validation layer reported {reported:#?}"
                 ));
             }
+            if stopped.is_some() {
+                break;
+            }
         }
     }
     let leaked = messages.take();
     eprintln!(
         "runtime indirect commands on {device_name}, shard {shard} of {SHARDS}: {} match their \
-         own dispatch, {} refused alike, {} failed to compile alike on the device, {} failed, of \
-         {} cases of buffers alone ({skipped} others)",
+         own dispatch, {} refused alike, {} failed to compile alike on the device, {} timed out, \
+         {} failed, of {} cases of buffers alone ({skipped} others)",
         alike.len(),
         refused.len(),
         compile_failed.len(),
+        timed_out.len(),
         failed.len(),
-        cases.len() - skipped
+        cases.len() - skipped - stopped.map_or(0, |(_, _, after)| after)
     );
+    if let Some((name, bound, after)) = stopped {
+        eprintln!(
+            "stopped at {name}: the device still ran its work after twice {} ms of its own \
+             time; the {after} cases after it in the shard did not run",
+            bound.as_millis()
+        );
+    }
+    for why in &timed_out {
+        eprintln!("timed out: {why}");
+    }
     for why in &refused {
         eprintln!("refused: {why}");
     }
     if !compile_failed.is_empty() {
         eprintln!(
             "compile failed alike: the device's own failure making the pipeline; \
-             docs/FAST-PATHS.md's known gaps record 3cf0a3f0's (Apple's compiler, on MoltenVK)"
+             docs/FAST-PATHS.md's known gaps record authored-four-iteration-loop's (3cf0a3f0; \
+             Apple's compiler, on MoltenVK)"
         );
     }
     for why in &compile_failed {
         eprintln!("compile failed alike: {why}");
     }
     assert!(
-        failed.is_empty() && leaked.is_empty(),
-        "failed:\n{}\nat device destruction: {leaked:#?}",
-        failed.join("\n")
+        failed.is_empty() && timed_out.is_empty() && leaked.is_empty(),
+        "failed:\n{}\ntimed out:\n{}\nat device destruction: {leaked:#?}",
+        failed.join("\n"),
+        timed_out.join("\n")
     );
     assert!(!alike.is_empty(), "no case ran alike");
+}
+
+/// Whether `run` timed out ([`Failed::TimedOut`]).
+fn timed(run: &Result<Run, Failed>) -> bool {
+    matches!(run, Err(Failed::TimedOut { .. }))
+}
+
+/// The bound `run` timed out at, where the device still ran its work after as long again.
+fn still_running(run: &Result<Run, Failed>) -> Option<Duration> {
+    match run {
+        Err(Failed::TimedOut {
+            bound,
+            drained: false,
+        }) => Some(*bound),
+        _ => None,
+    }
+}
+
+/// What `form`'s wait for its command buffer saw ([`wait_for_device`]): its wall time and the
+/// part of it that a thread of the process waited for a CPU.
+fn clocks(form: &str, waited: Option<DeviceWait>) -> String {
+    match waited {
+        Some(waited) => format!(
+            "{form} waited {} ms, {} ms of it for a CPU{}",
+            waited.wall.as_millis(),
+            waited.queued.as_millis(),
+            match waited.completed {
+                true => "",
+                false => ", and timed out",
+            }
+        ),
+        None => format!("{form} reached no wait"),
+    }
 }
 
 /// The pieces `every_case_of_buffers_alone_runs_from_a_command_as_its_dispatch` is split into. At

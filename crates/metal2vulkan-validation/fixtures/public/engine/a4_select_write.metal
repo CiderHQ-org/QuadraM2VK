@@ -1,4 +1,4 @@
-// Owned fixture (WP-A4, DESIGN D213): a write through a storage texture selected between two
+// Owned fixture: a write through a storage texture selected between two
 // parameters (`texture.write.switch`). Thread g writes (g, 1, 2, 3) at texel (g >> 1, 0) of a
 // when g is odd, else of b: texel k of a is (2k + 1, 1, 2, 3), of b (2k, 1, 2, 3). Loop-free.
 #include <metal_stdlib>

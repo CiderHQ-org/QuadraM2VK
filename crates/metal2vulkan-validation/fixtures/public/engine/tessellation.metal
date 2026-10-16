@@ -1,4 +1,4 @@
-// WP-K7 (DESIGN D153): post-tessellation vertex functions as Vulkan tessellation evaluation
+// Post-tessellation vertex functions as Vulkan tessellation evaluation
 // shaders. Owned MSL; see README.md for each entry's purpose.
 #include <metal_stdlib>
 using namespace metal;

@@ -1,4 +1,4 @@
-// Owned fixture (WP-EXF2, DESIGN D200): a fragment function that reads no attachment and writes
+// Owned fixture: a fragment function that reads no attachment and writes
 // color attachments 0 and 2 but not color attachment 1, between them: the pixel center and two
 // constants to attachment 0, the pixel's integer coordinates and two constants to attachment 2.
 // Loop-free.

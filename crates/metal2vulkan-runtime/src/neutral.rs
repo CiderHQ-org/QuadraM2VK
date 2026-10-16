@@ -400,7 +400,7 @@ impl Device {
                 return Err(vulkan(error));
             }
         };
-        let first = FirstMove::new(image, kind_format, vk::ImageLayout::UNDEFINED, false).cleared();
+        let first = FirstMove::new(image, kind_format, vk::ImageLayout::UNDEFINED, None).cleared();
         let neutral = Arc::new(NeutralImage {
             image,
             view,

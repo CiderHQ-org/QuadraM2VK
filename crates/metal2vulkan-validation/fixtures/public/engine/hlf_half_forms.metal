@@ -1,4 +1,4 @@
-// Owned fixture (WP-HLF, DESIGN D251): how Metal converts texels to `half` in the sampling forms
+// Owned fixture: how Metal converts texels to `half` in the sampling forms
 // `bcx_half_read` does not read. Four 2D `half` textures (the cases bind a 32-bit float, a 16-bit
 // unorm, an 8-bit unorm, and an sRGB format) are each gathered (components x and w) and sampled
 // with normalized coordinates, clamp-to-edge: nearest, and linear with a constant offset, an

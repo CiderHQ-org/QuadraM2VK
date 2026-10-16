@@ -1,4 +1,4 @@
-// Owned MSL for WP-TAIL's argument-buffer samplers (DESIGN D285.19): a sampler loaded from an
+// Owned MSL for argument-buffer samplers: a sampler loaded from an
 // argument buffer beside the texture it samples, in forms whose answer is exact on Metal, so
 // Metal's output is the comparison's reference.
 #include <metal_stdlib>

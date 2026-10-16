@@ -2,8 +2,8 @@
 //! texels.
 //!
 //! Metal takes a clear color as four doubles, a clear depth as a double and a clear stencil as a
-//! 32-bit value. Its conversion to each format was measured on an Apple M4 (macOS 27.0.1; RT6
-//! probes 1 and 2), and is copied here channel by channel:
+//! 32-bit value. Its conversion to each format was measured on an Apple M4 (macOS 27.0.1, by our
+//! Metal probes), and is copied here channel by channel:
 //!
 //! - **Normalized** channels go through `float` (round to nearest even), then NaN is 0, the value
 //!   is clamped to `[0, 1]` (`[-1, 1]` signed), and scaled to the nearest integer: 0.5/255 is 1
@@ -25,18 +25,18 @@
 //!   clear depth outside `[0, 1]` (the caller's check). **Stencil** keeps the low 8 bits.
 //!
 //! Vulkan converts a clear value to the format as its own rules say, which leave rounding to the
-//! implementation. So each clear value here is one the conversion maps exactly: the integer
-//! itself for integer formats, `k / m` for a normalized integer `k` (whose exact product with `m`
-//! is within a hair of `k`), the decoded sRGB value for an sRGB channel, and the exact `float`
-//! value of a `half`, small-float or shared-exponent result. A `Depth16Unorm` clear is
-//! `(k + 1/4) / m`, a quarter step above the stored integer `k` (or 1.0 for the largest), which
-//! rounding to nearest and truncating both map to `k`: MoltenVK hands the value to Metal, which
-//! truncates, and `k / m` lies a hair below `k` for some `k` (1/65535 stored 0 there). A NaN of a
-//! `half` or small-float channel has no such value: Vulkan leaves its bits to the device, and
-//! RADV and lavapipe write other NaNs than Metal's canonical quiet one (RRS probe 14, the M3 Max
-//! and an M4 alike: `0x7e00`, and `0x7e0` and `0x3f0` for `RG11B10Float`, the sign dropped).
-//! [`nan_texel`] gives such a texel's bits, which `nan_clear.rs` writes before the pass. A `float`
-//! NaN keeps its sign (`0x7fc00000`, `0xffc00000`), which every device measured writes.
+//! implementation. So each clear value here is one the conversion maps exactly: the integer itself
+//! for integer formats, `k / m` for a normalized integer `k` (whose exact product with `m` is
+//! within a hair of `k`), the decoded sRGB value for an sRGB channel, and the exact `float` value
+//! of a `half`, small-float or shared-exponent result. A `Depth16Unorm` clear is `(k + 1/4) / m`, a
+//! quarter step above the stored integer `k` (or 1.0 for the largest), which rounding to nearest
+//! and truncating both map to `k`: MoltenVK hands the value to Metal, which truncates, and `k / m`
+//! lies a hair below `k` for some `k` (1/65535 stored 0 there). A NaN of a `half` or small-float
+//! channel has no such value: Vulkan leaves its bits to the device, and RADV and lavapipe write
+//! other NaNs than Metal's canonical quiet one (a Metal probe, the M3 Max and an M4 alike:
+//! `0x7e00`, and `0x7e0` and `0x3f0` for `RG11B10Float`, the sign dropped). [`nan_texel`] gives
+//! such a texel's bits, which `nan_clear.rs` writes before the pass. A `float` NaN keeps its sign
+//! (`0x7fc00000`, `0xffc00000`), which every device measured writes.
 //!
 //! An **extended-range** attachment holds its raw texels in an unsigned integer format, so its
 //! clear value is the raw texel Metal stores (`ExtendedRange::clear_texel`): each channel goes
@@ -398,9 +398,9 @@ pub(crate) fn uint_texel(texel: &[u8]) -> Option<(Format, vk::ClearColorValue)> 
     Some((format, vk::ClearColorValue { uint32 }))
 }
 
-/// The bits of a small unsigned float of `mantissa` bits (and a 5-bit exponent) holding `v`,
-/// which is one exactly ([`ufloat_value`]'s result): NaN is the canonical quiet NaN (the top
-/// mantissa bit), as Metal writes it (RRS probe 14).
+/// The bits of a small unsigned float of `mantissa` bits (and a 5-bit exponent) holding `v`, which
+/// is one exactly ([`ufloat_value`]'s result): NaN is the canonical quiet NaN (the top mantissa
+/// bit), as Metal writes it (a Metal probe on the M3 Max and an M4).
 fn ufloat_bits(v: f32, mantissa: u32) -> u64 {
     if v.is_nan() {
         return (31 << mantissa) | (1 << (mantissa - 1));
@@ -739,8 +739,8 @@ pub(crate) mod tests {
         b.iter().map(|x| format!("{x:02x}")).collect()
     }
 
-    /// Every clear the M4 measured (RT6 probes 1 and 2; the NaNs, RRS probe 14 on an M4 and the
-    /// M3 Max alike), as the bytes it wrote.
+    /// Every clear the M4 measured (our Metal probes; the NaNs on an M4 and the M3 Max alike), as
+    /// the bytes it wrote.
     #[test]
     fn metal_clears_are_reproduced() {
         let n = f64::NAN;
@@ -923,8 +923,8 @@ pub(crate) mod tests {
         }
     }
 
-    /// A clear of a `half` or small-float NaN writes Metal's texel through an integer format of
-    /// its size (RRS probe 14's bytes), and no other clear does.
+    /// A clear of a `half` or small-float NaN writes Metal's texel through an integer format of its
+    /// size (the bytes Metal wrote on the M3 Max and an M4), and no other clear does.
     #[test]
     fn nan_texels_are_metals() {
         let n = f64::NAN;

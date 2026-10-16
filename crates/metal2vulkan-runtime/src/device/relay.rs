@@ -272,19 +272,21 @@ impl Flights {
 
     /// The submissions through the one of the last of `fences` completed (their fences are
     /// signaled, and every earlier submission's): they leave the log. The fences of the ones not
-    /// of a batch, for the caller to reset and give back (a batch's goes back with it).
-    pub(crate) fn settled(&self, fences: &[vk::Fence]) -> Vec<vk::Fence> {
+    /// of a batch go onto `marks`, for the caller to reset and give back (a batch's goes back with
+    /// it).
+    pub(crate) fn settled(&self, fences: &[vk::Fence], marks: &mut Vec<vk::Fence>) {
         let mut log = lock(&self.log);
         let Some(through) = log
             .iter()
             .rposition(|flight| fences.contains(&flight.fence))
         else {
-            return Vec::new();
+            return;
         };
-        log.drain(..=through)
-            .filter(|flight| !matches!(flight.by, By::Batch(_)))
-            .map(|flight| flight.fence)
-            .collect()
+        marks.extend(
+            log.drain(..=through)
+                .filter(|flight| !matches!(flight.by, By::Batch(_)))
+                .map(|flight| flight.fence),
+        );
     }
 
     /// How many of the queue's submissions are in the log: made, and not yet seen complete.
@@ -376,23 +378,35 @@ impl super::DeviceShared {
 
     /// Submit a batch of a command buffer's to `VkQueue` `queue` with `f`, under the queue's
     /// lock: where its failures are relayed, the submission of `fence` is logged first, its
-    /// failure for `failed` ([`By::Batch`]), and dropped from the log again when `f` fails.
+    /// failure for `failed` ([`By::Batch`]), and dropped from the log again when `f` fails. A
+    /// batch that signals the queue's timeline to `value` notes it once submitted (the exit
+    /// hook's value, and where freed memory waits for the batches in flight, theirs, under the
+    /// gate's read lock: `freed_memory.rs`).
     pub(crate) fn submit_logged(
         &self,
-        queue: usize,
+        (queue, value): (usize, Option<u64>),
         fence: Option<vk::Fence>,
         failed: &Arc<Relayed>,
         f: impl FnOnce(vk::Queue) -> Result<(), vk::Result>,
     ) -> Result<(), vk::Result> {
         let slot = &self.queues[queue];
         let logged = fence.zip(slot.flights.get());
+        let parking = self.parking.get();
         slot.with(|vk_queue| {
+            let _gate = parking.map(|parking| parking.submitting());
             if let Some((fence, flights)) = logged {
                 flights.push(fence, By::Batch(Arc::clone(failed)));
             }
             let submitted = f(vk_queue);
-            if let (Err(_), Some((fence, flights))) = (&submitted, logged) {
-                flights.unpush(fence);
+            match (&submitted, logged, value) {
+                (Err(_), Some((fence, flights)), _) => flights.unpush(fence),
+                (Ok(()), _, Some(value)) => {
+                    slot.submitted(value);
+                    if let Some(parking) = parking {
+                        parking.submitted(queue, value);
+                    }
+                }
+                _ => {}
             }
             submitted
         })
@@ -411,15 +425,16 @@ impl super::DeviceShared {
         };
         let fence = exit_guard::enter().and_then(|_busy| {
             let raw = self.vk();
-            let done = flights.done_marks();
+            let mut done = flights.done_marks();
             if !done.is_empty() {
                 // SAFETY: each is signaled, its submission completed, and out of the log.
                 let reset = unsafe { raw.reset_fences(&done) };
                 exit_guard::called(Call::ResetFences);
-                for fence in reset
-                    .map(|()| self.fences.keep(done.iter().copied()))
-                    .unwrap_or(done)
-                {
+                // Kept idle where reset; the rest, and all where the reset failed, released.
+                if reset.is_ok() {
+                    self.fences.keep(&mut done);
+                }
+                for fence in done {
                     // SAFETY: as above.
                     unsafe { crate::release::object(raw, fence) };
                 }

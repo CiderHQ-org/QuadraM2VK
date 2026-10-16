@@ -1,16 +1,14 @@
-// Owned MSL (WP-RFB, DESIGN D355 item 3, docs/TODO.md 8.10): what a fragment function reads of
-// its position and facing, and the depth it writes, under the viewports a render encoder sets:
-// depth ranges past [0, 1] in both depth clip modes, depth bias, and negative widths. The
-// shaders of WP-RFB Metal probe 1's viewport cases (an M3 Max and an M4), so each runtime lane
-// draw asks the question the probe measured. Written from scratch for this repository;
-// loop-free.
+// Owned MSL: what a fragment function reads of its position and facing, and the depth it writes,
+// under the viewports a render encoder sets: depth ranges past [0, 1] in both depth clip modes,
+// depth bias, and negative widths. The shaders of a Metal probe's viewport cases (an M3 Max and an
+// M4), so each runtime lane draw asks the question the probe measured. Written from scratch for
+// this repository; loop-free.
 //
 // rfb_full: Metal's fullscreen triangle, (-1, -1), (3, -1), (-1, 3), at depth `z + slope * x`.
 // rfb_position: the position the fragment reads (x, y, z) and its facing, +1 front, -1 back.
-// rfb_depth: writes the depth `d`, and the position's z it read into red.
-// rfb_span (added by WP-RRS, DESIGN D528): a quad over y -1 to 1 from x0 to x1, its z
-// running from z0 at x0 to z1 at x1 (w 1), drawn as a strip of four vertices: the shader of RRS
-// Metal probe 19b (an M3 Max and an M4), whose depth runs along x.
+// rfb_depth: writes the depth `d`, and the position's z it read into red. rfb_span: a quad over y
+// -1 to 1 from x0 to x1, its z running from z0 at x0 to z1 at x1 (w 1), drawn as a strip of four
+// vertices: the shader of a Metal probe on an M3 Max and an M4, whose depth runs along x.
 #include <metal_stdlib>
 using namespace metal;
 

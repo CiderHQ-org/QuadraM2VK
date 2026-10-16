@@ -2,7 +2,7 @@
 // air-rename: _Z14rfs_null_eventv air.get_null_simdgroup_event
 // air-rename: _Z11rfs_is_nullP9rfs_event air.is_null_simdgroup_event
 // air-rename: _Z8rfs_waitiPP9rfs_event air.wait_simdgroup_events
-// WP-RFS (DESIGN D405 item 4): a simdgroup's asynchronous 2D copy from device to threadgroup memory
+// Owned fixture: a simdgroup's asynchronous 2D copy from device to threadgroup memory
 // and its events, which MPS's matrix kernels call and MSL spells only in a private header. The
 // kernels call `rfs_copy`, `rfs_null_event`, `rfs_is_null` and `rfs_wait`, which this source
 // declares and never defines, and the directives above rename every call to the intrinsics in both

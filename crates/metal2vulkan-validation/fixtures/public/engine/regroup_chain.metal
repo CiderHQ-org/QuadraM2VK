@@ -1,5 +1,5 @@
-// regroup_chain: Metal's pairing of a fast-math multiply chain's lane-uniform factors (DESIGN
-// D754, `lower::arith::regroup`). Each entry computes a vector product `n = s * x` and multiplies
+// regroup_chain: Metal's pairing of a fast-math multiply chain's lane-uniform factors
+// (`lower::arith::regroup`). Each entry computes a vector product `n = s * x` and multiplies
 // lanes of it by `a`; Metal multiplies the two lane-uniform factors first where they repeat in
 // every lane's chain (EVs DGC-frg1-m4, DGC-frg2-m4, DGC-frg3-m4).
 // - dither: a fragment shape: a noise texel less one half, times a uniform scale, its first three

@@ -60,6 +60,7 @@ use super::texture_descriptor::TextureDescriptor;
 use super::tracker::{Access, Barrier, Use};
 use super::values::ResourceOptions;
 use super::Device;
+use crate::device::functions::Vk;
 use ash::vk;
 use metal2vulkan::device::FormatUsage;
 use metal2vulkan::error::{Capability, Feature, Unsupported};
@@ -293,7 +294,7 @@ fn by_copies(
 /// `extent` and `layers`, through which the draws copy: rendered, sampled and copied both ways,
 /// and mutable, so a copy between it and a colour texture of another format of its texel size
 /// goes through a view on MoltenVK (the module docs). Refused where the device does not make it.
-fn bits_image(
+pub(super) fn bits_image(
     maker: &CommandBuffer,
     (format, pixel_format): (Format, PixelFormat),
     samples: u32,
@@ -540,7 +541,7 @@ impl SampleCopy {
     /// rest in `GENERAL`; the regions lie in them, each copy's images have one sample count and
     /// formats Vulkan lets it copy between, and each draw's targets are as it was made for
     /// (planned above).
-    pub(super) unsafe fn record(&self, device: &ash::Device, raw: vk::CommandBuffer) {
+    pub(super) unsafe fn record(&self, device: &Vk, raw: vk::CommandBuffer) {
         let general = vk::ImageLayout::GENERAL;
         let phases = self.phases.iter().filter(|phase| !phase.is_empty());
         // SAFETY: the caller's contract above.

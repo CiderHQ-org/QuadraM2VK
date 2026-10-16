@@ -1,4 +1,4 @@
-// Owned fixture (WP-FMX, DESIGN D253): `fmx_atan2_precise` compiled with the default fast math.
+// Owned fixture: `fmx_atan2_precise` compiled with the default fast math.
 // `atan2` and `fast::atan2` are `air.fast_atan2.f32` (one call), `precise::atan2` is
 // `air.atan2.f32`, and the half call is `air.atan2.f16`, each carrying LLVM's fast flags, under
 // which the special operands are undefined (MSL section 7.1). The case reads which answers Metal

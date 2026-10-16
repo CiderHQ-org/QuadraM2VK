@@ -1,10 +1,10 @@
 //! The gate lanes of the driver deviations translation relies on, on the device the cfg selects,
 //! under the validation layer. A deviation is a driver's measured answer where Vulkan leaves the
 //! answer to it, keyed on the driver's release (`device::driver_facts`): MoltenVK 1.4.1 on Apple's
-//! GPUs has nineteen. A profile takes each at a measured release, and past the last measured one
-//! with a notice (`DeviceProfile::takes_driver_deviation`). Each test here runs what relies on one
-//! deviation and compares the device's answer with Metal's, so a venue whose driver release changes
-//! the deviation fails at the gate. The sampler's deviation has its own lanes (`depth_compares`,
+//! GPUs has twenty-three. A profile takes each at a measured release, and past the last measured
+//! one with a notice (`DeviceProfile::takes_driver_deviation`). Each test here runs what relies on
+//! one deviation and compares the device's answer with Metal's, so a venue whose driver release
+//! changes the deviation fails at the gate. The sampler's deviation has its own lanes (`depth_compares`,
 //! `mip_levels`, `nearest_positions`, `border_swizzles`), and the color writes theirs
 //! (`color_writes`); these are the others, the cube route's in both stages:
 //!
@@ -19,16 +19,20 @@
 //!   deviation, every word of a function the translation hands to the device's instruction is
 //!   Metal's (`PRECISE_DEVICE_WORDS`, `FAST_DEVICE_WORDS`). Elsewhere the translation's routines
 //!   answer within Apple's bound, and C3 compares them; the test prints how many words match.
-//! - **The cube routes** (`GraphicsCubeGradientRoute` and `CubeGradientRoute`): the owned fixture
-//!   `rtl_cube_grad_fragment` samples a cube and a cube array with explicit gradients through an
-//!   anisotropic constexpr sampler in a fragment function, over the inputs of the committed kernel
-//!   cases `anisotropic-cube-gradients-along-face-rows` and `-columns`, which run too. Where the
-//!   profile takes a route's deviation, each pixel or kernel lane is the Metal kernel's sample of
-//!   its lane on the Apple M3 Max, the lane's Metal environment. MoltenVK's graphics route is
-//!   measured on the M3 Max under macOS 26.7 alone (MoltenVK's device ID is the macOS release and
-//!   the GPU family), so on the M4, and on the M3 Max under macOS 27, the fragment's pipeline is
-//!   refused, naming the unmeasured deviation. Elsewhere the
-//!   sample is a near-equivalent (`CubeGradientFootprint`) or refused; the test prints which.
+//! - **The cube routes** (`GraphicsCubeGradientRoute`, `GraphicsCubeGradientTangents` and
+//!   `CubeGradientRoute`): the owned fixture `rtl_cube_grad_fragment` samples a cube and a cube
+//!   array with explicit gradients through an anisotropic constexpr sampler in a fragment function,
+//!   over the inputs of the committed kernel cases `anisotropic-cube-gradients-along-face-rows` and
+//!   `-columns`, which run too. Where the profile takes a route's deviation, each pixel or kernel
+//!   lane is the Metal kernel's sample of its lane on the Apple M3 Max, the lane's Metal
+//!   environment; where it takes `GraphicsCubeGradientTangents` (MoltenVK under macOS 27, whose
+//!   cube-gradient swizzle loses a `y` face's `z` gradient), so are the lanes on the `x` and `z`
+//!   faces, and the `y` faces' are a near-equivalent (`CubeGradientFootprint`) the test prints.
+//!   MoltenVK's graphics route is measured on the M3 Max under macOS 26.7 and under macOS 27.0.1
+//!   (MoltenVK's device ID is the macOS release and the GPU family, which the M4 under macOS 27
+//!   shares); under any other, the fragment's pipeline is refused, naming the unmeasured deviation
+//!   `GraphicsCubeGradientRoute`. Elsewhere the sample is a near-equivalent
+//!   (`CubeGradientFootprint`) or refused; the test prints which.
 //! - **The `half` fused multiply-add** (`MetalHalfFma`): the committed cases of a probe
 //!   (`fmx_fma_precise`, `fmx_fma_fast`), whose half word is a `half` `fma` and a `half` `a * b +
 //!   c` that Metal fuses, over 300 triples whose `float` sum lands on a `half` midpoint, 200 where
@@ -520,6 +524,10 @@ fn fragment_samples(device: &Device, case: &PublicCase) -> Result<Vec<u8>, Runti
         .collect())
 }
 
+/// The blocks of 12 lanes on a `y` face: each case's lanes take the faces in blocks of 12, in the
+/// order `+X`, `-X`, `+Y`, `-Y`, `+Z`, `-Z`.
+const Y_FACE_BLOCKS: [usize; 2] = [2, 3];
+
 /// The samples of `samples` that differ from `metal` (16 bytes each), and how many per block of
 /// 12 lanes (two samples a lane: each case's lanes take the faces in blocks of 12).
 fn differing_samples(samples: &[u8], metal: &[u8]) -> (Vec<usize>, Vec<usize>) {
@@ -537,9 +545,11 @@ fn differing_samples(samples: &[u8], metal: &[u8]) -> (Vec<usize>, Vec<usize>) {
 
 /// Where the profile takes each route's deviation, the fragment function's samples (the graphics
 /// route, `GraphicsCubeGradientRoute`) and the committed kernel's (the compute route,
-/// `CubeGradientRoute`) are the Metal kernel's of the same lanes on the Apple M3 Max. On MoltenVK
-/// where the graphics route is unmeasured (any Apple GPU and macOS release but the M3 Max under
-/// macOS 26.7: MoltenVK's device ID is both), the fragment's pipeline is refused naming it. Every
+/// `CubeGradientRoute`) are the Metal kernel's of the same lanes on the Apple M3 Max. Where it
+/// takes `GraphicsCubeGradientTangents` instead, the fragment's samples on the `x` and `z` faces
+/// are; its `y` faces' are printed. On MoltenVK where a route is unmeasured (any Apple GPU and
+/// macOS release but the M3 Max's under macOS 26.7 and 27: MoltenVK's device ID is both), the
+/// function emulates Metal's footprint, and its pipeline is made: its samples are printed. Every
 /// case and route is measured and printed before any is judged.
 #[test]
 fn cube_gradients_through_an_anisotropic_sampler_answer_as_metal() {
@@ -550,62 +560,44 @@ fn cube_gradients_through_an_anisotropic_sampler_answer_as_metal() {
         let device = validated_device(TEST_DEVICE, &messages, cache.path()).unwrap();
         let name = device.name().to_owned();
         let graphics = takes(&device, DriverDeviation::GraphicsCubeGradientRoute);
+        let tangents = takes(&device, DriverDeviation::GraphicsCubeGradientTangents);
         let compute = takes(&device, DriverDeviation::CubeGradientRoute);
         let moltenvk = device.properties().description.driver_id == Some(DriverId::MOLTENVK);
         let environment = METAL_ENVIRONMENT;
         for case_name in CUBE_CASES {
             let case = public_case(case_name).unwrap();
             let metal = metal_row(&case, environment);
-            let fragment = fragment_samples(&device, &case).map_err(|error| {
-                let refused = matches!(
-                    &error,
-                    RuntimeError::Compile(CompileError::Unsupported(u))
-                        | RuntimeError::Unsupported(u)
-                        if u.needs == Needs::UnmeasuredDeviation(
-                            DriverDeviation::GraphicsCubeGradientRoute
-                        )
-                );
-                (format!("{error}"), refused)
-            });
-            let kernel = run_case(&device, &case)
-                .map(|run| run.output)
-                .map_err(|why| (why, false));
-            for (stage, taken, answer) in [
-                ("fragment", graphics, fragment),
-                ("kernel", compute, kernel),
+            let fragment = fragment_samples(&device, &case).map_err(|error| format!("{error}"));
+            let kernel = run_case(&device, &case).map(|run| run.output);
+            for (stage, taken, y_faces_near, answer) in [
+                ("fragment", graphics || tangents, tangents, fragment),
+                ("kernel", compute, false, kernel),
             ] {
                 let verdict = match answer {
                     Ok(samples) => {
                         let (differ, per_block) = differing_samples(&samples, &metal);
                         eprintln!(
                             "cube route {stage} {case_name} on {name} (the measured route: \
-                             {taken}): {} of {} samples differ from {environment}'s kernel, per \
-                             12 lanes {per_block:?}: {differ:?}",
+                             {taken}, the y faces near: {y_faces_near}): {} of {} samples differ \
+                             from {environment}'s kernel, per 12 lanes {per_block:?}: {differ:?}",
                             differ.len(),
                             metal.len() / 16
                         );
-                        match (taken, stage, moltenvk) {
-                            (true, ..) if !differ.is_empty() => {
-                                Some(format!("samples {differ:?} differ"))
-                            }
-                            (false, "fragment", true) => {
-                                Some("made where the route is unmeasured".to_owned())
-                            }
-                            _ => None,
+                        let judged: Vec<usize> = differ
+                            .into_iter()
+                            .filter(|t| !(y_faces_near && Y_FACE_BLOCKS.contains(&(t / 24))))
+                            .collect();
+                        match taken && !judged.is_empty() {
+                            true => Some(format!("samples {judged:?} differ")),
+                            false => None,
                         }
                     }
-                    Err((why, refused)) => {
+                    Err(why) => {
                         eprintln!(
                             "cube route {stage} {case_name} on {name} (the measured route: \
                              {taken}): {why}"
                         );
-                        match (taken, stage, moltenvk) {
-                            (true, ..) => Some(why),
-                            (false, "fragment", true) if !refused => {
-                                Some(format!("refused otherwise than unmeasured: {why}"))
-                            }
-                            _ => None,
-                        }
+                        (taken || moltenvk).then_some(why)
                     }
                 };
                 if let Some(why) = verdict {

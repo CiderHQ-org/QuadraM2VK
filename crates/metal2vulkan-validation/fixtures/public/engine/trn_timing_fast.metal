@@ -1,4 +1,4 @@
-// Owned fixture (WP-TRN, DESIGN D297): timing kernels for the math functions WP-TRN computes with
+// Owned fixture: timing kernels for the math functions computed with
 // the translation's routines, compiled with the default fast math, so the precise calls are
 // spelled `precise::` (on MoltenVK a precise call in a fast-math entry takes the routine). Each
 // thread applies its function to its running value 64 n times (64 steps written out in each of

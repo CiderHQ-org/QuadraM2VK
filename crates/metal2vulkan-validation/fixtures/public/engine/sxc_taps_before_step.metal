@@ -1,10 +1,9 @@
-// Owned fixture (WP-SXC, DESIGN D247): two half taps of a texture at a coordinate, then a step of
-// the coordinate, then the taps' maximum. Thread t reads its coordinate c from `coords[t]`, takes
-// the texels at c and one to its right through a nearest, pixel-coordinate sampler, steps c.x by
-// `step` and stores c back, and writes (max(a.rg, b.rg), 0, 1) to texel (t, 0) of `dst`.
-// SPIRV-Cross (MoltenVK 1.4.1) forwards each tap's `OpQuantizeToF16` into the maximum without the
-// tap's dependency on c, and steps c in place: without D247's copies the taps read the stepped c.
-// Loop-free.
+// Owned fixture: two half taps of a texture at a coordinate, then a step of the coordinate, then
+// the taps' maximum. Thread t reads its coordinate c from `coords[t]`, takes the texels at c and
+// one to its right through a nearest, pixel-coordinate sampler, steps c.x by `step` and stores c
+// back, and writes (max(a.rg, b.rg), 0, 1) to texel (t, 0) of `dst`. SPIRV-Cross (MoltenVK 1.4.1)
+// forwards each tap's `OpQuantizeToF16` into the maximum without the tap's dependency on c, and
+// steps c in place: without the translator's copies the taps read the stepped c. Loop-free.
 #include <metal_stdlib>
 using namespace metal;
 

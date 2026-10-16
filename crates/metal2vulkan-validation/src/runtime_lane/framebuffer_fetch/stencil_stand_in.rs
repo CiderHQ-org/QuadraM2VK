@@ -4,20 +4,19 @@
 //!
 //! `tsw_fetch_discard` (without early tests) reads color 1 (`RG16Float`) as `(x, y)`, discards
 //! where `x` is 0, and writes `tint · w` to color 0 (`RGBA16Float`) and `(w, y / 4)` to color 1,
-//! `w = x / 2 + y`. Metal runs it for every fragment and tests after it, the stencil test first:
-//! a fragment that fails the stencil test runs the face's stencil-failure operation, one that
-//! passes it and fails the depth test the depth-failure operation, and one that passes both the
-//! pass operation, each under the face's write mask, and only that one stores its colors and
-//! depth. In the pixel interlock the function stores color 1 before Vulkan's tests, so it runs
-//! both tests itself, against stand-ins of the depth and the stencil, which the runtime fills
-//! before each run of such draws and copies back after it; through input attachments (lavapipe)
-//! the device's tests come after it as Metal's do. Either way each case draws Metal's answer,
-//! which the lane computes by Metal's rule: color 1 cleared to `(0.75, 0.25)`, color 0 to 0, the
-//! depth to 1 and the stencil to 0x40, then each full-screen draw at its depth under `Less` with
-//! writes and its stencil state. The fullscreen triangle is back-facing under Metal's default
-//! winding (`shader_stencil`'s RT6 Metal probe 9) and front-facing under `CounterClockwise`; the
-//! face a draw does not take compares `Never`, so a function that took the wrong face would drop
-//! every fragment.
+//! `w = x / 2 + y`. Metal runs it for every fragment and tests after it, the stencil test first: a
+//! fragment that fails the stencil test runs the face's stencil-failure operation, one that passes
+//! it and fails the depth test the depth-failure operation, and one that passes both the pass
+//! operation, each under the face's write mask, and only that one stores its colors and depth. In
+//! the pixel interlock the function stores color 1 before Vulkan's tests, so it runs both tests
+//! itself, against stand-ins of the depth and the stencil, which the runtime fills before each run
+//! of such draws and copies back after it; through input attachments (lavapipe) the device's tests
+//! come after it as Metal's do. Either way each case draws Metal's answer, which the lane computes
+//! by Metal's rule: color 1 cleared to `(0.75, 0.25)`, color 0 to 0, the depth to 1 and the stencil
+//! to 0x40, then each full-screen draw at its depth under `Less` with writes and its stencil state.
+//! The fullscreen triangle is back-facing under Metal's default winding (`shader_stencil`'s Metal
+//! probe on an M4) and front-facing under `CounterClockwise`; the face a draw does not take
+//! compares `Never`, so a function that took the wrong face would drop every fragment.
 //!
 //! The cases, each of 4² texels:
 //! - **faces and operations**: the reference passing and failing under `Equal`, `Less` through a

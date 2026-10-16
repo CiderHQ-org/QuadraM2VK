@@ -1,4 +1,4 @@
-// Owned fixture (WP-HLF, DESIGN D251): the `float` results of the texels whose `half` results
+// Owned fixture: the `float` results of the texels whose `half` results
 // `bcx_half_read` reads, to tell Metal's decode and filter from its conversion to `half`. Four 2D
 // `float` textures are each read at the lane's coordinate truncated to a texel, sampled through a
 // nearest-filter sampler, and sampled through a linear-filter sampler, both clamp-to-edge with

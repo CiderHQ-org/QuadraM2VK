@@ -1,4 +1,4 @@
-// Owned fixture (WP-RVC, docs/TODO.md 6.2; written for this repository): simd_shuffle_and_fill_down
+// Owned fixture (written for this repository): simd_shuffle_and_fill_down
 // with an explicit modulo of 32 in a vertex function. Metal runs this form there; its compiler
 // refuses the form without a modulo in a vertex function (it reads the simdgroup width,
 // air.get_simdgroup_size, which a vertex function may not). Forty rasterization-disabled points;

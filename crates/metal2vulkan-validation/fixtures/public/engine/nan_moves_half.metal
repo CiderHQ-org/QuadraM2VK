@@ -1,4 +1,4 @@
-// Owned fixture (NaN model, DESIGN D293): `nan_moves` on `half`, whether Metal's data movement
+// Owned fixture (NaN model): `nan_moves` on `half`, whether Metal's data movement
 // keeps a NaN `half`'s bits. Lane `i` loads halves a and b (`hin[2i]`, `hin[2i + 1]`) and a
 // selector, and stores as a half4 to `out[i]`: a (a half load and store), select(b, a, sel), its
 // neighbour's a through threadgroup memory, and the selected element of half4(b, a, b, a).

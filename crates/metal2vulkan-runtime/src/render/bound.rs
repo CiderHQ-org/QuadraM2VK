@@ -32,7 +32,7 @@ use ash::vk;
 use super::{DrawState, IndexBind};
 use crate::binding::PushWrite;
 use crate::pipeline::FixedState;
-use crate::render_state::DepthBiasSetting;
+use crate::render_state::{DepthBiasSetting, ViewportList};
 
 /// The state commands recorded into one secondary command buffer that still hold (the module
 /// docs).
@@ -63,8 +63,8 @@ pub(super) struct Bound {
 /// The values a draw sets its dynamic states to: the encoder's state at the draw and its input
 /// assembly.
 pub(super) struct Values {
-    viewports: Vec<vk::Viewport>,
-    scissors: Vec<vk::Rect2D>,
+    viewports: ViewportList<vk::Viewport>,
+    scissors: ViewportList<vk::Rect2D>,
     fixed: FixedState,
     stencil_reference: [u32; 2],
     depth_bias: DepthBiasSetting,
@@ -250,7 +250,7 @@ impl Values {
                     && self
                         .viewports
                         .iter()
-                        .zip(&s.viewports)
+                        .zip(s.viewports.iter())
                         .all(|(a, b)| viewport_bits(a) == viewport_bits(b))
             }
             vk::DynamicState::SCISSOR => {
@@ -258,7 +258,7 @@ impl Values {
                     && self
                         .scissors
                         .iter()
-                        .zip(&s.scissors)
+                        .zip(s.scissors.iter())
                         .all(|(a, b)| rect(a) == rect(b))
             }
             vk::DynamicState::DEPTH_BIAS => self.depth_bias == s.depth_bias.setting(),
@@ -302,14 +302,8 @@ impl Values {
         let s = now.state;
         let (ds, now_ds) = (&mut self.fixed.depth_stencil, &s.fixed.depth_stencil);
         match state {
-            vk::DynamicState::VIEWPORT => {
-                self.viewports.clear();
-                self.viewports.extend_from_slice(&s.viewports);
-            }
-            vk::DynamicState::SCISSOR => {
-                self.scissors.clear();
-                self.scissors.extend_from_slice(&s.scissors);
-            }
+            vk::DynamicState::VIEWPORT => self.viewports.clone_from(&s.viewports),
+            vk::DynamicState::SCISSOR => self.scissors.clone_from(&s.scissors),
             vk::DynamicState::DEPTH_BIAS => self.depth_bias = s.depth_bias.setting(),
             vk::DynamicState::BLEND_CONSTANTS => self.blend_color = s.blend_color,
             vk::DynamicState::STENCIL_COMPARE_MASK => {

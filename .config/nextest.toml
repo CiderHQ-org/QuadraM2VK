@@ -14,12 +14,43 @@ filter = 'test(/::soak_/)'
 slow-timeout = { period = "300s", terminate-after = 24 }
 
 # The exit lanes' timing checks each run alone. Each measures a child process's exit, from its
-# last line to its end, against 1.5 s: below the exit hook's own bound, so a hook that waited it
-# out fails. That time holds the driver's device destruction and process teardown, which the
-# runtime does not set: on an RTX 3090 (NVIDIA 615.71.09) `vkDestroyDevice` took 54 ms alone (63
-# devices, at most 57 ms) and up to 2 s while other lane processes used the GPU (over 500 ms for
-# 39 of 72 beside `runtime_lane::framebuffer_fetch`); exits that took 87 to 97 ms alone took 0.3
-# to 3.1 s beside other lanes there, and 1.8 to 2 s in an RTX 5080 Laptop GPU's whole suite.
+# last line to the end of its exit handlers, less the exiting thread's wait for a CPU, against
+# 1.5 s: below the exit hook's own bound, so a hook that waited it out fails. That time holds the
+# driver's device destruction, which the runtime does not set: on an RTX 3090 (NVIDIA 615.71.09)
+# `vkDestroyDevice` took 54 ms alone (63 devices, at most 57 ms) and up to 2 s while other lane
+# processes used the GPU (over 500 ms for 39 of 72 beside `runtime_lane::framebuffer_fetch`);
+# exits that took 87 to 97 ms alone took 0.3 to 3.1 s beside other lanes there, and 1.8 to 2 s in
+# an RTX 5080 Laptop GPU's whole suite.
 [[profile.default.overrides]]
 filter = 'package(metal2vulkan-validation) & test(/^runtime_lane::exits::(pending_work_stays_pending_at_exit|exits_from_the_runtime_s_threads_are_clean|an_exit_while_a_host_step_waits_is_clean|an_exit_waits_for_a_cpu_device_s_work|an_exit_while_submitting_is_clean|exits_right_after_learning_of_completion_are_clean)$/)'
+threads-required = 'num-test-threads'
+
+# The lanes that fault the GPU on purpose (a GPU write into read-only host pages; they make GPU work
+# on MoltenVK alone) run alone on macOS. Metal's recovery from a GPU fault fails command buffers of
+# other processes the GPU runs then, as `MTLCommandBufferErrorInternal` ("Discarded (victim of GPU
+# error/recovery) (00000005:kIOGPUCommandBufferCallbackErrorInnocentVictim)", the encoder
+# `Affected`), and completes some with wrong results and no error: a plain Metal probe on the M3
+# Max (macOS 27.0.1), the lane's texture round in one process beside processes that each fault
+# once, failed 19 of 52,592 rounds beside 160 faults that way and completed 4 more with wrong
+# bytes, and none of 12,270 rounds alone. `runtime_lane::host_copied_textures` failed with `Execution(1)` in 4 batches,
+# each beside `a_gpu_fault_fails_its_command_buffer_and_the_queue_runs_on`; in 100 runs alone and
+# 100 beside the other `host_*` lanes it never failed.
+[[profile.default.overrides]]
+platform = 'cfg(target_os = "macos")'
+filter = 'package(metal2vulkan-validation) & test(/^runtime_lane::host_memory::(a_gpu_fault_fails_its_command_buffer_and_the_queue_runs_on|a_lost_device_s_command_buffers_let_go_of_their_pools_after_the_driver_s_completion)$/)'
+threads-required = 'num-test-threads'
+
+# The queue storm runs alone on macOS. Beside the runtime lane's other tests on the M3 Max (macOS
+# 27.0.1, MoltenVK 1.4.1, load average 18 to 24) the runtime passed 1 storm of 4: its light bursts'
+# 99th percentile was 1.6 to 5.6 busy command buffers above Metal's under MoltenVK's fences, against
+# a margin of 1, and its median within 0.1. That tail is MoltenVK's completion path into the
+# runtime's queue waiter: from a burst's submission to its completion as the runtime saw it, 25.9
+# to 73.4 ms at the 99th percentile, where Metal's to its GPU end took 8.5 to 18.1 ms. The
+# runtime's wake from there, 6.0 to 30.0 ms, was at or below Metal's 13.4 to 45.9 ms in every
+# storm. Alone it still catches the runtime's own delays: it passed 5 storms of 5 on a quiet host,
+# and failed 3 of 3 with 10 ms spun in each of the runtime's completion turns (a probe build), its
+# bursts' median 3.53 busy command buffers against 2.03.
+[[profile.default.overrides]]
+platform = 'cfg(target_os = "macos")'
+filter = 'package(metal2vulkan-validation) & test(/^runtime_lane::queue_storms::four_queues_storm_as_metal_s_do$/)'
 threads-required = 'num-test-threads'

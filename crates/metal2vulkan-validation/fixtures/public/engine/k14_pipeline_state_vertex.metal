@@ -1,4 +1,4 @@
-// Owned fixture (WP-K14, DESIGN D206): a rasterization-disabled vertex function whose device
+// Owned fixture: a rasterization-disabled vertex function whose device
 // argument buffer holds a render pipeline state, a compute pipeline state, a `scale`, and a
 // `bias` (at 0, 8, 16, and 20). Each vertex writes `vid * scale + bias` and never reads a
 // pipeline state. Loop-free.

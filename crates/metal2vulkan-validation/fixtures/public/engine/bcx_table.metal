@@ -1,4 +1,4 @@
-// Owned fixture (WP-BCX, DESIGN D248): the weights of Metal's bicubic filter (`filter::bicubic`)
+// Owned fixture: the weights of Metal's bicubic filter (`filter::bicubic`)
 // at every 1/256 fraction of each axis. One clamp-to-edge bicubic sampler with pixel coordinates
 // samples `across` at each lane's coordinate and `down` at the same coordinate with its axes
 // swapped; the cases bind `down` to the transpose of `across`, so one lane reads the same taps

@@ -553,6 +553,7 @@ mod tests {
             }),
             draw: None,
             tessellation: None,
+            mesh_draw: None,
             output: OutputSelection::Buffer {
                 binding: 0,
                 offset: 0,
@@ -568,6 +569,7 @@ mod tests {
             raster_sample_count: None,
             public_source: None,
             no_effect: None,
+            creation_bound: None,
         };
         case.case_id = case.computed_case_id().unwrap();
         case
@@ -915,7 +917,7 @@ mod tests {
             Ok(())
         );
         assert!(row(restricted.clone(), None).validate_content().is_err());
-        assert!(row(restricted, Some("vk12-bare"))
+        assert!(row(restricted, Some("roadmap-2022"))
             .validate_content()
             .is_err());
         let inactive = serde_json::json!({"tools": [validation], "profiles_layer": restriction});

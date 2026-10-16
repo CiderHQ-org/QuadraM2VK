@@ -1,4 +1,4 @@
-// Owned fixture (WP-SPSE, DESIGN D270): the residency word (`sparse_color::resident()`) and value of
+// Owned fixture: the residency word (`sparse_color::resident()`) and value of
 // a 2D texture's nearest and linear samples and gathers at level 0 through clamp_to_edge and
 // clamp_to_border constexpr samplers, at authored coordinates (a probe buffer). Thread `i` runs
 // probe `i` of buffer 0: its kind picks the sampler and access, and its `uv` the coordinate. A case

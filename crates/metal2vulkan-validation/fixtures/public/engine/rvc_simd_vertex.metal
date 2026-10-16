@@ -1,4 +1,4 @@
-// Owned fixture (WP-RVC, docs/TODO.md 6.2; written for this repository): simdgroup functions in a
+// Owned fixture (written for this repository): simdgroup functions in a
 // vertex function. Forty rasterization-disabled points; vertex v reads in[v] and writes simd_sum,
 // simd_shuffle from lane 5, simd_shuffle_xor by 1, and the ballot of x > 0 (low and high words) to
 // out[5v .. 5v + 4]. Metal runs them in a vertex function; the translation needs a device that

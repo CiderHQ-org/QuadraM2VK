@@ -1,4 +1,4 @@
-// Owned fixture (WP-K14d, DESIGN D268): a compute template whose output observes the region of
+// Owned fixture: a compute template whose output observes the region of
 // the dispatch each of its threads runs in. Each thread stages its index in its threadgroup in
 // threadgroup memory, waits for its group, and reads its neighbour's (so a threadgroup of another
 // size reads another index). It then adds, atomically, a weighted sum of its threadgroup's size,

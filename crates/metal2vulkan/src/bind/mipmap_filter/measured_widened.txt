@@ -1,11 +1,10 @@
-# Plain Metal's generateMipmapsForTexture: of ABGR4Unorm and A1BGR5Unorm on an Apple M3 Max
-# (macOS 26.7) and an Apple M4 (macOS 27.0.1), the first computed level of share-mips-m3d's
-# random textures (193x193, 513x513, 1025x1025; WP-FXR, our own probe, DESIGN D729). Each row is
-# one field's sum (A1BGR5Unorm's fields: alpha, then its three 5-bit fields; ABGR4Unorm's four in
-# bit order): on each GPU every code is filtered as the code its bits replicate to (4-bit as
-# 8-bit, 5- and 1-bit as 10-bit), and the rows are a sample of the sums where that rule and the
-# former one (each code on its own 12-bit grid) give different codes, with near-tie sums where
-# they agree.
+# Plain Metal's generateMipmapsForTexture: of ABGR4Unorm and A1BGR5Unorm on an Apple M3 Max (macOS
+# 26.7) and an Apple M4 (macOS 27.0.1), the first computed level of share-mips-m3d's random textures
+# (193x193, 513x513, 1025x1025; our own probe). Each row is one field's sum (A1BGR5Unorm's fields:
+# alpha, then its three 5-bit fields; ABGR4Unorm's four in bit order): on each GPU every code is
+# filtered as the code its bits replicate to (4-bit as 8-bit, 5- and 1-bit as 10-bit), and the rows
+# are a sample of the sums where that rule and the former one (each code on its own 12-bit grid)
+# give different codes, with near-tie sums where they agree.
 # Format:
 #   <m3|m4> <format> <width>x<height> <x> <y> <field> <tap codes: (x0, y0) (x1, y0) (x0, y1)
 #   (x1, y1)> <the measured code>

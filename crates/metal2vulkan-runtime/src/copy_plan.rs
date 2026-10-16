@@ -510,6 +510,34 @@ impl HostLayout {
         })
     }
 
+    /// Whether the host bytes `host` of 32-bit float texels (a depth's) hold a negative value other
+    /// than a zero or a denormal, or a NaN of either sign, in a row.
+    pub(super) fn holds_negative_or_nan(&self, host: &[u8]) -> bool {
+        let n = self.row_bytes as usize;
+        self.rows().any(|(h, _)| {
+            host[h..h + n].as_chunks::<4>().0.iter().any(|word| {
+                let bits = u32::from_le_bytes(*word);
+                let exponent = bits & 0x7f80_0000;
+                let nan = exponent == 0x7f80_0000 && bits & 0x007f_ffff != 0;
+                nan || (bits & 0x8000_0000 != 0 && exponent != 0)
+            })
+        })
+    }
+
+    /// Whether the host bytes `host` of 32-bit float texels (a depth's) hold, in a row, a word
+    /// whose magnitude stand-in (`bind::DepthMagnitudeModule::stand_in`, a denormal's the smallest
+    /// normal where `flush`) is not itself: a negative value, -0 included, a NaN, or where `flush`
+    /// a denormal; a depth test of the device's compares such a value otherwise than Metal's.
+    pub(super) fn holds_unlike_its_stand_in(&self, host: &[u8], flush: bool) -> bool {
+        let n = self.row_bytes as usize;
+        self.rows().any(|(h, _)| {
+            host[h..h + n].as_chunks::<4>().0.iter().any(|word| {
+                let bits = u32::from_le_bytes(*word);
+                metal2vulkan::bind::DepthMagnitudeModule::stand_in(bits, flush) != bits
+            })
+        })
+    }
+
     /// Unpacks `packed` into the host bytes `host`, leaving the bytes between rows untouched;
     /// rows that overlap are written in order, image by image and row by row, so the later
     /// row's bytes stay.

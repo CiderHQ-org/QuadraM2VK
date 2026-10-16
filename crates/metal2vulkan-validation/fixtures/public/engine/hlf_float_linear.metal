@@ -1,4 +1,4 @@
-// Owned fixture (WP-HLF, DESIGN D251): Metal's linear filter with `float` and `half` results in
+// Owned fixture: Metal's linear filter with `float` and `half` results in
 // 1D and 2D, at the texture's edges included. A 2D and a 1D `float` texture and a 2D and a 1D
 // `half` texture (each case binds one format to all four, 16 texels wide) are each sampled
 // through a linear clamp-to-edge and a linear clamp-to-zero sampler with normalized

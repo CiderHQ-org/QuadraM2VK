@@ -1,4 +1,4 @@
-// Owned fixture (WP-DFL, docs/TODO.md 2.2 to 2.5): how Metal reads `float` denormals in vector
+// Owned fixture: how Metal reads `float` denormals in vector
 // arithmetic, comparisons and functions, and in operations whose operand is another operation's
 // result, in Metal's compile without fast math. Thread `i` reads the float vectors (a, b, c) and
 // the int vector n from `in[4i .. 4i + 3]` and writes 64 words to `out[16i .. 16i + 15]`, each row

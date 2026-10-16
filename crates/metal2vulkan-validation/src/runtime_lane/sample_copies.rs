@@ -16,6 +16,7 @@
 //! naming `Feature::Format`.
 
 use super::degrade_notices::shared_in_system_memory;
+use super::degrade_notices::signs_depth_tests;
 use super::degrade_notices::{assert_made_once, clamps_depth_uploads, forced};
 use super::degrade_notices::{loses_depth_denormals, made_compute_kinds, made_render_kinds};
 use super::{validated_device, Messages, ScratchCache, WAIT};
@@ -426,6 +427,10 @@ fn multisampled_depth_and_stencil_copy_every_sample_with_colour() {
             (
                 Degradation::RestrictedDepthUpload,
                 float_depth && clamps_depth_uploads(&device),
+            ),
+            (
+                Degradation::SignedDepthTest,
+                float_depth && signs_depth_tests(&device),
             ),
             (
                 Degradation::SharedInSystemMemory,

@@ -351,7 +351,14 @@ impl ShaderCache {
         create: impl FnOnce(vk::PipelineCache) -> Result<T, E>,
     ) -> Result<T, E> {
         let _turn = crate::pipeline::budget::program_turn();
-        let made = driver::make(&self.store, &self.records, raw, making, create);
+        let made = driver::make(
+            &self.store,
+            &self.records,
+            raw,
+            making,
+            crate::exit_guard::closed,
+            create,
+        );
         if self.store.over_capacity() {
             self.worker.evict();
         }

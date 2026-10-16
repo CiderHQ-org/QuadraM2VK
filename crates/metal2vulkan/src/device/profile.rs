@@ -91,6 +91,12 @@ impl DeviceProfile {
         &self.fields.descriptors
     }
 
+    /// The Function storage a thread holds correctly on the device: its measured value, or the
+    /// floor of a device not measured. No Vulkan property states it; Metal states none either.
+    pub fn function_storage(&self) -> FunctionStorage {
+        self.fields.function_storage
+    }
+
     /// The profile's subgroup model: each Metal stage's subgroup sizes, operations, and whether it
     /// can pin a size or require full subgroups. What a simdgroup runs as follows from it
     /// ([`DeviceProfile::simd_tier`]); a compiled function states what it requires
@@ -185,6 +191,9 @@ impl DeviceProfile {
             }
             DriverDeviation::GraphicsCubeGradientRoute => {
                 f.cube_gradients.graphics == CubeGradientRoute::AppleSwizzled
+            }
+            DriverDeviation::GraphicsCubeGradientTangents => {
+                f.cube_gradients.graphics == CubeGradientRoute::AppleProjected
             }
             DriverDeviation::SimdgroupLockstep => f
                 .enabled
@@ -282,6 +291,22 @@ impl DeviceProfile {
                 .enabled
                 .properties
                 .contains(&VkProperty::Unorm8LinearFilter),
+            DriverDeviation::MetalDepth16Stores => f
+                .enabled
+                .properties
+                .contains(&VkProperty::MetalDepth16Stores),
+            DriverDeviation::MetalDepth16BiasedStores => f
+                .enabled
+                .properties
+                .contains(&VkProperty::MetalDepth16BiasedStores),
+            DriverDeviation::MetalInterpolation => f
+                .enabled
+                .properties
+                .contains(&VkProperty::MetalInterpolation),
+            DriverDeviation::MetalFirstVertexIndices => f
+                .enabled
+                .properties
+                .contains(&VkProperty::MetalFirstVertexIndices),
         }
     }
 
@@ -433,11 +458,13 @@ pub struct ProfileFields {
     pub rounding_order: RoundingOrderRoute,
     /// The Function storage a thread holds correctly (`device::function_storage`): a stage's
     /// private memory, its call stacks included, may take this much a thread
-    /// (`VkLimit::FunctionStorageBytesPerThread`).
+    /// (`VkLimit::FunctionStorageBytesPerThread`), and a vertex or fragment function on a device
+    /// not measured more ([`FunctionStorage::Assumed`]).
     pub function_storage: FunctionStorage,
     /// How the driver hands a cube sample's explicit gradients to the GPU, in a graphics and in
     /// a compute pipeline: Vulkan's cube derivative rule unless the driver's release is measured
-    /// with another (`DriverDeviation::CubeGradientRoute`).
+    /// with another (`DriverDeviation::CubeGradientRoute`, `GraphicsCubeGradientRoute` and
+    /// `GraphicsCubeGradientTangents`).
     pub cube_gradients: CubeGradients,
     /// The driver's deviations the profile takes at a release newer than the last one measured
     /// (`device::driver_facts`), each with that release's `driverVersion`: taken, and recorded
@@ -448,9 +475,9 @@ pub struct ProfileFields {
 
 /// How a driver hands a cube sample's explicit gradients to the GPU
 /// ([`ProfileFields::cube_gradients`]), per pipeline kind, each decided by the driver's measured
-/// deviation (`DriverDeviation::GraphicsCubeGradientRoute` and
-/// `DriverDeviation::CubeGradientRoute`); without it, Vulkan's rule, but
-/// [`CubeGradientRoute::Unmeasured`] on a MoltenVK `driver_id`.
+/// deviations (`DriverDeviation::GraphicsCubeGradientRoute`,
+/// `DriverDeviation::GraphicsCubeGradientTangents` and `DriverDeviation::CubeGradientRoute`);
+/// without them, Vulkan's rule, but [`CubeGradientRoute::Unmeasured`] on a MoltenVK `driver_id`.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct CubeGradients {
@@ -460,26 +487,44 @@ pub struct CubeGradients {
     pub compute: CubeGradientRoute,
 }
 
-/// The route of a cube sample's explicit gradients to the GPU ([`CubeGradients`]).
+/// The route of a cube sample's explicit gradients to the GPU ([`CubeGradients`]). Metal's
+/// footprint is the one the Apple M3 Max reads under macOS 27 (`lower::sampler::CubeFootprint`):
+/// each gradient's two tangent components on the face, its normal component dropped.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CubeGradientRoute {
-    /// Vulkan's rule ("Cube Map Derivative Transformation") reads the footprint from them.
+    /// Vulkan's rule ("Cube Map Derivative Transformation") reads the footprint from them: the
+    /// function hands an isotropic sample Metal's length of the two tangent components on one
+    /// tangent, and an anisotropic one Metal's face gradients without their normal component
+    /// (`lower::sampler::CubeFootprint::Length` and `Face`); the level and the anisotropic filter
+    /// are the device's (`PrecisionNote::CubeGradientFootprint`).
     Vulkan,
     /// SPIRV-Cross's `spvGradientCube` (its `agx_manual_cube_grad_fixup`) projects each onto the
     /// face as Vulkan's rule does and swizzles the two values into the components Apple's
-    /// isotropic reading takes, then hands them to Metal's `gradientcube`, whose anisotropic
-    /// reading on the Apple M3 Max takes them transposed
-    /// (`lower::sampler::CubeFootprint::AnisotropicSwizzled`).
+    /// isotropic reading took under macOS 26.7, then hands them to Metal's `gradientcube`, whose
+    /// anisotropic reading on the Apple M3 Max there takes them transposed: that GPU's macOS 26.7
+    /// footprint (`lower::sampler::CubeFootprint::Isotropic` and `AnisotropicSwizzled`), measured
+    /// on that identity alone.
     AppleSwizzled,
+    /// The same fixup under macOS 27, whose Metal reads the face's two tangents of what it is
+    /// handed: an `x` or `z` face's gradient without its normal component reaches Metal as its
+    /// own, exactly; on a `y` face the fixup writes the face's `x` tangent on both, so the function
+    /// hands Metal's length there, which keeps an isotropic sample's footprint and lays an
+    /// anisotropic one's ellipse on the diagonal (`lower::sampler::CubeFootprint::Projected`,
+    /// `PrecisionNote::CubeGradientFootprint`).
+    AppleProjected,
     /// They reach Metal's `gradientcube` as given, which the GPU reads by Metal's own rule, so
     /// the function hands Metal's own (`lower::sampler::CubeFootprint::Metal`).
     Metal,
     /// The driver hands them to Metal by a route its description does not state: a MoltenVK
     /// `driver_id` at a release no measurement covers, or a document of one that states no
-    /// route. The isotropic form keeps its footprint's length under every route above, so an
-    /// isotropic sample takes it (`PrecisionNote::CubeGradientFootprint`); an anisotropic
-    /// constexpr sampler's is refused (`Needs::UnmeasuredDeviation`).
+    /// route. The function takes Metal's footprint itself where its emulation reaches the sample
+    /// (`lower::sampler::anisotropic`): Metal's level, and an anisotropic sampler's taps, each an
+    /// explicit level of Metal's own sampler, which no route alters
+    /// (`PrecisionNote::AnisotropicFilter` for the taps). Elsewhere it hands the isotropic form's
+    /// length, on one tangent, which every route above reads alike (but a `y` face's through
+    /// [`CubeGradientRoute::AppleProjected`]'s fixup), through an isotropic sampler
+    /// (`metal::sampler::SamplerUse::cube_gradient`, `PrecisionNote::CubeGradientFootprint`).
     Unmeasured,
 }
 
@@ -491,24 +536,21 @@ impl CubeGradients {
             _ => self.graphics,
         }
     }
-
-    /// The driver deviation that decides the route of a function of `stage`.
-    pub(crate) fn deviation(stage: crate::pipeline::sym::Stage) -> DriverDeviation {
-        match stage {
-            crate::pipeline::sym::Stage::Kernel => DriverDeviation::CubeGradientRoute,
-            _ => DriverDeviation::GraphicsCubeGradientRoute,
-        }
-    }
 }
 
-/// The Function storage a thread holds correctly ([`ProfileFields::function_storage`]), in bytes.
+/// The Function storage a thread holds correctly ([`DeviceProfile::function_storage`]), in bytes:
+/// how much private memory a stage may keep a thread (its `thread` variables and arrays, its call
+/// stacks, and the constants it holds per thread), which a driver backs with scratch memory and
+/// past which it can answer wrongly or hang with no error. Measured per device, since no Vulkan
+/// property states it.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FunctionStorage {
     /// Measured on the device: a thread holds this many bytes correctly.
     Measured(u64),
-    /// The device was not measured: translation assumes it holds this many, the floor, and a
-    /// stage that keeps private memory records `PrecisionNote::FunctionStorageAssumed`.
+    /// The device was not measured: it holds this many, the floor, with no note. A vertex or
+    /// fragment function may keep more, up to the 192 KiB a thread Metal was measured to hold, and
+    /// records `PrecisionNote::FunctionStorageAssumed`; any other stage past the floor is refused.
     Assumed(u64),
 }
 
@@ -1004,6 +1046,15 @@ pub struct Limits {
     /// `maxTessellationPatchSize`: the most control points a patch may have (0 without
     /// `tessellationShader`).
     pub max_tessellation_patch_size: u32,
+    /// `maxGeometryInputComponents`: the scalar components of a geometry stage's user inputs per
+    /// vertex (0 without `geometryShader`).
+    pub max_geometry_input_components: u32,
+    /// `maxGeometryOutputComponents`: the scalar components of a geometry stage's user outputs
+    /// per vertex (0 without `geometryShader`).
+    pub max_geometry_output_components: u32,
+    /// `maxGeometryTotalOutputComponents`: the scalar components of every vertex a geometry stage
+    /// emits for one input primitive, together (0 without `geometryShader`).
+    pub max_geometry_total_output_components: u32,
     /// `supportedDepthResolveModes` (`VkPhysicalDeviceDepthStencilResolveProperties`, Vulkan
     /// 1.2): the modes a depth attachment may resolve by.
     pub supported_depth_resolve_modes: vk::ResolveModeFlags,
@@ -1204,20 +1255,6 @@ pub enum DriverWorkaround {
     /// workgroup words, which its entry wrapper writes to the indices whole, one vector per
     /// primitive, after the body (`lower::mesh`).
     MeshIndexComponentStoresMisplaced,
-    /// The driver's interpolation of a varying is not Metal's: an interpolated value that is
-    /// exactly representable comes out one `f32` ulp toward zero where Metal, and every other
-    /// venue, gives it exactly. Vulkan states no precision for interpolation, so this is the
-    /// device's answer, not a defect of the specification's. Measured on NVIDIA's driver
-    /// (`VK_DRIVER_ID_NVIDIA_PROPRIETARY`) 615.71.09 on the GeForce RTX 5080 Laptop GPU (the C3
-    /// venue `nvidia-rtx5080-laptop`): authored case `c011369b`, whose varyings are affine in
-    /// screen position with exact vertices, reads -0.99999994, -0.74999994 and -2.74999976 for
-    /// -1, -0.75 and -2.75 on 12 of its 64 words, in both legs. It is keyed on the driver's
-    /// release and NVIDIA's vendor ID (`device::driver_facts`), for every NVIDIA GPU under it:
-    /// it changes no code, only what a module records, so taking it on a GPU not measured
-    /// announces a difference that GPU may not have rather than hiding one it has. A fragment
-    /// function that reads a varying the device interpolates records
-    /// `PrecisionNote::DeviceInterpolation` there (`lower::stage_io`).
-    InterpolationNotMetals,
     /// The driver's shader converter writes an `OpCompositeInsert` into the composite it reads
     /// (`c.x = v;`, and the result names `c`) wherever no later read of the composite in the
     /// text it writes stops it, so in a loop a composite defined before the loop is overwritten

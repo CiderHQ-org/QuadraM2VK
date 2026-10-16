@@ -1,4 +1,4 @@
-// Owned fixture (WP-ZIN2): a compositor's rounded, half-transparent boxes drawn over what a
+// Owned fixture: a compositor's rounded, half-transparent boxes drawn over what a
 // surface already holds, as a window server draws alert windows over a wallpaper. `zws_box`
 // places two triangles over a box given in pixels of a target of the given size. Both fragment
 // functions keep the fragments inside the box's rounded corners (a circle of the radius at each

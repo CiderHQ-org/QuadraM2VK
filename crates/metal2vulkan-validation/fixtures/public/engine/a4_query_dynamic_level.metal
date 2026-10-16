@@ -1,6 +1,6 @@
-// Owned fixture (WP-A4, DESIGN D213): size queries of a sampled texture at a level read from a
+// Owned fixture: size queries of a sampled texture at a level read from a
 // buffer (`texture.query_clamped`: under containment a level that is not the constant 0 is
-// clamped to the last level, D68.7). A case passes level 0, which names a level of every texture:
+// clamped to the last level). A case passes level 0, which names a level of every texture:
 // out = (width, height, levels). Loop-free.
 #include <metal_stdlib>
 using namespace metal;

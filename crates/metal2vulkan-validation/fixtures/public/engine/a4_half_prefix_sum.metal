@@ -1,4 +1,4 @@
-// Owned fixture (WP-A4, DESIGN D213): `half` prefix sums over a simdgroup
+// Owned fixture: `half` prefix sums over a simdgroup
 // (`simd.scan.fadd.half`). One simdgroup of 32 threads sums small integers, so every partial sum
 // is an integer below 2048, exact in `half` in any order of addition: out[t] is the inclusive sum
 // of in[0..=t], and out[32 + t] one plus the exclusive sum (so lane 0 reads 1 whichever zero the

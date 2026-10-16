@@ -39,9 +39,12 @@ impl RenderCommandEncoder {
         stride: u64,
         index: u32,
     ) -> Result<(), Error> {
-        self.log(|_| RenderCall::VertexBufferWithStride(buffer.cloned(), offset, stride, index));
+        self.log(|log| {
+            let buffer = buffer.map(|buffer| log.hold_buffer(buffer));
+            RenderCall::VertexBufferWithStride(buffer, offset, stride, index)
+        });
         self.vertex.set_buffer_with_stride(
-            &self.core,
+            &mut self.core,
             "set_vertex_buffer_with_stride",
             buffer,
             offset,
@@ -64,7 +67,7 @@ impl RenderCommandEncoder {
     ) -> Result<(), Error> {
         self.log(|log| RenderCall::VertexBytesWithStride(log.byte_span(bytes), stride, index));
         self.vertex.set_bytes(
-            &self.core,
+            &mut self.core,
             "set_vertex_bytes_with_stride",
             bytes,
             Some(stride),
@@ -93,7 +96,7 @@ impl RenderCommandEncoder {
             RenderCall::VertexBuffersWithStrides(Box::new(spans))
         });
         self.vertex.set_buffers_with_strides(
-            &self.core,
+            &mut self.core,
             "set_vertex_buffers_with_strides",
             buffers,
             offsets,
@@ -114,7 +117,7 @@ impl RenderCommandEncoder {
     ) -> Result<(), Error> {
         self.log(|_| RenderCall::VertexBufferOffsetWithStride(offset, stride, index));
         self.vertex.set_buffer_offset_with_stride(
-            &self.core,
+            &mut self.core,
             "set_vertex_buffer_offset_with_stride",
             offset,
             stride,

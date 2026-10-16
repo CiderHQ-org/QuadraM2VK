@@ -455,7 +455,7 @@ mod tests {
         } else {
             eprintln!(
                 "kcmp refused here: a not-yet-exec'd tool is counted beside its worker \
-                 (the documented fallback, DESIGN D289)"
+                 (the documented fallback)"
             );
             let stop = measured.unwrap_err();
             assert!(measured_at_stop(&stop) >= 600 * MIB, "{stop}");

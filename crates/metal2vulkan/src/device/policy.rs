@@ -314,7 +314,9 @@ pub enum RoundingOrderPolicy {
 /// or `RGBA16Float` attachment. Metal blends it in `half` arithmetic: the `half` the function
 /// returns, each factor (`1 - x` and the blend color's `half` included), each product and the sum
 /// rounded to `half`, nearest even (EV FLT-hb2-m3); a device's own blend adds in its arithmetic and
-/// rounds once.
+/// rounds once. It governs an attachment the function does not read: one the function fetches in
+/// the interlocked storage form takes Metal's blend there whatever this says, no Vulkan blend
+/// applying to a storage write.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -354,9 +356,10 @@ pub enum PaddedReadsPolicy {
     /// rows in its subresource. After its first move every command uses it in `GENERAL`, and
     /// copies and shader reads touch its texels alone; the first move, a layout transition, "may
     /// perform read and write accesses on all memory bound to the image subresource range"
-    /// (Vulkan's Image Layout Transitions), and from `UNDEFINED` may discard it. So the bytes
-    /// between the rows stay the program's only as far as the driver's move keeps them, which
-    /// the validation lane checks per driver (docs/FAST-PATHS.md, its known gaps).
+    /// (Vulkan's Image Layout Transitions), and from `UNDEFINED` may discard it. So the runtime
+    /// keeps the bytes the image is bound to, the bytes between the rows among them, on the host
+    /// across that move; a CPU write to them meanwhile is undone (docs/FAST-PATHS.md, its known
+    /// gaps).
     #[default]
     Alias,
     /// The runtime's shadow image of the texels, copied in from the buffer before each use: the

@@ -1,4 +1,4 @@
-// Owned fixture (WP-GSM, DESIGN D525 item 2; written for this repository): Metal 3.1's
+// Owned fixture (written for this repository): Metal 3.1's
 // program-scope built-in variables in a fragment function, which may declare
 // thread_index_in_quadgroup, threads_per_simdgroup and thread_index_in_simdgroup (Apple's
 // compiler refuses the other kernel built-ins there, and every one in a vertex function). The

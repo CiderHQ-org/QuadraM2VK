@@ -100,7 +100,11 @@ fn a_pool_that_can_fail_the_work_is_not_exact() {
         .collect();
     assert_eq!(
         within,
-        vec![D::IndirectIndexBoundsPass, D::EmulatedMeshDraws],
+        vec![
+            D::IndirectIndexBoundsPass,
+            D::EmulatedMeshDraws,
+            D::EmulatedTessellationDraws
+        ],
         "{within:?}"
     );
     for &kind in Degradation::ALL {

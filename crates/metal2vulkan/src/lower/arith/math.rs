@@ -725,9 +725,10 @@ pub enum FloatFn {
     Min3,
     /// `max3(a, b, c)`: `fmax(fmax(a, b), c)`, Metal's on `float` and `half`.
     Max3,
-    /// `llvm.minnum`: LLVM's function, the device's `NMin`. Metal's compiler emits it for
-    /// `a < b ? a : b` under fast math, with every flag, which refines to [`FloatFn::Min`]
-    /// (`nan_minmax_fast`); no other flag state is measured.
+    /// `llvm.minnum`: LLVM's function, the device's `NMin`, on the formats other than `float`.
+    /// Metal's compiler emits it for `a < b ? a : b` under fast math, with every flag; on `float`
+    /// it refines to [`FloatFn::Min`] with any flags, which Metal answers alike
+    /// (`nan_minmax_fast`, EV DNR-mm1-m3).
     MinNum,
     /// `llvm.maxnum`, as [`FloatFn::MinNum`] for `a > b ? a : b` and [`FloatFn::Max`].
     MaxNum,
@@ -1030,7 +1031,7 @@ impl FloatFn {
     /// a normal operand (where llvmpipe's `atan(2^-126)` is `0x007fff52`, EV FMX-evidence); and
     /// `fast::sin`, `fast::cos`, and `fast::tan` keep a denormal operand as Metal does, where RADV,
     /// ANV, and NVIDIA flush it (case cc234732). `fast::atan2` does not: its quotient is the
-    /// device's division, whose denormals are the device's (the fast division). The second stage's
+    /// device's division, whose operands `denormal::coverage` reads as Metal does. The second stage's
     /// functions do: their routines read a denormal operand as Metal does (`exp` and the hyperbolic
     /// functions as itself below `2^-12`, the logarithms and `pow`'s base as a zero) and flush a
     /// denormal result, and the fast formulas' steps have no denormal intermediate on which their
@@ -2852,7 +2853,11 @@ pub(super) type FmaOf<'a> = &'a dyn Fn(&mut FunctionBuilder<'_>, &[Value]) -> BR
 /// rounding once (`fma`; Metal's answers for `f32` denormals and NaNs are its). Every lane of
 /// probe case 08bc6611 (1,024, specials among them) is this expression on Metal's own quotient; the
 /// quotient's reciprocal is a near-equivalent of Metal's (`PrecisionNote::DeviceArithmetic`), so
-/// `fmod(1e10, 3)` is Metal's `-512` exactly where that reciprocal of `3` is Metal's.
+/// `fmod(1e10, 3)` is Metal's `-512` exactly where that reciprocal of `3` is Metal's. Metal reads a
+/// denormal `x` or `y` as the zero of its sign and answers no denormal, with and without fast math
+/// (EV DNR-fm1-m3, every pair of 28 patterns): the caller flushes the operands and the result where
+/// the fused multiply-add is the device's and the profile asks Metal's functions; under native
+/// device maths they are the device's (`PrecisionNote::DeviceDenormals`).
 pub(super) fn fast_fmod(
     fb: &mut FunctionBuilder<'_>,
     x: Value,
@@ -2892,15 +2897,26 @@ pub(super) fn metal_frem(
 /// lane of `nan_functions`, `nan_functions_fast`, `nan_half`, and `nan_half_fast` whose answer is a
 /// number is this expression, where the blend `x * (1 - t) + y * t` misses lanes (`mix(inf, 1, 0)`
 /// is NaN: `fma(-0, inf, inf)`; `mix(-0, -0, 0)` is `+0`; `half` `mix(-0.3, 0.7, 0.2)` is
-/// `0xAE68`). `t` is negated on its bits, which no float mode changes.
+/// `0xAE68`). `t` is negated on its bits, which no float mode changes. Each fused multiply-add
+/// reads an `f32` denormal operand as the zero of its sign and flushes a denormal result (EV
+/// DNR-dn2-m3, an Apple M3 Max under macOS 27.0.1: every finite triple of 28 patterns, denormals
+/// among them, in both modes); where `flush`, the inner one's result is read so
+/// ([`denormal::flush`]), for a device whose `OpFmaKHR` may keep one; the operands and the result
+/// are the caller's to flush.
 pub(super) fn metal_mix(
     fb: &mut FunctionBuilder<'_>,
     f: Form,
     [x, y, t]: [Value; 3],
     fma: FmaOf<'_>,
+    flush: bool,
 ) -> BResult<Value> {
     let minus_t = sign_bits(fb, f, t, SignBit::Flip)?;
     let rest = fma(fb, &[minus_t, x, x])?;
+    let rest = if flush {
+        denormal::flush(fb, f, rest)?
+    } else {
+        rest
+    };
     fma(fb, &[t, y, rest])
 }
 
@@ -2919,14 +2935,32 @@ pub(super) fn metal_dot(
     fma: FmaOf<'_>,
     flush: bool,
 ) -> BResult<Value> {
-    let s = f.scalar_form();
-    let lane = |fb: &mut FunctionBuilder<'_>, v: Value, i: u32| -> BResult<Value> {
+    let lane = |fb: &mut FunctionBuilder<'_>, i: u32| -> BResult<(Value, Value)> {
         if f.lanes == 1 {
-            Ok(v)
+            Ok((x, y))
         } else {
-            fb.composite_extract(v, &[i])
+            Ok((
+                fb.composite_extract(x, &[i])?,
+                fb.composite_extract(y, &[i])?,
+            ))
         }
     };
+    metal_chain(fb, f.scalar_form(), u32::from(f.lanes), &lane, fma, flush)
+}
+
+/// Lane `i`'s two operands of a dot product.
+pub(super) type LaneOf<'a> = &'a dyn Fn(&mut FunctionBuilder<'_>, u32) -> BResult<(Value, Value)>;
+
+/// [`metal_dot`]'s fused chain over `lanes` lanes of scalar form `s`, lane `i`'s operands by
+/// `lane`, each taken as the chain reaches it.
+pub(super) fn metal_chain(
+    fb: &mut FunctionBuilder<'_>,
+    s: Form,
+    lanes: u32,
+    lane: LaneOf<'_>,
+    fma: FmaOf<'_>,
+    flush: bool,
+) -> BResult<Value> {
     let step = |fb: &mut FunctionBuilder<'_>, v: Value| -> BResult<Value> {
         if flush {
             denormal::flush(fb, s, v)
@@ -2934,13 +2968,13 @@ pub(super) fn metal_dot(
             Ok(v)
         }
     };
-    let (x0, y0) = (lane(fb, x, 0)?, lane(fb, y, 0)?);
+    let (x0, y0) = lane(fb, 0)?;
     // A `half` product is exact in its `float` container, and rounded once.
     let p = fb.binary_no_contraction(BinOp::FMul, x0, y0)?;
     let mut sum = narrow::round(fb, s, p)?;
-    for i in 1..u32::from(f.lanes) {
+    for i in 1..lanes {
         sum = step(fb, sum)?;
-        let (xi, yi) = (lane(fb, x, i)?, lane(fb, y, i)?);
+        let (xi, yi) = lane(fb, i)?;
         sum = fma(fb, &[xi, yi, sum])?;
     }
     Ok(sum)
@@ -2999,7 +3033,9 @@ pub(super) type QuotientOf<'a> =
 /// an exact `±1` by the `+0` below into the correctly signed infinity. The quotient is
 /// `quotient`'s, the device's `OpFDiv`. For a normal `x` no operand of it is a denormal: a nonzero
 /// `sinpi` is at least `π 2^-126` in magnitude (`r` is `x` below 1, and a multiple of `2^-23`
-/// above); a denormal `x` is read as the device reads it (`PrecisionNote::DeviceDenormals`). At a
+/// above); a denormal `x` reaches the first multiply and difference, which read it as the device
+/// does: Metal's reading where the profile's functions are Metal's (the deviation, or flushed
+/// before), the device's under native device maths (`PrecisionNote::DeviceDenormals`). At a
 /// quarter turn (`r = ±1/4`, exact like every step before the multiply) the two arms are the sine
 /// and cosine of `π/4`, equal in magnitude, so `tanpi` is exactly `±1` with the quotient's sign,
 /// whatever the device's `Sin` and `Cos` round them to (on lavapipe they differ by one ulp, and the

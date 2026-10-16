@@ -416,10 +416,15 @@ pub(super) fn select(
     // under fast math, `float` and `half`): `OpFmaKHR` answers the device's `float` NaN and a
     // `half` result's rounding the device's `half` NaN on every route, so Metal's is selected.
     let khr = fma.route.device_float();
-    // A chain's links flush their factors and values as the outer pair does.
+    // A chain's links flush their factors and values as the outer pair does; `OpFmaKHR` checked
+    // ([`Fma::checked`]) answers no denormal, so only its factors and addend are read.
     let flush_of = |cx: &mut SelectCx<'_>, operands: &[Value]| {
         if khr {
-            super::fused_flush(cx, f, operands)
+            let flush = super::fused_flush(cx, f, operands);
+            denormal::Flush {
+                result: flush.result && !fma.checked(),
+                ..flush
+            }
         } else {
             denormal::Flush::NONE
         }

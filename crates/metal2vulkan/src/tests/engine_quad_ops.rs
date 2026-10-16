@@ -14,8 +14,9 @@
 //! - a reduction combines `(x0 op x1) op (x2 op x3)`, an inactive or missing lane the identity
 //!   (checked with inputs whose float sum each other order rounds differently);
 //! - `quad_broadcast_first` reads the quad's first active lane. The fixture's arm that Metal's
-//!   backend speculates (`quad_first_in_a_speculated_arm`) is the AIR's answer here, the first
-//!   active lane; Metal's differs, a pinned known difference.
+//!   backend speculates (`quad_first_in_a_speculated_arm`) runs in every lane of its branch's
+//!   block, as Metal runs it (`air::canon::speculate`): it reads the quad's lane 0 whether that
+//!   lane takes the arm or not.
 //!
 //! The float inputs are 1, -1, 2, -2, 0.5 and -0.5, so every sum and product of any association
 //! order is exact; integer products wrap. Fills and rotations run over full quads, the rest also
@@ -225,7 +226,7 @@ fn expected(entry: &str, local: u32, dm: &[u32; 8]) -> Vec<u8> {
             "quad_first_in_a_speculated_arm" => {
                 let on = |u: &u32| !u.is_multiple_of(3);
                 out.extend(u32s(&[if on(&t) {
-                    g.clone().find(on).expect("the calling lane is active") * 10 + 1
+                    g.clone().next().expect("the calling lane's quad") * 10 + 1
                 } else {
                     7777
                 }]));

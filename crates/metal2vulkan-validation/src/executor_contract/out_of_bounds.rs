@@ -638,7 +638,7 @@ pub fn containment(
                 )),
                 Some(Fetch::FixedFunction) if robust == Check::Shader => Err(format!(
                     "attribute {location} is fixed-function vertex input on a device without \
-                     buffer robustness, which contains nothing (DESIGN D219)"
+                     buffer robustness, which contains nothing"
                 )),
                 Some(Fetch::FixedFunction) => made(target.form, Medium::VertexInput, robust, false),
                 Some(Fetch::Pulled { buffer_index }) => {

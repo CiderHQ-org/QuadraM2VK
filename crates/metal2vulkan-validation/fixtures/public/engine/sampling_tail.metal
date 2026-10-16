@@ -1,4 +1,4 @@
-// Owned MSL for WP-L7e (D68.5, D102, D137): the read sampler used by a texture read in another
+// Owned MSL: the read sampler used by a texture read in another
 // block than its definition, a dynamic gather offset (a signed `Offset` operand), and a bicubic
 // constexpr sampler (refused: Metal's bicubic weights are not established). Every function is
 // loop-free.
@@ -8,7 +8,7 @@ using namespace metal;
 constexpr sampler bicubic_clamp(filter::bicubic, address::clamp_to_edge);
 
 // The front end calls `air.get_read_sampler` once in the entry block and passes it to both reads,
-// the second in the branch (D137.1).
+// the second in the branch.
 kernel void read_across_blocks(texture2d<float> t [[texture(0)]],
                                device float4 *out [[buffer(0)]],
                                constant uint &n [[buffer(1)]],
@@ -33,7 +33,7 @@ fragment float4 fragment_read_across_blocks(float4 pos [[position]],
 }
 
 // A dynamic gather offset: the clamped `Offset` operand, a signed vector as MSL's `gather` takes
-// (D102, D137.3).
+//.
 kernel void gather_dynamic_offset(texture2d<float> t [[texture(0)]],
                                   sampler s [[sampler(0)]],
                                   device float4 *out [[buffer(0)]],
@@ -42,7 +42,7 @@ kernel void gather_dynamic_offset(texture2d<float> t [[texture(0)]],
     out[gid] = t.gather(s, float2(gid) * 0.25, o);
 }
 
-// A bicubic constexpr sampler (D137.2): `NotImplemented(SamplerBicubicFilter)` on every profile.
+// A bicubic constexpr sampler: `NotImplemented(SamplerBicubicFilter)` on every profile.
 kernel void sample_bicubic(texture2d<float> t [[texture(0)]],
                            device float4 *out [[buffer(0)]],
                            uint gid [[thread_position_in_grid]]) {

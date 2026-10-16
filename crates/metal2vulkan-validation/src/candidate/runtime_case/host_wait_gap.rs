@@ -19,7 +19,7 @@
 //! host waiting for the middle one (EVs `RT10-vvlgap` and `RT10-vvlgap2`, the RTX 5080 and the
 //! RTX 3090). Its control, the same chain without the host wait, gets no message.
 //!
-//! The runtime's completion thread reads the timelines while its scheduler submits, so on a
+//! The runtime's queue waiters read the timelines while its scheduler submits, so on a
 //! device with several `VkQueue`s a lane test hits it at random: on the RTX 5080,
 //! `runtime_lane::exits::an_exit_while_submitting_is_clean` failed 4 to 12 runs in 30. A single
 //! `VkQueue` cannot hit it.

@@ -1,4 +1,4 @@
-// Owned fixture (WP-REF, DESIGN D327 item 4, TODO 5.7): `frexp` and `ilogb`, which Apple's compiler
+// Owned fixture: `frexp` and `ilogb`, which Apple's compiler
 // emits as calls of runtime routines its backend defines at pipeline creation. Each thread reads
 // one input word and writes eight: the scalar forms, and lanes of the 4-lane forms beside other
 // lanes' constants. Written for this repository; no third-party source. Loop-free.

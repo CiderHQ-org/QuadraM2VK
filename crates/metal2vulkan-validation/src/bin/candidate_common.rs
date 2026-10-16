@@ -119,7 +119,7 @@ fn run(backend: Backend) -> Result<(), ExecutorError> {
                      one it states. --robustness-off enables none of them, so the\n\
                      product compiles the in-shader encodings; the row is stored in the slot's\n\
                      +robustness-off form (ID@engine+robustness-off, ID@engine@P+robustness-off).\n\
-                     --accept-unordered-fetch: compile under U7's recorded opt-in\n\
+                     --accept-unordered-fetch: compile under the recorded opt-in\n\
                      (FramebufferFetchPolicy::AcceptUnordered): on a device without rasterization-order\n\
                      attachment access a framebuffer fetch is an unordered input-attachment read\n\
                      (PrecisionNote::UnorderedFramebufferFetch) instead of the default policy's\n\
@@ -178,7 +178,7 @@ fn run(backend: Backend) -> Result<(), ExecutorError> {
     );
     if accept_unordered_fetch {
         println!(
-            "not stored: --accept-unordered-fetch (U7's opt-in) slot={} precision={:?}",
+            "not stored: --accept-unordered-fetch (the opt-in) slot={} precision={:?}",
             observation.environment_id,
             observation
                 .census

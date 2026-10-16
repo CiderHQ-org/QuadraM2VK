@@ -1,4 +1,4 @@
-// Owned fixture (WP-UNK, DESIGN D283 family D): reads and writes of Metal's `ulong` textures,
+// Owned fixture: reads and writes of Metal's `ulong` textures,
 // which Metal binds only to RG32Uint textures (the low word in R, the high word in G).
 //
 // unk_ulong_rw: thread t reads one texel of each of a read_write 1D (8 texels), 1D array (8 x 2

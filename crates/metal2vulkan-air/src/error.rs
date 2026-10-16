@@ -786,6 +786,10 @@ pub enum Feature {
     Tensors,
     /// An undecoded indirect-command-buffer encoding intrinsic.
     GpuEncodedIndirectCommands,
+    /// A multisample imageblock's operation, which does not decode: its sample count, the colors
+    /// its pixel holds or a color's coverage mask, or a store to the samples of a coverage mask.
+    /// Tile functions and fragment imageblocks run on single-sample passes only.
+    Imageblocks,
     /// A program-scope buffer binding of MSL 3.2 (macOS 15 and later), `constant T* constant p
     /// [[buffer(n)]];` in Apple's `!air.global_bindings` list, valid AIR this version does not
     /// implement yet.

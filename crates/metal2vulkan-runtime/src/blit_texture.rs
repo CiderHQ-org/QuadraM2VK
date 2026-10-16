@@ -7,7 +7,7 @@
 //!   axis 0, or of no slices or levels, copies nothing while the encoder's other commands run, as
 //!   plain Metal does (its validation stops each). A copy to or from a memoryless texture, and its
 //!   mipmaps, are refused (`StorageMode`), as Metal's validation refuses them; the
-//!   `optimize_contents_*` hints take one, as Metal's do (RT6 probes 6b and 6f).
+//!   `optimize_contents_*` hints take one, as Metal's do (a Metal probe on an M4).
 //! - **Recording.** Each copy is one command of the encoder with what it reads and writes: a
 //!   texture's uses name its image's levels and layers (every aspect), so the encoder's order and
 //!   the commit's barriers cover views and their textures as one resource. A buffer layout
@@ -69,6 +69,7 @@ use super::deferred::Deferred;
 use super::degradation::Degradation;
 use super::error::{internal, invalid, Error, Problem, RuntimeGap};
 use super::fresh_unwritten::FreshUnwritten;
+use super::image_plan::copies_between;
 use super::mipmap::record_blit;
 use super::mipmap_plan::{leaves_as_is, not_implemented, plan_mipmaps, MipmapPlan, MipmapRefusal};
 use super::nan_clear;
@@ -83,6 +84,7 @@ use super::tracker::Access;
 use super::two_planes;
 use super::values::{Origin, Region, ResourceOptions, Size, StorageMode};
 use super::Buffer;
+use crate::device::functions::Vk;
 use ash::vk;
 use metal2vulkan::error::{Feature, Unsupported};
 use metal2vulkan::metal::format::{aspects, is_depth_stencil};
@@ -276,7 +278,7 @@ fn plan_copy(
     } else {
         buffer.length()
     };
-    let base = buffer.at(0).1;
+    let base = buffer.start();
     if is_pvrtc(texture.pixel_format()) && layout.bytes_per_row == 0 {
         return plan_block_order_copy(record, region, unit, layout, buffer_length, base)
             .map_err(|problem| invalid(call, Problem::Copy(problem)));
@@ -447,7 +449,7 @@ impl BlitCommandEncoder {
                 destination_slice,
             )?;
             let region = multisampled_region(CALL, destination_texture, region)?;
-            let (raw_buffer, base) = source_buffer.at(0);
+            let (raw_buffer, base) = self.core().blit_at(source_buffer, 0)?;
             let aspect = multisampled_aspect(CALL, destination_texture, options)?;
             let planned = sample_interleave::InterleaveCopy::plan(
                 self.core().command_buffer(),
@@ -469,8 +471,8 @@ impl BlitCommandEncoder {
                         unsafe { copy.record(device, raw) };
                     })?;
                     // A depth written as the single-sample path writes one announces as it does.
-                    destination_texture.degrade_depth_upload(CALL, aspect);
-                    destination_texture.degrade_depth_denormals(CALL, aspect, false);
+                    destination_texture.degrade_depth_upload(CALL, aspect, true, true);
+                    destination_texture.degrade_depth_denormals(CALL, aspect, false, true);
                     copy.announce(self.core().device(), CALL, destination_texture);
                     self.core().retain(copy);
                     // Every sample of the region written, as the single-sample path's.
@@ -519,8 +521,8 @@ impl BlitCommandEncoder {
         let plan = plan_copy(CALL, texture, &region, &unit, &layout, source_buffer, true)?;
         let written: Vec<ImageRegion> = plan.regions.iter().map(|r| r.image).collect();
         self.buffer_texture_copy(source_buffer, texture, plan, true)?;
-        texture.degrade_depth_upload(CALL, unit.aspect);
-        texture.degrade_depth_denormals(CALL, unit.aspect, false);
+        texture.degrade_depth_upload(CALL, unit.aspect, true, true);
+        texture.degrade_depth_denormals(CALL, unit.aspect, false, true);
         // Into a texture Metal keeps compressed: the texels its blit writes.
         if let Some(rule) = rule_of(texture) {
             self.compressed_image(texture, &written, &[rule])?;
@@ -604,7 +606,7 @@ impl BlitCommandEncoder {
             }
             let region = region(CALL, source_origin, size, source_level, source_slice)?;
             let region = multisampled_region(CALL, source_texture, region)?;
-            let (raw_buffer, base) = destination_buffer.at(0);
+            let (raw_buffer, base) = self.core().blit_at(destination_buffer, 0)?;
             let planned = sample_interleave::InterleaveCopy::plan(
                 self.core().command_buffer(),
                 raw_buffer,
@@ -773,8 +775,9 @@ impl BlitCommandEncoder {
         let fresh_reads = FreshUnwritten::reads(self.core().device(), texture, &boxes)?;
         // The plan's offsets are the `VkBuffer`'s (`plan_buffer_copy`'s base), its regions in the
         // texture's texels, which a 2-bit PVRTC texture's carrier halves across
-        // (`pvrtc::image_buffer_region`).
-        let ((raw_buffer, _), image) = (buffer.at(0), texture.raw_image()?);
+        // (`pvrtc::image_buffer_region`). Read as a blit's (`host_residency.rs`).
+        let (raw_buffer, _) = self.core().blit_at(buffer, 0)?;
+        let image = texture.raw_image()?;
         let image_plan = texture.image_plan()?;
         let regions: Vec<vk::BufferImageCopy> = plan
             .regions
@@ -846,7 +849,7 @@ impl BlitCommandEncoder {
                     };
                     staging.rows.iter().map(|r| buffer_copy(&back(r))).collect()
                 };
-                let move_rows = |device: &ash::Device, raw: vk::CommandBuffer| {
+                let move_rows = |device: &Vk, raw: vk::CommandBuffer| {
                     let (src, dst) = if into_texture {
                         (raw_buffer, through)
                     } else {
@@ -855,7 +858,7 @@ impl BlitCommandEncoder {
                     // SAFETY: as below; the rows lie in both buffers (checked by the plan).
                     unsafe { device.cmd_copy_buffer(raw, src, dst, &rows) };
                 };
-                let copy_image = |device: &ash::Device, raw: vk::CommandBuffer| {
+                let copy_image = |device: &Vk, raw: vk::CommandBuffer| {
                     // SAFETY: the encoder's command buffer is recording; the scratch buffer and
                     // the image are live and retained until it completes, the image is in the
                     // `GENERAL` layout, and the region lies in both.
@@ -1289,6 +1292,10 @@ impl BlitCommandEncoder {
                     if !regions.is_empty() {
                         let regions: Vec<vk::ImageCopy> = regions.iter().map(image_copy).collect();
                         direct.push((from.image, to.image, regions));
+                        // A depth that may hold a negative value or a NaN, copied as it is.
+                        if to.aspect == ImageAspectFlags::DEPTH && source.may_hold_signed_depth() {
+                            destination.degrade_signed_depth(call, true);
+                        }
                     }
                 }
                 None => staged.push(*to),
@@ -1339,8 +1346,8 @@ impl BlitCommandEncoder {
                 )?;
                 uses.extend(copy.uses.iter().cloned());
                 stages |= copy.stages;
-                destination.degrade_depth_upload(call, to.aspect);
-                destination.degrade_depth_denormals(call, to.aspect, false);
+                destination.degrade_depth_upload(call, to.aspect, true, true);
+                destination.degrade_depth_denormals(call, to.aspect, false, true);
                 planned.push(copy);
             }
             self.command_in_reading(stages, &uses, &fresh_reads, |device, raw| {
@@ -1422,8 +1429,9 @@ impl BlitCommandEncoder {
                 })?;
                 uses.push(reads(&scratch, 0..length));
                 for (to, _) in &staging.into {
-                    destination.degrade_depth_upload(call, to.aspect);
-                    destination.degrade_depth_denormals(call, to.aspect, false);
+                    let signed = source.may_hold_signed_depth();
+                    destination.degrade_depth_upload(call, to.aspect, signed, true);
+                    destination.degrade_depth_denormals(call, to.aspect, false, true);
                 }
                 Some((scratch, through))
             }
@@ -1552,8 +1560,8 @@ impl BlitCommandEncoder {
                         )
                         .map_err(copy_problem)?;
                         if into_texture {
-                            texture.degrade_depth_upload(call, image_unit.aspect);
-                            texture.degrade_depth_denormals(call, image_unit.aspect, false);
+                            texture.degrade_depth_upload(call, image_unit.aspect, true, true);
+                            texture.degrade_depth_denormals(call, image_unit.aspect, false, true);
                         }
                         self.buffer_texture_copy(buffer, texture, plan, into_texture)?;
                     }
@@ -1656,11 +1664,14 @@ impl BlitCommandEncoder {
     /// Every colour format Metal filters but `B5G6R5Unorm` and `BGR5A1Unorm`, extended range
     /// included, is computed as Metal's filter computes it, on every device with `shaderInt64`
     /// and without a blit (`mipmap_filter.rs`): a scratch buffer of the levels, one compute
-    /// dispatch per level, and copies in and out. The first computed level, and every level of a 3D
-    /// texture, is an Apple M3 Max's answer; below the first level of a 2D chain, an array or a
-    /// cube an Apple M4's stands in, announced once per device (`mipmaps-as-apple-m4`), as for the
-    /// formats an M3 Max converts through a half (`ABGR4Unorm`, `A1BGR5Unorm`, extended range) and,
-    /// in 3D, those summed as half floats.
+    /// dispatch per level, and copies in and out, by the rule of the device's Metal level
+    /// ([`MetalLevel::mipmap_rule`](crate::MetalLevel::mipmap_rule)). Under macOS 27.0.1 every
+    /// level is an Apple M3 Max's filter of the level above. Under macOS 26.7 the first computed
+    /// level, and every level of a 3D texture, is an Apple M3 Max's answer; below the first level
+    /// of a 2D chain, an array or a cube whose M3 Max passes are not known an Apple M4's stands in,
+    /// announced once per device (`mipmaps-as-apple-m4`), as for the formats an M3 Max converts
+    /// through a half (`ABGR4Unorm`, `A1BGR5Unorm`, extended range) and, in 3D, those summed as
+    /// half floats.
     ///
     /// Elsewhere (those two formats, a device without `shaderInt64`, limits that do not fit the
     /// chain) Metal's answers differ between Apple GPUs, so the runtime checks this device's
@@ -1692,6 +1703,17 @@ impl BlitCommandEncoder {
     /// [`Device::mipmap_generation`]: super::Device::mipmap_generation
     pub fn generate_mipmaps(&mut self, texture: &Texture) -> Result<(), Error> {
         self.log(|_| BlitCall::GenerateMipmaps(texture.clone()));
+        // A view that reads its image in the image's own format generates them as a texture of
+        // that format over the same levels: the same bits, filtered alike
+        // (`bind::mipmap_filter`'s layouts pair the formats `metal::format::swizzle_over` pairs).
+        match texture.bound_twin() {
+            Some(twin) => self.mipmaps(&twin),
+            None => self.mipmaps(texture),
+        }
+    }
+
+    /// [`generate_mipmaps`](Self::generate_mipmaps) of `texture`, logged.
+    fn mipmaps(&mut self, texture: &Texture) -> Result<(), Error> {
         const CALL: &str = "generate_mipmaps";
         // One level, of any format, or a depth or stencil texture: Metal's plain call leaves the
         // texture as it is, over a buffer or not, and its API validation asserts. Every texture
@@ -1907,10 +1929,15 @@ struct Held {
 
 impl Held {
     /// Whether Vulkan copies this image's texels into `to`'s: both in colour (formats of one
-    /// size, checked by the plan), or in the same depth or stencil aspects of one format.
+    /// size, checked by the plan, both alpha formats or neither, `image_plan::copies_between`:
+    /// an `A8Unorm` view's image is its `R8Unorm` texture's), or in the same depth or stencil
+    /// aspects of one format.
     fn copies_into(&self, to: &Held) -> bool {
         self.aspect == to.aspect
-            && (self.aspect == ImageAspectFlags::COLOR || self.format == to.format)
+            && match self.aspect == ImageAspectFlags::COLOR {
+                true => copies_between(self.format, to.format),
+                false => self.format == to.format,
+            }
     }
 
     /// `copy` from this image to `to`, each in its aspect.

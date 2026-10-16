@@ -326,9 +326,10 @@ mod tests {
     }
 
     /// Each byte the texture changed is the changed buffer's; every other byte keeps the current
-    /// buffer's, the other way's writes among them, inside one word too: TOB probe 1's
+    /// buffer's, the other way's writes among them, inside one word too: Metal probe cases
     /// `k.two_ways_disjoint` (a texel through the texture, the next one through the buffer) and
-    /// `k.two_ways_gap` (the buffer's bytes between rows), at byte granularity.
+    /// `k.two_ways_gap` (the buffer's bytes between rows), at byte granularity, on the M3 Max and
+    /// an M4.
     #[test]
     fn the_bytes_the_texture_changed_merge_into_the_current_bytes() {
         let kept: Vec<u8> = (0..32u8).collect();

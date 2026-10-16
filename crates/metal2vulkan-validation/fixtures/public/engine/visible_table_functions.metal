@@ -1,4 +1,4 @@
-// Owned MSL for WP-K2 (D157): visible functions a pipeline places in a visible-function table.
+// Owned MSL: visible functions a pipeline places in a visible-function table.
 // Three have the table's type `uint(uint, uint)` and one another type. The kernel only gives the
 // module an entry point. Loop-free.
 #include <metal_stdlib>

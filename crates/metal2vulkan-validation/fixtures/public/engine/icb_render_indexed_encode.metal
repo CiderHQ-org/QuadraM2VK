@@ -1,4 +1,4 @@
-// Owned fixture (WP-ICBV, DESIGN D336): a kernel whose only effect is the indexed draws it
+// Owned fixture: a kernel whose only effect is the indexed draws it
 // encodes. Thread 0 encodes command 0's draw of 5 points from 16-bit device indices, from the
 // second, twice from instance 1, each index minus 2; thread 1 encodes command 1's draw of 3 points
 // from 32-bit constant indices, once, each index plus 4. The pipeline is the executing encoder's,

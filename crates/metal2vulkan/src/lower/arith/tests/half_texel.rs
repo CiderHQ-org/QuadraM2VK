@@ -989,6 +989,129 @@ fn the_metal_sampler_routine_answers_as_every_family_on_metal_s_texels() {
     );
 }
 
+/// The values of a 16-bit normalized class the two forms of its `half` are compared on: every step
+/// `n / D` of its grid `D`, both signs, and values off it of every kind: random `f32` patterns of
+/// every magnitude, random values within and past `±1`, values whose step is `-0` or `+0`, and the
+/// specials.
+fn grid16_values(f: Norm, rng: &mut Rng) -> Vec<u64> {
+    let mut out: Vec<u64> = (-f.d..=f.d).map(|n| f.on_grid(n)).collect();
+    out.extend((0..4000).map(|_| rng.next() & 0xFFFF_FFFF));
+    out.extend((0..4000).map(|_| {
+        let v = (rng.next() % 2_400_001) as f64 / 1e6 - 1.2;
+        u64::from((v as f32).to_bits())
+    }));
+    let tiny = 0.5 / f.d as f32;
+    out.extend(
+        [
+            0.0f32,
+            -0.0,
+            tiny,
+            -tiny,
+            tiny * 0.999,
+            -tiny * 0.999,
+            1e-30,
+            -1e-30,
+            1.0,
+            -1.0,
+            1.0 + tiny,
+            -1.0 - tiny,
+            2.0,
+            -2.0,
+            f32::MAX,
+            f32::MIN,
+        ]
+        .map(|v| u64::from(v.to_bits())),
+    );
+    out.extend([
+        0x0000_0001,
+        0x8000_0001,
+        0x7F80_0000,
+        0xFF80_0000,
+        0x7FC0_0000,
+        0xFFC0_0000,
+        0x7F80_0001,
+        0xFFBF_FFFF,
+    ]);
+    out
+}
+
+/// The routine of a device that samples through Metal's own texture unit converts a 16-bit
+/// normalized texel by one product (`grid16_by_product`, its factor `texel_round::ones_ratio_factor`),
+/// where the routine of every family takes integer arithmetic alone
+/// (`texel_round::ones_ratio_to_half`); the two answer alike, bit for bit, on every value of
+/// [`grid16_values`] (every step of both grids, both signs, and values off the grids), in both
+/// roundings the routine takes and in a read's and a filtered sample's forms. Under native half
+/// rounding it keeps the integer form, which answers alike too.
+fn grid16_forms_agree(part: usize, of: usize) {
+    let mut rng = Rng(0x00b1_f0b1_f5ee_d016);
+    let ins = [v4(), int(32)];
+    let grids: Vec<Norm> = norms().into_iter().filter(|f| f.d > 4096).collect();
+    assert_eq!(grids.len(), 2, "the 16-bit grids");
+    let forms = [
+        (HalfForm::Read, TexelLanes::Texel),
+        (HalfForm::Sample, TexelLanes::Filtered),
+    ];
+    for f in grids {
+        let cases: Vec<Case> = quads(&grid16_values(f, &mut rng))
+            .iter()
+            .map(|t| vec![t.to_vec(), vec![u64::from(f.class)]])
+            .collect();
+        let cases = part_of(cases, part, of);
+        for q in [QuantizeForm::Device, QuantizeForm::Converted] {
+            for (form, lanes) in forms {
+                let build = |families, native: bool| {
+                    let body = body_families(form, lanes, q, families);
+                    kernel_with(
+                        &ins,
+                        v4(),
+                        &move |fb: &mut FunctionBuilder<'_>, x: &[Value]| {
+                            fb.module().set_native_half(native);
+                            body(fb, x)
+                        },
+                        true,
+                        false,
+                    )
+                    .expect("build")
+                };
+                let what = format!("{f:?} {form:?} {lanes:?} {q:?}");
+                let want = run_module(&what, build(HalfFamilies::Every, false), &ins, v4(), &cases);
+                for native in [false, true] {
+                    let got = run_module(
+                        &what,
+                        build(HalfFamilies::MetalSampler, native),
+                        &ins,
+                        v4(),
+                        &cases,
+                    );
+                    let differ: Vec<String> = cases
+                        .iter()
+                        .zip(got.iter().zip(&want))
+                        .filter(|(_, (g, w))| g != w)
+                        .take(8)
+                        .map(|(c, (g, w))| format!("{:x?}: got {g:x?}, want {w:x?}", c[0]))
+                        .collect();
+                    assert!(
+                        differ.is_empty(),
+                        "{what} native {native}:\n{}",
+                        differ.join("\n")
+                    );
+                }
+            }
+        }
+    }
+}
+
+parts!(grid16_forms_agree, 8;
+    the_16_bit_grids_convert_by_one_product_as_by_integers_0 = 0,
+    the_16_bit_grids_convert_by_one_product_as_by_integers_1 = 1,
+    the_16_bit_grids_convert_by_one_product_as_by_integers_2 = 2,
+    the_16_bit_grids_convert_by_one_product_as_by_integers_3 = 3,
+    the_16_bit_grids_convert_by_one_product_as_by_integers_4 = 4,
+    the_16_bit_grids_convert_by_one_product_as_by_integers_5 = 5,
+    the_16_bit_grids_convert_by_one_product_as_by_integers_6 = 6,
+    the_16_bit_grids_convert_by_one_product_as_by_integers_7 = 7,
+);
+
 /// The grid families' `half` comes from integer arithmetic, selected after the rounding of the
 /// texel itself, so every rounding the routine leaves to the device (the `Converted` form's
 /// barrier, a `NoContraction` `x + -0.0`, and the `Device` form's `OpQuantizeToF16`) reads the

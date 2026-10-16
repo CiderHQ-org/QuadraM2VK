@@ -1,4 +1,4 @@
-// Owned fixture (WP-ICBV, DESIGN D336): a kernel that encodes the imageblock size, kernel buffer
+// Owned fixture: a kernel that encodes the imageblock size, kernel buffer
 // and dispatch of commands whose pipeline the executing encoder supplies (inherited). Thread `tid`
 // encodes command `tid`: kernel buffer 0 the `out` window at 1024 * tid bytes, the imageblock
 // size `shapes[tid].xy`, and a dispatch of `grids[tid].xy` threads in threadgroups of

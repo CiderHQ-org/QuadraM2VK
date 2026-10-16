@@ -31,7 +31,8 @@ pub enum Exactness {
     /// cannot hold draws nothing, and its command buffer fails with a [`CommandBufferError`] of
     /// [`FailureOrigin::Runtime`](crate::FailureOrigin::Runtime) where Metal draws it
     /// ([`CommandBufferError::IndexPoolOverflow`] for `indirect-index-bounds-pass`,
-    /// [`CommandBufferError::MeshRecordsOverflow`] for `emulated-mesh-draws`).
+    /// [`CommandBufferError::MeshRecordsOverflow`] for `emulated-mesh-draws`,
+    /// [`CommandBufferError::TessellationRecordsOverflow`] for `emulated-tessellation-draws`).
     ExactWithinPool,
     /// A recorded near-equivalent of Metal's answer, or an answer where none of Metal's is
     /// measured.
@@ -46,7 +47,9 @@ impl Degradation {
         use Degradation as D;
         match self.category() {
             DegradationCategory::Performance | DegradationCategory::Validity => match self {
-                D::IndirectIndexBoundsPass | D::EmulatedMeshDraws => Exactness::ExactWithinPool,
+                D::IndirectIndexBoundsPass
+                | D::EmulatedMeshDraws
+                | D::EmulatedTessellationDraws => Exactness::ExactWithinPool,
                 _ => Exactness::Exact,
             },
             DegradationCategory::Precision => match self {

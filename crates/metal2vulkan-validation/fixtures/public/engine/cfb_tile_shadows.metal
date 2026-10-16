@@ -1,12 +1,11 @@
-// Owned fixture (WP-CFB, DESIGN D366): the functions WP-CFB Metal probe 3's passes ran (tile
-// dispatches over 2D textures whose texels lie in buffers), so each pass of the runtime's lane
-// asks the question the probe measured. The passes are 32x32 in 16x16 tiles; a thread or a
-// fragment at pixel p whose coordinates are multiples of 8 works on texel c = p / 8 of a 4x4
-// texture. A fullscreen triangle; fragment functions that write a texture's texel, write a
-// texel's bytes through a buffer, and read a texel's bytes or the texel into `o`; tile functions
-// that copy a texel, its channels reversed, from a bound texture or one an argument buffer holds;
-// and one that writes a texel and other bytes of its buffer (two ways). Written for this
-// repository; no third-party source. Loop-free.
+// Owned fixture: the functions a Metal probe's passes ran (tile dispatches over 2D textures whose
+// texels lie in buffers), so each pass of the runtime's lane asks the question the probe measured.
+// The passes are 32x32 in 16x16 tiles; a thread or a fragment at pixel p whose coordinates are
+// multiples of 8 works on texel c = p / 8 of a 4x4 texture. A fullscreen triangle; fragment
+// functions that write a texture's texel, write a texel's bytes through a buffer, and read a
+// texel's bytes or the texel into `o`; tile functions that copy a texel, its channels reversed,
+// from a bound texture or one an argument buffer holds; and one that writes a texel and other bytes
+// of its buffer (two ways). Written for this repository; no third-party source. Loop-free.
 // metal-fast-math: off
 #include <metal_stdlib>
 using namespace metal;

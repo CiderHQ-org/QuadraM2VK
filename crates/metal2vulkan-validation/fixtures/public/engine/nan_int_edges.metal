@@ -1,4 +1,4 @@
-// Owned fixture (NaN model, DESIGN D293): what Metal's conversions between float and integer
+// Owned fixture (NaN model): what Metal's conversions between float and integer
 // answer at their edges. Lane `i` reads a float a, an int i, a uint u, and a half ha from `in[i]`,
 // and writes eight words to `out[2i .. 2i + 1]`: int(a), uint(a), short(a) sign-extended,
 // ushort(a) | uchar(a) << 16 | char(a) << 24, float(i), float(u), half(i) | half(u) << 16, and

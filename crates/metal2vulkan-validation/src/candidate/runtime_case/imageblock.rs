@@ -115,7 +115,7 @@ pub fn helpers_text(master: &FragmentImageblock, cells: &Cells) -> Result<String
     let cell_bytes = cells.cell_bytes;
     let types: Vec<&str> = fields.iter().map(|(_, field)| field.ty).collect();
     let mut text = format!(
-        "; metal2vulkan generated imageblock helpers (DESIGN D314).\n\
+        "; metal2vulkan generated imageblock helpers.\n\
          source_filename = \"{SOURCE_FILENAME}\"\n\
          target datalayout = \"{DATA_LAYOUT}\"\n\
          target triple = \"{TRIPLE}\"\n\n\

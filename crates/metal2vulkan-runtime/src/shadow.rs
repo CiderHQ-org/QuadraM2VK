@@ -10,14 +10,29 @@
 //! - **Copy in** before the first command of an encoder that uses the texture, and again before a
 //!   later one when a command of the encoder wrote the bytes since: through the buffer, a texture
 //!   buffer, or another shadowed texture over them. A command buffer's encoders run after its
-//!   commit, so the first copy of each encoder sees every CPU write made before then.
+//!   commit, so the first copy of each encoder sees every CPU write made before then. A copy in
+//!   of a one-level, one-slice texture's image moves only the texels inside the rectangle its
+//!   command reads and writes them in, where the command bounds that ([`ShadowUse::loads`]: a
+//!   pass's attachment it loads and takes no other way, inside its draws' scissors). The image's
+//!   other texels keep whatever it held, which no copy back moves and no command of the encoder
+//!   reads: a later command that needs them current takes a copy back of what was written and a
+//!   copy in of every texel first, and each encoder copies in again before its first use.
+//! - **Copy in what changed.** An image whose bytes changed since its copy in only inside a
+//!   rectangle of its texels, by writes [`Within`] it (a render pass instance's to a color
+//!   attachment it loads, inside its draws' scissors), or by a copy back of a part of another
+//!   shadow laid over the bytes texel for texel as it is ([`ShadowCopies::same_texels`]), takes
+//!   a copy in of the texels inside the rectangle bounding those alone
+//!   (`WorkCounts::bounded_shadow_copies`): every other texel holds the bytes still. Any other
+//!   write of the bytes leaves it to copy in as above; it holds no writes of its own, nor a keep.
 //! - **Copy back** what a command wrote through the texture before the next command that touches
 //!   the bytes some other way, and at the end of the encoder (orchestrator, 2026-10-04: at the
 //!   end of the encoder that writes through the texture, not of the command buffer). A copy moves
 //!   only the texels' rows, never the bytes between them; a copy back of a one-level, one-slice
 //!   texture's image, only the texels inside the rectangle its writers since the last bound their
 //!   writes to, where each bounds them ([`ShadowUse::area`]: a pass's attachment it loads, inside
-//!   its draws' scissors), as the image's other texels are what the last copy in left.
+//!   its draws' scissors), as the image's other texels are what the last copy in left. Where the
+//!   device runs it faster so, a copy back of such a texture's image is a compute dispatch that
+//!   stores the same bytes (`shadow_copy_back.rs`).
 //! - **Ordering.** A copy is a command of the encoder with uses of both the buffer's bytes and the
 //!   image, so the tracker orders it against the encoder's other commands and other encoders'
 //!   like any use: the texture and its buffer are one resource to it. In an encoder whose
@@ -45,7 +60,9 @@
 //!   views reinterpret no image's components, such a view of an image is an image of the view's
 //!   format whose truth is the viewed image's texels in the levels and layers it presents
 //!   ([`ShadowSource::Image`]). Its copies are image to image (`vkCmdCopyImage` between formats of
-//!   one copy unit, which keeps every bit), and the rules above are the same with the image in the
+//!   one copy unit, which keeps every bit), or through a buffer of its own where Vulkan copies no
+//!   texels between the two formats (an alpha format and another, `A8_UNORM` and `R8_UNORM`:
+//!   `image_plan::copies_between`), and the rules above are the same with the image in the
 //!   buffer's place, except that a command writing the image two ways (below) is refused: no merge
 //!   serves an image.
 //! - **Rotated textures** (`rotated.rs`, `texture/rotation.rs`). A rotated texture renders through
@@ -98,6 +115,7 @@ use super::buffer::{Buffer, CallerMemory, WeakBuffer};
 use super::error::{Error, RuntimeGap};
 use super::resource::ResourceKey;
 use super::rotated::{RotatedCopies, Turn};
+use super::shadow_copy_back::{CopyBack, WordView};
 use super::shadow_merge::ShadowMerge;
 use super::texture::heap_tiled::HeapTiledCopies;
 use super::texture::heap_two_planes::HeapPlaneCopies;
@@ -105,6 +123,8 @@ use super::texture::Texture;
 use super::tracker::{Access, Barrier, Use, UseRange};
 use super::view_plan::reinterpretation_refused;
 use super::ycbcr::{YCbCrConversion, YCbCrWriteBack};
+use super::Device;
+use crate::device::functions::Vk;
 use ash::vk;
 use metal2vulkan::error::{Feature, Unsupported};
 use metal2vulkan::metal::PixelFormat;
@@ -159,6 +179,9 @@ pub(super) enum ShadowSource {
         shadow: vk::Image,
         /// From `image` to `shadow`; the copies back swap the two.
         regions: Vec<vk::ImageCopy>,
+        /// The buffer the copies go through where Vulkan copies no texels between the two
+        /// images' formats (an alpha format and another, `image_plan::copies_between`).
+        through: Option<ImageThrough>,
     },
     /// A surface's two planes in a buffer's bytes, which the shadow holds the texels Metal reads
     /// of (`ycbcr.rs`): its copy in converts them, and it is never copied back.
@@ -244,6 +267,9 @@ pub(super) enum ShadowTarget {
         /// texture ([`ShadowCopy::area`]) offsets its region; `None` where no copy of it is
         /// bounded (a heap's depth or stencil texture, which is no color attachment).
         texel: Option<u64>,
+        /// The image's unsigned-integer view through which its copies back dispatch, where the
+        /// device copies back faster so (`shadow_copy_back.rs`); `None` where they copy.
+        words: Option<WordView>,
     },
     /// A texture buffer's staging buffer, which its bindings view.
     Buffer(ShadowStaging),
@@ -276,6 +302,14 @@ pub(super) enum ShadowTarget {
 
 /// A shadowed texture's staging buffer (see the module): its bytes, from the first texel to the
 /// last, laid out as in the texture's buffer from the staging buffer's start.
+/// A runtime buffer the copies between a view's shadow and its image go through
+/// ([`ShadowSource::Image`]), held for the shadow's life: each region of the image into it, then
+/// out of it into the other image, the same subresources both ways.
+pub(super) struct ImageThrough {
+    pub(super) buffer: Buffer,
+    pub(super) regions: Vec<vk::BufferImageCopy>,
+}
+
 pub(super) struct ShadowStaging {
     /// A runtime buffer, held for the texture's life.
     pub(super) buffer: Buffer,
@@ -293,6 +327,60 @@ impl ShadowStaging {
 }
 
 impl ShadowCopies {
+    /// Whether a copy of the shadow's texels is cut to the rectangle of a part of them
+    /// ([`ShadowCopy::area`], [`part_of`]): a one-level, one-slice 2D texture's image over a
+    /// buffer's bytes, one region copied in place (no staging buffer).
+    pub(super) fn cuts(&self) -> bool {
+        matches!(
+            self.target(),
+            Some(ShadowTarget::Image {
+                regions,
+                staging: None,
+                texel: Some(_),
+                ..
+            }) if regions.len() == 1
+        )
+    }
+
+    /// Whether `other`'s texels lie in the truth's bytes as this shadow's do, texel for texel:
+    /// both cut to rectangles ([`cuts`](Self::cuts)), of one buffer, their one regions starting at
+    /// one byte, rows as long, of one extent, of texels of one size. A change of the bytes of
+    /// one's texels inside a rectangle is then a change of the other's inside it alone.
+    pub(super) fn same_texels(&self, other: &ShadowCopies) -> bool {
+        let layout = |copies: &ShadowCopies| match &copies.source {
+            ShadowSource::Bytes {
+                key,
+                target:
+                    ShadowTarget::Image {
+                        regions,
+                        staging: None,
+                        texel: Some(texel),
+                        ..
+                    },
+                ..
+            } => match regions.as_slice() {
+                [region] => Some((*key, *region, *texel)),
+                _ => None,
+            },
+            _ => None,
+        };
+        let (Some((key, a, texel)), Some((other_key, b, other_texel))) =
+            (layout(self), layout(other))
+        else {
+            return false;
+        };
+        let row = |r: &vk::BufferImageCopy| match r.buffer_row_length {
+            0 => r.image_extent.width,
+            row => row,
+        };
+        key == other_key
+            && texel == other_texel
+            && a.buffer_offset == b.buffer_offset
+            && row(&a) == row(&b)
+            && a.image_offset == b.image_offset
+            && a.image_extent == b.image_extent
+    }
+
     /// Whether the shadow is a heap's two-plane texture's, whose truth is its two planes in the
     /// heap's bytes ([`ShadowTarget::Planes`]).
     pub(super) fn holds_planes(&self) -> bool {
@@ -418,7 +506,7 @@ impl ShadowCopies {
     /// in the `GENERAL` layout.
     pub(super) unsafe fn record_out(
         &self,
-        device: &ash::Device,
+        device: &Vk,
         command_buffer: vk::CommandBuffer,
         to: vk::Buffer,
         at: u64,
@@ -496,14 +584,36 @@ pub(super) struct ShadowCopy<M = Arc<ShadowMerge>> {
     pub(super) kept: bool,
     /// A copy back of the texels inside `[x0, y0, x1, y1)` of a one-level, one-slice texture's
     /// image alone, where the commands since the last copy back wrote through it there and
-    /// nowhere else ([`ShadowUse::area`]); `None` for every texel.
+    /// nowhere else ([`ShadowUse::area`]), or a copy in of them alone, where the command reads
+    /// and writes no other texel of it ([`ShadowUse::loads`]); `None` for every texel.
     pub(super) area: Option<[u32; 4]>,
+    /// A copy in of the texels writes [`Within`] a rectangle changed since the image's copy in,
+    /// `area` the rectangle bounding them (the module's rules).
+    pub(super) bounded: bool,
 }
 
 impl<M> ShadowCopy<M> {
     /// The texels a copy back of a 2D texture's image over a buffer's bytes moves (its every
     /// region's, or its one region's inside [`area`](Self::area)): 0 for every other copy.
     pub(super) fn texels_back(&self) -> u64 {
+        match self.step {
+            Step::Back => self.image_texels(),
+            _ => 0,
+        }
+    }
+
+    /// The texels a copy in of a 2D texture's image over a buffer's bytes moves, as
+    /// [`texels_back`](Self::texels_back) counts them: 0 for every other copy.
+    pub(super) fn texels_in(&self) -> u64 {
+        match self.step {
+            Step::Into => self.image_texels(),
+            _ => 0,
+        }
+    }
+
+    /// The texels a copy in or back of a 2D texture's image over a buffer's bytes moves, as
+    /// `record` cuts its region: 0 for any other shadow.
+    fn image_texels(&self) -> u64 {
         let Some(ShadowTarget::Image {
             regions,
             staging,
@@ -513,9 +623,6 @@ impl<M> ShadowCopy<M> {
         else {
             return 0;
         };
-        if !matches!(self.step, Step::Back) {
-            return 0;
-        }
         let texels = |r: &vk::BufferImageCopy| {
             let e = r.image_extent;
             u64::from(e.width) * u64::from(e.height) * u64::from(e.depth)
@@ -531,6 +638,65 @@ impl<M> ShadowCopy<M> {
 }
 
 impl ShadowCopy {
+    /// The dispatch that takes this copy where it is a copy back that dispatches
+    /// (`shadow_copy_back.rs`): a one-slice 2D texture's image over a buffer's bytes, copied in
+    /// place, with its integer view, of texels the copy moves, made on `device` over the buffer's
+    /// `VkBuffer` now. `None` where the copy takes it (any other copy, or one the dispatch does
+    /// not fit).
+    pub(super) fn dispatched(&self, device: &Device) -> Option<CopyBack> {
+        let ShadowSource::Bytes {
+            buffer,
+            target:
+                ShadowTarget::Image {
+                    regions,
+                    staging: None,
+                    texel: Some(texel),
+                    words: Some(words),
+                    ..
+                },
+            ..
+        } = &self.copies.source
+        else {
+            return None;
+        };
+        let ([region], Step::Back) = (regions.as_slice(), &self.step) else {
+            return None;
+        };
+        let region = match self.area {
+            Some(area) => part_of(region, area, *texel)?,
+            None => *region,
+        };
+        CopyBack::new(device, *words, buffer.raw(), &region)
+    }
+
+    /// The uses of the dispatch that takes a copy back ([`dispatched`](Self::dispatched)): a
+    /// sampled read of the shadow and a storage write of the buffer's bytes, in the compute
+    /// stage.
+    pub(super) fn dispatched_uses(&self) -> Vec<Use<ResourceKey>> {
+        let c = &self.copies;
+        let (truth, range) = c.truth();
+        vec![
+            Use::reads(
+                c.shadow_key,
+                c.tracked,
+                c.shadow_range.clone(),
+                Access::new(
+                    vk::PipelineStageFlags2::COMPUTE_SHADER,
+                    vk::AccessFlags2::SHADER_SAMPLED_READ,
+                ),
+            ),
+            Use::writes(
+                truth,
+                c.tracked,
+                range,
+                Access::new(
+                    vk::PipelineStageFlags2::COMPUTE_SHADER,
+                    vk::AccessFlags2::SHADER_STORAGE_WRITE,
+                ),
+            ),
+        ]
+    }
+
     /// The stages the copy runs in: a rotated texture's copies dispatch the rotation kernel, a
     /// heap's two-plane texture's the two-plane kernel, and a tiled heap texture's the tiled
     /// texel kernel (its keep too).
@@ -629,7 +795,7 @@ impl ShadowCopy {
     ///
     /// `command_buffer` is recording, outside a render pass; the buffer and the shadow are live
     /// until it completes, and an image is in the `GENERAL` layout.
-    pub(super) unsafe fn record(&self, device: &ash::Device, command_buffer: vk::CommandBuffer) {
+    pub(super) unsafe fn record(&self, device: &Vk, command_buffer: vk::CommandBuffer) {
         let c = &self.copies;
         let into_shadow = match &self.step {
             Step::Into => true,
@@ -685,6 +851,7 @@ impl ShadowCopy {
                 image,
                 shadow,
                 regions,
+                through,
                 ..
             } => {
                 let (from, to) = if into_shadow {
@@ -692,6 +859,30 @@ impl ShadowCopy {
                 } else {
                     (*shadow, *image)
                 };
+                if let Some(through) = through {
+                    let (buffer, _) = through.buffer.at(0);
+                    // SAFETY: the caller's contract; the regions lie in both images, which have
+                    // the same shape, and in the buffer, which lives with the shadow; the
+                    // barrier orders the copy out of the buffer after the copy into it.
+                    unsafe {
+                        device.cmd_copy_image_to_buffer(
+                            command_buffer,
+                            from,
+                            vk::ImageLayout::GENERAL,
+                            buffer,
+                            &through.regions,
+                        );
+                        Barrier::everything().record(device, command_buffer);
+                        device.cmd_copy_buffer_to_image(
+                            command_buffer,
+                            buffer,
+                            to,
+                            vk::ImageLayout::GENERAL,
+                            &through.regions,
+                        );
+                    }
+                    return;
+                }
                 let regions: Vec<vk::ImageCopy> = if into_shadow {
                     regions.clone()
                 } else {
@@ -727,12 +918,13 @@ impl ShadowCopy {
                 regions,
                 staging,
                 texel,
+                ..
             } => {
                 let regions = match (self.area, staging, regions.as_slice(), *texel) {
-                    (Some(area), None, [region], Some(texel)) if !into_shadow => {
+                    (Some(area), None, [region], Some(texel)) => {
                         match part_of(region, area, texel) {
                             Some(part) => std::borrow::Cow::Owned(vec![part]),
-                            // The commands wrote no texel.
+                            // The commands read or wrote no texel.
                             None => return,
                         }
                     }
@@ -943,14 +1135,16 @@ pub(super) fn copies_used<'a>(
             overwrites: false,
             kept: false,
             area: None,
+            loads: None,
         });
     }
     shadows
 }
 
 /// Add `shadow` to `shadows`: once per shadowed texture, writing through it when either use
-/// writes (where both write, inside the rectangle bounding both areas), and overwriting it, or
-/// leaving its texels in place, only when both do.
+/// writes (where both write, inside the rectangle bounding both areas), reading its texels inside
+/// the rectangle bounding where both read them (anywhere where either does not bound that), and
+/// overwriting it, or leaving its texels in place, only when both do.
 pub(super) fn join(shadows: &mut Vec<ShadowUse>, shadow: &ShadowUse) {
     match shadows
         .iter_mut()
@@ -962,6 +1156,7 @@ pub(super) fn join(shadows: &mut Vec<ShadowUse>, shadow: &ShadowUse) {
                 (false, true) => shadow.area,
                 (_, false) => other.area,
             };
+            other.loads = bounding(other.loads, shadow.loads);
             other.writes |= shadow.writes;
             other.overwrites &= shadow.overwrites;
             other.kept &= shadow.kept;
@@ -972,6 +1167,7 @@ pub(super) fn join(shadows: &mut Vec<ShadowUse>, shadow: &ShadowUse) {
             overwrites: shadow.overwrites,
             kept: shadow.kept,
             area: shadow.area,
+            loads: shadow.loads,
         }),
     }
 }
@@ -979,8 +1175,15 @@ pub(super) fn join(shadows: &mut Vec<ShadowUse>, shadow: &ShadowUse) {
 /// A shadowed texture an encoder used, and where its image stands.
 struct Entry<M> {
     copies: Arc<ShadowCopies>,
-    /// The image holds the buffer's bytes as the encoder's commands so far left them.
+    /// The image holds the buffer's bytes as the encoder's commands so far left them, inside
+    /// `held`.
     current: bool,
+    /// Where the image holds them when `current`: the texels inside `[x0, y0, x1, y1)`, all its
+    /// last copy in moved ([`ShadowUse::loads`]); `None` for every texel. Its other texels are
+    /// whatever the image held before, which no command of the encoder reads and no copy back
+    /// moves: a command that needs them current copies back what was written and copies every
+    /// texel in first.
+    held: Option<[u32; 4]>,
     /// A command wrote through the texture since the last copy back.
     dirty: bool,
     /// Where those commands wrote through it, where they bound it ([`ShadowUse::area`]).
@@ -988,6 +1191,52 @@ struct Entry<M> {
     /// The scratch the image was kept in before a command that writes its bytes two ways, until
     /// the merge after it.
     merge: Option<M>,
+    /// When `current`, the rectangle bounding the texels whose bytes changed since the image's
+    /// copy in, where only writes [`Within`] it changed them (the module's rules): the next
+    /// command that uses the texture copies those in first. `None` where none changed.
+    stale: Option<[u32; 4]>,
+}
+
+impl<M> Entry<M> {
+    /// Whether a change of the bytes of `texels`' texels inside a rectangle leaves the image
+    /// current but there ([`Entry::stale`]): it holds the bytes, and no write of its own or keep,
+    /// and its texels are `texels`' ([`ShadowCopies::same_texels`]).
+    fn stale_within(&self, texels: &ShadowCopies) -> bool {
+        self.current && !self.dirty && self.merge.is_none() && self.copies.same_texels(texels)
+    }
+
+    /// Note a change of the bytes of `texels`' texels inside `area` (`[x0, y0, x1, y1)`), or
+    /// anywhere where `area` is `None`: the image is stale there, or no longer current.
+    fn changed(&mut self, texels: &ShadowCopies, area: Option<[u32; 4]>) {
+        match area.filter(|_| self.stale_within(texels)) {
+            Some(area) => {
+                self.stale = Some(match self.stale {
+                    Some(stale) => [
+                        stale[0].min(area[0]),
+                        stale[1].min(area[1]),
+                        stale[2].max(area[2]),
+                        stale[3].max(area[3]),
+                    ],
+                    None => area,
+                });
+            }
+            None => self.current = false,
+        }
+    }
+}
+
+/// A command's writes of a texture's bytes that change none of its texels outside a rectangle:
+/// a render pass instance's of a color attachment it loads, which only its draws change, inside
+/// their scissors (`render/shadows.rs`).
+pub(super) struct Within {
+    /// The writes' uses of the bytes.
+    pub(super) uses: Vec<Use<ResourceKey>>,
+    /// A shadow of the texture, whose texels are the attachment's pixels: an image whose texels
+    /// are laid out as its ([`ShadowCopies::same_texels`]) changed inside `area` alone. `None`
+    /// where the texture has none, and then every image over the bytes changed anywhere.
+    pub(super) texels: Option<Arc<ShadowCopies>>,
+    /// The rectangle, `[x0, y0, x1, y1)` of the texels.
+    pub(super) area: [u32; 4],
 }
 
 /// A command's use of a shadowed texture: its copies, and whether it writes through it.
@@ -999,7 +1248,7 @@ pub(super) struct ShadowUse {
     /// texture): it takes no copy in. A render encoder's one pass is its only command with
     /// attachments, so nothing earlier in the encoder wrote through the texture; where the pass
     /// does not store it either, nothing is copied back, and the buffer keeps its bytes, Metal's
-    /// answer (TOB probe 1).
+    /// answer (a Metal probe on the M3 Max and an M4).
     pub(super) overwrites: bool,
     /// The command leaves the texture's texels in place, but where it overwrites them: a render
     /// pass that draws nothing, of an attachment it renders. A rotated texture's copy in then
@@ -1011,12 +1260,37 @@ pub(super) struct ShadowUse {
     /// `[x0, y0, x1, y1)` of a one-level, one-slice texture's image (a pass's attachment it
     /// loads, which only its draws' scissors change, `render/shadows.rs`); `None` for anywhere.
     pub(super) area: Option<[u32; 4]>,
+    /// Where the command reads the texture's texels, where it bounds that: the texels inside
+    /// `[x0, y0, x1, y1)` of a one-level, one-slice texture's image, whose others it reads at
+    /// most into the image alone, never into what it writes elsewhere or what a copy back moves
+    /// (a pass's attachment it loads and takes in no other way, whose fragments run only inside
+    /// its draws' scissors and read the attachment at their own pixel alone,
+    /// `render/shadows.rs`); `None` for anywhere. Its copy in moves only those texels.
+    pub(super) loads: Option<[u32; 4]>,
 }
 
 /// The rectangle bounding `a` and `b`, each `[x0, y0, x1, y1)`; `None` (anywhere) where either is.
 fn bounding(a: Option<[u32; 4]>, b: Option<[u32; 4]>) -> Option<[u32; 4]> {
     let ([a0, a1, a2, a3], [b0, b1, b2, b3]) = (a?, b?);
     Some([a0.min(b0), a1.min(b1), a2.max(b2), a3.max(b3)])
+}
+
+/// The texels inside both `a` and `b`, each `[x0, y0, x1, y1)`; `None` where they share none.
+fn meet([a0, a1, a2, a3]: [u32; 4], [b0, b1, b2, b3]: [u32; 4]) -> Option<[u32; 4]> {
+    let r = [a0.max(b0), a1.max(b1), a2.min(b2), a3.min(b3)];
+    (r[0] < r[2] && r[1] < r[3]).then_some(r)
+}
+
+/// Whether an image holding the buffer's texels inside `held` (`None` every texel) holds those
+/// inside `needs` (`None` every texel).
+fn holds(held: Option<[u32; 4]>, needs: Option<[u32; 4]>) -> bool {
+    match (held, needs) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some([h0, h1, h2, h3]), Some([n0, n1, n2, n3])) => {
+            h0 <= n0 && h1 <= n1 && n2 <= h2 && n3 <= h3
+        }
+    }
 }
 
 /// The shadowed textures one encoder used, and the copies they need (the module's rules), `M`
@@ -1046,9 +1320,11 @@ impl<M: Clone> ShadowSync<M> {
                 self.entries.push(Entry {
                     copies: Arc::clone(copies),
                     current: false,
+                    held: None,
                     dirty: false,
                     area: None,
                     merge: None,
+                    stale: None,
                 });
                 self.entries.len() - 1
             }
@@ -1056,12 +1332,13 @@ impl<M: Clone> ShadowSync<M> {
     }
 
     /// Copy back entry `i` (dirty): its image's bytes replace the buffer's, so every other
-    /// texture over them is no longer current. One kept before a command that wrote its bytes
-    /// two ways is merged instead, and is then no longer current either: the buffer holds the
-    /// other way's writes too. A copy back covers only the area the commands wrote in, where
-    /// they bound it: the image's other texels are what the last copy in left, which the
-    /// buffer still holds (a write of its bytes another way leaves the image stale, and copies
-    /// in again before the next use).
+    /// texture over them is no longer current, or, where the copy back covers a rectangle of
+    /// texels laid out as its own, stale there alone (the module's rules). One kept before a
+    /// command that wrote its bytes two ways is merged instead, and is then no longer current
+    /// either: the buffer holds the other way's writes too. A copy back covers only the area the
+    /// commands wrote in, where they bound it: the image's other texels are what the last copy
+    /// in left, which the buffer still holds (a write of its bytes another way leaves the image
+    /// stale, and copies in again before the next use).
     fn copy_back(&mut self, i: usize, copies: &mut Vec<ShadowCopy<M>>) {
         let entry = &mut self.entries[i];
         let step = match &entry.merge {
@@ -1085,10 +1362,11 @@ impl<M: Clone> ShadowSync<M> {
             step,
             kept: false,
             area,
+            bounded: false,
         });
         for (j, other) in self.entries.iter_mut().enumerate() {
             if j != i && other.copies.shares_truth(&written) {
-                other.current = false;
+                other.changed(&written, area);
             }
         }
     }
@@ -1143,20 +1421,70 @@ impl<M: Clone> ShadowSync<M> {
         }
         for shadow in shadows {
             let i = self.entry(&shadow.copies);
-            let overwrites = shadow.overwrites
-                && !kept
-                    .iter()
-                    .any(|(copies, _)| copies.shadow_key == shadow.copies.shadow_key);
-            if !self.entries[i].current {
+            let two_ways = kept
+                .iter()
+                .any(|(copies, _)| copies.shadow_key == shadow.copies.shadow_key);
+            let overwrites = shadow.overwrites && !two_ways;
+            // The texels the command needs as the buffer holds them: those it reads, and those
+            // it writes (which a copy back moves), where it bounds both and the copies are cut to
+            // a rectangle; every texel where it writes the bytes two ways, as the merge after it
+            // compares every texel the keep took.
+            let needs = match two_ways || !shadow.copies.cuts() {
+                true => None,
+                false if shadow.writes => bounding(shadow.loads, shadow.area),
+                false => shadow.loads,
+            };
+            let entry = &self.entries[i];
+            if entry.current && !overwrites && !holds(entry.held, needs) {
+                // The image holds the buffer's texels only inside its last copy in's rectangle:
+                // what the encoder wrote through it goes back first, then the copy in below
+                // moves what this command needs.
+                if entry.dirty {
+                    self.copy_back(i, &mut copies);
+                }
+                self.entries[i].current = false;
+            }
+            let entry = &mut self.entries[i];
+            if !entry.current {
                 if !overwrites {
                     copies.push(ShadowCopy {
                         copies: Arc::clone(&shadow.copies),
                         step: Step::Into,
                         kept: shadow.kept,
-                        area: None,
+                        area: needs,
+                        bounded: false,
                     });
                 }
-                self.entries[i].current = true;
+                entry.current = true;
+                entry.held = needs;
+                entry.stale = None;
+            }
+            // The texels writes within a rectangle changed since the copy in: those alone. A
+            // command that reads only the texels inside a rectangle and writes none takes those of
+            // them inside it alone: the image then holds the buffer's texels there, inside what it
+            // held, which is all it claims from then on.
+            if let Some(stale) = entry.stale {
+                entry.stale = None;
+                let area = match (shadow.writes, needs) {
+                    (false, Some(reads)) => {
+                        entry.held = Some(reads);
+                        meet(stale, reads)
+                    }
+                    _ => Some(stale),
+                };
+                if let (false, Some(area)) = (overwrites, area) {
+                    copies.push(ShadowCopy {
+                        copies: Arc::clone(&shadow.copies),
+                        step: Step::Into,
+                        kept: shadow.kept,
+                        area: Some(area),
+                        bounded: true,
+                    });
+                }
+            }
+            // The command writes every texel before it reads any.
+            if overwrites {
+                entry.held = None;
             }
         }
         for (shadow, merge) in kept {
@@ -1167,22 +1495,36 @@ impl<M: Clone> ShadowSync<M> {
                 step: Step::Keep(merge),
                 kept: false,
                 area: None,
+                bounded: false,
             });
         }
         Ok(copies)
     }
 
-    /// Note a recorded command that used `shadows` and had `uses`: a write through a texture
-    /// leaves its image to copy back; a write of the bytes another way leaves the images over
-    /// them stale.
-    pub(super) fn after(&mut self, shadows: &[ShadowUse], uses: &[Use<ResourceKey>]) {
+    /// Note a recorded command that used `shadows` and had `uses`, and the writes `within`
+    /// (whose uses are not among `uses`): a write through a texture leaves its image to copy
+    /// back; a write of the bytes another way leaves the images over them stale, there alone
+    /// where it is one of `within` and the image's texels are laid out as its texture's (the
+    /// module's rules).
+    pub(super) fn after(
+        &mut self,
+        shadows: &[ShadowUse],
+        uses: &[Use<ResourceKey>],
+        within: &[Within],
+    ) {
         for entry in &mut self.entries {
             // A texture's own uses are its image's, never its bytes'.
-            let stale = uses
-                .iter()
-                .any(|used| !used.write.is_empty() && entry.copies.meets(used));
-            if stale {
+            let copies = Arc::clone(&entry.copies);
+            let writes = |used: &Use<ResourceKey>| !used.write.is_empty() && copies.meets(used);
+            if uses.iter().any(writes) {
                 entry.current = false;
+                continue;
+            }
+            for part in within.iter().filter(|part| part.uses.iter().any(writes)) {
+                match &part.texels {
+                    Some(texels) => entry.changed(texels, Some(part.area)),
+                    None => entry.current = false,
+                }
             }
         }
         for shadow in shadows.iter().filter(|shadow| shadow.writes) {

@@ -83,7 +83,11 @@ cargo build --release -p metal2vulkan --features cli
 ## Golden output hashes and `SEMANTICS_VERSION`
 
 `src/tests/golden_hashes.rs` pins a hash of the final SPIR-V (or the refusal class) of every public
-fixture entry point on every committed profile, in `crates/metal2vulkan/tests/golden_hashes.tsv`.
+fixture entry point on every committed profile, in `crates/metal2vulkan/tests/golden_hashes.tsv`,
+and of every fixture that samples, gathers or computes a level of detail under every exact form
+(Metal's sampler emulated and `DevicePolicy::exact_answers`), in
+`crates/metal2vulkan/tests/golden_hashes_exact.tsv`: the default policy samples natively, so only
+that table holds the sampler's emulation.
 `cache::SEMANTICS_VERSION` is part of every cache key, so a change that moves a cell while its
 fixture and profile are unchanged must bump `SEMANTICS_VERSION`
 (`crates/metal2vulkan/src/cache/mod.rs`) in the same change. New, removed or edited fixtures and
@@ -91,15 +95,15 @@ profiles need only the bless. The table records cells only, no version: a `SEMAN
 alone leaves it unchanged, and the bless on `development` refuses a cell that moved under an
 unchanged fixture and profile when `SEMANTICS_VERSION` is still its value at the table's last bless.
 
-The table is re-blessed on `development` after merges, so a change need not carry its own bless. To
-bless by hand (on macOS, which has `xcrun metal-as`):
+The tables are re-blessed on `development` after merges, so a change need not carry its own bless.
+One command blesses both (on macOS, which has `xcrun metal-as`):
 
 ```sh
 PATH=/opt/homebrew/opt/llvm/bin:$PATH cargo nextest run -p metal2vulkan --all-features \
   --run-ignored ignored-only -E 'test(bless_golden_hashes)'
 ```
 
-Never merge the table by hand: after a merge take `development`'s table and bless again. The other
+Never merge a table by hand: after a merge take `development`'s tables and bless again. The other
 versions move the same way when their behavior changes: `ARTIFACT_FORMAT_VERSION` (the artifact
 encoding) and `RUNTIME_VERSION` (what the runtime does with an unchanged artifact).
 

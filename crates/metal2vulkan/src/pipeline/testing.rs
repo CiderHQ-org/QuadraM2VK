@@ -64,15 +64,18 @@ pub const EXACT_SAMPLING: DevicePolicy = DevicePolicy {
     ..DevicePolicy::UNTRUSTED.exact_answers()
 };
 
-/// Committed profile `stem` (`validation/profiles/<stem>.json`) derived under `policy`.
-pub fn profile(stem: &str, policy: DevicePolicy) -> Result<DeviceProfile, String> {
+/// The description of committed profile `stem` (`validation/profiles/<stem>.json`).
+pub fn description(stem: &str) -> Result<DeviceDescription, String> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../metal2vulkan-validation/profiles")
         .join(format!("{stem}.json"));
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let desc =
-        DeviceDescription::from_khronos_json(&text, None).map_err(|e| format!("{stem}: {e}"))?;
-    let dev = Device::new(desc, policy).map_err(|e| format!("{stem}: {e}"))?;
+    DeviceDescription::from_khronos_json(&text, None).map_err(|e| format!("{stem}: {e}"))
+}
+
+/// Committed profile `stem` (`validation/profiles/<stem>.json`) derived under `policy`.
+pub fn profile(stem: &str, policy: DevicePolicy) -> Result<DeviceProfile, String> {
+    let dev = Device::new(description(stem)?, policy).map_err(|e| format!("{stem}: {e}"))?;
     Ok(dev.profile().clone())
 }
 
@@ -83,14 +86,27 @@ pub fn profile_with_storage_buffers(
     policy: DevicePolicy,
     storage: u32,
 ) -> Result<DeviceProfile, String> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../metal2vulkan-validation/profiles")
-        .join(format!("{stem}.json"));
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut desc =
-        DeviceDescription::from_khronos_json(&text, None).map_err(|e| format!("{stem}: {e}"))?;
+    let mut desc = description(stem)?;
     desc.limits.max_per_stage_descriptor_storage_buffers = storage;
     let dev = Device::new(desc, policy).map_err(|e| format!("{stem}: {e}"))?;
+    Ok(dev.profile().clone())
+}
+
+/// The name [`formatless_floor`]'s profile goes by in a test's messages.
+pub const FORMATLESS_FLOOR: &str = "vk12-floor+formatless";
+
+/// `vk12-floor` derived under `policy` with the two optional features that let a shader access a
+/// storage image without its format (`shaderStorageImageReadWithoutFormat` and
+/// `shaderStorageImageWriteWithoutFormat`): the floor, which states neither, beside a device that
+/// leaves a storage texture's format to the bound view.
+pub fn formatless_floor(policy: DevicePolicy) -> Result<DeviceProfile, String> {
+    use crate::device::requirements::VkFeature;
+    let mut desc = description("vk12-floor")?;
+    desc.features.extend([
+        VkFeature::ShaderStorageImageReadWithoutFormat,
+        VkFeature::ShaderStorageImageWriteWithoutFormat,
+    ]);
+    let dev = Device::new(desc, policy).map_err(|e| format!("{FORMATLESS_FLOOR}: {e}"))?;
     Ok(dev.profile().clone())
 }
 
@@ -141,6 +157,33 @@ pub fn compile(
     p: &DeviceProfile,
 ) -> Result<Arc<FunctionArtifact>, Error> {
     compile_with(bitcode, entry, p, &LowerInputs::new())
+}
+
+/// [`compile`], given each storage texture's format where `p` asks for it: a profile that reads or
+/// writes storage images only with a declared format (the floor, which states neither
+/// `shaderStorageImageReadWithoutFormat` nor `shaderStorageImageWriteWithoutFormat`) needs every
+/// storage slot's format (`NeedsInput(StorageTextureFormat)`), and the runtime compiles the variant
+/// of the format bound there. Each slot named takes `pf`'s read-and-write choice
+/// ([`storage_image_choice`](crate::metal::format::storage_image_choice)); a profile that asks for
+/// none compiles as [`compile`] does.
+pub fn compile_given_storage_format(
+    bitcode: &[u8],
+    entry: &str,
+    p: &DeviceProfile,
+    pf: crate::metal::PixelFormat,
+) -> Result<Arc<FunctionArtifact>, Error> {
+    let mut inputs = LowerInputs::new();
+    loop {
+        match compile_with(bitcode, entry, p, &inputs) {
+            Err(Error::NeedsInput(crate::error::RuntimeInput::StorageTextureFormat { slot }))
+                if !inputs.storage_images.contains_key(&slot) =>
+            {
+                let choice = crate::metal::format::storage_image_choice(pf, p)?;
+                inputs.storage_images.insert(slot, choice);
+            }
+            r => return r,
+        }
+    }
 }
 
 /// The lowering inputs a fragment function compiles under for the color attachments of `r` on

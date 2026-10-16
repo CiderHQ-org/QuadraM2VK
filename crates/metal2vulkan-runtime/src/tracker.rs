@@ -41,8 +41,11 @@
 //! entries has them merged into one per kind of range, which orders more and stays exact. A
 //! write or read retires once its batch completed and the host saw it ([`Tracker::completed`]);
 //! each `VkQueue`'s batches complete in its timeline's order. A queue submission orders
-//! everything that happened before it on the host, and every batch starts with
-//! [`Barrier::after_completed`], so later work needs no barrier from it.
+//! everything that happened before it on the host, and every batch with work waits for the
+//! timelines at the values the host saw them reach (`command_buffer/submit.rs`), which makes what
+//! completed work wrote visible to it, or, on a driver whose submissions stall on semaphore
+//! operations (`DriverFact::SemaphoreOperationsStallSubmits`), starts with
+//! [`Barrier::after_completed`]; so later work needs no barrier from it.
 //!
 //! **Kept cheap per batch.** The scheduler plans every batch on its thread (a commit's own, where
 //! it submits inline), so the state's upkeep is held to what a batch touches. Each resource's state
@@ -58,6 +61,7 @@
 //! `VkQueue`'s listed in its submission order as their plans were applied, not every resource the
 //! state holds.
 
+use crate::device::functions::Vk;
 use crate::key_hash::KeyMap;
 use ash::vk;
 use std::collections::{HashMap, VecDeque};
@@ -298,7 +302,8 @@ pub(super) struct Barrier {
 }
 
 impl Barrier {
-    /// The start of every batch with encoders: what completed batches wrote is visible to every
+    /// The start of every batch with encoders on a driver whose submissions stall on semaphore
+    /// operations (`command_buffer/submit.rs`): what completed batches wrote is visible to every
     /// later command. The tracker forgets a batch once it completed, so its writes are ordered by
     /// completion (its queue's timeline, observed on the host before this submission) and need
     /// only this visibility; the empty source waits for nothing.
@@ -362,19 +367,22 @@ impl Barrier {
     }
 
     /// Record the barrier on `command_buffer`: one global `VkMemoryBarrier` through
-    /// `vkCmdPipelineBarrier`, with [`Barrier::legacy`]'s masks. The runtime records every
-    /// barrier this way, with or without synchronization2: each mask it makes maps to the same or
-    /// a broader legacy mask, so one path is exact.
+    /// `vkCmdPipelineBarrier`, with [`Barrier::legacy`]'s masks, the destination's `MEMORY_READ`
+    /// named as the reads it stands for beside the destination stages
+    /// (`image_barrier::MemoryReads`, the device's queue family for encoders, which records every
+    /// such barrier). The runtime records every barrier
+    /// this way, with or without synchronization2: each mask it makes maps to the same or a
+    /// broader legacy mask, so one path is exact.
     ///
     /// # Safety
     ///
     /// `command_buffer` is a command buffer of `device` in the recording state, and no other
     /// thread records it.
-    pub(super) unsafe fn record(self, device: &ash::Device, command_buffer: vk::CommandBuffer) {
+    pub(super) unsafe fn record(self, device: &Vk, command_buffer: vk::CommandBuffer) {
         let masks = self.legacy();
         let barrier = vk::MemoryBarrier::default()
             .src_access_mask(masks.src_access)
-            .dst_access_mask(masks.dst_access);
+            .dst_access_mask(device.reads().named(masks.dst_access, masks.dst_stages));
         // SAFETY: the caller's contract.
         unsafe {
             device.cmd_pipeline_barrier(
@@ -909,7 +917,7 @@ fn coalesce(entries: &mut Vec<Entry>) {
 /// The uses one per key and range, sorted by key, without the ones that touch nothing.
 fn merged<S: Copy + Ord + Hash>(uses: impl IntoIterator<Item = Use<S>>) -> Vec<Use<S>> {
     let mut merged: Vec<Use<S>> = Vec::new();
-    let mut index: HashMap<(S, UseRange), usize> = HashMap::new();
+    let mut index: KeyMap<(S, UseRange), usize> = KeyMap::default();
     for used in uses {
         if used.is_nothing() {
             continue;
@@ -945,7 +953,7 @@ pub(super) struct EncoderUses<K> {
     /// Whether Metal runs the commands in encoded order (blit encoders, serial compute encoders).
     ordered: bool,
     /// The accesses of the current part's commands so far, for that order.
-    inside: HashMap<Class<K>, Vec<Entry>>,
+    inside: KeyMap<Class<K>, Vec<Entry>>,
     /// The parts, in order: the last is the current one. Never empty.
     parts: Vec<Part<K>>,
     /// The fences waited for: before the encoder's first part.
@@ -957,14 +965,14 @@ pub(super) struct EncoderUses<K> {
 /// The uses of one part of an encoder.
 struct Part<K> {
     /// The tracked uses so far, one per range, at most [`ENTRIES_PER_KEY`] per resource.
-    tracked: HashMap<K, Vec<Use<K>>>,
+    tracked: KeyMap<K, Vec<Use<K>>>,
     stages: vk::PipelineStageFlags2,
 }
 
 impl<K> Part<K> {
     fn new() -> Part<K> {
         Part {
-            tracked: HashMap::new(),
+            tracked: KeyMap::default(),
             stages: vk::PipelineStageFlags2::NONE,
         }
     }
@@ -975,7 +983,7 @@ impl<K: Copy + Ord + Hash> EncoderUses<K> {
     pub(super) fn new(ordered: bool) -> EncoderUses<K> {
         EncoderUses {
             ordered,
-            inside: HashMap::new(),
+            inside: KeyMap::default(),
             parts: vec![Part::new()],
             waits: Vec::new(),
             updates: Vec::new(),
@@ -1185,14 +1193,14 @@ impl<K> fmt::Debug for EncoderUses<K> {
 /// commands after them. One entry per range, at most [`ENTRIES_PER_KEY`] per resource, merged
 /// as [`EncoderUses`] merges its own, which claims more and stays exact.
 pub(super) struct UnorderedWrites<K> {
-    writes: HashMap<K, Vec<Use<K>>>,
+    writes: KeyMap<K, Vec<Use<K>>>,
 }
 
 impl<K: Copy + Ord + Hash> UnorderedWrites<K> {
     /// No writes.
     pub(super) fn new() -> UnorderedWrites<K> {
         UnorderedWrites {
-            writes: HashMap::new(),
+            writes: KeyMap::default(),
         }
     }
 

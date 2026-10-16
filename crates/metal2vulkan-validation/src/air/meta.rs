@@ -11,6 +11,7 @@ mod function_constants;
 mod globals;
 mod intersections;
 mod kernel;
+mod mesh;
 mod textures;
 pub(crate) mod types;
 mod vertex;
@@ -33,7 +34,10 @@ use globals::{location_index_with_static, static_init_int_global_values};
 pub use intersections::{
     AirIntersectionFamily, AirIntersectionInstancing, AirIntersectionResultField,
 };
-pub use kernel::{parse_air_kernel_meta, KernMeta, KernRole};
+pub use kernel::{parse_air_kernel_meta, parse_air_mesh_stage_meta, KernMeta, KernRole};
+pub use mesh::{
+    MeshFieldMeta, MeshFieldRole, MeshOutputsMeta, MeshStageMeta, MeshTopology, PayloadMeta,
+};
 pub use textures::{
     texture_shape_from_name, TextureComponent, TextureDimension, TextureFormat, TextureShape,
     TEXTURE_HANDLE_ARRAY_DESCRIPTOR_COUNT,
@@ -65,8 +69,9 @@ pub enum BufferAccess {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ImplicitImageblockAttachment {
     pub attachment: u32,
+    /// The plane's `imageblock_data_rate`: 0 for the pixel's texel (`read(coord)`), 1 for a
+    /// color's (`color`), 2 for a sample's (`sample`).
     pub data_rate: u32,
-    pub max_index: Option<u32>,
     pub format: TextureFormat,
     pub reads: bool,
     pub writes: bool,
@@ -109,28 +114,18 @@ pub(crate) fn aliased_imageblock_planes(
     }
     let mut planes = Vec::with_capacity(members.len());
     for (index, member) in members.iter().enumerate() {
-        let (format, intrinsic_suffix) = match &member.ty {
-            AirType::Scalar(AirScalar::Half) => (TextureFormat::R16f, "f16"),
-            AirType::Vec {
-                scalar: AirScalar::Half,
-                lanes: 2,
-            } => (TextureFormat::Rg16f, "v2f16"),
-            AirType::Vec {
-                scalar: AirScalar::Half,
-                lanes: 4,
-            } => (TextureFormat::Rgba16f, "v4f16"),
-            AirType::Scalar(AirScalar::Float) => (TextureFormat::R32f, "f32"),
-            AirType::Vec {
-                scalar: AirScalar::Float,
-                lanes: 4,
-            } => (TextureFormat::Rgba32f, "v4f32"),
-            AirType::Scalar(AirScalar::UInt) => (TextureFormat::R32ui, "i32"),
-            other => {
-                return Err(format!(
-                    "aliased imageblock member {index} has type {other:?}, which no implicit \
-                     imageblock plane format represents"
-                ))
-            }
+        let Some(&(intrinsic_suffix, format)) =
+            implicit_texel_suffix(&member.ty).and_then(|suffix| {
+                IMPLICIT_IMAGEBLOCK_TEXELS
+                    .iter()
+                    .find(|(texel, _)| *texel == suffix)
+            })
+        else {
+            return Err(format!(
+                "aliased imageblock member {index} has type {:?}, which no implicit imageblock \
+                 plane format represents",
+                member.ty
+            ));
         };
         planes.push(AliasedImageblockPlane {
             attachment: index as u32,
@@ -142,30 +137,62 @@ pub(crate) fn aliased_imageblock_planes(
     Ok(Some(planes))
 }
 
-/// Decode the stable AIR implicit-imageblock intrinsic suffix to its exact storage plane format.
-/// `Ok(None)` means the symbol is not in this intrinsic family; an unknown family suffix is an
-/// explicit error so reflection and corpus capability audits cannot silently omit a new ABI shape.
+/// The texel types of the stable AIR implicit-imageblock family
+/// (`air.load.implicit_imageblock.<T>`, `air.store.implicit_imageblock.<T>`), each with its exact
+/// storage plane format: the attachment format whose texel holds the type's value unchanged. An
+/// aliased explicit imageblock's member reaches its plane through the same table
+/// ([`aliased_imageblock_planes`]).
+const IMPLICIT_IMAGEBLOCK_TEXELS: [(&str, TextureFormat); 7] = [
+    ("f16", TextureFormat::R16f),
+    ("v2f16", TextureFormat::Rg16f),
+    ("v4f16", TextureFormat::Rgba16f),
+    ("f32", TextureFormat::R32f),
+    ("v2f32", TextureFormat::Rg32f),
+    ("v4f32", TextureFormat::Rgba32f),
+    ("i32", TextureFormat::R32ui),
+];
+
+/// The implicit-imageblock texel suffix AIR spells `ty` with (`f16`, `v2f32`, ...), when `ty` is
+/// a scalar or vector of the scalars the family names: `half`, `float`, and `uint`.
+fn implicit_texel_suffix(ty: &AirType) -> Option<String> {
+    let (scalar, lanes) = match ty {
+        AirType::Scalar(scalar) => (scalar, 1),
+        AirType::Vec { scalar, lanes } => (scalar, *lanes),
+        _ => return None,
+    };
+    let scalar = match scalar {
+        AirScalar::Half => "f16",
+        AirScalar::Float => "f32",
+        AirScalar::UInt => "i32",
+        _ => return None,
+    };
+    Some(if lanes == 1 {
+        scalar.to_owned()
+    } else {
+        format!("v{lanes}{scalar}")
+    })
+}
+
+/// Decode the stable AIR implicit-imageblock intrinsic suffix to its exact storage plane format,
+/// from the family's table of texel types; a store to the samples a coverage mask selects
+/// (`air.store.implicit_imageblock.mask.<T>`) writes the same planes. `Ok(None)` means the symbol
+/// is not in this intrinsic family; an unknown family suffix is an explicit error so reflection and
+/// corpus capability audits cannot silently omit a new ABI shape.
 pub fn implicit_imageblock_texture_format(name: &str) -> Result<Option<TextureFormat>, String> {
     let suffix = name
         .strip_prefix("air.load.implicit_imageblock.")
-        .or_else(|| name.strip_prefix("air.store.implicit_imageblock."));
+        .or_else(|| {
+            name.strip_prefix("air.store.implicit_imageblock.")
+                .map(|suffix| suffix.strip_prefix("mask.").unwrap_or(suffix))
+        });
     let Some(suffix) = suffix else {
         return Ok(None);
     };
-    let format = match suffix {
-        "f16" => TextureFormat::R16f,
-        "v2f16" => TextureFormat::Rg16f,
-        "v4f16" => TextureFormat::Rgba16f,
-        "f32" => TextureFormat::R32f,
-        "v4f32" => TextureFormat::Rgba32f,
-        "i32" => TextureFormat::R32ui,
-        _ => {
-            return Err(format!(
-                "{name} has unsupported implicit imageblock texel type"
-            ))
-        }
-    };
-    Ok(Some(format))
+    IMPLICIT_IMAGEBLOCK_TEXELS
+        .iter()
+        .find(|(texel, _)| *texel == suffix)
+        .map(|&(_, format)| Some(format))
+        .ok_or_else(|| format!("{name} has unsupported implicit imageblock texel type"))
 }
 
 /// The implicit imageblock attachments of `entry`'s calls: those of the text the entry reaches
@@ -190,6 +217,7 @@ fn detect_implicit_imageblock_attachments(
         let call = &line[at + 1..];
         let Some(open) = call.find('(') else { continue };
         let name = &call[..open];
+        let masked = name.starts_with("air.store.implicit_imageblock.mask.");
         let (reads, writes, value_prefix) = if name.starts_with("air.load.implicit_imageblock.") {
             (true, false, 0usize)
         } else if name.starts_with("air.store.implicit_imageblock.") {
@@ -207,14 +235,25 @@ fn detect_implicit_imageblock_attachments(
         else {
             continue;
         };
-        let index = args
-            .get(value_prefix + 2)
-            .and_then(|arg| typed_u32_constant(arg));
-        let Some(data_rate) = args
-            .get(value_prefix + 3)
-            .and_then(|arg| typed_u32_constant(arg))
-        else {
-            continue;
+        let data_rate = if masked {
+            // `(value, attachment, coord, coverage mask)`: no further operand. It writes the
+            // samples the mask selects; the plane it reaches is the pixel's own texel, the one a
+            // plain store of the pixel (`write(value, coord)`, data rate 0) writes.
+            0
+        } else {
+            // `(.., coord, data rate, index)`: the `i32` is the data rate, a constant, and the
+            // `i16` the color's or sample's index within the pixel, which may be computed and
+            // names no other plane. Probed on the M3 Max (macOS 27.0.1's compiler):
+            // `read(coord)` passes `i32 0, i16 0`, `read(coord, i, imageblock_data_rate::color)`
+            // `i32 1, i16 i`, and `read(coord, i, imageblock_data_rate::sample)` and
+            // `write(value, coord, i, imageblock_data_rate::sample)` `i32 2, i16 i`.
+            let Some(data_rate) = args
+                .get(value_prefix + 2)
+                .and_then(|arg| typed_u32_constant(arg))
+            else {
+                continue;
+            };
+            data_rate
         };
         let format = implicit_imageblock_texture_format(name).ok().flatten()?;
         let entry = attachments
@@ -222,17 +261,12 @@ fn detect_implicit_imageblock_attachments(
             .or_insert(ImplicitImageblockAttachment {
                 attachment,
                 data_rate,
-                max_index: index,
                 format,
                 reads: false,
                 writes: false,
             });
         entry.reads |= reads;
         entry.writes |= writes;
-        entry.max_index = match (entry.max_index, index) {
-            (Some(left), Some(right)) => Some(left.max(right)),
-            _ => None,
-        };
     }
     Some(attachments.into_values().collect())
 }
@@ -419,7 +453,7 @@ pub(crate) fn select_translation_entry(
 ) -> Result<String, String> {
     let nodes = collect_nodes(&ll);
     let mut entries = Vec::new();
-    for candidate in [Stage::Vertex, Stage::Fragment, Stage::Kernel] {
+    for candidate in Stage::ALL {
         for root in stage_roots(&ll, crate::air::stage_name(candidate)) {
             let symbol = nodes
                 .get(&root)
@@ -459,7 +493,9 @@ pub(crate) fn select_translation_entry(
     let mut selected_source = String::with_capacity(ll.len());
     for line in ll.lines() {
         if line.trim().split_once('=').is_some_and(|(key, _)| {
-            matches!(key.trim(), "!air.vertex" | "!air.fragment" | "!air.kernel")
+            Stage::ALL
+                .into_iter()
+                .any(|stage| key.trim() == format!("!air.{}", crate::air::stage_name(stage)))
         }) {
             continue;
         }
@@ -530,6 +566,10 @@ pub(crate) enum StageAttribute {
     /// `!{!"air.max_work_group_size", i32 N}` -- `[[max_total_threads_per_threadgroup(N)]]`. The
     /// largest threadgroup this entry was compiled to run.
     MaxWorkGroupSize(u32),
+    /// `!{!"air.max_mesh_work_groups", i32 N}` -- an object function's
+    /// `[[max_total_threadgroups_per_mesh_grid(N)]]`: the most mesh threadgroups one of its
+    /// threadgroups launches.
+    MaxMeshWorkGroups(u32),
     /// A tail operand this translator has no model for. Carried out so a stage can refuse rather
     /// than emit a module that silently lacks whatever the attribute asked for.
     Unrecognized(String),
@@ -542,6 +582,7 @@ impl StageAttribute {
             StageAttribute::Patch(_) => "air.patch".to_string(),
             StageAttribute::EarlyFragmentTests => "early_fragment_tests".to_string(),
             StageAttribute::MaxWorkGroupSize(_) => "air.max_work_group_size".to_string(),
+            StageAttribute::MaxMeshWorkGroups(_) => "air.max_mesh_work_groups".to_string(),
             StageAttribute::Unrecognized(text) => text.clone(),
         }
     }
@@ -574,6 +615,14 @@ fn stage_root_attributes(rootc: &str, nodes: &HashMap<u32, String>) -> Vec<Stage
                         Some(size) => StageAttribute::MaxWorkGroupSize(size),
                         None => StageAttribute::Unrecognized(
                             "air.max_work_group_size states no thread count".to_string(),
+                        ),
+                    }
+                }
+                Some(node) if node.contains("!\"air.max_mesh_work_groups\"") => {
+                    match i32_after_marker(node, "air.max_mesh_work_groups") {
+                        Some(count) => StageAttribute::MaxMeshWorkGroups(count),
+                        None => StageAttribute::Unrecognized(
+                            "air.max_mesh_work_groups states no threadgroup count".to_string(),
                         ),
                     }
                 }
@@ -1306,6 +1355,27 @@ pub(crate) const KERNEL_INPUT_ROLES: &[&str] = &[
     "visible_function_table",
 ];
 
+/// An object or mesh function's parameter roles beside its own stage's ([`mesh::MESH_STAGE_ROLES`]):
+/// a kernel's, less the stage input, the imageblock and the requested threadgroup size, which only
+/// a dispatch states.
+pub(crate) const MESH_PIPELINE_INPUT_ROLES: &[&str] = &[
+    "buffer",
+    "indirect_buffer",
+    "instance_acceleration_structure",
+    "intersection_function_table",
+    "primitive_acceleration_structure",
+    "sampler",
+    "texture",
+    "thread_index_in_threadgroup",
+    "thread_position_in_grid",
+    "thread_position_in_threadgroup",
+    "threadgroup_position_in_grid",
+    "threadgroups_per_grid",
+    "threads_per_grid",
+    "threads_per_threadgroup",
+    "visible_function_table",
+];
+
 /// Whether the emitter models `role` on an entry parameter of `stage`.
 ///
 /// The stage's own inventory, plus the execution-group facts that stage can answer. Those are read
@@ -1317,8 +1387,11 @@ pub(crate) fn air_input_role_is_modelled(stage: Stage, role: &str) -> bool {
         Stage::Fragment => FRAGMENT_INPUT_ROLES,
         Stage::Vertex => VERTEX_INPUT_ROLES,
         Stage::Kernel => KERNEL_INPUT_ROLES,
-        // No case expresses an object or mesh function (`mesh_pipeline`).
-        Stage::Object | Stage::Mesh => return false,
+        Stage::Object | Stage::Mesh => {
+            return (MESH_PIPELINE_INPUT_ROLES.contains(&role)
+                || mesh::MESH_STAGE_ROLES.contains(&role))
+                || stage_execution_group_role(stage, role).is_some()
+        }
     };
     inventory.contains(&role) || stage_execution_group_role(stage, role).is_some()
 }
@@ -1406,8 +1479,9 @@ pub(crate) fn execution_group_role(marker: &str) -> Option<(ExecutionGroupFact, 
 /// One statement of "does this stage lower that marker", shared by the inventory that decides what
 /// to refuse and by all three decodes. See [`ExecutionGroupFact::needs_a_threadgroup`].
 fn stage_execution_group_role(stage: Stage, marker: &str) -> Option<(ExecutionGroupFact, u32)> {
-    execution_group_role(marker)
-        .filter(|(fact, _)| stage == Stage::Kernel || !fact.needs_a_threadgroup())
+    execution_group_role(marker).filter(|(fact, _)| {
+        matches!(stage, Stage::Kernel | Stage::Object | Stage::Mesh) || !fact.needs_a_threadgroup()
+    })
 }
 
 /// The fragment return-member roles the emitter lowers.

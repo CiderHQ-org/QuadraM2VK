@@ -1,5 +1,5 @@
-// Owned fixture (WP-BCU, DESIGN D234): Metal's bicubic filter (`filter::bicubic`) per bound pixel
-// format. WP-A2's impulse reading (`a2_bicubic_weights`, D127.3) returned two linear weights on an
+// Owned fixture: Metal's bicubic filter (`filter::bicubic`) per bound pixel
+// format. An impulse reading (`a2_bicubic_weights`) returned two linear weights on an
 // `rgba32_float` texture, while a corpus case on `rgba16_float` returned Catmull-Rom weights, so
 // the filter Metal applies may depend on the format bound. Ten textures are sampled at each lane's
 // normalized coordinate through one clamp-to-edge bicubic sampler, in the form every corpus

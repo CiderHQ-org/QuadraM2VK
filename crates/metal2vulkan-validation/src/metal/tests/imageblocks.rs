@@ -132,6 +132,7 @@ declare void @air.store.implicit_imageblock.v4f16(<4 x half>, i32, <2 x i16>, i3
         }),
         draw: None,
         tessellation: None,
+        mesh_draw: None,
         output: OutputSelection::RenderTarget {
             index: 0,
             origin: [0, 0],
@@ -147,6 +148,7 @@ declare void @air.store.implicit_imageblock.v4f16(<4 x half>, i32, <2 x i16>, i3
         raster_sample_count: None,
         public_source: None,
         no_effect: None,
+        creation_bound: None,
     };
     case.validate_literal_resources().unwrap();
     let reflection = crate::air::reflect::inspect(

@@ -10,12 +10,14 @@
 //! [`memory`] (access chains, array length, copies, calls), [`atomic`] (atomics, texel pointers,
 //! barriers), [`image`] (sampling, fetch, gather, read/write, queries, derivatives), [`group`]
 //! (subgroup operations), [`glsl`] (`GLSL.std.450`), [`misc`] (undef, helper invocation,
-//! interlock), [`mesh`] (a mesh pipeline's output counts and launch), and [`ray`] (ray queries).
+//! interlock), [`mesh`] (a mesh pipeline's output counts and launch), [`geometry`] (a geometry
+//! entry's vertices and primitives), and [`ray`] (ray queries).
 
 pub mod arith;
 pub mod atomic;
 pub mod composite;
 pub mod convert;
+pub mod geometry;
 pub mod glsl;
 pub mod group;
 pub mod image;
@@ -266,6 +268,7 @@ pub(super) fn check_entry_model(
                     ExecModel::GLCompute | ExecModel::TaskEXT | ExecModel::MeshEXT
                 ),
                 ModelNeed::Mesh => entry.model == ExecModel::MeshEXT,
+                ModelNeed::Geometry => entry.model == ExecModel::Geometry,
             };
             if !ok {
                 return Err(BuildError::Entry(EntryRule::InstructionForModel(model_op(
@@ -297,6 +300,8 @@ fn model_op(inst: &Inst) -> crate::spv::Op {
         Inst::MemoryBarrier { .. } => Op::MemoryBarrier,
         Inst::Group { op, .. } => op.to_spirv(),
         Inst::SetMeshOutputs { .. } => Op::SetMeshOutputsEXT,
+        Inst::EmitVertex => Op::EmitVertex,
+        Inst::EndPrimitive => Op::EndPrimitive,
         _ => Op::ExtInst,
     }
 }

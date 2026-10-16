@@ -1,4 +1,4 @@
-// Owned fixture (WP-DSX, DESIGN D797): unnormalized 8- and 16-bit integer vertex formats read
+// Owned fixture: unnormalized 8- and 16-bit integer vertex formats read
 // into float attributes, which Metal converts to each component's integer value.
 // - `int_attribute_to_float4`, `int_attribute_to_half4`: a rasterization-disabled point per
 //   vertex; vertex v writes the float4 attribute (the half4 one widened, exactly) it fetched to

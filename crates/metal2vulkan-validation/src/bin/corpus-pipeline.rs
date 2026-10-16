@@ -20,8 +20,9 @@
 //!   counted; any other binder error is `BIND_ERROR` and fails the sweep. A render row's stages are
 //!   created at their default specialization, not the graphics plan's (a limit). A fragment
 //!   function's attachments have no more channels than its outputs write. It times each
-//!   `vkCreate*Pipelines`, with the drivers' shader disk caches off
-//!   (`budgets::turn_driver_shader_caches_off`); a creation above 5 s is a bug. A row's detail
+//!   `vkCreate*Pipelines` (`budgets::CreationClock`: its wall time less its thread's wait for a
+//!   CPU), with the drivers' shader disk caches off (`budgets::turn_driver_shader_caches_off`); a
+//!   creation above 5 s is a bug. A row's detail
 //!   prints its own stage's module words, which are what the translation sweep (`corpus-triage
 //!   --audit translation`) counts for it, a render row's other stages' apart as `companion_words`,
 //!   and a kernel's representative imageblock extent as `imageblock=WxH`, then the pipeline's
@@ -138,11 +139,10 @@ fn usage() -> String {
      It runs the engine. --profile P names a committed profile describing the device; it may take\n\
      --fixtures, --pulled (every vertex attribute pulled in the shader), or --compile-only\n\
      (compile every row, open no device).\n\
-     --accept-unordered-fetch compiles under U7's recorded opt-in\n\
+     --accept-unordered-fetch compiles under the recorded opt-in\n\
      (FramebufferFetchPolicy::AcceptUnordered): on a profile without rasterization-order\n\
      attachment access a framebuffer fetch is an unordered input-attachment read\n\
-     (PrecisionNote::UnorderedFramebufferFetch) instead of the default policy's refusal (DESIGN\n\
-     D255).\n\
+     (PrecisionNote::UnorderedFramebufferFetch) instead of the default policy's refusal.\n\
      --driver-caches-on leaves the drivers' shader disk caches as the environment sets them (warm\n\
      creations, when an earlier run compiled the same pipelines); every other run compiles cold.\n\
      --keep-modules DIR writes each compiled row's stage modules into DIR (a diagnostic): per stage\n\

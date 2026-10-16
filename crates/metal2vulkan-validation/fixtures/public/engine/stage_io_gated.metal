@@ -1,4 +1,4 @@
-// Owned fixture (WP-L9a, DESIGN D69.9, D233): a vertex attribute gated by a function constant
+// Owned fixture: a vertex attribute gated by a function constant
 // and read without a guard. With `has_tint = false` the attribute is not declared and the
 // language gives its read no value, so the engine reads zero and declares no attribute 1;
 // with `has_tint = true` the attribute is an ordinary input. Loop-free.

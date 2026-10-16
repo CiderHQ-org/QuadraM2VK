@@ -41,7 +41,7 @@ use metal2vulkan_runtime::{
     HeapType, HostMemory, IdPlacement, IndirectCommandBufferDescriptor, Invalid, IoSurfacePlane,
     KeepAlive, MemoryKind, MessageSeverity, MessageSink, Origin, Problem, Region,
     RenderPassDescriptor, ResourceId, ResourceIdKind, ResourceOptions, SamplerState,
-    SamplerStateOptions, Size, Texture, TextureDescriptor, TextureSwizzleChannels,
+    SamplerStateOptions, SharedEvent, Size, Texture, TextureDescriptor, TextureSwizzleChannels,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -72,7 +72,11 @@ pub(super) const OWN_COPIES: [Degradation; 1] = [Degradation::HeapSetCopied];
 
 /// The kind [`a_no_copy_buffer_s_deallocator_runs_at_its_release_given_a_keep_alive`] takes where
 /// a texture's image over the buffer's pages, which a submitted command buffer may read, holds
-/// their import and the buffer has no keep-alive.
+/// their import and the buffer has no keep-alive; and the tests of a released buffer whose pages a
+/// table of the live buffers a command buffer holds lists (`rebind_reach.rs`,
+/// `indirect_host_steps.rs`); and the test of a buffer released behind work that reads device
+/// addresses, where the device's driver has `FreedAddressMemoryFailsPendingWork`
+/// (`freed_memory.rs`).
 pub(super) const DELAYED_DEALLOCATORS: [Degradation; 1] = [Degradation::HostDeallocatorDelayed];
 
 // Each test asserts exactly the kinds of its sites it took, beside those its steps force on the
@@ -178,7 +182,7 @@ fn on_device_with(adjust: impl FnOnce(&mut DeviceOptions), test: impl FnOnce(&De
 /// argument buffer, a buffer output) on a device: its pipeline state, its resources (the texture
 /// holding the case's texels, and the sampler state), and its argument-buffer texture's literal
 /// and usage.
-struct Sampling {
+pub(super) struct Sampling {
     case: PublicCase,
     pipeline: ComputePipelineState,
     queue: CommandQueue,
@@ -189,7 +193,7 @@ struct Sampling {
 }
 
 impl Sampling {
-    fn new(device: &Device) -> Sampling {
+    pub(super) fn new(device: &Device) -> Sampling {
         Sampling::of(device, HANDLE_SAMPLER)
     }
 
@@ -1170,22 +1174,7 @@ fn a_no_copy_buffer_s_deallocator_runs_at_its_release_given_a_keep_alive() {
             let doomed = buffer.new_texture(&d, 0, ROW_BYTES).unwrap();
             // SAFETY: the handle is only compared, while the texture lives.
             let bound = unsafe { doomed.vk_image() }.is_some();
-            let (started, release) = (
-                device.new_shared_event().unwrap(),
-                device.new_shared_event().unwrap(),
-            );
-            let (command_buffer, buffers) = sampling.encode(device, &doomed, None, None);
-            command_buffer
-                .encode_signal_event(EventRef::from(&started), 1)
-                .unwrap();
-            command_buffer
-                .encode_wait_for_event(EventRef::from(&release), 1)
-                .unwrap();
-            command_buffer.commit().unwrap();
-            assert!(
-                started.wait_until_signaled_value(1, WAIT),
-                "the dispatch's batch ran"
-            );
+            let reaching = sampling.reaching(device, &doomed);
             let delayed = device.work_counts().host_deallocators_delayed;
             drop(buffer);
             drop(doomed);
@@ -1208,9 +1197,7 @@ fn a_no_copy_buffer_s_deallocator_runs_at_its_release_given_a_keep_alive() {
                 delayed + u64::from(delay),
                 "{what}: counted delayed"
             );
-            release.set_signaled_value(1);
-            // The dispatch read the texture or, once it went, the neutral: either is Metal's.
-            sampling.output(&command_buffer, &buffers);
+            reaching.complete(&sampling);
             // The import goes as the command buffer lets go of the image: the deallocator waiting
             // for it runs then, and the keep-alive goes.
             let done =
@@ -1230,6 +1217,54 @@ fn a_no_copy_buffer_s_deallocator_runs_at_its_release_given_a_keep_alive() {
         }
         sampling.announced(device, messages, &expected);
     });
+}
+
+/// A command buffer reaching a texture only through its ID in its argument buffer
+/// ([`Sampling::reaching`]), submitted and running: its dispatch submitted and done, which an event
+/// it signals then shows, and a wait for another event after it holding it. It holds the
+/// texture's image, and the memory the image is bound to, and nothing of the texture object or a
+/// buffer under it, until [`complete`](Reaching::complete).
+pub(super) struct Reaching {
+    command_buffer: CommandBuffer,
+    buffers: BTreeMap<u32, Buffer>,
+    release: SharedEvent,
+}
+
+impl Sampling {
+    /// A command buffer whose dispatch reaches `texture` only through its ID, committed and
+    /// submitted: returned once its dispatch ran ([`Reaching`]).
+    pub(super) fn reaching(&self, device: &Device, texture: &Texture) -> Reaching {
+        let (started, release) = (
+            device.new_shared_event().unwrap(),
+            device.new_shared_event().unwrap(),
+        );
+        let (command_buffer, buffers) = self.encode(device, texture, None, None);
+        command_buffer
+            .encode_signal_event(EventRef::from(&started), 1)
+            .unwrap();
+        command_buffer
+            .encode_wait_for_event(EventRef::from(&release), 1)
+            .unwrap();
+        command_buffer.commit().unwrap();
+        assert!(
+            started.wait_until_signaled_value(1, WAIT),
+            "the dispatch's batch ran"
+        );
+        Reaching {
+            command_buffer,
+            buffers,
+            release,
+        }
+    }
+}
+
+impl Reaching {
+    /// Let the command buffer go on, and wait until it completed.
+    pub(super) fn complete(self, sampling: &Sampling) {
+        self.release.set_signaled_value(1);
+        // The dispatch read the texture or, once it went, the neutral: either is Metal's.
+        sampling.output(&self.command_buffer, &self.buffers);
+    }
 }
 
 /// The bytes between rows of the textures over a buffer the lanes above make: Metal's linear

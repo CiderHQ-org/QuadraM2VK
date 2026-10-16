@@ -1029,12 +1029,16 @@ fn a_late_cubic_sampler_is_listed_with_its_cubic_bit_beside_tested_stages() {
 
 /// A sampler state of a shape the plan was not made for is held as a command buffer commits where
 /// the plan's checks of a listed shape pass: `check_sampler` for every use of its sampler arrays
-/// (invalid LOD clamps refuse; an anisotropic state refuses beside a cube's explicit gradients),
+/// (invalid LOD clamps refuse; an anisotropic state passes beside a cube's explicit gradients,
+/// whose use's sampler is isotropic, and, on a device without `samplerAnisotropy`, there alone),
 /// and an opaque-black border only where the members were checked against one. A plan whose arrays
 /// sample nothing (a function that only names the states) holds any shape.
 #[test]
 fn sampler_tables_admit_the_shapes_the_plan_s_checks_pass() {
     let profile = m3();
+    let floor =
+        crate::pipeline::testing::profile("vk12-floor", crate::device::DevicePolicy::default())
+            .expect("profile");
     let placement = HeapPlacement::ResourceId;
     let planned = PlannedHandleTable {
         set: 0,
@@ -1058,18 +1062,22 @@ fn sampler_tables_admit_the_shapes_the_plan_s_checks_pass() {
         integer: false,
         cube_gradient,
     };
+    let held_on =
+        |profile: &DeviceProfile, template: &ResourceTemplate, late: SamplerDescriptor| -> bool {
+            let mut samplers = encoded.to_vec();
+            samplers.push(crate::bind::ArgumentSampler::new(late, 2).at_element(2));
+            assert!(!template
+                .argument_samplers
+                .as_ref()
+                .expect("shape")
+                .shapes
+                .contains(&late.shape()));
+            relisted_sampler_tables(template, profile, &samplers, placement)
+                .expect("relisted")
+                .is_some()
+        };
     let held = |template: &ResourceTemplate, late: SamplerDescriptor| -> bool {
-        let mut samplers = encoded.to_vec();
-        samplers.push(crate::bind::ArgumentSampler::new(late, 2).at_element(2));
-        assert!(!template
-            .argument_samplers
-            .as_ref()
-            .expect("shape")
-            .shapes
-            .contains(&late.shape()));
-        relisted_sampler_tables(template, &profile, &samplers, placement)
-            .expect("relisted")
-            .is_some()
+        held_on(&profile, template, late)
     };
     let lod = {
         let mut d = SamplerDescriptor::new();
@@ -1101,7 +1109,30 @@ fn sampler_tables_admit_the_shapes_the_plan_s_checks_pass() {
     );
     assert!(!held(&sampled, black), "members unchecked for the border");
     let gradients = template(vec![class(false), class(true)], false);
-    assert!(!held(&gradients, anisotropic), "beside a cube's gradients");
+    assert!(held(&gradients, anisotropic), "beside a cube's gradients");
+    // Without `samplerAnisotropy` the plan's check refuses an anisotropic state for a use without
+    // a cube's gradients and passes it for one with them, whose sampler it makes isotropic.
+    assert!(
+        !floor
+            .fields()
+            .enabled
+            .features
+            .contains(&crate::device::requirements::VkFeature::SamplerAnisotropy),
+        "vk12-floor states samplerAnisotropy"
+    );
+    assert!(
+        !held_on(&floor, &sampled, anisotropic),
+        "anisotropic without samplerAnisotropy"
+    );
+    assert!(
+        !held_on(&floor, &gradients, anisotropic),
+        "anisotropic beside a use without the gradients, without samplerAnisotropy"
+    );
+    let cube_only = template(vec![class(true)], false);
+    assert!(
+        held_on(&floor, &cube_only, anisotropic),
+        "a cube's gradients alone, without samplerAnisotropy"
+    );
     let checked = template(vec![class(false)], true);
     assert!(held(&checked, black), "members checked for the border");
     let naming = template(Vec::new(), false);

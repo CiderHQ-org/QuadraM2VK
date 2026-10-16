@@ -1,4 +1,4 @@
-// Owned fixture (NaN model, DESIGN D293, class J): `nan_denormal_edges`' program under the default
+// Owned fixture (NaN model, class J): `nan_denormal_edges`' program under the default
 // fast math, its flagged state: whether Metal flushes a `float` result that is below 2^-126
 // before rounding but rounds to 2^-126. Lane `i` reads (a, b, c, n) from `in[i]` and writes 8
 // words to `out[2i .. 2i + 1]`, `nan_denormal_edges`' fields. Loop-free.

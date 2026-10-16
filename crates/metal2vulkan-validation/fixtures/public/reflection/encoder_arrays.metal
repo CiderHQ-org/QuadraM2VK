@@ -1,4 +1,4 @@
-// Owned fixture (WP-UNI, DESIGN D311 item 5, S2, TODO 8.19): argument buffers each holding one
+// Owned fixture: argument buffers each holding one
 // two-element array of structs, so a pipeline's reflection states which struct arrays it gives
 // stride 0 (an array of resource-only structs) and which their element size (an array of
 // plain-data structs): structs mixing a texture, sampler or pointer with a constant in both

@@ -42,6 +42,7 @@ use super::owned_kernel::{OwnedKernel, OwnedModule, OwnedSets};
 use super::resource::ResourceKey;
 use super::tracker::{Access, Barrier, Use, UseRange};
 use super::upload::Upload;
+use crate::device::functions::Vk;
 use ash::vk;
 use metal2vulkan::bind::{
     ExecutionStatus, IndexBufferRef, IndexRewriteModule, IndexRewritePass, IndirectRef,
@@ -430,7 +431,7 @@ impl RewriteSteps {
     ///
     /// `command_buffer` is the encoder's, recording outside a render pass, and only the encoder
     /// records it.
-    pub(super) unsafe fn record_in(&self, raw: &ash::Device, command_buffer: vk::CommandBuffer) {
+    pub(super) unsafe fn record_in(&self, raw: &Vk, command_buffer: vk::CommandBuffer) {
         // SAFETY: as the caller states; barriers need nothing more.
         unsafe {
             Barrier::everything().record(raw, command_buffer);
@@ -446,7 +447,7 @@ impl RewriteSteps {
     /// # Safety
     ///
     /// `command_buffer` is recording outside a render pass, and only one encoder records it.
-    unsafe fn dispatch(&self, raw: &ash::Device, command_buffer: vk::CommandBuffer) {
+    unsafe fn dispatch(&self, raw: &Vk, command_buffer: vk::CommandBuffer) {
         let phases = self.kernels.iter().zip(RewritePhase::ALL).zip(&self.sets);
         for (at, ((kernel, phase), sets)) in phases.enumerate() {
             // SAFETY: as the caller states; each kernel is the device's, its sets (whose layout

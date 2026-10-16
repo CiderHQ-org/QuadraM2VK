@@ -1,4 +1,4 @@
-// Owned fixture (WP-K14e, DESIGN D249): a kernel whose only effect is the draws it encodes.
+// Owned fixture: a kernel whose only effect is the draws it encodes.
 // Thread `tid` encodes command `tid`'s draw of 4 points from vertex 4 * tid, one instance; the
 // pipeline and the vertex buffers are the host's, or the executing encoder's when the commands
 // inherit them. `params` and `out` are bound here unread, so a case owns the buffers the host

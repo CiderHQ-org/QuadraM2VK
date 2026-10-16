@@ -1,6 +1,6 @@
-// Owned fixture (WP-RT6, DESIGN D305 item 22): the functions the runtime's render lane draws its
-// render state with, the shaders of RT6 Metal probe 4 (an M4, macOS 27.0.1), so each lane draw
-// asks the question the probe measured. Loop-free.
+// Owned fixture: the functions the runtime's render lane draws its render state with, the shaders
+// of a Metal probe on an M4 (macOS 27.0.1), so each lane draw asks the question the probe measured.
+// Loop-free.
 #include <metal_stdlib>
 using namespace metal;
 

@@ -182,6 +182,7 @@ pub(crate) fn interface_from_fragment(
                 outputs: imageblock.outputs.clone(),
             }
         }),
+        mesh_stage: None,
         function_constants: Vec::new(),
     }
 }
@@ -328,6 +329,7 @@ pub(crate) fn interface_from_vertex(meta: &VertMeta, entry_point: Option<&str>) 
             &meta.implicit_imageblock_attachments,
         ),
         fragment_imageblock: None,
+        mesh_stage: None,
         function_constants: Vec::new(),
     }
 }
@@ -485,8 +487,35 @@ pub(crate) fn interface_from_kernel(meta: &KernMeta, entry_point: Option<&str>) 
             &meta.implicit_imageblock_attachments,
         ),
         fragment_imageblock: None,
+        mesh_stage: None,
         function_constants: Vec::new(),
     }
+}
+
+/// Build reflection for an object or mesh function (`stage`) from its parsed meta, (optional)
+/// entry name and `reached`, the text of what the entry reaches (`air::entry_text`): a kernel's
+/// interface, at its own stage, with the stage's own facts.
+pub(crate) fn interface_from_mesh_stage(
+    stage: crate::case::Stage,
+    meta: &KernMeta,
+    entry_point: Option<&str>,
+    reached: &str,
+) -> ShaderInterface {
+    let mut interface = interface_from_kernel(meta, entry_point);
+    interface.stage = match stage {
+        crate::case::Stage::Object => ShaderStage::Object,
+        _ => ShaderStage::Mesh,
+    };
+    let own = &meta.mesh_stage;
+    interface.mesh_stage = Some(super::MeshStageInterface {
+        payload: own.payload.clone(),
+        mesh_grid: own.mesh_grid_param.is_some(),
+        sets_mesh_grid: reached.contains("@air.set_threadgroups_per_grid_mesh_properties("),
+        outputs: own.outputs.clone(),
+        max_total_threads: meta.max_work_group_size,
+        max_mesh_threadgroups: own.max_mesh_work_groups,
+    });
+    interface
 }
 
 /// A descriptor in set 0 at `binding`, one descriptor wide, if the band has the index.

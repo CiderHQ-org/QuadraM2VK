@@ -51,12 +51,9 @@ use std::sync::Arc;
 /// whose memory was taken away, as Metal fails it).
 ///
 /// It runs with no lock of the runtime's held, and holds back the scheduler thread's submissions
-/// while it runs. A commit made meanwhile has its ready batches submitted, by itself or by the
-/// pass of another commit's thread it finds under way; where that pass is the last that thread
-/// makes for others, which leaves what it is left to the scheduler's thread
-/// (`scheduler/inbox.rs`), they wait for this check to end, unless a later commit takes them in
-/// first. It must not wait for GPU work, a command buffer or a handler, and should be quick. It
-/// may call the runtime otherwise.
+/// while it runs: a commit made meanwhile returns at once, and its batches wait in the inbox for
+/// the thread's next pass, after this check (`scheduler/inbox.rs`). It must not wait for GPU work,
+/// a command buffer or a handler, and should be quick. It may call the runtime otherwise.
 pub type SubmissionCheck = Arc<dyn Fn(&Submission<'_>) -> Option<NonZeroU64> + Send + Sync>;
 
 /// The `MTLCommandBufferError` code a submission whose check panicked fails with: `Internal`.

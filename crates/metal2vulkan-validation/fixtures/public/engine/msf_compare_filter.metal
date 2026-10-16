@@ -1,4 +1,4 @@
-// Owned fixture (WP-MSF): Metal's comparison filtering of depth textures, so that a translation
+// Owned fixture: Metal's comparison filtering of depth textures, so that a translation
 // can emulate it in the shader. Every lane `i` reads a job `job[i]`: a normalized coordinate (or a
 // cube direction) and a reference value, chosen by the case, and compares through constexpr
 // samplers that clamp to the edge, with normalized coordinates and no mip filter:

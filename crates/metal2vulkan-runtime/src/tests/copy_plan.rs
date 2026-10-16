@@ -3,7 +3,7 @@
 
 use super::super::copy_plan::{
     block_extent, check_region, copy_unit, plan_host_copy, shape, BlitOption, CopyProblem,
-    CopyRefusal, CopyUnit, TextureRegion,
+    CopyRefusal, CopyUnit, HostLayout, TextureRegion,
 };
 use super::super::image_plan::{is_compressed, plan_image, ImagePlan};
 use super::super::texture_descriptor::TextureDescriptor;
@@ -455,5 +455,65 @@ fn a_four_two_two_texture_copies_its_two_byte_texels() {
         );
         let r = check_region(&t.record, &region([1, 2, 0], [3, 1, 1]), &u).unwrap();
         assert_eq!((r.origin, r.size), ([1, 2, 0], [3, 1, 1]), "{pf:?}");
+    }
+}
+
+/// A host upload's depth words hold a negative value or a NaN (`signed-depth-test`'s check) where a
+/// row the layout reads holds a negative normal or infinity, or a NaN of either sign; a zero of
+/// either sign, a denormal of either sign (`depth-denormals`'), a positive value, and a word
+/// between rows hold none.
+#[test]
+fn a_host_upload_holds_a_negative_or_nan_depth_only_in_its_rows() {
+    // Two rows of two words, 12 bytes apart: the third word of each row lies between them.
+    let layout = HostLayout {
+        row_bytes: 8,
+        rows: 2,
+        images: 1,
+        bytes_per_row: 12,
+        bytes_per_image: 24,
+    };
+    let bytes =
+        |words: [u32; 6]| -> Vec<u8> { words.iter().flat_map(|w| w.to_le_bytes()).collect() };
+    let quiet = [
+        0x0000_0000,
+        0x8000_0000,
+        0x8000_0001,
+        0x807f_ffff,
+        0x3f00_0000,
+        0x7f80_0000,
+    ];
+    for at in [0, 1, 3, 4] {
+        for word in quiet {
+            let mut words = [0x3e80_0000; 6];
+            words[at] = word;
+            assert!(
+                !layout.holds_negative_or_nan(&bytes(words)),
+                "{word:08x} at {at}"
+            );
+        }
+        for word in [
+            0xbf00_0000,
+            0xc000_0000,
+            0xff80_0000,
+            0x7fc0_0000,
+            0xffc0_0000,
+            0x7f80_0001,
+        ] {
+            let mut words = [0x3e80_0000; 6];
+            words[at] = word;
+            assert!(
+                layout.holds_negative_or_nan(&bytes(words)),
+                "{word:08x} at {at}"
+            );
+        }
+    }
+    // Between the rows.
+    for at in [2, 5] {
+        let mut words = [0x3e80_0000; 6];
+        words[at] = 0xbf00_0000;
+        assert!(
+            !layout.holds_negative_or_nan(&bytes(words)),
+            "between rows at {at}"
+        );
     }
 }

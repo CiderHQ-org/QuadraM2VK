@@ -1,4 +1,4 @@
-// Owned fixture (WP-UNK, DESIGN D283 family D): Metal's atomic_min and atomic_max on ulong
+// Owned fixture: Metal's atomic_min and atomic_max on ulong
 // textures, which compare a texel's unsigned 64-bit value (the low word in R and the high word in
 // G of the RG32Uint texture Metal binds) and return nothing.
 //

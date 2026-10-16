@@ -8,9 +8,9 @@
 // signed zeros. The claims are the signed-zero rows: atan2(-0, +1) is -0, not +0, and
 // atan2(-0, -1) is -pi, not +pi. Every row answers +-0, +-pi, +-pi/2 or pi/4.
 //
-// Compiled with -fno-fast-math (DESIGN D208). Under the default fast-math compile every call
+// Compiled with -fno-fast-math. Under the default fast-math compile every call
 // carries `nnan ninf nsz`, so an infinite operand is poison and either zero is a correct result:
-// those rows asked nothing Metal defines (DESIGN D204.6). Without the flags they are defined, and
+// those rows asked nothing Metal defines. Without the flags they are defined, and
 // the symbols are the same `air.atan2.f16` and `air.atan2.f32`.
 //
 // The origin is deliberately ABSENT. `fast::atan2(0, 0)` is NaN where `precise::atan2(0, 0)` is 0,

@@ -3,11 +3,11 @@
 //! validation layer.
 //!
 //! A submission handler runs once the command buffer's last batch reached its `VkQueue`, on the
-//! thread that submitted it, before the command buffer is `Scheduled`: inside `commit` where the
-//! commit submits it (its waits met, nothing earlier of its queue held, no other thread
-//! submitting), on the scheduler thread where an event the host raised releases it, and inside
-//! another `commit` whose GPU signal releases it, or that was submitting as it was committed.
-//! Never for a command buffer that fails before its last batch is submitted.
+//! device's scheduler thread, which makes every submission (`commit` returns at once and submits
+//! nothing), before the command buffer is `Scheduled`: once the commit is taken in where its waits
+//! are met, once an event the host raised releases it, and once another command buffer's GPU signal
+//! that releases it is submitted. Never for a command buffer that fails before its last batch is
+//! submitted.
 //!
 //! Metal's answers (EV SUB-sched1-m4: an M4, macOS 27.0.1): `commit` returns before the command
 //! buffer is scheduled, on Metal's own thread; its status reads `Scheduled` just before its first
@@ -28,10 +28,6 @@ use std::time::Duration;
 
 /// The longest a command buffer of these tests may take.
 const WAIT: Duration = Duration::from_secs(60);
-
-/// The most commits of one case [`a_commit_that_submits_runs_them_in_order_before_it_returns`]
-/// makes until one submits itself rather than leave its batches to another thread's pass.
-const ATTEMPTS: u32 = 16;
 
 /// The name of the device's scheduler thread.
 const SCHEDULER: &str = "metal2vulkan-scheduler";
@@ -138,18 +134,13 @@ impl Log {
     }
 }
 
-/// A commit that submits the last batch itself (no wait, or a wait the event already met) runs
-/// the submission handlers on the committing thread before `commit` returns, once each, in the
-/// order added, each seeing the command buffer `Committed`; its scheduled handlers run after
-/// them on a handler thread, seeing it `Scheduled`.
-///
-/// A commit made while another thread makes a pass (the scheduler's, woken by the event's raise
-/// or a completion) leaves its batches to that pass instead (`WorkCounts::commits_handed_off`),
-/// whose thread runs the submission handlers, in order, seeing it `Committed`, before its
-/// scheduled handlers: such an attempt is checked as that, and the case is made again, up to
-/// [`ATTEMPTS`] times, until a commit submits itself.
+/// A commit whose waits are met (no wait, or a wait the event already met) leaves its batches to
+/// the scheduler thread and returns (`WorkCounts::commits_handed_off`); that thread submits the last
+/// batch and runs the submission handlers, once each, in the order added, each seeing the command
+/// buffer `Committed`; its scheduled handlers run after them on a handler thread, seeing it
+/// `Scheduled`.
 #[test]
-fn a_commit_that_submits_runs_them_in_order_before_it_returns() {
+fn a_commit_s_handlers_run_in_order_on_the_scheduler_thread_before_it_is_scheduled() {
     on_device(|device| {
         let queue = device.new_command_queue().unwrap();
         let buffer = device.new_buffer(4096, ResourceOptions::private()).unwrap();
@@ -157,56 +148,44 @@ fn a_commit_that_submits_runs_them_in_order_before_it_returns() {
         met.set_signaled_value(1);
         for wait in [None, Some((&met, false)), Some((&met, true))] {
             let case = format!("wait {:?}", wait.map(|(_, work_first)| work_first));
-            for attempt in 1.. {
-                assert!(attempt <= ATTEMPTS, "{case}: every commit was handed off");
-                let log = Log::default();
-                let command_buffer = fill(&queue, &buffer, 1, wait);
-                for name in ["first", "second", "third"] {
-                    command_buffer
-                        .add_submission_handler(log.handler(name))
-                        .unwrap();
-                }
+            let log = Log::default();
+            let command_buffer = fill(&queue, &buffer, 1, wait);
+            for name in ["first", "second", "third"] {
                 command_buffer
-                    .add_scheduled_handler(log.handler("scheduled"))
+                    .add_submission_handler(log.handler(name))
                     .unwrap();
-                let handed_off = device.work_counts().commits_handed_off;
-                command_buffer.commit().unwrap();
-                let calls = log.calls();
-                if device.work_counts().commits_handed_off > handed_off {
-                    command_buffer.wait_until_scheduled().unwrap();
-                    let calls = log.calls();
-                    assert_eq!(
-                        log.names(),
-                        ["first", "second", "third", "scheduled"],
-                        "{case}, handed off: {calls:?}"
-                    );
-                    for call in &calls[..3] {
-                        assert_ne!(call.thread, thread::current().id(), "{case}: {calls:?}");
-                        assert_eq!(call.status, CommandBufferStatus::Committed, "{case}");
-                    }
-                    completed(&command_buffer);
-                    println!("{case}: attempt {attempt} was handed off");
-                    continue;
-                }
-                assert!(calls.len() >= 3, "{case}: {calls:?}");
-                for (call, name) in calls.iter().zip(["first", "second", "third"]) {
-                    assert_eq!(call.name, name, "{case}: {calls:?}");
-                    assert_eq!(call.thread, thread::current().id(), "{case}: {calls:?}");
-                    assert_eq!(call.status, CommandBufferStatus::Committed, "{case}");
-                }
-                command_buffer.wait_until_scheduled().unwrap();
-                assert_eq!(
-                    log.names(),
-                    ["first", "second", "third", "scheduled"],
-                    "{case}"
-                );
-                let scheduled = log.call("scheduled");
-                assert_ne!(scheduled.thread, thread::current().id(), "{case}");
-                assert_eq!(scheduled.status, CommandBufferStatus::Scheduled, "{case}");
-                completed(&command_buffer);
-                assert_eq!(log.calls().len(), 4, "{case}: each ran once");
-                break;
             }
+            command_buffer
+                .add_scheduled_handler(log.handler("scheduled"))
+                .unwrap();
+            let handed_off = device.work_counts().commits_handed_off;
+            command_buffer.commit().unwrap();
+            assert_eq!(
+                device.work_counts().commits_handed_off - handed_off,
+                1,
+                "{case}: the commit left its batches to the scheduler thread"
+            );
+            command_buffer.wait_until_scheduled().unwrap();
+            let calls = log.calls();
+            assert_eq!(
+                log.names(),
+                ["first", "second", "third", "scheduled"],
+                "{case}: {calls:?}"
+            );
+            for call in &calls[..3] {
+                assert_eq!(
+                    call.thread_name.as_deref(),
+                    Some(SCHEDULER),
+                    "{case}: {calls:?}"
+                );
+                assert_eq!(call.status, CommandBufferStatus::Committed, "{case}");
+            }
+            let scheduled = log.call("scheduled");
+            assert_ne!(scheduled.thread, thread::current().id(), "{case}");
+            assert_ne!(scheduled.thread_name.as_deref(), Some(SCHEDULER), "{case}");
+            assert_eq!(scheduled.status, CommandBufferStatus::Scheduled, "{case}");
+            completed(&command_buffer);
+            assert_eq!(log.calls().len(), 4, "{case}: each ran once");
         }
     });
 }
@@ -295,11 +274,11 @@ fn a_command_buffer_behind_a_held_one_of_its_queue_runs_them_once_it_goes() {
     });
 }
 
-/// A command buffer whose wait another queue's command buffer meets with a GPU signal is
-/// submitted by that one's `commit`, in the same pass: its submission handlers run on that
-/// committing thread, after the signaller's own, before that `commit` returns.
+/// A command buffer whose wait another queue's command buffer meets with a GPU signal is submitted
+/// once that one is, in the same pass of the scheduler thread: its submission handlers run there,
+/// after the signaller's own.
 #[test]
-fn a_command_buffer_a_gpu_signal_releases_runs_them_in_the_signaller_s_commit() {
+fn a_command_buffer_a_gpu_signal_releases_runs_them_after_the_signaller_s() {
     on_device(|device| {
         let (first, second) = (
             device.new_command_queue().unwrap(),
@@ -323,17 +302,24 @@ fn a_command_buffer_a_gpu_signal_releases_runs_them_in_the_signaller_s_commit() 
             .unwrap();
         assert!(log.calls().is_empty());
         signaller.commit().unwrap();
+        signaller.wait_until_scheduled().unwrap();
+        waiting.wait_until_scheduled().unwrap();
         assert_eq!(log.names(), ["signaller submitted", "waiting submitted"]);
         for call in log.calls() {
-            assert_eq!(call.thread, thread::current().id(), "{}", call.name);
+            assert_eq!(
+                call.thread_name.as_deref(),
+                Some(SCHEDULER),
+                "{}",
+                call.name
+            );
         }
         completed(&signaller);
         completed(&waiting);
     });
 }
 
-/// A command buffer committed as failed submits its batches: its submission handlers run, inside
-/// `commit_failed`, and it completes with its failure.
+/// A command buffer committed as failed submits its batches: its submission handlers run, on the
+/// scheduler thread, and it completes with its failure.
 #[test]
 fn a_command_buffer_committed_as_failed_runs_them() {
     on_device(|device| {
@@ -345,9 +331,12 @@ fn a_command_buffer_committed_as_failed_runs_them() {
             .add_submission_handler(log.handler("submitted"))
             .unwrap();
         command_buffer.commit_failed(CommitFailure::new(8)).unwrap();
-        assert_eq!(log.names(), ["submitted"]);
-        assert_eq!(log.call("submitted").thread, thread::current().id());
         command_buffer.wait_until_completed_for(WAIT).unwrap();
+        assert_eq!(log.names(), ["submitted"]);
+        assert_eq!(
+            log.call("submitted").thread_name.as_deref(),
+            Some(SCHEDULER)
+        );
         assert_eq!(command_buffer.status(), CommandBufferStatus::Error);
     });
 }
@@ -381,7 +370,7 @@ type Answers = (
     Result<(), Error>,
 );
 
-/// In a submission handler, on the committing thread or the scheduler thread, a wait for its own
+/// In a submission handler, on the scheduler thread, a wait for its own
 /// command buffer (whose scheduling waits for the handler) is refused at once
 /// (`DeadlockCause::SubmissionHandler`, `TimedOut` for the bounded wait); a wait for a command
 /// buffer that completed returns.

@@ -1,4 +1,4 @@
-// Owned fixture (WP-TRN, DESIGN D297): Metal's `half` math functions with the default fast math, at
+// Owned fixture: Metal's `half` math functions with the default fast math, at
 // the lanes where a device or the translation's `float` routines rounded to `half` were seen to
 // answer otherwise: the zeros' signs of `sin`, `tan`, `asin`, and `atan`; `fmod(x, ±inf)`;
 // `fmod(1.5, -0.75)`; `sqrt(65504)`; and `atan2`, `pow`, and `powr` at (3, 7) and (-0.300048828125,

@@ -1,4 +1,4 @@
-// Owned fixture (WP-RT13, DESIGN D283 item 8): explicit cube gradients through an anisotropic
+// Owned fixture: explicit cube gradients through an anisotropic
 // constexpr sampler. Lane i samples a cube (texture 0) and layer 1 of a cube array (texture 1) at
 // direction in[3i] with gradients in[3i + 1] (dP/dx) and in[3i + 2] (dP/dy), through a sampler that
 // filters linearly with a linear mip filter, clamps to the edge, and takes up to 16 anisotropic

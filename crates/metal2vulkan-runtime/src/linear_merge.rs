@@ -53,6 +53,7 @@ use super::render_pass::Target;
 use super::resource::ResourceKey;
 use super::tracker::{Access, Barrier, Use};
 use super::Device;
+use crate::device::functions::Vk;
 use ash::vk;
 use metal2vulkan::bind::ShadowMergeModule;
 
@@ -319,7 +320,7 @@ impl LinearMerge {
     /// `command_buffer` is recording outside a render pass, and only the caller records it; the
     /// merge, the images and the scratch live until it completes, and every image rests in
     /// `GENERAL`.
-    pub(super) unsafe fn reload_in(&self, device: &ash::Device, command_buffer: vk::CommandBuffer) {
+    pub(super) unsafe fn reload_in(&self, device: &Vk, command_buffer: vk::CommandBuffer) {
         // SAFETY: the caller's contract; the copy's region lies in both images (the box, inside
         // the render area), whose transfer usage the copies in already take.
         unsafe {
@@ -364,7 +365,7 @@ impl LinearMerge {
     /// # Safety
     ///
     /// As for [`LinearMerge::reload_in`].
-    unsafe fn merge_in(&self, device: &ash::Device, raw: vk::CommandBuffer) {
+    unsafe fn merge_in(&self, device: &Vk, raw: vk::CommandBuffer) {
         let changed: Vec<vk::BufferImageCopy> = self
             .regions
             .iter()

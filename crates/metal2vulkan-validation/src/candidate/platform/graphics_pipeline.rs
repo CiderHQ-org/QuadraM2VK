@@ -20,7 +20,7 @@ use metal2vulkan::device::DriverFact;
 use metal2vulkan::pipeline::{GraphicsState, RenderPipeline, VertexStride};
 use std::collections::BTreeSet;
 use std::ffi::CString;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::METAL_DEFAULT_FRONT_FACE;
 
@@ -460,13 +460,19 @@ pub(super) fn create_graphics_pipeline(
         })
         .collect();
     let mut stages = Vec::with_capacity(pipeline.stages.len());
-    for (((stage, module), (entry, spec)), subgroup) in pipeline
+    let topology = metal2vulkan::vk::PrimitiveTopology::from_raw(consumer.topology.as_raw());
+    // Of a pipeline's barycentric geometry stages, only the draw's class's runs.
+    for (at, (((stage, module), (entry, spec)), subgroup)) in pipeline
         .stages
         .iter()
         .zip(consumer.modules)
         .zip(entries.iter().zip(&spec_infos))
         .zip(subgroups.iter_mut())
+        .enumerate()
     {
+        if !pipeline.runs_stage(at, topology) {
+            continue;
+        }
         let mut info = vk::PipelineShaderStageCreateInfo::default()
             .stage(stage.stage.into())
             .module(*module)
@@ -559,17 +565,16 @@ pub(super) fn create_graphics_pipeline(
     if let Some(tessellation) = &tessellation {
         info = info.tessellation_state(tessellation);
     }
-    let topology = metal2vulkan::vk::PrimitiveTopology::from_raw(consumer.topology.as_raw());
     let expected = facts
         .iter()
         .filter_map(|fact| fact.pipeline_creation_diagnostic(&graphics.dynamic_states, topology))
         .collect();
-    let started = Instant::now();
+    let clock = crate::budgets::CreationClock::start();
     let created = super::device::expecting_diagnostics(expected, || {
         // SAFETY: every pointer in `info` outlives the call; the caller destroys the result.
         unsafe { device.create_graphics_pipelines(vk::PipelineCache::null(), &[info], None) }
     });
-    let elapsed = started.elapsed();
+    let elapsed = clock.read();
     match created {
         Ok(pipelines) => Ok((pipelines.first().copied().unwrap_or_default(), elapsed)),
         Err((pipelines, error)) => {

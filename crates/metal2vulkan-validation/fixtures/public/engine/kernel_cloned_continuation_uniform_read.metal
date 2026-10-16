@@ -1,4 +1,4 @@
-// Owned fixture (WP-D3): the compiled replacement for the hand-written top-level
+// Owned fixture: the compiled replacement for the hand-written top-level
 // `kernel_cloned_continuation_uniform_read.ll`, whose `air.struct_type_info` is not the form
 // Metal emits (the typed ABI decoder refuses it, `Abi(BadValue)`). This is the same program as
 // that fixture's `.metal` twin, so both answer alike. The front end folds the selection into a

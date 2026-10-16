@@ -1,4 +1,4 @@
-// Owned fixture (NaN model, DESIGN D293): the sign of Metal's zero remainder, and its remainder
+// Owned fixture (NaN model): the sign of Metal's zero remainder, and its remainder
 // by an infinity, for `float` and `half` `fmod`. Lane `i` reads floats a and b (`in[i].xy`) and
 // halves ha and hb (the low and high halves of `in[i].z`) and writes four words to `out[i]`:
 // fmod(a, b), fmod(ha, hb) in the low half, a, and b. `nan_fmod_zero_fast` is the same program

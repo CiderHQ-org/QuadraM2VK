@@ -537,8 +537,10 @@ fn call_kernel(name: &str, symbol: &str, arity: usize, fmf: FastMath) -> Kernel 
 /// division, which is Metal's own there, nor for a call the device answers as Metal's own
 /// function, `fast::atan2` among them; an entry Metal compiles without fast math (a division
 /// without `nnan` and `ninf`, a call without flags) still records them, and `fast::sinpi`, the
-/// device's near-equivalent, records its note in either. `mix` records no `DeviceDenormals` there
-/// and requires the measured fact; on a profile without either fact it keeps the note.
+/// device's near-equivalent, records its note in either. `mix` and `fast::sinpi` record no
+/// `DeviceDenormals` there and require the measured fact. Off MoltenVK, Metal's fused `mix` reads
+/// its denormals as Metal's does (EV DNR-dn2-m3) on every route, and requires the fact exactly
+/// where `OpFmaKHR` reads them so.
 #[test]
 fn a_fast_math_entry_on_moltenvk_records_no_note_for_metals_own_operations() {
     let every = every_flag();
@@ -642,10 +644,12 @@ fn a_fast_math_entry_on_moltenvk_records_no_note_for_metals_own_operations() {
                 "{name}_preserving on {stem}: {preserving:?}"
             );
         }
-        let (sinpi, _) = notes_of(p, "sinpi_fast");
+        let (sinpi, requires) = notes_of(p, "sinpi_fast");
         assert!(
-            sinpi.contains(&PrecisionNote::DeviceTranscendentals),
-            "sinpi_fast on {stem}: {sinpi:?}"
+            sinpi.contains(&PrecisionNote::DeviceTranscendentals)
+                && !sinpi.contains(&PrecisionNote::DeviceDenormals)
+                && requires,
+            "sinpi_fast on {stem}: {sinpi:?}, requires the fact: {requires}"
         );
         let (mix, requires) = notes_of(p, "mix_fast");
         assert!(
@@ -653,8 +657,9 @@ fn a_fast_math_entry_on_moltenvk_records_no_note_for_metals_own_operations() {
             "mix_fast on {stem}: {mix:?}, requires the fact: {requires}"
         );
     }
-    // Without Metal's functions, with or without Metal's denormals, `mix` keeps its note and the
-    // fast division its reciprocal's.
+    // Without Metal's functions, with or without Metal's denormals, `mix` reads its denormals as
+    // Metal's does, the fact required where `OpFmaKHR` reads them so, and the fast division keeps
+    // its reciprocal's note.
     for denormals in [true, false] {
         let Some((stem, p)) = profiles.iter().find(|(_, p)| {
             let (_, metal, flushes) = note_class(p);
@@ -662,10 +667,11 @@ fn a_fast_math_entry_on_moltenvk_records_no_note_for_metals_own_operations() {
         }) else {
             panic!("no committed profile of the device's functions, Metal's denormals {denormals}");
         };
-        let (mix, _) = notes_of(p, "mix_fast");
+        let (mix, requires) = notes_of(p, "mix_fast");
+        let khr = note_class(p).0 == Route::Khr;
         assert!(
-            mix.contains(&PrecisionNote::DeviceDenormals),
-            "mix_fast on {stem}: {mix:?}"
+            !mix.contains(&PrecisionNote::DeviceDenormals) && requires == (khr && denormals),
+            "mix_fast on {stem}: {mix:?}, requires the fact: {requires}"
         );
         let (fast, _) = notes_of(p, "fdiv_fast");
         assert!(

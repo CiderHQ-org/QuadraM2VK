@@ -4,6 +4,7 @@
 
 use super::image_plan::{committed, facts};
 use super::texture_descriptor::APPLE;
+use crate::image_barrier::ImageDst;
 use crate::image_plan::{plan_image, ImagePlan};
 use crate::resource::ResourceKey;
 use crate::sharing::Sharing;
@@ -606,9 +607,10 @@ fn an_image_resting_out_of_general_names_its_home_in_its_notice() {
 
 #[test]
 fn a_transition_is_one_barrier_over_the_whole_image() {
+    let family = vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE;
     let barrier = transition(ImageLayout::UNDEFINED, ImageLayout::GENERAL)
         .unwrap()
-        .barrier();
+        .barrier(family);
     assert_eq!(
         ImageLayout::from(barrier.old_layout),
         ImageLayout::UNDEFINED
@@ -619,8 +621,8 @@ fn a_transition_is_one_barrier_over_the_whole_image() {
         AccessFlags::MEMORY_WRITE
     );
     assert_eq!(
-        AccessFlags::from(barrier.dst_access_mask),
-        AccessFlags::MEMORY_READ | AccessFlags::MEMORY_WRITE
+        barrier.dst_access_mask.as_raw(),
+        ImageDst::Every.access(family).as_raw()
     );
     assert_eq!(barrier.src_queue_family_index, vk::QUEUE_FAMILY_IGNORED);
     assert_eq!(barrier.dst_queue_family_index, vk::QUEUE_FAMILY_IGNORED);

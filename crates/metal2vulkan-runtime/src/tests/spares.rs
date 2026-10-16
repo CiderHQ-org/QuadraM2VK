@@ -25,10 +25,10 @@ fn descriptor_pool(n: u64, needs: &SetNeeds, sets: u32) -> DescriptorPool {
     }
 }
 
-/// A command pool that a command buffer reset hands out its command buffers again, in the order
-/// they were made, each level apart, before any new one is made.
+/// A spare command pool that a command buffer took hands out its command buffers again, in the
+/// order they were made, each level apart, before any new one is made.
 #[test]
-fn a_reset_pool_hands_out_its_command_buffers_again() {
+fn a_taken_pool_hands_out_its_command_buffers_again() {
     let primary = vk::CommandBufferLevel::PRIMARY;
     let secondary = vk::CommandBufferLevel::SECONDARY;
     let mut pool = CommandPool::new(vk::CommandPool::from_raw(1), 0);
@@ -44,12 +44,35 @@ fn a_reset_pool_hands_out_its_command_buffers_again() {
     let mut pools = Vec::new();
     keep_command_pool(&mut pools, pool);
     let mut pool = pools.pop().expect("kept");
-    pool.reset_handed();
+    pool.taken();
     assert_eq!(pool.reuse(primary), Some(vk::CommandBuffer::from_raw(10)));
     assert_eq!(pool.reuse(secondary), Some(vk::CommandBuffer::from_raw(20)));
     assert_eq!(pool.reuse(primary), Some(vk::CommandBuffer::from_raw(11)));
     assert_eq!(pool.reuse(primary), None);
     assert_eq!(pool.reuse(secondary), None);
+}
+
+/// A spare command pool that made no secondary command buffer wants one; stocked with one, the
+/// next command buffer that takes it hands that one out before making any; one that made a
+/// secondary wants none.
+#[test]
+fn a_pool_without_a_secondary_is_stocked_with_one_for_its_next_taker() {
+    let primary = vk::CommandBufferLevel::PRIMARY;
+    let secondary = vk::CommandBufferLevel::SECONDARY;
+    let mut pool = CommandPool::new(vk::CommandPool::from_raw(1), 0);
+    pool.made(primary, vk::CommandBuffer::from_raw(10));
+    assert!(pool.wants_secondary(), "only a primary made");
+    pool.stock_secondary(vk::CommandBuffer::from_raw(20));
+    assert!(!pool.wants_secondary(), "stocked");
+    let mut pools = Vec::new();
+    keep_command_pool(&mut pools, pool);
+    let mut pool = pools.pop().expect("kept");
+    pool.taken();
+    assert_eq!(pool.reuse(secondary), Some(vk::CommandBuffer::from_raw(20)));
+    assert_eq!(pool.reuse(secondary), None);
+    let mut made = CommandPool::new(vk::CommandPool::from_raw(2), 0);
+    made.made(secondary, vk::CommandBuffer::from_raw(30));
+    assert!(!made.wants_secondary(), "one made already");
 }
 
 /// A command buffer takes the newest spare command pool made for its queue's family, never one
@@ -108,7 +131,7 @@ fn every_command_pool_given_back_is_kept() {
     }
     let mut large = take_command_pool(&mut pools, 0).expect("the large pool kept");
     assert_eq!(large.raw, vk::CommandPool::from_raw(1000));
-    large.reset_handed();
+    large.taken();
     assert_eq!(
         large.reuse(vk::CommandBufferLevel::PRIMARY),
         Some(vk::CommandBuffer::from_raw(1)),

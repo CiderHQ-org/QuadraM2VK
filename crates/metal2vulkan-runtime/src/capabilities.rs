@@ -47,10 +47,10 @@ use std::collections::BTreeSet;
 pub(super) const RATE_MAP_LAYERS: u64 = 2;
 
 /// The largest vertex amplification count Metal supports: `supportsVertexAmplificationCount:`
-/// answers yes from 1 to 8 and no from 9 to 16 (AMP Metal probe 1: the M3 Max with macOS 26.7
-/// and an M4 with macOS 27.0.1, alike), and yes for 0 (EVs API-props1-m3 and API-props1-m4, alike).
-/// A device with `multiview` draws every such count: as views where multiview draws them as Metal
-/// does, else one amplification at a time.
+/// answers yes from 1 to 8 and no from 9 to 16 (a Metal probe: the M3 Max with macOS 26.7 and an M4
+/// with macOS 27.0.1, alike), and yes for 0 (EVs API-props1-m3 and API-props1-m4, alike). A device
+/// with `multiview` draws every such count: as views where multiview draws them as Metal does, else
+/// one amplification at a time.
 pub(super) const MAX_VERTEX_AMPLIFICATION: u64 = 8;
 
 /// A device's identity and Metal's public device queries, as the runtime answers them on the

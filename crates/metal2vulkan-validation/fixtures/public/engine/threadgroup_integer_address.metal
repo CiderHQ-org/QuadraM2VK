@@ -1,4 +1,4 @@
-// Owned fixture (DESIGN D339 item 3): an integer threadgroup address names a byte of Metal's
+// Owned fixture: an integer threadgroup address names a byte of Metal's
 // threadgroup layout, which places a kernel's static threadgroup objects in the reverse of their
 // order in the module, each at the next offset aligned to its alignment, from 0. The arrays are
 // declared (so in the module) colors, bases, centers and first used in the other order, as in

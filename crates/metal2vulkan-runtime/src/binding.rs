@@ -16,11 +16,12 @@
 //!   (`Tables::region_record`) in its `ReplayRegionAddress` hole.
 //! - **Textures** a slot binds take the `VkImageView` the plan's view asks for (the texture's,
 //!   made at its first bind, `binding_view.rs`), in the `GENERAL` layout every runtime image
-//!   rests in. **Samplers** take the `VkSampler` of their state for the write's use and the
-//!   bind's LOD clamps (`bind::sampler_desc`, `sampler.rs`), its address modes mapped where the
-//!   slot samples a texture of an address-mode map (`address_map.rs`); a combined write checks the
-//!   view format's filtering against it. A slot with nothing bound takes the device's neutral image
-//!   or sampler (`neutral.rs`).
+//!   rests in; a draw's sampled binding of a texture its render pass instance renders takes the
+//!   texture's copy (`texture/attached_reads.rs`). **Samplers** take the `VkSampler` of their
+//!   state for the write's use and the bind's LOD clamps (`bind::sampler_desc`, `sampler.rs`), its
+//!   address modes mapped where the slot samples a texture of an address-mode map
+//!   (`address_map.rs`); a combined write checks the view format's filtering against it. A slot
+//!   with nothing bound takes the device's neutral image or sampler (`neutral.rs`).
 //! - **Texture buffers** a slot binds take a texel buffer view of their buffer's bytes in the
 //!   format the plan names, over the range it gives (`buffer_texture.rs`); an unbound slot takes
 //!   the device's neutral texel buffer.
@@ -51,6 +52,7 @@ use super::command_buffer::{NotedTable, State};
 use super::error::{internal, Error, RuntimeGap};
 use super::function_table::{self, TableSnapshot, VisibleFunctionTable};
 use super::heap_sets::{Keeper, TextureTable, HEAP_SET};
+use super::key_hash::KeyMap;
 use super::render_pass::{PassLayout, Target};
 use super::render_target;
 use super::residency::{Residency, Used};
@@ -67,9 +69,9 @@ use metal2vulkan::bind::{
     NeutralResource, PushConstantWrite, PushHole, ResourceUse, RootTable, SamplerDescriptor,
     SamplerSource, UseTarget, ViewSetup, WriteSource,
 };
-use metal2vulkan::metal::sampler::OpaqueBlackBorder;
+use metal2vulkan::metal::sampler::{OpaqueBlackBorder, SamplerUse};
 use metal2vulkan::pipeline::{HandleClass, SlotClass, SlotRef, Stage, StorageAttachmentView};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::ops::Deref;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -82,6 +84,10 @@ pub(super) struct Tables<'a> {
     /// A render encoder's pass, whose attachments a draw's input and storage attachments read,
     /// and the draw's views of its layers (`render_target::viewed`).
     pass: Option<(&'a PassLayout, ViewSetup)>,
+    /// A draw's render pass instance's attachments: a sampled slot binding of a texture that
+    /// presents one of its color attachments takes the texture's copy
+    /// (`texture/attached_reads.rs`).
+    attached: Option<&'a PassLayout>,
     /// The sampler states the bind state lists as argument samplers, in its order.
     argument_samplers: &'a [SamplerState],
     /// Where the plan's heap writes go, when the command writes a heap.
@@ -128,6 +134,19 @@ pub(super) struct Tables<'a> {
     /// first index where it is indexed. Its `PushHole::CaptureAddress` and
     /// `PushHole::CaptureIndexAddress` take them.
     capture: Option<(u64, Option<u64>)>,
+    /// A de-indexed draw's first index's address (`VariantKey::primitive_id_indices`): its
+    /// `PushHole::CaptureIndexAddress` takes it.
+    indices: Option<u64>,
+    /// A draw's slots read through snapshots (`render/snapshot.rs`): each binds its own texture,
+    /// not a copy, in the feedback loop layout, and its snapshot at `WriteSource::SnapshotTexels`.
+    snapshots: Option<&'a SnapshotViews>,
+}
+
+/// The fragment texture slots a draw reads through snapshots, and the storage view of each one's
+/// snapshot (`render/snapshot.rs`, `Texture::snapshot_texels`).
+pub(super) struct SnapshotViews {
+    pub(super) slots: BTreeSet<u32>,
+    pub(super) views: Vec<(u32, vk::ImageView)>,
 }
 
 impl<'a> Tables<'a> {
@@ -137,6 +156,7 @@ impl<'a> Tables<'a> {
             stages,
             residency: None,
             pass: None,
+            attached: None,
             argument_samplers: &[],
             heap: None,
             texture_table: None,
@@ -153,7 +173,28 @@ impl<'a> Tables<'a> {
             tile_memory: None,
             sampler_maps: SamplerMaps::default(),
             capture: None,
+            indices: None,
+            snapshots: None,
         }
+    }
+
+    /// The tables, with a draw's slots read through snapshots and their snapshots' views
+    /// (`render/snapshot.rs`).
+    pub(super) fn with_snapshots(self, snapshots: &'a SnapshotViews) -> Tables<'a> {
+        Tables {
+            snapshots: Some(snapshots),
+            ..self
+        }
+    }
+
+    /// Whether `slot` is one a draw reads through a snapshot: its binding takes the texture
+    /// itself, in the feedback loop layout, never its copy.
+    fn snapshot_slot(&self, slot: SlotRef) -> bool {
+        slot.stage == Stage::Fragment
+            && slot.class == SlotClass::Texture
+            && self
+                .snapshots
+                .is_some_and(|s| s.slots.contains(&slot.index))
     }
 
     /// The tables, with a capture draw's addresses: of its first capture `records`, and of its
@@ -161,6 +202,14 @@ impl<'a> Tables<'a> {
     pub(super) fn with_capture(self, records: u64, indices: Option<u64>) -> Tables<'a> {
         Tables {
             capture: Some((records, indices)),
+            ..self
+        }
+    }
+
+    /// The tables, with a de-indexed draw's first index's address (`Tables::indices`).
+    pub(super) fn with_indices(self, address: u64) -> Tables<'a> {
+        Tables {
+            indices: Some(address),
             ..self
         }
     }
@@ -188,6 +237,26 @@ impl<'a> Tables<'a> {
             pass: Some((pass, views)),
             ..self
         }
+    }
+
+    /// The tables, with a draw's render pass instance of `instance`'s attachments: a sampled slot
+    /// binding of a texture that presents one of its color attachments takes the texture's copy
+    /// (`texture/attached_reads.rs`).
+    pub(super) fn with_attachments(self, instance: &'a PassLayout) -> Tables<'a> {
+        Tables {
+            attached: Some(instance),
+            ..self
+        }
+    }
+
+    /// Whether a slot binding of `texture` of the kind `storage` reads it where the draw's
+    /// instance renders it: a sampled one of a texture that presents one of its color
+    /// attachments (`texture/attached_reads.rs`).
+    fn attached(&self, texture: &Texture, storage: bool) -> bool {
+        !storage
+            && self
+                .attached
+                .is_some_and(|instance| texture.attached_in(instance))
     }
 
     /// The tables, with the storage view of the shader-side stencil's `shadow`.
@@ -327,10 +396,13 @@ pub(super) struct Command<'a> {
     /// An emulated mesh draw's work buffer and records, for its `MeshWork` and `MeshRecords`
     /// writes.
     pub(super) mesh: Option<MeshRegions>,
+    /// An emulated tessellation draw's work buffer and records, for its `TessellationWork` and
+    /// `TessellationRecords` writes.
+    pub(super) tessellation: Option<MeshRegions>,
 }
 
-/// Where an emulated mesh draw's work buffer and records lie (`render/mesh.rs`), each bound
-/// whole.
+/// Where an emulated mesh or tessellation draw's work buffer and records lie (`render/mesh.rs`,
+/// `render/tessellation_scan.rs`), each bound whole.
 #[derive(Clone, Copy)]
 pub(super) struct MeshRegions {
     pub(super) work: vk::DescriptorBufferInfo,
@@ -584,8 +656,17 @@ pub(super) fn bind(
                 address: tables
                     .capture
                     .and_then(|(_, indices)| indices)
+                    .or(tables.indices)
                     .ok_or_else(|| internal("a capture index hole without capture indices"))?,
             },
+            // Which of a snapshot variant's draws runs: 0 in the plan's bytes, the drawing draw's,
+            // and set before each draw as it records (`render/snapshot.rs`).
+            PushHole::SnapshotPhase { .. } if tables.snapshots.is_some() => continue,
+            PushHole::SnapshotPhase { .. } => {
+                return Err(internal(
+                    "a snapshot phase hole the runtime did not ask for",
+                ));
+            }
         });
     }
     Ok(Bound {
@@ -639,6 +720,7 @@ pub(super) fn argument_sampler_writes(
             index,
             compare,
             integer,
+            cube_gradient,
         } = write.source
         else {
             continue;
@@ -654,8 +736,7 @@ pub(super) fn argument_sampler_writes(
         let desc = metal2vulkan::bind::sampler_desc(
             device.compile_device(),
             state.descriptor(),
-            compare,
-            integer,
+            SamplerUse::new(compare, integer).with_cube_gradient(cube_gradient),
             OpaqueBlackBorder::Stated,
             None,
         )
@@ -865,8 +946,9 @@ const KEPT_VIEWS: usize = 256;
 ///   moves.
 /// - **A sampler's description** (`sampler_desc`'s answer) for a sampler slot is a function of
 ///   the descriptor the bind maps the slot's state to (its LOD clamps and the address modes its
-///   textures map), the four facts `sampler_desc` takes beside the device (a comparison, an integer
-///   texture, the opaque black border, the image's format) and the device. The bind still asks the
+///   textures map), the facts `sampler_desc` takes beside the device (the use: a comparison, an
+///   integer texture, a cube's explicit gradients; the opaque black border; the image's format)
+///   and the device. The bind still asks the
 ///   state for its `VkSampler` of the description (`SamplerState::vk_sampler`), so the state keeps
 ///   and forgets its samplers as before.
 ///
@@ -876,13 +958,14 @@ const KEPT_VIEWS: usize = 256;
 pub(super) struct BindMemo {
     /// The views epoch the views were kept under.
     epoch: u64,
-    views: HashMap<ViewKey, vk::ImageView>,
+    views: KeyMap<ViewKey, vk::ImageView>,
     samplers: Vec<KeptSampler>,
 }
 
 /// What a view a bind made or found is a function of ([`BindMemo`]): a binding of the texture as
-/// the view, a storage one where the flag is set.
-type ViewKey = (Texture, ImageViewDesc, bool);
+/// the view, a storage one where the first flag is set, of a texture the draw's instance renders
+/// where the second is (`Tables::attached`).
+type ViewKey = (Texture, ImageViewDesc, bool, bool);
 
 /// A sampler description a bind worked out ([`BindMemo`]): `descriptor`'s under `facts`.
 struct KeptSampler {
@@ -894,8 +977,7 @@ struct KeptSampler {
 /// What `sampler_desc` takes of a binding beside its descriptor and the device.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct SamplerFacts {
-    compare: bool,
-    integer: bool,
+    use_: SamplerUse,
     opaque_black: OpaqueBlackBorder,
     format: Option<metal2vulkan::vk::Format>,
 }
@@ -931,6 +1013,16 @@ fn image_descriptor(
             .image_view(view)
             .image_layout(vk::ImageLayout::GENERAL)
     };
+    // A slot a draw reads through a snapshot samples its texture's subresource that the
+    // instance's color attachment holds in the feedback loop layout, the layout its accesses
+    // there name (`render_target::feedback_barriers`; "This layout is valid only for image
+    // subresources of images created with the VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT
+    // usage flag set", which `Texture::snapshot_color` checked).
+    let in_feedback =
+        |slot: SlotRef, info: vk::DescriptorImageInfo| match tables.snapshot_slot(slot) {
+            true => info.image_layout(vk::ImageLayout::ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT),
+            false => info,
+        };
     // The kept views are dropped once an image of the device let its views go.
     let (mut kept_views, mut kept_samplers) = match memo {
         Some(memo) => {
@@ -948,21 +1040,22 @@ fn image_descriptor(
     let mut texture_view = |slot: SlotRef, view: &ImageViewDesc, storage: bool| {
         let texture = slot_texture(tables, slot)
             .ok_or_else(|| internal("the plan binds an unbound texture slot"))?;
+        let attached = tables.attached(texture, storage) && !tables.snapshot_slot(slot);
         let Some(kept_views) = kept_views.as_deref_mut() else {
-            return texture.slot_view(call, view, storage);
+            return texture.slot_view(call, view, storage, attached);
         };
-        let key = (texture.clone(), *view, storage);
+        let key = (texture.clone(), *view, storage, attached);
         if let Some(raw) = kept_views.get(&key) {
             return Ok(*raw);
         }
-        let raw = texture.slot_view(call, view, storage)?;
+        let raw = texture.slot_view(call, view, storage, attached)?;
         if kept_views.len() == KEPT_VIEWS {
             kept_views.clear();
         }
         kept_views.insert(key, raw);
         Ok::<_, Error>(raw)
     };
-    let mut sampler = |slot: SlotRef, (compare, integer): (bool, bool), opaque_black, format| {
+    let mut sampler = |slot: SlotRef, use_: SamplerUse, opaque_black, format| {
         let (state, clamps) = slot_sampler(tables, slot)
             .ok_or_else(|| internal("the plan binds an unbound sampler slot"))?;
         // Its address modes as the textures it samples map them.
@@ -970,8 +1063,7 @@ fn image_descriptor(
             .sampler_maps
             .sampler(slot, bound_sampler(state, *clamps));
         let facts = SamplerFacts {
-            compare,
-            integer,
+            use_,
             opaque_black,
             format,
         };
@@ -985,8 +1077,7 @@ fn image_descriptor(
                 let desc = metal2vulkan::bind::sampler_desc(
                     device.compile_device(),
                     &descriptor,
-                    compare,
-                    integer,
+                    use_,
                     opaque_black,
                     format,
                 )
@@ -1012,41 +1103,56 @@ fn image_descriptor(
         _ => Err(internal("a neutral sampler of a kind that is no sampler")),
     };
     Ok(match &write.source {
-        WriteSource::Texture { slot, view } => image(texture_view(
+        WriteSource::Texture { slot, view } => in_feedback(
             *slot,
-            view,
-            ty == vk::DescriptorType::STORAGE_IMAGE,
-        )?),
+            image(texture_view(
+                *slot,
+                view,
+                ty == vk::DescriptorType::STORAGE_IMAGE,
+            )?),
+        ),
         WriteSource::CombinedImageSampler {
             image: source,
             sampler: sampler_source,
         } => {
-            let (view, format) = match source {
-                ImageSource::Texture { slot, view } => {
-                    (texture_view(*slot, view, false)?, Some(view.format))
-                }
-                ImageSource::Neutral(kind) => (device.neutral_view(*kind)?, kind.format()),
+            let (view, format, slot) = match source {
+                ImageSource::Texture { slot, view } => (
+                    texture_view(*slot, view, false)?,
+                    Some(view.format),
+                    Some(*slot),
+                ),
+                ImageSource::Neutral(kind) => (device.neutral_view(*kind)?, kind.format(), None),
             };
             let raw = match sampler_source {
                 SamplerSource::Slot {
                     slot,
                     compare,
                     integer,
+                    cube_gradient,
                     opaque_black,
-                } => sampler(*slot, (*compare, *integer), *opaque_black, format)?,
+                } => sampler(
+                    *slot,
+                    SamplerUse::new(*compare, *integer).with_cube_gradient(*cube_gradient),
+                    *opaque_black,
+                    format,
+                )?,
                 SamplerSource::Immutable => vk::Sampler::null(),
                 SamplerSource::Neutral(kind) => neutral_sampler(kind)?,
             };
-            image(view).sampler(raw)
+            match slot {
+                Some(slot) => in_feedback(slot, image(view).sampler(raw)),
+                None => image(view).sampler(raw),
+            }
         }
         WriteSource::Sampler {
             slot,
             compare,
             integer,
+            cube_gradient,
             opaque_black,
         } => vk::DescriptorImageInfo::default().sampler(sampler(
             *slot,
-            (*compare, *integer),
+            SamplerUse::new(*compare, *integer).with_cube_gradient(*cube_gradient),
             *opaque_black,
             None,
         )?),
@@ -1150,6 +1256,17 @@ fn image_descriptor(
                 None => return Err(internal("an extended-range color's shadow the pass lacks")),
             }
         }
+        // A slot's snapshot, which the encoder made before the draw, in `GENERAL`.
+        WriteSource::SnapshotTexels { slot } if ty == vk::DescriptorType::STORAGE_IMAGE => {
+            let view = tables
+                .snapshots
+                .and_then(|s| s.views.iter().find(|(at, _)| at == slot))
+                .map(|&(_, view)| view);
+            match view {
+                Some(view) => image(view),
+                None => return Err(internal("a snapshot the draw did not take")),
+            }
+        }
         // The pass's fragment imageblock storage, which the encoder made before the draw.
         WriteSource::Imageblock if ty == vk::DescriptorType::STORAGE_IMAGE => {
             match tables.imageblock {
@@ -1161,13 +1278,13 @@ fn image_descriptor(
             index,
             compare,
             integer,
+            cube_gradient,
         } => match tables.argument_samplers.get(*index as usize) {
             Some(state) => {
                 let desc = metal2vulkan::bind::sampler_desc(
                     device.compile_device(),
                     state.descriptor(),
-                    *compare,
-                    *integer,
+                    SamplerUse::new(*compare, *integer).with_cube_gradient(*cube_gradient),
                     OpaqueBlackBorder::Stated,
                     None,
                 )
@@ -1289,6 +1406,20 @@ fn descriptor(
             command
                 .mesh
                 .ok_or_else(|| internal("a mesh work write without the draw's dispatch"))?
+                .work
+        }
+        // An emulated tessellation draw's records and work buffer, whole: the draw's own
+        // regions, or the command buffer's records pool (`render/tessellation_scan.rs`).
+        WriteSource::TessellationRecords => {
+            command
+                .tessellation
+                .ok_or_else(|| internal("a tessellation records write without the draw's scan"))?
+                .records
+        }
+        WriteSource::TessellationWork => {
+            command
+                .tessellation
+                .ok_or_else(|| internal("a tessellation work write without the draw's scan"))?
                 .work
         }
         // An indexed patch draw's control-point index buffer.
@@ -1492,15 +1623,21 @@ pub(super) fn command_uses(
                 },
                 SlotClass::Texture => {
                     // An unbound slot takes a neutral image; a texture whose image and usage
-                    // lack the binding's usage, its shadow (`texture/usage_shadow.rs`).
+                    // lack the binding's usage, its shadow (`texture/usage_shadow.rs`), as does
+                    // a draw's sampled one its instance renders (`texture/attached_reads.rs`).
                     if let Some(texture) = slot_texture(tables, slot) {
                         let (read, write) = image_access(resource.class)?;
                         let storage = resource.class == AccessClass::StorageImage;
+                        let attached =
+                            tables.attached(texture, storage) && !tables.snapshot_slot(slot);
                         let used = texture.slot_use(
                             call,
                             storage,
-                            access(read, resource.access.read),
-                            access(write, resource.access.write),
+                            attached,
+                            (
+                                access(read, resource.access.read),
+                                access(write, resource.access.write),
+                            ),
                         )?;
                         name(&mut named, &reached, used.key);
                         uses.push(used);

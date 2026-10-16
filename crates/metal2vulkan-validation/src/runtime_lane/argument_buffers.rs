@@ -20,7 +20,7 @@ use super::{
 };
 use crate::candidate::engine::ComputeOutput;
 use crate::case::{AuthoredCase, Stage};
-use crate::gpu::TEST_DEVICE;
+use crate::gpu::{DeviceType, TEST_DEVICE};
 use metal2vulkan::bind::{SamplerDescriptor, StatusReport};
 use metal2vulkan::metal::{PixelFormat, ResourceUsage};
 use metal2vulkan_runtime::{
@@ -418,8 +418,12 @@ fn resource_ids_a_kernel_writes_name_resources_as_the_cpus_do() {
 /// How many dispatches [`dispatches_of_their_own_textures_share_one_heap_set`] records.
 const OWN_TEXTURES: usize = 2048;
 
-/// The most the peak resident set may grow over [`OWN_TEXTURES`] dispatches.
+/// The most the peak resident set may grow over [`OWN_TEXTURES`] dispatches on a CPU device.
 const PEAK_GROWTH: u64 = 256 << 20;
+
+/// The most the runtime's own allocations may grow over [`OWN_TEXTURES`] dispatches: the peak of
+/// the process's heap (`worker::alloc`), and the `VkDeviceMemory` the runtime allocated.
+const OWN_GROWTH: u64 = 256 << 20;
 
 /// The process's peak resident set (`VmHWM`), where `/proc/self/status` tells it.
 fn peak_resident() -> Option<u64> {
@@ -458,9 +462,15 @@ fn encode_own(
 /// beside it, [`HANDLE_SAMPLER`]): the even dispatches' textures hold the case's texels, the odd
 /// ones' zero. The dispatches share the command buffer's heap set, and each reads its own texture:
 /// the even ones give a lone dispatch's output over the case's texels, the odd ones a lone
-/// dispatch's over zero texels, which differ. With every texture made first, the process's peak
-/// resident set grows by less than [`PEAK_GROWTH`] over the dispatches where `/proc` tells it (a
-/// set per dispatch held lavapipe's whole heap capacity, about 10 MiB, each).
+/// dispatch's over zero texels, which differ. With every texture made first, the runtime's own
+/// allocations over the dispatches (the process's heap at its peak, and the `VkDeviceMemory` it
+/// allocated) grow by less than [`OWN_GROWTH`], and on a CPU device, whose memory is all the
+/// process's own, the process's peak resident set grows by less than [`PEAK_GROWTH`] where
+/// `/proc` tells it (a set per dispatch held lavapipe's whole heap capacity, about 10 MiB, each).
+/// A GPU's resident set is printed, not judged: it holds the driver's own memory, which the host's
+/// load moves while the runtime's work stays the same (an RTX 3090's grew 128 to 130 MiB alone, and
+/// 395 or 396 MiB in 3 of 5 runs beside 48 CPU-bound processes, with every work count of the
+/// dispatches equal and the heap's peak 17 MiB in each).
 #[test]
 fn dispatches_of_their_own_textures_share_one_heap_set() {
     on_device(|device| {
@@ -508,30 +518,49 @@ fn dispatches_of_their_own_textures_share_one_heap_set() {
         // peak by 266 MiB.
         let owned: Vec<CaseResources> = (0..OWN_TEXTURES).map(|i| own(i % 2 == 0)).collect();
         let before = peak_resident();
-        let command_buffer = queue.command_buffer().unwrap();
-        let outputs: Vec<_> = owned
-            .iter()
-            .map(|resources| encode_own(&command_buffer, &pipeline, &case, resources))
-            .collect();
-        run(&command_buffer);
+        let memory = device.work_counts().device_memory_allocated;
+        let (outputs, heap) = crate::worker::alloc::measure(|| {
+            let command_buffer = queue.command_buffer().unwrap();
+            let outputs: Vec<_> = owned
+                .iter()
+                .map(|resources| encode_own(&command_buffer, &pipeline, &case, resources))
+                .collect();
+            run(&command_buffer);
+            outputs
+        });
+        let memory = device.work_counts().device_memory_allocated - memory;
         let after = peak_resident();
         for (i, output) in outputs.into_iter().enumerate() {
             let expected = if i % 2 == 0 { &texels } else { &zeros };
             assert_eq!(&output(), expected, "dispatch {i}");
         }
-        match before.zip(after) {
-            Some((before, after)) => {
-                let growth = after.saturating_sub(before);
-                eprintln!(
-                    "runtime heap set: {OWN_TEXTURES} dispatches of their own textures grew the \
-                     peak resident set by {} MiB ({} to {} MiB)",
-                    growth >> 20,
-                    before >> 20,
-                    after >> 20
-                );
-                assert!(growth < PEAK_GROWTH, "{} MiB", growth >> 20);
-            }
-            None => eprintln!("runtime heap set: no peak resident set to read here"),
+        let resident = before
+            .zip(after)
+            .map(|(before, after)| after.saturating_sub(before));
+        let mib =
+            |bytes: Option<u64>| bytes.map_or("-".to_owned(), |bytes| (bytes >> 20).to_string());
+        eprintln!(
+            "runtime heap set: {OWN_TEXTURES} dispatches of their own textures grew the heap's \
+             peak by {} MiB, the runtime's device memory by {} MiB, and the peak resident set by \
+             {} MiB",
+            mib(heap),
+            memory >> 20,
+            mib(resident),
+        );
+        if let Some(heap) = heap {
+            assert!(heap < OWN_GROWTH, "the heap's peak grew {} MiB", heap >> 20);
+        }
+        assert!(
+            memory < OWN_GROWTH,
+            "the runtime allocated {} MiB of device memory",
+            memory >> 20
+        );
+        if let (DeviceType::Cpu, Some(resident)) = (TEST_DEVICE, resident) {
+            assert!(
+                resident < PEAK_GROWTH,
+                "the peak resident set grew {} MiB",
+                resident >> 20
+            );
         }
     });
 }

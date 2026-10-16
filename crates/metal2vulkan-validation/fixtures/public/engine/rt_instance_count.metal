@@ -1,4 +1,4 @@
-// Owned fixture (WP-C1E, DESIGN D255): the instance count of an instance acceleration structure,
+// Owned fixture: the instance count of an instance acceleration structure,
 // which no Vulkan instruction reads: the binder supplies the bound structure's count, so the
 // kernel translates without ray queries. out[gid] = count * 3 + gid. Loop-free.
 #include <metal_stdlib>

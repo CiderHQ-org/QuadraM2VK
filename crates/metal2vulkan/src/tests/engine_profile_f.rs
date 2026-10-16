@@ -2,8 +2,9 @@
 //!
 //! Profile F (`BufferAccess::Floor`: no `bufferDeviceAddress` or no `shaderInt64`) reaches every
 //! buffer through a descriptor. Over every public fixture on every committed Profile F device
-//! (`vk12-floor`, `vk12-bare`, and `roadmap-2022`, which has device addresses but no 64-bit
-//! integers), every compiled function:
+//! (`vk12-floor` and `roadmap-2022`, which has device addresses but no 64-bit integers), and on
+//! `vk12-floor` with the formatless storage-image features (`vk12-floor+formatless`), every
+//! compiled function:
 //!
 //! - reaches every buffer slot through a descriptor view, never by device address;
 //! - reads no root table and no execution status by address, and needs no pointer translation;
@@ -11,15 +12,14 @@
 //!   plan-time check (the binder's `DescriptorRangeExceeded`), never a device-address variant;
 //! - requires neither `bufferDeviceAddress` nor `PhysicalStorageBufferAddresses`.
 //!
-//! `vk12-bare` asserts refusals: it is `vk12-floor` without the features the consumer always
-//! enables (`shaderInt16`, 8- and 16-bit storage, formatless storage images). The engine never
-//! needs the first three (registers hold narrow integers in `u32`s, and every memory leaf is
-//! word-composed), so its inventory equals `vk12-floor`'s except where a storage texture needs its
-//! format as a lowering input, or where a storage heap class, refused on both, names the formatless
-//! access among the features `vk12-bare` lacks, or where a slot's format is the module's own
-//! extended format (a `ulong` texture's `RG32Uint`), which `vk12-floor` declares formatless and
-//! `vk12-bare` refuses. An integer imageblock slice takes its texel class from the slot's format on
-//! both.
+//! `vk12-floor` is Vulkan 1.2 core: no product path needs an optional feature. Registers hold
+//! narrow integers in `u32`s and every memory leaf is word-composed, so the floor needs neither
+//! `shaderInt16` nor 8- or 16-bit storage. Its inventory equals the formatless floor's except where
+//! a storage texture needs its format as a lowering input, or where a storage heap class, refused on
+//! both, names the formatless access among the features `vk12-floor` lacks, or where a slot's
+//! format is the module's own extended format (a `ulong` texture's `RG32Uint`), which the
+//! formatless floor declares formatless and `vk12-floor` refuses. An integer imageblock slice takes
+//! its texel class from the slot's format on both.
 //!
 //! The per-construct refusals (a dynamic-root dereference, the per-stage descriptor limit, a
 //! `BufferRangeLimit` variant) are asserted on the Profile F devices in
@@ -43,22 +43,25 @@ use crate::pipeline::facts::{Mechanism, RuntimeFact};
 use crate::pipeline::interface::{BufferForm, SlotInterface};
 use crate::pipeline::sym::PushField;
 use crate::pipeline::testing::{
-    compile, engine_dir, fixtures_dir, link_and_validate, llvm_assemble, metal_assemble, meter,
-    profile, AssembleError,
+    compile, engine_dir, fixtures_dir, formatless_floor, link_and_validate, llvm_assemble,
+    metal_assemble, meter, profile, AssembleError, FORMATLESS_FLOOR,
 };
 
 /// The committed Profile F devices this file checks.
-const PROFILE_F: [&str; 3] = ["vk12-floor", "vk12-bare", "roadmap-2022"];
+const PROFILE_F: [&str; 2] = ["vk12-floor", "roadmap-2022"];
 
+/// The formatless floor, then each of [`PROFILE_F`].
 fn profile_f() -> Vec<(&'static str, DeviceProfile)> {
-    PROFILE_F
-        .iter()
-        .map(|stem| {
-            let p = profile(stem, DevicePolicy::default()).expect("profile");
-            assert_eq!(p.fields().buffer_access, BufferAccess::Floor, "{stem}");
-            (*stem, p)
-        })
-        .collect()
+    let formatless = formatless_floor(DevicePolicy::default()).expect("profile");
+    let mut out = vec![(FORMATLESS_FLOOR, formatless)];
+    out.extend(PROFILE_F.iter().map(|stem| {
+        let p = profile(stem, DevicePolicy::default()).expect("profile");
+        (*stem, p)
+    }));
+    for (stem, p) in &out {
+        assert_eq!(p.fields().buffer_access, BufferAccess::Floor, "{stem}");
+    }
+    out
 }
 
 /// `.ll` files directly in `dir`, sorted by name.
@@ -151,14 +154,14 @@ fn cell(r: &Result<std::sync::Arc<FunctionArtifact>, Error>) -> String {
     }
 }
 
-/// Whether `bare` is `floor`'s refusal naming, beside what `floor` names, only the formatless
-/// storage-image features `vk12-bare` lacks: a storage heap class names every feature the profile
-/// lacks in one `AnyOf`, the formatless access among them.
+/// Whether `floor` is `formatless`'s refusal naming, beside what `formatless` names, only the
+/// formatless storage-image features `vk12-floor` lacks: a storage heap class names every feature
+/// the profile lacks in one `AnyOf`, the formatless access among them.
 fn refused_also_for_formatless(
+    formatless: &Result<std::sync::Arc<FunctionArtifact>, Error>,
     floor: &Result<std::sync::Arc<FunctionArtifact>, Error>,
-    bare: &Result<std::sync::Arc<FunctionArtifact>, Error>,
 ) -> bool {
-    let (Err(Error::Unsupported(f)), Err(Error::Unsupported(b))) = (floor, bare) else {
+    let (Err(Error::Unsupported(f)), Err(Error::Unsupported(b))) = (formatless, floor) else {
         return false;
     };
     let (Needs::AnyOf(fa), Needs::AnyOf(ba)) = (&f.needs, &b.needs) else {
@@ -180,16 +183,16 @@ fn refused_also_for_formatless(
         })
 }
 
-/// Whether `bare` refuses the storage format of a slot whose format the module fixes as an
+/// Whether `floor` refuses the storage format of a slot whose format the module fixes as an
 /// extended one (a `ulong` texture is `RG32Uint` whatever is bound): its ways are
-/// `shaderStorageImageExtendedFormats`, which neither Profile F device has, or the formatless
-/// access the slot uses, which `vk12-floor` has and `vk12-bare` lacks. `vk12-floor` declares
-/// such a slot formatless, so `vk12-bare` refuses it whatever `vk12-floor` makes of the function,
-/// and lacks whatever else `vk12-floor` refuses.
+/// `shaderStorageImageExtendedFormats`, which neither floor has, or the formatless access the slot
+/// uses, which the formatless floor has and `vk12-floor` lacks. The formatless floor declares such
+/// a slot formatless, so `vk12-floor` refuses it whatever the formatless floor makes of the
+/// function, and lacks whatever else the formatless floor refuses.
 fn refused_for_a_fixed_extended_format(
-    bare: &Result<std::sync::Arc<FunctionArtifact>, Error>,
+    floor: &Result<std::sync::Arc<FunctionArtifact>, Error>,
 ) -> bool {
-    let Err(Error::Unsupported(b)) = bare else {
+    let Err(Error::Unsupported(b)) = floor else {
         return false;
     };
     let Needs::AnyOf(ways) = &b.needs else {
@@ -214,14 +217,15 @@ fn refused_for_a_fixed_extended_format(
 }
 
 /// Every public fixture compiled for a Profile F device uses the static-root descriptor machinery
-/// only and passes L3; and `vk12-bare` refuses exactly what `vk12-floor` accepts only through its
-/// formatless storage-image bits, or refuses as `vk12-floor` does naming those bits too, or refuses
-/// a module-fixed extended format that `vk12-floor` declares formatless.
+/// only and passes L3; and `vk12-floor` refuses exactly what the formatless floor accepts only
+/// through its formatless storage-image bits, or refuses as the formatless floor does naming those
+/// bits too, or refuses a module-fixed extended format that the formatless floor declares
+/// formatless.
 #[test]
 fn profile_f_functions_reach_every_buffer_through_a_descriptor() {
     let profiles = profile_f();
     let mut compiled = 0usize;
-    let mut bare_only = 0usize;
+    let mut format_needed = 0usize;
     for dir in [fixtures_dir(), engine_dir()] {
         for path in ll_files(&dir) {
             let Some(bc) = assemble_fixture(&path) else {
@@ -246,21 +250,23 @@ fn profile_f_functions_reach_every_buffer_through_a_descriptor() {
                     cells.push(cell(&r));
                     results.push(r);
                 }
-                let (floor, bare) = (&cells[0], &cells[1]);
-                if floor != bare
+                let (formatless, floor) = (&cells[0], &cells[1]);
+                if formatless != floor
                     && !refused_also_for_formatless(&results[0], &results[1])
                     && !refused_for_a_fixed_extended_format(&results[1])
                 {
                     assert!(
-                        floor == "ok" && bare.starts_with("NeedsInput{StorageTextureFormat"),
-                        "{name} {entry}: vk12-floor {floor}, vk12-bare {bare}"
+                        formatless == "ok" && floor.starts_with("NeedsInput{StorageTextureFormat"),
+                        "{name} {entry}: {FORMATLESS_FLOOR} {formatless}, vk12-floor {floor}"
                     );
-                    bare_only += 1;
+                    format_needed += 1;
                 }
             }
         }
     }
-    eprintln!("{compiled} Profile F functions compiled; {bare_only} need a format on vk12-bare");
+    eprintln!(
+        "{compiled} Profile F functions compiled; {format_needed} need a format on vk12-floor"
+    );
     assert!(compiled > 0, "no fixture compiled");
 }
 

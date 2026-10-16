@@ -1,4 +1,4 @@
-// Owned fixture (NaN model, DESIGN D293): whether Metal's data movement keeps a NaN's bits. Lane
+// Owned fixture (NaN model): whether Metal's data movement keeps a NaN's bits. Lane
 // `i` loads floats a and b (`fin[2i]`, `fin[2i + 1]`) and a selector, and stores as a float4 to
 // `out[i]`: a (a float load and store), select(b, a, sel) (an if/else assignment folds to the same
 // `select`), its neighbour's a through threadgroup memory, and the selected element of

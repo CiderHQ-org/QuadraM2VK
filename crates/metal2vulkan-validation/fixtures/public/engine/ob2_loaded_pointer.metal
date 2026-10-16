@@ -1,4 +1,4 @@
-// Owned fixture (WP-OB2, DESIGN D245): loads and stores past a buffer reached through a pointer
+// Owned fixture: loads and stores past a buffer reached through a pointer
 // loaded from memory, the loaded pointer containment form. The argument buffer `h` holds the
 // address of a separately owned 16-byte buffer, so `h.p` is a pointer the kernel loads from
 // device memory (a dynamic root). Eight threads; thread t loads p[idx[t]] into out[t] and stores

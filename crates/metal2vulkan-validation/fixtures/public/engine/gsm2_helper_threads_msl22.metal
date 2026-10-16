@@ -1,5 +1,5 @@
 // metal-std: macos-metal2.2
-// Owned fixture (WP-GSM2, DESIGN D603; written for this repository): `quad_is_helper_thread` and
+// Owned fixture (written for this repository): `quad_is_helper_thread` and
 // `simd_is_helper_thread` after `discard_fragment` with terminate semantics (before MSL 2.3),
 // compiled with the standard named on the first line. Drawn over the whole target; the pixels
 // with (x + y) mod 3 == 0 discard, and every quad keeps two or three live pixels.

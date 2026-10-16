@@ -10,8 +10,18 @@
 //!
 //! What a bound texture's usage allows, and what a sampler's clamps sample, is checked at the
 //! command that uses the slot, against the function's use of it; binding checks only the index
-//! range, the object's device, a buffer offset against the buffer's length, and that a texture
-//! is not memoryless (Metal's validation stops binding one, RT6 probes 6b and 6c).
+//! range, the object's device, a buffer offset against the buffer's length, and that a texture is
+//! not memoryless (Metal's validation stops binding one; a Metal probe on an M4).
+//!
+//! Every object a table binds is held until its encoder's command buffer completes, as Metal (with
+//! retained references) holds what an encoder was handed: a no-copy buffer bound, then released by
+//! the program, ran its deallocator only after its command buffer completed, whether a command used
+//! it, it was replaced before any did, or it was bound after the last (the M3 Max under macOS
+//! 27.0.1, probes `dealloc-probe` and `dealloc-probe2`, compute and render encoders). A command
+//! that uses the table retains what it binds (`ArgumentTable::retain`); an object replaced or
+//! unbound that no such command retained at its slot, and one still bound as the encoder ends, is
+//! retained then (`ArgumentTable::let_go`, `ArgumentTable::let_go_all`). So a bind before each
+//! draw retains nothing of its own: it looks its slot up among what the last retain held.
 //!
 //! A compute encoder's table differs in two answers, as plain Metal's compute encoder gave them
 //! on an M4 (EV `SWP-misuse1-m4`) where its API validation asserts: it holds a buffer bound past
@@ -36,8 +46,9 @@ use metal2vulkan::pipeline::{
     BufferKind, PipelineInterface, SlotClass, SlotInterface, SlotRef, Stage,
 };
 use std::any::Any;
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 /// Entries of a buffer table (`setBuffer:offset:atIndex:` and its stage forms).
 pub(super) const BUFFER_SLOTS: u32 = 31;
@@ -179,15 +190,58 @@ fn attribute_stride(stride: u64) -> Option<u32> {
     (stride != ATTRIBUTE_STRIDE_STATIC).then_some(stride as u32)
 }
 
-/// Bind `value` at `index` of `table`, or unbind the index when `value` is `None`.
-fn set_entry<T>(table: &mut BTreeMap<u32, T>, index: u32, value: Option<T>) {
+/// Bind `value` at `index` of `table`, or unbind the index when `value` is `None`: what was
+/// bound there before.
+fn set_entry<T>(table: &mut BTreeMap<u32, T>, index: u32, value: Option<T>) -> Option<T> {
     match value {
-        Some(value) => {
-            table.insert(index, value);
-        }
-        None => {
-            table.remove(&index);
-        }
+        Some(value) => table.insert(index, value),
+        None => table.remove(&index),
+    }
+}
+
+/// Bind the handle `value` at `index` of `table` with `with` (its offset, its clamps), or unbind
+/// the index when `value` is `None`: the handle it replaced or unbound, another object than
+/// `value` ([`ArgumentTable::let_go`]). The handle already bound there (the same object) keeps
+/// its hold and takes `with` alone: binding it again takes no new reference, whose count the
+/// threads that release the encoder's holds share.
+fn set_handle<T: Clone + PartialEq, W>(
+    table: &mut BTreeMap<u32, (T, W)>,
+    index: u32,
+    value: Option<&T>,
+    with: W,
+) -> Option<T> {
+    match value {
+        Some(value) => match table.entry(index) {
+            Entry::Occupied(mut bound) if bound.get().0 == *value => {
+                bound.get_mut().1 = with;
+                None
+            }
+            Entry::Occupied(mut bound) => Some(bound.insert((value.clone(), with)).0),
+            Entry::Vacant(slot) => {
+                slot.insert((value.clone(), with));
+                None
+            }
+        },
+        None => table.remove(&index).map(|(handle, _)| handle),
+    }
+}
+
+/// [`set_handle`] for a table of handles alone.
+fn set_bare_handle<T: Clone + PartialEq>(
+    table: &mut BTreeMap<u32, T>,
+    index: u32,
+    value: Option<&T>,
+) -> Option<T> {
+    match value {
+        Some(value) => match table.entry(index) {
+            Entry::Occupied(bound) if bound.get() == value => None,
+            Entry::Occupied(mut bound) => Some(bound.insert(value.clone())),
+            Entry::Vacant(slot) => {
+                slot.insert(value.clone());
+                None
+            }
+        },
+        None => table.remove(&index),
     }
 }
 
@@ -280,7 +334,7 @@ impl ArgumentTable {
     /// another device, and in a render stage's table an offset past the buffer's length.
     pub(super) fn set_buffer(
         &mut self,
-        core: &EncoderCore,
+        core: &mut EncoderCore,
         call: &'static str,
         buffer: Option<&Buffer>,
         offset: u64,
@@ -294,7 +348,7 @@ impl ArgumentTable {
     /// [`set_buffer`](Self::set_buffer) is.
     pub(super) fn set_buffer_with_stride(
         &mut self,
-        core: &EncoderCore,
+        core: &mut EncoderCore,
         call: &'static str,
         buffer: Option<&Buffer>,
         offset: u64,
@@ -303,19 +357,17 @@ impl ArgumentTable {
     ) -> Result<(), Error> {
         check_index(call, index, BUFFER_SLOTS)?;
         let stride = attribute_stride(stride);
-        match buffer {
-            Some(buffer) => {
-                self.check_buffer(core, call, buffer, offset)?;
-                self.buffers.insert(index, (buffer.clone(), offset));
-            }
-            None => {
-                self.buffers.remove(&index);
-            }
+        if let Some(buffer) = buffer {
+            self.check_buffer(core, call, buffer, offset)?;
         }
+        let replaced = set_handle(&mut self.buffers, index, buffer, offset);
         set_entry(&mut self.attribute_strides, index, stride);
         self.function_tables.remove(&index);
         self.null_tables.remove(&index);
         self.bytes.remove(&index);
+        if let Some(replaced) = replaced {
+            self.let_go(core, (SlotClass::Buffer, index), Bound::Buffer(&replaced));
+        }
         Ok(())
     }
 
@@ -324,7 +376,7 @@ impl ArgumentTable {
     /// and when the slices' lengths differ; a refusal binds none of them.
     pub(super) fn set_buffers(
         &mut self,
-        core: &EncoderCore,
+        core: &mut EncoderCore,
         call: &'static str,
         buffers: &[Option<&Buffer>],
         offsets: &[u64],
@@ -338,7 +390,7 @@ impl ArgumentTable {
     /// `set_buffers` is.
     pub(super) fn set_buffers_with_strides(
         &mut self,
-        core: &EncoderCore,
+        core: &mut EncoderCore,
         call: &'static str,
         buffers: &[Option<&Buffer>],
         offsets: &[u64],
@@ -358,15 +410,14 @@ impl ArgumentTable {
         for (((buffer, &offset), stride), index) in
             buffers.iter().zip(offsets).zip(strides).zip(first..)
         {
-            set_entry(
-                &mut self.buffers,
-                index,
-                buffer.map(|buffer| (buffer.clone(), offset)),
-            );
+            let replaced = set_handle(&mut self.buffers, index, *buffer, offset);
             set_entry(&mut self.attribute_strides, index, stride);
             self.function_tables.remove(&index);
             self.null_tables.remove(&index);
             self.bytes.remove(&index);
+            if let Some(replaced) = replaced {
+                self.let_go(core, (SlotClass::Buffer, index), Bound::Buffer(&replaced));
+            }
         }
         Ok(())
     }
@@ -387,7 +438,7 @@ impl ArgumentTable {
     /// none keeps no offset), and in a render stage's table an offset past the buffer's length.
     pub(super) fn set_buffer_offset(
         &mut self,
-        core: &EncoderCore,
+        core: &mut EncoderCore,
         call: &'static str,
         offset: u64,
         index: u32,
@@ -400,7 +451,7 @@ impl ArgumentTable {
     /// [`set_buffer_offset`](Self::set_buffer_offset) is.
     pub(super) fn set_buffer_offset_with_stride(
         &mut self,
-        core: &EncoderCore,
+        core: &mut EncoderCore,
         call: &'static str,
         offset: u64,
         stride: u64,
@@ -432,9 +483,12 @@ impl ArgumentTable {
         }
         if self.function_tables.remove(&index).is_some() {
             // The table reads as the null table until the index is bound again.
-            self.buffers.remove(&index);
+            let words = self.buffers.remove(&index);
             self.attribute_strides.remove(&index);
             self.null_tables.insert(index);
+            if let Some((words, _)) = words {
+                self.let_go(core, (SlotClass::Buffer, index), Bound::Buffer(&words));
+            }
             return Ok(());
         }
         let compute = self.compute;
@@ -462,7 +516,7 @@ impl ArgumentTable {
     /// index past the table, and more than [`INLINE_BYTES_LIMIT`] bytes.
     pub(super) fn set_bytes(
         &mut self,
-        core: &EncoderCore,
+        core: &mut EncoderCore,
         call: &'static str,
         bytes: &[u8],
         stride: Option<u64>,
@@ -486,10 +540,13 @@ impl ArgumentTable {
             .state()
             .uploads
             .upload(core.device(), bytes, padded)?;
-        self.buffers.remove(&index);
+        let replaced = self.buffers.remove(&index);
         self.attribute_strides.remove(&index);
         self.function_tables.remove(&index);
         self.null_tables.remove(&index);
+        if let Some((replaced, _)) = replaced {
+            self.let_go(core, (SlotClass::Buffer, index), Bound::Buffer(&replaced));
+        }
         self.bytes.insert(
             index,
             InlineBytes {
@@ -509,7 +566,7 @@ impl ArgumentTable {
     /// binds none of them.
     pub(super) fn set_textures(
         &mut self,
-        core: &EncoderCore,
+        core: &mut EncoderCore,
         call: &'static str,
         textures: &[Option<&Texture>],
         first: u32,
@@ -520,7 +577,9 @@ impl ArgumentTable {
             texture.check_not_memoryless(call)?;
         }
         for (texture, index) in textures.iter().zip(first..) {
-            set_entry(&mut self.textures, index, texture.cloned());
+            if let Some(replaced) = set_bare_handle(&mut self.textures, index, *texture) {
+                self.let_go(core, (SlotClass::Texture, index), Bound::Texture(&replaced));
+            }
         }
         Ok(())
     }
@@ -531,7 +590,7 @@ impl ArgumentTable {
     /// inverted is refused at the command that samples through it.
     pub(super) fn set_samplers(
         &mut self,
-        core: &EncoderCore,
+        core: &mut EncoderCore,
         call: &'static str,
         samplers: &[Option<&SamplerState>],
         clamps: Option<(&[f32], &[f32])>,
@@ -548,11 +607,9 @@ impl ArgumentTable {
         }
         for (i, (sampler, index)) in samplers.iter().zip(first..).enumerate() {
             let clamp = clamps.map(|(min, max)| [min[i], max[i]]);
-            set_entry(
-                &mut self.samplers,
-                index,
-                sampler.map(|sampler| (sampler.clone(), clamp)),
-            );
+            if let Some(replaced) = set_handle(&mut self.samplers, index, *sampler, clamp) {
+                self.let_go(core, (SlotClass::Sampler, index), Bound::Sampler(&replaced));
+            }
         }
         Ok(())
     }
@@ -563,7 +620,7 @@ impl ArgumentTable {
     /// index past the buffer table, a table of another device; a refusal binds none of them.
     pub(super) fn set_function_tables(
         &mut self,
-        core: &EncoderCore,
+        core: &mut EncoderCore,
         call: &'static str,
         tables: &[Option<&VisibleFunctionTable>],
         first: u32,
@@ -573,7 +630,7 @@ impl ArgumentTable {
             core.check_device(call, table.device())?;
         }
         for (table, index) in tables.iter().zip(first..) {
-            set_entry(
+            let replaced = set_entry(
                 &mut self.buffers,
                 index,
                 table.map(|table| (table.words().clone(), 0)),
@@ -582,6 +639,15 @@ impl ArgumentTable {
             self.attribute_strides.remove(&index);
             self.null_tables.remove(&index);
             self.bytes.remove(&index);
+            // A table's words bound again at its index are the same object, held by the table.
+            if let Some((replaced, _)) = replaced.filter(|(replaced, _)| {
+                !self
+                    .buffers
+                    .get(&index)
+                    .is_some_and(|(bound, _)| bound == replaced)
+            }) {
+                self.let_go(core, (SlotClass::Buffer, index), Bound::Buffer(&replaced));
+            }
         }
         Ok(())
     }
@@ -903,19 +969,7 @@ impl ArgumentTable {
     /// Each object bound, by slot, in the table's order: its buffers, then its textures, then
     /// its sampler states, each by index.
     fn bound(&self) -> impl DoubleEndedIterator<Item = ((SlotClass, u32), Bound<'_>)> {
-        let buffers = self
-            .buffers
-            .iter()
-            .map(|(&index, (buffer, _))| ((SlotClass::Buffer, index), Bound::Buffer(buffer)));
-        let textures = self
-            .textures
-            .iter()
-            .map(|(&index, texture)| ((SlotClass::Texture, index), Bound::Texture(texture)));
-        let samplers = self
-            .samplers
-            .iter()
-            .map(|(&index, (sampler, _))| ((SlotClass::Sampler, index), Bound::Sampler(sampler)));
-        buffers.chain(textures).chain(samplers)
+        bound_in(&self.buffers, &self.textures, &self.samplers)
     }
 
     /// Hold everything bound until `core`'s command buffer completes: a command uses it, and
@@ -928,27 +982,94 @@ impl ArgumentTable {
     /// the table's order, as one hold of them all went.
     pub(super) fn retain(&self, core: &mut EncoderCore) {
         let mut retained = lock(&self.retained.0);
-        let RetainedBy { core: by, bound } = &mut *retained;
-        let same_core = *by == Some(core.id());
         let now = self.bound().map(|(slot, object)| (slot, object.address()));
-        if same_core && bound.iter().copied().eq(now) {
+        if retained.core == Some(core.id()) && retained.bound.iter().copied().eq(now) {
             return;
         }
         let keys = self.buffers.values().map(|(b, _)| b.identity().key);
         let texture_keys = self.textures.values().map(Texture::use_key);
         core.touch_keys(keys.chain(texture_keys));
         for (slot, object) in self.bound().rev() {
-            let held = same_core
-                && bound
-                    .binary_search_by_key(&slot, |&(slot, _)| slot)
-                    .is_ok_and(|at| bound[at].1 == object.address());
-            if !held {
+            if !retained.holds(core, slot, object) {
                 core.retain_shared(object.held());
             }
         }
+        let RetainedBy { core: by, bound } = &mut *retained;
         bound.clear();
         bound.extend(self.bound().map(|(slot, object)| (slot, object.address())));
         *by = Some(core.id());
         core.device().shared().counts.argument_table_retained();
+    }
+
+    /// Let go of `object`, which the table bound at `slot` until a call replaced or unbound it:
+    /// `core` holds it until its command buffer completes, as Metal holds every object an encoder
+    /// was handed, a binding replaced before any command used it included (the M3 Max under macOS
+    /// 27.0.1, probes `dealloc-probe` and `dealloc-probe2`: a no-copy buffer so bound, then
+    /// released, ran its deallocator only after the command buffer completed). Nothing is retained
+    /// where `core` holds it already, from a command that used the table with it at `slot`
+    /// ([`retain`](Self::retain)): a bind before each draw retains nothing here.
+    fn let_go(&mut self, core: &mut EncoderCore, slot: (SlotClass, u32), object: Bound<'_>) {
+        let retained = self
+            .retained
+            .0
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner);
+        if !retained.holds(core, slot, object) {
+            core.retain_shared(object.held());
+        }
+    }
+
+    /// Let go of everything the table binds, as its encoder ends or its state is set back:
+    /// [`let_go`](Self::let_go) of each object, the last first, so they go in the table's order.
+    /// Metal holds what an encoder was handed until its command buffer completes, a binding no
+    /// command used included (probe `dealloc-probe2`: a buffer or texture bound after the last
+    /// draw or dispatch).
+    pub(super) fn let_go_all(&mut self, core: &mut EncoderCore) {
+        let ArgumentTable {
+            buffers,
+            textures,
+            samplers,
+            retained,
+            ..
+        } = self;
+        // A stage the encoder bound nothing to (most often its object, mesh and tile stages').
+        if buffers.is_empty() && textures.is_empty() && samplers.is_empty() {
+            return;
+        }
+        let retained = retained.0.get_mut().unwrap_or_else(PoisonError::into_inner);
+        for (slot, object) in bound_in(buffers, textures, samplers).rev() {
+            if !retained.holds(core, slot, object) {
+                core.retain_shared(object.held());
+            }
+        }
+    }
+}
+
+/// The objects a table's `buffers`, `textures` and `samplers` bind, by slot, in the table's order
+/// ([`ArgumentTable::bound`]).
+fn bound_in<'a>(
+    buffers: &'a BTreeMap<u32, (Buffer, u64)>,
+    textures: &'a BTreeMap<u32, Texture>,
+    samplers: &'a BTreeMap<u32, (SamplerState, Option<[f32; 2]>)>,
+) -> impl DoubleEndedIterator<Item = ((SlotClass, u32), Bound<'a>)> {
+    let buffers = buffers
+        .iter()
+        .map(|(&index, (buffer, _))| ((SlotClass::Buffer, index), Bound::Buffer(buffer)));
+    let textures = textures
+        .iter()
+        .map(|(&index, texture)| ((SlotClass::Texture, index), Bound::Texture(texture)));
+    let samplers = samplers
+        .iter()
+        .map(|(&index, (sampler, _))| ((SlotClass::Sampler, index), Bound::Sampler(sampler)));
+    buffers.chain(textures).chain(samplers)
+}
+
+impl RetainedBy {
+    /// Whether `core` holds `object`, bound at `slot`, from the table's last retain into it.
+    fn holds(&self, core: &EncoderCore, slot: (SlotClass, u32), object: Bound<'_>) -> bool {
+        self.core == Some(core.id())
+            && (self.bound)
+                .binary_search_by_key(&slot, |&(slot, _)| slot)
+                .is_ok_and(|at| self.bound[at].1 == object.address())
     }
 }

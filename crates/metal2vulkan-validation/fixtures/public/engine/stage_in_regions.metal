@@ -1,4 +1,4 @@
-// Owned fixture (WP-SWP, DESIGN D430; written for this repository): kernels whose `[[stage_in]]`
+// Owned fixture (written for this repository): kernels whose `[[stage_in]]`
 // fetch a stage-in region smaller than the grid clamps. The compute pipeline's stage-input
 // descriptor, not the source, chooses each attribute's step (thread position in the grid on x or
 // y at a step rate, or through the index buffer), and the encoder's `setStageInRegion:` the

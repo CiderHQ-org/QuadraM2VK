@@ -55,9 +55,15 @@
 //! bound are NaN is refused where it is used, by the binding plan, since what Metal samples then is
 //! not measured. Metal takes any raw border color and keeps its low two bits, sampling 3 as
 //! transparent black on every format measured ([`sampler_border_color`], the same EVs). What the
-//! device cannot do with the state on any use (a mirror-clamp address mode or anisotropy it lacks)
-//! is refused here, `Unsupported` ([`check_sampler`]). A minimum or maximum reduction reads the
-//! weighted average, as on an Apple M4 without Metal's validation layer (which refuses one), and
+//! device cannot do with the state on any use (a mirror-clamp address mode it lacks) is refused
+//! here, `Unsupported` ([`check_sampler`]). Anisotropy on a device without `samplerAnisotropy` is
+//! made: its Vulkan samplers are isotropic, and a function samples through the state with Metal's
+//! anisotropic filter emulated where the emulation reaches the sample
+//! (`Degradation::AnisotropicFilter`) and the device's isotropic filter elsewhere
+//! (`Degradation::DeviceAnisotropicFilter`), each announced; an argument buffer that lists it is
+//! refused where it is used, `Unsupported` (`samplerAnisotropy`), since a function reading it
+//! there knows not its anisotropy. A minimum or maximum reduction reads the weighted average, as
+//! on an Apple M4 without Metal's validation layer (which refuses one), and
 //! `DeviceProperties::supports_sampler_reduction_mode` answers no.
 //!
 //! A min or mag filter `Cubic` (`MTLSamplerMinMagFilterCubic`, raw value 2) is made. Without a
@@ -78,6 +84,7 @@ use super::Device;
 use crate::release;
 use ash::vk;
 use metal2vulkan::bind::SamplerDescriptor;
+use metal2vulkan::device::VkFeature;
 use metal2vulkan::metal::sampler::{check_sampler, SamplerUse};
 use metal2vulkan::metal::{
     CompareFunction, SamplerAddressMode, SamplerBorderColor, SamplerMinMagFilter, SamplerMipFilter,
@@ -346,11 +353,12 @@ impl Device {
     ///
     /// A descriptor Metal's validation stops, of a `max_anisotropy` outside 1 to 16 or of pixel
     /// coordinates, is made, and samples as plain Metal samples it (the module's rules); an
-    /// anisotropy past the device's largest filters with that largest, announced once
-    /// (`Degradation::CappedAnisotropy`). Refused:
-    /// what the device cannot do on any use of the state (`Unsupported`, naming the feature: a
-    /// mirror-clamp address mode, a pixel-coordinate one's included, anisotropy). A minimum or
-    /// maximum reduction reads the weighted average.
+    /// anisotropy past the largest of a device with `samplerAnisotropy` filters with that
+    /// largest, announced once (`Degradation::CappedAnisotropy`). Anisotropy on a device without
+    /// it is made, and samples as the module's docs say. Refused: what the device cannot do on
+    /// any use of the state (`Unsupported`, naming the feature: a mirror-clamp address mode, a
+    /// pixel-coordinate one's included). A minimum or maximum reduction reads the weighted
+    /// average.
     pub fn new_sampler_state(&self, descriptor: &SamplerDescriptor) -> Result<SamplerState, Error> {
         self.sampler_state(
             "new_sampler_state",
@@ -396,9 +404,12 @@ impl Device {
         })?;
         self.check_sampler_placement(call, options.placement)?;
         // Metal samples an anisotropy past 16 with 32 (`metal_anisotropy`): a device whose
-        // samplers take less filters with its largest (`bind::sampler_desc` bounds it so).
+        // samplers take less filters with its largest (`bind::sampler_desc` bounds it so). A
+        // device without `samplerAnisotropy` filters with none, Metal's filter emulated where the
+        // function reaches the sample and the isotropic one recorded elsewhere.
         let largest = f32::from_bits(profile.limits().max_sampler_anisotropy_bits);
-        if taken.max_anisotropy as f32 > largest {
+        let anisotropy = (profile.enabled().features).contains(&VkFeature::SamplerAnisotropy);
+        if anisotropy && taken.max_anisotropy as f32 > largest {
             self.degrade(Degradation::CappedAnisotropy, || {
                 (
                     format!(

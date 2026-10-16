@@ -13,6 +13,7 @@ use crate::error::{
     Attachment, Capability, Error, Feature, InternalError, InternalKind, Unsupported,
 };
 use crate::metal;
+use crate::pipeline::descriptor::TessellationDescriptor;
 use crate::pipeline::interface::{MeshRecords, PatchDomain};
 use crate::pipeline::sym::SampledType;
 use crate::vk;
@@ -98,6 +99,10 @@ pub struct GraphicsState {
     /// (`[[viewport_array_index]]`): each primitive selects its viewport and scissor from the
     /// encoder's arrays. A rate-mapped pass drawn region by region sets one viewport per region, so
     /// [`RateMapRegions::admits`](crate::bind::RateMapRegions::admits) refuses such a pipeline.
+    /// Set too on a device without `multiViewport`, where the function stores no `ViewportIndex`
+    /// (every index selects viewport 0 of a draw's one, as Metal's does at or past the count):
+    /// there a draw of the pipeline while the encoder holds more than one viewport cannot select
+    /// one, and the runtime refuses it.
     #[cfg_attr(feature = "serde", serde(default))]
     pub writes_viewport_index: bool,
     /// The color attachments the fragment function reads, and may write, as storage images
@@ -134,6 +139,14 @@ pub struct GraphicsState {
     /// every other pipeline.
     #[cfg_attr(feature = "serde", serde(default))]
     pub mesh_records: Option<MeshRecords>,
+    /// A render pipeline whose vertex function is a post-tessellation vertex function, on a
+    /// device without `tessellationShader`: the function is the pipeline's `VERTEX` module, which
+    /// draws the tessellator's triangles itself as a `TRIANGLE_LIST` from an emulated draw's
+    /// records (the binder's `DrawCommands::tessellation_dispatch` states the consumer contract),
+    /// and the pipeline has no tessellation stages (`tessellation` is `None`). `None` for every
+    /// other pipeline.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub emulated_tessellation: Option<EmulatedTessellation>,
     /// The vertex function writes `[[point_size]]` (as its compiled function's
     /// `writes_point_size` answers; a post-tessellation vertex function's is dropped and
     /// answers `false`). Metal sizes a point
@@ -148,7 +161,8 @@ pub struct GraphicsState {
     /// one vertex of it (Vulkan's provoking vertex): a user varying it declares `[[flat]]` (a
     /// mesh function's per-primitive output read as one included), or the
     /// `[[render_target_array_index]]` or `[[viewport_array_index]]` a vertex function wrote,
-    /// read as a varying or as the `Layer` or `ViewportIndex` builtin. `false` for a pipeline
+    /// read as a varying or as the `Layer` or `ViewportIndex` builtin, or the `[[primitive_id]]`
+    /// its vertex function computes (`IoRole::PrimitiveId`). `false` for a pipeline
     /// without a fragment function, and for one whose fragment function reads only smooth
     /// inputs, perspective-correct or not, or none. A consumer that draws a primitive's vertices
     /// in another order can change what a draw shows only where this is set or the fragment
@@ -172,10 +186,11 @@ pub struct GraphicsState {
     pub writes_depth: bool,
     /// Whether the fragment function reads `[[barycentric_coord]]`, perspective-correct or not
     /// and of any width (`float`, `float2`, `float3`), from the translated fragment stage's
-    /// builtins (`BaryCoordKHR`, `BaryCoordNoPerspKHR`). Metal declares the weights at the pixel
-    /// center only (MSL 5.2.3.4); an AIR barycentric input sampled at the centroid or a sample
-    /// is refused at compile time, so no pipeline has one. `false` for a pipeline without a
-    /// fragment function. A primitive's weights follow the order its vertices are drawn in, so
+    /// builtins (`BaryCoordKHR`, `BaryCoordNoPerspKHR`) or, on a device without
+    /// `fragmentShaderBarycentric`, its varyings, which the pipeline's synthesized geometry stages
+    /// write. Metal reads the weights at the pixel center (MSL 5.2.3.4), under a `centroid` or
+    /// `sample` qualifier too, and so does the stage. `false` for a pipeline without a fragment
+    /// function. A primitive's weights follow the order its vertices are drawn in, so
     /// a consumer that draws them in another order can change what a draw shows only where this
     /// or [`flat_fragment_inputs`](GraphicsState::flat_fragment_inputs) is set.
     #[cfg_attr(feature = "serde", serde(default))]
@@ -248,6 +263,27 @@ pub struct GraphicsState {
     /// which the binder writes to the function's `PushField::ColorWriteRule` of the attachment.
     #[cfg_attr(feature = "serde", serde(default))]
     pub color_write_rules: Vec<(u32, u32)>,
+    /// The fragment function reads textures through snapshots (`VariantKey::snapshot_textures`):
+    /// each draw of the pipeline is drawn twice in its subpass, the texture's attachment in
+    /// `VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT`, first with every color write mask 0,
+    /// then with the pipeline's own (`PushHole::SnapshotPhase`), which it sets for every color
+    /// blend element: `dynamic_states` holds `VK_DYNAMIC_STATE_COLOR_WRITE_MASK_EXT`. The consumer
+    /// creates the pipeline with `VK_PIPELINE_CREATE_COLOR_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT`. Its
+    /// requirements name `attachmentFeedbackLoopLayout` and `extendedDynamicState3ColorWriteMask`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub snapshot_reads: bool,
+    /// The group of the pipeline's color attachments this variant draws
+    /// (`VariantKey::color_group`), where the device draws them in groups
+    /// ([`ColorGroup`](crate::pipeline::ColorGroup)): every color-indexed part of the state
+    /// (`color_attachments`, `input_attachments`, `storage_attachments`, `color_write_rules`
+    /// among them) indexes the group's attachments by location, Metal's attachment
+    /// `colors()[l]` at location `l`, and the fragment stage writes those alone. Each draw of the
+    /// pipeline is a draw of every group's variant, in a pass of that group's attachments; the
+    /// vertex stage is the same module in every variant, and the fragment stage's `FragDepth`,
+    /// `SampleMask` and `FragStencilRefEXT` outputs are decorated `Invariant` where there is more
+    /// than one group. `None` where each attachment is at its own index.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub color_group: Option<crate::pipeline::lower_inputs::ColorGroup>,
 }
 
 /// What a consumer and the binder need of a tessellation pipeline.
@@ -294,6 +330,45 @@ pub struct TessellationState {
     pub control_point_index_type: metal::TessellationControlPointIndexType,
 }
 
+/// What a consumer and the binder need of a tessellation pipeline on a device without
+/// `tessellationShader` (`GraphicsState::emulated_tessellation`).
+///
+/// Metal draws `patchCount` patches of `instanceCount` instances from `patchStart` and
+/// `baseInstance`. Each draw of patches runs the tessellation scan
+/// ([`TessellationScanModule`](crate::bind::TessellationScanModule) of [`Self::scan_kernel`]),
+/// which reads each patch's factors from the encoder's factor buffer and writes the draw's
+/// records, one per instance and patch, and its chunks' `VkDrawIndirectCommand`s; each chunk is
+/// a draw of the pipeline, whose vertex function decodes and places the tessellator's point for
+/// the vertex it draws and reads Metal's patch index, instance index and control points' elements
+/// as the native control stage hands them. The pipeline's topology is `TRIANGLE_LIST`, not
+/// dynamic state.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct EmulatedTessellation {
+    /// The post-tessellation vertex function's patch type.
+    pub domain: PatchDomain,
+    /// Its `[[patch(_, N)]]` control points per patch (0 when unstated): a patch draw's
+    /// `numberOfPatchControlPoints` must equal a stated count.
+    pub control_points: u32,
+    /// The descriptor's tessellation state, which the vertex function bakes in.
+    pub descriptor: TessellationDescriptor,
+}
+
+impl EmulatedTessellation {
+    /// The tessellation scan the pipeline's draws run.
+    pub fn scan_kernel(&self) -> crate::bind::TessellationScanKernel {
+        crate::bind::TessellationScanKernel {
+            domain: self.domain,
+            partition_mode: self.descriptor.partition_mode,
+            output_winding_order: self.descriptor.output_winding_order,
+            max_tessellation_factor: self.descriptor.max_tessellation_factor,
+            factor_step_function: self.descriptor.factor_step_function,
+            factor_scale_enabled: self.descriptor.factor_scale_enabled,
+        }
+    }
+}
+
 impl GraphicsState {
     /// A state that draws `topology` at `rasterization_samples` and nothing else: no attachment,
     /// dynamic state, tessellation, imageblock, fetch or amplification (one view). A consumer
@@ -325,6 +400,7 @@ impl GraphicsState {
             shadow_stencil: None,
             early_fragment_tests: false,
             mesh_records: None,
+            emulated_tessellation: None,
             writes_point_size: false,
             flat_fragment_inputs: false,
             clip_distances: 0,
@@ -336,6 +412,8 @@ impl GraphicsState {
             sample_mask: None,
             shader_tests: None,
             color_write_rules: Vec::new(),
+            snapshot_reads: false,
+            color_group: None,
         }
     }
 
@@ -527,6 +605,9 @@ fn dynamic_state_feature(state: vk::DynamicState) -> Result<Option<VkFeature>, E
         // `VK_EXT_extended_dynamic_state2`'s first feature (core in Vulkan 1.3 without one), made
         // dynamic only where the profile has it.
         D::PRIMITIVE_RESTART_ENABLE => Some(VkFeature::ExtendedDynamicState2),
+        // `VK_EXT_extended_dynamic_state3`'s color write masks, dynamic only in a pipeline that
+        // reads through snapshots (`GraphicsState::snapshot_reads`).
+        D::COLOR_WRITE_MASK_EXT => Some(VkFeature::ExtendedDynamicState3ColorWriteMask),
         other => {
             return Err(Error::Internal(InternalError::new(
                 InternalKind::Invariant,

@@ -1,4 +1,4 @@
-// Owned fixture (WP-FMX, DESIGN D253): how Metal composes its fast-math functions, with the
+// Owned fixture: how Metal composes its fast-math functions, with the
 // default fast math. Each fast function (`air.fast_*`) is written beside the composition MSL
 // Table 8.2 gives for it or a candidate one, over the same operands, so the reading shows where
 // Apple's result is a composition of other operations and where it is its own approximation:

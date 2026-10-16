@@ -2,10 +2,11 @@
 
 use super::super::error::{internal, Error};
 use super::super::host_aliases::{self, Alias};
+use super::super::key_hash::KeyMap;
 use super::super::resource::ResourceKey;
 use super::super::shadow::{
     self, ShadowBuffer, ShadowCopies, ShadowCopy, ShadowSource, ShadowSync, ShadowTarget,
-    ShadowUse, Step,
+    ShadowUse, Step, Within,
 };
 use super::super::tracker::{Access, Use, UseRange};
 use ash::vk;
@@ -35,6 +36,7 @@ fn shadow_joined(
                 regions: Vec::new(),
                 staging: None,
                 texel: Some(4),
+                words: None,
             },
             alias,
         },
@@ -71,6 +73,7 @@ fn through(texture: &Arc<ShadowCopies>, writes: bool) -> (ShadowUse, Use<Resourc
             overwrites: false,
             kept: false,
             area: None,
+            loads: None,
         },
         used,
     )
@@ -150,7 +153,7 @@ fn planned(
             Ok(*made)
         })
         .unwrap();
-    sync.after(&shadows, &uses);
+    sync.after(&shadows, &uses, &[]);
     copies
 }
 
@@ -203,6 +206,7 @@ fn a_copy_back_covers_only_where_the_commands_wrote() {
         overwrites: false,
         kept: false,
         area,
+        loads: None,
     };
     let (_, written) = through(&t, true);
     let run = |areas: &[Option<[u32; 4]>]| {
@@ -212,7 +216,7 @@ fn a_copy_back_covers_only_where_the_commands_wrote() {
             let uses = [written.clone()];
             let copies = sync.before(&shadows, &uses, |_| Ok(0)).unwrap();
             assert!(copies.iter().all(|copy| copy.area.is_none()), "a copy in");
-            sync.after(&shadows, &uses);
+            sync.after(&shadows, &uses, &[]);
         }
         back_areas(&mut sync)
     };
@@ -233,6 +237,338 @@ fn a_copy_back_covers_only_where_the_commands_wrote() {
     assert_eq!(joined[0].area, Some([2, 2, 6, 6]));
     shadow::join(&mut joined, &through(&t, true).0);
     assert_eq!(joined[0].area, None);
+}
+
+/// A shadowed texture over `bytes` of the buffer `buffer` whose copies are cut to a rectangle
+/// (`ShadowCopies::cuts`): one region of a 64x32 image, 4 bytes a texel, rows 320 bytes apart.
+fn cut_shadow(buffer: ResourceKey, bytes: Range<u64>) -> Arc<ShadowCopies> {
+    let mut copies = Arc::into_inner(shadow(buffer, bytes)).expect("one holder");
+    if let ShadowSource::Bytes {
+        target: ShadowTarget::Image { regions, .. },
+        ..
+    } = &mut copies.source
+    {
+        regions.push(vk::BufferImageCopy {
+            buffer_offset: 256,
+            buffer_row_length: 80,
+            buffer_image_height: 0,
+            image_subresource: vk::ImageSubresourceLayers {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                mip_level: 0,
+                base_array_layer: 0,
+                layer_count: 1,
+            },
+            image_offset: vk::Offset3D::default(),
+            image_extent: vk::Extent3D {
+                width: 64,
+                height: 32,
+                depth: 1,
+            },
+        });
+    }
+    assert!(copies.cuts());
+    Arc::new(copies)
+}
+
+/// The copies `sync` plans before a command of `shadows` with `uses`, then the command noted:
+/// each copy's step (into the image, or back) and area.
+fn planned_areas(
+    sync: &mut ShadowSync<u32>,
+    shadows: &[ShadowUse],
+    uses: &[Use<ResourceKey>],
+) -> Vec<(bool, Option<[u32; 4]>)> {
+    let copies = sync.before(shadows, uses, |_| Ok(0)).unwrap();
+    sync.after(shadows, uses, &[]);
+    copies
+        .iter()
+        .map(|copy| (matches!(copy.step, Step::Into), copy.area))
+        .collect()
+}
+
+/// A use that reads and writes a texture only inside a rectangle (`ShadowUse::loads`, a pass's
+/// attachment it loads and takes no other way, inside its draws' scissors) copies in only the
+/// texels there, and its writes are copied back there alone. A later command of the encoder that
+/// reads past them first takes a copy back of what was written and a copy in of every texel, so
+/// no texel the image did not take from the buffer is read or copied back. A shadow whose copies
+/// are not cut to a rectangle, a use joined with one that reads anywhere, and a texture written
+/// two ways copy every texel in; a use inside the rectangle the image holds copies nothing in.
+#[test]
+fn a_copy_in_covers_only_where_the_command_reads_and_writes() {
+    let buffer = ResourceKey::new();
+    let t = cut_shadow(buffer, 256..256 + 320 * 32);
+    let (_, written) = through(&t, true);
+    let (_, read) = through(&t, false);
+    let inside = |area: [u32; 4], writes: bool| ShadowUse {
+        copies: Arc::clone(&t),
+        writes,
+        overwrites: false,
+        kept: false,
+        area: writes.then_some(area),
+        loads: Some(area),
+    };
+    let a = [8, 4, 40, 20];
+    let mut sync = ShadowSync::<u32>::default();
+    let uses = [written.clone()];
+    assert_eq!(
+        planned_areas(&mut sync, &[inside(a, true)], &uses),
+        [(true, Some(a))]
+    );
+    // Inside what the image holds: nothing more is copied in.
+    assert_eq!(
+        planned_areas(&mut sync, &[inside([10, 5, 20, 10], true)], &uses),
+        []
+    );
+    assert_eq!(back_areas(&mut sync), [Some(a)]);
+    // Past it: what was written goes back, then every texel comes in.
+    let mut sync = ShadowSync::<u32>::default();
+    planned_areas(&mut sync, &[inside(a, true)], &uses);
+    let (anywhere, _) = through(&t, false);
+    assert_eq!(
+        planned_areas(&mut sync, &[anywhere], std::slice::from_ref(&read)),
+        [(false, Some(a)), (true, None)]
+    );
+    assert_eq!(back_areas(&mut sync), []);
+    // Past it, unwritten: only the copy in.
+    let mut sync = ShadowSync::<u32>::default();
+    planned_areas(&mut sync, &[inside(a, false)], std::slice::from_ref(&read));
+    assert_eq!(
+        planned_areas(&mut sync, &[inside([0, 0, 64, 32], false)], &[read]),
+        [(true, Some([0, 0, 64, 32]))]
+    );
+    // Joined with a use that reads anywhere, a use reads anywhere.
+    let mut joined = vec![inside(a, true)];
+    shadow::join(&mut joined, &through(&t, false).0);
+    assert_eq!((joined[0].loads, joined[0].area), (None, Some(a)));
+    let mut sync = ShadowSync::<u32>::default();
+    assert_eq!(planned_areas(&mut sync, &joined, &uses), [(true, None)]);
+    // Two uses inside rectangles read inside the one bounding both.
+    let mut joined = vec![inside(a, true)];
+    shadow::join(&mut joined, &inside([30, 10, 50, 30], false));
+    assert_eq!(joined[0].loads, Some([8, 4, 50, 30]));
+    // A shadow whose copies are not cut: every texel.
+    let whole = shadow(buffer, 256..1280);
+    let mut sync = ShadowSync::<u32>::default();
+    let uncut = ShadowUse {
+        copies: Arc::clone(&whole),
+        ..inside(a, true)
+    };
+    let uses = [through(&whole, true).1];
+    assert_eq!(planned_areas(&mut sync, &[uncut], &uses), [(true, None)]);
+    // Written two ways: kept, and every texel copied in for the merge to compare.
+    let mut sync = ShadowSync::<u32>::default();
+    let uses = [written, bytes(buffer, 256..512, true)];
+    let copies = sync.before(&[inside(a, true)], &uses, |_| Ok(7)).unwrap();
+    assert_eq!(
+        moved(&copies),
+        [Moved::Into(t.shadow_key), Moved::Keep(t.shadow_key, 7)]
+    );
+    assert_eq!(copies[0].area, None);
+    // The texels a cut copy moves.
+    let copy = ShadowCopy::<u32> {
+        copies: Arc::clone(&t),
+        step: Step::Into,
+        kept: false,
+        area: Some(a),
+        bounded: false,
+    };
+    assert_eq!((copy.texels_in(), copy.texels_back()), (32 * 16, 0));
+}
+
+/// Each copy's step (into the image, or not), area, and whether it is a copy in of what changed
+/// within a rectangle.
+fn steps(copies: &[ShadowCopy<u32>]) -> Vec<(bool, Option<[u32; 4]>, bool)> {
+    copies
+        .iter()
+        .map(|copy| (matches!(copy.step, Step::Into), copy.area, copy.bounded))
+        .collect()
+}
+
+/// The copies before a command that reads `texture` anywhere, then the command noted.
+fn read_anywhere(
+    sync: &mut ShadowSync<u32>,
+    texture: &Arc<ShadowCopies>,
+) -> Vec<(bool, Option<[u32; 4]>, bool)> {
+    let (shadow, used) = through(texture, false);
+    let shadows = [shadow];
+    let uses = [used];
+    let copies = sync.before(&shadows, &uses, |_| Ok(0)).unwrap();
+    sync.after(&shadows, &uses, &[]);
+    steps(&copies)
+}
+
+/// The copies before a command that uses `shadows`, has `others` and writes `parts` within
+/// rectangles, as a pass's plan gives them (`render/shadows.rs`: every use before it), then the
+/// command noted.
+fn within_command(
+    sync: &mut ShadowSync<u32>,
+    shadows: &[ShadowUse],
+    parts: &[Within],
+    others: &[Use<ResourceKey>],
+) -> Vec<(bool, Option<[u32; 4]>, bool)> {
+    let mut uses = others.to_vec();
+    uses.extend(parts.iter().flat_map(|part| part.uses.iter().cloned()));
+    let copies = sync.before(shadows, &uses, |_| Ok(0)).unwrap();
+    sync.after(shadows, others, parts);
+    steps(&copies)
+}
+
+/// A command whose writes of a texture's bytes change its texels inside a rectangle alone
+/// (`shadow::Within`: a render pass instance's draws into a color attachment it loads, inside
+/// their scissors) leaves an image of those texels current but there: the next command that
+/// uses it copies in the texels inside the rectangle bounding every such write since its copy
+/// in, and nothing where none came. A write of the bytes another way, one of a texture with no
+/// shadow, one whose texels are laid out otherwise (`ShadowCopies::same_texels`), an image whose
+/// copies are not cut, and one kept for a merge copy every texel in again.
+#[test]
+fn writes_within_a_rectangle_copy_in_only_the_texels_they_changed() {
+    let buffer = ResourceKey::new();
+    let bytes_of = 256..256 + 320 * 32;
+    let t = cut_shadow(buffer, bytes_of.clone());
+    let attachment = bytes(buffer, bytes_of.clone(), true);
+    let within = |area: [u32; 4], texels: Option<&Arc<ShadowCopies>>| Within {
+        uses: vec![attachment.clone()],
+        texels: texels.cloned(),
+        area,
+    };
+    let whole = (true, None, false);
+    let mut sync = ShadowSync::<u32>::default();
+    assert_eq!(read_anywhere(&mut sync, &t), [whole]);
+    let part = [within([8, 4, 12, 6], Some(&t))];
+    assert_eq!(within_command(&mut sync, &[], &part, &[]), []);
+    assert_eq!(
+        read_anywhere(&mut sync, &t),
+        [(true, Some([8, 4, 12, 6]), true)]
+    );
+    assert_eq!(read_anywhere(&mut sync, &t), []);
+    // Two commands before the next read: the rectangle bounding both.
+    within_command(&mut sync, &[], &[within([8, 4, 12, 6], Some(&t))], &[]);
+    within_command(&mut sync, &[], &[within([30, 1, 31, 2], Some(&t))], &[]);
+    assert_eq!(
+        read_anywhere(&mut sync, &t),
+        [(true, Some([8, 1, 31, 6]), true)]
+    );
+    // A texture over the same bytes, laid out texel for texel as `t`: the same rectangle.
+    let twin = cut_shadow(buffer, bytes_of.clone());
+    within_command(&mut sync, &[], &[within([0, 0, 2, 2], Some(&twin))], &[]);
+    assert_eq!(
+        read_anywhere(&mut sync, &t),
+        [(true, Some([0, 0, 2, 2]), true)]
+    );
+    // Then a write of the bytes another way: every texel.
+    within_command(&mut sync, &[], &[within([0, 0, 2, 2], Some(&t))], &[]);
+    within_command(&mut sync, &[], &[], &[bytes(buffer, 256..260, true)]);
+    assert_eq!(read_anywhere(&mut sync, &t), [whole]);
+    // A write within whose texture has no shadow, or whose texels lie otherwise: every texel.
+    within_command(&mut sync, &[], &[within([0, 0, 2, 2], None)], &[]);
+    assert_eq!(read_anywhere(&mut sync, &t), [whole]);
+    let other = shadow(buffer, bytes_of.clone());
+    within_command(&mut sync, &[], &[within([0, 0, 2, 2], Some(&other))], &[]);
+    assert_eq!(read_anywhere(&mut sync, &t), [whole]);
+    // Writes elsewhere in the buffer: nothing.
+    let apart = Within {
+        uses: vec![bytes(buffer, 0..256, true)],
+        texels: Some(Arc::clone(&t)),
+        area: [0, 0, 2, 2],
+    };
+    within_command(&mut sync, &[], &[apart], &[]);
+    assert_eq!(read_anywhere(&mut sync, &t), []);
+    // A shadow whose copies are not cut: every texel.
+    let uncut = shadow(buffer, bytes_of);
+    let mut sync = ShadowSync::<u32>::default();
+    assert_eq!(read_anywhere(&mut sync, &uncut), [whole]);
+    within_command(&mut sync, &[], &[within([0, 0, 2, 2], Some(&uncut))], &[]);
+    assert_eq!(read_anywhere(&mut sync, &uncut), [whole]);
+    // An image written through since its copy in goes back first, then holds the bytes: only
+    // what the writes within changed comes in.
+    let mut sync = ShadowSync::<u32>::default();
+    read_anywhere(&mut sync, &t);
+    let (writing, _) = through(&t, true);
+    within_command(&mut sync, std::slice::from_ref(&writing), &[], &[]);
+    let part = [within([0, 0, 2, 2], Some(&t))];
+    assert_eq!(
+        within_command(&mut sync, &[], &part, &[]),
+        [(false, None, false)]
+    );
+    assert_eq!(
+        read_anywhere(&mut sync, &t),
+        [(true, Some([0, 0, 2, 2]), true)]
+    );
+    // One written through by the command that writes within too is kept and merged: every texel.
+    let mut sync = ShadowSync::<u32>::default();
+    read_anywhere(&mut sync, &t);
+    assert_eq!(
+        within_command(&mut sync, &[writing], &part, &[]),
+        [(false, None, false)]
+    );
+    assert_eq!(read_anywhere(&mut sync, &t), [(false, None, false), whole]);
+}
+
+/// A copy back of a part of a shadowed attachment's image (a pass's attachment of a texture whose
+/// own image is a shadow, written inside its draws' scissors) leaves another image laid out as
+/// it, texel for texel, current but inside the part: the next command that reads that image
+/// copies in those texels alone. An image laid out otherwise copies every texel in.
+#[test]
+fn a_copy_back_of_a_part_leaves_a_twin_stale_there_alone() {
+    let buffer = ResourceKey::new();
+    let bytes_of = 256..256 + 320 * 32;
+    let attachment = cut_shadow(buffer, bytes_of.clone());
+    let read = cut_shadow(buffer, bytes_of.clone());
+    let other = shadow(buffer, bytes_of);
+    let (_, written) = through(&attachment, true);
+    let instance = |sync: &mut ShadowSync<u32>, area: [u32; 4], also: &[&Arc<ShadowCopies>]| {
+        let mut shadows = vec![ShadowUse {
+            copies: Arc::clone(&attachment),
+            writes: true,
+            overwrites: false,
+            kept: false,
+            area: Some(area),
+            loads: Some([0, 0, 64, 32]),
+        }];
+        let mut uses = vec![written.clone()];
+        for texture in also {
+            let (shadow, used) = through(texture, false);
+            shadows.push(shadow);
+            uses.push(used);
+        }
+        let copies = sync.before(&shadows, &uses, |_| Ok(0)).unwrap();
+        sync.after(&shadows, &uses, &[]);
+        copies
+            .iter()
+            .map(|copy| {
+                let key = copy.copies.shadow_key;
+                (
+                    key,
+                    matches!(copy.step, Step::Into),
+                    copy.area,
+                    copy.bounded,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut sync = ShadowSync::<u32>::default();
+    let all = Some([0, 0, 64, 32]);
+    let a = attachment.shadow_key;
+    let (r, o) = (read.shadow_key, other.shadow_key);
+    assert_eq!(
+        instance(&mut sync, [8, 4, 12, 6], &[]),
+        [(a, true, all, false)]
+    );
+    assert_eq!(
+        instance(&mut sync, [20, 4, 24, 6], &[&read, &other]),
+        [
+            (a, false, Some([8, 4, 12, 6]), false),
+            (r, true, None, false),
+            (o, true, None, false),
+        ]
+    );
+    assert_eq!(
+        instance(&mut sync, [0, 0, 1, 1], &[&read, &other]),
+        [
+            (a, false, Some([20, 4, 24, 6]), false),
+            (r, true, Some([20, 4, 24, 6]), true),
+            (o, true, None, false),
+        ]
+    );
 }
 
 /// A copy back of a part of a one-level, one-slice texture's image is its region cut to the
@@ -334,6 +670,7 @@ fn a_use_that_overwrites_every_texel_takes_no_copy_in() {
         overwrites: true,
         kept: false,
         area: None,
+        loads: None,
     };
     let (_, written) = through(&t, true);
     for stores in [true, false] {
@@ -342,7 +679,7 @@ fn a_use_that_overwrites_every_texel_takes_no_copy_in() {
         let uses = [written.clone()];
         let copies = sync.before(&shadows, &uses, |_| Ok(0)).unwrap();
         assert_eq!(named(&copies), [], "stores {stores}");
-        sync.after(&shadows, &uses);
+        sync.after(&shadows, &uses, &[]);
         assert_eq!(
             command(&mut sync, &[(&t, false)], &[]),
             [],
@@ -437,7 +774,7 @@ fn textures_over_two_buffers_of_one_memory_see_each_others_writes() {
     let a = shadow(first, 0..1024);
     let b = shadow_joined(second, Some(first), 0..1024);
     let c = shadow(other, 0..1024);
-    let aliases = std::collections::HashMap::from([(second, Alias { key: first })]);
+    let aliases: KeyMap<_, _> = [(second, Alias { key: first })].into_iter().collect();
     let augmented = |uses: &[Use<ResourceKey>]| {
         host_aliases::augmented(&aliases, None, uses).unwrap_or_else(|| uses.to_vec())
     };
@@ -568,6 +905,7 @@ fn view_of(image: ResourceKey, levels: Range<u32>, layers: Range<u32>) -> Arc<Sh
             range: range.clone(),
             shadow: vk::Image::null(),
             regions: Vec::new(),
+            through: None,
         },
         shadow_key: ResourceKey::new(),
         shadow_range: range,

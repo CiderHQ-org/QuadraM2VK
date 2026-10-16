@@ -38,8 +38,10 @@
 //!   for its stage (`Unsupported{MeshShading}` naming the limit), a `drawMeshThreads` that
 //!   leaves a partial object threadgroup (`NotImplemented(MeshShading)`: splitting the draw into
 //!   regions of their own threadgroup sizes would reorder its primitives), and an object
-//!   function's threadgroup memory arguments (`NotImplemented(MeshShading)`, which no setter
-//!   here sets). On a device with `VK_EXT_mesh_shader` an indirect draw is
+//!   function's arena with the lengths `setObjectThreadgroupMemoryLength:atIndex:` set
+//!   ([`RenderCommandEncoder::set_object_threadgroup_memory_length`]) past the device's workgroup
+//!   memory for the object stage (`Unsupported{ThreadgroupMemorySize}` naming the limit). On a
+//!   device with `VK_EXT_mesh_shader` an indirect draw is
 //!   `NotImplemented(IndirectDrawArguments)`: the binder asks for its arguments on the CPU, since
 //!   nothing bounds its GPU-written group counts by the device's limits yet.
 //! - **Emulated** on a device without `VK_EXT_mesh_shader`, whose pipeline's object and mesh
@@ -76,6 +78,7 @@ use super::{RenderCall, Table};
 use crate::binding::{MeshRegions, PushWrite};
 use crate::buffer::Buffer;
 use crate::degradation::Degradation;
+use crate::device::functions::Vk;
 use crate::draw_source::DrawSource;
 use crate::encoder::EncoderCore;
 use crate::error::{internal, invalid, Error, Problem};
@@ -94,6 +97,24 @@ use metal2vulkan::bind::{
 };
 use std::sync::Arc;
 
+/// Whether `state`'s object function has threadgroup memory arguments, whose lengths a draw
+/// specializes (`RuntimeFact::ObjectThreadgroupArena`).
+pub(super) fn reads_object_threadgroup_memory(
+    state: &crate::pipeline::RenderPipelineState,
+) -> bool {
+    match state.kind() {
+        super::RenderStateKind::Graphics(graphics) => {
+            graphics.base().dependencies.iter().any(|d| {
+                matches!(
+                    d.fact,
+                    metal2vulkan::pipeline::RuntimeFact::ObjectThreadgroupArena { .. }
+                )
+            })
+        }
+        super::RenderStateKind::Tile(_) => false,
+    }
+}
+
 /// Metal's most threads of an object or mesh threadgroup (`maxTotalThreadsPerObjectThreadgroup`,
 /// `maxTotalThreadsPerMeshThreadgroup`, measured).
 const METAL_THREADGROUP_THREADS: u64 = 1024;
@@ -111,9 +132,12 @@ impl RenderCommandEncoder {
         offset: u64,
         index: u32,
     ) -> Result<(), Error> {
-        self.log(|_| RenderCall::Buffer(Table::Object, buffer.cloned(), offset, index));
+        self.log(|log| {
+            let buffer = buffer.map(|buffer| log.hold_buffer(buffer));
+            RenderCall::Buffer(Table::Object, buffer, offset, index)
+        });
         self.object
-            .set_buffer(&self.core, "set_object_buffer", buffer, offset, index)
+            .set_buffer(&mut self.core, "set_object_buffer", buffer, offset, index)
     }
 
     /// `setObjectBuffers:offsets:withRange:`. Refused as
@@ -132,8 +156,13 @@ impl RenderCommandEncoder {
                 first,
             )
         });
-        self.object
-            .set_buffers(&self.core, "set_object_buffers", buffers, offsets, first)
+        self.object.set_buffers(
+            &mut self.core,
+            "set_object_buffers",
+            buffers,
+            offsets,
+            first,
+        )
     }
 
     /// `setObjectBufferOffset:atIndex:`. Refused as
@@ -141,7 +170,7 @@ impl RenderCommandEncoder {
     pub fn set_object_buffer_offset(&mut self, offset: u64, index: u32) -> Result<(), Error> {
         self.log(|_| RenderCall::BufferOffset(Table::Object, offset, index));
         self.object
-            .set_buffer_offset(&self.core, "set_object_buffer_offset", offset, index)
+            .set_buffer_offset(&mut self.core, "set_object_buffer_offset", offset, index)
     }
 
     /// `setObjectBytes:length:atIndex:`: as [`set_vertex_bytes`](Self::set_vertex_bytes), in
@@ -149,7 +178,7 @@ impl RenderCommandEncoder {
     pub fn set_object_bytes(&mut self, bytes: &[u8], index: u32) -> Result<(), Error> {
         self.log(|log| RenderCall::Bytes(Table::Object, log.byte_span(bytes), index));
         self.object
-            .set_bytes(&self.core, "set_object_bytes", bytes, None, index)
+            .set_bytes(&mut self.core, "set_object_bytes", bytes, None, index)
     }
 
     /// `setObjectTexture:atIndex:` (`None` unbinds the index). Refused as
@@ -159,9 +188,12 @@ impl RenderCommandEncoder {
         texture: Option<&Texture>,
         index: u32,
     ) -> Result<(), Error> {
-        self.log(|_| RenderCall::Texture(Table::Object, texture.cloned(), index));
+        self.log(|log| {
+            let texture = texture.map(|texture| log.hold_texture(texture));
+            RenderCall::Texture(Table::Object, texture, index)
+        });
         self.object
-            .set_textures(&self.core, "set_object_texture", &[texture], index)
+            .set_textures(&mut self.core, "set_object_texture", &[texture], index)
     }
 
     /// `setObjectTextures:withRange:`. Refused as
@@ -173,7 +205,7 @@ impl RenderCommandEncoder {
     ) -> Result<(), Error> {
         self.log(|log| RenderCall::Textures(Table::Object, log.texture_span(textures), first));
         self.object
-            .set_textures(&self.core, "set_object_textures", textures, first)
+            .set_textures(&mut self.core, "set_object_textures", textures, first)
     }
 
     /// `setObjectSamplerState:atIndex:` (`None` unbinds the index). Refused as
@@ -183,9 +215,12 @@ impl RenderCommandEncoder {
         sampler: Option<&SamplerState>,
         index: u32,
     ) -> Result<(), Error> {
-        self.log(|_| RenderCall::Sampler(Table::Object, sampler.cloned(), index));
+        self.log(|log| {
+            let sampler = sampler.map(|sampler| log.hold_sampler(sampler));
+            RenderCall::Sampler(Table::Object, sampler, index)
+        });
         self.object.set_samplers(
-            &self.core,
+            &mut self.core,
             "set_object_sampler_state",
             &[sampler],
             None,
@@ -204,12 +239,34 @@ impl RenderCommandEncoder {
     ) -> Result<(), Error> {
         self.log(|_| RenderCall::Samplers(Table::Object, Samplers::of(samplers, clamps, first)));
         self.object.set_samplers(
-            &self.core,
+            &mut self.core,
             "set_object_sampler_states",
             samplers,
             clamps,
             first,
         )
+    }
+
+    /// `setObjectThreadgroupMemoryLength:atIndex:`: the length of the object function's
+    /// `[[threadgroup(index)]]` argument in the encoder's later mesh draws, whichever pipeline
+    /// state they use; until it is set an argument's length is 0. A length that is not a multiple
+    /// of 16 bytes is rounded up to 16 at the draw, as a kernel's
+    /// (`ComputeCommandEncoder::set_threadgroup_memory_length`) is. Refused: an index past the
+    /// table (`Invalid`). The object function's arena with these lengths must fit the device's
+    /// workgroup memory for the object stage, checked at the draw
+    /// (`Unsupported{ThreadgroupMemorySize}` naming the limit). An indirect command's mesh draw
+    /// takes none of these: one whose object function reads them is
+    /// `NotImplemented(IndirectRenderCommands)`.
+    pub fn set_object_threadgroup_memory_length(
+        &mut self,
+        length: u32,
+        index: u32,
+    ) -> Result<(), Error> {
+        self.log(|_| RenderCall::ObjectThreadgroupMemoryLength(length, index));
+        const CALL: &str = "set_object_threadgroup_memory_length";
+        crate::argument_table::check_index(CALL, index, crate::compute::THREADGROUP_SLOTS)?;
+        self.object_threadgroup_lengths.insert(index, length);
+        Ok(())
     }
 
     /// `setMeshBuffer:offset:atIndex:` (`None` unbinds the index). Refused as
@@ -220,9 +277,12 @@ impl RenderCommandEncoder {
         offset: u64,
         index: u32,
     ) -> Result<(), Error> {
-        self.log(|_| RenderCall::Buffer(Table::Mesh, buffer.cloned(), offset, index));
+        self.log(|log| {
+            let buffer = buffer.map(|buffer| log.hold_buffer(buffer));
+            RenderCall::Buffer(Table::Mesh, buffer, offset, index)
+        });
         self.mesh
-            .set_buffer(&self.core, "set_mesh_buffer", buffer, offset, index)
+            .set_buffer(&mut self.core, "set_mesh_buffer", buffer, offset, index)
     }
 
     /// `setMeshBuffers:offsets:withRange:`. Refused as
@@ -242,7 +302,7 @@ impl RenderCommandEncoder {
             )
         });
         self.mesh
-            .set_buffers(&self.core, "set_mesh_buffers", buffers, offsets, first)
+            .set_buffers(&mut self.core, "set_mesh_buffers", buffers, offsets, first)
     }
 
     /// `setMeshBufferOffset:atIndex:`. Refused as
@@ -250,7 +310,7 @@ impl RenderCommandEncoder {
     pub fn set_mesh_buffer_offset(&mut self, offset: u64, index: u32) -> Result<(), Error> {
         self.log(|_| RenderCall::BufferOffset(Table::Mesh, offset, index));
         self.mesh
-            .set_buffer_offset(&self.core, "set_mesh_buffer_offset", offset, index)
+            .set_buffer_offset(&mut self.core, "set_mesh_buffer_offset", offset, index)
     }
 
     /// `setMeshBytes:length:atIndex:`: as [`set_vertex_bytes`](Self::set_vertex_bytes), in the
@@ -258,15 +318,18 @@ impl RenderCommandEncoder {
     pub fn set_mesh_bytes(&mut self, bytes: &[u8], index: u32) -> Result<(), Error> {
         self.log(|log| RenderCall::Bytes(Table::Mesh, log.byte_span(bytes), index));
         self.mesh
-            .set_bytes(&self.core, "set_mesh_bytes", bytes, None, index)
+            .set_bytes(&mut self.core, "set_mesh_bytes", bytes, None, index)
     }
 
     /// `setMeshTexture:atIndex:` (`None` unbinds the index). Refused as
     /// [`set_vertex_texture`](Self::set_vertex_texture) is.
     pub fn set_mesh_texture(&mut self, texture: Option<&Texture>, index: u32) -> Result<(), Error> {
-        self.log(|_| RenderCall::Texture(Table::Mesh, texture.cloned(), index));
+        self.log(|log| {
+            let texture = texture.map(|texture| log.hold_texture(texture));
+            RenderCall::Texture(Table::Mesh, texture, index)
+        });
         self.mesh
-            .set_textures(&self.core, "set_mesh_texture", &[texture], index)
+            .set_textures(&mut self.core, "set_mesh_texture", &[texture], index)
     }
 
     /// `setMeshTextures:withRange:`. Refused as
@@ -278,7 +341,7 @@ impl RenderCommandEncoder {
     ) -> Result<(), Error> {
         self.log(|log| RenderCall::Textures(Table::Mesh, log.texture_span(textures), first));
         self.mesh
-            .set_textures(&self.core, "set_mesh_textures", textures, first)
+            .set_textures(&mut self.core, "set_mesh_textures", textures, first)
     }
 
     /// `setMeshSamplerState:atIndex:` (`None` unbinds the index). Refused as
@@ -288,9 +351,12 @@ impl RenderCommandEncoder {
         sampler: Option<&SamplerState>,
         index: u32,
     ) -> Result<(), Error> {
-        self.log(|_| RenderCall::Sampler(Table::Mesh, sampler.cloned(), index));
+        self.log(|log| {
+            let sampler = sampler.map(|sampler| log.hold_sampler(sampler));
+            RenderCall::Sampler(Table::Mesh, sampler, index)
+        });
         self.mesh.set_samplers(
-            &self.core,
+            &mut self.core,
             "set_mesh_sampler_state",
             &[sampler],
             None,
@@ -309,7 +375,7 @@ impl RenderCommandEncoder {
     ) -> Result<(), Error> {
         self.log(|_| RenderCall::Samplers(Table::Mesh, Samplers::of(samplers, clamps, first)));
         self.mesh.set_samplers(
-            &self.core,
+            &mut self.core,
             "set_mesh_sampler_states",
             samplers,
             clamps,
@@ -693,7 +759,7 @@ impl MeshSteps {
     ///
     /// `command_buffer` is the encoder's, recording outside a render pass, and only the encoder
     /// records it.
-    pub(crate) unsafe fn record_in(&self, raw: &ash::Device, command_buffer: vk::CommandBuffer) {
+    pub(crate) unsafe fn record_in(&self, raw: &Vk, command_buffer: vk::CommandBuffer) {
         // SAFETY: as the caller states; barriers need nothing more.
         unsafe {
             Barrier::everything().record(raw, command_buffer);
@@ -710,7 +776,7 @@ impl MeshSteps {
     /// `command_buffer` is recording outside a render pass, and only one encoder records it; the
     /// pipelines, the sets and what they name are live until it completes (the draw retains
     /// them, and the command buffer the scan's set).
-    unsafe fn dispatches(&self, raw: &ash::Device, command_buffer: vk::CommandBuffer) {
+    unsafe fn dispatches(&self, raw: &Vk, command_buffer: vk::CommandBuffer) {
         let point = vk::PipelineBindPoint::COMPUTE;
         // A pipeline of the draw's layout, its sets and its push writes.
         let bind = |pipeline: vk::Pipeline| {

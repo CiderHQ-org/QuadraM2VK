@@ -1,12 +1,11 @@
-# WP-XRB's extended-range blend table of the second source without fast math (DESIGN D748;
-# D678 item 7's table, metal2vulkan-devtools `xr_blends`). Metal's answers: EV XRB-xrtd-m4,
-# plain Metal on an Apple M4 under macOS 27.0.1 (26A434), the lane-table probe built with
-# -fmetal-math-mode=safe (EV XRB-xrtdr-m4, built with -fmetal-math-mode=relaxed, gave every
-# band the same bytes), our own probe over synthetic inputs.
-# Each configuration reads the second source (a factor 15 to 18), the function returning a
-# second output (index 1) of its own values, and drew into its own 64 x 4 band of every case's
-# target (the same 256 raw texels, outputs and second outputs in every band) under its scissor
-# and blend color, in one pass that loads and stores it.
+# The extended-range blend table of the second source without fast math (the blend table's
+# configurations, metal2vulkan-devtools `xr_blends`). Metal's answers: EV XRB-xrtd-m4, plain Metal
+# on an Apple M4 under macOS 27.0.1 (26A434), the lane-table probe built with -fmetal-math-mode=safe
+# (EV XRB-xrtdr-m4, built with -fmetal-math-mode=relaxed, gave every band the same bytes), our own
+# probe over synthetic inputs. Each configuration reads the second source (a factor 15 to 18), the
+# function returning a second output (index 1) of its own values, and drew into its own 64 x 4 band
+# of every case's target (the same 256 raw texels, outputs and second outputs in every band) under
+# its scissor and blend color, in one pass that loads and stores it.
 #   cfg <index> <source rgb> <destination rgb> <rgb op> <source alpha> <destination alpha>
 #       <alpha op> <write mask> <blend color: 4 f32 bits>      (Metal's enum numbers)
 #   inputs <format> <h|f> <FNV-1a 64 of a band's plane 0> <of its alpha bytes> <of its outputs>

@@ -2975,8 +2975,9 @@ fn refusal(r: Result<Entry, Error>) -> Unsupported {
 
 /// A surviving call is refused at its location in the inlined entry, naming its callee, as its
 /// typed feature (not implemented yet): binding an intersection function table (an undecoded
-/// `air.set_intersection_function_table.*` intrinsic, by its family), a call to link, and an
-/// indirect call; another unknown intrinsic is `UnknownIntrinsic`.
+/// `air.set_intersection_function_table.*` intrinsic, by its family), a multisample imageblock's
+/// operation (imageblocks), a call to link, and an indirect call; another unknown intrinsic is
+/// `UnknownIntrinsic`.
 #[test]
 fn surviving_calls_are_refused_by_family_naming_the_callee() {
     let at = Location::function(DiagName::new("k"), Some(0), Some(0));
@@ -2988,6 +2989,17 @@ fn surviving_calls_are_refused_by_family_naming_the_callee() {
     assert_eq!(
         u.symbol,
         Some(DiagName::new("air.set_intersection_function_table.p1i8"))
+    );
+
+    // A multisample imageblock's operation is imageblocks, naming the operation.
+    let u = refusal(specialize_call(|m, fty| {
+        Callee::UnknownIntrinsic(m.declare("air.get_imageblock_num_colors", fty))
+    }));
+    assert_eq!(u.feature, Feature::Imageblocks);
+    assert_eq!(u.location, Some(at.clone()));
+    assert_eq!(
+        u.symbol,
+        Some(DiagName::new("air.get_imageblock_num_colors"))
     );
 
     let u = refusal(specialize_call(|m, fty| {

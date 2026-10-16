@@ -1,4 +1,4 @@
-// fpv_srgb_storage.metal (metal2vulkan, WP-FPV, DESIGN D716): kernels reading and writing an 8-bit
+// fpv_srgb_storage.metal (metal2vulkan): kernels reading and writing an 8-bit
 // sRGB texture at a storage slot, `float` and `half`, written from scratch for the lane
 // `runtime_lane::srgb_storage`. Each thread takes its texel at `gid` of a row `width` texels wide,
 // element `gid.y * width + gid.x` of buffer 0.

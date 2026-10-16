@@ -8,18 +8,20 @@
 //! mark `p`; patch `p`'s attribute in buffer 1 (per patch) is `0xa0 + p`; every patch's factors
 //! are 1 but patch 3's, which are 0, so it culls.
 //!
-//! Each case's marks are those Metal stored (RT6 Metal probe 14d, an M4 with macOS 27.0.1, with
-//! and without API validation): patch `i` of a draw with a patch index buffer is the patch its
-//! `uint` at `patchStart + i` names, for its control points, its attribute, and its
-//! `[[patch_id]]`, while its factors stay those at `patchStart + i`; control point `k` of the
-//! patch whose index is `p`, drawn by `drawIndexedPatches`, is the index at `3p + k` of the
-//! control-point index buffer from its offset, `ushort` or `uint` as the pipeline's
-//! `tessellationControlPointIndexType` states. What Metal's validation stops of a patch index
-//! buffer is `patches.rs`'s; of a control-point index buffer, this file's (probes 14d and 14e).
+//! Each case's marks are those Metal stored (a Metal probe on an M4 with macOS 27.0.1, with and
+//! without API validation): patch `i` of a draw with a patch index buffer is the patch its `uint`
+//! at `patchStart + i` names, for its control points, its attribute, and its `[[patch_id]]`, while
+//! its factors stay those at `patchStart + i`; control point `k` of the patch whose index is `p`,
+//! drawn by `drawIndexedPatches`, is the index at `3p + k` of the control-point index buffer from
+//! its offset, `ushort` or `uint` as the pipeline's `tessellationControlPointIndexType` states.
+//! What Metal's validation stops of a patch index buffer is `patches.rs`'s; of a control-point
+//! index buffer, this file's (probes 14d and 14e).
+//!
+//! Each test runs on the device's tessellation stages and on the emulation (`patches::Path`).
 
-use super::{buffer_with, read_buffer, validated_device, Messages, ScratchCache, WAIT};
+use super::patches::{on_path, Path};
+use super::{buffer_with, read_buffer, WAIT};
 use crate::air_library::AirLibrary;
-use crate::gpu::TEST_DEVICE;
 use metal2vulkan::metal::{
     TessellationControlPointIndexType, TessellationFactorStepFunction, TessellationPartitionMode,
     VertexFormat, VertexStepFunction,
@@ -163,10 +165,10 @@ fn cases() -> Vec<(Case, [u32; 4])> {
         ),
         // An offset off a multiple of 4, which Metal's validation stops, read from the offset
         // rounded down, as plain Metal reads it (an indirect command buffer's patch draw of the
-        // words 9, 3, 1 at offset 2 drew patches 9 and 3, probe `RT7-icb-probe7-m4`; RT6 probe
-        // 14 `pib_offset2` drew nothing through indices that read as 0x10000 and 0x30000 so):
-        // after the 2 zero bytes, the words 0x2_0000 and 0x1_0000 read as patches 0 and 2, where
-        // the offset itself would read patches past the buffers.
+        // words 9, 3, 1 at offset 2 drew patches 9 and 3, probe `RT7-icb-probe7-m4`; Metal probe
+        // case `pib_offset2` on an M4 drew nothing through indices that read as 0x10000 and 0x30000
+        // so): after the 2 zero bytes, the words 0x2_0000 and 0x1_0000 read as patches 0 and 2,
+        // where the offset itself would read patches past the buffers.
         (
             Case {
                 patch_indices: Some((&[0x2_0000, 0x1_0000], 2)),
@@ -414,20 +416,26 @@ impl Lane {
 /// control points, attribute and patch index, from its offset and the draw's patch start, direct
 /// and indirect, and the factors stay at the patch's position; a control-point index buffer
 /// names each control point of the patch its patch index names, `ushort` and `uint`, from its
-/// offset, direct and indirect. A device without tessellation shaders refuses the pipelines,
-/// reported as its refusal.
+/// offset, direct and indirect. A device that cannot make the fixture's pipelines refuses them,
+/// reported as its refusal; the emulation never does.
 #[test]
 fn patch_index_buffers_name_patches_as_metal() {
-    let cache = ScratchCache::new().unwrap();
-    let messages = Messages::default();
-    {
-        let device = validated_device(TEST_DEVICE, &messages, cache.path()).unwrap();
-        let name = device.name().to_owned();
+    name_patches_as_metal(Path::Native);
+}
+
+/// [`patch_index_buffers_name_patches_as_metal`], emulated.
+#[test]
+fn emulated_patch_index_buffers_name_patches_as_metal() {
+    name_patches_as_metal(Path::Emulated);
+}
+
+fn name_patches_as_metal(path: Path) {
+    on_path(path, |device, name| {
         let lane = Lane::new(device);
         for (case, metal) in cases() {
             let pipeline = match lane.pipeline(case.index_type()) {
                 Ok(pipeline) => pipeline,
-                Err(Error::Unsupported(u)) => {
+                Err(Error::Unsupported(u)) if path == Path::Native => {
                     eprintln!("patch index buffers on {name}: the pipeline is refused, {u:?}");
                     return;
                 }
@@ -443,34 +451,35 @@ fn patch_index_buffers_name_patches_as_metal() {
                 case.name
             );
         }
-    }
-    let reported = messages.take();
-    assert!(
-        reported.is_empty(),
-        "the validation layer reported: {reported:#?}"
-    );
+    });
 }
 
 /// What a draw gives on Metal: the marks it leaves where they are defined (`None` where the
 /// patch read past a buffer), or the problem Metal's validation stops it with.
 type Expected = Result<[Option<u32>; 4], DrawProblem>;
 
-/// What Metal's validation stops of a control-point index buffer (RT6 Metal probes 14d and 14e)
-/// is refused, typed, but for an offset that is not a multiple of the index size, which plain
-/// Metal reads from the offset rounded down (EVs ICBV-hostkinds-m3 and -m4) and the runtime
-/// likewise: a direct draw's `(patchStart + patchCount) · 3` indices past the buffer (a patch
-/// index buffer's patch indices are not checked against it, nor an indirect draw's). A draw of
-/// the other kind than the pipeline's, direct or indirect, draws as plain Metal draws it. A draw
-/// Metal's validation lets through draws; the marks of patches whose control points lie past the
-/// buffer, which Metal reads from memory past it (and the runtime as index 0), are not compared.
+/// What Metal's validation stops of a control-point index buffer (Metal probes on an M4) is
+/// refused, typed, but for an offset that is not a multiple of the index size, which plain Metal
+/// reads from the offset rounded down (EVs ICBV-hostkinds-m3 and -m4) and the runtime likewise: a
+/// direct draw's `(patchStart + patchCount) · 3` indices past the buffer (a patch index buffer's
+/// patch indices are not checked against it, nor an indirect draw's). A draw of the other kind than
+/// the pipeline's, direct or indirect, draws as plain Metal draws it. A draw Metal's validation
+/// lets through draws; the marks of patches whose control points lie past the buffer, which Metal
+/// reads from memory past it (and the runtime as index 0), are not compared.
 #[test]
 fn control_point_index_buffers_are_refused_as_metal_refuses_them() {
+    refused_as_metal_refuses_them(Path::Native);
+}
+
+/// [`control_point_index_buffers_are_refused_as_metal_refuses_them`], emulated.
+#[test]
+fn emulated_control_point_index_buffers_are_refused_as_metal_refuses_them() {
+    refused_as_metal_refuses_them(Path::Emulated);
+}
+
+fn refused_as_metal_refuses_them(path: Path) {
     use TessellationControlPointIndexType as T;
-    let cache = ScratchCache::new().unwrap();
-    let messages = Messages::default();
-    {
-        let device = validated_device(TEST_DEVICE, &messages, cache.path()).unwrap();
-        let name = device.name().to_owned();
+    on_path(path, |device, name| {
         let lane = Lane::new(device);
         let short = REVERSED.split_at(5).0;
         let six = REVERSED.split_at(6).0;
@@ -544,9 +553,9 @@ fn control_point_index_buffers_are_refused_as_metal_refuses_them() {
             // The other kind of draw than the pipeline's, which Metal's validation stops: an
             // indexed draw on a pipeline without an index type draws the patches' own control
             // points, the buffer unread, and a plain one on a pipeline with a type reads every
-            // index as 0 (RT6 Metal probe 14, rasterized: what each draws; a probe, a command's,
-            // the marks), and their indirect forms likewise (a Metal probe, the marks of both forms
-            // alike).
+            // index as 0 (a Metal probe on an M4, rasterized: what each draws; a probe, a
+            // command's, the marks), and their indirect forms likewise (a Metal probe, the marks of
+            // both forms alike).
             (
                 Case::indexed("indexed_without_type", Points::U32(REVERSED), 0),
                 T::None,
@@ -581,7 +590,7 @@ fn control_point_index_buffers_are_refused_as_metal_refuses_them() {
         for (case, index_type, expected) in rows {
             let pipeline = match lane.pipeline(index_type) {
                 Ok(pipeline) => pipeline,
-                Err(Error::Unsupported(u)) => {
+                Err(Error::Unsupported(u)) if path == Path::Native => {
                     eprintln!("control-point refusals on {name}: the pipeline is refused, {u:?}");
                     return;
                 }
@@ -609,10 +618,5 @@ fn control_point_index_buffers_are_refused_as_metal_refuses_them() {
                 }
             }
         }
-    }
-    let reported = messages.take();
-    assert!(
-        reported.is_empty(),
-        "the validation layer reported: {reported:#?}"
-    );
+    });
 }

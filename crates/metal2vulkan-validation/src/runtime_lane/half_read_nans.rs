@@ -253,7 +253,7 @@ fn kernel(op: Op) -> String {
         _ => ("!3, !4, !5, !7", 3),
     };
     format!(
-        r#"; Owned synthetic kernel (WP-FRT3, DESIGN D414 item 14).
+        r#"; Owned synthetic kernel.
 source_filename = "half_read_nans.metal"
 {states}
 define void @k(ptr addrspace(1) %c, ptr addrspace(1) %out, {texture_param}, {sampler_param}i32 %gid) {{

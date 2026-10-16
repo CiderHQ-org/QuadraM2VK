@@ -1,4 +1,4 @@
-// Owned fixture (WP-OB1, DESIGN D225): loads and stores past a threadgroup allocation, the
+// Owned fixture: loads and stores past a threadgroup allocation, the
 // threadgroup containment form. One threadgroup of eight threads over a 16-word allocation; thread
 // t stores 0xB0000000 | t to tg[t] and 0xC0000000 | t to tg[idx[t]], and after a barrier loads
 // tg[idx[8 + t]] into out[t]. The case's idx puts stores 0 to 3 in tg (words 8 to 11) and stores 4

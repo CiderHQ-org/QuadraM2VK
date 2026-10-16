@@ -101,7 +101,12 @@ fn a_sample_count_is_two_or_four() {
             assert!(errors.iter().any(|e| e.contains("omitting")), "{errors:?}");
         }
         if count == 8 {
-            assert!(errors.iter().any(|e| e.contains("D292")), "{errors:?}");
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| e.contains("no Metal answer exists for another count")),
+                "{errors:?}"
+            );
         }
     }
     assert_eq!(RASTER_SAMPLE_COUNTS, [2, 4]);

@@ -2944,6 +2944,22 @@ fn read(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>, r: &Read) -> BResult<
     } else {
         texel_memory(cx, fb, &r.image)?
     };
+    // A slot the draw reads through a snapshot (`LoweringInputs::snapshot_textures`): its
+    // interface fact admits only the plain fetch of a level the snapshot's copy makes, through the
+    // image the copy fetches from.
+    let snapshot = match r.image {
+        ImageRef::Slot(index) => {
+            let plain = sampled
+                && spec.is_none()
+                && sample.is_none()
+                && r.edge.is_none()
+                && !r.level_views
+                && within.is_none()
+                && r.raw == cx.decl.families.texture.raw.contains_key(&index);
+            crate::lower::fragment::snapshot_prepare(cx, fb, index, img, plain)?
+        }
+        ImageRef::Heap { .. } => None,
+    };
     let access = move |fb: &mut FunctionBuilder<'_>, sparse: bool| -> BResult<SValue> {
         match (sampled, sparse) {
             (true, false) => fb.fetch(img, coord, &ops),
@@ -3001,7 +3017,13 @@ fn read(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>, r: &Read) -> BResult<
             inb = Some(and(fb, inb, kept)?);
             (texel, Some(word))
         }
-        None => (access(fb, false)?, None),
+        None => match snapshot {
+            Some(s) => (
+                crate::lower::fragment::snapshot_read(cx, fb, s, coord)?,
+                None,
+            ),
+            None => (access(fb, false)?, None),
+        },
     };
     // A heap member of a form a heap reads: its raw texel's value, Metal's out-of-bounds texel
     // selected against its own image, which the float array's test below then leaves.

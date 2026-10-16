@@ -1101,10 +1101,7 @@ fn a_restricted_context_enables_the_recommendation_at_its_profiles_version() {
             }
         }
     }
-    assert_eq!(
-        at_1_2,
-        ["lunarg-desktop-baseline-2023", "vk12-bare", "vk12-floor"]
-    );
+    assert_eq!(at_1_2, ["lunarg-desktop-baseline-2023", "vk12-floor"]);
 }
 
 /// A fake Vulkan instance for the cross-check of the executor's feature structures against the

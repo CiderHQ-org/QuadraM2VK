@@ -1,4 +1,4 @@
-// Owned fixture (WP-WRG, DESIGN D307 item 14, TODO 1.8): which cube face and texel Metal reads
+// Owned fixture: which cube face and texel Metal reads
 // when two or three of a direction's components share the largest magnitude, or lie at either end
 // of the float range. The cases bind an rgba32_float cube whose texel (i, j) of face f holds
 // (f + 1, i + 1, j + 1, 0), so a result names the face and the texel it read. Lane `i` samples the direction `dir[i].xyz` through a nearest sampler, and

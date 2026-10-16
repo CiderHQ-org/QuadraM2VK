@@ -1,5 +1,5 @@
-// Owned fixture (WP-A2, DESIGN D127): the `{T, i8}` status word of a texture sample, gather, and
-// read (WP-L7f). MSL exposes it only through `sparse_color<T>::resident()`, which the front end
+// Owned fixture: the `{T, i8}` status word of a texture sample, gather, and
+// read. MSL exposes it only through `sparse_color<T>::resident()`, which the front end
 // spells `(status & 1) ^ 1`: bit 0 of the word is set when the texel is not resident. The case
 // model binds ordinary (non-sparse) textures only, so the reading is what Metal reports for them,
 // beside each operation's value. Loop-free.

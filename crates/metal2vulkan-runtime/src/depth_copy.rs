@@ -34,6 +34,13 @@
 //!   above. The `FragDepth` draw also reads its depth from such a colour image (`R32_SFLOAT`,
 //!   [`DepthDraw::from_colour`]).
 //!
+//! - **The magnitude draws** ([`DepthDraw::magnitude`], [`DepthDraw::magnitude_bits`]): a
+//!   multisampled depth stored without its signs after a pass with depth writes
+//!   (`texture/signed_depth.rs`): the `FragDepth` draw of [`DepthStencilCopy::DepthMagnitude`],
+//!   from a sampled copy of the depth, exact or announced as the draw above is; or the bits draw of
+//!   [`DepthStencilCopy::MagnitudeBits`], between two `R32_UINT` colour images of the depth's
+//!   bits that maintenance8's copies move to and from it, exact.
+//!
 //! - **The depth stand-in's copies** (`depth_stand_in.rs`): a pass's depth samples into an
 //!   `R32_SFLOAT` stand-in, multisampled or sample planes, by a dispatch of
 //!   `bind::depth_split_module` ([`DepthSplit`]), and back by the `FragDepth` draw of
@@ -356,7 +363,9 @@ impl Device {
         };
         let colour = matches!(
             copy,
-            DepthStencilCopy::DepthBits | DepthStencilCopy::StencilBits
+            DepthStencilCopy::DepthBits
+                | DepthStencilCopy::StencilBits
+                | DepthStencilCopy::MagnitudeBits
         );
         let result = (|| {
             made.render_pass = match colour {
@@ -829,6 +838,64 @@ impl DepthDraw {
         }
         let view = aspect_view(source, aspect)?;
         DepthDraw::of_view(device, copy, view, destination, area, feature)
+    }
+
+    /// The draw that writes the depth `source`'s depth aspect holds at each pixel and sample of
+    /// `area`, without its sign ([`DepthStencilCopy::DepthMagnitude`]), into `destination`'s
+    /// depth there: a multisampled depth's strip by draws (`texture/signed_depth.rs`).
+    pub(super) fn magnitude(
+        device: &Device,
+        source: &Target,
+        destination: &Target,
+        area: DrawArea,
+        feature: &Feature,
+    ) -> Result<DepthDraw, Error> {
+        let depth =
+            |target: &Target| image_aspects(target.format).contains(ImageAspectFlags::DEPTH);
+        if source.samples != destination.samples || !depth(source) || !depth(destination) {
+            return Err(internal(
+                "a depth's magnitude between targets of other samples or without depth",
+            ));
+        }
+        let view = aspect_view(source, ImageAspectFlags::DEPTH)?;
+        DepthDraw::of_view(
+            device,
+            DepthStencilCopy::DepthMagnitude,
+            view,
+            destination,
+            area,
+            feature,
+        )
+    }
+
+    /// The bits draw that writes the bits `source`, a multisampled `R32_UINT` colour target of a
+    /// 32-bit float depth's bits, holds at each pixel and sample of `area` without the sign bit
+    /// ([`DepthStencilCopy::MagnitudeBits`]) into `destination`, another, there: a multisampled
+    /// depth's strip through colour copies (`texture/signed_depth.rs`).
+    pub(super) fn magnitude_bits(
+        device: &Device,
+        source: &Target,
+        destination: &Target,
+        area: DrawArea,
+        feature: &Feature,
+    ) -> Result<DepthDraw, Error> {
+        if source.samples != destination.samples
+            || source.format != Format::R32_UINT
+            || destination.format != Format::R32_UINT
+        {
+            return Err(internal(
+                "a magnitude bits copy between targets of other samples or formats",
+            ));
+        }
+        let view = aspect_view(source, ImageAspectFlags::COLOR)?;
+        DepthDraw::of_view(
+            device,
+            DepthStencilCopy::MagnitudeBits,
+            view,
+            destination,
+            area,
+            feature,
+        )
     }
 
     /// The draw of `copy` reading `view` into `destination` over `area`.

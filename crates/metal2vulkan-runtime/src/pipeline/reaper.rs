@@ -5,7 +5,8 @@
 //! - **Started by a release.** A state released while a piece of its own is running starts the
 //!   thread ([`Reaper::start`], on the releasing thread), unless it runs; until then the device
 //!   has none.
-//! - **What a piece gave back.** Such a piece, as it ends, hands what it took ([`Reaps::reap`]);
+//! - **What a piece gave back.** Such a piece, as it ends, hands what it took ([`Reaps::reap`]),
+//!   with the trail it opened before settling its making (`trails.rs`), which closes after it;
 //!   the thread lets go of each, in turn, outside any section of the exit guard: each release of a
 //!   Vulkan object it reaches runs in a section of its own (`release.rs`), refused once the
 //!   process is exiting.

@@ -123,8 +123,8 @@ impl SourceRow {
         if entries > 1 {
             return Err(format!(
                 "source {} declares {entries} entry points: a stored source row is one module with \
-                 one entry, so a private module with several is refused (DESIGN D277; public \
-                 fixtures are a row per entry)",
+                 one entry, so a private module with several is refused (public fixtures \
+                 are a row per entry)",
                 self.label
             ));
         }
@@ -1341,7 +1341,7 @@ pub fn check_public_source(path: &str, air_sha256: &str) -> Result<(), String> {
     if actual != air_sha256 {
         return Err(format!(
             "public_source {path} hashes to {actual}, not the case's AIR {air_sha256}: the \
-             fixture changed without its case being re-keyed (DESIGN D243)"
+             fixture changed without its case being re-keyed"
         ));
     }
     Ok(())

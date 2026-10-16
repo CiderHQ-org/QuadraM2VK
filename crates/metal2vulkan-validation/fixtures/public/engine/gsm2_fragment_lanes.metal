@@ -1,7 +1,7 @@
-// Owned fixture (WP-GSM2, docs/TODO.md 5.15; written for this repository): a fragment function's
+// Owned fixture (written for this repository): a fragment function's
 // simdgroup lane, read as a `uint` parameter, a `ushort` parameter and a Metal 3.1 program-scope
 // `uint`, and its simdgroup width as a parameter, each written to an r32_uint target; and the lane
-// beside the simdgroup operations that name lanes (D561 item 7), written to an rgba32_uint target:
+// beside the simdgroup operations that name lanes, written to an rgba32_uint target:
 // the lane, a shuffle of the lane from itself, the first active lane by the ballot's bits, and a
 // shuffle of the lane from that first lane. The vertex function places each vertex at the
 // clip-space position buffer 0 holds, as given, so a draw's coverage is the positions' alone.

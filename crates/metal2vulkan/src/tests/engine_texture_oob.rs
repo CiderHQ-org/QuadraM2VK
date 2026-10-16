@@ -1887,7 +1887,7 @@ fn a_read_where_its_thread_wrote_out_of_bounds_is_zero() {
 /// where nothing out of bounds is defined. A texture atomic alone is both where image robustness
 /// discards it unguarded : the atomic-only `fwd_atomic`, declared `R32Uint` as atomics need, is
 /// `Volatile` on every profile with `robustImageAccess` (`roadmap-2022`, `swiftshader`) and on none
-/// without (`vk12-floor`, `vk12-bare`), where the shader guards it.
+/// without (`vk12-floor`), where the shader guards it.
 #[test]
 fn only_a_slot_left_both_a_store_and_a_load_is_volatile() {
     let Some(bc) = assemble_text("texture_forward", FORWARD) else {
@@ -1953,7 +1953,6 @@ fn only_a_slot_left_both_a_store_and_a_load_is_volatile() {
         ("roadmap-2022", true),
         ("swiftshader", true),
         ("vk12-floor", false),
-        ("vk12-bare", false),
     ] {
         assert_eq!(atomic.get(stem), Some(&want), "fwd_atomic on {stem}");
     }

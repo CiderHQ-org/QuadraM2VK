@@ -1,6 +1,6 @@
-// Owned fixture (WP-RT6, DESIGN D165, D305 item 22): vertex amplification into a layered render
-// pass, the functions RT6 Metal probe 13 drew (an M4), so each lane pass of an amplified draw asks
-// the question the probe measured. Written for this repository; no third-party source. Loop-free.
+// Owned fixture: vertex amplification into a layered render pass, the functions a Metal probe drew
+// on an M4, so each lane pass of an amplified draw asks the question the probe measured. Written
+// for this repository; no third-party source. Loop-free.
 #include <metal_stdlib>
 using namespace metal;
 

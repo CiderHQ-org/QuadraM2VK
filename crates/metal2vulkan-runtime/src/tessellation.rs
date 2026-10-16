@@ -25,20 +25,53 @@
 //! as the binder takes them. One that is 0 as a `half` (2^-30) culls every patch.
 //!
 //! Until `setTessellationFactorScale:` is called, a pipeline that enables the scale culls every
-//! patch on Metal (RT6 Metal probe 11: factors of 1 marked no domain point, with and without API
-//! validation), as a scale of 0 would; one that does not enable it never reads the scale. So an
-//! encoder holds no scale until one is set, and such a draw records nothing (`render.rs`), as
-//! does one with a scale that is 0 or negative as a `half`, which the binder refuses.
+//! patch on Metal (a Metal probe on an M4: factors of 1 marked no domain point, with and without
+//! API validation), as a scale of 0 would; one that does not enable it never reads the scale. So an
+//! encoder holds no scale until one is set, and such a draw records nothing (`render.rs`), as does
+//! one with a scale that is 0 or negative as a `half`, which the binder refuses.
 //!
 //! Metal's validation stops a scale of 0, a negative one, NaN, an infinity or a subnormal `float`
-//! at the setter, but plain Metal takes each (RT6 Metal probe 10 and a probe on an M4): 0, -1, NaN,
-//! `-∞` and both subnormals (`±2^-139`, 0 as a `half`) culled every patch of a pipeline that
-//! enables the scale, `+∞` drew what the maximum factor draws (as 16 does under a maximum of 16),
-//! and each drew as 1 does on a pipeline that does not enable it. So the setter takes every scale,
-//! and one that is 0, negative or NaN as a `half` culls.
+//! at the setter, but plain Metal takes each (Metal probes on an M4): 0, -1, NaN, `-∞` and both
+//! subnormals (`±2^-139`, 0 as a `half`) culled every patch of a pipeline that enables the scale,
+//! `+∞` drew what the maximum factor draws (as 16 does under a maximum of 16), and each drew as 1
+//! does on a pipeline that does not enable it. So the setter takes every scale, and one that is 0,
+//! negative or NaN as a `half` culls.
 
 use super::buffer::Buffer;
 use metal2vulkan::bind::{TessellationFactorBuffer, TessellationFactors};
+use metal2vulkan::metal::TessellationControlPointIndexType;
+use metal2vulkan::pipeline::GraphicsState;
+
+/// What a pipeline's patch draws take of it, whether its tessellation is the device's
+/// (`GraphicsState::tessellation`) or emulated on a device without `tessellationShader`
+/// (`GraphicsState::emulated_tessellation`, `render/tessellation_scan.rs`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Patches {
+    /// The control points its post-tessellation vertex function states (0 for none).
+    pub(crate) control_points: u32,
+    /// Its `tessellationControlPointIndexType`.
+    pub(crate) control_point_index_type: TessellationControlPointIndexType,
+    /// Whether its tessellation is emulated.
+    pub(crate) emulated: bool,
+}
+
+/// The patch draws of the pipeline whose state is `graphics`: `None` for one that draws no
+/// patches.
+pub(crate) fn patches(graphics: &GraphicsState) -> Option<Patches> {
+    match (graphics.tessellation, graphics.emulated_tessellation) {
+        (Some(t), _) => Some(Patches {
+            control_points: t.control_points,
+            control_point_index_type: t.control_point_index_type,
+            emulated: false,
+        }),
+        (None, Some(e)) => Some(Patches {
+            control_points: e.control_points,
+            control_point_index_type: e.descriptor.control_point_index_type,
+            emulated: true,
+        }),
+        (None, None) => None,
+    }
+}
 
 /// The encoder's factor buffer, its offset and its instance stride.
 #[derive(Clone, Debug)]

@@ -19,8 +19,9 @@
 //! ([`StatusWord::MeshRecordsCursor`], 0 before the command buffer's first scan): `T` mesh
 //! threadgroups' words. A draw whose records the rest of the pool cannot hold, or whose vertices
 //! pass a `u32`, runs and draws nothing; the scan sets [`StatusBits::MESH_RECORDS_OVERFLOW`] and,
-//! for the command buffer's first such draw, the consumer's number for it, its object
-//! threadgroups and the mesh threadgroups it needed (saturated) in the fault words, which
+//! where it is the command buffer's first records fault of either kind (mesh or tessellation), the
+//! consumer's number for the draw, its object threadgroups and the mesh threadgroups it needed
+//! (saturated) in the fault words, which
 //! [`ExecutionStatus::decode`](crate::bind::ExecutionStatus::decode) reports. Nothing is drawn
 //! short silently.
 //!
@@ -39,6 +40,7 @@
 use std::sync::Arc;
 
 use crate::bind::index_bounds::finished;
+use crate::bind::replay::checked_mul;
 use crate::bind::status::{StatusBits, StatusWord};
 use crate::device::requirements::Requirements;
 use crate::device::Device;
@@ -97,7 +99,11 @@ pub const STATUS: ResourceSlot = ResourceSlot {
 };
 
 /// A `Block { u32 words[]; }` storage buffer bound at `sym`.
-fn words_buffer(b: &mut ModuleBuilder, sym: ResourceSlot, u32_: TypeId) -> BResult<GlobalId> {
+pub(crate) fn words_buffer(
+    b: &mut ModuleBuilder,
+    sym: ResourceSlot,
+    u32_: TypeId,
+) -> BResult<GlobalId> {
     let rta = b.ty(Type::RuntimeArray {
         elem: u32_,
         stride: Some(4),
@@ -110,33 +116,43 @@ fn words_buffer(b: &mut ModuleBuilder, sym: ResourceSlot, u32_: TypeId) -> BResu
     b.resource(sym, StorageClass::StorageBuffer, block)
 }
 
-fn k(f: &mut FunctionBuilder<'_>, v: u32) -> BResult<Value> {
+pub(crate) fn k(f: &mut FunctionBuilder<'_>, v: u32) -> BResult<Value> {
     let c = f.u32_const(v)?;
     f.module().const_value(c)
 }
 
 /// The pointer to word `index` of `buffer`'s runtime array.
-fn word_ptr(f: &mut FunctionBuilder<'_>, buffer: Value, index: Value) -> BResult<Value> {
+pub(crate) fn word_ptr(f: &mut FunctionBuilder<'_>, buffer: Value, index: Value) -> BResult<Value> {
     let zero = k(f, 0)?;
     f.access_chain(buffer, &[zero, index])
 }
 
-fn load(f: &mut FunctionBuilder<'_>, buffer: Value, index: Value) -> BResult<Value> {
+pub(crate) fn load(f: &mut FunctionBuilder<'_>, buffer: Value, index: Value) -> BResult<Value> {
     let p = word_ptr(f, buffer, index)?;
     f.load(p, MemAccess::default())
 }
 
-fn load_at(f: &mut FunctionBuilder<'_>, buffer: Value, index: u32) -> BResult<Value> {
+pub(crate) fn load_at(f: &mut FunctionBuilder<'_>, buffer: Value, index: u32) -> BResult<Value> {
     let i = k(f, index)?;
     load(f, buffer, i)
 }
 
-fn store(f: &mut FunctionBuilder<'_>, buffer: Value, index: Value, v: Value) -> BResult<()> {
+pub(crate) fn store(
+    f: &mut FunctionBuilder<'_>,
+    buffer: Value,
+    index: Value,
+    v: Value,
+) -> BResult<()> {
     let p = word_ptr(f, buffer, index)?;
     f.store(p, v, MemAccess::default())
 }
 
-fn store_at(f: &mut FunctionBuilder<'_>, buffer: Value, index: u32, v: Value) -> BResult<()> {
+pub(crate) fn store_at(
+    f: &mut FunctionBuilder<'_>,
+    buffer: Value,
+    index: u32,
+    v: Value,
+) -> BResult<()> {
     let i = k(f, index)?;
     store(f, buffer, i, v)
 }
@@ -152,7 +168,7 @@ fn contained(f: &mut FunctionBuilder<'_>, buffer: Value, index: Value) -> BResul
 }
 
 /// `a + b`, or `u32::MAX` where it wraps.
-fn saturating_add(f: &mut FunctionBuilder<'_>, a: Value, b: Value) -> BResult<Value> {
+pub(crate) fn saturating_add(f: &mut FunctionBuilder<'_>, a: Value, b: Value) -> BResult<Value> {
     let sum = f.binary(BinOp::IAdd, a, b)?;
     let wrapped = f.binary(BinOp::ULessThan, sum, a)?;
     let max = k(f, u32::MAX)?;
@@ -160,7 +176,7 @@ fn saturating_add(f: &mut FunctionBuilder<'_>, a: Value, b: Value) -> BResult<Va
 }
 
 /// `a / b` rounded up (`b` not 0), without wrapping.
-fn div_ceil(f: &mut FunctionBuilder<'_>, a: Value, b: Value) -> BResult<Value> {
+pub(crate) fn div_ceil(f: &mut FunctionBuilder<'_>, a: Value, b: Value) -> BResult<Value> {
     let q = f.binary(BinOp::UDiv, a, b)?;
     let r = f.binary(BinOp::UMod, a, b)?;
     let zero = k(f, 0)?;
@@ -190,7 +206,7 @@ fn bounded_groups(f: &mut FunctionBuilder<'_>, [x, y, z]: [Value; 3]) -> BResult
 }
 
 /// Run `each(f, i)` for `i` from `lo` below `hi`.
-fn for_range<'a>(
+pub(crate) fn for_range<'a>(
     f: &mut FunctionBuilder<'_>,
     u32_: TypeId,
     (lo, hi): (Value, Value),
@@ -216,7 +232,7 @@ fn for_range<'a>(
 }
 
 /// Run `then(f)` where `c` holds.
-fn when<'a>(
+pub(crate) fn when<'a>(
     f: &mut FunctionBuilder<'_>,
     c: Value,
     then: impl FnOnce(&mut FunctionBuilder<'_>) -> BResult<()> + 'a,
@@ -230,7 +246,7 @@ fn when<'a>(
 }
 
 /// The workgroup barrier over the partial sums.
-fn barrier(f: &mut FunctionBuilder<'_>) -> BResult<()> {
+pub(crate) fn barrier(f: &mut FunctionBuilder<'_>) -> BResult<()> {
     let sem = Semantics {
         order: MemoryOrder::AcquireRelease,
         workgroup_memory: true,
@@ -393,10 +409,11 @@ pub fn scan_typed_module() -> BResult<TypedModule> {
         let gw = f.glsl(GlslOp::UMax, &[group_words, one])?;
         let fit = f.binary(BinOp::UDiv, room, gw)?;
         let fits = f.binary(BinOp::ULessThanEqual, total, fit)?;
+        // The draw's vertices fit a `u32` where the product's high word is 0
+        // (`replay::checked_mul`, whose docs say why).
         let gv = f.glsl(GlslOp::UMax, &[group_vertices, one])?;
-        let max = k(f, u32::MAX)?;
-        let most = f.binary(BinOp::UDiv, max, gv)?;
-        let drawable = f.binary(BinOp::ULessThanEqual, total, most)?;
+        let (_, past) = checked_mul(f, total, gv, zero)?;
+        let drawable = f.unary(UnOp::LogicalNot, past)?;
         let ok = f.binary(BinOp::LogicalAnd, fits, drawable)?;
         let t = f.select(ok, total, zero)?;
         let words = f.binary(BinOp::IMul, t, group_words)?;
@@ -430,7 +447,8 @@ pub fn scan_typed_module() -> BResult<TypedModule> {
             let bit = k(f, StatusBits::MESH_RECORDS_OVERFLOW.0)?;
             let p = word_ptr(f, status, word)?;
             let old = f.atomic(AtomicOp::Or, p, Scope::Device, Semantics::RELAXED, bit)?;
-            let had = f.binary(BinOp::BitwiseAnd, old, bit)?;
+            let either = k(f, StatusBits::RECORDS_FAULTS.0)?;
+            let had = f.binary(BinOp::BitwiseAnd, old, either)?;
             let new = f.binary(BinOp::IEqual, had, zero)?;
             when(f, new, move |f| {
                 for (w, v) in [

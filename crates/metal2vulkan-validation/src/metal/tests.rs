@@ -6,6 +6,8 @@ use super::*;
 mod graphics;
 #[cfg(all(target_os = "macos", m2v_gpu))]
 mod imageblocks;
+#[cfg(all(target_os = "macos", m2v_gpu))]
+mod mesh_draws;
 mod oracle_modules;
 mod qualification_contracts;
 #[cfg(all(target_os = "macos", m2v_gpu))]

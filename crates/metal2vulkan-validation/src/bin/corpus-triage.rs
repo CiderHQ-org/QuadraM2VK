@@ -68,6 +68,8 @@ enum AuditKind {
     UlongTextures,
     FragmentVaryings,
     LinkedFunctions,
+    TileFunctions,
+    MeshDraws,
     Translation,
     BitcodeReader,
     Budgets,
@@ -94,13 +96,15 @@ impl AuditKind {
             "ulong-textures" => Ok(Self::UlongTextures),
             "fragment-varyings" => Ok(Self::FragmentVaryings),
             "linked-functions" => Ok(Self::LinkedFunctions),
+            "tile-functions" => Ok(Self::TileFunctions),
+            "mesh-draws" => Ok(Self::MeshDraws),
             "translation" => Ok(Self::Translation),
             "bitcode-reader" => Ok(Self::BitcodeReader),
             "budgets" => Ok(Self::Budgets),
             "specialization" => Ok(Self::Specialization),
             "authored-compile" => Ok(Self::AuthoredCompile),
             _ => Err(format!(
-                "unknown audit {value:?}; expected authoring-capabilities, rasterization-rate-maps, sample-rate, ulong-textures, fragment-varyings, linked-functions, translation, bitcode-reader, budgets, specialization, or authored-compile"
+                "unknown audit {value:?}; expected authoring-capabilities, rasterization-rate-maps, sample-rate, ulong-textures, fragment-varyings, linked-functions, tile-functions, mesh-draws, translation, bitcode-reader, budgets, specialization, or authored-compile"
             )),
         }
     }
@@ -161,7 +165,7 @@ fn run() -> Result<(), String> {
             }
             "-h" | "--help" => {
                 println!(
-                    "usage: corpus-triage [--corpus DIR] [--private-corpus DIR] [--index PATH] [--limit N] [--jobs N] [--summary-only] [--audit authoring-capabilities [--reclassify-all] | --audit rasterization-rate-maps|sample-rate|ulong-textures|fragment-varyings|linked-functions|bitcode-reader [--after SHA256] | --audit bitcode-reader --library-modules [--after SHA256] | --audit translation --profile P... [--after SHA256] [--current-fingerprint | --retry-failures | --hash-file PATH] | --audit budgets --profile P... | --audit specialization --profile P... | --audit authored-compile [--expectations PATH] [--bless [--profile P[+robustness-off]]... | --bless-additions | --case ID... [--profile P[+robustness-off]]...]]\n\n--audit authored-compile compiles every committed authored case of --corpus without a device, with the requests the engine executor builds for it (its constants, linked modules, bind shape, dispatch, companion stage, and device-replay variants), on each profile-leg of the expectation file (--expectations, by default authored-compile.tsv under the corpus root), each pipeline in a compile worker under the 20-s and 500-MiB ceilings, --jobs cases at once. Each case's outcome on each profile-leg (compiled, or the executor's refusal label) is cached in the index under the product's census key, the executor ABI, and the census's version, so a warm rerun compiles nothing; failures are never cached. It fails on any failed cell (an internal error, a worker stop, a case that does not check or map) and on any difference from the expectation file (a regression, a changed refusal, a newly compiled case, a new or removed case). --bless rewrites the file from the run and prints the differences (never with a failed cell); with --profile it compiles those profile-legs instead of the file's. --bless-additions (each train's gate step) compiles the file's profile-legs plus every C3 venue's profile-leg the file lacks (crates/metal2vulkan-validation/cutover/c3-venues.json), fails as a check does on any failed cell and on any changed cell of a case and profile-leg the file holds, writing nothing, and otherwise writes the file with the new cases and profile-legs added and the removed cases dropped, only when that changes it; its authored-compile-additions line counts what it added and removed. Each case is admitted, prepared, and compiled in its own case worker (a child of this binary under the 500-MiB ceiling, its wall ceiling 20 s plus 40 s per profile-leg), so this process holds only the committed cases and their cells; a case worker reads each private source by the byte range --index records (read only, never repaired), and one the index does not locate by parsing its whole shard (counted as sources_by_range and sources_by_shard). --case ID (repeatable) is a probe: it compiles only those committed cases (on --profile's profile-legs when named, else the file's), prints an authored-compile-cell line per cell with its outcome or failure and what its compiles measured, and compares those cases' rows with the expectation file when it exists; it never blesses. Host-replayed command buffers, whose pipelines the producer's records decide on the device, are reported as uncovered.\n\n--audit translation translates each row's retained bitcode (a public .ll row, which retains none, is assembled with llvm-as) with the engine for every --profile P (a committed profile under crates/metal2vulkan-validation/profiles, derived under the default untrusted policy), one profile after another, and records typed outcome classes under a per-profile census key (the product sources, SEMANTICS_VERSION, the lane's version, the profile, and the llvm-as and spirv-val versions; no other validation source); its summary is the non-gating shadow census. Rows stream from the index through the workers, so the parent's memory does not grow with --limit. --jobs defaults to the host's available logical CPU count (the equivalent of nproc). An explicit --jobs N overrides that default. --hash-file reads a whitespace-delimited SHA-256 from the first field of each non-empty line and audits exactly those indexed sources. --audit bitcode-reader decodes each selected row's retained bitcode with the engine's reader and compares its structure with llvm-dis (METAL2VULKAN_LLVM_DIS); it also reports the intrinsic census (calls decoded to air.*/llvm.* and every name kept as an unknown intrinsic, with rows, calls, and whether the decoder lists its family as not decoded) and every function called but declared without a body that is no intrinsic (what the module needs linked), with rows and calls; without --summary-only, each row's such functions too. Without --library-modules it only reads the index. With --library-modules it first syncs the library-module index with the module shards on disk (incrementally: only a new or changed shard is opened, and a warm index opens none), then selects the indexed library modules (the linked dependencies harvest retains apart from the sources) instead of the sources, in module-hash order after --after, at most --limit, reading only the selected modules' byte ranges. --audit bitcode-reader runs each attempt (a row's decode) in its own killable worker under the 20-s and 500-MiB ceilings: a stopped attempt is reported as worker-stopped <outcome> and counted in worker_stopped, beside the workers' peak RSS, allocator peak, and slowest time. --audit budgets reports the budget gates of each --profile P from the rows the current engine fingerprint recorded (slowest row, p50/p99 attempt time, peak worker RSS and the largest counting-allocator peak a worker reported, and the ledger >= 0.7 x allocator-peak check); a row stopped at the memory ceiling or by a worker abort, or refused at an in-process budget, fails it whatever its measure. It only reads the index and fails when a gate fails. Timeouts are transient and never recorded, so --audit budgets cannot see them; instead --audit translation exits non-zero when its batch has a budget stop (a timeout, OOM, worker abort, or in-process budget refusal) or a row above the 20-s or 500-MiB ceiling (its sampled RSS or its allocator peak), after reporting every profile (translation-audit-budgets-failure lines name them). Its outcome classes, shadow census, and batch ledger lines stay non-gating. --audit specialization first plans, in killable workers, every indexed row without a plan under the planner key (the product's sources, the lane's version, the census tools) or whose authored cases changed: the row's declared function constants and their value sets (the authored cases' sets; zero and one, which leave optional constants undefined; zero_defined and one_defined; a strength-2 binary covering array over every constant), kept whole when over the 16-set bound and reported. It plans at most --limit rows, in hash order (a row not yet planned has no set selected; the summaries count them). Then, for each --profile P in turn, it translates each planned set of each planned row, and each row whose current plain engine census outcome (which must cover every indexed row) is needs_input other than a function constant under the inputs set (no constants), at most --limit attempts (whole rows), each attempt in its own killable worker under the 20-s and 500-MiB ceilings, deriving the inputs the row's AIR states (a kernel's stage-input descriptor, a post-tessellation vertex descriptor, tile attachment formats, a storage texture's format, a visible function's retained module). Attempts are recorded in the lane's own table under the profile's engine census key extended by the lane's version; transient outcomes are not recorded. It prints the planning batch and the plans' summary (with the fifth function-constant operand's agreement with \"required\"), then per profile the batch (with its lanes and budgets) and the report over every recorded attempt: rows by plain outcome, outcomes by kind, inputs derived and left with their reasons, refusal classes ranked by rows with their value-dependent rows (ray-tracing classes listed apart), and the recorded attempts' budgets. It exits non-zero, after reporting everything, when a planning or attempt worker was stopped at or ran above a ceiling, or an attempt's ledger peak is below 7/10 of its allocator peak (each compile of an attempt is metered and measured on its own, and the attempt's cost is its last compile's)."
+                    "usage: corpus-triage [--corpus DIR] [--private-corpus DIR] [--index PATH] [--limit N] [--jobs N] [--summary-only] [--audit authoring-capabilities [--reclassify-all] | --audit rasterization-rate-maps|sample-rate|ulong-textures|fragment-varyings|linked-functions|tile-functions|mesh-draws|bitcode-reader [--after SHA256] | --audit bitcode-reader --library-modules [--after SHA256] | --audit translation --profile P... [--after SHA256] [--current-fingerprint | --retry-failures | --hash-file PATH] | --audit budgets --profile P... | --audit specialization --profile P... | --audit authored-compile [--expectations PATH] [--bless [--profile P[+robustness-off]]... | --bless-additions | --case ID... [--profile P[+robustness-off]]...]]\n\n--audit authored-compile compiles every committed authored case of --corpus without a device, with the requests the engine executor builds for it (its constants, linked modules, bind shape, dispatch, companion stage, and device-replay variants), on each profile-leg of the expectation file (--expectations, by default authored-compile.tsv under the corpus root), each pipeline in a compile worker under the 20-s and 500-MiB ceilings, --jobs cases at once. Each case's outcome on each profile-leg (compiled, or the executor's refusal label) is cached in the index under the product's census key, the executor ABI, and the census's version, so a warm rerun compiles nothing; failures are never cached. It fails on any failed cell (an internal error, a worker stop, a case that does not check or map) and on any difference from the expectation file (a regression, a changed refusal, a newly compiled case, a new or removed case). --bless rewrites the file from the run and prints the differences (never with a failed cell); with --profile it compiles those profile-legs instead of the file's. --bless-additions (each train's gate step) compiles the file's profile-legs plus every C3 venue's profile-leg the file lacks (crates/metal2vulkan-validation/cutover/c3-venues.json), fails as a check does on any failed cell and on any changed cell of a case and profile-leg the file holds, writing nothing, and otherwise writes the file with the new cases and profile-legs added and the removed cases dropped, only when that changes it; its authored-compile-additions line counts what it added and removed. Each case is admitted, prepared, and compiled in its own case worker (a child of this binary under the 500-MiB ceiling, its wall ceiling 20 s plus 40 s per profile-leg), so this process holds only the committed cases and their cells; a case worker reads each private source by the byte range --index records (read only, never repaired), and one the index does not locate by parsing its whole shard (counted as sources_by_range and sources_by_shard). --case ID (repeatable) is a probe: it compiles only those committed cases (on --profile's profile-legs when named, else the file's), prints an authored-compile-cell line per cell with its outcome or failure and what its compiles measured, and compares those cases' rows with the expectation file when it exists; it never blesses. Host-replayed command buffers, whose pipelines the producer's records decide on the device, are reported as uncovered.\n\n--audit translation translates each row's retained bitcode (a public .ll row, which retains none, is assembled with llvm-as) with the engine for every --profile P (a committed profile under crates/metal2vulkan-validation/profiles, derived under the default untrusted policy), one profile after another, and records typed outcome classes under a per-profile census key (the product sources, SEMANTICS_VERSION, the lane's version, the profile, and the llvm-as and spirv-val versions; no other validation source); its summary is the non-gating shadow census. Rows stream from the index through the workers, so the parent's memory does not grow with --limit. --jobs defaults to the host's available logical CPU count (the equivalent of nproc). An explicit --jobs N overrides that default. --hash-file reads a whitespace-delimited SHA-256 from the first field of each non-empty line and audits exactly those indexed sources. --audit bitcode-reader decodes each selected row's retained bitcode with the engine's reader and compares its structure with llvm-dis (METAL2VULKAN_LLVM_DIS); it also reports the intrinsic census (calls decoded to air.*/llvm.* and every name kept as an unknown intrinsic, with rows, calls, and whether the decoder lists its family as not decoded) and every function called but declared without a body that is no intrinsic (what the module needs linked), with rows and calls; without --summary-only, each row's such functions too. Without --library-modules it only reads the index. With --library-modules it first syncs the library-module index with the module shards on disk (incrementally: only a new or changed shard is opened, and a warm index opens none), then selects the indexed library modules (the linked dependencies harvest retains apart from the sources) instead of the sources, in module-hash order after --after, at most --limit, reading only the selected modules' byte ranges. --audit bitcode-reader runs each attempt (a row's decode) in its own killable worker under the 20-s and 500-MiB ceilings: a stopped attempt is reported as worker-stopped <outcome> and counted in worker_stopped, beside the workers' peak RSS, allocator peak, and slowest time. --audit budgets reports the budget gates of each --profile P from the rows the current engine fingerprint recorded (slowest row, p50/p99 attempt time, peak worker RSS and the largest counting-allocator peak a worker reported, and the ledger >= 0.7 x allocator-peak check); a row stopped at the memory ceiling or by a worker abort, or refused at an in-process budget, fails it whatever its measure. It only reads the index and fails when a gate fails. Timeouts are transient and never recorded, so --audit budgets cannot see them; instead --audit translation exits non-zero when its batch has a budget stop (a timeout, OOM, worker abort, or in-process budget refusal) or a row above the 20-s or 500-MiB ceiling (its sampled RSS or its allocator peak), after reporting every profile (translation-audit-budgets-failure lines name them). Its outcome classes, shadow census, and batch ledger lines stay non-gating. --audit specialization first plans, in killable workers, every indexed row without a plan under the planner key (the product's sources, the lane's version, the census tools) or whose authored cases changed: the row's declared function constants and their value sets (the authored cases' sets; zero and one, which leave optional constants undefined; zero_defined and one_defined; a strength-2 binary covering array over every constant), kept whole when over the 16-set bound and reported. It plans at most --limit rows, in hash order (a row not yet planned has no set selected; the summaries count them). Then, for each --profile P in turn, it translates each planned set of each planned row, and each row whose current plain engine census outcome (which must cover every indexed row) is needs_input other than a function constant under the inputs set (no constants), at most --limit attempts (whole rows), each attempt in its own killable worker under the 20-s and 500-MiB ceilings, deriving the inputs the row's AIR states (a kernel's stage-input descriptor, a post-tessellation vertex descriptor, tile attachment formats, a storage texture's format, a visible function's retained module). Attempts are recorded in the lane's own table under the profile's engine census key extended by the lane's version; transient outcomes are not recorded. It prints the planning batch and the plans' summary (with the fifth function-constant operand's agreement with \"required\"), then per profile the batch (with its lanes and budgets) and the report over every recorded attempt: rows by plain outcome, outcomes by kind, inputs derived and left with their reasons, refusal classes ranked by rows with their value-dependent rows (ray-tracing classes listed apart), and the recorded attempts' budgets. It exits non-zero, after reporting everything, when a planning or attempt worker was stopped at or ran above a ceiling, or an attempt's ledger peak is below 7/10 of its allocator peak (each compile of an attempt is metered and measured on its own, and the attempt's cost is its last compile's)."
                 );
                 return Ok(());
             }
@@ -295,6 +299,12 @@ fn run() -> Result<(), String> {
             }
             AuditKind::LinkedFunctions => {
                 audit_linked_functions(&root, &index, after.as_deref(), limit, summary_only)
+            }
+            AuditKind::TileFunctions => {
+                audit_tile_functions(&root, &index, after.as_deref(), limit, summary_only)
+            }
+            AuditKind::MeshDraws => {
+                audit_mesh_draws(&root, &index, after.as_deref(), limit, summary_only)
             }
             AuditKind::BitcodeReader => audit_bitcode_reader(
                 &root,
@@ -2182,6 +2192,193 @@ fn audit_fragment_varyings(
     Ok(())
 }
 
+/// The focused audit of tile functions: the rows whose cached facts describe the family
+/// ([`AuditTarget::TileFunctions`], independent of any requirement), each reclassified from its
+/// source with the implicit-imageblock operations it calls (each texel type names the plane format
+/// a case authors its render target in), whether it is a public fixture's row or a private one,
+/// and its requirements.
+fn audit_tile_functions(
+    root: &std::path::Path,
+    index: &std::path::Path,
+    after: Option<&str>,
+    limit: usize,
+    summary_only: bool,
+) -> Result<(), String> {
+    let hashes = select_cached_audit_target_after(index, AuditTarget::TileFunctions, after, limit)?;
+    let mut operations = BTreeMap::<String, usize>::new();
+    let mut requirements = BTreeMap::<String, usize>::new();
+    let (mut public_rows, mut private_rows) = (0usize, 0usize);
+    for_each_indexed_source_analysis(root, index, &hashes, |source| {
+        let classified = classify(&source)?;
+        if !classified.tile_function {
+            return Err(format!(
+                "{} is described as a tile function but has no implicit imageblock attachment",
+                source.key()
+            ));
+        }
+        let calls = classified
+            .air_calls
+            .keys()
+            .filter(|name| name.contains(".implicit_imageblock."))
+            .collect::<Vec<_>>();
+        let public = metal2vulkan_validation::source::public_source_path(&source.label).is_some();
+        if public {
+            public_rows += 1;
+        } else {
+            private_rows += 1;
+        }
+        for call in &calls {
+            *operations.entry((*call).clone()).or_default() += 1;
+        }
+        for requirement in &classified.tooling_requirements {
+            *requirements.entry(requirement.to_string()).or_default() += 1;
+        }
+        if !summary_only {
+            let names = classified
+                .tooling_requirements
+                .iter()
+                .map(|requirement| requirement.as_str())
+                .collect::<Vec<_>>();
+            println!(
+                "tile-function\t{}\t{}\t{}\toperations={}\trequirements={}",
+                source.key(),
+                source.entry,
+                if public {
+                    source.label.as_str()
+                } else {
+                    "private"
+                },
+                calls.len(),
+                if names.is_empty() {
+                    "none".into()
+                } else {
+                    names.join(",")
+                }
+            );
+        }
+        Ok(())
+    })?;
+    println!(
+        "tile-function-summary\tselected={}\tpublic={public_rows}\tprivate={private_rows}\tfirst={}\tlast={}",
+        hashes.len(),
+        hashes.first().map_or("none", String::as_str),
+        hashes.last().map_or("none", String::as_str),
+    );
+    for (requirement, count) in requirements {
+        println!("tile-function-requirement\t{requirement}\t{count}");
+    }
+    for (operation, count) in operations {
+        println!("tile-function-operation\t{count}\t{operation}");
+    }
+    Ok(())
+}
+
+/// The focused audit of object and mesh functions: the rows whose cached facts describe the family
+/// ([`AuditTarget::MeshDraws`], independent of any requirement), each reclassified from its source
+/// with its stage, its payload, the stages a row of it needs that nothing supplies (which generated
+/// stage would let a case draw it), whether it is a public fixture's row or a private one, and its
+/// requirements. The summary counts the rows by stage, by the stages they need, and by the set of
+/// stages each needs.
+fn audit_mesh_draws(
+    root: &std::path::Path,
+    index: &std::path::Path,
+    after: Option<&str>,
+    limit: usize,
+    summary_only: bool,
+) -> Result<(), String> {
+    let hashes = select_cached_audit_target_after(index, AuditTarget::MeshDraws, after, limit)?;
+    let mut stages = BTreeMap::<String, usize>::new();
+    let mut missing = BTreeMap::<String, usize>::new();
+    let mut needs = BTreeMap::<String, usize>::new();
+    let mut requirements = BTreeMap::<String, usize>::new();
+    let (mut public_rows, mut private_rows) = (0usize, 0usize);
+    let names = |stages: &[metal2vulkan_validation::case::Stage]| {
+        if stages.is_empty() {
+            "none".to_string()
+        } else {
+            stages
+                .iter()
+                .map(|stage| stage.entry_list())
+                .collect::<Vec<_>>()
+                .join(",")
+        }
+    };
+    for_each_indexed_source_analysis(root, index, &hashes, |source| {
+        let classified = classify(&source)?;
+        let Some(draw) = &classified.mesh_draw else {
+            return Err(format!(
+                "{} is described as an object or mesh function but reflects no mesh draw",
+                source.key()
+            ));
+        };
+        let public = metal2vulkan_validation::source::public_source_path(&source.label).is_some();
+        if public {
+            public_rows += 1;
+        } else {
+            private_rows += 1;
+        }
+        let stage = draw.stage.entry_list().to_string();
+        *stages.entry(stage.clone()).or_default() += 1;
+        for needed in &draw.missing {
+            *missing.entry(needed.entry_list().to_string()).or_default() += 1;
+        }
+        *needs
+            .entry(format!("{stage}:{}", names(&draw.missing)))
+            .or_default() += 1;
+        for requirement in &classified.tooling_requirements {
+            *requirements.entry(requirement.to_string()).or_default() += 1;
+        }
+        if !summary_only {
+            let names_of = classified
+                .tooling_requirements
+                .iter()
+                .map(|requirement| requirement.as_str())
+                .collect::<Vec<_>>();
+            println!(
+                "mesh-draw\t{}\t{}\t{}\tstage={stage}\tpayload={}\tmissing={}\trequirements={}",
+                source.key(),
+                source.entry,
+                if public {
+                    source.label.as_str()
+                } else {
+                    "private"
+                },
+                match (draw.payload, draw.payload_size) {
+                    (false, _) => "none".to_string(),
+                    (true, Some(size)) => size.to_string(),
+                    (true, None) => "unsized".to_string(),
+                },
+                names(&draw.missing),
+                if names_of.is_empty() {
+                    "none".into()
+                } else {
+                    names_of.join(",")
+                }
+            );
+        }
+        Ok(())
+    })?;
+    println!(
+        "mesh-draw-summary\tselected={}\tpublic={public_rows}\tprivate={private_rows}\tfirst={}\tlast={}",
+        hashes.len(),
+        hashes.first().map_or("none", String::as_str),
+        hashes.last().map_or("none", String::as_str),
+    );
+    for (stage, count) in stages {
+        println!("mesh-draw-stage\t{stage}\t{count}");
+    }
+    for (stage, count) in missing {
+        println!("mesh-draw-missing\t{stage}\t{count}");
+    }
+    for (need, count) in needs {
+        println!("mesh-draw-needs\t{need}\t{count}");
+    }
+    for (requirement, count) in requirements {
+        println!("mesh-draw-requirement\t{requirement}\t{count}");
+    }
+    Ok(())
+}
+
 /// The focused audit of entries that link visible functions: the rows whose cached facts describe
 /// the family ([`AuditTarget::LinkedFunctions`], independent of any requirement), each reclassified
 /// from its source with the symbols it references, the public linked modules (owned MSL under
@@ -2374,6 +2571,7 @@ mod tests {
             fragment_imageblock: false,
             pipeline_state_members: false,
             tile_function: false,
+            mesh_draw: None,
             rasterization_rate_map: false,
             sample_rate: Vec::new(),
             ulong_texture: false,

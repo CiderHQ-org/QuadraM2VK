@@ -19,7 +19,7 @@ use crate::bind::status::{ExecutionStatus, StatusReport};
 use crate::device::{DeviceDescription, DevicePolicy};
 use crate::indirect_commands::{Action, BufferBinding};
 use crate::spirv::interp::{run, Buffer, Config, Order, Resources};
-use crate::spirv::testing::assert_valid;
+use crate::spirv::testing::{assert_valid, int_constants};
 
 /// Device addresses of the harness's objects.
 const SCRATCH: u64 = 0x0000_0030_0000_0000;
@@ -310,6 +310,7 @@ fn run_preprocess(
             PushHole::CaptureAddress { .. } | PushHole::CaptureIndexAddress { .. } => {
                 panic!("the preprocess captures no vertex")
             }
+            PushHole::SnapshotPhase { .. } => panic!("the preprocess draws no snapshot"),
         };
         push[offset as usize..offset as usize + 8].copy_from_slice(&address.to_le_bytes());
     }
@@ -1798,40 +1799,6 @@ fn a_flat_dispatch_is_described_only_as_a_flat_variant_runs_it() {
     assert!(FlatIndirect::new(ARGUMENTS, threads, [4, 1, 1], 0).is_none());
     assert!(FlatIndirect::new(ARGUMENTS, threads, [4, 1, 1], 1025).is_none());
     assert!(FlatIndirect::new(ARGUMENTS + 4, threads, [4, 1, 1], 1).is_some());
-}
-
-/// The constants of SPIR-V `words` by id: `(width, value)` of each 32- or 64-bit integer
-/// `OpConstant`.
-fn int_constants(words: &[u32]) -> std::collections::BTreeMap<u32, (u32, u64)> {
-    let mut widths = std::collections::BTreeMap::new();
-    let mut out = std::collections::BTreeMap::new();
-    let mut i = 5;
-    while let Some(&w) = words.get(i) {
-        let (len, op) = ((w >> 16) as usize, w & 0xFFFF);
-        let at = |k: usize| words.get(i + k).copied().unwrap_or(0);
-        match op {
-            // OpTypeInt result, width.
-            21 => {
-                widths.insert(at(1), at(2));
-            }
-            // OpConstant type, result, value words.
-            43 => match widths.get(&at(1)) {
-                Some(&32) => {
-                    out.insert(at(2), (32, u64::from(at(3))));
-                }
-                Some(&64) => {
-                    out.insert(at(2), (64, u64::from(at(3)) | (u64::from(at(4)) << 32)));
-                }
-                _ => {}
-            },
-            _ => {}
-        }
-        if len == 0 {
-            break;
-        }
-        i += len;
-    }
-    out
 }
 
 /// The replay's modules test a product's overflow only by `OpUMulExtended`'s high word, never by

@@ -29,7 +29,9 @@
 
 use super::super::address::ObjectsToken;
 use super::super::error::{invalid, Error, Problem};
+use super::super::image_barrier::{image_barrier, ImageDst};
 use super::super::image_plan::{plan_image, ImagePlan};
+use super::super::key_hash::KeyMap;
 use super::super::resource::{Identity, ResourceKey};
 use super::super::sharing::Sharing;
 use super::super::texture_descriptor::{texture_usage, TextureDescriptor};
@@ -37,14 +39,13 @@ use super::super::tracker::{Access, Use, UseRange};
 use super::super::values::StorageMode;
 use super::super::view_plan::ViewRecord;
 use super::super::Device;
-use super::{image_aspects, image_error, IdUse, Image, Owner, Storage, Texture};
+use super::{image_aspects, image_error, IdUse, Image, KeptResolves, Owner, Storage, Texture};
 use ash::vk;
 use metal2vulkan::metal::TextureType;
 use metal2vulkan::vk::{
     Format, ImageAspectFlags, ImageCreateFlags, ImageLayout, ImageTiling, ImageType,
     ImageUsageFlags, SampleCountFlags,
 };
-use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
@@ -189,23 +190,19 @@ pub(crate) struct Transition {
 }
 
 impl Transition {
-    /// The barrier recording the transition.
-    pub(crate) fn barrier(&self) -> vk::ImageMemoryBarrier<'static> {
-        vk::ImageMemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
-            .dst_access_mask(vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE)
-            .old_layout(self.old.into())
-            .new_layout(self.new.into())
-            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .image(self.image)
-            .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask: self.aspects.into(),
-                base_mip_level: 0,
-                level_count: vk::REMAINING_MIP_LEVELS,
-                base_array_layer: 0,
-                layer_count: vk::REMAINING_ARRAY_LAYERS,
-            })
+    /// The barrier recording the transition for a family of `family`'s queue flags, before every
+    /// access of the device's there (`image_barrier.rs`).
+    pub(crate) fn barrier(&self, family: vk::QueueFlags) -> vk::ImageMemoryBarrier<'static> {
+        let range = vk::ImageSubresourceRange {
+            aspect_mask: self.aspects.into(),
+            base_mip_level: 0,
+            level_count: vk::REMAINING_MIP_LEVELS,
+            base_array_layer: 0,
+            layer_count: vk::REMAINING_ARRAY_LAYERS,
+        };
+        let layouts = (self.old.into(), self.new.into());
+        let write = vk::AccessFlags::MEMORY_WRITE;
+        image_barrier(self.image, range, layouts, write, ImageDst::Every, family)
     }
 }
 
@@ -315,7 +312,7 @@ impl WrappedImage {
 /// [`settled`](WrappedImage::settled).
 #[derive(Default)]
 pub(crate) struct Wrapped {
-    images: Mutex<HashMap<ResourceKey, Arc<WrappedImage>>>,
+    images: Mutex<KeyMap<ResourceKey, Arc<WrappedImage>>>,
 }
 
 impl Wrapped {
@@ -347,7 +344,7 @@ impl Wrapped {
         found
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<ResourceKey, Arc<WrappedImage>>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, KeyMap<ResourceKey, Arc<WrappedImage>>> {
         self.images.lock().unwrap_or_else(|p| p.into_inner())
     }
 }
@@ -502,11 +499,18 @@ impl Device {
     /// ([`VkImageLayouts`]). Hazard tracking orders its uses as it orders a texture the runtime
     /// made.
     ///
+    /// The image has every usage the runtime's own texture of `descriptor` has, the transfer
+    /// usages included wherever the device copies the format, whatever the descriptor's usage
+    /// (a blit encoder's copies and an exact resolve's copy of the samples use them). Only the
+    /// input attachment usage may be missing: a pass that fetches the texture renders into a
+    /// stand-in that has it.
+    ///
     /// Refused: a descriptor Metal stops, as [`Device::new_texture`] refuses it; storage other
-    /// than `Private` (`Invalid`, `StorageMode`); an image that contradicts the descriptor, a
-    /// layout outside the contract, or a texture that moves between layouts with `Untracked`
-    /// hazards (`Invalid` with a [`WrappedImageProblem`]); a format or size the device lacks for
-    /// the descriptor (`Unsupported`, as `new_texture`).
+    /// than `Private` (`Invalid`, `StorageMode`); an image that contradicts the descriptor (a
+    /// usage missing, [`WrappedImageProblem::Usage`]), a layout outside the contract, or a texture
+    /// that moves between layouts with `Untracked` hazards (`Invalid` with a
+    /// [`WrappedImageProblem`]); a format or size the device lacks for the descriptor
+    /// (`Unsupported`, as `new_texture`).
     ///
     /// # Safety
     ///
@@ -611,11 +615,14 @@ impl Device {
             options,
             allow_gpu_optimized_contents: descriptor.allow_gpu_optimized_contents,
             identity,
-            views: Mutex::new(HashMap::new()),
+            views: Mutex::new(KeyMap::default()),
+            own_views: Mutex::new(KeyMap::default()),
+            resolves: KeptResolves::new(),
             twin: None,
             decoded: None,
             form: Default::default(),
             kept_outside: AtomicBool::new(false),
+            signed_depth: AtomicBool::new(false),
             detached: Mutex::new(None),
             first_move: Mutex::new(None),
             host_copies: false,

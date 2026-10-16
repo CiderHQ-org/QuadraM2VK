@@ -1,4 +1,4 @@
-// Owned MSL for WP-MSF's runtime-sampler probes (DESIGN D321, docs/TODO.md 4.2): whether Metal
+// Owned MSL for the runtime-sampler probes: whether Metal
 // filters a sample through a runtime sampler, bound to a slot or held in an argument buffer, as it
 // filters one through a constexpr sampler of the same state. Each `msf_rs*` kernel samples the
 // slot texture through its constexpr sampler and through the runtime sampler at slot 0, and the

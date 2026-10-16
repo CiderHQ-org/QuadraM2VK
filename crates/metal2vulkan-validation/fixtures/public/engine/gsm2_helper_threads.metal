@@ -1,4 +1,4 @@
-// Owned fixture (WP-GSM2, DESIGN D603; written for this repository): `quad_is_helper_thread` and
+// Owned fixture (written for this repository): `quad_is_helper_thread` and
 // `simd_is_helper_thread` in a kernel, a vertex function and fragment functions, with and without
 // a discard.
 // - A kernel thread or a vertex writes its own answers, q | s << 1, with 0x100 set, and the
@@ -10,7 +10,7 @@
 // - A discard of the pixels with (x + y) mod 3 == 0 makes each a helper. Every quad keeps two or
 //   three live pixels, which see the discarded ones as helpers after the discard and not before.
 // - `fragment_helper_threads_beside_a_simdgroup_vote` also votes over its simdgroup after the
-//   discard, so a discarded thread is a lane of a simdgroup operation (D327 item 6).
+//   discard, so a discarded thread is a lane of a simdgroup operation.
 // Loop-free.
 #include <metal_stdlib>
 using namespace metal;

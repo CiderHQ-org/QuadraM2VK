@@ -1,5 +1,5 @@
-// Owned fixture (WP-A2, DESIGN D127): whether Metal clamps a large sample bias (DESIGN D73.2,
-// D90.3: Vulkan clamps the Bias operand to maxSamplerLodBias, 2 to 16 on the committed profiles;
+// Owned fixture: whether Metal clamps a large sample bias
+// (Vulkan clamps the Bias operand to maxSamplerLodBias, 2 to 16 on the committed profiles;
 // Metal documents no clamp). A fragment's implicit level of detail is log2 of its texel-space
 // derivative, so a coordinate that advances 2^k normalized units per pixel over a 16-texel
 // texture has level k + 4 before the bias. Each 2x2 quad reads its own (k, bias) pair; the

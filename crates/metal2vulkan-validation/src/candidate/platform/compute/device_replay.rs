@@ -663,7 +663,14 @@ impl<'c> Variant<'c> {
         // SAFETY: `module_info` points at live SPIR-V words for the call.
         objects.module = unsafe { context.device.create_shader_module(&module_info, None) }
             .map_err(|error| format!("create shader module: {error}"))?;
-        create_pipelines(context, &mut objects, pipeline, &commands.regions)?;
+        // A replayed command's template: the shared ceiling (`ComputeCase::creation_bound`).
+        create_pipelines(
+            context,
+            &mut objects,
+            pipeline,
+            &commands.regions,
+            crate::budgets::PIPELINE_CREATION_CEILING,
+        )?;
         let sets = resources.write_sets(context, &objects.layout)?;
         Ok(Variant {
             commands: prepared.commands,
@@ -706,7 +713,7 @@ fn preprocess_objects<'c>(
     let info = vk::ComputePipelineCreateInfo::default()
         .stage(stage)
         .layout(objects.layout.pipeline_layout);
-    let started = Instant::now();
+    let clock = crate::budgets::CreationClock::start();
     // SAFETY: every pointer in `info` outlives the call; the result is destroyed with `objects`.
     let created = unsafe {
         context
@@ -715,7 +722,7 @@ fn preprocess_objects<'c>(
     }
     .map_err(|(_, error)| format!("the driver refused the preprocess pipeline: {error}"))?;
     objects.pipelines.extend(created.first().copied());
-    crate::budgets::creation_within_ceiling("the preprocess pipeline", started.elapsed())?;
+    crate::budgets::creation_within_ceiling("the preprocess pipeline", clock.read())?;
     Ok(objects)
 }
 

@@ -1,4 +1,4 @@
-// Owned fixture (WP-RFS, DESIGN D187 item 10): a fragment imageblock write beside a returned
+// Owned fixture: a fragment imageblock write beside a returned
 // sample mask, and views of two masters in one function, as Metal answers them (measured on the
 // M3 Max and an M4).
 //

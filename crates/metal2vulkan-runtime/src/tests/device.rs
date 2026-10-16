@@ -1,4 +1,5 @@
 use crate::device::properties::registry_id;
+use crate::device::submit::binding_seen;
 
 #[test]
 fn the_registry_id_folds_the_uuid_and_is_never_zero() {
@@ -657,4 +658,26 @@ fn a_device_extension_whose_instance_extension_the_instance_lacks_is_refused() {
         .unwrap_err()
         .to_string();
     assert!(message.contains("VK_KHR_surface"), "{message}");
+}
+
+/// A no-copy buffer's binding stops being waited for only once a host wait returned for its
+/// value (`device/submit.rs`): a timeline's read alone orders no host operation after the
+/// signal. A read below the value asks for no wait, and a failed wait leaves it waited for.
+#[test]
+fn a_binding_is_seen_complete_only_once_a_host_wait_returned_for_it() {
+    let mut asked = Vec::new();
+    let mut seen = |read: u64, returned: Result<bool, ()>| {
+        binding_seen(read, 5, |value| {
+            asked.push(value);
+            returned
+        })
+    };
+    assert!(
+        !seen(5, Ok(false)),
+        "the read shows it; the wait did not return"
+    );
+    assert!(seen(6, Ok(true)));
+    assert!(!seen(4, Ok(true)), "the read shows it pending");
+    assert!(!seen(5, Err(())), "a lost device");
+    assert_eq!(asked, [5, 5, 5]);
 }

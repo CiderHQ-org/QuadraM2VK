@@ -1,5 +1,5 @@
 // metal-std: macos-metal2.3
-// Owned fixture (WP-REF, DESIGN D327 item 6, TODO 5.3): a simdgroup count before a discard of
+// Owned fixture: a simdgroup count before a discard of
 // whole quads, in the thirteen shapes measured for where Metal's compiler places it, past the
 // discard (`hoisted_*`) or ahead of it, counting the dropped quads (`counted_*`), as Apple M4 and
 // M3 Max draw them (EVs REF-hfix, REF-hfix-m3). Written for this repository; no third-party

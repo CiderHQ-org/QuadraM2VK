@@ -6,6 +6,7 @@
 // nothing. It returns `tint` (buffer 0) and discards the fragments of every fourth column (`x` in
 // `[4k, 4k + 1)`), as `smw_writers`' `smw_discard` does. Loop-free.
 // metal-fast-math: off
+// metal-macos-min: 27.0
 #include <metal_stdlib>
 using namespace metal;
 

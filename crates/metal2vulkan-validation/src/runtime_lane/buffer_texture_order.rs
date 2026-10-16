@@ -737,7 +737,7 @@ fn through_view(mut bound: Bound, index: u32, pixel_format: PixelFormat) -> Boun
 /// A view of a texture over a buffer shares its texture's storage: a kernel's writes through a view
 /// of a 2D texture over a buffer (aliasing or shadowed) and of a texture buffer land in the
 /// buffer's bytes, and a kernel reads a texture buffer's bytes through a view of another format of
-/// the same size, as Metal's views do (TOB probe 1).
+/// the same size, as Metal's views do (a Metal probe on the M3 Max and an M4).
 #[test]
 fn views_of_textures_over_buffers_share_their_storage() {
     on_device(|device| {

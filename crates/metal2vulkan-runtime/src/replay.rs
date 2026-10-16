@@ -8,7 +8,8 @@
 //! the command buffer's first submission (`command_buffer/reencode.rs`).
 //!
 //! - **The log.** Each public call of a compute, blit or render encoder, with its arguments owned (a
-//!   handle's clone, bytes copied into the log's own arena), in order, before the call runs:
+//!   handle's clone, held once for the calls that name it in turn; bytes copied into the log's own
+//!   arena), in order, before the call runs:
 //!   encoding it again re-runs each call, so the commands come out as the program encoded them,
 //!   over where their buffers lie now. A call refused at its first encoding is refused again,
 //!   which leaves the encoder as it was encoded first ([`Replay::run`] fails, and the encoder is
@@ -26,23 +27,35 @@
 //!   render encoder logs as these do, with its pass's descriptor (`render/replay.rs`).
 //! - **Its memory.** No fixed cap (the coordinator's ruling of 2026-10-11): each entry holds its
 //!   call's own arguments, so a log grows with its encoder's recording, as Metal's command buffer
-//!   holds what the same calls encode. The logs go at the command buffer's first submission, after
-//!   which no rebind can matter, without a lock: the scheduler drops them as it drops what a
-//!   submission spent (`Submission::logs`), before its hold of the command buffer
-//!   (`scheduler::Spent`), so the command buffer's waiters return after them.
+//!   holds what the same calls encode. The command buffer keeps the logs its commit kept until it
+//!   completed: they go in its release, after its completed handlers, with what it retained, on its
+//!   queue's handler thread, before its waiters return (`CommandBufferShared::complete`). Metal
+//!   holds what an encoder was given until its command buffer completed, a binding replaced before
+//!   any command among it (a no-copy buffer's deallocator ran only after the completion, never at
+//!   the end of encoding nor while the committed command buffer waited: an M3 Max under macOS
+//!   27.0.1, probe `dealloc-probe`). And no other thread may hold such a handle past the
+//!   completion: a no-copy buffer's deallocator would run where it went, on the scheduler's thread
+//!   for one, whose own hold of the command buffer keeps the deallocator's wait for it from
+//!   returning (`scheduler::Spent`). A log let go of in the release, or at its encoder's end
+//!   where it is not kept, is cleared (its calls and handles go then) and its room kept for the
+//!   device's next encoders ([`SpareLogs`]), so the encoding thread's logs reuse their memory
+//!   rather than allocate what another thread frees.
 //! - **Notices.** A call encoded again announces no kind its first encoding announced: each kind
 //!   at most once (`Device::degrade`), as the program's call already met it.
 
 use super::buffer::Buffer;
 use super::command_buffer::CommandBuffer;
+use super::depth_stencil::DepthStencilState;
+use super::device::lock;
 use super::encoder::Replayed;
 use super::error::Error;
 use super::fence::Fence;
 use super::function_table::VisibleFunctionTable;
 use super::heap::Heap;
 use super::indirect_command_buffer::IndirectCommandBuffer;
-use super::pipeline::ComputePipelineState;
-use super::render::RenderLog;
+use super::pipeline::{ComputePipelineState, RenderPipelineState};
+use super::render::{RenderLog, RenderRoom};
+use super::render_pass::RenderPassDescriptor;
 use super::render_values::ClearColor;
 use super::residency::Residency;
 use super::resource::ResourceRef;
@@ -55,6 +68,64 @@ use crate::copy_plan::BlitOption;
 use metal2vulkan::metal::{BarrierScope, DispatchType, PixelFormat, ResourceUsage};
 use std::cell::Cell;
 use std::ops::Range;
+use std::sync::{Arc, Mutex};
+
+/// The handles of one kind a log holds, each once among the latest it took (`Handles::hold`).
+struct Handles<T> {
+    held: Vec<T>,
+}
+
+impl<T> Default for Handles<T> {
+    fn default() -> Handles<T> {
+        Handles { held: Vec::new() }
+    }
+}
+
+/// How many of a kind's latest handles a log looks among for the one a call names before it holds
+/// that one again: calls name what the calls just before them named (a buffer bound again at
+/// another offset, a pipeline state or sampler set again), and a look past these few would cost
+/// more than the hold it saves.
+const RECENT: usize = 8;
+
+impl<T: Clone + PartialEq> Handles<T> {
+    /// Where `handle` (the same object, by identity) is held: among the latest [`RECENT`], or
+    /// held now, and whether it was held now.
+    fn hold(&mut self, handle: &T) -> (Held, bool) {
+        let recent = self.held.len().saturating_sub(RECENT);
+        let at = match self.held[recent..].iter().rposition(|held| held == handle) {
+            Some(at) => (recent + at, false),
+            None => {
+                self.held.push(handle.clone());
+                (self.held.len() - 1, true)
+            }
+        };
+        // A log holds fewer handles than it has calls, each of 32 bytes or more.
+        (Held(at.0 as u32), at.1)
+    }
+
+    fn get(&self, held: Held) -> &T {
+        &self.held[held.0 as usize]
+    }
+}
+
+impl<T> Handles<T> {
+    /// The bytes its list has room for.
+    fn room(&self) -> usize {
+        self.held.capacity() * std::mem::size_of::<T>()
+    }
+
+    /// Let go of every handle, keeping the list's room.
+    fn clear(&mut self) {
+        self.held.clear();
+    }
+}
+
+/// A handle a log holds, by its place among those of its kind (`CallLog::hold_buffer` and the
+/// like): a call that names a handle again shares the log's one hold of it, so a call takes no
+/// reference of its own, whose count the thread that drops the log would share with the encoding
+/// thread's.
+#[derive(Clone, Copy)]
+pub(crate) struct Held(u32);
 
 /// A run of elements in one of a log's arenas.
 #[derive(Clone, Copy)]
@@ -115,6 +186,12 @@ pub(super) struct CallLog<C> {
     buffers: Vec<Option<Buffer>>,
     words: Vec<u64>,
     textures: Vec<Option<Texture>>,
+    /// The handles its calls name one at a time, each held once among the latest of its kind.
+    held_buffers: Handles<Buffer>,
+    held_textures: Handles<Texture>,
+    held_samplers: Handles<SamplerState>,
+    held_render_states: Handles<RenderPipelineState>,
+    held_depth_stencils: Handles<DepthStencilState>,
     /// What it holds, counted as it grows: each call's size, and its arenas' and boxes'.
     size: usize,
     /// Calls of the encoder's own public calls run now, which the call that makes them logged
@@ -131,9 +208,77 @@ impl<C> CallLog<C> {
             buffers: Vec::new(),
             words: Vec::new(),
             textures: Vec::new(),
+            held_buffers: Handles::default(),
+            held_textures: Handles::default(),
+            held_samplers: Handles::default(),
+            held_render_states: Handles::default(),
+            held_depth_stencils: Handles::default(),
             size: 0,
             nested: 0,
         }
+    }
+
+    /// `held`'s place in its kind's arena, its size counted where it was held now.
+    fn counted<T>(&mut self, (held, now): (Held, bool)) -> Held {
+        if now {
+            self.size += std::mem::size_of::<T>();
+        }
+        held
+    }
+
+    /// `buffer`, held once ([`Held`]).
+    pub(super) fn hold_buffer(&mut self, buffer: &Buffer) -> Held {
+        let held = self.held_buffers.hold(buffer);
+        self.counted::<Buffer>(held)
+    }
+
+    /// `texture`, held once ([`Held`]).
+    pub(super) fn hold_texture(&mut self, texture: &Texture) -> Held {
+        let held = self.held_textures.hold(texture);
+        self.counted::<Texture>(held)
+    }
+
+    /// `sampler`, held once ([`Held`]).
+    pub(super) fn hold_sampler(&mut self, sampler: &SamplerState) -> Held {
+        let held = self.held_samplers.hold(sampler);
+        self.counted::<SamplerState>(held)
+    }
+
+    /// `state`, held once ([`Held`]).
+    pub(super) fn hold_render_state(&mut self, state: &RenderPipelineState) -> Held {
+        let held = self.held_render_states.hold(state);
+        self.counted::<RenderPipelineState>(held)
+    }
+
+    /// `state`, held once ([`Held`]).
+    pub(super) fn hold_depth_stencil(&mut self, state: &DepthStencilState) -> Held {
+        let held = self.held_depth_stencils.hold(state);
+        self.counted::<DepthStencilState>(held)
+    }
+
+    /// The buffer `held` holds ([`CallLog::hold_buffer`]).
+    pub(crate) fn buffer(&self, held: Held) -> &Buffer {
+        self.held_buffers.get(held)
+    }
+
+    /// The texture `held` holds ([`CallLog::hold_texture`]).
+    pub(crate) fn texture(&self, held: Held) -> &Texture {
+        self.held_textures.get(held)
+    }
+
+    /// The sampler `held` holds ([`CallLog::hold_sampler`]).
+    pub(crate) fn sampler(&self, held: Held) -> &SamplerState {
+        self.held_samplers.get(held)
+    }
+
+    /// The render pipeline state `held` holds ([`CallLog::hold_render_state`]).
+    pub(crate) fn render_state(&self, held: Held) -> &RenderPipelineState {
+        self.held_render_states.get(held)
+    }
+
+    /// The depth and stencil state `held` holds ([`CallLog::hold_depth_stencil`]).
+    pub(crate) fn depth_stencil(&self, held: Held) -> &DepthStencilState {
+        self.held_depth_stencils.get(held)
     }
 
     /// Whether the encoder runs a public call of its own now, which logs nothing.
@@ -210,6 +355,124 @@ impl<C> CallLog<C> {
             .iter()
             .map(Option::as_ref)
             .collect()
+    }
+
+    /// The log emptied for another encoder, its calls and handles let go of and its lists' room
+    /// kept: `None` where that room is more than [`SPARE_LOG_BYTES`].
+    pub(super) fn cleared(mut self) -> Option<CallLog<C>> {
+        let room = self.calls.capacity() * std::mem::size_of::<C>()
+            + self.bytes.capacity()
+            + self.buffers.capacity() * std::mem::size_of::<Option<Buffer>>()
+            + self.words.capacity() * std::mem::size_of::<u64>()
+            + self.textures.capacity() * std::mem::size_of::<Option<Texture>>()
+            + self.held_buffers.room()
+            + self.held_textures.room()
+            + self.held_samplers.room()
+            + self.held_render_states.room()
+            + self.held_depth_stencils.room();
+        if room > SPARE_LOG_BYTES {
+            return None;
+        }
+        self.calls.clear();
+        self.bytes.clear();
+        self.buffers.clear();
+        self.words.clear();
+        self.textures.clear();
+        self.held_buffers.clear();
+        self.held_textures.clear();
+        self.held_samplers.clear();
+        self.held_render_states.clear();
+        self.held_depth_stencils.clear();
+        self.size = 0;
+        self.nested = 0;
+        Some(self)
+    }
+}
+
+/// How many cleared logs of each kind of encoder the device keeps ([`SpareLogs`]).
+const SPARE_LOGS: usize = 16;
+
+/// The most room a cleared log keeps for a next encoder, in bytes; a log with more goes.
+pub(super) const SPARE_LOG_BYTES: usize = 64 * 1024;
+
+/// Cleared logs the device keeps for its next encoders (the module docs): at most [`SPARE_LOGS`]
+/// of each kind, each with at most [`SPARE_LOG_BYTES`] of room, and no call or handle. An
+/// encoder that logs takes one, or a new log where none is kept; its log comes back as its
+/// encoder ends where its command buffer does not keep it, and else in the command buffer's
+/// release, on its queue's handler thread.
+#[derive(Default)]
+pub(crate) struct SpareLogs {
+    compute: Spares<CallLog<ComputeCall>>,
+    blit: Spares<CallLog<BlitCall>>,
+    render: Spares<RenderRoom>,
+}
+
+/// One kind's [`SpareLogs`].
+struct Spares<T>(Mutex<Vec<T>>);
+
+impl<T> Default for Spares<T> {
+    fn default() -> Spares<T> {
+        Spares(Mutex::new(Vec::new()))
+    }
+}
+
+impl<T> Spares<T> {
+    fn take(&self) -> Option<T> {
+        lock(&self.0).pop()
+    }
+
+    /// Keep `spare` where fewer than [`SPARE_LOGS`] are kept; else it goes, after the lock.
+    fn give(&self, spare: T) {
+        let mut spares = lock(&self.0);
+        if spares.len() < SPARE_LOGS {
+            spares.push(spare);
+        }
+    }
+}
+
+impl SpareLogs {
+    /// A compute encoder's log: a kept one, or a new one.
+    pub(super) fn compute(&self) -> CallLog<ComputeCall> {
+        self.compute.take().unwrap_or_else(CallLog::new)
+    }
+
+    /// A blit encoder's log: a kept one, or a new one.
+    pub(super) fn blit(&self) -> CallLog<BlitCall> {
+        self.blit.take().unwrap_or_else(CallLog::new)
+    }
+
+    /// The log of a pass `descriptor` opens: in a kept one's room, or a new one.
+    pub(super) fn render(&self, descriptor: &RenderPassDescriptor) -> RenderLog {
+        RenderLog::new(descriptor, self.render.take())
+    }
+
+    /// Clear `replay` and keep it for a next encoder, where its room is small enough
+    /// ([`CallLog::cleared`]): its calls and handles go now.
+    pub(super) fn give(&self, replay: Replay) {
+        match replay {
+            Replay::Compute { log, .. } => {
+                if let Some(log) = log.cleared() {
+                    self.compute.give(log);
+                }
+            }
+            Replay::Blit(log) => {
+                if let Some(log) = log.cleared() {
+                    self.blit.give(log);
+                }
+            }
+            Replay::Render(log) => {
+                if let Some(room) = log.cleared() {
+                    self.render.give(room);
+                }
+            }
+        }
+    }
+
+    /// [`give`](Self::give) `replay` where this is its last hold; else the hold goes.
+    pub(super) fn give_last(&self, replay: Arc<Replay>) {
+        if let Some(replay) = Arc::into_inner(replay) {
+            self.give(replay);
+        }
     }
 }
 

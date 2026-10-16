@@ -1,4 +1,4 @@
-// Owned fixture (WP-XRB, DESIGN D760): a `float4` output computed by whole-vector arithmetic over
+// Owned fixture: a `float4` output computed by whole-vector arithmetic over
 // loads under fast math, for the computed-class lane of the extended-range blend table
 // (`metal2vulkan_devtools::xr_blends::computed_table`). The fullscreen triangle of `rt6_samples`;
 // the fragment returns its texel's value times its texel's entry of a buffer of ones, each read

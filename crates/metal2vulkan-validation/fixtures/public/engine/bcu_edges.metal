@@ -1,4 +1,4 @@
-// Owned fixture (WP-BCU, DESIGN D234): Metal's bicubic filter at the texture's edges under each
+// Owned fixture: Metal's bicubic filter at the texture's edges under each
 // address mode the translation lowers, and with pixel coordinates: `bcu_address` without its
 // mirror-repeat sampler (which the translation refuses), so that the Vulkan candidates run it.
 // Each lane reads a normalized coordinate `(u, v)` and the same point in pixels `(x, y)` from the

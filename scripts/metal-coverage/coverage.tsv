@@ -1616,7 +1616,7 @@ MTLRenderCommandEncoder.h	MTLRenderCommandEncoder	method	setObjectSamplerState:a
 MTLRenderCommandEncoder.h	MTLRenderCommandEncoder	method	setObjectSamplerStates:withRange:		I	runtime	RenderCommandEncoder::set_object_sampler_states			
 MTLRenderCommandEncoder.h	MTLRenderCommandEncoder	method	setObjectSamplerState:lodMinClamp:lodMaxClamp:atIndex:		I	runtime	RenderCommandEncoder::set_object_sampler_states	a range of one with clamps		
 MTLRenderCommandEncoder.h	MTLRenderCommandEncoder	method	setObjectSamplerStates:lodMinClamps:lodMaxClamps:withRange:		I	runtime	RenderCommandEncoder::set_object_sampler_states			
-MTLRenderCommandEncoder.h	MTLRenderCommandEncoder	method	setObjectThreadgroupMemoryLength:atIndex:		M			an object function's threadgroup memory, refused today at the pipeline (`NotImplemented(MeshShading)`)	M	mesh
+MTLRenderCommandEncoder.h	MTLRenderCommandEncoder	method	setObjectThreadgroupMemoryLength:atIndex:		I	runtime	RenderCommandEncoder::set_object_threadgroup_memory_length			
 MTLRenderCommandEncoder.h	MTLRenderCommandEncoder	method	setMeshBytes:length:atIndex:		I	runtime	RenderCommandEncoder::set_mesh_bytes	copied at the call; more than 4096 bytes refused		
 MTLRenderCommandEncoder.h	MTLRenderCommandEncoder	method	setMeshBuffer:offset:atIndex:		I	runtime	RenderCommandEncoder::set_mesh_buffer			
 MTLRenderCommandEncoder.h	MTLRenderCommandEncoder	method	setMeshBufferOffset:atIndex:		I	runtime	RenderCommandEncoder::set_mesh_buffer_offset			

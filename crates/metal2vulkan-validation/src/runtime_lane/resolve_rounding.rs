@@ -16,6 +16,22 @@
 //!   result times `1 / n` a denormal flushed to the zero of its sign, and a NaN anywhere the
 //!   canonical `0x7fc00000`.
 //!
+//! A probe of an M3 Max under macOS 27.0.1 (our own `resolve.swift`) confirmed those and closed the
+//! rest at 2 and 4 samples (`bind::ColorResolveFormat`'s module docs state each rule):
+//!
+//! - a packed 16-bit unorm channel: each code read through the `half` nearest its value, times the
+//!   code's scale rounded toward zero to a `half`, the average of those rounded half up;
+//! - a `half` channel: the samples floored to a grid 14 bits below their largest exponent (at 4,
+//!   samples 0 and 1 first, as a two's complement adder normalizes their sum) and summed, the
+//!   average rounded to a `half` with a tie toward +∞, a NaN counting 0 and an infinity 65536;
+//! - an `RG11B10Float` channel: the `half` rule, then that `half` to nearest even on the channel's
+//!   grid, held to its largest finite value unless infinite;
+//! - an `RGB9E5Float` texel: the `half` rule per channel, then `EXT_texture_shared_exponent`'s
+//!   encode.
+//!
+//! The rules built on the `half` rule are not applied past 4 samples (the runtime resolves those by
+//! the device's average), so their formats are compared at 2 and 4 only.
+//!
 //! Each case draws a multisampled texture sample by sample (the owned fixture `rt6_samples`'s
 //! fill, each sample's code as the float that encodes it exactly), reads every sample back
 //! through an unsigned view (`candidate::runtime_samples`, the oracle's readback), resolves it in
@@ -33,6 +49,7 @@
 
 use super::presenting::{image_info, made_image, shared_among};
 use super::resolves::{lane, quiet, Lane, FULL, WHITE};
+use crate::air_library::AirLibrary;
 use crate::candidate::runtime_samples::{encode_through, library, shape};
 use crate::executor_contract::multisample::{ReadbackView, SampleRead};
 use crate::runtime_lane::buffer_with;
@@ -40,26 +57,46 @@ use metal2vulkan::bind::{SRGB_RESOLVE_LINEAR, SRGB_RESOLVE_THRESHOLDS};
 use metal2vulkan::metal::state::DepthStencilDescriptor;
 use metal2vulkan::metal::{CompareFunction, PixelFormat, PrimitiveType, TextureType, TextureUsage};
 use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};
+use metal2vulkan_devtools::{engine_dir, llvm_assemble};
 use metal2vulkan_runtime::{
     BlitOption, ClearColor, Degradation, LoadAction, PipelineOptions, RenderPassDescriptor,
     ResourceOptions, StoreAction, Texture, TextureDescriptor, VkImageLayouts,
 };
 
 /// How a channel's bits encode its value.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Channel {
     Unorm(u32),
+    /// A packed 16-bit format's unorm channel, which Metal reads through a `half`.
+    HalfUnorm(u32),
     Snorm(u32),
     Srgb,
     Float,
+    Half,
+    /// An unsigned float of 5 exponent bits and this many mantissa bits.
+    SmallFloat(u32),
+    /// A 9-bit mantissa of the texel's shared exponent at bits 27 to 31.
+    Shared,
 }
 
 impl Channel {
     fn bits(self) -> u32 {
         match self {
-            Channel::Unorm(bits) | Channel::Snorm(bits) => bits,
+            Channel::Unorm(bits) | Channel::HalfUnorm(bits) | Channel::Snorm(bits) => bits,
             Channel::Srgb => 8,
             Channel::Float => 32,
+            Channel::Half => 16,
+            Channel::SmallFloat(mantissa) => mantissa + 5,
+            Channel::Shared => 9,
+        }
+    }
+
+    /// Whether Metal's rule of the channel holds at `n` samples: one built on the `half` rule at
+    /// 2 and 4 only.
+    fn resolves(self, n: u32) -> bool {
+        match self {
+            Channel::Half | Channel::SmallFloat(_) | Channel::Shared => n == 2 || n == 4,
+            _ => true,
         }
     }
 }
@@ -80,6 +117,14 @@ const U10: Channel = Channel::Unorm(10);
 const U2: Channel = Channel::Unorm(2);
 const SRGB: Channel = Channel::Srgb;
 const F32: Channel = Channel::Float;
+const F16: Channel = Channel::Half;
+const H1: Channel = Channel::HalfUnorm(1);
+const H4: Channel = Channel::HalfUnorm(4);
+const H5: Channel = Channel::HalfUnorm(5);
+const H6: Channel = Channel::HalfUnorm(6);
+const F11: Channel = Channel::SmallFloat(6);
+const F10: Channel = Channel::SmallFloat(5);
+const E9: Channel = Channel::Shared;
 
 const fn case(pf: PixelFormat, bytes: usize, channels: &'static [(u32, usize, Channel)]) -> Case {
     Case {
@@ -152,7 +197,57 @@ const CASES: &[Case] = &[
         16,
         &[(0, 0, F32), (32, 1, F32), (64, 2, F32), (96, 3, F32)],
     ),
+    case(PixelFormat::R16Float, 2, &[(0, 0, F16)]),
+    case(PixelFormat::RG16Float, 4, &[(0, 0, F16), (16, 1, F16)]),
+    case(
+        PixelFormat::RGBA16Float,
+        8,
+        &[(0, 0, F16), (16, 1, F16), (32, 2, F16), (48, 3, F16)],
+    ),
+    // Metal's packed formats are named from the least significant bit.
+    case(
+        PixelFormat::B5G6R5Unorm,
+        2,
+        &[(11, 0, H5), (5, 1, H6), (0, 2, H5)],
+    ),
+    case(
+        PixelFormat::A1BGR5Unorm,
+        2,
+        &[(11, 0, H5), (6, 1, H5), (1, 2, H5), (0, 3, H1)],
+    ),
+    case(
+        PixelFormat::ABGR4Unorm,
+        2,
+        &[(12, 0, H4), (8, 1, H4), (4, 2, H4), (0, 3, H4)],
+    ),
+    case(
+        PixelFormat::BGR5A1Unorm,
+        2,
+        &[(10, 0, H5), (5, 1, H5), (0, 2, H5), (15, 3, H1)],
+    ),
+    case(
+        PixelFormat::RG11B10Float,
+        4,
+        &[(0, 0, F11), (11, 1, F11), (22, 2, F10)],
+    ),
+    case(
+        PixelFormat::RGB9E5Float,
+        4,
+        &[(0, 0, E9), (9, 1, E9), (18, 2, E9)],
+    ),
 ];
+
+impl Case {
+    /// Whether the case's texels share an exponent (`RGB9E5Float`'s, at bits 27 to 31).
+    fn shared(&self) -> bool {
+        self.channels.iter().any(|&(_, _, c)| c == Channel::Shared)
+    }
+
+    /// Whether Metal's rules of every channel hold at `n` samples.
+    fn resolves(&self, n: u32) -> bool {
+        self.channels.iter().all(|&(_, _, c)| c.resolves(n))
+    }
+}
 
 /// How a case's samples are read back: the unsigned view, the fixture's kernel that packs a texel
 /// of it into words, and the readback's texel size. A view of the texel's own components where the
@@ -169,9 +264,11 @@ fn readback_view(case: &Case) -> (PixelFormat, &'static str, ReadbackView) {
         }
         P::R16Unorm | P::R16Snorm => (P::R16Uint, "rt6_read_words1", ReadbackView::R16Uint),
         P::RG16Unorm | P::RG16Snorm => (P::RG16Uint, "rt6_read_halves2", ReadbackView::R32Uint),
-        P::RGBA16Unorm | P::RGBA16Snorm => {
+        P::RGBA16Unorm | P::RGBA16Snorm | P::RGBA16Float => {
             (P::RGBA16Uint, "rt6_read_halves4", ReadbackView::Rg32Uint)
         }
+        P::R16Float => (P::R16Uint, "rt6_read_words1", ReadbackView::R16Uint),
+        P::RG16Float => (P::RG16Uint, "rt6_read_halves2", ReadbackView::R32Uint),
         P::R32Float => (P::R32Uint, "rt6_read_words1", ReadbackView::R32Uint),
         P::RG32Float => (P::RG32Uint, "rt6_read_words2", ReadbackView::Rg32Uint),
         P::RGBA32Float => (P::RGBA32Uint, "rt6_read_words4", ReadbackView::Rgba32Uint),
@@ -183,10 +280,16 @@ fn readback_view(case: &Case) -> (PixelFormat, &'static str, ReadbackView) {
 }
 
 /// The float a fragment writes for `code` of `channel`: the value that encodes it exactly (an
-/// sRGB code's linear value, a snorm code below -1.0 as -1.0, a float's own bits).
+/// sRGB code's linear value, a snorm code below -1.0 as -1.0, a float's own bits, a small float's
+/// value). A shared exponent's mantissa needs its texel's exponent ([`shared_value`]).
 fn encoding(channel: Channel, code: u64) -> f32 {
     match channel {
-        Channel::Unorm(bits) => (code as f64 / ((1u64 << bits) - 1) as f64) as f32,
+        Channel::Unorm(bits) | Channel::HalfUnorm(bits) => {
+            (code as f64 / ((1u64 << bits) - 1) as f64) as f32
+        }
+        Channel::Half => half_value(code as u32) as f32,
+        Channel::SmallFloat(mantissa) => half_value((code as u32) << (10 - mantissa)) as f32,
+        Channel::Shared => panic!("a shared exponent's mantissa is no value alone"),
         Channel::Snorm(bits) => {
             let half = 1i64 << (bits - 1);
             let v = code as i64;
@@ -203,6 +306,34 @@ fn encoding(channel: Channel, code: u64) -> f32 {
             linear as f32
         }
         Channel::Float => f32::from_bits(code as u32),
+    }
+}
+
+/// The value of a shared-exponent texel's mantissa `code` under its exponent field `exponent`.
+fn shared_value(code: u64, exponent: u64) -> f64 {
+    code as f64 * pow2(exponent as i32 - 24)
+}
+
+/// 2^k, for a `k` of a normal `f64`.
+fn pow2(k: i32) -> f64 {
+    f64::from_bits(((k + 1023) as u64) << 52)
+}
+
+/// The exponent of a nonzero finite `f64` (its leading bit's), from its bits.
+fn exponent(x: f64) -> i32 {
+    ((x.abs().to_bits() >> 52) & 0x7ff) as i32 - 1023
+}
+
+/// The value of a half's bits: its NaNs and infinities too.
+fn half_value(h: u32) -> f64 {
+    let sign = if h & 0x8000 != 0 { -1.0 } else { 1.0 };
+    let e = ((h >> 10) & 0x1f) as i32;
+    let m = f64::from(h & 0x3ff);
+    sign * match e {
+        31 if m == 0.0 => f64::INFINITY,
+        31 => f64::NAN,
+        0 => m * pow2(-24),
+        _ => (1024.0 + m) * pow2(e - 25),
     }
 }
 
@@ -238,10 +369,39 @@ fn float_bits(r: &mut SplitMix) -> u64 {
     (sign << 31) | bits
 }
 
+/// Half bits that reach every case of the half rule: any, the infinities, NaNs, the largest,
+/// subnormals and zeros.
+fn half_bits(r: &mut SplitMix) -> u64 {
+    let pick = r.next();
+    let sign = (pick >> 8) & 1;
+    let bits = match pick % 12 {
+        0 => [0x7c00, 0x7e00, 0x7c01, 0x7fff][(r.next() % 4) as usize],
+        1 => 0x7bff - r.next() % 4,
+        2 => r.next() % 0x800,
+        3 => 0,
+        _ => r.next() % 0x7c00,
+    };
+    (sign << 15) | bits
+}
+
+/// Small-float bits of `mantissa` bits that reach every case of the small-float rule: any, the
+/// infinity, NaNs, the largest finite values, subnormals and zero.
+fn small_float_bits(r: &mut SplitMix, mantissa: u32) -> u64 {
+    let inf = 31u64 << mantissa;
+    match r.next() % 10 {
+        0 => inf,
+        1 => inf | (r.next() & ((1 << mantissa) - 1)).max(1),
+        2 => inf - 1 - r.next() % 4,
+        3 => r.next() & ((1 << mantissa) - 1),
+        4 => 0,
+        _ => r.next() % inf,
+    }
+}
+
 /// The value of channel `channel` of sample `s` of pixel `(x, y)` among `n`, on an image `width`
 /// wide: an 8-bit or narrower channel takes every pair `(x, y)` (2 samples), and `(a, a, b, b)`
 /// over every pair in the image's first 256 rows at more; the rest is random, wider integer
-/// channels drawing their edge values a quarter of the time.
+/// channels drawing their edge values a quarter of the time, floats every class.
 fn value(
     channel: Channel,
     index: usize,
@@ -271,6 +431,8 @@ fn value(
     }
     match channel {
         Channel::Float => float_bits(r),
+        Channel::Half => half_bits(r),
+        Channel::SmallFloat(mantissa) => small_float_bits(r, mantissa),
         _ if bits > 8 && r.next().is_multiple_of(4) => {
             let half = 1u64 << (bits - 1);
             let edges = [0, 1, half - 1, half, half + 1, mask - 1, mask];
@@ -328,7 +490,180 @@ fn metal(channel: Channel, samples: &[u64]) -> u64 {
                 u64::from(resolved.to_bits())
             }
         }
+        Channel::HalfUnorm(bits) => half_unorm_rule(bits, samples),
+        Channel::Half => {
+            let halves: Vec<u32> = samples.iter().map(|&s| s as u32).collect();
+            u64::from(half_rule(&halves))
+        }
+        Channel::SmallFloat(mantissa) => small_rule(mantissa, samples),
+        Channel::Shared => panic!("a shared exponent resolves by texel ([`shared_rule`])"),
     }
+}
+
+/// Metal's resolve of a unorm channel of `bits` bits read through a `half` (the module docs): each
+/// code `c` of `m` becomes the `half` nearest `c / m` (ties to even), times `m` rounded toward zero
+/// to a `half`; the average of those rounds half up. In `f64`, where `c / m` lies far from every
+/// tie of the `half` grid (`m` is odd) and each other step is exact.
+fn half_unorm_rule(bits: u32, samples: &[u64]) -> u64 {
+    let m = ((1u64 << bits) - 1) as f64;
+    let sum: f64 = samples
+        .iter()
+        .map(|&c| {
+            let v = c as f64 / m;
+            if v == 0.0 {
+                return 0.0;
+            }
+            let step = pow2(exponent(v) - 10);
+            let product = (v / step).round_ties_even() * step * m;
+            let step = pow2(exponent(product) - 10);
+            (product / step).floor() * step
+        })
+        .sum();
+    (sum / samples.len() as f64 + 0.5).floor() as u64
+}
+
+/// A half's value in units of 2^-24, exactly: a NaN 0, an infinity 2^16 of its sign.
+fn half_units(h: u32) -> i64 {
+    let sign = if h & 0x8000 != 0 { -1 } else { 1 };
+    let e = (h >> 10) & 0x1f;
+    let m = i64::from(h & 0x3ff);
+    sign * match (e, m) {
+        (31, 0) => 1 << 40,
+        (31, _) => 0,
+        (0, _) => m,
+        _ => (1024 + m) << (e - 1),
+    }
+}
+
+/// The half's bits of `v` units of 2^-24 on the `half` grid: 2^16 and more an infinity, a zero +0.
+fn half_of_units(v: i64) -> u32 {
+    let sign = if v < 0 { 0x8000 } else { 0 };
+    let a = v.unsigned_abs();
+    if a >= 1 << 40 {
+        return sign | 0x7c00;
+    }
+    if a == 0 {
+        return 0;
+    }
+    if a < 1024 {
+        return sign | a as u32;
+    }
+    let e = 64 - a.leading_zeros() - 11;
+    sign | ((e + 1) << 10) | ((a >> e) as u32 - 1024)
+}
+
+/// The exponent of `v` units of 2^-28 (its leading bit's), -100 for zero.
+fn fine_exponent(v: i64) -> i32 {
+    if v == 0 {
+        return -100;
+    }
+    63 - v.unsigned_abs().leading_zeros() as i32 - 28
+}
+
+/// `v` units of 2^-28 floored to the multiple of 2^(e - 14).
+fn floored(v: i64, e: i32) -> i64 {
+    let step = 1i64 << (e + 14);
+    v.div_euclid(step) * step
+}
+
+/// Metal's 2- and 4-sample half resolve (the module docs) in exact integers, units of 2^-28: each
+/// half's value (a NaN 0, an infinity 2^16 of its sign) and exponent (at least -14); at 2 the two
+/// floored to the larger exponent's grid and summed; at 4 samples 0 and 1 so summed into `A`,
+/// whose exponent is its leading bit's (one lower for a negative power of two) but at most the
+/// larger of theirs, and `A` and samples 2 and 3 floored to the largest exponent's grid and
+/// summed; the average rounded to the `half` grid with a tie toward +∞. The half's bits.
+fn half_rule(halves: &[u32]) -> u32 {
+    let fine: Vec<(i64, i32)> = halves
+        .iter()
+        .map(|&h| {
+            let v = half_units(h) * 16;
+            (v, fine_exponent(v).max(-14))
+        })
+        .collect();
+    let total = match *fine.as_slice() {
+        [(a, ea), (b, eb)] => {
+            let e = ea.max(eb);
+            floored(a, e) + floored(b, e)
+        }
+        [(a, ea), (b, eb), (c, ec), (d, ed)] => {
+            let pair = ea.max(eb);
+            let first = floored(a, pair) + floored(b, pair);
+            let mut e_first = fine_exponent(first);
+            if first < 0 && first.unsigned_abs().is_power_of_two() {
+                e_first -= 1;
+            }
+            let e = e_first.min(pair).max(ec).max(ed);
+            floored(first, e) + floored(c, e) + floored(d, e)
+        }
+        _ => panic!(
+            "a half's rule holds at 2 and 4 samples, not {}",
+            halves.len()
+        ),
+    };
+    let n = halves.len() as i64;
+    // The grid's step in units of 2^-28: 2^-24 below 2^-13, else the binade's.
+    let mut step = 16i64;
+    while total.abs() >= n * (step << 11) {
+        step <<= 1;
+    }
+    let q = (2 * total + n * step).div_euclid(2 * n * step);
+    half_of_units(q * step / 16)
+}
+
+/// Metal's resolve of a small float of `mantissa` bits (the module docs): the samples' half
+/// resolve (a small float's bits are a half's leading bits), an infinity infinite, else that half
+/// rounded to nearest even onto the small float's grid and held to its largest finite value. The
+/// small float's bits.
+fn small_rule(mantissa: u32, samples: &[u64]) -> u64 {
+    let halves: Vec<u32> = samples
+        .iter()
+        .map(|&c| (c as u32) << (10 - mantissa))
+        .collect();
+    let h = half_rule(&halves);
+    if h == 0x7c00 {
+        return 31 << mantissa;
+    }
+    let v = half_value(h);
+    if v == 0.0 {
+        return 0;
+    }
+    let m = mantissa as i32;
+    let step = pow2(exponent(v).max(-14) - m);
+    let v = ((v / step).round_ties_even() * step).min((2.0 - pow2(-m)) * 32768.0);
+    let e = exponent(v);
+    if e < -14 {
+        return (v / pow2(-14 - m)) as u64;
+    }
+    (((e + 15) as u64) << mantissa) | ((v / pow2(e - m)) as u64 - (1 << mantissa))
+}
+
+/// The three channels (R, G, B) of a shared-exponent texel `word`.
+fn shared_values(word: u64) -> [f64; 3] {
+    [0, 9, 18].map(|at| shared_value((word >> at) & 0x1ff, (word >> 27) & 0x1f))
+}
+
+/// Metal's resolve of shared-exponent texels `words` (the module docs): each channel's half
+/// resolve, then `EXT_texture_shared_exponent`'s encode. The values the resolved texel holds.
+fn shared_rule(words: &[u64]) -> [f64; 3] {
+    let resolved = [0, 1, 2].map(|c| {
+        // A channel's value in units of 2^-24 is its mantissa shifted by its exponent field.
+        let halves: Vec<u32> = words
+            .iter()
+            .map(|&w| half_of_units((((w >> (9 * c)) & 0x1ff) << ((w >> 27) & 0x1f)) as i64))
+            .collect();
+        half_value(half_rule(&halves)).clamp(0.0, 65408.0)
+    });
+    let most = resolved[0].max(resolved[1]).max(resolved[2]);
+    let mut e = if most > 0.0 {
+        exponent(most).max(-16)
+    } else {
+        -16
+    } + 16;
+    if (most / pow2(e - 24) + 0.5).floor() == 512.0 {
+        e += 1;
+    }
+    let step = pow2(e - 24);
+    resolved.map(|v| (v / step + 0.5).floor() * step)
 }
 
 /// The bits of `texel` (little-endian) at `offset`, `bits` wide.
@@ -368,10 +703,26 @@ struct Outcome {
     examples: Vec<String>,
 }
 
-/// Draw a `width` by `height` texture of `case` at `n` samples, read its samples back, resolve
-/// it, and compare.
+/// The width and height of a case's texture at `n` samples.
+fn case_extent(n: u32) -> [u32; 2] {
+    [256, if n == 2 { 256 } else { 512 }]
+}
+
+/// Draw a texture of `case` at `n` samples ([`case_extent`]), read its samples back, resolve it,
+/// and compare.
 fn resolve_case(lane: &Lane, case: &Case, n: u32) -> Result<Outcome, String> {
-    let (width, height) = (256u32, if n == 2 { 256u32 } else { 512u32 });
+    resolve_case_through(lane, case, n, None)
+}
+
+/// [`resolve_case`], where `through` names a texture of the case's format, samples and extent:
+/// the drawn samples copied into it after the readback (`copy_texture`), and it resolved instead.
+fn resolve_case_through(
+    lane: &Lane,
+    case: &Case,
+    n: u32,
+    through: Option<&Texture>,
+) -> Result<Outcome, String> {
+    let [width, height] = case_extent(n);
     let mut r = SplitMix(0x5250_4c00 ^ (u64::from(n) << 32) ^ case.pf as u64);
     let pixels = (width * height) as usize;
     let texels = pixels * n as usize;
@@ -381,17 +732,23 @@ fn resolve_case(lane: &Lane, case: &Case, n: u32) -> Result<Outcome, String> {
     for y in 0..height {
         for x in 0..width {
             let mut sample_floats = vec![[0f32; 4]; n as usize];
+            // A shared-exponent texel's exponent field, each sample's.
+            let exponents: Vec<u64> = (0..n)
+                .map(|_| if case.shared() { r.next() % 32 } else { 0 })
+                .collect();
             for (index, &(offset, component, channel)) in case.channels.iter().enumerate() {
                 for (s, lanes) in sample_floats.iter_mut().enumerate() {
                     let code = value(channel, index, (x, y), (s as u32, n), &mut r);
                     let at = (((y * width + x) * n) as usize + s) * case.bytes;
-                    set_field(
-                        &mut drawn[at..at + case.bytes],
-                        offset,
-                        channel.bits(),
-                        code,
-                    );
-                    lanes[component] = encoding(channel, code);
+                    let texel = &mut drawn[at..at + case.bytes];
+                    set_field(texel, offset, channel.bits(), code);
+                    lanes[component] = match channel {
+                        Channel::Shared => {
+                            set_field(texel, 27, 5, exponents[s]);
+                            shared_value(code, exponents[s]) as f32
+                        }
+                        _ => encoding(channel, code),
+                    };
                 }
             }
             for lanes in sample_floats {
@@ -469,9 +826,21 @@ fn resolve_case(lane: &Lane, case: &Case, n: u32) -> Result<Outcome, String> {
         n,
     )
     .map_err(|e| format!("the readback: {e}"))?;
+    let source = match through {
+        Some(texture) => {
+            let mut blit = command_buffer
+                .blit_command_encoder()
+                .map_err(|e| format!("the copy's encoder: {e}"))?;
+            blit.copy_texture(&msaa, texture)
+                .map_err(|e| format!("the copy into the resolved texture: {e}"))?;
+            blit.end_encoding().map_err(|e| e.to_string())?;
+            texture.clone()
+        }
+        None => msaa.clone(),
+    };
     let mut pass = RenderPassDescriptor::new();
     let target = &mut pass.color_attachments[0];
-    target.texture = Some(msaa.clone());
+    target.texture = Some(source);
     target.load_action = LoadAction::Load;
     target.store_action = StoreAction::MultisampleResolve;
     target.resolve_texture = Some(resolved.clone());
@@ -496,6 +865,10 @@ fn resolve_case(lane: &Lane, case: &Case, n: u32) -> Result<Outcome, String> {
     };
     for p in 0..pixels {
         let at = p * case.bytes;
+        if case.shared() {
+            compare_shared(&mut outcome, (&drawn, &stored, &got), p, n as usize);
+            continue;
+        }
         for &(offset, _, channel) in case.channels {
             outcome.channels += 1;
             let bits = channel.bits();
@@ -524,6 +897,36 @@ fn resolve_case(lane: &Lane, case: &Case, n: u32) -> Result<Outcome, String> {
     Ok(outcome)
 }
 
+/// Compare pixel `p`'s shared-exponent texel of 4 bytes, `n` samples each in `drawn` and
+/// `stored`, resolved in `got`, with Metal's rule by value: the encode may write one value in
+/// more than one way (a zero under any exponent).
+fn compare_shared(
+    outcome: &mut Outcome,
+    (drawn, stored, got): (&[u8], &[u8], &[u8]),
+    p: usize,
+    n: usize,
+) {
+    let word = |texels: &[u8], i: usize| field(&texels[4 * i..4 * i + 4], 0, 32);
+    let words: Vec<u64> = (0..n).map(|s| word(stored, p * n + s)).collect();
+    outcome.changed += (0..n)
+        .filter(|&s| shared_values(word(drawn, p * n + s)) != shared_values(words[s]))
+        .count();
+    let device_values = shared_values(word(got, p));
+    let metal_values = shared_rule(&words);
+    outcome.channels += 3;
+    let differ = (0..3)
+        .filter(|&c| device_values[c] != metal_values[c])
+        .count();
+    outcome.differ += differ;
+    if differ != 0 && outcome.examples.len() < 4 {
+        let shown: Vec<String> = words.iter().map(|w| format!("{w:#x}")).collect();
+        outcome.examples.push(format!(
+            "[{}]: {device_values:?}, Metal's rule {metal_values:?}",
+            shown.join(", ")
+        ));
+    }
+}
+
 /// Every closed format at every sample count the device takes, printed against Metal's rules
 /// and held to them (the module docs).
 #[test]
@@ -548,6 +951,13 @@ fn color_resolves_against_metals_rules() {
         }
         for case in CASES {
             let pf = case.pf;
+            if !case.resolves(n) {
+                eprintln!(
+                    "resolve rounding {pf:?} x{n} on {name}: skipped, Metal's rule of the format \
+                     holds at 2 and 4 samples (the device's average resolves it, announced)"
+                );
+                continue;
+            }
             match resolve_case(&lane, case, n) {
                 Err(why) => eprintln!("resolve rounding {pf:?} x{n} on {name}: {why}"),
                 Ok(outcome) => {
@@ -583,6 +993,178 @@ fn color_resolves_against_metals_rules() {
         differ.is_empty(),
         "resolves not by Metal's rules on {name}: {differ:#?}"
     );
+    quiet(lane, &messages);
+}
+
+/// A caller's multisampled image of `pf`, `n` samples and `extent`, made with `usage` alone
+/// (`new_texture_with_vk_image`, as a `RenderTarget` texture), and its image and memory, which
+/// the caller destroys after the texture and every command buffer that used it.
+fn callers_image(
+    lane: &Lane,
+    pf: PixelFormat,
+    n: u32,
+    [width, height]: [u32; 2],
+    usage: ash::vk::ImageUsageFlags,
+) -> (Texture, ash::vk::Image, ash::vk::DeviceMemory) {
+    let format = metal2vulkan::metal::format::direct_format(pf).expect("a direct format");
+    // SAFETY: used only while the device lives.
+    let raw = unsafe { lane.device.raw() };
+    // SAFETY: a physical device of the instance.
+    let memory = unsafe {
+        raw.instance
+            .get_physical_device_memory_properties(raw.physical_device)
+    };
+    let info = image_info(format.into(), usage)
+        .extent(ash::vk::Extent3D {
+            width,
+            height,
+            depth: 1,
+        })
+        .samples(ash::vk::SampleCountFlags::from_raw(n));
+    let info = shared_among(info, raw.queue_families);
+    // SAFETY: the device is live.
+    let (image, image_memory) = unsafe { made_image(raw.device, &memory, &info) };
+    let mut descriptor = TextureDescriptor::texture_2d(pf, width.into(), height.into(), false);
+    if n > 1 {
+        descriptor.texture_type = TextureType::Type2DMultisample;
+        descriptor.sample_count = n.into();
+    }
+    descriptor.usage = TextureUsage::RENDER_TARGET;
+    descriptor.resource_options = ResourceOptions::private();
+    // SAFETY: the image is the device's, made with `info`, and nothing else uses it.
+    let texture = unsafe {
+        lane.device.new_texture_with_vk_image(
+            &descriptor,
+            image,
+            &info,
+            VkImageLayouts::new(
+                ash::vk::ImageLayout::UNDEFINED.into(),
+                ash::vk::ImageLayout::TRANSFER_DST_OPTIMAL.into(),
+            ),
+        )
+    }
+    .unwrap();
+    (texture, image, image_memory)
+}
+
+/// Destroy a caller's image of [`callers_image`] and free its memory.
+///
+/// # Safety
+///
+/// Nothing uses them: their texture is gone and every command buffer that used it completed.
+unsafe fn destroy_callers(lane: &Lane, image: ash::vk::Image, memory: ash::vk::DeviceMemory) {
+    // SAFETY: the caller's contract; the device is live.
+    unsafe {
+        let raw = lane.device.raw();
+        raw.device.destroy_image(image, None);
+        raw.device.free_memory(memory, None);
+    }
+}
+
+/// The formats [`a_callers_image_without_input_usage_resolves_by_metals_rules`] resolves: 8-bit
+/// unorm, sRGB, 16-bit snorm and 32-bit float channels.
+const COPIED: [PixelFormat; 4] = [
+    PixelFormat::RGBA8Unorm,
+    PixelFormat::RGBA8UnormSRGB,
+    PixelFormat::RGBA16Snorm,
+    PixelFormat::R32Float,
+];
+
+/// A caller's multisampled image made with color attachment and transfer usage alone, so without
+/// the input attachment usage the exact resolve reads an attachment through: where the device
+/// resolves its format by the exact resolve, the runtime copies its samples into a scratch image
+/// that has the usage and resolves that (`color_resolve.rs`). For each of [`COPIED`] at 2 and 4
+/// samples, those the device takes (the others printed as skipped), the drawn samples (read back
+/// from the runtime's own texture, [`resolve_case`]) are copied into such an image, which a pass of
+/// no draws loads and resolves: every channel of the resolve must be Metal's rule over the
+/// samples, and no pass announces `device-rounded-resolve`.
+/// Where the device resolves so (`degrade_notices::resolve_kind`), `shader-resolve`'s reason, the
+/// first pass's, names the copy: the path ran.
+#[test]
+fn a_callers_image_without_input_usage_resolves_by_metals_rules() {
+    let (messages, _cache, lane) = lane();
+    let name = lane.device.name().to_owned();
+    messages.take_notices();
+    let usage = ash::vk::ImageUsageFlags::COLOR_ATTACHMENT
+        | ash::vk::ImageUsageFlags::TRANSFER_SRC
+        | ash::vk::ImageUsageFlags::TRANSFER_DST;
+    let mut exact = false;
+    let mut differ = Vec::new();
+    for n in [2u32, 4] {
+        let supported = lane
+            .device
+            .properties()
+            .supports_texture_sample_count(n.into())
+            .unwrap();
+        if !supported {
+            eprintln!(
+                "resolve rounding through a caller's image on {name}: no texture of {n} samples"
+            );
+            continue;
+        }
+        for pf in COPIED {
+            let case = CASES.iter().find(|c| c.pf == pf).expect("a closed format");
+            let kind = super::degrade_notices::resolve_kind(&lane.device, pf, n);
+            exact |= kind == Some(Degradation::ShaderResolve);
+            let (callers, image, memory) = callers_image(&lane, pf, n, case_extent(n), usage);
+            let what = format!("{pf:?} x{n} through a caller's image on {name}");
+            let outcome = match resolve_case_through(&lane, case, n, Some(&callers)) {
+                Ok(outcome) => outcome,
+                // Refused before the command buffer was committed: nothing used the image.
+                Err(why) if why.starts_with("unread") => {
+                    eprintln!("resolve rounding {what}: {why}");
+                    drop(callers);
+                    // SAFETY: the texture is gone and no command buffer that used it was
+                    // committed.
+                    unsafe { destroy_callers(&lane, image, memory) };
+                    continue;
+                }
+                Err(why) => panic!("{what}: {why}"),
+            };
+            drop(callers);
+            // SAFETY: the texture is gone and its command buffer completed.
+            unsafe { destroy_callers(&lane, image, memory) };
+            eprintln!(
+                "resolve rounding {what}: {} of {} channels differ from Metal's rule ({} samples \
+                 stored otherwise than drawn){}",
+                outcome.differ,
+                outcome.channels,
+                outcome.changed,
+                if outcome.examples.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", outcome.examples.join("; "))
+                }
+            );
+            if outcome.differ != 0 {
+                differ.push(format!("{pf:?} x{n}: {} channels", outcome.differ));
+            }
+        }
+    }
+    let notices = messages.take_notices();
+    let counts = super::degrade_notices::counts(&notices);
+    eprintln!("resolve rounding through a caller's image on {name}: announced {counts:?}");
+    assert!(
+        differ.is_empty(),
+        "resolves through a caller's image not by Metal's rules on {name}: {differ:#?}"
+    );
+    assert_eq!(
+        counts.get(&Degradation::DeviceRoundedResolve),
+        None,
+        "device-rounded-resolve on {name}"
+    );
+    if exact {
+        let reason = notices
+            .iter()
+            .filter_map(|message| message.degradation.as_ref())
+            .find(|notice| notice.degradation == Degradation::ShaderResolve)
+            .map(|notice| notice.reason.clone())
+            .unwrap_or_default();
+        assert!(
+            reason.contains("copied into a scratch image"),
+            "shader-resolve's reason on {name} names no copy: {reason:?}"
+        );
+    }
     quiet(lane, &messages);
 }
 
@@ -817,109 +1399,197 @@ const FRAME: [u32; 2] = [1920, 1080];
 /// Command buffers per variant of the cost test, of which the median GPU time is printed.
 const TIMED: usize = 15;
 
-/// The exact resolve's cost against the device's: a 1920x1080 `RGBA8Unorm` target of 4 samples,
-/// cleared and drawn once white, then resolved into a single-sampled texture by the device in the
-/// pass (a caller's image made without input attachment usage, which the runtime resolves by the
-/// device's average), by the exact resolve after the pass (the runtime's own texture, on a device
-/// that resolves so), or stored without a resolve; each the median GPU time of its command buffers,
-/// printed. Nothing about the times is asserted.
+/// The formats [`the_exact_resolve_costs_against_a_plain_store`] times: one of the 8-bit unorm rule,
+/// one of the sRGB rule (Maps' `BGRA8Unorm_sRGB`), one of the `half` rule, one of the packed 16-bit
+/// unorm rule, and `RG32Float`, whose 8 bytes a sample are `RGBA16Float`'s under the 32-bit float
+/// rule, so that the two's difference is the `half` rule's arithmetic.
+const TIMED_FORMATS: [PixelFormat; 5] = [
+    PixelFormat::RGBA8Unorm,
+    PixelFormat::BGRA8UnormSRGB,
+    PixelFormat::RGBA16Float,
+    PixelFormat::B5G6R5Unorm,
+    PixelFormat::RG32Float,
+];
+
+/// The side of the cost test's edge-dense draw's squares, in pixels: each square holds the
+/// triangle of its lower-left half, whose diagonal splits one pixel in `CELL` of the frame between
+/// the triangle and the clear color (6.25%), every other pixel's samples alike.
+const CELL: u32 = 16;
+
+/// The clip-space corners (`float4`s) of the cost test's edge-dense draw: over `FRAME` in squares
+/// of [`CELL`], each square's lower-left triangle.
+fn cells() -> Vec<u8> {
+    let [width, height] = FRAME;
+    let clip = |x: u32, y: u32| {
+        [
+            x as f32 / width as f32 * 2.0 - 1.0,
+            y as f32 / height as f32 * 2.0 - 1.0,
+            0.5,
+            1.0,
+        ]
+    };
+    let mut corners = Vec::new();
+    for y in (0..height).step_by(CELL as usize) {
+        for x in (0..width).step_by(CELL as usize) {
+            for corner in [clip(x, y), clip(x + CELL, y), clip(x, y + CELL)] {
+                corners.extend(corner.iter().flat_map(|v| v.to_le_bytes()));
+            }
+        }
+    }
+    corners
+}
+
+/// What a timed pass of the cost test draws.
+#[derive(Clone, Copy)]
+enum Geometry {
+    /// The fullscreen triangle: no pixel holds unlike samples.
+    Full,
+    /// The triangles of [`cells`].
+    Cells,
+}
+
+/// The resolve's cost against a plain store: for each of [`TIMED_FORMATS`], a 1920x1080 target of
+/// 4 samples, cleared and drawn once white, then resolved into a single-sampled texture as the
+/// runtime resolves the runtime's own texture of it on the device (printed: `shader-resolve`, the
+/// exact resolve after the pass; `device-rounded-resolve`, the device's average in the pass; none,
+/// the device's average, measured to be Metal's), resolved the same way from a caller's image
+/// without input attachment usage (the exact resolve reads a copy of its samples,
+/// `color_resolve.rs`), or stored without a resolve; and the runtime's own texture drawn instead
+/// with the edge-dense triangles of [`cells`] (the owned fixture `cfb_sample_depth`'s placed
+/// vertices and white), resolved and stored, as a frame whose edge pixels take the exact rule's
+/// average where the fullscreen triangle's take none. Each the median GPU time of its command
+/// buffers, printed (skipped, and so printed, where the device takes no texture of 4 samples or
+/// none of the format). Nothing about the times is asserted. No texture of these formats reaches
+/// the device's own resolve where the exact resolve applies: a caller's image has the transfer
+/// usage the runtime's texture has (`Device::new_texture_with_vk_image`), so it resolves from a
+/// copy.
 #[test]
-fn the_exact_resolve_costs_against_the_devices() {
+fn the_exact_resolve_costs_against_a_plain_store() {
     let (messages, _cache, lane) = lane();
     let name = lane.device.name().to_owned();
-    let pf = PixelFormat::RGBA8Unorm;
-    let [width, height] = FRAME;
-    let descriptor = |samples: u64| {
-        let mut d = TextureDescriptor::texture_2d(pf, width.into(), height.into(), false);
-        if samples > 1 {
-            d.texture_type = TextureType::Type2DMultisample;
-            d.sample_count = samples;
-        }
-        d.usage = TextureUsage::RENDER_TARGET;
-        d.resource_options = ResourceOptions::private();
-        d
-    };
-    let own = lane.device.new_texture(&descriptor(4)).unwrap();
-    let resolved = lane.device.new_texture(&descriptor(1)).unwrap();
-    // SAFETY: used only while the device lives; the image is destroyed after its texture and
-    // every command buffer that used it.
-    let raw = unsafe { lane.device.raw() };
-    // SAFETY: a physical device of the instance.
-    let memory = unsafe {
-        raw.instance
-            .get_physical_device_memory_properties(raw.physical_device)
-    };
-    let usage = ash::vk::ImageUsageFlags::COLOR_ATTACHMENT
-        | ash::vk::ImageUsageFlags::TRANSFER_SRC
-        | ash::vk::ImageUsageFlags::TRANSFER_DST;
-    let info = image_info(ash::vk::Format::R8G8B8A8_UNORM, usage)
-        .extent(ash::vk::Extent3D {
-            width,
-            height,
-            depth: 1,
-        })
-        .samples(ash::vk::SampleCountFlags::TYPE_4);
-    let info = shared_among(info, raw.queue_families);
-    // SAFETY: the device is live.
-    let (image, image_memory) = unsafe { made_image(raw.device, &memory, &info) };
-    // SAFETY: the image is the device's, made with `info`, and nothing else uses it.
-    let callers = unsafe {
-        lane.device.new_texture_with_vk_image(
-            &descriptor(4),
-            image,
-            &info,
-            VkImageLayouts::new(
-                ash::vk::ImageLayout::UNDEFINED.into(),
-                ash::vk::ImageLayout::TRANSFER_DST_OPTIMAL.into(),
-            ),
-        )
+    let supported = lane
+        .device
+        .properties()
+        .supports_texture_sample_count(4u32.into())
+        .unwrap();
+    if !supported {
+        eprintln!("resolve cost on {name}: skipped, no texture of 4 samples");
+        quiet(lane, &messages);
+        return;
     }
-    .unwrap();
-    let pipeline = lane.pipeline((FULL, WHITE), &[pf], (None, None), 4);
-    let time = |msaa: &Texture, resolve: bool| {
-        let mut times = Vec::with_capacity(TIMED);
-        for _ in 0..TIMED {
-            let mut pass = RenderPassDescriptor::new();
-            let target = &mut pass.color_attachments[0];
-            target.texture = Some(msaa.clone());
-            target.load_action = LoadAction::Clear;
-            if resolve {
-                target.store_action = StoreAction::MultisampleResolve;
-                target.resolve_texture = Some(resolved.clone());
-            } else {
-                target.store_action = StoreAction::Store;
-            }
-            let command_buffer = lane.queue.command_buffer().unwrap();
-            let mut encoder = command_buffer.render_command_encoder(&pass).unwrap();
-            let mut held = Vec::new();
-            lane.draw(&mut encoder, &mut held, &pipeline, 0.5);
-            encoder.end_encoding().unwrap();
-            command_buffer.commit().unwrap();
-            command_buffer
-                .wait_until_completed_for(super::WAIT)
-                .unwrap();
-            let (start, end) = (
-                command_buffer.gpu_start_time().unwrap(),
-                command_buffer.gpu_end_time().unwrap(),
-            );
-            times.push((end - start) * 1e6);
-        }
-        times.sort_by(f64::total_cmp);
-        times[TIMED / 2]
+    let [width, height] = FRAME;
+    let placed = {
+        let bitcode = llvm_assemble(&engine_dir().join("cfb_sample_depth.ll")).unwrap();
+        lane.device.new_library_with_air(&bitcode).unwrap()
     };
-    let device = time(&callers, true);
-    let exact = time(&own, true);
-    let stored = time(&own, false);
-    eprintln!(
-        "resolve cost on {name}: {width}x{height} RGBA8Unorm x4, median GPU time of {TIMED}: \
-         the device's resolve {device:.0} us, the runtime's own texture's resolve {exact:.0} us, \
-         stored without a resolve {stored:.0} us"
-    );
-    drop(callers);
-    // SAFETY: nothing uses them: the texture is gone and every command buffer completed.
-    unsafe {
-        raw.device.destroy_image(image, None);
-        raw.device.free_memory(image_memory, None);
+    let corners = cells();
+    let vertices = (corners.len() / 16) as u32;
+    let corners = buffer_with(&lane.device, &corners).unwrap();
+    for pf in TIMED_FORMATS {
+        let descriptor = |samples: u64| {
+            let mut d = TextureDescriptor::texture_2d(pf, width.into(), height.into(), false);
+            if samples > 1 {
+                d.texture_type = TextureType::Type2DMultisample;
+                d.sample_count = samples;
+            }
+            d.usage = TextureUsage::RENDER_TARGET;
+            d.resource_options = ResourceOptions::private();
+            d
+        };
+        let (own, resolved) = match (
+            lane.device.new_texture(&descriptor(4)),
+            lane.device.new_texture(&descriptor(1)),
+        ) {
+            (Ok(own), Ok(resolved)) => (own, resolved),
+            (Err(e), _) | (_, Err(e)) => {
+                eprintln!("resolve cost {pf:?} on {name}: skipped, {e}");
+                continue;
+            }
+        };
+        let (copied, copied_image, copied_memory) = callers_image(
+            &lane,
+            pf,
+            4,
+            FRAME,
+            ash::vk::ImageUsageFlags::COLOR_ATTACHMENT
+                | ash::vk::ImageUsageFlags::TRANSFER_SRC
+                | ash::vk::ImageUsageFlags::TRANSFER_DST,
+        );
+        let pipeline = lane.pipeline((FULL, WHITE), &[pf], (None, None), 4);
+        let cells_pipeline = {
+            let function = |name| {
+                StageSource::Function(
+                    placed
+                        .new_function_with_name(name)
+                        .unwrap()
+                        .function_descriptor(),
+                )
+            };
+            let mut descriptor = RenderPipelineDescriptor::new(function("cfb_depth_vertex"));
+            descriptor.fragment = Some(function("cfb_depth_white"));
+            descriptor.color_attachments[0] = Some(ColorAttachmentDescriptor::new(pf));
+            descriptor.raster_sample_count = 4;
+            lane.device
+                .new_render_pipeline_state(&descriptor, &PipelineOptions::default())
+                .unwrap()
+        };
+        let time = |msaa: &Texture, resolve: bool, geometry: Geometry| {
+            let mut times = Vec::with_capacity(TIMED);
+            for _ in 0..TIMED {
+                let mut pass = RenderPassDescriptor::new();
+                let target = &mut pass.color_attachments[0];
+                target.texture = Some(msaa.clone());
+                target.load_action = LoadAction::Clear;
+                if resolve {
+                    target.store_action = StoreAction::MultisampleResolve;
+                    target.resolve_texture = Some(resolved.clone());
+                } else {
+                    target.store_action = StoreAction::Store;
+                }
+                let command_buffer = lane.queue.command_buffer().unwrap();
+                let mut encoder = command_buffer.render_command_encoder(&pass).unwrap();
+                let mut held = Vec::new();
+                match geometry {
+                    Geometry::Full => lane.draw(&mut encoder, &mut held, &pipeline, 0.5),
+                    Geometry::Cells => {
+                        encoder.set_render_pipeline_state(&cells_pipeline).unwrap();
+                        encoder.set_vertex_buffer(Some(&corners), 0, 0).unwrap();
+                        encoder
+                            .draw_primitives(PrimitiveType::Triangle, 0, vertices, 1, 0)
+                            .unwrap();
+                    }
+                }
+                encoder.end_encoding().unwrap();
+                command_buffer.commit().unwrap();
+                command_buffer
+                    .wait_until_completed_for(super::WAIT)
+                    .unwrap();
+                let (start, end) = (
+                    command_buffer.gpu_start_time().unwrap(),
+                    command_buffer.gpu_end_time().unwrap(),
+                );
+                times.push((end - start) * 1e6);
+            }
+            times.sort_by(f64::total_cmp);
+            times[TIMED / 2]
+        };
+        let own_resolve = time(&own, true, Geometry::Full);
+        let through_copy = time(&copied, true, Geometry::Full);
+        let stored = time(&own, false, Geometry::Full);
+        let cells_resolve = time(&own, true, Geometry::Cells);
+        let cells_stored = time(&own, false, Geometry::Cells);
+        let kind = super::degrade_notices::resolve_kind(&lane.device, pf, 4)
+            .map_or("none", Degradation::code);
+        eprintln!(
+            "resolve cost on {name}: {width}x{height} {pf:?} x4 (announced kind {kind}), median \
+             GPU time of {TIMED}: the runtime's own texture's resolve {own_resolve:.0} us, a \
+             caller's image's resolve {through_copy:.0} us, stored without a resolve {stored:.0} us; \
+             edge-dense ({CELL}-pixel triangles): resolve {cells_resolve:.0} us, stored \
+             {cells_stored:.0} us"
+        );
+        drop(copied);
+        // SAFETY: nothing uses them: the texture is gone and every command buffer completed.
+        unsafe { destroy_callers(&lane, copied_image, copied_memory) };
     }
     quiet(lane, &messages);
 }

@@ -1,4 +1,4 @@
-// Owned fixture (WP-RRP, DESIGN D471, docs/TODO.md 8.41 and 8.37): reads, writes and an atomic
+// Owned fixture: reads, writes and an atomic
 // through the texture at [[texture(0)]], which a case binds as a swizzled view, or as a texture
 // whose declared usage the access skips. A read kernel writes texel (0, 0) to buffer 0; a write
 // kernel writes buffer 1's value to its thread's texel; the atomic kernel adds 5 to texel (0, 0)

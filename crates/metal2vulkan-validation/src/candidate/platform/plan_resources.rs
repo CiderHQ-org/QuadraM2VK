@@ -61,7 +61,7 @@ use metal2vulkan::bind::{
     SamplerSource, WriteSource,
 };
 use metal2vulkan::device::Device;
-use metal2vulkan::metal::sampler::OpaqueBlackBorder;
+use metal2vulkan::metal::sampler::{OpaqueBlackBorder, SamplerUse};
 use metal2vulkan::pipeline::StorageAttachmentView;
 use metal2vulkan::pipeline::{SlotRef, Stage};
 use std::collections::{BTreeMap, BTreeSet};
@@ -552,14 +552,17 @@ impl<'a> PlanResources<'a> {
                         slot,
                         compare,
                         integer,
+                        cube_gradient,
                         opaque_black,
                     } => {
                         let desc = bound_sampler(guest, *slot)?;
+                        let use_ =
+                            SamplerUse::new(*compare, *integer).with_cube_gradient(*cube_gradient);
                         self.slot_sampler(
                             context,
                             device,
                             desc,
-                            (*compare, *integer, *opaque_black),
+                            (use_, *opaque_black),
                             Some(format),
                         )?
                     }
@@ -582,11 +585,13 @@ impl<'a> PlanResources<'a> {
                 slot,
                 compare,
                 integer,
+                cube_gradient,
                 opaque_black,
             } => {
                 let desc = bound_sampler(guest, *slot)?;
-                let use_ = (*compare, *integer, *opaque_black);
-                let sampler = self.slot_sampler(context, device, desc, use_, None)?;
+                let use_ = SamplerUse::new(*compare, *integer).with_cube_gradient(*cube_gradient);
+                let sampler =
+                    self.slot_sampler(context, device, desc, (use_, *opaque_black), None)?;
                 Info::Image(vk::DescriptorImageInfo::default().sampler(sampler))
             }
             // An element past the list is the neutral sampler (the plan's array covers its
@@ -595,13 +600,15 @@ impl<'a> PlanResources<'a> {
                 index,
                 compare,
                 integer,
+                cube_gradient,
             } => {
+                let use_ = SamplerUse::new(*compare, *integer).with_cube_gradient(*cube_gradient);
                 let sampler = match guest.argument_samplers.get(*index as usize) {
                     Some(listed) => self.slot_sampler(
                         context,
                         device,
                         &listed.desc,
-                        (*compare, *integer, OpaqueBlackBorder::Stated),
+                        (use_, OpaqueBlackBorder::Stated),
                         None,
                     )?,
                     None => self.neutral_sampler(context, *compare)?,
@@ -873,17 +880,17 @@ impl<'a> PlanResources<'a> {
         Ok((image.image, image.layout))
     }
 
-    /// The `VkSampler` of a bound sampler's descriptor `desc` for a use `(compare, integer,
-    /// opaque_black)` reading `image_format`.
+    /// The `VkSampler` of a bound sampler's descriptor `desc` for a use and opaque black border
+    /// reading `image_format`.
     fn slot_sampler(
         &mut self,
         context: &VulkanContext,
         device: &Device,
         desc: &SamplerDescriptor,
-        (compare, integer, opaque_black): (bool, bool, OpaqueBlackBorder),
+        (use_, opaque_black): (SamplerUse, OpaqueBlackBorder),
         image_format: Option<metal2vulkan::vk::Format>,
     ) -> Result<vk::Sampler, ExecutorError> {
-        let mapped = sampler_desc(device, desc, compare, integer, opaque_black, image_format)
+        let mapped = sampler_desc(device, desc, use_, opaque_black, image_format)
             .map_err(|e| bind_refusal(&e))?;
         let mut reduction = vk::SamplerReductionModeCreateInfo::default();
         let mut border = vk::SamplerBorderColorComponentMappingCreateInfoEXT::default();

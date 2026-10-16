@@ -6,7 +6,7 @@ use crate::device::requirements::{Requirements, VkFeature};
 use crate::device::subgroup::SubgroupRequirement;
 use crate::graph::{Graph, Sccs};
 use crate::pipeline::sym::Stage;
-use crate::spirv::builder::mesh_arrayed;
+use crate::spirv::builder::{geometry_per_vertex, mesh_arrayed};
 use crate::spirv::error::Dangling;
 use crate::spirv::ids::{BlockId, FuncId, GlobalId};
 use crate::spirv::ir::{
@@ -193,11 +193,19 @@ pub(super) fn check_stage(m: &TypedModule) -> Result<(), VerifyError> {
             return Err(Violation::PayloadForModel(id).into());
         }
         if let GlobalKind::BuiltIn { builtin, dir } = g.kind {
-            // A mesh entry declares its outputs as arrays over its vertices or primitives, and
-            // no other model declares that form.
+            // A mesh entry declares its outputs as arrays over its vertices or primitives, a
+            // geometry entry its per-vertex inputs as arrays over the input primitive's vertices,
+            // and no other model declares that form.
             let per_element = m.entry.model == ExecModel::MeshEXT && dir == IoDir::Output;
+            let per_vertex = m.entry.model == ExecModel::Geometry
+                && dir == IoDir::Input
+                && geometry_per_vertex(builtin);
+            let vertex_form = m.entry.model == ExecModel::Geometry
+                && dir == IoDir::Input
+                && element_array(m, builtin, g.pointee)?;
             if !builtin_in_model(builtin, dir, m.entry.model)
                 || per_element != mesh_array_form(m, builtin, dir, g.pointee)?
+                || per_vertex != vertex_form
             {
                 return Err(Violation::BuiltInForModel(id).into());
             }
@@ -214,10 +222,20 @@ fn mesh_array_form(
     dir: IoDir,
     ty: crate::spirv::ids::TypeId,
 ) -> Result<bool, VerifyError> {
-    use crate::spv::BuiltIn as B;
     if dir != IoDir::Output || !mesh_arrayed(b) {
         return Ok(false);
     }
+    element_array(m, b, ty)
+}
+
+/// Whether builtin `b`'s variable type `ty` is an array of the builtin's own type (`ClipDistance`
+/// and `CullDistance`, already arrays, as arrays of arrays).
+fn element_array(
+    m: &TypedModule,
+    b: crate::spv::BuiltIn,
+    ty: crate::spirv::ids::TypeId,
+) -> Result<bool, VerifyError> {
+    use crate::spv::BuiltIn as B;
     let Type::Array { elem, .. } = m.types.get(ty)? else {
         return Ok(false);
     };
@@ -324,6 +342,26 @@ fn builtin_in_model(b: crate::spv::BuiltIn, dir: IoDir, model: ExecModel) -> boo
                 | B::ViewIndex
         ),
         (ExecModel::TaskEXT, IoDir::Output) => false,
+        (ExecModel::Geometry, IoDir::Input) => matches!(
+            b,
+            B::Position
+                | B::PointSize
+                | B::ClipDistance
+                | B::CullDistance
+                | B::PrimitiveId
+                | B::InvocationId
+                | B::ViewIndex
+        ),
+        (ExecModel::Geometry, IoDir::Output) => matches!(
+            b,
+            B::Position
+                | B::PointSize
+                | B::ClipDistance
+                | B::CullDistance
+                | B::PrimitiveId
+                | B::Layer
+                | B::ViewportIndex
+        ),
         (ExecModel::MeshEXT, IoDir::Output) => matches!(
             b,
             B::Position

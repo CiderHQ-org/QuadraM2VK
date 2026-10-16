@@ -6,16 +6,52 @@
 //! that calls an entry point outside the table therefore fails the lane that reaches it, so the
 //! table holds every entry point a section calls, and priming, which makes each before the exit
 //! hook is registered (`prime.rs`), covers them all. Other builds hand out every function.
+//!
+//! Each is a [`Vk`]: the `ash::Device`, which it dereferences to, and the reads the commands of the
+//! device's queue family for encoders make, which the runtime's global memory barriers name in
+//! their destination (`tracker::Barrier::record`, `image_barrier::MemoryReads`).
 
 use crate::exit_guard::{self, Call};
+use crate::image_barrier::MemoryReads;
 use ash::vk;
 use std::ffi::{c_void, CStr};
+use std::ops::Deref;
+
+/// A device's functions as the runtime records commands with them: the `ash::Device`, and the
+/// reads a global memory barrier recorded into a command buffer of the device's queue family for
+/// encoders names in place of `MEMORY_READ` (the module docs).
+#[derive(Clone)]
+pub(crate) struct Vk {
+    device: ash::Device,
+    reads: MemoryReads,
+}
+
+impl Vk {
+    /// `device`'s functions, whose global memory barriers name `reads`: for the work the runtime
+    /// records before the device's functions are made (`prime.rs`).
+    pub(super) fn new(device: ash::Device, reads: MemoryReads) -> Vk {
+        Vk { device, reads }
+    }
+
+    /// The reads a global memory barrier's destination names.
+    pub(crate) fn reads(&self) -> MemoryReads {
+        self.reads
+    }
+}
+
+impl Deref for Vk {
+    type Target = ash::Device;
+
+    fn deref(&self) -> &ash::Device {
+        &self.device
+    }
+}
 
 /// A device's functions: all of them, and the exit guard's table alone.
 #[derive(Clone)]
 pub(crate) struct Functions {
-    all: ash::Device,
-    sectioned: ash::Device,
+    all: Vk,
+    sectioned: Vk,
     /// The address of each device-level entry point of the table, in its order (0 for an
     /// instance-level one, or one the device has not): the topmost layer's where layers run,
     /// else the driver's.
@@ -23,13 +59,18 @@ pub(crate) struct Functions {
 }
 
 impl Functions {
-    /// The functions of `all`'s device, made from `instance`.
+    /// The functions of `all`'s device, made from `instance`, whose global memory barriers name
+    /// `reads`.
     ///
     /// # Safety
     ///
     /// `all` is a live device of `instance`, routed (`compiles::route`), and the loader serves
     /// `vkGetDeviceProcAddr` for it (its loader word is in place).
-    pub(super) unsafe fn new(instance: &ash::Instance, all: ash::Device) -> Functions {
+    pub(super) unsafe fn new(
+        instance: &ash::Instance,
+        all: ash::Device,
+        reads: MemoryReads,
+    ) -> Functions {
         let handle = all.handle();
         let get = instance.fp_v1_0().get_device_proc_addr;
         // SAFETY: the caller's contract; a missing function is null, as ash loads it.
@@ -54,8 +95,8 @@ impl Functions {
         // SAFETY: as above: each pointer is the device's function of that name, or null.
         let sectioned = unsafe { ash::Device::load_with(load, handle) };
         Functions {
-            all,
-            sectioned,
+            all: Vk::new(all, reads),
+            sectioned: Vk::new(sectioned, reads),
             entry_points,
         }
     }
@@ -66,7 +107,7 @@ impl Functions {
     }
 
     /// The device's functions for this thread now (see the module).
-    pub(crate) fn get(&self) -> &ash::Device {
+    pub(crate) fn get(&self) -> &Vk {
         exit_guard::check();
         if cfg!(debug_assertions) && exit_guard::in_section() {
             &self.sectioned

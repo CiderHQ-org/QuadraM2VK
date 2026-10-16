@@ -12,16 +12,20 @@
 //!   copied in before the first, so a load, a clear, and the texels the pass leaves alone are the
 //!   buffer's; copied back at the end where the pass stores it (`Store`,
 //!   `StoreAndMultisampleResolve`) or resolves into it. A `DontCare` store copies nothing back: the
-//!   buffer keeps its bytes, Metal's answer (TOB probe 1, and the DontCare-store probe,
-//!   `kept_bytes.rs`). A pass that reaches no tile (`clear_reach::PassReach::Nothing`) leaves a
-//!   color attachment it loads, resolves nothing from and stores (or stores `DontCare`) as it was,
-//!   as Metal loads and stores only the tiles a draw reaches: where its texture's shadow is an
-//!   image of a buffer's bytes, nothing is copied in or back. A pass whose draws do reach tiles
-//!   changes a color attachment it loads (as the encoder set its load, with no clear before the
-//!   pass) only inside its draws' scissors (`clear_reach::DrawnArea`): only those texels are
-//!   copied back. A texture over a buffer with an aliasing image renders into that image:
-//!   the buffer's bytes, with no copy; but a pass that does not store it renders through an image
-//!   its texture keeps, from which nothing is copied back either (`kept_bytes.rs`).
+//!   buffer keeps its bytes, Metal's answer (a Metal probe on the M3 Max and an M4, and the
+//!   DontCare-store probe, `kept_bytes.rs`). A pass that reaches no tile
+//!   (`clear_reach::PassReach::Nothing`) leaves a color attachment it loads, resolves nothing from
+//!   and stores (or stores `DontCare`) as it was, as Metal loads and stores only the tiles a draw
+//!   reaches: where its texture's shadow is an image of a buffer's bytes, nothing is copied in or
+//!   back. A pass whose draws do reach tiles changes a color attachment it loads (as the encoder
+//!   set its load, with no clear before the pass) only inside its draws' scissors
+//!   (`clear_reach::DrawnArea`): only those texels are copied back, and, where the pass takes the
+//!   texture in no other way, only those are copied in, as nothing the pass reads outside them
+//!   reaches anything but the image (its load is stored back unchanged, and a fragment reads the
+//!   attachment at its own pixel alone). A texture over a buffer with an aliasing image renders
+//!   into that image: the buffer's bytes, with no copy; but a pass that does not store it renders
+//!   through an image its texture keeps, from which nothing is copied back either
+//!   (`kept_bytes.rs`).
 //! - **Two ways.** An instance that writes through a shadowed texture (in a draw, or as an
 //!   attachment it stores) and also writes its bytes another way keeps the texture before it
 //!   and merges it after it, as `shadow.rs` does for a command: the merge goes between it and the
@@ -46,10 +50,11 @@
 use crate::buffer::Buffer;
 use crate::encoder::EncoderCore;
 use crate::error::Error;
-use crate::render_pass::{PassLayout, Target};
+use crate::render_pass::{ColorTarget, PassLayout, Target};
+use crate::render_target;
 use crate::render_values::{LoadAction, StoreAction};
 use crate::resource::ResourceKey;
-use crate::shadow::{self, ShadowCopy, ShadowTarget, ShadowUse};
+use crate::shadow::{self, ShadowCopy, ShadowTarget, ShadowUse, Within};
 use crate::tracker::{Access, Use, UseRange};
 use ash::vk;
 use metal2vulkan::metal::TextureType;
@@ -231,31 +236,89 @@ impl InstanceShadows {
 /// (`EncoderCore::plan_shadows`), the attachments a use of each, a pass whose draws reach tiles
 /// where `reached` (`clear_reach::PassReach`), inside `drawn` where its draws' scissors bound
 /// them (`clear_reach::DrawnArea::bounds`) and nothing but they write the color attachments it
-/// names as loaded by index (their loads as the encoder set them).
+/// names as loaded by index (their loads as the encoder set them). Each of `instances` comes
+/// with the rectangle bounding its own draws' scissors, where `drawn` holds and it bounds them
+/// (an instance of draws alone, after the pass's first, which the steps before the pass's
+/// instances do not precede): its writes of those colors change their bytes inside it alone
+/// ([`bounded_color`], `shadow::Within`), and an attachment's shadow is copied back there.
 pub(super) fn plan<'a>(
     core: &mut EncoderCore,
-    instances: impl Iterator<Item = &'a InstanceShadows>,
+    instances: impl Iterator<Item = (&'a InstanceShadows, Option<[u32; 4]>)>,
     layout: &PassLayout,
     (reached, drawn): (bool, Option<([u32; 4], &[bool])>),
 ) -> Result<Vec<Vec<ShadowCopy>>, Error> {
-    let attachments = attachment_shadows(layout, reached, drawn);
-    let attached = crate::render_target::attachment_uses(layout)?;
+    let attached = render_target::attachment_uses(layout)?;
+    // The colors whose writes an instance bounds, and the uses of the other attachments.
+    let bounded: Vec<usize> = (layout.colors.iter().enumerate())
+        .filter(|&(index, color)| {
+            let loaded = drawn.is_some_and(|(_, loaded)| loaded.get(index) == Some(&true));
+            color
+                .as_ref()
+                .is_some_and(|color| loaded && bounded_color(color, layout))
+        })
+        .map(|(index, _)| index)
+        .collect();
+    let others = render_target::attachment_uses_but(layout, |index| bounded.contains(&index))?;
+    let mut writes = Vec::with_capacity(bounded.len());
+    for color in bounded
+        .iter()
+        .filter_map(|&index| layout.colors[index].as_ref())
+    {
+        let texture = &color.target.texture;
+        let uses = render_target::target_uses(&color.target, false)?;
+        writes.push((uses, texture.usage_shadow_copies()));
+    }
     let mut copies = Vec::new();
-    for instance in instances {
+    for (instance, bound) in instances {
+        let bound = bound.filter(|_| drawn.is_some());
+        let attachments = attachment_shadows(layout, reached, drawn, bound);
         let mut shadows = Vec::with_capacity(attachments.len() + instance.shadows.len());
         for shadow in attachments.iter().chain(&instance.shadows) {
             shadow::join(&mut shadows, shadow);
         }
         let uses: Vec<Use<ResourceKey>> = instance.uses().chain(attached.iter().cloned()).collect();
         copies.push(core.plan_shadows(&shadows, &uses)?);
-        core.shadows_used(&shadows, &uses);
+        match bound.filter(|_| !writes.is_empty()) {
+            Some(area) => {
+                let uses: Vec<Use<ResourceKey>> =
+                    instance.uses().chain(others.iter().cloned()).collect();
+                let within: Vec<Within> = (writes.iter())
+                    .map(|(uses, texels)| Within {
+                        uses: uses.clone(),
+                        texels: texels.clone(),
+                        area,
+                    })
+                    .collect();
+                core.shadows_used(&shadows, &uses, &within);
+            }
+            None => core.shadows_used(&shadows, &uses, &[]),
+        }
     }
     Ok(copies)
 }
 
 /// Whether a pass of `layout` has a shadowed attachment or resolve target.
 pub(super) fn attachments_shadowed(layout: &PassLayout) -> bool {
-    !attachment_shadows(layout, true, None).is_empty()
+    !attachment_shadows(layout, true, None, None).is_empty()
+}
+
+/// Whether the pass changes a texel of `color` (as the encoder set its load, which a loaded
+/// color's is) only inside its draws' scissors, at the texel of the pixel: a single-sampled
+/// color it loads, resolves nowhere, renders itself (no stand-in, no sample planes), the whole
+/// of a one-level, one-slice 2D texture. Its load and store write back what they read
+/// (`VK_ATTACHMENT_LOAD_OP_LOAD`: "the previous contents of the image within the render area
+/// will be preserved as the initial values"; `VK_ATTACHMENT_STORE_OP_STORE`: "the contents
+/// generated during the render pass and within the render area are written to memory"), and a
+/// fragment's samples outside the scissor rectangle "will have their coverage set to 0" (the
+/// Fragment Operations chapter's Scissor Test).
+fn bounded_color(color: &ColorTarget, layout: &PassLayout) -> bool {
+    layout.samples == 1
+        && color.load == LoadAction::Load
+        && color.resolve.is_none()
+        && color.copied_resolve.is_none()
+        && color.stand_in.is_none()
+        && color.planes.is_none()
+        && one_image(&color.target)
 }
 
 /// A color attachment of `layout`'s pass that the pass loads and stores and loads other than by
@@ -289,11 +352,13 @@ pub(super) fn loaded_apart(layout: &PassLayout) -> Option<String> {
 /// different textures, the texture a stand-in renders for, and its resolve targets. A color
 /// attachment of a pass whose draws reach no tile (`reached` false) is left in place
 /// ([`ShadowUse::kept`]). A color attachment `drawn` names as loaded changes only inside its
-/// rectangle, which bounds the draws' scissors ([`ShadowUse::area`]).
+/// rectangle, which bounds the draws' scissors ([`ShadowUse::area`]), and in an instance whose
+/// draws' scissors `instance` bounds, only inside that.
 fn attachment_shadows(
     layout: &PassLayout,
     reached: bool,
     drawn: Option<([u32; 4], &[bool])>,
+    instance: Option<[u32; 4]>,
 ) -> Vec<ShadowUse> {
     let mut shadows = Vec::new();
     let stores = |store: StoreAction| {
@@ -330,6 +395,7 @@ fn attachment_shadows(
                     overwrites,
                     kept: false,
                     area: None,
+                    loads: None,
                 };
                 shadow::join(&mut shadows, &used);
             }
@@ -347,6 +413,7 @@ fn attachment_shadows(
                     overwrites: false,
                     kept: false,
                     area: None,
+                    loads: None,
                 };
                 shadow::join(&mut shadows, &used);
             }
@@ -381,15 +448,19 @@ fn attachment_shadows(
         // pixels its viewport overlaps (`render_state.rs`), which Metal's draw writes no pixel
         // past, and `drawn` bounds them all. So only the texels inside it are copied back, of
         // the attachment's texture where it is the whole of a one-level, one-slice texture.
+        // Nor does the pass read one outside it into anything but the image: the load reads
+        // every texel, but the store writes it back unchanged, a fragment reads the attachment
+        // at its own pixel alone (a blend, framebuffer fetch, programmable blending, an
+        // imageblock), and the area is unbounded wherever a fragment's write is not bounded so
+        // (a rasterization rate map, an execution of render commands) or something reads past
+        // its pixel (a tile dispatch reads the whole tile; a resolve reads every sample, and is
+        // excluded below). So only those texels are copied in (`ShadowUse::loads`); a draw that
+        // takes the texture another way (bound, or made resident) joins a use that reads
+        // anywhere, and each encoder copies in again before its first use.
         let loaded = drawn.filter(|(_, loaded)| loaded.get(index) == Some(&true));
-        let area = loaded.map(|(area, _)| area).filter(|_| {
-            color.load == LoadAction::Load
-                && color.resolve.is_none()
-                && color.copied_resolve.is_none()
-                && color.stand_in.is_none()
-                && color.planes.is_none()
-                && one_image(&color.target)
-        });
+        let area = loaded
+            .map(|(area, _)| area)
+            .filter(|_| bounded_color(color, layout));
         let own = color.stand_in.as_ref().map(|s| &s.own);
         for target in std::iter::once(&color.target).chain(own) {
             if let Some(copies) = target.texture.shadow() {
@@ -402,7 +473,8 @@ fn attachment_shadows(
                     writes: stores,
                     overwrites,
                     kept: !reached,
-                    area,
+                    area: area.map(|area| instance.unwrap_or(area)),
+                    loads: area,
                 };
                 shadow::join(&mut shadows, &used);
             }
@@ -420,6 +492,7 @@ fn attachment_shadows(
                     overwrites: false,
                     kept: false,
                     area: None,
+                    loads: None,
                 };
                 shadow::join(&mut shadows, &used);
             }

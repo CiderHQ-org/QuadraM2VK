@@ -1,4 +1,4 @@
-// Owned MSL for WP-K1 (D152): visible functions a pipeline links. `linked_scale` references
+// Owned MSL: visible functions a pipeline links. `linked_scale` references
 // `linked_offset`, which `linked_visible_caller.metal` defines, so linking resolves references of
 // linked functions in turn; `linked_sample` samples through a constexpr sampler. The kernel only
 // gives the module an entry point. Loop-free.

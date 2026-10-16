@@ -527,11 +527,12 @@ fn a_depth_twin_is_read_through_its_colour_image_and_compared_through_its_twin()
 }
 
 /// A bound runtime sampler's values are checked at plan time from its shape, with exactly the
-/// verdict `vk_sampler` gives the descriptor for the binding's use: anisotropy needs
-/// `samplerAnisotropy`, mirror-clamp `samplerMirrorClampToEdge`, and NaN or inverted LOD clamps are
-/// invalid descriptors; a min reduction reads the weighted average, refused nowhere, and an axis
-/// clamping to zero beside one clamping to a white border reads the one color, refused nowhere.
-/// Every refusal kind occurs on some committed profile.
+/// verdict `vk_sampler` gives the descriptor for the binding's use: mirror-clamp needs
+/// `samplerMirrorClampToEdge`, and NaN or inverted LOD clamps are invalid descriptors; anisotropy is
+/// refused nowhere (without `samplerAnisotropy` the Vulkan sampler is isotropic and the module
+/// emulates Metal's filter or announces the device's), a min reduction reads the weighted average,
+/// refused nowhere, and an axis clamping to zero beside one clamping to a white border reads the one
+/// color, refused nowhere. Every refusal kind occurs on some committed profile.
 #[test]
 fn runtime_sampler_values_are_checked_at_plan_time() {
     use crate::bind::state::SamplerDescriptor;
@@ -603,6 +604,7 @@ fn runtime_sampler_values_are_checked_at_plan_time() {
                                 slot,
                                 compare,
                                 integer: false,
+                                cube_gradient: false,
                                 opaque_black: crate::metal::sampler::OpaqueBlackBorder::Stated,
                             }),
                             "{stem} {name} compare={compare}"
@@ -634,17 +636,21 @@ fn runtime_sampler_values_are_checked_at_plan_time() {
             );
         }
     }
-    for name in ["anisotropic", "mirror clamp"] {
-        assert!(refused.contains_key(name), "{name} is refused somewhere");
-        assert!(accepted.contains_key(name), "{name} is accepted somewhere");
-    }
+    assert!(
+        refused.contains_key("mirror clamp"),
+        "mirror clamp is refused somewhere"
+    );
+    assert!(
+        accepted.contains_key("mirror clamp"),
+        "mirror clamp is accepted somewhere"
+    );
     for name in ["NaN LOD", "inverted LOD"] {
         assert!(
             !accepted.contains_key(name),
             "{name} is never a Vulkan sampler"
         );
     }
-    for name in ["default", "min", "zero beside a border"] {
+    for name in ["default", "anisotropic", "min", "zero beside a border"] {
         assert!(!refused.contains_key(name), "{name} is refused");
     }
 }
@@ -924,13 +930,15 @@ fn bicubic_texels_follow_the_bound_format() {
 
 /// A combined binding with the cube-gradient bit (a cube's explicit gradients in Metal's isotropic
 /// footprint, which a function takes through a runtime sampler where the device's cube-gradient
-/// route is not measured) refuses an anisotropic runtime sampler at plan time, on every committed
-/// profile, as `NotImplemented(SamplerAnisotropy)`: the function chose the isotropic form when it
-/// compiled. An isotropic sampler is accepted for it, and the same anisotropic sampler for a
-/// binding without the bit (every other cube-gradient binding, whose footprint the sampler's word
-/// chooses) gets the ordinary verdict (`samplerAnisotropy`).
+/// route is not measured) takes an anisotropic runtime sampler on every committed profile, without
+/// `samplerAnisotropy` too: its Vulkan sampler is isotropic (no anisotropy handed), and Metal's
+/// anisotropic filter is the function's emulation, whose taps read explicit levels, under the
+/// variant naming the slot (`anisotropic_variant`) wherever the function states
+/// `RuntimeFact::AnisotropicSampler` for it. An isotropic sampler is accepted for it, and the same
+/// anisotropic sampler for a binding without the bit (every other cube-gradient binding, whose
+/// footprint the sampler's word chooses) gets the ordinary verdict (`samplerAnisotropy`).
 #[test]
-fn an_explicit_cube_gradient_binding_refuses_an_anisotropic_sampler() {
+fn an_explicit_cube_gradient_binding_takes_an_anisotropic_sampler_isotropically() {
     use crate::bind::state::SamplerDescriptor;
     use crate::metal::sampler::{vk_sampler, SamplerUse};
     let texture = SlotRef {
@@ -946,7 +954,7 @@ fn an_explicit_cube_gradient_binding_refuses_an_anisotropic_sampler() {
     let isotropic = SamplerDescriptor::new();
     let mut anisotropic = isotropic;
     anisotropic.max_anisotropy = 4;
-    let (mut refused, mut compiled) = (0, 0);
+    let (mut isotropic_taken, mut compiled) = (0, 0);
     for (stem, p) in crate::spirv::testing::committed_profiles().expect("profiles") {
         let t = slot_iface(TextureType::Cube, SampledType::Float);
         let slots = BTreeMap::from([
@@ -981,7 +989,7 @@ fn an_explicit_cube_gradient_binding_refuses_an_anisotropic_sampler() {
                 stage
                     .samplers
                     .insert(sampler_slot.index, BoundSampler::new(desc).shape());
-                let shape = BTreeMap::from([(Stage::Kernel, stage)]);
+                let shape = BTreeMap::from([(Stage::Kernel, stage.clone())]);
                 let mut planner = ResourcePlanner {
                     profile: &p,
                     shape: &shape,
@@ -1003,13 +1011,39 @@ fn an_explicit_cube_gradient_binding_refuses_an_anisotropic_sampler() {
                     &p,
                 );
                 if name == "anisotropic" && cube_gradient {
-                    let gap = Unsupported::not_implemented(Feature::SamplerAnisotropy);
-                    assert!(
-                        matches!(&verdict, Err(Error::Unsupported(u)) if *u == gap),
-                        "{stem}: {verdict:?}"
+                    let made = verdict.unwrap_or_else(|e| panic!("{stem}: {e:?}"));
+                    assert_eq!(made.max_anisotropy, None, "{stem}: {made:?}");
+                    // The write carries the use, so the binder's `VkSampler` (`sampler_desc`)
+                    // is the isotropic one too.
+                    let Ok(WriteSource::CombinedImageSampler {
+                        sampler:
+                            SamplerSource::Slot {
+                                compare,
+                                integer,
+                                cube_gradient: true,
+                                ..
+                            },
+                        ..
+                    }) = planned
+                    else {
+                        panic!("{stem}: {planned:?}");
+                    };
+                    let use_ = SamplerUse::new(compare, integer).with_cube_gradient(true);
+                    assert_eq!(vk_sampler(&desc, use_, &p), Ok(made), "{stem}");
+                    let mut bind = crate::bind::state::BindShape::default();
+                    bind.stages.insert(Stage::Kernel, stage);
+                    let stated = [crate::pipeline::RuntimeDependency::new(
+                        crate::pipeline::facts::RuntimeFact::AnisotropicSampler {
+                            slot: sampler_slot,
+                        },
+                        crate::pipeline::facts::Mechanism::Variant,
+                    )];
+                    assert_eq!(
+                        crate::bind::plan::slots::anisotropic_variant(&stated, &bind),
+                        BTreeSet::from([sampler_slot]),
+                        "{stem}"
                     );
-                    assert_eq!(planned, Err(BindError::Unsupported(gap)), "{stem}");
-                    refused += 1;
+                    isotropic_taken += 1;
                 } else {
                     match verdict {
                         Ok(_) => {
@@ -1026,8 +1060,8 @@ fn an_explicit_cube_gradient_binding_refuses_an_anisotropic_sampler() {
         }
     }
     assert!(
-        refused > 0 && compiled > 0,
-        "{refused} refused, {compiled} accepted"
+        isotropic_taken > 0 && compiled > 0,
+        "{isotropic_taken} taken isotropically, {compiled} accepted"
     );
 }
 
@@ -1379,6 +1413,7 @@ fn a_separate_pair_takes_the_combined_pairs_checks() {
                         slot: sampler_slot,
                         compare: false,
                         integer: false,
+                        cube_gradient: false,
                         opaque_black: crate::metal::sampler::OpaqueBlackBorder::Stated,
                     },
                     None => WriteSource::Neutral(NeutralResource::Sampler { compare: false }),

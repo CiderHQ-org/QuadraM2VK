@@ -1,4 +1,4 @@
-// Owned fixture (WP-NAN, DESIGN D486 item 3, docs/TODO.md 2.4): how Metal sums `dot` on `float`
+// Owned fixture: how Metal sums `dot` on `float`
 // and `half` vectors of two, three and four lanes, in Metal's compile without fast math. Thread
 // `i` reads the float vectors x and y from `in[2i]` and `in[2i + 1]` and writes 8 words to
 // `out[2i]` and `out[2i + 1]`: dot(x.xy, y.xy), dot(x.xyz, y.xyz), dot(x, y); the same three on

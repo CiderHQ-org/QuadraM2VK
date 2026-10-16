@@ -1,7 +1,7 @@
 // A blit into the physical image of a render pass with a rasterization-rate map, through the
-// map's decoder (DESIGN D265): each fragment reads the screen-space texel its pixel stands for.
+// map's decoder: each fragment reads the screen-space texel its pixel stands for.
 //
-// A case draws the generated fullscreen triangle (DESIGN D155) through this function in a pass
+// A case draws the generated fullscreen triangle through this function in a pass
 // whose `rasterizationRateMap` the case authors (`render_pass_rate_map`), with buffer 0 the same
 // map's parameter data (a `rasterization_rate_map` literal) and texture 0 a screen-sized image.
 // Each fragment maps its `[[position]]` (a physical pixel's center) to screen coordinates with

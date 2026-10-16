@@ -285,8 +285,12 @@ pub enum ArithStrategy {
         reciprocal: divide::Reciprocal,
     },
     /// `air.mix` on `float` or `half`, with or without fast-math flags: Metal's
-    /// `fma(t, y, fma(-t, x, x))` (`math::metal_mix`), both fused multiply-adds the given one.
-    Mix(fma::Fma),
+    /// `fma(t, y, fma(-t, x, x))` (`math::metal_mix`), both fused multiply-adds `fma`; where
+    /// `flush`, the inner one's `float` result read as Metal reads a denormal.
+    Mix {
+        fma: fma::Fma,
+        flush: bool,
+    },
     /// `air.dot` on `float` or `half` vectors of form `form`: Metal's fused chain of the
     /// products (`math::metal_dot`), each fused multiply-add `fma`, on one lane; where `flush`, the
     /// chain's `float` values before the last read as Metal reads a denormal.
@@ -420,6 +424,17 @@ pub enum ArithStrategy {
         elem: Form,
         contract: Contraction,
     },
+    /// `air.dot` of chunked vectors of `lanes` lanes of `elem` (`float` or `half`) as Metal's fused
+    /// chain over every lane ([`chunk::dot_chain`]), each fused multiply-add `fma`; where `flush`,
+    /// the chain's `float` values before the last read as Metal reads a denormal, and the lanes of
+    /// the operands `reads` names and the result, where it says so.
+    ChunkedChain {
+        lanes: u16,
+        elem: Form,
+        fma: fma::Fma,
+        flush: bool,
+        reads: denormal::Flush,
+    },
     /// A float result with Metal's NaN selected where it is a NaN ([`nan`]): the value of `of`, a
     /// result of `form`, then [`nan::select`] of `answer`. Named as `of`.
     Nan {
@@ -523,7 +538,7 @@ impl FamilyStrategy for ArithStrategy {
             },
             S::Fma(f) | S::Fused { fma: f, .. } => f.name(),
             S::FastFmod { .. } => FAST_FMOD,
-            S::Mix(_) => MIX,
+            S::Mix { .. } => MIX,
             S::Dot { .. } => DOT,
             S::Folded => FOLDED,
             S::Convert {
@@ -553,6 +568,7 @@ impl FamilyStrategy for ArithStrategy {
             S::IndexWord(_) => "arith.index_word",
             S::SinCos { .. } => "arith.sincos",
             S::ChunkedDot { .. } => "arith.chunked.dot",
+            S::ChunkedChain { .. } => CHUNKED_DOT,
             S::Chunked { .. } => "arith.chunked",
             S::LaneExtract { .. } | S::LaneInsert { .. } => "arith.element.chunked",
             S::LaneShuffle { fragment: true, .. } => "arith.shuffle.fragment",
@@ -644,7 +660,14 @@ impl FamilyStrategy for ArithStrategy {
             // fused multiply-add.
             S::FastFmod { fma, .. } => 64 + fma.words() + math::FAST_DIVISION_CALL_WORDS,
             // The negation of `t` on its bits and the two fused multiply-adds.
-            S::Mix(f) => 32 + 2 * f.words(),
+            S::Mix { fma, flush } => {
+                32 + 2 * fma.words()
+                    + if *flush {
+                        denormal::flush_words(fma.form)
+                    } else {
+                        0
+                    }
+            }
             S::Dot { fma, form, flush } => math::metal_dot_words(*form, fma.words(), *flush),
             S::Convert {
                 kind: ConvertKind::FromFp8(_),
@@ -682,6 +705,13 @@ impl FamilyStrategy for ArithStrategy {
                 nan,
             } => chunk::sin_cos_words(*shape, *fast, *nan).saturating_add(store.words()),
             S::ChunkedDot { lanes, elem, .. } => chunk::dot_words(*lanes, *elem),
+            S::ChunkedChain {
+                lanes,
+                elem,
+                fma,
+                flush,
+                reads,
+            } => chunk::dot_chain_words(*lanes, *elem, fma.words(), *flush, *reads),
             S::Chunked {
                 lanes, parts, wide, ..
             } => {
@@ -1027,6 +1057,9 @@ pub const MIX: &str = "arith.mix.fused";
 /// The census name of `air.dot` on `float` and `half` as Metal's fused chain
 /// ([`ArithStrategy::Dot`]).
 pub const DOT: &str = "arith.dot.fused";
+/// The census name of `air.dot` on chunked `float` and `half` vectors as Metal's fused chain
+/// ([`ArithStrategy::ChunkedChain`]).
+pub const CHUNKED_DOT: &str = "arith.chunked.dot.fused";
 /// See [`SRGB_PACK`].
 pub const SRGB_UNPACK: &str = "arith.unpack.srgb";
 /// The census name of the color table a fragment function's sRGB color writes read
@@ -2475,9 +2508,9 @@ fn llvm_math(op: &LlvmIntrinsic) -> Result<Fun, Error> {
 ///
 /// `air.fast_fmod` on `float` is selected beside this, as [`ArithStrategy::FastFmod`].
 ///
-/// `llvm.minnum` and `llvm.maxnum` on `float` with every flag, Metal's fast-math form of
-/// `a < b ? a : b` and `a > b ? a : b`, are Metal's `fmin` and `fmax` ([`FloatFn::Min`],
-/// [`FloatFn::Max`]); without every flag they stay LLVM's (`FloatFn::MinNum`).
+/// `llvm.minnum` and `llvm.maxnum` on `float`, Metal's fast-math form of `a < b ? a : b` and
+/// `a > b ? a : b` (with every flag), are Metal's `fmin` and `fmax` ([`FloatFn::Min`],
+/// [`FloatFn::Max`]), with any flags; on the other formats they stay LLVM's (`FloatFn::MinNum`).
 ///
 /// `air.fract` on `half` with every flag, Metal's fast-math compile of a `half` `fract` (it has
 /// no `fast_` `half` function), answers the largest `half` below one for a NaN and an infinity
@@ -2506,10 +2539,13 @@ fn refine_float(
     }
     // `a < b ? a : b` and `a > b ? a : b` under fast math are `llvm.minnum` and `llvm.maxnum`
     // with every flag, which Metal answers as `fmin` and `fmax` (`nan_minmax_fast`, every lane);
-    // another flag state is not measured and keeps LLVM's function.
+    // without a flag Metal answers them the same, word for word (EV DNR-mm1-m3: those two calls
+    // of `nan_minmax_fast` with their flags removed, every pair of 20 patterns, NaNs and
+    // denormals among them), and so with some flags (EV DNR-mm2-m3: `nnan` on `llvm.minnum`,
+    // `nsz arcp` on `llvm.maxnum`).
     match op {
-        FloatFn::MinNum if every_flag(fmf) => return FloatFn::Min,
-        FloatFn::MaxNum if every_flag(fmf) => return FloatFn::Max,
+        FloatFn::MinNum => return FloatFn::Min,
+        FloatFn::MaxNum => return FloatFn::Max,
         _ => {}
     }
     if !fast {
@@ -2641,11 +2677,6 @@ fn select_float_fn(
     let lowered = float_call(op, fast, fmf, f, facts).ok_or_else(not_lowered)?;
     record(cx, lowered.notes);
     fp_env(cx, fmf, f);
-    // A `mix` that reads its denormals as Metal's own leaves them to the device's
-    // `OpFmaKHR`, measured to read them as Metal does.
-    if let FloatLowering::Mix(fma) = lowered.how {
-        cx.families.arith.device_denormals |= facts.metal_mix(fma, f);
-    }
     if let FloatLowering::Fn(op) = lowered.how {
         let uses = libm::uses(op, f);
         let arith = &mut cx.families.arith;
@@ -2672,7 +2703,16 @@ fn select_float_fn(
     let s = match lowered.how {
         FloatLowering::Fma(fma) => ArithStrategy::Fma(fma),
         FloatLowering::FastFmod { fma, reciprocal } => ArithStrategy::FastFmod { fma, reciprocal },
-        FloatLowering::Mix(fma) => ArithStrategy::Mix(fma),
+        // As `dot`'s chain: the inner fused multiply-add's result is flushed where `OpFmaKHR` may
+        // keep a denormal ([`with_denormals`] flushes the operands and the result); the routines,
+        // and `OpFmaKHR` checked ([`fma::Fma::checked`]), read and answer them as Metal does.
+        FloatLowering::Mix(fma) => ArithStrategy::Mix {
+            fma,
+            flush: fma.route.device_float()
+                && !fma.checked()
+                && f.float_fmt() == Some(FloatFmt::F32)
+                && !denormal::device_flushes(cx.profile),
+        },
         // The chain's values are flushed where `OpFmaKHR` and the multiply may keep a
         // denormal ([`with_denormals`] flushes the operands and the result); the
         // routines read and answer them as Metal does.
@@ -2691,10 +2731,52 @@ fn select_float_fn(
     };
     // The device's instruction reads `f32` denormals as Metal does only where the table
     // says so; `OpFmaKHR` is the device's, the routines are Metal's.
+    // Native device maths answers `fast::atan2` by the device's instructions, its denormals the
+    // device's (`PrecisionNote::DeviceDenormals`, [`function_notes`]); nothing is flushed there.
+    let native_atan2 = |op: FloatFn| {
+        matches!(op, FloatFn::FastAtan2 { .. })
+            && facts.native
+            && libm::uses(op, f).iter().any(|r| r.native())
+    };
+    // Where the profile's functions are Metal's, Metal's fast `sinpi`, `cospi` and `tanpi` are the
+    // device's form ([`FloatFn::FastSinPi`], `math::pi_scaled`), whose first multiply and
+    // difference read the operand: as Metal does on the deviation, else flushed. For a normal
+    // operand no step of it is a denormal, and it answers none.
+    let device_pi = |op: FloatFn| {
+        facts.metal_functions
+            && matches!(
+                op,
+                FloatFn::FastSinPi | FloatFn::FastCosPi | FloatFn::FastTanPi
+            )
+    };
+    // `OpFmaKHR` checked ([`fma::Fma::checked`]) answers no denormal: only its operands are read.
+    let checked = |fma: fma::Fma| {
+        denormal::coverage(FloatFn::Fma).map(|r| denormal::Reading {
+            result: r.result && !fma.checked(),
+            ..r
+        })
+    };
     let reading = match lowered.how {
-        FloatLowering::Fma(fma) if fma.route.device_float() => denormal::coverage(FloatFn::Fma),
+        FloatLowering::Fma(fma) if fma.route.device_float() => checked(fma),
+        FloatLowering::Fn(op) if native_atan2(op) => None,
+        FloatLowering::Fn(op) if device_pi(op) => Some(denormal::Reading {
+            covered: denormal::Covered::Deviation,
+            operands: 0b1,
+            result: false,
+        }),
         FloatLowering::Fn(op) => denormal::coverage(op),
         FloatLowering::Dot(_) => denormal::coverage(FloatFn::Dot),
+        // `mix` by `OpFmaKHR` reads its operands and result as its fused multiply-adds do.
+        FloatLowering::Mix(fma) if fma.route.device_float() => checked(fma),
+        // `fast::fmod` by `OpFmaKHR` reads its two operands and its result as `fma` does, but under
+        // native device maths, which leaves them to the device; its quotient's division reads them
+        // as Metal's.
+        FloatLowering::FastFmod { fma, .. } if fma.route.device_float() && !facts.native => {
+            checked(fma).map(|r| denormal::Reading {
+                operands: 0b11,
+                ..r
+            })
+        }
         _ => None,
     };
     let s = match reading {
@@ -2815,8 +2897,6 @@ struct FloatFacts {
     reciprocal: divide::Reciprocal,
     /// Whether the profile's `float` functions are Metal's (`FloatFunctions::Metal`).
     metal_functions: bool,
-    /// Whether the device reads `f32` denormals as Metal does ([`denormal::device_flushes`]).
-    metal_denormals: bool,
     /// Whether the profile takes native device maths (`FloatFunctions::Native`).
     native: bool,
     /// Whether the profile leaves Metal's NaN to the device ([`NanEncoding::Native`]).
@@ -2836,26 +2916,11 @@ impl FloatFacts {
             routes: fma::routes(p),
             reciprocal: divide::Reciprocal::on(p),
             metal_functions: p.fields().float_functions == FloatFunctions::Metal,
-            metal_denormals: denormal::device_flushes(p),
             native: p.fields().float_functions == FloatFunctions::Native,
             nan_native: nan::encoding(p) == NanEncoding::Native,
             native_min_max: p.fields().min_max == MinMaxRoute::Native,
             native_order: p.fields().rounding_order == RoundingOrderRoute::Native,
         }
-    }
-
-    /// Whether `mix` by fused multiply-add `fma` on form `f` reads its `f32` denormals as Metal's
-    /// own `mix`: where the profile's `float` functions are Metal's
-    /// (`DriverDeviation::MetalFloatFunctions`), its `OpFmaKHR` is Metal's own `fma`, so the two
-    /// steps are Metal's `mix` as Metal compiles it, and where the device reads `f32` denormals as
-    /// Metal does (`DriverDeviation::MetalFloatDenormals`, which measures `OpFmaKHR` among them) so
-    /// do the steps: MoltenVK's. Elsewhere how Metal's `mix` reads an `f32` denormal is not
-    /// measured (class J), and the call notes `DeviceDenormals`.
-    fn metal_mix(self, fma: fma::Fma, f: Form) -> bool {
-        f.float_fmt() == Some(FloatFmt::F32)
-            && self.metal_functions
-            && self.metal_denormals
-            && fma.route == fma::Route::Khr
     }
 }
 
@@ -3055,9 +3120,9 @@ fn float_call_of(
     // Metal's `mix(x, y, t)` on `float` and `half` is `fma(t, y, fma(-t, x, x))`, with and without
     // fast-math flags, so both fused multiply-adds take the profile's route. The routines answer
     // Metal's `float` NaN; `OpFmaKHR` answers the device's, which is selected, and a `half`
-    // result's as the `half` `fma`'s. How Metal's `mix` reads an `f32` denormal is measured only
-    // through Metal's own `fma` ([`FloatFacts::metal_mix`]); elsewhere the note stays on every
-    // route.
+    // result's as the `half` `fma`'s. Each reads an `f32` denormal as Metal's `fma` does (EV
+    // DNR-dn2-m3): the routines themselves, `OpFmaKHR` on the deviation or flushed
+    // ([`ArithStrategy::Mix`]'s `flush`, [`with_denormals`]).
     if op == FloatFn::Mix {
         if let Some(fma) = fma::Fma::by(routes, f) {
             // The device's order takes its `FMix` where Metal's fused form would be emulated:
@@ -3080,7 +3145,6 @@ fn float_call_of(
                 });
             }
             let khr = fma.route.device_float();
-            let denormals = !facts.metal_mix(fma, f);
             let nan = match f.float_fmt() {
                 Some(FloatFmt::Half) => {
                     nan::function_answer(op, fast, every_flag(fmf), FloatFmt::Half)
@@ -3089,8 +3153,7 @@ fn float_call_of(
             };
             return Some(FloatCall {
                 how: FloatLowering::Mix(fma),
-                notes: OpNotes::everywhere(device_float_notes(f, denormals, false).collect())
-                    .with(native_fma(fma)),
+                notes: native_fma(fma),
                 nan,
             });
         }
@@ -3133,12 +3196,15 @@ fn float_call_of(
     // table is single precision, so a narrow call keeps `fmod`. Where the profile's `float`
     // functions are Metal's, its `fma` is Metal's own and its quotient's reciprocal Metal's fast
     // one in a fast-math entry ([`divide::Reciprocal::Device`]), so its notes hold only outside
-    // one.
+    // one. Metal reads a denormal operand as the zero of its sign and answers no denormal, in both
+    // modes (EV DNR-fm1-m3): the routines read them so, and the device's fused multiply-add on the
+    // deviation or flushed ([`with_denormals`]) where the profile asks Metal's functions; native
+    // device maths leaves them to the device's (`DeviceDenormals`), unflushed.
     if fast && op == FloatFn::Fmod && f.float_fmt() == Some(FloatFmt::F32) {
         if let Some(fma) = fma::Fma::by(routes, f) {
             let khr = fma.route.device_float();
             let mut notes = BTreeSet::from([PrecisionNote::DeviceArithmetic]);
-            if khr {
+            if khr && facts.native {
                 notes.extend(device_float_notes(f, true, false));
             }
             return Some(FloatCall {
@@ -3158,14 +3224,21 @@ fn float_call_of(
     let nan = answer.filter(|_| !metal_nans);
     // A function whose denormals Metal's table reads ([`denormal::coverage`]) reads them as
     // Metal does: the device's, where the profile states it does, else flushed
-    // ([`with_denormals`]).
+    // ([`with_denormals`]). So do Metal's fast `sinpi`, `cospi` and `tanpi` (EV DNR-dn2-m3: a
+    // denormal operand read as a zero, no denormal answer): the routines read the operand by
+    // `denormal::operand`, and the device's form where the profile's functions are Metal's reads
+    // it as `select_float_fn` says. Native device maths records the note ([`function_notes`]).
+    let fast_pi = matches!(
+        op,
+        FloatFn::FastSinPi | FloatFn::FastCosPi | FloatFn::FastTanPi
+    );
     let mut notes = function_notes(
         op,
         fast,
         f,
         (metal_functions, facts.native, facts.native_order),
         (
-            !op.metal_denormals() && denormal::coverage(op).is_none(),
+            !op.metal_denormals() && denormal::coverage(op).is_none() && !fast_pi,
             !metal_nans && answer.is_none(),
         ),
     );
@@ -3610,6 +3683,7 @@ fn arity(s: &ArithStrategy) -> Option<usize> {
         S::InsertConst(_)
         | S::LaneInsert { at: Some(_), .. }
         | S::ChunkedDot { .. }
+        | S::ChunkedChain { .. }
         | S::Dot { .. } => Some(2),
         // An index word reads its operands itself (an index extension has no value).
         S::Zero(_)
@@ -3685,6 +3759,25 @@ fn value(
             elem,
             contract,
         } => chunk::dot(fb, *lanes, *elem, *contract, a(cx, 0)?, a(cx, 1)?)?,
+        S::ChunkedChain {
+            lanes,
+            elem,
+            fma: f,
+            flush,
+            reads,
+        } => {
+            let routine = match f.routine() {
+                Some(r) => match cx.decl.families.arith.fmas.get(&r) {
+                    Some(id) => Some(*id),
+                    None => return Err(cx.fail("a dot whose fused multiply-add is not declared")),
+                },
+                None => None,
+            };
+            let fma =
+                |fb: &mut FunctionBuilder<'_>, args: &[SValue]| fma::emit(fb, *f, args, routine);
+            let xy = [a(cx, 0)?, a(cx, 1)?];
+            chunk::dot_chain(fb, *lanes, *elem, xy, &fma, *flush, *reads)?
+        }
         S::LaneExtract { src, at, index } => chunk::extract(fb, *src, *at, *index, xs)?,
         S::LaneInsert { dst, at, index } => chunk::insert(fb, *dst, *at, *index, xs)?,
         S::LaneShuffle {
@@ -3996,7 +4089,7 @@ fn value(
             };
             math::fast_fmod(fb, x, y, &divide, &fma)?
         }
-        S::Mix(f) => {
+        S::Mix { fma: f, flush } => {
             let routine = match f.routine() {
                 Some(r) => match cx.decl.families.arith.fmas.get(&r) {
                     Some(id) => Some(*id),
@@ -4010,7 +4103,7 @@ fn value(
             };
             let fma =
                 |fb: &mut FunctionBuilder<'_>, args: &[SValue]| fma::emit(fb, *f, args, routine);
-            math::metal_mix(fb, f.form, xyt, &fma)?
+            math::metal_mix(fb, f.form, xyt, &fma, *flush)?
         }
         S::Dot {
             fma: f,

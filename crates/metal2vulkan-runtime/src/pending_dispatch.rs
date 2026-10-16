@@ -34,6 +34,7 @@ use super::pipeline::{ComputePipelineState, RawPipeline, RegionKey, RegionPipeli
 use super::resource::ResourceKey;
 use super::tracker::{Barrier, EncoderUses, Summary};
 use super::upload::Upload;
+use crate::device::functions::Vk;
 use ash::vk;
 use metal2vulkan::bind::PredicationStep;
 use std::sync::{Arc, OnceLock};
@@ -64,7 +65,7 @@ impl Recording {
     /// one per region.
     pub(super) unsafe fn record(
         &self,
-        raw: &ash::Device,
+        raw: &Vk,
         command_buffer: vk::CommandBuffer,
         pipelines: &[Arc<RawPipeline>],
     ) {
@@ -221,7 +222,7 @@ impl PendingDispatch {
             creation.get_or_init(|| pipelines.iter().map(|made| made.created_in).collect());
         }
         let (barrier, recording, made) = (self.barrier, &self.recording, &pipelines);
-        let record = |raw: &ash::Device, cb: vk::CommandBuffer| {
+        let record = |raw: &Vk, cb: vk::CommandBuffer| {
             // SAFETY: the segment's command buffer is recording outside a render pass, by this
             // call alone; what the dispatch records was retained at the dispatch, its pipelines
             // with the segment, and they are its variant's, one per region.

@@ -1,7 +1,6 @@
-// Owned fixture (WP-RT6, DESIGN D305 item 22): a vertex function that selects its viewport, the
-// one RT6 Metal probe 7 drew (an M4), so each lane draw asks the question the probe measured.
-// WP-MSF (DESIGN D313) adds the fragment function its probe 7c drew, which reads the index.
-// Loop-free.
+// Owned fixture: a vertex function that selects its viewport, the one a Metal probe drew (an M4),
+// so each lane draw asks the question the probe measured. It adds the fragment function another
+// probe drew, which reads the index. Loop-free.
 #include <metal_stdlib>
 using namespace metal;
 

@@ -888,7 +888,7 @@ fn products_record_their_precision() {
 /// Every matrix kernel compiles, links, relocates, and passes L3 on every committed profile
 /// exactly where its cross-lane class (a shuffle with a product, the lane alone for blocks) has
 /// a compute tier, and elsewhere is refused as that tier is (`matrix_mixed`'s five buffers fit
-/// `vk12-bare`'s four storage buffers per stage through a uniform view). The plan's size estimate
+/// `vk12-floor`'s four storage buffers per stage through a uniform view). The plan's size estimate
 /// bounds the emitted words.
 #[test]
 fn matrix_kernels_compile_or_refuse_with_the_tier() {

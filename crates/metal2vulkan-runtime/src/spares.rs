@@ -1,14 +1,14 @@
 //! A device's spare command pools and descriptor pools: a command buffer that completed gives back
 //! the command pool its encoders recorded into, with the command buffers made from it, and the
 //! descriptor pools its commands' sets came from (`descriptor_arena.rs`); the next command buffer
-//! takes them, reset, where it would make its own. Made, used once and destroyed, a command pool
-//! cost 38 to 48 us and a descriptor pool 23 to 26 us on RADV (Radeon 780M), 7 to 8 and 3 on ANV,
-//! against 0.2 and 0.02, and 1.3 and 0.1, reset (EV PERF-raw1).
+//! takes them where it would make its own. Made, used once and destroyed, a command pool cost 38
+//! to 48 us and a descriptor pool 23 to 26 us on RADV (Radeon 780M), 7 to 8 and 3 on ANV, against
+//! 0.2 and 0.02, and 1.3 and 0.1, reset (EV PERF-raw1).
 //!
 //! - **Command pools are kept, never released while the device lives**. Every command pool a
 //!   command buffer gives back is kept, whatever its status, and every command buffer dropped with
 //!   one gives it back too: the runtime calls `vkDestroyCommandPool` on a command buffer's pool
-//!   only as the device is torn down, after its queues are idle, or where a spare's reset failed.
+//!   only as the device is torn down, after its queues are idle.
 //!   The spares stay bounded all the same: a command buffer makes a pool only where no spare of its
 //!   queue's family is free, so the device holds at most as many as its command buffers held at
 //!   once (Metal bounds those by each queue's `maxCommandBufferCount`), each holding what its
@@ -20,12 +20,43 @@
 //! - **Descriptor pools are bounded.** At most [`DESCRIPTOR_POOLS`] descriptor pools of at most
 //!   [`DESCRIPTORS`] descriptors together; a descriptor pool given back past them releases the
 //!   oldest spares first, so the spares follow the shapes in use.
-//! - **Reset by the taker**, on the thread that encodes: the program's own, or one running the
-//!   program's code (a handler). A section of the exit guard (a host step's recording on the
-//!   scheduler's thread) calls only the guard's table of entry points, which holds no reset, so a
-//!   command buffer or command recorded there makes its pools as before; what it made is given back
-//!   all the same. A command buffer that encoded nothing, whose submissions record only their
-//!   barriers, in sections, takes its spare command pool at its commit, on the committing thread.
+//! - **A pool whose command buffers all ended is not reset; its command buffers are, as they are
+//!   begun.** Its pools are made with `VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT`, and
+//!   Vulkan: "If a command buffer is in the invalid, or executable state, and the command buffer
+//!   was allocated from a command pool with the VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT
+//!   flag set, then vkBeginCommandBuffer implicitly resets the command buffer, behaving as if
+//!   vkResetCommandBuffer had been called with VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT not
+//!   set". A command buffer counts the command buffers of its pool it ended
+//!   (`CommandBuffer::end_raw`, every `vkEndCommandBuffer` of one): where it completed and ended
+//!   every one handed out, none is pending or recording, so each is executable or invalid. A
+//!   pool given back otherwise may hold one still recording, which the validation layer forbids
+//!   beginning (`VUID-vkBeginCommandBuffer-commandBuffer-00049`: "commandBuffer must not be in
+//!   the recording or pending state"): by a command buffer that failed or was dropped
+//!   unsubmitted (an encoder never ended, a recording an error cut short), or by one that
+//!   completed with a recording it left unused, as its encoders may (a render pass instance's
+//!   draws its pass replaced before any draw, a refusal past a begin, a segment's core dropped).
+//!   Its taker resets that pool first, as every taker did before ([`CommandPool::recording`]),
+//!   and counts it (`WorkCounts::spare_command_pools_reset`). ANV resets a command buffer at each begin whatever its pool
+//!   (Mesa 26.2.4, `genX(BeginCommandBuffer)`), so a `vkResetCommandPool` before the begins reset
+//!   each one twice: on ms01's Iris Xe, ready to record again, one command buffer took 8.0 to 20.5
+//!   us of thread time begun alone against 12.1 to 25.1 us after the pool's reset, three 24.5 to
+//!   50.3 against 36.6 to 63.2; the RTX 5080 (615.71.09) 0.13 to 0.24 us less; RADV (Radeon 780M)
+//!   0.04 to 0.15 us less for one and 0.16 to 0.30 us more for three.
+//! - **A pool given back holds a secondary command buffer.** One that made none makes one as it
+//!   is given back, on the thread giving it back, inside a section of the exit guard. A pass
+//!   whose first instance does not record inline begins its draws in a secondary command buffer
+//!   as it opens (`render.rs`); taken from a pool that had served only passes recorded inline,
+//!   it would be made there, on the thread that encodes: on the M3 Max (MoltenVK, macOS 27.0.1),
+//!   0 to 5 of a run's 4020 pass opens made one, 16 allocations each against 14. A making that
+//!   fails is left to that open.
+//! - **Descriptor pools are reset by the taker**, on the thread that encodes: the program's own, or
+//!   one running the program's code (a handler).
+//! - **Taken outside sections alone.** A section of the exit guard (a host step's recording on the
+//!   scheduler's thread) calls only the guard's table of entry points, which holds no reset of a
+//!   pool, and takes no spare: a command buffer or command recorded there makes its
+//!   pools as before; what it made is given back all the same. A command buffer that encoded
+//!   nothing, whose submissions record only their barriers, in sections, takes its spare command
+//!   pool at its commit, on the committing thread.
 //! - **Given back once nothing of them is pending.** A command buffer that completed
 //!   (`CommandBufferStatus::Completed`) gives back its command pool and its descriptor pools; one
 //!   that failed, once its work ended, gives back its command pool and releases its descriptor
@@ -62,6 +93,10 @@ pub(super) struct CommandPool {
     family: u32,
     made: [Vec<vk::CommandBuffer>; 2],
     handed: [usize; 2],
+    /// One of its command buffers may still be recording: the command buffer that gave it back
+    /// did not complete, or left one it was handed unended (the module docs), so its taker
+    /// resets it.
+    pub(super) recording: bool,
 }
 
 impl CommandPool {
@@ -72,16 +107,23 @@ impl CommandPool {
             family,
             made: [Vec::new(), Vec::new()],
             handed: [0, 0],
+            recording: false,
         }
     }
 
-    /// A command buffer of `level` made from the pool before it was last reset, in the initial
-    /// state, not handed out since; `None` once each was.
+    /// A command buffer of `level` made from the pool before a command buffer last took it, not
+    /// handed out since, in any state but pending (its begin resets it: the module docs); `None`
+    /// once each was.
     pub(super) fn reuse(&mut self, level: vk::CommandBufferLevel) -> Option<vk::CommandBuffer> {
         let at = level_index(level);
         let buffer = self.made[at].get(self.handed[at]).copied()?;
         self.handed[at] += 1;
         Some(buffer)
+    }
+
+    /// The command buffers handed out since a command buffer last took it, of both levels.
+    pub(super) fn handed_out(&self) -> usize {
+        self.handed[0] + self.handed[1]
     }
 
     /// `buffer`, of `level`, was just made from the pool, and is handed out.
@@ -91,10 +133,43 @@ impl CommandPool {
         self.handed[at] = self.made[at].len();
     }
 
-    /// The pool was reset: every command buffer made from it is in the initial state, and none
-    /// is handed out.
-    pub(super) fn reset_handed(&mut self) {
+    /// A command buffer took the pool, reset where it was [`recording`](Self::recording): none of
+    /// the command buffers made from it is handed out, and none is recording.
+    pub(super) fn taken(&mut self) {
         self.handed = [0, 0];
+        self.recording = false;
+    }
+
+    /// Whether the pool made no secondary command buffer (the module docs).
+    pub(super) fn wants_secondary(&self) -> bool {
+        self.made[level_index(vk::CommandBufferLevel::SECONDARY)].is_empty()
+    }
+
+    /// `buffer`, a secondary command buffer just made from the pool, not handed out: the next
+    /// command buffer that takes the pool hands it out first.
+    pub(super) fn stock_secondary(&mut self, buffer: vk::CommandBuffer) {
+        self.made[level_index(vk::CommandBufferLevel::SECONDARY)].push(buffer);
+    }
+
+    /// Make the pool a secondary command buffer where it [`wants_secondary`](Self::wants_secondary)
+    /// one (the module docs): inside a section of the exit guard, on whatever thread gives the
+    /// pool back; nothing where the guard is closing, or where the making fails.
+    fn stock(&mut self, device: &DeviceShared) {
+        if !self.wants_secondary() {
+            return;
+        }
+        let Some(_busy) = exit_guard::enter() else {
+            return;
+        };
+        let info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(self.raw)
+            .level(vk::CommandBufferLevel::SECONDARY)
+            .command_buffer_count(1);
+        if let Ok(made) = device.allocate_command_buffers(&info) {
+            for buffer in made {
+                self.stock_secondary(buffer);
+            }
+        }
     }
 }
 
@@ -113,9 +188,9 @@ pub(super) struct Spares {
 }
 
 impl Spares {
-    /// A spare command pool of `device` made for queue family `family`, reset, whose command
-    /// buffers are in the initial state; `None` when there is none, or this thread is in a
-    /// section.
+    /// A spare command pool of `device` made for queue family `family`, none of whose command
+    /// buffers is pending or recording (reset where one may be, the module docs); `None` when
+    /// there is none, or this thread is in a section.
     pub(super) fn command_pool(
         &self,
         device: &DeviceShared,
@@ -127,25 +202,39 @@ impl Spares {
         let Some(mut pool) = take_command_pool(&mut lock(&self.command_pools), family) else {
             return Ok(None);
         };
-        // SAFETY: the pool is the caller's alone now, and nothing of it is pending: a command
-        // buffer that completed gave it back.
-        let reset = unsafe {
-            device
-                .vk()
-                .reset_command_pool(pool.raw, vk::CommandPoolResetFlags::empty())
-        };
-        if let Err(error) = reset {
-            // SAFETY: as above.
-            unsafe { release_in_section(device, pool.raw) };
-            return Err(vulkan(error));
+        if pool.recording {
+            // SAFETY: the pool is the caller's alone now, and nothing of it is pending: the
+            // command buffer that gave it back ended its work or was never submitted.
+            let reset = unsafe {
+                device
+                    .vk()
+                    .reset_command_pool(pool.raw, vk::CommandPoolResetFlags::empty())
+            };
+            if let Err(error) = reset {
+                // SAFETY: as above.
+                unsafe { release_in_section(device, pool.raw) };
+                return Err(vulkan(error));
+            }
+            device.counts.spare_command_pool_reset();
         }
-        pool.reset_handed();
+        pool.taken();
+        device.counts.spare_command_pool_taken();
         Ok(Some(pool))
     }
 
-    /// Keep `pool`, of a command buffer whose work ended or that was never submitted: nothing of
-    /// it is pending, and nothing else holds it. Never released here (the module docs).
-    pub(super) fn give_command_pool(&self, pool: CommandPool) {
+    /// Keep `pool` of `device`, of a command buffer whose work ended or that was never
+    /// submitted: nothing of it is pending, and nothing else holds it; `settled` where the
+    /// command buffer completed and ended every command buffer of it handed out, so none is
+    /// recording (the module docs). A pool that made no secondary command buffer makes one
+    /// first. Never released here.
+    pub(super) fn give_command_pool(
+        &self,
+        device: &DeviceShared,
+        mut pool: CommandPool,
+        settled: bool,
+    ) {
+        pool.recording = !settled;
+        pool.stock(device);
         keep_command_pool(&mut lock(&self.command_pools), pool);
     }
 

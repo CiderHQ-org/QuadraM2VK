@@ -14,11 +14,15 @@
 //! as correct. The table keys each value on the device's identity, its driver, vendor, and device
 //! ID, as the driver workarounds are keyed ([`DriverWorkaround`]), and on nothing else.
 //!
-//! A device the table does not name is assumed to hold [`FLOOR`], 16 KiB a thread: half the
-//! least any measured device held (32 KiB), and below every size any of them failed at (48 KiB
-//! and up). A stage that keeps private memory on such a device records
-//! `PrecisionNote::FunctionStorageAssumed`, so its output is known to rest on the floor, not on a
-//! measurement. Past the device's value, measured or assumed, a stage is refused, typed
+//! A device the table does not name holds [`FLOOR`], 16 KiB a thread: half the least any
+//! measured device held (32 KiB), and below every size any of them failed at (48 KiB and up).
+//! Private memory within it is taken as held on every device, and records nothing. Past it, on
+//! such a device, a vertex or fragment function runs up to [`METAL`], 192 KiB a thread, the most
+//! a Metal device was measured to hold, and records `PrecisionNote::FunctionStorageAssumed`: past
+//! the floor, unmeasured, it rests on no measurement, and a driver that holds less can answer
+//! wrongly or hang the GPU, as the RTX 5080 at 48 KiB and the RTX 3090 at 192 KiB hung when probed.
+//! A kernel, an object or a mesh function past the floor there is refused, as is any stage past a
+//! measured device's value and a vertex or fragment function past [`METAL`]: typed
 //! (`Unsupported{PrivateMemory}`, or `Unsupported{Recursion}` for a stage with a call stack,
 //! needing `VkLimit::FunctionStorageBytesPerThread`).
 //!
@@ -27,6 +31,7 @@
 
 use crate::device::description::{DeviceDescription, APPLE_VENDOR_ID};
 use crate::device::profile::FunctionStorage;
+use crate::pipeline::sym::Stage;
 use crate::vk;
 
 /// One measured device: its identity, and the most Function storage a thread held correctly.
@@ -125,12 +130,17 @@ const MEASURED: [Measured; 9] = [
     },
 ];
 
-/// The Function storage a device not measured is assumed to hold, a thread: 16 KiB (the module
-/// docs).
+/// The Function storage a device not measured holds, a thread: 16 KiB (the module docs).
 pub(crate) const FLOOR: u64 = 16 * KIB;
 
+/// The most Function storage a thread was measured to hold on Metal: the Apple M3 Max and M4 hold
+/// 192 KiB and refuse 256 KiB at pipeline creation (their rows in [`MEASURED`]). A vertex or
+/// fragment function on a device not measured may keep this much, past [`FLOOR`] with
+/// `PrecisionNote::FunctionStorageAssumed` (the module docs).
+pub(crate) const METAL: u64 = 192 * KIB;
+
 /// The Function storage a thread of `desc`'s device holds correctly: the measured value of its
-/// identity, or the assumed [`FLOOR`] for a device not measured.
+/// identity, or [`FLOOR`] for a device not measured.
 pub(crate) fn of(desc: &DeviceDescription) -> FunctionStorage {
     MEASURED
         .iter()
@@ -142,4 +152,14 @@ pub(crate) fn of(desc: &DeviceDescription) -> FunctionStorage {
         .map_or(FunctionStorage::Assumed(FLOOR), |d| {
             FunctionStorage::Measured(d.bytes)
         })
+}
+
+/// The private memory a thread of a `stage` function may keep on a device whose Function storage
+/// is `storage`: the device's own value, but [`METAL`] for a vertex or fragment function on a
+/// device not measured, which past [`FLOOR`] rests on no measurement (the module docs).
+pub(crate) fn ceiling(storage: FunctionStorage, stage: Stage) -> u64 {
+    match (storage, stage) {
+        (FunctionStorage::Assumed(_), Stage::Vertex | Stage::Fragment) => METAL,
+        _ => storage.bytes(),
+    }
 }

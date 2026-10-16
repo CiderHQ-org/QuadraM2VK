@@ -1,4 +1,4 @@
-// Owned fixture (WP-UNK, DESIGN D283): the second probe of the level of detail Metal derives
+// Owned fixture: the second probe of the level of detail Metal derives
 // from an explicit cube gradient, driven by a table. Buffer 0 holds the configuration count C in
 // the bits of in[0].x, then for each configuration c a direction in[1 + 3c] and the two
 // gradients in[2 + 3c] (dP/dx) and in[3 + 3c] (dP/dy), then the magnitudes from in[1 + 3C]. Lane

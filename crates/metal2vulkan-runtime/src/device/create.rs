@@ -37,6 +37,7 @@ use crate::degradation::{Degradation, DegradeNotice};
 use crate::enables::{host_image_copy_names, listed_reported, listed_structures, Enables};
 use crate::error::{vulkan, Error, InstanceApiVersion, LoaderNotFound};
 use crate::gpu_time;
+use crate::image_barrier::MemoryReads;
 use crate::loader_word::LoaderWord;
 use crate::metal_level::{choose, Chosen, Host};
 use crate::release;
@@ -1232,6 +1233,11 @@ fn create_on(
         .map_err(vulkan)?;
     // SAFETY: the device was just created: its word is the loader's.
     let loader_word = unsafe { LoaderWord::of_device(raw.handle()) };
+    let primary = families.get(queue_family as usize);
+    let memory_reads = MemoryReads::of(
+        primary.map_or(vk::QueueFlags::empty(), |family| family.queue_flags),
+        enables.names(),
+    );
     let parts = Parts {
         instance: Arc::clone(instance),
         physical,
@@ -1258,6 +1264,7 @@ fn create_on(
         dma_buf: dma_buf.is_some(),
         dma_buf_images: dma_buf_images.is_some(),
         sparse_features,
+        memory_reads,
         owned: true,
         cache: cache.clone(),
         metal_level: level,

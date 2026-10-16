@@ -1,4 +1,4 @@
-// Owned fixture (WP-UNI, DESIGN D311 item 5, S2, TODO 8.19), generated: one struct per MSL
+// Owned fixture, generated: one struct per MSL
 // scalar, vector and matrix type that Metal's MTLDataType names, each held alone by a plain buffer
 // (`encoder_types_plain_<n>`) and after a texture by an argument buffer (`encoder_types_tail_<n>`),
 // so Metal's `newArgumentEncoderWithBufferBinding:` states each type's bytes and alignment in

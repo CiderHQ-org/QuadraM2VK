@@ -153,8 +153,7 @@ fn every_committed_ll_fixture_assembles_with_the_pinned_llvm_and_decodes() {
     }
     assert!(
         rejected.is_empty(),
-        "{} rejects {} committed .ll fixture(s); write them as LLVM {major}'s llvm-dis would \
-         (DESIGN D148, D149):\n{}",
+        "{} rejects {} committed .ll fixture(s); write them as LLVM {major}'s llvm-dis would:\n{}",
         version,
         rejected.len(),
         rejected.join("\n")
@@ -162,7 +161,7 @@ fn every_committed_ll_fixture_assembles_with_the_pinned_llvm_and_decodes() {
     assert!(
         undecoded.is_empty(),
         "the product does not decode {} committed .ll fixture(s) assembled by {version}; write \
-         their metadata in Apple's AIR ABI grammar (DESIGN D243):\n{}",
+         their metadata in Apple's AIR ABI grammar:\n{}",
         undecoded.len(),
         undecoded.join("\n")
     );

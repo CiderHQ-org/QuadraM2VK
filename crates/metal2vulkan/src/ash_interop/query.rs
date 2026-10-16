@@ -310,6 +310,8 @@ struct FeatureChain {
     raster_order: avk::PhysicalDeviceRasterizationOrderAttachmentAccessFeaturesEXT<'static>,
     dynamic_state: avk::PhysicalDeviceExtendedDynamicStateFeaturesEXT<'static>,
     dynamic_state2: avk::PhysicalDeviceExtendedDynamicState2FeaturesEXT<'static>,
+    dynamic_state3: avk::PhysicalDeviceExtendedDynamicState3FeaturesEXT<'static>,
+    feedback_loop: avk::PhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT<'static>,
     maintenance8: Maintenance8Features,
     shader_fma: ShaderFmaFeatures,
     border_color_swizzle: avk::PhysicalDeviceBorderColorSwizzleFeaturesEXT<'static>,
@@ -358,6 +360,8 @@ const EXT_RASTER_ORDER: &[&str] = &[
 ];
 const EXT_DYNAMIC_STATE: &[&str] = &["VK_EXT_extended_dynamic_state"];
 const EXT_DYNAMIC_STATE2: &[&str] = &["VK_EXT_extended_dynamic_state2"];
+const EXT_DYNAMIC_STATE3: &[&str] = &["VK_EXT_extended_dynamic_state3"];
+const EXT_FEEDBACK_LOOP: &[&str] = &["VK_EXT_attachment_feedback_loop_layout"];
 const EXT_MAINTENANCE8: &[&str] = &["VK_KHR_maintenance8"];
 const EXT_SHADER_FMA: &[&str] = &["VK_KHR_shader_fma"];
 const EXT_BORDER_COLOR_SWIZZLE: &[&str] = &["VK_EXT_border_color_swizzle"];
@@ -401,6 +405,8 @@ pub(crate) struct Chained {
     raster_order: bool,
     dynamic_state: bool,
     dynamic_state2: bool,
+    dynamic_state3: bool,
+    feedback_loop: bool,
     maintenance8: bool,
     shader_fma: bool,
     border_color_swizzle: bool,
@@ -447,6 +453,8 @@ impl Chained {
             // Core in 1.3 without a feature bit.
             dynamic_state: !v13 && x.ext(EXT_DYNAMIC_STATE),
             dynamic_state2: !v13 && x.ext(EXT_DYNAMIC_STATE2),
+            dynamic_state3: x.ext(EXT_DYNAMIC_STATE3),
+            feedback_loop: x.ext(EXT_FEEDBACK_LOOP),
             maintenance8: x.ext(EXT_MAINTENANCE8),
             shader_fma: x.ext(EXT_SHADER_FMA),
             border_color_swizzle: x.ext(EXT_BORDER_COLOR_SWIZZLE),
@@ -513,6 +521,8 @@ impl FeatureChain {
                 raster_order,
                 dynamic_state,
                 dynamic_state2,
+                dynamic_state3,
+                feedback_loop,
                 maintenance8,
                 shader_fma,
                 border_color_swizzle,
@@ -608,6 +618,8 @@ feature_sources! { c, x;
     FragmentStoresAndAtomics => on(c.core.fragment_stores_and_atomics);
     ShaderDrawParameters => on(c.v11.shader_draw_parameters);
     GeometryShader => on(c.core.geometry_shader);
+    ShaderTessellationAndGeometryPointSize =>
+        on(c.core.shader_tessellation_and_geometry_point_size);
     TessellationShader => on(c.core.tessellation_shader);
     SampleRateShading => on(c.core.sample_rate_shading);
     DualSrcBlend => on(c.core.dual_src_blend);
@@ -618,6 +630,7 @@ feature_sources! { c, x;
     ShaderOutputViewportIndex => on(c.v12.shader_output_viewport_index);
     Multiview => on(c.v11.multiview);
     MultiviewTessellationShader => on(c.v11.multiview_tessellation_shader);
+    MultiviewGeometryShader => on(c.v11.multiview_geometry_shader);
     FragmentShaderBarycentric => on(c.barycentric.fragment_shader_barycentric);
     FragmentShaderPixelInterlock => on(c.interlock.fragment_shader_pixel_interlock);
     FragmentShaderSampleInterlock => on(c.interlock.fragment_shader_sample_interlock);
@@ -699,6 +712,9 @@ feature_sources! { c, x;
     // Core in 1.3 without a feature bit; the extension's own bit below 1.3.
     ExtendedDynamicState => x.core(3) || on(c.dynamic_state.extended_dynamic_state);
     ExtendedDynamicState2 => x.core(3) || on(c.dynamic_state2.extended_dynamic_state2);
+    ExtendedDynamicState3ColorWriteMask =>
+        on(c.dynamic_state3.extended_dynamic_state3_color_write_mask);
+    AttachmentFeedbackLoopLayout => on(c.feedback_loop.attachment_feedback_loop_layout);
     ShaderUniformBufferArrayDynamicIndexing =>
         on(c.core.shader_uniform_buffer_array_dynamic_indexing);
     ShaderSampledImageArrayDynamicIndexing =>
@@ -976,6 +992,9 @@ impl DeviceDescription {
         // decide per format.
         desc.khr_format_feature_flags2 =
             exposure.extensions.contains("VK_KHR_format_feature_flags2");
+        // A driver that reports some linear-tiling features from memory it has not initialized
+        // (`DriverFact::LinearTilingFeaturesUninitialized`) is read without them.
+        let unreliable = desc.unreliable_linear_tiling();
         for format in FormatSupport::queries_for(api, &desc.extensions) {
             let mut p = if desc.has_format_feature_flags2() {
                 let mut p3 = avk::FormatProperties3::default();
@@ -1011,6 +1030,7 @@ impl DeviceDescription {
                     vk::FormatFeatureFlags::from_raw(p.buffer_features.as_raw()),
                 )
             };
+            p.linear_tiling = p.linear_tiling.difference(unreliable);
             // SAFETY: as above.
             p.color_attachment_sample_counts =
                 unsafe { color_attachment_sample_counts(instance, physical_device, format, &p) }?;
@@ -1217,6 +1237,9 @@ fn limits(l: &avk::PhysicalDeviceLimits, p: &PropertyChain, chained: &Properties
         max_framebuffer_layers: l.max_framebuffer_layers,
         max_draw_indexed_index_value: l.max_draw_indexed_index_value,
         max_tessellation_patch_size: l.max_tessellation_patch_size,
+        max_geometry_input_components: l.max_geometry_input_components,
+        max_geometry_output_components: l.max_geometry_output_components,
+        max_geometry_total_output_components: l.max_geometry_total_output_components,
         supported_depth_resolve_modes: vk::ResolveModeFlags::from_raw(
             v12.supported_depth_resolve_modes.as_raw(),
         ),

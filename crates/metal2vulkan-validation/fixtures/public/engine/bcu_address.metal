@@ -1,4 +1,4 @@
-// Owned fixture (WP-BCU, DESIGN D234): Metal's bicubic filter at the texture's edges under each
+// Owned fixture: Metal's bicubic filter at the texture's edges under each
 // address mode, and with pixel coordinates. Each lane reads a normalized coordinate `(u, v)` and
 // the same point in pixels `(x, y)` (both exact, from the input buffer) and samples one texture
 // through bicubic samplers that clamp to the edge, clamp to zero, clamp to an opaque white border,

@@ -1,4 +1,4 @@
-// Owned fixture (WP-SPSE, DESIGN D270): the residency word (`sparse_color::resident()`) and value of
+// Owned fixture: the residency word (`sparse_color::resident()`) and value of
 // a 3D texture's fetch at a level, and of its nearest and linear samples at level 0, at authored
 // coordinates. Thread `i` runs probe `i` of buffer 0: its kind picks the access, its texel
 // `(x, y, z)` and level `lod` address a read, and its `uvw` a sample. Texture 0 is sampled, so a

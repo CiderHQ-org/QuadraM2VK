@@ -1,4 +1,4 @@
-// Owned MSL for WP-MSF's mip-level probes: which level of a mipmapped texture a sample with an
+// Owned MSL for the mip-level probes: which level of a mipmapped texture a sample with an
 // explicit level or a bias reads, and with what weight, through constexpr samplers that clamp to
 // the edge. Each lane `i` reads one value `x[i]`, a level or a bias, chosen by the case:
 //   msf_lvl2d    a `texture2d<float>`: `out[2i]` = the samples at `level(x)` through (nearest,

@@ -1,12 +1,12 @@
-// Owned fixture (WP-L9f, DESIGN D140): the stage-IO tail.
+// Owned fixture: the stage-IO tail.
 // - `bool` varyings, scalar and vector, written by a vertex function and read by a fragment
-//   function: the interface carries each as a flat `uint` 0 or 1 (D140.5);
+//   function: the interface carries each as a flat `uint` 0 or 1;
 // - a fragment `[[primitive_id]]`, declared through whichever of `Geometry` or `Tessellation` the
-//   profile enables (D140.4);
+//   profile enables;
 // - fragment `[[render_target_array_index]]` and `[[viewport_array_index]]` inputs, through
-//   `Geometry` or `ShaderLayer`, and `MultiViewport` or `ShaderViewportIndex` (D140.4);
+//   `Geometry` or `ShaderLayer`, and `MultiViewport` or `ShaderViewportIndex`;
 // - `[[barycentric_coord]]` as `float3` (perspective), `float2` (no perspective), and `float`
-//   (D140.3).
+//.
 // The vertex function reads a constant buffer, so the typed-pointer companion has a pointee.
 // Loop-free.
 #include <metal_stdlib>

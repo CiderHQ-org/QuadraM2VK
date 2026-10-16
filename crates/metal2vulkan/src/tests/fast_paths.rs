@@ -144,6 +144,8 @@ fn notes() -> Vec<(&'static str, Ledger)> {
             DeviceInterpolation,
             HalfOutputFastMathBlend,
             ReductionOrder,
+            FunctionStorageAssumed,
+            ColorAttachmentGroups,
         ],
         Elsewhere: [
             F16FmaDoubleRounding,
@@ -169,7 +171,6 @@ fn notes() -> Vec<(&'static str, Ledger)> {
             FloatSampleFilter,
             DeviceGatherFootprint,
             CubeFaceReciprocal,
-            FunctionStorageAssumed,
             QuadsCountedBeforeDiscard,
             DeviceDepthComparison,
             BeyondMeasuredDeviation,

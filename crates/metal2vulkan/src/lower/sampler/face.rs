@@ -438,7 +438,12 @@ fn wrapping(
 /// unit's on most majors, not all (module docs), which the module records
 /// (`PrecisionNote::CubeFaceReciprocal`).
 pub(super) fn plan(cx: &mut SelectCx<'_>) -> Result<FaceRoutines, Error> {
-    let Some(fma) = Fma::on(cx.profile, SCALAR) else {
+    // The sum `1 + sc * r` ([`texel_x`]) is computed between the sample's image and its use, which
+    // stay in one block, so it takes no branch: `OpFmaKHR` unchecked ([`Fma::unchecked`]), which is
+    // Metal's here. Its exact value is zero or at least `2^-48` in magnitude: a product near `-1`
+    // is an integer below `2^48` times a power of two of at least `2^-48`, so the sum is a
+    // multiple of that power (or, for a power above 1, at least 1).
+    let Some(fma) = Fma::on(cx.profile, SCALAR).map(Fma::unchecked) else {
         return Err(cx.invariant("a cube position without a float fused multiply-add"));
     };
     cx.families.arith.libm_uses.insert(libm::Fun::Recip);

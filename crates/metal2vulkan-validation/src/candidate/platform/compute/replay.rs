@@ -399,7 +399,14 @@ fn submit_child(
     // SAFETY: `module_info` points at live SPIR-V words for the call.
     objects.module = unsafe { context.device.create_shader_module(&module_info, None) }
         .map_err(|error| format!("create shader module: {error}"))?;
-    let region_pipelines = create_pipelines(context, &mut objects, pipeline, &commands.regions)?;
+    // An executed command's template: the shared ceiling (`ComputeCase::creation_bound`).
+    let region_pipelines = create_pipelines(
+        context,
+        &mut objects,
+        pipeline,
+        &commands.regions,
+        crate::budgets::PIPELINE_CREATION_CEILING,
+    )?;
     let sets = resources.write_sets(context, &objects.layout)?;
     record_and_submit(
         context,

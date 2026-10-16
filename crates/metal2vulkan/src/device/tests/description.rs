@@ -21,7 +21,6 @@ const COMMITTED: &[&str] = &[
     "nvidia-rtx5080-laptop",
     "roadmap-2022",
     "swiftshader",
-    "vk12-bare",
     "vk12-floor",
 ];
 
@@ -102,9 +101,12 @@ fn device_reports_carry_identity_and_formats() {
     assert!(nv.has(VkFeature::ShaderInt64));
 }
 
+/// The floor is Vulkan 1.2 core: no optional feature, not even one the product uses where present
+/// (narrow integers and storage access, formatless storage images), since no product path needs
+/// one.
 #[test]
-fn vk12_bare_is_the_1_2_floor() {
-    let d = profile("vk12-bare");
+fn vk12_floor_is_vulkan_1_2_core() {
+    let d = profile("vk12-floor");
     assert_eq!(d.api_version, ApiVersion::V1_2);
     // Vulkan 1.2 requires uniformBufferStandardLayout.
     assert!(d.has(VkFeature::UniformBufferStandardLayout));
@@ -116,6 +118,9 @@ fn vk12_bare_is_the_1_2_floor() {
         VkFeature::VertexPipelineStoresAndAtomics,
         VkFeature::FragmentStoresAndAtomics,
         VkFeature::SubgroupSizeControl,
+        VkFeature::StorageBuffer8BitAccess,
+        VkFeature::StorageBuffer16BitAccess,
+        VkFeature::ShaderStorageImageReadWithoutFormat,
         VkFeature::ShaderStorageImageWriteWithoutFormat,
     ] {
         assert!(!d.has(f), "{f:?}");
@@ -155,18 +160,6 @@ fn vk12_bare_is_the_1_2_floor() {
     assert_eq!(d.limits.max_compute_shared_memory_size, 16384);
     assert_eq!(d.limits.max_compute_work_group_size, [128, 128, 64]);
     assert_eq!(d.limits.min_storage_buffer_offset_alignment, 256);
-    let floor = profile("vk12-floor");
-    for f in [
-        VkFeature::ShaderInt16,
-        VkFeature::StorageBuffer8BitAccess,
-        VkFeature::StorageBuffer16BitAccess,
-        VkFeature::ShaderStorageImageReadWithoutFormat,
-        VkFeature::ShaderStorageImageWriteWithoutFormat,
-    ] {
-        assert!(floor.has(f), "{f:?}");
-    }
-    assert!(!floor.has(VkFeature::BufferDeviceAddress));
-    assert_eq!(floor.formats, d.formats);
 }
 
 /// `supportsNonZeroFirstInstance` comes from the KHR divisor (or 1.4) properties; an EXT-only
@@ -585,7 +578,6 @@ fn maintenance8_reads_its_extension_structure() {
         ("nvidia-rtx50-linux", true),
         ("roadmap-2022", false),
         ("swiftshader", false),
-        ("vk12-bare", false),
         ("vk12-floor", false),
     ] {
         assert_eq!(

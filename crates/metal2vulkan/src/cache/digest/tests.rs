@@ -233,7 +233,7 @@ mod serialized {
             .collect::<String>();
         assert_eq!(
             hex, "a7fb58b1d327f235fb690324f99969bccd238a3488178ac0cacb8cac19e2ebe0",
-            "the plan digest's definition changed (DESIGN D300)"
+            "the plan digest's definition changed"
         );
     }
 }

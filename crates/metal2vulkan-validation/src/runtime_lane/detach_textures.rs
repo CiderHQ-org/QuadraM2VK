@@ -25,7 +25,8 @@
 //!   and `StaleDetachedReach` is not ([`DETACHED_REACHES`]). A device without
 //!   `shaderStorageImageReadWithoutFormat` refuses that kernel, typed.
 //! - **Attached again**: a rebind gives every texture its pages back, those made while detached
-//!   among them.
+//!   among them; a kernel's write of one made while detached lands in the new pages, through the
+//!   copy back that dispatches where the device's does.
 //! - **A two-plane extended-range heap texture** made in a detached heap answers its descriptor.
 
 use super::degrade_notices::on_device as on_device_noticed;
@@ -34,7 +35,7 @@ use super::host_memory::on_device;
 use super::rebind_reach::{heap_member, member_over, rebind_heap_to, rebind_to, A, B};
 use super::{bound_buffers, encode_case, pipeline_state, public_case, CaseResources, PublicCase};
 use super::{buffer_with, texture_descriptor, WAIT};
-use metal2vulkan::device::VkFeature;
+use metal2vulkan::device::{DriverFact, VkFeature};
 use metal2vulkan::error::{Capability, Feature, Needs};
 use metal2vulkan::metal::{PixelFormat, ResourceUsage, TextureUsage};
 use metal2vulkan_devtools::llvm_assemble_text;
@@ -506,6 +507,44 @@ fn a_rebind_gives_every_texture_its_pages_again() {
             assert_eq!(texels(&target), read_texels(), "{form:?}");
         }
         eprintln!("DETACH textures: attached again, read and written");
+    });
+}
+
+/// A texture made while its bytes are detached is their shadow, presenting a stand-in; once the
+/// bytes lie in pages again, a kernel's write of it lands in them, both forms. Where the device
+/// copies a shadow back by a dispatch (`DriverFact::ShadowCopyBackDispatchFaster`), that dispatch
+/// reads the shadow through the word view its copies made with it, before the stand-in: the
+/// view is the image's own (`Image::own_view`), which the stand-in leaves alone. Before, it was
+/// among the views the stand-in let go of, and the copy back wrote a destroyed view into its set
+/// (`VUID-VkWriteDescriptorSet-descriptorType-02996` on the Iris Xe of RPL-P).
+#[test]
+fn a_texture_made_while_detached_writes_its_pages_once_they_are_given_again() {
+    on_device(|device| {
+        let query = QueryRead::new(device);
+        let dispatches = device
+            .properties()
+            .driver_facts
+            .contains(&DriverFact::ShadowCopyBackDispatchFaster);
+        let before = device.work_counts().shadow_copies_back_dispatched;
+        for over in [Over::Buffer, Over::Heap] {
+            let Some((bytes, texture)) = detached_texture(device, &query, (over, Made::While))
+            else {
+                return;
+            };
+            bytes.rebind();
+            let source = query.own(device, &query.source_texels());
+            let write = query.run(device, &source, &texture, &[&source, &texture]);
+            completed(&write);
+            assert_eq!(texels(&texture), read_texels(), "{over:?}");
+        }
+        let dispatched = device.work_counts().shadow_copies_back_dispatched - before;
+        if dispatches {
+            assert!(dispatched > 0, "no copy back dispatched");
+        }
+        eprintln!(
+            "DETACH textures: made while detached, written once attached again; {dispatched} \
+             copies back dispatched"
+        );
     });
 }
 

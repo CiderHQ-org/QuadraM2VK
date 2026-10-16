@@ -1,4 +1,4 @@
-// Owned fixture (WP-UNI, DESIGN D311 item 5, S2): the MTLFunction properties Metal answers from a
+// Owned fixture: the MTLFunction properties Metal answers from a
 // metallib's function tags. Function constants a function reads only through
 // is_function_constant_defined, only as an argument's predicate, for their value, or not at all;
 // post-tessellation vertex functions of both patch types with several control-point counts; and

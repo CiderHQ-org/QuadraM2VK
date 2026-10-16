@@ -527,7 +527,11 @@ fn a_fast_division_fits_its_word_estimate() {
             }
         }
         for route in [Route::Khr, Route::Wide, Route::Soft] {
-            let fma = Fma { form: f, route };
+            let fma = Fma {
+                form: f,
+                route,
+                tiny: None,
+            };
             let reciprocal = Reciprocal::of(route);
             let routine = math::FastDivision::new(f, reciprocal, Contraction::Forbidden);
             let defs: Defs<'_> = &|b| {
@@ -672,7 +676,11 @@ fn a_fast_division_routine_answers_as_the_division_inline() {
         .map(|(x, y, _)| vec![vec![u64::from(*x)], vec![u64::from(*y)]])
         .collect();
     for route in [Route::Khr, Route::Wide, Route::Soft] {
-        let fma = Fma { form: f, route };
+        let fma = Fma {
+            form: f,
+            route,
+            tiny: None,
+        };
         let reciprocal = Reciprocal::of(route);
         let routine = math::FastDivision::new(f, reciprocal, Contraction::Forbidden);
         let fmas = |b: &mut ModuleBuilder| -> BResult<Vec<FuncId>> {
@@ -746,7 +754,11 @@ fn fast_fmod_answers_as_metal_on_every_route() {
         .map(|(x, y, _)| vec![vec![u64::from(*x)], vec![u64::from(*y)]])
         .collect();
     for route in [Route::Khr, Route::Wide, Route::Soft] {
-        let fma = Fma { form: f, route };
+        let fma = Fma {
+            form: f,
+            route,
+            tiny: None,
+        };
         let routine = fma.routine();
         let division = math::FastDivision::new(f, Reciprocal::of(route), Contraction::Forbidden);
         let m = kernel_defs(

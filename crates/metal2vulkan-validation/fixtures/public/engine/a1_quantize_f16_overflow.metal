@@ -1,9 +1,9 @@
-// Owned fixture (WP-A1, D126): rounding to `half` just past its largest finite value, without
-// fast math (`-fno-fast-math`: an addition whose result overflows carries no `ninf`). D57.1 and
-// D57.2 round every `half` result with `OpQuantizeToF16`, whose SPIR-V definition makes a value
-// "too large to represent" an infinity; round to nearest even keeps everything below 65520 at
-// 65504 (the largest half) and makes 65520 (a tie, 65504 being odd) and above infinite. Metal's
-// conversion and its half arithmetic in that range are unmeasured.
+// Owned fixture: rounding to `half` just past its largest finite value, without fast math
+// (`-fno-fast-math`: an addition whose result overflows carries no `ninf`). The translator rounds
+// every `half` result with `OpQuantizeToF16`, whose SPIR-V definition makes a value "too large to
+// represent" an infinity; round to nearest even keeps everything below 65520 at 65504 (the largest
+// half) and makes 65520 (a tie, 65504 being odd) and above infinite. Metal's conversion and its
+// half arithmetic in that range are unmeasured.
 //
 // Thread t (0..4159) writes two words:
 // - `half(x) | half(y) << 16` for `x = 65504 + t / 256` and `y = -x`, every `float` from 65504 to

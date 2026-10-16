@@ -1,4 +1,4 @@
-// Owned fixture (WP-MESH, DESIGN D334 item 1): mesh type members under [[function_constant(..)]],
+// Owned fixture: mesh type members under [[function_constant(..)]],
 // as Apple's VFX particle meshes declare theirs: a vertex data member and a primitive data member
 // exist only where `has_tint` holds, beside members that always exist. Each is written only under
 // its constant. Loop-free.

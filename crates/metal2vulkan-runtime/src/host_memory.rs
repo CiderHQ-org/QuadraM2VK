@@ -52,8 +52,15 @@
 //!   reference goes: after the imported memory is freed, on the thread that drops it. A committed
 //!   command buffer holds the buffer until it completed and its completed handlers ran, so then it
 //!   runs on one of the device's handler threads, in the command buffer's queue's context, after
-//!   the GPU's last use, as Metal's runs on one of its threads. A
-//!   refused call never runs it.
+//!   the GPU's last use, as Metal's runs on one of its threads: what its commands retained and its
+//!   encoders' logs (`replay.rs`) go in its release, and no thread that submits command buffers
+//!   or sees them complete holds a handle past it (`exit_guard::program_release`). One released
+//!   while only command buffers not yet submitted reach it unnamed goes at once, as Metal's does
+//!   (it runs in the release, on the releasing thread, while such a command buffer waits
+//!   committed: probe `dealloc-probe3`, the M3 Max under macOS 27.0.1): on the releasing thread,
+//!   or, where such a command buffer's root table held it until its first submission (a rebind's
+//!   encoding again), on a handler thread then (`command_buffer/first_submission.rs`). A refused
+//!   call never runs it.
 //! - **A keep-alive** ([`KeepAlive`]). The import can outlive the buffer: a texture over the buffer
 //!   that a command buffer submitted before its release may still read through its resource ID
 //!   keeps its image, and the image the import, until that command buffer completes
@@ -63,7 +70,13 @@
 //!   deallocator runs at the release, as Metal's does, and the keep-alive is dropped once the
 //!   import is freed: the pages must stay mapped until then. A buffer over the bytes another
 //!   live buffer lies in shares its import (`host_aliases.rs`), whose pages that buffer's
-//!   contract keeps mapped: its deallocator runs at its release either way.
+//!   contract keeps mapped: its deallocator runs at its release either way, and so is its
+//!   keep-alive dropped, after the deallocator. So is the keep-alive of a buffer whose import
+//!   keeps another's already: every buffer in an import was made over the same bytes, so one
+//!   keep-alive keeps them mapped for all, and an import keeps one at most, however many buffers
+//!   come and go over its bytes while it lives (a consumer's buffer over a surface made at each
+//!   present and released after the next one's). Counted: `WorkCounts::host_keep_alives_kept`
+//!   (held now) and `WorkCounts::host_keep_alives_covered` (dropped at the release).
 
 use super::device::lock;
 #[cfg(unix)]
@@ -71,6 +84,7 @@ use super::dma_buf::DmaBufSource;
 use super::error::{vulkan, Error};
 use super::exit_guard;
 use super::loader_word::LoaderWord;
+use super::program_objects::ProgramObject;
 use ash::vk;
 use metal2vulkan::device::{EnableSet, VkExtension};
 use metal2vulkan::error::{Feature, Unsupported};
@@ -159,6 +173,17 @@ impl HostMemory {
     /// refuses the pointer of `memfd` and other shared mappings and imports `udmabuf`s of their
     /// pages; NVIDIA and lavapipe import the pointer and never call the source.
     ///
+    /// A no-copy buffer's own import of the chunks (not a heap's or a rebind's) may be released
+    /// while idle, because RADV lists every import in every submission. The release frees its
+    /// `VkBuffer` and memory and keeps the chunks open: the runtime keeps a duplicate descriptor of
+    /// each, within a quarter of the process's `RLIMIT_NOFILE` soft limit. The next blit imports
+    /// them again, on the thread that encodes it, which costs time then. Only a buffer that blits
+    /// alone have read is released. One whose `gpu_address` or `VkBuffer` was handed out, or with a
+    /// texture over its bytes, stays imported. Nothing of Metal's observes the release: the bytes,
+    /// the address and the pages stay, the CPU's writes made meanwhile are read, and the source is
+    /// not called again. A blit that finds the device unable to import the chunks again (out of
+    /// memory) is refused.
+    ///
     /// # Safety
     ///
     /// [`HostMemory::new`]'s contract for the bytes at `pointer`, holding while the chunks are
@@ -186,26 +211,40 @@ impl HostMemory {
 }
 
 /// A no-copy buffer's deallocator (Metal's block): called once, with the pointer and the length,
-/// when the buffer is released. It may run on a runtime thread, as Metal's runs on any thread. A
-/// panic inside it is caught.
+/// when the buffer is released. It may run on a runtime thread, as Metal's runs on any thread: a
+/// command buffer's queue's handler thread, where that command buffer's release lets go of the
+/// buffer, never a thread that submits command buffers or sees them complete. A panic inside it
+/// is caught.
 pub type Deallocator = Box<dyn FnOnce(NonNull<u8>, u64) + Send + 'static>;
 
 /// What keeps the caller's host memory mapped (a runtime extension: Metal has none): given with a
 /// no-copy buffer's or heap's memory, it is dropped once the device's import of the pages is
-/// freed, which may be after the deallocator ran. With one, the deallocator runs when the buffer
+/// freed, which may be after the deallocator ran, or at the buffer's release, after its
+/// deallocator, where the import's pages stay mapped without it: another buffer made over the
+/// same bytes lies in the import, or the import keeps such a buffer's keep-alive already (the
+/// module docs). With one, the deallocator runs when the buffer
 /// is released, as Metal's does, though a command buffer submitted before a texture over the
 /// pages was released may still hold the import; with none, the deallocator waits for the import
 /// (the module docs). Dropped on a runtime thread, possibly; a panic inside its drop is caught.
 /// Never dropped while the process exits: the pages stay imported to its end (`exit_guard`).
 pub type KeepAlive = Box<dyn Send + 'static>;
 
-/// What the caller gives back with its host memory: the deallocator, and the keep-alive.
+/// What the caller gives back with its host memory: the deallocator, and the keep-alive, each
+/// held as the program's object (`program_objects.rs`).
 pub(super) struct HostRelease {
-    pub(super) deallocator: Option<Deallocator>,
-    pub(super) keep_alive: Option<KeepAlive>,
+    deallocator: Option<ProgramObject<Deallocator>>,
+    keep_alive: Option<ProgramObject<KeepAlive>>,
 }
 
 impl HostRelease {
+    /// Hold the caller's `deallocator` and `keep_alive`, at the call that gives them.
+    pub(super) fn new(deallocator: Option<Deallocator>, keep_alive: Option<KeepAlive>) -> Self {
+        HostRelease {
+            deallocator: deallocator.map(ProgramObject::new),
+            keep_alive: keep_alive.map(ProgramObject::new),
+        }
+    }
+
     /// The release of `length` bytes at `pointer` to it, where it gives anything.
     pub(super) fn of(self, pointer: NonNull<u8>, length: u64) -> Option<Release> {
         let HostRelease {
@@ -728,8 +767,8 @@ impl Importer {
 pub(super) struct Release {
     pointer: NonNull<u8>,
     length: u64,
-    deallocator: Mutex<Option<Deallocator>>,
-    keep_alive: Mutex<Option<KeepAlive>>,
+    deallocator: Mutex<Option<ProgramObject<Deallocator>>>,
+    keep_alive: Mutex<Option<ProgramObject<KeepAlive>>>,
 }
 
 // SAFETY: the pointer is only handed to the deallocator, which is `Send`; the deallocator and
@@ -750,8 +789,9 @@ impl Release {
         }
     }
 
-    /// Its keep-alive, for the import to drop once it is freed; `None` where the caller gave none.
-    pub(super) fn keep_alive(&self) -> Option<KeepAlive> {
+    /// Its keep-alive, for the import to keep until it is freed, or to drop at the release where
+    /// the import's pages stay mapped without it (`buffer.rs`); `None` where the caller gave none.
+    pub(super) fn keep_alive(&self) -> Option<ProgramObject<KeepAlive>> {
         lock(&self.keep_alive).take()
     }
 
@@ -770,7 +810,9 @@ impl Release {
         let deallocator = lock(&self.deallocator).take();
         if let Some(deallocator) = deallocator {
             let (pointer, length) = (self.pointer, self.length);
-            exit_guard::program(move || deallocator(pointer, length));
+            exit_guard::program_release(move || {
+                deallocator.run(|deallocator| deallocator(pointer, length));
+            });
         }
     }
 }

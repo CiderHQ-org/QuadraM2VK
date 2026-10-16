@@ -48,13 +48,13 @@ use crate::buffer::Buffer;
 use crate::degradation::Degradation;
 use crate::encoder::EncoderCore;
 use crate::error::Error;
+use crate::key_hash::KeyMap;
 use crate::resource::ResourceKey;
 use crate::tracker::{Barrier, Use, UseRange};
 use crate::values::{CpuCacheMode, HazardTrackingMode, ResourceOptions, StorageMode};
 use crate::Device;
 use ash::vk;
 use metal2vulkan::pipeline::{PipelineInterface, SlotClass, SlotInterface, Stage};
-use std::collections::HashMap;
 use std::ops::Range;
 
 /// The byte ranges one key holds before they are merged into their hull.
@@ -74,7 +74,7 @@ const MESH_STAGES: vk::PipelineStageFlags2 = vk::PipelineStageFlags2::from_raw(
 
 /// Byte ranges of buffers, tracked or not, by key.
 #[derive(Clone, Default)]
-struct Written(HashMap<ResourceKey, Vec<Range<u64>>>);
+struct Written(KeyMap<ResourceKey, Vec<Range<u64>>>);
 
 impl Written {
     fn add(&mut self, key: ResourceKey, range: &Range<u64>) {

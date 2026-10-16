@@ -1,4 +1,4 @@
-// Owned fixture (WP-MESH, DESIGN D334 item 3): the draws whose answers Metal probes 1 to 3
+// Owned fixture: the draws whose answers Metal probes 1 to 3
 // measured on an M4 and an M3: primitive order (object threadgroup, then mesh threadgroup, then
 // slot), set_primitive_count past the slots written, slots whose indices are not all written,
 // primitive_culled, per-primitive data, the payload, and the fragment's primitive_id. The fragment

@@ -38,6 +38,7 @@ use super::super::shadow::ShadowStaging;
 use super::super::tracker::Barrier;
 use super::super::values::{CpuCacheMode, HazardTrackingMode, ResourceOptions, StorageMode};
 use super::super::Device;
+use crate::device::functions::Vk;
 use ash::vk;
 use metal2vulkan::bind::{PlaneLayout, TwoPlaneTexelsModule};
 
@@ -289,7 +290,7 @@ impl HeapPlaneCopies {
     /// sets are live until it completes, and the image rests in `GENERAL`.
     pub(crate) unsafe fn record(
         &self,
-        device: &ash::Device,
+        device: &Vk,
         command_buffer: vk::CommandBuffer,
         image: vk::Image,
         (bytes, staging): (vk::Buffer, &ShadowStaging),

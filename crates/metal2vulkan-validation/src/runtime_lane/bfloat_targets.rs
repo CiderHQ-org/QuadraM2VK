@@ -286,15 +286,24 @@ fn bfloat_clears_store_metal_s_codes() {
             .collect();
         assert_eq!(digest(&model), cleared, "{pf:?}: the model's clears");
         let got = read_buffer(&bytes, 0, size * n).unwrap();
-        for (i, (g, m)) in got
+        // The bytes read again after a later command buffer of the queue completed: a texel
+        // that changed reached the host after its wait returned; one that kept the fill was
+        // never written (seen on the Radeon RX 7900 XTX and 780M under a full suite's load).
+        let later = lane.queue.command_buffer().unwrap();
+        later.commit().unwrap();
+        later.wait_until_completed_for(WAIT).unwrap();
+        let again = read_buffer(&bytes, 0, size * n).unwrap();
+        for (i, ((g, m), a)) in got
             .chunks(size as usize)
             .zip(model.chunks(size as usize))
+            .zip(again.chunks(size as usize))
             .enumerate()
-            .filter(|(_, (g, m))| g != m)
+            .filter(|(_, ((g, m), _))| g != m)
             .take(8)
         {
             wrong.push(format!(
-                "{pf:?} color {i} {:?}: stored {g:02x?}, Metal's {m:02x?}",
+                "{pf:?} color {i} {:?}: stored {g:02x?}, Metal's {m:02x?}, read again after a \
+                 later command buffer {a:02x?}",
                 colors[i]
             ));
         }

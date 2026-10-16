@@ -1144,12 +1144,16 @@ fn sign_extracts(a: &FunctionArtifact) -> usize {
 }
 
 const MASK_LOD: u32 = 0x2;
+const MASK_CONST_OFFSET: u32 = 0x8;
 const MASK_OFFSET: u32 = 0x10;
+const OP_SWITCH: u16 = 251;
 
 /// A dynamic offset on a gather, and on a fragment's implicit-LOD sample, is the `Offset` operand
 /// of the value Metal applies, its low four bits sign-extended by one `OpBitFieldSExtract`; only
-/// the sample needs `maintenance8`. Without `shaderImageGatherExtended` a dynamic gather offset is
-/// refused naming it. A runtime sampler's gather reads the offset a second time for its snap behind
+/// the sample needs `maintenance8`. Without `shaderImageGatherExtended` (the floor) a dynamic gather
+/// offset is taken as `ConstOffset` arms: one switch on its dynamic lane's low four bits, 16 gathers
+/// each with a `ConstOffset` and none with `Offset`, and the module needs neither feature. A
+/// runtime sampler's gather reads the offset a second time for its snap behind
 /// the word, which moves the centre back where Metal drops it, on a device without Metal's own
 /// sampler (lavapipe). On one with it (MoltenVK) only a pixel word's gather snaps, and Metal's own
 /// sampler drops the offset of the normalized centre it is handed where Metal drops the pixel
@@ -1174,17 +1178,17 @@ fn dynamic_offsets_are_offset_operands_of_their_low_four_bits() {
         .contains(&VkFeature::ShaderImageGatherExtended));
     assert!(!a.requirements.features.contains(&VkFeature::Maintenance8));
     let floor = profile("vk12-floor", EXACT_SAMPLING).expect("profile");
-    match compile(&bc, "k", &floor) {
-        Err(Error::Unsupported(u)) => assert_eq!(
-            (u.feature, u.needs),
-            (
-                Feature::GatherExtended,
-                Needs::AnyOf(vec![vec![Capability::Feature(
-                    VkFeature::ShaderImageGatherExtended
-                )]])
-            )
-        ),
-        other => panic!("{:?}", other.map(|_| ())),
+    let a = ok(&bc, "k", &floor);
+    assert_eq!(count(&a, OP_SWITCH), 1);
+    assert_eq!(
+        operand_masks(&a, OP_IMAGE_GATHER, 6),
+        [MASK_CONST_OFFSET; 16]
+    );
+    for f in [
+        VkFeature::Maintenance8,
+        VkFeature::ShaderImageGatherExtended,
+    ] {
+        assert!(!a.requirements.features.contains(&f), "{f:?}");
     }
     let Some(bc) = assemble("fragment_dynamic_offset", DYNAMIC_OFFSET_FRAGMENT) else {
         return;

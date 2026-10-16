@@ -82,9 +82,10 @@
 //! ("Compute pipeline exceeds available stack space"): the refusal is
 //! `LimitExceeded(CallStackBytes)`, also for linked functions that do not recurse. The stacks are
 //! the thread's Function storage, allocas like its others: selection holds the entry's private
-//! memory to what the device holds correctly (`ProfileFields::function_storage`), and refuses a
-//! recursion past it as `Unsupported{Recursion}` needing more, since past it a driver can answer
-//! wrongly or hang with no error.
+//! memory to what the device holds correctly (`ProfileFields::function_storage`; a vertex or
+//! fragment function on a device not measured to Metal's 192 KiB, noted), and refuses a recursion
+//! past it as `Unsupported{Recursion}` needing more, since past it a driver can answer wrongly or
+//! hang with no error.
 
 use std::collections::{BTreeMap, BTreeSet};
 

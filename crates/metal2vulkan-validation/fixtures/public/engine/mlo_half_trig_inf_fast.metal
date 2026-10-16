@@ -1,7 +1,7 @@
-// Owned fixture (WP-MLO, TODO 2.8, DESIGN D324 item 2): `mlo_half_trig_inf` compiled with the
+// Owned fixture: `mlo_half_trig_inf` compiled with the
 // default fast math. The `half` calls carry LLVM's fast flags, under which an infinite operand is
-// undefined (MSL section 7.1); the case reads which answers Metal gives there all the same (WP-UNV
-// measured them equal to the answers without fast math, EV UNV-metal-probe-1).
+// undefined (MSL section 7.1); the case reads which answers Metal gives there all the same (a Metal
+// probe measured them equal to the answers without fast math, EV UNV-metal-probe-1).
 //
 // Thread i reads the `half` pattern `in[i]` as `x` and writes one `uint4`: `sin(x) | cos(x) << 16`,
 // `tan(x) | s << 16`, `c`, and the pattern of `x`, where `s = sincos(x, c)`. The operands are
@@ -9,7 +9,7 @@
 //
 // sincos's cosine, `c`, is declared ahead of the switch's only label (on i >> 31, zero for every
 // thread), so every path into the switch bypasses its declaration and Clang emits no lifetime
-// marker for it (as in trn_math_fast.metal and fmx2_divide_precise.metal, DESIGN D306).
+// marker for it (as in trn_math_fast.metal and fmx2_divide_precise.metal).
 #include <metal_stdlib>
 using namespace metal;
 

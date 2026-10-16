@@ -1,4 +1,4 @@
-// Owned fixture (WP-K10EX, DESIGN D201): partial views of a master layout whose members share
+// Owned fixture: partial views of a master layout whose members share
 // words. `Master` holds `a` (a half at byte 0) and `b` (a half at byte 2) in word 0, `tag` (a
 // uchar4) in word 1, and `n` (a ushort at byte 8) and `m` (a ushort at byte 10) in word 2. The
 // fragment reads `b` and `n` through one view and writes `a`, `tag`, and `m` through another:

@@ -37,7 +37,7 @@ use metal2vulkan_runtime::{
 
 /// The kernels: `inline_bytes_constant` reads buffer 0 through a `constant` pointer,
 /// `inline_bytes_device` through a `const device` one; each thread copies its word to buffer 1.
-const KERNELS: &str = r#"; Owned synthetic kernels (WP-APX): copy word gid of buffer 0 to buffer 1.
+const KERNELS: &str = r#"; Owned synthetic kernels: copy word gid of buffer 0 to buffer 1.
 source_filename = "inline_bytes.metal"
 
 define void @inline_bytes_constant(ptr addrspace(2) %in, ptr addrspace(1) %out, i32 %gid) {

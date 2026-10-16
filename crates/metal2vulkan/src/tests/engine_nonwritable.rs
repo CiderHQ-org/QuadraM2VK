@@ -39,6 +39,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::device::requirements::VkFeature;
 use crate::device::{Device, DeviceDescription, DevicePolicy};
 use crate::library::{FunctionStage, Library};
 use crate::metal::format::storage_image_choice;
@@ -476,14 +477,30 @@ const PROFILES: [(&str, bool); 3] = [
     ("vk12-floor", false),
 ];
 
-fn device(stem: &str) -> Device {
+fn description(stem: &str) -> DeviceDescription {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../metal2vulkan-validation/profiles")
         .join(format!("{stem}.json"));
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    let description =
-        DeviceDescription::from_khronos_json(&text, None).unwrap_or_else(|e| panic!("{stem}: {e}"));
-    Device::new(description, DevicePolicy::default()).unwrap_or_else(|e| panic!("{stem}: {e}"))
+    DeviceDescription::from_khronos_json(&text, None).unwrap_or_else(|e| panic!("{stem}: {e}"))
+}
+
+fn device(stem: &str) -> Device {
+    Device::new(description(stem), DevicePolicy::default())
+        .unwrap_or_else(|e| panic!("{stem}: {e}"))
+}
+
+/// The name [`floor_with_16_bit`]'s device goes by in the access sweep.
+const FLOOR_WITH_16_BIT: &str = "vk12-floor+16-bit";
+
+/// `vk12-floor` with `shaderInt16` and `storageBuffer16BitAccess`: a slot's views hold the 16-bit
+/// unit and not the 8-bit one.
+fn floor_with_16_bit() -> Device {
+    let mut desc = description("vk12-floor");
+    desc.features
+        .extend([VkFeature::ShaderInt16, VkFeature::StorageBuffer16BitAccess]);
+    Device::new(desc, DevicePolicy::default())
+        .unwrap_or_else(|e| panic!("{FLOOR_WITH_16_BIT}: {e}"))
 }
 
 /// `llvm-as` of `text`, through a scratch file that is removed at once.
@@ -991,19 +1008,14 @@ fn check_access(
     counts
 }
 
-/// The profiles of the access sweep: each binds buffers and textures by descriptor, so every
-/// slot's memory is a variable of the module. They differ in which narrow units a slot's views
-/// hold, and so in which stores merge into their words: `vk12-bare` has no 8- or 16-bit storage
-/// access, `vk12-floor` no `shaderInt8`, `lunarg-desktop-baseline-2023` no `shaderInt16`, and
-/// `moltenvk-m3` both widths.
-const BOUND_PROFILES: [&str; 4] = [
-    "lunarg-desktop-baseline-2023",
-    "vk12-floor",
-    "vk12-bare",
-    "moltenvk-m3",
-];
+/// The profiles of the access sweep, beside [`floor_with_16_bit`]: each binds buffers and textures
+/// by descriptor, so every slot's memory is a variable of the module. They differ in which narrow
+/// units a slot's views hold, and so in which stores merge into their words: `vk12-floor` has no
+/// 8- or 16-bit storage access, the floor with 16-bit access no `shaderInt8`,
+/// `lunarg-desktop-baseline-2023` no `shaderInt16`, and `moltenvk-m3` both widths.
+const BOUND_PROFILES: [&str; 3] = ["lunarg-desktop-baseline-2023", "vk12-floor", "moltenvk-m3"];
 
-/// A kernel whose four buffers AIR declares `air.write` (the most storage buffers `vk12-bare`
+/// A kernel whose four buffers AIR declares `air.write` (the most storage buffers `vk12-floor`
 /// gives a stage): a byte at `gid` of `bytes`, a `ushort` at `gid` of `halves`, a `uint` at `gid`
 /// of `words`, and a byte at `gid` through a pointer that selects `bytes` or `other` by the
 /// thread's parity (a store with two candidate slots, dispatched by root, `other`'s only store).
@@ -1052,7 +1064,7 @@ fn decorated_with(words: &[u32], decoration: u32) -> BTreeSet<u32> {
 }
 
 /// A store merged into its word reads the word, so its slot reports a read, and nothing declares
-/// the slot's variable unreadable. On `vk12-bare`, with no narrow storage access, every byte and
+/// the slot's variable unreadable. On `vk12-floor`, with no narrow storage access, every byte and
 /// `ushort` store merges: their slots, `other` through the root dispatch, report `read` and
 /// `write`, and the module's atomics read each of them. On `moltenvk-m3`, whose slots hold both
 /// narrow units, each such store is one plain unit store and every slot reports `write` alone, as
@@ -1075,7 +1087,7 @@ fn a_store_merged_into_its_word_reports_a_read_of_its_slot() {
         (2, "words", false),
         (3, "other", true),
     ];
-    for (stem, narrow_units) in [("vk12-bare", false), ("moltenvk-m3", true)] {
+    for (stem, narrow_units) in [("vk12-floor", false), ("moltenvk-m3", true)] {
         let device = device(stem);
         let function = FunctionDescriptor::new(library.function_at(0).expect("the kernel"));
         let compiled = device
@@ -1245,10 +1257,11 @@ fn an_escaped_slot_reports_what_loaded_pointers_may_do_to_it() {
 /// profile, reports an access that covers its module's.
 #[test]
 fn every_public_fixture_reports_an_access_covering_its_module() {
-    let devices: Vec<(&str, Device)> = BOUND_PROFILES
+    let mut devices: Vec<(&str, Device)> = BOUND_PROFILES
         .iter()
         .map(|&stem| (stem, device(stem)))
         .collect();
+    devices.push((FLOOR_WITH_16_BIT, floor_with_16_bit()));
     let budget = Budget::default();
     let mut total = AccessCounts::default();
     let mut modules = 0usize;

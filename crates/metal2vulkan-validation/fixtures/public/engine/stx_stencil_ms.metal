@@ -1,4 +1,4 @@
-// Owned fixture (WP-STX, DESIGN D295): a fragment function's `[[stencil]]` output in a
+// Owned fixture: a fragment function's `[[stencil]]` output in a
 // multisampled pass, where Metal tests and writes each covered sample against the output (its low
 // 8 bits). The functions that read `[[sample_id]]` run once per sample, so each sample of a pixel
 // takes its own reference; the others run once per pixel. The executors' fullscreen triangle

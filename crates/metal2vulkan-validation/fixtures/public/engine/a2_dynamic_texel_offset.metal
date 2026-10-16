@@ -1,5 +1,5 @@
-// Owned fixture (WP-A2, DESIGN D127): dynamic texel offsets on a sample and a gather (DESIGN
-// D102). MSL 6.13 requires an offset in [-8, 7]; the lowering clamps a dynamic offset into that
+// Owned fixture: dynamic texel offsets on a sample and a gather.
+// MSL 6.13 requires an offset in [-8, 7]; the lowering clamps a dynamic offset into that
 // range (`SClamp(offset, -8, 7)`), which is the identity on every offset Metal defines. The
 // offsets come from the input buffer, so one case reads in-range texel values and another reads
 // what Apple GPUs return outside the range. A nearest sampler at a texel centre of a texture

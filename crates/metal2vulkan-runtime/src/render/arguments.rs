@@ -175,7 +175,7 @@ impl RenderCommandEncoder {
         self.log(|_| RenderCall::FunctionTable(Table::Vertex, table.cloned(), index));
         const CALL: &str = "set_vertex_visible_function_table";
         self.vertex
-            .set_function_tables(&self.core, CALL, &[table], index)
+            .set_function_tables(&mut self.core, CALL, &[table], index)
     }
 
     /// `setVertexVisibleFunctionTables:withBufferRange:`: `tables[i]` at the vertex stage's
@@ -196,7 +196,7 @@ impl RenderCommandEncoder {
         });
         const CALL: &str = "set_vertex_visible_function_tables";
         self.vertex
-            .set_function_tables(&self.core, CALL, tables, first)
+            .set_function_tables(&mut self.core, CALL, tables, first)
     }
 
     /// `setFragmentVisibleFunctionTable:atBufferIndex:`: as
@@ -210,7 +210,7 @@ impl RenderCommandEncoder {
         self.log(|_| RenderCall::FunctionTable(Table::Fragment, table.cloned(), index));
         const CALL: &str = "set_fragment_visible_function_table";
         self.fragment
-            .set_function_tables(&self.core, CALL, &[table], index)
+            .set_function_tables(&mut self.core, CALL, &[table], index)
     }
 
     /// `setFragmentVisibleFunctionTables:withBufferRange:`: as
@@ -230,7 +230,7 @@ impl RenderCommandEncoder {
         });
         const CALL: &str = "set_fragment_visible_function_tables";
         self.fragment
-            .set_function_tables(&self.core, CALL, tables, first)
+            .set_function_tables(&mut self.core, CALL, tables, first)
     }
 
     /// `setTileVisibleFunctionTable:atBufferIndex:`: as
@@ -244,7 +244,7 @@ impl RenderCommandEncoder {
         self.log(|_| RenderCall::FunctionTable(Table::Tile, table.cloned(), index));
         const CALL: &str = "set_tile_visible_function_table";
         self.tile
-            .set_function_tables(&self.core, CALL, &[table], index)
+            .set_function_tables(&mut self.core, CALL, &[table], index)
     }
 
     /// `setTileVisibleFunctionTables:withBufferRange:`: as
@@ -264,6 +264,6 @@ impl RenderCommandEncoder {
         });
         const CALL: &str = "set_tile_visible_function_tables";
         self.tile
-            .set_function_tables(&self.core, CALL, tables, first)
+            .set_function_tables(&mut self.core, CALL, tables, first)
     }
 }

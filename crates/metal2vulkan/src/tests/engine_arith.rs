@@ -18,7 +18,7 @@
 use crate::air::{self, SpecRequest};
 use crate::device::profile::{DeviceProfile, DriverWorkaround, FloatFunctions};
 use crate::device::requirements::VkFeature;
-use crate::device::{Device, DeviceDescription};
+use crate::device::{Device, DeviceDescription, DevicePolicy};
 use crate::error::{Capability, Error, Feature, LowerFamily, Needs};
 use crate::float16::f16_bits_to_f32;
 use crate::library::FunctionConstantValues;
@@ -607,9 +607,9 @@ fn kernels() -> Vec<Kernel> {
         needs: &[],
         note: None,
     });
-    // `dot` of chunked vectors sums every chunk's dot product (a one-lane chunk's is a product) and
-    // rounds a narrow result once; `sincos` of one computes per chunk and stores its cosine as one
-    // chunked leaf.
+    // `dot` of chunked vectors, under the exact maths these kernels compile with, is Metal's fused
+    // chain over every lane (`wide_dot_is_metals_fused_chain_in_metals_order`), with no note;
+    // `sincos` of one computes per chunk and stores its cosine as one chunked leaf.
     v.push(Kernel {
         name: "chunked_dot_sums_every_chunk",
         body: format!(
@@ -620,7 +620,7 @@ fn kernels() -> Vec<Kernel> {
         // 1 + 4 + ... + 49 + 0.25 = 140.25, and 1 + 4 + 9 + 16 + 0.25 = 30.25.
         want: Some(170.5f32.to_bits()),
         needs: &[],
-        note: Some(PrecisionNote::DeviceArithmetic),
+        note: None,
     });
     v.push(Kernel {
         name: "chunked_half_dot",
@@ -632,7 +632,7 @@ fn kernels() -> Vec<Kernel> {
         // 4 * 1 + 1.5^2 = 6.25, a half.
         want: Some(6.25f32.to_bits()),
         needs: &[],
-        note: Some(PrecisionNote::DeviceArithmetic),
+        note: None,
     });
     v.push(Kernel {
         name: "chunked_sincos_stores_the_cosine",
@@ -1476,6 +1476,142 @@ fn dot_is_metals_fused_chain_on_every_profile() {
             if !device_dot {
                 let got = interpret(&bitcode, kk.name, &p);
                 assert_eq!(Some(got), kk.want, "{what}: {got:#x}");
+            }
+        }
+    }
+}
+
+/// Metal's `dot` of more than four lanes, on `float` and `half`, is the same fused chain over
+/// every lane in order, with and without fast math: EV DNR-dw1-m3, an Apple M3 Max under macOS
+/// 27.0.1, 16,384 rows of seeded random lanes each on 5, 8 and 16 `float` lanes and 8 and 16 `half`
+/// lanes, every answer the chain's. Each row here is one where the chain backwards, the chunks'
+/// sums added and the exact sum rounded once all miss Metal's word. Where Metal's order is the
+/// profile's (`RoundingOrderPolicy::Exact`; moltenvk-m3 under every policy) every profile answers it
+/// by the chain ([`ArithStrategy::ChunkedChain`]): no `OpDot`, no `DeviceArithmetic` and no
+/// `DeviceDenormals`. Under the default, a profile of the device's order keeps each chunk's
+/// `OpDot`, noted `DeviceArithmetic`.
+///
+/// [`ArithStrategy::ChunkedChain`]: crate::lower::arith::ArithStrategy::ChunkedChain
+#[test]
+fn wide_dot_is_metals_fused_chain_in_metals_order() {
+    let f = |b: &[u32]| b.iter().map(|&w| f32::from_bits(w)).collect::<Vec<_>>();
+    let h = |b: &[u16]| b.iter().map(|&w| f16_bits_to_f32(w)).collect::<Vec<_>>();
+    let x5 = f(&[0x3C4706A1, 0xC5D9EEB5, 0x3D6EA9B2, 0x3A2F23BF, 0xC603B91B]);
+    let y5 = f(&[0x40986206, 0xBE6B6C10, 0xBC124CDB, 0xB8E3B629, 0x3E3C8570]);
+    let x8 = f(&[
+        0xBFC457BC, 0xBD86A520, 0x35B57EFC, 0x43A8E94D, 0x3ABA1FAF, 0xBF68F7B9, 0x411A7DC7,
+        0xC0010B78,
+    ]);
+    let y8 = f(&[
+        0xBAC18975, 0xB7E5CCAA, 0x3DCAA0D4, 0xB6B402AC, 0xC2D6EDAA, 0x397CD0F5, 0xC0DB6522,
+        0xC2007DCD,
+    ]);
+    let x16 = f(&[
+        0x3E0AEC21, 0xBDE4C98F, 0x48F7CE82, 0xC74A1CB5, 0x3FEFB46A, 0xB8CDB9CA, 0x367C7539,
+        0xB7A71EB2, 0xC8A058F0, 0x41F42DA4, 0xBC9A925A, 0xC66A6596, 0xC0E26B92, 0x42AA4631,
+        0x433758BE, 0xB93AF022,
+    ]);
+    let y16 = f(&[
+        0x448360E6, 0xBC3FB11E, 0xBFED97A2, 0x3BBB547E, 0x3C051C11, 0xC4EE106E, 0x4521C04F,
+        0x3B630B77, 0x3A529217, 0xC2FE1081, 0xC656A359, 0xC6FFF097, 0x3EB192E9, 0xC2147C43,
+        0xC20B70CB, 0x40D2FDA7,
+    ]);
+    let hx8 = h(&[
+        0x32B2, 0xC743, 0xAD26, 0x36C6, 0xC7E3, 0xBFF2, 0x43C1, 0x4AA1,
+    ]);
+    let hy8 = h(&[
+        0xBD37, 0x321E, 0x3C57, 0x4039, 0xCC4E, 0x4F9E, 0xB7DC, 0xAC3B,
+    ]);
+    let hx16 = h(&[
+        0x4391, 0x403F, 0xBC34, 0xC571, 0xB6BC, 0xB7B3, 0xB7EF, 0x3BA4, 0x2FD5, 0xB227, 0xB58C,
+        0x2AFB, 0xAACF, 0x357C, 0x4DB6, 0xB40F,
+    ]);
+    let hy16 = h(&[
+        0x2D47, 0xB043, 0xB15B, 0xAB19, 0x36CE, 0x3634, 0x45F8, 0x4F21, 0xAF75, 0xC50E, 0x2B33,
+        0x2BFF, 0xCBB9, 0x3595, 0x3C83, 0xACEA,
+    ]);
+    let float = |name: &'static str, fast: bool, x: &[f32], y: &[f32], want: u32| {
+        let n = x.len();
+        let flag = if fast { "fast " } else { "" };
+        Kernel {
+            name,
+            body: format!(
+                "{}{}  %d = call {flag}float @air.dot.v{n}f32(<{n} x float> %x, <{n} x float> %y)\n  %r = bitcast float %d to i32\n",
+                opaque_vector("x", false, x),
+                opaque_vector("y", false, y)
+            ),
+            float: false,
+            want: Some(want),
+            needs: &[],
+            note: None,
+        }
+    };
+    let half = |name: &'static str, x: &[f32], y: &[f32], want: u32| {
+        let n = x.len();
+        Kernel {
+            name,
+            body: format!(
+                "{}{}  %d = call half @air.dot.v{n}f16(<{n} x half> %x, <{n} x half> %y)\n  %u = bitcast half %d to i16\n  %r = zext i16 %u to i32\n",
+                opaque_vector("x", true, x),
+                opaque_vector("y", true, y)
+            ),
+            float: false,
+            want: Some(want),
+            needs: &[],
+            note: None,
+        }
+    };
+    let ks = [
+        float("dot5_float", false, &x5, &y5, 0x424D5858),
+        float("dot8_float", false, &x8, &y8, 0xBFCA9608),
+        float("dot8_float_fast", true, &x8, &y8, 0xBFCA9608),
+        float("dot16_float", false, &x16, &y16, 0x4DE9E2D2),
+        half("dot8_half", &hx8, &hy8, 0x547C),
+        half("dot16_half", &hx16, &hy16, 0x5284),
+    ];
+    // `DECLS` declares the dots of 5 and 8 `float` lanes.
+    let decls = "declare float @air.dot.v16f32(<16 x float>, <16 x float>)\n\
+                 declare half @air.dot.v8f16(<8 x half>, <8 x half>)\n\
+                 declare half @air.dot.v16f16(<16 x half>, <16 x half>)\n";
+    let text = module(&ks).replace(DECLS, &format!("{DECLS}{decls}"));
+    let Some(bitcode) = assemble("wide-dot-chain", &text) else {
+        return;
+    };
+    let device = [
+        PrecisionNote::DeviceArithmetic,
+        PrecisionNote::DeviceDenormals,
+    ];
+    for stem in [
+        "moltenvk-m3",
+        "amd-rdna3-radv",
+        "lavapipe",
+        "vk12-floor",
+        "lunarg-desktop-baseline-2023",
+    ] {
+        for (policy, exact) in [(exact_maths(), true), (DevicePolicy::default(), false)] {
+            let p = profile(stem, policy).expect("profile");
+            let chain = exact || p.fields().float_functions == FloatFunctions::Metal;
+            for kk in &ks {
+                let what = format!("{} on {stem} (exact: {exact})", kk.name);
+                let a = compile(&bitcode, kk.name, &p).unwrap_or_else(|e| panic!("{what}: {e:?}"));
+                let (_, words) =
+                    link_and_validate(&a, &p).unwrap_or_else(|e| panic!("{what}: L3: {e}"));
+                let device_dot = count_op(&words, crate::spv::Op::Dot) > 0;
+                if chain {
+                    assert!(!device_dot, "{what}: OpDot");
+                    for n in device {
+                        assert!(!a.precision.contains(&n), "{what}: {:?}", a.precision);
+                    }
+                    let got = interpret(&bitcode, kk.name, &p);
+                    assert_eq!(Some(got), kk.want, "{what}: {got:#x}");
+                } else {
+                    assert!(device_dot, "{what}: OpDot");
+                    assert!(
+                        a.precision.contains(&PrecisionNote::DeviceArithmetic),
+                        "{what}: {:?}",
+                        a.precision
+                    );
+                }
             }
         }
     }
@@ -2329,15 +2465,14 @@ fn fast_sincos_flushes_past_the_last_quadrant() {
 /// profile states it reads them so and flushed elsewhere, and their NaN is Metal's, the device's
 /// where the profile states it and selected elsewhere; so does a remainder, Metal's composition of
 /// those; the functions that answer Metal at denormals and NaNs themselves (`sign`), `half`
-/// arithmetic, and the fused multiply-add routines record neither; `fast::atan2`'s device quotient
-/// records `DeviceDenormals`. The operands come from bits (`llvm.umin` of constants, bitcast), not
-/// from `float` arithmetic.
+/// arithmetic, and the fused multiply-add routines record neither; nor does `fast::atan2`, whose
+/// device quotient reads its operands as Metal does (EV DNR-dn2-m3), flushed off the deviation.
+/// The operands come from bits (`llvm.umin` of constants, bitcast), not from `float` arithmetic.
 #[test]
 fn device_float_environment_notes_follow_the_operations() {
     // 0x3fc03c00: a float near 1.5 whose low half is half 1.0.
     let w = "  %w = call i32 @llvm.umin.i32(i32 1069562880, i32 2147483647)\n  %x = bitcast i32 %w to float\n";
     let x = f32::from_bits(0x3FC0_3C00);
-    let denormals = &[PrecisionNote::DeviceDenormals][..];
     let none = &[][..];
     let ks = [
         k("env_fadd", format!("{w}  %s = fadd float %x, %x\n  %r = bitcast float %s to i32\n"), (x + x).to_bits()),
@@ -2366,7 +2501,7 @@ fn device_float_environment_notes_follow_the_operations() {
         (none, none),
         (none, none),
         (none, none),
-        (denormals, denormals),
+        (none, none),
     ];
     let text = module(&ks).replace(
         DECLS,
@@ -2760,7 +2895,7 @@ fn narrow_float_module_growth_is_bounded() {
             })
             .collect();
         eprintln!(
-            "D57 growth on {stem}: float {} words, half {} (+{}), bfloat {} (+{})",
+            "half and bfloat growth on {stem}: float {} words, half {} (+{}), bfloat {} (+{})",
             words[0],
             words[1],
             words[1] - words[0],
@@ -4878,14 +5013,14 @@ fn float_sign_operations_move_the_bits_on_every_profile() {
 }
 
 /// Class F: Metal's `float` `fmin`, `fmax`, `min3`, `max3`, and `clamp`, precise and `fast_` alike,
-/// and `llvm.minnum`/`llvm.maxnum` with every flag (Metal's fast-math `a < b ? a : b`), answer an
-/// operand bit for bit on every profile (`nan_minmax`, `nan_minmax_fast`, and their
-/// zeros-and-denormals cases, every lane): a NaN loses, two NaNs and a tie answer the second
-/// operand, and a denormal compares as zero but is returned itself. Off a profile that takes
-/// `DriverDeviation::MetalMinMax` no device `NMin`, `NMax`, or `NClamp` decides it; on one those
-/// instructions do, measured to be Metal's (the interpreter models them so), and the module
-/// requires `VkProperty::MetalMinMax`. No device note is recorded. `llvm.minnum` without flags is
-/// not measured: it stays LLVM's function, the device's, with its notes.
+/// and `llvm.minnum`/`llvm.maxnum` with every flag (Metal's fast-math `a < b ? a : b`), with none
+/// and with some, answer an operand bit for bit on every profile (`nan_minmax`, `nan_minmax_fast`,
+/// and their zeros-and-denormals cases, every lane; EV DNR-mm1-m3 and DNR-mm2-m3 for the other
+/// flag states): a NaN loses, two NaNs and a tie answer the second operand, and a denormal
+/// compares as zero but is returned itself. Off a profile that takes `DriverDeviation::MetalMinMax`
+/// no device `NMin`, `NMax`, or `NClamp` decides it; on one those instructions do, measured to be
+/// Metal's (the interpreter models them so), and the module requires `VkProperty::MetalMinMax`. No
+/// device note is recorded.
 #[test]
 fn float_min_max_answer_metals_operand_on_every_profile() {
     let two = |a: u32, b: u32| format!("{}{}", ob("x", a), ob("y", b));
@@ -4946,6 +5081,38 @@ fn float_min_max_answer_metals_operand_on_every_profile() {
                 two(0x8000_0000, 0x8000_0001)
             ),
             Some(0x8000_0001),
+        ),
+        nan_kernel(
+            "minnum_unflagged_denormal_tie",
+            format!(
+                "{}  %s = call float @llvm.minnum.f32(float %x, float %y)\n",
+                two(0, 1)
+            ),
+            Some(1),
+        ),
+        nan_kernel(
+            "maxnum_nsz_arcp_denormal_tie",
+            format!(
+                "{}  %s = call nsz arcp float @llvm.maxnum.f32(float %x, float %y)\n",
+                two(0x8000_0001, 0x8000_0000)
+            ),
+            Some(0x8000_0000),
+        ),
+        nan_kernel(
+            "minnum_nnan_a_nan_loses",
+            format!(
+                "{}  %s = call nnan float @llvm.minnum.f32(float %x, float %y)\n",
+                two(0x7FC0_0000, 0x3F80_0000)
+            ),
+            Some(0x3F80_0000),
+        ),
+        nan_kernel(
+            "maxnum_unflagged_two_nans",
+            format!(
+                "{}  %s = call float @llvm.maxnum.f32(float %x, float %y)\n",
+                two(0xFFC0_0001, 0x7F80_0001)
+            ),
+            Some(0x7F80_0001),
         ),
         nan_kernel(
             "clamp_of_a_nan",
@@ -5024,32 +5191,6 @@ fn float_min_max_answer_metals_operand_on_every_profile() {
             let got = interpret(&bitcode, kk.name, &p);
             assert_eq!(Some(got), kk.want, "{what}: {got:#x}");
         }
-    }
-    // Without every flag `llvm.minnum` is LLVM's function, the device's `NMin`, with its notes.
-    let unflagged = k(
-        "minnum_unflagged",
-        format!(
-            "{}  %s = call nnan float @llvm.minnum.f32(float %x, float %y)\n  %r = bitcast float %s to i32\n",
-            two(0x3F80_0000, 0x4000_0000)
-        ),
-        0,
-    );
-    let text = module(std::slice::from_ref(&unflagged)).replace(
-        DECLS,
-        &format!("{DECLS}declare float @llvm.minnum.f32(float, float)\n"),
-    );
-    let Some(bitcode) = assemble("nan-float-minnum", &text) else {
-        return;
-    };
-    let p = profile("lavapipe", exact_maths()).expect("profile");
-    let a = compile(&bitcode, unflagged.name, &p).expect("minnum_unflagged");
-    let (_, words) = link_and_validate(&a, &p).expect("minnum_unflagged: L3");
-    assert_eq!(device_pick(&words), 1);
-    for note in [
-        PrecisionNote::DeviceDenormals,
-        PrecisionNote::DeviceNanEncoding,
-    ] {
-        assert!(a.precision.contains(&note), "{:?}", a.precision);
     }
 }
 

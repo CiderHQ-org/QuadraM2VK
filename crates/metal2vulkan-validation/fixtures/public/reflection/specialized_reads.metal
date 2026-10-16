@@ -1,4 +1,4 @@
-// Owned fixture (WP-RFL, DESIGN D384, docs/TODO.md 8.27): a vertex function that reads a stage
+// Owned fixture: a vertex function that reads a stage
 // input only where a function constant says, so a function made with the constant false leaves
 // the attribute unread, which no earlier probe measured (MTLAttribute.isActive, and whether a
 // pipeline calls the attribute's buffer used). Written for this repository; no third-party

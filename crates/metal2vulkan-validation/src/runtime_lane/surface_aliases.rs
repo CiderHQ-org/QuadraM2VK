@@ -79,7 +79,7 @@ enum Reader {
 }
 
 /// The kernel of [`Reader::Kernel`]: thread `gid` copies word `gid` of buffer 0 into buffer 1.
-const COPY_WORDS: &str = r#"; Owned synthetic kernel (WP-CON): one thread a word.
+const COPY_WORDS: &str = r#"; Owned synthetic kernel: one thread a word.
 source_filename = "surface_aliases.metal"
 
 define void @copy_words(ptr addrspace(1) noalias %in, ptr addrspace(1) noalias %out, i32 %gid) {

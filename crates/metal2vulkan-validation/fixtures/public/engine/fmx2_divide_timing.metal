@@ -1,7 +1,7 @@
-// Owned fixture (WP-FMX2, DESIGN D279): a timing kernel for float division without fast math
-// (`-fno-fast-math`), so `acc / y` is an `fdiv float` with no flag, the division WP-FMX2 makes
-// Metal's correctly rounded quotient. Each thread divides its running value by its divisor n
-// times, each step waiting for the last:
+// Owned fixture: a timing kernel for float division without fast math (`-fno-fast-math`), so `acc /
+// y` is an `fdiv float` with no flag, the division the translator makes Metal's correctly rounded
+// quotient. Each thread divides its running value by its divisor n times, each step waiting for the
+// last:
 //
 //   acc = acc / y + 0.5   (n times)
 //

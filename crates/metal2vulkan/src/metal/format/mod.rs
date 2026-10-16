@@ -25,7 +25,9 @@ use crate::device::enables::format_exposure_gap;
 use crate::device::requirements::{FormatUsage, VkFeature};
 use crate::device::DeviceProfile;
 use crate::error::{Capability, DescriptorError, DriverDeviation, Error, Feature, Unsupported};
-use crate::metal::{PixelFormat, TextureType, TextureUsage};
+use crate::metal::{
+    PixelFormat, TextureSwizzle, TextureSwizzleChannels, TextureType, TextureUsage,
+};
 use crate::pipeline::lower_inputs::{
     AliasView, ChannelWrite, StorageImageChoice, StorageImageClass,
 };
@@ -1521,6 +1523,89 @@ pub fn vk_format(
         return Err(Unsupported::not_implemented(Feature::Format).into());
     }
     Err(Unsupported::needs_any_of(Feature::Format, alternatives).into())
+}
+
+/// The swizzle, over the channels of `own`, through which a texture of `own` reads what a view
+/// of `pf` made with `swizzle` reads, where `pf` holds its texels in the very bits of `own`'s and
+/// presents them in other channels: `own` samples as its direct Vulkan format on `profile`, and
+/// one of `pf`'s candidates is [`FormatEmulation::SwizzledView`] of that format (`A8Unorm` over
+/// `R8Unorm`, read through `(Zero, Zero, Zero, Red)`). Exact for sampling and reads as that
+/// emulation is: the same bits, the same filter, the channels moved by the view's mapping, which
+/// Vulkan applies to gathered texels and border texels as to any other ("Texel Input Operations":
+/// replacement, then the component swizzle). `None` elsewhere, for `pf` equal to `own`, where
+/// `profile` takes no view of the composed mapping
+/// (`VUID-VkImageViewCreateInfo-imageViewFormatSwizzle-04465`), and where an opaque-black border
+/// would read otherwise: Vulkan leaves it undefined through a mapping other than the identity
+/// unless the device swizzles borders (`VK_EXT_border_color_swizzle`), so the swizzle is given only
+/// where Metal reads the transparent-black texel for opaque black through it
+/// ([`opaque_black_reads_transparent`](crate::metal::sampler::opaque_black_reads_transparent)),
+/// whose sampler every device reads exactly; transparent black and opaque white are defined through
+/// any mapping. A write through it stores as a swizzled texture's storage binding does
+/// (`LoweringInputs::swizzled_storage`): each of the image's channels from the first lane whose
+/// source it is, else from the channel's own lane, as Metal stores each of the view's (probe
+/// `a8write`, an M3 Max under macOS 27.0.1: an `A8Unorm` view of an `R8Unorm` texture stores the
+/// first lane whose source is alpha, else the alpha lane). So `None` too where a channel of the
+/// view that holds one of the image's is no lane's source (an `A8Unorm` view of swizzle
+/// `(Red, Green, Blue, One)`), where the two fallbacks name different lanes.
+pub fn swizzle_over(
+    pf: PixelFormat,
+    swizzle: TextureSwizzleChannels,
+    own: PixelFormat,
+    profile: &DeviceProfile,
+) -> Option<TextureSwizzleChannels> {
+    if pf == own {
+        return None;
+    }
+    let sampled = [FormatUsage::SampledImage].into();
+    let image = vk_format(own, &sampled, profile).ok()?;
+    if image.emulation != FormatEmulation::Direct {
+        return None;
+    }
+    let (_, candidates) = candidates(pf).ok()?;
+    let candidate = candidates
+        .iter()
+        .find(|c| c.emulation == FormatEmulation::SwizzledView && c.format == image.format)?;
+    let mapping = swizzle.compose(candidate.components);
+    if view_mapping_gap(mapping, profile).is_some() {
+        return None;
+    }
+    let over = swizzle_of(mapping);
+    // A write stores each of the image's channels from the first lane whose source it is, else
+    // from the channel's own lane: the view's channel holding it must be some lane's source, so
+    // that the image's channel is too and both take the same lane.
+    let held = swizzle_of(candidate.components);
+    let lanes = [over.red, over.green, over.blue, over.alpha];
+    let writes = [held.red, held.green, held.blue, held.alpha]
+        .into_iter()
+        .filter(|c| !matches!(c, TextureSwizzle::Zero | TextureSwizzle::One))
+        .all(|c| lanes.contains(&c));
+    let reads = crate::metal::sampler::opaque_black_reads_transparent(own, over);
+    (reads && writes).then_some(over)
+}
+
+/// The swizzle that reads as component mapping `m` (in `TextureSwizzleChannels::compose`'s
+/// canonical form over a format's own channels): each channel from the one `m` names, from itself
+/// where `m` names none, or a constant.
+fn swizzle_of(m: vk::ComponentMapping) -> TextureSwizzleChannels {
+    use crate::metal::TextureSwizzle as T;
+    use vk::ComponentSwizzle as S;
+    let named = [
+        (S::ZERO, T::Zero),
+        (S::ONE, T::One),
+        (S::R, T::Red),
+        (S::G, T::Green),
+        (S::B, T::Blue),
+        (S::A, T::Alpha),
+    ];
+    let channel = |c: vk::ComponentSwizzle, own: T| {
+        named.iter().find(|(s, _)| *s == c).map_or(own, |&(_, t)| t)
+    };
+    TextureSwizzleChannels::new(
+        channel(m.r, T::Red),
+        channel(m.g, T::Green),
+        channel(m.b, T::Blue),
+        channel(m.a, T::Alpha),
+    )
 }
 
 /// What `profile` lacks to make an image view whose component mapping is `components`:

@@ -1,4 +1,4 @@
-// Owned fixture (NaN model, DESIGN D293): which NaN Metal's float functions answer. Lane `i` reads
+// Owned fixture (NaN model): which NaN Metal's float functions answer. Lane `i` reads
 // the bit patterns (a, b, t) from `in[i]` (t a runtime blend factor) and writes 36 words to
 // `out[9i .. 9i + 8]`: sin, cos, tan, asin, acos, atan of a; atan2(a, b); sinh, cosh, tanh, asinh,
 // acosh, atanh, exp, exp2, exp10, log, log2, log10 of a; pow(a, b), powr(a, b); rsqrt, floor,

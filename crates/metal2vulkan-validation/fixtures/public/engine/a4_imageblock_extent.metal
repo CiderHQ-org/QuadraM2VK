@@ -1,4 +1,4 @@
-// Owned fixture (WP-A4, DESIGN D213): the extent queries of a kernel's explicit imageblock
+// Owned fixture: the extent queries of a kernel's explicit imageblock
 // (`access.imageblock.extent`), as `kernel_imageblock_staging`'s `imageblock_neighbours`, alone in
 // its module so a case can name it. Every thread stages its own cell, then, after the imageblock
 // barrier, reads its right-hand neighbour's (wrapping at the imageblock's width) and reports the

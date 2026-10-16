@@ -645,11 +645,14 @@ fn the_inputs_encoding_is_the_earlier_derived_debug() {
                 .replace(", replay_bindings: false", "")
                 .replace(", framebuffer_fetch: None", "")
                 .replace(", srgb_textures: {}", "")
+                .replace(", snapshot_textures: {}", "")
                 .replace(", ycbcr_textures: {}", "")
                 .replace(", viewport_index_varying: false", "")
                 .replace(", max_call_stack_depth: None", "")
                 .replace(", flat_grid: false", "")
                 .replace(", render_target_array_index_varying: false", "")
+                .replace(", primitive_id_varying: false", "")
+                .replace(", primitive_id_indices: None", "")
                 .replace(", amplification_draws: None", "")
                 .replace(", color_writes: {}", "")
                 .replace(", primitive_varyings: {}", "")
@@ -684,7 +687,12 @@ fn the_inputs_encoding_is_the_earlier_derived_debug() {
                 .replace(", texture_write_rounding: TowardZero", "")
                 .replace(", anisotropic_samplers: {}", "")
                 .replace(", uniform_varyings: {}", "")
-                .replace(", instanced_attributes: {}", ""),
+                .replace(", instanced_attributes: {}", "")
+                .replace(", depth16_codes: false", "")
+                .replace(", depth16_bias_raises: None", "")
+                .replace(", color_group: None", "")
+                .replace(", object_payload: None", "")
+                .replace(", tessellation: None", ""),
             "{derived}"
         );
     }
@@ -2415,6 +2423,181 @@ fn a_render_pipeline_requires_its_framebuffer_sample_counts() {
         assert_eq!(stated, want, "{count} samples");
         assert_eq!(dev.profile().check(&pipe.requirements), Ok(()));
     }
+}
+
+/// The interface states the texture slots a fragment function reads only at its own pixel
+/// (`spirv::requirements::own_pixel`): owned fixture `tob_renders`'s `tob_read`
+/// (`t.read(uint2(in.position.xy))`) on every profile, whether the device's robustness returns
+/// Metal's out-of-bounds texel or the shader clamps the read (both kinds of profile are among
+/// them); not `tob_sample` (a sample at the pixel's center), `tob_read_buffer` (a texture
+/// buffer's texel by arithmetic), nor `tob_solid`, which reads no texture.
+#[test]
+fn the_interface_states_the_textures_read_at_the_fragments_own_pixel() {
+    let Some(bc) = fixture("tob_renders") else {
+        return;
+    };
+    let mut checks = std::collections::BTreeSet::new();
+    for stem in [
+        "intel-irisxe-anv",
+        "nvidia-rtx5080-laptop",
+        "amd-780m-radv",
+        "lavapipe",
+        "moltenvk-m3",
+        "vk12-floor",
+    ] {
+        let p = crate::pipeline::testing::profile(stem, DevicePolicy::default()).expect("profile");
+        checks.insert(crate::memory::contain::device_reads_texels(&p, false));
+        for (entry, own) in [
+            ("tob_read", &[0u32][..]),
+            ("tob_sample", &[]),
+            ("tob_read_buffer", &[]),
+            ("tob_solid", &[]),
+        ] {
+            let a = crate::pipeline::testing::compile(&bc, entry, &p)
+                .unwrap_or_else(|e| panic!("{stem} {entry}: {e}"));
+            assert_eq!(a.interface.own_pixel_textures, own, "{stem} {entry}");
+        }
+    }
+    assert_eq!(checks.len(), 2, "both read checks");
+}
+
+/// The interface states the own-pixel slots a draw can read through a snapshot
+/// (`spirv::requirements::snapshot`): `tob_read`'s, whose texel reaches only its output. Its
+/// snapshot variant (`LoweringInputs::snapshot_textures`) links and validates on every profile with
+/// the pixel interlock, which it requires; binds the slot's snapshot; places the phase in the
+/// fragment window; still states the slot, as read at the own pixel and through a snapshot; and
+/// writes no memory of the function's. A profile without the interlock refuses it, naming the
+/// feature. A variant asked for `tob_sample`'s slot, which the fact does not list, would sample the
+/// texture beside the copy: refused, never compiled so. All of it holds under the exact answers too,
+/// whose texel reaches its output through a call of Metal's conversion routine
+/// (`lower::texture::float_texel`) where the device's conversion is not Metal's.
+#[test]
+fn a_snapshot_variant_reads_its_texture_in_the_copy_alone() {
+    use crate::device::requirements::VkFeature;
+    use crate::error::Capability;
+    use crate::pipeline::interface::PushLoc;
+    use crate::pipeline::sym::{PushField, ResourceKind, SlotClass, SlotRef, SnapshotForm, Stage};
+    let Some(bc) = fixture("tob_renders") else {
+        return;
+    };
+    let inputs = |form: SnapshotForm| {
+        let mut inputs = LoweringInputs::new();
+        let slot = SlotRef {
+            stage: Stage::Fragment,
+            class: SlotClass::Texture,
+            index: 0,
+        };
+        inputs.snapshot_textures.insert(slot, form);
+        inputs
+    };
+    let mut interlocked = 0;
+    let mut converted = 0;
+    let policies = [
+        DevicePolicy::default(),
+        DevicePolicy::default().exact_answers(),
+    ];
+    for (stem, policy) in [
+        "intel-irisxe-anv",
+        "nvidia-rtx5080-laptop",
+        "amd-780m-radv",
+        "lavapipe",
+        "moltenvk-m3",
+        "vk12-floor",
+    ]
+    .into_iter()
+    .flat_map(|stem| policies.map(|policy| (stem, policy)))
+    {
+        let p = crate::pipeline::testing::profile(stem, policy).expect("profile");
+        let stem = format!("{stem} {:?}", policy.texel_conversion);
+        let base = crate::pipeline::testing::compile(&bc, "tob_read", &p)
+            .unwrap_or_else(|e| panic!("{stem}: {e}"));
+        assert_eq!(base.interface.snapshot_textures, [0u32], "{stem}");
+        let routine = crate::lower::texture::float_texel::CENSUS_NAME;
+        if base.strategies.entries.contains_key(routine) {
+            assert_eq!(
+                policy.texel_conversion,
+                crate::device::TexelConversionPolicy::Exact,
+                "{stem}"
+            );
+            converted += 1;
+        }
+        let sampled = crate::pipeline::testing::compile(&bc, "tob_sample", &p)
+            .unwrap_or_else(|e| panic!("{stem}: {e}"));
+        assert!(sampled.interface.snapshot_textures.is_empty(), "{stem}");
+        let variant = crate::pipeline::testing::compile_with(
+            &bc,
+            "tob_read",
+            &p,
+            &inputs(SnapshotForm::Bits),
+        );
+        if !p.fields().fragment.pixel_interlock {
+            assert_eq!(
+                variant.map(|_| ()),
+                Err(Error::Unsupported(crate::error::Unsupported::needs(
+                    Feature::RasterOrderGroups,
+                    Capability::Feature(VkFeature::FragmentShaderPixelInterlock),
+                ))),
+                "{stem}"
+            );
+            continue;
+        }
+        interlocked += 1;
+        // Each form of a float slot's codes compiles, its copy alone reading the texture.
+        for form in [
+            SnapshotForm::Unorm8,
+            SnapshotForm::Snorm8,
+            SnapshotForm::Unorm16,
+            SnapshotForm::Snorm16,
+            SnapshotForm::Half,
+        ] {
+            let narrow = crate::pipeline::testing::compile_with(&bc, "tob_read", &p, &inputs(form))
+                .unwrap_or_else(|e| panic!("{stem} {form:?}: {e}"));
+            assert_eq!(
+                narrow.interface.snapshot_textures,
+                [0u32],
+                "{stem} {form:?}"
+            );
+        }
+        let a = variant.unwrap_or_else(|e| panic!("{stem}: {e}"));
+        assert_eq!(a.interface.snapshot_textures, [0u32], "{stem}");
+        assert_eq!(a.interface.own_pixel_textures, [0u32], "{stem}");
+        assert!(!a.interface.writes_memory, "{stem}");
+        assert!(
+            a.interface
+                .descriptors
+                .iter()
+                .any(|d| d.slot.kind == ResourceKind::SnapshotTexels(0)),
+            "{stem}"
+        );
+        assert!(
+            a.interface.push.fields.iter().any(|f| {
+                f.field == PushField::SnapshotPhase && matches!(f.loc, PushLoc::Push { .. })
+            }),
+            "{stem}"
+        );
+        assert!(
+            a.requirements
+                .features
+                .contains(&VkFeature::FragmentShaderPixelInterlock),
+            "{stem}"
+        );
+        crate::pipeline::testing::link_and_validate(&a, &p)
+            .unwrap_or_else(|e| panic!("{stem}: {e}"));
+        match crate::pipeline::testing::compile_with(
+            &bc,
+            "tob_sample",
+            &p,
+            &inputs(SnapshotForm::Bits),
+        ) {
+            Err(Error::Internal(e)) if e.kind == InternalKind::Invariant => {}
+            other => panic!("{stem} tob_sample: {other:?}"),
+        }
+    }
+    assert!(
+        interlocked >= 8,
+        "the interlocked profiles, under both policies"
+    );
+    assert!(converted >= 4, "the exact conversion's calls");
 }
 
 /// The interface states whether the function writes memory another invocation or a later command

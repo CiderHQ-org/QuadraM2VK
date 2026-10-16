@@ -445,3 +445,26 @@ fn the_kinds_met_per_object_are_counted_and_no_other() {
         .collect();
     assert_eq!(counted, [Some(1), Some(2), Some(1), Some(2), Some(3)]);
 }
+
+/// A stage that records `PrecisionNote::FunctionStorageAssumed` names, in numbers, the private
+/// memory a thread of it keeps and what the device holds, the floor of a device not measured.
+#[test]
+fn function_storage_assumed_names_the_bytes_and_the_device_s_evidence() {
+    use crate::degradation::function_storage_reason;
+    use metal2vulkan::device::FunctionStorage;
+    let recorded = "its translation records `PrecisionNote::FunctionStorageAssumed`";
+    assert_eq!(
+        function_storage_reason(recorded, 102_400, FunctionStorage::Assumed(16_384)),
+        format!(
+            "{recorded}: it keeps 102400 bytes of private memory a thread, past the 16384 bytes a \
+             thread the floor of a device whose Function storage is not measured"
+        )
+    );
+    assert_eq!(
+        function_storage_reason(recorded, 40_000, FunctionStorage::Measured(32_768)),
+        format!(
+            "{recorded}: it keeps 40000 bytes of private memory a thread, past the 32768 bytes a \
+             thread measured on this device"
+        )
+    );
+}

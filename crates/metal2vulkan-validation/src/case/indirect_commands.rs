@@ -58,9 +58,9 @@ pub fn resolve_template(
 /// What a command buffer allows, fixed when it is made (Metal's
 /// `MTLIndirectCommandBufferDescriptor`, as far as the record format needs it): a compute
 /// buffer's dispatch kinds, kernel-buffer and threadgroup-memory binding counts and dynamic
-/// strides, or a render buffer's draw kinds, vertex and fragment binding counts and dynamic
-/// strides. The case's own schema: [`product`](Self::product) is the record format's descriptor,
-/// which initializes, decodes and guards the records.
+/// strides, or a render buffer's draw kinds, vertex, fragment, object and mesh binding counts and
+/// dynamic strides. The case's own schema: [`product`](Self::product) is the record format's
+/// descriptor, which initializes, decodes and guards the records.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CommandDescriptor {
@@ -78,14 +78,27 @@ pub enum CommandDescriptor {
         draws: RenderDraws,
         max_vertex_buffer_bind_count: u32,
         max_fragment_buffer_bind_count: u32,
+        /// The object buffers a command binds (`maxObjectBufferBindCount`), which a mesh draw's
+        /// object function reads. Absent, none, the one count previously, so the cases written
+        /// before it keep their identities.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        max_object_buffer_bind_count: u32,
+        /// The mesh buffers a command binds (`maxMeshBufferBindCount`), as the object buffers.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        max_mesh_buffer_bind_count: u32,
         support_dynamic_attribute_stride: bool,
     },
 }
 
+const fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
 /// The draws a render descriptor allows: Metal's `Draw` (draws of primitives), `DrawIndexed`
-/// (indexed draws), `DrawPatches` (patch draws) and `DrawIndexedPatches` (indexed patch draws),
-/// at least one of them. The default, and what an absent field means, is draws of primitives
-/// alone.
+/// (indexed draws), `DrawPatches` (patch draws), `DrawIndexedPatches` (indexed patch draws),
+/// `DrawMeshThreadgroups` and `DrawMeshThreads` (mesh draws of a grid of threadgroups or of
+/// threads, which only a kernel encodes in a case), at least one of them. The default, and what
+/// an absent field means, is draws of primitives alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RenderDraws {
@@ -96,6 +109,12 @@ pub struct RenderDraws {
     /// previously, so the cases written before it keep their identities.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub indexed_patches: bool,
+    /// Absent, none, as indexed patch draws.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mesh_threadgroups: bool,
+    /// Absent, none, as indexed patch draws.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mesh_threads: bool,
 }
 
 impl Default for RenderDraws {
@@ -105,6 +124,8 @@ impl Default for RenderDraws {
             indexed: false,
             patches: false,
             indexed_patches: false,
+            mesh_threadgroups: false,
+            mesh_threads: false,
         }
     }
 }
@@ -122,10 +143,14 @@ impl RenderDraws {
             indexed: self.indexed,
             patches: self.patches,
             indexed_patches: self.indexed_patches,
-            // An authored case draws no mesh (its schema has none).
-            mesh_threadgroups: false,
-            mesh_threads: false,
+            mesh_threadgroups: self.mesh_threadgroups,
+            mesh_threads: self.mesh_threads,
         }
+    }
+
+    /// Whether these allow a mesh draw of either grid form.
+    pub fn mesh(self) -> bool {
+        self.mesh_threadgroups || self.mesh_threads
     }
 
     /// Whether a host command's `action` is a draw these allow (or none).
@@ -176,13 +201,15 @@ impl CommandDescriptor {
                 draws,
                 max_vertex_buffer_bind_count,
                 max_fragment_buffer_bind_count,
+                max_object_buffer_bind_count,
+                max_mesh_buffer_bind_count,
                 support_dynamic_attribute_stride,
             } => D::Render {
                 draws: draws.product(),
                 max_vertex_buffer_bind_count,
                 max_fragment_buffer_bind_count,
-                max_object_buffer_bind_count: 0,
-                max_mesh_buffer_bind_count: 0,
+                max_object_buffer_bind_count,
+                max_mesh_buffer_bind_count,
                 support_dynamic_attribute_stride,
             },
         }
@@ -357,7 +384,8 @@ pub struct HostCommand {
 
 /// The parent encoder's state of an execution: its pipeline, exactly when the commands inherit it,
 /// and its buffers, only when they inherit buffers: kernel buffers for compute commands, vertex and
-/// fragment buffers for render commands.
+/// fragment buffers for render commands, and object and mesh buffers for the render commands of a
+/// buffer that allows mesh draws.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Execution {
@@ -369,6 +397,10 @@ pub struct Execution {
     pub vertex_buffers: Vec<CommandBinding>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fragment_buffers: Vec<CommandBinding>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub object_buffers: Vec<CommandBinding>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mesh_buffers: Vec<CommandBinding>,
 }
 
 /// The Metal primitive type of an authored primitive, as a draw's record holds it
@@ -721,9 +753,10 @@ impl CommandBufferResource {
     /// capacity, in index order, setting only what the descriptor's family admits (a compute
     /// command's dispatch, kernel buffers, and threadgroup lengths; a render command's draw and
     /// vertex and fragment buffers, and no barrier: Metal's render command has one, which neither
-    /// executor models yet) and nothing it inherits; an execution's parent pipeline exactly when
-    /// the commands inherit it, its buffers (of the family's stages) only when they inherit
-    /// buffers, and at most [`MAX_EXECUTED_COMMANDS`] commands. Which family each pipeline token's
+    /// executor encodes from the host yet) and nothing it inherits; an execution's parent pipeline
+    /// exactly when the commands inherit it, its buffers (of the family's stages, object and mesh
+    /// buffers where the descriptor allows mesh draws) only when they inherit buffers, and at most
+    /// [`MAX_EXECUTED_COMMANDS`] commands. Which family each pipeline token's
     /// template is of, the checker decides (`check::resolve_pipeline_templates`).
     pub fn validate_host_state(
         &self,
@@ -808,6 +841,7 @@ impl CommandBufferResource {
                     max_vertex_buffer_bind_count,
                     max_fragment_buffer_bind_count,
                     support_dynamic_attribute_stride,
+                    ..
                 } => {
                     if command.stage_in_region.is_some() {
                         return Err(format!("{what}: a render command has no stage-in region"));
@@ -827,12 +861,19 @@ impl CommandBufferResource {
                     if let Some(action) = command.action {
                         action.check_draw(lengths, &what)?;
                     }
-                    if command.barrier {
+                    if command.barrier && !draws.mesh() {
                         // Metal's validation stops it on a buffer without mesh draws ("setBarrier
                         // is not enabled on this indirect command buffer"), as the runtime refuses
-                        // it, and no case's descriptor draws meshes.
+                        // it.
                         return Err(format!(
                             "{what}: a host-encoded render command's barrier needs mesh draws"
+                        ));
+                    }
+                    if command.barrier {
+                        // Neither executor encodes one from the host yet.
+                        return Err(format!(
+                            "{what}: a host-encoded render command's barrier on a buffer of mesh \
+                             draws is not modelled"
                         ));
                     }
                     if !command.buffers.is_empty() || !command.threadgroup_memory_lengths.is_empty()
@@ -883,11 +924,16 @@ impl CommandBufferResource {
             if !self.inherit_buffers
                 && !(execution.buffers.is_empty()
                     && execution.vertex_buffers.is_empty()
-                    && execution.fragment_buffers.is_empty())
+                    && execution.fragment_buffers.is_empty()
+                    && execution.object_buffers.is_empty()
+                    && execution.mesh_buffers.is_empty())
             {
                 return Err("an execution's parent buffers need inherited buffers".into());
             }
-            let render = matches!(self.descriptor, CommandDescriptor::Render { .. });
+            let (render, mesh) = match self.descriptor {
+                CommandDescriptor::Render { draws, .. } => (true, draws.mesh()),
+                CommandDescriptor::Compute { .. } => (false, false),
+            };
             for (bindings, what, admitted) in [
                 (
                     &execution.buffers,
@@ -903,6 +949,16 @@ impl CommandBufferResource {
                     &execution.fragment_buffers,
                     "the parent encoder's fragment buffers",
                     render,
+                ),
+                (
+                    &execution.object_buffers,
+                    "the parent encoder's object buffers",
+                    mesh,
+                ),
+                (
+                    &execution.mesh_buffers,
+                    "the parent encoder's mesh buffers",
+                    mesh,
                 ),
             ] {
                 if !admitted && !bindings.is_empty() {
@@ -1020,6 +1076,18 @@ impl CommandBufferResource {
             &address,
             &mut parent,
         )?;
+        bound(
+            BufferStage::Object,
+            &execution.object_buffers,
+            &address,
+            &mut parent,
+        )?;
+        bound(
+            BufferStage::Mesh,
+            &execution.mesh_buffers,
+            &address,
+            &mut parent,
+        )?;
         Ok(Some(parent))
     }
 
@@ -1132,6 +1200,8 @@ mod tests {
                 draws: RenderDraws::default(),
                 max_vertex_buffer_bind_count: 1,
                 max_fragment_buffer_bind_count: 1,
+                max_object_buffer_bind_count: 0,
+                max_mesh_buffer_bind_count: 0,
                 support_dynamic_attribute_stride: enabled,
             };
             assert_eq!(
@@ -1143,6 +1213,8 @@ mod tests {
             draws: RenderDraws::default(),
             max_vertex_buffer_bind_count: 1,
             max_fragment_buffer_bind_count: 1,
+            max_object_buffer_bind_count: 0,
+            max_mesh_buffer_bind_count: 0,
             support_dynamic_attribute_stride: true,
         };
         record.bindings.buffers_mut(BufferStage::Fragment)[0] = set(0, Some(16));
@@ -1179,12 +1251,16 @@ mod tests {
                 draws: RenderDraws::default(),
                 max_vertex_buffer_bind_count: u32::MAX,
                 max_fragment_buffer_bind_count: 0,
+                max_object_buffer_bind_count: 0,
+                max_mesh_buffer_bind_count: 0,
                 support_dynamic_attribute_stride: false,
             },
             CommandDescriptor::Render {
                 draws: RenderDraws::default(),
                 max_vertex_buffer_bind_count: 0,
                 max_fragment_buffer_bind_count: u32::MAX,
+                max_object_buffer_bind_count: 0,
+                max_mesh_buffer_bind_count: 0,
                 support_dynamic_attribute_stride: false,
             },
         ] {
@@ -1327,6 +1403,8 @@ mod tests {
             draws: RenderDraws::default(),
             max_vertex_buffer_bind_count: 4,
             max_fragment_buffer_bind_count: 5,
+            max_object_buffer_bind_count: 0,
+            max_mesh_buffer_bind_count: 0,
             support_dynamic_attribute_stride: false,
         };
         let descriptor = crate::metal::indirect_command_descriptor(&resource).unwrap();

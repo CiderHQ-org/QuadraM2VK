@@ -39,9 +39,22 @@ use metal2vulkan::error::{Feature, Needs};
 use metal2vulkan::metal::{PixelFormat, TextureType, TextureUsage};
 use metal2vulkan_runtime::{
     BlitOption, Buffer, CommandQueue, Degradation, Device, Error, HeapDescriptor, HeapType,
-    IdPlacement, Invalid, Nil, Origin, Problem, Region, ResourceOptions, Size, SizeAndAlign,
-    Texture, TextureDescriptor, TextureProblem,
+    IdPlacement, Invalid, MetalLevel, Nil, Origin, Problem, Region, ResourceOptions, Size,
+    SizeAndAlign, Texture, TextureDescriptor, TextureProblem,
 };
+
+/// The alignment Metal's heap query answers, with 0 bytes, for an array, a cube, a cube array, a 3D
+/// texture or a multisample array of a format it makes no texture of and that has no planes
+/// (`Unspecialized`, `RGBA16Float_XR`, `AnyDepth`, `AnyStencil`), at `device`'s Metal level:
+/// 16 KiB on an Apple M3 Max under macOS 26.7 (EVs APX2-un2-m3, TTG-nil2-m3), 128 under 27.0.1
+/// (EV M27-heap1-m3; an M4 alike, EVs APX2-un1-m4, TTG-nil1-m4, TTG-nil4-m4).
+pub(super) fn stacked_nil_alignment(device: &Device) -> u64 {
+    if device.properties().metal_level >= MetalLevel::MacOS27_0_1 {
+        128
+    } else {
+        16 << 10
+    }
+}
 
 /// A Shared buffer holding `bytes`.
 fn staged(device: &Device, bytes: &[u8]) -> Buffer {
@@ -368,7 +381,7 @@ fn two_plane_heap_textures_take_metal_s_size() {
 }
 
 /// `Unspecialized`: Metal answers 0 bytes from the heap query, at its texture type's alignment
-/// (EV APX2-un2-m3, the M3 Max), and nil for the texture, a heap's (automatic and placement) and a
+/// ([`stacked_nil_alignment`] for the arrays, cubes and 3D textures), and nil for the texture, a heap's (automatic and placement) and a
 /// buffer's (`newTextureWithDescriptor:offset:bytesPerRow:` and the linear form), in every storage
 /// mode and usage (EV APX-fmt1-m4); it stops a multisample one and one of `ShaderAtomic` usage,
 /// plain too, in the query and the calls alike (EV APX2-un1-m4).
@@ -410,14 +423,15 @@ fn unspecialized_answers_metal_s_nothing() {
             d.resource_options = options;
             d
         };
+        let stacked = stacked_nil_alignment(device);
         let types = [
             (TextureType::Type1D, 128),
-            (TextureType::Type1DArray, 16384),
+            (TextureType::Type1DArray, stacked),
             (TextureType::Type2D, 128),
-            (TextureType::Type2DArray, 16384),
-            (TextureType::Cube, 16384),
-            (TextureType::CubeArray, 16384),
-            (TextureType::Type3D, 16384),
+            (TextureType::Type2DArray, stacked),
+            (TextureType::Cube, stacked),
+            (TextureType::CubeArray, stacked),
+            (TextureType::Type3D, stacked),
             (TextureType::TextureBuffer, 16),
         ];
         let usages = [
@@ -517,8 +531,8 @@ fn unspecialized_answers_metal_s_nothing() {
 /// validation stops comes first, from every creator and the heap query alike (`Error::Invalid`),
 /// and then Metal's nil (`Error::Nil`) from the device, either heap, a buffer and its linear
 /// form, a placement heap whose storage is not the descriptor's too; the query answers 0 bytes at
-/// the type's alignment, the M3 Max's (an M4 under macOS 27.0.1 and an M3 Max under 26.7, EVs
-/// TTG-nil1-m4, TTG-nil2-m3, TTG-nil4-m4).
+/// the type's alignment, the M3 Max's at the device's level ([`stacked_nil_alignment`] for the
+/// arrays, cubes and 3D textures; EVs TTG-nil1-m4, TTG-nil2-m3, TTG-nil4-m4, M27-heap1-m3).
 #[test]
 fn formats_without_textures_answer_metal_s_stops_then_its_nil() {
     use TextureType as T;
@@ -590,17 +604,18 @@ fn formats_without_textures_answer_metal_s_stops_then_its_nil() {
                 };
                 // Metal's nil from every creator, and the query's 0 bytes at the type's
                 // alignment, for each type Metal does not stop.
+                let stacked = stacked_nil_alignment(device);
                 for (texture_type, align, ycbcr_align) in [
                     (T::Type1D, 128, 16),
-                    (T::Type1DArray, 16384, 16),
+                    (T::Type1DArray, stacked, 16),
                     (T::Type2D, 128, 16),
-                    (T::Type2DArray, 16384, 128),
-                    (T::Cube, 16384, 16),
-                    (T::CubeArray, 16384, 16),
-                    (T::Type3D, 16384, 16),
+                    (T::Type2DArray, stacked, 128),
+                    (T::Cube, stacked, 16),
+                    (T::CubeArray, stacked, 16),
+                    (T::Type3D, stacked, 16),
                     (T::TextureBuffer, 16, 16),
                     (T::Type2DMultisample, 128, 0),
-                    (T::Type2DMultisampleArray, 16384, 0),
+                    (T::Type2DMultisampleArray, stacked, 0),
                 ] {
                     let what = format!("{pf:?} {texture_type:?} {options:?}");
                     let d = of(texture_type);

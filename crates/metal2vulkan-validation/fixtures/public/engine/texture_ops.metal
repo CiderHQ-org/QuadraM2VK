@@ -1,13 +1,13 @@
-// Owned fixture (WP-L7a; lower B2, DESIGN D25, D40, D68): texture reads, writes, fences, and
+// Owned fixture (lower B2): texture reads, writes, fences, and
 // queries through static texture slots, one kernel per shape family. Loop-free.
 //
-// - texel_buffers: a uniform texel buffer read and a storage texel buffer write (D40).
+// - texel_buffers: a uniform texel buffer read and a storage texel buffer write.
 // - read_write_fence: a read_write texture read, written, fenced, and read again.
 // - cube_faces: cube and cube-array reads by face (the binder's 2D-array view), cube queries.
 // - queries: size, array-size, level, and sample-count queries, and is_null_texture.
 // - short_texels: 16-bit coordinates, 16-bit signed texels read and written, a half 3D read.
 // - depth_ms: a depth read and a multisampled integer read.
-// - write_lod: a write at a dynamic level, through the slot's level views (D230).
+// - write_lod: a write at a dynamic level, through the slot's level views.
 #include <metal_stdlib>
 using namespace metal;
 

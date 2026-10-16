@@ -21,7 +21,6 @@ use metal2vulkan::bind::DispatchRegion;
 use metal2vulkan::device::Requirements;
 use metal2vulkan::pipeline::{PipelineLayout, StageModule};
 use std::ffi::CString;
-use std::time::Instant;
 
 /// The descriptor-set layouts (with their immutable samplers) and the pipeline layout of one
 /// binder `PipelineLayout`, destroyed on every exit path, and what a pool that allocates one set
@@ -214,14 +213,14 @@ fn create(context: &VulkanContext, pipeline: &RowPipeline) -> Result<Acceptance,
             let info = vk::ComputePipelineCreateInfo::default()
                 .stage(stage_infos[0])
                 .layout(objects.layout.pipeline_layout);
-            let started = Instant::now();
+            let clock = crate::budgets::CreationClock::start();
             // SAFETY: every handle in `info` is live; the result is destroyed with `objects`.
             let created = unsafe {
                 context
                     .device
                     .create_compute_pipelines(vk::PipelineCache::null(), &[info], None)
             };
-            (created.map_err(|(_, error)| error), started.elapsed())
+            (created.map_err(|(_, error)| error), clock.read())
         }
         RowPipeline::Render { pipeline: p, .. } => {
             let unmodelled_or_refused = |error: GraphicsError| match error {

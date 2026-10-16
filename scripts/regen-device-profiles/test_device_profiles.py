@@ -232,8 +232,8 @@ class DeriveTest(unittest.TestCase):
             "profiles": {profile: {"api-version": "1.2.131", "capabilities": ["base"]}},
         })
 
-    def derive(self, properties, floor=False, corrections=None):
-        source = {"name": "toy-floor", "label": "toy", "floor": floor}
+    def derive(self, properties, corrections=None):
+        source = {"name": "toy-floor", "label": "toy"}
         with mock.patch.dict(regen.SPEC_CORRECTIONS, corrections or {}, clear=True):
             return regen.derive(regen.Registry(REGISTRY), self.base(properties), source,
                                 self.FORMATS)
@@ -473,6 +473,7 @@ FORMAT_REGISTRY = b"""<registry>
 </enums>
 <enums name="VkDriverId" type="enum">
   <enum value="3" name="VK_DRIVER_ID_MESA_RADV"/>
+  <enum value="14" name="VK_DRIVER_ID_MOLTENVK"/>
 </enums>
 <enums name="VkFormatFeatureFlagBits" type="bitmask">
   <enum bitpos="0" name="VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT"/>
@@ -588,6 +589,29 @@ class FormatsSupplementTest(unittest.TestCase):
         with self.assertRaises(SystemExit) as raised:
             self.merge(self.capabilities(), supplement)
         self.assertIn("another device", str(raised.exception))
+
+    def linear_attachment(self):
+        """The capture with R8_UNORM's linear tiling a color attachment, the supplement without."""
+        capabilities = self.capabilities()
+        legacy = capabilities["device"]["formats"]["VK_FORMAT_R8_UNORM"]["VkFormatProperties"]
+        legacy["linearTilingFeatures"].append("VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT")
+        return capabilities, self.supplement()
+
+    def test_moltenvks_unreliable_linear_features_leave_the_capture(self):
+        capabilities, supplement = self.linear_attachment()
+        supplement["device"]["driver_id"] = 14
+        driver = {"driverID": "VK_DRIVER_ID_MOLTENVK", "driverInfo": "Mesa 26.2.4"}
+        regen.merge_formats(capabilities, self.CORE, driver, supplement, self.registry,
+                            self.SOURCE)
+        entry = capabilities["device"]["formats"]["VK_FORMAT_R8_UNORM"]
+        self.assertEqual(entry["VkFormatProperties"]["linearTilingFeatures"], [])
+        self.assertEqual(entry["VkFormatProperties3"]["linearTilingFeatures"], [])
+
+    def test_another_drivers_linear_attachment_feature_must_agree(self):
+        capabilities, supplement = self.linear_attachment()
+        with self.assertRaises(SystemExit) as raised:
+            self.merge(capabilities, supplement)
+        self.assertIn("32-bit features", str(raised.exception))
 
     def test_low_bits_that_disagree_with_the_capture_fail(self):
         supplement = self.supplement()

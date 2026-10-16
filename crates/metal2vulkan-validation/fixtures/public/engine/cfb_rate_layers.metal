@@ -1,7 +1,7 @@
-// Owned fixture (WP-CFB, DESIGN D373): the functions WP-CFB Metal probes 6 and 6b drew in a
-// rate-mapped pass over a 2-slice array target, so each lane draw asks the question the probes
-// measured. A fullscreen triangle, (-1, -1), (3, -1), (-1, 3); a vertex function that renders
-// it into the slice of its instance; one that reads its amplification and one that reads
+// Owned fixture: the functions two Metal probes drew in a rate-mapped pass over a 2-slice array
+// target, so each lane draw asks the question the probes measured. A fullscreen triangle, (-1, -1),
+// (3, -1), (-1, 3); a vertex function that renders it into the slice of its instance; one that
+// reads its amplification and one that reads
 // nothing; and fragment functions that write their position, 1, and (where the vertex function
 // chose one) the slice. Written for this repository; no third-party source. Loop-free.
 // metal-fast-math: off

@@ -1,6 +1,6 @@
 //! Whether a device's `Depth32Float` depth image holds a denormal and its depth test compares
-//! one as Metal's (the parity rule: Metal keeps one), on the device the cfg selects, under the
-//! validation layer.
+//! one as Metal's (the parity rule: Metal keeps one), and how its depth test compares a stored
+//! negative value or NaN, on the device the cfg selects, under the validation layer.
 //!
 //! **Metal's answer**: an Apple GPU's `Depth32Float` texture keeps a denormal through a blit in
 //! and out and a shader's read (EV FRT4-dm1-m4, an M4 under macOS 27.0.1); MoltenVK on the M4,
@@ -24,28 +24,216 @@
 //! Each prints a `DEPTH-DENORMAL` line. Checked: the two controls, the smallest normal and 0.5,
 //! read and pass as given on every device; a draw's denormal stores zero on every device, as
 //! Metal's; where the driver has `DriverFact::DepthImageKeepsDenormals` the clear's, the CPU's and
-//! the blit's read back as given; where it has `DriverFact::DepthTestKeepsDenormals` too, each
-//! kept one tests as Metal's; and `depth-denormals` is announced exactly where the driver lacks
-//! either fact.
+//! the blit's read back as given; where it has `DriverFact::DepthTestKeepsDenormals` too, or where
+//! the device keeps a value outside `[0, 1]` in a depth image, so that a pass loading a stored
+//! denormal tests it over its magnitude stand-in, the smallest normal (`texture/signed_depth.rs`,
+//! whose copies keep the denormal on such a driver), each one read back as given tests as Metal's;
+//! and `depth-denormals` is announced exactly where the driver lacks either fact (over the
+//! stand-in, for a fragment at exactly 2^-126).
+//!
+//! **Signs**: Metal's depth test compares the fragment's depth with the stored value's magnitude,
+//! as the integers of their low 31 bits: a stored -0.5 passes `Equal` for a fragment at 0.5, and a
+//! stored NaN orders above +inf (our probe `depthkeep`, the M3 Max under macOS 27.0.1: 5 compare
+//! functions, fragments at 0, 0.5 and 1, 18 stored values, 270 of 270 outcomes; its texel keeps
+//! every value's bits through copies, reads, samples and a pass's load and store without depth
+//! writes, and `sample_compare` is the IEEE compare of the reference with the texel, neither
+//! clamped, 720 of 720). Vulkan's compares the stored value as it is; a render target whose depth
+//! may hold such a value renders a pass that loads it over its magnitude stand-in
+//! (`texture/signed_depth.rs`). Each of the probe's 18 values is stored by `replace_region` and by
+//! a blit from a buffer, read by `get_bytes`, a kernel's read and a nearest sample, compared by
+//! `sample_compare` against five references under the eight functions, and depth-tested by the
+//! probe's 15 draws, each printing a `PROBED-DEPTH` line where it differs from Metal's. Checked on
+//! a device that keeps such a value: every answer Metal's wherever the value was stored as given,
+//! the switch-ons and passes over the stand-in counted (`WorkCounts`); and a pass with depth writes
+//! over a texture of such values stores the draw's depth where it passed and every other texel
+//! without its sign, as Metal's (our probe `depthstore`, the M3 Max under macOS 27.0.1), a pass
+//! that sets a state with depth writes and draws nothing stores every texel so, and a pass without
+//! depth writes keeps every bit, announcing `signed-depth-test` for the merge's corner (a draw
+//! writing exactly +inf over a stored NaN); on a device whose own depth test is Metal's
+//! (`DriverFact::DepthTestComparesMagnitudes`: MoltenVK), every answer Metal's with the depth
+//! rendered in place, nothing switched on or announced. A target that takes no stand-in (a
+//! `Depth32Float_Stencil8`, a 4x multisampled `Depth32Float` and `Depth32Float_Stencil8`) and a
+//! depth loaded through separate depth and stencil textures' scratch image, each holding such
+//! values, are stored without their signs after a pass that sets a state with depth writes and
+//! draws nothing, as Metal stores them, each stripped once (`WorkCounts::sign_strips`;
+//! `STRIPPED-DEPTH` lines). An ordinary depth, which never holds such a
+//! value, loads in place: nothing switched on, no pass over a stand-in, no image made
+//! (`ORDINARY-DEPTH` prints the command buffers its passes begin and submit).
 
-use super::degrade_notices::{assert_made_once, clamps_depth_uploads, forced};
-use super::degrade_notices::{made_render_kinds, shared_in_system_memory};
+use super::degrade_notices::signs_depth_tests;
+use super::degrade_notices::{assert_made_once, assert_once_allowing, bound_value_kinds};
+use super::degrade_notices::{clamps_depth_uploads, forced, loses_depth_denormals};
+use super::degrade_notices::{made_compute_kinds, made_render_kinds, shared_in_system_memory};
+use super::depth_compares::run;
 use super::render_state::library;
-use super::{buffer_with, validated_device, Messages, ScratchCache, WAIT};
+use super::{buffer_with, read_buffer, validated_device, Messages, ScratchCache, WAIT};
+use crate::air_library::AirLibrary;
 use crate::gpu::TEST_DEVICE;
-use metal2vulkan::device::DriverFact;
+use metal2vulkan::bind::{DepthMagnitudeModule, SamplerDescriptor};
+use metal2vulkan::device::{DriverFact, VkFeature};
+use metal2vulkan::error::RuntimeDriverDefect;
 use metal2vulkan::metal::state::DepthStencilDescriptor;
-use metal2vulkan::metal::{CompareFunction, PixelFormat, PrimitiveType, TextureUsage};
-use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};
-use metal2vulkan_runtime::{
-    BlitOption, ClearColor, CommandBufferStatus, CommandQueue, CpuCacheMode, Degradation, Device,
-    HazardTrackingMode, Library, LoadAction, Origin, PipelineOptions, Region, RenderPassDescriptor,
-    RenderPipelineState, ResourceOptions, Size, StorageMode, StoreAction, Texture,
-    TextureDescriptor,
+use metal2vulkan::metal::{
+    CompareFunction, PixelFormat, PrimitiveType, SamplerMinMagFilter, TextureType, TextureUsage,
 };
+use metal2vulkan::pipeline::{
+    ColorAttachmentDescriptor, ComputePipelineDescriptor, RenderPipelineDescriptor, StageSource,
+};
+use metal2vulkan_devtools::llvm_assemble_text;
+use metal2vulkan_runtime::{
+    BlitOption, ClearColor, CommandBufferStatus, CommandQueue, ComputePipelineState, CpuCacheMode,
+    Degradation, Device, Error, HazardTrackingMode, Library, LoadAction, Origin, PipelineOptions,
+    Region, RenderPassDescriptor, RenderPipelineState, ResourceOptions, SamplerState, Size,
+    StorageMode, StoreAction, Texture, TextureDescriptor, WorkCounts,
+};
+use std::cmp::Ordering;
+use std::collections::BTreeSet;
 
 /// The kind a depth image that may store a denormal otherwise than Metal's takes.
 pub(super) const DEPTH_DENORMALS: [Degradation; 1] = [Degradation::DepthDenormals];
+
+/// The kind a render target's depth that may hold a negative value or a NaN takes where the
+/// device's depth test may compare it as it is: here, the merge's corner.
+pub(super) const SIGNED_DEPTH_TESTS: [Degradation; 1] = [Degradation::SignedDepthTest];
+
+/// The 18 stored values of the probe `depthkeep`: ±2, ±0.5, the smallest and largest denormal of
+/// each sign, ±0, the smallest normal, 0.25, 0.5, 1, the `float` after 1, 1.5, ±inf, and the quiet
+/// NaN.
+const PROBED: [u32; 18] = [
+    0x4000_0000,
+    0xc000_0000,
+    0x3f00_0000,
+    0xbf00_0000,
+    0x0000_0001,
+    0x8000_0001,
+    0x007f_ffff,
+    0x807f_ffff,
+    0x0000_0000,
+    0x8000_0000,
+    0x0080_0000,
+    0x3e80_0000,
+    0x3f80_0000,
+    0x3f80_0001,
+    0x3fc0_0000,
+    0x7f80_0000,
+    0xff80_0000,
+    0x7fc0_0000,
+];
+
+/// The probe's depth tests: each of these compare functions at each of [`FRAGMENTS`].
+const PROBE_TESTS: [CompareFunction; 5] = [
+    CompareFunction::Less,
+    CompareFunction::LessEqual,
+    CompareFunction::Equal,
+    CompareFunction::GreaterEqual,
+    CompareFunction::Greater,
+];
+
+/// The fragment depths of the probe's tests.
+const FRAGMENTS: [f32; 3] = [0.0, 0.5, 1.0];
+
+/// The eight compare functions, each a runtime sampler's for `sample_compare`.
+const FUNCTIONS: [CompareFunction; 8] = [
+    CompareFunction::Never,
+    CompareFunction::Less,
+    CompareFunction::Equal,
+    CompareFunction::LessEqual,
+    CompareFunction::Greater,
+    CompareFunction::NotEqual,
+    CompareFunction::GreaterEqual,
+    CompareFunction::Always,
+];
+
+/// The references each stored value is compared against.
+const REFERENCES: [f32; 5] = [-1.0, 0.0, 0.5, 1.0, 2.0];
+
+/// The merge's texels, row by row: negative values, -0, NaNs, the infinities, and values on both
+/// sides of 0.5 (a draw at 0.5 under `Less` writes where the magnitude lies above it).
+const MERGED: [u32; 16] = [
+    0xbf00_0000,
+    0x7fc0_0000,
+    0xc000_0000,
+    0x3f40_0000,
+    0x3e80_0000,
+    0x8000_0000,
+    0x7f80_0000,
+    0xff80_0000,
+    0x3f00_0000,
+    0x3fc0_0000,
+    0x3e00_0000,
+    0xbe00_0000,
+    0x4000_0000,
+    0x3f80_0000,
+    0xbf80_0000,
+    0x7fc0_0001,
+];
+
+/// Synthetic AIR written for this test: `sd_read` reads texel `(0, 0)` of the `depth2d<float>` at
+/// slot 0, `sd_sample` samples it through sampler slot 0 at buffer 0's lane `tid` (a `float4`: the
+/// coordinate in `xy`), and `sd_compare` compares it there through sampler slot 0 against the
+/// reference in `z`; each writes its `float` to `x` of buffer 1's lane `tid` (a `float4`).
+const READS: &str = r#"define void @sd_read(ptr addrspace(1) %t, ptr addrspace(1) %c, ptr addrspace(1) %out, i32 %tid) {
+  %i = zext i32 %tid to i64
+  %rs = tail call ptr addrspace(2) @air.get_read_sampler()
+  %r = tail call { float, i8 } @air.read_depth_2d.f32(ptr addrspace(1) %t, ptr addrspace(2) %rs, i32 1, <2 x i32> zeroinitializer, <2 x i32> zeroinitializer, i32 0, i32 1)
+  %v = extractvalue { float, i8 } %r, 0
+  %v4 = insertelement <4 x float> zeroinitializer, float %v, i64 0
+  %q = getelementptr inbounds <4 x float>, ptr addrspace(1) %out, i64 %i
+  store <4 x float> %v4, ptr addrspace(1) %q, align 16
+  ret void
+}
+
+define void @sd_sample(ptr addrspace(1) %t, ptr addrspace(1) %c, ptr addrspace(1) %out, ptr addrspace(2) %s, i32 %tid) {
+  %i = zext i32 %tid to i64
+  %p = getelementptr inbounds <4 x float>, ptr addrspace(1) %c, i64 %i
+  %c4 = load <4 x float>, ptr addrspace(1) %p, align 16
+  %uv = shufflevector <4 x float> %c4, <4 x float> zeroinitializer, <2 x i32> <i32 0, i32 1>
+  %r = tail call { float, i8 } @air.sample_depth_2d.f32(ptr addrspace(1) %t, ptr addrspace(2) %s, i32 1, <2 x float> %uv, i1 true, <2 x i32> zeroinitializer, i1 false, float 0.000000e+00, float 0.000000e+00, i32 0)
+  %v = extractvalue { float, i8 } %r, 0
+  %v4 = insertelement <4 x float> zeroinitializer, float %v, i64 0
+  %q = getelementptr inbounds <4 x float>, ptr addrspace(1) %out, i64 %i
+  store <4 x float> %v4, ptr addrspace(1) %q, align 16
+  ret void
+}
+
+define void @sd_compare(ptr addrspace(1) %t, ptr addrspace(1) %c, ptr addrspace(1) %out, ptr addrspace(2) %s, i32 %tid) {
+  %i = zext i32 %tid to i64
+  %p = getelementptr inbounds <4 x float>, ptr addrspace(1) %c, i64 %i
+  %c4 = load <4 x float>, ptr addrspace(1) %p, align 16
+  %uv = shufflevector <4 x float> %c4, <4 x float> zeroinitializer, <2 x i32> <i32 0, i32 1>
+  %ref = extractelement <4 x float> %c4, i64 2
+  %r = call { float, i8 } @air.sample_compare_depth_2d.f32(ptr addrspace(1) %t, ptr addrspace(2) %s, i32 1, <2 x float> %uv, float %ref, i1 true, <2 x i32> zeroinitializer, i1 true, float 0.0, float 0.0, i32 0)
+  %v = extractvalue { float, i8 } %r, 0
+  %v4 = insertelement <4 x float> zeroinitializer, float %v, i64 0
+  %q = getelementptr inbounds <4 x float>, ptr addrspace(1) %out, i64 %i
+  store <4 x float> %v4, ptr addrspace(1) %q, align 16
+  ret void
+}
+
+declare ptr addrspace(2) @air.get_read_sampler()
+declare { float, i8 } @air.read_depth_2d.f32(ptr addrspace(1), ptr addrspace(2), i32, <2 x i32>, <2 x i32>, i32, i32)
+declare { float, i8 } @air.sample_depth_2d.f32(ptr addrspace(1), ptr addrspace(2), i32, <2 x float>, i1, <2 x i32>, i1, float, float, i32)
+declare { float, i8 } @air.sample_compare_depth_2d.f32(ptr addrspace(1), ptr addrspace(2), i32, <2 x float>, float, i1, <2 x i32>, i1, float, float, i32)
+
+!air.kernel = !{!0, !10, !20}
+!air.version = !{!30}
+!air.language_version = !{!31}
+!0 = !{ptr @sd_read, !1, !2}
+!1 = !{}
+!2 = !{!3, !4, !5, !7}
+!3 = !{i32 0, !"air.texture", !"air.location_index", i32 0, i32 1, !"air.read", !"air.arg_type_name", !"depth2d<float, read>", !"air.arg_name", !"t"}
+!4 = !{i32 1, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read", !"air.address_space", i32 1, !"air.arg_type_size", i32 16, !"air.arg_type_align_size", i32 16, !"air.arg_type_name", !"float4", !"air.arg_name", !"c"}
+!5 = !{i32 2, !"air.buffer", !"air.location_index", i32 1, i32 1, !"air.read_write", !"air.address_space", i32 1, !"air.arg_type_size", i32 16, !"air.arg_type_align_size", i32 16, !"air.arg_type_name", !"float4", !"air.arg_name", !"out"}
+!6 = !{i32 3, !"air.sampler", !"air.location_index", i32 0, i32 1, !"air.arg_type_name", !"sampler", !"air.arg_name", !"s"}
+!7 = !{i32 3, !"air.thread_position_in_grid", !"air.arg_type_name", !"uint", !"air.arg_name", !"tid"}
+!8 = !{i32 4, !"air.thread_position_in_grid", !"air.arg_type_name", !"uint", !"air.arg_name", !"tid"}
+!9 = !{i32 0, !"air.texture", !"air.location_index", i32 0, i32 1, !"air.sample", !"air.arg_type_name", !"depth2d<float, sample>", !"air.arg_name", !"t"}
+!10 = !{ptr @sd_sample, !1, !11}
+!11 = !{!9, !4, !5, !6, !8}
+!20 = !{ptr @sd_compare, !1, !11}
+!30 = !{i32 2, i32 8, i32 0}
+!31 = !{!"Metal", i32 4, i32 0, i32 0}
+"#;
 
 /// The textures' side.
 const SIDE: u64 = 4;
@@ -154,6 +342,173 @@ impl Lane {
         texels(&color)
     }
 
+    /// A pass that loads and stores `depth` and sets a depth/stencil state (`Less`, depth writes
+    /// where `write`), then does `then`.
+    fn state_pass(&self, depth: &Texture, write: bool, then: Then) {
+        let color = self.texture(PixelFormat::RGBA8Unorm);
+        let mut pass = RenderPassDescriptor::new();
+        let target = &mut pass.color_attachments[0];
+        target.texture = Some(color);
+        target.load_action = LoadAction::Clear;
+        target.store_action = StoreAction::Store;
+        pass.depth_attachment.texture = Some(depth.clone());
+        pass.depth_attachment.load_action = LoadAction::Load;
+        pass.depth_attachment.store_action = StoreAction::Store;
+        let command_buffer = self.queue.command_buffer().unwrap();
+        let mut encoder = command_buffer.render_command_encoder(&pass).unwrap();
+        let mut state = DepthStencilDescriptor::default();
+        state.depth_compare_function = CompareFunction::Less;
+        state.depth_write_enabled = write;
+        let state = self.device.new_depth_stencil_state(&state).unwrap();
+        encoder.set_render_pipeline_state(&self.white).unwrap();
+        encoder.set_depth_stencil_state(&state).unwrap();
+        let words: Vec<u8> = [0.5f32, 0.0].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let at = buffer_with(&self.device, &words).unwrap();
+        encoder.set_vertex_buffer(Some(&at), 0, 0).unwrap();
+        match then {
+            Then::Nothing => {}
+            Then::NoInstances => encoder
+                .draw_primitives(PrimitiveType::Triangle, 0, 3, 0, 0)
+                .unwrap(),
+            Then::WritesOffDraw => {
+                let mut off = DepthStencilDescriptor::default();
+                off.depth_compare_function = CompareFunction::Less;
+                let off = self.device.new_depth_stencil_state(&off).unwrap();
+                encoder.set_depth_stencil_state(&off).unwrap();
+                encoder
+                    .draw_primitives(PrimitiveType::Triangle, 0, 3, 1, 0)
+                    .unwrap();
+            }
+        }
+        encoder.end_encoding().unwrap();
+        command_buffer.commit().unwrap();
+        command_buffer.wait_until_completed_for(WAIT).unwrap();
+        assert_eq!(command_buffer.status(), CommandBufferStatus::Completed);
+    }
+
+    /// The words of `depth`, by `get_bytes`.
+    fn words(&self, depth: &Texture) -> Vec<u32> {
+        texels(depth)
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|w| u32::from_le_bytes(*w))
+            .collect()
+    }
+
+    /// A pass that loads and stores `depth` (and `stencil`, a separate texture, where given) and
+    /// sets a depth/stencil state (`Less`, depth writes where `write`), and draws nothing.
+    fn bare_state_pass(&self, depth: &Texture, stencil: Option<&Texture>, write: bool) {
+        let mut pass = RenderPassDescriptor::new();
+        pass.depth_attachment.texture = Some(depth.clone());
+        pass.depth_attachment.load_action = LoadAction::Load;
+        pass.depth_attachment.store_action = StoreAction::Store;
+        if let Some(stencil) = stencil {
+            pass.stencil_attachment.texture = Some(stencil.clone());
+            pass.stencil_attachment.load_action = LoadAction::Load;
+            pass.stencil_attachment.store_action = StoreAction::Store;
+        }
+        let command_buffer = self.queue.command_buffer().unwrap();
+        let mut encoder = command_buffer.render_command_encoder(&pass).unwrap();
+        let mut state = DepthStencilDescriptor::default();
+        state.depth_compare_function = CompareFunction::Less;
+        state.depth_write_enabled = write;
+        let state = self.device.new_depth_stencil_state(&state).unwrap();
+        encoder.set_depth_stencil_state(&state).unwrap();
+        encoder.end_encoding().unwrap();
+        command_buffer.commit().unwrap();
+        command_buffer.wait_until_completed_for(WAIT).unwrap();
+        assert_eq!(command_buffer.status(), CommandBufferStatus::Completed);
+    }
+
+    /// A pass that clears `depth` to `clear` and stores it, and draws nothing.
+    fn clearing_pass(&self, depth: &Texture, clear: f64) {
+        let mut pass = RenderPassDescriptor::new();
+        pass.depth_attachment.texture = Some(depth.clone());
+        pass.depth_attachment.load_action = LoadAction::Clear;
+        pass.depth_attachment.clear_depth = clear;
+        pass.depth_attachment.store_action = StoreAction::Store;
+        let command_buffer = self.queue.command_buffer().unwrap();
+        let encoder = command_buffer.render_command_encoder(&pass).unwrap();
+        encoder.end_encoding().unwrap();
+        command_buffer.commit().unwrap();
+        command_buffer.wait_until_completed_for(WAIT).unwrap();
+        assert_eq!(command_buffer.status(), CommandBufferStatus::Completed);
+    }
+
+    /// A private 4x4 render target of `pf` at `samples` holding `words` (each texel's samples in
+    /// turn, row by row) by a blit from a buffer with `option`, or the runtime's refusal of it.
+    fn blitted(
+        &self,
+        pf: PixelFormat,
+        samples: u64,
+        words: &[u32],
+        option: BlitOption,
+    ) -> Result<Texture, Error> {
+        let mut d = TextureDescriptor::texture_2d(pf, SIDE, SIDE, false);
+        if samples > 1 {
+            d.texture_type = TextureType::Type2DMultisample;
+            d.sample_count = samples;
+        }
+        d.usage = TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ;
+        d.resource_options = ResourceOptions::private();
+        let texture = self.device.new_texture(&d)?;
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let source = buffer_with(&self.device, &bytes).unwrap();
+        let command_buffer = self.queue.command_buffer().unwrap();
+        let mut blit = command_buffer.blit_command_encoder().unwrap();
+        blit.copy_from_buffer_to_texture(
+            &source,
+            0,
+            SIDE * samples * 4,
+            bytes.len() as u64,
+            Size::new(SIDE, SIDE, 1),
+            &texture,
+            0,
+            0,
+            Origin::new(0, 0, 0),
+            option,
+        )?;
+        blit.end_encoding().unwrap();
+        command_buffer.commit().unwrap();
+        command_buffer.wait_until_completed_for(WAIT).unwrap();
+        assert_eq!(command_buffer.status(), CommandBufferStatus::Completed);
+        Ok(texture)
+    }
+
+    /// The depth words of `depth`, a 4x4 texture at `samples` (each texel's samples in turn, row
+    /// by row), by a blit into a buffer with `option`.
+    fn blitted_words(&self, depth: &Texture, samples: u64, option: BlitOption) -> Vec<u32> {
+        let bytes = SIDE * SIDE * samples * 4;
+        let out = buffer_with(&self.device, &vec![0xee; bytes as usize]).unwrap();
+        let command_buffer = self.queue.command_buffer().unwrap();
+        let mut blit = command_buffer.blit_command_encoder().unwrap();
+        blit.copy_from_texture_to_buffer(
+            depth,
+            0,
+            0,
+            Origin::new(0, 0, 0),
+            Size::new(SIDE, SIDE, 1),
+            &out,
+            0,
+            SIDE * samples * 4,
+            bytes,
+            option,
+        )
+        .unwrap();
+        blit.end_encoding().unwrap();
+        command_buffer.commit().unwrap();
+        command_buffer.wait_until_completed_for(WAIT).unwrap();
+        assert_eq!(command_buffer.status(), CommandBufferStatus::Completed);
+        read_buffer(&out, 0, bytes)
+            .unwrap()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|w| u32::from_le_bytes(*w))
+            .collect()
+    }
+
     /// A depth texture holding `bits` everywhere, stored by `route`.
     fn stored(&self, route: Route, bits: u32) -> Texture {
         let depth = self.texture(PixelFormat::Depth32Float);
@@ -254,6 +609,11 @@ fn depth_images_hold_denormals_as_their_drivers_claim() {
             ),
             (Degradation::DepthDenormals, !(keeps && tests)),
         ]);
+        // A render target's depth that holds a denormal its test compares as zero renders a pass
+        // that loads it over its magnitude stand-in where the device keeps values outside [0, 1]
+        // and its test is not Metal's already, whose copies keep the denormal where the driver's
+        // GPU copies do.
+        let stands_in = signs_depth_tests(&device) && keeps;
         let lane = Lane::new(device);
         first.extend(made_render_kinds(
             &lane.device,
@@ -306,7 +666,7 @@ fn depth_images_hold_denormals_as_their_drivers_claim() {
                 if keeps {
                     assert_eq!(held, 16, "{at}: read {read:08x?}");
                 }
-                if keeps && tests {
+                if held == 16 && (tests || stands_in) {
                     let metals = if negative { 0 } else { 16 };
                     assert_eq!(passed, metals, "{at}: tested");
                 }
@@ -321,6 +681,713 @@ fn depth_images_hold_denormals_as_their_drivers_claim() {
             "{name}: depth-denormals announced where the driver lacks a fact (keeps {keeps}, \
              tests {tests})"
         );
+    }
+    let reported = messages.take();
+    assert!(
+        reported.is_empty(),
+        "the validation layer reported: {reported:#?}"
+    );
+}
+
+/// Whether Metal's depth test passes a fragment at depth `z` under `compare` against the stored
+/// value of bits `stored`: the two magnitudes compared as the integers of their low 31 bits (the
+/// module docs).
+fn metal_passes(z: f32, compare: CompareFunction, stored: u32) -> bool {
+    let (fragment, held) = (z.to_bits() & 0x7fff_ffff, stored & 0x7fff_ffff);
+    match compare {
+        CompareFunction::Never => false,
+        CompareFunction::Less => fragment < held,
+        CompareFunction::Equal => fragment == held,
+        CompareFunction::LessEqual => fragment <= held,
+        CompareFunction::Greater => fragment > held,
+        CompareFunction::NotEqual => fragment != held,
+        CompareFunction::GreaterEqual => fragment >= held,
+        CompareFunction::Always => true,
+        other => panic!("{other:?} is no compare function Metal names"),
+    }
+}
+
+/// Whether Metal's `sample_compare` under `f` passes the reference `r` against the texel `texel`:
+/// the IEEE order of the two, neither clamped, `-0` equal to `+0`; the function's raw value's bits
+/// 0, 1 and 2 pass a reference below, equal to and above the texel, and an unordered pair passes
+/// `not_equal` and `always` alone (`depth_compares`' rule, the probe's 720 of 720).
+fn metal_compares(f: CompareFunction, r: f32, texel: f32) -> bool {
+    let bits = f.as_raw();
+    match r.partial_cmp(&texel) {
+        Some(Ordering::Less) => bits & 1 != 0,
+        Some(Ordering::Equal) => bits & 2 != 0,
+        Some(Ordering::Greater) => bits & 4 != 0,
+        None => bits & 5 == 5,
+    }
+}
+
+/// Whether `a` and `b` are one read of a texel: the same bits, or both NaN (a sample or a
+/// kernel's read need not keep a NaN's payload).
+fn same_read(a: u32, b: u32) -> bool {
+    let nan = |w: u32| f32::from_bits(w).is_nan();
+    a == b || (nan(a) && nan(b))
+}
+
+/// What a test of the probe's values reads of one stored texture: `get_bytes`' first word, a
+/// kernel's read and nearest sample of texel `(0, 0)`, every `sample_compare` of [`REFERENCES`]
+/// under each of [`FUNCTIONS`] (in that order, the references inner),
+/// and how many of the 16 texels each depth test of [`PROBE_TESTS`] at each of [`FRAGMENTS`]
+/// passed.
+struct Observed {
+    read: u32,
+    kernel_read: u32,
+    sampled: u32,
+    compared: Vec<bool>,
+    tested: Vec<usize>,
+}
+
+/// The kernels and samplers that read a stored texture ([`READS`]).
+struct Readers {
+    read: ComputePipelineState,
+    sample: ComputePipelineState,
+    compare: ComputePipelineState,
+    nearest: SamplerState,
+    comparing: Vec<SamplerState>,
+}
+
+impl Readers {
+    fn new(device: &Device, library: &Library) -> Readers {
+        let kernel = |name| {
+            let function = library.new_function_with_name(name).unwrap();
+            device
+                .new_compute_pipeline_state(
+                    &ComputePipelineDescriptor::new(StageSource::Function(
+                        function.function_descriptor(),
+                    )),
+                    &PipelineOptions::default(),
+                )
+                .unwrap()
+        };
+        let sampler = |compare: Option<CompareFunction>| {
+            let mut d = SamplerDescriptor::new();
+            d.min_filter = SamplerMinMagFilter::Nearest;
+            d.mag_filter = SamplerMinMagFilter::Nearest;
+            if let Some(f) = compare {
+                d.compare_function = f;
+            }
+            device.new_sampler_state(&d).unwrap()
+        };
+        Readers {
+            read: kernel("sd_read"),
+            sample: kernel("sd_sample"),
+            compare: kernel("sd_compare"),
+            nearest: sampler(None),
+            comparing: FUNCTIONS.iter().map(|&f| sampler(Some(f))).collect(),
+        }
+    }
+}
+
+impl Lane {
+    /// What `depth`, a texture of one stored value, reads and tests as (the module docs).
+    fn observed(&self, depth: &Texture, readers: &Readers) -> Observed {
+        let read = texels(depth);
+        let read = u32::from_le_bytes([read[0], read[1], read[2], read[3]]);
+        let centre = 0.5 / SIDE as f32;
+        let at = [[centre, centre, 0.0, 0.0]];
+        let word = |state: &ComputePipelineState, sampler: Option<&SamplerState>| {
+            run(&self.device, (depth, sampler), state, &at, 1)[0].to_bits()
+        };
+        let kernel_read = word(&readers.read, None);
+        let sampled = word(&readers.sample, Some(&readers.nearest));
+        let jobs: Vec<[f32; 4]> = REFERENCES
+            .iter()
+            .map(|&r| [centre, centre, r, 0.0])
+            .collect();
+        let mut compared = Vec::new();
+        for sampler in &readers.comparing {
+            let out = run(
+                &self.device,
+                (depth, Some(sampler)),
+                &readers.compare,
+                &jobs,
+                1,
+            );
+            compared.extend((0..jobs.len()).map(|i| out[4 * i] == 1.0));
+        }
+        let mut tested = Vec::new();
+        for compare in PROBE_TESTS {
+            for z in FRAGMENTS {
+                let color = self.pass(depth, None, Some((z, compare, false)));
+                tested.push(passed(&color));
+            }
+        }
+        Observed {
+            read,
+            kernel_read,
+            sampled,
+            compared,
+            tested,
+        }
+    }
+}
+
+/// What a [`Lane::state_pass`] does after it sets its state.
+#[derive(Clone, Copy, Debug)]
+enum Then {
+    /// Nothing: the pass draws nothing.
+    Nothing,
+    /// A draw of no instances, which records nothing.
+    NoInstances,
+    /// A draw at 0.5 under a state without depth writes, set over the first.
+    WritesOffDraw,
+}
+
+/// How many of a color target's texels a pass drew white.
+fn passed(color: &[u8]) -> usize {
+    color
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|t| t[0] == 255)
+        .count()
+}
+
+/// Each of the probe's 18 values stored by `replace_region` and by a blit into a render target's
+/// `Depth32Float`, then read, sampled, compared and depth-tested (the module docs): on a device
+/// that keeps such a value in a depth image, each answer is Metal's wherever the value was stored
+/// as given (a blit's denormal is a zero on a driver without
+/// `DriverFact::DepthImageKeepsDenormals`, and `get_bytes` reads it so; a host copy's is read as a
+/// zero by such a driver's GPU copies and reads, announced as `depth-denormals`, and a sample or
+/// comparison whose making records `device-texel-denormals` or `device-depth-comparison` may read
+/// it so), each texture whose value's magnitude stand-in is not itself switched on once and each of
+/// its 15 tests rendered over the stand-in, none written back; a pass with depth writes over a
+/// texture holding such values stores its draw's depth where it passed and every other texel
+/// without its sign, one that sets a state with depth writes and draws nothing every texel without
+/// its sign, and one whose state has no depth writes keeps every bit, as Metal's (probe
+/// `depthstore`), announcing `signed-depth-test` for the merge's one corner. A device whose own
+/// depth test is Metal's (`DriverFact::DepthTestComparesMagnitudes`) gives the same answers in
+/// place: nothing switched on or announced. A device that may clamp such a value announces `restricted-depth-upload` and
+/// switches nothing on.
+#[test]
+fn a_stored_depth_tests_reads_samples_and_compares_as_metal_s() {
+    let cache = ScratchCache::new().unwrap();
+    let messages = Messages::default();
+    {
+        let device = validated_device(TEST_DEVICE, &messages, cache.path()).unwrap();
+        let name = device.name().to_owned();
+        // The device keeps such a value, and where its depth test is not Metal's already, its
+        // render targets take the magnitude stand-in.
+        let keeps = !clamps_depth_uploads(&device);
+        let takes = signs_depth_tests(&device);
+        let facts = &device.properties().driver_facts;
+        let flush = !facts.contains(&DriverFact::DepthTestKeepsDenormals);
+        let library = device
+            .new_library_with_air(&llvm_assemble_text(READS).unwrap())
+            .unwrap();
+        let kernels = ["sd_read", "sd_sample", "sd_compare"];
+        let function = |name| library.new_function_with_name(name).unwrap();
+        let mut allowed = BTreeSet::new();
+        let mut first = forced(&[
+            (Degradation::RestrictedDepthUpload, !keeps),
+            // The merge's corner.
+            (Degradation::SignedDepthTest, takes),
+            (
+                Degradation::DepthDenormals,
+                loses_depth_denormals(&device, false),
+            ),
+            (
+                Degradation::SharedInSystemMemory,
+                shared_in_system_memory(&device),
+            ),
+        ]);
+        for kernel in kernels {
+            first.extend(made_compute_kinds(
+                &device,
+                function(kernel).function_descriptor(),
+            ));
+            allowed.extend(bound_value_kinds(
+                &device,
+                function(kernel).function_descriptor(),
+            ));
+        }
+        // Where a denormal is Metal's: a driver whose GPU copies and reads keep one in a depth
+        // image (the stand-in's copies too), and of those, a sample or comparison whose making
+        // records no note that it may read one otherwise.
+        let kinds = |kernel| {
+            let descriptor = || function(kernel).function_descriptor();
+            let mut kinds = made_compute_kinds(&device, descriptor());
+            kinds.extend(bound_value_kinds(&device, descriptor()));
+            kinds
+        };
+        let denormals = facts.contains(&DriverFact::DepthImageKeepsDenormals);
+        let sampled_denormals =
+            denormals && !kinds("sd_sample").contains(&Degradation::DeviceTexelDenormals);
+        let compared_denormals = denormals
+            && kinds("sd_compare").is_disjoint(&BTreeSet::from([
+                Degradation::DeviceTexelDenormals,
+                Degradation::DeviceDepthComparison,
+            ]));
+        let readers = Readers::new(&device, &library);
+        let lane = Lane::new(device);
+        first.extend(made_render_kinds(
+            &lane.device,
+            &white_descriptor(&lane.library),
+        ));
+        let before = lane.device.work_counts();
+        let (mut asked, mut metals, mut switched) = (0, 0, 0u64);
+        for route in [Route::ReplaceRegion, Route::BlitFromBuffer] {
+            for bits in PROBED {
+                let depth = lane.stored(route, bits);
+                let seen = lane.observed(&depth, &readers);
+                let value = f32::from_bits(bits);
+                // A blit switches every texture on; `replace_region`, one whose bytes hold a
+                // value whose stand-in is not itself.
+                let stands_in = DepthMagnitudeModule::stand_in(bits, flush) != bits;
+                if keeps && (matches!(route, Route::BlitFromBuffer) || stands_in) {
+                    switched += 1;
+                }
+                // Metal's answers stand for the value as it was stored.
+                let kept = keeps && seen.read == bits;
+                let at = format!("{name} {route:?} {bits:08x}");
+                println!(
+                    "PROBED-DEPTH {at}: read {:08x}, kernel read {:08x}, sampled {:08x}",
+                    seen.read, seen.kernel_read, seen.sampled
+                );
+                let compares = FUNCTIONS
+                    .iter()
+                    .flat_map(|&f| REFERENCES.iter().map(move |&r| metal_compares(f, r, value)));
+                let tests = PROBE_TESTS.iter().flat_map(|&compare| {
+                    FRAGMENTS
+                        .iter()
+                        .map(move |&z| match metal_passes(z, compare, bits) {
+                            true => 16,
+                            false => 0,
+                        })
+                });
+                let mut wrong_compares = Vec::new();
+                for ((f, r), (got, want)) in FUNCTIONS
+                    .iter()
+                    .flat_map(|f| REFERENCES.iter().map(move |r| (f, r)))
+                    .zip(seen.compared.iter().zip(compares))
+                {
+                    asked += 1;
+                    metals += usize::from(*got == want);
+                    if *got != want {
+                        wrong_compares
+                            .push(format!("compare {f:?} ref {r}: {got}, Metal's {want}"));
+                    }
+                }
+                let mut wrong_tests = Vec::new();
+                for ((compare, z), (&got, want)) in PROBE_TESTS
+                    .iter()
+                    .flat_map(|c| FRAGMENTS.iter().map(move |z| (c, z)))
+                    .zip(seen.tested.iter().zip(tests))
+                {
+                    asked += 1;
+                    metals += usize::from(got == want);
+                    if got != want {
+                        wrong_tests.push(format!(
+                            "test {compare:?} at {z}: {got} of 16, Metal's {want}"
+                        ));
+                    }
+                }
+                for line in wrong_compares.iter().chain(&wrong_tests) {
+                    println!("PROBED-DEPTH {at}: {line}");
+                }
+                let denormal = bits & 0x7f80_0000 == 0 && bits & 0x007f_ffff != 0;
+                if kept && (!denormal || denormals) {
+                    assert!(same_read(seen.kernel_read, bits), "{at}: kernel read");
+                    assert!(wrong_tests.is_empty(), "{at}: {wrong_tests:#?}");
+                }
+                if kept && (!denormal || sampled_denormals) {
+                    assert!(same_read(seen.sampled, bits), "{at}: nearest sample");
+                }
+                if kept && (!denormal || compared_denormals) {
+                    assert!(wrong_compares.is_empty(), "{at}: {wrong_compares:#?}");
+                }
+            }
+        }
+        // The merge: values whose stand-ins a draw at 0.5 under `Less`, writing its depth, passes
+        // against where their magnitude lies above 0.5. Metal stores the draw's depth there and
+        // every other texel without its sign (probe `depthstore`); a pass that sets a state with
+        // depth writes and draws nothing stores every texel so, and one whose state has none
+        // keeps every bit. Each texture is switched on by its `replace_region`.
+        let held = || {
+            let depth = lane.texture(PixelFormat::Depth32Float);
+            let bytes: Vec<u8> = MERGED.iter().flat_map(|w| w.to_le_bytes()).collect();
+            depth
+                .replace_region(Region::new_2d(0, 0, SIDE, SIDE), 0, 0, &bytes, SIDE * 4, 0)
+                .unwrap();
+            depth
+        };
+        let merged = held();
+        let color = lane.pass(&merged, None, Some((0.5, CompareFunction::Less, true)));
+        // A state with depth writes and no draw, one with a draw of no instances, and one replaced
+        // by a state without depth writes before its draw: Metal strips each (probe
+        // `depthstore`), which a device whose pass is Metal's own leaves to the runtime's strip.
+        let stripped: Vec<(&str, Texture)> = [
+            ("no draw", Then::Nothing),
+            ("no instances", Then::NoInstances),
+            ("replaced", Then::WritesOffDraw),
+        ]
+        .into_iter()
+        .map(|(case, then)| {
+            let depth = held();
+            lane.state_pass(&depth, true, then);
+            (case, depth)
+        })
+        .collect();
+        let kept = held();
+        lane.state_pass(&kept, false, Then::Nothing);
+        // The five passes over a stand-in, four of them written back; three strips where the
+        // device's pass is Metal's own.
+        let (merges, writes, strips): (u64, u64, u64) = (5, 4, 3);
+        if keeps {
+            switched += merges;
+        }
+        let drawn = 0.5f32.to_bits();
+        let unsigned: Vec<u32> = MERGED.iter().map(|&w| w & 0x7fff_ffff).collect();
+        let want: Vec<u32> = MERGED
+            .iter()
+            .map(|&w| match metal_passes(0.5, CompareFunction::Less, w) {
+                true => drawn,
+                false => w & 0x7fff_ffff,
+            })
+            .collect();
+        let read = lane.words(&merged);
+        let read_kept = lane.words(&kept);
+        println!("PROBED-DEPTH {name} no depth writes: read {read_kept:08x?}");
+        let read_stripped: Vec<(&str, Vec<u32>)> = stripped
+            .iter()
+            .map(|(case, depth)| {
+                let read = lane.words(depth);
+                println!("PROBED-DEPTH {name} depth writes, {case}: read {read:08x?}");
+                (*case, read)
+            })
+            .collect();
+        // The texels Metal's test passes: not those whose stored value equals the draw's (0.5).
+        let wins = MERGED
+            .iter()
+            .filter(|&&w| metal_passes(0.5, CompareFunction::Less, w))
+            .count();
+        println!(
+            "PROBED-DEPTH {name} written back: {} of 16 drawn (Metal's {wins}), read {read:08x?}",
+            passed(&color)
+        );
+        let counts = lane.device.work_counts();
+        let (switch_ons, passes, written_back, sign_strips) = (
+            counts.signed_depth_switch_ons - before.signed_depth_switch_ons,
+            counts.magnitude_stand_in_passes - before.magnitude_stand_in_passes,
+            counts.magnitude_write_backs - before.magnitude_write_backs,
+            counts.sign_strips - before.sign_strips,
+        );
+        println!(
+            "PROBED-DEPTH {name}: {metals} of {asked} answers Metal's; keeps {keeps}; takes the \
+             stand-in {takes}; switched on {switch_ons}, passes over the stand-in {passes}, \
+             written back {written_back}, sign strips {sign_strips}"
+        );
+        if keeps {
+            assert_eq!(passed(&color), wins, "{name}: the merge pass drew");
+            assert_eq!(
+                read, want,
+                "{name}: the merge stored the draw's depth and the others without their signs"
+            );
+            for (case, read) in &read_stripped {
+                assert_eq!(
+                    read, &unsigned,
+                    "{name}: a pass with depth writes, {case}, stored every texel without its sign"
+                );
+            }
+            assert_eq!(
+                read_kept, MERGED,
+                "{name}: a pass without depth writes kept every bit"
+            );
+        }
+        // Each switched texture's 15 tests and the three passes load it over its stand-in.
+        let tests = PROBE_TESTS.len() * FRAGMENTS.len();
+        assert_eq!(switch_ons, switched, "{name}: switch-ons");
+        assert_eq!(
+            passes,
+            match takes {
+                true => (switched - merges) * tests as u64 + merges,
+                false => 0,
+            },
+            "{name}: passes over the stand-in"
+        );
+        assert_eq!(
+            written_back,
+            writes * u64::from(takes),
+            "{name}: written back"
+        );
+        // The device keeps the value and its pass is Metal's own: its single-sample depth is
+        // stripped after each pass with depth writes that drew under none.
+        let strips_signs = keeps && !takes;
+        assert_eq!(
+            sign_strips,
+            strips * u64::from(strips_signs),
+            "{name}: sign strips"
+        );
+        let taken = messages.taken_kinds();
+        let expected: Vec<Degradation> = first.difference(&taken).copied().collect();
+        let counts = assert_once_allowing(&messages.take_notices(), &expected, &allowed);
+        assert_eq!(
+            counts.contains_key(&Degradation::SignedDepthTest),
+            takes,
+            "{name}: signed-depth-test for the merge where the target takes the stand-in"
+        );
+    }
+    let reported = messages.take();
+    assert!(
+        reported.is_empty(),
+        "the validation layer reported: {reported:#?}"
+    );
+}
+
+/// A target that takes no magnitude stand-in, or whose pass renders it through another image,
+/// stores the words it did not write without their signs after a pass with depth writes, as
+/// Metal's (probe `depthstore`: single-sample `Depth32Float` and `Depth32Float_Stencil8`, and a 4x
+/// multisampled `Depth32Float` a blit from a buffer wrote, each sample): a `Depth32Float_Stencil8`,
+/// a `Depth32Float` beside a separate `Stencil8` texture (the pass renders the scratch image of
+/// both), and a 4x multisampled `Depth32Float` and `Depth32Float_Stencil8`, each holding the
+/// merge's values, each loaded and stored by a pass that sets a state with depth writes and draws
+/// nothing: every word read back is the one read before without its sign, each pass stripped once
+/// (`WorkCounts::sign_strips`), and then a pass whose state has no depth writes keeps every bit.
+/// A device's blit into a multisampled depth may change some values first (`drawn-depth-copy`);
+/// the strip keeps what it stored but the sign. A device that may clamp such a value strips
+/// nothing; `signed-depth-test` names the tests of a target that takes no stand-in on a device
+/// whose test is not Metal's. Each case prints a `STRIPPED-DEPTH` line.
+#[test]
+fn a_target_without_a_stand_in_stores_its_words_without_their_signs() {
+    let cache = ScratchCache::new().unwrap();
+    let messages = Messages::default();
+    {
+        let device = validated_device(TEST_DEVICE, &messages, cache.path()).unwrap();
+        let name = device.name().to_owned();
+        let keeps = !clamps_depth_uploads(&device);
+        let lane = Lane::new(device);
+        let before = lane.device.work_counts();
+        let words = |samples: u64| -> Vec<u32> {
+            (0..SIDE * SIDE * samples)
+                .map(|i| MERGED[((i + i / 16) % 16) as usize])
+                .collect()
+        };
+        let (depth, combined) = (BlitOption::None, BlitOption::DepthFromDepthStencil);
+        let mut stripped = 0u64;
+        // The separate textures: the depth by `replace_region`, the stencil the pass loads too.
+        {
+            let depth = lane.texture(PixelFormat::Depth32Float);
+            let bytes: Vec<u8> = MERGED.iter().flat_map(|w| w.to_le_bytes()).collect();
+            depth
+                .replace_region(Region::new_2d(0, 0, SIDE, SIDE), 0, 0, &bytes, SIDE * 4, 0)
+                .unwrap();
+            let mut d = TextureDescriptor::texture_2d(PixelFormat::Stencil8, SIDE, SIDE, false);
+            d.usage = TextureUsage::RENDER_TARGET;
+            d.resource_options = ResourceOptions::private();
+            let stencil = lane.device.new_texture(&d).unwrap();
+            let held = lane.words(&depth);
+            lane.bare_state_pass(&depth, Some(&stencil), true);
+            let read = lane.words(&depth);
+            lane.bare_state_pass(&depth, Some(&stencil), false);
+            let kept = lane.words(&depth);
+            println!("STRIPPED-DEPTH {name} separate: held {held:08x?}, read {read:08x?}");
+            if keeps {
+                let unsigned: Vec<u32> = held.iter().map(|&w| w & 0x7fff_ffff).collect();
+                assert_eq!(read, unsigned, "{name}: separate textures' depth, stripped");
+                stripped += 1;
+            }
+            assert_eq!(kept, read, "{name}: separate textures' depth, kept");
+        }
+        for (case, pf, samples, option) in [
+            ("combined", PixelFormat::Depth32FloatStencil8, 1, combined),
+            ("multisampled", PixelFormat::Depth32Float, 4, depth),
+            (
+                "multisampled combined",
+                PixelFormat::Depth32FloatStencil8,
+                4,
+                combined,
+            ),
+        ] {
+            let texture = match lane.blitted(pf, samples, &words(samples), option) {
+                Ok(texture) => texture,
+                Err(error) => {
+                    println!("STRIPPED-DEPTH {name} {case}: the blit in refused: {error}");
+                    continue;
+                }
+            };
+            let held = lane.blitted_words(&texture, samples, option);
+            lane.bare_state_pass(&texture, None, true);
+            let read = lane.blitted_words(&texture, samples, option);
+            lane.bare_state_pass(&texture, None, false);
+            let kept = lane.blitted_words(&texture, samples, option);
+            println!(
+                "STRIPPED-DEPTH {name} {case}: held {:08x?}, read {:08x?}",
+                &held[..16],
+                &read[..16]
+            );
+            if keeps {
+                let unsigned: Vec<u32> = held.iter().map(|&w| w & 0x7fff_ffff).collect();
+                assert_eq!(read, unsigned, "{name}: {case}, stripped");
+                stripped += 1;
+            }
+            assert_eq!(kept, read, "{name}: {case}, kept");
+        }
+        let strips = lane.device.work_counts().sign_strips - before.sign_strips;
+        println!("STRIPPED-DEPTH {name}: keeps {keeps}; sign strips {strips}");
+        assert_eq!(strips, stripped, "{name}: sign strips");
+        let signed = messages
+            .take_notices()
+            .iter()
+            .filter_map(|m| m.degradation.as_ref())
+            .any(|notice| notice.degradation == Degradation::SignedDepthTest);
+        assert_eq!(
+            signed,
+            signs_depth_tests(&lane.device),
+            "{name}: signed-depth-test for the tests of the targets without a stand-in"
+        );
+    }
+    let reported = messages.take();
+    assert!(
+        reported.is_empty(),
+        "the validation layer reported: {reported:#?}"
+    );
+}
+
+/// A NaN clear depth stores and tests as Metal's (our probe `nanclear`, the M3 Max under macOS
+/// 27.0.1): a `Depth32Float` or `Depth32Float_Stencil8` attachment, 1x and 4x, cleared to a NaN of
+/// either sign and stored, holds `0x7fc00000` in every texel and sample, and a draw at 0.5 in the
+/// clearing pass passes `Less` and fails `Greater` (Metal's test orders a NaN above every value); a
+/// `Depth16Unorm` one holds 0. Where the device makes no write of the word (a multisampled depth
+/// with neither maintenance8's colour copies nor an exact `FragDepth`, a device that may clamp a
+/// depth), the pass clears to 1.0, announced. Each case prints a `NAN-CLEAR-DEPTH` line.
+#[test]
+fn a_nan_clear_depth_stores_and_tests_as_metal_s() {
+    let cache = ScratchCache::new().unwrap();
+    let messages = Messages::default();
+    {
+        let device = validated_device(TEST_DEVICE, &messages, cache.path()).unwrap();
+        let name = device.name().to_owned();
+        let keeps = !clamps_depth_uploads(&device);
+        let colour = device.enabled().features.contains(&VkFeature::Maintenance8)
+            && !device
+                .properties()
+                .driver_defects
+                .contains(&RuntimeDriverDefect::MultisampledDepthStencilColourCopies);
+        let drawn = device
+            .properties()
+            .driver_facts
+            .contains(&DriverFact::FragmentDepthStoresUnchanged);
+        let lane = Lane::new(device);
+        let (depth, combined) = (BlitOption::None, BlitOption::DepthFromDepthStencil);
+        for (case, pf, samples, option) in [
+            ("Depth32Float", PixelFormat::Depth32Float, 1, depth),
+            ("Depth32Float 4x", PixelFormat::Depth32Float, 4, depth),
+            (
+                "Depth32Float_Stencil8",
+                PixelFormat::Depth32FloatStencil8,
+                1,
+                combined,
+            ),
+            (
+                "Depth32Float_Stencil8 4x",
+                PixelFormat::Depth32FloatStencil8,
+                4,
+                combined,
+            ),
+        ] {
+            for clear in [f64::NAN, -f64::NAN] {
+                let held = vec![0x3e80_0000; (SIDE * SIDE * samples) as usize];
+                let texture = lane.blitted(pf, samples, &held, option).unwrap();
+                lane.clearing_pass(&texture, clear);
+                let read = lane.blitted_words(&texture, samples, option);
+                println!(
+                    "NAN-CLEAR-DEPTH {name} {case} {clear}: read {:08x?}",
+                    &read[..4]
+                );
+                let written = keeps && (samples == 1 || colour || drawn);
+                let want = match written {
+                    true => 0x7fc0_0000,
+                    false => 1.0f32.to_bits(),
+                };
+                assert!(
+                    read.iter().all(|&w| w == want),
+                    "{name}: {case} cleared to {clear}: {want:08x} everywhere"
+                );
+            }
+        }
+        // A 16-bit depth's NaN clear stores 0.
+        let depth16 = lane.texture(PixelFormat::Depth16Unorm);
+        lane.clearing_pass(&depth16, 0.5);
+        lane.clearing_pass(&depth16, f64::NAN);
+        let codes = texels(&depth16);
+        println!(
+            "NAN-CLEAR-DEPTH {name} Depth16Unorm: read {:02x?}",
+            &codes[..8]
+        );
+        assert!(
+            codes.iter().all(|&b| b == 0),
+            "{name}: Depth16Unorm's NaN clear stores 0"
+        );
+        // In the clearing pass, a draw at 0.5 passes `Less` and fails `Greater` against the NaN.
+        for (compare, want) in [(CompareFunction::Less, 16), (CompareFunction::Greater, 0)] {
+            let depth = lane.texture(PixelFormat::Depth32Float);
+            let color = lane.pass(&depth, Some(f64::NAN), Some((0.5, compare, false)));
+            println!(
+                "NAN-CLEAR-DEPTH {name} draw at 0.5 under {compare:?}: {} of 16 drawn",
+                passed(&color)
+            );
+            assert_eq!(
+                passed(&color),
+                want,
+                "{name}: {compare:?} against a NaN clear"
+            );
+        }
+        messages.take_notices();
+    }
+    let reported = messages.take();
+    assert!(
+        reported.is_empty(),
+        "the validation layer reported: {reported:#?}"
+    );
+}
+
+/// The depth of an ordinary pass, which never stores a value whose stand-in is not itself, loads
+/// in place: no switch-on, no pass over a stand-in, no merge, no kept image or stand-in made, and
+/// the command buffers each pass begins and submits are printed (`WorkCounts`), the batch's to
+/// compare with the base's.
+#[test]
+fn an_ordinary_depth_loads_in_place() {
+    let cache = ScratchCache::new().unwrap();
+    let messages = Messages::default();
+    {
+        let device = validated_device(TEST_DEVICE, &messages, cache.path()).unwrap();
+        let name = device.name().to_owned();
+        let lane = Lane::new(device);
+        let before = lane.device.work_counts();
+        let depth = lane.stored(Route::ReplaceRegion, 0x3f00_0000);
+        const PASSES: u64 = 8;
+        for _ in 0..PASSES {
+            let at = (0.25, CompareFunction::LessEqual, true);
+            let color = lane.pass(&depth, None, Some(at));
+            assert_eq!(passed(&color), 16, "{name}");
+        }
+        let after = lane.device.work_counts();
+        let moved = |of: fn(&WorkCounts) -> u64| of(&after) - of(&before);
+        println!(
+            "ORDINARY-DEPTH {name}: {PASSES} passes began {} and submitted {} command buffers, \
+             made {} kept images and {} stand-ins",
+            moved(|c| c.command_buffers_begun),
+            moved(|c| c.command_buffers_submitted),
+            moved(|c| c.kept_backings_made),
+            moved(|c| c.stand_ins_made),
+        );
+        assert_eq!(moved(|c| c.signed_depth_switch_ons), 0, "{name}");
+        assert_eq!(moved(|c| c.magnitude_stand_in_passes), 0, "{name}");
+        assert_eq!(moved(|c| c.magnitude_write_backs), 0, "{name}");
+        assert_eq!(moved(|c| c.kept_backings_made), 0, "{name}");
+        assert_eq!(moved(|c| c.stand_ins_made), 0, "{name}");
+        // 0.5, then each pass's 0.25.
+        assert_eq!(texels(&depth)[..4], 0.25f32.to_le_bytes(), "{name}");
+        // A pass with depth writes that draws under none strips no depth never switched on.
+        lane.state_pass(&depth, true, Then::Nothing);
+        let strips = lane.device.work_counts().sign_strips - before.sign_strips;
+        println!("ORDINARY-DEPTH {name}: sign strips {strips}");
+        assert_eq!(strips, 0, "{name}: sign strips");
+        messages.take_notices();
     }
     let reported = messages.take();
     assert!(

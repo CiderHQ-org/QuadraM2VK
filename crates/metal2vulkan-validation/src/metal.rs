@@ -566,6 +566,8 @@ pub fn indirect_command_descriptor(
             draws,
             max_vertex_buffer_bind_count,
             max_fragment_buffer_bind_count,
+            max_object_buffer_bind_count,
+            max_mesh_buffer_bind_count,
             support_dynamic_attribute_stride,
         } => {
             let types = [
@@ -576,6 +578,11 @@ pub fn indirect_command_descriptor(
                     draws.indexed_patches,
                     MTLIndirectCommandType::DrawIndexedPatches,
                 ),
+                (
+                    draws.mesh_threadgroups,
+                    MTLIndirectCommandType::DrawMeshThreadgroups,
+                ),
+                (draws.mesh_threads, MTLIndirectCommandType::DrawMeshThreads),
             ]
             .into_iter()
             .filter(|&(allowed, _)| allowed)
@@ -585,6 +592,10 @@ pub fn indirect_command_descriptor(
             descriptor.setCommandTypes(types);
             descriptor.setMaxVertexBufferBindCount(max_vertex_buffer_bind_count as usize);
             descriptor.setMaxFragmentBufferBindCount(max_fragment_buffer_bind_count as usize);
+            unsafe {
+                descriptor.setMaxObjectBufferBindCount(max_object_buffer_bind_count as usize);
+                descriptor.setMaxMeshBufferBindCount(max_mesh_buffer_bind_count as usize);
+            }
             (support_dynamic_attribute_stride, 0)
         }
     };

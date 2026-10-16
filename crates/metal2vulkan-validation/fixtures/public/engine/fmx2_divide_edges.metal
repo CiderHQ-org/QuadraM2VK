@@ -1,6 +1,6 @@
-// Owned fixture (WP-FMX2, DESIGN D279): Metal's precise `float` division at the edges a correctly
+// Owned fixture: Metal's precise `float` division at the edges a correctly
 // rounded quotient has to get right, compiled without fast math (`-fno-fast-math`), so `x / y` is
-// an `fdiv float` with no flag. WP-FMX2's probe found the flagless quotient correctly rounded on
+// an `fdiv float` with no flag. A Metal probe found the flagless quotient correctly rounded on
 // every lane, with an `f32` denormal operand read as a zero and a denormal quotient flushed; the
 // lanes here separate where the flush is decided (the quotient rounded to the denormal grid, or
 // to 24 bits first) and test quotients within a hair of a rounding midpoint.

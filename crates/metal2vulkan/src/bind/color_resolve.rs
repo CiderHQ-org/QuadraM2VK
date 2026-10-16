@@ -15,16 +15,36 @@
 //! - **32-bit float**: the samples summed in sample order in `f32`, then times `1 / n`, each
 //!   input, partial sum and the result a denormal flushed to the zero of its sign, and a NaN
 //!   anywhere the canonical `0x7fc00000`.
-//! - **16-bit float, at 2 samples only** (EV `RES-hr1-m3`, an M3 Max under macOS 26.7, every one of
-//!   77824 channels): the exact average of the two samples, a NaN counting 0 and an infinity 65536
-//!   of its sign, rounded to a `half` with a tie toward +∞ (65520 and above is +∞, below -65520 is
-//!   -∞), a zero +0. Metal's rule at 4 samples is not closed: [`ColorResolveFormat::resolves`] is
-//!   false there.
+//!
+//! The probe of an M3 Max under macOS 27.0.1 (our own `resolve.swift`: 131072 texels per format
+//! and count, every pair of codes of a channel of 6 bits or fewer at 2 samples, and a second draw
+//! of the small floats' corners) confirmed those rules and closed the rest, each exact on every
+//! channel it measured, at 2 and 4 samples:
+//!
+//! - **unorm read through a `half`** (the packed 16-bit formats' 4-, 5- and 6-bit channels, and
+//!   the 1-bit alpha): each code `c` of `m = 2^b - 1` becomes the `half` nearest `c / m` (ties to
+//!   even), times `m` rounded toward zero to a `half`: `c`, or the `half` just below `c` where the
+//!   first rounding went down (`half_unorm_deficits`). In units of 2^-11 that is
+//!   `Y = 2048 c - s(c)`, `s(c)` the `half` step below `c` (2^(e+1) for `c` in `(2^e, 2^(e+1))`,
+//!   2^e for `c = 2^e`) where the deficit holds and 0 elsewhere, and the result is
+//!   `floor((sum Y + 1024 n) / (2048 n))`;
+//! - **16-bit float**: a NaN counts 0 and an infinity 65536 of its sign. At 2 samples both are
+//!   floored to the multiple of 2^(e - 14), `e` the larger exponent (each at least -14, an
+//!   infinity's 16), and summed. At 4, samples 0 and 1 are so summed into `A`; then `A` and
+//!   samples 2 and 3 are floored to the multiple of 2^(m - 14) and summed, `m` the largest of their
+//!   exponents, `A`'s as a two's complement adder normalizes it: never above the larger exponent
+//!   of samples 0 and 1 (a carry is not counted), a negative power of two one lower. The sum times
+//!   `1 / n` rounds to a `half` with a tie toward +∞ (65520 and above is +∞, below -65520 is -∞),
+//!   a zero +0. At 2 samples this is the exact average rounded so, as macOS 26.7 measured;
+//! - **`RG11B10Float`**: each channel the 16-bit float rule, then that `half` rounded to nearest
+//!   even onto the channel's grid (6 or 5 mantissa bits), a finite result past the largest value
+//!   (65024, 64512) that value, and an infinity infinite;
+//! - **`RGB9E5Float`**: each channel the 16-bit float rule, then the three `half`s encoded as
+//!   `EXT_texture_shared_exponent` states (its `floor(x + 1/2)` roundings).
 //!
 //! Metal has no texture of more than 4 samples on Apple silicon: at 8 and more the modules apply
-//! the same rules, which no Metal answer measures; a half's rule is not applied there. The formats
-//! of packed 16-bit, `RG11B10Float` and `RGB9E5Float` channels have no closed rule yet
-//! ([`ColorResolveFormat::of`] is `None` for them).
+//! the integer rules, which no Metal answer measures; the 16-bit float rule, and the two
+//! small-float formats' that build on it, are not applied there ([`ResolveRule::resolves`]).
 //!
 //! **The modules** ([`color_resolve_modules`]): a `Vertex` entry `main` that draws one triangle
 //! over the whole viewport from `VertexIndex` 0 to 2 (the sample planes merge's), and a `Fragment`
@@ -33,7 +53,15 @@
 //! channel by its rule, and writes the result to the color output at `Location` 0 as the float
 //! that the resolve texture's format stores as the resolved code: `code / (2^b - 1)` for unorm,
 //! `code / (2^(b-1) - 1)` for snorm, the code's linear value for sRGB (the attachment encodes it),
-//! and the float's own bits.
+//! and the float's own bits. A pixel whose samples all hold the same bits, as every pixel inside
+//! a primitive does where one invocation writes each covered sample, skips the average: there
+//! every rule but the 32-bit float's gives back the sample's code (a 16-bit float's NaN and -0 as
+//! +0), so the module writes that code's float, after a small float's grid step and a shared
+//! exponent's encode as after an average. The 32-bit float's rule always averages, as its sum
+//! rounds; so does a format of unorm and snorm channels alone, whose average costs about what
+//! comparing the samples does: on a Radeon 780M, comparing first took 8% off an `RGBA8Unorm`
+//! 1080p 4x resolve's cost over a plain store where every pixel's samples matched, and added 14%
+//! where one pixel in 16 straddled an edge (`runtime_lane::resolve_rounding`'s cost test).
 //!
 //! - [`ResolveSource::InputAttachment`]: the multisampled attachment as the input attachment of
 //!   index 0 (`InputAttachmentIndex 0`), in its own format, read at each sample. A unorm or snorm
@@ -58,12 +86,13 @@ use crate::device::requirements::Requirements;
 use crate::device::Device;
 use crate::error::{Error, Feature, InternalError, InternalKind, Unsupported};
 use crate::pipeline::sym::{ResourceKind, ResourceSlot, Stage, Symbol};
+use crate::spirv::builder::constructs::{ArmEnd, ArmFn};
 use crate::spirv::builder::{FunctionBuilder, ModuleBuilder};
 use crate::spirv::error::BResult;
 use crate::spirv::ids::{GlobalId, TypeId, Value};
 use crate::spirv::ir::{
     BinOp, ConstBits, Constant, ConvOp, Dim, ExecMode, ExecModel, GlslOp, ImageOperands, ImageType,
-    ImageUsage, IoDir, MemAccess, StorageClass, TexelMemory, Type, TypedModule,
+    ImageUsage, IoDir, MemAccess, StorageClass, TexelMemory, Type, TypedModule, UnOp,
 };
 use crate::vk::Format;
 
@@ -76,33 +105,88 @@ use super::sample_planes::PlanesCopy;
 pub enum ResolveRule {
     /// A unorm code of `bits` bits.
     Unorm { bits: u8 },
+    /// A unorm code of `bits` bits that Metal reads through a `half`: a channel of a packed
+    /// 16-bit format.
+    HalfUnorm { bits: u8 },
     /// A snorm code of `bits` bits.
     Snorm { bits: u8 },
     /// An 8-bit sRGB code.
     Srgb,
     /// A 32-bit float.
     Float32,
-    /// A 16-bit float, whose rule Metal's measured resolve closes at 2 samples only
-    /// ([`ColorResolveFormat::resolves`]).
+    /// A 16-bit float, whose rule Metal's measured resolve closes at 2 and 4 samples
+    /// ([`ResolveRule::resolves`]).
     Float16,
+    /// An unsigned float of a 5-bit exponent and `mantissa` bits (`RG11B10Float`'s), resolved as
+    /// a 16-bit float and rounded onto its own grid.
+    SmallFloat { mantissa: u8 },
+    /// The 9-bit mantissa of a channel that shares the texel's 5-bit exponent at bits 27 to 31
+    /// (`RGB9E5Float`'s), resolved as a 16-bit float and encoded with the texel's other channels.
+    SharedExponent,
 }
 
 impl ResolveRule {
-    /// The channel's bits in a texel.
+    /// The channel's bits in a texel (a shared exponent's mantissa alone).
     pub fn bits(self) -> u8 {
         match self {
-            ResolveRule::Unorm { bits } | ResolveRule::Snorm { bits } => bits,
+            ResolveRule::Unorm { bits }
+            | ResolveRule::HalfUnorm { bits }
+            | ResolveRule::Snorm { bits } => bits,
             ResolveRule::Srgb => 8,
             ResolveRule::Float32 => 32,
             ResolveRule::Float16 => 16,
+            ResolveRule::SmallFloat { mantissa } => mantissa + 5,
+            ResolveRule::SharedExponent => 9,
         }
     }
 
-    /// Whether Metal's rule of this channel holds at `samples`: every count but a 16-bit float's,
-    /// which is closed at 2 samples only.
-    pub fn resolves(self, samples: u32) -> bool {
-        self != ResolveRule::Float16 || samples == 2
+    /// Whether the rule gives back the sample where every sample of a pixel holds it: every rule's
+    /// but a 32-bit float's, whose sum rounds (`3x` at 4 samples) or overflows (`2x`)
+    /// (`resolve_alike`).
+    fn keeps_alike(self) -> bool {
+        self != ResolveRule::Float32
     }
+
+    /// Whether the rule's average costs about what comparing a pixel's samples costs: a unorm or
+    /// snorm channel's few integer operations a sample. A format of such channels alone averages
+    /// without comparing first (`resolve_texel`).
+    fn averages_cheaply(self) -> bool {
+        matches!(self, ResolveRule::Unorm { .. } | ResolveRule::Snorm { .. })
+    }
+
+    /// Whether Metal's rule of this channel holds at `samples`: an integer rule's at every count,
+    /// a 16-bit float's, and so a small float's, at 2 and 4, the counts Metal measures.
+    pub fn resolves(self, samples: u32) -> bool {
+        match self {
+            ResolveRule::Float16 | ResolveRule::SmallFloat { .. } | ResolveRule::SharedExponent => {
+                samples == 2 || samples == 4
+            }
+            _ => true,
+        }
+    }
+}
+
+/// The codes of a unorm channel of `bits` bits (at most 6) whose `half` Metal reads below the
+/// code's value: bit `c` is set where the `half` nearest `c / (2^bits - 1)` (ties to even, none of
+/// which a code reaches) lies below it (the module docs).
+const fn half_unorm_deficits(bits: u32) -> u64 {
+    let m = (1u64 << bits) - 1;
+    let mut mask = 0u64;
+    let mut c = 1u64;
+    while c < m {
+        // The binade of c / m: 2^-k <= c / m < 2^(1-k), whose `half` step is 2^(-k-10).
+        let mut k = 1;
+        while c << k < m {
+            k += 1;
+        }
+        let scaled = c << (k + 10);
+        let rem = scaled % m;
+        if rem != 0 && 2 * rem < m {
+            mask |= 1 << c;
+        }
+        c += 1;
+    }
+    mask
 }
 
 /// One channel of a format: its rule and where its bits lie in a texel (counted from the
@@ -131,11 +215,19 @@ const fn at(rule: ResolveRule, offset: u8) -> Option<ResolveChannel> {
 
 impl ColorResolveFormat {
     /// The resolve of `format`: Metal's 8-, 10- and 16-bit unorm formats with their 2-bit alpha,
-    /// its 8- and 16-bit snorm ones, its 8-bit sRGB ones, its 32-bit float ones, and its 16-bit
-    /// float ones, whose rule holds at 2 samples only ([`ColorResolveFormat::resolves`]), as Vulkan
-    /// formats. `None` for another format (the module docs).
+    /// its 8- and 16-bit snorm ones, its 8-bit sRGB ones, its 32-bit float ones, its packed 16-bit
+    /// unorm ones (each Vulkan layout that holds one, its red and blue twin included), and its
+    /// 16-bit float, `RG11B10Float` and `RGB9E5Float` ones, whose rules hold at 2 and 4 samples
+    /// ([`ColorResolveFormat::resolves`]), as Vulkan formats. `None` for another format (the
+    /// module docs).
     pub fn of(format: Format) -> Option<ColorResolveFormat> {
-        use ResolveRule::{Float16 as F16, Float32 as F32, Srgb as S};
+        use ResolveRule::{Float16 as F16, Float32 as F32, SharedExponent as E9, Srgb as S};
+        const H1: ResolveRule = ResolveRule::HalfUnorm { bits: 1 };
+        const H4: ResolveRule = ResolveRule::HalfUnorm { bits: 4 };
+        const H5: ResolveRule = ResolveRule::HalfUnorm { bits: 5 };
+        const H6: ResolveRule = ResolveRule::HalfUnorm { bits: 6 };
+        const F11: ResolveRule = ResolveRule::SmallFloat { mantissa: 6 };
+        const F10: ResolveRule = ResolveRule::SmallFloat { mantissa: 5 };
         const U8: ResolveRule = ResolveRule::Unorm { bits: 8 };
         const N8: ResolveRule = ResolveRule::Snorm { bits: 8 };
         const U16: ResolveRule = ResolveRule::Unorm { bits: 16 };
@@ -168,6 +260,16 @@ impl ColorResolveFormat {
             Format::R16_SFLOAT => [at(F16, 0), None, None, None],
             Format::R16G16_SFLOAT => [at(F16, 0), at(F16, 16), None, None],
             Format::R16G16B16A16_SFLOAT => [at(F16, 0), at(F16, 16), at(F16, 32), at(F16, 48)],
+            // Vulkan's packed formats are named from the most significant bit.
+            Format::R5G6B5_UNORM_PACK16 => [at(H5, 11), at(H6, 5), at(H5, 0), None],
+            Format::B5G6R5_UNORM_PACK16 => [at(H5, 0), at(H6, 5), at(H5, 11), None],
+            Format::R5G5B5A1_UNORM_PACK16 => [at(H5, 11), at(H5, 6), at(H5, 1), at(H1, 0)],
+            Format::B5G5R5A1_UNORM_PACK16 => [at(H5, 1), at(H5, 6), at(H5, 11), at(H1, 0)],
+            Format::A1R5G5B5_UNORM_PACK16 => [at(H5, 10), at(H5, 5), at(H5, 0), at(H1, 15)],
+            Format::R4G4B4A4_UNORM_PACK16 => [at(H4, 12), at(H4, 8), at(H4, 4), at(H4, 0)],
+            Format::B4G4R4A4_UNORM_PACK16 => [at(H4, 4), at(H4, 8), at(H4, 12), at(H4, 0)],
+            Format::B10G11R11_UFLOAT_PACK32 => [at(F11, 0), at(F11, 11), at(F10, 22), None],
+            Format::E5B9G9R9_UFLOAT_PACK32 => [at(E9, 0), at(E9, 9), at(E9, 18), None],
             _ => return None,
         };
         Some(ColorResolveFormat { format, channels })
@@ -184,12 +286,21 @@ impl ColorResolveFormat {
     }
 
     /// Whether Metal's rules resolve the format at `samples` ([`ResolveRule::resolves`] of every
-    /// channel): a 16-bit float format's at 2 samples only, any other's at every count.
+    /// channel): a 16-bit float, `RG11B10Float` or `RGB9E5Float` format's at 2 and 4 samples, any
+    /// other's at every count.
     pub fn resolves(self, samples: u32) -> bool {
         self.channels
             .iter()
             .flatten()
             .all(|c| c.rule.resolves(samples))
+    }
+
+    /// Whether the channels share an exponent (`RGB9E5Float`'s, at bits 27 to 31).
+    fn shared_exponent(self) -> bool {
+        self.channels
+            .iter()
+            .flatten()
+            .any(|c| c.rule == ResolveRule::SharedExponent)
     }
 
     /// Whether a channel is sRGB.
@@ -447,26 +558,69 @@ fn element(f: &mut FunctionBuilder<'_>, table: GlobalId, index: Value) -> BResul
     f.load(at, MemAccess::default())
 }
 
-/// The count of the 255 ascending entries of `table` that `x` reaches (`at_least(x, entry)`): a
-/// binary search of eight steps.
-fn rank(
+/// The cubic in `q = x^(1/4)` that [`srgb_estimate`] evaluates, lowest power first: a least
+/// squares fit of `255 (1.055 q^(5/3) - 0.055)`, the sRGB encode of `x` in codes (IEC 61966-2-1),
+/// over `q` from `0.0031308^(1/4)` to 1, within 0.12 of it there.
+const SRGB_CURVE: [f32; 4] = [-18.61511, 66.77221, 240.6806, -33.919685];
+
+/// An estimate of `255 encode(x)`, the sRGB encode of the linear `x` (from 0 to 1) in codes, within
+/// 0.12 of it: `255 · 12.92 x` up to 0.0031308, else [`SRGB_CURVE`] at `sqrt(sqrt(x))`.
+fn srgb_estimate(f: &mut FunctionBuilder<'_>, t: Types, x: Value) -> BResult<Value> {
+    let knee = float(f, t, 0.0031308)?;
+    let low = f.binary(BinOp::FOrdLessThanEqual, x, knee)?;
+    let slope = float(f, t, 255.0 * 12.92)?;
+    let line = f.binary(BinOp::FMul, x, slope)?;
+    let root = f.glsl(GlslOp::Sqrt, &[x])?;
+    let q = f.glsl(GlslOp::Sqrt, &[root])?;
+    let [c0, c1, c2, c3] = SRGB_CURVE;
+    let mut curve = float(f, t, c3)?;
+    for c in [c2, c1, c0] {
+        let product = f.binary(BinOp::FMul, curve, q)?;
+        let c = float(f, t, c)?;
+        curve = f.binary(BinOp::FAdd, product, c)?;
+    }
+    f.select(low, line, curve)
+}
+
+/// The count of the 255 ascending entries of `table` that `x` reaches (`at_least(x, entry)`), from
+/// `estimate`, a float that rounds to within one of that count: the estimate rounded and held to
+/// `[0, 255]`, one lower where `x` does not reach the entry below it, one higher where `x` reaches
+/// the entry it names. Exact for any such estimate, whatever its error.
+fn corrected_rank(
     f: &mut FunctionBuilder<'_>,
     t: Types,
     table: GlobalId,
     x: Value,
+    estimate: Value,
     at_least: BinOp,
 ) -> BResult<Value> {
-    let mut lo = uint(f, t, 0)?;
-    for step in [128u32, 64, 32, 16, 8, 4, 2, 1] {
-        let less = uint(f, t, step - 1)?;
-        let index = f.binary(BinOp::IAdd, lo, less)?;
-        let entry = element(f, table, index)?;
-        let reached = f.binary(at_least, x, entry)?;
-        let size = uint(f, t, step)?;
-        let up = f.binary(BinOp::IAdd, lo, size)?;
-        lo = f.select(reached, up, lo)?;
-    }
-    Ok(lo)
+    let lowest = float(f, t, 0.0)?;
+    let highest = float(f, t, 255.0)?;
+    let e = f.glsl(GlslOp::RoundEven, &[estimate])?;
+    let e = f.glsl(GlslOp::FClamp, &[e, lowest, highest])?;
+    let e = f.convert(ConvOp::ConvertFToU, e, t.u32_)?;
+    let zero = uint(f, t, 0)?;
+    let one = uint(f, t, 1)?;
+    // Entry `e - 1`, where `e` is above 0.
+    let above_first = f.binary(BinOp::INotEqual, e, zero)?;
+    let lifted = f.glsl(GlslOp::UMax, &[e, one])?;
+    let below_at = f.binary(BinOp::ISub, lifted, one)?;
+    let below = element(f, table, below_at)?;
+    let reaches_below = f.binary(at_least, x, below)?;
+    let short = f.unary(UnOp::LogicalNot, reaches_below)?;
+    let down = f.binary(BinOp::LogicalAnd, above_first, short)?;
+    // Entry `e`, where `e` is below 255.
+    let entries = uint(f, t, 255)?;
+    let inside = f.binary(BinOp::ULessThan, e, entries)?;
+    let last = uint(f, t, 254)?;
+    let at_index = f.glsl(GlslOp::UMin, &[e, last])?;
+    let at = element(f, table, at_index)?;
+    let reaches = f.binary(at_least, x, at)?;
+    let up = f.binary(BinOp::LogicalAnd, inside, reaches)?;
+    let lower = f.binary(BinOp::ISub, e, one)?;
+    let higher = f.binary(BinOp::IAdd, e, one)?;
+    let moved = f.select(up, higher, e)?;
+    f.select(down, lower, moved)
 }
 
 /// The code of `channel` in a sample's `texel` read from `source` (the module docs): a `u32`
@@ -488,7 +642,7 @@ fn code(
         let count = uint(f, t, bits)?;
         return match channel.rule {
             ResolveRule::Float32 => Ok(word),
-            ResolveRule::Unorm { .. } | ResolveRule::Srgb => {
+            ResolveRule::Unorm { .. } | ResolveRule::HalfUnorm { .. } | ResolveRule::Srgb => {
                 f.bit_field_extract(false, word, shift, count)
             }
             // The half's bits, unpacked to the `float` it is (exactly), as that float's bits.
@@ -496,6 +650,29 @@ fn code(
                 let half = f.bit_field_extract(false, word, shift, count)?;
                 let pair = f.glsl(GlslOp::UnpackHalf2x16, &[half])?;
                 let x = f.composite_extract(pair, &[0])?;
+                f.convert(ConvOp::Bitcast, x, t.u32_)
+            }
+            // A small float's exponent is a half's and its mantissa a half's leading bits: its
+            // bits moved up to a half's (the sign 0), unpacked to the `float` it is.
+            ResolveRule::SmallFloat { mantissa } => {
+                let small = f.bit_field_extract(false, word, shift, count)?;
+                let up = uint(f, t, 10 - u32::from(mantissa))?;
+                let half = f.binary(BinOp::ShiftLeftLogical, small, up)?;
+                let pair = f.glsl(GlslOp::UnpackHalf2x16, &[half])?;
+                let x = f.composite_extract(pair, &[0])?;
+                f.convert(ConvOp::Bitcast, x, t.u32_)
+            }
+            // The mantissa times 2^(E - 24), `E` the texel's exponent at bits 27 to 31: exact.
+            ResolveRule::SharedExponent => {
+                let mantissa = f.bit_field_extract(false, word, shift, count)?;
+                let at = uint(f, t, 27)?;
+                let five = uint(f, t, 5)?;
+                let exponent = f.bit_field_extract(false, word, at, five)?;
+                let bias = uint(f, t, 127 - 24)?;
+                let field = f.binary(BinOp::IAdd, exponent, bias)?;
+                let scale = power_of_two(f, t, field)?;
+                let m = f.convert(ConvOp::ConvertUToF, mantissa, t.f32_)?;
+                let x = f.binary_no_contraction(BinOp::FMul, m, scale)?;
                 f.convert(ConvOp::Bitcast, x, t.u32_)
             }
             ResolveRule::Snorm { .. } => {
@@ -509,8 +686,11 @@ fn code(
     }
     let lane = f.composite_extract(texel, &[component])?;
     match channel.rule {
-        ResolveRule::Float32 | ResolveRule::Float16 => f.convert(ConvOp::Bitcast, lane, t.u32_),
-        ResolveRule::Unorm { .. } => {
+        ResolveRule::Float32
+        | ResolveRule::Float16
+        | ResolveRule::SmallFloat { .. }
+        | ResolveRule::SharedExponent => f.convert(ConvOp::Bitcast, lane, t.u32_),
+        ResolveRule::Unorm { .. } | ResolveRule::HalfUnorm { .. } => {
             let scale = float(f, t, ((1u64 << bits) - 1) as f32)?;
             let half = float(f, t, 0.5)?;
             let x = f.binary(BinOp::FMul, lane, scale)?;
@@ -525,7 +705,15 @@ fn code(
         }
         ResolveRule::Srgb => {
             let tables = srgb.ok_or(crate::spirv::error::BuildError::IdSpaceExhausted)?;
-            rank(f, t, tables.midpoints, lane, BinOp::FOrdGreaterThanEqual)
+            let estimate = srgb_estimate(f, t, lane)?;
+            corrected_rank(
+                f,
+                t,
+                tables.midpoints,
+                lane,
+                estimate,
+                BinOp::FOrdGreaterThanEqual,
+            )
         }
     }
 }
@@ -669,31 +857,157 @@ fn resolve(
             }
             let count = uint(f, t, n)?;
             let mean = f.binary(BinOp::UDiv, sum, count)?;
-            let code = rank(f, t, tables.thresholds, mean, BinOp::UGreaterThanEqual)?;
+            // The 12-bit value as a linear value, `mean / 4095`, estimates its code.
+            let real = f.convert(ConvOp::ConvertUToF, mean, t.f32_)?;
+            let unit = float(f, t, 1.0 / 4095.0)?;
+            let linear = f.binary(BinOp::FMul, real, unit)?;
+            let estimate = srgb_estimate(f, t, linear)?;
+            let code = corrected_rank(
+                f,
+                t,
+                tables.thresholds,
+                mean,
+                estimate,
+                BinOp::UGreaterThanEqual,
+            )?;
             element(f, tables.decoded, code)
         }
+        ResolveRule::HalfUnorm { .. } => resolve_half_unorm(f, t, bits, codes),
         ResolveRule::Float32 => {
             let bits = resolve_float(f, t, codes)?;
             f.convert(ConvOp::Bitcast, bits, t.f32_)
         }
-        ResolveRule::Float16 => resolve_half(f, t, codes),
+        // A shared exponent's channel is encoded with the texel's others after
+        // ([`encode_shared_exponent`]).
+        ResolveRule::Float16 | ResolveRule::SharedExponent => resolve_half(f, t, codes),
+        ResolveRule::SmallFloat { mantissa } => {
+            let half = resolve_half(f, t, codes)?;
+            small_float(f, t, half, u32::from(mantissa))
+        }
     }
 }
 
-/// Metal's resolve of two 16-bit float samples, each the bits of the `float` it reads as (the
+/// Metal's resolve of the codes of a unorm channel of `bits` bits read through a `half` (the
+/// module docs), as the output float `code / (2^bits - 1)`: each code `c` is
+/// `Y = 2048 c - s(c)` in units of 2^-11, `s(c)` the `half` step below `c` where
+/// `half_unorm_deficits` holds `c` and 0 elsewhere, and the code `(sum Y + 1024 n) / (2048 n)`.
+fn resolve_half_unorm(
+    f: &mut FunctionBuilder<'_>,
+    t: Types,
+    bits: u32,
+    codes: &[Value],
+) -> BResult<Value> {
+    let n = codes.len() as u32;
+    let deficits = half_unorm_deficits(bits);
+    let zero = uint(f, t, 0)?;
+    let one = uint(f, t, 1)?;
+    let eleven = uint(f, t, 11)?;
+    let low = uint(f, t, deficits as u32)?;
+    let high = uint(f, t, (deficits >> 32) as u32)?;
+    let mut sum = uint(f, t, n * 1024)?;
+    for &c in codes {
+        let scaled = f.binary(BinOp::ShiftLeftLogical, c, eleven)?;
+        let y = if deficits == 0 {
+            scaled
+        } else {
+            // The deficit's bit of `c` (below 64): the mask's word `c / 32`, bit `c % 32`.
+            let word = if deficits >> 32 == 0 {
+                low
+            } else {
+                let five = uint(f, t, 5)?;
+                let index = f.binary(BinOp::ShiftRightLogical, c, five)?;
+                let upper = f.binary(BinOp::INotEqual, index, zero)?;
+                f.select(upper, high, low)?
+            };
+            let thirty_one = uint(f, t, 31)?;
+            let bit = f.binary(BinOp::BitwiseAnd, c, thirty_one)?;
+            let shifted = f.binary(BinOp::ShiftRightLogical, word, bit)?;
+            let flag = f.binary(BinOp::BitwiseAnd, shifted, one)?;
+            let deficit = f.binary(BinOp::INotEqual, flag, zero)?;
+            // The `half` step below `c` in units of 2^-11: 2^e at `c = 2^e`, else 2^(e+1), `e`
+            // its leading bit's (`c | 1`, so a code 0, which has no deficit, names a bit too).
+            let odd = f.binary(BinOp::BitwiseOr, c, one)?;
+            let lead = f.glsl(GlslOp::FindUMsb, &[odd])?;
+            let power = f.binary(BinOp::ShiftLeftLogical, one, lead)?;
+            let exact = f.binary(BinOp::IEqual, c, power)?;
+            let doubled = f.binary(BinOp::ShiftLeftLogical, power, one)?;
+            let step = f.select(exact, power, doubled)?;
+            let step = f.select(deficit, step, zero)?;
+            f.binary(BinOp::ISub, scaled, step)?
+        };
+        sum = f.binary(BinOp::IAdd, sum, y)?;
+    }
+    let denominator = uint(f, t, n * 2048)?;
+    let code = f.binary(BinOp::UDiv, sum, denominator)?;
+    let code = f.convert(ConvOp::ConvertUToF, code, t.f32_)?;
+    let scale = float(f, t, (1.0 / ((1u64 << bits) - 1) as f64) as f32)?;
+    f.binary(BinOp::FMul, code, scale)
+}
+
+/// The `float` 2^(field - 127) of the biased exponent `field`, a `u32` from 1 to 254.
+fn power_of_two(f: &mut FunctionBuilder<'_>, t: Types, field: Value) -> BResult<Value> {
+    let shift = uint(f, t, 23)?;
+    let bits = f.binary(BinOp::ShiftLeftLogical, field, shift)?;
+    f.convert(ConvOp::Bitcast, bits, t.f32_)
+}
+
+/// The biased exponent field of the float bits `x`, a `u32`.
+fn exponent_field(f: &mut FunctionBuilder<'_>, t: Types, x: Value) -> BResult<Value> {
+    let magnitude = uint(f, t, 0x7fff_ffff)?;
+    let m = f.binary(BinOp::BitwiseAnd, x, magnitude)?;
+    let shift = uint(f, t, 23)?;
+    f.binary(BinOp::ShiftRightLogical, m, shift)
+}
+
+/// The sum of the `float`s `values`, each floored to the multiple of 2^(e - 14), `e` the biased
+/// exponent `field` less 127 (from -14 to 16): `floor(v · 2^(14 - e)) · 2^(e - 14)`, each step
+/// exact, and the sum too, a multiple of 2^(e - 14) below 2^(e + 3).
+fn floored_sum(
+    f: &mut FunctionBuilder<'_>,
+    t: Types,
+    values: &[Value],
+    field: Value,
+) -> BResult<Value> {
+    let fourteen = uint(f, t, 14)?;
+    let step_field = f.binary(BinOp::ISub, field, fourteen)?;
+    let step = power_of_two(f, t, step_field)?;
+    let both_biases = uint(f, t, 127 + 127 + 14)?;
+    let inverse_field = f.binary(BinOp::ISub, both_biases, field)?;
+    let inverse = power_of_two(f, t, inverse_field)?;
+    let mut sum: Option<Value> = None;
+    for &v in values {
+        let units = f.binary_no_contraction(BinOp::FMul, v, inverse)?;
+        let units = f.glsl(GlslOp::Floor, &[units])?;
+        let floored = f.binary_no_contraction(BinOp::FMul, units, step)?;
+        sum = Some(match sum {
+            None => floored,
+            Some(acc) => f.binary_no_contraction(BinOp::FAdd, acc, floored)?,
+        });
+    }
+    sum.ok_or(crate::spirv::error::BuildError::IdSpaceExhausted)
+}
+
+/// Metal's resolve of 2 or 4 16-bit float samples, each the bits of the `float` it reads as (the
 /// module docs), as the `float` of the resolved `half`, which the attachment stores exactly.
-/// A NaN counts 0 and an infinity 65536 of its sign. The two `half`s' sum in `f32` can round only
-/// where their exponents lie more than 13 apart, where it lies far from every tie of the result's
-/// `half` grid, so the rounding below sees the exact sum's side of each tie; it and the halving
-/// are otherwise exact, and every nonzero sum is a normal `float`, which no device flushes. The
-/// average `x` rounds to the `half` grid with a tie toward +∞ as `floor(x · (1/u) + 1/2) · u`,
-/// `u` the grid's step at `x` (2^-24 below 2^-14, else 2^(e - 10) for `x` in `[2^e, 2^(e+1))`):
-/// each step exact in `f32`. A result of 2^16 or more is an infinity; a zero is +0.
+///
+/// A NaN counts 0 and an infinity 65536 of its sign; each sample's exponent is its `float`'s, at
+/// least -14 (an infinity's 16). Every step below is exact in `f32` ([`floored_sum`]): at 2
+/// samples the sum is the two floored to the multiple of 2^(e - 14), `e` the larger exponent; at
+/// 4, samples 0 and 1 are so summed into `A`, whose exponent is its `float`'s, one lower for a
+/// negative power of two (a two's complement adder's), and never above the larger of theirs;
+/// then `A` and samples 2 and 3 are floored to the multiple of 2^(m - 14), `m` the largest of the
+/// three exponents, and summed. The sum times `1 / n` (exact) rounds to the `half` grid with a tie
+/// toward +∞ as `floor(x · (1/u) + 1/2) · u`, `u` the grid's step at `x` (2^-24 below 2^-14,
+/// else 2^(e - 10) for `x` in `[2^e, 2^(e+1))`): each step exact, and every nonzero value a
+/// normal `float`, which no device flushes. A result of 2^16 or more is an infinity; a zero is
+/// +0.
 fn resolve_half(f: &mut FunctionBuilder<'_>, t: Types, codes: &[Value]) -> BResult<Value> {
     let sign = uint(f, t, 0x8000_0000)?;
     let zero_bits = uint(f, t, 0)?;
     let big = uint(f, t, 0x4780_0000)?; // 65536.0
-    let mut sum: Option<Value> = None;
+    let lowest = uint(f, t, 127 - 14)?;
+    let mut samples = Vec::with_capacity(codes.len());
+    let mut exponents = Vec::with_capacity(codes.len());
     for &x in codes {
         let nan = is_nan(f, t, x)?;
         let inf = is_inf(f, t, x)?;
@@ -701,32 +1015,53 @@ fn resolve_half(f: &mut FunctionBuilder<'_>, t: Types, codes: &[Value]) -> BResu
         let signed_big = f.binary(BinOp::BitwiseOr, s, big)?;
         let x = f.select(inf, signed_big, x)?;
         let x = f.select(nan, zero_bits, x)?;
-        let x = f.convert(ConvOp::Bitcast, x, t.f32_)?;
-        sum = Some(match sum {
-            None => x,
-            Some(acc) => f.binary_no_contraction(BinOp::FAdd, acc, x)?,
-        });
+        let field = exponent_field(f, t, x)?;
+        exponents.push(f.glsl(GlslOp::UMax, &[field, lowest])?);
+        samples.push(f.convert(ConvOp::Bitcast, x, t.f32_)?);
     }
-    let sum = sum.ok_or(crate::spirv::error::BuildError::IdSpaceExhausted)?;
+    let sum = match (samples.as_slice(), exponents.as_slice()) {
+        (&[a, b], &[ea, eb]) => {
+            let e = f.glsl(GlslOp::UMax, &[ea, eb])?;
+            floored_sum(f, t, &[a, b], e)?
+        }
+        (&[a, b, c, d], &[ea, eb, ec, ed]) => {
+            let pair = f.glsl(GlslOp::UMax, &[ea, eb])?;
+            let first = floored_sum(f, t, &[a, b], pair)?;
+            // `A`'s exponent as a two's complement adder normalizes it: a negative power of two
+            // (mantissa 0) one lower, a zero's field 0 below every sample's.
+            let bits = f.convert(ConvOp::Bitcast, first, t.u32_)?;
+            let field = exponent_field(f, t, bits)?;
+            let negative = f.binary(BinOp::UGreaterThanEqual, bits, sign)?;
+            let fraction = uint(f, t, 0x007f_ffff)?;
+            let mantissa = f.binary(BinOp::BitwiseAnd, bits, fraction)?;
+            let power = f.binary(BinOp::IEqual, mantissa, zero_bits)?;
+            let nonzero = f.binary(BinOp::INotEqual, field, zero_bits)?;
+            let lower = f.binary(BinOp::LogicalAnd, negative, power)?;
+            let lower = f.binary(BinOp::LogicalAnd, lower, nonzero)?;
+            let one = uint(f, t, 1)?;
+            let below = f.binary(BinOp::ISub, field, one)?;
+            let field = f.select(lower, below, field)?;
+            let field = f.glsl(GlslOp::UMin, &[field, pair])?;
+            let rest = f.glsl(GlslOp::UMax, &[ec, ed])?;
+            let e = f.glsl(GlslOp::UMax, &[field, rest])?;
+            floored_sum(f, t, &[first, c, d], e)?
+        }
+        _ => return Err(crate::spirv::error::BuildError::IdSpaceExhausted),
+    };
     let scale = float(f, t, 1.0 / codes.len() as f32)?;
     let x = f.binary_no_contraction(BinOp::FMul, sum, scale)?;
     // The grid's step: 2^(max(e, -14) - 10), from the exponent field of |x|'s bits.
     let bits = f.convert(ConvOp::Bitcast, x, t.u32_)?;
     let magnitude = uint(f, t, 0x7fff_ffff)?;
-    let m = f.binary(BinOp::BitwiseAnd, bits, magnitude)?;
-    let shift = uint(f, t, 23)?;
-    let field = f.binary(BinOp::ShiftRightLogical, m, shift)?;
-    let lowest = uint(f, t, 127 - 14)?;
+    let field = exponent_field(f, t, bits)?;
     let field = f.glsl(GlslOp::UMax, &[field, lowest])?;
     let ten = uint(f, t, 10)?;
     let step_field = f.binary(BinOp::ISub, field, ten)?;
-    let step = f.binary(BinOp::ShiftLeftLogical, step_field, shift)?;
-    let step = f.convert(ConvOp::Bitcast, step, t.f32_)?;
+    let step = power_of_two(f, t, step_field)?;
     // `1 / u`, a power of two too, so each product is exact.
     let twice_bias = uint(f, t, 254)?;
     let inverse_field = f.binary(BinOp::ISub, twice_bias, step_field)?;
-    let inverse = f.binary(BinOp::ShiftLeftLogical, inverse_field, shift)?;
-    let inverse = f.convert(ConvOp::Bitcast, inverse, t.f32_)?;
+    let inverse = power_of_two(f, t, inverse_field)?;
     let units = f.binary_no_contraction(BinOp::FMul, x, inverse)?;
     let half = float(f, t, 0.5)?;
     let units = f.binary_no_contraction(BinOp::FAdd, units, half)?;
@@ -743,6 +1078,262 @@ fn resolve_half(f: &mut FunctionBuilder<'_>, t: Types, codes: &[Value]) -> BResu
     let is_zero = f.binary(BinOp::IEqual, rm, zero_bits)?;
     let out = f.select(is_zero, zero_bits, out)?;
     f.convert(ConvOp::Bitcast, out, t.f32_)
+}
+
+/// `value`, the resolved `half` of an unsigned small float of `mantissa` bits (a `float`, +0 or
+/// more, or +∞), rounded as Metal does (the module docs): to nearest even onto the small float's
+/// grid (2^-14 its least exponent, as a `half`'s), a finite result past the largest finite value
+/// that value, an infinity infinite. Each step is exact.
+fn small_float(
+    f: &mut FunctionBuilder<'_>,
+    t: Types,
+    value: Value,
+    mantissa: u32,
+) -> BResult<Value> {
+    let bits = f.convert(ConvOp::Bitcast, value, t.u32_)?;
+    let inf_bits = uint(f, t, 0x7f80_0000)?;
+    let infinite = f.binary(BinOp::IEqual, bits, inf_bits)?;
+    let field = exponent_field(f, t, bits)?;
+    let lowest = uint(f, t, 127 - 14)?;
+    let field = f.glsl(GlslOp::UMax, &[field, lowest])?;
+    let width = uint(f, t, mantissa)?;
+    let step_field = f.binary(BinOp::ISub, field, width)?;
+    let step = power_of_two(f, t, step_field)?;
+    let twice_bias = uint(f, t, 254)?;
+    let inverse_field = f.binary(BinOp::ISub, twice_bias, step_field)?;
+    let inverse = power_of_two(f, t, inverse_field)?;
+    let units = f.binary_no_contraction(BinOp::FMul, value, inverse)?;
+    let units = f.glsl(GlslOp::RoundEven, &[units])?;
+    let rounded = f.binary_no_contraction(BinOp::FMul, units, step)?;
+    let largest = (2.0 - (-(mantissa as f64)).exp2()) * 32768.0;
+    let largest = float(f, t, largest as f32)?;
+    let rounded = f.glsl(GlslOp::FMin, &[rounded, largest])?;
+    let infinity = f.convert(ConvOp::Bitcast, inf_bits, t.f32_)?;
+    f.select(infinite, infinity, rounded)
+}
+
+/// The resolved `half`s `channels` (red, green, blue: `float`s from +0 to 65408, the largest
+/// sample) of a shared-exponent texel, encoded as `EXT_texture_shared_exponent` states and
+/// returned as the `float`s the texel then holds, which the attachment stores exactly: each
+/// clamped to 65408, the exponent `max(-16, floor(log2(max))) + 16` (one more where the largest
+/// channel's mantissa `floor(max / 2^(E - 24) + 1/2)` reaches 512), each mantissa
+/// `floor(c / 2^(E - 24) + 1/2)`. Each step is exact in `f32`; an addition of 1/2 that rounds is
+/// one to a value below 2^-13, whose floor is 0 either way.
+fn encode_shared_exponent(
+    f: &mut FunctionBuilder<'_>,
+    t: Types,
+    channels: [Value; 3],
+) -> BResult<[Value; 3]> {
+    let largest = float(f, t, 65408.0)?;
+    let mut clamped = [channels[0]; 3];
+    for (out, &c) in clamped.iter_mut().zip(channels.iter()) {
+        *out = f.glsl(GlslOp::FMin, &[c, largest])?;
+    }
+    let most = f.glsl(GlslOp::FMax, &[clamped[0], clamped[1]])?;
+    let most = f.glsl(GlslOp::FMax, &[most, clamped[2]])?;
+    // The shared exponent E as the `float` exponent field E + 127 - 16: the largest channel's
+    // field, at least 127 - 16.
+    let bits = f.convert(ConvOp::Bitcast, most, t.u32_)?;
+    let field = exponent_field(f, t, bits)?;
+    let lowest = uint(f, t, 127 - 16)?;
+    let field = f.glsl(GlslOp::UMax, &[field, lowest])?;
+    let half = float(f, t, 0.5)?;
+    // The step 2^(E - 24) is the field (E + 111) less 8, its inverse the field 254 less that.
+    let scaled = |f: &mut FunctionBuilder<'_>, field: Value| -> BResult<(Value, Value)> {
+        let eight = uint(f, t, 8)?;
+        let step_field = f.binary(BinOp::ISub, field, eight)?;
+        let step = power_of_two(f, t, step_field)?;
+        let twice_bias = uint(f, t, 254)?;
+        let inverse_field = f.binary(BinOp::ISub, twice_bias, step_field)?;
+        let inverse = power_of_two(f, t, inverse_field)?;
+        Ok((step, inverse))
+    };
+    let round = |f: &mut FunctionBuilder<'_>, c: Value, inverse: Value| -> BResult<Value> {
+        let units = f.binary_no_contraction(BinOp::FMul, c, inverse)?;
+        let units = f.binary_no_contraction(BinOp::FAdd, units, half)?;
+        f.glsl(GlslOp::Floor, &[units])
+    };
+    let (_, inverse) = scaled(f, field)?;
+    let top = round(f, most, inverse)?;
+    let full = float(f, t, 512.0)?;
+    let carried = f.binary(BinOp::FOrdEqual, top, full)?;
+    let one = uint(f, t, 1)?;
+    let up = f.binary(BinOp::IAdd, field, one)?;
+    let field = f.select(carried, up, field)?;
+    let (step, inverse) = scaled(f, field)?;
+    let mut out = clamped;
+    for (o, &c) in out.iter_mut().zip(clamped.iter()) {
+        let units = round(f, c, inverse)?;
+        *o = f.binary_no_contraction(BinOp::FMul, units, step)?;
+    }
+    Ok(out)
+}
+
+/// The resolved output float of `channel` where every sample holds `code`: what [`resolve`] gives
+/// for `n` copies of it, at every count the rule holds at, without the average (the module docs):
+///
+/// - unorm: `(n c + n / 2) / n = c`, as `floor(n / 2) < n`;
+/// - snorm: `floor((2 n c + n) / 2n) = c + floor(1 / 2) = c`;
+/// - sRGB: the linear value `L` of `c` averages to `L`, and Metal's encode of `L` is `c` for every
+///   code (`SRGB_RESOLVE_THRESHOLDS` against `SRGB_RESOLVE_LINEAR`, which a test checks);
+/// - unorm through a `half`: `floor((Y + 1024) / 2048) = c`, as `Y = 2048 c - s(c)` and
+///   `0 <= s(c) < 1024`;
+/// - 16-bit float, and so the two small floats' and the shared exponent's channels: a `half` `x`
+///   lies on the grid of its own exponent, so each floored step, `A = 2x` included, is exact, the
+///   sum is `n x` and the rounding keeps `x`; a NaN counts 0, so it and -0 resolve to +0, and an
+///   infinity's 65536 rounds to the infinity of its sign. A small float's grid step and the shared
+///   exponent's encode then run on it as on an average.
+///
+/// A 32-bit float has none ([`ResolveRule::keeps_alike`]).
+fn resolve_alike(
+    f: &mut FunctionBuilder<'_>,
+    t: Types,
+    srgb: Option<SrgbTables>,
+    channel: ResolveChannel,
+    code: Value,
+) -> BResult<Value> {
+    let bits = u32::from(channel.rule.bits());
+    let scaled = |f: &mut FunctionBuilder<'_>, x: Value, top: u64| -> BResult<Value> {
+        let scale = float(f, t, (1.0 / top as f64) as f32)?;
+        f.binary(BinOp::FMul, x, scale)
+    };
+    let half = |f: &mut FunctionBuilder<'_>| -> BResult<Value> {
+        let nan = is_nan(f, t, code)?;
+        let magnitude = uint(f, t, 0x7fff_ffff)?;
+        let m = f.binary(BinOp::BitwiseAnd, code, magnitude)?;
+        let zero = uint(f, t, 0)?;
+        let zero_value = f.binary(BinOp::IEqual, m, zero)?;
+        let plus_zero = f.binary(BinOp::LogicalOr, nan, zero_value)?;
+        let out = f.select(plus_zero, zero, code)?;
+        f.convert(ConvOp::Bitcast, out, t.f32_)
+    };
+    Ok(match channel.rule {
+        ResolveRule::Unorm { .. } | ResolveRule::HalfUnorm { .. } => {
+            let x = f.convert(ConvOp::ConvertUToF, code, t.f32_)?;
+            scaled(f, x, (1u64 << bits) - 1)?
+        }
+        ResolveRule::Snorm { .. } => {
+            let x = f.convert(ConvOp::ConvertSToF, code, t.f32_)?;
+            scaled(f, x, (1u64 << (bits - 1)) - 1)?
+        }
+        ResolveRule::Srgb => {
+            let tables = srgb.ok_or(crate::spirv::error::BuildError::IdSpaceExhausted)?;
+            element(f, tables.decoded, code)?
+        }
+        ResolveRule::Float16 | ResolveRule::SharedExponent => half(f)?,
+        ResolveRule::SmallFloat { mantissa } => {
+            let x = half(f)?;
+            small_float(f, t, x, u32::from(mantissa))?
+        }
+        ResolveRule::Float32 => return Err(crate::spirv::error::BuildError::IdSpaceExhausted),
+    })
+}
+
+/// Whether every texel of `texels` (read from `source`) has the first's bits, as a `bool`.
+fn alike(
+    f: &mut FunctionBuilder<'_>,
+    t: Types,
+    texels: &[Value],
+    source: ResolveSource,
+) -> BResult<Value> {
+    let uvec4 = f.module().ty(Type::Vector {
+        elem: t.u32_,
+        len: 4,
+    })?;
+    let words = |f: &mut FunctionBuilder<'_>, texel: Value| -> BResult<Value> {
+        match source {
+            ResolveSource::Planes(_) => Ok(texel),
+            ResolveSource::InputAttachment => f.convert(ConvOp::Bitcast, texel, uvec4),
+        }
+    };
+    let (&first, rest) = texels
+        .split_first()
+        .ok_or(crate::spirv::error::BuildError::IdSpaceExhausted)?;
+    let first = words(f, first)?;
+    let mut differ: Option<Value> = None;
+    for &texel in rest {
+        let other = words(f, texel)?;
+        let bits = f.binary(BinOp::BitwiseXor, first, other)?;
+        differ = Some(match differ {
+            None => bits,
+            Some(d) => f.binary(BinOp::BitwiseOr, d, bits)?,
+        });
+    }
+    let differ = differ.ok_or(crate::spirv::error::BuildError::IdSpaceExhausted)?;
+    let mut any = f.composite_extract(differ, &[0])?;
+    for lane in 1..4 {
+        let word = f.composite_extract(differ, &[lane])?;
+        any = f.binary(BinOp::BitwiseOr, any, word)?;
+    }
+    let zero = uint(f, t, 0)?;
+    f.binary(BinOp::IEqual, any, zero)
+}
+
+/// The resolved output floats (R, G, B, A; 0 where the format has no channel) of `format` from
+/// each sample's `texels` read from `source` (the module docs).
+///
+/// A pixel whose samples all hold the same bits (every pixel inside a primitive, where one
+/// invocation writes every covered sample) takes [`resolve_alike`], which gives what the rule
+/// gives without its average; another takes the rule ([`resolve`]). The two meet before a shared
+/// exponent's encode. A format of 32-bit floats, or of unorm and snorm channels alone
+/// ([`ResolveRule::averages_cheaply`]), takes the rule without comparing.
+fn resolve_texel(
+    f: &mut FunctionBuilder<'_>,
+    t: Types,
+    srgb: Option<SrgbTables>,
+    format: ColorResolveFormat,
+    texels: &[Value],
+    source: ResolveSource,
+) -> BResult<[Value; 4]> {
+    let zero = float(f, t, 0.0)?;
+    let channels: Vec<(u32, ResolveChannel)> = (0u32..)
+        .zip(format.channels)
+        .filter_map(|(component, channel)| Some((component, channel?)))
+        .collect();
+    let (&first, rest) = texels
+        .split_first()
+        .ok_or(crate::spirv::error::BuildError::IdSpaceExhausted)?;
+    let mut firsts = Vec::with_capacity(channels.len());
+    for &(component, channel) in &channels {
+        firsts.push(code(f, t, srgb, channel, component, first, source)?);
+    }
+    let averaged = |f: &mut FunctionBuilder<'_>| -> BResult<Vec<Value>> {
+        let mut out = Vec::with_capacity(channels.len());
+        for (&(component, channel), &first) in channels.iter().zip(&firsts) {
+            let mut codes = Vec::with_capacity(texels.len());
+            codes.push(first);
+            for &texel in rest {
+                codes.push(code(f, t, srgb, channel, component, texel, source)?);
+            }
+            out.push(resolve(f, t, srgb, channel, &codes)?);
+        }
+        Ok(out)
+    };
+    let shortcut = channels.iter().all(|(_, c)| c.rule.keeps_alike())
+        && channels.iter().any(|(_, c)| !c.rule.averages_cheaply());
+    let resolved = if shortcut {
+        let same = alike(f, t, texels, source)?;
+        let kept: ArmFn<'_, ()> = Box::new(|f, _| {
+            let mut out = Vec::with_capacity(channels.len());
+            for (&(_, channel), &first) in channels.iter().zip(&firsts) {
+                out.push(resolve_alike(f, t, srgb, channel, first)?);
+            }
+            Ok(ArmEnd::FallThrough(out))
+        });
+        let average: ArmFn<'_, ()> = Box::new(|f, _| Ok(ArmEnd::FallThrough(averaged(f)?)));
+        f.if_(&mut (), same, kept, Some(average))?.0
+    } else {
+        averaged(f)?
+    };
+    let mut lanes = [zero; 4];
+    for (&(component, _), value) in channels.iter().zip(resolved) {
+        lanes[component as usize] = value;
+    }
+    if format.shared_exponent() {
+        let [r, g, b] = encode_shared_exponent(f, t, [lanes[0], lanes[1], lanes[2]])?;
+        lanes[..3].copy_from_slice(&[r, g, b]);
+    }
+    Ok(lanes)
 }
 
 /// The fragment stage of `format` at `samples` reading `source`, as a typed module, before
@@ -845,26 +1436,7 @@ pub fn fragment_typed_module(
         };
         texels.push(texel);
     }
-    let mut lanes = Vec::with_capacity(4);
-    for (component, channel) in format.channels.iter().enumerate() {
-        let Some(channel) = *channel else {
-            lanes.push(float(&mut f, t, 0.0)?);
-            continue;
-        };
-        let mut codes = Vec::with_capacity(texels.len());
-        for &texel in &texels {
-            codes.push(code(
-                &mut f,
-                t,
-                srgb,
-                channel,
-                component as u32,
-                texel,
-                source,
-            )?);
-        }
-        lanes.push(resolve(&mut f, t, srgb, channel, &codes)?);
-    }
+    let lanes = resolve_texel(&mut f, t, srgb, format, &texels, source)?;
     let value = f.composite_construct(t.vec4, &lanes)?;
     let output = f.module().global_value(output)?;
     f.store(output, value, MemAccess::default())?;
@@ -911,7 +1483,8 @@ fn finish(
     Ok((words.into(), r.requirements))
 }
 
-/// The resolve modules of `format` at `samples` (a power of two from 2 to 64) reading `source`,
+/// The resolve modules of `format` at `samples` (a power of two from 2 to 64 at which
+/// [`ColorResolveFormat::resolves`]) reading `source`,
 /// on `device`: built with the typed builder (the vertex stage is the sample planes merge's,
 /// `bind::sample_planes`), checked by the owned verifier against the device's profile
 /// (requirements included), serialized, and numbered with the fixed binding of

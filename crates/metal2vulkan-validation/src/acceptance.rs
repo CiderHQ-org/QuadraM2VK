@@ -24,6 +24,7 @@ pub mod metal_report;
 pub mod row;
 
 use crate::candidate::engine::graphics::RenderTemplate;
+use crate::candidate::engine::mesh::MeshTemplate;
 use crate::engine::{bounded_detail, FailureKind, Outcome, RowSource};
 use crate::executor_contract::stage_inputs;
 use crate::worker::compile::{
@@ -262,8 +263,9 @@ pub enum Projection {
 /// The pipeline one compile builds: its kind, its functions, their function-constant values, and
 /// the functions each links. Its functions come from the compile's libraries
 /// ([`PipelineRequest::libraries`]): a draw's vertex function from the first and its fragment
-/// function from the second, every other request's function from the one, and then the libraries
-/// of each function's linked functions ([`RequestFunction::linked`]).
+/// function from the second, a mesh draw's each from the one its [`MeshFunction::library`] names,
+/// every other request's function from the one, and then the libraries of each function's linked
+/// functions ([`RequestFunction::linked`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PipelineRequest {
     /// `Device::compile_compute_pipeline` of kernel `entry` with `constants`.
@@ -333,6 +335,29 @@ pub enum PipelineRequest {
         #[serde(default)]
         shape: Option<BindShape>,
     },
+    /// `Device::compile_mesh_pipeline` of a mesh render pipeline from the Metal oracle's
+    /// descriptor `template`, of its object function where it has one, its mesh function, and its
+    /// fragment function where it has one, each from the stage library its
+    /// [`MeshFunction::library`] names (the case's, then its generated companion's): the engine
+    /// candidate's mesh draw (`engine::mesh::mesh_request`). With a bind `shape`, the pipeline is
+    /// the variant that shape decides (`variants::compile_mesh_for_shape`), as the runtime
+    /// compiles a mesh draw's.
+    MeshDraw {
+        object: Option<MeshFunction>,
+        mesh: MeshFunction,
+        fragment: Option<MeshFunction>,
+        template: MeshTemplate,
+        #[serde(default)]
+        shape: Option<BindShape>,
+    },
+}
+
+/// One stage's function of a [`PipelineRequest::MeshDraw`] and the stage library it comes from,
+/// by index among the request's stage libraries ([`PipelineRequest::stage_libraries`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeshFunction {
+    pub library: usize,
+    pub function: RequestFunction,
 }
 
 /// One function of a request: its entry, its function-constant values, and the functions it
@@ -370,11 +395,23 @@ pub struct LinkedLibrary {
 
 impl PipelineRequest {
     /// How many libraries the request's stage functions come from: two for a draw (the vertex
-    /// function's, then the fragment function's), one otherwise (an L4 fragment row's companion
-    /// is derived from its one library, [`row`]).
+    /// function's, then the fragment function's), as many as a mesh draw's functions name, one
+    /// otherwise (an L4 fragment row's companion is derived from its one library, [`row`]).
     pub fn stage_libraries(&self) -> usize {
         match self {
             PipelineRequest::Draw { .. } => 2,
+            PipelineRequest::MeshDraw {
+                object,
+                mesh,
+                fragment,
+                ..
+            } => object
+                .iter()
+                .chain([mesh])
+                .chain(fragment)
+                .map(|f| f.library + 1)
+                .max()
+                .unwrap_or(1),
             PipelineRequest::Compute { .. }
             | PipelineRequest::BoundCompute { .. }
             | PipelineRequest::Row { .. }
@@ -391,6 +428,17 @@ impl PipelineRequest {
             PipelineRequest::Draw {
                 vertex, fragment, ..
             } => vec![vertex, fragment],
+            PipelineRequest::MeshDraw {
+                object,
+                mesh,
+                fragment,
+                ..
+            } => object
+                .iter()
+                .chain([mesh])
+                .chain(fragment)
+                .map(|f| &f.function)
+                .collect(),
         }
     }
 
@@ -848,6 +896,47 @@ fn compile_counted(
                 handles: vec![vertex_handles, fragment_handles],
             }
         }
+        PipelineRequest::MeshDraw {
+            object,
+            mesh,
+            fragment,
+            template,
+            shape,
+        } => {
+            let mut handles = Vec::new();
+            let mut stage = |f: &MeshFunction, stage: Stage| {
+                let (function, linked_handles) =
+                    function(f.library, stage, &f.function, linked(handles.len()))?;
+                handles.push(linked_handles);
+                Ok::<_, Error>(StageSource::Function(function))
+            };
+            let object = object
+                .as_ref()
+                .map(|object| stage(object, Stage::Object))
+                .transpose()?;
+            let mesh = stage(mesh, Stage::Mesh)?;
+            let fragment = fragment
+                .as_ref()
+                .map(|fragment| stage(fragment, Stage::Fragment))
+                .transpose()?;
+            let descriptor = template.descriptor(object, mesh, fragment)?;
+            let pipeline = match shape {
+                None => device.compile_mesh_pipeline(&descriptor, &budget)?,
+                Some(shape) => {
+                    crate::candidate::engine::variants::compile_mesh_for_shape(
+                        device,
+                        &descriptor,
+                        shape,
+                        &budget,
+                    )?
+                    .0
+                }
+            };
+            CompiledRequest {
+                pipeline: AcceptancePipeline::Render(Box::new(pipeline)),
+                handles,
+            }
+        }
         PipelineRequest::Row {
             entry,
             stage,
@@ -969,7 +1058,8 @@ fn linked_functions(
 /// What the driver did with one pipeline.
 #[derive(Debug)]
 pub enum Acceptance {
-    /// The driver created the pipeline; `create` is the `vkCreate*Pipelines` call alone.
+    /// The driver created the pipeline; `create` is the `vkCreate*Pipelines` call alone, by a
+    /// `budgets::CreationClock`.
     Created { create: Duration },
     /// The device did not enable (or does not provide) something the pipeline requires, or a
     /// requirement could not be checked against it; creating it could be invalid usage, so
@@ -1587,7 +1677,10 @@ mod tests {
     /// A post-tessellation vertex row compiles to a tessellation pipeline: the synthesized vertex
     /// and control stages before the function's evaluation stage, a patch list of one control point
     /// per patch, and the row's control-point and patch attributes pulled by the evaluation stage.
-    /// A device without tessellation shaders refuses it typed.
+    /// On a device without tessellation shaders it compiles to the emulation: the function as the
+    /// one vertex stage, drawing a triangle list, its attributes pulled; on one whose vertex stage
+    /// cannot bind the emulation's buffers beside the function's (the floor's four storage
+    /// buffers), it is refused typed.
     #[test]
     fn post_tessellation_vertex_rows_compile_to_tessellation_pipelines() {
         let Some(bitcode) = fixture("tessellation.ll") else {
@@ -1630,9 +1723,34 @@ mod tests {
             // The fixed vertex stage reads no attribute: every one is pulled.
             assert!(render.vertex_input.attributes.is_empty(), "{entry}");
         }
-        match compile("vk12-floor", "tess_quad_buffer") {
+        for entry in ["tess_quad_buffer", "tess_triangle_points"] {
+            let RowCompile::Compiled(pipeline) = compile("roadmap-2022", entry) else {
+                panic!("{entry} did not compile on roadmap-2022");
+            };
+            let RowPipeline::Render {
+                pipeline: render, ..
+            } = *pipeline
+            else {
+                panic!("{entry} is a render pipeline");
+            };
+            let stages: Vec<_> = render.stages.iter().map(|stage| stage.stage).collect();
+            assert_eq!(stages, [vk::ShaderStage::VERTEX], "{entry}");
+            assert_eq!(render.graphics.tessellation, None, "{entry}");
+            assert!(render.graphics.emulated_tessellation.is_some(), "{entry}");
+            assert_eq!(
+                render.graphics.topology,
+                vk::PrimitiveTopology::TRIANGLE_LIST,
+                "{entry}"
+            );
+            assert!(render.vertex_input.attributes.is_empty(), "{entry}");
+        }
+        match compile("vk12-floor", "tess_triangle_points") {
             RowCompile::NotCompiled(outcome, detail) => {
                 assert_eq!(outcome.label(), "device_capability_missing", "{detail}");
+                assert!(
+                    detail.contains("MaxPerStageDescriptorStorageBuffers"),
+                    "{detail}"
+                );
             }
             other => panic!("{other:?}"),
         }
@@ -1875,13 +1993,13 @@ mod tests {
         use metal2vulkan::device::{ApiVersion, StageCreateFlag, VkExtension, VkFeature};
         let description = description("vk12-floor");
         let mut enabled = EnableSet::new();
-        enabled.features.insert(VkFeature::ShaderInt16);
+        enabled.features.insert(VkFeature::RobustBufferAccess);
         let opened = opened_description(description, &enabled);
         assert!(opened.is_ok(), "{opened:?}");
 
         let mut requirements = Requirements::default();
         requirements.api_version = Some(ApiVersion { major: 1, minor: 3 });
-        requirements.features.insert(VkFeature::ShaderInt16);
+        requirements.features.insert(VkFeature::RobustBufferAccess);
         requirements.features.insert(VkFeature::ShaderInt64);
         requirements.extensions.insert(VkExtension::ExtRobustness2);
         requirements
@@ -2031,7 +2149,7 @@ mod tests {
         let description = description("vk12-floor");
         assert_eq!(description.api_version, ApiVersion::V1_2);
         let mut enabled = EnableSet::new();
-        enabled.features.insert(VkFeature::ShaderInt16);
+        enabled.features.insert(VkFeature::RobustBufferAccess);
         let opened = opened_description(description.clone(), &enabled).unwrap();
         assert_eq!(opened.features, enabled.features);
         assert!(opened.extensions.is_empty());

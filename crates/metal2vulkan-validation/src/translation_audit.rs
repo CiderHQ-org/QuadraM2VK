@@ -40,8 +40,10 @@ const PRODUCT_FINGERPRINT: &str = env!("METAL2VULKAN_PRODUCT_FINGERPRINT");
 /// under the stage-input descriptor its AIR implies. 5: a worker group member is charged only the
 /// memory of its own, never its parent's while it still runs in it. 6: the worker runs `spirv-val`
 /// in its L3 stage, a fresh image of itself, so an attempt's peak is the larger of its
-/// translation's and its validation's, not their sum.
-pub const ENGINE_CENSUS_VERSION: u32 = 6;
+/// translation's and its validation's, not their sum. 7: a fragment function refused for writing
+/// more colors than the profile draws at once is translated in color groups, one module a group,
+/// each checked by L3 (`engine::color_groups`).
+pub const ENGINE_CENSUS_VERSION: u32 = 7;
 
 /// The external tools a census row can depend on: `llvm-as` (a public row's bitcode) and
 /// `spirv-val` (L3). Each is keyed by its `--version` output.

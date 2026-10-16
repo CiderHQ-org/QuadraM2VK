@@ -1,4 +1,4 @@
-// Owned fixture (WP-VSM, DESIGN D341): fragment functions that read [[sample_mask]] and that Metal
+// Owned fixture: fragment functions that read [[sample_mask]] and that Metal
 // runs once per covered sample (each writes memory, and most read [[sample_id]]), drawn by the
 // fullscreen triangle in a pass without attachments. Metal hands every run the coverage of the
 // piece of the primitive the pixel's fragment came from; the compile layer runs such a function

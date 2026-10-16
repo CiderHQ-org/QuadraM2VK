@@ -1027,12 +1027,14 @@ struct FlatDispatch {
 
 /// `a * b` (two `u64`s, or two `u32`s with `zero` a `u32`) and whether it exceeds the type's
 /// largest value: the double-width product's low and high words (`OpUMulExtended`), the product
-/// exceeding it exactly where the high word is not `zero`. Every overflow test of the replay's
-/// modules takes this form: NVIDIA's compiler (615.71.09) refuses a module that tests a `u64`
-/// product by dividing (`b > (2^64 - 1) / a`) or a `u32` product by widening it to 64 bits and
-/// comparing it with `2^32 - 1`, where those tests sit beside the preprocess's other arithmetic
-/// ("NVVM compilation failed: 3"), and compiles this one.
-fn checked_mul(
+/// exceeding it exactly where the high word is not `zero`. The crate's own modules test a
+/// product's overflow in this form, and none divides the all-ones constant (a test checks every
+/// one): NVIDIA's compiler (615.71.09) refuses a module that tests a `u64` product by dividing
+/// (`b > (2^64 - 1) / a`) or a `u32` product by widening it to 64 bits and comparing it with
+/// `2^32 - 1`, where those tests sit beside the preprocess's other arithmetic, and on an RTX 3090
+/// one that tests a `u32` product by dividing (`b <= (2^32 - 1) / a`, the tessellation scan's
+/// records count) ("NVVM compilation failed: 3"), and compiles this one.
+pub(crate) fn checked_mul(
     fb: &mut FunctionBuilder<'_>,
     a: Value,
     b: Value,

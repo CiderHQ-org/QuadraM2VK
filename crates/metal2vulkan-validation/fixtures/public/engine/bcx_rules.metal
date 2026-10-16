@@ -1,4 +1,4 @@
-// Owned fixture (WP-BCX, DESIGN D248): how Metal's bicubic filter (`filter::bicubic`) sums and
+// Owned fixture: how Metal's bicubic filter (`filter::bicubic`) sums and
 // rounds per bound format. One clamp-to-edge bicubic sampler with pixel coordinates samples
 // sixteen textures at each lane's coordinate: eight 2D `float` textures, four 2D `half`
 // textures (returned widened to `float`), three 1D `float` textures and one 1D `half` texture

@@ -1,4 +1,4 @@
-// Vertex amplification (WP-K12, DESIGN D165): [[amplification_id]], [[amplification_count]],
+// Vertex amplification: [[amplification_id]], [[amplification_count]],
 // [[shared]] outputs, and the per-view viewport and layer builtins beside them, in vertex,
 // fragment, and post-tessellation vertex functions. Written for this repository; no third-party
 // source.

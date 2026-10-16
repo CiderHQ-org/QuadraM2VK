@@ -1,15 +1,15 @@
-// Owned fixture (WP-RCH, DESIGN D770): fragment functions that discard and then make side
+// Owned fixture: fragment functions that discard and then make side
 // effects, which a predicated discard runs only where the invocation was not discarded: a store
 // (`rch_guarded_store`), an atomic whose old value picks the slot of a later store
 // (`rch_guarded_atomic`), a store in a loop (`rch_guarded_loop`), a texture write
 // (`rch_guarded_write`), a copy of a pair of vectors (`rch_guarded_copy`, through `copy_pair`,
 // whose deferred body has Apple's compiler declare `llvm.memcpy` after the sample and the discard,
 // where the opaque text, whose `llvm-dis` renames it, declares it too: the two texts then declare
-// what the function calls in one order, D17), and a store of a simdgroup sum
+// what the function calls in one order), and a store of a simdgroup sum
 // (`rch_guarded_simd`), whose non-quad subgroup operation stops the predicate where
-// the profile demotes (D327 item 6). Each samples an 8x8 texture repeated over the target at LOD
+// the profile demotes. Each samples an 8x8 texture repeated over the target at LOD
 // 0, discards where the texel's alpha is below 0.5, and returns the texel: the shape whose
-// discard waits past the stores on a driver that drops a simdgroup's stores (D743).
+// discard waits past the stores on a driver that drops a simdgroup's stores.
 // `rch_guarded_vertex` draws the triangle whose three corners `buffer(0)` holds, in clip space.
 // A pixel's index is `y * 64 + x`.
 #include <metal_stdlib>

@@ -1,4 +1,4 @@
-// Owned fixture (WP-RVC, DESIGN D500; written for this repository): a draw's base vertex and base
+// Owned fixture (written for this repository): a draw's base vertex and base
 // instance. Rasterization-disabled points; vertex `vid` of instance `iid` writes `vid`, `iid`,
 // `[[base_vertex]]` and `[[base_instance]]` to the four words of out[(iid % 4) * 8 + vid % 8], so
 // each vertex of up to eight consecutive ones and each instance of up to four consecutive ones

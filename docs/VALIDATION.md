@@ -104,7 +104,9 @@ seed. So does one the layer's words fit both to such a pair and to pairs whose b
 the minimized sequence then tells them apart: when it still needs a command of an apart pair,
 the pair sharing bytes alone raised no hazard. Two seeds fail so today (7 and 50, on lavapipe,
 the RTX 3090 and RADV), each settled that way: the hazard is between untracked commands in two
-encoders, which Metal leaves unordered and whose bytes are apart.
+encoders, which Metal leaves unordered and whose bytes are apart, and the layer's ranges meet
+because a texel kernel's or a draw's buffer binds from its offset to the buffer's end, as Metal's
+does.
 
 **Generated-program fuzzers** (`metal2vulkan_devtools::fuzz`: structured, irreducible, inline,
 access, workgroup, pointer select) run device-free in the translator's tests
@@ -176,12 +178,12 @@ worker under the 20-second and 500-MiB ceilings, resumable in bounded batches (`
 | Audit | What it answers |
 |---|---|
 | `authoring-capabilities [--reclassify-all]` | For every indexed AIR identity, whether a case can express and both executors can run its structure (`ToolingRequirement`s). Closed only when `classified == total`, `remaining == 0` and `unresolved == 0`; a warm rerun reads no source shard |
-| `translation --profile P...` | Each row translated for each committed profile, recorded as a typed outcome class under the current product fingerprint (`--current-fingerprint`, `--retry-failures`, `--hash-file PATH` select rows). It fails when a row breaks a ceiling |
+| `translation --profile P...` | Each row translated for each committed profile, recorded as a typed outcome class under the current product fingerprint (`--current-fingerprint`, `--retry-failures`, `--hash-file PATH` select rows). A fragment function of more colors than the profile draws at once is translated as its render pipeline's color groups, one module a group, each checked by L3. It fails when a row breaks a ceiling |
 | `budgets --profile P...` | The budget gates from recorded rows: no row above 20 s or 500 MiB, no stopped worker, and each row's ledger peak at least 0.7 of its allocator peak |
 | `specialization --profile P...` | Rows translated under planned function-constant value sets and the pipeline inputs their AIR states, not only with none |
 | `authored-compile [--bless \| --bless-additions \| --case ID]` | Every committed authored case compiled, with the requests its executor builds, on each profile and leg of `corpus/authored-compile.tsv`; it fails on any changed cell. The table is re-blessed on `development` |
 | `bitcode-reader` | The bitcode reader's decode compared with `llvm-dis`, and the intrinsic census |
-| focused audits (`rasterization-rate-maps`, `sample-rate`, `ulong-textures`, `fragment-varyings`, `linked-functions`) | One structural family, selected by current facts, translated in batches |
+| focused audits (`rasterization-rate-maps`, `sample-rate`, `ulong-textures`, `fragment-varyings`, `linked-functions`, `tile-functions`, `mesh-draws`) | One structural family, selected by current facts, translated in batches |
 
 ```sh
 cargo run -p metal2vulkan-validation --release --bin corpus-triage -- \
@@ -208,7 +210,8 @@ repair or reinterpret anything. Cases live in `corpus/cases/`, Metal and Vulkan 
 `corpus/observations/`, keyed by the case's semantic ID. The schema and its resource kinds are in
 [the crate's README](../crates/metal2vulkan-validation/README.md); they include out-of-bounds
 targets for containment checks (`out_of_bounds`), sparse textures (`sparse`), fragment, vertex,
-tessellation and tile cases, argument buffers and indirect command buffers.
+tessellation and tile cases, object and mesh cases (`mesh_draw`),
+argument buffers and indirect command buffers.
 
 ```sh
 cargo run -p metal2vulkan-validation --bin corpus-index
@@ -227,8 +230,10 @@ cargo run -p metal2vulkan-validation --bin corpus-status
 ## Contract 1: emitter stability
 
 `crates/metal2vulkan/src/tests/golden_hashes.rs` pins a hash of the final SPIR-V (or the refusal
-class) of every public fixture entry point on every committed profile. A behavior-preserving change
-keeps every cell; a change that moves one bumps `SEMANTICS_VERSION` and re-blesses
+class) of every public fixture entry point on every committed profile, and, in a second table, of
+every fixture that samples under every exact form (Metal's sampler emulated and
+`DevicePolicy::exact_answers`). A behavior-preserving change keeps every cell; a change that moves
+one bumps `SEMANTICS_VERSION` and re-blesses
 ([CONTRIBUTING.md](../CONTRIBUTING.md#golden-output-hashes-and-semantics_version)). The fixture
 inventory (`crates/metal2vulkan/tests/public_fixture_expectations_engine.tsv`) pins which
 fixtures compile or refuse on which profile. Over the private corpus, the translation audit records

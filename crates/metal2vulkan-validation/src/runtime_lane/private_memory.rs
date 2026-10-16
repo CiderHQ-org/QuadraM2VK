@@ -40,7 +40,7 @@ const LINE: u32 = 16;
 fn kernel(words: u32) -> String {
     let lines = words / LINE;
     format!(
-        r#"; Owned synthetic kernel (WP-UNI): a private array of {words} words a thread.
+        r#"; Owned synthetic kernel: a private array of {words} words a thread.
 source_filename = "private_memory.metal"
 
 define void @private_words(ptr addrspace(1) %out, i32 %gid) {{
@@ -284,7 +284,7 @@ fn held_kernel() -> String {
         }
     }
     format!(
-        r#"; Owned synthetic kernel (WP-UNI): private arrays reached only at constant offsets, and one
+        r#"; Owned synthetic kernel: private arrays reached only at constant offsets, and one
 ; indexed at run time.
 source_filename = "private_memory_held.metal"
 

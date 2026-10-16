@@ -102,6 +102,7 @@ use crate::blit::TRANSFER;
 use crate::buffer::Buffer;
 use crate::clear_reach;
 use crate::command_buffer::CommandBuffer;
+use crate::device::functions::Vk;
 use crate::encoder::EncoderCore;
 use crate::error::{internal, invalid, Error, Problem, RuntimeGap};
 use crate::execution::{ExecutedPipeline, Execution};
@@ -192,7 +193,7 @@ impl TileDispatch {
     /// completes; the images are in the `GENERAL` layout.
     pub(super) unsafe fn record(
         &self,
-        raw: &ash::Device,
+        raw: &Vk,
         command_buffer: vk::CommandBuffer,
         copies: &[Staging],
     ) {
@@ -597,9 +598,12 @@ impl RenderCommandEncoder {
         offset: u64,
         index: u32,
     ) -> Result<(), Error> {
-        self.log(|_| RenderCall::Buffer(Table::Tile, buffer.cloned(), offset, index));
+        self.log(|log| {
+            let buffer = buffer.map(|buffer| log.hold_buffer(buffer));
+            RenderCall::Buffer(Table::Tile, buffer, offset, index)
+        });
         self.tile
-            .set_buffer(&self.core, "set_tile_buffer", buffer, offset, index)
+            .set_buffer(&mut self.core, "set_tile_buffer", buffer, offset, index)
     }
 
     /// `setTileBuffers:offsets:withRange:`. Refused as
@@ -619,7 +623,7 @@ impl RenderCommandEncoder {
             )
         });
         self.tile
-            .set_buffers(&self.core, "set_tile_buffers", buffers, offsets, first)
+            .set_buffers(&mut self.core, "set_tile_buffers", buffers, offsets, first)
     }
 
     /// `setTileBufferOffset:atIndex:`. Refused as
@@ -627,7 +631,7 @@ impl RenderCommandEncoder {
     pub fn set_tile_buffer_offset(&mut self, offset: u64, index: u32) -> Result<(), Error> {
         self.log(|_| RenderCall::BufferOffset(Table::Tile, offset, index));
         self.tile
-            .set_buffer_offset(&self.core, "set_tile_buffer_offset", offset, index)
+            .set_buffer_offset(&mut self.core, "set_tile_buffer_offset", offset, index)
     }
 
     /// `setTileBytes:length:atIndex:`: as
@@ -636,15 +640,18 @@ impl RenderCommandEncoder {
     pub fn set_tile_bytes(&mut self, bytes: &[u8], index: u32) -> Result<(), Error> {
         self.log(|log| RenderCall::Bytes(Table::Tile, log.byte_span(bytes), index));
         self.tile
-            .set_bytes(&self.core, "set_tile_bytes", bytes, None, index)
+            .set_bytes(&mut self.core, "set_tile_bytes", bytes, None, index)
     }
 
     /// `setTileTexture:atIndex:` (`None` unbinds the index). Refused as
     /// [`RenderCommandEncoder::set_vertex_texture`] is.
     pub fn set_tile_texture(&mut self, texture: Option<&Texture>, index: u32) -> Result<(), Error> {
-        self.log(|_| RenderCall::Texture(Table::Tile, texture.cloned(), index));
+        self.log(|log| {
+            let texture = texture.map(|texture| log.hold_texture(texture));
+            RenderCall::Texture(Table::Tile, texture, index)
+        });
         self.tile
-            .set_textures(&self.core, "set_tile_texture", &[texture], index)
+            .set_textures(&mut self.core, "set_tile_texture", &[texture], index)
     }
 
     /// `setTileTextures:withRange:`. Refused as
@@ -656,7 +663,7 @@ impl RenderCommandEncoder {
     ) -> Result<(), Error> {
         self.log(|log| RenderCall::Textures(Table::Tile, log.texture_span(textures), first));
         self.tile
-            .set_textures(&self.core, "set_tile_textures", textures, first)
+            .set_textures(&mut self.core, "set_tile_textures", textures, first)
     }
 
     /// `setTileSamplerState:atIndex:` (`None` unbinds the index). Refused as
@@ -666,9 +673,12 @@ impl RenderCommandEncoder {
         sampler: Option<&SamplerState>,
         index: u32,
     ) -> Result<(), Error> {
-        self.log(|_| RenderCall::Sampler(Table::Tile, sampler.cloned(), index));
+        self.log(|log| {
+            let sampler = sampler.map(|sampler| log.hold_sampler(sampler));
+            RenderCall::Sampler(Table::Tile, sampler, index)
+        });
         self.tile.set_samplers(
-            &self.core,
+            &mut self.core,
             "set_tile_sampler_state",
             &[sampler],
             None,
@@ -687,7 +697,7 @@ impl RenderCommandEncoder {
     ) -> Result<(), Error> {
         self.log(|_| RenderCall::Samplers(Table::Tile, Samplers::of(samplers, clamps, first)));
         self.tile.set_samplers(
-            &self.core,
+            &mut self.core,
             "set_tile_sampler_states",
             samplers,
             clamps,
@@ -1040,6 +1050,7 @@ impl RenderCommandEncoder {
                 .map(|blob| (Stage::Kernel, blob))
                 .collect(),
             mesh: None,
+            tessellation: None,
         };
         let stages = [(Stage::Kernel, &self.tile)];
         let mut tables = binding::Tables::new(&stages)

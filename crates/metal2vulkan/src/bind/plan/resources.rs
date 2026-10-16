@@ -27,10 +27,11 @@
 //!   type.
 //! - **Shape checks:** a runtime sampler's shape passes `metal::sampler::check_sampler` for the
 //!   binding's use (a non-average reduction needs `samplerFilterMinmax` and no comparison;
-//!   mirror-clamp, border colors, anisotropy, and LOD clamps; no anisotropy where the binding
-//!   samples a cube with explicit gradients), so `bind::sampler_desc` refuses per bind only what
-//!   depends on the bound image format; `SamplerState` specializes from the bound sampler's word,
-//!   masked by the fields the function reads.
+//!   mirror-clamp, border colors, and LOD clamps; anisotropy needs nothing, its sampler isotropic
+//!   on a device without `samplerAnisotropy` and where the binding samples a cube with explicit
+//!   gradients), so `bind::sampler_desc` refuses per bind only what depends on the bound image
+//!   format; `SamplerState` specializes from the bound sampler's word, masked by the fields the
+//!   function reads.
 //! - **Bicubic texels**: a texture slot sampled through Metal's bicubic filter specializes
 //!   `BicubicTexels` from the bound format's family (`metal::bicubic::texels`), and refuses a
 //!   format of no measured family.
@@ -92,25 +93,23 @@ pub(crate) fn bind_error(e: Error) -> BindError {
     }
 }
 
-/// The `VkSampler` of the sampler bound at a plan's `WriteSource::Sampler` or
-/// `SamplerSource::Slot`: `metal::sampler::vk_sampler` for the write's use (`compare`, `integer`)
-/// on `device`, its opaque-black border made as the write says (`opaque_black`, transparent black,
-/// or opaque black with the view's mapping in `border_components`), and, when the sampler reads an
-/// image of `image_format` (a combined write's view format), the format's linear-filtering and
-/// min/max features the descriptor needs (checked against the bound sampler, not at texture
-/// creation). The plan already refused what the sampler's shape decides
+/// The `VkSampler` of the sampler bound at a plan's `WriteSource::Sampler`,
+/// `WriteSource::ArgumentSampler` or `SamplerSource::Slot`: `metal::sampler::vk_sampler` for the
+/// write's use (its `compare`, `integer` and `cube_gradient`) on `device`, its opaque-black border
+/// made as the write says (`opaque_black`, transparent black, or opaque black with the view's
+/// mapping in `border_components`), and, when the sampler reads an image of `image_format` (a
+/// combined write's view format), the format's linear-filtering and min/max features the
+/// descriptor needs (checked against the bound sampler, not at texture creation). The plan already refused what the sampler's shape decides
 /// (`metal::sampler::check_sampler`), so for a state of the plan's shape only the format features
 /// can refuse here.
 pub fn sampler_desc(
     device: &crate::device::Device,
     desc: &crate::bind::state::SamplerDescriptor,
-    compare: bool,
-    integer: bool,
+    use_: SamplerUse,
     opaque_black: OpaqueBlackBorder,
     image_format: Option<vk::Format>,
 ) -> Result<vk::SamplerDesc, BindError> {
     let profile = device.profile();
-    let use_ = SamplerUse::new(compare, integer);
     let mut out = crate::metal::sampler::vk_sampler(desc, use_, profile).map_err(bind_error)?;
     let black = [
         vk::BorderColor::FLOAT_OPAQUE_BLACK,
@@ -1261,9 +1260,9 @@ impl ResourcePlanner<'_> {
     }
 
     /// The runtime sampler `slot` for a use, with the shape's value checks
-    /// (`metal::sampler::check_sampler`: reduction; address modes, border colors, anisotropy, and
-    /// LOD clamps; anisotropy on explicit cube gradients), or the neutral sampler when the slot is
-    /// unbound. The write keeps the use's comparison and texel type, which make the `VkSampler`,
+    /// (`metal::sampler::check_sampler`: reduction; address modes, border colors, and LOD
+    /// clamps), or the neutral sampler when the slot is unbound. The write keeps the use's
+    /// comparison, texel type and explicit cube gradients, which make the `VkSampler`,
     /// and how its opaque-black border is made (`ResourcePlanner::opaque_black`); the shape alone
     /// decides the cube-gradient check, so a descriptor of the plan's shape never fails it per
     /// bind.
@@ -1282,6 +1281,7 @@ impl ResourcePlanner<'_> {
             slot,
             compare,
             integer: use_.integer_texture,
+            cube_gradient: use_.cube_gradient,
             opaque_black,
         })
     }
@@ -1410,11 +1410,13 @@ impl ResourcePlanner<'_> {
                 slot,
                 compare,
                 integer,
+                cube_gradient,
                 opaque_black,
             } => WriteSource::Sampler {
                 slot,
                 compare,
                 integer,
+                cube_gradient,
                 opaque_black,
             },
             SamplerSource::Neutral(n) => WriteSource::Neutral(n),
@@ -1426,8 +1428,8 @@ impl ResourcePlanner<'_> {
 
     /// The write of a heap sampler binding fed by the runtime sampler `slot`: the sampler bound
     /// there made for the use `c` (its comparison, the texture's numeric type, and whether it takes
-    /// explicit cube gradients in the isotropic form, which refuses an anisotropic sampler), or the
-    /// neutral sampler where none is bound. Its opaque-black border and its filtering meet the
+    /// explicit cube gradients in the isotropic form, which makes it isotropic), or the neutral
+    /// sampler where none is bound. Its opaque-black border and its filtering meet the
     /// heap's members, which the heap planner checks (`HeapPlanner::array`).
     pub fn heap_sampler(
         &mut self,

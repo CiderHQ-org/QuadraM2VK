@@ -1,4 +1,4 @@
-// Owned fixture (WP-K13, DESIGN D154): simdgroup and quad operations in workgroup-uniform
+// Owned fixture: simdgroup and quad operations in workgroup-uniform
 // control flow, which a kernel whose simdgroups are emulated through workgroup memory runs
 // exactly. Every kernel writes out[t], t = thread_index_in_threadgroup; lane =
 // thread_index_in_simdgroup (t & 31: Metal simdgroup k is the linear threads [32k, 32k + 32)).

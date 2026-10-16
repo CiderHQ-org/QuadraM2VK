@@ -35,7 +35,7 @@
 use crate::budget::Meter;
 use crate::device::requirements::Requirements;
 use crate::device::DeviceProfile;
-use crate::error::{Error, Feature, InternalError, InternalKind, Unsupported};
+use crate::error::{Error, Feature, InternalError, InternalKind, RuntimeInput, Unsupported};
 pub use crate::lower::mesh::{RECORDS_SLOT, WORK_SLOT};
 use crate::pipeline::artifact::{Reconvergence, SpecializationLayout, StageModule, StrategyCensus};
 use crate::pipeline::interface::{MeshRecords, RecordField, RecordValue, StageInterface};
@@ -57,6 +57,24 @@ use crate::vk;
 /// wide line included.
 pub const FAR: f32 = 65536.0;
 
+/// The payload check of the mesh render pipeline of stages `ifaces`: its mesh function's payload
+/// arena holds at least its object function's (`StageInterface::payload`,
+/// `LoweringInputs::object_payload`), else `NeedsInput(ObjectPayload)`.
+pub fn payload(ifaces: &[&StageInterface]) -> Result<(), Error> {
+    let of = |stage: Stage| {
+        ifaces
+            .iter()
+            .find(|i| i.stage == stage)
+            .and_then(|i| i.payload)
+    };
+    match (of(Stage::Object), of(Stage::Mesh)) {
+        (Some(object), Some(mesh)) if mesh < object => {
+            Err(Error::NeedsInput(RuntimeInput::ObjectPayload))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// The records of the mesh render pipeline of stages `ifaces` whose mesh function is emulated
 /// (`StageInterface::mesh_records`); `None` where its mesh function is not. A fragment function
 /// that reads `[[primitive_id]]` behind an emulated mesh function is
@@ -65,9 +83,14 @@ pub fn records(ifaces: &[&StageInterface]) -> Result<Option<MeshRecords>, Error>
     let Some(r) = ifaces.iter().find_map(|i| i.mesh_records.as_ref()) else {
         return Ok(None);
     };
-    let reads_id = ifaces
-        .iter()
-        .any(|i| i.stage == Stage::Fragment && i.io.builtins.contains(&StageBuiltin::PrimitiveId));
+    let reads_id = ifaces.iter().any(|i| {
+        i.stage == Stage::Fragment
+            && (i.io.builtins.contains(&StageBuiltin::PrimitiveId)
+                || i.io
+                    .inputs
+                    .iter()
+                    .any(|v| v.role == crate::pipeline::stage_io::IoRole::PrimitiveId))
+    });
     if reads_id {
         return Err(Unsupported::not_implemented(Feature::MeshShading).into());
     }
@@ -120,6 +143,9 @@ pub fn synthesized_stage(
             rounded_colors: Vec::new(),
             specialized_notes: Vec::new(),
             half_bit_colors: Vec::new(),
+            own_pixel_textures: Vec::new(),
+            snapshot_textures: Vec::new(),
+            private_bytes: 0,
         },
         module.requirements,
     ))

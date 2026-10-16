@@ -16,10 +16,10 @@ use super::{
 use crate::gpu::TEST_DEVICE;
 use metal2vulkan::metal::{PixelFormat, TextureUsage};
 use metal2vulkan_runtime::{
-    BlitCommandEncoder, BlitOption, Buffer, CommandBuffer, CommandBufferStatus, CommandQueue,
-    CpuCacheMode, Device, Error, EventRef, HazardTrackingMode, Invalid, Origin, Problem,
-    ResourceOptions, RuntimeGap, SharedEvent, SharedEventListener, Size, StorageMode, Texture,
-    TextureDescriptor,
+    host_time, BlitCommandEncoder, BlitOption, Buffer, CommandBuffer, CommandBufferStatus,
+    CommandQueue, CpuCacheMode, Device, Error, EventRef, HazardTrackingMode, Invalid, Origin,
+    Problem, ResourceOptions, RuntimeGap, SharedEvent, SharedEventListener, Size, StorageMode,
+    Texture, TextureDescriptor,
 };
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -818,13 +818,19 @@ fn a_scheduled_handler_signals_a_shared_event() {
 /// Each round ends with an empty command buffer, after everything else of the round's device
 /// went: the program's last drops (the command buffer, its queue, the device) then only release
 /// references, so they race the runtime's threads to the device's last one. Even rounds complete
-/// it on the completion thread; odd rounds give it a scheduled handler that outlasts its
+/// it in a completion turn; odd rounds give it a scheduled handler that outlasts its
 /// execution, so the scheduler's thread completes it. A runtime thread that kept a reference past
 /// the waiter's return would destroy the device itself, perhaps while the process exits (which
 /// RADV ended with `SIGSEGV`).
+///
+/// Printed: `WAIT-AFTER-HANDLER`, how long after the last command buffer's completed handler ran
+/// (or after the wait was asked, if later) its wait returned, each round and as the rounds' median
+/// and longest. Metal's wait for a command buffer's completion returns after its completed handlers
+/// ended, 10 us after at the median and 23 us at p99 on the M3 Max.
 #[test]
 fn a_device_dropped_after_a_wait_is_gone_when_the_drop_returns() {
     let case = public_case(CASE).unwrap();
+    let mut after_handler = Vec::new();
     for round in 0..16 {
         let cache = ScratchCache::new().unwrap();
         let messages = Messages::default();
@@ -843,8 +849,21 @@ fn a_device_dropped_after_a_wait_is_gone_when_the_drop_returns() {
                 }))
                 .unwrap();
             }
+            let handled = Arc::new(Mutex::new(None));
+            let noted = Arc::clone(&handled);
+            last.add_completed_handler(Box::new(move |_: &CommandBuffer| {
+                *noted.lock().unwrap() = Some(host_time());
+            }))
+            .unwrap();
             last.commit().unwrap();
+            let asked = host_time();
+            last.wait_until_completed_for(WAIT).unwrap();
+            let returned = host_time();
             completed(&last);
+            let handled = handled.lock().unwrap().expect("the completed handler ran");
+            let us = (returned - handled.max(asked)) * 1e6;
+            eprintln!("WAIT-AFTER-HANDLER round {round}: {us:.1} us");
+            after_handler.push(us);
             first
         };
         assert_eq!(
@@ -869,4 +888,11 @@ fn a_device_dropped_after_a_wait_is_gone_when_the_drop_returns() {
             "the validation layer reported: {messages:#?}"
         );
     }
+    after_handler.sort_by(f64::total_cmp);
+    eprintln!(
+        "WAIT-AFTER-HANDLER rounds {}: median {:.1} us, longest {:.1} us",
+        after_handler.len(),
+        after_handler[after_handler.len() / 2],
+        after_handler[after_handler.len() - 1]
+    );
 }

@@ -125,11 +125,11 @@ impl ResourceOptions {
 
     /// Bit 24 (0x100_0000), a private option plain Metal takes (a consumer's read-only detached
     /// buffers pass it; Metal's validation stops it as undefined). Metal makes the resource and
-    /// reports its options without the bit (RT4 probe `nc_bit24`). [`from_raw`](Self::from_raw)
-    /// takes it. A device makes a resource of options with it as without it, reports its options
-    /// without it, and announces `metal2vulkan-degrade-private-resource-option` once: on Metal a
-    /// no-copy buffer made with it kept the GPU's writes from the CPU, where the runtime's reach
-    /// it.
+    /// reports its options without the bit (Metal probe `nc_bit24` on an M4).
+    /// [`from_raw`](Self::from_raw) takes it. A device makes a resource of options with it as
+    /// without it, reports its options without it, and announces
+    /// `metal2vulkan-degrade-private-resource-option` once: on Metal a no-copy buffer made with it
+    /// kept the GPU's writes from the CPU, where the runtime's reach it.
     pub const PRIVATE_BIT: u64 = 1 << 24;
 
     /// The options of these three modes.

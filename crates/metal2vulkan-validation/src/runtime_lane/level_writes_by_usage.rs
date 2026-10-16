@@ -20,7 +20,7 @@
 //! bound such a texture's level views as neutrals every write was dropped, and the texels kept
 //! their `0x11` bytes.
 
-use super::degrade_notices::{counts, on_device};
+use super::degrade_notices::{counts, on_device_with};
 use super::{buffer_with, read_buffer, WAIT};
 use crate::air_library::AirLibrary;
 use metal2vulkan::metal::{PixelFormat, TextureUsage};
@@ -43,7 +43,7 @@ const VALUE: [u8; 8] = [0x00, 0x34, 0x00, 0x38, 0x00, 0x3a, 0x00, 0x3c];
 const FILL: u8 = 0x11;
 
 /// Synthetic AIR written for this lane (the module docs).
-const KERNELS: &str = r#"; Owned synthetic kernels (WP-XRR2, DESIGN D630).
+const KERNELS: &str = r#"; Owned synthetic kernels.
 source_filename = "level_writes_by_usage.metal"
 
 %"struct.metal::_imageblock_base" = type { ptr addrspace(4) }
@@ -225,37 +225,58 @@ fn writes_at_every_level_store_whatever_the_usage() {
         TextureUsage::SHADER_READ | TextureUsage::SHADER_WRITE,
     ];
     let mut forms = Vec::new();
-    for (name, slice) in [("slice_at_level", true), ("write_at_level", false)] {
-        for usage in usages {
-            let what = format!("{name}, usage {:#x}", usage.as_raw());
-            on_device(|device, messages| {
-                let state = kernel(device, name);
-                messages.take_notices();
-                let levels = written(device, &state, slice, usage);
-                for (level, bytes) in levels.iter().enumerate() {
-                    let wrong = bytes
-                        .as_chunks::<8>()
-                        .0
-                        .iter()
-                        .filter(|texel| **texel != VALUE)
-                        .count();
-                    assert_eq!(
+    // Every case on one device. A device announces a kind once unless its options ask for each
+    // occurrence: with `undeclared-usage-shadow` announced for each texture that takes a shadow,
+    // each case reads its own texture's notice as on a device of its own, and its validation
+    // messages fail it by name.
+    on_device_with(
+        |options| {
+            options
+                .announce_each
+                .insert(Degradation::UndeclaredUsageShadow);
+        },
+        |device, messages| {
+            for (name, slice) in [("slice_at_level", true), ("write_at_level", false)] {
+                for usage in usages {
+                    let what = format!("{name}, usage {:#x}", usage.as_raw());
+                    {
+                        let state = kernel(device, name);
+                        messages.take_notices();
+                        let levels = written(device, &state, slice, usage);
+                        for (level, bytes) in levels.iter().enumerate() {
+                            let wrong = bytes
+                                .as_chunks::<8>()
+                                .0
+                                .iter()
+                                .filter(|texel| **texel != VALUE)
+                                .count();
+                            assert_eq!(
                         wrong,
                         0,
                         "{what}: level {level}: {wrong} of {} texels not written (first {:02x?})",
                         bytes.len() / 8,
                         &bytes[..8]
                     );
+                        }
+                        let shadowed = counts(&messages.take_notices())
+                            .contains_key(&Degradation::UndeclaredUsageShadow);
+                        assert!(
+                            !(shadowed && usage.intersects(TextureUsage::BLOCK_WRITES_ONLY)),
+                            "{what}: a BlockWritesOnly texture took a shadow"
+                        );
+                        forms.push((
+                            what.clone(),
+                            if shadowed { "shadowed" } else { "own image" },
+                        ));
+                    }
+                    assert_eq!(
+                        messages.take(),
+                        Vec::new(),
+                        "{what}: the validation layer reported"
+                    );
                 }
-                let shadowed = counts(&messages.take_notices())
-                    .contains_key(&Degradation::UndeclaredUsageShadow);
-                assert!(
-                    !(shadowed && usage.intersects(TextureUsage::BLOCK_WRITES_ONLY)),
-                    "{what}: a BlockWritesOnly texture took a shadow"
-                );
-                forms.push((what, if shadowed { "shadowed" } else { "own image" }));
-            });
-        }
-    }
+            }
+        },
+    );
     eprintln!("level writes by usage: {forms:#?}");
 }

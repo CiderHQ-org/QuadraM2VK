@@ -1,18 +1,18 @@
 //! Device tests of visibility results (its third part) on the device the cfg selects, under the
 //! validation layer.
 //!
-//! Each pass is one RT6 Metal probes 1 and 5 measured (an M4 with macOS 27.0.1, each case with and
-//! without Metal's API validation), drawn with the owned fixture `rt6_render_state` into a 4²
-//! target: the fullscreen triangle covers every pixel, and the same draw from vertex 3 covers
-//! none. Each visibility buffer starts as 0xaa bytes, and its words after the command buffer are
-//! compared with the ones Metal wrote: `Boolean` writes 1 or 0 at each offset the encoder set,
-//! `Counting` the samples that passed (16 for the fullscreen triangle, 48 for three instances of
-//! it, 64 at 4x), an offset set with no draw after it gets 0, an offset never set keeps its
-//! bytes, a later pass rewrites only its own offsets, and an offset taken again in its mode, which
-//! Metal's validation stops, adds the draws since to its result. An offset that is not a multiple of 8,
-//! which Metal's validation stops, lands at the offset rounded down to 8, where plain Metal writes
-//! it. What else Metal's validation stops, the runtime refuses typed; a device without precise
-//! occlusion queries refuses `Counting` (`Unsupported`, naming `occlusionQueryPrecise`), printed.
+//! Each pass is one that Metal probes measured (an M4 with macOS 27.0.1, each case with and without
+//! Metal's API validation), drawn with the owned fixture `rt6_render_state` into a 4² target: the
+//! fullscreen triangle covers every pixel, and the same draw from vertex 3 covers none. Each
+//! visibility buffer starts as 0xaa bytes, and its words after the command buffer are compared with
+//! the ones Metal wrote: `Boolean` writes 1 or 0 at each offset the encoder set, `Counting` the
+//! samples that passed (16 for the fullscreen triangle, 48 for three instances of it, 64 at 4x), an
+//! offset set with no draw after it gets 0, an offset never set keeps its bytes, a later pass
+//! rewrites only its own offsets, and an offset taken again in its mode, which Metal's validation
+//! stops, adds the draws since to its result. An offset that is not a multiple of 8, which Metal's
+//! validation stops, lands at the offset rounded down to 8, where plain Metal writes it. What else
+//! Metal's validation stops, the runtime refuses typed; a device without precise occlusion queries
+//! refuses `Counting` (`Unsupported`, naming `occlusionQueryPrecise`), printed.
 
 use std::collections::BTreeSet;
 

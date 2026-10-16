@@ -174,6 +174,7 @@ pub enum BufferStage {
     Vertex,
     Fragment,
     Object,
+    Mesh,
 }
 
 /// Recognized command-encoder operation; recognition does not establish lowering support.
@@ -218,6 +219,13 @@ pub enum CommandEncoderOperation {
         control_point_indices: u32,
         factors: u32,
     },
+    /// `air.draw_mesh_threadgroups_render_command` or `air.draw_mesh_threads_render_command`
+    /// (`void (cmd, i32, <3 x i32>, <3 x i32>, <3 x i32>)`): a mesh draw of its grid, in
+    /// threadgroups, or in threads where `threads`, then the threads of an object threadgroup and
+    /// of a mesh threadgroup.
+    DrawMesh {
+        threads: bool,
+    },
     /// `air.reset_compute_command` or `air.reset_render_command` (`void (cmd, i32)`): the command's
     /// every field reset, as `resetWithRange:` resets it.
     Reset {
@@ -238,8 +246,8 @@ pub enum CommandEncoderOperation {
     /// `p1` or `p2` of their element types.
     UnsupportedBufferEncoding,
     /// Any other operation of the AIR command-encoder families (`air.*_compute_command`,
-    /// `air.*_render_command`): render state setters, mesh bindings, among others.
-    /// Neither executor models them yet.
+    /// `air.*_render_command`): render state setters and an object threadgroup's memory length,
+    /// among others. Neither executor models them yet.
     Unmodeled,
 }
 
@@ -290,6 +298,12 @@ impl CommandEncoderOperation {
                 return Some(Self::ThreadgroupMemory)
             }
             "air.draw_primitives_render_command" => return Some(Self::Draw),
+            "air.draw_mesh_threadgroups_render_command" => {
+                return Some(Self::DrawMesh { threads: false })
+            }
+            "air.draw_mesh_threads_render_command" => {
+                return Some(Self::DrawMesh { threads: true })
+            }
             "air.reset_compute_command" => return Some(Self::Reset { render: false }),
             "air.reset_render_command" => return Some(Self::Reset { render: true }),
             "air.set_stage_in_region_compute_command" => return Some(Self::StageInRegion),
@@ -362,6 +376,7 @@ impl CommandEncoderOperation {
             "set_vertex_buffer_render_command" => BufferStage::Vertex,
             "set_fragment_buffer_render_command" => BufferStage::Fragment,
             "set_object_buffer_render_command" => BufferStage::Object,
+            "set_mesh_buffer_render_command" => BufferStage::Mesh,
             _ if family.ends_with("_compute_command") || family.ends_with("_render_command") => {
                 return Some(Self::Unmodeled)
             }
@@ -514,6 +529,41 @@ mod tests {
                 Some(CommandEncoderOperation::UnsupportedBufferEncoding)
             );
         }
+    }
+
+    /// A mesh draw of either grid form, and an object or a mesh buffer of either space, are their
+    /// own operations; an object threadgroup's memory length is one neither executor models.
+    #[test]
+    fn mesh_draws_and_buffers_decode() {
+        for (symbol, threads) in [
+            ("air.draw_mesh_threadgroups_render_command", false),
+            ("air.draw_mesh_threads_render_command", true),
+        ] {
+            assert_eq!(
+                CommandEncoderOperation::from_symbol(symbol),
+                Some(CommandEncoderOperation::DrawMesh { threads })
+            );
+        }
+        for (family, stage) in [
+            ("set_object_buffer_render_command", BufferStage::Object),
+            ("set_mesh_buffer_render_command", BufferStage::Mesh),
+        ] {
+            for (suffix, address_space) in [("p1i8", 1), ("p2i8", 2)] {
+                assert_eq!(
+                    CommandEncoderOperation::from_symbol(&format!("air.{family}.{suffix}")),
+                    Some(CommandEncoderOperation::Buffer {
+                        stage,
+                        address_space
+                    })
+                );
+            }
+        }
+        assert_eq!(
+            CommandEncoderOperation::from_symbol(
+                "air.set_object_threadgroup_memory_length_render_command"
+            ),
+            Some(CommandEncoderOperation::Unmodeled)
+        );
     }
 
     #[test]

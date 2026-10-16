@@ -65,6 +65,7 @@ use super::super::resource::Identity;
 use super::super::resource::ResourceKey;
 use super::super::texture_descriptor::{TextureDescriptor, TextureLayout};
 use super::super::tracker::{Access, Barrier, Use, UseRange};
+use super::super::trails::Trail;
 use super::super::values::{HazardTrackingMode, ResourceOptions};
 use super::super::{Buffer, Device};
 use super::first_move::{FirstMove, Pattern, Patterned, TexelCopy};
@@ -73,6 +74,7 @@ use super::{
     binding_view, block_decode_fact, buffer_image_copy, texture_aspects, view_error, view_shadow,
     Image, Owner, Start, Storage, Texture, ViewRecord,
 };
+use crate::device::functions::Vk;
 use ash::vk;
 use metal2vulkan::bind::{BlockDecode, BlockDecodeModule, ImageViewDesc};
 use metal2vulkan::metal::format::FormatMapping;
@@ -266,7 +268,7 @@ impl Device {
                 twin.raw.get(),
                 plan.format,
                 vk::ImageLayout::UNDEFINED,
-                false,
+                None,
             );
             *lock(&twin.first_move) = Some(first.patterned(patterned));
         }
@@ -553,9 +555,10 @@ impl Image {
     }
 
     /// On the device's decode thread: decode `blocks` (`region`'s; `None`, the zero blocks) into
-    /// the twin ([`write_decoded`](Self::write_decoded)), count a write's decode, and let the
-    /// batches that wait for it go. A failure is said on the device's message sink as an error
-    /// (`metal2vulkan-twin-decode-failed`): the call that queued it has returned.
+    /// the twin ([`write_decoded`](Self::write_decoded)) and count a write's decode;
+    /// [`twin_decoded`](Self::twin_decoded) then lets the batches that wait for it go. A failure
+    /// is said on the device's message sink as an error (`metal2vulkan-twin-decode-failed`): the
+    /// call that queued it has returned.
     pub(super) fn finish_twin_decode(&self, region: &ImageRegion, blocks: Option<&[u8]>) {
         let shared = self.device.shared();
         let result = match self.decoded.as_deref() {
@@ -588,18 +591,21 @@ impl Image {
                 }
             }
         }
+    }
+
+    /// On the device's decode thread, a job decoded, or a start a later queued write overwrites
+    /// whole skipped (its texels are never read): the batches that wait for its decodes may go
+    /// (those of a skipped start once that write finished too). The trail opened just before
+    /// (`trails.rs`), which the thread closes once it let go of the job: from here a batch may run
+    /// and complete while the job still holds this image, and the device with it.
+    pub(super) fn twin_decoded(&self) -> Trail {
+        let shared = self.device.shared();
+        let trail = shared.trails.open();
         let identity = &self.identity;
         shared
             .scheduler
             .decode_finished(identity.key, identity.tracked);
-    }
-
-    /// On the device's decode thread: a start a later queued write overwrites whole, skipped (its
-    /// texels are never read); the batches that wait for it go once that write finished too.
-    pub(super) fn skip_twin_decode(&self) {
-        let identity = &self.identity;
-        let scheduler = &self.device.shared().scheduler;
-        scheduler.decode_finished(identity.key, identity.tracked);
+        trail
     }
 
     /// Decode `blocks`, `region`'s (`None`: the zero blocks, a constant fill), on the CPU and copy
@@ -940,7 +946,7 @@ impl DecodePass {
     ///
     /// `raw` is recording, outside a render pass, on a queue family with compute; the image, the
     /// twin and the pass live until it completes; both images are in the `GENERAL` layout.
-    pub(crate) unsafe fn record(&self, device: &ash::Device, raw: vk::CommandBuffer) {
+    pub(crate) unsafe fn record(&self, device: &Vk, raw: vk::CommandBuffer) {
         let general = vk::ImageLayout::GENERAL;
         let compute = vk::PipelineBindPoint::COMPUTE;
         // SAFETY: the caller's contract; each copy lies in its image and in the scratch, and

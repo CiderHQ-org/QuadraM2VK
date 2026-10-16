@@ -267,6 +267,8 @@ fn host_commands_and_executions_validate_and_encode_their_records() {
         buffers: vec![],
         vertex_buffers: vec![],
         fragment_buffers: vec![],
+        object_buffers: vec![],
+        mesh_buffers: vec![],
     });
     case.validate_literal_resources().unwrap();
     let executed_id = case.computed_case_id().unwrap();
@@ -279,6 +281,8 @@ fn host_commands_and_executions_validate_and_encode_their_records() {
         buffers: vec![],
         vertex_buffers: vec![],
         fragment_buffers: vec![],
+        object_buffers: vec![],
+        mesh_buffers: vec![],
     });
 
     let rejects = |case: &AuthoredCase, what: &str| {
@@ -683,6 +687,8 @@ fn host_render_commands_validate_and_encode_their_records() {
             draws: crate::case::indirect_commands::RenderDraws::default(),
             max_vertex_buffer_bind_count: 2,
             max_fragment_buffer_bind_count: 1,
+            max_object_buffer_bind_count: 0,
+            max_mesh_buffer_bind_count: 0,
             support_dynamic_attribute_stride: false,
         },
         commands: vec![HostCommand {
@@ -705,6 +711,8 @@ fn host_render_commands_validate_and_encode_their_records() {
             buffers: vec![],
             vertex_buffers: vec![],
             fragment_buffers: vec![],
+            object_buffers: vec![],
+            mesh_buffers: vec![],
         }),
     });
     case.validate_literal_resources().unwrap();
@@ -942,6 +950,8 @@ fn host_indexed_draws_validate_and_encode_their_records() {
         indexed: true,
         patches: false,
         indexed_patches: false,
+        mesh_threadgroups: false,
+        mesh_threads: false,
     };
     case.command_buffers.push(CommandBufferResource {
         buffer_binding: 0,
@@ -954,6 +964,8 @@ fn host_indexed_draws_validate_and_encode_their_records() {
             draws,
             max_vertex_buffer_bind_count: 2,
             max_fragment_buffer_bind_count: 0,
+            max_object_buffer_bind_count: 0,
+            max_mesh_buffer_bind_count: 0,
             support_dynamic_attribute_stride: false,
         },
         commands: vec![HostCommand {
@@ -976,6 +988,8 @@ fn host_indexed_draws_validate_and_encode_their_records() {
             buffers: vec![],
             vertex_buffers: vec![],
             fragment_buffers: vec![],
+            object_buffers: vec![],
+            mesh_buffers: vec![],
         }),
     });
     case.validate_literal_resources().unwrap();
@@ -989,6 +1003,8 @@ fn host_indexed_draws_validate_and_encode_their_records() {
         draws: RenderDraws::default(),
         max_vertex_buffer_bind_count: 2,
         max_fragment_buffer_bind_count: 0,
+        max_object_buffer_bind_count: 0,
+        max_mesh_buffer_bind_count: 0,
         support_dynamic_attribute_stride: false,
     };
     let value = serde_json::to_value(&primitives).unwrap();
@@ -1035,6 +1051,8 @@ fn host_indexed_draws_validate_and_encode_their_records() {
                 draws: RenderDraws::default(),
                 max_vertex_buffer_bind_count: 2,
                 max_fragment_buffer_bind_count: 0,
+                max_object_buffer_bind_count: 0,
+                max_mesh_buffer_bind_count: 0,
                 support_dynamic_attribute_stride: false,
             }
         },
@@ -1197,9 +1215,13 @@ fn host_patch_draws_validate_and_encode_their_records() {
                 indexed: false,
                 patches: true,
                 indexed_patches: false,
+                mesh_threadgroups: false,
+                mesh_threads: false,
             },
             max_vertex_buffer_bind_count: 2,
             max_fragment_buffer_bind_count: 0,
+            max_object_buffer_bind_count: 0,
+            max_mesh_buffer_bind_count: 0,
             support_dynamic_attribute_stride: false,
         },
         commands: vec![HostCommand {
@@ -1222,6 +1244,8 @@ fn host_patch_draws_validate_and_encode_their_records() {
             buffers: vec![],
             vertex_buffers: vec![],
             fragment_buffers: vec![],
+            object_buffers: vec![],
+            mesh_buffers: vec![],
         }),
     });
     case.validate_literal_resources().unwrap();
@@ -1264,6 +1288,8 @@ fn host_patch_draws_validate_and_encode_their_records() {
                 draws: RenderDraws::default(),
                 max_vertex_buffer_bind_count: 2,
                 max_fragment_buffer_bind_count: 0,
+                max_object_buffer_bind_count: 0,
+                max_mesh_buffer_bind_count: 0,
                 support_dynamic_attribute_stride: false,
             }
         },
@@ -1431,6 +1457,8 @@ fn executed_command_buffers_run_in_identity_order() {
             buffers: vec![],
             vertex_buffers: vec![],
             fragment_buffers: vec![],
+            object_buffers: vec![],
+            mesh_buffers: vec![],
         }),
     };
     let mut produced = executed(2);
@@ -1471,4 +1499,200 @@ fn executed_command_buffers_run_in_identity_order() {
             keys(&case)
         );
     }
+}
+
+/// A render descriptor of mesh draws: its draw kinds and object and mesh counts serialize only
+/// where set, so the cases written before them keep their identities, and change a case's
+/// identity where set; an execution's parent object and mesh buffers are admitted only on a
+/// buffer that allows mesh draws and inherits buffers, and bind at their own stages; a
+/// host-encoded barrier needs mesh draws, and on a buffer of them is not modelled.
+#[test]
+fn mesh_draw_descriptors_keep_identities_and_admit_object_and_mesh_parents() {
+    use crate::case::indirect_commands::{
+        CommandBinding, CommandBufferResource, CommandDescriptor, Execution, HostCommand,
+        PipelineTemplate, RenderDraws,
+    };
+    use metal2vulkan::bind::indirect_commands::BufferStage;
+    use std::num::NonZeroU64;
+    let mut case = example();
+    case.case_id = "22".repeat(32);
+    case.buffers = vec![
+        BufferResource {
+            binding: 0,
+            role: ResourceRole::Input,
+            bytes_b64: Some(base64::engine::general_purpose::STANDARD.encode([0u8; 8])),
+            initial_bytes_b64: None,
+            rasterization_rate_map: None,
+        },
+        BufferResource {
+            binding: 1,
+            role: ResourceRole::Output,
+            bytes_b64: None,
+            initial_bytes_b64: Some(base64::engine::general_purpose::STANDARD.encode([0u8; 512])),
+            rasterization_rate_map: None,
+        },
+    ];
+    case.output = OutputSelection::Buffer {
+        binding: 1,
+        offset: 0,
+        length: 4,
+    };
+    let primitives = CommandDescriptor::Render {
+        draws: RenderDraws::default(),
+        max_vertex_buffer_bind_count: 1,
+        max_fragment_buffer_bind_count: 0,
+        max_object_buffer_bind_count: 0,
+        max_mesh_buffer_bind_count: 0,
+        support_dynamic_attribute_stride: false,
+    };
+    let value = serde_json::to_value(&primitives).unwrap();
+    for key in ["max_object_buffer_bind_count", "max_mesh_buffer_bind_count"] {
+        assert!(value.get(key).is_none(), "{key}");
+    }
+    let binding = |index| CommandBinding {
+        index,
+        buffer: 1,
+        offset: 256,
+        attribute_stride: None,
+    };
+    let parent = Execution {
+        pipeline: Some(PipelineTemplate {
+            token: 4,
+            air_sha256: "55".repeat(32),
+            case_id: "66".repeat(32),
+        }),
+        buffers: vec![],
+        vertex_buffers: vec![],
+        fragment_buffers: vec![],
+        object_buffers: vec![],
+        mesh_buffers: vec![],
+    };
+    let value = serde_json::to_value(&parent).unwrap();
+    for key in ["object_buffers", "mesh_buffers"] {
+        assert!(value.get(key).is_none(), "{key}");
+    }
+    let mesh_draws = RenderDraws {
+        primitives: false,
+        indexed: false,
+        patches: false,
+        indexed_patches: false,
+        mesh_threadgroups: true,
+        mesh_threads: false,
+    };
+    case.command_buffers.push(CommandBufferResource {
+        buffer_binding: 0,
+        field_offset: 0,
+        capacity: 1,
+        execution_range: [0, 1],
+        inherit_pipeline_state: true,
+        inherit_buffers: true,
+        descriptor: CommandDescriptor::Render {
+            draws: mesh_draws,
+            max_vertex_buffer_bind_count: 0,
+            max_fragment_buffer_bind_count: 0,
+            max_object_buffer_bind_count: 1,
+            max_mesh_buffer_bind_count: 2,
+            support_dynamic_attribute_stride: false,
+        },
+        commands: vec![],
+        execute: Some(Execution {
+            object_buffers: vec![binding(0)],
+            mesh_buffers: vec![binding(1)],
+            ..parent
+        }),
+    });
+    case.validate_literal_resources().unwrap();
+    let descriptor = serde_json::to_value(&case.command_buffers[0].descriptor).unwrap();
+    assert_eq!(
+        descriptor["draws"],
+        serde_json::json!({"primitives": false, "indexed": false, "patches": false,
+            "mesh_threadgroups": true})
+    );
+    assert_eq!(descriptor["max_mesh_buffer_bind_count"], 2);
+    let identity = case.computed_case_id().unwrap();
+    let mut counted = case.clone();
+    if let CommandDescriptor::Render {
+        max_object_buffer_bind_count,
+        ..
+    } = &mut counted.command_buffers[0].descriptor
+    {
+        *max_object_buffer_bind_count = 2;
+    }
+    assert_ne!(counted.computed_case_id().unwrap(), identity);
+
+    // The parent's object and mesh buffers bind at their own stages.
+    let address = |buffer: u32| (buffer == 1).then_some(0x2_0000_0000);
+    let state = case.command_buffers[0]
+        .parent_bindings(address)
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.pipeline, NonZeroU64::new(4));
+    assert_eq!(
+        state.buffers(BufferStage::Object)[0].map(|b| b.address),
+        Some(0x2_0000_0100)
+    );
+    assert_eq!(
+        state.buffers(BufferStage::Mesh)[1].map(|b| b.address),
+        Some(0x2_0000_0100)
+    );
+
+    let rejects = |change: &dyn Fn(&mut CommandBufferResource), what: &str| {
+        let mut variant = case.clone();
+        change(&mut variant.command_buffers[0]);
+        let errors = variant.validate_literal_resources().unwrap_err();
+        assert!(
+            errors.iter().any(|error| error.contains(what)),
+            "{what}: {errors:?}"
+        );
+    };
+    // On a buffer of no mesh draws, the parent's object and mesh buffers bind no stage its
+    // commands run.
+    let without_mesh = |resource: &mut CommandBufferResource| {
+        if let CommandDescriptor::Render { draws, .. } = &mut resource.descriptor {
+            *draws = RenderDraws::default();
+        }
+    };
+    rejects(
+        &without_mesh,
+        "the parent encoder's object buffers are no stage",
+    );
+    rejects(
+        &|resource| {
+            without_mesh(resource);
+            if let Some(execution) = &mut resource.execute {
+                execution.object_buffers.clear();
+            }
+        },
+        "the parent encoder's mesh buffers are no stage",
+    );
+    rejects(
+        &|resource| resource.inherit_buffers = false,
+        "an execution's parent buffers need inherited buffers",
+    );
+    let barrier = HostCommand {
+        index: 0,
+        action: None,
+        barrier: true,
+        pipeline: None,
+        buffers: vec![],
+        threadgroup_memory_lengths: vec![],
+        stage_in_region: None,
+        vertex_buffers: vec![],
+        fragment_buffers: vec![],
+    };
+    rejects(
+        &|resource| resource.commands = vec![barrier.clone()],
+        "barrier on a buffer of mesh draws is not modelled",
+    );
+    rejects(
+        &|resource| {
+            without_mesh(resource);
+            if let Some(execution) = &mut resource.execute {
+                execution.object_buffers.clear();
+                execution.mesh_buffers.clear();
+            }
+            resource.commands = vec![barrier.clone()];
+        },
+        "barrier needs mesh draws",
+    );
 }

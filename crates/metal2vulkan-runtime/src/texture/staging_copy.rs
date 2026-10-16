@@ -82,7 +82,7 @@ impl Image {
         let mut staging = Staging::new(&self.device, packed.len() as u64)?;
         staging.bytes().copy_from_slice(packed);
         let (buffer, image) = (staging.raw, self.raw.get());
-        self.device.submit_staging(|raw, command_buffer| {
+        self.device.submit_staging(|raw, command_buffer, _| {
             transfer_barrier(raw, command_buffer, true);
             // SAFETY: the staging command buffer is recording; the staging buffer and the image
             // are live (the detach lock keeps the image's own `VkImage` presented), and the image
@@ -116,7 +116,7 @@ impl Image {
         }
         let mut staging = Staging::new(&self.device, bytes.len() as u64)?;
         let (buffer, image) = (staging.raw, self.raw.get());
-        self.device.submit_staging(|raw, command_buffer| {
+        self.device.submit_staging(|raw, command_buffer, _| {
             transfer_barrier(raw, command_buffer, true);
             // SAFETY: the staging command buffer is recording; the staging buffer and the image
             // are live (the detach lock keeps the image's own `VkImage` presented), and the image

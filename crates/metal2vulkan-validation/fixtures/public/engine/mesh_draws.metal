@@ -1,4 +1,4 @@
-// Owned fixture (WP-MESH, DESIGN D334): the grids of mesh draws, for the runtime lane and Metal
+// Owned fixture: the grids of mesh draws, for the runtime lane and Metal
 // probe 4. Each mesh threadgroup draws one small triangle over the centre of one pixel of an 8x8
 // target and gives it, as per-primitive data, the builtins its threadgroup read: with no object
 // function the pixel is the threadgroup's position, and under one it is the mesh threadgroup's x

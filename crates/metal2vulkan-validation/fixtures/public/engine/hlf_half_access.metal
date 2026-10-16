@@ -1,4 +1,4 @@
-// Owned fixture (WP-HLF, DESIGN D251): how Metal converts texels to `half` when a texture
+// Owned fixture: how Metal converts texels to `half` when a texture
 // declared `access::read` or `access::read_write` reads them (`bcx_half_read` reads textures
 // declared `access::sample`). Four read-only 2D `half` textures (the case binds a 32-bit float, a
 // 16-bit unorm, an 8-bit unorm, and an sRGB format) and two read-write ones (a 32-bit float and

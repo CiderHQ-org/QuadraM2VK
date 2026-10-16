@@ -4,11 +4,11 @@
 //! A process exits (`exit`, or the end of `main`) on one thread, which runs the exit handlers and
 //! the loaded libraries' destructors in the reverse order of their registration; every other
 //! thread keeps running meanwhile. A driver's or a layer's destructors free what a later Vulkan
-//! call needs: RADV ended a process with `SIGSEGV` when the completion thread destroyed a device
+//! call needs: RADV ended a process with `SIGSEGV` when a completing thread destroyed a device
 //! beside the validation layer's destructors.
 //!
 //! - **Sections.** Each Vulkan call the runtime makes on its own threads (the scheduler's
-//!   submissions, the completion thread's polls), each release of a
+//!   submissions, the queues' waiters' polls), each release of a
 //!   Vulkan object (a drop, on whatever thread it runs), and each read of an event's counter runs
 //!   inside a section ([`enter`]), which counts itself. A section runs none of the program's code
 //!   (handlers, deallocators, notifications) except a device's message sink, which Vulkan calls
@@ -21,7 +21,10 @@
 //!     A source test fails when another file calls such an entry point;
 //!   - every thread the runtime starts is started by [`spawn`], and every call of the program's
 //!     code (handlers, notifications, deallocators, the message sink) goes through [`program`];
-//!     source tests fail when a thread is started or a panic caught elsewhere;
+//!     source tests fail when a thread is started or a panic caught elsewhere. A release of the
+//!     program's (a deallocator, a keep-alive, a range token, a dma-buf source) goes through
+//!     [`program_release`], which in builds with debug assertions ends the process on a thread
+//!     command buffers' completion depends on;
 //!   - the device's functions are reached only through checked accessors (`DeviceShared::vk`,
 //!     private field), which in builds with debug assertions end the process
 //!     when one of the runtime's threads reaches them outside a section and outside the
@@ -75,14 +78,27 @@
 //!   it ended, an exit the program makes once it learned of a section's work (from a handler, a
 //!   wait, a status) comes after that section's registration. Measured: while the scheduler posted
 //!   a command buffer's scheduling inside its section, an exit from a scheduled handler crashed the
-//!   completion thread's poll on MoltenVK in 10 runs of 10. The hole left: a static first made by a
+//!   completion's poll on MoltenVK in 10 runs of 10. The hole left: a static first made by a
 //!   call after the hook's last registration (one in progress as the exit begins included), when
-//!   the process exits before the next registration.
-//! - **Once closed.** The scheduler and the completion thread end at their next section, so what
+//!   the process exits before the next registration. The program's own calls register nothing,
+//!   so one of those may make it too: on the M3 Max (the validation layer 1.4.357.0 from
+//!   Homebrew), the layer's descriptor set layouts' empty lists
+//!   (`DescriptorSetLayoutDef::GetMutableTypes` and `GetImmutableSamplerCreateInfosFromIndex`),
+//!   first made on the program's thread 3 to 11 ms before an exit in each of 20 runs; no section
+//!   was seen to read them at exit. Not the guard's, at exit or before: under a layer on MoltenVK
+//!   1.4.1, a message that names the device leaves `ICD_LOADER_MAGIC` in its loader word, and the
+//!   layer, which finds its state by that word, ends the process at its next call for the device
+//!   (the validation layer: "The VkDevice dispatch handle was not found";
+//!   `Device::with_loader_word`).
+//! - **Once closed.** The scheduler and the queues' waiters end at their next section, so what
 //!   is pending stays pending, as Metal's does. A release skips its Vulkan calls (the process's
 //!   end frees what they would), and a no-copy buffer released then keeps its deallocator unrun,
-//!   with its pages imported. The handler threads, listeners and the shader cache's thread go on;
-//!   a making that ends then saves no record (`shader_cache/driver.rs`).
+//!   with its pages imported; a release inside a section in progress (a whole drop's, a pool
+//!   piece's) runs, within the hook's wait. The handler threads, listeners and the shader cache's
+//!   thread go on. A driver's making then calls the driver for its pipelines alone
+//!   (`shader_cache/driver.rs`): one in progress (a pool piece's or a host step's section runs on
+//!   past the close) neither reads its cache for a record nor releases it, and one begun after
+//!   makes no cache.
 //! - **A CPU device's work.** A device whose queues run in this process (`DeviceKind::Cpu`:
 //!   lavapipe, SwiftShader) runs what was submitted to it on the process's own threads, so the
 //!   destructors would run under its execution. Once the sections ended, the hook waits for the
@@ -299,7 +315,7 @@ calls! {
     // which an indirect sparse update's read in a host step can be.
     CreateSemaphore => c"vkCreateSemaphore",
     WaitForFences => c"vkWaitForFences",
-    // The completion thread's drain of a device's queues after a failed wait
+    // A completion turn's drain of a device's queues after a failed wait
     // (`Device::drain_queues`).
     QueueWaitIdle => c"vkQueueWaitIdle",
     ResetFences => c"vkResetFences",
@@ -492,6 +508,8 @@ thread_local! {
     static BASE: Cell<usize> = const { Cell::new(0) };
     /// The host steps this thread is recording now ([`host_step`]).
     static HOST_STEPS: Cell<usize> = const { Cell::new(0) };
+    /// Command buffers' completion depends on this thread ([`serves_completion`]).
+    static SERVES_COMPLETION: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Whether this thread runs inside a call of the program's: one of the program's own threads,
@@ -725,8 +743,8 @@ where
 /// Start one of the runtime's threads that take a command buffer from its commit to its handlers,
 /// running `f`, as [`spawn`] does, but at the user-interactive quality of service on macOS, and
 /// with the utilization floor at its top on Linux, from its start ([`run_at_user_interactive`]):
-/// the scheduler's (`scheduler/`), the completion thread
-/// and each `VkQueue`'s waiter (`command_buffer/completion.rs`), and every thread of the handler
+/// the scheduler's (`scheduler/`), each `VkQueue`'s waiter, which makes the completion turns
+/// (`command_buffer/completion.rs`), and every thread of the handler
 /// pool (`contexts/`). A thread one of them starts (the reaper a pipeline state's last release
 /// starts on a handler thread, a program's thread made in a handler) does not take either: it
 /// starts at the default class on macOS ([`spawn`]), and with no floor on Linux.
@@ -943,6 +961,38 @@ pub(crate) fn program(f: impl FnOnce()) {
 /// ([`Call`], `device/functions.rs`).
 pub(crate) fn in_section() -> bool {
     OWN.with(Cell::get) > BASE.with(Cell::get)
+}
+
+/// Mark this thread, one of the runtime's own, as one that command buffers' completion depends on:
+/// the scheduler's, which submits them and holds each batch's command buffer until its pass ends,
+/// so its gate stays shut meanwhile (`command_buffer/gate.rs`); the queues' waiters, which see
+/// them complete and finish them. No release of the program's may run on it
+/// ([`program_release`]).
+pub(crate) fn serves_completion() {
+    SERVES_COMPLETION.with(|serves| serves.set(true));
+}
+
+/// Run `f`, the program's code a release runs (a no-copy buffer's deallocator, the drop of its
+/// keep-alive, of a range token or of a dma-buf source), as [`program`] runs it. In builds with
+/// debug assertions (every test run), end the process where this thread is one command buffers'
+/// completion depends on ([`serves_completion`]) and runs none of the program's code already (a
+/// submission handler's own drops are the program's): `f` may wait for such a command buffer,
+/// which would then never complete or never open its gate. What a command buffer's commands and
+/// encoders took goes in its release, on its queue's handler thread
+/// (`CommandBufferShared::complete`); what the scheduler's thread lets go of before then, on a
+/// handler thread in a context of its own (`Device::let_go_elsewhere`).
+pub(crate) fn program_release(f: impl FnOnce()) {
+    if cfg!(debug_assertions) && SERVES_COMPLETION.with(Cell::get) && PROGRAM.with(Cell::get) == 0 {
+        let name = std::thread::current().name().map(str::to_owned);
+        eprintln!(
+            "metal2vulkan: the runtime's thread {} ran a release of the program's (a deallocator, \
+             a keep-alive, a range token or a dma-buf source), on which command buffers' \
+             completion depends",
+            name.as_deref().unwrap_or("(unnamed)")
+        );
+        std::process::abort();
+    }
+    program(f);
 }
 
 /// Whether this thread may reach the device's functions now: the program's threads always (the

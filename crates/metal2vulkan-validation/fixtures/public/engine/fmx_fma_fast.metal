@@ -1,4 +1,4 @@
-// Owned fixture (WP-FMX, DESIGN D253): how Metal rounds a fused multiply-add and a written
+// Owned fixture: how Metal rounds a fused multiply-add and a written
 // `a * b + c`, compiled with the default fast math. `fma` is `air.fma.f32` / `air.fma.f16`, which
 // MSL Tables 8.1 and 8.2 make correctly rounded; `a * b + c` is an `fmul fast` feeding an
 // `fadd fast` (both carry `contract`), which Metal's compiler may fuse or not. `fmx_fma_precise`

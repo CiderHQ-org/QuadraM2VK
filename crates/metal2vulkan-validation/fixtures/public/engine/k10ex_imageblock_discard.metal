@@ -1,4 +1,4 @@
-// Owned fixture (WP-K10EX, DESIGN D201): a fragment that only writes its imageblock (`c`, a half4
+// Owned fixture: a fragment that only writes its imageblock (`c`, a half4
 // at byte 0, and `id`, a ushort at byte 8) and discards the pixels of odd `x + y`. A discarded
 // fragment writes nothing, so those pixels keep the cells the pass began with; the others hold
 // `c = (x, y, 0.25, -1)` and `id = 4y + x` of their pixel, and the color `(x, y, 0.5, 1)`.

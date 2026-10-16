@@ -2,13 +2,13 @@
 //! cfg selects, under the validation layer, through the resolve lane's fixture `rt6_resolves` and
 //! helpers (`resolves.rs`).
 //!
-//! What RT6 Metal probes 15 and 15b measured on an M4 (macOS 27.0.1): the target set last is
-//! resolved into, at its slice and level, holding every draw of the pass, those after the call
-//! too; the descriptor's resolve texture keeps its texels; a depth and a stencil target are
-//! written whether or not the descriptor named one; Metal's validation stops a target of another
-//! pixel format or size and an index without an attachment. Where Metal ignores a color target
-//! the descriptor named none for, the runtime's setter does what it says and resolves into it
-//! (the extension's contract, not Metal's answer).
+//! What Metal probes measured on an M4 (macOS 27.0.1): the target set last is resolved into, at its
+//! slice and level, holding every draw of the pass, those after the call too; the descriptor's
+//! resolve texture keeps its texels; a depth and a stencil target are written whether or not the
+//! descriptor named one; Metal's validation stops a target of another pixel format or size and an
+//! index without an attachment. Where Metal ignores a color target the descriptor named none for,
+//! the runtime's setter does what it says and resolves into it (the extension's contract, not
+//! Metal's answer).
 
 use super::buffer_with;
 use super::resolves::{
@@ -277,15 +277,15 @@ fn late_depth_and_stencil_targets_resolve() {
 }
 
 /// Stencil and depth targets set after the draws of a pass whose aspects resolve in different
-/// modes, depth `Min` and stencil `Sample0` (RT6 probe 6's `ds_min_sample0`: depth 0.1, stencil
-/// 20), split into two instances by a barrier, with a color target beside them: each resolves as
-/// the descriptor's would. Where the device's resolve modes lack `MIN` the depth is drawn after
-/// the pass where the driver's fragment depth is exact (lavapipe), from the attachment's samples,
-/// so the attachment is made for shader reads too there. Where neither resolves the pair, the depth
-/// setter is refused `NotImplemented(DepthStencilResolve)`, as the descriptor's resolve is
-/// (`resolves::depth_and_stencil_resolve_the_samples_metal_picks`), and keeps the target before
-/// (none): the stencil resolves alone. A device that resolves the pair only one aspect at a time
-/// resolves the second after the pass; no committed profile is one.
+/// modes, depth `Min` and stencil `Sample0` (Metal probe case `ds_min_sample0` on an M4: depth 0.1,
+/// stencil 20), split into two instances by a barrier, with a color target beside them: each
+/// resolves as the descriptor's would. Where the device's resolve modes lack `MIN` the depth is
+/// drawn after the pass where the driver's fragment depth is exact (lavapipe), from the
+/// attachment's samples, so the attachment is made for shader reads too there. Where neither
+/// resolves the pair, the depth setter is refused `NotImplemented(DepthStencilResolve)`, as the
+/// descriptor's resolve is (`resolves::depth_and_stencil_resolve_the_samples_metal_picks`), and
+/// keeps the target before (none): the stencil resolves alone. A device that resolves the pair only
+/// one aspect at a time resolves the second after the pass; no committed profile is one.
 #[test]
 fn late_targets_resolve_aspects_of_different_modes() {
     let (messages, _cache, lane) = lane();

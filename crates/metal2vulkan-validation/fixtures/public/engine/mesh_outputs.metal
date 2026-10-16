@@ -1,4 +1,4 @@
-// Owned fixture (WP-MESH, DESIGN D334 item 2): every mesh output and object input the AIR decode
+// Owned fixture: every mesh output and object input the AIR decode
 // reads, compiled by Apple's compiler: points with point_size, clip distances and user data of
 // several types; primitives with primitive_culled, primitive_id, render_target_array_index,
 // viewport_array_index and user data; lines without primitive data, written through set_indices;

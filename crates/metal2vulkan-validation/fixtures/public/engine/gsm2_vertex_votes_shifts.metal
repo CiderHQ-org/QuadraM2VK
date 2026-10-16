@@ -1,4 +1,4 @@
-// Owned fixture (WP-GSM2, DESIGN D578; written for this repository): simdgroup votes and relative
+// Owned fixture (written for this repository): simdgroup votes and relative
 // shuffles in a vertex function. Rasterization-disabled points; vertex v reads in[v].
 // simd_votes_in_a_vertex_function writes simd_all and simd_any of x > 0 and of x > 100 to
 // out[4v .. 4v + 3]; simd_shifts_in_a_vertex_function writes simd_shuffle_up by 3,

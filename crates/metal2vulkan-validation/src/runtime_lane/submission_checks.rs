@@ -167,12 +167,12 @@ fn a_check_is_refused_once_committed() {
     });
 }
 
-/// A commit submits its ready batches itself: while another command buffer's check runs on the
-/// scheduler thread, held there by this test, a command buffer committed on another queue runs
-/// and completes. Previously the scheduler thread made every submission, so the second command
-/// buffer waited for the check to return.
+/// A commit returns at once while another command buffer's check runs on the scheduler thread,
+/// held there by this test, as Metal's `commit` does, and submits nothing itself: the scheduler
+/// thread makes every submission, so the command buffer committed on another queue stays
+/// `Committed` until the check returned, and then runs and completes.
 #[test]
-fn a_commit_submits_its_batches_while_a_check_runs() {
+fn a_commit_made_while_a_check_runs_returns_at_once_and_runs_after_the_check() {
     use std::sync::mpsc;
     use std::time::Duration;
     on_device(|device, _| {
@@ -208,13 +208,18 @@ fn a_commit_submits_its_batches_while_a_check_runs() {
             .expect("the check runs on the scheduler thread");
         let other = fill(&free, &free_bytes);
         other.commit().unwrap();
-        let ran = other.wait_until_completed_for(Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(50));
         let status = other.status();
         release.send(()).unwrap();
         held.wait_until_completed_for(WAIT).unwrap();
         assert_eq!(held.status(), CommandBufferStatus::Completed);
-        assert!(ran.is_ok(), "the commit waited for the check: {status:?}");
-        assert_eq!(status, CommandBufferStatus::Completed);
+        assert_eq!(
+            status,
+            CommandBufferStatus::Committed,
+            "submitted while the scheduler thread ran the check"
+        );
+        other.wait_until_completed_for(WAIT).unwrap();
+        assert_eq!(other.status(), CommandBufferStatus::Completed);
         assert_eq!(read_buffer(&free_bytes, 0, 256).unwrap(), vec![0x5a; 256]);
     });
 }

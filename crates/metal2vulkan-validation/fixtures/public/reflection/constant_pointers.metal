@@ -1,6 +1,6 @@
-// Owned fixture (WP-RRX, docs/TODO.md 8.27): a program-scope pointer a module's static initializer
+// Owned fixture: a program-scope pointer a module's static initializer
 // chooses by a function constant, so it stores a pointer (a shape the crate's dependency analysis
-// refused, DESIGN D384 item 9), read by one kernel and not by another. Metal's
+// refused), read by one kernel and not by another. Metal's
 // functionConstantsDictionary (the metallib's CNST tag) answers which constants each reads.
 // Written for this repository; no third-party source.
 #include <metal_stdlib>

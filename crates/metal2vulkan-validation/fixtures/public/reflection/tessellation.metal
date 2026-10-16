@@ -1,4 +1,4 @@
-// Owned fixture (WP-UNI, DESIGN D311 item 5, S2): a post-tessellation vertex function, whose
+// Owned fixture: a post-tessellation vertex function, whose
 // MTLFunction reflection Metal answers with its patch type and control-point count and its
 // control-point and per-patch attributes. Written for this repository; no third-party source.
 // Loop-free.

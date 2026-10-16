@@ -73,6 +73,7 @@ use super::tracker::{Access, Barrier, Use};
 use super::values::{ResourceOptions, StorageMode};
 use super::view_plan::{keeps_components, reinterpretation_refused};
 use super::Device;
+use crate::device::functions::Vk;
 use crate::shader_cache::driver::Making;
 use ash::vk;
 use metal2vulkan::bind::{
@@ -1074,7 +1075,7 @@ impl PlanesCommands {
     /// planes, the attachments and these commands' objects are live until it completes.
     pub(super) unsafe fn record(
         &self,
-        raw: &ash::Device,
+        raw: &Vk,
         command_buffer: vk::CommandBuffer,
         position: usize,
     ) {
@@ -1188,7 +1189,7 @@ impl BitsCopy {
     ///
     /// `command_buffer` is recording outside a render pass, and only the caller records it; the
     /// images and these copies are live until it completes.
-    pub(super) unsafe fn record(&self, raw: &ash::Device, command_buffer: vk::CommandBuffer) {
+    pub(super) unsafe fn record(&self, raw: &Vk, command_buffer: vk::CommandBuffer) {
         // SAFETY: the caller's contract.
         unsafe { record_steps(raw, command_buffer, &self.steps) };
     }
@@ -1209,7 +1210,7 @@ fn whole([width, height]: [u32; 2]) -> vk::Rect2D {
 ///
 /// `command_buffer` is recording outside a render pass, and only the caller records it; the
 /// images the steps run on and their objects are live until it completes.
-unsafe fn record_steps(raw: &ash::Device, command_buffer: vk::CommandBuffer, steps: &[Recorded]) {
+unsafe fn record_steps(raw: &Vk, command_buffer: vk::CommandBuffer, steps: &[Recorded]) {
     for step in steps {
         // SAFETY: the caller's contract; each command's objects were made for this device.
         unsafe {

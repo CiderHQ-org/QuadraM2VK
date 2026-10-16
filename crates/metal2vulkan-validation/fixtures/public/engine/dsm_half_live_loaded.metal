@@ -1,4 +1,4 @@
-// Owned fixture (WP-DSM, DESIGN D271): an 8x8 simdgroup multiply-add, in float and in half, run by
+// Owned fixture: an 8x8 simdgroup multiply-add, in float and in half, run by
 // lanes 0-15 of each simdgroup only, on fragments every lane loaded before the branch.
 //
 // The kernel reads three 8x8 row-major matrices a, b, c from `in` (float, at 0, 64, 128) and from
@@ -7,7 +7,7 @@
 // and out[2n + 2g + j] that of the half d's, widened, at thread g of a grid of n threads
 // (g = thread_position_in_grid). A lane that does not run it writes nothing. Lane L of a
 // simdgroup holds cells (row(L), col(L) + j), row(L) = ((L >> 1) & 3) | ((L >> 4) << 2),
-// col(L) = ((L >> 3) & 1) * 4 + (L & 1) * 2 (D91.1). Loop-free.
+// col(L) = ((L >> 3) & 1) * 4 + (L & 1) * 2. Loop-free.
 #include <metal_stdlib>
 using namespace metal;
 

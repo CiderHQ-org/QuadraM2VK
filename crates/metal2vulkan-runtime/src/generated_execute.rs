@@ -559,6 +559,7 @@ fn record_total(
         uses: &[],
         blobs: Vec::new(),
         mesh: None,
+        tessellation: None,
     };
     let mut uses = Vec::new();
     for p in &prepared {

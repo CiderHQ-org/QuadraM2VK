@@ -1,5 +1,5 @@
-// Owned fixture (DESIGN D183): a kernel that reads more buffers than a small profile's per-stage
-// storage-buffer limit (vk12-floor and vk12-bare allow four). Five slots are read only: two
+// Owned fixture: a kernel that reads more buffers than a small profile's per-stage
+// storage-buffer limit (vk12-floor allows four). Five slots are read only: two
 // `device` arrays and a `device` array indexed by the thread (`Whole` windows), a `constant` array
 // indexed by the thread (`Whole`), and a `device` struct reference (`Bounded`, 8 bytes); one slot
 // is written. On Profile F the per-stage fallback views read-only slots as uniform buffers until

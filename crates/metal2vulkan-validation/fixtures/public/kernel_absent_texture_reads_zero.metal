@@ -4,7 +4,7 @@ using namespace metal;
 // On Metal (case 3fe49200), where this kernel reads the resource the pipeline does not provide,
 // `dest` keeps its initial zero, and its write to that resource goes nowhere. The read's value is
 // undefined, not zero: Metal's compiler drops a store of such a value, and its validation layer
-// reads zero instead (SPC-metal2, DESIGN D291.7). So the engine refuses the observed read
+// reads zero instead (SPC-metal2). So the engine refuses the observed read
 // (`FunctionConstantArgument`), and the case's Metal rows stay as the record. `provide_absent` is
 // false in the variant this fixture describes, so `absent_source` and `absent_sink` are exactly
 // that resource -- and `present` and `dest` are the module's only other 2D read and only other 2D

@@ -1,4 +1,4 @@
-// Owned fixture (WP-WRG, DESIGN D307, TODO 1.7): which 2x2 block Metal's depth gathers and
+// Owned fixture: which 2x2 block Metal's depth gathers and
 // `gather_compare` read at the positions where its arithmetic decides them (see
 // `wrg_sampler_positions`: the wrap into one period, the product rounded ties away from zero, and
 // the footprint's 1/512-texel steps). The cases bind a 32-bit float depth texture of odd size whose

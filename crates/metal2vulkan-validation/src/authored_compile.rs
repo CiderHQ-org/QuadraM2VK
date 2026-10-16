@@ -82,7 +82,11 @@ mod tests;
 /// 3: each recorded cell holds the digest of what a run of its case executes there,
 ///    which the expectation file records on the C3 venues' profile-legs, at the build its
 ///    `artifacts_at` line names.
-pub const AUTHORED_COMPILE_CENSUS_VERSION: u32 = 3;
+/// 4: a case the runtime runs compiles its own pipeline although the executor's context does not
+///    replay its templates, each executed command buffer uncovered (`engine::case_compiles`).
+/// 5: an object or mesh case compiles its mesh render pipeline, where it was refused
+///    (`engine::mesh::mesh_request`).
+pub const AUTHORED_COMPILE_CENSUS_VERSION: u32 = 5;
 
 /// The expectation file's name under the corpus root (`validation/corpus`).
 pub const EXPECTATIONS: &str = "authored-compile.tsv";
@@ -871,7 +875,7 @@ impl Expectations {
     /// file with a digest has a build, or this is an error naming it.
     pub fn render(&self) -> Result<String, String> {
         let mut out = String::from(
-            "# The authored compile census's expectations (DESIGN D288, D300): one line per \
+            "# The authored compile census's expectations: one line per \
              committed authored\n# case, its id, then its cell on each profile-leg of the \
              header: `compiled`, or the executor's\n# stable refusal label, followed by \
              ` uncovered=N` when N of the case's command buffers are\n# host-replayed there \

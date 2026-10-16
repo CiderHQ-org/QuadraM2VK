@@ -17,8 +17,9 @@
 //! - the clamped and unclamped LOD queries of 2D array, 3D, cube, and cube array textures and of
 //!   depth 2D, 2D array, cube, and cube array textures are `OpImageQueryLod`;
 //! - a cube's explicit gradients take Metal's footprint (`sampler.sample_cube_grad`, with
-//!   `PrecisionNote::CubeGradientFootprint`), other gradients pass unchanged, and an anisotropic
-//!   constexpr sampler's keep Metal's two face components.
+//!   `PrecisionNote::CubeGradientFootprint`), other gradients pass unchanged: an isotropic
+//!   sampler's as Metal's length of the two tangent components, an anisotropic constexpr
+//!   sampler's as Metal's two face components.
 //!
 //! Previously each kernel was refused `UnknownIntrinsic`, so every test fails without it. A profile
 //! without cube arrays (`vk12-floor`) refuses the fixtures with the typed device gap, which the
@@ -44,6 +45,8 @@ const OP_EXT_INST: u16 = 12;
 const OP_CONSTANT: u16 = 43;
 /// `Length` in `GLSL.std.450`.
 const GLSL_LENGTH: u32 = 66;
+/// `FMax` in `GLSL.std.450`.
+const GLSL_FMAX: u32 = 40;
 const OP_IMAGE_SAMPLE_IMPLICIT_LOD: u16 = 87;
 const OP_IMAGE_SAMPLE_EXPLICIT_LOD: u16 = 88;
 const OP_IMAGE_SAMPLE_DREF_IMPLICIT_LOD: u16 = 89;
@@ -51,6 +54,8 @@ const OP_IMAGE_SAMPLE_DREF_EXPLICIT_LOD: u16 = 90;
 const OP_IMAGE_GATHER: u16 = 96;
 const OP_IMAGE_DREF_GATHER: u16 = 97;
 const OP_IMAGE_QUERY_LOD: u16 = 105;
+const OP_IMAGE_QUERY_LEVELS: u16 = 106;
+const OP_LOOP_MERGE: u16 = 246;
 const LOD: u32 = 0x2;
 const GRAD: u32 = 0x4;
 const CONST_OFFSET: u32 = 0x8;
@@ -214,14 +219,16 @@ fn gradient_and_level_samples_of_3d_cube_and_depth_textures() {
         }
         let lod = |m: &u32| m & (LOD | GRAD);
         // Three color and four depth gradient samples, and the compared ones; the depth cube
-        // array's at level 0, twice.
+        // array's at level 0, twice. Off `VkProperty::MetalSampler` the color cube and cube
+        // array take Metal's level in the shader: each its one tap's two explicit levels.
+        let emulated = 2 * compared;
         let mut plain: Vec<u32> = masks(a, OP_IMAGE_SAMPLE_EXPLICIT_LOD, 5)
             .iter()
             .map(lod)
             .collect();
         plain.sort();
-        let mut expected = vec![LOD, LOD];
-        expected.extend(vec![GRAD; 7 + compared]);
+        let mut expected = vec![LOD; 2 + emulated];
+        expected.extend(vec![GRAD; 7 + compared - emulated / 2]);
         assert_eq!(plain, expected, "{stem}");
         // Four gradient comparisons, less the compared ones, and two at level 0.
         let mut dref: Vec<u32> = masks(a, OP_IMAGE_SAMPLE_DREF_EXPLICIT_LOD, 6)
@@ -312,18 +319,20 @@ fn glsl(a: &FunctionArtifact, number: u32) -> usize {
 }
 
 /// Each of the fixture's six explicit cube gradient samples (color, depth, and comparison; cube and
-/// cube array) takes Metal's footprint: its gradients are the counted components' length on one
-/// tangent (a `GLSL.std.450` `Length` per gradient), its census name is `sampler.sample_cube_grad`,
-/// and the module records `CubeGradientFootprint`. The 3D and depth 2D and 2D array gradient
-/// samples pass their gradients unchanged (`sampler.sample_grad`), and a module whose gradients are
-/// all 2D records no such note. The depth samples without comparison read through a sampler that
-/// filters nearest with no mip filter, so on a device without `VkProperty::MetalSampler` their
-/// directions are snapped onto Metal's texel instead (`sampler.cube.snapped`): the two gradient
-/// samples and the two at level 0. The 2D fixture's gradient sample reads a runtime sampler, so on
-/// a device without the property the linear emulation plans it (`sampler.linear`, its word
-/// selecting the device's sample). On a driver that hands a compute pipeline's cube gradients to
-/// Metal's `gradientcube` (`CubeGradientRoute::Metal`), the kernel hands Metal's own gradients,
-/// exactly: no `Length`, and no note.
+/// cube array) takes Metal's footprint: its gradients are Metal's length of the two tangent
+/// components on one tangent (two `GLSL.std.450` `FMax` per gradient, no `Length`), or off
+/// `VkProperty::MetalSampler` the color samples' Metal's level in the shader of the same lengths,
+/// its census name is `sampler.sample_cube_grad`, and the module records `CubeGradientFootprint`
+/// (for the depth and comparison samples, which the shader's level does not reach). The 3D and
+/// depth 2D and 2D array gradient samples pass their gradients unchanged (`sampler.sample_grad`),
+/// and a module whose gradients are all 2D records no such note. The depth samples without
+/// comparison read through a sampler that filters nearest with no mip filter, so on a device
+/// without `VkProperty::MetalSampler` their directions are snapped onto Metal's texel instead
+/// (`sampler.cube.snapped`): the two gradient samples and the two at level 0. The 2D fixture's
+/// gradient sample reads a runtime sampler, so on a device without the property the linear
+/// emulation plans it (`sampler.linear`, its word selecting the device's sample). On a driver that
+/// hands a compute pipeline's cube gradients to Metal's `gradientcube`
+/// (`CubeGradientRoute::Metal`), the kernel hands Metal's own gradients, exactly: no note.
 #[test]
 fn explicit_cube_gradients_take_metals_footprint() {
     let handed = handed_metal();
@@ -340,7 +349,11 @@ fn explicit_cube_gradients_take_metals_footprint() {
         assert_eq!(uses(a, "sampler.cube.snapped"), 2 * snapped, "{stem}");
         assert_eq!(uses(a, "sampler.sample_grad"), 5, "{stem}");
         let metal = handed.iter().any(|m| m == stem);
-        assert_eq!(glsl(a, GLSL_LENGTH) >= 2, !metal, "{stem}");
+        assert_eq!(glsl(a, GLSL_LENGTH), 0, "{stem}");
+        if !metal {
+            let samples = uses(a, "sampler.sample_cube_grad") as usize;
+            assert!(glsl(a, GLSL_FMAX) >= 4 * samples, "{stem}");
+        }
         assert_eq!(
             a.precision.contains(&PrecisionNote::CubeGradientFootprint),
             !metal,
@@ -375,14 +388,14 @@ fn explicit_cube_gradients_take_metals_footprint() {
 }
 
 /// An anisotropic constexpr sampler (`max_anisotropy(2)`, bits 20-23 of the state's first word) on
-/// a cube's explicit gradients takes Metal's anisotropic footprint on every profile that compiles
-/// the isotropic fixture and has `samplerAnisotropy`: each of the four samples is
-/// `sampler.sample_cube_grad` with `CubeGradientFootprint` recorded, and its gradients keep Metal's
-/// two face components (`emit::cube_footprint`) instead of the isotropic form's length on one
-/// tangent, so the module has no `GLSL.std.450` `Length` where the isotropic one has one per
-/// gradient. A profile without the feature refuses it with the typed device gap. On a driver that
-/// hands a compute pipeline's cube gradients to Metal's `gradientcube`, the kernel hands Metal's
-/// own through either sampler: no `Length` and no note.
+/// a cube's explicit gradients takes Metal's footprint on every profile that compiles the isotropic
+/// fixture, with `samplerAnisotropy` or without it (whose Vulkan sampler is isotropic, the taps
+/// the emulation's). Off `VkProperty::MetalSampler` the shader takes Metal's level and taps: each
+/// of the four samples queries the level count and loops over its taps, `AnisotropicFilter` is
+/// recorded and `CubeGradientFootprint` is not; through the isotropic sampler, Metal's level and
+/// one tap: no loop, neither note. On a driver that hands a compute pipeline's cube gradients to
+/// Metal's `gradientcube`, the kernel hands Metal's own through either sampler: no level query, no
+/// note. Neither module has a `Length`.
 #[test]
 fn an_anisotropic_constexpr_sampler_takes_metals_cube_gradient_footprint() {
     let path = engine_dir().join("unk_cube_grad_lod.ll");
@@ -412,27 +425,52 @@ fn an_anisotropic_constexpr_sampler_takes_metals_cube_gradient_footprint() {
             continue;
         };
         let metal = handed.contains(&stem);
-        assert_eq!(glsl(&i, GLSL_LENGTH) >= 2, !metal, "{stem}");
+        let shader = !p
+            .fields()
+            .enabled
+            .properties
+            .contains(&VkProperty::MetalSampler);
+        assert_eq!(glsl(&i, GLSL_LENGTH), 0, "{stem}");
+        let samples = uses(&i, "sampler.sample_cube_grad") as usize;
+        assert!(samples > 0, "{stem}");
+        assert_eq!(
+            count(&i, OP_IMAGE_QUERY_LEVELS),
+            if shader { samples } else { 0 },
+            "{stem}"
+        );
+        assert_eq!(count(&i, OP_LOOP_MERGE), 0, "{stem}");
         assert_eq!(
             i.precision.contains(&PrecisionNote::CubeGradientFootprint),
-            !metal,
+            !metal && !shader,
             "{stem}"
         );
-        let Some(a) = artifact(&aniso, "unk_cube_grad_lod", &stem, &p) else {
-            assert!(!p.fields().images.sampler_anisotropy, "{stem}");
-            continue;
-        };
+        assert!(
+            !i.precision.contains(&PrecisionNote::AnisotropicFilter),
+            "{stem}"
+        );
+        let a = artifact(&aniso, "unk_cube_grad_lod", &stem, &p)
+            .unwrap_or_else(|| panic!("{stem}: the anisotropic sampler refused"));
         compiled += 1;
         assert_eq!(
-            uses(&a, "sampler.sample_cube_grad"),
-            uses(&i, "sampler.sample_cube_grad"),
+            uses(&a, "sampler.sample_cube_grad") as usize,
+            samples,
             "{stem}"
         );
-        assert!(uses(&a, "sampler.sample_cube_grad") > 0, "{stem}");
         assert_eq!(glsl(&a, GLSL_LENGTH), 0, "{stem}");
         assert_eq!(
+            count(&a, OP_LOOP_MERGE),
+            if shader { samples } else { 0 },
+            "{stem}"
+        );
+        assert_eq!(
+            a.precision.contains(&PrecisionNote::AnisotropicFilter),
+            shader,
+            "{stem}: {:?}",
+            a.precision
+        );
+        assert_eq!(
             a.precision.contains(&PrecisionNote::CubeGradientFootprint),
-            !metal,
+            !metal && !shader,
             "{stem}: {:?}",
             a.precision
         );
@@ -441,14 +479,16 @@ fn an_anisotropic_constexpr_sampler_takes_metals_cube_gradient_footprint() {
 }
 
 /// An unmeasured route: `moltenvk-m3` without its measured compute cube-gradient route (as a
-/// MoltenVK release no measurement covers) keeps the isotropic form for `unk_cube_grad_lod`'s
-/// isotropic sampler (a `Length` per gradient, `CubeGradientFootprint`), and refuses the same
-/// kernel through an anisotropic constexpr sampler with `Needs::UnmeasuredDeviation`, naming the
-/// cube-gradient route; the measured description compiles both.
+/// MoltenVK release no measurement covers) takes Metal's footprint in the shader, where the
+/// refusal was: `unk_cube_grad_lod`'s isotropic sampler Metal's level and one tap (each sample
+/// queries the level count; no loop, no note), the same kernel through an anisotropic constexpr
+/// sampler Metal's level and taps (a loop of taps per sample, `AnisotropicFilter`), neither with
+/// `CubeGradientFootprint`. The measured description hands Metal's own gradients: no level query,
+/// no note.
 #[test]
-fn an_unmeasured_cube_gradient_route_refuses_an_anisotropic_constexpr_sampler() {
+fn an_unmeasured_cube_gradient_route_takes_metals_footprint_in_the_shader() {
     use crate::device::profile::CubeGradients;
-    use crate::error::{DriverDeviation, Feature};
+    use crate::error::DriverDeviation;
     let path = engine_dir().join("unk_cube_grad_lod.ll");
     let text = std::fs::read_to_string(&path).expect("fixture");
     let word: u64 = 34_901_797_601_019_977;
@@ -478,44 +518,62 @@ fn an_unmeasured_cube_gradient_route_refuses_an_anisotropic_constexpr_sampler() 
             .clone()
     };
     let (measured, unmeasured) = (profile(measured.clone(), true), profile(measured, false));
-    // The graphics route is its own deviation, unmeasured on macOS 27's identity either way.
+    // The graphics route is its own deviation, measured on macOS 27's identity either way.
     assert_eq!(
         unmeasured.fields().cube_gradients,
         CubeGradients {
-            graphics: CubeGradientRoute::Unmeasured,
+            graphics: CubeGradientRoute::AppleProjected,
             compute: CubeGradientRoute::Unmeasured,
         }
     );
-    let i = artifact(&iso, "unk_cube_grad_lod", "unmeasured", &unmeasured).expect("isotropic");
-    assert!(glsl(&i, GLSL_LENGTH) >= 2);
-    assert!(i.precision.contains(&PrecisionNote::CubeGradientFootprint));
-    match compile(&aniso, "unk_cube_grad_lod", &unmeasured) {
-        Err(Error::Unsupported(u)) => {
-            assert_eq!(u.feature, Feature::SamplerAnisotropy);
-            assert_eq!(
-                u.needs,
-                Needs::UnmeasuredDeviation(DriverDeviation::CubeGradientRoute)
-            );
-        }
-        other => panic!("an unmeasured route: {:?}", other.map(|_| ())),
-    }
-    for bc in [&iso, &aniso] {
-        let a = artifact(bc, "unk_cube_grad_lod", "measured", &measured).expect("measured");
-        assert_eq!(glsl(&a, GLSL_LENGTH), 0);
+    for (bc, taps) in [(&iso, false), (&aniso, true)] {
+        let what = if taps { "anisotropic" } else { "isotropic" };
+        let u = artifact(bc, "unk_cube_grad_lod", "unmeasured", &unmeasured).expect(what);
+        let samples = uses(&u, "sampler.sample_cube_grad") as usize;
+        assert!(samples > 0, "{what}");
+        assert_eq!(count(&u, OP_IMAGE_QUERY_LEVELS), samples, "{what}");
+        assert_eq!(
+            count(&u, OP_LOOP_MERGE),
+            if taps { samples } else { 0 },
+            "{what}"
+        );
+        assert_eq!(
+            u.precision.contains(&PrecisionNote::AnisotropicFilter),
+            taps,
+            "{what}: {:?}",
+            u.precision
+        );
+        assert!(
+            !u.precision.contains(&PrecisionNote::CubeGradientFootprint),
+            "{what}: {:?}",
+            u.precision
+        );
+        let m = artifact(bc, "unk_cube_grad_lod", "measured", &measured).expect(what);
+        assert_eq!(count(&m, OP_IMAGE_QUERY_LEVELS), 0, "{what}");
+        assert!(
+            !m.precision.contains(&PrecisionNote::CubeGradientFootprint),
+            "{what}"
+        );
+        assert!(
+            !m.precision.contains(&PrecisionNote::AnisotropicFilter),
+            "{what}"
+        );
     }
 }
 
 /// The graphics cube route is measured per GPU and macOS release (MoltenVK's `deviceID` names
 /// both). On the Apple M3 Max under macOS 26.7 (`moltenvk-m3`'s capture at that release's
 /// `deviceID`) a fragment function's explicit cube gradients through an anisotropic constexpr
-/// sampler take SPIRV-Cross's fixup in the transposed form; on `moltenvk-m4` (macOS 27's identity,
-/// the M4's and, as `moltenvk-m3` now is, the M3 Max's), whose graphics route is unmeasured (that
-/// form misses Metal's sample on 96 and 48 of 144 samples on the M4, EV RTL-lane2-mvk4), the same
-/// fragment is refused naming `GraphicsCubeGradientRoute`, while the kernel route stays Metal's and
-/// the kernel of the same samples compiles. The cover vertex function compiles on both.
+/// sampler take SPIRV-Cross's fixup in the transposed form (`AppleSwizzled`); on macOS 27's
+/// identity (`moltenvk-m3` and `moltenvk-m4`: the M3 Max's and the M4's) they take the fixup's
+/// projected form (`AppleProjected`), exact on an `x` or `z` face and a near-equivalent on a `y`
+/// face, both with `CubeGradientFootprint`. Without the macOS 27 route's measurement (a release
+/// no measurement covers) the same fragment takes Metal's level and taps in the shader, with
+/// `AnisotropicFilter` and without `CubeGradientFootprint`, while the kernel route stays Metal's
+/// and the kernel of the same samples compiles. The cover vertex function compiles on each.
 #[test]
-fn the_graphics_cube_route_is_measured_on_the_m3_max_alone() {
-    use crate::error::{DriverDeviation, Feature};
+fn the_graphics_cube_route_is_measured_per_macos_identity() {
+    use crate::error::DriverDeviation;
     let (Some(fragment), Some(kernel)) =
         (fixture("rtl_cube_grad_fragment"), fixture("ani_cube_grad"))
     else {
@@ -533,12 +591,13 @@ fn the_graphics_cube_route_is_measured_on_the_m3_max_alone() {
         of("moltenvk-m3").fields().cube_gradients,
         m4.fields().cube_gradients
     );
-    let mut m3_macos26 = committed_descriptions()
+    let m3_macos27 = committed_descriptions()
         .expect("descriptions")
         .iter()
         .find(|(s, _)| s == "moltenvk-m3")
         .map(|(_, d)| d.clone())
         .expect("moltenvk-m3");
+    let mut m3_macos26 = m3_macos27.clone();
     m3_macos26.device_id = crate::device::driver_facts::APPLE_M3_MAX;
     let m3 = Device::new(m3_macos26, EXACT_SAMPLING)
         .expect("device")
@@ -556,21 +615,46 @@ fn the_graphics_cube_route_is_measured_on_the_m3_max_alone() {
             m4.fields().cube_gradients.graphics,
             m4.fields().cube_gradients.compute
         ),
-        (CubeGradientRoute::Unmeasured, CubeGradientRoute::Metal)
+        (CubeGradientRoute::AppleProjected, CubeGradientRoute::Metal)
     );
-    let a = artifact(&fragment, "rtl_cube_grad_fragment", "moltenvk-m3", &m3).expect("M3 Max");
-    assert!(a.precision.contains(&PrecisionNote::CubeGradientFootprint));
-    match compile(&fragment, "rtl_cube_grad_fragment", &m4) {
-        Err(Error::Unsupported(u)) => {
-            assert_eq!(u.feature, Feature::SamplerAnisotropy);
-            assert_eq!(
-                u.needs,
-                Needs::UnmeasuredDeviation(DriverDeviation::GraphicsCubeGradientRoute)
-            );
-        }
-        other => panic!("the M4's graphics route: {:?}", other.map(|_| ())),
-    }
+    let tangents = DriverDeviation::GraphicsCubeGradientTangents;
+    let unmeasured = Device::with_deviation(m3_macos27, EXACT_SAMPLING, tangents, false)
+        .expect("device")
+        .profile()
+        .clone();
+    assert_eq!(
+        unmeasured.fields().cube_gradients.graphics,
+        CubeGradientRoute::Unmeasured
+    );
     for (stem, p) in [("moltenvk-m3", &m3), ("moltenvk-m4", &m4)] {
+        let a = artifact(&fragment, "rtl_cube_grad_fragment", stem, p).expect(stem);
+        assert!(
+            a.precision.contains(&PrecisionNote::CubeGradientFootprint),
+            "{stem}"
+        );
+    }
+    let a = artifact(
+        &fragment,
+        "rtl_cube_grad_fragment",
+        "unmeasured",
+        &unmeasured,
+    )
+    .expect("an unmeasured graphics route");
+    assert!(
+        a.precision.contains(&PrecisionNote::AnisotropicFilter),
+        "{:?}",
+        a.precision
+    );
+    assert!(
+        !a.precision.contains(&PrecisionNote::CubeGradientFootprint),
+        "{:?}",
+        a.precision
+    );
+    for (stem, p) in [
+        ("moltenvk-m3", &m3),
+        ("moltenvk-m4", &m4),
+        ("unmeasured", &unmeasured),
+    ] {
         artifact(&fragment, "rtl_cube_cover", stem, p).expect(stem);
         let k = artifact(&kernel, "ani_cube_grad", stem, p).expect(stem);
         assert!(
@@ -606,14 +690,15 @@ declare { <4 x float>, i8 } @air.sample_texture_cube_grad.v4f32(ptr addrspace(1)
 
 /// A cube's explicit gradients through a runtime sampler slot take their footprint by the slot's
 /// word on every profile whose route is measured and not Metal's: the slot's `SamplerState`
-/// specialization reads `SamplerWord::ANISOTROPIC`, the module computes the isotropic form (a
-/// `Length` per gradient) beside the anisotropic one, records `CubeGradientFootprint`, and its
-/// combined binding carries no cube-gradient bit, so the plan takes an anisotropic sampler there.
-/// On a driver that hands a compute pipeline's cube gradients to Metal's `gradientcube`, the kernel
-/// hands Metal's own: no word read, no `Length`, no note. On `moltenvk-m3` without its measured
-/// route (unmeasured) the kernel keeps the isotropic form without reading the word, and its binding
-/// carries the bit, which refuses an anisotropic sampler where it is bound
-/// (`bind::plan::resources`' refusal test).
+/// specialization reads `SamplerWord::ANISOTROPIC`, the module computes the isotropic form
+/// (Metal's length per gradient, two `FMax` each; macOS 26.7's fixup a `Length` instead) beside
+/// the anisotropic one, records `CubeGradientFootprint`, and its combined binding carries no
+/// cube-gradient bit, so the plan takes an anisotropic sampler there. On a driver that hands a
+/// compute pipeline's cube gradients to Metal's `gradientcube`, the kernel hands Metal's own: no
+/// word read, no note. On `moltenvk-m3` without its measured route (unmeasured) the kernel keeps
+/// the isotropic form without reading the word (a variant naming the slot takes Metal's taps),
+/// and its binding carries the bit, which makes an anisotropic sampler isotropic where it is
+/// bound.
 #[test]
 fn a_runtime_samplers_cube_gradients_take_their_footprint_by_its_word() {
     use crate::metal::sampler::SamplerWord;
@@ -656,27 +741,28 @@ fn a_runtime_samplers_cube_gradients_take_their_footprint_by_its_word() {
             })
             .collect();
         let noted = a.precision.contains(&PrecisionNote::CubeGradientFootprint);
+        let lengths = glsl(&a, GLSL_FMAX) >= 4 || glsl(&a, GLSL_LENGTH) >= 2;
         match route {
             CubeGradientRoute::Metal => {
                 assert!(!reads, "{stem}: {fields:?}");
-                assert_eq!(glsl(&a, GLSL_LENGTH), 0, "{stem}");
                 assert!(!noted, "{stem}");
                 assert_eq!(bits, vec![false], "{stem}");
                 handed += 1;
             }
             CubeGradientRoute::Unmeasured => {
                 assert!(!reads, "{stem}: {fields:?}");
-                assert!(glsl(&a, GLSL_LENGTH) >= 2, "{stem}");
+                assert!(glsl(&a, GLSL_FMAX) >= 4, "{stem}");
                 assert!(noted, "{stem}");
                 assert_eq!(bits, vec![true], "{stem}");
             }
             CubeGradientRoute::Vulkan | CubeGradientRoute::AppleSwizzled => {
                 assert!(reads, "{stem}: {fields:?}");
-                assert!(glsl(&a, GLSL_LENGTH) >= 2, "{stem}");
+                assert!(lengths, "{stem}");
                 assert!(noted, "{stem}");
                 assert_eq!(bits, vec![false], "{stem}");
                 by_word += 1;
             }
+            CubeGradientRoute::AppleProjected => panic!("{stem}: a kernel's route {route:?}"),
         }
     }
     assert!(by_word >= 4, "{by_word}");

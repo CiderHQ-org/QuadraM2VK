@@ -1,4 +1,4 @@
-// Owned fixture (WP-UNK, DESIGN D283): the gathers the decoder lacked before D283 -- of a cube
+// Owned fixture: the gathers the decoder once lacked -- of a cube
 // and a cube array texture (components x, w, and z), of a depth cube and cube array, and the
 // comparison gathers of depth 2D, 2D array, cube, and cube array textures. Each lane reads its
 // 2D coordinate and comparison reference, layer, and cube direction from in[i] and writes nine

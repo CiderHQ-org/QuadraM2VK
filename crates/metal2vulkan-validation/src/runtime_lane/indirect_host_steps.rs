@@ -22,7 +22,9 @@
 //!   in `commit` for the CPU's, in the host step (or on the GPU alone) for the kernel's, with each
 //!   command's state's ability to encode indirect commands and the buffers made resident for
 //!   writing. It sees the same on a device that keeps no execution record, as a consumer's keeps
-//!   none.
+//!   none;
+//! - a no-copy buffer released while a later batch's host step resolves against a table of the
+//!   live buffers that lists it keeps its pages until the command buffer completes, announced.
 //!
 //! One test reports, per device, how long a host step holds its command buffer and how late
 //! another queue's command buffers committed meanwhile are submitted (a `STALL` line). Each
@@ -31,6 +33,8 @@
 use super::degrade_notices::{
     assert_made_once, counts, forced, on_device_with, shared_in_system_memory,
 };
+use super::host_memory::{gpu_fill, no_copy, Mapping, GUEST_PAGE};
+use super::resource_ids::DELAYED_DEALLOCATORS as DELAYED;
 use super::{buffer_with, read_buffer, WAIT};
 use crate::air_library::AirLibrary;
 use metal2vulkan::bind::{ReplayFaults, StatusReport};
@@ -39,13 +43,14 @@ use metal2vulkan::pipeline::{ComputePipelineDescriptor, RuntimeFact, StageSource
 use metal2vulkan_devtools::{engine_dir, llvm_assemble};
 use metal2vulkan_runtime::{
     BlitCommandEncoder, Buffer, CommandBuffer, CommandBufferStatus, CommandQueue,
-    ComputeCommandEncoder, ComputePipelineState, Degradation, Device, DeviceOptions, Error,
-    ExecutedCommands, ExecutedCommandsHandler, ExecutedPipeline, Execution, IdPlacement,
-    IndirectCommand, IndirectCommandBuffer, IndirectCommandBufferDescriptor,
+    ComputeCommandEncoder, ComputePipelineState, Deallocator, Degradation, Device, DeviceOptions,
+    Error, EventRef, ExecutedCommands, ExecutedCommandsHandler, ExecutedPipeline, Execution,
+    IdPlacement, IndirectCommand, IndirectCommandBuffer, IndirectCommandBufferDescriptor,
     IndirectCommandBufferProblem, Invalid, PipelineOptions, Problem, RecordsRead, ResourceId,
     ResourceOptions, Size,
 };
-use std::sync::{Arc, Mutex};
+use std::ptr::NonNull;
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Instant;
 
 /// The kind every test here takes: an execution of commands a kernel may write is replayed on
@@ -925,6 +930,114 @@ fn run_written(queue: &CommandQueue, setup: &Setup) {
     encoder.end_encoding().unwrap();
     complete(&command_buffer);
     assert_eq!(setup.output(), expected());
+}
+
+/// A no-copy buffer listed after a command buffer's first submission, and released while a later
+/// batch's host step resolves against the live buffers' table that lists it, keeps its pages
+/// until that command buffer completes: the commands the step records may reach them. Its
+/// deallocator then runs in the command buffer's release, where its wait for that command buffer
+/// returns at once, and the device announces the wait past Metal's release once
+/// (`host-deallocator-delayed`; Metal's runs at the release, probe `dealloc-probe4`). The step's
+/// own hold of the table was its last: the deallocator ran on the thread that submits, whose wait
+/// for the command buffer never returned. The device withholds the GPU-alone form, so the
+/// execution takes the host step; the executed-commands handler, called in the step, holds it
+/// while the program releases the buffer.
+#[test]
+fn a_buffer_released_during_a_later_host_step_waits_for_its_command_buffer() {
+    let withheld = |options: &mut DeviceOptions| options.withhold_generated_commands = true;
+    on_device_forcing_with(withheld, &DELAYED, |device| {
+        let (queue, other) = (
+            device.new_command_queue().unwrap(),
+            device.new_command_queue().unwrap(),
+        );
+        let setup = Setup::new(device, 2);
+        let writing = queue.command_buffer().unwrap();
+        let mut encoder = writing.compute_command_encoder().unwrap();
+        setup.write(&mut encoder);
+        encoder.end_encoding().unwrap();
+        complete(&writing);
+        let scratch = device.new_buffer(256, ResourceOptions::shared()).unwrap();
+        let executing = queue.command_buffer().unwrap();
+        let memory = Mapping::anonymous(GUEST_PAGE);
+        let pointer = memory.pointer();
+        let (sender, receiver) = mpsc::channel();
+        let deallocator: Deallocator = {
+            let executing = executing.clone();
+            Box::new(move |_: NonNull<u8>, _: u64| {
+                let status = executing.status();
+                let waited = (
+                    executing.wait_until_completed(),
+                    executing.wait_until_completed_for(WAIT),
+                );
+                drop(executing);
+                drop(memory);
+                sender.send((status, waited)).unwrap();
+            })
+        };
+        // SAFETY: the deallocator releases the mapping, after the buffer's last use.
+        let buffer = unsafe {
+            no_copy(
+                device,
+                pointer,
+                GUEST_PAGE,
+                ResourceOptions::default(),
+                Some(deallocator),
+            )
+        }
+        .unwrap();
+        let (submitted, stepping) = (
+            device.new_shared_event().unwrap(),
+            device.new_shared_event().unwrap(),
+        );
+        let mut blit = executing.blit_command_encoder().unwrap();
+        blit.fill_buffer(&scratch, 0..256, 1).unwrap();
+        blit.end_encoding().unwrap();
+        executing
+            .encode_signal_event(EventRef::from(&submitted), 1)
+            .unwrap();
+        executing
+            .encode_wait_for_event(EventRef::from(&stepping), 1)
+            .unwrap();
+        let mut encoder = executing.compute_command_encoder().unwrap();
+        setup.execute(&mut encoder);
+        encoder.end_encoding().unwrap();
+        let (reading, read) = mpsc::channel::<()>();
+        let (go, gone) = mpsc::channel::<()>();
+        let held = Mutex::new(Some((reading, gone)));
+        executing
+            .add_executed_commands_handler(Arc::new(move |_: &ExecutedCommands| {
+                if let Some((reading, gone)) = held.lock().unwrap().take() {
+                    reading.send(()).unwrap();
+                    gone.recv_timeout(WAIT).unwrap();
+                }
+            }))
+            .unwrap();
+        executing.commit().unwrap();
+        assert!(
+            submitted.wait_until_signaled_value(1, WAIT),
+            "the first batch ran"
+        );
+        // Listed only now, after the first submission: the later batch's commands reach it.
+        gpu_fill(&other, &buffer, 0..64, 0x2d);
+        stepping.set_signaled_value(1);
+        read.recv_timeout(WAIT)
+            .expect("the host step read the records");
+        let before = device.work_counts();
+        drop(buffer);
+        assert_eq!(
+            device.work_counts().host_deallocators_delayed - before.host_deallocators_delayed,
+            1,
+            "the release waits for the step's table"
+        );
+        go.send(()).unwrap();
+        let (status, waited) = receiver
+            .recv_timeout(WAIT)
+            .expect("the deallocator ran and returned");
+        assert_eq!(status, CommandBufferStatus::Completed);
+        assert_eq!(waited, (Ok(()), Ok(())));
+        wait(&executing);
+        assert_eq!(setup.output(), expected());
+    });
 }
 
 /// A command buffer's executed-commands handler sees each execution where the runtime reads its

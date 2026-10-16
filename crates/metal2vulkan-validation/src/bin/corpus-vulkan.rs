@@ -40,8 +40,8 @@ Measures, on the device a venue run on this host selects, the facts the Metal-li
 design takes from each device: host memory imported without a copy\n\
 (VK_EXT_external_memory_host) and used by a dispatch, and linear images over a buffer's memory\n\
 (row pitches, aliasing, explicit layouts through VK_EXT_image_drm_format_modifier), and whether a\n\
-fragment's FragCoord.z, clamped to the viewport's range, is the depth the device stores (DESIGN\n\
-D672: bias, clamp and range cases, one sample and per sample, the depth attachment in the\n\
+fragment's FragCoord.z, clamped to the viewport's range, is the depth the device stores (bias,\n\
+clamp and range cases, one sample and per sample, the depth attachment in the\n\
 subpass, out of it, or in it with its test off). Writes the JSON report to OUT.json and exits 1\n\
 when the validation layer reported anything.";
 

@@ -2515,16 +2515,16 @@ fn half_nan_answers_follow_the_measured_states() {
     }
 }
 
-/// The float facts of a profile whose `float` fused multiply-add is `OpFmaKHR`, whose `half` one
-/// is the routine, and whose `float` functions and denormals are the device's.
+/// The float facts of a profile whose `float` fused multiply-add is `OpFmaKHR`, checked by the
+/// integer routine, whose `half` one is the routine, and whose `float` functions are the device's.
 const KHR_FACTS: super::FloatFacts = super::FloatFacts {
     routes: super::fma::Routes {
         float: super::fma::Route::Khr,
         half: super::fma::Route::HalfOdd,
+        tiny: Some(super::fma::Route::Soft),
     },
     reciprocal: super::divide::Reciprocal::Rounded,
     metal_functions: false,
-    metal_denormals: false,
     native: false,
     nan_native: false,
     native_min_max: false,
@@ -3421,15 +3421,14 @@ fn fast_variants_refine_float_functions() {
         for op in [FloatFn::Sign, FloatFn::Saturate] {
             assert_eq!(refine(op, true, fmf, f32_), op);
         }
-        // `llvm.minnum` and `llvm.maxnum` (never `fast_`) with every flag, Metal's fast-math `a < b
-        // ? a : b` and `a > b ? a : b`, are Metal's `fmin` and `fmax` on `float`; any other call
-        // keeps LLVM's function.
+        // `llvm.minnum` and `llvm.maxnum` (never `fast_`), Metal's fast-math `a < b ? a : b` and
+        // `a > b ? a : b`, are Metal's `fmin` and `fmax` on `float` with any flags; on the other
+        // formats they keep LLVM's function.
         for (op, metal) in [
             (FloatFn::MinNum, FloatFn::Min),
             (FloatFn::MaxNum, FloatFn::Max),
         ] {
-            let want = if fmf == every { metal } else { op };
-            assert_eq!(refine(op, false, fmf, f32_), want);
+            assert_eq!(refine(op, false, fmf, f32_), metal);
             assert_eq!(refine(op, false, fmf, float(16)), op);
             assert_eq!(refine(op, false, fmf, bfloat()), op);
         }
@@ -4099,7 +4098,9 @@ fn aggregate_leaf_total_is_capped_before_expansion() {
 
 mod atan2;
 mod bicubic;
+mod blend16;
 mod color_write;
+mod depth16;
 mod divide;
 mod fast;
 mod float_texel;
@@ -4110,6 +4111,7 @@ mod libm_exp;
 mod narrow;
 mod norm_write;
 mod round_texel;
+mod snapshot_codes;
 mod specials;
 mod texel_round;
 mod wide;

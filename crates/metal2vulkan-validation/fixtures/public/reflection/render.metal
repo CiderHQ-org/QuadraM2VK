@@ -1,4 +1,4 @@
-// Owned fixture (WP-UNI, DESIGN D311 item 5, S2): vertex and fragment functions whose pipeline
+// Owned fixture: vertex and fragment functions whose pipeline
 // reflection Metal answers per stage: a vertex stage input that a vertex descriptor feeds (Metal
 // lists the descriptor's buffers as `vertexBuffer.N`), buffers, textures and samplers in both
 // stages, and a vertex function without a stage input. Written for this repository; no

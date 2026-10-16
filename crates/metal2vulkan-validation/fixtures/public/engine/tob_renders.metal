@@ -1,9 +1,9 @@
-// Owned fixture (WP-TOB, DESIGN D335 items 5 and 6): the functions TOB Metal probe 1's render
-// cases (`r.*`) drew with, so each pass of the runtime's lane asks the question the probe
-// measured: a rectangle and a triangle from a buffer's corners, a solid color from a buffer, and
-// fragment functions that read, sample and write a 2D texture or a texture buffer of 4x4 texels;
-// and the kernel of its cases that write a texture's bytes two ways (`k.two_ways_*`). Written
-// for this repository; no third-party source. Loop-free.
+// Owned fixture: the functions a Metal probe's render cases (`r.*`) drew with on the M3 Max and an
+// M4, so each pass of the runtime's lane asks the question the probe measured: a rectangle and a
+// triangle from a buffer's corners, a solid color from a buffer, and fragment functions that read,
+// sample and write a 2D texture or a texture buffer of 4x4 texels; and the kernel of its cases that
+// write a texture's bytes two ways (`k.two_ways_*`). Written for this repository; no third-party
+// source. Loop-free.
 #include <metal_stdlib>
 using namespace metal;
 

@@ -1,4 +1,4 @@
-// A `bool` element index (DESIGN D291.1). MSL's `v[b]` with a `bool` `b` compiles to
+// A `bool` element index. MSL's `v[b]` with a `bool` `b` compiles to
 // `extractelement` and `insertelement` with an `i1` index; the engine widens it to the `u32`
 // 0 or 1 before `OpVectorExtractDynamic` and `OpVectorInsertDynamic`, which take an integer
 // index (it was an internal builder error before).

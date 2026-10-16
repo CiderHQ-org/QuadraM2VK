@@ -1,4 +1,4 @@
-// Owned fixture (WP-MSR, DESIGN D292): fragment functions that read and write a render pass's
+// Owned fixture: fragment functions that read and write a render pass's
 // per-sample state, drawn into attachments of 1, 2, and 4 samples. Each reads or writes one
 // sample-rate feature: the pass's sample count, the coverage mask in and out, and depth per
 // sample. Loop-free; nothing here runs on a GPU when compiled.

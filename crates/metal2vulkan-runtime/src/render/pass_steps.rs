@@ -2,6 +2,9 @@
 //! the encoder records the pass at once or leaves it to record later with its executions of
 //! render commands (`render/executions.rs`), in this order:
 //!
+//! - **Around each instance's render pass instance**: its colors a draw reads through a snapshot
+//!   moved into the feedback loop layout just before it begins, and back just after it ends
+//!   (`render_target::feedback_barriers`).
 //! - **Before each instance**: after a memory barrier, the colors over a buffer's bytes that
 //!   render through copied stand-ins merged back and copied in again, or copied back
 //!   (`linear_merge.rs`); after the first, the shadowed textures' copies into it, each before a
@@ -31,7 +34,8 @@ use super::tile_dispatch::{Staging, TileDispatch};
 use super::Before;
 use crate::attachment_stand_in::StandInCopies;
 use crate::depth_stand_in::StandInCopies as DepthStandInCopies;
-use crate::render_target::{FramebufferObject, RenderPassObject};
+use crate::device::functions::Vk;
+use crate::render_target::{self, FeedbackImage, FramebufferObject, RenderPassObject};
 use crate::resolve::ResolveSource;
 use crate::sample_planes::PlanesCommands;
 use crate::shadow::ShadowCopy;
@@ -58,6 +62,11 @@ pub(super) struct InstanceSteps {
     pub(super) reformat_in: Option<StandInCopies>,
     /// Their copies back after it.
     pub(super) reformat_out: Option<StandInCopies>,
+    /// The subresources of its colors in the feedback loop layout (`render/snapshot.rs`): moved
+    /// there just before it begins and back just after it ends
+    /// (`render_target::feedback_barriers`). Empty for every instance whose draws read no color
+    /// through a snapshot.
+    pub(super) feedback: Vec<FeedbackImage>,
 }
 
 /// A tile dispatch, ready to record after the instance before it: its staged attachments'
@@ -73,6 +82,9 @@ pub(super) struct StagedDispatch {
 /// retains them, or the pass that records later does.
 pub(super) struct PassSteps {
     pub(super) instances: Vec<InstanceSteps>,
+    /// The flags of the queue family that records the pass, for which its image barriers are made
+    /// (`image_barrier.rs`).
+    pub(super) family: vk::QueueFlags,
     /// The instances that follow a memory barrier (`render.rs`'s `reload_at`): before each, the
     /// colors over a buffer's bytes rendered through copied stand-ins are merged back and copied
     /// in again (`reloads`), and those the pass does not load are copied back (`published`).
@@ -107,12 +119,7 @@ impl PassSteps {
     /// `command_buffer` is recording outside a render pass, and only the caller records it;
     /// every object the steps name is live until it completes, and every image rests in
     /// `GENERAL`.
-    pub(super) unsafe fn before(
-        &self,
-        raw: &ash::Device,
-        command_buffer: vk::CommandBuffer,
-        index: usize,
-    ) {
+    pub(super) unsafe fn before(&self, raw: &Vk, command_buffer: vk::CommandBuffer, index: usize) {
         // SAFETY: the caller's contract.
         unsafe {
             if self.reload_at.contains(&index) {
@@ -154,7 +161,8 @@ impl PassSteps {
 
     /// Begin instance `index` in `pass` and `framebuffer` (one of its runs, where an execution
     /// splits it), its subpass running secondary command buffers, after binding its positioned
-    /// pipeline where it has one.
+    /// pipeline where it has one, and after moving its feedback colors into their layout
+    /// (`InstanceSteps::feedback`).
     ///
     /// # Safety
     ///
@@ -169,8 +177,13 @@ impl PassSteps {
         framebuffer: vk::Framebuffer,
     ) {
         let positioned = self.instances.get(index).and_then(|i| i.positioned);
-        // SAFETY: the caller's contract.
+        let feedback = self
+            .instances
+            .get(index)
+            .map_or(&[][..], |i| &i.feedback[..]);
+        // SAFETY: the caller's contract; the feedback colors rest in `GENERAL` until here.
         unsafe {
+            render_target::feedback_barriers(raw, command_buffer, feedback, true, self.family);
             if let Some(pipeline) = positioned {
                 raw.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, pipeline);
             }
@@ -187,17 +200,35 @@ impl PassSteps {
         }
     }
 
-    /// Record what goes after instance `index` (the module docs), once it ended.
+    /// Move instance `index`'s feedback colors back to `GENERAL` (`InstanceSteps::feedback`),
+    /// right after its render pass instance ended, before anything after it.
     ///
     /// # Safety
     ///
-    /// As for [`PassSteps::before`].
-    pub(super) unsafe fn after(
+    /// As for [`PassSteps::before`], but for the feedback colors, in their layout since the
+    /// instance began ([`PassSteps::begin`]).
+    pub(super) unsafe fn ended(
         &self,
         raw: &ash::Device,
         command_buffer: vk::CommandBuffer,
         index: usize,
     ) {
+        let feedback = self
+            .instances
+            .get(index)
+            .map_or(&[][..], |i| &i.feedback[..]);
+        // SAFETY: the caller's contract.
+        unsafe {
+            render_target::feedback_barriers(raw, command_buffer, feedback, false, self.family)
+        };
+    }
+
+    /// Record what goes after instance `index` (the module docs), once it ended.
+    ///
+    /// # Safety
+    ///
+    /// As for [`PassSteps::before`].
+    pub(super) unsafe fn after(&self, raw: &Vk, command_buffer: vk::CommandBuffer, index: usize) {
         // SAFETY: the caller's contract.
         unsafe {
             let reformat = self
@@ -236,7 +267,7 @@ impl PassSteps {
     /// # Safety
     ///
     /// As for [`PassSteps::before`].
-    pub(super) unsafe fn end(&self, raw: &ash::Device, command_buffer: vk::CommandBuffer) {
+    pub(super) unsafe fn end(&self, raw: &Vk, command_buffer: vk::CommandBuffer) {
         // SAFETY: the caller's contract.
         unsafe {
             if let Some(planes) = &self.planes {

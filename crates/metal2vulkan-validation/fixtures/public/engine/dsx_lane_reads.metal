@@ -1,8 +1,8 @@
-// Owned fixture (WP-DSX, DESIGN D700; written for this repository): simdgroup and quad lane moves
+// Owned fixture (written for this repository): simdgroup and quad lane moves
 // whose source lane does not take part, one family per entry. The vertex functions run over
 // rasterization-disabled points and read in[v] for vertex v; a draw of 38 points leaves lanes 6 to
 // 31 of its second simdgroup past the draw, so its second quad has two live lanes. A vertex
-// function's lane is the number of active lanes below it at entry (D578), so each takes it from
+// function's lane is the number of active lanes below it at entry, so each takes it from
 // simd_prefix_exclusive_sum before any move. Each vertex function makes its first moves with every
 // vertex of the draw, then its last ones in a branch only the even vertices take. Vertex v writes
 // its K words to out[K v .. K v + K - 1]; an odd vertex leaves the branch's words unwritten.
@@ -10,7 +10,7 @@
 // the one before the branch, which every lane made (EV DSX-lc1-m4).
 // lane_moves_in_a_branch_of_a_kernel makes all eighteen moves in a branch the even lanes of a
 // kernel take, with the value loaded before the branch. Metal reads all-zero bits from a lane that
-// does not take part (D700 item 3). The fills take an explicit modulo, the form Metal's compiler
+// does not take part. The fills take an explicit modulo, the form Metal's compiler
 // takes in a vertex function. Loop-free.
 #include <metal_stdlib>
 using namespace metal;

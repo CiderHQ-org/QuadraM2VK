@@ -1,15 +1,14 @@
-//! `scheduler/inbox.rs`: a commit that finds a pass under way on another thread returns at once
-//! and its commit goes next, in commit order; one that finds the lock held for no pass passes
-//! itself; the scheduler's pass looks again for a commit left to it until a pass answers it has
-//! work of its own first; a committing thread passes once for what others left it, and leaves the
-//! rest to the thread its caller wakes; commits from many threads racing passes, ones that stop
-//! looking again, wakes and short holds are all passed, each thread's in its order, with no pass
-//! made for them at the end; a nudge finding a pass under way returns at once and is passed for
-//! once that pass ends; and wakers racing passes and commits have every change they made read by
-//! a pass.
+//! `scheduler/inbox.rs`: a commit posts and returns at once, whether or not a pass is under way,
+//! and its commit goes next, in commit order; one that finds no pass under way marks the state for
+//! the thread's wake, waiting only for a short hold; the scheduler's pass looks again for a commit
+//! left to it until a pass answers it has work of its own first; commits from many threads racing
+//! passes, ones that stop looking again, and short holds are all passed, each thread's in its
+//! order, with no pass made for them at the end; a nudge finding a pass under way returns at once
+//! and is passed for once that pass ends; and wakers racing passes and commits have every change
+//! they made read by a pass; and a pass leaves the inbox room for twice the commits it took in.
 
 use crate::device::lock;
-use crate::scheduler::inbox::{Inbox, Outcome, AGAIN};
+use crate::scheduler::inbox::Inbox;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar};
@@ -23,95 +22,135 @@ const WAIT: Duration = Duration::from_secs(30);
 /// The state: the commits in the order the passes took them in.
 type Log = Inbox<Vec<u32>, u32>;
 
-/// A pass that only takes the commits in.
-fn take_in(log: &mut Vec<u32>, commits: Vec<u32>) {
-    log.extend(commits);
+/// A pass that only takes the commits in, and looks again.
+fn take_in(log: &mut Vec<u32>, commits: &mut Vec<u32>) -> bool {
+    log.append(commits);
+    true
 }
 
-/// Commit `commit` from another thread while this one holds `inbox`'s lock for a pass: what
-/// became of it. It is left to this thread's pass, so it makes none itself.
-pub(super) fn commit_elsewhere<S: Send, C: Send>(inbox: &Inbox<S, C>, commit: C) -> Outcome {
+/// Post `commit` from another thread while this one makes a pass: it is left to this thread's
+/// pass, which looks again for it, so the committer marks nothing.
+pub(super) fn commit_elsewhere<S: Send, C: Send>(inbox: &Inbox<S, C>, commit: C) {
     thread::scope(|scope| {
         let committer = scope.spawn(|| {
-            inbox.commit(commit, |_, _| {
-                panic!("a commit that found a pass under way passed itself")
+            inbox.post(commit, |_| {
+                panic!("a commit that found a pass under way marked the state")
             })
         });
-        committer.join().unwrap()
-    })
+        assert!(
+            !committer.join().unwrap(),
+            "a commit that found a pass under way marked the state"
+        );
+    });
+}
+
+/// A pass by the scheduler's thread that stays under way, the lock held, until the test sends on
+/// the channel it answers, taking in what it finds and looking again; its thread answers how many
+/// passes it made.
+fn held_pass(inbox: &Arc<Log>) -> (thread::JoinHandle<u32>, mpsc::Sender<()>) {
+    let (entered, in_pass) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    let passer = {
+        let inbox = Arc::clone(inbox);
+        thread::spawn(move || {
+            let mut passes = 0;
+            inbox.pass(|log, commits| {
+                take_in(log, commits);
+                passes += 1;
+                if passes == 1 {
+                    entered.send(()).unwrap();
+                    released.recv_timeout(WAIT).unwrap();
+                }
+                true
+            });
+            passes
+        })
+    };
+    in_pass.recv_timeout(WAIT).unwrap();
+    (passer, release)
 }
 
 #[test]
 fn a_commit_finding_a_pass_under_way_returns_at_once_and_goes_next_in_commit_order() {
     let inbox = Arc::new(Log::new(Vec::new()));
-    let (entered, in_pass) = mpsc::channel();
-    let (release, released) = mpsc::channel::<()>();
-    let passer = {
-        let inbox = Arc::clone(&inbox);
-        thread::spawn(move || {
-            let mut passes = 0;
-            inbox.commit(0, |log, commits| {
-                take_in(log, commits);
-                passes += 1;
-                // The first pass stays under way, the lock held, until the test lets it end.
-                if passes == 1 {
-                    entered.send(()).unwrap();
-                    released.recv_timeout(WAIT).unwrap();
-                }
-            })
-        })
-    };
-    in_pass.recv_timeout(WAIT).unwrap();
+    assert!(
+        inbox.post(0, |_| {}),
+        "no pass under way: it marked the state"
+    );
+    let (passer, release) = held_pass(&inbox);
     let (done, returned) = mpsc::channel();
     let committer = {
         let inbox = Arc::clone(&inbox);
         thread::spawn(move || {
             for commit in 1..=3 {
-                done.send(inbox.commit(commit, take_in).left).unwrap();
+                done.send(inbox.post(commit, |_| panic!("marked under a pass")))
+                    .unwrap();
             }
         })
     };
     for commit in 1..=3 {
-        let left = returned.recv_timeout(WAIT).unwrap_or_else(|_| {
+        let marked = returned.recv_timeout(WAIT).unwrap_or_else(|_| {
             panic!("commit {commit} waited for the pass under way instead of returning")
         });
-        assert!(left, "commit {commit} was left to the pass under way");
+        assert!(!marked, "commit {commit} was left to the pass under way");
     }
     committer.join().unwrap();
     assert!(inbox.holds_commits());
     release.send(()).unwrap();
-    assert_eq!(
-        passer.join().unwrap(),
-        Outcome::default(),
-        "the passer's own commit was its own, and it passed for the others"
-    );
-    // The passer took them in once its pass ended, in commit order, with no pass asked for.
+    assert_eq!(passer.join().unwrap(), 2, "it looked again for them");
+    // The passer took them in once its pass ended, in commit order.
     assert_eq!(*lock(inbox.state()), [0, 1, 2, 3]);
     assert!(!inbox.holds_commits());
 }
 
+/// A commit that finds no pass under way makes none either: it marks the state under the lock,
+/// waiting only for a short hold, and the thread's next pass takes it in.
 #[test]
-fn a_commit_finding_the_lock_held_for_no_pass_passes_itself() {
-    let inbox = Arc::new(Log::new(Vec::new()));
+fn a_commit_finding_no_pass_marks_the_state_for_the_thread_s_wake() {
+    let inbox = Arc::new(Inbox::<(Vec<u32>, bool), u32>::new((Vec::new(), false)));
     let held = lock(inbox.state());
     let committer = {
         let inbox = Arc::clone(&inbox);
-        thread::spawn(move || inbox.commit(7, take_in))
+        thread::spawn(move || inbox.post(7, |(_, marked)| *marked = true))
     };
-    // It found the lock taken and posted: no passer is counted, so it waits for the lock.
+    // It posted, found no passer, and waits for the short hold to mark the state.
     let until = Instant::now() + WAIT;
     while !inbox.holds_commits() {
         assert!(Instant::now() < until, "the commit never posted");
         thread::yield_now();
     }
     drop(held);
-    assert_eq!(
-        committer.join().unwrap(),
-        Outcome::default(),
-        "it passed its commit itself"
-    );
-    assert_eq!(*lock(inbox.state()), [7]);
+    assert!(committer.join().unwrap(), "it marked the state");
+    assert_eq!(*lock(inbox.state()), (Vec::new(), true), "and made no pass");
+    assert!(inbox.holds_commits());
+    inbox.pass(|(log, _), commits| {
+        log.append(commits);
+        false
+    });
+    assert_eq!(lock(inbox.state()).0, [7]);
     assert!(!inbox.holds_commits());
+}
+
+/// A pass leaves the inbox room for twice the commits it took in, made on the passing thread: so
+/// the commits after it grow the inbox on their own thread, an allocation in `commit`, only where
+/// more than twice as many wait. Grown by the pushes alone, it had room for 8 after 5 (Rust
+/// 1.98.1's growth).
+#[test]
+fn a_pass_leaves_the_inbox_room_for_twice_the_commits_it_took_in() {
+    let inbox = Log::new(Vec::new());
+    for commit in 0..5 {
+        inbox.post(commit, |_| {});
+    }
+    inbox.pass(|log, commits| {
+        log.append(commits);
+        false
+    });
+    assert_eq!(*lock(inbox.state()), [0, 1, 2, 3, 4]);
+    assert!(
+        inbox.room() >= 10,
+        "a pass that took in 5 left the inbox room for {}",
+        inbox.room()
+    );
 }
 
 #[test]
@@ -138,7 +177,7 @@ fn the_scheduler_s_pass_looks_again_until_a_pass_answers_it_has_work_first() {
             })
         };
         in_pass.recv_timeout(WAIT).unwrap();
-        assert!(inbox.commit(1, take_in).left, "left to the pass under way");
+        commit_elsewhere(&inbox, 1);
         release.send(()).unwrap();
         let passes = scheduler.join().unwrap();
         if again {
@@ -151,54 +190,11 @@ fn the_scheduler_s_pass_looks_again_until_a_pass_answers_it_has_work_first() {
             assert_eq!(passes, 1);
             assert!(lock(inbox.state()).is_empty());
             assert!(inbox.holds_commits());
-            inbox.pass(|log, commits| {
-                take_in(log, commits);
-                true
-            });
+            inbox.pass(take_in);
             assert_eq!(*lock(inbox.state()), [1]);
             assert!(!inbox.holds_commits());
         }
     }
-}
-
-/// A committing thread makes its own pass and [`AGAIN`] more for what other threads left it while
-/// it passed, however many they leave it meanwhile: the last one left waits in the inbox, which it
-/// answers was left unattended, for its caller to wake the thread that makes passes itself.
-#[test]
-fn a_committing_thread_passes_once_for_the_others_and_leaves_the_rest_to_a_wake() {
-    let inbox = Log::new(Vec::new());
-    let mut passes = 0;
-    let outcome = inbox.commit(0, |log, commits| {
-        take_in(log, commits);
-        passes += 1;
-        // While each of its passes is under way, another thread's commit is left to it.
-        if passes <= 4 {
-            assert!(commit_elsewhere(&inbox, passes).left);
-        }
-    });
-    assert_eq!(
-        passes as usize,
-        1 + AGAIN,
-        "its own pass and {AGAIN} for the others'"
-    );
-    assert_eq!(
-        outcome,
-        Outcome {
-            left: false,
-            unattended: true
-        }
-    );
-    assert_eq!(*lock(inbox.state()), [0, 1]);
-    assert!(
-        inbox.holds_commits(),
-        "the last one left waits for the thread its caller wakes"
-    );
-    inbox.pass(|log, commits| {
-        take_in(log, commits);
-        true
-    });
-    assert_eq!(*lock(inbox.state()), [0, 1, 2]);
-    assert!(!inbox.holds_commits());
 }
 
 /// The state of [`Model`]'s passes: the commits in the order they took them in, each waker's
@@ -228,13 +224,14 @@ impl Model {
         }
     }
 
-    /// `Scheduler::commit`'s: commit, and wake the thread where the inbox was left unattended.
-    fn commit(&self, commit: u32, pass: impl FnMut(&mut Seen, Vec<u32>)) -> Outcome {
-        let outcome = self.inbox.commit(commit, pass);
-        if outcome.unattended {
-            self.wake();
+    /// `Scheduler::commit`'s: post, and wake the thread where it marked the state. Whether it
+    /// was left to a pass under way.
+    fn commit(&self, commit: u32) -> bool {
+        if self.inbox.post(commit, |seen| seen.dirty = true) {
+            self.woken.notify_all();
+            return false;
         }
-        outcome
+        true
     }
 
     /// `Scheduler::wake`'s: whether it was left to a pass under way.
@@ -250,7 +247,7 @@ impl Model {
     /// timed look, then passes, its passes answering `again` of their count whether to look again
     /// (false: it has work of its own first, done at once, after which it looks at the inbox
     /// again). Once stopped, it ends when it has nothing to pass for.
-    fn run(&self, mut pass: impl FnMut(&mut Seen, Vec<u32>), again: impl Fn(u64) -> bool) {
+    fn run(&self, mut pass: impl FnMut(&mut Seen, &mut Vec<u32>), again: impl Fn(u64) -> bool) {
         let asked = |seen: &Seen| seen.dirty || self.inbox.holds_commits() || self.inbox.nudged();
         let mut passes = 0;
         loop {
@@ -278,11 +275,11 @@ impl Model {
 }
 
 /// A pass that holds the lock a while, so that commits and wakes find it under way.
-fn slow(seen: &mut Seen, commits: Vec<u32>) {
+fn slow(seen: &mut Seen, commits: &mut Vec<u32>) {
     for _ in 0..200 {
         std::hint::spin_loop();
     }
-    seen.log.extend(commits);
+    seen.log.append(commits);
 }
 
 /// Whether `done` holds of the model's state within [`WAIT`], read every millisecond.
@@ -299,27 +296,24 @@ fn soon(model: &Model, done: impl Fn(&Seen) -> bool) -> bool {
 
 /// Commits from several threads race the scheduler thread's passes, which answer in turn that
 /// they have work first, and short holds: each is passed once, each thread's in its order, by a
-/// pass made for it or by the thread its committer woke, with no pass made for them at the end.
+/// pass under way that looked again for it or by the thread its committer woke, with no pass
+/// made for them at the end.
 #[test]
-fn commits_racing_passes_wakes_and_short_holds_are_all_passed_each_thread_s_in_its_order() {
+fn commits_racing_passes_and_short_holds_are_all_passed_each_thread_s_in_its_order() {
     const THREADS: u32 = 4;
     const COMMITS: u32 = 2000;
     let model = Model::new(0);
     let all = (THREADS * COMMITS) as usize;
-    let (left, unattended, passed_all) = thread::scope(|scope| {
+    let (left, passed_all) = thread::scope(|scope| {
         // The scheduler's thread: every other pass answers it has work of its own first.
         let scheduler = scope.spawn(|| model.run(slow, |pass| pass % 2 == 0));
         let committers: Vec<_> = (0..THREADS)
             .map(|index| {
                 let model = &model;
                 scope.spawn(move || {
-                    let outcomes: Vec<Outcome> = (0..COMMITS)
-                        .map(|commit| model.commit(index * COMMITS + commit, slow))
-                        .collect();
-                    let count = |what: fn(&Outcome) -> bool| {
-                        outcomes.iter().filter(|outcome| what(outcome)).count()
-                    };
-                    (count(|o| o.left), count(|o| o.unattended))
+                    (0..COMMITS)
+                        .filter(|commit| model.commit(index * COMMITS + commit))
+                        .count()
                 })
             })
             .collect();
@@ -330,26 +324,23 @@ fn commits_racing_passes_wakes_and_short_holds_are_all_passed_each_thread_s_in_i
                 thread::yield_now();
             }
         });
-        let counts: Vec<(usize, usize)> = (committers.into_iter())
+        let left: usize = (committers.into_iter())
             .map(|committer| committer.join().unwrap())
-            .collect();
+            .sum();
         marker.join().unwrap();
-        // The thread passes for nothing on its own: a commit left unattended waits for its wake.
+        // The thread passes for nothing on its own: a commit waits for a look or its wake.
         let passed_all = soon(&model, |seen| seen.log.len() == all);
         model.stop();
         scheduler.join().unwrap();
-        let (left, unattended) = (counts.into_iter()).fold((0, 0), |(l, u), (left, unattended)| {
-            (l + left, u + unattended)
-        });
-        (left, unattended, passed_all)
+        (left, passed_all)
     });
     let seen = lock(model.inbox.state());
     assert!(
         passed_all,
-        "{} of {all} passed ({left} left to other threads, {unattended} left unattended)",
+        "{} of {all} passed ({left} left to a pass under way)",
         seen.log.len()
     );
-    eprintln!("INBOX-RACE commits: {left} left to other threads, {unattended} left unattended");
+    eprintln!("INBOX-RACE commits: {left} of {all} left to a pass under way, the rest woke it");
     assert!(!model.inbox.holds_commits());
     assert_eq!(seen.log.len(), all, "each once");
     for index in 0..THREADS {
@@ -367,24 +358,8 @@ fn commits_racing_passes_wakes_and_short_holds_are_all_passed_each_thread_s_in_i
 #[test]
 fn a_nudge_finding_a_pass_under_way_is_passed_for_once_it_ends() {
     let inbox = Arc::new(Log::new(Vec::new()));
-    let (entered, in_pass) = mpsc::channel();
-    let (release, released) = mpsc::channel::<()>();
-    let passer = {
-        let inbox = Arc::clone(&inbox);
-        thread::spawn(move || {
-            let mut passes = 0;
-            inbox.commit(0, |log, commits| {
-                take_in(log, commits);
-                passes += 1;
-                if passes == 1 {
-                    entered.send(()).unwrap();
-                    released.recv_timeout(WAIT).unwrap();
-                }
-            });
-            passes
-        })
-    };
-    in_pass.recv_timeout(WAIT).unwrap();
+    assert!(inbox.post(0, |_| {}));
+    let (passer, release) = held_pass(&inbox);
     assert!(inbox.nudge(), "the nudge was left to the pass under way");
     release.send(()).unwrap();
     assert_eq!(
@@ -416,11 +391,11 @@ fn wakers_racing_passes_and_commits_have_every_change_read_by_a_pass() {
     const COMMITS: u32 = 2000;
     let model = Model::new(WAKERS);
     let values: Vec<AtomicU64> = (0..WAKERS).map(|_| AtomicU64::new(0)).collect();
-    let read = |seen: &mut Seen, commits: Vec<u32>| {
+    let read = |seen: &mut Seen, commits: &mut Vec<u32>| {
         for _ in 0..100 {
             std::hint::spin_loop();
         }
-        seen.log.extend(commits);
+        seen.log.append(commits);
         // Raised with no ordering of their own: only the wake orders a raise before a pass.
         for (seen, value) in seen.values.iter_mut().zip(&values) {
             *seen = value.load(Ordering::Relaxed);
@@ -434,7 +409,7 @@ fn wakers_racing_passes_and_commits_have_every_change_read_by_a_pass() {
                 let model = &model;
                 scope.spawn(move || {
                     for commit in 0..COMMITS {
-                        model.commit(index * COMMITS + commit, read);
+                        model.commit(index * COMMITS + commit);
                     }
                 })
             })

@@ -25,7 +25,6 @@
 use crate::device::profile::DeviceProfile;
 use crate::device::requirements::VkFeature;
 use crate::device::DevicePolicy;
-use crate::error::{Capability, Error, Feature, Needs};
 use crate::library::FunctionArtifact;
 use crate::pipeline::artifact::PrecisionNote;
 use crate::pipeline::facts::RuntimeFact;
@@ -138,13 +137,6 @@ fn combined(a: &FunctionArtifact) -> Vec<(u32, SamplerRef)> {
     out
 }
 
-fn refusal(bc: &[u8], entry: &str, p: &DeviceProfile) -> (Feature, Needs) {
-    match compile(bc, entry, p) {
-        Err(Error::Unsupported(u)) => (u.feature, u.needs),
-        other => panic!("{entry}: {:?}", other.map(|_| ())),
-    }
-}
-
 /// Every entry compiles and passes L3 on every committed profile, or is refused with its typed
 /// error on every profile.
 #[test]
@@ -157,26 +149,33 @@ fn every_entry_compiles_or_refuses_on_every_profile() {
             let a = compile(&bc, entry, &p).unwrap_or_else(|e| panic!("{entry} on {stem}: {e}"));
             link_and_validate(&a, &p).unwrap_or_else(|e| panic!("{entry} on {stem}: L3: {e}"));
         }
-        // `Offset` on a sample needs `maintenance8` and `shaderImageGatherExtended`.
-        let missing: Vec<Capability> = match stem.as_str() {
-            "lunarg-desktop-baseline-2023" => vec![Capability::Feature(VkFeature::Maintenance8)],
-            "roadmap-2022" | "swiftshader" | "vk12-bare" | "vk12-floor" => vec![
-                Capability::Feature(VkFeature::Maintenance8),
-                Capability::Feature(VkFeature::ShaderImageGatherExtended),
-            ],
-            _ => Vec::new(),
-        };
-        if missing.is_empty() {
-            let a = compile(&bc, "sample_dynamic_offset", &p)
-                .unwrap_or_else(|e| panic!("sample_dynamic_offset on {stem}: {e}"));
-            link_and_validate(&a, &p)
-                .unwrap_or_else(|e| panic!("sample_dynamic_offset on {stem}: L3: {e}"));
+        // `Offset` on a sample needs `maintenance8` and `shaderImageGatherExtended`. A profile
+        // without either takes the dynamic offset as `ConstOffset` arms: one switch on its dynamic
+        // lane's low four bits, and 16 samples, each with its level and a `ConstOffset` and none
+        // with `Offset`; the module needs neither feature (a function past the arms' bound is
+        // refused, `engine_offset_arms`).
+        let armed = matches!(
+            stem.as_str(),
+            "lunarg-desktop-baseline-2023" | "roadmap-2022" | "swiftshader" | "vk12-floor"
+        );
+        let a = compile(&bc, "sample_dynamic_offset", &p)
+            .unwrap_or_else(|e| panic!("sample_dynamic_offset on {stem}: {e}"));
+        link_and_validate(&a, &p)
+            .unwrap_or_else(|e| panic!("sample_dynamic_offset on {stem}: L3: {e}"));
+        let masks = operand_masks(&a, OP_IMAGE_SAMPLE_EXPLICIT_LOD, 5);
+        let needs = [
+            VkFeature::Maintenance8,
+            VkFeature::ShaderImageGatherExtended,
+        ]
+        .map(|f| a.requirements.features.contains(&f));
+        if armed {
+            assert_eq!(count(&a, OP_SWITCH), 1, "{stem}");
+            assert_eq!(masks, [MASK_LOD | MASK_CONST_OFFSET; 16], "{stem}");
+            assert_eq!(needs, [false; 2], "{stem}");
         } else {
-            assert_eq!(
-                refusal(&bc, "sample_dynamic_offset", &p),
-                (Feature::TexelOffset, Needs::AnyOf(vec![missing])),
-                "{stem}"
-            );
+            assert_eq!(count(&a, OP_SWITCH), 0, "{stem}");
+            assert_eq!(masks, [MASK_LOD | MASK_OFFSET], "{stem}");
+            assert_eq!(needs, [true; 2], "{stem}");
         }
     }
 }
@@ -333,6 +332,7 @@ fn operand_masks(a: &FunctionArtifact, op: u16, at: usize) -> Vec<u32> {
 }
 
 const MASK_LOD: u32 = 0x2;
+const MASK_CONST_OFFSET: u32 = 0x8;
 const MASK_OFFSET: u32 = 0x10;
 
 /// A dynamic offset on a sample through a runtime sampler is the `Offset` operand beside its

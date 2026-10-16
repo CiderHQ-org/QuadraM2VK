@@ -1,4 +1,4 @@
-// Owned fixture (WP-OB1, DESIGN D225): loads and stores past a `device` buffer, the storage
+// Owned fixture: loads and stores past a `device` buffer, the storage
 // buffer containment form. Eight threads; thread t loads src[idx[t]] into out[t] and stores
 // 0xA0000000 | t to out[idx[8 + t]]. The case's idx puts loads 0 to 3 in src (16 bytes) and loads
 // 4 to 7 past its end (words 4, 5, 17, 63: up to byte 256), stores 0 to 3 in out (words 8 to 11 of

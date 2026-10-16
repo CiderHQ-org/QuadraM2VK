@@ -44,6 +44,7 @@ pub(super) mod budget;
 pub(super) mod content_keyed;
 mod creation_log;
 mod dispatch_making;
+pub(super) mod flight;
 mod graphics;
 mod indirect_arguments;
 pub(super) mod kept;
@@ -69,8 +70,11 @@ pub use additions::{
     BinaryFunctionProblem, BinaryFunctionStage, RenderPipelineFunctionsDescriptor,
     RequiredThreadsProblem,
 };
+pub(super) use creation_log::enabled as creation_log_enabled;
 pub(super) use dispatch_making::RegionPipeline;
-pub(super) use graphics::{keyed_assembly, DepthRange, DrawKey, FixedState, GraphicsKey};
+pub(super) use graphics::{
+    color_write_masks, keyed_assembly, DepthRange, DrawKey, FixedState, GraphicsKey,
+};
 pub(super) use making::Pending;
 pub(super) use objects::ShaderModules;
 pub(super) use objects::{create_set_layout, set_needs, RawPipeline, VariantObjects};

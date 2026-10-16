@@ -299,6 +299,23 @@ pub enum VkFeature {
     /// mode, under which every quad starts with its four invocations, helpers included, as Metal
     /// runs a fragment function's simdgroup and quad operations.
     ShaderQuadControl,
+    // Appended.
+    /// `shaderTessellationAndGeometryPointSize` (Vulkan 1.0): a geometry stage's `PointSize` (the
+    /// `GeometryPointSize` capability). A geometry stage without it draws points of size 1.
+    ShaderTessellationAndGeometryPointSize,
+    /// `multiviewGeometryShader` (Vulkan 1.1): a multiview pipeline with a geometry stage.
+    MultiviewGeometryShader,
+    // Appended.
+    /// `VK_EXT_attachment_feedback_loop_layout`'s `attachmentFeedbackLoopLayout`: the layout
+    /// `VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT`, the image usage
+    /// `VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT` and the pipeline flag
+    /// `VK_PIPELINE_CREATE_COLOR_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT`, under which a draw samples a
+    /// color attachment of its own subpass (a feedback loop). A render pipeline that reads a
+    /// texture its pass renders through a snapshot requires it.
+    AttachmentFeedbackLoopLayout,
+    /// `VK_EXT_extended_dynamic_state3`'s `extendedDynamicState3ColorWriteMask`: the dynamic
+    /// state `VK_DYNAMIC_STATE_COLOR_WRITE_MASK_EXT`, set by `vkCmdSetColorWriteMaskEXT`.
+    ExtendedDynamicState3ColorWriteMask,
 }
 
 /// A Vulkan device extension the new core can require.
@@ -396,6 +413,13 @@ pub enum VkExtension {
     // Appended.
     /// `VK_KHR_shader_quad_control` (never promoted): [`VkFeature::ShaderQuadControl`].
     KhrShaderQuadControl,
+    // Appended.
+    /// `VK_EXT_attachment_feedback_loop_layout` (never promoted):
+    /// [`VkFeature::AttachmentFeedbackLoopLayout`].
+    ExtAttachmentFeedbackLoopLayout,
+    /// `VK_EXT_extended_dynamic_state3` (never promoted):
+    /// [`VkFeature::ExtendedDynamicState3ColorWriteMask`].
+    ExtExtendedDynamicState3,
 }
 
 /// One subgroup operation class (`VkSubgroupFeatureFlagBits`).
@@ -695,6 +719,36 @@ pub enum VkProperty {
     /// leaves a sample to the device's sampler there requires it and records
     /// [`PrecisionNote::DeviceSampling`](crate::pipeline::PrecisionNote::DeviceSampling).
     DeviceSampling,
+    /// The device stores every unbiased depth a draw writes to a `Depth16Unorm` attachment as
+    /// Metal's code (the driver's measured deviation
+    /// [`DriverDeviation::MetalDepth16Stores`](crate::error::DriverDeviation::MetalDepth16Stores)).
+    /// No Vulkan query reports it: Vulkan leaves the conversion's rounding to the device. No module
+    /// requires it: where the profile lacks it, the fragment stage writes Metal's code itself.
+    MetalDepth16Stores,
+    /// The device stores every depth a draw biases on a `Depth16Unorm` attachment as Metal's code
+    /// (the driver's measured deviation
+    /// [`DriverDeviation::MetalDepth16BiasedStores`](crate::error::DriverDeviation::MetalDepth16BiasedStores)).
+    /// No Vulkan query reports it: Vulkan leaves the biased sum's rounding to the device. No module
+    /// requires it: where the profile lacks it, a biased draw's fragment stage writes Metal's code
+    /// itself.
+    MetalDepth16BiasedStores,
+    /// The device interpolates a varying as Metal does, bit for bit (the driver's measured
+    /// deviation
+    /// [`DriverDeviation::MetalInterpolation`](crate::error::DriverDeviation::MetalInterpolation)).
+    /// No Vulkan query reports it: Vulkan states no precision for interpolation. A fragment module
+    /// that reads a varying the device interpolates and records no
+    /// [`PrecisionNote::DeviceInterpolation`](crate::pipeline::PrecisionNote::DeviceInterpolation)
+    /// requires it; without it, the module records that note.
+    MetalInterpolation,
+    /// The device takes a primitive's `Layer` and `ViewportIndex` from its first vertex, whatever
+    /// its other vertices store, as Metal takes a primitive's slice and viewport (the driver's
+    /// measured deviation
+    /// [`DriverDeviation::MetalFirstVertexIndices`](crate::error::DriverDeviation::MetalFirstVertexIndices)).
+    /// No Vulkan query reports it: Vulkan takes them only where every vertex of a primitive
+    /// stores the same. A vertex module that stores an index differing among a primitive's
+    /// vertices to its builtin requires it; without it, the index goes through the pipeline's
+    /// synthesized geometry stages.
+    MetalFirstVertexIndices,
 }
 
 /// One depth or stencil resolve mode (`VkResolveModeFlagBits`), named by
@@ -835,7 +889,9 @@ pub enum VkLimit {
     /// property states it (a driver backs Function storage with scratch memory, and past it can
     /// answer wrongly or hang with no error). The call stack of a recursion through visible
     /// functions is Function storage, and a stack past the limit is refused
-    /// (`Unsupported{Recursion}` needing it). A device not measured has 0.
+    /// (`Unsupported{Recursion}` needing it). A device not measured has the floor, 16 KiB; a
+    /// vertex or fragment function's refusal there names 192 KiB, the most Metal was measured to
+    /// hold, which such a function may keep (`device::function_storage`).
     FunctionStorageBytesPerThread,
     /// `maxMeshOutputVertices` (`VkPhysicalDeviceMeshShaderPropertiesEXT`): the most vertices a
     /// mesh entry may declare (`OutputVertices`), a mesh type's `NV`.
@@ -881,6 +937,16 @@ pub enum VkLimit {
     MaxTaskPayloadAndSharedMemorySize,
     /// `maxMeshPayloadAndSharedMemorySize`: a mesh entry's payload and workgroup memory together.
     MaxMeshPayloadAndSharedMemorySize,
+    // Appended.
+    /// `maxGeometryInputComponents` (`VkPhysicalDeviceLimits`): the scalar components of a
+    /// geometry stage's user inputs, per vertex.
+    MaxGeometryInputComponents,
+    /// `maxGeometryOutputComponents`: the scalar components of a geometry stage's user outputs,
+    /// per vertex.
+    MaxGeometryOutputComponents,
+    /// `maxGeometryTotalOutputComponents`: the scalar components of the user outputs of every
+    /// vertex a geometry stage emits for an input primitive, together.
+    MaxGeometryTotalOutputComponents,
 }
 
 /// What a format must support for a use (`VkFormatFeatureFlags2`: optimal-tiling features for

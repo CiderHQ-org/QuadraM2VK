@@ -1,4 +1,4 @@
-// Owned fixture (WP-UNK, DESIGN D283): reads of a depth multisampled texture array
+// Owned fixture: reads of a depth multisampled texture array
 // (`air.read_depth_2d_ms_array`) at 32- and 16-bit coordinates. Lane i reads sample i mod s of
 // texel ((i / s) mod w, (i / sw) mod h) in slice (i / swh) mod n and writes the two depths' words
 // to out[2i .. 2i + 1]. Loop-free.

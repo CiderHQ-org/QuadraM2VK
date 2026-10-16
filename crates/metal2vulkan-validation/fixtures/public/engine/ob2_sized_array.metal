@@ -1,4 +1,4 @@
-// Owned fixture (WP-OB2, DESIGN D245): loads and stores past a sized thread-local array, the sized
+// Owned fixture: loads and stores past a sized thread-local array, the sized
 // array containment form. Each thread's `Frame` holds the four-word array between four words
 // before it and eight words past it, so every index the case passes stays inside the frame (the
 // thread object Metal allocates) while it reaches past the array. Eight threads; thread t

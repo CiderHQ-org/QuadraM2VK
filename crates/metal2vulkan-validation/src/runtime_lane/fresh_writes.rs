@@ -21,7 +21,9 @@
 
 use super::degrade_notices::shared_in_system_memory;
 use super::degrade_notices::{assert_made_once, assert_once, clamps_depth_uploads};
-use super::degrade_notices::{draws_depth_copies, forced, loses_depth_denormals};
+use super::degrade_notices::{
+    draws_depth_copies, forced, loses_depth_denormals, signs_depth_tests,
+};
 use super::{buffer_with, read_buffer, validated_device, Messages, ScratchCache, WAIT};
 use crate::gpu::TEST_DEVICE;
 use metal2vulkan::metal::{PixelFormat, TextureType, TextureUsage};
@@ -178,7 +180,8 @@ fn run_pass(name: &str, queue: &CommandQueue, pass: &RenderPassDescriptor, case:
 
 /// The kinds copies of a buffer's bytes into `Depth32Float` textures announce on `device`, where
 /// a device announces them first: what a float depth's write may store
-/// (`degrade_notices::loses_depth_denormals`, `clamps_depth_uploads`), the draws that copy into
+/// (`degrade_notices::loses_depth_denormals`, `clamps_depth_uploads`, `signs_depth_tests`: the
+/// textures render), the draws that copy into
 /// a multisampled one where `multisampled` (`draws_depth_copies`), and the `Shared` buffers.
 fn copied_in(device: &Device, multisampled: bool) -> BTreeSet<Degradation> {
     forced(&[
@@ -190,6 +193,7 @@ fn copied_in(device: &Device, multisampled: bool) -> BTreeSet<Degradation> {
             Degradation::RestrictedDepthUpload,
             clamps_depth_uploads(device),
         ),
+        (Degradation::SignedDepthTest, signs_depth_tests(device)),
         (
             Degradation::DrawnDepthCopy,
             multisampled && draws_depth_copies(device),

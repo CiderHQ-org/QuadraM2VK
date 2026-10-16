@@ -163,6 +163,9 @@ pub fn mechanism(fact: &RuntimeFact, profile: &DeviceProfile) -> Mechanism {
         RuntimeFact::SparseTextureWrites { atomic: true, .. } => Mechanism::PlanTimeCheck,
         // The offsets and the tile memory are specialized; the pass binds its tile memory.
         RuntimeFact::TileThreadgroupMemory { .. } => Mechanism::Specialization,
+        // The binder checks the object function's arena with the encoder's lengths, which it
+        // specializes, against the object stage's workgroup memory limit.
+        RuntimeFact::ObjectThreadgroupArena { .. } => Mechanism::PlanTimeCheck,
         // The binder specializes the bound texture buffer's swizzle, which the function applies
         // to its reads.
         RuntimeFact::TextureSwizzle { .. } => Mechanism::Specialization,
@@ -241,5 +244,21 @@ pub fn mechanism(fact: &RuntimeFact, profile: &DeviceProfile) -> Mechanism {
         // The binder holds each half-float member the twin takes there; the consumer announces
         // a member it does not take where its heap holds one.
         RuntimeFact::HeapHalfTexelWrites { .. } => Mechanism::BinderView,
+        // The binder pushes the draw's depth bias; the consumer records its Vulkan bias as zero.
+        RuntimeFact::Depth16Codes { biased: true } => Mechanism::PushConstant,
+        // The function's returned depth, which Metal does not bias: nothing to meet.
+        RuntimeFact::Depth16Codes { biased: false } => Mechanism::None,
+        // A separate compile of the pipeline, which a pass whose depth is or is not
+        // `Depth16Unorm` where the pipeline names otherwise asks for.
+        RuntimeFact::Depth16Pass { .. } => Mechanism::Variant,
+        // A separate compile of the pipeline, which a draw that biases a `Depth16Unorm` depth
+        // asks for where the device stores its biased depths otherwise than Metal.
+        RuntimeFact::Depth16Biased => Mechanism::Variant,
+        // A separate compile of the pipeline, which a draw whose depth bias has a proven side
+        // asks for where the fragment stage adds the bias itself.
+        RuntimeFact::Depth16BiasSide { .. } => Mechanism::Variant,
+        // The pipeline's own stages, which every draw of its class runs; the consumer announces
+        // them.
+        RuntimeFact::SynthesizedGeometry { .. } => Mechanism::None,
     }
 }

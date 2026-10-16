@@ -1,10 +1,9 @@
-# Plain Metal's generateMipmapsForTexture: of BGR10_XR and BGRA10_XR on an Apple M3 Max (macOS
-# 26.7) and an Apple M4 (macOS 27.0.1), the first computed level of share-mips-m3d's random
-# textures (193x193, 513x513, 1025x1025; WP-FXR, our own probe, DESIGN D727). Each row is one
-# field's sum (BGRA10_XR's fields are its four lanes, the fourth alpha): on each GPU every term (a
-# code times its weight) is floored before the sum, a colour's to 2^-13 code and alpha's to
-# 2^-15, and the rows are a sample of the sums where that floor and the exact sum give different
-# codes, with near-tie sums where they agree.
+# Plain Metal's generateMipmapsForTexture: of BGR10_XR and BGRA10_XR on an Apple M3 Max (macOS 26.7)
+# and an Apple M4 (macOS 27.0.1), the first computed level of share-mips-m3d's random textures
+# (193x193, 513x513, 1025x1025; our own probe). Each row is one field's sum (BGRA10_XR's fields are
+# its four lanes, the fourth alpha): on each GPU every term (a code times its weight) is floored
+# before the sum, a colour's to 2^-13 code and alpha's to 2^-15, and the rows are a sample of the
+# sums where that floor and the exact sum give different codes, with near-tie sums where they agree.
 # Format:
 #   <m3|m4> <format> <width>x<height> <x> <y> <field> <tap codes: (x0, y0) (x1, y0) (x0, y1)
 #   (x1, y1)> <the measured code>

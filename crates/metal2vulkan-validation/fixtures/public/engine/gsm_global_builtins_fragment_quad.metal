@@ -1,4 +1,4 @@
-// Owned fixture (WP-GSM, DESIGN D525 item 2; written for this repository): Metal 3.1's
+// Owned fixture (written for this repository): Metal 3.1's
 // program-scope thread_index_in_quadgroup in a fragment function, as a global uint. The fragment
 // writes its quad lane to an r32_uint target. Apple's compiler accepts it; whether the Metal device
 // lowers it is what the M4 qualification measures (a global ushort one was refused at pipeline

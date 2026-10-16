@@ -1,4 +1,4 @@
-// Owned fixture (WP-D3): the compiled replacement for the hand-written top-level
+// Owned fixture: the compiled replacement for the hand-written top-level
 // `kernel_vector_function_constant.ll`, whose function-constant global has no
 // `!air.function_constants` entry, so a value supplied for index 0 names no declared constant
 // (`FunctionConstantIndex`). This is the same program as that fixture's `.metal` twin. Metal

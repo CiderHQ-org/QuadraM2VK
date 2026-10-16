@@ -75,6 +75,7 @@ use std::sync::Arc;
 
 use crate::bind::index_bounds::{finished, word_range, IndexBoundsPass};
 use crate::bind::instantiate::{BufferRange, IndirectRef};
+use crate::bind::replay::checked_mul;
 use crate::bind::status::{StatusBits, StatusWord};
 use crate::device::requirements::Requirements;
 use crate::device::Device;
@@ -1030,11 +1031,10 @@ fn place_phase(f: &mut FunctionBuilder<'_>, g: Globals, d: DrawWalk, lin: Value)
         let some = f.binary(BinOp::INotEqual, d.restart, zero)?;
         let tail_drawn = f.select(some, d.tail, zero)?;
         let primitives = saturating_add(f, walked_total, tail_drawn)?;
-        // The output's indices, where they fit a `u32`.
-        let max = k(f, u32::MAX)?;
-        let most = f.binary(BinOp::UDiv, max, vk_)?;
-        let countable = f.binary(BinOp::ULessThanEqual, primitives, most)?;
-        let written = f.binary(BinOp::IMul, primitives, vk_)?;
+        // The output's indices, where they fit a `u32`: where the product's high word is 0
+        // (`replay::checked_mul`, whose docs say why).
+        let (written, past) = checked_mul(f, primitives, vk_, zero)?;
+        let countable = f.unary(UnOp::LogicalNot, past)?;
         // Placed in the pool's room, or in the draw's own region.
         let counter_ptr = word_ptr(f, g.output, zero)?;
         let counter = f.load(counter_ptr, MemAccess::default())?;

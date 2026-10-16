@@ -1,4 +1,4 @@
-// Owned fixture (WP-TRN, DESIGN D297): Metal's single-precision math library without fast math
+// Owned fixture: Metal's single-precision math library without fast math
 // (`-fno-fast-math`), so every call is the precise `air.<name>.f32` and MSL Table 8.1 bounds it.
 // The probe reads, function by function, how far Metal and each device are from the exact value,
 // against Apple's stated bound. `trn_math_fast` is the same program with the default fast math.
@@ -17,7 +17,7 @@
 // thread), so every path into the switch bypasses its declaration and Clang emits no lifetime
 // marker for it (as in ob2_sized_array.metal): LLVM 22 and later read a marker in a one-argument
 // form, so a fixture holding one may decode to other type numbers under each `llvm-as` major a
-// gate assembles it with (DESIGN D306).
+// gate assembles it with.
 #include <metal_stdlib>
 using namespace metal;
 

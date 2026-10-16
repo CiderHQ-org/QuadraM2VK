@@ -162,6 +162,7 @@ pub(super) mod device {
         }
         Ok(ComputeCase {
             out_of_bounds: Vec::new(),
+            creation_bound: crate::budgets::PIPELINE_CREATION_CEILING,
             entry: kernel.entry.to_owned(),
             constants: FunctionConstantValues::defaults(),
             buffers,

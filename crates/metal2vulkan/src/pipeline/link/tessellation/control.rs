@@ -31,39 +31,39 @@
 //! **The patch index**. Metal's patch index (`[[patch_id]]`, the element of the patch's control
 //! points and per-patch attributes) is the patch's position, or, for a draw with a patch index
 //! buffer, the `uint` at the position in that buffer (`patchIndexBuffer[patchStart + i]`), while
-//! the factors stay at the position (RT6 Metal probes 14, 14b, 14c on an M4). The control stage
-//! reads that word from the patch index buffer (`SyntheticBinding::PatchIndices`, bound from an
-//! aligned base below its offset, a multiple of 4, as the factor buffer is) where the pushed
-//! `PatchIndexBound` is nonzero; a word outside the bound range reads 0. Metal's validation stops a
-//! direct draw there; without it, Metal drew patch 0 there (probes 14b, 14d).
+//! the factors stay at the position (Metal probes on an M4). The control stage reads that word from
+//! the patch index buffer (`SyntheticBinding::PatchIndices`, bound from an aligned base below its
+//! offset, a multiple of 4, as the factor buffer is) where the pushed `PatchIndexBound` is nonzero;
+//! a word outside the bound range reads 0. Metal's validation stops a direct draw there; without
+//! it, Metal drew patch 0 there (probes 14b, 14d).
 //!
 //! **Control points**. Control point `k` of the patch whose index is `p` is element `p · N + k` of
 //! its `PerPatchControlPoint` vertex buffers (wrapping `u32`), or, for a pipeline with a
 //! control-point index type (`tessellationControlPointIndexType` `UInt16` or `UInt32`), the index
 //! at that position in the draw's control-point index buffer
 //! (`SyntheticBinding::ControlPointIndices`, bound from an aligned base below its offset, a
-//! multiple of the index size; the pushed `ControlPointIndexOffset` is the residual): RT6 Metal
-//! probes 14c, 14d, 14e on an M4, with and without a patch index buffer, direct and indirect. The
-//! control stage hands each element to the evaluation stage, which fetches the control point's
-//! attributes there (`lower::tessellation`). An index outside the bound range reads 0. Metal's
-//! validation stops a direct draw whose `(patchStart + patchCount) · N` indices pass the buffer; a
-//! patch index buffer's patch indices are not checked against it, and an indirect draw is not
-//! checked (probe 14e).
+//! multiple of the index size; the pushed `ControlPointIndexOffset` is the residual): Metal probes
+//! on an M4, with and without a patch index buffer, direct and indirect. The control stage hands
+//! each element to the evaluation stage, which fetches the control point's attributes there
+//! (`lower::tessellation`). An index outside the bound range reads 0. Metal's validation stops a
+//! direct draw whose `(patchStart + patchCount) · N` indices pass the buffer; a patch index
+//! buffer's patch indices are not checked against it, and an indirect draw is not checked (probe
+//! 14e).
 //!
 //! **Factors.** A patch's `MTLTriangleTessellationFactorsHalf` (three edge factors and an inside
 //! one, 8 bytes) or `MTLQuadTessellationFactorsHalf` (four and two, 12 bytes) sits at byte
 //! `offset + position · size` (per-patch step functions) `+ instance · instanceStride`
 //! (per-instance ones) of the factor buffer (`MTLTessellationFactorStepFunction`). Metal's
 //! validation requires the offset and the instance stride to be multiples of 4, but plain Metal
-//! reads an offset of 2 at that byte (RT6 Metal probe 10 `factor_offset_2`), so the stage reads the
-//! `half`s from an even byte: the words from the one that holds it, each holding two `half`s, low
-//! half first, the first `half` that word's high one where the address is 2 past a multiple of 4.
-//! The binder refuses an odd offset or stride. The descriptor binds the buffer from an aligned base
-//! below the bind offset, as a buffer slot's: the address adds the pushed residual. A word outside
-//! the bound range reads 0 (contained), which culls. Edge `k` is Vulkan's outer level `k` and
-//! inside factor `k` its inner level `k` (Metal's edge 0 is the edge `u = 0`, 1 `v = 0`, 2 `u = 1`
-//! or `w = 0`, 3 `v = 1`, as Vulkan's outer levels; SPIRV-Cross maps them lane for lane too). Then,
-//! as Metal states:
+//! reads an offset of 2 at that byte (Metal probe case `factor_offset_2` on an M4), so the stage
+//! reads the `half`s from an even byte: the words from the one that holds it, each holding two
+//! `half`s, low half first, the first `half` that word's high one where the address is 2 past a
+//! multiple of 4. The binder refuses an odd offset or stride. The descriptor binds the buffer from
+//! an aligned base below the bind offset, as a buffer slot's: the address adds the pushed residual.
+//! A word outside the bound range reads 0 (contained), which culls. Edge `k` is Vulkan's outer
+//! level `k` and inside factor `k` its inner level `k` (Metal's edge 0 is the edge `u = 0`, 1 `v =
+//! 0`, 2 `u = 1` or `w = 0`, 3 `v = 1`, as Vulkan's outer levels; SPIRV-Cross maps them lane for
+//! lane too). Then, as Metal states:
 //!
 //! 1. an edge factor that is negative, zero, or NaN culls the patch: every outer level is written
 //!    0, and Vulkan discards a patch with an outer level at or below zero;
@@ -113,6 +113,7 @@
 //! `[[instance_id]]` does). These are A-track readings.
 
 use crate::lower::tessellation::element_array;
+use crate::lower::tessellation::factors::{self, factor_halves, word};
 use crate::metal::{
     TessellationControlPointIndexType as IndexType, TessellationFactorStepFunction as Step,
     TessellationPartitionMode as Partition, Winding,
@@ -203,10 +204,7 @@ impl Control {
 
     /// Bytes of one patch's factors (`tessellationFactorStride`).
     pub fn factor_bytes(domain: PatchDomain) -> u32 {
-        match domain {
-            PatchDomain::Triangle => 8,
-            PatchDomain::Quad => 12,
-        }
+        factors::factor_bytes(domain)
     }
 
     /// The readings this control stage takes without a Metal observation, as precision notes
@@ -330,22 +328,6 @@ fn push_word(fb: &mut FunctionBuilder<'_>, push: GlobalId, member: u32) -> BResu
     let index = ku(fb, member)?;
     let ptr = fb.access_chain(base, &[index])?;
     fb.load(ptr, MemAccess::default())
-}
-
-/// Word `index` of `buffer` (the factor or patch index buffer), or 0 when the bound range does
-/// not hold it.
-fn word(fb: &mut FunctionBuilder<'_>, buffer: GlobalId, index: Value) -> BResult<Value> {
-    let base = fb.module().global_value(buffer)?;
-    let len = fb.array_length(base, 0)?;
-    let inside = fb.binary(BinOp::ULessThan, index, len)?;
-    // The binder binds at least 16 bytes, so `len - 1` is a word of the range.
-    let one = ku(fb, 1)?;
-    let last = fb.binary(BinOp::ISub, len, one)?;
-    let at = fb.glsl(GlslOp::UMin, &[index, last])?;
-    let zero = ku(fb, 0)?;
-    let ptr = fb.access_chain(base, &[zero, at])?;
-    let w = fb.load(ptr, MemAccess::default())?;
-    fb.select(inside, w, zero)
 }
 
 /// The `float` value of a finite positive `half` `h` (bits in `[0x0001, 0x7bff]`, a `uint`),
@@ -498,29 +480,7 @@ pub fn levels(
         let at = fb.binary(BinOp::IMul, instance, stride)?;
         address = fb.binary(BinOp::IAdd, address, at)?;
     }
-    // The `half`s from the even byte `address` (the module docs): the words from the one that
-    // holds it, unpacked low half first, from that word's high half where `address` is 2 past a
-    // multiple of 4.
-    let count = edges + insides;
-    let two = ku(fb, 2)?;
-    let first = fb.binary(BinOp::ShiftRightLogical, address, two)?;
-    let mask = ku(fb, 0xffff)?;
-    let sixteen = ku(fb, 16)?;
-    let mut unpacked = Vec::with_capacity(count + 2);
-    for k in 0..(count + 1).div_ceil(2) {
-        let offset = ku(fb, k as u32)?;
-        let index = fb.binary(BinOp::IAdd, first, offset)?;
-        let w = word(fb, src.factors, index)?;
-        unpacked.push(fb.binary(BinOp::BitwiseAnd, w, mask)?);
-        unpacked.push(fb.binary(BinOp::ShiftRightLogical, w, sixteen)?);
-    }
-    let high = fb.binary(BinOp::BitwiseAnd, address, two)?;
-    let zero = ku(fb, 0)?;
-    let shifted = fb.binary(BinOp::INotEqual, high, zero)?;
-    let mut halves = Vec::with_capacity(count);
-    for k in 0..count {
-        halves.push(fb.select(shifted, unpacked[k + 1], unpacked[k])?);
-    }
+    let halves = factor_halves(fb, src.factors, address, edges + insides)?;
     // Each factor is classified on its bits (the module docs).
     // 1. An edge factor that is not above zero (negative, zero, or NaN: bits outside
     //    `[0x0001, 0x7c00]`) culls the patch.

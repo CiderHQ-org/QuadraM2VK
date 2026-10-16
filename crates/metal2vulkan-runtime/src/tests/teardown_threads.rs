@@ -12,11 +12,19 @@
 //!   of the device, whose last handle goes on the program's thread; one held while it runs
 //!   (`pool::held::mid_making_hold`) leaves its state's release at once, and the device to its
 //!   reaper's thread. The command buffer is dropped uncommitted.
+//! - **Not a pool thread after a wait**: a dispatch's piece held after it settled its making and
+//!   before it gave back its variant (`pool::held::settled_hold`) lets the command buffer complete
+//!   and its completed handler run, but not its wait return, until the piece let go (its trail,
+//!   `trails.rs`): the program's drops after the wait tear the device down on its own thread,
+//!   before the last drop returns.
 //! - **The scheduler**: a committed command buffer held at its submission (its submission check
 //!   blocked on the scheduler's thread). The teardown ends on the scheduler, whose submitted
 //!   batch's hold goes after its lock, or on the queue's handler thread, which releases what the
-//!   command buffer retained; never on the completion thread, which drops its own handle before
-//!   it posts a finished command buffer and hands its hold to the posted transition.
+//!   command buffer retained; never on a queue's waiter, whose completion turn drops its own
+//!   handle before it posts a finished command buffer and hands its hold to the posted transition,
+//!   and, where it runs a command buffer's transition itself, lets the transition's hold go short
+//!   of the command buffer's last reference (`Hold::let_go_short_of_last`): the last then goes on
+//!   a handler thread.
 //! - **A handler thread, beside a host step's own module**: a module made as a host step makes its
 //!   variant's (`exit_guard::host_step`: one of its own, which the device's map keeps only for a
 //!   sweep or its teardown), held by a completed handler blocked on its gate; once a command
@@ -32,15 +40,18 @@
 //! `m2v_cpu_icd`), on the kind of device the cfg selects. The render pipeline is the owned
 //! fixture `validation/fixtures/public/examples/runtime_examples.ll` (`llvm-as`).
 
+use super::dispatch_pending as pending;
 use crate::device::lock;
 use crate::device::prime::SHADER;
 use crate::exit_guard;
 use crate::pipeline::objects::{shader_module, words_digest};
 use crate::pipeline::pool::held;
+use crate::trails::blocked;
 use crate::{
-    Buffer, ClearColor, DebugMessage, Device, DeviceKind, DeviceOptions, LoadAction,
-    MessageSeverity, MessageSink, PipelineOptions, RenderPassDescriptor, RenderPipelineState,
-    ResourceOptions, ShaderCacheOptions, StoreAction, Submission, TextureDescriptor,
+    Buffer, ClearColor, CommandBufferStatus, DebugMessage, Device, DeviceKind, DeviceOptions,
+    LoadAction, MessageSeverity, MessageSink, PipelineOptions, RenderPassDescriptor,
+    RenderPipelineState, ResourceOptions, ShaderCacheOptions, Size, StoreAction, Submission,
+    TextureDescriptor,
 };
 use metal2vulkan::metal::{PixelFormat, PrimitiveType, TextureUsage};
 use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};
@@ -110,6 +121,18 @@ impl Ending {
             Err(TryRecvError::Empty),
             "the device was torn down while {holder} held it"
         );
+    }
+
+    /// The teardown already ended, on this thread: the last drop returned with the device gone;
+    /// and nothing failed meanwhile.
+    fn ended_here(&self) {
+        assert_eq!(
+            self.thread.try_recv(),
+            Ok(program_thread()),
+            "the device was not torn down on this thread before its last drop returned"
+        );
+        let failures = lock(&self.failures);
+        assert!(failures.is_empty(), "failing messages: {:#?}", *failures);
     }
 
     /// The teardown ends, on one of `threads`, and nothing failed meanwhile.
@@ -261,6 +284,65 @@ fn a_making_running_in_the_pool_leaves_its_release_at_once_and_the_device_to_the
     ending.on(&[REAPER]);
 }
 
+/// A dispatch's making that the pool settled, its piece held before it gives back the variant it
+/// took (`pool::held::settled_hold`): the command buffer that waited for the making completes and
+/// its completed handler runs meanwhile, but its wait returns only once a wait met the piece's
+/// trail and the piece let go (`trails.rs`). So the program's drops after the wait tear the device
+/// down on its thread, before the last drop returns. Before trails, the wait returned while the
+/// piece held the variant, and the device went on the reaper's thread once the piece gave it back
+/// to the released state: `runtime_lane::events`'s drop after a wait outlived the drop so on the
+/// Radeon 780M under load.
+#[test]
+fn a_device_dropped_after_a_wait_goes_on_the_program_s_thread_while_its_piece_trails() {
+    let scratch = Scratch::new("trail");
+    let (device, ending) = watched(&scratch.0);
+    let state = pending::state(&device);
+    let buffers = pending::Buffers::new(&device);
+    let queue = device.new_command_queue().unwrap();
+    let settled = held::settled_hold();
+    let pooled = device.work_counts().dispatch_pipelines_pooled;
+    let command_buffer = pending::dispatch(
+        &queue,
+        &state,
+        &buffers,
+        pending::Grid::One(Size::new(64, 1, 1)),
+    );
+    assert_eq!(
+        device.work_counts().dispatch_pipelines_pooled,
+        pooled + 1,
+        "the dispatch's making went to the pool"
+    );
+    let (handled, completed) = mpsc::channel();
+    command_buffer
+        .add_completed_handler(Box::new(move |_| {
+            let _ = handled.send(());
+        }))
+        .unwrap();
+    command_buffer.commit().unwrap();
+    assert!(
+        settled.reached(1, WAIT),
+        "the dispatch's piece settled its making"
+    );
+    completed
+        .recv_timeout(WAIT)
+        .expect("the command buffer completes while the piece holds its variant");
+    // Released once a wait met the piece's open trail.
+    let releasing = std::thread::spawn(move || {
+        let met = blocked::reached(1, WAIT);
+        drop(settled);
+        met
+    });
+    command_buffer.wait_until_completed_for(WAIT).unwrap();
+    assert_eq!(command_buffer.status(), CommandBufferStatus::Completed);
+    drop((command_buffer, queue, buffers, state));
+    drop(device);
+    ending.ended_here();
+    assert!(
+        releasing.join().unwrap(),
+        "the wait met the piece's open trail"
+    );
+}
+
 /// This thread's name, as [`Ended`] sends it.
 fn program_thread() -> String {
     let thread = std::thread::current();
@@ -376,7 +458,7 @@ fn a_host_step_s_own_module_and_the_last_device_go_on_a_handler_thread() {
         .recv_timeout(WAIT)
         .expect("the completed handler runs");
     // A command buffer of another queue, committed now, finished: the scheduler let go of what it
-    // submitted before it, and the completion thread holds no device handle between batches.
+    // submitted before it, and no completion turn holds a device handle between batches.
     // Only the handler's thread holds the first command buffer now.
     let after = filling(&second, &buffer);
     after.commit().unwrap();

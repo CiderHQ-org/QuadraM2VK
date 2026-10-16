@@ -1,14 +1,14 @@
 //! Device tests of sample positions and the store action option that names them (the runtime's
 //! `sample_positions.rs`) on the device the cfg selects, under the validation layer.
 //!
-//! Each pass is one RT6 Metal probes 15, 15d and 15e measured (an M4 with macOS 27.0.1, each case
-//! with and without API validation): a target of one pixel whose triangle covers what lies left of
-//! a vertical edge, resolved. The probes drew white and read the resolved red; the lane draws
-//! through the owned fixture `rt6_restart` (its vertex function places each vertex where buffer 0
-//! holds it, its fragment function writes alpha 1) over a target cleared to zero, so the resolved
-//! alpha is the pixel's coverage. Each is compared as the number of covered samples, as Vulkan
-//! leaves a resolve's rounding to the device. What Metal's validation stops, the runtime refuses
-//! typed, and a pass Metal takes that the runtime has not built is refused `NotImplemented`.
+//! Each pass is one that Metal probes measured (an M4 with macOS 27.0.1, each case with and without
+//! API validation): a target of one pixel whose triangle covers what lies left of a vertical edge,
+//! resolved. The probes drew white and read the resolved red; the lane draws through the owned
+//! fixture `rt6_restart` (its vertex function places each vertex where buffer 0 holds it, its
+//! fragment function writes alpha 1) over a target cleared to zero, so the resolved alpha is the
+//! pixel's coverage. Each is compared as the number of covered samples, as Vulkan leaves a
+//! resolve's rounding to the device. What Metal's validation stops, the runtime refuses typed, and
+//! a pass Metal takes that the runtime has not built is refused `NotImplemented`.
 //!
 //! The passes with a depth or stencil attachment, and those of the store action
 //! `CustomSampleDepthStore`, are the Metal probe's: drawn through the owned fixture

@@ -1,4 +1,4 @@
-// Owned fixture (WP-ICBV, DESIGN D336): a kernel whose only effect is the patch draws it encodes,
+// Owned fixture: a kernel whose only effect is the patch draws it encodes,
 // each of patches of one control point. Thread 0 encodes command 0's draw of 2 patches from
 // position 1, each patch's index the `uint` at its position from the second of the device patch
 // indices, twice from instance 1, their factors from the second triangle factor structure of the

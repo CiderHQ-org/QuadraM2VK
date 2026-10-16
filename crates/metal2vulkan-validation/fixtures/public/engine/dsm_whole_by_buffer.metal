@@ -1,4 +1,4 @@
-// Owned fixture (WP-DSM, DESIGN D271): an 8x8 simdgroup multiply-add, in float and in half, in a
+// Owned fixture: an 8x8 simdgroup multiply-add, in float and in half, in a
 // block the translator cannot prove workgroup uniform: simdgroup k takes the branch when the
 // device word sel[k] is nonzero, a value equal across the simdgroup. Every lane of a simdgroup
 // takes it or none does; the simdgroup is partial only when the threadgroup leaves it partial.
@@ -9,7 +9,7 @@
 // and out[2n + 2g + j] that of the half d's, widened, at thread g of a grid of n threads
 // (g = thread_position_in_grid). A lane that does not run it writes nothing. Lane L of a
 // simdgroup holds cells (row(L), col(L) + j), row(L) = ((L >> 1) & 3) | ((L >> 4) << 2),
-// col(L) = ((L >> 3) & 1) * 4 + (L & 1) * 2 (D91.1). Loop-free.
+// col(L) = ((L >> 3) & 1) * 4 + (L & 1) * 2. Loop-free.
 #include <metal_stdlib>
 using namespace metal;
 

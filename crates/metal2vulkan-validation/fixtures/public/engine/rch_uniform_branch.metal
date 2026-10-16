@@ -1,7 +1,7 @@
-// Owned fixture (WP-RCH, DESIGN D780): a fragment function that samples a texture through a
+// Owned fixture: a fragment function that samples a texture through a
 // runtime sampler at a coordinate it divides by the texture's size where a constant block's flag
 // says, a branch every invocation of a draw takes alike, and writes a buffer. Under the sampler's
-// YCbCr variant (D593) the emulated linear filter branches on the sampler's specialization
+// YCbCr variant the emulated linear filter branches on the sampler's specialization
 // constants, and its device-sample arm converts a `half` texel through a rounded add.
 #include <metal_stdlib>
 using namespace metal;

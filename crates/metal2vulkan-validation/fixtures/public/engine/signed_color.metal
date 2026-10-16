@@ -1,4 +1,4 @@
-// Owned fixture (WP-MM8, DESIGN D191): fragment color outputs to signed-integer attachments.
+// Owned fixture: fragment color outputs to signed-integer attachments.
 // A render pipeline whose color attachment has a signed-integer pixel format compiles its
 // fragment function with that attachment in `LoweringInputs::signed_color_attachments`, so a
 // 32-bit integer output to it is declared `int` and stored by `OpBitcast`. The `int4` lanes are

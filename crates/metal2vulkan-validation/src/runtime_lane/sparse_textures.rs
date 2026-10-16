@@ -682,15 +682,15 @@ fn assert_moved(after: &[f32], to: [u64; 2], before: &[f32], from: [u64; 2], wha
     }
 }
 
-/// A move takes each mapped source tile to its destination tile where that one is unmapped, as
-/// an M4's does (SPR-probe1-m4, SPR-probe2-m4): onto mapped tiles nothing moves; between
-/// textures of one heap or of two, whose counts do not change. What AMP sparse probe 1 measured
-/// on an M3 Max and an M4 moves too: within one texture over overlapping regions, one tile at a
-/// time in Metal's order (only the tiles that land on unmapped ones), between formats of
-/// different tiles tile for tile, and a slice's tail at `firstMipmapInTail`, onto another's tail
-/// or onto a tile and back. Each moved tile's texels go with it, on every device that makes the
-/// textures, whatever its blocks, as Metal's do for a texture without GPU-optimized contents.
-/// Fences order the encoder like any other.
+/// A move takes each mapped source tile to its destination tile where that one is unmapped, as an
+/// M4's does (SPR-probe1-m4, SPR-probe2-m4): onto mapped tiles nothing moves; between textures of
+/// one heap or of two, whose counts do not change. What a Metal sparse probe measured on an M3 Max
+/// and an M4 moves too: within one texture over overlapping regions, one tile at a time in Metal's
+/// order (only the tiles that land on unmapped ones), between formats of different tiles tile for
+/// tile, and a slice's tail at `firstMipmapInTail`, onto another's tail or onto a tile and back.
+/// Each moved tile's texels go with it, on every device that makes the textures, whatever its
+/// blocks, as Metal's do for a texture without GPU-optimized contents. Fences order the encoder
+/// like any other.
 #[test]
 fn moves_take_mappings_to_unmapped_tiles() {
     on_device(|device, messages| {
@@ -1031,7 +1031,7 @@ fn updates_of_a_texture_that_is_not_sparse_record_nothing() {
     });
 }
 
-/// A render pass's stores into unmapped tiles are dropped, as AMP sparse probe 2 measured on an
+/// A render pass's stores into unmapped tiles are dropped, as a Metal sparse probe measured on an
 /// M3 Max and an M4 (a clear, a draw, a load's draw): a checkerboard of mapped tiles cleared and
 /// drawn white, then loaded and stored again, reads white in its mapped tiles and zero in the
 /// unmapped ones on every device that makes the texture, which the device's blocks hold two of
@@ -1106,8 +1106,8 @@ fn a_render_pass_drops_its_stores_into_unmapped_tiles() {
     quiet(lane, &messages);
 }
 
-/// An update or a move through a view of a sparse texture names the texture's own tiles, as AMP
-/// sparse probe 1 measured on an M3 Max and an M4 and EVs RRX-sparse1-m4, RRX-sparse2-m4 and -m3
+/// An update or a move through a view of a sparse texture names the texture's own tiles, as a Metal
+/// sparse probe measured on an M3 Max and an M4 and EVs RRX-sparse1-m4, RRX-sparse2-m4 and -m3
 /// measured further: the level names the texture's level whatever the view's levels, past them too;
 /// the slice is the view's, its texture's past the view's first slice, past the view's slices too,
 /// and one past the texture's is refused as on the texture; a view of another pixel format of the

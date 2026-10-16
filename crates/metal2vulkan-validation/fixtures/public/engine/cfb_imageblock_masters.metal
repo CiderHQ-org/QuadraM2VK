@@ -1,9 +1,8 @@
-// Owned fixture (WP-CFB, DESIGN D371): a fragment function whose explicit imageblock is another
-// master of the eight-byte splat cell of `cfit_tile_imageblock` (two `uint`s, aligned to 4), its
-// words swapped, so a lane draws both masters in one pass as WP-CFB Metal probe 5 did: Metal's
-// views of masters of one size and alignment reach the same bytes, each at its own offsets. The
-// vertex function is `cfit_ib_rect`'s rectangle. Written for this repository; no third-party
-// source. Loop-free.
+// Owned fixture: a fragment function whose explicit imageblock is another master of the eight-byte
+// splat cell of `cfit_tile_imageblock` (two `uint`s, aligned to 4), its words swapped, so a lane
+// draws both masters in one pass as a Metal probe did: Metal's views of masters of one size and
+// alignment reach the same bytes, each at its own offsets. The vertex function is `cfit_ib_rect`'s
+// rectangle. Written for this repository; no third-party source. Loop-free.
 // metal-fast-math: off
 #include <metal_stdlib>
 using namespace metal;

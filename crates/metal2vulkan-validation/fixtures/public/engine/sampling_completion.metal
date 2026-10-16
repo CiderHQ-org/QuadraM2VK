@@ -1,4 +1,4 @@
-// Owned MSL for WP-L7c (lower B3, D19, D73, D84, D90): samplers selected among constexpr and
+// Owned MSL: samplers selected among constexpr and
 // runtime candidates, the exact nearest pixel fetch, sample offsets, and level of detail outside
 // fragment functions. Every function is loop-free.
 #include <metal_stdlib>
@@ -19,7 +19,7 @@ kernel void sample_mixed_samplers(texture2d<float> t [[texture(0)]],
 }
 
 // The same selection with an implicit-LOD, biased sample in a fragment function (tangled: the
-// gradients are hoisted before the switch, D19 rule 2), and a gather through it.
+// gradients are hoisted before the switch), and a gather through it.
 fragment float4 fragment_mixed_samplers(float4 pos [[position]],
                                         texture2d<float> t [[texture(0)]],
                                         sampler s [[sampler(0)]]) {

@@ -2,8 +2,8 @@
 //! validation layer. Such a pass rasterizes at its default raster sample count
 //! (`defaultRasterSampleCount`), with no attachment to carry it: the owned fixture
 //! `rt6_attachmentless` draws the fullscreen triangle over a 2x2 render area, and each fragment
-//! invocation ORs into its pixel's word the samples it ran for and counts itself, as RT6 Metal
-//! probe 8 drew it. Each such pass records, makes its pipelines against, and begins the pass its
+//! invocation ORs into its pixel's word the samples it ran for and counts itself, as a Metal probe
+//! on an M4 drew it. Each such pass records, makes its pipelines against, and begins the pass its
 //! device keeps for its sample count (`runtime/attachmentless.rs`); MoltenVK rasterized one sample
 //! in a pass made per encoder (EV `RT6-atl-gpu-mvk`).
 
@@ -28,9 +28,9 @@ fn library(device: &Device) -> Library {
         .unwrap()
 }
 
-/// Metal's words after one draw at `samples` (RT6 Metal probe 8, an M4 with macOS 27.0.1, both
-/// functions, with and without Metal's API validation): every pixel ran every sample, once each
-/// (a function that writes memory runs once per covered sample).
+/// Metal's words after one draw at `samples` (a Metal probe on an M4 with macOS 27.0.1, both
+/// functions, with and without Metal's API validation): every pixel ran every sample, once each (a
+/// function that writes memory runs once per covered sample).
 fn metal_words(samples: u32) -> [u32; 5] {
     let every = (1u32 << samples) - 1;
     [every, every, every, every, 4 * samples]

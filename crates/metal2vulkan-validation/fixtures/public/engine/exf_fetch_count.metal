@@ -1,4 +1,4 @@
-// Owned fixture (WP-EXF, DESIGN D198): an integer read-modify-write of the color attachment. Each
+// Owned fixture: an integer read-modify-write of the color attachment. Each
 // fragment multiplies the count it reads by three and adds `k + 1` in lane `k` (wrapping), so `n`
 // fragments over one pixel in order leave `c * 3^n + (k + 1) * (3^n - 1) / 2` in lane `k`, and a
 // fragment that read the attachment before an earlier one wrote it leaves a different integer.

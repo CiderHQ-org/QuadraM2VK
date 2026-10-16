@@ -37,7 +37,7 @@ use std::fmt;
 pub use crate::air::container::Hash256;
 use crate::device::Device;
 use crate::pipeline::lower_inputs::{CaptureForm, StorageImageChoice};
-use crate::pipeline::sym::SlotRef;
+use crate::pipeline::sym::{SlotRef, SnapshotForm};
 use crate::vk;
 
 mod artifacts;
@@ -60,7 +60,7 @@ mod tests;
 /// unchanged version, and its bless records the version. Independent of the crate's version and of
 /// [`ARTIFACT_FORMAT_VERSION`]. The commit that bumps it says what changed; this comment keeps no
 /// history.
-pub const SEMANTICS_VERSION: u32 = 1698;
+pub const SEMANTICS_VERSION: u32 = 1739;
 
 /// The byte-layout version of encoded artifacts (`CompiledFunction::to_bytes` and the
 /// [`PipelineArtifact`] encodings). Every encoded artifact carries it, and a decode under another
@@ -70,7 +70,7 @@ pub const SEMANTICS_VERSION: u32 = 1698;
 /// re-typed in an encoded type, its `codec` body or its `envelope`. A variant removed while its tag
 /// stays unused needs no bump: an entry holding it fails to decode, which is a miss. The commit that
 /// bumps it says what changed; this comment keeps no history.
-pub const ARTIFACT_FORMAT_VERSION: u32 = 399;
+pub const ARTIFACT_FORMAT_VERSION: u32 = 419;
 
 /// The version of what this crate's runtime does with a compiled pipeline: instantiating a binding
 /// plan (`BindingPlan::instantiate_*`: descriptor ranges, push bytes, root, argument, and handle
@@ -93,7 +93,7 @@ pub const ARTIFACT_FORMAT_VERSION: u32 = 399;
 /// changes no behaviour, and then updates that hash alone with the commit saying why, or changes
 /// behaviour and also bumps this version. The commit that bumps it says what changed; this comment
 /// keeps no history.
-pub const RUNTIME_VERSION: u32 = 1211;
+pub const RUNTIME_VERSION: u32 = 1301;
 
 /// The digest of the sources this build of the crate was compiled from: SHA-256, as lowercase hex,
 /// of the manifest, the build script, and exactly the files the crate roots' module tree compiles
@@ -188,6 +188,19 @@ pub struct VariantKey {
     /// the plan of a pipeline compiled under it states it.
     #[cfg_attr(feature = "serde", serde(default))]
     pub srgb_textures: BTreeSet<SlotRef>,
+    /// Fragment texture slots the draw reads through a snapshot an earlier draw of the same
+    /// primitives took (`LoweringInputs::snapshot_textures`), each with the form the snapshot
+    /// keeps its texels in (`SnapshotForm::of` the slot's bound view): the slots
+    /// `BindShape::snapshot_textures` names, each one of the fragment stage's
+    /// `StageInterface::snapshot_textures`. The plan of a pipeline compiled under it states it,
+    /// and binds each slot's snapshot (`WriteSource::SnapshotTexels`, an image of the form's
+    /// `SnapshotForm::format`) and leaves which of its draws runs to the consumer
+    /// (`PushHole::SnapshotPhase`).
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, with = "crate::pipeline::serde_pairs")
+    )]
+    pub snapshot_textures: BTreeMap<SlotRef, SnapshotForm>,
     /// Texture slots bound in a YCbCr format whose linear samples the function emulates on a
     /// device that samples through Metal's own sampler: every slot of a
     /// `RuntimeFact::YCbCrTexture` the shape binds in a two-plane YCbCr format
@@ -274,6 +287,30 @@ pub struct VariantKey {
     /// The plan of a pipeline compiled under it states it.
     #[cfg_attr(feature = "serde", serde(default))]
     pub depth_clamp_range: bool,
+    /// Whether the draw's render pass depth is `Depth16Unorm`, where the render pipeline's depth
+    /// format says otherwise (`BindShape::depth16_pass`): plain Metal stores into the pass's depth
+    /// whatever format the pipeline names, so the variant's fragment stage writes Metal's 16-bit
+    /// codes, or leaves the depth to the device, by the pass's format
+    /// (`LoweringInputs::depth16_codes`). The plan of a pipeline compiled under it states it
+    /// (`RuntimeFact::Depth16Pass`).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub depth16_pass: Option<bool>,
+    /// Whether the draw biases a `Depth16Unorm` depth on a profile that stores the pass's
+    /// unbiased depths as Metal's codes but not its biased ones (`BindShape::depth16_biased`): the
+    /// variant's fragment stage adds the draw's bias and writes Metal's code itself
+    /// (`LoweringInputs::depth16_codes`), where a pipeline compiled without it leaves the depth to
+    /// the device. The plan of a pipeline compiled under it states it
+    /// (`RuntimeFact::Depth16Biased`).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub depth16_biased: bool,
+    /// The side of the draw's bias of a `Depth16Unorm` depth whose fragment stage adds the bias
+    /// itself, where the runtime proved it (`BindShape::depth16_bias_raises`): `Some(true)` where
+    /// Metal's biased depth is never below the fragment's own, `Some(false)` where it is never
+    /// above. The variant's fragment stage declares it (`LoweringInputs::depth16_bias_raises`), so
+    /// the device may test the depth before the stage runs. The plan of a pipeline compiled under
+    /// it states it (`RuntimeFact::Depth16BiasSide`).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub depth16_bias_raises: Option<bool>,
     /// Storage-image texture slots bound to a texture with a swizzle (`MTLTexture.swizzle` other
     /// than the default) whose texels the function reads or writes
     /// (`LoweringInputs::swizzled_storage`): a Vulkan storage view takes no swizzle, so the
@@ -348,6 +385,14 @@ pub struct VariantKey {
     /// the other form is `BindError::NeedsVariant` with that form.
     #[cfg_attr(feature = "serde", serde(default))]
     pub captured_positions: Option<CaptureForm>,
+    /// The de-indexed form of a pipeline whose vertex function writes the primitive ID's varying
+    /// (`LoweringInputs::primitive_id_indices`, `BindShape::primitive_id_indices`): the vertex
+    /// function of an indexed draw of this index type runs the draw's indices as `index count`
+    /// vertices from 0, read at the draw's index address, so each primitive's stream position
+    /// names it. The runtime asks for it for an indexed draw of such a pipeline, and the plan of
+    /// a pipeline compiled under it states it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub primitive_id_indices: Option<crate::metal::IndexType>,
     /// Extended-range color attachments whose `half` shadow the draw's render pass instance
     /// holds (`BindShape::extended_shadows`): the variant's fragment function reads and writes
     /// each through the interlocked storage form against the shadow as Metal's tile value
@@ -372,6 +417,18 @@ pub struct VariantKey {
     /// it states it.
     #[cfg_attr(feature = "serde", serde(default))]
     pub anisotropic_samplers: BTreeSet<SlotRef>,
+    /// The group of the render pipeline's color attachments the variant draws, where the device
+    /// draws them in groups (`crate::pipeline::ColorGroup`, `GraphicsState::color_group`): its
+    /// fragment function writes that group's attachments alone, at locations `0..`
+    /// (`LoweringInputs::color_group`), and its graphics state holds them alone. The key's other
+    /// choices of colors (`zeroed_colors`, `dropped_colors`, `interlocked_colors`,
+    /// `extended_shadows`) then name the group's locations, as a bind plan of the variant over its
+    /// group's part of the pass asks for them; no bind plan sets the group itself. 0, the first
+    /// group, by default; a group past the pipeline's last is no plan's (an invariant). Not a
+    /// lowering input of its own: the render pipeline's compile derives the fragment function's
+    /// from it, the descriptor and the profile.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub color_group: u32,
 }
 
 impl VariantKey {
@@ -447,6 +504,7 @@ impl VariantKey {
             && !self.dropped_vertex_layer
             && self.storage_view_slots.is_empty()
             && self.srgb_textures.is_empty()
+            && self.snapshot_textures.is_empty()
             && self.ycbcr_textures.is_empty()
             && self.address_maps.is_empty()
             && !self.flat_grid
@@ -459,6 +517,9 @@ impl VariantKey {
             && self.dropped_colors.is_empty()
             && self.kept_imageblock_bytes.is_none()
             && !self.depth_clamp_range
+            && self.depth16_pass.is_none()
+            && !self.depth16_biased
+            && self.depth16_bias_raises.is_none()
             && self.swizzled_storage.is_empty()
             && !self.addressed_function_tables
             && self.interlocked_colors.is_empty()
@@ -468,9 +529,11 @@ impl VariantKey {
             && !self.window_depth_varying
             && self.cubic_samplers.is_empty()
             && self.captured_positions.is_none()
+            && self.primitive_id_indices.is_none()
             && self.extended_shadows.is_empty()
             && self.cross_class.is_empty()
             && self.anisotropic_samplers.is_empty()
+            && self.color_group == 0
     }
 
     /// The lowering inputs of the function of `stage` under this key: its storage-image choices,
@@ -529,6 +592,12 @@ impl VariantKey {
             .filter(|s| s.stage == stage)
             .copied()
             .collect();
+        out.snapshot_textures = self
+            .snapshot_textures
+            .iter()
+            .filter(|(s, _)| s.stage == stage)
+            .map(|(s, form)| (*s, *form))
+            .collect();
         out.ycbcr_textures = self
             .ycbcr_textures
             .iter()
@@ -584,6 +653,9 @@ impl VariantKey {
             self.window_depth_varying && stage == crate::pipeline::sym::Stage::Vertex;
         out.captured_positions = self
             .captured_positions
+            .filter(|_| stage == crate::pipeline::sym::Stage::Vertex);
+        out.primitive_id_indices = self
+            .primitive_id_indices
             .filter(|_| stage == crate::pipeline::sym::Stage::Vertex);
         out.kept_imageblock_bytes = self
             .kept_imageblock_bytes

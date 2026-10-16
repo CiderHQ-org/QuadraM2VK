@@ -1,4 +1,4 @@
-// Owned MSL for WP-L5b (D18, D19, D38; memory spec §6): texture and sampler handles as values.
+// Owned MSL: texture and sampler handles as values.
 // Every function is loop-free.
 #include <metal_stdlib>
 using namespace metal;
@@ -57,7 +57,7 @@ kernel void sampler_select(texture2d<float> t [[texture(0)]],
     out[gid] = t.sample(ss[gid & 1], uv, level(0.0)) + v.sample(s, uv, level(1.0));
 }
 
-// Implicit-LOD samples through a selected texture (tangled, D19): the gradients are hoisted
+// Implicit-LOD samples through a selected texture (tangled): the gradients are hoisted
 // before the switch, the bias scaling them.
 fragment float4 fragment_select_sample(float4 pos [[position]],
                                        texture2d<float> a [[texture(0)]],
@@ -69,7 +69,7 @@ fragment float4 fragment_select_sample(float4 pos [[position]],
 }
 
 // An LOD query through a selected texture: no gradient form, so each candidate's query runs
-// before the switch, at the call's position, and the switch selects one (D285).
+// before the switch, at the call's position, and the switch selects one.
 fragment float4 fragment_select_lod(float4 pos [[position]],
                                     texture2d<float> a [[texture(0)]],
                                     texture2d<float> b [[texture(1)]],
@@ -82,14 +82,14 @@ struct Resources {
     texture2d<float> t;
 };
 
-// A texture loaded from an argument buffer: the D38 heap (not implemented).
+// A texture loaded from an argument buffer: the heap of argument-buffer textures (not implemented).
 kernel void argument_buffer_read(constant Resources &res [[buffer(0)]],
                                  device float4 *out [[buffer(1)]],
                                  uint gid [[thread_position_in_grid]]) {
     out[gid] = res.t.read(uint2(gid, 0));
 }
 
-// Argument-buffer members reached through one dynamic element index (WP-L5f, D162): an element
+// Argument-buffer members reached through one dynamic element index: an element
 // of a texture-array member, written through the storage heap, and the texture of an element of
 // an array of argument buffers, tested for null and read through the sampled heap.
 struct Slices {
@@ -114,7 +114,7 @@ kernel void argument_buffer_struct_array(constant Atlas *atlas [[buffer(0)]],
 }
 
 // A depth texture read through an argument buffer, written to a storage texture of the same
-// argument buffer (WP-L5f, D162): the depth is the float heap class's first component.
+// argument buffer: the depth is the float heap class's first component.
 struct DepthBlit {
     depth2d<float, access::read> source;
     texture2d<float, access::write> target;
@@ -125,7 +125,7 @@ kernel void argument_buffer_depth_read(constant DepthBlit &blit [[buffer(0)]],
     blit.target.write(float4(blit.source.read(gid)), gid);
 }
 
-// Argument-buffer textures sampled through constexpr samplers (WP-L5f, D162): each heap element
+// Argument-buffer textures sampled through constexpr samplers: each heap element
 // through a separate heap sampler. A kernel copies through a normalized linear sampler and a
 // nearest pixel sampler (an exact fetch), and an integer texture through a nearest sampler.
 constexpr sampler linear_clamp(coord::normalized, filter::linear, address::clamp_to_edge);
@@ -177,7 +177,7 @@ fragment float4 argument_buffer_fragment_sample(float4 pos [[position]],
 }
 
 // A heap texture sampled through a runtime sampler: a heap sampler binding the binder writes with
-// the sampler bound at the slot (D285).
+// the sampler bound at the slot.
 kernel void argument_buffer_runtime_sampler(constant Resources &res [[buffer(0)]],
                                             sampler s [[sampler(0)]],
                                             device float4 *out [[buffer(1)]],
@@ -186,7 +186,7 @@ kernel void argument_buffer_runtime_sampler(constant Resources &res [[buffer(0)]
 }
 
 // A heap depth texture sampled with comparison: a member of the depth-comparison heap class
-// (D285).
+//.
 constexpr sampler shadow_less(coord::normalized, filter::linear, compare_func::less);
 
 struct Shadow {
@@ -200,7 +200,7 @@ kernel void argument_buffer_sample_compare(constant Shadow &shadow [[buffer(0)]]
 }
 
 // A heap texture sampled with an opaque-black border: every member the sampled array holds must
-// read that border exactly through its view (D147, D162).
+// read that border exactly through its view.
 constexpr sampler black_border(coord::normalized, filter::linear, address::clamp_to_border,
                                border_color::opaque_black);
 

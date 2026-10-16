@@ -1,4 +1,4 @@
-// Owned fixture (WP-L9a, DESIGN D69): vertex fetch, varyings, stage builtins, fragment inputs
+// Owned fixture: vertex fetch, varyings, stage builtins, fragment inputs
 // and outputs. The vertex and fragment entries share `Varyings`, so their user keys match and
 // the pair links (vertex outputs to fragment inputs by AIR user key). Loop-free.
 #include <metal_stdlib>

@@ -1,4 +1,4 @@
-// Owned fixture (WP-RFL, DESIGN D384, docs/TODO.md 8.27): visible function tables inside an
+// Owned fixture: visible function tables inside an
 // argument buffer, one and an array of two beside an inline constant, whose reflection no earlier
 // probe measured, and the visible function they call. Written for this repository; no
 // third-party source. Loop-free.

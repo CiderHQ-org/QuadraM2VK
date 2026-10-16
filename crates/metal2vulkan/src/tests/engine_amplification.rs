@@ -39,7 +39,9 @@ use crate::budget::Budget;
 use crate::cache::VariantKey;
 use crate::device::requirements::{VkFeature as F, VkLimit};
 use crate::device::{Device, DeviceDescription, DevicePolicy, DeviceProfile};
-use crate::error::{BindError, Capability, DescriptorError, Error, Feature, Needs};
+use crate::error::{
+    BindError, Capability, DescriptorError, DriverDeviation, Error, Feature, Needs,
+};
 use crate::library::{FunctionArtifact, Library};
 use crate::pipeline::descriptor::{
     FunctionDescriptor, RenderPipelineDescriptor, StageSource, TessellationDescriptor,
@@ -49,8 +51,8 @@ use crate::pipeline::interface::PushLoc;
 use crate::pipeline::link::{link, LinkInputs};
 use crate::pipeline::lower_inputs::LoweringInputs;
 use crate::pipeline::relocate::relocate;
-use crate::pipeline::stage_io::StageBuiltin;
-use crate::pipeline::sym::{PushField, ResourceKind, ResourceSlot, SpecKey, Stage};
+use crate::pipeline::stage_io::{IoRole, StageBuiltin};
+use crate::pipeline::sym::{PushField, ResourceKind, ResourceSlot, SpecKey, Stage, VaryingKey};
 use crate::pipeline::testing::{
     compile, engine_dir, fixtures_dir, llvm_assemble, moltenvk_msl_compile, profile, typed_module,
     typed_module_with, AssembleError,
@@ -113,7 +115,10 @@ fn validate(a: &FunctionArtifact, p: &DeviceProfile) -> Vec<(SpecKey, u64)> {
 }
 
 /// Every amplified entry reads `ViewIndex` for its amplification id and the specialized count,
-/// and a shared output stays an output.
+/// and a shared output stays an output. `amp_vertex`'s viewport index (`vid & 1`) differs among a
+/// primitive's vertices: MoltenVK, which takes the first vertex's as Metal does
+/// (`DriverDeviation::MetalFirstVertexIndices`), stores it to `ViewportIndex`; lavapipe to the
+/// selected viewport the synthesized geometry stage reads.
 #[test]
 fn amplification_builtins_are_the_view_index_and_a_specialized_count() {
     let Some(bc) = fixture() else { return };
@@ -155,18 +160,32 @@ fn amplification_builtins_are_the_view_index_and_a_specialized_count() {
             );
         }
         // `uv` is `[[shared]]`: the second varying, beside the amplified color; the third is
-        // the viewport index as written.
+        // the viewport index as written, and the fourth, behind the synthesized geometry stage,
+        // the selected viewport.
         let a = compile(&bc, "amp_vertex", &p).expect("amp_vertex");
+        let first_vertex = p.takes_driver_deviation(DriverDeviation::MetalFirstVertexIndices);
         assert_eq!(
             a.interface.io.outputs.len(),
-            3,
+            if first_vertex { 3 } else { 4 },
             "{stem}: color, uv, viewport index"
         );
-        assert!(a
-            .interface
-            .io
-            .builtins
-            .contains(&StageBuiltin::ViewportIndex));
+        assert_eq!(
+            a.interface
+                .io
+                .builtins
+                .contains(&StageBuiltin::ViewportIndex),
+            first_vertex,
+            "{stem}"
+        );
+        assert_eq!(
+            a.interface
+                .io
+                .outputs
+                .iter()
+                .any(|o| o.role == IoRole::SelectedViewport),
+            !first_vertex,
+            "{stem}"
+        );
     }
 }
 
@@ -225,7 +244,29 @@ fn a_vertex_function_writing_its_slice_reads_amplification_id_zero() {
                 "{entry}: {:?}",
                 a.interface.io.builtins
             );
-            assert!(a.interface.io.builtins.contains(&StageBuiltin::Layer));
+            // `amp_vertex_layer`'s slice (`slices[vid & 1]`) differs among a primitive's
+            // vertices: stored to `Layer` where the profile takes the first vertex's as Metal
+            // does, else to the selected slice; `vertex_amplification_id_layer`'s does not.
+            let stored = a
+                .interface
+                .io
+                .uniform_outputs
+                .contains(&VaryingKey::render_target_array_index())
+                || p.takes_driver_deviation(DriverDeviation::MetalFirstVertexIndices);
+            assert_eq!(
+                a.interface.io.builtins.contains(&StageBuiltin::Layer),
+                stored,
+                "{entry}"
+            );
+            assert_eq!(
+                a.interface
+                    .io
+                    .outputs
+                    .iter()
+                    .any(|o| o.role == IoRole::SelectedLayer),
+                !stored,
+                "{entry}"
+            );
             assert!(!a.requirements.features.contains(&F::Multiview), "{entry}");
             assert!(
                 !a.requirements
@@ -445,7 +486,7 @@ fn an_amplified_render_pipeline_plans_its_views() {
         assert_eq!((plan.views.view_mask, plan.views.base_layer), (0, 2));
         assert_eq!(plan.variant.amplification_draws, None, "{stem}");
         // One into slice 2 of a pass of 4, without multiview, and into the first layer where the
-        // offset is at or past the pass's length, as Metal renders it (RT6 Metal probe 13).
+        // offset is at or past the pass's length, as Metal renders it (a Metal probe on an M4).
         for (length, base_layer) in [(4, 2), (2, 0), (0, 0)] {
             let plan = p
                 .plan(&dev, &amplified_in(1, &[(0, 2)], length).shape())
@@ -774,8 +815,8 @@ fn a_variant_draws_each_amplification_with_its_push_fields() {
     }
 }
 
-/// The variant's layered `Layer` needs `shaderOutputLayer`, which `lunarg-desktop-baseline-2023`
-/// lacks; and a tessellation pipeline is drawn amplified only as views (`lavapipe` has
+/// The variant's layered `Layer` needs `shaderOutputLayer` or `geometryShader`, which
+/// `lunarg-desktop-baseline-2023` both lacks; and a tessellation pipeline is drawn amplified only as views (`lavapipe` has
 /// `multiviewTessellationShader`).
 #[test]
 fn amplification_draws_refuse_what_the_variant_cannot_be() {
@@ -789,10 +830,7 @@ fn amplification_draws_refuse_what_the_variant_cannot_be() {
     match dev.compile_render_variant(&d, &plan.variant, &budget) {
         Err(Error::Unsupported(u)) => {
             assert_eq!(u.feature, Feature::VertexAmplification);
-            assert_eq!(
-                u.needs,
-                Needs::AnyOf(vec![vec![Capability::Feature(F::ShaderOutputLayer)]])
-            );
+            assert_eq!(u.needs, output_layer_or_geometry());
         }
         other => panic!("{:?}", other.map(|_| ())),
     }
@@ -816,71 +854,100 @@ fn amplification_draws_refuse_what_the_variant_cannot_be() {
     }
 }
 
-/// On a profile without `shaderOutputLayer` (`lunarg-desktop-baseline-2023`), every amplified draw
-/// is drawn as Metal or refused typed, never drawn into another slice: as views where multiview
-/// draws Metal's answer; one amplification at a time in a pass of one layer or none, whose variant
-/// writes no `Layer` (every amplification renders the pass's one layer, as Metal's do: AMP Metal
-/// probe 1's `amp2_len1`); and in a pass of more layers, whose variant must write the
-/// amplification's slice as `Layer`, `Unsupported(VertexAmplification)` needing the feature.
+/// What a variant that stores a layered amplification's slice needs on a device without
+/// `shaderOutputLayer`: the feature, or the geometry stage that stores the slice instead.
+fn output_layer_or_geometry() -> Needs {
+    Needs::AnyOf(vec![
+        vec![Capability::Feature(F::ShaderOutputLayer)],
+        vec![Capability::Feature(F::GeometryShader)],
+    ])
+}
+
+/// On a profile without `shaderOutputLayer`, every amplified draw is drawn as Metal or refused
+/// typed, never drawn into another slice: as views where multiview draws Metal's answer; one
+/// amplification at a time in a pass of one layer or none, whose variant writes no `Layer` and
+/// carries no geometry stage (every amplification renders the pass's one layer, as Metal's do:
+/// Metal probe case `amp2_len1` on the M3 Max and an M4); and in a pass of more layers, whose
+/// variant must store the amplification's slice as `Layer`, through the synthesized geometry
+/// stages where the device has `geometryShader` (`lavapipe` without the output), and otherwise
+/// (`lunarg-desktop-baseline-2023`) `Unsupported(VertexAmplification)` needing either feature.
 #[test]
 fn a_profile_without_shader_output_layer_draws_or_refuses_every_amplification() {
     let Some(bc) = fixture() else { return };
     let budget = Budget::standard();
-    let stem = "lunarg-desktop-baseline-2023";
-    assert!(!description(stem).features.contains(&F::ShaderOutputLayer));
-    let dev = device(stem);
-    let d = render(&bc, "amp_vertex_store", None, 2);
-    let p = dev.compile_render_pipeline(&d, &budget).expect("base");
-    let (mut views, mut drawn, mut refused) = (0, 0, 0);
-    for length in 0..4 {
-        for mappings in [
-            vec![(0, 0), (0, 1)],
-            vec![(0, 1), (0, 2)],
-            vec![(0, 1), (0, 0)],
-            vec![(0, 0), (0, 2)],
-            vec![(0, 0), (0, 0)],
-            vec![],
-        ] {
-            let what = format!("{stem} {mappings:?} in a pass of {length} layers");
-            let plan = p
-                .plan(&dev, &amplified_in(2, &mappings, length).shape())
-                .unwrap_or_else(|e| panic!("{what}: {e:?}"));
-            let Some(draws) = plan.variant.amplification_draws else {
-                assert_ne!(plan.views.view_mask, 0, "{what}");
-                views += 1;
-                continue;
-            };
-            assert_eq!(draws.layered, length > 1, "{what}");
-            match dev.compile_render_variant(&d, &plan.variant, &budget) {
-                Ok(variant) => {
-                    assert!(!draws.layered, "{what}: compiled");
-                    assert!(!variant.graphics.declares_layer, "{what}");
-                    drawn += 1;
+    let lunarg = "lunarg-desktop-baseline-2023";
+    assert!(!description(lunarg).features.contains(&F::ShaderOutputLayer));
+    assert!(!description(lunarg).features.contains(&F::GeometryShader));
+    let mut lavapipe = description("lavapipe");
+    assert!(lavapipe.features.remove(&F::ShaderOutputLayer));
+    assert!(lavapipe.features.contains(&F::GeometryShader));
+    let lavapipe = Device::new(lavapipe, DevicePolicy::default()).expect("device");
+    for (stem, dev, geometry) in [
+        (lunarg, device(lunarg), false),
+        ("lavapipe without shaderOutputLayer", lavapipe, true),
+    ] {
+        let d = render(&bc, "amp_vertex_store", None, 2);
+        let p = dev.compile_render_pipeline(&d, &budget).expect("base");
+        let (mut views, mut drawn, mut layered, mut refused) = (0, 0, 0, 0);
+        for length in 0..4 {
+            for mappings in [
+                vec![(0, 0), (0, 1)],
+                vec![(0, 1), (0, 2)],
+                vec![(0, 1), (0, 0)],
+                vec![(0, 0), (0, 2)],
+                vec![(0, 0), (0, 0)],
+                vec![],
+            ] {
+                let what = format!("{stem} {mappings:?} in a pass of {length} layers");
+                let plan = p
+                    .plan(&dev, &amplified_in(2, &mappings, length).shape())
+                    .unwrap_or_else(|e| panic!("{what}: {e:?}"));
+                let Some(draws) = plan.variant.amplification_draws else {
+                    assert_ne!(plan.views.view_mask, 0, "{what}");
+                    views += 1;
+                    continue;
+                };
+                assert_eq!(draws.layered, length > 1, "{what}");
+                match dev.compile_render_variant(&d, &plan.variant, &budget) {
+                    Ok(variant) => {
+                        let stages = variant
+                            .stages
+                            .iter()
+                            .filter(|m| m.stage == crate::vk::ShaderStage::GEOMETRY)
+                            .count();
+                        assert_eq!(variant.graphics.declares_layer, draws.layered, "{what}");
+                        if draws.layered {
+                            assert!(geometry, "{what}: compiled");
+                            assert_eq!(stages, 3, "{what}");
+                            layered += 1;
+                        } else {
+                            assert_eq!(stages, 0, "{what}");
+                            drawn += 1;
+                        }
+                        for m in &variant.stages {
+                            check_words_valid(&m.spirv, &variant.requirements, dev.profile())
+                                .unwrap_or_else(|e| panic!("{what} {:?}: L3: {e}", m.stage));
+                        }
+                    }
+                    Err(Error::Unsupported(u)) => {
+                        assert!(draws.layered && !geometry, "{what}: refused");
+                        assert_eq!(u.feature, Feature::VertexAmplification, "{what}");
+                        assert_eq!(u.needs, output_layer_or_geometry(), "{what}");
+                        refused += 1;
+                    }
+                    Err(e) => panic!("{what}: {e}"),
                 }
-                Err(Error::Unsupported(u)) => {
-                    assert!(draws.layered, "{what}: refused");
-                    assert_eq!(u.feature, Feature::VertexAmplification, "{what}");
-                    assert_eq!(
-                        u.needs,
-                        Needs::AnyOf(vec![vec![Capability::Feature(F::ShaderOutputLayer)]]),
-                        "{what}"
-                    );
-                    refused += 1;
-                }
-                Err(e) => panic!("{what}: {e}"),
             }
         }
+        assert!(views > 0 && drawn > 0, "{stem}: {views} {drawn}");
+        if geometry {
+            assert!(layered > 0 && refused == 0, "{stem}: {layered} {refused}");
+        } else {
+            assert!(refused > 0 && layered == 0, "{stem}: {layered} {refused}");
+        }
     }
-    assert!(
-        views > 0 && drawn > 0 && refused > 0,
-        "{views} {drawn} {refused}"
-    );
 }
 
-/// On the CPU interpreter, a vertex function compiled under `amplification_draws` reads its
-/// amplification id from its push data: three draws of three vertices, each with its
-/// amplification's id written, store `(count << 16) | (amp + 1)` at `vid * 8 + amp`, as the
-/// views of a multiview draw do.
 #[test]
 fn each_amplification_draw_reads_its_pushed_id() {
     let Some(bc) = fixture() else { return };

@@ -104,6 +104,43 @@ records. Metal consumes those records through native per-patch vertex stepping a
 Vulkan generates the matching vertex and tessellation-control stages, including reflected 16-bit
 system-value types. All generated SPIR-V modules participate in the candidate dependency hash.
 
+Object and mesh cases replace `dispatch` with a `mesh_draw` record: the grid of
+`drawMeshThreadgroups:` (`{"threadgroups": [x, y, z]}`) or `drawMeshThreads:` (`{"threads": [...]}`),
+the threads per object and per mesh threadgroup (at most 1024 each, Metal's limit), and
+`rasterization` (absent is on). The case's entry is its own stage's function, and every resource
+it authors is that function's. The pipeline's other stages are partners named from the same AIR
+module (`object`, `mesh`, `fragment`). Each partner binds no resource and is loop-free, and the
+stages link as Metal links them: payload sizes, and fragment inputs by user key. A rasterizing
+draw must have a fragment function, and the checker refuses one that does not: Metal's
+descriptor validation aborts on such a pipeline. The draw names its fragment partner, or a mesh
+case states an `observation` in its place (`{"kind": "position"}`,
+`{"kind": "vertex_data", "index": n}` or `{"kind": "primitive_data", "index": n}`, counting the
+struct's user data fields in declaration order). Both executors then draw it with a generated
+fragment function that writes that output to render target 0, as a vertex case's observer does;
+a primitive data field is read flat. An object case may state `{"kind": "launch"}` in place of
+both its mesh and fragment partners. A generated mesh function then draws, for each mesh
+threadgroup the object function launches, one row of an `RGBA32Uint` render target 0. The row is
+the threadgroup's linear index in the launched grid. Pixel 0 holds the grid and the row
+(`(X, Y, Z, row)`), and each later pixel 16 bytes of the payload, read flat at its declared size;
+a word past that size reads 0. Every other pixel keeps the target's initial bytes, so a write
+past the payload or the grid shows. The draw must launch one object threadgroup, because a mesh
+threadgroup cannot tell which object threadgroup launched it, and the payload must be whole words
+of at most 1344 bytes. A mesh case may state `object_launch` (`{"payload_b64": ...,
+"mesh_threadgroups": [x, y, z]}`) in place of its object partner. A generated object function
+then writes those payload bytes from thread 0 of each object threadgroup and launches that grid
+of mesh threadgroups (at most 1024), so every object threadgroup launches the same work. The
+payload is whole words, at least as many bytes as the mesh function reads, and at most Metal's
+16 KB. Without rasterization the case selects a buffer its entry writes. The payload length is
+the pipeline's default. A stage the case leaves absent and nothing generates is a requirement
+(`mesh_companion`). An object row whose payload the launch observer reads, and a mesh row whose
+payload a generated object function writes, need none. The Metal oracle draws a case through
+`MTLMeshRenderPipelineDescriptor` and the case's own stage's setters. The engine's candidate
+draws it through the runtime's mesh render pipeline state and `draw_mesh_threadgroups` or
+`draw_mesh_threads`. On a device without `VK_EXT_mesh_shader` the runtime emulates the draw and
+announces `emulated-mesh-draws`. An object case's `threadgroup_memory` sets its arguments'
+lengths: the oracle's through `setObjectThreadgroupMemoryLength:atIndex:`, the candidate's
+through the runtime's `set_object_threadgroup_memory_length`.
+
 Dynamic Metal `threadgroup` arguments are declared through `threadgroup_memory` binding/length
 pairs. Metal binds that exact allocation; Vulkan uses the translator's descriptor-free `Workgroup`
 storage. The schema intentionally has no initial bytes because both APIs leave this storage

@@ -67,6 +67,7 @@ use super::texture_descriptor::{largest_side, TextureDescriptor};
 use super::tracker::{Access, Barrier, Use};
 use super::values::ResourceOptions;
 use super::Device;
+use crate::device::functions::Vk;
 use crate::shader_cache::driver::Making;
 use ash::vk;
 use metal2vulkan::bind::{
@@ -389,7 +390,7 @@ impl Device {
 
 /// The merge's render pass for `copy` at `samples`: one color attachment in the copy format,
 /// `GENERAL` throughout, its render area written whole (`DONT_CARE`, then `STORE`).
-fn merge_pass(raw: &ash::Device, copy: PlanesCopy, samples: u32) -> Result<vk::RenderPass, Error> {
+fn merge_pass(raw: &Vk, copy: PlanesCopy, samples: u32) -> Result<vk::RenderPass, Error> {
     let general = vk::ImageLayout::GENERAL;
     let attachments = [vk::AttachmentDescription::default()
         .format(copy.format().into())
@@ -1124,7 +1125,7 @@ impl InterleaveCopy {
     ///
     /// `command_buffer` is recording outside a render pass, and only the caller records it; the
     /// buffer, the texture, and this copy's images and objects are live until it completes.
-    pub(super) unsafe fn record(&self, raw: &ash::Device, command_buffer: vk::CommandBuffer) {
+    pub(super) unsafe fn record(&self, raw: &Vk, command_buffer: vk::CommandBuffer) {
         for step in &self.steps {
             // SAFETY: the caller's contract; each command's objects were made for this device.
             unsafe {

@@ -1,6 +1,6 @@
-// Owned fixture (WP-A1, D126): how Metal rounds a normalized pack. D57.10 and D78.2 round the
+// Owned fixture: how Metal rounds a normalized pack. The translator rounds the
 // exact product `x * (2^N - 1)` to nearest even (measured for `rgb10a2` by the old engine),
-// D110.4 rounds the `f32` product for `rgb565` (measured, case the-rgb565-pack-at-the-exact-tie),
+// rounds the `f32` product for `rgb565` (measured, case the-rgb565-pack-at-the-exact-tie),
 // and the 8- and 16-bit formats are unmeasured. The float inputs are the floats whose `f32`
 // product is exactly a half-integer while the exact product is not, for every tie of the 8-bit,
 // 5-bit, 6-bit, and 2-bit channels and 64 ties of each 10- and 16-bit one: rounding the `f32`

@@ -1,4 +1,4 @@
-// Owned fixture (WP-RCH, DESIGN D758): fragment functions that read a coverage texture, take a
+// Owned fixture: fragment functions that read a coverage texture, take a
 // branch where the coverage is not 1 (where every covered pixel's coverage is 1, only the quad
 // helpers past a primitive's edges take it), round `half` values there, and write a buffer after
 // it. `rch_helper_branch` samples a texture at LOD 0 before the branch; `rch_helper_branch_late`

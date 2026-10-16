@@ -820,6 +820,9 @@ fn limits(p: &Props<'_>, api: ApiVersion, extensions: &BTreeSet<String>) -> Resu
         max_framebuffer_layers: p.u32("maxFramebufferLayers")?,
         max_draw_indexed_index_value: p.u32("maxDrawIndexedIndexValue")?,
         max_tessellation_patch_size: p.u32("maxTessellationPatchSize")?,
+        max_geometry_input_components: p.u32("maxGeometryInputComponents")?,
+        max_geometry_output_components: p.u32("maxGeometryOutputComponents")?,
+        max_geometry_total_output_components: p.u32("maxGeometryTotalOutputComponents")?,
         supported_depth_resolve_modes: p.flags_any(
             &["supportedDepthResolveModes"],
             vk::ResolveModeFlags::from_name,
@@ -907,7 +910,7 @@ fn float_controls(p: &Props<'_>) -> Result<FloatControls, Error> {
 
 /// The limits and subgroup properties every device of `version` guarantees, for the members the
 /// core reads: the Vulkan "Required Limits" table as transcribed by Vulkan-Profiles
-/// `VP_LUNARG_minimum_requirements_1_2` (the source of the committed `vk12-bare` profile), plus
+/// `VP_LUNARG_minimum_requirements_1_2` (the source of the committed `vk12-floor` profile), plus
 /// `maxBufferSize ≥ 2^30` from Vulkan 1.3. A Khronos *profile* document states only what it
 /// raises above its base version, so an omitted member means this value, never "unsupported".
 /// Device reports list every member and are not affected.
@@ -1239,6 +1242,12 @@ fn feature_route(structure: &str) -> Option<Route> {
             Ext(&["VK_EXT_extended_dynamic_state2"], None)
         }
         // Not promoted to a core version.
+        "VkPhysicalDeviceExtendedDynamicState3FeaturesEXT" => {
+            Ext(&["VK_EXT_extended_dynamic_state3"], None)
+        }
+        "VkPhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT" => {
+            Ext(&["VK_EXT_attachment_feedback_loop_layout"], None)
+        }
         "VkPhysicalDeviceMaintenance8FeaturesKHR" => Ext(&["VK_KHR_maintenance8"], None),
         "VkPhysicalDeviceShaderFmaFeaturesKHR" => Ext(&["VK_KHR_shader_fma"], None),
         "VkPhysicalDeviceBorderColorSwizzleFeaturesEXT" => {
@@ -1355,6 +1364,10 @@ pub(super) const FEATURE_MEMBERS: &[(&str, VkFeature)] = {
         ("fragmentStoresAndAtomics", F::FragmentStoresAndAtomics),
         ("shaderDrawParameters", F::ShaderDrawParameters),
         ("geometryShader", F::GeometryShader),
+        (
+            "shaderTessellationAndGeometryPointSize",
+            F::ShaderTessellationAndGeometryPointSize,
+        ),
         ("tessellationShader", F::TessellationShader),
         ("sampleRateShading", F::SampleRateShading),
         ("dualSrcBlend", F::DualSrcBlend),
@@ -1368,6 +1381,7 @@ pub(super) const FEATURE_MEMBERS: &[(&str, VkFeature)] = {
             "multiviewTessellationShader",
             F::MultiviewTessellationShader,
         ),
+        ("multiviewGeometryShader", F::MultiviewGeometryShader),
         ("fragmentShaderBarycentric", F::FragmentShaderBarycentric),
         (
             "fragmentShaderPixelInterlock",
@@ -1521,6 +1535,14 @@ pub(super) const FEATURE_MEMBERS: &[(&str, VkFeature)] = {
         ("extendedDynamicState", F::ExtendedDynamicState),
         ("extendedDynamicState2", F::ExtendedDynamicState2),
         (
+            "extendedDynamicState3ColorWriteMask",
+            F::ExtendedDynamicState3ColorWriteMask,
+        ),
+        (
+            "attachmentFeedbackLoopLayout",
+            F::AttachmentFeedbackLoopLayout,
+        ),
+        (
             "shaderUniformBufferArrayDynamicIndexing",
             F::ShaderUniformBufferArrayDynamicIndexing,
         ),
@@ -1660,6 +1682,8 @@ pub(crate) fn extension_from_name(name: &str) -> Option<VkExtension> {
         "VK_EXT_external_memory_host" => E::ExtExternalMemoryHost,
         "VK_EXT_extended_dynamic_state" => E::ExtExtendedDynamicState,
         "VK_EXT_extended_dynamic_state2" => E::ExtExtendedDynamicState2,
+        "VK_EXT_extended_dynamic_state3" => E::ExtExtendedDynamicState3,
+        "VK_EXT_attachment_feedback_loop_layout" => E::ExtAttachmentFeedbackLoopLayout,
         "VK_EXT_mutable_descriptor_type" | "VK_VALVE_mutable_descriptor_type" => {
             E::ExtMutableDescriptorType
         }

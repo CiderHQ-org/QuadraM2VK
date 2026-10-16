@@ -204,10 +204,7 @@ fn argument_tables_compile_on_every_profile() {
             snapshots.push(stem);
         }
     }
-    assert_eq!(
-        snapshots,
-        ["lunarg-desktop-baseline-2023", "vk12-bare", "vk12-floor"]
-    );
+    assert_eq!(snapshots, ["lunarg-desktop-baseline-2023", "vk12-floor"]);
 }
 
 /// A call through a table loaded from an argument buffer that no linked function can answer
@@ -452,7 +449,7 @@ fn the_plan_writes_the_snapshot_and_its_directory() {
     let Some((caller, functions)) = fixtures() else {
         return;
     };
-    for stem in ["lunarg-desktop-baseline-2023", "vk12-bare", "vk12-floor"] {
+    for stem in ["lunarg-desktop-baseline-2023", "vk12-floor"] {
         let dev = device(stem);
         let pipe = pipeline(&dev, &caller, &functions, ONE);
         assert!(

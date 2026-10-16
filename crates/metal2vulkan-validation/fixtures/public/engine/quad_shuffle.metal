@@ -1,4 +1,4 @@
-// Owned fixture (DESIGN D3): quad_shuffle in a compute kernel.
+// Owned fixture: quad_shuffle in a compute kernel.
 // Metal compute quads are four consecutive linear threads of the threadgroup, so with
 // t = thread_index_in_threadgroup the expected value is
 //     out[t] = (t & ~3u) | ((t + 1u) & 3u)

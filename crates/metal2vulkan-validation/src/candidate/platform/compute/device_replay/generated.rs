@@ -327,7 +327,7 @@ fn bindable_pipeline(
         .stage(stage)
         .layout(layout)
         .push_next(&mut flags);
-    let started = Instant::now();
+    let clock = crate::budgets::CreationClock::start();
     // SAFETY: every pointer in `info` outlives the call; the caller destroys the result.
     let created = unsafe {
         context
@@ -343,7 +343,7 @@ fn bindable_pipeline(
         .first()
         .copied()
         .ok_or_else(|| fail("the driver created no pipeline"))?;
-    Ok((pipeline, started.elapsed()))
+    Ok((pipeline, clock.read()))
 }
 
 /// Record, after the preprocess and its barrier, the descriptor sets once and per command of

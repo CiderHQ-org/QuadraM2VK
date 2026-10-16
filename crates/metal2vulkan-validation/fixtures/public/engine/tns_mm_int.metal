@@ -1,6 +1,6 @@
 // metal-std: metal4.0
 // metal-macos-min: 26.2
-// Owned fixture (WP-TNS, DESIGN D272): matmul2d over int8_t into int32_t, whose sums are exact. One
+// Owned fixture: matmul2d over int8_t into int32_t, whose sums are exact. One
 // threadgroup: A (extents a0, a1) and B (extents b0, b1) are int8_t tensors over a and b (copied to
 // threadgroup memory where the variant places them there), C is a cooperative destination
 // initialized from c0 by coordinate, and out receives it by coordinate (row stride 64). Function

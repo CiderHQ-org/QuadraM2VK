@@ -15,8 +15,11 @@
 //!   before the dispatch between barriers; and an execution's device replay scratch on the GPU
 //!   alone (its slot tables, region records, sequences and counts, and the sink;
 //!   `generated_execute.rs`), which the replay's preprocess writes before the executions between
-//!   barriers: every chunk carries indirect and storage usage and, where the device has them, a
-//!   device address. The command buffer releases the arena when it completes.
+//!   barriers; and an emulated tessellation draw's work buffer, whose first words an indirect
+//!   draw's copy of its arguments and whose header and chunk slots its scan write before its draws
+//!   between barriers (`render/tessellation_scan.rs`): every chunk carries indirect and storage
+//!   usage and, where the device has them, a device address. The command buffer releases the arena
+//!   when it completes.
 //! - **Sizes.** A command buffer's first chunk holds [`FIRST_CHUNK_BYTES`], and each next one
 //!   twice as many, up to [`CHUNK_BYTES`]; a region of more than half of that takes a chunk of its
 //!   own. A new chunk is cleared whole (a new buffer reads zero), so a command buffer of a few

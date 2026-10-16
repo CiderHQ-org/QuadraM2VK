@@ -236,6 +236,11 @@ fn states() -> Vec<BindState> {
             s.extended_shadows.insert(0);
         }),
         with(|s| s.fragment_tests = FragmentTests::Pass),
+        with(|s| s.depth16_pass = Some(false)),
+        with(|s| s.depth16_pass = Some(true)),
+        with(|s| s.depth16_biased = true),
+        with(|s| s.depth16_bias_raises = Some(true)),
+        with(|s| s.depth16_bias_raises = Some(false)),
     ]
 }
 

@@ -570,7 +570,7 @@ fn blits_refuse_what_metal_refuses() {
 /// layer's own `VK_KHRONOS_VALIDATION_VALIDATE_SYNC=true`) checks hazards; the lavapipe EV runs it.
 ///
 /// The layer reports the hazard only when the second command buffer is submitted before the
-/// completion thread has seen the first complete; once it has, the layer knows the first fill
+/// completion turn has seen the first complete; once it has, the layer knows the first fill
 /// done and reports nothing. Two things keep that window open on a fast GPU:
 /// - The first command buffer waits for a shared event the host signals only once the second is
 ///   committed. The scheduler holds the first until then and submits the two in one pass. The

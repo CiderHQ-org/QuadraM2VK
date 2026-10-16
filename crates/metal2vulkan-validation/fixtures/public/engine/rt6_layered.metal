@@ -1,7 +1,7 @@
-// Owned fixture (WP-RT6, DESIGN D176, D305 item 22): a vertex function that chooses its render
-// target slice and a fragment function that reads it, the pair RT6 Metal probe 12 drew (an M4), so
-// each lane pass of a layered render pass asks the question the probe measured. Written for this
-// repository; no third-party source. Loop-free.
+// Owned fixture: a vertex function that chooses its render target slice and a fragment function
+// that reads it, the pair a Metal probe drew on an M4, so each lane pass of a layered render pass
+// asks the question the probe measured. Written for this repository; no third-party source.
+// Loop-free.
 #include <metal_stdlib>
 using namespace metal;
 
@@ -26,4 +26,14 @@ vertex Rt6Layered rt6_layered_vertex(uint vid [[vertex_id]], uint iid [[instance
 // The instance's tag above the slice the fragment reads: `tag << 8 | layer`.
 fragment uint rt6_layered_fragment(Rt6Layered in [[stage_in]]) {
     return (in.tag << 8) | in.layer;
+}
+
+// The slice and tag `rt6_layered_fragment` returns, with the primitive ID in bits 16 to 22 and, in
+// bit 23, whether every barycentric weight lies in [0, 1]: the reads one synthesized geometry
+// stage serves together on a device without the slice output or barycentrics.
+fragment uint rt6_layered_weights(Rt6Layered in [[stage_in]],
+                                  float3 weights [[barycentric_coord]],
+                                  uint primitive [[primitive_id]]) {
+    uint inside = (all(weights >= 0.0) && all(weights <= 1.0)) ? 1u : 0u;
+    return (inside << 23) | ((primitive & 0x7fu) << 16) | (in.tag << 8) | in.layer;
 }

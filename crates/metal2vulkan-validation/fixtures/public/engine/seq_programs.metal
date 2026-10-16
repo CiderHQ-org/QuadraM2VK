@@ -1,8 +1,8 @@
-// Owned fixture (WP-SYV, DESIGN D538): the functions the seeded differential sequences of the
+// Owned fixture: the functions the seeded differential sequences of the
 // parity harness run (`validation/src/parity/sequences/`), written for them. Integer-exact and
 // loop-free: a kernel copies or mixes one word, and a draw covers whole pixels of an 8x8 target
 // with colours a buffer holds, and a kernel reads or writes texels of an 8-bit unorm texture
-// through 8-bit unorm words (WP-SYV2, generator round 2), so every byte a sequence ends with is
+// through 8-bit unorm words (generator round 2), so every byte a sequence ends with is
 // defined, and a CPU model of the sequence computes it.
 #include <metal_stdlib>
 using namespace metal;

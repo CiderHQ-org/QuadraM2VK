@@ -56,6 +56,7 @@ use super::texture_descriptor::TextureDescriptor;
 use super::tracker::{Access, Barrier, Use};
 use super::values::ResourceOptions;
 use super::Device;
+use crate::device::functions::Vk;
 use ash::vk;
 use metal2vulkan::error::{Feature, RuntimeDriverDefect, Unsupported};
 use metal2vulkan::metal::format::FormatMapping;
@@ -306,12 +307,7 @@ impl ShadowCopies {
     /// `raw` is `device`'s command buffer, recording outside a render pass, which only this
     /// encoder records; the shadow, its staging buffer and the stencil's image live until it
     /// completes and rest in `GENERAL`.
-    pub(super) unsafe fn record_in(
-        &self,
-        device: &ash::Device,
-        raw: vk::CommandBuffer,
-        first: bool,
-    ) {
+    pub(super) unsafe fn record_in(&self, device: &Vk, raw: vk::CommandBuffer, first: bool) {
         Barrier::everything().record(device, raw);
         match self.clear.filter(|_| first) {
             Some(value) => {
@@ -340,7 +336,7 @@ impl ShadowCopies {
     /// # Safety
     ///
     /// As for [`ShadowCopies::record_in`].
-    pub(super) unsafe fn record_out(&self, device: &ash::Device, raw: vk::CommandBuffer) {
+    pub(super) unsafe fn record_out(&self, device: &Vk, raw: vk::CommandBuffer) {
         Barrier::everything().record(device, raw);
         self.copy(device, raw, false);
         Barrier::everything().record(device, raw);
@@ -352,7 +348,7 @@ impl ShadowCopies {
     /// # Safety
     ///
     /// As for [`ShadowCopies::record_in`].
-    unsafe fn copy(&self, device: &ash::Device, raw: vk::CommandBuffer, inward: bool) {
+    unsafe fn copy(&self, device: &Vk, raw: vk::CommandBuffer, inward: bool) {
         match (&self.planes, inward) {
             (Some(planes), true) => return planes.record_in(device, raw),
             (Some(planes), false) => return planes.record_out(device, raw),

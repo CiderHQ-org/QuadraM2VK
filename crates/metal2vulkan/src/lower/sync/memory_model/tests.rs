@@ -7,8 +7,9 @@ fn needs(f: VkFeature) -> Error {
     Unsupported::needs(Feature::CoherentMemory, Capability::Feature(f)).into()
 }
 
-/// `GLSL450` needs nothing; the Vulkan model needs `vulkanMemoryModel`, and with a `Device`-scope
-/// operation also `vulkanMemoryModelDeviceScope`, on every committed profile.
+/// `GLSL450` needs nothing, with or without `Coherent` resources; the Vulkan model needs
+/// `vulkanMemoryModel`, and with a `Device`-scope operation also `vulkanMemoryModelDeviceScope`,
+/// on every committed profile.
 #[test]
 fn the_vulkan_model_is_checked_against_the_profile() {
     let profiles = committed_profiles().expect("profiles");
@@ -18,11 +19,13 @@ fn the_vulkan_model_is_checked_against_the_profile() {
             let glsl = MemoryModelPlan {
                 model: BarrierModel::Glsl450,
                 device_scope,
+                coherent_resources: device_scope,
             };
             assert_eq!(check(&glsl, p), Ok(()), "{stem}");
             let vulkan = MemoryModelPlan {
                 model: BarrierModel::Vulkan,
                 device_scope,
+                coherent_resources: false,
             };
             let mm = p.fields().vulkan_memory_model;
             let ds = p
@@ -69,8 +72,35 @@ fn llvm_fence_orders_map_onto_vulkan() {
     );
 }
 
-/// The default plan is `GLSL450` (Metal's default model).
+/// The default plan is `GLSL450` (Metal's default model), without `Coherent` resources.
 #[test]
 fn the_default_model_is_glsl450() {
     assert_eq!(MemoryModelPlan::default().model, BarrierModel::Glsl450);
+    assert!(!MemoryModelPlan::default().coherent_resources);
+}
+
+/// Coherent accesses that took the `GLSL450` form (a profile short of the Vulkan model or its
+/// device scope) cannot meet the Vulkan model: its check names the feature the profile lacks.
+#[test]
+fn glsl450_coherent_resources_never_pass_under_the_vulkan_model() {
+    let profiles = committed_profiles().expect("profiles");
+    let mut checked = 0;
+    for (stem, p) in &profiles {
+        if vulkan_model(p) {
+            continue;
+        }
+        let plan = MemoryModelPlan {
+            model: BarrierModel::Vulkan,
+            device_scope: false,
+            coherent_resources: true,
+        };
+        let want = if p.fields().vulkan_memory_model {
+            needs(VkFeature::VulkanMemoryModelDeviceScope)
+        } else {
+            needs(VkFeature::VulkanMemoryModel)
+        };
+        assert_eq!(check(&plan, p), Err(want), "{stem}");
+        checked += 1;
+    }
+    assert!(checked > 0, "no committed profile lacks the Vulkan model");
 }

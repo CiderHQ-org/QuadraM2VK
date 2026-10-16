@@ -1,4 +1,4 @@
-// Owned fixture (WP-SPSE, DESIGN D270): what a write to a sparse texture's unmapped texel does. A
+// Owned fixture: what a write to a sparse texture's unmapped texel does. A
 // thread writes a texel of a read_write 2D texture, fences the texture, and reads the texel back
 // with its residency (`sparse_color::resident()`), so the thread observes its own write. Thread `i`
 // runs probe `i` of buffer 0: kind 0 writes `value` at texel `(x, y)` and then reads it, kind 1

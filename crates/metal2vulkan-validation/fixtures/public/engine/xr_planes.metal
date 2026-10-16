@@ -1,4 +1,4 @@
-// Owned fixture (WP-TXN, DESIGN D398, TODO 4.17; written for this repository): a two-plane
+// Owned fixture (written for this repository): a two-plane
 // extended-range texture held as two single-plane textures, as a consumer holds Apple's
 // `RGB10A8_2P_XR10`: plane 0 viewed in `BGR10_XR` (or its sRGB twin) and the alpha plane in a
 // four-byte format whose first component is the texel's second byte (`ARGB8Unorm`). One thread

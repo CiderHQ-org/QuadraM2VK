@@ -28,7 +28,7 @@ use super::{back, backing, Backing, DeferredPass, PassInstance, Piece, RunPasses
 use crate::command_buffer::CommandBuffer;
 use crate::error::Error;
 use crate::render_pass::PassLayout;
-use crate::render_target::{self, FramebufferObject, Position, RenderPassObject};
+use crate::render_target::{self, Feedback, FramebufferObject, Position, RenderPassObject};
 use crate::Device;
 use ash::vk;
 use metal2vulkan::bind::ViewSetup;
@@ -130,7 +130,13 @@ fn run_passes(
 ) -> Result<(RunPasses, [RenderPassObject; 3]), Error> {
     let at = instance.position;
     let pass = |first, last| {
-        render_target::final_pass(device, own, &instance.shape, Position { first, last })
+        render_target::final_pass(
+            device,
+            own,
+            &instance.shape,
+            Position { first, last },
+            Feedback::NONE,
+        )
     };
     let objects = [
         pass(at.first, false)?,
@@ -202,8 +208,13 @@ fn backed(
         let own = crate::render::instance_layout(&layout, bare.as_ref(), &instance.shape);
         let (runs, objects) = run_passes(device, own, instance)?;
         // One framebuffer serves every run: their passes differ only in their operations.
-        let framebuffer =
-            render_target::framebuffer(device, &objects[0], own, ViewSetup::default())?;
+        let framebuffer = render_target::framebuffer(
+            device,
+            &objects[0],
+            own,
+            ViewSetup::default(),
+            Feedback::NONE,
+        )?;
         instances.push(Some((runs, framebuffer.raw)));
         held.0.extend(objects);
         held.1.push(framebuffer);

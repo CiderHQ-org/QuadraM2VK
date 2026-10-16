@@ -1,4 +1,4 @@
-// WP-TIB (DESIGN D498): a fragment function's `calculate_clamped_lod` through constexpr samplers
+// Owned fixture: a fragment function's `calculate_clamped_lod` through constexpr samplers
 // whose min and mag filters differ, beside one whose filters agree. Metal clamps the level at its
 // grid's bounds whatever the filters (EVs TIB-flod-m4, TIB-flod2-m4 and TIB-flodx-m3): a
 // constexpr clamp is read as a half, then a linear mip filter's bound is truncated onto
@@ -16,7 +16,7 @@ constexpr sampler tib_min_linear(coord::normalized, address::repeat, min_filter:
 // Min nearest, mag linear, nearest mip filter; clamp [half(2.505), 16], on the grid level 2 to 16.
 constexpr sampler tib_min_nearest(coord::normalized, address::repeat, min_filter::nearest,
                                   mag_filter::linear, mip_filter::nearest, lod_clamp(2.505, 16.0));
-// Both filters linear: the control, whose clamp was on the grid before D498.
+// Both filters linear: the control.
 constexpr sampler tib_both_linear(coord::normalized, address::repeat, filter::linear,
                                   mip_filter::linear, lod_clamp(1.3, 2.7));
 

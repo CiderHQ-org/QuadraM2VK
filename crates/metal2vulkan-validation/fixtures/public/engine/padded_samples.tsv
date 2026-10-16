@@ -1,11 +1,11 @@
 # Metal samples of R10Unorm_X6 (576) and RG10Unorm_X12 (578) over a 300 x 77 CoreVideo surface
 # plane, our own probes x6e and x6h (EVs XRR2-x6e-m4 and XRR2-x6h-m4, an Apple M4 under macOS
-# 27.0.1; byte-identical on an Apple M3 Max under macOS 26.7, the -m3 runs; DESIGN D640 item 5).
-# The texture's words are the probes' generator (samples.rs `padded_words`). Columns: raw format,
-# filter, address mode on both axes (mirror: mirrored repeat; mirrorclamp: mirror clamp to edge;
-# zero: clamp to zero; clear, black, white: clamp to a transparent black, opaque black or opaque
-# white border), coordinates (norm or pixel), the coordinate's two f32 bits, and the float
-# result's red and green bits (blue is 0 and alpha 1 in every sample).
+# 27.0.1; byte-identical on an Apple M3 Max under macOS 26.7, the -m3 runs). The texture's words are
+# the probes' generator (samples.rs `padded_words`). Columns: raw format, filter, address mode on
+# both axes (mirror: mirrored repeat; mirrorclamp: mirror clamp to edge; zero: clamp to zero; clear,
+# black, white: clamp to a transparent black, opaque black or opaque white border), coordinates
+# (norm or pixel), the coordinate's two f32 bits, and the float result's red and green bits (blue is
+# 0 and alpha 1 in every sample).
 576 linear repeat norm 3f157bd7 401666a6 3f404010 00000000
 576 linear repeat norm 3fac5977 402cae21 3edcb72e 00000000
 576 linear repeat norm 3fcd0037 bfdc5746 3f1d1746 00000000

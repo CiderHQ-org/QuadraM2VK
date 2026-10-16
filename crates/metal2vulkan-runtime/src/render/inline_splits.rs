@@ -1,0 +1,406 @@
+//! A plain pass's later render pass instances recorded inline too: after a split of a pass whose
+//! first instance records inline (`render/inline_first.rs`), each new instance of the same plain
+//! shape records into the same primary command buffer, its render pass instance begun after the
+//! one before it ends, in place of a secondary command buffer the pass executes at its end.
+//!
+//! A split instance costs a secondary command buffer and its state recorded again in it on every
+//! driver measured: on ms01's Iris Xe (ANV) the encoding thread's CPU of a split read is about
+//! 61 to 87 us in a secondary against 5 to 9 us inline, and its GPU time 3.7 to 5.4 us more. In
+//! one primary command buffer the draws keep what the draws before them bound: a pipeline binding
+//! "affects subsequent commands that interact with the given pipeline type in the command buffer
+//! until a different pipeline of the same type is bound to the bind point", dynamic state
+//! "persists for the lifetime of the command buffer, or until modified by another dynamic state
+//! setting command, or made invalid by binding a pipeline in which that state is statically
+//! specified", and descriptor sets and vertex and index buffers stay bound likewise
+//! (`render/bound.rs`), across the render pass instances, the copies and the barriers between
+//! them, which bind nothing.
+//!
+//! - **What goes between two instances** is what the pass's end records there for them: a barrier
+//!   from everything before to everything after, the shadowed textures' copies into the later
+//!   instance, each followed by such a barrier (`render/shadows.rs`), and its draws' steps before
+//!   it (`Before`). The copies depend on every draw of the later instance (and of the instances
+//!   that continue it, `Instance::continues`), which is known only once the next instance
+//!   begins or the pass ends. So the later instance's commands (its draws, and the barriers
+//!   between them) are kept as they come (`Kept`), and recorded into the primary command buffer
+//!   when its group ends ([`RenderCommandEncoder::flush_inline`]): there the end of the
+//!   instance before it, the barrier, the copies, the steps, the render pass instance's begin,
+//!   and its commands, in their order. The encoder's commands meanwhile record into the command
+//!   buffer before the pass, as for the first instance. Every command keeps its place in
+//!   submission order: where the pass's end would record it.
+//! - **The copies** are the ones the pass's end plans, one instance at a time and in order,
+//!   through the same shadowed textures' record (`EncoderCore::plan_shadows`): the instance
+//!   before's first (the pass's first instance's go before the pass, into the command buffer
+//!   before it), as each instance's group ends. An instance's writes of the colors the pass
+//!   loads are bounded by its draws' scissors as the end bounds them, the pass's drawn area and
+//!   reach taken as far as the pass has gone ([`RenderCommandEncoder::plan_one`]): the next copy
+//!   takes the texels inside them alone. Where the end would find them unbounded by its time, it
+//!   copies more, never fewer.
+//! - **Admitted** at a split, the new instance's first draw recording: the pass's first instance
+//!   recorded inline, every instance since did, and the instance before is no continuation; the
+//!   pass has no attachment that is a shadowed texture (`shadows::attachments_shadowed`), so the
+//!   copies before an instance depend on its own draws alone; and the new instance is of the
+//!   first instance's shape and allows what the first allowed (`inline_first::Inline`): its
+//!   pipeline made, no fetched attachment, view of another format, multiview, shader-side test,
+//!   stand-in, tile dispatch, execution of render commands, pending pipeline, imageblock or
+//!   visibility query in the pass so far, and no color its draw reads through a snapshot
+//!   (`render/snapshot.rs`), whose feedback loop layout the later render pass would lack.
+//!   Elsewhere the instance records as before, in a secondary, and so does every later one.
+//! - **Counted**: `WorkCounts::inline_split_instances`.
+
+use super::bound::Bound;
+use super::pending::OwnedRecording;
+use super::{inline_first, shadows, Instance, Next, Recording, RenderCommandEncoder, ViewSetup};
+use crate::clear_reach;
+use crate::encoder::EncoderCore;
+use crate::error::Error;
+use crate::render_pass::PassLayout;
+use crate::render_target::{self, Feedback, Position, RenderPassObject};
+use crate::render_values::LoadAction;
+use crate::shadow::ShadowCopy;
+use crate::tracker::Barrier;
+use ash::vk;
+
+/// The commands of an instance recorded inline after a split (the module docs), kept until the
+/// instance's copies are known.
+#[derive(Default)]
+pub(super) struct Kept {
+    /// Its draws' recordings, each of its made pipeline, in order.
+    draws: Vec<(OwnedRecording, vk::Pipeline)>,
+    /// Its commands, in order: each draw's place among them, and the barriers.
+    commands: Vec<KeptCommand>,
+}
+
+/// One of [`Kept`]'s commands.
+enum KeptCommand {
+    /// The next of its draws.
+    Draw,
+    /// A memory barrier between its draws over the render targets, of the view mask
+    /// (`render_target::between_draws`).
+    Barrier(u32),
+    /// A barrier before a draw that reaches interlocked storage a draw before it wrote, of the
+    /// view mask (`render_target::between_storage_draws`).
+    StorageBarrier(u32),
+}
+
+impl Kept {
+    /// Keep a draw's `recording`, of its made `pipeline`.
+    pub(super) fn draw(&mut self, recording: OwnedRecording, pipeline: vk::Pipeline) {
+        self.draws.push((recording, pipeline));
+        self.commands.push(KeptCommand::Draw);
+    }
+
+    /// Keep a memory barrier between draws over the render targets.
+    pub(super) fn barrier(&mut self, view_mask: u32) {
+        self.commands.push(KeptCommand::Barrier(view_mask));
+    }
+
+    /// Keep a barrier before a draw that reaches interlocked storage.
+    pub(super) fn storage_barrier(&mut self, view_mask: u32) {
+        self.commands.push(KeptCommand::StorageBarrier(view_mask));
+    }
+}
+
+/// The render pass and framebuffer an inline instance after a split begins in: the pass's
+/// first instance's framebuffer, and a render pass of its shape that loads and stores every
+/// attachment, made at the first split.
+pub(super) struct Later {
+    pub(super) pass: RenderPassObject,
+}
+
+/// The copies of the instance a split ends, planned as the split's draw is admitted
+/// ([`RenderCommandEncoder::inline_split`]), recorded once its new instance is installed
+/// ([`RenderCommandEncoder::begin_inline_split`]).
+pub(super) struct SplitBegin {
+    copies: Vec<ShadowCopy>,
+}
+
+impl RenderCommandEncoder {
+    /// Whether the draw about to record into `next` begins a new instance that records inline
+    /// after the current one (the module docs; `records`: the draw records, `made` its pipeline,
+    /// `capture` a capture draw, `stood` a stand-in arriving with it); where it does, the current
+    /// instance's copies planned, which the draw records once installed. `None` where it does
+    /// not, or where the plan is refused (the pass's end plans it again, and refuses it there).
+    pub(super) fn inline_split(
+        &mut self,
+        next: &Next,
+        stood: Option<&PassLayout>,
+        (records, made, capture): (bool, bool, bool),
+    ) -> Option<SplitBegin> {
+        let inline_first::Inline::Begun(begun) = &self.inline else {
+            return None;
+        };
+        let Next::New {
+            instance,
+            split: true,
+        } = next
+        else {
+            return None;
+        };
+        let unmade = begun.later.is_none();
+        let admitted = begun.splits
+            && records
+            && made
+            && !capture
+            && stood.is_none()
+            && self.current.inline
+            && !self.current.continues
+            && !self.replaying
+            && !self.rerouting
+            && self.pending.is_empty()
+            && self.executions.is_empty()
+            && self.dispatches.is_empty()
+            && !self.dispatched
+            && self.imageblock.is_none()
+            && !self.tile_imageblock
+            && self.shadow.is_none()
+            && self.depth_stand_in.is_none()
+            && !self.visibility.active()
+            && instance.pieces.is_empty()
+            && instance.shape == begun.shape
+            && instance.reformats.is_empty()
+            && instance.views == ViewSetup::default()
+            && !instance.shadow
+            && !instance.shader_tests
+            && instance.feedback == Feedback::NONE;
+        if !admitted {
+            return None;
+        }
+        // The render pass of the instances after the first, made once.
+        if unmade {
+            let at = Position {
+                first: false,
+                last: false,
+            };
+            let device = self.core.device().clone();
+            let pass = render_target::final_pass(
+                &device,
+                &self.layout,
+                &instance.shape,
+                at,
+                Feedback::NONE,
+            )
+            .ok()?;
+            if let inline_first::Inline::Begun(begun) = &mut self.inline {
+                begun.later = Some(Later { pass });
+            }
+        }
+        let copies = self.plan_one(None).ok()?;
+        Some(SplitBegin { copies })
+    }
+
+    /// Begin the instance a split's draw installed inline after the one before
+    /// ([`inline_split`](Self::inline_split)): the instance before's copies recorded (before the
+    /// pass for the pass's first instance; else with its kept commands, `flush_inline`'s), and
+    /// the new instance's commands kept from here on. It has no secondary: the draw began none
+    /// for it (`Instance::draws`).
+    pub(super) fn begin_inline_split(&mut self, begin: SplitBegin) {
+        let Some(before) = self.earlier.len().checked_sub(1) else {
+            return;
+        };
+        self.record_flushed(before, &begin.copies);
+        let device = self.core.device().clone();
+        self.current.inline = true;
+        self.current.kept = Some(Kept::default());
+        self.current.rerecord = None;
+        device.shared().counts.inline_split_instance();
+    }
+
+    /// Record the last instance recorded inline after a split whose commands are still kept,
+    /// where one is (the module docs): its copies planned, then recorded with its commands into
+    /// the pass's command buffer. As the pass ends, before its own plan. Refused as the plan is.
+    pub(super) fn flush_inline(&mut self) -> Result<(), Error> {
+        let waiting = |instance: &Instance| instance.kept.is_some() && !instance.planned;
+        if waiting(&self.current) {
+            let copies = self.plan_one(None)?;
+            if let Some(objects) = self.later_objects() {
+                let bound = &mut self.held_bound;
+                record_kept(
+                    &mut self.core,
+                    bound,
+                    &self.current,
+                    &copies,
+                    objects,
+                    &self.layout,
+                );
+            }
+            self.current.planned = true;
+            return Ok(());
+        }
+        if let Some(at) = self.earlier.iter().position(waiting) {
+            let copies = self.plan_one(Some(at))?;
+            self.record_flushed(at, &copies);
+        }
+        Ok(())
+    }
+
+    /// The copies before the head of a group, the current instance (`at` `None`) or the earlier
+    /// one at `at`, through the encoder's shadowed textures, as the pass's end plans them for it
+    /// (`shadows::plan`). Its writes of the colors the pass loads are bounded by its draws'
+    /// scissors where the end bounds them: an instance after a split (not the pass's first,
+    /// whose copies the steps before the pass follow) that no instance continues (whose writes
+    /// the end bounds no more), of draws alone (no reformat or piece), in a pass whose draws so
+    /// far reach the tiles they touch (`clear_reach::PassReach::Draws`, which no later draw
+    /// changes but to reaching none, and where no color is cleared, so no reach clear writes
+    /// one) and whose drawn area bounds them so far. The bound holds whatever the pass does
+    /// after: the instance's draws write those colors inside their scissors alone. Where the end
+    /// would find the pass's area unbounded by then (an execution after, or past the rectangles
+    /// `clear_reach::DrawnArea` keeps), it copies more, never fewer.
+    fn plan_one(&mut self, at: Option<usize>) -> Result<Vec<ShadowCopy>, Error> {
+        let instance = match at {
+            Some(at) => &self.earlier[at],
+            None => &self.current,
+        };
+        let alone = at.is_none()
+            && instance.kept.is_some()
+            && instance.reformats.is_empty()
+            && instance.pieces.is_empty();
+        let bound = alone.then(|| instance.drawn.bounds()).flatten();
+        let reach = clear_reach::PassReach::of(&self.layout, self.called, self.drew);
+        let area = match reach {
+            clear_reach::PassReach::Draws => self.drawn.bounds(),
+            clear_reach::PassReach::Nothing | clear_reach::PassReach::Every => None,
+        };
+        let loaded: Vec<bool> = (self.layout.colors.iter())
+            .map(|color| {
+                color
+                    .as_ref()
+                    .is_some_and(|color| color.load == LoadAction::Load)
+            })
+            .collect();
+        let planned = shadows::plan(
+            &mut self.core,
+            std::iter::once((&instance.shadows, bound)),
+            &self.layout,
+            (true, area.map(|area| (area, &loaded[..]))),
+        )?;
+        Ok(planned.into_iter().next().unwrap_or_default())
+    }
+
+    /// Record the copies `copies` planned for the earlier instance at `at`, and mark it
+    /// planned: before the pass for the pass's first instance, recorded inline as its draws
+    /// came; else between the instance before it and it, with its kept commands.
+    fn record_flushed(&mut self, at: usize, copies: &[ShadowCopy]) {
+        if self.earlier[at].kept.is_none() {
+            // The pass's first instance: its copies go before the pass, into the command buffer
+            // before the pass's, as the pass's end records them before its first instance.
+            self.core.shadow_copies(copies);
+        } else if let Some(objects) = self.later_objects() {
+            let (bound, instance) = (&mut self.held_bound, &self.earlier[at]);
+            record_kept(
+                &mut self.core,
+                bound,
+                instance,
+                copies,
+                objects,
+                &self.layout,
+            );
+        }
+        self.earlier[at].planned = true;
+    }
+
+    /// The render pass and framebuffer of an inline instance after a split, where the pass made
+    /// them.
+    fn later_objects(&self) -> Option<(vk::RenderPass, vk::Framebuffer)> {
+        match &self.inline {
+            inline_first::Inline::Begun(begun) => begun
+                .later
+                .as_ref()
+                .map(|later| (later.pass.raw, begun.framebuffer.raw)),
+            inline_first::Inline::Never | inline_first::Inline::Open { .. } => None,
+        }
+    }
+}
+
+/// Record `instance`, kept (the module docs), into the pass's command buffer after the render
+/// pass instance before it: that one's end, a barrier from everything before, `copies` (each
+/// followed by a barrier), the steps its draws take before it, its render pass instance's begin
+/// in `objects` (a render pass compatible with its draws' pipelines, and the pass's
+/// framebuffer), and its commands, recorded through `bound`, the record of what the command
+/// buffer bound.
+fn record_kept(
+    core: &mut EncoderCore,
+    bound: &mut Bound,
+    instance: &Instance,
+    copies: &[ShadowCopy],
+    (pass, framebuffer): (vk::RenderPass, vk::Framebuffer),
+    layout: &PassLayout,
+) {
+    let Some(held) = core.held_pass() else {
+        return;
+    };
+    let device = core.device().clone();
+    let shared = device.shared();
+    let raw = shared.vk();
+    // SAFETY: the held command buffer is recording inside the render pass instance before this
+    // one, and only this encoder records it.
+    unsafe {
+        raw.cmd_end_render_pass(held);
+        Barrier::everything().record(raw, held);
+    }
+    core.held_shadow_copies(copies);
+    let [width, height] = layout.extent;
+    let clear_values = render_target::clear_values(layout);
+    let info = vk::RenderPassBeginInfo::default()
+        .render_pass(pass)
+        .framebuffer(framebuffer)
+        .render_area(vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent: vk::Extent2D { width, height },
+        })
+        .clear_values(&clear_values);
+    let mut recorded = 0;
+    // SAFETY: the held command buffer is recording outside a render pass instance, and only this
+    // encoder records it; the steps' objects are live until it completes (retained at their
+    // draws); the pass and framebuffer are live until it completes (the encoder holds them to its
+    // end, which retains them), the pass compatible with every kept draw's pipeline (made for
+    // the instance's shape, `render_target::final_pass`) and the framebuffer made for the pass's
+    // first instance, of the same attachments; every image rests in `GENERAL`; every kept
+    // draw's objects are live until the command buffer completes (retained at the draw), and
+    // `bound` is the record of what the draws recorded into it bound, which the copies and
+    // barriers recorded since (transfer commands) leave bound.
+    unsafe {
+        for step in &instance.before {
+            step.record_in(raw, held);
+        }
+        raw.cmd_begin_render_pass(held, &info, vk::SubpassContents::INLINE);
+        let kept = instance.kept.as_ref();
+        let mut draws = kept.iter().flat_map(|kept| &kept.draws);
+        for command in kept.iter().flat_map(|kept| &kept.commands) {
+            match command {
+                KeptCommand::Draw => {
+                    let Some((owned, pipeline)) = draws.next() else {
+                        break;
+                    };
+                    recorded += Recording {
+                        raw,
+                        command_buffer: held,
+                        layout: owned.layout,
+                        pipeline: *pipeline,
+                        sets: &owned.sets,
+                        heap: owned.heap,
+                        push: &owned.push,
+                        vertex_buffers: &owned.vertex_buffers,
+                        index: owned.index,
+                        indirect: owned.indirect,
+                        dynamic: &owned.dynamic,
+                        topology: owned.topology,
+                        primitive_restart: owned.primitive_restart,
+                        state: &owned.state,
+                        extended: owned.extended,
+                        mesh: shared.mesh_draws.as_ref(),
+                        draw: owned.draw,
+                        pair: owned.pair.clone(),
+                    }
+                    .record(bound);
+                }
+                KeptCommand::Barrier(view_mask) => {
+                    render_target::between_draws(raw, held, *view_mask)
+                }
+                KeptCommand::StorageBarrier(view_mask) => {
+                    render_target::between_storage_draws(raw, held, *view_mask)
+                }
+            }
+        }
+    }
+    shared.counts.draw_states_recorded(recorded);
+}

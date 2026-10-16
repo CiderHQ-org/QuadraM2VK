@@ -1,10 +1,10 @@
-// Owned fixture (WP-CFB, DESIGN D369): the functions WP-CFB Metal probe 4 drew under a depth
-// compare of Never in a 4x4 pass without a depth attachment, so each lane draw asks the question
-// the probe measured. A fullscreen triangle at depth 0.5; fragment functions that count their
-// invocations in word 0 of a buffer and return red, one under [[early_fragment_tests]] and one
-// that discards column 0 after counting; and a vertex function that counts its invocations in
-// word 1. cfb_dn_red_early (added by WP-RRS, DESIGN D530): red under [[early_fragment_tests]],
-// writing no memory. Written for this repository; no third-party source. Loop-free.
+// Owned fixture: the functions a Metal probe drew under a depth compare of Never in a 4x4 pass
+// without a depth attachment, so each lane draw asks the question the probe measured. A fullscreen
+// triangle at depth 0.5; fragment functions that count their invocations in word 0 of a buffer and
+// return red, one under [[early_fragment_tests]] and one that discards column 0 after counting; and
+// a vertex function that counts its invocations in word 1. cfb_dn_red_early: red under
+// [[early_fragment_tests]], writing no memory. Written for this repository; no third-party source.
+// Loop-free.
 // metal-fast-math: off
 #include <metal_stdlib>
 using namespace metal;

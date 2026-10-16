@@ -1,4 +1,4 @@
-// Owned MSL (WP-RVC, DESIGN D431 item 2): linked source callbacks in the calling convention the
+// Owned MSL: linked source callbacks in the calling convention the
 // MPS NDArray kernels call `prefixSecondary_f` and `prefixTertiary_f` with. A case links them (by
 // this module's `.ll` hash) where the retained modules of those names return a constant.
 #include <metal_stdlib>

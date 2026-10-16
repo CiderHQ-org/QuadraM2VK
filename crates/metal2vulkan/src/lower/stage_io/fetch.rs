@@ -824,7 +824,7 @@ pub fn decode(
 }
 
 /// Load the `u32` builtin of stage-IO object `index`.
-fn load_builtin(
+pub(super) fn load_builtin(
     cx: &mut EmitCx<'_>,
     fb: &mut FunctionBuilder<'_>,
     index: usize,

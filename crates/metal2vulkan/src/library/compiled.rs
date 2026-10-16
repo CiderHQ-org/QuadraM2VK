@@ -155,6 +155,14 @@ impl CompiledFunction {
         fixed.chain(pulled).chain(stage_in).collect()
     }
 
+    /// Whether the function writes memory another invocation or a later command can read: it
+    /// stores to a buffer or a texture, or updates one atomically. A render pipeline whose colors
+    /// the device draws in more than one group refuses such a function, which each group's draw
+    /// would run again ([`ColorGroup`](crate::pipeline::ColorGroup)).
+    pub fn writes_memory(&self) -> bool {
+        self.0.interface.writes_memory
+    }
+
     /// Whether the function reads the resident root table: it has a device-address slot or a
     /// dynamic root, so the binder builds the table with an entry for each such slot.
     pub fn reads_resident_roots(&self) -> bool {

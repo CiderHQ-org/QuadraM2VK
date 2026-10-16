@@ -1,4 +1,4 @@
-// WP-TIB (DESIGN D495): a kernel's explicit imageblock written to a texture through a slice with
+// Owned fixture: a kernel's explicit imageblock written to a texture through a slice with
 // fewer lanes than the texture's format has channels. Metal writes the slice's lanes and then
 // zeros, whatever the format (EVs TIB-slice-m4 and TIB-slice-m3): a 1-lane half slice lands in an
 // RGBA16Float texel as (v, 0, 0, 0).

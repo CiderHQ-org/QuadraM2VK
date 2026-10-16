@@ -1,24 +1,16 @@
 //! The device's scheduler: one thread per device that submits the committed command buffers'
 //! batches to the device's `VkQueue`s.
 //!
-//! - **Submitted by the commit**. `commit` makes the thread's pass itself, on the committing
-//!   thread, under the scheduler's lock, where it finds the lock free: the batches ready then go
-//!   to the `VkQueue` before it returns, in the same order, with no wake of the thread on their
-//!   path. The thread runs what that pass leaves (a host step, a submission check, a wait for an
-//!   event the host raises later), as before: the pass that finds a step or a check wakes it at
-//!   once, under the lock, not after the committing thread's further passes or its submission
-//!   handlers.
-//! - **Handed to the pass under way** ([`Inbox`]). Where another thread holds the lock for a pass
-//!   (this one, or another commit), `commit` leaves its batches in the inbox and returns at once:
-//!   that thread takes them in, in commit order, as soon as it lets go of the lock, and submits
-//!   what is ready in a pass of its own, as the commit would once it had the lock. The order sees
-//!   every commit in commit order, and every batch is planned as it is submitted, as before. This
+//! - **Handed to the thread** ([`Inbox`]). `commit` leaves its batches in the inbox and returns
+//!   at once, as Metal's `commit` returns before its command buffer is scheduled: it makes no
+//!   pass and submits nothing, so no driver call holds it. This thread takes them in, in commit
+//!   order, at its next pass, and submits what is ready. The commit wakes the thread where it is
+//!   not making a pass; where it is, the thread looks at the inbox again once its pass ends. The
+//!   order sees every commit in commit order, and every batch is planned as it is submitted. This
 //!   thread stops looking at the inbox again at a pass that leaves it a check or a host step, and
 //!   before each one it runs passes again for as long as the inbox holds commits, and looks at it
-//!   before it sleeps ([`left`]): a commit left to it waits for the pass under way, the submission
-//!   handlers that pass leaves, and the pass that takes it in, never for a wake or a check or a
-//!   step. A committing thread passes at most once for what others left it; what is left to that
-//!   pass it hands to this thread with a wake ([`inbox::Outcome::unattended`]).
+//!   before it sleeps ([`left`]): a commit waits for the pass under way, the submission handlers
+//!   that pass leaves, and the pass that takes it in, never for a check or a step.
 //!
 //! - **The order** ([`Order`]). Each logical queue's batches wait in commit order; the head
 //!   committed first among those ready goes next. A batch is ready once every event it waits for
@@ -35,17 +27,15 @@
 //!   ([`Order::behind`]).
 //! - **Many logical queues on few `VkQueue`s.** A logical queue keeps one `VkQueue` (round robin
 //!   at creation); each `VkQueue` signals its own timeline semaphore with every batch, which is
-//!   the [`Point`] the tracker and the completion thread know the batch by.
+//!   the [`Point`] the tracker and the completion turns know the batch by.
 //! - **Scheduled.** A command buffer is scheduled once its last batch is submitted (its every
-//!   wait was satisfied): the thread that submitted it (this one, or the committing one) posts
-//!   its transition to `Scheduled` to its queue's context ([`contexts`](super::contexts)), which
+//!   wait was satisfied): this thread posts its transition to `Scheduled` to its queue's context ([`contexts`](super::contexts)), which
 //!   runs its scheduled handlers. No submission runs a scheduled handler, so none holds back a
 //!   submission.
-//! - **Submission handlers** (a runtime extension). The thread that submitted a command buffer's
-//!   last batch runs its submission handlers, in submission order among the command buffers its
-//!   passes submitted, once it let go of the lock and before it lets go of the command buffers: in
-//!   `commit`, before it returns (a commit handed to another thread's pass has them run there); on
-//!   this thread, before its next pass, which they hold back. The command buffer's transition to
+//! - **Submission handlers** (a runtime extension). This thread runs a command buffer's
+//!   submission handlers once it submitted its last batch, in submission order among the command
+//!   buffers its passes submitted, once it let go of the lock and before it lets go of the command
+//!   buffers, before its next pass, which they hold back. The command buffer's transition to
 //!   `Scheduled` waits for them.
 //! - **Host steps**. A batch that executes commands the GPU may write
 //!   (`CommandBufferShared::needs_host_step`) is held, once otherwise ready, until every
@@ -53,14 +43,14 @@
 //!   values): only then are the records the work before it wrote known. The thread then records
 //!   the batch's segments (`CommandBufferShared::host_step`) without its lock, each step a
 //!   section of the exit guard, and submits the batch in its order. Meanwhile it submits other
-//!   ready batches; the completion thread wakes it as batches complete while a gate is pending.
+//!   ready batches; the completion turns wake it as batches complete while a gate is pending.
 //! - **Submission checks** (`command_buffer/checks.rs`). A batch of a command buffer with a check
 //!   is held, once otherwise ready and its host step recorded, until the checks of Metal's
 //!   submissions in it ran (`CommandBufferShared::run_checks`), which the thread runs as it runs
 //!   host steps: without its lock, each pass a section of the exit guard. Its checks wait, besides,
 //!   until every event value it waits for was reached on the device or by the host: a value only a
 //!   submitted GPU signal reaches is held for until that signal landed, as Metal submits (and
-//!   checks) only then. The completion thread sees each finished batch's event signals before it
+//!   checks) only then. A completion turn sees each finished batch's event signals before it
 //!   wakes the thread, as for a gate. A command buffer without a check costs one flag per batch.
 //! - **Waits are bounded.** The thread wakes on a commit or a host signal, and at least every
 //!   [`WAIT_SLICE`], so a stop is seen promptly.
@@ -71,7 +61,7 @@
 //!   drop stops this thread.
 //!
 //! Locks are taken in one order: the scheduler's state, then its inbox's, then a command buffer's,
-//! then an event's or a `VkQueue`'s, then the handler threads' state, then the completion thread's
+//! then an event's or a `VkQueue`'s, then the handler threads' state, then the queues' waiters'
 //! list. No call made under the scheduler's lock takes it again.
 //!
 //! [`EventTimeline`]: super::event_timeline::EventTimeline
@@ -84,13 +74,14 @@ pub(super) mod order;
 
 use super::command_buffer::gate::Hold;
 use super::command_buffer::kept_barriers::KeptBarriers;
+use super::command_buffer::BatchLists;
 use super::command_buffer::CommandBufferShared;
 use super::device::lock;
 use super::error::{Error, MemoryKind};
 use super::event::EventShared;
 use super::event_timeline::WaitFor;
 use super::exit_guard;
-use super::replay::Replay;
+use super::replay::SpareLogs;
 use super::resource::ResourceKey;
 use super::tracker::{self, Footprint, Tracker};
 use ash::vk;
@@ -117,9 +108,12 @@ struct SchedulerShared {
     /// The state, under the lock a pass holds, with the commits a pass under way takes in.
     inbox: Inbox<State, Committed>,
     wake: Condvar,
-    /// A batch waits at its gate for work to complete: the completion thread wakes the thread
+    /// A batch waits at its gate for work to complete: the completion turns wake the thread
     /// as batches complete.
     gated: AtomicBool,
+    /// The device's cleared encoder logs (`replay.rs`): an encoder takes one, and its log comes
+    /// back as the encoder ends, or in its command buffer's release.
+    spare_logs: SpareLogs,
 }
 
 /// What the scheduler submits from, and the device state it submits against.
@@ -129,6 +123,11 @@ pub(crate) struct State {
     pub(crate) tracker: Tracker<ResourceKey>,
     /// Per `VkQueue`: the timeline value of the last batch submitted there.
     pub(crate) values: Vec<u64>,
+    /// Per `VkQueue`, per timeline whose completed writes its batches wait for (each `VkQueue`'s,
+    /// then the device's two own, `device/submit.rs`): the value a batch there last waited for,
+    /// which made what completed through it visible to every later command there
+    /// (`command_buffer/submit.rs`).
+    pub(crate) waited: Vec<Vec<u64>>,
     /// The binary semaphore signals the device's command buffers committed and submitted.
     binary: BinarySignals<vk::Semaphore>,
     /// A commit or a host signal came since the thread last looked.
@@ -143,6 +142,9 @@ pub(crate) struct State {
     /// The batches' barrier command buffers, recorded once and submitted again
     /// (`command_buffer/kept_barriers.rs`).
     pub(crate) kept: KeptBarriers,
+    /// The lists each batch's submission fills and empties, with their room
+    /// (`command_buffer/submit.rs`).
+    pub(crate) lists: BatchLists,
 }
 
 /// A commit not yet taken into the order: the command buffer, its logical queue, its batches.
@@ -205,15 +207,18 @@ impl Scheduler {
                 order: Order::default(),
                 tracker: Tracker::default(),
                 values: vec![0; queues],
+                waited: vec![vec![0; queues + 2]; queues],
                 binary: BinarySignals::default(),
                 dirty: false,
                 stopping: false,
                 decodes: BTreeMap::new(),
                 untracked_decodes: 0,
                 kept: KeptBarriers::default(),
+                lists: BatchLists::default(),
             }),
             wake: Condvar::new(),
             gated: AtomicBool::new(false),
+            spare_logs: SpareLogs::default(),
         });
         let thread = {
             let shared = Arc::clone(&shared);
@@ -230,12 +235,9 @@ impl Scheduler {
     }
 
     /// Hold the batches of `buffer`, committed now on logical queue `queue`: what each batch
-    /// waits for and signals, in order. Then submit, on the committing thread, every batch that
-    /// is ready now, as the thread's pass would: a commit whose batches wait for nothing reaches
-    /// the `VkQueue` before `commit` returns, without the thread's wake on its path. Where another
-    /// thread is making a pass, leave the batches to it and return at once (the module docs). A
-    /// host step or a submission check found ready, and the process's exit, are left to the
-    /// thread, which the pass that found them wakes for them at once.
+    /// waits for and signals, in order. They go to the thread's inbox, and `commit` returns at
+    /// once, with nothing submitted: the thread takes them in at its next pass, woken for it
+    /// where it is not making one (the module docs).
     pub(crate) fn commit(
         &self,
         buffer: &Arc<CommandBufferShared>,
@@ -248,30 +250,10 @@ impl Scheduler {
             queue,
             batches,
         };
-        let (mut passed, mut left) = (Passed::default(), Left::default());
-        let outcome = (shared.inbox).commit(committed, |state, commits| {
-            pass(state, commits, (&mut passed, &mut left), shared, false);
-        });
-        if outcome.left {
-            buffer.device().shared().counts.commit_handed_off();
+        buffer.device().shared().counts.commit_handed_off();
+        if (shared.inbox).post(committed, |state| state.dirty = true) {
+            shared.wake.notify_all();
         }
-        // What other threads left to this thread's last pass goes to the scheduler's thread.
-        if outcome.unattended {
-            self.wake();
-        }
-        let Passed {
-            spent,
-            settled,
-            handlers,
-            ..
-        } = passed;
-        settle(settled);
-        // On the committing thread, before `commit` returns.
-        run_submission_handlers(handlers);
-        // Without the lock, as the thread lets go of them: the thread finds the steps and the
-        // checks again in its own pass, which the pass that found them woke it for.
-        drop(spent);
-        drop(left);
     }
 
     /// What makes the thread look for work again from any thread: a pipeline a held batch's
@@ -354,6 +336,11 @@ impl Scheduler {
         }
     }
 
+    /// The device's cleared encoder logs (`replay.rs`).
+    pub(crate) fn spare_logs(&self) -> &SpareLogs {
+        &self.shared.spare_logs
+    }
+
     /// Release the kept barrier command buffers (`command_buffer/kept_barriers.rs`): the device is
     /// being torn down, its queues idle.
     pub(crate) fn release_kept(&self, raw: &ash::Device) {
@@ -380,6 +367,10 @@ impl Scheduler {
 /// The thread's loop. It ends when the device stops it, or once the process is exiting
 /// ([`exit_guard`]): what is held then stays held, as Metal's pending work stays pending.
 fn run(shared: &SchedulerShared) {
+    exit_guard::serves_completion();
+    // What its rounds let go of and the work they leave it, emptied after each waking and kept
+    // with their room.
+    let (mut passed, mut left) = (Passed::default(), Left::default());
     loop {
         let mut state = lock(shared.inbox.state());
         // A commit, or a nudge, left to this thread's pass may wait in the inbox (`inbox.rs`).
@@ -400,7 +391,12 @@ fn run(shared: &SchedulerShared) {
         // The pass takes the lock again, counted as a passer from before (`inbox.rs`): a commit
         // that finds it taken leaves its batches to this thread.
         drop(state);
-        match work_through(&shared.inbox, |left| round(shared, left), run_work) {
+        match work_through(
+            &shared.inbox,
+            &mut left,
+            |left| round(shared, left, &mut passed),
+            run_work,
+        ) {
             None => return,
             Some(false) => {}
             // What the work did may let batches go.
@@ -433,32 +429,28 @@ fn run_work(kind: Kind, work: Work) -> bool {
 }
 
 /// One round of the thread's: a pass, looking at the inbox again while the passes leave the
-/// thread no work ([`Inbox::pass`]), what they leave added to `left`; then, without the lock,
-/// what they let go of: the storage forms settled, the submission handlers run (on this thread,
-/// before its next pass; none once the process is exiting, as the thread then runs nothing
-/// more, their command buffers staying `Committed`), the holds dropped (the last reference to a
-/// command buffer may be among them, and with it its device, whose drop stops this thread).
-/// False once the process is exiting.
-fn round(shared: &SchedulerShared, left: &mut Left<Work>) -> bool {
-    let mut passed = Passed::default();
+/// thread no work ([`Inbox::pass`]), what they leave added to `left` and what they let go of to
+/// `passed` (empty, kept from round to round); then, without the lock, what they let go of: the
+/// switches of storage forms settled ended and the submission handlers run (on this thread,
+/// before its next pass; neither once the process is exiting, as the thread then runs nothing
+/// more, their command buffers
+/// staying `Committed`), the holds dropped (the last reference to a command buffer may be among
+/// them, and with it its device, whose drop stops this thread). False once the process is
+/// exiting.
+fn round(shared: &SchedulerShared, left: &mut Left<Work>, passed: &mut Passed) -> bool {
     (shared.inbox).pass(|state, commits| {
-        pass(state, commits, (&mut passed, &mut *left), shared, true);
+        pass(state, commits, (&mut *passed, &mut *left), &shared.gated);
         !passed.exiting && left.is_empty()
     });
-    let Passed {
-        spent,
-        settled,
-        handlers,
-        exiting,
-    } = passed;
-    settle(settled);
-    if exiting {
-        drop(handlers);
+    if passed.exiting {
+        passed.settled.clear();
+        passed.handlers.clear();
     } else {
-        run_submission_handlers(handlers);
+        settle(&mut passed.settled);
+        run_submission_handlers(&mut passed.handlers);
     }
-    drop(spent);
-    !exiting
+    passed.spent.clear();
+    !passed.exiting
 }
 
 /// What passes let go of for their thread to finish without the lock ([`submit_ready`]'s
@@ -471,23 +463,19 @@ struct Passed {
     exiting: bool,
 }
 
-/// A pass: take `commits` into the order, in commit order, then submit what is ready
-/// ([`submit_ready`]) into `passed` and `left`. A pass on a thread other than the scheduler's
-/// (`own` false) was the thread's but for what it leaves it: the thread looks again only for
-/// that, or for the exit, for which this wakes it at once, under the lock (what woke it before,
-/// this pass saw).
+/// A pass of the thread's: take `commits` into the order, in commit order, then submit what is
+/// ready ([`submit_ready`]) into `passed` and `left`.
 fn pass(
     state: &mut State,
-    commits: Vec<Committed>,
+    commits: &mut Vec<Committed>,
     (passed, left): (&mut Passed, &mut Left<Work>),
-    shared: &SchedulerShared,
-    own: bool,
+    gated: &AtomicBool,
 ) {
     for Committed {
         buffer,
         queue,
         batches,
-    } in commits
+    } in commits.drain(..)
     {
         let count = batches.len();
         let State { order, binary, .. } = &mut *state;
@@ -504,7 +492,7 @@ fn pass(
         });
         order.push(queue, held);
         // The commit's own hold goes without the lock: its batches hold the command buffer now.
-        passed.spent.buffers.push(buffer);
+        passed.spent.push(buffer);
     }
     state.dirty = false;
     let exiting = submit_ready(
@@ -512,47 +500,28 @@ fn pass(
         (&mut passed.spent, &mut passed.settled),
         left,
         &mut passed.handlers,
-        &shared.gated,
+        gated,
     )
     .is_err();
     passed.exiting |= exiting;
-    if !own && (passed.exiting || !left.is_empty()) {
-        state.dirty = true;
-        shared.wake.notify_all();
-    }
 }
 
-/// What a pass of [`submit_ready`] lets go of, for the caller to drop without the lock: the logs
-/// its batches' first submissions ended (`replay.rs`), then the holds of the command buffers its
-/// batches came from, either of which may hold a resource's last handle.
-///
-/// The logs go first, by their place: a struct's fields drop in declaration order. A log holds
-/// handles of what its command buffer's encoders named, and the last hold of a command buffer
-/// that finished opens its gate, so its waiters return only after its logs went, as they return
-/// after what it retained (`CommandBufferShared::complete`): a no-copy buffer the program lets go
-/// of once its command buffer completed goes, its deallocator with it, in the program's call.
-/// Generic for its unit test (`tests/gate.rs`): `L` is a first submission's log, `B` a command
-/// buffer's hold.
-pub(super) struct Spent<L = Arc<Replay>, B = Hold<CommandBufferShared>> {
-    pub(super) logs: Vec<L>,
-    pub(super) buffers: Vec<B>,
-}
-
-impl<L, B> Default for Spent<L, B> {
-    fn default() -> Self {
-        Spent {
-            logs: Vec::new(),
-            buffers: Vec::new(),
-        }
-    }
-}
+/// What a pass of [`submit_ready`] lets go of, for the caller to drop without the lock: the holds
+/// of the command buffers its batches came from, the last of which may be a command buffer's last
+/// reference. Nothing else: what a command buffer's commands and encoders took (what it retained,
+/// its encoders' logs) goes in its release, on its queue's handler thread
+/// (`CommandBufferShared::complete`), never here. A batch is published before its pass ends, so
+/// its command buffer may complete, and run its release, before these holds go; a handle let go
+/// of here after that would be the last, and a no-copy buffer's deallocator would run on this
+/// thread, whose own hold keeps the command buffer's gate shut against the deallocator's wait for
+/// it.
+type Spent = Vec<Hold<CommandBufferShared>>;
 
 /// Submit every batch that is ready, in order, until none is; each submission is a section of
 /// the exit guard. A batch is published (or its failure posted) only after its section ended, so
 /// the exit hook's registration at the section's end comes before anything the program can
 /// learn of it (`exit_guard`). A batch's events are let go of before its command buffer
-/// (`gate`), whose holds go to `spent`, for the caller to drop without the lock, as do the logs
-/// a command buffer's first submission ended (`replay.rs`). A batch whose
+/// (`gate`), whose holds go to `spent`, for the caller to drop without the lock. A batch whose
 /// host step may run now goes to `left` as a step (once), for the caller to record without the
 /// lock; `gated` says whether one still waits at its gate. A batch whose submission checks may run
 /// now goes to `left` as a check (once), for the caller to run without the lock. A command buffer whose
@@ -649,7 +618,7 @@ fn submit_ready(
                 if submission.runs_handlers() {
                     handlers.push(buffer.hold());
                 }
-                spent.logs.extend(buffer.publish(submission));
+                buffer.publish(submission);
                 if last && buffer.settle_storage_forms() {
                     settled.push(buffer.hold());
                 }
@@ -664,16 +633,14 @@ fn submit_ready(
                 for held in &rest {
                     state.binary.dropped(&held.binary_needs);
                 }
-                spent
-                    .buffers
-                    .extend(rest.into_iter().map(|held| held.buffer));
+                spent.extend(rest.into_iter().map(|held| held.buffer));
                 buffer.failed(error, &state.values);
                 if buffer.settle_storage_forms() {
                     settled.push(buffer.hold());
                 }
             }
         }
-        spent.buffers.push(buffer);
+        spent.push(buffer);
     }
 }
 
@@ -688,16 +655,25 @@ fn reads_decoding(held: &Held, decodes: &BTreeMap<ResourceKey, usize>) -> bool {
         .is_none_or(|footprint| footprint.names_any(|key| decodes.contains_key(key)))
 }
 
-/// Wake what waits for the storage forms riding on the `settled` command buffers
-/// (`texture/storage_form.rs`), with the scheduler's lock free: the device's switch lock is
-/// taken before it, never under it.
-fn settle(settled: Settled) {
-    for buffer in &settled {
-        buffer.device().storage_form_settled();
+/// End the switches of storage forms riding on the `settled` command buffers
+/// (`texture/storage_form.rs`) on this thread, with the scheduler's lock free (the device's switch
+/// lock is taken before it, never under it), before their transitions to `Scheduled` go on
+/// ([`run_submission_handlers`]): the program sees each swap, and its announcement, by the time it
+/// can see its command buffer scheduled. A thread that made a command buffer meanwhile may have
+/// ended it first. Each end is a section of the exit guard (it makes Vulkan calls and announces):
+/// once the process is exiting, the switch stays as it is.
+fn settle(settled: &mut Settled) {
+    for buffer in settled.iter() {
+        let Some(busy) = exit_guard::enter() else {
+            break;
+        };
+        buffer.device().finish_storage_forms();
+        drop(busy);
     }
+    settled.clear();
 }
 
-/// The command buffers whose storage forms the scheduler settled, to announce without its lock.
+/// The command buffers whose storage forms the scheduler settled, to end without its lock.
 type Settled = Vec<Hold<CommandBufferShared>>;
 
 /// The command buffers whose last batch a pass submitted with submission handlers, in
@@ -706,10 +682,11 @@ type Handlers = Vec<Hold<CommandBufferShared>>;
 
 /// Run the submission handlers of `handlers`' command buffers on this thread, which holds none of
 /// the runtime's locks, in submission order; each one's transition to `Scheduled` goes on after
-/// its own (`CommandBufferShared::run_submission_handlers`). Each hold goes after its handlers,
-/// outside every lock: it may be its command buffer's last reference.
-fn run_submission_handlers(handlers: Handlers) {
-    for buffer in handlers {
+/// its own (`CommandBufferShared::run_submission_handlers`), and after its switch of storage forms
+/// ended ([`settle`], run first). Each hold goes after its handlers, outside every lock: it may be
+/// its command buffer's last reference.
+fn run_submission_handlers(handlers: &mut Handlers) {
+    for buffer in handlers.drain(..) {
         buffer.run_submission_handlers();
     }
 }

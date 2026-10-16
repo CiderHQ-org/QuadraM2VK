@@ -1,4 +1,4 @@
-// Owned fixture (WP-XRB, DESIGN D678 item 7): a blend into a memoryless color 2 observed through
+// Owned fixture: a blend into a memoryless color 2 observed through
 // color 0. `xrb_color2_fill` writes color 2 alone, the `half4` of its pixel in a buffer of rows
 // `width` long (a draw unblended sets the attachment's texels, a draw blended blends over them);
 // `xrb_color2_copy` reads color 2 and writes it to color 0, the stored attachment a test reads.

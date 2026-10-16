@@ -3,14 +3,13 @@
 //! resolve texture, slice, depth plane and level before the pass ends.
 //!
 //! Metal has them only as private calls (`setColorResolveTexture:slice:depthPlane:level:yInvert:
-//! atIndex:` and its depth and stencil twins). Measured on an M4 with macOS 27.0.1 (RT6 Metal
-//! probes 15 and 15b, with and without API validation): the texture set last before
-//! `endEncoding` is resolved into, at its slice and level, and holds every draw of the pass,
-//! those after the call too; the descriptor's resolve texture keeps its texels; a depth or
-//! stencil resolve is written whether or not the descriptor named one; `yInvert` changes nothing;
-//! and Metal's validation stops a resolve texture of another pixel format or size than the
-//! attachment, and an index without an attachment. A color resolve set where the descriptor named
-//! none writes nothing.
+//! atIndex:` and its depth and stencil twins). Measured on an M4 with macOS 27.0.1 (Metal probes,
+//! with and without API validation): the texture set last before `endEncoding` is resolved into, at
+//! its slice and level, and holds every draw of the pass, those after the call too; the
+//! descriptor's resolve texture keeps its texels; a depth or stencil resolve is written whether or
+//! not the descriptor named one; `yInvert` changes nothing; and Metal's validation stops a resolve
+//! texture of another pixel format or size than the attachment, and an index without an attachment.
+//! A color resolve set where the descriptor named none writes nothing.
 //!
 //! These setters are a generic extension, not copies of Apple's calls: they take no `yInvert`,
 //! and each does what it says, so a color target set where the descriptor named none is resolved
@@ -111,8 +110,16 @@ impl RenderCommandEncoder {
         check_index(CALL, index, MAX_COLOR_ATTACHMENTS as u32)?;
         let which = Attachment::Color(index);
         let maker = self.core.command_buffer().clone();
-        let Some(Some(color)) = self.layout.colors.get_mut(index as usize) else {
-            return Err(problem(CALL, RenderPassProblem::NoAttachment(which)));
+        // In a pass of several color groups, no draw read the target before
+        // (`render/color_groups.rs`).
+        self.check_group_resolve(target.as_ref().map(|t| &t.texture))?;
+        // Its color group's, where the pass draws in groups; a later group's encoder sets only
+        // its own colors.
+        let later = self.later_group_encoder();
+        let color = match self.color_slot(index) {
+            Some(Some(color)) => color,
+            None if later => return Ok(()),
+            _ => return Err(problem(CALL, RenderPassProblem::NoAttachment(which))),
         };
         // A late target keeps the rules Metal's validation states (plain Metal's answer is
         // unmeasured): a resolving store action needs a target, and a target a store action that
@@ -172,6 +179,12 @@ impl RenderCommandEncoder {
         which: Attachment,
         target: Option<ResolveTarget>,
     ) -> Result<(), Error> {
+        // A later color group's twin of the depth and stencil resolves nothing; in a pass of
+        // several groups, no draw read the target before (`render/color_groups.rs`).
+        if self.later_group_encoder() {
+            return Ok(());
+        }
+        self.check_group_resolve(target.as_ref().map(|t| &t.texture))?;
         let maker = self.core.command_buffer().clone();
         // The pass's hidden depth and stencil are no attachment of Metal's (`render.rs`).
         let Some(ds) = self.layout.depth_stencil.as_mut().filter(|ds| !ds.hidden) else {

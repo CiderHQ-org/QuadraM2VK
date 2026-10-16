@@ -3,10 +3,14 @@
 //!
 //! - **What a context runs.** In its queue's order, each command buffer's transitions: to
 //!   `Scheduled` with its scheduled handlers, and to `Completed` (or `Error`) with its completed
-//!   handlers and the release of what it retained. The scheduler and the completion thread only
-//!   post them ([`Contexts::post`]); they run no such handler. (A transition to `Scheduled` waits
-//!   for its command buffer's submission handlers, which the thread that submitted its last batch
-//!   runs.)
+//!   handlers and the release of what it retained. The scheduler posts them ([`Contexts::post`]),
+//!   and so does a completion turn, but for a transition that runs none of the program's code,
+//!   which the turn runs itself where the context runs on no thread and holds only such
+//!   transitions, in order after them ([`Contexts::run_here`], `command_buffer/completion.rs`);
+//!   neither runs a handler. (A transition to `Scheduled` waits for its command buffer's
+//!   submission handlers, which the thread that submitted its last batch runs.) A release the
+//!   scheduler's thread hands off (`Device::let_go_elsewhere`) runs in a context of its own,
+//!   behind no queue's handlers.
 //! - **Metal's order** (measured on an M4, macOS 27.0.1, EV `RT4-metal-order`): while one of a
 //!   queue's handlers blocks, the queue's later transitions wait, even of a command buffer whose
 //!   work already ran; another queue's transitions and handlers go on, on another thread. Metal
@@ -19,9 +23,10 @@
 //!   buffer blocks its thread. It is refused when it would close a cycle of such waits (across
 //!   every device) or leave the device's pool with no thread that is not blocked so; then at least
 //!   one thread can always run the contexts the blocked waits wait for.
-//! - **Stopping.** The device's drop stops the threads once none runs an item (every item holds
-//!   its command buffer, which holds the device). A drop on one of the threads (its item held the
-//!   last reference) does not wait for itself.
+//! - **Stopping.** The device's drop stops the threads, which end once no item is left: a
+//!   transition holds its command buffer, which holds the device, so none is left by then; a
+//!   release may hold nothing of the device, and runs before its thread ends. A drop on one of the
+//!   threads (its item held the last reference) does not wait for itself.
 //!
 //! Locks: a pool's state, then its census; the waits' graph, then a census. No call made under
 //! either takes the state again.
@@ -47,10 +52,17 @@ pub(crate) const STACK: usize = 512 * 1024;
 /// How long a thread other than the first finds nothing to run before it ends.
 const IDLE: Duration = Duration::from_secs(2);
 
-/// An item of a queue's context: run once, on one of the device's handler threads.
+/// An item of a queue's context: run once, on one of the device's handler threads, or on the
+/// thread that runs the context itself ([`Contexts::run_here`]).
 pub(crate) trait Run: Send + 'static {
     /// Run the item; dropping it lets go of what it holds.
     fn run(self);
+
+    /// Whether the item runs none of the program's code (no handler, no notice, no release of
+    /// the program's), so that a thread that may run none can run it: none by default.
+    fn plain(&self) -> bool {
+        false
+    }
 }
 
 /// One device's handler threads. A clone is another handle of the same pool, which holds nothing
@@ -134,6 +146,34 @@ impl<I: Run> Contexts<I> {
     pub(crate) fn post(&self, queue: u64, item: I) {
         let mut state = lock(&self.shared.state);
         state.lines.push(queue, item);
+        self.serve(state);
+    }
+
+    /// Run `item` in the context of logical queue `queue` on this thread, after the items that
+    /// context holds, where no thread runs that context and those items and `item` are all
+    /// [`plain`](Run::plain): the context runs on this thread meanwhile, so the items posted to
+    /// it wait for `item`, then run on the pool's threads. Else give `item` back, changing
+    /// nothing.
+    pub(crate) fn run_here(&self, queue: u64, item: I) -> Result<(), I> {
+        if !item.plain() {
+            return Err(item);
+        }
+        let Some(before) = lock(&self.shared.state).lines.take_plain(queue, I::plain) else {
+            return Err(item);
+        };
+        for earlier in before {
+            earlier.run();
+        }
+        item.run();
+        let mut state = lock(&self.shared.state);
+        state.lines.done(queue);
+        self.serve(state);
+        Ok(())
+    }
+
+    /// Start a thread where a context is ready that no free thread will take, below the cap, and
+    /// wake one: `state` was just changed.
+    fn serve(&self, mut state: std::sync::MutexGuard<'_, State<I>>) {
         if state.lines.ready() > state.free {
             let start = {
                 let mut count = lock(&self.shared.census.count);
@@ -159,8 +199,8 @@ impl<I: Run> Contexts<I> {
         self.shared.wake.notify_one();
     }
 
-    /// Stop the threads and wait for them to end, but for this one when it is one of them. The
-    /// device is being dropped, so no item is left.
+    /// Stop the threads and wait for them to end, but for this one when it is one of them: each
+    /// runs the items left first. The device is being dropped, so no transition is left.
     pub(crate) fn stop(&self) {
         lock(&self.shared.state).stopping = true;
         self.shared.wake.notify_all();
@@ -233,6 +273,11 @@ fn run<I: Run>(shared: &Shared<I>, first: bool) {
     count.threads -= 1;
     drop(count);
     shared.census.gone.notify_all();
+}
+
+/// Whether this thread is one of a pool's handler threads.
+pub(crate) fn on_handler_thread() -> bool {
+    POOL.with(|pool| pool.borrow().is_some())
 }
 
 /// A handler thread's wait for another queue's context, counted until dropped.

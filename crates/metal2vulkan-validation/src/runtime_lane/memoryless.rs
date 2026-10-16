@@ -1,13 +1,12 @@
 //! Device tests of memoryless textures (its fourth part) on the device the cfg selects, under the
 //! validation layer.
 //!
-//! A memoryless texture is a transient render attachment. RT6 Metal probes 6, 6b, 6c, 6d and 6f
-//! measured (an M4 with macOS 27.0.1, each case with and without Metal's API validation) what
-//! Metal renders through one and which uses its validation stops. Each pass here is one the
-//! probes ran, drawn with the owned fixture `rt6_resolves` and compared with the texels Metal
-//! left (a resolve Metal's, as `resolves.rs` holds every unorm, sRGB and float resolve). Each
-//! refusal is one Metal's validation stopped, refused typed before anything records; each use
-//! Metal took is taken.
+//! A memoryless texture is a transient render attachment. Metal probes measured (an M4 with macOS
+//! 27.0.1, each case with and without Metal's API validation) what Metal renders through one and
+//! which uses its validation stops. Each pass here is one the probes ran, drawn with the owned
+//! fixture `rt6_resolves` and compared with the texels Metal left (a resolve Metal's, as
+//! `resolves.rs` holds every unorm, sRGB and float resolve). Each refusal is one Metal's validation
+//! stopped, refused typed before anything records; each use Metal took is taken.
 
 use super::resolves::{
     color_pass, lane, near, quiet, repeat, Channels, Lane, Shape, FULL, MSAA, ONE, SAMPLES, SIZE,

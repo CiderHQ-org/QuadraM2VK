@@ -26,6 +26,11 @@
 //!   buffers on an Apple M4, EV CPF-rset1-mvk4; MoltenVK's
 //!   `MVKDevice::encodeGPUAddressableBuffers`).
 //!
+//! - **Freed after the batches in flight** where the driver fails pending work when memory a
+//!   device-address buffer lay in is freed (`freed_memory.rs`): a block that goes has its buffer
+//!   of addresses destroyed at once, and its memory waits, parked, until the batches and the
+//!   device's own submissions made before it completed.
+//!
 //! - **Images apart**. An image the runtime places in memory of its own takes a block that holds
 //!   images alone ([`Holds`], [`allocate_image`]): no buffer, a block's buffer of addresses among
 //!   them, is bound into such a block, nor such an image into a buffers' block. An image over a
@@ -38,15 +43,14 @@ use super::device::lock;
 #[cfg(unix)]
 use super::dma_buf::DmaBufPages;
 use super::error::{internal, vulkan, Error, MemoryKind};
+use super::freed_memory::{Parked, Parking};
 use super::range::RangeAllocator;
 use super::sharing::Sharing;
 use super::work_counts::Counters;
 use crate::release;
 use ash::vk;
 use std::ptr::NonNull;
-#[cfg(unix)]
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// The size of a pooled block, at most the device's `maxMemoryAllocationSize`.
 pub(super) const BLOCK_BYTES: u64 = 64 << 20;
@@ -424,6 +428,12 @@ impl Mapped {
     pub(super) fn as_ptr(self) -> *mut u8 {
         self.0.as_ptr()
     }
+
+    /// The address `bytes` past this one, in the same mapping.
+    pub(super) fn add(self, bytes: u64) -> Mapped {
+        let bytes = usize::try_from(bytes).unwrap_or(usize::MAX);
+        Mapped(NonNull::new(self.0.as_ptr().wrapping_add(bytes)).unwrap_or(self.0))
+    }
 }
 
 /// One `VkDeviceMemory` block.
@@ -456,12 +466,26 @@ impl Block {
     ///
     /// Nothing is placed in the block any more, and no command that reads it is pending.
     unsafe fn release(self, device: &ash::Device) {
-        if let Some(addresses) = self.addresses {
+        // SAFETY: the caller's contract.
+        let memory = unsafe { self.release_addresses(device) };
+        // SAFETY: the caller's contract; freeing unmaps it.
+        unsafe { release::object(device, memory) };
+    }
+
+    /// Destroy the block's buffer of addresses: its memory, to free.
+    ///
+    /// # Safety
+    ///
+    /// Nothing is placed in the block any more, and no command that reads the buffer is pending.
+    unsafe fn release_addresses(self, device: &ash::Device) -> vk::DeviceMemory {
+        let Block {
+            memory, addresses, ..
+        } = self;
+        if let Some(addresses) = addresses {
             // SAFETY: the caller's contract.
             unsafe { release::object(device, addresses.raw) };
         }
-        // SAFETY: the caller's contract; freeing unmaps it.
-        unsafe { release::object(device, self.memory) };
+        memory
     }
 }
 
@@ -669,6 +693,13 @@ pub(super) struct Memory {
     families: Vec<u32>,
     /// The bytes of the blocks allocated so far ([`Memory::allocated`]).
     allocated: u64,
+    /// Where the device's driver fails pending work when memory a device-address buffer lay in
+    /// is freed, the record its blocks that go wait by (`freed_memory.rs`).
+    parking: Option<Arc<Parking>>,
+    /// The blocks that went and wait, their buffers of addresses destroyed.
+    parked: Vec<Parked>,
+    /// The blocks that waited so far ([`Memory::parked`]).
+    parked_count: u64,
 }
 
 impl Memory {
@@ -681,6 +712,7 @@ impl Memory {
         device_address: bool,
         unified: bool,
         families: Vec<u32>,
+        parking: Option<Arc<Parking>>,
     ) -> Memory {
         let count = properties.memory_type_count as usize;
         let types = properties.memory_types[..count.min(vk::MAX_MEMORY_TYPES)].to_vec();
@@ -696,7 +728,23 @@ impl Memory {
             unified,
             families,
             allocated: 0,
+            parking,
+            parked: Vec::new(),
+            parked_count: 0,
         }
+    }
+
+    /// The blocks that waited for the batches in flight as they went, so far, and those that
+    /// wait now (`freed_memory.rs`).
+    pub(super) fn parked(&self) -> (u64, u64) {
+        (self.parked_count, self.parked.len() as u64)
+    }
+
+    /// Let the blocks that go from now on wait by `parking` (`freed_memory.rs`), as where the
+    /// device's driver has the defect: the crate's tests' way to take that path on any device.
+    #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+    pub(super) fn park_by(&mut self, parking: Arc<Parking>) {
+        self.parking = Some(parking);
     }
 
     /// The bytes of `VkDeviceMemory` allocated so far for blocks of the runtime's own memory,
@@ -792,7 +840,7 @@ impl Memory {
         };
         if let Some(counts) = addressed {
             if let Err(error) = self.address_block(device, type_index, block, counts) {
-                self.release_range(device, (holds, type_index), block, offset, size);
+                drop(self.release_range(device, (holds, type_index), block, offset, size, None));
                 return Err(error);
             }
         }
@@ -945,7 +993,8 @@ impl Memory {
     }
 
     /// Return `[offset, offset + size)` of block `block` of memory type `type_index`, freeing the
-    /// block when it empties ([`Pool::release`]).
+    /// block when it empties ([`Pool::release`]); `after` goes once it is freed. `after`, given
+    /// back for the caller to let go of with no lock held, unless the block waits with it.
     fn release_range(
         &mut self,
         device: &ash::Device,
@@ -953,11 +1002,69 @@ impl Memory {
         block: usize,
         offset: u64,
         size: u64,
-    ) {
-        if let Some(block) = self.pool(holds, type_index).release(block, offset, size) {
+        after: Option<Box<dyn Send>>,
+    ) -> Option<Box<dyn Send>> {
+        match self.pool(holds, type_index).release(block, offset, size) {
             // SAFETY: no resource is placed in the block any more.
-            unsafe { block.release(device) };
+            Some(block) => unsafe { self.let_go(device, block, after) },
+            None => after,
         }
+    }
+
+    /// Free `block`, or where the device parks freed memory (`freed_memory.rs`), destroy its
+    /// buffer of addresses and let its memory wait, with `after`, for the batches submitted
+    /// before now, unless they completed. `after`, given back where the memory was freed here.
+    ///
+    /// # Safety
+    ///
+    /// Nothing is placed in the block any more, and no command that reads it is pending.
+    unsafe fn let_go(
+        &mut self,
+        device: &ash::Device,
+        block: Block,
+        after: Option<Box<dyn Send>>,
+    ) -> Option<Box<dyn Send>> {
+        let Some(parking) = &self.parking else {
+            // SAFETY: the caller's.
+            unsafe { block.release(device) };
+            return after;
+        };
+        // Out of the driver's list first, then the batches that may list it noted.
+        // SAFETY: the caller's.
+        let memory = unsafe { block.release_addresses(device) };
+        let noted = parking.note();
+        if !parking.reached(&noted) {
+            parking.waits();
+            // Checked again once counted: a waiter that published a value before the count did
+            // not see it, so the value is seen here (both sequentially consistent).
+            if !parking.reached(&noted) {
+                self.parked_count += 1;
+                self.parked.push(Parked {
+                    noted,
+                    memory,
+                    after,
+                });
+                return None;
+            }
+            parking.freed(1);
+        }
+        // SAFETY: the caller's; every batch that may list it completed.
+        unsafe { release::object(device, memory) };
+        after
+    }
+
+    /// The blocks that wait whose values were reached, out of the list, to free with no lock held
+    /// (`freed_memory.rs`).
+    pub(super) fn reached(&mut self) -> Vec<Parked> {
+        let Some(parking) = &self.parking else {
+            return Vec::new();
+        };
+        let reached: Vec<Parked> = self
+            .parked
+            .extract_if(.., |parked| parking.reached(&parked.noted))
+            .collect();
+        parking.freed(reached.len());
+        reached
     }
 
     /// Import the caller's host memory, `size` bytes at `pointer` (both multiples of the device's
@@ -1089,9 +1196,20 @@ impl Memory {
 
     /// Return `placement`'s memory, freeing its block when it empties.
     pub(super) fn free(&mut self, device: &ash::Device, placement: &Placement) {
+        drop(self.free_then(device, placement, None));
+    }
+
+    /// [`free`](Self::free), and `after` goes once the block is freed: given back for the caller
+    /// to let go of with no lock held, unless the block waits with it (`freed_memory.rs`).
+    pub(super) fn free_then(
+        &mut self,
+        device: &ash::Device,
+        placement: &Placement,
+        after: Option<Box<dyn Send>>,
+    ) -> Option<Box<dyn Send>> {
         // The caller's memory is the caller's to free.
         let Some(index) = placement.block else {
-            return;
+            return after;
         };
         self.release_range(
             device,
@@ -1099,17 +1217,26 @@ impl Memory {
             index,
             placement.offset,
             placement.size,
-        );
+            after,
+        )
     }
 
-    /// Free every block: the device is being destroyed and no resource is left.
-    pub(super) fn destroy(&mut self, device: &ash::Device) {
+    /// Free every block, those that wait too: the device is being destroyed, its queues idle,
+    /// and no resource is left. What waited with them, for the caller to let go of with no lock
+    /// held.
+    pub(super) fn destroy(&mut self, device: &ash::Device) -> Vec<Box<dyn Send>> {
         for pool in &mut self.pools {
             for block in pool.drain() {
                 // SAFETY: no resource is left, and the device is idle.
                 unsafe { block.release(device) };
             }
         }
+        let mut after = Vec::new();
+        for parked in self.parked.drain(..) {
+            // SAFETY: nothing is placed in it, and the device is idle.
+            after.extend(unsafe { parked.release(device) });
+        }
+        after
     }
 }
 

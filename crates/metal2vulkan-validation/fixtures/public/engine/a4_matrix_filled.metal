@@ -1,4 +1,4 @@
-// Owned fixture (WP-A4, DESIGN D213): an 8x8 simdgroup matrix filled with a runtime value
+// Owned fixture: an 8x8 simdgroup matrix filled with a runtime value
 // (`simd.matrix_init_filled`), stored as a block and read back through `thread_elements()`. One
 // simdgroup of 32 threads: out[0, 64) is the block store and out[2L + j + 64] element j of lane
 // L, every one equal to fill[0]. Loop-free.

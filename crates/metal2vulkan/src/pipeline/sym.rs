@@ -87,6 +87,111 @@ pub enum SampledType {
     Uint64,
 }
 
+/// How a draw read through a snapshot keeps a texture's texel in the snapshot
+/// (`VariantKey::snapshot_textures`): the texel's codes, from which the read gives back the
+/// fetched value bit for bit, in as few bytes as hold them, or the fetched lanes' bits.
+///
+/// The copy takes the codes from the value the fetch returns, and the read decodes them as Metal
+/// reads the format: a normalized code `c` as `c / (2^b - 1)` correctly rounded (a signed one's
+/// magnitude so, `-1` at most), a half-float code widened exactly, an integer code extended. A
+/// device whose own decode is exactly that (its value one Metal reads) is given back its fetched
+/// value; one whose decode is not is given Metal's.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum SnapshotForm {
+    /// The fetched `vec4`'s 32 bits a lane (`R32G32B32A32_UINT`): any texel.
+    Bits,
+    /// Four 8-bit unsigned normalized codes (`R8G8B8A8_UINT`).
+    Unorm8,
+    /// Four 8-bit signed normalized codes (`R8G8B8A8_UINT`, two's complement).
+    Snorm8,
+    /// Four 16-bit unsigned normalized codes (`R16G16B16A16_UINT`).
+    Unorm16,
+    /// Four 16-bit signed normalized codes (`R16G16B16A16_UINT`, two's complement).
+    Snorm16,
+    /// Four half-float codes (`R16G16B16A16_UINT`).
+    Half,
+    /// Four 8-bit unsigned integer codes (`R8G8B8A8_UINT`).
+    Uint8,
+    /// Four 8-bit signed integer codes (`R8G8B8A8_UINT`, two's complement).
+    Sint8,
+    /// Four 16-bit unsigned integer codes (`R16G16B16A16_UINT`).
+    Uint16,
+    /// Four 16-bit signed integer codes (`R16G16B16A16_UINT`, two's complement).
+    Sint16,
+}
+
+impl SnapshotForm {
+    /// The form a texture slot of sampled type `ty` keeps its texels in, read through a sampled
+    /// view of `format`: the codes of an 8- or 16-bit normalized, half-float or integer format
+    /// whose class is the slot's, one, two or four channels; [`Bits`](Self::Bits) for any other
+    /// format (an sRGB format's view decodes its codes, so its texels are no codes' values).
+    pub fn of(format: vk::Format, ty: SampledType) -> SnapshotForm {
+        use vk::Format as F;
+        let form = match format {
+            F::R8_UNORM
+            | F::R8G8_UNORM
+            | F::R8G8B8A8_UNORM
+            | F::B8G8R8A8_UNORM
+            | F::A8B8G8R8_UNORM_PACK32 => SnapshotForm::Unorm8,
+            F::R8_SNORM | F::R8G8_SNORM | F::R8G8B8A8_SNORM | F::A8B8G8R8_SNORM_PACK32 => {
+                SnapshotForm::Snorm8
+            }
+            F::R16_UNORM | F::R16G16_UNORM | F::R16G16B16A16_UNORM => SnapshotForm::Unorm16,
+            F::R16_SNORM | F::R16G16_SNORM | F::R16G16B16A16_SNORM => SnapshotForm::Snorm16,
+            F::R16_SFLOAT | F::R16G16_SFLOAT | F::R16G16B16A16_SFLOAT => SnapshotForm::Half,
+            F::R8_UINT | F::R8G8_UINT | F::R8G8B8A8_UINT | F::A8B8G8R8_UINT_PACK32 => {
+                SnapshotForm::Uint8
+            }
+            F::R8_SINT | F::R8G8_SINT | F::R8G8B8A8_SINT | F::A8B8G8R8_SINT_PACK32 => {
+                SnapshotForm::Sint8
+            }
+            F::R16_UINT | F::R16G16_UINT | F::R16G16B16A16_UINT => SnapshotForm::Uint16,
+            F::R16_SINT | F::R16G16_SINT | F::R16G16B16A16_SINT => SnapshotForm::Sint16,
+            _ => SnapshotForm::Bits,
+        };
+        let class = match form {
+            SnapshotForm::Bits => return form,
+            SnapshotForm::Uint8 | SnapshotForm::Uint16 => SampledType::Uint,
+            SnapshotForm::Sint8 | SnapshotForm::Sint16 => SampledType::Sint,
+            _ => SampledType::Float,
+        };
+        match class == ty {
+            true => form,
+            false => SnapshotForm::Bits,
+        }
+    }
+
+    /// The snapshot's format: an unsigned integer format of the codes' width, four channels.
+    pub fn format(self) -> vk::Format {
+        match self {
+            SnapshotForm::Bits => vk::Format::R32G32B32A32_UINT,
+            SnapshotForm::Unorm8
+            | SnapshotForm::Snorm8
+            | SnapshotForm::Uint8
+            | SnapshotForm::Sint8 => vk::Format::R8G8B8A8_UINT,
+            SnapshotForm::Unorm16
+            | SnapshotForm::Snorm16
+            | SnapshotForm::Half
+            | SnapshotForm::Uint16
+            | SnapshotForm::Sint16 => vk::Format::R16G16B16A16_UINT,
+        }
+    }
+
+    /// The width in bits of each code, and whether it is signed; `None` for
+    /// [`Bits`](Self::Bits).
+    pub(crate) fn code(self) -> Option<(u8, bool)> {
+        match self {
+            SnapshotForm::Bits => None,
+            SnapshotForm::Unorm8 | SnapshotForm::Uint8 => Some((8, false)),
+            SnapshotForm::Snorm8 | SnapshotForm::Sint8 => Some((8, true)),
+            SnapshotForm::Unorm16 | SnapshotForm::Half | SnapshotForm::Uint16 => Some((16, false)),
+            SnapshotForm::Snorm16 | SnapshotForm::Sint16 => Some((16, true)),
+        }
+    }
+}
+
 /// Whether an image is sampled or used as a storage image.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -133,8 +238,8 @@ pub struct ImageHandleClass {
 /// One runtime array of the set-1 heap: a fixed enumeration of dimension × sampled type ×
 /// sampled/storage × storage format class, plus samplers by their use: an argument buffer's sampler
 /// made for a sample with comparison or without, of an integer texture or not, and sampling a cube
-/// with explicit gradients or not (for which an anisotropic sampler is refused), as a combined
-/// binding's runtime sampler is made for its use (`CombinedSampler`).
+/// with explicit gradients in the isotropic form or not (for which the sampler is made isotropic),
+/// as a combined binding's runtime sampler is made for its use (`CombinedSampler`).
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -249,6 +354,16 @@ pub enum SyntheticBinding {
     /// which its object function writes and its mesh function and synthesized vertex stage read
     /// (`lower::mesh::work`). Declared with the mesh stage's symbols.
     MeshWork,
+    /// An emulated tessellation draw's work buffer (`GraphicsState::emulated_tessellation`): its
+    /// arguments, where its records begin and its chunks' draws, which the tessellation scan
+    /// writes and the post-tessellation vertex function reads (`lower::tessellation::work`).
+    /// Declared with the vertex stage's symbols.
+    TessellationWork,
+    /// An emulated tessellation draw's records: one per instance and patch, each its processed
+    /// factors, its first triangle and its stream state, which the tessellation scan writes and
+    /// the post-tessellation vertex function reads (`lower::tessellation::work`). Declared with
+    /// the vertex stage's symbols.
+    TessellationRecords,
     /// A fragment function's sRGB color table: a read-only uniform or storage buffer (as the
     /// binding's descriptor type says) holding
     /// [`color_write_table`](crate::bind::color_write_table)'s bytes, from which a function that
@@ -324,6 +439,11 @@ pub enum ResourceKind {
     /// storage image of the attachment's extent holding Metal's tile value of each texel, which
     /// the function's interlocked storage form reads and writes beside the attachment's codes.
     ExtendedShadow(u32),
+    /// The snapshot of the texture bound at fragment texture slot `n` (`ResourceSlot::index` too)
+    /// for a draw that reads it through one (`LoweringInputs::snapshot_textures`): an
+    /// `R32G32B32A32_UINT` 2D storage image covering the draw's render area, each texel the bits
+    /// of the four values a fetch of the texture's level 0 there returned.
+    SnapshotTexels(u32),
 }
 
 /// What a bound acceleration structure holds: the binder binds a top-level structure, so a
@@ -378,9 +498,11 @@ pub struct CombinedSampler {
     pub compare: bool,
     /// The texture's sampled type is an integer type.
     pub integer: bool,
-    /// The shader samples a cube with explicit gradients through this binding's runtime sampler,
-    /// emulating Metal's isotropic footprint: the sampler may not be anisotropic. A constexpr
-    /// sampler's binding never sets it (its footprint follows its anisotropy).
+    /// The shader samples a cube with explicit gradients through this binding in the isotropic
+    /// form a route its device's description does not state takes, through a sampler that may be
+    /// anisotropic (a runtime one, or an anisotropic constexpr one): the sampler is made isotropic
+    /// for it (`metal::sampler::SamplerUse::cube_gradient`). Elsewhere a sampler's footprint
+    /// follows its anisotropy.
     pub cube_gradient: bool,
     /// The binding samples the texture's raw view, the UNORM format of its channels, from which
     /// the function reads an 8-bit sRGB texture's raw codes (`RuntimeFact::SrgbTexture`):
@@ -784,6 +906,12 @@ pub enum PushField {
     /// position's raw index there: a hole the consumer fills (`PushHole::CaptureIndexAddress`),
     /// placed beside `CaptureAddress`.
     CaptureIndexAddress,
+    /// Which draw of a fragment function compiled under `LoweringInputs::snapshot_textures` runs
+    /// (`u32`): a hole the consumer fills (`PushHole::SnapshotPhase`), placed beside the addresses
+    /// so the fragment window always holds it. 1 in the draw that takes the snapshot, whose
+    /// fragments copy their pixels' texels into it and run nothing else; 0 in the draw that reads
+    /// it, whose fragments copy nothing and run the function.
+    SnapshotPhase,
     // The three amplification words come right after the addresses in the order, so every stage
     // window holds them (at most 32 bytes before them, 12 of them): a draw of one amplification
     // writes them alone, between its draws, never through an `ArgumentTable`.
@@ -798,6 +926,12 @@ pub enum PushField {
     /// That amplification's `viewportArrayIndexOffset` (`u32`), added to the viewport index and
     /// read as `AmplificationLayerOffset` is.
     AmplificationViewportOffset,
+    /// The chunk an emulated tessellation draw's `vkCmdDrawIndirect` draws (`u32`): an emulated
+    /// post-tessellation vertex function draws the triangles of the draw's chunk this field names
+    /// (`lower::tessellation::work`). Placed with the amplification fields, so the vertex stage's
+    /// window holds it (at most 44 bytes before it there: `SnapshotPhase` is a fragment
+    /// function's): the draw of each chunk writes it alone, between its draws.
+    TessellationChunk,
     /// Region base and grid of a multi-region dispatch.
     DispatchRegion,
     /// Device address (`u64`) of the region record a device-replay variant's dispatch reads its
@@ -809,6 +943,13 @@ pub enum PushField {
     ReplayRegionAddress,
     /// Base vertex and base instance without `shaderDrawParameters`.
     BaseVertexInstance,
+    /// The draw's vertices per primitive `n`, a `u32`: 3 for a triangle list, 2 for a line list,
+    /// 1 for a strip or points. A vertex function compiled under
+    /// `LoweringInputs::primitive_id_varying` writes `(VertexIndex - first) / n` to the primitive
+    /// ID's varying (`IoRole::PrimitiveId`), `first` the draw's base vertex (Vulkan's `BaseVertex`
+    /// with `shaderDrawParameters`, lane 0 of `BaseVertexInstance` without). The binder writes it
+    /// for each draw without indices, direct or indirect.
+    VerticesPerPrimitive,
     /// Residual bind offset of a descriptor-form slot: the bind offset minus the descriptor base,
     /// modulo 2^32.
     SlotBindOffset(SlotRef),
@@ -864,7 +1005,9 @@ pub enum PushField {
     /// Whether the patch draw binds a patch index buffer (`u32`, 1 or 0), a control-stage field.
     PatchIndexBound,
     /// The control-point index buffer's residual bind offset (`u32`), a control-stage field of a
-    /// pipeline with a control-point index type.
+    /// pipeline with a control-point index type. An emulated post-tessellation vertex function
+    /// reads this field and the two before it in its own push window
+    /// (`GraphicsState::emulated_tessellation`).
     ControlPointIndexOffset,
     /// The stride (`u32`) the compute encoder binds the kernel buffer at this Metal index with
     /// (`setBuffer:offset:attributeStride:atIndex:` and its forms), 0 where it binds none, which
@@ -958,6 +1101,13 @@ pub enum PushField {
     /// (`DevicePolicy::half_blend`): one `uvec4` holding the four `f32`s' bits as the encoder
     /// set them (`BindState::blend_color`), which the function rounds to `half`.
     HalfBlendColor,
+    /// The draw's depth bias for a fragment stage that stores Metal's `Depth16Unorm` codes itself
+    /// (`RuntimeFact::Depth16Codes`): one `uvec4` holding the bits of three `f32`s and a zero
+    /// word, `[constant, slope, clamp, 0]` (`BindState::depth_bias`). The constant is Metal's
+    /// units of 1/65535 as a depth (`metal::state::depth16_bias`), the slope and clamp factors
+    /// Metal's; all three are 0 for a draw its bias does not touch (points, lines, a bias the
+    /// draw's viewports take).
+    DepthBias,
     /// The value a draw or dispatch binds for specialization key `key`, carried as data rather
     /// than specialized: one `u32` holding exactly the value the binder computes for the key's
     /// specialization constant from the bound textures and samplers (a boolean key as 1 or 0; a
@@ -1094,9 +1244,11 @@ mod tests {
             PushField::ExecutionStatusAddress,
             PushField::CaptureAddress,
             PushField::CaptureIndexAddress,
+            PushField::SnapshotPhase,
             PushField::DispatchRegion,
             PushField::ReplayRegionAddress,
             PushField::BaseVertexInstance,
+            PushField::VerticesPerPrimitive,
             PushField::SlotBindOffset(slot(SlotClass::Buffer, 0)),
             PushField::SlotBindOffset(slot(SlotClass::Buffer, 7)),
             PushField::SlotGuestBase(slot(SlotClass::Buffer, 0)),

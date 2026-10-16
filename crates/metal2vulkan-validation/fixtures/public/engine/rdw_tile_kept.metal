@@ -1,11 +1,11 @@
-// Owned fixture (WP-RDW, DESIGN D470): tile functions whose explicit imageblock stands alone and
-// holds sixteen bytes a cell, one `uint4`, which Metal places after an `r32uint` attachment's
-// four bytes rounded up to 8 and then to the block's 16-byte alignment (the state's imageblock
-// sample length is 32). Plain Metal keeps the words of such a block that lie below the pass's
-// imageblock sample length rounded up to 8, and reads every other word as zero, a dispatch's own
-// writes to it read back after a barrier included (WP-RDW Metal probes 7 and 10, an M4 under
-// macOS 27.0.1): a pass of 20 bytes keeps words 0 and 1. A tile function runs one thread per pixel
-// of its tile, its cell `thread_position_in_threadgroup`. Loop-free.
+// Owned fixture: tile functions whose explicit imageblock stands alone and holds sixteen bytes a
+// cell, one `uint4`, which Metal places after an `r32uint` attachment's four bytes rounded up to 8
+// and then to the block's 16-byte alignment (the state's imageblock sample length is 32). Plain
+// Metal keeps the words of such a block that lie below the pass's imageblock sample length rounded
+// up to 8, and reads every other word as zero, a dispatch's own writes to it read back after a
+// barrier included (Metal probes on an M4 under macOS 27.0.1): a pass of 20 bytes keeps words 0 and
+// 1. A tile function runs one thread per pixel of its tile, its cell
+// `thread_position_in_threadgroup`. Loop-free.
 // metal-fast-math: off
 #include <metal_stdlib>
 using namespace metal;

@@ -828,8 +828,8 @@ fn whole_blocks_of_small_levels_copy_between_textures() {
     );
 }
 
-/// A 4x4 `RGBA8Unorm` texture over a buffer at offset 256, rows 32 bytes apart (TOB probe 1's
-/// layout), two slices 128 bytes apart for an array.
+/// A 4x4 `RGBA8Unorm` texture over a buffer at offset 256, rows 32 bytes apart (the layout of a
+/// Metal probe on the M3 Max and an M4), two slices 128 bytes apart for an array.
 fn over_buffer(slices: u64) -> (Texture, TexelsLayout) {
     let t = texture(TextureDescriptor {
         texture_type: if slices > 1 {
@@ -902,8 +902,8 @@ fn copies_into_textures_over_buffers_move_texel_rows() {
     );
 }
 
-/// Rows that are contiguous in both buffers are one copy, and a copy whose source and
-/// destination rows share a byte meets (TOB probe 1's overlapping copies).
+/// Rows that are contiguous in both buffers are one copy, and a copy whose source and destination
+/// rows share a byte meets (a Metal probe's overlapping copies, the M3 Max and an M4).
 #[test]
 fn texel_rows_merge_and_meet() {
     let (t, texels) = over_buffer(2);

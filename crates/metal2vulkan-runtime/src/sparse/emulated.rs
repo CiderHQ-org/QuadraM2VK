@@ -272,12 +272,12 @@ impl Written {
     }
 }
 
-/// A blit's or a render pass's writes of a sparse texture a copy writes: Metal drops a blit's
-/// write to an unmapped tile (SPR-probe1-m4) and a pass's store (AMP probe 2), so where the
-/// command wrote an unmapped tile inside memory the texture holds the runtime zeroes it again
-/// right after, recorded as the batch is submitted, with the mappings the batch applied
-/// (`Deferred::SparseScrub`). A write into a device unit that holds no memory is the device's
-/// (dropped: Vulkan discards a write to an unbound block).
+/// A blit's or a render pass's writes of a sparse texture a copy writes: Metal drops a blit's write
+/// to an unmapped tile (SPR-probe1-m4) and a pass's store (a Metal sparse probe on the M3 Max and
+/// an M4), so where the command wrote an unmapped tile inside memory the texture holds the runtime
+/// zeroes it again right after, recorded as the batch is submitted, with the mappings the batch
+/// applied (`Deferred::SparseScrub`). A write into a device unit that holds no memory is the
+/// device's (dropped: Vulkan discards a write to an unbound block).
 pub(crate) struct Scrub {
     texture: Texture,
     written: Vec<Written>,
@@ -296,12 +296,12 @@ impl Scrub {
             })
     }
 
-    /// The scrubs of a render pass's writes of `targets` (its attachments, resolve targets and
-    /// the textures copied into after it) over its render area `extent` from the origin: Metal
-    /// drops a pass's stores into unmapped tiles, of a clear, a draw and a resolve alike (AMP
-    /// probe 2), as a blit's, so each sparse texture the runtime zeroes is scrubbed after the
-    /// pass. Inside the pass, the draws see what the draws before them stored, as in Metal's tile
-    /// memory.
+    /// The scrubs of a render pass's writes of `targets` (its attachments, resolve targets and the
+    /// textures copied into after it) over its render area `extent` from the origin: Metal drops a
+    /// pass's stores into unmapped tiles, of a clear, a draw and a resolve alike (a Metal sparse
+    /// probe on the M3 Max and an M4), as a blit's, so each sparse texture the runtime zeroes is
+    /// scrubbed after the pass. Inside the pass, the draws see what the draws before them stored,
+    /// as in Metal's tile memory.
     pub(crate) fn of_pass<'a>(
         targets: impl IntoIterator<Item = &'a Target>,
         extent: [u32; 2],

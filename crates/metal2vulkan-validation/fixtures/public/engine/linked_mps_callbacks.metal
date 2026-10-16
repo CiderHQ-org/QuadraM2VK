@@ -1,4 +1,4 @@
-// Owned MSL (WP-RVC, DESIGN D431 item 2): a kernel that calls, in the calling convention of the
+// Owned MSL: a kernel that calls, in the calling convention of the
 // MPS NDArray kernels' linked callbacks, the visible functions the public linked modules under
 // ../linked/ define. It builds the table of its four device buffers, reads its secondary and
 // tertiary sources through `prefixSecondary_f` and `prefixTertiary_f` (element `tid` of buffers 1

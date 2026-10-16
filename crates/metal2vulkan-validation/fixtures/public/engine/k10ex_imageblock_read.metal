@@ -1,4 +1,4 @@
-// Owned fixture (WP-K10EX, DESIGN D201): a fragment that only reads its imageblock (`c`, a half4
+// Owned fixture: a fragment that only reads its imageblock (`c`, a half4
 // at byte 0, and `k`, a ushort at byte 8) and writes the color `c + k` (exact for the authored
 // values). It writes no imageblock member, so it needs no fragment stores. Loop-free.
 // metal-fast-math: off

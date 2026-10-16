@@ -1,5 +1,5 @@
-// Owned fixture (WP-DSM2, DESIGN D278): the sign of the zero cell an 8x8 simdgroup multiply-add,
-// in float and in half, reads for a lane that does not take part in it (D271: not live in its
+// Owned fixture: the sign of the zero cell an 8x8 simdgroup multiply-add,
+// in float and in half, reads for a lane that does not take part in it (not live in its
 // block, or past the threadgroup's thread count), compiled without fast math so a signed zero
 // asks a defined question (no `nsz`).
 // metal-fast-math: off
@@ -11,7 +11,7 @@
 // out[2g + j] is element j of the float d's fragment and out[2n + 2g + j] that of the half d's,
 // widened, at thread g of a grid of n threads (g = thread_position_in_grid). A lane that does not
 // run it writes nothing. Lane L of a simdgroup holds cells (row(L), col(L) + j),
-// row(L) = ((L >> 1) & 3) | ((L >> 4) << 2), col(L) = ((L >> 3) & 1) * 4 + (L & 1) * 2 (D91.1).
+// row(L) = ((L >> 1) & 3) | ((L >> 4) << 2), col(L) = ((L >> 3) & 1) * 4 + (L & 1) * 2.
 // With a -0 accumulator and every other term -0, a cell's result is -0 exactly when every term
 // is, so a term that multiplies a non-taking-part lane's zero cell by a nonzero partner shows
 // that zero's sign. Loop-free.

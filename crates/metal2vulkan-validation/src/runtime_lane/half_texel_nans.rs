@@ -362,7 +362,7 @@ fn kernel(op: Op, half: bool) -> String {
         false => ("!3, !4, !5, !7", 3),
     };
     format!(
-        r#"; Owned synthetic kernel (WP-NAN).
+        r#"; Owned synthetic kernel.
 source_filename = "half_texel_nans.metal"
 {states}
 define void @k(ptr addrspace(1) %c, ptr addrspace(1) %out, ptr addrspace(1) %t, {sampler_param}i32 %gid) {{

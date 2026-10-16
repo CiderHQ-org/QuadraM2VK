@@ -1,4 +1,4 @@
-// Owned fixture (WP-RRP, DESIGN D471 item 4, docs/TODO.md 8.40): samples, gathers and depth
+// Owned fixture: samples, gathers and depth
 // comparisons through the runtime sampler at [[sampler(0)]], which a case binds with
 // `MirrorClampToEdge` on `s`, pixel or normalized coordinates, and nearest or linear filters.
 // Each lane reads its coordinate (and a comparison's reference, `.z`) from buffer 0 and writes

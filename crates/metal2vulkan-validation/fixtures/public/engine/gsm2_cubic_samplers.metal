@@ -1,5 +1,5 @@
-// Owned fixture (WP-GSM2, DESIGN D622; written for this repository): a sample through the runtime
-// sampler at slot 0 beside the same sample through a constexpr bicubic sampler (D234) of each
+// Owned fixture (written for this repository): a sample through the runtime
+// sampler at slot 0 beside the same sample through a constexpr bicubic sampler of each
 // address mode, border color, and coordinate kind. Metal samples through a runtime sampler whose
 // min or mag filter is `MTLSamplerMinMagFilterCubic` (raw value 2) as through a constexpr bicubic
 // sampler of the same state (EV GSM2-bcs2-m4), so the runtime lane binds the slot to cubic
@@ -41,7 +41,7 @@ kernel void gsm2_cubic_samples(texture2d<float> t [[texture(0)]],
 }
 
 // The same with `half` results at an explicit level, which a bicubic sample does not read (its
-// filter samples the base level, D234): lane `i` writes the runtime sampler's sample at level
+// filter samples the base level): lane `i` writes the runtime sampler's sample at level
 // 2.5, then the constexpr edge sampler's implicit one.
 kernel void gsm2_cubic_half_samples(texture2d<half> t [[texture(0)]],
                                     sampler s [[sampler(0)]],

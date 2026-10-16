@@ -1,4 +1,4 @@
-// Owned fixture (DESIGN D11): load the last half (bytes 8..9) of a 10-byte buffer.
+// Owned fixture: load the last half (bytes 8..9) of a 10-byte buffer.
 // Bind `in` to a 10-byte allocation: out[0] = in[4]. Loop-free.
 #include <metal_stdlib>
 using namespace metal;

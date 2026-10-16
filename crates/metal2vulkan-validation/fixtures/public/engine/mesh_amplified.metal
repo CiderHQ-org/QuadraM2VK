@@ -1,4 +1,4 @@
-// Owned fixture (WP-MESH, DESIGN D334): what Apple's VFX particle meshes read and write beside
+// Owned fixture: what Apple's VFX particle meshes read and write beside
 // their user data. A mesh function reads its vertex amplification's id and count (one entry), and
 // reads the id under [[function_constant(..)]] (another); a third writes each primitive's render
 // target slice and viewport index, a ushort and a uint. Loop-free.

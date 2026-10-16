@@ -44,13 +44,29 @@
 //! Metal divides `half` the same way under every flag set, `arcp` included: the quotient rounded
 //! once from the exact one, `half` denormals kept (a probe cases 4c363561 under fast math and
 //! 54f0fe8e without, every lane). The device's `float` `OpFDiv` rounded to `half` is not that
-//! quotient by Vulkan's contract: within 2.5 ulp, it may cross a `half` rounding midpoint, which a
-//! quotient of two `half` values can approach within about one `float` ulp. So every `half`
-//! division calls the routine. A `half` quotient is the routine's on the operands (held in
-//! `float`), rounded once to `half`:
-//! the `float` quotient is correctly rounded, and a quotient of two `half` values is never
-//! within half a `float` ulp of a `half` rounding midpoint without being one, which it cannot
-//! be, so the two roundings are one.
+//! quotient by Vulkan's contract: within 2.5 ulp, it may cross a `half` rounding midpoint, from
+//! which a quotient of two `half` values can be as little as two `float` ulp away (1 / (2047 /
+//! 1024) is 2.001 ulp from one). So every `half` division calls a routine, and its `float`
+//! quotient of the operands (held in `float`) is rounded once to `half`. On the integer path and
+//! the fused path that quotient is correctly rounded, and a quotient of two `half` values is never
+//! within half a `float` ulp of a `half` rounding midpoint without being one, so the two roundings
+//! are one. Where the fused path's profiles hold every `half` value exactly (not native half
+//! rounding, whose device compiler may hand over an unrounded operand), a `half` division takes a
+//! third path:
+//!
+//! - [`Path::Halves`] (`halves`): one fused correction `q + r · (x - y · q)` of `q = x · r`, `r`
+//!   the device's `1 / y`, on the operands themselves. That quotient is within `1/2 + 2^-18` ulp
+//!   of the exact one and is it wherever the exact one is a `float`, which suffices: the exact
+//!   quotient of two `half` values is a point of the 12-bit grid (every `half` value and every
+//!   `half` rounding midpoint, the overflow threshold 65520 and the denormal ones included) or at
+//!   least two `float` ulp from every such point, so both round to the same `half`. No step leaves
+//!   the normal range (the divisor is in `[2^-24, 65504]`, the quotient in `[2^-40, 2^40]`), so
+//!   the device's environment does not enter, and scaling an operand by a power of two scales
+//!   every step exactly: the `one_fused_correction_rounds_every_half_quotient` test runs every
+//!   pair of 11-bit significands with every estimate within 2.5 ulp. Zeros, infinities, and NaNs
+//!   are answered as `fused` answers them, by integer tests that fast math keeps. On an Apple M3
+//!   Max through MoltenVK, the pipeline of a fragment function with 164 such divisions is created
+//!   in about 5.8 s instead of 6.5 s through `fused`.
 
 use crate::air::ir::{BinOp as AirBin, FastMath};
 use crate::device::profile::FloatFunctions;
@@ -87,11 +103,14 @@ pub enum Path {
     /// `fused`, Markstein's sequence on the significands: profiles whose `float` fused
     /// multiply-add is `OpFmaKHR`.
     Fused,
+    /// `halves`, one fused correction on `half` operands held in `float`: a `half` division on
+    /// those profiles where every `half` value is held exactly ([`Routine::on`]).
+    Halves,
 }
 
 impl Path {
-    /// The path on profile `p`: [`Path::Fused`] where its `float` fused multiply-add is
-    /// `OpFmaKHR` ([`fma::float_route`]), else [`Path::Integer`].
+    /// The path of a `float` division on profile `p`: [`Path::Fused`] where its `float` fused
+    /// multiply-add is `OpFmaKHR` ([`fma::float_route`]), else [`Path::Integer`].
     pub fn on(p: &DeviceProfile) -> Path {
         match fma::float_route(p) {
             Route::Khr => Path::Fused,
@@ -110,11 +129,23 @@ pub struct Routine {
 }
 
 impl Routine {
-    /// The routine for a division of form `f` (`float` or `half` lanes) on profile `p`.
+    /// The routine for a division of form `f` (`float` or `half` lanes) on profile `p`: the
+    /// profile's [`Path`], or [`Path::Halves`] for `half` lanes on the fused path where the
+    /// profile's `half` rounding is not the device's own (`narrow::native_rounding`), so that
+    /// every operand is a `half` value.
     pub fn on(p: &DeviceProfile, f: Form) -> Routine {
+        let path = match Path::on(p) {
+            Path::Fused
+                if f.float_fmt() == Some(FloatFmt::Half)
+                    && narrow::native_rounding(p, narrow::quantize_form(p)).is_none() =>
+            {
+                Path::Halves
+            }
+            path => path,
+        };
         Routine {
             lanes: f.lanes,
-            path: Path::on(p),
+            path,
         }
     }
 
@@ -124,6 +155,7 @@ impl Routine {
         match self.path {
             Path::Integer => 640 + 48 * lanes,
             Path::Fused => 420 + 40 * lanes,
+            Path::Halves => 240 + 24 * lanes,
         }
     }
 }
@@ -157,6 +189,7 @@ pub(super) fn define_with(mb: &mut ModuleBuilder, r: Routine, rough: Rough<'_>) 
     let q = match r.path {
         Path::Integer => quotient(&mut fb, f, x, y, rough)?,
         Path::Fused => fused(&mut fb, f, x, y, rough)?,
+        Path::Halves => halves(&mut fb, f, x, y, rough)?,
     };
     fb.ret(Some(q))?;
     fb.finish()
@@ -213,7 +246,8 @@ pub fn native(fb: &mut FunctionBuilder<'_>, f: Form, x: Value, y: Value) -> BRes
 }
 
 /// The device's quotient of two `float` lanes, the estimate `quotient` (of two lanes in
-/// `[1, 2)`), `fused` (of one and a divisor in its range), and [`Reciprocal::Rounded`] correct.
+/// `[1, 2)`), `fused` (of one and a divisor in its range), `halves` (of one and a `half` divisor),
+/// and [`Reciprocal::Rounded`] correct.
 pub(super) type Rough<'a> = &'a dyn Fn(&mut FunctionBuilder<'_>, Value, Value) -> BResult<Value>;
 
 /// How Metal's fast reciprocal (`math::fast_reciprocal`, the reciprocal of an `arcp` division) is
@@ -367,6 +401,73 @@ fn fused(
     let e = bin(fb, BinOp::ISub, e, p.ey)?;
     let mant = bin(fb, BinOp::BitwiseAnd, qb, mant_mask)?;
     assemble(fb, f, &p, e, mant)
+}
+
+/// The `float` quotient of `half` lanes `x` and `y` held in `float` (form `f`) by `OpFmaKHR`,
+/// whose rounding to `half` is Metal's `half` quotient ([`Path::Halves`]): `q = x · r` from
+/// `rough`'s estimate `r` of `1 / y`, within 2.5 ulp of it, and one fused step
+/// `q + r · (x - y · q)`, on every lane whose operands are both finite and nonzero. With `ε` and
+/// `δ` the estimate's and the product's relative errors (`|ε| <= 2.5 · 2^-23`, `|δ| <= 2^-24`),
+/// `q` is within `|x / y| · 3 · 2^-23` of `x / y`; the fused residual `x - y · q` is rounded
+/// once at most (by `η`, `|η| <= 2^-24`), so the step's exact sum is within that times
+/// `|ε + η + εη|`, below `2^-18` ulp, and its one rounding gives the quotient within
+/// `1/2 + 2^-18` ulp, and exactly where the quotient is a `float`. Zeros, infinities, and NaNs,
+/// which a `half` operand reaches only as itself (no `half` value is an `f32` denormal), are
+/// answered as `fused` answers them: a NaN for a NaN operand, `0 / 0`, or `∞ / ∞`; the infinity
+/// of the quotient's sign for an infinite dividend or a zero divisor; else its zero.
+fn halves(
+    fb: &mut FunctionBuilder<'_>,
+    f: Form,
+    x: Value,
+    y: Value,
+    rough: Rough<'_>,
+) -> BResult<Value> {
+    let u = u32_form(f);
+    let (ut, ft) = (ty(fb, u)?, ty(fb, f)?);
+    let k = |fb: &mut FunctionBuilder<'_>, v: u64| splat(fb, u, v);
+    let bin = |fb: &mut FunctionBuilder<'_>, op: BinOp, a: Value, b: Value| fb.binary(op, a, b);
+
+    // q = x · r, then one fused step q + r · (x - y · q).
+    let one = fsplat(fb, f, 1.0)?;
+    let r = rough(fb, one, y)?;
+    let q = bin(fb, BinOp::FMul, x, r)?;
+    let ny = fb.unary(UnOp::FNegate, y)?;
+    let e = fb.fma(ny, q, x)?;
+    let q = fb.fma(e, r, q)?;
+    let qb = fb.convert(ConvOp::Bitcast, q, ut)?;
+
+    // A lane is regular where both magnitudes are in [1, 0x7F7FFFFF]: finite and nonzero.
+    let xb = fb.convert(ConvOp::Bitcast, x, ut)?;
+    let yb = fb.convert(ConvOp::Bitcast, y, ut)?;
+    let (magnitude, sign_bit) = (k(fb, 0x7FFF_FFFF)?, k(fb, 0x8000_0000)?);
+    let ax = bin(fb, BinOp::BitwiseAnd, xb, magnitude)?;
+    let ay = bin(fb, BinOp::BitwiseAnd, yb, magnitude)?;
+    let xy = bin(fb, BinOp::BitwiseXor, xb, yb)?;
+    let sign = bin(fb, BinOp::BitwiseAnd, xy, sign_bit)?;
+    let (k0, k1, largest) = (k(fb, 0)?, k(fb, 1)?, k(fb, 0x7F7F_FFFF)?);
+    let xm = bin(fb, BinOp::ISub, ax, k1)?;
+    let ym = bin(fb, BinOp::ISub, ay, k1)?;
+    let xr = bin(fb, BinOp::ULessThan, xm, largest)?;
+    let yr = bin(fb, BinOp::ULessThan, ym, largest)?;
+    let regular = bin(fb, BinOp::LogicalAnd, xr, yr)?;
+
+    // Elsewhere one operand is a zero, an infinity, or a NaN: equal magnitudes there are two
+    // zeros, two infinities, or NaNs.
+    let inf_bits = k(fb, 0x7F80_0000)?;
+    let xnan = bin(fb, BinOp::UGreaterThan, ax, inf_bits)?;
+    let ynan = bin(fb, BinOp::UGreaterThan, ay, inf_bits)?;
+    let same = bin(fb, BinOp::IEqual, ax, ay)?;
+    let nan = bin(fb, BinOp::LogicalOr, xnan, ynan)?;
+    let nan = bin(fb, BinOp::LogicalOr, nan, same)?;
+    let xi = bin(fb, BinOp::IEqual, ax, inf_bits)?;
+    let yz = bin(fb, BinOp::IEqual, ay, k0)?;
+    let to_inf = bin(fb, BinOp::LogicalOr, xi, yz)?;
+    let inf = bin(fb, BinOp::BitwiseOr, sign, inf_bits)?;
+    let special = fb.select(to_inf, inf, sign)?;
+    let qnan = k(fb, 0x7FC0_0000)?;
+    let special = fb.select(nan, qnan, special)?;
+    let res = fb.select(regular, qb, special)?;
+    fb.convert(ConvOp::Bitcast, res, ft)
 }
 
 /// The fields of two `float` operands both paths read: their bits, the quotient's sign bit, the

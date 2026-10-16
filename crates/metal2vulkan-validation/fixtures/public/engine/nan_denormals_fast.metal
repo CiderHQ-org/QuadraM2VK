@@ -1,4 +1,4 @@
-// Owned fixture (NaN model, DESIGN D293, class J): `nan_denormals`' program under the default fast
+// Owned fixture (NaN model, class J): `nan_denormals`' program under the default fast
 // math, its flagged state: which `float` operations read a denormal operand as a zero of its sign,
 // and which flush a denormal result, where the calls are the `fast_` ones and the arithmetic
 // carries every flag. Lane `i` reads (a, b, c) from `in[i]` and writes 48 words to

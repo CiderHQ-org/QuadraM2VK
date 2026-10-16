@@ -1,4 +1,4 @@
-// Owned fixture (WP-RVC, DESIGN D453 items 3 and 4; written for this repository): a word loaded
+// Owned fixture (written for this repository): a word loaded
 // from a device buffer before a loop, read once in each iteration, while the loop stores to the
 // element it was loaded from. Every iteration reads the value loaded before the loop, whatever
 // the loop has stored there since. MoltenVK 1.4.1's SPIRV-Cross writes such a load into the text

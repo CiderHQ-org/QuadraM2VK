@@ -1,4 +1,4 @@
-// Owned MSL (WP-RVC, DESIGN D431 item 2): a linked destination callback in the calling convention
+// Owned MSL: a linked destination callback in the calling convention
 // the MPS NDArray kernels call `postfixPrimary_4xf` with. A case links it (by this module's `.ll`
 // hash) where the retained modules of that name write nothing.
 #include <metal_stdlib>

@@ -1,4 +1,4 @@
-// Owned fixture (WP-GSM, DESIGN D525 item 2; written for this repository): Metal 3.1's
+// Owned fixture (written for this repository): Metal 3.1's
 // program-scope built-in variables of ushort types in a kernel, which Apple's compiler reads with
 // the `.i16` calls (`air.get_local_size.i16(i16 1)`). Thread t of the grid (t = x + width * y of
 // its ushort2 thread_position_in_grid over the uint3 threads_per_grid) writes 8 words from

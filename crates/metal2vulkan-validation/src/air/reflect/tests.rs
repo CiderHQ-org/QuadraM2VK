@@ -178,3 +178,30 @@ declare <4 x float> @air.load.implicit_imageblock.v4f32(i32, <2 x i16>, i32, i16
         );
     }
 }
+
+/// A read of a sample's texel, `read(coord, 5, imageblock_data_rate::sample)` (`i32 2, i16 5` on
+/// the M3 Max), and one of the pixel's (`i32 0, i16 0`) are two planes of their attachment, each
+/// at the binding of its data rate: the imageblock band's first binding, 200, plus 3 for each
+/// attachment before it, plus the rate. The sample's index names no plane.
+#[test]
+fn a_sample_rate_read_takes_its_data_rate_s_plane() {
+    let ll = r#"define void @k(<2 x i16> %lid) {
+  %sample = tail call <4 x half> @air.load.implicit_imageblock.v4f16(i32 1, <2 x i16> %lid, i32 2, i16 5)
+  %pixel = tail call <4 x half> @air.load.implicit_imageblock.v4f16(i32 1, <2 x i16> %lid, i32 0, i16 0)
+  ret void
+}
+declare <4 x half> @air.load.implicit_imageblock.v4f16(i32, <2 x i16>, i32, i16)
+!air.kernel = !{!0}
+!0 = !{ptr @k, !1, !2}
+!1 = !{}
+!2 = !{!3}
+!3 = !{i32 0, !"air.thread_position_in_threadgroup", !"air.arg_type_name", !"ushort2", !"air.arg_name", !"lid"}
+"#;
+    let k = inspect(ll, Stage::Kernel, "k", &[]).unwrap();
+    let planes: Vec<_> = k
+        .implicit_imageblock_attachments
+        .iter()
+        .map(|plane| (plane.attachment, plane.data_rate, plane.binding))
+        .collect();
+    assert_eq!(planes, [(1, 0, 203), (1, 2, 205)]);
+}

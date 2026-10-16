@@ -309,10 +309,13 @@ fn a_fragment_reading_its_slice_alone_asks_for_no_variant() {
 
 /// The dropped variant declares no `Layer` output, so a device that cannot write `Layer` from a
 /// vertex function runs a pass of one layer exactly, where the variant that writes `Layer` is
-/// refused typed. The device keeps `VK_EXT_shader_viewport_index_layer`: without
-/// `shaderOutputLayer` it grants no `Layer` output (the capability a module declares at the 1.2
-/// floor is the feature's), so the refusal names the feature rather than failing as a
-/// requirement beyond the profile.
+/// refused typed when the device has no geometry stage to write it either (MoltenVK has none).
+/// The device keeps `VK_EXT_shader_viewport_index_layer`: without `shaderOutputLayer` it grants no
+/// `Layer` output (the capability a module declares at the 1.2 floor is the feature's), so the
+/// refusal names what would store the slice rather than failing as a requirement beyond the
+/// profile: `geometryShader`, as `amp_vertex_layer`'s slice (`slices[vid & 1]`) differs among a
+/// primitive's vertices, which only the synthesized geometry stage stores without the output
+/// MoltenVK hands to Metal.
 #[test]
 fn the_dropped_variant_needs_no_output_layer() {
     let Some(bc) = assemble(&engine_dir().join("vertex_amplification.ll")) else {
@@ -331,7 +334,7 @@ fn the_dropped_variant_needs_no_output_layer() {
             assert_eq!(u.feature, Feature::LayeredRendering);
             assert_eq!(
                 u.needs,
-                Needs::AnyOf(vec![vec![Capability::Feature(F::ShaderOutputLayer)]])
+                Needs::AnyOf(vec![vec![Capability::Feature(F::GeometryShader)]])
             );
         }
         other => panic!("{other:?}"),

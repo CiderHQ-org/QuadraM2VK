@@ -40,6 +40,14 @@
 //! ```
 //!
 //! Rows of a fixture whose assembler is not installed (`metal-as` off macOS) are skipped visibly.
+//!
+//! A second table, `golden_hashes_exact.tsv`, pins the same cells of the fixtures that sample,
+//! gather or compute a level of detail (their source declares an `air.sample_texture*`,
+//! `air.gather_texture*` or `air.calculate_*` intrinsic) under every exact form
+//! (`pipeline::testing::EXACT_SAMPLING`: Metal's sampler emulated, `SamplingPolicy::Exact`, and
+//! `DevicePolicy::exact_answers`), whose output the default policy's native device sampling never
+//! reaches. Its profiles' fingerprints are those of that policy. The bless writes both tables, under
+//! the same rule.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -54,6 +62,7 @@ use crate::metal::format::storage_image_choice;
 use crate::metal::{PixelFormat, VertexFormat};
 use crate::pipeline::testing::{
     engine_dir, fixtures_dir, link_standalone, llvm_assemble, metal_assemble, AssembleError,
+    EXACT_SAMPLING,
 };
 use crate::pipeline::{
     ColorAttachmentDescriptor, ComputePipelineDescriptor, FramebufferFetchInputs,
@@ -63,8 +72,53 @@ use crate::pipeline::{
 };
 use crate::Budget;
 
-/// The committed table, relative to the crate root.
-const TABLE: &str = "tests/golden_hashes.tsv";
+/// One golden table: where it is committed, the policy its devices compile under, and the
+/// fixtures it takes.
+#[derive(Clone, Copy)]
+struct Golden {
+    /// The committed table, relative to the crate root.
+    table: &'static str,
+    /// The first lines of its header, before the bless command.
+    title: &'static str,
+    policy: DevicePolicy,
+    /// Whether it takes a fixture, by its source text.
+    takes: fn(&str) -> bool,
+}
+
+/// The table of every fixture under the default policy.
+const DEFAULT: Golden = Golden {
+    table: "tests/golden_hashes.tsv",
+    title: "# Golden output hashes of the engine over the public fixtures x the committed\n\
+            # profiles (src/tests/golden_hashes.rs). Written by the bless; do not edit:\n",
+    policy: DevicePolicy::UNTRUSTED,
+    takes: every,
+};
+
+/// The table of the fixtures that sample under every exact form.
+const EXACT: Golden = Golden {
+    table: "tests/golden_hashes_exact.tsv",
+    title: "# Golden output hashes of the engine over the public fixtures that sample x the\n\
+            # committed profiles under EXACT_SAMPLING, every exact form\n\
+            # (src/tests/golden_hashes.rs). Written by the bless; do not edit:\n",
+    policy: EXACT_SAMPLING,
+    takes: samples,
+};
+
+fn every(_: &str) -> bool {
+    true
+}
+
+/// Whether a fixture's source declares a sample, a gather or a level-of-detail query: the
+/// intrinsics whose lowering `SamplingPolicy` chooses.
+fn samples(text: &str) -> bool {
+    [
+        "@air.sample_texture",
+        "@air.gather_texture",
+        "@air.calculate_",
+    ]
+    .iter()
+    .any(|family| text.contains(family))
+}
 
 const BLESS: &str = "cargo nextest run -p metal2vulkan --all-features --run-ignored ignored-only \
                      -E 'test(bless_golden_hashes)'";
@@ -323,8 +377,8 @@ fn multisampled_descriptor(
 
 // ---- Inputs ----
 
-/// Every committed profile as a device under the default policy, by stem.
-fn devices() -> Vec<(String, Device)> {
+/// Every committed profile as a device under `policy`, by stem.
+fn devices(policy: DevicePolicy) -> Vec<(String, Device)> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../metal2vulkan-validation/profiles");
     let mut out = Vec::new();
     for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
@@ -339,8 +393,7 @@ fn devices() -> Vec<(String, Device)> {
         let text = std::fs::read_to_string(&path).expect("read profile");
         let desc = DeviceDescription::from_khronos_json(&text, None)
             .unwrap_or_else(|e| panic!("{stem}: {e}"));
-        let dev =
-            Device::new(desc, DevicePolicy::default()).unwrap_or_else(|e| panic!("{stem}: {e}"));
+        let dev = Device::new(desc, policy).unwrap_or_else(|e| panic!("{stem}: {e}"));
         out.push((stem, dev));
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
@@ -358,11 +411,16 @@ fn ll_files(dir: &Path) -> Vec<PathBuf> {
     paths
 }
 
-/// Every fixture as (table name, path), named as the engine inventory names them.
-fn fixture_paths() -> Vec<(String, PathBuf)> {
+/// Every fixture `golden` takes as (table name, path), named as the engine inventory names them.
+fn fixture_paths(golden: Golden) -> Vec<(String, PathBuf)> {
     let mut out = Vec::new();
     for (prefix, dir) in [("", fixtures_dir()), ("engine/", engine_dir())] {
         for p in ll_files(&dir) {
+            let text =
+                std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+            if !(golden.takes)(&text) {
+                continue;
+            }
             let name = p.file_name().unwrap().to_string_lossy().into_owned();
             out.push((format!("{prefix}{name}"), p));
         }
@@ -666,12 +724,9 @@ impl Table {
         out
     }
 
-    fn render(&self) -> String {
+    fn render(&self, golden: Golden) -> String {
         let mut s = String::new();
-        s.push_str(
-            "# Golden output hashes of the engine over the public fixtures x the committed\n\
-             # profiles (src/tests/golden_hashes.rs). Written by the bless; do not edit:\n",
-        );
+        s.push_str(golden.title);
         s.push_str(&format!("#   {BLESS}\n"));
         s.push_str(
             "# A cell is the first 64 bits of SHA-256 over the final SPIR-V of its subject, or its\n\
@@ -738,14 +793,14 @@ impl Table {
     }
 }
 
-fn table_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(TABLE)
+fn table_path(golden: Golden) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(golden.table)
 }
 
 /// The committed table; `None` before the first bless.
-fn committed() -> Option<Table> {
-    let text = std::fs::read_to_string(table_path()).ok()?;
-    Some(Table::parse(&text).unwrap_or_else(|e| panic!("{TABLE}: {e}")))
+fn committed(golden: Golden) -> Option<Table> {
+    let text = std::fs::read_to_string(table_path(golden)).ok()?;
+    Some(Table::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", golden.table)))
 }
 
 /// The observed table and the fixtures that were skipped.
@@ -754,8 +809,8 @@ struct Observed {
     skipped: BTreeSet<String>,
 }
 
-fn observe(devices: &[(String, Device)]) -> Observed {
-    let paths = fixture_paths();
+fn observe(golden: Golden, devices: &[(String, Device)]) -> Observed {
+    let paths = fixture_paths(golden);
     let fixtures = parallel(paths.len(), |i| load(paths[i].0.clone(), &paths[i].1));
     let skipped = fixtures
         .iter()
@@ -885,14 +940,8 @@ fn check_storage_pair(observed: &Table, devices: &[(String, Device)]) -> usize {
 
 #[test]
 fn golden_hashes_match_the_table() {
-    let devices = devices();
-    let observed = observe(&devices);
-    if !observed.skipped.is_empty() {
-        eprintln!(
-            "SKIPPED {} fixture(s) whose assembler is not installed",
-            observed.skipped.len()
-        );
-    }
+    let devices = devices(DEFAULT.policy);
+    let observed = observe(DEFAULT, &devices);
     if !observed.skipped.contains(STORAGE_FIXTURE) {
         let swizzled = check_storage_pair(&observed.table, &devices);
         assert!(
@@ -900,23 +949,45 @@ fn golden_hashes_match_the_table() {
             "no committed profile swizzles a bgra8 storage texture"
         );
     }
-    let Some(committed) = committed() else {
-        panic!("{TABLE} is missing: bless it with\n  {BLESS}");
+    matches_the_table(DEFAULT, &devices, &observed);
+}
+
+/// The fixtures that sample, under every exact form: the sampler's emulation, which the default
+/// table's native device sampling does not reach.
+#[test]
+fn exact_golden_hashes_match_the_table() {
+    let devices = devices(EXACT.policy);
+    let observed = observe(EXACT, &devices);
+    matches_the_table(EXACT, &devices, &observed);
+}
+
+/// `golden`'s committed table holds `observed` cell for cell.
+fn matches_the_table(golden: Golden, devices: &[(String, Device)], observed: &Observed) {
+    let table = golden.table;
+    if !observed.skipped.is_empty() {
+        eprintln!(
+            "SKIPPED {} fixture(s) whose assembler is not installed",
+            observed.skipped.len()
+        );
+    }
+    let Some(committed) = committed(golden) else {
+        panic!("{table} is missing: bless it with\n  {BLESS}");
     };
-    let d = diff(&committed, &observed);
+    let d = diff(&committed, observed);
     if !d.changed.is_empty() {
         panic!(
-            "output changed under an unchanged key: {} cell(s) changed while their fixture source \
-             and profile fingerprint did not, so a cached artifact under the same key would be \
-             stale unless cache::SEMANTICS_VERSION (src/cache/mod.rs) is above its value at the \
-             table's last bless. Bump it if this change has not, and bless:\n  {BLESS}\n{}",
+            "{table}: output changed under an unchanged key: {} cell(s) changed while their \
+             fixture source and profile fingerprint did not, so a cached artifact under the same \
+             key would be stale unless cache::SEMANTICS_VERSION (src/cache/mod.rs) is above its \
+             value at the table's last bless. Bump it if this change has not, and bless:\n  \
+             {BLESS}\n{}",
             d.changed.len(),
             shown(&d.changed)
         );
     }
     if !d.stale.is_empty() {
         panic!(
-            "{TABLE} is stale: {} cell(s) are new, gone, or under a changed fixture source or \
+            "{table} is stale: {} cell(s) are new, gone, or under a changed fixture source or \
              profile (their keys changed, so no SEMANTICS_VERSION bump is needed). Bless it \
              with\n  {BLESS}\n{}",
             d.stale.len(),
@@ -924,41 +995,76 @@ fn golden_hashes_match_the_table() {
         );
     }
     eprintln!(
-        "{} rows x {} profiles match",
+        "{table}: {} rows x {} profiles match",
         observed.table.rows.len(),
         devices.len()
     );
 }
 
-/// Rewrite the table from what this build observes: `BLESS` above. Refuses when an assembler is
+/// Rewrite both tables from what this build observes: `BLESS` above. Refuses when an assembler is
 /// missing; names the cells that changed under an unchanged key, which need a
 /// `cache::SEMANTICS_VERSION` bump since the last bless (the master bless checks it).
 #[test]
 #[ignore]
 fn bless_golden_hashes() {
-    let devices = devices();
-    let observed = observe(&devices);
-    assert!(
-        observed.skipped.is_empty(),
-        "refusing to bless without every assembler (skipped: {:?}); bless on macOS",
-        observed.skipped
-    );
-    if let Some(committed) = committed() {
-        let d = diff(&committed, &observed);
-        if !d.changed.is_empty() {
-            eprintln!(
-                "{} cell(s) changed under an unchanged key: they need cache::SEMANTICS_VERSION \
-                 above its value at the table's last bless\n{}",
-                d.changed.len(),
-                shown(&d.changed)
-            );
+    for golden in [DEFAULT, EXACT] {
+        let table = golden.table;
+        let devices = devices(golden.policy);
+        let observed = observe(golden, &devices);
+        assert!(
+            observed.skipped.is_empty(),
+            "refusing to bless without every assembler (skipped: {:?}); bless on macOS",
+            observed.skipped
+        );
+        if let Some(committed) = committed(golden) {
+            let d = diff(&committed, &observed);
+            if !d.changed.is_empty() {
+                eprintln!(
+                    "{table}: {} cell(s) changed under an unchanged key: they need \
+                     cache::SEMANTICS_VERSION above its value at the table's last bless\n{}",
+                    d.changed.len(),
+                    shown(&d.changed)
+                );
+            }
         }
+        std::fs::write(table_path(golden), observed.table.render(golden)).expect("write the table");
+        eprintln!(
+            "{table}: blessed {} rows x {} profiles",
+            observed.table.rows.len(),
+            devices.len()
+        );
     }
-    std::fs::write(table_path(), observed.table.render()).expect("write the table");
-    eprintln!(
-        "blessed {} rows x {} profiles",
-        observed.table.rows.len(),
-        devices.len()
+}
+
+/// The exact table takes the fixtures whose sampling the policy changes, under the sampler's
+/// emulation and Metal's other answers: its fingerprints are not the default table's.
+#[test]
+fn the_exact_table_takes_the_sampling_fixtures_under_the_emulation() {
+    assert_eq!(EXACT.policy.sampling, crate::device::SamplingPolicy::Exact);
+    assert_eq!(
+        EXACT.policy,
+        DevicePolicy {
+            sampling: crate::device::SamplingPolicy::Exact,
+            ..DevicePolicy::default().exact_answers()
+        }
+    );
+    assert_eq!(DEFAULT.policy, DevicePolicy::default());
+    let all = fixture_paths(DEFAULT);
+    let taken = fixture_paths(EXACT);
+    assert!(!taken.is_empty() && taken.len() < all.len());
+    assert!(taken.iter().all(|f| all.contains(f)));
+    for anisotropic in ["engine/ani_cube_grad.ll", "engine/a4_sample_grad.ll"] {
+        assert!(
+            taken.iter().any(|(name, _)| name == anisotropic),
+            "{anisotropic}"
+        );
+    }
+    let (stem, default) = &devices(DEFAULT.policy)[0];
+    let (_, exact) = &devices(EXACT.policy)[0];
+    assert_ne!(
+        default.profile().fingerprint(),
+        exact.profile().fingerprint(),
+        "{stem}"
     );
 }
 
@@ -982,7 +1088,9 @@ fn the_table_format_round_trips() {
         ],
         rows,
     };
-    assert_eq!(Table::parse(&t.render()), Ok(t));
+    for golden in [DEFAULT, EXACT] {
+        assert_eq!(Table::parse(&t.render(golden)), Ok(t.clone()));
+    }
 }
 
 /// The rule itself on synthetic tables: a changed cell under unchanged inputs needs a bump; a

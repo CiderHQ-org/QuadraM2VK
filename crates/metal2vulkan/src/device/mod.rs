@@ -79,8 +79,9 @@ pub use profile::{
     GuestIsolation, HandleDomain, ImageCaps, Independence, Limits, MeshLimits, PointerDomain,
 };
 // The profile's facts a consumer or a validation tool reads: its descriptor capabilities, its
-// subgroup model and simdgroup tiers, and how it contains an out-of-bounds access.
-pub use profile::{Containment, DescriptorCaps, Robustness};
+// subgroup model and simdgroup tiers, how it contains an out-of-bounds access, and the Function
+// storage a thread holds.
+pub use profile::{Containment, DescriptorCaps, FunctionStorage, Robustness};
 pub use subgroup::{SimdClass, StageSubgroup, SubgroupModel, SubgroupSizes, Tier};
 // The driver defect a refusal names (`Needs::DriverDefect`).
 pub use profile::DriverWorkaround;

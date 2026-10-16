@@ -60,6 +60,7 @@ pub(super) struct OwnedRecording {
     pub(super) state: DrawState,
     pub(super) extended: Option<ExtendedDynamicState>,
     pub(super) draw: metal2vulkan::vk::DrawCommand,
+    pub(super) pair: Option<super::snapshot::Pair>,
 }
 
 /// A draw whose pipeline is being made (the module docs).
@@ -174,6 +175,7 @@ impl PendingDraw {
                     extended: owned.extended,
                     mesh: shared.mesh_draws.as_ref(),
                     draw: owned.draw,
+                    pair: owned.pair.clone(),
                 }
                 .record(&mut bound);
             }
@@ -181,7 +183,7 @@ impl PendingDraw {
             if let Some(query) = &self.query {
                 query.end(raw, cb);
             }
-            raw.end_command_buffer(cb).map_err(vulkan)?;
+            command_buffer.end_raw(cb).map_err(vulkan)?;
         }
         Ok(())
     }

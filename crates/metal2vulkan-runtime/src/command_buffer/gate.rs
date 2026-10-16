@@ -8,6 +8,18 @@
 //!   destroys the device on its own thread, before the drop returns. Were a runtime thread to
 //!   hold the last reference instead, the device would go on that thread, perhaps while the
 //!   program exits, which drivers do not survive (RADV ended such a process with `SIGSEGV`).
+//! - **And what fed its work** (`trails.rs`). A thread that made what the command buffer waited
+//!   for, and holds what it made it with past its signal, holds the device without holding the
+//!   command buffer: a pool piece between its making's settle and its give-back (a dispatch's or
+//!   a draw's pipeline, a capture's translation), the reaper with what such a piece gave back to a
+//!   released state, the twin-decode thread between a decode's end and its job's drop. Each opens
+//!   a trail before its signal and closes it after its last let-go; the command buffer takes the
+//!   device's trail mark as it completes, and `wait_until_completed` and its timed form, once the
+//!   gate opened, wait for the trails below it, so the program's drop right after the wait is the
+//!   device's last (`tests/teardown_threads.rs` holds a dispatch's piece between the two). The
+//!   gate itself, the status and the completed handlers do not wait for trails. Metal's
+//!   `waitUntilCompleted` returns after the completed handlers ended too (the M3 Max: 10 µs at the
+//!   median, 23 µs at p99, a handler of 20 ms included).
 //! - **What it does not cover.** A program that learns of the completion otherwise (from a
 //!   handler, an event the command buffer signals, or its status) may drop its last handles while
 //!   the runtime's thread still holds the command buffer; the device then goes on that thread.
@@ -127,7 +139,7 @@ impl Gate {
     }
 }
 
-/// A reference a runtime thread holds (the scheduler's, the completion thread's, a queue
+/// A reference a runtime thread holds (the scheduler's, a completion turn's, a queue
 /// context's transition), counted by a [`Gate`]. Its fields drop in declaration order: the
 /// reference first, then the count, so the gate cannot open while the reference is alive.
 pub(crate) struct Hold<T> {
@@ -157,6 +169,30 @@ impl<T> Hold<T> {
     /// Whether `self` and `other` hold the same value.
     pub(crate) fn same(&self, other: &Hold<T>) -> bool {
         Arc::ptr_eq(&self.value, &other.value)
+    }
+
+    /// Let go of the reference here, and leave the gate after, unless it is the value's last:
+    /// then the value, still counted by the gate, for the caller to let go of on another thread
+    /// ([`Last`]). Whether it is the last is decided as it goes (`Arc::into_inner`), so another
+    /// holder's drop meanwhile never leaves the value's drop here.
+    pub(crate) fn let_go_short_of_last(self) -> Option<Last<T>> {
+        let Hold { value, _count } = self;
+        Arc::into_inner(value).map(|value| Last { value, _count })
+    }
+}
+
+/// A [`Hold`]'s value where the hold was its last reference ([`Hold::let_go_short_of_last`]),
+/// still counted by its gate: dropped, it drops the value, then leaves the gate.
+pub(crate) struct Last<T> {
+    value: T,
+    _count: Count,
+}
+
+impl<T> Deref for Last<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.value
     }
 }
 

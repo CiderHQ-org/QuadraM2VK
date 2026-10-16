@@ -11,7 +11,7 @@ use super::degrade_notices::{decodes_blocks_its_way, shared_in_system_memory};
 use super::degrade_notices::{twins_blocks, twins_depth};
 use super::{validated_device, Messages, ScratchCache};
 use crate::gpu::TEST_DEVICE;
-use metal2vulkan::bind::MipmapFilterChain;
+use metal2vulkan::bind::{MipmapFilterChain, MipmapRule};
 use metal2vulkan::device::VkExtension;
 use metal2vulkan::error::Feature;
 use metal2vulkan::metal::format::{is_depth_stencil, x_channel};
@@ -1191,8 +1191,14 @@ pub(super) const MIPMAPS: [Degradation; 1] = [Degradation::MipmapsWithinSpread];
 /// Metal's filter, never by the device's blits (`runtime::mipmap_filter`): a format the filter
 /// computes, on a device with `shaderInt64` (every venue's), the chain far within any device's
 /// limits at these sizes.
-fn filtered(pf: PixelFormat, extent: [u64; 3], levels: u64, volume: bool) -> bool {
-    filter_chain(pf, extent, levels, volume).is_some()
+fn filtered(
+    pf: PixelFormat,
+    extent: [u64; 3],
+    levels: u64,
+    volume: bool,
+    rule: MipmapRule,
+) -> bool {
+    filter_chain(pf, extent, levels, volume, rule).is_some()
 }
 
 /// The chain [`filtered`] plans: where it may differ from an Apple M3 Max's answer
@@ -1203,6 +1209,7 @@ fn filter_chain(
     extent: [u64; 3],
     levels: u64,
     volume: bool,
+    rule: MipmapRule,
 ) -> Option<MipmapFilterChain> {
     let groups = [65535, 65535];
     let extent = extent.map(|e| e as u32);
@@ -1214,6 +1221,7 @@ fn filter_chain(
         levels as u32,
         volume,
         false,
+        rule,
         256,
         1 << 27,
         groups,
@@ -1249,7 +1257,9 @@ pub(super) const UPLOADS: [Degradation; 1] = [Degradation::RestrictedDepthUpload
 /// elsewhere Vulkan leaves such a value undefined (`VUID-vkCmdCopyBufferToImage-pRegions-07931`)
 /// and a device keeps it or stores it clamped to `[0, 1]`, which its upload announces once
 /// ([`UPLOADS`]): each value reads back as one of the two, and the form the device took is
-/// printed. So does a twin, which a copy into a texture without one reads.
+/// printed; where it keeps them, the upload of a negative value into a render target, and a copy
+/// out of a twin into one, switch its depth on to render a pass that loads it over its magnitude
+/// stand-in (`texture/signed_depth.rs`), unannounced.
 /// Copies between two textures with twins, and from a render target into one, land in both its
 /// images.
 #[test]
@@ -1538,6 +1548,7 @@ fn mipmaps_of_every_format_run_or_are_refused_typed() {
     let messages = Messages::default();
     {
         let device = validated_device(TEST_DEVICE, &messages, cache.path()).unwrap();
+        let rule = device.properties().metal_level.mipmap_rule();
         // What the device announced before its first mipmaps.
         messages.take_notices();
         let queue = device.new_command_queue().unwrap();
@@ -1577,13 +1588,13 @@ fn mipmaps_of_every_format_run_or_are_refused_typed() {
                 // An RGBX format's chain is not yet held (Metal stores X = green in its levels,
                 // zeros for `RGBX8Snorm`'s): refused `NotImplemented(MipmapGeneration)`, below.
                 let computed =
-                    !x_channel(pf) && (filtered(pf, extent, levels, volume) || picked(pf));
+                    !x_channel(pf) && (filtered(pf, extent, levels, volume, rule) || picked(pf));
                 match blit.generate_mipmaps(&t) {
                     // Plain Metal leaves a depth or stencil texture as it is.
                     Ok(()) if is_depth_stencil(pf) => outcome.push("left as it is"),
                     Ok(()) if computed => {
                         exact += 1;
-                        if let Some(chain) = filter_chain(pf, extent, levels, volume) {
+                        if let Some(chain) = filter_chain(pf, extent, levels, volume, rule) {
                             first.extend(forced(&[
                                 (Degradation::MipmapsAsAppleM4, chain.unlike_an_m3),
                                 (Degradation::MipmapTieRounding, chain.near_ties),

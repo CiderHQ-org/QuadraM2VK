@@ -1,7 +1,7 @@
-// Owned fixture (WP-RFL, DESIGN D384 item 1, docs/TODO.md 8.19): the kernel the argument-encoder
+// Owned fixture: the kernel the argument-encoder
 // GPU test runs. argument_buffers' kernel, but for its nested argument buffer, which holds a
 // pointer and an inline constant here in place of a texture: the translator does not implement a
-// texture or sampler loaded from a nested argument buffer (DESIGN D285 item 19). The other members
+// texture or sampler loaded from a nested argument buffer. The other members
 // and their ids are argument_buffers', whose encoders Metal measured. Written for this repository;
 // no third-party source. Loop-free.
 #include <metal_stdlib>

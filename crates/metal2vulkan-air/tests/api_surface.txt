@@ -1,6 +1,6 @@
-# The public surface of metal2vulkan-air (DESIGN D337 item 2), one line per item:
-# "<module> <name> <kind>", read from source by tests/api_surface.rs, which explains the kinds.
-# A removed or changed line is a breaking change, released as a minor version with metal2vulkan.
+# The public surface of metal2vulkan-air, one line per item: "<module> <name> <kind>", read from
+# source by tests/api_surface.rs, which explains the kinds. A removed or changed line is a breaking
+# change, released as a minor version with metal2vulkan.
 abi AbiHandle enum(E)
 abi AbiInt enum(E)
 abi AccelerationStructureKind enum(E)

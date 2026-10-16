@@ -1,4 +1,4 @@
-// Owned fixture (WP-A1, D126): what `air.convert` from a float to `i1` computes. The front end
+// Owned fixture: what `air.convert` from a float to `i1` computes. The front end
 // emits it for every explicit or contextual conversion of a float to `bool` (`bool(x)`,
 // `static_cast<bool>(x)`, `(bool)x`, `x ? a : b`): a scalar `float` is
 // `air.convert.u.i1.f.f32`, a scalar `half` is widened by `fpext` first and converted the same

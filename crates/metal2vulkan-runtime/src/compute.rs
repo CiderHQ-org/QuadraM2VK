@@ -143,7 +143,9 @@ pub(super) fn imageblock_size(width: u64, height: u64) -> Result<ImageblockSize,
 }
 
 /// A compute encoder (`MTLComputeCommandEncoder`): `Send`, not `Sync`; `end_encoding` consumes
-/// it.
+/// it. Each object a call binds is held until its command buffer completes (or, never committed,
+/// is released), as Metal holds what an encoder was handed: one a later call replaced or unbound
+/// before any dispatch used it, and one bound after the last dispatch, too.
 pub struct ComputeCommandEncoder {
     core: EncoderCore,
     dispatch_type: DispatchType,
@@ -226,7 +228,8 @@ impl CommandBuffer {
             indirect_stage_in: None,
             residency: self.inherited_residency(false),
             captures: Captures::default(),
-            log: self.device().shared().rebinds.any().then(CallLog::new),
+            log: (self.device().shared().rebinds.any())
+                .then(|| self.device().shared().scheduler.spare_logs().compute()),
             dispatches: 0,
         })
     }
@@ -259,7 +262,8 @@ impl ComputeCommandEncoder {
 
     /// End an encoder made by [`replaying`](Self::replaying): what it recorded, and what it made
     /// resident.
-    pub(super) fn finish_replay(self) -> Result<(Replayed, Option<Residency>), Error> {
+    pub(super) fn finish_replay(mut self) -> Result<(Replayed, Option<Residency>), Error> {
+        self.table.let_go_all(&mut self.core);
         let replayed = self.core.finish_replay()?;
         Ok((replayed, Some(self.residency)))
     }
@@ -353,7 +357,7 @@ impl ComputeCommandEncoder {
     ) -> Result<(), Error> {
         self.log(|_| ComputeCall::Buffer(buffer.cloned(), offset, index));
         self.table
-            .set_buffer(&self.core, "set_buffer", buffer, offset, index)
+            .set_buffer(&mut self.core, "set_buffer", buffer, offset, index)
     }
 
     /// `setBuffers:offsets:withRange:`: `buffers[i]` at offset `offsets[i]` at index
@@ -369,7 +373,7 @@ impl ComputeCommandEncoder {
             ComputeCall::Buffers(log.buffer_span(buffers), log.word_span(offsets), first)
         });
         self.table
-            .set_buffers(&self.core, "set_buffers", buffers, offsets, first)
+            .set_buffers(&mut self.core, "set_buffers", buffers, offsets, first)
     }
 
     /// `setBufferOffset:atIndex:`, which clears the index's attribute stride
@@ -384,7 +388,7 @@ impl ComputeCommandEncoder {
     pub fn set_buffer_offset(&mut self, offset: u64, index: u32) -> Result<(), Error> {
         self.log(|_| ComputeCall::BufferOffset(offset, index));
         self.table
-            .set_buffer_offset(&self.core, "set_buffer_offset", offset, index)
+            .set_buffer_offset(&mut self.core, "set_buffer_offset", offset, index)
     }
 
     /// `setBuffer:offset:attributeStride:atIndex:`: as [`set_buffer`](Self::set_buffer), the
@@ -403,7 +407,7 @@ impl ComputeCommandEncoder {
     ) -> Result<(), Error> {
         self.log(|_| ComputeCall::BufferWithStride(buffer.cloned(), offset, stride, index));
         self.table.set_buffer_with_stride(
-            &self.core,
+            &mut self.core,
             "set_buffer_with_stride",
             buffer,
             offset,
@@ -428,7 +432,7 @@ impl ComputeCommandEncoder {
             ComputeCall::BuffersWithStrides(buffers, offsets, log.word_span(strides), first)
         });
         self.table.set_buffers_with_strides(
-            &self.core,
+            &mut self.core,
             "set_buffers_with_strides",
             buffers,
             offsets,
@@ -449,7 +453,7 @@ impl ComputeCommandEncoder {
     ) -> Result<(), Error> {
         self.log(|_| ComputeCall::BufferOffsetWithStride(offset, stride, index));
         self.table.set_buffer_offset_with_stride(
-            &self.core,
+            &mut self.core,
             "set_buffer_offset_with_stride",
             offset,
             stride,
@@ -468,7 +472,7 @@ impl ComputeCommandEncoder {
     pub fn set_bytes(&mut self, bytes: &[u8], index: u32) -> Result<(), Error> {
         self.log(|log| ComputeCall::Bytes(log.byte_span(bytes), index));
         self.table
-            .set_bytes(&self.core, "set_bytes", bytes, None, index)
+            .set_bytes(&mut self.core, "set_bytes", bytes, None, index)
     }
 
     /// `setBytes:length:attributeStride:atIndex:`: as [`set_bytes`](Self::set_bytes), the
@@ -484,7 +488,7 @@ impl ComputeCommandEncoder {
     ) -> Result<(), Error> {
         self.log(|log| ComputeCall::BytesWithStride(log.byte_span(bytes), stride, index));
         self.table.set_bytes(
-            &self.core,
+            &mut self.core,
             "set_bytes_with_stride",
             bytes,
             Some(stride),
@@ -503,8 +507,12 @@ impl ComputeCommandEncoder {
         index: u32,
     ) -> Result<(), Error> {
         self.log(|_| ComputeCall::FunctionTable(table.cloned(), index));
-        self.table
-            .set_function_tables(&self.core, "set_visible_function_table", &[table], index)
+        self.table.set_function_tables(
+            &mut self.core,
+            "set_visible_function_table",
+            &[table],
+            index,
+        )
     }
 
     /// `setVisibleFunctionTables:withBufferRange:`: `tables[i]` at buffer index `first + i`.
@@ -519,7 +527,7 @@ impl ComputeCommandEncoder {
             ComputeCall::FunctionTables(tables.iter().map(|table| table.cloned()).collect(), first)
         });
         self.table
-            .set_function_tables(&self.core, "set_visible_function_tables", tables, first)
+            .set_function_tables(&mut self.core, "set_visible_function_tables", tables, first)
     }
 
     /// `setTexture:atIndex:` (`None` unbinds the index). Refused: an index past the table, a
@@ -528,7 +536,7 @@ impl ComputeCommandEncoder {
     pub fn set_texture(&mut self, texture: Option<&Texture>, index: u32) -> Result<(), Error> {
         self.log(|_| ComputeCall::Texture(texture.cloned(), index));
         self.table
-            .set_textures(&self.core, "set_texture", &[texture], index)
+            .set_textures(&mut self.core, "set_texture", &[texture], index)
     }
 
     /// `setTextures:withRange:`: `textures[i]` at index `first + i`. Refused as
@@ -536,7 +544,7 @@ impl ComputeCommandEncoder {
     pub fn set_textures(&mut self, textures: &[Option<&Texture>], first: u32) -> Result<(), Error> {
         self.log(|log| ComputeCall::Textures(log.texture_span(textures), first));
         self.table
-            .set_textures(&self.core, "set_textures", textures, first)
+            .set_textures(&mut self.core, "set_textures", textures, first)
     }
 
     /// `setSamplerState:atIndex:` (`None` unbinds the index). Refused: an index past the table, a
@@ -548,7 +556,7 @@ impl ComputeCommandEncoder {
     ) -> Result<(), Error> {
         self.log(|_| ComputeCall::Sampler(sampler.cloned(), index));
         self.table
-            .set_samplers(&self.core, "set_sampler_state", &[sampler], None, index)
+            .set_samplers(&mut self.core, "set_sampler_state", &[sampler], None, index)
     }
 
     /// `setSamplerStates:withRange:`: `samplers[i]` at index `first + i`. Refused as
@@ -565,7 +573,7 @@ impl ComputeCommandEncoder {
             )
         });
         self.table
-            .set_samplers(&self.core, "set_sampler_states", samplers, None, first)
+            .set_samplers(&mut self.core, "set_sampler_states", samplers, None, first)
     }
 
     /// `setSamplerState:lodMinClamp:lodMaxClamp:atIndex:`: the state with its LOD clamps
@@ -584,7 +592,7 @@ impl ComputeCommandEncoder {
             ComputeCall::SamplerWithLodClamps(sampler.cloned(), lod_min_clamp, lod_max_clamp, index)
         });
         self.table.set_samplers(
-            &self.core,
+            &mut self.core,
             "set_sampler_state_with_lod_clamps",
             &[sampler],
             Some((&[lod_min_clamp], &[lod_max_clamp])),
@@ -612,7 +620,7 @@ impl ComputeCommandEncoder {
             }))
         });
         self.table.set_samplers(
-            &self.core,
+            &mut self.core,
             "set_sampler_states_with_lod_clamps",
             samplers,
             Some((lod_min_clamps, lod_max_clamps)),
@@ -1179,8 +1187,10 @@ impl ComputeCommandEncoder {
         }
     }
 
-    /// Set the encoder's state back to `state`.
+    /// Set the encoder's state back to `state`: what the table it replaces binds is held until
+    /// the command buffer completes (`ArgumentTable::let_go_all`).
     pub(super) fn restore_state(&mut self, state: EncoderState) {
+        self.table.let_go_all(&mut self.core);
         self.pipeline = state.pipeline;
         self.table = state.table;
         self.threadgroup_lengths = state.threadgroup_lengths;
@@ -1194,8 +1204,10 @@ impl ComputeCommandEncoder {
         &mut self.captures
     }
 
-    /// `endEncoding`.
-    pub fn end_encoding(self) -> Result<(), Error> {
+    /// `endEncoding`. What it binds is held until the command buffer completes, as Metal holds
+    /// what an encoder was handed.
+    pub fn end_encoding(mut self) -> Result<(), Error> {
+        self.table.let_go_all(&mut self.core);
         // Its log, which its command buffer keeps where a rebind may need it (`replay.rs`).
         let replay = self.log.map(|log| Replay::Compute {
             dispatch_type: self.dispatch_type,
@@ -1560,6 +1572,7 @@ fn record(
             .map(|blob| (Stage::Kernel, blob))
             .collect(),
         mesh: None,
+        tessellation: None,
     };
     let mut uses = binding::command_uses(call, &plan, &command, &bound_tables, None, None)?;
     if let Some((call, _)) = &flat {
@@ -1721,7 +1734,7 @@ fn record(
                 };
                 core.pend(next, pending)?;
             }
-            core.shadows_used(&shadows, &uses);
+            core.shadows_used(&shadows, &uses, &[]);
             if let Some(creation) = creation {
                 core.executed(|| {
                     Execution::made_later(
@@ -1740,7 +1753,7 @@ fn record(
                 // below), and the pipelines are the variant's, one per region.
                 unsafe { recording.record(raw, command_buffer, made) }
             });
-            core.shadows_used(&shadows, &uses);
+            core.shadows_used(&shadows, &uses, &[]);
             core.executed(|| {
                 Execution::new(
                     ExecutedPipeline::Compute(Arc::clone(variant.shared_pipeline())),

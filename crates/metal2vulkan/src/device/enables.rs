@@ -205,12 +205,13 @@ exposures! {
         ShaderUniformBufferArrayDynamicIndexing, ShaderSampledImageArrayDynamicIndexing,
         ShaderStorageBufferArrayDynamicIndexing, ShaderStorageImageArrayDynamicIndexing,
         MultiViewport, DepthBiasClamp, ShaderResourceResidency, OcclusionQueryPrecise,
-        FullDrawIndexUint32,
+        FullDrawIndexUint32, ShaderTessellationAndGeometryPointSize,
     ];
     // `VkPhysicalDeviceVulkan11Features`.
     Core(v(1)) => [
         StorageBuffer16BitAccess, UniformAndStorageBuffer16BitAccess, StoragePushConstant16,
         StorageInputOutput16, Multiview, ShaderDrawParameters, MultiviewTessellationShader,
+        MultiviewGeometryShader,
     ];
     // `VkPhysicalDeviceVulkan12Features`.
     Core(v(2)) => [
@@ -280,6 +281,8 @@ exposures! {
     ];
     Extension(&[E::KhrShaderMaximalReconvergence]) => [ShaderMaximalReconvergence];
     Extension(&[E::KhrShaderQuadControl]) => [ShaderQuadControl];
+    Extension(&[E::ExtAttachmentFeedbackLoopLayout]) => [AttachmentFeedbackLoopLayout];
+    Extension(&[E::ExtExtendedDynamicState3]) => [ExtendedDynamicState3ColorWriteMask];
     Extension(&[E::KhrShaderSubgroupUniformControlFlow]) => [ShaderSubgroupUniformControlFlow];
     Extension(DERIVATIVES) => [ComputeDerivativeGroupQuads, ComputeDerivativeGroupLinear];
     Extension(&[E::KhrMaintenance8]) => [Maintenance8];
@@ -347,6 +350,8 @@ fn facts(ext: VkExtension) -> ExtensionFacts {
         | E::ExtDepthClampControl
         | E::ExtSampleLocations
         | E::ExtPrimitiveTopologyListRestart
+        | E::ExtAttachmentFeedbackLoopLayout
+        | E::ExtExtendedDynamicState3
         | E::ImgFormatPvrtc
         | E::KhrPortabilitySubset
         | E::ExtShaderAtomicFloat => fact(true, None, &[]),
@@ -480,6 +485,11 @@ pub const FEATURE_NEEDS: &[(VkFeature, VkFeature, &str)] = &[
         VkFeature::MultiviewTessellationShader,
         VkFeature::Multiview,
         "VUID-VkPhysicalDeviceMultiviewFeatures-multiviewTessellationShader-00581",
+    ),
+    (
+        VkFeature::MultiviewGeometryShader,
+        VkFeature::Multiview,
+        "VUID-VkPhysicalDeviceMultiviewFeatures-multiviewGeometryShader-00580",
     ),
 ];
 

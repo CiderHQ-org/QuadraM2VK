@@ -54,12 +54,10 @@ fn missing_support(context: &VulkanContext, info: &vk::ImageCreateInfo<'_>) -> V
     let mut missing: Vec<String> = [ExecutorFeature::SparseBinding, residency]
         .into_iter()
         .filter(|feature| !context.sparse_images.features.contains(feature))
-        .map(|feature| format!("{} (a sparse case texture, DESIGN D264)", feature.name()))
+        .map(|feature| format!("{} (a sparse case texture)", feature.name()))
         .collect();
     if !context.sparse_images.queue {
-        missing.push(
-            "a queue with VK_QUEUE_SPARSE_BINDING_BIT (a sparse case texture, DESIGN D264)".into(),
-        );
+        missing.push("a queue with VK_QUEUE_SPARSE_BINDING_BIT (a sparse case texture)".into());
     }
     missing
 }

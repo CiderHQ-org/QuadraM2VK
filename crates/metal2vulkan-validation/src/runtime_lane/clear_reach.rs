@@ -538,11 +538,11 @@ fn a_clear_reaches_past_the_render_area_as_metal_s() {
     quiet(lane, &messages);
 }
 
-/// A clear of a `half` NaN writes Metal's canonical quiet NaN (RRS probe 14's
-/// `nan_1_half_nan`: `0x7e00`) over the reach any clear has, through the scratch image of an
+/// A clear of a `half` NaN writes Metal's canonical quiet NaN (Metal probe case `nan_1_half_nan` on
+/// the M3 Max and an M4: `0x7e00`) over the reach any clear has, through the scratch image of an
 /// integer format the runtime clears it in (`nan_clear.rs`): to the tiles in a pass with a draw
-/// call, over the whole attachment in one without, and through a stand-in. A 4-sample
-/// attachment's clear runs valid (Metal's resolve of its NaN samples is unmeasured).
+/// call, over the whole attachment in one without, and through a stand-in. A 4-sample attachment's
+/// clear runs valid (Metal's resolve of its NaN samples is unmeasured).
 #[test]
 fn a_nan_clear_reaches_as_metal_s() {
     let (messages, _cache, lane) = lane();

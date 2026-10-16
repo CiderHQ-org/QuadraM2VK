@@ -239,12 +239,15 @@ fn backed(pf: PixelFormat) -> Result<(), BufferTextureProblem> {
 /// `pf`'s alignment in a buffer ([`LINEAR_ALIGNMENT`]) on a device answering at `level`, or why
 /// no buffer can back it: also a format the level describes none of
 /// ([`MetalLevel::describes`]), whose alignment queries Metal asserts on (EVs XRR2-pla1-m4 and
-/// XRR2-pla1-m3).
+/// XRR2-pla1-m3), and one it describes as a depth or a stencil format, `AnyDepth` and
+/// `AnyStencil` among them, which Vulkan has no format for ("Linear textures do not support
+/// depth/stencil pixel formats", EV M27-lin1-m3).
 pub(super) fn linear_alignment(
     pf: PixelFormat,
     level: MetalLevel,
 ) -> Result<u64, BufferTextureProblem> {
-    if !level.describes(pf) {
+    let info = level.pixel_format_info(u64::from(pf.as_raw()));
+    if !info.describes_a_format() || info.depth_or_stencil() {
         return Err(BufferTextureProblem::NotLinear { pixel_format: pf });
     }
     backed(pf).map(|()| LINEAR_ALIGNMENT)
@@ -796,9 +799,10 @@ pub(super) fn only_reads(usage: TextureUsage) -> bool {
 /// memory locations"). So a texture that renders or writes is a shadow: a write back of what was
 /// read would undo the program's write of the bytes meanwhile, which Metal keeps, and lavapipe
 /// reads the bytes its 4-texel blocks reach past a row's texels and writes them back, a signaling
-/// NaN's bits quieted. A texture that only reads meets the bytes at its first move alone, which
-/// keeps them where the driver's move does (`docs/FAST-PATHS.md`'s known gap, which tight rows
-/// share): the policy's default aliases them, and `PaddedReadsPolicy::Shadow` keeps the shadow.
+/// NaN's bits quieted. A texture that only reads meets the bytes at its first move alone, across
+/// which the host keeps them (`texture/first_move.rs`'s `Keep`; a CPU write to them meanwhile is
+/// undone, `docs/FAST-PATHS.md`'s known gaps): the policy's default aliases them, and
+/// `PaddedReadsPolicy::Shadow` keeps the shadow.
 pub(super) fn holding(
     layout: &BufferLayout,
     usage: TextureUsage,

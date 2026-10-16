@@ -1,4 +1,4 @@
-// Owned fixture (WP-WRG, DESIGN D307, TODO 1.7): which texels Metal's samples and gathers read at
+// Owned fixture: which texels Metal's samples and gathers read at
 // the positions where its arithmetic decides them. Per axis Metal wraps a normalized coordinate
 // into one period first, under repeat and mirrored repeat, then rounds its product with the size
 // to `float`, ties away from zero; the filters read their footprints from that position. The cases

@@ -616,7 +616,7 @@ fn a_denormal_the_device_keeps_stays_open() {
     for part in [
         "within Apple's stated accuracy",
         "DeviceDenormals",
-        "D253.12",
+        "a flushing select after each operation",
         "air.fast_sinpi.f32",
     ] {
         assert!(open.detail().contains(part), "{part}: {open:?}");

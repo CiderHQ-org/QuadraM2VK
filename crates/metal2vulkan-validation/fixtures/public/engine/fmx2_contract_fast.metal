@@ -1,5 +1,5 @@
-// Owned fixture (WP-FMX2, DESIGN D279): which multiply-add pairs Metal fuses, compiled with the
-// default fast math. WP-FMX's probe (D253.2) measured one shape: a `fast` product used once by a
+// Owned fixture: which multiply-add pairs Metal fuses, compiled with the
+// default fast math. A Metal probe measured one shape: a `fast` product used once by a
 // `fast` addition, which Metal rounds once. This kernel writes the shapes around it, each shape k
 // on its own operands `v = x + 8k` (`a, b, c, d, e, s = v[0 .. 5]`), so the front end shares no
 // product between shapes:

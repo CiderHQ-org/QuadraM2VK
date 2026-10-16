@@ -1,4 +1,4 @@
-// Owned fixture (WP-UNI, DESIGN D311 item 5, S2, TODO 8.19): buffers whose reflected bindings
+// Owned fixture: buffers whose reflected bindings
 // Metal's `newArgumentEncoderWithBufferBinding:` lays out. `encoders_plain` takes plain buffers of
 // one struct each: single members of each scalar, vector, packed vector and matrix type, arrays,
 // members in both orders, a nested struct and an array of them, and atomics. `encoders_args` takes

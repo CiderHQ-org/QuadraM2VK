@@ -115,7 +115,7 @@ impl GraphicsState {
     ) -> Option<(Arc<RenderVariant>, Arc<BindingPlan>)> {
         // A post-tessellation vertex function's pipeline tessellates where the descriptor's
         // tessellation state is `None` (Metal's defaults) too.
-        if self.base().graphics.tessellation.is_some() {
+        if crate::tessellation::patches(&self.base().graphics).is_some() {
             return None;
         }
         let predicting = self.predicting_variant()?;

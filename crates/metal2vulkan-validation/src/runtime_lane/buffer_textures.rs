@@ -387,11 +387,11 @@ fn textures_over_buffers_lie_where_metal_lays_them() {
     });
 }
 
-/// A `Private` texture buffer is made shareable, as Metal makes one (CRF probe 2), and a texture
-/// opened from its handle is a texture buffer over the same texels, with a resource ID of its own:
-/// the case's texels uploaded by a blit into the first, the case run with the second bound, and the
-/// first copied out give the case's own output (`TEXEL_CASES`' writer, which writes four bytes of a
-/// texture buffer). A view of it is not shareable.
+/// A `Private` texture buffer is made shareable, as Metal makes one (a Metal probe on the M3 Max
+/// and an M4), and a texture opened from its handle is a texture buffer over the same texels, with
+/// a resource ID of its own: the case's texels uploaded by a blit into the first, the case run with
+/// the second bound, and the first copied out give the case's own output (`TEXEL_CASES`' writer,
+/// which writes four bytes of a texture buffer). A view of it is not shareable.
 #[test]
 fn a_shared_texture_buffer_opens_over_its_texels() {
     on_device(|device| {

@@ -9,8 +9,9 @@
 //! compiles that module through its own path: the oracle assembles the typed-pointer spelling
 //! with `metal-as` and loads it like any other library, the engine candidate assembles the
 //! opaque-pointer spelling with `llvm-as` and compiles it in its compile worker beside the case's
-//! own library. The spellings differ only in how metadata names the function (no body uses a
-//! pointer), so both executors run one program.
+//! own library. The spellings differ only in how pointers are spelled: in metadata naming a
+//! function, and in a mesh function's output handle and payload, so both executors run one
+//! program.
 //!
 //! - **Passthrough vertex** (a fragment case): Metal's fullscreen triangle, `a = (vid & 1, vid >>
 //!   1)`, position `(4a - 1, 0, 1)`, covering clip space with the vertices `(-1, -1)`, `(3, -1)`,
@@ -20,6 +21,24 @@
 //! - **Observer fragment** (a vertex case with a vertex observation): reads the position, or the
 //!   varying the observation's location names (the vertex function's varyings in output order),
 //!   and writes it to render target 0 padded to four lanes as `(v, 0, 0, 1)` fills them.
+//! - **Mesh observer fragment** (a rasterizing mesh case that states a mesh observation): the same
+//!   fragment function over the mesh function's outputs: the position, or the vertex or primitive
+//!   data field the observation names, under its user key (Metal links a mesh function's vertex
+//!   and primitive data to fragment inputs by user key alike), the type the mesh function writes
+//!   it with (`air.set_vertex_data_mesh.<T>`, `air.set_primitive_data_mesh.<T>`), and a primitive
+//!   data field read flat, its one value over each primitive.
+//! - **Launch observer** (an object case that states [`MeshObservation::Launch`]): a mesh
+//!   function in the mesh partner's place, and the observer fragment of the primitive data it
+//!   writes. Each mesh threadgroup the object function launches draws, from its thread 0, one row
+//!   of render target 0 (`x + X * (y + Y * z)` for its position `(x, y, z)` in the launched grid
+//!   of `(X, Y, Z)` threadgroups): pixel 0 holds `(X, Y, Z, row)`, and pixel `1 + k` the payload's
+//!   words `4k` to `4k + 3`, read at its declared size, a word past it 0. Each pixel is one
+//!   triangle over its centre and no other pixel's, as the owned `mesh_draws` fixture draws, whose
+//!   one primitive data field (a `uint4`, read flat) the observer writes.
+//! - **Payload object** (a mesh case that states an [`ObjectLaunch`]): an object function in the
+//!   object partner's place. Thread 0 of each object threadgroup writes the authored payload's
+//!   words and sets the authored grid of mesh threadgroups, so every object threadgroup launches
+//!   the same mesh threadgroups over the same payload.
 //!
 //! The values are the ones the oracle's generated MSL wrote through `ORACLE_ABI` v34 (and that
 //! the old engine's companions mirror), rule for rule, so a re-recorded Metal observation of an
@@ -30,10 +49,18 @@ mod air;
 pub(crate) mod tests;
 
 use crate::air::reflect::TextureComponent;
-use crate::case::{AuthoredCase, Stage, TextureFormat, VertexObservation};
+use crate::case::{
+    AuthoredCase, MeshObservation, ObjectLaunch, Stage, TextureFormat, VertexObservation,
+};
 use crate::check::interface::AirInterface;
-use metal2vulkan_air::abi::{AirAbi, Builtin, EntryPoint, OutputRole, ParamRole, UserKey};
-use metal2vulkan_air::ir::{InstKind, Module, Type, TypeId};
+use crate::executor_contract::mesh::{launch_payload_words, object_payload_bytes};
+use metal2vulkan_air::abi::{
+    AirAbi, Builtin, EntryPoint, MeshField, MeshFieldRole, MeshOutputs, OutputRole, ParamRole,
+    UserKey,
+};
+use metal2vulkan_air::intrinsics::{AirIntrinsic, Elem, Mesh, NumTy};
+use metal2vulkan_air::ir::{Callee, Const, InstKind, Module, Type, TypeId, Value};
+use std::collections::BTreeSet;
 
 pub use air::Spelling;
 
@@ -41,22 +68,55 @@ pub use air::Spelling;
 pub const PASSTHROUGH_VERTEX_ENTRY: &str = "metal2vulkan_passthrough_vertex";
 /// The entry of a generated observer fragment function.
 pub const OBSERVER_FRAGMENT_ENTRY: &str = "metal2vulkan_observer_fragment";
+/// The entry of a generated launch observer's mesh function.
+pub const OBSERVER_MESH_ENTRY: &str = "metal2vulkan_observer_mesh";
+/// The entry of a generated payload object function.
+pub const PAYLOAD_OBJECT_ENTRY: &str = "metal2vulkan_payload_object";
+/// The user key of the launch observer's primitive data field, which its mesh function writes and
+/// its observer fragment reads: the key Metal's compiler gives a `uint4` field named `observed`.
+const LAUNCH_KEY: &[u8] = b"generated(8observedDv4_j)";
 
-/// The generated stage an authored graphics case draws with.
+/// The generated stages an authored graphics case draws with.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Companion {
     /// The vertex function of a fragment case.
     PassthroughVertex(PassthroughVertex),
     /// The fragment function of a vertex case observed through its position or a varying.
     ObserverFragment(ObserverFragment),
+    /// The stages a mesh render pipeline's draw takes from its observation.
+    MeshStages(MeshStages),
 }
 
 impl Companion {
-    /// The companion's entry point.
+    /// The entry of the companion's first function in pipeline order: its one function, but for
+    /// mesh stages, whose others [`stage_entry`](Self::stage_entry) names.
     pub fn entry(&self) -> &'static str {
         match self {
             Companion::PassthroughVertex(_) => PASSTHROUGH_VERTEX_ENTRY,
             Companion::ObserverFragment(_) => OBSERVER_FRAGMENT_ENTRY,
+            Companion::MeshStages(stages) => match (&stages.object, &stages.mesh) {
+                (Some(_), _) => PAYLOAD_OBJECT_ENTRY,
+                (None, Some(_)) => OBSERVER_MESH_ENTRY,
+                (None, None) => OBSERVER_FRAGMENT_ENTRY,
+            },
+        }
+    }
+
+    /// The entry of the companion's function at `stage`, `None` where it generates none.
+    pub fn stage_entry(&self, stage: Stage) -> Option<&'static str> {
+        match (self, stage) {
+            (Companion::PassthroughVertex(_), Stage::Vertex) => Some(PASSTHROUGH_VERTEX_ENTRY),
+            (Companion::ObserverFragment(_), Stage::Fragment) => Some(OBSERVER_FRAGMENT_ENTRY),
+            (Companion::MeshStages(stages), Stage::Object) => {
+                stages.object.as_ref().map(|_| PAYLOAD_OBJECT_ENTRY)
+            }
+            (Companion::MeshStages(stages), Stage::Mesh) => {
+                stages.mesh.as_ref().map(|_| OBSERVER_MESH_ENTRY)
+            }
+            (Companion::MeshStages(stages), Stage::Fragment) => {
+                stages.fragment.as_ref().map(|_| OBSERVER_FRAGMENT_ENTRY)
+            }
+            _ => None,
         }
     }
 
@@ -116,6 +176,56 @@ pub enum PassthroughValue {
     Authored { lanes: [u32; 4] },
 }
 
+/// The generated stages of an object or mesh case's mesh render pipeline, each in the place of a
+/// partner its draw does not name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MeshStages {
+    /// The object function of a mesh case's object launch.
+    pub object: Option<PayloadObject>,
+    /// The mesh function of an object case's launch observation.
+    pub mesh: Option<LaunchObserver>,
+    /// The observer fragment: of a mesh case's observation, or of the launch observer's rows.
+    pub fragment: Option<ObserverFragment>,
+}
+
+/// A mesh function that draws what an object function launches into render target 0, a row for
+/// each mesh threadgroup ([`MeshObservation::Launch`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LaunchObserver {
+    /// The object function's payload, which the mesh function declares as its own; `None` where
+    /// the object function declares none.
+    pub payload: Option<LaunchPayload>,
+    /// Render target 0's width and height, which place each row's pixels.
+    pub target: [u32; 2],
+}
+
+/// The payload a launch observer reads: the object function's declared size in 4-byte words, and
+/// its declared alignment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LaunchPayload {
+    pub words: u32,
+    pub align: u32,
+}
+
+/// An object function that writes a payload and launches a grid of mesh threadgroups
+/// ([`ObjectLaunch`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PayloadObject {
+    /// The payload's words, which thread 0 of each object threadgroup writes.
+    pub words: Vec<u32>,
+    /// The payload's declared alignment: the mesh function's, at least 4.
+    pub align: u32,
+    /// The mesh threadgroups each object threadgroup launches.
+    pub mesh_threadgroups: [u32; 3],
+}
+
+impl LaunchObserver {
+    /// The pixels of each row: the grid's, and one for each four payload words.
+    pub fn pixels(&self) -> u32 {
+        1 + self.payload.map_or(0, |payload| payload.words.div_ceil(4))
+    }
+}
+
 /// A fragment function that writes one vertex value to render target 0.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObserverFragment {
@@ -128,13 +238,15 @@ pub struct ObserverFragment {
 pub enum ObservedValue {
     /// `[[position]]`, as Metal's rasterizer delivers it (center, no perspective).
     Position,
-    /// The varying of user key `key`, interpolated flat for an integer or boolean, else at the
-    /// center with perspective (MSL's default).
+    /// The varying of user key `key`, interpolated flat for an integer or boolean or a value
+    /// `per_primitive`, else at the center with perspective (MSL's default).
     Varying {
         key: UserKey,
         ty: VaryingType,
         /// The vertex output's declared type name, repeated as the fragment input's.
         type_name: String,
+        /// A mesh function's primitive data: one value over each primitive.
+        per_primitive: bool,
     },
 }
 
@@ -213,9 +325,11 @@ impl VaryingType {
 
 /// The companion `case` draws with, derived from its entry in `module` (whose decoded ABI is
 /// `abi` and whose interface for the case is `interface`): a [`PassthroughVertex`] for a fragment
-/// case, an [`ObserverFragment`] for a vertex case with a vertex observation, `None` for any
-/// other case. An `Err` names what no companion can supply (a varying of a type the companions do
-/// not write, an observation of something the vertex function does not output), so the case
+/// case, an [`ObserverFragment`] for a vertex case with a vertex observation, [`MeshStages`] for
+/// an object or mesh case with a mesh observation or an object launch, `None` for any other case.
+/// An `Err` names what no companion can supply (a varying of a type the companions do not write,
+/// an observation of something the vertex or mesh function does not output, a payload the launch
+/// observer cannot read or a launch that holds less than the mesh function reads), so the case
 /// cannot be executed as authored.
 pub fn derive(
     case: &AuthoredCase,
@@ -226,9 +340,49 @@ pub fn derive(
     let observation = match (case.stage, case.vertex_observation) {
         (Stage::Fragment, _) => None,
         (Stage::Vertex, Some(observation)) => Some(observation),
-        (Stage::Vertex, None) | (Stage::Kernel | Stage::Object | Stage::Mesh, _) => {
-            return Ok(None)
+        (Stage::Mesh | Stage::Object, _) => {
+            let Some(draw) = case.mesh_draw.as_ref().filter(|draw| draw.generates()) else {
+                return Ok(None);
+            };
+            let entry = entry_point(module, abi, &case.entry)?;
+            let stages = match (case.stage, draw.observation) {
+                (Stage::Object, Some(MeshObservation::Launch)) => MeshStages {
+                    object: None,
+                    mesh: Some(launch_observer(case, entry)?),
+                    fragment: Some(ObserverFragment {
+                        input: ObservedValue::Varying {
+                            key: UserKey(LAUNCH_KEY.into()),
+                            ty: VaryingType {
+                                scalar: Scalar::I32,
+                                lanes: 4,
+                            },
+                            type_name: "uint4".into(),
+                            per_primitive: true,
+                        },
+                        output: ObserverOutput::Uint,
+                    }),
+                },
+                (Stage::Mesh, observation) => MeshStages {
+                    object: draw
+                        .object_launch
+                        .as_ref()
+                        .map(|launch| payload_object(entry, launch))
+                        .transpose()?,
+                    mesh: None,
+                    fragment: observation
+                        .map(|observation| mesh_observer(case, module, entry, observation))
+                        .transpose()?,
+                },
+                (_, observation) => {
+                    return Err(format!(
+                        "an object case's observation {observation:?}: an object case observes \
+                         its launch"
+                    ))
+                }
+            };
+            return Ok(Some(Companion::MeshStages(stages)));
         }
+        (Stage::Vertex, None) | (Stage::Kernel, _) => return Ok(None),
     };
     match observation {
         None => passthrough_vertex(module, abi, &case.entry)
@@ -454,6 +608,16 @@ fn normalizes_a_float3_difference(module: &Module) -> bool {
     declares_fast_rsqrt && subtracts_float3
 }
 
+/// The format of `case`'s render target 0, which the observer of `what` (a vertex or mesh
+/// observation) writes.
+fn observed_format(case: &AuthoredCase, what: &str) -> Result<TextureFormat, String> {
+    case.render_targets
+        .iter()
+        .find(|target| target.index == 0)
+        .map(|target| target.format)
+        .ok_or_else(|| format!("a {what} needs render target 0"))
+}
+
 fn observer(
     case: &AuthoredCase,
     module: &Module,
@@ -462,12 +626,7 @@ fn observer(
     interface: &AirInterface,
     observation: VertexObservation,
 ) -> Result<ObserverFragment, String> {
-    let format = case
-        .render_targets
-        .iter()
-        .find(|target| target.index == 0)
-        .map(|target| target.format)
-        .ok_or("a vertex observation needs render target 0")?;
+    let format = observed_format(case, VERTEX)?;
     let live = |index: usize| {
         interface
             .outputs
@@ -484,7 +643,7 @@ fn observer(
                     "vertex observation selects position, but AIR does not write it".into(),
                 );
             }
-            expect_format(format, TextureFormat::Rgba32Float)?;
+            expect_format(VERTEX, format, TextureFormat::Rgba32Float)?;
             Ok(ObserverFragment {
                 input: ObservedValue::Position,
                 output: ObserverOutput::Float,
@@ -519,12 +678,13 @@ fn observer(
                          (float, half, 32- and 16-bit integers, and bool, of 1 to 4 lanes)"
                     )
                 })?;
-            let output_class = observer_output(ty, format)?;
+            let output_class = observer_output(VERTEX, ty, format)?;
             Ok(ObserverFragment {
                 input: ObservedValue::Varying {
                     key: key.clone(),
                     ty,
                     type_name: type_name(output.ty.name.as_ref(), ty),
+                    per_primitive: false,
                 },
                 output: output_class,
             })
@@ -532,37 +692,306 @@ fn observer(
     }
 }
 
+/// What a mesh function writes of its output (its module's `air.set_*_mesh` calls): its position,
+/// and each vertex and primitive data slot with the type each call writes it with.
+#[derive(Default)]
+struct MeshWrites {
+    position: bool,
+    vertex_data: BTreeSet<(u32, NumTy)>,
+    primitive_data: BTreeSet<(u32, NumTy)>,
+}
+
+impl MeshWrites {
+    fn of(module: &Module) -> MeshWrites {
+        let slot = |value: Option<&Value>| {
+            let Some(Value::Const(id)) = value else {
+                return None;
+            };
+            match module.consts().get(*id)?.value {
+                Const::Int(slot) => u32::try_from(slot).ok(),
+                _ => None,
+            }
+        };
+        let mut writes = MeshWrites::default();
+        let calls = module
+            .parts()
+            .funcs
+            .values()
+            .filter_map(|function| function.body.as_ref())
+            .flat_map(|body| body.insts.values())
+            .filter_map(|inst| match &inst.kind {
+                InstKind::Call(call) => Some(call),
+                _ => None,
+            });
+        for call in calls {
+            let Callee::Air {
+                op: AirIntrinsic::Mesh(op),
+                ..
+            } = &call.callee
+            else {
+                continue;
+            };
+            match op {
+                Mesh::Position => writes.position = true,
+                Mesh::VertexData(ty) | Mesh::PrimitiveData(ty) => {
+                    // An `air.set_*_data_mesh` call's slot is its second operand.
+                    let Some(slot) = slot(call.args.get(1)) else {
+                        continue;
+                    };
+                    let data = match op {
+                        Mesh::VertexData(_) => &mut writes.vertex_data,
+                        _ => &mut writes.primitive_data,
+                    };
+                    data.insert((slot, *ty));
+                }
+                _ => {}
+            }
+        }
+        writes
+    }
+
+    /// The one type the function writes data slot `slot` with (of its primitive data where
+    /// `per_primitive`), or why there is none.
+    fn data_type(&self, slot: u32, per_primitive: bool) -> Result<NumTy, String> {
+        let data = if per_primitive {
+            &self.primitive_data
+        } else {
+            &self.vertex_data
+        };
+        let types = data
+            .iter()
+            .filter(|(written, _)| *written == slot)
+            .map(|(_, ty)| *ty)
+            .collect::<Vec<_>>();
+        match types[..] {
+            [ty] => Ok(ty),
+            [] => Err(format!("the mesh function never writes data slot {slot}")),
+            _ => Err(format!(
+                "the mesh function writes data slot {slot} with {} types",
+                types.len()
+            )),
+        }
+    }
+}
+
+/// The varying type of a mesh data field written as `ty`, `None` for a type no observer reads.
+fn mesh_data_type(ty: NumTy) -> Option<VaryingType> {
+    let scalar = match ty.elem {
+        Elem::F32 => Scalar::F32,
+        Elem::F16 => Scalar::F16,
+        Elem::I32 => Scalar::I32,
+        Elem::I16 => Scalar::I16,
+        _ => return None,
+    };
+    (1..=4).contains(&ty.lanes).then_some(VaryingType {
+        scalar,
+        lanes: ty.lanes,
+    })
+}
+
+/// The observer fragment of mesh function `entry` (of `module`) for `observation`.
+fn mesh_observer(
+    case: &AuthoredCase,
+    module: &Module,
+    entry: &EntryPoint,
+    observation: MeshObservation,
+) -> Result<ObserverFragment, String> {
+    if observation == MeshObservation::Launch {
+        return Err(
+            "a mesh case's launch observation: it observes an object case's own object function"
+                .into(),
+        );
+    }
+    let format = observed_format(case, MESH)?;
+    let outputs: &MeshOutputs = entry
+        .params
+        .iter()
+        .find_map(|binding| match &binding.role {
+            ParamRole::Mesh(outputs) => Some(outputs.as_ref()),
+            _ => None,
+        })
+        .ok_or("the mesh function declares no mesh output")?;
+    let writes = MeshWrites::of(module);
+    let gated = |field: &MeshField, what: &str| match field.predicate {
+        Some(_) => Err(format!(
+            "mesh observation selects {what}, which a function constant gates: not modelled"
+        )),
+        None => Ok(()),
+    };
+    match observation {
+        MeshObservation::Position => {
+            let field = outputs
+                .vertex
+                .iter()
+                .find(|field| matches!(field.role, MeshFieldRole::Position { .. }))
+                .filter(|_| writes.position)
+                .ok_or(
+                    "mesh observation selects position, but the mesh function does not write it",
+                )?;
+            gated(field, "position")?;
+            expect_format(MESH, format, TextureFormat::Rgba32Float)?;
+            Ok(ObserverFragment {
+                input: ObservedValue::Position,
+                output: ObserverOutput::Float,
+            })
+        }
+        MeshObservation::Launch => unreachable!("refused above"),
+        MeshObservation::VertexData { index } | MeshObservation::PrimitiveData { index } => {
+            let per_primitive = matches!(observation, MeshObservation::PrimitiveData { .. });
+            let (fields, what) = if per_primitive {
+                (&outputs.primitive, "primitive data")
+            } else {
+                (&outputs.vertex, "vertex data")
+            };
+            let (field, slot, key) = fields
+                .iter()
+                .filter_map(|field| match &field.role {
+                    MeshFieldRole::VertexData { slot, key }
+                    | MeshFieldRole::PrimitiveData { slot, key } => Some((field, *slot, key)),
+                    _ => None,
+                })
+                .nth(index as usize)
+                .ok_or_else(|| {
+                    format!("mesh observation selects undeclared {what} field {index}")
+                })?;
+            gated(field, &format!("{what} field {index}"))?;
+            let written = writes.data_type(slot, per_primitive)?;
+            let ty = mesh_data_type(written).ok_or_else(|| {
+                format!(
+                    "mesh {what} field {index} has a type no generated observer reads (float, \
+                     half, 32- and 16-bit integers, of 1 to 4 lanes)"
+                )
+            })?;
+            Ok(ObserverFragment {
+                input: ObservedValue::Varying {
+                    key: key.clone(),
+                    ty,
+                    type_name: type_name(field.ty.name.as_ref(), ty),
+                    per_primitive,
+                },
+                output: observer_output(MESH, ty, format)?,
+            })
+        }
+    }
+}
+
+/// The launch observer of object function `entry` for `case`: the payload it declares, read at
+/// its declared size in whole words ([`launch_payload_words`]), into an `RGBA32Uint` render target
+/// 0 wide enough for a row's pixels.
+fn launch_observer(case: &AuthoredCase, entry: &EntryPoint) -> Result<LaunchObserver, String> {
+    let format = observed_format(case, LAUNCH)?;
+    expect_format(LAUNCH, format, TextureFormat::Rgba32Uint)?;
+    let payload = entry
+        .params
+        .iter()
+        .find(|binding| matches!(binding.role, ParamRole::Payload { .. }));
+    if payload.is_some_and(|binding| binding.predicate.is_some()) {
+        return Err(
+            "launch observation of a payload a function constant gates: not modelled".into(),
+        );
+    }
+    let words = launch_payload_words(payload.map(|binding| binding.ty.size))?;
+    let target = case
+        .render_targets
+        .iter()
+        .find(|target| target.index == 0)
+        .map(|target| target.dimensions)
+        .ok_or("a launch observation needs render target 0")?;
+    let observer = LaunchObserver {
+        payload: payload.map(|binding| LaunchPayload {
+            words,
+            align: binding.ty.align.unwrap_or(4),
+        }),
+        target,
+    };
+    if target[0] < observer.pixels() {
+        return Err(format!(
+            "launch observation draws {} pixels a row, and render target 0 is {} wide",
+            observer.pixels(),
+            target[0]
+        ));
+    }
+    Ok(observer)
+}
+
+/// The payload object of mesh function `entry` for `launch`: its payload's words, at least as many
+/// bytes as the mesh function reads ([`object_payload_bytes`]), at the mesh function's declared
+/// alignment.
+fn payload_object(entry: &EntryPoint, launch: &ObjectLaunch) -> Result<PayloadObject, String> {
+    let bytes = launch
+        .payload()
+        .ok_or("mesh_draw.object_launch.payload_b64 does not decode")?;
+    let read = entry
+        .params
+        .iter()
+        .find(|binding| matches!(binding.role, ParamRole::Payload { .. }));
+    if read.is_some_and(|binding| binding.predicate.is_some()) {
+        return Err("object launch for a payload a function constant gates: not modelled".into());
+    }
+    if let Some(binding) = read {
+        let size = object_payload_bytes(binding.ty.size)?;
+        if (bytes.len() as u64) < u64::from(size) {
+            return Err(format!(
+                "the object launch's payload holds {} bytes, and the mesh function reads {size}",
+                bytes.len()
+            ));
+        }
+    }
+    Ok(PayloadObject {
+        words: bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| u32::from_le_bytes(*word))
+            .collect(),
+        align: read
+            .and_then(|binding| binding.ty.align)
+            .unwrap_or(4)
+            .max(4),
+        mesh_threadgroups: launch.mesh_threadgroups,
+    })
+}
+
 /// The output of an observer of a `ty` varying into a `format` render target: floats into
 /// `RGBA32Float`, booleans into `RGBA32Uint`, and integers into `RGBA32Sint` or `RGBA32Uint`,
 /// whose class states the sign the IR does not carry.
-fn observer_output(ty: VaryingType, format: TextureFormat) -> Result<ObserverOutput, String> {
+fn observer_output(
+    what: &str,
+    ty: VaryingType,
+    format: TextureFormat,
+) -> Result<ObserverOutput, String> {
     let output = match (ty.scalar, format.component_class()) {
         (scalar, _) if scalar.is_float() => {
-            expect_format(format, TextureFormat::Rgba32Float)?;
+            expect_format(what, format, TextureFormat::Rgba32Float)?;
             ObserverOutput::Float
         }
         (Scalar::Bool, _) => {
-            expect_format(format, TextureFormat::Rgba32Uint)?;
+            expect_format(what, format, TextureFormat::Rgba32Uint)?;
             ObserverOutput::Uint
         }
         (_, TextureComponent::Sint) => {
-            expect_format(format, TextureFormat::Rgba32Sint)?;
+            expect_format(what, format, TextureFormat::Rgba32Sint)?;
             ObserverOutput::Sint
         }
         _ => {
-            expect_format(format, TextureFormat::Rgba32Uint)?;
+            expect_format(what, format, TextureFormat::Rgba32Uint)?;
             ObserverOutput::Uint
         }
     };
     Ok(output)
 }
 
-fn expect_format(format: TextureFormat, expected: TextureFormat) -> Result<(), String> {
+/// The observations an observer fragment reads, as its errors name them.
+const VERTEX: &str = "vertex observation";
+const MESH: &str = "mesh observation";
+const LAUNCH: &str = "launch observation";
+
+fn expect_format(what: &str, format: TextureFormat, expected: TextureFormat) -> Result<(), String> {
     if format == expected {
         Ok(())
     } else {
         Err(format!(
-            "vertex observation requires render target format {expected:?}, got {format:?}"
+            "{what} requires render target format {expected:?}, got {format:?}"
         ))
     }
 }

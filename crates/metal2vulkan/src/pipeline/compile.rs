@@ -14,6 +14,7 @@
 //! key derivation is [`key`].
 
 pub mod api;
+pub(crate) mod color_group;
 mod entry;
 pub mod key;
 mod numbered;
@@ -49,7 +50,7 @@ use crate::pipeline::artifact::{PrecisionNote, StrategyCensus, StrategyUse};
 use crate::pipeline::compile::key::{DynamicKey, LinkedKey};
 use crate::pipeline::descriptor::{
     ColorAttachmentDescriptor, DynamicLibraries, FunctionDescriptor, LinkedFunctions,
-    MeshPipelineDescriptor, RenderPipelineDescriptor, VertexDescriptor,
+    MeshPipelineDescriptor, RenderPipelineDescriptor, TessellationDescriptor, VertexDescriptor,
 };
 use crate::pipeline::interface::{SlotInterface, StageInterface};
 use crate::pipeline::sym::VaryingKey;
@@ -76,9 +77,22 @@ pub enum InputsFrom<'a> {
     /// The vertex stage of a render pipeline under a variant key: the vertex-fetch projection of
     /// this vertex descriptor over the attributes the specialized entry reads with the key's
     /// pulled vertex buffers (`link::vertex::vertex_fetch_projection_for`), the key's other
-    /// vertex-stage inputs (`VariantKey::lowering_inputs`), and the pipeline's
-    /// `maxVertexCallStackDepth` (the `u32`).
-    Vertex(Option<&'a VertexDescriptor>, &'a VariantKey, u32),
+    /// vertex-stage inputs (`VariantKey::lowering_inputs`), the pipeline's
+    /// `maxVertexCallStackDepth` (the `u32`), whether the pipeline's fragment function reads
+    /// `[[primitive_id]]` where the device carries it through a varying
+    /// ([`reads_primitive_id_varying`]), and its tessellation state (`None` for Metal's
+    /// defaults), which a post-tessellation vertex function bakes in on a device without
+    /// `tessellationShader` (`LoweringInputs::tessellation`). A plain vertex function writes the
+    /// primitive ID's varying where the device cannot declare a fragment `PrimitiveId`, and a
+    /// post-tessellation one the device emulates on any device
+    /// (`LoweringInputs::primitive_id_varying`).
+    Vertex(
+        Option<&'a VertexDescriptor>,
+        &'a VariantKey,
+        u32,
+        bool,
+        Option<&'a TessellationDescriptor>,
+    ),
     /// The fragment stage of this render pipeline under a variant key: the key's fragment-stage
     /// inputs, the attachments among the pipeline's color attachments that the specialized entry
     /// writes and whose pixel format is a signed integer
@@ -121,6 +135,8 @@ pub struct FragmentPass<'a> {
     pub(crate) color_attachments: &'a [Option<ColorAttachmentDescriptor>; 8],
     /// The pipeline has a depth or a stencil attachment.
     pub(crate) depth_or_stencil: bool,
+    /// The pipeline's depth attachment is `Depth16Unorm` (`LoweringInputs::depth16_codes`).
+    pub(crate) depth16: bool,
     pub(crate) raster_sample_count: u32,
     pub(crate) rasterization_enabled: bool,
     pub(crate) alpha_to_coverage: bool,
@@ -132,6 +148,10 @@ pub struct FragmentPass<'a> {
     /// (`LoweringInputs::sample_mask`); `None` from a descriptor, set by the compile layer where
     /// the function compiled without it could tell Vulkan's mask from Metal's.
     pub(crate) sample_mask: Option<u32>,
+    /// The group of the pipeline's color attachments the function writes
+    /// (`LoweringInputs::color_group`), whose variant's descriptor `color_attachments` is
+    /// (`color_group::descriptor`); `None` from a descriptor, set by the compile layer.
+    pub(crate) color_group: Option<&'a crate::pipeline::lower_inputs::ColorGroup>,
 }
 
 impl<'a> From<&'a RenderPipelineDescriptor> for FragmentPass<'a> {
@@ -139,6 +159,7 @@ impl<'a> From<&'a RenderPipelineDescriptor> for FragmentPass<'a> {
         FragmentPass {
             color_attachments: &d.color_attachments,
             depth_or_stencil: d.depth_format.is_some() || d.stencil_format.is_some(),
+            depth16: d.depth_format == Some(crate::metal::PixelFormat::Depth16Unorm),
             raster_sample_count: d.raster_sample_count,
             rasterization_enabled: d.rasterization_enabled,
             alpha_to_coverage: d.alpha_to_coverage,
@@ -146,6 +167,7 @@ impl<'a> From<&'a RenderPipelineDescriptor> for FragmentPass<'a> {
             max_call_stack_depth: d.max_fragment_call_stack_depth,
             texture_write_rounding_mode: d.texture_write_rounding_mode,
             sample_mask: None,
+            color_group: None,
         }
     }
 }
@@ -155,6 +177,7 @@ impl<'a> From<&'a MeshPipelineDescriptor> for FragmentPass<'a> {
         FragmentPass {
             color_attachments: &d.color_attachments,
             depth_or_stencil: d.depth_format.is_some() || d.stencil_format.is_some(),
+            depth16: d.depth_format == Some(crate::metal::PixelFormat::Depth16Unorm),
             raster_sample_count: d.raster_sample_count,
             rasterization_enabled: d.rasterization_enabled,
             alpha_to_coverage: d.alpha_to_coverage,
@@ -162,30 +185,57 @@ impl<'a> From<&'a MeshPipelineDescriptor> for FragmentPass<'a> {
             max_call_stack_depth: 1,
             texture_write_rounding_mode: d.texture_write_rounding_mode,
             sample_mask: None,
+            color_group: None,
         }
     }
 }
 
 /// The indices a render pipeline's vertex function writes, each of which it also writes as
 /// written to a raw varying that a fragment function of the pipeline reads in its place:
-/// `[[viewport_array_index]]` and `[[render_target_array_index]]`.
+/// `[[viewport_array_index]]` and `[[render_target_array_index]]`; and the primitive ID's varying,
+/// which a fragment function reads as its `[[primitive_id]]`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RawIndices {
     /// `[[viewport_array_index]]` (`IoRole::ViewportIndex`).
     pub viewport: bool,
     /// `[[render_target_array_index]]` (`IoRole::RenderTargetArrayIndex`).
     pub layer: bool,
+    /// The primitive ID (`IoRole::PrimitiveId`).
+    pub primitive_id: bool,
 }
 
-impl InputsFrom<'_> {
+impl<'a> InputsFrom<'a> {
     /// The `maxCallStackDepth` the stage compiles under: the given inputs', or the render
     /// pipeline's for its stage. 0 and 1 are Metal's default.
     fn call_stack_depth(&self) -> u32 {
         match self {
             InputsFrom::Given(i) => i.max_call_stack_depth.unwrap_or(1),
-            InputsFrom::Vertex(_, _, depth) => (*depth).max(1),
+            InputsFrom::Vertex(_, _, depth, _, _) => (*depth).max(1),
             InputsFrom::Fragment(pass, ..) => pass.max_call_stack_depth.max(1),
         }
+    }
+
+    /// The group of its pipeline's color attachments a fragment stage compiles for
+    /// (`LoweringInputs::color_group`): the given inputs', or the render pipeline variant's.
+    fn color_group(&self) -> Option<&'a crate::pipeline::lower_inputs::ColorGroup> {
+        match self {
+            InputsFrom::Given(i) => i.color_group.as_ref(),
+            InputsFrom::Vertex(..) => None,
+            InputsFrom::Fragment(pass, ..) => pass.color_group,
+        }
+    }
+}
+
+/// The specialized entry `spec` as a compile under `inputs` lowers it on `p`: renumbered for its
+/// color group (`color_group::entry`) where it compiles for one.
+fn grouped_entry(
+    spec: air::Entry,
+    inputs: InputsFrom<'_>,
+    p: &DeviceProfile,
+) -> Result<air::Entry, Error> {
+    match inputs.color_group() {
+        Some(g) => color_group::entry(spec, g, p),
+        None => Ok(spec),
     }
 }
 
@@ -478,12 +528,18 @@ pub fn stage_inputs(
 ) -> Result<StageInputs, Error> {
     guarded(|| {
         let specialized = entries.specialized(fd, inputs.call_stack_depth(), m)?;
-        let spec = &specialized.spec;
+        // A color group's variant reads its own renumbering of the entry the creation shares.
+        let grouped = match inputs.color_group() {
+            Some(_) => Some(grouped_entry(specialized.spec.clone(), inputs, p)?),
+            None => None,
+        };
+        let spec = grouped.as_ref().unwrap_or(&specialized.spec);
         let inputs = lower_inputs(spec, inputs, p, m)?;
         let uniform = crate::lower::stage_io::uniform_varyings(spec, &inputs, m)?;
+        let writes = raw_indices_written(spec, &inputs);
         Ok(StageInputs {
             inputs,
-            writes: raw_indices_written(spec),
+            writes,
             varyings: varyings_written(spec),
             uniform,
         })
@@ -856,12 +912,15 @@ fn interpolated_float_inputs(spec: &air::Entry) -> impl Iterator<Item = VaryingK
     })
 }
 
-/// The indices the specialized entry `spec` writes.
-fn raw_indices_written(spec: &air::Entry) -> RawIndices {
+/// The indices the specialized entry `spec` writes under `inputs`: a vertex function compiled
+/// under `LoweringInputs::primitive_id_varying` writes the primitive ID's varying.
+fn raw_indices_written(spec: &air::Entry, inputs: &LowerInputs) -> RawIndices {
     let writes = |f: fn(&OutputRole) -> bool| spec.ep.outputs.iter().any(|o| f(&o.role));
     RawIndices {
         viewport: writes(|r| matches!(r, OutputRole::ViewportArrayIndex)),
         layer: writes(|r| matches!(r, OutputRole::RenderTargetArrayIndex)),
+        primitive_id: inputs.primitive_id_varying
+            && matches!(spec.ep.stage, AbiStage::Vertex { .. }),
     }
 }
 
@@ -879,6 +938,7 @@ fn varyings_read<'a>(
             inputs.render_target_array_index_varying,
             VaryingKey::render_target_array_index(),
         ),
+        (inputs.primitive_id_varying, VaryingKey::primitive_id()),
     ];
     spec.ep
         .params
@@ -901,7 +961,69 @@ fn raw_indices_read(spec: &air::Entry) -> RawIndices {
     RawIndices {
         viewport: reads(Builtin::ViewportArrayIndex),
         layer: reads(Builtin::RenderTargetArrayIndex),
+        primitive_id: reads(Builtin::PrimitiveId),
     }
+}
+
+/// Whether a fragment function compiled for `p` reads `[[primitive_id]]` from a varying
+/// (`IoRole::PrimitiveId`): `p` enables none of the features that let a fragment stage declare
+/// `PrimitiveId` (`geometryShader`, `tessellationShader`).
+pub(crate) fn primitive_id_varying_on(p: &DeviceProfile) -> bool {
+    let enabled = &p.fields().enabled.features;
+    !crate::spirv::requirements::builtin_enablers(
+        crate::spv::BuiltIn::PrimitiveId,
+        crate::spirv::ir::IoDir::Input,
+    )
+    .iter()
+    .any(|(_, f)| enabled.contains(f))
+}
+
+/// Whether a render pipeline's fragment stage `fragment`, its calls nesting `depth` deep, reads
+/// `[[primitive_id]]`, which its vertex function then writes to its varying where the device
+/// carries it that way (`LoweringInputs::primitive_id_varying`): a `Function` stage whose
+/// specialized entry (the one `entries` holds, else one made there now under `m`) declares the
+/// parameter, or a `Compiled` stage whose interface reads the varying or Vulkan's `PrimitiveId`
+/// (link refuses the second behind a vertex function that writes the varying). Called only on a
+/// device without a fragment `PrimitiveId` ([`primitive_id_varying_on`]) or without
+/// `tessellationShader` (`lower::tessellation::emulates`), so no other decodes anything.
+pub(crate) fn reads_primitive_id_varying(
+    fragment: Option<&crate::pipeline::descriptor::StageSource>,
+    depth: u32,
+    entries: &StageEntries,
+    m: &mut Meter,
+) -> Result<bool, Error> {
+    use crate::pipeline::descriptor::StageSource;
+    Ok(match fragment {
+        Some(StageSource::Function(fd)) => entries
+            .specialized(fd, depth, m)?
+            .spec
+            .ep
+            .params
+            .iter()
+            .any(|p| p.role == ParamRole::Builtin(crate::air::abi::Builtin::PrimitiveId)),
+        Some(StageSource::Compiled(c)) => {
+            c.artifact()
+                .interface
+                .io
+                .inputs
+                .iter()
+                .any(|v| v.role == crate::pipeline::stage_io::IoRole::PrimitiveId)
+                || c.artifact()
+                    .interface
+                    .io
+                    .builtins
+                    .contains(&crate::pipeline::stage_io::StageBuiltin::PrimitiveId)
+        }
+        None => false,
+    })
+}
+
+/// Whether render pipelines on `p` may carry `[[primitive_id]]` through a varying, so that a
+/// pipeline's fragment entry is read for it ([`reads_primitive_id_varying`]): `p` cannot declare a
+/// fragment `PrimitiveId` ([`primitive_id_varying_on`]), or it emulates post-tessellation vertex
+/// functions (`lower::tessellation::emulates`), whose patch's position the fragment reads.
+pub(crate) fn primitive_id_carried_on(p: &DeviceProfile) -> bool {
+    primitive_id_varying_on(p) || crate::lower::tessellation::emulates(p)
 }
 
 /// Run `g` on the compile request of function `f`. A visible function is not a stage: it is
@@ -1520,7 +1642,7 @@ pub(crate) fn fetch_inputs(
     if !matches!(spec.ep.stage, AbiStage::Fragment { .. }) || !(interlock || inputs) {
         return None;
     }
-    // Each 16-bit float attachment a `half4` output of a module without fast math blends into,
+    // Each 16-bit float attachment a `half` output of a module without fast math blends into,
     // where the profile asks for Metal's blend there, which the function computes in the storage
     // form where it is exact.
     let half_blends: BTreeSet<u32> = match crate::lower::fragment::blends_half_in_shader(p) {
@@ -1535,7 +1657,7 @@ pub(crate) fn fetch_inputs(
                     c.blending_enabled,
                     c.write_mask,
                     crate::pipeline::lower_inputs::BlendEquation::of(c),
-                ) && crate::lower::fragment::half4_output(spec, color)
+                ) && crate::lower::fragment::half_output(spec, color)
             })
             .map(|(_, color)| color)
             .collect(),
@@ -1644,7 +1766,44 @@ pub(crate) fn fragment_inputs(
     out.sample_mask = d.sample_mask;
     out.half_output_lanes = crate::pipeline::color_writes::half_output_lanes(d.color_attachments);
     out.texture_write_rounding = d.texture_write_rounding_mode;
+    out.depth16_codes = depth16_codes(d, v, p);
+    out.depth16_bias_raises = v.depth16_bias_raises.filter(|_| out.depth16_codes);
     out
+}
+
+/// Whether a fragment stage of pass `d` under variant `v` on `p` stores Metal's `Depth16Unorm`
+/// codes itself (`LoweringInputs::depth16_codes`): the depth it renders against is
+/// `Depth16Unorm` (`VariantKey::depth16_pass`, else the pipeline's depth attachment), and
+/// [`depth16_stage_form`] holds, for a biased draw under `VariantKey::depth16_biased`.
+pub(crate) fn depth16_codes(d: FragmentPass<'_>, v: &VariantKey, p: &DeviceProfile) -> bool {
+    v.depth16_pass.unwrap_or(d.depth16)
+        && depth16_stage_form(
+            d.rasterization_enabled,
+            d.raster_sample_count,
+            v.depth16_biased,
+            p,
+        )
+}
+
+/// Whether a pipeline that rasterizes (`rasterizes`) `samples` samples per pixel on `p` takes
+/// Metal's codes from its fragment stage where it renders against a `Depth16Unorm` depth, for a
+/// draw that biases it where `biased`: it rasterizes one sample, and the profile lacks
+/// `DriverDeviation::MetalDepth16Stores`, or for a biased draw
+/// `DriverDeviation::MetalDepth16BiasedStores`. At more than one sample the device's depth is
+/// each sample's own, which one written depth would replace.
+pub(crate) fn depth16_stage_form(
+    rasterizes: bool,
+    samples: u32,
+    biased: bool,
+    p: &DeviceProfile,
+) -> bool {
+    use crate::error::DriverDeviation::{MetalDepth16BiasedStores, MetalDepth16Stores};
+    let stores = if biased {
+        MetalDepth16BiasedStores
+    } else {
+        MetalDepth16Stores
+    };
+    rasterizes && samples <= 1 && !p.takes_driver_deviation(stores)
 }
 
 /// The attributes the vertex function `spec` fetches in fixed function under `inputs` from
@@ -1686,6 +1845,19 @@ fn instanced_attributes(
     })
 }
 
+/// The caller's inputs `i` for the specialized entry `spec`, its object payload kept only where it
+/// widens a mesh function's payload arena (`LoweringInputs::object_payload`): any other function,
+/// and a mesh function whose own arena holds it, compiles as without it.
+fn given_inputs(spec: &air::Entry, i: &LowerInputs) -> LowerInputs {
+    let mut out = i.clone();
+    out.object_payload = i.object_payload.filter(|&bytes| {
+        matches!(spec.ep.stage, AbiStage::Mesh { .. })
+            && crate::lower::mesh::payload_size(spec)
+                .is_some_and(|own| u64::from(bytes) > crate::memory::arena::payload_bytes(own))
+    });
+    out
+}
+
 /// The lowering inputs of the specialized entry `spec` (see [`InputsFrom`]).
 fn lower_inputs(
     spec: &air::Entry,
@@ -1694,9 +1866,9 @@ fn lower_inputs(
     m: &mut Meter,
 ) -> Result<LowerInputs, Error> {
     match inputs {
-        InputsFrom::Given(i) => Ok(i.clone()),
+        InputsFrom::Given(i) => Ok(given_inputs(spec, i)),
         // A post-tessellation vertex function pulls every attribute it reads.
-        InputsFrom::Vertex(desc, variant, depth)
+        InputsFrom::Vertex(desc, variant, depth, primitive_id, tessellation)
             if matches!(spec.ep.stage, AbiStage::Vertex { patch: Some(_) }) =>
         {
             let attributes = crate::lower::tessellation::attributes_read(spec);
@@ -1705,15 +1877,23 @@ fn lower_inputs(
             let mut out = variant.lowering_inputs(crate::pipeline::sym::Stage::Vertex);
             out.vertex_fetch = Some(projection);
             out.max_call_stack_depth = call_stack_input(depth);
+            // Only an emulated function bakes the tessellation state in, and writes its patch's
+            // position for a fragment function that reads `[[primitive_id]]`; one drawn through the
+            // device's tessellation stages is refused under the field (`lower::stage_io`).
+            if crate::lower::tessellation::emulates(p) {
+                out.tessellation = tessellation.copied();
+            }
+            out.primitive_id_varying = primitive_id;
             Ok(key::canonical_inputs(&out))
         }
-        InputsFrom::Vertex(desc, variant, depth) => {
+        InputsFrom::Vertex(desc, variant, depth, primitive_id, _) => {
             let attributes = attributes_read(spec);
-            // The indexed capture form pulls every attribute, whatever the caller's projection
-            // would fetch in fixed function.
+            // The indexed capture form and the primitive ID's de-indexed form pull every
+            // attribute, whatever the caller's projection would fetch in fixed function.
             let pull_every = variant
                 .captured_positions
-                .is_some_and(|f| f.index_type().is_some());
+                .is_some_and(|f| f.index_type().is_some())
+                || variant.primitive_id_indices.is_some();
             let projection = crate::pipeline::link::vertex::vertex_fetch_projection_for(
                 desc,
                 &attributes,
@@ -1724,11 +1904,15 @@ fn lower_inputs(
             let mut out = variant.lowering_inputs(crate::pipeline::sym::Stage::Vertex);
             out.vertex_fetch = Some(projection);
             out.max_call_stack_depth = call_stack_input(depth);
+            // Only on a device that cannot declare a fragment `PrimitiveId`: elsewhere a plain
+            // vertex function's fragment function reads Vulkan's, Metal's there.
+            out.primitive_id_varying = primitive_id && primitive_id_varying_on(p);
             out.instanced_attributes = instanced_attributes(spec, &out, desc, m)?;
             Ok(key::canonical_inputs(&out))
         }
         InputsFrom::Fragment(d, variant, written, primitive, varyings, uniform) => {
             let mut out = fragment_inputs(d, variant, p);
+            out.color_group = d.color_group.cloned();
             out.signed_color_attachments = signed_colors_written(spec, d.color_attachments);
             out.unattached_colors =
                 unattached_colors_written(spec, d.color_attachments, d.alpha_to_coverage);
@@ -1737,6 +1921,11 @@ fn lower_inputs(
             let read = raw_indices_read(spec);
             out.viewport_index_varying = written.viewport && read.viewport;
             out.render_target_array_index_varying = written.layer && read.layer;
+            // Behind a vertex function that writes the primitive ID's varying, on a device that
+            // declares a fragment `PrimitiveId` (behind an emulated post-tessellation vertex
+            // function): elsewhere the fragment function reads the varying without the field.
+            out.primitive_id_varying =
+                written.primitive_id && read.primitive_id && !primitive_id_varying_on(p);
             out.primitive_varyings = varyings_read(spec, &out)
                 .filter(|k| primitive.contains(k))
                 .collect();
@@ -1880,6 +2069,7 @@ fn plan_one(r: &Request<'_>, p: &DeviceProfile, m: &mut Meter) -> Result<Planned
         spec,
         before,
     } = ordered_entry(r, p, m)?;
+    let spec = grouped_entry(spec, r.inputs, p)?;
     let inputs = lower_inputs(&spec, r.inputs, p, m)?;
     // A flat variant runs its grid in threadgroups of its own: only a kernel that does not observe
     // its partition computes the same there.
@@ -1988,6 +2178,30 @@ fn compile_kept<K>(
     // The function's own side effects; the `ExecutionStatus` buffer's words (the resident-miss
     // count's) are the product's.
     let writes_memory = crate::spirv::requirements::writes_memory(&module)?;
+    // A fragment function's texture slots read only at the fragment's own pixel.
+    let mut own_pixel_textures = crate::spirv::requirements::own_pixel_textures(&module, m)?;
+    // Those a draw can read through a snapshot an earlier draw of the same primitives took, of a
+    // function that writes no memory. A variant compiled to read them so states its own: its only
+    // texel access of each is the entry's copy, at the fragment's own pixel.
+    let snapshots: Vec<u32> = plan.families.fragment.snapshot.keys().copied().collect();
+    let snapshot_textures = match (snapshots.is_empty(), writes_memory) {
+        (false, _) => {
+            if !crate::spirv::requirements::snapshot_copies_alone(&module, &snapshots, m)? {
+                return Err(Error::Internal(InternalError::new(
+                    InternalKind::Invariant,
+                    "a snapshot variant that reads its texture outside the copy",
+                )));
+            }
+            own_pixel_textures.extend(&snapshots);
+            own_pixel_textures.sort_unstable();
+            own_pixel_textures.dedup();
+            snapshots
+        }
+        (true, true) => Vec::new(),
+        (true, false) => {
+            crate::spirv::requirements::snapshot_textures(&module, &own_pixel_textures, m)?
+        }
+    };
     // A `half` rounded through `OpQuantizeToF16` (`QuantizeForm::Device`) because the device's
     // is measured to round as Metal does: the module requires that fact. Elsewhere a `half` rounds
     // by integer arithmetic, exact on every device, and no module holds a quantize.
@@ -2061,6 +2275,7 @@ fn compile_kept<K>(
         &function_tables,
         reaches_command_buffers,
         (writes_textures, numbered_samplers),
+        (own_pixel_textures, snapshot_textures),
     );
     let mut requirements = module.requirements.clone();
     // Pairs only the device's simdgroup lockstep orders.
@@ -2143,6 +2358,19 @@ fn compile_kept<K>(
         requirements
             .properties
             .insert(crate::device::requirements::VkProperty::MetalCenterVaryings);
+    }
+    // Varyings the device interpolates, with no note, because it interpolates as Metal does.
+    if plan.families.stage_io.interpolation_by_metal {
+        requirements
+            .properties
+            .insert(crate::device::requirements::VkProperty::MetalInterpolation);
+    }
+    // An index stored to its builtin although it differs among a primitive's vertices, because
+    // the device takes the first vertex's as Metal does.
+    if plan.families.stage_io.first_vertex_indices_by_device {
+        requirements
+            .properties
+            .insert(crate::device::requirements::VkProperty::MetalFirstVertexIndices);
     }
     // Color channels written as computed, because the device converts them as Metal does.
     requirements
@@ -2281,6 +2509,7 @@ fn stage_interface(
     function_tables: &std::collections::BTreeSet<u32>,
     reaches_command_buffers: bool,
     (writes_textures, numbered_samplers): (bool, Vec<crate::pipeline::interface::NumberedSampler>),
+    (own_pixel_textures, snapshot_textures): (Vec<u32>, Vec<u32>),
 ) -> StageInterface {
     use crate::pipeline::interface::{BufferKind, BufferSlot};
     use crate::pipeline::sym::{PushField, SlotClass};
@@ -2338,8 +2567,12 @@ fn stage_interface(
         writes_memory,
         mesh_records: crate::lower::mesh::records(&plan.families.mesh),
         emulated_payload: crate::lower::mesh::emulated_payload(&plan.families.mesh),
+        payload: plan.families.mesh.payload,
         reaches_command_buffers,
         writes_textures,
         numbered_samplers,
+        own_pixel_textures,
+        snapshot_textures,
+        private_bytes: plan.private_bytes,
     }
 }

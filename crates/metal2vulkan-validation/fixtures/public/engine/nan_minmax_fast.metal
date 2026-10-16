@@ -1,4 +1,4 @@
-// Owned fixture (NaN model, DESIGN D293): `nan_minmax`' program under the default fast math, the
+// Owned fixture (NaN model): `nan_minmax`' program under the default fast math, the
 // flag state of class F that `nan_minmax` (without fast math) does not measure: `fmin`, `fmax`,
 // `min3`, `max3`, `median3`, and `clamp` are the `fast_` calls, and `a < b ? a : b` and
 // `a > b ? a : b` fold to `llvm.minnum` and `llvm.maxnum`, every call with `fast`. A NaN operand

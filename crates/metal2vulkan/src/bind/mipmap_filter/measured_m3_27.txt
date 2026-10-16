@@ -1,0 +1,768 @@
+# Plain Metal's generateMipmapsForTexture: on an Apple M3 Max (macOS 27.0.1, 26A434), our own probe
+# (M27-mips4-m3): the chains of measured_m3_passes.txt, measured_m3_formats.txt,
+# measured_m3_stores.txt and measured_m3_layouts.txt rerun, each in its store, those to 512x512
+# texels a layer kept here (the larger ones, to 4096x4096 and 16384x64, matched the chain too);
+# and 3D chains of 14 formats at 13 extents, Private: 2x2x2, 4x4x4, 8x8x2, 16x16x6, 24x40x8,
+# 64x64x4, 82x122x16, 7x9x3, 40x40x10, 128x128x5, 64x32x12, 41x61x5 and 32x32x32. Rows from
+# measured_m3_passes.txt take the store private. The first levels come from
+# measured_m3_passes.txt's probe, keyed by the chain's key; a 3D chain's slices are generated as
+# layers are, in turn. Each level's digest is the first 12 hex digits of the SHA-256 of its bytes,
+# every layer or slice in turn, rows tight; level 0's is the first level as Metal read it back,
+# which is the probe's in every row. Left out: the 18 3D chains of BGRA10_XR and BGRA10_XR_sRGB
+# 16 texels or more on each side, whose first level Metal's compressed storage rewrote (their
+# levels below matched the chain from the probe's first level).
+# Format:
+#   <key> <format> <2d|2darray|cube|3d> <width>x<height>[x<depth>] <layers> <pattern>
+#   <plain|sw|pfv|rt|private|shared> <digest of level 0> ...
+f80-2d-256x256-l9-u8 MTLPixelFormatBGRA8Unorm 2d 256x256 1 u8 private 5a1f19dc90ac 420ce3996bfd 1328019f927f bc69442af97b 997030d736d4 ffeebed93115 1301e3db0eb5 fa078c2e8b1b ea4521d97009
+f80-2d-65x65-l7-u8 MTLPixelFormatBGRA8Unorm 2d 65x65 1 u8 private 0404cc31ca1f 4ad1abb2b8be 0f6402455e2b 8382abff8421 97f29f531633 b7db819689a4 83dafcc97968
+f80-2d-66x66-l7-u8 MTLPixelFormatBGRA8Unorm 2d 66x66 1 u8 private c68f5df35a6c ffdf133e95ff 4190999db7bd 3fb7123d1dd0 958b08c560a9 ae1f222a1e18 ad2a3d793f72
+f80-2d-72x72-l7-u8 MTLPixelFormatBGRA8Unorm 2d 72x72 1 u8 private 827f0d5af231 5b580e6e1295 b09626391b8d b623f9aca44f abfbae16e7ae 8b4f74cc4aac 7b9f42e82ddf
+f80-2d-80x80-l7-u8 MTLPixelFormatBGRA8Unorm 2d 80x80 1 u8 private 501f4dd20033 f12d74735a03 251c21a7782a e75eb5dce1ad 1fdc75bbf5bd 28d7edf45bc2 bc8fcebea748
+f80-2d-96x96-l7-u8 MTLPixelFormatBGRA8Unorm 2d 96x96 1 u8 private c91dd6c5dd6e 357aaad717ba e578e3920fec e5340f7ad0e6 f2b3ff38cd01 388272b21406 4e1ed2f2523c
+f80-2d-100x100-l7-u8 MTLPixelFormatBGRA8Unorm 2d 100x100 1 u8 private 17659a74f8da 7d18ef1f82c5 4244caf63e0d c526473aae97 cd0f451f525d 16be32ec09df 6f417f6da132
+f80-2d-112x112-l7-u8 MTLPixelFormatBGRA8Unorm 2d 112x112 1 u8 private 950518199787 3055f35382da 58a29babc283 9ade1f935542 c2c925501ce4 97d69ff6a51f 5df277896120
+f80-2d-127x127-l7-u8 MTLPixelFormatBGRA8Unorm 2d 127x127 1 u8 private caa6403c9600 4c7acf683345 e06d80d33693 93ab09ec58f0 557daf808541 fca153ed8f95 9e242cd04a99
+f80-2d-128x128-l8-u8 MTLPixelFormatBGRA8Unorm 2d 128x128 1 u8 private b0ca70f36119 ba61191ebc64 dd221dec8aab 84a121fb50fd 8016df87d688 6e3005d84312 17b748c1a6a4 8d65a89d33fc
+f80-2d-129x129-l8-u8 MTLPixelFormatBGRA8Unorm 2d 129x129 1 u8 private 849aa3df9347 5e94f0279de5 375667ad4511 a2cc6c8c7c91 390d5bc789f2 5350c7cfbea4 cb9c282d143b cc0102d4cb2e
+f80-2d-130x130-l8-u8 MTLPixelFormatBGRA8Unorm 2d 130x130 1 u8 private 92ec849c74c7 a7da315d2e7b 8647111f6997 8da7552cf5e3 8a60ac1fc18a 9c8164201247 7897b6506dc8 2427959f2256
+f80-2d-150x150-l8-u8 MTLPixelFormatBGRA8Unorm 2d 150x150 1 u8 private 2feb887481ea 341ce67b79fc c351a9170d20 5ca27469bacf 79f65f3c0241 a4b12a051fb2 63dc7358b07f 38d0e03aeea8
+f80-2d-160x160-l8-u8 MTLPixelFormatBGRA8Unorm 2d 160x160 1 u8 private 60d48d33f401 981a1c349563 cda090bf0f4f 3add8036a3f9 9a1267944632 8eceae6aa53c 9bb76857189c 8d65a89d33fc
+f80-2d-191x191-l8-u8 MTLPixelFormatBGRA8Unorm 2d 191x191 1 u8 private c1a24ed699a7 cc10178697f9 b5fe3bd4b094 0eb92bc3f9c6 404137512416 8ed3c21b4c8e 3b8593127c4e 5cd41b066e39
+f80-2d-192x192-l8-u8 MTLPixelFormatBGRA8Unorm 2d 192x192 1 u8 private 117b6cf3ec12 e119f0381f6e 9104141702e8 6f08cfb84a62 21c1c801d03b 75d891e2a551 5697d1731b73 9724c9ad1e67
+f80-2d-193x193-l8-u8 MTLPixelFormatBGRA8Unorm 2d 193x193 1 u8 private 74595ce5414c 5d97052811ee d90b1d3f24ed b86498be7d2a c44bde0600bc d11df7673d8f fe16d0788927 fb4d708bc23f
+f80-2d-200x200-l8-u8 MTLPixelFormatBGRA8Unorm 2d 200x200 1 u8 private 6b87306af4a6 350de63c4362 8a8611cbec89 7cd962b35635 5501552101f2 ae4821382a2f ecf467654da8 b9bde55adff6
+f80-2d-224x224-l8-u8 MTLPixelFormatBGRA8Unorm 2d 224x224 1 u8 private b35d4050a408 f9ad1b44ce34 a3d9c989f7b1 834f3ed8789f a76ec4434bdf 44eb448e780a 75046e6ab7e0 0350a81da93a
+f80-2d-255x255-l8-u8 MTLPixelFormatBGRA8Unorm 2d 255x255 1 u8 private 41e7f9555015 80c99b1fead8 c87431a4ad40 47b22722c4c9 b99ec97c73ac 5474dbc5c121 f2e886e56d38 998696cb5625
+f80-2d-257x257-l9-u8 MTLPixelFormatBGRA8Unorm 2d 257x257 1 u8 private c74dfdb01090 e329bbad09b4 f0cd8443d5be 6b6f06a375a9 fba41e9e95c0 9b3ba7043c78 785bd8040ce7 c675022dff58 902e54af06cc
+f80-2d-300x300-l9-u8 MTLPixelFormatBGRA8Unorm 2d 300x300 1 u8 private d8424a8cfacd 66dd83ca151d 2d2c433cf91b ff475637d1f5 114a11e8c79f f625ee206df5 d01adaa20760 dba7c80fdada 097cc04024bd
+f80-2d-320x320-l9-u8 MTLPixelFormatBGRA8Unorm 2d 320x320 1 u8 private 00986584dcc8 8cdd2b9cd124 42c58c6bc1d6 8dc1686574d4 254a7f7f7e91 a1015e3a8ce3 88fae119bc1a b3415bac2629 8d65a89d33fc
+f80-2d-384x384-l9-u8 MTLPixelFormatBGRA8Unorm 2d 384x384 1 u8 private 6c249fa48bdd acdd90d1ac35 4f20ffad59fc 6b4993d31c97 6d895a63d729 b23cabe77009 0c6faadab895 29524bd99430 2427959f2256
+f80-2d-400x400-l9-u8 MTLPixelFormatBGRA8Unorm 2d 400x400 1 u8 private ebaa63f907df b14ff0fc547b 3785e88bde61 be9d49fc9549 f64d8fcc3675 8f161f31befb f653bec0c2d6 fe9e8275a1bc 8d65a89d33fc
+f80-2d-448x448-l9-u8 MTLPixelFormatBGRA8Unorm 2d 448x448 1 u8 private 5421764d6902 d5213237a10c 9c8ae765d0e0 e2bae0cf142f e8fe0d0f7cec 26a8c3a017a4 33d6bd7b343c 02c205d6aa28 a30e86812af2
+f80-2d-500x500-l9-u8 MTLPixelFormatBGRA8Unorm 2d 500x500 1 u8 private 4d5e5ec067e9 8351054a0152 28abb397a5ad 21633e7af7d4 493c7c33517b 0b2d4f389925 39fb887f7973 48fb4f032dbf dcdbf237c691
+f80-2d-511x511-l9-u8 MTLPixelFormatBGRA8Unorm 2d 511x511 1 u8 private 6d83582cc5b5 a35847ddfe55 e8688c7d796a 1e3bf8baaeb4 e6cee29b3ea6 6fe72b144bb9 863d3557332d cc9d4474efeb 956e7464da39
+f80-2d-512x512-l10-u8 MTLPixelFormatBGRA8Unorm 2d 512x512 1 u8 private 235270b402d4 3dfea1d78f5b a972e7b4a777 906d109d130a 168e854c216f 405780697e5b 86def74db1cd 4ce0e2d9b823 00881bb44bad 8d65a89d33fc
+f80-2d-128x64-l8-u8 MTLPixelFormatBGRA8Unorm 2d 128x64 1 u8 private d6f17d2ac30b c851347da043 997f2ee55bb2 13bd562b828d 11db1c929e99 ba26a37ffb0c 60925dca1d83 902e54af06cc
+f80-2d-64x128-l8-u8 MTLPixelFormatBGRA8Unorm 2d 64x128 1 u8 private c63685552ccc 21e7bb2d319c be63bed75495 779aae097ab1 e7702393e702 3c4e8a6b713b bd5d8abca982 902e54af06cc
+f80-2d-256x64-l9-u8 MTLPixelFormatBGRA8Unorm 2d 256x64 1 u8 private abe91c0810eb b1c807ee9fc4 017b52d3bec2 9ab2fc497689 9afd1fe19249 7c3b1c25a589 860213b234fe 8ebd157bc74c 902e54af06cc
+f80-2d-64x256-l9-u8 MTLPixelFormatBGRA8Unorm 2d 64x256 1 u8 private 9ef626f3761c 9f438264baef 01718cff295e 113477a4806e def5668c2667 e3236c8c910c 3fa8a7bcff8c 772452c83a03 ff84c3ffad92
+f80-2d-256x128-l9-u8 MTLPixelFormatBGRA8Unorm 2d 256x128 1 u8 private 12ccdf8b8aa2 8fd857529da4 648d2506e108 67bb30132ad0 78360606c414 c56f08eb6431 c9264aa77ddf 387f872a063a 8d65a89d33fc
+f80-2d-128x256-l9-u8 MTLPixelFormatBGRA8Unorm 2d 128x256 1 u8 private b09f15a9817d be8e84484bb2 22d64bd72e6b d6191ba51d77 b2fee34267a7 4e9d482f7194 9ce212e274eb 7cdc9c7929c4 8d65a89d33fc
+f80-2d-512x256-l10-u8 MTLPixelFormatBGRA8Unorm 2d 512x256 1 u8 private f83c60ca39fb 5aabfaac8892 5ada6f6d6d42 891246baa98b 39baa0de581b 05c14a39dc12 c200a8414906 df286acbf742 5d5c717bcf50 8d65a89d33fc
+f80-2d-256x512-l10-u8 MTLPixelFormatBGRA8Unorm 2d 256x512 1 u8 private d5aeac5312b6 12e1296fdc8e f2498f3e13a7 e05c0f2cc22a 59820dc5c289 595265298200 11a74ce8a276 47dd43b43a89 c088b3f8be7c 8d65a89d33fc
+f80-2d-65x64-l7-u8 MTLPixelFormatBGRA8Unorm 2d 65x64 1 u8 private d046ced1eaf3 4f0f0ca50cea 629843088453 16992a0bb5e1 aacf33b99a6f 8f7800581724 d97d8609fd4b
+f80-2d-64x65-l7-u8 MTLPixelFormatBGRA8Unorm 2d 64x65 1 u8 private c4985ac2c838 480c6ddbf84e 552d8c69ed8b e44f78cea67e b5647b0e3ca9 a2d9883bc7d8 11ac005b526b
+f80-2d-65x33-l7-u8 MTLPixelFormatBGRA8Unorm 2d 65x33 1 u8 private 22fc6efb5854 b57f6f7dd2f9 a913d1e958f4 d80b90a54510 82b9d50c2c31 c427264c49f2 9de04d5b7436
+f80-2d-33x65-l7-u8 MTLPixelFormatBGRA8Unorm 2d 33x65 1 u8 private ad8e28cd64b8 46d3845da7d5 1f3db96a705e 8a3f81ec1e4b 2d51b0a3d63b 8fc011ddd30f 25550d16a8df
+f80-2d-100x70-l7-u8 MTLPixelFormatBGRA8Unorm 2d 100x70 1 u8 private ef25f5773969 fb30ff556103 6ab2783f3bd4 ce8834187804 fd136b462fc5 ab80b94a933a 49c79a6b3c7d
+f80-2d-300x200-l9-u8 MTLPixelFormatBGRA8Unorm 2d 300x200 1 u8 private cc4dd7296558 8638796b44e8 43e5015061a9 d69c2afb2f5c ebbbb215e9ee d788cea36989 369f5f15b77a 20cb75781416 2124748583c7
+f80-2d-200x300-l9-u8 MTLPixelFormatBGRA8Unorm 2d 200x300 1 u8 private 102f6f2a906b 32dd991b609e 854b16d0f91f 30490b8bab61 0158b0c941fb 07397feb44c0 1133afe1f9b1 755c7da6d53a 6890a2da7fd1
+f80-2d-1024x16-l11-u8 MTLPixelFormatBGRA8Unorm 2d 1024x16 1 u8 private d8f33ceab490 b267bc9f2ce1 3ad7b01f2b36 0f391c0e435f ea6a9f063b63 bdb7ec13974c 34e12889edee 8a7c46d58509 3df4306cef68 157b98f0c20b 8d65a89d33fc
+f80-2d-16x1024-l11-u8 MTLPixelFormatBGRA8Unorm 2d 16x1024 1 u8 private 72c3027fe6d2 c3055d9eca71 6a853619937d 0d44918d3efa 09268d6d6a53 ce77bedc88f8 6e46e05d859a 37f033d80123 31e326440205 5d5c717bcf50 8d65a89d33fc
+f80-2d-2048x8-l12-u8 MTLPixelFormatBGRA8Unorm 2d 2048x8 1 u8 private 4995ec3fa64e 5e010a00d184 7998390b51eb 8f3e04844185 c8a9af4e1cb5 0ca0e2b3271e ed22297b113c 8f37ce2a2028 92351d506b51 055d5620b7fa 5d5c717bcf50 8d65a89d33fc
+f80-2d-8x2048-l12-u8 MTLPixelFormatBGRA8Unorm 2d 8x2048 1 u8 private 36b1bb3e3ab9 03ac7c6fbfce 4e287d26e0fb 4154db0dad4e 558ac92057b8 e54b2b67f5ab b84ec72abb8c 2c3b332e4dd7 7d6cdd2d6813 69055168a8cf 7cdc9c7929c4 8d65a89d33fc
+f80-2d-1000x3-l10-u8 MTLPixelFormatBGRA8Unorm 2d 1000x3 1 u8 private aac96b5ad487 96d5bd472414 4f28c6f84238 de79bd662234 259622ea5ff0 5d7b12f508ad 9b568ef6f743 fa8c3bf2145a ff6dd12ab8dd 96304023c725
+f80-2d-3x1000-l10-u8 MTLPixelFormatBGRA8Unorm 2d 3x1000 1 u8 private 36ed914acc5c 444f1111b62f fd4ddd40170f 6628b88d5f8b dbf1e637d014 750499c1b669 45274cad4f83 9d01ebae4a0d 350b002cfd6a c5e3a901d9eb
+f80-2d-2048x1-l12-u8 MTLPixelFormatBGRA8Unorm 2d 2048x1 1 u8 private a3be3ac2a4da 39b6cb80afc6 9c96a2f525ea f97f9a5ce1ca 7141657075fd b92727f1b0fb 4986c21472dd 5bc2ff4c9e55 a54974096921 08282ac437e9 00262a434741 b9047fd7a6dc
+f80-2d-256x256-l2-u8 MTLPixelFormatBGRA8Unorm 2d 256x256 1 u8 private 3ea2ceab59f4 5a7c76db62fb
+f80-2d-256x256-l3-u8 MTLPixelFormatBGRA8Unorm 2d 256x256 1 u8 private a586818c4eec 4dd0c56e404d a08d835151d4
+f80-2d-256x256-l4-u8 MTLPixelFormatBGRA8Unorm 2d 256x256 1 u8 private ed4639f39a89 5ab04435845f 885f5cebed3e 36f1d92dc89a
+f80-2d-256x256-l5-u8 MTLPixelFormatBGRA8Unorm 2d 256x256 1 u8 private b8ebd3338622 790cb9c3a210 39cc89847ee3 07bd1286feeb a4ec64b94b7e
+f80-2d-256x256-l6-u8 MTLPixelFormatBGRA8Unorm 2d 256x256 1 u8 private bac233f4e720 65af81abb828 c5e28283fdd9 12656f89b18e 7415897b6fab a93ef6bde4f5
+f80-2d-256x256-l7-u8 MTLPixelFormatBGRA8Unorm 2d 256x256 1 u8 private e8de9fd137d4 945d134c5e04 105df2304f7d b85a6031df45 98c09a569ebf 058afe7ed0f8 00c0f69999c9
+f80-2d-256x256-l8-u8 MTLPixelFormatBGRA8Unorm 2d 256x256 1 u8 private fc01444c47c9 3ecea52a7bea 41f0ca2b195d ee4953782957 a9b1c0fabef5 8a59031f8d84 6eb05ef27953 9c2869a0ba1f
+f80-2d-512x512-l3-u8 MTLPixelFormatBGRA8Unorm 2d 512x512 1 u8 private 428bdd2fffba db1e279cae83 4626a754b91c
+f80-2d-512x512-l5-u8 MTLPixelFormatBGRA8Unorm 2d 512x512 1 u8 private 32709336429d 92466e4b1a00 bebe733286fb 7405be8a0ad1 7a3038c92447
+f80-2d-193x193-l3-u8 MTLPixelFormatBGRA8Unorm 2d 193x193 1 u8 private ac19cd7b8686 6db319d9df31 874b5fa95a1a
+f80-2d-193x193-l5-u8 MTLPixelFormatBGRA8Unorm 2d 193x193 1 u8 private 537950b15b2a 46f898bf0e89 c2c7d95f60a9 0a47b3df6438 fe9ad37755a1
+f80-2darray-256x256x2-l9-u8 MTLPixelFormatBGRA8Unorm 2darray 256x256 2 u8 private 4dbb3f367e8b e9baa648c7c9 f7e69acafd1a 52fc5e8399ce e9ae49adadfa 2e1f9ec0f445 c004e6d3f208 87150ce87562 cab9d36f4d8e
+f80-2darray-200x150x3-l8-u8 MTLPixelFormatBGRA8Unorm 2darray 200x150 3 u8 private e33c2b845131 4c5e4a7647ba 9d62dec3a601 778bfb8b2da5 0a21cae69cfd 69a7b939c9ae c4965bb405b1 0dc561982cda
+f80-cube-100x100-l7-u8 MTLPixelFormatBGRA8Unorm cube 100x100 6 u8 private c38cbbc649e7 9686a4a3fbc7 1fda2e7e9988 9769e6696ea7 16a8a1f13745 d0e0afc1e198 defd20d4dddd
+f80-cube-128x128-l8-u8 MTLPixelFormatBGRA8Unorm cube 128x128 6 u8 private 85b798fc5f34 33d3be09fd87 3177e52bd178 a76f9f2e5f5a f759442d02a3 aab7947d2c37 6c6e7d453f40 7d6cf4143234
+f80-cube-256x256-l9-u8 MTLPixelFormatBGRA8Unorm cube 256x256 6 u8 private 412478596fd2 08780eb017b8 698f02937716 82b1cbd0d5a2 6145c150877c 1902971e309a 1f3914d120c6 fb871f1cc1db d75e2afba4cb
+f105-2d-65x65-l7-ramp MTLPixelFormatRG32Float 2d 65x65 1 ramp private e114a19dfb4d 78d9dc0b0393 d0457ac8c2c1 340cb3b332dd bf9da06bcf4b 582c9ae7e663 b837605ac34a
+f105-2d-66x66-l7-ramp MTLPixelFormatRG32Float 2d 66x66 1 ramp private aecca76b03e7 de3e8850011b f1582d3e374b dc1208d7fc0d f51ab331a0bb a5c2d9618e75 5a74ba6cf902
+f105-2d-72x72-l7-ramp MTLPixelFormatRG32Float 2d 72x72 1 ramp private 34738e579837 fd7564308e35 df57890a72a3 5508853f1640 c1b26f243dd4 7d3ae1b23bd0 a06aafa23d62
+f105-2d-80x80-l7-ramp MTLPixelFormatRG32Float 2d 80x80 1 ramp private c5d089cf143f 6cb2bb558774 313d4f2162f1 d2960d6c1788 5ab3ab1fdf35 b0cfa7db7a2e 431cd1ab5ca6
+f105-2d-96x96-l7-ramp MTLPixelFormatRG32Float 2d 96x96 1 ramp private 68b2d8b053aa 5792a921cf8b 47483989eaa6 42fc188e0731 a071a8640b06 517ede610266 9983c05cb2be
+f105-2d-100x100-l7-ramp MTLPixelFormatRG32Float 2d 100x100 1 ramp private 3cadd878684b fc0e04b42df4 f4ed771db8b9 cb94fbb03fe8 bc8b9933497c d39fcc0658f5 7891b0f26c92
+f105-2d-112x112-l7-ramp MTLPixelFormatRG32Float 2d 112x112 1 ramp private 1869b6e07eca 579a856adad2 98fb82f5de1d c72b674301e2 c755f643a846 23e08c3a7016 cb5172aede70
+f105-2d-127x127-l7-ramp MTLPixelFormatRG32Float 2d 127x127 1 ramp private 1b6263b5a783 2fab90d96325 88c3ac8e3e9b 9df4de36aba8 88c7ab016da3 aa74b127f6c2 15c873d293a7
+f105-2d-128x128-l8-ramp MTLPixelFormatRG32Float 2d 128x128 1 ramp private 0c0f102f78ee e9ea2301d1d3 cdf8b7d38257 d5a09fd096f1 ff2ca1273df0 90a310ad80bc 86a6483d8d98 dba923832075
+f105-2d-129x129-l8-ramp MTLPixelFormatRG32Float 2d 129x129 1 ramp private 351bb2391f7f 991988b23032 e29b8c4159e3 158167b2c3fd 8d222b7afeb4 0abce4671351 c3848e459f13 1c3ec42e026e
+f105-2d-130x130-l8-ramp MTLPixelFormatRG32Float 2d 130x130 1 ramp private 234707e4b595 4961a091e921 e5d40ebf237e 4ea4a02190d7 866b163b8962 3417d2f86007 fa0b6fde5021 79145a9850a9
+f105-2d-150x150-l8-ramp MTLPixelFormatRG32Float 2d 150x150 1 ramp private 84f78aa9a912 c1518551f4b7 c17dad430ced d507e972abfc cbfc6e0c7421 8645bc001c12 9aba44698bb5 c50a00b337b6
+f105-2d-160x160-l8-ramp MTLPixelFormatRG32Float 2d 160x160 1 ramp private 09c530a9888d 86153a8a9f27 24d5393fa02f 61f040e349a5 b571d2133682 24fd5403fafb c5e1ff79f387 8974b151a880
+f105-2d-191x191-l8-ramp MTLPixelFormatRG32Float 2d 191x191 1 ramp private c44bb84016be aa72ca1239b6 76b27dded175 8b95a48c9cf4 03caf9f6b255 60bc0cca1020 6bf202cb1f9e dac2c0026b73
+f105-2d-192x192-l8-ramp MTLPixelFormatRG32Float 2d 192x192 1 ramp private bf89a2d97537 a5e3bf7225ab cc97bffae64d f3d6195f4f94 40756adc1880 91b64ec57374 4ae8c91cf071 82da7a510f15
+f105-2d-193x193-l8-ramp MTLPixelFormatRG32Float 2d 193x193 1 ramp private edf46cedee77 c572c6cff517 7b14ecdee732 fa3f0556c70c 441df03b5c78 b091660e6235 41f0d0834d81 e5087076533e
+f105-2d-200x200-l8-ramp MTLPixelFormatRG32Float 2d 200x200 1 ramp private 143d10d2ebfd 6ee803a4d543 224a82c06451 66e4d57ff585 0feef74d4f7a 8850c6088b44 10c4738f8735 4c25ce4e254e
+f105-2d-224x224-l8-ramp MTLPixelFormatRG32Float 2d 224x224 1 ramp private 36497e406623 03b5502dff97 e4e947ad0100 0c700ef558af 98b985ab4948 18af4fde7e4b 33e8a01fd0d3 1c1980341fab
+f105-2d-255x255-l8-ramp MTLPixelFormatRG32Float 2d 255x255 1 ramp private f1da7dd5481b 870ac534b0c5 080dd8a61cd2 faa3ca37e527 7f9c8aaced23 d247270d1be7 fbe6fe0acc09 a4d4b0799bfc
+f105-2d-256x256-l9-ramp MTLPixelFormatRG32Float 2d 256x256 1 ramp private 4da28ccd3869 000bc671e67f 0f45e9ed69de 14b52357097a ee1afb5e3dba 0a75d6f8dc87 312b3ad87128 d1d312c1780b b2dace091c27
+f105-2d-257x257-l9-ramp MTLPixelFormatRG32Float 2d 257x257 1 ramp private 885e9f6d079c 7187ef7e45b9 f6c8e13826ab ac9f36826621 4a8d78e4d776 77d7feb455db 40924c93dadc b64c7a48d998 6691ea388fa5
+f105-2d-300x300-l9-ramp MTLPixelFormatRG32Float 2d 300x300 1 ramp private 48581f9e8718 149bc8241152 8ba1b2ec135f 7c5b5f754ac9 fb96cef2ec90 1be64d84657d 5468528c6f61 9e0869d7c8e3 cf25df42696b
+f105-2d-320x320-l9-ramp MTLPixelFormatRG32Float 2d 320x320 1 ramp private 1feb52e674ee d4b385edb786 b83c8a4627fb 5448f9bb6804 4a50f65e0c00 87cbc992142f 1ee689c37d70 cdbf3d79c8a4 57b8bc96c195
+f105-2d-384x384-l9-ramp MTLPixelFormatRG32Float 2d 384x384 1 ramp private 09650f23e7d0 0e6f8d38908a 78ad1be155ce b62a7e709d08 c559e0104d27 402d828816b1 7088b80ae683 f470c5b6174c 6f25321c4f13
+f105-2d-400x400-l9-ramp MTLPixelFormatRG32Float 2d 400x400 1 ramp private 6bc0af931cbc eb9bef7864a7 bdaf4f20156d 32e30ed3c0e7 999499513dc3 600b30182b4d f5355aa494c9 6413f4d17916 b9716bd81882
+f105-2d-448x448-l9-ramp MTLPixelFormatRG32Float 2d 448x448 1 ramp private 6dd68621376d a83bccd45ff3 c82675032a4d 8f6f84e62583 e7349ec98afb c5cb0ebc9b55 e1cc613d3e95 1724ec85c9b6 191384abd750
+f105-2d-500x500-l9-ramp MTLPixelFormatRG32Float 2d 500x500 1 ramp private 5f054c9c04fe 7ca7393f34bd 57454b3cdd02 c61e6acfac26 22f24cf9b1c2 0fb4d9a94ac5 965ef26d7d6e fea92e3a3396 02c836e95652
+f105-2d-511x511-l9-ramp MTLPixelFormatRG32Float 2d 511x511 1 ramp private 756ec3c96d74 75d80b91ef0a 7b39cf9b0519 2b2d32f57294 5d9b5a54a444 7fe52977d682 49c486a4c4f7 5d2e4d76c155 74a59d93f986
+f105-2d-512x512-l10-ramp MTLPixelFormatRG32Float 2d 512x512 1 ramp private 9c1f392ce1d6 333f2ed4b01b eab336d0d52d e2e095cf7b63 6502dc94eade 443db9665fb8 0700a11463c8 4d8220041dda 74137a6536b4 e56b97edf704
+f105-2d-128x64-l8-ramp MTLPixelFormatRG32Float 2d 128x64 1 ramp private a5f2b5957953 f339d0f873b2 71241ab1eaee 0a05ed724324 fd1fbdf86647 e56b975fb379 d8903b92fdd4 d1e308f37cba
+f105-2d-64x128-l8-ramp MTLPixelFormatRG32Float 2d 64x128 1 ramp private 5960eaceb0dd c3b303f625af b110609ebe27 52fc2f9f29df f8cc8372c095 0faeeb9b582a e4f34ec3beec b94bbf2fe2ed
+f105-2d-256x64-l9-ramp MTLPixelFormatRG32Float 2d 256x64 1 ramp private 328d92621d82 abbe2e5cb349 8792325732d8 a8e9209dbfc7 8b4413a1ee2a d882380d7dfc ba30ffb07c6d b1a829e7d1ee 39124063db2b
+f105-2d-64x256-l9-ramp MTLPixelFormatRG32Float 2d 64x256 1 ramp private f7d859c19282 9d1cdc3a1c8c f690645481dc 91b5edfb9807 7a8335bfc187 ffd8cf0f2d1c 0f943dc063a0 076b41c41850 0cae89481d41
+f105-2d-256x128-l9-ramp MTLPixelFormatRG32Float 2d 256x128 1 ramp private 5ed4462a3154 01f71892a21b 20c917d72537 6adbaa62afb7 91ed55cd068d e62a1287ad18 4c25bf5ea5ce 61b198fcb44b b181af0bf907
+f105-2d-128x256-l9-ramp MTLPixelFormatRG32Float 2d 128x256 1 ramp private a1b46b3f3b0d c6b0ae355b65 73802f1f6aa7 8f5b8c39f358 8aaf7f0bb028 c42aa8ad348f 8985fce19383 ae8c307745d7 8ded8b3252e9
+f105-2d-512x256-l10-ramp MTLPixelFormatRG32Float 2d 512x256 1 ramp private ea5bf9329ae4 f683d79b0f17 69b8605f448a f5ff458a669f e757405b003b 73fd81a72d08 21200694a1b4 39c72838c6c4 12cd3e030c5a 67eb5054177f
+f105-2d-256x512-l10-ramp MTLPixelFormatRG32Float 2d 256x512 1 ramp private c11e255f66a3 644c13f71e67 2d17673d1736 4dbb7ad5cff0 f40b053e2aab 9ea9c0e970c7 3985f0dc5834 9bab6e480887 4428ca861396 55d42e2f9d40
+f105-2d-65x64-l7-ramp MTLPixelFormatRG32Float 2d 65x64 1 ramp private 2786db7aee50 5310e0579bfd f3a5bc1dce19 8fee73d02021 dcdf40c07e06 7eb94f9cf1fd 417fe2398a79
+f105-2d-64x65-l7-ramp MTLPixelFormatRG32Float 2d 64x65 1 ramp private e876f75c9676 90c847ea6645 ab11a5ad2c8d e11cb3842d83 a484e0cbd18a c222c6b3ee45 7cecc0d12773
+f105-2d-65x33-l7-ramp MTLPixelFormatRG32Float 2d 65x33 1 ramp private 3359e917cf00 b36d7b7eb26d da5165b3f35f d5d093e5aed5 b1df8fdd6fc0 8b39671c9679 86e8f2016433
+f105-2d-33x65-l7-ramp MTLPixelFormatRG32Float 2d 33x65 1 ramp private ccdb77dc541b 964fda87fc30 ecb89d252f89 1c88085cbbdf a6988e50dade 15c251a1ab9f b96bc12183bc
+f105-2d-100x70-l7-ramp MTLPixelFormatRG32Float 2d 100x70 1 ramp private 1975dac0ab13 836862333923 6f3c33019963 e47416f85aad 97ac7102fbab 28f582268819 d877581a50e5
+f105-2d-300x200-l9-ramp MTLPixelFormatRG32Float 2d 300x200 1 ramp private 20c1d0ea3994 896ca11ecbdd 27dd71d3e52d 5a9b9a863a6e f2a964678544 f96944c410a7 38b02633277a e89bf3445051 795ac182c340
+f105-2d-200x300-l9-ramp MTLPixelFormatRG32Float 2d 200x300 1 ramp private 2f1ba33cbf01 cbe2cdb96327 e981890495fb 2081ad7b0329 c4647e9aa093 564679bc2ca8 11e262e8b030 f9d28c1d2ce3 504ae3478ac4
+f105-2d-1024x16-l11-ramp MTLPixelFormatRG32Float 2d 1024x16 1 ramp private 85dd317287f4 7b72e03c041d 6cc1def74eb7 084f72c3cf73 4aa0c2197c1f 79c6fbec3fae 5aabfbf11e84 1ed6a8c18b2a 39eb3f94ac2b 975bc0d6e758 353c5e5f94cf
+f105-2d-16x1024-l11-ramp MTLPixelFormatRG32Float 2d 16x1024 1 ramp private 2a8984fb0cf7 e0d95cf36334 cbd4e038c700 9ab88adca89a e8ca0fb94663 9da8e7ca28f0 0cf329f8c27a 30fd72489efb 3e110e49cfed 29581a2945e4 faa9685107bf
+f105-2d-2048x8-l12-ramp MTLPixelFormatRG32Float 2d 2048x8 1 ramp private f1214d436221 2737bc39d4df 3f256c333a1b 91b11e27e38e 6d0d85bf7f29 72e6c24c47e9 87bfc6284ec7 6582eef10792 a7141783c9d9 a0dacd543ffe 4161789c6a80 713980565b42
+f105-2d-8x2048-l12-ramp MTLPixelFormatRG32Float 2d 8x2048 1 ramp private 844753c94770 cbe9828695a5 9d22752bf2be 3cb0e4ff80dd b8fb94d2d10c 0f66a86927d3 8109e72de51f 101cce62783c 3145901c2a93 1a9835e10b67 e8e8864f75a5 7a5275f88271
+f105-2d-1000x3-l10-ramp MTLPixelFormatRG32Float 2d 1000x3 1 ramp private 2d790eadc2e1 b6f56c0d3574 bb5cfa10c3d2 53bb9f7aaa3d 7820c4945b78 941ef2ba6e2c d58abeaee5f7 ae15d0843ab1 a093d7f74fcb ce9f4df198f9
+f105-2d-3x1000-l10-ramp MTLPixelFormatRG32Float 2d 3x1000 1 ramp private 207fafb1098a 185b6348ed63 97706efffc22 aab3f1164e6a 125472654542 6d933dbe5d6e 2b210ab2e9ac f978fcf0b83f ddd3b0a3167d e5a9fba1f580
+f105-2d-2048x1-l12-ramp MTLPixelFormatRG32Float 2d 2048x1 1 ramp private ad67ffec0996 03bc263fc43a 9ade9d99428f 2ebc6617539d 10e27aa1eed1 f6c9d8c844d7 0de09c38b10e de286a8714c0 b2e87023938c 730818dd6db5 1661452a1b32 dc5cbe2a90e4
+f55-2d-129x129-l8-xramp MTLPixelFormatR32Float 2d 129x129 1 xramp private 3b5a7f79ff29 cee510dd5d9c ad989fc6ac95 746aad8f6fc1 2ddb855c5129 5dc222c267a1 fd91da15feba 8568e5a1fe34
+f55-2d-129x129-l8-yramp MTLPixelFormatR32Float 2d 129x129 1 yramp private 8af5e0ad8cfa d16e10655bca aa59dab67a2f b15ee7458f59 d66cdfbe1153 03236fc65973 945e2fb732ae 8568e5a1fe34
+f55-2d-193x193-l8-xramp MTLPixelFormatR32Float 2d 193x193 1 xramp private 44d752aaeb91 b3780ad0330f 57872cd6d4e9 e576192ff121 61ed541d7c78 c44c0b8d5ac6 29a5921397ef fff0350d107c
+f55-2d-193x193-l8-yramp MTLPixelFormatR32Float 2d 193x193 1 yramp private 63657e1fc297 90709bee99f9 b78b5752891d 15e3abc042ec 95aade6d53ed ef9d7a42b0a3 ec041da364ee fff0350d107c
+f55-2d-256x256-l9-xramp MTLPixelFormatR32Float 2d 256x256 1 xramp private 06a4efc5424f 077a88c02f54 ae257f99f589 770fa6830457 208b39723536 06d53fa315cc 3b5bd48edd48 250875e38e96 9fd754fbfd83
+f55-2d-256x256-l9-yramp MTLPixelFormatR32Float 2d 256x256 1 yramp private db0016912b98 cbda1867e2bf 776e61c3ca29 4382389465ec 4aad418a36ac 46c8d949fb50 02920a5d5abf 8ba34263e321 9fd754fbfd83
+f55-2d-257x257-l9-xramp MTLPixelFormatR32Float 2d 257x257 1 xramp private 33f8ec28a823 8a1f01d472e3 bc18456e899c 53349f659fb9 41eaca44ac04 0492cbef1f3d b5315a1ff8dd 7f3dd67b4d0e ad286c643736
+f55-2d-257x257-l9-yramp MTLPixelFormatR32Float 2d 257x257 1 yramp private 2b95491bcdb9 70a6b74a2d5d a4dcd15f6df7 47ff8f238e4d 5208ef72ca60 1fa0818020af 577b91ac9c36 975871e0b865 ad286c643736
+f55-2d-300x200-l9-xramp MTLPixelFormatR32Float 2d 300x200 1 xramp private c003a8e32114 30f2af28025b e6c0c978df4c 07e3caacbd20 ebf36ba46f2e dbdf4c9f0294 e10cd7c99b27 15870b5ac51b 4f2bfd7b020f
+f55-2d-300x200-l9-yramp MTLPixelFormatR32Float 2d 300x200 1 yramp private f605eb4eb1d7 d3935b9c7a46 aa739a10f770 a3031d3b959b 3b791ded5a38 dbe92c98f46f df64ff9aee92 4c25ce4e254e 9ea7c205941c
+f105-2darray-256x256x2-l9-ramp MTLPixelFormatRG32Float 2darray 256x256 2 ramp private cb1689290c64 04b3679c0d3f 33fa54416a69 1e5f68af6811 c7e3289186dc b2c532880913 ddfcd91c8fbc 6193dce076cb 40ce2be75183
+f105-cube-128x128-l8-ramp MTLPixelFormatRG32Float cube 128x128 6 ramp private 633186fc3979 0d22f03f3873 3229908858eb ef1fb1d8f650 30275a78ef57 681f78a5431b 2994c0cd9010 f925bbc4c168
+f10-2d-65x65-l7-u8 MTLPixelFormatR8Unorm 2d 65x65 1 u8 private 0847d5800590 a3a846683002 b3a9eef9dc67 2654a810ef88 fef9aedd04bf 0c82607e9ff5 620bfdaa346b
+f10-2d-96x96-l7-u8 MTLPixelFormatR8Unorm 2d 96x96 1 u8 private f9a759dc71c1 7529e0ddef06 10eb8472e32f abe1e6e34ca2 843eb7c58ac2 b0afbbd31c89 7ace431cb615
+f10-2d-127x127-l7-u8 MTLPixelFormatR8Unorm 2d 127x127 1 u8 private 6563ded7df03 a3891ca46b23 33cf1d483042 2f194702133c bc79a56e1e96 e2173a113591 d4b0c0a4a8cc
+f10-2d-128x128-l8-u8 MTLPixelFormatR8Unorm 2d 128x128 1 u8 private 2f3f2362e2ca fd216a5f6812 d0d26d8d4e8c 30d810733f0d eaa9772d0ec8 886ebe52d87a afb726e6a584 620bfdaa346b
+f10-2d-129x129-l8-u8 MTLPixelFormatR8Unorm 2d 129x129 1 u8 private 94bc841e83c3 54f26ae0028b 97dbc73e0ee6 4393c163536e 468bb22aa002 19b650c1a118 950471bab614 620bfdaa346b
+f10-2d-192x192-l8-u8 MTLPixelFormatR8Unorm 2d 192x192 1 u8 private 7b5ef89e4da3 2c00d20be14d ed5ce693f6be 94e1708b14bb 097c226cb86a 138b31573822 d784bef346e7 591b7cc95037
+f10-2d-193x193-l8-u8 MTLPixelFormatR8Unorm 2d 193x193 1 u8 private 2975ae55990f cbe260d2ad0b cf2d1d281a33 c934b4ce682c b9d29e4d66f4 987cbd2ab84f f7e1eba72f0f 7ace431cb615
+f10-2d-255x255-l8-u8 MTLPixelFormatR8Unorm 2d 255x255 1 u8 private 828793530f65 6cecb975a33b d332292f4bc2 828f30f6d5ff 89e2146dd5ca f8982750259e 45c02c9cb66e 3cbdaf66b3dd
+f10-2d-256x256-l9-u8 MTLPixelFormatR8Unorm 2d 256x256 1 u8 private 6cdc3ddf98e8 e903c26f0421 bdd070d36583 16da50a55671 c6ca6fdb326c 557b7748a7ba a2c785441748 ea4521d97009 76be8b528d00
+f10-2d-257x257-l9-u8 MTLPixelFormatR8Unorm 2d 257x257 1 u8 private 28e96cb0e688 337a1407bef2 d8bcb4481989 ca4215aeba39 97457f7c16b1 6be8c8b9649f ef52fa0c9fb5 a7826f848b26 76be8b528d00
+f10-2d-384x384-l9-u8 MTLPixelFormatR8Unorm 2d 384x384 1 u8 private 0af0086e4718 27c5710cc7d7 c1a58555c87f 0ddfedec975c 07b4394f14d3 717da519cc82 ee21be91c7be cb10ffcf959b 76be8b528d00
+f10-2d-511x511-l9-u8 MTLPixelFormatR8Unorm 2d 511x511 1 u8 private 8c4696d9d23e 6de2e7798eb3 9bb3f5627f94 a5d2d78511ad 8d3471e9b403 ba78d04ce075 991624f1256c b3ff4161bed5 67c872d4912c
+f10-2d-512x512-l10-u8 MTLPixelFormatR8Unorm 2d 512x512 1 u8 private afa32eab07f3 f52dc46f6157 57e1c1279ffa 9ad2c3ad83f0 289e6a165525 4726b1ad3430 f1391d94ae04 ef5e15b70cd8 8d65a89d33fc 76be8b528d00
+f10-2d-256x64-l9-u8 MTLPixelFormatR8Unorm 2d 256x64 1 u8 private f589515c8534 6f21ee095921 bb2ca908886a bab8735d0262 a3b08ab438ca 33bd9bbb4288 f8e0de8f7b96 af472cf2977d 76be8b528d00
+f10-2d-64x256-l9-u8 MTLPixelFormatR8Unorm 2d 64x256 1 u8 private df14802a25c8 0c14e6ab6969 e9517ab2e802 300f722654fb 8faf9b3d1397 f171a60a6eaa f5d1d92cb271 e65aceb89baa 76be8b528d00
+f10-2d-300x200-l9-u8 MTLPixelFormatR8Unorm 2d 300x200 1 u8 private 3fb6c2418511 aaffe881ef45 4f67a8a140d9 465fced433a7 7006f7419e99 643671f26ffc 93225596e5c8 517391d5972c 76be8b528d00
+f10-2d-1024x16-l11-u8 MTLPixelFormatR8Unorm 2d 1024x16 1 u8 private aa7afd026ab6 acde9e8e2f8e d95c311c143b 7197945666e6 0aa6ff273053 16aab816857e 65414d9ffe00 c62ff1175eb1 902e54af06cc af472cf2977d 76be8b528d00
+f10-2d-16x1024-l11-u8 MTLPixelFormatR8Unorm 2d 16x1024 1 u8 private cca6b459ef2c 64da8c260065 b5c2ae6c3d47 16614b45e507 7557c40fd7c3 3b31bdfd96be 92b6347ec49a 15f349ef18eb 9cdf24357a8e af472cf2977d 76be8b528d00
+f30-2d-256x256-l9-u8 MTLPixelFormatRG8Unorm 2d 256x256 1 u8 private 01b9a419dd3c 735968deafdc 42f1d118dd2f d1dcc5a036b7 4039f4b4e2ce 9af2118d7948 05375b966cb2 5d5c717bcf50 af472cf2977d
+f30-2d-193x193-l8-u8 MTLPixelFormatRG8Unorm 2d 193x193 1 u8 private 5543507170bd cee55fe5b175 106129bd3812 6b4e4ffa8d46 2a589632c0c0 806af2d5887f 8bfcb1cbbef3 4ca3666b5447
+f30-2d-512x512-l10-u8 MTLPixelFormatRG8Unorm 2d 512x512 1 u8 private ddc2fe70d783 c94c5fad3589 5ee0f0045d38 e473686fb98b cdacf9d43a0d c0fff1bf39e5 45e74ff3c913 08685886d08c 5d5c717bcf50 af472cf2977d
+f30-2d-300x200-l9-u8 MTLPixelFormatRG8Unorm 2d 300x200 1 u8 private 7b5f96150a16 ea9944e38a9c 00efecc1499d 5a20de0dc718 8201402f89c2 db2c6ecf4322 1fa8f56687db 38ff3da99a4b 4ca3666b5447
+f70-2d-256x256-l9-u8 MTLPixelFormatRGBA8Unorm 2d 256x256 1 u8 private fcbcaee52704 654e1736f6ae cdbe1af62a6c 6d15a6942f71 7f2e9d61efe0 9b5f6499607b 210feb7155ae b5a0c243116c 8d65a89d33fc
+f70-2d-257x257-l9-u8 MTLPixelFormatRGBA8Unorm 2d 257x257 1 u8 private b56132e53988 efc25bad9a06 a36caf5c6287 8956213cf0b4 73ac1a15c360 22776f8590ce 34454d0c30c2 59a64ba43a9e 2427959f2256
+f70-2d-193x193-l8-u8 MTLPixelFormatRGBA8Unorm 2d 193x193 1 u8 private 188d636594a9 f5bddfdb28d3 46d0bf3ff826 1bd391686d82 3e831deca12e 47e50eadbe41 12aaeb265236 17a05fe6734a
+f70-2d-300x200-l9-u8 MTLPixelFormatRGBA8Unorm 2d 300x200 1 u8 private 6d1e975c8627 a85888d6f384 2865c9050efc 4b40e9723ff1 7870eccc1f32 d776e160f134 86233d50cfa8 b73674ad591e 9cdf24357a8e
+f81-2d-256x256-l9-u8 MTLPixelFormatBGRA8Unorm_sRGB 2d 256x256 1 u8 private 4e98985176f8 767b2294674b aaa26b8e65f3 b0b99c627668 44f305b32b85 007045d5ccc5 eb51f30b1fac 8cd670fe33f4 9dfaff450fe4
+f81-2d-129x129-l8-u8 MTLPixelFormatBGRA8Unorm_sRGB 2d 129x129 1 u8 private 686de5ab22b1 c3c0b861f0ae 451fd8075179 5b0ba6a6615d 25a233811716 cb39e9397483 b5795293fd80 0feec2de90ee
+f81-2d-193x193-l8-u8 MTLPixelFormatBGRA8Unorm_sRGB 2d 193x193 1 u8 private 4ec3c53a6bbf d7bc38b19bc8 c527ea1a68d9 f02daeea22e7 cc24d6c8d52a e0c1bd890cb1 6a3cfd1f1c21 00dfda4f7430
+f81-2d-300x200-l9-u8 MTLPixelFormatBGRA8Unorm_sRGB 2d 300x200 1 u8 private 4144e96b753f aaeba56576de 3cf9286fc887 1f8227df8325 39d9b7beb4ed f0e53a5077be 5726fa95e74f 234905d3220e 16c02afd8d28
+f71-2d-256x256-l9-u8 MTLPixelFormatRGBA8Unorm_sRGB 2d 256x256 1 u8 private 31d5e68235ab 4e35dc0d4905 b70b23727e94 f20520b2b54c 8920cd4f7317 29cfc08aec65 c86b36decfac 26e74d14f753 8f19a9ba7922
+f71-2d-129x129-l8-u8 MTLPixelFormatRGBA8Unorm_sRGB 2d 129x129 1 u8 private 666bb0b1a963 ff08641af6c5 9c26357fd4c7 3e010c7d084d ed63d527509e 12d2faa3d309 35b0f27bd6be 2f2a866f48d1
+f71-2d-193x193-l8-u8 MTLPixelFormatRGBA8Unorm_sRGB 2d 193x193 1 u8 private 41e841b7d2cd 7aa25573abad 23876412efc1 2dab2c3bbff3 9530dd033b3b 8977947c9c69 9295e127abff 3a798119284e
+f71-2d-300x200-l9-u8 MTLPixelFormatRGBA8Unorm_sRGB 2d 300x200 1 u8 private d1210c648757 5720d203981e 00e133c034e8 d656973faa4f 6eb5ac5cfae8 f05e01a6fea0 1132ea9e48ac 6d80bd4a5507 d089426cd739
+f90-2d-256x256-l9-u8 MTLPixelFormatRGB10A2Unorm 2d 256x256 1 u8 private 4ffbc5724b11 f786670a2e68 60b2e5e548f1 1be7adb9ccac c23da54bf06b 0dcc245d9805 13943a25539a eeb4346071e1 7d11303d59c2
+f90-2d-193x193-l8-u8 MTLPixelFormatRGB10A2Unorm 2d 193x193 1 u8 private 4ae89ae8ce73 4f7501d75921 ebd3d43827eb 8961aef13900 b97781b0591c 6417c03123c2 e23a55b5cac5 c3e469e1b52a
+f90-2d-129x129-l8-u8 MTLPixelFormatRGB10A2Unorm 2d 129x129 1 u8 private 39915fc7dc55 5217531ff4dc 837728914854 c5d3059f94ca 722044b6b657 3aa197465f2a dc3b0576d934 ef8fc7df6c2a
+f90-2d-512x512-l10-u8 MTLPixelFormatRGB10A2Unorm 2d 512x512 1 u8 private ab5c979e683d bbef79ecc30f 1d7f4ad8324f 4608bf2847b2 61ccb149924b 3a081518561e 316bd994830c 446af17484bf 99240c916ce2 5eceffc69009
+f90-2d-300x200-l9-u8 MTLPixelFormatRGB10A2Unorm 2d 300x200 1 u8 private d86b131d45be 2b8e7aa586d9 a47179e8679e 1e6de64ffa52 52666b26749f 54480e8f779a db7d5233f0f3 b6250db6f0cf 1e6e5e136afc
+f115-2d-65x65-l7-h16 MTLPixelFormatRGBA16Float 2d 65x65 1 h16 private cac1683a2d15 c35136233502 f0be68079c2c 07a84b07fe87 c62e7e8f7a0f 784833c7312e e343015f409b
+f115-2d-96x96-l7-h16 MTLPixelFormatRGBA16Float 2d 96x96 1 h16 private 55c9ae893037 a8f64be9691b 11ac36cb9904 cdc2e52128d7 f2f9c5f45dc2 0513f3f17bf4 31ee7c480364
+f115-2d-128x128-l8-h16 MTLPixelFormatRGBA16Float 2d 128x128 1 h16 private e67fffc53185 d2547266f436 810816f58f0b e2f7e118d8a6 4ca5406024f4 9195a39484ea 79cf4d6fe6fc add7d66daddc
+f115-2d-129x129-l8-h16 MTLPixelFormatRGBA16Float 2d 129x129 1 h16 private eadf1d047793 43e9dbd331ec 987aa6d57dd5 202c9b7f9611 13562961e9ab 8690444636ff b858c4929bfe d6f3e8631a07
+f115-2d-193x193-l8-h16 MTLPixelFormatRGBA16Float 2d 193x193 1 h16 private c8c56b91eacc 7f8ccee9e384 023bb190d650 e151cef2d4c3 b8bb55630212 7a53ee247830 368da8ca8f43 ab462e7d4639
+f115-2d-256x256-l9-h16 MTLPixelFormatRGBA16Float 2d 256x256 1 h16 private caa11c818802 8a5beab122d9 d862e622f0df a6451ac03724 e9ae2c9422bd 30c85c1e34f4 811189638852 9f55077b605d b820202cf379
+f115-2d-257x257-l9-h16 MTLPixelFormatRGBA16Float 2d 257x257 1 h16 private 2a587e119e1d 1f74ee607867 01f5af704b78 e16e0de4763c a6e031f8275c ddcc226f9096 93a58287d1ae 0a99119179c6 43c12bb69c7a
+f115-2d-384x384-l9-h16 MTLPixelFormatRGBA16Float 2d 384x384 1 h16 private 568dd1d34ce2 c578de9966b5 01152f13291b f86eac759073 8c3374ae50ad bb12a3a09c4b 89cf3d1f64fb 93363dc3dd3c b591194638db
+f115-2d-512x512-l10-h16 MTLPixelFormatRGBA16Float 2d 512x512 1 h16 private 7f38c36e8d3a 79d80487a996 e80364f6e787 ff37557a36fa 9fbfde4cec96 320bc1dcb7cd dd14fd03c357 bd66bd0f9f36 07f7ce4330f9 bf6385197fdf
+f115-2d-300x200-l9-h16 MTLPixelFormatRGBA16Float 2d 300x200 1 h16 private cc526525352e c74b69fdc83c 35363e7b394a f862783f16b3 42b361675803 1fa249482419 dd55f0343a5f 165b7b93b9c1 a9573a9fabbe
+f115-2d-256x64-l9-h16 MTLPixelFormatRGBA16Float 2d 256x64 1 h16 private 4404420cd48a 1f27f5809a4e 39c5d399bba3 cea686de52f1 14366f224634 5f634e10994e 1454eb455951 62faac6f1fc3 ccc299b997ac
+f115-2d-64x256-l9-h16 MTLPixelFormatRGBA16Float 2d 64x256 1 h16 private fcee9c3ffd55 f6e6f45c4a93 ca4719714157 283cae63a4cf a61f3ab10a3e 5ad95471eaff 172ed645fdb9 58ad03386c01 19f6d6219c20
+f125-2d-65x65-l7-f32 MTLPixelFormatRGBA32Float 2d 65x65 1 f32 private 95a67b6bc194 df001a7afae6 91084c1a3b6b 1c5155906737 075850aff996 84e5f7911c78 9bdbbe84faa2
+f125-2d-96x96-l7-f32 MTLPixelFormatRGBA32Float 2d 96x96 1 f32 private 8d403b14673b efa14a88ea22 1e581048f601 9d4a8691f777 4066216a1acc d636043b96a7 96856afcf66d
+f125-2d-128x128-l8-f32 MTLPixelFormatRGBA32Float 2d 128x128 1 f32 private 2d6f82fba313 e530e4ecfc8d 964ebb44e38c b2c8b2a48821 11c5a44a2ba9 5d46bbfca035 0937b5c2891e 02e2e6393603
+f125-2d-129x129-l8-f32 MTLPixelFormatRGBA32Float 2d 129x129 1 f32 private 5be83d9a9a4d ccbdd24f4f68 5e57119101a0 81ff0c06d7ff ebd9d3d51e40 c497835949cd 8d2193a7b570 93d1d1dc0ee6
+f125-2d-193x193-l8-f32 MTLPixelFormatRGBA32Float 2d 193x193 1 f32 private b28cc5473113 c0c16f9d640d c5b5cddd247e 00cfbef95a36 eaae8eec121d 424567003006 7fff2d783a75 54eae260aa9b
+f125-2d-256x256-l9-f32 MTLPixelFormatRGBA32Float 2d 256x256 1 f32 private 56b79e0f800c de3be9cc90a2 fd95b8925fcc 1909f8fb7c9d 006aeafc2d90 e03df99d02e0 03c7c608040b 832d2eba7426 f1dded4f78fe
+f125-2d-257x257-l9-f32 MTLPixelFormatRGBA32Float 2d 257x257 1 f32 private 5af30a57ae4b b4112296d5d9 c38bab41d416 8a1e4b86ed70 d9597076b104 0e7953c130aa fb31c1c3e068 a02d889fce43 acd256c6899f
+f125-2d-384x384-l9-f32 MTLPixelFormatRGBA32Float 2d 384x384 1 f32 private 6d5975455665 5e5d638e9a39 38bbc8704dd7 f5dab3ea0724 ecb003deeefe 56db0a4e9c07 5cd05b71b448 d5c31115eb2e 64333771f731
+f125-2d-512x512-l10-f32 MTLPixelFormatRGBA32Float 2d 512x512 1 f32 private 0284abbde6b5 4d31feae7319 7e780eaed659 efe1f9bbe625 5492419d289b 060db74b7432 1862b2c3e135 008e603830d2 1c482d437949 c5c68f040db0
+f125-2d-300x200-l9-f32 MTLPixelFormatRGBA32Float 2d 300x200 1 f32 private 9da8f11915ed c1c2b90f9f98 f7acd0a86ac8 5ae860829ed3 91a01ac26091 62b5101f6665 0b568ddc72c6 465378e866e2 84e4c87722fb
+f125-2d-256x64-l9-f32 MTLPixelFormatRGBA32Float 2d 256x64 1 f32 private a93ebf4aa26e d661cc0417fa a8dc1ffd733e eeee1aafe3de 81d2cb2f39f5 287b83fa0811 d5972788348c cd45fd489041 41e81691b69d
+f125-2d-64x256-l9-f32 MTLPixelFormatRGBA32Float 2d 64x256 1 f32 private 340762784d48 7a2536bd9db5 a1768a4ed563 3d0af640a780 a68b9afe28d4 191e1f507577 0b870ca2291d 48cdef5a2cbc 90d98a2dbf6a
+f1-2d-256x256-l9-u8 MTLPixelFormatA8Unorm 2d 256x256 1 u8 plain e4bdf88f7fa2 66520a4575c8 ac70a87bd2b3 4add3f0f0429 ba291d22b615 78746e8f6726 5a9871dd5d28 ea4521d97009 76be8b528d00
+f1-2d-193x193-l8-u8 MTLPixelFormatA8Unorm 2d 193x193 1 u8 plain 1d41a9d30c22 44e63a4b9ddd 6d9d47b27668 71ef00e3e870 1ebc89b5c77e fb9c8deef483 063d6b4f1a88 76be8b528d00
+f1-2d-300x200-l9-u8 MTLPixelFormatA8Unorm 2d 300x200 1 u8 plain 67d095841d05 fb4861affda6 866ddb51e292 7c37ca907ab3 d361d18b708e 88c8d4d619c3 44af9104dccb 517391d5972c 76be8b528d00
+f1-2d-130x130-l8-u8 MTLPixelFormatA8Unorm 2d 130x130 1 u8 plain c23e69440f6b 0362624b9f81 264f080a1419 6494bcc0a86a 4ddb210e4db1 97f2fbad972d ebb6bd1c6c52 7ace431cb615
+f1-2d-1024x16-l11-u8 MTLPixelFormatA8Unorm 2d 1024x16 1 u8 plain 5da2838ee0f7 8eb0fe313e28 dcce926e12e1 f2106dd4be16 9271bfdf3643 548f7faac8c0 c062ed717332 807a33a944cf 5418fd6359c5 af472cf2977d 76be8b528d00
+f1-cube-128x128-l8-u8 MTLPixelFormatA8Unorm cube 128x128 6 u8 plain 8a067cb983c7 718b42654689 8e27ff009a2d 4026c134e35f 4de77dc80cc6 dacc41bb70eb d78eb195c064 86ff3911aa5c
+f11-2d-256x256-l9-u8 MTLPixelFormatR8Unorm_sRGB 2d 256x256 1 u8 plain 7733f227e1eb 1f684027a263 23d27c54923b a0f454411f2c caf342e7bb06 02099a075e65 e5bc44bbc3a0 ebcb6c48ed79 79bec7ff3e69
+f11-2d-193x193-l8-u8 MTLPixelFormatR8Unorm_sRGB 2d 193x193 1 u8 plain e0ebe5f9cf73 00e817a8d151 72bda47e716a 662e2574bce1 9e94e2e07211 458e5e715dd1 df815c2ad1d5 5bad0d1132ac
+f11-2d-300x200-l9-u8 MTLPixelFormatR8Unorm_sRGB 2d 300x200 1 u8 plain e1fdf9384389 b55601c8dc3f 5e306e852ff7 3223ee9c0bc1 abe99672d54b c0de401f58db 0b527df86247 371d6eecf1b3 2a0ab732b4e9
+f11-2d-130x130-l8-u8 MTLPixelFormatR8Unorm_sRGB 2d 130x130 1 u8 plain 6c6359d9f6ac 54efb1e21778 d46055ba3ad5 9897f861b1bd 7d955637e958 b1dcd9996e4c 2bbc7407df36 79bec7ff3e69
+f11-2d-1024x16-l11-u8 MTLPixelFormatR8Unorm_sRGB 2d 1024x16 1 u8 plain c515eaed106f dbee94cbd832 0c912922bbce 23786fabfd9e a551a0c1605b 4892e0282913 fff98638ba76 3064a8ceba67 13bed67d04eb d65441eec2a4 84873854dba0
+f11-cube-128x128-l8-u8 MTLPixelFormatR8Unorm_sRGB cube 128x128 6 u8 plain 36d68f727dba 31ffb5dc04ed b63d00e84a20 795ec5a44798 d1b92fbbf9ad 09bb25ec1021 ab5f3b92be86 000e0ece9f8d
+f12-2d-256x256-l9-u8 MTLPixelFormatR8Snorm 2d 256x256 1 u8 plain 3239570b35e4 c46ebb2a19ff 062fa3c42842 d6ae733890d4 987519b14af0 2e8123d23482 5b8abb3da615 b7d1b3a1104c 6e340b9cffb3
+f12-2d-193x193-l8-u8 MTLPixelFormatR8Snorm 2d 193x193 1 u8 plain 3006da147ad3 cc25327cbdd2 7f2ce5de200d 53d8c34ab2a0 53ffb26d76ff f9a847b44a5c 3ad330bd176b 3e151409ace9
+f12-2d-300x200-l9-u8 MTLPixelFormatR8Snorm 2d 300x200 1 u8 plain 6c9ee798fbc6 b8313af4e390 4e8c6385e40f dd26c84d59fc 93499e81e038 cad2883df406 8d6688a1d0e6 96a296d224f2 6e340b9cffb3
+f12-2d-130x130-l8-u8 MTLPixelFormatR8Snorm 2d 130x130 1 u8 plain 916a4eaa8f0d bba362db5b6c f1f80a2e2389 5f670beee8e0 e0ddc6f7b623 f762ce039f1a bf4571113cd8 6e340b9cffb3
+f12-2d-1024x16-l11-u8 MTLPixelFormatR8Snorm 2d 1024x16 1 u8 plain aca55153f4a6 4be062f76a90 bce31fb11298 60696638d1fc 35be3caf14a3 64dceaf41d91 cd5c8fe2b961 2dc87c716bb5 81ff65efc448 96a296d224f2 6e340b9cffb3
+f12-cube-128x128-l8-u8 MTLPixelFormatR8Snorm cube 128x128 6 u8 plain 034e8eeedb7d babf1fd4b0d1 fbcfe4158175 935de765c0ed 2881f456472f 175dd308673b 71011dbc0eb3 8febb72cbed2
+f32-2d-256x256-l9-u8 MTLPixelFormatRG8Snorm 2d 256x256 1 u8 plain 5d310202043f 8357b057bd51 6e564fdf804c 2e5e26cc8047 73d2767d1e0d 6d9c1bddff26 b4ce7b3e1d8e e5562c56cc53 06eb7d6a69ee
+f32-2d-193x193-l8-u8 MTLPixelFormatRG8Snorm 2d 193x193 1 u8 plain c68669a460a0 bcf0ed83a353 dc89a9bdee43 fd258b7088c7 10409451ad29 53847533a91a a526cfd8165b 6aaf57eaeabd
+f32-2d-300x200-l9-u8 MTLPixelFormatRG8Snorm 2d 300x200 1 u8 plain cc30f2e118ca 8bfaf2ec9bf6 d58beeaca3c7 3e0bb62077cc 6a45886e5beb 2f2645fe69bd f42b48d4ad00 ffc22fec512b 47dc540c94ce
+f32-2d-130x130-l8-u8 MTLPixelFormatRG8Snorm 2d 130x130 1 u8 plain d7eb0da76d7b a53bb217818f f438b1909ecc f9735127827d fc9747363382 485c7f85a369 70d590b7eeda ca2fd00fa001
+f32-2d-1024x16-l11-u8 MTLPixelFormatRG8Snorm 2d 1024x16 1 u8 plain cc4a58c24aa5 50aab76ab034 fc813c50dda4 2b64c2285c8f a193fe6603ce 7cb51870d274 c5af1295a6c6 9bdbdcbeea08 58efaaba8121 81ff65efc448 96a296d224f2
+f32-cube-128x128-l8-u8 MTLPixelFormatRG8Snorm cube 128x128 6 u8 plain d36b48324a53 acc4be4061aa 2b5770c7111a d444053c7b37 d299a74287d8 4d6b53fe45fc 2f1af62c3dda 0ff14c32a09c
+f72-2d-256x256-l9-u8 MTLPixelFormatRGBA8Snorm 2d 256x256 1 u8 plain 81e6e0bdf6fc 85910d58b826 089d28cbe856 97af512dcc41 3d4fd90c5fe3 356a1692eb64 e05bf99afd4e e9121e0b73f2 bf4571113cd8
+f72-2d-193x193-l8-u8 MTLPixelFormatRGBA8Snorm 2d 193x193 1 u8 plain 7a9f4d56cbfe 64ff58937890 e4a6a36c21c3 ee08d2d8e747 6a6a90924fe6 bd54cd4a8a7f 4c910d4e5bd7 5e88a9a5820d
+f72-2d-300x200-l9-u8 MTLPixelFormatRGBA8Snorm 2d 300x200 1 u8 plain 841f0542c5b6 dc324c67c97e df1c49f3ad10 a0653b02685d bc1c10fb7496 7d2d558b47bd e8d7e33c447a 2eabe3fbad75 34aa409cb358
+f72-2d-130x130-l8-u8 MTLPixelFormatRGBA8Snorm 2d 130x130 1 u8 plain e2d332f63fe3 26adc1229bcf 3a401b61caa6 18d3a2820583 0b1c7646394b 43108930bfe1 d4a80f4aa73d e890f350f438
+f72-2d-1024x16-l11-u8 MTLPixelFormatRGBA8Snorm 2d 1024x16 1 u8 plain bdd64285a9af add0392d8340 f583fb2c6538 031ff50ea798 71e8b0c8c924 d820a2bd8f71 f64d953b28f4 a3958221ed08 ceeac7a3a006 0f71f9a25a25 df3f619804a9
+f72-cube-128x128-l8-u8 MTLPixelFormatRGBA8Snorm cube 128x128 6 u8 plain dc71a3a9fb80 182ca1be9b28 cd4594739446 3065a7ca8089 9a0782a36847 c873ee2f644c e3bcbed0e2c0 f68399107e43
+f20-2d-256x256-l9-u8 MTLPixelFormatR16Unorm 2d 256x256 1 u8 plain 0f6bbc381694 93b1cf763f21 caeee7547ab6 81504ffc65db 205f09649a51 271473773a02 957d585c0114 111d69acd428 077ba5bd795b
+f20-2d-193x193-l8-u8 MTLPixelFormatR16Unorm 2d 193x193 1 u8 plain 8d83619b0b56 77c2f99148a2 dba3a76815bf 8c6069e9fc80 ea669eaf3109 13d2504000e2 70c3307c00af 6a41beb057dc
+f20-2d-300x200-l9-u8 MTLPixelFormatR16Unorm 2d 300x200 1 u8 plain 5cf8729ed987 6ed375f59c8e b7a9ffcf865d c9d30cd8c992 7eb5e8b31042 3410a87ac4d3 70223ba6b69d b567c2142d51 5a1b769c88e0
+f20-2d-130x130-l8-u8 MTLPixelFormatR16Unorm 2d 130x130 1 u8 plain 0b544ae3b2d7 0678874cb373 8da34f45bad9 67b94644f5fd 83bff7112e8a cba3ecd8b723 00c8b27924be e3075b153992
+f20-2d-1024x16-l11-u8 MTLPixelFormatR16Unorm 2d 1024x16 1 u8 plain 2343cc0b78a5 7e194e75924c 2c2ab12953b9 9ec47740b0f5 028d1e4a0870 06aa50b1c1b5 f2893a65dc4f a03eb4c1522d caa318385e26 36fc85604c94 9fbd691f6100
+f20-cube-128x128-l8-u8 MTLPixelFormatR16Unorm cube 128x128 6 u8 plain 255cf7588740 cd97ae8aa559 4f5c2c8a65bd d3ef0ecc4196 cd238e3f4c13 4d85c37c67f5 79733bd3c9e8 708e7f873fe2
+f60-2d-256x256-l9-u8 MTLPixelFormatRG16Unorm 2d 256x256 1 u8 plain 3af9cfa55753 ef54933a5ba9 886eec0eefe7 c59d11f88f44 52ecbe7a76ba 1d7e20d6165a 1db1128a5d07 09ff3b30915c 3f6c6c1a6d5b
+f60-2d-193x193-l8-u8 MTLPixelFormatRG16Unorm 2d 193x193 1 u8 plain e2fbb7e4e8d5 95d113918017 e67e7574dc6b ec4c2bca4cff d3605e895347 1a8ca66c4958 820b205b080e 1b8c1a46502c
+f60-2d-300x200-l9-u8 MTLPixelFormatRG16Unorm 2d 300x200 1 u8 plain f361e3577f3a a00e4ce71dc0 e413f7bb9e23 2f2ec40b68c5 f2b953cdc619 8eb592f83c14 0ff0a5a16824 b0ca12ba1c61 f51c13916c3f
+f60-2d-130x130-l8-u8 MTLPixelFormatRG16Unorm 2d 130x130 1 u8 plain 61ddb4a26331 f6a0d6f6b4d8 4a5260540a53 227b2b79b0c5 674c77090a37 266299aa9da6 2a1aa85bd164 2560d5aaae57
+f60-2d-1024x16-l11-u8 MTLPixelFormatRG16Unorm 2d 1024x16 1 u8 plain 2bd38772c17d ce2c1c071a01 4e44eaf3b0ed 7adf5a3d389c 3b3e86a406b9 0a06e9e1d41a 6c7fef9e5534 b561d27e567e a50f0ef5cf03 17b2b3a9fab6 b9e2c4391126
+f60-cube-128x128-l8-u8 MTLPixelFormatRG16Unorm cube 128x128 6 u8 plain 00896f239e86 430f07ea7e12 46c08f23f40a 2bc7263d175b 3c4f6bdc6f60 57e645f98e62 926c058c318b 3b0a90833e53
+f110-2d-256x256-l9-u8 MTLPixelFormatRGBA16Unorm 2d 256x256 1 u8 plain a7273aea3adb 9b27c4c8c2c9 cae2c9507317 a4fc69ef69e8 f2eff15cfc56 77d2e6d6b298 37c4dea151c9 7645db4f47b3 dee53f15b495
+f110-2d-193x193-l8-u8 MTLPixelFormatRGBA16Unorm 2d 193x193 1 u8 plain c2ced01b28c7 f4aeb70c67a1 ec0f2a2f6472 4c56e4ef6b25 5ec6740cd194 12ec6b6a6dee 16a8d68c42c1 7614edb1329e
+f110-2d-300x200-l9-u8 MTLPixelFormatRGBA16Unorm 2d 300x200 1 u8 plain 9d87a8d2730f 989cbafbe2bc ec1c69f02649 5bc445806f9c 1685b6dd9265 8e786ecf15ad 7efb82d62264 88ba57f1b54d 33edab9ff269
+f110-2d-130x130-l8-u8 MTLPixelFormatRGBA16Unorm 2d 130x130 1 u8 plain 5cb384565fd6 db349602bc17 14b359b4c78a df09d9e4f967 8d5735fbdb50 b814713abec4 4ecdaa92788f 04bab5039b1f
+f110-2d-1024x16-l11-u8 MTLPixelFormatRGBA16Unorm 2d 1024x16 1 u8 plain 875fa1c4be91 0dcaa6fd17b6 51786dcd9d59 95004bc0418e bf97836802f6 37adc9d9edbf f694d1ad9137 5e6a140e5f68 b7d73878798e 8ff3d2a0d0a4 9cb38bd9db31
+f110-cube-128x128-l8-u8 MTLPixelFormatRGBA16Unorm cube 128x128 6 u8 plain d693e8f21888 46da218be18a f56798d5e31b 95ffdd754bb6 ff0bdde753f6 d7469f5c03cb 036a6c45a286 46e9ee580510
+f22-2d-256x256-l9-u8 MTLPixelFormatR16Snorm 2d 256x256 1 u8 plain cbcffe13d355 1e8660157c7b 38145eb50d68 9845c052fae6 adf92cda01ed d5dd8e85746c 232a0ca4cc65 e2a7f13c6dc5 7648eb81c4e9
+f22-2d-193x193-l8-u8 MTLPixelFormatR16Snorm 2d 193x193 1 u8 plain e0b39e805eda f07a06db5b8c ae16bdefd969 d4c3c830e190 14d50ab9bc07 f82832ef2c62 f76ccc4dadc4 3a6ed5958fc7
+f22-2d-300x200-l9-u8 MTLPixelFormatR16Snorm 2d 300x200 1 u8 plain 58c531ebefb8 c952df59758c 00a430180686 050ea51d40d0 fcb18e42d381 29be8d6367c5 e0bd27fccefd 7d9884e20152 c52ef971de7a
+f22-2d-130x130-l8-u8 MTLPixelFormatR16Snorm 2d 130x130 1 u8 plain c9879539dd35 79034de6821c 65e376e731e3 d311f2952a44 28586392bc4c 652fb19e6626 a4de405953ed 31c582d77ca1
+f22-2d-1024x16-l11-u8 MTLPixelFormatR16Snorm 2d 1024x16 1 u8 plain 41a9b40298fc 90f1c85d92c8 7def5d5bd9d6 ffa67acb57c5 3b7765c77006 6d1df6037d00 c88d651fd591 1532336f451e cb393653f534 d11563d235f0 c6e7152f6e31
+f22-cube-128x128-l8-u8 MTLPixelFormatR16Snorm cube 128x128 6 u8 plain 14fd98e4cd27 c7ebf368f22e 4fe5a00cbd6d c834e041d108 6ffcc8dc94a3 29e5c32961c7 da958220ca0a 880db33be237
+f112-2d-256x256-l9-u8 MTLPixelFormatRGBA16Snorm 2d 256x256 1 u8 plain 027ecf13d2f5 a0708a68823e 1774bf741e72 3962563687a0 86ca9fb5f7dd d37ab3e55883 6ea8a0a56c70 c12570a87c36 86a64d4d178c
+f112-2d-193x193-l8-u8 MTLPixelFormatRGBA16Snorm 2d 193x193 1 u8 plain 5a3783a1ec35 78d9465aa594 86661aa5e5ae 65f7d0044d23 22d6a2dc88be 7c46b53e89fe b4688ff7925b bbe79d4ebc28
+f112-2d-300x200-l9-u8 MTLPixelFormatRGBA16Snorm 2d 300x200 1 u8 plain fae6bdf3e010 7d1f690da725 f3c9cbdafe4b 02144b60486b 425516d39bd2 267f1ad835f8 a16d52f37a53 fae26481cd0f 48b5d5eb4afe
+f112-2d-130x130-l8-u8 MTLPixelFormatRGBA16Snorm 2d 130x130 1 u8 plain 3e63f0b62783 6865daf6af3a 385f50db0278 61ea2ab6ca4c 15848e0d105f 5841a9ecb162 dd86a2999285 23e1665de3a6
+f112-2d-1024x16-l11-u8 MTLPixelFormatRGBA16Snorm 2d 1024x16 1 u8 plain 15b2de95ad96 3c3be4d7ffa3 581f3db0a567 094c4dc2cef9 aa267ca7a14e e86e1c019c1f 2f6eddbe5efe 9edc53703f8d 43af7a1d6bc8 1e3eaf5a04d4 56b62e3da9eb
+f112-cube-128x128-l8-u8 MTLPixelFormatRGBA16Snorm cube 128x128 6 u8 plain 215e734bfe6e a793b048590c 813e08be59c2 9053f286b778 fd040c08dd03 83c66d36f36d 1c8d9335606b ab044cea130a
+f25-2d-256x256-l9-h16 MTLPixelFormatR16Float 2d 256x256 1 h16 plain 7f9c569bbe63 f85219d85c3e 7f5125e657d8 17fbcf37e699 0b0d3e9db2de 97f6f6211e7f 71055b299043 fcb613adb109 fa61e3dec343
+f25-2d-193x193-l8-h16 MTLPixelFormatR16Float 2d 193x193 1 h16 plain b8a4bc59ecc6 00d4de5096d8 bab0aacf96b2 49fa4d2d791f e7c771246e93 aa41de08681f 77df5529f425 3d37a95ef1d5
+f25-2d-300x200-l9-h16 MTLPixelFormatR16Float 2d 300x200 1 h16 plain b083b3fceb0a 2f0c00e4f19b e51c9b65a56d fcdc592d9583 b7fd5c1198c7 406c4bca0659 098c804221b6 306e08c3cb1c 029a865c02c5
+f25-2d-130x130-l8-h16 MTLPixelFormatR16Float 2d 130x130 1 h16 plain ea352f5acda2 a5a61b66cb31 f3a161eee950 efbf711d3613 abb1f4bfa6d2 65be031601a1 0a627177fd62 640268b811ad
+f25-2d-1024x16-l11-h16 MTLPixelFormatR16Float 2d 1024x16 1 h16 plain 7a759b2edfa8 866942d2b02b 07e7db745ddb 0ded56e1c459 21078b28e8dc 055156aceaee 047f8c6b99e1 3bd2fc3b8699 59e9a9f9974c 797dfcdbb80e 1eed1c05436a
+f25-cube-128x128-l8-h16 MTLPixelFormatR16Float cube 128x128 6 h16 plain 315d40715417 d741f26564d2 f937d412451a d078418957b6 34516d8622e1 1f93396f01b5 33e8cb895234 ae5c306cdb6d
+f65-2d-256x256-l9-h16 MTLPixelFormatRG16Float 2d 256x256 1 h16 plain 8a5785dc3009 0a146458c4e0 d70c314f6c32 cbc3546c8f3f 192f9b249a46 987867aee6f0 68231e09d77c d5f33c3da525 09fb08eff8ac
+f65-2d-193x193-l8-h16 MTLPixelFormatRG16Float 2d 193x193 1 h16 plain 1c9714b74f18 a9b763194f7f 5e7435ca67ea 92d9b24a219b f0ff8a4c0d26 7450ddab7d67 6a0a19d27d3c a574973b1a2a
+f65-2d-300x200-l9-h16 MTLPixelFormatRG16Float 2d 300x200 1 h16 plain 904794268fd8 9e45cf10e2f5 c2af18448792 d9091788da89 156b99470419 fa5a6d9aadc4 d45ca822c6d3 14cd8763ef63 28ff51e3d0f3
+f65-2d-130x130-l8-h16 MTLPixelFormatRG16Float 2d 130x130 1 h16 plain 925c569833db a55d48195a93 6b9dcfe434a0 4edff8bd47e7 d746026e40fe 0ada9129c7df 3199c3a19eb3 c9dfc034d24a
+f65-2d-1024x16-l11-h16 MTLPixelFormatRG16Float 2d 1024x16 1 h16 plain 04b46c53303c 253f44ecab23 b32c07ebb9f7 bd31a9dc528c ab14d1cb1677 d974ea8001ea d543515fb153 b3b62ea35fe5 9a067ed634f7 bf5347fabb02 301f75b8c348
+f65-cube-128x128-l8-h16 MTLPixelFormatRG16Float cube 128x128 6 h16 plain 5a7c9147c183 4deed04e8c7e ca0a664c2616 311d64a76aba 73a97c02e367 a2cc6af9c67b 6b3497d0a29e 3cc4bb83fb35
+f92-2d-256x256-l9-u8 MTLPixelFormatRG11B10Float 2d 256x256 1 u8 plain c74b777486e5 bb25cc33255e 3fe16f0ceba4 c454418b309a 266c77ab7b82 0ccdd1aedc9e 2c2753c54fc6 407ba5e43508 71b574896b96
+f92-2d-193x193-l8-u8 MTLPixelFormatRG11B10Float 2d 193x193 1 u8 plain 6e3ac8ab3962 54f02fea9b9e 41f0b4f3d511 8188f3bc3dd2 270ea8edc6a0 33b6be3321be bc4f58ec9ebf 71b574896b96
+f92-2d-300x200-l9-u8 MTLPixelFormatRG11B10Float 2d 300x200 1 u8 plain 9a73fb070d5f 071c66ad7cfa efc82ba8c9c2 fd1265065a81 c9cd82cc3716 91c4a9b2d9b0 f324b53791ff e7d6336a8b2b 71b574896b96
+f92-2d-130x130-l8-u8 MTLPixelFormatRG11B10Float 2d 130x130 1 u8 plain 5534eaf8fda2 c152d0cce295 750b02d07efb d70ffa53c3d6 0ccdd1aedc9e 2c2753c54fc6 407ba5e43508 71b574896b96
+f92-2d-1024x16-l11-u8 MTLPixelFormatRG11B10Float 2d 1024x16 1 u8 plain f52c97c1854e aa437bf1e37a 5de4e01d573e 4b833c23cb22 0ccdd1aedc9e f9b497b679ba 2c2753c54fc6 0f4cb6926607 407ba5e43508 e7d6336a8b2b 71b574896b96
+f92-cube-128x128-l8-u8 MTLPixelFormatRG11B10Float cube 128x128 6 u8 plain 73a9bec35613 40b1d019c095 c900ca81a67c f25c41e604eb 699ab15db959 ff65bfb93e12 095c5f9b55d2 2bbe0fff2e27
+f93-2d-256x256-l9-u8 MTLPixelFormatRGB9E5Float 2d 256x256 1 u8 plain 0c25428250f8 edf6d75d5741 b6469e1bb5c4 49648f2083dc 67ec764aedda 1c84a64cb89e 58cb4e66e28c b9ce323785b3 0fff122ac3a7
+f93-2d-193x193-l8-u8 MTLPixelFormatRGB9E5Float 2d 193x193 1 u8 plain 0b2878576102 c68dd4c3eaab f8e58766ae1c 2966d881c9d2 6cd0b867ae73 14029909b894 89fb2b793916 ddc28ff65312
+f93-2d-300x200-l9-u8 MTLPixelFormatRGB9E5Float 2d 300x200 1 u8 plain dccbf83e3000 393d3e5c141c 44be2a56a0dc f5c26b18b026 89498fd20a1e 737d6d9d057a 6de655c48cee 7dc7e1136885 1bce90bfb52e
+f93-2d-130x130-l8-u8 MTLPixelFormatRGB9E5Float 2d 130x130 1 u8 plain f86719796d07 6f1efcd67dc5 b6a8ea391e52 4d205cf5b9f1 bb9d34ffb777 ee02e52ddd1f a975f237995a 9ac61ed79445
+f93-2d-1024x16-l11-u8 MTLPixelFormatRGB9E5Float 2d 1024x16 1 u8 plain 8aa22d71669b 104ad8130e57 eb5377f0f8ac 092faead2e9e 934b70006bd4 41047887a62c 16d46bbf08ac e409beb85bef b8c9a264c862 aecae1600490 89ff7289dda2
+f93-cube-128x128-l8-u8 MTLPixelFormatRGB9E5Float cube 128x128 6 u8 plain 55b4ff42d361 104d4e317d38 28fec50e2522 7ecee8e4e455 7e36253ef66e 5f6554224ab6 9bc68c37aa01 6f60152c970f
+f554-2d-256x256-l9-u8 MTLPixelFormatBGR10_XR 2d 256x256 1 u8 plain 2393cc2900d8 07c77d2759e9 a061506bde30 5e2e59084c14 f79b568b781d 614b39779ef0 f71f81931300 3d5bde1a9bc1 77e959d35ac0
+f554-2d-193x193-l8-u8 MTLPixelFormatBGR10_XR 2d 193x193 1 u8 plain c19bc6a8946a 77dc72bd6563 d6988f7aec61 8cb43208b17d 3ae362aa3f24 8e07eb86f69c 453de8f1e6b1 613d1f1ffebb
+f554-2d-300x200-l9-u8 MTLPixelFormatBGR10_XR 2d 300x200 1 u8 plain 66cac833a351 fa0bd8be3a0f ade2d851ed25 5070b76dac21 6e4dfb302f71 1687bdf18e24 60d1e5cb9379 6122748eb00e 16000a116d9d
+f554-2d-130x130-l8-u8 MTLPixelFormatBGR10_XR 2d 130x130 1 u8 plain 36a65d4daff5 7ec3cc9ad047 d3fc1a9432a8 f3435bf0e4d5 640e438e21d4 6fc0b867f789 a5c6a2a91b12 47fa073f8ad6
+f554-2d-1024x16-l11-u8 MTLPixelFormatBGR10_XR 2d 1024x16 1 u8 plain 6dec1b405deb 5c4be2046026 f13bfc9168ad 56cc9f8d50d3 fbe6a15854a7 0288d6980c26 1bae2feae5ef 9996aaa9061e fd42d444772b 655c23255820 f7149ce65865
+f554-cube-128x128-l8-u8 MTLPixelFormatBGR10_XR cube 128x128 6 u8 plain 3448961fc311 fedf08af0344 b4f400a221a0 c2de0fa246f5 89d5b05284c0 b71d371606c0 a56447f619ae 0ff9ac65afc7
+f552-2d-256x256-l9-u8 MTLPixelFormatBGRA10_XR 2d 256x256 1 u8 plain 5e16ca381460 c5dd8e2dd3d7 bba5cb844f8d 1d391709bde5 70b85949e184 1deba423cdf0 58ee4bd6de6c e272fb81909a 9b07d0279567
+f552-2d-193x193-l8-u8 MTLPixelFormatBGRA10_XR 2d 193x193 1 u8 plain 766372244430 0bbd79ae37b1 0797c0499fe9 46dfdcb57442 afaa4bd136ca 529a58d0b6b5 39c5588194e7 83233b64ea26
+f552-2d-300x200-l9-u8 MTLPixelFormatBGRA10_XR 2d 300x200 1 u8 plain b068db06a1ba 465cb2c56162 3b1aa049ae7c 1a52e423b46f c0910f4f366a eda41010962c 75b3afb51f31 dcaebca57b57 7507572d8e8a
+f552-2d-130x130-l8-u8 MTLPixelFormatBGRA10_XR 2d 130x130 1 u8 plain 54213cf55219 64288545e75c 352fdd3ef61e 4a5727254de3 373f36065d0d c2191fb9e21c d7d271820bae 5858323e4227
+f552-2d-1024x16-l11-u8 MTLPixelFormatBGRA10_XR 2d 1024x16 1 u8 plain eb99fe27d59e b4de87d4e41d 19f86c04ca84 05f6b16f3693 a77c107eaadd b7234522713f 99aeaf0d1201 de152731726c 5879c55292ae d71fc5558143 569401046c1a
+f552-cube-128x128-l8-u8 MTLPixelFormatBGRA10_XR cube 128x128 6 u8 plain 2bacb9838f04 57b58fcc4263 12d78a416155 009b62571e2d aa617ba3b071 071dc68d94b3 34b7c6c0dc30 15e00fac6d2b
+f555-2d-256x256-l9-u8 MTLPixelFormatBGR10_XR_sRGB 2d 256x256 1 u8 plain 01aa700ac6c2 e4e593cafd1a 771fd377c21c 02abc9b6d723 bfe2d595bc47 449259282568 d6d7ac99b09e bd9e5e2a891a f393e486f486
+f555-2d-193x193-l8-u8 MTLPixelFormatBGR10_XR_sRGB 2d 193x193 1 u8 plain dbc02d633273 c645910071f9 94731251e8d8 5aacf3d0b25d 4bfc8ebb17e7 7adc99504bb2 7223aeadfebd fe3b320db8a2
+f555-2d-300x200-l9-u8 MTLPixelFormatBGR10_XR_sRGB 2d 300x200 1 u8 plain 5e982a3db956 ee942d847e32 9de89b4e7e01 a90782d51e09 0bd8b3986001 b9783afd59d2 dadbe40450fa 07dccd7459b0 fa9a61b2bea8
+f555-2d-130x130-l8-u8 MTLPixelFormatBGR10_XR_sRGB 2d 130x130 1 u8 plain 888b854e0986 1277f3717d99 4212e672fbfc b1926eaed15f c7150d76958f 76a409ea2e19 690ddb5e1b92 a24bf6910218
+f555-2d-1024x16-l11-u8 MTLPixelFormatBGR10_XR_sRGB 2d 1024x16 1 u8 plain 8d1a52368b7b 7b8da6379c4b 86ba4cadcef8 dcbf2d9f7895 7ce5a1516a3c 0c00bed40a47 ee3295fa802f ddb640d26a9f b71e6b882f19 8064e1769108 dbf2e1152990
+f555-cube-128x128-l8-u8 MTLPixelFormatBGR10_XR_sRGB cube 128x128 6 u8 plain 83f22a07aea8 586fe46c778b 087613697efd 49b38bb2a828 f50ae2d70e0f 4baf3270bf17 032e0b06f20b 572ea3858108
+f553-2d-256x256-l9-u8 MTLPixelFormatBGRA10_XR_sRGB 2d 256x256 1 u8 plain 077d05783a84 9ff896559857 a4a2aaf0a0a9 96104f088109 eafa5a27c034 cb7aa639c737 a41d677d2bb8 d8fc791f7b81 480097ba8f51
+f553-2d-193x193-l8-u8 MTLPixelFormatBGRA10_XR_sRGB 2d 193x193 1 u8 plain 0c27fabc4876 5df58869d558 2643bf6d1321 06947bfe1062 2ae05e73877c 12f8729c3d9b a1ed6af1c0de df8fb55c0ef0
+f553-2d-300x200-l9-u8 MTLPixelFormatBGRA10_XR_sRGB 2d 300x200 1 u8 plain 479659d33f52 b6da776e3336 4753c2021fdf d3deb0b4a935 a24c3315e5bf 40386db6a7f9 092ec7d1afda fc904fff5c0f 9adc97068d48
+f553-2d-130x130-l8-u8 MTLPixelFormatBGRA10_XR_sRGB 2d 130x130 1 u8 plain 6a056beb6ae2 3cbb012bded9 8872b211ee04 9aec2f84aff1 dbf3e45104c5 70566e65f4e9 93c59b6075ef 4eca68205060
+f553-2d-1024x16-l11-u8 MTLPixelFormatBGRA10_XR_sRGB 2d 1024x16 1 u8 plain be238b8de28e cdb96d98e334 b594891f1aee 7f82d4bf4407 49ceaa569faf d01313b87eeb c88fc1aadc08 5ae14b09cca1 a10b7d8a4c47 cbf50a255677 f5088245491a
+f553-cube-128x128-l8-u8 MTLPixelFormatBGRA10_XR_sRGB cube 128x128 6 u8 plain 0cf4a8e56962 92e199f98295 9f003746334c 8ae471249a74 f9aaf12008da 3f77a87e7b12 b3477a383692 d5c767a93854
+f42-2d-256x256-l9-u8 MTLPixelFormatABGR4Unorm 2d 256x256 1 u8 plain 6013b6828f23 cdf5418d8a66 e0bf1810d48e 10ca0d8c6748 b2441a706567 d81ae57cafd6 e8b72e0b71c7 d07a1b83c17a e638914c44e9
+f42-2d-193x193-l8-u8 MTLPixelFormatABGR4Unorm 2d 193x193 1 u8 plain a301174fd973 8efd80993397 1fad2ac6ce39 1b847df9bbf7 541b8da6f9ab 4d4a3723fa0f 1c1976b7286a e638914c44e9
+f42-2d-300x200-l9-u8 MTLPixelFormatABGR4Unorm 2d 300x200 1 u8 plain d9645b229ee8 c945f1387a17 43bd173f5688 c8ebf93ec270 a584501ee8e6 3ab14545f574 9e4ab5106a14 4d58bbbffc4a e638914c44e9
+f42-2d-130x130-l8-u8 MTLPixelFormatABGR4Unorm 2d 130x130 1 u8 plain 13f19a1034a1 2912133af412 8d599a65655b 762b949b3bba 928543563032 1ce3b23bd60c d07a1b83c17a e638914c44e9
+f42-2d-1024x16-l11-u8 MTLPixelFormatABGR4Unorm 2d 1024x16 1 u8 plain 7a59348d5359 b5687b1ec040 5b9054f70a07 64437f4cc373 61ce81f0728c 407b06ce05da e8b72e0b71c7 4c989d0c271e d07a1b83c17a 4d58bbbffc4a e638914c44e9
+f42-cube-128x128-l8-u8 MTLPixelFormatABGR4Unorm cube 128x128 6 u8 plain 18985d1d0cd3 b8448f0948ad 2fb94488463d addd5c11e84f 2b87d2009036 d03e268efe54 c535d7929ba1 7133391e3746
+f41-2d-256x256-l9-u8 MTLPixelFormatA1BGR5Unorm 2d 256x256 1 u8 plain deb107639d66 a07ca6bd1e02 5095fe73802f fecf2c1598c0 b5d0cd1b6f9f 250503002a61 39e2dfa950bd eb06cb73f366 bffbf7647da1
+f41-2d-193x193-l8-u8 MTLPixelFormatA1BGR5Unorm 2d 193x193 1 u8 plain 425b45fff25d 53a7b579b0b5 a5a8c3c33f3b d1a790cb2e27 615823fced31 b939e895582a 019d2f21426d e2f2a3782b44
+f41-2d-300x200-l9-u8 MTLPixelFormatA1BGR5Unorm 2d 300x200 1 u8 plain 232d9ca9f9a3 33bc3bec329f 235f94f4ab5f fad17ad49b01 2c41a582fa82 e7ced07881eb c521c145d688 daa2755174c2 bffbf7647da1
+f41-2d-130x130-l8-u8 MTLPixelFormatA1BGR5Unorm 2d 130x130 1 u8 plain 32c909c0828f c4c6df4cf0dc 8a96abb4b2f2 6e088601dac7 7447cc0e1ae3 ff146476956e 3bde83859044 bffbf7647da1
+f41-2d-1024x16-l11-u8 MTLPixelFormatA1BGR5Unorm 2d 1024x16 1 u8 plain 885c34ee26b4 75a61871b855 ea84b78ce55e 07f4740a6ca6 aeda3b4789b4 c83708983a36 538ef9565830 8eb3110490f4 a8ce532fbe9e 79f20d041e29 ff61da6028c0
+f41-cube-128x128-l8-u8 MTLPixelFormatA1BGR5Unorm cube 128x128 6 u8 plain 047ed123043c ec20be21da6c e28e7fee18e2 996195013a23 e332c7363836 cc08ca7d0feb ddf9e4f7b33a a441a62406c6
+f94-2d-256x256-l9-u8 MTLPixelFormatBGR10A2Unorm 2d 256x256 1 u8 plain fe7a895f40ee a817d208ca8c f249ddeb3ac7 d5151456ec56 5f01d1e563fb 73636f930491 353ae821dbaf 74b032c6933a 857eb92c6d8d
+f94-2d-193x193-l8-u8 MTLPixelFormatBGR10A2Unorm 2d 193x193 1 u8 plain 569247e06175 3054134199f2 10c9804db67e d8b2ae27633c aac28f6de8ca 458698ccf358 ab9d08a0aed8 3c59cc5aaea6
+f94-2d-300x200-l9-u8 MTLPixelFormatBGR10A2Unorm 2d 300x200 1 u8 plain d4574ded7699 8bdfb84719ad 23059fe4acd2 ba59ab913472 1a8ce36848e0 2fde3b9f4591 0ab3469de296 92871f7d70a6 1f74fa0b10f3
+f94-2d-130x130-l8-u8 MTLPixelFormatBGR10A2Unorm 2d 130x130 1 u8 plain 5db590735ac9 e06dfd4dc816 b34e9faa70ff bcc52b29305b 39fe3bbd62cb 0416b7cbfa93 c089c3adfffe 33999bc9ce7f
+f94-2d-1024x16-l11-u8 MTLPixelFormatBGR10A2Unorm 2d 1024x16 1 u8 plain e8e3beaa1acd 2c02fa24f604 ea217bb53b9b 0e266c57544f b72d4fc9e13f 9ed6a029e25a 691f7f4319ed 04f7fe9baf0d b7da0f81af1e c6cb034ba8df 4c0ac6dfe9d0
+f94-cube-128x128-l8-u8 MTLPixelFormatBGR10A2Unorm cube 128x128 6 u8 plain a256fcc3abf0 5c4967b8b9c8 a487be44db98 ae04923f256c 023549f16883 2b9ef999ff44 cd4164e747e5 dfdca40baf55
+f115-2d-257x257-l9-h16-s1 MTLPixelFormatRGBA16Float 2d 257x257 1 h16 private d51ea034e644 1dd6004410f9 c406b20454bc 33fcefb5b39e 85f69400d1fe ff50659fee1f 734089a0f762 348a224405b0 ecb2e737b1af
+f115-2d-257x257-l9-h16-s2 MTLPixelFormatRGBA16Float 2d 257x257 1 h16 private 8570321abe51 a24755bf9905 bcbee4137351 5c86b4a2134b 08d9a34dc6ec 0dbab5f0dba6 cde49aaa19cf b9b3f53a4ac6 c025822d6299
+f115-2d-257x257-l9-h16-s3 MTLPixelFormatRGBA16Float 2d 257x257 1 h16 private 307f17d92778 b51b0a84784d cebbcb20f715 ab5e9b1bed17 3da577ca188c 9e6f1a0f8761 78a844612e9d 1dd07cfc073f 579be3fc6d9f
+f115-2d-64x64-l7-h16-s1 MTLPixelFormatRGBA16Float 2d 64x64 1 h16 private c38ea8a4bf36 e8f66d9bd7f2 544dba4991c6 41360d3d430c 8b1b398eca7d 078367d4a470 082fc0e1f7b6
+f115-2d-32x32-l6-h16-s1 MTLPixelFormatRGBA16Float 2d 32x32 1 h16 private a1cff9537650 86c8e1f6c56d 353c33443d47 3e53529deb29 5e60a997b0de 39ef71e6fad1
+f115-2d-64x64-l7-h16-s2 MTLPixelFormatRGBA16Float 2d 64x64 1 h16 private 5613dd1c9e3e 55c9cbf6b4c5 ca67e12d692b 2677c2975c2c e899923c4aff af07e7592ab9 f6c8bb472b8e
+f115-2d-32x32-l6-h16-s2 MTLPixelFormatRGBA16Float 2d 32x32 1 h16 private 45fb29884039 6d207e8bdc47 d2f088a55869 77030508633d 781e4e8bacb2 2a2ae2bf1b50
+f115-2d-64x64-l7-h16-s3 MTLPixelFormatRGBA16Float 2d 64x64 1 h16 private e2b25fe2e942 c5807f9cec31 feb923a25a26 9a0d2dd734b5 5e2532b83108 38bbe235d1a4 a7f84027b6af
+f115-2d-32x32-l6-h16-s3 MTLPixelFormatRGBA16Float 2d 32x32 1 h16 private e9ac5485a720 7fbcd1888b21 0e3ec27de16a 2810b691c00e 316da8157e12 27700d4180a2
+f115-2d-64x64-l7-h16-s4 MTLPixelFormatRGBA16Float 2d 64x64 1 h16 private 039d644b49a9 e93ce1a8bff9 bcb4bb353e13 618598a93c9e daab248be31c 3624bf1ce49e 06eba966b69d
+f115-2d-32x32-l6-h16-s4 MTLPixelFormatRGBA16Float 2d 32x32 1 h16 private 41e1230304a9 47964095f67c 0fea10e4f34c ea8e42c7ac49 2f247d331ce6 3a6b423025d3
+f115-2d-64x64-l7-h16-s5 MTLPixelFormatRGBA16Float 2d 64x64 1 h16 private 72ad360078c6 971111b7f5e9 e39b4efe0f6f 3297e9f7167d ef47eb0ef5a4 9bfac514c8fd 8d187fb17be2
+f115-2d-32x32-l6-h16-s5 MTLPixelFormatRGBA16Float 2d 32x32 1 h16 private fbcdf7e4935d 8344eaddb4d3 a733e2a32931 5841dbf29973 69746e0c9d36 e8462d0970f9
+f115-2d-64x64-l7-h16-s6 MTLPixelFormatRGBA16Float 2d 64x64 1 h16 private 1ea9c8adcf52 e7b4bf7ee601 28b3903a0052 206d626d4efa e925c9550b8b 918e4d825a01 a2fd2aaf7369
+f115-2d-32x32-l6-h16-s6 MTLPixelFormatRGBA16Float 2d 32x32 1 h16 private f3d16ccf1da9 3a1f6c23a0e9 9257ab5c6f98 addcebf0749c 893582eeb874 f256080963c1
+f115-2d-64x64-l7-h16-s7 MTLPixelFormatRGBA16Float 2d 64x64 1 h16 private 119539ba3cb8 a8de5fba9ff5 fef58a58ba70 d16e73bcb800 29476dba2ec2 0e63b7305b73 30a26eeec8ad
+f115-2d-32x32-l6-h16-s7 MTLPixelFormatRGBA16Float 2d 32x32 1 h16 private 5ecf41675008 80506747f878 a7a32438e130 43db8fd2b0df 7ad363bfb2d5 e894466bdd18
+f115-2d-64x64-l7-h16-s8 MTLPixelFormatRGBA16Float 2d 64x64 1 h16 private 044b39d479a3 4bafba8321cc e26963c551fb 7272bc26fa25 fe748f94133d 67cb64d8f199 4729b3d5e472
+f115-2d-32x32-l6-h16-s8 MTLPixelFormatRGBA16Float 2d 32x32 1 h16 private 81e730bd7e95 826611a9725a dab802a0fcea 9023bf84be56 b82c7bd8a25c 96fe51d895fa
+f80-2d-2048x16-l12-u8 MTLPixelFormatBGRA8Unorm 2d 2048x16 1 u8 plain 51bd6456f5d5 9afedef4af3c 80e9108008a4 ac157fa81967 c3ade4372bbc a06ba7149c60 641ddadc5aaa cc39fd0a7d37 91c570fa1d43 58af5d552a81 5d5c717bcf50 8d65a89d33fc
+f80-2d-64x64-l7-u8 MTLPixelFormatBGRA8Unorm 2d 64x64 1 u8 plain f3681bd9a87b b44701ac7043 0bd88409f4a0 903248fec636 62fe5b98db06 4d86022b44dd d66e9feb6221
+f80-2d-65x65-l7-u8 MTLPixelFormatBGRA8Unorm 2d 65x65 1 u8 plain 0404cc31ca1f 4ad1abb2b8be 0f6402455e2b 8382abff8421 97f29f531633 b7db819689a4 83dafcc97968
+f80-2d-66x66-l7-u8 MTLPixelFormatBGRA8Unorm 2d 66x66 1 u8 plain c68f5df35a6c ffdf133e95ff 4190999db7bd 3fb7123d1dd0 958b08c560a9 ae1f222a1e18 ad2a3d793f72
+f80-2d-96x96-l7-u8 MTLPixelFormatBGRA8Unorm 2d 96x96 1 u8 plain c91dd6c5dd6e 357aaad717ba e578e3920fec e5340f7ad0e6 f2b3ff38cd01 388272b21406 4e1ed2f2523c
+f80-2d-100x100-l7-u8 MTLPixelFormatBGRA8Unorm 2d 100x100 1 u8 plain 17659a74f8da 7d18ef1f82c5 4244caf63e0d c526473aae97 cd0f451f525d 16be32ec09df 6f417f6da132
+f80-2d-127x127-l7-u8 MTLPixelFormatBGRA8Unorm 2d 127x127 1 u8 plain caa6403c9600 4c7acf683345 e06d80d33693 93ab09ec58f0 557daf808541 fca153ed8f95 9e242cd04a99
+f80-2d-128x128-l8-u8 MTLPixelFormatBGRA8Unorm 2d 128x128 1 u8 plain b0ca70f36119 ba61191ebc64 dd221dec8aab 84a121fb50fd 8016df87d688 6e3005d84312 17b748c1a6a4 8d65a89d33fc
+f80-2d-129x129-l8-u8 MTLPixelFormatBGRA8Unorm 2d 129x129 1 u8 plain 849aa3df9347 5e94f0279de5 375667ad4511 a2cc6c8c7c91 390d5bc789f2 5350c7cfbea4 cb9c282d143b cc0102d4cb2e
+f80-2d-130x130-l8-u8 MTLPixelFormatBGRA8Unorm 2d 130x130 1 u8 plain 92ec849c74c7 a7da315d2e7b 8647111f6997 8da7552cf5e3 8a60ac1fc18a 9c8164201247 7897b6506dc8 2427959f2256
+f80-2d-192x192-l8-u8 MTLPixelFormatBGRA8Unorm 2d 192x192 1 u8 plain 117b6cf3ec12 e119f0381f6e 9104141702e8 6f08cfb84a62 21c1c801d03b 75d891e2a551 5697d1731b73 9724c9ad1e67
+f80-2d-193x193-l8-u8 MTLPixelFormatBGRA8Unorm 2d 193x193 1 u8 plain 74595ce5414c 5d97052811ee d90b1d3f24ed b86498be7d2a c44bde0600bc d11df7673d8f fe16d0788927 fb4d708bc23f
+f80-2d-255x255-l8-u8 MTLPixelFormatBGRA8Unorm 2d 255x255 1 u8 plain 41e7f9555015 80c99b1fead8 c87431a4ad40 47b22722c4c9 b99ec97c73ac 5474dbc5c121 f2e886e56d38 998696cb5625
+f80-2d-256x256-l9-u8 MTLPixelFormatBGRA8Unorm 2d 256x256 1 u8 plain 5a1f19dc90ac 420ce3996bfd 1328019f927f bc69442af97b 997030d736d4 ffeebed93115 1301e3db0eb5 fa078c2e8b1b ea4521d97009
+f80-2d-257x257-l9-u8 MTLPixelFormatBGRA8Unorm 2d 257x257 1 u8 plain c74dfdb01090 e329bbad09b4 f0cd8443d5be 6b6f06a375a9 fba41e9e95c0 9b3ba7043c78 785bd8040ce7 c675022dff58 902e54af06cc
+f80-2d-384x384-l9-u8 MTLPixelFormatBGRA8Unorm 2d 384x384 1 u8 plain 6c249fa48bdd acdd90d1ac35 4f20ffad59fc 6b4993d31c97 6d895a63d729 b23cabe77009 0c6faadab895 29524bd99430 2427959f2256
+f80-2d-512x512-l10-u8 MTLPixelFormatBGRA8Unorm 2d 512x512 1 u8 plain 235270b402d4 3dfea1d78f5b a972e7b4a777 906d109d130a 168e854c216f 405780697e5b 86def74db1cd 4ce0e2d9b823 00881bb44bad 8d65a89d33fc
+f80-2d-1024x16-l11-u8 MTLPixelFormatBGRA8Unorm 2d 1024x16 1 u8 plain d8f33ceab490 b267bc9f2ce1 3ad7b01f2b36 0f391c0e435f ea6a9f063b63 bdb7ec13974c 34e12889edee 8a7c46d58509 3df4306cef68 157b98f0c20b 8d65a89d33fc
+f80-2d-2048x32-l12-u8 MTLPixelFormatBGRA8Unorm 2d 2048x32 1 u8 plain 93911af525dd f8b926054fe3 5aed839b948d c44ce3dde405 3ce50ab93db1 ef50a8ed1785 e625a341624f 708e2399cbfa 1a02353e9ccb d568d8a22604 5d5c717bcf50 8d65a89d33fc
+f80-2d-1024x32-l11-u8 MTLPixelFormatBGRA8Unorm 2d 1024x32 1 u8 plain 120ada88abd3 91ca7c9d67b3 a2114859c6dd b45a9254ac72 b83f097e490d 1ab7e9fdeab0 a90f05262e1a d96381f0700b d7570215c7b6 5d5c717bcf50 8d65a89d33fc
+f80-2d-512x32-l10-u8 MTLPixelFormatBGRA8Unorm 2d 512x32 1 u8 plain a72821f3a6d3 c40248919b07 625a0520e3a3 0178784355b9 e4cc2bcad882 29ad2420abd8 e647dfa868b0 0b56e359644d f90f1594b04f 8d65a89d33fc
+f80-2d-256x32-l9-u8 MTLPixelFormatBGRA8Unorm 2d 256x32 1 u8 plain 0dad26c033af a483c8736764 709892fb1ac7 4c3009c9a66e ecb8b55cb5db b3db1020f210 7e814347708c 558da5da025f 8d65a89d33fc
+f80-2d-128x32-l8-u8 MTLPixelFormatBGRA8Unorm 2d 128x32 1 u8 plain ad0c97a6f979 165282919f0e 3fb45384624c 51042b362896 ddaf78472595 6f92e7e44e56 55cc5b0715c0 9cdf24357a8e
+f80-2d-64x32-l7-u8 MTLPixelFormatBGRA8Unorm 2d 64x32 1 u8 plain 5f94b01d97db bd1c2c2a4a20 281879ae18ca 41268d4418f9 6518359fc36b c4f4efde83f1 250a2e99ba3f
+f80-2d-2048x64-l12-u8 MTLPixelFormatBGRA8Unorm 2d 2048x64 1 u8 plain 259b5ec27450 f4e20c19d003 6936895c19b8 be3b3de42b58 bb4b07379a10 144eedf51c63 d9152e748a6f 7e6746d5b8aa fe306cc29d08 3d631f198f48 5d5c717bcf50 8d65a89d33fc
+f80-2d-512x64-l10-u8 MTLPixelFormatBGRA8Unorm 2d 512x64 1 u8 plain 3e8b90040b71 c9401dc8e933 0fa89a5ef366 d73ba36b81d4 813451e19cbf f5a909fbbdc7 8e09133cee1d 89d35af28e80 c088b3f8be7c 8d65a89d33fc
+f80-2d-256x64-l9-u8 MTLPixelFormatBGRA8Unorm 2d 256x64 1 u8 plain abe91c0810eb b1c807ee9fc4 017b52d3bec2 9ab2fc497689 9afd1fe19249 7c3b1c25a589 860213b234fe 8ebd157bc74c 902e54af06cc
+f80-2d-128x64-l8-u8 MTLPixelFormatBGRA8Unorm 2d 128x64 1 u8 plain d6f17d2ac30b c851347da043 997f2ee55bb2 13bd562b828d 11db1c929e99 ba26a37ffb0c 60925dca1d83 902e54af06cc
+f80-2d-512x128-l10-u8 MTLPixelFormatBGRA8Unorm 2d 512x128 1 u8 plain 4ee1f5d691d9 6bc339c14ef9 ddb685525ee0 c560bcbf9ccc 3be327cdb533 bfaaac1726ae 92716f21163b 6a1aad21fdcd 7ed615cc0888 8d65a89d33fc
+f80-2d-256x128-l9-u8 MTLPixelFormatBGRA8Unorm 2d 256x128 1 u8 plain 12ccdf8b8aa2 8fd857529da4 648d2506e108 67bb30132ad0 78360606c414 c56f08eb6431 c9264aa77ddf 387f872a063a 8d65a89d33fc
+f80-2d-1024x256-l11-u8 MTLPixelFormatBGRA8Unorm 2d 1024x256 1 u8 plain 57a47bebd7b2 d1e2560f96ae ae8fea6b9314 2563f22b0069 54aff27b40e0 35e8dd7d9e83 b9f9586599bd 14fe2997bdd0 4e972baaee2a 5d5c717bcf50 8d65a89d33fc
+f80-2d-1024x24-l11-u8 MTLPixelFormatBGRA8Unorm 2d 1024x24 1 u8 plain f1c88d45162f 6ac5b6b20f40 589fe68a750e 10bceb8fbfc2 7235cccfad9b 5067dde9d6df 76ac8c6f0f14 d6cde2face37 989732ed8d80 d532076c901a 8d65a89d33fc
+f80-2d-1024x48-l11-u8 MTLPixelFormatBGRA8Unorm 2d 1024x48 1 u8 plain 7f3b54e1c731 a2cf8c0f54ea b00d0335c010 e66fff14a7cf e512c12a1adc 4ce25ddd4c88 93b67f1f932d 9a45acd192b8 bfc86b97ae17 850b2776d0ac 8d65a89d33fc
+f80-2d-1024x96-l11-u8 MTLPixelFormatBGRA8Unorm 2d 1024x96 1 u8 plain 4ab325a1a47e f41bcc8d3865 d6739d942e95 f3e766570397 7a06ae3be83b e06cd97bd6b8 cb5b6b6e201b ca3920314953 dd14ffd46822 5d5c717bcf50 8d65a89d33fc
+f80-2d-2048x96-l12-u8 MTLPixelFormatBGRA8Unorm 2d 2048x96 1 u8 plain 948204b9b2b4 60cc973cfdbf 10b84f3013a8 83dad915556b 3badf3b7ed64 f2ba8f5cd534 d0a39c676ffb 288558a00e36 c1ef319afc4c ef59857297a7 5d5c717bcf50 8d65a89d33fc
+f80-2d-300x200-l9-u8 MTLPixelFormatBGRA8Unorm 2d 300x200 1 u8 plain cc4dd7296558 8638796b44e8 43e5015061a9 d69c2afb2f5c ebbbb215e9ee d788cea36989 369f5f15b77a 20cb75781416 2124748583c7
+f80-2d-500x20-l9-u8 MTLPixelFormatBGRA8Unorm 2d 500x20 1 u8 plain 496dbbae9c0f 5fe5e6ef5a6d fd12dea488ec 8d640034ab49 7aca000bf8d8 51bde596c36e 2a22a271de6e 805ae796919e 74ae022ae24f
+f80-2d-1000x40-l10-u8 MTLPixelFormatBGRA8Unorm 2d 1000x40 1 u8 plain 8d9f71da671d da339a0d8d89 7fb1731ae1ea d608bc8ac92d 5beca6c60f9d 5ca507803070 6bfcdb6c26e5 691bb10c1f4a b0689c6b3494 17466d65344b
+f80-2d-1500x20-l11-u8 MTLPixelFormatBGRA8Unorm 2d 1500x20 1 u8 plain 3f14c02f24ea bfbe7ab3fced fc16978875e8 9dfe60c345a1 10b607383c31 dfc9faa6c21f 01ff0be16730 37ea2008fe18 d8b1772d9347 9ac57542e7d5 14963c668ce8
+f80-2d-2000x30-l11-u8 MTLPixelFormatBGRA8Unorm 2d 2000x30 1 u8 plain 2e3430e4334c 116c2a5d815a afe4efa8f662 467c9e41a6b6 7745f1b80f66 cd65f3d2aa91 019dd2afefca fd49dd6abaac 108f59debc50 0a793d66a84b cdb471aaccd3
+f80-2d-3000x40-l12-u8 MTLPixelFormatBGRA8Unorm 2d 3000x40 1 u8 plain d0d9689c3c68 cb1b85229de8 1e0404a6c609 eebfd3646bfa f66ab828485f 1ddc3f61b0fa bd37bff5ff8b d8a2bf122634 098a2ce9ed48 4604f8916275 a41bf56f7b11 ea4521d97009
+f80-2d-1100x16-l11-u8 MTLPixelFormatBGRA8Unorm 2d 1100x16 1 u8 plain b363c697c0ad 3f1507bf1124 cea23a919b89 fa195fc2ed5c 9df2b253b135 0657c3eb6e50 3493dcd45ae4 7a0febd7b57a b71152d65e7f 67851925b271 9cdf24357a8e
+f80-2d-1040x16-l11-u8 MTLPixelFormatBGRA8Unorm 2d 1040x16 1 u8 plain 6a1ecdf4d5ff 55a1d91fe0a7 3fb59ae60d20 f0225d8e9d40 03738b945d1c 4d1f018aa378 659da08409bd 25c20e8ec93d 753953e031cb 05b9822dfb89 8d65a89d33fc
+f80-2d-1024x17-l11-u8 MTLPixelFormatBGRA8Unorm 2d 1024x17 1 u8 plain c437b76c5f93 654b1737be6c e4831df97ca8 97e603c73aa9 245c900c1d90 30f4a88f6e14 6d2c1699bea6 0d82af39b338 60d65db462a9 5d5c717bcf50 8d65a89d33fc
+f80-2d-16x1024-l11-u8 MTLPixelFormatBGRA8Unorm 2d 16x1024 1 u8 plain 72c3027fe6d2 c3055d9eca71 6a853619937d 0d44918d3efa 09268d6d6a53 ce77bedc88f8 6e46e05d859a 37f033d80123 31e326440205 5d5c717bcf50 8d65a89d33fc
+f80-2d-32x2048-l12-u8 MTLPixelFormatBGRA8Unorm 2d 32x2048 1 u8 plain c2a433f9dc37 314ff20ce10d 719700d45d40 893576b514e3 1af019fdad6e af9d0be132a6 543f3af0e682 15e83345508d 3421c2970016 4e972baaee2a 5d5c717bcf50 8d65a89d33fc
+f80-2d-200x300-l9-u8 MTLPixelFormatBGRA8Unorm 2d 200x300 1 u8 plain 102f6f2a906b 32dd991b609e 854b16d0f91f 30490b8bab61 0158b0c941fb 07397feb44c0 1133afe1f9b1 755c7da6d53a 6890a2da7fd1
+f80-2d-24x1024-l11-u8 MTLPixelFormatBGRA8Unorm 2d 24x1024 1 u8 plain 4075c0065f50 fb0e7869ee0e 9d244524c185 1f0ef4e8fad2 acb108ffb473 f384aaf98067 dd171b9bcf51 68f6c2c07a24 067b3fba8017 12a0e7ecc273 ff84c3ffad92
+f80-2d-257x129-l9-u8 MTLPixelFormatBGRA8Unorm 2d 257x129 1 u8 plain 4c2e19d3608c 7187724c4502 1afb48ab955a 5fce7f466c92 2f9d667084a3 c673dc777180 c38946ca8e7c ad98e8940f6e 8d65a89d33fc
+f80-2d-4096x16-l13-u8 MTLPixelFormatBGRA8Unorm 2d 4096x16 1 u8 plain 267ea6699590 462d45a9da0b d0c7a42d6e3a 2fd8509b3430 8d58531d942c 029ea1e29149 1b62296c053b aa60d8f0dbad 9ecf2547549d d1ccaae1cb1e 88a11a678ce8 5d5c717bcf50 8d65a89d33fc
+f80-2d-8192x32-l14-u8 MTLPixelFormatBGRA8Unorm 2d 8192x32 1 u8 plain 7aa193485bd7 75d231dd9e89 d872734b3102 d18c3ac6ea4a fdac0a1d2a6b 6503b5fe9e42 e5e911e14eb0 39a5d47d7898 f5d1032e3a4f 437982508bae bd75a82b9957 4e972baaee2a 5d5c717bcf50 8d65a89d33fc
+f80-2d-66x16-l7-u8 MTLPixelFormatBGRA8Unorm 2d 66x16 1 u8 plain af7d930a1707 28fc222d7cd0 02c25ed1a72a 5ab93d139337 c57aace1e45b cf9ed1760ffd 7523801fadc8
+f80-2d-96x24-l7-u8 MTLPixelFormatBGRA8Unorm 2d 96x24 1 u8 plain d12951b65557 f26b78a0cc71 b7640cba12e5 514643ef0bae 75203c69a3cf 9dbf1ce19bb2 d9de30e14211
+f80-2darray-256x256x2-l9-u8 MTLPixelFormatBGRA8Unorm 2darray 256x256 2 u8 plain 4dbb3f367e8b e9baa648c7c9 f7e69acafd1a 52fc5e8399ce e9ae49adadfa 2e1f9ec0f445 c004e6d3f208 87150ce87562 cab9d36f4d8e
+f80-2darray-300x200x2-l9-u8 MTLPixelFormatBGRA8Unorm 2darray 300x200 2 u8 plain 14378bee7fb1 27ede13951c0 2e34cbd70dc0 916e4964ca2d 5a950cd138f5 7ed7cbe2c31b 2181b62af242 0d2094c2fe0e ddb04e04cb71
+f80-cube-128x128-l8-u8 MTLPixelFormatBGRA8Unorm cube 128x128 6 u8 plain 85b798fc5f34 33d3be09fd87 3177e52bd178 a76f9f2e5f5a f759442d02a3 aab7947d2c37 6c6e7d453f40 7d6cf4143234
+f80-cube-256x256-l9-u8 MTLPixelFormatBGRA8Unorm cube 256x256 6 u8 plain 412478596fd2 08780eb017b8 698f02937716 82b1cbd0d5a2 6145c150877c 1902971e309a 1f3914d120c6 fb871f1cc1db d75e2afba4cb
+f80-cube-100x100-l7-u8 MTLPixelFormatBGRA8Unorm cube 100x100 6 u8 plain c38cbbc649e7 9686a4a3fbc7 1fda2e7e9988 9769e6696ea7 16a8a1f13745 d0e0afc1e198 defd20d4dddd
+f80-2d-256x256-l9-u8 MTLPixelFormatBGRA8Unorm 2d 256x256 1 u8 sw 5a1f19dc90ac 420ce3996bfd 1328019f927f bc69442af97b 997030d736d4 ffeebed93115 1301e3db0eb5 fa078c2e8b1b ea4521d97009
+f80-2d-256x256-l9-u8 MTLPixelFormatBGRA8Unorm 2d 256x256 1 u8 pfv 5a1f19dc90ac 420ce3996bfd 1328019f927f bc69442af97b 997030d736d4 ffeebed93115 1301e3db0eb5 fa078c2e8b1b ea4521d97009
+f80-2d-193x193-l8-u8 MTLPixelFormatBGRA8Unorm 2d 193x193 1 u8 sw 74595ce5414c 5d97052811ee d90b1d3f24ed b86498be7d2a c44bde0600bc d11df7673d8f fe16d0788927 fb4d708bc23f
+f80-2d-193x193-l8-u8 MTLPixelFormatBGRA8Unorm 2d 193x193 1 u8 pfv 74595ce5414c 5d97052811ee d90b1d3f24ed b86498be7d2a c44bde0600bc d11df7673d8f fe16d0788927 fb4d708bc23f
+f80-2d-300x200-l9-u8 MTLPixelFormatBGRA8Unorm 2d 300x200 1 u8 sw cc4dd7296558 8638796b44e8 43e5015061a9 d69c2afb2f5c ebbbb215e9ee d788cea36989 369f5f15b77a 20cb75781416 2124748583c7
+f80-2d-300x200-l9-u8 MTLPixelFormatBGRA8Unorm 2d 300x200 1 u8 pfv cc4dd7296558 8638796b44e8 43e5015061a9 d69c2afb2f5c ebbbb215e9ee d788cea36989 369f5f15b77a 20cb75781416 2124748583c7
+f80-2d-2048x32-l12-u8 MTLPixelFormatBGRA8Unorm 2d 2048x32 1 u8 sw 93911af525dd f8b926054fe3 5aed839b948d c44ce3dde405 3ce50ab93db1 ef50a8ed1785 e625a341624f 708e2399cbfa 1a02353e9ccb d568d8a22604 5d5c717bcf50 8d65a89d33fc
+f80-2d-2048x32-l12-u8 MTLPixelFormatBGRA8Unorm 2d 2048x32 1 u8 pfv 93911af525dd f8b926054fe3 5aed839b948d c44ce3dde405 3ce50ab93db1 ef50a8ed1785 e625a341624f 708e2399cbfa 1a02353e9ccb d568d8a22604 5d5c717bcf50 8d65a89d33fc
+f80-2d-1024x16-l11-u8 MTLPixelFormatBGRA8Unorm 2d 1024x16 1 u8 sw d8f33ceab490 b267bc9f2ce1 3ad7b01f2b36 0f391c0e435f ea6a9f063b63 bdb7ec13974c 34e12889edee 8a7c46d58509 3df4306cef68 157b98f0c20b 8d65a89d33fc
+f80-2d-1024x16-l11-u8 MTLPixelFormatBGRA8Unorm 2d 1024x16 1 u8 pfv d8f33ceab490 b267bc9f2ce1 3ad7b01f2b36 0f391c0e435f ea6a9f063b63 bdb7ec13974c 34e12889edee 8a7c46d58509 3df4306cef68 157b98f0c20b 8d65a89d33fc
+f80-2d-130x130-l8-u8 MTLPixelFormatBGRA8Unorm 2d 130x130 1 u8 sw 92ec849c74c7 a7da315d2e7b 8647111f6997 8da7552cf5e3 8a60ac1fc18a 9c8164201247 7897b6506dc8 2427959f2256
+f80-2d-130x130-l8-u8 MTLPixelFormatBGRA8Unorm 2d 130x130 1 u8 pfv 92ec849c74c7 a7da315d2e7b 8647111f6997 8da7552cf5e3 8a60ac1fc18a 9c8164201247 7897b6506dc8 2427959f2256
+f80-2d-256x256-l9-u8 MTLPixelFormatBGRA8Unorm 2d 256x256 1 u8 rt 5a1f19dc90ac 420ce3996bfd 1328019f927f bc69442af97b 997030d736d4 ffeebed93115 1301e3db0eb5 fa078c2e8b1b ea4521d97009
+f80-2d-2048x32-l12-u8 MTLPixelFormatBGRA8Unorm 2d 2048x32 1 u8 rt 93911af525dd f8b926054fe3 5aed839b948d c44ce3dde405 3ce50ab93db1 ef50a8ed1785 e625a341624f 708e2399cbfa 1a02353e9ccb d568d8a22604 5d5c717bcf50 8d65a89d33fc
+f80-2d-300x200-l9-u8 MTLPixelFormatBGRA8Unorm 2d 300x200 1 u8 rt cc4dd7296558 8638796b44e8 43e5015061a9 d69c2afb2f5c ebbbb215e9ee d788cea36989 369f5f15b77a 20cb75781416 2124748583c7
+f11-2d-256x256-l9-u8 MTLPixelFormatR8Unorm_sRGB 2d 256x256 1 u8 private 7733f227e1eb 1f684027a263 23d27c54923b a0f454411f2c caf342e7bb06 02099a075e65 e5bc44bbc3a0 ebcb6c48ed79 79bec7ff3e69
+f11-2d-2048x32-l12-u8 MTLPixelFormatR8Unorm_sRGB 2d 2048x32 1 u8 private de2c223fcae4 fe9cdac5a706 63e8944c24c0 e2fe29faff0d d06466e416bc 5e8268d6891e a2e612d7a55f f9caf128ced0 167eee50e1ea f44573b462b2 d65441eec2a4 84873854dba0
+f11-2d-1024x12-l11-u8 MTLPixelFormatR8Unorm_sRGB 2d 1024x12 1 u8 private 29e549950915 7301b56cc98c 4733abb077fa db6b34182d48 fb8a27c8984b f701c3a34708 6fa3823cf9d8 a4f185d0a2cd 6220d909491b f981a10a1800 79bec7ff3e69
+f11-2d-4096x4-l13-u8 MTLPixelFormatR8Unorm_sRGB 2d 4096x4 1 u8 private cc95543c76da c443c59251c7 21da262c2df8 1d6d9efb73a0 1fd0663efbdf 2c202454804d f3dc97b358f8 96791aed42f1 3713dd4ddfa7 6f339caafdf0 983a0d220835 f981a10a1800 79bec7ff3e69
+f11-2d-512x512-l10-u8 MTLPixelFormatR8Unorm_sRGB 2d 512x512 1 u8 plain 82bb2861d423 055f5094b850 dca063e5fbd7 6a86a7e6167e 0504412cb192 2e6ec4597309 3d9cdf1e3b23 548811458375 f0a210a32bdb 2a0ab732b4e9
+f12-2d-256x256-l9-u8 MTLPixelFormatR8Snorm 2d 256x256 1 u8 private 3239570b35e4 c46ebb2a19ff 062fa3c42842 d6ae733890d4 987519b14af0 2e8123d23482 5b8abb3da615 b7d1b3a1104c 6e340b9cffb3
+f12-2d-2048x32-l12-u8 MTLPixelFormatR8Snorm 2d 2048x32 1 u8 private 1c4c96afc83b 3591472a4443 c99b5d044599 c242528d6e58 5ac93dda154c bb16dddf6e87 16921912f55d 892e29c415dc f17963d0b231 df3f619804a9 96a296d224f2 6e340b9cffb3
+f12-2d-1024x12-l11-u8 MTLPixelFormatR8Snorm 2d 1024x12 1 u8 private 36e89fa07517 a3a5385406fb 51686dc0b8e2 10f6941b6fe6 c6e68f8bb9dc 2d7a9ca0c8a8 47ae4b975f11 4f78600fac61 acc7e98acb0e 437cb43a3022 6e340b9cffb3
+f12-2d-4096x4-l13-u8 MTLPixelFormatR8Snorm 2d 4096x4 1 u8 private ac1dea3b301c 096090aa61b9 18df27333e67 cb7a9335fe2c 66f8c4056cbb dcc85e5173df c8e0f5c18a1e 71fc4301acdc e6b6532e24ce cbf6ff410e91 df3f619804a9 96a296d224f2 6e340b9cffb3
+f12-2d-512x512-l10-u8 MTLPixelFormatR8Snorm 2d 512x512 1 u8 plain 676bf7b43643 2a774d45090f a5139d862c12 d676329f8908 07cb95211772 7ac5e7ff5ab9 4cc7b5c76737 e09b870bcbd9 ad95131bc0b7 a8100ae6aa19
+f20-2d-256x256-l9-u8 MTLPixelFormatR16Unorm 2d 256x256 1 u8 private 0f6bbc381694 93b1cf763f21 caeee7547ab6 81504ffc65db 205f09649a51 271473773a02 957d585c0114 111d69acd428 077ba5bd795b
+f20-2d-2048x32-l12-u8 MTLPixelFormatR16Unorm 2d 2048x32 1 u8 private 4df9edd5686a 40331512a0a4 1dc6f5e47738 2cfc80e4892c 4e906540a7b5 c985b22d3553 01bd89051902 ed34109567f5 a2e5bbf5e2e7 943f831cc056 eebb6e26e5aa ff3b86b0cb99
+f20-2d-1024x12-l11-u8 MTLPixelFormatR16Unorm 2d 1024x12 1 u8 private 68fa2933fe02 040892ec4a44 593b02718e0c 8b18b67cf25f b1dcd7c83533 ec045137d418 5d666d2ecc78 1c9a078d5aa5 c6314f7cd82f 8fb08cb3d83c d8e0f7d17b7f
+f20-2d-4096x4-l13-u8 MTLPixelFormatR16Unorm 2d 4096x4 1 u8 private aed9bb5fdaae 785530de16a9 8f9169033ac9 85e34edd69d5 75b1b26c4365 44468967f793 c4ba052ebe64 2d91cd10771c 635b2fd76318 01af315d1337 616a7d57ebf2 16737a2a646e a916c499c938
+f20-2d-512x512-l10-u8 MTLPixelFormatR16Unorm 2d 512x512 1 u8 plain 21836b2b6cb1 4c56903e99b3 ba92af6930e2 c49de8cb34ea 16fbc65e85ec 87b1486592aa eab74887e340 e51541f2ed38 31cdb5c3231d ca73b7cc82c6
+f22-2d-256x256-l9-u8 MTLPixelFormatR16Snorm 2d 256x256 1 u8 private cbcffe13d355 1e8660157c7b 38145eb50d68 9845c052fae6 adf92cda01ed d5dd8e85746c 232a0ca4cc65 e2a7f13c6dc5 7648eb81c4e9
+f22-2d-2048x32-l12-u8 MTLPixelFormatR16Snorm 2d 2048x32 1 u8 private 8e79d86c8312 a9e104323b04 2d354de4bb46 179893360621 a288e4491fdf 999a9184aef1 b1c11e83200f 3925cdafdb53 31e0f824851f 8fcc4409d22c c126513ccc40 dfc39cd3cd88
+f22-2d-1024x12-l11-u8 MTLPixelFormatR16Snorm 2d 1024x12 1 u8 private 6f6822dbd50a 951aa5e0a0ac 165742ec6586 783b84d1fc52 e058c9ec83e0 16a29c541184 5b22f0f8fc2d e83e90ffb2f0 64ba70d70842 3e15a22dd270 7132b8c9e293
+f22-2d-4096x4-l13-u8 MTLPixelFormatR16Snorm 2d 4096x4 1 u8 private ce7ef71e1293 fba264183871 1c0f4d880baa 4b6e90617c9d 1f096443cbc8 bf76651b97a8 af81ec513b92 b9acbe0d1c0a 45a8c44d793a 29130701122e 9fbd99bf7643 32606d8adede fc5c2283015b
+f22-2d-512x512-l10-u8 MTLPixelFormatR16Snorm 2d 512x512 1 u8 plain 9d013923499a 94c9cad4935e 91c4d3acdff1 45b8d0825b64 e0698fc84ed5 fe228ac973ea 7a2010fe3104 001d2ccd2b5d 6e646784ceaf 0a6361b3a802
+f25-2d-256x256-l9-h16 MTLPixelFormatR16Float 2d 256x256 1 h16 private 7f9c569bbe63 f85219d85c3e 7f5125e657d8 17fbcf37e699 0b0d3e9db2de 97f6f6211e7f 71055b299043 fcb613adb109 fa61e3dec343
+f25-2d-2048x32-l12-h16 MTLPixelFormatR16Float 2d 2048x32 1 h16 private 4ef377003ff7 d166685e0ae5 e76e8f7e1a8d bdc672308172 6d10e52d8748 8e04ed695798 55073cc63044 aba4583257b4 fcbcfdf70cb7 b9cde40e53b6 cb745b24f94f 77cd0e8523ae
+f25-2d-1024x12-l11-h16 MTLPixelFormatR16Float 2d 1024x12 1 h16 private aa8787b47d0e 5ee65d6198e1 03d85a2ed450 8710885a9c9f f77193a2d7ea 47ddbb02f85f 0e9aebdbc1dc f8ae2cc81df7 376a89e3c424 4fa99ec41f68 36eba09830e2
+f25-2d-4096x4-l13-h16 MTLPixelFormatR16Float 2d 4096x4 1 h16 private 077ef54f4639 bf9d0c4ee65e 2a0532704113 6a007955164f 5196207026c0 c365f1e6d192 659b0995b06b 6ab93bbd52b5 757ee36d2361 3cca5fe970ab 0c9c51234d2e 1c5db075d9ee a7430bdfa3bf
+f25-2d-512x512-l10-h16 MTLPixelFormatR16Float 2d 512x512 1 h16 plain d9f6e08878d0 0d93426df84a 0746d770dd67 f523671d05ba b2c778556a61 7002914bb912 5397b8851315 d024e8b57f7f c40dfa24032c e6f8e270f103
+f32-2d-256x256-l9-u8 MTLPixelFormatRG8Snorm 2d 256x256 1 u8 private 5d310202043f 8357b057bd51 6e564fdf804c 2e5e26cc8047 73d2767d1e0d 6d9c1bddff26 b4ce7b3e1d8e e5562c56cc53 06eb7d6a69ee
+f32-2d-2048x32-l12-u8 MTLPixelFormatRG8Snorm 2d 2048x32 1 u8 private 0712703bb09e 0a90e93a3ada f2c41ce509f1 ecafe0a77927 35ae1c3e8038 f03a5ff41c56 d6bca97ccfb2 2555277e0abb d86ab0a55418 af5570f5a181 df3f619804a9 96a296d224f2
+f32-2d-1024x12-l11-u8 MTLPixelFormatRG8Snorm 2d 1024x12 1 u8 private 4d7305ac5c3e 72157512113f 4f4e9f879dfb 955ec3aea922 102926804603 50d01295dd16 f1a290b75a75 5e0f1d5bc586 01e96e0921f5 5bfaaea1aa22 b413f47d13ee
+f32-2d-4096x4-l13-u8 MTLPixelFormatRG8Snorm 2d 4096x4 1 u8 private ab01b13e0292 f5944fc3172a 01c2562eb08f c178db7c0696 3ff80fe1658e c7696eadc20c 66b8718b2ee9 4fdf34cd29f4 149d6218916e c89f7916e34d 7cd2d463e503 df3f619804a9 96a296d224f2
+f32-2d-512x512-l10-u8 MTLPixelFormatRG8Snorm 2d 512x512 1 u8 plain f986648576e2 c65ccf52bebc 853950b25cac 468f28a47218 0157c1414637 8d18515543c6 6b7849b1c038 ca740f95b5a0 099984f6879a 96a296d224f2
+f41-2d-256x256-l9-u8 MTLPixelFormatA1BGR5Unorm 2d 256x256 1 u8 private deb107639d66 a07ca6bd1e02 5095fe73802f fecf2c1598c0 b5d0cd1b6f9f 250503002a61 39e2dfa950bd eb06cb73f366 bffbf7647da1
+f41-2d-2048x32-l12-u8 MTLPixelFormatA1BGR5Unorm 2d 2048x32 1 u8 private 3ce23827f808 d20684f8247e 993bca49272a 506b8f53fbc3 dd6337fd47a7 afefc02dfb65 7970d378f1ee 705a4ecfd165 670e59565e54 79fb3b76f326 30461e9dc2fe 89891ac1ceb4
+f41-2d-1024x12-l11-u8 MTLPixelFormatA1BGR5Unorm 2d 1024x12 1 u8 private f8c85f2a2f80 9e381a34afc2 16e5c374bc09 fb342c00c7cc 8fec4aee38a6 907db580869f 3d67ec8b5caa 34cd5a89d1f5 97c5718d80bf 79f20d041e29 ff61da6028c0
+f41-2d-4096x4-l13-u8 MTLPixelFormatA1BGR5Unorm 2d 4096x4 1 u8 private 2b2199dbd8ff 1ed81fffd067 5396c1177404 ba0bafe40079 bd7e8b202841 6d17a50635af 164cc0d4b113 6352affddbc1 3e034f10f0ee 5ed17647b67d 97c5718d80bf 79f20d041e29 ff61da6028c0
+f41-2d-512x512-l10-u8 MTLPixelFormatA1BGR5Unorm 2d 512x512 1 u8 plain 3a175ec69ada 49bcf24dacc5 3eac73e6e6f0 d8e1d580c717 3430207b5e1a c527cd5fd14b c18e3d7440c4 39e2dfa950bd eb06cb73f366 bffbf7647da1
+f42-2d-256x256-l9-u8 MTLPixelFormatABGR4Unorm 2d 256x256 1 u8 private 6013b6828f23 cdf5418d8a66 e0bf1810d48e 10ca0d8c6748 b2441a706567 d81ae57cafd6 e8b72e0b71c7 d07a1b83c17a e638914c44e9
+f42-2d-2048x32-l12-u8 MTLPixelFormatABGR4Unorm 2d 2048x32 1 u8 private 267acce91f74 2125500d8e3a e2099a71eb62 4b0d98555ed6 f7aeca472857 078d4a4542bc f91ff5832b73 e8b72e0b71c7 4c989d0c271e d07a1b83c17a 4d58bbbffc4a e638914c44e9
+f42-2d-1024x12-l11-u8 MTLPixelFormatABGR4Unorm 2d 1024x12 1 u8 private 064f65641234 3c0d45b4265c e55194bafc2b eacecf35e8e6 19e29ddf7f6c f26112a05981 e8b72e0b71c7 4c989d0c271e d07a1b83c17a 4d58bbbffc4a e638914c44e9
+f42-2d-4096x4-l13-u8 MTLPixelFormatABGR4Unorm 2d 4096x4 1 u8 private b41ed34b9769 180137fe7f78 df02a677f148 727e125af01e dcc9d067b268 c8ae5f3a5e9f 078d4a4542bc f91ff5832b73 e8b72e0b71c7 4c989d0c271e d07a1b83c17a 4d58bbbffc4a e638914c44e9
+f42-2d-512x512-l10-u8 MTLPixelFormatABGR4Unorm 2d 512x512 1 u8 plain 8a15c3e1f6ac 33132c9c322f d845892cae09 22b34d2556c6 662e7e3f2b52 f8bfc5e877c6 078d4a4542bc e8b72e0b71c7 d07a1b83c17a e638914c44e9
+f60-2d-256x256-l9-u8 MTLPixelFormatRG16Unorm 2d 256x256 1 u8 private 3af9cfa55753 ef54933a5ba9 886eec0eefe7 c59d11f88f44 52ecbe7a76ba 1d7e20d6165a 1db1128a5d07 09ff3b30915c 3f6c6c1a6d5b
+f60-2d-2048x32-l12-u8 MTLPixelFormatRG16Unorm 2d 2048x32 1 u8 private 03604bb2978c 6891d155fa9b 0b73b4a92f41 2e1963f90e5b aca47e0eedef 12efc2e770c5 6d5a1a37d044 a3bbbbbbb184 bf261ce678d9 ddf978a4eb29 805ebb11fb3f 73e641b356f9
+f60-2d-1024x12-l11-u8 MTLPixelFormatRG16Unorm 2d 1024x12 1 u8 private ec3e74274965 434f30a41603 65ae5110d038 0769aebe2ce5 2c6147e7dd5d 417395ec8e31 b7c9df7af180 50f45a29f44d 831dc3de37ae b9b12bf85e81 de7b9194c010
+f60-2d-4096x4-l13-u8 MTLPixelFormatRG16Unorm 2d 4096x4 1 u8 private 776cdbbe7546 9d2aed51e43f 4845e33b9397 88e5852ea0cd 146e65230809 e03c7fe83e28 7bb341014d30 d86dbef2ac66 4884d4a6f98f e09b4df7d2ff c90722009a33 3a34537c12e3 2e606ba424e7
+f60-2d-512x512-l10-u8 MTLPixelFormatRG16Unorm 2d 512x512 1 u8 plain b094567c8419 31b1be88bf36 c2620bd2b932 fb046c8f0b56 56b50f559976 a0267ac025ea d1a0073e6803 647a8c76dc47 24ce4ca6b63d f05364139801
+f65-2d-256x256-l9-h16 MTLPixelFormatRG16Float 2d 256x256 1 h16 private 8a5785dc3009 0a146458c4e0 d70c314f6c32 cbc3546c8f3f 192f9b249a46 987867aee6f0 68231e09d77c d5f33c3da525 09fb08eff8ac
+f65-2d-2048x32-l12-h16 MTLPixelFormatRG16Float 2d 2048x32 1 h16 private 52236f1c6e8c ad04663654ce 10dc6eb3593f cb6eb86a3c7b 115cdcac6ffb ce970b1b7f9a 5df82e0b3aba 7d1e93e67e42 0779c01d5d12 d3437a16416f 771bd6301059 2962c2d77934
+f65-2d-1024x12-l11-h16 MTLPixelFormatRG16Float 2d 1024x12 1 h16 private e96ede35adf3 4c789ced9dbe 8f598d762b1a 2104ec2c9416 762827a1380a f8766cd558bb 75d43daffde5 910692a6ec32 f84810dffe58 5db1f6973f5a 5d7597cf6daf
+f65-2d-4096x4-l13-h16 MTLPixelFormatRG16Float 2d 4096x4 1 h16 private c34bea4e7537 d2e473573d52 f63c3a3e4262 d7a6ed2f9cb2 af28cfa8eef5 80f8d66fbf20 1d0d19d1f264 b55392841311 e398840672f4 67d679cc483e bc9883b9ef77 78de810480a6 e7a026b04710
+f65-2d-512x512-l10-h16 MTLPixelFormatRG16Float 2d 512x512 1 h16 plain 20912811431a 9570e8c24e93 2cfd365f81a1 4671fda0d183 cdca2feefd93 0fcd31614b35 d573bfe10e39 efc61f96b6f7 fda9c4cac58f f7c2736b8dcd
+f71-2d-2048x32-l12-u8 MTLPixelFormatRGBA8Unorm_sRGB 2d 2048x32 1 u8 private 6711dfb06b0a 4ce6fa1da52a 49a059c52115 4c26e1c35c12 ae489d63ad23 010d3de5d9a1 884fa645693a b49c68eb07cc 2b418ce49ec2 2b3426f50ae3 e265dbd7d144 f154b9abba5b
+f71-2d-1024x12-l11-u8 MTLPixelFormatRGBA8Unorm_sRGB 2d 1024x12 1 u8 private 9d7e34eb6c09 e97065fd3f1d 350f7232c824 84847d5dd6a0 dd98703ff0f2 5d4795986b66 706c0e504044 6e0258fb130e d1d29da53c5b 06bc39e98bf9 9f7f687281a0
+f71-2d-4096x4-l13-u8 MTLPixelFormatRGBA8Unorm_sRGB 2d 4096x4 1 u8 private be2d4e90dd40 03dbb7b3f10a c6f74c427f30 147ab49825c5 278f85b030fc abbcd821bc59 4a85b5d613ac 013bc306510c fde96f0d1330 a8d471cadf4d c4077386f656 a5c8591b8337 f154b9abba5b
+f71-2d-512x512-l10-u8 MTLPixelFormatRGBA8Unorm_sRGB 2d 512x512 1 u8 plain 046a95e16414 35333a58adef 6ed24f3f3859 5b43b2a97c34 96edcbf2af3f effa281b9f40 03d5f1be7f3e d8a0945c002d 987e62585acf 0feec2de90ee
+f72-2d-256x256-l9-u8 MTLPixelFormatRGBA8Snorm 2d 256x256 1 u8 private 81e6e0bdf6fc 85910d58b826 089d28cbe856 97af512dcc41 3d4fd90c5fe3 356a1692eb64 e05bf99afd4e e9121e0b73f2 bf4571113cd8
+f72-2d-2048x32-l12-u8 MTLPixelFormatRGBA8Snorm 2d 2048x32 1 u8 private 0e225bb97af8 681d2d90b4e6 399bdd450266 87dbece52d29 1fdb77e1fb60 548806eea9fa 0de60cffd845 c69ce1fde594 cf10a4ab049c 758f626a01d9 0f71f9a25a25 df3f619804a9
+f72-2d-1024x12-l11-u8 MTLPixelFormatRGBA8Snorm 2d 1024x12 1 u8 private baa2dcbf7e61 6cf140130fc5 fee99299f9f4 a24bd538ef0b 808b42da6c2d 07f2e4d7c2ef 29b88da8ae89 20b861293f5b 52cfa9b97e08 c03fd19c0cc3 6fc6f4524161
+f72-2d-4096x4-l13-u8 MTLPixelFormatRGBA8Snorm 2d 4096x4 1 u8 private b536a2835220 aab22e9572e4 8617cd3363b8 4611c1c1c03e 1eb99697500d 9feef653871f 2b10734bb22d 378a95ae16c6 c3dc58e5f0cd e89bf538ea1b e7a24ef5791e cc9c7baa9986 81ff65efc448
+f72-2d-512x512-l10-u8 MTLPixelFormatRGBA8Snorm 2d 512x512 1 u8 plain c92849b7dcfd 8bfdf6218042 bd265cedf0bd b4818153a443 5887fa7eff4d 863a130851c4 636a85a757fe 43a9a28108ba 829426d415fa df3f619804a9
+f81-2d-2048x32-l12-u8 MTLPixelFormatBGRA8Unorm_sRGB 2d 2048x32 1 u8 private d4cc6b0d250f cc30327c6b1e 6e82098c2771 d4a2d71f6e6c f46fded68061 4e5337efd0c1 670face87b64 3aee03dded14 571f91e114e0 bb0b9dce169e 24dee47cb7e3 0feec2de90ee
+f81-2d-1024x12-l11-u8 MTLPixelFormatBGRA8Unorm_sRGB 2d 1024x12 1 u8 private 9749049d7ca1 2873d819a751 99209026af51 57db9107dad8 3bc64a94e4b0 b58178f3af79 a7c175ee16d4 067b8ffe967a 3892478f019c f6e28610bd6d a5415fa48be2
+f81-2d-4096x4-l13-u8 MTLPixelFormatBGRA8Unorm_sRGB 2d 4096x4 1 u8 private 2cf3825a8e95 88fb1af6c5b0 2cc7f89e8a82 a58a3d859917 efc9b165765d 7381ba02cba6 fb47c3b713ed 13b93477d0db ebcfaa98dfe2 e14beae4ff40 5c01aea4e882 e265dbd7d144 f154b9abba5b
+f81-2d-512x512-l10-u8 MTLPixelFormatBGRA8Unorm_sRGB 2d 512x512 1 u8 plain f49115057227 b3d640d2f218 221554f1963b a7f19cd712cd 24a5d412fa1b 093bbb65cc73 80995717608c 2a18dbfd395c ef1af60d57a6 f154b9abba5b
+f90-2d-2048x32-l12-u8 MTLPixelFormatRGB10A2Unorm 2d 2048x32 1 u8 private ae6e4b4e5a48 e269146cd4b9 87a9a8b94ea8 ee35ac01e5b2 8f766c5aea8a a824eb1b52bd 97e4cc6cad93 199a2258ec81 715c86555e91 7a28a07fb231 cad64918416d 5c6aa1e8719b
+f90-2d-1024x12-l11-u8 MTLPixelFormatRGB10A2Unorm 2d 1024x12 1 u8 private 3279bfa1a637 e8630c01027d 556f72dbfc78 39969fbb7966 182e6e80babe dcfea04ec2a4 817b1f42f110 8ecb1aa7e4da faf07f96e0ff 085b8ff74546 3b14a9c346e0
+f90-2d-4096x4-l13-u8 MTLPixelFormatRGB10A2Unorm 2d 4096x4 1 u8 private fc18614fadaa 91e161329b5a a45695f79159 4e28dc14c3aa 42ecacbdae13 8f713bc26c5c 5af4ba800880 cfee5cb000f8 171a6c1ee256 b314d72e0385 a38a18d8aec6 6c46b4fa6f8c da3b842d2234
+f90-2d-512x512-l10-u8 MTLPixelFormatRGB10A2Unorm 2d 512x512 1 u8 plain ab5c979e683d bbef79ecc30f 1d7f4ad8324f 4608bf2847b2 61ccb149924b 3a081518561e 316bd994830c 446af17484bf 99240c916ce2 5eceffc69009
+f92-2d-1024x12-l11-u8 MTLPixelFormatRG11B10Float 2d 1024x12 1 u8 private e5620cb00dd7 617462d17dbe 3994edb35f53 aa2a15f2a921 c229ab7b0e1c c4014f0e5728 2c2753c54fc6 0f4cb6926607 407ba5e43508 e7d6336a8b2b 71b574896b96
+f92-2d-4096x4-l13-u8 MTLPixelFormatRG11B10Float 2d 4096x4 1 u8 private 573d924b90db caf1ba005934 2125c7c16f6a 50c5580008a9 f8a3d105bd74 da9a86a92343 4b4cfa706c40 f9b497b679ba 2c2753c54fc6 0f4cb6926607 407ba5e43508 e7d6336a8b2b 71b574896b96
+f92-2d-512x512-l10-u8 MTLPixelFormatRG11B10Float 2d 512x512 1 u8 plain 3db25649c6a3 b4fdf7a5c05d 1386dc522f25 61fea6a7f9d5 832bcf4da083 266c77ab7b82 0ccdd1aedc9e 2c2753c54fc6 407ba5e43508 71b574896b96
+f93-2d-1024x12-l11-u8 MTLPixelFormatRGB9E5Float 2d 1024x12 1 u8 private 7d09de7cac25 4d217ceece15 9dfc9473b50e aee92fe2a3ac c3529278ef14 00faf822ef97 9bdf74657e2c 9ee118f07ba2 a5e330b409a7 a4bf2cd8d72e f63e993f6741
+f93-2d-4096x4-l13-u8 MTLPixelFormatRGB9E5Float 2d 4096x4 1 u8 private 129e364604e5 17f9b3139795 daa197ba8a6e e4b915539649 6d75c89c266d 3484fc235cb8 55ac603e4b13 ef579194b09b ac4d60e74709 d6facff65b15 ed05e2f12118 dce5544eacce 486840e22b5b
+f93-2d-512x512-l10-u8 MTLPixelFormatRGB9E5Float 2d 512x512 1 u8 plain 1742651405ad 39063b5d792a c2413a2faa9d 73e788b665e1 f968aa8d3457 14fbac8086d7 fa412079f1ef 04e4bfad0284 ba66d8412b0c 64d1b526d3eb
+f94-2d-256x256-l9-u8 MTLPixelFormatBGR10A2Unorm 2d 256x256 1 u8 private fe7a895f40ee a817d208ca8c f249ddeb3ac7 d5151456ec56 5f01d1e563fb 73636f930491 353ae821dbaf 74b032c6933a 857eb92c6d8d
+f94-2d-2048x32-l12-u8 MTLPixelFormatBGR10A2Unorm 2d 2048x32 1 u8 private bb64bacf87f3 b051f054975c 35842c1fd2f5 185384d0b8d8 673ecd1f4e8e 61aa68a783d2 bdcda33d2a89 516a17a6e5b7 120fec230d97 093b2f289628 e3cd403ac157 3054981510b6
+f94-2d-1024x12-l11-u8 MTLPixelFormatBGR10A2Unorm 2d 1024x12 1 u8 private d1bd3a52c942 ed0b6294cb72 105cc80b1b5e aeb90071335d 2df1a15feac0 6bc2f5f18e73 c2587179667e 396d9483ddce 0da200c3df17 a58834fb8802 124c782e8292
+f94-2d-4096x4-l13-u8 MTLPixelFormatBGR10A2Unorm 2d 4096x4 1 u8 private 2ca62d657584 a697d85ed689 41eb10f748ad 78c84561325a 75735114b317 c358c676b5dd a59dafe55367 9327f3123e6b d643bc1c6c92 077998b921c7 d18084148ec7 8b6a6d0638dd 5a89457e415b
+f94-2d-512x512-l10-u8 MTLPixelFormatBGR10A2Unorm 2d 512x512 1 u8 plain 08d960f2ac9e f2010bd75f40 217fd36fd310 64b9e7469a09 847563941b1e 9febf2c02c7e 92578fced95b 4045d524b3a6 678edea10797 754dd5313a24
+f110-2d-256x256-l9-u8 MTLPixelFormatRGBA16Unorm 2d 256x256 1 u8 private a7273aea3adb 9b27c4c8c2c9 cae2c9507317 a4fc69ef69e8 f2eff15cfc56 77d2e6d6b298 37c4dea151c9 7645db4f47b3 dee53f15b495
+f110-2d-2048x32-l12-u8 MTLPixelFormatRGBA16Unorm 2d 2048x32 1 u8 private 9341adddec1f bb60e76a08e6 a3b9dad79674 43589188ab92 9842fdae4595 649b1d47859b a45ead6ef8c8 5fb6af5da20e ba23414db7bc 31ea4e923997 d0a829482d59 6859c7f711c8
+f110-2d-1024x12-l11-u8 MTLPixelFormatRGBA16Unorm 2d 1024x12 1 u8 private 21b76d92d940 0b7f3cd9fc36 f4efd2435767 c48f1cc81686 e2d8cfe28e6d 2b77dedd459e 05951857fd00 36dcf191047a 2c70a597bd1b 6aba8cc40563 f46017c48949
+f110-2d-4096x4-l13-u8 MTLPixelFormatRGBA16Unorm 2d 4096x4 1 u8 private c9a1816015d1 b8156c0e2eb9 0aaa0c451276 97ad096f98de ca0c8b54d7a7 99158c8f053f 6d4293f7521a e45f43c17595 751bb9bca5ec 1676c8a46b02 dc63c15c20a2 65d33749e4a9 3a923fffb81a
+f110-2d-512x512-l10-u8 MTLPixelFormatRGBA16Unorm 2d 512x512 1 u8 plain e12ce6886add 4b726211fbe5 17e9bba6873e 1d0f5f42ccdf e67815d3dd84 1a8fccfcaca6 adcdbc41ca97 784544e85611 9c7c9b743590 493e35360eb3
+f112-2d-256x256-l9-u8 MTLPixelFormatRGBA16Snorm 2d 256x256 1 u8 private 027ecf13d2f5 a0708a68823e 1774bf741e72 3962563687a0 86ca9fb5f7dd d37ab3e55883 6ea8a0a56c70 c12570a87c36 86a64d4d178c
+f112-2d-2048x32-l12-u8 MTLPixelFormatRGBA16Snorm 2d 2048x32 1 u8 private b0358358e68f 3d772fbfbab9 f29c91d06a91 ff36c6f102a8 b9fc31558a68 b14dd2228585 9e23524ab23d c177a3dfa3bc 6fdc8b5a7a92 2b44d0e9b022 354fe83538f9 1117b93da6f0
+f112-2d-1024x12-l11-u8 MTLPixelFormatRGBA16Snorm 2d 1024x12 1 u8 private cb64f58a6043 c36757bec8d3 8426938dd4b3 6490c7582589 f46bb4b74581 4e54baf3c762 47ad94a4f908 df5d79648d3e 7b04d8abf54a a16c19d47ab5 07490ba41471
+f112-2d-4096x4-l13-u8 MTLPixelFormatRGBA16Snorm 2d 4096x4 1 u8 private ee0b5ff92759 822697a6eefd b557b8d262aa 4f1e7c16a347 ba658fcf3c91 a004602aab21 92b22f61a5d1 34bfcce7d77b 3b2b12d45feb cee06cdbba34 0b42c626e002 42ab0ebbd91c a614fdd12300
+f112-2d-512x512-l10-u8 MTLPixelFormatRGBA16Snorm 2d 512x512 1 u8 plain b1f3462782a4 b57a49cfe05e fe2a9a50cad6 34d2bead5afe cb041c0c9210 7e5b403d209d f83449a4b0d2 ca3e3427c93d 43dcb3c04acd e7db045e2e1a
+f115-2d-2048x32-l12-h16 MTLPixelFormatRGBA16Float 2d 2048x32 1 h16 private 217459d1649c 6077fd4df70a 6a524ed73ddc bd6b313f75e3 19728df933c3 62c6f88159ca 3c6d16f6b2cf 5dc7fc528df5 bf25f91995b7 c7036c5022f0 2ffb5b561ec8 76ec5a84d839
+f115-2d-1024x12-l11-h16 MTLPixelFormatRGBA16Float 2d 1024x12 1 h16 private 08a91f579b77 8dbf945b15fa 996a4a56cacf 636836d82726 8b537b4d6a0c 42733c7f9905 a1e46b7b27c9 cd2a214f8b45 bb567c3a9ccb 06c321127937 e9b97f424bdc
+f115-2d-4096x4-l13-h16 MTLPixelFormatRGBA16Float 2d 4096x4 1 h16 private 28b58f590459 bce6f2dcc780 8832b1f2cb3c 16275bf66bcd 34adbe8e7939 c9f646b747f5 3099fd946c47 4de593e19767 2ce59fbe2896 0a86b0c987ff fdb6ddb4ec02 cf03f7a00654 6bf17b021ea5
+f115-2d-512x512-l10-h16 MTLPixelFormatRGBA16Float 2d 512x512 1 h16 plain 7f38c36e8d3a 79d80487a996 e80364f6e787 ff37557a36fa 9fbfde4cec96 320bc1dcb7cd dd14fd03c357 bd66bd0f9f36 07f7ce4330f9 bf6385197fdf
+f552-2d-1024x12-l11-u8 MTLPixelFormatBGRA10_XR 2d 1024x12 1 u8 private c1eae68546e9 93acbc2708b1 f49baef81924 190dc6cae1ed a674812a60e4 bca9aabf7cbd e069557e46ba 65b331b387f0 b56bfc7a3330 e587ff1e22a2 8bcf469cf627
+f552-2d-4096x4-l13-u8 MTLPixelFormatBGRA10_XR 2d 4096x4 1 u8 private f348227b78a2 9bfc067ea839 7494b8185c19 d9fbd462bc04 e59de837208f 96beb2288b07 a80546276a54 e2e4e0ed168f f0384d34dba3 88d4e7064bd2 9c464b3449e4 c4cf003341e0 7a6dc8cd91d5
+f552-2d-512x512-l10-u8 MTLPixelFormatBGRA10_XR 2d 512x512 1 u8 plain ec7ae012c654 cae64356bc0c 12f1b53f4f75 ae1a2866af2a 8e366be25454 4bd73d9d38ce 864d4da81133 05cb6f0375a4 256355c02422 a65ddfb051b7
+f553-2d-1024x12-l11-u8 MTLPixelFormatBGRA10_XR_sRGB 2d 1024x12 1 u8 private e6586a6c85be f4d3df6e51d6 3a41c908fa2e f93e371687c4 dc529715a833 83b70b0da08d 141dd19d6c50 dbdb83a4197a de2f3cb23dc5 bc5fb755df54 655b9e552a78
+f553-2d-4096x4-l13-u8 MTLPixelFormatBGRA10_XR_sRGB 2d 4096x4 1 u8 private be608d838dc0 c500a837ebec ab351ae86b5a 1cb54b6f02b8 ab24c48ef9a9 4cf2c57f257d 2aec09af0d7f 382d6f9e173c 1a58603021a8 1687c4f8b780 0c4e122e7bdf 273a1e6230cd d30ab20afb05
+f553-2d-512x512-l10-u8 MTLPixelFormatBGRA10_XR_sRGB 2d 512x512 1 u8 plain 20016a87433d 9d94096a67d5 4b57ea19b6e8 f7533be78e54 2ebd59b7c655 7931ca3c55b6 b994edfda719 a03183f29491 76a9ab2c9053 3f0492c109ae
+f554-2d-256x256-l9-u8 MTLPixelFormatBGR10_XR 2d 256x256 1 u8 private 2393cc2900d8 07c77d2759e9 a061506bde30 5e2e59084c14 f79b568b781d 614b39779ef0 f71f81931300 3d5bde1a9bc1 77e959d35ac0
+f554-2d-2048x32-l12-u8 MTLPixelFormatBGR10_XR 2d 2048x32 1 u8 private 75a17295be8e 97eba1652421 e7f64b94e186 dbf30e565b4b 29528eea0869 920ed4713c02 57a372210155 ce07592456f1 1645fd9c35ed 03e79e1e205d c3872f35fd30 071987c87f6f
+f554-2d-1024x12-l11-u8 MTLPixelFormatBGR10_XR 2d 1024x12 1 u8 private 8567b3b5df8d 816a2620f3e8 73c20a516bca f4939190e6a0 f2d20a63a62b 7097a8b383ac dcb23d84db7f 2de46416a1a0 9bbe9d84ee5d 3b3cec5fc3f2 1a1f88e9ae8e
+f554-2d-4096x4-l13-u8 MTLPixelFormatBGR10_XR 2d 4096x4 1 u8 private 9c6534f7cc27 aef5ac1025f2 c43de224a5b1 24233dc90c3f 56b905929e28 3d9215a85d0f f2b3c4a86757 b0fa13c84080 997ecbb41a0c e2d99a04a850 24c0dcfb8fca e4160330b975 27ad57a39811
+f554-2d-512x512-l10-u8 MTLPixelFormatBGR10_XR 2d 512x512 1 u8 plain 316df182135a aa1d2809fd54 e84f4f959bc3 adc43e4fc3c6 45a27a604b7c 0ab2563060e0 5a5768cf6809 e3c301b8d9ba 6b4c4114f028 cef6d95c91ea
+f555-2d-256x256-l9-u8 MTLPixelFormatBGR10_XR_sRGB 2d 256x256 1 u8 private 01aa700ac6c2 e4e593cafd1a 771fd377c21c 02abc9b6d723 bfe2d595bc47 449259282568 d6d7ac99b09e bd9e5e2a891a f393e486f486
+f555-2d-2048x32-l12-u8 MTLPixelFormatBGR10_XR_sRGB 2d 2048x32 1 u8 private 68d56781ddb1 229721c62b79 4a3ed289e8a5 a59515db1e85 0c368caa8ff4 9a0aa2bbce19 7f79638e7b69 1f6498cea9fa dd878ae8c25d 53956207aed2 3ca625474159 ba11b8d782cf
+f555-2d-1024x12-l11-u8 MTLPixelFormatBGR10_XR_sRGB 2d 1024x12 1 u8 private 316739cfd50c 06aa32e34a15 99b7b4c7b3b5 9413ea89c405 a232d41768d6 37a1ad86c3d3 ced19c688682 b4af14a2c497 829520155afd 99b4a88d17ff 90d42fd988a6
+f555-2d-4096x4-l13-u8 MTLPixelFormatBGR10_XR_sRGB 2d 4096x4 1 u8 private 9707b24c9d2f 159bb6f8ddcf 5b775674ca50 54dd0c52279e bd2a0a1049bc 69667986d10c ba7ee572827e 9151baaf08ce 33ea3efbb652 da0c80ae3b23 4f13e29cb5e9 9e6794b381e0 7d7e90b7ab8b
+f555-2d-512x512-l10-u8 MTLPixelFormatBGR10_XR_sRGB 2d 512x512 1 u8 plain 7f406977eab2 1b20d07df676 d32a43729f4e 6385b9f11712 512162402ed7 ddfb8de3301b efb7b8dc9265 c4206aaa8195 0d6d09f5a429 0e0b66c9f71a
+f1-2d-256x256-l9-u8 MTLPixelFormatA8Unorm 2d 256x256 1 u8 private e4bdf88f7fa2 66520a4575c8 ac70a87bd2b3 4add3f0f0429 ba291d22b615 78746e8f6726 5a9871dd5d28 ea4521d97009 76be8b528d00
+f1-2d-2048x32-l12-u8 MTLPixelFormatA8Unorm 2d 2048x32 1 u8 private a495c0e70793 c410f62a321e d1776f29bf1c f1279c4c4005 487c0593cbb8 74397b3d4cf2 c4cdb1e49316 3e041c5009b5 5d5c717bcf50 8d65a89d33fc af472cf2977d 76be8b528d00
+f1-2d-1024x12-l11-u8 MTLPixelFormatA8Unorm 2d 1024x12 1 u8 private f83b1df9d5c5 3fd1dbd7e882 315fc907cbdc 8dad8785311f dc18996c441e 9cd4b9bf9b6d 15387b574c97 f2b4cd9428b9 73fe06332016 517391d5972c 76be8b528d00
+f1-2d-4096x4-l13-u8 MTLPixelFormatA8Unorm 2d 4096x4 1 u8 private 053789003354 5d8f4fc00bf8 4ab59415d5ad d0c79bbf44f8 3111e2e66a36 cce7f8ed4b7f 41013995c49c a9a0afa9eef2 0924864e9c84 e587b0d775c5 8d65a89d33fc af472cf2977d 76be8b528d00
+f1-2d-512x512-l10-u8 MTLPixelFormatA8Unorm 2d 512x512 1 u8 plain c6a8630b346a c83f48d3db11 20b9f0768dcb cef7562e5582 4d52857f2820 51f1f18eb4f3 e0b93c2db6e9 699c79e45db6 8d65a89d33fc 76be8b528d00
+f80-2d-4096x1-l13-u8 MTLPixelFormatBGRA8Unorm 2d 4096x1 1 u8 private fcd3ff6b720c 6a423e7f4f2f 69e7261f8f89 82ead4b25795 87714ff9cd36 64643c210dc3 0ecbe7d636e9 c5720376f807 1c8ea2e00c7a 6c287ecc97ae 8166af65211f 78c14daf61ba 9cdf24357a8e
+f80-2d-8192x1-l14-u8 MTLPixelFormatBGRA8Unorm 2d 8192x1 1 u8 private b658508dcd37 faf39b3fc761 43686b8d5c5e aa1cbbd6dace ae0ae0200d4e 2709870437dd 331e0d9d30d0 69ed87620d20 835fabb52a17 bf88d5397543 eeeb98f394de 158fe03ab6ba 08e712b5eac2 8d65a89d33fc
+f80-2d-16384x1-l15-u8 MTLPixelFormatBGRA8Unorm 2d 16384x1 1 u8 private e0c98013f5b4 0e2147a25215 3035ea7c840a 557323b63761 3a9875e06a93 ec241e4fe0c4 2e962f5befe6 3ca59b6ba3ee 9d75e7cb473a 1756ff4c40b1 5a21624fd5fd 01af1be28891 b750d2a38019 c088b3f8be7c 8d65a89d33fc
+f80-2d-1024x1-l11-u8 MTLPixelFormatBGRA8Unorm 2d 1024x1 1 u8 private 7c7889ac6212 a2bf68ee23e5 465b50138040 54e1e66126cc 9868d713e8f7 8eac89e73178 721fce12ba14 9ff5b2c8ec39 7f799cf2fe77 8e148d0ca554 f55cf1b9e5cf
+f80-2d-512x1-l10-u8 MTLPixelFormatBGRA8Unorm 2d 512x1 1 u8 private 6e6876d94622 86a19f16ae32 b91d9ffd625f 2da30cf0ce97 9ca80472fde4 8ac2f241806c e1acb9bd3dcf 441111cc593d f7c2d8369a36 274da0ae880e
+f80-2d-256x1-l9-u8 MTLPixelFormatBGRA8Unorm 2d 256x1 1 u8 private 9eccf54a863a b979a7b03a1b d0c87feddb39 2ec60fa06491 b764e0b1208c 74281dbd6142 5126701d3f19 987abcce94b4 c65eb4f45d1e
+f80-2d-130x1-l8-u8 MTLPixelFormatBGRA8Unorm 2d 130x1 1 u8 private f8f2c8e2f264 6be3a878217e 8e20f77029ed ec786c9e3097 d6c790adcaaa 3e290f8ad4ce c77c45cadd74 5ac19929c6f9
+f80-2d-100x1-l7-u8 MTLPixelFormatBGRA8Unorm 2d 100x1 1 u8 private 1678646deda7 d227450bd6b9 56a9f8a6910f bb4ccd50992a f6562e0267be c7d464bf134b 61cf45bf2d3c
+f80-2d-66x1-l7-u8 MTLPixelFormatBGRA8Unorm 2d 66x1 1 u8 private 87807e59f3dd 0e0df94f7b99 83151ac17b7c 4098c7537bd6 ebeb24739e45 0d1f0c30b0ec 5586ae3e9519
+f80-2d-2048x2-l12-u8 MTLPixelFormatBGRA8Unorm 2d 2048x2 1 u8 private 478beeeb6770 d7d026e27027 8702d40e9dc3 5c285fd3ddce 0e8ec9c54fdb 29c928b59938 7811e45562d0 43656960a450 afc954b0304d 0e45ef09e806 e2ac733c22b7 ff84c3ffad92
+f80-2d-2048x4-l12-u8 MTLPixelFormatBGRA8Unorm 2d 2048x4 1 u8 private a0622db7d9fb 8de2850fd41e ffe78adcb7d3 55d47ddd3d5e 94c2388a0a3f 3d0068448414 96bd84c2c0a3 cd40a7cd7655 2eb93c78cebe 7c60b07dbeff 17e5efa51fd6 8d65a89d33fc
+f80-2d-4096x4-l13-u8 MTLPixelFormatBGRA8Unorm 2d 4096x4 1 u8 private 6c3c639c87d0 ac55c549f25c ec3cfd134ea7 249aedf7233e 98e941b8ffbc daa571b3f849 c55dbebb41c5 957851a80ffc 811787b23833 983041049979 a78121a1c95b 5d5c717bcf50 8d65a89d33fc
+f80-2d-512x2-l10-u8 MTLPixelFormatBGRA8Unorm 2d 512x2 1 u8 private 146b7348ae46 1e107f3fb6b8 cebe847838b8 8f96270bbc33 e0bd47040d2d 1bc388d00c42 3ce58a75edfa 54176b63466c ca6e359358c4 d8fb2679389a
+f80-2d-512x4-l10-u8 MTLPixelFormatBGRA8Unorm 2d 512x4 1 u8 private ace0d97add68 d1a2cc641a8e 167041bb34d8 a7f2e39e46c8 f1b7a3834a39 b63812b43212 94680515f5e9 8c3936c9c4b7 671ff8385fc6 027158935538
+f80-2d-130x2-l8-u8 MTLPixelFormatBGRA8Unorm 2d 130x2 1 u8 private ad8663b97b22 d338ce19955b 516c12c92d00 c35f1c5f61d1 7ad62a2d564a e211a4a4c074 911ac9096256 526e3b3bc807
+f80-2d-130x4-l8-u8 MTLPixelFormatBGRA8Unorm 2d 130x4 1 u8 private 8f2d5732173c 654aa48d7cfb 2a317a25e426 754e57ee31cb 2f8ac10a03c3 4e7272b375cd ae84c0cf93ae adf82f07f07a
+f80-2d-256x8-l9-u8 MTLPixelFormatBGRA8Unorm 2d 256x8 1 u8 private 9af4153554cc 07751f054714 6502e8fcf7a2 a0e60201b2ae 260712e44b3b fb813966296b 55af42d6d66e f8f3b5638748 250a2e99ba3f
+f80-2d-128x8-l8-u8 MTLPixelFormatBGRA8Unorm 2d 128x8 1 u8 private 1b43b11633af c9b3daacb176 cee7eeb742e6 58a2b1d8d353 6daf7908e558 2443b0d0bc5b 05aeaefc58ef 3c695eb6b6b5
+f80-2d-96x8-l7-u8 MTLPixelFormatBGRA8Unorm 2d 96x8 1 u8 private 2f7de93b64e2 188788e70ce4 cbbf5bf3a811 1e997e393fe6 8dc60bec0bd7 5afee955d886 81ca6c674837
+f80-2d-66x8-l7-u8 MTLPixelFormatBGRA8Unorm 2d 66x8 1 u8 private a7fa4195aecc 7a6d777056ca 87a3c8c6f604 8d210a36486c 22889597be84 d7d79ac88ec0 525996660c34
+f80-2d-512x8-l10-u8 MTLPixelFormatBGRA8Unorm 2d 512x8 1 u8 private bc522f5a4a5d ea520ec828b2 2e0f1d3a2829 92018cebd889 205e25e35e5d 6f857a837e64 6a680fdb3625 a569dc4514fa 63ae6aca7200 29a796fd87f5
+f80-2d-1024x8-l11-u8 MTLPixelFormatBGRA8Unorm 2d 1024x8 1 u8 private 3fbf5ce27c38 a17cccd5644c deb7a8d755f0 4b65ce7012d3 5287b7a71f56 ca4c93d2ed1e e2b23aad05a6 fae1a8b6d815 ab6adf1857c9 60ddfc163c69 902e54af06cc
+f80-2d-1024x9-l11-u8 MTLPixelFormatBGRA8Unorm 2d 1024x9 1 u8 private 928f7403a36e d931bf92c194 c63d117295b3 540434b92155 4038710fb5df 5afae95fdc87 7f4e33d97eee d7c254a5a544 a02c78c87899 f5fcdfd8b171 8d65a89d33fc
+f80-2d-1024x10-l11-u8 MTLPixelFormatBGRA8Unorm 2d 1024x10 1 u8 private bc5addce6624 b5f13f0d3aa0 82e722559280 793c15e62542 3499c7f12035 d8204c54336c 4e6e9db7fee7 92c1743f844f 5cd1a697d6ae deecbf2cd150 cc0102d4cb2e
+f80-2d-1024x12-l11-u8 MTLPixelFormatBGRA8Unorm 2d 1024x12 1 u8 private 3a3ef2f8f1de f690d049d941 033c473a2007 fac0dc3695f3 1afb60c9e449 278808c5ee71 135430671c1b 74c265faea11 740106f9d576 0f20ac3b207c d80aa4479ac6
+f80-2d-1024x14-l11-u8 MTLPixelFormatBGRA8Unorm 2d 1024x14 1 u8 private 7313c114addf 78e450940c1d 6b7aa21bec94 ffd1e7b6b464 feee06c66961 4bdd973727c8 c5830d63e0c5 2871c32ec637 46bcbb8f78c7 25e580800c7a 311c99e48437
+f80-2d-1024x15-l11-u8 MTLPixelFormatBGRA8Unorm 2d 1024x15 1 u8 private f616b7e8e63f fe32b207ffbf 284ef9023b38 c7e5179b12cf a8d2a654988e f50ec9814975 e1849c74283d 3041bacdb28b 3fa372f87ee4 ea49134de1d1 c7e622b3e0bb
+f80-2d-512x9-l10-u8 MTLPixelFormatBGRA8Unorm 2d 512x9 1 u8 private 883485ea1f22 2b463d179751 410ffc01cbad 241d9e06839b 02ba56f73f80 bc15a7585d7d 507a4ec95e23 f1947c025e3b ed7c07b812bb 2427959f2256
+f80-2d-512x12-l10-u8 MTLPixelFormatBGRA8Unorm 2d 512x12 1 u8 private 85748bbb1141 2ef6da3b5e8f 0b24acb945d0 c07d86ec5d0b 3743f09ae83f 67d357aa944b 002063c88dab 18887ad7d4ab a7a79b35a578 6480cb9e6c09
+f80-2d-256x9-l9-u8 MTLPixelFormatBGRA8Unorm 2d 256x9 1 u8 private e704448b8a3a d6fd582d2e66 333f148020ee 62e5aa3ea004 1b3a3b7d6c16 a28116360403 ea71ff279a8d a207025acbbd 4c194186b6ce
+f80-2d-256x12-l9-u8 MTLPixelFormatBGRA8Unorm 2d 256x12 1 u8 private a61e2afbdefd 2a8e219d59cc bb6a40c6082e 16ab1917717c 1335628e1f90 65dccc26b0c9 6c0296d761b7 27bb504cfb83 90efc885950a
+f80-2d-256x15-l9-u8 MTLPixelFormatBGRA8Unorm 2d 256x15 1 u8 private c4eaecf46a8e 3032dd011fc8 05176bb4fa3d 823f5266a8a5 c3279a3b9a9e 2338cd1a9a6d e086377521da 52ee82d183c9 f4929aabbcff
+f80-2d-300x9-l9-u8 MTLPixelFormatBGRA8Unorm 2d 300x9 1 u8 private 66865ad036eb 75c74a52d510 7a653f296886 cf8c6fea2e19 a2d9db137a0c f364d291426a f2765e9841c6 c1619177b42d ff84c3ffad92
+f80-2d-600x12-l10-u8 MTLPixelFormatBGRA8Unorm 2d 600x12 1 u8 private 782ffeba3019 9d2d76127dc5 c356ac31ad93 8a80c3203bc6 68eb52ba88e7 02b1700fc616 ce6190e87647 ed24c61e1374 7c3f6deccded 8a739f53c734
+f80-2d-2048x16-l12-u8 MTLPixelFormatBGRA8Unorm 2d 2048x16 1 u8 private 51bd6456f5d5 9afedef4af3c 80e9108008a4 ac157fa81967 c3ade4372bbc a06ba7149c60 641ddadc5aaa cc39fd0a7d37 91c570fa1d43 58af5d552a81 5d5c717bcf50 8d65a89d33fc
+f80-2d-2048x24-l12-u8 MTLPixelFormatBGRA8Unorm 2d 2048x24 1 u8 private e0fd2f999c5c 45267b5e9442 6465f820ca95 7fa5b47f7385 fce1fe6af8d4 0107dc1805aa 6ceea644ac34 e5bfc3b0c660 43537ec93f0d 6fe9e9a25447 460d4f7a6c1e 8d65a89d33fc
+f80-2d-2048x31-l12-u8 MTLPixelFormatBGRA8Unorm 2d 2048x31 1 u8 private 9231d11aa264 ed06c0c725a8 80d2f663fea4 bf5f6403c893 2713f3f1a827 dbb93dc20d21 ef287dc70fbd 5f6519e936b5 5e11e45b038c 96b034ad72c2 6f4b48c97800 300b677b3bd8
+f80-2d-2048x32-l12-u8 MTLPixelFormatBGRA8Unorm 2d 2048x32 1 u8 private 93911af525dd f8b926054fe3 5aed839b948d c44ce3dde405 3ce50ab93db1 ef50a8ed1785 e625a341624f 708e2399cbfa 1a02353e9ccb d568d8a22604 5d5c717bcf50 8d65a89d33fc
+f80-2d-4096x32-l13-u8 MTLPixelFormatBGRA8Unorm 2d 4096x32 1 u8 private 9c3ba1b583e5 cdee4893e74f f0a1a834e925 6b467ad69ac1 18952e0498fb e38569a7d9fe 60599777c168 123cf6709c60 1ec5bfc42bdf 16a88811cdbf 4e972baaee2a 5d5c717bcf50 8d65a89d33fc
+f80-2d-4096x48-l13-u8 MTLPixelFormatBGRA8Unorm 2d 4096x48 1 u8 private 76c5752e6f01 1792415bbd9c 214c57a1faf8 73492a985b49 dfd9e9226b02 b5b654c65e77 0884143bfb08 acf9fe9aa45f 02b55b129d03 e46927ed0d9e 4e972baaee2a 5d5c717bcf50 8d65a89d33fc
+f80-2d-4096x64-l13-u8 MTLPixelFormatBGRA8Unorm 2d 4096x64 1 u8 private 3e20a6837f8b c0f93d8d0217 c724d412bcb1 bbea4720cf1c d46a6f381cf1 5eda219af13e 22ae548aa972 292a3a29e37d 7ed8089436af 0e8c7464da41 4e972baaee2a 5d5c717bcf50 8d65a89d33fc
+f80-2d-1100x16-l11-u8 MTLPixelFormatBGRA8Unorm 2d 1100x16 1 u8 private b363c697c0ad 3f1507bf1124 cea23a919b89 fa195fc2ed5c 9df2b253b135 0657c3eb6e50 3493dcd45ae4 7a0febd7b57a b71152d65e7f 67851925b271 9cdf24357a8e
+f80-2d-1088x16-l11-u8 MTLPixelFormatBGRA8Unorm 2d 1088x16 1 u8 private 497e9b5dd20b b72e397887bd f09153a44c81 7baa350059f4 14dd0715ce2e c1e269c75d9d aec2783566a8 ecc263cd67eb e3ce4c463d61 c3da32b2e447 8d65a89d33fc
+f80-2d-1040x16-l11-u8 MTLPixelFormatBGRA8Unorm 2d 1040x16 1 u8 private 6a1ecdf4d5ff 55a1d91fe0a7 3fb59ae60d20 f0225d8e9d40 03738b945d1c 4d1f018aa378 659da08409bd 25c20e8ec93d 753953e031cb 05b9822dfb89 8d65a89d33fc
+f80-2d-1024x17-l11-u8 MTLPixelFormatBGRA8Unorm 2d 1024x17 1 u8 private c437b76c5f93 654b1737be6c e4831df97ca8 97e603c73aa9 245c900c1d90 30f4a88f6e14 6d2c1699bea6 0d82af39b338 60d65db462a9 5d5c717bcf50 8d65a89d33fc
+f80-2d-2000x30-l11-u8 MTLPixelFormatBGRA8Unorm 2d 2000x30 1 u8 private 2e3430e4334c 116c2a5d815a afe4efa8f662 467c9e41a6b6 7745f1b80f66 cd65f3d2aa91 019dd2afefca fd49dd6abaac 108f59debc50 0a793d66a84b cdb471aaccd3
+f80-2d-3000x40-l12-u8 MTLPixelFormatBGRA8Unorm 2d 3000x40 1 u8 private d0d9689c3c68 cb1b85229de8 1e0404a6c609 eebfd3646bfa f66ab828485f 1ddc3f61b0fa bd37bff5ff8b d8a2bf122634 098a2ce9ed48 4604f8916275 a41bf56f7b11 ea4521d97009
+f80-2d-1500x20-l11-u8 MTLPixelFormatBGRA8Unorm 2d 1500x20 1 u8 private 3f14c02f24ea bfbe7ab3fced fc16978875e8 9dfe60c345a1 10b607383c31 dfc9faa6c21f 01ff0be16730 37ea2008fe18 d8b1772d9347 9ac57542e7d5 14963c668ce8
+f80-2d-1x4096-l13-u8 MTLPixelFormatBGRA8Unorm 2d 1x4096 1 u8 private d1f044fe3366 6064a4eec7c1 3e3292419f9e 56095c9254ce 3ca8a99e8a8c 8947834d0433 2344c27943a5 fcbfe2fa51db fb53ae7302c0 0e70672baf0e 2921c07e8c70 49f75ef0aa5a 8d65a89d33fc
+f80-2d-9x1024-l11-u8 MTLPixelFormatBGRA8Unorm 2d 9x1024 1 u8 private 00cb8e28d166 924cf238d935 56a0c5e1d8d8 95da826a85a1 c6aad6db374a c9b7d3c00c6a 10605e7fdc20 7e16b9d854e4 a32c71866f21 bb5f5038dba2 b2747ce91ef6
+f80-2d-16x2048-l12-u8 MTLPixelFormatBGRA8Unorm 2d 16x2048 1 u8 private 8d478afd9763 7fa542616e9c 00024e626b1b 903e04ac3104 3005ecaab3c9 00c1f2a541e3 3a58cd763b84 70054f7b1435 a1f0e95411f6 ba08c96a1498 5d5c717bcf50 8d65a89d33fc
+f80-2d-12x256-l9-u8 MTLPixelFormatBGRA8Unorm 2d 12x256 1 u8 private 33fd78914c9a d4ffca533746 dcfe5fee2562 133c2c01dbfc 40038efc216c 7838dddb3c8f edbec4948ab5 ee635123f09a d1e41a9d5f37
+f80-2d-4x2048-l12-u8 MTLPixelFormatBGRA8Unorm 2d 4x2048 1 u8 private d72bd457e1ac 49060330b1fd 14b5ff5a7255 aa00b8c900f2 172e7707b45e 00c829992cb3 ed3d02180238 f429118094ea 3fb727b3e2fa 735bf690f883 05b9822dfb89 8d65a89d33fc
+f80-2d-32x4096-l13-u8 MTLPixelFormatBGRA8Unorm 2d 32x4096 1 u8 private bef04633d831 e768f9dd9907 b3164e2e37a4 1d18a67d57b8 29522554a5cb 1fe525246213 e4df85bf1357 f80e1262f3e8 35120f0283dc ce561e6f7c54 4e972baaee2a 5d5c717bcf50 8d65a89d33fc
+f10-2d-4096x1-l13-u8 MTLPixelFormatR8Unorm 2d 4096x1 1 u8 private f2ae7256f1ad 9429df344649 01a609771477 464d600671d7 3501949d8496 4169758a58c6 511024978f1f 979cea411326 3dcedce37b4c b13c0faaa775 c089c370e89d 6e7f6b404075 620bfdaa346b
+f125-2d-4096x1-l13-f32 MTLPixelFormatRGBA32Float 2d 4096x1 1 f32 private 55e1f0d111d5 c2f88aefc230 8e6e9ae6f29d 38d11f9c036d c9812b343c03 fa7f98306d6f 49a9c92b65ac 554d3ecf69ba 4abc25a9eacc 37399d502195 63d217a61995 f4da3944f5a6 6491efac755c
+f10-2d-1024x12-l11-u8 MTLPixelFormatR8Unorm 2d 1024x12 1 u8 private 3d3bda1b5e47 a0906a11d9de 16ea15d197b1 b661eba65547 e19a81e2cb19 2947cdce9834 defb9cb59429 d1a5f3a13cce 1361f36fa510 af472cf2977d 76be8b528d00
+f125-2d-1024x12-l11-f32 MTLPixelFormatRGBA32Float 2d 1024x12 1 f32 private 825fc7a168ea 0b26561492c0 d4ec18c5f267 ce90073ad37f ecb911802abe 86c866b407f4 950949276361 aad6ac8c478f 8524aa54dcb3 9c0029b8cfe6 23e39c8bb543
+f10-2d-2048x32-l12-u8 MTLPixelFormatR8Unorm 2d 2048x32 1 u8 private e44f19dea527 1e6bbdb8824d bba608ccae5b 715c4900cc29 e80da76c74df 13eff163877b 3f9449f8f108 c77e987723ab 157b98f0c20b 8d65a89d33fc af472cf2977d 76be8b528d00
+f125-2d-2048x32-l12-f32 MTLPixelFormatRGBA32Float 2d 2048x32 1 f32 private 79210cc60077 6f35fe7a3eb6 efd5da096c75 9263c36c71ab 1bf064f35dc4 063cbf217608 5330c150dcf9 ef865aad193f 4bf910a6a0e6 26707078d177 4a123a098032 bcf5c1dd5391
+f80-2darray-1024x8x2-l11-u8 MTLPixelFormatBGRA8Unorm 2darray 1024x8 2 u8 private 597f3394aa2a e9947a9966b0 c0811751b4e3 81ee3b73846b 7d9697c14bfa b0cc5f7af7a4 b293213a6663 899807b1efec 8d35db172adb 67fc1630f704 089c0d40dbe9
+f105-2d-4096x4-l13-ramp MTLPixelFormatRG32Float 2d 4096x4 1 ramp private 0d82caec219c 57d7ca6c17a1 fea702317928 5846996466d4 7a2df156ec8b b356e739658f 0c56ea9928ca ac3e5c6770b0 ffb5445a5a78 ceea61994885 a2c978de74f9 7ff7fe13c5ab c64a420ae5a3
+f105-2d-1024x12-l11-ramp MTLPixelFormatRG32Float 2d 1024x12 1 ramp private b4881fa09828 3f19ac557ce8 a6462c4920c3 c471b3f4dd3a eadcb193d1c8 8dc49064cede 87ea0d176370 67bfe49c60ba 33fe6101bd33 d9da09cc0bc3 055bb42c89e4
+f80-2d-2048x16-l12-u8 MTLPixelFormatBGRA8Unorm 2d 2048x16 1 u8 shared 51bd6456f5d5 9afedef4af3c 80e9108008a4 ac157fa81967 c3ade4372bbc a06ba7149c60 641ddadc5aaa cc39fd0a7d37 91c570fa1d43 58af5d552a81 5d5c717bcf50 8d65a89d33fc
+f41-3d-2x2x2-l2-u8 MTLPixelFormatA1BGR5Unorm 3d 2x2x2 1 u8 private fd938fc26ac0 20ce688af870
+f41-3d-4x4x4-l3-u8 MTLPixelFormatA1BGR5Unorm 3d 4x4x4 1 u8 private 203ba8b32433 cf5c67f16122 852e56a917d0
+f41-3d-8x8x2-l4-u8 MTLPixelFormatA1BGR5Unorm 3d 8x8x2 1 u8 private c10a098f858d 27b8d87e671c 8086152134ad d6f881c0e9e6
+f41-3d-16x16x6-l5-u8 MTLPixelFormatA1BGR5Unorm 3d 16x16x6 1 u8 private 6feb927d8948 f6a75cb5e5e3 7c8a8f0761fe 02f83265ecc2 51983c8bd828
+f41-3d-24x40x8-l6-u8 MTLPixelFormatA1BGR5Unorm 3d 24x40x8 1 u8 private 97049f3ae1bd 5e1811974fc6 78baede834dc e12119ede9e8 f957a0bb15be bffbf7647da1
+f41-3d-64x64x4-l7-u8 MTLPixelFormatA1BGR5Unorm 3d 64x64x4 1 u8 private 9c091a021e11 81acb5778060 64879956a008 d26932a2f216 1002e21adacb ba9bb35afdfa bffbf7647da1
+f41-3d-82x122x16-l7-u8 MTLPixelFormatA1BGR5Unorm 3d 82x122x16 1 u8 private 883e097ae6de ba04c4043ee3 79a8e5ec6dc9 0247e6b8f238 8f5f9029628c 9481421c4ac4 bffbf7647da1
+f41-3d-7x9x3-l4-u8 MTLPixelFormatA1BGR5Unorm 3d 7x9x3 1 u8 private f736c8bae724 2b6e31d4dfbe 1cd2d33094be e4ad72f8252e
+f41-3d-40x40x10-l6-u8 MTLPixelFormatA1BGR5Unorm 3d 40x40x10 1 u8 private 8c80b7fc4fb3 cd25fd496496 087f195b9177 9694b1d7702b dc19e843cf7e bffbf7647da1
+f41-3d-128x128x5-l8-u8 MTLPixelFormatA1BGR5Unorm 3d 128x128x5 1 u8 private 53538a2c87e5 07cf6490927b 3cf46706a3ed 488cb9147392 05d871d774bf 39e2dfa950bd eb06cb73f366 bffbf7647da1
+f41-3d-64x32x12-l7-u8 MTLPixelFormatA1BGR5Unorm 3d 64x32x12 1 u8 private 36cde54a8de5 7107b5197092 d72a684c7eab 7309f832be59 9611cd64c5e7 daa2755174c2 bffbf7647da1
+f41-3d-41x61x5-l6-u8 MTLPixelFormatA1BGR5Unorm 3d 41x61x5 1 u8 private 78aa479727b1 836bdbae9d54 564ea7d5a885 608acae2fa4d 69c0824297c9 89891ac1ceb4
+f41-3d-32x32x32-l6-u8 MTLPixelFormatA1BGR5Unorm 3d 32x32x32 1 u8 private 40d0c3c1bd0f 6b382a21c03a d62fbdff3089 dc61cb04f6f1 533faa39feb0 bffbf7647da1
+f42-3d-2x2x2-l2-u8 MTLPixelFormatABGR4Unorm 3d 2x2x2 1 u8 private 0738368865e9 c0bb940964a6
+f42-3d-4x4x4-l3-u8 MTLPixelFormatABGR4Unorm 3d 4x4x4 1 u8 private c5f23c06f7bb e219d6160058 cf92d9ea5852
+f42-3d-8x8x2-l4-u8 MTLPixelFormatABGR4Unorm 3d 8x8x2 1 u8 private 75433c6a9471 3926da7cb3c3 0b06db67bbe5 ebd1ee01e8f1
+f42-3d-16x16x6-l5-u8 MTLPixelFormatABGR4Unorm 3d 16x16x6 1 u8 private ef00bce965e7 b296fda01053 42f9e85e0624 04ca4d149d95 e638914c44e9
+f42-3d-24x40x8-l6-u8 MTLPixelFormatABGR4Unorm 3d 24x40x8 1 u8 private 5670dafe4f6e bfa9c5a1b295 0d1bf5b91605 323291b2650f a0def9ad5d61 df69ef12db83
+f42-3d-64x64x4-l7-u8 MTLPixelFormatABGR4Unorm 3d 64x64x4 1 u8 private f842eb73e224 01964ffca7f0 23499a670e67 615c0eb0d601 9230ffde9267 d07a1b83c17a e638914c44e9
+f42-3d-82x122x16-l7-u8 MTLPixelFormatABGR4Unorm 3d 82x122x16 1 u8 private 47d3468fb823 25759112c4a0 90f4588b9fae 0f5dafb1f8e9 efd01883c057 9021a7d0f3a4 e638914c44e9
+f42-3d-7x9x3-l4-u8 MTLPixelFormatABGR4Unorm 3d 7x9x3 1 u8 private 21c2ac728f0f e7d07383caa9 ce4525e8de30 1873f2c9d868
+f42-3d-40x40x10-l6-u8 MTLPixelFormatABGR4Unorm 3d 40x40x10 1 u8 private 7de130a2601b c0f813bc9384 527764c7b087 b0fb99a701bb 5c842997f523 e638914c44e9
+f42-3d-128x128x5-l8-u8 MTLPixelFormatABGR4Unorm 3d 128x128x5 1 u8 private 2562fa86b219 90e3bcfbf368 06a3018f546b 10f26f614929 f24f8f945bb7 e8b72e0b71c7 d07a1b83c17a e638914c44e9
+f42-3d-64x32x12-l7-u8 MTLPixelFormatABGR4Unorm 3d 64x32x12 1 u8 private 21f84df4e4bf a0b5874351d1 8b28aba09e90 ae638fae9852 223c566c47d5 4d58bbbffc4a e638914c44e9
+f42-3d-41x61x5-l6-u8 MTLPixelFormatABGR4Unorm 3d 41x61x5 1 u8 private 0a9e2a3b4956 a4cfec13dd51 b5ea61cd25e8 87d48ad5199d 965c86b6fa4e df69ef12db83
+f42-3d-32x32x32-l6-u8 MTLPixelFormatABGR4Unorm 3d 32x32x32 1 u8 private b3829e886eea b4c9523b0920 e898770d64ff 0da0eb74f825 1555149947bb e638914c44e9
+f72-3d-2x2x2-l2-u8 MTLPixelFormatRGBA8Snorm 3d 2x2x2 1 u8 private 3d70abfd888a d971229c5742
+f72-3d-4x4x4-l3-u8 MTLPixelFormatRGBA8Snorm 3d 4x4x4 1 u8 private f84cca429229 4a9bb4e1d135 f31f01e06666
+f72-3d-8x8x2-l4-u8 MTLPixelFormatRGBA8Snorm 3d 8x8x2 1 u8 private 288f70a258c6 61c346b30f51 17652799a444 2b0efc048d7b
+f72-3d-16x16x6-l5-u8 MTLPixelFormatRGBA8Snorm 3d 16x16x6 1 u8 private f1e3130855a9 45a31a88a5b8 01e0c4b19958 40b00bf432e1 f600e40fdff6
+f72-3d-24x40x8-l6-u8 MTLPixelFormatRGBA8Snorm 3d 24x40x8 1 u8 private 177dc028e8f0 fad52820c91e 4b510dca4392 9fc321f50d0b 80a57fa6ec8f 7cd9ac5a9f74
+f72-3d-64x64x4-l7-u8 MTLPixelFormatRGBA8Snorm 3d 64x64x4 1 u8 private 821aaff64861 f06aa7b62221 ea876cbf7f30 73e054d852e4 28dae5c88cc0 f024fad3d778 08efea1c0957
+f72-3d-82x122x16-l7-u8 MTLPixelFormatRGBA8Snorm 3d 82x122x16 1 u8 private 0d13893a73ba c509a0df01a0 ed277269f24f 455bb6a4fdd1 306ead6a09aa 085a5c05bdfc d31878eb7602
+f72-3d-7x9x3-l4-u8 MTLPixelFormatRGBA8Snorm 3d 7x9x3 1 u8 private 9800cc81f603 0c6ae49bd83d 6a6b3ab10224 31e6e9297861
+f72-3d-40x40x10-l6-u8 MTLPixelFormatRGBA8Snorm 3d 40x40x10 1 u8 private ea2b02201b6c f0de0b6c7578 6519407e22ae fac104370661 80df42202801 6b1e73a0094b
+f72-3d-128x128x5-l8-u8 MTLPixelFormatRGBA8Snorm 3d 128x128x5 1 u8 private e958e004c4d4 04b6ad985fc3 2938fc528c0f 6e592bd37040 218235f67059 b5f9d6e09111 e83a21c922f1 df3f619804a9
+f72-3d-64x32x12-l7-u8 MTLPixelFormatRGBA8Snorm 3d 64x32x12 1 u8 private a055248b7eca 10b2d0a1ba7f 31fbc3193377 ea971cdae02b 86124ca246b7 a1766164b181 08efea1c0957
+f72-3d-41x61x5-l6-u8 MTLPixelFormatRGBA8Snorm 3d 41x61x5 1 u8 private bb12cd54a59b 56810450aee3 17ac48dce0dc bafa5fe6bacd 5acb22f8630f af1662103bf0
+f72-3d-32x32x32-l6-u8 MTLPixelFormatRGBA8Snorm 3d 32x32x32 1 u8 private 0a26063922b2 5df00ba6d77e db00072e5851 82d6c6f250a1 46b22c684f23 9e83509b5f28
+f81-3d-2x2x2-l2-u8 MTLPixelFormatBGRA8Unorm_sRGB 3d 2x2x2 1 u8 private 6a93325f6988 c61b0434ae41
+f81-3d-4x4x4-l3-u8 MTLPixelFormatBGRA8Unorm_sRGB 3d 4x4x4 1 u8 private 56740adc4ce1 5ae223874de7 9776a52ce76a
+f81-3d-8x8x2-l4-u8 MTLPixelFormatBGRA8Unorm_sRGB 3d 8x8x2 1 u8 private ff69107fd317 e44f777f0589 083d19f2356c 5440f896b690
+f81-3d-16x16x6-l5-u8 MTLPixelFormatBGRA8Unorm_sRGB 3d 16x16x6 1 u8 private 327ae30f2424 a477897db45e e6b52b02d87c 058fa0807fcf 5be8714e5592
+f81-3d-24x40x8-l6-u8 MTLPixelFormatBGRA8Unorm_sRGB 3d 24x40x8 1 u8 private 032b3760ad9c 614c2af0926e 94b162283f7c bb645188abfb 9dfbf0739051 b05603866a6d
+f81-3d-64x64x4-l7-u8 MTLPixelFormatBGRA8Unorm_sRGB 3d 64x64x4 1 u8 private ef4587f9d7c5 7b015983cb52 2e31f8aa92b2 e7457288a6e7 90f71da5edf1 317e8a39ed96 8f19a9ba7922
+f81-3d-82x122x16-l7-u8 MTLPixelFormatBGRA8Unorm_sRGB 3d 82x122x16 1 u8 private 19bebc364a62 5825c1de71fa 945716f44107 f624a4e2a2ee 40e0f3f910fa 29b00a5f0381 3d9da34b64f3
+f81-3d-7x9x3-l4-u8 MTLPixelFormatBGRA8Unorm_sRGB 3d 7x9x3 1 u8 private c3b6edcb17d3 9c735a9c97dc cd9ea516e177 13686ec22d1f
+f81-3d-40x40x10-l6-u8 MTLPixelFormatBGRA8Unorm_sRGB 3d 40x40x10 1 u8 private 5d4a850a19be 62b3da0f98de 8714bdc54005 0c41a457141f 4f93b0051bb1 70f810fbb105
+f81-3d-128x128x5-l8-u8 MTLPixelFormatBGRA8Unorm_sRGB 3d 128x128x5 1 u8 private 1a9a4493c0e8 987ff8fd50cf 4d3dd70ae268 1871c05176bd 5eb55f03ed0e 08606f087e74 ce81b753f340 f154b9abba5b
+f81-3d-64x32x12-l7-u8 MTLPixelFormatBGRA8Unorm_sRGB 3d 64x32x12 1 u8 private c9799f3c0fc9 6cca0d481491 f1666f62ac69 ece6bd172ab2 ddd782d007f5 91efc0d75988 94d68209a714
+f81-3d-41x61x5-l6-u8 MTLPixelFormatBGRA8Unorm_sRGB 3d 41x61x5 1 u8 private c2e7a6996800 43d91ed645c0 c52828d8d203 2bdc76a0da29 a1557e1efccd 935f4c3c4482
+f81-3d-32x32x32-l6-u8 MTLPixelFormatBGRA8Unorm_sRGB 3d 32x32x32 1 u8 private 7e45222fc0fe c469657ade08 c755f44402a9 51baa16edaf3 fb40ade82b5c 3d4fb3611701
+f553-3d-2x2x2-l2-u8 MTLPixelFormatBGRA10_XR_sRGB 3d 2x2x2 1 u8 private 74b517e31c61 b5af66c458dc
+f553-3d-4x4x4-l3-u8 MTLPixelFormatBGRA10_XR_sRGB 3d 4x4x4 1 u8 private 6d2d502ef9c1 e77c59f1a116 19ff19f783ed
+f553-3d-8x8x2-l4-u8 MTLPixelFormatBGRA10_XR_sRGB 3d 8x8x2 1 u8 private 6e9a115a24fa 5aa8e12721a9 ac1c8baae628 399636cee5c4
+f553-3d-7x9x3-l4-u8 MTLPixelFormatBGRA10_XR_sRGB 3d 7x9x3 1 u8 private 46dfefc7575b e29ce9671a85 39a3f21f2ad2 8c998a195979
+f555-3d-2x2x2-l2-u8 MTLPixelFormatBGR10_XR_sRGB 3d 2x2x2 1 u8 private 8f23e65848d5 af21526eece2
+f555-3d-4x4x4-l3-u8 MTLPixelFormatBGR10_XR_sRGB 3d 4x4x4 1 u8 private 46c9155019bc c6549d953bb6 c55752b915cd
+f555-3d-8x8x2-l4-u8 MTLPixelFormatBGR10_XR_sRGB 3d 8x8x2 1 u8 private 17c415582cc6 3c26bcf6b5bc b5182101e78f 7820ea7e2abf
+f555-3d-16x16x6-l5-u8 MTLPixelFormatBGR10_XR_sRGB 3d 16x16x6 1 u8 private 491f160a4485 238adbc6c36e c7489eef52f5 bbc94edaac51 260629c3004b
+f555-3d-24x40x8-l6-u8 MTLPixelFormatBGR10_XR_sRGB 3d 24x40x8 1 u8 private 540fb428a396 45acca022d4a 7684db8566cd 11c601304d38 e1f99726fd25 3f43a1c4c36d
+f555-3d-64x64x4-l7-u8 MTLPixelFormatBGR10_XR_sRGB 3d 64x64x4 1 u8 private bd8bc122ab14 7855122a8980 011e77c1cd4c 993832257649 053a4f9a4322 3c317cc5dbe4 889bc06daf6c
+f555-3d-82x122x16-l7-u8 MTLPixelFormatBGR10_XR_sRGB 3d 82x122x16 1 u8 private 0a3cfabe84f0 c30502440817 2132f33b9c68 880b027ba7d6 600a2c7e04e7 267719529d12 6131c7e0245c
+f555-3d-7x9x3-l4-u8 MTLPixelFormatBGR10_XR_sRGB 3d 7x9x3 1 u8 private 506738977db7 2c31dc27130f b3b602b4a9be 3e418220da83
+f555-3d-40x40x10-l6-u8 MTLPixelFormatBGR10_XR_sRGB 3d 40x40x10 1 u8 private 10179faad904 3d2a34510376 447dc017abfc 52aabc48a399 b6fd04ab1393 5062567054d8
+f555-3d-128x128x5-l8-u8 MTLPixelFormatBGR10_XR_sRGB 3d 128x128x5 1 u8 private fe9cf38a0696 5c9fdef9f088 e288811324ba b88087a67e56 14408b345a9c 4d5dcf817e48 a5a4688a4bee 6bf9b4f3933a
+f555-3d-64x32x12-l7-u8 MTLPixelFormatBGR10_XR_sRGB 3d 64x32x12 1 u8 private afe07c7addaf 2febcf7cb8d6 873e0878c0ff 724b47e3245b f26cc9feb4f0 b035a6bf5a86 a645980e5c87
+f555-3d-41x61x5-l6-u8 MTLPixelFormatBGR10_XR_sRGB 3d 41x61x5 1 u8 private d5e2e6ec8b6f 294316f0d865 8e5722e56eec 8fb1b9c6b3de a5d96bb5b3fc d18e91d3d52b
+f555-3d-32x32x32-l6-u8 MTLPixelFormatBGR10_XR_sRGB 3d 32x32x32 1 u8 private 0b0fe4e8b3ed ca985c95b9d4 ebd866dabcf4 6eafaecd2a56 7d1d923a47ae e051087c9602
+f110-3d-2x2x2-l2-u8 MTLPixelFormatRGBA16Unorm 3d 2x2x2 1 u8 private 370906442c25 52767de5ae47
+f110-3d-4x4x4-l3-u8 MTLPixelFormatRGBA16Unorm 3d 4x4x4 1 u8 private b689e5bdc7d1 912426b76f86 74ee8534ed6b
+f110-3d-8x8x2-l4-u8 MTLPixelFormatRGBA16Unorm 3d 8x8x2 1 u8 private b866d9a94c3d 0ea71338591e 3cae4baf5309 56d9f9987f55
+f110-3d-16x16x6-l5-u8 MTLPixelFormatRGBA16Unorm 3d 16x16x6 1 u8 private 7d8c785d4df9 8567c1a833b9 6a80da1fd986 678e5c5c9e0e e91b6678904c
+f110-3d-24x40x8-l6-u8 MTLPixelFormatRGBA16Unorm 3d 24x40x8 1 u8 private e177ac67c92d b21ea5cc1446 f8c34582f2d6 66e9632c5ec8 6c66ddf46365 8b6df86cc122
+f110-3d-64x64x4-l7-u8 MTLPixelFormatRGBA16Unorm 3d 64x64x4 1 u8 private 2d7e8197532d abeebafcfd9a 365a6b9e3588 a1cf04dc2d5f 90f4959ea8cb 79d91bad05a0 a1785ae89e7f
+f110-3d-82x122x16-l7-u8 MTLPixelFormatRGBA16Unorm 3d 82x122x16 1 u8 private 4ee7a1763c91 f51198327361 875a97afca31 515845287ad8 66c2b2ed4127 fa171c1333d7 1756b0a67c69
+f110-3d-7x9x3-l4-u8 MTLPixelFormatRGBA16Unorm 3d 7x9x3 1 u8 private 8fb66e0b6dbe d99adedafd1e 4a4b295fa309 3de2a91d947d
+f110-3d-40x40x10-l6-u8 MTLPixelFormatRGBA16Unorm 3d 40x40x10 1 u8 private bbd3b4929cc3 a46d82d6c432 903cdfe664fd 5f12493866b2 afe08ba6b9cf f395dc1b15f9
+f110-3d-128x128x5-l8-u8 MTLPixelFormatRGBA16Unorm 3d 128x128x5 1 u8 private 3452c29bbe00 2cc974ba7af6 1b1368a243d7 f6336a85a053 955b026af693 b74e0b4b7b6d 59241fc6f7e8 365fb2ee4f53
+f110-3d-64x32x12-l7-u8 MTLPixelFormatRGBA16Unorm 3d 64x32x12 1 u8 private f8a93ef80398 942d73e2e9e7 55bd01c35e5f a34d27939375 e4fc56f5549e 4ae1c1ae551d f71d0a9d3fb6
+f110-3d-41x61x5-l6-u8 MTLPixelFormatRGBA16Unorm 3d 41x61x5 1 u8 private 7cae93a8d265 f3c2b68a14ca 8965d5b9f809 7fb08957fcc1 dcfc3b00f8e9 817ee364c72c
+f110-3d-32x32x32-l6-u8 MTLPixelFormatRGBA16Unorm 3d 32x32x32 1 u8 private d23f66bf12cd fb7c12b2dd23 6000c4202d85 d710461aa0fe b5a25c1f7f0a a724abf57ac3
+f112-3d-2x2x2-l2-u8 MTLPixelFormatRGBA16Snorm 3d 2x2x2 1 u8 private 52f9dfcb3d13 e7f193d9b7df
+f112-3d-4x4x4-l3-u8 MTLPixelFormatRGBA16Snorm 3d 4x4x4 1 u8 private e0a78f736af4 2038c1ce6d9a 5d4ef4f26fac
+f112-3d-8x8x2-l4-u8 MTLPixelFormatRGBA16Snorm 3d 8x8x2 1 u8 private 8919eaeca70f 0f01b3d62c9d eca710caa829 f33caac3c20d
+f112-3d-16x16x6-l5-u8 MTLPixelFormatRGBA16Snorm 3d 16x16x6 1 u8 private 2ae36aa7ac10 3b5c06652ae1 3c26b24e722d b458a0f450f1 7a5562f93f87
+f112-3d-24x40x8-l6-u8 MTLPixelFormatRGBA16Snorm 3d 24x40x8 1 u8 private bb839bdc049c d5d8360890e9 7752dcd9e5f2 298a83b40c4d 0f7388f15c19 8b8558d28b78
+f112-3d-64x64x4-l7-u8 MTLPixelFormatRGBA16Snorm 3d 64x64x4 1 u8 private 17447fe84d86 e36a1199e22d c7ae24886438 37fa40447fbc 17e3e16a4510 e68c54299f74 c2ccb62421ab
+f112-3d-82x122x16-l7-u8 MTLPixelFormatRGBA16Snorm 3d 82x122x16 1 u8 private f46a3c10afd5 8c4587d9a6b3 23262ef44bf9 32c1ccea6086 afac5fed8ee8 1d39d5bad7bb 62c1f90fd5d5
+f112-3d-7x9x3-l4-u8 MTLPixelFormatRGBA16Snorm 3d 7x9x3 1 u8 private 0354ef504388 8b8aca592af0 2e5c8fef2bcb 99f8af73557c
+f112-3d-40x40x10-l6-u8 MTLPixelFormatRGBA16Snorm 3d 40x40x10 1 u8 private b862b9f89a72 2c43179d0ae6 17831032c803 26f0401ba0a2 05bf5b578768 0b2b368ff4ee
+f112-3d-128x128x5-l8-u8 MTLPixelFormatRGBA16Snorm 3d 128x128x5 1 u8 private 246d4eb7c76b 82f68f1fe15f 254b8087737e 49bedd584447 a6de603f7734 5a9a76a1b214 efc040311301 d1319feb5971
+f112-3d-64x32x12-l7-u8 MTLPixelFormatRGBA16Snorm 3d 64x32x12 1 u8 private 12c887375779 ded45242007f 3cd40d6bb4dd 4e1f101d63b8 cfc92898f432 d7f5b82c7763 b61de77ebef3
+f112-3d-41x61x5-l6-u8 MTLPixelFormatRGBA16Snorm 3d 41x61x5 1 u8 private e9c20d00a5ca b340cc6e4856 d75353f76e85 67ab23c4bd0b 08bd99d5be15 46ac54b3fe33
+f112-3d-32x32x32-l6-u8 MTLPixelFormatRGBA16Snorm 3d 32x32x32 1 u8 private 1e53efe58c79 b7d6bc8cf743 0894a176ae77 adb57ef2609e 003a40371a3d 95e9fec30c98
+f25-3d-2x2x2-l2-h16 MTLPixelFormatR16Float 3d 2x2x2 1 h16 private fed1d7b9d79b 844ecc08164e
+f25-3d-4x4x4-l3-h16 MTLPixelFormatR16Float 3d 4x4x4 1 h16 private e5454d3b3fa1 ce1f92ec4b20 d6b331a392ca
+f25-3d-8x8x2-l4-h16 MTLPixelFormatR16Float 3d 8x8x2 1 h16 private 4a13269cf258 db12ac02b0f5 087becd64c79 d08e4ddc30ca
+f25-3d-16x16x6-l5-h16 MTLPixelFormatR16Float 3d 16x16x6 1 h16 private 465d80b661fb e3c4fbe2c6c6 d585580d6f69 db92cd346925 f09e4ded9af0
+f25-3d-24x40x8-l6-h16 MTLPixelFormatR16Float 3d 24x40x8 1 h16 private 097b610585e9 bfe021740033 069e89f4bcdc bcc94136ea07 a112b7a30fef f80dd9a9fee2
+f25-3d-64x64x4-l7-h16 MTLPixelFormatR16Float 3d 64x64x4 1 h16 private a2d760da935e efeda4a77495 8cb93ada5902 979e74303cff 6c57c8768b57 3e3e71a4de22 97479ec73666
+f25-3d-82x122x16-l7-h16 MTLPixelFormatR16Float 3d 82x122x16 1 h16 private cf048551b78b 9c5b13c49efe c92866a27210 bce92dc14b88 3af8fda12606 505e8240c06e 9b487c8ad203
+f25-3d-7x9x3-l4-h16 MTLPixelFormatR16Float 3d 7x9x3 1 h16 private ecd3533b3e83 ebddcd557bc6 28cc595d3e0b e390b9d0d4a2
+f25-3d-40x40x10-l6-h16 MTLPixelFormatR16Float 3d 40x40x10 1 h16 private 4df419e319e6 32fe9624471a 406847f2d7a5 b39f37cbe8fa bd03e3a593c0 966a61f8f038
+f25-3d-128x128x5-l8-h16 MTLPixelFormatR16Float 3d 128x128x5 1 h16 private d31811762874 259e9820d00a 32865c8cc01c f78fc66114bc 5247d4321226 d83e1ec1f05f e1f853277809 7f774bb46e7e
+f25-3d-64x32x12-l7-h16 MTLPixelFormatR16Float 3d 64x32x12 1 h16 private 9370b1107917 67b7a2cf83d2 08455f2bd172 facc6e00e159 6e1d2b3358aa e6e5d96db58e 9f2a3c3980fe
+f25-3d-41x61x5-l6-h16 MTLPixelFormatR16Float 3d 41x61x5 1 h16 private f67fc050b4ad 6110ecda73d1 2c0b69990c5f 99822424fab3 d6d6e38edd77 43167f079941
+f25-3d-32x32x32-l6-h16 MTLPixelFormatR16Float 3d 32x32x32 1 h16 private e128f5141b3e b703b7042bd0 2ce8da81131e de5faca6333a 892fc098c0d6 310d585e6350
+f32-3d-2x2x2-l2-u8 MTLPixelFormatRG8Snorm 3d 2x2x2 1 u8 private 4967179cd4f5 c3dce98aa927
+f32-3d-4x4x4-l3-u8 MTLPixelFormatRG8Snorm 3d 4x4x4 1 u8 private 5ae5a7c9cbc6 0c9cb2c99f00 47dc540c94ce
+f32-3d-8x8x2-l4-u8 MTLPixelFormatRG8Snorm 3d 8x8x2 1 u8 private 5a592129015d 99f1e9b3e5af 12177b6654ec 290efb42a65b
+f32-3d-16x16x6-l5-u8 MTLPixelFormatRG8Snorm 3d 16x16x6 1 u8 private 53a5e410a5c3 6bedd04af155 3030e80659c7 e2aed1593686 9071864696be
+f32-3d-24x40x8-l6-u8 MTLPixelFormatRG8Snorm 3d 24x40x8 1 u8 private fb9f2c2f5eaa 525977f8eb86 dc241d1c5a4a 554c1ab6c09d 4b1f9c0a292d ea5dbf9596d1
+f32-3d-64x64x4-l7-u8 MTLPixelFormatRG8Snorm 3d 64x64x4 1 u8 private a6957322d6da c4ca0dc89d9a a94a7c16098c e7934af47cb6 68c551510688 425db68aee54 06eb7d6a69ee
+f32-3d-82x122x16-l7-u8 MTLPixelFormatRG8Snorm 3d 82x122x16 1 u8 private 5d6fc0fec510 9f3f028f5e22 643a1602d89b e2ade69ea0cf 5a50d3c5b336 8c4512d09242 ea5dbf9596d1
+f32-3d-7x9x3-l4-u8 MTLPixelFormatRG8Snorm 3d 7x9x3 1 u8 private 64cb2ece8266 4702fcc39948 c0fd2c345a4d 8cbc2a9cfe82
+f32-3d-40x40x10-l6-u8 MTLPixelFormatRG8Snorm 3d 40x40x10 1 u8 private 9a63edfe739a 71262d7bc818 f641e2dfc7a8 c48f12aede50 3ac7d2522585 96a296d224f2
+f32-3d-128x128x5-l8-u8 MTLPixelFormatRG8Snorm 3d 128x128x5 1 u8 private 8e36d134600d 10f9e34bb3ac c018f0d9d523 987407b1954d da3e2a90a823 2e0b3909e248 f36e3d17d15f 96a296d224f2
+f32-3d-64x32x12-l7-u8 MTLPixelFormatRG8Snorm 3d 64x32x12 1 u8 private 5c8813efe191 ca5c4f1b910b 09abdc0b7054 ddbe567da824 55bcc5ba1e37 7638fcbac97f dcc3494d4980
+f32-3d-41x61x5-l6-u8 MTLPixelFormatRG8Snorm 3d 41x61x5 1 u8 private 26b3abebac64 19080ebb14fc eab731616954 4e1a5750a156 8d0fc27c2922 88311466896a
+f32-3d-32x32x32-l6-u8 MTLPixelFormatRG8Snorm 3d 32x32x32 1 u8 private 71fcdbd38f78 385e80af1966 7a84de3caa2a 6b54dc5d8634 6069164740e8 ca2fd00fa001
+f70-3d-2x2x2-l2-u8 MTLPixelFormatRGBA8Unorm 3d 2x2x2 1 u8 private b22e668fd79c 073ead3201f4
+f70-3d-4x4x4-l3-u8 MTLPixelFormatRGBA8Unorm 3d 4x4x4 1 u8 private 293c9699a6d1 143e76a0c97a a16ed6ac082a
+f70-3d-8x8x2-l4-u8 MTLPixelFormatRGBA8Unorm 3d 8x8x2 1 u8 private f9d64ea93c8d e6edd872a749 8727f1b99280 4e4a0cdb2f12
+f70-3d-16x16x6-l5-u8 MTLPixelFormatRGBA8Unorm 3d 16x16x6 1 u8 private b32502d7db3b 5901090f83c6 368af3ccc398 5eeafab480f6 98968ff93b29
+f70-3d-24x40x8-l6-u8 MTLPixelFormatRGBA8Unorm 3d 24x40x8 1 u8 private ab5be8315a15 458874f18161 a6c5ce1b6ec3 ead97ace0e6b 4695d5a415c9 0912ac19a5ba
+f70-3d-64x64x4-l7-u8 MTLPixelFormatRGBA8Unorm 3d 64x64x4 1 u8 private 138890110d12 0509bcacd5e4 57b1bcc120b3 c1d7844f01a3 9e3376c506c1 6de2c8671411 9cdf24357a8e
+f70-3d-82x122x16-l7-u8 MTLPixelFormatRGBA8Unorm 3d 82x122x16 1 u8 private 90ceb3d0908f c4d53f4addc0 0544c90c6124 016dbdd16a56 64e705631fa9 4bed37acb131 6622b2ee380f
+f70-3d-7x9x3-l4-u8 MTLPixelFormatRGBA8Unorm 3d 7x9x3 1 u8 private a04b1d210af6 7f0b291dcb19 d3223060c973 8205eb4aef71
+f70-3d-40x40x10-l6-u8 MTLPixelFormatRGBA8Unorm 3d 40x40x10 1 u8 private 840968c76ffb e4c3de6e73d0 3b061c366d37 01329bf3255d 278815657155 d4ea1994c1c4
+f70-3d-128x128x5-l8-u8 MTLPixelFormatRGBA8Unorm 3d 128x128x5 1 u8 private f51f3373172a 23f61366614f ec7ba223fae5 d727bbfc91da 59ba549432b8 ad08172945c9 e60af9dfdeed ff84c3ffad92
+f70-3d-64x32x12-l7-u8 MTLPixelFormatRGBA8Unorm 3d 64x32x12 1 u8 private 1a624895c254 96657f2ff8cb 5f20fe1243c9 9ab98a4ea31d ce00e9b3d4dd 47e14447b36c 73fe06332016
+f70-3d-41x61x5-l6-u8 MTLPixelFormatRGBA8Unorm 3d 41x61x5 1 u8 private 676f4a2fa0b5 3ace15a189aa dfdc0631a6f2 32cdad0eca2e 993a35924ff6 a56adf0044d6
+f70-3d-32x32x32-l6-u8 MTLPixelFormatRGBA8Unorm 3d 32x32x32 1 u8 private 88c0eea0b536 ecaeb98f2a0e 3c051de6954d 09e78bd8391d 7b3fecd009bf 936ce905ee50
+f552-3d-2x2x2-l2-u8 MTLPixelFormatBGRA10_XR 3d 2x2x2 1 u8 private 2199ae1673f7 3ea6379eed5d
+f552-3d-4x4x4-l3-u8 MTLPixelFormatBGRA10_XR 3d 4x4x4 1 u8 private a1e0893535ae 67ce96a2bd22 e84287fb0e81
+f552-3d-8x8x2-l4-u8 MTLPixelFormatBGRA10_XR 3d 8x8x2 1 u8 private 6bba9985db7b 76a32fbe5cdf 96789c4f9cfc d3d43289c6b9
+f552-3d-7x9x3-l4-u8 MTLPixelFormatBGRA10_XR 3d 7x9x3 1 u8 private 665ac2286fa7 d6c5169f21d6 49a4124156fb e5c017bcbdb1
+f125-3d-2x2x2-l2-f32 MTLPixelFormatRGBA32Float 3d 2x2x2 1 f32 private 21c7fad9fed0 40afd203f312
+f125-3d-4x4x4-l3-f32 MTLPixelFormatRGBA32Float 3d 4x4x4 1 f32 private 4274caef70fc fb2f99211889 8214a0cce6e9
+f125-3d-8x8x2-l4-f32 MTLPixelFormatRGBA32Float 3d 8x8x2 1 f32 private 7c40308a9b08 676ee043d25c 27d73edf042e bde16b221cca
+f125-3d-16x16x6-l5-f32 MTLPixelFormatRGBA32Float 3d 16x16x6 1 f32 private 1c8943c3b011 dc971e34e4dd 55c00509cf9f febf06055d86 ad477706ca30
+f125-3d-24x40x8-l6-f32 MTLPixelFormatRGBA32Float 3d 24x40x8 1 f32 private a2386c7875cd 899365ae2397 db6080dff473 72bec3bcae87 fe686a41b0d8 05b484b6d715
+f125-3d-64x64x4-l7-f32 MTLPixelFormatRGBA32Float 3d 64x64x4 1 f32 private ce70a22d3f85 92d9a2689c65 1343333343b7 e0bb7c91d604 073189c3ec64 41bf9ac9b3b8 5494f68e976e
+f125-3d-82x122x16-l7-f32 MTLPixelFormatRGBA32Float 3d 82x122x16 1 f32 private 7cf3746822e7 a95ed926c7a0 22244f3e81b8 4b28f57709df 546dec5a8453 7d21674d5397 caac9668f095
+f125-3d-7x9x3-l4-f32 MTLPixelFormatRGBA32Float 3d 7x9x3 1 f32 private cce23e224146 9eee7041c263 98f2c3e30eec 2b1bf33937e0
+f125-3d-40x40x10-l6-f32 MTLPixelFormatRGBA32Float 3d 40x40x10 1 f32 private 069936244888 e81d7ff078e9 54d3695e486e cff00b6bffe7 dd8bf5f2861a 9c072f15edc7
+f125-3d-128x128x5-l8-f32 MTLPixelFormatRGBA32Float 3d 128x128x5 1 f32 private 226159b0b70d 820fe65ff891 6800d67c7d26 794ed72bc624 55e9daa2b7bf e92079dca82f e19a06a6beb6 6200b9d24a2a
+f125-3d-64x32x12-l7-f32 MTLPixelFormatRGBA32Float 3d 64x32x12 1 f32 private af1c712eb4f2 bf79875e1008 2b9ebbae25c3 363c28642f02 145b3d143b9c 461bf7a02b67 f3abd435ceab
+f125-3d-41x61x5-l6-f32 MTLPixelFormatRGBA32Float 3d 41x61x5 1 f32 private b65d31130812 24ec4f4e9ea2 d28bd6248c49 f77d1c6fb0e4 40354e3e182d 6aaa3321ade3
+f125-3d-32x32x32-l6-f32 MTLPixelFormatRGBA32Float 3d 32x32x32 1 f32 private acfe1c09b764 3583aa1aac19 79125e48c313 33eb0e8896f4 256d41bd43b5 478bb4f3f0a7
+f90-3d-2x2x2-l2-u8 MTLPixelFormatRGB10A2Unorm 3d 2x2x2 1 u8 private a4d5470bb85a 1acf4802ceca
+f90-3d-4x4x4-l3-u8 MTLPixelFormatRGB10A2Unorm 3d 4x4x4 1 u8 private fc00a3eb277c 9c0c0bc01575 0fb50dcd947a
+f90-3d-8x8x2-l4-u8 MTLPixelFormatRGB10A2Unorm 3d 8x8x2 1 u8 private cb0b794b6daa 51bc51dc87c0 53c0cb0d7f86 2050a6ecc29b
+f90-3d-16x16x6-l5-u8 MTLPixelFormatRGB10A2Unorm 3d 16x16x6 1 u8 private bf9fa08cac7b 51325efe2361 06b2e89e7f48 a2494fb7c644 0718ab30102f
+f90-3d-24x40x8-l6-u8 MTLPixelFormatRGB10A2Unorm 3d 24x40x8 1 u8 private ea89f3ac2270 a8e625414ea7 73b31e71f8a4 f6f9ccba5aed 0e45f9e0ea46 cc64126a710b
+f90-3d-64x64x4-l7-u8 MTLPixelFormatRGB10A2Unorm 3d 64x64x4 1 u8 private 35431221abac e482c7be5466 8a06e78aa206 93074b205c88 9f2973522851 e8774629a925 570fb50c9ea2
+f90-3d-82x122x16-l7-u8 MTLPixelFormatRGB10A2Unorm 3d 82x122x16 1 u8 private 126ee5ed105d 10018d07b40f b178ea1c2352 43f5a8b12356 b7fc4f2f8f38 eedd79f2d801 99e311913760
+f90-3d-7x9x3-l4-u8 MTLPixelFormatRGB10A2Unorm 3d 7x9x3 1 u8 private 249d2d4fd739 872e5ac4bfab f625e23d0381 334ea250c5a3
+f90-3d-40x40x10-l6-u8 MTLPixelFormatRGB10A2Unorm 3d 40x40x10 1 u8 private d592f42518b8 f4cb1b6b95a5 029a12fa407e 1db88707b503 048c8e500db3 b2bd1188b7ad
+f90-3d-128x128x5-l8-u8 MTLPixelFormatRGB10A2Unorm 3d 128x128x5 1 u8 private d81ad62dc5e8 7796f2f35d8e 9243021b96bf db0976c477bf 5b25593e9b1d 742d21117035 48b56b016f90 c79dc7b89ec7
+f90-3d-64x32x12-l7-u8 MTLPixelFormatRGB10A2Unorm 3d 64x32x12 1 u8 private 850d641acd2e abd41a2dbba3 f3adc9c207d3 8ec30d407f07 c5a19841df45 ee6d0e15fab6 4de6f38eb1f4
+f90-3d-41x61x5-l6-u8 MTLPixelFormatRGB10A2Unorm 3d 41x61x5 1 u8 private 0b4f1c0134d3 87e6acacefdf eb3a8625aa6f 320ebb1abc3d 7c58fd209ea5 5918e38ddbcd
+f90-3d-32x32x32-l6-u8 MTLPixelFormatRGB10A2Unorm 3d 32x32x32 1 u8 private 03286397904d d17420147f98 4891a6757443 6e3ffdc7ee01 124457c4f287 0d96192225de

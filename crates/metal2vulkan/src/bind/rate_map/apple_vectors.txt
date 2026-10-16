@@ -1,10 +1,10 @@
-# Apple M4 (macOS 27.0.1) measurements of MTLRasterizationRateMap, from our own probes (WP-RRS3,
-# DESIGN D662: EVs RRS3-rmbytes1-m4, RRS3-rmgpu1-m4, RRS3-rmprobe2-m4; an M3 Max on macOS 26.7 gave the
-# first two's bytes and answers alike). No guest data.
-# map <id> <width> <height> <layers: h:samples|v:samples;...  or ->  <sha-256 of the 24,624 bytes>
-# <id> <cpu|gpu|pad> <s2p|p2s> <layer> <axis> <input bits> <output bits>: cpu is the map's answer, gpu a
-# shader's (fast and safe math answered alike), pad a shader's over the bytes followed by the probe's pattern.
-# padded <id> <bytes> <sha-256 of the bytes followed by the pattern>
+# Apple M4 (macOS 27.0.1) measurements of MTLRasterizationRateMap, from our own probes (EVs
+# RRS3-rmbytes1-m4, RRS3-rmgpu1-m4, RRS3-rmprobe2-m4; an M3 Max on macOS 26.7 gave the first two's
+# bytes and answers alike). No guest data. map <id> <width> <height> <layers:
+# h:samples|v:samples;...  or ->  <sha-256 of the 24,624 bytes> <id> <cpu|gpu|pad> <s2p|p2s> <layer>
+# <axis> <input bits> <output bits>: cpu is the map's answer, gpu a shader's (fast and safe math
+# answered alike), pad a shader's over the bytes followed by the probe's pattern. padded <id>
+# <bytes> <sha-256 of the bytes followed by the pattern>
 map L2a 1024 1024 h:1.0|v:1.0;h:0.5|v:0.5 32e3d1ee7f8f3cbeeffe6bc1a84ba4359dea582614e7d7eebdc881820c2d6ce4
 map L2b 512 512 h:1.0,0.5|v:0.5,1.0;h:0.25|v:1.0 3ca4043c410ef8ae2ec09fb2dcf1f903d4b0a4fe5bd40c2b40aacbaf8cfb1d4f
 map L2c 256 128 h:0.25|v:1.0;h:1.0|v:0.25 1bfd20cb11324f9da1df08fa6840ed54fa07b2ec88c4b5bf99a88adad7514181

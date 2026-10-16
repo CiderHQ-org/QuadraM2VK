@@ -1,6 +1,6 @@
 // metal-std: metal4.0
 // metal-macos-min: 26.2
-// Owned fixture (WP-TNS, DESIGN D272): matmul2d's float sums. Threadgroup t (32 threads, one
+// Owned fixture: matmul2d's float sums. Threadgroup t (32 threads, one
 // simdgroup) computes one 16 x 16 tile, out[256 t ...] = A * B + C, through a cooperative
 // destination of float initialized from C by coordinate. tiles[t] names the blocks it reads: A is
 // block tiles[t].x of a (16 x 32, extents 32, 16), B block tiles[t].y of b (32 x 16, extents 16,

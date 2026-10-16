@@ -594,8 +594,8 @@ fn a_runtime_thread_starts_at_the_default_quality_of_service_whoever_started_it(
 
 /// The threads that take a command buffer from its commit to its handlers run at the
 /// user-interactive quality of service from their start, whatever the class of the thread that
-/// started them, as read from inside each: the scheduler's, the completion thread, each
-/// `VkQueue`'s waiter, and the handler pool's first thread and a later one, which also run their
+/// started them, as read from inside each: the scheduler's, each `VkQueue`'s waiter (which makes
+/// the completion turns), and the handler pool's first thread and a later one, which also run their
 /// items there. Another of the runtime's threads, the reaper, runs as [`exit_guard::spawn`]
 /// starts a thread, at the default class.
 #[cfg(target_os = "macos")]
@@ -700,7 +700,6 @@ fn the_threads_that_take_command_buffers_to_their_handlers_run_at_the_user_inter
         assert_eq!(
             names,
             [
-                "metal2vulkan-completion",
                 "metal2vulkan-handlers",
                 "metal2vulkan-handlers",
                 "metal2vulkan-queue-wait-0",
@@ -729,15 +728,15 @@ fn the_threads_that_take_command_buffers_to_their_handlers_run_at_the_user_inter
 
 /// On Linux the threads that take a command buffer from its commit to its handlers run with the
 /// utilization floor at its top from their start, as read from inside each (`sched_getattr(2)`):
-/// the scheduler's, the completion thread, each `VkQueue`'s waiter, and the handler pool's first
-/// thread and a later one, which also run their items there. Each keeps the policy and nice value
-/// of the thread that started it, and has `SCHED_FLAG_RESET_ON_FORK`: a thread one of them starts
-/// as the runtime starts its own ([`exit_guard::spawn`]) begins with no floor and without the
-/// setting, at the same policy and nice value. From threads at `SCHED_OTHER`, `SCHED_BATCH` and
-/// `SCHED_IDLE`, each where the test's thread may enter it (a session a daemon such as ananicy-cpp
-/// put in `SCHED_IDLE` may not leave it), `SCHED_IDLE` always. Where the kernel refuses the floor
-/// (built without the clamps), every thread reads none, and the kernel refuses one the test asks
-/// for itself.
+/// the scheduler's, each `VkQueue`'s waiter (which makes the completion turns), and the handler
+/// pool's first thread and a later one, which also run their items there. Each keeps the policy and
+/// nice value of the thread that started it, and has `SCHED_FLAG_RESET_ON_FORK`: a thread one of
+/// them starts as the runtime starts its own ([`exit_guard::spawn`]) begins with no floor and
+/// without the setting, at the same policy and nice value. From threads at `SCHED_OTHER`,
+/// `SCHED_BATCH` and `SCHED_IDLE`, each where the test's thread may enter it (a session a daemon
+/// such as ananicy-cpp put in `SCHED_IDLE` may not leave it), `SCHED_IDLE` always. Where the kernel
+/// refuses the floor (built without the clamps), every thread reads none, and the kernel refuses
+/// one the test asks for itself.
 #[cfg(target_os = "linux")]
 #[test]
 fn the_threads_that_take_command_buffers_to_their_handlers_run_with_the_utilization_floor() {
@@ -861,7 +860,6 @@ fn the_threads_that_take_command_buffers_to_their_handlers_run_with_the_utilizat
         assert_eq!(
             names,
             [
-                "metal2vulkan-completion",
                 "metal2vulkan-handlers",
                 "metal2vulkan-handlers",
                 "metal2vulkan-queue-wait-0",
@@ -918,6 +916,48 @@ fn a_runtime_thread_reaching_the_device_outside_a_section_aborts() {
         let checked = exit_guard::spawn(std::thread::Builder::new(), exit_guard::check)
             .map(|thread| thread.join());
         let code = if checked.is_ok() { 43 } else { 44 };
+        // SAFETY: ends the child at once.
+        unsafe { libc::_exit(code) };
+    }
+    assert!(child > 0, "fork");
+    let mut status = 0;
+    // SAFETY: `child` is this process's child.
+    let reaped = unsafe { libc::waitpid(child, &mut status, 0) };
+    assert_eq!(reaped, child);
+    assert!(
+        libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGABRT,
+        "the child was not aborted: {status}"
+    );
+}
+
+/// In builds with debug assertions, a release of the program's (a deallocator) on a thread command
+/// buffers' completion depends on ends the process: its wait for such a command buffer would
+/// never return. It runs on any other thread, and on that one inside the program's own code (a
+/// submission handler's drops).
+#[cfg(all(unix, debug_assertions))]
+#[test]
+fn a_release_of_the_program_s_on_a_thread_completion_depends_on_aborts() {
+    let mut ran = 0;
+    exit_guard::program_release(|| ran += 1);
+    let in_program = exit_guard::spawn(std::thread::Builder::new(), || {
+        exit_guard::serves_completion();
+        let mut ran = false;
+        exit_guard::program(|| exit_guard::program_release(|| ran = true));
+        ran
+    })
+    .unwrap()
+    .join()
+    .unwrap();
+    assert_eq!((ran, in_program), (1, true));
+    // SAFETY: the child starts one thread, which releases and aborts, and otherwise exits.
+    let child = unsafe { libc::fork() };
+    if child == 0 {
+        let released = exit_guard::spawn(std::thread::Builder::new(), || {
+            exit_guard::serves_completion();
+            exit_guard::program_release(|| {});
+        })
+        .map(|thread| thread.join());
+        let code = if released.is_ok() { 43 } else { 44 };
         // SAFETY: ends the child at once.
         unsafe { libc::_exit(code) };
     }
@@ -1071,7 +1111,7 @@ fn the_device_s_functions_are_reached_through_checked_accessors() {
 /// tuple field, a type argument or a by-value parameter) fails
 /// `only_the_listed_modules_keep_the_device_s_functions`; so does a listed module that keeps none
 /// any more.
-const KEEPERS: [(&str, &str); 17] = [
+const KEEPERS: [(&str, &str); 18] = [
     (
         "device/adopt.rs",
         "the consumer's loader entry, read while the device is adopted",
@@ -1127,6 +1167,10 @@ const KEEPERS: [(&str, &str); 17] = [
     (
         "render.rs",
         "a draw's recording (vkCmd*), held by what holds its command buffer",
+    ),
+    (
+        "render/inline_splits.rs",
+        "an inline instance's draws' recordings, kept until its group ends, held by its encoder",
     ),
     (
         "render/pending.rs",

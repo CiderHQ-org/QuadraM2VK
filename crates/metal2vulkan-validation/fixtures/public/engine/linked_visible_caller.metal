@@ -1,4 +1,4 @@
-// Owned MSL for WP-K1 (D152): kernels that call visible functions they do not define. Each call
+// Owned MSL: kernels that call visible functions they do not define. Each call
 // is a visible-function reference (`!air.visible_function_references`) that the pipeline's
 // linked functions resolve; `linked_visible_functions.metal` defines them. The module also
 // defines `linked_offset`, which those functions reference in turn. Loop-free.

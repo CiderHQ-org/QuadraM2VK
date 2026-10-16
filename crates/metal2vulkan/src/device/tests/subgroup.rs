@@ -68,7 +68,6 @@ nvidia-rtx50-linux: -,D,D,D,D,D,D | -,D,D,D,D,D,D | -,L,D,D,D,D,D
 nvidia-rtx5080-laptop: -,D,D,D,D,D,D | -,D,D,D,D,D,D | -,L,D,D,D,D,D
 roadmap-2022: -,xO,xO,xO,xO,xO,xM | -,P,P,P,P,P,xW | -,L,E,E,E,E,E
 swiftshader: -,P,xQ,P,P,P,xW | -,P,P,P,P,P,xW | -,L,E,E,E,E,E
-vk12-bare: -,xO,xO,xO,xO,xO,xM | -,xO,xQ,xO,xO,xO,xM | -,L,E,E,E,E,E
 vk12-floor: -,xO,xO,xO,xO,xO,xM | -,xO,xQ,xO,xO,xO,xM | -,L,E,E,E,E,E
 ";
 
@@ -584,20 +583,27 @@ fn metal_properties_report_d3_d4_values() {
         );
         assert!(m.max_buffer_length > 0, "{stem}");
     }
-    let bare = device("vk12-bare");
-    let m = bare.metal_properties();
+    let floor = device("vk12-floor");
+    let m = floor.metal_properties();
     assert_eq!(m.max_threads_per_threadgroup, [128, 128, 64]);
     assert_eq!(m.argument_buffers_tier, ArgumentBuffersTier::Tier1);
     // Vulkan 1.2 requires R32 storage images: tier 1. Tier 2's 8- and 16-bit single-channel formats
-    // need shaderStorageImageExtendedFormats, which neither floor has, so formatless reads and
-    // writes (vk12-floor) do not make it tier 2.
+    // need shaderStorageImageExtendedFormats, which the floor lacks, so formatless reads and
+    // writes added to it do not make it tier 2.
     assert_eq!(m.read_write_texture_tier, ReadWriteTextureTier::Tier1);
-    let floor = device("vk12-floor");
+    let mut formatless = profile("vk12-floor");
+    formatless
+        .features
+        .insert(VkFeature::ShaderStorageImageReadWithoutFormat);
+    formatless
+        .features
+        .insert(VkFeature::ShaderStorageImageWriteWithoutFormat);
+    let formatless = Device::new(formatless, DevicePolicy::default()).unwrap();
     assert_eq!(
-        floor.metal_properties().read_write_texture_tier,
+        formatless.metal_properties().read_write_texture_tier,
         ReadWriteTextureTier::Tier1
     );
-    assert!(storage_image_choice(PixelFormat::R16Float, floor.profile()).is_err());
+    assert!(storage_image_choice(PixelFormat::R16Float, formatless.profile()).is_err());
     // Typed storage images are enough: intel-irisxe-anv reads storage images only with a
     // declared format and still has every tier-2 format.
     let irisxe = device("intel-irisxe-anv");
@@ -615,7 +621,7 @@ fn metal_properties_report_d3_d4_values() {
     // 64-bit integers are two words without `shaderInt64`, on every pipeline.
     assert!(!has(&Feature::Int64Arithmetic));
     for f in [Feature::ArgumentBufferPointers, Feature::RasterOrderGroups] {
-        assert!(has(&f), "vk12-bare should report {f:?}");
+        assert!(has(&f), "vk12-floor should report {f:?}");
     }
     let nv = device("nvidia-rtx50-linux");
     let m = nv.metal_properties();

@@ -68,7 +68,7 @@ fn every_public_case_names_its_fixture_and_the_fixture_is_its_air() {
     errors.sort();
     assert!(
         errors.is_empty(),
-        "{} committed case(s) and their public fixtures disagree (DESIGN D243.6):\n{}",
+        "{} committed case(s) and their public fixtures disagree:\n{}",
         errors.len(),
         errors.join("\n")
     );

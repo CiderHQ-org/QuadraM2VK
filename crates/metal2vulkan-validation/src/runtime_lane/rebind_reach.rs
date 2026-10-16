@@ -23,8 +23,11 @@
 //!   keeps the table and the pages it took then for every later batch (the split: a wait for an
 //!   event after an encoder), named or resident (table 3: a running command buffer reads the old
 //!   pages until it completes). The old pages' deallocator runs once it completed; so does a
-//!   released buffer's that its table lists, while a buffer released beside it that no submitted
-//!   table lists goes at once.
+//!   released buffer's that its table lists, announced once (Metal's runs at the release), while a
+//!   buffer released beside it that no submitted table lists goes at once. One released after a rebind encoded a pending command buffer
+//!   again goes at that command buffer's first submission, before it completes, its deallocator
+//!   free to read it. One a submitted command buffer's command names goes as that command buffer
+//!   completes, as Metal's does, unannounced.
 //!
 //! The walker (`walk-a-device-pointer-chain-through-a-loop-phi`, an owned case) reaches its
 //! argument buffer's member through a pointer it loads; the member holds a node whose value is
@@ -36,6 +39,7 @@ use super::host_memory::{gpu_read, host_page, no_copy, not_importable, on_device
 use super::host_memory::{Mapping, Seen};
 use super::no_copy_heaps::{no_copy_heap, shared, HEAP};
 use super::rebinds::{rebind, rebind_heap};
+use super::resource_ids::DELAYED_DEALLOCATORS;
 use super::shared_kinds;
 use super::{
     bound_buffers, buffer_with, encode_case, pipeline_state, public_case, read_buffer,
@@ -45,19 +49,21 @@ use crate::air_library::AirLibrary;
 use crate::candidate::engine::ComputeOutput;
 use crate::gpu::TEST_DEVICE;
 use crate::worker::alloc::live_bytes;
-use metal2vulkan::metal::{PixelFormat, PrimitiveType, TextureUsage};
+use metal2vulkan::metal::{IndexType, PixelFormat, PrimitiveType, TextureUsage};
 use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};
 use metal2vulkan_devtools::{engine_dir, llvm_assemble};
 use metal2vulkan_runtime::{
     Buffer, ClearColor, CommandBuffer, CommandBufferError, CommandBufferStatus, CommandQueue,
-    CommitFailure, Degradation, Device, EventRef, FailedEncoders, Heap, HeapType, LoadAction,
-    PipelineOptions, Region, RenderPassDescriptor, RenderPipelineState, ResourceOptions,
-    StoreAction, Submission, SubmissionCheck, TextureDescriptor,
+    CommitFailure, Deallocator, Degradation, Device, EventRef, FailedEncoders, Heap, HeapType,
+    LoadAction, PipelineOptions, Region, RenderCommandEncoder, RenderPassDescriptor,
+    RenderPipelineState, ResourceOptions, StoreAction, Submission, SubmissionCheck,
+    TextureDescriptor,
 };
 use std::collections::BTreeMap;
 use std::num::NonZeroU64;
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 /// Walks a pointer chain from the address its argument buffer (buffer 0) holds at offset 0.
@@ -729,6 +735,78 @@ const COST_DISPATCHES: usize = 4000;
 /// The rounds [`a_dispatch_heavy_encoder_s_log_costs_a_push_per_call`] encodes each way.
 const COST_ROUNDS: usize = 5;
 
+/// Bytes written into a buffer's pages, each run at its offset.
+type Placed = [(usize, Vec<u8>)];
+
+/// The texels a pass drew into an 8 by 8 `RGBA8Unorm` target it clears blue, its draws `encode`d
+/// with their corners from `member`, a vertex buffer over host pages that hold `old`, the command
+/// buffer committed behind an event wait; where `rebound`, the buffer is rebound to pages that
+/// hold `new` before the first submission, which encodes the render encoder again. `None` where
+/// the device imports no host memory.
+fn rebound_pass(
+    device: &Device,
+    (old, new): (&Placed, &Placed),
+    rebound: bool,
+    encode: &dyn Fn(&mut RenderCommandEncoder, &Buffer),
+) -> Option<Vec<u8>> {
+    let queue = device.new_command_queue().unwrap();
+    let side = 8;
+    let filled = |placed: &Placed| {
+        let mapping = Mapping::anonymous(buffer_len());
+        for (at, bytes) in placed {
+            mapping.write(*at, bytes);
+        }
+        mapping
+    };
+    let seen = Arc::new(Seen::default());
+    let member = buffer_over(device, filled(old), &seen)?;
+    let mut target = TextureDescriptor::texture_2d(PixelFormat::RGBA8Unorm, side, side, false);
+    target.usage = TextureUsage::RENDER_TARGET;
+    target.resource_options = ResourceOptions::shared();
+    let target = device.new_texture(&target).unwrap();
+    let mut pass = RenderPassDescriptor::new();
+    let color = &mut pass.color_attachments[0];
+    color.texture = Some(target.clone());
+    color.load_action = LoadAction::Clear;
+    color.clear_color = ClearColor::new(0.0, 0.0, 1.0, 1.0);
+    color.store_action = StoreAction::Store;
+    let event = device.new_shared_event().unwrap();
+    let command_buffer = queue.command_buffer().unwrap();
+    command_buffer
+        .encode_wait_for_event(EventRef::from(&event), 1)
+        .unwrap();
+    let mut encoder = command_buffer.render_command_encoder(&pass).unwrap();
+    encode(&mut encoder, &member);
+    encoder.end_encoding().unwrap();
+    command_buffer.commit().unwrap();
+    let before = device.work_counts();
+    if rebound {
+        let seen = Arc::new(Seen::default());
+        rebind(&member, filled(new), &seen).unwrap();
+        let after = device.work_counts();
+        assert_eq!(
+            after.encoders_reencoded,
+            before.encoders_reencoded + 1,
+            "the rebind encoded the render encoder again"
+        );
+    }
+    event.set_signaled_value(1);
+    command_buffer.wait_until_completed_for(WAIT).unwrap();
+    assert_eq!(command_buffer.status(), CommandBufferStatus::Completed);
+    assert_eq!(command_buffer.error(), None);
+    let mut texels = vec![0; (side * side * 4) as usize];
+    let region = Region::new_2d(0, 0, side, side);
+    target
+        .get_bytes(&mut texels, side * 4, 0, region, 0, 0)
+        .unwrap();
+    Some(texels)
+}
+
+/// The bytes of a triangle's three corners, `x` then `y` of each.
+fn corners(points: [f32; 6]) -> Vec<u8> {
+    points.iter().flat_map(|v| v.to_le_bytes()).collect()
+}
+
 /// A render pass committed behind an event wait, whose draw reads its corners from a vertex
 /// buffer over host pages, is encoded again by a rebind before its first submission: the draw
 /// reads the new pages, as Metal's does. The old pages hold corners off the target, so with no
@@ -738,70 +816,24 @@ const COST_ROUNDS: usize = 5;
 #[test]
 fn a_render_pass_drawing_from_a_buffer_rebound_before_its_first_submission_reads_the_new_pages() {
     on_device(|device| {
-        let queue = device.new_command_queue().unwrap();
         let pipeline = corner_pipeline(device);
-        let side = 8;
-        let corners =
-            |points: [f32; 6]| -> Vec<u8> { points.iter().flat_map(|v| v.to_le_bytes()).collect() };
-        let off = corners([4.0, 4.0, 5.0, 4.0, 4.0, 5.0]);
-        let whole = corners([-1.0, -1.0, 3.0, -1.0, -1.0, 3.0]);
-        let drawn = |rebound: bool| -> Option<Vec<u8>> {
-            let seen = Arc::new(Seen::default());
-            let member = buffer_over(device, pages(buffer_len(), 0, &off), &seen)?;
-            let mut target =
-                TextureDescriptor::texture_2d(PixelFormat::RGBA8Unorm, side, side, false);
-            target.usage = TextureUsage::RENDER_TARGET;
-            target.resource_options = ResourceOptions::shared();
-            let target = device.new_texture(&target).unwrap();
-            let mut pass = RenderPassDescriptor::new();
-            let color = &mut pass.color_attachments[0];
-            color.texture = Some(target.clone());
-            color.load_action = LoadAction::Clear;
-            color.clear_color = ClearColor::new(0.0, 0.0, 1.0, 1.0);
-            color.store_action = StoreAction::Store;
-            let event = device.new_shared_event().unwrap();
-            let command_buffer = queue.command_buffer().unwrap();
-            command_buffer
-                .encode_wait_for_event(EventRef::from(&event), 1)
-                .unwrap();
-            let mut encoder = command_buffer.render_command_encoder(&pass).unwrap();
+        let off = [(0, corners([4.0, 4.0, 5.0, 4.0, 4.0, 5.0]))];
+        let whole = [(0, corners([-1.0, -1.0, 3.0, -1.0, -1.0, 3.0]))];
+        let encode = |encoder: &mut RenderCommandEncoder, member: &Buffer| {
             encoder.set_render_pipeline_state(&pipeline).unwrap();
-            encoder.set_vertex_buffer(Some(&member), 0, 0).unwrap();
+            encoder.set_vertex_buffer(Some(member), 0, 0).unwrap();
             encoder
                 .draw_primitives(PrimitiveType::Triangle, 0, 3, 1, 0)
                 .unwrap();
-            encoder.end_encoding().unwrap();
-            command_buffer.commit().unwrap();
-            let before = device.work_counts();
-            if rebound {
-                let seen = Arc::new(Seen::default());
-                rebind(&member, pages(buffer_len(), 0, &whole), &seen).unwrap();
-                let after = device.work_counts();
-                assert_eq!(
-                    after.encoders_reencoded,
-                    before.encoders_reencoded + 1,
-                    "the rebind encoded the render encoder again"
-                );
-            }
-            event.set_signaled_value(1);
-            command_buffer.wait_until_completed_for(WAIT).unwrap();
-            assert_eq!(command_buffer.status(), CommandBufferStatus::Completed);
-            assert_eq!(command_buffer.error(), None);
-            let mut texels = vec![0; (side * side * 4) as usize];
-            let region = Region::new_2d(0, 0, side, side);
-            target
-                .get_bytes(&mut texels, side * 4, 0, region, 0, 0)
-                .unwrap();
-            Some(texels)
         };
-        let Some(kept) = drawn(false) else {
+        let Some(kept) = rebound_pass(device, (&off, &whole), false, &encode) else {
             return;
         };
         assert!(
             kept.chunks(4).all(|texel| texel == [0, 0, 255, 255]),
             "the old pages' draw covered texels: {kept:?}"
         );
-        let rebound = drawn(true).unwrap();
+        let rebound = rebound_pass(device, (&off, &whole), true, &encode).unwrap();
         assert!(
             rebound.chunks(4).all(|texel| texel == [1, 0, 0, 255]),
             "the draw did not read the new pages: {rebound:?}"
@@ -810,6 +842,65 @@ fn a_render_pass_drawing_from_a_buffer_rebound_before_its_first_submission_reads
             "CBF-MARK {}: a render pass drawing from a buffer rebound before its first submission \
              drew the new pages",
             device.name()
+        );
+    });
+}
+
+/// As [`a_render_pass_drawing_from_a_buffer_rebound_before_its_first_submission_reads_the_new_pages`],
+/// with two indexed draws, each setting the pipeline state and the rebound vertex buffer again,
+/// the second at another offset: the log holds each handle once for every call that names it
+/// (`replay.rs`), and its indexed draws' arguments in one list (`render/replay.rs`), and the
+/// encoding again runs every call with its own arguments. The new pages hold a triangle over the
+/// target's left half at the first offset and one over its right half at the second, so the
+/// target is drawn whole only where both draws ran again at their own offsets.
+#[test]
+fn indexed_draws_setting_a_rebound_buffer_again_are_each_encoded_again() {
+    on_device(|device| {
+        let pipeline = corner_pipeline(device);
+        let indices: Vec<u8> = [0u16, 1, 2]
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let indices = buffer_with(device, &indices).unwrap();
+        // The second draw's corners, past the first's 24 bytes.
+        const SECOND: usize = 32;
+        let away = corners([4.0, 4.0, 5.0, 4.0, 4.0, 5.0]);
+        let off = [(0, away.clone()), (SECOND, away)];
+        let halves = [
+            (0, corners([0.0, -5.0, 0.0, 5.0, -5.0, 0.0])),
+            (SECOND, corners([0.0, -5.0, 0.0, 5.0, 5.0, 0.0])),
+        ];
+        let encode = |encoder: &mut RenderCommandEncoder, member: &Buffer| {
+            for at in [0, SECOND] {
+                encoder.set_render_pipeline_state(&pipeline).unwrap();
+                encoder
+                    .set_vertex_buffer(Some(member), at as u64, 0)
+                    .unwrap();
+                encoder
+                    .draw_indexed_primitives(
+                        PrimitiveType::Triangle,
+                        3,
+                        IndexType::UInt16,
+                        &indices,
+                        0,
+                        1,
+                        0,
+                        0,
+                    )
+                    .unwrap();
+            }
+        };
+        let Some(kept) = rebound_pass(device, (&off, &halves), false, &encode) else {
+            return;
+        };
+        assert!(
+            kept.chunks(4).all(|texel| texel == [0, 0, 255, 255]),
+            "the old pages' draws covered texels: {kept:?}"
+        );
+        let rebound = rebound_pass(device, (&off, &halves), true, &encode).unwrap();
+        assert!(
+            rebound.chunks(4).all(|texel| texel == [1, 0, 0, 255]),
+            "the draws did not both read the new pages at their offsets: {rebound:?}"
         );
     });
 }
@@ -1177,13 +1268,15 @@ fn a_command_buffer_first_submitted_before_a_rebind_keeps_its_pages_in_every_lat
 
 /// A no-copy buffer released while a command buffer whose first batch was submitted holds the
 /// table that lists it keeps its pages, its deallocator waiting for that command buffer to
-/// complete (the submitted batches hold their table); one released beside it, which no submitted
-/// table lists, has its deallocator run while that command buffer still waits. (The G344 re-land's
+/// complete (the submitted batches hold their table), which the device announces once
+/// (`host-deallocator-delayed`: Metal's runs at the release, probe `dealloc-probe4`); one
+/// released beside it, which no submitted table lists, has its deallocator run while that command
+/// buffer still waits. (The G344 re-land's
 /// tests marked a table by hand and ran a spinning kernel on a host-written flag, which an Apple
 /// GPU never saw; an event wait between two batches holds the command buffer here.)
 #[test]
 fn a_released_buffer_s_pages_wait_for_the_submitted_command_buffer_whose_table_lists_it() {
-    on_device(|device| {
+    on_device_noticed(|device, messages| {
         let queue = device.new_command_queue().unwrap();
         let walker = public_case(POINTER_WALKER).unwrap();
         let outputs = Outputs::new(device, &queue, &walker);
@@ -1221,7 +1314,13 @@ fn a_released_buffer_s_pages_wait_for_the_submitted_command_buffer_whose_table_l
             );
             std::thread::sleep(Duration::from_millis(1));
         }
+        let before = device.work_counts();
         drop(listed);
+        assert_eq!(
+            device.work_counts().host_deallocators_delayed - before.host_deallocators_delayed,
+            1,
+            "the release waits for the submitted table"
+        );
         std::thread::sleep(Duration::from_millis(50));
         assert_eq!(
             listed_seen.runs.load(Ordering::SeqCst),
@@ -1247,6 +1346,168 @@ fn a_released_buffer_s_pages_wait_for_the_submitted_command_buffer_whose_table_l
         assert_eq!(read_buffer(&unrelated, 0, 16).unwrap(), [0x3c; 16]);
         deallocated(&listed_seen);
         assert_eq!(listed_seen.runs.load(Ordering::SeqCst), 1);
+        // The wait past Metal's release, announced once; the buffer beside it waited for none.
+        assert_made_once(messages, &DELAYED_DEALLOCATORS, &shared_kinds(device));
         eprintln!("REBIND-REACH released: the pages waited for the submitted table's holder");
+    });
+}
+
+/// A no-copy buffer that a submitted command buffer's command names, released while that command
+/// buffer waits, goes as it completes, as Metal's goes (Metal holds what an encoder was handed
+/// until its command buffer completes: probe `dealloc-probe`, the M3 Max under macOS 27.0.1). That
+/// wait is no longer than Metal's, so it is not announced, though the command buffer's own table
+/// lists the buffer too: the command buffer lets go of its tables before what it retained, so only
+/// another command buffer's table counts as holding the pages past the release.
+#[test]
+fn a_named_buffer_released_while_its_command_buffer_waits_goes_unannounced_as_it_completes() {
+    on_device_noticed(|device, messages| {
+        let queue = device.new_command_queue().unwrap();
+        let walker = public_case(POINTER_WALKER).unwrap();
+        let Some((named, named_seen)) = member_over(device, A) else {
+            return;
+        };
+        // Used, so the command buffer's table lists it (`live_buffers.rs`).
+        gpu_read(&queue, &named, 0..16);
+        let (binding, ..) = output(&walker);
+        let state = pipeline_state(device, &walker).unwrap();
+        let holding = CaseResources::new(device, &walker).unwrap();
+        let mut buffers = bound_buffers(device, &walker.compute, &holding).unwrap();
+        buffers.insert(binding, named.clone());
+        let event = device.new_shared_event().unwrap();
+        let command_buffer = queue.command_buffer().unwrap();
+        let mut encoder = command_buffer.compute_command_encoder().unwrap();
+        encode_case(&mut encoder, &state, &walker.compute, &buffers, &holding).unwrap();
+        encoder.end_encoding().unwrap();
+        command_buffer
+            .encode_wait_for_event(EventRef::from(&event), 1)
+            .unwrap();
+        command_buffer.commit().unwrap();
+        let deadline = Instant::now() + WAIT;
+        while command_buffer.kernel_start_time() == 0.0 {
+            assert!(
+                Instant::now() < deadline,
+                "the first batch was never submitted"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let before = device.work_counts();
+        drop(buffers);
+        drop(named);
+        assert_eq!(
+            named_seen.runs.load(Ordering::SeqCst),
+            0,
+            "ran while its command buffer held it"
+        );
+        event.set_signaled_value(1);
+        command_buffer.wait_until_completed_for(WAIT).unwrap();
+        assert_eq!(command_buffer.error(), None);
+        deallocated(&named_seen);
+        assert_eq!(
+            device.work_counts().host_deallocators_delayed - before.host_deallocators_delayed,
+            0,
+            "counted a wait no longer than Metal's"
+        );
+        assert_made_once(messages, &[], &shared_kinds(device));
+    });
+}
+
+/// A no-copy buffer released after a rebind encoded a pending command buffer again, before that
+/// command buffer's first submission, goes at that submission, before the command buffer
+/// completes, as Metal lets go at once of a buffer no submitted command buffer holds (its
+/// deallocator runs in the release, while such a command buffer waits committed: probe
+/// `dealloc-probe3`, the M3 Max under macOS 27.0.1). Its deallocator may read that command
+/// buffer's status. The encoding again of the walker's encoder, which names the rebound member,
+/// held the live buffers' table that lists the released buffer from then on (`reencode.rs`); the
+/// first submission makes the resident set again of the list without it and lets go of that
+/// table, its pages' last hold. It let go of it on the thread that submits, under its locks and
+/// the command buffer's: the deallocator ran there, and its read of the status never returned.
+/// The wait from the release to that submission, past Metal's, is announced once
+/// (`host-deallocator-delayed`).
+#[test]
+fn a_buffer_released_after_a_rebind_before_the_first_submission_goes_at_once() {
+    on_device_noticed(|device, messages| {
+        let queue = device.new_command_queue().unwrap();
+        let walker = public_case(POINTER_WALKER).unwrap();
+        let Some((member, _)) = member_over(device, A) else {
+            return;
+        };
+        // Its pipelines made, so the commit records the walker's encoder for good: one a later
+        // step records holds its buffers' pages, which refuses a rebind, until it completes.
+        let plain = buffer_with(device, &node(A)).unwrap();
+        walk(
+            device,
+            &queue,
+            &walker,
+            &plain,
+            Uses::Resident,
+            false,
+            || {},
+        );
+        let (binding, ..) = output(&walker);
+        let state = pipeline_state(device, &walker).unwrap();
+        let holding = CaseResources::new(device, &walker).unwrap();
+        let mut buffers = bound_buffers(device, &walker.compute, &holding).unwrap();
+        buffers.insert(binding, member.clone());
+        let command_buffer = queue.command_buffer().unwrap();
+        let mapping = pages(buffer_len(), 0, &node(C));
+        let pointer = mapping.pointer();
+        let (sender, receiver) = mpsc::channel();
+        let deallocator: Deallocator = {
+            let command_buffer = command_buffer.clone();
+            Box::new(move |_: NonNull<u8>, _: u64| {
+                let status = command_buffer.status();
+                drop(command_buffer);
+                drop(mapping);
+                sender.send(status).unwrap();
+            })
+        };
+        // SAFETY: the deallocator releases the mapping, after the buffer's last use.
+        let made = unsafe {
+            no_copy(
+                device,
+                pointer,
+                buffer_len(),
+                ResourceOptions::default(),
+                Some(deallocator),
+            )
+        };
+        let released = match made {
+            Ok(buffer) => buffer,
+            Err(error) if not_importable(&error) => return,
+            Err(error) => panic!("new_buffer_with_bytes_no_copy: {error:?}"),
+        };
+        // Used, so every later command buffer's commands reach it unnamed (`live_buffers.rs`).
+        gpu_read(&queue, &released, 0..16);
+        let (started, finished) = (
+            device.new_shared_event().unwrap(),
+            device.new_shared_event().unwrap(),
+        );
+        command_buffer
+            .encode_wait_for_event(EventRef::from(&started), 1)
+            .unwrap();
+        let mut encoder = command_buffer.compute_command_encoder().unwrap();
+        encode_case(&mut encoder, &state, &walker.compute, &buffers, &holding).unwrap();
+        encoder.end_encoding().unwrap();
+        command_buffer
+            .encode_wait_for_event(EventRef::from(&finished), 1)
+            .unwrap();
+        command_buffer.commit().unwrap();
+        let before = device.work_counts();
+        rebind_to(&member, B);
+        assert_eq!(
+            device.work_counts().encoders_reencoded - before.encoders_reencoded,
+            1,
+            "the walker's encoder encoded again"
+        );
+        drop(released);
+        started.set_signaled_value(1);
+        let status = receiver
+            .recv_timeout(WAIT)
+            .expect("the deallocator ran and returned");
+        assert_eq!(status, CommandBufferStatus::Committed);
+        finished.set_signaled_value(1);
+        command_buffer.wait_until_completed_for(WAIT).unwrap();
+        assert_eq!(command_buffer.error(), None);
+        assert_made_once(messages, &DELAYED_DEALLOCATORS, &shared_kinds(device));
     });
 }

@@ -1,4 +1,4 @@
-// Owned fixture (WP-MS1, DESIGN D212): fragment functions of a multisampled render pipeline.
+// Owned fixture: fragment functions of a multisampled render pipeline.
 // Metal reads `[[position]]` and center and centroid varyings at the pixel center in every
 // invocation, and runs a function that writes memory once per covered sample; these entries read
 // each kind of input beside the sample index, a sample-qualified varying, or a memory write.

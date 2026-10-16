@@ -630,6 +630,94 @@ fn a8_is_direct_where_exposed_and_samples_as_red_elsewhere() {
     assert_eq!(m.format, vk::Format::A8_UNORM);
 }
 
+/// An `A8Unorm` view reads an `R8Unorm` image through `(Zero, Zero, Zero, Red)` composed under the
+/// view's own swizzle, where the device has `A8_UNORM` and where it does not (the probe a8view on
+/// an Apple M3 Max under macOS 27.0.1: Metal's `A8Unorm` view of an `R8Unorm` texture made without
+/// `PixelFormatView` samples, reads, gathers and borders as a plain `A8Unorm` texture and as an
+/// `R8Unorm` view of that swizzle do, shared and private, through four swizzles). A pair whose
+/// opaque-black border texel moves with the mapping (`BGRA8Unorm` over `RGBA8Unorm`: the format
+/// has alpha of its own) has none, nor a format over itself, nor a format of no such candidate,
+/// nor a device whose portability subset withholds `imageViewFormatSwizzle`.
+#[test]
+fn a_view_in_other_channels_of_the_same_bits_reads_through_a_swizzle() {
+    use crate::metal::TextureSwizzle as T;
+    let s = SAMPLED;
+    let table = [
+        (vk::Format::R8_UNORM, s),
+        (vk::Format::A8_UNORM, s),
+        (vk::Format::R8G8B8A8_UNORM, s),
+        (vk::Format::B8G8R8A8_UNORM, s),
+    ];
+    let mut desc = floor_with(&table);
+    desc.extensions.extend([
+        VkExtension::KhrMaintenance5,
+        VkExtension::KhrDynamicRendering,
+    ]);
+    let m5 = device(desc);
+    let floor = device(floor_with(&table));
+    let alpha = TextureSwizzleChannels::new(T::Zero, T::Zero, T::Zero, T::Red);
+    for d in [&m5, &floor] {
+        let over = |pf, swizzle, own| swizzle_over(pf, swizzle, own, d.profile());
+        let default = TextureSwizzleChannels::DEFAULT;
+        assert_eq!(
+            over(PixelFormat::A8Unorm, default, PixelFormat::R8Unorm),
+            Some(alpha)
+        );
+        let swizzled = TextureSwizzleChannels::new(T::Alpha, T::Red, T::One, T::Zero);
+        assert_eq!(
+            over(PixelFormat::A8Unorm, swizzled, PixelFormat::R8Unorm),
+            Some(TextureSwizzleChannels::new(
+                T::Red,
+                T::Zero,
+                T::One,
+                T::Zero
+            ))
+        );
+        // The first lane whose source is alpha stores the image's red (probe a8write).
+        let second = TextureSwizzleChannels::new(T::Zero, T::Alpha, T::Alpha, T::Red);
+        assert_eq!(
+            over(PixelFormat::A8Unorm, second, PixelFormat::R8Unorm),
+            Some(TextureSwizzleChannels::new(
+                T::Zero,
+                T::Red,
+                T::Red,
+                T::Zero
+            ))
+        );
+        // No lane's source is alpha: Metal stores the alpha lane, a swizzled R8 image its red.
+        let opaque = TextureSwizzleChannels::new(T::Red, T::Green, T::Blue, T::One);
+        assert_eq!(
+            over(PixelFormat::A8Unorm, opaque, PixelFormat::R8Unorm),
+            None
+        );
+        assert_eq!(
+            over(PixelFormat::BGRA8Unorm, default, PixelFormat::RGBA8Unorm),
+            None
+        );
+        assert_eq!(
+            over(PixelFormat::R8Unorm, default, PixelFormat::R8Unorm),
+            None
+        );
+        assert_eq!(
+            over(PixelFormat::R8Uint, default, PixelFormat::R8Unorm),
+            None
+        );
+    }
+    let mut desc = floor_with(&table);
+    desc.extensions.insert(VkExtension::KhrPortabilitySubset);
+    let withheld = device(desc);
+    let default = TextureSwizzleChannels::DEFAULT;
+    assert_eq!(
+        swizzle_over(
+            PixelFormat::A8Unorm,
+            default,
+            PixelFormat::R8Unorm,
+            withheld.profile()
+        ),
+        None
+    );
+}
+
 /// A portability subset that withholds `imageViewFormatSwizzle` makes no view with a component
 /// mapping (`VUID-VkImageViewCreateInfo-imageViewFormatSwizzle-04465`): `A8Unorm`'s swizzled
 /// `R8_UNORM` candidate names the feature beside the direct format's needs, and is chosen once the
@@ -1161,16 +1249,12 @@ fn depth_and_stencil_fall_back_to_combined_formats() {
 #[test]
 fn storage_choices_follow_d25() {
     let storage = SAMPLED | vk::FormatFeatureFlags::STORAGE_IMAGE;
-    let mut desc = floor_with(&[
+    // The floor states neither formatless feature: its storage images are typed.
+    let typed = device(floor_with(&[
         (vk::Format::R8G8B8A8_UNORM, storage),
         (vk::Format::B8G8R8A8_UNORM, SAMPLED),
         (vk::Format::R32_UINT, storage),
-    ]);
-    desc.features
-        .remove(&VkFeature::ShaderStorageImageReadWithoutFormat);
-    desc.features
-        .remove(&VkFeature::ShaderStorageImageWriteWithoutFormat);
-    let typed = device(desc);
+    ]));
     let choice = |pf, dev: &Device| storage_image_choice(pf, dev.profile());
     let rgba = choice(PixelFormat::RGBA8Unorm, &typed).unwrap();
     assert_eq!(
@@ -1235,12 +1319,7 @@ fn storage_choices_follow_d25() {
         }
         Err(Unsupported::needs_any_of(Feature::Format, vec![need]).into())
     };
-    let mut desc = floor_with(&[(vk::Format::R8_UNORM, storage)]);
-    desc.features
-        .remove(&VkFeature::ShaderStorageImageReadWithoutFormat);
-    desc.features
-        .remove(&VkFeature::ShaderStorageImageWriteWithoutFormat);
-    let typed_r8 = device(desc);
+    let typed_r8 = device(floor_with(&[(vk::Format::R8_UNORM, storage)]));
     assert_eq!(
         choice(PixelFormat::R8Unorm, &typed_r8),
         Ok(StorageImageChoice::new(
@@ -1543,16 +1622,11 @@ fn rgbx_formats_are_held_in_their_rgba_twins() {
     // A storage choice is the twin's, converting the texels; the sRGB format's through the
     // twin's UNORM alias where the sRGB format is no storage format.
     let storage = SAMPLED | vk::FormatFeatureFlags::STORAGE_IMAGE;
-    let mut desc = floor_with(&[
+    let typed = device(floor_with(&[
         (F::R8G8B8A8_UNORM, storage),
         (F::R8G8B8A8_SRGB, SAMPLED),
         (F::R8G8B8A8_UINT, storage),
-    ]);
-    desc.features
-        .remove(&VkFeature::ShaderStorageImageReadWithoutFormat);
-    desc.features
-        .remove(&VkFeature::ShaderStorageImageWriteWithoutFormat);
-    let typed = device(desc);
+    ]));
     let choice = |pf| storage_image_choice(pf, typed.profile());
     let mut want = StorageImageChoice::new(F::R8G8B8A8_UNORM, StorageImageClass::Identity);
     want.x_channel = true;

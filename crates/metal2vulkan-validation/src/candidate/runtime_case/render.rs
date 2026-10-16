@@ -87,10 +87,13 @@ use metal2vulkan::pipeline::RenderPipelineDescriptor;
 use metal2vulkan::pipeline::Stage as ShaderStage;
 use metal2vulkan_runtime::{
     Buffer, CommandBuffer, Device, Execution, Function, LoadAction, PipelineOptions, Region,
-    RenderPassDescriptor, RenderPipelineState, ResourceOptions, ResourceRef, SamplerState,
-    StoreAction, Texture, TextureDescriptor, Viewport, VisibleFunctionTable,
+    RenderCommandEncoder, RenderPassDescriptor, RenderPipelineState, ResourceOptions, ResourceRef,
+    SamplerState, StoreAction, Texture, TextureDescriptor, Viewport, VisibleFunctionTable,
 };
 use std::collections::BTreeMap;
+
+mod mesh;
+pub use mesh::{encoded_mesh, mesh_pipeline_state, MeshInputs};
 
 /// What a render case's draw needs: the authored case, its render mapping, its AIR bitcode and its
 /// generated companion's, the libraries its own function links (`engine::linked_modules`),
@@ -543,11 +546,201 @@ impl StageBound {
     }
 }
 
+/// What each stage of one pipeline makes its resources with: the authored case, the usage the Metal
+/// oracle gives each of the case's own textures, its own function's AIR interface, the state of
+/// each pipeline template its argument buffers name, and the pipeline state and linked functions
+/// that make each stage's visible-function tables.
+struct StageContext<'a> {
+    case: &'a AuthoredCase,
+    texture_usage: &'a BTreeMap<u32, TextureUsage>,
+    interface: &'a AirInterface,
+    templates: &'a BTreeMap<u64, TemplateState>,
+    pipeline: &'a RenderPipelineState,
+    linked: &'a LinkedSet,
+}
+
+/// One stage's resources made on a device ([`StageContext::bound`]): what it binds, its sampler
+/// states by slot, and the bytes the runtime wrote to its visible-function tables.
+struct MadeStage {
+    bound: StageBound,
+    samplers: Vec<(u32, SamplerState)>,
+    words: TableBuffers,
+}
+
+impl StageContext<'_> {
+    /// `function`'s resources at `stage`, made on `device` as the Metal oracle makes them: its
+    /// argument buffers' members, its command buffers and the pipeline states its argument buffers
+    /// hold, its visible-function tables, its buffers holding their members' words, the host's
+    /// commands encoded, its textures and its sampler states. The fills its textures need join
+    /// `prep`.
+    fn bound(
+        &self,
+        device: &Device,
+        stage: ShaderStage,
+        function: &RenderFunction,
+        prep: &mut Vec<Prep>,
+    ) -> Result<MadeStage, CaseError> {
+        let resources = &function.resources;
+        let mut stage_bound = StageBound::default();
+        let mut fills = Vec::new();
+        // Its argument buffers' members, as a kernel's are made (`runtime_case::CaseResources`):
+        // an argument-buffer texture's usage is its role united with the declared access of the
+        // case's own function's AIR member at its field.
+        let argument_usage = if Some(stage) == case_stage(self.case) {
+            argument_texture_usage(&resources.argument_buffer_textures, self.interface)?
+        } else {
+            BTreeMap::new()
+        };
+        // A command buffer's field holds the command buffer, not the record storage the mapped
+        // case states for the executor.
+        stage_bound.argument_buffers = resources
+            .argument_buffer_buffers
+            .iter()
+            .filter(|(key, _)| !resources.command_buffers.contains_key(key))
+            .map(|(&key, bytes)| Ok((key, buffer_with(device, bytes)?)))
+            .collect::<Result<_, CaseError>>()?;
+        stage_bound.argument_textures = argument_textures(
+            device,
+            &resources.argument_buffer_textures,
+            &argument_usage,
+            &mut fills,
+        )?;
+        stage_bound.argument_samplers =
+            argument_samplers(device, &resources.argument_buffer_samplers)?;
+        stage_bound.commands = CaseCommands::of(device, &resources.command_buffers)?;
+        stage_bound.commands.states = pipeline_states(&resources.objects, self.templates)?;
+        let fields = stage_bound.member_words()?;
+        // Its visible-function tables, made by the pipeline state for the stage, as the oracle
+        // makes them (`newVisibleFunctionTableWithDescriptor:stage:`).
+        let made = tables_of(
+            (stage, &resources.function_tables),
+            self.linked,
+            |descriptor| {
+                self.pipeline
+                    .new_visible_function_table(descriptor, render_stage(stage))
+            },
+            |function| self.pipeline.function_handle(function, render_stage(stage)),
+        )?;
+        stage_bound.tables = made.tables;
+        for &index in resources.buffers.keys() {
+            // A buffer of the case's own stage that holds a rasterization-rate map's parameter
+            // data is made as the oracle makes it (`rate_map_buffer`).
+            let map = (Some(stage) == case_stage(self.case))
+                .then(|| {
+                    self.case
+                        .buffers
+                        .iter()
+                        .find(|buffer| buffer.binding == index)
+                })
+                .flatten()
+                .and_then(|buffer| buffer.rasterization_rate_map.as_ref());
+            // An argument buffer's owner holds each member's word at its field.
+            let buffer = match map {
+                Some(map) => rate_map_buffer(device, map)?,
+                None => buffer_with(device, &owner_bytes(&resources.buffers, index, &fields)?)?,
+            };
+            stage_bound.buffers.insert(index, buffer);
+        }
+        // The host's commands, before the draw runs.
+        encode_host_commands(
+            &resources.command_buffers,
+            &stage_bound.commands,
+            &stage_bound.buffers,
+            self.templates,
+        )?;
+        for (&slot, literal) in &resources.textures {
+            let usage = self
+                .texture_usage
+                .get(&slot)
+                .copied()
+                .ok_or_else(|| format!("texture {slot} has no usage"))?;
+            let texture = filled_texture(device, literal, usage, &mut fills)?;
+            stage_bound.textures.insert(slot, texture);
+        }
+        prep.extend(fills.into_iter().map(Prep::Fill));
+        let samplers = resources
+            .samplers
+            .iter()
+            .map(|(&slot, sampler)| {
+                let state = device
+                    .new_sampler_state(&sampler_descriptor(sampler))
+                    .map_err(CaseError::runtime("new_sampler_state"))?;
+                Ok((slot, state))
+            })
+            .collect::<Result<_, CaseError>>()?;
+        Ok(MadeStage {
+            bound: stage_bound,
+            samplers,
+            words: made.words,
+        })
+    }
+}
+
+/// Bind each stage's buffers, textures, visible-function tables and sampler states at their
+/// indices through that stage's setters (`setVertex*`, `setFragment*`, `setObject*`, `setMesh*`).
+/// Metal has no object or mesh setter for a visible-function table, so neither stage binds one.
+fn bind_stages(
+    encoder: &mut RenderCommandEncoder,
+    bound: &BTreeMap<ShaderStage, StageBound>,
+    samplers: &[(ShaderStage, u32, SamplerState)],
+) -> Result<(), CaseError> {
+    for (&stage, stage_bound) in bound {
+        for (&index, buffer) in &stage_bound.buffers {
+            let buffer = Some(buffer);
+            match stage {
+                ShaderStage::Fragment => encoder.set_fragment_buffer(buffer, 0, index),
+                ShaderStage::Object => encoder.set_object_buffer(buffer, 0, index),
+                ShaderStage::Mesh => encoder.set_mesh_buffer(buffer, 0, index),
+                _ => encoder.set_vertex_buffer(buffer, 0, index),
+            }
+            .map_err(CaseError::runtime("set_*_buffer"))?;
+        }
+        for (&index, texture) in &stage_bound.textures {
+            let texture = Some(texture);
+            match stage {
+                ShaderStage::Fragment => encoder.set_fragment_texture(texture, index),
+                ShaderStage::Object => encoder.set_object_texture(texture, index),
+                ShaderStage::Mesh => encoder.set_mesh_texture(texture, index),
+                _ => encoder.set_vertex_texture(texture, index),
+            }
+            .map_err(CaseError::runtime("set_*_texture"))?;
+        }
+        for (&index, table) in &stage_bound.tables {
+            match stage {
+                ShaderStage::Fragment => {
+                    encoder.set_fragment_visible_function_table(Some(table), index)
+                }
+                ShaderStage::Object | ShaderStage::Mesh => {
+                    return Err(format!(
+                    "{stage:?} visible-function table {index}: no object or mesh setter binds one"
+                )
+                    .into())
+                }
+                _ => encoder.set_vertex_visible_function_table(Some(table), index),
+            }
+            .map_err(CaseError::runtime("set_*_visible_function_table"))?;
+        }
+    }
+    for &(stage, slot, ref state) in samplers {
+        let state = Some(state);
+        match stage {
+            ShaderStage::Fragment => encoder.set_fragment_sampler_state(state, slot),
+            ShaderStage::Object => encoder.set_object_sampler_state(state, slot),
+            ShaderStage::Mesh => encoder.set_mesh_sampler_state(state, slot),
+            _ => encoder.set_vertex_sampler_state(state, slot),
+        }
+        .map_err(CaseError::runtime("set_*_sampler_state"))?;
+    }
+    Ok(())
+}
+
 /// The render stage of `stage`'s function, whose tables the pipeline state makes and whose handles
 /// it gives.
 fn render_stage(stage: ShaderStage) -> RenderStages {
     match stage {
         ShaderStage::Fragment => RenderStages::FRAGMENT,
+        ShaderStage::Object => RenderStages::OBJECT,
+        ShaderStage::Mesh => RenderStages::MESH,
         _ => RenderStages::VERTEX,
     }
 }
@@ -680,90 +873,23 @@ pub fn encoded_render(
     let mut bound: BTreeMap<ShaderStage, StageBound> = BTreeMap::new();
     let mut samplers: Vec<(ShaderStage, u32, SamplerState)> = Vec::new();
     let mut tables = TableBuffers::new();
+    let context = StageContext {
+        case: inputs.case,
+        texture_usage: inputs.texture_usage,
+        interface: inputs.interface,
+        templates: inputs.templates,
+        pipeline: &pipeline,
+        linked: &linked,
+    };
     for (stage, function) in render.stages() {
-        let resources = &function.resources;
-        let stage_bound = bound.entry(stage).or_default();
-        let mut fills = Vec::new();
-        // Its argument buffers' members, as a kernel's are made (`runtime_case::CaseResources`):
-        // an argument-buffer texture's usage is its role united with the declared access of the
-        // case's own function's AIR member at its field.
-        let argument_usage = if Some(stage) == case_stage(inputs.case) {
-            argument_texture_usage(&resources.argument_buffer_textures, inputs.interface)?
-        } else {
-            BTreeMap::new()
-        };
-        // A command buffer's field holds the command buffer, not the record storage the mapped
-        // case states for the executor.
-        stage_bound.argument_buffers = resources
-            .argument_buffer_buffers
-            .iter()
-            .filter(|(key, _)| !resources.command_buffers.contains_key(key))
-            .map(|(&key, bytes)| Ok((key, buffer_with(device, bytes)?)))
-            .collect::<Result<_, CaseError>>()?;
-        stage_bound.argument_textures = argument_textures(
-            device,
-            &resources.argument_buffer_textures,
-            &argument_usage,
-            &mut fills,
-        )?;
-        stage_bound.argument_samplers =
-            argument_samplers(device, &resources.argument_buffer_samplers)?;
-        stage_bound.commands = CaseCommands::of(device, &resources.command_buffers)?;
-        stage_bound.commands.states = pipeline_states(&resources.objects, inputs.templates)?;
-        let fields = stage_bound.member_words()?;
-        // Its visible-function tables, made by the pipeline state for the stage, as the oracle
-        // makes them (`newVisibleFunctionTableWithDescriptor:stage:`).
-        let made = tables_of(
-            (stage, &resources.function_tables),
-            &linked,
-            |descriptor| pipeline.new_visible_function_table(descriptor, render_stage(stage)),
-            |function| pipeline.function_handle(function, render_stage(stage)),
-        )?;
-        stage_bound.tables = made.tables;
+        let made = context.bound(device, stage, function, &mut prep)?;
         tables.extend(made.words);
-        for &index in resources.buffers.keys() {
-            // A buffer of the case's own stage that holds a rasterization-rate map's parameter
-            // data is made as the oracle makes it (`rate_map_buffer`).
-            let map = (Some(stage) == case_stage(inputs.case))
-                .then(|| {
-                    inputs
-                        .case
-                        .buffers
-                        .iter()
-                        .find(|buffer| buffer.binding == index)
-                })
-                .flatten()
-                .and_then(|buffer| buffer.rasterization_rate_map.as_ref());
-            // An argument buffer's owner holds each member's word at its field.
-            let buffer = match map {
-                Some(map) => rate_map_buffer(device, map)?,
-                None => buffer_with(device, &owner_bytes(&resources.buffers, index, &fields)?)?,
-            };
-            stage_bound.buffers.insert(index, buffer);
-        }
-        // The host's commands, before the draw runs.
-        encode_host_commands(
-            &resources.command_buffers,
-            &stage_bound.commands,
-            &stage_bound.buffers,
-            inputs.templates,
-        )?;
-        for (&slot, literal) in &resources.textures {
-            let usage = inputs
-                .texture_usage
-                .get(&slot)
-                .copied()
-                .ok_or_else(|| format!("texture {slot} has no usage"))?;
-            let texture = filled_texture(device, literal, usage, &mut fills)?;
-            stage_bound.textures.insert(slot, texture);
-        }
-        prep.extend(fills.into_iter().map(Prep::Fill));
-        for (&slot, sampler) in &resources.samplers {
-            let state = device
-                .new_sampler_state(&sampler_descriptor(sampler))
-                .map_err(CaseError::runtime("new_sampler_state"))?;
-            samplers.push((stage, slot, state));
-        }
+        samplers.extend(
+            made.samplers
+                .into_iter()
+                .map(|(slot, state)| (stage, slot, state)),
+        );
+        bound.insert(stage, made.bound);
     }
     // An index buffer that is an out-of-bounds target lies in a heap of its own between guards
     // too.
@@ -842,38 +968,7 @@ pub fn encoded_render(
                 .map_err(CaseError::runtime("set_vertex_buffer"))?,
         }
     }
-    for (stage, stage_bound) in &bound {
-        for (&index, buffer) in &stage_bound.buffers {
-            match stage {
-                ShaderStage::Fragment => encoder.set_fragment_buffer(Some(buffer), 0, index),
-                _ => encoder.set_vertex_buffer(Some(buffer), 0, index),
-            }
-            .map_err(CaseError::runtime("set_*_buffer"))?;
-        }
-        for (&index, texture) in &stage_bound.textures {
-            match stage {
-                ShaderStage::Fragment => encoder.set_fragment_texture(Some(texture), index),
-                _ => encoder.set_vertex_texture(Some(texture), index),
-            }
-            .map_err(CaseError::runtime("set_*_texture"))?;
-        }
-        for (&index, table) in &stage_bound.tables {
-            match stage {
-                ShaderStage::Fragment => {
-                    encoder.set_fragment_visible_function_table(Some(table), index)
-                }
-                _ => encoder.set_vertex_visible_function_table(Some(table), index),
-            }
-            .map_err(CaseError::runtime("set_*_visible_function_table"))?;
-        }
-    }
-    for (stage, slot, state) in &samplers {
-        match stage {
-            ShaderStage::Fragment => encoder.set_fragment_sampler_state(Some(state), *slot),
-            _ => encoder.set_vertex_sampler_state(Some(state), *slot),
-        }
-        .map_err(CaseError::runtime("set_*_sampler_state"))?;
-    }
+    bind_stages(&mut encoder, &bound, &samplers)?;
     let primitive = match &render.assembly {
         Assembly::Primitives(primitive) => Some(metal_primitive_type(*primitive)),
         Assembly::Patches { factors, .. } => {
@@ -1113,8 +1208,7 @@ impl CommittedRender {
     /// The bytes `inputs`' output selects, once the command buffer completed.
     pub fn output(&self, inputs: &RenderInputs<'_>) -> Result<Vec<u8>, CaseError> {
         let render = inputs.render;
-        let drawn = &self.drawn;
-        if let Some((readback, [extent, origin, dimensions], texel)) = &drawn.readback {
+        if let Some((readback, [extent, origin, dimensions], texel)) = &self.drawn.readback {
             return Ok(select_tightly_packed_2d(
                 &readback.bytes()?,
                 *extent,
@@ -1123,13 +1217,30 @@ impl CommittedRender {
                 *texel,
             )?);
         }
+        self.drawn.read(
+            &render.output,
+            |stage| render.function(stage),
+            &render.color_targets,
+        )
+    }
+}
+
+impl Drawn {
+    /// The bytes `output` selects of what the draw left, once the command buffer completed: a
+    /// stage's resource, of the function `function_of` gives at its stage, or a region of a color
+    /// target of `color_targets`, the depth or the stencil attachment, or the imageblock.
+    fn read<'a>(
+        &self,
+        output: &RenderOutput,
+        function_of: impl Fn(ShaderStage) -> Option<&'a RenderFunction>,
+        color_targets: &BTreeMap<u32, ColorTarget>,
+    ) -> Result<Vec<u8>, CaseError> {
         let stage_of = |stage: ShaderStage| {
-            drawn
-                .bound
+            self.bound
                 .get(&stage)
                 .ok_or_else(|| format!("the output's stage {stage:?} binds nothing"))
         };
-        match render.output {
+        match *output {
             RenderOutput::None => Ok(Vec::new()),
             RenderOutput::Buffer {
                 stage,
@@ -1154,8 +1265,7 @@ impl CommittedRender {
                     .textures
                     .get(&binding)
                     .ok_or_else(|| format!("the output texture {binding} is not bound"))?,
-                render
-                    .function(stage)
+                function_of(stage)
                     .and_then(|function| function.resources.textures.get(&binding))
                     .ok_or_else(|| format!("the output texture {binding} is not declared"))?,
                 origin,
@@ -1190,8 +1300,7 @@ impl CommittedRender {
                     .ok_or_else(|| {
                         format!("no argument-buffer texture at {owner}+{field_offset}")
                     })?,
-                render
-                    .function(stage)
+                function_of(stage)
                     .and_then(|function| {
                         function
                             .resources
@@ -1209,12 +1318,11 @@ impl CommittedRender {
                 origin,
                 dimensions,
             } => {
-                let texture = drawn
+                let texture = self
                     .targets
                     .get(&index)
                     .ok_or_else(|| format!("the output target {index} is not attached"))?;
-                let pixel = render
-                    .color_targets
+                let pixel = color_targets
                     .get(&index)
                     .ok_or_else(|| format!("the output target {index} is not declared"))?
                     .format
@@ -1222,14 +1330,14 @@ impl CommittedRender {
                 texels_of(texture, origin, dimensions, pixel)
             }
             RenderOutput::Depth { origin, dimensions } => {
-                let texture = drawn
+                let texture = self
                     .depth
                     .as_ref()
                     .ok_or("the output's depth is not attached")?;
                 texels_of(texture, origin, dimensions, 4)
             }
             RenderOutput::Stencil { origin, dimensions } => {
-                let texture = drawn
+                let texture = self
                     .stencil
                     .as_ref()
                     .ok_or("the output's stencil is not attached")?;
@@ -1239,7 +1347,7 @@ impl CommittedRender {
                 member,
                 origin,
                 dimensions,
-            } => Ok(drawn
+            } => Ok(self
                 .imageblock
                 .as_ref()
                 .ok_or("an imageblock output without its helpers")?
@@ -1254,6 +1362,8 @@ fn case_stage(case: &AuthoredCase) -> Option<ShaderStage> {
     match case.stage {
         Stage::Vertex => Some(ShaderStage::Vertex),
         Stage::Fragment => Some(ShaderStage::Fragment),
-        Stage::Kernel | Stage::Object | Stage::Mesh => None,
+        Stage::Object => Some(ShaderStage::Object),
+        Stage::Mesh => Some(ShaderStage::Mesh),
+        Stage::Kernel => None,
     }
 }

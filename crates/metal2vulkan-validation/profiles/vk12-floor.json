@@ -9,7 +9,7 @@
       "url": "https://raw.githubusercontent.com/KhronosGroup/Vulkan-Headers/v1.4.364/registry/vk.xml",
       "sha256": "4cfe3c137f3a95c15275b1cfda0aee407dbf131de2005a3552aa41c49f895c89"
     },
-    "rule": "features reduced to the unconditional VK_VERSION_1_0..1_2 feature requirements of vk.xml; limits and properties are the base profile's minimums, but where the Vulkan 1.2 specification states another (spec_corrections); plus the m2v_unrequired_properties block: the weakest value the specification permits for each property the product reads, and the profiles layer sets, that the base profile leaves without a requirement; plus the m2v_consumer_floor block: the features the consumer always enables (DESIGN D8.4)",
+    "rule": "features reduced to the unconditional VK_VERSION_1_0..1_2 feature requirements of vk.xml; limits and properties are the base profile's minimums, but where the Vulkan 1.2 specification states another (spec_corrections); plus the m2v_unrequired_properties block: the weakest value the specification permits for each property the product reads, and the profiles layer sets, that the base profile leaves without a requirement",
     "dropped_features": [
       "VkPhysicalDeviceVulkan12Features.descriptorIndexing",
       "VkPhysicalDeviceVulkan12Features.drawIndirectCount",
@@ -22,13 +22,6 @@
       "VkPhysicalDeviceProperties.maxDrawIndexedIndexValue: 16777216 -> 16777215",
       "VkPhysicalDeviceVulkan12Properties.supportedDepthResolveModes: [] -> [\"VK_RESOLVE_MODE_SAMPLE_ZERO_BIT\"]",
       "VkPhysicalDeviceVulkan12Properties.supportedStencilResolveModes: [] -> [\"VK_RESOLVE_MODE_SAMPLE_ZERO_BIT\"]"
-    ],
-    "added_features": [
-      "VkPhysicalDeviceFeatures.shaderInt16",
-      "VkPhysicalDeviceFeatures.shaderStorageImageReadWithoutFormat",
-      "VkPhysicalDeviceFeatures.shaderStorageImageWriteWithoutFormat",
-      "VkPhysicalDeviceVulkan11Features.storageBuffer16BitAccess",
-      "VkPhysicalDeviceVulkan12Features.storageBuffer8BitAccess"
     ],
     "required_formats": {
       "url": "https://raw.githubusercontent.com/KhronosGroup/Vulkan-Docs/v1.2.203/chapters/formats.txt",
@@ -1025,21 +1018,6 @@
         }
       }
     },
-    "m2v_consumer_floor": {
-      "features": {
-        "VkPhysicalDeviceFeatures": {
-          "shaderInt16": true,
-          "shaderStorageImageReadWithoutFormat": true,
-          "shaderStorageImageWriteWithoutFormat": true
-        },
-        "VkPhysicalDeviceVulkan11Features": {
-          "storageBuffer16BitAccess": true
-        },
-        "VkPhysicalDeviceVulkan12Features": {
-          "storageBuffer8BitAccess": true
-        }
-      }
-    },
     "m2v_vulkan12_required_formats": {
       "formats": {
         "VK_FORMAT_A1R5G5B5_UNORM_PACK16": {
@@ -1884,7 +1862,7 @@
     "VP_M2V_vk12_floor": {
       "version": 1,
       "api-version": "1.2.131",
-      "label": "Vulkan 1.2 plus the features the consumer always enables (D8.4)",
+      "label": "Vulkan 1.2 required features and minimum limits only",
       "description": "Derived by scripts/regen-device-profiles/regen_device_profiles.py from VP_LUNARG_minimum_requirements_1_2; see provenance.",
       "contributors": {},
       "history": [
@@ -1900,7 +1878,6 @@
         "vulkan11requirements",
         "vulkan12requirements",
         "m2v_unrequired_properties",
-        "m2v_consumer_floor",
         "m2v_vulkan12_required_formats"
       ]
     }

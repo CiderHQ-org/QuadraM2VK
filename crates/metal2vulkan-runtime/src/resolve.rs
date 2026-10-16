@@ -1,7 +1,7 @@
 //! Multisample resolves: `MTLStoreActionMultisampleResolve` and
 //! `MTLStoreActionStoreAndMultisampleResolve` (step 6's fourth part).
 //!
-//! **Metal**, measured on an M4 (RT6 probe 6, with and without API validation):
+//! **Metal**, measured on an M4 with macOS 27.0.1 (with and without API validation):
 //!
 //! - A color resolve averages each pixel's stored samples: unorm values round to nearest (the
 //!   samples 0, 85, 170 and 255 give 128), sRGB ones are averaged in linear space and encoded
@@ -57,29 +57,30 @@
 //!   attachment's and `MultisampleResolve` resolve the pass's. Memory- and timing-dependent, inside
 //!   one pass where no fence or event reaches: the runtime resolves the pass's samples, as Metal
 //!   does for a tracked texture.
-//! - **A layered pass** (`renderTargetArrayLength` 2 or more; CRF probe 5, an M3 Max with macOS
+//! - **A layered pass** (`renderTargetArrayLength` 2 or more; a Metal probe on an M3 Max with macOS
 //!   26.7 and an M4 with 27.0.1, alike, with and without API validation): layer `i` of the pass,
 //!   from the attachment's slice, resolves into slice `resolveSlice + i`, and a layer past the
-//!   resolve texture's slices is not resolved (a 2D resolve texture takes layer 0 alone), which
-//!   API validation accepts. A layer no draw reached resolves its clear.
+//!   resolve texture's slices is not resolved (a 2D resolve texture takes layer 0 alone), which API
+//!   validation accepts. A layer no draw reached resolves its clear.
 //!
-//! **Refused** (`Invalid`, each measured): a depth or stencil attachment's resolving store
-//! action without a resolve texture; a memoryless resolve texture (RT6 probe 6b);
-//! a single-sampled depth or stencil attachment, or a color one's late target, a
-//! multisampled resolve texture (but a color one of another sample count, above), another pixel
-//! format (but a multisampled color attachment's sRGB twin, above), an integer color format, a level or slice past the resolve texture, and a color level
-//! reaching past the attachment after a load other than `Clear`; `DepthResolvedSample` without
-//! a depth attachment, or with a separate depth texture stored beside it; and depth and stencil
-//! attachments of one texture that mix storing and resolving as plain Metal leaves undetermined
-//! ([`mixed`]). A color attachment's resolve without a texture, or a texture under a store
-//! action that does not resolve, the descriptor's or the encoder's, stops Metal's validation,
-//! and plain Metal resolves nothing and leaves that texture untouched (RT6 probe 6m), as the
-//! runtime does; so does a depth or stencil attachment's texture under such an action, or under
-//! `Unknown` still at `endEncoding`, and the attachment is stored by the action (`DontCare` for
-//! `Unknown`; EV RFX-probe2-m4, an M4 with macOS 27.0.1, color, depth and stencil alike). So does
-//! the resolve of a single-sampled color attachment, and plain Metal resolves its one sample (probe
-//! 6m's `ref_single_sampled_source`): the runtime copies the attachment's texels into the resolve
-//! texture after the pass (`color_copy`), of the attachment's extent.
+//! **Refused** (`Invalid`, each measured): a depth or stencil attachment's resolving store action
+//! without a resolve texture; a memoryless resolve texture (a Metal probe on an M4); a
+//! single-sampled depth or stencil attachment, or a color one's late target, a multisampled resolve
+//! texture (but a color one of another sample count, above), another pixel format (but a
+//! multisampled color attachment's sRGB twin, above), an integer color format, a level or slice
+//! past the resolve texture, and a color level reaching past the attachment after a load other than
+//! `Clear`; `DepthResolvedSample` without a depth attachment, or with a separate depth texture
+//! stored beside it; and depth and stencil attachments of one texture that mix storing and
+//! resolving as plain Metal leaves undetermined ([`mixed`]). A color attachment's resolve without a
+//! texture, or a texture under a store action that does not resolve, the descriptor's or the
+//! encoder's, stops Metal's validation, and plain Metal resolves nothing and leaves that texture
+//! untouched (a Metal probe on an M4), as the runtime does; so does a depth or stencil attachment's
+//! texture under such an action, or under `Unknown` still at `endEncoding`, and the attachment is
+//! stored by the action (`DontCare` for `Unknown`; EV RFX-probe2-m4, an M4 with macOS 27.0.1,
+//! color, depth and stencil alike). So does the resolve of a single-sampled color attachment, and
+//! plain Metal resolves its one sample (probe 6m's `ref_single_sampled_source`): the runtime copies
+//! the attachment's texels into the resolve texture after the pass (`color_copy`), of the
+//! attachment's extent.
 //!
 //! **Plain Metal's answers to what its validation stops** (probes on an M4, four fills alike): an
 //! index the resolve texture's type does not have is ignored (`render_pass::used_indices`: a 2D
@@ -185,6 +186,7 @@ use super::texture_descriptor::TextureDescriptor;
 use super::tracker::{Access, Barrier, Use};
 use super::values::{ResourceOptions, StorageMode};
 use super::Device;
+use crate::device::functions::Vk;
 use ash::vk;
 use metal2vulkan::bind::{ColorResolveFormat, DepthPick};
 use metal2vulkan::device::DeviceProfile;
@@ -391,13 +393,13 @@ fn problem(call: &'static str, p: RenderPassProblem) -> Error {
     invalid(call, Problem::RenderPass(p))
 }
 
-/// Whether `which` resolves: its descriptor's resolve texture and store action, checked (a depth
-/// or stencil attachment's resolving action needs a texture). An attachment does not resolve
-/// without a texture and an action that resolves or is `Unknown`: plain Metal leaves a resolve
-/// texture under `Store` or `DontCare` untouched and stores the attachment by the action, and a
-/// color attachment's resolving action without a texture resolves nothing (RT6 probe 6m's
-/// `ref_resolve_without_texture` and `ref_texture_with_store`; depth and stencil alike in EV
-/// RFX-probe2-m4; its validation stops each).
+/// Whether `which` resolves: its descriptor's resolve texture and store action, checked (a depth or
+/// stencil attachment's resolving action needs a texture). An attachment does not resolve without a
+/// texture and an action that resolves or is `Unknown`: plain Metal leaves a resolve texture under
+/// `Store` or `DontCare` untouched and stores the attachment by the action, and a color
+/// attachment's resolving action without a texture resolves nothing (Metal probe cases
+/// `ref_resolve_without_texture` and `ref_texture_with_store` on an M4; depth and stencil alike in
+/// EV RFX-probe2-m4; its validation stops each).
 fn resolves(call: &'static str, which: Attachment, wanted: &Wanted<'_>) -> Result<bool, Error> {
     let resolving = wanted.store.resolves() || wanted.store == StoreAction::Unknown;
     if let Attachment::Color(_) = which {
@@ -906,13 +908,13 @@ fn single_sampled(call: &'static str, which: Attachment, source: &Target) -> Res
 }
 
 /// The resolve of single-sampled color attachment `source` (`which`) as `wanted` states it: the
-/// resolve texture's level and slice that the attachment's texels are copied into after the
-/// pass, over the render area and the pass's layers that fit (`ResolveCopies`), as plain Metal
-/// resolves one sample (RT6 probe 6m's `ref_single_sampled_source`, which its validation stops:
+/// resolve texture's level and slice that the attachment's texels are copied into after the pass,
+/// over the render area and the pass's layers that fit (`ResolveCopies`), as plain Metal resolves
+/// one sample (Metal probe case `ref_single_sampled_source` on an M4, which its validation stops:
 /// the resolve texture holds the draw); `None` where it does not resolve. Refused as `color`
 /// refuses a resolve but for the sample count, and `NotImplemented(Render)` where the copy is not
-/// built: a memoryless attachment, or an attachment or destination whose image takes no copy or
-/// is not 2D.
+/// built: a memoryless attachment, or an attachment or destination whose image takes no copy or is
+/// not 2D.
 pub(super) fn color_copy(
     call: &'static str,
     device: &Device,
@@ -1075,10 +1077,10 @@ fn destination(
         return Err(Error::NotImplemented(RuntimeGap::Render));
     }
     // Layer `i` of a layered pass resolves into slice `resolveSlice + i`, and a layer past the
-    // texture's slices is not resolved (CRF probe 5, an M3 Max and an M4 alike): the resolve
-    // writes the layers that fit, at least the first.
-    // A depth or stencil attachment resolves its first layer alone, into slice `resolveSlice`;
-    // the later layers are not resolved (a probe, an M3 Max and an M4 alike).
+    // texture's slices is not resolved (a Metal probe, an M3 Max and an M4 alike): the resolve
+    // writes the layers that fit, at least the first. A depth or stencil attachment resolves its
+    // first layer alone, into slice `resolveSlice`; the later layers are not resolved (a probe, an
+    // M3 Max and an M4 alike).
     let layers = match which {
         Attachment::Color(_) => source.layers,
         Attachment::Depth | Attachment::Stencil => 1,
@@ -1112,8 +1114,8 @@ fn other_channel_order(a: PixelFormat, b: PixelFormat) -> bool {
 
 /// An image of `source`'s format, extent and layers, of `samples`, that the pass resolves into,
 /// then copies from (one sample), or that a copy of `source` is resolved from (its samples,
-/// [`ResolveSource`]).
-fn scratch(
+/// [`ResolveSource`], and the exact color resolve's copy, `color_resolve.rs`).
+pub(super) fn scratch(
     maker: &CommandBuffer,
     source: &Target,
     usage: ImageUsageFlags,
@@ -1289,7 +1291,7 @@ impl ResolveSource {
     /// `command_buffer` is recording outside a render pass, and only the caller records it; both
     /// images are live until it completes (the encoder retains the attachment, and this the
     /// scratch image), and rest in `GENERAL`.
-    pub(super) unsafe fn record(&self, raw: &ash::Device, command_buffer: vk::CommandBuffer) {
+    pub(super) unsafe fn record(&self, raw: &Vk, command_buffer: vk::CommandBuffer) {
         let general = vk::ImageLayout::GENERAL;
         // SAFETY: the caller's contract; the region is the attachment's level and the pass's
         // layers of both images, which have one format, sample count and extent.

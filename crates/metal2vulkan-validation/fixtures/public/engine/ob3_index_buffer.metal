@@ -1,4 +1,4 @@
-// Owned fixture (WP-OB3, DESIGN D258): index fetches past the index buffer of an indexed draw,
+// Owned fixture: index fetches past the index buffer of an indexed draw,
 // the index buffer containment form. A rasterization-disabled point per index; the vertex
 // function marks the vertex id it was given, seen[min(vid, 7)] = 1 (idempotent, so the marks do
 // not depend on how often an index is shaded). The case's index buffer holds indices 0 to 3 and

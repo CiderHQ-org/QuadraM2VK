@@ -1,4 +1,4 @@
-// Owned fixture (WP-RCH, DESIGN D671 item 11): a vertex function of a typical vertex shader's
+// Owned fixture: a vertex function of a typical vertex shader's
 // arithmetic, for the cost of an invariant position: each vertex takes a position from buffer 0
 // at its vertex id, transforms it by a model, a view and a projection matrix from buffer 1 (each
 // a float4x4), and its normal by the model's 3x3 part, and writes the position, the transformed

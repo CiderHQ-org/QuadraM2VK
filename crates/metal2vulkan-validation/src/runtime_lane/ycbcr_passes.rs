@@ -52,7 +52,7 @@ const LENGTH: u64 = 2 * ROW * H;
 /// Synthetic AIR written for this lane: vertex `corner` places vertex `vid` at buffer 0's
 /// `float4` `vid`; fragment `values` writes to color 0 buffer 0's `float4` of its pixel (row by
 /// row, [`W`] a row).
-const SHADERS: &str = r#"; Owned synthetic shaders (WP-GSM2).
+const SHADERS: &str = r#"; Owned synthetic shaders.
 define <{ <4 x float> }> @corner(i32 %vid, ptr addrspace(2) %p) {
   %i = zext i32 %vid to i64
   %q = getelementptr inbounds <4 x float>, ptr addrspace(2) %p, i64 %i

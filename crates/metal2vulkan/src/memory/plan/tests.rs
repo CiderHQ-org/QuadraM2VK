@@ -1723,7 +1723,7 @@ fn the_ledger_peak_covers_every_input_scaled_table() {
 /// needs function constants, and with zero constants it is a linked function), so this is the
 /// analysis cost at that size. Reports wall time, work units, and the ledger peak.
 #[test]
-#[ignore = "G-rel: run in release with --ignored (D16.6 spike, WP-L2)"]
+#[ignore = "G-rel: run in release with --ignored (an analysis cost spike)"]
 fn spike_analysis_at_the_largest_row_size() {
     const BLOCKS: u32 = 1000;
     const TRIPLES: u64 = 450;

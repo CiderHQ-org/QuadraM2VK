@@ -1043,22 +1043,29 @@ impl FeatureRow {
                 f.properties.are_programmable_sample_positions_supported(),
                 Query::ProgrammableSamplePositions,
             )]),
-            // `render_target_array_index` (`shaderOutputLayer`), and passes of more than one layer
+            // `render_target_array_index`, stored from the vertex function (`shaderOutputLayer`) or
+            // by the generated geometry stage (`geometryShader`), and passes of more than one layer
             // (`render_target_array_length`, `render_pass.rs`): built, an index at or past the
             // length included, and resolves, separate depth and stencil textures and stand-ins over
             // every layer; a tile dispatch in one is the tile shading row's.
-            F::LayeredRendering => first([needs_features(
+            F::LayeredRendering => first([needs_any(
                 f,
                 Feature::LayeredRendering,
-                &[VkFeature::ShaderOutputLayer],
+                &[
+                    &[VkFeature::ShaderOutputLayer],
+                    &[VkFeature::GeometryShader],
+                ],
             )]),
             // The same, into multisampled array textures, which a portability subset may withhold
             // (`multisampleArrayImage`).
             F::LayeredRenderingToMultisampleTextures => first([
-                needs_features(
+                needs_any(
                     f,
                     Feature::LayeredRendering,
-                    &[VkFeature::ShaderOutputLayer],
+                    &[
+                        &[VkFeature::ShaderOutputLayer],
+                        &[VkFeature::GeometryShader],
+                    ],
                 ),
                 withheld(
                     f,
@@ -1066,16 +1073,20 @@ impl FeatureRow {
                     VkFeature::MultisampleArrayImage,
                 ),
             ]),
-            // `viewport_array_index` and `set_viewports`: `multiViewport` and
-            // `shaderOutputViewportIndex`.
-            F::MultipleViewports => first([needs_features(
-                f,
-                Feature::LayeredRendering,
-                &[
-                    VkFeature::MultiViewport,
-                    VkFeature::ShaderOutputViewportIndex,
-                ],
-            )]),
+            // `viewport_array_index` and `set_viewports`: `multiViewport`, and the index stored
+            // from the vertex function (`shaderOutputViewportIndex`) or by the generated geometry
+            // stage (`geometryShader`).
+            F::MultipleViewports => first([
+                needs_features(f, Feature::LayeredRendering, &[VkFeature::MultiViewport]),
+                needs_any(
+                    f,
+                    Feature::LayeredRendering,
+                    &[
+                        &[VkFeature::ShaderOutputViewportIndex],
+                        &[VkFeature::GeometryShader],
+                    ],
+                ),
+            ]),
             // Dual-source blending: `dualSrcBlend`.
             F::DualSourceBlending => first([needs_features(
                 f,
@@ -1093,15 +1104,20 @@ impl FeatureRow {
                     Capability::Extension(VkExtension::ExtShaderStencilExport),
                 ))
             })]),
-            // `[[primitive_id]]` in a fragment function: the geometry or tessellation stage it
-            // needs, which the compile layer lists where the device lacks both.
-            F::PrimitiveId => first([listed(f, Feature::PrimitiveId)]),
-            // `[[barycentric_coord]]`: `fragmentShaderBarycentric`.
-            F::BarycentricCoordinates => first([needs_features(
-                f,
-                Feature::Barycentrics,
-                &[VkFeature::FragmentShaderBarycentric],
-            )]),
+            // `[[primitive_id]]` in a fragment function: the builtin through the geometry or
+            // tessellation capability; on a device with neither, a varying the vertex function
+            // writes, which an indexed draw's shared vertices cannot carry: an indexed list or
+            // point draw runs de-indexed where the device addresses buffers, and an indexed
+            // strip or indirect indexed draw is refused (`NotImplemented(PrimitiveId)`).
+            F::PrimitiveId => {
+                let d = f.profile.fragment();
+                first([(!d.geometry_shader && !d.tessellation_shader)
+                    .then(|| refused(Unsupported::not_implemented(Feature::PrimitiveId)))])
+            }
+            // `[[barycentric_coord]]`: `fragmentShaderBarycentric`, or the generated geometry
+            // stage that writes the weights as varyings, which the compile layer lists where the
+            // device lacks both.
+            F::BarycentricCoordinates => first([listed(f, Feature::Barycentrics)]),
             // Raster order groups: the pixel interlock, which the compile layer lists where the
             // device lacks both interlocks, then the runtime's query, which answers yes where the
             // pixel interlock is enabled.
@@ -1113,17 +1129,31 @@ impl FeatureRow {
                 ),
             ]),
             // Vertex amplification: multiview, and for what multiview does not draw as Metal does
-            // the layer and viewport index outputs of the variant that draws one amplification at a
-            // time; then the runtime's query of two views; then a tessellation pipeline drawn so,
-            // which the binder does not implement.
+            // the variant that draws one amplification at a time, which stores the slice and the
+            // viewport from the vertex function (the layer and viewport index outputs) or by the
+            // generated geometry stage, the viewport among more than one (`multiViewport`); then
+            // the runtime's query of two views; then a tessellation pipeline drawn so, which the
+            // binder does not implement.
             F::VertexAmplification => first([
                 needs_features(
                     f,
                     Feature::VertexAmplification,
+                    &[VkFeature::Multiview, VkFeature::MultiViewport],
+                ),
+                needs_any(
+                    f,
+                    Feature::VertexAmplification,
                     &[
-                        VkFeature::Multiview,
-                        VkFeature::ShaderOutputLayer,
-                        VkFeature::ShaderOutputViewportIndex,
+                        &[VkFeature::ShaderOutputLayer],
+                        &[VkFeature::GeometryShader],
+                    ],
+                ),
+                needs_any(
+                    f,
+                    Feature::VertexAmplification,
+                    &[
+                        &[VkFeature::ShaderOutputViewportIndex],
+                        &[VkFeature::GeometryShader],
                     ],
                 ),
                 query(
@@ -1153,15 +1183,15 @@ impl FeatureRow {
             F::TextureBarriers | F::VisibilityCountAccumulation | F::DepthBoundsTesting => {
                 first([gap(G::Render)])
             }
-            // Patch draws: `tessellationShader`; the runtime's patch draws, direct and indirect,
-            // are built (`tessellation.rs`). The compile layer still refuses a post-tessellation
-            // vertex function whose patch states no control-point count (`[[patch(kind)]]`), and
-            // a fragment function behind one that reads `[[primitive_id]]`
-            // (`NotImplemented(Tessellation)`).
-            F::Tessellation | F::IndirectTessellationArguments => first([
-                needs_features(f, Feature::Tessellation, &[VkFeature::TessellationShader]),
-                not_implemented(Feature::Tessellation),
-            ]),
+            // Patch draws: the runtime's patch draws, direct and indirect, are built
+            // (`tessellation.rs`), through the device's tessellation stages where it enables
+            // `tessellationShader` and emulated elsewhere (`render/tessellation_scan.rs`). The
+            // compile layer still refuses a post-tessellation vertex function whose patch states
+            // no control-point count (`[[patch(kind)]]`), and with the device's stages a fragment
+            // function behind one that reads `[[primitive_id]]` (`NotImplemented(Tessellation)`).
+            F::Tessellation | F::IndirectTessellationArguments => {
+                first([not_implemented(Feature::Tessellation)])
+            }
             // Coverage after the depth test (`[[post_depth_coverage]]`): not lowered.
             F::PostDepthCoverage => {
                 first([not_implemented(Feature::Lowering(LowerFamily::Fragment))])
@@ -1276,7 +1306,6 @@ impl FeatureRow {
                 ])
             }
             F::IcbTessellation => first([
-                needs_features(f, Feature::Tessellation, &[VkFeature::TessellationShader]),
                 addressed(f, Feature::GpuEncodedIndirectCommands),
                 gap(G::IndirectRenderCommands),
             ]),
@@ -1487,6 +1516,20 @@ pub(super) fn needs_features(f: &Facts<'_>, feature: Feature, features: &[VkFeat
         .map(|&x| Capability::Feature(x))
         .collect();
     (!missing.is_empty()).then(|| refused(Unsupported::needs_any_of(feature, vec![missing])))
+}
+
+/// `feature`, refused where the device was created without every feature of each of
+/// `alternatives`.
+pub(super) fn needs_any(f: &Facts<'_>, feature: Feature, alternatives: &[&[VkFeature]]) -> Check {
+    let has = |x: &VkFeature| f.properties.description.has(*x);
+    if alternatives.iter().any(|a| a.iter().all(has)) {
+        return None;
+    }
+    let needs = alternatives
+        .iter()
+        .map(|a| a.iter().map(|&x| Capability::Feature(x)).collect())
+        .collect();
+    Some(refused(Unsupported::needs_any_of(feature, needs)))
 }
 
 /// `feature`, refused where the device's `VK_KHR_portability_subset` withholds `withheld`.

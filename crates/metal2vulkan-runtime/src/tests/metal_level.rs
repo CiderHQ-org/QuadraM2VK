@@ -4,11 +4,13 @@
 
 use super::capabilities::{committed_descriptions, created_at};
 use crate::metal_level::{choose, parse_version, Chosen, Host};
+use crate::texture::heap::no_texture_alignment;
 use crate::texture_descriptor::{Creator, Refused, TextureDescriptor, TextureProblem};
 use crate::texture_descriptor::{TextureRules, APPLE_SAMPLE_COUNTS};
 use crate::{BufferTextureProblem, Error, Invalid, MetalLevel, Problem, Unproven};
+use metal2vulkan::bind::MipmapRule;
 use metal2vulkan::metal::PixelFormat as P;
-use metal2vulkan::metal::TextureUsage;
+use metal2vulkan::metal::{TextureType, TextureUsage};
 
 /// The 12 three-channel formats of the macOS 27.0 SDK and `RGB16Bfloat`: values macOS 26.7's
 /// descriptor does not know (EV XRR2-pfi1-m3), and formats macOS 27.0.1 describes none of (EV
@@ -38,8 +40,10 @@ const TWELVE_BIT_UINT: [P; 5] = [
     P::RGB10A8Uint2P,
 ];
 
-/// The formats from 630 to 645: made by macOS 27.0.1 (EV XRR2-pf576b-m4), described by none of
-/// macOS 26.7 (EVs XRR2-pfi1-m3, XRR2-pla1-m3).
+/// The formats from 630 to 645: made by an Apple M4 under macOS 27.0.1 (EV XRR2-pf576b-m4),
+/// described by neither release on an Apple M3 Max (EVs XRR2-pfi1-m3 and XRR2-pla1-m3 at 26.7;
+/// at 27.0.1 the consumer's macOS 27 host lane and EV M27-lin1-m3, where the alignment query
+/// asserts and the descriptor's validation stops a texture of each, "has invalid pixelFormat").
 const FROM_630: [P; 16] = [
     P::BGRA10UintPACKED,
     P::BGRA10XRPACKED,
@@ -68,34 +72,32 @@ fn described(level: MetalLevel) -> Vec<P> {
         .collect()
 }
 
-/// Each level's row is its release's measurement: macOS 27.0.1 on an Apple M4 describes 280
-/// values and macOS 26.7 on an Apple M3 Max 264 (`MTLPixelFormatGetInfoForDevice`, EVs
-/// XRR2-pfi1-m4 and XRR2-pfi1-m3), each without `Depth24Unorm_Stencil8` and `X24_Stencil8`, which
-/// no Apple GPU has; 26.7's descriptor does not know the three-channel formats; and a newer release
-/// describes every format an older one does.
+/// Each level's row is its release's measurement on an Apple M3 Max: macOS 26.7 and 27.0.1 each
+/// describe 264 values (`MTLPixelFormatGetInfoForDevice`, EV XRR2-pfi1-m3 and the consumer's
+/// macOS 27 host lane), without `Depth24Unorm_Stencil8` and `X24_Stencil8`, which no Apple GPU
+/// has, and without the 16 from 630 to 645, which an Apple M4 under 27.0.1 also describes; 26.7's
+/// descriptor does not know the three-channel formats; and a newer release describes every format
+/// an older one does.
 #[test]
 fn each_level_describes_what_its_release_measured() {
     let apple_lacks = [P::Depth24UnormStencil8, P::X24Stencil8];
-    assert_eq!(described(MetalLevel::MacOS27_0_1).len(), 280);
-    assert_eq!(described(MetalLevel::MacOS26_7).len(), 264);
     let named = P::ALL.iter().filter(|&&pf| pf != P::Invalid).count();
-    let undescribed = |level| named - described(level).len();
-    assert_eq!(undescribed(MetalLevel::MacOS27_0_1), 20);
-    assert_eq!(undescribed(MetalLevel::MacOS26_7), 36);
+    for level in MetalLevel::ALL {
+        assert_eq!(described(level).len(), 264, "{level:?}");
+        assert_eq!(named - described(level).len(), 36, "{level:?}");
+    }
     for &pf in P::ALL {
         let three = THREE_CHANNEL.contains(&pf);
         assert!(MetalLevel::MacOS27_0_1.knows(pf), "{pf:?}");
         assert_eq!(MetalLevel::MacOS26_7.knows(pf), !three, "{pf:?}");
-        let newest = !three
+        let an_m3s = !three
             && !TWELVE_BIT_UINT.contains(&pf)
+            && !FROM_630.contains(&pf)
             && !apple_lacks.contains(&pf)
             && pf != P::Invalid;
-        assert_eq!(MetalLevel::MacOS27_0_1.describes(pf), newest, "{pf:?}");
-        assert_eq!(
-            MetalLevel::MacOS26_7.describes(pf),
-            newest && !FROM_630.contains(&pf),
-            "{pf:?}"
-        );
+        for level in MetalLevel::ALL {
+            assert_eq!(level.describes(pf), an_m3s, "{level:?} {pf:?}");
+        }
     }
     // Ordered by release, and a newer release describes what an older one does.
     assert!(MetalLevel::ALL.windows(2).all(|pair| pair[0] < pair[1]));
@@ -107,6 +109,52 @@ fn each_level_describes_what_its_release_measured() {
     }
     assert_eq!(MetalLevel::MacOS26_7.to_string(), "macOS 26.7");
     assert_eq!(MetalLevel::MacOS27_0_1.macos(), "27.0.1");
+}
+
+/// Each level makes mipmaps by its release's rule on an Apple M3 Max (`bind::MipmapRule`: macOS
+/// 26.7's passes, 27.0.1's filter at every level), and answers the heap query of a texture of a
+/// format of which Metal makes none alone, with no planes, its release's alignment: 16 KiB for an
+/// array, a cube, a cube array, a 3D texture and a multisample array under 26.7 (EVs APX2-un2-m3,
+/// TTG-nil2-m3), 128 under 27.0.1 (EV M27-heap1-m3), and alike for the other types.
+#[test]
+fn a_level_takes_its_release_s_mipmaps_and_nil_alignments() {
+    assert_eq!(
+        MetalLevel::MacOS26_7.mipmap_rule(),
+        MipmapRule::AppleM3MaxPasses
+    );
+    assert_eq!(MetalLevel::MacOS27_0_1.mipmap_rule(), MipmapRule::Filter);
+    use TextureType as T;
+    let types = [
+        (T::Type1D, 128, 128),
+        (T::Type2D, 128, 128),
+        (T::Type2DMultisample, 128, 128),
+        (T::TextureBuffer, 16, 16),
+        (T::Type1DArray, 16 << 10, 128),
+        (T::Type2DArray, 16 << 10, 128),
+        (T::Cube, 16 << 10, 128),
+        (T::CubeArray, 16 << 10, 128),
+        (T::Type3D, 16 << 10, 128),
+        (T::Type2DMultisampleArray, 16 << 10, 128),
+    ];
+    for pf in [
+        P::Unspecialized,
+        P::RGBA16FloatXR,
+        P::AnyDepth,
+        P::AnyStencil,
+    ] {
+        for (ty, older, newer) in types {
+            assert_eq!(
+                no_texture_alignment(pf, ty, MetalLevel::MacOS26_7),
+                older,
+                "{pf:?} {ty:?}"
+            );
+            assert_eq!(
+                no_texture_alignment(pf, ty, MetalLevel::MacOS27_0_1),
+                newer,
+                "{pf:?} {ty:?}"
+            );
+        }
+    }
 }
 
 /// A macOS host's release reads as major, minor and patch, the patch 0 where absent.
@@ -208,8 +256,8 @@ fn a_device_answers_at_or_below_its_host() {
 /// A texture of a format the device's level describes none of is stopped as `Invalid` is, from
 /// every creator and the heap size query, before every other rule; one of a format it describes
 /// is not (Metal's validation stops it, "has invalid pixelFormat": EVs XRR2-pf576b-m4 and
-/// XRR2-pfi1-m3). The 16 formats from 630 to 645 are stopped under macOS 26.7 and pass the
-/// descriptor's rules under 27.0.1.
+/// XRR2-pfi1-m3; at macOS 27.0.1 on the M3 Max, EV M27-lin1-m3). The 16 formats from 630 to 645
+/// are stopped at both levels, as the M3 Max stops them at both releases.
 #[test]
 fn a_level_stops_textures_of_the_formats_it_describes_none_of() {
     let creators = [
@@ -250,14 +298,16 @@ fn a_level_stops_textures_of_the_formats_it_describes_none_of() {
             sample_counts: APPLE_SAMPLE_COUNTS,
             level,
         };
-        assert_eq!(d.check(at(MetalLevel::MacOS26_7)), stop, "{pf:?}");
-        assert!(d.check(at(MetalLevel::MacOS27_0_1)).is_ok(), "{pf:?}");
+        for level in MetalLevel::ALL {
+            assert_eq!(d.check(at(level)), stop, "{level:?} {pf:?}");
+        }
     }
 }
 
-/// `minimumLinearTextureAlignmentForPixelFormat:` answers at the device's level: 16 under macOS
-/// 27.0.1 for the formats from 630 to 645, an assertion under 26.7 (EVs XRR2-pla1-m4,
-/// XRR2-pla1-m3), which the runtime refuses `Invalid`.
+/// `minimumLinearTextureAlignmentForPixelFormat:` answers at the device's level, an Apple M3 Max's
+/// at each: an assertion for the formats from 630 to 645 at macOS 26.7 and at 27.0.1 (EVs
+/// XRR2-pla1-m3 and M27-lin1-m3, "MTLPixelFormatInvalid is not supported on this device"; an
+/// Apple M4 under 27.0.1 answers 16, EV XRR2-pla1-m4), which the runtime refuses `Invalid`.
 #[test]
 fn the_linear_alignment_answers_at_the_devices_level() {
     let (_, desc) = committed_descriptions()
@@ -270,19 +320,17 @@ fn the_linear_alignment_answers_at_the_devices_level() {
     assert_eq!(newer.metal_level, MetalLevel::MacOS27_0_1);
     let call = "minimum_linear_texture_alignment_for_pixel_format";
     for pf in FROM_630 {
-        assert_eq!(
-            older.minimum_linear_texture_alignment_for_pixel_format(pf),
-            Err(Error::Invalid(Invalid::new(
-                call,
-                Problem::BufferTexture(BufferTextureProblem::NotLinear { pixel_format: pf }),
-            ))),
-            "{pf:?}"
-        );
-        assert_eq!(
-            newer.minimum_linear_texture_alignment_for_pixel_format(pf),
-            Ok(16),
-            "{pf:?}"
-        );
+        for p in [&older, &newer] {
+            assert_eq!(
+                p.minimum_linear_texture_alignment_for_pixel_format(pf),
+                Err(Error::Invalid(Invalid::new(
+                    call,
+                    Problem::BufferTexture(BufferTextureProblem::NotLinear { pixel_format: pf }),
+                ))),
+                "{:?} {pf:?}",
+                p.metal_level
+            );
+        }
     }
     for pf in [P::RGBA8Unorm, P::R10UnormX6, P::RGB10A82P] {
         for p in [&older, &newer] {

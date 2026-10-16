@@ -54,14 +54,13 @@ fn every_property_has_one_selector() {
     );
 }
 
-/// Spot values as the probes printed them, where the chips or releases differ and where they
-/// agree.
+/// Spot values as the probes printed them on an Apple M3 Max at each release (an Apple M4 under
+/// macOS 27.0.1 answers `gpuCoreCount` 10 and `supportsComputeCompressedTextureWrite` yes, EV
+/// API-props1-m4; the M3 Max 40 and no, EV M27-props1-m3).
 #[test]
 fn the_answers_are_the_probes() {
-    use MetalLevel::{MacOS26_7 as M3, MacOS27_0_1 as M4};
-    assert_eq!(M3.private_count(PrivateCount::GpuCoreCount), 40);
-    assert_eq!(M4.private_count(PrivateCount::GpuCoreCount), 10);
     for level in MetalLevel::ALL {
+        assert_eq!(level.private_count(PrivateCount::GpuCoreCount), 40);
         assert_eq!(level.private_count(PrivateCount::MaxComputeBuffers), 31);
         assert_eq!(
             level.private_count(PrivateCount::MaxComputeThreadgroupMemory),
@@ -85,9 +84,8 @@ fn the_answers_are_the_probes() {
             !(9..13).any(|raw| level.supports_primitive_type(raw)),
             "{level}"
         );
+        assert!(!level.private_flag(PrivateFlag::SupportsComputeCompressedTextureWrite));
     }
-    assert!(!M3.private_flag(PrivateFlag::SupportsComputeCompressedTextureWrite));
-    assert!(M4.private_flag(PrivateFlag::SupportsComputeCompressedTextureWrite));
 }
 
 /// Which properties answer Metal's measured value: those no document describes.
@@ -276,7 +274,7 @@ fn the_core_count_and_fp16_are_the_devices() {
         };
         let unknown = of(&properties).count(PrivateCount::GpuCoreCount);
         assert_eq!(unknown.value(), None, "{stem}");
-        assert_eq!(unknown.metal(), 10, "{stem}: Metal's, the M4's, beside");
+        assert_eq!(unknown.metal(), 40, "{stem}: Metal's, the M3 Max's, beside");
         let mut reported = properties.clone();
         reported.gpu_core_count = Some(84);
         assert_eq!(

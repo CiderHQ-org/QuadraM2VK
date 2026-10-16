@@ -5,9 +5,9 @@
 //! over the same image, as Metal's does. Cross-process export is not built (not scheduled). Metal's
 //! answers, measured on an Apple M3 Max (macOS 26.7, plain and under API validation):
 //! - only a `Private` texture is made shareable: any other storage mode answers nil, and API
-//!   validation stops it ("Requested storage mode is not allowed for Shared Textures"); a
-//!   texture buffer and a multisample texture are made, and a texture opened from a texture
-//!   buffer's handle reads what a kernel wrote through the texture buffer (CRF probe 2);
+//!   validation stops it ("Requested storage mode is not allowed for Shared Textures"); a texture
+//!   buffer and a multisample texture are made, and a texture opened from a texture buffer's handle
+//!   reads what a kernel wrote through the texture buffer (a Metal probe on the M3 Max and an M4);
 //! - a texture made otherwise, a texture over a buffer, and a view of a shareable texture are
 //!   not shareable, and their handle is nil;
 //! - each open answers a new texture object, shareable, with the texture's properties (its

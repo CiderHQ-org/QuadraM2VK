@@ -1,4 +1,4 @@
-// Owned fixture (WP-GSM2, DESIGN D592; written for this repository): simdgroup products, prefix
+// Owned fixture (written for this repository): simdgroup products, prefix
 // products and rotate up, in kernels and in vertex functions. Thread or vertex t reads in[t]. The
 // float and half inputs are 1, -1, 2, -2, 0.5 and -0.5, at most eight of magnitude 2 and six of
 // 0.5 in a simdgroup, so every product, prefix product and partial product of any association

@@ -13,16 +13,86 @@
 //! Vulkan admits `Offset` outside a gather only with the `maintenance8` feature
 //! (VUID-RuntimeSpirv-Offset-10213). The builder is profile-free: a sample with `Offset` is
 //! well formed, and requirement derivation records that the module needs `maintenance8`, which
-//! the profile check refuses on a device without it.
+//! the profile check refuses on a device without it. Where the lowering arms a dynamic offset
+//! ([`FunctionBuilder::arm_offset`]), each access it is the `Offset` operand of is emitted as a
+//! switch over its values, each arm the access with that value as `ConstOffset` ([`ArmedOffset`]),
+//! and the module carries no `Offset` operand.
 
+use crate::spirv::builder::constructs::{ArmEnd, ArmFn, Merged};
 use crate::spirv::builder::function::FunctionBuilder;
 use crate::spirv::builder::ops::{err, Num};
 use crate::spirv::error::{BResult, ImageRule, OperandRule};
 use crate::spirv::ids::{TypeId, Value};
 use crate::spirv::ir::{
-    DerivOp, Dim, ImageOperandKind as K, ImageOperands, ImageQuery, ImageType, ImageUsage, Inst,
-    SampleForm, TexelMemory, Type, ValueOrigin,
+    ConstBits, Constant, DerivOp, Dim, ImageOperandKind as K, ImageOperands, ImageQuery, ImageType,
+    ImageUsage, Inst, MemAccess, SampleForm, TexelMemory, Type, ValueOrigin,
 };
+
+/// The most dynamic lanes an armed offset takes ([`ArmedOffset`]): three, `16^3` arms.
+pub const ARMED_LANES: usize = 3;
+
+/// The values one dynamic lane of an armed offset takes: Metal's texel offset range, `[-8, 7]`.
+pub const ARM_VALUES: u32 = 16;
+
+/// How a sampled image was made, so a block it is not consumed in makes it again.
+#[derive(Clone, Copy, Debug)]
+enum Remake {
+    /// `OpSampledImage` of `image` and `sampler`.
+    Sampled { image: Value, sampler: Value },
+    /// The load of a combined image sampler through `ptr`.
+    Load { ptr: Value, access: MemAccess },
+}
+
+/// A dynamic texel offset the lowering asked to be taken as constants
+/// ([`FunctionBuilder::arm_offset`]). Where the device admits no `Offset` operand (a sample
+/// without `maintenance8`, a gather without `shaderImageGatherExtended`), an access with the offset
+/// is a switch-at-use over the offset's values, each arm the same access with its value as
+/// `ConstOffset` (Vulkan 1.0 core). Both operands add the same texel offset to the unnormalized
+/// texel coordinates at each level the access reads (the specification's texel coordinate
+/// offset), so each arm reads the texels and filter weights the `Offset` operand of its value
+/// reads. Every dynamic lane lies in `[-8, 7]`, which the device's offset ranges contain (the
+/// specification's required limits).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArmedOffset {
+    /// A 32-bit integer whose bits `4j .. 4j + 4` hold the `j`-th dynamic lane's offset plus 8, the
+    /// dynamic lanes in plane order.
+    pub selector: Value,
+    /// Each plane lane's offset: its constant where `Some`, a dynamic lane where `None`.
+    pub lanes: Vec<Option<i32>>,
+}
+
+impl ArmedOffset {
+    /// The number of dynamic lanes.
+    pub fn dynamic(&self) -> usize {
+        self.lanes.iter().filter(|l| l.is_none()).count()
+    }
+
+    /// The number of arms: [`ARM_VALUES`] to the power of the dynamic lanes.
+    pub fn arms(&self) -> u32 {
+        (0..self.dynamic()).fold(1, |n, _| n.saturating_mul(ARM_VALUES))
+    }
+
+    /// The selector value of the arm whose dynamic lanes are all 0.
+    fn zero_arm(&self) -> u32 {
+        (0..self.dynamic()).fold(0, |a, j| a | 8 << (4 * j))
+    }
+
+    /// The offset of the arm selector value `a` names.
+    fn offset_of(&self, a: u32) -> Vec<i32> {
+        let mut j = 0;
+        self.lanes
+            .iter()
+            .map(|l| match l {
+                Some(k) => *k,
+                None => {
+                    let x = ((a >> (4 * j)) & 15) as i32 - 8;
+                    j += 1;
+                    x
+                }
+            })
+            .collect()
+    }
+}
 
 /// Which image operands an opcode admits.
 #[derive(Clone, Copy, Debug, Default)]
@@ -80,6 +150,129 @@ impl FunctionBuilder<'_> {
         }
         self.image_of_ty(image)?
             .ok_or(err(op, OperandRule::Category(0)))
+    }
+
+    /// Take dynamic texel offset `offset` as constants ([`ArmedOffset`]): each later sample or
+    /// gather whose `Offset` operand it is becomes the switch over its values. An offset of no
+    /// dynamic lane, or of more than [`ARMED_LANES`], or whose lanes are not the selector's, is
+    /// refused.
+    pub fn arm_offset(&mut self, offset: Value, arms: ArmedOffset) -> BResult<()> {
+        const OP: crate::spv::Op = crate::spv::Op::Switch;
+        if !(1..=ARMED_LANES).contains(&arms.dynamic()) {
+            return Err(err(OP, OperandRule::Arity));
+        }
+        let lanes = self.num(offset)?.map(|n| usize::from(n.n));
+        if lanes != Some(arms.lanes.len()) {
+            return Err(err(OP, OperandRule::Mismatch(0)));
+        }
+        match self.num(arms.selector)? {
+            Some(n) if n.is_int() && n.is_scalar() && n.width == 32 => {}
+            _ => return Err(err(OP, OperandRule::Category(0))),
+        }
+        self.module().offset_arms.insert(offset, arms);
+        Ok(())
+    }
+
+    /// The arms of `ops`'s `Offset` operand, where the lowering armed it.
+    fn armed(&self, ops: &ImageOperands) -> Option<ArmedOffset> {
+        ops.offset
+            .and_then(|o| self.mb().offset_arms.get(&o).cloned())
+    }
+
+    /// How sampled image `v` was made: an `OpSampledImage` of an image and a sampler, or the load
+    /// of a combined image sampler.
+    fn sampled_image_source(&self, op: crate::spv::Op, v: Value) -> BResult<Remake> {
+        let ValueOrigin::Inst(b) = self.origin(v)? else {
+            return Err(err(op, OperandRule::SampledImageBlock));
+        };
+        self.mb()
+            .blocks
+            .get(b.index())
+            .and_then(|block| block.insts.iter().rev().find(|n| n.result == Some(v)))
+            .and_then(|n| match n.inst {
+                Inst::SampledImage { image, sampler } => Some(Remake::Sampled { image, sampler }),
+                Inst::Load { ptr, access } => Some(Remake::Load { ptr, access }),
+                _ => None,
+            })
+            .ok_or(err(op, OperandRule::SampledImageBlock))
+    }
+
+    /// The constant offset `k`: a signed 32-bit scalar or vector, `None` where every lane is 0.
+    fn arm_const(&mut self, k: &[i32]) -> BResult<Option<Value>> {
+        if k.iter().all(|x| *x == 0) {
+            return Ok(None);
+        }
+        let i32_ = self.module().ty(Type::Int {
+            width: 32,
+            signed: true,
+        })?;
+        let mut parts = Vec::with_capacity(k.len());
+        for x in k {
+            parts.push(self.module().constant(Constant::Scalar {
+                ty: i32_,
+                bits: ConstBits(u64::from(*x as u32)),
+            })?);
+        }
+        let c = match parts.as_slice() {
+            [one] => *one,
+            _ => {
+                let n = u8::try_from(parts.len()).unwrap_or(u8::MAX);
+                let ty = self.vec_of(i32_, n)?;
+                self.module().constant(Constant::Composite {
+                    ty,
+                    parts: parts.into(),
+                })?
+            }
+        };
+        self.module().const_value(c).map(Some)
+    }
+
+    /// Access `access` of `sampled_image` with operands `ops`, whose `Offset` is armed (`arms`),
+    /// as a switch-at-use on the arms' selector: each arm makes the sampled image again as it was
+    /// made (a sampled image is consumed in the block that makes it) and accesses it
+    /// with its value as `ConstOffset`, none for a zero offset. The arm of every dynamic lane at 0
+    /// is the default, which no selector value reaches but the case it stands for. A
+    /// switch-at-use holds no tangled instruction, so an implicit-LOD sample is refused there.
+    /// The merged result.
+    fn armed_access(
+        &mut self,
+        op: crate::spv::Op,
+        (sampled_image, ops, arms): (Value, &ImageOperands, &ArmedOffset),
+        access: &dyn Fn(&mut FunctionBuilder<'_>, Value, &ImageOperands) -> BResult<Value>,
+    ) -> BResult<Value> {
+        self.sampled_image_value(op, sampled_image)?;
+        let source = self.sampled_image_source(op, sampled_image)?;
+        let zero = arms.zero_arm();
+        let mut offsets = Vec::with_capacity(usize::try_from(arms.arms()).unwrap_or(0));
+        for a in 0..arms.arms() {
+            offsets.push(self.arm_const(&arms.offset_of(a))?);
+        }
+        let ops = *ops;
+        let arm = |off: Option<Value>| -> ArmFn<'_, ()> {
+            Box::new(move |fb, _| {
+                let si = match source {
+                    Remake::Sampled { image, sampler } => fb.sampled_image(image, sampler)?,
+                    Remake::Load { ptr, access } => fb.load(ptr, access)?,
+                };
+                let mut o = ops;
+                o.offset = None;
+                o.const_offset = off;
+                let x = access(fb, si, &o)?;
+                Ok(ArmEnd::FallThrough(vec![x]))
+            })
+        };
+        let default = arm(offsets.get(zero as usize).copied().flatten());
+        let cases = offsets
+            .iter()
+            .enumerate()
+            .filter(|(a, _)| *a != zero as usize)
+            .map(|(a, off)| (vec![a as u32], arm(*off)))
+            .collect();
+        let Merged(merged) = self.switch_at_use(&mut (), arms.selector, cases, default)?;
+        match merged[..] {
+            [x] => Ok(x),
+            _ => Err(err(op, OperandRule::Arity)),
+        }
     }
 
     /// `coord` must be a 32-bit float (`float`) or 32-bit integer scalar/vector of `n` components.
@@ -270,6 +463,11 @@ impl FunctionBuilder<'_> {
             sparse,
         };
         let op = form.to_spirv();
+        if let Some(arms) = self.armed(ops) {
+            return self.armed_access(op, (sampled_image, ops, &arms), &|fb, si, o| {
+                fb.sample_form(si, coord, dref, proj, o, sparse)
+            });
+        }
         let img = self.sampled_image_value(op, sampled_image)?;
         if img.multisampled
             || (proj && (img.arrayed || !matches!(img.dim, Dim::D1 | Dim::D2 | Dim::D3)))
@@ -454,6 +652,11 @@ impl FunctionBuilder<'_> {
         } else {
             crate::spv::Op::ImageGather
         };
+        if let Some(arms) = self.armed(ops) {
+            return self.armed_access(op, (sampled_image, ops, &arms), &|fb, si, o| {
+                fb.gather_form(si, coord, component, o, sparse)
+            });
+        }
         let img = self.check_gather(op, sampled_image, coord, false, ops)?;
         if component > 3 {
             return Err(rule(op, ImageRule::Value));
@@ -511,6 +714,11 @@ impl FunctionBuilder<'_> {
         } else {
             crate::spv::Op::ImageDrefGather
         };
+        if let Some(arms) = self.armed(ops) {
+            return self.armed_access(op, (sampled_image, ops, &arms), &|fb, si, o| {
+                fb.dref_gather_form(si, coord, dref, o, sparse)
+            });
+        }
         let img = self.check_gather(op, sampled_image, coord, true, ops)?;
         if !self.num(dref)?.is_some_and(|n| is_f32(&n) && n.n == 1) {
             return Err(rule(op, ImageRule::Value));

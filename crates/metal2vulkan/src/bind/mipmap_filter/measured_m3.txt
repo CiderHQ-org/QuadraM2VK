@@ -1,10 +1,10 @@
 # Plain Metal's generateMipmapsForTexture: chains measured on an Apple M3 Max (macOS 26.7): every
 # level of each chain, two runs and one under MTL_DEBUG_LAYER=1 byte-identical (EVs CPM-probe2-m3
-# and CPM-probe6-m3, WP-CPM, DESIGN D521). Seeded random first levels of each format the filter
-# computes in 8x8 and 13x11 2D textures, a two-slice 7x5 array and a 5x5 cube of RGBA8Unorm, and
-# 5x4x3 3D textures of the formats the M3 Max carries through a half; the float and normalized
-# formats' extremes in 7x5 and 8x8 textures; 16x16 squares (probe 6) and, of R8Unorm, 32x32,
-# 64x64, 24x24 and 16x8 textures, a two-slice 16x16 array and a 16x16 cube.
+# and CPM-probe6-m3). Seeded random first levels of each format the filter computes in 8x8 and 13x11
+# 2D textures, a two-slice 7x5 array and a 5x5 cube of RGBA8Unorm, and 5x4x3 3D textures of the
+# formats the M3 Max carries through a half; the float and normalized formats' extremes in 7x5 and
+# 8x8 textures; 16x16 squares (probe 6) and, of R8Unorm, 32x32, 64x64, 24x24 and 16x8 textures, a
+# two-slice 16x16 array and a 16x16 cube.
 # Format:
 #   chain <format> <2d|3d> <width>x<height>x<depth> <layers>
 #   L<level> <the level's bytes, every layer in turn, hex>

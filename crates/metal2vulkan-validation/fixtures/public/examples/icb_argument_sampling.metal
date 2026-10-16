@@ -1,4 +1,4 @@
-// Owned fixture (WP-RRS3, DESIGN D625 item 16): a render state that supports indirect command
+// Owned fixture: a render state that supports indirect command
 // buffers and samples a texture through a constexpr sampler. Metal refuses such a state whose
 // functions use a direct texture or sampler argument (EV RRS3-icbtex3-m4), so the fragment
 // function reaches its texture through an argument buffer, as Metal allows. Written from scratch

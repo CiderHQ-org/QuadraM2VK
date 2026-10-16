@@ -18,21 +18,18 @@ use super::RenderCommandEncoder;
 use crate::amplification::VertexAmplificationViewMapping;
 use crate::buffer::Buffer;
 use crate::command_buffer::CommandBuffer;
-use crate::depth_stencil::DepthStencilState;
 use crate::encoder::Replayed;
 use crate::error::Error;
 use crate::fence::Fence;
 use crate::function_table::VisibleFunctionTable;
 use crate::heap::Heap;
 use crate::indirect_command_buffer::IndirectCommandBuffer;
-use crate::pipeline::RenderPipelineState;
 use crate::render::ResolveTarget;
 use crate::render_pass::RenderPassDescriptor;
 use crate::render_values::{ScissorRect, StoreAction, StoreActionOptions, Viewport};
-use crate::replay::{CallLog, Resource, Span};
+use crate::replay::{CallLog, Held, Resource, Span, SPARE_LOG_BYTES};
 use crate::residency::Residency;
 use crate::sampler::SamplerState;
-use crate::texture::Texture;
 use crate::values::{Region, Size};
 use crate::visibility::VisibilityResultMode;
 use metal2vulkan::metal::{
@@ -45,20 +42,70 @@ use std::ops::Range;
 pub(crate) struct RenderLog {
     descriptor: Box<RenderPassDescriptor>,
     calls: CallLog<RenderCall>,
+    /// The arguments of its `draw_indexed_primitives` calls, in order
+    /// (`RenderCall::DrawIndexedPrimitives`): in one list, not a box each.
+    indexed: Vec<DrawIndexed>,
+}
+
+/// A cleared render log's lists, their room kept for a next pass's log (`SpareLogs`).
+pub(crate) struct RenderRoom {
+    calls: CallLog<RenderCall>,
+    indexed: Vec<DrawIndexed>,
 }
 
 impl RenderLog {
-    /// The log of a pass `descriptor` opens, before any call.
-    pub(super) fn new(descriptor: &RenderPassDescriptor) -> RenderLog {
+    /// The log of a pass `descriptor` opens, before any call: in `room` where one is kept.
+    pub(crate) fn new(descriptor: &RenderPassDescriptor, room: Option<RenderRoom>) -> RenderLog {
+        let (calls, indexed) = match room {
+            Some(RenderRoom { calls, indexed }) => (calls, indexed),
+            None => (CallLog::new(), Vec::new()),
+        };
         RenderLog {
             descriptor: Box::new(descriptor.clone()),
-            calls: CallLog::new(),
+            calls,
+            indexed,
         }
+    }
+
+    /// Its lists emptied for a next pass's log, its descriptor, calls and handles let go of:
+    /// `None` where their room is more than `SPARE_LOG_BYTES` (`CallLog::cleared`).
+    pub(crate) fn cleared(self: Box<RenderLog>) -> Option<RenderRoom> {
+        let RenderLog {
+            descriptor,
+            calls,
+            mut indexed,
+        } = *self;
+        drop(descriptor);
+        if indexed.capacity() * std::mem::size_of::<DrawIndexed>() > SPARE_LOG_BYTES {
+            return None;
+        }
+        indexed.clear();
+        Some(RenderRoom {
+            calls: calls.cleared()?,
+            indexed,
+        })
     }
 
     /// The bytes it holds.
     pub(crate) fn bytes(&self) -> usize {
-        std::mem::size_of::<RenderPassDescriptor>() + self.calls.bytes()
+        std::mem::size_of::<RenderPassDescriptor>()
+            + self.calls.bytes()
+            + std::mem::size_of_val(&*self.indexed)
+    }
+
+    /// The descriptor its pass was opened with.
+    pub(crate) fn descriptor(&self) -> &RenderPassDescriptor {
+        &self.descriptor
+    }
+
+    /// Run its calls again on `encoder`, a later color group's of its pass
+    /// (`render/color_groups.rs`). A call refused there was refused in the first group's
+    /// encoder, whose answer the program had, or is a divergence the later group's encoder notes
+    /// (`RenderCommandEncoder::group_outcome`): either way the calls after it run.
+    pub(crate) fn replay_into(&self, encoder: &mut RenderCommandEncoder) {
+        for call in &self.calls.calls {
+            let _ = render(encoder, (&self.calls, &self.indexed), call);
+        }
     }
 
     /// Encode its encoder again into `command_buffer`, starting with `residency` (`Replay::run`).
@@ -70,7 +117,7 @@ impl RenderLog {
         let mut encoder =
             RenderCommandEncoder::replaying(command_buffer, &self.descriptor, residency)?;
         for call in &self.calls.calls {
-            render(&mut encoder, &self.calls, call)?;
+            render(&mut encoder, (&self.calls, &self.indexed), call)?;
         }
         encoder.finish_replay()
     }
@@ -89,18 +136,18 @@ pub(crate) enum Table {
 /// One public call of a render encoder, its arguments owned (the method of each variant's name;
 /// a per-stage method's with its [`Table`]).
 pub(crate) enum RenderCall {
-    PipelineState(RenderPipelineState),
-    Buffer(Table, Option<Buffer>, u64, u32),
+    PipelineState(Held),
+    Buffer(Table, Option<Held>, u64, u32),
     Buffers(Table, Span, Span, u32),
     BufferOffset(Table, u64, u32),
     Bytes(Table, Span, u32),
-    Texture(Table, Option<Texture>, u32),
+    Texture(Table, Option<Held>, u32),
     Textures(Table, Span, u32),
-    Sampler(Table, Option<SamplerState>, u32),
+    Sampler(Table, Option<Held>, u32),
     Samplers(Table, Box<Samplers>),
     FunctionTable(Table, Option<VisibleFunctionTable>, u32),
     FunctionTables(Table, Box<[Option<VisibleFunctionTable>]>, u32),
-    VertexBufferWithStride(Option<Buffer>, u64, u64, u32),
+    VertexBufferWithStride(Option<Held>, u64, u64, u32),
     VertexBuffersWithStrides(Box<(Span, Span, Span, u32)>),
     VertexBufferOffsetWithStride(u64, u64, u32),
     VertexBytesWithStride(Span, u64, u32),
@@ -116,7 +163,7 @@ pub(crate) enum RenderCall {
     ScissorRects(Box<[ScissorRect]>),
     CullMode(CullMode),
     FrontFacingWinding(Winding),
-    DepthStencilState(Option<DepthStencilState>),
+    DepthStencilState(Option<Held>),
     StencilReferenceValue(u32),
     StencilReferenceValues(u32, u32),
     DepthBias(f32, f32, f32),
@@ -127,7 +174,8 @@ pub(crate) enum RenderCall {
     TessellationFactorScale(f32),
     VertexAmplificationCount(u64, Option<Box<[VertexAmplificationViewMapping]>>),
     DrawPrimitives(PrimitiveType, u32, u32, u32, u32),
-    DrawIndexedPrimitives(Box<DrawIndexed>),
+    /// Its arguments' place in the log's list of them (`RenderLog::indexed`).
+    DrawIndexedPrimitives(u32),
     DrawPrimitivesIndirect(PrimitiveType, Buffer, u64),
     DrawIndexedPrimitivesIndirect(Box<DrawIndexedIndirect>),
     DrawPatches(Box<DrawPatches>),
@@ -151,6 +199,7 @@ pub(crate) enum RenderCall {
     ThreadsPerTile(Box<Size>),
     ThreadsPerTileInRegion(Box<(Size, Region, Option<u32>)>),
     ThreadgroupMemoryLength(u64, u64, u32),
+    ObjectThreadgroupMemoryLength(u32, u32),
     UpdateFence(Fence, RenderStages),
     WaitForFence(Fence, RenderStages),
     BarrierWithScope(BarrierScope, RenderStages, RenderStages),
@@ -186,7 +235,6 @@ impl RenderCall {
             C::VertexAmplificationCount(_, mappings) => mappings
                 .as_ref()
                 .map_or(0, |mappings| size_of_val(&**mappings)),
-            C::DrawIndexedPrimitives(call) => size_of_val(&**call),
             C::DrawIndexedPrimitivesIndirect(call) => size_of_val(&**call),
             C::DrawPatches(call) => size_of_val(&**call),
             C::DrawPatchesIndirect(call) => size_of_val(&**call),
@@ -235,7 +283,7 @@ pub(crate) struct DrawIndexed {
     pub(super) primitive_type: PrimitiveType,
     pub(super) index_count: u32,
     pub(super) index_type: IndexType,
-    pub(super) index_buffer: Buffer,
+    pub(super) index_buffer: Held,
     pub(super) index_buffer_offset: u64,
     pub(super) instance_count: u32,
     pub(super) base_vertex: i32,
@@ -306,20 +354,37 @@ impl RenderCommandEncoder {
             log.calls.push(call, extra);
         }
     }
+
+    /// Log a `draw_indexed_primitives` call, whose arguments `draw` makes of the log, before it
+    /// runs, where the encoder logs: its arguments go into the log's list of them.
+    pub(crate) fn log_indexed(
+        &mut self,
+        draw: impl FnOnce(&mut CallLog<RenderCall>) -> DrawIndexed,
+    ) {
+        if let Some(log) = &mut self.log {
+            let draw = draw(&mut log.calls);
+            // Fewer than the log's calls, each of 24 bytes or more.
+            let at = log.indexed.len() as u32;
+            log.indexed.push(draw);
+            let call = RenderCall::DrawIndexedPrimitives(at);
+            log.calls.push(call, std::mem::size_of::<DrawIndexed>());
+        }
+    }
 }
 
-/// Run `call` again on `encoder`, its slices in `log`'s arenas.
+/// Run `call` again on `encoder`, its slices in `log`'s arenas and an indexed draw's arguments in
+/// `indexed`.
 fn render(
     encoder: &mut RenderCommandEncoder,
-    log: &CallLog<RenderCall>,
+    (log, indexed): (&CallLog<RenderCall>, &[DrawIndexed]),
     call: &RenderCall,
 ) -> Result<(), Error> {
     use RenderCall as C;
     use Table as T;
     match call {
-        C::PipelineState(state) => encoder.set_render_pipeline_state(state),
+        C::PipelineState(state) => encoder.set_render_pipeline_state(log.render_state(*state)),
         C::Buffer(table, buffer, offset, index) => {
-            let buffer = buffer.as_ref();
+            let buffer = buffer.map(|held| log.buffer(held));
             match table {
                 T::Vertex => encoder.set_vertex_buffer(buffer, *offset, *index),
                 T::Fragment => encoder.set_fragment_buffer(buffer, *offset, *index),
@@ -356,7 +421,7 @@ fn render(
             }
         }
         C::Texture(table, texture, index) => {
-            let texture = texture.as_ref();
+            let texture = texture.map(|held| log.texture(held));
             match table {
                 T::Vertex => encoder.set_vertex_texture(texture, *index),
                 T::Fragment => encoder.set_fragment_texture(texture, *index),
@@ -376,7 +441,7 @@ fn render(
             }
         }
         C::Sampler(table, sampler, index) => {
-            let sampler = sampler.as_ref();
+            let sampler = sampler.map(|held| log.sampler(held));
             match table {
                 T::Vertex => encoder.set_vertex_sampler_state(sampler, *index),
                 T::Fragment => encoder.set_fragment_sampler_state(sampler, *index),
@@ -423,7 +488,8 @@ fn render(
             }
         }
         C::VertexBufferWithStride(buffer, offset, stride, index) => {
-            encoder.set_vertex_buffer_with_stride(buffer.as_ref(), *offset, *stride, *index)
+            let buffer = buffer.map(|held| log.buffer(held));
+            encoder.set_vertex_buffer_with_stride(buffer, *offset, *stride, *index)
         }
         C::VertexBuffersWithStrides(call) => {
             let (buffers, offsets, strides, first) = **call;
@@ -457,7 +523,9 @@ fn render(
             encoder.set_front_facing_winding(*winding);
             Ok(())
         }
-        C::DepthStencilState(state) => encoder.set_depth_stencil_state(state.as_ref()),
+        C::DepthStencilState(state) => {
+            encoder.set_depth_stencil_state(state.map(|held| log.depth_stencil(held)))
+        }
         C::StencilReferenceValue(value) => {
             encoder.set_stencil_reference_value(*value);
             Ok(())
@@ -486,16 +554,21 @@ fn render(
         C::DrawPrimitives(primitive, start, count, instances, base) => {
             encoder.draw_primitives(*primitive, *start, *count, *instances, *base)
         }
-        C::DrawIndexedPrimitives(call) => encoder.draw_indexed_primitives(
-            call.primitive_type,
-            call.index_count,
-            call.index_type,
-            &call.index_buffer,
-            call.index_buffer_offset,
-            call.instance_count,
-            call.base_vertex,
-            call.base_instance,
-        ),
+        C::DrawIndexedPrimitives(at) => {
+            let call = indexed
+                .get(*at as usize)
+                .ok_or_else(|| crate::error::internal("a logged indexed draw past its list"))?;
+            encoder.draw_indexed_primitives(
+                call.primitive_type,
+                call.index_count,
+                call.index_type,
+                log.buffer(call.index_buffer),
+                call.index_buffer_offset,
+                call.instance_count,
+                call.base_vertex,
+                call.base_instance,
+            )
+        }
         C::DrawPrimitivesIndirect(primitive, buffer, offset) => {
             encoder.draw_primitives_indirect(*primitive, buffer, *offset)
         }
@@ -592,6 +665,9 @@ fn render(
         }
         C::ThreadgroupMemoryLength(length, offset, index) => {
             encoder.set_threadgroup_memory_length(*length, *offset, *index)
+        }
+        C::ObjectThreadgroupMemoryLength(length, index) => {
+            encoder.set_object_threadgroup_memory_length(*length, *index)
         }
         C::UpdateFence(fence, stages) => encoder.update_fence(fence, *stages),
         C::WaitForFence(fence, stages) => encoder.wait_for_fence(fence, *stages),

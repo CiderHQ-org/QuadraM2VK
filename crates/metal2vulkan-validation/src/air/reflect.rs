@@ -14,7 +14,9 @@ use crate::air::meta;
 /// The metadata types the interface's fields carry.
 pub use crate::air::meta::{
     AirType, ArgumentBufferResourceKind, DepthQualifier, FragmentImageblockProjection,
-    FunctionConstant, PatchDomain, TextureComponent, TextureDimension, TextureFormat, TextureShape,
+    FunctionConstant, MeshFieldMeta as MeshField, MeshFieldRole, MeshOutputsMeta as MeshOutputs,
+    MeshTopology, PatchDomain, PayloadMeta as MeshPayload, TextureComponent, TextureDimension,
+    TextureFormat, TextureShape,
 };
 use crate::case::Stage;
 
@@ -51,6 +53,10 @@ pub enum ShaderStage {
     TessellationEvaluation,
     Fragment,
     Kernel,
+    /// An object function: a mesh render pipeline's first stage.
+    Object,
+    /// A mesh function: a mesh render pipeline's geometry stage.
+    Mesh,
 }
 
 /// The kind of a bound resource.
@@ -255,6 +261,39 @@ pub struct TessellationAttribute {
     pub type_name: Option<String>,
 }
 
+/// What an object or mesh function declares beyond a kernel's interface: the payload it writes
+/// (object) or reads (mesh), an object function's mesh grid, and a mesh function's outputs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MeshStageInterface {
+    /// The `[[payload]]` parameter.
+    pub payload: Option<MeshPayload>,
+    /// An object function's `mesh_grid_properties` parameter is declared.
+    pub mesh_grid: bool,
+    /// The entry sets the grid of mesh threadgroups it launches
+    /// (`air.set_threadgroups_per_grid_mesh_properties`); an object threadgroup that sets none
+    /// launches nothing.
+    pub sets_mesh_grid: bool,
+    /// A mesh function's output type.
+    pub outputs: Option<MeshOutputs>,
+    /// `[[max_total_threads_per_threadgroup(N)]]`.
+    pub max_total_threads: Option<u32>,
+    /// An object function's `[[max_total_threadgroups_per_mesh_grid(N)]]`.
+    pub max_mesh_threadgroups: Option<u32>,
+}
+
+impl MeshStageInterface {
+    /// Whether the mesh function's vertices state a position, which a rasterizing pipeline's
+    /// fragment stage reads its coverage from.
+    pub fn writes_position(&self) -> bool {
+        self.outputs.as_ref().is_some_and(|outputs| {
+            outputs
+                .vertex
+                .iter()
+                .any(|field| field.role == MeshFieldRole::Position)
+        })
+    }
+}
+
 /// The declared interface of one entry.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShaderInterface {
@@ -281,6 +320,8 @@ pub struct ShaderInterface {
     pub imageblock_layouts: Vec<ImageblockLayout>,
     pub implicit_imageblock_attachments: Vec<ImplicitImageblockAttachment>,
     pub fragment_imageblock: Option<FragmentImageblock>,
+    /// An object or mesh function's own interface.
+    pub mesh_stage: Option<MeshStageInterface>,
     /// The module's `[[function_constant(N)]]` inventory.
     pub function_constants: Vec<FunctionConstant>,
 }
@@ -306,19 +347,16 @@ impl ShaderInterface {
 /// 6. the function constants listed, buffer access tightened from the entry body, constexpr
 ///    samplers decoded and placed;
 /// 7. the descriptor ABI checked as one collision-free mapping.
+///
+/// An object or mesh entry's interface is a kernel's (its resources, threadgroup memory and grid
+/// builtins, in the kernel's descriptor bands) with its own stage's facts
+/// ([`ShaderInterface::mesh_stage`]).
 pub fn inspect(
     ll: &str,
     stage: Stage,
     entry: &str,
     function_constants: &[(u32, Vec<u8>)],
 ) -> Result<ShaderInterface, String> {
-    if stage.is_mesh_pipeline_stage() {
-        return Err(format!(
-            "the {} function {entry} is not reflected: no case expresses a mesh render pipeline \
-             (mesh_pipeline, DESIGN D334)",
-            stage.entry_list()
-        ));
-    }
     let source = crate::air::sanitize::sanitize_ll_text(ll);
     let source = meta::select_translation_entry(source, stage, entry)?;
     let source =
@@ -338,7 +376,18 @@ pub fn inspect(
             let (kern, entry_name) = meta::parse_air_kernel_meta(&source);
             build::interface_from_kernel(&kern.unwrap_or_default(), entry_name.as_deref())
         }
-        Stage::Object | Stage::Mesh => unreachable!("refused above"),
+        Stage::Object | Stage::Mesh => {
+            let (kern, entry_name) = meta::parse_air_mesh_stage_meta(&source, stage);
+            // What the entry's body does is read from what it reaches alone: another entry of the
+            // module may set a mesh grid this one does not.
+            let reached = crate::air::entry_text(ll, entry)?;
+            build::interface_from_mesh_stage(
+                stage,
+                &kern.unwrap_or_default(),
+                entry_name.as_deref(),
+                &reached,
+            )
+        }
     };
     descriptors::check_bands(&interface)?;
     interface.function_constants = meta::parse_function_constants(&source);

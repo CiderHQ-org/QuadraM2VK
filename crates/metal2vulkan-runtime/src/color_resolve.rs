@@ -4,12 +4,13 @@
 //! device, and of the drivers measured only MoltenVK's from 1.4.1 on Apple's GPUs writes Metal's
 //! answer (`DriverFact::ColorResolveAverageIsMetals`, measured at 2 and 4 samples). Every other
 //! device resolves a color attachment whose format has Metal's closed rule at its count
-//! (`bind::ColorResolveFormat::of` and `resolves`: unorm, snorm, sRGB and 32-bit float formats,
-//! and 16-bit float ones at 2 samples) by the crate-owned exact resolve
-//! (`bind::color_resolve_modules`), and so does every device at more than 4 samples, where Apple's
-//! GPUs have no texture and the rules measured at 2 and 4 are applied unmeasured. A format without
-//! a closed rule at its count (half floats past 2 samples, packed 16-bit, `RG11B10Float`,
-//! `RGB9E5Float`) resolves by the device's average: Metal's own resolve where the fact holds
+//! (`bind::ColorResolveFormat::of` and `resolves`: unorm, snorm, sRGB, 32-bit float and packed
+//! 16-bit unorm formats at every count, and 16-bit float, `RG11B10Float` and `RGB9E5Float` ones at
+//! 2 and 4 samples) by the crate-owned exact resolve (`bind::color_resolve_modules`), and so does
+//! every device at more than 4 samples, where Apple's GPUs have no texture and the integer rules
+//! measured at 2 and 4 are applied unmeasured. A format without a closed rule at its count (the
+//! 16-bit float, `RG11B10Float` and `RGB9E5Float` formats past 4 samples, and a format no rule
+//! covers) resolves by the device's average: Metal's own resolve where the fact holds
 //! ([`average_is_metals`]: MoltenVK resolves every such format by Metal's multisample resolve store
 //! action), elsewhere a recorded near-equivalent.
 //!
@@ -31,10 +32,20 @@
 //! - **From the attachment** otherwise: its level and layer as the resolve pass's input
 //!   attachment 0, loaded and stored. Its image needs input attachment usage, which a
 //!   multisampled color render target the runtime makes takes where the device may resolve it so
-//!   and the usage costs the image nothing (`framebuffer_fetch.rs`), as does a stand-in
-//!   (`attachment_stand_in.rs`); an attachment whose image lacks it (a caller's image without it,
-//!   or a device where it would change the image's memory requirements) resolves by the device's
-//!   average, announced as `device-rounded-resolve`.
+//!   and the usage costs the image nothing, and a memoryless one wherever the device makes the
+//!   image (`framebuffer_fetch.rs`), as does a stand-in (`attachment_stand_in.rs`).
+//! - **From a copy of the attachment's samples** where its image lacks that usage (a caller's
+//!   image without it, or a device where it would change the image's memory requirements) but
+//!   takes transfer reads ([`copied`]): its level and the pass's layers over the render area are
+//!   copied (`vkCmdCopyImage`, one format and sample count) into a scratch image of its format and
+//!   samples that has the usage, held by the command buffer until it completes, and the resolve
+//!   reads the scratch as it reads an attachment. The copy moves each sample's bits; the one
+//!   device measured to change them, RADV, writes a 16-bit float NaN as `0xfe00`
+//!   (`RuntimeDriverDefect::MultisampledCopiesConvertFloatNans`), which the resolve counts as 0
+//!   whatever its bits. A caller's image has the transfer usage the runtime's texture of its
+//!   descriptor has (`texture/wrapped.rs`), so only an image of a format the device copies no
+//!   image of has neither usage: it resolves by the device's average, announced as
+//!   `device-rounded-resolve`.
 //!
 //! A layered pass (`renderTargetArrayLength` 2 or more) resolves each of its layers in a render
 //! pass instance of its own, through views of that layer. Its resolve from the sample planes, which
@@ -42,12 +53,16 @@
 //!
 //! The resolve's pipelines and passes are made once per device, format, sample count and source,
 //! at the first pass that needs them, and destroyed with the device; each pass's descriptor sets
-//! and framebuffers are held by its command buffer until it completes. Each resolve runs between
-//! barriers from everything before and to everything after. The runtime announces
-//! `shader-resolve` (performance) for the extra pass, and `unmeasured-resolve` (precision) at
-//! more than 4 samples.
+//! and framebuffers are held by its command buffer until it completes, and, where every resolve of
+//! the pass reads its attachment through the attachment's own views, kept by the image it first
+//! resolves into for its next pass of the same views ([`KeptResolves`]). Each resolve runs between
+//! barriers from everything before and to everything after, as does each copy before them. The
+//! runtime announces `shader-resolve` (performance) for the extra pass (naming the copy where the
+//! resolve reads one), and `unmeasured-resolve` (precision) at more than 4 samples.
 
 use super::binding_view::VkView;
+use super::blit::TRANSFER;
+use super::command_buffer::CommandBuffer;
 use super::device::{device_error, lock};
 use super::encoder::EncoderCore;
 use super::error::{internal, vulkan, Error, RuntimeGap};
@@ -56,6 +71,7 @@ use super::image_plan::ImagePlan;
 use super::release;
 use super::render_pass::{PassLayout, Target};
 use super::render_target::{takes_input, ATTACHMENT_STAGES};
+use super::resolve;
 use super::resource::ResourceKey;
 use super::sample_planes::{pipeline_layout, set_layout, shader_module};
 use super::tracker::{Access, Barrier, Use};
@@ -66,8 +82,10 @@ use metal2vulkan::bind::{color_resolve_modules, ColorResolveFormat, PlanesCopy, 
 use metal2vulkan::device::DriverFact;
 use metal2vulkan::error::Feature;
 use metal2vulkan::vk::{
-    ComponentMapping, Format, ImageAspectFlags, ImageUsageFlags, ImageViewType,
+    ComponentMapping, Format, FormatFeatureFlags2, ImageAspectFlags, ImageUsageFlags, ImageViewType,
 };
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 
 /// The most samples of a texture on Apple's GPUs, so the most whose resolve Metal measures.
 pub(super) const METAL_SAMPLES: u32 = 4;
@@ -76,7 +94,7 @@ pub(super) const METAL_SAMPLES: u32 = 4;
 /// format's rules where the format has them and the device's average is not measured to be
 /// Metal's at that count (the module docs). `None` where the device resolves it in the pass.
 pub(super) fn exact(device: &Device, format: Format, samples: u32) -> Option<ColorResolveFormat> {
-    // Rules that hold at that count: a half's at 2 samples only.
+    // Rules that hold at that count: the float formats' at 2 and 4 samples only.
     let rules = ColorResolveFormat::of(format).filter(|rules| rules.resolves(samples))?;
     (samples > 1 && !average_is_metals(device, samples)).then_some(rules)
 }
@@ -93,16 +111,34 @@ pub(super) fn average_is_metals(device: &Device, samples: u32) -> bool {
 }
 
 /// The exact resolve of the color attachment `source`, where the runtime resolves it so: [`exact`]
-/// of its format and samples, where its image takes input attachment usage, through which the
-/// resolve reads its samples unless its sample planes hold them (the module docs).
+/// of its format and samples, where the resolve may read its samples: through its image's input
+/// attachment usage, or from a copy of them into a scratch image that has it ([`copied`]), unless
+/// its sample planes hold them (the module docs).
 pub(super) fn of_attachment(
     device: &Device,
     source: &Target,
 ) -> Result<Option<ColorResolveFormat>, Error> {
     match exact(device, source.format, source.samples) {
-        Some(rules) if takes_input(source)? => Ok(Some(rules)),
+        Some(rules) if takes_input(source)? || copied(device, source)? => Ok(Some(rules)),
         _ => Ok(None),
     }
+}
+
+/// Whether the exact resolve may read the color attachment `source`, whose image takes no input
+/// attachment usage, from a copy of its samples (the module docs): its image takes transfer reads,
+/// and the device copies images of its format both ways, which the scratch image the copy writes
+/// needs.
+fn copied(device: &Device, source: &Target) -> Result<bool, Error> {
+    let usage = source.texture.image_plan()?.usage;
+    let profile = device.compile_device().profile();
+    let copies = FormatFeatureFlags2::TRANSFER_SRC | FormatFeatureFlags2::TRANSFER_DST;
+    Ok(usage.contains(ImageUsageFlags::TRANSFER_SRC)
+        && device
+            .shared()
+            .textures
+            .facts(profile)
+            .optimal(source.format)
+            .contains(copies))
 }
 
 /// Whether a multisampled color attachment of `format` at `samples` that the sample planes may
@@ -408,12 +444,14 @@ fn resolve_pipeline(
         .ok_or_else(|| internal("the driver made no pipeline"))
 }
 
-/// The objects one pass's resolves hold until its command buffer completes: their descriptor
-/// sets' pool and their framebuffers.
+/// The objects one pass's resolves hold until its command buffer completes, and, kept
+/// ([`KeptResolves`]), until the image keeping them lets them go and every command buffer that
+/// took them completed: their descriptor sets' pool and, for each resolve and layer, its
+/// framebuffer and set.
 struct PassObjects {
     device: Device,
     pool: vk::DescriptorPool,
-    framebuffers: Vec<vk::Framebuffer>,
+    resolves: Vec<Planned>,
 }
 
 impl Drop for PassObjects {
@@ -424,10 +462,17 @@ impl Drop for PassObjects {
         };
         let raw = self.device.shared().vk();
         // SAFETY: no pending command uses them (a command buffer retains them until it completes);
-        // the sets are freed with their pool, and a null handle is a no-op.
+        // the sets are freed with their pool, and a null handle is a no-op. The views they were
+        // made of may have gone first: an object is destroyed in any order but after its children,
+        // and its destruction accesses no other object (the Vulkan specification's object
+        // lifetime: "Applications can: free or destroy objects in any order, except that parent
+        // objects must: be freed only after all child objects are freed", the parent being the
+        // first object of the child's creation, here the device; "When destroying or freeing an
+        // object, implementations must: not access any memory or other objects that may:
+        // otherwise be accessed when the object is accessed").
         unsafe {
-            for &framebuffer in &self.framebuffers {
-                release::object(raw, framebuffer);
+            for resolve in &self.resolves {
+                release::object(raw, resolve.framebuffer);
             }
             release::object(raw, self.pool);
         }
@@ -443,10 +488,262 @@ struct Planned {
 
 /// A pass's exact color resolves, planned before the pass records and recorded after it.
 pub(super) struct ShaderResolves {
-    resolves: Vec<Planned>,
     extent: [u32; 2],
     uses: Vec<Use<ResourceKey>>,
-    objects: PassObjects,
+    /// The copies of the attachments the resolves read from a scratch image ([`copied`]):
+    /// `(attachment, scratch, region)` each, and their uses.
+    copies: Vec<(vk::Image, vk::Image, vk::ImageCopy)>,
+    copy_uses: Vec<Use<ResourceKey>>,
+    objects: Arc<PassObjects>,
+}
+
+/// The most passes' resolve objects an image keeps ([`KeptResolves`]).
+const KEPT_PASSES: usize = 4;
+
+/// The resolve objects of the passes that resolved into one image ([`ShaderResolves::plan`]),
+/// kept for its next pass of the same views, and the image's key in the passes' keys.
+///
+/// A pass whose every resolve reads its attachment through the attachment's own views (not the
+/// sample planes, nor a copy of its samples, whose views are the pass's own) is kept by the image
+/// it first resolves into, by everything its objects are made of ([`PassKey`]), and a later pass
+/// of the same key binds the kept sets and begins the kept framebuffers instead of making its
+/// own: the same descriptors of the same views, never written again. A set or framebuffer serves
+/// several pending command buffers at once: neither is mutated by the commands that use it (the
+/// Vulkan specification: "Any object parameters that are not labeled as externally synchronized
+/// are either not mutated by the command or are internally synchronized"; `vkCmdBindDescriptorSets`
+/// and `vkCmdBeginRenderPass` label only their command buffer), and a set's contents must only not
+/// be altered while a command that bound it may consume them ("Once all pending uses have
+/// completed, it is legal to update and reuse a descriptor set").
+///
+/// A key names each image by one no other image had or will have ([`KeptResolves::new`]), so a
+/// view of an image that dropped is never taken for a view of another, whatever handle the
+/// driver gave either. A view an image lets go while it lives (a rebind's or a storage form's new
+/// `VkImage`, a detach's stand-in, a reattach) moves the device's views epoch
+/// (`DeviceShared::views_epoch`): a pass kept under an older epoch is never taken, and an image's
+/// kept passes all go at its next pass after the epoch moved. A kept pass's objects go once the
+/// image lets go of them (as it drops, before its views; as the epoch moves; as a newer pass
+/// takes the place of the oldest past [`KEPT_PASSES`]) and every command buffer that took them
+/// completed.
+pub(super) struct KeptResolves {
+    image: ResourceKey,
+    passes: Mutex<Kept<PassObjects>>,
+}
+
+impl KeptResolves {
+    /// No passes kept yet, for an image made now.
+    pub(super) fn new() -> KeptResolves {
+        KeptResolves {
+            image: ResourceKey::new(),
+            passes: Mutex::new(Kept::default()),
+        }
+    }
+
+    /// Let every kept pass go.
+    pub(super) fn clear(&self) {
+        lock(&self.passes).values.clear();
+    }
+}
+
+/// What a kept pass's objects are made of ([`KeptResolves`]): the pass's extent and, for each
+/// resolve and layer in the pass's order, the resolve's pipeline (format, samples and source),
+/// the view it reads and the view it writes, each as its image's key and the view's description.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PassKey {
+    extent: [u32; 2],
+    resolves: Vec<ResolveKey>,
+}
+
+/// One resolve and layer of a [`PassKey`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ResolveKey {
+    pipeline: (ColorResolveFormat, u32, Source),
+    read: (ResourceKey, VkView),
+    written: (ResourceKey, VkView),
+}
+
+/// Values kept by key, each under the views epoch it was made in: at most [`KEPT_PASSES`], the
+/// newest first, all of one epoch.
+struct Kept<T> {
+    epoch: u64,
+    values: Vec<(PassKey, Arc<T>)>,
+}
+
+impl<T> Default for Kept<T> {
+    fn default() -> Kept<T> {
+        Kept {
+            epoch: 0,
+            values: Vec::new(),
+        }
+    }
+}
+
+impl<T> Kept<T> {
+    /// The value kept for `key`, where the views epoch is `epoch` as it was when the value was
+    /// made; a newer epoch lets every kept value go.
+    fn find(&mut self, epoch: u64, key: &PassKey) -> Option<Arc<T>> {
+        self.at(epoch);
+        if epoch != self.epoch {
+            return None;
+        }
+        self.values
+            .iter()
+            .find(|(kept, _)| kept == key)
+            .map(|(_, value)| Arc::clone(value))
+    }
+
+    /// Keep `value` for `key`, made under views epoch `epoch`: not where the epoch moved since,
+    /// and letting the oldest go past [`KEPT_PASSES`].
+    fn keep(&mut self, epoch: u64, key: PassKey, value: Arc<T>) {
+        self.at(epoch);
+        if epoch != self.epoch {
+            return;
+        }
+        if self.values.len() == KEPT_PASSES {
+            self.values.pop();
+        }
+        self.values.insert(0, (key, value));
+    }
+
+    /// Let every kept value go where `epoch` is newer than theirs.
+    fn at(&mut self, epoch: u64) {
+        if epoch > self.epoch {
+            self.values.clear();
+            self.epoch = epoch;
+        }
+    }
+}
+
+/// The key of a pass resolving each of `wanted` (its attachment, its resolve attachment, its
+/// format's rules and its source) over `extent` in `layers` layers ([`KeptResolves`]); `None`
+/// where a resolve reads the sample planes or a copy of its samples, or its targets have other
+/// layers than the pass (which [`ShaderResolves::plan`] refuses).
+fn pass_key<'a>(
+    wanted: impl Iterator<Item = (&'a Target, &'a Target, ColorResolveFormat, Source)>,
+    extent: [u32; 2],
+    layers: u32,
+) -> Result<Option<PassKey>, Error> {
+    let mut resolves = Vec::new();
+    for (attachment, into, format, source) in wanted {
+        let own_views = source == Source::Attachment
+            && attachment.layers == layers
+            && into.layers == layers
+            && takes_input(attachment)?;
+        if !own_views {
+            return Ok(None);
+        }
+        let read = attachment.texture.kept_resolves()?.image;
+        let written = into.texture.kept_resolves()?.image;
+        for layer in 0..layers {
+            resolves.push(ResolveKey {
+                pipeline: (format, attachment.samples, source),
+                read: (read, view_of(attachment, layer, attachment.format, INPUT)?),
+                written: (written, view_of(into, layer, into.format, WRITTEN)?),
+            });
+        }
+    }
+    Ok(Some(PassKey { extent, resolves }))
+}
+
+/// The usage of a resolve's view of the samples it reads as its input attachment.
+const INPUT: ImageUsageFlags = ImageUsageFlags::INPUT_ATTACHMENT;
+/// The usage of a resolve's view of the attachment it writes.
+const WRITTEN: ImageUsageFlags = ImageUsageFlags::COLOR_ATTACHMENT;
+
+/// The use of `samples`' level and `layers` layers by a resolve that reads them as its input
+/// attachment.
+fn read_use(samples: &Target, layers: u32) -> Result<Use<ResourceKey>, Error> {
+    samples.texture.image_use(
+        samples.level..samples.level + 1,
+        samples.layer..samples.layer + layers,
+        Access::new(
+            vk::PipelineStageFlags2::FRAGMENT_SHADER
+                | vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+            vk::AccessFlags2::INPUT_ATTACHMENT_READ
+                | vk::AccessFlags2::COLOR_ATTACHMENT_READ
+                | vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+        ),
+        true,
+    )
+}
+
+/// The use of `into`'s level and `layers` layers by the resolve that writes them.
+fn written_use(into: &Target, layers: u32) -> Result<Use<ResourceKey>, Error> {
+    into.texture.image_use(
+        into.level..into.level + 1,
+        into.layer..into.layer + layers,
+        Access::new(
+            vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+            vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+        ),
+        true,
+    )
+}
+
+/// The copy of `samples`' level and `layers` layers over the render area `extent` into a scratch
+/// image of its format and samples that the exact resolve reads as its input attachment
+/// ([`copied`]): the scratch, the copy, and its uses (the read of the attachment and the write of
+/// the scratch). The scratch is `maker`'s, held until it completes.
+fn copy_out(
+    maker: &CommandBuffer,
+    samples: &Target,
+    layers: u32,
+    extent: [u32; 2],
+) -> Result<
+    (
+        Target,
+        (vk::Image, vk::Image, vk::ImageCopy),
+        [Use<ResourceKey>; 2],
+    ),
+    Error,
+> {
+    let usage = ImageUsageFlags::COLOR_ATTACHMENT
+        | ImageUsageFlags::INPUT_ATTACHMENT
+        | ImageUsageFlags::TRANSFER_DST;
+    let area = Target {
+        extent,
+        ..samples.clone()
+    };
+    let scratch = resolve::scratch(maker, &area, usage, samples.samples)?;
+    let at = |t: &Target| vk::ImageSubresourceLayers {
+        aspect_mask: vk::ImageAspectFlags::COLOR,
+        mip_level: t.level,
+        base_array_layer: t.layer,
+        layer_count: layers,
+    };
+    let [width, height] = extent;
+    let region = vk::ImageCopy {
+        src_subresource: at(samples),
+        src_offset: vk::Offset3D::default(),
+        dst_subresource: at(&scratch),
+        dst_offset: vk::Offset3D::default(),
+        extent: vk::Extent3D {
+            width,
+            height,
+            depth: 1,
+        },
+    };
+    let level = |t: &Target| t.level..t.level + 1;
+    let on = |t: &Target| t.layer..t.layer + layers;
+    let uses = [
+        samples.texture.image_use(
+            level(samples),
+            on(samples),
+            Access::new(TRANSFER, vk::AccessFlags2::TRANSFER_READ),
+            false,
+        )?,
+        scratch.texture.image_use(
+            level(&scratch),
+            on(&scratch),
+            Access::new(TRANSFER, vk::AccessFlags2::TRANSFER_WRITE),
+            true,
+        )?,
+    ];
+    let copy = (
+        samples.texture.raw_image()?,
+        scratch.texture.raw_image()?,
+        region,
+    );
+    Ok((scratch, copy, uses))
 }
 
 /// The single-level view of `target`'s layer `layer` (counted from its first) in `format`,
@@ -457,12 +754,24 @@ fn view(
     format: Format,
     usage: ImageUsageFlags,
 ) -> Result<vk::ImageView, Error> {
+    target
+        .texture
+        .image_view(&view_of(target, layer, format, usage)?)
+}
+
+/// The description of [`view`]'s view.
+fn view_of(
+    target: &Target,
+    layer: u32,
+    format: Format,
+    usage: ImageUsageFlags,
+) -> Result<VkView, Error> {
     // A 1D image's layer is a 1D view (a 3D image's planes take 2D ones).
     let view_type = match target.texture.image_plan()?.image_type {
         metal2vulkan::vk::ImageType::TYPE_1D => ImageViewType::TYPE_1D,
         _ => ImageViewType::TYPE_2D,
     };
-    target.texture.image_view(&VkView {
+    Ok(VkView {
         view_type,
         format,
         components: ComponentMapping::IDENTITY,
@@ -478,13 +787,15 @@ fn view(
 impl ShaderResolves {
     /// The exact resolves of `layout`'s color attachments (its final layout) whose last render
     /// pass instance leaves `last_storage` out of its draws' subpass: each from its sample
-    /// planes where they hold its samples, else from the attachment (the module docs). `None`
-    /// where no attachment resolves so.
+    /// planes where they hold its samples, else from the attachment, or from a copy of its
+    /// samples where its image takes no input attachment usage (the module docs). `None` where
+    /// no attachment resolves so. Scratch images are `maker`'s.
     pub(super) fn plan(
-        device: &Device,
+        maker: &CommandBuffer,
         layout: &PassLayout,
         last_storage: &[u32],
     ) -> Result<Option<ShaderResolves>, Error> {
+        let device = maker.device();
         let mut wanted = Vec::new();
         for (index, color) in layout.colors.iter().enumerate() {
             let Some(color) = color else {
@@ -516,12 +827,41 @@ impl ShaderResolves {
         if layers > 1 && wanted.iter().any(|w| w.3 != Source::Attachment) {
             return Err(Error::NotImplemented(RuntimeGap::LayeredPass));
         }
+        // A pass whose resolves read their attachments through their own views takes the objects
+        // the image it first resolves into keeps for a pass of the same key, or keeps the ones it
+        // makes ([`KeptResolves`]). The views epoch is read before any view is taken, so a pass is
+        // kept under an epoch no newer than its views'.
+        let epoch = device.shared().views_epoch.load(Ordering::Acquire);
+        let targets = wanted
+            .iter()
+            .map(|w| (&w.0.target, &w.1.attachment, w.2, w.3));
+        let kept = match pass_key(targets, layout.extent, layers)? {
+            Some(key) => Some((wanted[0].1.attachment.texture.kept_resolves()?, key)),
+            None => None,
+        };
+        if let Some((memo, key)) = &kept {
+            if let Some(objects) = lock(&memo.passes).find(epoch, key) {
+                let mut uses = Vec::with_capacity(2 * wanted.len());
+                for (color, resolve, ..) in &wanted {
+                    uses.push(read_use(&color.target, layers)?);
+                    uses.push(written_use(&resolve.attachment, layers)?);
+                }
+                device.shared().counts.color_resolve_pass_kept();
+                return Ok(Some(ShaderResolves {
+                    extent: layout.extent,
+                    uses,
+                    copies: Vec::new(),
+                    copy_uses: Vec::new(),
+                    objects,
+                }));
+            }
+        }
         let raw = device.shared().vk();
         let count = wanted.len() as u32 * layers;
         let mut objects = PassObjects {
             device: device.clone(),
             pool: vk::DescriptorPool::null(),
-            framebuffers: Vec::new(),
+            resolves: Vec::with_capacity(count as usize),
         };
         let inputs = wanted.iter().filter(|w| w.3 == Source::Attachment).count() as u32 * layers;
         let mut sizes = Vec::new();
@@ -540,15 +880,33 @@ impl ShaderResolves {
         objects.pool = unsafe { raw.create_descriptor_pool(&info, None) }.map_err(vulkan)?;
         let general = vk::ImageLayout::GENERAL;
         let mut uses = Vec::new();
-        let mut resolves = Vec::with_capacity(wanted.len());
+        let mut copies = Vec::new();
+        let mut copy_uses = Vec::new();
         for (color, resolve, format, source, planes) in wanted {
-            let samples = &color.target;
+            let attachment = &color.target;
             let into = &resolve.attachment;
-            if samples.layers != layers || into.layers != layers {
+            if attachment.layers != layers || into.layers != layers {
                 return Err(internal("an exact resolve of other layers than its pass"));
             }
+            // An attachment whose image takes no input attachment usage is read from a copy of
+            // its samples ([`copied`]).
+            let read_copy = source == Source::Attachment && !takes_input(attachment)?;
+            let scratch = match read_copy {
+                true if copied(device, attachment)? => {
+                    let (scratch, copy, used) = copy_out(maker, attachment, layers, layout.extent)?;
+                    copies.push(copy);
+                    copy_uses.extend(used);
+                    Some(scratch)
+                }
+                true => {
+                    return Err(internal(
+                        "an exact resolve of an attachment it can neither read nor copy",
+                    ))
+                }
+                false => None,
+            };
+            let samples = scratch.as_ref().unwrap_or(attachment);
             let pipeline = device.color_resolve_pipeline(format, samples.samples, source)?;
-            let all = |t: &Target| (t.level..t.level + 1, t.layer..t.layer + layers);
             match (source, planes) {
                 (Source::Planes(_), Some(planes)) => uses.push(planes.image_use(
                     Access::new(
@@ -557,40 +915,12 @@ impl ShaderResolves {
                     ),
                     false,
                 )?),
-                (Source::Attachment, _) => {
-                    if !takes_input(samples)? {
-                        return Err(internal(
-                            "an exact resolve of an attachment without input attachment usage",
-                        ));
-                    }
-                    let (levels, on) = all(samples);
-                    uses.push(samples.texture.image_use(
-                        levels,
-                        on,
-                        Access::new(
-                            vk::PipelineStageFlags2::FRAGMENT_SHADER
-                                | vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
-                            vk::AccessFlags2::INPUT_ATTACHMENT_READ
-                                | vk::AccessFlags2::COLOR_ATTACHMENT_READ
-                                | vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
-                        ),
-                        true,
-                    )?);
-                }
+                (Source::Attachment, _) => uses.push(read_use(samples, layers)?),
                 (Source::Planes(_), None) => {
                     return Err(internal("a planes resolve without planes"))
                 }
             }
-            let (levels, on) = all(into);
-            uses.push(into.texture.image_use(
-                levels,
-                on,
-                Access::new(
-                    vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
-                    vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
-                ),
-                true,
-            )?);
+            uses.push(written_use(into, layers)?);
             // Each layer of the pass: one set and framebuffer of that layer's views.
             for layer in 0..layers {
                 let layouts = [pipeline.set_layout];
@@ -604,19 +934,14 @@ impl ShaderResolves {
                     .first()
                     .copied()
                     .ok_or_else(|| internal("the driver allocated no set"))?;
-                let written = view(into, layer, into.format, ImageUsageFlags::COLOR_ATTACHMENT)?;
+                let written = view(into, layer, into.format, WRITTEN)?;
                 let (read, attachments) = match (source, planes) {
                     (Source::Planes(copy), Some(planes)) => {
                         let read = planes.view(copy.format(), ImageUsageFlags::SAMPLED)?;
                         (read, vec![written])
                     }
                     (Source::Attachment, _) => {
-                        let read = view(
-                            samples,
-                            layer,
-                            samples.format,
-                            ImageUsageFlags::INPUT_ATTACHMENT,
-                        )?;
+                        let read = view(samples, layer, samples.format, INPUT)?;
                         (read, vec![read, written])
                     }
                     (Source::Planes(_), None) => {
@@ -647,30 +972,36 @@ impl ShaderResolves {
                     .layers(1);
                 // SAFETY: `info` and its array are live for the call; the views are live.
                 let framebuffer = unsafe { crate::creation::framebuffer(raw, &info) }?;
-                objects.framebuffers.push(framebuffer);
-                resolves.push(Planned {
+                objects.resolves.push(Planned {
                     pipeline,
                     framebuffer,
                     set,
                 });
             }
         }
+        device.shared().counts.color_resolve_pass_made();
+        let objects = Arc::new(objects);
+        if let Some((memo, key)) = kept {
+            lock(&memo.passes).keep(epoch, key, Arc::clone(&objects));
+        }
         Ok(Some(ShaderResolves {
-            resolves,
             extent: layout.extent,
             uses,
+            copies,
+            copy_uses,
             objects,
         }))
     }
 
     /// Record the resolves in `core`'s command buffer after the pass, between barriers from
-    /// everything before and to everything after, and hold their objects until the command
-    /// buffer completes.
+    /// everything before and to everything after, each copy of an attachment's samples first,
+    /// between barriers too, and hold their objects until the command buffer completes.
     pub(super) fn record(self, core: &mut EncoderCore) {
         let ShaderResolves {
-            resolves,
             extent,
             uses,
+            copies,
+            copy_uses,
             objects,
         } = self;
         let [width, height] = extent;
@@ -687,8 +1018,24 @@ impl ShaderResolves {
             max_depth: 1.0,
         };
         core.barrier(Barrier::everything());
+        if !copies.is_empty() {
+            core.command(TRANSFER, &copy_uses, |raw, command_buffer| {
+                let general = vk::ImageLayout::GENERAL;
+                for &(from, to, region) in &copies {
+                    // SAFETY: the encoder's command buffer is recording outside a render pass;
+                    // both images are live until it completes (the encoder retains the
+                    // attachment's texture, and the command buffer the scratch's) and rest in
+                    // `GENERAL`; the region is the attachment's level and the pass's layers over
+                    // the render area, in both images, of one format and sample count.
+                    unsafe {
+                        raw.cmd_copy_image(command_buffer, from, general, to, general, &[region])
+                    };
+                }
+            });
+            core.barrier(Barrier::everything());
+        }
         core.command(ATTACHMENT_STAGES, &uses, |raw, command_buffer| {
-            for resolve in &resolves {
+            for resolve in &objects.resolves {
                 let begin = vk::RenderPassBeginInfo::default()
                     .render_pass(resolve.pipeline.render_pass)
                     .framebuffer(resolve.framebuffer)
@@ -696,7 +1043,8 @@ impl ShaderResolves {
                 // SAFETY: the encoder's command buffer is recording outside a render pass; the
                 // pipeline, framebuffer, set and the images they view are live until it completes
                 // (the device keeps the pipeline, this the framebuffer and set, the encoder the
-                // textures and planes); every image rests in `GENERAL`.
+                // textures and planes); every image rests in `GENERAL`. A kept framebuffer and
+                // set are of views the textures still present ([`KeptResolves`]).
                 unsafe {
                     raw.cmd_begin_render_pass(command_buffer, &begin, vk::SubpassContents::INLINE);
                     raw.cmd_bind_pipeline(
@@ -721,5 +1069,98 @@ impl ShaderResolves {
         });
         core.barrier(Barrier::everything());
         core.retain(objects);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A pass resolving a view of image `read` into one of image `written`, the same views but
+    /// for their images.
+    fn key(read: ResourceKey, written: ResourceKey) -> PassKey {
+        let view = VkView {
+            view_type: ImageViewType::TYPE_2D,
+            format: Format::R8G8B8A8_UNORM,
+            components: ComponentMapping::IDENTITY,
+            aspect: ImageAspectFlags::COLOR,
+            base_level: 0,
+            level_count: 1,
+            base_layer: 0,
+            layer_count: 1,
+            usage: INPUT,
+        };
+        let format = ColorResolveFormat::of(Format::R8G8B8A8_UNORM).expect("RGBA8's rules");
+        PassKey {
+            extent: [4, 4],
+            resolves: vec![ResolveKey {
+                pipeline: (format, 4, Source::Attachment),
+                read: (read, view),
+                written: (
+                    written,
+                    VkView {
+                        usage: WRITTEN,
+                        ..view
+                    },
+                ),
+            }],
+        }
+    }
+
+    /// A pass kept of a view of an image that dropped is never taken for the same view of an
+    /// image made after it, whatever handle the driver gives the new view (it may give the
+    /// dropped one's again): a key names an image by a key no other image had, and no handle.
+    #[test]
+    fn a_new_image_s_view_never_takes_a_dropped_image_s_kept_pass() {
+        let written = KeptResolves::new();
+        let dropped = KeptResolves::new();
+        let dropped_key = dropped.image;
+        let mut kept = Kept::default();
+        kept.keep(1, key(dropped_key, written.image), Arc::new(()));
+        assert!(kept.find(1, &key(dropped_key, written.image)).is_some());
+        drop(dropped);
+        let made_after = KeptResolves::new();
+        assert_ne!(made_after.image, dropped_key);
+        assert!(kept
+            .find(1, &key(made_after.image, written.image))
+            .is_none());
+    }
+
+    /// Once an image let views go (the views epoch moved), a kept pass is never taken but made
+    /// again, every kept one is let go, and one made under the older epoch is not kept.
+    #[test]
+    fn a_moved_views_epoch_makes_the_pass_again() {
+        let (read, written) = (KeptResolves::new().image, KeptResolves::new().image);
+        let objects = Arc::new(());
+        let mut kept = Kept::default();
+        kept.keep(3, key(read, written), Arc::clone(&objects));
+        assert!(kept.find(3, &key(read, written)).is_some());
+        assert!(kept.find(4, &key(read, written)).is_none());
+        assert_eq!(
+            Arc::strong_count(&objects),
+            1,
+            "the kept pass was not let go"
+        );
+        kept.keep(3, key(read, written), Arc::clone(&objects));
+        assert!(kept.find(4, &key(read, written)).is_none());
+        kept.keep(4, key(read, written), Arc::clone(&objects));
+        assert!(kept.find(4, &key(read, written)).is_some());
+    }
+
+    /// An image keeps at most `KEPT_PASSES` passes, letting the oldest go first.
+    #[test]
+    fn an_image_keeps_its_newest_passes() {
+        let written = KeptResolves::new().image;
+        let reads: Vec<_> = (0..=KEPT_PASSES)
+            .map(|_| KeptResolves::new().image)
+            .collect();
+        let mut kept = Kept::default();
+        for &read in &reads {
+            kept.keep(0, key(read, written), Arc::new(()));
+        }
+        assert!(kept.find(0, &key(reads[0], written)).is_none());
+        for &read in &reads[1..] {
+            assert!(kept.find(0, &key(read, written)).is_some());
+        }
     }
 }

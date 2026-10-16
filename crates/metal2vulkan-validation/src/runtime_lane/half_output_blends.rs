@@ -34,7 +34,9 @@
 //! interlock (NVIDIA, RADV, ANV), none on lavapipe, whose fetch is its input attachments, so the
 //! device blends there and the pipeline announces it. The rule reads the blend color's `half`
 //! before its one minus (the fit of `RGBA16Float`'s blue lane, a blend color of 0.9: `h(1 - h(c))`)
-//! and drops a term whose factor is `Zero`, as Metal's extended-range model does.
+//! and keeps a term whose factor is `Zero` in the 16-bit float formats' sum, as Metal does there
+//! (EV FBL-zf1-m3: `+0` where the other term is `-0`, a product of a destination of zero), but
+//! drops it in the 32-bit float formats', as Metal's extended-range model does.
 
 use super::degrade_notices::counts;
 use super::{validated_device_with, Messages, ScratchCache, WAIT};
@@ -537,14 +539,15 @@ fn factor(f: F, c: usize, s: [f64; 4], d: [f64; 4], bc: [f64; 4], r: &dyn Fn(f64
 
 /// Channel `c` of blend `b`, every factor, product and the result rounded by `r`, with the
 /// largest operand's magnitude: the source, the destination, or the products' magnitudes
-/// summed; and with the factors' magnitudes too (the recorded bound's measure).
+/// summed; and with the factors' magnitudes too (the recorded bound's measure). A term whose
+/// factor is `Zero` is kept in the sum where `kept` (Metal's 16-bit float blend, EV FBL-zf1-m3),
+/// else dropped.
 fn blended(
     b: &Blend,
     c: usize,
-    s: [f64; 4],
-    d: [f64; 4],
-    bc: [f64; 4],
+    (s, d, bc): ([f64; 4], [f64; 4], [f64; 4]),
     r: &dyn Fn(f64) -> f64,
+    kept: bool,
 ) -> (f64, f64, f64) {
     let (x, y) = (s[c], d[c]);
     let plain = x.abs().max(y.abs());
@@ -556,7 +559,7 @@ fn blended(
     }
     let fs = factor(b.source, c, s, d, bc, r);
     let fd = factor(b.destination, c, s, d, bc, r);
-    let term = |f: F, v: f64, factor: f64| (f != F::Zero).then(|| r(v * factor));
+    let term = |f: F, v: f64, factor: f64| (kept || f != F::Zero).then(|| r(v * factor));
     let (ps, pd) = (term(b.source, x, fs), term(b.destination, y, fd));
     let neg = |t: Option<f64>| t.map(|v| -v);
     let (ps, pd) = match b.op {
@@ -760,11 +763,11 @@ fn blends_under(setting: HalfBlendPolicy) -> Vec<String> {
                     for c in 0..channels {
                         let got = texel(&out, i, c, channels, wide);
                         let (metal, mag, magf) = if wide {
-                            blended(b, c, s, d, bc, &f32r)
+                            blended(b, c, (s, d, bc), &f32r, false)
                         } else {
-                            blended(b, c, s, d, bc, &|x| to_half(x, false))
+                            blended(b, c, (s, d, bc), &|x| to_half(x, false), true)
                         };
-                        let (model, _, _) = blended(b, c, s, d, bc, &f32r);
+                        let (model, _, _) = blended(b, c, (s, d, bc), &f32r, false);
                         let (model, model_rtz) = if wide {
                             (model, model)
                         } else {

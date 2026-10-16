@@ -29,6 +29,8 @@ pub mod jsonl;
 pub mod l3;
 pub mod library_module;
 pub mod literal;
+#[cfg(test)]
+mod mesh_cases;
 pub mod metal;
 pub mod msl_portability;
 pub mod no_effect;

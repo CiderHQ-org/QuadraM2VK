@@ -46,12 +46,12 @@ use super::shadows::InstanceShadows;
 use super::{Assembly, Instance, InterlockedStorage, RenderCommandEncoder};
 use crate::attachmentless;
 use crate::binding::CommandUses;
-use crate::clear_reach::{DrawnTiles, PassReach};
+use crate::clear_reach::{DrawnArea, DrawnTiles, PassReach};
 use crate::command_buffer::CaptureTally;
 use crate::draw_source::DrawSource;
 use crate::owned_kernel::{OwnedKernel, OwnedModule, OwnedSet, OwnedSets};
 use crate::render_pass::PassLayout;
-use crate::render_target;
+use crate::render_target::{self, Feedback};
 use crate::tracker::Barrier;
 use crate::values::ResourceOptions;
 use ash::vk;
@@ -401,6 +401,7 @@ impl RenderCommandEncoder {
             imageblock: false,
             interlocked_writes: InterlockedStorage::NONE,
             tile_memory: false,
+            barriers: false,
             views: ViewSetup::default(),
             pieces: Vec::new(),
             shadows: InstanceShadows::default(),
@@ -409,6 +410,13 @@ impl RenderCommandEncoder {
             positioned: None,
             rerecord: None,
             bound: Bound::default(),
+            drawn: DrawnArea::default(),
+            inline: false,
+            continues: false,
+            kept: None,
+            planned: false,
+            feedback: Feedback::NONE,
+            storage_colors: 0,
         };
         let (_, _, base) = steps.records;
         let recording = Keeping::Recording(Capturing {
@@ -453,9 +461,15 @@ impl RenderCommandEncoder {
         // The pass ends: it keeps no draw from here on.
         let Keeping::Recording(capturing) = std::mem::replace(&mut self.keeping, Keeping::Stopped)
         else {
+            self.end_unrun(instance);
             return None;
         };
-        recorded.then_some((instance, capturing.uses))
+        if !recorded {
+            // A capture that records nothing is never executed.
+            self.end_unrun(instance);
+            return None;
+        }
+        Some((instance, capturing.uses))
     }
 
     /// Record, into the encoder's command buffer before the pass, the capture draws' instance
@@ -470,9 +484,8 @@ impl RenderCommandEncoder {
         (grid, bound): (u64, u64),
     ) -> Option<CapturedReach> {
         let device = self.core.device().clone();
-        let raw = device.shared().vk();
         // SAFETY: only this encoder records the secondary command buffer.
-        unsafe { raw.end_command_buffer(instance.draws) }.ok()?;
+        unsafe { self.core.command_buffer().end_raw(instance.draws) }.ok()?;
         let framebuffer = render_target::attachmentless_framebuffer(
             &device,
             &instance.compatible,

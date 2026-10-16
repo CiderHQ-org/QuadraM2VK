@@ -1,4 +1,4 @@
-// Owned fixture (WP-UNI, DESIGN D311 item 5, S2): a tile function, whose pipeline reflection Metal
+// Owned fixture: a tile function, whose pipeline reflection Metal
 // answers as tile bindings: its implicit imageblock (MTLBindingTypeImageblock), threadgroup
 // memory and a buffer. Written for this repository; no third-party source. Loop-free.
 #include <metal_stdlib>

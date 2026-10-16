@@ -1,4 +1,4 @@
-// Owned fixture (WP-EXF, DESIGN D198): programmable blending, one read-modify-write of the color
+// Owned fixture: programmable blending, one read-modify-write of the color
 // attachment per fragment. The source color is the pixel center and two constants, blended over
 // the color the fragment reads at alpha one half: `(src + dst) / 2`, one rounded sum scaled by a
 // power of two, and no multiply feeds an add, so nothing can contract. A draw whose fragments

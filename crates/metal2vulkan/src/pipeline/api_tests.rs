@@ -45,6 +45,9 @@ fn stage_module_bytes_are_little_endian_words() {
         constant_blob: None,
         rounded_colors: Vec::new(),
         half_bit_colors: Vec::new(),
+        own_pixel_textures: Vec::new(),
+        snapshot_textures: Vec::new(),
+        private_bytes: 0,
         specialized_notes: Vec::new(),
     };
     assert_eq!(
@@ -92,6 +95,9 @@ fn a_stage_s_notes_under_a_specialization_are_its_held_clauses() {
         constant_blob: None,
         rounded_colors: Vec::new(),
         half_bit_colors: Vec::new(),
+        own_pixel_textures: Vec::new(),
+        snapshot_textures: Vec::new(),
+        private_bytes: 0,
         specialized_notes: vec![
             SpecializedNote {
                 note: PrecisionNote::PixelSamplerScaling,
@@ -220,12 +226,21 @@ mod serde_round_trips {
             )]),
             cubic_samplers: BTreeMap::from([(slot(Stage::Fragment, SlotClass::Sampler, 0), 0x2d0)]),
             captured_positions: Some(crate::pipeline::CaptureForm::Vertices),
+            primitive_id_indices: Some(metal::IndexType::UInt16),
             extended_shadows: BTreeSet::from([0]),
+            snapshot_textures: BTreeMap::from([(
+                slot(Stage::Fragment, SlotClass::Texture, 2),
+                crate::pipeline::SnapshotForm::Unorm8,
+            )]),
             cross_class: BTreeMap::from([(
                 slot(Stage::Kernel, SlotClass::Texture, 8),
                 SampledType::Uint,
             )]),
             anisotropic_samplers: BTreeSet::from([slot(Stage::Fragment, SlotClass::Sampler, 1)]),
+            depth16_pass: Some(false),
+            depth16_biased: true,
+            depth16_bias_raises: Some(true),
+            color_group: 1,
         });
         round_trip(&SpecializationKey {
             data: vec![1, 0, 0, 0],
@@ -306,11 +321,23 @@ mod serde_round_trips {
                 half_blends: BTreeSet::from([0]),
             }),
             srgb_textures: BTreeSet::from([slot(Stage::Fragment, SlotClass::Texture, 7)]),
+            snapshot_textures: BTreeMap::from([(
+                slot(Stage::Fragment, SlotClass::Texture, 3),
+                crate::pipeline::SnapshotForm::Half,
+            )]),
             ycbcr_textures: BTreeSet::from([slot(Stage::Fragment, SlotClass::Texture, 8)]),
             viewport_index_varying: true,
+            // An emulated post-tessellation vertex function's state.
+            tessellation: Some(crate::pipeline::TessellationDescriptor {
+                max_tessellation_factor: 16,
+                partition_mode: metal::TessellationPartitionMode::FractionalOdd,
+                ..Default::default()
+            }),
             max_call_stack_depth: Some(8),
             flat_grid: true,
             render_target_array_index_varying: true,
+            primitive_id_varying: true,
+            primitive_id_indices: Some(crate::metal::IndexType::UInt16),
             color_writes: BTreeMap::from([
                 (
                     0,
@@ -417,6 +444,14 @@ mod serde_round_trips {
             anisotropic_samplers: BTreeSet::from([slot(Stage::Fragment, SlotClass::Sampler, 3)]),
             uniform_varyings: BTreeSet::from([VaryingKey::user(b"user(tint)")]),
             instanced_attributes: BTreeSet::from([1]),
+            depth16_codes: true,
+            depth16_bias_raises: Some(false),
+            color_group: Some(crate::pipeline::ColorGroup {
+                present: vec![0, 1, 2, 3, 5, 7],
+                width: 4,
+                group: 1,
+            }),
+            object_payload: Some(64),
         });
     }
 
@@ -586,6 +621,12 @@ mod serde_round_trips {
                 ],
                 slot_words: 12,
             }),
+            // An emulated tessellation pipeline's state.
+            emulated_tessellation: Some(crate::pipeline::EmulatedTessellation {
+                domain: crate::pipeline::interface::PatchDomain::Quad,
+                control_points: 4,
+                descriptor: crate::pipeline::TessellationDescriptor::default(),
+            }),
             writes_point_size: true,
             flat_fragment_inputs: true,
             clip_distances: 2,
@@ -610,6 +651,12 @@ mod serde_round_trips {
                 }),
             }),
             color_write_rules: vec![(0, 0x3322), (2, 0x0001)],
+            snapshot_reads: true,
+            color_group: Some(crate::pipeline::ColorGroup {
+                present: vec![0, 5],
+                width: 4,
+                group: 0,
+            }),
         });
         let mut slots = BTreeMap::new();
         slots.insert(
@@ -934,11 +981,17 @@ mod bind_serde_round_trips {
             interlocked_colors: BTreeSet::from([0, 3]),
             fragment_tests: crate::bind::FragmentTests::Depth { writes: true },
             extended_shadows: BTreeSet::from([0]),
+            snapshot_textures: BTreeSet::from([2]),
             depth_range: [0.25, 0.75],
             depth_clip_mode_clamp: true,
             stencil_references: [0x5A, 0xC3],
             blend_color: [0.25, -0.5, 1.5, 0.75],
             primitive_type: Some(metal::PrimitiveType::TriangleStrip),
+            depth_bias: [1.5 / 65535.0, -2.0, 0.125],
+            depth16_pass: Some(true),
+            depth16_biased: true,
+            depth16_bias_raises: Some(true),
+            primitive_id_indices: Some(metal::IndexType::UInt16),
         });
         let mut shape = StageShape::default();
         shape.buffers.insert(
@@ -994,6 +1047,11 @@ mod bind_serde_round_trips {
             interlocked_colors: BTreeSet::from([0, 3]),
             fragment_tests: crate::bind::FragmentTests::Pass,
             extended_shadows: BTreeSet::from([0]),
+            snapshot_textures: BTreeSet::from([2]),
+            depth16_pass: Some(true),
+            depth16_biased: true,
+            depth16_bias_raises: Some(true),
+            primitive_id_indices: Some(metal::IndexType::UInt32),
         });
     }
 
@@ -1164,6 +1222,8 @@ mod bind_serde_round_trips {
         round_trip(&WriteSource::TileMemory { bytes: 480 });
         round_trip(&UseTarget::PatchIndices);
         round_trip(&WriteSource::ControlPointIndices);
+        round_trip(&WriteSource::TessellationWork);
+        round_trip(&WriteSource::TessellationRecords);
         round_trip(&UseTarget::ControlPointIndices);
         round_trip(&DrawCommands {
             push_constants: Vec::new(),
@@ -1217,6 +1277,24 @@ mod bind_serde_round_trips {
                     }),
                 },
                 records: crate::bind::MeshRecordsRegion::Pool,
+            }),
+            // An emulated tessellation draw's scan.
+            tessellation_dispatch: Some(crate::bind::TessellationDispatch {
+                kernel: crate::pipeline::EmulatedTessellation {
+                    domain: crate::pipeline::interface::PatchDomain::Triangle,
+                    control_points: 3,
+                    descriptor: crate::pipeline::TessellationDescriptor::default(),
+                }
+                .scan_kernel(),
+                header: vec![2, 1, 0, 3],
+                records: crate::bind::TessellationRecords::Exact { records: 2 },
+                factors: Some(crate::bind::BufferRange {
+                    offset: 0,
+                    range: 32,
+                }),
+                arguments: None,
+                chunk_fields: vec![(vk::ShaderStageFlags::VERTEX, 12)],
+                patch_triangles: 64,
             }),
         });
         // A mesh draw's commands.

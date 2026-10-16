@@ -1,4 +1,4 @@
-// Owned fixture (WP-ICBV, DESIGN D336): the pipeline template of executed patch commands, read
+// Owned fixture: the pipeline template of executed patch commands, read
 // without rasterizing. A post-tessellation vertex function of triangle patches of one control
 // point and no stage input returns nothing (its case runs with rasterization disabled) and
 // stores, for every domain point it is called with, a mark at the point's cell of its patch's and

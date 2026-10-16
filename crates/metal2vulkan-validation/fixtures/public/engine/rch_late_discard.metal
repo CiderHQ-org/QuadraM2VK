@@ -1,4 +1,4 @@
-// Owned fixture (WP-RCH, DESIGN D743): fragment functions that read color attachment 0
+// Owned fixture: fragment functions that read color attachment 0
 // (`[[color(0)]]`: the storage form inside the pixel interlock where the device orders fetch only
 // through it), discard a fragment whose attachment alpha is zero (MSL's default standard: demote
 // semantics), and sample a texture. `rch_late_discard` writes nothing but its color, so its

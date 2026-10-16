@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Dumps the metallib function tags Metal answers MTLFunction's properties from (DESIGN D311 item
-# 5, S2): per function, in function-list order, its TYPE and TESS function-list tags and its CNST,
-# VATT and VATY public-metadata tags, as hex, and the names of its other tags. Owned code, written
-# for this repository. Usage: tags.py <fixture>.metallib... ; metallib-tags.txt is its output over
-# the reflection fixtures' metallibs (built as probe.swift says).
+# Dumps the metallib function tags Metal answers MTLFunction's properties from: per function, in
+# function-list order, its TYPE and TESS function-list tags and its CNST, VATT and VATY
+# public-metadata tags, as hex, and the names of its other tags. Owned code, written for this
+# repository. Usage: tags.py <fixture>.metallib... ; metallib-tags.txt is its output over the
+# reflection fixtures' metallibs (built as probe.swift says).
 import os
 import struct
 import sys

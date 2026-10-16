@@ -91,8 +91,8 @@ mod sparse;
 mod tile;
 pub use commands::{encoded_execution, pipeline_states, CaseCommands, TemplateState};
 pub use render::{
-    commit_render, encoded_render, render_pipeline_descriptor, render_pipeline_state,
-    CommittedRender, EncodedRender, RenderInputs,
+    commit_render, encoded_mesh, encoded_render, mesh_pipeline_state, render_pipeline_descriptor,
+    render_pipeline_state, CommittedRender, EncodedRender, MeshInputs, RenderInputs,
 };
 pub use tile::{encoded_tile, tile_descriptor, tile_tables};
 

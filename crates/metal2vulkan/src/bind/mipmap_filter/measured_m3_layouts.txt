@@ -1,9 +1,9 @@
 # Plain Metal's generateMipmapsForTexture: on an Apple M3 Max (macOS 26.7, 25G229): strips and
 # chains of the formats whose passes are fit (8-bit unorm, 32-bit float), from 66x1 to 16384x1 and
-# 8192x64, Private, Shared and Private with allowGPUOptimizedContents off (WP-FXR's share-mips-m3b,
-# our own probe, DESIGN D719). The first levels come from measured_m3_passes.txt's probe, keyed by
-# the chain's key; the Private 2048x16 chain ran twice, byte-identical. Each level's digest is the
-# first 12 hex digits of the SHA-256 of its bytes, every layer in turn, rows tight.
+# 8192x64, Private, Shared and Private with allowGPUOptimizedContents off (share-mips-m3b, our own
+# probe). The first levels come from measured_m3_passes.txt's probe, keyed by the chain's key; the
+# Private 2048x16 chain ran twice, byte-identical. Each level's digest is the first 12 hex digits of
+# the SHA-256 of its bytes, every layer in turn, rows tight.
 # Format:
 #   <key> <format> <2d|2darray|cube> <width>x<height> <layers> <pattern> <private|shared|plain>
 #   <digest of level 0> ...

@@ -43,8 +43,8 @@
 //! process's other threads over the timed frames, their waits included, per command buffer (on
 //! Linux, from each thread's `schedstat`), with its user-space part (from its `stat`, in clock
 //! ticks) and how often they slept (their voluntary context switches, from their `status`: the
-//! scheduler's are the wakes it took, a commit's among them): the runtime's scheduler, completion,
-//! queue-wait and handler threads by name, and the rest (the driver's) together; with their
+//! scheduler's are the wakes it took, a commit's among them): the runtime's scheduler, queue-wait
+//! (which make the completion turns) and handler threads by name, and the rest (the driver's) together; with their
 //! allocations per command buffer where they are counted, and the submission checks run per frame.
 //!
 //! `frame_costs` measures the plain device, the checked one, then the announced one, each in turn
@@ -72,13 +72,14 @@
 //! to [`PASS_END_ALLOCATIONS`], each on average;
 //! `a_frame_s_pass_opens_allocate_within_their_bound` its pass opens to [`OPEN_ALLOCATIONS`]; and
 //! `a_frame_s_commits_allocate_within_their_bound` holds a checked frame's commits to
-//! [`COMMIT_ALLOCATIONS`] on the encoding thread and to [`SUBMIT_ALLOCATIONS`] on the others
-//! (the scheduler's checks and submissions, the completion), per command buffer on average.
+//! [`COMMIT_ALLOCATIONS`] on the encoding thread ([`FIRST_LOCK_ALLOCATIONS`] more on Apple's
+//! platforms) and to [`SUBMIT_ALLOCATIONS`] on the others (the scheduler's passes, checks and
+//! submissions, the completion), per command buffer on average.
 //! Another runs by default on every device,
-//! `a_frame_s_passes_and_commits_begin_their_command_buffers_within_their_bound`: each pass, from
-//! its opening through its end, begins at most [`PASS_BEGINS`] command buffers, and each commit
-//! none but the barrier command buffers it records to keep, on a device that keeps them
-//! (`Device::work_counts`). They count, and time nothing.
+//! `a_frame_s_passes_and_commits_begin_their_command_buffers_within_their_bound`: each pass's
+//! encoder, from its opening through its end, begins at most [`PASS_BEGINS`] command buffers, each
+//! commit none, and the frame's submissions none but the barrier command buffers they record to
+//! keep, on a device that keeps them (`Device::work_counts`). They count, and time nothing.
 
 use super::{buffer_with, loader, open_device, ScratchCache, WAIT};
 use crate::air_library::AirLibrary;
@@ -146,17 +147,34 @@ const OPEN_ALLOCATIONS: f64 = 14.0;
 #[cfg(not(m2v_system_alloc))]
 const PASS_END_ALLOCATIONS: f64 = 40.0;
 /// The most command buffers a pass begins, from its opening through its end, once every pipeline
-/// is made: its primary and its draws' secondary.
+/// is made: its primary and its draws' secondary. A pass whose first instance records inline, and
+/// that does not split, begins its primary alone: its draws' secondary never begins.
 const PASS_BEGINS: u64 = 2;
 /// The most allocations a checked frame's commit makes on the encoding thread on average, once
-/// every pipeline is made. Measured: 4.7 to 5.0 on RADV (Radeon 780M), 5.0 on lavapipe and on ANV
-/// (Iris Xe).
+/// every pipeline is made, [`FIRST_LOCK_ALLOCATIONS`] more on Apple's platforms: a commit hands its
+/// batches to the scheduler's thread and returns, making no pass (`scheduler/inbox.rs`), so this
+/// is the hand-off's cost. Measured: 3.00 on RADV (Radeon 780M), NVIDIA (RTX 3090, RTX 5080
+/// Laptop GPU), ANV (Iris Xe) and lavapipe, 4.00 on the M3 Max through MoltenVK, every commit of
+/// the frames handing its batches off.
 #[cfg(not(m2v_system_alloc))]
-const COMMIT_ALLOCATIONS: f64 = 6.0;
+const COMMIT_ALLOCATIONS: f64 = 3.0;
+/// The allocations a commit makes on Apple's platforms beyond [`COMMIT_ALLOCATIONS`]: there Rust's
+/// standard library (1.98.1) boxes a `Mutex`'s pthread mutex at its first lock and a `Condvar`'s at
+/// its first notify, and a commit takes its command buffer's gate's lock for the first time (as it
+/// holds the command buffer for the scheduler); Linux's locks allocate nothing.
+#[cfg(not(m2v_system_alloc))]
+const FIRST_LOCK_ALLOCATIONS: f64 = if cfg!(target_vendor = "apple") {
+    1.0
+} else {
+    0.0
+};
 /// The most allocations the process's other threads make per command buffer of a checked frame:
-/// its check and its batch's planning and submission on the scheduler thread, its completion and
-/// its handlers, which varies with how the threads take turns. Measured: 14.8 to 16.3 on RADV
-/// (Radeon 780M), 16.8 to 17.5 on lavapipe, 15.7 to 16.8 on ANV (Iris Xe).
+/// the scheduler thread's pass, its check and its submission, its completion and its handlers.
+/// Measured: 11.6 to 12.2 on ANV (Iris Xe), 11.7 on RADV (Radeon 780M), 11.7 to 12.5 on NVIDIA
+/// (RTX 5080 Laptop GPU), 12.8 to 13.0 on lavapipe, 13.0 on NVIDIA (RTX 3090); more on the M3 Max
+/// through MoltenVK, where the queues' waiters wait for each command buffer's fence too
+/// (`RuntimeDriverDefect::ReadsCommandBuffersAfterTheirSignal`) and whose locks allocate at their
+/// first use.
 #[cfg(not(m2v_system_alloc))]
 const SUBMIT_ALLOCATIONS: f64 = 20.0;
 
@@ -551,6 +569,7 @@ impl Workload {
         let switches = thread_switches();
         let cpu = thread_cpu();
         let start = Instant::now();
+        let at_start = counts();
         let mut begun = [Begun::default(); 4];
         for pass in 0..BUFFERS {
             let command_buffer = self.queue.command_buffer().unwrap();
@@ -594,6 +613,10 @@ impl Workload {
             frame.commit.push(committed);
             if let Some(before) = &before {
                 begun[3].add(Begun::since(&self.device, before));
+                let after = self.device.work_counts();
+                frame
+                    .handed
+                    .push(after.commits_handed_off > before.commits_handed_off);
             }
             last = Some(command_buffer);
         }
@@ -606,6 +629,7 @@ impl Workload {
         let last = last.unwrap();
         last.wait_until_completed_for(WAIT).unwrap();
         frame.done = start.elapsed();
+        frame.whole = at_start.map(|before| Begun::since(&self.device, &before));
         assert_eq!(last.status(), CommandBufferStatus::Completed);
         frame
     }
@@ -746,12 +770,17 @@ struct Reads {
     instructions: bool,
 }
 
-/// The command buffers the device began, and of those the barrier command buffers it recorded to
-/// keep, in a step a frame that read the work counts ran ([`Workload::frame_reading`]).
+/// The command buffers the device began, of those the ones encoders began as they recorded
+/// (`WorkCounts::encoder_command_buffers_begun`) and the barrier command buffers it recorded to
+/// keep, in a span a frame that read the work counts ran ([`Workload::frame_reading`]); and the
+/// batches it submitted with no command buffer of barriers before their first encoder
+/// (`WorkCounts::bare_starts`).
 #[derive(Clone, Copy, Default)]
 struct Begun {
     all: u64,
+    encoder: u64,
     kept: u64,
+    bare: u64,
 }
 
 impl Begun {
@@ -760,13 +789,17 @@ impl Begun {
         let now = device.work_counts();
         Begun {
             all: now.command_buffers_begun - before.command_buffers_begun,
+            encoder: now.encoder_command_buffers_begun - before.encoder_command_buffers_begun,
             kept: now.barrier_buffers_kept - before.barrier_buffers_kept,
+            bare: now.bare_starts - before.bare_starts,
         }
     }
 
     fn add(&mut self, other: Begun) {
         self.all += other.all;
+        self.encoder += other.encoder;
         self.kept += other.kept;
+        self.bare += other.bare;
     }
 }
 
@@ -788,10 +821,18 @@ struct Frame {
     /// in that order, where it read the work counts ([`Workload::frame_reading`]); none
     /// elsewhere.
     begun: [Begun; 4],
+    /// The command buffers begun from its first opening through its last command buffer's
+    /// completion, on every thread, where it read the work counts: its batches' submissions, which
+    /// the scheduler's thread makes while the encoding thread goes on, begin theirs in whichever
+    /// step runs then.
+    whole: Option<Begun>,
     /// The encoding thread's context switches over the same span as `cpu`, where they are read.
     switches: Option<Switches>,
     /// Its voluntary ones inside its commits.
     commit_blocks: Option<u64>,
+    /// Whether each commit handed its batches to the scheduler's thread
+    /// (`WorkCounts::commits_handed_off`), where it read the work counts; none elsewhere.
+    handed: Vec<bool>,
 }
 
 /// A thread's context switches: the voluntary ones (it blocked: on a lock, a condition variable, a
@@ -921,9 +962,8 @@ fn other_threads_cpu() -> Option<BTreeMap<String, Cpu>> {
 
 /// The groups of the process's other threads [`other_threads_cpu`] reports: the runtime's by the
 /// prefix of their names, and the rest.
-const THREAD_GROUPS: [(&str, &str); 4] = [
+const THREAD_GROUPS: [(&str, &str); 3] = [
     ("scheduler", "metal2vulkan-sc"),
-    ("completion", "metal2vulkan-co"),
     ("queue waits", "metal2vulkan-qu"),
     ("handlers", "metal2vulkan-ha"),
 ];
@@ -1281,12 +1321,22 @@ fn a_frame_s_draws_and_pass_ends_allocate_within_their_bounds() {
     );
 }
 
-/// A frame's passes each begin at most [`PASS_BEGINS`] command buffers on the encoding thread,
-/// from the opening through the end, once every pipeline is made; and its commits begin none but
-/// the barrier command buffers they record to keep (`command_buffer/kept_barriers.rs`), where the
-/// device keeps them: every device whose driver reads no command buffer after its timeline's
-/// signal (`RuntimeDriverDefect::ReadsCommandBuffersAfterTheirSignal`), where a commit records
-/// its batch's two barrier command buffers, before its pass and after it.
+/// A frame's passes' encoders each begin at most [`PASS_BEGINS`] command buffers, from the
+/// opening through the end, once every pipeline is made, and its commits none
+/// (`WorkCounts::encoder_command_buffers_begun`, counted in each step: the scheduler's thread
+/// submits earlier command buffers meanwhile, and what their submissions begin lands in whichever
+/// step runs then). Its batches' submissions, counted over the whole frame through its last
+/// command buffer's completion, begin none but the barrier command buffers they record to keep
+/// (`command_buffer/kept_barriers.rs`), where the device keeps them: every device whose driver
+/// reads no command buffer after its timeline's signal
+/// (`RuntimeDriverDefect::ReadsCommandBuffersAfterTheirSignal`), where a submission records its
+/// batch's barrier command buffer before its pass unless its batch starts bare, with nothing
+/// planned before the pass (`WorkCounts::bare_starts`): its end goes into the pass's own last
+/// command buffer (`command_buffer/submit.rs`). It prints the passes whose first instance
+/// recorded inline, how many of them split, and their instances after a split that recorded
+/// inline too (`WorkCounts::inline_passes`, `WorkCounts::inline_passes_split`,
+/// `WorkCounts::inline_split_instances`): each inline pass that did not split begins one fewer,
+/// its draws' secondary never begun.
 #[test]
 fn a_frame_s_passes_and_commits_begin_their_command_buffers_within_their_bound() {
     let cache = ScratchCache::new().unwrap();
@@ -1296,36 +1346,76 @@ fn a_frame_s_passes_and_commits_begin_their_command_buffers_within_their_bound()
     for _ in 0..WARM {
         work.frame();
     }
+    let counted = work.device.work_counts();
     let frame = work.frame_reading(Reads {
         work_counts: true,
         ..Reads::default()
     });
     let [open, draws, end, commit] = frame.begun;
+    let whole = frame.whole.expect("the work counts read over the frame");
     let passes = BUFFERS as u64;
     let late_reads = (work.device.properties().driver_defects)
         .contains(&RuntimeDriverDefect::ReadsCommandBuffersAfterTheirSignal);
+    // The passes whose first instance recorded inline (`render/inline_first.rs`).
+    let after = work.device.work_counts();
+    let inline = after.inline_passes - counted.inline_passes;
+    let split = after.inline_passes_split - counted.inline_passes_split;
     eprintln!(
-        "FRAME-COST {}: command buffers begun a pass: {:.2} opening, {:.2} drawing, {:.2} ending, \
-         {:.2} committing ({:.2} of them barrier command buffers recorded to keep), the bound \
-         {PASS_BEGINS} a pass; the driver reads command buffers after their signal: {late_reads}",
+        "FRAME-COST {}: {:.2} passes a pass with their first instance inline, {:.2} of them split, \
+         {:.2} instances after a split inline",
         work.device.name(),
-        open.all as f64 / passes as f64,
-        draws.all as f64 / passes as f64,
-        end.all as f64 / passes as f64,
-        commit.all as f64 / passes as f64,
-        commit.kept as f64 / passes as f64,
+        inline as f64 / passes as f64,
+        split as f64 / passes as f64,
+        (after.inline_split_instances - counted.inline_split_instances) as f64 / passes as f64,
     );
-    let pass = open.all + draws.all + end.all;
+    let each = |n: u64| n as f64 / passes as f64;
+    eprintln!(
+        "FRAME-COST {}: command buffers encoders began a pass: {:.2} opening, {:.2} drawing, \
+         {:.2} ending, {:.2} committing, the bound {PASS_BEGINS} a pass; the frame's submissions \
+         began {:.2} a pass ({:.2} of them barrier command buffers recorded to keep), {:.2} bare \
+         starts; every step's command buffers, the submissions' landing in them: {:.2} opening, \
+         {:.2} drawing, {:.2} ending, {:.2} committing; the driver reads command buffers after \
+         their signal: {late_reads}",
+        work.device.name(),
+        each(open.encoder),
+        each(draws.encoder),
+        each(end.encoder),
+        each(commit.encoder),
+        each(whole.all - whole.encoder),
+        each(whole.kept),
+        each(whole.bare),
+        each(open.all),
+        each(draws.all),
+        each(end.all),
+        each(commit.all),
+    );
+    let pass = open.encoder + draws.encoder + end.encoder;
+    let bound = PASS_BEGINS * passes - (inline - split);
     assert!(
-        pass <= PASS_BEGINS * passes,
-        "{pass} command buffers begun by {passes} passes, more than {PASS_BEGINS} each"
+        pass <= bound,
+        "{pass} command buffers encoders began in {passes} passes, more than {PASS_BEGINS} each \
+         but one fewer for each of the {} inline passes that did not split",
+        inline - split
     );
-    let own = commit.all - commit.kept;
+    assert_eq!(
+        commit.encoder, 0,
+        "command buffers encoders began in commits"
+    );
+    assert_eq!(
+        whole.encoder, pass,
+        "command buffers encoders began outside the frame's steps"
+    );
+    // The frame's batches' submissions, on whichever thread made them.
+    let own = whole.all - whole.encoder - whole.kept;
     match late_reads {
-        true => assert_eq!(own, 2 * passes, "a commit's two barrier command buffers"),
+        true => assert_eq!(
+            own + whole.bare,
+            passes,
+            "a submission's barrier command buffer before its pass, or a bare start"
+        ),
         false => assert_eq!(
             own, 0,
-            "{own} command buffers begun by {passes} commits, not kept"
+            "{own} command buffers begun by {passes} command buffers' submissions, not kept"
         ),
     }
 }
@@ -1348,10 +1438,13 @@ fn a_frame_s_pass_opens_allocate_within_their_bound() {
 }
 
 /// A checked frame's commits allocate at most [`COMMIT_ALLOCATIONS`] each on average on the
-/// encoding thread, and the process's other threads at most [`SUBMIT_ALLOCATIONS`] per command
-/// buffer (its check, its batch's planning and submission, its completion), once every pipeline is
-/// made. The other threads' count is the process's: the test needs a process of its own, as
-/// nextest runs each test in.
+/// encoding thread ([`FIRST_LOCK_ALLOCATIONS`] more on Apple's platforms), and the process's other
+/// threads at most [`SUBMIT_ALLOCATIONS`] per command buffer (the scheduler thread's pass, the
+/// check, the submission, the completion), once every pipeline is made. Every commit hands its
+/// batches to the scheduler's thread (`WorkCounts::commits_handed_off`), which the test checks: no
+/// commit submits, so which thread submits moves nothing between the two counts.
+/// The other threads' count is the process's: the test needs a process of its own, as nextest
+/// runs each test in.
 #[cfg(not(m2v_system_alloc))]
 #[test]
 fn a_frame_s_commits_allocate_within_their_bound() {
@@ -1364,21 +1457,43 @@ fn a_frame_s_commits_allocate_within_their_bound() {
     }
     const FRAMES: usize = 4;
     let before = others_allocations().unwrap();
-    let frames: Vec<Frame> = (0..FRAMES).map(|_| work.frame()).collect();
+    // The work counts read around each step tell which commits handed their batches off.
+    let frames: Vec<Frame> = (0..FRAMES)
+        .map(|_| {
+            work.frame_reading(Reads {
+                work_counts: true,
+                ..Reads::default()
+            })
+        })
+        .collect();
     let others = others_allocations().unwrap() - before;
-    let commits: u64 = (frames.iter().flat_map(|frame| &frame.commit))
-        .map(|s| s.allocations.unwrap())
-        .sum();
-    let buffers = (FRAMES * BUFFERS) as f64;
-    let (each, other) = (commits as f64 / buffers, others as f64 / buffers);
+    let commits: Vec<u64> = (frames.iter())
+        .flat_map(|frame| &frame.commit)
+        .map(|step| step.allocations.unwrap())
+        .collect();
+    let handed = (frames.iter())
+        .flat_map(|frame| &frame.handed)
+        .filter(|&&handed| handed)
+        .count();
+    let buffers = commits.len() as f64;
+    let each = commits.iter().sum::<u64>() as f64 / buffers;
+    let other = others as f64 / buffers;
+    let bound = COMMIT_ALLOCATIONS + FIRST_LOCK_ALLOCATIONS;
     eprintln!(
-        "FRAME-COST {}: {each:.2} allocations a commit, at most {COMMIT_ALLOCATIONS} kept; \
-         {other:.2} on the other threads a command buffer, at most {SUBMIT_ALLOCATIONS} kept",
-        work.device.name()
+        "FRAME-COST {}: {each:.2} allocations a commit ({handed} of {} handed their batches to \
+         the scheduler's thread), at most {bound} kept; {other:.2} on the other threads a \
+         command buffer, at most {SUBMIT_ALLOCATIONS} kept",
+        work.device.name(),
+        commits.len(),
+    );
+    assert_eq!(
+        handed,
+        commits.len(),
+        "every commit hands its batches to the scheduler's thread"
     );
     assert!(
-        each <= COMMIT_ALLOCATIONS,
-        "{each:.2} allocations a commit, more than {COMMIT_ALLOCATIONS}"
+        each <= bound,
+        "{each:.2} allocations a commit, more than {bound}"
     );
     assert!(
         other <= SUBMIT_ALLOCATIONS,

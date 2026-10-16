@@ -1,4 +1,4 @@
-// Owned fixture (WP-MESH, DESIGN D334 item 5 step 3): mesh draws that read, behind a memory
+// Owned fixture: mesh draws that read, behind a memory
 // barrier, what an earlier draw of the same render pass wrote, for the runtime lane and Metal
 // probe 5. A writer draw covers pixel (7, 7) of an 8x8 RGBA32Uint target and stores a control
 // word to buffer 0, from its mesh function (`mesh_barrier_writer`) or from its fragment function

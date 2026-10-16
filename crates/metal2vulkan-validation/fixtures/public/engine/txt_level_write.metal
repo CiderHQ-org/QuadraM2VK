@@ -1,4 +1,4 @@
-// Owned fixture (WP-TXT, DESIGN D230): a write to a `half` storage texture at a level read from a
+// Owned fixture: a write to a `half` storage texture at a level read from a
 // buffer, with 16-bit coordinates and level, as mip generators spell it
 // (`air.write_texture_2d.i16.v4f16`). A storage access reaches its view's base level only, so the
 // slot is bound as its level views and the write indexes them by the level; a level the texture

@@ -919,7 +919,7 @@ fn schema_mismatch_remedy(error: &serde_json::Error) -> &'static str {
         "; the row uses a field or variant this checkout's schema does not know, so a newer \
          commit wrote this shard: read the tracked corpus of the checkout that runs the tool \
          (--corpus, by default its own validation/corpus) and take the private sources from the \
-         other corpus with --private-corpus DIR (DESIGN D260)"
+         other corpus with --private-corpus DIR"
     } else {
         ""
     }
@@ -1283,6 +1283,7 @@ mod tests {
             }),
             draw: None,
             tessellation: None,
+            mesh_draw: None,
             output: OutputSelection::Buffer {
                 binding: 0,
                 offset: 0,
@@ -1298,6 +1299,7 @@ mod tests {
             raster_sample_count: None,
             public_source: None,
             no_effect: None,
+            creation_bound: None,
         };
         case.case_id = case.computed_case_id().unwrap();
         case
@@ -2259,7 +2261,7 @@ mod tests {
             ..product(false)
         };
         let mut earlier = serde_json::to_value(RefusalObservation {
-            environment_id: "env@engine@vk12-bare".into(),
+            environment_id: "env@engine@roadmap-2022".into(),
             ..product(false)
         })
         .unwrap();

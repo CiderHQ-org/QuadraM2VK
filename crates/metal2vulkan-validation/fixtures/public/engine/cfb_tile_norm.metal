@@ -1,11 +1,11 @@
-// Owned fixture (WP-CFB, DESIGN D376): tile functions over a normalized color attachment's
-// implicit imageblock, as WP-CFB Metal probes 9b to 9f ran them on the M3 Max and an M4: a member
-// of one, two or four floats, each thread reading its cell into its pixel's element of a buffer,
-// or writing the element into its cell, and one function writing its cell and reading it back
-// after a barrier; and, as probe 12 ran them, a member of one, two or four halves, read into a
-// float buffer and written from a half buffer. A tile is 16x16 pixels and its threadgroup 16x16 threads, over an attachment
-// one tile wide, so pixel `(x, y)` is element `16 y + x`. Written for this repository; no
-// third-party source. Loop-free.
+// Owned fixture: tile functions over a normalized color attachment's implicit imageblock, as Metal
+// probes ran them on the M3 Max and an M4: a member of one, two or four floats, each thread reading
+// its cell into its pixel's element of a buffer, or writing the element into its cell, and one
+// function writing its cell and reading it back after a barrier; and, as probe 12 ran them, a
+// member of one, two or four halves, read into a float buffer and written from a half buffer. A
+// tile is 16x16 pixels and its threadgroup 16x16 threads, over an attachment one tile wide, so
+// pixel `(x, y)` is element `16 y + x`. Written for this repository; no third-party source.
+// Loop-free.
 #include <metal_stdlib>
 using namespace metal;
 

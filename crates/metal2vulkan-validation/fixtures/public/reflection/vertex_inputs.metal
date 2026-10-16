@@ -1,4 +1,4 @@
-// Owned fixture (WP-UNI, DESIGN D311 item 5, S2): vertex functions whose stage inputs decide
+// Owned fixture: vertex functions whose stage inputs decide
 // whether Metal's pipeline reflection calls a vertex descriptor's buffer used: an attribute the
 // function declares but never reads (`air.arg_unused`), and one a function constant gates.
 // Written for this repository; no third-party source. Loop-free.

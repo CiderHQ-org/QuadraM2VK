@@ -88,8 +88,8 @@
 //!   which a consumer lists again then ([`BindingPlan::relisted_sampler_tables`]). A class whose
 //!   least count does not fit the capacity is [`BindError::HeapTooLarge`] at plan time, and a list
 //!   longer than the planned entries at instantiation. Every listed shape must pass
-//!   `metal::sampler::check_sampler` for every use the arrays declare (the plan cannot see which
-//!   sampler a buffer pairs with which use, so a pair that never meets can refuse), and an
+//!   `metal::sampler::check_argument_sampler` for every use the arrays declare (the plan cannot see
+//!   which sampler a buffer pairs with which use, so a pair that never meets can refuse), and an
 //!   opaque-black border among them meets every member a sampled array holds, as a heap sampler's
 //!   does. The table bytes list each listed sampler's `(resource id, element, flags)` with a
 //!   nonzero id, as a texture table does. A listed cubic sampler, whose bicubic filter no stage
@@ -146,7 +146,7 @@ use crate::metal::format::{
     is_depth_stencil, sampled_type, storage_choice, vk_format, without_format_gaps, StorageUse,
 };
 use crate::metal::sampler::{
-    check_border_view, check_sampler, vk_filtering, SamplerUse, SamplerWord,
+    check_argument_sampler, check_border_view, vk_filtering, SamplerUse, SamplerWord,
 };
 use crate::metal::{self, TextureType};
 use crate::pipeline::artifact::RuntimeDependency;
@@ -687,7 +687,7 @@ struct HeapFilter {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct SamplerAdmission {
     /// The classes of the plan's sampler arrays: each is a use that every listed shape must pass
-    /// (`metal::sampler::check_sampler`).
+    /// (`metal::sampler::check_argument_sampler`).
     pub classes: Vec<HandleClass>,
     /// Every stage with a sampler table tests its entries for a cubic filter
     /// (`RuntimeFact::CubicArgumentSampler`).
@@ -710,13 +710,13 @@ impl SamplerAdmission {
     }
 
     /// Whether the plan holds a state of shape `s` on `profile` as it holds a listed one: `s`
-    /// passes `check_sampler` for every use, [`cubic_held`](Self::cubic_held), and an
+    /// passes `check_argument_sampler` for every use, [`cubic_held`](Self::cubic_held), and an
     /// opaque-black border only where the members were checked against one. Where no array
     /// samples (a function that only names the states), every shape.
     fn admits(&self, s: &SamplerShape, profile: &DeviceProfile) -> bool {
         let sampled = self.uses().next().is_some();
         self.uses()
-            .all(|use_| check_sampler(s, use_, profile).is_ok())
+            .all(|use_| check_argument_sampler(s, use_, profile).is_ok())
             && self.cubic_held(s)
             && (!sampled || !s.opaque_black_border || self.opaque_black)
     }
@@ -949,7 +949,7 @@ impl<'a> HeapPlanner<'a> {
             }
             for s in &a.shapes {
                 for &use_ in &sampler_uses {
-                    check_sampler(s, use_, profile).map_err(bind_error)?;
+                    check_argument_sampler(s, use_, profile).map_err(bind_error)?;
                 }
             }
             // A cubic sampler's bicubic filter through an argument buffer is not built.
@@ -1243,12 +1243,14 @@ impl<'a> HeapPlanner<'a> {
         }
         let image = match class {
             HandleClass::Image(image) => image,
-            // The array's `VkSampler`s depend on the comparison and the texel class alone; a
-            // cube-gradient use in the isotropic form refuses an anisotropic listed state at
-            // plan time.
+            // The array's `VkSampler`s are made for its use: the comparison, the texel class, and
+            // a cube's explicit gradients in the isotropic form, which makes a listed anisotropic
+            // state isotropic.
             HandleClass::Sampler {
-                compare, integer, ..
-            } => return self.sampler_array(set, b, compare, integer),
+                compare,
+                integer,
+                cube_gradient,
+            } => return self.sampler_array(set, b, (compare, integer, cube_gradient)),
             HandleClass::FunctionTable => return self.function_table_array(set, b),
         };
         let expected = if image.access == ImageAccess::Storage {
@@ -1364,15 +1366,14 @@ impl<'a> HeapPlanner<'a> {
         })
     }
 
-    /// The writes of the sampler array `b` of set `set` for the use (`compare`, `integer`): element
-    /// 0 the use's neutral sampler, element `i + 1` argument sampler `i` made for the use, through
-    /// the class's entries.
+    /// The writes of the sampler array `b` of set `set` for the use (`compare`, `integer`,
+    /// `cube_gradient`): element 0 the use's neutral sampler, element `i + 1` argument sampler `i`
+    /// made for the use, through the class's entries.
     fn sampler_array(
         &self,
         set: u32,
         b: &DescriptorBinding,
-        compare: bool,
-        integer: bool,
+        (compare, integer, cube_gradient): (bool, bool, bool),
     ) -> Result<Vec<DescriptorWrite>, BindError> {
         if b.ty != vk::DescriptorType::SAMPLER {
             return Err(internal(format!(
@@ -1403,6 +1404,7 @@ impl<'a> HeapPlanner<'a> {
                     index: element - 1,
                     compare,
                     integer,
+                    cube_gradient,
                 },
             ));
         }
@@ -1960,11 +1962,12 @@ impl BindingPlan {
     /// plan, made on `device`, holds that list: no more samplers than each table's planned
     /// entries hold beside the null entry (twice the class's entries, the module docs), each of
     /// a shape the plan was made for or one that passes the plan's checks of a listed shape
-    /// (`metal::sampler::check_sampler` for every use of its sampler arrays, a cubic filter only
-    /// beside stages that test for it, an opaque-black border only where the members were checked
-    /// against one). A consumer whose function reaches a sampler state by its ID as the command
-    /// runs, as Metal's does, lists the states live as the command buffer commits over the
-    /// command's own, and writes their elements with [`WriteSource::ArgumentSampler`]'s rule.
+    /// (`metal::sampler::check_argument_sampler` for every use of its sampler arrays, a cubic
+    /// filter only beside stages that test for it, an opaque-black border only where the members
+    /// were checked against one). A consumer whose function reaches a sampler state by its ID as
+    /// the command runs, as Metal's does, lists the states live as the command buffer commits
+    /// over the command's own, and writes their elements with [`WriteSource::ArgumentSampler`]'s
+    /// rule.
     /// `None` where the plan does not hold the list (more states than its tables hold, or a shape
     /// its checks refuse), or has no sampler table: the command cannot reach the states as Metal's
     /// would.

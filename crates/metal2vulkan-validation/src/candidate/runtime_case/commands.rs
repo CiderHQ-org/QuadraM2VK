@@ -163,8 +163,8 @@ pub fn pipeline_states(
 /// The runtime's descriptor of `resource`, as the oracle states its own
 /// (`metal::indirect_command_descriptor`): for compute commands no vertex or fragment buffers,
 /// the authored kernel counts, its command types the authored dispatch kinds; for render commands
-/// the authored draw kinds (`DRAW`, `DRAW_INDEXED`, `DRAW_PATCHES`, `DRAW_INDEXED_PATCHES`) and
-/// vertex and fragment buffer
+/// the authored draw kinds (`DRAW`, `DRAW_INDEXED`, `DRAW_PATCHES`, `DRAW_INDEXED_PATCHES`,
+/// `DRAW_MESH_THREADGROUPS`, `DRAW_MESH_THREADS`) and vertex, fragment, object and mesh buffer
 /// counts, no kernel buffers; and the authored inheritance.
 fn descriptor(resource: &CommandBufferResource) -> IndirectCommandBufferDescriptor {
     let mut descriptor = IndirectCommandBufferDescriptor::new();
@@ -189,6 +189,8 @@ fn descriptor(resource: &CommandBufferResource) -> IndirectCommandBufferDescript
             draws,
             max_vertex_buffer_bind_count,
             max_fragment_buffer_bind_count,
+            max_object_buffer_bind_count,
+            max_mesh_buffer_bind_count,
             support_dynamic_attribute_stride,
         } => {
             descriptor.command_types = [
@@ -199,6 +201,11 @@ fn descriptor(resource: &CommandBufferResource) -> IndirectCommandBufferDescript
                     draws.indexed_patches,
                     IndirectCommandType::DRAW_INDEXED_PATCHES,
                 ),
+                (
+                    draws.mesh_threadgroups,
+                    IndirectCommandType::DRAW_MESH_THREADGROUPS,
+                ),
+                (draws.mesh_threads, IndirectCommandType::DRAW_MESH_THREADS),
             ]
             .into_iter()
             .filter(|&(allowed, _)| allowed)
@@ -207,12 +214,30 @@ fn descriptor(resource: &CommandBufferResource) -> IndirectCommandBufferDescript
             });
             descriptor.max_vertex_buffer_bind_count = max_vertex_buffer_bind_count;
             descriptor.max_fragment_buffer_bind_count = max_fragment_buffer_bind_count;
+            descriptor.max_object_buffer_bind_count = max_object_buffer_bind_count;
+            descriptor.max_mesh_buffer_bind_count = max_mesh_buffer_bind_count;
             descriptor.support_dynamic_attribute_stride = support_dynamic_attribute_stride;
         }
     }
     descriptor.inherit_pipeline_state = resource.inherit_pipeline_state;
     descriptor.inherit_buffers = resource.inherit_buffers;
     descriptor
+}
+
+/// The stages a render encoder makes the case's resources resident in for `resource`'s commands, as
+/// the oracle does: the vertex and fragment stages, and the object and mesh stages too where its
+/// descriptor allows mesh draws.
+fn render_stages(resource: &CommandBufferResource) -> RenderStages {
+    let mesh = match resource.descriptor {
+        CommandDescriptor::Render { draws, .. } => draws.mesh(),
+        CommandDescriptor::Compute { .. } => false,
+    };
+    let stages = RenderStages::VERTEX | RenderStages::FRAGMENT;
+    if mesh {
+        stages | RenderStages::OBJECT | RenderStages::MESH
+    } else {
+        stages
+    }
 }
 
 /// The size of a grid or threadgroup.
@@ -557,12 +582,18 @@ pub fn encoded_execution(
                 .set_fragment_buffer(Some(parent(binding)?), binding.offset.into(), binding.index)
                 .map_err(runtime("set_fragment_buffer"))?;
         }
+        for binding in &execution.object_buffers {
+            encoder
+                .set_object_buffer(Some(parent(binding)?), binding.offset.into(), binding.index)
+                .map_err(runtime("set_object_buffer"))?;
+        }
+        for binding in &execution.mesh_buffers {
+            encoder
+                .set_mesh_buffer(Some(parent(binding)?), binding.offset.into(), binding.index)
+                .map_err(runtime("set_mesh_buffer"))?;
+        }
         encoder
-            .use_resources(
-                resident,
-                usage,
-                RenderStages::VERTEX | RenderStages::FRAGMENT,
-            )
+            .use_resources(resident, usage, render_stages(resource))
             .map_err(runtime("use_resources"))?;
         encoder
             .execute_commands_in_buffer(icb, range)

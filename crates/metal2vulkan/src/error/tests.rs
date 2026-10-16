@@ -20,10 +20,6 @@ fn one_of_each() -> Vec<Error> {
             Feature::SeparateMultisampledDepthStencil,
             RuntimeDriverDefect::MultisampledDepthStencilColourCopies,
         )),
-        Error::Unsupported(Unsupported::unmeasured_deviation(
-            Feature::SamplerAnisotropy,
-            DriverDeviation::CubeGradientRoute,
-        )),
         Error::Unsupported(Unsupported::metal_gpu_family(
             Feature::IndirectRenderState,
             1010,
@@ -64,13 +60,12 @@ fn retry_and_permanence_table() {
                 Needs::NotImplemented | Needs::NotRepresentable => {
                     (Retry::Never, Permanence::Input)
                 }
-                // A defect of the device's driver, or a departure its release has no measured rule
-                // for: another device translates the input. A Metal GPU family the device does not
-                // claim: another device, one that claims it, may. A form Metal refuses on the
-                // measured devices: an unmeasured device is not refused so.
+                // A defect of the device's driver: another device translates the input. A Metal GPU
+                // family the device does not claim: another device, one that claims it, may. A
+                // form Metal refuses on the measured devices: an unmeasured device is not refused
+                // so.
                 Needs::DriverDefect(_)
                 | Needs::RuntimeDriverDefect(_)
-                | Needs::UnmeasuredDeviation(_)
                 | Needs::MetalGpuFamily(_)
                 | Needs::MetalRefuses(_) => (Retry::Never, Permanence::InputAndDevice),
             },
@@ -82,7 +77,7 @@ fn retry_and_permanence_table() {
             // `BudgetExceeded` and `InternalKind` are the front end's crate's, `#[non_exhaustive]`
             // there: each variant this pinned version has is listed, and a new one fails here until
             // it is.
-            Error::Budget(other) => panic!("classify {other:?} (D14)"),
+            Error::Budget(other) => panic!("classify {other:?}"),
             Error::Cancelled => (Retry::Later, Permanence::Never),
             // Every `InternalKind`: the host allocator failing a reservation the ledger admitted is
             // transient; every other kind is an invariant of the emitted, profile-dependent module.
@@ -93,7 +88,7 @@ fn retry_and_permanence_table() {
                 | InternalKind::RequirementsExceedProfile
                 | InternalKind::Panic
                 | InternalKind::Invariant => (Retry::Never, Permanence::InputAndDevice),
-                other => panic!("classify {other:?} (D14)"),
+                other => panic!("classify {other:?}"),
             },
         };
         assert_eq!(err.retry(), retry, "{err:?}");

@@ -2,8 +2,8 @@
 //! shadowed texture (`shadow.rs`) and also writes the same buffer's bytes another way (through the
 //! buffer, a texture buffer, or another texture over them). A copy back of the shadow would replace
 //! the other write's bytes with the shadow's, where Metal keeps both writes when they touch
-//! different bytes (TOB probe 1's `k.two_ways_disjoint` and `k.two_ways_gap`, M3 Max and M4), so
-//! the bytes the command changed through the texture are merged into the buffer's instead:
+//! different bytes (Metal probe cases `k.two_ways_disjoint` and `k.two_ways_gap`, M3 Max and M4),
+//! so the bytes the command changed through the texture are merged into the buffer's instead:
 //!
 //! - **Kept.** Before the command, after its copies in, the shadow's texels are copied into the
 //!   *kept* part of a scratch buffer, laid out as in the buffer from the texture's first byte.
@@ -34,6 +34,7 @@ use super::shadow::{ShadowCopies, ShadowSource};
 use super::tracker::{Access, Barrier, Use, UseRange};
 use super::values::ResourceOptions;
 use super::Device;
+use crate::device::functions::Vk;
 use ash::vk;
 use metal2vulkan::bind::ShadowMergeModule;
 use std::ops::Range;
@@ -227,7 +228,7 @@ impl ShadowMerge {
     /// scratch are live until it completes, and an image is in the `GENERAL` layout.
     pub(super) unsafe fn record_keep(
         &self,
-        device: &ash::Device,
+        device: &Vk,
         command_buffer: vk::CommandBuffer,
         copies: &ShadowCopies,
     ) {
@@ -243,7 +244,7 @@ impl ShadowMerge {
     /// As `record_keep`, after the keep and the command it surrounds.
     pub(super) unsafe fn record_merge(
         &self,
-        device: &ash::Device,
+        device: &Vk,
         command_buffer: vk::CommandBuffer,
         copies: &ShadowCopies,
     ) {

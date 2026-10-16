@@ -59,6 +59,7 @@ fn case(tag: u8, name: &str) -> AuthoredCase {
         }),
         draw: None,
         tessellation: None,
+        mesh_draw: None,
         output: OutputSelection::Buffer {
             binding: 0,
             offset: 0,
@@ -74,6 +75,7 @@ fn case(tag: u8, name: &str) -> AuthoredCase {
         authored_by: None,
         public_source: None,
         no_effect: None,
+        creation_bound: None,
     };
     case.case_id = case.computed_case_id().unwrap();
     case

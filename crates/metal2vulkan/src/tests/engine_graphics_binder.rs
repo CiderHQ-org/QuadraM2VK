@@ -37,7 +37,7 @@ use crate::device::profile::{Containment, Robustness};
 use crate::device::{Device, DeviceDescription, DevicePolicy};
 use crate::error::{BindError, DescriptorError, Error, Feature};
 use crate::library::Library;
-use crate::metal::sampler::SamplerWord;
+use crate::metal::sampler::{SamplerUse, SamplerWord};
 use crate::metal::{
     self, PixelFormat, SamplerMinMagFilter, SamplerMipFilter, SamplerReductionMode, TextureType,
     VertexFormat,
@@ -582,7 +582,7 @@ fn an_indexed_draw_past_its_index_buffer_is_bounded() {
     };
     let mut seen = [false; 2];
     for (stem, dev, robust) in devices {
-        // `vk12-floor`, `vk12-bare`, and `roadmap-2022` refuse the pipeline's depth attachment.
+        // `vk12-floor` and `roadmap-2022` refuse the pipeline's depth attachment.
         let Ok(p) = render_pipeline(&dev, &bc) else {
             continue;
         };
@@ -1629,8 +1629,9 @@ fn sampled_textures_and_runtime_samplers() {
         );
         let r = p.plan(&dev, &minmax.shape());
         assert!(r.is_ok(), "{stem}: {r:?}");
-        // Anisotropy and LOD clamps are checked at plan time from the shape, with the verdict
-        // `sampler_desc` gives the bound descriptor.
+        // LOD clamps are checked at plan time from the shape, with the verdict `sampler_desc`
+        // gives the bound descriptor; anisotropy plans on every device, its Vulkan sampler
+        // isotropic without `samplerAnisotropy`.
         let with = |f: &dyn Fn(&mut SamplerDescriptor)| {
             let mut s = sampler(true, SamplerReductionMode::WeightedAverage);
             f(&mut s.desc);
@@ -1642,27 +1643,20 @@ fn sampled_textures_and_runtime_samplers() {
             (p.plan(&dev, &state.shape()), s.desc)
         };
         let (r, desc) = with(&|d| d.max_anisotropy = 8);
-        if dev.profile().fields().images.sampler_anisotropy {
-            assert!(r.is_ok(), "{stem}: {r:?}");
-        } else {
-            assert!(
-                matches!(&r, Err(BindError::Unsupported(u)) if u.feature == Feature::SamplerAnisotropy),
-                "{stem}: {r:?}"
-            );
-            assert_eq!(
-                r.map(|_| ()),
-                sampler_desc(
-                    &dev,
-                    &desc,
-                    false,
-                    false,
-                    crate::metal::sampler::OpaqueBlackBorder::Stated,
-                    None
-                )
-                .map(|_| ()),
-                "{stem}"
-            );
-        }
+        assert!(r.is_ok(), "{stem}: {r:?}");
+        let made = sampler_desc(
+            &dev,
+            &desc,
+            SamplerUse::default(),
+            crate::metal::sampler::OpaqueBlackBorder::Stated,
+            None,
+        )
+        .unwrap_or_else(|e| panic!("{stem}: {e:?}"));
+        assert_eq!(
+            made.max_anisotropy.is_some(),
+            dev.profile().fields().images.sampler_anisotropy,
+            "{stem}"
+        );
         let (r, _) = with(&|d| {
             d.lod_min_clamp = 4.0;
             d.lod_max_clamp = 1.0;

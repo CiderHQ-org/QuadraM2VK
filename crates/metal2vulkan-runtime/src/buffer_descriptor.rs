@@ -230,10 +230,7 @@ impl Device {
                     memory,
                     length,
                     resource_options,
-                    HostRelease {
-                        deallocator,
-                        keep_alive,
-                    },
+                    HostRelease::new(deallocator, keep_alive),
                     place,
                     false,
                 )
@@ -263,8 +260,10 @@ impl Device {
     /// `newBufferWithBytesNoCopy:length:options:deallocator:`, its pointer wrapped in `memory`
     /// ([`HostMemory`]): a buffer whose bytes are the caller's `length` bytes at
     /// `memory.pointer()` (module docs of `host_memory.rs`). `deallocator` runs once, with the
-    /// pointer and `length`, when the buffer's last reference goes: on a runtime thread when that
-    /// is a command buffer completing. A refused call never runs it.
+    /// pointer and `length`, when the buffer's last reference goes: where that is a command
+    /// buffer's, in its release on its queue's handler thread, after its completed handlers, where
+    /// a wait in it for that command buffer returns at once, as Metal's does. A refused call never
+    /// runs it.
     ///
     /// The pages are imported here, as Metal wires them when it makes the buffer: the GPU uses
     /// the pages mapped at the pointer now, and memory the device cannot import is refused here,
@@ -305,10 +304,7 @@ impl Device {
                 memory,
                 length,
                 options,
-                HostRelease {
-                    deallocator,
-                    keep_alive: None,
-                },
+                HostRelease::new(deallocator, None),
                 AddressPlacement::Any.into(),
                 false,
             )
@@ -462,12 +458,18 @@ impl Device {
         // SAFETY: the window lies in the pages of the caller's bytes, which stay mapped
         // (`HostMemory::new`), and the source's pieces hold them (`HostMemory::with_dma_buf`). No
         // lock of the runtime's is held.
-        let (buffer, memory) =
+        // A no-copy buffer's own import of dma-bufs keeps them, so the device may release it
+        // while idle and import them again (`host_residency.rs`); a heap's keeps none.
+        let (buffer, memory, again) =
             match unsafe { self.import_by_pointer(importer, pointer, length, host, class) }? {
-                Ok(made) => made,
+                Ok((buffer, memory)) => (buffer, memory, None),
                 // SAFETY: as above.
                 Err(source) => unsafe {
-                    self.import_from_source(call, importer, pointer, length, &window, source, class)
+                    let keep = !of_heap;
+                    let window = &window;
+                    self.import_from_source(
+                        call, importer, pointer, length, window, source, class, keep,
+                    )
                 }?,
             };
         let (address, reserved) = match self.place_window(placement, &window, length) {
@@ -491,6 +493,8 @@ impl Device {
             release,
             of_heap,
             mirror: None,
+            #[cfg(unix)]
+            again,
         });
         // A buffer over the bytes another no-copy buffer covers joins it (`host_aliases.rs`), and
         // a later one lies in its import.
@@ -576,43 +580,45 @@ impl Device {
         };
         // SAFETY: the window lies in the pages of the caller's bytes, which stay mapped
         // (`HostMemory::new`, `HostMemory::with_dma_buf`).
-        let (host, placement, remade) = match unsafe {
-            self.import_by_pointer(importer, pointer, length, host, class)
-        }? {
-            Ok((host, placement)) => (host, placement, Remade::default()),
-            // The source is called with no lock of the runtime's held (`dma_buf.rs`): the
-            // textures over detached bytes are let go of meanwhile, and must be settled again
-            // after it.
-            Err(source) => {
-                let was_settled = settled.take().is_some();
-                // SAFETY: as above, and the source's pieces hold the pages
-                // (`HostMemory::with_dma_buf`).
-                let (host, placement) = unsafe {
-                    self.import_from_source(call, importer, pointer, length, &window, source, class)
-                }?;
-                // The aliasing images of the textures over the bytes, made over dma-bufs of their
-                // own pages, each of which the source makes: still with no lock held.
-                let again = self.dma_buf_images_again(&aliases, heap, &placement, pointer);
-                let remade = match again {
-                    Ok(remade) => remade,
-                    Err(error) => {
-                        self.discard_import(host, placement);
-                        return Err(error);
-                    }
-                };
-                if was_settled {
-                    match cell.settled() {
-                        Some(again) => settled = Some(again),
-                        None => {
-                            drop(remade);
+        let (host, placement, remade) =
+            match unsafe { self.import_by_pointer(importer, pointer, length, host, class) }? {
+                Ok((host, placement)) => (host, placement, Remade::default()),
+                // The source is called with no lock of the runtime's held (`dma_buf.rs`): the
+                // textures over detached bytes are let go of meanwhile, and must be settled again
+                // after it.
+                Err(source) => {
+                    let was_settled = settled.take().is_some();
+                    // SAFETY: as above, and the source's pieces hold the pages
+                    // (`HostMemory::with_dma_buf`).
+                    let (host, placement, _) = unsafe {
+                        let window = &window;
+                        self.import_from_source(
+                            call, importer, pointer, length, window, source, class, false,
+                        )
+                    }?;
+                    // The aliasing images of the textures over the bytes, made over dma-bufs of their
+                    // own pages, each of which the source makes: still with no lock held.
+                    let again = self.dma_buf_images_again(&aliases, heap, &placement, pointer);
+                    let remade = match again {
+                        Ok(remade) => remade,
+                        Err(error) => {
                             self.discard_import(host, placement);
-                            return Err(detached_textures());
+                            return Err(error);
+                        }
+                    };
+                    if was_settled {
+                        match cell.settled() {
+                            Some(again) => settled = Some(again),
+                            None => {
+                                drop(remade);
+                                self.discard_import(host, placement);
+                                return Err(detached_textures());
+                            }
                         }
                     }
+                    (host, placement, remade)
                 }
-                (host, placement, remade)
-            }
-        };
+            };
         let pages = self.host_pages(
             host.raw,
             placement,
@@ -846,7 +852,8 @@ impl Device {
         _window: &ImportWindow,
         source: Source,
         _class: MemoryClass,
-    ) -> Result<(HostBuffer, Placement), Error> {
+        _keep: bool,
+    ) -> Result<(HostBuffer, Placement, Option<std::convert::Infallible>), Error> {
         match source {}
     }
 

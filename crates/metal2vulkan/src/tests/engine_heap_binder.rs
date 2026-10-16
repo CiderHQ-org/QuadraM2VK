@@ -58,7 +58,7 @@ use crate::memory::handles::{
 use crate::memory::leaf::k32;
 use crate::memory::views;
 use crate::metal::format::storage_image_choice;
-use crate::metal::sampler::SamplerWord;
+use crate::metal::sampler::{OpaqueBlackBorder, SamplerUse, SamplerWord};
 use crate::metal::{
     PixelFormat, RenderStages, SamplerAddressMode, SamplerBorderColor, SamplerMinMagFilter,
     TextureType, TextureUsage,
@@ -1309,6 +1309,7 @@ fn a_runtime_heap_sampler_is_written_with_the_bound_sampler() {
             slot: s0,
             compare: false,
             integer: false,
+            cube_gradient: false,
             opaque_black: crate::metal::sampler::OpaqueBlackBorder::Stated,
         }]
     );
@@ -2095,6 +2096,7 @@ fn argument_samplers_fill_their_arrays_and_tables() {
                 index: e as u32 - 1,
                 compare: false,
                 integer: false,
+                cube_gradient: false,
             }
         );
     }
@@ -2159,6 +2161,7 @@ fn argument_samplers_fill_their_arrays_and_tables() {
                         index: 0,
                         compare: use_.0,
                         integer: use_.1,
+                        cube_gradient: false,
                     },
                     "{entry}"
                 );
@@ -2208,10 +2211,11 @@ declare { <4 x float>, i8 } @air.sample_texture_cube_grad.v4f32(ptr addrspace(1)
 /// one included: its array has no cube-gradient bit, and an isotropic sampler plans with the
 /// array's `ArgumentSampler` writes, as an anisotropic one does. On a driver whose cube-gradient
 /// route is not measured (`moltenvk-m3` without its measured route) the kernel keeps the isotropic
-/// form, its array carries the bit, and the plan refuses an anisotropic listed sampler there
-/// (`SamplerAnisotropy NotImplemented`) while the same sampler plans for a use without cube
-/// gradients (`argument_sampler_sample`). Run on every committed profile that compiles the use, and
-/// the unmeasured description.
+/// form, its array carries the bit, and the plan takes an anisotropic listed sampler there too,
+/// made isotropic for that use (where the refusal was): the array's writes carry the bit, and
+/// `sampler_desc` makes the `VkSampler` of a write with it isotropic. It takes the same sampler for
+/// a use without cube gradients (`argument_sampler_sample`). Run on every committed profile that
+/// compiles the use, and the unmeasured description.
 #[test]
 fn a_cube_gradient_use_takes_an_anisotropic_argument_sampler_by_its_word() {
     let Some(bc) = assemble("argument_sampler_cube_grad", CUBE_GRADIENT) else {
@@ -2241,7 +2245,7 @@ fn a_cube_gradient_use_takes_an_anisotropic_argument_sampler_by_its_word() {
     )
     .expect("device");
     devices.push(("unmeasured".to_string(), unmeasured));
-    let (mut taken_on, mut refused_on) = (0, 0);
+    let (mut taken_on, mut isotropic_on) = (0, 0);
     for (stem, dev) in devices {
         let lib = Library::from_air(&bc).expect("library");
         let f = lib.function("argument_sampler_cube_grad").expect("entry");
@@ -2303,6 +2307,7 @@ fn a_cube_gradient_use_takes_an_anisotropic_argument_sampler_by_its_word() {
                 index: 0,
                 compare: false,
                 integer: false,
+                cube_gradient: isotropic,
             },
             "{stem}"
         );
@@ -2318,19 +2323,37 @@ fn a_cube_gradient_use_takes_an_anisotropic_argument_sampler_by_its_word() {
                     index: 0,
                     compare: false,
                     integer: false,
+                    cube_gradient: false,
                 },
                 "{stem}"
             );
             taken_on += 1;
             continue;
         }
-        let refused = planned.expect_err("an anisotropic sampler for the isotropic form");
-        assert!(
-            matches!(&refused, BindError::Unsupported(u)
-                if u.feature == Feature::SamplerAnisotropy && u.needs == Needs::NotImplemented),
-            "{stem}: {refused:?}"
+        let plan = planned
+            .unwrap_or_else(|e| panic!("{stem}: an anisotropic sampler, made isotropic: {e}"));
+        let write = sampler_writes(&plan, arrays[0].0)[1].clone();
+        assert_eq!(
+            write,
+            WriteSource::ArgumentSampler {
+                index: 0,
+                compare: false,
+                integer: false,
+                cube_gradient: true,
+            },
+            "{stem}"
         );
-        refused_on += 1;
+        // The binder's `VkSampler` of that write (the runtime's and the executor's) is isotropic;
+        // the same sampler for a use without the bit keeps its anisotropy.
+        let made = |cube_gradient| {
+            let use_ = SamplerUse::new(false, false).with_cube_gradient(cube_gradient);
+            crate::bind::sampler_desc(&dev, &anisotropic, use_, OpaqueBlackBorder::Stated, None)
+                .unwrap_or_else(|e| panic!("{stem}: {e}"))
+                .max_anisotropy
+        };
+        assert_eq!(made(true), None, "{stem}");
+        assert!(made(false).is_some(), "{stem}");
+        isotropic_on += 1;
         let Some(plain) = argument_sampler_pipeline(&dev, "argument_sampler_sample") else {
             return;
         };
@@ -2342,7 +2365,10 @@ fn a_cube_gradient_use_takes_an_anisotropic_argument_sampler_by_its_word() {
             .unwrap_or_else(|e| panic!("{stem}: the same sampler without cube gradients: {e}"));
     }
     assert!(taken_on > 0, "no profile took the anisotropic sampler");
-    assert_eq!(refused_on, 1, "the unmeasured description refuses it");
+    assert_eq!(
+        isotropic_on, 1,
+        "the unmeasured description takes it isotropic"
+    );
 }
 
 /// A plan depends on the argument samplers only through their shape (`ArgumentSamplersShape`: the

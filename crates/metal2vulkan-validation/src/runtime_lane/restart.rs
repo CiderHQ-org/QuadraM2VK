@@ -3,11 +3,11 @@
 //! and its fragment function adds one 8-bit unit through an additive blend, so each pixel of an 8x1
 //! `RGBA8Unorm` target cleared to zero counts the primitives that cover it.
 //!
-//! Each case's counts are those Metal stored (RT6 Metal probe 15c, an M4 with macOS 27.0.1, with
-//! and without API validation): an indexed strip of triangles or lines restarts at the all-ones
-//! index of its index type, `ushort` and `uint`, and a list of triangles or lines, or points,
-//! draws the all-ones index as a vertex (the fixture places a `uint` all-ones where vertex 65535
-//! is). Another index splits nothing.
+//! Each case's counts are those Metal stored (a Metal probe on an M4 with macOS 27.0.1, with and
+//! without API validation): an indexed strip of triangles or lines restarts at the all-ones index
+//! of its index type, `ushort` and `uint`, and a list of triangles or lines, or points, draws the
+//! all-ones index as a vertex (the fixture places a `uint` all-ones where vertex 65535 is). Another
+//! index splits nothing.
 //!
 //! After `set_primitive_restart_enabled` (Apple's `setPrimitiveRestartEnabled:index:`), an indexed
 //! strip restarts at the call's index `k'` alone (EVs RFX-probe5-m4 and RFX-probe6-m4, an M4 with

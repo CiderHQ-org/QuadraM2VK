@@ -1,10 +1,9 @@
-// Owned fixture (WP-CFB, DESIGN D364): the functions WP-CFB Metal probe 2's passes drew with
-// (custom sample positions with a depth or stencil attachment, and the store action
-// `MTLStoreActionCustomSampleDepthStore`), so each pass of the runtime's lane asks the question
-// the probe measured: each vertex where buffer 0 holds it, its depth included, so a pass stores a
-// plane of depths whose value at each sample tells where the sample lies; a fragment function
-// that writes white, and one that writes nothing. Written for this repository; no third-party
-// source. Loop-free.
+// Owned fixture: the functions a Metal probe's passes drew with (custom sample positions with a
+// depth or stencil attachment, and the store action `MTLStoreActionCustomSampleDepthStore`), so
+// each pass of the runtime's lane asks the question the probe measured: each vertex where buffer 0
+// holds it, its depth included, so a pass stores a plane of depths whose value at each sample tells
+// where the sample lies; a fragment function that writes white, and one that writes nothing.
+// Written for this repository; no third-party source. Loop-free.
 #include <metal_stdlib>
 using namespace metal;
 

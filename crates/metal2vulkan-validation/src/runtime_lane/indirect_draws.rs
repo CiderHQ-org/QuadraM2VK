@@ -1,16 +1,16 @@
 //! Device tests of indirect draws (its third part) on the device the cfg selects, under the
 //! validation layer.
 //!
-//! Each draw is one RT6 Metal probe 5 measured (an M4 with macOS 27.0.1, each case with and
+//! Each draw is one that a Metal probe measured (an M4 with macOS 27.0.1, each case with and
 //! without Metal's API validation), drawn with the owned fixture `rt6_render_state`'s fullscreen
 //! triangle (vertices 0 to 2; vertex 3 and up land outside the target) into a 4² target, and
-//! compared with the texels Metal stored: the arguments' vertex start, index start, base vertex
-//! and the index buffer offset are taken; no instances or no vertices draw nothing; arguments a
-//! blit wrote earlier in the command buffer are the ones drawn. The indexed form draws on every
-//! device: where nothing bounds its index fetch (no `robustBufferAccess2`) through the index bounds
-//! pass. Misaligned argument and index offsets, which Metal's validation stops, draw what plain
-//! Metal drew from the offset rounded down; arguments past the buffer, which plain Metal reads past
-//! it, are refused typed.
+//! compared with the texels Metal stored: the arguments' vertex start, index start, base vertex and
+//! the index buffer offset are taken; no instances or no vertices draw nothing; arguments a blit
+//! wrote earlier in the command buffer are the ones drawn. The indexed form draws on every device:
+//! where nothing bounds its index fetch (no `robustBufferAccess2`) through the index bounds pass.
+//! Misaligned argument and index offsets, which Metal's validation stops, draw what plain Metal
+//! drew from the offset rounded down; arguments past the buffer, which plain Metal reads past it,
+//! are refused typed.
 //!
 //! An indexed indirect draw whose arguments or indices an earlier draw of the encoder writes (the
 //! rasterization-disabled `icb_render_replay_template`) draws as a Metal probe measured (an M3 Max

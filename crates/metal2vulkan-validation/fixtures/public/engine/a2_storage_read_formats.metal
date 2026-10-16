@@ -1,5 +1,5 @@
-// Owned fixture (WP-A2, DESIGN D127): reads of `read_write` textures per bound pixel format
-// (DESIGN D25, D62.5, D68.4). A storage read of a format the shader does not declare needs
+// Owned fixture: reads of `read_write` textures per bound pixel format
+//. A storage read of a format the shader does not declare needs
 // `shaderStorageImageReadWithoutFormat` and the format's `STORAGE_READ_WITHOUT_FORMAT` feature in
 // Vulkan; what Metal returns for each format (unorm conversion, half denormals, signed zero,
 // infinities, NaN, 8- and 16-bit integer sign extension) is the reading. The cases bind different

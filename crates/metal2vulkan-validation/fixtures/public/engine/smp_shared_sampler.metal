@@ -1,4 +1,4 @@
-// Owned fixture (WP-SMP, DESIGN D299): a fragment function that samples two 16-texture arrays
+// Owned fixture: a fragment function that samples two 16-texture arrays
 // through one constexpr sampler. Where their 32 combined image samplers exceed the stage's
 // samplers (moltenvk-m3 and lunarg-desktop-baseline-2023 have 16) both arrays share the stage's
 // one separate sampler; elsewhere they stay combined, and the vk12 profiles, whose 16 sampled

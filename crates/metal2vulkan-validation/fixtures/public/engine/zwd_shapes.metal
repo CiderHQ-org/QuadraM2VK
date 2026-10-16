@@ -1,4 +1,4 @@
-// Owned fixture (WP-ZIN2): a compositor's antialiased shapes, as a window server draws an alert
+// Owned fixture: a compositor's antialiased shapes, as a window server draws an alert
 // panel's rounded corners and a title bar's round buttons by their coverage. `zwd_quad` places two
 // triangles over a shape's box given in pixels, two pixels wider each way for its soft edge, in a
 // target of the given size. Each fragment function returns the shape's premultiplied color times

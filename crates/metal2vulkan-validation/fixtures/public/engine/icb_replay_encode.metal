@@ -1,4 +1,4 @@
-// Owned fixture (WP-K14b, DESIGN D211): a kernel whose only effect is the compute commands it
+// Owned fixture: a kernel whose only effect is the compute commands it
 // encodes. Thread `tid` encodes command `tid`: the pipeline state of its argument buffer, the
 // constant `params` window and the device `out` window at 256 * tid bytes as kernel buffers 0
 // and 1, a 32-byte threadgroup length, a dispatch of 64 threads in groups of 8 (as threadgroups

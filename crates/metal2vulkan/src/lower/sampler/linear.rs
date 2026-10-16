@@ -569,7 +569,7 @@ pub(super) fn select(
     let offset = match offset {
         None => None,
         Some(Offset::Const(k)) => Some(k.clone()),
-        Some(Offset::Dynamic(_)) => return Ok(None),
+        Some(Offset::Dynamic(..)) => return Ok(None),
     };
     if clamped || observed {
         return Ok(None);

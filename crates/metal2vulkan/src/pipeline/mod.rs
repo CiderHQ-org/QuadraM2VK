@@ -116,9 +116,9 @@ pub use descriptor::{
     VertexAttributeDescriptor, VertexBufferLayoutDescriptor, VertexDescriptor,
 };
 pub use graphics::{
-    BlendState, ColorAttachmentState, FragmentImageblock, GraphicsState, ImageblockMechanism,
-    InputAttachmentUse, ShaderTestsUse, ShadowStencilUse, StandInUse, StandInView,
-    StorageAttachmentUse, StorageAttachmentView, TessellationState,
+    BlendState, ColorAttachmentState, EmulatedTessellation, FragmentImageblock, GraphicsState,
+    ImageblockMechanism, InputAttachmentUse, ShaderTestsUse, ShadowStencilUse, StandInUse,
+    StandInView, StorageAttachmentUse, StorageAttachmentView, TessellationState,
 };
 pub use interface::{
     AccessSet, AttributeFetch, BufferForm, BufferKind, BufferSlot, DescriptorView, MeshRecords,
@@ -131,10 +131,10 @@ pub use layout::{
 };
 pub use link::heap_unused_while_pending;
 pub use lower_inputs::{
-    AliasView, AmplificationDraws, BlendEquation, CaptureForm, ChannelWrite, ExtendedRangeColor,
-    FactorLane, FetchedAttachment, FramebufferFetchInputs, HalfOutputLane, LoweringInputs,
-    RotatedBlendForm, StorageImageChoice, StorageImageClass, VertexFetch, VertexFetchProjection,
-    ViewportCompensation,
+    AliasView, AmplificationDraws, BlendEquation, CaptureForm, ChannelWrite, ColorGroup,
+    ExtendedRangeColor, FactorLane, FetchedAttachment, FramebufferFetchInputs, HalfOutputLane,
+    LoweringInputs, RotatedBlendForm, StorageImageChoice, StorageImageClass, VertexFetch,
+    VertexFetchProjection, ViewportCompensation,
 };
 pub use table::FunctionHandle;
 // The vocabulary the pipeline surface reaches: render-pipeline keys, runtime facts and their
@@ -148,7 +148,8 @@ pub use facts::{Mechanism, RuntimeFact, UniformViewChoice};
 pub use sym::{
     AccelerationStructureLevel, AirUserKey, Axis, CombinedSampler, HandleClass, ImageAccess,
     ImageDim, ImageHandleClass, PushField, ResourceKind, ResourceSlot, SampledType, SamplerRef,
-    SlotClass, SlotRef, SpecKey, Stage, StorageFormatClass, Symbol, SyntheticBinding, VaryingKey,
+    SlotClass, SlotRef, SnapshotForm, SpecKey, Stage, StorageFormatClass, Symbol, SyntheticBinding,
+    VaryingKey,
 };
 pub use vertex::{PulledAttribute, VertexAttribute, VertexBinding, VertexInputState, VertexStride};
 

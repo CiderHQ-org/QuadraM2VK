@@ -5,7 +5,9 @@
 //! and `deviceID`. A device's defects are in its properties
 //! ([`DeviceProperties::driver_defects`](super::DeviceProperties::driver_defects)), and what a
 //! defect breaks is taken another way where an exact one exists, else refused there, typed
-//! ([`Needs::RuntimeDriverDefect`]), never run wrong.
+//! ([`Needs::RuntimeDriverDefect`]), never run wrong unannounced: only where a refusal would
+//! withhold a feature of the families the device claims (a row of the feature table,
+//! `families/features.rs`) does it run, announced as a degradation.
 //!
 //! Each defect lists the drivers that have it and, for each, the measured identities a probe found
 //! clean: a GPU (`deviceID`) at one release, which the device layer measured
@@ -208,6 +210,29 @@ pub(super) struct Affected {
 ///   bits; gem10): known broken through 26.2.4; 26.0.8 unprobed. Nothing is refused: no such
 ///   image of a height that is no multiple of 4 is made there (`dma_buf.rs`'s
 ///   `explicit_plane_rows`), and the texture takes its shadow.
+///
+/// `OcclusionCountPerColorOutput`:
+/// - Mesa's ANV (`INTEL_OPEN_SOURCE_MESA`): a precise occlusion query counts each passing sample
+///   once per color output the fragment shader writes, where Vulkan's Sample Counting counts it
+///   once; write masks of 0, the query's command buffer and linked pipelines do not change it, and
+///   an imprecise query reads nonzero. Measured on 26.2.4 (driverVersion 0x6802004) on the Iris
+///   Xe (`deviceID` 0xa7a0; `runtime_lane::color_groups`): known broken through 26.2.4. Nothing
+///   is refused, since a refusal would withhold the Mac2 and Metal3 families: the draw runs,
+///   announced (`Degradation::VisibilityCountPerColor`).
+///
+/// `FreedAddressMemoryFailsPendingWork`:
+/// - MoltenVK (`MOLTENVK`): every encoder whose pipeline reads device addresses makes every buffer
+///   of `SHADER_DEVICE_ADDRESS` usage resident (`MVKDevice::encodeGPUAddressableBuffers`), in
+///   Metal command buffers that retain none of it (`retainedReferences` off where the device keeps
+///   its residency set), and `vkFreeMemory` lets go of the memory's Metal objects at once: a
+///   Metal command buffer encoded before and not yet run fails `Invalid Resource` (Metal's code
+///   9), its device then lost. Destroying the buffer alone, its memory kept, fails nothing.
+///   Read in 1.4.1's source, and measured on 1.4.1 (driverVersion 10401) on an M3 Max with macOS
+///   27.0.1: a bare-Vulkan program freeing an unused buffer's memory while a dispatch through a
+///   device address waits behind fills fails at once, and `runtime_lane::freed_memory`: known
+///   broken through 1.4.1. Nothing is refused: the runtime frees such memory once the batches
+///   submitted before it completed (`freed_memory.rs`). The program's own submissions through
+///   `CommandQueue::with_vk_queue` signal no timeline of the runtime's, so its frees wait for none.
 pub(super) const AFFECTED: &[Affected] = &[
     Affected {
         defect: RuntimeDriverDefect::MultisampledDepthStencilColourCopies,
@@ -271,10 +296,20 @@ pub(super) const AFFECTED: &[Affected] = &[
         clean: &[],
     },
     Affected {
+        defect: RuntimeDriverDefect::OcclusionCountPerColorOutput,
+        driver: DriverId::INTEL_OPEN_SOURCE_MESA,
+        clean: &[],
+    },
+    Affected {
         defect: RuntimeDriverDefect::ImplicitPreprocessAfterExecutionSet,
         driver: DriverId::MESA_RADV,
         // The Radeon 780M at 26.2.4, measured clean.
         clean: &[(0x15bf, (26 << 22) | (2 << 12) | 4)],
+    },
+    Affected {
+        defect: RuntimeDriverDefect::FreedAddressMemoryFailsPendingWork,
+        driver: DriverId::MOLTENVK,
+        clean: &[],
     },
 ];
 

@@ -1,6 +1,6 @@
-// Owned fixture (WP-FMX2, DESIGN D279): how Metal divides under each fast-math flag set, and how
-// `fast::sincos` answers past the last quadrant, compiled with the default fast math. WP-FMX's
-// probe (D253.2) found a fast `x / y` equal to `x` times Metal's fast `1 / y`, but its kernel
+// Owned fixture: how Metal divides under each fast-math flag set, and how
+// `fast::sincos` answers past the last quadrant, compiled with the default fast math. A Metal
+// probe found a fast `x / y` equal to `x` times Metal's fast `1 / y`, but its kernel
 // also divided by the same `y` elsewhere, which a compiler may turn into one reciprocal shared by
 // every quotient. Here each quotient divides by its own load of the divisor (every copy holds
 // the same value), so no division shares its divisor, except in words 10 and 11:
@@ -25,7 +25,7 @@
 // thread), so every path into the switch bypasses its declaration and Clang emits no lifetime
 // marker for it (as in trn_math_fast.metal): LLVM 22 and later read a marker in a one-argument
 // form, so a fixture holding one may decode to other type numbers under each `llvm-as` major a
-// gate assembles it with (DESIGN D306).
+// gate assembles it with.
 #include <metal_stdlib>
 using namespace metal;
 

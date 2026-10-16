@@ -1,12 +1,13 @@
 //! Device tests of blits that name textures over buffers on the device the cfg selects, under the
-//! validation layer. TOB probe 1's blit cases run on the runtime over Metal's bytes: a buffer whose
-//! byte `i` is `7i + 3`, holding 4x4 `RGBA8Unorm` textures at offset 256, two-slice linear arrays
-//! and 16-texel texture buffers, filled with texels that name themselves. Each case runs over an
-//! ordinary buffer and a no-copy one, at the probe's 32-byte rows and at 256-byte rows, so each
-//! layout takes the aliasing or the shadow form the device gives it. Every byte of every buffer and
-//! ordinary texture is checked against a model of Metal's measured answer: a copy moves texel rows
-//! as a copy through a temporary does, never the bytes between rows. The overlapping cases, which a
-//! model alone would not prove, also match the rows the probe recorded on the M4 and the M3 Max.
+//! validation layer. The blit cases of a Metal probe on the M3 Max and an M4 run on the runtime
+//! over Metal's bytes: a buffer whose byte `i` is `7i + 3`, holding 4x4 `RGBA8Unorm` textures at
+//! offset 256, two-slice linear arrays and 16-texel texture buffers, filled with texels that name
+//! themselves. Each case runs over an ordinary buffer and a no-copy one, at the probe's 32-byte
+//! rows and at 256-byte rows, so each layout takes the aliasing or the shadow form the device gives
+//! it. Every byte of every buffer and ordinary texture is checked against a model of Metal's
+//! measured answer: a copy moves texel rows as a copy through a temporary does, never the bytes
+//! between rows. The overlapping cases, which a model alone would not prove, also match the rows
+//! the probe recorded on the M4 and the M3 Max.
 
 use super::degrade_notices::{assert_made_once, forced, shared_in_system_memory};
 use super::host_memory::{no_copy, not_importable, Mapping};
@@ -382,11 +383,10 @@ fn on_device(test: impl FnOnce(&Device)) {
     );
 }
 
-/// The rows TOB probe 1 recorded (M4 and M3 Max alike) for its overlapping copies at 32-byte
-/// rows: a texture onto itself a texel down and right (`b.self_overlap`), a texture into one a
-/// row below over the same bytes and back (`b.t2t_overlap`, `b.t2t_overlap_rev`, five rows),
-/// and copies between the texture and its own buffer a texel apart (`b.b2t_overlap`,
-/// `b.t2b_overlap`).
+/// The rows a Metal probe recorded (M4 and M3 Max alike) for its overlapping copies at 32-byte
+/// rows: a texture onto itself a texel down and right (`b.self_overlap`), a texture into one a row
+/// below over the same bytes and back (`b.t2t_overlap`, `b.t2t_overlap_rev`, five rows), and copies
+/// between the texture and its own buffer a texel apart (`b.b2t_overlap`, `b.t2b_overlap`).
 const PROBE_SELF_OVERLAP: &str =
     "102040c0112041c1122042c2132043c3737a81888f969da4abb2b9c0c7ced5dc|\
 102144c4102040c0112041c1122042c2535a61686f767d848b9299a0a7aeb5bc|\
@@ -418,13 +418,13 @@ fn probe_rows(held: &Held, probe: Option<(&str, u64)>, what: &str) {
         assert_eq!(
             hex_rows(&held.bytes(), OFF, 32, n),
             rows,
-            "{what}: the rows TOB probe 1 recorded"
+            "{what}: the rows Metal's probe recorded"
         );
     }
 }
 
-/// TOB probe 1's blits between a 2D texture over a buffer (at `OFF`, rows `bpr` apart) and
-/// ordinary textures, other textures over buffers, the texture itself, and buffers.
+/// The probe's blits between a 2D texture over a buffer (at `OFF`, rows `bpr` apart) and ordinary
+/// textures, other textures over buffers, the texture itself, and buffers.
 fn texture_blits(device: &Device, kind: Kind, bpr: u64) {
     let new = || Held::new(device, kind).unwrap();
     let probe = |recorded: &'static str, n: u64| {
@@ -845,7 +845,7 @@ fn texture_buffer_blits(device: &Device, kind: Kind) {
     }
 }
 
-/// Every blit kind with textures over buffers moves Metal's bytes: TOB probe 1's cases, over an
+/// Every blit kind with textures over buffers moves Metal's bytes: the probe's cases, over an
 /// ordinary and a no-copy buffer, at 32- and 256-byte rows.
 #[test]
 fn blits_of_textures_over_buffers_move_metals_bytes() {
@@ -871,7 +871,7 @@ fn blits_of_textures_over_buffers_move_metals_bytes() {
 /// bytes of one buffer that overlap, which goes through a scratch buffer.
 pub(super) const OVERLAPS: [Degradation; 1] = [Degradation::OverlappingTexelCopy];
 
-/// A copy of a texture over a buffer onto itself a texel down and right (TOB probe 1's
+/// A copy of a texture over a buffer onto itself a texel down and right (probe case
 /// `b.self_overlap`), and of one into a texture a row further on over the same bytes
 /// (`b.t2t_overlap`), each in two command buffers, move the rows the probe recorded on the M4 and
 /// the M3 Max, and the device announces the overlap once ([`OVERLAPS`]), and where they force it

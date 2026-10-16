@@ -5,6 +5,12 @@
 //! memory type without coherence (Mesa 26.2.4 on Arrow Lake-S's Xe-LPG), where such images lay
 //! before, the GPU read stale 64-byte lines of them (4x4 texels of a Tile4 32-bit image;
 //! `runtime/src/memory.rs`, `host_cached`).
+//!
+//! A blit's command buffer that fails says why, with Metal's description of the failure
+//! (`CommandBuffer::error_description`). On the M3 Max this lane failed only beside
+//! `host_memory`'s lanes that fault the GPU on purpose, whose recovery fails another process's
+//! command buffers in flight (`Execution(1)`, "Discarded (victim of GPU error/recovery)"), so those
+//! lanes run alone (`.config/nextest.toml`).
 
 use super::{buffer_with, read_buffer, WAIT};
 use crate::runtime_lane::host_memory::on_device;
@@ -50,7 +56,12 @@ fn gpu_read(device: &Device, queue: &CommandQueue, texture: &Texture, side: u64)
     blit.end_encoding().unwrap();
     command_buffer.commit().unwrap();
     command_buffer.wait_until_completed_for(WAIT).unwrap();
-    assert_eq!(command_buffer.error(), None);
+    assert_eq!(
+        command_buffer.error(),
+        None,
+        "the blit's command buffer failed: {:?}",
+        command_buffer.error_description()
+    );
     read_buffer(&out, 0, len).unwrap()
 }
 
@@ -75,7 +86,12 @@ fn gpu_write(device: &Device, queue: &CommandQueue, texture: &Texture, side: u64
     blit.end_encoding().unwrap();
     command_buffer.commit().unwrap();
     command_buffer.wait_until_completed_for(WAIT).unwrap();
-    assert_eq!(command_buffer.error(), None);
+    assert_eq!(
+        command_buffer.error(),
+        None,
+        "the blit's command buffer failed: {:?}",
+        command_buffer.error_description()
+    );
 }
 
 /// The texels of `got` that differ from `want`'s, of a `side` x `side` 4-byte texel image: their

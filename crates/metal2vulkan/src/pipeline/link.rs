@@ -46,6 +46,7 @@
 
 pub mod contract;
 pub mod fetch;
+pub mod geometry;
 pub mod graphics;
 pub mod imageblock;
 pub mod mesh;
@@ -80,6 +81,7 @@ use crate::pipeline::interface::{PipelineInterface, StageDescriptor, StageInterf
 use crate::pipeline::layout::{
     BindingSource, DescriptorBinding, DescriptorSetLayout, PipelineLayout, PushConstantRange,
 };
+use crate::pipeline::lower_inputs::ColorGroup;
 use crate::pipeline::sym::{
     CombinedSampler, HandleClass, ResourceKind, ResourceSlot, SlotClass, SlotRef, SpecKey, Stage,
 };
@@ -141,10 +143,16 @@ impl LinkInputs {
     }
 
     /// A render pipeline of `desc`'s fixed-function state under `variant`'s pulled vertex
-    /// buffers.
-    pub fn render_variant(desc: &RenderPipelineDescriptor, variant: &VariantKey) -> LinkInputs {
+    /// buffers, the variant of color group `group` where it draws one, whose descriptor `desc`
+    /// holds the group's attachments alone (`pipeline::compile::color_group::descriptor`).
+    pub fn render_variant(
+        desc: &RenderPipelineDescriptor,
+        variant: &VariantKey,
+        group: Option<ColorGroup>,
+    ) -> LinkInputs {
         let mut r = RenderLinkInputs::from(desc);
         r.pulled_vertex_buffers = variant.pulled_vertex_buffers.clone();
+        r.color_group = group;
         LinkInputs::Render(Box::new(r))
     }
 
@@ -178,6 +186,10 @@ pub struct RenderLinkInputs {
     pub tessellation: Option<TessellationDescriptor>,
     /// `textureWriteRoundingMode`: the color writes the fragment stage rounds by.
     pub texture_write_rounding_mode: metal::TextureWriteRoundingMode,
+    /// The group of the pipeline's color attachments the variant draws, whose attachments
+    /// alone [`color_attachments`](Self::color_attachments) holds, at their locations
+    /// (`GraphicsState::color_group`); `None` where each attachment is at its own index.
+    pub color_group: Option<ColorGroup>,
 }
 
 impl RenderLinkInputs {
@@ -197,6 +209,7 @@ impl RenderLinkInputs {
             max_vertex_amplification_count: 1,
             tessellation: None,
             texture_write_rounding_mode: metal::TextureWriteRoundingMode::TowardZero,
+            color_group: None,
         }
     }
 }
@@ -223,6 +236,7 @@ impl From<&RenderPipelineDescriptor> for RenderLinkInputs {
             max_vertex_amplification_count: d.max_vertex_amplification_count,
             tessellation: d.tessellation,
             texture_write_rounding_mode: d.texture_write_rounding_mode,
+            color_group: None,
         }
     }
 }
@@ -259,6 +273,10 @@ pub struct Linked {
     /// The synthesized control stage of a tessellation pipeline, with its push fields placed: the
     /// compile API builds its vertex and control stages from it.
     pub control: Option<tessellation::control::Control>,
+    /// The synthesized geometry stages of a render pipeline whose fragment function reads
+    /// `[[barycentric_coord]]` as varyings, or whose vertex function selects its slice or
+    /// viewport through them ([`geometry`]): the compile API builds them.
+    pub geometry: Option<geometry::GeometryStages>,
 }
 
 impl SymbolTable for Linked {
@@ -278,8 +296,16 @@ pub fn link(
     check_stages(&ifaces, inputs)?;
     // A render pipeline whose vertex function is post-tessellation adds the synthesized vertex
     // and control stages: the control stage's factor and patch index buffers and push range.
+    // On a device without `tessellationShader` the vertex function draws the tessellator's
+    // triangles itself: no stage is added, and the pipeline states the emulation.
+    let emulated = match (inputs, ifaces.first().and_then(|i| i.tessellation)) {
+        (LinkInputs::Render(r), Some(stage)) if stage.emulated.is_some() => Some(
+            tessellation::emulated_state(r.tessellation.as_ref(), stage)?,
+        ),
+        _ => None,
+    };
     let plan = match (inputs, ifaces.first().and_then(|i| i.tessellation)) {
-        (LinkInputs::Render(r), Some(stage)) => {
+        (LinkInputs::Render(r), Some(stage)) if stage.emulated.is_none() => {
             tessellation::check_fragment(ifaces.get(1).copied())?;
             Some(tessellation::control_plan(
                 r.tessellation.as_ref(),
@@ -290,10 +316,34 @@ pub fn link(
         }
         _ => None,
     };
-    // An emulated mesh function's pipeline draws through a synthesized vertex stage, which reads
-    // the records the mesh stage writes.
+    // A fragment function that reads `[[barycentric_coord]]` as varyings, or a vertex function
+    // that selects its slice or viewport through them, draws through synthesized geometry stages,
+    // which write them.
+    let geometry = match inputs {
+        LinkInputs::Render(r) => geometry::plan(
+            &ifaces,
+            r.input_primitive_topology,
+            r.max_vertex_amplification_count,
+            false,
+            p,
+        )?,
+        LinkInputs::Mesh(r) => geometry::plan(
+            &ifaces,
+            r.input_primitive_topology,
+            r.max_vertex_amplification_count,
+            true,
+            p,
+        )?,
+        LinkInputs::Standalone | LinkInputs::Compute => None,
+    };
+    // A mesh function reads its payload within its object function's. An emulated mesh
+    // function's pipeline draws through a synthesized vertex stage, which reads the records the
+    // mesh stage writes.
     let records = match inputs {
-        LinkInputs::Mesh(_) => mesh::records(&ifaces)?,
+        LinkInputs::Mesh(_) => {
+            mesh::payload(&ifaces)?;
+            mesh::records(&ifaces)?
+        }
         _ => None,
     };
     let mut table = LinkTable::default();
@@ -323,15 +373,20 @@ pub fn link(
     };
     let specialization = specialize(&ifaces, &mut table)?;
     table.locations = varyings::assign(stages, p)?;
+    if let Some(g) = &geometry {
+        g.check_limits(&table.locations, p)?;
+    }
     let interface = pipeline_interface(&ifaces);
     let (vertex_input, graphics) = match inputs {
         LinkInputs::Render(r) => {
             let vs = ifaces.first().ok_or_else(|| missing_stage(Stage::Vertex))?;
-            let vi = match control {
-                Some(_) => tessellation::vertex_input_state(vs, r.vertex_descriptor.as_ref())?,
+            let vi = match (control, emulated) {
+                (Some(_), _) | (_, Some(_)) => {
+                    tessellation::vertex_input_state(vs, r.vertex_descriptor.as_ref())?
+                }
                 // A vertex function compiled in the indexed capture form pulled every attribute:
                 // its fact says so.
-                None => vertex::vertex_input_state(
+                (None, None) => vertex::vertex_input_state(
                     vs,
                     r.vertex_descriptor.as_ref(),
                     &r.pulled_vertex_buffers,
@@ -346,7 +401,19 @@ pub fn link(
                 )?,
             };
             let ts = control.map(|(plan, offset)| plan.state(offset));
-            let gs = render_state(r, vs, stages.get(1).copied(), &vi, ts, p)?;
+            let mut gs = render_state(r, vs, stages.get(1).copied(), &vi, ts, p)?;
+            // An emulated tessellation pipeline draws a triangle list, which no draw changes.
+            if let Some(e) = emulated {
+                gs.topology = vk::PrimitiveTopology::TRIANGLE_LIST;
+                gs.dynamic_states.retain(|d| {
+                    !matches!(
+                        *d,
+                        vk::DynamicState::PRIMITIVE_TOPOLOGY
+                            | vk::DynamicState::PRIMITIVE_RESTART_ENABLE
+                    )
+                });
+                gs.emulated_tessellation = Some(e);
+            }
             (vi, Some(gs))
         }
         // The mesh stage stands in the vertex stage's place; the fragment stage follows it.
@@ -389,6 +456,7 @@ pub fn link(
         graphics,
         specialization,
         control: control.map(|(plan, offset)| plan.control(offset)),
+        geometry,
     })
 }
 
@@ -586,6 +654,7 @@ fn binding_source(slot: ResourceSlot) -> BindingSource {
         },
         ResourceKind::RawTexture => BindingSource::RawTexture(metal(SlotClass::Texture)),
         ResourceKind::ExtendedShadow(color) => BindingSource::ExtendedShadow(color),
+        ResourceKind::SnapshotTexels(texture) => BindingSource::SnapshotTexels(texture),
     }
 }
 

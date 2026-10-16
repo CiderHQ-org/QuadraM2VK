@@ -21,7 +21,8 @@
 //! rounded once to `half`, nearest even (`h`):
 //!
 //! 1. `Min` and `Max`: `min(s, d)` and `max(s, d)`, the factors unread.
-//! 2. A zero factor drops its term: `0`, or `h(±S)` or `h(±D)` alone.
+//! 2. A zero factor drops its term: `0`, or `h(±S)` or `h(±D)` alone (but a 16-bit float
+//!    attachment's blend without fast math, [`Blend::half_float`]).
 //! 3. A factor of one: `h(±S ± D)`, one fused multiply-add.
 //! 4. Two products, added, where one's factor is `1 - z` and the other's operands hold `z`
 //!    (a lerp): `h(y + z · inner)`, `y` the first product's operand and `inner` the other
@@ -100,7 +101,7 @@ use super::{floats, per_lane_f, source_range, SRGB_SOURCE_RANGE};
 use crate::error::{Error, ExtendedRangeBlend, Feature, Unsupported};
 use crate::lower::arith::fma::{float_fma_exact, half_sum};
 use crate::lower::arith::legal::{FloatFmt, Form, Held};
-use crate::lower::arith::ops::{fsplat, ty};
+use crate::lower::arith::ops::{fsplat, splat, ty};
 use crate::lower::arith::texel_round::{f32_to_half, HalfRounding};
 use crate::metal::format::ExtendedRange;
 use crate::metal::{BlendFactor, BlendOperation, ColorWriteMask};
@@ -677,11 +678,13 @@ fn plan(
 /// The arithmetic of a lane class (alpha where `alpha`) of factors `fs` and `fd` under `op` in a
 /// module without fast math ([`BlendMath::Rounded`]), `opaque_` for a format without alpha:
 /// `min` or `max`; no term, one, or both terms' rounded products added and rounded
-/// ([`Arith::Rounded`]).
+/// ([`Arith::Rounded`]). Where `keep_zero` (a 16-bit float attachment's blend) a zero factor keeps
+/// its product, `x · 0`, in the sum ([`Class::zero_kept`]); elsewhere it leaves its term out,
+/// which an extended-range form's clamped operands and encode cannot tell apart.
 fn plan_rounded(
     (fs, fd, op): (BlendFactor, BlendFactor, BlendOperation),
     alpha: bool,
-    opaque_: bool,
+    (opaque_, keep_zero): (bool, bool),
 ) -> Result<Arith, Error> {
     let (s, d) = match alpha {
         true => (Atom::Sa, Atom::Da),
@@ -708,10 +711,10 @@ fn plan_rounded(
     }
     let (st, dt): (Term, Term) = ((s, nfs), (d, nfd));
     Ok(match (nfs == Node::Zero, nfd == Node::Zero) {
-        (true, true) => Arith::Zero,
-        (true, false) => Arith::Term { sign: pd, term: dt },
-        (false, true) => Arith::Term { sign: ps, term: st },
-        (false, false) => Arith::Rounded {
+        (true, true) if !keep_zero => Arith::Zero,
+        (true, false) if !keep_zero => Arith::Term { sign: pd, term: dt },
+        (false, true) if !keep_zero => Arith::Term { sign: ps, term: st },
+        _ => Arith::Rounded {
             source: (ps, st),
             destination: (pd, dt),
         },
@@ -741,14 +744,16 @@ fn planned(
     (float, math): (bool, BlendMath),
 ) -> Result<Blend, Error> {
     let has_alpha = !matches!(form, ExtendedRange::Bgr10 { .. });
-    planned_for(eq, (has_alpha, form.srgb()), written, (float, math))
+    planned_for(eq, (has_alpha, form.srgb(), false), written, (float, math))
 }
 
 /// [`planned`] for a format with an alpha channel where `has_alpha`, an `_sRGB` extended-range
-/// form where `srgb`.
+/// form where `srgb`, and a 16-bit float attachment's blend where `sixteen`
+/// ([`Blend::half_float`]), which takes fast math's color channels' blend color difference (an
+/// extended-range form refuses it).
 fn planned_for(
     eq: &BlendEquation,
-    (has_alpha, srgb): (bool, bool),
+    (has_alpha, srgb, sixteen): (bool, bool, bool),
     written: ColorWriteMask,
     (float, math): (bool, BlendMath),
 ) -> Result<Blend, Error> {
@@ -780,13 +785,13 @@ fn planned_for(
                 BlendOperation::Subtract | BlendOperation::ReverseSubtract
             ) && pair.contains(&BlendFactor::BlendColor)
                 && pair.contains(&BlendFactor::OneMinusBlendColor);
-            if fast && differs {
+            if fast && differs && !sixteen {
                 return Err(refused(ExtendedRangeBlend::ConstantColorDifference));
             }
             let f = (eq.source_rgb, eq.destination_rgb, eq.rgb_operation);
             Some(match math {
-                BlendMath::Rounded => plan_rounded(f, false, opaque_)?,
                 BlendMath::Fast => plan(f, false, &Shared::default(), opaque_, float)?,
+                BlendMath::Rounded => plan_rounded(f, false, (opaque_, sixteen))?,
             })
         }
     };
@@ -809,7 +814,7 @@ fn planned_for(
             }
             let f = (eq.source_alpha, eq.destination_alpha, eq.alpha_operation);
             Some(match math {
-                BlendMath::Rounded => plan_rounded(f, true, opaque_)?,
+                BlendMath::Rounded => plan_rounded(f, true, (opaque_, sixteen))?,
                 BlendMath::Fast => plan(f, true, &shared, opaque_, float)?,
             })
         }
@@ -890,20 +895,66 @@ impl Blend {
         }
     }
 
-    /// Metal's blend `eq` of a `half4` output of a module without fast math into a 16-bit float
-    /// attachment (`R16Float`, `RG16Float`, `RGBA16Float`) storing the channels `written` of four
-    /// (a channel the format lacks counts as written: the store drops it): the model's rounded
-    /// forms ([`BlendMath::Rounded`], the module docs), measured into those formats (EV FLT-hb2-m3:
-    /// the output's `half`, each factor, each product and the sum rounded to `half`, nearest even;
-    /// the blend color rounded to `half` before its one minus), computed by [`blend_half_float`]. A
-    /// factor of the second source is no form here (`Feature::ExtendedRangeBlend` `DualSource`):
-    /// its output is not planned beside the storage form's write.
-    pub fn half_float(eq: &BlendEquation, written: ColorWriteMask) -> Result<Blend, Error> {
-        let b = planned_for(eq, (true, false), written, (false, BlendMath::Rounded))?;
+    /// Metal's blend `eq` of a `half` or `float` output of a module of math `math` into a 16-bit
+    /// float attachment (`R16Float`, `RG16Float`, `RGBA16Float`) storing the channels `written` of
+    /// four (a channel the format lacks counts as written: the store drops it), in the arithmetic
+    /// of the output's type ([`BlendArith`]), computed by [`blend_half_float`]. Without fast math
+    /// the model's rounded forms ([`BlendMath::Rounded`], the module docs): each factor, each
+    /// product and the sum rounded to the arithmetic's type, nearest even, the blend color rounded
+    /// to `half` (a `half4` output) before its one minus (EV FLT-hb2-m3; and EVs FBL-sw1-m3 and
+    /// FBL-sw2-m3, plain Metal on the M3 Max under macOS 27.0.1: every one of 677 blend states of
+    /// one key for color and alpha and 1,350 of a key beside one minus the source alpha's, over
+    /// 16,384 pixels of loaded `half4` and `float4` outputs, every channel of each 16-bit float
+    /// format, and the 677 under four write masks that keep some channels of `RGBA16Float`). There a
+    /// factor of zero keeps its product `x · 0` in the sum, as IEEE 754 adds: a NaN where `x` is an
+    /// infinity or a NaN, else the other term, a zero sum `-0` only where both terms are `-0` (two
+    /// zero factors alike), every NaN the one Metal stores, `0x7e00` (EV FBL-zf1-m3: plain Metal on
+    /// the M3 Max under macOS 27.0.1, each operation with a zero factor beside each factor, color
+    /// and alpha, into `RGBA16Float` and `RG16Float` from `half4` and `float4` outputs, three seeds
+    /// of 16,384 pixels whose sources and texels hold signed zeros, infinities and NaNs among them:
+    /// every lane). `SourceAlphaSaturated` takes Metal's minimum under either math, a NaN operand
+    /// giving the other and two zeros `+0` ([`metal_min`]). Under fast math the fast forms of the
+    /// module docs, with nothing clamped: the blend color's one
+    /// minus `h(1 - c)` of a color channel and `h(1 - h(a))` of alpha in `half`, `1 - c` in `float`
+    /// (the same sweeps built under `MTLMathModeFast`: every class of the forms [`Blend::fitted`]
+    /// names, each channel of every state; the sum and lerp forms fit most states but not all). A
+    /// blend constant's difference (`BlendColor` with `OneMinusBlendColor`, `BlendAlpha` with
+    /// `OneMinusBlendAlpha`, under `Subtract` or `ReverseSubtract`) fuses the minuend's product and
+    /// rounds the subtrahend's first, the color channels' one minus beside `BlendColor` being of
+    /// its read, `h(1 - h(c))` in `half` (EV FBL-sw1-m3: each such state of both sweeps, every
+    /// channel of `half4` and `float4` outputs, signed zeros included; and EV FBL-nw1-m3 through
+    /// narrower outputs). A factor of the second source is no form here
+    /// (`Feature::ExtendedRangeBlend` `DualSource`): its output is not planned beside the storage
+    /// form's write.
+    pub fn half_float(
+        eq: &BlendEquation,
+        written: ColorWriteMask,
+        math: BlendMath,
+    ) -> Result<Blend, Error> {
+        let b = planned_for(eq, (true, false, true), written, (false, math))?;
         match b.reads_second() {
             true => Err(refused(ExtendedRangeBlend::DualSource)),
             false => Ok(b),
         }
+    }
+
+    /// Whether every class the blend stores takes a form the 16-bit float sweeps fit in every state
+    /// ([`Blend::half_float`]): the rounded forms without fast math; under fast math no term, one
+    /// term, one fused multiply-add, a minimum or maximum, or a blend constant's difference
+    /// ([`constant_difference`]). A fast-math blend of another form (a sum regrouped by a lerp or a
+    /// common factor, or another product rounded beside a fused one) fits most states but not every
+    /// one, so it is a near-equivalent.
+    pub fn fitted(&self) -> bool {
+        let fits = |a: &Arith| match self.math {
+            BlendMath::Rounded => true,
+            BlendMath::Fast => {
+                matches!(
+                    a,
+                    Arith::Zero | Arith::Term { .. } | Arith::Fused { .. } | Arith::MinMax { .. }
+                ) || constant_difference(a)
+            }
+        };
+        [&self.color, &self.alpha].into_iter().flatten().all(fits)
     }
 
     /// Whether the blend of an output of four lanes of `output` (`None` for another output) is
@@ -924,6 +975,17 @@ impl Blend {
             .into_iter()
             .flatten()
             .any(|a| nodes(a).into_iter().any(reads_constant))
+    }
+
+    /// Whether the color channels' arithmetic reads the source alpha as a factor (`SourceAlpha` or
+    /// `OneMinusSourceAlpha`; `SourceAlphaSaturated` reads it beside one minus the destination
+    /// alpha).
+    pub fn color_reads_source_alpha(&self) -> bool {
+        self.color.as_ref().is_some_and(|a| {
+            nodes(a)
+                .into_iter()
+                .any(|n| matches!(n, Node::Atom(Atom::Sa) | Node::OneMinus(Atom::Sa)))
+        })
     }
 
     /// Whether the blend reads the second source (the function's index-1 output).
@@ -951,7 +1013,7 @@ impl Blend {
         // A `float4` output's: the source's clamp and its rounding to `half`, and per class an
         // exact `float` multiply-add and a rounding more.
         const FLOAT_BASE: u32 = 12 * 6 + ROUND;
-        const FLOAT_FMA: u32 = 72 * 6 + ROUND;
+        const FLOAT_FMA: u32 = 92 * 6 + ROUND;
         let mut words = match self.float {
             true => BASE + FLOAT_BASE,
             false => BASE,
@@ -994,6 +1056,22 @@ impl Blend {
         }
         words
     }
+}
+
+/// Whether `a` is a difference of a blend constant's product and its one minus's (`BlendColor` with
+/// `OneMinusBlendColor`, `BlendAlpha` with `OneMinusBlendAlpha`, subtracted either way): the
+/// minuend's product fused, the subtrahend's rounded first ([`Arith::Contracted`] of terms of
+/// opposite signs), which a 16-bit float attachment's fast-math sweeps fit in every state
+/// ([`Blend::fitted`]; added, the same products are no such form).
+fn constant_difference(a: &Arith) -> bool {
+    let Arith::Contracted { rounded, fused } = a else {
+        return false;
+    };
+    let factors = [rounded.1 .1, fused.1 .1];
+    rounded.0 != fused.0
+        && [Atom::C, Atom::Ca]
+            .into_iter()
+            .any(|x| factors.contains(&Node::Atom(x)) && factors.contains(&Node::OneMinus(x)))
 }
 
 /// Whether `n` reads the blend color.
@@ -1058,6 +1136,9 @@ struct Inputs {
     sf: Option<Value>,
     math: BlendMath,
     s1: Option<Value>,
+    /// The arithmetic every rounding is to: `half` but a 16-bit float attachment's blend of a
+    /// `float4` output ([`BlendArith`]).
+    arith: BlendArith,
 }
 
 /// The values of one lane class, each node computed once.
@@ -1139,8 +1220,20 @@ impl<'a> Class<'a> {
     fn one_minus(&mut self, fb: &mut FunctionBuilder<'_>, x: Value) -> BResult<Value> {
         let f = self.lanes.floats();
         let one = fsplat(fb, f, 1.0)?;
+        if self.inputs.arith == BlendArith::Float {
+            return fb.binary_no_contraction(BinOp::FSub, one, x);
+        }
         let m = fb.binary(BinOp::FSub, one, x)?;
         f32_to_half(fb, f, m, HalfRounding::NearestEven)
+    }
+
+    /// `x · y`: in `float` arithmetic rounded to `float` on its own, never fused into a sum, its
+    /// zero signed on the bits ([`signed_product`]); a product of two `half`s is exact in `f32`.
+    fn mul(&self, fb: &mut FunctionBuilder<'_>, x: Value, y: Value) -> BResult<Value> {
+        match self.inputs.arith {
+            BlendArith::Float => signed_product(fb, self.lanes.floats(), x, y),
+            BlendArith::Half => fb.binary(BinOp::FMul, x, y),
+        }
     }
 
     fn node(&mut self, fb: &mut FunctionBuilder<'_>, n: Node) -> BResult<Value> {
@@ -1152,7 +1245,12 @@ impl<'a> Class<'a> {
             Node::Zero => fsplat(fb, f, 0.0)?,
             Node::One => fsplat(fb, f, 1.0)?,
             Node::Atom(a) => self.atom(fb, a)?,
-            Node::OneMinus(Atom::C) if self.inputs.math == BlendMath::Fast => {
+            // Under fast math the precomputed one minus, but beside `BlendColor` in its class (a
+            // 16-bit float attachment's difference, [`constant_difference`]) the one minus of
+            // `BlendColor`'s read, as below.
+            Node::OneMinus(Atom::C)
+                if self.inputs.math == BlendMath::Fast && !self.one_minus_of_read =>
+            {
                 let (_, m, _) = self.constant()?;
                 self.own(fb, m)?
             }
@@ -1178,7 +1276,7 @@ impl<'a> Class<'a> {
                 let sa = self.atom(fb, Atom::Sa)?;
                 let da = self.atom(fb, Atom::Da)?;
                 let m = self.one_minus(fb, da)?;
-                fb.glsl(GlslOp::FMin, &[sa, m])?
+                metal_min(fb, f, sa, m)?
             }
         };
         self.nodes.push((n, v));
@@ -1198,7 +1296,11 @@ impl<'a> Class<'a> {
     }
 
     fn round(&self, fb: &mut FunctionBuilder<'_>, x: Value) -> BResult<Value> {
-        f32_to_half(fb, self.lanes.floats(), x, HalfRounding::NearestEven)
+        match self.inputs.arith {
+            // Every `float` operation here is rounded already.
+            BlendArith::Float => Ok(x),
+            BlendArith::Half => f32_to_half(fb, self.lanes.floats(), x, HalfRounding::NearestEven),
+        }
     }
 
     /// `h(a · b + c)`: of `half` values exactly ([`half_sum`]); where the product or the addend
@@ -1212,6 +1314,9 @@ impl<'a> Class<'a> {
         [a, b, c]: [Value; 3],
     ) -> BResult<Value> {
         let f = self.lanes.floats();
+        if self.inputs.arith == BlendArith::Float {
+            return float_fma_exact(fb, f, a, b, c);
+        }
         let s = match (raw_product, raw_addend) {
             (true, _) => float_fma_exact(fb, f, a, b, c)?,
             (false, true) => {
@@ -1314,12 +1419,12 @@ impl<'a> Class<'a> {
                 let z = self.node(fb, *z)?;
                 // A product of two `half`s is exact in `f32`, one of an unrounded source rounded
                 // to `float` as Metal's is.
-                let p = fb.binary(BinOp::FMul, z, i)?;
+                let p = self.mul(fb, z, i)?;
                 self.round(fb, p)
             }
             Arith::Contracted { rounded, fused } => {
                 let [x, f] = self.signed(fb, *rounded)?;
-                let p = fb.binary(BinOp::FMul, x, f)?;
+                let p = self.mul(fb, x, f)?;
                 let r = self.round(fb, p)?;
                 let [x, f] = self.signed(fb, *fused)?;
                 self.fma(fb, (raw_term(&fused.1), false), [x, f, r])
@@ -1333,6 +1438,12 @@ impl<'a> Class<'a> {
                 let k = fb.binary_no_contraction(BinOp::FMul, x, f)?;
                 let s = fb.binary(BinOp::FAdd, k, r)?;
                 self.round(fb, s)
+            }
+            Arith::Rounded {
+                source,
+                destination,
+            } if source.1 .1 == Node::Zero || destination.1 .1 == Node::Zero => {
+                self.zero_kept(fb, *source, *destination)
             }
             Arith::Rounded {
                 source,
@@ -1355,11 +1466,160 @@ impl<'a> Class<'a> {
             Node::One if t.0 == Atom::Sf => self.round(fb, x),
             Node::One => Ok(x),
             _ => {
-                let p = fb.binary(BinOp::FMul, x, f)?;
+                let p = self.mul(fb, x, f)?;
                 self.round(fb, p)
             }
         }
     }
+
+    /// The bits of `sign · operand · 0` of `(sign, term)`, a term of factor zero, and whether it is
+    /// a NaN: the operand an infinity or a NaN, whose product with zero is a NaN; else the zero of
+    /// the signed operand's sign. Decided on the bits: a device may fold a product by a constant
+    /// zero to `+0` (a module without `SignedZeroInfNanPreserve`, MoltenVK's fast math), which
+    /// keeps neither the NaN nor the sign.
+    fn zero_product(
+        &mut self,
+        fb: &mut FunctionBuilder<'_>,
+        (sign, t): (i8, Term),
+    ) -> BResult<(Value, Value)> {
+        let f = self.lanes.floats();
+        let u = crate::lower::arith::narrow::u32_form(f);
+        let ut = ty(fb, u)?;
+        let x = self.atom(fb, t.0)?;
+        let xb = fb.convert(ConvOp::Bitcast, x, ut)?;
+        let magnitude = splat(fb, u, 0x7FFF_FFFF)?;
+        let infinity = splat(fb, u, 0x7F80_0000)?;
+        let sign_bit = splat(fb, u, 0x8000_0000)?;
+        let m = fb.binary(BinOp::BitwiseAnd, xb, magnitude)?;
+        let nan = fb.binary(BinOp::UGreaterThanEqual, m, infinity)?;
+        let z = fb.binary(BinOp::BitwiseAnd, xb, sign_bit)?;
+        let z = match sign < 0 {
+            true => fb.binary(BinOp::BitwiseXor, z, sign_bit)?,
+            false => z,
+        };
+        Ok((z, nan))
+    }
+
+    /// The bits of term `t`: a zero factor's product and whether it is a NaN
+    /// ([`zero_product`](Self::zero_product)), or the term rounded as
+    /// [`product`](Self::product) rounds it and `None`.
+    fn zero_or_product(
+        &mut self,
+        fb: &mut FunctionBuilder<'_>,
+        t: (i8, Term),
+    ) -> BResult<(Value, Option<Value>)> {
+        if t.1 .1 == Node::Zero {
+            let (z, nan) = self.zero_product(fb, t)?;
+            return Ok((z, Some(nan)));
+        }
+        let u = crate::lower::arith::narrow::u32_form(self.lanes.floats());
+        let ut = ty(fb, u)?;
+        let p = self.product(fb, t)?;
+        Ok((fb.convert(ConvOp::Bitcast, p, ut)?, None))
+    }
+
+    /// The sum of `a` and `b` where a factor of either is zero ([`Arith::Rounded`] of a 16-bit
+    /// float attachment's blend, [`plan_rounded`]'s `keep_zero`): a NaN where a zero factor's
+    /// product is one (its operand an infinity or a NaN) or the other term is one, the quiet NaN
+    /// of positive sign Metal stores (`0x7e00`) whatever the NaN's sign and payload; else the
+    /// other term, rounded as [`product`](Self::product) rounds it, but where that is a zero, the
+    /// zero IEEE 754 gives the sum: `-0` only where both are `-0`. Two zero factors sum their
+    /// zeros alike. The sum of a zero and a number is the number, so nothing rounds again. On the
+    /// bits, as [`zero_product`](Self::zero_product), and the NaN on a select, which no float mode
+    /// changes.
+    fn zero_kept(
+        &mut self,
+        fb: &mut FunctionBuilder<'_>,
+        a: (i8, Term),
+        b: (i8, Term),
+    ) -> BResult<Value> {
+        let f = self.lanes.floats();
+        let u = crate::lower::arith::narrow::u32_form(f);
+        let ft = ty(fb, f)?;
+        let magnitude = splat(fb, u, 0x7FFF_FFFF)?;
+        let zero = splat(fb, u, 0)?;
+        let (za, na) = self.zero_or_product(fb, a)?;
+        let (zb, nb) = self.zero_or_product(fb, b)?;
+        // Each zero factor's product is a signed zero (its magnitude bits clear): `x & z` is the
+        // zero both signs share where `x` is a zero too, so a zero other takes it and a number
+        // stays itself.
+        let (sum, nan) = match (na, nb) {
+            (Some(na), Some(nb)) => (
+                fb.binary(BinOp::BitwiseAnd, za, zb)?,
+                fb.binary(BinOp::LogicalOr, na, nb)?,
+            ),
+            (Some(n), None) | (None, Some(n)) => {
+                let (z, other) = match na.is_some() {
+                    true => (za, zb),
+                    false => (zb, za),
+                };
+                let shared = fb.binary(BinOp::BitwiseAnd, other, z)?;
+                let m = fb.binary(BinOp::BitwiseAnd, other, magnitude)?;
+                let is_zero = fb.binary(BinOp::IEqual, m, zero)?;
+                let infinity = splat(fb, u, 0x7F80_0000)?;
+                let other_nan = fb.binary(BinOp::UGreaterThan, m, infinity)?;
+                let nan = fb.binary(BinOp::LogicalOr, n, other_nan)?;
+                (fb.select(is_zero, shared, other)?, nan)
+            }
+            (None, None) => return Err(BuildError::Type(TypeRule::FunctionSignature)),
+        };
+        let quiet = splat(fb, u, 0x7FC0_0000)?;
+        let w = fb.select(nan, quiet, sum)?;
+        fb.convert(ConvOp::Bitcast, w, ft)
+    }
+}
+
+/// Metal's `min(x, y)` in `SourceAlphaSaturated` (lanes of form `f`): a NaN operand gives the other,
+/// and two zeros `+0` (EV FBL-zf1-m3: a 16-bit float attachment's blends, every lane of
+/// `min(sa, 1 - da)` where `sa` is `-0` beside the `+0` of a destination alpha of one, or either a
+/// NaN, under safe math; under fast math the same rule leaves no lane of `RGBA16Float` but a
+/// zero's sign off Metal's, and fewer of those than the device's `FMin` of `-0` first). The
+/// device's `FMin` is the minimum of two numbers, its answer for a NaN or a zero's sign the
+/// device's own (Vulkan leaves both undefined), so those lanes are decided on the bits and a
+/// select.
+fn metal_min(fb: &mut FunctionBuilder<'_>, f: Form, x: Value, y: Value) -> BResult<Value> {
+    let u = crate::lower::arith::narrow::u32_form(f);
+    let ut = ty(fb, u)?;
+    let m = fb.glsl(GlslOp::FMin, &[x, y])?;
+    let xb = fb.convert(ConvOp::Bitcast, x, ut)?;
+    let yb = fb.convert(ConvOp::Bitcast, y, ut)?;
+    let magnitude = splat(fb, u, 0x7FFF_FFFF)?;
+    let infinity = splat(fb, u, 0x7F80_0000)?;
+    let zero = splat(fb, u, 0)?;
+    let either = fb.binary(BinOp::BitwiseOr, xb, yb)?;
+    let either = fb.binary(BinOp::BitwiseAnd, either, magnitude)?;
+    let zeros = fb.binary(BinOp::IEqual, either, zero)?;
+    let plus = fsplat(fb, f, 0.0)?;
+    let m = fb.select(zeros, plus, m)?;
+    let xm = fb.binary(BinOp::BitwiseAnd, xb, magnitude)?;
+    let x_nan = fb.binary(BinOp::UGreaterThan, xm, infinity)?;
+    let m = fb.select(x_nan, y, m)?;
+    let ym = fb.binary(BinOp::BitwiseAnd, yb, magnitude)?;
+    let y_nan = fb.binary(BinOp::UGreaterThan, ym, infinity)?;
+    fb.select(y_nan, x, m)
+}
+
+/// `x · y` (`float` lanes of form `f`) rounded to `float` on its own (`NoContraction`), a zero
+/// product taking the sign IEEE 754 gives it (the factors' signs differing), put on the bits as an
+/// integer: SPIRV-Cross renders a `NoContraction` `OpFMul` as `fma(x, y, 0)`, whose zero is `+0`
+/// for a `-0` product (MoltenVK; see `fma::half_sum`), and a module without
+/// `SignedZeroInfNanPreserve` lets the device ignore the sign of a zero.
+fn signed_product(fb: &mut FunctionBuilder<'_>, f: Form, x: Value, y: Value) -> BResult<Value> {
+    let p = fb.binary_no_contraction(BinOp::FMul, x, y)?;
+    let u = crate::lower::arith::narrow::u32_form(f);
+    let (ut, ft) = (ty(fb, u)?, ty(fb, f)?);
+    let xb = fb.convert(ConvOp::Bitcast, x, ut)?;
+    let yb = fb.convert(ConvOp::Bitcast, y, ut)?;
+    let pb = fb.convert(ConvOp::Bitcast, p, ut)?;
+    let mag = splat(fb, u, 0x7FFF_FFFF)?;
+    let sign = splat(fb, u, 0x8000_0000)?;
+    let z = splat(fb, u, 0)?;
+    let m = fb.binary(BinOp::BitwiseAnd, pb, mag)?;
+    let zero = fb.binary(BinOp::IEqual, m, z)?;
+    let s = fb.binary(BinOp::BitwiseXor, xb, yb)?;
+    let s = fb.binary(BinOp::BitwiseAnd, s, sign)?;
+    let w = fb.select(zero, s, pb)?;
+    fb.convert(ConvOp::Bitcast, w, ft)
 }
 
 /// `s` (a `vec4`) clamped: its color lanes to `(lo, hi)`, alpha to `[0, 1]`, a NaN to the low
@@ -1437,32 +1697,67 @@ pub fn blend(
         sf,
         math: b.math,
         s1,
+        arith: BlendArith::Half,
     };
     lanes(fb, b, &inputs)
 }
 
-/// Metal's blend `b` ([`Blend::half_float`]) of a `half4` output `s` (a `vec4` of `f32` holding
-/// its `half`s) over `d`, the 16-bit float attachment's texel as the storage image reads it (a
-/// `vec4` of `f32`; a channel the format lacks reads 0, alpha 1), in a module without fast math:
-/// a `vec4` of `f32` holding each blended lane, a `half`. Nothing is clamped: the source is the
-/// `half` the function returns, and `color`, the encoder's blend color (a `uvec4` of its `f32`s'
-/// bits, `PushField::HalfBlendColor`, where `b` reads it, [`Blend::reads_constant`]), is rounded
-/// to `half`, nearest even, which
-/// `BlendColor` reads and whose one minus `OneMinusBlendColor` rounds again (EV FLT-hb2-m3: the
-/// one fit of `RGBA16Float`'s blue lane under a blend color of 0.9). `min` and `max` are the
-/// device's `FMin` and `FMax`, whose answer at a NaN is not Metal's measured one.
+/// The arithmetic Metal blends a 16-bit float attachment in: the type of the function's output
+/// (EV FBL-sw1-m3: a `half4` output's blend rounds each step to `half`, a `float4` one's to
+/// `float`, and the result converts to `half` as Metal's unblended write of a `float` does).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlendArith {
+    /// A `half4` output: each rounding is to `half`, nearest even.
+    Half,
+    /// A `float4` output: each rounding is to `float`, nearest even, and the result is a `float`,
+    /// which the caller converts to the format.
+    Float,
+}
+
+/// Metal's blend `b` ([`Blend::half_float`]) of a four-lane output `s` (a `vec4` of `f32`: a
+/// `half4` output's `half`s, or a `float4` one) over `d`, the 16-bit float attachment's texel as
+/// the storage image reads it (a `vec4` of `f32`; a channel the format lacks reads 0, alpha 1), in
+/// `arith`: a `vec4` of `f32` holding each blended lane, a `half` (`BlendArith::Half`) or a `float`
+/// (`BlendArith::Float`, which the caller converts to `half` by Metal's write). Nothing is clamped:
+/// the source is the value the function returns, and `color`, the encoder's blend color (a `uvec4`
+/// of its `f32`s' bits, `PushField::HalfBlendColor`, where `b` reads it,
+/// [`Blend::reads_constant`]), is what `BlendColor` reads, rounded to `half`, nearest even, in
+/// `half` arithmetic (EV FLT-hb2-m3: the one fit of `RGBA16Float`'s blue lane under a blend color
+/// of 0.9), and `OneMinusBlendColor` its one minus: without fast math of that read, under fast math
+/// `h(1 - c)` of a color channel's `f32` and `h(1 - h(a))` of alpha, but of that read beside
+/// `BlendColor` in a color class (EV FBL-sw1-m3). The `Min` and `Max` operations are the device's
+/// `FMin` and `FMax`, whose answer at a NaN is not Metal's measured one; `SourceAlphaSaturated`'s
+/// minimum is Metal's ([`metal_min`]). A `float` multiply-add is correctly
+/// rounded where no part of it underflows (`fma::float_fma_exact`).
 pub fn blend_half_float(
     fb: &mut FunctionBuilder<'_>,
     b: &Blend,
+    arith: BlendArith,
     (s, d): (Value, Value),
     color: Option<Value>,
 ) -> BResult<Value> {
+    let f = floats();
     let constant = match color {
         Some(words) => {
-            let ft = ty(fb, floats())?;
+            let ft = ty(fb, f)?;
             let c = fb.convert(ConvOp::Bitcast, words, ft)?;
-            let c = f32_to_half(fb, floats(), c, HalfRounding::NearestEven)?;
-            Some((c, c, c))
+            let one = fsplat(fb, f, 1.0)?;
+            match arith {
+                BlendArith::Half => {
+                    let h = f32_to_half(fb, f, c, HalfRounding::NearestEven)?;
+                    // Under fast math the color channels' one minus reads the `f32`, alpha's
+                    // its `half` (a color class beside `BlendColor` computes its own of the
+                    // `half`).
+                    let minus_of = fb.vector_shuffle(c, h, &[0, 1, 2, 7])?;
+                    let m = fb.binary(BinOp::FSub, one, minus_of)?;
+                    let m = f32_to_half(fb, f, m, HalfRounding::NearestEven)?;
+                    Some((h, m, h))
+                }
+                BlendArith::Float => {
+                    let m = fb.binary_no_contraction(BinOp::FSub, one, c)?;
+                    Some((c, m, c))
+                }
+            }
         }
         None => None,
     };
@@ -1473,6 +1768,7 @@ pub fn blend_half_float(
         sf: None,
         math: b.math,
         s1: None,
+        arith,
     };
     lanes(fb, b, &inputs)
 }

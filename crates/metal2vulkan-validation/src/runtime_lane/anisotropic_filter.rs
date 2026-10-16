@@ -16,14 +16,17 @@
 //! On a device without Metal's own sampler each sample takes the product's emulation of Metal's
 //! filter (the module `lower::sampler::anisotropic`), and the device announces
 //! `anisotropic-filter`; a device with Metal's sampler (MoltenVK) filters with it and announces
-//! nothing. Each sampler's answers stay within its bound in codes ([`Bound`]): for linear filters
-//! the emulation's residue, the device's own bilinear filter (under clamp to edge, lavapipe's
-//! 8-bit path) and Metal's level at `1/256` of a level; for nearest ones a tap a texel off
-//! Metal's where it sits within the spacing's residue of a texel edge. The test prints each
-//! sampler's largest and mean difference in codes and the share of channels a code or more off.
+//! nothing. The samplers run again with `samplerAnisotropy` withheld, under the lane's exact
+//! sampling and under native device sampling (the default policy's): every Vulkan sampler is then
+//! isotropic and every sample takes the emulation, MoltenVK's too, within the same bounds. Each
+//! sampler's answers stay within its bound in codes ([`Bound`]): for linear filters the
+//! emulation's residue, the device's own bilinear filter (under clamp to edge, lavapipe's 8-bit
+//! path) and Metal's level at `1/256` of a level; for nearest ones a tap a texel off Metal's where
+//! it sits within the spacing's residue of a texel edge. The test prints each sampler's largest
+//! and mean difference in codes and the share of channels a code or more off.
 
 use super::degrade_notices::counts;
-use super::{buffer_with, read_buffer, validated_device, Messages, ScratchCache, WAIT};
+use super::{buffer_with, read_buffer, validated_device_with, Messages, ScratchCache, WAIT};
 use crate::air_library::AirLibrary;
 use crate::gpu::TEST_DEVICE;
 use metal2vulkan::bind::SamplerDescriptor;
@@ -444,11 +447,46 @@ fn the_inputs_are_the_probes() {
 /// sampler's differences.
 #[test]
 fn anisotropic_samples_answer_within_their_bounds_of_metals() {
+    within_bounds("", |_| {}, false);
+}
+
+/// [`anisotropic_samples_answer_within_their_bounds_of_metals`] with `samplerAnisotropy` withheld,
+/// under the lane's exact sampling and under native device sampling (the default policy's): every
+/// sampler state is made, its Vulkan sampler isotropic, every sample takes the emulation on every
+/// device (`anisotropic-filter` announced, through Metal's own sampler too), and each sampler's
+/// answers stay within its bound of the M4's.
+#[test]
+fn without_sampler_anisotropy_the_emulation_answers_within_its_bounds() {
+    use metal2vulkan::device::{SamplingPolicy, VkFeature};
+    for sampling in [SamplingPolicy::Exact, SamplingPolicy::NativeDevice] {
+        let what = format!("samplerAnisotropy withheld, {sampling:?} sampling");
+        within_bounds(
+            &what,
+            |options| {
+                options.policy.sampling = sampling;
+                options
+                    .withheld_features
+                    .insert(VkFeature::SamplerAnisotropy);
+            },
+            true,
+        );
+    }
+}
+
+/// Every sampler's answers on the test device made with `adjust` beside the lane's options stay
+/// within its bound of the M4's, and the device announces `anisotropic-filter` where it lacks
+/// Metal's own sampler or `withheld` (`samplerAnisotropy` withheld): the emulation ran; never
+/// `device-anisotropic-filter`. Prints each sampler's differences under `setting`.
+fn within_bounds(
+    setting: &str,
+    adjust: impl FnOnce(&mut metal2vulkan_runtime::DeviceOptions),
+    withheld: bool,
+) {
     let cache = ScratchCache::new().unwrap();
     let messages = Messages::default();
     let (name, metal_sampler, outcomes) = {
-        let device = validated_device(TEST_DEVICE, &messages, cache.path()).unwrap();
-        let name = device.name().to_owned();
+        let device = validated_device_with(TEST_DEVICE, &messages, cache.path(), adjust).unwrap();
+        let name = format!("{} {setting}", device.name());
         let metal_sampler = device
             .compile_device()
             .profile()
@@ -498,8 +536,9 @@ fn anisotropic_samples_answer_within_their_bounds_of_metals() {
     }
     assert_eq!(
         announced.contains(&Degradation::AnisotropicFilter),
-        !metal_sampler,
-        "{name}: anisotropic-filter announced where the device lacks Metal's sampler"
+        !metal_sampler || withheld,
+        "{name}: anisotropic-filter announced where the device lacks Metal's sampler or the \
+         feature"
     );
     assert!(
         !announced.contains(&Degradation::DeviceAnisotropicFilter),

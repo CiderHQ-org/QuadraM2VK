@@ -1,4 +1,4 @@
-// Owned fixture (WP-FMX2, DESIGN D279): how Metal divides `half` values under fast math (the
+// Owned fixture: how Metal divides `half` values under fast math (the
 // default). The `fdiv half` of `x / y` carries every fast-math flag; whether Metal rounds the
 // quotient once to `half`, rounds a `float` quotient to `half`, or multiplies by a reciprocal
 // rounded to `half` first is what the lanes separate. Each quotient divides by its own load of

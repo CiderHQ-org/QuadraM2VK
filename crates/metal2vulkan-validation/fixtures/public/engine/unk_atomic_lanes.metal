@@ -1,4 +1,4 @@
-// Owned fixture (WP-UNK, DESIGN D283): the probe of what Metal's texture atomics return in every
+// Owned fixture: the probe of what Metal's texture atomics return in every
 // lane of their `vec<T, 4>` results, and what a compare-exchange leaves in every lane of
 // `expected`. Thread t works on texel (t, 0) of an r32uint and an r32sint read_write 2D texture:
 // it fetch-adds, fetch-ors, exchanges, loads, compare-exchanges with a stale and then the current

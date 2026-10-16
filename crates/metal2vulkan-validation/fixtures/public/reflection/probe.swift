@@ -1,8 +1,8 @@
-// The probe that recorded metal-answers.txt (DESIGN D311 item 5, S2). Owned code, written for this
-// repository. Build it with `xcrun swiftc -O probe.swift -o probe`, build each fixture into
-// <dir>/<fixture>.metallib with the compiler driver (`xcrun metal -x metal - -o
-// <dir>/<fixture>.metallib < <fixture>.metal`, which writes the reflection Metal's library answers
-// from; `metallib` of `.air` files does not), then run one case per process:
+// The probe that recorded metal-answers.txt. Owned code, written for this repository. Build it with
+// `xcrun swiftc -O probe.swift -o probe`, build each fixture into <dir>/<fixture>.metallib with the
+// compiler driver (`xcrun metal -x metal - -o <dir>/<fixture>.metallib < <fixture>.metal`, which
+// writes the reflection Metal's library answers from; `metallib` of `.air` files does not), then
+// run one case per process:
 //   probe <dir> list     prints every case name
 //   probe <dir> <case>   prints the case's lines
 // metal-answers.txt is the cases' outputs in `list` order. Pipeline creation only; nothing is
@@ -453,11 +453,11 @@ func bindingEncoders(_ fixture: String, _ kernel: String, _ offsets: Bool, _ onl
         }
     }
 }
-// The bindings no earlier case measured (WP-RTL, docs/TODO.md 8.27): an explicit imageblock in a
-// tile function and in a compute kernel, a fragment function's imageblock data, render pipeline
-// states inside an argument buffer, implicit indices after gated arguments, indices a function
-// constant computes, and descriptor attributes whose buffer has no layout (each recorded without
-// API validation; their runs under MTL_DEBUG_LAYER=1 are recorded in the answers' header).
+// The bindings no earlier case measured: an explicit imageblock in a tile function and in a compute
+// kernel, a fragment function's imageblock data, render pipeline states inside an argument buffer,
+// implicit indices after gated arguments, indices a function constant computes, and descriptor
+// attributes whose buffer has no layout (each recorded without API validation; their runs under
+// MTL_DEBUG_LAYER=1 are recorded in the answers' header).
 func leftoversGate(_ gate: Bool) -> MTLFunctionConstantValues {
     let c = MTLFunctionConstantValues()
     var g = gate
@@ -491,16 +491,15 @@ cases += [
     ("vertex_no_layout_unread", { renderOf(function("vertex_inputs", "reflection_unread"), function("vertex_inputs", "reflection_solid"), vertexDescriptor(two, [(0, 16)])) }),
     ("stage_in_no_layout", { stageIn([(0, .float4, 0, 1), (1, .uint, 0, 2)], [(1, 16)]) }),
 ]
-// Visible function tables inside an argument buffer (WP-RFL, docs/TODO.md 8.27).
+// Visible function tables inside an argument buffer.
 cases += [
     ("tables_in_arguments", { kernel("tables_in_arguments", "reflection_tables_in_arguments") }),
 ]
-// A user annotation (WP-RFL, docs/TODO.md 8.27).
+// A user annotation.
 cases += [
     ("annotated", { kernel("annotations", "reflection_annotated") }),
 ]
-// A vertex input a function constant leaves unread: the attribute and the pipeline's buffer
-// (WP-RFL, docs/TODO.md 8.27).
+// A vertex input a function constant leaves unread: the attribute and the pipeline's buffer.
 func branchRead(_ read: Bool) -> MTLFunction { function("specialized_reads", "reflection_branch_read", useUV(read)) }
 cases += [
     ("specialized_branch_false", { properties(branchRead(false)) }),
@@ -508,7 +507,7 @@ cases += [
     ("render_branch_false", { renderOf(branchRead(false), function("specialized_reads", "reflection_branch_solid"), vertexDescriptor(two, [(0, 16), (1, 8)])) }),
     ("render_branch_true", { renderOf(branchRead(true), function("specialized_reads", "reflection_branch_solid"), vertexDescriptor(two, [(0, 16), (1, 8)])) }),
 ]
-// A mesh render pipeline with and without an object function (WP-RFL, docs/TODO.md 8.27).
+// A mesh render pipeline with and without an object function.
 func meshPipeline(_ object: Bool) {
     let d = MTLMeshRenderPipelineDescriptor()
     if object { d.objectFunction = function("mesh_functions", "reflection_object") }
@@ -526,7 +525,7 @@ cases += [
 ]
 // A kernel's stage inputs, a post-tessellation function's control-point and per-patch inputs, and
 // argument bindings of each kind that a function constant leaves unread: the attributes and the
-// pipelines' bindings (WP-RRX, docs/TODO.md 8.27).
+// pipelines' bindings.
 func gatedKernel(_ read: Bool) -> MTLFunction { function("specialized_inputs", "reflection_gated_stage_in", useUV(read)) }
 func gatedTessellation(_ read: Bool) -> MTLFunction { function("specialized_inputs", "reflection_gated_tessellation", useUV(read)) }
 func gatedStageIn(_ read: Bool) {

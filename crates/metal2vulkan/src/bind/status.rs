@@ -4,8 +4,9 @@
 //! with [`ExecutionStatus::initial`] before the command buffer's first use and reads it back with
 //! [`ExecutionStatus::decode`] after the last one (a `SHADER_WRITE -> HOST_READ` barrier first);
 //! the resident-set miss counter, the indirect clamp, the device replay's preprocess, the index
-//! bounds pass, an absent argument's read, the mesh scan, a sample through a cubic argument
-//! sampler, the capture settle, and a sequentially consistent fence write the words named here.
+//! bounds pass, an absent argument's read, the mesh and tessellation scans, a sample through a
+//! cubic argument sampler, the capture settle, and a sequentially consistent fence write the words
+//! named here.
 
 /// The `ExecutionStatus` buffer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -33,6 +34,8 @@ impl ExecutionStatus {
             u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
         };
         let bits = StatusBits(word(StatusWord::Status));
+        let tessellation_first = bits.contains(StatusBits::TESSELLATION_RECORDS_OVERFLOW)
+            && word(StatusWord::MeshFaultObjects) == 0;
         StatusReport {
             overflow: bits.contains(StatusBits::OVERFLOW),
             resident_miss: bits.contains(StatusBits::RESIDENT_MISS),
@@ -43,13 +46,28 @@ impl ExecutionStatus {
             absent_argument_read: bits.contains(StatusBits::ABSENT_ARGUMENT_READ),
             cubic_argument_sampler: bits.contains(StatusBits::CUBIC_ARGUMENT_SAMPLER),
             captured_reach_unmeasured: bits.contains(StatusBits::CAPTURED_REACH_UNMEASURED),
-            mesh_records_overflow: bits.contains(StatusBits::MESH_RECORDS_OVERFLOW).then(|| {
-                MeshRecordsFault {
-                    draw: word(StatusWord::MeshFaultDraw),
-                    object_threadgroups: word(StatusWord::MeshFaultObjects),
-                    mesh_threadgroups: word(StatusWord::MeshFaultGroups),
+            mesh_records_overflow: (bits.contains(StatusBits::MESH_RECORDS_OVERFLOW)).then(|| {
+                // The fault words are the first records fault's: a tessellation draw's when its
+                // object threadgroups word is 0 (a scanned mesh draw's is at least 1), which
+                // names no mesh draw.
+                match tessellation_first {
+                    false => MeshRecordsFault {
+                        draw: word(StatusWord::MeshFaultDraw),
+                        object_threadgroups: word(StatusWord::MeshFaultObjects),
+                        mesh_threadgroups: word(StatusWord::MeshFaultGroups),
+                    },
+                    true => MeshRecordsFault::default(),
                 }
             }),
+            tessellation_records_overflow: bits
+                .contains(StatusBits::TESSELLATION_RECORDS_OVERFLOW)
+                .then(|| match tessellation_first {
+                    true => TessellationRecordsFault {
+                        draw: word(StatusWord::MeshFaultDraw),
+                        records: word(StatusWord::MeshFaultGroups),
+                    },
+                    false => TessellationRecordsFault::default(),
+                }),
         }
     }
 }
@@ -79,8 +97,15 @@ pub struct StatusReport {
     pub absent_argument_read: bool,
     /// A mesh scan found no room in the command buffer's records pool for an emulated mesh
     /// draw's records, or the draw's vertices passed a `u32` (`bind::MeshScanModule`): such draws
-    /// drew nothing. The first one, as the scan saw it.
+    /// drew nothing. The first one, as the scan saw it, where it was the command buffer's first
+    /// records fault; a fault of all zeros where a tessellation draw's was.
     pub mesh_records_overflow: Option<MeshRecordsFault>,
+    /// A tessellation scan found no room in the command buffer's records pool for an emulated
+    /// tessellation draw's records, or the draw's records passed a `u32`
+    /// (`bind::TessellationScanModule`): such draws drew nothing. The first one, as the scan saw
+    /// it, where it was the command buffer's first records fault; a fault of all zeros where a
+    /// mesh draw's was.
+    pub tessellation_records_overflow: Option<TessellationRecordsFault>,
     /// A function sampled through an argument buffer's sampler whose min or mag filter is
     /// `Cubic`, whose bicubic filter it does not emulate there
     /// (`RuntimeFact::CubicArgumentSampler`): no result of the command buffer is then Metal's.
@@ -105,6 +130,17 @@ pub struct MeshRecordsFault {
     pub mesh_threadgroups: u32,
 }
 
+/// The first emulated tessellation draw of a command buffer that drew nothing because its records
+/// did not fit (`StatusReport::tessellation_records_overflow`).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct TessellationRecordsFault {
+    /// The consumer's number for the draw (the work buffer's `DRAW_ID` word).
+    pub draw: u32,
+    /// The records the draw needed (`patchCount · instanceCount`), saturated at `u32::MAX`.
+    pub records: u32,
+}
+
 /// A word of the `ExecutionStatus` buffer.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -118,12 +154,13 @@ pub enum StatusWord {
     /// The words of the command buffer's mesh records pool its scans reserved
     /// (`bind::MeshScanModule`). Initial 0.
     MeshRecordsCursor,
-    /// The consumer's number for the first emulated mesh draw whose records did not fit
-    /// ([`StatusBits::MESH_RECORDS_OVERFLOW`]). Initial 0.
+    /// The consumer's number for the command buffer's first emulated mesh or tessellation draw
+    /// whose records did not fit ([`StatusBits::RECORDS_FAULTS`]). Initial 0.
     MeshFaultDraw,
-    /// That draw's object threadgroups. Initial 0.
+    /// That draw's object threadgroups, 0 for a tessellation draw. Initial 0.
     MeshFaultObjects,
-    /// The mesh threadgroups that draw needed, saturated. Initial 0.
+    /// The mesh threadgroups, or the tessellation records, that draw needed, saturated. Initial
+    /// 0.
     MeshFaultGroups,
     /// The word every sequentially consistent fence of the command buffer increments with an
     /// acquire-release atomic at the fence's scope (`lower::sync::barrier::seq_cst_order`), so
@@ -184,7 +221,8 @@ impl StatusBits {
     pub const ABSENT_ARGUMENT_READ: StatusBits = StatusBits(1 << 4);
     /// A mesh scan found no room in the command buffer's records pool for an emulated mesh
     /// draw's records, or the draw's vertices passed a `u32`, and the draw drew nothing
-    /// (`bind::MeshScanModule`); the fault words name the first such draw.
+    /// (`bind::MeshScanModule`); the fault words name the command buffer's first records fault of
+    /// either kind.
     pub const MESH_RECORDS_OVERFLOW: StatusBits = StatusBits(1 << 5);
     /// A function sampled, gathered, or queried through a sampler an argument buffer holds whose
     /// min or mag filter is `Cubic`, whose bicubic filter it does not emulate there
@@ -195,6 +233,16 @@ impl StatusBits {
     /// unmeasured, and set every tile of the pass's mask (`bind::CaptureSettleModule`): the pass
     /// takes the announced fallback.
     pub const CAPTURED_REACH_UNMEASURED: StatusBits = StatusBits(1 << 7);
+    /// A tessellation scan found no room in the command buffer's records pool for an emulated
+    /// tessellation draw's records, or the draw's records passed a `u32`, and the draw drew
+    /// nothing (`bind::TessellationScanModule`); the fault words name the command buffer's first
+    /// records fault of either kind.
+    pub const TESSELLATION_RECORDS_OVERFLOW: StatusBits = StatusBits(1 << 8);
+    /// Either records fault: the command buffer's first one of either kind writes the fault
+    /// words.
+    pub const RECORDS_FAULTS: StatusBits = StatusBits(
+        StatusBits::MESH_RECORDS_OVERFLOW.0 | StatusBits::TESSELLATION_RECORDS_OVERFLOW.0,
+    );
 
     /// Every bit in `other` is set in `self`.
     pub const fn contains(self, other: StatusBits) -> bool {

@@ -1,4 +1,4 @@
-// Owned fixture (WP-A3, DESIGN D2.3, control Q3, D128): threads return before a threadgroup
+// Owned fixture: threads return before a threadgroup
 // barrier and between two barriers; the threads that remain exchange words through threadgroup
 // memory across each barrier. Threads t >= limits[0] return before the first barrier, threads
 // t >= limits[1] (limits[1] <= limits[0]) between the two; each thread writes out[t] once, on the

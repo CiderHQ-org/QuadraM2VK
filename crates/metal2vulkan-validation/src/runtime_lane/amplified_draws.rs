@@ -4,9 +4,9 @@
 //! amplification `a`. An `R32Uint` 2D array of 4 slices holds 0xEE in every slice first; a layered
 //! pass from a slice clears its layers to 0x11 or loads them, and each draw sets (or not) the
 //! encoder's amplification count and view mappings first. Each slice is compared with the texels
-//! Metal stored for the same functions and passes (RT6 Metal probe 13, an M4 with macOS 27.0.1; AMP
-//! Metal probe 1, the M3 Max with macOS 26.7 and an M4 with macOS 27.0.1, alike; each with and
-//! without API validation): amplification `a` renders the layer of the pass its render target
+//! Metal stored for the same functions and passes (a Metal probe on an M4 with macOS 27.0.1;
+//! another Metal probe on the M3 Max with macOS 26.7 and an M4 with macOS 27.0.1, alike; each with
+//! and without API validation): amplification `a` renders the layer of the pass its render target
 //! offset (plus the slice the vertex function chooses) names, below the pass's
 //! `renderTargetArrayLength`, else the first; the viewport its viewport offset (plus the one the
 //! function selects) names, below the encoder's viewport count, else the first, through that
@@ -121,7 +121,7 @@ enum Visibility {
     After(VisibilityResultMode),
 }
 
-/// One pass, as RT6 Metal probe 13 and AMP Metal probe 1 drew it.
+/// One pass, as the Metal probes on the M3 Max and an M4 drew it.
 #[derive(Clone, Copy)]
 struct Case {
     name: &'static str,
@@ -817,10 +817,10 @@ fn as_views() -> Vec<(Case, Stored)> {
     ]
 }
 
-/// A count above a pipeline's `maxVertexAmplificationCount` of 2 or more, which Metal's
-/// validation stops at the draw, draws that many amplifications, as plain Metal drew them
-/// (a Metal probe `amp_3_on_2`, `amp_4_on_2`, `amp_4_on_3`, an M4 with macOS 27.0.1, RT6 probe 13's
-/// functions): each into the layer its mapping names, as views.
+/// A count above a pipeline's `maxVertexAmplificationCount` of 2 or more, which Metal's validation
+/// stops at the draw, draws that many amplifications, as plain Metal drew them (a Metal probe
+/// `amp_3_on_2`, `amp_4_on_2`, `amp_4_on_3`, an M4 with macOS 27.0.1, the probe's functions): each
+/// into the layer its mapping names, as views.
 #[test]
 fn a_count_above_the_pipeline_s_maximum_draws_as_metal() {
     const THREE: Draw = Draw {
@@ -867,11 +867,12 @@ fn a_count_above_the_pipeline_s_maximum_draws_as_metal() {
 }
 
 /// What multiview does not draw as Metal does draws one amplification at a time and stores Metal's
-/// texels (AMP Metal probe 1): every amplification into one layer (`nil` mappings, the same offset
-/// twice, offsets past a pass of length 0, 1 or 2), the last drawn winning; layers out of order or
-/// apart; viewport offsets, folded onto the first viewport and its scissor rectangle at or past the
-/// viewport count; and a pipeline that reads or chooses its slice amplified or moved, whose
-/// fragment function reads the slice and the viewport plus the offsets, unfolded.
+/// texels (a Metal probe on the M3 Max and an M4): every amplification into one layer (`nil`
+/// mappings, the same offset twice, offsets past a pass of length 0, 1 or 2), the last drawn
+/// winning; layers out of order or apart; viewport offsets, folded onto the first viewport and its
+/// scissor rectangle at or past the viewport count; and a pipeline that reads or chooses its slice
+/// amplified or moved, whose fragment function reads the slice and the viewport plus the offsets,
+/// unfolded.
 #[test]
 fn what_multiview_does_not_express_draws_one_amplification_at_a_time() {
     let layered = Case {
@@ -1120,10 +1121,10 @@ fn what_multiview_does_not_express_draws_one_amplification_at_a_time() {
     ]);
 }
 
-/// A visibility result over amplified draws counts the samples of every amplification, as one
-/// query over draws of one amplification each does (AMP Metal probe 1: 16 for one amplification
-/// of the 16-pixel target, 32 for two into two layers or into one, and with a depth test; 1 for
-/// `Boolean`). A mode set after a draw amplified as views leaves its texels as Metal's.
+/// A visibility result over amplified draws counts the samples of every amplification, as one query
+/// over draws of one amplification each does (a Metal probe on the M3 Max and an M4: 16 for one
+/// amplification of the 16-pixel target, 32 for two into two layers or into one, and with a depth
+/// test; 1 for `Boolean`). A mode set after a draw amplified as views leaves its texels as Metal's.
 #[test]
 fn a_visibility_result_counts_every_amplification() {
     use VisibilityResultMode::{Boolean, Counting};
@@ -1216,10 +1217,10 @@ fn a_visibility_result_counts_every_amplification() {
     );
 }
 
-/// What Metal's validation stops and plain Metal's answer does not settle is `Invalid` (RT6 Metal
-/// probe 13: "Vertex Amplification Count (3) must be between (inclusive) 1 and the maximum vertex
-/// amplification count specified in the pipeline state (2)"; AMP Metal probe 1 alike): at the
-/// draw a count above a pipeline's maximum of 1 (plain Metal stored garbage, probe 13
+/// What Metal's validation stops and plain Metal's answer does not settle is `Invalid` (a Metal
+/// probe on an M4: "Vertex Amplification Count (3) must be between (inclusive) 1 and the maximum
+/// vertex amplification count specified in the pipeline state (2)"; the M3 Max alike): at the draw
+/// a count above a pipeline's maximum of 1 (plain Metal stored garbage, probe case
 /// `amp2_pipeline1`, a probe `amp_3_on_1`) or above Metal's 8 (unmeasured), and at the setter too
 /// few mappings. A count of 0 draws nothing, as plain Metal draws it, and one above a larger
 /// maximum draws (`a_count_above_the_pipeline_s_maximum_draws_as_metal`). Each refusal records
@@ -1319,13 +1320,74 @@ fn an_amplified_draw_is_refused_as_typed() {
     );
 }
 
+/// On a device without `multiViewport` (withheld here, with `shaderOutputViewportIndex`) a draw has
+/// one viewport, so an amplification's viewport offset selects viewport 0 whatever it is, as Metal
+/// draws an offset at or past the viewports set, and the variant stores no `ViewportIndex`: under
+/// Metal's one default viewport the offsets 0 and 1 (`vp_default`) store Metal's texels. The same
+/// draw while the encoder holds two viewports (`amp2_vpo`), where Metal selects the second, is
+/// refused, `Unsupported(LayeredRendering)` needing `multiViewport`. The device announces
+/// [`AMPLIFICATION`] once, and the validation layer stays silent.
+#[test]
+fn with_one_viewport_an_amplification_s_viewport_offset_draws_through_it() {
+    let cache = ScratchCache::new().unwrap();
+    let messages = Messages::default();
+    {
+        let device = validated_device_with(TEST_DEVICE, &messages, cache.path(), |options| {
+            options.withheld_features.extend([
+                VkFeature::MultiViewport,
+                VkFeature::ShaderOutputViewportIndex,
+            ]);
+        })
+        .unwrap();
+        let name = device.name().to_owned();
+        let Some(lane) = lane(device) else {
+            return;
+        };
+        let vp_default = Case {
+            name: "vp_default",
+            draws: const { &[amp2(&[(0, 0), (1, 1)])] },
+            ..PLAIN
+        };
+        let stored = lane
+            .try_run(&vp_default)
+            .unwrap_or_else(|e| panic!("vp_default on {name}: {e}"));
+        assert_eq!(stored, colors([0x100, 0x101, E, E]), "vp_default on {name}");
+        let amp2_vpo = Case {
+            name: "amp2_vpo",
+            draws: const { &[amp2(&[(0, 0), (1, 1)])] },
+            viewports: Viewports::Halves,
+            ..PLAIN
+        };
+        assert_eq!(
+            lane.try_run(&amp2_vpo).unwrap_err(),
+            Error::Unsupported(metal2vulkan::error::Unsupported::needs(
+                Feature::LayeredRendering,
+                Capability::Feature(VkFeature::MultiViewport),
+            )),
+            "amp2_vpo on {name}"
+        );
+        let mut first = forced(&[(
+            Degradation::SharedInSystemMemory,
+            shared_in_system_memory(&lane.device),
+        )]);
+        first.extend(lane.made(&PLAIN));
+        assert_made_once(&messages, &AMPLIFICATION, &first);
+    }
+    let reported = messages.take();
+    assert!(
+        reported.is_empty(),
+        "the validation layer reported: {reported:#?}"
+    );
+}
+
 /// A device without `shaderOutputLayer` (withheld here: no committed real GPU lacks it) draws an
 /// amplified pass as Metal or refuses it typed, never into another slice: what multiview draws
 /// (`amp2_len2`) and one amplification at a time into a pass of one layer (`amp2_len1`, whose
 /// variant writes no `Layer`) store Metal's texels; one amplification at a time into a pass of
-/// more layers (`amp2_reversed`, `amp2_gap`), whose variant must write each amplification's
-/// slice as `Layer`, is refused `Unsupported(VertexAmplification)` needing the feature. The
-/// device announces [`AMPLIFICATION`] once, for the pass of one layer, and the validation layer
+/// more layers (`amp2_reversed`, `amp2_gap`), whose variant must store each amplification's
+/// slice as `Layer`, stores Metal's texels through the synthesized geometry stages on a device
+/// with `geometryShader`, and is refused `Unsupported(VertexAmplification)` needing either
+/// feature on one without. The device announces [`AMPLIFICATION`] once, and the validation layer
 /// stays silent.
 #[test]
 fn a_device_without_shader_output_layer_draws_or_refuses_typed() {
@@ -1366,31 +1428,47 @@ fn a_device_without_shader_output_layer_draws_or_refuses_typed() {
                 .unwrap_or_else(|e| panic!("{} on {name}: {e}", case.name));
             assert_eq!(stored, *metal, "{} on {name}", case.name);
         }
-        let refused = [
-            Case {
-                name: "amp2_reversed",
-                draws: const { &[amp2(&[(0, 1), (0, 0)])] },
-                ..PLAIN
-            },
-            Case {
-                name: "amp2_gap",
-                length: 4,
-                draws: const { &[amp2(&[(0, 0), (0, 2)])] },
-                ..PLAIN
-            },
+        // Metal's texels (`what_multiview_does_not_express_draws_one_amplification_at_a_time`).
+        let layered = [
+            (
+                Case {
+                    name: "amp2_reversed",
+                    draws: const { &[amp2(&[(0, 1), (0, 0)])] },
+                    ..PLAIN
+                },
+                colors([0x101, 0x100, E, E]),
+            ),
+            (
+                Case {
+                    name: "amp2_gap",
+                    length: 4,
+                    draws: const { &[amp2(&[(0, 0), (0, 2)])] },
+                    ..PLAIN
+                },
+                colors([0x100, C, 0x101, C]),
+            ),
         ];
-        for case in &refused {
-            match lane.try_run(case) {
-                Err(Error::Unsupported(u)) => {
+        let geometry = lane
+            .device
+            .enabled()
+            .features
+            .contains(&VkFeature::GeometryShader);
+        for (case, metal) in &layered {
+            match (lane.try_run(case), geometry) {
+                (Ok(stored), true) => assert_eq!(stored, *metal, "{} on {name}", case.name),
+                (Err(Error::Unsupported(u)), false) => {
                     assert_eq!(u.feature, Feature::VertexAmplification, "{}", case.name);
                     assert_eq!(
                         u.needs,
-                        Needs::AnyOf(vec![vec![Capability::Feature(feature)]]),
+                        Needs::AnyOf(vec![
+                            vec![Capability::Feature(feature)],
+                            vec![Capability::Feature(VkFeature::GeometryShader)],
+                        ]),
                         "{} on {name}",
                         case.name
                     );
                 }
-                other => panic!("{} on {name}: {:?}", case.name, other.map(|_| ())),
+                (other, _) => panic!("{} on {name}: {:?}", case.name, other.map(|_| ())),
             }
         }
         // The plain pipeline's making, the pass of one layer's draws of one amplification at a

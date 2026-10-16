@@ -1,7 +1,6 @@
-// Owned fixture (WP-RT6, DESIGN D329, D305 item 22): patch draws with patch and control-point
-// index buffers, the questions RT6 Metal probes 14, 14b and 14c asked (an M4), with the domain
-// points stored rather than rasterized. Written for this repository; no third-party source.
-// Loop-free.
+// Owned fixture: patch draws with patch and control-point index buffers, the questions Metal probes
+// asked on an M4, with the domain points stored rather than rasterized. Written for this
+// repository; no third-party source. Loop-free.
 #include <metal_stdlib>
 using namespace metal;
 

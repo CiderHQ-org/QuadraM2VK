@@ -1,4 +1,4 @@
-// Owned fixture (WP-FCA, DESIGN D233): a kernel builtin a function constant gates, read without a
+// Owned fixture: a kernel builtin a function constant gates, read without a
 // guard. MSL 5.8.1.2: with `has_width` false (or undefined) the argument is not declared in the
 // function signature, and the language gives its read no value; the engine reads zero, the
 // all-zero value of its type. With `has_width` true it is `threads_per_threadgroup`. Each thread

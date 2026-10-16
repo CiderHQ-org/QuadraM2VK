@@ -1,4 +1,4 @@
-// Owned fixture (WP-STX, DESIGN D295): a fragment function's `[[stencil]]` output, which Metal
+// Owned fixture: a fragment function's `[[stencil]]` output, which Metal
 // uses as the stencil reference of both faces (its low 8 bits) when it tests and writes the
 // stencil under the encoder's depth/stencil state. Each function returns the stencil (one
 // returns its depth too); the executors' fullscreen triangle covers every pixel once per instance.

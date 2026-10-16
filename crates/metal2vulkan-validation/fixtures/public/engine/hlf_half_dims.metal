@@ -1,4 +1,4 @@
-// Owned fixture (WP-HLF, DESIGN D251): how Metal converts texels to `half` in the texture types
+// Owned fixture: how Metal converts texels to `half` in the texture types
 // `bcx_half_read` does not read. A 1D, a 1D array, a 2D array, a 3D, and a cube `half` texture
 // (each case binds one format to all five, 16 texels wide) are each read at a texel and sampled
 // through a nearest-filter and a linear-filter sampler, both clamp-to-edge with normalized

@@ -1,4 +1,4 @@
-// Owned fixture (WP-DFL, docs/TODO.md 2.1): `dfl_half_edge`'s program under the default fast math:
+// Owned fixture: `dfl_half_edge`'s program under the default fast math:
 // how Metal rounds a `float` to `half` at the edge of the half range and at the half denormals, in
 // a conversion and in `half` arithmetic carrying every flag. Thread `i` reads (x, y, z) and writes
 // 16 words, `dfl_half_edge`'s rows. Loop-free.

@@ -48,7 +48,7 @@ const THREADS: u32 = 256;
 const WORDS: u32 = 4;
 
 /// The owned synthetic kernel.
-const KERNEL: &str = r#"; Owned synthetic kernel (WP-RT13, wip-queue 0d, DESIGN D307 item 18).
+const KERNEL: &str = r#"; Owned synthetic kernel.
 source_filename = "narrow_clamps.metal"
 
 declare i32 @llvm.smin.i32(i32, i32)

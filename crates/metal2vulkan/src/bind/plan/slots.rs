@@ -16,7 +16,9 @@ use crate::pipeline::facts::{Mechanism, RuntimeFact, UniformViewChoice};
 use crate::pipeline::interface::SlotInterface;
 use crate::pipeline::interface::{AccessSet, BufferForm, BufferSlot, DescriptorView, Window};
 use crate::pipeline::layout::{BindingSource, PipelineLayout};
-use crate::pipeline::sym::{PushField, SampledType, SlotClass, SlotRef, SpecKey, Stage};
+use crate::pipeline::sym::{
+    PushField, SampledType, SlotClass, SlotRef, SnapshotForm, SpecKey, Stage,
+};
 use crate::vk;
 
 use super::compute::internal;
@@ -272,6 +274,52 @@ pub(crate) fn srgb_variant(
                 if metal::texel_format::srgb_raw(*pixel_format))
         })
         .collect()
+}
+
+/// The form each of the snapshot slots `slots` keeps its texels in (`VariantKey::snapshot_textures`,
+/// `SnapshotForm::of`): by the view the snapshot's copy fetches through, the bound texture's
+/// sampled view or, at a slot whose raw codes the variant reads (`srgb`, `slots::srgb_variant`),
+/// its raw view (`metal::texel_format::srgb_raw_view`), and the slot's declared sampled type.
+/// [`SnapshotForm::Bits`] at a slot the variant reads in another class (`cross`), a depth twin's,
+/// or one whose sampled view the device has no format for. The variant's compile reads the same
+/// key, so its plan for the same shape states the same forms.
+pub(crate) fn snapshot_forms(
+    profile: &DeviceProfile,
+    slots: &std::collections::BTreeSet<SlotRef>,
+    interface: &BTreeMap<SlotRef, SlotInterface>,
+    shape: &BindShape,
+    (srgb, cross): (
+        &std::collections::BTreeSet<SlotRef>,
+        &BTreeMap<SlotRef, SampledType>,
+    ),
+) -> BTreeMap<SlotRef, SnapshotForm> {
+    let form = |slot: SlotRef| {
+        let Some(SlotInterface::Texture(t)) = interface.get(&slot) else {
+            return SnapshotForm::Bits;
+        };
+        let Some(TextureShape::Texture {
+            pixel_format,
+            depth_twin: false,
+            ..
+        }) = bound_texture(shape, slot)
+        else {
+            return SnapshotForm::Bits;
+        };
+        if cross.contains_key(&slot) {
+            return SnapshotForm::Bits;
+        }
+        let usages: std::collections::BTreeSet<_> =
+            [crate::device::requirements::FormatUsage::SampledImage].into();
+        let Ok(m) = metal::format::vk_format(*pixel_format, &usages, profile) else {
+            return SnapshotForm::Bits;
+        };
+        let view = match srgb.contains(&slot) {
+            true => metal::texel_format::srgb_raw_view(m.format).unwrap_or(m.format),
+            false => m.format,
+        };
+        SnapshotForm::of(view, t.sampled_type)
+    };
+    slots.iter().map(|&slot| (slot, form(slot))).collect()
 }
 
 /// The sampled texture slots whose function reads their texels in any numeric class

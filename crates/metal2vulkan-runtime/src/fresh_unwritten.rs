@@ -51,6 +51,7 @@
 
 use super::device::lock;
 use super::error::Error;
+use super::key_hash::KeyMap;
 use super::render_pass::{AspectTarget, PassLayout, Target};
 use super::render_values::{LoadAction, StoreAction};
 use super::resolve::Resolve;
@@ -62,7 +63,6 @@ use super::tracker::{Access, UseRange};
 use super::Device;
 use ash::vk::ImageAspectFlags;
 use metal2vulkan::vk::{Format, ImageType};
-use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -73,7 +73,7 @@ use std::sync::Mutex;
 pub(super) struct FreshUnwritten {
     /// Whether any texture is noted: without one, a command checks nothing.
     any: AtomicBool,
-    textures: Mutex<HashMap<ResourceKey, Unwritten>>,
+    textures: Mutex<KeyMap<ResourceKey, Unwritten>>,
 }
 
 /// A noted texture: which texels of each aspect of its pattern levels' layers no write has
@@ -568,6 +568,18 @@ fn pass_targets(
             (None, None) => None,
         };
         let by = |aspect: &Option<AspectTarget>, kept: bool, flag| match aspect {
+            // A NaN clear depth written into the texture before the pass, which loads it
+            // (`nan_clear.rs`), is the texture's clear.
+            Some(a) if !kept && a.written_nan => {
+                let aspect = Aspect {
+                    load: LoadAction::Clear,
+                    reaches: true,
+                };
+                match test(&aspect) {
+                    true => flag,
+                    false => ImageAspectFlags::empty(),
+                }
+            }
             Some(a) if !kept => {
                 let aspect = Aspect {
                     load: a.load,

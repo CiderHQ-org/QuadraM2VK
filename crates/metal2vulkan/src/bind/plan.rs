@@ -190,7 +190,7 @@ pub struct GraphicsTemplate {
     /// whose pipeline is not the variant its amplification asks for sets `other_layer_variant`.
     #[cfg_attr(feature = "serde", serde(default))]
     pub(crate) amplifications: Vec<[u32; 2]>,
-    /// A tessellation pipeline's control stage: its draws draw patches.
+    /// A tessellation pipeline's, native or emulated: its draws draw patches.
     #[cfg_attr(feature = "serde", serde(default))]
     pub(crate) tessellation: Option<FactorTemplate>,
     /// The device lacks `drawIndirectFirstInstance`: an indirect draw's arguments are read on
@@ -220,6 +220,11 @@ pub struct GraphicsTemplate {
     /// `PushField::CaptureLayout`, and an indexed form's run without indices.
     #[cfg_attr(feature = "serde", serde(default))]
     pub(crate) capture: Option<crate::pipeline::CaptureForm>,
+    /// A pipeline compiled in the primitive ID's de-indexed form of this index type
+    /// (`VariantKey::primitive_id_indices`): its indexed draws write `PushField::CaptureLayout`
+    /// and run without indices, as the indexed capture form's do.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub(crate) deindexed: Option<crate::metal::IndexType>,
     /// `PushField::StorageKeptChannels`: each storage-form color attachment's kept channels
     /// (`StorageAttachmentUse::kept`), bits `4c` to `4c + 3` for color `c`, which its draws
     /// write.
@@ -323,30 +328,55 @@ pub(crate) struct ShadowTemplate {
     pub depth_attachment: bool,
 }
 
-/// What a patch draw of a tessellation pipeline instantiates: the control stage's push fields and
-/// the factor, patch index, and control-point index buffers' descriptor ranges.
+/// What a patch draw of a tessellation pipeline instantiates: the push fields of the stage that
+/// reads the patch and control-point index buffers, their descriptor ranges, and the factor
+/// buffer's range, read by the control stage of a native pipeline or the scan of an emulated one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct FactorTemplate {
-    /// The byte offset of the control stage's push range (`TessellationState::push_offset`).
-    pub push_offset: u32,
     pub step: crate::metal::TessellationFactorStepFunction,
     /// Bytes of one patch's factors.
     pub patch_bytes: u32,
-    /// `(set, binding)` of the factor buffer when the plan writes it (a factor buffer is set);
-    /// `None` when the zero buffer stands in.
-    pub binding: Option<(u32, u32)>,
     /// `minStorageBufferOffsetAlignment`.
     pub alignment: u64,
     /// `maxStorageBufferRange`.
     pub max_range: u64,
     /// The `N` of the function's `[[patch(_, N)]]` (0 when unstated).
     pub control_points: u32,
-    /// `(set, binding)` of the patch index buffer.
-    pub patch_indices: (u32, u32),
-    /// `(set, binding)` of the control-point index buffer and the bytes of one index (2 or 4),
-    /// for a pipeline with a control-point index type; `None` for one without.
-    pub control_point_indices: Option<((u32, u32), u64)>,
+    /// `(set, binding)` of the patch index buffer, where a stage reads it: always a native
+    /// pipeline's control stage, an emulated function where it reads its patch index or its
+    /// control points.
+    pub patch_indices: Option<(u32, u32)>,
+    /// For a pipeline with a control-point index type, the bytes of one index (2 or 4), and
+    /// `(set, binding)` of the control-point index buffer where a stage reads it (a native
+    /// pipeline's control stage, an emulated function that reads its control points); `None` for
+    /// a pipeline without one.
+    pub control_point_indices: Option<(Option<(u32, u32)>, u64)>,
+    /// The stage that reads the factors.
+    pub site: FactorSite,
+}
+
+/// The stage that reads a tessellation pipeline's factors ([`FactorTemplate`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub(crate) enum FactorSite {
+    /// A native pipeline's control stage, whose push range holds the draw's factor and index
+    /// buffer fields.
+    Control {
+        /// The byte offset of the control stage's push range (`TessellationState::push_offset`).
+        push_offset: u32,
+        /// `(set, binding)` of the factor buffer when the plan writes it (a factor buffer is set);
+        /// `None` when the zero buffer stands in.
+        binding: Option<(u32, u32)>,
+    },
+    /// An emulated pipeline's tessellation scan (`DrawCommands::tessellation_dispatch`), whose
+    /// draws' vertex stage reads the index buffer fields from its own push window.
+    Scan {
+        /// The scan the pipeline's draws run.
+        kernel: crate::bind::TessellationScanKernel,
+        /// Whether the shape sets a factor buffer; without one the scan reads the zero buffer.
+        factors: bool,
+    },
 }
 
 /// The device's and pipeline's rules for a per-bind vertex stride.
@@ -591,14 +621,17 @@ pub enum WriteSource {
         window: Window,
     },
     /// A `VkSampler` for the sampler bound at `slot`, made for this use: `compare` enables depth
-    /// comparison and `integer` selects integer border colors (`bind::sampler_desc`). The plan
-    /// checks what the shape states (reduction); the rest of the descriptor is per bind.
-    /// `opaque_black` says how an opaque-black border is made to read Metal's texel through every
-    /// texture the sampler meets (`metal::sampler::OpaqueBlackBorder`).
+    /// comparison, `integer` selects integer border colors, and `cube_gradient` makes it isotropic
+    /// for a cube's explicit gradients in Metal's isotropic footprint
+    /// (`metal::sampler::SamplerUse`, `bind::sampler_desc`). The plan checks what the shape states
+    /// (reduction); the rest of the descriptor is per bind. `opaque_black` says how an opaque-black
+    /// border is made to read Metal's texel through every texture the sampler meets
+    /// (`metal::sampler::OpaqueBlackBorder`).
     Sampler {
         slot: SlotRef,
         compare: bool,
         integer: bool,
+        cube_gradient: bool,
         opaque_black: OpaqueBlackBorder,
     },
     /// The stage's argument table; instantiation fills the bytes.
@@ -681,7 +714,7 @@ pub enum WriteSource {
     TileMap { slot: SlotRef },
     /// Element `index + 1` of a set-1 sampler array: a `VkSampler` for
     /// `BindState::argument_samplers[index]`, made for this use as `Sampler` is
-    /// (`bind::sampler_desc` with `compare` and `integer`), or the neutral sampler
+    /// (`bind::sampler_desc` with `compare`, `integer` and `cube_gradient`), or the neutral sampler
     /// (`NeutralResource::Sampler { compare }`) where the state lists fewer samplers: no handle
     /// names that element then. The plan writes every element of its shape's capacity class
     /// (`ArgumentSamplersShape::entries`), so the list may grow or shrink within the class
@@ -690,6 +723,7 @@ pub enum WriteSource {
         index: u32,
         compare: bool,
         integer: bool,
+        cube_gradient: bool,
     },
     /// The shadow of the render pass's stencil attachment that a fragment function's
     /// shader-side stencil tests and writes (`GraphicsState::shadow_stencil`): the consumer's
@@ -706,15 +740,15 @@ pub enum WriteSource {
     /// a new plan; the consumer resolves each write against the state it binds.
     FunctionTable { index: u32 },
     /// A patch draw's patch index buffer (`DrawCall::Patches::patch_index`), a read-only storage
-    /// buffer of the control stage over the draw's `DescriptorRange`. A draw without one has no
-    /// range for it, and the consumer binds the zero buffer of `min_bytes` there
-    /// (`NeutralResource::ZeroBuffer`'s), whose words the control stage discards: the draw
-    /// pushes `PushField::PatchIndexBound` 0.
+    /// buffer of the control stage (an emulated tessellation pipeline's vertex stage) over the
+    /// draw's `DescriptorRange`. A draw without one has no range for it, and the consumer binds
+    /// the zero buffer of `min_bytes` there (`NeutralResource::ZeroBuffer`'s), whose words the
+    /// stage discards: the draw pushes `PushField::PatchIndexBound` 0.
     PatchIndices { min_bytes: u32 },
     /// An indexed patch draw's control-point index buffer
     /// (`DrawCall::Patches::control_point_index`), a read-only storage buffer of the control
-    /// stage of a pipeline with a control-point index type over the draw's `DescriptorRange`. Every
-    /// draw of such a pipeline has one.
+    /// stage (an emulated tessellation pipeline's vertex stage) of a pipeline with a control-point
+    /// index type over the draw's `DescriptorRange`. Every draw of such a pipeline has one.
     ControlPointIndices,
     /// The render pass's tile threadgroup memory (`SyntheticBinding::TileMemory`): a storage
     /// buffer the consumer keeps for the pass, of at least `bytes` bytes (every tile of the
@@ -739,6 +773,16 @@ pub enum WriteSource {
     /// stages' alike): the draw's region of `MeshDispatch::work_bytes`, holding
     /// `MeshDispatch::work`, bound whole ([`MeshDispatch`](crate::bind::MeshDispatch)).
     MeshWork,
+    /// An emulated tessellation draw's work buffer (`SyntheticBinding::TessellationWork`, the
+    /// vertex stage's): the draw's region holding
+    /// [`TessellationDispatch::work`](crate::bind::TessellationDispatch::work), bound whole
+    /// ([`TessellationDispatch`](crate::bind::TessellationDispatch)).
+    TessellationWork,
+    /// An emulated tessellation draw's records (`SyntheticBinding::TessellationRecords`, the
+    /// vertex stage's): the draw's `TessellationDispatch::records`, a region of its own or the
+    /// command buffer's records pool, bound whole for the scan and the draw alike
+    /// ([`TessellationDispatch`](crate::bind::TessellationDispatch)).
+    TessellationRecords,
     /// The command buffer's execution status (`SyntheticBinding::ExecutionStatus`) of a stage on
     /// a device that does not address buffers: a storage buffer of the
     /// [`ExecutionStatus`](crate::bind::ExecutionStatus) words, the same buffer every command of
@@ -764,6 +808,12 @@ pub enum WriteSource {
     /// storage image of the attachment's extent, in `GENERAL` layout, holding Metal's tile value
     /// of each texel of the pass (`VariantKey::extended_shadows`).
     ExtendedShadow { color_index: u32 },
+    /// The snapshot of the texture the draw binds at fragment texture slot `slot`
+    /// (`BindingSource::SnapshotTexels`, `VariantKey::snapshot_textures`): the consumer's
+    /// single-sample 2D `R32G32B32A32_UINT` storage image covering the draw's render area, in
+    /// `GENERAL` layout, which the draw's fragments write at their pixels in the draw that takes
+    /// the snapshot and read in the draw that reads it (`PushHole::SnapshotPhase`).
+    SnapshotTexels { slot: u32 },
     /// The stand-in of the render pass's stencil attachment that a fragment function that runs
     /// the draw's stencil test itself tests and writes (`ShaderTestsUse::stencil`): the
     /// consumer's `R8_UINT` storage image of the attachment's extent and the pipeline's samples,
@@ -791,6 +841,7 @@ pub enum SamplerSource {
         slot: SlotRef,
         compare: bool,
         integer: bool,
+        cube_gradient: bool,
         opaque_black: OpaqueBlackBorder,
     },
     /// The layout's immutable (constexpr) sampler: the write carries only the image.

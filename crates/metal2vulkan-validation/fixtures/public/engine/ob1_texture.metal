@@ -1,4 +1,4 @@
-// Owned fixture (WP-OB1, DESIGN D225): reads and writes past a 2D texture, the texture
+// Owned fixture: reads and writes past a 2D texture, the texture
 // containment form, whose results Metal defines (MSL 4.1: a read out of bounds returns zero, a
 // write out of bounds is ignored). Eight threads; thread t reads src at the texel idx[t] names (x in
 // the low 16 bits, y in the high) into out[t] and writes 0xA0000000 | t to dst at the texel

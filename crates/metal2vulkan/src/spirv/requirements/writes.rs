@@ -107,8 +107,8 @@ struct Status<'m> {
     /// `Synthetic(MeshWork)` bindings.
     bindings: Vec<Value>,
     /// The variables of the `Synthetic(ShadowStencil)`, `Synthetic(DepthStandIn)`,
-    /// `Synthetic(StencilStandIn)`, `TileAttachment` and `ExtendedShadow` bindings, and the loads
-    /// of them.
+    /// `Synthetic(StencilStandIn)`, `TileAttachment`, `ExtendedShadow` and `SnapshotTexels`
+    /// bindings, and the loads of them.
     shadows: Vec<Value>,
     /// The push block's variable.
     block: Option<Value>,
@@ -146,6 +146,7 @@ impl<'m> Status<'m> {
                                 | SyntheticBinding::StencilStandIn
                         ) | ResourceKind::TileAttachment(_)
                             | ResourceKind::ExtendedShadow(_)
+                            | ResourceKind::SnapshotTexels(_)
                     ) =>
                 {
                     s.shadows.push(g.value);

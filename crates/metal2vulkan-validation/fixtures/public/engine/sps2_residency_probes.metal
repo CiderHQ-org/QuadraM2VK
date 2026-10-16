@@ -1,5 +1,5 @@
-// Owned fixture (WP-SPS2, DESIGN D264): the residency word (`sparse_color::resident()`, the front
-// end's `(status & 1) ^ 1`, D138.1, D252) and the value of a texture read, sample, and gather at
+// Owned fixture: the residency word (`sparse_color::resident()`, the front
+// end's `(status & 1) ^ 1`) and the value of a texture read, sample, and gather at
 // authored coordinates. Thread `i` runs probe `i` of buffer 0: its kind picks the access, its
 // texel `(x, y)` addresses a read, and its `uv` a sample or gather (normalized, level 0). Texture
 // 0 is sampled (a read of it is a fetch), texture 1 has read access (a storage read). A case binds

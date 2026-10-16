@@ -1,4 +1,4 @@
-// Owned fixture (WP-A4, DESIGN D213): a `device` atomic that is only loaded
+// Owned fixture: a `device` atomic that is only loaded
 // (`access.atomic.buffer.load`). Every thread reads the limit n with a relaxed atomic load:
 // out[i] = i < n ? a[i] : 1000 + n. Loop-free.
 #include <metal_stdlib>

@@ -1,6 +1,6 @@
-// Owned MSL for WP-UNV's runtime-sampler level probes (docs/TODO.md 4.14, DESIGN D331, D324 item
-// 7): the level, and the texel at that level, a sample at an explicit level or a kernel's bias reads
-// through a sampler the function learns only at run time.
+// Owned MSL for the runtime-sampler level probes: the level, and the texel at that level, a sample
+// at an explicit level or a kernel's bias reads through a sampler the function learns only at run
+// time.
 //   unv_rlvl2d  a `texture2d<float>` sampled through the runtime sampler at slot 0, and the
 //               argument buffer's texture through the argument buffer's sampler, at the centre:
 //               `out[i]` = the slot's samples at `level(x[i])` and `bias(x[i])`, then the argument

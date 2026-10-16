@@ -337,6 +337,21 @@ impl DrawnArea {
             })
     }
 
+    /// Add `other`'s rectangles: anywhere where it bounds nothing.
+    pub(super) fn join(&mut self, other: &DrawnArea) {
+        if other.whole {
+            self.everywhere();
+            return;
+        }
+        if self.whole {
+            return;
+        }
+        self.rects.extend(other.rects.iter().copied());
+        if self.rects.len() > MOST_RECTS {
+            self.everywhere();
+        }
+    }
+
     /// Bound nothing: the draws may write anywhere in the render area.
     pub(super) fn everywhere(&mut self) {
         self.whole = true;

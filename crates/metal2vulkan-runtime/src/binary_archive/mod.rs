@@ -171,7 +171,7 @@ impl BinaryArchive {
         )?;
         let profile = self.profile();
         let keys = metal_key::render(&profile, descriptor);
-        let kind = if state.base().graphics.tessellation.is_some() {
+        let kind = if crate::tessellation::patches(&state.base().graphics).is_some() {
             VertexKind::Patch
         } else {
             VertexKind::Plain

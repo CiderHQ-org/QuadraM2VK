@@ -1,4 +1,4 @@
-// Owned MSL for WP-ICR (DESIGN D420 item 13's leftover): a tile function that calls visible
+// Owned MSL: a tile function that calls visible
 // functions through a `visible_function_table`, as `vft_vertex_caller`'s vertex function does.
 // Thread `t` of tile `k` (`x + y * width` of its `threadgroup_position_in_grid` over
 // `threadgroups_per_grid`) is `i = k * count + t`, `count` the tile's threads: it calls entry

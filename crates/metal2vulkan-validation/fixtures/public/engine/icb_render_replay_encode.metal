@@ -1,4 +1,4 @@
-// Owned fixture (WP-K14e, DESIGN D249): a rasterization-disabled vertex function whose only
+// Owned fixture: a rasterization-disabled vertex function whose only
 // effect is the render commands it encodes, the shape of a GPU validation layer's patch pass.
 // Vertex `vid` below the execution range's length encodes command `range.location + vid`: the
 // constant `params` window and the device `out` window at 256 * vid bytes as vertex buffers 0

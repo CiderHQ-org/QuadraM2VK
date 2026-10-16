@@ -1,4 +1,4 @@
-// Owned fixture (WP-RRS3, DESIGN D645): vertex, mesh and object functions that use a direct
+// Owned fixture: vertex, mesh and object functions that use a direct
 // texture or sampler argument, by where the value read goes once Metal links the pipeline, and the
 // fragment functions that read their varyings or drop them. Metal refuses a state that supports
 // indirect command buffers whose vertex or mesh function's texel reaches the position or another
@@ -377,7 +377,7 @@ fragment StencilOutput stencil_fragment(Varyings in [[stage_in]],
 }
 
 // The varying decides a branch whose arms (too costly to speculate) compute the color: with a
-// color attachment its pipeline keeps the read through the branch (DESIGN D645 item 14).
+// color attachment its pipeline keeps the read through the branch.
 fragment float4 branching_fragment(Varyings in [[stage_in]],
                                    device const float4* weights [[buffer(0)]]) {
     if (in.color.x > 0.5) {
@@ -387,7 +387,7 @@ fragment float4 branching_fragment(Varyings in [[stage_in]],
 }
 
 // The varying is the color alone, beside a second color from a constant: with only attachment 1,
-// the read is dropped (DESIGN D645 item 14).
+// the read is dropped.
 fragment TwoColors varying_first_color_fragment(Varyings in [[stage_in]]) {
     TwoColors out;
     out.first = in.color;
@@ -473,8 +473,7 @@ struct Payload {
     }
 }
 
-// Writes its vertices' positions alone: a fragment function's `color` is unwritten (DESIGN D645
-// item 16).
+// Writes its vertices' positions alone: a fragment function's `color` is unwritten.
 struct PositionMeshVertex {
     float4 position [[position]];
 };
@@ -494,7 +493,7 @@ using PositionMesh = metal::mesh<PositionMeshVertex, void, 3, 1, topology::trian
 }
 
 // A post-tessellation vertex function writing its position alone: a fragment function's `color`
-// is unwritten (DESIGN D645 item 16).
+// is unwritten.
 [[patch(triangle, 3)]] vertex float4 post_tess_vertex(float3 bary [[position_in_patch]]) {
     return float4(bary, 1.0);
 }

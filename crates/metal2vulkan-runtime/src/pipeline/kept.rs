@@ -18,7 +18,7 @@
 //!   evicted instance's objects and pipelines are destroyed then. An instance keeps at most what
 //!   its variant's memo of `VkPipeline`s held.
 //! - **On the guest's threads, in a fixed order** (the owner's HITCH rule 1). A last release can
-//!   happen on any thread: the completion thread when a command buffer lets its objects go, a pool
+//!   happen on any thread: a handler thread when a command buffer lets its objects go, a pool
 //!   thread whose making evicts a memo's entry, or a program's thread. A release only queues there
 //!   ([`Kept::objects_released`], [`Kept::pipeline_released`]): nothing moves in the order, nothing
 //!   is evicted, nothing is destroyed. The queue is applied where a variant is made

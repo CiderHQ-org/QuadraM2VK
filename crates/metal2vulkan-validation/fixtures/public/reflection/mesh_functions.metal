@@ -1,4 +1,4 @@
-// Owned fixture (WP-RFL, DESIGN D384, docs/TODO.md 8.27): an object function that writes a
+// Owned fixture: an object function that writes a
 // payload and a mesh function that reads it, with a buffer each, and a fragment function, for
 // their library reflection (the payload binding) and a mesh render pipeline's (object, mesh and
 // fragment bindings). Written for this repository; no third-party source. Loop-free.

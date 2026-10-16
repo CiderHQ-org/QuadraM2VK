@@ -1,4 +1,4 @@
-// Owned fixture (WP-BCX, DESIGN D248): how Metal converts a texel to `half` when a `half` texture
+// Owned fixture: how Metal converts a texel to `half` when a `half` texture
 // reads or samples a format with wider channels, outside the bicubic filter. Four 2D `half`
 // textures are each read at the lane's coordinate truncated to a texel, sampled through a
 // nearest-filter sampler, and sampled through a linear-filter sampler, both clamp-to-edge with

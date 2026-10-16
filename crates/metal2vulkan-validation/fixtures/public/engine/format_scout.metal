@@ -1,4 +1,4 @@
-// The format scout's functions (WP-TTG2; validation/src/bin/format-scout.rs), our own MSL: a
+// The format scout's functions (validation/src/bin/format-scout.rs), our own MSL: a
 // fullscreen triangle, fragments writing a value of each class from the pixel's position, and
 // kernels that read, sample, write and read-and-write a 16 x 16 texture of each class into a
 // buffer of one value a texel.

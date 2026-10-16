@@ -1,5 +1,5 @@
 //! The fences that end command buffers, where the driver needs them: the batch that ends a command
-//! buffer signals one with its submission, and the completion thread finishes the command buffer
+//! buffer signals one with its submission, and the completion turn finishes the command buffer
 //! only once both its queue's timeline reached the batch's value and the fence is signaled
 //! ([`completion`](super::completion)).
 //!
@@ -18,11 +18,11 @@
 //!   failures are relayed (`device/relay.rs`) still takes one for every batch, which its log of
 //!   submissions in flight needs.
 //! - **Pooled, and bounded.** A fence is taken when the last batch is submitted (made only when
-//!   none is idle) and given back, reset, once the completion thread saw it signaled. At most
+//!   none is idle) and given back, reset, once a completion turn saw it signaled. At most
 //!   [`IDLE`] wait idle; the ones beyond are released. So the fences live are the command buffers
 //!   in flight plus at most [`IDLE`], whatever the number of command buffers committed.
 //! - **The exit guard's doors.** Making one is the scheduler's (inside its section), waiting for
-//!   and resetting them the completion thread's (inside its sections), and every release goes
+//!   and resetting them the queues' waiters' (inside their sections), and every release goes
 //!   through `release.rs`; each entry point is in the guard's table and primed
 //!   (`exit_guard`, `device/prime.rs`).
 
@@ -78,17 +78,15 @@ impl Fences {
     }
 
     /// Give back `fences` of `device`, each unsignaled (reset, or never submitted) and in no
-    /// pending submission: kept idle up to [`IDLE`], the rest released.
+    /// pending submission: kept idle up to [`IDLE`], the rest released. `fences` is left empty,
+    /// its room kept for the caller's next ones.
     ///
     /// # Safety
     ///
     /// As above.
-    pub(crate) unsafe fn give(
-        &self,
-        device: &ash::Device,
-        fences: impl IntoIterator<Item = vk::Fence>,
-    ) {
-        for fence in self.keep(fences) {
+    pub(crate) unsafe fn give(&self, device: &ash::Device, fences: &mut Vec<vk::Fence>) {
+        self.keep(fences);
+        for fence in fences.drain(..) {
             // SAFETY: the caller's: no pending submission uses it.
             unsafe { release::object(device, fence) };
         }
@@ -112,17 +110,11 @@ impl Fences {
         lock(&self.idle).pop()
     }
 
-    /// Keep `fences` idle up to [`IDLE`]; the ones beyond, for the caller to release.
-    pub(crate) fn keep(&self, fences: impl IntoIterator<Item = vk::Fence>) -> Vec<vk::Fence> {
+    /// Keep `fences` idle up to [`IDLE`], the first of them first; the ones beyond stay in
+    /// `fences`, for the caller to release.
+    pub(crate) fn keep(&self, fences: &mut Vec<vk::Fence>) {
         let mut idle = lock(&self.idle);
-        let mut over = Vec::new();
-        for fence in fences {
-            if idle.len() < IDLE {
-                idle.push(fence);
-            } else {
-                over.push(fence);
-            }
-        }
-        over
+        let kept = IDLE.saturating_sub(idle.len()).min(fences.len());
+        idle.extend(fences.drain(..kept));
     }
 }

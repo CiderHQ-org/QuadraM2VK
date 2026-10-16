@@ -43,6 +43,7 @@ use super::texture_descriptor::{TextureDescriptor, TextureLayout};
 use super::tracker::{Access, Barrier};
 use super::values::{ResourceOptions, StorageMode};
 use super::{Buffer, Device, MetalLevel};
+use crate::device::functions::Vk;
 use ash::vk;
 use metal2vulkan::bind::{CompressedBlit, CompressedBlitModule};
 use metal2vulkan::error::RuntimeDriverDefect;
@@ -403,7 +404,7 @@ impl Rewrite {
     ///
     /// `raw` is recording outside a render pass, and the scratch and the sets live until it
     /// completes.
-    unsafe fn record(&self, device: &ash::Device, raw: vk::CommandBuffer) {
+    unsafe fn record(&self, device: &Vk, raw: vk::CommandBuffer) {
         // SAFETY: the caller's contract.
         unsafe {
             for pass in &self.passes {

@@ -1,10 +1,9 @@
 # Metal samples of R10Unorm_X6_sRGB (577) and RG10Unorm_X12_sRGB (579) over a 300 x 77 CoreVideo
 # surface plane, our own probes x6es and x6hs (EVs XRR2-x6es-m4 and XRR2-x6hs-m4, an Apple M4 under
-# macOS 27.0.1; byte-identical on an Apple M3 Max under macOS 26.7, the -m3 runs; DESIGN D640 item
-# 9). The texture's words are the probes' generator (samples.rs `padded_words`). Columns as
-# padded_samples.tsv's: raw format, filter, address mode on both axes, coordinates (norm or
-# pixel), the coordinate's two f32 bits, and the float result's red and green bits (blue is 0 and
-# alpha 1 in every sample).
+# macOS 27.0.1; byte-identical on an Apple M3 Max under macOS 26.7, the -m3 runs). The texture's
+# words are the probes' generator (samples.rs `padded_words`). Columns as padded_samples.tsv's: raw
+# format, filter, address mode on both axes, coordinates (norm or pixel), the coordinate's two f32
+# bits, and the float result's red and green bits (blue is 0 and alpha 1 in every sample).
 577 linear black norm 3e1d9f93 3f070711 3daf8000 00000000
 577 linear black norm 3f098cbf 3ecfb0a0 3ee65000 00000000
 577 linear black norm 3e3f28bf bba710a0 3d368000 00000000

@@ -1,10 +1,10 @@
-// WP-RFS (DESIGN D405 item 3): reads of an argument a function constant removes, behind a
+// Owned fixture: reads of an argument a function constant removes, behind a
 // run-time flag. With `has_source` false or undefined, `source` (and `smp`) are not declared in the
 // specialized function (MSL 5.8.1.2), so Metal gives a read of one no value. A run whose `flag`
 // is 0 never reaches the read and has Metal's answer: each kernel writes values of its own. A run
 // whose `flag` is nonzero reaches it: the translation takes zero for the read (Metal's answer
 // under its debug layer) and marks the command buffer's execution status, and the command buffer
-// completes (WP-CBF, DESIGN D858). With `has_source` true they are reads.
+// completes. With `has_source` true they are reads.
 #include <metal_stdlib>
 using namespace metal;
 

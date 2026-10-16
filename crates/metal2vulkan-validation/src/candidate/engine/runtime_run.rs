@@ -16,7 +16,9 @@
 //! at the profile's version (`DeviceOptions::instance_api_version`); the context's second check
 //! made on the opened device through its raw handles, and the row stored in the profile's slot.
 //! Where the runtime would compile for the device's own kept members rather than the profile's, the
-//! case goes to the executor's context (`untranslated`, the bridge). A kernel case's AIR becomes a
+//! case goes to the executor's context (`translation`, the bridge), but for a patch draw the
+//! profile emulates, whose emulation only the runtime runs: the runtime runs it on those members,
+//! and the row records them (`kept_members`). A kernel case's AIR becomes a
 //! library, its entry a function, the function with the functions it links (each linked module a
 //! library of its own) a pipeline state, which makes the case's visible-function tables (each entry
 //! the handle the state gives the function it holds, `runtime_case::visible_function_tables`), and
@@ -78,15 +80,17 @@ use super::{
 use crate::air_library::AirLibrary;
 use crate::candidate::device_facts::{DeviceFacts, RECORDED_LAYERS};
 use crate::candidate::runtime_case::{
-    argument_texture_usage, compute_descriptor, encoded_case, encoded_execution, encoded_render,
-    encoded_tile, executor_layer_settings, linked_functions, open_device,
-    render_pipeline_descriptor, texture_usage, tile_descriptor, tile_tables, validated_options,
-    visible_function_tables, CaseError, Messages, RenderInputs, ScratchCache, TemplateState,
+    argument_texture_usage, compute_descriptor, encoded_case, encoded_execution, encoded_mesh,
+    encoded_render, encoded_tile, executor_layer_settings, linked_functions, mesh_pipeline_state,
+    open_device, render_pipeline_descriptor, texture_usage, tile_descriptor, tile_tables,
+    validated_options, visible_function_tables, CaseError, MeshInputs, Messages, RenderInputs,
+    ScratchCache, TemplateState,
 };
 use crate::candidate::{runtime_restriction, RestrictedDevice, Restricting, RuntimeRestriction};
 use crate::case::out_of_bounds::ContainmentForm;
 use crate::case::{AuthoredCase, Stage};
 use crate::check::admission::ExecutorError;
+use crate::companion::Spelling;
 use crate::coverage::{ExecutedCensus, Leg, ModuleCensus, ROBUSTNESS_FEATURES};
 use crate::engine::RowSource;
 use crate::executor_contract::out_of_bounds::{self, OutOfBoundsRun};
@@ -100,6 +104,7 @@ use metal2vulkan::pipeline::{Stage as ShaderStage, StageModule};
 use metal2vulkan_runtime::{
     Buffer, CommandBuffer, Device, Error, ExecutedPipeline, Execution, Function, PipelineOptions,
 };
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// What a case needs that the runtime path does not run yet: the steps that add a case's
@@ -157,6 +162,8 @@ pub fn route(prepared: &PreparedCase) -> Route {
     let needs = match &prepared.mapped {
         Mapped::Compute(compute) => kernel_prerequisites(compute),
         Mapped::Render(render) => render_prerequisites(authored, render),
+        // Only the runtime draws a mesh render pipeline (`runtime_case::encoded_mesh`).
+        Mapped::Mesh(_) => BTreeSet::new(),
     };
     if needs.is_empty() {
         Route::Runtime
@@ -539,7 +546,8 @@ impl Kind {
     fn of(mapped: &Mapped) -> Kind {
         match mapped {
             Mapped::Compute(_) => Kind::Compute,
-            Mapped::Render(_) => Kind::Render,
+            // A mesh draw is a render encoder's draw of a render pipeline state.
+            Mapped::Render(_) | Mapped::Mesh(_) => Kind::Render,
         }
     }
 
@@ -565,8 +573,11 @@ struct Opened {
     /// The committed profile the device is restricted to, which the census names.
     restricted_to: Option<String>,
     /// Under a restriction, why the device's compile device does not translate for the profile
-    /// as the executor's context does ([`untranslated`]): the bridge's gap.
+    /// as the executor's context does ([`translation`]): the bridge's gap.
     untranslated: Option<String>,
+    /// The bound the case's own pipeline's creation is held to: a kernel case's
+    /// (`ComputeCase::creation_bound`), the shared ceiling for a render or mesh case.
+    creation_bound: std::time::Duration,
 }
 
 impl Opened {
@@ -582,11 +593,14 @@ impl Opened {
         let restricted = restriction
             .map(|restriction| restriction.check(device))
             .transpose()?;
-        let untranslated = restricted
+        let translation = restricted
             .as_ref()
-            .map(|restricted| untranslated(device, restricted))
-            .transpose()?
-            .flatten();
+            .map(|restricted| translation(device, restricted, mapped))
+            .transpose()?;
+        let untranslated = match &translation {
+            Some(Translation::Bridged(gap)) => Some(gap.clone()),
+            Some(Translation::Profile | Translation::Kept(_)) | None => None,
+        };
         // SAFETY: only physical-device queries of the device's own instance; nothing is created,
         // destroyed, or submitted, and the handles are not kept past the borrow.
         let facts = unsafe {
@@ -632,6 +646,9 @@ impl Opened {
             ] {
                 object.insert(key.into(), value);
             }
+            if let Some(Translation::Kept(kept)) = &translation {
+                object.insert("kept_members".into(), serde_json::json!(kept));
+            }
         }
         Ok(Opened {
             facts,
@@ -643,6 +660,10 @@ impl Opened {
             leg,
             restricted_to: restriction.map(|restriction| restriction.stem().to_owned()),
             untranslated,
+            creation_bound: match mapped {
+                Mapped::Compute(case) => case.creation_bound,
+                Mapped::Render(_) | Mapped::Mesh(_) => crate::budgets::PIPELINE_CREATION_CEILING,
+            },
         })
     }
 
@@ -730,7 +751,7 @@ impl Opened {
         };
         let (what, stages, planned) = self.executed(execution)?;
         for &created in execution.pipeline_creation() {
-            crate::budgets::creation_within_ceiling(what, created)
+            crate::budgets::creation_within(what, created, self.creation_bound)
                 .map_err(ExecutorError::Failed)?;
         }
         let mut artifact = self.artifact(execution, &ran.tables)?;
@@ -1051,6 +1072,38 @@ fn run_on(
                 children,
             })
         }
+        Mapped::Mesh(mesh) => {
+            let companion = mesh
+                .companion
+                .as_ref()
+                .map(|generated| {
+                    RowSource::Text(Cow::Owned(generated.air_text(Spelling::Opaque))).bitcode()
+                })
+                .transpose()
+                .map_err(|error| format!("the generated companion's AIR: {error:?}"))?;
+            let inputs = MeshInputs {
+                case: &primary.case,
+                mesh,
+                bitcode: &bitcode,
+                companion: companion.as_deref(),
+                texture_usage: &usage,
+                interface: &primary.interface,
+            };
+            let encoded = encoded_mesh(device, &inputs).map_err(|error| stop(error, false))?;
+            let committed = encoded.commit().map_err(|error| stop(error, false))?;
+            let status = completed(prepared, &committed.command_buffer, &committed.executions)?;
+            let output = committed
+                .mesh_output(mesh)
+                .map_err(|error| stop(error, true))?;
+            Ok(Ran {
+                output,
+                status,
+                executions: committed.executions,
+                tables: committed.tables,
+                out_of_bounds: None,
+                children: Vec::new(),
+            })
+        }
     }
 }
 
@@ -1090,9 +1143,10 @@ fn kernel_out_of_bounds(
 /// argument buffer holds and each execution's parent pipeline's, made from its template's AIR as
 /// the template's own case makes it (its constant values, the functions it links), with
 /// `support_indirect_command_buffers`, as the Metal oracle makes the template states its commands
-/// name: a kernel template's compute state, and a vertex or fragment template's render state of the
+/// name: a kernel template's compute state, a vertex or fragment template's render state of the
 /// oracle's descriptor, as the render runner makes its own case's
-/// (`runtime_case::render_pipeline_descriptor`).
+/// (`runtime_case::render_pipeline_descriptor`), and an object or mesh template's mesh render
+/// state, as the mesh runner makes its own case's (`runtime_case::mesh_pipeline_state`).
 fn template_states(
     device: &Device,
     prepared: &PreparedCase,
@@ -1176,10 +1230,22 @@ fn template_states(
                         )))
                 })()
             }
-            Stage::Object | Stage::Mesh => Err(CaseError::from(format!(
-                "pipeline template {case_id} is an object or mesh function: no case expresses a \
-                 mesh render pipeline (mesh_pipeline, DESIGN D334)"
-            ))),
+            Stage::Object | Stage::Mesh => {
+                let mesh = super::mesh::mesh_case(&template.case, template.companion.as_ref())
+                    .map_err(Stop::Error)?;
+                let companion = mesh
+                    .companion
+                    .as_ref()
+                    .map(|generated| {
+                        RowSource::Text(Cow::Owned(generated.air_text(Spelling::Opaque))).bitcode()
+                    })
+                    .transpose()
+                    .map_err(|error| {
+                        format!("pipeline template {case_id}'s generated companion: {error:?}")
+                    })?;
+                mesh_pipeline_state(device, &mesh, (&bitcode, companion.as_deref()), true)
+                    .map(TemplateState::Render)
+            }
         }
         .map_err(|error| stop(error, false))?;
         states.insert(token, state);
@@ -1226,14 +1292,31 @@ fn draw_out_of_bounds(
     Ok(run)
 }
 
-/// Where a device restricted to a profile translates for other than the profile: the runtime
-/// compiles for the description it read through the profiles layer, whose kept members
-/// (`profiles::KEPT`, the format sample counts) are the device's own, where the executor's context
-/// translates for the profile's (`check_restricted`). `None` where the two make the same profile
-/// (the profile states the device's own values there), so the runtime translates for the profile;
-/// else the gap names the members, and the bridge sends the case to the executor's context (item
-/// 3), whose restricted row means what it always has.
-fn untranslated(device: &Device, restricted: &RestrictedDevice) -> Result<Option<String>, String> {
+/// What a device restricted to a profile translates a case for.
+enum Translation {
+    /// The profile: the device's kept members (`profiles::KEPT`, read as the device's own through
+    /// the layer) are the profile's values.
+    Profile,
+    /// The profile's members but the kept ones, `kept`, which are the device's: the case is a
+    /// patch draw the profile emulates ([`emulated_patches`]), which the runtime runs on them.
+    Kept(Vec<String>),
+    /// The same, for any other case, which the bridge sends to the executor's context: the gap.
+    Bridged(String),
+}
+
+/// What a device restricted to a profile translates `mapped` for: the runtime compiles for the
+/// description it read through the profiles layer, whose kept members (`profiles::KEPT`) are the
+/// device's own, where the executor's context translates for the profile's (`check_restricted`).
+/// [`Translation::Profile`] where the two make the same profile (the profile states the device's
+/// own values there), so the runtime translates for the profile; else the bridge sends the case to
+/// the executor's context (item 3), whose restricted row means what it always has, but for a patch
+/// draw the profile emulates, whose emulation that context does not run: the runtime runs it on the
+/// kept members, which its row records.
+fn translation(
+    device: &Device,
+    restricted: &RestrictedDevice,
+    mapped: &Mapped,
+) -> Result<Translation, String> {
     let translated = restricted
         .translated
         .clone()
@@ -1243,13 +1326,31 @@ fn untranslated(device: &Device, restricted: &RestrictedDevice) -> Result<Option
         })
         .map_err(|error| format!("the profile's description on the enabled set: {error}"))?;
     if translated.profile().fingerprint() == device.compile_device().profile().fingerprint() {
-        return Ok(None);
+        return Ok(Translation::Profile);
     }
-    Ok(Some(format!(
+    if emulated_patches(mapped, translated.profile()) {
+        return Ok(Translation::Kept(restricted.kept.clone()));
+    }
+    Ok(Translation::Bridged(format!(
         "profile restriction: the runtime compiles for the device's kept members ({}), not the \
          profile's",
         restricted.kept.join(", ")
     )))
+}
+
+/// Whether `mapped` is a patch draw (`graphics::Assembly::Patches`) that `profile`, without
+/// `tessellationShader`, compiles emulated (`metal2vulkan`'s `lower::tessellation`): its pipeline
+/// binds the emulation's work and records, which the runtime makes and the executor's context
+/// does not (it refuses their descriptor source, `NotImplemented`).
+fn emulated_patches(mapped: &Mapped, profile: &metal2vulkan::device::DeviceProfile) -> bool {
+    let Mapped::Render(render) = mapped else {
+        return false;
+    };
+    matches!(render.assembly, graphics::Assembly::Patches { .. })
+        && !profile
+            .enabled()
+            .features
+            .contains(&VkFeature::TessellationShader)
 }
 
 /// Wait for `command_buffer`, which runs `prepared`'s `executions`, bounded under the hang

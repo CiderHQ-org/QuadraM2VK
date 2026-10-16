@@ -77,6 +77,26 @@ impl NativePipeline {
         }
     }
 }
+/// The library of a generated `companion`, loaded from its typed AIR as a case's own library is
+/// ([`companion_air`], [`load_library`]).
+pub(super) fn companion_library(
+    device: &ProtocolObject<dyn MTLDevice>,
+    companion: &Companion,
+) -> Result<Library, String> {
+    load_library(device, &companion_air(companion)?, None)
+}
+
+/// The function of a generated `companion` of one function, from its library
+/// ([`companion_library`]).
+fn companion_function(
+    device: &ProtocolObject<dyn MTLDevice>,
+    companion: &Companion,
+) -> Result<Function, String> {
+    companion_library(device, companion)?
+        .newFunctionWithName(&NSString::from_str(companion.entry()))
+        .ok_or_else(|| format!("the generated companion has no entry {}", companion.entry()))
+}
+
 /// The vertex and fragment functions of `case`'s render pipeline: its own `function` alone for a
 /// rasterization-disabled vertex case, else with its generated `companion` loaded from the
 /// companion's typed AIR as the case's own library is ([`companion_air`], [`load_library`]), in
@@ -87,12 +107,7 @@ pub(super) fn make_render_functions(
     companion: Option<&Companion>,
     function: Function,
 ) -> Result<(Function, Option<Function>), String> {
-    let generated = |companion: &Companion| {
-        let library = load_library(device, &companion_air(companion)?, None)?;
-        library
-            .newFunctionWithName(&NSString::from_str(companion.entry()))
-            .ok_or_else(|| format!("the generated companion has no entry {}", companion.entry()))
-    };
+    let generated = |companion: &Companion| companion_function(device, companion);
     match (case.stage, case.vertex_observation, companion) {
         (crate::case::Stage::Vertex, None, None) => Ok((function, None)),
         (crate::case::Stage::Vertex, Some(_), Some(observer @ Companion::ObserverFragment(_))) => {
@@ -139,8 +154,7 @@ pub(super) fn make_render_pipeline(
             crate::case::Stage::Kernel => {
                 return Err("compute shader cannot form a render pipeline".into())
             }
-            // A mesh render pipeline is no render pipeline of a vertex function; no Metal executor
-            // runs one yet (ToolingRequirement::MeshPipeline).
+            // An object or mesh case draws a mesh render pipeline of its own (`mesh.rs`).
             crate::case::Stage::Object | crate::case::Stage::Mesh => {
                 return Err("an object or mesh function forms no vertex render pipeline".into())
             }
@@ -277,9 +291,14 @@ pub(super) fn make_pipeline_templates(
                         true,
                     )?)
                 }
-                // No Metal executor runs a mesh render pipeline yet.
                 crate::case::Stage::Object | crate::case::Stage::Mesh => {
-                    return Err("a mesh render pipeline template is not modelled".into())
+                    NativePipeline::Render(super::mesh::make_template_pipeline(
+                        device,
+                        &template.case,
+                        (&library, &function),
+                        &constants,
+                        template.companion.as_ref(),
+                    )?)
                 }
             };
             if !pipeline.supports_indirect_commands() {

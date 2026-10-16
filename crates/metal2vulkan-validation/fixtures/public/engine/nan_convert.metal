@@ -1,4 +1,4 @@
-// Owned fixture (NaN model, DESIGN D293): Metal's vector conversions between `float` and `half`
+// Owned fixture (NaN model): Metal's vector conversions between `float` and `half`
 // beside the scalar casts. Lane `i` reads a float4 a (the bits in `in[2i]`) and a half4 h (the
 // four halves of `in[2i + 1].xy`, the first in the low half) and writes eight words to
 // `out[2i .. 2i + 1]`: half4(a) (two words, x | y << 16 and z | w << 16), half(a.x) |

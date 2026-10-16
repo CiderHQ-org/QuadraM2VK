@@ -6,34 +6,46 @@
 //! reads`, counted from the pass's first, as the vertex function wrote it (a pass from slice 2
 //! drawing layer 0 stores 0x200 there, the second instance's tag over layer 0). Every slice of an
 //! `R32Uint` target holds 0xEE first; the pass clears its layers to 0x11 or loads them. Each slice
-//! is compared with the texels Metal stored for the same functions and passes (RT6 Metal probe 12c,
-//! an M4 with macOS 27.0.1, with and without API validation, every texel of a slice alike). A
+//! is compared with the texels Metal stored for the same functions and passes (a Metal probe on an
+//! M4 with macOS 27.0.1, with and without API validation, every texel of a slice alike). A
 //! `Depth32Float` array beside the color one, each slice cleared to 0.75 by a pass of its own
 //! first, is cleared to 1.0 and tested `Less` with writes.
 //!
-//! An index at or past the length renders the pass's first layer, and a fragment function reads
-//! the index as written in a pass of any length, a pass of length 1 included (RT6 Metal probe
-//! 12b), and a pass of length 0, Metal's default, too: there plain Metal draws the slice-choosing
-//! function as at a length of 1, where its debug layer stops the draw (RT6 Metal probe 12, an M4; a
-//! probe, an M3 Max and an M4). What Metal's validation stops is refused typed: an attachment
-//! without the pass's layers (`RenderPassProblem::ArrayLengthPastSlices`).
+//! An index at or past the length renders the pass's first layer, and a fragment function reads the
+//! index as written in a pass of any length, a pass of length 1 included (a Metal probe on an M4),
+//! and a pass of length 0, Metal's default, too: there plain Metal draws the slice-choosing
+//! function as at a length of 1, where its debug layer stops the draw (a Metal probe on an M4;
+//! another probe, an M3 Max and an M4). What Metal's validation stops is refused typed: an
+//! attachment without the pass's layers (`RenderPassProblem::ArrayLengthPastSlices`).
+//!
+//! The passes run again with `shaderOutputLayer` withheld, where the synthesized geometry stages
+//! store `Layer` from the slice the vertex function selects, and every draw asserts how many
+//! geometry stages the pipeline it executed carries (three in a pass of two layers or more, none
+//! in a pass of one layer or none). `rt6_layered_weights` reads the primitive ID and the
+//! barycentric weights beside the slice, on the device as made and with `fragmentShaderBarycentric`
+//! withheld too, where one set of stages serves all three (a Metal probe on an M3 Max with macOS
+//! 27.0.1 for its texels).
 
-use super::{buffer_with, read_buffer, validated_device, Messages, ScratchCache, WAIT};
+use super::{
+    buffer_with, read_buffer, validated_device, validated_device_with, Messages, ScratchCache, WAIT,
+};
 use crate::air_library::AirLibrary;
 use crate::gpu::TEST_DEVICE;
+use metal2vulkan::device::VkFeature;
 use metal2vulkan::metal::state::{DepthStencilDescriptor, StencilDescriptor};
 use metal2vulkan::metal::{
     BarrierScope, CompareFunction, PixelFormat, PrimitiveType, RenderStages, StencilOperation,
     TextureType, TextureUsage,
 };
 use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};
+use metal2vulkan::vk;
 use metal2vulkan_devtools::llvm_assemble;
 use metal2vulkan_runtime::{
     Attachment, BlitOption, Buffer, ClearColor, CommandBuffer, CommandBufferStatus, CommandQueue,
-    CpuCacheMode, DepthStencilState, Device, Error, HazardTrackingMode, Invalid, LoadAction,
-    MultisampleDepthResolveFilter, MultisampleStencilResolveFilter, Origin, PipelineOptions,
-    Problem, RenderPassDescriptor, RenderPassProblem, RenderPipelineState, ResolveTarget,
-    ResourceOptions, Size, StorageMode, StoreAction, Texture, TextureDescriptor,
+    CpuCacheMode, DepthStencilState, Device, Error, ExecutedPipeline, HazardTrackingMode, Invalid,
+    LoadAction, MultisampleDepthResolveFilter, MultisampleStencilResolveFilter, Origin,
+    PipelineOptions, Problem, RenderPassDescriptor, RenderPassProblem, RenderPipelineState,
+    ResolveTarget, ResourceOptions, Size, StorageMode, StoreAction, Texture, TextureDescriptor,
     VertexAmplificationViewMapping,
 };
 use std::path::Path;
@@ -72,7 +84,7 @@ impl Kind {
     }
 }
 
-/// One pass, as RT6 Metal probe 12c drew it.
+/// One pass, as a Metal probe on an M4 drew it.
 struct Case {
     name: &'static str,
     kind: Kind,
@@ -110,6 +122,20 @@ struct Stored {
     depth: Vec<f32>,
 }
 
+/// How many geometry stages a pipeline that stores the slice, or reads the weights, through
+/// synthesized geometry stages carries: the point, line and triangle classes'.
+const CLASSES: usize = 3;
+
+/// The fixture's fragment function a lane draws with.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Fragment {
+    /// `rt6_layered_fragment`: the tag and the slice.
+    Slice,
+    /// `rt6_layered_weights`: the tag and the slice, the primitive ID, and whether every
+    /// barycentric weight lies in [0, 1].
+    Weights,
+}
+
 /// The device, its queue, and the fixture's pipelines.
 struct Lane {
     device: Device,
@@ -120,11 +146,34 @@ struct Lane {
     two_colors: RenderPipelineState,
     with_depth: RenderPipelineState,
     less: DepthStencilState,
+    /// The device stores the slice through the synthesized geometry stages (it has no
+    /// `shaderOutputLayer`): a pass of two layers or more runs them.
+    slice_stages: bool,
+    /// The fragment function reads the weights as varyings the synthesized geometry stages write
+    /// (the device has no `fragmentShaderBarycentric`): every draw runs them.
+    weight_stages: bool,
+}
+
+/// The lane on the test device without `withheld`, drawing with `fragment`; `Err` with the
+/// device's name and its refusal of the fixture's pipeline.
+fn lane_without(
+    messages: &Messages,
+    cache: &ScratchCache,
+    withheld: &[VkFeature],
+    fragment: Fragment,
+) -> Result<Lane, (String, Box<Error>)> {
+    let device = validated_device_with(TEST_DEVICE, messages, cache.path(), |options| {
+        options.withheld_features.extend(withheld.iter().copied())
+    })
+    .unwrap();
+    let name = device.name().to_owned();
+    Lane::new(device, fragment).map_err(|e| (name, Box::new(e)))
 }
 
 impl Lane {
-    /// The lane on `device`; `Err` with the device's refusal of the fixture's pipeline.
-    fn new(device: Device) -> Result<Lane, Error> {
+    /// The lane on `device` drawing with `fragment`; `Err` with the device's refusal of the
+    /// fixture's pipeline.
+    fn new(device: Device, fragment: Fragment) -> Result<Lane, Error> {
         let ll =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/public/engine/rt6_layered.ll");
         let library = device
@@ -140,7 +189,10 @@ impl Lane {
         };
         let pipeline = |second: bool, depth: bool| {
             let mut descriptor = RenderPipelineDescriptor::new(function("rt6_layered_vertex"));
-            descriptor.fragment = Some(function("rt6_layered_fragment"));
+            descriptor.fragment = Some(function(match fragment {
+                Fragment::Slice => "rt6_layered_fragment",
+                Fragment::Weights => "rt6_layered_weights",
+            }));
             descriptor.color_attachments[0] =
                 Some(ColorAttachmentDescriptor::new(PixelFormat::R32Uint));
             if second {
@@ -155,7 +207,20 @@ impl Lane {
         let mut less = DepthStencilDescriptor::default();
         less.depth_compare_function = CompareFunction::Less;
         less.depth_write_enabled = true;
+        let enabled = |feature| {
+            device
+                .compile_device()
+                .profile()
+                .enabled()
+                .features
+                .contains(&feature)
+        };
+        let slice_stages = !enabled(VkFeature::ShaderOutputLayer);
+        let weight_stages =
+            fragment == Fragment::Weights && !enabled(VkFeature::FragmentShaderBarycentric);
         Ok(Lane {
+            slice_stages,
+            weight_stages,
             plain: pipeline(false, false)?,
             two_colors: pipeline(true, false)?,
             with_depth: pipeline(false, true)?,
@@ -163,6 +228,16 @@ impl Lane {
             queue: device.new_command_queue().unwrap(),
             device,
         })
+    }
+
+    /// How many geometry stages the pipeline a draw in a pass of `length` layers executes
+    /// carries: a pass of one layer or none runs the variant that stores no slice
+    /// (`VariantKey::dropped_vertex_layer`).
+    fn geometry_stages(&self, length: u64) -> usize {
+        match self.weight_stages || (self.slice_stages && length > 1) {
+            true => CLASSES,
+            false => 0,
+        }
     }
 
     /// A private render target of `pf` and `kind`.
@@ -341,6 +416,24 @@ impl Lane {
         encoder.end_encoding()?;
         Lane::complete(&command_buffer);
         drop(held);
+        if !case.layers.is_empty() {
+            let executions = command_buffer.executions();
+            let ExecutedPipeline::Render(executed) = executions[0].pipeline() else {
+                panic!("{}: the draw executed no render pipeline", case.name);
+            };
+            let stages = executed
+                .stages
+                .iter()
+                .filter(|s| s.stage == vk::ShaderStage::GEOMETRY)
+                .count();
+            assert_eq!(
+                stages,
+                self.geometry_stages(case.length),
+                "{}: the geometry stages of the pipeline the draw executed on {}",
+                case.name,
+                self.device.name()
+            );
+        }
         Ok(Stored {
             color: self.slices(&color, slices),
             second: second
@@ -364,19 +457,34 @@ impl Lane {
 /// (no `shaderOutputLayer`) prints its typed refusal.
 #[test]
 fn a_layered_pass_renders_each_layer_as_metal() {
+    layered_passes(&[]);
+}
+
+/// [`a_layered_pass_renders_each_layer_as_metal`] with `shaderOutputLayer` withheld: the vertex
+/// function stores the slice to a varying and the synthesized geometry stages store `Layer` from
+/// it, in every pass of two layers or more (asserted from the pipeline each draw executed). A
+/// device without `geometryShader` refuses the fixture's pipeline (printed).
+#[test]
+fn through_a_geometry_stage_a_layered_pass_renders_each_layer_as_metal() {
+    layered_passes(&[VkFeature::ShaderOutputLayer]);
+}
+
+/// [`a_layered_pass_renders_each_layer_as_metal`]'s passes on the test device without `withheld`.
+fn layered_passes(withheld: &[VkFeature]) {
     let cache = ScratchCache::new().unwrap();
     let messages = Messages::default();
     {
-        let device = validated_device(TEST_DEVICE, &messages, cache.path()).unwrap();
-        let name = device.name().to_owned();
-        let lane = match Lane::new(device) {
+        let lane = match lane_without(&messages, &cache, withheld, Fragment::Slice) {
             Ok(lane) => lane,
-            Err(Error::Unsupported(u)) => {
-                eprintln!("refused: layered passes on {name}: {u:?}");
-                return;
-            }
-            Err(other) => panic!("layered passes on {name}: {other}"),
+            Err((name, error)) => match *error {
+                Error::Unsupported(u) => {
+                    eprintln!("refused: layered passes on {name} without {withheld:?}: {u:?}");
+                    return;
+                }
+                other => panic!("layered passes on {name}: {other}"),
+            },
         };
+        let name = lane.device.name().to_owned();
         // `rt6_layered_vertex` writes `[[render_target_array_index]]` and no viewport index.
         assert!(lane.plain.writes_render_target_array_index());
         assert!(!lane.plain.writes_viewport_array_index());
@@ -387,7 +495,7 @@ fn a_layered_pass_renders_each_layer_as_metal() {
             second: Vec::new(),
             depth: Vec::new(),
         };
-        // Metal's texels (RT6 Metal probe 12c).
+        // Metal's texels (a Metal probe on an M4; the M3 Max with macOS 27.0.1 stores the same).
         let cases = [
             (
                 Case {
@@ -494,8 +602,9 @@ fn a_layered_pass_renders_each_layer_as_metal() {
             );
         }
         eprintln!(
-            "layered passes on {name}: {} cases, Metal's texels",
-            cases.len()
+            "layered passes on {name}: {} cases, {} geometry stages in a pass of 2: Metal's texels",
+            cases.len(),
+            lane.geometry_stages(2)
         );
     }
     let reported = messages.take();
@@ -507,26 +616,42 @@ fn a_layered_pass_renders_each_layer_as_metal() {
 
 /// An index at or past the pass's length renders the pass's first layer, and the fragment function
 /// reads the index as written, in a pass of length 1 too: each pass of probe 12b stores Metal's
-/// texels in every slice. So does a pass of length 0, Metal's default, which plain Metal draws as
-/// a pass of length 1 (RT6 Metal probe 12's `len0_*`; its debug layer stops these draws). The probe's pass into plane 1 of a 3D texture is not drawn (the runtime
-/// refuses a 3D attachment), and its depth pass is drawn as one draw of index 5: the probe drew
-/// index 4 into the depth alone first (depth 0.5 in the first layer, 1.0 in the second, as here)
-/// and then index 5 behind it, which its depth test dropped.
+/// texels in every slice. So does a pass of length 0, Metal's default, which plain Metal draws as a
+/// pass of length 1 (Metal probe cases `len0_*` on an M4; its debug layer stops these draws). The
+/// probe's pass into plane 1 of a 3D texture is not drawn (the runtime refuses a 3D attachment),
+/// and its depth pass is drawn as one draw of index 5: the probe drew index 4 into the depth alone
+/// first (depth 0.5 in the first layer, 1.0 in the second, as here) and then index 5 behind it,
+/// which its depth test dropped.
 #[test]
 fn an_index_past_the_length_renders_the_first_layer_as_metal() {
+    index_past_the_length(&[]);
+}
+
+/// [`an_index_past_the_length_renders_the_first_layer_as_metal`] with `shaderOutputLayer`
+/// withheld: through the synthesized geometry stages in a pass of two layers or more, and through
+/// the variant that stores no slice, with no stage, in a pass of one layer or none.
+#[test]
+fn through_a_geometry_stage_an_index_past_the_length_renders_the_first_layer_as_metal() {
+    index_past_the_length(&[VkFeature::ShaderOutputLayer]);
+}
+
+/// [`an_index_past_the_length_renders_the_first_layer_as_metal`]'s passes on the test device
+/// without `withheld`.
+fn index_past_the_length(withheld: &[VkFeature]) {
     let cache = ScratchCache::new().unwrap();
     let messages = Messages::default();
     {
-        let device = validated_device(TEST_DEVICE, &messages, cache.path()).unwrap();
-        let name = device.name().to_owned();
-        let lane = match Lane::new(device) {
+        let lane = match lane_without(&messages, &cache, withheld, Fragment::Slice) {
             Ok(lane) => lane,
-            Err(Error::Unsupported(u)) => {
-                eprintln!("refused: layered passes on {name}: {u:?}");
-                return;
-            }
-            Err(other) => panic!("layered passes on {name}: {other}"),
+            Err((name, error)) => match *error {
+                Error::Unsupported(u) => {
+                    eprintln!("refused: layered passes on {name} without {withheld:?}: {u:?}");
+                    return;
+                }
+                other => panic!("layered passes on {name}: {other}"),
+            },
         };
+        let name = lane.device.name().to_owned();
         const E: u32 = FILLED;
         const C: u32 = CLEARED[0];
         let colors = |color: &[u32]| Stored {
@@ -534,7 +659,7 @@ fn an_index_past_the_length_renders_the_first_layer_as_metal() {
             second: Vec::new(),
             depth: Vec::new(),
         };
-        // Metal's texels (RT6 Metal probe 12b).
+        // Metal's texels (a Metal probe on an M4; the M3 Max with macOS 27.0.1 stores the same).
         let cases = [
             (
                 Case {
@@ -698,8 +823,10 @@ fn an_index_past_the_length_renders_the_first_layer_as_metal() {
             );
         }
         eprintln!(
-            "an index past the length on {name}: {} cases, Metal's texels",
-            cases.len()
+            "an index past the length on {name}: {} cases, {} geometry stages in a pass of 2: \
+             Metal's texels",
+            cases.len(),
+            lane.geometry_stages(2)
         );
     }
     let reported = messages.take();
@@ -709,8 +836,155 @@ fn an_index_past_the_length_renders_the_first_layer_as_metal() {
     );
 }
 
-/// What Metal's validation stops in a layered pass is refused typed before anything runs (RT6
-/// Metal probes 12 and 12c): an attachment without the pass's slices from its own, a second color
+/// `rt6_layered_weights` reads the slice and the tag, the primitive ID and the barycentric weights
+/// together. Each pass stores Metal's texels (a Metal probe of the fixture's functions on an M3 Max
+/// with macOS 27.0.1, with and without API validation where it draws): the primitive ID restarts
+/// at 0 in each instance, and every weight of the fullscreen triangle at a pixel's center lies in
+/// [0, 1] (bit 23).
+#[test]
+fn the_slice_the_weights_and_the_primitive_id_read_as_metal() {
+    weights_passes(&[]);
+}
+
+/// [`the_slice_the_weights_and_the_primitive_id_read_as_metal`] with `shaderOutputLayer` and
+/// `fragmentShaderBarycentric` withheld: one set of synthesized geometry stages stores the slice
+/// and writes the weights and the primitive ID, in every pass (asserted from the pipeline each draw
+/// executed), the pass of one layer included, whose variant stores no slice. A device without
+/// `geometryShader` refuses the fixture's pipeline (printed).
+#[test]
+fn through_one_geometry_stage_the_slice_the_weights_and_the_primitive_id_read_as_metal() {
+    weights_passes(&[
+        VkFeature::ShaderOutputLayer,
+        VkFeature::FragmentShaderBarycentric,
+    ]);
+}
+
+/// [`the_slice_the_weights_and_the_primitive_id_read_as_metal`]'s passes on the test device
+/// without `withheld`.
+fn weights_passes(withheld: &[VkFeature]) {
+    let cache = ScratchCache::new().unwrap();
+    let messages = Messages::default();
+    {
+        let lane = match lane_without(&messages, &cache, withheld, Fragment::Weights) {
+            Ok(lane) => lane,
+            Err((name, error)) => match *error {
+                Error::Unsupported(u) => {
+                    eprintln!(
+                        "refused: the weights in layered passes on {name} without {withheld:?}: {u:?}"
+                    );
+                    return;
+                }
+                other => panic!("the weights in layered passes on {name}: {other}"),
+            },
+        };
+        let name = lane.device.name().to_owned();
+        const E: u32 = FILLED;
+        const C: u32 = CLEARED[0];
+        /// Every weight in [0, 1], and the primitive ID 0.
+        const W: u32 = 1 << 23;
+        let colors = |color: &[u32]| Stored {
+            color: color.to_vec(),
+            second: Vec::new(),
+            depth: Vec::new(),
+        };
+        // Metal's texels (a Metal probe on an M3 Max with macOS 27.0.1).
+        let cases = [
+            (
+                Case {
+                    name: "len2_slice0",
+                    ..PLAIN
+                },
+                colors(&[W | 0x100, W | 0x201, E, E]),
+            ),
+            (
+                Case {
+                    name: "len4_all",
+                    length: 4,
+                    layers: &[3, 2, 1, 0],
+                    ..PLAIN
+                },
+                colors(&[W | 0x400, W | 0x301, W | 0x202, W | 0x103]),
+            ),
+            (
+                Case {
+                    name: "len4_same_layer",
+                    length: 4,
+                    layers: &[2, 2, 2],
+                    ..PLAIN
+                },
+                colors(&[C, C, W | 0x302, C]),
+            ),
+            (
+                Case {
+                    name: "len6_cube",
+                    kind: Kind::Cube,
+                    length: 6,
+                    layers: &[5, 0, 3],
+                    ..PLAIN
+                },
+                colors(&[W | 0x200, C, C, W | 0x303, C, W | 0x105]),
+            ),
+            (
+                Case {
+                    name: "len2_index7_alone",
+                    layers: &[7],
+                    ..PLAIN
+                },
+                colors(&[W | 0x107, C, E, E]),
+            ),
+            (
+                Case {
+                    name: "len1_slice2_index1",
+                    slice: 2,
+                    length: 1,
+                    layers: &[1],
+                    ..PLAIN
+                },
+                colors(&[E, E, W | 0x101, E]),
+            ),
+            (
+                Case {
+                    name: "len1_two_instances",
+                    length: 1,
+                    layers: &[0, 3],
+                    ..PLAIN
+                },
+                colors(&[W | 0x203, E, E, E]),
+            ),
+            (
+                Case {
+                    name: "len0_index_3_then_0",
+                    length: 0,
+                    layers: &[3, 0],
+                    ..PLAIN
+                },
+                colors(&[W | 0x200, E, E, E]),
+            ),
+        ];
+        for (case, metal) in &cases {
+            assert_eq!(
+                lane.try_run(case).unwrap(),
+                *metal,
+                "{} on {name}: Metal's texels",
+                case.name
+            );
+        }
+        eprintln!(
+            "the weights in layered passes on {name}: {} cases, {} geometry stages in a pass of 1: \
+             Metal's texels",
+            cases.len(),
+            lane.geometry_stages(1)
+        );
+    }
+    let reported = messages.take();
+    assert!(
+        reported.is_empty(),
+        "the validation layer reported: {reported:#?}"
+    );
+}
+
+/// What Metal's validation stops in a layered pass is refused typed before anything runs (Metal
+/// probes on an M4): an attachment without the pass's slices from its own, a second color
 /// attachment's and a 2D texture's among them ("slice + renderTargetArrayLength is 3, but the
 /// texture only has 2 slices").
 #[test]
@@ -720,7 +994,7 @@ fn a_layered_pass_is_refused_as_metal_refuses_it() {
     {
         let device = validated_device(TEST_DEVICE, &messages, cache.path()).unwrap();
         let name = device.name().to_owned();
-        let lane = match Lane::new(device) {
+        let lane = match Lane::new(device, Fragment::Slice) {
             Ok(lane) => lane,
             Err(Error::Unsupported(u)) => {
                 eprintln!("refused: layered passes on {name}: {u:?}");
@@ -783,8 +1057,9 @@ fn a_layered_pass_is_refused_as_metal_refuses_it() {
     );
 }
 
-/// A resolve lane texel (RGBA8): white where a draw covered the pixel, the clear (zero) where
-/// none did, and what a resolve texture holds before its pass (CRF probe 5's 0x808080ff).
+/// A resolve lane texel (RGBA8): white where a draw covered the pixel, the clear (zero) where none
+/// did, and what a resolve texture holds before its pass (0x808080ff, as in a Metal probe on the M3
+/// Max and an M4).
 const WHITE: u32 = 0xffff_ffff;
 const CLEAR: u32 = 0;
 const FILL: u32 = 0xff80_8080;
@@ -1440,15 +1715,14 @@ impl Steps {
     }
 }
 
-/// A layered pass resolves each of its layers as Metal does (CRF probe 5, an M3 Max with macOS
-/// 26.7 and an M4 with 27.0.1, alike, with and without API validation): layer `i`, counted from
-/// the attachment's slice, into slice `resolveSlice + i` of the resolve texture, none past its
-/// slices (a 2D resolve texture takes layer 0 alone), a layer no draw reached resolving the clear.
-/// Through the resolve texture's own slices where they hold the pass's layers, else through a
-/// scratch image whose fitting layers are copied (a texture without render target usage too);
-/// a late target likewise, the descriptor's texture keeping its texels; and where the pass's last
-/// instance renders one layer (an amplification moved there), through one more instance over
-/// every layer.
+/// A layered pass resolves each of its layers as Metal does (a Metal probe on an M3 Max with macOS
+/// 26.7 and an M4 with 27.0.1, alike, with and without API validation): layer `i`, counted from the
+/// attachment's slice, into slice `resolveSlice + i` of the resolve texture, none past its slices
+/// (a 2D resolve texture takes layer 0 alone), a layer no draw reached resolving the clear. Through
+/// the resolve texture's own slices where they hold the pass's layers, else through a scratch image
+/// whose fitting layers are copied (a texture without render target usage too); a late target
+/// likewise, the descriptor's texture keeping its texels; and where the pass's last instance
+/// renders one layer (an amplification moved there), through one more instance over every layer.
 #[test]
 fn a_layered_pass_resolves_each_layer_as_metal() {
     let cache = ScratchCache::new().unwrap();
@@ -1880,16 +2154,15 @@ fn separate_multisampled_depth_and_stencil_render_each_layer_as_metal() {
     assert!(differ.is_empty(), "{differ:#?}");
 }
 
-/// A pass of one layer resolves its depth and stencil from its attachment's slice into the
-/// resolve texture's `resolveSlice` alone (RT6 probe 6: the resolve writes only the resolve
-/// texture's `resolveLevel` and `resolveSlice`): from slice 1 of a 4-sample
-/// `Depth32Float_Stencil8` array into slices 2 and 0 of a 3-slice one, and from slice 0 into
-/// slice 2, under each filter pair of `a_layered_pass_resolves_its_depth_and_stencil_from_its_first_layer`.
-/// On lavapipe, whose render pass resolves a depth/stencil attachment from its image's first
-/// slice into the resolve image's first
-/// (`RuntimeDriverDefect::DepthStencilResolveFirstSubresource`), the runtime resolves a copy of
-/// the attachment's slice into a scratch image copied into the resolve slice. A device whose
-/// resolve modes lack a filter, where no draw takes it, prints its typed refusal.
+/// A pass of one layer resolves its depth and stencil from its attachment's slice into the resolve
+/// texture's `resolveSlice` alone (a Metal probe on an M4: the resolve writes only the resolve
+/// texture's `resolveLevel` and `resolveSlice`): from slice 1 of a 4-sample `Depth32Float_Stencil8`
+/// array into slices 2 and 0 of a 3-slice one, and from slice 0 into slice 2, under each filter
+/// pair of `a_layered_pass_resolves_its_depth_and_stencil_from_its_first_layer`. On lavapipe, whose
+/// render pass resolves a depth/stencil attachment from its image's first slice into the resolve
+/// image's first (`RuntimeDriverDefect::DepthStencilResolveFirstSubresource`), the runtime resolves
+/// a copy of the attachment's slice into a scratch image copied into the resolve slice. A device
+/// whose resolve modes lack a filter, where no draw takes it, prints its typed refusal.
 #[test]
 fn a_depth_and_stencil_resolve_reads_and_writes_their_own_slices() {
     use MultisampleDepthResolveFilter as D;

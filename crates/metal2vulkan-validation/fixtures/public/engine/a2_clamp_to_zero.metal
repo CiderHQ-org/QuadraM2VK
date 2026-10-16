@@ -1,5 +1,5 @@
-// Owned fixture (WP-A2, DESIGN D127): `clamp_to_zero` addressing per bound pixel format (DESIGN
-// D62.7, D90.2). Metal documents the out-of-range texel as (0, 0, 0, 0) for a format with alpha
+// Owned fixture: `clamp_to_zero` addressing per bound pixel format.
+// Metal documents the out-of-range texel as (0, 0, 0, 0) for a format with alpha
 // and (0, 0, 0, 1) without; which formats count as having alpha, and what a linear blend with that
 // zero gives, are readings. One float, one uint, and one int texture are sampled at coordinates
 // inside, outside, and on each edge: through constexpr nearest and linear clamp-to-zero samplers

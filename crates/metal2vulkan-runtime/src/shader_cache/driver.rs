@@ -263,13 +263,24 @@ struct Seed {
 /// (the module docs), seeded from `making`'s record in `store` where one loads, and write the
 /// data the making added as the record; `create` is handed a null cache where the driver makes
 /// none. `raw` is the device's checked accessor's (`DeviceShared::vk`).
-pub(super) fn make<T, E>(
+///
+/// Once the process is exiting (`exiting`: the exit guard's [`closed`](exit_guard::closed), or a
+/// test's own), the making's own `vkCreate*Pipelines` is the one Vulkan call it makes: a pool
+/// piece's section, begun before the close, runs on past it (`exit_guard`), and what the making
+/// would add to it (its cache's creation, its data's read for the record, its release) is left
+/// out. Asked before the cache is made, where `create` is then handed a null cache, and again once
+/// `create` returned, where the cache is left to the process's end, unread.
+pub(crate) fn make<T, E>(
     store: &Store,
     records: &Records,
     raw: &ash::Device,
     making: Making,
+    exiting: impl Fn() -> bool,
     create: impl FnOnce(vk::PipelineCache) -> Result<T, E>,
 ) -> Result<T, E> {
+    if exiting() {
+        return create(vk::PipelineCache::null());
+    }
     let name = records.name(making);
     let identity = &records.identity;
     let seed = match store.load_content(&name, |bytes| {
@@ -316,6 +327,9 @@ pub(super) fn make<T, E>(
         }
     };
     let made = create(cache);
+    if exiting() {
+        return made;
+    }
     if made.is_ok() {
         keep(store, (identity, &name), raw, cache, loaded);
     }
@@ -325,8 +339,8 @@ pub(super) fn make<T, E>(
 }
 
 /// Write `cache`'s data as the record `name` unless it is `loaded`'s, byte for byte, or the
-/// checks refuse it (counted). Once the process is exiting, nothing is read or written: the
-/// read is a section of the exit guard ([`exit_guard`]).
+/// checks refuse it (counted). The read is a section of the exit guard ([`exit_guard`]): on the
+/// program's own thread, once the process is exiting, nothing is read or written.
 fn keep(
     store: &Store,
     (identity, name): (&Identity, &str),

@@ -21,13 +21,19 @@
 //! Pipeline-creation time (over 5 s is a bug) is measured wherever validation creates an engine
 //! pipeline on a driver: `corpus-pipeline`'s L4 sweep reports it per row, and the engine
 //! candidate executors fail a run whose creation breaches it ([`creation_within_ceiling`]);
-//! [`PIPELINE_CREATION_CEILING`] is the ceiling. Both tools turn the drivers' shader disk caches
-//! off for their own process first ([`turn_driver_shader_caches_off`]), so a creation they time is
-//! a compile, not a cache hit.
+//! [`PIPELINE_CREATION_CEILING`] is the ceiling, and a kernel case may declare a bound of its own
+//! for its pipeline ([`creation_within`], `AuthoredCase::creation_bound`). Each times its own
+//! `vkCreate*Pipelines` calls by a [`CreationClock`]: the call's wall time less the time its thread
+//! waited, runnable, for a CPU, so a host loaded by other processes does not move the measure by
+//! that wait (its threads' turns on the cores the call shares, which slow the call's own work, stay
+//! in it: the case's own bound is for those). Both tools turn the drivers' shader disk caches off
+//! for their own process first ([`turn_driver_shader_caches_off`]), so a creation they time is a
+//! compile, not a cache hit.
 
 use crate::engine::{FailureKind, LimitKind};
 use crate::translation_audit::CostRow;
-use std::time::Duration;
+use std::marker::PhantomData;
+use std::time::{Duration, Instant};
 
 /// The ledger must account for at least this fraction (numerator, denominator) of the peak
 /// attributable bytes the counting allocator saw.
@@ -37,18 +43,112 @@ pub const LEDGER_FLOOR: (u64, u64) = (7, 10);
 /// translation ceiling.
 pub const PIPELINE_CREATION_CEILING: Duration = Duration::from_secs(5);
 
-/// A `vkCreate*Pipelines` call of `what` that took `created`: an error above
-/// [`PIPELINE_CREATION_CEILING`], which is a failing result like a translation over 20 s, never an
-/// observation.
+/// A `vkCreate*Pipelines` call of `what` that took `created` (a [`CreationClock`]'s reading, or a
+/// time the runtime reports for its own makings, `Execution::pipeline_creation`, which is their
+/// wall time): an error above [`PIPELINE_CREATION_CEILING`], which is a failing result like a
+/// translation over 20 s, never an observation.
 pub fn creation_within_ceiling(what: &str, created: Duration) -> Result<(), String> {
-    if created > PIPELINE_CREATION_CEILING {
+    creation_within(what, created, PIPELINE_CREATION_CEILING)
+}
+
+/// [`creation_within_ceiling`] of a case's own pipeline, held to `bound`: the case's own
+/// (`AuthoredCase::creation_bound`, above the ceiling), or [`PIPELINE_CREATION_CEILING`] where it
+/// declares none.
+pub fn creation_within(what: &str, created: Duration, bound: Duration) -> Result<(), String> {
+    if created > bound {
+        let of = match bound == PIPELINE_CREATION_CEILING {
+            true => format!("the {} s pipeline-creation ceiling", bound.as_secs()),
+            false => format!(
+                "the case's own pipeline-creation bound of {} ms",
+                bound.as_millis()
+            ),
+        };
         return Err(format!(
-            "creating {what} took {} ms, above the {} s pipeline-creation ceiling (DESIGN D16.8)",
-            created.as_millis(),
-            PIPELINE_CREATION_CEILING.as_secs()
+            "creating {what} took {} ms, above {of}",
+            created.as_millis()
         ));
     }
     Ok(())
+}
+
+/// The clock of one `vkCreate*Pipelines` call: started on the calling thread just before the call,
+/// read on the same thread just after it ([`CreationClock::read`]), it gives the call's wall time
+/// less the time that thread waited, runnable, for a CPU.
+///
+/// The ceiling bounds the driver's work on our modules, and the drivers measured compile on the
+/// calling thread: an RTX 3090's (NVIDIA 615.71.09) creation of a bicubic texture kernel took
+/// 1414 ms of wall time and 1405 ms of the thread's CPU time. On a host whose other processes keep
+/// the thread off a CPU, the wall time grows by that wait, which is the host's: the same kernel's
+/// creation took 13.5 s under a batch's two GPU suites at nextest's default parallelism (a load of
+/// 30 to 45 on 16 hardware threads), and passed alone. Every other wait stays in the reading: the
+/// call blocked on a lock, a disk read, or work on another thread or in another process (MoltenVK
+/// has Metal's compiler service compile each pipeline, which the calling thread waits for blocked).
+///
+/// Linux counts each thread's wait: the second field of `/proc/thread-self/schedstat`, "time spent
+/// waiting on a runqueue" in nanoseconds (the kernel's `Documentation/scheduler/sched-stats.rst`).
+/// Where the kernel gives no such count (another OS, or a kernel built without `CONFIG_SCHED_INFO`)
+/// the clock reads the wall time.
+///
+/// The kernel adds a wait to the count as the thread gets a CPU back, and reading the count is a
+/// system call, which a wait may interrupt: a wait between reading the instant and reading the
+/// count would be left out of one and counted in the other. So each end reads the count on both
+/// sides of its instant until the two agree, no wait between them, and where they never do it
+/// keeps the side that leaves the wait in the reading: the count after the instant at the start,
+/// before it at the end. The clock so never reads less than the call's time on a CPU and blocked.
+pub struct CreationClock {
+    started: Instant,
+    /// The thread's run-queue wait so far, where the kernel counts it.
+    queued: Option<Duration>,
+    /// The wait counted is the thread's own, so the clock stays on it.
+    _thread: PhantomData<*const ()>,
+}
+
+impl CreationClock {
+    /// A clock started now, on the calling thread.
+    pub fn start() -> CreationClock {
+        let (_, started, queued) = paired();
+        CreationClock {
+            started,
+            queued,
+            _thread: PhantomData,
+        }
+    }
+
+    /// The time since [`CreationClock::start`], less the time the thread waited for a CPU since
+    /// then where the kernel counts it.
+    pub fn read(&self) -> Duration {
+        let (queued, now, _) = paired();
+        let wall = now.saturating_duration_since(self.started);
+        match (self.queued, queued) {
+            (Some(before), Some(after)) => wall.saturating_sub(after.saturating_sub(before)),
+            _ => wall,
+        }
+    }
+}
+
+/// How many times an end of a [`CreationClock`] reads the count on both sides of its instant
+/// before it keeps a pair that disagrees.
+const PAIRING_TRIES: usize = 4;
+
+/// An instant with the calling thread's run-queue wait read just before and just after it
+/// ([`CreationClock`]): read again until the two agree, at most [`PAIRING_TRIES`] times.
+fn paired() -> (Option<Duration>, Instant, Option<Duration>) {
+    let mut pair = (run_queue_wait(), Instant::now(), run_queue_wait());
+    for _ in 1..PAIRING_TRIES {
+        if pair.0 == pair.2 {
+            break;
+        }
+        pair = (run_queue_wait(), Instant::now(), run_queue_wait());
+    }
+    pair
+}
+
+/// The calling thread's run-queue wait so far: the second field of `/proc/thread-self/schedstat`
+/// ([`CreationClock`]); `None` where the kernel gives none.
+fn run_queue_wait() -> Option<Duration> {
+    let stat = std::fs::read_to_string("/proc/thread-self/schedstat").ok()?;
+    let waited = stat.split_whitespace().nth(1)?.parse::<u64>().ok()?;
+    Some(Duration::from_nanos(waited))
 }
 
 /// The settings that turn the Vulkan drivers' own shader disk caches off, so a pipeline creation
@@ -321,6 +421,129 @@ mod tests {
             other => panic!("an over-ceiling creation must fail the run: {other:?}"),
         }
     }
+
+    /// A case's own bound holds its pipeline's creation in place of the ceiling: a creation past
+    /// the ceiling and within the bound passes, one past the bound is an error that names it.
+    #[test]
+    fn a_case_s_own_creation_bound_holds_in_place_of_the_ceiling() {
+        let bound = Duration::from_secs(8);
+        let past_ceiling = PIPELINE_CREATION_CEILING + Duration::from_millis(1);
+        assert!(creation_within("the compute pipeline", past_ceiling, bound).is_ok());
+        let over = bound + Duration::from_millis(1);
+        let error = creation_within("the compute pipeline", over, bound).unwrap_err();
+        assert!(error.contains("8001 ms"), "{error}");
+        assert!(
+            error.contains("own pipeline-creation bound of 8000 ms"),
+            "{error}"
+        );
+    }
+
+    /// A [`CreationClock`] counts the time its thread spends on a CPU and the time it blocks, and
+    /// leaves out the time it waits for a CPU: a thread that sleeps reads its sleep; a thread that
+    /// shares one CPU with a spinning thread (both pinned to it) while it spins for 100 ms of its
+    /// own CPU time reads no less than that CPU time and well under its wall time, which holds the
+    /// other thread's turns. Linux counts the wait (`/proc/thread-self/schedstat`).
+    ///
+    /// The spinner's turns also fall at every point of [`READINGS`] clocks of 50 us of the
+    /// thread's CPU time each, some between an end's instant and its count of the wait; none reads
+    /// less than its CPU time. With each end's count read on one side of its instant only, 1 to 32
+    /// of them read less, most as 0 (ten runs on a 16-thread host).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_creation_clock_leaves_out_the_wait_for_a_cpu() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        assert!(
+            run_queue_wait().is_some(),
+            "the kernel counts no run-queue wait"
+        );
+        let clock = CreationClock::start();
+        std::thread::sleep(Duration::from_millis(50));
+        let slept = clock.read();
+        assert!(slept >= Duration::from_millis(50), "{slept:?}");
+
+        let thread_cpu = || {
+            let mut now = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            // SAFETY: `now` is a valid timespec for the call to fill.
+            let read = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) };
+            assert_eq!(read, 0, "clock_gettime(CLOCK_THREAD_CPUTIME_ID)");
+            Duration::new(now.tv_sec as u64, now.tv_nsec as u32)
+        };
+        // Pin the calling thread to the CPU it is on, and a spinning thread to the same CPU.
+        // SAFETY: no arguments.
+        let cpu = unsafe { libc::sched_getcpu() };
+        assert!(cpu >= 0, "sched_getcpu");
+        let pin = |cpu: usize| {
+            // SAFETY: a zeroed set is an empty CPU set.
+            let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+            // SAFETY: `cpu` is a CPU number the kernel gave, within the set's size.
+            unsafe { libc::CPU_SET(cpu, &mut set) };
+            // SAFETY: `set` is a valid CPU set of its own size; 0 names the calling thread.
+            let pinned = unsafe { libc::sched_setaffinity(0, std::mem::size_of_val(&set), &set) };
+            assert_eq!(pinned, 0, "sched_setaffinity");
+        };
+        // SAFETY: a zeroed set is an empty CPU set, which the call fills.
+        let mut before: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `before` is a valid CPU set of its own size; 0 names the calling thread.
+        let got =
+            unsafe { libc::sched_getaffinity(0, std::mem::size_of_val(&before), &mut before) };
+        assert_eq!(got, 0, "sched_getaffinity");
+        let cpu = cpu as usize;
+        pin(cpu);
+        let stop = AtomicBool::new(false);
+        let spin = |span: Duration| {
+            let cpu_before = thread_cpu();
+            while thread_cpu() - cpu_before < span {
+                std::hint::spin_loop();
+            }
+            thread_cpu() - cpu_before
+        };
+        let (spent, wall, read, under) = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                pin(cpu);
+                while !stop.load(Ordering::Relaxed) {
+                    std::hint::spin_loop();
+                }
+            });
+            // Let the spinner take its first turn.
+            std::thread::sleep(Duration::from_millis(10));
+            let started = Instant::now();
+            let clock = CreationClock::start();
+            let spent = spin(Duration::from_millis(100));
+            let read = clock.read();
+            let wall = started.elapsed();
+            let under: Vec<(Duration, Duration)> = (0..READINGS)
+                .filter_map(|_| {
+                    let clock = CreationClock::start();
+                    let spent = spin(Duration::from_micros(50));
+                    let read = clock.read();
+                    (read + Duration::from_micros(20) < spent).then_some((read, spent))
+                })
+                .collect();
+            stop.store(true, Ordering::Relaxed);
+            (spent, wall, read, under)
+        });
+        // SAFETY: `before` is the thread's own earlier set, of its own size.
+        let restored =
+            unsafe { libc::sched_setaffinity(0, std::mem::size_of_val(&before), &before) };
+        assert_eq!(restored, 0, "sched_setaffinity");
+        assert!(
+            read + Duration::from_millis(1) >= spent && read * 4 <= wall * 3,
+            "the clock read {read:?} of {wall:?} for {spent:?} of the thread's CPU"
+        );
+        assert!(
+            under.is_empty(),
+            "{} of {READINGS} clocks read less than their thread's CPU time (reading, CPU): {under:?}",
+            under.len()
+        );
+    }
+
+    /// How many short clocks [`a_creation_clock_leaves_out_the_wait_for_a_cpu`] reads beside the
+    /// spinner: about a second of its turns.
+    #[cfg(target_os = "linux")]
+    const READINGS: usize = 6000;
 
     /// The switch overrides values set before it, and a process started after it (a batch's run)
     /// inherits it. It changes this process's environment, so it runs in a child of the test

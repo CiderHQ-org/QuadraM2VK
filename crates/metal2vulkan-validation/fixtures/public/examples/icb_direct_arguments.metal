@@ -1,4 +1,4 @@
-// Owned fixture (WP-RRS3, DESIGN D645): functions that use, or only declare, a direct texture or
+// Owned fixture: functions that use, or only declare, a direct texture or
 // sampler argument, for the runtime lane's states that support indirect command buffers. Metal
 // answers nil with an NSError for such a state whose functions use one (EVs RRS3-icbtex3 to 6),
 // and makes it where they only declare one. Written from scratch for the runtime lane;

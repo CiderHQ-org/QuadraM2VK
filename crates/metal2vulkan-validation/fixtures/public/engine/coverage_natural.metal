@@ -1,4 +1,4 @@
-// Owned fixture (WP-VSM, DESIGN D341 item 9): fragment functions that read [[sample_mask]] and
+// Owned fixture: fragment functions that read [[sample_mask]] and
 // write memory, which Metal runs once per covered sample, and which read no [[position]] beside
 // a sample index or a sample-qualified varying. On a driver that runs a memory writer once per
 // covered sample itself (MoltenVK on Apple's GPU) such a function compiles as written and keeps

@@ -7,8 +7,7 @@ validation uses them for per-profile checks.
 
 | File | Source | Device / definition | Driver | API |
 |---|---|---|---|---|
-| `vk12-bare` | derived from `VP_LUNARG_minimum_requirements_1_2` | Vulkan 1.2 required features, minimum limits, and the unconditional Required Format Support entries only; asserts typed refusals | – | 1.2.131 |
-| `vk12-floor` | derived, as above | `vk12-bare` + shaderInt16, 8/16-bit storage buffers, formatless storage-image read/write; F-class | – | 1.2.131 |
+| `vk12-floor` | derived from `VP_LUNARG_minimum_requirements_1_2` | the floor: Vulkan 1.2 required features, minimum limits, and the unconditional Required Format Support entries only; F-class | – | 1.2.131 |
 | `lunarg-desktop-baseline-2023` | Vulkan-Profiles `VP_LUNARG_desktop_baseline_2023` | profile, plus `m2v_layer_presentation` | – | 1.2.148 |
 | `roadmap-2022` | Vulkan-Profiles `VP_KHR_roadmap_2022` | profile, plus the Vulkan 1.2 Required Format Support entries it implies, plus `m2v_layer_presentation` | – | 1.3.204 |
 | `nvidia-rtx50-linux` | gpuinfo report 51770 | NVIDIA GeForce RTX 5080, Linux | 615.71.09 | 1.4.351 |

@@ -1,4 +1,4 @@
-// Owned fixture (WP-DSM2, DESIGN D278): what the other lane-moving simdgroup and quadgroup
+// Owned fixture: what the other lane-moving simdgroup and quadgroup
 // operations read from a lane past the threadgroup's thread count, beside dsm2_shuffle_past_n's
 // simd_shuffle, simd_shuffle_down, and simd_shuffle_xor (which read all-zero bits there). Every
 // thread runs every operation, in workgroup-uniform control flow; a threadgroup whose size is not

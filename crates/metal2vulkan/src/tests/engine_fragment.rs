@@ -472,8 +472,9 @@ fn fetch_state(read: &[u32], formats: &[PixelFormat], blending: bool) -> Lowerin
 /// rasterization-order color attachment access it is one input attachment with a `FramebufferFetch`
 /// fact. With only the ordered pixel interlock it is one storage image read (and written) inside
 /// the interlock, under its pipeline's state (standalone, the function needs that state); where
-/// that state blocks the storage form, `RequireOrdered` refuses with the blocker and
-/// `AcceptUnordered` reads an input attachment unordered with a precision note. With neither,
+/// that state blocks the storage form (a blend of a format whose blend the shader does not compute),
+/// `RequireOrdered` refuses with the blocker and `AcceptUnordered` reads an input attachment
+/// unordered with a precision note; a 16-bit float attachment's blend the shader computes. With neither,
 /// `RequireOrdered` refuses naming both and `AcceptUnordered` reads unordered. Every compiled
 /// module passes L3.
 #[test]
@@ -554,9 +555,33 @@ fn framebuffer_fetch_reads_in_an_ordered_form_where_the_device_has_one() {
                     assert!(attachments(&a).is_empty(), "{entry} on {stem}");
                     assert!(!unordered(&a), "{entry} on {stem}");
                 }
-                // Blending the written color 0 blocks its storage form (an in-shader blend is
-                // not implemented): refused with that reason, or read unordered.
+                // Blending the written color 0 blocks its storage form where the shader computes
+                // no blend of its format (`RGBA8Unorm`, `R32Float`): refused with that reason, or
+                // read unordered. A 16-bit float one's blend the shader computes, as Metal's.
                 let blended = fetch_state(colors, formats, true);
+                if formats[0] == PixelFormat::RGBA16Float {
+                    for p in [&strict, &lenient] {
+                        let a = compile_with(&bc, entry, p, &blended)
+                            .unwrap_or_else(|e| panic!("{entry} on {stem}: blended: {e}"));
+                        link_and_validate(&a, p)
+                            .unwrap_or_else(|e| panic!("{entry} on {stem}: blended: L3: {e}"));
+                        assert_eq!(storage_attachments(&a), colors, "{entry} on {stem}");
+                        assert!(
+                            a.facts.iter().any(|f| matches!(
+                                f,
+                                RuntimeFact::InterlockedFramebufferFetch {
+                                    color: 0,
+                                    blend: Some(_),
+                                    ..
+                                }
+                            )),
+                            "{entry} on {stem}: {:?}",
+                            a.facts
+                        );
+                        assert!(!unordered(&a), "{entry} on {stem}");
+                    }
+                    continue;
+                }
                 match compile_with(&bc, entry, &strict, &blended) {
                     Err(Error::Unsupported(u)) => assert_eq!(
                         (u.feature, u.needs),
@@ -1771,8 +1796,10 @@ fn a_fetched_attachment_s_module_is_the_same_for_each_format_it_reads_alike() {
 /// fetched attachment written under mask none by a function that discards, beside a depth and
 /// stencil attachment, so without early tests (`msf_fetch_discard`). Each takes the storage form on
 /// every committed profile that orders fetch through the interlock (a write of mask none stores
-/// nothing), passes L3, and the first makes its whole pipeline on `moltenvk-m3`; a blend that adds
-/// the destination stays refused. A stored channel without early tests compiles, stating
+/// nothing), passes L3, and the first makes its whole pipeline on `moltenvk-m3`; under a blend that
+/// adds the destination too, the function computing Metal's blend of its `half2` output (one and
+/// one, added: Metal's `h(s + d)`, measured bit-exact by the narrow sweeps, EV FBL-nw1-m3), its
+/// fact naming the blend, and passes L3. A stored channel without early tests compiles, stating
 /// `TestedStorageWrites`, whose draws' plans check their tests; the write of mask none states
 /// nothing of them.
 #[test]
@@ -1813,12 +1840,6 @@ fn a_replacing_blend_or_a_write_that_stores_nothing_takes_the_storage_form() {
         inputs.framebuffer_fetch = Some(FramebufferFetchInputs::of([read], colors, true, false, 1));
         inputs
     };
-    let ni = |r: Result<std::sync::Arc<crate::library::FunctionArtifact>, Error>| match r {
-        Err(Error::Unsupported(u)) => {
-            (u.feature, u.needs) == (Feature::FramebufferFetch, Needs::NotImplemented)
-        }
-        _ => false,
-    };
     let mut checked = 0;
     for (stem, p) in committed_profiles().expect("profiles") {
         if !crate::lower::fragment::interlock_orders(&p) {
@@ -1834,10 +1855,19 @@ fn a_replacing_blend_or_a_write_that_stores_nothing_takes_the_storage_form() {
         checked += 1;
         link_and_validate(&a, &p).unwrap_or_else(|e| panic!("{stem}: L3: {e}"));
         let adds = state(1, &replacing(BlendFactor::One), &p);
-        assert!(
-            ni(compile_with(&coverage, "con_fetch_coverage", &p, &adds)),
-            "{stem}"
-        );
+        let a = compile_with(&coverage, "con_fetch_coverage", &p, &adds)
+            .unwrap_or_else(|e| panic!("{stem}: adds: {e}"));
+        let fetched = a.facts.iter().find_map(|f| match f {
+            RuntimeFact::InterlockedFramebufferFetch {
+                color: 1,
+                writes,
+                blend,
+                ..
+            } => Some((*writes, blend.is_some())),
+            _ => None,
+        });
+        assert_eq!(fetched, Some((true, true)), "{stem}: adds: {:?}", a.facts);
+        link_and_validate(&a, &p).unwrap_or_else(|e| panic!("{stem}: adds: L3: {e}"));
         let none = state(0, &discarding(ColorWriteMask::NONE), &p);
         let a = compile_with(&discard, "msf_fetch_discard", &p, &none)
             .unwrap_or_else(|e| panic!("{stem}: {e}"));
@@ -4507,40 +4537,46 @@ fn notes_on(bc: &[u8], what: &str, note: PrecisionNote, noted: &[&str]) {
     }
 }
 
-/// On a driver whose interpolation is measured not to be Metal's
-/// (`DriverWorkaround::InterpolationNotMetals`: NVIDIA's 615.71.09, both committed profiles of
-/// it), a fragment function that reads a varying the device interpolates records
-/// `PrecisionNote::DeviceInterpolation`, whatever its sampling and perspective; one whose varying
-/// is flat, which no interpolation touches, does not, and no other profile records it (NVIDIA's
-/// older 580 release, measured by no one, among them).
+/// A fragment function that reads a varying the device interpolates records
+/// `PrecisionNote::DeviceInterpolation`, whatever its sampling and perspective, on every committed
+/// profile but MoltenVK's, which take `DriverDeviation::MetalInterpolation` (Metal interpolates
+/// there): those record none and require `VkProperty::MetalInterpolation` instead. One whose
+/// varying is flat, which no interpolation touches, records neither anywhere.
 #[test]
 fn a_varying_the_device_interpolates_records_the_device_interpolation_note() {
+    use crate::device::requirements::VkProperty;
     let note = PrecisionNote::DeviceInterpolation;
-    let nvidia = ["nvidia-rtx50-linux", "nvidia-rtx5080-laptop"];
+    let profiles = committed_profiles().expect("profiles");
+    let devices: Vec<&str> = profiles
+        .iter()
+        .map(|(stem, _)| stem.as_str())
+        .filter(|stem| !is_moltenvk_capture(stem))
+        .collect();
+    assert!(devices.len() > 10, "{devices:?}");
     let body = "  %r = add i32 %x, 1";
     let cases = [
-        (
-            "perspective",
-            r#"!"air.center", !"air.perspective""#,
-            &nvidia[..],
-        ),
-        (
-            "linear",
-            r#"!"air.center", !"air.no_perspective""#,
-            &nvidia[..],
-        ),
-        (
-            "centroid",
-            r#"!"air.centroid", !"air.perspective""#,
-            &nvidia[..],
-        ),
-        ("flat", r#"!"air.flat""#, &[][..]),
+        ("perspective", r#"!"air.center", !"air.perspective""#, true),
+        ("linear", r#"!"air.center", !"air.no_perspective""#, true),
+        ("centroid", r#"!"air.centroid", !"air.perspective""#, true),
+        ("flat", r#"!"air.flat""#, false),
     ];
-    for (what, interp, noted) in cases {
+    for (what, interp, interpolated) in cases {
         let Some(bc) = varying_fragment(what, interp, body, "") else {
             return;
         };
+        let noted = if interpolated { &devices[..] } else { &[][..] };
         notes_on(&bc, what, note, noted);
+        for (stem, p) in &profiles {
+            let Ok(a) = compile(&bc, "f", p) else {
+                continue;
+            };
+            let requires = a
+                .requirements
+                .properties
+                .contains(&VkProperty::MetalInterpolation);
+            let by_metal = interpolated && is_moltenvk_capture(stem);
+            assert_eq!(requires, by_metal, "{what} on {stem}");
+        }
     }
 }
 
@@ -5168,4 +5204,257 @@ fn a_fragment_functions_derivatives_are_fine() {
         compiled += 1;
     }
     assert!(compiled >= 10, "{compiled} profiles compiled it");
+}
+
+/// A draw that reads a texture its subpass renders through a snapshot (`BindState::
+/// snapshot_textures`): owned fixture `tob_renders`'s `tob_rect` and `tob_read`
+/// (`t.read(uint2(in.position.xy))`, whose texel reaches only its output), planned with slots 0
+/// and 3 asking for snapshots, keeps slot 0 alone (the function has no slot 3) on every profile
+/// with the pixel interlock, fragment stores, the feedback loop layout and dynamic color write
+/// masks. Its variant binds slot 0's snapshot as a storage image, states `snapshot_reads`, makes
+/// the write masks dynamic, requires the feedback loop layout, writes no memory of the
+/// function's, passes L3, and plans the same variant
+/// against itself, writing `WriteSource::SnapshotTexels` and leaving the phase to the consumer as a
+/// fragment hole, zero in the plan's bytes. A pipeline with a depth attachment, a multisampled
+/// one, a profile without one of those features, and a draw that asks for no snapshot keep the
+/// plain pipeline.
+#[test]
+fn a_snapshot_read_plans_its_variant_where_the_pipeline_can() {
+    use crate::bind::{DrawCall, PushHole};
+    use crate::pipeline::sym::{PushField, SlotClass, SlotRef, SnapshotForm, Stage};
+    let Some(bc) = fixture("tob_renders") else {
+        return;
+    };
+    let function = |name: &str| {
+        StageSource::Function(FunctionDescriptor::new(
+            Library::from_air(&bc)
+                .expect("library")
+                .function(name)
+                .expect("function"),
+        ))
+    };
+    let descriptor = |depth: bool, samples: u32| {
+        let mut d = RenderPipelineDescriptor::new(function("tob_rect"));
+        d.fragment = Some(function("tob_read"));
+        d.color_attachments[0] = Some(ColorAttachmentDescriptor::new(PixelFormat::RGBA8Unorm));
+        if depth {
+            d.depth_format = Some(PixelFormat::Depth32Float);
+        }
+        d.raster_sample_count = samples;
+        d
+    };
+    let snapshots = |p: &crate::pipeline::RenderPipeline| -> Vec<(u32, vk::DescriptorType)> {
+        p.layout
+            .sets
+            .iter()
+            .flat_map(|s| &s.bindings)
+            .filter_map(|b| match b.source {
+                BindingSource::SnapshotTexels(slot) => Some((slot, b.ty)),
+                _ => None,
+            })
+            .collect()
+    };
+    let slot = SlotRef {
+        stage: Stage::Fragment,
+        class: SlotClass::Texture,
+        index: 0,
+    };
+    let state = BindState {
+        snapshot_textures: [0, 3].into(),
+        ..Default::default()
+    };
+    let draw = DrawCall::Primitives {
+        vertex_start: 0,
+        vertex_count: 4,
+        instance_count: 1,
+        base_instance: 0,
+    };
+    let mut planned = 0;
+    for stem in [
+        "intel-irisxe-anv",
+        "amd-780m-radv",
+        "nvidia-rtx5080-laptop",
+        "lavapipe",
+        "vk12-floor",
+    ] {
+        let desc = crate::pipeline::testing::description(stem).expect("description");
+        let dev = Device::new(desc, DevicePolicy::default()).expect("device");
+        let base = dev
+            .compile_render_pipeline(&descriptor(false, 1), &Budget::standard())
+            .unwrap_or_else(|e| panic!("{stem}: {e}"));
+        assert!(snapshots(&base).is_empty(), "{stem}");
+        assert!(!base.graphics.snapshot_reads, "{stem}");
+        let plain = base
+            .plan(&dev, &BindState::default().shape())
+            .expect("plain plan");
+        assert!(plain.variant.snapshot_textures.is_empty(), "{stem}");
+        let plan = base.plan(&dev, &state.shape()).expect("plan");
+        // The binder plans the variant where the device enabled what its draws take: the pixel
+        // interlock, fragment stores, the feedback loop layout and dynamic write masks.
+        let enabled = &dev.profile().fields().enabled.features;
+        let takes = dev.profile().fields().fragment.pixel_interlock
+            && [
+                VkFeature::FragmentStoresAndAtomics,
+                VkFeature::AttachmentFeedbackLoopLayout,
+                VkFeature::ExtendedDynamicState3ColorWriteMask,
+            ]
+            .iter()
+            .all(|feature| enabled.contains(feature));
+        if !takes {
+            assert!(plan.variant.snapshot_textures.is_empty(), "{stem}");
+            continue;
+        }
+        planned += 1;
+        // No texture bound: the fetched lanes' bits.
+        assert_eq!(
+            plan.variant.snapshot_textures,
+            [(slot, SnapshotForm::Bits)].into(),
+            "{stem}"
+        );
+        assert!(
+            matches!(
+                plan.instantiate_draw(&state, &draw),
+                Err(BindError::NeedsVariant { .. })
+            ),
+            "{stem}: the base pipeline is the other variant"
+        );
+        let variant = dev
+            .compile_render_variant(&descriptor(false, 1), &plan.variant, &Budget::standard())
+            .unwrap_or_else(|e| panic!("{stem}: variant: {e}"));
+        assert_eq!(
+            snapshots(&variant),
+            [(0, vk::DescriptorType::STORAGE_IMAGE)],
+            "{stem}"
+        );
+        assert!(variant.graphics.snapshot_reads, "{stem}");
+        assert!(
+            variant
+                .graphics
+                .dynamic_states
+                .contains(&vk::DynamicState::COLOR_WRITE_MASK_EXT),
+            "{stem}: dynamic write masks"
+        );
+        assert!(
+            variant
+                .requirements
+                .features
+                .contains(&VkFeature::AttachmentFeedbackLoopLayout)
+                && variant
+                    .requirements
+                    .features
+                    .contains(&VkFeature::ExtendedDynamicState3ColorWriteMask),
+            "{stem}: {:?}",
+            variant.requirements.features
+        );
+        assert!(!variant.graphics.fragment_writes_memory, "{stem}");
+        for m in &variant.stages {
+            check_words_valid(&m.spirv, &variant.requirements, dev.profile())
+                .unwrap_or_else(|e| panic!("{stem}: L3: {e}"));
+        }
+        let again = variant.plan(&dev, &state.shape()).expect("variant plan");
+        assert_eq!(again.variant, plan.variant, "{stem}: a fixed point");
+        assert!(
+            again
+                .descriptors
+                .iter()
+                .any(|w| w.source == WriteSource::SnapshotTexels { slot: 0 }),
+            "{stem}: {:?}",
+            again.descriptors
+        );
+        let cmds = again
+            .instantiate_draw(&state, &draw)
+            .unwrap_or_else(|e| panic!("{stem}: draw: {e:?}"));
+        let holes: Vec<(vk::ShaderStageFlags, u32)> = cmds
+            .push_holes
+            .iter()
+            .filter_map(|h| match *h {
+                PushHole::SnapshotPhase { stages, offset } => Some((stages, offset)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(holes.len(), 1, "{stem}: {:?}", cmds.push_holes);
+        let (stages, offset) = holes[0];
+        assert_eq!(stages, vk::ShaderStageFlags::FRAGMENT, "{stem}");
+        let at = offset as usize;
+        let bytes = cmds
+            .push_constants
+            .iter()
+            .find(|w| w.stages == stages)
+            .map(|w| (w.offset as usize, &w.bytes))
+            .expect("the fragment's push bytes");
+        assert_eq!(
+            bytes.1.get(at - bytes.0..at - bytes.0 + 4),
+            Some(&[0u8; 4][..]),
+            "{stem}: phase 0 in the plan's bytes"
+        );
+        assert!(
+            again
+                .push
+                .fields
+                .iter()
+                .any(|f| f.field == PushField::SnapshotPhase),
+            "{stem}"
+        );
+        // A bound texture's form: the codes of a normalized or half-float format, the bits of a
+        // 32-bit float format's lanes and of an sRGB format's decoded ones; each variant passes L3
+        // and binds its snapshot.
+        for (format, form) in [
+            (PixelFormat::RGBA8Unorm, SnapshotForm::Unorm8),
+            (PixelFormat::BGRA8Unorm, SnapshotForm::Unorm8),
+            (PixelFormat::R8Unorm, SnapshotForm::Unorm8),
+            (PixelFormat::RGBA8Snorm, SnapshotForm::Snorm8),
+            (PixelFormat::RG16Unorm, SnapshotForm::Unorm16),
+            (PixelFormat::RGBA16Float, SnapshotForm::Half),
+            (PixelFormat::RGBA32Float, SnapshotForm::Bits),
+            (PixelFormat::RGB10A2Unorm, SnapshotForm::Bits),
+        ] {
+            let mut bound = state.clone();
+            let mut table = crate::bind::state::StageTable::default();
+            let facts =
+                crate::bind::state::TextureFacts::new(crate::metal::TextureType::Type2D, format);
+            table.textures.insert(
+                0,
+                crate::bind::state::BoundTexture::Texture {
+                    facts,
+                    resource_id: None,
+                },
+            );
+            bound.stages.insert(Stage::Fragment, table);
+            let plan = base.plan(&dev, &bound.shape()).expect("bound plan");
+            assert_eq!(
+                plan.variant.snapshot_textures,
+                [(slot, form)].into(),
+                "{stem}: {format:?}"
+            );
+            let variant = dev
+                .compile_render_variant(&descriptor(false, 1), &plan.variant, &Budget::standard())
+                .unwrap_or_else(|e| panic!("{stem}: {format:?}: {e}"));
+            assert_eq!(
+                snapshots(&variant),
+                [(0, vk::DescriptorType::STORAGE_IMAGE)],
+                "{stem}: {format:?}"
+            );
+            for m in &variant.stages {
+                check_words_valid(&m.spirv, &variant.requirements, dev.profile())
+                    .unwrap_or_else(|e| panic!("{stem}: {format:?}: L3: {e}"));
+            }
+        }
+        // No snapshot again: the plain pipeline.
+        let unread = variant
+            .plan(&dev, &BindState::default().shape())
+            .expect("plain plan of the variant");
+        assert!(unread.variant.snapshot_textures.is_empty(), "{stem}");
+        // A depth attachment, or more than one sample, keeps the plain pipeline.
+        for (depth, samples) in [(true, 1), (false, 4)] {
+            let other = dev
+                .compile_render_pipeline(&descriptor(depth, samples), &Budget::standard())
+                .unwrap_or_else(|e| panic!("{stem}: {depth} {samples}: {e}"));
+            let plan = other.plan(&dev, &state.shape()).expect("plan");
+            assert!(
+                plan.variant.snapshot_textures.is_empty(),
+                "{stem}: {depth} {samples}"
+            );
+        }
+    }
+    assert!(planned >= 4, "the interlocked profiles");
 }

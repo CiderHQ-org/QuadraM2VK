@@ -132,7 +132,7 @@ fi
 git add -A -- crates/metal2vulkan-validation/corpus/observations/vulkan crates/metal2vulkan-validation/corpus/observations/moltenvk \
     crates/metal2vulkan-validation/corpus/observations/refusals/vulkan crates/metal2vulkan-validation/corpus/observations/refusals/moltenvk ||
     exit 1
-[ -n "$subject" ] || subject="Record $venues at product ${product:0:12} (DESIGN D294)"
+[ -n "$subject" ] || subject="Record $venues at product ${product:0:12}"
 git commit -q -m "$subject" -m "Rows and refusals recorded by one build (executor $executor, product
 $product, semantics $semantics, oracle $oracle), installed at $head by
 scripts/rerecord-commit. Only candidate and refusal shards change, so the product,

@@ -21,7 +21,35 @@
 //!   `PrimitiveId`, `Layer`, or `ViewportIndex` input is declared through the first of its
 //!   enabling capabilities the profile enables (`requirements::builtin_enablers`);
 //!   `[[barycentric_coord]]` reads `BaryCoordKHR` or `BaryCoordNoPerspKHR`, a `float` or `float2`
-//!   its leading lanes.
+//!   its leading lanes, a `float3` its first two lanes and `1 - (x + y)` of them as the third,
+//!   Metal's third weight. On a device without `fragmentShaderBarycentric` it reads the first two
+//!   lanes from a `float2` center varying of its perspective (`IoRole::Barycentric`) that the
+//!   pipeline's synthesized geometry stage writes (`link::geometry`), read at the pixel center
+//!   as a center varying is, the same way.
+//! - On a device that enables neither of `PrimitiveId`'s capabilities (`geometryShader`,
+//!   `tessellationShader`), `[[primitive_id]]` reads a flat `uint` varying (`IoRole::PrimitiveId`)
+//!   that the pipeline's vertex function, compiled under `LoweringInputs::primitive_id_varying`,
+//!   writes at each return as `(VertexIndex - first) / n`, from the draw's base vertex and
+//!   `PushField::VerticesPerPrimitive`. Vulkan's flat inputs take the provoking vertex's
+//!   value ("The output values assigned are those of the provoking vertex of the primitive"), and
+//!   without a geometry, tessellation or mesh stage "the provoking vertex is determined by the
+//!   primitive topology": "the provoking vertex for p_i is v_3i" in a triangle list, "v_2i" in a
+//!   line list, and "v_i" in a strip and of points (the Vulkan specification's flat shading and
+//!   primitive topologies; no pipeline enables `VK_EXT_provoking_vertex`'s last vertex). So each
+//!   fragment reads `i`, its primitive's index among the draw's primitives of its instance, which
+//!   is Metal's `[[primitive_id]]`: restarted in each instance, moved by no vertex start, base
+//!   vertex or base instance, a flat varying taking the first vertex (Metal probes on the M3 Max,
+//!   macOS 27.0.1: lists, strips, lines, points, indirect draws). The varying's `VertexIndex` is a
+//!   draw's own only without indices: an indexed draw's primitives share vertices, so it runs in
+//!   the de-indexed form (`LoweringInputs::primitive_id_indices`), `index count` vertices from 0
+//!   that read their indices at the draw's index address as the indexed capture form does
+//!   ([`CapturedIndex`]), whose first vertex is 0. A vertex function that writes memory is
+//!   refused there (it would run once per index), and so are the draws the binder cannot run
+//!   so (`NotImplemented(PrimitiveId)`).
+//!   A post-tessellation vertex function emulated on a device without `tessellationShader` writes
+//!   the same varying under that field, from another source: its patch's position in the draw
+//!   (`lower::tessellation::emulated`), which a fragment function compiled under the field reads
+//!   on any device, since Vulkan's `PrimitiveId` would count the tessellator's triangles there.
 //! - A `bool` varying (a vertex output or a fragment input) is a flat `uint` variable: written as
 //!   1 or 0, read as `!= 0`.
 //! - Vertex amplification: `[[amplification_id]]` is `ViewIndex` (the binder's view mask makes view
@@ -38,21 +66,31 @@
 //!   variant a pass of at most one layer runs on, no `Layer` is declared (every index renders slice
 //!   0); otherwise the function reads the length from `PushField::RenderTargetArrayLength` and
 //!   stores `Layer` as `index < length ? index : 0`, as Metal renders the pass's first layer for an
-//!   index at or past it (RT6 probes 12, 12b and 12c, an M4), where Vulkan leaves the layer
-//!   undefined. Metal's fragment function reads the index as written in both, so in both the vertex
-//!   function writes it to a flat `uint` varying (`IoRole::RenderTargetArrayIndex`), which a
-//!   fragment function compiled under `LoweringInputs::render_target_array_index_varying` reads as
-//!   its `[[render_target_array_index]]`; any other fragment function reads `Layer` (0 when no
-//!   stage writes it).
+//!   index at or past it (Metal probes on an M4), where Vulkan leaves the layer undefined. Metal's
+//!   fragment function reads the index as written in both, so in both the vertex function writes it
+//!   to a flat `uint` varying (`IoRole::RenderTargetArrayIndex`), which a fragment function
+//!   compiled under `LoweringInputs::render_target_array_index_varying` reads as its
+//!   `[[render_target_array_index]]`; any other fragment function reads `Layer` (0 when no stage
+//!   writes it).
 //! - A vertex function's `[[viewport_array_index]]` selects a viewport only below the draw's
 //!   viewport count (`setViewports:count:`): Metal draws an index at or past it through viewport 0
-//!   (RT6 probes 7b and 7c, M3 Max and M4), where Vulkan leaves the viewport undefined. The
+//!   (Metal probes on the M3 Max and an M4), where Vulkan leaves the viewport undefined. The
 //!   function depends on the count (`RuntimeFact::ViewportCount`), which it reads from
 //!   `PushField::ViewportCount`, and stores `ViewportIndex` as `index < count ? index : 0`. Metal's
 //!   fragment function reads the index as written, so the vertex function also writes it to a flat
 //!   `uint` varying (`IoRole::ViewportIndex`), which a fragment function compiled under
 //!   `LoweringInputs::viewport_index_varying` reads as its `[[viewport_array_index]]`; any other
 //!   fragment function reads `ViewportIndex` (0 when no stage writes it).
+//! - Where the device cannot store `Layer` or `ViewportIndex` from a vertex function
+//!   (`shaderOutputLayer`, `shaderOutputViewportIndex`), the function stores the value it would
+//!   store there to a flat `uint` varying instead (`IoRole::SelectedLayer`,
+//!   `IoRole::SelectedViewport`), and the pipeline's synthesized geometry stages store the builtin
+//!   from the primitive's first vertex (`link::geometry`), Metal's rule; that needs
+//!   `geometryShader`, else the function is refused needing either feature. On a device without
+//!   `multiViewport` a draw has one viewport, so every index selects viewport 0 and no
+//!   `ViewportIndex` is stored at all: the raw varying alone. A fragment function that reads an
+//!   index no stage can have written (no varying input names it, and the device declares neither
+//!   builtin) reads 0, Metal's value with no vertex write (`StageIo::zero_indices`).
 //!
 //! Reading an input ([`param_value`]) loads the variable and brings it to the parameter's lowered
 //! representation: a narrow integer is masked to its width (a signed-integer attribute format
@@ -101,6 +139,7 @@
 //! the function), and the interface variables and execution modes ([`declare`]).
 
 pub(crate) mod color_write;
+pub(crate) mod depth16;
 pub(crate) mod extended_color;
 pub mod fetch;
 mod plan;
@@ -301,10 +340,18 @@ pub struct StageIoPlan {
     pub zeroed: Vec<Link>,
     /// The shape of the returned value.
     pub returned: Returned,
+    /// A vertex function stores every slice and viewport index it stores to its selected index
+    /// (`IoRole::SelectedLayer`, `IoRole::SelectedViewport`), as it stores one of them there.
+    pub indices_selected: bool,
     /// The `PointSize` object a vertex function without a point-size output writes 1.0 to.
     pub point_size_default: Option<usize>,
     /// The `Position` object of a vertex function, decorated `Invariant`.
     pub invariant: Option<usize>,
+    /// A fragment function of one of its pipeline's color groups, where the pipeline takes more
+    /// than one (`LoweringInputs::color_group`): its `FragDepth`, `SampleMask` and
+    /// `FragStencilRefEXT` outputs are decorated `Invariant`, so every group's variant computes
+    /// them alike (the module docs of `pipeline::compile::color_group`).
+    pub invariant_fragment_outputs: bool,
     /// The entry's execution modes (fragment origin, early tests, depth and stencil modes).
     pub modes: Vec<ExecMode>,
     /// The artifact's stage-IO interface.
@@ -342,6 +389,10 @@ pub struct StageIoPlan {
     /// A fragment function's depth output, which each return gives Metal's answer
     /// (`clamp_depth`).
     pub depth_clamp: Option<DepthClamp>,
+    /// A fragment function that returns no depth, compiled under
+    /// `LoweringInputs::depth16_codes`: the `FragDepth` output and `FragCoord` input objects its
+    /// entry stores the depth Metal stores for the fragment through ([`depth16`]).
+    pub depth16: Option<Depth16Store>,
     /// The render pipeline's private sample mask a fragment function applies itself
     /// (`LoweringInputs::sample_mask`): the `SampleMask` output's object and the mask, which each
     /// return ANDs into the function's own `[[sample_mask]]` output or stores as it.
@@ -359,6 +410,14 @@ pub struct StageIoPlan {
     /// center as Metal does (`VkProperty::MetalCenterVaryings`): the module requires that
     /// property.
     pub center_varyings_by_device: bool,
+    /// A fragment function reads a varying the device interpolates and records no
+    /// `PrecisionNote::DeviceInterpolation`, because its device interpolates as Metal does
+    /// (`VkProperty::MetalInterpolation`): the module requires that property.
+    pub interpolation_by_metal: bool,
+    /// A vertex function stores an index that differs among a primitive's vertices to its
+    /// builtin, because its device takes the first vertex's as Metal does
+    /// (`VkProperty::MetalFirstVertexIndices`): the module requires that property.
+    pub first_vertex_indices_by_device: bool,
     /// A vertex function compiled under `LoweringInputs::window_depth_varying` writes its
     /// position's window depth to a varying ([`WindowDepth`]).
     pub window_depth: Option<WindowDepth>,
@@ -369,7 +428,43 @@ pub struct StageIoPlan {
     /// vertex from the draw's index buffer ([`CapturedIndex`]): planned where the function reads
     /// it (`[[vertex_id]]`, a per-vertex attribute, or its record's restart flag).
     pub captured_index: Option<CapturedIndex>,
+    /// A vertex function compiled under `LoweringInputs::primitive_id_varying` writes the
+    /// primitive ID of each vertex's primitive to its varying ([`PrimitiveIdStore`]).
+    pub primitive_id: Option<PrimitiveIdStore>,
 }
+
+/// How a vertex function compiled under `LoweringInputs::primitive_id_varying` writes the
+/// primitive ID a fragment function reads from its varying on a device without a fragment
+/// `PrimitiveId`: at each return, `(VertexIndex - first) / n` (`vertex` is the input builtin's
+/// object), in wrapping `u32` arithmetic, `first` the draw's first vertex ([`FirstVertex`]) and
+/// `n` `PushField::VerticesPerPrimitive`, to its `IoRole::PrimitiveId` varying (`object`). A
+/// primitive's flat inputs read its provoking vertex, its first, so each of its fragments reads
+/// the index of the primitive in its instance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PrimitiveIdStore {
+    pub vertex: usize,
+    pub first: FirstVertex,
+    pub object: usize,
+}
+
+/// Where a vertex function's primitive ID reads its draw's first vertex, Vulkan's base vertex of
+/// a draw without indices (its `firstVertex`, in an indirect draw's arguments too).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FirstVertex {
+    /// The `BaseVertex` builtin, stage-IO object `index` (`shaderDrawParameters`).
+    Builtin { index: usize },
+    /// Lane 0 of `PushField::BaseVertexInstance`, which the binder writes for each draw (an
+    /// indirect one's from its arguments read on the CPU).
+    Push,
+    /// Vertex 0: the de-indexed form draws an indexed draw's indices as `index count` vertices
+    /// from 0 (`LoweringInputs::primitive_id_indices`), as the indexed capture form does.
+    Zero,
+}
+
+/// The words a vertex function's primitive ID adds: its output variable, decorations and
+/// interface entry, the vertex index's and base vertex's inputs, their loads, the push loads and
+/// an extract, the subtraction, the division and the store.
+const PRIMITIVE_ID_WORDS: u64 = 56;
 
 /// How a vertex function compiled under `LoweringInputs::window_depth_varying` writes its
 /// window depth: at each return, the `z / w` of the value it stores to its `Position` object
@@ -436,6 +531,14 @@ pub(super) const CAPTURED_INDEX_WORDS: u64 = 400;
 /// three stores (measured 246 to 259 on `tests::engine_vertex_capture`'s functions).
 const CAPTURE_WORDS: u64 = 300;
 
+/// Plan an emulated post-tessellation vertex function's primitive ID output under
+/// `LoweringInputs::primitive_id_varying`: the index of its object, the flat `uint` varying of
+/// `IoRole::PrimitiveId` to which its entry wrapper writes its patch's position in the draw
+/// (`lower::tessellation`).
+pub fn primitive_id_varying(sp: &mut StageIoPlan) -> Result<usize, Error> {
+    plan::primitive_id(sp, IoDir::Output)
+}
+
 /// Plan the fragment's window-depth input for a fragment function that computes each sample's
 /// depth for its in-shader depth test: the index of its object, a no-perspective `float` varying of
 /// `IoRole::WindowDepth`.
@@ -466,6 +569,21 @@ pub struct DepthClamp {
     pub object: usize,
     pub clamps: bool,
     pub range: bool,
+    /// Under `LoweringInputs::depth16_codes`, each return clamps the depth to `[0, 1]` and writes
+    /// it as Metal's `Depth16Unorm` code ([`depth16::code_depth`]).
+    pub codes: bool,
+}
+
+/// How a fragment function that returns no depth stores the depth Metal stores for the fragment
+/// under `LoweringInputs::depth16_codes` ([`depth16`]): at entry, its `FragDepth` output object
+/// (`depth`) takes [`depth16::biased_depth`] of its `FragCoord` input object's (`coord`) depth and
+/// `PushField::DepthBias`, bounded by that depth on the bias's side where it is known (`raises`,
+/// `LoweringInputs::depth16_bias_raises`, [`depth16::side_bounded`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Depth16Store {
+    pub depth: usize,
+    pub coord: usize,
+    pub raises: Option<bool>,
 }
 
 /// How a vertex function compiled under `LoweringInputs::viewport_compensation` stores its
@@ -570,9 +688,12 @@ pub fn select_return(cx: &mut SelectCx<'_>, _at: InstId, v: Option<Value>) -> Re
     }
 }
 
-/// The user varyings vertex function `e`, compiled under `inputs`, writes the same value at every
-/// vertex of a primitive (`StageIo::uniform_outputs`), sorted: at each return, in a block every
-/// vertex of a primitive reaches alike, the varying's field of the returned value is uniform
+/// The varyings vertex function `e`, compiled under `inputs`, writes the same value at every
+/// vertex of a primitive (`StageIo::uniform_outputs`), sorted: its user varyings, and the raw
+/// varyings of the slice and viewport indices it writes (`VaryingKey::render_target_array_index`,
+/// `VaryingKey::viewport_index`), which decide where it stores those indices. At each return, in
+/// a block every vertex of a primitive reaches alike, the varying's field of the returned value is
+/// uniform
 /// among those vertices (`simd::uniform::Among::Primitive`), computed only from constants,
 /// `constant` memory read through uniform pointers, the draw's instance, base vertex, base
 /// instance, amplification and patch, and the vertex attributes `inputs` fetches per instance or
@@ -598,6 +719,10 @@ pub(crate) fn uniform_varyings(
             .iter()
             .filter_map(|o| match &o.role {
                 OutputRole::VertexOutput(key) => Some((o.field, VaryingKey::user(&key.0))),
+                OutputRole::RenderTargetArrayIndex => {
+                    Some((o.field, VaryingKey::render_target_array_index()))
+                }
+                OutputRole::ViewportArrayIndex => Some((o.field, VaryingKey::viewport_index())),
                 _ => None,
             })
             .collect();
@@ -808,7 +933,7 @@ fn pointer(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>, link: &Link) -> BR
     let g = global(cx, link.object)?;
     let base = fb.module().global_value(g)?;
     match link.place {
-        Place::Whole | Place::Prefix(_) => Ok(base),
+        Place::Whole | Place::Prefix(_) | Place::Weights => Ok(base),
         Place::Element0 | Place::Spread(_) => {
             let zero = fb.u32_const(0)?;
             let zero = fb.module().const_value(zero)?;
@@ -837,7 +962,8 @@ fn uint_lanes(form: Form) -> Form {
 
 /// `x`, a value loaded through `link`, as the lowered representation of its form: a narrow
 /// integer masked to its width, a narrow float rounded to its format, a `bool` carried as `uint`
-/// compared with 0, the leading lanes of a [`Place::Prefix`] read.
+/// compared with 0, the leading lanes of a [`Place::Prefix`] read, the weights of a
+/// [`Place::Weights`] read.
 fn to_lowered(
     cx: &EmitCx<'_>,
     fb: &mut FunctionBuilder<'_>,
@@ -855,7 +981,7 @@ fn to_lowered(
 }
 
 /// The value `x` loaded through `link` holds at its place: a prefix of a wider variable's
-/// lanes, or the whole.
+/// lanes, the three barycentric weights, or the whole.
 fn placed(fb: &mut FunctionBuilder<'_>, link: &Link, x: SValue) -> BResult<SValue> {
     Ok(match link.place {
         Place::Prefix(1) => fb.composite_extract(x, &[0])?,
@@ -863,8 +989,32 @@ fn placed(fb: &mut FunctionBuilder<'_>, link: &Link, x: SValue) -> BResult<SValu
             let lanes: Vec<u32> = (0..u32::from(n)).collect();
             fb.vector_shuffle(x, x, &lanes)?
         }
+        Place::Weights => weights(fb, x)?,
         Place::Whole | Place::Element0 | Place::Spread(_) => x,
     })
+}
+
+/// The three barycentric weights of `x`, a `float3` (`BaryCoordKHR`) or `float2`
+/// (`IoRole::Barycentric`) whose first two lanes are the first two weights: those, and
+/// `1 - (x + y)` as the third, Metal's (`plan::input_builtin`). Each operation is rounded on its
+/// own (`NoContraction`), so no device fuses or reorders it.
+fn weights(fb: &mut FunctionBuilder<'_>, x: SValue) -> BResult<SValue> {
+    use crate::lower::arith::FloatFmt;
+    let f32_ty = fb.module().ty(SType::Float { width: 32 })?;
+    let ty = fb.module().ty(SType::Vector {
+        elem: f32_ty,
+        len: 3,
+    })?;
+    let first = fb.composite_extract(x, &[0])?;
+    let second = fb.composite_extract(x, &[1])?;
+    let sum = fb.binary_no_contraction(BinOp::FAdd, first, second)?;
+    let f32_ = Form {
+        held: Held::Float(FloatFmt::F32),
+        lanes: 1,
+    };
+    let one = ops::splat(fb, f32_, u64::from(1.0f32.to_bits()))?;
+    let third = fb.binary_no_contraction(BinOp::FSub, one, sum)?;
+    fb.composite_construct(ty, &[first, second, third])
 }
 
 /// `x`, the `f32` lanes (of a `float` or `half` form `form`) of a varying the fragment function
@@ -948,6 +1098,22 @@ pub fn emit_entry(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>) -> BResult<
         };
         let x = fetch::emit(cx, fb, &read)?;
         cx.hold(v, x);
+    }
+    // The depth Metal stores for the fragment, in the first block, where the whole quad runs for
+    // the derivatives and the store dominates every return.
+    if let Some(d) = cx.plan.families.stage_io.depth16 {
+        let coord = global(cx, d.coord)?;
+        let coord = fb.module().global_value(coord)?;
+        let coord = fb.load(coord, MemAccess::default())?;
+        let z = fb.composite_extract(coord, &[2])?;
+        let bias = cx.push_field(fb, PushField::DepthBias)?;
+        let mut stored = depth16::biased_depth(fb, z, bias)?;
+        if let Some(raises) = d.raises {
+            stored = depth16::side_bounded(fb, stored, z, raises)?;
+        }
+        let out = global(cx, d.depth)?;
+        let out = fb.module().global_value(out)?;
+        fb.store(out, stored, MemAccess::default())?;
     }
     Ok(())
 }
@@ -1275,6 +1441,7 @@ pub fn emit_return(
     let depth_clamp = plan.depth_clamp;
     let window_depth = plan.window_depth;
     let capture = plan.capture;
+    let primitive_id = plan.primitive_id;
     // The private sample mask: ANDed into the function's own `[[sample_mask]]` output where this
     // return stores one, else stored as that output.
     let private_mask = plan.private_mask;
@@ -1321,7 +1488,12 @@ pub fn emit_return(
                             true => Some(cx.push_field(fb, PushField::DepthClampRange)?),
                             false => None,
                         };
-                        clamp_depth(fb, part, kill, d.clamps || d.range, range)?
+                        let clamped =
+                            clamp_depth(fb, part, kill, d.clamps || d.range || d.codes, range)?;
+                        match d.codes {
+                            true => depth16::code_depth(fb, clamped)?,
+                            false => clamped,
+                        }
                     }
                     None => part,
                 };
@@ -1365,6 +1537,11 @@ pub fn emit_return(
         };
         let mask = u32_constant(fb, mask)?;
         store(cx, fb, &link, mask)?;
+    }
+    // The primitive ID of the primitive the vertex provokes, wherever the function returns its
+    // outputs.
+    if let (Some(_), Some(p)) = (v, primitive_id) {
+        store_primitive_id(cx, fb, p)?;
     }
     // The indices a draw of one amplification stores though the function writes none.
     let amplified = cx.plan.families.stage_io.amplified.clone();
@@ -1452,6 +1629,43 @@ fn store_window_depth(
         },
     };
     store(cx, fb, &link, depth)
+}
+
+/// Store the primitive ID of the primitive the vertex provokes to its varying
+/// ([`PrimitiveIdStore`]): `(VertexIndex - first) / n`, `n` from
+/// `PushField::VerticesPerPrimitive`.
+fn store_primitive_id(
+    cx: &mut EmitCx<'_>,
+    fb: &mut FunctionBuilder<'_>,
+    p: PrimitiveIdStore,
+) -> BResult<()> {
+    let first = match p.first {
+        FirstVertex::Builtin { index } => Some(fetch::load_builtin(cx, fb, index)?),
+        FirstVertex::Push => {
+            let bases = cx.push_field(fb, PushField::BaseVertexInstance)?;
+            Some(fb.composite_extract(bases, &[0])?)
+        }
+        FirstVertex::Zero => None,
+    };
+    let per_primitive = cx.push_field(fb, PushField::VerticesPerPrimitive)?;
+    let vertex = fetch::load_builtin(cx, fb, p.vertex)?;
+    let position = match first {
+        Some(first) => fb.binary(BinOp::ISub, vertex, first)?,
+        None => vertex,
+    };
+    let id = fb.binary(BinOp::UDiv, position, per_primitive)?;
+    let link = Link {
+        object: p.object,
+        place: Place::Whole,
+        form: Form {
+            held: Held::Int {
+                bits: 32,
+                container: 32,
+            },
+            lanes: 1,
+        },
+    };
+    store(cx, fb, &link, id)
 }
 
 /// Store vertex capture record `c` ([`Capture`]): the clip position `clip` and the point size
@@ -1842,8 +2056,9 @@ fn rotated_second(
 }
 
 /// The viewport a vertex function returning `x` selects, as Vulkan reads it: the `ViewportIndex`
-/// it stores (`output_part`), else the one an amplification stores (`StageIoPlan::amplified`),
-/// else the first.
+/// it stores (`output_part`) or the `IoRole::SelectedViewport` varying the synthesized geometry
+/// stages store it from, else the one an amplification stores (`StageIoPlan::amplified`), else
+/// the first.
 fn selected_viewport(
     cx: &mut EmitCx<'_>,
     fb: &mut FunctionBuilder<'_>,
@@ -1852,15 +2067,21 @@ fn selected_viewport(
     outputs: &[PlannedOutput],
 ) -> BResult<SValue> {
     let sp = &cx.plan.families.stage_io;
-    let is_index = |o: &IoObject| {
-        matches!(
-            o,
-            IoObject::Builtin {
-                builtin: crate::spv::BuiltIn::ViewportIndex,
-                dir: IoDir::Output,
-                ..
-            }
-        )
+    // The `ViewportIndex` the function stores, or the varying the synthesized geometry stages
+    // store it from (`IoRole::SelectedViewport`): either holds the index below the count.
+    let selected_key = crate::pipeline::sym::VaryingKey::selected_viewport();
+    let is_index = |o: &IoObject| match o {
+        IoObject::Builtin {
+            builtin: crate::spv::BuiltIn::ViewportIndex,
+            dir: IoDir::Output,
+            ..
+        } => true,
+        IoObject::User {
+            key,
+            dir: IoDir::Output,
+            ..
+        } => *key == selected_key,
+        _ => false,
     };
     let object = sp.objects.iter().position(is_index);
     let amplified = sp
@@ -2202,7 +2423,9 @@ fn store(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>, link: &Link, x: SVal
         x
     };
     match link.place {
-        Place::Prefix(_) => Err(cx.fail("an output stored through a prefix of its variable")),
+        Place::Prefix(_) | Place::Weights => {
+            Err(cx.fail("an output stored through a prefix of its variable"))
+        }
         Place::Whole | Place::Element0 => {
             let p = pointer(cx, fb, link)?;
             fb.store(p, x, MemAccess::default())
@@ -2313,6 +2536,19 @@ pub fn declare(
     }
     if let Some(g) = sp.invariant.and_then(|i| d.globals.get(i)) {
         mb.invariant(*g)?;
+    }
+    if sp.invariant_fragment_outputs {
+        use crate::spv::BuiltIn as B;
+        for (o, g) in sp.objects.iter().zip(&d.globals) {
+            if let IoObject::Builtin {
+                builtin: B::FragDepth | B::SampleMask | B::FragStencilRefEXT,
+                dir: IoDir::Output,
+                ..
+            } = o
+            {
+                mb.invariant(*g)?;
+            }
+        }
     }
     modes.extend(sp.modes.iter().copied());
     Ok(d)

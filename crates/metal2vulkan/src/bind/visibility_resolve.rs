@@ -2,9 +2,9 @@
 //!
 //! Metal's visibility results are occlusion queries. In `Counting` mode Metal writes the samples
 //! that passed, which a precise query's result is. In `Boolean` mode Metal writes exactly 1 when
-//! any sample passed and 0 otherwise (measured on an M4, RT6 probes 1 and 5); a Vulkan query's
-//! result is a count (any nonzero value without the precise flag), so a copy alone cannot give it.
-//! The consumer copies every query's 64-bit result to its Metal offset in the visibility buffer
+//! any sample passed and 0 otherwise (measured on an M4 with macOS 27.0.1); a Vulkan query's result
+//! is a count (any nonzero value without the precise flag), so a copy alone cannot give it. The
+//! consumer copies every query's 64-bit result to its Metal offset in the visibility buffer
 //! (`vkCmdCopyQueryPoolResults`), then records [`VisibilityResolve`] for the pass's `Boolean`
 //! offsets: one dispatch of the crate-owned module [`visibility_resolve_module`] rewrites each of
 //! their words in place as Metal's 1 or 0. `Counting` words are left as copied.

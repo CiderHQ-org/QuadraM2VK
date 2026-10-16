@@ -203,6 +203,30 @@ fn topology(class: PrimitiveTopologyClass) -> vk::PrimitiveTopology {
     }
 }
 
+/// Check the color group of render inputs `r` (`RenderLinkInputs::color_group`) with vertex stage
+/// `vs`, fragment stage `fs`, a tessellation pipeline where `tessellated`, on `p`: the fragment
+/// stage compiled for the variant's own group (`NeedsInput(ColorWrites)` for one compiled for
+/// another, or for none), and, where the pipeline takes more than one group, neither stage writes
+/// memory and the pipeline is no tessellation pipeline, which each group's draw would run again
+/// (the limit refusal, `compile::color_group`).
+fn color_group(
+    r: &RenderLinkInputs,
+    (vs, fs): (&StageInterface, Option<&StageInterface>),
+    tessellated: bool,
+    p: &DeviceProfile,
+) -> Result<(), Error> {
+    if fs.is_some_and(|fs| fs.io.color_group != r.color_group) {
+        return Err(Error::NeedsInput(RuntimeInput::ColorWrites));
+    }
+    let Some(g) = r.color_group.as_ref().filter(|g| g.groups() > 1) else {
+        return Ok(());
+    };
+    if tessellated || vs.writes_memory || fs.is_some_and(|fs| fs.writes_memory) {
+        return Err(crate::pipeline::compile::color_group::refusal(g, p));
+    }
+    Ok(())
+}
+
 /// The vertex amplification count of render inputs `r` (see the module docs).
 fn vertex_amplification(r: &RenderLinkInputs, p: &DeviceProfile) -> Result<u32, Error> {
     let count = r.max_vertex_amplification_count;
@@ -242,10 +266,16 @@ pub fn graphics_state(
     if r.alpha_to_one {
         return Err(Unsupported::not_implemented(Feature::AlphaToOne).into());
     }
+    color_group(r, (vs, fs), tessellation.is_some(), p)?;
     let max_vertex_amplification_count = vertex_amplification(r, p)?;
-    let declares_layer = std::iter::once(vs)
-        .chain(fs)
-        .any(|s| s.io.builtins.contains(&StageBuiltin::Layer));
+    // A vertex function that selects its slice through the synthesized geometry stage
+    // (`IoRole::SelectedLayer`) declares `Layer` there, and a fragment function that reads it as 0
+    // (`StageIo::zero_indices`) reads it as Metal does only where no amplification moves it.
+    let declares_layer = std::iter::once(vs).chain(fs).any(|s| {
+        s.io.builtins.contains(&StageBuiltin::Layer)
+            || s.io.zero_indices.contains(&StageBuiltin::Layer)
+            || s.io.outputs.iter().any(|o| o.role == IoRole::SelectedLayer)
+    });
     let limits = &p.fields().limits;
     let used = r
         .color_attachments
@@ -312,12 +342,17 @@ pub fn graphics_state(
                 let state = || -> Result<ColorAttachmentState, Error> {
                     // The fragment function writes what Metal's blend of one and zero stores,
                     // so the attachment takes no Vulkan blend, nor the format's blend support:
-                    // one it rounds, and one it writes as a half's bits.
+                    // one it rounds, and one it writes as a half's bits. But not a 16-bit float
+                    // attachment's from a module without fast math, whose blend Metal computes
+                    // keeping the destination's product by zero: that one blends, announced
+                    // (`color_writes::keeps_zero`).
                     let rounded = fs.is_some_and(|f| {
                         f.io.rounded_colors.contains(&(index as u32))
                             || f.io.half_bit_colors.contains(&(index as u32))
                     }) || selected_rounds(index as u32);
-                    let replaced = rounded && color_writes::replaces(a);
+                    let keeps_zero =
+                        fs.is_some_and(|f| color_writes::keeps_zero(&f.io, index as u32, a));
+                    let replaced = rounded && color_writes::replaces(a) && !keeps_zero;
                     // An extended-range attachment whose blend the function computes over its
                     // input attachment takes no Vulkan blend, and the function's write stores
                     // every raw component (none where it keeps every channel).
@@ -527,6 +562,15 @@ pub fn graphics_state(
             dynamic_states.push(D::VERTEX_INPUT_BINDING_STRIDE);
         }
     }
+    // A fragment stage that binds a snapshot reads through it, drawn twice with its color write
+    // masks as dynamic state (`GraphicsState::snapshot_reads`).
+    let snapshot_reads = fs
+        .into_iter()
+        .flat_map(|f| &f.descriptors)
+        .any(|d| matches!(d.slot.kind, ResourceKind::SnapshotTexels(_)));
+    if snapshot_reads {
+        dynamic_states.push(D::COLOR_WRITE_MASK_EXT);
+    }
     let state = GraphicsState {
         topology: match tessellation {
             Some(_) => vk::PrimitiveTopology::PATCH_LIST,
@@ -554,10 +598,18 @@ pub fn graphics_state(
         shadow_stencil: None,
         sample_shading,
         vertex_writes_memory: vs.writes_memory,
-        writes_viewport_index: vs.io.builtins.contains(&StageBuiltin::ViewportIndex),
+        // Stored as the builtin, through the synthesized geometry stages, or (on a device with
+        // one viewport) nowhere: the raw varying is written in every case.
+        writes_viewport_index: vs.io.builtins.contains(&StageBuiltin::ViewportIndex)
+            || vs
+                .io
+                .outputs
+                .iter()
+                .any(|o| matches!(o.role, IoRole::SelectedViewport | IoRole::ViewportIndex)),
         early_fragment_tests: fs.is_some_and(|fs| fs.io.early_fragment_tests),
         // An emulated mesh function's pipeline states its records (`link`).
         mesh_records: None,
+        emulated_tessellation: None,
         writes_point_size: vs.writes_point_size(),
         flat_fragment_inputs: fs.is_some_and(|fs| reads_flat_inputs(&fs.io)),
         clip_distances: vs
@@ -586,6 +638,8 @@ pub fn graphics_state(
         // The fragment stage's facts decide it (`link::shader_tests`).
         shader_tests: None,
         color_write_rules,
+        snapshot_reads,
+        color_group: r.color_group.clone(),
     };
     // The sample count against the attachments' sample counts.
     state.sample_count_properties(&p.fields().enabled.properties)?;
@@ -594,17 +648,22 @@ pub fn graphics_state(
 }
 
 /// Whether a fragment stage of interface `io` reads `[[barycentric_coord]]`
-/// (`GraphicsState::reads_barycentric_coord`): either `BaryCoord` builtin, perspective-correct
-/// or not.
+/// (`GraphicsState::reads_barycentric_coord`): either `BaryCoord` builtin, or either form's
+/// varying (`IoRole::Barycentric`), perspective-correct or not.
 fn reads_barycentric_coord(io: &StageIo) -> bool {
     io.builtins
         .iter()
         .any(|b| matches!(b, StageBuiltin::BaryCoord { .. }))
+        || io
+            .inputs
+            .iter()
+            .any(|v| matches!(v.role, IoRole::Barycentric { .. }))
 }
 
 /// Whether a fragment stage of interface `io` reads a flat input
-/// (`GraphicsState::flat_fragment_inputs`): a flat user varying, or the render target array or
-/// viewport index a vertex function wrote, as an input of its own role or as its builtin.
+/// (`GraphicsState::flat_fragment_inputs`): a flat user varying, the render target array or
+/// viewport index a vertex function wrote, as an input of its own role or as its builtin, or the
+/// primitive ID's varying.
 fn reads_flat_inputs(io: &StageIo) -> bool {
     let flat = io.inputs.iter().any(|v| {
         matches!(
@@ -614,6 +673,7 @@ fn reads_flat_inputs(io: &StageIo) -> bool {
                 ..
             } | IoRole::ViewportIndex
                 | IoRole::RenderTargetArrayIndex
+                | IoRole::PrimitiveId
         )
     });
     flat || io
@@ -683,15 +743,15 @@ fn sample_invocations(
         return Ok(false);
     }
     let io = &fs.io;
+    // The barycentric weights' varyings are center varyings.
     let interpolated = |at: Sampling| {
-        io.inputs.iter().any(|v| {
-            matches!(
-                v.role,
-                IoRole::Varying {
-                    interpolation: Some(Interpolation::Smooth { sampling, .. }),
-                    ..
-                } if sampling == at
-            )
+        io.inputs.iter().any(|v| match v.role {
+            IoRole::Varying {
+                interpolation: Some(Interpolation::Smooth { sampling, .. }),
+                ..
+            } => sampling == at,
+            IoRole::Barycentric { .. } => at == Sampling::Center,
+            _ => false,
         })
     };
     let rate = p.fields().fragment.sample_rate_shading;

@@ -125,7 +125,7 @@ mod tests {
     };
     use crate::ScratchDir;
     use rusqlite::Connection;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     /// A row of a committed kernel fixture's text with `note` appended (a new content identity),
     /// labelled `label`.
@@ -549,9 +549,11 @@ mod tests {
 
     /// Object and mesh functions are rows like any other, read through the one stage vocabulary
     /// (`case::Stage`): a public module declaring one of each is two entry rows of those stages,
-    /// and a private module declaring a mesh function is its shard's row. A cold census classifies
-    /// all three, each under `mesh_pipeline` (no executor runs a mesh render pipeline yet), so they
-    /// are classified and unresolved, never skipped; a warm pass selects and reads nothing.
+    /// and a private module declaring a mesh function is its shard's row. A cold census reflects
+    /// and classifies all three: the object function draws with the generated launch observer of
+    /// its payload, and each mesh function, which writes no device memory and states no position,
+    /// carries `mesh_companion` (a fragment stage no executor generates), so it is classified and
+    /// unresolved, never skipped; a warm pass selects and reads nothing.
     #[test]
     fn object_and_mesh_rows_are_indexed_and_classified() {
         let scratch = ScratchDir::new("census-mesh-rows").unwrap();
@@ -626,12 +628,10 @@ mod tests {
         assert_eq!(cold.summary.total_sources, 3);
         assert_eq!(cold.summary.classified_sources, 3);
         assert_eq!(cold.summary.remaining_sources(), 0);
-        assert_eq!(cold.summary.unresolved_sources, 3, "{:?}", cold.summary);
+        assert_eq!(cold.summary.unresolved_sources, 2, "{:?}", cold.summary);
         assert_eq!(
-            cold.summary
-                .requirements
-                .get(&ToolingRequirement::MeshPipeline),
-            Some(&3),
+            cold.summary.requirements,
+            BTreeMap::from([(ToolingRequirement::MeshCompanion, 2)]),
             "{:?}",
             cold.summary
         );

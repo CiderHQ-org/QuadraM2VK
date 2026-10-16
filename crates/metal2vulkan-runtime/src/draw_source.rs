@@ -68,6 +68,7 @@ use super::encoder::EncoderCore;
 use super::error::Error;
 use super::resource::ResourceKey;
 use super::tracker::{Barrier, Use};
+use crate::device::functions::Vk;
 use ash::vk;
 use metal2vulkan::device::{EnableSet, VkExtension, VkFeature};
 use std::ffi::CStr;
@@ -490,7 +491,7 @@ impl CopySteps {
     ///
     /// `command_buffer` is the encoder's, recording outside a render pass, and only the encoder
     /// records it.
-    pub(super) unsafe fn record_in(&self, raw: &ash::Device, command_buffer: vk::CommandBuffer) {
+    pub(super) unsafe fn record_in(&self, raw: &Vk, command_buffer: vk::CommandBuffer) {
         // SAFETY: as the caller states.
         unsafe {
             Barrier::everything().record(raw, command_buffer);

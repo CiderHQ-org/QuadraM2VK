@@ -1,4 +1,4 @@
-// Owned fixture (WP-A4, DESIGN D213): a nearest, clamp-to-edge pixel sampler at texel centres,
+// Owned fixture: a nearest, clamp-to-edge pixel sampler at texel centres,
 // an exact texel fetch (`sampler.pixel_fetch`): out[y * 4 + x] = t(x, y) over a 4 x 2 grid.
 // Loop-free.
 #include <metal_stdlib>

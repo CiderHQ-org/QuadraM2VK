@@ -37,7 +37,7 @@
 //! - **The exception: an object of a host step's own.** No lookup finds it, so it changes nothing
 //!   another variant takes; the map keeps it apart (`own`) only to destroy it. For a variant a
 //!   command buffer's host step made (a device-generated replay's, `generated_execute.rs`, which
-//!   keeps no instance), the completion thread releases the variant's layouts and samplers as the
+//!   keeps no instance), the handler thread releases the variant's layouts and samplers as the
 //!   command buffer releases its segment, and its own objects go at the next sweep or settle (the
 //!   next variant made, on any thread) or at the teardown.
 

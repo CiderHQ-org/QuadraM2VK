@@ -1,4 +1,4 @@
-// Owned fixture (WP-REF, DESIGN D327 item 1, TODO 5.5): a raster order group on a color output
+// Owned fixture: a raster order group on a color output
 // the function does not read, drawn over overlapping triangles whose blend does not commute, so
 // the target holds the answer of one order alone. Written for this repository; no third-party
 // source. Loop-free.

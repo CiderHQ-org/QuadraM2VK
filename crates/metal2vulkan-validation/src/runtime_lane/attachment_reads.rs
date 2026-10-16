@@ -1,0 +1,676 @@
+//! Device tests of a draw that samples its own render pass's color attachment's texture, on the
+//! device the cfg selects, under the validation layer: the draw reads a copy of the texture taken
+//! before its render pass instance, never the attachment (`texture/attached_reads.rs`; Vulkan's
+//! `VUID-vkCmdDraw-None-10795`, which the layer cannot check inside the runtime's secondary
+//! command buffers).
+//!
+//! The target is a [`SIDE`]-square `RGBA8Unorm` texture holding red [`BEFORE`] before the pass:
+//! one of its own image, and one over a buffer's bytes. Draw A fills its block `[8, 16)²` with red
+//! [`DRAWN`]. Where the pass renders a target's linear image through a copied stand-in
+//! (`linear_attachment.rs`), its image is no attachment, and the draw reads it in place
+//! (`WorkCounts::linear_passes_through_copies` moved): the same answers, no copy of the read's.
+//!
+//! - [`a_draw_after_a_barrier_samples_what_the_draws_before_wrote`]: after a memory barrier over
+//!   the render targets, draw C (`a4_fragment_select_sample` over `[4, 8)²`, the target bound as
+//!   both of its textures) samples, at pixel `(x, y)`, the target's texel `(2x + 1, 2y + 1)`
+//!   (the pixel's center over 16, through a nearest sampler): other pixels than it writes, inside
+//!   A's block. It draws A's red, as a Mac2 GPU orders the barrier; the draw records into a new
+//!   instance (`attachment_read_splits`), reads the copy (`attachment_reads_through_copies`), and
+//!   an encoder copies it in (`shadow_copies`).
+//! - [`a_draw_without_a_barrier_samples_the_texels_from_before_the_pass`]: with no barrier, draw C
+//!   (`tob_sample` over A's block, at its own pixel) draws the red from before the pass, Metal's
+//!   answer at a draw's own pixel (probe `selfsample`, an M3 Max under macOS 27.0.1, 80 of 80
+//!   runs), with no split. A device that read the attachment in A's instance read A's red there.
+//! - [`a_chain_of_barriers_copies_in_only_what_each_instance_drew`]: [`CHAIN`] steps after A, each
+//!   a fill of one pixel through a one-pixel scissor, a memory barrier, and draw C through a
+//!   one-pixel scissor at the pixel that samples it: every C draws its fill's red, every other
+//!   pixel keeps its red, the answers of a copy of every texel before each instance. Over a
+//!   buffer, each copy after the first takes only the rectangle bounding the pixels the instance
+//!   before it drew (`bounded_shadow_copies`, `shadow_texels_copied_in`); the texture of its own
+//!   image copies every texel.
+//! - [`own_pixel_reads_copy_in_only_around_their_scissors`]: [`OWN_STEPS`] steps after A, each a
+//!   fill of one pixel through a one-pixel scissor (corners and edges among them), a memory
+//!   barrier, and draw C (`tob_read`, `t.read(uint2(in.position.xy))`) through a one-pixel
+//!   scissor at that pixel, then one more at the first step's pixel: every C draws its fill's red.
+//!   Over a buffer, each C reads at its own pixel alone (`own_pixel_reads`), and each copy in
+//!   moves at most the 3x3 texels around its pixel. A C the device reads through a snapshot
+//!   inside its instance (`snapshot_reads.rs`, `reading_draws_snapshotted`) takes neither a split
+//!   nor a copy, and answers the same.
+//! - [`an_own_pixel_read_without_a_barrier_reads_the_texels_from_before_the_pass`]: with no
+//!   barrier, `tob_read` over A's block draws the red from before the pass (probe `selfsample`),
+//!   its copy over a buffer the texels around the block alone.
+//! - [`a_pass_that_samples_no_attachment_copies_nothing`]: A, then `tob_read` of another texture:
+//!   no read through a copy, split, own-pixel read or shadow copy.
+
+use super::degrade_notices::on_device;
+use crate::air_library::AirLibrary;
+use metal2vulkan::bind::SamplerDescriptor;
+use metal2vulkan::metal::{BarrierScope, PixelFormat, PrimitiveType, RenderStages, TextureUsage};
+use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};
+use metal2vulkan_devtools::llvm_assemble;
+use metal2vulkan_runtime::{
+    BlitOption, Buffer, CommandQueue, Device, LoadAction, Origin, PipelineOptions, Region,
+    RenderCommandEncoder, RenderPassDescriptor, RenderPipelineState, ResourceOptions, ScissorRect,
+    Size, StoreAction, Texture, TextureDescriptor, WorkCounts,
+};
+use std::path::Path;
+use std::time::Duration;
+
+const WAIT: Duration = Duration::from_secs(60);
+
+/// The target's side, in pixels.
+pub(super) const SIDE: u64 = 32;
+
+/// The target's red before the pass.
+const BEFORE: u8 = 64;
+
+/// The red draw A writes.
+const DRAWN: u8 = 128;
+
+/// A function of the fixture `fixture` under `fixtures/public/engine`.
+pub(super) fn function(device: &Device, name: &str, fixture: &str) -> StageSource {
+    let ll = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/public/engine")
+        .join(fixture);
+    let library = device
+        .new_library_with_air(&llvm_assemble(&ll).unwrap())
+        .unwrap();
+    StageSource::Function(
+        library
+            .new_function_with_name(name)
+            .unwrap()
+            .function_descriptor(),
+    )
+}
+
+/// The `tob_rect` state with the fragment function `name` of `fixture`, into an unblended
+/// `RGBA8Unorm` color.
+fn state(device: &Device, name: &str, fixture: &str) -> RenderPipelineState {
+    let mut d = RenderPipelineDescriptor::new(function(device, "tob_rect", "tob_renders.ll"));
+    d.fragment = Some(function(device, name, fixture));
+    d.color_attachments[0] = Some(ColorAttachmentDescriptor::new(PixelFormat::RGBA8Unorm));
+    device
+        .new_render_pipeline_state(&d, &PipelineOptions::default())
+        .unwrap()
+}
+
+/// The bytes of `f32`s.
+pub(super) fn floats(v: [f32; 4]) -> Vec<u8> {
+    v.iter().flat_map(|f| f.to_le_bytes()).collect()
+}
+
+/// The corners, in normalized device coordinates, of the target's pixels `[x0, x1) x [y0, y1)`.
+pub(super) fn corners([x0, y0, x1, y1]: [u64; 4]) -> Vec<u8> {
+    let x = |p: u64| p as f32 / SIDE as f32 * 2.0 - 1.0;
+    let y = |p: u64| 1.0 - p as f32 / SIDE as f32 * 2.0;
+    floats([x(x0), y(y1), x(x1), y(y0)])
+}
+
+/// Every texel red [`BEFORE`], opaque.
+fn before() -> Vec<u8> {
+    [BEFORE, 0, 0, 255].repeat((SIDE * SIDE) as usize)
+}
+
+/// The targets: a `Shared` texture of its own image, and one over a `Shared` buffer's bytes (the
+/// buffer kept alive beside it), each holding [`before`].
+fn targets(device: &Device) -> Vec<(&'static str, Texture, Option<Buffer>)> {
+    let mut d = TextureDescriptor::texture_2d(PixelFormat::RGBA8Unorm, SIDE, SIDE, false);
+    d.usage = TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ;
+    d.resource_options = ResourceOptions::shared();
+    let own = device.new_texture(&d).unwrap();
+    own.replace_region(
+        Region::new_2d(0, 0, SIDE, SIDE),
+        0,
+        0,
+        &before(),
+        SIDE * 4,
+        0,
+    )
+    .unwrap();
+    // Tight rows: 128 bytes, a multiple of every linear alignment Metal answers (16).
+    let row = SIDE * 4;
+    let buffer = device
+        .new_buffer(row * SIDE, ResourceOptions::shared())
+        .unwrap();
+    let over = buffer.new_texture(&d, 0, row).unwrap();
+    over.replace_region(
+        Region::new_2d(0, 0, SIDE, SIDE),
+        0,
+        0,
+        &before(),
+        SIDE * 4,
+        0,
+    )
+    .unwrap();
+    vec![
+        ("its own image", own, None),
+        ("over a buffer", over, Some(buffer)),
+    ]
+}
+
+/// One pass over `target`, loaded and stored: draw A, then `then` (draw C), and the target's
+/// bytes after it, tight rows, read back.
+fn pass(
+    queue: &CommandQueue,
+    target: &Texture,
+    fill: &RenderPipelineState,
+    then: impl FnOnce(&mut RenderCommandEncoder),
+) -> Vec<u8> {
+    let device = queue.device();
+    let mut d = RenderPassDescriptor::new();
+    let color = &mut d.color_attachments[0];
+    color.texture = Some(target.clone());
+    color.load_action = LoadAction::Load;
+    color.store_action = StoreAction::Store;
+    let back = device
+        .new_buffer(SIDE * SIDE * 4, ResourceOptions::shared())
+        .unwrap();
+    let command_buffer = queue.command_buffer().unwrap();
+    let mut encoder = command_buffer.render_command_encoder(&d).unwrap();
+    encoder.set_render_pipeline_state(fill).unwrap();
+    encoder
+        .set_vertex_bytes(&corners([8, 8, 16, 16]), 0)
+        .unwrap();
+    let red = f32::from(DRAWN) / 255.0;
+    encoder
+        .set_fragment_bytes(&floats([red, 0.0, 0.0, 1.0]), 0)
+        .unwrap();
+    encoder
+        .draw_primitives(PrimitiveType::Triangle, 0, 6, 1, 0)
+        .unwrap();
+    then(&mut encoder);
+    encoder.end_encoding().unwrap();
+    let mut blit = command_buffer.blit_command_encoder().unwrap();
+    blit.copy_from_texture_to_buffer(
+        target,
+        0,
+        0,
+        Origin::new(0, 0, 0),
+        Size::new(SIDE, SIDE, 1),
+        &back,
+        0,
+        SIDE * 4,
+        SIDE * SIDE * 4,
+        BlitOption::None,
+    )
+    .unwrap();
+    blit.end_encoding().unwrap();
+    command_buffer.commit().unwrap();
+    command_buffer.wait_until_completed_for(WAIT).unwrap();
+    assert_eq!(command_buffer.error(), None);
+    let contents = back.contents().unwrap();
+    // SAFETY: the buffer's bytes, which no command uses now.
+    unsafe { std::slice::from_raw_parts(contents.as_ptr(), back.length() as usize) }.to_vec()
+}
+
+/// The red of pixel `(x, y)` of `bytes`, tight `RGBA8Unorm` rows.
+pub(super) fn red(bytes: &[u8], x: u64, y: u64) -> u8 {
+    bytes[((y * SIDE + x) * 4) as usize]
+}
+
+/// What the pass moved of the counts: its draws' splits for attachment reads, their reads
+/// through snapshots inside their instances, their reads through copies, the encoders' shadow
+/// copies, of those the copies in of what changed within a rectangle alone, the texels the copies
+/// in moved, and whether the pass rendered the target through a copied stand-in.
+struct Moved {
+    splits: u64,
+    snapshotted: u64,
+    reads: u64,
+    copies: u64,
+    bounded: u64,
+    texels_in: u64,
+    apart: bool,
+}
+
+fn moved(before: &WorkCounts, after: &WorkCounts) -> Moved {
+    Moved {
+        splits: after.attachment_read_splits - before.attachment_read_splits,
+        snapshotted: after.reading_draws_snapshotted - before.reading_draws_snapshotted,
+        reads: after.attachment_reads_through_copies - before.attachment_reads_through_copies,
+        copies: after.shadow_copies - before.shadow_copies,
+        bounded: after.bounded_shadow_copies - before.bounded_shadow_copies,
+        texels_in: after.shadow_texels_copied_in - before.shadow_texels_copied_in,
+        apart: after.linear_passes_through_copies > before.linear_passes_through_copies,
+    }
+}
+
+/// Hold `moved` to a pass whose draws C sample the target `name`, after `barriers` barriers, one
+/// before each, or none: through a copy, taken after a split where a barrier came first, or a
+/// draw after a barrier that reads at its own pixel alone through a snapshot inside its instance
+/// (`snapshot_reads.rs`), where the pass renders the target itself; in place where it renders
+/// through a stand-in.
+fn check(name: &str, moved: &Moved, barriers: u64) {
+    eprintln!(
+        "attachment reads, {name}, barriers {barriers}: splits {}, snapshotted {}, reads through \
+         copies {}, shadow copies {} (bounded {}, texels in {}), through a stand-in {}",
+        moved.splits,
+        moved.snapshotted,
+        moved.reads,
+        moved.copies,
+        moved.bounded,
+        moved.texels_in,
+        moved.apart
+    );
+    if moved.apart {
+        assert_eq!(
+            moved.reads, 0,
+            "{name}: the stand-in rendered, the image read in place"
+        );
+        return;
+    }
+    assert_eq!(
+        moved.splits + moved.snapshotted,
+        barriers,
+        "{name}: a split or a snapshot for each read after a barrier"
+    );
+    if moved.snapshotted < barriers.max(1) {
+        assert!(moved.reads >= 1, "{name}: the draw read no copy");
+        assert!(moved.copies >= 1, "{name}: no copy was taken");
+    }
+}
+
+/// The steps of [`own_pixel_reads_copy_in_only_around_their_scissors`].
+const OWN_STEPS: u64 = 12;
+
+/// Step `i`'s pixel there: the corners, the middles of the edges, and pixels inside, none in
+/// A's block.
+fn own_step(i: u64) -> [u64; 2] {
+    const PIXELS: [[u64; 2]; OWN_STEPS as usize] = [
+        [0, 0],
+        [SIDE - 1, 0],
+        [0, SIDE - 1],
+        [SIDE - 1, SIDE - 1],
+        [SIDE / 2, 0],
+        [0, SIDE / 2],
+        [SIDE - 1, SIDE / 2],
+        [SIDE / 2, SIDE - 1],
+        [3, 4],
+        [4, 3],
+        [20, 25],
+        [21, 25],
+    ];
+    PIXELS[i as usize]
+}
+
+/// The red step `i`'s fill writes: none of [`BEFORE`], [`DRAWN`] or another step's.
+fn own_red(i: u64) -> u8 {
+    (150 + 5 * i) as u8
+}
+
+/// Set a one-pixel scissor at `(x, y)` and the corners of that pixel.
+fn one_pixel(encoder: &mut RenderCommandEncoder, [x, y]: [u64; 2]) {
+    let rect = ScissorRect {
+        x,
+        y,
+        width: 1,
+        height: 1,
+    };
+    encoder.set_scissor_rect(rect).unwrap();
+    encoder
+        .set_vertex_bytes(&corners([x, y, x + 1, y + 1]), 0)
+        .unwrap();
+}
+
+#[test]
+fn own_pixel_reads_copy_in_only_around_their_scissors() {
+    on_device(|device, _messages| {
+        let queue = device.new_command_queue().unwrap();
+        let fill = state(device, "tob_solid", "tob_renders.ll");
+        let read = state(device, "tob_read", "tob_renders.ll");
+        // Each step, then the first step's pixel again.
+        let steps: Vec<(u64, [u64; 2])> = (0..OWN_STEPS)
+            .map(|i| (i, own_step(i)))
+            .chain([(OWN_STEPS, own_step(0))])
+            .collect();
+        for (name, target, _buffer) in targets(device) {
+            let counted = device.work_counts();
+            let bytes = pass(&queue, &target, &fill, |encoder| {
+                for &(i, pixel) in &steps {
+                    encoder.set_render_pipeline_state(&fill).unwrap();
+                    one_pixel(encoder, pixel);
+                    let red = f32::from(own_red(i)) / 255.0;
+                    encoder
+                        .set_fragment_bytes(&floats([red, 0.0, 0.0, 1.0]), 0)
+                        .unwrap();
+                    encoder
+                        .draw_primitives(PrimitiveType::Triangle, 0, 6, 1, 0)
+                        .unwrap();
+                    encoder.memory_barrier_with_scope(
+                        BarrierScope::RENDER_TARGETS,
+                        RenderStages::FRAGMENT,
+                        RenderStages::FRAGMENT,
+                    );
+                    encoder.set_render_pipeline_state(&read).unwrap();
+                    one_pixel(encoder, pixel);
+                    encoder.set_fragment_texture(Some(&target), 0).unwrap();
+                    encoder
+                        .draw_primitives(PrimitiveType::Triangle, 0, 6, 1, 0)
+                        .unwrap();
+                }
+            });
+            // Each C its fill's red (the last fill's at the first pixel), A's block A's red,
+            // every other pixel the red from before the pass.
+            let mut expected = vec![BEFORE; (SIDE * SIDE) as usize];
+            for y in 8..16 {
+                for x in 8..16 {
+                    expected[(y * SIDE + x) as usize] = DRAWN;
+                }
+            }
+            for &(i, [x, y]) in &steps {
+                expected[(y * SIDE + x) as usize] = own_red(i);
+            }
+            for y in 0..SIDE {
+                for x in 0..SIDE {
+                    let want = expected[(y * SIDE + x) as usize];
+                    assert_eq!(red(&bytes, x, y), want, "{name}: pixel ({x}, {y})");
+                }
+            }
+            let after = device.work_counts();
+            let moved = moved(&counted, &after);
+            let count = steps.len() as u64;
+            check(name, &moved, count);
+            let own = after.own_pixel_reads - counted.own_pixel_reads;
+            eprintln!("own-pixel reads, {name}: {own}");
+            if moved.apart {
+                continue;
+            }
+            // Each C read the copy, or read through a snapshot inside its instance.
+            assert_eq!(
+                moved.reads + moved.snapshotted,
+                count,
+                "{name}: each C read the copy or a snapshot"
+            );
+            // Over a buffer: each copy in of at most the 3x3 texels around a C's pixel, and a
+            // shadowed attachment's own copy in at most every texel more. The image's shadow
+            // takes every texel (`ShadowCopies::cuts`).
+            if name == "over a buffer" {
+                assert_eq!(own, moved.reads, "{name}: own-pixel reads");
+                let most = SIDE * SIDE + 9 * count;
+                assert!(
+                    moved.texels_in <= most,
+                    "{name}: {} texels copied in, past {most}",
+                    moved.texels_in
+                );
+            } else {
+                assert_eq!(own, 0, "{name}: own-pixel reads");
+            }
+        }
+    });
+}
+
+#[test]
+fn an_own_pixel_read_without_a_barrier_reads_the_texels_from_before_the_pass() {
+    on_device(|device, _messages| {
+        let queue = device.new_command_queue().unwrap();
+        let fill = state(device, "tob_solid", "tob_renders.ll");
+        let read = state(device, "tob_read", "tob_renders.ll");
+        for (name, target, _buffer) in targets(device) {
+            let counted = device.work_counts();
+            let bytes = pass(&queue, &target, &fill, |encoder| {
+                encoder.set_render_pipeline_state(&read).unwrap();
+                encoder
+                    .set_vertex_bytes(&corners([8, 8, 16, 16]), 0)
+                    .unwrap();
+                encoder.set_fragment_texture(Some(&target), 0).unwrap();
+                encoder
+                    .draw_primitives(PrimitiveType::Triangle, 0, 6, 1, 0)
+                    .unwrap();
+            });
+            for y in 0..SIDE {
+                for x in 0..SIDE {
+                    assert_eq!(red(&bytes, x, y), BEFORE, "{name}: pixel ({x}, {y})");
+                }
+            }
+            let after = device.work_counts();
+            let moved = moved(&counted, &after);
+            check(name, &moved, 0);
+            let own = after.own_pixel_reads - counted.own_pixel_reads;
+            eprintln!("own-pixel reads, {name}: {own}");
+            if !moved.apart && name == "over a buffer" {
+                assert_eq!(own, 1, "{name}: own-pixel reads");
+                // The full scissor, the whole target: its copy every texel at most, and a
+                // shadowed attachment's own every texel more.
+                let most = 2 * SIDE * SIDE;
+                assert!(moved.texels_in <= most, "{name}: {}", moved.texels_in);
+            }
+        }
+    });
+}
+
+#[test]
+fn a_pass_that_samples_no_attachment_copies_nothing() {
+    on_device(|device, _messages| {
+        let queue = device.new_command_queue().unwrap();
+        let fill = state(device, "tob_solid", "tob_renders.ll");
+        let read = state(device, "tob_read", "tob_renders.ll");
+        let (name, target, _) = targets(device).swap_remove(0);
+        let (_, other, _) = targets(device).swap_remove(0);
+        let counted = device.work_counts();
+        let bytes = pass(&queue, &target, &fill, |encoder| {
+            encoder.set_render_pipeline_state(&read).unwrap();
+            encoder.set_vertex_bytes(&corners([4, 4, 8, 8]), 0).unwrap();
+            encoder.set_fragment_texture(Some(&other), 0).unwrap();
+            encoder
+                .draw_primitives(PrimitiveType::Triangle, 0, 6, 1, 0)
+                .unwrap();
+        });
+        assert_eq!(red(&bytes, 4, 4), BEFORE, "{name}: the other texture's red");
+        assert_eq!(red(&bytes, 8, 8), DRAWN, "{name}: A's red");
+        let after = device.work_counts();
+        let moved = moved(&counted, &after);
+        let own = after.own_pixel_reads - counted.own_pixel_reads;
+        eprintln!(
+            "no attachment read, {name}: reads {}, splits {}, own-pixel {own}, shadow copies {}, \
+             command buffers begun {}, draw states recorded {}",
+            moved.reads,
+            moved.splits,
+            moved.copies,
+            after.command_buffers_begun - counted.command_buffers_begun,
+            after.draw_states_recorded - counted.draw_states_recorded
+        );
+        assert_eq!(
+            (moved.reads, moved.splits, own, moved.copies),
+            (0, 0, 0, 0),
+            "{name}: reads, splits, own-pixel reads, shadow copies"
+        );
+    });
+}
+
+#[test]
+fn a_draw_after_a_barrier_samples_what_the_draws_before_wrote() {
+    on_device(|device, _messages| {
+        let queue = device.new_command_queue().unwrap();
+        let fill = state(device, "tob_solid", "tob_renders.ll");
+        let sample = state(
+            device,
+            "a4_fragment_select_sample",
+            "a4_fragment_select_sample.ll",
+        );
+        let sampler = device.new_sampler_state(&SamplerDescriptor::new()).unwrap();
+        for (name, target, _buffer) in targets(device) {
+            let counted = device.work_counts();
+            let bytes = pass(&queue, &target, &fill, |encoder| {
+                encoder.memory_barrier_with_scope(
+                    BarrierScope::RENDER_TARGETS,
+                    RenderStages::FRAGMENT,
+                    RenderStages::FRAGMENT,
+                );
+                encoder.set_render_pipeline_state(&sample).unwrap();
+                encoder.set_vertex_bytes(&corners([4, 4, 8, 8]), 0).unwrap();
+                encoder.set_fragment_texture(Some(&target), 0).unwrap();
+                encoder.set_fragment_texture(Some(&target), 1).unwrap();
+                encoder
+                    .set_fragment_sampler_state(Some(&sampler), 0)
+                    .unwrap();
+                encoder
+                    .draw_primitives(PrimitiveType::Triangle, 0, 6, 1, 0)
+                    .unwrap();
+            });
+            for y in 4..8 {
+                for x in 4..8 {
+                    assert_eq!(red(&bytes, x, y), DRAWN, "{name}: pixel ({x}, {y})");
+                }
+            }
+            assert_eq!(red(&bytes, 0, 0), BEFORE, "{name}: outside the draws");
+            check(name, &moved(&counted, &device.work_counts()), 1);
+        }
+    });
+}
+
+#[test]
+fn a_draw_without_a_barrier_samples_the_texels_from_before_the_pass() {
+    on_device(|device, _messages| {
+        let queue = device.new_command_queue().unwrap();
+        let fill = state(device, "tob_solid", "tob_renders.ll");
+        let sample = state(device, "tob_sample", "tob_renders.ll");
+        let sampler = device.new_sampler_state(&SamplerDescriptor::new()).unwrap();
+        for (name, target, _buffer) in targets(device) {
+            let counted = device.work_counts();
+            let bytes = pass(&queue, &target, &fill, |encoder| {
+                encoder.set_render_pipeline_state(&sample).unwrap();
+                encoder
+                    .set_vertex_bytes(&corners([8, 8, 16, 16]), 0)
+                    .unwrap();
+                encoder.set_fragment_texture(Some(&target), 0).unwrap();
+                encoder
+                    .set_fragment_sampler_state(Some(&sampler), 0)
+                    .unwrap();
+                encoder
+                    .draw_primitives(PrimitiveType::Triangle, 0, 6, 1, 0)
+                    .unwrap();
+            });
+            for y in 8..16 {
+                for x in 8..16 {
+                    assert_eq!(red(&bytes, x, y), BEFORE, "{name}: pixel ({x}, {y})");
+                }
+            }
+            check(name, &moved(&counted, &device.work_counts()), 0);
+        }
+    });
+}
+
+/// The steps of [`a_chain_of_barriers_copies_in_only_what_each_instance_drew`]: as many
+/// render-target barriers in one pass as the most a pass of the owner's RTX 5080 trace has.
+const CHAIN: u64 = 29;
+
+/// Step `i`'s pixel `(x, y)`, where its draw C writes, sampling texel `(2x + 1, 2y + 1)`, its
+/// fill's pixel: even columns, so no C writes a pixel a fill writes or a C samples, and outside
+/// A's block.
+fn chained(i: u64) -> [u64; 2] {
+    [2 * (i % 8), i / 8]
+}
+
+/// The red step `i`'s fill writes: none of [`BEFORE`], [`DRAWN`] or another step's.
+fn chain_red(i: u64) -> u8 {
+    (140 + 3 * i) as u8
+}
+
+/// Of the target's `SIDE` by `SIDE` texels, those the rectangles bounding the pixels each
+/// instance of the chain after the first draws hold (draw C of the step before, then the fill):
+/// what a copy in of only those moves before each later instance.
+fn chain_texels() -> u64 {
+    (1..CHAIN)
+        .map(|i| {
+            let ([cx, cy], [x, y]) = (chained(i - 1), chained(i));
+            let (fx, fy) = (2 * x + 1, 2 * y + 1);
+            (cx.abs_diff(fx) + 1) * (cy.abs_diff(fy) + 1)
+        })
+        .sum()
+}
+
+#[test]
+fn a_chain_of_barriers_copies_in_only_what_each_instance_drew() {
+    on_device(|device, _messages| {
+        let queue = device.new_command_queue().unwrap();
+        let fill = state(device, "tob_solid", "tob_renders.ll");
+        let sample = state(
+            device,
+            "a4_fragment_select_sample",
+            "a4_fragment_select_sample.ll",
+        );
+        let sampler = device.new_sampler_state(&SamplerDescriptor::new()).unwrap();
+        let one = |encoder: &mut RenderCommandEncoder, [x, y]: [u64; 2]| {
+            let rect = ScissorRect {
+                x,
+                y,
+                width: 1,
+                height: 1,
+            };
+            encoder.set_scissor_rect(rect).unwrap();
+            encoder
+                .set_vertex_bytes(&corners([x, y, x + 1, y + 1]), 0)
+                .unwrap();
+        };
+        for (name, target, _buffer) in targets(device) {
+            let counted = device.work_counts();
+            let bytes = pass(&queue, &target, &fill, |encoder| {
+                for i in 0..CHAIN {
+                    let [x, y] = chained(i);
+                    encoder.set_render_pipeline_state(&fill).unwrap();
+                    one(encoder, [2 * x + 1, 2 * y + 1]);
+                    let red = f32::from(chain_red(i)) / 255.0;
+                    encoder
+                        .set_fragment_bytes(&floats([red, 0.0, 0.0, 1.0]), 0)
+                        .unwrap();
+                    encoder
+                        .draw_primitives(PrimitiveType::Triangle, 0, 6, 1, 0)
+                        .unwrap();
+                    encoder.memory_barrier_with_scope(
+                        BarrierScope::RENDER_TARGETS,
+                        RenderStages::FRAGMENT,
+                        RenderStages::FRAGMENT,
+                    );
+                    encoder.set_render_pipeline_state(&sample).unwrap();
+                    one(encoder, [x, y]);
+                    encoder.set_fragment_texture(Some(&target), 0).unwrap();
+                    encoder.set_fragment_texture(Some(&target), 1).unwrap();
+                    encoder
+                        .set_fragment_sampler_state(Some(&sampler), 0)
+                        .unwrap();
+                    encoder
+                        .draw_primitives(PrimitiveType::Triangle, 0, 6, 1, 0)
+                        .unwrap();
+                }
+            });
+            // What a copy of every texel before each instance answers: each C its fill's red,
+            // A's block A's red, every other pixel the red from before the pass.
+            let mut expected = vec![BEFORE; (SIDE * SIDE) as usize];
+            for y in 8..16 {
+                for x in 8..16 {
+                    expected[(y * SIDE + x) as usize] = DRAWN;
+                }
+            }
+            for i in 0..CHAIN {
+                let [x, y] = chained(i);
+                expected[(y * SIDE + x) as usize] = chain_red(i);
+                expected[((2 * y + 1) * SIDE + 2 * x + 1) as usize] = chain_red(i);
+            }
+            for y in 0..SIDE {
+                for x in 0..SIDE {
+                    let want = expected[(y * SIDE + x) as usize];
+                    assert_eq!(red(&bytes, x, y), want, "{name}: pixel ({x}, {y})");
+                }
+            }
+            let moved = moved(&counted, &device.work_counts());
+            check(name, &moved, CHAIN);
+            if moved.apart {
+                continue;
+            }
+            assert_eq!(moved.reads, CHAIN, "{name}: each C read the copy");
+            // Over a buffer: the first copy of every texel, then only what each instance drew.
+            // The image's shadow takes every texel (`ShadowCopies::cuts`).
+            if name == "over a buffer" {
+                assert_eq!(moved.bounded, CHAIN - 1, "{name}: bounded copies");
+                // A shadowed attachment's own copy in takes at most every texel more.
+                let most = 2 * SIDE * SIDE + chain_texels();
+                assert!(
+                    moved.texels_in <= most,
+                    "{name}: {} texels copied in, past {most}",
+                    moved.texels_in
+                );
+            } else {
+                assert_eq!(moved.bounded, 0, "{name}: bounded copies");
+            }
+        }
+    });
+}

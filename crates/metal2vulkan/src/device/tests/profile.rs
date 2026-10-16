@@ -51,13 +51,13 @@ fn every_committed_profile_derives() {
 }
 
 /// `occlusionQueryPrecise` is read from each committed profile whose source states it, and enabled
-/// there: every venue's source does; the two derived Vulkan 1.2 floors, whose base
-/// (`VP_LUNARG_minimum_requirements_1_2`) does not require it, leave it unstated.
+/// there: every venue's source does; the derived Vulkan 1.2 floor, whose base
+/// (`VP_LUNARG_minimum_requirements_1_2`) does not require it, leaves it unstated.
 #[test]
 fn occlusion_query_precise_follows_each_source() {
     for (stem, text) in committed_profiles() {
         let stated = text.contains("\"occlusionQueryPrecise\": true");
-        assert_eq!(stated, !stem.starts_with("vk12-"), "{stem}");
+        assert_eq!(stated, stem != "vk12-floor", "{stem}");
         let desc = DeviceDescription::from_khronos_json(&text, None).unwrap();
         assert_eq!(
             desc.features.contains(&VkFeature::OcclusionQueryPrecise),
@@ -150,7 +150,7 @@ fn find_structure(v: &serde_json::Value, name: &str, out: &mut Option<serde_json
 #[test]
 fn memory_profiles_follow_bda_and_int64() {
     // roadmap-2022 requires device addresses but not shaderInt64.
-    for stem in ["vk12-bare", "vk12-floor", "roadmap-2022"] {
+    for stem in ["vk12-floor", "roadmap-2022"] {
         assert_eq!(
             device(stem).profile().fields().buffer_access,
             BufferAccess::Floor,
@@ -178,13 +178,10 @@ fn memory_profiles_follow_bda_and_int64() {
 fn addressed_needs_name_only_the_missing_features() {
     let bda = Capability::Feature(VkFeature::BufferDeviceAddress);
     let int64 = Capability::Feature(VkFeature::ShaderInt64);
-    for stem in ["vk12-bare", "vk12-floor"] {
-        assert_eq!(
-            device(stem).profile().addressed_needs(),
-            vec![bda.clone(), int64.clone()],
-            "{stem}"
-        );
-    }
+    assert_eq!(
+        device("vk12-floor").profile().addressed_needs(),
+        vec![bda, int64.clone()]
+    );
     // roadmap-2022 has device addresses; only the 64-bit integers are missing.
     assert_eq!(
         device("roadmap-2022").profile().addressed_needs(),
@@ -193,8 +190,8 @@ fn addressed_needs_name_only_the_missing_features() {
 }
 
 #[test]
-fn vk12_bare_derives_a_floor_profile() {
-    let dev = device("vk12-bare");
+fn vk12_floor_derives_a_floor_profile() {
+    let dev = device("vk12-floor");
     let f = dev.profile().fields();
     assert_eq!(
         f.containment,
@@ -284,7 +281,7 @@ fn robustness2_selects_the_rba2_encoding() {
 
 #[test]
 fn below_1_2_and_contradictory_policies_are_refused() {
-    let mut desc = profile("vk12-bare");
+    let mut desc = profile("vk12-floor");
     desc.api_version = ApiVersion { major: 1, minor: 1 };
     match Device::new(desc, DevicePolicy::default()) {
         Err(Error::Unsupported(u)) => {
@@ -301,13 +298,13 @@ fn below_1_2_and_contradictory_policies_are_refused() {
         ..DevicePolicy::default()
     };
     assert!(matches!(
-        Device::new(profile("vk12-bare"), unsafe_on),
+        Device::new(profile("vk12-floor"), unsafe_on),
         Err(Error::InvalidDescriptor(
             DescriptorError::DeviceDescription { .. }
         ))
     ));
     unsafe_on.isolation = GuestIsolation::Off;
-    let dev = Device::new(profile("vk12-bare"), unsafe_on).unwrap();
+    let dev = Device::new(profile("vk12-floor"), unsafe_on).unwrap();
     assert_eq!(dev.profile().fields().containment, Containment::UnsafeOff);
 }
 
@@ -573,7 +570,7 @@ fn check_reports_the_first_missing_capability() {
     );
     assert_eq!(
         need(Requirements {
-            features: [VkFeature::ShaderInt16, VkFeature::ShaderInt64].into(),
+            features: [VkFeature::RobustBufferAccess, VkFeature::ShaderInt64].into(),
             ..Requirements::default()
         }),
         Err(Capability::Feature(VkFeature::ShaderInt64))
@@ -694,7 +691,12 @@ fn storage_without_format_follows_each_format() {
         buffer: F::STORAGE_TEXEL_BUFFER | buffer,
         ..Default::default()
     };
+    // The floor states neither formatless feature: the test grants both.
     let mut desc = profile("vk12-floor");
+    desc.features
+        .insert(VkFeature::ShaderStorageImageReadWithoutFormat);
+    desc.features
+        .insert(VkFeature::ShaderStorageImageWriteWithoutFormat);
     assert!(!desc.has_format_feature_flags2());
     desc.formats.formats.clear();
     desc.formats
@@ -1208,49 +1210,6 @@ fn function_storage_is_the_measured_value_of_the_device() {
     desc.device_id = 0x15bf;
     desc.driver_id = Some(vk::DriverId::AMD_OPEN_SOURCE);
     assert_eq!(storage(desc), Assumed(16 * kib));
-}
-
-/// `DriverWorkaround::InterpolationNotMetals` is keyed on NVIDIA's driver from the release measured
-/// with it (615.71.09, the C3 venue's) on NVIDIA's vendor ID, for every GPU of it: both committed
-/// profiles at that release carry it, a newer release keeps it, and an older release (the committed
-/// Pascal profile's 580), another vendor's ID, or another driver does not.
-#[test]
-fn nvidia_carries_the_interpolation_answer_from_its_measured_release() {
-    use crate::device::driver_facts::nvidia;
-    use crate::device::profile::DriverWorkaround;
-    let fact = DriverWorkaround::InterpolationNotMetals;
-    let carries = |desc: &DeviceDescription| {
-        Device::new(desc.clone(), DevicePolicy::default())
-            .unwrap()
-            .profile()
-            .fields()
-            .workarounds
-            .contains(&fact)
-    };
-    let mut desc = profile("nvidia-rtx5080-laptop");
-    assert_eq!(desc.driver_id, Some(vk::DriverId::NVIDIA_PROPRIETARY));
-    assert_eq!(desc.driver_version, nvidia(615, 71, 9));
-    assert!(carries(&desc));
-    desc.device_id = 0x2204;
-    assert!(carries(&desc), "on another NVIDIA GPU");
-    desc.driver_version = nvidia(620, 1, 0);
-    assert!(carries(&desc), "620.01");
-    desc.driver_version = nvidia(615, 71, 8);
-    assert!(!carries(&desc), "615.71.08");
-    desc.driver_version = nvidia(615, 71, 9);
-    desc.vendor_id = 0x1002;
-    assert!(!carries(&desc), "on another vendor's ID");
-    desc.vendor_id = 0x10de;
-    desc.driver_id = Some(vk::DriverId::MESA_NVK);
-    assert!(!carries(&desc), "under NVK");
-    for (stem, text) in committed_profiles() {
-        let desc = DeviceDescription::from_khronos_json(&text, None).unwrap();
-        let nv = desc.driver_id == Some(vk::DriverId::NVIDIA_PROPRIETARY)
-            && desc.driver_version >= nvidia(615, 71, 9);
-        assert_eq!(carries(&desc), nv, "{stem}");
-    }
-    assert!(carries(&profile("nvidia-rtx50-linux")));
-    assert!(!carries(&profile("nvidia-pascal-linux")));
 }
 
 /// `DriverWorkaround::VertexGroupingNotApples` is keyed on ANV from the release measured with it

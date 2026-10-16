@@ -1,4 +1,4 @@
-// Owned fixture (WP-RRX, docs/TODO.md 8.27): a kernel that takes the addresses of visible functions
+// Owned fixture: a kernel that takes the addresses of visible functions
 // which read function constants and calls one through them, beside a kernel that calls one
 // directly and one that calls a plain function out of line. Metal's functionConstantsDictionary
 // (the metallib's CNST tag) answers whether a kernel reads the constants of the functions whose

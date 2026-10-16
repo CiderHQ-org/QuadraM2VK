@@ -76,7 +76,7 @@ const FULL: u32 = u32::from_be_bytes(*b"420f");
 /// the points inside the texture and the rest outside it. `write_masked` writes buffer 0's
 /// `float4` element `gid.y * width + gid.x` to texel `gid` of texture 0 where buffer 1's `uint`
 /// element there is not 0, and `write_masked_half` the same of `half4`s.
-pub(super) const KERNELS: &str = r#"; Owned synthetic kernels (WP-XRR2).
+pub(super) const KERNELS: &str = r#"; Owned synthetic kernels.
 source_filename = "ycbcr_textures.metal"
 
 define void @read_texels(ptr addrspace(1) %t, ptr addrspace(1) noalias %out, <2 x i32> %gid, <2 x i32> %size) {
@@ -192,7 +192,7 @@ entry:
   ret void
 }
 
-; ---- Added by WP-TXN2 (DESIGN D620): gathers of red and blue at texel corners ----
+; ---- Gathers of red and blue at texel corners ----
 define void @gather_red(ptr addrspace(1) %t, ptr addrspace(1) noalias %out, ptr addrspace(2) %smp, <2 x i32> %gid, <2 x i32> %size) {
 entry:
   %g = tail call <2 x float> @air.convert.f.v2f32.u.v2i32(<2 x i32> %gid)
@@ -934,7 +934,7 @@ fn fragments() -> String {
         ));
     }
     format!(
-        r#"; Owned synthetic shaders (WP-TXN2).
+        r#"; Owned synthetic shaders.
 @__air_sampler_state = internal addrspace(2) constant [2 x i64] [i64 {LINEAR_EDGE}, i64 0], align 8
 
 define <{{ <4 x float> }}> @corner(i32 %vid, ptr addrspace(2) %p) {{
@@ -2804,7 +2804,7 @@ const NEAREST_REPEAT: u64 = 0x007b_ff00_0008_0000 | 2 | 2 << 3 | 2 << 6;
 /// constexpr sampler of [`NEAREST_REPEAT`]'s words in place of sampler slot 0.
 fn constexpr_outside() -> String {
     format!(
-        r#"; Owned synthetic kernel (WP-TXN2).
+        r#"; Owned synthetic kernel.
 source_filename = "ycbcr_constexpr.metal"
 
 @__air_sampler_state = internal addrspace(2) constant [2 x i64] [i64 {NEAREST_REPEAT}, i64 0], align 8

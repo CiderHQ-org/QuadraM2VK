@@ -1,5 +1,5 @@
 // air-rename: _Z9rfs_yieldt llvm.agx3.yield
-// WP-RFS (DESIGN D405 item 1): `llvm.agx3.yield`, the backoff Apple's decoupled-lookback scans call
+// Owned fixture: `llvm.agx3.yield`, the backoff Apple's decoupled-lookback scans call
 // in their spin loops. MSL has no spelling for it, so the kernels call `rfs_yield`, which this
 // source declares and never defines, and the directive above renames every call to the
 // intrinsic in both companions (scripts/regen-air-fixtures). Measured on an M3 Max and an M4

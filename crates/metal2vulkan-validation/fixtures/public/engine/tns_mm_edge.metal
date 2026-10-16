@@ -1,6 +1,6 @@
 // metal-std: metal4.0
 // metal-macos-min: 26.2
-// Owned fixture (WP-TNS, DESIGN D272): matmul2d's float sums where the whole-tile readings
+// Owned fixture: matmul2d's float sums where the whole-tile readings
 // (tns_mm_float) do not reach: k, m, and n cut by the tensors' extents, inner extents past the
 // descriptor's k, denormal, infinite, NaN, and overflowing values, relaxed precision, multiply mode,
 // and tiles of two and four simdgroups. Threadgroup t computes one tile: A (extents a0, a1) over

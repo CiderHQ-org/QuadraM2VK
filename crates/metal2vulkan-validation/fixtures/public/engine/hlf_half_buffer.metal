@@ -1,4 +1,4 @@
-// Owned fixture (WP-HLF, DESIGN D251): how Metal converts a texture buffer's texels to `half`
+// Owned fixture: how Metal converts a texture buffer's texels to `half`
 // (the 2D reads `hlf_half_access` reads are not texture buffers). Four `half` texture buffers
 // (the case binds a 32-bit float, an 8-bit unorm, an 8-bit snorm, and a half-float format) are
 // each read at element `i` of lane `i`, which writes the four results, widened to `float`, to

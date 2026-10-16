@@ -2,14 +2,15 @@
 //! internal items through the former `unstable-internals` feature; as unit tests of the crate they
 //! reach those items directly, so the crate exports nothing for them. `tests/` keeps the tests that
 //! use only the public API. Their data stays where it was: `tests/golden_hashes.tsv`,
-//! `tests/public_fixture_expectations_engine.tsv`, and `tests/air_input/`.
+//! `tests/golden_hashes_exact.tsv`, `tests/public_fixture_expectations_engine.tsv`, and
+//! `tests/air_input/`.
 
 mod air_abi;
 mod air_canon;
 mod air_input;
 mod argument_buffers;
 mod bind_shape_of;
-mod constant_blob_footprint;
+pub(crate) mod constant_blob_footprint;
 mod engine_absent_handles;
 mod engine_absent_threadgroup;
 mod engine_absent_value_arguments;
@@ -28,11 +29,13 @@ mod engine_bicubic;
 mod engine_binder;
 mod engine_buffer_table;
 mod engine_chosen_pointers;
+mod engine_color_groups;
 mod engine_copy;
 mod engine_coverage_loop;
 mod engine_cross_class;
 mod engine_cube_gather;
 mod engine_declared_varyings;
+mod engine_depth16_codes;
 mod engine_depth_range;
 mod engine_device_replay;
 mod engine_dispatch;
@@ -41,6 +44,8 @@ mod engine_draw_bases;
 mod engine_dynamic_libraries;
 mod engine_dynamic_roots;
 mod engine_extended_range;
+mod engine_fetch_blend16;
+mod engine_fetch_blend16_narrow;
 mod engine_fill_moduli;
 mod engine_float_call_notes;
 mod engine_fpc_frames;
@@ -69,6 +74,7 @@ mod engine_link;
 mod engine_linking;
 mod engine_matmul2d;
 mod engine_mesh;
+mod engine_metal_denormals;
 mod engine_metal_math;
 mod engine_metal_readings;
 mod engine_metal_routines;
@@ -81,10 +87,12 @@ mod engine_name_independence;
 mod engine_native_half;
 mod engine_native_maths;
 mod engine_nonwritable;
+mod engine_offset_arms;
 mod engine_places;
 mod engine_pointer_cells;
 mod engine_pointer_memory;
 mod engine_pointer_values;
+mod engine_primitive_ids;
 mod engine_private_memory;
 mod engine_private_render_state;
 mod engine_profile_f;
@@ -105,6 +113,7 @@ mod engine_sampler_completion;
 mod engine_sampler_fetched;
 mod engine_sampler_tail;
 mod engine_sampler_unk;
+mod engine_selected_indices;
 mod engine_separate_samplers;
 mod engine_seq_cst;
 mod engine_shared_switch;
@@ -153,4 +162,6 @@ mod fast_paths;
 mod fuzz_interp;
 mod fuzz_soak;
 mod golden_hashes;
+mod owned_divisions;
 mod public_fixtures_engine;
+mod tessellator;

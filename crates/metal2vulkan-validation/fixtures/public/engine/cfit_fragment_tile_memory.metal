@@ -1,4 +1,4 @@
-// Owned fixture (WP-CFIT, DESIGN D340): fragment functions over their tile's threadgroup memory,
+// Owned fixture: fragment functions over their tile's threadgroup memory,
 // which a render pass keeps across its draws and tile dispatches. Metal gives each tile one
 // allocation of the pass's `threadgroupMemoryLength` bytes, zero when the pass begins, shared by
 // every fragment of the tile and by the pass's tile functions, each `[[threadgroup(n)]]` argument

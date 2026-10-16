@@ -1,9 +1,9 @@
-// Owned MSL for WP-L7b (lower B2, B3, D19, D23, D25, D73): sampling, gathers, and LOD queries
+// Owned MSL: sampling, gathers, and LOD queries
 // through runtime and constexpr samplers. Every function is loop-free.
 #include <metal_stdlib>
 using namespace metal;
 
-// A runtime sampler at an explicit level: pixel or normalized per the bound sampler (D25).
+// A runtime sampler at an explicit level: pixel or normalized per the bound sampler.
 kernel void sample_level(texture2d<float> t [[texture(0)]],
                          sampler s [[sampler(0)]],
                          device float4 *out [[buffer(0)]],
@@ -66,7 +66,7 @@ kernel void sample_pixel(texture2d<float> t [[texture(0)]],
     out[gid] = t.sample(pixel_linear, float2(gid) + 0.5);
 }
 
-// Fragment sampling: implicit LOD with a bias, a cube, and the LOD queries (tangled, D19).
+// Fragment sampling: implicit LOD with a bias, a cube, and the LOD queries (tangled).
 fragment float4 sample_fragment(float4 pos [[position]],
                                 texture2d<float> t [[texture(0)]],
                                 texturecube<float> cube [[texture(1)]],

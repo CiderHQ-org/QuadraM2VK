@@ -1,8 +1,8 @@
-// Owned MSL (WP-EVG, DESIGN D351 item 2, TODO 6.2): the two sampling strategies no case ran, over
+// Owned MSL: the two sampling strategies no case ran, over
 // a mipmapped texture whose levels differ. Written from scratch for this repository; loop-free.
 //
 // mip_bias_kernel: a kernel's sample with no level or gradient. Metal reads its default level 0
-// shifted by the bias (`sampler.sample_base_level`, DESIGN D90.3, D280); each thread takes its
+// shifted by the bias (`sampler.sample_base_level`); each thread takes its
 // coordinate and bias from the input buffer.
 //
 // mip_implicit_fragment: a fragment function's implicit-level sample (`sampler.sample_implicit`).

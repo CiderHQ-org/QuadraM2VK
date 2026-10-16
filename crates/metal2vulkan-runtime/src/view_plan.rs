@@ -8,29 +8,29 @@
 //!
 //! Metal's rules for a view ([`check_view`]), measured on an Apple M3 Max and M4:
 //!
-//! - **Formats.** A view takes the texture's own format, its sRGB twin, and any format of the
-//!   same class: an uncompressed color format of the same bytes per pixel (`RGBA8Unorm` as
-//!   `R32Uint`, `BGRA8Unorm`, `RGB10A2Unorm`, `RG11B10Float`, `RGB9E5Float` or `RG16Snorm`,
-//!   `B5G6R5Unorm` as `R16Uint`, `R8Unorm` as `A8Unorm`), another member of its compressed family
-//!   (`BC4_RUnorm` as `BC4_RSnorm`), or the stencil of a combined depth/stencil format
-//!   (`Depth32Float_Stencil8` as `X32_Stencil8`). Metal's API validation stops a view of the class
-//!   other than the sRGB twin unless the texture has `PixelFormatView` usage; plain Metal makes it
-//!   and renders through it the same (RT5 probes 1 and 2, `view.*.plain.*`), so the runtime makes
-//!   it too: where the texture's image was not made for the view's format, the view holds its
-//!   texels apart (`texture/view_shadow.rs`). Metal stops every other pair whatever the usage:
-//!   another size, compressed and uncompressed, two compressed families (`BC1_RGBA` as
-//!   `BC4_RUnorm`), depth or stencil and color (`Depth16Unorm` and `R16Unorm`), a combined format
-//!   as its depth. An extended-range format of one plane (`BGRA10_XR`, `BGR10_XR` and their sRGB
-//!   twins) views only as itself and its twin, and no other format views as one, though their bytes
-//!   per pixel match (the consumer's report, an M3 Max under macOS 26.7: plain Metal aborts each of
-//!   the 116 other pairs among the 32- and 64-bit color formats, "source texture pixelFormat not
-//!   compatible with texture view pixelFormat"), as a 4:2:2 format does; and so does one of two
-//!   planes (`RGB10A8_2P_XR10` and its sRGB twin: an M4 under macOS 27.0.1, EV `APX2-xv1-m4`, plain
-//!   Metal aborts each of its 72 pairs with 18 color formats of 1 to 16 bytes, the one-plane ones
-//!   among them, in both orders). Metal views a two-plane texture as its sRGB twin, which the
-//!   runtime refuses `Unsupported(Format)`: those reads are not measured. A converted two-plane
-//!   YCbCr texture (`YCBCR8_420_2P`, `YCBCR10_420_2P`) views as its `_sRGB` twin, which converts
-//!   the same planes (`texture/ycbcr_image.rs`); the other order is refused `Unsupported(Format)`,
+//! - **Formats.** A view takes the texture's own format, its sRGB twin, and any format of the same
+//!   class: an uncompressed color format of the same bytes per pixel (`RGBA8Unorm` as `R32Uint`,
+//!   `BGRA8Unorm`, `RGB10A2Unorm`, `RG11B10Float`, `RGB9E5Float` or `RG16Snorm`, `B5G6R5Unorm` as
+//!   `R16Uint`, `R8Unorm` as `A8Unorm`), another member of its compressed family (`BC4_RUnorm` as
+//!   `BC4_RSnorm`), or the stencil of a combined depth/stencil format (`Depth32Float_Stencil8` as
+//!   `X32_Stencil8`). Metal's API validation stops a view of the class other than the sRGB twin
+//!   unless the texture has `PixelFormatView` usage; plain Metal makes it and renders through it
+//!   the same (Metal probe cases `view.*.plain.*`, the M3 Max and the M4), so the runtime makes it
+//!   too: where the texture's image was not made for the view's format, the view holds its texels
+//!   apart (`texture/view_shadow.rs`). Metal stops every other pair whatever the usage: another
+//!   size, compressed and uncompressed, two compressed families (`BC1_RGBA` as `BC4_RUnorm`), depth
+//!   or stencil and color (`Depth16Unorm` and `R16Unorm`), a combined format as its depth. An
+//!   extended-range format of one plane (`BGRA10_XR`, `BGR10_XR` and their sRGB twins) views only
+//!   as itself and its twin, and no other format views as one, though their bytes per pixel match
+//!   (the consumer's report, an M3 Max under macOS 26.7: plain Metal aborts each of the 116 other
+//!   pairs among the 32- and 64-bit color formats, "source texture pixelFormat not compatible with
+//!   texture view pixelFormat"), as a 4:2:2 format does; and so does one of two planes
+//!   (`RGB10A8_2P_XR10` and its sRGB twin: an M4 under macOS 27.0.1, EV `APX2-xv1-m4`, plain Metal
+//!   aborts each of its 72 pairs with 18 color formats of 1 to 16 bytes, the one-plane ones among
+//!   them, in both orders). Metal views a two-plane texture as its sRGB twin, which the runtime
+//!   refuses `Unsupported(Format)`: those reads are not measured. A converted two-plane YCbCr
+//!   texture (`YCBCR8_420_2P`, `YCBCR10_420_2P`) views as its `_sRGB` twin, which converts the same
+//!   planes (`texture/ycbcr_image.rs`); the other order is refused `Unsupported(Format)`,
 //!   unmeasured.
 //! - **Types.** One-dimensional types view as each other, and so do the 2D types with the cube
 //!   types, the multisample types, and 3D alone. A view of a type that is not an array has one
@@ -43,14 +43,14 @@
 //! - **Swizzles.** A view made without a swizzle has the viewed texture's swizzle; one made with a
 //!   swizzle has that swizzle, which replaces the texture's rather than composing with it. Metal
 //!   applies a swizzle to the channels the view's format gives, border texels included.
-//! - **Usage.** A view has the viewed texture's usage, except that a view made with a swizzle
-//!   other than the default keeps only `ShaderRead` and `PixelFormatView` of it (a texture of
-//!   `Unknown` usage has Metal's `effective_usage`). Metal's validation stops a write binding of
-//!   such a view of a texture with `ShaderWrite`; plain Metal reads it swizzled and writes through
-//!   it with the swizzle undone (RT5 probe 2 `rw.view.read`, `rw.view.write`, the M3 Max and the
-//!   M4). A Vulkan storage view takes no swizzle, so at a storage slot the function applies it
-//!   to its reads and undoes it on its writes, and the view takes none (`binding_view`); a texture
-//!   made resident for a function reading handles stays the runtime's gap
+//! - **Usage.** A view has the viewed texture's usage, except that a view made with a swizzle other
+//!   than the default keeps only `ShaderRead` and `PixelFormatView` of it (a texture of `Unknown`
+//!   usage has Metal's `effective_usage`). Metal's validation stops a write binding of such a view
+//!   of a texture with `ShaderWrite`; plain Metal reads it swizzled and writes through it with the
+//!   swizzle undone (Metal probe cases `rw.view.read` and `rw.view.write`, the M3 Max and the M4).
+//!   A Vulkan storage view takes no swizzle, so at a storage slot the function applies it to its
+//!   reads and undoes it on its writes, and the view takes none (`binding_view`); a texture made
+//!   resident for a function reading handles stays the runtime's gap
 //!   (`NotImplemented(TextureSwizzle)`). A texture's usage keeps the bits Metal's texture drops
 //!   (`TextureUsage::DROPPED`), and so do its views; Metal asserts on a swizzled view of a texture
 //!   whose usage is none (one made with 0x8 alone), plain too
@@ -111,6 +111,11 @@ pub(super) struct ViewRecord {
     /// (`TextureDescriptor::framebuffer_only`, `rotation`, `is_drawable`): its views' too, as
     /// plain Metal's views keep them (EV ZCI2-rotprobe3-m4).
     pub(super) presented: Presented,
+    /// A view that reads its image in the image's own format (`texture/view_shadow.rs`): that
+    /// format, and the swizzle over its channels through which it reads what the view reads
+    /// (`metal::format::swizzle_over`). Its bindings, and the work that reads its texels' meaning
+    /// (`generate_mipmaps`), take [`bound`](Self::bound). `None` for every other texture.
+    pub(super) read_as: Option<(PixelFormat, TextureSwizzleChannels)>,
 }
 
 /// A texture's SPI presentation properties (`ViewRecord::presented`): none for every texture
@@ -145,6 +150,7 @@ impl ViewRecord {
             alpha_reads_one: false,
             address_mode_map: AddressModeMap::IDENTITY,
             presented: Presented::default(),
+            read_as: None,
         }
     }
 
@@ -164,6 +170,21 @@ impl ViewRecord {
                 is_drawable: descriptor.is_drawable,
             },
             ..ViewRecord::of_texture(layout, descriptor.usage, descriptor.swizzle)
+        }
+    }
+
+    /// What the texture's bindings present: the record itself, or, for a view that reads its
+    /// image in the image's own format (`read_as`), that format through its swizzle, as a texture
+    /// of the format made with the swizzle reads.
+    pub(super) fn bound(&self) -> ViewRecord {
+        match self.read_as {
+            Some((pixel_format, swizzle)) => ViewRecord {
+                pixel_format,
+                swizzle,
+                read_as: None,
+                ..*self
+            },
+            None => *self,
         }
     }
 
@@ -249,7 +270,7 @@ pub enum ViewProblem {
     /// a cube, a multiple of six for a cube array.
     SliceCount,
     /// More than one slice of a 2D array over a buffer: Metal asserts on such a view, plain and
-    /// validated (`sliceRange.length == 1`, TOB probe 1).
+    /// validated (`sliceRange.length == 1`; a Metal probe on the M3 Max and an M4).
     BufferSlices,
     /// A view with a swizzle of a texture whose usage is none (a texture made with Apple's private
     /// usage 0x8 alone): Metal asserts on such a view, plain and validated (`_usage !=
@@ -513,6 +534,7 @@ pub(super) fn check_view(
         alpha_reads_one: source.alpha_reads_one,
         address_mode_map: source.address_mode_map,
         presented: source.presented,
+        read_as: None,
     })
 }
 

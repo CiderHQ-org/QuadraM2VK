@@ -269,6 +269,7 @@ use crate::blit::reads;
 use crate::buffer::Buffer;
 use crate::command_buffer::CommandBuffer;
 use crate::degradation::{Degradation, SplitCauses};
+use crate::device::functions::Vk;
 use crate::device::lock;
 use crate::encoder::{EncoderCore, RecordedSegment};
 use crate::error::{internal, invalid, vulkan, Error, Problem, RuntimeGap};
@@ -283,7 +284,7 @@ use crate::pipeline::{BufferForms, FixedState, GraphicsKey, RawPipeline, RenderV
 use crate::rate_mapped_pass::RateMappedPass;
 use crate::render_pass::{ColorTarget, PassLayout, Target};
 use crate::render_state::EncoderState;
-use crate::render_target::{self, PassShape, Position, RenderPassObject};
+use crate::render_target::{self, Feedback, PassShape, Position, RenderPassObject};
 use crate::residency::{every_render_stage, Residency};
 use crate::resource::ResourceKey;
 use crate::sample_planes::{PlanesCommands, PlanesStep};
@@ -369,6 +370,8 @@ impl RenderCommandEncoder {
         if range.is_empty() {
             return Ok(());
         }
+        // Not in a pass of several color groups (`render/color_groups.rs`).
+        self.check_group_execution()?;
         let pipeline = match self.inherited_pipeline(CALL, icb)? {
             Inherited::Faults => return Ok(()),
             Inherited::Commands => None,
@@ -419,6 +422,8 @@ impl RenderCommandEncoder {
             return Err(Error::NotImplemented(RuntimeGap::IndirectRenderCommands));
         }
         indirect_execute::check_range_buffer(CALL_INDIRECT, range_buffer.length(), offset)?;
+        // Not in a pass of several color groups (`render/color_groups.rs`).
+        self.check_group_execution()?;
         let pipeline = match self.inherited_pipeline(CALL_INDIRECT, icb)? {
             Inherited::Faults => return Ok(()),
             Inherited::Commands => None,
@@ -500,6 +505,13 @@ impl RenderCommandEncoder {
         self.degrade_extended_range_execution();
         // Its commands write the extended-range colors' codes alone: the shadows end.
         self.end_extended_shadows();
+        // Commands that set their own depth/stencil states may write the depth: a depth over its
+        // magnitude stand-in is merged back (`texture/signed_depth.rs`).
+        self.depth_writes |= !icb.descriptor().inherit_depth_stencil_state;
+        // And its commands hand the device's pass the states they draw under: their own, which
+        // may write the depth, or the encoder's.
+        self.drew_depth_writes |=
+            !icb.descriptor().inherit_depth_stencil_state || self.state.depth_writes();
         // Where a visibility result mode is set, the commands' draws count in a query of their
         // own that continues the active offset, and the encoder's draws after them in another.
         let device = self.core.device().clone();
@@ -528,22 +540,42 @@ impl RenderCommandEncoder {
         // gives none, and a command's draw that needs them is refused as before
         // (`hidden_depth_stencil`); an execution of no such draw runs.
         let hidden = self.needed_hidden().ok().flatten();
+        // The draws before it are a piece of the instance it joins, or of the one it follows:
+        // the current one's secondary begins where the pass left it unbegun (`Instance::draws`).
+        self.begin_current_draws()?;
         // The commands draw into an instance of no fetched attachments, shader-side stencil or
         // views: the current one where it is such an instance and no tile dispatch or memory
         // barrier follows it, else a new one, as a draw of such a pipeline records.
-        let (next, stood) = self.next_instance(
+        // Not an instance recorded inline, which runs no secondary (`render/inline_first.rs`):
+        // a new one that continues it, where it would have taken them. Nor one whose colors are
+        // in the feedback loop layout, which runs as one render pass instance and whose
+        // descriptors of those colors name that layout (`render/snapshot.rs`): the commands read
+        // the attachments in place, in `GENERAL`.
+        let continues = self.current.inline
+            && self.takes_current(
+                (&[], &[], &[]),
+                (false, false),
+                ViewSetup::default(),
+                hidden.is_some(),
+            );
+        let apart = self.current.inline || self.current.feedback != Feedback::NONE;
+        let (mut next, stood) = self.next_instance(
             (&[], None),
             (false, false),
             ViewSetup::default(),
-            false,
+            apart,
             hidden,
             &[],
             &[],
         )?;
+        if let Next::New { instance, .. } = &mut next {
+            instance.continues = continues;
+        }
         let continuation = match &next {
             Next::New { split: true, .. } => self.visibility.continuation(&device)?,
             Next::New { .. } | Next::Current => None,
         };
+        self.begin_new_draws(&mut next)?;
         self.install(next, stood, continuation);
         let draws = self
             .core
@@ -634,11 +666,12 @@ impl RenderCommandEncoder {
                     overwrites: false,
                     kept: false,
                     area: None,
+                    loads: None,
                 };
                 shadow::join(&mut shadows, &used);
             }
         }
-        self.current.shadows.add(&shadows, &[]);
+        self.gathering().add(&shadows, &[]);
         // The bytes the commands may reach, so the copies between the pass's instances and as
         // the encoder ends keep what they read and write (`render/shadows.rs`): the resident
         // buffers and heaps, writing where their usage may, and the encoder's buffers where the
@@ -653,7 +686,7 @@ impl RenderCommandEncoder {
         .flat_map(|table| table.buffers.values())
         .map(|(buffer, _)| (buffer, true));
         for (buffer, write) in snapshot.residency.buffers_written().chain(bound) {
-            self.current.shadows.add_bytes(buffer, write);
+            self.gathering().add_bytes(buffer, write);
         }
         self.core.retain(icb.clone());
         self.executions.push(RenderExecution {
@@ -1059,7 +1092,7 @@ impl RunSteps {
     /// `command_buffer` is recording outside a render pass, and only the caller records it; the
     /// images and the steps' objects are live until it completes, and every image rests in
     /// `GENERAL`.
-    unsafe fn before(&self, raw: &ash::Device, command_buffer: vk::CommandBuffer) {
+    unsafe fn before(&self, raw: &Vk, command_buffer: vk::CommandBuffer) {
         // SAFETY: the caller's contract.
         unsafe {
             if let Some(into) = &self.into {
@@ -1076,7 +1109,7 @@ impl RunSteps {
     /// # Safety
     ///
     /// As for [`RunSteps::before`].
-    unsafe fn after(&self, raw: &ash::Device, command_buffer: vk::CommandBuffer) {
+    unsafe fn after(&self, raw: &Vk, command_buffer: vk::CommandBuffer) {
         // SAFETY: the caller's contract.
         unsafe {
             if let Some(planes) = &self.planes {
@@ -1465,11 +1498,8 @@ impl Draw<u64> {
 /// them (`None` elsewhere).
 fn pipeline_control_points(pipeline: &RenderPipelineState) -> Option<u32> {
     match pipeline.kind() {
-        RenderStateKind::Graphics(state) => state
-            .base()
-            .graphics
-            .tessellation
-            .map(|t| t.control_points)
+        RenderStateKind::Graphics(state) => crate::tessellation::patches(&state.base().graphics)
+            .map(|p| p.control_points)
             .filter(|&points| points != 0),
         RenderStateKind::Tile(_) => None,
     }
@@ -1482,7 +1512,7 @@ fn pipeline_point_index_size(pipeline: &RenderPipelineState) -> Option<u64> {
     let RenderStateKind::Graphics(state) = pipeline.kind() else {
         return None;
     };
-    match state.base().graphics.tessellation?.control_point_index_type {
+    match crate::tessellation::patches(&state.base().graphics)?.control_point_index_type {
         T::UInt16 => Some(2),
         T::UInt32 => Some(4),
         _ => None,
@@ -1527,7 +1557,7 @@ impl RenderCommandEncoder {
             return;
         };
         let vertex = state.descriptor().vertex();
-        if state.base().graphics.tessellation.is_some()
+        if crate::tessellation::patches(&state.base().graphics).is_some()
             || vertex.is_none()
             || self.check_pipeline(CALL, pipeline).is_err()
         {
@@ -1583,7 +1613,7 @@ impl RenderCommandEncoder {
             (state, &settings),
             &PassStartTables::default(),
             (&mut argument_samplers, &mut None),
-            &function_tables,
+            (&function_tables, &mut None),
         )?;
         let Settled { variant, plan, .. } = settled;
         self.core
@@ -1812,6 +1842,11 @@ impl RenderExecution {
             };
             encoder.factors.scale = scale;
             encoder.check_pipeline(CALL, &pipeline)?;
+            // An object function's threadgroup memory arguments: which lengths a command's mesh
+            // draw takes, its own or the encoder's, is not measured.
+            if super::mesh::reads_object_threadgroup_memory(&pipeline) {
+                return Err(Error::NotImplemented(RuntimeGap::IndirectRenderCommands));
+            }
             let control_points = pipeline_control_points(&pipeline);
             encoder.pipeline = Some(pipeline);
             if !inherited {
@@ -1964,7 +1999,7 @@ impl RenderExecution {
         }
         for run in &runs {
             // SAFETY: only this recording records the secondary command buffers.
-            unsafe { device.shared().vk().end_command_buffer(run.draws) }.map_err(vulkan)?;
+            unsafe { core.command_buffer().end_raw(run.draws) }.map_err(vulkan)?;
         }
         Ok(Recorded {
             core,
@@ -2010,6 +2045,8 @@ impl RenderExecution {
                 // So may they have written the instance's interlocked colors.
                 interlocked_writes: InterlockedStorage::ALL,
                 tile_memory: snapshot.tile_memory_reached,
+                // Its commands read an attachment in place (`texture/attached_reads.rs`).
+                barriers: false,
                 views: ViewSetup::default(),
                 pieces: Vec::new(),
                 shadows,
@@ -2018,6 +2055,13 @@ impl RenderExecution {
                 positioned: None,
                 rerecord: None,
                 bound: Bound::default(),
+                drawn: crate::clear_reach::DrawnArea::default(),
+                inline: false,
+                continues: false,
+                kept: None,
+                planned: false,
+                feedback: Feedback::NONE,
+                storage_colors: 0,
             },
             layout,
             passes: vec![(snapshot.shape.clone(), Arc::clone(&snapshot.compatible))],
@@ -2029,6 +2073,8 @@ impl RenderExecution {
             fragment: snapshot.fragment.clone(),
             object: snapshot.object.clone(),
             mesh: snapshot.mesh.clone(),
+            // No command's draw takes them: one whose object function reads them is refused.
+            object_threadgroup_lengths: BTreeMap::new(),
             visibility,
             tile: ArgumentTable::default(),
             dispatches: Vec::new(),
@@ -2074,6 +2120,8 @@ impl RenderExecution {
             reaches_unnamed: true,
             reload_at: std::collections::BTreeSet::new(),
             called: true,
+            depth_writes: false,
+            drew_depth_writes: false,
             drew: true,
             drawn: crate::clear_reach::DrawnArea::unbounded(),
             coverage: crate::linear_attachment::Coverage::unbounded(),
@@ -2096,6 +2144,11 @@ impl RenderExecution {
             quiet_bound_values: None,
             bind_memo: crate::binding::BindMemo::default(),
             last_retained: Default::default(),
+            inline: super::inline_first::Inline::Never,
+            held_bound: Default::default(),
+            // No pass of several color groups executes render commands
+            // (`render/color_groups.rs`).
+            grouped: None,
         }
     }
 
@@ -2216,6 +2269,16 @@ impl RenderExecution {
 /// docs): each instance's begin, the secondaries its subpass runs, and its end.
 pub(crate) struct DeferredPass {
     instances: Vec<PassInstance>,
+    /// The index among the pass's instances of the first of `instances`: the count of those the
+    /// encoder recorded inline (`held`), else 0. The steps name instances by that index.
+    first: usize,
+    /// The command buffer the encoder recorded the pass's leading instances inline in, and the
+    /// steps after the last of them, ended and handed over (`render/inline_first.rs`,
+    /// `render/inline_splits.rs`, `EncoderCore::hand_over_pass`): the segment places it after what
+    /// it records before the pass (the executions' copies and dispatches before it, a fragment
+    /// imageblock's clear) and before the later instances, where the first instance runs in a
+    /// segment that records it (`EncoderCore::cut_before`).
+    held: Option<vk::CommandBuffer>,
     /// The steps around its instances, as the encoder's own pass records them
     /// (`render/pass_steps.rs`): the shadowed textures' copies, the sample planes', the
     /// shader-side stencil's copies, the draws' steps before their instances, the tile
@@ -2287,9 +2350,11 @@ impl DeferredPass {
     /// The pass of `instances`, whose pieces name `executions` and `pending` draws by index,
     /// with `steps` around them, with the attachments' and the steps' `uses`, its `storage`
     /// where the encoder made it, and its `layout` as the encoder ended it with that layout
-    /// without its hidden depth and stencil (`bare`).
+    /// without its hidden depth and stencil (`bare`); `held` the command buffer of its leading
+    /// instances where the encoder recorded those inline, and their count, and `instances` the
+    /// later ones (the field's docs).
     pub(super) fn new(
-        instances: Vec<PassInstance>,
+        (instances, held): (Vec<PassInstance>, Option<(vk::CommandBuffer, usize)>),
         steps: PassSteps,
         uses: Vec<Use<ResourceKey>>,
         (executions, pending): (Vec<RenderExecution>, Vec<PendingDraw>),
@@ -2299,6 +2364,8 @@ impl DeferredPass {
     ) -> DeferredPass {
         DeferredPass {
             instances,
+            first: held.map_or(0, |(_, inlined)| inlined),
+            held: held.map(|(held, _)| held),
             steps,
             uses,
             executions,
@@ -2623,7 +2690,13 @@ impl DeferredPass {
                     }
                     (None, _, Some((passes, framebuffer))) => (passes.at(at, count), *framebuffer),
                     (None, None, _) if !backed => {
-                        let pass = render_target::final_pass(device, own, shape, position)?;
+                        let pass = render_target::final_pass(
+                            device,
+                            own,
+                            shape,
+                            position,
+                            Feedback::NONE,
+                        )?;
                         let raw = pass.raw;
                         made.0.push(pass);
                         (raw, instance.framebuffer)
@@ -2635,8 +2708,10 @@ impl DeferredPass {
                         let framed = of.map_or(&[][..], |of| &of.framed[..]);
                         let framed = framed_layout(own, framed);
                         let own = &*framed;
-                        let pass = render_target::final_pass(device, own, shape, position)?;
-                        let framebuffer = render_target::framebuffer(device, &pass, own, views)?;
+                        let none = Feedback::NONE;
+                        let pass = render_target::final_pass(device, own, shape, position, none)?;
+                        let framebuffer =
+                            render_target::framebuffer(device, &pass, own, views, none)?;
                         let raw = (pass.raw, framebuffer.raw);
                         made.0.push(pass);
                         made.1.push(framebuffer);
@@ -2656,7 +2731,13 @@ impl DeferredPass {
         if let Some(ahead) = ahead {
             core.retain(Arc::clone(ahead));
         }
+        // The first instance the encoder recorded inline: after what the segment recorded before
+        // the pass, as it runs where the segment records it.
+        if let Some(held) = self.held {
+            core.cut_before(held)?;
+        }
         let steps = &self.steps;
+        let first = self.first;
         let shadow_copies = shadow_copies.as_ref();
         core.command(render_target::ATTACHMENT_STAGES, &uses, |raw, cb| {
             // SAFETY: the segment's command buffer is recording outside a render pass; the
@@ -2689,7 +2770,7 @@ impl DeferredPass {
                     }
                     // Its steps before its first run, and after its last (`render/pass_steps.rs`).
                     if run_index == 0 {
-                        steps.before(raw, cb, at);
+                        steps.before(raw, cb, at + first);
                     }
                     let copies = shadow_copies.filter(|_| shadowed);
                     if let Some(copies) = copies {
@@ -2701,9 +2782,10 @@ impl DeferredPass {
                     if let Some(run_steps) = run_steps {
                         run_steps.before(raw, cb);
                     }
-                    steps.begin(raw, cb, at, pass, framebuffer);
+                    steps.begin(raw, cb, at + first, pass, framebuffer);
                     raw.cmd_execute_commands(cb, run);
                     raw.cmd_end_render_pass(cb);
+                    steps.ended(raw, cb, at + first);
                     if let Some(run_steps) = run_steps {
                         run_steps.after(raw, cb);
                     }
@@ -2711,7 +2793,7 @@ impl DeferredPass {
                         copies.record_out(raw, cb);
                     }
                     if last_run {
-                        steps.after(raw, cb, at);
+                        steps.after(raw, cb, at + first);
                     }
                 }
                 steps.end(raw, cb);

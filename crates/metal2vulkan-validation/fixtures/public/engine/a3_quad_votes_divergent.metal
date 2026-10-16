@@ -1,6 +1,6 @@
-// Owned fixture (WP-A3, DESIGN D70.5, D128): quad votes under divergence: quad_is_first, the
+// Owned fixture: quad votes under divergence: quad_is_first, the
 // active-lane mask, quad_all and quad_any (not quad_ballot, which no corpus row calls and the
-// decoder does not model). Compute quads are four consecutive threads (D3). Lane t & 3 of quad
+// decoder does not model). Compute quads are four consecutive threads. Lane t & 3 of quad
 // q = t >> 2 runs the votes exactly when bit (t & 3) of q & 15 is set, so the sixteen quads of 64
 // threads cover every subset of a quad once, including the empty one and those whose first lane
 // is inactive. Loop-free.

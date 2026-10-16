@@ -29,6 +29,7 @@ mod function_tables;
 mod imageblocks;
 mod indirect_commands;
 mod libraries;
+mod mesh;
 mod pipelines;
 mod readback;
 mod sample_readback;
@@ -49,7 +50,7 @@ use libraries::{
 };
 
 use pipelines::{
-    encode_pipeline_templates, make_compute_pipeline, make_pipeline_templates,
+    companion_library, encode_pipeline_templates, make_compute_pipeline, make_pipeline_templates,
     make_render_functions, make_render_pipeline, metal_cull_mode, NativePipeline,
 };
 
@@ -228,10 +229,8 @@ pub fn execute(
                         function_tables,
                         &pipelines,
                     ),
-                    // The case checker stops an object or mesh case before execution
-                    // (ToolingRequirement::MeshPipeline).
                     crate::case::Stage::Object | crate::case::Stage::Mesh => {
-                        Err("no Metal executor runs an object or mesh function yet".into())
+                        mesh::execute_mesh(context, case, source, resources, facts)
                     }
                 }
             })

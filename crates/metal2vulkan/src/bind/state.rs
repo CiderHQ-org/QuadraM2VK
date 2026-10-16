@@ -89,14 +89,25 @@ pub struct BindState {
     /// of the shape.
     #[cfg_attr(feature = "serde", serde(default))]
     pub depth_stencil: metal::state::DepthStencilDescriptor,
-    /// The draw's primitive type (`drawIndexedPrimitives:`'s `primitiveType`), which only a draw
-    /// of an indexed capture variant reads (`CaptureForm::Indexed`): Metal restarts a line or
-    /// triangle strip at the index type's all-ones index and shades no vertex there, and draws
-    /// every index of a list or of points. `None` where the consumer does not say; such an
-    /// indexed capture draw is `BindError::MissingPrimitiveType`. Only a draw's bytes depend on
-    /// it, so it is not part of the shape.
+    /// The draw's primitive type (`drawPrimitives:`'s or `drawIndexedPrimitives:`'s
+    /// `primitiveType`), which two draws read: one of an indexed capture variant
+    /// (`CaptureForm::Indexed`), as Metal restarts a line or triangle strip at the index type's
+    /// all-ones index and shades no vertex there, and draws every index of a list or of points;
+    /// and one of a pipeline whose vertex function writes the primitive ID
+    /// (`LoweringInputs::primitive_id_varying`), whose `PushField::VerticesPerPrimitive` holds
+    /// the type's vertices per primitive. `None` where the consumer does not say; such a draw is
+    /// `BindError::MissingPrimitiveType`. Only a draw's bytes depend on it, so it is not part of
+    /// the shape.
     #[cfg_attr(feature = "serde", serde(default))]
     pub primitive_type: Option<metal::PrimitiveType>,
+    /// The index type of a direct indexed draw of a pipeline whose vertex function writes the
+    /// primitive ID's varying (`LoweringInputs::primitive_id_varying`): its primitives share
+    /// vertices, so it runs the variant that draws its indices as vertices from 0
+    /// (`VariantKey::primitive_id_indices`). Part of the shape
+    /// (`BindShape::primitive_id_indices`); `None` for every other draw, whose plan otherwise
+    /// asks for it (`BindError::NeedsVariant`) or refuses the draw.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub primitive_id_indices: Option<metal::IndexType>,
     /// Where the heap arrays (set 1) hold the command's heap members and argument samplers
     /// ([`HeapPlacement`]). Only the instantiated tables and the elements the consumer writes
     /// ([`BindingPlan::heap_elements`]) depend on it, so it is not part of the shape.
@@ -161,6 +172,30 @@ pub struct BindState {
     /// other draw.
     #[cfg_attr(feature = "serde", serde(default))]
     pub depth_clamp_range: Option<[f32; 2]>,
+    /// Whether the depth the draw renders against is `Depth16Unorm`: its render pass's depth
+    /// attachment's format, or `false` for the hidden `float` depth a pass without one tests;
+    /// `None` where the draw has no depth. Plain Metal stores into that depth whatever format the
+    /// draw's pipeline names, so a draw whose pipeline names otherwise runs the variant whose
+    /// fragment stage takes Metal's 16-bit codes by it (`BindShape::depth16_pass`,
+    /// `VariantKey::depth16_pass`). Part of the shape; `None` for every other encoder.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub depth16_pass: Option<bool>,
+    /// Whether the draw biases its triangles' depths by Metal's factors: a constant or slope factor
+    /// other than 0 (`setDepthBias:slopeScale:clamp:`), for a draw of triangles whose viewports
+    /// take no bias. Where the depth is `Depth16Unorm` and the device stores unbiased depths as
+    /// Metal's codes but not biased ones, the draw runs the variant whose fragment stage adds the
+    /// bias itself (`BindShape::depth16_biased`, `VariantKey::depth16_biased`). Part of the shape;
+    /// `false` for every other draw.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub depth16_biased: bool,
+    /// The side of the draw's depth bias, where the consumer proved it: `Some(true)` where Metal's
+    /// biased depth is never below the fragment's own, `Some(false)` where it is never above
+    /// (`metal::state::depth16_bias_side`). Where the depth is `Depth16Unorm` and the draw's
+    /// fragment stage adds the bias itself, the draw runs the variant whose stage declares that
+    /// side (`BindShape::depth16_bias_raises`, `VariantKey::depth16_bias_raises`), so the device
+    /// may test the depth before the stage runs. Part of the shape; `None` for every other draw.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub depth16_bias_raises: Option<bool>,
     /// Allocations a pointer may reach that the consumer lists apart from `used_resources`, at
     /// their own lengths: the resident set holds them beside the bound buffers and the used
     /// resources, and a replay's extents count them (the runtime's live buffers of their own,
@@ -185,6 +220,16 @@ pub struct BindState {
     /// variant is part of the shape (`BindShape::extended_shadows`); empty for every other draw.
     #[cfg_attr(feature = "serde", serde(default))]
     pub extended_shadows: BTreeSet<u32>,
+    /// The fragment texture slots the consumer reads through a snapshot, by Metal index: a draw
+    /// that reads a texture its render pass renders, where the consumer draws it twice, first
+    /// taking each fragment's texel into the slot's snapshot with every color write mask zero,
+    /// then with the pipeline's masks reading the snapshot. The plan keeps a slot only where the
+    /// draw's pipeline can (the module docs of `bind::graphics`) and runs the variant that reads
+    /// it so (`VariantKey::snapshot_textures`); `BindingPlan::variant`'s `snapshot_textures` says
+    /// which it kept, and the consumer serves every other read as it would without it. Part of the
+    /// shape (`BindShape::snapshot_textures`); empty for every other draw.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub snapshot_textures: BTreeSet<u32>,
     /// What the draw's depth and stencil tests can do to its fragments ([`FragmentTests::of`]),
     /// which decides whether a fragment function that stores a color through the interlocked
     /// storage form before the tests (`RuntimeFact::TestedStorageWrites`) stores what Metal
@@ -222,6 +267,15 @@ pub struct BindState {
     /// depend on it, so it is not part of the shape.
     #[cfg_attr(feature = "serde", serde(default))]
     pub stencil_references: [u32; 2],
+    /// The draw's depth bias as a fragment stage that stores Metal's `Depth16Unorm` codes itself
+    /// adds it (`PushField::DepthBias`, `RuntimeFact::Depth16Codes`): Metal's constant as a
+    /// depth (`metal::state::depth16_bias`), then its slope and clamp factors, all 0 where the
+    /// draw's bias touches no depth (Metal's default, a draw of points or lines, a bias the draw's
+    /// viewports take). Read only by a draw of such a pipeline, whose consumer records the draw's
+    /// Vulkan depth bias as zero; only the draw's bytes depend on it, so it is not part of the
+    /// shape.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub depth_bias: [f32; 3],
 }
 
 /// What a draw's depth and stencil tests can do to its fragments (`BindState::fragment_tests`).
@@ -615,6 +669,11 @@ impl BindState {
             interlocked_colors: self.interlocked_colors.clone(),
             fragment_tests: self.fragment_tests,
             extended_shadows: self.extended_shadows.clone(),
+            snapshot_textures: self.snapshot_textures.clone(),
+            depth16_pass: self.depth16_pass,
+            depth16_biased: self.depth16_biased,
+            depth16_bias_raises: self.depth16_bias_raises,
+            primitive_id_indices: self.primitive_id_indices,
         }
     }
 
@@ -663,6 +722,11 @@ impl BindState {
             interlocked_colors,
             fragment_tests,
             extended_shadows,
+            snapshot_textures,
+            depth16_pass,
+            depth16_biased,
+            depth16_bias_raises,
+            primitive_id_indices,
         } = shape;
         let tables = self.stages.iter().filter(|(_, t)| !t.has_empty_shape());
         tables.clone().count() == stages.len()
@@ -685,6 +749,11 @@ impl BindState {
             && self.interlocked_colors == *interlocked_colors
             && self.fragment_tests == *fragment_tests
             && self.extended_shadows == *extended_shadows
+            && self.snapshot_textures == *snapshot_textures
+            && self.depth16_pass == *depth16_pass
+            && self.depth16_biased == *depth16_biased
+            && self.depth16_bias_raises == *depth16_bias_raises
+            && self.primitive_id_indices == *primitive_id_indices
             // Last: the one field compared through a shape made of it.
             && match self.used_resources.is_empty() {
                 true => used.is_empty(),
@@ -804,11 +873,12 @@ pub struct VertexAmplification {
     pub count: u32,
     /// `MTLVertexAmplificationViewMapping`s by amplification id; empty for `nil`.
     pub view_mappings: Vec<ViewMapping>,
-    /// Draw a count above 1 one amplification at a time even where Vulkan multiview would draw
-    /// it as views (`BindingPlan::variant`'s `amplification_draws`): the consumer sets it while
-    /// a visibility result mode is set, since a query in a multiview render pass instance takes
-    /// one query per view, while draws of one amplification each add to the one query, as Metal
-    /// counts the samples of every amplification (AMP Metal probe 1). Not set by default.
+    /// Draw a count above 1 one amplification at a time even where Vulkan multiview would draw it
+    /// as views (`BindingPlan::variant`'s `amplification_draws`): the consumer sets it while a
+    /// visibility result mode is set, since a query in a multiview render pass instance takes one
+    /// query per view, while draws of one amplification each add to the one query, as Metal counts
+    /// the samples of every amplification (a Metal probe on the M3 Max and an M4). Not set by
+    /// default.
     #[cfg_attr(feature = "serde", serde(default))]
     pub one_at_a_time: bool,
 }
@@ -843,9 +913,9 @@ impl VertexAmplification {
 
     /// The layer of a pass of `renderTargetArrayLength` `length` that amplification `a` renders
     /// into under a pipeline whose `maxVertexAmplificationCount` is `max`, before any slice a
-    /// vertex function chooses: its mapping's render target offset ([`Self::mapping`]) where
-    /// that is below the pass's layers (`length`, at least 1), and the first layer where it is
-    /// not (RT6 Metal probe 13, the rule for an index).
+    /// vertex function chooses: its mapping's render target offset ([`Self::mapping`]) where that
+    /// is below the pass's layers (`length`, at least 1), and the first layer where it is not (a
+    /// Metal probe on an M4, the rule for an index).
     pub fn layer(&self, a: u32, length: u32, max: u32) -> u32 {
         let offset = self.mapping(a, max).render_target_array_index_offset;
         match offset < length.max(1) {
@@ -1473,6 +1543,29 @@ pub struct BindShape {
     /// (`VariantKey::extended_shadows`).
     #[cfg_attr(feature = "serde", serde(default))]
     pub extended_shadows: BTreeSet<u32>,
+    /// `BindState.snapshot_textures`: the variant whose fragment function reads those of them
+    /// the pipeline can read through a snapshot so (`VariantKey::snapshot_textures`).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub snapshot_textures: BTreeSet<u32>,
+    /// `BindState.depth16_pass`: where it differs from the pipeline's depth format, the variant
+    /// whose fragment stage takes Metal's 16-bit depth codes by the pass's depth
+    /// (`VariantKey::depth16_pass`).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub depth16_pass: Option<bool>,
+    /// `BindState.depth16_biased`: against a `Depth16Unorm` depth, on a profile whose device
+    /// stores unbiased depths as Metal's codes but not biased ones, the variant whose fragment
+    /// stage adds the draw's bias and writes Metal's code (`VariantKey::depth16_biased`).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub depth16_biased: bool,
+    /// `BindState.depth16_bias_raises`: where the draw's fragment stage adds a `Depth16Unorm`
+    /// depth's bias itself, the variant whose stage declares the bias's side
+    /// (`VariantKey::depth16_bias_raises`).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub depth16_bias_raises: Option<bool>,
+    /// `BindState.primitive_id_indices`: the primitive ID's de-indexed variant of an indexed
+    /// draw's index type (`VariantKey::primitive_id_indices`), where the pipeline writes the ID.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub primitive_id_indices: Option<metal::IndexType>,
 }
 
 impl BindShape {
@@ -1545,8 +1638,8 @@ pub struct ArgumentSamplersShape {
     /// `MIN_ENTRIES << class` (the least such class).
     pub class: u8,
     /// The distinct shapes of the listed samplers: every one is checked for every use of a plan's
-    /// sampler arrays (`metal::sampler::check_sampler`), and an opaque-black border meets every
-    /// member a sampled heap array holds.
+    /// sampler arrays (`metal::sampler::check_argument_sampler`), and an opaque-black border meets
+    /// every member a sampled heap array holds.
     pub shapes: std::collections::BTreeSet<SamplerShape>,
 }
 

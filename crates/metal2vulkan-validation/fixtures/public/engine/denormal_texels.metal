@@ -1,4 +1,4 @@
-// Owned fixture (WP-RT13, DESIGN D338, docs/TODO.md 2.12): plain gathers and nearest samples of
+// Owned fixture: plain gathers and nearest samples of
 // 32-bit float textures whose texels include denormals of both signs. Lane i reads at in[i].xy
 // through a nearest clamp-to-edge sampler and a nearest repeating sampler, without a mip filter,
 // and writes eight float4s from out[8i]: gathers of an r32Float texture (texture 0) and of an

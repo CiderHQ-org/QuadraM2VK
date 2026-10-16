@@ -85,6 +85,11 @@ pub struct AuthoredCase {
     pub draw: Option<Draw>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tessellation: Option<TessellationDraw>,
+    /// An object or mesh case's draw of its mesh render pipeline ([`MeshDraw`]). Absent from every
+    /// other case, so no case authored before this field changes identity. Part of the semantic
+    /// identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_draw: Option<MeshDraw>,
     pub output: OutputSelection,
     pub compare: Comparison,
     pub execution_safety: ExecutionSafety,
@@ -120,6 +125,13 @@ pub struct AuthoredCase {
     pub raster_sample_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rationale: Option<String>,
+    /// A kernel case's own bound on each driver creation of its pipelines, in place of the shared
+    /// ceiling (`budgets::PIPELINE_CREATION_CEILING`), with what it was set from
+    /// ([`CreationBound`]). A test bound the compute executors hold each creation to, never a
+    /// product one. Execution never reads it, so like the name and the rationale it is not part of
+    /// the identity (`case_id`, `input_sha256`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creation_bound: Option<CreationBound>,
     /// Why the case's work is meant to leave its selected output exactly as authored: an early exit
     /// its parameters select, a callback that writes nothing, or a write of the bytes it read.
     /// Metal qualification refuses an answer equal to the selected initial bytes unless the case
@@ -198,6 +210,7 @@ pub(crate) fn attachmentless_fragment_test_case(air_sha256: String, entry: Strin
             base_instance: 0,
         }),
         tessellation: None,
+        mesh_draw: None,
         output: OutputSelection::None,
         compare: Comparison::Exact,
         execution_safety: ExecutionSafety::LoopFree,
@@ -209,6 +222,7 @@ pub(crate) fn attachmentless_fragment_test_case(air_sha256: String, entry: Strin
         raster_sample_count: None,
         public_source: None,
         no_effect: None,
+        creation_bound: None,
     }
 }
 
@@ -262,6 +276,7 @@ pub(crate) fn combined_depth_stencil_test_case(air_sha256: String, entry: String
             base_instance: 0,
         }),
         tessellation: None,
+        mesh_draw: None,
         output: OutputSelection::Stencil {
             origin: [0, 0],
             dimensions: [1, 1],
@@ -276,6 +291,7 @@ pub(crate) fn combined_depth_stencil_test_case(air_sha256: String, entry: String
         raster_sample_count: None,
         public_source: None,
         no_effect: None,
+        creation_bound: None,
     }
 }
 
@@ -333,6 +349,7 @@ pub(crate) fn vector_function_constant_test_case(
         }),
         draw: None,
         tessellation: None,
+        mesh_draw: None,
         output: OutputSelection::Buffer {
             binding: 0,
             offset: 0,
@@ -348,6 +365,7 @@ pub(crate) fn vector_function_constant_test_case(
         raster_sample_count: None,
         public_source: None,
         no_effect: None,
+        creation_bound: None,
     }
 }
 
@@ -403,6 +421,7 @@ pub(crate) fn narrow_implicit_imageblock_test_case(
         }),
         draw: None,
         tessellation: None,
+        mesh_draw: None,
         output: OutputSelection::RenderTarget {
             index: 0,
             origin: [0, 0],
@@ -418,6 +437,7 @@ pub(crate) fn narrow_implicit_imageblock_test_case(
         raster_sample_count: None,
         public_source: None,
         no_effect: None,
+        creation_bound: None,
     }
 }
 
@@ -480,6 +500,7 @@ pub(crate) fn fragment_imageblock_test_case(air_sha256: String, entry: String) -
             base_instance: 0,
         }),
         tessellation: None,
+        mesh_draw: None,
         output: OutputSelection::FragmentImageblock {
             semantic: "user(depth)".into(),
             origin: [0, 0],
@@ -495,7 +516,22 @@ pub(crate) fn fragment_imageblock_test_case(air_sha256: String, entry: String) -
         raster_sample_count: None,
         public_source: None,
         no_effect: None,
+        creation_bound: None,
     }
+}
+
+/// A kernel case's own bound on each driver creation of its pipelines
+/// ([`AuthoredCase::creation_bound`]), above the shared ceiling: for a module whose compile, on a
+/// device and driver measured, takes more of its thread's own CPU time than the ceiling on a host
+/// whose other work shares the CPU's cores, where the clock the executors read
+/// (`budgets::CreationClock`) already leaves out the thread's waits for a CPU.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreationBound {
+    /// The bound, in milliseconds.
+    pub ms: u64,
+    /// The device and driver it was measured on, and the measurements.
+    pub measured: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -1917,6 +1953,356 @@ pub enum CullMode {
     Back,
 }
 
+/// Metal's most threads of an object or mesh threadgroup (`maxTotalThreadsPerObjectThreadgroup`,
+/// `maxTotalThreadsPerMeshThreadgroup`, measured on the M3 Max and an M4): its validation stops a
+/// draw of a larger threadgroup, so a case of one has no defined answer.
+pub const MESH_THREADGROUP_THREADS: u64 = 1024;
+
+/// An object or mesh case's draw of its mesh render pipeline (`MTLMeshRenderPipelineDescriptor`
+/// and one `drawMeshThreadgroups:` or `drawMeshThreads:`).
+///
+/// The case's own entry is the stage its [`AuthoredCase::stage`] names; the pipeline's other
+/// stages are either partners, functions of the case's own AIR module named here, generated
+/// stages its [`observation`](Self::observation) or [`object_launch`](Self::object_launch)
+/// implies, or absent. An object case's absent mesh stage is a stage nothing supplies
+/// (`ToolingRequirement::MeshCompanion`) unless the case states a [`MeshObservation::Launch`], as
+/// is the absent object stage of a mesh function that reads a payload unless the case states the
+/// generated object function's [`ObjectLaunch`]. A rasterizing draw has a fragment function: Metal's
+/// descriptor validation stops a rasterizing mesh pipeline without one ("fragmentFunction must not
+/// be nil", an abort on the M3 Max under macOS 27.0.1), so the schema refuses such a draw before
+/// any executor runs. The draw names its fragment partner, or states the
+/// [`observation`](Self::observation) whose generated stages write render target 0
+/// (`companion::MeshStages`). A partner binds no
+/// resource: every resource the case authors is its own entry's, bound through the stage's setters
+/// (`setObjectBuffer:`, `setMeshBuffer:`, ...). The payload length is the pipeline's default
+/// (`payloadMemoryLength` 0, under which the M3 Max's mesh function reads the object function's
+/// whole payload): the case does not author it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MeshDraw {
+    /// The object function: a partner of a mesh case, absent for an object case (its own entry).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object: Option<String>,
+    /// The mesh function: a partner of an object case, absent for a mesh case (its own entry).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh: Option<String>,
+    /// The fragment function, a partner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fragment: Option<String>,
+    /// The draw's grid and its kind.
+    pub grid: MeshGrid,
+    /// The draw's `threadsPerObjectThreadgroup`.
+    pub threads_per_object_threadgroup: [u32; 3],
+    /// The draw's `threadsPerMeshThreadgroup`.
+    pub threads_per_mesh_threadgroup: [u32; 3],
+    /// The pipeline's `rasterizationEnabled`; absent is `true`, which needs a
+    /// [`fragment`](Self::fragment) or an [`observation`](Self::observation). Without
+    /// rasterization the pipeline has no fragment stage and no attachment, and the case observes
+    /// its entry's buffers.
+    #[serde(default = "rasterizes", skip_serializing_if = "is_rasterizing")]
+    pub rasterization: bool,
+    /// What generated stages observe into render target 0, in place of a fragment partner (and,
+    /// for an object case, of a mesh partner): only a rasterizing case that names neither states
+    /// one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation: Option<MeshObservation>,
+    /// What a generated object function launches in the object partner's place: only a mesh case
+    /// that names no object function states one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_launch: Option<ObjectLaunch>,
+}
+
+/// Metal's largest object payload (16 KB an object threadgroup, its feature set tables' limit),
+/// the most a generated object function writes.
+pub const MESH_PAYLOAD_BYTES: usize = 16 * 1024;
+
+/// What a mesh case's generated object function does in its object partner's place
+/// ([`MeshDraw::object_launch`], `companion::PayloadObject`): thread 0 of each object threadgroup
+/// writes the payload's bytes and launches the mesh grid, so each object threadgroup launches the
+/// same mesh threadgroups over the same payload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObjectLaunch {
+    /// The payload's bytes: whole 4-byte words, at least as many as the mesh function reads
+    /// (its `air.arg_type_size`) and at most [`MESH_PAYLOAD_BYTES`].
+    pub payload_b64: String,
+    /// The mesh threadgroups each object threadgroup launches
+    /// (`mesh_grid_properties::set_threadgroups_per_grid`), at most
+    /// [`MESH_GRID_THREADGROUPS`] in all.
+    pub mesh_threadgroups: [u32; 3],
+}
+
+/// Metal's most mesh threadgroups an object threadgroup launches (its feature set tables' limit
+/// on a mesh grid, which `max_total_threadgroups_per_mesh_grid` may lower).
+pub const MESH_GRID_THREADGROUPS: u64 = 1024;
+
+impl ObjectLaunch {
+    /// The payload's bytes, when `payload_b64` decodes.
+    pub fn payload(&self) -> Option<Vec<u8>> {
+        base64::engine::general_purpose::STANDARD
+            .decode(&self.payload_b64)
+            .ok()
+    }
+
+    fn validate(&self, errors: &mut Vec<String>) {
+        match self.payload() {
+            None => errors.push("mesh_draw.object_launch.payload_b64 does not decode".into()),
+            Some(bytes) if bytes.is_empty() || bytes.len() % 4 != 0 => errors.push(format!(
+                "mesh_draw.object_launch.payload_b64 holds {} bytes: a generated object function \
+                 writes whole 4-byte words, at least one",
+                bytes.len()
+            )),
+            Some(bytes) if bytes.len() > MESH_PAYLOAD_BYTES => errors.push(format!(
+                "mesh_draw.object_launch.payload_b64 holds {} bytes, past Metal's \
+                 {MESH_PAYLOAD_BYTES}-byte payload",
+                bytes.len()
+            )),
+            Some(_) => {}
+        }
+        let total = self
+            .mesh_threadgroups
+            .iter()
+            .map(|axis| u64::from(*axis))
+            .product::<u64>();
+        if total > MESH_GRID_THREADGROUPS {
+            errors.push(format!(
+                "mesh_draw.object_launch.mesh_threadgroups {:?} holds {total} threadgroups, past \
+                 Metal's {MESH_GRID_THREADGROUPS} a mesh grid",
+                self.mesh_threadgroups
+            ));
+        }
+    }
+}
+
+/// What a case's generated stages write to render target 0 ([`MeshDraw::observation`]): an output
+/// of a mesh case's own mesh function, which a generated observer fragment reads as a vertex
+/// case's observer reads a vertex output ([`VertexObservation`]), or what an object case's own
+/// object function launches ([`Launch`](Self::Launch)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MeshObservation {
+    /// An object case's launch: the grid of mesh threadgroups its object function sets and the
+    /// payload it writes, drawn by a generated mesh function in its mesh partner's place
+    /// (`companion::LaunchObserver`) through a generated observer fragment. Each mesh threadgroup
+    /// of the launched grid draws row `x + X * (y + Y * z)` of an `RGBA32Uint` render target 0
+    /// (its position `(x, y, z)` in the grid of `(X, Y, Z)` threadgroups): pixel 0 holds
+    /// `(X, Y, Z, row)`, and pixel `1 + k` the payload's words `4k` to `4k + 3`, read at the
+    /// payload's declared size (`air.arg_type_size`, whole words), with a word past it 0. Every
+    /// other pixel keeps the target's initial value, so a row past the grid or a pixel past the
+    /// payload shows any write that lands there. The draw launches one object threadgroup: a mesh
+    /// threadgroup cannot tell which object threadgroup launched it, so two would draw the same
+    /// rows.
+    Launch,
+    /// `[[position]]`, as Metal's rasterizer delivers it.
+    Position,
+    /// The vertex struct's user data field `index`, counting its user data fields in declaration
+    /// order (its builtins aside), interpolated as Metal's default for the field's type.
+    VertexData { index: u32 },
+    /// The primitive struct's user data field `index`, counting its user data fields in
+    /// declaration order: one value over each primitive, read flat.
+    PrimitiveData { index: u32 },
+}
+
+fn rasterizes() -> bool {
+    true
+}
+
+fn is_rasterizing(rasterization: &bool) -> bool {
+    *rasterization
+}
+
+/// A mesh draw's grid: of the first stage's threadgroups (`drawMeshThreadgroups:`), or of its
+/// threads (`drawMeshThreads:`). The first stage is the object function where the pipeline has
+/// one, else the mesh function.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MeshGrid {
+    Threadgroups([u32; 3]),
+    Threads([u32; 3]),
+}
+
+impl MeshGrid {
+    /// The grid's three extents, whichever kind it is.
+    pub fn extents(self) -> [u32; 3] {
+        match self {
+            MeshGrid::Threadgroups(extents) | MeshGrid::Threads(extents) => extents,
+        }
+    }
+}
+
+impl MeshDraw {
+    /// The function the pipeline runs at `stage` for a case of `case_stage` whose entry is
+    /// `entry`: the entry at its own stage, the partner this draw names at another, `None` for a
+    /// stage the draw leaves absent (or for a kernel, vertex or fragment `stage` other than the
+    /// fragment).
+    pub fn function<'a>(
+        &'a self,
+        case_stage: Stage,
+        entry: &'a str,
+        stage: Stage,
+    ) -> Option<&'a str> {
+        if stage == case_stage {
+            return Some(entry);
+        }
+        self.partner(stage)
+    }
+
+    /// The partner this draw names at `stage`, if any.
+    pub fn partner(&self, stage: Stage) -> Option<&str> {
+        match stage {
+            Stage::Object => self.object.as_deref(),
+            Stage::Mesh => self.mesh.as_deref(),
+            Stage::Fragment => self.fragment.as_deref(),
+            Stage::Kernel | Stage::Vertex => None,
+        }
+    }
+
+    /// Whether the draw takes generated stages (`companion::MeshStages`): it states an observation
+    /// or an object launch.
+    pub fn generates(&self) -> bool {
+        self.observation.is_some() || self.object_launch.is_some()
+    }
+
+    /// The partners this draw names, with their stages, in pipeline order.
+    pub fn partners(&self) -> impl Iterator<Item = (Stage, &str)> {
+        [
+            (Stage::Object, self.object.as_deref()),
+            (Stage::Mesh, self.mesh.as_deref()),
+            (Stage::Fragment, self.fragment.as_deref()),
+        ]
+        .into_iter()
+        .filter_map(|(stage, name)| name.map(|name| (stage, name)))
+    }
+
+    /// The literal checks of the draw of a case of `stage` whose entry is `entry`.
+    fn validate(&self, stage: Stage, entry: &str, errors: &mut Vec<String>) {
+        match stage {
+            Stage::Object if self.object.is_some() => errors.push(
+                "mesh_draw.object of an object case: the case's entry is its object function"
+                    .into(),
+            ),
+            Stage::Mesh if self.mesh.is_some() => errors.push(
+                "mesh_draw.mesh of a mesh case: the case's entry is its mesh function".into(),
+            ),
+            _ => {}
+        }
+        for (partner_stage, name) in self.partners() {
+            if name.trim().is_empty() {
+                errors.push(format!(
+                    "mesh_draw.{} must not be empty",
+                    partner_stage.entry_list()
+                ));
+            } else if name == entry {
+                errors.push(format!(
+                    "mesh_draw.{} names the case's own entry {name:?}",
+                    partner_stage.entry_list()
+                ));
+            }
+        }
+        match (self.rasterization, &self.fragment, self.observation) {
+            (false, Some(_), _) => errors.push(
+                "mesh_draw.fragment without rasterization: a pipeline that does not rasterize \
+                 has no fragment stage"
+                    .into(),
+            ),
+            (false, None, Some(_)) => errors.push(
+                "mesh_draw.observation without rasterization: the observer is a fragment \
+                 function, and a pipeline that does not rasterize has no fragment stage"
+                    .into(),
+            ),
+            (true, Some(_), Some(_)) => errors.push(
+                "mesh_draw names a fragment partner and an observation: the observation's \
+                 generated fragment function takes the fragment partner's place"
+                    .into(),
+            ),
+            (true, None, None) => errors.push(
+                "mesh_draw rasterizes and names no fragment function: Metal's descriptor \
+                 validation stops a rasterizing mesh pipeline without one (\"fragmentFunction \
+                 must not be nil\"); name the fragment partner, state an observation, or set \
+                 rasterization false"
+                    .into(),
+            ),
+            _ => {}
+        }
+        match (stage, self.observation) {
+            (Stage::Object, Some(MeshObservation::Launch)) => {
+                if self.mesh.is_some() {
+                    errors.push(
+                        "mesh_draw names a mesh partner and a launch observation: the \
+                         observation's generated mesh function takes the mesh partner's place"
+                            .into(),
+                    );
+                }
+                let launched = match self.grid {
+                    MeshGrid::Threadgroups(groups) => groups,
+                    MeshGrid::Threads(threads) => {
+                        let mut groups = [0; 3];
+                        for (axis, groups) in groups.iter_mut().enumerate() {
+                            let per = self.threads_per_object_threadgroup[axis].max(1);
+                            *groups = threads[axis].div_ceil(per);
+                        }
+                        groups
+                    }
+                };
+                if launched != [1, 1, 1] {
+                    errors.push(format!(
+                        "mesh_draw's launch observation needs one object threadgroup, and its \
+                         grid launches {launched:?}: a mesh threadgroup cannot tell which object \
+                         threadgroup launched it, so two would draw the same rows"
+                    ));
+                }
+            }
+            (Stage::Object, Some(_)) => errors.push(
+                "mesh_draw.observation of an object case other than its launch: the observer \
+                 reads a mesh function's outputs, and the case's own function is its object \
+                 function"
+                    .into(),
+            ),
+            (_, Some(MeshObservation::Launch)) => errors.push(
+                "mesh_draw's launch observation of a mesh case: it observes an object case's own \
+                 object function"
+                    .into(),
+            ),
+            _ => {}
+        }
+        if let Some(launch) = &self.object_launch {
+            match stage {
+                Stage::Mesh if self.object.is_some() => errors.push(
+                    "mesh_draw names an object partner and an object launch: the launch's \
+                     generated object function takes the object partner's place"
+                        .into(),
+                ),
+                Stage::Mesh => launch.validate(errors),
+                _ => errors.push(
+                    "mesh_draw.object_launch of an object case: the case's entry is its object \
+                     function"
+                        .into(),
+                ),
+            }
+        }
+        validate_dimensions("mesh_draw.grid", &self.grid.extents(), errors);
+        for (field, threads) in [
+            (
+                "mesh_draw.threads_per_object_threadgroup",
+                &self.threads_per_object_threadgroup,
+            ),
+            (
+                "mesh_draw.threads_per_mesh_threadgroup",
+                &self.threads_per_mesh_threadgroup,
+            ),
+        ] {
+            validate_dimensions(field, threads, errors);
+            let total = threads.iter().map(|axis| u64::from(*axis)).product::<u64>();
+            if total > MESH_THREADGROUP_THREADS {
+                errors.push(format!(
+                    "{field} {threads:?} holds {total} threads: Metal's validation stops a \
+                     threadgroup of more than {MESH_THREADGROUP_THREADS}"
+                ));
+            }
+        }
+    }
+}
+
 /// Any binary16 bit patterns: Metal culls a patch one of whose edge factors is zero, negative, or
 /// NaN, and clamps every other factor to its partition's range at most `maxTessellationFactor`, so
 /// every pattern is a defined draw.
@@ -2088,6 +2474,8 @@ struct SemanticCase<'a> {
     draw: &'a Option<Draw>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tessellation: &'a Option<TessellationDraw>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mesh_draw: &'a Option<MeshDraw>,
     output: &'a OutputSelection,
     compare: &'a Comparison,
     execution_safety: ExecutionSafety,
@@ -2208,8 +2596,7 @@ impl AuthoredCase {
         if !target && end > bytes.len() as u64 {
             errors.push(format!(
                 "the indexed draw reads indices to byte {end} of its {}-byte index buffer, which \
-                 Metal leaves undefined: declare the index buffer an out-of-bounds target \
-                 (DESIGN D258)",
+                 Metal leaves undefined: declare the index buffer an out-of-bounds target",
                 bytes.len()
             ));
         }
@@ -2275,6 +2662,7 @@ impl AuthoredCase {
             dispatch: &self.dispatch,
             draw: &self.draw,
             tessellation: &self.tessellation,
+            mesh_draw: &self.mesh_draw,
             output: &self.output,
             compare: &self.compare,
             execution_safety: self.execution_safety,
@@ -2344,6 +2732,8 @@ impl AuthoredCase {
             draw: &'a Option<Draw>,
             #[serde(skip_serializing_if = "Option::is_none")]
             tessellation: &'a Option<TessellationDraw>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            mesh_draw: &'a Option<MeshDraw>,
             output: &'a OutputSelection,
             #[serde(skip_serializing_if = "Option::is_none")]
             render_pass_rate_map: &'a Option<RateMapLiteral>,
@@ -2407,12 +2797,24 @@ impl AuthoredCase {
             dispatch: &self.dispatch,
             draw: &self.draw,
             tessellation: &self.tessellation,
+            mesh_draw: &self.mesh_draw,
             output: &self.output,
             render_pass_rate_map: &self.render_pass_rate_map,
             raster_sample_count: self.raster_sample_count,
         })
         .map_err(|error| format!("canonicalize inputs: {error}"))?;
         Ok(sha256_bytes(canonical.as_bytes()))
+    }
+
+    /// The bound each driver creation of the case's own pipeline is held to: its
+    /// [`creation_bound`](Self::creation_bound), or the shared ceiling
+    /// (`budgets::PIPELINE_CREATION_CEILING`) where it declares none.
+    pub fn pipeline_creation_bound(&self) -> std::time::Duration {
+        self.creation_bound
+            .as_ref()
+            .map_or(crate::budgets::PIPELINE_CREATION_CEILING, |bound| {
+                std::time::Duration::from_millis(bound.ms)
+            })
     }
 
     pub fn validate_literal_resources(&self) -> Result<(), Vec<String>> {
@@ -2436,17 +2838,37 @@ impl AuthoredCase {
                     .into(),
             );
         }
+        if let Some(bound) = &self.creation_bound {
+            if self.stage != Stage::Kernel {
+                errors.push("creation_bound is read by the compute executors alone".into());
+            }
+            if u128::from(bound.ms) <= crate::budgets::PIPELINE_CREATION_CEILING.as_millis() {
+                errors.push(format!(
+                    "creation_bound {} ms is not above the shared ceiling of {} ms",
+                    bound.ms,
+                    crate::budgets::PIPELINE_CREATION_CEILING.as_millis()
+                ));
+            }
+            if bound.measured.trim().is_empty() {
+                errors.push(
+                    "creation_bound requires what it was measured on and the measurements".into(),
+                );
+            }
+        }
         if [
             self.dispatch.is_some(),
             self.draw.is_some(),
             self.tessellation.is_some(),
+            self.mesh_draw.is_some(),
         ]
         .into_iter()
         .filter(|present| *present)
         .count()
             != 1
         {
-            errors.push("exactly one of dispatch, draw, or tessellation is required".into());
+            errors.push(
+                "exactly one of dispatch, draw, tessellation, or mesh_draw is required".into(),
+            );
         }
         match self.stage {
             Stage::Kernel if self.dispatch.is_none() => {
@@ -2458,7 +2880,13 @@ impl AuthoredCase {
             Stage::Fragment if self.draw.is_none() => {
                 errors.push("fragment case requires draw".into())
             }
+            Stage::Object | Stage::Mesh if self.mesh_draw.is_none() => {
+                errors.push("object or mesh case requires mesh_draw".into())
+            }
             _ => {}
+        }
+        if let Some(mesh_draw) = &self.mesh_draw {
+            self.validate_mesh_draw(mesh_draw, &mut errors);
         }
         if let Some(dispatch) = &self.dispatch {
             validate_dimensions("dispatch.grid", &dispatch.grid, &mut errors);
@@ -3564,6 +3992,82 @@ impl AuthoredCase {
         }
     }
 
+    /// A mesh draw ([`MeshDraw`]) in an object or mesh case, and what such a case authors around
+    /// it: color render targets only where it rasterizes, no indirect command buffer (whose
+    /// producers are kernels, vertex and fragment functions), and threadgroup memory only for an
+    /// object function, whose `setObjectThreadgroupMemoryLength:atIndex:` sets it (Metal has no
+    /// such setter for a mesh function).
+    fn validate_mesh_draw(&self, mesh_draw: &MeshDraw, errors: &mut Vec<String>) {
+        if !self.stage.is_mesh_pipeline_stage() {
+            errors.push("mesh_draw is valid only for object and mesh cases".into());
+            return;
+        }
+        mesh_draw.validate(self.stage, &self.entry, errors);
+        if !mesh_draw.rasterization {
+            if !self.render_targets.is_empty() {
+                errors.push(
+                    "a mesh draw without rasterization does not accept render targets".into(),
+                );
+            }
+            if matches!(self.output, OutputSelection::RenderTarget { .. }) {
+                errors
+                    .push("a mesh draw without rasterization must select a shader resource".into());
+            }
+        }
+        if self.stage == Stage::Mesh && !self.threadgroup_memory.is_empty() {
+            errors.push(
+                "threadgroup_memory of a mesh case: Metal sets no mesh function's threadgroup \
+                 memory"
+                    .into(),
+            );
+        }
+        // A depth/stencil attachment, a multisampled or rate-mapped pass, varying values, vertex
+        // and kernel stage inputs and imageblocks are refused by their own checks, each valid
+        // only for its stage.
+        for (present, what) in [
+            (!self.command_buffers.is_empty(), "command_buffers"),
+            (!self.pipeline_states.is_empty(), "pipeline_states"),
+        ] {
+            if present {
+                errors.push(format!(
+                    "{what} is not modelled for an object or mesh case: an indirect command \
+                     buffer's producer is a kernel, vertex or fragment function"
+                ));
+            }
+        }
+        // Metal's render encoder binds an object or mesh function's buffers, bytes, textures,
+        // samplers and (an object function's) threadgroup memory, and has no object or mesh setter
+        // for an acceleration structure or a function table; no executor links visible functions
+        // into a mesh render pipeline or shadows a mesh draw's out-of-bounds targets.
+        for (present, what) in [
+            (
+                !self.acceleration_structures.is_empty(),
+                "acceleration_structures",
+            ),
+            (
+                !self.visible_function_tables.is_empty(),
+                "visible_function_tables",
+            ),
+            (
+                !self.intersection_function_tables.is_empty(),
+                "intersection_function_tables",
+            ),
+            (
+                !self.argument_buffer_intersection_function_tables.is_empty(),
+                "argument_buffer_intersection_function_tables",
+            ),
+            (
+                !self.visible_function_references.is_empty(),
+                "visible_function_references",
+            ),
+            (self.out_of_bounds.is_some(), "out_of_bounds"),
+        ] {
+            if present {
+                errors.push(format!("{what} is not modelled for an object or mesh case"));
+            }
+        }
+    }
+
     /// A render pass's rate map: a valid map of one layer, in a case that rasterizes through a
     /// fragment function (a fragment case, or a vertex case observed through its generated fragment
     /// function) and draws no patches or imageblock, whose every attachment holds the map's screen
@@ -3648,7 +4152,7 @@ impl AuthoredCase {
             errors.push(format!(
                 "raster_sample_count {count} is not one of {RASTER_SAMPLE_COUNTS:?}: the Metal \
                  reference device (Apple M3 Max) rasterizes 1, 2, and 4 samples, so no Metal \
-                 answer exists for another count (DESIGN D292)"
+                 answer exists for another count"
             ));
         }
         if self.stage != Stage::Fragment || self.draw.is_none() {
@@ -4363,6 +4867,7 @@ pub(crate) fn narrow_vertex_test_case(air_sha256: String, entry: String) -> Auth
             base_instance: 0,
         }),
         tessellation: None,
+        mesh_draw: None,
         output: OutputSelection::Buffer {
             binding: 0,
             offset: 0,
@@ -4378,6 +4883,7 @@ pub(crate) fn narrow_vertex_test_case(air_sha256: String, entry: String) -> Auth
         raster_sample_count: None,
         public_source: None,
         no_effect: None,
+        creation_bound: None,
     }
 }
 

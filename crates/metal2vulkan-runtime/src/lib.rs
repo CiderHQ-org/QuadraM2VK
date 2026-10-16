@@ -95,6 +95,7 @@ mod fetch_reach;
 mod fill_value;
 mod fragment_imageblock;
 mod framebuffer_fetch;
+mod freed_memory;
 mod fresh_unwritten;
 mod function_table;
 #[doc(hidden)]
@@ -106,6 +107,9 @@ mod heap;
 mod heap_sets;
 mod host_aliases;
 mod host_memory;
+#[cfg(unix)]
+mod host_residency;
+mod image_barrier;
 mod image_plan;
 mod index_bounds;
 mod index_rewrite;
@@ -141,11 +145,13 @@ mod pipeline;
 mod pixel_format_info;
 mod predication;
 mod private_properties;
+mod program_objects;
 mod pvrtc;
 mod queue;
 mod range;
 mod rate_map;
 mod rate_mapped_pass;
+mod reader_sizes;
 mod rebind;
 mod release;
 mod render;
@@ -169,6 +175,7 @@ mod sampler_listing;
 mod scheduler;
 mod shader_cache;
 mod shadow;
+mod shadow_copy_back;
 mod shadow_merge;
 mod shadow_stencil;
 mod sharing;
@@ -181,6 +188,7 @@ mod texture;
 mod texture_descriptor;
 mod tile_pass;
 mod tracker;
+mod trails;
 mod two_planes;
 mod unique_identifier;
 mod upload;
@@ -234,8 +242,8 @@ pub use error::Unproven;
 pub use error::{
     ArchivedPipeline, BinaryArchiveError, BinaryArchiveMiss, CommandBufferError, DeadlockCause,
     DriverSetting, Error, InstanceApiVersion, Invalid, LoaderNotFound, MemoryKind,
-    MeshRecordsOverflow, Problem, RuntimeGap, SamplerLimit, ShaderCacheError, TimedOut,
-    VkResultCode,
+    MeshRecordsOverflow, Problem, RuntimeGap, SamplerLimit, ShaderCacheError,
+    TessellationRecordsOverflow, TimedOut, VkResultCode,
 };
 pub use error::{FailedPipeline, FailedState, PipelineCreationCause};
 pub use event::{

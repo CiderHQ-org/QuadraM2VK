@@ -411,9 +411,11 @@ pub enum DepthBiasUnit {
 /// 0, when no bias exists to clamp and the clamp is dropped.
 ///
 /// A float depth format's constant factor counts Vulkan's r, which is Metal's. A `Depth16Unorm`
-/// depth's is Metal's own rule (measured on an Apple M3 Max and an M4, plain and validated): a
-/// finite nonzero constant `c` biases by `c + sign(c)` units of 1/65535, as `float`, which is added
-/// to the depth rounded toward zero, and the sum stored rounded to nearest. Vulkan leaves a unorm
+/// depth's is Metal's own rule (measured on an Apple M3 Max and an M4, plain and validated, and on
+/// the M3 Max under macOS 27.0.1 with slopes too): wherever the constant `c` (finite) or the slope
+/// factor is nonzero, the constant biases by `c + 1` units of 1/65535 for `c` of 0 or more and
+/// `c - 1` below, as `float` (so a slope alone brings one unit), which is added to the depth
+/// rounded toward zero, and the sum stored rounded to nearest. Vulkan leaves a unorm
 /// format's unit to the device, up to twice 2^-16, unless `depthBiasExact` pins it: with
 /// `floatRepresentation` too the factor is that bias in depth ([`DepthBiasUnit::Depth`]), and with
 /// `depthBiasExact` alone it is the same bias counted in 2^-16
@@ -453,15 +455,14 @@ pub fn depth_bias(
         require(profile, VkFeature::DepthBiasClamp, Feature::DepthBiasClamp)?;
     }
     let enabled = &profile.fields().enabled.features;
+    // A bias is set (the return above): a constant, a slope or both.
     let unorm16 = depth_format == Some(PixelFormat::Depth16Unorm)
         && depth_bias.is_finite()
-        && depth_bias != 0.0
         && enabled.contains(&VkFeature::DepthBiasExact);
     let (constant_factor, unit) = if !unorm16 {
         (depth_bias, DepthBiasUnit::Device)
     } else {
-        // Metal's `c + sign(c)` units of 1/65535, exact in `f64` and rounded once to `float`.
-        let units = f64::from(depth_bias) + f64::from(depth_bias.signum());
+        let units = depth16_units(depth_bias);
         if enabled.contains(&VkFeature::FloatRepresentation) {
             ((units / 65535.0) as f32, DepthBiasUnit::Depth)
         } else {
@@ -478,6 +479,50 @@ pub fn depth_bias(
         slope_factor: slope_scale,
         unit,
     })
+}
+
+/// Metal's `c ± 1` units of 1/65535 for a `Depth16Unorm` depth's constant `c` (finite), exact in
+/// `f64`: `c + 1` for `c` of 0 or more, `c - 1` below ([`depth_bias`]).
+fn depth16_units(c: f32) -> f64 {
+    f64::from(c) + if c >= 0.0 { 1.0 } else { -1.0 }
+}
+
+/// The depth bias a fragment stage that stores Metal's `Depth16Unorm` codes itself adds
+/// (`BindState::depth_bias`, `RuntimeFact::Depth16Codes`), for the render encoder's
+/// `setDepthBias:slopeScale:clamp:` factors `depth_bias` and `slope_scale` (both finite) and
+/// `clamp` (finite; Metal's NaN or infinite clamp clamps nothing, as 0 does): `[u, s, k]`, `u`
+/// Metal's `c ± 1` units of 1/65535 rounded once to `float` ([`depth_bias`]'s rule), `s` and `k`
+/// the factors. All three are 0 where neither factor is nonzero, which biases nothing; the caller
+/// passes 0 for a draw of points or lines, which Metal never biases.
+pub fn depth16_bias(depth_bias: f32, slope_scale: f32, clamp: f32) -> [f32; 3] {
+    if depth_bias == 0.0 && slope_scale == 0.0 {
+        return [0.0; 3];
+    }
+    let units = (depth16_units(depth_bias) / 65535.0) as f32;
+    [units, slope_scale, clamp]
+}
+
+/// The side of the depth bias a fragment stage that stores Metal's `Depth16Unorm` codes itself
+/// adds for the factors `depth_bias`, `slope_scale` and `clamp` ([`depth16_bias`]'s), where every
+/// triangle's biased depth lies on it: `Some(true)` where Metal's units are above 0, the slope
+/// factor finite and not below 0, and a clamp above 0 not below the units, so the stored depth is
+/// never below the fragment's own; `Some(false)` for the mirror, never above it; `None` for any
+/// other bias, whose side a triangle's slope decides, and for none. The caller also needs every
+/// Vulkan depth range of the draw inside `[0, 1]` (`BindState::depth16_bias_raises`); the proof is
+/// `lower::stage_io::depth16::side_bounded`'s.
+pub fn depth16_bias_side(depth_bias: f32, slope_scale: f32, clamp: f32) -> Option<bool> {
+    let [units, slope, clamp] = depth16_bias(depth_bias, slope_scale, clamp);
+    if !units.is_finite() || !slope.is_finite() {
+        return None;
+    }
+    // A NaN or infinite clamp bounds nothing (`depth16_bias`), as the stage's comparisons find.
+    let raises = units > 0.0 && slope >= 0.0 && !(clamp > 0.0 && clamp < units);
+    let lowers = units < 0.0 && slope <= 0.0 && !(clamp < 0.0 && clamp > units);
+    match (raises, lowers) {
+        (true, _) => Some(true),
+        (_, true) => Some(false),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -690,10 +735,10 @@ mod tests {
         }
     }
 
-    /// A `Depth16Unorm` depth's constant bias is Metal's `c + sign(c)` units of 1/65535 as
-    /// `float`: in depth where the device has `floatRepresentation` and `depthBiasExact`, in
-    /// 2^-16 where it has `depthBiasExact` alone, and Metal's `c` in the device's own unit
-    /// elsewhere, as on a float depth format or for a constant of 0.
+    /// A `Depth16Unorm` depth's constant bias is Metal's `c ± 1` units of 1/65535 as `float`
+    /// (one unit for a constant of 0 beside a slope): in depth where the device has
+    /// `floatRepresentation` and `depthBiasExact`, in 2^-16 where it has `depthBiasExact` alone,
+    /// and Metal's `c` in the device's own unit elsewhere, as on a float depth format.
     #[test]
     fn a_unorm_depth_bias_is_metals_where_the_device_pins_its_unit() {
         let triangles = vk::PrimitiveTopology::TRIANGLE_LIST;
@@ -733,7 +778,17 @@ mod tests {
                 );
             }
         }
-        assert_eq!(mapped(&lavapipe, 0.0, d16), (0.0, DepthBiasUnit::Device));
+        // A slope alone (`mapped`'s 0.5) brings one unit; no bias at all brings none.
+        assert_eq!(
+            mapped(&lavapipe, 0.0, d16),
+            ((1.0f64 / 65535.0) as f32, DepthBiasUnit::Depth)
+        );
+        let none = depth_bias(triangles, 0.0, 0.0, 0.0, d16, lavapipe.profile()).unwrap();
+        assert_eq!(
+            (none.constant_factor, none.unit),
+            (0.0, DepthBiasUnit::Device)
+        );
+        assert_eq!(mapped(&moltenvk, 0.0, d16), (0.0, DepthBiasUnit::Device));
         assert_eq!(
             mapped(&lavapipe, f32::INFINITY, d16),
             (f32::INFINITY, DepthBiasUnit::Device)

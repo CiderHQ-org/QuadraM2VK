@@ -244,7 +244,7 @@ fn a_tessellation_pipeline_census_is_its_functions() {
 /// feature, in its robustness-off leg (validation runs both): the stated leg compiles the robust
 /// encodings the profile states, the off leg the in-shader ones, on the same device class and
 /// subgroup width. Every committed profile states `robustBufferAccess`, so every one has both legs;
-/// `vk12-floor` and `vk12-bare` state no image robustness, and `moltenvk-m3` states
+/// `vk12-floor` states no image robustness, and `moltenvk-m3` states
 /// `robustBufferAccess` without `robustBufferAccess2`.
 #[test]
 fn the_tier_table_derives_a_robustness_off_leg_from_each_profile() {
@@ -287,7 +287,6 @@ fn the_tier_table_derives_a_robustness_off_leg_from_each_profile() {
             .unwrap()
     };
     assert!(!stated("vk12-floor").profile.images().robust_image_access);
-    assert!(!stated("vk12-bare").profile.images().robust_image_access);
     assert!(stated("lavapipe").profile.images().robust_image_access);
     assert_eq!(
         stated("moltenvk-m3").profile.containment(),
@@ -311,8 +310,8 @@ fn the_tier_table_derives_a_robustness_off_leg_from_each_profile() {
 /// A compile records the containment it compiled under, from its profile and its own module:
 /// the robust and the in-shader leg of one copy census the same strategy names (the name hides
 /// the encoding) under different encodings; a kernel that declares no image has none; a texture
-/// write's image encoding follows the profile's image robustness, which `vk12-floor` does not
-/// state; and a kernel that turns an integer into a pointer (a dynamic root) reaches that memory by
+/// write's image encoding follows the leg's image robustness, and `vk12-floor`, which writes a
+/// storage image only through its declared format, needs the texture's format first; and a kernel that turns an integer into a pointer (a dynamic root) reaches that memory by
 /// device address under names of its own, checked in the shader in both legs, while its descriptor
 /// accesses take each leg's encoding.
 #[test]
@@ -361,7 +360,20 @@ fn a_compile_records_the_containment_it_compiled_under() {
     };
     assert_eq!(write("lavapipe", Leg::Stated), I::Robust);
     assert_eq!(write("lavapipe", Leg::RobustnessOff), I::Checked);
-    assert_eq!(write("vk12-floor", Leg::Stated), I::Checked);
+    let select_write = llvm_assemble(&engine_dir().join("a4_select_write.ll"))
+        .unwrap_or_else(|error| panic!("{error:?}"));
+    match compile_module(
+        &select_write,
+        "a4_select_write",
+        &CaseInputs::defaults(),
+        leg("vk12-floor", Leg::Stated),
+    ) {
+        Err(CompileError::Refused(reason)) => assert!(
+            reason.starts_with("needs_input StorageTextureFormat"),
+            "{reason}"
+        ),
+        other => panic!("a4_select_write on vk12-floor: {other:?}"),
+    }
 
     let round_trip = |leg_of| {
         let module = compile(
@@ -877,10 +889,9 @@ fn the_ob2_fixtures_contain_each_target_in_the_shader_on_every_profile() {
         "lunarg-desktop-baseline-2023",
         "roadmap-2022",
         "swiftshader",
-        "vk12-bare",
         "vk12-floor",
     ];
-    let handles = ["vk12-bare", "vk12-floor"];
+    let handles = ["vk12-floor"];
     assert_eq!(
         refused,
         pointer
@@ -997,15 +1008,16 @@ fn ob3_case(fixture: &str) -> AuthoredCase {
 /// control point and a stage input are pulled through a descriptor view, left to the stated
 /// robustness or checked in the shader; an index buffer is bounded by `robustBufferAccess2` where
 /// the leg enables it and clamped by the binder elsewhere; a top-level texture array's index is
-/// clamped in the shader. The profiles without vertex stores or tessellation refuse the draws, a
-/// typed refusal.
+/// clamped in the shader. The profiles without vertex stores refuse the vertex and control-point
+/// draws, which write memory, a typed refusal; a control point compiles on every other profile,
+/// through the tessellation emulation on one without `tessellationShader`.
 #[test]
 fn the_ob3_fixtures_contain_each_target_by_its_fetch_on_every_profile() {
     use metal2vulkan_devtools::{engine_dir, llvm_assemble};
     let table = committed_profiles().unwrap();
-    // What each profile's description states, by stem: whether it has `robustBufferAccess2`,
-    // vertex stores, and tessellation. The stated description decides both legs; the
-    // robustness-off leg reads none of the robustness here.
+    // What each profile's description states, by stem: whether it has `robustBufferAccess2` and
+    // vertex stores. The stated description decides both legs; the robustness-off leg reads none
+    // of the robustness here.
     let described = table
         .iter()
         .map(|entry| entry.tier.stem.as_str())
@@ -1017,7 +1029,6 @@ fn the_ob3_fixtures_contain_each_target_by_its_fetch_on_every_profile() {
             let facts = (
                 has(VkFeature::RobustBufferAccess2),
                 has(VkFeature::VertexPipelineStoresAndAtomics),
-                has(VkFeature::TessellationShader),
             );
             (stem, facts)
         })
@@ -1038,13 +1049,12 @@ fn the_ob3_fixtures_contain_each_target_by_its_fetch_on_every_profile() {
             let label = entry.tier.label();
             let stem = entry.tier.stem.as_str();
             let off = entry.tier.leg == Leg::RobustnessOff;
-            let (robust2, vertex_stores, tessellation) = described[stem];
+            let (robust2, vertex_stores) = described[stem];
             let robust = if robust2 { "robust2" } else { "robust" };
             let refused = match fixture {
-                "ob3_vertex_input" | "ob3_index_buffer" => {
+                "ob3_vertex_input" | "ob3_index_buffer" | "ob3_control_point" => {
                     (!vertex_stores).then_some("StageStoresAndAtomics")
                 }
-                "ob3_control_point" => (!tessellation).then_some("Tessellation"),
                 _ => None,
             };
             let expected = match fixture {

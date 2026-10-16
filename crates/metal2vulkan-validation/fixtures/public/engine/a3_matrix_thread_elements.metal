@@ -1,4 +1,4 @@
-// Owned fixture (WP-A3, DESIGN D91.1, D128): what `thread_elements()` of an 8x8 simdgroup matrix
+// Owned fixture: what `thread_elements()` of an 8x8 simdgroup matrix
 // holds, read against the block store and the block load. One simdgroup: lane L writes
 // in[2L + j] into element j of `a`; `b` is a block load of in[64, 128). The output holds b's
 // elements as each lane reads them, `a` as the block store lays it out, and the product a * b

@@ -917,7 +917,10 @@ fn a_draws_targets_are_contained_by_their_fetch() {
                 assert_ne!(contained.mechanism.check, Check::Shader, "{label}");
                 assert!(!contained.written, "{label}");
             }
-            Err(why) => assert!(shader && why.contains("D219"), "{label}: {why}"),
+            Err(why) => assert!(
+                shader && why.contains("which contains nothing"),
+                "{label}: {why}"
+            ),
         }
         assert!(
             vertex(

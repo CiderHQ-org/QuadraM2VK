@@ -12,9 +12,14 @@
 //! time are printed: report only.
 //!
 //! The created device enables calibrated timestamps where listed: where it can calibrate (the
-//! device's own domain and a monotonic host one), it announces nothing; elsewhere it announces
-//! `Degradation::UncalibratedGpuTimes` once. The adopted device names no calibrated timestamps,
-//! so it times every command buffer by its completion on every venue.
+//! device's own domain and a monotonic host one), it announces nothing, and the calibration pairs
+//! that placed the times stated deviations within [`SLACK`], each read at least twice; elsewhere
+//! it announces `Degradation::UncalibratedGpuTimes` once. So does a calibrating device whose pairs
+//! placed a command buffer's times outside its life (`WorkCounts::calibration_disagreements`,
+//! printed): its timestamps count on another clock than the one it calibrates, as a Radeon 780M's
+//! after two MODE2 GPU resets, 65 s ahead, and those command buffers are timed by their
+//! completion. The adopted device names no calibrated timestamps, so it times every command
+//! buffer by its completion on every venue.
 //!
 //! A further test holds [`IN_FLIGHT`] command buffers in flight at once, more than Metal keeps
 //! counter sample buffers live, and times each: the device's first timestamp pool serves them
@@ -25,6 +30,16 @@
 //! GPU times refused, and the device announces `Degradation::UntimedCommandBuffer` once. It prints
 //! how long the commits and the completions took (`GPU-TIMES-HELD`). Each of their command buffers
 //! has an encoder (an empty blit encoder): one with none writes no timestamps.
+//!
+//! Command buffers committed one after another, each once the one before it completed, take
+//! the slot the one before gave back: each is still timed inside its own commit and wait, after
+//! the one before it, its start written by its fill's own command buffer as its encoder opened
+//! where the device's timestamp pools are not Metal counter sample buffers and its batches need no
+//! command buffer of barriers for completed work, else by kept command buffers that reset the
+//! slot and write its timestamps (`command_buffer/kept_barriers.rs`). A
+//! fill committed behind another still running, the same bytes, takes the start a command buffer
+//! of barriers writes after the barrier its batch plans, and starts no earlier than the first
+//! ended, as Metal's does.
 //!
 //! A command buffer with no encoder and no wait writes no timestamps and answers where its queue
 //! reached it as both its GPU times, as Metal answers for one: its kernel end time, or the GPU
@@ -49,7 +64,7 @@ use super::{validated_device, validated_device_with, Messages, ScratchCache};
 use crate::gpu::TEST_DEVICE;
 use ash::vk;
 use metal2vulkan::device::DriverFact;
-use metal2vulkan::error::Feature;
+use metal2vulkan::error::{Feature, RuntimeDriverDefect};
 use metal2vulkan_runtime::{
     host_time, CommandBuffer, CommandQueue, Degradation, Device, Error, EventRef, ResourceOptions,
     SharedEvent,
@@ -75,6 +90,10 @@ const SLACK: f64 = 20e-6;
 /// and an M4), each of which a timestamp query pool is on MoltenVK.
 const IN_FLIGHT: usize = 40;
 
+/// The command buffers [`command_buffers_one_after_another_are_each_timed_on_their_own`] commits,
+/// one after another.
+const ONE_AFTER_ANOTHER: usize = 8;
+
 /// The slots of each of a device's timestamp pools (the runtime's `gpu_time::SLOTS`): the command
 /// buffers in flight one pool times at once.
 const POOL_SLOTS: usize = 2048;
@@ -94,6 +113,13 @@ const PER_QUEUE: usize = 63;
 
 /// The bytes each fill writes.
 const LENGTH: u64 = 1 << 20;
+
+/// The pairs [`a_start_behind_a_planned_barrier_follows_the_work_before_it`] commits.
+const BEHIND_ROUNDS: usize = 4;
+
+/// The bytes each of its fills writes: enough that the second fill's submission, made in the same
+/// pass of the scheduler as the first's, finds the first still running.
+const BEHIND_LENGTH: u64 = 64 << 20;
 
 /// What the venue states of its timestamps.
 struct Venue {
@@ -193,17 +219,29 @@ fn from_host_by_driver(device: &Device) -> bool {
         .contains(&DriverFact::TimestampsWaitForEveryQueue)
 }
 
+/// Whether a timed command buffer's first encoder writes its start on `device` (`gpu_time.rs`):
+/// where its timestamp pools are not Metal counter sample buffers
+/// (`DriverFact::TimestampPoolsAreCounterSampleBuffers`) and its batches need no command buffer of
+/// barriers for completed work (`DriverFact::SemaphoreOperationsStallSubmits`).
+fn starts_in_the_first_encoder(device: &Device) -> bool {
+    let facts = &device.properties().driver_facts;
+    !facts.contains(&DriverFact::TimestampPoolsAreCounterSampleBuffers)
+        && !facts.contains(&DriverFact::SemaphoreOperationsStallSubmits)
+}
+
 /// The kind a read of a timed command buffer's GPU times announces on `device`, made with the
 /// default options, as `command_buffers_are_timed_in_the_hosts_time_base` checks: [`FROM_HOST`]'s
 /// where its driver answers them from the host, [`GPU_TIMES`]' where it writes timestamps it does
-/// not calibrate, none elsewhere (a calibrating device, or one that writes no timestamps and
-/// refuses the read).
+/// not calibrate or its calibration disagreed with them so far
+/// (`WorkCounts::calibration_disagreements`), none elsewhere (a calibrating device, or one that
+/// writes no timestamps and refuses the read).
 pub(super) fn read_kinds(device: &Device) -> BTreeSet<Degradation> {
     if from_host_by_driver(device) {
         return BTreeSet::from(FROM_HOST);
     }
     let venue = Venue::of(device);
-    match venue.bits > 0 && !venue.calibrates() {
+    let disagreed = device.work_counts().calibration_disagreements > 0;
+    match venue.bits > 0 && (!venue.calibrates() || disagreed) {
         true => BTreeSet::from(GPU_TIMES),
         false => BTreeSet::new(),
     }
@@ -226,7 +264,12 @@ fn timed(label: &str, cb: &CommandBuffer) {
     let before = host_time();
     cb.commit().unwrap();
     cb.wait_until_completed_for(WAIT).unwrap();
-    let after = host_time();
+    within(label, cb, before, host_time());
+}
+
+/// Check `cb`'s times, labelled `label`, against the host times `before` its commit and `after`
+/// its wait returned (the module docs); its GPU duration, kernel span and wall time, printed.
+fn within(label: &str, cb: &CommandBuffer, before: f64, after: f64) {
     assert_eq!(cb.error(), None, "{label}");
     let read = times(cb);
     let [gpu_start, gpu_end, kernel_start, kernel_end] = read;
@@ -317,9 +360,244 @@ fn command_buffers_are_timed_in_the_hosts_time_base() {
             assert_once(&notices, &FROM_HOST);
             assert_eq!(counts(&notices).len(), 1, "{:?}", counts(&notices));
         } else if venue.calibrates() {
-            assert_eq!(counts(&notices), Default::default(), "a calibrated device");
+            match device.work_counts().calibration_disagreements {
+                0 => assert_eq!(counts(&notices), Default::default(), "a calibrated device"),
+                _ => {
+                    assert_once(&notices, &GPU_TIMES);
+                    assert_eq!(counts(&notices).len(), 1, "{:?}", counts(&notices));
+                }
+            }
+            calibrated_within_slack(&device);
         } else {
             assert_once(&notices, &GPU_TIMES);
+        }
+    }
+    let messages = messages.take();
+    assert!(
+        messages.is_empty(),
+        "the validation layer reported: {messages:#?}"
+    );
+}
+
+/// On a `device` that calibrates: the calibration pairs that placed its command buffers' times
+/// stated deviations within [`SLACK`] (`WorkCounts::calibration_deviation_most`), each pair read
+/// at least twice (`WorkCounts::calibration_readings`). Its first pair is taken with its GPU idle:
+/// on an Iris Xe (ANV, i915), the first reading then stated 165 us at the median and placed every
+/// time 156 us early, the next 7.6 us (`gpu_time.rs`).
+fn calibrated_within_slack(device: &Device) {
+    let counts = device.work_counts();
+    let (pairs, readings, most, disagreed) = (
+        counts.calibrations,
+        counts.calibration_readings,
+        counts.calibration_deviation_most,
+        counts.calibration_disagreements,
+    );
+    eprintln!(
+        "runtime gpu times: {}: {pairs} calibration pairs of {readings} readings, the largest \
+         deviation {:.1} us; {disagreed} command buffers whose pair placed their times outside \
+         their life, timed by their completion",
+        device.name(),
+        most as f64 / 1e3
+    );
+    assert!(pairs > 0, "no calibration pair taken");
+    assert!(readings >= 2 * pairs, "a pair read once");
+    assert!(
+        most as f64 <= SLACK * 1e9,
+        "a calibration pair's deviation {most} ns, beyond the slack"
+    );
+}
+
+/// [`ONE_AFTER_ANOTHER`] command buffers on one queue, each a fill committed once the one before it
+/// completed, each taking the slot the one before gave back: each is timed inside its own commit
+/// and wait, and starts no earlier than the one before it ended, so none reads a timestamp an
+/// earlier command buffer wrote into the slot. Where the first encoder writes the start
+/// ([`starts_in_the_first_encoder`]), each fill's own command buffer wrote its start as its
+/// encoder opened, and its batch began with no command buffer of barriers
+/// (`WorkCounts::prefixed_starts`, one each; no stamped command buffer recorded or taken again).
+/// Elsewhere, where the device's command buffers end at their timeline's value, the starts come
+/// from kept command buffers,
+/// recorded once and taken again by the command buffers that hold the same slot later
+/// (`command_buffer/kept_barriers.rs`, `WorkCounts::stamped_buffers_kept`,
+/// `WorkCounts::stamped_buffers_reused`, printed; at least one taken again). Each one's batch
+/// ends in its fill's own command buffer, the end timestamp written there
+/// (`WorkCounts::finales_folded`, one each, and no end apart). The validation layer reported
+/// nothing.
+#[test]
+fn command_buffers_one_after_another_are_each_timed_on_their_own() {
+    let cache = ScratchCache::new().unwrap();
+    let messages = Messages::default();
+    {
+        let device = validated_device(TEST_DEVICE, &messages, cache.path()).unwrap();
+        let venue = Venue::of(&device);
+        if venue.bits == 0 || from_host_by_driver(&device) {
+            eprintln!(
+                "runtime gpu times: {}: writes no timestamps, nothing to check",
+                device.name()
+            );
+            return;
+        }
+        let queue = device.new_command_queue().unwrap();
+        let buffer = device
+            .new_buffer(LENGTH, ResourceOptions::private())
+            .unwrap();
+        let before = device.work_counts();
+        let mut last_end = 0.0;
+        for n in 0..ONE_AFTER_ANOTHER {
+            let cb = queue.command_buffer().unwrap();
+            let mut blit = cb.blit_command_encoder().unwrap();
+            blit.fill_buffer(&buffer, 0..LENGTH, n as u8).unwrap();
+            blit.end_encoding().unwrap();
+            let label = format!("command buffer {n} of {ONE_AFTER_ANOTHER}");
+            timed(&label, &cb);
+            let [gpu_start, gpu_end, ..] = times(&cb);
+            assert!(
+                gpu_start >= last_end - SLACK,
+                "{label}: starts at {gpu_start}, before the one before it ended at {last_end}"
+            );
+            last_end = gpu_end;
+        }
+        let after = device.work_counts();
+        let kept = after.stamped_buffers_kept - before.stamped_buffers_kept;
+        let reused = after.stamped_buffers_reused - before.stamped_buffers_reused;
+        let prefixed = after.prefixed_starts - before.prefixed_starts;
+        let folded = after.finales_folded - before.finales_folded;
+        let apart = after.finales_apart - before.finales_apart;
+        assert_eq!(
+            (folded, apart),
+            (ONE_AFTER_ANOTHER as u64, 0),
+            "the batches' ends folded into their fills, and apart"
+        );
+        eprintln!(
+            "runtime gpu times: {}: {ONE_AFTER_ANOTHER} command buffers one after another: \
+             {prefixed} started by their fill's own command buffer, {kept} stamped barrier \
+             command buffers recorded to keep, {reused} taken again",
+            device.name()
+        );
+        let at_fence = (device.properties().driver_defects)
+            .contains(&RuntimeDriverDefect::ReadsCommandBuffersAfterTheirSignal);
+        if starts_in_the_first_encoder(&device) {
+            assert_eq!(
+                (prefixed, kept, reused),
+                (ONE_AFTER_ANOTHER as u64, 0, 0),
+                "each start written by its fill's own command buffer"
+            );
+        } else if at_fence {
+            assert_eq!((prefixed, kept, reused), (0, 0, 0));
+        } else {
+            // A start each, kept or taken again (the end is in the fill's command buffer); one
+            // the scheduler found still pending is recorded by its batch.
+            assert_eq!(prefixed, 0);
+            assert!(kept + reused <= ONE_AFTER_ANOTHER as u64);
+            assert!(reused > 0, "no kept stamped command buffer taken again");
+        }
+    }
+    let messages = messages.take();
+    assert!(
+        messages.is_empty(),
+        "the validation layer reported: {messages:#?}"
+    );
+}
+
+/// [`BEHIND_ROUNDS`] pairs of fills of the same [`BEHIND_LENGTH`] bytes on one queue, the first
+/// waiting for a shared event the host signals once both are committed: the scheduler submits
+/// both in one pass, and the second's batch plans a barrier before its encoder, for the first's
+/// writes, still running. So its start is not its fill's own: a command buffer of barriers writes
+/// it after that barrier, once every command before it completed (`command_buffer/submit.rs`),
+/// and the start its fill wrote as it opened is never read. The first, with nothing planned
+/// before its fill, starts in its fill's own command buffer, after the event's wait. Each is timed
+/// inside its commit and wait, the second ends no earlier than the first, and where the device
+/// calibrates its timestamps (each time its own) the second starts no earlier than the first
+/// ended, as Metal starts a command buffer behind the work it depends on (probe `gpustart`, an
+/// M3 Max under macOS 27.0.1: 0.5 to 0.9 us after it, 10 of 10). Where the first encoder writes
+/// the start ([`starts_in_the_first_encoder`]), every first started in its fill's command buffer
+/// and at least one second did not (`WorkCounts::prefixed_starts`, printed); elsewhere none did.
+/// The validation layer reported nothing.
+#[test]
+fn a_start_behind_a_planned_barrier_follows_the_work_before_it() {
+    let cache = ScratchCache::new().unwrap();
+    let messages = Messages::default();
+    {
+        let device = validated_device(TEST_DEVICE, &messages, cache.path()).unwrap();
+        let venue = Venue::of(&device);
+        if venue.bits == 0 || from_host_by_driver(&device) {
+            eprintln!(
+                "runtime gpu times: {}: writes no timestamps, nothing to check",
+                device.name()
+            );
+            return;
+        }
+        let calibrates = venue.calibrates();
+        let queue = device.new_command_queue().unwrap();
+        let buffer = device
+            .new_buffer(BEHIND_LENGTH, ResourceOptions::private())
+            .unwrap();
+        let fill = |byte: u8| {
+            let cb = queue.command_buffer().unwrap();
+            let mut blit = cb.blit_command_encoder().unwrap();
+            blit.fill_buffer(&buffer, 0..BEHIND_LENGTH, byte).unwrap();
+            blit.end_encoding().unwrap();
+            cb
+        };
+        // The first takes any first work the device's creation left, and the buffer's.
+        let warm = fill(0);
+        warm.commit().unwrap();
+        warm.wait_until_completed_for(WAIT).unwrap();
+        let before_rounds = device.work_counts();
+        for round in 0..BEHIND_ROUNDS {
+            let event: SharedEvent = device.new_shared_event().unwrap();
+            let first = queue.command_buffer().unwrap();
+            first
+                .encode_wait_for_event(EventRef::from(&event), 1)
+                .unwrap();
+            let mut blit = first.blit_command_encoder().unwrap();
+            blit.fill_buffer(&buffer, 0..BEHIND_LENGTH, 2 * round as u8 + 1)
+                .unwrap();
+            blit.end_encoding().unwrap();
+            let second = fill(2 * round as u8 + 2);
+            let before = host_time();
+            first.commit().unwrap();
+            second.commit().unwrap();
+            event.set_signaled_value(1);
+            first.wait_until_completed_for(WAIT).unwrap();
+            second.wait_until_completed_for(WAIT).unwrap();
+            let after = host_time();
+            within(&format!("round {round}, the first"), &first, before, after);
+            within(
+                &format!("round {round}, the second"),
+                &second,
+                before,
+                after,
+            );
+            let ([_, first_end, ..], [second_start, second_end, ..]) =
+                (times(&first), times(&second));
+            // Each its own timestamp where the device calibrates; else placed by its completion,
+            // late by the completion turn's latency, which differs between the two.
+            if calibrates && device.work_counts().calibration_disagreements == 0 {
+                assert!(
+                    second_start >= first_end - SLACK,
+                    "round {round}: the second started at {second_start}, before the first \
+                     ended at {first_end}"
+                );
+            }
+            assert!(
+                second_end >= first_end - SLACK,
+                "round {round}: the second ended at {second_end}, before the first at {first_end}"
+            );
+        }
+        let after_rounds = device.work_counts();
+        let prefixed = after_rounds.prefixed_starts - before_rounds.prefixed_starts;
+        eprintln!(
+            "runtime gpu times: {}: {BEHIND_ROUNDS} pairs, the second behind the first: {prefixed} \
+             started by their fill's own command buffer",
+            device.name()
+        );
+        match starts_in_the_first_encoder(&device) {
+            false => assert_eq!(prefixed, 0),
+            true => assert!(
+                (BEHIND_ROUNDS as u64..2 * BEHIND_ROUNDS as u64).contains(&prefixed),
+                "{prefixed} started by their fill's command buffer: every first, and not every \
+                 second"
+            ),
         }
     }
     let messages = messages.take();
@@ -405,7 +683,8 @@ fn more_command_buffers_in_flight_than_metal_keeps_sample_buffers_are_timed() {
 /// are in flight at once, round queues of at most [`PER_QUEUE`] each. Where the driver's pools
 /// are not Metal counter sample buffers, [`HELD_POOLS`] pools' slots ([`POOL_SLOTS`] each) and
 /// one more: every one is timed, past the first pool's slots of pools made as they needed them,
-/// and nothing is announced. Where they are (`DriverFact::TimestampPoolsAreCounterSampleBuffers`,
+/// and nothing is announced but what reading GPU times announces there ([`read_kinds`]: none
+/// where the device's calibration agreed with its timestamps). Where they are (`DriverFact::TimestampPoolsAreCounterSampleBuffers`,
 /// one pool), one more than [`POOL_SLOTS`]: each but the last is timed, and the last found no
 /// slot free and no pool more: its GPU times are refused (`Unsupported`, `Feature::GpuTimes`),
 /// its kernel times kept, and the device announces `untimed-command-buffer` once, naming the
@@ -490,7 +769,10 @@ fn command_buffers_past_a_pool_s_slots_are_timed_by_pools_made_as_needed() {
                     "the notice names {named}: {notices:#?}"
                 );
             } else {
-                assert_once(&notices, &[]);
+                // What reading GPU times announces there, after the reads: nothing on a device
+                // whose calibration agreed with its timestamps.
+                let read: Vec<Degradation> = read_kinds(&device).into_iter().collect();
+                assert_once(&notices, &read);
             }
             eprintln!(
                 "GPU-TIMES-HELD {count} command buffers over {} queues on {}: committed in \
@@ -715,25 +997,43 @@ fn row_fills(at: usize) -> &'static [u64] {
 /// among each queue's command buffers with an encoder, or every one where `every`. Metal answers
 /// an encoder-less command buffer a zero window at a time after the next command buffer of its
 /// queue ran (EV STL-ts1-mvk4: 6 of 12 such went back), so its order is the order of the work
-/// that ran; the runtime places every one in its queue's order. The broken rules, and the
-/// command buffers so ordered that started before the one before them on their queue ended.
-fn broken_rules(queues: &[Vec<Record>], every: bool) -> (Vec<String>, usize) {
+/// that ran; the runtime places every one in its queue's order. Where `late_kernel_ends`, a
+/// kernel end after the GPU start (and end) breaks no rule, the kernel end still between the
+/// kernel start and the handler: Metal answers so on macOS 27 ([`LATE_KERNEL_END`]). The broken
+/// rules; the command buffers so ordered that started before the one before them on their queue
+/// ended; and those whose kernel end came after their GPU start.
+fn broken_rules(
+    queues: &[Vec<Record>],
+    every: bool,
+    late_kernel_ends: bool,
+) -> (Vec<String>, usize, usize) {
     let mut broken = Vec::new();
     let mut overlaps = 0;
+    let mut late = 0;
+    let in_order = |times: &[f64]| times.windows(2).all(|w| w[0] <= w[1]);
     for (queue, records) in queues.iter().enumerate() {
         for (at, record) in records.iter().enumerate() {
             let [gpu_start, gpu_end, kernel_start, kernel_end] = record.times;
-            let order = [
-                record.commit,
+            let (commit, handler) = (record.commit, record.handler);
+            let strict = [
+                commit,
                 kernel_start,
                 kernel_end,
                 gpu_start,
                 gpu_end,
-                record.handler,
+                handler,
             ];
-            if record.times.iter().any(|&time| time <= 0.0) || order.windows(2).any(|w| w[0] > w[1])
-            {
+            let ordered = match late_kernel_ends {
+                false => in_order(&strict),
+                true => {
+                    in_order(&[commit, kernel_start, gpu_start, gpu_end, handler])
+                        && in_order(&[kernel_start, kernel_end, handler])
+                }
+            };
+            if record.times.iter().any(|&time| time <= 0.0) || !ordered {
                 broken.push(format!("queue {queue}, {at}: out of order: {record:?}"));
+            } else if kernel_end > gpu_start {
+                late += 1;
             }
         }
         let ordered: Vec<(usize, &Record)> = records
@@ -754,7 +1054,51 @@ fn broken_rules(queues: &[Vec<Record>], every: bool) -> (Vec<String>, usize) {
             }
         }
     }
-    (broken, overlaps)
+    (broken, overlaps, late)
+}
+
+/// A command buffer's kernel end after its GPU start, as plain Metal answered on the M3 Max under
+/// macOS 27.0.1: a fill's `kernelEndTime` 121311.732792 s against its `GPUStartTime` .732711 and
+/// `GPUEndTime` .732714, another's .736230 against .733545 and .733550. Not Metal's rule there,
+/// so Metal's answers are not held to it: counted and printed. The runtime's answers keep it by construction
+/// (`gpu_time.rs`: the GPU start is its kernel end time or later).
+const LATE_KERNEL_END: &str = "a kernel end after the GPU start";
+
+/// A record whose kernel end came after its GPU start and end, as one of Metal's did on the M3
+/// under macOS 27.0.1 ([`LATE_KERNEL_END`], its times), is counted, not broken, where late kernel
+/// ends are admitted (Metal's answers), and breaks the order where not (the runtime's); one whose
+/// GPU start came before its kernel start breaks it either way.
+#[test]
+fn a_late_kernel_end_is_counted_for_metal_and_broken_for_the_runtime() {
+    let late = Record {
+        commit: 121311.710109333,
+        handler: 121311.735203166,
+        times: [
+            121311.732711125,
+            121311.73271366667,
+            121311.73249775001,
+            121311.73279187501,
+        ],
+    };
+    let early = Record {
+        times: [late.times[0], late.times[1], 121311.7328, 121311.7329],
+        ..late
+    };
+    let rules = |record: Record, admitted: bool| {
+        let (broken, _, late) = broken_rules(&[vec![record]], true, admitted);
+        (broken.len(), late)
+    };
+    assert_eq!(rules(late, true), (0, 1), "{LATE_KERNEL_END}, admitted");
+    assert_eq!(
+        rules(late, false),
+        (1, 0),
+        "{LATE_KERNEL_END}, not admitted"
+    );
+    assert_eq!(
+        rules(early, true),
+        (1, 0),
+        "a GPU start before the kernel start"
+    );
 }
 
 /// The rules test's rows on the runtime's `device`: two queues, [`IN_A_ROW`] command buffers each,
@@ -890,19 +1234,21 @@ fn metal_rows() -> Vec<Vec<Record>> {
 /// start, GPU end, completed handler, each queue's in order and none starting before the one before
 /// it on its queue ended; the device announces `gpu-times-from-host` once. The fourth rule, no
 /// counter samples, holds as the runtime has none. On a Mac's GPU, Metal's own answers to the same
-/// rows, in the same test, keep the same rules among the command buffers with an encoder (its
-/// overlaps, and its encoder-less command buffers out of its queue's order, counted and printed;
-/// [`broken_rules`]): the rules are Metal's, its clock `host_time`'s.
+/// rows, in the same test, keep the same rules among the command buffers with an encoder but one
+/// (its overlaps, its encoder-less command buffers out of its queue's order, and its kernel ends
+/// after their GPU starts, [`LATE_KERNEL_END`], counted and printed; [`broken_rules`]): the rules
+/// are Metal's, its clock `host_time`'s. The runtime's answers keep that one too.
 #[test]
 fn host_clock_gpu_times_keep_metal_s_rules() {
     #[cfg(all(m2v_gpu, target_os = "macos"))]
     {
         let rows = metal_rows();
-        let (broken, overlaps) = broken_rules(&rows, false);
-        let (every, _) = broken_rules(&rows, true);
+        let (broken, overlaps, late) = broken_rules(&rows, false, true);
+        let (every, _, _) = broken_rules(&rows, true, true);
         eprintln!(
-            "runtime gpu times: Metal's answers: {} broken rules and {overlaps} overlaps among the \
-             command buffers with an encoder; {} broken with the encoder-less ones too",
+            "runtime gpu times: Metal's answers: {} broken rules, {overlaps} overlaps and {late} \
+             with {LATE_KERNEL_END} among the command buffers with an encoder; {} broken with \
+             the encoder-less ones too",
             broken.len(),
             every.len()
         );
@@ -927,7 +1273,7 @@ fn host_clock_gpu_times_keep_metal_s_rules() {
             )
         };
         let rows = runtime_rows(told.as_ref().unwrap_or(&device));
-        let (broken, overlaps) = broken_rules(&rows, true);
+        let (broken, overlaps, _) = broken_rules(&rows, true, false);
         assert!(
             broken.is_empty(),
             "the runtime's answers broke a rule: {broken:#?}"

@@ -1,4 +1,4 @@
-// Owned fixture (WP-K14b, DESIGN D211): a kernel that encodes only the kernel buffers of
+// Owned fixture: a kernel that encodes only the kernel buffers of
 // commands whose other state the host encodes. Thread `tid` sets command `tid`'s kernel buffers
 // 0 and 1 to the constant `params` window and the device `out` window at 256 * tid bytes; the
 // pipeline is inherited from the executing encoder, and each dispatch and threadgroup length is

@@ -1152,7 +1152,10 @@ fn render_cases_bind_argument_buffer_buffers_and_texture_arrays() {
     let sources = public_sources().unwrap();
     let (case, row) = (0..64)
         .flat_map(|shard| store.read_case_shard(shard).unwrap())
-        .filter(|case| case.stage != Stage::Kernel && !case.argument_buffer_buffers.is_empty())
+        .filter(|case| {
+            matches!(case.stage, Stage::Vertex | Stage::Fragment)
+                && !case.argument_buffer_buffers.is_empty()
+        })
         .find_map(|case| {
             let row = sources
                 .iter()
@@ -1636,7 +1639,9 @@ fn public_render_cases_plan_or_refuse_typed() {
             else {
                 continue;
             };
-            if case.stage == Stage::Kernel {
+            // A kernel case is no draw, and an object or mesh case is a mesh draw, which
+            // `engine::mesh` maps (`mesh_case`), never `render_case`.
+            if !matches!(case.stage, Stage::Vertex | Stage::Fragment) {
                 continue;
             }
             let scratch = crate::ScratchDir::new("public-render-case").unwrap();
@@ -1679,6 +1684,9 @@ fn public_render_cases_plan_or_refuse_typed() {
                     vertex: &bitcode,
                     fragment: Some(generated),
                 },
+                (Some(Companion::MeshStages(_)), Some(_)) => {
+                    unreachable!("a render case's companion is no mesh render pipeline's stages")
+                }
                 (Some(_), None) => unreachable!("the companion's bitcode was assembled"),
             };
             with_companion += usize::from(render.companion.is_some());

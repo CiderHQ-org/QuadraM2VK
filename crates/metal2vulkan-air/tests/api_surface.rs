@@ -260,7 +260,7 @@ fn the_table_matches_the_source() {
     assert!(
         only_table.is_empty() && only_source.is_empty(),
         "the public surface of metal2vulkan-air changed: update air/tests/api_surface.txt (a \
-         removed or changed line is a breaking change, DESIGN D337 item 2)\nin the table, not \
+         removed or changed line is a breaking change)\nin the table, not \
          the source:\n  {}\nin the source, not the table:\n  {}",
         only_table
             .iter()

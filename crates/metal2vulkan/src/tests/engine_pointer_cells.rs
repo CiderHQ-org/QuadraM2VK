@@ -8,7 +8,9 @@
 //! pointer slot is also read as data stays an open cell (guest addresses), and a `memcpy` or
 //! `memmove` between two cells moves their pointer slots unless it splits one. A volatile cell
 //! access is the plain one whose words carry `Volatile`. Each refusal is pinned against a control
-//! kernel without the refused construct.
+//! kernel without the refused construct. A kernel that writes a storage texture compiles under its
+//! format on a profile that asks for it (the floor, without formatless storage), as the runtime
+//! compiles the variant of the bound texture's format.
 //!
 //! `llvm-as` assembles the kernels; without it the tests skip visibly.
 
@@ -19,12 +21,14 @@ use crate::device::profile::DeviceProfile;
 use crate::device::DevicePolicy;
 use crate::error::{Error, Feature, LowerFamily, Needs};
 use crate::lower::select::Plan;
+use crate::metal::PixelFormat;
 use crate::pipeline::interface::PushLoc;
 use crate::pipeline::sym::{
     Axis, PushField, ResourceKind, ResourceSlot, SpecKey, Stage, SyntheticBinding,
 };
 use crate::pipeline::testing::{
-    compile, link_and_validate, llvm_assemble, profile, typed_module, AssembleError,
+    compile, compile_given_storage_format, link_and_validate, llvm_assemble, profile, typed_module,
+    AssembleError,
 };
 use crate::spirv::interp::{run, Buffer, Config, Order, Resources, SubgroupSize};
 use crate::spirv::ir::TypedModule;
@@ -473,7 +477,8 @@ declare void @air.write_texture_2d.i16.v4f16(ptr addrspace(1), <2 x i16>, <4 x h
     };
     for stem in PROFILES {
         let prof = p(stem);
-        let a = compile(&bc, "tex", &prof).unwrap_or_else(|e| panic!("{stem}: {e}"));
+        let a = compile_given_storage_format(&bc, "tex", &prof, PixelFormat::RGBA16Float)
+            .unwrap_or_else(|e| panic!("{stem}: {e}"));
         link_and_validate(&a, &prof).unwrap_or_else(|e| panic!("{stem}: L3: {e}"));
         let uses = |n: &str| a.strategies.entries.get(n).map_or(0, |u| u.uses);
         assert_eq!(
@@ -1353,7 +1358,8 @@ declare void @air.write_texture_2d.i16.v4f16(ptr addrspace(1), <2 x i16>, <4 x h
     };
     for stem in PROFILES {
         let prof = p(stem);
-        let a = compile(&bc, "texbits", &prof).unwrap_or_else(|e| panic!("{stem}: {e}"));
+        let a = compile_given_storage_format(&bc, "texbits", &prof, PixelFormat::RGBA16Float)
+            .unwrap_or_else(|e| panic!("{stem}: {e}"));
         link_and_validate(&a, &prof).unwrap_or_else(|e| panic!("{stem}: L3: {e}"));
         let uses = |n: &str| a.strategies.entries.get(n).map_or(0, |u| u.uses);
         assert_eq!(
@@ -1530,7 +1536,8 @@ declare void @air.write_texture_2d.i16.v4f16(ptr addrspace(1), <2 x i16>, <4 x h
     };
     for stem in PROFILES {
         let prof = p(stem);
-        let a = compile(&bc, "texarray", &prof).unwrap_or_else(|e| panic!("{stem}: {e}"));
+        let a = compile_given_storage_format(&bc, "texarray", &prof, PixelFormat::RGBA16Float)
+            .unwrap_or_else(|e| panic!("{stem}: {e}"));
         link_and_validate(&a, &prof).unwrap_or_else(|e| panic!("{stem}: L3: {e}"));
         let uses = |n: &str| a.strategies.entries.get(n).map_or(0, |u| u.uses);
         assert_eq!(
@@ -1739,7 +1746,8 @@ declare void @air.write_texture_2d.i16.v4f16(ptr addrspace(1), <2 x i16>, <4 x h
     };
     for stem in PROFILES {
         let prof = p(stem);
-        let a = compile(&bc, "nulltex", &prof).unwrap_or_else(|e| panic!("{stem}: {e}"));
+        let a = compile_given_storage_format(&bc, "nulltex", &prof, PixelFormat::RGBA16Float)
+            .unwrap_or_else(|e| panic!("{stem}: {e}"));
         link_and_validate(&a, &prof).unwrap_or_else(|e| panic!("{stem}: L3: {e}"));
         let uses = |n: &str| a.strategies.entries.get(n).map_or(0, |u| u.uses);
         assert_eq!(

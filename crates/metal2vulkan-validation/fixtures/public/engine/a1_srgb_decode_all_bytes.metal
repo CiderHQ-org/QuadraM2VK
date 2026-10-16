@@ -1,4 +1,4 @@
-// Owned fixture (WP-A1, D126): Metal's sRGB decode of every byte. D110.5 lowers
+// Owned fixture: Metal's sRGB decode of every byte. The translator lowers
 // `air.unpack.unorm4x8.srgb` as the table step `rint(decode(b / 255) * 4095) / 4095`, correctly
 // rounded, from the old engine's device measurement and three observed steps (1, 1024, 4095 in
 // case srgb-transfer-and-its-twelve-bit-table). A byte reaches 256 of the 4096 steps, so decoding

@@ -1,4 +1,4 @@
-// Owned fixture (WP-D3): the compiled replacement for the hand-written top-level
+// Owned fixture: the compiled replacement for the hand-written top-level
 // `kernel_nested_loop_constant_weight_walk.ll`, whose SSA numbering `llvm-as` rejects. This is
 // the same program as that fixture's `.metal` twin. A `constant` pointer walked by a nested loop:
 // the inner loop advances it one `float4` per iteration, and because the inner trip count is the

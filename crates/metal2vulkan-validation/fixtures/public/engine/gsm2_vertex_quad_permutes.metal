@@ -1,4 +1,4 @@
-// Owned fixture (WP-GSM2, DESIGN D595 item 10; written for this repository): quad broadcasts and
+// Owned fixture (written for this repository): quad broadcasts and
 // quad shuffle-xors by a constant lane or mask in vertex functions, which the translation emits as
 // Vulkan's quad instructions where the stage takes them and as shuffles elsewhere (MoltenVK's
 // vertex stage). Rasterization-disabled points; vertex v reads in[v], a float whose bits differ
@@ -7,7 +7,7 @@
 //   lane 0 to 3 and the shuffle-xors by masks 1, 2 and 3 of in[v]; a float2's broadcast of lane 3;
 //   a half's shuffle-xor by 2; an int's broadcast of lane 1; a short's shuffle-xor by 3; a uchar's
 //   broadcast of lane 2. Every quad it runs over must be whole: a read of a lane the quad lacks is
-//   undefined in Metal (D595 item 5).
+//   undefined in Metal.
 // - quad_pair_permutes_in_a_vertex_function writes out[4v .. 4v + 3]: the broadcasts of quad lanes
 //   0 and 1, the shuffle-xor by 1, and an int's broadcast of lane 0, which read only lanes a quad
 //   of two vertices has.

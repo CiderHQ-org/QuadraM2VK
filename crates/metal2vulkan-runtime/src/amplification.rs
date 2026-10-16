@@ -3,10 +3,10 @@
 //!
 //! The binder takes them as `BindState::vertex_amplification` and plans the draws' views
 //! (`bind::ViewSetup`): Vulkan multiview over the pass's layers from the one the first mapping
-//! names, or without multiview into that one layer, or, where multiview does not draw them as
-//! Metal does, one draw per amplification (`render.rs`). Metal's validation stops a draw whose
-//! count is 0 or above its pipeline's `maxVertexAmplificationCount`, not the setter (RT6 Metal
-//! probe 13: "Vertex Amplification Count (3) must be between (inclusive) 1 and the maximum vertex
+//! names, or without multiview into that one layer, or, where multiview does not draw them as Metal
+//! does, one draw per amplification (`render.rs`). Metal's validation stops a draw whose count is 0
+//! or above its pipeline's `maxVertexAmplificationCount`, not the setter (a Metal probe on an M4:
+//! "Vertex Amplification Count (3) must be between (inclusive) 1 and the maximum vertex
 //! amplification count specified in the pipeline state (2)"), so the encoder holds any count. A
 //! draw of a count of 0 draws nothing, as plain Metal draws it (probe 13 `amp0`). One above a
 //! pipeline's maximum of 2 or more, up to Metal's 8, draws that many amplifications, as plain Metal

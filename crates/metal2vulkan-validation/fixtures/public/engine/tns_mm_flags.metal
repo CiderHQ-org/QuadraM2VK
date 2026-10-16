@@ -1,6 +1,6 @@
 // metal-std: metal4.0
 // metal-macos-min: 26.2
-// Owned fixture (WP-TNS, DESIGN D272): matmul2d's float sums with relaxed precision and in
+// Owned fixture: matmul2d's float sums with relaxed precision and in
 // multiply mode over the shapes, transposes, element types, and scopes the plain sums were read
 // over (tns_mm_float, tns_mm_edge), and the plain sums over the two shapes only the layout probe
 // read (128 x 128 x 32 and 8 x 128 x 32 over four simdgroups). Threadgroup t computes one tile: A

@@ -1,31 +1,35 @@
-//! A kernel's private memory against the device's Function storage.
+//! A stage's private memory against the device's Function storage.
 //!
-//! Owned synthetic kernels: `words` keeps a private array of `N` 32-bit words, written and read
-//! at indices only the thread id decides (so it stays an array in memory); `lookup` reads a
-//! constant table at such an index (held per thread as a `Private` variable); `fixed` keeps an
-//! array of `N` words it reaches only at constant indices; `plain` keeps no private memory.
+//! Owned synthetic functions: the kernel `words` keeps a private array of `N` 32-bit words,
+//! written and read at indices only the thread id decides (so it stays an array in memory), as do
+//! the vertex function `vwords` (by its vertex ID) and the fragment function `fwords` (by its
+//! position); `lookup` reads a constant table at such an index (held per thread as a `Private`
+//! variable); `fixed` keeps an array of `N` words it reaches only at constant indices; `plain`
+//! keeps no private memory.
 //!
 //! - On a measured device (the RTX 5080: 32 KiB a thread) an array of exactly 32 KiB compiles
-//!   with no note, and 64 bytes more is `Unsupported{PrivateMemory}` needing that much. The RTX
-//!   3090, measured at 128 KiB, holds an array of 128 KiB alike, with no note, and the RX 7900 XTX,
-//!   measured at 96 KiB, one of 96 KiB.
-//! - On a device not measured (`amd-rdna3-radv`) the floor, 16 KiB, holds: an array of 16 KiB
-//!   compiles and records `PrecisionNote::FunctionStorageAssumed`, as does the constant table;
-//!   64 bytes more is refused needing it; a kernel without private memory records nothing.
+//!   with no note, and 64 bytes more is `Unsupported{PrivateMemory}` needing that much, in a
+//!   kernel, a vertex and a fragment function alike. The RTX 3090, measured at 128 KiB, holds an
+//!   array of 128 KiB alike, with no note, and the RX 7900 XTX, measured at 96 KiB, one of 96 KiB.
+//! - On a device not measured (`amd-rdna3-radv`) the floor, 16 KiB, holds with no note: an array
+//!   of 16 KiB, the constant table, a kernel without private memory. Past it a kernel is refused
+//!   needing it, and a vertex or fragment function runs, recording
+//!   `PrecisionNote::FunctionStorageAssumed`, up to the 192 KiB Metal was measured to hold; 64
+//!   bytes more is refused needing that.
 //! - An array reached only at constant indices counts nothing: three times the RTX 5080's 32 KiB
 //!   compiles there, and records no note on a device not measured.
 //!
-//! `llvm-as` assembles the kernels; a missing tool skips visibly.
+//! `llvm-as` assembles the functions; a missing tool skips visibly.
 
 use crate::device::{Device, DeviceDescription, DevicePolicy, DeviceProfile, VkLimit};
 use crate::error::{Capability, Error, Feature, Unsupported};
 use crate::pipeline::artifact::PrecisionNote;
 use crate::pipeline::testing::{compile, link_and_validate, profile, AssembleError};
 
-/// The kernels, `words` with a private array of `n` words.
+/// The functions, `words`, `vwords` and `fwords` with a private array of `n` words.
 fn module(n: u32) -> Option<Vec<u8>> {
     let text = format!(
-        r#"; Owned synthetic kernels (WP-UNI): private memory of {n} words, a constant table, none.
+        r#"; Owned synthetic functions: private memory of {n} words, a constant table, none.
 source_filename = "private_memory.metal"
 
 @table = internal addrspace(2) constant [8 x i32] [i32 3, i32 1, i32 4, i32 1, i32 5, i32 9, i32 2, i32 6], align 4
@@ -82,7 +86,41 @@ entry:
   ret void
 }}
 
+define <4 x float> @vwords(i32 %vid) {{
+entry:
+  %a = alloca [{n} x i32], align 4
+  %w = urem i32 %vid, {n}
+  %p = getelementptr inbounds [{n} x i32], ptr %a, i32 0, i32 %w
+  store i32 %vid, ptr %p, align 4
+  %r = mul i32 %vid, 7
+  %i = urem i32 %r, {n}
+  %q = getelementptr inbounds [{n} x i32], ptr %a, i32 0, i32 %i
+  %x = load i32, ptr %q, align 4
+  %f = uitofp i32 %x to float
+  %c = insertelement <4 x float> <float 0.0, float 0.0, float 0.0, float 1.0>, float %f, i64 0
+  ret <4 x float> %c
+}}
+
+define <4 x float> @fwords(<4 x float> %pos) {{
+entry:
+  %a = alloca [{n} x i32], align 4
+  %px = extractelement <4 x float> %pos, i64 0
+  %gid = fptoui float %px to i32
+  %w = urem i32 %gid, {n}
+  %p = getelementptr inbounds [{n} x i32], ptr %a, i32 0, i32 %w
+  store i32 %gid, ptr %p, align 4
+  %r = mul i32 %gid, 7
+  %i = urem i32 %r, {n}
+  %q = getelementptr inbounds [{n} x i32], ptr %a, i32 0, i32 %i
+  %x = load i32, ptr %q, align 4
+  %f = uitofp i32 %x to float
+  %c = insertelement <4 x float> <float 0.0, float 0.0, float 0.0, float 1.0>, float %f, i64 0
+  ret <4 x float> %c
+}}
+
 !air.kernel = !{{!0, !5, !6, !7}}
+!air.vertex = !{{!8}}
+!air.fragment = !{{!13}}
 !0 = !{{ptr @words, !1, !2}}
 !1 = !{{}}
 !2 = !{{!3, !4}}
@@ -91,6 +129,16 @@ entry:
 !5 = !{{ptr @lookup, !1, !2}}
 !6 = !{{ptr @plain, !1, !2}}
 !7 = !{{ptr @fixed, !1, !2}}
+!8 = !{{ptr @vwords, !9, !11}}
+!9 = !{{!10}}
+!10 = !{{!"air.position", !"air.arg_type_name", !"float4", !"air.arg_name", !"position"}}
+!11 = !{{!12}}
+!12 = !{{i32 0, !"air.vertex_id", !"air.arg_type_name", !"uint", !"air.arg_name", !"vid"}}
+!13 = !{{ptr @fwords, !14, !16}}
+!14 = !{{!15}}
+!15 = !{{!"air.render_target", i32 0, i32 0, !"air.arg_type_name", !"float4"}}
+!16 = !{{!17}}
+!17 = !{{i32 0, !"air.position", !"air.center", !"air.no_perspective", !"air.arg_type_name", !"float4", !"air.arg_name", !"pos"}}
 "#,
         last = n - 1
     );
@@ -100,7 +148,7 @@ entry:
             eprintln!("SKIPPED: {why}");
             None
         }
-        Err(AssembleError::Rejected(why)) => panic!("llvm-as rejected the kernels: {why}"),
+        Err(AssembleError::Rejected(why)) => panic!("llvm-as rejected the functions: {why}"),
     }
 }
 
@@ -117,7 +165,7 @@ fn needs(required: u64, available: u64) -> Result<(), Error> {
     )))
 }
 
-/// Kernel `entry` of [`module`]`(n)` on `stem`: its precision notes, or what refused it.
+/// Function `entry` of [`module`]`(n)` on `stem`: its precision notes, or what refused it.
 fn notes(stem: &str, n: u32, entry: &str) -> Option<Result<Vec<PrecisionNote>, Error>> {
     notes_on(
         &profile(stem, Default::default()).expect("profile"),
@@ -127,7 +175,7 @@ fn notes(stem: &str, n: u32, entry: &str) -> Option<Result<Vec<PrecisionNote>, E
     )
 }
 
-/// Kernel `entry` of [`module`]`(n)` on profile `p`, named `name`: its precision notes, or what
+/// Function `entry` of [`module`]`(n)` on profile `p`, named `name`: its precision notes, or what
 /// refused it.
 fn notes_on(
     p: &DeviceProfile,
@@ -156,16 +204,22 @@ fn captured_as(stem: &str, id: u32) -> DeviceProfile {
         .clone()
 }
 
-/// On the RTX 5080's measured 32 KiB a thread, 8192 words fit with no note; 8208 do not.
+/// On the RTX 5080's measured 32 KiB a thread, 8192 words fit with no note; 8208 do not, in a
+/// kernel, a vertex and a fragment function alike: a measured device's value is every stage's.
 #[test]
 fn private_memory_past_a_measured_device_is_refused() {
-    let Some(fits) = notes("nvidia-rtx5080-laptop", 8192, "words") else {
-        return;
-    };
-    let fits = fits.unwrap_or_else(|e| panic!("8192 words: {e}"));
-    assert!(!fits.contains(&PrecisionNote::FunctionStorageAssumed));
-    let past = notes("nvidia-rtx5080-laptop", 8208, "words").expect("assembled");
-    assert_eq!(past.map(|_| ()), needs(8208 * 4, 32 * 1024));
+    for entry in ["words", "vwords", "fwords"] {
+        let Some(fits) = notes("nvidia-rtx5080-laptop", 8192, entry) else {
+            return;
+        };
+        let fits = fits.unwrap_or_else(|e| panic!("{entry} 8192 words: {e}"));
+        assert!(
+            !fits.contains(&PrecisionNote::FunctionStorageAssumed),
+            "{entry}"
+        );
+        let past = notes("nvidia-rtx5080-laptop", 8208, entry).expect("assembled");
+        assert_eq!(past.map(|_| ()), needs(8208 * 4, 32 * 1024), "{entry}");
+    }
 }
 
 /// On the RTX 3090's measured 128 KiB a thread, 32768 words fit with no note; 32784 do not. The
@@ -206,25 +260,49 @@ fn private_memory_on_the_rx_7900_xtx_rests_on_its_measurement() {
     assert_eq!(past.map(|_| ()), needs(24592 * 4, 96 * 1024));
 }
 
-/// On a device not measured the floor holds: 4096 words, and the constant table, fit and record
-/// that they rest on it; 4112 words do not fit; a kernel without private memory records nothing.
+/// On a device not measured the floor holds with no note: 4096 words, the constant table and a
+/// kernel without private memory record nothing, in a kernel, a vertex and a fragment function
+/// alike. A kernel of 4112 words does not fit.
 #[test]
-fn private_memory_on_a_device_not_measured_rests_on_the_floor() {
+fn private_memory_within_the_floor_records_nothing() {
     let stem = "amd-rdna3-radv";
-    let Some(fits) = notes(stem, 4096, "words") else {
-        return;
-    };
     let assumed = PrecisionNote::FunctionStorageAssumed;
-    let fits = fits.unwrap_or_else(|e| panic!("4096 words: {e}"));
-    assert!(fits.contains(&assumed), "{fits:?}");
-    let table = notes(stem, 4096, "lookup").expect("assembled");
-    let table = table.unwrap_or_else(|e| panic!("lookup: {e}"));
-    assert!(table.contains(&assumed), "{table:?}");
-    let plain = notes(stem, 4096, "plain").expect("assembled");
-    let plain = plain.unwrap_or_else(|e| panic!("plain: {e}"));
-    assert!(!plain.contains(&assumed), "{plain:?}");
+    for entry in ["words", "vwords", "fwords", "lookup", "plain"] {
+        let Some(fits) = notes(stem, 4096, entry) else {
+            return;
+        };
+        let fits = fits.unwrap_or_else(|e| panic!("{entry} 4096 words: {e}"));
+        assert!(!fits.contains(&assumed), "{entry}: {fits:?}");
+    }
     let past = notes(stem, 4112, "words").expect("assembled");
     assert_eq!(past.map(|_| ()), needs(4112 * 4, 16 * 1024));
+}
+
+/// On a device not measured a vertex or fragment function runs past the floor, recording that it
+/// rests on no measurement: 17 KiB (4352 words), 100 KiB (25600) and Metal's 192 KiB (49152) a
+/// thread; 49168 words are refused needing them, of the 192 KiB they may keep. A kernel of 17 KiB
+/// is refused needing it, of the floor's 16 KiB.
+#[test]
+fn render_stages_past_the_floor_of_a_device_not_measured_run_noted_up_to_metal_s() {
+    let stem = "amd-rdna3-radv";
+    let assumed = PrecisionNote::FunctionStorageAssumed;
+    for entry in ["vwords", "fwords"] {
+        for n in [4352, 25600, 49152] {
+            let Some(noted) = notes(stem, n, entry) else {
+                return;
+            };
+            let noted = noted.unwrap_or_else(|e| panic!("{entry} {n} words: {e}"));
+            assert!(noted.contains(&assumed), "{entry} {n} words: {noted:?}");
+        }
+        let past = notes(stem, 49168, entry).expect("assembled");
+        assert_eq!(
+            past.map(|_| ()),
+            needs(49168 * 4, 192 * 1024),
+            "{entry} 49168 words"
+        );
+    }
+    let kernel = notes(stem, 4352, "words").expect("assembled");
+    assert_eq!(kernel.map(|_| ()), needs(4352 * 4, 16 * 1024));
 }
 
 /// An array reached only at constant indices counts nothing: a driver holds its parts in registers.

@@ -270,6 +270,6 @@ fn the_digest_definition_is_pinned() {
     assert_eq!(
         hex(value.digest().root("pinned")),
         "affc438d6bb30724408d763b8b905d9bcf6f7bda55c7535dcee01eb275b05a7b",
-        "the content digest's definition changed (DESIGN D300)"
+        "the content digest's definition changed"
     );
 }

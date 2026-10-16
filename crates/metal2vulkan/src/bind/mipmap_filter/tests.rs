@@ -6,7 +6,8 @@ use super::layout::{axis_tap, grid_tie_up, layout, mode, record, rule, Rule};
 use super::reciprocal::Reciprocal;
 use super::{
     model, params, FetchView, KernelStep, MipmapFilterChain, MipmapFilterKernel,
-    MipmapFilterModule, Step, DESTINATION, KEPT_IN, KEPT_OUT, PARAMS, SOURCE, SOURCE_IMAGE,
+    MipmapFilterModule, MipmapRule, Step, DESTINATION, KEPT_IN, KEPT_OUT, PARAMS, SOURCE,
+    SOURCE_IMAGE,
 };
 use crate::metal::format::candidate_formats;
 use crate::metal::PixelFormat;
@@ -46,7 +47,7 @@ fn fetch_views(pf: PixelFormat) -> Vec<Format> {
 /// codes or kept values, keeping or not); and, for each view a fetch reads its first level
 /// through, the first later level's sampler level fetching from it (keeping or not, from a 2D
 /// array, a 3D texture one texel deep, or a deeper one).
-fn every_kernel() -> Vec<MipmapFilterKernel> {
+pub(crate) fn every_kernel() -> Vec<MipmapFilterKernel> {
     let mut out = Vec::new();
     for &pixel_format in PixelFormat::ALL {
         let Some(l) = layout(pixel_format) else {
@@ -392,6 +393,7 @@ fn plan(pf: PixelFormat, extent: [u32; 3], layers: u32, levels: u32) -> MipmapFi
         levels,
         volume,
         compressed(extent),
+        MipmapRule::AppleM3MaxPasses,
         64,
         u32::MAX,
         [65535, 65535],
@@ -512,6 +514,8 @@ struct Digested {
     key: String,
     pf: PixelFormat,
     extent: [u32; 3],
+    /// Whether the chain is a 3D texture's (`3d`, its extent `<width>x<height>x<depth>`).
+    volume: bool,
     layers: u32,
     pattern: String,
     /// The texture's store (a table's store column; `private` where it has none).
@@ -537,7 +541,8 @@ fn digested(table: &str, stored: bool) -> Vec<Digested> {
                 .split('x')
                 .map(|v| v.parse().expect("a size"))
                 .collect();
-            let extent = [d[0], d[1], 1];
+            let volume = p[2] == "3d";
+            let extent = [d[0], d[1], if volume { d[2] } else { 1 }];
             let store = if stored { p[6] } else { "private" };
             let kept = match store {
                 "private" | "shared" | "rt" => true,
@@ -548,10 +553,11 @@ fn digested(table: &str, stored: bool) -> Vec<Digested> {
                 key: p[0].to_owned(),
                 pf: PixelFormat::from_name(p[1]).expect("a format"),
                 extent,
+                volume,
                 layers: p[4].parse().expect("layers"),
                 pattern: p[5].to_owned(),
                 store: store.to_owned(),
-                compressed: kept && compressed(extent),
+                compressed: kept && !volume && compressed(extent),
                 digests: p[6 + usize::from(stored)..]
                     .iter()
                     .map(|&d| d.to_owned())
@@ -571,7 +577,7 @@ fn digest(bytes: &[u8]) -> String {
 }
 
 /// The first level of every layer of a `measured_m3_passes.txt` chain of texels of `bytes`
-/// bytes, as the probe made it (the file's header).
+/// bytes, as the probe made it (the file's header); of a 3D chain, every slice in turn as a layer.
 fn probe_first_level(c: &Digested, bytes: u32) -> Vec<u8> {
     let mut state = c.key.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
         (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
@@ -583,9 +589,9 @@ fn probe_first_level(c: &Digested, bytes: u32) -> Vec<u8> {
         z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
         z ^ (z >> 31)
     };
-    let [w, h, _] = c.extent;
+    let [w, h, d] = c.extent;
     let mut out = Vec::new();
-    for _ in 0..c.layers {
+    for _ in 0..if c.volume { d } else { c.layers } {
         for i in 0..w * h {
             let (x, y) = ((i % w) as f32, (i / w) as f32);
             match c.pattern.as_str() {
@@ -618,15 +624,16 @@ fn probe_first_level(c: &Digested, bytes: u32) -> Vec<u8> {
     out
 }
 
-/// The chain of a table's row, as Metal stored the texture (`Digested::compressed`).
-fn digested_chain(c: &Digested) -> MipmapFilterChain {
+/// The chain of a table's row under `rule`, as Metal stored the texture (`Digested::compressed`).
+fn digested_chain(c: &Digested, rule: MipmapRule) -> MipmapFilterChain {
     MipmapFilterChain::plan(
         c.pf,
         c.extent,
         c.layers,
         c.digests.len() as u32,
-        false,
+        c.volume,
         c.compressed,
+        rule,
         64,
         u32::MAX,
         [65535, 65535],
@@ -677,7 +684,7 @@ fn check_m3_chains(chains: &[Digested]) -> Checked {
         let what = format!("{} {}", c.key, c.store);
         let first = probe_first_level(c, layout(c.pf).expect("a layout").bytes);
         assert_eq!(digest(&first), c.digests[0], "{what} level 0");
-        let chain = digested_chain(c);
+        let chain = digested_chain(c, MipmapRule::AppleM3MaxPasses);
         let unexplained = c.pf == P::A1BGR5Unorm || (c.pf == P::ABGR4Unorm && c.digests.len() >= 3);
         assert_eq!(chain.unlike_an_m3, unexplained, "{what}");
         let cpu = chain.expected_levels(&first).expect("levels");
@@ -718,7 +725,12 @@ fn the_chain_gives_the_m3_s_measured_passes() {
     );
     let mut modules = Modules::default();
     for key in ["f80-2d-130x130-l8-u8", "f80-2d-1000x3-l10-u8"] {
-        kernel_gives(&mut modules, &chains, key, "private");
+        kernel_gives(
+            &mut modules,
+            &chains,
+            (key, "private"),
+            MipmapRule::AppleM3MaxPasses,
+        );
     }
 }
 
@@ -751,14 +763,19 @@ const MEASURED_M3_FORMATS: &str = include_str!("measured_m3_formats.txt");
 /// them).
 const MEASURED_M3_STORES: &str = include_str!("measured_m3_stores.txt");
 
-/// The kernel's chain of a table's row is the CPU's, which gives every level's digest.
-fn kernel_gives(modules: &mut Modules, chains: &[Digested], key: &str, store: &str) {
+/// The kernel's chain of a table's row under `rule` is the CPU's, which gives every level's digest.
+fn kernel_gives(
+    modules: &mut Modules,
+    chains: &[Digested],
+    (key, store): (&str, &str),
+    rule: MipmapRule,
+) {
     let c = chains
         .iter()
         .find(|c| c.key == key && c.store == store)
         .expect("a chain");
     let first = probe_first_level(c, layout(c.pf).expect("a layout").bytes);
-    let chain = digested_chain(c);
+    let chain = digested_chain(c, rule);
     let cpu = chain.expected_levels(&first).expect("levels");
     for (level, (got, want)) in cpu.iter().zip(&c.digests).enumerate() {
         assert_eq!(&digest(got), want, "{key} {store} level {level}");
@@ -794,8 +811,8 @@ fn the_chain_gives_the_m3_s_runs_where_metal_does_not_compress() {
     kernel_gives(
         &mut Modules::default(),
         &chains,
-        "f80-2d-128x128-l8-u8",
-        "plain",
+        ("f80-2d-128x128-l8-u8", "plain"),
+        MipmapRule::AppleM3MaxPasses,
     );
 }
 
@@ -804,7 +821,7 @@ fn the_chain_gives_the_m3_s_runs_where_metal_does_not_compress() {
 /// compressed, as strips and with `allowGPUOptimizedContents` off: the chain claims the M3 Max's
 /// answer but for the 4-, 5- and 1-bit formats' (`check_m3_chains`): 146 of share-mips-m3b's 158
 /// and 107 of share-mips-m3c's 117. It gives every claimed chain's levels but from a near tie in
-/// 18, of 16-bit float, 8-bit sRGB and extended-range sRGB formats. A format carried through a half
+/// 14, of 16-bit float, 8-bit sRGB and extended-range sRGB formats. A format carried through a half
 /// reads kept values at every level of a run, and the tail reads an axis of one texel alone
 /// (`RG11B10Float`'s 4096x4 strip, whose one-texel levels hold infinities); the kernel's chains of
 /// such strips are the CPU's.
@@ -821,7 +838,7 @@ fn the_chain_gives_every_format_s_m3_passes() {
         (
             Checked {
                 known: 146,
-                near_ties: 17
+                near_ties: 13
             },
             Checked {
                 known: 107,
@@ -830,8 +847,108 @@ fn the_chain_gives_every_format_s_m3_passes() {
         )
     );
     let mut modules = Modules::default();
-    kernel_gives(&mut modules, &stores, "f554-2d-1024x12-l11-u8", "private");
-    kernel_gives(&mut modules, &stores, "f92-2d-4096x4-l13-u8", "private");
+    for key in ["f554-2d-1024x12-l11-u8", "f92-2d-4096x4-l13-u8"] {
+        kernel_gives(
+            &mut modules,
+            &stores,
+            (key, "private"),
+            MipmapRule::AppleM3MaxPasses,
+        );
+    }
+}
+
+/// The digests of every level of the M3 Max's chains under macOS 27.0.1 (the file's header states
+/// them).
+const MEASURED_M3_27: &str = include_str!("measured_m3_27.txt");
+
+/// Every chain of a table of digests from the probe's first level, against the chain under
+/// [`MipmapRule::Filter`] on the CPU. The first level is the probe's. The chain claims the M3
+/// Max's answer (`unlike_an_m3` false) for every chain, and gives every level's digest down to its
+/// first miss, if any, which is at a level a near tie may miss on ([`near_tie_level`]).
+fn check_filter_chains(chains: &[Digested]) -> Checked {
+    let mut checked = Checked {
+        known: 0,
+        near_ties: 0,
+    };
+    for c in chains {
+        let what = format!("{} {}", c.key, c.store);
+        let first = probe_first_level(c, layout(c.pf).expect("a layout").bytes);
+        assert_eq!(digest(&first), c.digests[0], "{what} level 0");
+        let chain = digested_chain(c, MipmapRule::Filter);
+        assert!(!chain.unlike_an_m3, "{what}");
+        let cpu = chain.expected_levels(&first).expect("levels");
+        checked.known += 1;
+        if let Some(level) = (1..cpu.len()).find(|&level| digest(&cpu[level]) != c.digests[level]) {
+            assert!(chain.near_ties, "{what} level {level}");
+            assert!(near_tie_level(&chain, level), "{what} level {level}");
+            checked.near_ties += 1;
+        }
+    }
+    checked
+}
+
+/// The M3 Max's 2D chains, arrays and cubes under macOS 27.0.1 (`measured_m3_27.txt`: the four
+/// tables above rerun, to 512x512 texels a layer): the chain under [`MipmapRule::Filter`] claims
+/// every one, `A1BGR5Unorm`'s and `ABGR4Unorm`'s among them, and gives every level's digest but
+/// from a near tie in 2, of 8-bit sRGB formats (one texel each: linear sums of 906.5002 and
+/// 413.5002 steps stored one byte below the chain's); macOS 26.7's passes miss its levels below
+/// the first computed one. The kernel's chain of one is the CPU's.
+#[test]
+fn the_filter_gives_the_m3_s_chains_under_macos_27_0_1() {
+    let chains: Vec<Digested> = digested(MEASURED_M3_27, true)
+        .into_iter()
+        .filter(|c| !c.volume)
+        .collect();
+    assert_eq!(chains.len(), 588);
+    assert_eq!(
+        check_filter_chains(&chains),
+        Checked {
+            known: 588,
+            near_ties: 2
+        }
+    );
+    // The release moved: 26.7's chain of a 256x256 texture misses 27.0.1's second computed level.
+    let c = chains
+        .iter()
+        .find(|c| c.key == "f80-2d-256x256-l9-u8" && c.store == "private")
+        .expect("a chain");
+    let first = probe_first_level(c, 4);
+    let older = digested_chain(c, MipmapRule::AppleM3MaxPasses)
+        .expected_levels(&first)
+        .expect("levels");
+    assert_eq!(digest(&older[1]), c.digests[1]);
+    assert_ne!(digest(&older[2]), c.digests[2]);
+    kernel_gives(
+        &mut Modules::default(),
+        &chains,
+        ("f80-2d-130x130-l8-u8", "private"),
+        MipmapRule::Filter,
+    );
+}
+
+/// The M3 Max's 3D chains under macOS 27.0.1 (`measured_m3_27.txt`: 14 formats at 13 extents,
+/// halving and not, `R16Float` among them): the chain under [`MipmapRule::Filter`] claims every
+/// one and gives every level's digest: the weights split along y last, a float's slices summed
+/// apart (`model.rs`). The kernel's chains of a 3D texture of odd sides, of 8-bit and half-float
+/// codes, are the CPU's.
+#[test]
+fn the_filter_gives_the_m3_s_3d_chains_under_macos_27_0_1() {
+    let chains: Vec<Digested> = digested(MEASURED_M3_27, true)
+        .into_iter()
+        .filter(|c| c.volume)
+        .collect();
+    assert_eq!(chains.len(), 164);
+    assert_eq!(
+        check_filter_chains(&chains),
+        Checked {
+            known: 164,
+            near_ties: 0
+        }
+    );
+    let mut modules = Modules::default();
+    for key in ["f70-3d-41x61x5-l6-u8", "f25-3d-41x61x5-l6-h16"] {
+        kernel_gives(&mut modules, &chains, (key, "private"), MipmapRule::Filter);
+    }
 }
 
 /// `n` bytes from a seed (xorshift).
@@ -984,6 +1101,7 @@ fn the_plan_lays_the_levels_and_refuses_what_it_cannot_run() {
         3,
         false,
         compressed([8, 4, 1]),
+        MipmapRule::AppleM3MaxPasses,
         256,
         u32::MAX,
         [65535, 65535],
@@ -1033,6 +1151,7 @@ fn the_plan_lays_the_levels_and_refuses_what_it_cannot_run() {
         2,
         false,
         compressed([8, 4, 1]),
+        MipmapRule::AppleM3MaxPasses,
         256,
         u32::MAX,
         [65535, 65535],
@@ -1047,6 +1166,7 @@ fn the_plan_lays_the_levels_and_refuses_what_it_cannot_run() {
             levels,
             false,
             compressed(extent),
+            MipmapRule::AppleM3MaxPasses,
             64,
             max_range,
             max_groups,
@@ -1093,6 +1213,7 @@ fn the_chain_says_where_an_m3_s_answer_differs() {
             levels,
             volume,
             compressed(extent),
+            MipmapRule::AppleM3MaxPasses,
             64,
             u32::MAX,
             [65535, 65535],
@@ -1146,6 +1267,7 @@ fn the_chain_says_where_an_m3_s_answer_differs() {
             levels,
             false,
             false,
+            MipmapRule::AppleM3MaxPasses,
             64,
             u32::MAX,
             [65535, 65535],
@@ -1189,6 +1311,7 @@ fn the_chain_says_where_a_rounding_is_not_fit() {
             levels,
             volume,
             compressed(extent),
+            MipmapRule::AppleM3MaxPasses,
             64,
             u32::MAX,
             [65535, 65535],
@@ -1370,6 +1493,7 @@ fn the_plan_keeps_what_the_next_level_reads() {
             levels,
             false,
             compressed(extent),
+            MipmapRule::AppleM3MaxPasses,
             64,
             u32::MAX,
             [9, 9],
@@ -1452,6 +1576,7 @@ fn a_first_level_fetched_from_its_view_is_the_chain_on_the_cpu() {
                     levels,
                     volume,
                     compressed(extent),
+                    MipmapRule::AppleM3MaxPasses,
                     64,
                     u32::MAX,
                     [65535, 65535],
@@ -1465,6 +1590,7 @@ fn a_first_level_fetched_from_its_view_is_the_chain_on_the_cpu() {
                     levels,
                     volume,
                     compressed(extent),
+                    MipmapRule::AppleM3MaxPasses,
                     64,
                     u32::MAX,
                     [65535, 65535],
@@ -1509,6 +1635,7 @@ fn the_plan_fetches_only_what_a_fetch_recovers() {
             3,
             false,
             compressed([8, 8, 1]),
+            MipmapRule::AppleM3MaxPasses,
             64,
             u32::MAX,
             [65535, 65535],

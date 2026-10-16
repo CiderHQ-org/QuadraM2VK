@@ -298,6 +298,8 @@ impl Device {
             release: None,
             of_heap: false,
             mirror: None,
+            #[cfg(unix)]
+            again: None,
         });
         Ok(self.visible(buffer))
     }

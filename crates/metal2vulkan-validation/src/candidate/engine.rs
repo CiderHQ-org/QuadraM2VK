@@ -97,12 +97,14 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::time::Duration;
 
 pub mod argument_buffers;
 pub mod artifact;
 pub mod graphics;
 pub mod guards;
 pub mod imageblock;
+pub mod mesh;
 #[cfg(test)]
 mod public_cases;
 pub mod resources;
@@ -217,6 +219,10 @@ pub struct ComputeCase {
     /// reach, and the run records how the compiled module contains each target
     /// (`executor_contract::out_of_bounds::OutOfBoundsRun`).
     pub out_of_bounds: Vec<OutOfBoundsTarget>,
+    /// The bound each driver creation of the case's own pipeline is held to
+    /// (`budgets::creation_within`): the case's declared one (`AuthoredCase::creation_bound`), or
+    /// the shared ceiling. An executed command's pipelines, its templates', keep the ceiling.
+    pub creation_bound: Duration,
 }
 
 /// The render pass a tile kernel runs in, as the Metal oracle encodes it (`metal::platform::tile`):
@@ -695,6 +701,7 @@ pub fn compute_case(
             .as_ref()
             .map(|declaration| declaration.targets.clone())
             .unwrap_or_default(),
+        creation_bound: case.pipeline_creation_bound(),
     })
 }
 
@@ -1086,7 +1093,7 @@ pub fn absent_argument_refusal() -> ExecutorError {
     refusal_at(
         Outcome::from(&error),
         "a function read an argument its function constants removed, which Metal gives no \
-         value: the run read zero (DESIGN D405 item 3)"
+         value: the run read zero"
             .into(),
         false,
     )
@@ -1574,6 +1581,11 @@ pub fn render_request<'a>(
                 Companion::ObserverFragment(_) => {
                     ([library, companion], own(&case.vertex), generated(fragment))
                 }
+                Companion::MeshStages(_) => {
+                    return Err(ExecutorError::Failed(
+                        "a render case's companion is a mesh render pipeline's stages".into(),
+                    ))
+                }
             };
             let request = PipelineRequest::Draw {
                 vertex,
@@ -2001,9 +2013,10 @@ pub enum TemplateCase {
 /// family, so such a literal is no template here. A replayed compute template binds buffers and
 /// threadgroup memory only, and runs no stage input; a replayed render template is a
 /// rasterization-disabled vertex function (which the checker requires) that binds buffers only,
-/// with no vertex input. Every other resource of its own is the refusal of the executor's context,
-/// before any device: of the case itself where it runs there, and kept for a run the runtime hands
-/// back where the runtime runs it (`PreparedCase::templates`).
+/// with no vertex input. Every other resource of its own, and an object or mesh template, whose
+/// mesh draws only the runtime replays (`runtime_run::template_states`), is the refusal of the
+/// executor's context, before any device: of the case itself where it runs there, and kept for a
+/// run the runtime hands back where the runtime runs it (`PreparedCase::templates`).
 pub fn replay_templates(
     checked: &CheckedCase,
 ) -> Result<BTreeMap<u64, ReplayTemplate>, ExecutorError> {
@@ -2032,9 +2045,7 @@ pub fn replay_templates(
             .ok_or_else(|| format!("pipeline template {case_id} was not checked"))?;
         let executes_family = match template.case.stage {
             Stage::Kernel => executes_compute,
-            Stage::Vertex | Stage::Fragment => executes_render,
-            // No executor runs an object or mesh template (`mesh_pipeline`).
-            Stage::Object | Stage::Mesh => false,
+            Stage::Vertex | Stage::Fragment | Stage::Object | Stage::Mesh => executes_render,
         };
         if !executes_family {
             continue;
@@ -2097,8 +2108,13 @@ pub fn replay_templates(
                 }
                 TemplateCase::Render(Box::new(mapped))
             }
-            // Skipped above: no executor runs an object or mesh template.
-            Stage::Object | Stage::Mesh => continue,
+            Stage::Object | Stage::Mesh => {
+                return Err(NotSupported::NotImplemented(format!(
+                    "engine candidate: the replayed template {case_id} is an object or mesh \
+                     function, whose mesh draws only the runtime replays"
+                ))
+                .into())
+            }
         };
         templates.insert(
             token,
@@ -2308,6 +2324,7 @@ pub fn edge_sizes(local: [u32; 3]) -> Vec<[u32; 3]> {
 enum Mapped {
     Compute(Box<ComputeCase>),
     Render(Box<graphics::RenderCase>),
+    Mesh(Box<mesh::MeshCase>),
 }
 
 /// The executor's device-free checks of a case admitted for `device`: the admission's device, the
@@ -2315,7 +2332,8 @@ enum Mapped {
 /// ([`CheckedCase::requirements`], of the case and of every pipeline template, the source's
 /// families, such as a kernel's implicit imageblock, and the case's own), what the executor maps (a
 /// kernel case [`compute_case`] maps, a graphics case [`graphics::render_case`] maps with the
-/// checker's generated companion), and the libraries its function links ([`linked_modules`]). A
+/// checker's generated companion, an object or mesh case [`mesh::mesh_case`] maps), and the
+/// libraries its function links ([`linked_modules`]). A
 /// refusal here needs neither a device nor a Metal observation, so a case this executor refuses
 /// device-free never reaches the GPU.
 pub fn prepare_case(
@@ -2335,14 +2353,10 @@ pub fn prepare_case(
             checked.primary.companion.as_ref(),
             checked.primary.reflection.fragment_imageblock.as_ref(),
         )?)),
-        Stage::Object | Stage::Mesh => {
-            return Err(
-                NotSupported::Requirements(crate::executor_contract::stage_requirements(
-                    case.stage,
-                ))
-                .into(),
-            )
-        }
+        Stage::Object | Stage::Mesh => Mapped::Mesh(Box::new(mesh::mesh_case(
+            case,
+            checked.primary.companion.as_ref(),
+        )?)),
     };
     let linked = linked_modules(&checked.primary.linked_functions)?;
     let templates = replay_templates(&checked);
@@ -2402,6 +2416,12 @@ enum PlannedPipeline<'a> {
         linked: &'a [LinkedModule],
         shape: BindShape,
     },
+    /// A mesh draw's pipeline, whose functions link nothing (`mesh::mesh_request`).
+    Mesh {
+        request: PipelineRequest,
+        libraries: Vec<RowSource<'a>>,
+        shape: BindShape,
+    },
 }
 
 impl CaseCompile<'_> {
@@ -2447,6 +2467,23 @@ impl CaseCompile<'_> {
                     .and_then(|compiled| record(&compiled.pipeline, &compiled.tables, shape));
                 (result, attempt.measured)
             }
+            PlannedPipeline::Mesh {
+                request,
+                libraries,
+                shape,
+            } => match compile_render_request(worker, device, libraries, request) {
+                Err(failure) => {
+                    let measured = failure.measured();
+                    (Err(CompileFailure::Stopped(failure)), measured)
+                }
+                Ok(compiled) => {
+                    let result = compiled
+                        .result
+                        .map_err(CompileFailure::NotCompiled)
+                        .and_then(|c| record(&c.pipeline, &TableBuffers::new(), shape));
+                    (result, Some(compiled.measured))
+                }
+            },
         }
     }
 }
@@ -2458,8 +2495,10 @@ pub struct CaseCompiles<'a> {
     pub compiles: Vec<CaseCompile<'a>>,
     /// The executed command buffers (with a non-empty execution range) that the host replay runs
     /// on this device: a render command buffer, and a compute one where the product sets no device
-    /// replay up or the case registers no variant. Each command's pipeline is compiled for the bind
-    /// shape of the records the producer writes on the device, so no device-free compile builds it.
+    /// replay up or the case registers no variant (a case the runtime runs whose templates the
+    /// executor's context does not replay registers none). Each command's pipeline is compiled for
+    /// the bind shape of the records the producer writes on the device, so no device-free compile
+    /// builds it.
     pub host_replayed: usize,
 }
 
@@ -2490,7 +2529,14 @@ pub fn case_compiles<'a>(
     let mut host_replayed = 0;
     match &prepared.mapped {
         Mapped::Compute(compute) => {
-            let registered = replay_variants(compute, prepared.templates()?)?;
+            // A case the runtime runs replays its templates through the runtime's own pipeline
+            // states (`prepare_case`), so the executor's context's refusal of them is not that
+            // run's: it registers no variant here, and each executed command buffer is uncovered.
+            let registered = match prepared.templates() {
+                Ok(templates) => replay_variants(compute, templates)?,
+                Err(_) if runtime_run::route(prepared) == runtime_run::Route::Runtime => Vec::new(),
+                Err(refused) => return Err(refused),
+            };
             let shape = compute_shape(compute, addressed).map_err(ExecutorError::Failed)?;
             let (request, libraries) = compute_request(&library, linked, compute, &shape);
             compiles.push(CaseCompile {
@@ -2587,6 +2633,24 @@ pub fn case_compiles<'a>(
                 .command_buffers()
                 .filter(|(_, command)| executed(command))
                 .count();
+        }
+        // The pipeline the runtime compiles in the run itself (`runtime_run`), for its own
+        // stage's resources.
+        Mapped::Mesh(mesh) => {
+            let shape = mesh::mesh_shape(mesh, addressed)?;
+            let companion = mesh
+                .companion
+                .as_ref()
+                .map(|generated| RowSource::Text(Cow::Owned(generated.air_text(Spelling::Opaque))));
+            let (request, libraries) = mesh::mesh_request(&library, companion, mesh, &shape)?;
+            compiles.push(CaseCompile {
+                subject: CompileSubject::Case,
+                pipeline: PlannedPipeline::Mesh {
+                    request,
+                    libraries,
+                    shape,
+                },
+            });
         }
     }
     Ok(CaseCompiles {
@@ -2813,6 +2877,12 @@ fn run_on_context(prepared: &PreparedCase, backend: Backend, worker: &CompileWor
                 backend,
             )
         }
+        // Only the runtime path draws a mesh render pipeline; the executor's context runs a
+        // mesh case only when the runtime handed it back (the bridge).
+        Mapped::Mesh(_) => RunAttempt::of(Err(NotSupported::NotImplemented(
+            "engine candidate: the executor's own context draws no mesh render pipeline".into(),
+        )
+        .into())),
     };
     let executed = artifact.into_inner().executed();
     if let Ok(run) = &mut attempt.result {

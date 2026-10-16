@@ -1,7 +1,7 @@
-// Owned fixture (WP-A1, D126): `fract`, `saturate`, and `median3` at NaN, infinities, signed
+// Owned fixture: `fract`, `saturate`, and `median3` at NaN, infinities, signed
 // zeros, and denormals, without fast math (`-fno-fast-math`: no call carries `nnan` or `ninf`,
 // so every lane asks a defined question; `precise::` and `fast::` spellings are distinct `air`
-// symbols with no flags). D52.2 and D57.2 lower `fract` as `fmin(x - floor(x), 1 - ulp)`,
+// symbols with no flags). The translator lowers `fract` as `fmin(x - floor(x), 1 - ulp)`,
 // `saturate` as a NaN-aware clamp, and `median3` through `NMin`/`NMax`; Metal's answers at
 // these operands are unmeasured (the public kernel_a_nan_loses_to_a_number reads `saturate` of
 // one NaN).

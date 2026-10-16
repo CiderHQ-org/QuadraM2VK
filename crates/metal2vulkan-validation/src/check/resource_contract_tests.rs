@@ -229,7 +229,9 @@ fn pipeline_templates_resolve_exact_identity_and_match_reflected_stage() {
 /// `icb_render_replay_template`) in its own topology class, whether the command sets the template
 /// or inherits it from the execution's parent; a fragment template, a draw of another class, or a
 /// patch draw of a vertex template is refused, and a render command buffer the case never executes
-/// constrains nothing.
+/// constrains nothing. A mesh template (the owned `icb_mesh_template`'s `icb_mesh_marks`) that
+/// does not rasterize runs on a buffer that allows mesh draws, and only there; a vertex template
+/// runs on no buffer of mesh draws alone.
 #[test]
 fn executed_render_commands_run_rasterization_disabled_vertex_templates_of_their_class() {
     use crate::case::indirect_commands::{
@@ -265,6 +267,13 @@ fn executed_render_commands_run_rasterization_disabled_vertex_templates_of_their
         include_str!("../../fixtures/public/engine/icb_render_patch_template.ll"),
         "Vertex",
         "icb_render_patch_template",
+    );
+    // A module of several entries is a public fixture's row per entry, which the checker finds
+    // among the public fixtures, not the scratch store's source shards.
+    let mesh = row(
+        include_str!("../../fixtures/public/engine/icb_mesh_template.ll"),
+        "Mesh",
+        "icb_mesh_marks",
     );
     crate::source::write_source_shards(
         scratch.path(),
@@ -337,6 +346,8 @@ fn executed_render_commands_run_rasterization_disabled_vertex_templates_of_their
             draws: crate::case::indirect_commands::RenderDraws::default(),
             max_vertex_buffer_bind_count: 2,
             max_fragment_buffer_bind_count: 0,
+            max_object_buffer_bind_count: 0,
+            max_mesh_buffer_bind_count: 0,
             support_dynamic_attribute_stride: false,
         },
         commands: vec![HostCommand {
@@ -355,6 +366,8 @@ fn executed_render_commands_run_rasterization_disabled_vertex_templates_of_their
             buffers: vec![],
             vertex_buffers: vec![],
             fragment_buffers: vec![],
+            object_buffers: vec![],
+            mesh_buffers: vec![],
         }),
     });
     let interface = argument_buffer(
@@ -382,9 +395,13 @@ fn executed_render_commands_run_rasterization_disabled_vertex_templates_of_their
                 indexed: false,
                 patches: true,
                 indexed_patches: false,
+                mesh_threadgroups: false,
+                mesh_threads: false,
             },
             max_vertex_buffer_bind_count: 2,
             max_fragment_buffer_bind_count: 0,
+            max_object_buffer_bind_count: 0,
+            max_mesh_buffer_bind_count: 0,
             support_dynamic_attribute_stride: false,
         };
     patches.command_buffers[0].commands[0].action = Some(HostAction::DrawPatches {
@@ -492,9 +509,13 @@ fn executed_render_commands_run_rasterization_disabled_vertex_templates_of_their
                 indexed: false,
                 patches: true,
                 indexed_patches: false,
+                mesh_threadgroups: false,
+                mesh_threads: false,
             },
             max_vertex_buffer_bind_count: 2,
             max_fragment_buffer_bind_count: 0,
+            max_object_buffer_bind_count: 0,
+            max_mesh_buffer_bind_count: 0,
             support_dynamic_attribute_stride: false,
         };
     // Patches at positions 1 and 2: their factors end at byte 8 + 8 * 3, the buffer's end.
@@ -509,6 +530,93 @@ fn executed_render_commands_run_rasterization_disabled_vertex_templates_of_their
     let mut primitives = patching.clone();
     primitives.command_buffers[0].commands[0].action = Some(draw(Primitive::Point));
     assert!(check(&primitives).unwrap_err()[0].contains("does not draw"));
+
+    // A mesh template without rasterization: two threadgroups of four threads, each marking its
+    // word of mesh buffer 0.
+    let mut mesh_template = painting.clone();
+    mesh_template.name = "marks-two-threadgroups".into();
+    mesh_template.air_sha256 = mesh.air_sha256.clone();
+    mesh_template.entry = mesh.entry.clone();
+    mesh_template.stage = Stage::Mesh;
+    mesh_template.render_targets.clear();
+    mesh_template.pipeline_states.clear();
+    mesh_template.command_buffers.clear();
+    mesh_template.draw = None;
+    mesh_template.buffers = vec![BufferResource {
+        binding: 0,
+        role: ResourceRole::Output,
+        bytes_b64: None,
+        initial_bytes_b64: Some(base64::engine::general_purpose::STANDARD.encode([0xab; 48])),
+        rasterization_rate_map: None,
+    }];
+    mesh_template.mesh_draw = Some(crate::case::MeshDraw {
+        object: None,
+        mesh: None,
+        fragment: None,
+        grid: crate::case::MeshGrid::Threadgroups([2, 1, 1]),
+        threads_per_object_threadgroup: [1, 1, 1],
+        threads_per_mesh_threadgroup: [4, 1, 1],
+        rasterization: false,
+        observation: None,
+        object_launch: None,
+    });
+    mesh_template.output = OutputSelection::Buffer {
+        binding: 0,
+        offset: 0,
+        length: 48,
+    };
+    mesh_template.case_id = mesh_template.computed_case_id().unwrap();
+    store.put_case(mesh_template.clone()).unwrap();
+    let mesh_draws = crate::case::indirect_commands::RenderDraws {
+        primitives: false,
+        indexed: false,
+        patches: false,
+        indexed_patches: false,
+        mesh_threadgroups: true,
+        mesh_threads: false,
+    };
+    // A kernel's mesh draws under the mesh template the execution's parent sets.
+    let mut meshing = producer.clone();
+    meshing.pipeline_states.clear();
+    meshing.command_buffers[0].commands.clear();
+    meshing.command_buffers[0].inherit_pipeline_state = true;
+    meshing.command_buffers[0].descriptor =
+        crate::case::indirect_commands::CommandDescriptor::Render {
+            draws: mesh_draws,
+            max_vertex_buffer_bind_count: 0,
+            max_fragment_buffer_bind_count: 0,
+            max_object_buffer_bind_count: 0,
+            max_mesh_buffer_bind_count: 1,
+            support_dynamic_attribute_stride: false,
+        };
+    meshing.command_buffers[0]
+        .execute
+        .as_mut()
+        .unwrap()
+        .pipeline = Some(PipelineTemplate {
+        token: 3,
+        air_sha256: mesh_template.air_sha256.clone(),
+        case_id: mesh_template.case_id.clone(),
+    });
+    assert_eq!(check(&meshing), Ok(1));
+    // A vertex template draws none of a buffer of mesh draws alone.
+    let mut vertex_parent = meshing.clone();
+    vertex_parent.command_buffers[0]
+        .execute
+        .as_mut()
+        .unwrap()
+        .pipeline = Some(PipelineTemplate {
+        token: 3,
+        air_sha256: template.air_sha256.clone(),
+        case_id: template.case_id.clone(),
+    });
+    assert!(check(&vertex_parent).unwrap_err()[0].contains("hold none of"));
+    // Nor does a mesh template draw any of a buffer of draws of primitives alone.
+    let mut primitive_buffer = producer.clone();
+    primitive_buffer.pipeline_states[0].air_sha256 = mesh_template.air_sha256.clone();
+    primitive_buffer.pipeline_states[0].case_id = mesh_template.case_id.clone();
+    primitive_buffer.command_buffers[0].commands[0].action = None;
+    assert!(check(&primitive_buffer).unwrap_err()[0].contains("hold none of"));
 }
 
 #[test]
@@ -599,6 +707,7 @@ fn bare_kernel_case(source: &crate::source::SourceRow, binding: u32) -> Authored
         }),
         draw: None,
         tessellation: None,
+        mesh_draw: None,
         output: OutputSelection::Buffer {
             binding,
             offset: 0,
@@ -614,6 +723,7 @@ fn bare_kernel_case(source: &crate::source::SourceRow, binding: u32) -> Authored
         raster_sample_count: None,
         public_source: None,
         no_effect: None,
+        creation_bound: None,
     }
 }
 
@@ -1348,6 +1458,7 @@ entry:
         }),
         draw: None,
         tessellation: None,
+        mesh_draw: None,
         output: OutputSelection::Buffer {
             binding: 0,
             offset: 0,
@@ -1363,6 +1474,7 @@ entry:
         raster_sample_count: None,
         public_source: None,
         no_effect: None,
+        creation_bound: None,
     };
     case.case_id = case.computed_case_id().unwrap();
     let checked = check_case(scratch.path(), case).unwrap();
@@ -1543,6 +1655,8 @@ fn executed_commands_bind_a_dynamic_layouts_buffer_with_a_stride() {
             draws: RenderDraws::default(),
             max_vertex_buffer_bind_count: 31,
             max_fragment_buffer_bind_count: 0,
+            max_object_buffer_bind_count: 0,
+            max_mesh_buffer_bind_count: 0,
             support_dynamic_attribute_stride: true,
         },
         commands: vec![command(0, Some(8)), command(1, None)],
@@ -1555,6 +1669,8 @@ fn executed_commands_bind_a_dynamic_layouts_buffer_with_a_stride() {
             buffers: vec![],
             vertex_buffers: vec![],
             fragment_buffers: vec![],
+            object_buffers: vec![],
+            mesh_buffers: vec![],
         }),
     });
     let interface = argument_buffer(0, &[(0, ParamRole::CommandBuffer(object(0)))]);

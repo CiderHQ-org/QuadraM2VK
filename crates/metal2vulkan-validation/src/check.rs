@@ -441,7 +441,23 @@ fn check_shader_against_source<S: Borrow<SourceRow>>(
         Default::default()
     });
     let imageblock = validate_reflected_families(&case, &reflection, &mut errors);
-    if !conformance::selected_output_is_writable(&case, &interface, &imageblock) {
+    let mut partner_targets =
+        validate_mesh_partners(&case, &source.air_ll, &reflection, &mut errors);
+    // An object or mesh case's generated observer fragment, in its fragment partner's place,
+    // writes render target 0.
+    if matches!(
+        &companion,
+        Some(crate::companion::Companion::MeshStages(stages)) if stages.fragment.is_some()
+    ) {
+        partner_targets.insert(0);
+    }
+    let partner_writes = matches!(
+        case.output,
+        crate::case::OutputSelection::RenderTarget { index, .. }
+            if partner_targets.contains(&index)
+    );
+    if !conformance::selected_output_is_writable(&case, &interface, &imageblock) && !partner_writes
+    {
         errors.push(OUTPUT_NOT_WRITABLE.into());
     }
     if errors.is_empty() {
@@ -597,8 +613,9 @@ fn command_family(
     }
 }
 
-/// The draws a render template runs: a vertex function's, of its draw's topology class, or a
-/// post-tessellation vertex function's patches, of its patch type and control-point count.
+/// The draws a render template runs: a vertex function's, of its draw's topology class, a
+/// post-tessellation vertex function's patches, of its patch type and control-point count, or a
+/// mesh render pipeline's mesh draws.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TemplateDraws {
     Primitives(metal2vulkan::metal::PrimitiveTopologyClass),
@@ -606,21 +623,28 @@ enum TemplateDraws {
         domain: crate::air::reflect::PatchDomain,
         control_points: u32,
     },
+    Mesh,
 }
 
 /// The render templates an executed render command of `case` may select: each render pipeline
 /// state's (`kinds` names each token's family) and each render execution's parent. Each must be a
 /// rasterization-disabled vertex case, whose vertex inputs a command's vertex buffers feed at the
-/// template's slots (its stride a dynamic layout's), or a rasterization-disabled post-tessellation
-/// one without control points or patch inputs, whose draw writes only memory: the execution's
-/// render pass has no attachment a case authors, so it is the Metal oracle's 1x1 scaffolding, which
-/// a rasterization-disabled template's pipeline names and no draw writes. And each host-encoded
-/// draw is one the pipeline it runs draws where the literal states it (the parent's when the
-/// commands inherit it, else the command's own): a draw of primitives or an indexed draw of the
-/// topology class of a vertex template, which Metal compiles for its case's class, a draw of
-/// another class being no draw it defines; a patch draw of a post-tessellation template, stating
-/// the template's control points, whose factors (a triangle patch's 8 bytes, a quad patch's 12, at
-/// each patch's position) lie inside its factor buffer.
+/// template's slots (its stride a dynamic layout's), a rasterization-disabled post-tessellation
+/// one without control points or patch inputs, or an object or mesh case whose mesh draw does not
+/// rasterize, whose draw writes only memory: the execution's render pass has no attachment a case
+/// authors, so it is the Metal oracle's 1x1 scaffolding, which a rasterization-disabled template's
+/// pipeline names and no draw writes. A template the host sets on a command, or an execution's
+/// parent, runs draws its command buffer holds: a mesh template a buffer's that allows mesh
+/// draws, and another a buffer's that allows draws of another kind (Metal's process ends in the
+/// host's setter of a pipeline whose kind the buffer's command types hold no draw of: a mesh
+/// pipeline on a buffer of no mesh draw, a vertex pipeline on a buffer of mesh draws alone). And
+/// each host-encoded draw is one the pipeline it runs draws where the literal states it (the
+/// parent's when the commands inherit it, else the command's own): a draw of primitives or an
+/// indexed draw of the topology class of a vertex template, which Metal compiles for its case's
+/// class, a draw of another class being no draw it defines; a patch draw of a post-tessellation
+/// template, stating the template's control points, whose factors (a triangle patch's 8 bytes, a
+/// quad patch's 12, at each patch's position) lie inside its factor buffer. No host-encoded draw is
+/// a mesh draw.
 fn check_render_replay_templates(
     case: &AuthoredCase,
     interface: &interface::AirInterface,
@@ -652,6 +676,21 @@ fn check_render_replay_templates(
         let template = resolved
             .get(case_id)
             .ok_or_else(|| vec![format!("pipeline template {case_id} was not resolved")])?;
+        if matches!(template.case.stage, Stage::Object | Stage::Mesh) {
+            if template
+                .case
+                .mesh_draw
+                .as_ref()
+                .is_none_or(|draw| draw.rasterization)
+            {
+                return Err(vec![format!(
+                    "pipeline template {case_id}, which an executed render command may select, \
+                     is an object or mesh case whose mesh draw rasterizes"
+                )]);
+            }
+            tokens.insert(token, TemplateDraws::Mesh);
+            continue;
+        }
         let unfetched = template
             .case
             .tessellation
@@ -660,7 +699,8 @@ fn check_render_replay_templates(
         if !template.case.is_rasterization_disabled_vertex() || !unfetched {
             return Err(vec![format!(
                 "pipeline template {case_id}, which an executed render command may select, is \
-                 not a rasterization-disabled vertex case without control points or patch inputs"
+                 not a rasterization-disabled vertex case without control points or patch inputs, \
+                 or an object or mesh case that does not rasterize"
             )]);
         }
         let draws = match &template.reflection.tessellation {
@@ -681,14 +721,40 @@ fn check_render_replay_templates(
     }
     let lengths = case.buffer_lengths();
     for resource in &case.command_buffers {
-        if command_family(resource) != PipelineClass::Render {
+        let crate::case::indirect_commands::CommandDescriptor::Render { draws: held, .. } =
+            resource.descriptor
+        else {
             continue;
-        }
+        };
         let parent = resource
             .execute
             .as_ref()
             .and_then(|execution| execution.pipeline.as_ref())
             .map(|template| template.token);
+        // Each template the host sets on this buffer's commands, or its parent, of a kind the
+        // buffer holds draws of.
+        let other = held.primitives || held.indexed || held.patches || held.indexed_patches;
+        for token in resource
+            .commands
+            .iter()
+            .filter_map(|command| command.pipeline)
+            .chain(parent)
+        {
+            let Some(draws) = tokens.get(&token) else {
+                continue;
+            };
+            let holds = match draws {
+                TemplateDraws::Mesh => held.mesh(),
+                TemplateDraws::Primitives(_) | TemplateDraws::Patches { .. } => other,
+            };
+            if !holds {
+                return Err(vec![format!(
+                    "command buffer ({}, {}) runs pipeline {token}, a template whose draws its \
+                     command types hold none of",
+                    resource.buffer_binding, resource.field_offset
+                )]);
+            }
+        }
         for command in &resource.commands {
             let Some(action) = command.action else {
                 continue;
@@ -931,13 +997,7 @@ fn resolve_pipeline_templates(
             .map_err(|error| vec![error])?;
         let expected = match template.stage {
             Stage::Kernel => PipelineClass::Compute,
-            Stage::Vertex | Stage::Fragment => PipelineClass::Render,
-            Stage::Object | Stage::Mesh => {
-                return Err(vec![format!(
-                    "pipeline template {id} is an object or mesh function: no case expresses a \
-                     mesh render pipeline (mesh_pipeline, DESIGN D334)"
-                )])
-            }
+            Stage::Vertex | Stage::Fragment | Stage::Object | Stage::Mesh => PipelineClass::Render,
         };
         if kind != expected {
             return Err(vec![format!(
@@ -1072,6 +1132,175 @@ fn reflect(air_ll: &str, case: &AuthoredCase) -> Result<ShaderInterface, String>
         .map(|constant| (constant.index, constant.bytes))
         .collect::<Vec<_>>();
     crate::air::reflect::inspect(air_ll, case.stage, &case.entry, &function_constants)
+}
+
+/// The partners of an object or mesh case's mesh draw ([`crate::case::MeshDraw`]), checked
+/// against the case's own module `module_ll` (whose entry's reflection is `reflection`): each is an
+/// entry of the module at the stage the draw names it for, loop-free (no executor bounds a
+/// partner's loops), reflected under the case's function constants, and binding no resource (the
+/// case authors only its own entry's). The pipeline's stages agree as Metal links them: each
+/// threadgroup within its function's `[[max_total_threads_per_threadgroup]]`, a mesh function that
+/// reads a payload under an object function whose payload holds as many bytes, and every user input
+/// of the fragment function a field the mesh function writes under the same user key. Returns the
+/// render-target locations the fragment partner writes: a render-target output selects one.
+fn validate_mesh_partners(
+    case: &AuthoredCase,
+    module_ll: &str,
+    reflection: &ShaderInterface,
+    errors: &mut Vec<String>,
+) -> HashSet<u32> {
+    use crate::air::reflect::{MeshFieldRole, MeshStageInterface};
+    let Some(draw) = &case.mesh_draw else {
+        return HashSet::new();
+    };
+    let entries = match crate::air::module_entries(module_ll) {
+        Ok(entries) => entries,
+        Err(error) => {
+            errors.push(format!("the module's entries do not read: {error}"));
+            return HashSet::new();
+        }
+    };
+    let constants = match crate::literal::function_constants(case) {
+        Ok(constants) => constants
+            .into_iter()
+            .map(|constant| (constant.index, constant.bytes))
+            .collect::<Vec<_>>(),
+        Err(error) => {
+            errors.push(error);
+            return HashSet::new();
+        }
+    };
+    let mut partners = BTreeMap::new();
+    let mut fragment_text = None;
+    for (stage, name) in draw.partners() {
+        let field = format!("mesh_draw.{}", stage.entry_list());
+        if !entries
+            .iter()
+            .any(|entry| entry.name == name && entry.stage == stage.metadata_label())
+        {
+            errors.push(format!(
+                "{field} names {name:?}, which the module declares as no {} function",
+                stage.entry_list()
+            ));
+            continue;
+        }
+        let text = match crate::air::entry_text(module_ll, name) {
+            Ok(text) => text.into_owned(),
+            Err(error) => {
+                errors.push(format!("{field} {name:?} has no projection: {error}"));
+                continue;
+            }
+        };
+        if has_cfg_cycle(&text) {
+            errors.push(format!(
+                "{field} {name:?} has a loop: a partner must be loop-free, since no executor \
+                 bounds a partner's loops"
+            ));
+        }
+        let partner = match crate::air::reflect::inspect(&text, stage, name, &constants) {
+            Ok(partner) => partner,
+            Err(error) => {
+                errors.push(format!("{field} {name:?} does not reflect: {error}"));
+                continue;
+            }
+        };
+        if !partner.bindings.is_empty() || !partner.argument_buffer_fields.is_empty() {
+            errors.push(format!(
+                "{field} {name:?} binds resources: a partner binds none, since a case authors \
+                 only its own entry's"
+            ));
+        }
+        if stage == Stage::Fragment {
+            fragment_text = Some(text);
+        }
+        partners.insert(stage, partner);
+    }
+    let own = |stage: Stage| -> Option<&MeshStageInterface> {
+        if stage == case.stage {
+            reflection.mesh_stage.as_ref()
+        } else {
+            partners
+                .get(&stage)
+                .and_then(|partner| partner.mesh_stage.as_ref())
+        }
+    };
+    for (stage, threads) in [
+        (Stage::Object, draw.threads_per_object_threadgroup),
+        (Stage::Mesh, draw.threads_per_mesh_threadgroup),
+    ] {
+        let Some(max) = own(stage).and_then(|own| own.max_total_threads) else {
+            continue;
+        };
+        let total = threads.iter().map(|axis| u64::from(*axis)).product::<u64>();
+        if total > u64::from(max) {
+            errors.push(format!(
+                "mesh_draw's {} threadgroup {threads:?} holds {total} threads, past the {} \
+                 function's max_total_threads_per_threadgroup {max}",
+                stage.entry_list(),
+                stage.entry_list()
+            ));
+        }
+    }
+    let payload = |stage| own(stage).and_then(|own| own.payload.as_ref());
+    if let (Some(_), Some(read)) = (own(Stage::Object), payload(Stage::Mesh)) {
+        match payload(Stage::Object) {
+            None => errors.push(
+                "the mesh function reads a payload, and the object function declares none".into(),
+            ),
+            Some(written) if read.size.unwrap_or(0) > written.size.unwrap_or(0) => {
+                errors.push(format!(
+                    "the mesh function reads a {}-byte payload, and the object function's holds \
+                     {} bytes",
+                    read.size.unwrap_or(0),
+                    written.size.unwrap_or(0)
+                ))
+            }
+            Some(_) => {}
+        }
+    }
+    if let (Some(text), Some(outputs)) = (
+        &fragment_text,
+        own(Stage::Mesh).and_then(|own| own.outputs.as_ref()),
+    ) {
+        let keys = outputs
+            .vertex
+            .iter()
+            .chain(&outputs.primitive)
+            .filter_map(|field| match &field.role {
+                MeshFieldRole::VertexData { key, .. }
+                | MeshFieldRole::PrimitiveData { key, .. } => Some(key.as_str()),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        let (fragment, _) = crate::air::meta::parse_air_fragment_meta(text);
+        let mut inputs = fragment
+            .map(|fragment| {
+                fragment
+                    .varying_user_semantics
+                    .into_values()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        inputs.sort();
+        for input in inputs {
+            if !keys.contains(input.as_str()) {
+                errors.push(format!(
+                    "the fragment function reads {input:?}, which the mesh function writes no \
+                     field of"
+                ));
+            }
+        }
+    }
+    partners
+        .get(&Stage::Fragment)
+        .map(|fragment| {
+            fragment
+                .render_targets
+                .iter()
+                .map(|target| target.location)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 const OUTPUT_NOT_WRITABLE: &str =

@@ -57,7 +57,7 @@ struct QueueShared {
     /// The slots its uncompleted command buffers hold.
     slots: Arc<Slots>,
     /// The latest GPU end, in nanoseconds of the host's clock, of its command buffers completed
-    /// so far, which the completion thread places in its order (`gpu_time.rs`). A leaf lock:
+    /// so far, which the completion turns place in its order (`gpu_time.rs`). A leaf lock:
     /// taken under a command buffer's, never held while another is taken.
     latest_gpu_end: Mutex<u64>,
 }

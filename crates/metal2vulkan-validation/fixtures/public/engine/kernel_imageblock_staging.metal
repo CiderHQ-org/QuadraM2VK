@@ -1,4 +1,4 @@
-// Owned fixture (WP-K5, DESIGN D173): a kernel's explicit imageblock as threadgroup staging.
+// Owned fixture: a kernel's explicit imageblock as threadgroup staging.
 //
 // Metal gives each threadgroup its own `width x height` imageblock, the compute encoder's
 // `setImageblockWidth:height:`, of `sizeof(cell)` bytes per cell; the kernel reaches a cell only

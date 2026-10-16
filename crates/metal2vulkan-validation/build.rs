@@ -46,6 +46,7 @@ fn main() {
         "src/air/meta/globals.rs",
         "src/air/meta/intersections.rs",
         "src/air/meta/kernel.rs",
+        "src/air/meta/mesh.rs",
         "src/air/meta/textures.rs",
         "src/air/meta/types.rs",
         "src/air/meta/vertex.rs",
@@ -59,6 +60,7 @@ fn main() {
         "src/air/text.rs",
         "src/air/visible_references.rs",
         "src/executor_contract.rs",
+        "src/executor_contract/mesh.rs",
         "src/executor_contract/min_lod_clamp.rs",
         "src/executor_contract/rate_map.rs",
         "src/executor_contract/rate_map/layout.rs",
@@ -94,22 +96,24 @@ fn main() {
     // `src/metal`, and the AIR front end's `metal2vulkan-air/src/metal`, whose `MTLDataType`
     // `metal` re-exports), the record and table formats it writes (indirect commands, the rate and
     // tile maps, function tables; the rate map's and function table's words are the AIR front end's
-    // `metal2vulkan-air/src/canon` formats), root tables and handles (`src/memory`), the
-    // dispatch-region encoding (`src/lower/dispatch.rs`), the shader-side stencil's shadow format
-    // and state word (`src/lower/fragment/stencil.rs`), an emulated mesh draw's work buffer layout
-    // (`src/lower/mesh/work.rs`), the sRGB tables Metal's mipmap filter reads
-    // (`src/lower/arith/srgb.rs`), the blend color an extended-range blend reads
-    // (`src/lower/arith/extended_range/blend_color.rs`), half-float conversion, and the Metal-like
-    // runtime (`metal2vulkan-runtime/src`, with the measured answers it reads), through which the
-    // executor runs the families that have moved onto it. The translator's paths above are below
-    // its crate (`metal2vulkan/src/...`). Each path is a product file below the workspace's crates/
-    // directory, this crate's parent: those listed here, the binder's Rust sources under
-    // `metal2vulkan/src/bind/`, and every file under `metal2vulkan-runtime/src/`, test modules
-    // aside (`runtime_files`, so a file added under either joins), all sorted as strings. The guard
-    // test in `candidate::engine::artifact` requires this hash to be the one validation pins
-    // (`runtime-sources.sha256`), and the inputs to be closed over the module files their non-test code
-    // reaches (each is an input, or listed there with why a run does not depend on it beyond the
-    // artifact digest).
+    // `metal2vulkan-air/src/canon` formats), root tables, handles and the threadgroup regions'
+    // alignment (`src/memory`), the dispatch-region encoding (`src/lower/dispatch.rs`), the
+    // shader-side stencil's shadow format and state word (`src/lower/fragment/stencil.rs`), an
+    // emulated mesh draw's work buffer layout (`src/lower/mesh/work.rs`), an emulated tessellation
+    // draw's work buffer layout, factor reads and tessellator, which its scan runs
+    // (`src/lower/tessellation/{work,factors,tessellator}.rs`),
+    // the sRGB tables Metal's mipmap filter reads (`src/lower/arith/srgb.rs`), the blend color an
+    // extended-range blend reads (`src/lower/arith/extended_range/blend_color.rs`), half-float
+    // conversion, and the Metal-like runtime (`metal2vulkan-runtime/src`, with the measured answers
+    // it reads), through which the executor runs the families that have moved onto it. The
+    // translator's paths above are below its crate (`metal2vulkan/src/...`). Each path is a product
+    // file below the workspace's crates/ directory, this crate's parent: those listed here, the
+    // binder's Rust sources under `metal2vulkan/src/bind/`, and every file under
+    // `metal2vulkan-runtime/src/`, test modules aside (`runtime_files`, so a file added under
+    // either joins), all sorted as strings. The guard test in `candidate::engine::artifact`
+    // requires this hash to be the one validation pins (`runtime-sources.sha256`), and the inputs
+    // to be closed over the module files their non-test code reaches (each is an input, or listed
+    // there with why a run does not depend on it beyond the artifact digest).
     let listed = [
         "metal2vulkan-air/src/canon/function_table.rs",
         "metal2vulkan-air/src/canon/rate_map_data.rs",
@@ -144,6 +148,10 @@ fn main() {
         "metal2vulkan/src/lower/arith/extended_range/table.rs",
         "metal2vulkan/src/lower/arith/srgb.rs",
         "metal2vulkan/src/lower/mesh/work.rs",
+        "metal2vulkan/src/lower/tessellation/factors.rs",
+        "metal2vulkan/src/lower/tessellation/tessellator.rs",
+        "metal2vulkan/src/lower/tessellation/work.rs",
+        "metal2vulkan/src/memory/arena.rs",
         "metal2vulkan/src/memory/handles.rs",
         "metal2vulkan/src/memory/roots.rs",
         "metal2vulkan/src/metal/bicubic.rs",

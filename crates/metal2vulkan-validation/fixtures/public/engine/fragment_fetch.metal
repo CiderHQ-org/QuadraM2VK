@@ -1,4 +1,4 @@
-// Owned fixture (WP-L9b, DESIGN D39, D74): framebuffer fetch (`[[color(n)]]` fragment inputs)
+// Owned fixture: framebuffer fetch (`[[color(n)]]` fragment inputs)
 // through input attachments. Loop-free.
 #include <metal_stdlib>
 using namespace metal;
@@ -26,7 +26,7 @@ fragment float fetch_scalar(float dst [[color(0)]]) {
     return dst * 0.5;
 }
 
-// A color input in a raster order group: read inside the fragment interlock (D86).
+// A color input in a raster order group: read inside the fragment interlock.
 fragment float4 fetch_ordered(float4 dst [[color(0), raster_order_group(0)]]) {
     return dst * 0.5;
 }

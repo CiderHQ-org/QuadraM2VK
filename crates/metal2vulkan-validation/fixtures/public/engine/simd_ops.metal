@@ -1,8 +1,9 @@
-// Owned fixture (WP-L8a, DESIGN D3, D70): simdgroup and quad operations in compute kernels.
+// Owned fixture: simdgroup and quad operations in compute kernels.
 // Every kernel writes out[t], t = thread_index_in_threadgroup; lane = thread_index_in_simdgroup
 // (t & 31: Metal simdgroup k is the linear threads [32k, 32k + 32)). Divergent kernels run the
-// operation only on some lanes, so inactive lanes must not contribute. The expected values are
-// derived from t alone in tests/engine_simd.rs. Loop-free.
+// operation only on some lanes, and inactive lanes contribute nothing, except where Metal's
+// backend speculates the branch's arm: `quad_ballot_k`'s quad votes count every lane of the quad.
+// The expected values are derived from t alone in tests/engine_simd.rs. Loop-free.
 #include <metal_stdlib>
 using namespace metal;
 

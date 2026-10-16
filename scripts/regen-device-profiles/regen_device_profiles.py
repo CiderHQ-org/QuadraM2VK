@@ -15,7 +15,7 @@ Source kinds:
   KhronosGroup/Vulkan-Profiles file. A profile that states no formats of its own defers to its
   core version's Required Format Support tables, so it gets the same format blocks as `derived`
   (Vulkan-Profiles does not encode those tables); one that states formats is kept as is.
-* `derived`: the Vulkan 1.2 floors, built from the LunarG 1.2 minimum-requirements
+* `derived`: the Vulkan 1.2 floor, built from the LunarG 1.2 minimum-requirements
   profile, with features reduced to the unconditional `VK_VERSION_1_0..1_2` requirements of
   `vk.xml`, plus the Vulkan 1.2 specification's Required Format Support tables
   (`required_formats.py`) and the weakest permitted value of each property the
@@ -71,19 +71,6 @@ MINIMUM_REQUIREMENTS = {
 }
 GPUINFO_REPORT = "https://vulkan.gpuinfo.org/api/v2/getreport.php?id={}"
 GPUINFO_DISPLAY = "https://vulkan.gpuinfo.org/displayreport.php?id={}"
-
-# Features the consumer always enables on top of Vulkan 1.2: int16, 8/16-bit
-# storage, and the storage-image formatless bits. The floor is F-class: no buffer device address
-# and no Int64.
-FLOOR_FEATURES = {
-    "VkPhysicalDeviceFeatures": [
-        "shaderInt16",
-        "shaderStorageImageReadWithoutFormat",
-        "shaderStorageImageWriteWithoutFormat",
-    ],
-    "VkPhysicalDeviceVulkan11Features": ["storageBuffer16BitAccess"],
-    "VkPhysicalDeviceVulkan12Features": ["storageBuffer8BitAccess"],
-}
 
 # Properties the product reads at Vulkan 1.2 that the base profile leaves unstated because the
 # specification sets no requirement on them, at the weakest value it permits: the value the
@@ -153,6 +140,10 @@ CORE_PROPERTIES = {
         "maxVertexOutputComponents": 64,
         "maxTessellationGenerationLevel": 0,
         "maxTessellationEvaluationOutputComponents": 0,
+        # 0 without `geometryShader`, which no core version requires.
+        "maxGeometryInputComponents": 0,
+        "maxGeometryOutputComponents": 0,
+        "maxGeometryTotalOutputComponents": 0,
         "maxFragmentInputComponents": 64,
         "maxFragmentOutputAttachments": 4,
         "maxFragmentDualSrcAttachments": 0,
@@ -318,16 +309,9 @@ SAMPLE_COUNTS_MEMBER = "colorAttachmentSampleCounts"
 
 SOURCES = [
     {
-        "name": "vk12-bare",
-        "kind": "derived",
-        "label": "Vulkan 1.2 required features and minimum limits only",
-        "floor": False,
-    },
-    {
         "name": "vk12-floor",
         "kind": "derived",
-        "label": "Vulkan 1.2 plus the features the consumer always enables (D8.4)",
-        "floor": True,
+        "label": "Vulkan 1.2 required features and minimum limits only",
     },
     {
         "name": "lunarg-desktop-baseline-2023",
@@ -1333,16 +1317,6 @@ def derive(registry, data, source, formats):
                            "the specification permits for each property the product reads, and "
                            "the profiles layer sets, that the base profile leaves without a "
                            "requirement")
-    if source["floor"]:
-        capabilities["m2v_consumer_floor"] = {
-            "features": {struct: {m: True for m in members}
-                         for struct, members in FLOOR_FEATURES.items()},
-        }
-        required.append("m2v_consumer_floor")
-        provenance["rule"] += ("; plus the m2v_consumer_floor block: the features the consumer "
-                               "always enables (DESIGN D8.4)")
-        provenance["added_features"] = sorted(
-            f"{struct}.{m}" for struct, members in FLOOR_FEATURES.items() for m in members)
     required_format_blocks(capabilities, required, provenance, formats)
     return document(source["name"], base["api-version"], source["label"],
                     f"Derived by {CONVERTER} from {MINIMUM_REQUIREMENTS['profile']}; "
@@ -1445,6 +1419,18 @@ def conform_capture(capabilities, registry):
 
 FORMAT_MEMBERS = ("linearTilingFeatures", "optimalTilingFeatures", "bufferFeatures")
 
+# The linear-tiling features a driver reports from memory it has not initialized, which the
+# product's description leaves out (`DriverFact::LinearTilingFeaturesUninitialized`,
+# `DeviceDescription::unreliable_linear_tiling`), and so the capture's linear tiling here: MoltenVK
+# builds its format table before it sets `renderLinearTextures`, so one instance reports a format's
+# linear attachment features and another does not. Its supplement leaves them out already.
+UNRELIABLE_LINEAR_FEATURES = {
+    "VK_DRIVER_ID_MOLTENVK": ("VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT",
+                              "VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT",
+                              "VK_FORMAT_FEATURE_BLIT_DST_BIT",
+                              "VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT"),
+}
+
 
 def enum_value(registry, type_name, name):
     """The value `type_name`'s enumerant `name` has in the pinned registry."""
@@ -1472,7 +1458,8 @@ def merge_formats(capabilities, core, driver, supplement, registry, source):
     API version, device type), each stated format is in the supplement with the capture's low 32
     bits and its color attachment sample counts, those counts belong to a format whose optimal
     tiling has `COLOR_ATTACHMENT`, and every format the supplement reports with a feature is one
-    the capture states."""
+    the capture states. The capture's linear tiling first loses the features its driver reports
+    unreliably (`UNRELIABLE_LINEAR_FEATURES`), as the supplement's and the product's do."""
     formats = source["formats"]
     device = supplement.get("device") or {}
     expected = {
@@ -1508,6 +1495,10 @@ def merge_formats(capabilities, core, driver, supplement, registry, source):
                                  "which the capture states")
             masks = reported[name]
             legacy = entry.get("VkFormatProperties") or {}
+            unreliable = UNRELIABLE_LINEAR_FEATURES.get(driver["driverID"], ())
+            if unreliable and "linearTilingFeatures" in legacy:
+                legacy["linearTilingFeatures"] = [bit for bit in legacy["linearTilingFeatures"]
+                                                  if bit not in unreliable]
             for member in FORMAT_MEMBERS:
                 low = flag_bits(registry, "VkFormatFeatureFlags", legacy.get(member, []))
                 if masks[member] & legacy_bits != low:
@@ -1525,7 +1516,7 @@ def merge_formats(capabilities, core, driver, supplement, registry, source):
             samples = masks.get(SAMPLE_COUNTS_MEMBER)
             if samples is None:
                 raise SystemExit(f"{source['name']}: the formats supplement states no "
-                                 f"{SAMPLE_COUNTS_MEMBER} for {name}: recapture it (DESIGN D315)")
+                                 f"{SAMPLE_COUNTS_MEMBER} for {name}: recapture it")
             if samples and not masks["optimalTilingFeatures"] & color_attachment:
                 raise SystemExit(f"{source['name']}: {name}: the supplement's color attachment "
                                  f"sample counts {samples:#x} are of a format whose optimal "

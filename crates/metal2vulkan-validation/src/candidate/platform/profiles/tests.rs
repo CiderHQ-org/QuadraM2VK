@@ -120,28 +120,49 @@ fn every_committed_profile_is_within_itself() {
     }
 }
 
-/// What V8 measured with the layer: `vk12-floor` on SwiftShader states four features SwiftShader
-/// lacks. The product's view names each of them.
+/// A profile that states features a device lacks is named member by member: the floor with four
+/// optional features SwiftShader lacks (`shaderInt16`, 8- and 16-bit storage access, and formatless
+/// storage-image reads) names each of them on SwiftShader.
 #[test]
 fn a_profile_beyond_the_device_is_named_member_by_member() {
-    let floor = read_at(&committed("vk12-floor"), AT_1_2);
-    let swiftshader = read_at(&committed("swiftshader"), AT_1_2);
-    let gaps = exceeds(&floor, &swiftshader);
-    for feature in [
+    let lacked = [
         VkFeature::ShaderInt16,
         VkFeature::StorageBuffer8BitAccess,
         VkFeature::StorageBuffer16BitAccess,
         VkFeature::ShaderStorageImageReadWithoutFormat,
-    ] {
+    ];
+    let mut beyond = read_at(&committed("vk12-floor"), AT_1_2);
+    beyond.features.extend(lacked);
+    let swiftshader = read_at(&committed("swiftshader"), AT_1_2);
+    let gaps = exceeds(&beyond, &swiftshader);
+    for feature in lacked {
         assert!(
             gaps.contains(&format!("feature {feature:?}")),
             "{feature:?}: {gaps:?}"
         );
     }
     // The committed x86 lavapipe has more than the floor; the reverse does not hold.
+    let floor = read_at(&committed("vk12-floor"), AT_1_2);
     let lavapipe = read_at(&committed("lavapipe"), AT_1_2);
     assert!(exceeds(&floor, &lavapipe).is_empty());
     assert!(!exceeds(&lavapipe, &floor).is_empty());
+}
+
+/// The floor is Vulkan 1.2 core, which every Vulkan 1.2 device has: Intel's Iris Xe on ANV, which
+/// reads no storage image without its format, takes it as the other Linux venue captures do.
+#[test]
+fn every_device_capture_takes_the_floor() {
+    let floor = read_at(&committed("vk12-floor"), AT_1_2);
+    for stem in [
+        "intel-irisxe-rplp-anv",
+        "intel-uhd770-rpls-anv",
+        "amd-780m-radv",
+        "nvidia-rtx5080-laptop",
+        "gate-lavapipe",
+    ] {
+        let device = read_at(&committed(stem), AT_1_2);
+        assert_eq!(exceeds(&floor, &device), Vec::<String>::new(), "{stem}");
+    }
 }
 
 #[test]
@@ -405,9 +426,14 @@ fn a_restricted_context_runs_only_on_a_device_that_has_and_reports_its_profile()
         check(&native, &tools[..1], &queried),
         Err(RestrictionError::Inactive { .. })
     ));
+    // SwiftShader takes the floor (Vulkan 1.2's required features and minimum limits); a device
+    // short of one of its limits does not.
     let swiftshader = read_at(&committed("swiftshader"), AT_1_2);
+    assert_eq!(check_within(&restriction, &swiftshader, AT_1_2), Ok(()));
+    let mut short = swiftshader;
+    short.limits.max_bound_descriptor_sets = 3;
     assert!(matches!(
-        check_within(&restriction, &swiftshader, AT_1_2),
+        check_within(&restriction, &short, AT_1_2),
         Err(RestrictionError::Exceeds { .. })
     ));
     let mut renamed = queried.clone();

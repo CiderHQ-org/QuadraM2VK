@@ -1,7 +1,7 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// Simdgroup matrices (DESIGN D91): element access through `thread_elements()`, filled and
+// Simdgroup matrices: element access through `thread_elements()`, filled and
 // diagonal matrices, products with mixed element formats, and block loads and stores at a
 // leading dimension and origin. One simdgroup of 32 threads per threadgroup; loop-free.
 

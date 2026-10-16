@@ -1,4 +1,4 @@
-// Owned fixture (WP-MSF, DESIGN D310): framebuffer fetch in a multisampled pass. Each function
+// Owned fixture: framebuffer fetch in a multisampled pass. Each function
 // reads color attachment 0 and writes it back. Its cases draw into passes of 2 or 4 samples whose
 // samples start distinct, so what each sample ends with says whether the function ran once per
 // sample and which sample's color it read. The probes cover [[sample_id]], the coverage mask in

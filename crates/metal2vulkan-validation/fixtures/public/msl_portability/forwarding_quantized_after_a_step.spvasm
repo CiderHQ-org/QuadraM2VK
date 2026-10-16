@@ -1,7 +1,7 @@
-; metal2vulkan's spirv::testing::forwarding::quantized_after_a_step (DESIGN D247): the module
-; the serializer writes for it, linked densely and relocated, as spirv-dis --raw-id prints it.
-; The crate's test the_committed_assembly_is_each_kernels_module holds it equal to that module;
-; validation's MoltenVK portability tests assemble it with spirv-as (DESIGN D342 item 9).
+; metal2vulkan's spirv::testing::forwarding::quantized_after_a_step: the module the serializer
+; writes for it, linked densely and relocated, as spirv-dis --raw-id prints it. The crate's test
+; the_committed_assembly_is_each_kernels_module holds it equal to that module; validation's MoltenVK
+; portability tests assemble it with spirv-as.
 ; SPIR-V
 ; Version: 1.5
 ; Generator: Khronos; 0

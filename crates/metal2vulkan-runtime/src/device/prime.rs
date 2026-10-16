@@ -15,27 +15,49 @@
 //! alone (`functions.rs`), and each priming checks, in builds with debug assertions, that it made
 //! every entry point of the table but [`UNPRIMED`]: an entry point added to the table and not made
 //! here fails every lane at its first device. The calls: a batch's (a command pool and a command
-//! buffer of it, begun, with the barriers every batch begins and ends with and, where the queue
-//! family writes timestamps, the reset and the two timestamps of a command buffer's GPU times
+//! buffer of it, begun, with the barrier every batch ends with and, where the queue family writes
+//! timestamps, the reset and the two timestamps of a command buffer's GPU times
 //! ([`TIMESTAMP_CALLS`], made only there), ended, submitted after each queue's timeline at 0 and
 //! signalling a timeline of its own and a new fence; the wait for the timeline, a read of every
 //! timeline, the wait for the fence and its reset, a wait for the queue to be idle (its drain after
-//! a failed wait), and the read of the two timestamps, as the completion thread makes them); a
+//! a failed wait), and the read of the two timestamps, as a completion turn makes them); a
 //! sampler, an occlusion query pool, a buffer in host-visible memory, mapped (and, where the device
 //! has device addresses, [`DEVICE_ADDRESS_CALLS`], its address read), and an image with their
 //! memory and views, a depth image, a render pass and a framebuffer, a descriptor set layout, a
 //! pipeline layout with a push constant range and a descriptor pool with a set written, and a
-//! compute pipeline made with a pipeline cache from a shader module, whose data is read; a command
-//! buffer, recorded and never submitted, with what a host step records: the pipeline and the set
-//! bound, a push constant, a dispatch and one from the buffer's arguments, a copy within the
-//! buffer, a copy from the buffer to the image and back with a barrier between them, a copy between
-//! the image's texels and the image's clear (a render host step's pass steps) and the depth image's
-//! (a batch's first work's), then a render host step's: a graphics pipeline that rasterizes nothing
-//! drawn in a secondary command buffer, directly and from the buffer's arguments, with a vertex
-//! buffer and the states a draw sets, inside a query of the occlusion pool, which the render pass's
-//! subpass executes; where the queues bind sparse memory, an empty `vkQueueBindSparse`
-//! ([`SPARSE_CALLS`]); a wait for the device to be idle; and the release of each object made.
-//! Nothing of it outlives the call.
+//! compute pipeline made with a pipeline cache from a shader module, its stage specialized as the
+//! runtime's makings are ([`SPECIALIZED`]), whose data is read; a command buffer, recorded and
+//! never submitted, with what a host step records: the pipeline and the set bound, a push
+//! constant, a dispatch and one from the buffer's arguments, a copy within the buffer, a copy from
+//! the buffer to the image and back with a barrier between them, a copy between the image's texels
+//! and the image's clear (a render host step's pass steps) and the depth image's (a batch's first
+//! work's), then a render host step's: a graphics pipeline that rasterizes nothing, its stage
+//! specialized too, drawn in a secondary command buffer, directly and from the buffer's arguments,
+//! with a vertex buffer and the states a draw sets, inside a query of the occlusion pool, which the
+//! render pass's subpass executes; where the queues bind sparse memory, an empty
+//! `vkQueueBindSparse` ([`SPARSE_CALLS`]); a wait for the device to be idle; and the release of
+//! each object made. Nothing of it outlives the call.
+//!
+//! **Specialized, with an extended instruction, as the runtime's makings are.** A stage with
+//! specialization constants takes paths of its own: in a driver's compiler, and in the Khronos
+//! validation layer's checks of the stage, which run `spirv-opt`'s passes and the SPIR-V validator
+//! over the module specialized at each pipeline's creation. A module the layer validated before, in
+//! any process, it skips at its creation (its validation cache, kept on disk), and priming's are
+//! the same in every process: so without a specialized stage, priming ran no validator at all, and
+//! the process's first making of a specialized pipeline made the validator's statics. And the
+//! validator makes one of them only at an operand naming an untyped definition made before it,
+//! such as an extended instruction's set: so priming's modules take `GLSL.std.450`'s `UMin` of
+//! their constant, as translated modules take that set's instructions. Measured on the M3 Max
+//! (macOS 27.0.1, MoltenVK 1.4.1, the layer and `spirv-tools` 1.4.357.0 from Homebrew), in a lane
+//! process that exited while a pool's making of a host step's variant was in progress: `SIGSEGV` at
+//! `0x50` inside `spvtools::val::InstructionCanHaveTypeOperand`, its function-local
+//! `std::unordered_set` already destroyed (`CoreChecks::ValidateShaderStage`, from
+//! `vkCreateComputePipelines` on the pool's thread, in its making section). A diagnostic interposer
+//! of the C library's exit handlers showed the validator's two such sets (that one and
+//! `InstructionRequiresTypeOperand`'s) made after the hook's first registration in each of 10 runs,
+//! the second after its last, by a making on the program's thread or the pool's; with priming
+//! specialized and taking the extended instruction, both made in priming, before the hook's first
+//! registration, in each of 10.
 //!
 //! Priming makes each entry point once, in the runtime's shapes; it cannot promise that a layer
 //! makes no new static on a code path a later call takes with other parameters. A section's
@@ -57,6 +79,7 @@ use crate::tracker::Barrier;
 use ash::vk;
 use std::time::{Duration, Instant};
 
+use super::functions::Vk;
 use super::QueueSlot;
 
 /// The table's entry points priming cannot make before the hook is registered for the device it
@@ -94,20 +117,29 @@ pub(crate) const SPARSE_CALLS: [Call; 1] = [Call::QueueBindSparse];
 /// The longest the priming submission is waited for: it holds two barriers.
 const LIMIT: Duration = Duration::from_secs(10);
 
-/// How long one wait lasts before it is repeated, as the completion thread's.
+/// How long one wait lasts before it is repeated, as a queue waiter's.
 const WAIT_SLICE: Duration = Duration::from_millis(100);
 
-/// The smallest compute shader: `main`, of one invocation, returns (SPIR-V 1.0). Also the words
-/// of a host step's own module in `tests/teardown_threads.rs`.
-pub(crate) const SHADER: [u32; 35] = [
+/// The smallest compute shader with a specialization constant ([`SPECIALIZED`]) and an extended
+/// instruction: `main`, of one invocation, takes `GLSL.std.450`'s `UMin` of the constant and
+/// returns (SPIR-V 1.0). Also the words of a host step's own module in
+/// `tests/teardown_threads.rs`.
+pub(crate) const SHADER: [u32; 60] = [
     0x0723_0203,
     0x0001_0000,
     0,
-    5,
+    10,
     0,
     // OpCapability Shader
     0x0002_0011,
     1,
+    // %8 = OpExtInstImport "GLSL.std.450"
+    0x0006_000b,
+    8,
+    0x4c53_4c47,
+    0x6474_732e,
+    0x3035_342e,
+    0,
     // OpMemoryModel Logical GLSL450
     0x0003_000e,
     0,
@@ -125,13 +157,28 @@ pub(crate) const SHADER: [u32; 35] = [
     1,
     1,
     1,
+    // OpDecorate %5 SpecId 0
+    0x0004_0047,
+    5,
+    1,
+    0,
     // %2 = OpTypeVoid; %3 = OpTypeFunction %2
     0x0002_0013,
     2,
     0x0003_0021,
     3,
     2,
-    // %1 = OpFunction %2 None %3; %4 = OpLabel; OpReturn; OpFunctionEnd
+    // %6 = OpTypeInt 32 0; %5 = OpSpecConstant %6 0
+    0x0004_0015,
+    6,
+    32,
+    0,
+    0x0004_0032,
+    6,
+    5,
+    0,
+    // %1 = OpFunction %2 None %3; %4 = OpLabel; %9 = OpExtInst %6 %8 UMin %5 %5; OpReturn;
+    // OpFunctionEnd
     0x0005_0036,
     2,
     1,
@@ -139,21 +186,36 @@ pub(crate) const SHADER: [u32; 35] = [
     3,
     0x0002_00f8,
     4,
+    0x0007_000c,
+    6,
+    9,
+    8,
+    38,
+    5,
+    5,
     0x0001_00fd,
     0x0001_0038,
 ];
 
-/// The smallest vertex shader: `main` returns (SPIR-V 1.0), for a pipeline that rasterizes
-/// nothing.
-const VERTEX_SHADER: [u32; 29] = [
+/// The smallest vertex shader with a specialization constant ([`SPECIALIZED`]) and an extended
+/// instruction: `main` takes `GLSL.std.450`'s `UMin` of the constant and returns (SPIR-V 1.0), for
+/// a pipeline that rasterizes nothing.
+const VERTEX_SHADER: [u32; 54] = [
     0x0723_0203,
     0x0001_0000,
     0,
-    5,
+    10,
     0,
     // OpCapability Shader
     0x0002_0011,
     1,
+    // %8 = OpExtInstImport "GLSL.std.450"
+    0x0006_000b,
+    8,
+    0x4c53_4c47,
+    0x6474_732e,
+    0x3035_342e,
+    0,
     // OpMemoryModel Logical GLSL450
     0x0003_000e,
     0,
@@ -164,13 +226,28 @@ const VERTEX_SHADER: [u32; 29] = [
     1,
     0x6e69_616d,
     0,
+    // OpDecorate %5 SpecId 0
+    0x0004_0047,
+    5,
+    1,
+    0,
     // %2 = OpTypeVoid; %3 = OpTypeFunction %2
     0x0002_0013,
     2,
     0x0003_0021,
     3,
     2,
-    // %1 = OpFunction %2 None %3; %4 = OpLabel; OpReturn; OpFunctionEnd
+    // %6 = OpTypeInt 32 0; %5 = OpSpecConstant %6 0
+    0x0004_0015,
+    6,
+    32,
+    0,
+    0x0004_0032,
+    6,
+    5,
+    0,
+    // %1 = OpFunction %2 None %3; %4 = OpLabel; %9 = OpExtInst %6 %8 UMin %5 %5; OpReturn;
+    // OpFunctionEnd
     0x0005_0036,
     2,
     1,
@@ -178,9 +255,36 @@ const VERTEX_SHADER: [u32; 29] = [
     3,
     0x0002_00f8,
     4,
+    0x0007_000c,
+    6,
+    9,
+    8,
+    38,
+    5,
+    5,
     0x0001_00fd,
     0x0001_0038,
 ];
+
+/// The constant [`SHADER`] and the vertex shader declare, specialized as the runtime's makings
+/// specialize their modules' (`pipeline/objects.rs`, `pipeline/graphics.rs`): a specialized stage
+/// takes paths of its own, in a driver's compiler and in a layer's checks of the stage, which a
+/// making then reaches first (the module docs).
+const SPECIALIZED: [vk::SpecializationMapEntry; 1] = [vk::SpecializationMapEntry {
+    constant_id: 0,
+    offset: 0,
+    size: 4,
+}];
+
+/// The value of [`SPECIALIZED`]'s constant.
+const SPECIALIZED_VALUE: [u8; 4] = 1u32.to_le_bytes();
+
+/// The specialization of each priming stage: [`SPECIALIZED`] at [`SPECIALIZED_VALUE`].
+fn specialization() -> vk::SpecializationInfo<'static> {
+    vk::SpecializationInfo::default()
+        .map_entries(&SPECIALIZED)
+        .data(&SPECIALIZED_VALUE)
+}
 
 /// What the device primed has: a queue family that writes timestamps, device addresses,
 /// `VK_EXT_device_generated_commands`, and sparse binding on its queues.
@@ -206,7 +310,7 @@ pub(crate) struct Has {
 pub(super) unsafe fn prime(
     instance: &ash::Instance,
     physical: vk::PhysicalDevice,
-    device: &ash::Device,
+    device: &Vk,
     loader_word: &LoaderWord,
     queue_family: u32,
     queues: &[QueueSlot],
@@ -293,7 +397,7 @@ type Release = Box<dyn FnOnce(&ash::Device) -> Call>;
 
 /// A priming in progress.
 struct Primer<'a> {
-    device: &'a ash::Device,
+    device: &'a Vk,
     /// The device's loader word, put back before each call the loader serves.
     loader_word: &'a LoaderWord,
     /// How the device's buffers and images are shared among its queue families.
@@ -426,7 +530,6 @@ impl Primer<'_> {
                 self.made(Call::CmdResetQueryPool);
                 device.cmd_write_timestamp(buffer, vk::PipelineStageFlags::TOP_OF_PIPE, queries, 0);
             }
-            Barrier::after_completed().record(device, buffer);
             Barrier::to_host().record(device, buffer);
             self.made(Call::CmdPipelineBarrier);
             if let Some(queries) = queries {
@@ -501,7 +604,7 @@ impl Primer<'_> {
         // SAFETY: the fence is signaled and its submission completed.
         unsafe { device.reset_fences(&fences) }.map_err(vulkan)?;
         self.made(Call::ResetFences);
-        // The completion thread's drain of the queues after a failed wait
+        // A completion turn's drain of the queues after a failed wait
         // (`Device::drain_queues`).
         // SAFETY: the queue is used under its lock; its one submission completed.
         queues[0]
@@ -566,10 +669,12 @@ impl Primer<'_> {
             self.hold(layout);
             let mut flags =
                 vk::PipelineCreateFlags2CreateInfoKHR::default().flags(INDIRECT_BINDABLE);
+            let specialization = specialization();
             let stage = vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::COMPUTE)
                 .module(module)
-                .name(c"main");
+                .name(c"main")
+                .specialization_info(&specialization);
             let info = vk::ComputePipelineCreateInfo::default()
                 .stage(stage)
                 .layout(layout)
@@ -853,10 +958,12 @@ impl Primer<'_> {
                 .map_err(vulkan)?;
             self.made(Call::CreatePipelineCache);
             self.hold(cache);
+            let specialization = specialization();
             let stage = vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::COMPUTE)
                 .module(module)
-                .name(c"main");
+                .name(c"main")
+                .specialization_info(&specialization);
             let info = [vk::ComputePipelineCreateInfo::default()
                 .stage(stage)
                 .layout(layout)];
@@ -1027,10 +1134,12 @@ impl Primer<'_> {
             let info = vk::ShaderModuleCreateInfo::default().code(&VERTEX_SHADER);
             let module = device.create_shader_module(&info, None).map_err(vulkan)?;
             self.hold(module);
+            let specialization = specialization();
             let stages = [vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::VERTEX)
                 .module(module)
-                .name(c"main")];
+                .name(c"main")
+                .specialization_info(&specialization)];
             let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
             // Triangles: a point list's vertex shader must write the point size where the device
             // does not enable `maintenance5`.

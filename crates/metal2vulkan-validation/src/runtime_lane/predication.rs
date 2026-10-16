@@ -35,7 +35,7 @@ use metal2vulkan_runtime::{
 /// The kernels: `prd_mark` adds 1 to word `t[0]` of `log`; `prd_put` writes `v[0]` into word 0
 /// of `w`; `prd_mark_group` adds its threadgroup's width to word `t[0]` of `log` (it observes
 /// its partition, so its thread dispatches from GPU arguments take a host step).
-const KERNELS: &str = r#"; Owned synthetic kernels (WP-PRD): command predication's marks.
+const KERNELS: &str = r#"; Owned synthetic kernels: command predication's marks.
 source_filename = "predication.metal"
 
 define void @prd_mark(ptr addrspace(2) %t, ptr addrspace(1) %log) {

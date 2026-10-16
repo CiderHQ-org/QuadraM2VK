@@ -25,6 +25,7 @@ pub(crate) fn case(entry: &str, buffer: Vec<u8>, dispatch: Dispatch) -> ComputeC
     let length = buffer.len() as u64;
     ComputeCase {
         out_of_bounds: Vec::new(),
+        creation_bound: crate::budgets::PIPELINE_CREATION_CEILING,
         entry: entry.into(),
         constants: FunctionConstantValues::defaults(),
         buffers: BTreeMap::from([(0, buffer)]),

@@ -14,9 +14,8 @@
 //!   every capability of one set compiles it), [`Needs::NotImplemented`] is a gap of this
 //!   translator version on every device, [`Needs::NotRepresentable`] has no Vulkan 1.2+
 //!   mechanism, [`Needs::DriverDefect`] is a mechanism the device's driver is measured to run
-//!   wrong ([`Needs::RuntimeDriverDefect`] one the runtime records for itself), and
-//!   [`Needs::UnmeasuredDeviation`] one the driver departs from the specifications in by a rule
-//!   not measured on its release. The runtime adds [`Needs::MetalGpuFamily`]: Metal's own refusal
+//!   wrong ([`Needs::RuntimeDriverDefect`] one the runtime records for itself). The runtime adds
+//!   [`Needs::MetalGpuFamily`]: Metal's own refusal
 //!   on a device without the family, and [`Needs::MetalRefuses`]: Metal's own refusal of the
 //!   form on the devices it was measured on. The translator does not return different output in place
 //!   of a refusal; where an output accepts a documented difference from Metal, its stage lists it
@@ -158,7 +157,6 @@ impl Error {
                 Needs::NotImplemented | Needs::NotRepresentable => Permanence::Input,
                 Needs::DriverDefect(_)
                 | Needs::RuntimeDriverDefect(_)
-                | Needs::UnmeasuredDeviation(_)
                 | Needs::MetalGpuFamily(_)
                 | Needs::MetalRefuses(_) => Permanence::InputAndDevice,
             },
@@ -265,6 +263,7 @@ impl From<crate::air::error::Feature> for Feature {
             Air::RayTracing => Feature::RayTracing,
             Air::Tensors => Feature::Tensors,
             Air::GpuEncodedIndirectCommands => Feature::GpuEncodedIndirectCommands,
+            Air::Imageblocks => Feature::Imageblocks,
             Air::ProgramScopeBinding => Feature::ProgramScopeBinding,
         }
     }
@@ -393,17 +392,6 @@ impl Unsupported {
         }
     }
 
-    /// Translatable on a device whose description states `deviation`'s rule, which this
-    /// device's driver departs by on a release no measurement covers.
-    pub fn unmeasured_deviation(feature: Feature, deviation: DriverDeviation) -> Unsupported {
-        Unsupported {
-            feature,
-            needs: Needs::UnmeasuredDeviation(deviation),
-            location: None,
-            symbol: None,
-        }
-    }
-
     /// Translatable if the device had every capability of any one alternative.
     pub fn needs_any_of(feature: Feature, alternatives: Vec<Vec<Capability>>) -> Unsupported {
         Unsupported {
@@ -506,12 +494,6 @@ pub enum Needs {
     /// record for itself: the runtime refuses rather than hand back what the driver would
     /// change. A device without the defect runs the input.
     RuntimeDriverDefect(RuntimeDriverDefect),
-    /// The mechanism exists, but the device's driver departs from the specifications in it by a
-    /// rule the device's description does not state: the rule is measured on other releases of
-    /// the driver, and a description infers it only for those. The translation refuses rather
-    /// than assume another release's rule. A description that states the named deviation (a
-    /// measured release) translates the input.
-    UnmeasuredDeviation(DriverDeviation),
     /// A device that claims this Metal GPU family (`MTLGPUFamily`'s raw value, 1010 for Apple10),
     /// which the device does not: Metal itself refuses the input on a device without the family,
     /// so the refusal is Metal's own answer rather than a gap. Only the runtime refuses so, by the
@@ -530,16 +512,16 @@ pub enum Needs {
 /// A departure of a driver from the specifications that translation relies on, measured per
 /// driver and release (`device::driver_facts`): the profile takes it on a measured release, and on
 /// a later one with `PrecisionNote::BeyondMeasuredDeviation` recorded
-/// (`ProfileFields::deviations_beyond`); elsewhere the translation takes its conservative route,
-/// or names the deviation in [`Needs::UnmeasuredDeviation`] where none exists.
+/// (`ProfileFields::deviations_beyond`); elsewhere the translation takes its conservative route.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DriverDeviation {
     /// How the driver hands a kernel's cube sample's explicit gradients to the GPU
     /// (`ProfileFields::cube_gradients`'s compute route, `CubeGradientRoute::Unmeasured`): as
-    /// given, to Metal's own reading. Unmeasured, an isotropic sample keeps the form every route
-    /// reads alike, and an anisotropic constexpr one is refused. A vertex or fragment function's
-    /// route is [`DriverDeviation::GraphicsCubeGradientRoute`].
+    /// given, to Metal's own reading. Unmeasured, the function emulates Metal's footprint where
+    /// its emulation reaches the sample, and elsewhere hands the form every route reads alike
+    /// through an isotropic sampler. A vertex or fragment function's route is
+    /// [`DriverDeviation::GraphicsCubeGradientRoute`].
     CubeGradientRoute,
     /// The device runs each 32 consecutive invocations of a compute workgroup in lockstep, as
     /// an Apple GPU runs a Metal simdgroup (`VkProperty::SimdgroupLockstep`). Unmeasured, a kernel
@@ -558,11 +540,18 @@ pub enum DriverDeviation {
     /// emulations reach, and notes the rest.
     MetalSampler,
     /// How the driver hands a vertex or fragment function's cube sample's explicit gradients to
-    /// the GPU (`ProfileFields::cube_gradients`'s graphics route): through SPIRV-Cross's
-    /// `spvGradientCube`, whose result the GPU reads by its own anisotropic rule, which differs
-    /// between Apple's GPUs, so the fact is measured per GPU. Unmeasured, an isotropic sample keeps
-    /// the form every route reads alike, and an anisotropic constexpr one is refused.
+    /// the GPU (`ProfileFields::cube_gradients`'s graphics route,
+    /// `CubeGradientRoute::AppleSwizzled`): through SPIRV-Cross's `spvGradientCube`, whose result
+    /// the GPU reads by its own anisotropic rule, which differs between Apple's GPUs and macOS
+    /// releases, so the fact is measured per GPU and release: the Apple M3 Max's under macOS
+    /// 26.7. Unmeasured, as [`DriverDeviation::CubeGradientRoute`].
     GraphicsCubeGradientRoute,
+    /// How the driver hands a vertex or fragment function's cube sample's explicit gradients to
+    /// the GPU under macOS 27 (the graphics route, `CubeGradientRoute::AppleProjected`): through
+    /// SPIRV-Cross's `spvGradientCube`, whose result Metal reads by its macOS 27 rule, the face's
+    /// two tangents: an `x` or `z` face's gradient reaches it as Metal's own, a `y` face's `z`
+    /// tangent is lost. Unmeasured, as [`DriverDeviation::GraphicsCubeGradientRoute`].
+    GraphicsCubeGradientTangents,
     /// The device stores a fragment function's float color output into a normalized, sRGB or
     /// half-float attachment as Metal does (`VkProperty::MetalColorWrites`): the exact product
     /// rounded to nearest, Metal's twelve-bit sRGB encode, and `half` rounded toward zero.
@@ -752,14 +741,51 @@ pub enum DriverDeviation {
     /// `Unorm8LinearFilterPolicy::DeviceWithinOneCode`; the default policy keeps Metal's filter
     /// exact on every device.
     Unorm8LinearFilter,
+    /// The device stores every depth a draw writes to a `Depth16Unorm` attachment, unbiased, as
+    /// Metal's code: the depth scaled by 65535 exactly and rounded to nearest, a tie up
+    /// (`VkProperty::MetalDepth16Stores`; Metal stored 32768 for 0.5 and 6554 for 0.1's
+    /// `0x3dcccccd`). Vulkan leaves the conversion's rounding to the device. Where the profile
+    /// takes it, a single-sampled pipeline's depth is the device's own. Unmeasured, the fragment
+    /// stage writes Metal's code itself (`LoweringInputs::depth16_codes`), exact: the depth it
+    /// returns, or the depth Metal stores for the fragment, its depth bias included, which a
+    /// pipeline without a fragment function takes from a synthesized fragment stage.
+    MetalDepth16Stores,
+    /// The device stores every depth a draw biases on a `Depth16Unorm` attachment as Metal's code,
+    /// the bias recorded as [`depth_bias`](crate::metal::state::depth_bias) records it
+    /// (`VkProperty::MetalDepth16BiasedStores`): Metal biases by `c ± 1` units of 1/65535 as
+    /// `float` (one unit for a slope alone), adds the bias to the depth rounding toward zero, and
+    /// stores the sum rounded to nearest, a tie up. Vulkan leaves the sum's rounding, and without
+    /// `depthBiasExact` the unit, to the device. Where the profile takes it, a single-sampled
+    /// pipeline's biased depth is the device's own. Unmeasured, a draw that biases such a depth
+    /// runs the variant whose fragment stage adds the bias and writes Metal's code itself
+    /// (`VariantKey::depth16_biased`), where the profile's unbiased depths are the device's
+    /// ([`MetalDepth16Stores`](Self::MetalDepth16Stores)); elsewhere every depth already is the
+    /// stage's.
+    MetalDepth16BiasedStores,
+    /// The device interpolates a varying as Metal does, bit for bit
+    /// (`VkProperty::MetalInterpolation`): the driver hands the varying and its qualifiers to
+    /// Metal, whose rasterizer interpolates it. Vulkan states no precision for interpolation, and
+    /// every other device measured rounds otherwise. Where the profile takes it, a fragment
+    /// function reading a varying the device interpolates records no note. Unmeasured, such a
+    /// function records `PrecisionNote::DeviceInterpolation`.
+    MetalInterpolation,
+    /// The device takes a primitive's `Layer` and `ViewportIndex` from its first vertex, whatever
+    /// its other vertices store, as Metal takes a primitive's slice and viewport
+    /// (`VkProperty::MetalFirstVertexIndices`). Vulkan takes them only where every vertex of a
+    /// primitive stores the same. Where the profile takes it, a vertex function whose index differs
+    /// among a primitive's vertices stores it to its builtin. Unmeasured, it stores it through the
+    /// pipeline's synthesized geometry stages, which store the first vertex's at every vertex,
+    /// and is refused on a device without `geometryShader`.
+    MetalFirstVertexIndices,
 }
 
 /// A defect of a device's driver in a command the runtime records for itself, never in a
 /// translation (which [`DriverWorkaround`] covers). The runtime keys it on the driver's
 /// identity and release (`driverID`, `driverVersion`; `runtime::driver_defects`), lists the
 /// device's in its properties, and takes another way where an exact one exists, else refuses,
-/// what the driver would run wrong ([`Needs::RuntimeDriverDefect`]). No compile profile, cache
-/// key or digest holds it.
+/// what the driver would run wrong ([`Needs::RuntimeDriverDefect`]), or runs it announced as a
+/// degradation where a refusal would withhold a feature of the families the device claims. No
+/// compile profile, cache key or digest holds it.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RuntimeDriverDefect {
@@ -843,6 +869,18 @@ pub enum RuntimeDriverDefect {
     /// such image of a height that is no multiple of 4 there, and a texture over a buffer or a
     /// heap's pages takes its shadow (`shadowed-texture`).
     ExplicitPlaneRowsPastHeight,
+    /// A precise occlusion query counts each sample that passes once per color output the
+    /// fragment shader writes, where Vulkan counts it once. Nothing is refused: a draw counted by
+    /// a `Counting` visibility result whose fragment stage writes more than one color attachment
+    /// runs, announced (`visibility-count-per-color`); `Boolean` results are Metal's.
+    OcclusionCountPerColorOutput,
+    /// Freeing memory that a buffer of `SHADER_DEVICE_ADDRESS` usage lay in fails a submission
+    /// still pending whose pipelines read device addresses, though none of its commands refers
+    /// to that memory. Nothing is refused: the runtime destroys such a buffer at once and frees
+    /// its memory once the batches and its own submissions made before it completed, a no-copy
+    /// buffer's deallocator waiting with it, announced (`host-deallocator-delayed`). The
+    /// program's own submissions to the runtime's queues are not waited for.
+    FreedAddressMemoryFailsPendingWork,
 }
 
 /// One device capability a refusal can name.
@@ -981,7 +1019,7 @@ pub enum Feature {
     StorageTextureInVertexStage,
     /// Cube arrays.
     CubeArray,
-    /// Constexpr sampler anisotropy.
+    /// Sampler anisotropy an argument buffer lists, on a device without `samplerAnisotropy`.
     SamplerAnisotropy,
     /// Sampler border colors Vulkan cannot express.
     SamplerBorderColor,
@@ -1002,7 +1040,12 @@ pub enum Feature {
     /// Framebuffer fetch without ordered attachment access under `RequireOrdered`, or in a
     /// multisampled pipeline (not implemented).
     FramebufferFetch,
-    /// `primitive_id` in fragment without geometry or tessellation shaders.
+    /// `[[primitive_id]]` in a fragment function: behind a mesh function on a device without
+    /// geometry or tessellation shaders, whose fragment stage reads it from a varying no mesh
+    /// function writes; and, of a pipeline whose vertex function writes that varying, the
+    /// indexed draws its de-indexed form (`VariantKey::primitive_id_indices`) does not run: a
+    /// strip, an indirect draw, indices past their buffer, and a vertex function that writes
+    /// memory (`NotImplemented`).
     PrimitiveId,
     /// Vertex amplification.
     VertexAmplification,
@@ -1032,9 +1075,17 @@ pub enum Feature {
     KernelStageIn,
 
     // ---- the refused families, not implemented yet ----
+    /// Tessellation: a post-tessellation vertex function and its pipeline's patch draws, through
+    /// the device's tessellation stages, or emulated on a device without `tessellationShader`.
     Tessellation,
     MeshShading,
     TileShading,
+    /// An imageblock outside the single-sample forms implemented: a multisample imageblock's
+    /// operation (its sample count, the colors a pixel holds, a color's coverage mask, or a store
+    /// to the samples a coverage mask selects); a fragment imageblock on a multisample, layered or
+    /// amplified pass, or whose write a later test or alpha to coverage may drop; or an explicit
+    /// layout, imageblock data operand or slice write of a shape not modelled. Tile functions and
+    /// fragment imageblocks run on single-sample passes.
     Imageblocks,
     RayTracing,
     Tensors,
@@ -1196,8 +1247,9 @@ pub enum Feature {
     CentroidVarying,
     /// A stage whose private memory (its `thread` variables and arrays, and the constants it
     /// holds per thread) takes more Function storage a thread than the device holds correctly
-    /// (`VkLimit::FunctionStorageBytesPerThread`). A stage with a call stack is refused as
-    /// `Recursion` instead.
+    /// (`VkLimit::FunctionStorageBytesPerThread`): its measured value, or on a device not measured
+    /// the floor of 16 KiB, and for a vertex or fragment function there the 192 KiB Metal was
+    /// measured to hold. A stage with a call stack is refused as `Recursion` instead.
     PrivateMemory,
     /// A sparse heap (`MTLHeapTypeSparse`), or a texture made from one, on a device without what
     /// a sparse resident image of it needs, which `missing` names.
@@ -1308,7 +1360,9 @@ pub enum ExtendedRangeBlend {
     /// Under fast math, the color channels' `BlendColor` with `OneMinusBlendColor` (either as
     /// the source factor) under `Subtract` or `ReverseSubtract`: Metal's result there follows
     /// none of the model's forms for every blend color the sweeps drew, so no rule is known.
-    /// (Without fast math it is built.)
+    /// (Without fast math it is built; into a 16-bit float attachment, whose blend the storage
+    /// form computes, it is built under fast math too, Metal's exactly there: the minuend's
+    /// product fused, the subtrahend's rounded first.)
     ConstantColorDifference,
     /// Under fast math, a write mask of exactly one color channel: Metal blends that channel
     /// otherwise than the two or three it blends as one vector, by a rule not known. (Without
@@ -1498,6 +1552,20 @@ pub enum RuntimeInput {
     /// of one layer), and compiled under it behind another a varying no stage writes. It is
     /// compiled for the pipeline again.
     RenderTargetArrayIndex,
+    /// A fragment function reads its `[[primitive_id]]` from the varying its pipeline's vertex
+    /// function writes (`IoRole::PrimitiveId`: on a device that cannot declare a fragment
+    /// `PrimitiveId`, or behind a post-tessellation vertex function emulated on a device without
+    /// `tessellationShader`), and the vertex function was compiled without
+    /// `LoweringInputs::primitive_id_varying`, so it writes none; or the vertex function writes it
+    /// and the fragment function, compiled for another vertex function, reads Vulkan's
+    /// `PrimitiveId`, which counts the tessellator's triangles there. It is compiled for the
+    /// pipeline again.
+    PrimitiveId,
+    /// A post-tessellation vertex function compiled for a device without `tessellationShader`
+    /// bakes its render pipeline descriptor's tessellation state in
+    /// (`LoweringInputs::tessellation`), and was compiled for another state than its pipeline's:
+    /// it is compiled for the pipeline again.
+    TessellationDescriptor,
     /// A fragment function writes a color attachment whose format converts its float output (a
     /// normalized, sRGB or half-float format) and was compiled for other attachments, another
     /// blend state, or another device's conversion: how it rounds each such output
@@ -1522,6 +1590,11 @@ pub enum RuntimeInput {
     /// primitive one that its pipeline's vertex or mesh function writes per vertex: it was
     /// compiled for another pipeline, and is compiled for this one again.
     PrimitiveVaryings,
+    /// A mesh function's payload arena is smaller than its mesh render pipeline's object
+    /// function's: compiled on its own or for another pipeline, it would read zeros past its own
+    /// payload where Metal reads the object function's (`LoweringInputs::object_payload`). It is
+    /// compiled for this pipeline again.
+    ObjectPayload,
     /// A fragment function in a render pipeline whose private sample mask drops a sample writes
     /// memory, reads `[[sample_mask]]` or declares `[[early_fragment_tests]]`, so it applies the
     /// mask itself (`LoweringInputs::sample_mask`), as Metal applies it after the function runs;
@@ -1777,7 +1850,7 @@ pub enum BindError {
         reason: crate::bind::replay::ReplayRefusal,
     },
     /// A patch draw's patch index buffer is bound at an offset that is not a multiple of 4, which
-    /// Metal requires (RT6 Metal probe 14: "patchIndexBufferOffset(2) must be a multiple of 4
+    /// Metal requires (a Metal probe on an M4: "patchIndexBufferOffset(2) must be a multiple of 4
     /// bytes").
     InvalidPatchIndexBuffer { offset: u64 },
     /// The patch indices a draw reads span more bytes (`needed`) than one storage-buffer
@@ -1785,12 +1858,12 @@ pub enum BindError {
     PatchIndexRange { needed: u64, limit: u64 },
     /// A patch draw with a control-point index buffer (`indexed`, `drawIndexedPatches`) for a
     /// pipeline whose `tessellationControlPointIndexType` is `None`, or one without it for a
-    /// pipeline whose type is not, which Metal's validation stops (RT6 Metal probe 14:
-    /// "tessellationControlPointIndexType of MTLTessellationControlPointIndexTypeNone not valid
-    /// for drawIndexedPatches", and of `UInt32` for `drawPatches`).
+    /// pipeline whose type is not, which Metal's validation stops (a Metal probe on an M4:
+    /// "tessellationControlPointIndexType of MTLTessellationControlPointIndexTypeNone not valid for
+    /// drawIndexedPatches", and of `UInt32` for `drawPatches`).
     ControlPointIndexing { indexed: bool },
     /// A patch draw's control-point index buffer is bound at an offset that is not a multiple of
-    /// its pipeline's index size, which Metal requires (RT6 Metal probe 14:
+    /// its pipeline's index size, which Metal requires (a Metal probe on an M4:
     /// "controlPointIndexBufferOffset(1) must be a multiple of 2 bytes").
     InvalidControlPointIndexBuffer { offset: u64 },
     /// The control-point indices a draw reads span more bytes (`needed`) than one storage-buffer

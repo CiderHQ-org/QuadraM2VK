@@ -1,4 +1,4 @@
-// Owned fixture (WP-TXT, DESIGN D230): an imageblock slice written to a `half` storage texture at a
+// Owned fixture: an imageblock slice written to a `half` storage texture at a
 // level read from a buffer, as mip-chain blurs spell it
 // (`air.write_imageblock_slice_to_texture_2d.i16.v4f16` with a runtime level). Each thread stages
 // (x, y, 1, 0.5) in its cell; thread (0, 0) then writes the whole imageblock's slice at texel

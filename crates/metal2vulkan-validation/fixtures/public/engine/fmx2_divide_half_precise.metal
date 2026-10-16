@@ -1,4 +1,4 @@
-// Owned fixture (WP-FMX2, DESIGN D279): `fmx2_divide_half_fast` without fast math
+// Owned fixture: `fmx2_divide_half_fast` without fast math
 // (`-fno-fast-math`): the `fdiv half` of `x / y` carries no flag. Whether Metal rounds the
 // quotient once to `half`, rounds a `float` quotient to `half`, or multiplies by a reciprocal
 // rounded to `half` first is what the lanes separate. Each quotient divides by its own load of

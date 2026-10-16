@@ -1,8 +1,8 @@
-// Owned fixture (WP-RT6, DESIGN D305 item 22): primitive restart of indexed draws, the questions
-// RT6 Metal probe 15 asked (an M4). Each vertex takes its position from buffer 0 at its vertex id,
-// clamped to 65535, so every index past 65535 lands where vertex 65535 is; the fragment function
-// adds one 8-bit unit through the pipeline's additive blend, so each pixel of the target counts
-// the primitives that cover it. Written for this repository; no third-party source. Loop-free.
+// Owned fixture: primitive restart of indexed draws, the questions a Metal probe asked on an M4.
+// Each vertex takes its position from buffer 0 at its vertex id, clamped to 65535, so every index
+// past 65535 lands where vertex 65535 is; the fragment function adds one 8-bit unit through the
+// pipeline's additive blend, so each pixel of the target counts the primitives that cover it.
+// Written for this repository; no third-party source. Loop-free.
 #include <metal_stdlib>
 using namespace metal;
 

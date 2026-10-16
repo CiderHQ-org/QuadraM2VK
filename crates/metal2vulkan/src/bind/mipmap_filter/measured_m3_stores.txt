@@ -1,15 +1,14 @@
 # Plain Metal's generateMipmapsForTexture: on an Apple M3 Max (macOS 26.7, 25G229): the chains of
-# WP-FXR's share-mips-m3c (our own probe, DESIGN D732), by store: plain, Private with
-# allowGPUOptimizedContents off; sw, Private with ShaderRead and ShaderWrite; pfv, Private with
-# ShaderRead and PixelFormatView (Metal compresses none of the three); rt, Private with
-# ShaderRead and RenderTarget, and private, Private, both compressed at 16 texels or more on
-# each side. BGRA8Unorm squares from 64 to 4096, rectangles to 16384x64 and their transposes,
-# two-slice arrays and cubes (plain), seven of them with sw and pfv, three with rt; and 25
-# formats Private at 256x256 and 2048x32, as strips at 1024x12 and 4096x4, and plain at
-# 512x512. Left out: the 8 Private chains whose first level Metal's compressed storage rewrote
-# (RG11B10Float, RGB9E5Float, BGRA10_XR and BGRA10_XR_sRGB at 256x256 and 2048x32), and the
-# two formats the filter does not compute (B5G6R5Unorm, BGR5A1Unorm). The first levels come from
-# measured_m3_passes.txt's probe, keyed by the chain's key. Each level's digest is the first 12
+# share-mips-m3c (our own probe), by store: plain, Private with allowGPUOptimizedContents off; sw,
+# Private with ShaderRead and ShaderWrite; pfv, Private with ShaderRead and PixelFormatView (Metal
+# compresses none of the three); rt, Private with ShaderRead and RenderTarget, and private, Private,
+# both compressed at 16 texels or more on each side. BGRA8Unorm squares from 64 to 4096, rectangles
+# to 16384x64 and their transposes, two-slice arrays and cubes (plain), seven of them with sw and
+# pfv, three with rt; and 25 formats Private at 256x256 and 2048x32, as strips at 1024x12 and
+# 4096x4, and plain at 512x512. Left out: the 8 Private chains whose first level Metal's compressed
+# storage rewrote (RG11B10Float, RGB9E5Float, BGRA10_XR and BGRA10_XR_sRGB at 256x256 and 2048x32),
+# and the two formats the filter does not compute (B5G6R5Unorm, BGR5A1Unorm). The first levels come
+# from measured_m3_passes.txt's probe, keyed by the chain's key. Each level's digest is the first 12
 # hex digits of the SHA-256 of its bytes, every layer in turn, rows tight.
 # Format:
 #   <key> <format> <2d|2darray|cube> <width>x<height> <layers> <pattern>

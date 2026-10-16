@@ -1,4 +1,4 @@
-// Owned fixture (WP-ICBV, DESIGN D336): a kernel whose only effect is resetting commands the host
+// Owned fixture: a kernel whose only effect is resetting commands the host
 // encoded. Thread 0 resets compute command 1 of the first command buffer; every other thread
 // resets render command 0 of the second. Each command's other state is the host's; a reset one
 // runs nothing. `params` and `out` are bound here unread, so a case owns the buffers the host

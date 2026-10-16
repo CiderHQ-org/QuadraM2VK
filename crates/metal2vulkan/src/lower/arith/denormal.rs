@@ -135,11 +135,18 @@ impl Reading {
 /// | `sqrt`, `rsqrt`, `fast::rsqrt` | the operand | never denormal | the deviation |
 /// | `dot` | both vectors | flushed | the deviation |
 /// | `fma`, `llvm.fmuladd` (`OpFmaKHR`) | all three | flushed | the deviation |
+/// | `fast::atan2` | both | never denormal | the deviation |
 ///
 /// `dot` is Metal's fused chain of its products: the device's own `OpDot` where it reaches Metal's
 /// `dot`, else the multiply and `OpFmaKHR`s the deviation also covers, or the routines, which read
 /// as Metal does; where the profile lacks the deviation, the chain flushes its values between the
 /// fused multiply-adds as well.
+///
+/// `fast::atan2(y, x)` reads a denormal `y` or `x` as the zero of its sign and answers no denormal
+/// (EV DNR-dn1-m3 and DNR-dn2-m3, an Apple M3 Max under macOS 27.0.1: every pair of 28 patterns,
+/// in entries with and without fast math); its quotient is the device's multiply or division, whose operands are those two, and a denormal
+/// quotient reaches the fast `atan`, which reads it as a zero. Where native device maths answers
+/// it, its denormals are the device's (the caller flushes nothing there).
 ///
 /// `trunc` and `rint` (`Trunc`, `RoundEven`) of a denormal answer the zero of its sign on every
 /// venue measured, as Metal does (the probes' words, both modes, all seven venues), but Vulkan
@@ -153,6 +160,7 @@ pub fn coverage(op: FloatFn) -> Option<Reading> {
         F::Sqrt | F::Rsqrt | F::FastRsqrt => (Covered::Deviation, 0b1, false),
         F::Dot => (Covered::Deviation, 0b11, true),
         F::Fma | F::MulAdd => (Covered::Deviation, 0b111, true),
+        F::FastAtan2 { .. } => (Covered::Deviation, 0b11, false),
         _ => return None,
     };
     Some(Reading {

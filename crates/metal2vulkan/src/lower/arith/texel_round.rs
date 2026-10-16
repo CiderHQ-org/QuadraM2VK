@@ -498,12 +498,46 @@ pub fn grid_step(
     d: Value,
     neg_d: Value,
 ) -> BResult<Value> {
-    let y = fb.binary_no_contraction(BinOp::FMul, x, d)?;
-    let y = fb.glsl(GlslOp::NClamp, &[y, neg_d, d])?;
-    let y = fb.glsl(GlslOp::RoundEven, &[y])?;
+    let y = grid_round(fb, x, d, neg_d)?;
     let it = ty(fb, words(f))?;
     fb.convert(ConvOp::ConvertFToS, y, it)
 }
+
+/// [`grid_step`]'s step before its conversion to an integer: `RoundEven` of the product clamped
+/// into `[-D, D]`, an integral `f32` in `x`'s lanes whose zero may be `-0`.
+pub fn grid_round(
+    fb: &mut FunctionBuilder<'_>,
+    x: Value,
+    d: Value,
+    neg_d: Value,
+) -> BResult<Value> {
+    let y = fb.binary_no_contraction(BinOp::FMul, x, d)?;
+    let y = fb.glsl(GlslOp::NClamp, &[y, neg_d, d])?;
+    fb.glsl(GlslOp::RoundEven, &[y])
+}
+
+/// The factor `c = 2^-b · (1 + 2^-17)` of the grid `D = 2^b - 1` (`b` 15 or 16, the 16-bit
+/// normalized grids) whose product by a step `m` (`0 <= m <= D`) rounds to `half` as `m / D` does:
+/// either `f32` neighbour of the exact product `m · c`, rounded to `half` to nearest even, is
+/// `m / D` correctly rounded to `half`. So [`ones_ratio_to_half`]'s value is one product rounded
+/// by the device's conversion to `half`, for any `f32` rounding of the product.
+///
+/// Why: `m / D = m · 2^-b · (1 + 2^-b + 2^-2b + ...)` lies above the dyadic `m · 2^-b` (for `m >
+/// 0`), by too little to reach the next point where the rounding to `half` changes, and so does
+/// `m · c` for every `c` strictly between `2^-b` and `1 / D`; but in `f32` the product may round
+/// onto such a point. Checked exhaustively on every step (`the_ones_ratio_factor_rounds_every_step`,
+/// both neighbours of each exact product), the factors that hold are exactly those strictly between
+/// `2^-b` and the reciprocal `RN(1 / D)`: `2^-b · (1 + k · 2^-23)` for `k` in `1..=127` (`b = 16`)
+/// and `1..=255` (`b = 15`). At `k = 0` the product is the dyadic step itself, whose tie to even
+/// is wrong where `m / D` lies above a midpoint (`2049 / 65535`); the reciprocal itself (`k = 128`,
+/// `256`) rounds twice at `65455` and `65519` (`32759` on `32767`). The factor takes `k = 64`, inside
+/// both ranges.
+pub fn ones_ratio_factor(b: u32) -> f32 {
+    f32::from_bits(((127 - b) << 23) | ONES_RATIO_FACTOR_ULPS)
+}
+
+/// The `k` of [`ones_ratio_factor`]: its `f32` units above `2^-b`.
+pub const ONES_RATIO_FACTOR_ULPS: u32 = 64;
 
 /// The value `n / D` of signed grid step `n` (`i32` bits in `u32` lanes of form `u`, within
 /// `[-D, D]`; `d` the grid `D` in `u32` lanes, `1 <= D < 2^16`): `+0` for zero, else the

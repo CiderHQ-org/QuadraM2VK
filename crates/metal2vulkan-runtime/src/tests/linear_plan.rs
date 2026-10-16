@@ -154,9 +154,10 @@ const ANSWERED_M4: [P; 62] = [
     P::RG10UintPACKED,
 ];
 
-/// The formats of [`ANSWERED_M4`] an Apple M3 Max under macOS 26.7 asserted on (EV
-/// XRR2-pla1-m3): the 16 from 630 to 645, which macOS 26.7 describes none of.
-const ASSERTED_26_7: [P; 16] = [
+/// The formats of [`ANSWERED_M4`] an Apple M3 Max asserted on, under macOS 26.7 and 27.0.1 alike
+/// (EVs XRR2-pla1-m3 and M27-lin1-m3): the 16 from 630 to 645, which it describes none of, nor
+/// does either Metal level.
+const ASSERTED_M3: [P; 16] = [
     P::BGRA10UintPACKED,
     P::BGRA10XRPACKED,
     P::BGRA10XRPACKEDSRGB,
@@ -178,7 +179,9 @@ const ASSERTED_26_7: [P; 16] = [
 /// Metal answers 16 for exactly the formats it answered for; it asserts on every other one
 /// (compressed formats, the 4:2:2 ones among them, and depth and stencil formats; on the M3 and
 /// M4, `Depth24Unorm_Stencil8` and `X24_Stencil8` as unsupported formats), which the runtime
-/// refuses, at each Metal level its own. `Invalid` was not asked.
+/// refuses, at each Metal level the M3 Max's (EV M27-lin1-m3 at macOS 27.0.1: of the raw values
+/// from 0 to 700, 175 answered and every other one asserted, each as the runtime answers).
+/// `Invalid` was not asked.
 #[test]
 fn buffers_back_exactly_the_formats_metal_answers_for() {
     // Probe 9 took none of the formats Metal makes no texture of alone (the 69 two-plane YCbCr
@@ -191,7 +194,7 @@ fn buffers_back_exactly_the_formats_metal_answers_for() {
             if pf == P::Invalid || no_texture_alone(pf) {
                 continue;
             }
-            let asserted = level == MetalLevel::MacOS26_7 && ASSERTED_26_7.contains(&pf);
+            let asserted = ASSERTED_M3.contains(&pf);
             let want = if ANSWERED.contains(&pf) || (ANSWERED_M4.contains(&pf) && !asserted) {
                 Ok(LINEAR_ALIGNMENT)
             } else {
@@ -223,6 +226,16 @@ fn buffers_back_exactly_the_formats_metal_answers_for() {
                 pixel_format: P::Invalid
             })
         );
+        // Nor `AnyDepth` and `AnyStencil`, of which Metal makes no texture alone: it asserts as on
+        // every depth and stencil format (EV M27-lin1-m3, "Linear textures do not support
+        // depth/stencil pixel formats").
+        for pf in [P::AnyDepth, P::AnyStencil] {
+            assert_eq!(
+                linear_alignment(pf, level),
+                Err(BufferTextureProblem::NotLinear { pixel_format: pf }),
+                "{level:?} {pf:?}"
+            );
+        }
     }
 }
 

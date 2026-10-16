@@ -1,4 +1,4 @@
-// Owned fixture (WP-OB3, DESIGN D258): reads through an index past a top-level texture array, the
+// Owned fixture: reads through an index past a top-level texture array, the
 // handle array index containment form. The array `tex` takes texture slots 0 and 1, and the array
 // `spare` slots 2 and 3, so an index of 2 or 3 into `tex` names a slot the case binds (one of
 // `spare`'s). Eight threads; thread t reads texel (0, 0) of tex[idx[t]] into out[t], and texel

@@ -1,6 +1,6 @@
-// Owned fixture (WP-L9b2, DESIGN D6, D30, D86): raster order groups. Each function names a group
+// Owned fixture: raster order groups. Each function names a group
 // on a different kind of argument or output; the lowering runs the whole body inside a
-// fragment-interlock critical section. `rog_loop` has a loop (run as compiled, DESIGN D222);
+// fragment-interlock critical section. `rog_loop` has a loop (run as compiled);
 // nothing here runs on a GPU.
 #include <metal_stdlib>
 using namespace metal;
@@ -76,7 +76,7 @@ fragment float4 rog_sample(float4 position [[position]],
 }
 
 // A discard followed by a simdgroup reduction (demote semantics, not in a group): demote keeps
-// the discarded thread a helper; predication would make it a live lane (refused, D86).
+// the discarded thread a helper; predication would make it a live lane (refused).
 fragment float4 discard_then_simd(Surface in [[stage_in]]) {
     float4 c = in.color;
     if (c.a < 0.5) {

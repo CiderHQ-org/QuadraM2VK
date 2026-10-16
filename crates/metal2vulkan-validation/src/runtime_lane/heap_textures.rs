@@ -26,6 +26,7 @@
 //!   layout), so the test asserts the change, not the bytes.
 
 use super::degrade_notices::counts;
+use super::heap_metal_sizes::stacked_nil_alignment;
 use super::host_memory::{gpu_fill, gpu_read, on_device, run};
 use super::presenting::Adopted;
 use super::textures::{no_texture_alone, pattern, texel_bytes};
@@ -988,23 +989,28 @@ fn tiling_refusal(error: &Error) -> Option<LinearNeed> {
     }
 }
 
-/// Every pixel format's 16x16 2D texture of a `Shared` placement heap, read, viewed as other
-/// pixel formats, written or rendered to, is made or refused typed, the query and the call alike:
-/// where the device's optimal images take no memory a `Shared` heap lies in (the RTX 3090's), the
-/// texture is a linear image in the heap's memory, refused `HeapTextureTiling` only for what the
-/// device's linear images lack, which a `Private` heap's texture never is. Each uncompressed color
-/// format's texture made that is not floating point takes bytes through `replace_region` and gives
-/// them back through `get_bytes`. A texture of several levels, a cube, a 3D texture and an array
-/// are made or refused alike. `HEAPTEX shared` lines print each refusal for linear tiling and the
-/// counts. No colour texture is refused `NotImplemented(HeapTextureMemory)`: one whose image needs
-/// extended usage, such as a written sRGB texture, is checked format by format. `Unspecialized`
-/// takes Metal's answers: 0 bytes from the query, at 128 for a 2D texture and 16 KiB for a cube, a
-/// 3D texture or an array (an M3 Max under macOS 26.7, EV APX2-un2-m3), and no texture from the
-/// call (`TextureProblem::Unspecialized`, Metal's nil; an M4 under macOS 27.0.1, EV APX-fmt1-m4,
-/// every usage). A format Metal makes no texture of from a descriptor alone, such as a two-plane
-/// YCbCr one, takes Metal's answers too: 0 bytes from the query, at 16 for a two-plane YCbCr 2D
-/// texture and 128 for another, and nil from the call (`Error::Nil`,
-/// `TextureProblem::NoTextureOfFormat`).
+/// Every pixel format's 16x16 2D texture of a `Shared` placement heap, read, viewed as other pixel
+/// formats, written or rendered to, is made or refused typed, the query and the call alike: where
+/// the device's optimal images take no memory a `Shared` heap lies in (the RTX 3090's), the texture
+/// is a linear image in the heap's memory, refused `HeapTextureTiling` only for what the device's
+/// linear images lack, which a `Private` heap's texture never is. Each uncompressed color format's
+/// texture made that is not floating point takes bytes through `replace_region` and gives them back
+/// through `get_bytes`, and again through a second `get_bytes`: a copy the driver makes after the
+/// first read's submission must not change them (MoltenVK 1.4.1 copied a texture into its heap's
+/// memory, which is the texture's own, once a command buffer with a barrier asking for host reads
+/// completed; `image_barrier.rs` in the runtime). A texture of several levels, a cube, a 3D texture
+/// and an array are made or refused alike. `HEAPTEX shared` lines print each refusal for linear
+/// tiling and the counts, the second reads that differ among them, and the submissions on the
+/// device's staging queue (a copy engine's, where texture copies and first moves run on a family
+/// of transfers alone, `device/staging.rs` in the runtime). No colour texture is refused
+/// `NotImplemented(HeapTextureMemory)`: one whose image needs extended usage, such as a written
+/// sRGB texture, is checked format by format. `Unspecialized` takes Metal's answers: 0 bytes from
+/// the query, at 128 for a 2D texture and the device's level's alignment for a cube, a 3D texture
+/// or an array (`stacked_nil_alignment`), and no texture from the call
+/// (`TextureProblem::Unspecialized`, Metal's nil; an M4 under macOS 27.0.1, EV APX-fmt1-m4, every
+/// usage). A format Metal makes no texture of from a descriptor alone, such as a two-plane YCbCr
+/// one, takes Metal's answers too: 0 bytes from the query, at 16 for a two-plane YCbCr 2D texture
+/// and 128 for another, and nil from the call (`Error::Nil`, `TextureProblem::NoTextureOfFormat`).
 #[test]
 fn shared_heap_textures_are_made_or_refused_for_linear_tiling() {
     on_device(|device| {
@@ -1027,8 +1033,10 @@ fn shared_heap_textures_are_made_or_refused_for_linear_tiling() {
             "new_texture_at_offset",
             Problem::Texture(TextureProblem::NoTextureOfFormat),
         );
+        let staged = device.work_counts().staging_submissions;
         let (mut made, mut round_trips, mut refused) = (0usize, 0usize, Vec::new());
         let mut changed = Vec::new();
+        let mut changed_again = Vec::new();
         let mut gaps = Vec::new();
         let mut check = |what: String, mut descriptor: TextureDescriptor| {
             descriptor.resource_options = options;
@@ -1055,6 +1063,13 @@ fn shared_heap_textures_are_made_or_refused_for_linear_tiling() {
                     texture
                         .get_bytes(&mut back, row as u64, 0, region, 0, 0)
                         .unwrap_or_else(|e| panic!("{what}: {e:?}"));
+                    let mut again = vec![0xeeu8; row * 16];
+                    texture
+                        .get_bytes(&mut again, row as u64, 0, region, 0, 0)
+                        .unwrap_or_else(|e| panic!("{what}: {e:?}"));
+                    if again != src {
+                        changed_again.push(what.clone());
+                    }
                     if back != src {
                         changed.push(what);
                     }
@@ -1065,7 +1080,7 @@ fn shared_heap_textures_are_made_or_refused_for_linear_tiling() {
                     let align = match descriptor.texture_type {
                         TextureType::Type1D | TextureType::Type2D => 128,
                         TextureType::TextureBuffer => 16,
-                        _ => 16384,
+                        _ => stacked_nil_alignment(device),
                     };
                     assert_eq!(
                         (answer.size, answer.align, descriptor.pixel_format),
@@ -1136,15 +1151,21 @@ fn shared_heap_textures_are_made_or_refused_for_linear_tiling() {
             eprintln!("HEAPTEX shared refused {line}");
         }
         eprintln!(
-            "HEAPTEX shared on {}: {made} made ({round_trips} round trips), {} refused for linear \
-             tiling",
+            "HEAPTEX shared on {}: {made} made ({round_trips} round trips, {} second reads \
+             differ, {} staging queue submissions), {} refused for linear tiling",
             device.name(),
+            changed_again.len(),
+            device.work_counts().staging_submissions - staged,
             refused.len()
         );
         assert!(made > 0, "no Shared heap texture was made");
         assert!(
             changed.is_empty(),
             "bytes changed by the round trip: {changed:?}"
+        );
+        assert!(
+            changed_again.is_empty(),
+            "bytes changed between the round trip and a second read: {changed_again:?}"
         );
         assert!(
             gaps.is_empty(),
@@ -1183,12 +1204,12 @@ fn tracked(storage: StorageMode) -> ResourceOptions {
     )
 }
 
-/// A texture buffer of a heap takes Metal's answer, its row of texels at a multiple of 16 bytes
-/// (CRF heap probe 1, an M3 Max and an M4 alike, plain and validated): a placement heap places it
-/// at every multiple of 16 with its bytes inside the heap, and refuses an offset off it and bytes
-/// past the end as Metal's validation stops them (`Invalid`); an automatic heap places it first
-/// fit, answers `heap_offset` 0, counts its row in `used_size` (400 and 400 and a 16-byte buffer,
-/// 816, as Metal counted) and takes the range back when it is made aliasable or goes. The texture
+/// A texture buffer of a heap takes Metal's answer, its row of texels at a multiple of 16 bytes (a
+/// Metal heap probe, an M3 Max and an M4 alike, plain and validated): a placement heap places it at
+/// every multiple of 16 with its bytes inside the heap, and refuses an offset off it and bytes past
+/// the end as Metal's validation stops them (`Invalid`); an automatic heap places it first fit,
+/// answers `heap_offset` 0, counts its row in `used_size` (400 and 400 and a 16-byte buffer, 816,
+/// as Metal counted) and takes the range back when it is made aliasable or goes. The texture
 /// answers its heap, in a `Shared` and a `Private` heap.
 #[test]
 fn heap_texture_buffers_answer_and_place_as_metal_s_do() {
@@ -1308,12 +1329,12 @@ fn heap_texture_buffer(case: &PublicCase, index: u32, heap: &Heap, offset: u64) 
     heap.new_texture_at_offset(&descriptor, offset).unwrap()
 }
 
-/// A texture buffer of a heap is the heap's bytes from its offset, in order (CRF heap probe 1: a
-/// kernel read what a buffer over the bytes held, and its writes showed in the buffer there and
-/// nowhere else): the four texture buffers `FOUR_TEXEL_READS` reads, packed at 16-byte steps of a
-/// placement heap whose bytes a buffer over the heap wrote, give its own run's output; and the
-/// texture buffer `TEXEL_WRITER` writes, at byte 48, writes there what its own run writes and
-/// leaves the bytes around it; in a `Shared` and a `Private` heap.
+/// A texture buffer of a heap is the heap's bytes from its offset, in order (a Metal heap probe on
+/// the M3 Max and an M4: a kernel read what a buffer over the bytes held, and its writes showed in
+/// the buffer there and nowhere else): the four texture buffers `FOUR_TEXEL_READS` reads, packed at
+/// 16-byte steps of a placement heap whose bytes a buffer over the heap wrote, give its own run's
+/// output; and the texture buffer `TEXEL_WRITER` writes, at byte 48, writes there what its own run
+/// writes and leaves the bytes around it; in a `Shared` and a `Private` heap.
 #[test]
 fn a_heap_texture_buffer_is_the_heap_s_bytes() {
     on_device(|device| {
@@ -1380,10 +1401,10 @@ fn a_heap_texture_buffer_is_the_heap_s_bytes() {
     });
 }
 
-/// Two `Depth32Float` textures a shader reads, side by side in a placement heap, keep their
-/// texels (CRF heap probe 1, an M3 Max and an M4 alike: each read back as uploaded, then a buffer
-/// filled over the first one's answered bytes changed every texel of it and none of the second's).
-/// Where the device holds such a texture with a depth twin (RADV, ANV and unmeasured drivers) the
+/// Two `Depth32Float` textures a shader reads, side by side in a placement heap, keep their texels
+/// (a Metal heap probe, an M3 Max and an M4 alike: each read back as uploaded, then a buffer filled
+/// over the first one's answered bytes changed every texel of it and none of the second's). Where
+/// the device holds such a texture with a depth twin (RADV, ANV and unmeasured drivers) the
 /// answered size takes the twin's bytes too, so the second texture, uploaded before the first,
 /// keeps its texels when the first's upload writes its twin; the comparisons of both compare as a
 /// texture's outside a heap does; in a `Shared` and a `Private` heap. `HEAPTEX depth` lines print

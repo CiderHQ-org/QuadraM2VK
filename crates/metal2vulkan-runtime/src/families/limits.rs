@@ -10,7 +10,7 @@
 //! have neither imageblocks nor tile shaders.
 
 use super::features::{
-    addressed, first, gap, listed, needs_features, query, ray_tracing, refused, Check,
+    addressed, first, gap, listed, needs_any, needs_features, query, ray_tracing, refused, Check,
 };
 use super::{Column, Facts, FeatureRow, Refusal, RowState};
 use crate::capabilities::Query;
@@ -801,16 +801,20 @@ impl LimitRow {
                     l.max_vertex_output_components,
                 ),
             ]),
-            // Tessellation factors: `tessellationShader` and `maxTessellationGenerationLevel`.
-            // The patch draws that read them are built (`tessellation.rs`); what the compile
-            // layer still refuses of tessellation is the feature row's.
+            // Tessellation factors: `maxTessellationGenerationLevel` on a device that enables
+            // `tessellationShader`; elsewhere the emulation's tessellator takes Metal's every
+            // factor (`render/tessellation_scan.rs`). The patch draws that read them are built
+            // (`tessellation.rs`); what the compile layer still refuses of tessellation is the
+            // feature row's.
             L::TessellationFactor => first([
-                needs_features(f, Feature::Tessellation, &[VkFeature::TessellationShader]),
-                at_least(
-                    Feature::Tessellation,
-                    VkLimit::MaxTessellationGenerationLevel,
-                    l.max_tessellation_generation_level,
-                ),
+                match f.properties.description.has(VkFeature::TessellationShader) {
+                    true => at_least(
+                        Feature::Tessellation,
+                        VkLimit::MaxTessellationGenerationLevel,
+                        l.max_tessellation_generation_level,
+                    ),
+                    false => None,
+                },
             ]),
             // One viewport on every device; more need `multiViewport`, whose devices take at least
             // 16 (Vulkan's required `maxViewports`).
@@ -878,19 +882,17 @@ impl LimitRow {
                 l.max_texel_buffer_elements,
             )]),
             // A pass's color attachments: `maxColorAttachments` and
-            // `maxFragmentOutputAttachments`.
-            L::ColorRenderTargets => first([
-                at_least(
-                    Feature::InterfaceComponents,
-                    VkLimit::MaxColorAttachments,
-                    l.max_color_attachments,
-                ),
-                at_least(
-                    Feature::InterfaceComponents,
-                    VkLimit::MaxFragmentOutputAttachments,
-                    l.max_fragment_output_attachments,
-                ),
-            ]),
+            // `maxFragmentOutputAttachments`. Past the lesser, a pass draws its colors in groups
+            // of that many (`render/color_groups.rs`), whose refusals keep the row a gap.
+            L::ColorRenderTargets => {
+                let width = l
+                    .max_color_attachments
+                    .min(l.max_fragment_output_attachments);
+                first([match need {
+                    Need::AtLeast(n) if u64::from(width) < n => gap(G::ColorAttachmentGroups),
+                    _ => None,
+                }])
+            }
             // `[[point_size]]`: the device clamps a point to its `pointSizeRange`, whose upper
             // bound (in whole pixels, `Limits::max_point_size`) must reach Metal's largest point;
             // the translation stores a larger size as Metal's.
@@ -904,18 +906,20 @@ impl LimitRow {
             // `framebufferDepthSampleCounts`.
             L::RenderPassSampleCount => first([sample_count(f, need)]),
             // Vertex amplification: multiview, whose views past `maxMultiviewViewCount` draw one
-            // amplification at a time through the layer output, then the runtime's query (the
-            // feature row holds the tessellation pipelines not implemented).
+            // amplification at a time, storing the slice through the layer output or the
+            // generated geometry stage, then the runtime's query (the feature row holds the
+            // tessellation pipelines not implemented).
             L::VertexAmplificationCount => first([
                 needs_features(f, Feature::VertexAmplification, &[VkFeature::Multiview]),
                 match need {
-                    Need::AtLeast(n) if n > u64::from(l.max_multiview_view_count) => {
-                        needs_features(
-                            f,
-                            Feature::VertexAmplification,
+                    Need::AtLeast(n) if n > u64::from(l.max_multiview_view_count) => needs_any(
+                        f,
+                        Feature::VertexAmplification,
+                        &[
                             &[VkFeature::ShaderOutputLayer],
-                        )
-                    }
+                            &[VkFeature::GeometryShader],
+                        ],
+                    ),
                     _ => None,
                 },
                 match need {

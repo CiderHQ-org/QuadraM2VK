@@ -1,4 +1,4 @@
-// Owned fixture (WP-UNK, DESIGN D283): reads and the width query of 1D texture arrays
+// Owned fixture: reads and the width query of 1D texture arrays
 // (`air.read_texture_1d_array`, `air.get_width_texture_1d_array`). Lane i reads texel
 // (i mod w, (i / w) mod n) of three 1D arrays of w texels and n slices: `float` through a read
 // texture at 32-bit coordinates, `uint` through a read texture at 16-bit coordinates, and `half`

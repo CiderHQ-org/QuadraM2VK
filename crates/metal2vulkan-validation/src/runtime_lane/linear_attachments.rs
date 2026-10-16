@@ -62,12 +62,24 @@
 //!   a panel, a render-target barrier, then a draw sampling the surface's own texture at its
 //!   pixel: the pages hold the private texture's pass. A cleared one renders in place (a command
 //!   of it may read the bytes); one apart is split at the barrier, merged and copied in again.
+//!   Where the device renders the texture's own image as any other, the pass alone records its
+//!   instances inline (`render/inline_first.rs`, `render/inline_splits.rs`), counted.
+//! - [`a_detach_while_a_pass_over_host_pages_is_open_fails_its_command_buffer`] and
+//!   [`a_detach_while_a_pass_in_a_no_copy_heap_is_open_fails_its_command_buffer`]: the bytes
+//!   detached after the pass's first draw: the command buffer fails `DetachedBacking`, the pages
+//!   keep their bytes, and the validation layer reports nothing, where the pass records inline
+//!   too (`render/inline_first.rs`; a heap's texture of its own image does, unless the rule binds
+//!   it).
+//! - [`a_rebind_while_a_pass_over_host_pages_is_open_is_refused`]: refused `EncodedUses`, before
+//!   any draw.
 //!
 //! Each prints the texture's form (`LINEAR-ATTACHMENT`).
 
 use super::degrade_notices::{counts, on_device};
-use super::host_memory::{counting, no_copy, not_importable, Mapping, GUEST_PAGE};
+use super::host_memory::{counting, no_copy, not_importable, Mapping, Seen, GUEST_PAGE};
+use super::no_copy_heaps::{no_copy_heap, shared, HEAP};
 use super::no_copy_textures::{blending, floats, rects_beside, staged};
+use super::rebinds::rebind;
 use super::{Messages, WAIT};
 use crate::air_library::AirLibrary;
 use metal2vulkan::library::{FunctionConstantValue, FunctionConstantValues};
@@ -79,11 +91,14 @@ use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor
 use metal2vulkan::vk::{Format, FormatFeatureFlags2};
 use metal2vulkan_devtools::llvm_assemble;
 use metal2vulkan_runtime::{
-    BlitOption, Buffer, ClearColor, CommandQueue, Degradation, Device, EventRef, LoadAction,
-    Origin, PipelineOptions, RenderPassDescriptor, RenderPipelineState, ResourceOptions,
-    ScissorRect, Size, StoreAction, Texture, TextureDescriptor, WorkCounts,
+    BlitOption, Buffer, ClearColor, CommandBufferError, CommandQueue, Degradation, Device, Error,
+    EventRef, HeapType, Invalid, LoadAction, Origin, PipelineOptions, Problem, RebindProblem,
+    RenderPassDescriptor, RenderPipelineState, ResourceOptions, ScissorRect, Size, StoreAction,
+    Texture, TextureDescriptor, WorkCounts,
 };
 use std::path::Path;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// The kind a pass that renders a linear image apart takes.
@@ -1051,7 +1066,9 @@ fn sampling_pass(
 /// the pass renders in place, loaded or cleared (a command of it may read the texture's bytes,
 /// so no clear is copied), announcing no `linear-attachment-clear-copies`; beside a stencil
 /// attachment apart, split at the barrier: the stand-in merged back (or, cleared, copied back)
-/// and copied in again before the reading draw.
+/// and copied in again before the reading draw. Where the device renders the texture's own
+/// image as any other, the pass alone records both its instances inline, the reading draw's
+/// after the split (`WorkCounts::inline_split_instances`).
 fn sampling(start: usize, load: LoadAction, stencil: bool) {
     on_device(|device, messages| {
         messages.take_notices();
@@ -1059,9 +1076,10 @@ fn sampling(start: usize, load: LoadAction, stencil: bool) {
             return;
         };
         let rule = by_the_rule(device) && aliased(&texture);
+        let inline = aliased(&texture) && !by_the_rule(device) && !stencil;
         println!(
             "LINEAR-ATTACHMENT sampled after a barrier on {}: {load:?}, stencil {stencil}, by the \
-             rule {rule}",
+             rule {rule}, inline {inline}",
             device.name()
         );
         let library = zwd_library(device);
@@ -1083,6 +1101,16 @@ fn sampling(start: usize, load: LoadAction, stencil: bool) {
         let expected = read_out(&queue, &reference, WIDE);
         let before = device.work_counts();
         sampling_pass(&queue, &states, &texture, load, stencil);
+        let inlined = inlined(device, &before);
+        println!("LINEAR-ATTACHMENT sampled after a barrier: inline counts {inlined:?}");
+        assert_eq!(
+            inlined,
+            match inline {
+                true => [1, 1, 1],
+                false => [0, 0, 0],
+            },
+            "passes inline, of them split, and instances after a split inline"
+        );
         let pages = mapping.read(0..n);
         let differ = (0..n / 4)
             .filter(|&t| pages[t * 4..t * 4 + 4] != expected[t * 4..t * 4 + 4])
@@ -1103,6 +1131,17 @@ fn sampling(start: usize, load: LoadAction, stencil: bool) {
         drop((texture, buffer));
         drop(mapping);
     });
+}
+
+/// The passes since `before` whose first instance recorded inline, those of them split, and
+/// their instances after a split that recorded inline too.
+fn inlined(device: &Device, before: &WorkCounts) -> [u64; 3] {
+    let after = device.work_counts();
+    [
+        after.inline_passes - before.inline_passes,
+        after.inline_passes_split - before.inline_passes_split,
+        after.inline_split_instances - before.inline_split_instances,
+    ]
 }
 
 /// [`sampling`] of a loaded pass: in place.
@@ -1128,6 +1167,184 @@ fn a_pass_apart_sampling_its_surface_after_a_barrier_reads_its_draws() {
 #[test]
 fn a_cleared_pass_apart_sampling_its_surface_after_a_barrier_reads_its_draws() {
     sampling(53, LoadAction::Clear, true);
+}
+
+/// A loaded pass over `texture`, whose bytes over host pages `detach` detaches while the pass is
+/// open, after its first draw (the panel of [`sampling_pass`] over `size`), then the barrier and
+/// the draw sampling the texture: the command buffer fails `DetachedBacking` and runs nothing.
+/// The passes whose first instance recorded inline (`WorkCounts::inline_passes`).
+fn detached_in_an_open_pass(
+    device: &Device,
+    texture: &Texture,
+    size: [u64; 2],
+    detach: impl FnOnce() -> Result<bool, Error>,
+) -> u64 {
+    let library = zwd_library(device);
+    let panel = zwd_state(device, &library, ("zwd_panel", 3), Some(over()), false);
+    let reader = zwd_state(
+        device,
+        &library,
+        ("zwd_mask_nearest", 0),
+        Some(over()),
+        false,
+    );
+    let queue = device.new_command_queue().unwrap();
+    let before = device.work_counts();
+    let mut descriptor = RenderPassDescriptor::new();
+    let attachment = &mut descriptor.color_attachments[0];
+    attachment.texture = Some(texture.clone());
+    attachment.load_action = LoadAction::Load;
+    attachment.store_action = StoreAction::Store;
+    let [w, h] = size.map(|v| v as f32);
+    let command_buffer = queue.command_buffer().unwrap();
+    let mut encoder = command_buffer.render_command_encoder(&descriptor).unwrap();
+    let drawn = zwd_shape_in(
+        [16.0, 8.0, w - 16.0, h - 8.0],
+        [0.5, 0.25, 0.125, 0.5],
+        [0.0; 4],
+        size,
+    );
+    encoder.set_render_pipeline_state(&panel).unwrap();
+    encoder.set_vertex_bytes(&drawn, 0).unwrap();
+    encoder.set_fragment_bytes(&drawn, 0).unwrap();
+    encoder
+        .draw_primitives(PrimitiveType::Triangle, 0, 6, 1, 0)
+        .unwrap();
+    assert_eq!(detach(), Ok(true), "the detach");
+    encoder.memory_barrier_with_scope(
+        BarrierScope::RENDER_TARGETS,
+        RenderStages::FRAGMENT,
+        RenderStages::FRAGMENT,
+    );
+    let read = zwd_shape_in(
+        [0.0, 0.0, w, h],
+        [0.25, 0.375, 0.5, 0.5],
+        [1.0, 0.0, 0.0, 0.0],
+        size,
+    );
+    encoder.set_render_pipeline_state(&reader).unwrap();
+    encoder.set_fragment_texture(Some(texture), 0).unwrap();
+    encoder.set_vertex_bytes(&read, 0).unwrap();
+    encoder.set_fragment_bytes(&read, 0).unwrap();
+    encoder
+        .draw_primitives(PrimitiveType::Triangle, 0, 6, 1, 0)
+        .unwrap();
+    encoder.end_encoding().unwrap();
+    command_buffer.commit().unwrap();
+    command_buffer.wait_until_completed_for(WAIT).unwrap();
+    assert_eq!(
+        command_buffer.error(),
+        Some(CommandBufferError::DetachedBacking)
+    );
+    device.work_counts().inline_passes - before.inline_passes
+}
+
+/// [`detached_in_an_open_pass`] over a [`WIDE`] render target over a no-copy buffer's host pages
+/// (counting from 59): the pages keep their bytes, and the validation layer reports nothing. The
+/// pass holds the pages from its open (`render.rs`), so the images over them the detach replaces
+/// stay until the command buffer goes (`detach.rs`). Where the texture is its own image outside
+/// `VK_NV_linear_color_attachment`'s rule ([`by_the_rule`]), the pass records inline.
+#[test]
+fn a_detach_while_a_pass_over_host_pages_is_open_fails_its_command_buffer() {
+    on_device(|device, messages| {
+        messages.take_notices();
+        let Some((mapping, buffer, texture)) = surface_of(device, 59, WIDE[0], WIDE[1]) else {
+            return;
+        };
+        let n = (WIDE[0] * WIDE[1] * TEXEL) as usize;
+        let inline = detached_in_an_open_pass(device, &texture, WIDE, || buffer.detach_backing());
+        let own = aliased(&texture) && !by_the_rule(device);
+        println!(
+            "LINEAR-ATTACHMENT detached in an open pass on {}: aliased {}, by the rule {}, inline \
+             {inline}",
+            device.name(),
+            aliased(&texture),
+            by_the_rule(device)
+        );
+        if own {
+            assert_eq!(inline, 1, "passes inline");
+        }
+        assert!(
+            mapping.read(0..n) == counting(n, 59),
+            "the pages changed: the command buffer ran"
+        );
+        drop((texture, buffer));
+        drop(mapping);
+    });
+}
+
+/// [`detached_in_an_open_pass`] over a render target in a no-copy heap, detached while the pass is
+/// open: where the texture is an image of its own (no `shadowed-texture` announced) that the device
+/// renders without `VK_NV_linear_color_attachment`'s rule ([`by_the_rule`]; a pass of an image the
+/// rule binds records into a secondary), the pass's first instance records inline into a command
+/// buffer it holds, naming the image's view from its first draw; the detach leaves that image and
+/// view until the command buffer goes, so the command buffer stays valid to its end, and the
+/// validation layer reports nothing.
+#[test]
+fn a_detach_while_a_pass_in_a_no_copy_heap_is_open_fails_its_command_buffer() {
+    on_device(|device, messages| {
+        messages.take_notices();
+        let mapping = Mapping::anonymous(HEAP);
+        // SAFETY: the mapping outlives the heap, dropped after it.
+        let Some(heap) =
+            (unsafe { no_copy_heap(device, mapping.pointer(), HeapType::Placement, None) })
+        else {
+            return;
+        };
+        let mut d = TextureDescriptor::texture_2d(PixelFormat::BGRA8Unorm, W, H, false);
+        d.resource_options = shared();
+        d.usage = TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ;
+        let texture = heap.new_texture_at_offset(&d, 0).unwrap();
+        let shadowed = counts(&messages.take_notices()).contains_key(&Degradation::ShadowedTexture);
+        let rule = by_the_rule(device);
+        let inline = detached_in_an_open_pass(device, &texture, [W, H], || heap.detach_backing());
+        println!(
+            "LINEAR-ATTACHMENT detached in an open pass in a no-copy heap on {}: shadowed \
+             {shadowed}, by the rule {rule}, inline {inline}",
+            device.name()
+        );
+        if !shadowed && !rule {
+            assert_eq!(inline, 1, "passes inline");
+        }
+        drop((texture, heap));
+        drop(mapping);
+    });
+}
+
+/// A rebind of a no-copy buffer under a pass's render target while the pass is open, before any
+/// draw, is refused `EncodedUses`: the render encoder uses its attachments' bytes from its open.
+#[test]
+fn a_rebind_while_a_pass_over_host_pages_is_open_is_refused() {
+    on_device(|device, _| {
+        let Some((mapping, buffer, texture)) = surface(device, 61) else {
+            return;
+        };
+        let queue = device.new_command_queue().unwrap();
+        let mut descriptor = RenderPassDescriptor::new();
+        let attachment = &mut descriptor.color_attachments[0];
+        attachment.texture = Some(texture.clone());
+        attachment.load_action = LoadAction::Load;
+        attachment.store_action = StoreAction::Store;
+        let command_buffer = queue.command_buffer().unwrap();
+        let encoder = command_buffer.render_command_encoder(&descriptor).unwrap();
+        let seen = Arc::new(Seen::default());
+        let other = Mapping::anonymous(buffer.length() as usize);
+        assert_eq!(
+            rebind(&buffer, other, &seen),
+            Err(Error::Invalid(Invalid::new(
+                "rebind_bytes_no_copy",
+                Problem::Rebind(RebindProblem::EncodedUses)
+            )))
+        );
+        assert_eq!(
+            seen.runs.load(Ordering::SeqCst),
+            0,
+            "a refused rebind's deallocator ran"
+        );
+        encoder.end_encoding().unwrap();
+        drop((command_buffer, texture, buffer));
+        drop(mapping);
+    });
 }
 
 /// A render target over host pages is aliased where the device renders it by the rule, and a

@@ -1,4 +1,4 @@
-// Owned fixture (WP-DFL, docs/TODO.md 2.11): what Metal answers for the precise trigonometric
+// Owned fixture: what Metal answers for the precise trigonometric
 // functions called in a module compiled with the default fast math, whose calls then carry every
 // fast-math flag, at NaN operands of each payload and sign. Thread `i` reads one float pattern x
 // from `in[i]` and writes 12 words to `out[3i .. 3i + 2]`: precise::sin(x), precise::cos(x), the
@@ -7,7 +7,7 @@
 //
 // sincos's cosine, `c`, is declared ahead of the switch's only label (on tid >> 31, zero for
 // every thread), so every path into the switch bypasses its declaration and Clang emits no
-// lifetime marker for it (as in mlo_half_trig_inf.metal, DESIGN D306).
+// lifetime marker for it (as in mlo_half_trig_inf.metal).
 #include <metal_stdlib>
 using namespace metal;
 

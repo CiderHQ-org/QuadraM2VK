@@ -24,9 +24,9 @@ impl Ledger {
     }
 
     /// Fences given back as their command buffers finished.
-    fn give(&mut self, fences: Vec<vk::Fence>) {
-        let over = self.fences.keep(fences);
-        self.released.extend(over);
+    fn give(&mut self, mut fences: Vec<vk::Fence>) {
+        self.fences.keep(&mut fences);
+        self.released.extend(fences);
     }
 
     /// The fences idle now (taken back after counting).
@@ -36,7 +36,8 @@ impl Ledger {
             idle.push(fence);
         }
         let count = idle.len();
-        assert!(self.fences.keep(idle).is_empty());
+        self.fences.keep(&mut idle);
+        assert!(idle.is_empty());
         count
     }
 }

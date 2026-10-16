@@ -1,4 +1,4 @@
-// Owned fixture (WP-RRS, DESIGN D408 item 7): the tile function WP-RRS's Metal probe RRS-tilew
+// Owned fixture: the tile function our Metal probe RRS-tilew
 // wrote an indexed indirect draw's arguments or indices with, in the form of the vertex writer
 // `icb_render_replay_template` that `runtime_lane::indirect_draws` writes them with: thread
 // (0, 0) of each tile writes `params[0] * (k + 1) + params[1]` to word `k` of `out`, for `k` 0

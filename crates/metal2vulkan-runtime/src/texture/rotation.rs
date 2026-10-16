@@ -106,8 +106,9 @@ impl Texture {
     }
 
     /// The texture a render pass renders, or resolves, into for this one: a texture buffer's
-    /// attachment twin (`Texture::attachment_twin`), a rotated texture's twin (the module docs),
-    /// and otherwise the texture itself. Refused as the twin is.
+    /// attachment twin (`Texture::attachment_twin`), a rotated texture's twin (the module docs), a
+    /// view's render shadow where its bindings present it in its image's own format
+    /// (`Texture::view_render_shadow`), and otherwise the texture itself. Refused as the twin is.
     pub(crate) fn pass_texture(&self) -> Result<Texture, Error> {
         let record = self.record();
         if record.texture_type == TextureType::TextureBuffer {
@@ -118,6 +119,11 @@ impl Texture {
         // (`texture/surface_depth.rs`).
         if self.over_buffer() && is_depth_stencil(record.pixel_format) {
             return self.surface_depth_twin();
+        }
+        // A view its bindings present in its image's own format renders into its render shadow
+        // (`texture/view_shadow.rs`).
+        if record.read_as.is_some() {
+            return self.view_render_shadow("render_command_encoder");
         }
         let rotation = record.presented.rotation;
         if rotation == 0 {
@@ -233,6 +239,7 @@ impl Device {
             image.raw.get(),
             image.identity,
             texture_aspects(image.plan()),
+            None,
         )?;
         copies.drops_writes = true;
         self.degrade(Degradation::ShadowedTexture, || {

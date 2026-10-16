@@ -1,4 +1,4 @@
-// Owned fixture (WP-BCU, DESIGN D234): which sample forms and texture types Metal's bicubic
+// Owned fixture: which sample forms and texture types Metal's bicubic
 // filter applies to. The front end admits a bicubic sampler only with both filters bicubic and no
 // mip filter, so the level of detail selects neither a level nor a filter; this checks that. Each
 // lane samples a one-level 2D texture implicitly (the corpus form), at `level(0)`, at

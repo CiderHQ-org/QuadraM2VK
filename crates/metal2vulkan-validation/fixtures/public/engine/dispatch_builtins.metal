@@ -1,4 +1,4 @@
-// Owned fixture (WP-L10, DESIGN D4, D54): kernel dispatch builtins, barriers, and fences.
+// Owned fixture: kernel dispatch builtins, barriers, and fences.
 // Each marker kernel reads one scalar builtin only as a switch selector and stores a constant to
 // out[0] for the threads whose builtin matches the first case (the second case never matches),
 // so its lowering needs no arithmetic. Threads that store, store the same value. Loop-free.

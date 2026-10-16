@@ -2521,6 +2521,12 @@ fn known_families_decode_or_are_listed() {
         "air.convert.f.f32.f.f8e4m3",
         "air.convert.s.i32.f.f8e4m3fn",
         "air.convert.u.i8.f.f8e5m2",
+        // A multisample imageblock's operations: listed, not decoded (the single-sample ones
+        // above, its size and the implicit loads and stores, decode).
+        "air.get_imageblock_samples",
+        "air.get_imageblock_num_colors",
+        "air.get_color_coverage_mask",
+        "air.store.implicit_imageblock.mask.v4f16",
     ];
     for name in names {
         let listed = undecoded_family(name).is_some();
@@ -2541,9 +2547,11 @@ fn known_families_decode_or_are_listed() {
 }
 
 /// The typed undecoded families are undecoded `air.*` families, classified by their ABI prefix.
-/// Binding an intersection function table is a function table (dynamic call). Decoded siblings of
-/// these families (and ray intersection, decoded, and the render commands' barriers and object and
-/// mesh setters, decoded) and other undecoded names are not classified here.
+/// Binding an intersection function table is a function table (dynamic call), and a multisample
+/// imageblock's operations are imageblocks. Decoded siblings of these families (and ray
+/// intersection, decoded, the single-sample imageblock operations, and the render commands'
+/// barriers and object and mesh setters, decoded) and other undecoded names are not classified
+/// here.
 #[test]
 fn undecoded_features_are_undecoded_prefixes() {
     for (prefix, _) in UNDECODED_FEATURES {
@@ -2560,8 +2568,27 @@ fn undecoded_features_are_undecoded_prefixes() {
         Some(Feature::IntersectionFunctionTable),
         "{name}"
     );
+    // A multisample imageblock's operations, as Apple's compiler declares them, are imageblocks.
+    for name in [
+        "air.get_imageblock_samples",
+        "air.get_imageblock_num_colors",
+        "air.get_color_coverage_mask",
+        "air.store.implicit_imageblock.mask.f32",
+        "air.store.implicit_imageblock.mask.v4f16",
+    ] {
+        assert_eq!(classify_self(name), DeclClass::Unknown, "{name}");
+        assert_eq!(
+            undecoded_feature(name.as_bytes()),
+            Some(Feature::Imageblocks),
+            "{name}"
+        );
+    }
     // Decoded members of these families are refused by lowering, not classified here.
     for name in [
+        "air.get_imageblock_width",
+        "air.get_imageblock_height",
+        "air.load.implicit_imageblock.f32",
+        "air.store.implicit_imageblock.v4f16",
         "air.intersect",
         "air.intersect.instancing.triangle_data",
         "air.get_null_intersection_function_table",

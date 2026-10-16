@@ -1,4 +1,4 @@
-// Owned fixture (WP-FMX, DESIGN D253): Metal's `atan2` at every pair of IEEE special operands,
+// Owned fixture: Metal's `atan2` at every pair of IEEE special operands,
 // compiled without fast math (`-fno-fast-math`), so no call carries `nnan`, `ninf`, or `nsz` and
 // C99 Annex F's answers are defined. `atan2` and `precise::atan2` are `air.atan2.f32` (one call),
 // `fast::atan2` is `air.fast_atan2.f32`, and the half call is `air.atan2.f16`.

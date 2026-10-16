@@ -195,10 +195,10 @@ fn binding_views_take_the_plans_view_and_the_records_range_and_swizzle() {
     }
 }
 
-/// A swizzled view of a texture with shader writes (RT5 probe 2 `rw.view.read`, `rw.view.write`,
-/// the M3 Max and the M4): Metal's validation stops a write binding of it, and plain Metal reads
-/// it swizzled and writes through it with the swizzle undone, which a Vulkan storage view, taking
-/// no swizzle, cannot. Where the binding plan's function applies the swizzle
+/// A swizzled view of a texture with shader writes (Metal probe cases `rw.view.read` and
+/// `rw.view.write`, the M3 Max and the M4): Metal's validation stops a write binding of it, and
+/// plain Metal reads it swizzled and writes through it with the swizzle undone, which a Vulkan
+/// storage view, taking no swizzle, cannot. Where the binding plan's function applies the swizzle
 /// (`ImageViewDesc::shader_swizzle`, a storage slot's) the view takes none; elsewhere (a texture a
 /// function reaches through its handle) it stays the runtime's gap, not Metal's refusal.
 #[test]

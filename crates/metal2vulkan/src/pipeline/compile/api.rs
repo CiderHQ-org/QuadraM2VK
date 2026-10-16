@@ -38,8 +38,9 @@ use crate::pipeline::artifact::{
 };
 use crate::pipeline::compile::key::{function_key, pipeline_key, render_descriptor_key};
 use crate::pipeline::compile::{
-    compile_stage, compile_stage_from, dynamic_order, guarded, linked_keys, stage_inputs,
-    FragmentPass, InputsFrom, RawIndices, StageEntries, NO_PRIMITIVE_VARYINGS,
+    color_group, compile_stage, compile_stage_from, dynamic_order, guarded, linked_keys,
+    primitive_id_carried_on, reads_primitive_id_varying, stage_inputs, FragmentPass, InputsFrom,
+    RawIndices, StageEntries, NO_PRIMITIVE_VARYINGS,
 };
 use crate::pipeline::descriptor::{
     ComputePipelineDescriptor, FunctionDescriptor, MeshPipelineDescriptor,
@@ -47,6 +48,7 @@ use crate::pipeline::descriptor::{
 };
 use crate::pipeline::facts::RuntimeFact;
 use crate::pipeline::graphics::{GraphicsState, StorageAttachmentView};
+use crate::pipeline::link::geometry;
 use crate::pipeline::link::mesh::synthesized_stage as mesh_vertex_stage;
 use crate::pipeline::link::tessellation::{note_evaluation_stage, synthesized_stages};
 use crate::pipeline::link::{link, LinkInputs, Linked, RenderLinkInputs};
@@ -283,9 +285,25 @@ impl Device {
     ) -> Result<RenderPipelineKeys, Error> {
         guarded(|| {
             crate::pipeline::private_state::check_render(&d.private)?;
-            let zeroed = with_zeroed_colors(d, v)?;
-            let d = zeroed.as_ref();
             let p = self.profile();
+            // A color group's variant is the pipeline of its group's attachments
+            // (`render_pipeline`).
+            let group = color_group::group(d, v, p)?;
+            let grouped = group.as_ref().map(|g| color_group::descriptor(d, g));
+            let zeroed = with_zeroed_colors(grouped.as_ref().unwrap_or(d), v)?;
+            let d = zeroed.as_ref();
+            // The vertex function writes the primitive ID a fragment function reads from its
+            // varying, on a device without a fragment `PrimitiveId` or behind an emulated
+            // post-tessellation vertex function.
+            let primitive_id = match primitive_id_carried_on(p) {
+                true => reads_primitive_id_varying(
+                    d.fragment.as_ref(),
+                    d.max_fragment_call_stack_depth,
+                    entries,
+                    &mut Meter::new(b),
+                )?,
+                false => false,
+            };
             let (vertex, vertex_inputs, written, varyings, uniform) = match &d.vertex {
                 StageSource::Function(f) => {
                     let s = stage_inputs(
@@ -295,6 +313,8 @@ impl Device {
                             d.vertex_descriptor.as_ref(),
                             v,
                             d.max_vertex_call_stack_depth,
+                            primitive_id,
+                            d.tessellation.as_ref(),
                         ),
                         entries,
                         &mut Meter::new(b),
@@ -321,6 +341,7 @@ impl Device {
                     // Whether the function applies the private sample mask itself shows only
                     // in its module, so a pipeline whose mask drops a sample lowers it once.
                     let mut pass: FragmentPass<'_> = d.into();
+                    pass.color_group = group.as_ref();
                     if crate::pipeline::private_state::applied_sample_mask(d).is_some() {
                         let inputs = InputsFrom::Fragment(
                             pass,
@@ -362,7 +383,7 @@ impl Device {
                     b"render",
                     &self.profile_fingerprint(),
                     &stages,
-                    &render_fields(d),
+                    &(render_fields(d) + &variant_fields(v)),
                 ),
                 vertex,
                 fragment,
@@ -401,9 +422,11 @@ impl Device {
     }
 
     /// Compile the mesh render pipeline `d` under budget `b`: its object function (when it has one)
-    /// and its mesh function as they compile alone, and its fragment function for the mesh
-    /// function's primitive outputs (`LoweringInputs::primitive_varyings`), its raw render target
-    /// slice and viewport indices and the pipeline's attachments, as a render pipeline's. The
+    /// as it compiles alone, its mesh function as it compiles alone but for a payload that holds
+    /// at least the object function's (`LoweringInputs::object_payload`), and its fragment
+    /// function for the mesh function's primitive outputs (`LoweringInputs::primitive_varyings`),
+    /// its raw render target slice and viewport indices and the pipeline's attachments, as a
+    /// render pipeline's. The
     /// result is a [`RenderPipeline`] whose stages are the object stage (`TASK_EXT`), the mesh
     /// stage (`MESH_EXT`) and the fragment stage: it has no vertex input and no input assembly (its
     /// `GraphicsState::topology` is unused), and Metal's draws of it are `drawMeshThreadgroups` and
@@ -458,7 +481,10 @@ impl Device {
             }
             None => None,
         };
-        let mesh_inputs = v.lowering_inputs(Stage::Mesh);
+        // The mesh function reads its payload within the object function's
+        // (`LoweringInputs::object_payload`).
+        let mut mesh_inputs = v.lowering_inputs(Stage::Mesh);
+        mesh_inputs.object_payload = object.as_ref().and_then(|o| o.artifact().interface.payload);
         let mesh = self.stage(&d.mesh, InputsFrom::Given(&mesh_inputs), m)?;
         let written = raw_indices_written(mesh.artifact());
         let primitive = primitive_varyings_written(mesh.artifact());
@@ -486,7 +512,7 @@ impl Device {
             check_call_stack(c.artifact(), 1)?;
         }
         let artifacts: Vec<&FunctionArtifact> = compiled.iter().map(|c| c.artifact()).collect();
-        let linked = link(&artifacts, &LinkInputs::mesh(d), p)?;
+        let mut linked = link(&artifacts, &LinkInputs::mesh(d), p)?;
         let mut stages = Vec::with_capacity(artifacts.len());
         for (i, a) in artifacts.iter().enumerate() {
             stages.push(stage_module(a, &linked, i)?);
@@ -516,16 +542,26 @@ impl Device {
                 .ok_or_else(|| invariant("an emulated mesh pipeline without its compute stage"))?;
             stages.insert(at + 1, module);
         }
+        let mut dependencies = dependencies(&artifacts, self);
+        let depth = (&mut linked, &mut stages, &mut dependencies);
+        if let Some(r) = depth16_stage((d.into(), v, d.fragment.is_none()), depth, p, m)? {
+            requirements = p.union_requirements(&requirements, &r);
+        }
         let (graphics, requirements) = graphics_requirements(requirements, &linked, &artifacts, p)?;
         let profile = self.profile_fingerprint();
         Ok(RenderPipeline {
-            key: pipeline_key(b"mesh", &profile, &keys, &mesh_fields(d)),
+            key: pipeline_key(
+                b"mesh",
+                &profile,
+                &keys,
+                &(mesh_fields(d) + &variant_fields(v)),
+            ),
             profile,
             stages,
             layout: linked.layout,
             vertex_input: linked.vertex_input,
             graphics,
-            dependencies: dependencies(&artifacts, self),
+            dependencies,
             interface: linked.interface,
             requirements,
             variant_bits: artifacts.iter().fold(0, |bits, a| bits | a.variant_bits),
@@ -534,6 +570,24 @@ impl Device {
 
     /// A stage from its source: compiled now under `inputs`, or taken as compiled (link and
     /// relocate only) when it was compiled for this device's profile.
+    /// [`Device::stage`] of a render pipeline's fragment stage `src`, reading a `Function`
+    /// stage's specialized entry from `entries` where the pipeline made one there
+    /// (`reads_primitive_id_varying`).
+    fn fragment_stage(
+        &self,
+        src: &StageSource,
+        inputs: InputsFrom<'_>,
+        entries: Option<&StageEntries>,
+        m: &mut Meter,
+    ) -> Result<CompiledFunction, Error> {
+        match (src, entries) {
+            (StageSource::Function(fd), Some(e)) => {
+                compile_stage_from(fd, self.profile(), inputs, e, m)
+            }
+            _ => self.stage(src, inputs, m),
+        }
+    }
+
     fn stage(
         &self,
         src: &StageSource,
@@ -644,7 +698,9 @@ impl Device {
         })
     }
 
-    /// [`Device::compile_render_variant`] with the caller's meter.
+    /// [`Device::compile_render_variant`] with the caller's meter. A variant of one of the
+    /// pipeline's color groups (`VariantKey::color_group`) compiles and links as the pipeline of
+    /// its group's attachments (`color_group`), its key's choices of colors naming the group's.
     pub(crate) fn render_pipeline(
         &self,
         d: &RenderPipelineDescriptor,
@@ -652,15 +708,37 @@ impl Device {
         m: &mut Meter,
     ) -> Result<RenderPipeline, Error> {
         crate::pipeline::private_state::check_render(&d.private)?;
-        let zeroed = with_zeroed_colors(d, v)?;
-        let d = zeroed.as_ref();
         let p = self.profile();
+        let group = color_group::group(d, v, p)?;
+        let grouped = group.as_ref().map(|g| color_group::descriptor(d, g));
+        let zeroed = with_zeroed_colors(grouped.as_ref().unwrap_or(d), v)?;
+        let d = zeroed.as_ref();
+        let pass = || {
+            let mut pass = FragmentPass::from(d);
+            pass.color_group = group.as_ref();
+            pass
+        };
+        // On a device without a fragment `PrimitiveId` or without `tessellationShader`, whether
+        // the vertex function writes the primitive ID's varying: the fragment entry specialized
+        // for that is the one its compile reads.
+        let entries = primitive_id_carried_on(p).then(StageEntries::new);
+        let primitive_id = match &entries {
+            Some(e) => reads_primitive_id_varying(
+                d.fragment.as_ref(),
+                d.max_fragment_call_stack_depth,
+                e,
+                m,
+            )?,
+            None => false,
+        };
         let vertex = self.stage(
             &d.vertex,
             InputsFrom::Vertex(
                 d.vertex_descriptor.as_ref(),
                 v,
                 d.max_vertex_call_stack_depth,
+                primitive_id,
+                d.tessellation.as_ref(),
             ),
             m,
         )?;
@@ -671,36 +749,36 @@ impl Device {
         let fragment = match &d.fragment {
             Some(f @ StageSource::Function(_)) => {
                 let inputs = InputsFrom::Fragment(
-                    d.into(),
+                    pass(),
                     v,
                     written,
                     &NO_PRIMITIVE_VARYINGS,
                     Some(&varyings),
                     &uniform,
                 );
-                let compiled = self.stage(f, inputs, m)?;
+                let compiled = self.fragment_stage(f, inputs, entries.as_ref(), m)?;
                 // Compiled again applying the private sample mask itself where it could tell
                 // Vulkan's mask from Metal's.
                 match crate::pipeline::private_state::shader_sample_mask(d, compiled.artifact()) {
                     Some(mask) => {
-                        let mut pass: FragmentPass<'_> = d.into();
-                        pass.sample_mask = Some(mask);
+                        let mut masked = pass();
+                        masked.sample_mask = Some(mask);
                         let inputs = InputsFrom::Fragment(
-                            pass,
+                            masked,
                             v,
                             written,
                             &NO_PRIMITIVE_VARYINGS,
                             Some(&varyings),
                             &uniform,
                         );
-                        Some(self.stage(f, inputs, m)?)
+                        Some(self.fragment_stage(f, inputs, entries.as_ref(), m)?)
                     }
                     None => Some(compiled),
                 }
             }
             Some(f) => {
                 let inputs = InputsFrom::Fragment(
-                    d.into(),
+                    pass(),
                     v,
                     written,
                     &NO_PRIMITIVE_VARYINGS,
@@ -716,12 +794,16 @@ impl Device {
         }
         let compiled: Vec<&CompiledFunction> = std::iter::once(&vertex).chain(&fragment).collect();
         let artifacts: Vec<&FunctionArtifact> = compiled.iter().map(|c| c.artifact()).collect();
-        let linked = link(&artifacts, &LinkInputs::render_variant(d, v), p)?;
+        let mut linked = link(
+            &artifacts,
+            &LinkInputs::render_variant(d, v, group.clone()),
+            p,
+        )?;
         let mut stages = Vec::with_capacity(artifacts.len());
         for (i, a) in artifacts.iter().enumerate() {
             stages.push(stage_module(a, &linked, i)?);
         }
-        note_sample_position(d.into(), &artifacts, &mut stages);
+        note_sample_position(pass(), &artifacts, &mut stages);
         let keys: Vec<FunctionCompileKey> = artifacts.iter().map(|a| a.key).collect();
         let mut requirements = vertex.artifact().requirements.clone();
         for a in artifacts.iter().skip(1) {
@@ -739,6 +821,37 @@ impl Device {
             all.extend(stages);
             stages = all;
         }
+        // A fragment function that reads `[[barycentric_coord]]` as varyings, or a vertex function
+        // that selects its slice or viewport through them: the geometry stages of the point, line
+        // and triangle classes, before the fragment stage, or last without one.
+        if let Some(g) = &linked.geometry {
+            let at = stages
+                .iter()
+                .position(|s| s.stage == vk::ShaderStage::FRAGMENT)
+                .unwrap_or(stages.len());
+            let mut added = Vec::with_capacity(geometry::CLASSES.len());
+            for (module, r) in g.stages(&linked, p, m)? {
+                requirements = p.union_requirements(&requirements, &r);
+                added.push(module);
+            }
+            stages.splice(at..at, added);
+        }
+        let mut dependencies = dependencies(&artifacts, self);
+        if let Some(g) = &linked.geometry {
+            let fact = RuntimeFact::SynthesizedGeometry {
+                weights: !g.forms.is_empty(),
+                layer: g.layer,
+                viewport: g.viewport,
+            };
+            dependencies.push(RuntimeDependency {
+                fact,
+                mechanism: mechanism(&fact, self.profile()),
+            });
+        }
+        let depth = (&mut linked, &mut stages, &mut dependencies);
+        if let Some(r) = depth16_stage((pass(), v, d.fragment.is_none()), depth, p, m)? {
+            requirements = p.union_requirements(&requirements, &r);
+        }
         let (mut graphics, requirements) =
             graphics_requirements(requirements, &linked, &artifacts, p)?;
         graphics.sample_mask = crate::pipeline::private_state::sample_mask(
@@ -748,13 +861,18 @@ impl Device {
         )?;
         let profile = self.profile_fingerprint();
         Ok(RenderPipeline {
-            key: pipeline_key(b"render", &profile, &keys, &render_fields(d)),
+            key: pipeline_key(
+                b"render",
+                &profile,
+                &keys,
+                &(render_fields(d) + &variant_fields(v)),
+            ),
             profile,
             stages,
             layout: linked.layout,
             vertex_input: linked.vertex_input,
             graphics,
-            dependencies: dependencies(&artifacts, self),
+            dependencies,
             interface: linked.interface,
             requirements,
             variant_bits: artifacts.iter().fold(0, |bits, a| bits | a.variant_bits),
@@ -830,6 +948,82 @@ impl Device {
     }
 }
 
+/// State among a render pipeline's `dependencies` the depth variant `v` compiled it for
+/// (`RuntimeFact::Depth16Pass` of `VariantKey::depth16_pass`, `RuntimeFact::Depth16Biased` of
+/// `VariantKey::depth16_biased`, `RuntimeFact::Depth16BiasSide` of
+/// `VariantKey::depth16_bias_raises`), and give one without a fragment
+/// function (`fragmentless`) whose pass `pass` takes Metal's `Depth16Unorm` codes from its fragment
+/// stage (`compile::depth16_codes`) the synthesized fragment stage
+/// (`lower::stage_io::depth16::fragment_module`), as a fragment function would take them under
+/// `LoweringInputs::depth16_codes`: its module after the `stages`, its push range and placement in
+/// the `linked` layout and interface, and `RuntimeFact::Depth16Codes` among the `dependencies`.
+/// It writes no color, so the pipeline's color state stays a fragment-less pipeline's. The module's
+/// requirements, or `None` where the pipeline takes no such stage.
+fn depth16_stage(
+    (pass, v, fragmentless): (FragmentPass<'_>, &VariantKey, bool),
+    (linked, stages, dependencies): (
+        &mut Linked,
+        &mut Vec<StageModule>,
+        &mut Vec<RuntimeDependency>,
+    ),
+    p: &DeviceProfile,
+    m: &mut Meter,
+) -> Result<Option<Requirements>, Error> {
+    use crate::lower::stage_io::depth16;
+    if let Some(depth16) = v.depth16_pass {
+        let fact = RuntimeFact::Depth16Pass { depth16 };
+        dependencies.push(RuntimeDependency::new(fact, mechanism(&fact, p)));
+    }
+    if v.depth16_biased {
+        let fact = RuntimeFact::Depth16Biased;
+        dependencies.push(RuntimeDependency::new(fact, mechanism(&fact, p)));
+    }
+    if let Some(raises) = v.depth16_bias_raises {
+        let fact = RuntimeFact::Depth16BiasSide { raises };
+        dependencies.push(RuntimeDependency::new(fact, mechanism(&fact, p)));
+    }
+    if !fragmentless || !crate::pipeline::compile::depth16_codes(pass, v, p) {
+        return Ok(None);
+    }
+    let module = depth16::fragment_module(v.depth16_bias_raises)?;
+    crate::spirv::verify::verify(&module, p, m)?;
+    let module = crate::spirv::serialize::serialize_for(module, p)?;
+    let words = crate::spirv::serialize::relocate(&module, &*linked)?;
+    stages.push(StageModule {
+        stage: vk::ShaderStage::FRAGMENT,
+        entry_point: ENTRY_NAME.to_owned(),
+        spirv: words.into(),
+        specialization: crate::pipeline::artifact::SpecializationLayout::default(),
+        required_subgroup_size: None,
+        stage_flags: vk::PipelineShaderStageCreateFlags::empty(),
+        reconvergence: crate::pipeline::artifact::Reconvergence::Guaranteed,
+        precision_notes: Vec::new(),
+        strategies: crate::pipeline::artifact::StrategyCensus::default(),
+        constant_blob: None,
+        rounded_colors: Vec::new(),
+        specialized_notes: Vec::new(),
+        half_bit_colors: Vec::new(),
+        own_pixel_textures: Vec::new(),
+        snapshot_textures: Vec::new(),
+        private_bytes: 0,
+    });
+    let placement = depth16::fragment_placement();
+    if let Some((offset, size)) = placement.push_range {
+        linked
+            .layout
+            .push_constants
+            .push(crate::pipeline::layout::PushConstantRange {
+                stages: vk::ShaderStageFlags::FRAGMENT,
+                offset,
+                size,
+            });
+    }
+    linked.interface.push.push(placement);
+    let fact = RuntimeFact::Depth16Codes { biased: true };
+    dependencies.push(RuntimeDependency::new(fact, mechanism(&fact, p)));
+    Ok(Some(module.requirements))
+}
+
 /// A render or mesh render pipeline's graphics state, and its stages' `requirements` with what
 /// that state adds.
 fn graphics_requirements(
@@ -846,6 +1040,13 @@ fn graphics_requirements(
     requirements
         .features
         .extend(graphics.dynamic_state_features()?);
+    // A pipeline that reads through snapshots samples a color attachment of its subpass in the
+    // feedback loop layout, created with its flag (`GraphicsState::snapshot_reads`).
+    if graphics.snapshot_reads {
+        requirements
+            .features
+            .insert(VkFeature::AttachmentFeedbackLoopLayout);
+    }
     // Its color blend state: attachments that blend differently, dual-source blending.
     requirements
         .features
@@ -1187,6 +1388,31 @@ fn compute_fields(d: &ComputePipelineDescriptor) -> String {
     }
 }
 
+/// The pipeline key's fields of variant `v` past its stages' keys: the depth it was compiled for
+/// (`VariantKey::depth16_pass`, `VariantKey::depth16_biased`, `VariantKey::depth16_bias_raises`),
+/// which a pipeline without a fragment function keeps in no stage's key, and which every pipeline
+/// states (`RuntimeFact::Depth16Pass`, `RuntimeFact::Depth16Biased`,
+/// `RuntimeFact::Depth16BiasSide`), and its color group past the first (`VariantKey::color_group`),
+/// whose variant of a pipeline without a fragment function has no stage of its own. Empty for
+/// every other variant, so a pipeline keeps its key.
+fn variant_fields(v: &VariantKey) -> String {
+    let mut fields = match v.depth16_pass {
+        Some(depth16) => format!(" depth16_pass {depth16}"),
+        None => String::new(),
+    };
+    if v.depth16_biased {
+        fields.push_str(" depth16_biased");
+    }
+    if let Some(raises) = v.depth16_bias_raises {
+        fields.push_str(&format!(" depth16_bias_raises {raises}"));
+    }
+    // The group a pipeline without a fragment function keeps in no stage's key.
+    if v.color_group != 0 {
+        fields.push_str(&format!(" color_group {}", v.color_group));
+    }
+    fields
+}
+
 /// The render descriptor fields the artifact depends on: all of its fixed-function state (the
 /// artifact carries the vertex input and graphics state), not only what changes SPIR-V.
 fn render_fields(d: &RenderPipelineDescriptor) -> String {
@@ -1255,6 +1481,9 @@ fn stage_module(a: &FunctionArtifact, linked: &Linked, i: usize) -> Result<Stage
         rounded_colors,
         specialized_notes: a.specialized.clone(),
         half_bit_colors: a.interface.io.half_bit_colors.clone(),
+        own_pixel_textures: a.interface.own_pixel_textures.clone(),
+        snapshot_textures: a.interface.snapshot_textures.clone(),
+        private_bytes: a.interface.private_bytes,
     })
 }
 
@@ -1289,7 +1518,8 @@ fn uniform_written(a: &FunctionArtifact) -> std::collections::BTreeSet<VaryingKe
 
 /// The indices `a` writes when it is a vertex or mesh function, each of which its fragment stage
 /// reads from the raw varying `a` writes it to: it declares that varying's role among its outputs
-/// (`IoRole::ViewportIndex`, `IoRole::RenderTargetArrayIndex`), in every variant.
+/// (`IoRole::ViewportIndex`, `IoRole::RenderTargetArrayIndex`), in every variant; and the
+/// primitive ID (`IoRole::PrimitiveId`).
 fn raw_indices_written(a: &FunctionArtifact) -> RawIndices {
     let writes = |role: IoRole| {
         matches!(a.interface.stage, Stage::Vertex | Stage::Mesh)
@@ -1298,6 +1528,7 @@ fn raw_indices_written(a: &FunctionArtifact) -> RawIndices {
     RawIndices {
         viewport: writes(IoRole::ViewportIndex),
         layer: writes(IoRole::RenderTargetArrayIndex),
+        primitive_id: writes(IoRole::PrimitiveId),
     }
 }
 

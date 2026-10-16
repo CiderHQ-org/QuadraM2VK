@@ -684,6 +684,99 @@ fn a_deallocator_may_touch_the_command_buffer_that_held_its_buffer() {
     });
 }
 
+/// The deallocator of a buffer an encoder named, with its command buffer's every reference to the
+/// buffer let go only after it completed, still runs as that command buffer releases what it
+/// retained, where its wait for the command buffer returns at once, as Metal's does. Here the
+/// device's thread that submits holds on past the completion, deterministically: the command
+/// buffer `filled` is submitted in one pass with `holding`, whose submission handler returns only
+/// once `after`, committed behind `filled` on its queue, ran its completed handler, after
+/// `filled`'s release. (`opener`, on `holding`'s queue, holds that thread until all three are
+/// committed, so the three go in that one pass.) A blit encoder logs its calls while the device has
+/// a buffer over host pages (`replay.rs`), and its log was let go there, with the buffer's last
+/// handle, after the completion: the deallocator then ran on that thread, whose own hold on the
+/// command buffer kept the deallocator's wait from ever returning.
+#[test]
+fn a_deallocator_returns_whatever_thread_submits_past_its_completion() {
+    on_device(|device| {
+        let (first, second) = (
+            device.new_command_queue().unwrap(),
+            device.new_command_queue().unwrap(),
+        );
+        let opener = second.command_buffer().unwrap();
+        let (opened, open) = std::sync::mpsc::channel::<()>();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        opener
+            .add_submission_handler(Box::new(move |_: &CommandBuffer| {
+                opened.send(()).unwrap();
+                released.recv_timeout(WAIT).unwrap();
+            }))
+            .unwrap();
+        opener.commit().unwrap();
+        open.recv_timeout(WAIT)
+            .expect("the opener's submission handler ran");
+        let memory = Mapping::anonymous(GUEST_PAGE);
+        let pointer = memory.pointer();
+        let filled = first.command_buffer().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let deallocator: Deallocator = {
+            let filled = filled.clone();
+            Box::new(move |_: NonNull<u8>, _: u64| {
+                let status = filled.status();
+                let waited = (
+                    filled.wait_until_completed(),
+                    filled.wait_until_completed_for(WAIT),
+                );
+                drop(filled);
+                drop(memory);
+                sender.send((status, waited)).unwrap();
+            })
+        };
+        // SAFETY: the deallocator releases the mapping, after the buffer's last use.
+        let buffer = unsafe {
+            no_copy(
+                device,
+                pointer,
+                GUEST_PAGE,
+                ResourceOptions::default(),
+                Some(deallocator),
+            )
+        }
+        .unwrap();
+        let mut blit = filled.blit_command_encoder().unwrap();
+        blit.fill_buffer(&buffer, 0..64, 0x2d).unwrap();
+        blit.end_encoding().unwrap();
+        filled.commit().unwrap();
+        drop(buffer);
+        let after = first.command_buffer().unwrap();
+        let (ran, after_ran) = std::sync::mpsc::channel::<()>();
+        after
+            .add_completed_handler(Box::new(move |_: &CommandBuffer| {
+                ran.send(()).unwrap();
+            }))
+            .unwrap();
+        after.commit().unwrap();
+        let holding = second.command_buffer().unwrap();
+        holding
+            .add_submission_handler(Box::new(move |_: &CommandBuffer| {
+                after_ran
+                    .recv_timeout(WAIT)
+                    .expect("the later command buffer's completed handler ran");
+            }))
+            .unwrap();
+        holding.commit().unwrap();
+        release.send(()).unwrap();
+        let (status, waited) = receiver
+            .recv_timeout(WAIT)
+            .expect("the deallocator ran and returned");
+        assert_eq!(status, CommandBufferStatus::Completed);
+        assert_eq!(waited, (Ok(()), Ok(())));
+        for command_buffer in [&opener, &filled, &after, &holding] {
+            command_buffer.wait_until_completed_for(WAIT).unwrap();
+            assert_eq!(command_buffer.error(), None);
+        }
+    });
+}
+
 /// The consumer's EFI framebuffer (`display/efi.rs`): a 16-KiB-aligned mapping of the
 /// framebuffer, a length of the rows times the stride rounded up to a guest page, options 0, and
 /// no deallocator. The GPU reads the pixels the guest wrote; the buffer's release runs nothing,

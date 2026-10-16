@@ -5,17 +5,16 @@
 //! then commits queue A's write of the buffer and B's copy, in that order: B's copy holds A's
 //! write.
 //!
-//! - **Submitted at its commit.** A's write is a blit fill.
+//! - **Ready at its commit.** A's write is a blit fill.
 //! - **Held for its host step.** A's write is an execution of commands a kernel of A wrote
 //!   (`indirect_host_steps.rs`), behind fills of a ballast: its batch waits at its gate for A's
 //!   earlier work to complete, and for its host step, while B commits.
 //! - **Held for its submission check.** A's fill has a check that waits until B committed.
 //!
-//! And within one queue, commits from two threads while one's submission waits for the `VkQueue`
-//! (the test holds it): the other's commits return at once, left to the submitting thread
+//! And within one queue, commits from two threads while the scheduler thread's submission waits
+//! for the `VkQueue` (the test holds it): every commit returns at once, left to that thread
 //! (`scheduler/inbox.rs`), and every command buffer runs in commit order. A checked command buffer
-//! so left is checked and submitted by the scheduler's thread at once, not after the submitting
-//! thread's submission handlers.
+//! committed meanwhile is checked and submitted by that thread as soon as its pass ends.
 
 use super::degrade_notices::{assert_made_once, on_device};
 use super::indirect_host_steps::{expected, Setup, HOST_STEPS};
@@ -28,7 +27,7 @@ use metal2vulkan_runtime::{
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// The bytes A's fill writes.
 const FILLED: u8 = 0x5a;
@@ -191,12 +190,12 @@ fn numbered(queue: &CommandQueue, tracked: &Buffer, seen: &Buffer, number: u8) -
 }
 
 /// Two threads each commit [`EACH`] command buffers of one queue while the test holds its
-/// `VkQueue`: the first commit to take the scheduler's lock submits, its `vkQueueSubmit` waiting
-/// for the `VkQueue`, and every commit of the other thread returns at once, left to it. Once the
-/// `VkQueue` is free, the command buffers run in commit order: each that returned before another
-/// started runs before it, as each one's copy of the number the one before it wrote shows.
+/// `VkQueue`: every commit returns at once, its batches left to the scheduler's thread, whose
+/// `vkQueueSubmit` waits for the `VkQueue`, as Metal's `commit` returns at once. Once the `VkQueue`
+/// is free, the command buffers run in commit order: each that returned before another started
+/// runs before it, as each one's copy of the number the one before it wrote shows.
 #[test]
-fn commits_made_while_another_thread_submits_return_at_once_and_run_in_commit_order() {
+fn commits_made_while_the_vk_queue_is_held_return_at_once_and_run_in_commit_order() {
     const EACH: u8 = 4;
     on_device(|device, _| {
         let queue = device.new_command_queue().unwrap();
@@ -250,17 +249,15 @@ fn commits_made_while_another_thread_submits_return_at_once_and_run_in_commit_or
             })
             .collect();
         drop(returned);
-        for commit in 1..=EACH {
+        for commit in 1..=2 * EACH {
             returns.recv_timeout(WAIT).unwrap_or_else(|_| {
-                panic!(
-                    "commit {commit} of the thread not submitting waited for the other's \
-                     submission"
-                )
+                panic!("commit {commit} waited for the scheduler thread's submission")
             });
         }
-        assert!(
-            handed_off() - before >= u64::from(EACH),
-            "the other thread's commits were left to the submitting one"
+        assert_eq!(
+            handed_off() - before,
+            u64::from(2 * EACH),
+            "every commit was left to the scheduler's thread"
         );
         release.send(()).unwrap();
         holder.join().unwrap();
@@ -305,15 +302,14 @@ fn passes() -> SubmissionCheck {
 /// most: well under the 100 ms it sleeps for at a time.
 const PROMPTLY: Duration = Duration::from_millis(40);
 
-/// A command buffer with a submission check, committed while another thread's commit submits
-/// (the test holds the `VkQueue`), is left to that thread (`scheduler/inbox.rs`), whose pass
-/// finds its check once the `VkQueue` is free: the scheduler's thread runs the check and submits
-/// it at once, [`PROMPTLY`], while the other thread's submission handler still waits for it, and
-/// not once that handler returned, nor when the scheduler's thread looks for work by itself. The
-/// scheduler's thread is made to sleep afresh first (it checks and submits a command buffer), so
-/// that it would look by itself only about 100 ms later.
+/// A command buffer with a submission check, committed while the scheduler's thread submits
+/// another (the test holds the `VkQueue`), is taken in as that thread looks at its inbox again once
+/// that pass ends: the thread runs the check and submits it at once, [`PROMPTLY`] after the
+/// `VkQueue` is free, not when it looks for work by itself. The scheduler's thread is made to sleep
+/// afresh first (it checks and submits a command buffer), so that it would look by itself only
+/// about 100 ms later.
 #[test]
-fn a_checked_command_buffer_left_to_another_thread_is_submitted_promptly() {
+fn a_checked_command_buffer_committed_during_a_submission_is_submitted_promptly() {
     on_device(|device, _| {
         let queue = device.new_command_queue().unwrap();
         let tracked = buffer_with(device, &[0; 4]).unwrap();
@@ -323,21 +319,6 @@ fn a_checked_command_buffer_left_to_another_thread_is_submitted_promptly() {
         let submitting = numbered(&queue, &tracked, &seen, 2);
         let left = numbered(&queue, &tracked, &seen, 3);
         left.set_submission_check(passes()).unwrap();
-        // The submitting thread's handler waits for the left command buffer's submission.
-        let waited = Arc::new(Mutex::new(None));
-        let handler = {
-            let (left, waited) = (left.clone(), Arc::clone(&waited));
-            move |_: &CommandBuffer| {
-                let until = Instant::now() + Duration::from_secs(1);
-                while left.kernel_end_time() == 0.0 && Instant::now() < until {
-                    std::thread::sleep(Duration::from_micros(100));
-                }
-                *waited.lock().unwrap() = Some(left.kernel_end_time() != 0.0);
-            }
-        };
-        submitting
-            .add_submission_handler(Box::new(handler))
-            .unwrap();
         // The scheduler's thread checks and submits it, then sleeps afresh, its pass over.
         first.commit().unwrap();
         first.wait_until_scheduled().unwrap();
@@ -360,30 +341,20 @@ fn a_checked_command_buffer_left_to_another_thread_is_submitted_promptly() {
         holding.recv_timeout(WAIT).unwrap();
         let handed_off = || device.work_counts().commits_handed_off;
         let before = handed_off();
-        let committer = {
-            let submitting = submitting.clone();
-            std::thread::spawn(move || submitting.commit().unwrap())
-        };
-        // Its pass waits for the `VkQueue` under the scheduler's lock.
+        submitting.commit().unwrap();
+        // The scheduler thread's pass waits for the `VkQueue` under the scheduler's lock.
         std::thread::sleep(Duration::from_millis(20));
         left.commit().unwrap();
         assert_eq!(
             handed_off() - before,
-            1,
-            "the checked command buffer was left to the submitting thread"
+            2,
+            "both commits were left to the scheduler's thread"
         );
         let free = host_time();
         release.send(()).unwrap();
         holder.join().unwrap();
-        committer.join().unwrap();
         completed(&[&first, &submitting, &left]);
         let after = left.kernel_end_time() - free;
-        assert_eq!(
-            *waited.lock().unwrap(),
-            Some(true),
-            "submitted while the submitting thread's handler waited ({after:.4} s after the \
-             VkQueue was free)"
-        );
         assert!(
             after < PROMPTLY.as_secs_f64(),
             "submitted {after:.4} s after the VkQueue was free, on {}",

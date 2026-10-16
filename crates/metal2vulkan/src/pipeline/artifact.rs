@@ -26,7 +26,12 @@ pub struct RenderPipeline {
     pub profile: Hash256,
     /// Vertex, then fragment when rasterization is enabled. A post-tessellation vertex
     /// function's pipeline has the synthesized vertex and tessellation control stages, then its
-    /// evaluation stage, then the fragment stage.
+    /// evaluation stage, then the fragment stage. A pipeline whose fragment function reads
+    /// `[[barycentric_coord]]` on a device without `fragmentShaderBarycentric`, or whose vertex
+    /// function selects its slice or viewport on a device without the output, has three
+    /// synthesized geometry stages (one set for every such need) before its fragment stage, or
+    /// last without one, for the point, line and triangle topology classes in that order: a
+    /// `VkPipeline` runs only the one of its draw's class ([`runs_stage`](Self::runs_stage)).
     pub stages: Vec<StageModule>,
     pub layout: PipelineLayout,
     pub vertex_input: VertexInputState,
@@ -37,6 +42,33 @@ pub struct RenderPipeline {
     pub requirements: Requirements,
     /// Specialization and variant bits the pipeline can take.
     pub variant_bits: u32,
+}
+
+impl RenderPipeline {
+    /// Whether a `VkPipeline` drawing `topology` runs stage `at` of
+    /// [`stages`](Self::stages): every stage but a geometry stage of another topology class (a
+    /// pipeline's geometry stages are the point, line and triangle classes' in that order). A
+    /// stage past the list runs nothing.
+    pub fn runs_stage(&self, at: usize, topology: vk::PrimitiveTopology) -> bool {
+        use vk::PrimitiveTopology as T;
+        let Some(stage) = self.stages.get(at) else {
+            return false;
+        };
+        if stage.stage != vk::ShaderStage::GEOMETRY {
+            return true;
+        }
+        let class = match topology {
+            T::POINT_LIST => 0,
+            T::LINE_LIST | T::LINE_STRIP => 1,
+            T::TRIANGLE_LIST | T::TRIANGLE_STRIP | T::TRIANGLE_FAN => 2,
+            _ => return false,
+        };
+        let nth = self.stages[..at]
+            .iter()
+            .filter(|s| s.stage == vk::ShaderStage::GEOMETRY)
+            .count();
+        nth == class
+    }
 }
 
 /// A compiled compute pipeline.
@@ -108,6 +140,19 @@ pub struct StageModule {
     /// output's bits but not a 32-bit output's NaN as Metal does. Each such write costs the stage
     /// a few instructions per output; empty for every other stage.
     pub half_bit_colors: Vec<u32>,
+    /// The texture slots this fragment stage reads only at the fragment's own pixel, sorted
+    /// (`StageInterface::own_pixel_textures`): a draw's reads of such a slot lie inside the
+    /// rectangle bounding its scissors, a pixel wider each way for its helper invocations, on a
+    /// framebuffer below `2^24` pixels a side. Empty for every other stage.
+    pub own_pixel_textures: Vec<u32>,
+    /// The texture slots of `own_pixel_textures` a draw can read through a snapshot an earlier
+    /// draw of the same primitives took (`StageInterface::snapshot_textures`), sorted. Empty for
+    /// every other stage.
+    pub snapshot_textures: Vec<u32>,
+    /// The private memory a thread of the stage keeps, in bytes
+    /// (`StageInterface::private_bytes`): what `PrecisionNote::FunctionStorageAssumed`'s
+    /// announcement names. 0 for a stage the link makes itself.
+    pub private_bytes: u64,
 }
 
 impl StageModule {
@@ -426,8 +471,10 @@ pub enum PrecisionNote {
     /// scale by `2^B` through every sampler, and, on a device that does not sample through Metal's
     /// own sampler, a bias whose sum with the sampler's own may lie beyond the device's
     /// `maxSamplerLodBias`, which Vulkan clamps, or that an anisotropic sampler applies to its
-    /// footprint's minor axis alone. The gradients carry Metal's own reading of the bias, `B`;
-    /// `Exp2`'s precision and the device's level arithmetic are the device's. A device that samples
+    /// footprint's minor axis alone; and, on a device without `maintenance8`, a fragment's
+    /// implicit-level sample with a dynamic texel offset, whose derivatives are taken before the
+    /// switch over the offset's values (`lower::sampler::OffsetArms`). The gradients carry Metal's
+    /// own reading of the bias, `B`; `Exp2`'s precision and the device's level arithmetic are the device's. A device that samples
     /// through Metal's own sampler (MoltenVK) records it only for a constexpr sampler with a bias
     /// of its own and for hoisted derivatives, except those of a 2D color sample without a bias, a
     /// `min_lod_clamp` or an offset through samplers without a bias of their own, which there are
@@ -449,21 +496,26 @@ pub enum PrecisionNote {
     /// `float` denormals follow the device: Metal reads an `f32` denormal operand of its float
     /// arithmetic, comparisons, and functions as the zero of its sign and flushes a denormal result
     /// to one, where a Vulkan device keeps or flushes them by its own float controls (this
-    /// translation declares no `DenormFlushToZero`). Recorded wherever the module leaves an
-    /// operation whose reading is not Metal's to the device: a remainder, a conversion to or from
-    /// `double`, `dot`'s fused sum, and the functions the translation does not compute itself. Not
-    /// by `float` `+ - *`, the comparisons, the fused multiply-adds, `sqrt`, `rsqrt`, `floor`, and
-    /// `ceil`, which read their denormals as Metal does on every device (the device's where the
-    /// profile takes the measured `DriverDeviation::MetalFloatDenormals`, an exponent-field select
-    /// elsewhere), nor by `ldexp`, computed on its operand's bits, nor by the functions that answer
-    /// Metal at denormals themselves (`sign`, `saturate`, `fract`, `median3`, `copysign`, `atan2`,
-    /// `fast::sqrt`, and the fused multiply-add routines), nor by Metal's precise and fast `float`
-    /// divisions. Nor, on a device whose `float` functions are Metal's own (MoltenVK), by `mix`,
-    /// whose fused multiply-adds are Metal's own and read their denormals as Metal does there (the
-    /// measured `DriverDeviation::MetalFloatDenormals`), nor, in an entry Metal compiles with fast
-    /// math ([`EntryMath::Fast`]), by a call the device answers wholly as Metal's own function.
-    /// Validation derives no tolerance and no explanation from it: every `float` computation is
-    /// exposed to it.
+    /// translation declares no `DenormFlushToZero`). Recorded only where the module leaves an
+    /// operation's denormals to the device: the instructions of native device maths
+    /// (`FloatMathsPolicy::Native`, `fast::fmod`'s fused multiply-add among them) and of the
+    /// device's order (`RoundingOrderPolicy::Native`: `mix` by `FMix`, `fast::sqrt` by `Sqrt`,
+    /// and `dot` of vectors of other than two to four lanes, whose chunks' products the device
+    /// sums where Metal flushes each one below `2^-126`, EV DNR-d8-m3), beside their own notes;
+    /// and, under every policy, a conversion to or from `double`, whose reading Metal's is not
+    /// measured. Every other `float` operation reads its denormals as Metal does on every device
+    /// (the device's where the profile takes the measured `DriverDeviation::MetalFloatDenormals`,
+    /// an exponent-field select elsewhere): `+ - *`, the comparisons, the divisions, `fma`, `mix`,
+    /// `dot`, `sqrt`, `rsqrt`, `floor` and `ceil`, `ldexp` (on its operand's bits), the minimum
+    /// and maximum functions (`llvm.minnum`
+    /// and `llvm.maxnum` among them, with any flags), and the functions the translation computes
+    /// itself or the device answers as Metal's own; `mix`, `atan2`, `sinpi`, `cospi`, `tanpi` and
+    /// `fast::fmod` in both modes, and two chained `fma`s, answer Metal's words on an Apple M3 Max
+    /// under macOS 27.0.1 at and around denormal operands (EVs DNR-dn2-m3 and DNR-fm1-m3),
+    /// but where the device's fused multiply-add under native device maths rounds a result whose
+    /// exact value is below `2^-126` up to `2^-126`, which Metal flushes (docs/FAST-PATHS.md,
+    /// known gaps). Validation derives no tolerance and no explanation from it: every `float`
+    /// computation is exposed to it.
     DeviceDenormals,
     /// Pixel-coordinate samplers scale coordinates in the shader, rounding differently.
     /// Recorded for an access through a runtime sampler slot whose word may state pixel
@@ -639,10 +691,14 @@ pub enum PrecisionNote {
     /// 16-bit float texel's decode (MoltenVK answers the canonical NaN for every one). Also
     /// recorded by a `half` texel's write to a storage texture that may hold a float format: Metal
     /// stores a 16-bit float texel's NaN as the half's own bits and a 32-bit one's as `0x7fc00000`,
-    /// and the device converts the half widened. Also recorded by a `float` read of a heap's
-    /// texture buffer on a device without Metal's sampler: Metal hands back a half-float texel's
-    /// NaN as `0x7fc00000`, and the handle carries no class to convert it by. Validation derives no
-    /// tolerance and no explanation from it, as for `DeviceDenormals`.
+    /// and the device converts the half widened. Also recorded by a 16-bit float attachment's blend
+    /// the function computes in the storage form, on a device not measured to store `0x7fc00000` in
+    /// a 16-bit float storage image as Metal's `0x7e00` (`DriverDeviation::MetalFloatStorageNans`):
+    /// the blend gives every NaN as `0x7fc00000`, and the device's store converts it (ANV stores
+    /// `0xfe00`). Also recorded by a `float` read of a heap's texture buffer on a device without
+    /// Metal's sampler: Metal hands back a half-float texel's NaN as `0x7fc00000`, and the handle
+    /// carries no class to convert it by. Validation derives no tolerance and no explanation from
+    /// it, as for `DeviceDenormals`.
     DeviceNanEncoding,
     /// The device compares a depth texture's texels (a sample or a gather with comparison the
     /// shader does not make itself) on a device without `VK_EXT_depth_range_unrestricted` enabled
@@ -661,27 +717,51 @@ pub enum PrecisionNote {
     /// value into a depth image its device may clamp announces that upload (docs/API.md section 5).
     RestrictedDepthRange,
     /// An explicit-gradient sample of a cube texture takes Metal's footprint in a form a Vulkan
-    /// device reads alike, but for what is not reproduced. Metal (measured on Apple M3 Max) takes
-    /// each gradient `g`'s footprint as `‖(g_a, g_b)‖ / |m_a|` for the direction's major axis `a`,
-    /// its component `m_a` there, and `b = (a + 2) mod 3`, and the larger of the two gradients';
-    /// the module passes the gradient `‖(g_a, g_b)‖ e_b`, from which Vulkan's cube derivative rule
-    /// reads that footprint. Not reproduced: Apple combines the two components by its own rule
-    /// (from 2.2% below to 1.7% above their length, by their ratio) and minifies only past a
-    /// footprint of about 1.00146, where the module takes the Euclidean length and the device's
-    /// level. The major axis is Metal's, `x` over `y` over `z` at equal magnitudes (measured on
-    /// Apple M4), its ties broken in the direction handed to the device. A level near a filter or
-    /// level boundary can therefore select another level or filter than Metal's. Through an
-    /// anisotropic constexpr sampler the device is handed the face gradients Metal's ellipse has
-    /// instead (measured on the Apple M3 Max), and filters that ellipse by its own anisotropic
-    /// rule; a runtime or argument buffer's sampler takes the form its word's anisotropy states,
-    /// and an anisotropic one is refused only on a device whose cube-gradient route is not
-    /// measured. Also recorded for every cube access whose level comes from the fragment's
-    /// derivatives (an implicit-level sample, one whose gradients a switch-at-use hoisted, or an
-    /// LOD query): its level is the device's, of the direction handed to it, and Metal's rule there
-    /// is not measured. A tie so broken scales a component by at most `1 - 2^-23`, which moves a
-    /// face coordinate by at most `2^-24` of the face, a derivative the device takes between two
-    /// lanes by at most `2^-23` (`2^-9` texels on Metal's largest face, 16,384, so the level by at
-    /// most `log2(1 + 2^-9)`, about 0.003, where the footprint is at least a texel), and a hoisted
+    /// device reads alike, but for what is not reproduced. Metal (measured on the Apple M3 Max
+    /// under macOS 27.0.1) drops each gradient's component on the direction's major axis `a` and
+    /// reads the face's two tangent components over `2 |m_a|`, as a 2D sample of the face reads
+    /// its gradients. Through an isotropic sampler the module passes each gradient's two tangent
+    /// components combined by Metal's length rule (`max(M + 3m/16, 49M/64 + 21m/32)`) on one
+    /// tangent, from which Vulkan's cube derivative rule reads that length exactly; through an
+    /// anisotropic sampler, the face gradients without their normal component, mirrored on the
+    /// `-x`, `-y` and `+z` faces as Metal mirrors them. Not reproduced: the level is the device's
+    /// logarithm of the footprint, where Metal's piecewise-linear one minifies only past a
+    /// footprint of `1 + 3/2048` and blends levels in 256ths, and the device filters an
+    /// anisotropic footprint by its own rule (its taps and weights). The major axis is Metal's,
+    /// `x` over `y` over `z` at equal magnitudes (measured on Apple M4), its ties broken in the
+    /// direction handed to the device. A level near a filter or level boundary can therefore
+    /// select another level or filter than Metal's. A runtime or argument buffer's sampler takes
+    /// the form its word's anisotropy states.
+    ///
+    /// Not recorded where the module takes Metal's footprint itself through a constexpr sampler
+    /// (`lower::sampler::anisotropic`, on a device without Metal's own sampler and on one whose
+    /// stage's cube-gradient route is not measured): Metal's level, and an anisotropic sampler's
+    /// taps (`PrecisionNote::AnisotropicFilter`). Where the route is not measured
+    /// (`CubeGradientRoute::Unmeasured`), every other sample hands the isotropic form, which
+    /// every measured route reads alike but on a `y` face under macOS 27, through a sampler made
+    /// isotropic for that use (`metal::sampler::SamplerUse::cube_gradient`): an anisotropic
+    /// sampler's footprint is then Metal's isotropic one, its major axis's, but where a runtime
+    /// sampler slot's variant takes Metal's taps.
+    ///
+    /// Through MoltenVK's graphics route under macOS 27 (`CubeGradientRoute::AppleProjected`),
+    /// SPIRV-Cross's `spvGradientCube` hands Metal an `x` or `z` face's gradients as Metal's own,
+    /// exactly, but writes a `y` face's `x` tangent on both of its tangents, so its `z` tangent is
+    /// lost: the module hands a `y` face Metal's length of its two tangents, which Metal reads on
+    /// both, an isotropic sample's footprint kept up to one rounding of `64/91` (measured: every
+    /// lane Metal's) and an anisotropic one's ellipse laid on the face's diagonal. Sampling a `y`
+    /// face through a 2D-array view of the cube with the face gradients would give Metal's own
+    /// anisotropic sample on every lane whose filter stays inside the face (measured), and differ
+    /// less than the fixup where it crosses the face's edge; the binder does not offer that view
+    /// yet. On macOS 26.7's identity (`CubeGradientRoute::AppleSwizzled`) the route hands that GPU
+    /// its own footprint of that release, which counted the normal and the tangent `(a + 2) mod 3`.
+    ///
+    /// Also recorded for every cube access whose level comes from the fragment's derivatives (an
+    /// implicit-level sample, one whose gradients a switch-at-use hoisted, or an LOD query): its
+    /// level is the device's, of the direction handed to it, and Metal's rule there is not
+    /// measured. A tie so broken scales a component by at most `1 - 2^-23`, which moves a face
+    /// coordinate by at most `2^-24` of the face, a derivative the device takes between two lanes
+    /// by at most `2^-23` (`2^-9` texels on Metal's largest face, 16,384, so the level by at most
+    /// `log2(1 + 2^-9)`, about 0.003, where the footprint is at least a texel), and a hoisted
     /// gradient's projection by at most `2^-24` of the major component's relative change: within
     /// Vulkan's own level-of-detail approximation, but able to cross a level or filter boundary.
     CubeGradientFootprint,
@@ -835,13 +915,18 @@ pub enum PrecisionNote {
     /// every nearest cube sample the module hands its texel and every linear cube sample it
     /// emulates. Validation derives no tolerance from it: the class is unbounded.
     CubeFaceReciprocal,
-    /// The stage keeps private memory (its `alloca`s, a call stack among them, or constants held
-    /// as `Private` variables) on a device whose Function storage was not measured, so it assumes
-    /// the device holds the floor, 16 KiB a thread (`device::function_storage`). A driver backs
-    /// that storage with scratch memory, and past what it holds can answer wrongly or hang with no
-    /// error. The stage's private memory fits the floor, which every measured device holds twice
-    /// over, but on this device that rests on the assumption, not a measurement. Validation keeps
-    /// a difference as a mismatch: the class is derived as if the note were absent.
+    /// A vertex or fragment function keeps more private memory (its `alloca`s, a call stack among
+    /// them, or constants held as `Private` variables) than the floor, 16 KiB a thread, on a device
+    /// whose Function storage was not measured, up to the 192 KiB a thread Metal was measured to
+    /// hold (`device::function_storage`). A driver backs that storage with scratch memory, and
+    /// Vulkan states no amount it holds: past what it holds a driver can answer wrongly or hang the
+    /// GPU with no error. Probed, the RTX 5080 Laptop GPU hung at 48 KiB and the RTX 3090 at
+    /// 192 KiB (Xid 109), and the Iris Xe answered wrongly at 48 KiB and the Radeon 780M at
+    /// 128 KiB. The module runs on this device all the same, resting on no measurement; a kernel,
+    /// an object or a mesh function past the floor there is refused instead. Measuring the device
+    /// (`runtime_lane::private_memory`) and adding its row removes the note up to its value.
+    /// Validation keeps a difference as a mismatch: the class is derived as if the note were
+    /// absent.
     FunctionStorageAssumed,
     /// A fragment function runs a non-quad simdgroup operation (a reduction, scan, ballot,
     /// broadcast, shuffle, vote, or simdgroup matrix) before a discard on a path to it, in a
@@ -976,17 +1061,19 @@ pub enum PrecisionNote {
     /// mismatch for review.
     DeviceColorConversion,
     /// A fragment function reads a varying the device interpolates (`center_perspective`,
-    /// `centroid`, `sample` or `no_perspective`, not `flat`) on a device whose interpolation is
-    /// measured to differ from Metal's ([`DriverWorkaround::InterpolationNotMetals`]): NVIDIA's
-    /// driver rounds an interpolated value that is exactly representable one `f32` ulp toward
-    /// zero where Metal gives it exactly. The exact path, interpolating each varying in the
-    /// shader from its per-vertex values by Metal's formula, is not built: Metal's formula is
-    /// not measured.
+    /// `centroid`, `sample` or `no_perspective`, not `flat`) on a device not measured to
+    /// interpolate as Metal does (without
+    /// [`DriverDeviation::MetalInterpolation`](crate::error::DriverDeviation::MetalInterpolation),
+    /// which only MoltenVK takes: there Metal interpolates). Vulkan states no precision for
+    /// interpolation, and every other device measured rounds otherwise than Metal: on a perspective
+    /// triangle list, texcoords over a full-screen quad and a colour whose `w` varies, 31% to 45%
+    /// of the lanes RADV, ANV, lavapipe and NVIDIA's driver interpolated were Metal's bit for bit,
+    /// the rest up to about `3e-4` apart (lavapipe, which snaps vertices otherwise) and `1.5e-4`
+    /// elsewhere. The exact path, interpolating each varying in the shader by Metal's formula,
+    /// is not built: Metal's formula is not known.
     ///
     /// Validation derives no tolerance and no explanation from it: a difference stays a
-    /// mismatch for review, deferred in C3 until the exact path exists.
-    ///
-    /// [`DriverWorkaround::InterpolationNotMetals`]: crate::device::DriverWorkaround::InterpolationNotMetals
+    /// mismatch for review.
     DeviceInterpolation,
     /// A fragment function runs a quad or simdgroup operation on a device that shades a
     /// triangle it clips as several triangles
@@ -1103,7 +1190,7 @@ pub enum PrecisionNote {
     /// an attachment the pipeline has, and either its module is compiled without fast math
     /// (`air.compile.fast_math_disable`) and that attachment blends, factors one and zero
     /// included, with some channel written (`StageIo::half_blend_colors`, which the pipeline's
-    /// stage reads), or its module names no math mode (under fast math the function records
+    /// stage reads), or its module names no math mode (under fast math the pipeline's stage records
     /// [`PrecisionNote::HalfOutputFastMathBlend`] instead). Without fast math Metal stores the
     /// `half` the function returns (EV FLT-hb2-m3: a `half4` output and a `float4` of its `half`
     /// store alike under every blend and format), so an unblended attachment stores Metal's value
@@ -1129,6 +1216,16 @@ pub enum PrecisionNote {
     /// ANV and lavapipe, Mesa 26.2.4, the 14 blends Metal measured over the two sweeps); and 1 or 2
     /// codes of an 8-bit or extended-range format. MoltenVK on the M3 Max stores Metal's bytes in
     /// every one of the draws.
+    ///
+    /// Also: a `float` color output (a scalar or vector of AIR's `float`) of a module compiled
+    /// without fast math to a 16-bit float attachment that blends by one and zero, added, for
+    /// color and alpha (`StageIo::float_blend_colors`). Into a 16-bit float attachment Metal's blend
+    /// of a module without fast math keeps a zero factor's product, the destination's by zero
+    /// there: a NaN of an infinite or NaN texel, and `+0` of a `-0` output over a texel of `+0` or
+    /// above (EV FBL-zf1-m3, plain Metal on the M3 Max under macOS 27.0.1, `half4` and `float4`
+    /// outputs). Where the function does not compute that blend in the storage form, the pipeline
+    /// blends the output by the device's blend, whose answer for those texels is the device's own,
+    /// where a `float` output would otherwise store as written.
     ///
     /// Validation derives no tolerance and no explanation from it: a difference stays a
     /// mismatch for review, deferred in C3 until an exact path exists.
@@ -1203,10 +1300,15 @@ pub enum PrecisionNote {
     /// filter emulated by the device's samples at explicit levels, on a device that does not
     /// sample through Metal's own sampler (`lower::sampler::anisotropic`): a sample without
     /// comparison of a 2D texture or 2D array at the fragment's implicit level or with explicit
-    /// gradients, through a constexpr sampler of `maxAnisotropy` above 1, or through a runtime
-    /// sampler slot whose word states anisotropy (under that word alone). Metal's footprint (its
-    /// gradient lengths, piecewise-linear `log2`, level, tap count, tap weights and direction) is
-    /// reproduced as measured on an Apple M4 (the M3 Max answering identically), with this residue:
+    /// gradients, or of a cube or cube array with explicit gradients, through a constexpr sampler
+    /// of `maxAnisotropy` above 1, or through a runtime sampler slot whose word states anisotropy
+    /// (under that word alone). A cube's sample is emulated on Metal's own sampler too where the
+    /// stage's cube-gradient route is not measured (`CubeGradientRoute::Unmeasured`), its taps
+    /// Metal's own samples at explicit levels; and so is an anisotropic sampler's on a device
+    /// without `samplerAnisotropy` whatever its sampling, every Vulkan sampler being isotropic
+    /// there, each tap the device's isotropic filter. Metal's footprint (its gradient lengths,
+    /// piecewise-linear `log2`, level, tap count, tap weights and direction) is reproduced as
+    /// measured on an Apple M4 (the M3 Max answering identically), with this residue:
     /// - the level is off by `1/256` of a level on about 1% of anisotropic samples;
     /// - the tap spacing is Metal's at the ratio cap and for two taps (but where the ratio lies
     ///   within `0.07/256` of a rounding tie, on about 5% of two-tap footprints, by up to 1.8/256
@@ -1214,7 +1316,11 @@ pub enum PrecisionNote {
     ///   1,021 of 1,674 measured windows; up to about 18/256 of a texel at the outer tap of 10 or
     ///   more taps);
     /// - each tap is the device's own filter at the level the shader hands it, so its footprint
-    ///   and sum are the device's (`HalfSampleFilter`, `FloatSampleFilter`).
+    ///   and sum are the device's (`HalfSampleFilter`, `FloatSampleFilter`);
+    /// - a cube's taps step across the direction's face by Metal's face gradients (Metal under
+    ///   macOS 27 samples a cube as the face's 2D plane, measured on the Apple M3 Max), the
+    ///   direction moved and projected onto the face again by the device, and a tap past the
+    ///   face's edge reads the next face as the device projects it, where Metal's is not measured.
     ///
     /// Measured by `runtime_lane::anisotropic_filter` against the M4's answers on `rgba8Unorm`
     /// at `maxAnisotropy` 2 to 16. With a linear filter, every channel is within a code: at most
@@ -1239,9 +1345,11 @@ pub enum PrecisionNote {
     /// (Radeon 780M) and an RTX 3090 miss Metal by up to 28, 60 and 62 codes (mean 6.6, 6.2 and
     /// 12.4; EVs ANI-v1b and ANI-e1 to ANI-e5); other shapes are not measured. A sampler with a
     /// nearest min or mag filter is handed no anisotropy off Metal's sampler, so there the device
-    /// filters isotropically. An argument buffer's sampler, whose anisotropy the function does not
-    /// know, records `HalfSampleFilter` or `FloatSampleFilter` alone. Validation derives no
-    /// tolerance from it.
+    /// filters isotropically, and so does every sampler on a device without `samplerAnisotropy`,
+    /// whatever its sampling (the device's own sampling recording it there too). An argument
+    /// buffer's sampler, whose anisotropy the function does not know, records `HalfSampleFilter`
+    /// or `FloatSampleFilter` alone, and is refused anisotropic without `samplerAnisotropy`.
+    /// Validation derives no tolerance from it.
     DeviceAnisotropicFilter,
     /// A vertex function writes `[[point_size]]`, or a mesh function `set_point_size`, on a device
     /// whose `pointSizeRange` ends below Metal's largest point, 511 pixels
@@ -1287,18 +1395,20 @@ pub enum PrecisionNote {
     /// (2026-10-10). Validation derives no tolerance from it.
     DeviceUnorm8LinearFilter,
     /// A fragment function of a module compiled with fast math (`air.compile.fast_math_enable`)
-    /// returns a `half` color output to an attachment the pipeline has, where
-    /// [`PrecisionNote::HalfOutputPrecision`]'s conditions hold. Metal's compiler folds the
-    /// attachment's blend and conversion into the function and, under fast math, fuses and
-    /// regroups them per pipeline: it reads the output's `float` or its `half`, rounds each
+    /// returns a `half` color output to an attachment the pipeline has that stores some channel
+    /// (its write mask not none; `StageIo::half_fast_colors`, which the pipeline's stage reads),
+    /// where [`PrecisionNote::HalfOutputPrecision`]'s conditions hold; or computes the blend of a 16-bit
+    /// float attachment it fetches where Metal's compiler may regroup it (below). Metal's compiler
+    /// folds the attachment's blend and conversion into the function and, under fast math, fuses
+    /// and regroups them per pipeline: it reads the output's `float` or its `half`, rounds each
     /// factor and product to `half` or keeps it, and takes a lerp or a common factor, by the
-    /// attachment's channel count, the blend and the function's own arithmetic (EV FLT-hb2-m3,
-    /// an M3 Max under macOS 26.7, the consumer's sweep of a `half4` computed in `float` into
+    /// attachment's channel count, the blend and the function's own arithmetic (EV FLT-hb2-m3, an
+    /// M3 Max under macOS 26.7, the consumer's sweep of a `half4` computed in `float` into
     /// `R16Float`, `RG16Float` and `RGBA16Float`: one and one reads the `float` into the one- and
-    /// two-channel formats and the `half` into the four-channel one; source alpha and one minus
-    /// it, destination color and one minus it, and the blend color and one minus it fit no single
-    /// form; into `RGBA32Float` every channel reads the `half`, fused as `fma(d, Fd, h·Fs)` for
-    /// most factor pairs, and Metal's compiler takes another fused form for the alpha lane of the
+    /// two-channel formats and the `half` into the four-channel one; source alpha and one minus it,
+    /// destination color and one minus it, and the blend color and one minus it fit no single form;
+    /// into `RGBA32Float` every channel reads the `half`, fused as `fma(d, Fd, h·Fs)` for most
+    /// factor pairs, and Metal's compiler takes another fused form for the alpha lane of the
     /// function this module becomes on MoltenVK). No form the AIR and the blend state decide is
     /// Metal's, so the device's blend of the output's `half` is a near-equivalent, within the
     /// owner's acceptance of fast-math regrouping (the user's answer of 2026-10-03, extended to
@@ -1308,6 +1418,23 @@ pub enum PrecisionNote {
     /// two units in the last place of a `float` there into a 32-bit float one (MoltenVK on the M3
     /// Max against plain Metal over every blended draw of the sweep; the device's `float` blend
     /// modelled on the same draws, three units). A consumer may relay it as a known difference.
+    ///
+    /// A fragment function that fetches a blended `R16Float`, `RG16Float` or `RGBA16Float`
+    /// attachment in the interlocked storage form computes the blend itself, no Vulkan blend
+    /// applying to a storage write (`lower::fragment::fetch`): in the arithmetic of its `half` or
+    /// `float` output of one to four lanes, as Metal's compiler appends it (EVs FBL-sw1-m3,
+    /// FBL-sw2-m3 and FBL-nw1-m3, plain Metal on the M3 Max under macOS 27.0.1: every channel of
+    /// 677 and 1,350 blend states into each format, half and float outputs, safe and fast math).
+    /// Under fast math it records this note where the blend is not Metal's exactly: where Metal's
+    /// compiler may fold the output's own arithmetic into the blend (a lane computed by a fast-math
+    /// operation, a constant, or the fetched color; EV FBL-fold1-m3: a returned product fused into
+    /// the blend's one minus the source alpha), or the blend's fast form is a sum, a lerp, a common
+    /// factor or a product rounded beside a fused one (but a blend constant's difference), which
+    /// the sweeps fit in most states but not all. It then stores within 2 units in the last place
+    /// of a `half` of Metal's at the operands' magnitude, 16 at the stored value's under
+    /// cancellation (below one at the function's own largest term). Where every lane of the output
+    /// is opaque to the blend and its form fits every state, the blend is Metal's and the function
+    /// records nothing.
     ///
     /// Validation derives no tolerance from it; C3 takes a row it leaves unbounded as showing
     /// the fast-math regrouping cause.
@@ -1481,6 +1608,20 @@ pub enum PrecisionNote {
     /// one within `3 * 2^-10 * (|x * (1 - t)| + |y * t|) + 2^-23`. Validation derives no
     /// tolerance from it.
     NativeMix,
+    /// A render pipeline whose color attachments the device draws in more than one group
+    /// (`GraphicsState::color_group`, the module docs of `pipeline::compile::color_group`): a
+    /// device without Metal's eight color attachments draws each of its draws once per group,
+    /// each group's variant writing that group's attachments over its own copy of the depth and
+    /// stencil the pass loads. Every variant's vertex stage is the same module, its `Position`
+    /// decorated `Invariant`, and every fragment variant computes `FragDepth`, `SampleMask` and
+    /// `FragStencilRefEXT` by the same expressions, decorated `Invariant` (SPIR-V: "computed
+    /// invariantly with respect to other shaders computing the same expressions"). Vulkan's
+    /// invariance appendix promises no more across pipelines of other fragment modules and
+    /// attachments (its Rule 4 holds for "identical pipelines", its Corollary 1 across the state
+    /// of its Rule 2). **Residual:** groups past the first may differ at discard or depth edges if
+    /// the driver compiles the variants differently. Nothing broader. Recorded only by a fragment
+    /// stage of such a pipeline. Validation derives no tolerance from it.
+    ColorAttachmentGroups,
 }
 
 /// The math mode of an entry's module, which decides, on a device whose `float` functions are

@@ -1,4 +1,4 @@
-// Owned fixture (WP-A3, DESIGN D70.3, D128): simd_shuffle_and_fill_{down,up} with segments
+// Owned fixture: simd_shuffle_and_fill_{down,up} with segments
 // (`modulo`) of 4 and 8 lanes, in-segment reads and fills. Every thread writes eight words,
 // out[8t + i], t = thread_index_in_threadgroup, from data t and fill t + 1000, so each word names
 // the lane and the operand it came from. Loop-free.

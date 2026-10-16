@@ -1,21 +1,21 @@
 //! A render pipeline's interlocked framebuffer fetch: `GraphicsState::storage_attachments` from the
 //! fragment stage's `RuntimeFact::InterlockedFramebufferFetch`.
 //!
-//! On a device that orders framebuffer fetch only through the ordered pixel interlock, the
-//! fragment function reads each color attachment, and writes it, as a storage image inside the
-//! interlock where the pipeline's state lets that form be exact (`lower::fragment`'s `fetch`).
-//! The function compiled under its pipeline's state (`LoweringInputs::framebuffer_fetch`); link
-//! decides the form again from the state of the pipeline it links into, with the same rule, and
-//! a stage whose form, attachment format, kept channels (a write mask short of the format's
-//! channels), or in-shader blend (an extended-range attachment's) that state would not choose (a
-//! write before a depth or stencil attachment's tests only where the function states
+//! On a device that orders framebuffer fetch only through the ordered pixel interlock, the fragment
+//! function reads each color attachment, and writes it, as a storage image inside the interlock
+//! where the pipeline's state lets that form be exact (`lower::fragment`'s `fetch`). The function
+//! compiled under its pipeline's state (`LoweringInputs::framebuffer_fetch`); link decides the form
+//! again from the state of the pipeline it links into, with the same rule, and a stage whose form,
+//! attachment format, kept channels (a write mask short of the format's channels), or in-shader
+//! blend (an extended-range or 16-bit float attachment's) that state would not choose (a write
+//! before a depth or stencil attachment's tests only where the function states
 //! `RuntimeFact::TestedStorageWrites`, which each draw's plan checks) was compiled for another
 //! pipeline: `NeedsInput(FramebufferFetch)`. A write mask that keeps some of a format's channels
 //! compiles as its class (`FramebufferFetchInputs::of`), so the comparison holds across the masks
 //! of a class, and the pipeline's own kept channels go in `StorageAttachmentUse::kept`, which the
-//! binder writes into each draw's push bytes. An attachment the function reads in the
-//! storage form is no color attachment of the subpass (`graphics_state` gives it no state), and
-//! the consumer binds it as `GraphicsState::storage_attachments` states.
+//! binder writes into each draw's push bytes. An attachment the function reads in the storage form
+//! is no color attachment of the subpass (`graphics_state` gives it no state), and the consumer
+//! binds it as `GraphicsState::storage_attachments` states.
 //!
 //! In a multisampled pipeline the form is per sample. Where the device has multisampled storage
 //! images, the image has the pipeline's samples, so the device's `storageImageSampleCounts` must

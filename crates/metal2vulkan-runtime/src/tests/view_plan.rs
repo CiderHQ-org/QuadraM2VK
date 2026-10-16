@@ -95,9 +95,9 @@ fn a_texture_record_presents_its_whole_image() {
     assert_eq!((r.array_length(), r.extent()), (2, [16, 16, 1]));
 }
 
-/// Every view-format pair probe 2 measured, with plain Metal's verdict: Metal's API validation
-/// also stops the pairs `plain` marks on a texture without `PixelFormatView` usage, which plain
-/// Metal makes (RT5 probes 1 and 2).
+/// Every view-format pair probe 2 measured, with plain Metal's verdict: Metal's API validation also
+/// stops the pairs `plain` marks on a texture without `PixelFormatView` usage, which plain Metal
+/// makes (Metal probes on the M3 Max and the M4).
 #[test]
 fn view_formats_follow_metals_measured_verdicts() {
     use PixelFormat as P;
@@ -322,8 +322,8 @@ fn view_types_follow_metals_measured_verdicts() {
             0..1,
             Ok(()),
         ),
-        // A texture buffer views as a texture buffer only; Metal asserts on the others, plain
-        // and validated (TOB probes 1 and 2).
+        // A texture buffer views as a texture buffer only; Metal asserts on the others, plain and
+        // validated (Metal probes on the M3 Max and an M4).
         (T::TextureBuffer, 1, T::TextureBuffer, 0..1, Ok(())),
         (
             T::TextureBuffer,

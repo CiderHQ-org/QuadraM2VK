@@ -1,27 +1,30 @@
-//! Draws whose depth/stencil state uses depth or the stencil their pass has no attachment for
-//! on the device the cfg selects, under the validation layer. Metal's validation stops each; plain
+//! Draws whose depth/stencil state uses depth or the stencil their pass has no attachment for on
+//! the device the cfg selects, under the validation layer. Metal's validation stops each; plain
 //! Metal tests it against a hidden `float` depth, 1.0 at the pass's start, and a hidden stencil of
-//! 0, kept through the pass (RT6 Metal probes 4, 4b and 4c; Metal probes; an M4 with macOS 27.0.1),
-//! which the runtime gives the pass as an attachment of its own. RT6 probe 4's functions (the owned
-//! fixture `rt6_render_state`) draw fullscreen triangles into its 4x4 `RGBA8Unorm` target cleared
-//! to zero, white unless a case names `rt6_half`.
+//! 0, kept through the pass (Metal probes on an M4 with macOS 27.0.1), which the runtime gives the
+//! pass as an attachment of its own. The probe's functions (the owned fixture `rt6_render_state`)
+//! draw fullscreen triangles into its 4x4 `RGBA8Unorm` target cleared to zero, white unless a case
+//! names `rt6_half`.
 //!
 //! Every answer below is plain Metal's, and each pass stores what the same pass stores with a
 //! `Depth32Float` attachment cleared to 1.0 and a `Stencil8` one cleared to 0 (checked):
 //!
 //! - Each compare at depth 0.5, with writes for `Never` and `Always`: `Less`, `LessEqual`,
-//!   `NotEqual` and `Always` draw; `Equal`, `Greater`, `GreaterEqual` and `Never` draw nothing
-//!   (RT6 probes 4 and 4b).
+//!   `NotEqual` and `Always` draw; `Equal`, `Greater`, `GreaterEqual` and `Never` draw nothing (a
+//!   Metal probe).
 //! - A write at 0.25, then `Equal` at 0.25, draws (probe 2 `dwa_write_then_equal`); a write at
 //!   0.5, then `Equal` at the next `float` above 0.5, draws nothing (probe 3 `dwa_eq_2m24`).
 //! - A pass after one that wrote 0.25 starts at 1.0 again: `Less` at 0.5 draws (probe 2
 //!   `dwa_across_passes`).
 //! - Through a viewport depth range of `[0, 0.5]` depth 1.0 lands at 0.5: `LessEqual` draws,
 //!   `Equal` and `GreaterEqual` draw nothing (probe 2 `dwa_range_*`).
-//! - The stencil: a compare of `Never` draws nothing, `Always` with `Replace` draws (RT6 probe
-//!   4b); `Replace` of 5 under a small triangle, then `Equal` to 5, draws that triangle alone.
+//! - The stencil: a compare of `Never` draws nothing, `Always` with `Replace` draws (a Metal
+//!   probe); `Replace` of 5 under a small triangle, then `Equal` to 5, draws that triangle alone.
 //! - A draw that needs them after a draw that did not (the pass splits) keeps the earlier draw's
 //!   texels, and tests against 1.0.
+//! - A first draw that needs them takes the place of the pass's first instance before anything
+//!   recorded into it: that instance's draws recording ends, and its pool goes back to the
+//!   device's spares unreset.
 //!
 //! A pass with a depth attachment of its own whose draw uses the stencil it lacks, and the other
 //! way round, stay refused `NotImplemented(HiddenDepthStencil)` (not built, unmeasured).
@@ -193,6 +196,51 @@ fn a_draw_without_its_depth_or_stencil_attachment_tests_metal_s_hidden_ones() {
         "after a draw without them on {name}: {texels:02x?}"
     );
     eprintln!("draws against the hidden depth and stencil on {name}: Metal's");
+    super::render_state::quiet(probe, &messages);
+}
+
+/// A pass whose first draw tests its hidden depth runs from that draw on in an instance with the
+/// hidden attachment, which takes the place of the pass's first instance before anything recorded
+/// into it. Where that first instance began its draws' secondary as the pass opened (a pass with
+/// a visibility result buffer, whose first instance never records inline), the runtime ends it
+/// unused (`WorkCounts::unrun_instances_ended`); where the first instance may record inline (the
+/// probe's color-only pass), it began none and none ends (`render/inline_first.rs`). Either way
+/// every command buffer the pass's pool handed out ended, the pool goes back to the device's
+/// spares unreset, and no spare is reset as it is taken again
+/// (`WorkCounts::spare_command_pools_reset`).
+#[test]
+fn a_first_draw_s_instance_ends_the_one_it_replaces() {
+    const PASSES: u64 = 4;
+    let (messages, _cache, probe) = validated();
+    let results = super::buffer_with(&probe.device, &[0; 8]).unwrap();
+    for (visibility, begun) in [(None, 0), (Some(&results), PASSES)] {
+        let before = probe.device.work_counts();
+        for _ in 0..PASSES {
+            let stored = probe
+                .try_run_with(PASS, visibility, |p, e, h| {
+                    e.set_depth_stencil_state(&p.state(CompareFunction::Less, false, None))
+                        .unwrap();
+                    p.draw(e, h, WHITE, 0.5, 0.0);
+                })
+                .unwrap();
+            assert_eq!(stored.color, rows(&FULL), "Less at 0.5 against 1.0");
+        }
+        let after = probe.device.work_counts();
+        let ended = after.unrun_instances_ended - before.unrun_instances_ended;
+        let taken = after.spare_command_pools_taken - before.spare_command_pools_taken;
+        let reset = after.spare_command_pools_reset - before.spare_command_pools_reset;
+        eprintln!(
+            "unrun instances on {}, visibility buffer {}: {PASSES} passes ended {ended} replaced \
+             instances; {taken} spare pools taken, {reset} of them reset",
+            probe.device.name(),
+            visibility.is_some(),
+        );
+        assert_eq!(
+            ended, begun,
+            "a replaced instance a pass whose first began its secondary"
+        );
+        assert_eq!(reset, 0, "spare pools reset as taken");
+    }
     super::render_state::quiet(probe, &messages);
 }
 

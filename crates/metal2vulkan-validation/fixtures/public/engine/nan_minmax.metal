@@ -1,4 +1,4 @@
-// Owned fixture (NaN model, DESIGN D293): which NaN or number Metal's minimum and maximum answer.
+// Owned fixture (NaN model): which NaN or number Metal's minimum and maximum answer.
 // Lane `i` reads (a, b, c) from `in[i]` and writes eight words to `out[2i .. 2i + 1]`: fmin(a, b)
 // and fmax(a, b) (`air.fmin`, `air.fmax`; `min` and `max` are the same calls), a < b ? a : b and
 // a > b ? a : b (an `fcmp` and a `select`), min3, max3, median3, and clamp(a, b, c). Compiled

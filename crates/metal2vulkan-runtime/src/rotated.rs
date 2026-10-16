@@ -49,6 +49,7 @@ use super::shadow::ShadowStaging;
 use super::tracker::Barrier;
 use super::values::{CpuCacheMode, HazardTrackingMode, ResourceOptions, StorageMode};
 use super::Device;
+use crate::device::functions::Vk;
 use ash::vk;
 use metal2vulkan::bind::RotateTexelsModule;
 
@@ -304,7 +305,7 @@ impl RotatedCopies {
     /// sets are live until it completes, and the image rests in `GENERAL`.
     pub(super) unsafe fn record(
         &self,
-        device: &ash::Device,
+        device: &Vk,
         command_buffer: vk::CommandBuffer,
         image: vk::Image,
         (bytes, staging): (vk::Buffer, &ShadowStaging),

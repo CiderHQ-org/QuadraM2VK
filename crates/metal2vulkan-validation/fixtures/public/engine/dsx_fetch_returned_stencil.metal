@@ -1,4 +1,4 @@
-// Owned fixture (WP-DSX, DESIGN D672 item 15): fragment functions without early fragment tests
+// Owned fixture: fragment functions without early fragment tests
 // that read their color attachment (`[[color(0)]]`), write back half of it plus a quarter, and
 // return the stencil reference (`[[stencil]]`), the sample mask (`[[sample_mask]]`), or both,
 // that their buffer holds (`x` the stencil, `y` the mask). Beside a depth and stencil attachment

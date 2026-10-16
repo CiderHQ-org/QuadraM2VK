@@ -123,6 +123,9 @@ pub enum BindingSource {
     /// draw's render pass instance holds (`ResourceKind::ExtendedShadow`), bound as a storage
     /// image.
     ExtendedShadow(u32),
+    /// The snapshot of the texture the draw binds at this fragment texture slot
+    /// (`ResourceKind::SnapshotTexels`), bound as a storage image.
+    SnapshotTexels(u32),
 }
 
 /// One push-constant range of a [`PipelineLayout`]: a stage's fixed window (vertex `[0, 64)`,

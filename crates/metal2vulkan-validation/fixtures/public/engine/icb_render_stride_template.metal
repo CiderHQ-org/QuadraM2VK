@@ -1,4 +1,4 @@
-// Owned fixture (WP-ICBV, DESIGN D327 item 5): the render template of executed draws whose vertex
+// Owned fixture: the render template of executed draws whose vertex
 // buffer a command binds at an attribute stride, a rasterization-disabled vertex function. Vertex
 // `vid` of instance `iid` fetches its `[[stage_in]]` attribute (a case's vertex descriptor: one
 // uint per vertex, under a layout of `MTLBufferLayoutStrideDynamic` the stride the buffer is

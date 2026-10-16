@@ -1,6 +1,6 @@
 // metal-std: metal4.0
 // metal-macos-min: 26.2
-// Owned fixture (WP-TNS, DESIGN D272): where MetalPerformancePrimitives' matmul2d places a
+// Owned fixture: where MetalPerformancePrimitives' matmul2d places a
 // cooperative tensor's elements. Function constant 0 (0 when absent) selects a descriptor, an
 // execution scope, element types, and an operand (the destination, or the right input). Each thread
 // writes the tensor's capacity to out[tid] and, for each element i it holds, one word at

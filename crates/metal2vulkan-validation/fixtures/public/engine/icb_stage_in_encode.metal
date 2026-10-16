@@ -1,4 +1,4 @@
-// Owned fixture (WP-ICBV, DESIGN D336): a kernel that encodes the stage-in region and the dispatch
+// Owned fixture: a kernel that encodes the stage-in region and the dispatch
 // of commands whose pipeline and buffers the executing encoder supplies (inherited). Thread `tid`
 // encodes command `tid`: the region of origin `origins[tid].xyz` and size `sizes[tid].xyz`, then
 // a dispatch of `origins[tid].w` threads on x in threadgroups of `sizes[tid].w`. `out` and `data`

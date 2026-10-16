@@ -1,4 +1,4 @@
-// Owned fixture (WP-LP2, DESIGN D208): the domain points of a quad patch, read without
+// Owned fixture: the domain points of a quad patch, read without
 // rasterizing them. The post-tessellation vertex function returns nothing (the case runs with
 // rasterization disabled) and stores, for every domain point it is called with:
 // - a mark at the point's cell, `marks[j * 65 + i] = 1`, where `i = rint(u * grid.x)` and

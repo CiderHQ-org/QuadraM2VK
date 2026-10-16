@@ -1,11 +1,11 @@
 //! Separate depth and stencil textures in one pass (step 6's second part).
 //!
 //! Metal renders a pass whose depth and stencil attachments are two textures: measured on an M4
-//! (RT6 probe 4c), `Depth32Float` with `Stencil8` and `Depth16Unorm` with `Stencil8` both test
-//! and store each aspect in its own texture. A Vulkan subpass has one depth/stencil attachment,
-//! so such a pass renders into a scratch image of the combined format whose depth aspect holds
-//! the depth texture's bits: `D32_SFLOAT_S8_UINT` for 32-bit float depth, `D16_UNORM_S8_UINT`
-//! for 16-bit, `D24_UNORM_S8_UINT` for 24-bit. Stencil is 8 bits in every format.
+//! (macOS 27.0.1), `Depth32Float` with `Stencil8` and `Depth16Unorm` with `Stencil8` both test and
+//! store each aspect in its own texture. A Vulkan subpass has one depth/stencil attachment, so such
+//! a pass renders into a scratch image of the combined format whose depth aspect holds the depth
+//! texture's bits: `D32_SFLOAT_S8_UINT` for 32-bit float depth, `D16_UNORM_S8_UINT` for 16-bit,
+//! `D24_UNORM_S8_UINT` for 24-bit. Stencil is 8 bits in every format.
 //!
 //! - **Before the pass**, each aspect loaded with `Load` is copied from its texture into the
 //!   scratch image; `Clear` and `DontCare` load as the scratch's own operations.
@@ -39,13 +39,13 @@
 //! - **Textures of different sizes**, which Metal's validation stops ("When both depth (8 x 8) and
 //!   stencil (4 x 4) are used from separate textures, they must have identical dimensions") and
 //!   plain Metal renders over the smaller (EV RRS-probe-1-m4, an M4 with macOS 27.0.1, one sample,
-//!   without draws; RT6 probe 4b's `separate_sizes`, with one): the scratch image is the smaller,
-//!   the render area at most that, and its copies move the render area. Metal's clear of the larger
-//!   reaches past the render area to the end of its tiles, by 32 pixels a side for `Depth32Float`
-//!   and 16 for `Stencil8` (a 64x64 depth cleared at 0..31, a 64x64 stencil at 0..15, an 8x8 depth
-//!   whole, each beside a 4x4 texture; and 32 alike under 16x16 tiles). A texture that ends inside
-//!   those tiles, cleared and stored, is cleared whole before the copies back
-//!   (`cleared_whole`); one past them, of another format, or of more samples, unmeasured, is
+//!   without draws; Metal probe `separate_sizes` on an M4, with one): the scratch image is the
+//!   smaller, the render area at most that, and its copies move the render area. Metal's clear of
+//!   the larger reaches past the render area to the end of its tiles, by 32 pixels a side for
+//!   `Depth32Float` and 16 for `Stencil8` (a 64x64 depth cleared at 0..31, a 64x64 stencil at
+//!   0..15, an 8x8 depth whole, each beside a 4x4 texture; and 32 alike under 16x16 tiles). A
+//!   texture that ends inside those tiles, cleared and stored, is cleared whole before the copies
+//!   back (`cleared_whole`); one past them, of another format, or of more samples, unmeasured, is
 //!   `NotImplemented(Render)` (`check_sizes`).
 //! - **A layered pass** (`renderTargetArrayLength` 2 or more) renders through a scratch image of
 //!   its layers, each texture's from its slice, and the copies move every layer; the copies' draws,

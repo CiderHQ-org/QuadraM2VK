@@ -1,5 +1,6 @@
 //! `pixel_format_info`: `MTLPixelFormatGetInfoForDevice` answers our own measurements at each Metal
-//! level (EVs XRR2-pfi1-m3 and XRR2-pfi1-m4), the level describes a format exactly where the table
+//! level (an Apple M3 Max: EV XRR2-pfi1-m3, and the consumer's macOS 27 host lane, whose answers
+//! are XRR2-pfi1-m4's on an M4 but from 630 to 645), the level describes a format exactly where the table
 //! has a row, and `MTLGetTextureLevelInfoForDeviceWithOptions` answers the probes' layouts (EVs
 //! API-tli1 to API-tli4 on each).
 
@@ -13,16 +14,15 @@ fn described(level: MetalLevel) -> Vec<u64> {
         .collect()
 }
 
-/// macOS 26.7 on an Apple M3 Max describes 264 values, macOS 27.0.1 on an Apple M4 280: the 264
-/// and the 16 from 630 to 645.
+/// An Apple M3 Max describes the same 264 values under macOS 26.7 and 27.0.1, none from 630 to
+/// 645 (which an Apple M4 describes under 27.0.1).
 #[test]
 fn each_level_answers_its_measured_rows() {
     let old = described(MetalLevel::MacOS26_7);
     let new = described(MetalLevel::MacOS27_0_1);
     assert_eq!(old.len(), 264);
-    assert_eq!(new.len(), 280);
-    let added: Vec<u64> = new.iter().copied().filter(|r| !old.contains(r)).collect();
-    assert_eq!(added, (630..=645).collect::<Vec<u64>>());
+    assert_eq!(new, old);
+    assert!(!new.iter().any(|raw| (630..=645).contains(raw)));
     // Past every named value, and a value no format has, Metal answers Invalid.
     for raw in [0, 2, 9, 2047, 2048, u64::from(u32::MAX) + 10, u64::MAX] {
         for level in MetalLevel::ALL {
@@ -59,7 +59,7 @@ fn a_level_describes_exactly_the_formats_it_answers() {
 }
 
 /// Spot values, as the probes printed them: a format alike at both levels, a cast class numbered
-/// anew, flags that differ, a compressed format's block, and a format only 27.0.1 describes.
+/// anew, flags that differ, a compressed format's block, and a format only an Apple M4 describes.
 #[test]
 fn the_answers_are_the_probes() {
     let at = |level: MetalLevel, pf: P| level.pixel_format_info(u64::from(pf.as_raw()));
@@ -92,12 +92,14 @@ fn the_answers_are_the_probes() {
     let bc1 = at(MetalLevel::MacOS27_0_1, P::BC1RGBA);
     assert_ne!(bc1.flags & 0x400, 0);
     assert_eq!(bc1.words, [8, 4, 4, 1]);
-    // BGRA10Unorm (638): only macOS 27.0.1 describes it.
-    assert_eq!(
-        at(MetalLevel::MacOS26_7, P::BGRA10Unorm),
-        PixelFormatInfo::INVALID
-    );
-    assert_eq!(at(MetalLevel::MacOS27_0_1, P::BGRA10Unorm).cast_class, 43);
+    // BGRA10Unorm (638): only an Apple M4 under macOS 27.0.1 describes it.
+    for level in MetalLevel::ALL {
+        assert_eq!(
+            at(level, P::BGRA10Unorm),
+            PixelFormatInfo::INVALID,
+            "{level}"
+        );
+    }
 }
 
 /// A format of blocks (flags bit 0x400) states its block in the four words: bytes, then a width

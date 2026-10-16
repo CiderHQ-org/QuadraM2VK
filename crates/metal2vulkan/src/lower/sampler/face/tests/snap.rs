@@ -74,6 +74,7 @@ fn by(route: Route) -> Fma {
     let routes = fma::Routes {
         float: route,
         half: Route::HalfOdd,
+        tiny: None,
     };
     Fma::by(routes, SCALAR).expect("float")
 }

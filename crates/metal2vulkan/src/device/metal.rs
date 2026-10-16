@@ -260,12 +260,14 @@ fn unsupported_features(profile: &DeviceProfile) -> Vec<Unsupported> {
             ],
         ));
     }
-    if !f.fragment.geometry_shader && !f.fragment.tessellation_shader {
+    // `[[barycentric_coord]]`: the device's builtins, or varyings a generated geometry stage
+    // writes (`pipeline::link::geometry`).
+    if !f.fragment.barycentric && !f.fragment.geometry_shader {
         out.push(Unsupported::needs_any_of(
-            Feature::PrimitiveId,
+            Feature::Barycentrics,
             vec![
+                vec![feature(VkFeature::FragmentShaderBarycentric)],
                 vec![feature(VkFeature::GeometryShader)],
-                vec![feature(VkFeature::TessellationShader)],
             ],
         ));
     }

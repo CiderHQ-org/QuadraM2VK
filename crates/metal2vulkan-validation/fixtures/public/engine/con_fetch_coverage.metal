@@ -1,4 +1,4 @@
-// Owned fixture (WP-CON, DESIGN D287): a fragment function with early fragment tests that reads a
+// Owned fixture: a fragment function with early fragment tests that reads a
 // two-channel `half` color attachment (`[[color(1)]]`) and writes it back beside a four-channel
 // color it does not read. With `w = coverage.x / 2 + coverage.y`, it writes `tint * w` to color 0
 // and `(w, coverage.y / 4)` to color 1, so `n` fragments over one pixel in order leave a value in

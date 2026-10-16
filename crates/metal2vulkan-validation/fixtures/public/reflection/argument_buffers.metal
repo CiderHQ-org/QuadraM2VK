@@ -1,4 +1,4 @@
-// Owned fixture (WP-UNI, DESIGN D311 item 5, S2): argument buffers whose reflection Metal answers
+// Owned fixture: argument buffers whose reflection Metal answers
 // (MTLPointerType, MTLStructType, MTLStructMember, MTLArrayType, MTLTextureReferenceType): members
 // with explicit and implicit ids, textures of each access, a depth texture, arrays of textures,
 // samplers, pointers and inline constants, samplers, device and constant pointers, inline

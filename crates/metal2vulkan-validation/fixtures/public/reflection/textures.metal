@@ -1,4 +1,4 @@
-// Owned fixture (WP-UNI, DESIGN D311 item 5, S2): the texture and sampler arguments whose
+// Owned fixture: the texture and sampler arguments whose
 // reflection Metal answers (MTLTextureBinding): every texture type a kernel takes, each access,
 // depth textures, a texture array argument, and an unused texture. Written for this repository;
 // no third-party source. Loop-free.

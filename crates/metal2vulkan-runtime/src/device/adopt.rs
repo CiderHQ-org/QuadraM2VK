@@ -10,6 +10,7 @@
 use super::{device_error, Device, InstanceShared, Parts};
 use crate::error::Error;
 use crate::gpu_time;
+use crate::image_barrier::MemoryReads;
 use crate::loader_word::LoaderWord;
 use crate::metal_level::{choose, Host};
 use crate::shader_cache::{CacheSetup, ShaderCacheOptions};
@@ -17,7 +18,7 @@ use crate::sparse::device::SparseFeatures;
 use ash::vk;
 use metal2vulkan::device::{DeviceDescription, DevicePolicy, EnableSet, VkExtension};
 use std::collections::BTreeSet;
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::sync::Arc;
 
 /// The consumer's Vulkan objects a runtime device adopts ([`Device::from_raw`]). No Metal
@@ -232,6 +233,21 @@ impl Device {
                 super::create::graphics_pipeline_library_supported(&instance, raw.physical_device)
             }
         });
+        // The reads its global memory barriers name: those of the family the runtime submits to,
+        // which supports graphics and compute work, with every extension the consumer enabled
+        // that the description or the consumer names.
+        // SAFETY: the caller's contract: the physical device was enumerated from the instance.
+        let families =
+            unsafe { instance.get_physical_device_queue_family_properties(raw.physical_device) };
+        let family = (families.get(raw.queue_family as usize)).map_or(
+            vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE,
+            |family| family.queue_flags,
+        );
+        let mut named: Vec<&CStr> = (raw.enabled.extensions.iter())
+            .flat_map(|&extension| crate::enables::names_of(extension))
+            .collect();
+        named.extend(raw.device_extensions.iter().map(CString::as_c_str));
+        let memory_reads = MemoryReads::of(family, named);
         let parts = Parts {
             instance: Arc::new(InstanceShared {
                 entry,
@@ -273,6 +289,7 @@ impl Device {
             linear_color_attachment,
             graphics_pipeline_library,
             sparse_features: raw.sparse_features.features(),
+            memory_reads,
             owned: false,
             cache,
             metal_level,

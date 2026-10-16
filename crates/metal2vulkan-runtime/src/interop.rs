@@ -118,7 +118,8 @@ impl Texture {
     /// driver's own linear image lays its rows out otherwise than `bytes_per_row`
     /// (`WorkCounts::pitched_host_images` counts them). Ask such an image's layout of its memory
     /// plane (`VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT`, not the color aspect), and its modifier
-    /// with `vkGetImageDrmFormatModifierPropertiesEXT`.
+    /// with `vkGetImageDrmFormatModifierPropertiesEXT`. Textures of one image over the same bytes
+    /// of one import of host pages give the same `VkImage`, which they share.
     ///
     /// # Safety
     ///
@@ -173,7 +174,10 @@ impl CommandQueue {
     /// and presents (`vkQueuePresentKHR`) go there, externally synchronized as Vulkan requires.
     /// On MoltenVK, where the runtime relays the driver's command-buffer failures, it submits no
     /// work with a fence of its own after `f` under the same lock, so a failure of the caller's
-    /// submissions stays the caller's.
+    /// submissions stays the caller's. There the runtime's frees of its memory wait for its own
+    /// work in flight, not for the caller's
+    /// (`RuntimeDriverDefect::FreedAddressMemoryFailsPendingWork`): a submission of the caller's
+    /// still pending whose pipelines read device addresses may fail.
     ///
     /// # Safety
     ///

@@ -1,10 +1,10 @@
-// Owned fixture (WP-A3, DESIGN D44, control Q1, D128): a tangled operation in the tail of a
+// Owned fixture: a tangled operation in the tail of a
 // multi-level break. Lane t searches a nested loop (trip counts trips[0] x trips[1], authored
 // inputs) for its flat stop iteration stop[t]; at it, the tail records which lanes run it together
 // (simd_or of the lane bits) and leaves both loops by returning from the inlined helper. out[2t] is
 // that mask (0 when the lane never stops), out[2t + 1] = i << 8 | j at the stop (0xFFFF when the
 // lane never stops). MSL has no goto, so the break is a return from an inlined helper; the front
-// end compiles it with one join per loop (see D128). Cyclic: bounded by the authored trip counts.
+// end compiles it with one join per loop. Cyclic: bounded by the authored trip counts.
 #include <metal_stdlib>
 using namespace metal;
 

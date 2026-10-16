@@ -53,7 +53,7 @@ use metal2vulkan_runtime::Degradation;
 use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::Duration;
 
 mod device_replay;
 mod replay;
@@ -834,7 +834,13 @@ fn execute(
     // SAFETY: `module_info` points at live SPIR-V words for the call.
     objects.module = unsafe { context.device.create_shader_module(&module_info, None) }
         .map_err(|error| format!("create shader module: {error}"))?;
-    let region_pipelines = create_pipelines(context, &mut objects, pipeline, &commands.regions)?;
+    let region_pipelines = create_pipelines(
+        context,
+        &mut objects,
+        pipeline,
+        &commands.regions,
+        case.creation_bound,
+    )?;
     let sets = resources.write_sets(context, &objects.layout)?;
     record_and_submit(
         context,
@@ -1127,12 +1133,14 @@ fn push_writes(
 }
 
 /// One compute pipeline per distinct region specialization (with its stage flags and required
-/// subgroup size), and each region's index into `objects.pipelines`.
+/// subgroup size), each creation held to `bound` (the case's, `ComputeCase::creation_bound`), and
+/// each region's index into `objects.pipelines`.
 fn create_pipelines(
     context: &VulkanContext,
     objects: &mut Objects<'_>,
     pipeline: &ComputePipeline,
     regions: &[DispatchRegion],
+    bound: Duration,
 ) -> Result<Vec<usize>, ExecutorError> {
     let entry = CString::new(pipeline.stage.entry_point.as_str())
         .map_err(|_| "entry point name contains NUL")?;
@@ -1173,7 +1181,7 @@ fn create_pipelines(
         let info = vk::ComputePipelineCreateInfo::default()
             .stage(stage)
             .layout(objects.layout.pipeline_layout);
-        let started = Instant::now();
+        let clock = crate::budgets::CreationClock::start();
         // SAFETY: every pointer in `info` outlives the call; the result is destroyed with
         // `objects`.
         let created = unsafe {
@@ -1183,7 +1191,7 @@ fn create_pipelines(
         }
         .map_err(|(_, error)| format!("the driver refused the compute pipeline: {error}"))?;
         objects.pipelines.extend(created.first().copied());
-        crate::budgets::creation_within_ceiling("the compute pipeline", started.elapsed())?;
+        crate::budgets::creation_within("the compute pipeline", clock.read(), bound)?;
         indices.push(keys.len());
         keys.push(region);
     }

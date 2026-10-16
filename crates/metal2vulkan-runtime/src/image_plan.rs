@@ -79,8 +79,8 @@ use metal2vulkan::metal::format::{
 };
 use metal2vulkan::metal::{PixelFormat, TextureType, TextureUsage};
 use metal2vulkan::vk::{
-    Format, FormatBlock, FormatFeatureFlags2, ImageCreateFlags, ImageType, ImageUsageFlags,
-    NumericType, SampleCountFlags,
+    ColorComponentFlags, Format, FormatBlock, FormatFeatureFlags2, ImageCreateFlags, ImageType,
+    ImageUsageFlags, NumericType, SampleCountFlags,
 };
 use std::collections::BTreeSet;
 
@@ -113,6 +113,10 @@ pub(super) struct DepthImageFacts {
     pub(super) outside_unit_range: bool,
     /// `DriverFact::DepthTestKeepsDenormals`.
     pub(super) test_denormals: bool,
+    /// `DriverFact::DepthTestComparesMagnitudes`: the depth test is Metal's for every value a
+    /// `D32_SFLOAT` image holds, so no target renders over a magnitude stand-in
+    /// (`texture/signed_depth.rs`).
+    pub(super) test_magnitudes: bool,
 }
 
 impl DepthImageFacts {
@@ -122,6 +126,7 @@ impl DepthImageFacts {
             denormals: facts.contains(&DriverFact::DepthImageKeepsDenormals),
             outside_unit_range: facts.contains(&DriverFact::DepthImageKeepsValuesOutsideUnitRange),
             test_denormals: facts.contains(&DriverFact::DepthTestKeepsDenormals),
+            test_magnitudes: facts.contains(&DriverFact::DepthTestComparesMagnitudes),
         }
     }
 }
@@ -467,6 +472,21 @@ pub(super) fn compatible(image: Format, view: Format, family: bool) -> bool {
     !is_compressed(&a) || family
 }
 
+/// Whether Vulkan copies texels between images of color formats `a` and `b` of one texel block
+/// size (`vkCmdCopyImage`, `VUID-vkCmdCopyImage-srcImage-01548`): "Color formats with the same
+/// texel block size are considered size-compatible as long as neither or both are alpha formats
+/// (e.g., VK_FORMAT_A8_UNORM)" (the Formats chapter's "Size Compatibility"). An alpha format's
+/// one component is alpha. Elsewhere the copy goes through a buffer, whose copies take each
+/// image's texel block size alone.
+pub(super) fn copies_between(a: Format, b: Format) -> bool {
+    let alpha = |format: Format| {
+        format
+            .block()
+            .is_some_and(|block| block.color_components == ColorComponentFlags::A)
+    };
+    alpha(a) == alpha(b)
+}
+
 /// Whether a color format's block is a compressed block: more than one texel, or (Vulkan's
 /// registry counts a PVRTC block as one texel) components that share no width and pack into no
 /// word.
@@ -569,9 +589,9 @@ fn plan_held(
     let samples = sample_count(layout.samples).ok_or_else(|| {
         ImageRefusal::Unsupported(Unsupported::not_representable(Feature::TextureSampleCount))
     })?;
-    // Metal makes a multisample array, memoryless ones included (RT6 probe 6c); a device whose
-    // portability subset withholds `multisampleArrayImage` makes no multisampled image of more
-    // than one layer's type (`VUID-VkImageCreateInfo-multisampleArrayImage-04460`).
+    // Metal makes a multisample array, memoryless ones included (a Metal probe on an M4); a device
+    // whose portability subset withholds `multisampleArrayImage` makes no multisampled image of
+    // more than one layer's type (`VUID-VkImageCreateInfo-multisampleArrayImage-04460`).
     if layout.texture_type == TextureType::Type2DMultisampleArray
         && profile
             .enabled()

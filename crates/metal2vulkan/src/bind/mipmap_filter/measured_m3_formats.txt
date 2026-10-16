@@ -1,11 +1,10 @@
 # Plain Metal's generateMipmapsForTexture: on an Apple M3 Max (macOS 26.7, 25G229): the format
-# chains of WP-FXR's share-mips-m3b (our own probe, DESIGN D732). 21 formats at 256x256, 193x193,
-# 300x200, 130x130, 1024x16 and as a 128x128 cube, Private with allowGPUOptimizedContents off
-# (plain); RGBA16Float Private at 257 to 1025 (three seeds), 2048x2048, and 32x32 and 64x64
-# (eight seeds); R16Float and RG16Float Private at 1024x1024; and a 2048x16 BGRA8Unorm chain,
-# plain. The first levels come from measured_m3_passes.txt's probe, keyed by the chain's key
-# (seed tags included). Each level's digest is the first 12 hex digits of the SHA-256 of its
-# bytes, every layer in turn, rows tight.
+# chains of share-mips-m3b (our own probe). 21 formats at 256x256, 193x193, 300x200, 130x130,
+# 1024x16 and as a 128x128 cube, Private with allowGPUOptimizedContents off (plain); RGBA16Float
+# Private at 257 to 1025 (three seeds), 2048x2048, and 32x32 and 64x64 (eight seeds); R16Float and
+# RG16Float Private at 1024x1024; and a 2048x16 BGRA8Unorm chain, plain. The first levels come from
+# measured_m3_passes.txt's probe, keyed by the chain's key (seed tags included). Each level's digest
+# is the first 12 hex digits of the SHA-256 of its bytes, every layer in turn, rows tight.
 # Format:
 #   <key> <format> <2d|2darray|cube> <width>x<height> <layers> <pattern> <private|plain>
 #   <digest of level 0> ...

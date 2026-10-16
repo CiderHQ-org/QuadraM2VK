@@ -1,13 +1,12 @@
-// Owned fixture (WP-A1, D126): the two fast-math places D110 left to comparison classes (D33,
-// D113): the sign of a zero from `sign` under `nsz` and the range of Metal's division. D110.3
-// lowers `sign` under `nsz` as `FSign` (either zero's sign may come back) because Metal wrote
-// +0 for `w - lr * (sign(w) * s + g)` at w = -0 (d72f0f18, private corpus), where the exact
-// sequence gives -0; the mechanism was not isolated. D110.2 notes that Metal's fast division
-// bounds its error only for divisors in [2^-126, 2^126] (its reciprocal flushes past them, so
-// `fast_tanh` answers 0 near x = 44), while a Vulkan `OpFDiv` of a divisor past 2^126 may be
-// correctly rounded. Compiled with the default fast math, as the corpus is (`sign`, the
-// regularizer's arithmetic, and both divisions carry `fast`); `a1_sign_and_division_precise` is
-// the same program without fast math.
+// Owned fixture: the two fast-math places the translator leaves to comparison classes: the sign of
+// a zero from `sign` under `nsz` and the range of Metal's division. The translator lowers `sign`
+// under `nsz` as `FSign` (either zero's sign may come back) because Metal wrote +0 for `w - lr *
+// (sign(w) * s + g)` at w = -0 (d72f0f18, private corpus), where the exact sequence gives -0; the
+// mechanism was not isolated. Metal's fast division bounds its error only for divisors in [2^-126,
+// 2^126] (its reciprocal flushes past them, so `fast_tanh` answers 0 near x = 44), while a Vulkan
+// `OpFDiv` of a divisor past 2^126 may be correctly rounded. Compiled with the default fast math,
+// as the corpus is (`sign`, the regularizer's arithmetic, and both divisions carry `fast`);
+// `a1_sign_and_division_precise` is the same program without fast math.
 //
 // Thread i reads `in[i]` = float patterns (w, lr, s, g), `div[i]` = float patterns (n, d), and
 // `hin[i]` = half patterns (x, n, d, 0), and writes four words: `sign(w)` (`air.sign.f32`),

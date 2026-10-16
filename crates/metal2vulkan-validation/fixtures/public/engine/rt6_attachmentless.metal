@@ -1,9 +1,9 @@
-// Owned fixture (WP-RT6, DESIGN D305 item 22): the functions RT6 Metal probe 8 drew (an M4) in a
-// render pass without attachments at a default raster sample count of 1, 2 and 4, so each lane
-// draw asks the question the probe measured. The fullscreen triangle covers a 2x2 render area;
-// each fragment invocation ORs into its pixel's word the samples it ran for and counts itself in
-// word 4. Metal runs both functions once per covered sample (each writes memory), so each pixel's
-// word holds every sample and the count is the pixels times the samples. Loop-free.
+// Owned fixture: the functions a Metal probe drew on an M4 in a render pass without attachments at
+// a default raster sample count of 1, 2 and 4, so each lane draw asks the question the probe
+// measured. The fullscreen triangle covers a 2x2 render area; each fragment invocation ORs into its
+// pixel's word the samples it ran for and counts itself in word 4. Metal runs both functions once
+// per covered sample (each writes memory), so each pixel's word holds every sample and the count is
+// the pixels times the samples. Loop-free.
 #include <metal_stdlib>
 using namespace metal;
 

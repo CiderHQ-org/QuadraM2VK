@@ -619,7 +619,7 @@ fn d639_model(form: ExtendedRange, eq: &BlendEquation, s: [f32; 4], d: [f32; 4])
         BlendFactor::Zero => 0.0,
         BlendFactor::One => 1.0,
         BlendFactor::OneMinusSourceAlpha => minus,
-        f => panic!("{f:?} is not a D639 factor"),
+        f => panic!("{f:?} is not a factor of these blends"),
     };
     std::array::from_fn(|k| {
         let (fs, fd) = match k {

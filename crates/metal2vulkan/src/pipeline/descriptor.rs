@@ -974,7 +974,7 @@ impl StageInputAttributeDescriptor {
 /// The tessellation fields of `MTLRenderPipelineDescriptor`: the synthesized control stage's factor
 /// rules and modes. A control-point index type other than `None` is not implemented.
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TessellationDescriptor {
     pub max_tessellation_factor: u32,

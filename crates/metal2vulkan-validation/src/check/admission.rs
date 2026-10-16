@@ -155,8 +155,8 @@ impl fmt::Display for NotSupported {
             ),
             Self::Uncontained(_) => write!(
                 formatter,
-                "{}: the device leaves these forms uncontained under its robust buffer access \
-                 (DESIGN D221), so the case's out-of-bounds accesses are not run there",
+                "{}: the device leaves these forms uncontained under its robust buffer access, so \
+                 the case's out-of-bounds accesses are not run there",
                 self.outcome()
             ),
             Self::Restriction { profile, gaps } => write!(

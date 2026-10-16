@@ -1,4 +1,4 @@
-// Owned fixture (WP-TRN, DESIGN D297): `trn_timing_fast`'s fast tangent kernel compiled without
+// Owned fixture: `trn_timing_fast`'s fast tangent kernel compiled without
 // fast math (`-fno-fast-math`), so on MoltenVK, whose `Tan` is Metal's precise one in such an
 // entry, `fast::tan` takes Apple's formula of the fast sine and cosine and the fast division's
 // routine. Each thread applies the function to its running value 64 n times (64 steps written

@@ -154,6 +154,19 @@ pub(crate) fn views_in(plan: &ImagePlan, format: Format) -> bool {
             && (plan.view_formats.is_empty() || plan.view_formats.contains(&format)))
 }
 
+/// Whether a fetching draw in the interlock reads and writes an attachment that renders in
+/// `format` through a storage view of its image of `plan` ([`storage_view_format`]): the image is
+/// that format, or the attachment a view of it in a format `profile` stores, or the image takes
+/// the view ([`views_in`]).
+pub(crate) fn stores_in_place(profile: &DeviceProfile, format: Format, plan: &ImagePlan) -> bool {
+    let view = storage_view_format(format);
+    if view == format {
+        format == plan.format || profile.supports_format(format, FormatUsage::StorageImage)
+    } else {
+        views_in(plan, view)
+    }
+}
+
 /// The image descriptions remembered at most: past this many, the oldest answer goes.
 const ANSWERS: usize = 64;
 
@@ -161,7 +174,9 @@ const ANSWERS: usize = 64;
 /// the usage costs a color render target's image nothing (the module docs): what a framebuffer
 /// fetch's form needs, `STORAGE` ([`storage_candidate`]) or what the sample planes' copies need
 /// ([`planes_candidate`]), and the input attachment usage the exact resolve reads through
-/// (`color_resolve::input_candidate`). Bounded: the oldest answer goes first.
+/// (`color_resolve::input_candidate`); for a memoryless attachment's input attachment usage,
+/// whether the device makes the image ([`Device::with_free_usage`]). Bounded: the oldest answer
+/// goes first.
 #[derive(Default)]
 pub(crate) struct UsageAnswers(VecDeque<(ImagePlan, ImagePlan, bool)>);
 
@@ -288,11 +303,15 @@ impl Device {
     /// needs ([`fetch_candidate`]), or a multisampled depth/stencil attachment's copies without
     /// colour copies need (`depth_stencil_scratch::sampled_candidate`), then the unsigned-integer
     /// view a NaN clear writes a multisampled attachment through on a device whose copies
-    /// convert its NaNs (`nan_clear::view_candidate`), and then the input attachment usage the
+    /// convert its NaNs (`nan_clear::view_candidate`), then the input attachment usage the
     /// exact color resolve reads a multisampled color attachment through
-    /// (`color_resolve::input_candidate`), each where it may take it and it costs the image
+    /// (`color_resolve::input_candidate`), and then the feedback loop usage a draw that reads the
+    /// texture its pass renders through a snapshot takes (`texture::feedback_candidate`), each
+    /// where it may take it and it costs the image
     /// nothing: the image's memory requirements, size and alignment, are the same with it as
-    /// without it (the module docs).
+    /// without it (the module docs). A memoryless attachment takes the input attachment usage
+    /// wherever the device makes the image: its image takes no copies, so the exact resolve reads
+    /// it through that usage or not at all (`color_resolve.rs`).
     pub(crate) fn with_free_usage(
         &self,
         plan: ImagePlan,
@@ -308,10 +327,39 @@ impl Device {
             Some(candidate) => self.if_free(plan, candidate, texture_type)?,
             None => plan,
         };
-        match color_resolve::input_candidate(&plan, self) {
+        let plan = match color_resolve::input_candidate(&plan, self) {
+            Some(candidate) if plan.usage.contains(ImageUsageFlags::TRANSIENT_ATTACHMENT) => {
+                self.if_made(plan, candidate, texture_type)?
+            }
+            Some(candidate) => self.if_free(plan, candidate, texture_type)?,
+            None => plan,
+        };
+        match crate::texture::feedback_candidate(&plan, self) {
             Some(candidate) => self.if_free(plan, candidate, texture_type),
             None => Ok(plan),
         }
+    }
+
+    /// `candidate`, `plan` with a usage added, where the device makes an image of it (its limits
+    /// for the image take it, `Device::image_requirements`), else `plan`; remembered as
+    /// [`Device::if_free`]'s answers are.
+    fn if_made(
+        &self,
+        plan: ImagePlan,
+        candidate: ImagePlan,
+        texture_type: TextureType,
+    ) -> Result<ImagePlan, Error> {
+        let answers = &self.shared().textures.usage_answers;
+        let known = lock(answers).answer(&plan, &candidate);
+        let made = match known {
+            Some(made) => made,
+            None => {
+                let made = self.image_requirements(&candidate, texture_type)?.is_some();
+                lock(answers).remember(plan.clone(), candidate.clone(), made);
+                made
+            }
+        };
+        Ok(if made { candidate } else { plan })
     }
 
     /// `candidate`, `plan` with a usage added, where that costs the image nothing (as

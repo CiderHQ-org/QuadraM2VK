@@ -545,10 +545,11 @@ fn float(
     let sentinel = c32(f, 0xc000_0000)?;
     let falsy = bin(f, BinOp::INotEqual, zero, zero)?;
     let (mut nan, mut pos, mut neg) = (falsy, falsy, falsy);
-    let mut e = sentinel;
+    // The largest exponent estimate of each depth slice (each four taps in turn).
+    let mut slice_e = vec![sentinel; taps.len().div_ceil(4)];
     // Per tap: (negative, M, z, live, n, nxy).
     let mut terms = Vec::with_capacity(taps.len());
-    for tap in taps {
+    for (at, tap) in taps.iter().enumerate() {
         let n = tap.n;
         let b = bits(f, &tap.words, offset, mask)?;
         let ef = bits(f, &tap.words, exp_offset, exp_mask)?;
@@ -578,7 +579,7 @@ fn float(
         let ei = bin(f, BinOp::IAdd, ei, msb_n)?;
         let ei = bink(f, BinOp::ISub, ei, 24)?;
         let ei = select(f, live, ei, sentinel)?;
-        e = f.glsl(GlslOp::SMax, &[e, ei])?;
+        slice_e[at / 4] = f.glsl(GlslOp::SMax, &[slice_e[at / 4], ei])?;
         if let Some(is_special) = is_special {
             let counted = bin(f, BinOp::LogicalAnd, is_special, weighed)?;
             let quiet = bin(f, BinOp::INotEqual, mf, zero)?;
@@ -597,8 +598,15 @@ fn float(
     let precision = k.word(c, record::PRECISION);
     let fraction = c32(f, precision & 0xffff)?;
     let guard = c32(f, precision >> 16)?;
-    let sc = bin(f, BinOp::ISub, e, fraction)?;
-    let sc = bin(f, BinOp::ISub, sc, guard)?;
+    let quantum = |f: &mut FunctionBuilder<'_>, e: Value| -> BResult<Value> {
+        let sc = bin(f, BinOp::ISub, e, fraction)?;
+        bin(f, BinOp::ISub, sc, guard)
+    };
+    let mut e = slice_e[0];
+    for &es in &slice_e[1..] {
+        e = f.glsl(GlslOp::SMax, &[e, es])?;
+    }
+    let sc = quantum(f, e)?;
     // A half's accumulator at a 2D level, in 32 bits: each live term `M n 2^(z - 24 - sc)` lies
     // below `2^(e_i + 2 - sc) <= 2^19` (`e_i <= e`, `sc = e - 17`), so the four terms and their
     // sum lie below `2^21`; with `n = 256 nxy`, `M nxy` (below `2^27`) shifted by 8 more is the
@@ -609,29 +617,54 @@ fn float(
     } else {
         (c64(f, k, 0)?, c64(f, k, 1)?, c32(f, 63)?)
     };
+    // Each slice's terms truncated to its own quantum and summed; a 3D level's two slice sums
+    // then truncated toward zero to the quantum of the largest estimate (`model::accumulate`).
     let mut sum = zero_w;
-    for (negative, m, z, live, n, nxy) in terms {
-        let (p, sh) = match (narrow, nxy) {
-            (true, Some(nxy)) => (bin(f, BinOp::IMul, m, nxy)?, bink(f, BinOp::ISub, z, 16)?),
-            _ => {
-                let m = f.convert(ConvOp::UConvert, m, k.u64_)?;
-                let n = f.convert(ConvOp::UConvert, n, k.u64_)?;
-                (bin(f, BinOp::IMul, m, n)?, bink(f, BinOp::ISub, z, 24)?)
-            }
+    for (slice, terms) in terms.chunks(4).enumerate() {
+        let sc_s = if slice_e.len() == 1 {
+            sc
+        } else {
+            quantum(f, slice_e[slice])?
         };
-        let sh = bin(f, BinOp::ISub, sh, sc)?;
-        let left = bin(f, BinOp::SGreaterThanEqual, sh, zero)?;
-        let l = f.glsl(GlslOp::UMin, &[sh, cap])?;
-        let l = select(f, left, l, zero)?;
-        let minus = bin(f, BinOp::ISub, zero, sh)?;
-        let r = f.glsl(GlslOp::UMin, &[minus, cap])?;
-        let r = select(f, left, zero, r)?;
-        let mag = bin(f, BinOp::ShiftLeftLogical, p, l)?;
-        let mag = bin(f, BinOp::ShiftRightLogical, mag, r)?;
-        let minus = bin(f, BinOp::ISub, zero_w, mag)?;
-        let t = select(f, negative, minus, mag)?;
-        let t = select(f, live, t, zero_w)?;
-        sum = bin(f, BinOp::IAdd, sum, t)?;
+        let mut part = zero_w;
+        for &(negative, m, z, live, n, nxy) in terms {
+            let (p, sh) = match (narrow, nxy) {
+                (true, Some(nxy)) => (bin(f, BinOp::IMul, m, nxy)?, bink(f, BinOp::ISub, z, 16)?),
+                _ => {
+                    let m = f.convert(ConvOp::UConvert, m, k.u64_)?;
+                    let n = f.convert(ConvOp::UConvert, n, k.u64_)?;
+                    (bin(f, BinOp::IMul, m, n)?, bink(f, BinOp::ISub, z, 24)?)
+                }
+            };
+            let sh = bin(f, BinOp::ISub, sh, sc_s)?;
+            let left = bin(f, BinOp::SGreaterThanEqual, sh, zero)?;
+            let l = f.glsl(GlslOp::UMin, &[sh, cap])?;
+            let l = select(f, left, l, zero)?;
+            let minus = bin(f, BinOp::ISub, zero, sh)?;
+            let r = f.glsl(GlslOp::UMin, &[minus, cap])?;
+            let r = select(f, left, zero, r)?;
+            let mag = bin(f, BinOp::ShiftLeftLogical, p, l)?;
+            let mag = bin(f, BinOp::ShiftRightLogical, mag, r)?;
+            let minus = bin(f, BinOp::ISub, zero_w, mag)?;
+            let t = select(f, negative, minus, mag)?;
+            let t = select(f, live, t, zero_w)?;
+            part = bin(f, BinOp::IAdd, part, t)?;
+        }
+        let part = if slice_e.len() == 1 {
+            part
+        } else {
+            // `part 2^sc_s` truncated toward zero to `2^sc` (`sc >= sc_s`; a slice of no live term
+            // sums to 0 whatever its shift).
+            let by = bin(f, BinOp::ISub, sc, sc_s)?;
+            let by = f.glsl(GlslOp::UMin, &[by, cap])?;
+            let negative = bin(f, BinOp::SLessThan, part, zero_w)?;
+            let minus = bin(f, BinOp::ISub, zero_w, part)?;
+            let mag = select(f, negative, minus, part)?;
+            let mag = bin(f, BinOp::ShiftRightLogical, mag, by)?;
+            let minus = bin(f, BinOp::ISub, zero_w, mag)?;
+            select(f, negative, minus, mag)?
+        };
+        sum = bin(f, BinOp::IAdd, sum, part)?;
     }
     // The rounding, half away from zero, of `sum 2^sc`.
     let negative = bin(f, BinOp::SLessThan, sum, zero_w)?;
@@ -1048,7 +1081,6 @@ fn sampled(f: &mut FunctionBuilder<'_>, k: &K<'_>, i: Value) -> BResult<[Value; 
         } else {
             (ay[0], ay[2])
         };
-        let nxy = bin(f, BinOp::IMul, wx, wy)?;
         // The image: the layer's (`r`, one slice each), or the layer's depth tap's.
         let (image, n, nxy) = match depth {
             Some((first, az)) => {
@@ -1058,10 +1090,26 @@ fn sampled(f: &mut FunctionBuilder<'_>, k: &K<'_>, i: Value) -> BResult<[Value; 
                     (az[0], az[2])
                 };
                 let image = bin(f, BinOp::IAdd, first, sz)?;
-                (image, bin(f, BinOp::IMul, nxy, wz)?, None)
+                // Split along y last (`model::tap_weight`): the far row's part of `wx wz` rounded
+                // half down to `2^-16`, the near row's the rest.
+                let nxz = bin(f, BinOp::IMul, wx, wz)?;
+                let far = bin(f, BinOp::IMul, nxz, ay[3])?;
+                let far = bink(f, BinOp::IAdd, far, 127)?;
+                let far = bink(f, BinOp::ShiftRightLogical, far, 8)?;
+                let far = bink(f, BinOp::ShiftLeftLogical, far, 8)?;
+                let n = if (t >> 1) & 1 == 1 {
+                    far
+                } else {
+                    let whole = bink(f, BinOp::ShiftLeftLogical, nxz, 8)?;
+                    bin(f, BinOp::ISub, whole, far)?
+                };
+                (image, n, None)
             }
             // The one depth tap weighs 256.
-            None => (r, bink(f, BinOp::ShiftLeftLogical, nxy, 8)?, Some(nxy)),
+            None => {
+                let nxy = bin(f, BinOp::IMul, wx, wy)?;
+                (r, bink(f, BinOp::ShiftLeftLogical, nxy, 8)?, Some(nxy))
+            }
         };
         let words = match &k.spec.fetch {
             // The first level's view: a 2D array's layer or a 3D texture's slice is `image`.

@@ -1,12 +1,12 @@
 //! `DepthStencilState` (`MTLDepthStencilState`) and `Device::new_depth_stencil_state`
 //! (step 6's second part).
 //!
-//! A depth/stencil state is its descriptor (the compile layer's [`DepthStencilDescriptor`],
-//! Metal's properties) and the Vulkan depth/stencil state it stands for
+//! A depth/stencil state is its descriptor (the compile layer's [`DepthStencilDescriptor`], Metal's
+//! properties) and the Vulkan depth/stencil state it stands for
 //! ([`metal2vulkan::metal::state::depth_stencil_state`]): a render encoder's draws take it as the
 //! pipeline's static depth/stencil state, or as dynamic state where the pipeline makes it dynamic
 //! (`render.rs`). Metal makes a state of any descriptor, masks wider than the 8-bit stencil
-//! included (measured, RT6 probe 4), so creation refuses nothing.
+//! included (measured on an M4), so creation refuses nothing.
 //!
 //! A state's `gpuResourceID` is Apple10's: below it Metal's API validation stops the call
 //! ("Obtaining the resourceID of a DepthStencilState object requires support for
@@ -92,9 +92,9 @@ impl DepthStencilState {
         self.0.vulkan
     }
 
-    /// What the state does with depth in a pass without a depth attachment (RT6 probes 4 and
-    /// 4b): Metal's validation stops a draw that writes depth or compares other than `Always`
-    /// and `Never`, which plain Metal tests against the pass's hidden depth. Under `Never` every
+    /// What the state does with depth in a pass without a depth attachment (measured on an M4):
+    /// Metal's validation stops a draw that writes depth or compares other than `Always` and
+    /// `Never`, which plain Metal tests against the pass's hidden depth. Under `Never` every
     /// fragment fails, where Vulkan, with no attachment to test, would pass it
     /// ([`DepthStencilState::failing_depth`]).
     pub(super) fn depth_without_attachment(&self) -> DepthUse {

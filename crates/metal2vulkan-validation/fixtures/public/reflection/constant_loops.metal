@@ -1,4 +1,4 @@
-// Owned fixture (WP-RRX, docs/TODO.md 8.27): a module whose static initializer keeps loops, beside
+// Owned fixture: a module whose static initializer keeps loops, beside
 // values computed from a loop's result and values computed without one. `constant_initializers`
 // showed a loop's constants (its trip count and the value its body folds) in every function of
 // the module, a select's only in the functions that read its global; this module asks which of a

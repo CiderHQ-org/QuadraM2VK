@@ -7,8 +7,8 @@ use crate::device::{DeviceDescription, DevicePolicy};
 use crate::spirv::testing::assert_valid;
 use std::path::PathBuf;
 
-/// Every copy draw: each plane of each source, the export of each source, the depth, and the
-/// depth's and the stencil's bits into colour.
+/// Every copy draw: each plane of each source, the export of each source, the depth, the
+/// depth's and the stencil's bits into colour, and a depth's magnitude as a depth and as bits.
 fn every_copy() -> Vec<DepthStencilCopy> {
     let mut copies = Vec::new();
     for source in [CopySource::Aspect, CopySource::Shadow] {
@@ -20,6 +20,8 @@ fn every_copy() -> Vec<DepthStencilCopy> {
     copies.push(DepthStencilCopy::Depth);
     copies.push(DepthStencilCopy::DepthBits);
     copies.push(DepthStencilCopy::StencilBits);
+    copies.push(DepthStencilCopy::DepthMagnitude);
+    copies.push(DepthStencilCopy::MagnitudeBits);
     for form in FORMS {
         copies.push(DepthStencilCopy::DepthFromStandIn { form });
     }

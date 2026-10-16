@@ -1,4 +1,4 @@
-// Owned fixture (WP-K14b, DESIGN D211): the compute template an executed indirect command
+// Owned fixture: the compute template an executed indirect command
 // dispatches. Each thread stages `params[0] * (tid + 1)` in threadgroup memory, waits for its
 // group, and writes its own staged word plus `params[1]` to `out[tid]`. A command binds `params`
 // and `out` (each at an offset into a larger buffer) and sets the threadgroup length. Loop-free.
