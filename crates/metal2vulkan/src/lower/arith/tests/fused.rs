@@ -302,9 +302,10 @@ fn check_fma(
             lanes: 1,
         }));
     }
+    // The routine of `OpFmaKHR`'s small results is never defined per lane.
     assert_eq!(
         routine.is_some_and(|r| fma::per_lane(r, &fmas)),
-        per_lane && routine.is_some() && f.lanes > 1,
+        per_lane && routine.is_some_and(|r| r.route != Route::Khr) && f.lanes > 1,
         "{what}"
     );
     let m = kernel_defs(
@@ -425,17 +426,46 @@ fn a_checked_fused_multiply_add_is_metals_in_every_denormal_mode() {
     for (what, device) in devices {
         for [a, b, c] in &triples {
             let r = device(*a, *b, *c);
-            let checked = if r & 0x7FFF_FFFF <= 0x0080_0000 {
-                metal_fma32(*a, *b, *c)
-            } else {
-                r
-            };
+            let small = r & 0x7FFF_FFFF <= 0x0080_0000;
             let want = metal_fma32(*a, *b, *c);
-            assert!(
-                same(float(32))(checked, want),
-                "{what}: fma({a:#010x}, {b:#010x}, {c:#010x}): {checked:#010x}, Metal {want:#010x}"
-            );
+            // By the whole routine (the integer route), and by the routine of small results.
+            for (routine, answer) in [
+                ("Metal's fma", metal_fma32(*a, *b, *c)),
+                ("small", small_results(*a, *b, *c, r)),
+            ] {
+                let checked = if small { answer } else { r };
+                assert!(
+                    same(float(32))(checked, want),
+                    "{what}, {routine}: fma({a:#010x}, {b:#010x}, {c:#010x}): {checked:#010x}, \
+                     Metal {want:#010x}"
+                );
+            }
         }
+    }
+}
+
+/// `fma::small` on one lane, in Rust's IEEE `double`: Metal's `fma` of `a`, `b`, `c` from `r`,
+/// their `OpFmaKHR` on some device, where `r` is at most `2^-126` in magnitude, else `r`.
+fn small_results(a: u64, b: u64, c: u64, r: u64) -> u64 {
+    let read = |x: u64| match x & 0x7F80_0000 {
+        0 => 0.0,
+        _ => f64::from(f32v(x)),
+    };
+    let (x, y, z) = (read(a), read(b), read(c));
+    let p = x * y;
+    let s = p + z;
+    let sp = s - z;
+    let sz = s - sp;
+    let e = (p - sp) + (z - sz);
+    let normal = f64::from(f32::MIN_POSITIVE);
+    let size = s.abs();
+    let tiny = size < normal || (size == normal && e * s < 0.0);
+    match r & 0x7FFF_FFFF <= 0x0080_0000 && tiny {
+        // An exact zero sum: IEEE's sign, on the operands' bits.
+        true if s == 0.0 => (a ^ b) & c & 0x8000_0000,
+        true if s < 0.0 => 0x8000_0000,
+        true => 0,
+        false => r,
     }
 }
 
@@ -682,8 +712,10 @@ fn the_half_reference_rounds_the_exact_sum() {
 ///
 /// Under native device maths (the default policy) a profile whose functions are not Metal's takes
 /// the device's `Fma` ([`Route::Native`]) where it would take a routine. Under
-/// `FloatMathsPolicy::Exact`, `OpFmaKHR` off `DriverDeviation::MetalFloatDenormals` is checked by
-/// the `double` routine where it is offered, else the integer one ([`fma::tiny_route`]).
+/// `FloatMathsPolicy::Exact`, `OpFmaKHR` on a profile whose functions are not Metal's own (not
+/// MoltenVK, whose `fma` is Metal's) is checked by the `double` routine where it is offered, else
+/// the integer one ([`fma::tiny_route`]), whether or not the device reads its denormals as Metal
+/// does (`DriverDeviation::MetalFloatDenormals`): it rounds before it flushes.
 #[test]
 fn the_fused_multiply_add_route_follows_the_profile() {
     use crate::device::profile::FloatFunctions;
@@ -711,6 +743,8 @@ fn the_fused_multiply_add_route_follows_the_profile() {
     let mut seen = std::collections::BTreeSet::new();
     let mut f16 = Vec::new();
     let mut checked = 0;
+    let mut flushing = 0;
+    let mut metals = 0;
     for (stem, p) in committed_profiles_with(exact_maths()).expect("profiles") {
         let l = &p.fields().leaf;
         let want = if l.fma32 {
@@ -722,24 +756,29 @@ fn the_fused_multiply_add_route_follows_the_profile() {
         };
         let f = Fma::on(&p, float(32)).expect("float");
         assert_eq!(f.route, want, "{stem}");
-        let tiny = (want == Route::Khr
-            && !p.takes_driver_deviation(DriverDeviation::MetalFloatDenormals))
-        .then_some(if l.float64 && l.int64 {
+        // Metal's own functions (MoltenVK) take its `fma`, unchecked.
+        let device = p.fields().float_functions == FloatFunctions::Device;
+        let tiny = (want == Route::Khr && device).then_some(if l.float64 && l.int64 {
             Route::Wide
         } else {
             Route::Soft
         });
         assert_eq!(f.tiny, tiny, "{stem}");
+        // `OpFmaKHR` checked through `double` calls the routine of its small results alone.
         assert_eq!(
             f.routine(),
             match want {
-                Route::Khr => tiny,
+                Route::Khr => tiny.map(|t| if t == Route::Wide { Route::Khr } else { t }),
                 _ => Some(want),
             }
             .map(|route| Routine { route, lanes: 1 }),
             "{stem}"
         );
         checked += usize::from(tiny.is_some());
+        metals += usize::from(want == Route::Khr && !device);
+        flushing += usize::from(
+            tiny.is_some() && p.takes_driver_deviation(DriverDeviation::MetalFloatDenormals),
+        );
         let half = match p.takes_driver_deviation(DriverDeviation::MetalHalfFma) && l.float16 {
             true => Route::F16,
             false => Route::HalfOdd,
@@ -769,6 +808,14 @@ fn the_fused_multiply_add_route_follows_the_profile() {
     );
     assert!(f16.len() >= 2, "{f16:?}");
     assert!(checked >= 1, "{checked} profiles check OpFmaKHR");
+    assert!(
+        flushing >= 1,
+        "{flushing} profiles check OpFmaKHR on a device that flushes its denormals"
+    );
+    assert!(
+        metals >= 1,
+        "{metals} profiles take Metal's own OpFmaKHR unchecked"
+    );
 }
 
 /// The words of a module of the functions `defs` defines and an empty entry point.
@@ -798,20 +845,21 @@ fn defined_words(defs: &dyn Fn(&mut ModuleBuilder) -> BResult<()>) -> usize {
 /// The routines' words stay within their estimates: each routine's function, defined alone, and
 /// each use; and a routine defined per lane, beside its route's routine on one lane, its type
 /// included. `half`'s in the integer rounding and in the device's quantize. A use of `OpFmaKHR`
-/// checked ([`Fma::checked`]) stays within its own estimate, on one lane and four.
+/// checked ([`Fma::checked`]) stays within its own estimate, on one lane and four, by the integer
+/// routine and by the routine of its small results.
 #[test]
 fn fused_multiply_add_routines_fit_their_word_estimates() {
     use crate::spirv::builder::QuantizeForm;
-    for lanes in [1u8, 4] {
-        let r = Routine {
-            route: Route::Soft,
-            lanes,
-        };
+    let lanes_and_routes = [1u8, 4]
+        .into_iter()
+        .flat_map(|lanes| [(lanes, Route::Soft), (lanes, Route::Wide)]);
+    for (lanes, tiny) in lanes_and_routes {
         let fma = Fma {
             form: floats(lanes),
             route: Route::Khr,
-            tiny: Some(Route::Soft),
+            tiny: Some(tiny),
         };
+        let r = fma.routine().expect("a checked use's routine");
         // The routine and a function of three floats that answers their `fma`, or its first.
         let module = |uses: bool| {
             defined_words(&|b| {
@@ -834,7 +882,7 @@ fn fused_multiply_add_routines_fit_their_word_estimates() {
         let words = module(true) - module(false);
         assert!(
             words <= fma.words() as usize,
-            "checked x{lanes}: {words} words against the estimate {}",
+            "checked by {tiny:?} x{lanes}: {words} words against the estimate {}",
             fma.words()
         );
     }
@@ -872,6 +920,15 @@ fn fused_multiply_add_routines_fit_their_word_estimates() {
                     r.per_lane_words(),
                 );
             }
+        }
+        // The routine of `OpFmaKHR`'s small results, never defined per lane.
+        for lanes in [1u8, 4] {
+            let r = Routine {
+                route: Route::Khr,
+                lanes,
+            };
+            let words = in_q(&|b| fma::define(b, r).map(drop));
+            within(&format!("Khr x{lanes} ({q:?})"), words, r.words(q));
         }
     }
 }
@@ -1229,7 +1286,7 @@ fn check_dot(
         &|fb, x, funcs| {
             let id = funcs.first().copied();
             let fused = |fb: &mut FunctionBuilder<'_>, args: &[Value]| fma::emit(fb, fma, args, id);
-            math::metal_dot(fb, v, [x[0], x[1]], &fused, flush)
+            math::metal_dot(fb, v, [x[0], x[1]], &fused, (flush, None))
         },
         true,
         false,

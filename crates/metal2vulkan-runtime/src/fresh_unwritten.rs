@@ -48,6 +48,15 @@
 //! writes the pattern by a copy that converts the NaNs (`nan_clear::converting_copy`): its samples
 //! hold the device's NaNs, announced (`device-nan-encoding`) where a command first reads them
 //! ([`FreshKind`]).
+//!
+//! A new render target's 32-bit float depth whose pattern copies write exactly, a NaN with the sign
+//! set, is noted too ([`FreshKind::SignedDepth`]): every read of its bits is Metal's, but Metal's
+//! depth test compares the stored value's magnitude, which lies above every depth, and a pass with
+//! depth writes stores it without its sign (our probe `fd32`, the M3 Max under macOS 27.0.1). A
+//! command's read observes nothing of it. A pass that loads its depth where its attachment's level
+//! reaches an unwritten texel ([`FreshUnwritten::loads_signed_depth`]) switches the depth on as it
+//! is planned, before it decides its magnitude stand-in, as a write that may store such a value
+//! does (`texture/signed_depth.rs`), and the texture is no longer noted.
 
 use super::device::lock;
 use super::error::Error;
@@ -230,9 +239,22 @@ pub(super) enum FreshKind {
     /// NaNs (`RuntimeDriverDefect::MultisampledCopiesConvertFloatNans`): each NaN as the device
     /// converts it (`device-nan-encoding`).
     NansConverted,
+    /// Metal's pattern itself, copied into a render target's 32-bit float depth: a NaN with the
+    /// sign set, which every read gives as Metal's, and which Metal's depth test compares by its
+    /// magnitude. Only a pass that loads it observes it, and switches the depth on
+    /// ([`FreshUnwritten::loads_signed_depth`]); nothing is announced for it here.
+    SignedDepth,
 }
 
 impl Unwritten {
+    /// Whether an unwritten texel of `aspects` lies in `texels` (a level's layers and a box in it).
+    fn reaches(&self, aspects: ImageAspectFlags, texels: &Written) -> bool {
+        let bounds = Bounds::of(texels, level_extent(self.extent, texels.level));
+        let levels = texels.level..texels.level + 1;
+        (self.indices(aspects, levels, texels.layers.clone()))
+            .any(|i| self.unwritten[i].iter().any(|b| b.meets(&bounds)))
+    }
+
     /// The records of `aspects` of `levels` and `layers` inside the texture's pattern levels,
     /// layers and aspects.
     fn indices(
@@ -336,7 +358,8 @@ impl FreshUnwritten {
         layers: Range<u32>,
     ) -> Option<Notice> {
         self.observe(key, |entry| {
-            (entry.indices(aspects, levels, layers)).any(|i| !entry.unwritten[i].is_empty())
+            entry.notice.kind != FreshKind::SignedDepth
+                && (entry.indices(aspects, levels, layers)).any(|i| !entry.unwritten[i].is_empty())
         })
     }
 
@@ -350,11 +373,19 @@ impl FreshUnwritten {
         texels: &Written,
     ) -> Option<Notice> {
         self.observe(key, |entry| {
-            let bounds = Bounds::of(texels, level_extent(entry.extent, texels.level));
-            let levels = texels.level..texels.level + 1;
-            (entry.indices(aspects, levels, texels.layers.clone()))
-                .any(|i| entry.unwritten[i].iter().any(|b| b.meets(&bounds)))
+            entry.notice.kind != FreshKind::SignedDepth && entry.reaches(aspects, texels)
         })
+    }
+
+    /// A pass loads the depth of `texels` (a level's layers and a box in it) of the texture `key`:
+    /// whether its entry is a [`FreshKind::SignedDepth`] one with an unwritten texel there, after
+    /// which the texture is no longer noted.
+    pub(super) fn loaded_signed_depth(&self, key: ResourceKey, texels: &Written) -> bool {
+        self.observe(key, |entry| {
+            let depth = ImageAspectFlags::DEPTH;
+            entry.notice.kind == FreshKind::SignedDepth && entry.reaches(depth, texels)
+        })
+        .is_some()
     }
 
     /// The notice of the texture `key` where `reaches` its entry (a read reaches an unwritten
@@ -396,6 +427,22 @@ impl FreshUnwritten {
             }
         }
         Ok(())
+    }
+
+    /// A render pass being planned loads the depth of `target`, its depth attachment (the module
+    /// docs): whether the attachment's texture is a [`FreshKind::SignedDepth`] one with an
+    /// unwritten texel in the attachment's level and layers, after which it is no longer noted.
+    /// The whole level is weighed, as the render area is not decided yet.
+    pub(super) fn loads_signed_depth(device: &Device, target: &Target) -> Result<bool, Error> {
+        let fresh = &device.shared().fresh;
+        if !fresh.any() {
+            return Ok(false);
+        }
+        let texels = pass_texels(target, [u32::MAX; 2])?;
+        Ok(match image_key(&target.texture, &texels)? {
+            Some(key) => fresh.loaded_signed_depth(key, &texels),
+            None => false,
+        })
     }
 
     /// A render pass of `layout` ends (its layout as the pass decided it, before its `DontCare`

@@ -227,6 +227,11 @@ pub struct Entry {
     /// The call stack of the entry's recursion through visible functions: `None` when the entry has
     /// none.
     pub call_stack: Option<CallStack>,
+    /// Whether the body holds a branch whose arms hold a quad or simdgroup operation that Metal's
+    /// backend makes answer over the lanes of the branch's block when it speculates the arms, where
+    /// no measurement says whether it speculates them (an arm of an instruction, size or shape no
+    /// probe covers). Such a branch keeps the AIR's lanes; Metal's may be the block's.
+    pub unmeasured_speculation: bool,
 }
 
 /// An entry's explicit call stack: what its recursion through visible functions runs on. Its stacks
@@ -600,7 +605,7 @@ pub fn specialize_dynamic(
     post_check(&body, &parts, &stubs, &name, &control_points(ep), m)?;
     // A branch's short arms that Metal's backend speculates, where a group operation in them
     // answers over the lanes of the branch's block.
-    let body = {
+    let (body, unmeasured_speculation) = {
         let f = parts
             .funcs
             .get(func)
@@ -745,6 +750,7 @@ pub fn specialize_dynamic(
         function_tables,
         lockstep: Lockstep::default(),
         call_stack,
+        unmeasured_speculation,
         module,
     })
 }

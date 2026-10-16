@@ -31,7 +31,7 @@ a cell that names another source took its numbers there.
 |---|---|---|---|---|
 | Samples, gathers and depth comparisons go to the device's own sampler: its filter, footprint, level, anisotropy, sRGB decode and comparison. | `sampling = SamplingPolicy::NativeDevice` | `sampling = SamplingPolicy::Exact`: Metal's sampler emulated by fetches, a pipeline per bound sampler state | Linear filter within one code (1/255) on the measured devices, sRGB within 1.83; levels, anisotropy, cubes, 3D, gathers and comparisons unmeasured. `DeviceSampling` (`device-sampling`) | Not measured on today's master. At the switch (maths and texel conversions still exact): Xgc15 making 24.2-24.8 s exact against 12.5-13.9 s native |
 | A texel's `float` value is the device's conversion of its codes; a `half` result is the device's `float` texel rounded to nearest even. | `texel_conversion = TexelConversionPolicy::Device` | `texel_conversion = TexelConversionPolicy::Exact`: Metal's conversion by the bound format's class of every read; a sample's or gather's also with `sampling = SamplingPolicy::Exact` (under native sampling the device's sampler decodes it) | One `f32` ulp for 8- and 16-bit codes, 0.18 of a code for 5- and 6-bit packed channels; `half` within one ulp; NaN bits the device's. `DeviceTexelConversion` (`device-texel-conversion`), `HalfTexelConversion` (`half-texel-conversion`, also recorded for heap textures and unmeasured formats) | Exact reads (the same reads): Xgc14 0.88-0.89 → 0.90-0.93 s, GPU 0.039 → 0.046 ms; Xgc15 0.65-0.66 → 0.68 s, 0.090 → 0.094 ms; A2X unchanged (no affected read). Samples: with the sampling row |
-| The maths library (`sin`, `exp`, `log`, `pow`, `atan2`...), divisions and Metal's fast reciprocal, and a fused multiply-add without `OpFmaKHR` are the device's instructions, not routines of Metal's answers. A `float` fused multiply-add by `OpFmaKHR` off MoltenVK keeps the device's rounding before Metal's flush (known gaps: tininess before rounding). | `float_maths = FloatMathsPolicy::Native` | `float_maths = FloatMathsPolicy::Exact`; there `OpFmaKHR` off MoltenVK is checked: a result at most `2^-126` in magnitude, zero included, is recomputed by the `double` or integer routine | Vulkan's precision table (`Sin` 2^-11 absolute in [-π, π], `Exp` 3 + 2·\|x\| ulp, `Atan` 4096 ulp) against Metal's 4-6 ulp; division 2.5 ulp; `fma` one `half` ulp (a `float` one may round twice); an `f32` denormal in a maths function, `fast::fmod` among them, read as the device reads it (`DeviceDenormals`). `NativeTranscendentals` (`native-transcendentals`), `NativeDivision` (`native-division`), `NativeFma` (`native-fma`) | A2X 1.00-1.02 → 4.61-4.67 s, GPU 0.098 → 0.194 ms; Xgc14 0.88-0.89 → 3.55-3.58 s, 0.039 → 0.095-0.099 ms; Xgc15 0.65-0.66 → 1.94-2.00 s, 0.090 → 0.176 ms. The `OpFmaKHR` check adds no word to the three |
+| The maths library (`sin`, `exp`, `log`, `pow`, `atan2`...), divisions and Metal's fast reciprocal, and a fused multiply-add without `OpFmaKHR` are the device's instructions, not routines of Metal's answers. Off MoltenVK a `float` multiply, and a fused multiply-add by `OpFmaKHR`, keep the device's rounding before Metal's flush: Metal flushes a result whose exact value lies below `2^-126` before rounding it. | `float_maths = FloatMathsPolicy::Native` | `float_maths = FloatMathsPolicy::Exact`; there off MoltenVK a `float` product of `±2^-126` is Metal's zero where the exact product lies below `2^-126`, decided inline without a branch by one `OpFmaKHR` on the operands' magnitudes, or by their bits without `OpFmaKHR` (`arith.float.tiny`, `dot`'s first product too), and `OpFmaKHR` is checked: a result at most `2^-126` in magnitude, zero included, is answered by a routine called only then, with `double` one that decides only the exact sum's sign and whether it lies below `2^-126`, else the integer `fma` | Vulkan's precision table (`Sin` 2^-11 absolute in [-π, π], `Exp` 3 + 2·\|x\| ulp, `Atan` 4096 ulp) against Metal's 4-6 ulp; division 2.5 ulp; `fma` one `half` ulp (a `float` one may round twice); an `f32` denormal in a maths function, `fast::fmod` among them, read as the device reads it (`DeviceDenormals`); a product or fused multiply-add whose exact value lies within half a unit below `2^-126` answers `2^-126` of its sign where Metal answers the zero of its sign, announced once per device as it is made. `NativeTranscendentals` (`native-transcendentals`), `NativeDivision` (`native-division`), `NativeFma` (`native-fma`), `FloatTininessAfterRounding` (`float-tininess-after-rounding`) | A2X 0.99-1.02 → 9.66-9.83 s, GPU 0.097-0.098 → 0.222-0.225 ms; Xgc14 0.87-0.90 → 12.6-13.6 s, 0.038 → 0.124-0.135 ms; Xgc15 0.63-0.65 → 9.40-9.54 s, 0.089 → 0.208 ms (at 7a9d65147f). Off MoltenVK a product's check is 12 instructions inline (23 without `OpFmaKHR`), and a checked `OpFmaKHR` adds its test, a branch and a call of a routine of about 40 instructions (with `double`), which the device's compiler copies into each use |
 | A NaN result's bits are the device's (no select of Metal's NaN), and `fmin`, `fmax`, `min3`, `max3`, `clamp` and `saturate` are the device's `NMin`, `NMax` and `NClamp`. | `nan_and_min_max = NanMinMaxPolicy::Native` | `nan_and_min_max = NanMinMaxPolicy::Exact` | A NaN where Metal answers one, its bits the device's; the operand Metal picks but at two NaNs, `+0` against `-0`, and `f32` denormals. `NativeNanEncoding` (`native-nan-encoding`), `NativeMinMax` (`native-min-max`) | A2X 1.00-1.02 → 1.85-1.88 s, GPU 0.098 → 0.116 ms; Xgc14 0.88-0.89 → 1.59-1.63 s, 0.039 → 0.048 ms; Xgc15 0.65-0.66 → 1.25-1.28 s, 0.090 → 0.102 ms |
 | `dot`, `mix` and `fast::sqrt` are the device's `OpDot`, `FMix` and `Sqrt`, not Metal's fused chain, its two fused multiply-adds and `x · rsqrt(x)`; a `dot` of other than two to four lanes sums the `OpDot` of each chunk of up to four lanes. | `rounding_order = RoundingOrderPolicy::Native` | `rounding_order = RoundingOrderPolicy::Exact` (MoltenVK takes Metal's order under every policy): Metal's chain over every lane of a `dot` of any width (test `wide_dot_is_metals_fused_chain_in_metals_order`) | `float` `dot` of n lanes within (3n − 1)·2^-24·Σ\|aᵢbᵢ\|, `mix` within 2^-21 of its two terms, `fast::sqrt` 4.5 ulp; `FMix` and `Sqrt` read an `f32` denormal as the device does (`DeviceDenormals`). `NativeDot` (`native-dot`), `NativeMix` (`native-mix`), `NativeTranscendentals` (`native-transcendentals`); a `dot` of other than two to four lanes within Vulkan's precision of its chunks' `OpDot` and sum, an `f32` denormal read as the device reads it, `DeviceArithmetic` (`device-arithmetic`) and `DeviceDenormals` | A2X 1.00-1.02 → 1.03-1.06 s, GPU 0.098 → 0.101 ms; Xgc14 0.88-0.89 → 0.97-1.02 s, 0.039 → 0.041 ms; Xgc15 0.65-0.66 → 0.73 s, 0.090 → 0.088 ms |
 | A `half` result computed in `float` rounds through the device's conversion to 16 bits (three instructions), or its `OpQuantizeToF16` without `shaderFloat16`, not Metal's rounding in integer arithmetic (about twenty). | `half_rounding = HalfRoundingPolicy::Native` | `half_rounding = HalfRoundingPolicy::Exact` | One `half` ulp; 65504 where Metal answers infinity on a device rounding toward zero; a half denormal may flush; NaN bits and a zero's sign the device's. Or no rounding at all, measured: NVIDIA (RTX 3090, 615.71.09) drops the conversion pair, and lavapipe does in arithmetic on Mesa 26.2.4 with LLVM 23.1.1 and for a loaded texel on Mesa 26.0.8 with LLVM 21.1.8, whose arithmetic measured rounded, so the result keeps `float` precision, its differences compounding across operations, and a value past `half`'s range stays finite until a `half` store saturates it to infinity; RADV and ANV take their quantize, measured to be Metal's (exact, no note); the RTX 5080 Laptop GPU (615.71.09) rounds, measured: 8192 of 8192 narrowed sums are Metal's. `NativeHalfConversion` (`native-half-conversion`), `NativeHalfQuantize` (`native-half-quantize`) | A2X 0.99-1.04 → 7.19-7.21 s, GPU 0.098-0.100 → 0.139-0.140 ms (+40%); Xgc14 0.86-0.87 → 0.87-0.92 s, Xgc15 0.63-0.66 → 0.69-0.70 s, GPU unchanged (RTX 5080). Rounding natively by `OpQuantizeToF16` instead, which the RTX 3090 and lavapipe honour (Metal's answer on every operand tested), was measured and declined: A2X 1.3 s → 18-22 s, GPU 0.14 → 1.5 ms on an RTX 3090 |
@@ -72,6 +72,7 @@ known. The rest of the differences are docs/API.md section 9's precision notes.
 | On MoltenVK a light queue's command buffer waits for the latest one another queue committed, where Metal waits for none: MoltenVK fences every encoder of every queue device-wide when argument buffers and a residency set are on. | The runtime needs argument buffers, and MoltenVK has no setting for its residency set; `runtime_lane::queue_storms` judges the runtime against Metal under those fences. | None (timing only) |
 | A `Counting` visibility result of a draw writing more than one color attachment, on ANV (Mesa 26.2.4): Metal's count multiplied by the colors written, not divided back. `Boolean` results stay exact. | The driver counts each sample once per color output (`RuntimeDriverDefect::OcclusionCountPerColorOutput`), no documented Vulkan form counts it once, and a refusal would withhold the Mac2 and Metal3 families. | `VisibilityCountPerColor` (`visibility-count-per-color`) |
 | On MoltenVK a no-copy buffer or heap released with no keep-alive while batches are in flight runs its deallocator once the batches submitted before its release completed, where Metal runs it at the release. | MoltenVK 1.4.1 fails pending work that reads device addresses where memory a device-address buffer lay in is freed (`RuntimeDriverDefect::FreedAddressMemoryFailsPendingWork`), so freed memory waits for the batches in flight (`WorkCounts::freed_memory_parked`). | `HostDeallocatorDelayed` (`host-deallocator-delayed`) |
+| On ANV (Mesa 26.2.4) a render pipeline whose largest stage module, under the consumer's exact forms, passes 400,000 words is retranslated with those forms dropped until it fits: native sampling first, then every module-growing exact answer native. On a large enough module the driver's register allocator reads past its interference bitset and the process faults at pipeline creation. | ANV's `brw` register allocator faults on such modules (`DriverWorkaround::RegisterAllocatorOverflowsLargeModules`), no documented Vulkan form bounds a module's register pressure, and a refusal would withhold the consumer's large fragments. | `ExactFormsOverCompilerLimit` (`exact-forms-over-compiler-limit`) |
 
 ## Accuracy switches whose default is Metal's
 
@@ -98,8 +99,11 @@ recorded here.
   (`scheduler/inbox.rs`), so no driver call holds `commit`. Where that thread sleeps, a commit's
   batches wait for its wake: three command buffers committed back to back and waited for take a
   median 90 to 160 µs longer on ANV (Iris Xe), 5 µs on the RTX 5080 Laptop GPU and none on the M3
-  Max. A submission check or submission handler, which run on that thread, holds back every other
-  command buffer's submission while it runs.
+  Max. On the Iris Xe, frames of 24 command buffers committed back to back
+  (`runtime_lane::commit_costs`, `frames`) take a median 5.7 to 6.0 ms against 3.2 to 4.5 ms with
+  the submissions on the committing thread, the GT held at its efficient 300 MHz by its governor
+  (GuC SLPC). A submission check or submission handler, which run on that thread, holds back every
+  other command buffer's submission while it runs.
 - **Idle dma-buf imports are released.** RADV lists every imported memory in every kernel
   submission, so a no-copy buffer's dma-buf import that only blits have read is released after its
   idle window (2 s, doubled at each import again up to 64 s). The encoding thread pays its import
@@ -171,22 +175,16 @@ recorded here.
 Open differences from Metal that no note announces yet, and runtime costs still above the
 driver's. Each is open work.
 
-- **Tininess before rounding.** Metal flushes a `float` result whose exact value lies below
-  `2^-126` even where rounding would reach `2^-126`: `fma(2^-126, -2^-126, 2^-126)` is `0` on Metal
-  and on MoltenVK, `2^-126` on RADV, ANV, NVIDIA and lavapipe. The translation's fused
-  multiply-add routines, and `OpFmaKHR` checked under `FloatMathsPolicy::Exact`, flush first as
-  Metal does. Off MoltenVK the device's fused multiply-add under native device maths and its
-  multiply under every policy round first, so `fma`, `mix` and a multiply there can answer
-  `2^-126` (test `the_default_forms_note_what_they_leave_to_the_device`). An exact multiply needs a
-  check on every `float` multiply; it is not built.
-- **Zero signs of a fetched 16-bit float blend under fast math.** The storage form stores Metal's
-  value in every channel, but where a factor is zero because `R16Float` and `RG16Float` have no
-  alpha, Metal folds the product to `+0` where the shader's is `-0`; and into `RGBA16Float`, a
-  `Subtract` of a zero source factor and an exactly zero destination factor stores the zero of the
-  destination's sign, where the shader's has the other.
-- **A fragment sample's bias within the device's limit.** Off MoltenVK the shader forms Metal's
-  bias, `clamp(floor(half(bias) · 64) / 64, -32, 31.984375)`, but the device's own level arithmetic
-  applies it, unannounced.
+- **A mesh or tile render pipeline past ANV's compiler word bound.** Its stages are not fitted to
+  the bound as a vertex and fragment pipeline's are, so under the exact forms ANV's compiler can
+  fault on it.
+- **A level the device's arithmetic chooses.** Off MoltenVK under exact sampling, a fragment's
+  implicit-level sample (its bias Metal's `B` within the device's limit), a sample with explicit
+  gradients and a fragment's LOD query take the device's level of detail, where Metal's is not
+  measured, and an explicit level Metal's rule is not handed on (an integer texture's, a constexpr
+  sampler's with its own bias or an unmeasured clamp) takes the device's rounding. Where the level
+  chooses what a sample reads and no sample-filter note records it, and for every LOD query, it is
+  announced as `DeviceSampleLevel`.
 - **An anisotropic cube sample on a `y` face through MoltenVK's vertex and fragment stages under
   macOS 27.** SPIRV-Cross's `spvGradientCube`, which MoltenVK 1.4.1 applies, writes a `+Y` or `-Y`
   face's gradients as `(d_x, d_z, d_x)`, so Metal loses the `z` gradient. The module hands such a
@@ -206,31 +204,25 @@ driver's. Each is open work.
   `CubeGradientFootprint`. An argument buffer's sampler needs its degree in its table entry; it is
   not built.
 - **A group operation in a branch arm whose speculation no probe covers.** Metal's backend runs a
-  branch's short arms of plain computation in every lane of the branch's block, so a quad or
-  simdgroup operation there answers over those lanes; the module does the same for the arm shapes
-  measured on the M3 Max (`air::canon::speculate`). An arm of another shape (a vector, aggregate or
-  address operation, a math function other than `sqrt`, a call outside the measured families, a
-  load other than a `constant` reference's, a division by a variable, a join of more than two
-  values or of a pointer, 22 to 25 instructions holding anything but 32-bit integer arithmetic,
-  comparisons, selects of values, `freeze`s and quad broadcasts), or a two-arm branch of an
-  unmeasured shape, keeps the AIR's lanes, unannounced, where Metal may speculate it.
+  branch's short arms of plain computation in every lane of the branch's block; the module does the
+  same for the arm shapes measured on Apple's GPU (`air::canon::speculate`). A branch of another
+  shape whose arms hold a quad or simdgroup operation keeps the AIR's lanes, where Metal's may be
+  the block's, announced as `UnmeasuredGroupSpeculation`.
 - **A render pass's attachment read another way than a sampled slot binding.** Vulkan forbids
   reading an attachment in its own render pass instance (`VUID-vkCmdDraw-None-10795`); a sampled
   slot binding reads a copy or a snapshot (Costs above). Every other such read still reads the
-  attachment in its instance, unannounced: a texture reached through the heap set (a handle, or an
-  argument buffer's texture), a storage binding, a depth or stencil attachment a draw samples,
-  another texture over the same buffer's bytes, a texture whose shadow is not served
-  (`texture/usage_shadow.rs`), and an execution's command (`render/executions.rs`). In an instance
-  that holds the attachment in the feedback loop layout, those reads name
-  `VK_IMAGE_LAYOUT_GENERAL` in their descriptors, against the layout the instance holds.
+  attachment in its instance, announced as `AttachmentReadInPlace`: a texture reached through the
+  heap set (a handle, or an argument buffer's texture), a storage binding, a depth or stencil
+  attachment a draw samples, a texture buffer or a buffer over the same buffer's bytes, a texture
+  whose shadow is not served (`texture/usage_shadow.rs`), and an execution's command
+  (`render/executions.rs`). In an instance that holds the attachment in the feedback loop layout,
+  those reads name `VK_IMAGE_LAYOUT_GENERAL` in their descriptors, against the layout the instance
+  holds.
 - **A stored negative or NaN depth where the magnitude stand-in and the sign strip do not reach.**
   Metal's depth test compares the stored value's magnitude (a NaN above +inf), and a pass with depth
   writes stores every texel no fragment wrote without its sign; the runtime matches both through a
   magnitude stand-in or a sign strip (`texture/signed_depth.rs`, docs/API.md's
   `signed-depth-test`). Still open:
-  - a new `Private` `Depth32Float` texture's all-ones pattern (a NaN with the sign set), which a
-    pass that loads it uncleared tests as the device does, unannounced; switching it on needs
-    `fresh_unwritten.rs`'s record of unwritten texels;
   - a multisampled or `Depth32Float_Stencil8` target's test, which compares a negative value or a
     NaN as it is, and a pass with depth writes on a device that makes no strip for it, which keeps
     the signs: announced (`signed-depth-test`); its resolve in such a pass resolves the samples
@@ -244,8 +236,6 @@ driver's. Each is open work.
     cleared to 1.0, announced (`signed-depth-test`);
   - a device that may clamp a depth outside `[0, 1]` (ANV): announced as `restricted-depth-upload`;
     a form that keeps the value in a 32-bit float colour image beside the stand-in is not built.
-- **Simdgroup barriers in divergent code** stay where they are, as SPIR-V defines them (they wait
-  for their tangle). No case compares them with Metal.
 - **Compute private memory past a device's Function storage is refused.** A kernel, object or mesh
   function whose private memory (its `alloca`s, a call stack among them, and constants held as
   `Private` variables) passes what the device holds is refused (`Unsupported{PrivateMemory}`, or
@@ -320,7 +310,9 @@ driver's. Each is open work.
   own sampler (MoltenVK).** Vulkan has no sampler without mipmapping, so the runtime hands MoltenVK
   a nearest mip filter with a level clamp: `[0, 0]` where the two filters agree, which is Metal's
   `NotMipmapped` bit for bit, and `[0, 0.25]` where they differ, which chooses Metal's filter, but
-  at `maxAnisotropy` 2 to 16 no clamp reads Metal's `NotMipmapped` answer. No note announces it.
+  at `maxAnisotropy` 2 to 16 no clamp reads Metal's `NotMipmapped` answer. Announced as
+  `NotMipmappedAnisotropicSampler` for a sampler state and `NotMipmappedAnisotropicFilter` for a
+  constexpr sampler.
 - **Dynamic texel offsets past 512 arms in one function, on a device without the `Offset`
   operand.** Without `maintenance8` (a sample) or `shaderImageGatherExtended` (a gather) a dynamic
   texel offset is a switch over the values Metal reads, each arm the access with that value as
@@ -333,9 +325,6 @@ driver's. Each is open work.
   `R10UintX6`, `RG10UintX12` and the rest): a texture of one is stopped and the linear alignment
   query refused, as on the M3 Max. An Apple M4 under 27.0.1 describes and makes them; no level the
   runtime has does.
-- **macOS 27.0.1 answers measured only on an Apple M4.** The level answers an Apple M4's block
-  placement of a heap's block-compressed textures and its compressed-texture blits until an M3 Max
-  probe replaces them.
 - **Tessellation's triangle order.** On a device with `tessellationShader` but MoltenVK on an
   Apple GPU, the device's tessellator orders a patch's triangles, picks their first corners and
   joins its rings itself, announced as `TessellationTriangleOrder`

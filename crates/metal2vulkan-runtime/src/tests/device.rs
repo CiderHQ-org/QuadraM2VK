@@ -681,3 +681,44 @@ fn a_binding_is_seen_complete_only_once_a_host_wait_returned_for_it() {
     assert!(!seen(5, Err(())), "a lost device");
     assert_eq!(asked, [5, 5, 5]);
 }
+
+/// `float-tininess-after-rounding`'s condition (`device/float_tininess.rs`): under native device
+/// maths (`FloatMathsPolicy::Native`, the default) every committed profile's device but MoltenVK's,
+/// whose float functions are Metal's own, takes the device's `float` multiply and fused
+/// multiply-add, which round a tiny result before they flush it; under `FloatMathsPolicy::Exact`
+/// none does.
+#[test]
+fn native_device_maths_rounds_a_tiny_product_before_its_flush_off_moltenvk() {
+    use crate::device::float_tininess::rounds_before_flushing;
+    use metal2vulkan::device::FloatMathsPolicy;
+    let (mut rounding, mut metals) = (0, 0);
+    for (path, description) in descriptions() {
+        let moltenvk = path
+            .file_stem()
+            .is_some_and(|stem| stem.to_string_lossy().starts_with("moltenvk"));
+        for float_maths in [FloatMathsPolicy::Native, FloatMathsPolicy::Exact] {
+            let mut options = DeviceOptions::default();
+            options.policy.float_maths = float_maths;
+            let set = enable_set(&description, &options);
+            let enabled = description
+                .clone()
+                .with_enabled(&set)
+                .unwrap_or_else(|error| panic!("{path:?}: {error:?}"));
+            let compile = metal2vulkan::device::Device::new(enabled, options.policy)
+                .unwrap_or_else(|error| panic!("{path:?}: {error:?}"));
+            let rounds = rounds_before_flushing(&compile);
+            let native = float_maths == FloatMathsPolicy::Native;
+            assert_eq!(
+                rounds,
+                native && !moltenvk,
+                "{path:?} under {float_maths:?}"
+            );
+            rounding += usize::from(rounds);
+            metals += usize::from(native && moltenvk);
+        }
+    }
+    assert!(
+        rounding > 0 && metals > 0,
+        "{rounding} rounding, {metals} Metal's own"
+    );
+}

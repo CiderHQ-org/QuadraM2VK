@@ -3796,7 +3796,8 @@ impl Device {
     /// into a multisampled image, a depth a copy may store clamped, an image holding other bytes
     /// than Metal's), the texture (`key`) reads zero, and the device announces
     /// `fresh-pattern-zeroed` where a command first reads those levels before a clear covers them
-    /// (`fresh_unwritten.rs`).
+    /// (`fresh_unwritten.rs`). A render target's 32-bit float depth written by copies of the
+    /// pattern is noted for the passes that load it unwritten (`FreshKind::SignedDepth`).
     fn fresh_patterned(
         &self,
         plan: &ImagePlan,
@@ -3858,8 +3859,24 @@ impl Device {
                 self.scratch_pattern(plan, texel)?
             }
             FreshPattern::Color { .. } => None,
-            // Every depth and stencil pattern is all ones: copies of ones write each aspect.
-            FreshPattern::DepthStencil { .. } if single && self.ones_write(plan.format, pf) => {
+            // Every depth and stencil pattern is all ones: copies of ones write each aspect. A
+            // render target's 32-bit float depth then holds a NaN with the sign set, which a pass
+            // that loads it before a write covers it switches on (`fresh_unwritten.rs`).
+            FreshPattern::DepthStencil { depth, .. }
+                if single && self.ones_write(plan.format, pf) =>
+            {
+                let signed = depth == Some(FreshDepth::Nan)
+                    && matches!(plan.format, Format::D32_SFLOAT | Format::D32_SFLOAT_S8_UINT)
+                    && usage.contains(TextureUsage::RENDER_TARGET);
+                if signed {
+                    let notice = Notice {
+                        layout: *layout,
+                        format: plan.format,
+                        kind: FreshKind::SignedDepth,
+                    };
+                    let (aspect, extent) = (vk::ImageAspectFlags::DEPTH, plan.extent);
+                    (self.shared().fresh).note(key, levels, plan.layers, aspect, extent, notice);
+                }
                 Some(copies(&[0xff])?)
             }
             FreshPattern::DepthStencil { depth, stencil } if clear => match depth {

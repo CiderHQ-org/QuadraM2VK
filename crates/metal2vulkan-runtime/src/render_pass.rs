@@ -99,6 +99,7 @@ use super::command_buffer::CommandBuffer;
 use super::degradation::Degradation;
 use super::depth_stencil_scratch::{self, Separate};
 use super::error::{invalid, nil, CommandBufferError, Error, Problem, RuntimeGap};
+use super::fresh_unwritten::FreshUnwritten;
 use super::image_plan::{block_family, ImagePlan};
 use super::linear_attachment;
 use super::nan_clear::{self, NanDepth};
@@ -1797,6 +1798,17 @@ fn depth_stencil(
         true => LoadAction::Load,
         false => d.load_action,
     };
+    // A new texture's depth pattern, a NaN with the sign set, that the pass loads before a write
+    // covered it: Metal's test compares its magnitude, so the depth is switched on as a write that
+    // may store one switches it, before the pass decides its magnitude stand-in below
+    // (`fresh_unwritten.rs`).
+    if let Some(target) = depth.as_ref().filter(|_| d.load_action == LoadAction::Load) {
+        if FreshUnwritten::loads_signed_depth(device, target)?
+            && !target.texture.switch_on_fresh_pattern()
+        {
+            target.texture.degrade_signed_depth("new_texture", true);
+        }
+    }
     let clear_depth = match nan {
         Some(NanDepth::Cleared(value)) => value,
         Some(NanDepth::Written) => 1.0,

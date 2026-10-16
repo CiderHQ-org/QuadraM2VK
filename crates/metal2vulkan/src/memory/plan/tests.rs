@@ -157,6 +157,7 @@ fn entry(
         function_tables: Default::default(),
         lockstep: Default::default(),
         call_stack: None,
+        unmeasured_speculation: false,
         module,
     }
 }

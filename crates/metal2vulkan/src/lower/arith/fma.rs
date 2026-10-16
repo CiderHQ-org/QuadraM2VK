@@ -25,8 +25,11 @@
 //! other `float` arithmetic does; on MoltenVK it is Metal's own `fma`. Elsewhere it rounds before
 //! it flushes, if it flushes: an exact value just below `2^-126` answers `2^-126`. Where the
 //! profile asks Metal's answers (`FloatMathsPolicy::Exact`), a result of `OpFmaKHR` at most
-//! `2^-126` in magnitude is recomputed by the routine ([`tiny_route`], [`checked`]); every larger
-//! one is Metal's already.
+//! `2^-126` in magnitude is answered by a routine ([`tiny_route`], [`checked`]); every larger one
+//! is Metal's already. Where the profile has `double`, that routine decides only what such a
+//! result needs, the exact sum's sign and whether it lies below `2^-126` ([`small`]), about 40
+//! instructions where the whole `double` route is about 90: the device's compiler inlines a call,
+//! so each checked use compiles its copy.
 //!
 //! The wide and integer routes are one module-scope function per lane count ([`Routine`]),
 //! which every use calls, so a module holds each once (as the wide divisions are). A module that
@@ -63,7 +66,6 @@
 use crate::device::profile::FloatFunctions;
 use crate::device::DeviceProfile;
 use crate::error::DriverDeviation;
-use crate::lower::arith::denormal;
 use crate::lower::arith::legal::{FloatFmt, Form, Held};
 use crate::lower::arith::narrow::{self, u32_form};
 use crate::lower::arith::ops::{fsplat, splat, ty};
@@ -138,20 +140,18 @@ pub fn float_route(p: &DeviceProfile) -> Route {
     }
 }
 
-/// The route of the routine that recomputes a `float` fused multiply-add by `OpFmaKHR` whose result
+/// The route of the routine that answers a `float` fused multiply-add by `OpFmaKHR` whose result
 /// is at most `2^-126` in magnitude ([`checked`]), on profile `p`: where its `float` route is
-/// [`Route::Khr`], its functions are to answer as Metal's (`FloatFunctions::Device`, the policy's
-/// `FloatMathsPolicy::Exact`) and the device is not measured to read `f32` denormals as Metal does
-/// ([`denormal::device_flushes`]), [`Route::Wide`] where `shaderFloat64` and `shaderInt64` are
-/// enabled, else [`Route::Soft`]. `None` elsewhere: `OpFmaKHR` is then Metal's `fma` (MoltenVK),
-/// or the device's rounding before its flush is left to it (native device maths,
+/// [`Route::Khr`] and its functions are to answer as Metal's (`FloatFunctions::Device`, the
+/// policy's `FloatMathsPolicy::Exact`), [`Route::Wide`] where `shaderFloat64` and `shaderInt64` are
+/// enabled (the routine of those results alone, [`small`]), else [`Route::Soft`]. A device that reads `f32` denormals as Metal does
+/// (`denormal::device_flushes`) is checked too: it rounds before it flushes, as every device off
+/// MoltenVK does (`denormal::checks_tiny_products`). `None` elsewhere: `OpFmaKHR` is then Metal's
+/// `fma` (MoltenVK), or the device's rounding before its flush is left to it (native device maths,
 /// `docs/FAST-PATHS.md`).
 pub fn tiny_route(p: &DeviceProfile) -> Option<Route> {
     let fields = p.fields();
-    if float_route(p) != Route::Khr
-        || fields.float_functions != FloatFunctions::Device
-        || denormal::device_flushes(p)
-    {
+    if float_route(p) != Route::Khr || fields.float_functions != FloatFunctions::Device {
         return None;
     }
     Some(if fields.leaf.float64 && fields.leaf.int64 {
@@ -242,10 +242,12 @@ impl Fma {
     }
 
     /// The shared routine the operation calls, if its route has one: the route's, or on
-    /// [`Route::Khr`] the routine of its small results ([`Fma::tiny`]).
+    /// [`Route::Khr`] the routine of its small results ([`Fma::tiny`]): on [`Route::Wide`] the
+    /// one that decides only those ([`small`]), named by [`Route::Khr`].
     pub fn routine(self) -> Option<Routine> {
         let route = match (self.route, self.tiny) {
             (Route::Wide | Route::Soft | Route::HalfOdd, _) => self.route,
+            (Route::Khr, Some(Route::Wide)) => Route::Khr,
             (Route::Khr, Some(tiny)) => tiny,
             (Route::Khr | Route::F16 | Route::Native, _) => return None,
         };
@@ -285,7 +287,9 @@ impl Fma {
 }
 
 /// A module-scope fused multiply-add routine on `float` lanes (`half` values held in `float` for
-/// [`Route::HalfOdd`]): `route` is [`Route::Wide`], [`Route::Soft`], or [`Route::HalfOdd`].
+/// [`Route::HalfOdd`]): `route` is [`Route::Wide`], [`Route::Soft`], or [`Route::HalfOdd`]; or
+/// [`Route::Khr`], the routine of `OpFmaKHR`'s results at most `2^-126` in magnitude through
+/// `double` ([`small`]), which takes that result too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Routine {
     pub route: Route,
@@ -298,6 +302,9 @@ impl Routine {
     pub fn words(self, q: QuantizeForm) -> u32 {
         match self.route {
             Route::Wide => 640,
+            // 43 instructions of at most six words, eight constants (a vector's carry their lanes),
+            // the `double` types, and the function's type, frame and four parameters.
+            Route::Khr => 340 + 25 * u32::from(self.lanes),
             // The sequence, its rounding to `half`, and the function's frame.
             Route::HalfOdd => 272 + narrow::round_words_in(q, half_form(self.lanes)) + 64,
             _ => 1800,
@@ -333,6 +340,7 @@ impl Routine {
     /// The census name of the strategies that call it.
     pub fn name(self) -> &'static str {
         match self.route {
+            Route::Khr => KHR_CHECKED,
             Route::Wide => WIDE,
             Route::HalfOdd => HALF,
             _ => SOFT,
@@ -356,6 +364,7 @@ impl Routine {
 pub fn complete(fmas: &mut BTreeSet<Routine>, q: QuantizeForm) {
     let add: Vec<Routine> = fmas
         .iter()
+        .filter(|r| r.route != Route::Khr)
         .map(|r| r.one_lane())
         .filter(|one| !fmas.contains(one))
         .filter(|one| {
@@ -374,9 +383,9 @@ pub fn complete(fmas: &mut BTreeSet<Routine>, q: QuantizeForm) {
 
 /// Whether routine `r`, among a module's routines `fmas` ([`complete`]), is defined per lane
 /// ([`define_per_lane`]): it is on two or more lanes, and the module holds its route's routine
-/// on one lane.
+/// on one lane. The routine of small results ([`Route::Khr`], [`small`]) never is.
 pub fn per_lane(r: Routine, fmas: &BTreeSet<Routine>) -> bool {
-    r.lanes > 1 && fmas.contains(&r.one_lane())
+    r.lanes > 1 && r.route != Route::Khr && fmas.contains(&r.one_lane())
 }
 
 /// Define routine `r` among a module's routines `fmas` ([`complete`]), given the functions of
@@ -400,7 +409,8 @@ pub fn define_among(
 }
 
 /// Define routine `r`: a function of three `float` values of `r.lanes` lanes returning their
-/// correctly rounded fused multiply-add.
+/// correctly rounded fused multiply-add; on [`Route::Khr`], of those three and their `OpFmaKHR`,
+/// returning Metal's `fma` where that is at most `2^-126` in magnitude ([`small`]).
 pub fn define(mb: &mut ModuleBuilder, r: Routine) -> BResult<FuncId> {
     let f = f32_form(r.lanes);
     let e = mb.ty(Type::Float { width: 32 })?;
@@ -415,6 +425,10 @@ pub fn define(mb: &mut ModuleBuilder, r: Routine) -> BResult<FuncId> {
     let mut fb = mb.routine(t)?;
     let (a, b, c) = (fb.param(t)?, fb.param(t)?, fb.param(t)?);
     let v = match r.route {
+        Route::Khr => {
+            let fused = fb.param(t)?;
+            small(&mut fb, f, [a, b, c], fused)?
+        }
         Route::Wide => wide(&mut fb, f, a, b, c)?,
         Route::Soft => soft(&mut fb, f, a, b, c)?,
         Route::HalfOdd => {
@@ -422,9 +436,7 @@ pub fn define(mb: &mut ModuleBuilder, r: Routine) -> BResult<FuncId> {
             let s = half_sum(&mut fb, h, a, b, c)?;
             narrow::round(&mut fb, h, s)?
         }
-        Route::Khr | Route::F16 | Route::Native => {
-            return Err(BuildError::Type(TypeRule::FunctionSignature))
-        }
+        Route::F16 | Route::Native => return Err(BuildError::Type(TypeRule::FunctionSignature)),
     };
     fb.ret(Some(v))?;
     fb.finish()
@@ -535,7 +547,9 @@ fn float(
 ) -> BResult<Value> {
     match (fma.route, fma.tiny, routine) {
         (Route::Khr, None, _) => fb.fma(a, b, c),
-        (Route::Khr, Some(_), Some(r)) => checked(fb, fma.form, [a, b, c], r),
+        (Route::Khr, Some(tiny), Some(r)) => {
+            checked(fb, fma.form, [a, b, c], (r, tiny == Route::Wide))
+        }
         (Route::Wide | Route::Soft | Route::HalfOdd, _, Some(r)) => fb
             .call(r, &[a, b, c])?
             .ok_or(BuildError::Type(TypeRule::FunctionSignature)),
@@ -544,8 +558,9 @@ fn float(
 }
 
 /// Metal's `fma` of `a`, `b` and `c` (`float` lanes of form `f`, each read as Metal reads it: no
-/// denormal) by `OpFmaKHR`, its result `r` recomputed by `routine` (Metal's, [`tiny_route`]) where
-/// any lane's is at most `2^-126` in magnitude, zero included, and taken on those lanes.
+/// denormal) by `OpFmaKHR`, its result `r` answered by `routine` ([`tiny_route`]) where any lane's
+/// is at most `2^-126` in magnitude, zero included: where `small`, the routine of those results
+/// ([`small`]), given `r`, on every lane; else Metal's `fma`, taken on those lanes.
 ///
 /// Every other lane's `r` is Metal's answer. `OpFmaKHR` is correctly rounded (Vulkan's precision
 /// table), and the device may only replace a denormal it reads or answers by a zero (Vulkan's
@@ -564,7 +579,7 @@ fn checked(
     fb: &mut FunctionBuilder<'_>,
     f: Form,
     [a, b, c]: [Value; 3],
-    routine: FuncId,
+    (routine, small): (FuncId, bool),
 ) -> BResult<Value> {
     let r = fb.fma(a, b, c)?;
     let u = u32_form(f);
@@ -573,19 +588,21 @@ fn checked(
     let magnitude = splat(fb, u, 0x7FFF_FFFF)?;
     let least = splat(fb, u, 0x0080_0000)?;
     let m = bin(fb, BinOp::BitwiseAnd, bits, magnitude)?;
-    let small = bin(fb, BinOp::ULessThanEqual, m, least)?;
+    let at_most = bin(fb, BinOp::ULessThanEqual, m, least)?;
     let any = match f.lanes {
-        1 => small,
-        _ => fb.unary(UnOp::Any, small)?,
+        1 => at_most,
+        _ => fb.unary(UnOp::Any, at_most)?,
     };
     let lanes = f.lanes;
     let recompute: ArmFn<'_, ()> = Box::new(move |fb, _| {
+        let all = [a, b, c, r];
+        let args = if small { &all[..] } else { &all[..3] };
         let metal = fb
-            .call(routine, &[a, b, c])?
+            .call(routine, args)?
             .ok_or(BuildError::Type(TypeRule::FunctionSignature))?;
-        let v = match lanes {
-            1 => metal,
-            _ => fb.select(small, metal, r)?,
+        let v = match (small, lanes) {
+            (true, _) | (_, 1) => metal,
+            _ => fb.select(at_most, metal, r)?,
         };
         Ok(ArmEnd::FallThrough(vec![v]))
     });
@@ -902,6 +919,78 @@ fn wide(fb: &mut FunctionBuilder<'_>, f: Form, a: Value, b: Value, c: Value) -> 
     let r = fb.select(zero, out.unfused, r)?;
     let r = fb.select(out.finite, r, out.special)?;
     metal_result(fb, f, r)
+}
+
+/// Metal's `fma` of `a`, `b` and `c` (`float` lanes of form `f`) from `r`, their `OpFmaKHR`, on
+/// each lane where `r` is at most `2^-126` in magnitude, through `double`; `r` on every other lane
+/// ([`checked`]'s rare path, [`Route::Khr`]'s routine).
+///
+/// On such a lane every operand is finite, and with each read as Metal reads it (a denormal as a
+/// zero of its sign) `r` is the device's rounding of the exact `v = a · b + c`: correctly rounded,
+/// then kept, flushed to a zero of either sign, or flushed before rounding (Vulkan's float
+/// controls), its zero's sign the device's to drop without `SignedZeroInfNanPreserve`. Metal
+/// answers a zero where `v` is below `2^-126` in magnitude: of `v`'s sign where `v` is nonzero,
+/// and where it is zero the sign IEEE 754-2008 (6.3) gives a fused multiply-add's exact zero
+/// (`-0` only where the product's sign and `c`'s are both negative, [`zero_sign`]). Elsewhere it
+/// answers the correctly rounded `v`, which there is `r`, `±2^-126` (`|v|` at least `2^-126`
+/// rounds to no less, and `r` is no more). So only `v`'s sign and whether it lies below `2^-126`
+/// are computed: `p = a · b` is exact in `double` (48 bits), `s = p + c` rounds once and Knuth's
+/// TwoSum gives its error `e` exactly (no `double` overflow, and every value is a multiple of
+/// `2^-298`, far above `double`'s denormals). `s` is zero only where `v` is and has its sign
+/// elsewhere; rounding is monotone and `2^-126` a `double`, so `|v| < 2^-126` where
+/// `|s| < 2^-126`, never where `|s| > 2^-126`, and where `|s| == 2^-126` exactly where `e` points
+/// inward (`e · s < 0`, a normal `double`). The test of `r`, the zero's sign and the zero are on
+/// bits, so no float mode changes the answer.
+fn small(fb: &mut FunctionBuilder<'_>, f: Form, [a, b, c]: [Value; 3], r: Value) -> BResult<Value> {
+    let d = f.with(Held::Float(FloatFmt::F64));
+    let u = u32_form(f);
+    let (ut, td, tf) = (ty(fb, u)?, ty(fb, d)?, ty(fb, f)?);
+    let rb = fb.convert(ConvOp::Bitcast, r, ut)?;
+    let magnitude = splat(fb, u, 0x7FFF_FFFF)?;
+    let least = splat(fb, u, 0x0080_0000)?;
+    let m = bin(fb, BinOp::BitwiseAnd, rb, magnitude)?;
+    let at_most = bin(fb, BinOp::ULessThanEqual, m, least)?;
+    // The operands as Metal reads them, in `double`: a denormal as a zero, its sign on its bits.
+    let exponent = splat(fb, u, 0x7F80_0000)?;
+    let zu = splat(fb, u, 0)?;
+    let zf = fsplat(fb, f, 0.0)?;
+    let mut read = |x: Value| -> BResult<(Value, Value)> {
+        let bits = fb.convert(ConvOp::Bitcast, x, ut)?;
+        let e = bin(fb, BinOp::BitwiseAnd, bits, exponent)?;
+        let denormal = bin(fb, BinOp::IEqual, e, zu)?;
+        let x = fb.select(denormal, zf, x)?;
+        Ok((bits, fb.convert(ConvOp::FConvert, x, td)?))
+    };
+    let ((ab, x), (bb, y), (cb, z)) = (read(a)?, read(b)?, read(c)?);
+    let p = exact_op(fb, BinOp::FMul, x, y)?;
+    let s = exact_op(fb, BinOp::FAdd, p, z)?;
+    // Knuth's TwoSum: `e = (p - (s - z)) + (z - (s - (s - z)))`, exactly `v - s`.
+    let sp = exact_op(fb, BinOp::FSub, s, z)?;
+    let sz = exact_op(fb, BinOp::FSub, s, sp)?;
+    let dp = exact_op(fb, BinOp::FSub, p, sp)?;
+    let dz = exact_op(fb, BinOp::FSub, z, sz)?;
+    let e = exact_op(fb, BinOp::FAdd, dp, dz)?;
+    let normal = fsplat(fb, d, f64::from(f32::MIN_POSITIVE))?;
+    let zd = fsplat(fb, d, 0.0)?;
+    let size = fb.glsl(GlslOp::FAbs, &[s])?;
+    let below = bin(fb, BinOp::FOrdLessThan, size, normal)?;
+    let at = bin(fb, BinOp::FOrdEqual, size, normal)?;
+    let es = exact_op(fb, BinOp::FMul, e, s)?;
+    let inward = bin(fb, BinOp::FOrdLessThan, es, zd)?;
+    let edge = bin(fb, BinOp::LogicalAnd, at, inward)?;
+    let under = bin(fb, BinOp::LogicalOr, below, edge)?;
+    let tiny = bin(fb, BinOp::LogicalAnd, at_most, under)?;
+    // The zero's sign: an exact zero sum's IEEE sign, else `v`'s.
+    let sign = splat(fb, u, 0x8000_0000)?;
+    let product = bin(fb, BinOp::BitwiseXor, ab, bb)?;
+    let both = bin(fb, BinOp::BitwiseAnd, product, cb)?;
+    let exact = bin(fb, BinOp::BitwiseAnd, both, sign)?;
+    let negative = bin(fb, BinOp::FOrdLessThan, s, zd)?;
+    let signed = fb.select(negative, sign, zu)?;
+    let cancelled = bin(fb, BinOp::FOrdEqual, s, zd)?;
+    let zero = fb.select(cancelled, exact, signed)?;
+    let out = fb.select(tiny, zero, rb)?;
+    fb.convert(ConvOp::Bitcast, out, tf)
 }
 
 // ---- The integer routine ----

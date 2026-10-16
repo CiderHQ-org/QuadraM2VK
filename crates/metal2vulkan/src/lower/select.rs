@@ -1218,9 +1218,15 @@ pub fn select(
         facts: (e.call_stack.into_iter())
             .map(|stack| RuntimeFact::CallStackDepth { depth: stack.depth })
             .collect(),
-        // Private memory past the floor of a device not measured rests on no measurement. A
-        // rate-map decoder canon compiled is Apple's over Metal's bytes: no note.
-        precision: storage_note.into_iter().collect(),
+        // Private memory past the floor of a device not measured rests on no measurement, as
+        // does a group operation in a branch no measurement says Metal speculates. A rate-map
+        // decoder canon compiled is Apple's over Metal's bytes: no note.
+        precision: (storage_note.into_iter())
+            .chain(
+                e.unmeasured_speculation
+                    .then_some(PrecisionNote::UnmeasuredGroupSpeculation),
+            )
+            .collect(),
         specialized: BTreeMap::new(),
         noted: 0,
         descriptors: DescriptorCounts::default(),

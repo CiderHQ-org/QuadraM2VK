@@ -85,6 +85,7 @@ use crate::release;
 use ash::vk;
 use metal2vulkan::bind::SamplerDescriptor;
 use metal2vulkan::device::VkFeature;
+use metal2vulkan::error::DriverDeviation;
 use metal2vulkan::metal::sampler::{check_sampler, SamplerUse};
 use metal2vulkan::metal::{
     CompareFunction, SamplerAddressMode, SamplerBorderColor, SamplerMinMagFilter, SamplerMipFilter,
@@ -354,8 +355,11 @@ impl Device {
     /// A descriptor Metal's validation stops, of a `max_anisotropy` outside 1 to 16 or of pixel
     /// coordinates, is made, and samples as plain Metal samples it (the module's rules); an
     /// anisotropy past the largest of a device with `samplerAnisotropy` filters with that
-    /// largest, announced once (`Degradation::CappedAnisotropy`). Anisotropy on a device without
-    /// it is made, and samples as the module's docs say. Refused: what the device cannot do on
+    /// largest, announced once (`Degradation::CappedAnisotropy`). An anisotropic state without a
+    /// mip filter whose two filters differ, on a device that samples through Metal's own sampler
+    /// (MoltenVK), filters another footprint than Metal's, announced once
+    /// (`Degradation::NotMipmappedAnisotropicSampler`). Anisotropy on a device without it is made,
+    /// and samples as the module's docs say. Refused: what the device cannot do on
     /// any use of the state (`Unsupported`, naming the feature: a mirror-clamp address mode, a
     /// pixel-coordinate one's included). A minimum or maximum reduction reads the weighted
     /// average.
@@ -421,6 +425,28 @@ impl Device {
                          samplers take at most {largest} (maxSamplerAnisotropy)",
                         taken.max_anisotropy
                     ),
+                )
+            });
+        }
+        // Metal's own sampler handed anisotropy reads no level clamp of a sampler without a mip
+        // filter whose filters differ as Metal's `NotMipmapped` (`metal::sampler::vk_sampler`).
+        // A pixel-coordinate state has no anisotropy (`taken_descriptor`).
+        if anisotropy
+            && taken.max_anisotropy > 1
+            && taken.mip_filter == SamplerMipFilter::NotMipmapped
+            && taken.min_filter != taken.mag_filter
+            && profile.takes_driver_deviation(DriverDeviation::MetalSampler)
+        {
+            self.degrade(Degradation::NotMipmappedAnisotropicSampler, || {
+                (
+                    format!(
+                        "a sampler state of maxAnisotropy {} without a mip filter, minification \
+                         {:?} and magnification {:?}",
+                        descriptor.max_anisotropy, taken.min_filter, taken.mag_filter
+                    ),
+                    "the device samples through Metal's own sampler, whose anisotropic filter \
+                     reads no level clamp as Metal's NotMipmapped where the filters differ"
+                        .to_owned(),
                 )
             });
         }

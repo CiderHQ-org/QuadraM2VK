@@ -485,6 +485,30 @@ engine/descriptor_limit_uniform_views.air.ll	descriptor_limit_uniform_views	ok	o
 engine/descriptor_limit_uniform_views.air.ll	descriptor_limit_atomic_load	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
 engine/descriptor_limit_uniform_views.ll	descriptor_limit_uniform_views	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
 engine/descriptor_limit_uniform_views.ll	descriptor_limit_atomic_load	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/device_level.air.ll	dl_gradients	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/device_level.air.ll	dl_level	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/device_level.air.ll	dl_uint_level	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/device_level.air.ll	dl_uint_whole_level	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/device_level.air.ll	dl_nearest_mips	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/device_level.air.ll	dl_nearest_mips_bias	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/device_level.air.ll	dl_nearest_base	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/device_level.air.ll	dl_linear_mips	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/device_level.air.ll	dl_uint_mips	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/device_level.air.ll	dl_runtime	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/device_level.air.ll	dl_query	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/device_level.air.ll	dl_cube	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/device_level.ll	dl_gradients	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/device_level.ll	dl_level	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/device_level.ll	dl_uint_level	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/device_level.ll	dl_uint_whole_level	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/device_level.ll	dl_nearest_mips	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/device_level.ll	dl_nearest_mips_bias	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/device_level.ll	dl_nearest_base	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/device_level.ll	dl_linear_mips	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/device_level.ll	dl_uint_mips	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/device_level.ll	dl_runtime	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/device_level.ll	dl_query	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/device_level.ll	dl_cube	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
 engine/dfl_float_denormals.air.ll	dfl_float_denormals	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
 engine/dfl_float_denormals.ll	dfl_float_denormals	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
 engine/dfl_float_denormals_fast.air.ll	dfl_float_denormals_fast	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
@@ -1439,6 +1463,12 @@ engine/nan_signbits.air.ll	nan_signbits	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	o
 engine/nan_signbits.ll	nan_signbits	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
 engine/nan_signbits_fast.air.ll	nan_signbits_fast	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
 engine/nan_signbits_fast.ll	nan_signbits_fast	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/not_mipmapped_anisotropic.air.ll	anisotropic_mixed_filters	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/not_mipmapped_anisotropic.air.ll	anisotropic_equal_filters	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/not_mipmapped_anisotropic.air.ll	anisotropic_mipmapped_mixed	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/not_mipmapped_anisotropic.ll	anisotropic_mixed_filters	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/not_mipmapped_anisotropic.ll	anisotropic_equal_filters	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/not_mipmapped_anisotropic.ll	anisotropic_mipmapped_mixed	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
 engine/ob1_buffer_atomic.air.ll	ob1_buffer_atomic	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
 engine/ob1_buffer_atomic.ll	ob1_buffer_atomic	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
 engine/ob1_device_address.air.ll	ob1_device_address	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
@@ -2131,6 +2161,10 @@ engine/tib_imageblock_slices.air.ll	tib_slot_short2_slice	NeedsInput{StorageText
 engine/tib_imageblock_slices.ll	tib_slot_half_slice	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	NeedsInput{StorageTextureFormat { slot: SlotRef { stage: Kernel, class: Texture, index: 0 } }}	ok	NeedsInput{StorageTextureFormat { slot: SlotRef { stage: Kernel, class: Texture, index: 0 } }}
 engine/tib_imageblock_slices.ll	tib_argument_half_slice	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	Unsupported{ArgumentBufferTextures; AnyOf[[Feature(ShaderStorageImageArrayNonUniformIndexing)]]}	ok	ok	ok	ok	ok	Unsupported{ArgumentBufferTextures; AnyOf[[Feature(ShaderStorageImageWriteWithoutFormat)]]}	ok	Unsupported{ArgumentBufferTextures; AnyOf[[Feature(RuntimeDescriptorArray), Feature(DescriptorBindingPartiallyBound), Feature(ShaderStorageImageArrayNonUniformIndexing), Feature(DescriptorBindingStorageImageUpdateAfterBind), Feature(ShaderStorageImageWriteWithoutFormat)]]}
 engine/tib_imageblock_slices.ll	tib_slot_short2_slice	NeedsInput{StorageTextureFormat { slot: SlotRef { stage: Kernel, class: Texture, index: 0 } }}	NeedsInput{StorageTextureFormat { slot: SlotRef { stage: Kernel, class: Texture, index: 0 } }}	NeedsInput{StorageTextureFormat { slot: SlotRef { stage: Kernel, class: Texture, index: 0 } }}	NeedsInput{StorageTextureFormat { slot: SlotRef { stage: Kernel, class: Texture, index: 0 } }}	NeedsInput{StorageTextureFormat { slot: SlotRef { stage: Kernel, class: Texture, index: 0 } }}	NeedsInput{StorageTextureFormat { slot: SlotRef { stage: Kernel, class: Texture, index: 0 } }}	NeedsInput{StorageTextureFormat { slot: SlotRef { stage: Kernel, class: Texture, index: 0 } }}	NeedsInput{StorageTextureFormat { slot: SlotRef { stage: Kernel, class: Texture, index: 0 } }}	NeedsInput{StorageTextureFormat { slot: SlotRef { stage: Kernel, class: Texture, index: 0 } }}	NeedsInput{StorageTextureFormat { slot: SlotRef { stage: Kernel, class: Texture, index: 0 } }}	NeedsInput{StorageTextureFormat { slot: SlotRef { stage: Kernel, class: Texture, index: 0 } }}	NeedsInput{StorageTextureFormat { slot: SlotRef { stage: Kernel, class: Texture, index: 0 } }}	NeedsInput{StorageTextureFormat { slot: SlotRef { stage: Kernel, class: Texture, index: 0 } }}	NeedsInput{StorageTextureFormat { slot: SlotRef { stage: Kernel, class: Texture, index: 0 } }}	NeedsInput{StorageTextureFormat { slot: SlotRef { stage: Kernel, class: Texture, index: 0 } }}	NeedsInput{StorageTextureFormat { slot: SlotRef { stage: Kernel, class: Texture, index: 0 } }}	NeedsInput{StorageTextureFormat { slot: SlotRef { stage: Kernel, class: Texture, index: 0 } }}	NeedsInput{StorageTextureFormat { slot: SlotRef { stage: Kernel, class: Texture, index: 0 } }}	NeedsInput{StorageTextureFormat { slot: SlotRef { stage: Kernel, class: Texture, index: 0 } }}
+engine/tiny_products_flush.air.ll	tiny_products_flush	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/tiny_products_flush.ll	tiny_products_flush	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/tiny_products_flush_fast.air.ll	tiny_products_flush_fast	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/tiny_products_flush_fast.ll	tiny_products_flush_fast	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
 engine/tns_coop_layout.air.ll	tns_coop_layout	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
 engine/tns_coop_layout.ll	tns_coop_layout	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
 engine/tns_init.air.ll	tns_init	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
@@ -2247,6 +2281,10 @@ engine/unk_ulong_rw.ll	unk_ulong_rw	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
 engine/unk_ulong_rw.ll	unk_ulong_access	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	Unsupported{Format; AnyOf[[Feature(ShaderStorageImageExtendedFormats)], [Feature(ShaderStorageImageWriteWithoutFormat)]]}
 engine/unm_contract_chain.air.ll	unm_contract_chain	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
 engine/unm_contract_chain.ll	unm_contract_chain	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/unmeasured_speculation.air.ll	quad_first_in_an_unmeasured_arm	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/unmeasured_speculation.air.ll	sin_in_an_unmeasured_arm	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/unmeasured_speculation.ll	quad_first_in_an_unmeasured_arm	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
+engine/unmeasured_speculation.ll	sin_in_an_unmeasured_arm	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
 engine/unv_runtime_levels.air.ll	unv_rlvl2d	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	Unsupported{ArgumentBufferTextures; AnyOf[[Feature(RuntimeDescriptorArray), Feature(DescriptorBindingPartiallyBound), Feature(ShaderSampledImageArrayNonUniformIndexing), Feature(DescriptorBindingSampledImageUpdateAfterBind)]]}
 engine/unv_runtime_levels.air.ll	unv_rpos2d	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok
 engine/unv_runtime_levels.ll	unv_rlvl2d	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	ok	Unsupported{ArgumentBufferTextures; AnyOf[[Feature(RuntimeDescriptorArray), Feature(DescriptorBindingPartiallyBound), Feature(ShaderSampledImageArrayNonUniformIndexing), Feature(DescriptorBindingSampledImageUpdateAfterBind)]]}

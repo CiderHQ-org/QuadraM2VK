@@ -25,7 +25,8 @@
 //!   occurrence instead, the same notice through the same sink, on the thread whose call
 //!   announces it: a bit per kind beside those, read first. For a kind a variant's making announces
 //!   (a stage's precision notes, specialized or not, `ycbcr-filter-not-exact`, a shader's color
-//!   conversions, reconvergence that is not Metal's, unadvertised vertex simdgroups), an occurrence
+//!   conversions, reconvergence that is not Metal's, unadvertised vertex simdgroups, exact forms
+//!   dropped to fit a compiler word bound), an occurrence
 //!   is each dispatch or draw that binds the variant (an indirect command's too, where its
 //!   execution records it, and an execution the GPU alone runs, once), announced there with the
 //!   making's object and reason and not at the making, since the device memoizes a variant and
@@ -33,43 +34,52 @@
 //!   bind ANDs with the device's before it describes any.
 //! - **Where.** Each site announces once the command or object it degrades can no longer be
 //!   refused. A pipeline stage's precision notes, and reconvergence that is not Metal's, are
-//!   announced where the runtime makes a variant's objects (`pipeline/objects.rs`), for compute
-//!   and render pipeline states alike, but for a note the stage records only under some
+//!   announced where the runtime makes a variant's objects (`pipeline/objects.rs`), for compute and
+//!   render pipeline states alike, but for a note the stage records only under some
 //!   specializations, announced where the runtime makes a `VkPipeline` whose specialization (the
 //!   bound formats' classes and samplers' words) takes it; a render pipeline's vertex simdgroups on
-//!   a driver that runs them without advertising the vertex stage where the runtime makes a render
-//!   variant, before its shader modules (`pipeline/render.rs`, from the pipeline's requirements); a
+//!   a driver that runs them without advertising the vertex stage, and the exact forms its
+//!   translation dropped to fit the device's compiler word bound, where the runtime makes a render
+//!   variant, before its shader modules (`pipeline/render.rs`, from the pipeline's requirements
+//!   and dependencies); a
 //!   render pass's degradations where its encoder ends (`render.rs`), from the pass's layout, its
 //!   render pass instances and the storage it kept; a rasterization-rate map that is not the
-//!   identity where the device makes it (`rate_map.rs`); a draw's copy of its index buffer or
-//!   arguments where the copy records (`draw_source.rs`), and its zeroed index positions where it
-//!   records (`render.rs`, `index_bounds.rs`); work a host step records (an indirect command
-//!   buffer's execution, an indirect dispatch) where its command buffer commits and where the step
-//!   records it (`deferred.rs`); a `Shared` buffer or heap in system memory where the device makes
-//!   it (`buffer.rs`, `heap.rs`); a texture whose blocks a carrier holds, which a command reading
+//!   identity where the device makes it (`rate_map.rs`); a draw's use of an attachment's memory in
+//!   place where the draw records (`render.rs`); a draw's copy of its index buffer or arguments
+//!   where the copy records (`draw_source.rs`), and its zeroed index positions where it records
+//!   (`render.rs`, `index_bounds.rs`); work a host step records (an indirect command buffer's
+//!   execution, an indirect dispatch) where its command buffer commits and where the step records
+//!   it (`deferred.rs`); a `Shared` buffer or heap in system memory where the device makes it
+//!   (`buffer.rs`, `heap.rs`); a texture whose blocks a carrier holds, which a command reading
 //!   texture handles reaches, once the command is encoded (`pvrtc.rs`, from `compute.rs` and
 //!   `render/arguments.rs`); a Metal level below the host's release where the device is made
-//!   (`device/mod.rs`, from `metal_level.rs`); a BC1 to BC5 texture whose texels the device decodes
-//!   otherwise than Metal where the device makes it (`texture.rs`, `texture/shared.rs`,
-//!   `texture/heap.rs`).
+//!   (`device/mod.rs`, from `metal_level.rs`); native device maths that rounds a tiny product
+//!   before its flush where the device is made (`device/float_tininess.rs`); a sampler state whose
+//!   anisotropy the device filters otherwise than Metal where the device makes it (`sampler.rs`); a
+//!   BC1 to BC5 texture whose texels the device decodes otherwise than Metal where the device makes
+//!   it (`texture.rs`, `texture/shared.rs`, `texture/heap.rs`).
 
 use super::attachment_stand_in::{Cause, StandIn};
 use super::color_resolve;
 use super::device::{DebugMessage, Device, MessageKind, MessageSeverity};
+use super::error::Error;
 use super::fragment_imageblock::PassImageblock;
 use super::render_pass::{ColorTarget, PassLayout, Target};
 use super::render_target::{self, depth_stencil_steps, HandedDontCare, PassShape};
 use super::render_values::{LoadAction, StoreAction};
 use super::resolve::ResolveMode;
-use super::resource::ObjectId;
+use super::resource::{ObjectId, ResourceKey};
 use super::texture::heap_tiled::Untiled;
 use super::texture_descriptor::TextureDescriptor;
+use super::tracker::Use;
 use super::values::ResourceOptions;
 use metal2vulkan::bind::PlanDiagnostic;
 use metal2vulkan::cache::SpecializationKey;
-use metal2vulkan::device::{DriverFact, FunctionStorage, Requirements, VkProperty};
+use metal2vulkan::device::{DriverFact, FunctionStorage, VkProperty};
 use metal2vulkan::metal::PixelFormat;
-use metal2vulkan::pipeline::{PrecisionNote, Reconvergence, SlotRef, SpecKey, StageModule};
+use metal2vulkan::pipeline::{
+    PrecisionNote, Reconvergence, RenderPipeline, SlotRef, SpecKey, StageModule,
+};
 use metal2vulkan::vk::{ImageAspectFlags, ShaderStage};
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -431,6 +441,19 @@ degradations! {
             "each draw runs a geometry stage of its topology class between the vertex and \
              fragment stages, which emits each primitive's vertices with the barycentric weights \
              or the first vertex's slice and viewport";
+        /// A render pipeline state whose largest stage module, under the consumer's exact forms,
+        /// exceeded the device's compiler word bound
+        /// ([`metal2vulkan::pipeline::RuntimeFact::ExactFormsOverCompilerLimit`];
+        /// [`metal2vulkan::device::DriverWorkaround::RegisterAllocatorOverflowsLargeModules`],
+        /// ANV's register allocator faults compiling a module past it), so the translation dropped
+        /// the consumer's exact forms until it fit: native sampling first, then every
+        /// module-growing exact answer native. Announced where the runtime makes a render
+        /// variant whose pipeline the fit reduced, the base variant or another (`pipeline/
+        /// render.rs`, from the pipeline's dependencies), naming the forms dropped; the reduced
+        /// stages announce their own precision notes besides.
+        ExactFormsOverCompilerLimit = "exact-forms-over-compiler-limit", Precision,
+            "the dropped exact forms' results can differ from Metal's as their notes' \
+             documentation states, where the device's compiler would fault on the exact module";
         /// Visibility results start where Vulkan writes no query result.
         LandedVisibilityResults = "landed-visibility-results", Performance,
             "they land in an upload region and are copied on into the buffer after the pass";
@@ -934,6 +957,17 @@ degradations! {
              document, and the stencil's samples are kept too, where Metal's GPU overwrites the \
              depth's samples and its resolve texture with a layout pattern of the resolved depth \
              and leaves the stencil's texels (measured on an Apple M4)";
+        /// A draw whose functions read or write, other than as an attachment, memory an
+        /// attachment of its render pass instance renders, where no copy or snapshot serves the
+        /// access (`texture/attached_reads.rs`): a texture reached through a handle or an
+        /// argument buffer, a storage binding of a color attachment's texture, the depth or
+        /// stencil attachment's texture, a texture buffer or a buffer over its bytes, a texture
+        /// whose copy is not served, or an execution's or a capture's command. Announced where the
+        /// draw records; the payload names its call.
+        AttachmentReadInPlace = "attachment-read-in-place", Precision,
+            "the access sees the attachment as the device holds it inside its render pass \
+             instance, which Vulkan leaves undefined (`VUID-vkCmdDraw-None-10795`), where Metal's \
+             read at the draw's own pixel gives the texel from before the pass";
         /// A sampler state whose `maxAnisotropy`, which Metal's validation stops past 16, plain
         /// Metal samples with an anisotropy past the device's largest (`maxSamplerAnisotropy`):
         /// 17 to 31 in its low five bits, which Metal samples with 32 (`sampler.rs`).
@@ -941,6 +975,17 @@ degradations! {
             "it filters with the device's largest anisotropy (16 on every venue measured), where \
              Metal filters with 32: a footprint more than 16 times as long as it is wide reads a \
              coarser level than Metal's (one level coarser at 32 to 1 and beyond)";
+        /// A sampler state with anisotropy, no mip filter (`NotMipmapped`) and different
+        /// minification and magnification filters, on a device that samples through Metal's own
+        /// sampler (MoltenVK on Apple's GPU, `DriverDeviation::MetalSampler`): Vulkan has no
+        /// sampler without mipmapping, so the device's sampler takes a nearest mip filter with the
+        /// level clamp `[0, 0.25]`, which keeps Metal's choice of filter, and Metal's anisotropic
+        /// filter reads no such clamp as Metal's `NotMipmapped` (`sampler.rs`). Announced once,
+        /// where the device makes the state; the payload names its anisotropy and filters. A
+        /// constexpr sampler of that shape records `NotMipmappedAnisotropicFilter` instead.
+        NotMipmappedAnisotropicSampler = "not-mipmapped-anisotropic-sampler", Precision,
+            "a sample at an implicit level or with gradients through it filters another \
+             anisotropic footprint than Metal's at `maxAnisotropy` 2 to 16";
         /// A command whose function reads texture handles from memory (an argument buffer, or
         /// any memory holding a texture's resource ID) has a texture the runtime holds as raw
         /// blocks for copies (a PVRTC texture on a device without its format, `pvrtc.rs`)
@@ -1552,18 +1597,20 @@ degradations! {
         /// macOS 27.0.1: 270 of 270 outcomes); and a pass that sets a depth/stencil state with
         /// depth writes stores each texel no fragment wrote without its sign (probe `depthstore`).
         /// Vulkan's compares the stored value as it is, and its pass keeps it. A single-sample
-        /// `Depth32Float` render target that a write may give such a value renders the passes that
-        /// load its depth over its magnitude stand-in (`texture/signed_depth.rs`), whose tests and
-        /// stores are Metal's, and announces only the corners: a pass that writes its depth over
-        /// the stand-in, whose merge keeps a stored NaN where a draw wrote exactly +inf, its
-        /// stand-in, over it; a pass that loads it through another image (separate depth and
-        /// stencil textures' scratch image, a stand-in for custom sample positions); and a write
-        /// that switches it on while another command buffer is uncommitted, whose passes encoded
-        /// before it test and store the value as it is. A multisampled or `Depth32Float_Stencil8`
-        /// target takes no stand-in: its words are stripped of their signs after a pass with depth
-        /// writes, Metal's stores, and its test, which compares the value as it is, is announced
-        /// at the write (a blit's copy into its depth), on a device that keeps such a value there
-        /// (`VK_EXT_depth_range_unrestricted` enabled, or
+        /// `Depth32Float` render target that a write may give such a value, or whose new texture's
+        /// pattern (a NaN with the sign set) a pass loads before a write covered it
+        /// (`fresh_unwritten.rs`), renders the passes that load its depth over its magnitude
+        /// stand-in (`texture/signed_depth.rs`), whose tests and stores are Metal's, and announces
+        /// only the corners: a pass that writes its depth over the stand-in, whose merge keeps a
+        /// stored NaN where a draw wrote exactly +inf, its stand-in, over it; a pass that loads it
+        /// through another image (separate depth and stencil textures' scratch image, a stand-in
+        /// for custom sample positions); and a write that switches it on while another command
+        /// buffer is uncommitted, whose passes encoded before it test and store the value as it is.
+        /// A multisampled or `Depth32Float_Stencil8` target takes no stand-in: its words are
+        /// stripped of their signs after a pass with depth writes, Metal's stores, and its test,
+        /// which compares the value as it is, is announced at the write (a blit's copy into its
+        /// depth, or the pass that loads its new pattern), on a device that keeps such a value
+        /// there (`VK_EXT_depth_range_unrestricted` enabled, or
         /// `DriverFact::DepthImageKeepsValuesOutsideUnitRange`; elsewhere `restricted-depth-upload`
         /// is announced), as is a strip the device does not make. A denormal tested over the
         /// smallest normal is `depth-denormals`'. A device whose depth test compares magnitudes as
@@ -1661,6 +1708,18 @@ degradations! {
         UnrestoredFirstMoveBytes = "unrestored-first-move-bytes", Precision,
             "those bytes keep what the image's move from `UNDEFINED` wrote, where Metal's \
              texture leaves its pages as they were";
+        /// A device whose policy takes native device maths (`FloatMathsPolicy::Native`, the
+        /// default) where its float functions are not Metal's own (not MoltenVK,
+        /// `DriverDeviation::MetalFloatFunctions`): Metal flushes a `float` product or fused
+        /// multiply-add whose exact value lies below `2^-126` to the zero of its sign, deciding
+        /// tininess before rounding, and the device rounds before it decides (measured on RADV,
+        /// ANV, NVIDIA and lavapipe, whether they flush denormals or keep them), so the device's
+        /// multiply and fused multiply-add answer `2^-126` there (`device/float_tininess.rs`).
+        /// Announced once, as the device is made; the payload names the device and its policy.
+        FloatTininessAfterRounding = "float-tininess-after-rounding", Precision,
+            "a `float` product or fused multiply-add whose exact value lies within half a unit \
+             below `2^-126` answers `2^-126` of its sign where Metal answers the zero of its sign; \
+             `FloatMathsPolicy::Exact` computes Metal's";
     }
     notes {
         F16FmaDoubleRounding = "f16-fma-double-rounding";
@@ -1830,6 +1889,27 @@ degradations! {
         /// triangulation and the order a patch's triangles blend in may differ. On a device
         /// without `tessellationShader` the emulation draws Metal's order and records none.
         TessellationTriangleOrder = "tessellation-triangle-order";
+        /// A function holds a branch whose arms hold a quad or simdgroup operation that Metal's
+        /// backend makes answer over every lane of the branch's block when it speculates the arms,
+        /// where no measurement says whether it speculates them (an arm of an instruction, size or
+        /// shape no probe covers): the branch keeps the AIR's lanes, so that operation may answer
+        /// over the lanes that take the arm where Metal's answers over the block's. Nothing else
+        /// in the stage changes.
+        UnmeasuredGroupSpeculation = "unmeasured-group-speculation";
+        /// A sample at an implicit level or with gradients through a constexpr sampler with
+        /// anisotropy, no mip filter and different minification and magnification filters, on a
+        /// device that samples through Metal's own sampler (MoltenVK on Apple's GPU): no level
+        /// clamp the device's sampler takes reads Metal's `NotMipmapped` footprint at
+        /// `maxAnisotropy` 2 to 16, so the sample filters another anisotropic footprint.
+        NotMipmappedAnisotropicFilter = "not-mipmapped-anisotropic-filter";
+        /// A sample whose level the device's level arithmetic chooses (a fragment function's
+        /// implicit-level sample, its bias within the device's limit; a sample with explicit
+        /// gradients; a fragment function's LOD query; an explicit level Metal's level rule is not
+        /// handed on, such as an integer texture's), of a texture other than a cube, without
+        /// comparison, where no sample-filter note covers it: the device's level of detail and its
+        /// rounding of a level may read another level or filter than Metal's near a boundary, and
+        /// the query answers the device's level.
+        DeviceSampleLevel = "device-sample-level";
     }
 }
 
@@ -2144,11 +2224,11 @@ pub(crate) struct Kinds([u64; WORDS]);
 
 impl Kinds {
     /// The kinds `stages` (a variant's) may announce where the variant or a `VkPipeline` of it is
-    /// made (`Device::degrade_stages`, `Device::degrade_specialized`), and those of
-    /// `requirements` (`Device::degrade_requirements`): every note's, a specialized one's under
-    /// any specialization (a filter note's two-plane YCbCr kind among them), and each other
-    /// kind a stage's records state.
-    pub(crate) fn of(stages: &[StageModule], requirements: Option<&Requirements>) -> Kinds {
+    /// made (`Device::degrade_stages`, `Device::degrade_specialized`), and those of a render
+    /// variant's `render` pipeline (`Device::degrade_render`): every note's, a specialized one's
+    /// under any specialization (a filter note's two-plane YCbCr kind among them), and each other
+    /// kind a stage's or the pipeline's records state.
+    pub(crate) fn of(stages: &[StageModule], render: Option<&RenderPipeline>) -> Kinds {
         let mut kinds = Kinds::default();
         for stage in stages {
             let notes = stage.precision_notes.iter().copied();
@@ -2171,8 +2251,17 @@ impl Kinds {
                 kinds.add(Degradation::ImplementationDefinedReconvergence);
             }
         }
-        if requirements.is_some_and(|r| r.properties.contains(&VkProperty::MetalVertexSimdgroups)) {
-            kinds.add(Degradation::UnadvertisedVertexSimdgroups);
+        if let Some(render) = render {
+            if render
+                .requirements
+                .properties
+                .contains(&VkProperty::MetalVertexSimdgroups)
+            {
+                kinds.add(Degradation::UnadvertisedVertexSimdgroups);
+            }
+            if dropped_exact_forms(&render.dependencies).is_some() {
+                kinds.add(Degradation::ExactFormsOverCompilerLimit);
+            }
         }
         kinds
     }
@@ -2181,6 +2270,39 @@ impl Kinds {
         let (word, bit) = kind.bit();
         self.0[word] |= bit;
     }
+}
+
+/// The exact forms a render pipeline's translation dropped to fit the device's compiler word bound
+/// (`RuntimeFact::ExactFormsOverCompilerLimit` among its `dependencies`), named; `None` where it
+/// dropped none.
+pub(crate) fn dropped_exact_forms(
+    dependencies: &[metal2vulkan::pipeline::RuntimeDependency],
+) -> Option<Vec<&'static str>> {
+    dependencies.iter().find_map(|d| match d.fact {
+        metal2vulkan::pipeline::RuntimeFact::ExactFormsOverCompilerLimit {
+            sampling,
+            float_maths,
+            texel_conversion,
+            half_rounding,
+            nan_and_min_max,
+            rounding_order,
+            half_blend,
+        } => Some(
+            [
+                (sampling, "exact sampling"),
+                (float_maths, "exact float maths"),
+                (texel_conversion, "exact texel conversion"),
+                (half_rounding, "exact half rounding"),
+                (nan_and_min_max, "exact NaN and minimum and maximum"),
+                (rounding_order, "exact rounding order"),
+                (half_blend, "exact half blend"),
+            ]
+            .into_iter()
+            .filter_map(|(dropped, name)| dropped.then_some(name))
+            .collect(),
+        ),
+        _ => None,
+    })
 }
 
 /// Where a variant's notices are announced: as the variant (or a `VkPipeline` of it) is made,
@@ -2252,6 +2374,33 @@ pub(crate) fn placement(degradation: Degradation, each: bool, ends: bool) -> Opt
 }
 
 impl Device {
+    /// Announce `AttachmentReadInPlace` where `uses`, what a draw of `call` binds or reaches,
+    /// share memory with an attachment of `layout`'s render pass instance
+    /// (`render_target::shares_attachment`). The check runs only while the kind would be
+    /// announced: once it was, a device that announces it once skips it.
+    pub(super) fn degrade_attachment_reads<'a>(
+        &self,
+        call: &'static str,
+        layout: &PassLayout,
+        uses: impl IntoIterator<Item = &'a Use<ResourceKey>>,
+    ) -> Result<(), Error> {
+        let kind = Degradation::AttachmentReadInPlace;
+        if !self.shared().announced.pending(kind)
+            || !render_target::shares_attachment(layout, uses)?
+        {
+            return Ok(());
+        }
+        self.degrade(kind, || {
+            (
+                format!("a draw ({call})"),
+                "a function of the draw reads or writes, other than as an attachment, memory an \
+                 attachment of its render pass instance renders"
+                    .to_owned(),
+            )
+        });
+        Ok(())
+    }
+
     /// Announce `degradation` unless the device announced it before (but a kind its options ask
     /// for at each occurrence, `DeviceOptions::announce_each`), `describe` giving the object and
     /// the reason: through the device's message sink, else on stderr, on the calling thread (the
@@ -2434,17 +2583,17 @@ impl Device {
     /// device's options ask for at every occurrence (`DeviceOptions::announce_each`), with the
     /// making's object and reason, in the order the making announces them (a memoized variant is
     /// made once, so its making alone would announce them once). `stages` are the variant's
-    /// stages, `requirements` a render variant's, and `specializations` the specializations and
+    /// stages, `render` a render variant's pipeline, and `specializations` the specializations and
     /// bound formats of the `VkPipeline`s the bind takes (`Device::degrade_specialized`).
     pub(crate) fn bound_notices(
         &self,
-        (stages, requirements): (&[StageModule], Option<&Requirements>),
+        (stages, render): (&[StageModule], Option<&RenderPipeline>),
         specializations: &[(&SpecializationKey, Option<BoundFormats<'_>>)],
     ) -> Vec<BoundNotice> {
         let notices = std::cell::RefCell::new(Vec::new());
         let at = Occurrence::Bound(&notices);
-        if let Some(requirements) = requirements {
-            self.degrade_requirements(requirements, at);
+        if let Some(render) = render {
+            self.degrade_render(render, at);
         }
         self.degrade_stages(stages, at);
         for (n, &(specialization, formats)) in specializations.iter().enumerate() {
@@ -2599,12 +2748,27 @@ impl Device {
 }
 
 impl Device {
-    /// Announce, `at` its variant's making or a bind ([`Occurrence`]), a render pipeline whose
-    /// `requirements` hold a vertex function's subgroup operations on a driver that runs them as
-    /// Metal does without advertising the vertex stage
-    /// ([`Degradation::UnadvertisedVertexSimdgroups`]).
-    pub(super) fn degrade_requirements(&self, requirements: &Requirements, at: Occurrence<'_>) {
-        if requirements
+    /// Announce, `at` its variant's making or a bind ([`Occurrence`]), what a render variant's
+    /// `pipeline` records beside its stages: requirements that hold a vertex function's subgroup
+    /// operations on a driver that runs them as Metal does without advertising the vertex stage
+    /// ([`Degradation::UnadvertisedVertexSimdgroups`]), and exact forms the translation dropped to
+    /// fit the device's compiler word bound ([`Degradation::ExactFormsOverCompilerLimit`]), for the
+    /// base variant and every other alike, each pipeline by its own records.
+    pub(super) fn degrade_render(&self, pipeline: &RenderPipeline, at: Occurrence<'_>) {
+        if let Some(dropped) = dropped_exact_forms(&pipeline.dependencies) {
+            self.degrade_at(at, Degradation::ExactFormsOverCompilerLimit, || {
+                (
+                    "a render pipeline state".to_owned(),
+                    format!(
+                        "its largest stage module passed the device's compiler word bound, so its \
+                         translation dropped {} to the device's answer",
+                        dropped.join(", ")
+                    ),
+                )
+            });
+        }
+        if pipeline
+            .requirements
             .properties
             .contains(&VkProperty::MetalVertexSimdgroups)
         {

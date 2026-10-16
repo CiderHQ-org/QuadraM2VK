@@ -15,18 +15,22 @@
 //!   after them behind those before. Vulkan's barriers inside a render pass instance are limited
 //!   to its subpass's dependency on itself, which is by region over the framebuffer-space
 //!   stages: it orders the fragment stages' accesses of one pixel. A barrier over the render
-//!   targets alone, from the fragment stage to the fragment stage, is one of those: the pixels a
-//!   draw's fragments write as render targets are the pixels later fragments read as render
-//!   targets (blending, the depth and stencil tests, framebuffer fetch), so it records inside the
-//!   instance (`render_target::between_draws`); a draw after it that samples an attachment's
-//!   texture, at any pixel, records into a new instance (`texture/attached_reads.rs`). Any other
+//!   targets alone, after the fragment stage, before a stage at or before it (the vertex, object,
+//!   mesh or fragment stage: a later draw's fragment stage runs after its earlier stages, so a
+//!   barrier before those orders it too), is one of those: the pixels a draw's fragments write as
+//!   render targets are the pixels later fragments read as render targets (blending, the depth
+//!   and stencil tests, framebuffer fetch), so it records inside the instance
+//!   (`render_target::between_draws`); a draw after it that samples an attachment's texture, at
+//!   any pixel, records into a new instance (`texture/attached_reads.rs`). Any other
 //!   (buffers or textures, which a fragment may write at any address and a draw may read at any
 //!   stage) splits the pass: the next draw records into a new instance, after a barrier from
 //!   everything before to everything after (`render.rs`, the `render-pass-split` degradation).
 //! - **Barriers over the render targets on Apple GPUs.** The Metal Feature Set Tables give that
 //!   scope to Mac2 GPUs, not to Apple3 to Apple10 ones: on the M3 Max under macOS 27.0.1 (probe
 //!   `rtbarrier`), a draw after one read its own pixel's texels from before the pass, as with no
-//!   barrier. The runtime orders what each barrier names, as a Mac2 GPU does.
+//!   barrier, and (probe `rtb`) a draw after one from the fragment stage to the fragment or the
+//!   vertex stage read other pixels' texels from before the pass too, as an Apple GPU orders none
+//!   of them. The runtime orders what each barrier names, as a Mac2 GPU does.
 //! - **Barriers after the fragment stage.** On an Apple GPU Metal's validation stops one
 //!   ("afterStages (0x2) can not contain MTLRenderStageTile or MTLRenderStageFragment on this
 //!   device", M4, EV `CFIT-metal-probe-3`), and Metal without it did not order a fragment's
@@ -186,6 +190,13 @@ impl BlitCommandEncoder {
     }
 }
 
+/// The render stages a draw runs before or as its fragment stage: a barrier before one of them
+/// orders the draw's fragment stage too.
+const UP_TO_FRAGMENT: RenderStages = RenderStages::VERTEX
+    .union(RenderStages::OBJECT)
+    .union(RenderStages::MESH)
+    .union(RenderStages::FRAGMENT);
+
 impl RenderCommandEncoder {
     /// `updateFence:afterStages:`: the fence is updated after the encoder's draws. The update
     /// follows every stage of the encoder's work, which covers `after_stages` (the module docs).
@@ -224,11 +235,14 @@ impl RenderCommandEncoder {
     /// `memoryBarrierWithScope:afterStages:beforeStages:`: the writes of the encoder's draws
     /// before the barrier to the kinds of resource `scope` names (buffers, textures, render
     /// targets) are visible to its draws after it (the module docs). A scope of the render
-    /// targets alone orders the fragment stage's writes before the fragment stage's reads, inside
-    /// the render pass instance; another scope splits the pass there. An empty scope, no stage
-    /// before or after, or a scope of the render targets alone without the fragment stage on
-    /// both sides orders nothing more than the pass does: no vertex stage reaches a render
-    /// target, and a tile dispatch runs between render pass instances (`render/tile_dispatch.rs`).
+    /// targets alone, after the fragment stage and before a stage at or before it (the vertex,
+    /// object, mesh or fragment stage), orders the fragment stage's writes before the later
+    /// draws' fragment stages, which run after their earlier stages, inside the render pass
+    /// instance; another scope splits the pass there. An empty scope, no stage before or after,
+    /// or a scope of the render targets alone after no fragment stage or before none of those
+    /// stages orders nothing more than the pass does: only the fragment stage writes a render
+    /// target, and a tile dispatch runs between render pass instances
+    /// (`render/tile_dispatch.rs`).
     pub fn memory_barrier_with_scope(
         &mut self,
         scope: BarrierScope,
@@ -240,8 +254,9 @@ impl RenderCommandEncoder {
             return;
         }
         if scope == BarrierScope::RENDER_TARGETS {
-            let fragment = RenderStages::FRAGMENT;
-            if after_stages.contains(fragment) && before_stages.contains(fragment) {
+            if after_stages.contains(RenderStages::FRAGMENT)
+                && before_stages.intersects(UP_TO_FRAGMENT)
+            {
                 self.barrier_between_draws();
             }
             return;

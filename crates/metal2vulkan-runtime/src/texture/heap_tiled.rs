@@ -47,12 +47,13 @@
 //!   number of tiles a row: level 1 of a 513 x 300 `BC1_RGBA` chain, 64 blocks of its own and 65
 //!   halved in tiles 64 wide) its GPU and its CPU copies meet the level's blocks at other bytes,
 //!   and a CPU copy reads back other blocks than a blit wrote; the M4's GPU counts them as its CPU
-//!   copies do (`GpuRows::AsCpu`). Measured on the M3 Max at 26.7 and the M4 at 27.0.1: whether the
-//!   GPU or the release makes the difference is not known. The device's Metal level names each
-//!   family's placement and its GPU's count (`MetalLevel::heap_blocks`,
-//!   `MetalLevel::heap_block_gpu_rows`): the CPU copies place blocks by `TiledLevel::across`, the
-//!   kernel's moves by `TiledLevel::gpu_across`, as Metal's own two paths do. A PVRTC texture stays
-//!   untiled (`heap-texture-block-compressed-layout`), its answer its device's.
+//!   copies do (`GpuRows::AsCpu`). The release makes the difference: the M3 Max under 27.0.1
+//!   answers every texture of `tests/heap_tiled_blocks.rs` as the M4 does, its CPU's spans and its
+//!   GPU's (EV M27-hblk1-m3). The device's Metal level names each family's placement and its
+//!   GPU's count (`MetalLevel::heap_blocks`, `MetalLevel::heap_block_gpu_rows`): the CPU copies
+//!   place blocks by `TiledLevel::across`, the kernel's moves by `TiledLevel::gpu_across`, as
+//!   Metal's own two paths do. A PVRTC texture stays untiled
+//!   (`heap-texture-block-compressed-layout`), its answer its device's.
 //! - **Lossless compression** (EV TXN3-htlm1-m4, 14174 answers of every plain format, type,
 //!   shape, usage and storage mode). Metal keeps a texture losslessly compressed where
 //!   `allowGPUOptimizedContents` holds and the shorter side of its level 0 is 16 texels or more

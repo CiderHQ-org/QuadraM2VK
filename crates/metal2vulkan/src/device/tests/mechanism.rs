@@ -261,6 +261,15 @@ fn every_fact() -> Vec<RuntimeFact> {
             static_bytes: 0,
             payload: None,
         },
+        RuntimeFact::ExactFormsOverCompilerLimit {
+            sampling: true,
+            float_maths: true,
+            texel_conversion: false,
+            half_rounding: false,
+            nan_and_min_max: true,
+            rounding_order: false,
+            half_blend: false,
+        },
     ]
 }
 
@@ -358,6 +367,7 @@ fn variant(f: &RuntimeFact) -> usize {
         RuntimeFact::Depth16BiasSide { .. } => 87,
         RuntimeFact::SynthesizedGeometry { .. } => 88,
         RuntimeFact::ObjectThreadgroupArena { .. } => 89,
+        RuntimeFact::ExactFormsOverCompilerLimit { .. } => 90,
     }
 }
 
@@ -365,7 +375,7 @@ fn variant(f: &RuntimeFact) -> usize {
 fn mechanism_is_total_over_every_fact_and_profile() {
     let facts = every_fact();
     let covered: std::collections::BTreeSet<usize> = facts.iter().map(variant).collect();
-    assert_eq!(covered, (0..90).collect(), "every_fact misses a variant");
+    assert_eq!(covered, (0..91).collect(), "every_fact misses a variant");
     for (stem, _) in super::committed_profiles() {
         let dev = device(&stem);
         let p = dev.profile();
@@ -502,6 +512,7 @@ fn mechanism_is_total_over_every_fact_and_profile() {
                 RuntimeFact::CallStackDepth { .. }
                 | RuntimeFact::AbsentArgumentRead { .. }
                 | RuntimeFact::SynthesizedGeometry { .. }
+                | RuntimeFact::ExactFormsOverCompilerLimit { .. }
                 | RuntimeFact::Depth16Codes { biased: false } => Mechanism::None,
             };
             assert_eq!(m, expected, "{stem}: {fact:?}");

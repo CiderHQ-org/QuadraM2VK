@@ -985,11 +985,20 @@ fn driver_keeps_pipeline_cache(device: &Device) -> bool {
 /// the device and its host apart from the runtime, and nothing else: `metal-level-not-macos` off
 /// macOS and `metal-level-below-host` on a macOS release that is no measured level, where the
 /// options name no Metal level; `driver-pipeline-cache-kept` where the driver lets no device turn
-/// its internal pipeline cache off and that cache is not Metal's own (MoltenVK's); and
+/// its internal pipeline cache off and that cache is not Metal's own (MoltenVK's);
 /// `moltenvk-argument-buffers-unread` on a MoltenVK whose argument-buffer state the runtime does
-/// not read.
+/// not read; and `float-tininess-after-rounding` where the device's policy takes native device
+/// maths and its profile's float functions are not Metal's own (MoltenVK's).
 pub fn creation_kinds(device: &Device, level_named: bool) -> BTreeSet<Degradation> {
     let mut kinds = BTreeSet::new();
+    let compile = device.compile_device();
+    if compile.policy().float_maths == metal2vulkan::device::FloatMathsPolicy::Native
+        && !compile
+            .profile()
+            .takes_driver_deviation(metal2vulkan::error::DriverDeviation::MetalFloatFunctions)
+    {
+        kinds.insert(Degradation::FloatTininessAfterRounding);
+    }
     let properties = device.properties();
     // MoltenVK 1.4.1's argument-buffer state read from its limits: on, or off on an Apple GPU.
     let description = &properties.description;

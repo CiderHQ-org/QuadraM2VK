@@ -1734,6 +1734,30 @@ pub(super) fn attachment_uses_but(
     Ok(uses)
 }
 
+/// Whether one of `uses`, what a command's functions bind or reach, reads or writes memory an
+/// attachment of the pass of `layout` renders (its resolve textures included): a use of the
+/// attachment other than as an attachment, inside its render pass instance, which Vulkan leaves
+/// undefined (`texture/attached_reads.rs`). A use that reads a copy or a snapshot names another
+/// resource.
+pub(super) fn shares_attachment<'a>(
+    layout: &PassLayout,
+    uses: impl IntoIterator<Item = &'a Use<ResourceKey>>,
+) -> Result<bool, Error> {
+    let mut used = uses
+        .into_iter()
+        .filter(|used| used.read != Access::NONE || used.write != Access::NONE)
+        .peekable();
+    if used.peek().is_none() {
+        return Ok(false);
+    }
+    let attached = attachment_uses(layout)?;
+    Ok(used.any(|used| {
+        attached
+            .iter()
+            .any(|a| a.key == used.key && a.range.overlaps(&used.range))
+    }))
+}
+
 /// The keys of the buffers whose bytes the pass's attachments lie in (their resolve textures
 /// included): the buffer a texture is over, or the bytes of the heap it, or its buffer, lies in.
 /// A rebind or a detach of one swaps the images of the textures over it (`rebind.rs`,

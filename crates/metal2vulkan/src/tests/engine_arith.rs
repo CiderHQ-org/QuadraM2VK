@@ -29,8 +29,8 @@ use crate::pipeline::artifact::PrecisionNote;
 use crate::pipeline::compile::{plan_bitcode, EntryRef};
 use crate::pipeline::sym::{ResourceKind, ResourceSlot, Stage};
 use crate::pipeline::testing::{
-    compile, exact_maths, link_and_validate, llvm_assemble, meter, profile, without_math_routines,
-    AssembleError,
+    compile, exact_maths, link_and_validate, llvm_assemble, meter, profile, tiny_check_scales,
+    without_math_routines, AssembleError,
 };
 use crate::spirv::interp::{run, Buffer, Config, Resources};
 
@@ -2687,7 +2687,9 @@ fn glsl_fma_results(words: &[u32]) -> Vec<u32> {
 /// left undecorated; every other addition is decorated `NoContraction`, and every other multiply is
 /// the product rounded on its own, decorated `NoContraction`: an `OpFMul` where the profile's
 /// `float` functions are the device's, and `GLSL.std.450 Fma(a, b, -0.0)` where they are Metal's,
-/// whose SPIR-V reaches Metal through SPIRV-Cross. The decoration matters where the addition may be
+/// whose SPIR-V reaches Metal through SPIRV-Cross. Under `FloatMathsPolicy::Exact` the product's
+/// check of a profile whose check is fused (`TinyCheck::Fused`) scales an operand by its own
+/// multiply, `NoContraction` too, counted apart. The decoration matters where the addition may be
 /// fused: Mesa splits a contractable `Fma` into a multiply and an add and folds the `-0.0` away,
 /// and the multiply may then be fused with the `reassoc contract` add of `mul_strict_add_fast`
 /// (NIR's `fuse` option on older Mesa, or a backend such as ACO) unless the multiply is
@@ -2696,6 +2698,7 @@ fn glsl_fma_results(words: &[u32]) -> Vec<u32> {
 /// one fused multiply-add, the multiply no operation of its own, 2^-24 on every profile.
 #[test]
 fn float_ops_without_contract_and_reassoc_are_no_contraction() {
+    use crate::lower::arith::denormal::{tiny_check, TinyCheck};
     let inputs = format!(
         "{}{}",
         of("a", 1.0 + 2f32.powi(-12)),
@@ -2745,6 +2748,19 @@ fn float_ops_without_contract_and_reassoc_are_no_contraction() {
             let (muls, decorated) = results_and_no_contraction(&words, crate::spv::Op::FMul);
             let (adds, _) = results_and_no_contraction(&words, crate::spv::Op::FAdd);
             let fmas = glsl_fma_results(&words);
+            // The product's check, where it is fused, scales an operand by its own multiply.
+            let scales = tiny_check_scales(&words);
+            let fused = tiny_check(&p) == Some(TinyCheck::Fused);
+            assert_eq!(
+                scales.len(),
+                usize::from(fused),
+                "{what}: the check's scaling"
+            );
+            assert!(
+                scales.iter().all(|s| decorated.contains(s)),
+                "{what}: the check's scaling NoContraction: {scales:?}"
+            );
+            let muls: Vec<u32> = muls.into_iter().filter(|m| !scales.contains(m)).collect();
             let add_rewritable = kk.name == "mul_strict_add_fast";
             // No unfused multiply here carries both flags: each is the profile's product with
             // `NoContraction`.
@@ -2844,9 +2860,15 @@ fn arithmetic_the_air_lets_a_compiler_rewrite_notes_fast_math_rewrites() {
 
 /// Growth report: the same chain of 16 float operations on `float`, `half`, and `bfloat`. Each
 /// widened `half` operation adds its rounding; each `bfloat` operation adds its integer rounding.
-/// The measured words are printed (`--nocapture`) and bounded so a growth regression fails.
+/// The narrow chains grow over the `float` chain without the check of a product at `2^-126`
+/// (native float maths, `FloatMathsPolicy::Native`); under exact float maths each of its eight
+/// products adds at most that check (`denormal::tiny_product_words`). The measured words are
+/// printed (`--nocapture`) and bounded so a growth regression fails.
 #[test]
 fn narrow_float_module_growth_is_bounded() {
+    use crate::device::FloatMathsPolicy;
+    use crate::lower::arith::denormal::{tiny_product_words, TinyCheck};
+    use crate::lower::arith::legal::{FloatFmt, Form, Held};
     let chain = |ty: &str| -> String {
         let (enter, leave) = match ty {
             "float" => (
@@ -2882,25 +2904,43 @@ fn narrow_float_module_growth_is_bounded() {
     let Some(bitcode) = assemble("growth", &module(&ks)) else {
         return;
     };
+    let plain = DevicePolicy {
+        float_maths: FloatMathsPolicy::Native,
+        ..exact_maths()
+    };
+    let float = Form {
+        held: Held::Float(FloatFmt::F32),
+        lanes: 1,
+    };
+    let checks = 8 * tiny_product_words(float, TinyCheck::Bits) as usize;
     for stem in PROFILES {
+        let words_on = |policy: DevicePolicy, kk: &Kernel| {
+            let p = profile(stem, policy).expect("profile");
+            let a = compile(&bitcode, kk.name, &p)
+                .unwrap_or_else(|e| panic!("{} on {stem}: {e:?}", kk.name));
+            link_and_validate(&a, &p).unwrap_or_else(|e| panic!("{} on {stem}: L3: {e}", kk.name));
+            a.module.words.len()
+        };
         let p = profile(stem, exact_maths()).expect("profile");
-        let words: Vec<usize> = ks
-            .iter()
-            .map(|kk| {
-                let a = compile(&bitcode, kk.name, &p)
-                    .unwrap_or_else(|e| panic!("{} on {stem}: {e:?}", kk.name));
-                link_and_validate(&a, &p)
-                    .unwrap_or_else(|e| panic!("{} on {stem}: L3: {e}", kk.name));
-                a.module.words.len()
-            })
-            .collect();
+        let checked = words_on(exact_maths(), &ks[0]);
+        let words = [
+            words_on(plain, &ks[0]),
+            words_on(exact_maths(), &ks[1]),
+            words_on(exact_maths(), &ks[2]),
+        ];
         eprintln!(
-            "half and bfloat growth on {stem}: float {} words, half {} (+{}), bfloat {} (+{})",
+            "half and bfloat growth on {stem}: float {} words ({checked} with its products' \
+             checks), half {} ({:+}), bfloat {} ({:+})",
             words[0],
             words[1],
-            words[1] - words[0],
+            words[1] as i64 - words[0] as i64,
             words[2],
-            words[2] - words[0]
+            words[2] as i64 - words[0] as i64
+        );
+        assert!(
+            words[0] <= checked && checked <= words[0] + checks,
+            "{stem}: float {} words, {checked} with its products' checks",
+            words[0]
         );
         // Half: through the device's measured quantize, per multiply and per narrowing
         // conversion a six-instruction rounding with the denormal arithmetic (at most 32 words),

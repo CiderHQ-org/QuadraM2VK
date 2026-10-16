@@ -293,11 +293,14 @@ pub enum ArithStrategy {
     },
     /// `air.dot` on `float` or `half` vectors of form `form`: Metal's fused chain of the
     /// products (`math::metal_dot`), each fused multiply-add `fma`, on one lane; where `flush`, the
-    /// chain's `float` values before the last read as Metal reads a denormal.
+    /// chain's `float` values before the last read as Metal reads a denormal; where `tiny`, the
+    /// first product Metal's where the device's rounding reaches `±2^-126`, by that check
+    /// ([`denormal::tiny_product`]).
     Dot {
         fma: fma::Fma,
         form: Form,
         flush: bool,
+        tiny: Option<denormal::TinyCheck>,
     },
     /// An `fdiv` carrying `arcp` on `float` lanes: Metal's fast division, `x` times its fast
     /// reciprocal of `y` with that reciprocal's two flushes, answered as Metal answers at
@@ -427,13 +430,16 @@ pub enum ArithStrategy {
     /// `air.dot` of chunked vectors of `lanes` lanes of `elem` (`float` or `half`) as Metal's fused
     /// chain over every lane ([`chunk::dot_chain`]), each fused multiply-add `fma`; where `flush`,
     /// the chain's `float` values before the last read as Metal reads a denormal, and the lanes of
-    /// the operands `reads` names and the result, where it says so.
+    /// the operands `reads` names and the result, where it says so; where `tiny`, the first product
+    /// Metal's where the device's rounding reaches `±2^-126`, by that check
+    /// ([`denormal::tiny_product`]).
     ChunkedChain {
         lanes: u16,
         elem: Form,
         fma: fma::Fma,
         flush: bool,
         reads: denormal::Flush,
+        tiny: Option<denormal::TinyCheck>,
     },
     /// A float result with Metal's NaN selected where it is a NaN ([`nan`]): the value of `of`, a
     /// result of `form`, then [`nan::select`] of `answer`. Named as `of`.
@@ -452,6 +458,15 @@ pub enum ArithStrategy {
         form: Form,
         out: Form,
         flush: denormal::Flush,
+    },
+    /// A `float` multiply `of` (lanes of form `form`) whose device product may round up to
+    /// `±2^-126` where Metal flushes the exact product, below it, to the zero of its sign
+    /// ([`denormal::tiny_product`]): `of`'s product, then that zero where `check` finds the exact
+    /// product below `2^-126`.
+    TinyProduct {
+        of: Box<ArithStrategy>,
+        form: Form,
+        check: denormal::TinyCheck,
     },
     /// An operation with a wide integer operand or result on a profile without `shaderInt64`,
     /// on the two words of each value ([`wide`]).
@@ -583,6 +598,7 @@ impl FamilyStrategy for ArithStrategy {
             // Named as its operation: unwrapped above.
             S::Nan { .. } => "arith.nan",
             S::Denormals { .. } => "arith.denormals",
+            S::TinyProduct { .. } => "arith.float.tiny",
         })
     }
 
@@ -668,7 +684,12 @@ impl FamilyStrategy for ArithStrategy {
                         0
                     }
             }
-            S::Dot { fma, form, flush } => math::metal_dot_words(*form, fma.words(), *flush),
+            S::Dot {
+                fma,
+                form,
+                flush,
+                tiny,
+            } => math::metal_dot_words(*form, fma.words(), (*flush, *tiny)),
             S::Convert {
                 kind: ConvertKind::FromFp8(_),
                 ..
@@ -711,7 +732,8 @@ impl FamilyStrategy for ArithStrategy {
                 fma,
                 flush,
                 reads,
-            } => chunk::dot_chain_words(*lanes, *elem, fma.words(), *flush, *reads),
+                tiny,
+            } => chunk::dot_chain_words(*lanes, *elem, fma.words(), (*flush, *tiny), *reads),
             S::Chunked {
                 lanes, parts, wide, ..
             } => {
@@ -742,6 +764,9 @@ impl FamilyStrategy for ArithStrategy {
             S::WordBitcast { from, to } => chunk::bitcast_words(*from, *to),
             S::Wide(w) => w.words(),
             S::Nan { of, answer, form } => of.words().saturating_add(answer.words(*form)),
+            S::TinyProduct { of, form, check } => of
+                .words()
+                .saturating_add(denormal::tiny_product_words(*form, *check)),
             S::Denormals {
                 of,
                 form,
@@ -1731,6 +1756,32 @@ fn with_denormals(
     }
 }
 
+/// `s`, a `float` operation `op` on lanes of form `f`, with Metal's flush of a product whose exact
+/// value lies below `2^-126` where the device's rounding may reach `±2^-126`
+/// ([`ArithStrategy::TinyProduct`]): an `f32` multiply whose result can be that small (`result`,
+/// [`denormal_result`]) on a profile that computes Metal's products
+/// ([`denormal::checks_tiny_products`]). A sum or difference that small is exact, so a rounding
+/// never reaches `2^-126` from below it.
+fn tiny_product(
+    cx: &SelectCx<'_>,
+    s: ArithStrategy,
+    op: AirBin,
+    f: Form,
+    result: bool,
+) -> ArithStrategy {
+    let check = match denormal::tiny_check(cx.profile) {
+        Some(check) if op == AirBin::FMul && result && f.float_fmt() == Some(FloatFmt::F32) => {
+            check
+        }
+        _ => return s,
+    };
+    ArithStrategy::TinyProduct {
+        of: Box::new(s),
+        form: f,
+        check,
+    }
+}
+
 /// The flushes of a fused addition by `OpFmaKHR` on `float` lanes of form `f` of `operands`
 /// (`a`, `b` and `c`, or a chain link's `a` and `b`, [`ArithStrategy::Fused`]): none where the
 /// device reads its denormals as Metal does ([`denormal::device_flushes`]; the module then
@@ -2154,10 +2205,12 @@ fn select_in(
                             contract,
                         };
                         // Metal reads an `f32` denormal operand of `+ - *` as a zero and flushes
-                        // a denormal result; its remainder is not measured.
+                        // a denormal result, a product's before rounding; its remainder is not
+                        // measured.
                         let s = match op {
                             AirBin::FAdd | AirBin::FSub | AirBin::FMul => {
                                 let result = denormal_result(cx, *op, *a, *b);
+                                let s = tiny_product(cx, s, *op, f, result);
                                 with_denormals(
                                     cx,
                                     s,
@@ -2722,6 +2775,8 @@ fn select_float_fn(
             flush: fma.route.device_float()
                 && f.float_fmt() == Some(FloatFmt::F32)
                 && !denormal::device_flushes(cx.profile),
+            // The first product is a multiply: Metal's flush before its rounding.
+            tiny: denormal::tiny_check(cx.profile).filter(|_| f.float_fmt() == Some(FloatFmt::F32)),
         },
         FloatLowering::Fn(op) => ArithStrategy::FloatFn {
             f: op,
@@ -3699,7 +3754,7 @@ fn arity(s: &ArithStrategy) -> Option<usize> {
         | S::Member { .. } => Some(0),
         S::Chunked { parts, .. } => parts.first().and_then(|(_, p)| arity(p)),
         S::Wide(w) => w.arity(),
-        S::Nan { of, .. } | S::Denormals { of, .. } => arity(of),
+        S::Nan { of, .. } | S::Denormals { of, .. } | S::TinyProduct { of, .. } => arity(of),
         _ => None,
     }
 }
@@ -3754,6 +3809,14 @@ fn value(
                 r
             }
         }
+        S::TinyProduct { of, form, check } => {
+            let r = value(cx, fb, of, xs)?;
+            let ab = match xs {
+                [a, b, ..] => [*a, *b],
+                _ => return Err(cx.fail("a product without its operands")),
+            };
+            denormal::tiny_product(fb, *form, ab, r, *check)?
+        }
         S::ChunkedDot {
             lanes,
             elem,
@@ -3765,6 +3828,7 @@ fn value(
             fma: f,
             flush,
             reads,
+            tiny,
         } => {
             let routine = match f.routine() {
                 Some(r) => match cx.decl.families.arith.fmas.get(&r) {
@@ -3776,7 +3840,7 @@ fn value(
             let fma =
                 |fb: &mut FunctionBuilder<'_>, args: &[SValue]| fma::emit(fb, *f, args, routine);
             let xy = [a(cx, 0)?, a(cx, 1)?];
-            chunk::dot_chain(fb, *lanes, *elem, xy, &fma, *flush, *reads)?
+            chunk::dot_chain(fb, *lanes, *elem, xy, &fma, (*flush, *tiny), *reads)?
         }
         S::LaneExtract { src, at, index } => chunk::extract(fb, *src, *at, *index, xs)?,
         S::LaneInsert { dst, at, index } => chunk::insert(fb, *dst, *at, *index, xs)?,
@@ -4109,6 +4173,7 @@ fn value(
             fma: f,
             form,
             flush,
+            tiny,
         } => {
             let routine = match f.routine() {
                 Some(r) => match cx.decl.families.arith.fmas.get(&r) {
@@ -4123,7 +4188,7 @@ fn value(
             };
             let fma =
                 |fb: &mut FunctionBuilder<'_>, args: &[SValue]| fma::emit(fb, *f, args, routine);
-            math::metal_dot(fb, *form, xy, &fma, *flush)?
+            math::metal_dot(fb, *form, xy, &fma, (*flush, *tiny))?
         }
         S::Convert { kind, from, to } => {
             let p = a(cx, 0)?;

@@ -1637,6 +1637,52 @@ pub enum PrecisionNote {
     /// Metal's triangles in Metal's order through the emulation. Recorded on the evaluation stage.
     /// Validation derives no tolerance from it.
     TessellationTriangleOrder,
+    /// The stage's function holds a branch whose arms hold a quad or simdgroup operation that
+    /// answers over the lanes of the branch's block when Metal's backend speculates the arms (a
+    /// quad shuffle, broadcast or vote, a simdgroup shuffle, `simd_is_first`), where no
+    /// measurement says whether Metal speculates them: an arm of an instruction, size or shape no
+    /// probe on Apple's GPU covers. Each branch Metal was measured to speculate is speculated
+    /// (`air::canon::speculate`); this one keeps the AIR's lanes. **Residual:** that operation may
+    /// answer over the lanes that take the arm where Metal's answers over every lane of the
+    /// branch's block (a quad's first lane, a shuffle's source lane, a vote). Nothing else in the
+    /// stage changes. Validation derives no tolerance from it.
+    UnmeasuredGroupSpeculation,
+    /// A sample at an implicit level or with gradients through a constexpr sampler with
+    /// anisotropy, no mip filter (`mip_filter::none`) and different minification and magnification
+    /// filters, on a device that samples through Metal's own sampler (MoltenVK on Apple's GPU,
+    /// `DriverDeviation::MetalSampler`). Vulkan has no sampler without mipmapping: the device's
+    /// sampler takes a nearest mip filter with the level clamp `[0, 0.25]`, which keeps Metal's
+    /// choice of filter, but at `maxAnisotropy` 2 to 16 no clamp reads Metal's `NotMipmapped`
+    /// footprint (`metal::sampler::vk_sampler`). **Residual:** the sample filters another
+    /// anisotropic footprint than Metal's. A sampler state the runtime makes of that shape is
+    /// announced as it is made instead. Validation derives no tolerance from it.
+    NotMipmappedAnisotropicFilter,
+    /// A sample whose level the device's level arithmetic chooses, on a device that samples neither
+    /// through Metal's own sampler nor natively (which records [`PrecisionNote::DeviceSampling`]),
+    /// of a texture other than a cube (whose level [`PrecisionNote::CubeGradientFootprint`]
+    /// records), without comparison (whose level [`PrecisionNote::DeviceDepthComparison`] records
+    /// where the device compares): a fragment function's implicit-level sample, its bias Metal's
+    /// own reading `B` within the device's `maxSamplerLodBias` (the `Bias` operand), a sample with
+    /// explicit gradients, a fragment function's LOD query, and a sample at an explicit level (or a
+    /// kernel's bias) that Metal's level rule is not handed on (`lower::sampler::level`: an integer
+    /// texture's, and a constexpr sampler's with a level bias of its own or a clamp the rule does
+    /// not take), but a constant level the device reads as Metal does (a whole level a constexpr
+    /// sampler without a level bias of its own clamps to a whole level, a float texture's whole
+    /// level through a runtime sampler, or one a constexpr sampler's snap hands on unchanged). The
+    /// device takes the level of detail by Vulkan's rules, whose scale factor may be approximated,
+    /// and a nearest mip filter reads its level `ceil(λ + 1/2) - 1`, where Metal reads the level
+    /// rounded to `half` with its fraction truncated onto sixty-fourths (measured for explicit
+    /// levels); Metal's level of detail from derivatives is not measured. Recorded for an LOD
+    /// query, and for a sample through a sampler that chooses a level or a filter by it (a mip
+    /// filter, or minification and magnification filters that differ) where no sample-filter note
+    /// records the sample: through a constexpr sampler with nearest filters and a nearest mip
+    /// filter, through a runtime sampler where its word states those, and through any such sampler
+    /// of an integer texture (an argument buffer's sampler, whose state the function does not know,
+    /// always). A bias past the limit and hoisted derivatives record
+    /// [`PrecisionNote::GradFromBias`] instead. **Residual:** the sample may read another level, or
+    /// another filter, than Metal's near a boundary, and the query answers the device's level.
+    /// Validation derives no tolerance from it.
+    DeviceSampleLevel,
 }
 
 /// The math mode of an entry's module, which decides, on a device whose `float` functions are

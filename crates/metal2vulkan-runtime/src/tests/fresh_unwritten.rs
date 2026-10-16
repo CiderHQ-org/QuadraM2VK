@@ -276,3 +276,46 @@ fn the_record_holds_every_unwritten_texel() {
     let white = texels(0, 0..1, [1, 0, 0], [1, 1, 1]);
     assert!(fresh.observed_within(key, DEPTH, &white).is_some());
 }
+
+/// A new render target's signed NaN depth pattern (`FreshKind::SignedDepth`) is observed by no
+/// command's read, only by a pass that loads an unwritten texel of its depth, once; a load of the
+/// written texels alone does not observe it. A pattern zeroed is not a signed depth's: a pass's
+/// load of it reports nothing here, and a command's read announces it as before.
+#[test]
+fn a_signed_depth_pattern_is_observed_by_a_loading_pass_alone() {
+    let fresh = FreshUnwritten::default();
+    let key = ResourceKey::new();
+    let signed = Notice {
+        layout: TextureLayout {
+            texture_type: TextureType::Type2D,
+            samples: 1,
+            ..notice().layout
+        },
+        kind: FreshKind::SignedDepth,
+        ..notice()
+    };
+    fresh.note(key, 1, 1, DEPTH, [16, 16, 1], signed);
+    assert!(
+        fresh.observed(key, DEPTH, 0..1, 0..1).is_none(),
+        "a command's read"
+    );
+    let all = whole(0, 0..1);
+    assert!(
+        fresh.observed_within(key, DEPTH, &all).is_none(),
+        "a command's read of a box"
+    );
+    assert!(fresh.any(), "still noted");
+    let left = texels(0, 0..1, [0; 3], [8, 16, 1]);
+    fresh.written(key, DEPTH, &left);
+    assert!(!fresh.loaded_signed_depth(key, &left), "the written half");
+    assert!(fresh.loaded_signed_depth(key, &all), "an unwritten texel");
+    assert!(!fresh.any(), "observed: no longer noted");
+    assert!(!fresh.loaded_signed_depth(key, &all), "once");
+    let zeroed = ResourceKey::new();
+    fresh.note(zeroed, 1, 1, DEPTH, [16, 16, 1], notice());
+    assert!(!fresh.loaded_signed_depth(zeroed, &all), "a zeroed pattern");
+    assert!(
+        fresh.observed(zeroed, DEPTH, 0..1, 0..1).is_some(),
+        "a zeroed pattern's read"
+    );
+}

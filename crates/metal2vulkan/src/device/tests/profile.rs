@@ -1184,6 +1184,41 @@ fn uniform_reads_outpace_storage_reads_on_anv_and_narrow_lavapipe() {
     assert!(!carries(&desc));
 }
 
+/// `DriverWorkaround::RegisterAllocatorOverflowsLargeModules` is keyed on ANV, whatever its GPU
+/// and release; every committed ANV profile carries it and gives a 400,000-word module bound, and
+/// no other profile carries it or bounds a module. The UHD 770's description under RADV or
+/// NVIDIA's driver loses it.
+#[test]
+fn register_allocator_overflow_is_keyed_on_anv() {
+    use crate::device::profile::{DriverWorkaround, REGISTER_ALLOCATOR_MODULE_WORD_BOUND};
+    let fact = DriverWorkaround::RegisterAllocatorOverflowsLargeModules;
+    let profile_of = |desc: &DeviceDescription| {
+        Device::new(desc.clone(), DevicePolicy::default())
+            .unwrap()
+            .profile()
+            .clone()
+    };
+    for (stem, text) in committed_profiles() {
+        let desc = DeviceDescription::from_khronos_json(&text, None).unwrap();
+        let anv = desc.driver_id == Some(vk::DriverId::INTEL_OPEN_SOURCE_MESA);
+        let p = profile_of(&desc);
+        assert_eq!(p.workarounds().contains(&fact), anv, "{stem}");
+        assert_eq!(
+            p.module_word_bound(),
+            anv.then_some(REGISTER_ALLOCATOR_MODULE_WORD_BOUND),
+            "{stem}"
+        );
+    }
+    let mut desc = profile("intel-irisxe-rplp-anv");
+    assert!(profile_of(&desc).workarounds().contains(&fact));
+    for other in [vk::DriverId::MESA_RADV, vk::DriverId::NVIDIA_PROPRIETARY] {
+        desc.driver_id = Some(other);
+        let p = profile_of(&desc);
+        assert!(!p.workarounds().contains(&fact), "{other:?}");
+        assert_eq!(p.module_word_bound(), None, "{other:?}");
+    }
+}
+
 /// The Function storage a thread holds is the measured value of the device's identity, and on every
 /// committed profile of a device not measured the assumed floor, 16 KiB. It is keyed on the driver,
 /// the vendor, and the device ID together: the Radeon 780M's description under the RX 7900 XTX's

@@ -184,7 +184,8 @@ fn a_release_waits_for_the_batch_in_flight_where_the_device_parks_freed_memory()
         after.host_deallocators_delayed - before.host_deallocators_delayed,
         runs.count.load(Ordering::SeqCst)
     );
-    match pending && command_buffer.status() != CommandBufferStatus::Completed {
+    let waited = pending && command_buffer.status() != CommandBufferStatus::Completed;
+    match waited {
         true => {
             assert_eq!(after.freed_memory_parked - before.freed_memory_parked, 1);
             assert_eq!(after.freed_memory_waiting, 1);
@@ -214,11 +215,14 @@ fn a_release_waits_for_the_batch_in_flight_where_the_device_parks_freed_memory()
         device.work_counts().freed_memory_waiting,
         runs.count.load(Ordering::SeqCst)
     );
-    assert_ne!(
-        *runs.thread.lock().unwrap(),
-        Some(std::thread::current().id()),
-        "the deallocator ran on the program's thread after its batch completed"
-    );
+    // A release after its batch completed runs the deallocator at once, on the program's thread.
+    if waited {
+        assert_ne!(
+            *runs.thread.lock().unwrap(),
+            Some(std::thread::current().id()),
+            "the deallocator ran on the program's thread after its batch completed"
+        );
+    }
 }
 
 /// Where the device parks no freed memory, the same release goes at once, on the releasing

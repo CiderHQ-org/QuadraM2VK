@@ -260,5 +260,8 @@ pub fn mechanism(fact: &RuntimeFact, profile: &DeviceProfile) -> Mechanism {
         // The pipeline's own stages, which every draw of its class runs; the consumer announces
         // them.
         RuntimeFact::SynthesizedGeometry { .. } => Mechanism::None,
+        // The pipeline's exact forms were dropped to fit the device's compiler word bound; the
+        // consumer announces it, and the reduced stages carry their own notes.
+        RuntimeFact::ExactFormsOverCompilerLimit { .. } => Mechanism::None,
     }
 }

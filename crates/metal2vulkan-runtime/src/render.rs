@@ -7498,6 +7498,12 @@ impl RenderCommandEncoder {
             index.map(DrawSource::metal),
             indirect.map(DrawSource::metal),
         )?;
+        // A use of an attachment's memory other than as the attachment, inside its instance,
+        // which no copy serves (`texture/attached_reads.rs`): a draw that reads through snapshots
+        // reads no attachment otherwise (`snapshot_holds`).
+        if snapshot.is_none() {
+            device.degrade_attachment_reads(call, layout, uses.iter())?;
+        }
         // In a pass of several color groups, what the draw reads of what another group writes
         // (`render/color_groups.rs`): checked at its first recording.
         if capture.is_none() && !self.rerouting {
@@ -8563,7 +8569,7 @@ impl RenderCommandEncoder {
             let formats = |slot| tested.iter().find(|(s, _)| *s == slot)?.1;
             let compiled = variant.pipeline();
             objects.announce_bound(
-                (&compiled.stages, Some(&compiled.requirements)),
+                (&compiled.stages, Some(compiled)),
                 [(specialization, Some(&formats as BoundFormats<'_>))],
             );
         }

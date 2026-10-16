@@ -48,7 +48,9 @@
 //! that hold 22 to 25 instructions with one of a kind the budget was not measured with
 //! ([`OFF_EDGE`]), or of one of the two diamond shapes no probe covers (a small arm without a call
 //! on the false edge, or with one on the true edge, past 25 together): those keep the AIR's lanes,
-//! a known gap.
+//! where Metal may speculate them. An entry holding such a branch whose arms hold a group
+//! operation of the speculated families records it ([`super::Entry::unmeasured_speculation`]), and
+//! its pipeline the precision note of an unmeasured speculation.
 
 use std::collections::BTreeMap;
 
@@ -832,14 +834,19 @@ fn analysed(
 
 /// Speculate each outermost branch of `body` that Metal's backend speculates and whose arms hold
 /// a group operation that answers over the branch's block's lanes there (the module docs), in the
-/// entry of parameter types `param_tys` and parameters `params`.
+/// entry of parameter types `param_tys` and parameters `params`. Also whether a branch whose arms
+/// hold such an operation is one no measurement decides ([`Decision::Unknown`]): it keeps the AIR's
+/// lanes, where Metal's backend may speculate it.
 pub(super) fn expand(
     body: Body,
     (types, consts): (&TypeTable, &ConstTable),
     (param_tys, params): (&[TypeId], &[Param]),
     m: &mut Meter,
-) -> Result<Body, Error> {
+) -> Result<(Body, bool), Error> {
     let found = analysed(&body, (types, consts), (param_tys, params), m)?;
+    let unmeasured = found
+        .values()
+        .any(|f| f.decision == Decision::Unknown && f.content.group);
     let speculated: Vec<&Fold> = found
         .values()
         .filter(|f| f.decision == Decision::Speculated && f.content.group)
@@ -855,7 +862,7 @@ pub(super) fn expand(
         })
         .collect();
     if outermost.is_empty() {
-        return Ok(body);
+        return Ok((body, unmeasured));
     }
     let value_ty = |v: Value| value_ty(&body, consts, param_tys, v);
     let next = scoped(m, |m, held| {
@@ -866,5 +873,5 @@ pub(super) fn expand(
         apply(&body, &edit, &|c| c, m)
     })?;
     body.release(m);
-    Ok(next)
+    Ok((next, unmeasured))
 }

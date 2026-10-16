@@ -417,6 +417,7 @@ fn select_dot(
                 fma,
                 flush,
                 reads,
+                tiny: denormal::tiny_check(cx.profile).filter(|_| single),
             };
             return Ok(super::with_nan(cx, at, s, answer, elem));
         }
@@ -478,7 +479,7 @@ pub fn dot_chain(
     elem: Form,
     [a, b]: [SValue; 2],
     fma: math::FmaOf<'_>,
-    flush: bool,
+    (flush, tiny): (bool, Option<denormal::TinyCheck>),
     reads: denormal::Flush,
 ) -> BResult<SValue> {
     let chunks = chunk_lanes(u32::from(lanes));
@@ -498,7 +499,7 @@ pub fn dot_chain(
         }
         Ok((xy[0], xy[1]))
     };
-    let sum = math::metal_chain(fb, elem, u32::from(lanes), &lane, fma, flush)?;
+    let sum = math::metal_chain(fb, elem, u32::from(lanes), &lane, fma, (flush, tiny))?;
     if reads.result {
         denormal::flush(fb, elem, sum)
     } else {
@@ -514,7 +515,7 @@ pub fn dot_chain_words(
     lanes: u16,
     elem: Form,
     fma_words: u32,
-    flush: bool,
+    (flush, tiny): (bool, Option<denormal::TinyCheck>),
     reads: denormal::Flush,
 ) -> u32 {
     let lanes = u32::from(lanes);
@@ -522,9 +523,10 @@ pub fn dot_chain_words(
     let read = reads.operands.count_ones().saturating_mul(flush_words);
     let step = fma_words + if flush { flush_words } else { 0 };
     let result = if reads.result { flush_words } else { 0 };
+    let check = tiny.map_or(0, |check| denormal::tiny_product_words(elem, check));
     (12 + read)
         .saturating_mul(lanes)
-        .saturating_add(5 + narrow::round_words(elem))
+        .saturating_add(5 + narrow::round_words(elem) + check)
         .saturating_add(lanes.saturating_sub(1).saturating_mul(step))
         .saturating_add(result)
 }

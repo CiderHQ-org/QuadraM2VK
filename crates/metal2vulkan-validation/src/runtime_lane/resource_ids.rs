@@ -37,9 +37,9 @@ use metal2vulkan::metal::{
 use metal2vulkan_runtime::{
     BlitOption, Buffer, BufferContents, BufferDescriptor, CommandBuffer, CommandBufferError,
     CommandBufferStatus, CommandQueue, ComputePipelineState, Deallocator, DebugMessage,
-    Degradation, Device, DeviceOptions, Error, EventRef, ExecutedPipeline, Heap, HeapDescriptor,
-    HeapType, HostMemory, IdPlacement, IndirectCommandBufferDescriptor, Invalid, IoSurfacePlane,
-    KeepAlive, MemoryKind, MessageSeverity, MessageSink, Origin, Problem, Region,
+    Degradation, Device, DeviceOptions, Error, EventRef, ExecutedPipeline, Fence, Heap,
+    HeapDescriptor, HeapType, HostMemory, IdPlacement, IndirectCommandBufferDescriptor, Invalid,
+    IoSurfacePlane, KeepAlive, MemoryKind, MessageSeverity, MessageSink, Origin, Problem, Region,
     RenderPassDescriptor, ResourceId, ResourceIdKind, ResourceOptions, SamplerState,
     SamplerStateOptions, SharedEvent, Size, Texture, TextureDescriptor, TextureSwizzleChannels,
 };
@@ -1368,13 +1368,15 @@ impl Sampling {
 
     /// One compute encoder in `command_buffer` dispatching the case with `named`'s ID in its
     /// argument buffer, binding and making resident the textures of `reaching` and the heap
-    /// `heap` where given: the dispatch's buffers, its output among them.
+    /// `heap` where given, after waiting for the fence `after` where given: the dispatch's
+    /// buffers, its output among them.
     fn encode_in(
         &self,
         device: &Device,
         command_buffer: &CommandBuffer,
         named: &Texture,
         (reaching, heap): (CaseResources, Option<&Heap>),
+        after: Option<&Fence>,
     ) -> BTreeMap<u32, Buffer> {
         let naming = CaseResources {
             argument_textures: BTreeMap::from([(self.key, named.clone())]),
@@ -1383,6 +1385,9 @@ impl Sampling {
         };
         let buffers = bound_buffers(device, &self.case.compute, &naming).unwrap();
         let mut encoder = command_buffer.compute_command_encoder().unwrap();
+        if let Some(fence) = after {
+            encoder.wait_for_fence(fence).unwrap();
+        }
         if let Some(heap) = heap {
             encoder.use_heap(heap).unwrap();
         }
@@ -1478,13 +1483,13 @@ fn a_shadowed_texture_a_command_buffer_made_resident_is_read_as_its_bytes_stand(
             argument_textures: BTreeMap::from([(sampling.key, texture.clone())]),
             ..CaseResources::default()
         };
-        let a = sampling.encode_in(device, &command_buffer, &texture, (resident, None));
+        let a = sampling.encode_in(device, &command_buffer, &texture, (resident, None), None);
         let mut blit = command_buffer.blit_command_encoder().unwrap();
         blit.copy_from_buffer_to_buffer(&source, 0, &buffer, 0, buffer.length())
             .unwrap();
         blit.end_encoding().unwrap();
         let nothing = (CaseResources::default(), None);
-        let c = sampling.encode_in(device, &command_buffer, &texture, nothing);
+        let c = sampling.encode_in(device, &command_buffer, &texture, nothing, None);
         command_buffer.commit().unwrap();
         command_buffer.wait_until_completed_for(WAIT).unwrap();
         assert_eq!(command_buffer.status(), CommandBufferStatus::Completed);
@@ -1509,8 +1514,12 @@ fn a_shadowed_texture_a_command_buffer_made_resident_is_read_as_its_bytes_stand(
 /// among them: such a texture is read through its ID, by an encoder that uses only the heap, as
 /// its bytes stand, after the CPU wrote them and after a blit of the command buffer wrote them.
 /// Metal's answer, the M4 probe XRB-shd1-m4 `heap_use`: each read the bytes as they stood (with no
-/// `useHeap:`, `heap_none`, the first two read zeros). The texture is a shadow ([`SHADOW_ROW`]);
-/// the line `SHADOW-READ` reports what each read.
+/// `useHeap:`, `heap_none`, the first two read zeros). The heap's resources are untracked (a
+/// heap's default), so the reading encoder waits for a fence the blit updates, as a Metal program
+/// must: on the M3 Max under macOS 27.0.1 (probe `heap_order`) a compute encoder read a texture
+/// over such a buffer before the blit just before it had written it, in every run without the
+/// fence and in none with it. The texture is a shadow ([`SHADOW_ROW`]); the line `SHADOW-READ`
+/// reports what each read.
 #[test]
 fn a_shadowed_texture_over_a_heap_s_buffer_is_read_through_use_heap_as_its_bytes_stand() {
     on_device(|device, messages| {
@@ -1531,20 +1540,23 @@ fn a_shadowed_texture_over_a_heap_s_buffer_is_read_through_use_heap_as_its_bytes
         write_at_start(&buffer, &shadow_rows(&first));
         let texture = sampling.over(&buffer);
         let source = buffer_with(device, &shadow_rows(&third)).unwrap();
+        let fence = device.new_fence();
         let mut got = Vec::new();
         for step in 0..3 {
             if step == 1 {
                 write_at_start(&buffer, &shadow_rows(&second));
             }
             let command_buffer = sampling.queue.command_buffer().unwrap();
-            if step == 2 {
+            let after = (step == 2).then(|| {
                 let mut blit = command_buffer.blit_command_encoder().unwrap();
                 blit.copy_from_buffer_to_buffer(&source, 0, &buffer, 0, length)
                     .unwrap();
+                blit.update_fence(&fence).unwrap();
                 blit.end_encoding().unwrap();
-            }
+                &fence
+            });
             let using_heap = (CaseResources::default(), Some(&heap));
-            let buffers = sampling.encode_in(device, &command_buffer, &texture, using_heap);
+            let buffers = sampling.encode_in(device, &command_buffer, &texture, using_heap, after);
             command_buffer.commit().unwrap();
             command_buffer.wait_until_completed_for(WAIT).unwrap();
             assert_eq!(command_buffer.status(), CommandBufferStatus::Completed);
@@ -1567,7 +1579,7 @@ fn a_shadowed_texture_over_a_heap_s_buffer_is_read_through_use_heap_as_its_bytes
         );
         assert_eq!(got[0], wants[0], "CB1");
         assert_eq!(got[1], wants[1], "CB2, after a CPU write");
-        assert_eq!(got[2], wants[2], "CB3, after a blit in it");
+        assert_eq!(got[2], wants[2], "CB3, after a blit in it and its fence");
         drop((texture, buffer, heap));
     });
 }

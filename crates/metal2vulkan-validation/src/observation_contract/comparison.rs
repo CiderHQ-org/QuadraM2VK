@@ -151,6 +151,13 @@ impl UlpTable {
 /// - `TessellationTriangleOrder`: unbounded: the device's tessellator's triangle order, first
 ///   corners and ring triangulation change flat varyings, interpolated values and blend order by
 ///   whole primitives, not lanes.
+/// - `UnmeasuredGroupSpeculation`: unbounded: a quad or simdgroup operation answering over other
+///   lanes reads another lane's value, which differs from Metal's by any amount.
+/// - `NotMipmappedAnisotropicFilter`: unbounded: another anisotropic footprint reads other texels,
+///   which differ from Metal's by up to the texture's range.
+/// - `DeviceSampleLevel`: unbounded: another level or filter near a boundary reads other texels,
+///   which differ from Metal's by up to the texture's range, and an LOD query answers the device's
+///   level.
 /// - `Fp8Value`: unbounded until a Metal device that implements 8-bit float conversions reads
 ///   them: Metal on Apple M3 returns the carrier byte's integer extension, which differs from the
 ///   format's value by any amount.
@@ -284,6 +291,9 @@ pub fn allowance(note: PrecisionNote) -> Allowance {
         | N::TessellationFactorScale
         | N::TessellationFactorInstance
         | N::TessellationTriangleOrder
+        | N::UnmeasuredGroupSpeculation
+        | N::NotMipmappedAnisotropicFilter
+        | N::DeviceSampleLevel
         | N::Fp8Value
         | N::MultisamplePosition
         | N::RasterizationRateMap

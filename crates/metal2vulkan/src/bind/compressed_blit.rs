@@ -8,8 +8,8 @@
 //! moves its texels through the compression, which keeps only the bits a format's texel holds.
 //! For three families the bytes the blit writes differ from the bytes it read (EVs FXR-fxr3-m4,
 //! FXR-fxr4-m4 and FXR-fxr5-m4, an Apple M4 under macOS 27.0.1, plain: random bytes, every
-//! direction, every level, slice and texture type, heap textures and views; each rule below
-//! matched every texel):
+//! direction, every level, slice and texture type, heap textures and views; and EV
+//! M27-cblit1-m3, an Apple M3 Max under 27.0.1, alike; each rule below matched every texel):
 //!
 //! - `BGRA10_XR` and `BGRA10_XR_sRGB` ([`CompressedBlit::ExtendedRangeFields`]): each 16-bit
 //!   field's low six bits cleared, and the alpha field's code clamped to `[384, 894]`;

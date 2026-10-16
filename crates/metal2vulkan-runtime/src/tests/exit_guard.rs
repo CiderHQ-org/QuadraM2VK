@@ -1,7 +1,7 @@
 //! `exit_guard.rs`: sections end before the hook returns, none starts after it closed, the hook
-//! never waits for the exiting thread's own sections, its wait is bounded, and it acts only in
-//! the process it was registered in. Each test uses a guard of its own; only the fork test uses
-//! the process's, which nothing here closes.
+//! never waits for the exiting thread's own sections, its wait is bounded, only its first run
+//! waits for a CPU device's work, and it acts only in the process it was registered in. Each test
+//! uses a guard of its own; only the fork test uses the process's, which nothing here closes.
 
 use crate::exit_guard::{self, hook, Busy, Call, Guard, InProcess, InProcessDevices};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -142,6 +142,42 @@ fn the_hook_waits_past_its_bound_for_a_making_in_progress() {
     let busy = exit_guard::enter().expect("open");
     assert_eq!(exit_guard::driver_making(exit_guard::own), before + 2);
     drop(busy);
+}
+
+/// A making that ends as the hook looks, past its bound, is seen ended: whether it ends between
+/// the hook's read of the sections and its read of the makings, or the hook reads both between
+/// the section's end and its making's. The hook gave up on such a making once (`close` returned
+/// false as the section ended, on an RX 7900 XTX under the runtime lane's stress), and then left
+/// the work of the process's own devices undrained. The steps run between the two counts
+/// (`exit_guard::BETWEEN_COUNTS`), on this thread: no timing.
+#[test]
+fn the_hook_sees_a_making_that_ends_as_it_looks_ended() {
+    // Between the hook's two reads: one section in progress, then no making.
+    let guard = guard();
+    let making = guard.enter_making().expect("open");
+    exit_guard::BETWEEN_COUNTS
+        .with(|step| *step.borrow_mut() = Some(Box::new(move || drop(making))));
+    assert!(
+        guard.close(0, Duration::ZERO),
+        "the hook gave up on a making that ended between its reads"
+    );
+
+    // Both reads between the section's end and its making's.
+    let guard = self::guard();
+    let making = guard.enter_making().expect("open");
+    let seen = std::rc::Rc::new(std::cell::Cell::new(None));
+    let looked = std::rc::Rc::clone(&seen);
+    exit_guard::BETWEEN_COUNTS.with(|step| {
+        *step.borrow_mut() = Some(Box::new(move || {
+            looked.set(Some(guard.close(0, Duration::ZERO)));
+        }))
+    });
+    drop(making);
+    assert_eq!(
+        seen.get(),
+        Some(true),
+        "the hook gave up on a making whose section had ended"
+    );
 }
 
 /// An exit from inside a section (a message sink that calls `exit`) does not wait for the exiting
@@ -366,10 +402,73 @@ fn the_hook_s_wait_for_a_cpu_device_s_work_shares_its_bound() {
     let (_never, done) = mpsc::channel();
     let parents = Running::new(done);
     add(&devices, &parents);
-    let start = Instant::now();
-    assert!(devices.drain(pid + 1, Instant::now() + Duration::from_secs(10)));
-    assert!(start.elapsed() < Duration::from_secs(1));
+    assert!(devices.take(pid + 1).is_empty());
     assert!(parents.asked().is_none());
+}
+
+/// A device whose queues run in this process, which counts the hook's waits for its work.
+struct Counted(AtomicUsize);
+
+impl InProcess for Counted {
+    fn drain(&self, _deadline: Instant) -> bool {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        true
+    }
+}
+
+/// A [`Counted`] device of this process, added to `devices`.
+fn counted(devices: &InProcessDevices) -> Arc<Counted> {
+    let device = Arc::new(Counted(AtomicUsize::new(0)));
+    let weak: Weak<dyn InProcess> = Arc::<Counted>::downgrade(&device);
+    devices.add(weak);
+    device
+}
+
+/// The hook runs once per registration, and each run after the first follows the destructors
+/// registered after its own registration: the first run alone waits for a CPU device's work (a
+/// Vulkan call), and a later one finds no device.
+#[test]
+fn only_the_hook_s_first_run_waits_for_a_cpu_device_s_work() {
+    let pid = std::process::id();
+    let guard = guard();
+    let devices = none_in_process();
+    let device = counted(&devices);
+    for _ in 0..3 {
+        assert_eq!(
+            hook(guard, &devices, pid, pid, 0, Duration::from_secs(10)),
+            Some(true)
+        );
+    }
+    assert_eq!(device.0.load(Ordering::SeqCst), 1);
+}
+
+/// A first run whose wait for the sections outlasts its bound waits for no CPU device's work and
+/// still takes the devices: a later run, once the section ended, finds none.
+#[test]
+fn a_hook_run_whose_sections_outlast_its_bound_still_takes_the_devices() {
+    let pid = std::process::id();
+    let guard = guard();
+    let devices = none_in_process();
+    let device = counted(&devices);
+    let (entered, end_section) = (mpsc::channel(), mpsc::channel::<()>());
+    let section = std::thread::spawn(move || {
+        let busy = guard.enter().expect("open");
+        entered.0.send(()).unwrap();
+        let _ = end_section.1.recv();
+        drop(busy);
+    });
+    entered.1.recv().unwrap();
+    assert_eq!(
+        hook(guard, &devices, pid, pid, 0, Duration::from_millis(100)),
+        Some(false)
+    );
+    end_section.0.send(()).unwrap();
+    section.join().unwrap();
+    assert_eq!(
+        hook(guard, &devices, pid, pid, 0, Duration::from_secs(10)),
+        Some(true)
+    );
+    assert_eq!(device.0.load(Ordering::SeqCst), 0);
 }
 
 /// A child forked (without exec) from a process whose hook is registered, while another of the
@@ -515,6 +614,63 @@ fn a_section_at_a_power_of_two_registers_the_hook_again() {
         }),
         42,
         "the destructor ran before the hook"
+    );
+}
+
+/// The exit of a child that registers an end (which ends it with 42), its hook (its first
+/// device), a destructor (a layer's static first made by a call on the program's thread, which
+/// registers no hook), and its hook again (a section after an entry point's first call), with a
+/// device whose queues run in it: the destructor runs between the hook's two runs, and the
+/// device's wait ends the child with 43 when it comes after the destructor. Seen before the hook's
+/// later runs found no device: lavapipe processes under the validation layer ended with `SIGABRT`
+/// inside the layer's `vkWaitSemaphores`, in the run of the hook's first registration.
+#[cfg(unix)]
+#[test]
+fn no_wait_for_a_cpu_device_s_work_follows_a_destructor_between_the_hook_s_runs() {
+    static DESTROYED: AtomicBool = AtomicBool::new(false);
+    extern "C" fn end() {
+        // SAFETY: ends the child at once, from its exit handlers.
+        unsafe { libc::_exit(42) };
+    }
+    extern "C" fn destructor() {
+        DESTROYED.store(true, Ordering::SeqCst);
+    }
+    /// A device whose wait ends the child with 43 once the destructor ran.
+    struct Checked;
+    impl InProcess for Checked {
+        fn drain(&self, _deadline: Instant) -> bool {
+            if DESTROYED.load(Ordering::SeqCst) {
+                // SAFETY: ends the child at once, from its exit handlers.
+                unsafe { libc::_exit(43) };
+            }
+            true
+        }
+    }
+    // SAFETY: the child registers exit handlers and a device (atomics, a lock and the C
+    // library's `atexit`), and exits.
+    let child = unsafe { libc::fork() };
+    if child == 0 {
+        // SAFETY: `end` is a function with no arguments that never unwinds.
+        unsafe { libc::atexit(end) };
+        let device: Arc<dyn InProcess> = Arc::new(Checked);
+        exit_guard::runs_in_process(Arc::downgrade(&device));
+        exit_guard::register();
+        // SAFETY: `destructor` is a function with no arguments that never unwinds.
+        unsafe { libc::atexit(destructor) };
+        exit_guard::register();
+        // SAFETY: as above; `device` stays live, since `exit` drops nothing of this frame.
+        unsafe { libc::exit(0) };
+    }
+    assert!(child > 0, "fork");
+    let mut status = 0;
+    // SAFETY: `child` is this process's child.
+    let reaped = unsafe { libc::waitpid(child, &mut status, 0) };
+    assert_eq!(reaped, child);
+    assert!(libc::WIFEXITED(status), "the child did not exit: {status}");
+    assert_eq!(
+        libc::WEXITSTATUS(status),
+        42,
+        "a wait for the device's work followed the destructor"
     );
 }
 

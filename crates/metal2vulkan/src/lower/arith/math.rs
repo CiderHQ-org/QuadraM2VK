@@ -2927,13 +2927,15 @@ pub(super) fn metal_mix(
 /// lanes each, in both modes, every `float` and `half` answer of the M3 Max and the M4 is this
 /// chain's (a `half` keeps its denormals). Where `flush`, each of the chain's `float` values before
 /// the last is read as Metal reads a denormal ([`denormal::flush`]), for a device whose multiply
-/// and `OpFmaKHR` may keep one; the operands and the result are the caller's to flush.
+/// and `OpFmaKHR` may keep one; the operands and the result are the caller's to flush. Where
+/// `tiny` (`float` lanes), the first product is Metal's where the device's rounding of a product
+/// below `2^-126` reaches `±2^-126`, by that check ([`denormal::tiny_product`]).
 pub(super) fn metal_dot(
     fb: &mut FunctionBuilder<'_>,
     f: Form,
     [x, y]: [Value; 2],
     fma: FmaOf<'_>,
-    flush: bool,
+    (flush, tiny): (bool, Option<denormal::TinyCheck>),
 ) -> BResult<Value> {
     let lane = |fb: &mut FunctionBuilder<'_>, i: u32| -> BResult<(Value, Value)> {
         if f.lanes == 1 {
@@ -2945,21 +2947,28 @@ pub(super) fn metal_dot(
             ))
         }
     };
-    metal_chain(fb, f.scalar_form(), u32::from(f.lanes), &lane, fma, flush)
+    metal_chain(
+        fb,
+        f.scalar_form(),
+        u32::from(f.lanes),
+        &lane,
+        fma,
+        (flush, tiny),
+    )
 }
 
 /// Lane `i`'s two operands of a dot product.
 pub(super) type LaneOf<'a> = &'a dyn Fn(&mut FunctionBuilder<'_>, u32) -> BResult<(Value, Value)>;
 
 /// [`metal_dot`]'s fused chain over `lanes` lanes of scalar form `s`, lane `i`'s operands by
-/// `lane`, each taken as the chain reaches it.
+/// `lane`, each taken as the chain reaches it; its first product Metal's at `2^-126` where `tiny`.
 pub(super) fn metal_chain(
     fb: &mut FunctionBuilder<'_>,
     s: Form,
     lanes: u32,
     lane: LaneOf<'_>,
     fma: FmaOf<'_>,
-    flush: bool,
+    (flush, tiny): (bool, Option<denormal::TinyCheck>),
 ) -> BResult<Value> {
     let step = |fb: &mut FunctionBuilder<'_>, v: Value| -> BResult<Value> {
         if flush {
@@ -2971,6 +2980,10 @@ pub(super) fn metal_chain(
     let (x0, y0) = lane(fb, 0)?;
     // A `half` product is exact in its `float` container, and rounded once.
     let p = fb.binary_no_contraction(BinOp::FMul, x0, y0)?;
+    let p = match tiny {
+        Some(check) => denormal::tiny_product(fb, s, [x0, y0], p, check)?,
+        None => p,
+    };
     let mut sum = narrow::round(fb, s, p)?;
     for i in 1..lanes {
         sum = step(fb, sum)?;
@@ -2981,13 +2994,18 @@ pub(super) fn metal_chain(
 }
 
 /// An upper estimate of the SPIR-V words of [`metal_dot`] on form `f` whose fused multiply-adds
-/// take `fma_words` each: two extractions per lane, the product and its rounding, and per later
-/// lane the fused multiply-add and, where `flush`, the flush before it.
-pub(super) fn metal_dot_words(f: Form, fma_words: u32, flush: bool) -> u32 {
+/// take `fma_words` each: two extractions per lane, the product, its check where `tiny` and its
+/// rounding, and per later lane the fused multiply-add and, where `flush`, the flush before it.
+pub(super) fn metal_dot_words(
+    f: Form,
+    fma_words: u32,
+    (flush, tiny): (bool, Option<denormal::TinyCheck>),
+) -> u32 {
     let s = f.scalar_form();
     let lanes = u32::from(f.lanes);
     let step = fma_words + if flush { denormal::flush_words(s) } else { 0 };
-    (10 * lanes + 5 + narrow::round_words(s)).saturating_add(lanes.saturating_sub(1) * step)
+    let check = tiny.map_or(0, |check| denormal::tiny_product_words(s, check));
+    (10 * lanes + 5 + narrow::round_words(s) + check).saturating_add(lanes.saturating_sub(1) * step)
 }
 
 /// Which of Metal's pi-scaled functions [`pi_scaled`] computes.

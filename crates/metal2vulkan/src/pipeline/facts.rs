@@ -749,6 +749,24 @@ pub enum RuntimeFact {
         static_bytes: u32,
         payload: Option<u32>,
     },
+    /// The render pipeline was retranslated with some of the consumer's exact forms dropped to
+    /// native, because its largest stage module exceeded the device's compiler word bound and that
+    /// driver faults compiling a module past it
+    /// ([`DriverWorkaround::RegisterAllocatorOverflowsLargeModules`](crate::device::DriverWorkaround::RegisterAllocatorOverflowsLargeModules):
+    /// ANV's register allocator). Each `true` field is an exact form the pipeline would carry under
+    /// the consumer's policy that the fitting translation gave up to fit the bound; the stages carry
+    /// the reduced policy's own precision notes besides. The consumer announces it once per device
+    /// (the runtime's `Degradation::ExactFormsOverCompilerLimit`), naming the pipeline and the forms
+    /// dropped. Nothing binds it.
+    ExactFormsOverCompilerLimit {
+        sampling: bool,
+        float_maths: bool,
+        texel_conversion: bool,
+        half_rounding: bool,
+        nan_and_min_max: bool,
+        rounding_order: bool,
+        half_blend: bool,
+    },
 }
 
 /// What one compile made of a slot of a `RuntimeFact::UniformViewRange`.

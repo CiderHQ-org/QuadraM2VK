@@ -25,10 +25,19 @@
 //! `RG16Float` from `half4` and `float4` outputs, sources and texels holding signed zeros,
 //! infinities and NaNs: every lane). Before the form was built, a zero factor dropped its term,
 //! which kept neither the NaN of an infinite or NaN operand nor the zero sum's sign.
+//!
+//! Under fast math a zero factor drops its term, and a lone term's zero takes Metal's sign
+//! (`a_fast_blend_s_lone_term_takes_metal_s_zero`): `R16Float` and `RG16Float` have no alpha, so
+//! one minus the destination alpha is a zero factor; and into `RG16Float` or `RGBA16Float` a
+//! destination's product subtracted alone by one minus the source's color or alpha negates the
+//! factor, `h(d · h(z - 1))`, as does any one minus in alpha of a `float4` output (our probes
+//! `rb16b`, `rb16c` and `rb16e`, the M3 Max under macOS 27.0.1, every lane). Before, the destination
+//! alpha of those formats was the texel's one, whose `1 - 1` kept the product `d · 0` in the sum,
+//! and every lone term negated its operand: the zero's sign was off Metal's.
 
 use super::*;
 use crate::lower::arith::extended_range::blend::{blend_half_float, Blend, BlendArith, BlendMath};
-use crate::metal::{BlendFactor as F, BlendOperation as O, ColorWriteMask};
+use crate::metal::{BlendFactor as F, BlendOperation as O, ColorWriteMask, PixelFormat};
 use crate::pipeline::lower_inputs::BlendEquation;
 
 /// `x` rounded to `half`, nearest even.
@@ -126,8 +135,13 @@ fn a_fetched_blend_constant_difference_is_metals() {
                     alpha_operation: op,
                 };
                 let what = format!("{arith:?} {fs:?} {fd:?} {op:?}");
-                let b = Blend::half_float(&eq, ColorWriteMask::ALL, BlendMath::Fast)
-                    .unwrap_or_else(|e| panic!("{what}: {e:?}"));
+                let b = Blend::half_float(
+                    &eq,
+                    PixelFormat::RGBA16Float,
+                    ColorWriteMask::ALL,
+                    BlendMath::Fast,
+                )
+                .unwrap_or_else(|e| panic!("{what}: {e:?}"));
                 assert!(b.fitted(), "{what}: {b:?}");
                 check(
                     &format!("the fetched blend's {what}"),
@@ -283,8 +297,13 @@ fn a_safe_blend_keeps_a_zero_factors_product() {
                     alpha_operation: op,
                 };
                 let what = format!("{arith:?} {fs:?} {fd:?} {op:?}");
-                let b = Blend::half_float(&eq, ColorWriteMask::ALL, BlendMath::Rounded)
-                    .unwrap_or_else(|e| panic!("{what}: {e:?}"));
+                let b = Blend::half_float(
+                    &eq,
+                    PixelFormat::RGBA16Float,
+                    ColorWriteMask::ALL,
+                    BlendMath::Rounded,
+                )
+                .unwrap_or_else(|e| panic!("{what}: {e:?}"));
                 check_accept(
                     &format!("the safe blend's {what}"),
                     &[f4, f4, u4],
@@ -301,6 +320,206 @@ fn a_safe_blend_keeps_a_zero_factors_product() {
                         )
                     },
                     &|got, want| got == want,
+                );
+            }
+        }
+    }
+}
+
+/// The values of [`a_fast_blend_s_lone_term_takes_metal_s_zero`]'s grid: the signed zeros, one,
+/// -1, 2.5, -0.75, the infinities and a NaN, each exact in `half` and every product and `1 - x` of
+/// them too.
+const GRID: [f32; 9] = [
+    0.0,
+    -0.0,
+    1.0,
+    -1.0,
+    2.5,
+    -0.75,
+    f32::INFINITY,
+    -f32::INFINITY,
+    f32::NAN,
+];
+
+/// Metal's blend under fast math (our probes `rb16b`, `rb16c`, `rb16e`) in lane `l` (alpha the
+/// last) of an attachment of `channels` channels, of source `s` over destination `d`, factors `fs`
+/// and `fd` under `op`, blend color one, one of whose terms is dropped by a zero factor (`None`
+/// where neither is), in `arith`: the remaining term, its operand negated or, a destination's
+/// product subtracted by one minus a source value into two or more channels (any one minus in
+/// alpha in `float`), its factor; both dropped `+0`.
+fn metal_fast_term(
+    arith: BlendArith,
+    (fs, fd, op): (F, F, O),
+    channels: u32,
+    l: usize,
+    (s, d): ([f32; 4], [f32; 4]),
+) -> Option<f64> {
+    let alpha = l == 3;
+    let (sl, dl) = (f64::from(s[l]), f64::from(d[l]));
+    let sa = f64::from(s[3]);
+    let da = if channels == 4 { f64::from(d[3]) } else { 1.0 };
+    // Each factor: `None` where it is zero by the state, else its `1 - z` (`Some(z)`) or value;
+    // the blend color one.
+    let factor = |f: F| -> Option<(Option<f64>, f64)> {
+        let z = match f {
+            F::Zero => return None,
+            F::OneMinusDestinationAlpha if channels < 4 => return None,
+            F::One | F::BlendColor => return Some((None, 1.0)),
+            F::SourceColor => return Some((None, sl)),
+            F::SourceAlpha => return Some((None, sa)),
+            F::DestinationColor => return Some((None, dl)),
+            F::DestinationAlpha => return Some((None, da)),
+            F::SourceAlphaSaturated if alpha => return Some((None, 1.0)),
+            F::SourceAlphaSaturated => return Some((None, metal_min(sa, 1.0 - da))),
+            F::OneMinusBlendColor | F::OneMinusBlendAlpha => 1.0,
+            F::OneMinusSourceAlpha => sa,
+            F::OneMinusSourceColor if alpha => sa,
+            F::OneMinusSourceColor => sl,
+            F::OneMinusDestinationAlpha => da,
+            F::OneMinusDestinationColor if alpha => da,
+            F::OneMinusDestinationColor => dl,
+            _ => panic!("no factor {f:?} here"),
+        };
+        Some((Some(z), 1.0 - z))
+    };
+    let source_value = |f: F| matches!(f, F::OneMinusSourceAlpha | F::OneMinusSourceColor);
+    let (ks, kd) = (factor(fs), factor(fd));
+    let (x, k, f, sign) = match (ks, kd) {
+        (None, None) => return Some(0.0),
+        (Some(_), Some(_)) => return None,
+        (Some(k), None) => (sl, k, fs, if op == O::ReverseSubtract { -1.0 } else { 1.0 }),
+        (None, Some(k)) => (dl, k, fd, if op == O::Subtract { -1.0 } else { 1.0 }),
+    };
+    let destination = kd.is_some();
+    let into = destination
+        && sign < 0.0
+        && channels > 1
+        && k.0.is_some()
+        && (source_value(f) || (alpha && arith == BlendArith::Float));
+    Some(match (into, k.0) {
+        (true, Some(z)) => x * (z - 1.0),
+        _ => sign * (x * k.1),
+    })
+}
+
+#[test]
+fn a_fast_blend_s_lone_term_takes_metal_s_zero() {
+    let f4 = vec(float(32), 4);
+    let u4 = vec(int(32), 4);
+    // The probes' states with a zero factor.
+    let states = [
+        (F::One, F::OneMinusDestinationAlpha, O::Add),
+        (F::One, F::OneMinusDestinationAlpha, O::Subtract),
+        (F::One, F::OneMinusDestinationAlpha, O::ReverseSubtract),
+        (F::SourceAlpha, F::OneMinusDestinationAlpha, O::Add),
+        (F::SourceAlpha, F::OneMinusDestinationAlpha, O::Subtract),
+        (F::OneMinusDestinationAlpha, F::One, O::Subtract),
+        (
+            F::OneMinusDestinationAlpha,
+            F::SourceAlpha,
+            O::ReverseSubtract,
+        ),
+        (
+            F::OneMinusDestinationAlpha,
+            F::OneMinusDestinationAlpha,
+            O::Subtract,
+        ),
+        (F::Zero, F::OneMinusSourceAlpha, O::Add),
+        (F::Zero, F::OneMinusSourceAlpha, O::Subtract),
+        (F::Zero, F::OneMinusSourceColor, O::Subtract),
+        (F::Zero, F::OneMinusDestinationAlpha, O::Subtract),
+        (F::Zero, F::OneMinusDestinationColor, O::Subtract),
+        (F::Zero, F::OneMinusBlendColor, O::Subtract),
+        (F::Zero, F::OneMinusBlendAlpha, O::Subtract),
+        (F::Zero, F::BlendColor, O::Subtract),
+        (F::Zero, F::SourceColor, O::Subtract),
+        (F::Zero, F::SourceAlpha, O::Subtract),
+        (F::Zero, F::SourceAlphaSaturated, O::Subtract),
+        (F::Zero, F::One, O::Subtract),
+        (F::Zero, F::DestinationAlpha, O::Add),
+        (F::Zero, F::DestinationAlpha, O::Subtract),
+        (F::Zero, F::DestinationColor, O::Subtract),
+        (F::OneMinusSourceAlpha, F::Zero, O::Subtract),
+        (F::OneMinusSourceAlpha, F::Zero, O::ReverseSubtract),
+        (F::OneMinusSourceColor, F::Zero, O::ReverseSubtract),
+        (F::OneMinusDestinationAlpha, F::Zero, O::ReverseSubtract),
+        (F::OneMinusDestinationColor, F::Zero, O::ReverseSubtract),
+        (F::OneMinusBlendColor, F::Zero, O::ReverseSubtract),
+        (F::SourceAlpha, F::Zero, O::Subtract),
+        (F::SourceAlpha, F::Zero, O::ReverseSubtract),
+        (F::SourceAlphaSaturated, F::Zero, O::ReverseSubtract),
+        (F::DestinationColor, F::Zero, O::ReverseSubtract),
+        (F::DestinationAlpha, F::Zero, O::ReverseSubtract),
+        (F::One, F::Zero, O::ReverseSubtract),
+        (F::Zero, F::Zero, O::Add),
+        (F::Zero, F::Zero, O::Subtract),
+    ];
+    let formats = [
+        (PixelFormat::R16Float, 1),
+        (PixelFormat::RG16Float, 2),
+        (PixelFormat::RGBA16Float, 4),
+    ];
+    let bits = |x: f32| u64::from(x.to_bits());
+    for arith in [BlendArith::Half, BlendArith::Float] {
+        for (pf, channels) in formats {
+            // Each source of color `GRID[a]` and alpha `GRID[b]` over a texel of color `GRID[c]`
+            // and alpha `GRID[e]`, or one, the texel's, where the format has no alpha.
+            let n = GRID.len();
+            let alphas = if channels == 4 { n } else { 1 };
+            let mut cases: Vec<Case> = Vec::new();
+            for i in 0..n * n * n * alphas {
+                let (a, b, c, e) = (
+                    i / (n * n * alphas),
+                    (i / (n * alphas)) % n,
+                    (i / alphas) % n,
+                    i % alphas,
+                );
+                let da = if channels == 4 { GRID[e] } else { 1.0 };
+                let s = [GRID[a], GRID[a], GRID[a], GRID[b]].map(bits).to_vec();
+                let d = [GRID[c], GRID[c], GRID[c], da].map(bits).to_vec();
+                cases.push(vec![s, d, vec![bits(1.0); 4]]);
+            }
+            // A zero factor of the state or the format's, which drops its term.
+            let dropped = |f: F| f == F::Zero || (f == F::OneMinusDestinationAlpha && channels < 4);
+            for (fs, fd, op) in states
+                .into_iter()
+                .filter(|&(fs, fd, _)| dropped(fs) || dropped(fd))
+            {
+                let eq = BlendEquation {
+                    source_rgb: fs,
+                    destination_rgb: fd,
+                    rgb_operation: op,
+                    source_alpha: fs,
+                    destination_alpha: fd,
+                    alpha_operation: op,
+                };
+                let what = format!("{arith:?} {pf:?} {fs:?} {fd:?} {op:?}");
+                let b = Blend::half_float(&eq, pf, ColorWriteMask::ALL, BlendMath::Fast)
+                    .unwrap_or_else(|e| panic!("{what}: {e:?}"));
+                assert!(b.fitted(), "{what}: {b:?}");
+                // The channels the format stores: the store drops the others.
+                let stored = channels as usize;
+                check_accept(
+                    &format!("the fast blend's {what}"),
+                    &[f4, f4, u4],
+                    f4,
+                    &|fb, x| blend_half_float(fb, &b, arith, (x[0], x[1]), Some(x[2])),
+                    &cases,
+                    &|c| {
+                        let s: [f32; 4] = std::array::from_fn(|l| f32v(c[0][l]));
+                        let d: [f32; 4] = std::array::from_fn(|l| f32v(c[1][l]));
+                        let lanes = (0..4).map(|l| match l < stored {
+                            true => metal_fast_term(arith, (fs, fd, op), channels, l, (s, d))
+                                .map(|v| bits(v as f32)),
+                            // A lane the store drops: any answer.
+                            false => Some(u64::MAX),
+                        });
+                        lanes.collect()
+                    },
+                    &|got, want| {
+                        let nan = |w: u64| f32v(w).is_nan();
+                        want == u64::MAX || got == want || (nan(got) && nan(want))
+                    },
                 );
             }
         }

@@ -2270,6 +2270,9 @@ impl RenderVariant {
             )?));
         }
         let pipeline = compile.compile_render_variant(&linked, key, &budget)?;
+        // Held to the driver's compiler word bound, translated again from the functions where its
+        // largest stage passes it; it keeps its key, so the cache stores and finds it as compiled.
+        let pipeline = compile.fit_render_variant(descriptor, key, &budget, pipeline)?;
         Ok(Remembered::Compiled(sources.linked_render(pipeline)))
     }
 
@@ -2294,7 +2297,7 @@ impl RenderVariant {
         };
         framebuffer_fetch::ordered(&pipeline.graphics)?;
         // Before the variant's shader modules, whose creation the layer reports.
-        device.degrade_requirements(&pipeline.requirements, Occurrence::Made);
+        device.degrade_render(&pipeline, Occurrence::Made);
         // Where the creation log is on, the stages' SPIR-V it names hashed on a thread of its
         // own while the objects are made: the hash its first line reads, off the creation's path.
         let (objects, kept) = std::thread::scope(|scope| {
@@ -2313,7 +2316,7 @@ impl RenderVariant {
                 Compiled::Render(pipeline.key),
                 &pipeline.layout,
                 &pipeline.stages,
-                Some(&pipeline.requirements),
+                Some(&*pipeline),
             )
         })?;
         let stages = handle_stages(&pipeline.layout, every_render_stage());

@@ -739,7 +739,13 @@ assert_eq!(linked, pipeline);
   `compile_function_with_report` also returns a `CompileReport` of what the compile cost.
 - A render pipeline's stages compile under inputs that a decode of its functions learns.
   `render_pipeline_key` returns `RenderPipelineKeys`: each stage's function key, and the inputs to
-  compile a missing stage under.
+  compile a missing stage under. `compile_render_variant` holds a pipeline of `Function` stages to
+  the device's compiler word bound (`DeviceProfile::module_word_bound`, ANV's) itself; one linked
+  from `Compiled` stages it cannot translate again. A caller who compiles stages ahead must pass
+  the linked pipeline, with the descriptor of its functions, to `device.fit_render_variant(
+  &descriptor, &variant, &budget, pipeline)`, or its module goes to the driver unreduced: the call
+  translates the functions again with the policy's exact forms dropped where the largest stage
+  passes the bound (`exact-forms-over-compiler-limit`), under the same key.
 - A key names an artifact by its inputs and versions; a content digest names it by what it says.
   `pipeline.content_digest()` hashes everything but the key and profile, and `plan.content_digest()`
   (with `serde`) everything a plan states. A cache of driver objects keyed on the digest survives a
@@ -1053,6 +1059,16 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   function. Announced at the state's making, naming which. Cost: each draw runs a geometry stage of
   its topology class between the vertex and fragment stages, which emits each primitive's vertices
   with the barycentric weights or the first vertex's slice and viewport.
+- `metal2vulkan-degrade-exact-forms-over-compiler-limit` (precision). `ExactFormsOverCompilerLimit`:
+  A render pipeline state whose largest stage module, under the consumer's exact forms, exceeded the
+  device's compiler word bound (`RuntimeFact::ExactFormsOverCompilerLimit`;
+  `DriverWorkaround::RegisterAllocatorOverflowsLargeModules`, ANV's register allocator faults
+  compiling a module past it), so the translation dropped those forms until it fit: native sampling
+  first, then every module-growing exact answer native. Announced where the runtime makes a render
+  variant whose pipeline the fit reduced, the base variant or another, naming the forms dropped; the
+  reduced stages announce their own precision notes besides.
+  Cost: the dropped exact forms' results can differ from Metal's as their notes' documentation
+  states, where the device's compiler would fault on the exact module.
 - `metal2vulkan-degrade-landed-visibility-results` (performance). `LandedVisibilityResults`:
   Visibility results start where Vulkan writes no query result. Cost: they land in an upload region
   and are copied on into the buffer after the pass.
@@ -1439,6 +1455,24 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   samples with 32. Cost: it filters with the device's largest anisotropy (16 on every venue
   measured), where Metal filters with 32: a footprint more than 16 times as long as it is wide reads
   a coarser level than Metal's (one level coarser at 32 to 1 and beyond).
+- `metal2vulkan-degrade-not-mipmapped-anisotropic-sampler` (precision).
+  `NotMipmappedAnisotropicSampler`: A sampler state with anisotropy, no mip filter (`NotMipmapped`)
+  and different minification and magnification filters, on a device that samples through Metal's
+  own sampler (MoltenVK on Apple's GPU): Vulkan has no sampler without mipmapping, so the device's
+  sampler takes a nearest mip filter with the level clamp `[0, 0.25]`, which keeps Metal's choice
+  of filter, and Metal's anisotropic filter reads no such clamp as Metal's `NotMipmapped`.
+  Announced once, as the device makes the state. Cost: a sample at an implicit level or with
+  gradients through it filters another anisotropic footprint than Metal's at `maxAnisotropy` 2 to
+  16. A constexpr sampler of that shape records `PrecisionNote::NotMipmappedAnisotropicFilter`.
+- `metal2vulkan-degrade-attachment-read-in-place` (precision). `AttachmentReadInPlace`: A draw whose
+  functions read or write, other than as an attachment, memory an attachment of its render pass
+  instance renders, where no copy or snapshot serves the access: a texture reached through a handle
+  or an argument buffer, a storage binding of a color attachment's texture, the depth or stencil
+  attachment's texture, a texture buffer or a buffer over its bytes, a texture whose copy is not
+  served, or an execution's or a capture's command. Announced where the draw records. Cost: the
+  access sees the attachment as the device holds it inside its render pass instance, which Vulkan
+  leaves undefined (`VUID-vkCmdDraw-None-10795`), where Metal's read at the draw's own pixel gives
+  the texel from before the pass.
 - `metal2vulkan-degrade-unreadable-handle-texture` (precision). `UnreadableHandleTexture`: A command
   whose function reads texture handles from memory (an argument buffer, or any memory holding a
   texture's resource ID) has a texture the runtime holds as raw blocks for copies made resident, or
@@ -1622,10 +1656,10 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
 - `metal2vulkan-degrade-heap-texture-block-compressed-layout` (precision).
   `HeapTextureBlockCompressedLayout`: A texture of a block-compressed format made in a heap over
   host pages whose placement the device's Metal level does not measure: Metal places a format
-  family's blocks in each level by a rule that differs by family and by machine, measured for BC,
-  ETC2, EAC and ASTC on an Apple M4 under macOS 27.0.1 and an Apple M3 Max under 26.7 (whether the
-  GPU or the release makes their difference is not known), where those lie as Metal lays them out,
-  and not for PVRTC at any level, whose blocks lie in the runtime's layout. Cost: the texture's
+  family's blocks in each level by a rule that differs by family and by release, measured for BC,
+  ETC2, EAC and ASTC under macOS 27.0.1 (an Apple M3 Max and an Apple M4 alike) and 26.7 (an
+  Apple M3 Max), where those lie as Metal lays them out, and not for PVRTC at any level, whose
+  blocks lie in the runtime's layout. Cost: the texture's
   reads, writes and copies are Metal's, but its blocks lie in the heap's bytes in the runtime's
   layout, where Metal tiles them: a buffer or texture over them meets the blocks at other bytes than
   on Metal.
@@ -1834,19 +1868,20 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   a pass with depth writes that may store such a value with its sign, where Metal's test compares
   the stored value's magnitude (a NaN above +inf) and its pass with depth writes stores every texel
   no fragment wrote without its sign. A single-sample `Depth32Float` render target a write may give
-  such a value is switched on (`WorkCounts::signed_depth_switch_ons`): each pass that loads its
-  depth renders over a magnitude stand-in, merged back after a pass with depth writes
+  such a value, or whose new texture's pattern (a NaN with the sign set) a pass loads before a write
+  covered it, is switched on (`WorkCounts::signed_depth_switch_ons`): each pass that loads its depth
+  renders over a magnitude stand-in, merged back after a pass with depth writes
   (`WorkCounts::magnitude_stand_in_passes`, `magnitude_write_backs`); other targets' signs are
   stripped after such a pass (`WorkCounts::sign_strips`); MoltenVK's test is Metal's own
   (`DriverFact::DepthTestComparesMagnitudes`). Announced for what that misses: a merge under a
   draw's exact +inf, a depth loaded through another image, a switch while another command buffer is
-  uncommitted, a multisampled or `Depth32Float_Stencil8` target's test (at the write), a strip the
-  device does not make, and a NaN clear depth the device does not write before the pass. Cost: a
-  depth test against the stored value, or the value a pass with depth writes stores, can differ
-  from Metal's in the pass or target named; a NaN clear depth is stored and tested as 1.0, where
-  Metal stores `0x7fc00000`. A texture never switched on renders in place; a switched-on texture's
-  loading pass adds two copies and a dispatch over its render area before it, and the same after it
-  where it writes the depth.
+  uncommitted, a multisampled or `Depth32Float_Stencil8` target's test (at the write, or at the pass
+  that loads its new pattern), a strip the device does not make, and a NaN clear depth the device
+  does not write before the pass. Cost: a depth test against the stored value, or the value a pass
+  with depth writes stores, can differ from Metal's in the pass or target named; a NaN clear depth
+  is stored and tested as 1.0, where Metal stores `0x7fc00000`. A texture never switched on renders
+  in place; a switched-on texture's loading pass adds two copies and a dispatch over its render area
+  before it, and the same after it where it writes the depth.
 - `metal2vulkan-degrade-first-sparse-resource-wait` (performance). `FirstSparseResourceWait`: The
   device's first sparse texture made (`Heap::new_texture` in a sparse heap) on a device whose
   driver's first sparse resource waits for the work submitted before it on every queue
@@ -1892,6 +1927,15 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   buffer). Not observed on RADV, which fails the command buffers submitted after a page of an
   import loses write permission (`HostMemory::new`). Cost: those bytes keep what the image's move
   from `UNDEFINED` wrote, where Metal's texture leaves its pages as they were.
+- `metal2vulkan-degrade-float-tininess-after-rounding` (precision). `FloatTininessAfterRounding`: A
+  device whose policy takes native device maths (`FloatMathsPolicy::Native`, the default) where its
+  float functions are not Metal's own (not MoltenVK): Metal flushes a `float` product or fused
+  multiply-add whose exact value lies below `2^-126` to the zero of its sign, deciding tininess
+  before rounding, and the device rounds before it decides (measured on RADV, ANV, NVIDIA and
+  lavapipe, whether they flush denormals or keep them). Announced once, as the device is made. Cost:
+  a `float` product or fused multiply-add whose exact value lies within half a unit below `2^-126`
+  answers `2^-126` of its sign where Metal answers the zero of its sign; `FloatMathsPolicy::Exact`
+  computes Metal's.
 - `metal2vulkan-degrade-f16-fma-double-rounding` (precision). `PrecisionNote::F16FmaDoubleRounding`:
   Widened half fma rounds twice.
 - `metal2vulkan-degrade-f16-int-conv-double-rounding` (precision).
@@ -1969,6 +2013,35 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   varying, a value interpolated across another triangulation, and the order a patch's triangles
   blend in may differ. A device without `tessellationShader` draws Metal's order through the
   emulation (`emulated-tessellation-draws`) and records none.
+- `metal2vulkan-degrade-unmeasured-group-speculation` (precision).
+  `PrecisionNote::UnmeasuredGroupSpeculation`: A function holds a branch whose arms hold a quad or
+  simdgroup operation that answers over every lane of the branch's block when Metal's backend
+  speculates the arms (a quad shuffle, broadcast or vote, a simdgroup shuffle, `simd_is_first`),
+  where no measurement says whether Metal speculates them: an arm of an instruction, size or shape
+  no probe covers. The branch keeps the AIR's lanes, so that operation may answer over the lanes
+  that take the arm where Metal's answers over the block's. A branch Metal was measured to
+  speculate is speculated, and one it was measured to keep is kept, with no note.
+- `metal2vulkan-degrade-not-mipmapped-anisotropic-filter` (precision).
+  `PrecisionNote::NotMipmappedAnisotropicFilter`: A sample at an implicit level or with gradients
+  through a constexpr sampler with anisotropy, no mip filter and different minification and
+  magnification filters, on a device that samples through Metal's own sampler (MoltenVK on Apple's
+  GPU): no level clamp the device's sampler takes reads Metal's `NotMipmapped` footprint at
+  `maxAnisotropy` 2 to 16, so the sample filters another anisotropic footprint than Metal's.
+- `metal2vulkan-degrade-device-sample-level` (precision). `PrecisionNote::DeviceSampleLevel`: A
+  sample whose level the device's level arithmetic chooses, on a device that samples neither through
+  Metal's own sampler nor natively, of a texture other than a cube, without comparison: a fragment
+  function's implicit-level sample (its bias Metal's own reading within the device's
+  `maxSamplerLodBias`), a sample with explicit gradients, a fragment function's LOD query, and a
+  sample at an explicit level Metal's level rule is not handed on (an integer texture's, or a
+  constexpr sampler's with a level bias of its own or a clamp the rule does not take), but a
+  constant level the device reads as Metal does. The device takes the level of detail by Vulkan's
+  rules, whose scale factor may be approximated, and rounds a level its own way; Metal's level of
+  detail from derivatives is not measured. Recorded for an LOD query, and for a sample through a
+  sampler that chooses a level or a filter by it where no sample-filter note records the sample:
+  nearest filters with a nearest mip filter (a constexpr sampler's, or a runtime sampler's where its
+  word states them), or an integer texture's sampler with a mip filter or filters that differ (an
+  argument buffer's sampler always). The sample may read another level or filter than Metal's near a
+  boundary, and the query answers the device's level.
 - `metal2vulkan-degrade-fp8-value` (precision). `PrecisionNote::Fp8Value`: An 8-bit float converts
   to an integer from the format's documented value with Metal's saturating float-to-integer rule,
   where Metal's device here answers otherwise: Metal on Apple M3 compiles these reads but extends
@@ -2470,6 +2543,9 @@ each item named states the rule in full.
 - **A recursive call past the call stack yields zero**: the stack holds what Metal's byte model
   holds for the pipeline's `max_call_stack_depth`; a call that finds it full returns zero, where
   Metal's answer is corrupt.
+- **A simdgroup barrier in divergent code waits for its tangle**, as SPIR-V defines it. The Metal
+  Shading Language requires every thread of the SIMD-group to execute a `simdgroup_barrier` that
+  any of them executes in a conditional or a loop iteration, so Metal defines no answer there.
 
 **Rasterization-rate maps**
 

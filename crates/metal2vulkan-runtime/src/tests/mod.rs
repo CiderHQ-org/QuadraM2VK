@@ -52,6 +52,8 @@ mod families;
 mod fences;
 mod fill_value;
 mod first_moves;
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+mod fitted_variant_notice;
 mod framebuffer_fetch;
 #[cfg(any(m2v_gpu, m2v_cpu_icd))]
 mod freed_memory;

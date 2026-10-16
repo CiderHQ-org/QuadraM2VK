@@ -30,7 +30,6 @@ use crate::Device;
 use ash::vk;
 use metal2vulkan::bind::DispatchRegion;
 use metal2vulkan::cache::{Hash256, SpecializationKey};
-use metal2vulkan::device::Requirements;
 use metal2vulkan::pipeline::{
     DescriptorSetLayout, PipelineLayout, RenderPipeline, SlotRef, StageModule,
 };
@@ -512,13 +511,13 @@ impl VariantObjects {
     /// guarantees. Once they are made, the device announces what the stages record: their
     /// precision notes (but those a specialization decides, announced with each `VkPipeline`), and
     /// reconvergence that is not Metal's (`degradation.rs`), but the kinds it announces at every
-    /// occurrence, which each bind announces (`announce_bound`); a render variant's `requirements`
-    /// count among its kinds.
+    /// occurrence, which each bind announces (`announce_bound`); what a render variant's `render`
+    /// pipeline records beside its stages counts among its kinds (`Device::degrade_render`).
     pub(crate) fn create(
         device: &Device,
         layout: &PipelineLayout,
         stages: &[StageModule],
-        requirements: Option<&Requirements>,
+        render: Option<&RenderPipeline>,
     ) -> Result<VariantObjects, Error> {
         let set_needs = layout
             .sets
@@ -557,7 +556,7 @@ impl VariantObjects {
                 .collect(),
             heap_layout: layout.sets.get(1).cloned(),
             heap: Mutex::new(None),
-            kinds: Kinds::of(stages, requirements),
+            kinds: Kinds::of(stages, render),
             tested: tested_slots_of(stages),
             bound: Mutex::new(None),
             keep: None,
@@ -625,7 +624,7 @@ impl VariantObjects {
         compiled: Compiled,
         layout: &PipelineLayout,
         stages: &[StageModule],
-        requirements: Option<&Requirements>,
+        render: Option<&RenderPipeline>,
     ) -> Result<(VariantObjects, Vec<(Place, RawPipeline)>), Error> {
         let set_needs = layout
             .sets
@@ -642,7 +641,7 @@ impl VariantObjects {
         // And the device's graphics pipeline libraries nothing holds now.
         settle_libraries(device);
         let Some(back) = back else {
-            let mut objects = VariantObjects::create(device, layout, stages, requirements)?;
+            let mut objects = VariantObjects::create(device, layout, stages, render)?;
             objects.keep = Some(Instance::new(compiled));
             return Ok((objects, Vec::new()));
         };
@@ -662,7 +661,7 @@ impl VariantObjects {
                 .collect(),
             heap_layout: layout.sets.get(1).cloned(),
             heap: Mutex::new(None),
-            kinds: Kinds::of(stages, requirements),
+            kinds: Kinds::of(stages, render),
             tested: tested_slots_of(stages),
             bound: Mutex::new(None),
             keep: Some(instance),
@@ -699,15 +698,15 @@ impl VariantObjects {
     /// Announce, at a dispatch's or draw's bind of the variant, the notices its making announces
     /// whose kinds the device's options ask for at every occurrence (`DeviceOptions::
     /// announce_each`), on the calling thread, with the making's object and reason
-    /// (`Device::bound_notices`): `stages` are the variant's, `requirements` a render variant's,
+    /// (`Device::bound_notices`): `stages` are the variant's, `render` a render variant's pipeline,
     /// and `specializations` the specializations and bound formats of the `VkPipeline`s the bind
     /// takes. Its kinds are tested first (`Device::binds_each`), so a variant none of whose kinds
     /// is asked for costs an AND a word. The notices are made once and announced at each bind
     /// until the specializations, or the formats bound at the slots its notes test, change:
-    /// they are a function of those alone, the variant's stages and requirements fixed.
+    /// they are a function of those alone, the variant's stages and pipeline fixed.
     pub(crate) fn announce_bound<'a>(
         &self,
-        (stages, requirements): (&[StageModule], Option<&Requirements>),
+        (stages, render): (&[StageModule], Option<&RenderPipeline>),
         specializations: impl IntoIterator<Item = (&'a SpecializationKey, Option<BoundFormats<'a>>)>,
     ) {
         let device = &self.device;
@@ -722,7 +721,7 @@ impl VariantObjects {
                 None => {
                     device.shared().counts.bound_notices_made();
                     let notices: Arc<[BoundNotice]> = device
-                        .bound_notices((stages, requirements), &specializations)
+                        .bound_notices((stages, render), &specializations)
                         .into();
                     let made_for = specializations
                         .iter()

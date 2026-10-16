@@ -42,15 +42,16 @@
 //!   it, on the program's thread. Their one door (`creation.rs`, and `neutral.rs` for the neutrals)
 //!   refuses one in a host step before any Vulkan call, `Error::HostStepObject`, in every build; a
 //!   source test fails when another file makes such an object.
-//! - **The hook.** A device made or adopted registers an exit handler ([`register_device`]),
-//!   once its driver and layers are loaded and primed (`device/prime.rs`: the first call of each
-//!   entry point of the table, made on the creating thread), so it runs before their destructors,
-//!   those of statics made at those first calls included: the process's first device, one whose
-//!   driver and functions are new since the process last loaded a shared object, and the first
-//!   after such a load ([`loaded`]). A device made again on what stays loaded registers nothing.
-//!   It closes the guard, so no section starts, and waits for the sections in progress to end: at
-//!   most [`BOUND`], and never for the exiting thread's own (an exit from a message sink). A
-//!   second run finds nothing to wait for. While a driver's making of a `VkPipeline` is in progress
+//! - **The hook.** A device made or adopted registers an exit handler ([`register_device`]), once
+//!   its driver and layers are loaded and primed (`device/prime.rs`: the first call of each entry
+//!   point of the table, made on the creating thread), so it runs before their destructors, those
+//!   of statics made at those first calls included: the process's first device, one whose driver
+//!   and functions are new since the process last loaded a shared object, and the first after such
+//!   a load ([`loaded`]). A device made again on what stays loaded registers nothing. It closes the
+//!   guard, so no section starts, and waits for the sections in progress to end: at most [`BOUND`],
+//!   and never for the exiting thread's own (an exit from a message sink). A later run (an earlier
+//!   registration) finds nothing to wait for and makes no Vulkan call: it follows the destructors
+//!   registered after that registration. While a driver's making of a `VkPipeline` is in progress
 //!   in a section (a pool's piece's `vkCreate*Pipelines`, [`driver_making`]), at most
 //!   [`MAKING_BOUND`], and it says so on standard error as that wait starts: a making outlasts
 //!   [`BOUND`], and the program need not wait for the command buffer whose making it is before it
@@ -101,14 +102,18 @@
 //!   makes no cache.
 //! - **A CPU device's work.** A device whose queues run in this process (`DeviceKind::Cpu`:
 //!   lavapipe, SwiftShader) runs what was submitted to it on the process's own threads, so the
-//!   destructors would run under its execution. Once the sections ended, the hook waits for the
-//!   work submitted to each such device's queues ([`InProcess`], [`runs_in_process`]), within
-//!   what is left of [`BOUND`]; what is not submitted stays pending. A GPU's work runs on the
-//!   GPU, and the hook does not wait for it, as Metal's exit does not. Measured on lavapipe
-//!   (Mesa 26.2.4, x86_64): with work in flight at exit, its queue thread compiled a dispatch's
-//!   shader (LLVM's `MCJIT::finalizeObject`) while the destructors ran, and the process ended in
-//!   `free()`'s heap checks, in 5 of 300 exits while a host step waited and 1 of 300 with a
-//!   plain dispatch in flight.
+//!   destructors would run under its execution. Once the sections ended, the hook's first run waits
+//!   for the work submitted to each such device's queues ([`InProcess`], [`runs_in_process`]),
+//!   within what is left of [`BOUND`], and takes the devices off the list; what is not submitted
+//!   stays pending. Measured: while every run waited, lavapipe processes exiting with a live device
+//!   under the validation layer 1.4.357 ended with `SIGABRT` (`SIGSEGV` with GPU-assisted
+//!   validation) inside the layer's `vkWaitSemaphores`, in the run of the hook's first
+//!   registration, after a destructor the layer registered on the program's thread between that
+//!   registration and the next. A GPU's work runs on the GPU, and the hook does not wait for it, as
+//!   Metal's exit does not. Measured on lavapipe (Mesa 26.2.4, x86_64): with work in flight at
+//!   exit, its queue thread compiled a dispatch's shader (LLVM's `MCJIT::finalizeObject`) while the
+//!   destructors ran, and the process ended in `free()`'s heap checks, in 5 of 300 exits while a
+//!   host step waited and 1 of 300 with a plain dispatch in flight.
 //! - **No exit waits for a thread the guard ended.** Those two threads end between sections,
 //!   holding no lock. Two things wait for them:
 //!   - joins, made only by a device's teardown, which is one section: once the guard closed none
@@ -197,24 +202,27 @@ impl InProcessDevices {
         devices.push((std::process::id(), device));
     }
 
-    /// Wait for the submitted work of each live device made in process `pid`, at most until
-    /// `deadline`: whether every one completed.
-    pub(crate) fn drain(&self, pid: u32, deadline: Instant) -> bool {
-        let live: Vec<Arc<dyn InProcess>> = self
-            .devices
+    /// Take the devices made in process `pid` off the list: the live ones. A second call finds
+    /// none.
+    pub(crate) fn take(&self, pid: u32) -> Vec<Arc<dyn InProcess>> {
+        self.devices
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .iter()
-            .filter(|(made, _)| *made == pid)
+            .extract_if(.., |(made, _)| *made == pid)
             .filter_map(|(_, device)| device.upgrade())
-            .collect();
-        // Every device is waited for, whatever an earlier one answered.
-        let mut drained = true;
-        for device in &live {
-            drained &= device.drain(deadline);
-        }
-        drained
+            .collect()
     }
+}
+
+/// Wait for the submitted work of each of `devices`, at most until `deadline`: whether every one
+/// completed.
+fn drain(devices: &[Arc<dyn InProcess>], deadline: Instant) -> bool {
+    // Every device is waited for, whatever an earlier one answered.
+    let mut drained = true;
+    for device in devices {
+        drained &= device.drain(deadline);
+    }
+    drained
 }
 
 /// Wait at exit for the work submitted to `device`, whose queues run in this process.
@@ -599,6 +607,12 @@ impl Guard {
     /// Close the guard, then wait until no more sections are in progress than `own` (the
     /// closing thread's), at most `bound`, or while a section that makes a `VkPipeline` is in
     /// progress, at most [`MAKING_BOUND`]: whether they ended.
+    ///
+    /// The count of sections and the count of makings are read one after the other, so a making
+    /// may end between the two reads: counted as in progress by the first, gone from the second.
+    /// The wait gives up only on a count read after the makings', which a section's end lowers
+    /// before its making's ([`Busy`]'s drop): a making that ended is never taken for a section
+    /// still in progress.
     pub(crate) fn close(&self, own: usize, bound: Duration) -> bool {
         self.closed.store(true, Ordering::SeqCst);
         let start = Instant::now();
@@ -607,10 +621,11 @@ impl Guard {
             if self.active.load(Ordering::SeqCst) <= own {
                 return true;
             }
+            between_counts();
             let waited = start.elapsed();
             let making = self.making.load(Ordering::SeqCst);
             if waited >= bound && (making == 0 || waited >= MAKING_BOUND) {
-                return false;
+                return self.active.load(Ordering::SeqCst) <= own;
             }
             if waited >= bound && !said {
                 said = true;
@@ -628,10 +643,13 @@ impl Guard {
 impl Drop for Busy<'_> {
     fn drop(&mut self) {
         OWN.with(|own| own.set(own.get() - 1));
+        // The section ends before its making: a closing thread that reads the makings ended has
+        // the section ended too ([`Guard::close`]).
+        self.guard.active.fetch_sub(1, Ordering::SeqCst);
+        between_counts();
         if self.making {
             self.guard.making.fetch_sub(1, Ordering::SeqCst);
         }
-        self.guard.active.fetch_sub(1, Ordering::SeqCst);
         if self.counted {
             // After the section's Vulkan calls, which may have registered a destructor.
             let calls = PENDING.with(|pending| {
@@ -768,8 +786,25 @@ where
     })
 }
 
+/// A test's step between the guard's two counts, run once: between a section's end and its
+/// making's ([`Busy`]'s drop), or between [`Guard::close`]'s read of the sections and its read of
+/// the makings, whichever this thread reaches first (`tests::exit_guard`).
+#[cfg(test)]
+fn between_counts() {
+    if let Some(step) = BETWEEN_COUNTS.with(|step| step.borrow_mut().take()) {
+        step();
+    }
+}
+
+/// Nothing outside tests.
+#[cfg(not(test))]
+fn between_counts() {}
+
 #[cfg(test)]
 thread_local! {
+    /// The step [`between_counts`] runs once, on this thread.
+    pub(crate) static BETWEEN_COUNTS: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
     /// What each thread [`spawn_user_interactive`] starts from this thread runs once its class is
     /// set, before `f`: a test's reading of the class from inside the thread.
     pub(crate) static ON_START: std::cell::RefCell<Option<std::sync::Arc<dyn Fn() + Send + Sync>>> =
@@ -1208,11 +1243,11 @@ pub(crate) fn run_on_exit() {
 }
 
 /// The hook's work in process `pid`, registered in process `registered`, on a thread with `own`
-/// sections in progress: close `guard` and wait for the other sections, then for the work
-/// submitted to `in_process`'s devices, at most `bound` in all; where a section that makes a
-/// `VkPipeline` held the sections' wait past `bound` ([`Guard::close`]), the work's wait gets
-/// `bound` from there. `None` (nothing done) in another process than the one registered; else
-/// whether the other sections ended and the work completed.
+/// sections in progress: close `guard` and wait for the other sections, then for the work submitted
+/// to `in_process`'s devices, which the first run takes whether it waits or not, at most `bound` in
+/// all; where a section that makes a `VkPipeline` held the sections' wait past `bound`
+/// ([`Guard::close`]), the work's wait gets `bound` from there. `None` (nothing done) in another
+/// process than the one registered; else whether the other sections ended and the work completed.
 pub(crate) fn hook(
     guard: &Guard,
     in_process: &InProcessDevices,
@@ -1230,7 +1265,10 @@ pub(crate) fn hook(
             true => now + bound,
             false => deadline,
         };
-        ended && in_process.drain(pid, deadline)
+        // A later run (an earlier registration) follows the destructors registered after its
+        // registration: it finds no device, so makes no Vulkan call.
+        let devices = in_process.take(pid);
+        ended && drain(&devices, deadline)
     })
 }
 

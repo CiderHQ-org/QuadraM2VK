@@ -19,6 +19,7 @@ mod adopt;
 pub(super) mod argument_buffers;
 mod compiles;
 pub(super) mod create;
+pub(super) mod float_tininess;
 pub(super) mod functions;
 mod handles;
 pub(super) mod instance_requirements;
@@ -1409,6 +1410,7 @@ impl Device {
         let device = Device(shared);
         device.say_unmeasured_driver();
         device.degrade_argument_buffers_unread();
+        device.degrade_float_tininess();
         if let Some((kind, notice)) = metal_level.announcement() {
             device.degrade(kind, || notice);
         }

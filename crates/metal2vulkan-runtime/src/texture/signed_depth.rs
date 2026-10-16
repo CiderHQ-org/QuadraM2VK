@@ -40,8 +40,10 @@
 //! - **Switched on** ([`Texture::switch_on_signed_depth`]) by a write that may store a value whose
 //!   stand-in is not itself, before its data lands: every blit into the depth from a buffer or
 //!   another texture, but from a texture known to hold none ([`Texture::may_hold_signed_depth`]), a
-//!   `replace_region` whose bytes hold one, and a pass that clears it to a denormal where the
-//!   device's test compares one as zero. A flag on the image, set once and never cleared, counted
+//!   `replace_region` whose bytes hold one, a pass that clears it to a denormal where the
+//!   device's test compares one as zero, and a pass that loads a new texture's pattern, a NaN with
+//!   the sign set, before a write covered it ([`Texture::switch_on_fresh_pattern`], as the pass is
+//!   planned: `fresh_unwritten.rs`). A flag on the image, set once and never cleared, counted
 //!   once (`WorkCounts::signed_depth_switch_ons`). A pass encoded before the switch in a command
 //!   buffer not yet committed renders the depth in place: where another command buffer than the
 //!   writer's was uncommitted at the switch, `signed-depth-test` is announced.
@@ -278,6 +280,25 @@ impl Texture {
     /// which that may store one would have switched it on.
     pub(crate) fn may_hold_signed_depth(&self) -> bool {
         self.magnitude_form().is_none() || self.switched_on()
+    }
+
+    /// Switch the texture's depth on for a pass, being planned, that loads a new texture's
+    /// pattern, a NaN with the sign set, before a write covered it (`fresh_unwritten.rs`): as
+    /// [`Self::switch_on_signed_depth`], but no pass encoded before can have tested the pattern in
+    /// place, as the first that loads it switches it on, so no other command buffer is weighed.
+    /// Whether the device's depth test then answers as Metal's (else the caller announces).
+    pub(crate) fn switch_on_fresh_pattern(&self) -> bool {
+        let Some(form) = self.magnitude_form() else {
+            return false;
+        };
+        let Ok(image) = self.image() else {
+            return false;
+        };
+        let device = &image.device;
+        if !image.signed_depth.swap(true, Ordering::AcqRel) {
+            device.shared().counts.signed_depth_switch_on();
+        }
+        form == MagnitudeForm::StandIn || tests_magnitudes(device)
     }
 
     /// Switch the texture's depth on for `call`'s write, which may store a value whose stand-in

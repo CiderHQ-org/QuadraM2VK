@@ -1,5 +1,6 @@
-//! `texture/heap_tiled`'s block-compressed layouts against an Apple M4 under macOS 27.0.1 and an
-//! Apple M3 Max under macOS 26.7, our own probes (EVs TXN3-htl5-m4 and TXN3-bcsw1-m4 to
+//! `texture/heap_tiled`'s block-compressed layouts against an Apple M4 under macOS 27.0.1 (an Apple
+//! M3 Max under 27.0.1 alike, EV M27-hblk1-m3: every row's answer, its CPU's span and its GPU's)
+//! and an Apple M3 Max under macOS 26.7, our own probes (EVs TXN3-htl5-m4 and TXN3-bcsw1-m4 to
 //! TXN3-bcsw4-m4, rerun on the M3 Max: each texture in a `Shared` placement heap over host pages,
 //! every block of every slice, level and depth slice written by `replaceRegion` with values that
 //! name it, the span read through the pages, then written again by a blit): each row's answered
@@ -27,7 +28,8 @@ struct Row {
     span: u64,
 }
 
-/// The M4's rows, as the probes state them, one a line: the format and type as Metal names them
+/// The M4's rows (and the M3 Max's under 27.0.1, EV M27-hblk1-m3, every field alike), as the
+/// probes state them, one a line: the format and type as Metal names them
 /// (less `MTLPixelFormat` and `MTLTextureType`), width, height, depth, levels, array length,
 /// size, alignment and the span's hash; `#` a heading.
 const M4_ROWS: &str = "

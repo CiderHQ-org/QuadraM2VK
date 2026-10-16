@@ -16,9 +16,9 @@
 //!   other byte the heap's, through the merge (`shadow-merge` once).
 //! - **Blocks**. A BC, ETC2, EAC or ASTC texture lies as its device's Metal level lays it out, at
 //!   each level: each row's span, every block numbered as the probes numbered it, hashes to the
-//!   M4's at 27.0.1 through `replaceRegion` and blits, and at 26.7 to the M3 Max's CPU's through
-//!   `replaceRegion` and its GPU's through blits; `getBytes` reads the CPU's writes of the CPU's
-//!   bytes.
+//!   M3 Max's and the M4's at 27.0.1 through `replaceRegion` and blits, and at 26.7 to the M3
+//!   Max's CPU's through `replaceRegion` and its GPU's through blits; `getBytes` reads the CPU's
+//!   writes of the CPU's bytes.
 //! - **Layouts the runtime does not follow** ([`HEAP_LAYOUTS`]). A texture Metal keeps
 //!   losslessly compressed (`heap-texture-lossless-layout`), one of a block-compressed format
 //!   whose placement no level measures (PVRTC, `heap-texture-block-compressed-layout`) and one

@@ -59,14 +59,29 @@
 //! `STRIPPED-DEPTH` lines). An ordinary depth, which never holds such a
 //! value, loads in place: nothing switched on, no pass over a stand-in, no image made
 //! (`ORDINARY-DEPTH` prints the command buffers its passes begin and submit).
+//!
+//! **A new target's pattern**: a new `Private` `Depth32Float` or `Depth32Float_Stencil8` render
+//! target of 16² reads Metal's pattern, a NaN with the sign set (all ones); a pass that loads it
+//! before anything wrote it and draws at 0.5 with depth writes draws everywhere under `Less` and
+//! `NotEqual` and nowhere under `Greater` and `Equal`, and stores every texel no fragment wrote as
+//! `0x7fffffff` (our probe `fd32`, the M3 Max under macOS 27.0.1, 64² drawn over half). Checked on
+//! a device that writes the pattern: each new target switched on once as its pass is planned, a
+//! `Depth32Float` tested over its magnitude stand-in where the device's test is not Metal's own,
+//! each such pass announcing the merge's corner (`signed-depth-test`), every store Metal's, and a
+//! `Depth32Float_Stencil8`'s test announced (`signed-depth-test`) at each pass that loads its
+//! pattern where the device's test is not Metal's own. On a device that may clamp the pattern,
+//! each target reads zero and draws and stores as over a zero depth, announced
+//! (`fresh-pattern-zeroed`) at its first load. A new target cleared first loads its clear in place
+//! (`FRESH-SIGNED-DEPTH` lines).
 
-use super::degrade_notices::signs_depth_tests;
 use super::degrade_notices::{assert_made_once, assert_once_allowing, bound_value_kinds};
 use super::degrade_notices::{clamps_depth_uploads, forced, loses_depth_denormals};
+use super::degrade_notices::{counts, signs_depth_tests};
 use super::degrade_notices::{made_compute_kinds, made_render_kinds, shared_in_system_memory};
 use super::depth_compares::run;
 use super::render_state::library;
-use super::{buffer_with, read_buffer, validated_device, Messages, ScratchCache, WAIT};
+use super::{buffer_with, read_buffer, validated_device, validated_device_with};
+use super::{Messages, ScratchCache, WAIT};
 use crate::air_library::AirLibrary;
 use crate::gpu::TEST_DEVICE;
 use metal2vulkan::bind::{DepthMagnitudeModule, SamplerDescriptor};
@@ -82,9 +97,9 @@ use metal2vulkan::pipeline::{
 use metal2vulkan_devtools::llvm_assemble_text;
 use metal2vulkan_runtime::{
     BlitOption, ClearColor, CommandBufferStatus, CommandQueue, ComputePipelineState, CpuCacheMode,
-    Degradation, Device, Error, HazardTrackingMode, Library, LoadAction, Origin, PipelineOptions,
-    Region, RenderPassDescriptor, RenderPipelineState, ResourceOptions, SamplerState, Size,
-    StorageMode, StoreAction, Texture, TextureDescriptor, WorkCounts,
+    Degradation, Device, DeviceOptions, Error, HazardTrackingMode, Library, LoadAction, Origin,
+    PipelineOptions, Region, RenderPassDescriptor, RenderPipelineState, ResourceOptions,
+    SamplerState, Size, StorageMode, StoreAction, Texture, TextureDescriptor, WorkCounts,
 };
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
@@ -1337,6 +1352,282 @@ fn a_nan_clear_depth_stores_and_tests_as_metal_s() {
             );
         }
         messages.take_notices();
+    }
+    let reported = messages.take();
+    assert!(
+        reported.is_empty(),
+        "the validation layer reported: {reported:#?}"
+    );
+}
+
+/// The side of [`fresh_target`]'s textures, which Metal compresses: each texel reads its pattern.
+const FRESH_SIDE: u64 = 16;
+
+/// A new `Private` render target of `pf` of [`FRESH_SIDE`]², sampled too, which nothing wrote.
+fn fresh_target(lane: &Lane, pf: PixelFormat) -> Texture {
+    let mut d = TextureDescriptor::texture_2d(pf, FRESH_SIDE, FRESH_SIDE, false);
+    d.usage = TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ;
+    d.resource_options = ResourceOptions::private();
+    lane.device.new_texture(&d).unwrap()
+}
+
+/// A pass that loads and stores `depth` (of `pf`, its stencil too) and draws white at 0.5 through
+/// `white` under `compare` with depth writes over a [`FRESH_SIDE`]² color target cleared to zero:
+/// how many texels it drew.
+fn fresh_pass(
+    lane: &Lane,
+    white: &RenderPipelineState,
+    (depth, pf): (&Texture, PixelFormat),
+    compare: CompareFunction,
+) -> usize {
+    let mut d =
+        TextureDescriptor::texture_2d(PixelFormat::RGBA8Unorm, FRESH_SIDE, FRESH_SIDE, false);
+    d.usage = TextureUsage::RENDER_TARGET;
+    d.resource_options = ResourceOptions::shared();
+    let color = lane.device.new_texture(&d).unwrap();
+    let mut pass = RenderPassDescriptor::new();
+    let target = &mut pass.color_attachments[0];
+    target.texture = Some(color.clone());
+    target.load_action = LoadAction::Clear;
+    target.clear_color = ClearColor::new(0.0, 0.0, 0.0, 0.0);
+    target.store_action = StoreAction::Store;
+    pass.depth_attachment.texture = Some(depth.clone());
+    pass.depth_attachment.load_action = LoadAction::Load;
+    pass.depth_attachment.store_action = StoreAction::Store;
+    if pf == PixelFormat::Depth32FloatStencil8 {
+        pass.stencil_attachment.texture = Some(depth.clone());
+        pass.stencil_attachment.load_action = LoadAction::Load;
+        pass.stencil_attachment.store_action = StoreAction::Store;
+    }
+    let mut state = DepthStencilDescriptor::default();
+    state.depth_compare_function = compare;
+    state.depth_write_enabled = true;
+    let state = lane.device.new_depth_stencil_state(&state).unwrap();
+    let words: Vec<u8> = [0.5f32, 0.0].iter().flat_map(|v| v.to_le_bytes()).collect();
+    let at = buffer_with(&lane.device, &words).unwrap();
+    let command_buffer = lane.queue.command_buffer().unwrap();
+    let mut encoder = command_buffer.render_command_encoder(&pass).unwrap();
+    encoder.set_render_pipeline_state(white).unwrap();
+    encoder.set_depth_stencil_state(&state).unwrap();
+    encoder.set_vertex_buffer(Some(&at), 0, 0).unwrap();
+    encoder
+        .draw_primitives(PrimitiveType::Triangle, 0, 3, 1, 0)
+        .unwrap();
+    encoder.end_encoding().unwrap();
+    command_buffer.commit().unwrap();
+    command_buffer.wait_until_completed_for(WAIT).unwrap();
+    assert_eq!(command_buffer.status(), CommandBufferStatus::Completed);
+    let side = FRESH_SIDE;
+    let mut out = vec![0u8; (side * side * 4) as usize];
+    let region = Region::new_2d(0, 0, side, side);
+    color
+        .get_bytes(&mut out, side * 4, side * side * 4, region, 0, 0)
+        .unwrap();
+    passed(&out)
+}
+
+/// The depth words of [`fresh_target`]'s `depth`, by a blit into a buffer with `option`.
+fn fresh_words(lane: &Lane, depth: &Texture, option: BlitOption) -> Vec<u32> {
+    let side = FRESH_SIDE;
+    let bytes = side * side * 4;
+    let out = buffer_with(&lane.device, &vec![0xee; bytes as usize]).unwrap();
+    let command_buffer = lane.queue.command_buffer().unwrap();
+    let mut blit = command_buffer.blit_command_encoder().unwrap();
+    let size = Size::new(side, side, 1);
+    let origin = Origin::new(0, 0, 0);
+    blit.copy_from_texture_to_buffer(depth, 0, 0, origin, size, &out, 0, side * 4, bytes, option)
+        .unwrap();
+    blit.end_encoding().unwrap();
+    command_buffer.commit().unwrap();
+    command_buffer.wait_until_completed_for(WAIT).unwrap();
+    assert_eq!(command_buffer.status(), CommandBufferStatus::Completed);
+    read_buffer(&out, 0, bytes)
+        .unwrap()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|w| u32::from_le_bytes(*w))
+        .collect()
+}
+
+/// The kinds [`a_new_target_s_pattern_loaded_unwritten_tests_and_stores_as_metal_s`]'s device
+/// announces at each occurrence, so that each format's targets announce their own.
+const FRESH_SIGNED_EACH: [Degradation; 2] = [
+    Degradation::SignedDepthTest,
+    Degradation::FreshPatternZeroed,
+];
+
+/// A new target's pattern, a NaN with the sign set, loaded by a pass before anything wrote it,
+/// tests and stores as Metal's (the module docs): each target switched on once as its pass is
+/// planned, a `Depth32Float` tested over its magnitude stand-in where the device's test is not
+/// Metal's own, each such pass announcing the merge's corner, a `Depth32Float_Stencil8`'s test
+/// announced at each pass that switches it on there; on a device that may clamp the pattern, each
+/// target reads and stores zero, announced at its first load; a target cleared first is not
+/// switched on. The device announces [`FRESH_SIGNED_EACH`] at each occurrence, so each format's
+/// targets announce their own.
+#[test]
+fn a_new_target_s_pattern_loaded_unwritten_tests_and_stores_as_metal_s() {
+    let cache = ScratchCache::new().unwrap();
+    let messages = Messages::default();
+    {
+        let each = |options: &mut DeviceOptions| {
+            options.announce_each = FRESH_SIGNED_EACH.into_iter().collect();
+        };
+        let device = validated_device_with(TEST_DEVICE, &messages, cache.path(), each).unwrap();
+        let name = device.name().to_owned();
+        let keeps = !clamps_depth_uploads(&device);
+        let native = device
+            .properties()
+            .driver_facts
+            .contains(&DriverFact::DepthTestComparesMagnitudes);
+        // The device keeps the pattern and its test is not Metal's: a `Depth32Float` takes the
+        // magnitude stand-in.
+        let takes = signs_depth_tests(&device);
+        let lane = Lane::new(device);
+        let white = |pf: PixelFormat| {
+            let mut d = white_descriptor(&lane.library);
+            d.depth_format = Some(pf);
+            if pf == PixelFormat::Depth32FloatStencil8 {
+                d.stencil_format = Some(pf);
+            }
+            let options = PipelineOptions::default();
+            lane.device.new_render_pipeline_state(&d, &options).unwrap()
+        };
+        let before = lane.device.work_counts();
+        let all = (FRESH_SIDE * FRESH_SIDE) as usize;
+        // Each function, whether a draw at 0.5 passes over Metal's pattern and over a zero depth.
+        let compares = [
+            (CompareFunction::Less, true, false),
+            (CompareFunction::NotEqual, true, true),
+            (CompareFunction::Greater, false, true),
+            (CompareFunction::Equal, false, false),
+        ];
+        let targets = compares.len();
+        let (depth, combined) = (BlitOption::None, BlitOption::DepthFromDepthStencil);
+        for (case, pf, option) in [
+            ("Depth32Float", PixelFormat::Depth32Float, depth),
+            (
+                "Depth32Float_Stencil8",
+                PixelFormat::Depth32FloatStencil8,
+                combined,
+            ),
+        ] {
+            let white = white(pf);
+            let tested = pf == PixelFormat::Depth32Float || native;
+            let case_before = lane.device.work_counts();
+            let mut notices = Vec::new();
+            for (compare, over_pattern, over_zero) in compares {
+                let target = fresh_target(&lane, pf);
+                let drawn = fresh_pass(&lane, &white, (&target, pf), compare);
+                let words = fresh_words(&lane, &target, option);
+                notices.extend(messages.take_notices());
+                println!(
+                    "FRESH-SIGNED-DEPTH {name} {case} {compare:?}: drawn {drawn} of {all}, \
+                     stored {:08x?}",
+                    &words[..2]
+                );
+                // Where the device keeps the pattern, each texel a fragment wrote holds 0.5 and
+                // every other the pattern without its sign, as Metal's; elsewhere the target reads
+                // zero, announced, and draws and stores as over a zero depth.
+                let (draws, unwritten) = match keeps {
+                    true => (over_pattern, 0x7fff_ffff),
+                    false => (over_zero, 0),
+                };
+                if tested || !keeps {
+                    let want = if draws { all } else { 0 };
+                    assert_eq!(drawn, want, "{name}: {case} under {compare:?}");
+                }
+                let want = if drawn == all { 0x3f00_0000 } else { unwritten };
+                assert!(
+                    words.iter().all(|&w| w == want),
+                    "{name}: {case} under {compare:?} stores {want:08x}: {:08x?}",
+                    &words[..4]
+                );
+            }
+            let written_back =
+                lane.device.work_counts().magnitude_write_backs - case_before.magnitude_write_backs;
+            let announced = counts(&notices);
+            let of = |kind: Degradation| announced.get(&kind).copied().unwrap_or(0);
+            println!(
+                "FRESH-SIGNED-DEPTH {name} {case}: signed-depth-test {}, fresh-pattern-zeroed {}, \
+                 written back {written_back}",
+                of(Degradation::SignedDepthTest),
+                of(Degradation::FreshPatternZeroed),
+            );
+            // Over the stand-in, each pass stores the depth after a draw with depth writes: its
+            // words are merged back, which announces the merge's corner (a draw writing exactly
+            // +inf over the stored NaN). A target without a stand-in on a device whose test is not
+            // Metal's announces its test at the pass that loads its pattern and switches it on.
+            let stands_in = pf == PixelFormat::Depth32Float && takes;
+            assert_eq!(
+                written_back,
+                if stands_in { targets as u64 } else { 0 },
+                "{name}: {case}: passes merged back"
+            );
+            let signed = match (keeps, tested) {
+                (false, _) => 0,
+                (true, true) => written_back as usize,
+                (true, false) => targets,
+            };
+            assert_eq!(
+                of(Degradation::SignedDepthTest),
+                signed,
+                "{name}: {case}: signed-depth-test"
+            );
+            if keeps && !tested {
+                let at_load = notices
+                    .iter()
+                    .filter_map(|m| m.degradation.as_ref())
+                    .filter(|n| n.degradation == Degradation::SignedDepthTest)
+                    .all(|n| n.reason.starts_with("new_texture "));
+                assert!(
+                    at_load,
+                    "{name}: {case}: its test, at the pass that loads it"
+                );
+            }
+            // A device that may clamp the pattern writes none: zero, announced where each target's
+            // pass first loads it.
+            let zeroed = if keeps { 0 } else { targets };
+            assert_eq!(
+                of(Degradation::FreshPatternZeroed),
+                zeroed,
+                "{name}: {case}: fresh-pattern-zeroed"
+            );
+        }
+        let after = lane.device.work_counts();
+        let moved = |of: fn(&WorkCounts) -> u64| of(&after) - of(&before);
+        println!(
+            "FRESH-SIGNED-DEPTH {name}: switched on {}, passes over a stand-in {}",
+            moved(|c| c.signed_depth_switch_ons),
+            moved(|c| c.magnitude_stand_in_passes),
+        );
+        // Each new target switched on once where the device keeps its pattern; none elsewhere.
+        let switched = if keeps { 2 * targets as u64 } else { 0 };
+        assert_eq!(moved(|c| c.signed_depth_switch_ons), switched, "{name}");
+        let stand_ins = if takes { targets as u64 } else { 0 };
+        assert_eq!(moved(|c| c.magnitude_stand_in_passes), stand_ins, "{name}");
+        // A new target cleared first loads its clear in place.
+        let white = white(PixelFormat::Depth32Float);
+        let target = fresh_target(&lane, PixelFormat::Depth32Float);
+        lane.clearing_pass(&target, 0.75);
+        let before = lane.device.work_counts();
+        let pair = (&target, PixelFormat::Depth32Float);
+        let drawn = fresh_pass(&lane, &white, pair, CompareFunction::Less);
+        let switched =
+            lane.device.work_counts().signed_depth_switch_ons - before.signed_depth_switch_ons;
+        println!("FRESH-SIGNED-DEPTH {name} cleared first: drawn {drawn}, switched on {switched}");
+        assert_eq!(
+            drawn, all,
+            "{name}: a draw at 0.5 under Less over a clear of 0.75"
+        );
+        assert_eq!(switched, 0, "{name}: a cleared target is not switched on");
+        let announced = counts(&messages.take_notices());
+        assert!(
+            FRESH_SIGNED_EACH
+                .iter()
+                .all(|kind| !announced.contains_key(kind)),
+            "{name}: a cleared target announces nothing: {announced:?}"
+        );
     }
     let reported = messages.take();
     assert!(

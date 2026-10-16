@@ -71,6 +71,15 @@
 //! it takes its clamp so ([`SamplerWord::LEVEL_RULE`]); elsewhere the device keeps the level it
 //! is handed. With one filter both ways the level's sign chooses nothing, so a level handed to
 //! the device needs no fraction to stay minified.
+//!
+//! **A level from derivatives or gradients** (a fragment function's implicit level, explicit
+//! gradients, an LOD query) is the device's level arithmetic: Vulkan's level of detail, whose
+//! scale factor may be approximated, and the rounding above. Metal's level of detail there is not
+//! measured, so nothing hands the device Metal's. Nor does anything hand it Metal's level where
+//! the rule is not reached: an integer texture's level, and a constexpr sampler's that
+//! [`LevelSnap::plan`] leaves (a level bias of its own, a clamp it does not take). Where the level
+//! chooses what a sample reads and no other note records the sample, the module records
+//! `PrecisionNote::DeviceSampleLevel` ([`device_when`]).
 
 use crate::air::abi::{Coordinates, MipFilter, SamplerState};
 use crate::air::ir::{Const, Value};
@@ -78,7 +87,7 @@ use crate::error::Error;
 use crate::float16::{f16_bits_to_f32, f32_to_f16_bits};
 use crate::lower::arith::legal::{FloatFmt, Form, Held};
 use crate::lower::arith::texel_round::{self, HalfRounding};
-use crate::lower::select::SelectCx;
+use crate::lower::select::{any_of, NoteClause, NoteOn, NoteTest, SelectCx};
 use crate::metal::sampler::SamplerWord;
 use crate::metal::SamplerMipFilter;
 use crate::pipeline::sym::SamplerRef;
@@ -87,7 +96,7 @@ use crate::spirv::error::BResult;
 use crate::spirv::ids::Value as SValue;
 use crate::spirv::ir::{BinOp, ConstBits, Constant, GlslOp, Type as SType, UnOp};
 
-use super::{Lod, SampleOp};
+use super::{BiasReach, Lod, SampleOp};
 
 #[cfg(test)]
 mod tests;
@@ -392,6 +401,143 @@ pub(super) fn select(
         return Ok(None);
     }
     Ok(Some(rule))
+}
+
+/// Where the level of `op` through `sampler` (`None`: an argument buffer's) is the device's level
+/// arithmetic and no other note records it (`PrecisionNote::DeviceSampleLevel`, the module docs),
+/// `filtered` whether the sample's filter note records it where its sampler filters
+/// (`linear::filter_note`), `snapped` whether [`select`] hands the device Metal's level, `value`
+/// the sample's level or bias, and `integer` whether the texture's texels are integers.
+///
+/// - Never on a device that samples through Metal's own sampler or natively
+///   (`DeviceSampling`), nor for a cube, whose level `CubeGradientFootprint` records, nor for a
+///   comparison, whose level `DeviceDepthComparison` records where the device compares.
+/// - Always for an LOD query, which answers the level.
+/// - For a sample at an implicit level whose bias is within the device's limit (a bias past it
+///   and hoisted derivatives record `GradFromBias`), with explicit gradients, or at an explicit
+///   level that [`select`] does not snap and the device may not read as Metal does
+///   ([`reads_metal_level`]): where its sampler chooses a
+///   level or a filter by the level (a mip filter, or minification and magnification filters
+///   that differ) and the filter note does not hold. A filtered sample's note holds wherever its
+///   sampler filters, so through a constexpr sampler that is nearest filters and a nearest mip
+///   filter, through a runtime sampler where its word states those, and through an argument
+///   buffer's sampler never; a sample no filter note records (an integer texture's) wherever its
+///   sampler chooses, an argument buffer's always.
+pub(super) fn device_when(
+    cx: &SelectCx<'_>,
+    op: &SampleOp,
+    sampler: Option<SamplerRef>,
+    (cube, filtered): (bool, bool),
+    (snapped, value, integer): (bool, Option<Value>, bool),
+) -> Result<Vec<NoteClause>, Error> {
+    let always = || vec![NoteClause::new()];
+    if cx.profile.device_samples() || cube {
+        return Ok(Vec::new());
+    }
+    let state = match sampler {
+        Some(SamplerRef::Constexpr(words)) => Some(super::state_of(words)?),
+        _ => None,
+    };
+    match op {
+        SampleOp::Lod { .. } => return Ok(always()),
+        SampleOp::Sample { dref: Some(_), .. } => return Ok(Vec::new()),
+        SampleOp::Sample {
+            lod:
+                Lod::Implicit {
+                    reach: BiasReach::Within,
+                    ..
+                }
+                | Lod::Grad(..),
+            ..
+        } => {}
+        SampleOp::Sample {
+            lod: Lod::Level(_) | Lod::Base { .. },
+            ..
+        } if !snapped => {
+            let level = constant_level(cx, op, value);
+            if level.is_some_and(|x| reads_metal_level(x, state.as_ref(), integer)) {
+                return Ok(Vec::new());
+            }
+        }
+        _ => return Ok(Vec::new()),
+    }
+    Ok(match (sampler, state) {
+        (Some(SamplerRef::Constexpr(_)), Some(s)) => {
+            let chooses = s.mip_filter != MipFilter::None || s.min_filter != s.mag_filter;
+            match chooses && !filtered {
+                true => always(),
+                false => Vec::new(),
+            }
+        }
+        (Some(SamplerRef::Slot(n)), _) => {
+            let on = NoteOn::Sampler(n);
+            let nearest_mip = 1 << SamplerWord::MIP_FILTER_SHIFT;
+            match filtered {
+                true => any_of([NoteTest::equal(on, SamplerWord::LINEAR_FILTER, nearest_mip)]),
+                false => any_of([
+                    NoteTest::differ(on, SamplerWord::MIP_FILTER, 0),
+                    NoteTest::equal(on, SamplerWord::LINEAR, SamplerWord::MIN_LINEAR),
+                    NoteTest::equal(on, SamplerWord::LINEAR, SamplerWord::MAG_LINEAR),
+                ]),
+            }
+        }
+        _ => match filtered {
+            true => Vec::new(),
+            false => always(),
+        },
+    })
+}
+
+/// The level sample `op` reads at an explicit level where the function states it: its level
+/// `value` (`None`: level 0), or a kernel's sample without a level, at its bias `value` (`None`:
+/// level 0); `None` where a clamp of the call's own enters or the value is not a constant.
+fn constant_level(cx: &SelectCx<'_>, op: &SampleOp, value: Option<Value>) -> Option<f32> {
+    let SampleOp::Sample {
+        lod, min_lod: None, ..
+    } = op
+    else {
+        return None;
+    };
+    match lod {
+        Lod::Level(None)
+        | Lod::Base {
+            bias: None,
+            min: None,
+        } => Some(0.0),
+        Lod::Level(Some(_)) | Lod::Base { min: None, .. } => {
+            match value.and_then(|v| super::select::konst(cx, v)) {
+                Some(Const::Null) => Some(0.0),
+                Some(Const::Float(bits)) => Some(f32::from_bits(*bits as u32)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Whether the device reads Metal's level at the constant explicit level `x` that [`select`] does
+/// not snap, through constexpr sampler `state` (`None`: a runtime or argument buffer's), of a
+/// texture of `integer` texels:
+/// - through a constexpr sampler, where `x` is a whole level that its clamp leaves whole within
+///   `[0, 64]`, without a level bias of its own; or, of a texture of float texels, where its snap
+///   hands the device `x` itself ([`LevelSnap::of`]);
+/// - through a runtime or argument buffer's sampler, of a texture of float texels, where `x` is a
+///   whole level within `[0, 64]`: its clamp is on Metal's grid there (`metal::sampler::vk_sampler`).
+///   An integer texture's sampler keeps the descriptor's clamp, which may move such a level off it.
+fn reads_metal_level(x: f32, state: Option<&SamplerState>, integer: bool) -> bool {
+    let whole = |x: f32| x.fract() == 0.0 && (0.0..=CAP).contains(&x);
+    match state {
+        Some(s) => {
+            let (min, max) = (s.lod_min_clamp.to_f32(), s.lod_max_clamp.to_f32());
+            let clamps = !min.is_nan() && !max.is_nan() && min <= max;
+            let kept =
+                s.lod_bias.to_f32() == 0.0 && clamps && whole(x) && whole(x.max(min).min(max));
+            let snaps = !integer
+                && LevelSnap::plan(s).is_some_and(|snap| snap.of(x).to_bits() == x.to_bits());
+            kept || snaps
+        }
+        None => !integer && whole(x),
+    }
 }
 
 /// The `u32` constant `v`.

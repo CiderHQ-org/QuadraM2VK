@@ -39,7 +39,7 @@ use crate::pipeline::interface::PushLoc;
 use crate::pipeline::sym::{Axis, PushField, ResourceKind, ResourceSlot, SpecKey, Stage};
 use crate::pipeline::testing::{
     compile, engine_dir, exact_maths, link_and_validate, llvm_assemble, meter, profile,
-    typed_module, without_math_routines, AssembleError,
+    tiny_check_scales, typed_module, without_math_routines, AssembleError,
 };
 use crate::spirv::interp::{run, Buffer, Config, Resources};
 use crate::spirv::ir::StorageClass;
@@ -312,8 +312,9 @@ fn metal_math_variants_select_metals_functions() {
 }
 
 /// Each float arithmetic result of `words` (`OpFAdd`, `OpFSub`, `OpFMul`, `OpFDiv`, and
-/// `GLSL.std.450 Fma`), as its opcode and whether it is decorated `NoContraction`.
-fn float_arithmetic(words: &[u32]) -> Vec<(u32, bool)> {
+/// `GLSL.std.450 Fma`) but those of `apart`, as its opcode and whether it is decorated
+/// `NoContraction`.
+fn float_arithmetic(words: &[u32], apart: &[u32]) -> Vec<(u32, bool)> {
     let (mut results, mut exact) = (Vec::new(), Vec::new());
     let arith = [
         crate::spv::Op::FAdd,
@@ -338,6 +339,7 @@ fn float_arithmetic(words: &[u32]) -> Vec<(u32, bool)> {
     }
     results
         .into_iter()
+        .filter(|(_, id)| !apart.contains(id))
         .map(|(op, id)| (op, exact.contains(&id)))
         .collect()
 }
@@ -349,9 +351,12 @@ fn float_arithmetic(words: &[u32]) -> Vec<(u32, bool)> {
 /// Metal's, an `OpFMul` elsewhere), `t - 1`, `t + 1`, and the reciprocal's estimate. The caller's
 /// `fast` arithmetic stays undecorated. Without the decorations, Mesa's `lower_flrp` rule turned
 /// GELU's `1 + tanh` into `t` on RADV and x86 lavapipe (RC3 cases e72f550f and 2d5f3949,
-/// `gelu(-8)`).
+/// `gelu(-8)`). Under `FloatMathsPolicy::Exact` each of the caller's two products is checked; a
+/// fused check (`TinyCheck::Fused`) scales an operand by its own multiply, `NoContraction`,
+/// counted apart.
 #[test]
 fn fast_tanh_is_one_operation() {
+    use crate::lower::arith::denormal::{tiny_check, TinyCheck};
     let Some(bitcode) = assemble() else {
         return;
     };
@@ -361,7 +366,24 @@ fn fast_tanh_is_one_operation() {
         let a =
             compile(&bitcode, FAST_TANH_IN_GELU, &p).unwrap_or_else(|e| panic!("{what}: {e:?}"));
         let (_, words) = link_and_validate(&a, &p).unwrap_or_else(|e| panic!("{what}: L3: {e}"));
-        let ops = float_arithmetic(&without_math_routines(&words));
+        let own = without_math_routines(&words);
+        let scales = tiny_check_scales(&own);
+        let fused = tiny_check(&p) == Some(TinyCheck::Fused);
+        assert_eq!(
+            scales.len(),
+            2 * usize::from(fused),
+            "{what}: the checks' scaling"
+        );
+        let ops = float_arithmetic(&own, &scales);
+        let exact_muls = |ops: &[(u32, bool)]| {
+            let mul = (crate::spv::Op::FMul as u32, true);
+            ops.iter().filter(|&&o| o == mul).count()
+        };
+        assert_eq!(
+            exact_muls(&float_arithmetic(&own, &[])),
+            exact_muls(&ops) + scales.len(),
+            "{what}: the checks' scaling, NoContraction"
+        );
         let count = |op: crate::spv::Op, exact: bool| {
             ops.iter()
                 .filter(|(o, e)| *o == op as u32 && *e == exact)

@@ -1892,7 +1892,8 @@ fn select_one(
     // filter: a blend of two levels' comparisons where the device compares
     // (`Compared::blend_device_when`).
     let by = stat.map(|(r, _)| r);
-    if let Some(note) = super::linear::filter_note(cx, &op, form, (by, image))? {
+    let filter = super::linear::filter_note(cx, &op, form, (by, image))?;
+    if let Some(note) = filter {
         let when = match &compared {
             Some(c) if c.blends() => c.blend_device_when(),
             _ => super::linear::filter_when(linear.as_ref(), by),
@@ -1938,6 +1939,16 @@ fn select_one(
     // A level or a kernel's bias handed to the device on Metal's grid, a runtime or argument
     // buffer's sampler's by its word.
     let level = super::level::select(cx, &op, stat, (ops.get(TexRole::LodValue), integer))?;
+    // A level the device's arithmetic takes (from derivatives or gradients, or a level the rule
+    // does not reach), where it chooses what the sample reads and no other note records it.
+    let when = super::level::device_when(
+        cx,
+        &op,
+        by,
+        (cube, filter.is_some()),
+        (level.is_some(), ops.get(TexRole::LodValue), integer),
+    )?;
+    cx.note_when(PrecisionNote::DeviceSampleLevel, when, m)?;
     if let SamplerArg::Static(SamplerRef::Slot(n), _) = sampler {
         if let Some(s) = cx.families.sampler.slots.get_mut(&n) {
             match snap.as_ref().map(|p| p.kind) {

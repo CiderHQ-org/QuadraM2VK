@@ -167,6 +167,7 @@ fn entry(module: Module, func: FuncId, roles: Vec<ParamRole>) -> Entry {
         function_tables: Default::default(),
         lockstep: Default::default(),
         call_stack: None,
+        unmeasured_speculation: false,
         module,
     }
 }

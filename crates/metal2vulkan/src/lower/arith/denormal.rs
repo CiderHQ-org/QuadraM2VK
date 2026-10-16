@@ -11,16 +11,18 @@
 //! are listed: a widened `half` is never an `f32` denormal, and Metal's `bfloat` and `double`
 //! environments are not measured.
 
+use crate::device::profile::FloatFunctions;
 use crate::device::DeviceProfile;
 use crate::error::DriverDeviation;
+use crate::lower::arith::fma;
 use crate::lower::arith::legal::Form;
 use crate::lower::arith::math::FloatFn;
 use crate::lower::arith::narrow::u32_form;
-use crate::lower::arith::ops::{splat, ty};
+use crate::lower::arith::ops::{fsplat, splat, ty};
 use crate::spirv::builder::FunctionBuilder;
 use crate::spirv::error::BResult;
 use crate::spirv::ids::Value;
-use crate::spirv::ir::{BinOp, ConvOp};
+use crate::spirv::ir::{BinOp, Contraction, ConvOp, GlslOp};
 
 /// How Metal reads an `f32` denormal operand of one operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -202,6 +204,150 @@ impl Flush {
     /// each.
     pub fn words(self, f: Form) -> u32 {
         (self.operands.count_ones() + u32::from(self.result)) * flush_words(f)
+    }
+}
+
+/// Whether profile `p` computes Metal's `float` product where the exact product lies below
+/// `2^-126` and the device's rounding reaches `±2^-126` ([`tiny_product`]): where its functions
+/// are to answer as Metal's (`FloatFunctions::Device`, the policy's `FloatMathsPolicy::Exact`).
+/// Metal flushes such a product to the zero of its sign, deciding tininess before rounding; every
+/// Vulkan device measured off MoltenVK rounds first, those that flush their denormals and those
+/// that keep them (the authored tininess cases' rows on RADV, ANV, NVIDIA and lavapipe), and
+/// Vulkan states no order. On MoltenVK the multiply is Metal's own (`FloatFunctions::Metal`);
+/// under native device maths (`FloatFunctions::Native`, the default) the device's product is
+/// taken, which the runtime announces once per device (`float-tininess-after-rounding`).
+pub fn checks_tiny_products(p: &DeviceProfile) -> bool {
+    p.fields().float_functions == FloatFunctions::Device
+}
+
+/// How a check of a `float` product at `±2^-126` decides whether the exact product lies below
+/// `2^-126` ([`tiny_product`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TinyCheck {
+    /// By one `OpFmaKHR` on the operands' magnitudes, one of them scaled: where the profile's
+    /// `float` fused multiply-add is `OpFmaKHR` (`fma::Route::Khr`).
+    Fused,
+    /// By the operands' bits, in integer operations of Vulkan 1.2's core alone.
+    Bits,
+}
+
+/// The check of a `float` product at `±2^-126` profile `p` takes, where it checks one
+/// ([`checks_tiny_products`]).
+pub fn tiny_check(p: &DeviceProfile) -> Option<TinyCheck> {
+    if !checks_tiny_products(p) {
+        return None;
+    }
+    Some(match fma::float_route(p) {
+        fma::Route::Khr => TinyCheck::Fused,
+        _ => TinyCheck::Bits,
+    })
+}
+
+/// Metal's product of `float` lanes `a` and `b` (form `f`, each read as Metal reads a denormal)
+/// from `r`, the device's product of them: the zero of `r`'s sign where `r` is `±2^-126` and the
+/// exact product lies below `2^-126` in magnitude, else `r`, decided by `check`. Inline and
+/// branchless: the device's compiler inlines any call, so a shared routine would not shrink what
+/// it compiles at each product.
+///
+/// Only a product whose exact value lies within half a unit of `2^-126` rounds to `±2^-126`, and
+/// a zero, denormal, infinite or NaN operand gives no such `r` (a denormal operand is read as a
+/// zero before the multiply, by the device or [`flush`]). So where `r` is `±2^-126` both operands
+/// are normal, at most `1 + 2^-23` in magnitude (the other is at least `2^-126`), and with biased
+/// exponent fields `ea` and `eb` and significands `ma` and `mb` (hidden bit set) the exact product
+/// is `ma · mb · 2^(ea + eb - 300)`, with `ea + eb` 126, 127 or 128.
+///
+/// - [`TinyCheck::Fused`]: `OpFmaKHR(|a| · 2^48, |b|, -2^-78)` is `2^48 · (|a · b| - 2^-126)`
+///   rounded once (Vulkan's precision table: correctly rounded), negative exactly where the exact
+///   product lies below `2^-126`. `|a| · 2^48` is exact and finite, an `OpFMul` decorated
+///   `NoContraction` (rounded on its own, as it is exact); the difference is a multiple
+///   of `2^-174` (`ea + eb` is at least 126), so scaled it is zero or at least `2^-126`, a normal
+///   number no denormal mode changes and rounding keeps the sign of. Elsewhere the lane is not
+///   `±2^-126` and the test is not taken.
+/// - [`TinyCheck::Bits`]: below `2^-126` where `ea + eb <= 126`, or where `ea + eb == 127` and
+///   `ma · mb < 2^47`, which the high word of `OpUMulExtended` tells (`hi < 2^15`).
+///
+/// The test of `r` and its zero are on `r`'s bits, so the same in every float mode.
+pub fn tiny_product(
+    fb: &mut FunctionBuilder<'_>,
+    f: Form,
+    [a, b]: [Value; 2],
+    r: Value,
+    check: TinyCheck,
+) -> BResult<Value> {
+    let u = u32_form(f);
+    let (ut, ft) = (ty(fb, u)?, ty(fb, f)?);
+    let rb = fb.convert(ConvOp::Bitcast, r, ut)?;
+    // `r` is `±2^-126`.
+    let magnitude = splat(fb, u, 0x7FFF_FFFF)?;
+    let least = splat(fb, u, 0x0080_0000)?;
+    let m = fb.binary(BinOp::BitwiseAnd, rb, magnitude)?;
+    let at_least = fb.binary(BinOp::IEqual, m, least)?;
+    let below = match check {
+        TinyCheck::Fused => fused_below(fb, f, [a, b])?,
+        TinyCheck::Bits => bits_below(fb, u, [a, b])?,
+    };
+    let tiny = fb.binary(BinOp::LogicalAnd, at_least, below)?;
+    let sign = splat(fb, u, 0x8000_0000)?;
+    let signed_zero = fb.binary(BinOp::BitwiseAnd, rb, sign)?;
+    let out = fb.select(tiny, signed_zero, rb)?;
+    fb.convert(ConvOp::Bitcast, out, ft)
+}
+
+/// Whether `|a · b|` lies below `2^-126` ([`TinyCheck::Fused`]), for normal `a` and `b` at most
+/// `1 + 2^-23` in magnitude whose product rounds to `±2^-126`.
+fn fused_below(fb: &mut FunctionBuilder<'_>, f: Form, [a, b]: [Value; 2]) -> BResult<Value> {
+    let x = fb.glsl(GlslOp::FAbs, &[a])?;
+    let y = fb.glsl(GlslOp::FAbs, &[b])?;
+    let scale = fsplat(fb, f, 2f64.powi(48))?;
+    // Exact, and `NoContraction` so that no device folds it into another operation.
+    let x = fb.binary_with(BinOp::FMul, x, scale, Contraction::Forbidden)?;
+    let edge = fsplat(fb, f, -(2f64.powi(-78)))?;
+    let d = fb.fma(x, y, edge)?;
+    let zero = fsplat(fb, f, 0.0)?;
+    fb.binary(BinOp::FOrdLessThan, d, zero)
+}
+
+/// Whether the exact product of `a` and `b` lies below `2^-126` ([`TinyCheck::Bits`]), on `u32`
+/// lanes of form `u`, for operands whose product rounds to `±2^-126`.
+fn bits_below(fb: &mut FunctionBuilder<'_>, u: Form, [a, b]: [Value; 2]) -> BResult<Value> {
+    let ut = ty(fb, u)?;
+    let ab = fb.convert(ConvOp::Bitcast, a, ut)?;
+    let bb = fb.convert(ConvOp::Bitcast, b, ut)?;
+    // The exponent fields' sum, in place: at most 2 · 254 · 2^23, below 2^32.
+    let field = splat(fb, u, 0x7F80_0000)?;
+    let ea = fb.binary(BinOp::BitwiseAnd, ab, field)?;
+    let eb = fb.binary(BinOp::BitwiseAnd, bb, field)?;
+    let sum = fb.binary(BinOp::IAdd, ea, eb)?;
+    let below = splat(fb, u, 126 << 23)?;
+    let edge = splat(fb, u, 127 << 23)?;
+    let low = fb.binary(BinOp::ULessThanEqual, sum, below)?;
+    let at_edge = fb.binary(BinOp::IEqual, sum, edge)?;
+    // The significands' product below `2^47`: its high word below `2^15`.
+    let fraction = splat(fb, u, 0x007F_FFFF)?;
+    let hidden = splat(fb, u, 0x0080_0000)?;
+    let mut significand = |x: Value| -> BResult<Value> {
+        let m = fb.binary(BinOp::BitwiseAnd, x, fraction)?;
+        fb.binary(BinOp::BitwiseOr, m, hidden)
+    };
+    let (ma, mb) = (significand(ab)?, significand(bb)?);
+    let product = fb.binary(BinOp::UMulExtended, ma, mb)?;
+    let hi = fb.composite_extract(product, &[1])?;
+    let limit = splat(fb, u, 0x8000)?;
+    let under = fb.binary(BinOp::ULessThan, hi, limit)?;
+    let edge_tiny = fb.binary(BinOp::LogicalAnd, at_edge, under)?;
+    fb.binary(BinOp::LogicalOr, low, edge_tiny)
+}
+
+/// An upper estimate of the SPIR-V words of one [`tiny_product`] on form `f` by `check`: the test
+/// of `r` and the zero, seven instructions; [`TinyCheck::Fused`]'s five more, three constants and
+/// the scaling's decoration (three words), [`TinyCheck::Bits`]'s 16 more, six constants and the
+/// extended product's struct type; each instruction of at most six words, and the constants' share
+/// (a vector's constants carry their lanes).
+pub fn tiny_product_words(f: Form, check: TinyCheck) -> u32 {
+    let lanes = u32::from(f.lanes);
+    match check {
+        TinyCheck::Fused => 93 + 7 * (7 + lanes),
+        TinyCheck::Bits => 160 + 10 * (7 + lanes),
     }
 }
 

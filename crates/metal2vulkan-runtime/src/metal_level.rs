@@ -35,10 +35,10 @@ pub enum MetalLevel {
     /// XRR2-pla1-m3).
     MacOS26_7,
     /// macOS 27.0.1 (build 26A434), measured on an Apple M3 Max (EVs M27-pfi1-m3, M27-lin1-m3,
-    /// M27-heap1-m3, M27-props1-m3, M27-mips1-m3 to M27-mips4-m3 and M27-imp1-m3), and where no
-    /// M3 Max probe has replaced it, on an Apple M4 (heap blocks and compressed blits). An M4's
-    /// answers differ where both were measured in the formats from 630 to 645, which it describes,
-    /// in `gpuCoreCount` and in `supportsComputeCompressedTextureWrite`.
+    /// M27-heap1-m3, M27-hblk1-m3, M27-cblit1-m3, M27-props1-m3, M27-mips1-m3 to M27-mips4-m3 and
+    /// M27-imp1-m3). An Apple M4's answers differ where both were measured in the formats from 630
+    /// to 645, which it describes, in `gpuCoreCount` and in
+    /// `supportsComputeCompressedTextureWrite`.
     MacOS27_0_1,
 }
 
@@ -84,9 +84,9 @@ struct Row {
 }
 
 /// How a level's Metal places a block-compressed texture's blocks in its levels' tiles, per
-/// family (`texture/heap_tiled.rs`); `None` where not measured. Measured on one machine a
-/// level, an Apple M3 Max under macOS 26.7 and an Apple M4 under 27.0.1: whether the GPU or the
-/// release makes their difference is not known.
+/// family (`texture/heap_tiled.rs`); `None` where not measured. Where two levels' rows differ,
+/// the release makes the difference: an Apple M3 Max places them as each release's row says (and
+/// an Apple M4 under 27.0.1 alike).
 struct HeapBlocks {
     bc: Option<BlockPlacement>,
     etc: Option<BlockPlacement>,
@@ -121,22 +121,26 @@ const MACOS_26_7: Row = Row {
 
 /// macOS 27.0.1 on an Apple M3 Max: its descriptor knows every value the runtime names (it
 /// describes none from 630 on but `AnyDepth` and `AnyStencil`; the table of
-/// `pixel_format_info`). Its heap blocks and compressed blits are an Apple M4's at 27.0.1, which
-/// no M3 Max probe has replaced (`docs/FAST-PATHS.md`, known gaps); the heap shapes the M3 Max
-/// was asked of every format (22,856 answers) are the model's.
+/// `pixel_format_info`). Its heap blocks and compressed blits are its own, an Apple M4's at 27.0.1
+/// alike; the heap shapes the M3 Max was asked of every format (22,856 answers) are the model's.
 const MACOS_27_0_1: Row = Row {
     macos: "27.0.1",
     version: [27, 0, 1],
     unknown: &[],
-    // Every BC, ETC2, EAC and ASTC format, every element of every level of 815 textures (EVs
-    // TXN3-htl5-m4 and TXN3-bcsw1-m4 to TXN3-bcsw4-m4).
+    // Every BC, ETC2, EAC and ASTC format, every element of every level of 815 textures on an
+    // Apple M4 (EVs TXN3-htl5-m4 and TXN3-bcsw1-m4 to TXN3-bcsw4-m4); the M3 Max answers the 809
+    // of `tests/heap_tiled_blocks.rs` alike, each one's size, alignment, CPU span and GPU span (EV
+    // M27-hblk1-m3).
     heap_blocks: HeapBlocks {
         bc: Some(BlockPlacement::Narrow),
         etc: Some(BlockPlacement::Narrow),
         astc: Some(BlockPlacement::Halved),
         gpu_rows: GpuRows::AsCpu,
     },
-    // EVs FXR-fxr3-m4, FXR-fxr5-m4 and FXR-cblit-m4: every rule matched every texel.
+    // EV M27-cblit1-m3: each rule matched every texel of its formats' blits through a texture
+    // Metal compresses (private, array, heap, texture to texture, a shared texture's blit out),
+    // and every texture Metal keeps uncompressed, every CPU copy and 7 other formats kept their
+    // bytes; an Apple M4 alike (EVs FXR-fxr3-m4, FXR-fxr5-m4 and FXR-cblit-m4).
     compressed_blits: true,
     // EV M27-heap1-m3 (and an Apple M4 alike, EVs APX2-un1-m4, TTG-nil1-m4 and TTG-nil4-m4):
     // every type but a texture buffer 128, private and shared storage, `ShaderRead` and

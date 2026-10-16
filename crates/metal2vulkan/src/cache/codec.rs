@@ -1206,6 +1206,15 @@ codec_enum! {
         Depth16BiasSide { raises },
         SynthesizedGeometry { weights, layer, viewport },
         ObjectThreadgroupArena { static_bytes, payload },
+        ExactFormsOverCompilerLimit {
+            sampling,
+            float_maths,
+            texel_conversion,
+            half_rounding,
+            nan_and_min_max,
+            rounding_order,
+            half_blend
+        },
     }
     UniformViewChoice { Viewed, Spare, Kept }
     Mechanism {
@@ -1378,6 +1387,9 @@ codec_enum! {
         NativeMix,
         ColorAttachmentGroups,
         TessellationTriangleOrder,
+        UnmeasuredGroupSpeculation,
+        NotMipmappedAnisotropicFilter,
+        DeviceSampleLevel,
     }
     BindingSource {
         Buffer(f0), Texture(f0), Sampler(f0), CombinedTextureSampler { texture, sampler },

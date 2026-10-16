@@ -3002,3 +3002,173 @@ fn a_fragment_reads_the_viewport_index_its_vertex_function_wrote() {
         );
     }
 }
+
+/// A render pipeline whose largest stage module passes a device's compiler word bound is
+/// translated again with the device policy's exact forms dropped until it fits: native sampling
+/// first, then every exact answer that grows a module native, recording which forms it dropped
+/// (`RuntimeFact::ExactFormsOverCompilerLimit`) and keeping the compile's key and profile
+/// fingerprint. A pipeline compiled from stages compiled ahead (the runtime's shape) is fitted from
+/// its functions' descriptor ([`Device::fit_render_variant`]), and is left as it is from its
+/// `Compiled` stages, which cannot be translated again. The bound is pinned low in code
+/// (`Device::fit_within`); no device identity is needed. Uses the owned `runtime_examples` fixture
+/// (a sampled `half` fragment), on a generic desktop profile whose sampler is not Metal's own.
+#[test]
+fn a_module_over_the_compiler_bound_drops_its_exact_forms_to_fit() {
+    use crate::device::policy::SamplingPolicy;
+    use crate::pipeline::artifact::RenderPipeline;
+    use crate::pipeline::facts::RuntimeFact;
+    let path = metal2vulkan_devtools::fixtures_dir().join("examples/runtime_examples.ll");
+    let bc = match llvm_assemble(&path) {
+        Ok(b) => b,
+        Err(AssembleError::Missing(why)) => {
+            eprintln!("SKIPPED: {why}");
+            return;
+        }
+        Err(AssembleError::Rejected(why)) => panic!("llvm-as rejected runtime_examples: {why}"),
+    };
+    let lib = Library::from_air(&bc).expect("library");
+    let vertex = lib.function("colored_vertex").expect("vertex");
+    let fragment = lib.function("sampled_fragment").expect("fragment");
+    let descriptor = || {
+        let mut d = RenderPipelineDescriptor::new(StageSource::Function(FunctionDescriptor::new(
+            vertex.clone(),
+        )));
+        d.fragment = Some(StageSource::Function(FunctionDescriptor::new(
+            fragment.clone(),
+        )));
+        d.color_attachments[0] = Some(ColorAttachmentDescriptor::new(
+            metal::PixelFormat::RGBA8Unorm,
+        ));
+        d
+    };
+    let v = crate::cache::VariantKey::new();
+    let b = Budget::standard();
+    let stem = "lunarg-desktop-baseline-2023";
+    let words = |policy: DevicePolicy| -> u32 {
+        let dev = Device::new(description(stem), policy).expect("device");
+        let pipe = dev
+            .compile_render_variant(&descriptor(), &v, &b)
+            .expect("compile");
+        largest(&pipe)
+    };
+    fn largest(pipe: &RenderPipeline) -> u32 {
+        pipe.stages
+            .iter()
+            .map(|s| u32::try_from(s.spirv.len()).unwrap())
+            .max()
+            .unwrap()
+    }
+    fn dropped(pipe: &RenderPipeline) -> Option<[bool; 7]> {
+        pipe.dependencies.iter().find_map(|d| match d.fact {
+            RuntimeFact::ExactFormsOverCompilerLimit {
+                sampling,
+                float_maths,
+                texel_conversion,
+                half_rounding,
+                nan_and_min_max,
+                rounding_order,
+                half_blend,
+            } => Some([
+                sampling,
+                float_maths,
+                texel_conversion,
+                half_rounding,
+                nan_and_min_max,
+                rounding_order,
+                half_blend,
+            ]),
+            _ => None,
+        })
+    }
+
+    let exact = DevicePolicy {
+        sampling: SamplingPolicy::Exact,
+        ..DevicePolicy::default().exact_answers()
+    };
+    let w_exact = words(exact);
+    let w_sampling_native = words(DevicePolicy::default().exact_answers());
+    let w_fast = words(DevicePolicy::default());
+    assert!(
+        w_fast <= w_sampling_native && w_sampling_native <= w_exact,
+        "fast {w_fast} <= sampling-native {w_sampling_native} <= exact {w_exact}"
+    );
+
+    let dev = Device::new(description(stem), exact).expect("device");
+    let first = || {
+        dev.compile_render_variant(&descriptor(), &v, &b)
+            .expect("compile")
+    };
+    let fit = |bound: u32| {
+        let first = first();
+        let fitted = dev
+            .fit_within(&descriptor(), &v, &b, first.clone(), Some(bound))
+            .expect("fit");
+        // The fitted pipeline is what the device's compile of the descriptor gives, as a cache
+        // stores and finds it.
+        assert_eq!(fitted.key, first.key, "the compile's key kept");
+        assert_eq!(fitted.profile, first.profile, "the compile's profile kept");
+        fitted
+    };
+
+    // A bound below every form drops every exact form the policy carries: the fast default.
+    let pipe = fit(0);
+    assert_eq!(largest(&pipe), w_fast, "reduced to the fast default");
+    assert_eq!(dropped(&pipe), Some([true; 7]), "every exact form dropped");
+
+    // Over the bound by exact sampling alone (where it grows the module): sampling is dropped
+    // first, and nothing more, because native sampling already fits.
+    if w_sampling_native < w_exact {
+        let pipe = fit(w_sampling_native);
+        assert_eq!(largest(&pipe), w_sampling_native);
+        assert_eq!(
+            dropped(&pipe),
+            Some([true, false, false, false, false, false, false]),
+            "only sampling dropped"
+        );
+    }
+
+    // Within the bound, or on a device without one: no fallback, no fact, the exact forms kept.
+    for pipe in [
+        fit(u32::MAX),
+        dev.fit_within(&descriptor(), &v, &b, first(), None)
+            .expect("no bound"),
+        dev.fit_render_variant(&descriptor(), &v, &b, first())
+            .expect("the device's own: none"),
+    ] {
+        assert_eq!(dropped(&pipe), None, "no fallback within the bound");
+        assert_eq!(largest(&pipe), w_exact);
+    }
+
+    // The runtime's shape: each stage compiled ahead under the keys' inputs, linked from the
+    // `Compiled` stages, then fitted from the functions' descriptor.
+    let keys = dev.render_pipeline_key(&descriptor(), &b).expect("keys");
+    let compiled = |source: &StageSource, inputs: &LoweringInputs| match source {
+        StageSource::Function(f) => {
+            StageSource::Compiled(dev.compile_function(f, inputs, &b).expect("stage"))
+        }
+        StageSource::Compiled(_) => unreachable!("the descriptor's stages are functions"),
+    };
+    let mut linked = descriptor();
+    linked.vertex = compiled(&linked.vertex, keys.vertex_inputs.as_ref().expect("inputs"));
+    linked.fragment = linked
+        .fragment
+        .as_ref()
+        .map(|f| compiled(f, keys.fragment_inputs.as_ref().expect("inputs")));
+    let ahead = dev
+        .compile_render_variant(&linked, &v, &b)
+        .expect("compiled stages");
+    assert_eq!(ahead.key, keys.pipeline);
+    assert_eq!(largest(&ahead), w_exact);
+    // From the compiled stages alone nothing can be translated again: left as it is.
+    let kept = dev
+        .fit_within(&linked, &v, &b, ahead.clone(), Some(0))
+        .expect("compiled stages kept");
+    assert_eq!(kept, ahead);
+    // From the functions' descriptor: fitted, under the compiled pipeline's key.
+    let fitted = dev
+        .fit_within(&descriptor(), &v, &b, ahead, Some(0))
+        .expect("fitted from the functions");
+    assert_eq!(fitted.key, keys.pipeline);
+    assert_eq!(largest(&fitted), w_fast);
+    assert_eq!(dropped(&fitted), Some([true; 7]));
+}

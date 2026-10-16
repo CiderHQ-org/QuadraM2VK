@@ -57,7 +57,9 @@
 //! draws emulated on a device without `VK_EXT_mesh_shader` in `mesh_draws` ([`EMULATED_MESH`]),
 //! render pipeline states whose draws run a synthesized geometry stage in `barycentric_weights`
 //! ([`SYNTHESIZED_GEOMETRY`]), tessellated draws emulated on a device without
-//! `tessellationShader` in `patches` ([`EMULATED_TESSELLATION`]),
+//! `tessellationShader` in `patches` ([`EMULATED_TESSELLATION`]), render pipeline states whose
+//! exact forms a stage past the device's compiler word bound dropped here
+//! ([`EXACT_FORMS_OVER_LIMIT`]),
 //! vertex-stage reads in place of bytes a fragment stage of the pass wrote in `pass_start_reads`
 //! ([`IN_PLACE_VERTEX_READS`]) and a vertex stage's write of bytes one wrote there
 //! ([`FRAGMENTS_BEFORE_GEOMETRY`]), constant biases of 16-bit unorm depths the device converts
@@ -73,7 +75,10 @@
 //! through depth ranges past `[0, 1]` whose vertex stage clamps each
 //! vertex's depth, or cannot, and bias factors in depth clamp mode through a range past 1 there
 //! ([`VERTEX_CLAMPS`]),
-//! sampler states of an anisotropy past the device's largest here ([`CAPPED_ANISOTROPY`]), PVRTC
+//! sampler states of an anisotropy past the device's largest here ([`CAPPED_ANISOTROPY`]),
+//! anisotropic sampler states without a mip filter through Metal's own sampler
+//! ([`NOT_MIPMAPPED_ANISOTROPY`]), draws that read an attachment's bytes in place in
+//! `attachment_reads` ([`IN_PLACE`]), PVRTC
 //! textures held for copies that a kernel's texture handles reach in `pvrtc_textures`
 //! ([`UNREADABLE`]), the device's texture table and heap sets in `resource_ids` (an unviewable
 //! texture, [`UNVIEWABLE`]; a shadowed one, [`UNNAMED_SHADOWS`]; an ID past a pipeline's arrays,
@@ -131,6 +136,7 @@
 
 use super::absent_reads::ABSENT_READS;
 use super::amplified_draws::AMPLIFICATION;
+use super::attachment_reads::IN_PLACE;
 use super::barycentric_weights::SYNTHESIZED_GEOMETRY;
 use super::binary_archives::ARCHIVES;
 use super::blits::SYSTEM_MEMORY;
@@ -207,12 +213,16 @@ use metal2vulkan::device::{SimdClass, Tier};
 use metal2vulkan::error::{DriverDeviation, Feature};
 use metal2vulkan::library::Library;
 use metal2vulkan::metal::format::bound_texel_format;
-use metal2vulkan::metal::{PixelFormat, TextureType, TextureUsage};
+use metal2vulkan::metal::{
+    PixelFormat, SamplerMinMagFilter, SamplerMipFilter, TextureType, TextureUsage,
+};
 use metal2vulkan::pipeline::MeshPipelineDescriptor;
 use metal2vulkan::pipeline::StageModule;
+use metal2vulkan::pipeline::{
+    ColorAttachmentDescriptor, RenderPipelineDescriptor, Stage, StageSource,
+};
 use metal2vulkan::pipeline::{ComputePipelineDescriptor, FunctionDescriptor, Reconvergence};
 use metal2vulkan::pipeline::{PrecisionNote, SlotRef, SpecKey};
-use metal2vulkan::pipeline::{RenderPipelineDescriptor, Stage, StageSource};
 use metal2vulkan::vk::DriverId;
 use metal2vulkan::vk::ResolveModeFlags as Mode;
 use metal2vulkan::Budget;
@@ -225,6 +235,7 @@ use metal2vulkan_runtime::{
     ResourceOptions, RuntimeGap, Size, StorageMode, StoreAction, TextureDescriptor,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 use std::time::Duration;
 
 /// The longest a command buffer here may take.
@@ -273,9 +284,12 @@ pub(super) const POSITIONED: [Degradation; 1] = [Degradation::PositionsThroughSc
 
 /// The kinds a device announces as it is made, which the lane's constructor takes and checks
 /// exactly (`runtime_lane::creation_kinds`); `metal-level-below-host` is [`METAL_LEVELS`].
-pub(super) const CREATED: [Degradation; 2] = [
+/// `float-tininess-after-rounding` is announced by the devices `native_maths` makes with native
+/// device maths, on every venue but MoltenVK, and by none made with the lane's exact policy.
+pub(super) const CREATED: [Degradation; 3] = [
     Degradation::MetalLevelNotMacOS,
     Degradation::DriverPipelineCacheKept,
+    Degradation::FloatTininessAfterRounding,
 ];
 
 /// The kind `capabilities`' private answers take, read once.
@@ -476,6 +490,8 @@ fn every_kind_has_a_site_a_lane_test_takes() {
         &MIXED_RESOLVES,
         &EMULATED_MESH,
         &CAPPED_ANISOTROPY,
+        &NOT_MIPMAPPED_ANISOTROPY,
+        &IN_PLACE,
         &ARGUMENT_BUFFERS,
         &METAL_LEVELS,
         &UNREADABLE,
@@ -525,6 +541,7 @@ fn every_kind_has_a_site_a_lane_test_takes() {
         &UNSIZED_POINTS,
         &SYNTHESIZED_GEOMETRY,
         &EMULATED_TESSELLATION,
+        &EXACT_FORMS_OVER_LIMIT,
     ];
     for kind in lists.into_iter().flatten().copied().chain(stage_kinds) {
         assert!(listed.insert(kind), "{kind:?} is listed twice");
@@ -605,6 +622,70 @@ fn moltenvk_argument_buffers_are_announced_where_unread_and_refused_off() {
         Ok(_) => panic!("argument buffers off: the device opened"),
     }
     assert_eq!(off.take(), Vec::new(), "the validation layer reported");
+}
+
+/// The kind a render pipeline state takes where a stage of its translation, with the device's
+/// exact forms, is longer than the device's compiler word bound, and the translation dropped exact
+/// forms to fit it ([`exact_forms_past_the_compiler_bound_are_announced_exactly_there`]).
+const EXACT_FORMS_OVER_LIMIT: [Degradation; 1] = [Degradation::ExactFormsOverCompilerLimit];
+
+/// A render pipeline state announces [`EXACT_FORMS_OVER_LIMIT`] exactly where a stage of its
+/// translation with the lane's exact forms (`runtime_lane::validated_options`) is longer than the
+/// device's compiler word bound (`DeviceProfile::module_word_bound`: ANV's, `None` elsewhere). No
+/// owned render fixture's stage reaches ANV's bound, so no venue announces it today; each checks
+/// the rule on its own device, with the owned `runtime_examples` render pipeline. The runtime's own
+/// test `a_variant_fitted_while_its_base_was_not_still_announces` takes the announcement of a
+/// fitted variant, and the translator's
+/// `a_module_over_the_compiler_bound_drops_its_exact_forms_to_fit` the fit.
+#[test]
+fn exact_forms_past_the_compiler_bound_are_announced_exactly_there() {
+    on_device(|device, messages| {
+        let ll = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/public/examples/runtime_examples.ll");
+        let library = device
+            .new_library_with_air(&llvm_assemble(&ll).unwrap())
+            .unwrap();
+        let function = |name| {
+            library
+                .new_function_with_name(name)
+                .unwrap()
+                .function_descriptor()
+        };
+        let mut descriptor =
+            RenderPipelineDescriptor::new(StageSource::Function(function("colored_vertex")));
+        descriptor.fragment = Some(StageSource::Function(function("colored_fragment")));
+        descriptor.color_attachments[0] =
+            Some(ColorAttachmentDescriptor::new(PixelFormat::RGBA8Unorm));
+        let compile = device.compile_device();
+        let compiled = compile
+            .compile_render_pipeline(&descriptor, &Budget::standard())
+            .unwrap();
+        let longest = compiled
+            .stages
+            .iter()
+            .map(|stage| stage.spirv.len())
+            .max()
+            .unwrap_or(0);
+        let bound = compile.profile().module_word_bound();
+        let past = bound.is_some_and(|bound| longest > bound as usize);
+        let _state = device
+            .new_render_pipeline_state(&descriptor, &PipelineOptions::default())
+            .unwrap();
+        let announced = counts(&messages.take_notices())
+            .get(&Degradation::ExactFormsOverCompilerLimit)
+            .copied()
+            .unwrap_or(0);
+        eprintln!(
+            "{}: longest stage {longest} words, compiler word bound {bound:?}",
+            device.name()
+        );
+        assert_eq!(
+            announced,
+            usize::from(past),
+            "{:?} exactly past the bound",
+            EXACT_FORMS_OVER_LIMIT
+        );
+    });
 }
 
 /// The kind a device answering at a Metal level below its host's macOS release takes
@@ -724,6 +805,62 @@ fn an_anisotropy_past_the_devices_largest_is_announced_once() {
         let notices = messages.take_notices();
         if anisotropic && largest < 32.0 {
             assert_eq!(assert_once(&notices, &CAPPED_ANISOTROPY).len(), 1);
+        } else {
+            assert_eq!(counts(&notices), BTreeMap::new());
+        }
+    });
+}
+
+/// The kind an anisotropic sampler state without a mip filter whose filters differ takes through
+/// Metal's own sampler ([`an_anisotropic_state_without_mips_is_announced_through_metals_sampler`]).
+const NOT_MIPMAPPED_ANISOTROPY: [Degradation; 1] = [Degradation::NotMipmappedAnisotropicSampler];
+
+/// Sampler states of `maxAnisotropy` 8 without a mip filter are made; the one whose minification
+/// and magnification filters differ is announced once, exactly on a device with anisotropy that
+/// samples through Metal's own sampler (`DriverDeviation::MetalSampler`, the M3 and M4 venues'
+/// MoltenVK). Equal filters, a mip filter, or no anisotropy announce nothing anywhere.
+#[test]
+fn an_anisotropic_state_without_mips_is_announced_through_metals_sampler() {
+    on_device(|device, messages| {
+        let profile = device.compile_device().profile();
+        let own = profile.takes_driver_deviation(DriverDeviation::MetalSampler)
+            && profile
+                .enabled()
+                .features
+                .contains(&VkFeature::SamplerAnisotropy);
+        let state = |min, mag, mip, anisotropy| {
+            let mut d = SamplerDescriptor::new();
+            d.min_filter = min;
+            d.mag_filter = mag;
+            d.mip_filter = mip;
+            d.max_anisotropy = anisotropy;
+            d
+        };
+        use SamplerMinMagFilter::{Linear, Nearest};
+        use SamplerMipFilter::NotMipmapped;
+        let unannounced = [
+            state(Linear, Linear, NotMipmapped, 8),
+            state(Linear, Nearest, SamplerMipFilter::Linear, 8),
+            state(Linear, Nearest, NotMipmapped, 1),
+        ];
+        for d in unannounced {
+            match device.new_sampler_state(&d) {
+                Ok(_) | Err(Error::Unsupported(_)) => {}
+                Err(other) => panic!("{d:?}: {other}"),
+            }
+        }
+        assert_eq!(counts(&messages.take_notices()), BTreeMap::new());
+        let mixed = state(Linear, Nearest, NotMipmapped, 8);
+        for _ in 0..2 {
+            match device.new_sampler_state(&mixed) {
+                Ok(_) => {}
+                Err(Error::Unsupported(u)) if !own => eprintln!("{mixed:?}: {u:?}"),
+                Err(other) => panic!("{mixed:?}: {other}"),
+            }
+        }
+        let notices = messages.take_notices();
+        if own {
+            assert_eq!(assert_once(&notices, &NOT_MIPMAPPED_ANISOTROPY).len(), 1);
         } else {
             assert_eq!(counts(&notices), BTreeMap::new());
         }

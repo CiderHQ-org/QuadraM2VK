@@ -84,10 +84,14 @@
 //!   another pixel.
 //! - **Not served** (`docs/FAST-PATHS.md`, known gaps): a read through the heap set (a handle
 //!   or an argument buffer's texture, which no slot names), a storage binding, a depth or
-//!   stencil attachment, another texture over the same buffer's bytes, and a texture whose
-//!   shadow is not served (`texture/usage_shadow.rs`): those read the attachment as before, and
+//!   stencil attachment, a texture buffer or a buffer binding over the same buffer's bytes (a
+//!   texture over them whose image aliases them has the buffer's identity, so it presents the
+//!   attachment, `attached_in`, and reads its copy), and a texture whose shadow is not served (`texture/usage_shadow.rs`): those read the attachment as before, and
 //!   in an instance that holds it in the feedback loop layout (`render/snapshot.rs`) through a
-//!   descriptor that names `VK_IMAGE_LAYOUT_GENERAL`.
+//!   descriptor that names `VK_IMAGE_LAYOUT_GENERAL`. A draw whose uses share memory with an
+//!   attachment of its instance (`render_target::shares_attachment`, by the tracker's keys and
+//!   ranges: a copy or a snapshot is another resource) announces it,
+//!   `Degradation::AttachmentReadInPlace`.
 
 use super::{Device, Storage, Texture};
 use crate::binding_view::VkView;

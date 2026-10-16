@@ -318,7 +318,8 @@ pub enum Source {
 /// axis: Metal's level is `max(log2 minor + B, log2 major - log2 maxAnisotropy)`, which neither the
 /// `Bias` operand nor `2^B` derivatives give, but the axis gradients do (`emit::axis_gradients`).
 /// Every route but `Metal`'s takes `B` from the module and the device's level arithmetic,
-/// `PrecisionNote::GradFromBias` where gradients carry it.
+/// `PrecisionNote::GradFromBias` where gradients carry it and `PrecisionNote::DeviceSampleLevel`
+/// where the `Bias` operand does (`level::device_when`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BiasReach {
     /// The device samples through Metal's own sampler (`VkProperty::MetalSampler`, MoltenVK),

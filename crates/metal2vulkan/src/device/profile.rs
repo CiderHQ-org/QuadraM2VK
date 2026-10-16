@@ -152,6 +152,18 @@ impl DeviceProfile {
         &self.fields.workarounds
     }
 
+    /// The stage-module word count a pipeline's largest stage must fit for this device, where its
+    /// driver faults compiling a module past it
+    /// ([`DriverWorkaround::RegisterAllocatorOverflowsLargeModules`]); `None` where no such bound
+    /// is measured. A compile over the bound retranslates with the consumer's exact forms dropped
+    /// to fit ([`Device::fit_render_variant`](crate::device::Device::fit_render_variant)).
+    pub fn module_word_bound(&self) -> Option<u32> {
+        self.fields
+            .workarounds
+            .contains(&DriverWorkaround::RegisterAllocatorOverflowsLargeModules)
+            .then_some(REGISTER_ALLOCATOR_MODULE_WORD_BOUND)
+    }
+
     /// The driver deviations the profile takes at a driver release newer than the last one
     /// measured, each with that release's `driverVersion` (`device::driver_facts`): a module
     /// compiled for the profile records each as
@@ -1145,6 +1157,13 @@ pub struct FormatTable {
     pub formats: BTreeMap<vk::Format, BTreeSet<FormatUsage>>,
 }
 
+/// The stage-module word bound for a device whose driver faults compiling a module past it
+/// ([`DriverWorkaround::RegisterAllocatorOverflowsLargeModules`], ANV's register allocator):
+/// its overflow is a 32-bit triangular pair index, and 400,000 words sits below the smallest
+/// module observed to fault with margin. [`DeviceProfile::module_word_bound`] returns it where the
+/// workaround is taken.
+pub(crate) const REGISTER_ALLOCATOR_MODULE_WORD_BOUND: u32 = 400_000;
+
 /// A typed driver workaround: a defect of the driver measured on it, which changes a leaf
 /// encoding or refuses the construct the driver runs wrong ([`Needs::DriverDefect`]), never the
 /// pointer model or a semantic; or a measured answer of the driver's that the specifications allow
@@ -1404,6 +1423,29 @@ pub enum DriverWorkaround {
     /// through the device's tessellation stages records `PrecisionNote::TessellationTriangleOrder`
     /// there (`link::tessellation::note_evaluation_stage`).
     TessellatorNotMetals,
+    /// The driver's shader compiler faults creating a pipeline from a stage module past a word
+    /// bound, so a module the consumer's exact forms grow beyond it is retranslated with those
+    /// forms dropped until its largest stage fits ([`DeviceProfile::module_word_bound`]): the one
+    /// workaround that changes no leaf encoding and refuses nothing, but bounds a module's size by
+    /// trading exactness for the fast form, device by device.
+    ///
+    /// ANV (`VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA`), Mesa 26.2.4, faults in its `brw` backend's
+    /// register allocator: a bitset indexed by the triangular pair index `n·(n-1)/2` of two live
+    /// ranges, computed in 32 bits, which overflows once the function's live-range count is large
+    /// and reads outside the allocation (`libvulkan_intel.so`, `SEGV_ACCERR`). Measured on the
+    /// Iris Xe of RPL-P with a synthetic compute module whose one function keeps a sliding window
+    /// of `W` live `float` values: `vkCreateComputePipelines` compiled `W` = 50,000 (750,107 words)
+    /// and faulted `W` = 60,000, 65,000 and 92,000 (900,107 words and up); and with the consumer's
+    /// fragments, where a module carrying exact sampling alone (455,402 words) compiled but one
+    /// carrying every exact answer faulted. The bound is 400,000 words, below the smallest module
+    /// observed to combine enough exact forms to fault, with margin: a module carrying exact
+    /// sampling alone above it is reduced too, since the fault point for a module's register
+    /// pressure is not known exactly and the fault is unrecoverable, where the reduction is a
+    /// logged precision note. Keyed on the driver whatever its GPU, whatever its release, in
+    /// `device::derive`; a release that fixes the overflow keeps it until a measurement raises or
+    /// removes the bound, and the fast-default form of every module stays below it. The consumer
+    /// announces each reduced pipeline (`RuntimeFact::ExactFormsOverCompilerLimit`).
+    RegisterAllocatorOverflowsLargeModules,
 }
 
 #[cfg(test)]

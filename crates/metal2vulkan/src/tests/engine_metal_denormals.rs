@@ -295,10 +295,10 @@ fn device_fma(a: u32, b: u32, c: u32) -> u32 {
     }
 }
 
-/// The device's fused multiply-add unchecked off the deviation (native device maths,
-/// docs/FAST-PATHS.md): Metal flushes a result whose exact value is below `2^-126` before rounding
-/// it, where the device has rounded it up to `2^-126`, which the flush after it keeps. `fun`'s
-/// answer with each `fma` so, where it is a composition of them.
+/// The device's fused multiply-add unchecked (native device maths, which the runtime announces as
+/// `float-tininess-after-rounding`; docs/FAST-PATHS.md): Metal flushes a result whose exact value
+/// is below `2^-126` before rounding it, where the device has rounded it up to `2^-126`, which the
+/// flush after it keeps. `fun`'s answer with each `fma` so, where it is a composition of them.
 fn device_fma_gap(fun: Fun, [a, b, c]: [u32; 3]) -> Option<u32> {
     match fun {
         Fun::Mix | Fun::FmaFma => Some(device_fma(c, b, device_fma(c ^ 0x8000_0000, a, a))),

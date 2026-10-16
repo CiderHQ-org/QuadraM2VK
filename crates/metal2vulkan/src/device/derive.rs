@@ -54,6 +54,10 @@ struct DeviceInner {
     /// The description's allocation sizes, which the Metal-facing `maxBufferLength` and the
     /// runtime's heap sizes read; not a profile field, as above.
     allocation: AllocationLimits,
+    /// The description the device was made from, kept so a compile over a device's compiler word
+    /// bound can rebuild the device under a reduced policy (`Device::fit_render_variant`); not
+    /// a profile field, as above.
+    description: DeviceDescription,
 }
 
 impl Device {
@@ -126,6 +130,7 @@ impl Device {
             robust_buffer_access_update_after_bind: desc.robust_buffer_access_update_after_bind,
             generated_commands: desc.generated_commands,
             allocation: desc.allocation,
+            description: desc,
         })))
     }
 
@@ -149,6 +154,12 @@ impl Device {
     /// The policy the device was created with.
     pub fn policy(&self) -> &DevicePolicy {
         &self.0.policy
+    }
+
+    /// The description the device was made from, for a compile that rebuilds the device under a
+    /// reduced policy to fit a compiler word bound (`Device::fit_render_variant`).
+    pub(crate) fn description(&self) -> &DeviceDescription {
+        &self.0.description
     }
 
     /// The description's `robustBufferAccessUpdateAfterBind`.
@@ -482,10 +493,12 @@ fn by_identity(desc: &DeviceDescription) -> Vec<DriverWorkaround> {
         {
             vec![DriverWorkaround::NarrowMaskAfterSignedClamp]
         }
-        // A uniform buffer's reads at different addresses, on every GPU it drives.
-        Some(vk::DriverId::INTEL_OPEN_SOURCE_MESA) => {
-            vec![DriverWorkaround::UniformReadsOutpaceStorageReads]
-        }
+        // A uniform buffer's reads at different addresses, and a register allocator that faults
+        // compiling a module past a word bound, on every GPU it drives.
+        Some(vk::DriverId::INTEL_OPEN_SOURCE_MESA) => vec![
+            DriverWorkaround::UniformReadsOutpaceStorageReads,
+            DriverWorkaround::RegisterAllocatorOverflowsLargeModules,
+        ],
         _ => Vec::new(),
     }
 }

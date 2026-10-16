@@ -399,7 +399,8 @@ fn not_metal_s(setting: Setting, x: &[f32; IN], r: &[f32; OUT]) -> Vec<String> {
 /// announces each native kind of its stage once; every thread's answers are within the bounds their
 /// kinds record, and Metal's where their choice is off. On MoltenVK, whose functions, minimum and
 /// maximum, and NaNs are Metal's own, the stage records none of them under any setting and
-/// announces none.
+/// announces none. The device made with native device maths announces
+/// `float-tininess-after-rounding` as it is made, exactly off MoltenVK.
 #[test]
 fn each_choice_answers_within_its_recorded_bounds_on_and_metal_s_off() {
     let bitcode = llvm_assemble_text(&kernel()).unwrap();
@@ -436,6 +437,13 @@ fn answers_under(device: &Device, messages: &Messages, setting: Setting, bitcode
         nan_min_max,
         rounding_order,
     } = setting;
+    // The constructor checked the creation notices against `creation_kinds`: the device's
+    // multiply and fused multiply-add, taken under native device maths, announced as it was made.
+    assert_eq!(
+        super::creation_kinds(device, false).contains(&Degradation::FloatTininessAfterRounding),
+        maths && !metals,
+        "{name}: float-tininess-after-rounding"
+    );
     for (note, native) in [
         (
             PrecisionNote::NativeTranscendentals,

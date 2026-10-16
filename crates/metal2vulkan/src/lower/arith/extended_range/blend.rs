@@ -22,7 +22,8 @@
 //!
 //! 1. `Min` and `Max`: `min(s, d)` and `max(s, d)`, the factors unread.
 //! 2. A zero factor drops its term: `0`, or `h(±S)` or `h(±D)` alone (but a 16-bit float
-//!    attachment's blend without fast math, [`Blend::half_float`]).
+//!    attachment's blend without fast math, and one minus the source subtracted alone into one of
+//!    two or more channels, [`Blend::half_float`]).
 //! 3. A factor of one: `h(±S ± D)`, one fused multiply-add.
 //! 4. Two products, added, where one's factor is `1 - z` and the other's operands hold `z`
 //!    (a lerp): `h(y + z · inner)`, `y` the first product's operand and `inner` the other
@@ -104,7 +105,7 @@ use crate::lower::arith::legal::{FloatFmt, Form, Held};
 use crate::lower::arith::ops::{fsplat, splat, ty};
 use crate::lower::arith::texel_round::{f32_to_half, HalfRounding};
 use crate::metal::format::ExtendedRange;
-use crate::metal::{BlendFactor, BlendOperation, ColorWriteMask};
+use crate::metal::{BlendFactor, BlendOperation, ColorWriteMask, PixelFormat};
 use crate::pipeline::lower_inputs::BlendEquation;
 use crate::spirv::builder::FunctionBuilder;
 use crate::spirv::error::{BResult, BuildError, TypeRule};
@@ -242,6 +243,10 @@ pub struct Blend {
     /// The function's math mode: every one minus is `h(1 - x)` of the `half` it reads under
     /// [`BlendMath::Rounded`], the blend color's too.
     pub(crate) math: BlendMath,
+    /// A 16-bit float attachment of two or more channels under fast math, whose destination
+    /// product subtracted alone by one minus a source value Metal computes with the factor negated
+    /// ([`Blend::half_float`]).
+    negates_one_minus: bool,
 }
 
 /// The range Metal clamps a `float4` output's color lanes to before blending into an attachment
@@ -350,7 +355,8 @@ fn alpha_rank(f: BlendFactor) -> u8 {
     }
 }
 
-/// `BGR10_XR`'s factor `n`: its destination alpha is one.
+/// The factor `n` of a format without alpha (`BGR10_XR`, `R16Float`, `RG16Float`): its destination
+/// alpha is one.
 fn opaque(n: Node) -> Node {
     match n {
         Node::Atom(Atom::Da) => Node::One,
@@ -829,6 +835,7 @@ fn planned_for(
         masked,
         float,
         math,
+        negates_one_minus: false,
     })
 }
 
@@ -896,9 +903,20 @@ impl Blend {
     }
 
     /// Metal's blend `eq` of a `half` or `float` output of a module of math `math` into a 16-bit
-    /// float attachment (`R16Float`, `RG16Float`, `RGBA16Float`) storing the channels `written` of
-    /// four (a channel the format lacks counts as written: the store drops it), in the arithmetic
-    /// of the output's type ([`BlendArith`]), computed by [`blend_half_float`]. Without fast math
+    /// float attachment of format `pf` (`R16Float`, `RG16Float`, `RGBA16Float`) storing the
+    /// channels `written` of four (a channel the format lacks counts as written: the store drops
+    /// it), in the arithmetic of the output's type ([`BlendArith`]), computed by
+    /// [`blend_half_float`]. `R16Float` and `RG16Float` have no alpha: their destination alpha is
+    /// one, so `DestinationAlpha` is a factor of one and `OneMinusDestinationAlpha` of zero, which
+    /// under fast math drops its term (a lone term `h(±S)` or `h(±D)`, both dropped `+0`). Under
+    /// fast math into `RG16Float` or `RGBA16Float`, a destination's product subtracted alone
+    /// (`Subtract` of a zero source factor) by one minus the source's color or alpha is
+    /// `h(d · h(z - 1))`, the factor negated, whose zero has `d`'s sign where `z` is one; so is any
+    /// one minus in alpha of a `float4` output; every other lone term is `h(±S)` or `h(±D)`, the
+    /// operand negated, `R16Float`'s too (our probes `rb16b`, `rb16c` and `rb16e`, the M3 Max under
+    /// macOS 27.0.1: `half4` and `float4` outputs, sources and texels of `±0`, `±1`, `2.5`,
+    /// `-0.75`, `±inf` and NaN in each of color and alpha, every lane of 20 states with a zero
+    /// factor into each format, and the blend color one). Without fast math
     /// the model's rounded forms ([`BlendMath::Rounded`], the module docs): each factor, each
     /// product and the sum rounded to the arithmetic's type, nearest even, the blend color rounded
     /// to `half` (a `half4` output) before its one minus (EV FLT-hb2-m3; and EVs FBL-sw1-m3 and
@@ -928,10 +946,20 @@ impl Blend {
     /// form's write.
     pub fn half_float(
         eq: &BlendEquation,
+        pf: PixelFormat,
         written: ColorWriteMask,
         math: BlendMath,
     ) -> Result<Blend, Error> {
-        let b = planned_for(eq, (true, false, true), written, (false, math))?;
+        let channels = match pf {
+            PixelFormat::R16Float => 1,
+            PixelFormat::RG16Float => 2,
+            _ => 4,
+        };
+        let b = planned_for(eq, (channels == 4, false, true), written, (false, math))?;
+        let b = Blend {
+            negates_one_minus: channels > 1 && math == BlendMath::Fast,
+            ..b
+        };
         match b.reads_second() {
             true => Err(refused(ExtendedRangeBlend::DualSource)),
             false => Ok(b),
@@ -1139,6 +1167,8 @@ struct Inputs {
     /// The arithmetic every rounding is to: `half` but a 16-bit float attachment's blend of a
     /// `float4` output ([`BlendArith`]).
     arith: BlendArith,
+    /// [`Blend`]'s `negates_one_minus`.
+    negates_one_minus: bool,
 }
 
 /// The values of one lane class, each node computed once.
@@ -1213,6 +1243,25 @@ impl<'a> Class<'a> {
                 }
             }
         }
+    }
+
+    /// Whether Metal computes a destination's product subtracted alone by `1 - z` as `d · (z - 1)`
+    /// ([`Blend::half_float`]): into a 16-bit float attachment of two or more channels under fast
+    /// math, where `z` is a source value; in alpha of a `float4` output, any `z`.
+    fn negates_one_minus(&self, z: Atom) -> bool {
+        let float_alpha = self.lanes == Lanes::Scalar && self.inputs.arith == BlendArith::Float;
+        self.inputs.negates_one_minus && (matches!(z, Atom::S | Atom::Sf | Atom::Sa) || float_alpha)
+    }
+
+    /// `x - 1`, rounded as [`one_minus`](Self::one_minus) rounds `1 - x`: `+0` where `x` is one.
+    fn minus_one(&mut self, fb: &mut FunctionBuilder<'_>, x: Value) -> BResult<Value> {
+        let f = self.lanes.floats();
+        let one = fsplat(fb, f, 1.0)?;
+        if self.inputs.arith == BlendArith::Float {
+            return fb.binary_no_contraction(BinOp::FSub, x, one);
+        }
+        let m = fb.binary(BinOp::FSub, x, one)?;
+        f32_to_half(fb, f, m, HalfRounding::NearestEven)
     }
 
     /// `h(1 - x)` of `half` `x`: `1 - x` is exact in `f32` but for `|x|` below `2^-13`, where its
@@ -1388,6 +1437,17 @@ impl<'a> Class<'a> {
                 }
             }
             Arith::Zero => fsplat(fb, self.lanes.floats(), 0.0),
+            Arith::Term {
+                sign: -1,
+                term: (operand @ (Atom::D | Atom::Da), Node::OneMinus(z)),
+            } if self.negates_one_minus(*z) => {
+                // `h(d · h(z - 1))`: where `z` is one, the zero of `d`'s sign.
+                let x = self.atom(fb, *operand)?;
+                let z = self.atom(fb, *z)?;
+                let f = self.minus_one(fb, z)?;
+                let p = self.mul(fb, x, f)?;
+                self.round(fb, p)
+            }
             Arith::Term { sign, term } => self.product(fb, (*sign, *term)),
             Arith::Fused { product, addend } => {
                 let [x, f] = self.signed(fb, *product)?;
@@ -1698,6 +1758,7 @@ pub fn blend(
         math: b.math,
         s1,
         arith: BlendArith::Half,
+        negates_one_minus: b.negates_one_minus,
     };
     lanes(fb, b, &inputs)
 }
@@ -1769,6 +1830,7 @@ pub fn blend_half_float(
         math: b.math,
         s1: None,
         arith,
+        negates_one_minus: b.negates_one_minus,
     };
     lanes(fb, b, &inputs)
 }

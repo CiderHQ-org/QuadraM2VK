@@ -47,6 +47,12 @@ impl Built {
     }
 
     fn expanded(self) -> Body {
+        self.expanded_noting().0
+    }
+
+    /// The expanded body and whether `expand` reports a branch of a group operation no
+    /// measurement decides.
+    fn expanded_noting(self) -> (Body, bool) {
         let mut m = meter();
         let params = vec![Param::default(); self.param_tys.len()];
         expand(
@@ -654,4 +660,62 @@ fn a_division_by_a_variable_leaves_the_arm() {
     });
     assert_eq!(b.decisions(), [Decision::Unknown]);
     assert_eq!(conditional_branches(&b.expanded()), 1);
+}
+
+/// `expand` reports a branch no measurement decides exactly where its arms hold a group operation
+/// that answers over the branch's block's lanes when speculated (the entry's
+/// `unmeasured_speculation`, its pipeline's `PrecisionNote::UnmeasuredGroupSpeculation`): an
+/// unmeasured instruction, an integer division by a variable, or an unmeasured diamond beside
+/// `quad_broadcast_first`; not that operation in an arm Metal was measured to speculate or keep,
+/// nor an unmeasured arm without it.
+#[test]
+fn only_an_unmeasured_branch_of_a_group_operation_is_reported() {
+    let unmeasured_first = triangle(|f, t| {
+        gep_out(f, t);
+        let x = chain(f, t, 0);
+        first(f, t, x)
+    });
+    let divided_first = triangle(|f, t| {
+        let x = chain(f, t, 0);
+        let q = f.bin(BinOp::UDiv, x, f.arg(0));
+        first(f, t, q)
+    });
+    // A small arm without a call on the false edge, past 25 together: no probe covers it.
+    let diamond_first = diamond(
+        |f, t| {
+            let x = chain(f, t, 22);
+            first(f, t, x)
+        },
+        |f, t| chain(f, t, 1),
+    );
+    for (what, b) in [
+        ("an unmeasured instruction", unmeasured_first),
+        ("a division by a variable", divided_first),
+        ("an unmeasured diamond", diamond_first),
+    ] {
+        assert_eq!(b.decisions(), [Decision::Unknown], "{what}");
+        let (body, reported) = b.expanded_noting();
+        assert!(reported, "{what}: not reported");
+        assert_eq!(conditional_branches(&body), 1, "{what}: the branch kept");
+    }
+    let speculated = triangle(|f, t| {
+        let x = chain(f, t, 0);
+        first(f, t, x)
+    });
+    let kept = triangle(|f, t| {
+        let x = chain(f, t, 0);
+        quad_sum(f, t, x)
+    });
+    let unmeasured_plain = triangle(|f, t| {
+        gep_out(f, t);
+        chain(f, t, 0)
+    });
+    for (what, b, decision) in [
+        ("a measured arm", speculated, Decision::Speculated),
+        ("a kept arm", kept, Decision::Kept),
+        ("no group operation", unmeasured_plain, Decision::Unknown),
+    ] {
+        assert_eq!(b.decisions(), [decision], "{what}");
+        assert!(!b.expanded_noting().1, "{what}: reported");
+    }
 }

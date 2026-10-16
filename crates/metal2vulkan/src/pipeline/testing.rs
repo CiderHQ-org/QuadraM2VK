@@ -409,6 +409,39 @@ pub fn zero_relocations(a: &FunctionArtifact, words: &[u32]) -> Vec<u32> {
     out
 }
 
+/// The result ids of each product check's scaling multiply in module `words`
+/// (`denormal::tiny_product` under `TinyCheck::Fused`, `|a| · 2^48`): an `OpFMul` of a 32-bit
+/// `float` constant `2^48`, or of a vector of them. So a test counts the check's own instructions
+/// apart from the caller's.
+pub fn tiny_check_scales(words: &[u32]) -> Vec<u32> {
+    use crate::spv::Op;
+    const SCALE: u32 = 0x5780_0000;
+    let (mut floats, mut scales, mut results) = (Vec::new(), Vec::new(), Vec::new());
+    let mut i = 5;
+    while i < words.len() {
+        let (len, op) = ((words[i] >> 16) as usize, words[i] & 0xFFFF);
+        assert!(len > 0 && i + len <= words.len(), "malformed module");
+        let at = &words[i..i + len];
+        if op == Op::TypeFloat as u32 && at[2] == 32 {
+            floats.push(at[1]);
+        }
+        if op == Op::Constant as u32 && len == 4 && floats.contains(&at[1]) && at[3] == SCALE {
+            scales.push(at[2]);
+        }
+        if op == Op::ConstantComposite as u32
+            && len > 3
+            && at[3..].iter().all(|c| scales.contains(c))
+        {
+            scales.push(at[2]);
+        }
+        if op == Op::FMul as u32 && (scales.contains(&at[3]) || scales.contains(&at[4])) {
+            results.push(at[2]);
+        }
+        i += len;
+    }
+    results
+}
+
 /// The module `words` without the math library's routines: the functions of exactly one
 /// parameter, which answer Metal's function of one operand where the device's instruction does
 /// not, and the functions only they call, which they divide and take roots through (the precise

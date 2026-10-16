@@ -501,7 +501,7 @@ pub(crate) fn half_blend_attachment(
         && !mask.contains(ColorWriteMask::UNSPECIALIZED)
         && !channels(pf).intersection(mask).is_empty()
         && equation.is_some_and(|eq| {
-            extended_range::Blend::half_float(&eq, ColorWriteMask::ALL, rounded).is_ok()
+            extended_range::Blend::half_float(&eq, pf, ColorWriteMask::ALL, rounded).is_ok()
         })
 }
 
@@ -541,6 +541,8 @@ pub enum StorageSamples {
 /// How the storage form declares and views one attachment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StorageView {
+    /// The attachment's Metal pixel format.
+    pub pixel_format: crate::metal::PixelFormat,
     /// The attachment's Vulkan format, which the view takes (but an sRGB attachment's,
     /// [`uint_view`](Self::uint_view)).
     pub format: vk::Format,
@@ -805,7 +807,7 @@ pub(crate) fn storage_form(
             // A channel the format lacks counts as written, as [`plan`] plans it.
             None => {
                 let written = ColorWriteMask::ALL.difference(kept);
-                extended_range::Blend::half_float(&eq, written, use_.math)
+                extended_range::Blend::half_float(&eq, pf, written, use_.math)
             }
         };
         match planned {
@@ -903,6 +905,7 @@ pub(crate) fn storage_form(
     };
     match declared {
         Some(declared) if missing.is_empty() => Ok(Ok(StorageView {
+            pixel_format: pf,
             format,
             declared,
             numeric,
@@ -1310,9 +1313,10 @@ pub(super) fn plan(cx: &mut SelectCx<'_>) -> Result<(), Error> {
             // Metal's 16-bit float blend, of a `half` or `float` output of one to four lanes.
             Ok(view) if view.blend.is_some() && view.extended.is_none() => {
                 let math = blend_math(cx);
-                let planned = view
-                    .blend
-                    .map(|eq| extended_range::Blend::half_float(&eq, written(view.kept), math));
+                let planned = view.blend.map(|eq| {
+                    let written = written(view.kept);
+                    extended_range::Blend::half_float(&eq, view.pixel_format, written, math)
+                });
                 match (planned, blended_output(cx.entry, color)) {
                     (Some(Ok(b)), Some((_, lanes))) => {
                         let stated = cx.entry.compile.fast_math.is_some();
@@ -1379,8 +1383,12 @@ pub(super) fn plan(cx: &mut SelectCx<'_>) -> Result<(), Error> {
                 // The blend color as the encoder set it, where Metal's 16-bit float blend reads
                 // it. Where that blend is not Metal's exactly, the function notes it.
                 if let (Some(eq), None) = (view.blend, view.extended) {
-                    let half =
-                        extended_range::Blend::half_float(&eq, written(view.kept), blend_math(cx));
+                    let half = extended_range::Blend::half_float(
+                        &eq,
+                        view.pixel_format,
+                        written(view.kept),
+                        blend_math(cx),
+                    );
                     if half.is_ok_and(|h| h.reads_constant()) {
                         cx.push.insert(PushField::HalfBlendColor);
                     }
@@ -1760,7 +1768,8 @@ pub(super) fn words(cx: &SelectCx<'_>, uses: u64, rets: u64) -> u64 {
         .filter_map(|sc| {
             let eq = sc.view.blend?;
             let kept = self::written(sc.view.kept);
-            let b = extended_range::Blend::half_float(&eq, kept, blend_math(cx));
+            let pf = sc.view.pixel_format;
+            let b = extended_range::Blend::half_float(&eq, pf, kept, blend_math(cx));
             let b = b.ok()?;
             Some(
                 READ.saturating_add(2 * u64::from(b.words()))
@@ -2190,7 +2199,8 @@ fn half_blended(
     (form, part): (Form, SValue),
 ) -> BResult<SValue> {
     let math = extended_range::blend::BlendMath::of(cx.entry.compile.fast_math);
-    let Ok(b) = extended_range::Blend::half_float(&eq, written(sc.view.kept), math) else {
+    let (pf, written) = (sc.view.pixel_format, written(sc.view.kept));
+    let Ok(b) = extended_range::Blend::half_float(&eq, pf, written, math) else {
         return Err(cx.fail("a 16-bit float blend outside Metal's model"));
     };
     let arith = match (form.lanes, form.float_fmt()) {

@@ -11,12 +11,14 @@
 //! (`WorkCounts::linear_passes_through_copies` moved): the same answers, no copy of the read's.
 //!
 //! - [`a_draw_after_a_barrier_samples_what_the_draws_before_wrote`]: after a memory barrier over
-//!   the render targets, draw C (`a4_fragment_select_sample` over `[4, 8)²`, the target bound as
-//!   both of its textures) samples, at pixel `(x, y)`, the target's texel `(2x + 1, 2y + 1)`
-//!   (the pixel's center over 16, through a nearest sampler): other pixels than it writes, inside
-//!   A's block. It draws A's red, as a Mac2 GPU orders the barrier; the draw records into a new
-//!   instance (`attachment_read_splits`), reads the copy (`attachment_reads_through_copies`), and
-//!   an encoder copies it in (`shadow_copies`).
+//!   the render targets, after the fragment stage and before the fragment or the vertex stage,
+//!   draw C (`a4_fragment_select_sample` over `[4, 8)²`, the target bound as both of its
+//!   textures) samples, at pixel `(x, y)`, the target's texel `(2x + 1, 2y + 1)` (the pixel's
+//!   center over 16, through a nearest sampler): other pixels than it writes, inside A's block.
+//!   It draws A's red, as a Mac2 GPU orders the barrier; the draw records into a new instance
+//!   (`attachment_read_splits`), reads the copy (`attachment_reads_through_copies`), and an
+//!   encoder copies it in (`shadow_copies`). After one from the vertex stage to the vertex stage,
+//!   which orders no render target, it draws the red from before the pass, with no split.
 //! - [`a_draw_without_a_barrier_samples_the_texels_from_before_the_pass`]: with no barrier, draw C
 //!   (`tob_sample` over A's block, at its own pixel) draws the red from before the pass, Metal's
 //!   answer at a draw's own pixel (probe `selfsample`, an M3 Max under macOS 27.0.1, 80 of 80
@@ -42,16 +44,16 @@
 //! - [`a_pass_that_samples_no_attachment_copies_nothing`]: A, then `tob_read` of another texture:
 //!   no read through a copy, split, own-pixel read or shadow copy.
 
-use super::degrade_notices::on_device;
+use super::degrade_notices::{assert_once, counts, on_device};
 use crate::air_library::AirLibrary;
 use metal2vulkan::bind::SamplerDescriptor;
 use metal2vulkan::metal::{BarrierScope, PixelFormat, PrimitiveType, RenderStages, TextureUsage};
 use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};
 use metal2vulkan_devtools::llvm_assemble;
 use metal2vulkan_runtime::{
-    BlitOption, Buffer, CommandQueue, Device, LoadAction, Origin, PipelineOptions, Region,
-    RenderCommandEncoder, RenderPassDescriptor, RenderPipelineState, ResourceOptions, ScissorRect,
-    Size, StoreAction, Texture, TextureDescriptor, WorkCounts,
+    BlitOption, Buffer, CommandQueue, Degradation, Device, LoadAction, Origin, PipelineOptions,
+    Region, RenderCommandEncoder, RenderPassDescriptor, RenderPipelineState, ResourceOptions,
+    ScissorRect, Size, StoreAction, Texture, TextureDescriptor, WorkCounts,
 };
 use std::path::Path;
 use std::time::Duration;
@@ -487,14 +489,19 @@ fn a_draw_after_a_barrier_samples_what_the_draws_before_wrote() {
             "a4_fragment_select_sample.ll",
         );
         let sampler = device.new_sampler_state(&SamplerDescriptor::new()).unwrap();
-        for (name, target, _buffer) in targets(device) {
+        let (fragment, vertex) = (RenderStages::FRAGMENT, RenderStages::VERTEX);
+        let barriers = [
+            (fragment, fragment, true),
+            (fragment, vertex, true),
+            (vertex, vertex, false),
+        ];
+        for ((name, target, _buffer), (after, before, ordered)) in barriers
+            .into_iter()
+            .flat_map(|barrier| targets(device).into_iter().map(move |t| (t, barrier)))
+        {
             let counted = device.work_counts();
             let bytes = pass(&queue, &target, &fill, |encoder| {
-                encoder.memory_barrier_with_scope(
-                    BarrierScope::RENDER_TARGETS,
-                    RenderStages::FRAGMENT,
-                    RenderStages::FRAGMENT,
-                );
+                encoder.memory_barrier_with_scope(BarrierScope::RENDER_TARGETS, after, before);
                 encoder.set_render_pipeline_state(&sample).unwrap();
                 encoder.set_vertex_bytes(&corners([4, 4, 8, 8]), 0).unwrap();
                 encoder.set_fragment_texture(Some(&target), 0).unwrap();
@@ -506,13 +513,19 @@ fn a_draw_after_a_barrier_samples_what_the_draws_before_wrote() {
                     .draw_primitives(PrimitiveType::Triangle, 0, 6, 1, 0)
                     .unwrap();
             });
+            let want = if ordered { DRAWN } else { BEFORE };
+            let name = format!("{name}, {after:?} to {before:?}");
             for y in 4..8 {
                 for x in 4..8 {
-                    assert_eq!(red(&bytes, x, y), DRAWN, "{name}: pixel ({x}, {y})");
+                    assert_eq!(red(&bytes, x, y), want, "{name}: pixel ({x}, {y})");
                 }
             }
             assert_eq!(red(&bytes, 0, 0), BEFORE, "{name}: outside the draws");
-            check(name, &moved(&counted, &device.work_counts()), 1);
+            check(
+                &name,
+                &moved(&counted, &device.work_counts()),
+                u64::from(ordered),
+            );
         }
     });
 }
@@ -545,6 +558,103 @@ fn a_draw_without_a_barrier_samples_the_texels_from_before_the_pass() {
                 }
             }
             check(name, &moved(&counted, &device.work_counts()), 0);
+        }
+    });
+}
+
+/// The kind a draw's use of an attachment's memory other than as the attachment takes
+/// ([`a_read_of_the_attachments_bytes_is_served_or_announced`]).
+pub(super) const IN_PLACE: [Degradation; 1] = [Degradation::AttachmentReadInPlace];
+
+/// Draws that read, in the pass over the target over a buffer, its bytes other than as the
+/// attachment. Draw C (`tob_sample` over A's block) samples first the target itself, then a second
+/// texture of the target's descriptor over the same bytes: each, where it and the target are
+/// aliasing images over the buffer's memory (neither shadowed, `WorkCounts::shadowed_textures`,
+/// and the target rendered through no copied stand-in), is held as the attachment's own texture
+/// (an aliasing image's identity is its buffer's) and read through its copy; elsewhere it is
+/// another image than the pass renders. Neither is announced. Then the fill (`tob_solid`) reads its
+/// color from the buffer's first bytes through a buffer binding, which no copy serves
+/// (`texture/attached_reads.rs`, not served): where the pass renders the buffer's memory itself
+/// (the target not shadowed, through no stand-in), the draw reads the attachment's memory in
+/// place, announced once as `attachment-read-in-place`, and what it reads is Vulkan's undefined
+/// answer, unchecked; elsewhere it reads other memory than the pass renders, and nothing is
+/// announced.
+#[test]
+fn a_read_of_the_attachments_bytes_is_served_or_announced() {
+    on_device(|device, messages| {
+        let queue = device.new_command_queue().unwrap();
+        let fill = state(device, "tob_solid", "tob_renders.ll");
+        let sample = state(device, "tob_sample", "tob_renders.ll");
+        let sampler = device.new_sampler_state(&SamplerDescriptor::new()).unwrap();
+        let made = device.work_counts();
+        let (name, target, buffer) = targets(device).pop().unwrap();
+        let buffer = buffer.expect("the target over a buffer");
+        let held = device.work_counts();
+        let mut d = TextureDescriptor::texture_2d(PixelFormat::RGBA8Unorm, SIDE, SIDE, false);
+        d.usage = TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ;
+        d.resource_options = ResourceOptions::shared();
+        let other = buffer.new_texture(&d, 0, SIDE * 4).unwrap();
+        let target_shadowed = held.shadowed_textures - made.shadowed_textures;
+        let other_shadowed = device.work_counts().shadowed_textures - held.shadowed_textures;
+        let draw_c = |encoder: &mut RenderCommandEncoder, texture: &Texture| {
+            encoder.set_render_pipeline_state(&sample).unwrap();
+            encoder
+                .set_vertex_bytes(&corners([8, 8, 16, 16]), 0)
+                .unwrap();
+            encoder.set_fragment_texture(Some(texture), 0).unwrap();
+            encoder
+                .set_fragment_sampler_state(Some(&sampler), 0)
+                .unwrap();
+            encoder
+                .draw_primitives(PrimitiveType::Triangle, 0, 6, 1, 0)
+                .unwrap();
+        };
+        messages.take_notices();
+        for (what, texture, shadowed) in [
+            ("the target", &target, target_shadowed),
+            (
+                "a second texture over its bytes",
+                &other,
+                target_shadowed + other_shadowed,
+            ),
+        ] {
+            let counted = device.work_counts();
+            pass(&queue, &target, &fill, |encoder| draw_c(encoder, texture));
+            let seen = moved(&counted, &device.work_counts());
+            let notices = counts(&messages.take_notices());
+            eprintln!(
+                "{name}: {what}: shadowed textures {shadowed}, reads through copies {}, through a \
+                 stand-in {}",
+                seen.reads, seen.apart
+            );
+            assert!(
+                !notices.contains_key(&IN_PLACE[0]),
+                "{name}: {what}: {notices:?}"
+            );
+            if shadowed == 0 && !seen.apart {
+                assert_eq!(seen.reads, 1, "{name}: {what}: read through its copy");
+            }
+        }
+        let counted = device.work_counts();
+        pass(&queue, &target, &fill, |encoder| {
+            encoder
+                .set_vertex_bytes(&corners([8, 8, 16, 16]), 0)
+                .unwrap();
+            encoder.set_fragment_buffer(Some(&buffer), 0, 0).unwrap();
+            encoder
+                .draw_primitives(PrimitiveType::Triangle, 0, 6, 1, 0)
+                .unwrap();
+        });
+        let apart = moved(&counted, &device.work_counts()).apart;
+        let notices = messages.take_notices();
+        eprintln!(
+            "{name}: its buffer's bytes: shadowed textures {target_shadowed}, through a stand-in \
+             {apart}"
+        );
+        if target_shadowed == 0 && !apart {
+            assert_once(&notices, &IN_PLACE);
+        } else {
+            assert!(!counts(&notices).contains_key(&IN_PLACE[0]), "{name}");
         }
     });
 }
