@@ -5,14 +5,16 @@
 //! or at the end of `main` while the runtime's threads hold work, run the program's code, or tear
 //! a device down. The parent checks that the child exited with status 0, not by a signal, and
 //! that its exit handlers ended within [`EXIT_LIMIT`] of its last line, or of the end of the CPU
-//! device's work its exit waits for where that is later, less the time the exiting thread waited
-//! for a CPU meanwhile ([`exit_end`]): below the exit hook's own bound of 2 s, so a hook that
-//! waited out its bound fails too. Each child reports the validation layer's messages until then,
-//! which must be none. The parent prints each exit's time, with its wall time, that wait, and how
-//! long the process took to end after its handlers. Each test that checks that time runs alone in
-//! the suite (`.config/nextest.toml`): an exit's time holds the drivers' exit handlers, which
-//! other processes' GPU work slows (NVIDIA's `vkDestroyDevice` took 54 ms alone and up to 2 s
-//! beside other lanes on an RTX 3090).
+//! device's work its exit waits for (macOS) where that is later, less the time the exiting thread
+//! waited for a CPU meanwhile ([`exit_end`]): below the exit hook's own bound of 2 s on macOS, so a
+//! hook that waited out its bound fails too. On Linux (the GNU C library) the hook waits for
+//! nothing: where the runtime is busy as it runs, the process ends at once from it, the handlers
+//! registered before it unrun, and the process's end counts. Each child reports the validation
+//! layer's messages until then, which must be none. The parent prints each exit's time, with its
+//! wall time, that wait, and how long the process took to end after its handlers. Each test that
+//! checks that time runs alone in the suite (`.config/nextest.toml`): an exit's time holds the
+//! drivers' exit handlers, which other processes' GPU work slows (NVIDIA's `vkDestroyDevice` took
+//! 54 ms alone and up to 2 s beside other lanes on an RTX 3090).
 //!
 //! Metal's answers (EV `RT4-metal-teardown`, an M4 with macOS 27.0.1, each case without and with
 //! `MTL_DEBUG_LAYER=1`): every such exit was clean, in 15 to 45 ms, but one: a dropped command
@@ -21,10 +23,12 @@
 //! its handler running, once the event is signalled
 //! ([`a_dropped_command_buffer_completes_once_its_event_is_signalled`]).
 //!
-//! On a CPU device the work submitted before an exit runs on the process's own threads, so the
-//! exit waits for it before the destructors run ([`an_exit_waits_for_a_cpu_device_s_work`]):
-//! measured on lavapipe, its queue thread compiling a dispatch's shader during the destructors
-//! ended the process in the heap's checks, in 1 to 2 exits of 100 while a host step waited.
+//! On a CPU device the work submitted before an exit runs on the process's own threads, so no exit
+//! handler or destructor runs beside it ([`an_exit_runs_no_handler_beside_a_cpu_device_s_work`]):
+//! on Linux the process ends at once with the exit's status, and on macOS the exit waits for the
+//! work. Measured on lavapipe, its queue thread compiling a dispatch's shader during the
+//! destructors ended the process in the heap's checks, in 1 to 2 exits of 100 while a host step
+//! waited.
 
 use super::indirect_host_steps::Setup;
 use super::{run_queue_waits, validated_device, Messages, ScratchCache};
@@ -43,11 +47,12 @@ use std::sync::{mpsc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The longest an exit may take, from the child's last line to the end of its last exit handler
-/// ([`exit_end`]), or, where the exit waits for a CPU device's work that ends later, from that
-/// work's end: the work runs for as long as the host's load lets it ([`CPU_WORK_TIME`]), and the
-/// exit's own part does not. Less the time the exiting thread waited for a CPU meanwhile, which
-/// is the host's load. What follows the handlers, the libraries' destructors and the kernel's
-/// teardown of the process, is not the exit's work: the parent prints it.
+/// ([`exit_end`]; the process's end where it ended at once and that handler did not run), or,
+/// where the exit waits for a CPU device's work that ends later (macOS), from that work's end: the
+/// work runs for as long as the host's load lets it ([`CPU_WORK_TIME`]), and the exit's own part
+/// does not. Less the time the exiting thread waited for a CPU meanwhile, which is the host's
+/// load. What follows the handlers, the libraries' destructors and the kernel's teardown of the
+/// process, is not the exit's work: the parent prints it.
 const EXIT_LIMIT: Duration = Duration::from_millis(1500);
 
 /// The longest a child may run, or a command buffer of these tests take.
@@ -61,6 +66,10 @@ const CACHE_VAR: &str = "M2V_LANE_EXIT_CACHE_DIR";
 
 /// The line a child reports on, right before it exits.
 const REPORT: &str = "RUNTIME-EXIT";
+
+/// The start of the line the runtime writes on standard error where it ends an exit at once from
+/// its hook (Linux, the GNU C library: the driver still runs the runtime's work as the hook runs).
+const AT_ONCE: &str = "metal2vulkan: the process's exit: ";
 
 /// The bytes one fill of the in-flight case writes, and how many fills it encodes: enough work
 /// that the device still runs it when a handler exits (4 GiB written on a GPU), and on a CPU
@@ -76,9 +85,10 @@ fn in_flight() -> (u64, usize) {
 const CPU_WORK_FILL: u64 = 64 << 20;
 
 /// How long the CPU work case's work runs, as one fill's time measured before it predicts: far
-/// longer than the exit's own teardown (about 50 ms on lavapipe), so an exit that did not wait for
-/// it finds it running, and far shorter than the hook's bound of 2 s, within which the hook waits
-/// for it. A host's load stretches it: at a load of 30 to 45, 400 ms of fills ran for 1.5 s.
+/// longer than the exit's own teardown (about 50 ms on lavapipe), so the hook finds it running
+/// (and on Linux ends the process at once), and far shorter than the hook's bound of 2 s on macOS,
+/// within which the hook waits for it. A host's load stretches it: at a load of 30 to 45, 400 ms
+/// of fills ran for 1.5 s.
 const CPU_WORK_TIME: Duration = Duration::from_millis(200);
 
 /// The fill byte of [`fill`].
@@ -90,7 +100,8 @@ const FILLED: u8 = 0x5a;
 /// on the RTX 3090 (NVIDIA 615.71.09) the read of a marker it had mapped ended the process with
 /// `SIGSEGV` in every exit (EV `SWP-exit3090-m2`, 3 of 3, the fault at the mapping's first byte in
 /// the handler). A CPU device's memory is the process's own, which no destructor unmaps, and only
-/// a CPU device's exit waits for the work the marker follows.
+/// a CPU device's exit waits for the work the marker follows (macOS; on Linux it ends at once, and
+/// the handler does not run).
 static MARKER: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
 
 /// A point the exit's own time may count from ([`exit_end`]): when, in milliseconds since the
@@ -151,8 +162,9 @@ fn watch_the_marker(at: NonNull<u8>) {
 }
 
 /// An exit handler the CPU work case registers before it makes its device, so that it runs after
-/// the device's exit hook: print whether the marker's fill, submitted after the work, completed
-/// (always `written=0` without a marker, on a GPU), when the work ended (`seen_ms`: when
+/// the device's exit hook where the hook returns (not where it ended the process at once, on
+/// Linux): print whether the marker's fill, submitted after the work, completed (always
+/// `written=0` without a marker, on a GPU), when the work ended (`seen_ms`: when
 /// [`watch_the_marker`] saw the fill complete, else now; 0 where it is not written), and whether
 /// the runtime answers that the process is exiting (`process_exiting`, which the hook's run makes
 /// true on every device).
@@ -870,32 +882,44 @@ fn exits_from_the_runtime_s_threads_are_clean() {
 /// An exit while a batch waits at its host step's gate for the work before it: the scheduler ends
 /// at its next section, and what is pending stays pending. The same work ran once to completion
 /// before, so that its pipelines are made and no driver's making of one is in progress at the
-/// exit: the hook waits for such a making, which the runtime's
-/// `the_hook_waits_past_its_bound_for_a_making_in_progress` tests.
+/// exit: the hook waits for such a making on macOS, and on Linux ends the process at once, which
+/// the runtime's `the_hook_waits_past_its_bound_for_a_making_in_progress` and
+/// `a_busy_exit_ends_at_once_with_its_status` test.
 #[test]
 fn an_exit_while_a_host_step_waits_is_clean() {
     exits_cleanly(&["host_step_pending_exit"]);
 }
 
 /// An exit while a CPU device runs work submitted before it (fills it runs for about
-/// [`CPU_WORK_TIME`], then a fill of a shared marker) waits for that work: the marker is written
-/// by the time an exit handler registered before the device runs, after the device's hook. That
-/// is the interleaving of an exit with a dispatch in flight on lavapipe, made certain: the work
-/// waits at a gate until the exit has begun, where a handler that runs before the device's hook
-/// ([`release_the_gate`]) opens it and waits until the work is submitted, so it runs as the hook
-/// starts, for far longer than the exit's own teardown. Without the wait the marker was unwritten
-/// in 4 of 20 exits with a fixed 512 MiB of fills, which lavapipe ran within the teardown's 50 ms
-/// in the other 16. The exit's own time counts from the work's end, which a thread watching the
-/// marker sees: the work's own time follows the host's load (1.585 s from the last line to the end
-/// of an exit beside other lanes at a load of 30 to 45, 47 to 58 ms alone). On a GPU the hook does
-/// not wait (as Metal's exit does not), and the exit, with the work started in it, is clean. The
-/// gate makes the work's state as the exit begins certain on every device and at any load: before
-/// it, the child read the status once the work was submitted, and on an RTX 3090 (NVIDIA
-/// 615.71.09) beside 24 CPU spinners the GPU finished the work (15 to 18 fills of 64 MiB, sized by
-/// one fill's 11 to 13 ms round trip there) in the 2 to 3 ms the child took to see its submission
-/// and read its status, in 2 of 20 runs; and in 2 batches beside other lanes.
+/// [`CPU_WORK_TIME`], then a fill of a shared marker) runs no exit handler beside that work, which
+/// runs on the process's own threads:
+/// - on Linux (the GNU C library), where the hook learns the exit's status, the hook finds the work
+///   running and ends the process at once with that status (0), with one line on standard error
+///   ([`AT_ONCE`]): the handlers registered before the device ([`read_the_marker`], [`exit_end`])
+///   do not run. Metal's process ends 1.2 to 2.0 ms after `exit` with work in flight (M3 Max, macOS
+///   27.0.1);
+/// - elsewhere (macOS) the hook waits for the work: the marker is written by the time
+///   [`read_the_marker`] runs, after the device's hook. The exit's own time counts from the work's
+///   end, which a thread watching the marker sees: the work's own time follows the host's load
+///   (1.585 s from the last line to the end of an exit beside other lanes at a load of 30 to 45, 47
+///   to 58 ms alone, on lavapipe).
+///
+/// That is the interleaving of an exit with a dispatch in flight on lavapipe, made certain: the
+/// work waits at a gate until the exit has begun, where a handler that runs before the device's
+/// hook ([`release_the_gate`]) opens it and waits until the work is submitted, so it runs as the
+/// hook starts, for far longer than the exit's own teardown. Without the hook's wait the marker was
+/// unwritten in 4 of 20 exits with a fixed 512 MiB of fills, which lavapipe ran within the
+/// teardown's 50 ms in the other 16. On a GPU the hook does not wait for the work (as Metal's exit
+/// does not), and the exit, with the work started in it, is clean: on Linux it ends at once where
+/// another thread is in a section as the hook runs (the completion waiter's wait for the work),
+/// else the hook returns and the marker's handler runs. The gate makes the work's state as the exit
+/// begins certain on every device and at any load: before it, the child read the status once the
+/// work was submitted, and on an RTX 3090 (NVIDIA 615.71.09) beside 24 CPU spinners the GPU
+/// finished the work (15 to 18 fills of 64 MiB, sized by one fill's 11 to 13 ms round trip there)
+/// in the 2 to 3 ms the child took to see its submission and read its status, in 2 of 20 runs; and
+/// in 2 batches beside other lanes.
 #[test]
-fn an_exit_waits_for_a_cpu_device_s_work() {
+fn an_exit_runs_no_handler_beside_a_cpu_device_s_work() {
     let case = "cpu_work_exit";
     let exited = exits_cleanly(&[case]).remove(0);
     let field = |line: &str, name: &str| -> Option<u8> {
@@ -905,8 +929,9 @@ fn an_exit_waits_for_a_cpu_device_s_work() {
             .parse()
             .ok()
     };
-    let what = || format!("stdout:\n{}", exited.stdout);
+    let what = || format!("stdout:\n{}\nstderr:\n{}", exited.stdout, exited.stderr);
     let release = format!("{REPORT}-RELEASE ");
+    let marker = format!("{REPORT}-MARKER ");
     assert_eq!(
         field(&release, "held"),
         Some(1),
@@ -925,26 +950,71 @@ fn an_exit_waits_for_a_cpu_device_s_work() {
         "the work was not submitted once the gate opened: {}",
         what()
     );
-    assert_eq!(
-        field(&format!("{REPORT}-MARKER "), "exiting"),
-        Some(1),
-        "the runtime did not answer that the process is exiting: {}",
-        what()
-    );
-    if field(&format!("{REPORT}-WORK {case} "), "cpu") == Some(1) {
+    let cpu = field(&format!("{REPORT}-WORK {case} "), "cpu") == Some(1);
+    if cpu {
         assert_eq!(
             field(&release, "running"),
             Some(1),
             "the work completed before the device's hook began: {}",
             what()
         );
+    }
+    let notices = exited.stderr.matches(AT_ONCE).count();
+    assert!(
+        notices <= 1,
+        "the exit's notice was written {notices} times: {}",
+        what()
+    );
+    let at_once = notices == 1;
+    let hook_learns_status = cfg!(all(target_os = "linux", target_env = "gnu"));
+    assert!(
+        !at_once || hook_learns_status,
+        "the exit ended at once where the hook learns no status: {}",
+        what()
+    );
+    if at_once {
+        for line in [&marker, &format!("{REPORT}-END ")] {
+            assert!(
+                stdout_line(&exited, line).is_none(),
+                "a handler registered before the device's hook ran after the exit ended at once \
+                 ({}): {}",
+                line.trim_end(),
+                what()
+            );
+        }
+    } else {
         assert_eq!(
-            field(&format!("{REPORT}-MARKER "), "written"),
+            field(&marker, "exiting"),
+            Some(1),
+            "the runtime did not answer that the process is exiting: {}",
+            what()
+        );
+    }
+    if cpu && hook_learns_status {
+        assert!(
+            at_once,
+            "the exit did not end at once with the CPU device's work in flight: {}",
+            what()
+        );
+    } else if cpu {
+        assert_eq!(
+            field(&marker, "written"),
             Some(1),
             "the exit did not wait for the CPU device's work: {}",
             what()
         );
     }
+    println!(
+        "runtime exit, {case} on a {}: {}",
+        match cpu {
+            true => "CPU device",
+            false => "GPU",
+        },
+        match at_once {
+            true => "ended at once from the device's hook",
+            false => "the device's hook returned, and the handlers before it ran",
+        }
+    );
 }
 
 /// An exit right after committing many command buffers: the scheduler is still submitting them,

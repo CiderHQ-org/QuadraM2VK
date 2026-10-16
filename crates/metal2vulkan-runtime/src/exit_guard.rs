@@ -48,17 +48,30 @@
 //!   of statics made at those first calls included: the process's first device, one whose driver
 //!   and functions are new since the process last loaded a shared object, and the first after such
 //!   a load ([`loaded`]). A device made again on what stays loaded registers nothing. It closes the
-//!   guard, so no section starts, and waits for the sections in progress to end: at most [`BOUND`],
-//!   and never for the exiting thread's own (an exit from a message sink). A later run (an earlier
-//!   registration) finds nothing to wait for and makes no Vulkan call: it follows the destructors
-//!   registered after that registration. While a driver's making of a `VkPipeline` is in progress
-//!   in a section (a pool's piece's `vkCreate*Pipelines`, [`driver_making`]), at most
-//!   [`MAKING_BOUND`], and it says so on standard error as that wait starts: a making outlasts
-//!   [`BOUND`], and the program need not wait for the command buffer whose making it is before it
-//!   exits. Seen: with two seconds, two lane processes on ANV ended with `SIGSEGV` and `SIGABRT`
-//!   inside the validation layer 3 and 20 s after their test passed, where a bicubic kernel's
-//!   making took 6.6 s under the lane's load (EV `PRDC-gl1-anv`); a making in progress then is
-//!   inferred from the timing.
+//!   guard, so no section starts, and waits for the sections in progress to end, never for the
+//!   exiting thread's own (an exit from a message sink). A later run (an earlier registration)
+//!   finds nothing to wait for and makes no Vulkan call: it follows the destructors registered
+//!   after that registration. What the first run does with the sections in progress depends on
+//!   whether the hook learns the exit's status:
+//!   - **Linux, with the GNU C library**, where it does (`on_exit(3)`, [`exit_handler`]): it waits
+//!     for nothing. Where a section of another thread (a making's included) or a CPU device's work
+//!     (below) is in progress, it ends the process at once with the exit's status
+//!     ([`end_at_once`]): one line on standard error ([`AT_ONCE_NOTICE`]), the C library's output
+//!     streams flushed, `_exit`. The exit handlers registered before the hook's last registration
+//!     (the program's, a terminal's restore) then do not run, where Metal's exit runs them
+//!     (docs/API.md, accepted differences). Measured on the M3 Max (macOS 27.0.1): Metal's process
+//!     ends 1.2 to 2.0 ms after `exit` with a command buffer's work in flight, a thread waiting for
+//!     it, or a compile in progress. With the waits below, a lavapipe process took 2 s to exit
+//!     while a thread waited for its work, and under the GPU-assisted validation layer 1.4.357 two
+//!     completion tests' processes hung at exit, the layer deadlocked inside a submission.
+//!   - **Elsewhere** (macOS, where `atexit` gives no status): at most [`BOUND`], and while a
+//!     driver's making of a `VkPipeline` is in progress in a section (a pool's piece's
+//!     `vkCreate*Pipelines`, [`driver_making`]), at most [`MAKING_BOUND`], and it says so on
+//!     standard error as that wait starts: a making outlasts [`BOUND`], and the program need not
+//!     wait for the command buffer whose making it is before it exits. Seen: with two seconds, two
+//!     lane processes on ANV ended with `SIGSEGV` and `SIGABRT` inside the validation layer 3 and
+//!     20 s after their test passed, where a bicubic kernel's making took 6.6 s under the lane's
+//!     load (EV `PRDC-gl1-anv`); a making in progress then is inferred from the timing.
 //! - **Registered again.** Drivers and layers also register destructors later, when a static is
 //!   made at its first use. Measured: with the hook registered only at the first device, polls
 //!   and device waits crashed inside the validation layer's synchronization code at exit while
@@ -104,16 +117,16 @@
 //!   lavapipe, SwiftShader) runs what was submitted to it on the process's own threads, so the
 //!   destructors would run under its execution. Once the sections ended, the hook's first run waits
 //!   for the work submitted to each such device's queues ([`InProcess`], [`runs_in_process`]),
-//!   within what is left of [`BOUND`], and takes the devices off the list; what is not submitted
-//!   stays pending. Measured: while every run waited, lavapipe processes exiting with a live device
-//!   under the validation layer 1.4.357 ended with `SIGABRT` (`SIGSEGV` with GPU-assisted
-//!   validation) inside the layer's `vkWaitSemaphores`, in the run of the hook's first
-//!   registration, after a destructor the layer registered on the program's thread between that
-//!   registration and the next. A GPU's work runs on the GPU, and the hook does not wait for it, as
-//!   Metal's exit does not. Measured on lavapipe (Mesa 26.2.4, x86_64): with work in flight at
-//!   exit, its queue thread compiled a dispatch's shader (LLVM's `MCJIT::finalizeObject`) while the
-//!   destructors ran, and the process ended in `free()`'s heap checks, in 5 of 300 exits while a
-//!   host step waited and 1 of 300 with a plain dispatch in flight.
+//!   within what is left of its bound (above, none on Linux), and takes the devices off the list;
+//!   what is not submitted stays pending. Measured: while every run waited, lavapipe processes
+//!   exiting with a live device under the validation layer 1.4.357 ended with `SIGABRT` (`SIGSEGV`
+//!   with GPU-assisted validation) inside the layer's `vkWaitSemaphores`, in the run of the hook's
+//!   first registration, after a destructor the layer registered on the program's thread between
+//!   that registration and the next. A GPU's work runs on the GPU, and the hook does not wait for
+//!   it, as Metal's exit does not. Measured on lavapipe (Mesa 26.2.4, x86_64): with work in flight
+//!   at exit, its queue thread compiled a dispatch's shader (LLVM's `MCJIT::finalizeObject`) while
+//!   the destructors ran, and the process ended in `free()`'s heap checks, in 5 of 300 exits while
+//!   a host step waited and 1 of 300 with a plain dispatch in flight.
 //! - **No exit waits for a thread the guard ended.** Those two threads end between sections,
 //!   holding no lock. Two things wait for them:
 //!   - joins, made only by a device's teardown, which is one section: once the guard closed none
@@ -126,8 +139,8 @@
 //!     known. A handler's wait for another queue is one of them.
 //!
 //!   The hook itself waits only for sections, and a section waits for nothing the exiting thread
-//!   holds but through a message sink, which [`BOUND`] covers. So nothing run before the exit
-//!   returns (later exit handlers and destructors, or a thread one of them joins) waits for a
+//!   holds but through a message sink, which the hook's bound covers. So nothing run before the
+//!   exit returns (later exit handlers and destructors, or a thread one of them joins) waits for a
 //!   thread the guard ended.
 //! - **Forks.** The hook acts only in the process it was registered in: a child forked without
 //!   exec, which has none of its parent's threads, runs it as a no-op, and registers its own with
@@ -141,16 +154,18 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 /// The longest the hook waits for the sections in progress, and then for a CPU device's
-/// submitted work ([`InProcess`]). A section is one submission, one poll (at most 100 ms), one
-/// counter read, one save's read, or one object's release (a device's: its threads' stops,
-/// `vkDeviceWaitIdle`, its destruction); it outlasts this only when a driver or a message sink
-/// blocks.
+/// submitted work ([`InProcess`]), where it learns no exit status (macOS). A section is one
+/// submission, one poll (at most 100 ms), one counter read, one save's read, or one object's
+/// release (a device's: its threads' stops, `vkDeviceWaitIdle`, its destruction); it outlasts this
+/// only when a driver or a message sink blocks.
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 pub(crate) const BOUND: Duration = Duration::from_secs(2);
 
-/// The longest the hook waits, while a driver's making of a `VkPipeline` is in progress in a
-/// section ([`driver_making`]), for the sections in progress: a making takes 20 to 50 s on
-/// NVIDIA (`pipeline/piece_holds.rs`), and Metal's process waited for all of it at the state's
-/// creation, before its exit.
+/// The longest the hook waits, where it learns no exit status (macOS), while a driver's making of
+/// a `VkPipeline` is in progress in a section ([`driver_making`]), for the sections in progress: a
+/// making takes 20 to 50 s on NVIDIA (`pipeline/piece_holds.rs`), and Metal's process waited for
+/// all of it at the state's creation, before its exit.
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 pub(crate) const MAKING_BOUND: Duration = Duration::from_secs(60);
 
 /// The longest a blocked wait goes without looking at the guard.
@@ -591,7 +606,7 @@ impl Guard {
     }
 
     /// [`enter`](Self::enter) a section around a driver's making of a `VkPipeline`: while one is
-    /// in progress, [`close`](Self::close) waits up to [`MAKING_BOUND`].
+    /// in progress, [`close`](Self::close) waits up to its making's bound.
     pub(crate) fn enter_making(&self) -> Option<Busy<'_>> {
         let mut busy = self.enter()?;
         busy.making = true;
@@ -606,14 +621,15 @@ impl Guard {
 
     /// Close the guard, then wait until no more sections are in progress than `own` (the
     /// closing thread's), at most `bound`, or while a section that makes a `VkPipeline` is in
-    /// progress, at most [`MAKING_BOUND`]: whether they ended.
+    /// progress, at most `making` (no more than `bound` where `making` is not longer): whether
+    /// they ended.
     ///
     /// The count of sections and the count of makings are read one after the other, so a making
     /// may end between the two reads: counted as in progress by the first, gone from the second.
     /// The wait gives up only on a count read after the makings', which a section's end lowers
     /// before its making's ([`Busy`]'s drop): a making that ended is never taken for a section
     /// still in progress.
-    pub(crate) fn close(&self, own: usize, bound: Duration) -> bool {
+    pub(crate) fn close(&self, own: usize, bound: Duration, making: Duration) -> bool {
         self.closed.store(true, Ordering::SeqCst);
         let start = Instant::now();
         let mut said = false;
@@ -623,16 +639,16 @@ impl Guard {
             }
             between_counts();
             let waited = start.elapsed();
-            let making = self.making.load(Ordering::SeqCst);
-            if waited >= bound && (making == 0 || waited >= MAKING_BOUND) {
+            let makings = self.making.load(Ordering::SeqCst);
+            if waited >= bound && (makings == 0 || waited >= making) {
                 return self.active.load(Ordering::SeqCst) <= own;
             }
             if waited >= bound && !said {
                 said = true;
                 eprintln!(
-                    "metal2vulkan: the exit waits for {making} pipeline making(s) in the driver, \
+                    "metal2vulkan: the exit waits for {makings} pipeline making(s) in the driver, \
                      at most {} s more",
-                    MAKING_BOUND.saturating_sub(waited).as_secs()
+                    making.saturating_sub(waited).as_secs()
                 );
             }
             std::thread::sleep(POLL);
@@ -674,9 +690,9 @@ pub(crate) fn enter() -> Option<Busy<'static>> {
 }
 
 /// Run `make`, a driver's making of `VkPipeline`s, inside a section of its own where this thread
-/// is in a section (a pool's piece), which the hook waits for up to [`MAKING_BOUND`]
-/// ([`Guard::enter_making`]); on the program's own thread, as it is. A section inside one runs
-/// even once the guard closed, so the making is always counted.
+/// is in a section (a pool's piece), which the hook waits for up to its making's bound
+/// ([`Guard::enter_making`], the module docs); on the program's own thread, as it is. A section
+/// inside one runs even once the guard closed, so the making is always counted.
 pub(crate) fn driver_making<T>(make: impl FnOnce() -> T) -> T {
     let _making = match in_section() {
         true => GUARD.enter_making(),
@@ -1209,22 +1225,65 @@ fn register_again() {
     }
 }
 
-/// Register [`on_exit`] with the C library's exit handlers.
-#[cfg(unix)]
+/// Register [`exit_handler`] with the C library's exit handlers: through `on_exit(3)`, which
+/// shares `atexit`'s order and passes the exit's status.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 fn install() {
     INSTALLED.fetch_add(1, Ordering::Relaxed);
-    // SAFETY: `on_exit` is a function with no arguments that never unwinds. Registration fails
-    // only when the C library is out of memory; the process then exits unguarded, as before.
-    unsafe { libc::atexit(on_exit) };
+    // SAFETY: `exit_handler` takes the status and an argument it does not read, and never
+    // unwinds. Registration fails only when the C library is out of memory; the process then
+    // exits unguarded, as before.
+    unsafe { on_exit(exit_handler, std::ptr::null_mut()) };
+}
+
+/// Register [`exit_handler`] with the C library's exit handlers.
+#[cfg(all(unix, not(all(target_os = "linux", target_env = "gnu"))))]
+fn install() {
+    INSTALLED.fetch_add(1, Ordering::Relaxed);
+    // SAFETY: `exit_handler` is a function with no arguments that never unwinds. Registration
+    // fails only when the C library is out of memory; the process then exits unguarded, as
+    // before.
+    unsafe { libc::atexit(exit_handler) };
 }
 
 /// Nothing to register: the runtime is built for unix hosts, whose exit order the hook relies on.
 #[cfg(not(unix))]
 fn install() {}
 
-/// The exit handler.
-#[cfg(unix)]
-extern "C" fn on_exit() {
+// The GNU C library's `on_exit(3)` (`<stdlib.h>`), which `libc` does not declare: `function` is
+// called with `exit`'s status and `argument`, among the handlers `atexit` registers, in the
+// reverse order of their registration.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+unsafe extern "C" {
+    fn on_exit(
+        function: extern "C" fn(std::ffi::c_int, *mut std::ffi::c_void),
+        argument: *mut std::ffi::c_void,
+    ) -> std::ffi::c_int;
+}
+
+/// The exit handler, where it learns the exit's status: the hook waits for nothing, and where the
+/// driver is running what the runtime gave it, the process ends at once with that status
+/// ([`end_at_once`]).
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+extern "C" fn exit_handler(status: std::ffi::c_int, _: *mut std::ffi::c_void) {
+    let ended = hook(
+        &GUARD,
+        &IN_PROCESS,
+        REGISTERED.load(Ordering::SeqCst),
+        std::process::id(),
+        OWN.with(Cell::get),
+        Duration::ZERO,
+        Duration::ZERO,
+    );
+    if ended == Some(false) {
+        end_at_once(status);
+    }
+}
+
+/// The exit handler, where it learns no status (`atexit`): the hook waits at most [`BOUND`], or
+/// [`MAKING_BOUND`] while a making is in progress, and returns.
+#[cfg(all(unix, not(all(target_os = "linux", target_env = "gnu"))))]
+extern "C" fn exit_handler() {
     hook(
         &GUARD,
         &IN_PROCESS,
@@ -1232,22 +1291,54 @@ extern "C" fn on_exit() {
         std::process::id(),
         OWN.with(Cell::get),
         BOUND,
+        MAKING_BOUND,
     );
 }
 
-/// The exit handler [`install`] registers, run alone, as the C library's `exit` runs it: a forked
-/// child's test runs it without the other handlers the child inherits.
+/// The exit handler [`install`] registers, run alone, as the C library's `exit` runs it for
+/// `status` (where it learns the status): a forked child's test runs it without the other handlers
+/// the child inherits.
 #[cfg(all(test, unix))]
-pub(crate) fn run_on_exit() {
-    on_exit();
+pub(crate) fn run_on_exit(status: std::ffi::c_int) {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    exit_handler(status, std::ptr::null_mut());
+    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+    {
+        let _ = status;
+        exit_handler();
+    }
+}
+
+/// What [`end_at_once`] writes on standard error, one line in a degrade notice's form.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub(crate) const AT_ONCE_NOTICE: &str = "metal2vulkan: the process's exit: the Vulkan driver is \
+    still running the runtime's work (a call, a pipeline's making, or a CPU device's commands); \
+    the process ends at once with its status, and the exit handlers registered before the \
+    runtime's (a terminal's restore, say) do not run\n";
+
+/// End the process at once with `status`, the exit's, where the driver is running what the runtime
+/// gave it as the hook closes the guard: a section of another thread, a making, or a CPU device's
+/// work. One line on standard error ([`AT_ONCE_NOTICE`]), the C library's output streams flushed
+/// (as `exit` flushes them after its handlers), then `_exit`: no later exit handler or destructor
+/// runs, beside the driver's call or after it.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn end_at_once(status: std::ffi::c_int) -> ! {
+    // SAFETY: writes the notice's bytes, live for the call, to standard error; a failed write
+    // is ignored, as the exit goes on.
+    unsafe { libc::write(2, AT_ONCE_NOTICE.as_ptr().cast(), AT_ONCE_NOTICE.len()) };
+    // SAFETY: flushes every open output stream of the C library.
+    unsafe { libc::fflush(std::ptr::null_mut()) };
+    // SAFETY: ends the process with the exit's status.
+    unsafe { libc::_exit(status) }
 }
 
 /// The hook's work in process `pid`, registered in process `registered`, on a thread with `own`
 /// sections in progress: close `guard` and wait for the other sections, then for the work submitted
 /// to `in_process`'s devices, which the first run takes whether it waits or not, at most `bound` in
-/// all; where a section that makes a `VkPipeline` held the sections' wait past `bound`
-/// ([`Guard::close`]), the work's wait gets `bound` from there. `None` (nothing done) in another
-/// process than the one registered; else whether the other sections ended and the work completed.
+/// all; where a section that makes a `VkPipeline` held the sections' wait past `bound` (at most
+/// `making`, [`Guard::close`]), the work's wait gets `bound` from there. `None` (nothing done) in
+/// another process than the one registered; else whether the other sections ended and the work
+/// completed.
 pub(crate) fn hook(
     guard: &Guard,
     in_process: &InProcessDevices,
@@ -1255,10 +1346,11 @@ pub(crate) fn hook(
     pid: u32,
     own: usize,
     bound: Duration,
+    making: Duration,
 ) -> Option<bool> {
     (registered == pid).then(|| {
         let deadline = Instant::now() + bound;
-        let ended = guard.close(own, bound);
+        let ended = guard.close(own, bound, making);
         // A making's section held the close past the bound: the work gets the bound from there.
         let now = Instant::now();
         let deadline = match now > deadline {

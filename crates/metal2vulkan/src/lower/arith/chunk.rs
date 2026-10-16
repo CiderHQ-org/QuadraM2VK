@@ -411,13 +411,14 @@ fn select_dot(
                     super::denormal_flush(cx, &[a, b], 0b11, true),
                 )
             };
+            let tiny = denormal::tiny_check(cx.profile).filter(|_| single);
             let s = ArithStrategy::ChunkedChain {
                 lanes: shape.lanes,
                 elem,
                 fma,
                 flush,
                 reads,
-                tiny: denormal::tiny_check(cx.profile).filter(|_| single),
+                tiny: cx.families.arith.take_tiny_check(tiny, elem),
             };
             return Ok(super::with_nan(cx, at, s, answer, elem));
         }

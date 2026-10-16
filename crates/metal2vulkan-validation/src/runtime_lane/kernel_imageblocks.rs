@@ -124,7 +124,7 @@ fn an_imageblock_size_is_taken_or_refused_at_the_call() {
         });
         assert!(
             output == case.metal_output,
-            "{EXTENT}: a refused size changed the size set before it"
+            "{EXTENT}: the run at the size set before four refused ones is not Metal's"
         );
         assert!(width >= 4, "{EXTENT}: its width rounds from below");
         let below = u64::from(width / 2 + 1);

@@ -329,6 +329,20 @@ impl Routine {
         }
     }
 
+    /// The float container widths the routine computes in: 32, and 64 for those in `double`
+    /// ([`Route::Wide`], and [`Route::Khr`]'s [`small`]). It answers Metal's zero of its sign
+    /// through float instructions at those widths (an exact zero sum by the device's `Fma` or the
+    /// unfused `a * b + c`, a `float` result below `2^-126` flushed to the zero of its sign),
+    /// whose zero signs Vulkan lets a device ignore without `SignedZeroInfNanPreserve`: where the
+    /// profile's functions answer as Metal's, the module keeps them at each width
+    /// (`ArithPlan::keep_zero_signs`).
+    pub fn widths(self) -> &'static [u8] {
+        match self.route {
+            Route::Wide | Route::Khr => &[32, 64],
+            _ => &[32],
+        }
+    }
+
     /// The routine of its route on one lane.
     fn one_lane(self) -> Routine {
         Routine {

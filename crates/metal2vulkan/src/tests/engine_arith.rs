@@ -3431,7 +3431,7 @@ fn barred_roundings(words: &[u32]) -> (usize, usize) {
 }
 
 /// Whether `words` declares `OpExecutionMode <entry> SignedZeroInfNanPreserve <width>`.
-fn declares_signed_zero_inf_nan(words: &[u32], width: u32) -> bool {
+pub(super) fn declares_signed_zero_inf_nan(words: &[u32], width: u32) -> bool {
     let mut i = 5;
     while i < words.len() {
         let (len, opcode) = ((words[i] >> 16) as usize, words[i] & 0xFFFF);
@@ -3450,7 +3450,9 @@ fn declares_signed_zero_inf_nan(words: &[u32], width: u32) -> bool {
 
 /// A float operation without `nnan`/`ninf`/`nsz` makes the entry declare `SignedZeroInfNanPreserve
 /// 32` where the profile supports it, and note `DeviceSignedZeroInfNan` where it does not; `fast`
-/// operations need neither. Half arithmetic is held in `f32`, so it needs the 32-bit mode.
+/// operations need neither, but for a `fast` product's check at `±2^-126` where the profile checks
+/// one, which answers Metal's zero of its sign. Half arithmetic is held in `f32`, so it needs the
+/// 32-bit mode.
 #[test]
 fn float_ops_without_fast_flags_preserve_signed_zero_inf_nan() {
     let inputs = format!("{}{}", of("a", -0.0), of("b", 0.0));
@@ -3491,7 +3493,12 @@ fn float_ops_without_fast_flags_preserve_signed_zero_inf_nan() {
             let note = a.precision.contains(&PrecisionNote::DeviceSignedZeroInfNan);
             let mode = declares_signed_zero_inf_nan(&words, 32);
             if kk.name == "fast_mul" {
-                assert!(!mode && !note, "{what}: fast needs no preservation");
+                let checked = crate::lower::arith::denormal::checks_tiny_products(&p);
+                assert_eq!(
+                    (mode, note),
+                    (checked && supported, checked && !supported),
+                    "{what}: fast needs preservation only for its product's check"
+                );
             } else {
                 assert_eq!((mode, note), (supported, !supported), "{what}");
                 declared += usize::from(mode);
@@ -3505,18 +3512,132 @@ fn float_ops_without_fast_flags_preserve_signed_zero_inf_nan() {
     );
 }
 
+/// Under `FloatMathsPolicy::Exact` a fused multiply-add the translation computes by a routine (in
+/// `double` or in integers without `OpFmaKHR`, a `half` one through `float`, and a checked
+/// `OpFmaKHR`'s small results) answers Metal's zero of its sign through float instructions, so a
+/// `fast` entry that calls one declares `SignedZeroInfNanPreserve` at 32 bits, and at 64 for a
+/// routine in `double`, where the profile supports it, else notes `DeviceSignedZeroInfNan`: without
+/// the mode Vulkan lets a device answer a zero of either sign (Metal's `fma(+0, 100, +0)` is `+0`).
+/// Nothing else in the kernels needs the mode: their operands are bits, their calls `fast`. Where
+/// the profile's functions are Metal's own (MoltenVK), and under the default policy, neither kernel
+/// declares it.
+#[test]
+fn fused_multiply_add_routines_keep_zero_signs() {
+    use crate::lower::arith::fma::{self, Route};
+    use crate::spirv::testing::committed_profiles_with;
+    let ks = [
+        Kernel {
+            name: "fast_fma_float",
+            body: format!(
+                "{}{}{}  %r = call fast float @llvm.fma.f32(float %a, float %b, float %c)\n",
+                ob("a", 0),
+                ob("b", 100f32.to_bits()),
+                ob("c", 0)
+            ),
+            float: true,
+            want: None,
+            needs: &[],
+            note: None,
+        },
+        Kernel {
+            name: "fast_fma_half",
+            body: format!(
+                "{}{}{}  %x = call fast half @llvm.fma.f16(half %h, half %g, half %u)\n  %xb = bitcast half %x to i16\n  %r = zext i16 %xb to i32\n",
+                oh("h", 0),
+                oh("g", 0x5640),
+                oh("u", 0)
+            ),
+            float: false,
+            want: None,
+            needs: &[],
+            note: None,
+        },
+    ];
+    let text = module(&ks).replace(
+        DECLS,
+        &format!(
+            "{DECLS}declare float @llvm.fma.f32(float, float, float)\ndeclare half @llvm.fma.f16(half, half, half)\n"
+        ),
+    );
+    let Some(bitcode) = assemble("fma-zero-signs", &text) else {
+        return;
+    };
+    // The routes and widths some profile keeps zero signs at (by the mode or the note).
+    let mut kept = std::collections::BTreeSet::new();
+    for (stem, p) in committed_profiles_with(exact_maths()).expect("profiles") {
+        let exact = p.fields().float_functions == FloatFunctions::Device;
+        let r = fma::routes(&p);
+        let fc = p.fields().float_controls;
+        let supported = [
+            fc.f32.signed_zero_inf_nan_preserve,
+            fc.f64.signed_zero_inf_nan_preserve,
+        ];
+        for kk in &ks {
+            let what = format!("{} on {stem}", kk.name);
+            // The kernel's route, whether it calls a routine, and whether that one is in `double`.
+            let (route, routine) = if kk.float {
+                let routine = matches!(r.float, Route::Wide | Route::Soft) || r.tiny.is_some();
+                let double = r.float == Route::Wide || r.tiny == Some(Route::Wide);
+                (r.float, [routine, double])
+            } else {
+                (r.half, [r.half == Route::HalfOdd, false])
+            };
+            let wanted = routine.map(|w| w && exact);
+            let a = compile(&bitcode, kk.name, &p).unwrap_or_else(|e| panic!("{what}: {e:?}"));
+            let (_, words) =
+                link_and_validate(&a, &p).unwrap_or_else(|e| panic!("{what}: L3: {e}"));
+            for (i, width) in [32, 64].into_iter().enumerate() {
+                let mode = declares_signed_zero_inf_nan(&words, width);
+                assert_eq!(mode, wanted[i] && supported[i], "{what}: mode {width}");
+                if wanted[i] {
+                    kept.insert((route, width));
+                }
+            }
+            let unsupported = (0..2).any(|i| wanted[i] && !supported[i]);
+            assert_eq!(
+                a.precision.contains(&PrecisionNote::DeviceSignedZeroInfNan),
+                unsupported,
+                "{what}: note"
+            );
+        }
+    }
+    for want in [
+        (Route::Wide, 32),
+        (Route::Wide, 64),
+        (Route::Soft, 32),
+        (Route::HalfOdd, 32),
+    ] {
+        assert!(kept.contains(&want), "no profile keeps {want:?}: {kept:?}");
+    }
+    for (stem, p) in committed_profiles_with(DevicePolicy::default()).expect("profiles") {
+        for kk in &ks {
+            let what = format!("{} on {stem} by default", kk.name);
+            let a = compile(&bitcode, kk.name, &p).unwrap_or_else(|e| panic!("{what}: {e:?}"));
+            let (_, words) =
+                link_and_validate(&a, &p).unwrap_or_else(|e| panic!("{what}: L3: {e}"));
+            for width in [32, 64] {
+                assert!(
+                    !declares_signed_zero_inf_nan(&words, width),
+                    "{what}: mode {width}"
+                );
+            }
+        }
+    }
+}
+
 /// A float to integer `air.convert` converts NaN to 0, telling it by `OpIsNan` only where the entry
 /// declares `SignedZeroInfNanPreserve` for `float`, and by its bits where it does not (a device may
 /// assume there that no operand is a NaN, in `OpIsNan` and `NClamp` alike): a `fast` entry has no
-/// `OpIsNan`. (AIR has no `double` conversion; `math::convert`'s unit tests read a 64-bit
-/// container's NaN by its two words.)
+/// `OpIsNan`. The NaN is a sum's: a product's check at `±2^-126` would keep zero signs under
+/// `FloatMathsPolicy::Exact`. (AIR has no `double` conversion; `math::convert`'s unit tests read a
+/// 64-bit container's NaN by its two words.)
 #[test]
 fn a_convert_tells_a_nan_by_its_bits_where_the_entry_may_assume_none() {
     let float = |name: &'static str, flags: &str| {
         k(
             name,
             format!(
-                "{}  %f = bitcast i32 %a to float\n  %g = fmul {flags}float %f, %f\n  %i = call i32 @air.convert.s.i32.f.f32(float %g)\n  %u = call i8 @air.convert.u.i8.f.f32(float %g)\n  %uw = zext i8 %u to i32\n  %s = or i32 %i, %uw\n  %r = add i32 %s, 7\n",
+                "{}  %f = bitcast i32 %a to float\n  %g = fadd {flags}float %f, %f\n  %i = call i32 @air.convert.s.i32.f.f32(float %g)\n  %u = call i8 @air.convert.u.i8.f.f32(float %g)\n  %uw = zext i8 %u to i32\n  %s = or i32 %i, %uw\n  %r = add i32 %s, 7\n",
                 oi("a", 0x7FC0_0001)
             ),
             7,

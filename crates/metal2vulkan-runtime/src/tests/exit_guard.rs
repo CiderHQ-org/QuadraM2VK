@@ -1,7 +1,9 @@
 //! `exit_guard.rs`: sections end before the hook returns, none starts after it closed, the hook
 //! never waits for the exiting thread's own sections, its wait is bounded, only its first run
-//! waits for a CPU device's work, and it acts only in the process it was registered in. Each test
-//! uses a guard of its own; only the fork test uses the process's, which nothing here closes.
+//! waits for a CPU device's work, and it acts only in the process it was registered in. A child's
+//! exit while the driver runs the runtime's work ends at once with its status where the hook learns
+//! it (Linux). Each test uses a guard of its own; only the fork tests use the process's, which
+//! nothing here closes.
 
 use crate::exit_guard::{self, hook, Busy, Call, Guard, InProcess, InProcessDevices};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -31,7 +33,7 @@ fn sections_start_until_the_guard_closes_and_never_after() {
     }
     assert_eq!(exit_guard::own(), before);
     assert!(!guard.is_closed());
-    assert!(guard.close(0, Duration::ZERO));
+    assert!(guard.close(0, Duration::ZERO, Duration::ZERO));
     assert!(guard.is_closed());
     assert!(guard.enter().is_none());
     assert_eq!(exit_guard::own(), before);
@@ -64,7 +66,9 @@ fn the_hook_waits_for_the_sections_in_progress_on_other_threads() {
     };
     entered.wait();
     let start = Instant::now();
-    let closer = std::thread::spawn(move || guard.close(0, Duration::from_secs(10)));
+    let closer = std::thread::spawn(move || {
+        guard.close(0, Duration::from_secs(10), Duration::from_secs(10))
+    });
     while !guard.is_closed() {
         std::thread::yield_now();
     }
@@ -99,7 +103,7 @@ fn the_hook_s_wait_is_bounded() {
     held.1.recv().unwrap();
     let bound = Duration::from_millis(300);
     let start = Instant::now();
-    assert!(!guard.close(0, bound), "a stuck section ended");
+    assert!(!guard.close(0, bound, bound), "a stuck section ended");
     let waited = start.elapsed();
     assert!(
         waited >= bound && waited < bound + Duration::from_secs(2),
@@ -110,10 +114,13 @@ fn the_hook_s_wait_is_bounded() {
 }
 
 /// A section around a driver's making of a `VkPipeline` holds the hook past its bound until it
-/// ends, within `MAKING_BOUND`: a making outlasts the bound, and the program need not wait for
-/// it. One run only on a thread in a section takes such a section (`driver_making`).
+/// ends, within the making's own bound (`MAKING_BOUND` where the hook waits, on macOS): a making
+/// outlasts the bound, and the program need not wait for it. Where the making's bound is not
+/// longer (the hook that ends the process at once, on Linux), it holds the hook no longer than the
+/// bound. One run only on a thread in a section takes such a section (`driver_making`).
 #[test]
 fn the_hook_waits_past_its_bound_for_a_making_in_progress() {
+    let making = Duration::from_secs(10);
     let guard = guard();
     let (held, release) = (mpsc::channel(), mpsc::channel::<()>());
     let (entered, stop) = (held.0, release.1);
@@ -127,13 +134,36 @@ fn the_hook_waits_past_its_bound_for_a_making_in_progress() {
     release.0.send(()).unwrap();
     let bound = Duration::from_millis(50);
     let start = Instant::now();
-    assert!(guard.close(0, bound), "the making's section did not end");
+    assert!(
+        guard.close(0, bound, making),
+        "the making's section did not end"
+    );
     let waited = start.elapsed();
     assert!(
-        waited >= Duration::from_millis(250) && waited < exit_guard::MAKING_BOUND,
+        waited >= Duration::from_millis(250) && waited < making,
         "the hook waited {waited:?}"
     );
     assert!(guard.enter_making().is_none());
+    worker.join().unwrap();
+
+    // With the making's bound no longer than the bound.
+    let guard = self::guard();
+    let (held, release) = (mpsc::channel(), mpsc::channel::<()>());
+    let (entered, stop) = (held.0, release.1);
+    let worker = std::thread::spawn(move || {
+        let _busy: Busy<'static> = guard.enter_making().expect("open");
+        entered.send(()).unwrap();
+        let _ = stop.recv();
+    });
+    held.1.recv().unwrap();
+    let start = Instant::now();
+    assert!(!guard.close(0, bound, bound), "a stuck making ended");
+    let waited = start.elapsed();
+    assert!(
+        waited >= bound && waited < Duration::from_millis(250),
+        "the hook waited {waited:?} for a bound of {bound:?}"
+    );
+    release.0.send(()).unwrap();
     worker.join().unwrap();
 
     // `driver_making` takes such a section of the process's guard only on a thread in a section.
@@ -158,7 +188,7 @@ fn the_hook_sees_a_making_that_ends_as_it_looks_ended() {
     exit_guard::BETWEEN_COUNTS
         .with(|step| *step.borrow_mut() = Some(Box::new(move || drop(making))));
     assert!(
-        guard.close(0, Duration::ZERO),
+        guard.close(0, Duration::ZERO, Duration::ZERO),
         "the hook gave up on a making that ended between its reads"
     );
 
@@ -169,7 +199,7 @@ fn the_hook_sees_a_making_that_ends_as_it_looks_ended() {
     let looked = std::rc::Rc::clone(&seen);
     exit_guard::BETWEEN_COUNTS.with(|step| {
         *step.borrow_mut() = Some(Box::new(move || {
-            looked.set(Some(guard.close(0, Duration::ZERO)));
+            looked.set(Some(guard.close(0, Duration::ZERO, Duration::ZERO)));
         }))
     });
     drop(making);
@@ -187,7 +217,11 @@ fn the_hook_does_not_wait_for_the_exiting_thread_s_own_sections() {
     let guard = guard();
     let own = guard.enter().expect("open");
     let start = Instant::now();
-    assert!(guard.close(exit_guard::own(), Duration::from_secs(10)));
+    assert!(guard.close(
+        exit_guard::own(),
+        Duration::from_secs(10),
+        Duration::from_secs(10)
+    ));
     assert!(start.elapsed() < Duration::from_secs(1));
     drop(own);
 
@@ -201,7 +235,11 @@ fn the_hook_does_not_wait_for_the_exiting_thread_s_own_sections() {
     });
     other.1.recv().unwrap();
     // One section is this thread's, the other a stuck one's: the hook waits for that one only.
-    assert!(!guard.close(exit_guard::own(), Duration::from_millis(100)));
+    assert!(!guard.close(
+        exit_guard::own(),
+        Duration::from_millis(100),
+        Duration::from_millis(100)
+    ));
     done.0.send(()).unwrap();
     worker.join().unwrap();
     drop(own);
@@ -235,7 +273,7 @@ fn no_section_runs_once_the_hook_returned() {
         })
         .collect();
     std::thread::sleep(Duration::from_millis(5));
-    assert!(guard.close(0, Duration::from_secs(10)));
+    assert!(guard.close(0, Duration::from_secs(10), Duration::from_secs(10)));
     after.store(true, Ordering::SeqCst);
     assert_eq!(
         inside.load(Ordering::SeqCst),
@@ -260,14 +298,30 @@ fn the_hook_does_nothing_in_another_process() {
     let start = Instant::now();
     let devices = none_in_process();
     assert_eq!(
-        hook(guard, &devices, 41, 42, 0, Duration::from_secs(10)),
+        hook(
+            guard,
+            &devices,
+            41,
+            42,
+            0,
+            Duration::from_secs(10),
+            Duration::from_secs(10)
+        ),
         None
     );
     assert!(start.elapsed() < Duration::from_secs(1));
     assert!(!guard.is_closed());
     drop(busy);
     assert_eq!(
-        hook(guard, &devices, 42, 42, 0, Duration::from_secs(10)),
+        hook(
+            guard,
+            &devices,
+            42,
+            42,
+            0,
+            Duration::from_secs(10),
+            Duration::from_secs(10)
+        ),
         Some(true)
     );
     assert!(guard.is_closed());
@@ -333,7 +387,17 @@ fn the_hook_waits_for_a_cpu_device_s_work_once_the_sections_ended() {
     let pid = std::process::id();
     let start = Instant::now();
     let hooked = std::thread::scope(|scope| {
-        let hooking = scope.spawn(|| hook(guard, &devices, pid, pid, 0, Duration::from_secs(10)));
+        let hooking = scope.spawn(|| {
+            hook(
+                guard,
+                &devices,
+                pid,
+                pid,
+                0,
+                Duration::from_secs(10),
+                Duration::from_secs(10),
+            )
+        });
         std::thread::sleep(Duration::from_millis(100));
         assert!(
             running.asked().is_none(),
@@ -377,7 +441,10 @@ fn the_hook_s_wait_for_a_cpu_device_s_work_shares_its_bound() {
     add(&devices, &stuck);
     let bound = Duration::from_millis(300);
     let start = Instant::now();
-    assert_eq!(hook(guard, &devices, pid, pid, 0, bound), Some(false));
+    assert_eq!(
+        hook(guard, &devices, pid, pid, 0, bound, bound),
+        Some(false)
+    );
     let waited = start.elapsed();
     assert!(
         waited >= bound && waited < bound + Duration::from_secs(2),
@@ -392,7 +459,15 @@ fn the_hook_s_wait_for_a_cpu_device_s_work_shares_its_bound() {
     drop(gone);
     let start = Instant::now();
     assert_eq!(
-        hook(guard, &devices, pid, pid, 0, Duration::from_secs(10)),
+        hook(
+            guard,
+            &devices,
+            pid,
+            pid,
+            0,
+            Duration::from_secs(10),
+            Duration::from_secs(10)
+        ),
         Some(true)
     );
     assert!(start.elapsed() < Duration::from_secs(1));
@@ -435,7 +510,15 @@ fn only_the_hook_s_first_run_waits_for_a_cpu_device_s_work() {
     let device = counted(&devices);
     for _ in 0..3 {
         assert_eq!(
-            hook(guard, &devices, pid, pid, 0, Duration::from_secs(10)),
+            hook(
+                guard,
+                &devices,
+                pid,
+                pid,
+                0,
+                Duration::from_secs(10),
+                Duration::from_secs(10)
+            ),
             Some(true)
         );
     }
@@ -459,13 +542,29 @@ fn a_hook_run_whose_sections_outlast_its_bound_still_takes_the_devices() {
     });
     entered.1.recv().unwrap();
     assert_eq!(
-        hook(guard, &devices, pid, pid, 0, Duration::from_millis(100)),
+        hook(
+            guard,
+            &devices,
+            pid,
+            pid,
+            0,
+            Duration::from_millis(100),
+            Duration::from_millis(100)
+        ),
         Some(false)
     );
     end_section.0.send(()).unwrap();
     section.join().unwrap();
     assert_eq!(
-        hook(guard, &devices, pid, pid, 0, Duration::from_secs(10)),
+        hook(
+            guard,
+            &devices,
+            pid,
+            pid,
+            0,
+            Duration::from_secs(10),
+            Duration::from_secs(10)
+        ),
         Some(true)
     );
     assert_eq!(device.0.load(Ordering::SeqCst), 0);
@@ -473,7 +572,8 @@ fn a_hook_run_whose_sections_outlast_its_bound_still_takes_the_devices() {
 
 /// A child forked (without exec) from a process whose hook is registered, while another of the
 /// parent's threads is in a section of the process's guard, exits at once: the hook it inherits
-/// checks the process, and the section's thread is not the child's.
+/// checks the process, and the section's thread is not the child's, so the hook neither waits for
+/// it nor ends the child (with the exit's status, 3 here) for it.
 ///
 /// The child runs the guard's exit handler alone and ends with `_exit`, not `exit`: the handlers
 /// a child inherits are every library's the parent loaded, not only the hook and the C library's.
@@ -496,7 +596,7 @@ fn a_forked_child_s_exit_does_not_wait_for_its_parent_s_sections() {
     // `_exit`, which runs no handler.
     let child = unsafe { libc::fork() };
     if child == 0 {
-        exit_guard::run_on_exit();
+        exit_guard::run_on_exit(3);
         // SAFETY: as above.
         unsafe { libc::_exit(0) };
     }
@@ -510,7 +610,7 @@ fn a_forked_child_s_exit_does_not_wait_for_its_parent_s_sections() {
     assert_eq!(reaped, child);
     assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0);
     assert!(
-        took < exit_guard::BOUND / 2,
+        took < Duration::from_secs(1),
         "the child's exit took {took:?}: it waited for its parent's section"
     );
 }
@@ -672,6 +772,162 @@ fn no_wait_for_a_cpu_device_s_work_follows_a_destructor_between_the_hook_s_runs(
         42,
         "a wait for the device's work followed the destructor"
     );
+}
+
+/// A child's exit, as its parent saw it: its status, how long it took from the child's call of
+/// `exit` to its end, and what it wrote on standard error.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+struct ChildExit {
+    status: libc::c_int,
+    took: Duration,
+    stderr: String,
+}
+
+/// The clock every process reads alike (`CLOCK_MONOTONIC`), in nanoseconds.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn monotonic_ns() -> u64 {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: writes the clock's time into `now`, which lives for the call.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
+    now.tv_sec as u64 * 1_000_000_000 + now.tv_nsec as u64
+}
+
+/// Fork a child that runs `child` (its exit handlers, its devices, what is in progress as it
+/// exits), then calls the C library's `exit` with `status`; its standard error goes to a pipe.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn child_exit(child: fn(), status: libc::c_int) -> ChildExit {
+    use std::io::Read;
+    use std::os::fd::FromRawFd;
+    let (mut stderr, mut called) = ([0; 2], [0; 2]);
+    // SAFETY: each makes a pipe into an array of two descriptors that lives for the call.
+    unsafe {
+        assert_eq!(libc::pipe(stderr.as_mut_ptr()), 0);
+        assert_eq!(libc::pipe(called.as_mut_ptr()), 0);
+    }
+    // SAFETY: the child moves its standard error to the pipe, runs `child` (atomics, locks, a
+    // thread, the C library's `atexit`), writes its clock, and exits.
+    let pid = unsafe { libc::fork() };
+    if pid == 0 {
+        // SAFETY: the pipes' descriptors are this process's.
+        unsafe {
+            libc::dup2(stderr[1], 2);
+            libc::close(stderr[0]);
+            libc::close(called[0]);
+        }
+        child();
+        let now = monotonic_ns().to_ne_bytes();
+        // SAFETY: writes `now`, live for the call, to the pipe; then exits.
+        unsafe {
+            libc::write(called[1], now.as_ptr().cast(), now.len());
+            libc::exit(status);
+        }
+    }
+    assert!(pid > 0, "fork");
+    // SAFETY: the write ends are this process's, and the child has its own.
+    unsafe {
+        libc::close(stderr[1]);
+        libc::close(called[1]);
+    }
+    let mut raw = 0;
+    // SAFETY: `pid` is this process's child.
+    let reaped = unsafe { libc::waitpid(pid, &mut raw, 0) };
+    let ended = monotonic_ns();
+    assert_eq!(reaped, pid);
+    let read = |fd| {
+        // SAFETY: `fd` is the read end of a pipe this process owns, read once and closed.
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        bytes
+    };
+    let stderr = String::from_utf8_lossy(&read(stderr[0])).into_owned();
+    assert!(
+        libc::WIFEXITED(raw),
+        "the child did not exit: {raw}; its standard error: {stderr}"
+    );
+    let called: [u8; 8] = read(called[0])
+        .try_into()
+        .expect("the child's clock at its exit");
+    ChildExit {
+        status: libc::WEXITSTATUS(raw),
+        took: Duration::from_nanos(ended.saturating_sub(u64::from_ne_bytes(called))),
+        stderr,
+    }
+}
+
+/// Where the hook learns the exit's status (Linux with the GNU C library), an exit while the
+/// driver runs the runtime's work (a CPU device's work in flight, a section in progress on another
+/// thread) ends the process at once with that status, says so on standard error in one line, and
+/// runs no handler registered before the hook: Metal's process ends within 2 ms of its `exit`.
+/// Before, the hook waited 2 s, returned, and the handler ran.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn a_busy_exit_ends_at_once_with_its_status() {
+    /// An exit handler the program registered before the runtime's (a terminal's restore): it
+    /// ends the child with 43.
+    extern "C" fn registered_before() {
+        // SAFETY: ends the child at once, from its exit handlers.
+        unsafe { libc::_exit(43) };
+    }
+    /// A CPU device whose submitted work never completes.
+    struct Stuck;
+    impl InProcess for Stuck {
+        fn drain(&self, deadline: Instant) -> bool {
+            std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+            false
+        }
+    }
+    fn work_in_flight() {
+        // SAFETY: a function with no arguments that never unwinds.
+        unsafe { libc::atexit(registered_before) };
+        let device: Arc<dyn InProcess> = Arc::new(Stuck);
+        exit_guard::runs_in_process(Arc::downgrade(&device));
+        // Live through the exit, as a device the program holds.
+        std::mem::forget(device);
+        exit_guard::register();
+    }
+    fn section_in_progress() {
+        // SAFETY: as above.
+        unsafe { libc::atexit(registered_before) };
+        exit_guard::register();
+        let (entered, held) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _busy = exit_guard::enter().expect("the child is not exiting");
+            entered.send(()).unwrap();
+            loop {
+                std::thread::park();
+            }
+        });
+        held.recv().unwrap();
+    }
+    let children: [(&str, fn()); 2] = [
+        ("a CPU device's work", work_in_flight),
+        ("a section", section_in_progress),
+    ];
+    for (busy, child) in children {
+        for status in [0, 7] {
+            let exit = child_exit(child, status);
+            assert_eq!(
+                exit.status, status,
+                "{busy} in progress: a handler registered before the hook ran, or the status \
+                 changed; its standard error: {}",
+                exit.stderr
+            );
+            assert!(
+                exit.took < Duration::from_millis(100),
+                "{busy} in progress: the exit took {:?}",
+                exit.took
+            );
+            assert_eq!(
+                exit.stderr,
+                exit_guard::AT_ONCE_NOTICE,
+                "{busy} in progress"
+            );
+        }
+    }
 }
 
 /// The runtime's own threads may reach the device only inside a section or while they run the

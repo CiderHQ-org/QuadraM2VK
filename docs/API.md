@@ -1979,7 +1979,11 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
 - `metal2vulkan-degrade-device-signed-zero-inf-nan` (precision).
   `PrecisionNote::DeviceSignedZeroInfNan`: Float operations LLVM requires to keep signed zeros,
   infinities, and NaNs run without `SignedZeroInfNanPreserve`, which the device does not support at
-  their width.
+  their width. Under `FloatMathsPolicy::Exact` so does an operation that answers Metal's zero of
+  its sign: a fused multiply-add the translation computes itself (in `double` or in integers
+  without `OpFmaKHR`, and a `half` one through `float`), one by `OpFmaKHR` whose result is at most
+  `2^-126` in magnitude, and a `float` product flushed below `2^-126`. Without the mode the device
+  may answer such a zero with either sign.
 - `metal2vulkan-degrade-device-ray-intersection` (precision).
   `PrecisionNote::DeviceRayIntersection`: A ray intersection traversed by the device's ray query.
 - `metal2vulkan-degrade-fast-math-rewrites` (precision). `PrecisionNote::FastMathRewrites`: Float
@@ -2546,6 +2550,12 @@ each item named states the rule in full.
 - **A simdgroup barrier in divergent code waits for its tangle**, as SPIR-V defines it. The Metal
   Shading Language requires every thread of the SIMD-group to execute a `simdgroup_barrier` that
   any of them executes in a conditional or a loop iteration, so Metal defines no answer there.
+
+**Process exit**
+
+- **On Linux, an exit while the driver runs the runtime's work ends the process at once** with the
+  exit's status and one line on standard error: the exit handlers registered before the runtime's
+  last registration (a terminal's restore, say) do not run, where Metal's exit runs them.
 
 **Rasterization-rate maps**
 

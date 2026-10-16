@@ -541,7 +541,12 @@ pub enum PrecisionNote {
     /// device answers as Metal's own function.
     DeviceArithmetic,
     /// Float operations LLVM requires to keep signed zeros, infinities, and NaNs run without
-    /// `SignedZeroInfNanPreserve`, which the device does not support at their width.
+    /// `SignedZeroInfNanPreserve`, which the device does not support at their width. Under
+    /// `FloatMathsPolicy::Exact` so does an operation that answers Metal's zero of its sign: a
+    /// fused multiply-add the translation computes itself (in `double` or in integers without
+    /// `OpFmaKHR`, and a `half` one through `float`), one by `OpFmaKHR` whose result is at most
+    /// `2^-126` in magnitude, and a `float` product flushed below `2^-126`. Without the mode the
+    /// device may answer such a zero with either sign.
     DeviceSignedZeroInfNan,
     /// A ray intersection traversed by the device's ray query. The hit distance and the
     /// barycentrics are the device's arithmetic. The conventions no Metal reading has settled yet

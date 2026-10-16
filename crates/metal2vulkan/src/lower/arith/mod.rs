@@ -43,10 +43,12 @@
 //! compiler may take another than the device's. Every other lowering is exact for every non-poison
 //! input within the device's floating-point environment: signed zeros, infinities, and NaNs are
 //! preserved by `SignedZeroInfNanPreserve` where an operation without `nnan`/`ninf`/`nsz` requires
-//! it and the profile supports it (else `PrecisionNote::DeviceSignedZeroInfNan`), while denormal
-//! flushing and the rounding mode are the device default (no `DenormPreserve`/`RoundingModeRTE`
-//! yet; the rounding mode decides the inexact `FConvert` narrowings and integer-to-float
-//! conversions, which Vulkan leaves to the device without `shaderRoundingModeRTE`). `sign`,
+//! it, or a check or a fused multiply-add routine answers Metal's zero of its sign
+//! ([`ArithPlan::keep_zero_signs`]), and the profile supports it (else
+//! `PrecisionNote::DeviceSignedZeroInfNan`), while denormal flushing and the rounding mode are the
+//! device default (no `DenormPreserve`/`RoundingModeRTE` yet; the rounding mode decides the
+//! inexact `FConvert` narrowings and integer-to-float conversions, which Vulkan leaves to the
+//! device without `shaderRoundingModeRTE`). `sign`,
 //! `fract`, `saturate`, `median3`, and `pow` answer as Metal does at zeros, NaNs, infinities, and
 //! `f32` denormals whatever the device's modes, and the normalized and sRGB `air.unpack`/`air.pack`
 //! conversions are exact integer sequences and Metal's tables.
@@ -841,8 +843,10 @@ fn leaves(d: &DemoteTy) -> u32 {
 /// floating-point environment.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ArithPlan {
-    /// The float container widths whose operations LLVM requires to keep signed zeros,
-    /// infinities, and NaNs (an operation without all of `nnan`, `ninf`, and `nsz`).
+    /// The float container widths whose operations must keep signed zeros, infinities, and NaNs:
+    /// those LLVM requires it of (an operation without all of `nnan`, `ninf`, and `nsz`), and
+    /// those of a check or a fused multiply-add routine that answers Metal's zero of its sign
+    /// ([`ArithPlan::keep_zero_signs`]).
     pub preserve: BTreeSet<u8>,
     /// The widths whose `SignedZeroInfNanPreserve` execution mode the entry declares: those of
     /// `preserve` the profile supports.
@@ -993,14 +997,44 @@ impl ArithPlan {
         }
     }
 
-    /// Record fused multiply-add `fma`, selected: its routine, which [`declare`] defines once,
-    /// or the device's 16-bit `Fma` ([`ArithPlan::f16_fma`]).
+    /// Record fused multiply-add `fma`, selected: its routine, which [`declare`] defines once
+    /// (and whose widths [`finish`] keeps zero signs of), or the device's 16-bit `Fma`
+    /// ([`ArithPlan::f16_fma`]).
     pub fn take_fma(&mut self, fma: fma::Fma) {
         if let Some(r) = fma.routine() {
             self.fmas.insert(r);
         }
         self.f16_fma |= fma.route == fma::Route::F16;
         self.native_fma |= fma.route == fma::Route::Native;
+    }
+
+    /// Record a check of a `float` product at `±2^-126` on lanes of form `f`
+    /// ([`denormal::tiny_product`]), selected where `check` is one: it answers Metal's zero of
+    /// the product's sign, so its width keeps zero signs ([`ArithPlan::keep_zero_signs`]).
+    pub fn take_tiny_check(
+        &mut self,
+        check: Option<denormal::TinyCheck>,
+        f: Form,
+    ) -> Option<denormal::TinyCheck> {
+        if check.is_some() {
+            self.keep_zero_signs(f.container());
+        }
+        check
+    }
+
+    /// Record that a check or routine computed by the translation answers Metal's zero of its
+    /// sign on floats of container width `width`: a fused multiply-add routine where the profile's
+    /// functions answer as Metal's ([`fma::Routine::widths`]: in `double`, in integers, a `half`
+    /// one, or a checked `OpFmaKHR`'s small results), a product flushed at `±2^-126`
+    /// ([`denormal::tiny_product`]). Vulkan lets a device take a zero of either sign from any
+    /// float operation of an entry without `SignedZeroInfNanPreserve` at its width (it assumes
+    /// `NSZ` there: the Vulkan specification's "Precision and Operation of SPIR-V Instructions"),
+    /// whatever the AIR's flags: NVIDIA's 615.71.09 on the RTX 3090 answered `-0` for a checked
+    /// `fma(+0, 100, +0)` whose answer is `+0`, in a fast-math entry. So the width joins
+    /// [`ArithPlan::preserve`], which [`finish`] declares where the profile supports it, else
+    /// notes `PrecisionNote::DeviceSignedZeroInfNan`.
+    pub fn keep_zero_signs(&mut self, width: u8) {
+        self.preserve.insert(width);
     }
 
     /// Whether an `arcp` division's quotient is the device's `OpFDiv(x, y)`: where the profile's
@@ -1097,7 +1131,8 @@ pub const FAST_DIVIDE: &str = "arith.fdiv.fast";
 pub const FOLDED: &str = "arith.float.folded";
 
 /// Complete the arith family's plan once every instruction and parameter is selected: declare
-/// `SignedZeroInfNanPreserve` for each required width the profile supports, and note
+/// `SignedZeroInfNanPreserve` for each required width the profile supports (with those its fused
+/// multiply-add routines compute in where its functions answer as Metal's), and note
 /// `DeviceSignedZeroInfNan` for one it does not (the device's behavior is accepted and
 /// reported); then, with the entry's execution modes known, keep the math-library routines whose
 /// function the device's instruction does not answer: on a profile whose `float` functions are
@@ -1127,6 +1162,21 @@ pub fn finish(cx: &mut SelectCx<'_>) -> Result<(), Error> {
     } else {
         MaskForm::And
     };
+    // Where the profile's functions answer as Metal's (`FloatMathsPolicy::Exact`), a fused
+    // multiply-add routine answers Metal's zero of its sign: every width it computes in keeps
+    // zero signs. Every family selected its fused multiply-adds by now.
+    if cx.profile.fields().float_functions == FloatFunctions::Device {
+        let arith = &mut cx.families.arith;
+        let kept: BTreeSet<u8> = arith
+            .fmas
+            .iter()
+            .flat_map(|r| r.widths())
+            .copied()
+            .collect();
+        for w in kept {
+            arith.keep_zero_signs(w);
+        }
+    }
     let fc = cx.profile.fields().float_controls;
     let widths: Vec<u8> = cx.families.arith.preserve.iter().copied().collect();
     for w in widths {
@@ -1763,17 +1813,16 @@ fn with_denormals(
 /// ([`denormal::checks_tiny_products`]). A sum or difference that small is exact, so a rounding
 /// never reaches `2^-126` from below it.
 fn tiny_product(
-    cx: &SelectCx<'_>,
+    cx: &mut SelectCx<'_>,
     s: ArithStrategy,
     op: AirBin,
     f: Form,
     result: bool,
 ) -> ArithStrategy {
-    let check = match denormal::tiny_check(cx.profile) {
-        Some(check) if op == AirBin::FMul && result && f.float_fmt() == Some(FloatFmt::F32) => {
-            check
-        }
-        _ => return s,
+    let check = denormal::tiny_check(cx.profile)
+        .filter(|_| op == AirBin::FMul && result && f.float_fmt() == Some(FloatFmt::F32));
+    let Some(check) = cx.families.arith.take_tiny_check(check, f) else {
+        return s;
     };
     ArithStrategy::TinyProduct {
         of: Box::new(s),
@@ -2769,15 +2818,19 @@ fn select_float_fn(
         // The chain's values are flushed where `OpFmaKHR` and the multiply may keep a
         // denormal ([`with_denormals`] flushes the operands and the result); the
         // routines read and answer them as Metal does.
-        FloatLowering::Dot(fma) => ArithStrategy::Dot {
-            fma,
-            form: f,
-            flush: fma.route.device_float()
-                && f.float_fmt() == Some(FloatFmt::F32)
-                && !denormal::device_flushes(cx.profile),
+        FloatLowering::Dot(fma) => {
             // The first product is a multiply: Metal's flush before its rounding.
-            tiny: denormal::tiny_check(cx.profile).filter(|_| f.float_fmt() == Some(FloatFmt::F32)),
-        },
+            let tiny =
+                denormal::tiny_check(cx.profile).filter(|_| f.float_fmt() == Some(FloatFmt::F32));
+            ArithStrategy::Dot {
+                fma,
+                form: f,
+                flush: fma.route.device_float()
+                    && f.float_fmt() == Some(FloatFmt::F32)
+                    && !denormal::device_flushes(cx.profile),
+                tiny: cx.families.arith.take_tiny_check(tiny, f),
+            }
+        }
         FloatLowering::Fn(op) => ArithStrategy::FloatFn {
             f: op,
             form: f,

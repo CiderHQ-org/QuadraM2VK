@@ -387,3 +387,67 @@ fn the_routine_of_small_fma_results_is_not_declared_dont_inline() {
     }
     assert!(checked > 0, "no profile checks OpFmaKHR");
 }
+
+/// A check that answers Metal's zero of its sign keeps zero signs, in a fast-math entry too: a
+/// product's at `±2^-126` and `dot`'s chain, a checked `OpFmaKHR` or a fused multiply-add routine,
+/// make the entry declare `SignedZeroInfNanPreserve 32`, and the chain whose routine computes in
+/// `double` (`fma::small`, the `double` route) `64`, each where the profile supports it, else note
+/// `DeviceSignedZeroInfNan`. Without the mode Vulkan
+/// lets a device answer a zero of either sign from any float operation: NVIDIA's 615.71.09 on the
+/// RTX 3090 answered `-0` for a checked `fma(+0, 100, +0)`, where Metal answers `+0`. Under the
+/// default policy nothing is checked, and the fast entry declares neither.
+#[test]
+fn checks_that_answer_a_zero_s_sign_keep_zero_signs() {
+    use super::engine_arith::declares_signed_zero_inf_nan;
+    use crate::pipeline::artifact::PrecisionNote;
+    let entry = ENTRIES[1];
+    let Some(bc) = assemble(entry) else {
+        return;
+    };
+    let mut declared = [0; 2];
+    for (stem, p) in committed_profiles_with(exact_maths()).expect("profiles") {
+        let what = format!("{entry} on {stem}");
+        let a = compile(&bc, entry, &p).unwrap_or_else(|e| panic!("{what}: {e:?}"));
+        let (_, words) = link_and_validate(&a, &p).unwrap_or_else(|e| panic!("{what}: L3: {e}"));
+        // The fixture's products are checked where the profile checks one, and `dot`'s chain is
+        // then a checked `OpFmaKHR` or a routine, in `double` on the `double` route.
+        let tiny = fma::tiny_route(&p);
+        let exact = p.fields().float_functions == FloatFunctions::Device;
+        let wide = fma::float_route(&p) == fma::Route::Wide || tiny == Some(fma::Route::Wide);
+        let wanted = [
+            a.strategies.entries.contains_key(TINY) || tiny.is_some(),
+            exact && wide,
+        ];
+        let fc = p.fields().float_controls;
+        let supported = [
+            fc.f32.signed_zero_inf_nan_preserve,
+            fc.f64.signed_zero_inf_nan_preserve,
+        ];
+        for (i, width) in [32, 64].into_iter().enumerate() {
+            let mode = declares_signed_zero_inf_nan(&words, width);
+            assert_eq!(mode, wanted[i] && supported[i], "{what}: mode {width}");
+            declared[i] += usize::from(mode);
+        }
+        let unsupported = (0..2).any(|i| wanted[i] && !supported[i]);
+        assert_eq!(
+            a.precision.contains(&PrecisionNote::DeviceSignedZeroInfNan),
+            unsupported,
+            "{what}: note"
+        );
+    }
+    assert!(
+        declared.iter().all(|&n| n > 0),
+        "no profile declares a width: {declared:?}"
+    );
+    for (stem, p) in committed_profiles_with(DevicePolicy::default()).expect("profiles") {
+        let what = format!("{entry} on {stem} by default");
+        let a = compile(&bc, entry, &p).unwrap_or_else(|e| panic!("{what}: {e:?}"));
+        let (_, words) = link_and_validate(&a, &p).unwrap_or_else(|e| panic!("{what}: L3: {e}"));
+        for width in [32, 64] {
+            assert!(
+                !declares_signed_zero_inf_nan(&words, width),
+                "{what}: mode {width}"
+            );
+        }
+    }
+}
