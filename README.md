@@ -6,7 +6,7 @@ metal2vulkan runs Metal shaders and Metal programs on Vulkan. It reads **Metal A
 or AIR bitcode) and compiles it into Vulkan pipelines, and it offers the Metal API itself on top
 of a Vulkan device.
 
-> **Alpha.** The API, the command line, the pipeline JSON and the emitted SPIR-V may change during
+> **Beta.** The API, the command line, the pipeline JSON and the emitted SPIR-V may change during
 > the `0.x` series. Version your cached outputs.
 
 ## The crates
