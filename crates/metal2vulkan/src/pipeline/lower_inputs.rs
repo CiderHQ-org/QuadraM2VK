@@ -150,10 +150,10 @@ pub struct LoweringInputs {
     )]
     pub snapshot_textures: BTreeMap<SlotRef, SnapshotForm>,
     /// Texture slots bound in a YCbCr format (`VariantKey::ycbcr_textures`,
-    /// `RuntimeFact::YCbCrTexture`): on a device that samples through Metal's own sampler, each
-    /// such slot's linear samples take the emulation of Metal's filter a device without it takes,
-    /// and the samples it does not reach are noted. Ignored on any other device, and for a slot of
-    /// no such sample.
+    /// `RuntimeFact::YCbCrTexture`): on a profile that takes the variant
+    /// (`ProfileFields::ycbcr_variant`), each such slot's linear samples take the emulation of
+    /// Metal's filter a device without it takes, and the samples it does not reach are noted.
+    /// Ignored on any other profile, and for a slot of no such sample.
     #[cfg_attr(feature = "serde", serde(default))]
     pub ycbcr_textures: BTreeSet<SlotRef>,
     /// The fragment function's render pipeline has a vertex function that writes

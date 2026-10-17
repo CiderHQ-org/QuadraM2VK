@@ -27,7 +27,10 @@
 //!   textures then carry, each level seeded) or `aniso` (`mip` with an anisotropy of 16), and
 //!   `nearest-px` or `linear-px` (pixel coordinates); a combo `FORMAT:MODE@SLOT=FORMAT2` binds
 //!   `FORMAT2` at texture slot `SLOT` in place of `FORMAT` (A pass that reads its own target's
-//!   format at one slot and samples 8-bit textures at the others). `--primitive TYPE` (`point`,
+//!   format at one slot and samples 8-bit textures at the others); `FORMAT2` a two-plane YCbCr
+//!   format of 8-bit 4:2:0 codes (`YCBCR8_420_2P`, its `_sRGB` twin, `RGB8_420_2P`) binds a
+//!   texture over plane 0 of a `420v` surface of seeded bytes ([`ycbcr_surface`]), as a video
+//!   frame is bound. `--primitive TYPE` (`point`,
 //!   `line`, `line-strip`, `triangle` or `triangle-strip`; `time` takes it too) draws the three
 //!   vertices as `TYPE`, where the draws are of the template's class's list by default (a triangle
 //!   for no class): a strip of three vertices covers what its list does, through a pipeline of the
@@ -494,6 +497,25 @@ fn surface_planes(format: PixelFormat, side: u64) -> Option<(u64, u64, u64, u64)
 /// one Metal's answers were measured over.
 const B3A8: u32 = u32::from_be_bytes(*b"b3a8");
 
+/// The OSType of the surface a sampled two-plane YCbCr texture stands over (`'420v'`, CoreVideo's
+/// 8-bit 4:2:0 video-range surface, as a video frame's texture is).
+const YUV420V: u32 = u32::from_be_bytes(*b"420v");
+
+/// The layout of the `420v` surface a sampled two-plane YCbCr texture of `format` and `side`
+/// stands over: the luma plane's rows of `side` codes, then the chroma plane's rows of `side /
+/// 2` Cb and Cr pairs, each row padded to 64 bytes, for the 8-bit 4:2:0 formats. `None` for
+/// every other format. Returns the planes' `bytesPerRow`, the chroma plane's offset and the
+/// surface's length.
+fn ycbcr_surface(format: PixelFormat, side: u64) -> Option<(u64, u64, u64)> {
+    use PixelFormat as P;
+    if !matches!(format, P::YCBCR84202P | P::YCBCR84202PSRGB | P::RGB84202P) {
+        return None;
+    }
+    let row = side.next_multiple_of(64);
+    let chroma_at = row * side;
+    Some((row, chroma_at, chroma_at + row * side.div_ceil(2)))
+}
+
 /// The bytes of one texel of `format`, for the formats a draw may use here.
 fn texel_bytes(format: PixelFormat) -> Option<u64> {
     use PixelFormat as P;
@@ -856,6 +878,10 @@ struct BoundTexture {
     descriptor: TextureDescriptor,
     /// Each slice's and level's starting bytes: `(slice, level, bytes)`.
     uploads: Vec<(u64, u64, Buffer)>,
+    /// For a two-plane YCbCr texture, the shared buffer standing for its surface
+    /// ([`ycbcr_surface`]), which holds its starting bytes (it then has no uploads), kept alive
+    /// with the texture.
+    _surface: Option<Buffer>,
 }
 
 /// How a run's samplers filter.
@@ -1062,6 +1088,37 @@ fn inputs(
                         (_, Some(format)) if chosen => format,
                         _ => choices[(run as usize + slot as usize) % choices.len()],
                     };
+                    // A two-plane YCbCr texture stands over a surface of seeded bytes, as a
+                    // video frame's does, one level.
+                    if let Some((row, chroma_at, length)) = ycbcr_surface(format, side) {
+                        if ty != TextureType::Type2D || !chosen {
+                            return Err(format!(
+                                "texture {slot}: {} at a slot not a sampled 2D one",
+                                format.name()
+                            ));
+                        }
+                        let surface = upload(stream | u64::from(element), length)?;
+                        let mut d = TextureDescriptor::texture_2d(format, side, side, false);
+                        d.usage = TextureUsage::SHADER_READ;
+                        d.resource_options = ResourceOptions::shared();
+                        let facts = IoSurfaceYCbCr::new(YUV420V, 0, [side, side], chroma_at, row);
+                        let plane = IoSurfacePlane::new(0, row, true).with_ycbcr(facts);
+                        let texture = surface
+                            .new_texture_with_iosurface_plane(&d, plane)
+                            .map_err(e(format!("texture {slot} of {}", format.name())))?;
+                        inputs
+                            .described
+                            .push_str(&format!(" t{slot}={}", format.name()));
+                        inputs.textures.push(BoundTexture {
+                            index: slot,
+                            texture,
+                            written,
+                            descriptor: d,
+                            uploads: Vec::new(),
+                            _surface: Some(surface),
+                        });
+                        continue;
+                    }
                     let mipmapped = sampling.mode.mipmapped() && !written;
                     let mut d = TextureDescriptor::texture_2d(format, side, side, mipmapped);
                     d.texture_type = ty;
@@ -1115,6 +1172,7 @@ fn inputs(
                         written,
                         descriptor: d,
                         uploads,
+                        _surface: None,
                     });
                 }
             }

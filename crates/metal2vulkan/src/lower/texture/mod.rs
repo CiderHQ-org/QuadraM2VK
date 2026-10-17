@@ -1962,12 +1962,17 @@ pub(crate) fn texel_format_spec(cx: &mut SelectCx<'_>, image: ImageRef) -> Resul
     Ok(())
 }
 
-/// Whether a linear sample of `image` (shape `shape`) on a device that samples through Metal's
-/// own sampler (`VkProperty::MetalSampler`) takes the emulation of Metal's filter: at a sampled
-/// color texture slot under its YCbCr variant (`LoweringInputs::ycbcr_textures`), whose bound
-/// format's view holds converted texels Metal filters on its own grid. Such a slot of any such
-/// sample records `RuntimeFact::YCbCrTexture`, which puts it in the variant where the binder binds
-/// a YCbCr format there.
+/// Whether a linear sample of `image` (shape `shape`) on a device whose sampler answers it
+/// (`DeviceProfile::device_samples`) takes the emulation of Metal's filter: at a sampled color
+/// texture slot under its YCbCr variant (`LoweringInputs::ycbcr_textures`), whose bound format's
+/// view holds converted texels Metal filters on its own grid. Such a slot of any such sample
+/// records `RuntimeFact::YCbCrTexture`, which puts it in the variant where the binder binds a
+/// YCbCr format there, on a profile that takes the variant (`ProfileFields::ycbcr_variant`: under
+/// `YCbCrFilterPolicy::Exact`, and on a device that samples through Metal's own sampler also under
+/// `SamplingPolicy::Exact`). On any other profile the slot records nothing and the device filters
+/// such a texture as any other (`YCbCrFilterPolicy::Device`), which the module's
+/// `PrecisionNote::DeviceSampling` states, or, through Metal's own sampler, its filter note under
+/// the bound format (`lower::sampler::linear::metal_filtered_ycbcr`).
 pub(crate) fn ycbcr_texture(
     cx: &mut SelectCx<'_>,
     image: ImageRef,
@@ -1976,7 +1981,11 @@ pub(crate) fn ycbcr_texture(
     let ImageRef::Slot(index) = image else {
         return Ok(false);
     };
-    if shape.dim == ImageDim::Buffer || shape.depth || shape.ms {
+    if shape.dim == ImageDim::Buffer
+        || shape.depth
+        || shape.ms
+        || !cx.profile.fields().ycbcr_variant
+    {
         return Ok(false);
     }
     let s = slot_of(cx, index)?;
@@ -2006,9 +2015,11 @@ pub(crate) fn constexpr_address_map(
     Ok(cx.inputs.address_maps.get(&slot).copied())
 }
 
-/// Whether `image` is a slot under its YCbCr variant ([`ycbcr_texture`]).
+/// Whether `image` is a slot under its YCbCr variant ([`ycbcr_texture`]), on a profile that takes
+/// the variant.
 pub(crate) fn ycbcr_slot(cx: &SelectCx<'_>, image: ImageRef) -> Result<bool, Error> {
     match image {
+        ImageRef::Slot(_) if !cx.profile.fields().ycbcr_variant => Ok(false),
         ImageRef::Slot(index) => Ok(cx.inputs.ycbcr_textures.contains(&slot_of(cx, index)?.slot)),
         ImageRef::Heap { .. } => Ok(false),
     }

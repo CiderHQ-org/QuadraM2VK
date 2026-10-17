@@ -222,6 +222,7 @@ surface! {
         struct DevicePolicy N;
         enum Unorm8LinearFilterPolicy N;
         enum SamplingPolicy N;
+        enum YCbCrFilterPolicy N;
         enum FloatMathsPolicy N;
         enum TexelConversionPolicy N;
         enum HalfRoundingPolicy N;

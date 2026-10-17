@@ -28,6 +28,10 @@ pub struct DevicePolicy {
     /// Whether a device that does not sample through Metal's own sampler samples natively (the
     /// default) or emulates Metal's sampler exactly.
     pub sampling: SamplingPolicy,
+    /// Whether, under native device sampling, a linear sample of a texture slot bound to a
+    /// two-plane YCbCr texture is the device's own filter of its texels (the default) or Metal's
+    /// filter of the format, emulated in a variant of the pipeline the draw binding it makes.
+    pub ycbcr_filter: YCbCrFilterPolicy,
     /// Whether the math library's functions (`sin`, `cos`, `exp`, `log`, `pow` and the rest), a
     /// precise division and Metal's fast reciprocal, and a fused multiply-add are the device's
     /// own instructions (native device maths, the default) or the translation's routines of
@@ -65,7 +69,8 @@ pub struct DevicePolicy {
 impl DevicePolicy {
     /// The untrusted-guest production policy: containment and isolation on,
     /// ordered framebuffer fetch required, Metal's 8-bit linear filter emulated exactly where the
-    /// emulation runs, native device sampling, native device maths, the device's own texel
+    /// emulation runs, native device sampling (a two-plane YCbCr texture's samples among them),
+    /// native device maths, the device's own texel
     /// conversions, native half rounding, the device's NaN and minimum and maximum, the device's
     /// rounding order, the device's blend of a `half` output into a 16-bit float attachment, and
     /// an image over a texture's padded rows where the texture only reads.
@@ -77,6 +82,7 @@ impl DevicePolicy {
         framebuffer_fetch: FramebufferFetchPolicy::RequireOrdered,
         unorm8_linear_filter: Unorm8LinearFilterPolicy::Exact,
         sampling: SamplingPolicy::NativeDevice,
+        ycbcr_filter: YCbCrFilterPolicy::Device,
         float_maths: FloatMathsPolicy::Native,
         texel_conversion: TexelConversionPolicy::Device,
         half_rounding: HalfRoundingPolicy::Native,
@@ -91,11 +97,13 @@ impl DevicePolicy {
     /// ([`TexelConversionPolicy::Exact`]), its `half` rounding ([`HalfRoundingPolicy::Exact`]), its
     /// NaN and minimum and maximum ([`NanMinMaxPolicy::Exact`]), its rounding order
     /// ([`RoundingOrderPolicy::Exact`]), its 16-bit float blend of a `half` output
-    /// ([`HalfBlendPolicy::Exact`]), and the bytes between a texture's rows that no first move of
-    /// an image over them reaches ([`PaddedReadsPolicy::Shadow`]). Sampling and every other field
-    /// are kept.
+    /// ([`HalfBlendPolicy::Exact`]), its filter of a two-plane YCbCr texture
+    /// ([`YCbCrFilterPolicy::Exact`]), and the bytes between a texture's rows that no first move
+    /// of an image over them reaches ([`PaddedReadsPolicy::Shadow`]). Sampling and every other
+    /// field are kept.
     pub const fn exact_answers(self) -> DevicePolicy {
         DevicePolicy {
+            ycbcr_filter: YCbCrFilterPolicy::Exact,
             float_maths: FloatMathsPolicy::Exact,
             texel_conversion: TexelConversionPolicy::Exact,
             half_rounding: HalfRoundingPolicy::Exact,
@@ -167,6 +175,38 @@ pub enum SamplingPolicy {
     NativeDevice,
     /// Metal's sampler, emulated exactly where the device's differs: the module's size and the
     /// driver's making time grow with each sample.
+    Exact,
+}
+
+/// How a linear sample of a texture slot bound to a two-plane YCbCr texture
+/// (`metal::format::ycbcr_format`) is filtered where the module leaves the slot's samples to the
+/// device's sampler: on a device that samples natively ([`SamplingPolicy::NativeDevice`], the
+/// module requiring `VkProperty::DeviceSampling`), and on one that samples through Metal's own
+/// sampler (MoltenVK on Apple's GPU) under native sampling. The texture's image holds Metal's reads
+/// of the planes exactly, steps of `1/2048` or `1/8192`; Metal's filter sums those steps on their
+/// grid, each term truncated, at its own weights, so the device's filter of the same texels lands
+/// off Metal's answer: natively within the bound `PrecisionNote::DeviceSampling` states, through
+/// Metal's own sampler within one step of the grid (`ycbcr-filter-not-exact`). Under
+/// [`SamplingPolicy::Exact`] every sample is Metal's, through the slot's variant on MoltenVK.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum YCbCrFilterPolicy {
+    /// The device's filter of the texture's texels, as for every other format (the default: the
+    /// owner's ruling, making time before exactness, recorded and announced): the pipeline a draw
+    /// binding such a texture takes is the one a draw binding any other texture takes, so the draw
+    /// makes none. A natively sampling module records
+    /// [`PrecisionNote::DeviceSampling`](crate::pipeline::PrecisionNote::DeviceSampling), whose
+    /// docs state the bound measured against Metal; through Metal's own sampler the module records
+    /// its filter note under the bound format, which the runtime announces as
+    /// `ycbcr-filter-not-exact` where a draw binds such a texture, and a `half` sample's one texel
+    /// on the grid `8192` through a runtime sampler rounds to nearest even
+    /// ([`PrecisionNote::HalfTexelConversion`](crate::pipeline::PrecisionNote::HalfTexelConversion)).
+    #[default]
+    Device,
+    /// Metal's filter of the format, emulated: a draw that binds such a texture at a slot the
+    /// function samples linearly takes the slot's YCbCr variant (`RuntimeFact::YCbCrTexture`), a
+    /// pipeline of its own, made at that draw.
     Exact,
 }
 

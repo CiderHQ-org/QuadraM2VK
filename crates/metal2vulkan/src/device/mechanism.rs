@@ -38,7 +38,7 @@ pub fn mechanism(fact: &RuntimeFact, profile: &DeviceProfile) -> Mechanism {
         // Keyed by the slots bound in an sRGB format whose raw code the function reads.
         RuntimeFact::SrgbTexture { .. } => Mechanism::Variant,
         // Keyed by the slots bound in a YCbCr format whose filter the function emulates on a
-        // device that samples through Metal's own sampler.
+        // profile that takes the variant (`ProfileFields::ycbcr_variant`).
         RuntimeFact::YCbCrTexture { .. } => Mechanism::Variant,
         RuntimeFact::SamplerCoordinates { .. } => Mechanism::Specialization,
         RuntimeFact::SamplerReduction { .. } => Mechanism::PlanTimeCheck,

@@ -1165,9 +1165,16 @@ degradations! {
         /// texture does not take Metal's exact filter of the format: the stage records
         /// `PrecisionNote::HalfSampleFilter` or `FloatSampleFilter` under the slot's bound format
         /// (a format whose filter is not measured, a swizzle that moves its channels, a linear
-        /// mip filter, or a sample the emulation does not reach). Announced, in place of those
-        /// notes' own notices for the slot, where the specialized pipeline is made, naming the
-        /// slot and the format.
+        /// mip filter, or a sample the emulation does not reach), or, on a device that samples
+        /// through Metal's own sampler under `YCbCrFilterPolicy::Device` (no slot variant), under
+        /// any two-plane YCbCr format bound there, whose converted texels Metal's sampler filters
+        /// as an `RGBA16Float` or `RGBA32Float` texture's: within one step of the format's grid of
+        /// Metal's filter of the format, a `half` result within one `half` unit in the last place
+        /// (plain Metal on an Apple M3 Max under macOS 27.0.1, `YCBCR8_420_2P` and its `_sRGB`
+        /// twin against such a texture of the same texels). Announced, in place of those notes'
+        /// own notices for the slot, where the specialized pipeline is made, or, without the
+        /// variant, at a draw or dispatch that binds such a texture there (through a runtime
+        /// sampler, whatever its word states), naming the slot and the format.
         YCbCrFilterNotExact = "ycbcr-filter-not-exact", Precision,
             "the texels hold Metal's reads exactly, but the sample filters them as the device \
              does, off the grid Metal sums the format's steps on, so a filtered result can miss \
@@ -3149,7 +3156,9 @@ impl Device {
     /// whose formats are not known (`None`: an execution of commands the GPU writes) holding. A
     /// slot bound to nothing reads zero and holds no NaN, so a clause testing it does not hold
     /// (EV ZIN-mac1-mvk4's `made_at_creation`). Such a clause is announced here alone: no
-    /// pipeline's key tells it. A kind already announced costs one atomic load.
+    /// pipeline's key tells it. A filter note's (a two-plane YCbCr texture that Metal's own
+    /// sampler filters) is announced as `ycbcr-filter-not-exact`. A kind already announced costs
+    /// one atomic load.
     pub(crate) fn degrade_bound_formats(
         &self,
         stages: &[StageModule],
@@ -3157,7 +3166,17 @@ impl Device {
     ) {
         for stage in stages {
             for s in &stage.specialized_notes {
-                let kind = Degradation::from_precision_note(s.note);
+                // A filter note's clauses of the bound formats test a two-plane YCbCr format
+                // alone (`metal2vulkan::lower`'s filter of such a texture by Metal's own sampler):
+                // its own kind.
+                let filter = matches!(
+                    s.note,
+                    PrecisionNote::HalfSampleFilter | PrecisionNote::FloatSampleFilter
+                );
+                let kind = match filter {
+                    true => Degradation::YCbCrFilterNotExact,
+                    false => Degradation::from_precision_note(s.note),
+                };
                 if !s.when.iter().any(|c| c.tests_bound_formats())
                     || !self.shared().announced.pending(kind)
                 {
@@ -3194,14 +3213,19 @@ impl Device {
                             ),
                         })
                         .collect();
-                    (
-                        stage_object(stage.stage).to_owned(),
-                        format!(
-                            "{} where it binds a texture whose format may hold one ({})",
-                            self.note_reason(s.note),
-                            bound.join(", ")
+                    let bound = bound.join(", ");
+                    let reason = self.note_reason(s.note);
+                    let message = match s.note {
+                        _ if filter => format!(
+                            "a filtered sample of {bound} takes the device's filter of its \
+                             texels, not Metal's exact filter of the format: {reason}"
                         ),
-                    )
+                        PrecisionNote::DeviceNanEncoding => {
+                            format!("{reason} where it binds a texture whose format may hold one ({bound})")
+                        }
+                        _ => format!("{reason} where it binds {bound}"),
+                    };
+                    (stage_object(stage.stage).to_owned(), message)
                 });
             }
         }

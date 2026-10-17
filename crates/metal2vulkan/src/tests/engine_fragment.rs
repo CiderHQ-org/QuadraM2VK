@@ -5224,16 +5224,21 @@ fn helper_invocations_skip_an_optnone_branch_on_a_driver_that_drops_a_simdgroups
 /// samples a `half` texture through a runtime sampler after a branch on a constant block's flag and
 /// writes a buffer; under the sampler's YCbCr variant the emulated linear filter branches on the
 /// sampler's specialization constants, and its device-sample arm converts the texel through a
-/// rounded add, which SPIRV-Cross writes as an `optnone` call. On `moltenvk-m3`, with and without
-/// the variant: no helper census entry, no guard, no `HelperBranchDropsSimdgroupStores`, the
-/// emulated filter only under the variant, and L3.
+/// rounded add, which SPIRV-Cross writes as an `optnone` call. On `moltenvk-m3` under Metal's
+/// filter of the format (`YCbCrFilterPolicy::Exact`), with and without the variant: no helper
+/// census entry, no guard, no `HelperBranchDropsSimdgroupStores`, the emulated filter only under
+/// the variant, and L3.
 #[test]
 fn a_branch_every_invocation_takes_alike_leaves_no_helper_alone() {
     use crate::pipeline::sym::{SlotClass, SlotRef, Stage};
     let Some(bc) = fixture("rch_uniform_branch") else {
         return;
     };
-    let p = profile("moltenvk-m3", DevicePolicy::default()).expect("profile");
+    let policy = DevicePolicy {
+        ycbcr_filter: crate::device::YCbCrFilterPolicy::Exact,
+        ..DevicePolicy::default()
+    };
+    let p = profile("moltenvk-m3", policy).expect("profile");
     let noted = PrecisionNote::HelperBranchDropsSimdgroupStores;
     for ycbcr in [false, true] {
         let what = format!("rch_uniform_branch on moltenvk-m3, YCbCr variant {ycbcr}");

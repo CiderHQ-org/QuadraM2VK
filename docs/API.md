@@ -85,11 +85,13 @@ compile does. `DevicePolicy::default()` is `DevicePolicy::UNTRUSTED`:
   `robustBufferAccess`, buffer accesses and vertex input are left to it. (MoltenVK advertises the
   feature without implementing it; there such accesses are not contained, as on native Metal.)
 - **Ordered framebuffer fetch required** (`FramebufferFetchPolicy::RequireOrdered`).
-- **Fast native forms off Apple's GPUs.** The device's own sampler, maths library, divisions,
-  fused multiply-adds, texel conversions, `half` rounding, NaN bits, min/max, rounding order of
-  `dot`/`mix`/`fast::sqrt`, and blend of a `half` color. Each records a precision note with its
-  bound, and each has an exact switch. `DevicePolicy::exact_answers()` turns on every exact form
-  but sampling's; `sampling = SamplingPolicy::Exact` emulates Metal's sampler too.
+- **Fast native forms off Apple's GPUs.** The device's own sampler (its filter of a two-plane
+  YCbCr texture among them), maths library, divisions, fused multiply-adds, texel conversions,
+  `half` rounding, NaN bits, min/max, rounding order of `dot`/`mix`/`fast::sqrt`, and blend of a
+  `half` color. Each records a precision note with its bound, and each has an exact switch.
+  `DevicePolicy::exact_answers()` turns on every exact form but sampling's, Metal's filter of a
+  two-plane YCbCr texture (`YCbCrFilterPolicy::Exact`) included; `sampling =
+  SamplingPolicy::Exact` emulates Metal's sampler too.
   [FAST-PATHS.md](FAST-PATHS.md) lists every choice, its bound and the measured cost of its exact
   form. On MoltenVK on an Apple GPU, whose sampler and `float` functions are Metal's own, most of
   these choices change nothing.
@@ -1598,7 +1600,11 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   swizzle that moves its channels, a linear mip filter, or a sample the emulation does not reach).
   Cost: the texels hold Metal's reads exactly, but the sample filters them as the device does, off
   the grid Metal sums the format's steps on, so a filtered result can miss Metal's by a step of that
-  grid or more.
+  grid or more. The slot takes Metal's filter only under `YCbCrFilterPolicy::Exact` (on MoltenVK
+  also under `SamplingPolicy::Exact`). Under the default a device that samples natively answers
+  the device's filter, `metal2vulkan-degrade-device-sampling`; on MoltenVK, Metal's own sampler
+  filters the converted texels as an `RGBA16Float` or `RGBA32Float` texture's, within one step of
+  the grid (a `half` result within one `half` ulp), announced at a draw that binds such a texture.
 - `metal2vulkan-degrade-rotated-load-tiles` (precision). `RotatedLoadTiles`: A render pass that
   draws loads and stores a rotated texture of rotation 4, whose load is the plane transposed and
   whose store is rotation 1's: every tile of the frame lands mirrored, where Metal loads and stores
@@ -2103,7 +2109,10 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   lies on the face's diagonal (docs/FAST-PATHS.md's known gaps). A kernel's samples through
   MoltenVK are Metal's own, with no note.
 - `metal2vulkan-degrade-half-texel-conversion` (precision). `PrecisionNote::HalfTexelConversion`:
-  The module reads, gathers, or samples a texture with a `half` result.
+  The module reads, gathers, or samples a texture with a `half` result. On MoltenVK under
+  `YCbCrFilterPolicy::Device`, also announced at a draw that binds a two-plane YCbCr texture on
+  the grid `8192` at a slot sampled through a runtime sampler: a sample of one texel rounds to
+  nearest even, one `half` ulp from Metal's ties-away rounding at a tie.
 - `metal2vulkan-degrade-half-sample-filter` (precision). `PrecisionNote::HalfSampleFilter`: The
   module samples a texture with a `half` result through a filter (linear minification or
   magnification, or a runtime sampler) on a device that does not sample through Metal's own sampler.
@@ -2306,7 +2315,10 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
 - `metal2vulkan-degrade-device-sampling` (precision). `PrecisionNote::DeviceSampling`: Native device
   sampling: the module hands a sample, gather or comparison to the device's own sampler where a
   device whose sampler is not Metal's would emulate Metal's (`SamplingPolicy::NativeDevice`, the
-  default; the module requires `VkProperty::DeviceSampling`).
+  default; the module requires `VkProperty::DeviceSampling`). Under `YCbCrFilterPolicy::Device`
+  (the default) that includes a linear sample of a two-plane YCbCr texture, whose texels hold
+  Metal's reads exactly: the device's filter of them lands within 1.183 codes (1/255) of Metal's
+  sum on the format's grid, so a draw binding such a texture makes no pipeline of its own.
 - `metal2vulkan-degrade-native-transcendentals` (precision). `PrecisionNote::NativeTranscendentals`:
   Native device maths: the module computes a `float` or `half` math-library function by the device's
   own `GLSL.std.450` instruction (or Metal's composition of the device's `Exp2` and `Log2`), not by

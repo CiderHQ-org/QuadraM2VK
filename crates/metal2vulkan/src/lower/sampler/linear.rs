@@ -148,11 +148,14 @@
 //! class (`PackedTexels::one_level`, `reaches_word`). A constexpr sampler with a mip filter keeps
 //! the device's filter, noted.
 //!
-//! On a device that samples through Metal's own sampler such a slot's emulation is its YCbCr
-//! variant's alone ([`Linear::exact_only`]): the binder binds a two-plane YCbCr format there, whose
-//! class is `EXACT` or measured by no family, so only an `EXACT` class takes the emulation, through
-//! the exact routine alone, and every other class the device's sample, which is Metal's own filter
-//! on that device.
+//! On a device whose sampler answers the module's samples such a slot's emulation is its YCbCr
+//! variant's alone ([`Linear::exact_only`]), on a profile that takes the variant
+//! (`ProfileFields::ycbcr_variant`: under `YCbCrFilterPolicy::Exact`, and on a device that samples
+//! through Metal's own sampler also under `SamplingPolicy::Exact`; elsewhere the device filters
+//! the slot as any other, `YCbCrFilterPolicy::Device`, noted): the binder binds a two-plane YCbCr
+//! format there, whose class is `EXACT` or measured by no family, so only an `EXACT` class takes
+//! the emulation, through the exact routine alone, and every other class the device's sample,
+//! which is Metal's own filter on that device.
 //!
 //! **Depth textures and comparisons** (the RT13-px2, px3 and px4 probes, Apple M4 on macOS 27.0.1).
 //! A depth texture's linear sample is its color class's (`metal::texel_format`: `Depth32Float` an
@@ -245,10 +248,10 @@ pub struct Linear {
     /// raw view (`BindingKey::raw`). `None`: the taps are fetched through the sample's binding (a
     /// cube's through its faces' view).
     pub fetch: Option<super::BindingKey>,
-    /// The emulation of a slot under its YCbCr variant on a device that samples through Metal's
-    /// own sampler (`VkProperty::MetalSampler`): only an `EXACT` class takes it, through the exact
-    /// routine alone, and every other class the device's sample, Metal's own filter. The binder
-    /// puts a slot in the variant only where it binds a two-plane YCbCr format there
+    /// The emulation of a slot under its YCbCr variant on a device whose sampler answers the
+    /// module's samples (`DeviceProfile::device_samples`): only an `EXACT` class takes it, through
+    /// the exact routine alone, and every other class the device's sample, Metal's own filter. The
+    /// binder puts a slot in the variant only where it binds a two-plane YCbCr format there
     /// (`bind::plan::slots::ycbcr_variant`), whose class is `EXACT` or measured by no family
     /// (`metal::texel_format`'s `two_plane_family`), never the accumulated routine's: so the
     /// emulated routine, which no such class reads, is not called.
@@ -525,7 +528,8 @@ pub(super) fn select(
     };
     // On a device that samples through Metal's own sampler, the device's filter is Metal's, but
     // for a slot under its YCbCr variant; on one that samples natively, the device's filter is the
-    // answer.
+    // answer, but for a slot under its YCbCr variant where the policy asks for Metal's filter of
+    // the format (`ProfileFields::ycbcr_variant`).
     let metal_sampler = cx.profile.device_samples();
     if metal_sampler && !crate::lower::texture::ycbcr_texture(cx, image, shape)? {
         cx.families.sampler.metal_sampler = true;
@@ -668,7 +672,9 @@ pub(super) fn select(
 /// `float` one (a depth texture's and a comparison's included); `None` for a sample that is not
 /// filtered (a constexpr sampler that reads one texel of one level, [`unfiltered`]), one of another
 /// result, and every sample on a device with the property but a slot's under its YCbCr variant,
-/// whose filter the device's is not. Where it holds is [`filter_when`]'s.
+/// whose filter the device's is not, and a slot's whose two-plane YCbCr format the profile leaves
+/// to Metal's own sampler. Where it holds is [`filter_when`]'s, for such a slot
+/// [`metal_filtered_ycbcr`]'s.
 pub(super) fn filter_note(
     cx: &SelectCx<'_>,
     op: &SampleOp,
@@ -689,8 +695,41 @@ pub(super) fn filter_note(
         }
     }
     let metal = cx.profile.device_samples();
-    let device_metal = metal && !crate::lower::texture::ycbcr_slot(cx, image)?;
+    let device_metal = metal
+        && !crate::lower::texture::ycbcr_slot(cx, image)?
+        && metal_filtered_ycbcr(cx, image).is_none();
     Ok((!device_metal).then_some(note))
+}
+
+/// On a device that samples through Metal's own sampler (`VkProperty::MetalSampler`) under
+/// `YCbCrFilterPolicy::Device` (no `ProfileFields::ycbcr_variant`), the clauses under which a
+/// filtered sample of texture slot `image` is not Metal's filter of the format bound there: where
+/// that format is two-plane YCbCr (its class's `TexelFormat::PACKED` field one of
+/// [`PackedTexels::YCbCr2048`], [`PackedTexels::YCbCr8192`] and
+/// [`PackedTexels::YCbCrExtended8192`]), whose view holds Metal's reads exactly but which Metal's
+/// sampler then filters as an `RGBA16Float` or `RGBA32Float` texture's texels, not on the format's
+/// own grid. The runtime reads the bound format (`SpecKey::BoundTexelFormat`) and announces it as
+/// `ycbcr-filter-not-exact`, through a runtime sampler whatever its word states. `None` on any
+/// other device or profile, and for a heap's texture, which never takes the variant.
+pub(super) fn metal_filtered_ycbcr(cx: &SelectCx<'_>, image: ImageRef) -> Option<Vec<NoteClause>> {
+    let ImageRef::Slot(index) = image else {
+        return None;
+    };
+    let fields = cx.profile.fields();
+    let metal = fields
+        .enabled
+        .properties
+        .contains(&crate::device::requirements::VkProperty::MetalSampler);
+    (metal && !fields.ycbcr_variant).then(|| {
+        any_of(
+            [
+                PackedTexels::YCbCr2048,
+                PackedTexels::YCbCr8192,
+                PackedTexels::YCbCrExtended8192,
+            ]
+            .map(|p| NoteTest::equal(NoteOn::Bound(index), TexelFormat::PACKED_MASK, p.class().0)),
+        )
+    })
 }
 
 /// Where the filter note ([`filter_note`]) of a sample through `sampler` (`None`: an argument

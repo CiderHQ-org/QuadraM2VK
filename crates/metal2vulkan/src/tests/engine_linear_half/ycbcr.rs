@@ -674,6 +674,100 @@ fn moltenvk_emulates_a_ycbcr_slot_under_its_variant() {
     }
 }
 
+/// Under native sampling (the default), a filtered sample of a texture slot records
+/// `RuntimeFact::YCbCrTexture` only under `YCbCrFilterPolicy::Exact`, whose variant emulates
+/// Metal's filter of a two-plane YCbCr format bound there, on lavapipe and on MoltenVK. Under the
+/// default, `YCbCrFilterPolicy::Device`, it records none, so a draw binding such a texture makes no
+/// variant, and the device filters the slot whatever the inputs name: on lavapipe the module records
+/// `DeviceSampling` (its note of the device's filter) and no filter note; on MoltenVK, whose
+/// sampler is Metal's own, the filter note, which holds only where the format bound at the slot is
+/// two-plane YCbCr (`SpecKey::BoundTexelFormat`, the runtime's `ycbcr-filter-not-exact`), and no
+/// `DeviceSampling`.
+#[test]
+fn a_device_takes_the_ycbcr_variant_only_under_the_exact_filter() {
+    use crate::device::YCbCrFilterPolicy;
+    use crate::metal::texel_format::{PackedTexels, TexelFormat};
+    use crate::pipeline::sym::SpecKey;
+    let Some(bc) = assemble(
+        "ycbcr policy",
+        &kernel(Some(linear(1, false, 0)), Form::Plain { offset: (0, 0) }),
+    ) else {
+        return;
+    };
+    let fact = RuntimeFact::YCbCrTexture { slot: TEXTURE };
+    let ycbcr_fields: Vec<u32> = [
+        PackedTexels::YCbCr2048,
+        PackedTexels::YCbCr8192,
+        PackedTexels::YCbCrExtended8192,
+    ]
+    .map(|p| p.class().0)
+    .into();
+    for stem in ["lavapipe", "moltenvk-m3"] {
+        for ycbcr in [YCbCrFilterPolicy::Device, YCbCrFilterPolicy::Exact] {
+            let policy = DevicePolicy {
+                ycbcr_filter: ycbcr,
+                ..DevicePolicy::UNTRUSTED
+            };
+            let p = profile(stem, policy).expect("profile");
+            let native = stem == "lavapipe";
+            let takes = ycbcr == YCbCrFilterPolicy::Exact;
+            assert_eq!(p.fields().ycbcr_variant, takes, "{stem} {ycbcr:?}");
+            for variant in [false, true] {
+                let what = format!("{stem} {ycbcr:?}, variant {variant}");
+                let a = compile_with(&bc, "k", &p, &inputs(variant))
+                    .unwrap_or_else(|e| panic!("{what}: {e}"));
+                link_and_validate(&a, &p).unwrap_or_else(|e| panic!("{what}: {e}"));
+                let (plan, _) = typed_module_with(&bc, "k", &p, &inputs(variant))
+                    .unwrap_or_else(|e| panic!("{what}: {e}"));
+                assert_eq!(plan.facts.contains(&fact), takes, "{what}");
+                assert_eq!(
+                    a.strategies.entries.contains_key("sampler.linear.quad"),
+                    takes && variant,
+                    "{what}"
+                );
+                // Metal's own sampler without the variant: the filter note, under a two-plane
+                // YCbCr format bound at the slot alone.
+                let bound = !native && !takes;
+                assert_eq!(
+                    a.precision.contains(&PrecisionNote::HalfSampleFilter),
+                    (takes && variant) || bound,
+                    "{what}"
+                );
+                if bound {
+                    let s = a
+                        .specialized
+                        .iter()
+                        .find(|s| s.note == PrecisionNote::HalfSampleFilter)
+                        .unwrap_or_else(|| panic!("{what}: the filter note's clauses"));
+                    let mut tested: Vec<u32> = s
+                        .when
+                        .iter()
+                        .map(|c| match c.all[..] {
+                            [t] if matches!(t.key, SpecKey::BoundTexelFormat(_))
+                                && t.mask == TexelFormat::PACKED_MASK
+                                && t.equal =>
+                            {
+                                t.bits
+                            }
+                            _ => panic!("{what}: {c:?}"),
+                        })
+                        .collect();
+                    tested.sort_unstable();
+                    assert_eq!(tested, ycbcr_fields, "{what}");
+                }
+                // The device's sample, wherever the emulation is not taken: noted on lavapipe.
+                if !(takes && variant) {
+                    assert_eq!(
+                        a.precision.contains(&PrecisionNote::DeviceSampling),
+                        native,
+                        "{what}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// A YCbCr texture has one level, which Metal's mip filter leaves as it is (EVs TXN2-ycm1-m4 and
 /// -m3): through a runtime sampler whose word states a nearest or a linear mip filter, the
 /// emulation answers each field's samples as through none, on lavapipe and on MoltenVK under the

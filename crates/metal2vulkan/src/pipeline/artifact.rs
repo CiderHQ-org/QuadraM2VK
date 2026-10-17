@@ -796,6 +796,14 @@ pub enum PrecisionNote {
     /// value onto its grid first), but for a 32-bit float texel's sample past `±65504`, which Metal
     /// saturates to `±65504` and the rounding takes to the infinity of its sign; a NaN is the
     /// device's decode ([`PrecisionNote::DeviceNanEncoding`]).
+    ///
+    /// On a device that samples through Metal's own sampler under
+    /// [`YCbCrFilterPolicy::Device`](crate::device::YCbCrFilterPolicy), a sample with a `half`
+    /// result through a runtime sampler slot bound to a two-plane YCbCr texture on the grid `8192`
+    /// (the `_sRGB` twins, the unpacked 12-bit and the extended-range formats): where its word
+    /// reads one texel, the texel's step rounds to nearest even, where Metal rounds it with ties
+    /// away from zero, one `half` unit in the last place apart at a tie. The runtime announces it
+    /// at a draw or dispatch that binds such a texture there.
     HalfTexelConversion,
     /// The module samples a texture with a `half` result through a filter (linear minification
     /// or magnification, or a runtime sampler) on a device that does not sample through Metal's
@@ -1463,6 +1471,18 @@ pub enum PrecisionNote {
     /// texel boundary may read the neighbouring texel, whose difference it then answers: 0.1% of
     /// the probe's coordinates on NVIDIA and ANV, 0.02% on RADV, none on lavapipe. Level selection,
     /// anisotropy, cube maps, 3D textures, gathers, comparisons and offsets are not measured.
+    ///
+    /// A linear sample of a two-plane YCbCr texture is the device's filter of its converted texels
+    /// under [`YCbCrFilterPolicy::Device`](crate::device::YCbCrFilterPolicy), the default: the
+    /// texels hold Metal's reads exactly, but Metal sums their steps on the format's grid at its own
+    /// weights, each term truncated. Against that sum (the slot's emulation under
+    /// `YCbCrFilterPolicy::Exact`, which keeps it), at 65,536 random coordinates on each of five
+    /// `YCBCR8_420_2P` surfaces of both ranges and three matrices, `float` and `half` results, the
+    /// largest difference of any channel, in codes of 1/255, is 1.183 on NVIDIA's 615.71.09 (RTX
+    /// 3090), 0.877 on RADV (Mesa 26.0.8, Radeon 780M and RX 7900 XTX), 1.058 on ANV (Mesa 26.2.4,
+    /// Iris Xe of RPL-P) and 0.872 on lavapipe (Mesa 26.2.4); at coordinates on the 1/256 grid,
+    /// 0.498, 0.125, 0.125 and 0.125.
+    ///
     /// Validation derives no tolerance from it.
     DeviceSampling,
     /// Native device maths: the module computes a `float` or `half` math-library function by the

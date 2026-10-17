@@ -15,7 +15,7 @@ use crate::device::function_storage;
 use crate::device::metal::MetalDeviceProperties;
 use crate::device::policy::{
     ContainmentPolicy, DevicePolicy, FloatMathsPolicy, HalfRoundingPolicy, NanMinMaxPolicy,
-    RoundingOrderPolicy, SamplingPolicy, Unorm8LinearFilterPolicy,
+    RoundingOrderPolicy, SamplingPolicy, Unorm8LinearFilterPolicy, YCbCrFilterPolicy,
 };
 use crate::device::profile::{
     BufferAccess, Containment, CubeGradientRoute, CubeGradients, DescriptorCaps, DeviceProfile,
@@ -394,6 +394,20 @@ fn derive_fields(
             TexelNanRoute::Metal
         } else {
             TexelNanRoute::Device
+        },
+        // Metal's filter of a two-plane YCbCr texture through the slot's variant where the policy
+        // asks for it: on a device that samples through Metal's own sampler, under the YCbCr
+        // filter's switch or Metal's sampling; on one that samples natively, under the switch. A
+        // device that emulates Metal's sampler answers it in every module.
+        ycbcr_variant: match deviates(DriverDeviation::MetalSampler) {
+            true => {
+                policy.ycbcr_filter == YCbCrFilterPolicy::Exact
+                    || policy.sampling == SamplingPolicy::Exact
+            }
+            false => {
+                policy.sampling == SamplingPolicy::NativeDevice
+                    && policy.ycbcr_filter == YCbCrFilterPolicy::Exact
+            }
         },
         // Metal's picks where the device's minimum and maximum are measured to be Metal's or its
         // functions are Metal's own; elsewhere the device's where the policy takes them.

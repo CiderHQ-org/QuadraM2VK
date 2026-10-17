@@ -360,9 +360,9 @@ pub(crate) fn cross_variant(
         .collect()
 }
 
-/// The texture slots whose linear samples the function emulates on a device that samples
-/// through Metal's own sampler where the slot is bound in a YCbCr format
-/// (`RuntimeFact::YCbCrTexture`) at which `shape` binds a texture of a two-plane YCbCr format
+/// The texture slots whose linear samples the function emulates where the slot is bound in a
+/// YCbCr format, on a profile that takes the variant (`RuntimeFact::YCbCrTexture`,
+/// `ProfileFields::ycbcr_variant`), at which `shape` binds a texture of a two-plane YCbCr format
 /// (`metal::format::ycbcr_format`), whose view Metal's sampler filters as the view's format, not as
 /// Metal's filter of the YCbCr format: the plan's `VariantKey::ycbcr_textures`. The variant's
 /// compile states the same facts, so its plan for the same shape states the same key.

@@ -516,7 +516,10 @@ pub enum RuntimeFact {
     /// (`VariantKey::ycbcr_textures`, `LoweringInputs::ycbcr_textures`), under which the function
     /// emulates Metal's filter of the slot's samples as a device without the property does, and
     /// notes the samples the emulation does not reach. Bound in any other format, or unbound, the
-    /// slot leaves the variant.
+    /// slot leaves the variant. Recorded only under `YCbCrFilterPolicy::Exact`, and through Metal's
+    /// own sampler also under `SamplingPolicy::Exact`, as is the same fact on a device that samples
+    /// natively (`VkProperty::DeviceSampling`; `ProfileFields::ycbcr_variant`); under the default
+    /// the device's filter answers the slot as any other's, noted, and no draw makes the variant.
     YCbCrTexture { slot: SlotRef },
     /// The tile function reads a builtin whose answer depends on its pipeline's
     /// `threadgroupSizeMatchesTileSize` (its threads per threadgroup, simdgroups or quadgroups
@@ -754,7 +757,9 @@ pub enum RuntimeFact {
     /// driver faults compiling a module past it
     /// ([`DriverWorkaround::RegisterAllocatorOverflowsLargeModules`](crate::device::DriverWorkaround::RegisterAllocatorOverflowsLargeModules):
     /// ANV's register allocator). Each `true` field is an exact form the pipeline would carry under
-    /// the consumer's policy that the fitting translation gave up to fit the bound; the stages carry
+    /// the consumer's policy that the fitting translation gave up to fit the bound (`sampling`
+    /// also for Metal's filter of a two-plane YCbCr texture, `YCbCrFilterPolicy::Exact`, which is
+    /// dropped with it); the stages carry
     /// the reduced policy's own precision notes besides. The consumer announces it once per device
     /// (the runtime's `Degradation::ExactFormsOverCompilerLimit`), naming the pipeline and the forms
     /// dropped. Nothing binds it.

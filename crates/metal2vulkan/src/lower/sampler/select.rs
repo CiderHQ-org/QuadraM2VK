@@ -11,7 +11,7 @@ use crate::error::{
     Capability, Error, Feature, InternalError, InternalKind, LowerFamily, Unsupported,
 };
 use crate::lower::access::handle::HandleTarget;
-use crate::lower::select::SelectCx;
+use crate::lower::select::{NoteOn, NoteTest, SelectCx};
 use crate::lower::texture::{
     texel_conv, AbsentArgument, ImageRef, NullArm, Prelude, Switch, TexelClass, TexelConv,
     TexelForm, TextureStrategy,
@@ -1898,6 +1898,11 @@ fn select_one(
             Some(c) if c.blends() => c.blend_device_when(),
             _ => super::linear::filter_when(linear.as_ref(), by),
         };
+        // Where Metal's own sampler filters the slot, only a two-plane YCbCr format bound there
+        // takes another filter than Metal's: the clauses test the bound format alone, which the
+        // runtime reads at each draw, whatever a runtime sampler's word states (no key carries it
+        // there).
+        let when = super::linear::metal_filtered_ycbcr(cx, image).unwrap_or(when);
         cx.note_when(note, when, m)?;
     }
     // A native class's sample, the device's filter at Metal's footprint step, within one code
@@ -2031,7 +2036,10 @@ fn select_one(
     // On a device that samples through Metal's own texture unit, the `half` routine reads an
     // access's lanes only for a YCbCr field's one texel (`half::HalfFamilies::MetalSampler`),
     // which a runtime sampler slot's texture holds only under the slot's YCbCr variant
-    // (`texture::ycbcr_texture`): elsewhere no sampler word decides them.
+    // (`texture::ycbcr_texture`): elsewhere no sampler word decides them. A slot's texture of a
+    // YCbCr format on the grid `8192` (`TexelFormat::YCBCR_8192`) bound there without the variant
+    // (`YCbCrFilterPolicy::Device`) then rounds a sample of its one texel to nearest even, where
+    // Metal rounds it with ties away, noted where it is bound.
     let one_texel = match one_texel {
         crate::lower::texture::OneTexel::Word(_)
             if half
@@ -2040,6 +2048,15 @@ fn select_one(
                     == crate::lower::texture::half::HalfFamilies::MetalSampler
                 && !crate::lower::texture::ycbcr_texture(cx, image, shape)? =>
         {
+            if let ImageRef::Slot(index) = image {
+                use crate::metal::texel_format::TexelFormat;
+                let ties = NoteTest::equal(
+                    NoteOn::Bound(index),
+                    TexelFormat::YCBCR_8192,
+                    TexelFormat::YCBCR_8192,
+                );
+                cx.note_when(PrecisionNote::HalfTexelConversion, vec![[ties].into()], m)?;
+            }
             crate::lower::texture::OneTexel::Never
         }
         other => other,
@@ -2531,7 +2548,7 @@ fn pixel_note(
     ),
 ) -> Vec<crate::lower::select::NoteClause> {
     use super::position::SnapKind;
-    use crate::lower::select::{both, NoteClause, NoteOn, NoteTest};
+    use crate::lower::select::{both, NoteClause};
     let always = || vec![NoteClause::new()];
     let gathered = snap.is_some_and(|s| matches!(s.kind, SnapKind::WordGather { .. }));
     match pixel {

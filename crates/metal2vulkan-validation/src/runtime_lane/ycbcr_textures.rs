@@ -8,8 +8,12 @@
 //!   (`metal2vulkan::bind::ycbcr_texel`, after the 9/3/3/1 chroma filter), for both ranges and
 //!   both matrices, and for one surface Metal's own reads (EV XRR2-ycc2-m4): the same digest. A
 //!   nearest sample at each texel's centre reads the same texel, unannounced; a linear one there
-//!   too, and between the texels it is Metal's filter of them, unannounced. A function that samples
-//!   handles and reaches the texture is refused, typed.
+//!   too, and between the texels it is Metal's filter of them, unannounced (the lane's devices
+//!   sample as Metal does). Under native sampling it is Metal's filter under
+//!   `YCbCrFilterPolicy::Exact`, through one pipeline more at the draw, and under the default the
+//!   device's filter of the same texels (on MoltenVK Metal's own sampler's, announced), within
+//!   [`DEVICE_FILTER_BOUND`] of Metal's, through the pipeline the state's creation made. A function
+//!   that samples handles and reaches the texture is refused, typed.
 //! - The texture follows writes of its planes' bytes through other textures over them, as a
 //!   decoder writes the planes as `R8Unorm` and `RG8Unorm` textures: in an earlier command
 //!   buffer, an earlier encoder of the same one, an earlier dispatch of the same encoder, and a
@@ -26,7 +30,7 @@
 
 use super::argument_linear_samples::{self, LINEAR_EDGE};
 use super::blits::SYSTEM_MEMORY;
-use super::degrade_notices::{assert_once, counts, on_device};
+use super::degrade_notices::{assert_once, counts, on_device, on_device_with};
 use super::depth_compares::{pipeline_of, run_held, Held, Through};
 use super::host_memory::{self, host_page, Mapping};
 use super::{buffer_with, read_buffer};
@@ -35,7 +39,7 @@ use metal2vulkan::bind::{
     ycbcr_read, ycbcr_texel, ycbcr_write, SamplerDescriptor, YCbCrCodes, YCbCrMatrix, YCbCrOutput,
     YCbCrRange,
 };
-use metal2vulkan::device::VkProperty;
+use metal2vulkan::device::{SamplingPolicy, VkProperty, YCbCrFilterPolicy};
 use metal2vulkan::error::{BindError, Feature};
 use metal2vulkan::metal::format::{ycbcr_format, ChromaSubsampling, YCbCrReads};
 use metal2vulkan::metal::{
@@ -49,14 +53,15 @@ use metal2vulkan::pipeline::{
 use metal2vulkan_devtools::llvm_assemble_text;
 use metal2vulkan_runtime::{
     BlitOption, Buffer, ClearColor, CommandBuffer, CommandQueue, ComputePipelineState, Deallocator,
-    Degradation, Device, Error, Invalid, IoSurfacePlane, IoSurfaceYCbCr, Library, LoadAction,
-    MappedSampling, Nil, Origin, PipelineOptions, Problem, Region, RenderPassDescriptor,
-    ResourceOptions, RuntimeGap, SamplerState, Size, StoreAction, SurfaceYCbCrMatrix, Texture,
-    TextureDescriptor, TextureProblem,
+    Degradation, Device, DeviceOptions, Error, Invalid, IoSurfacePlane, IoSurfaceYCbCr, Library,
+    LoadAction, MappedSampling, Nil, Origin, PipelineOptions, Problem, Region,
+    RenderPassDescriptor, RenderPipelineState, ResourceOptions, RuntimeGap, SamplerState, Size,
+    StoreAction, SurfaceYCbCrMatrix, Texture, TextureDescriptor, TextureProblem,
 };
 use std::time::Duration;
 
 const WAIT: Duration = Duration::from_secs(60);
+
 /// The surface's size, and its planes' rows and offsets.
 const W: u64 = 40;
 const H: u64 = 24;
@@ -992,6 +997,12 @@ fn drawn_after(
     (texture, sampler): (&Texture, Option<&SamplerState>),
     before: impl FnOnce(&CommandQueue, &CommandBuffer),
 ) -> Vec<[f32; 4]> {
+    let pipeline = between_state(device, library, fragment);
+    drawn_with(device, &pipeline, (texture, sampler), before)
+}
+
+/// The render pipeline state of vertex `corner` and `fragment` into one `RGBA32Float` color.
+fn between_state(device: &Device, library: &Library, fragment: &str) -> RenderPipelineState {
     let function = |name: &str| {
         StageSource::Function(
             library
@@ -1004,9 +1015,18 @@ fn drawn_after(
     descriptor.fragment = Some(function(fragment));
     descriptor.color_attachments[0] =
         Some(ColorAttachmentDescriptor::new(PixelFormat::RGBA32Float));
-    let pipeline = device
+    device
         .new_render_pipeline_state(&descriptor, &PipelineOptions::default())
-        .unwrap();
+        .unwrap()
+}
+
+/// [`drawn_after`]'s draw through `pipeline`.
+fn drawn_with(
+    device: &Device,
+    pipeline: &RenderPipelineState,
+    (texture, sampler): (&Texture, Option<&SamplerState>),
+    before: impl FnOnce(&CommandQueue, &CommandBuffer),
+) -> Vec<[f32; 4]> {
     let mut target = TextureDescriptor::texture_2d(PixelFormat::RGBA32Float, W, H, false);
     target.usage = TextureUsage::RENDER_TARGET;
     target.resource_options = ResourceOptions::shared();
@@ -1034,7 +1054,7 @@ fn drawn_after(
     let command_buffer = queue.command_buffer().unwrap();
     before(&queue, &command_buffer);
     let mut encoder = command_buffer.render_command_encoder(&pass).unwrap();
-    encoder.set_render_pipeline_state(&pipeline).unwrap();
+    encoder.set_render_pipeline_state(pipeline).unwrap();
     encoder.set_vertex_buffer(Some(&corners), 0, 0).unwrap();
     encoder.set_fragment_texture(Some(texture), 0).unwrap();
     if let Some(sampler) = sampler {
@@ -1114,6 +1134,139 @@ fn a_fragments_linear_sample_is_metals_through_each_sampler_and_result() {
         ] {
             assert_eq!(notices.get(&kind), None, "{notices:?}");
         }
+    });
+}
+
+/// How far the device's own linear filter of a two-plane YCbCr texture's texels may land from
+/// Metal's filter of the format at coordinates on the 1/256 grid, in codes of `1/255`: the bound
+/// `PrecisionNote::DeviceSampling` states for such a texture there (docs/FAST-PATHS.md), 0.498 on
+/// NVIDIA and 0.125 on RADV, ANV and lavapipe; through Metal's own sampler one step of the grid
+/// `1/2048`, 0.125 (`ycbcr-filter-not-exact`).
+const DEVICE_FILTER_BOUND: f32 = 0.5;
+
+/// Under native sampling (`SamplingPolicy::NativeDevice`) and the default
+/// (`YCbCrFilterPolicy::Device`), a fragment function's linear sample of a `YCBCR8_420_2P` texture
+/// through a runtime sampler, with a `float` and a `half` result, takes the pipeline a draw binding
+/// any other texture takes: the draw binding it makes no pipeline after the one that bound an
+/// `RGBA16Float` texture of the same texels, and its samples are that texture's bit for bit (the
+/// device's filter of them), within [`DEVICE_FILTER_BOUND`] of Metal's step. On a device that
+/// samples natively the module's `device-sampling` is announced and no filter notice; on one that
+/// samples through Metal's own sampler `ycbcr-filter-not-exact`, once, naming the slot and the
+/// format, and no `device-sampling`.
+#[test]
+fn a_ycbcr_slot_takes_the_devices_filter_in_the_pipeline_its_creation_made() {
+    ycbcr_draws_under(YCbCrFilterPolicy::Device);
+}
+
+/// [`a_ycbcr_slot_takes_the_devices_filter_in_the_pipeline_its_creation_made`] under Metal's
+/// filter of the format (`YCbCrFilterPolicy::Exact`): on every device the draw binding the
+/// texture takes the slot's YCbCr variant, one pipeline more, and its samples are Metal's step
+/// exactly, announced by no filter notice.
+#[test]
+fn a_ycbcr_slot_takes_metals_filter_under_the_exact_switch() {
+    ycbcr_draws_under(YCbCrFilterPolicy::Exact);
+}
+
+/// The draws of [`a_ycbcr_slot_takes_the_devices_filter_in_the_pipeline_its_creation_made`] on a
+/// device that samples natively, under `filter`.
+fn ycbcr_draws_under(filter: YCbCrFilterPolicy) {
+    let native = |options: &mut DeviceOptions| {
+        options.policy.sampling = SamplingPolicy::NativeDevice;
+        options.policy.ycbcr_filter = filter;
+    };
+    on_device_with(native, |device, messages| {
+        let kernels = Kernels::new(device);
+        let surface = buffer_with(device, &surface_bytes(9)).unwrap();
+        let texture = ycbcr_texture(
+            &surface,
+            Some(facts(VIDEO, None)),
+            TextureUsage::SHADER_READ,
+        )
+        .unwrap();
+        let read = grid(&texels_of(device, &kernels.read, &texture, None));
+        let d = TextureDescriptor::texture_2d(PixelFormat::RGBA16Float, W, H, false);
+        let twin = device.new_texture(&d).unwrap();
+        let bytes: Vec<u8> = read
+            .iter()
+            .flat_map(|t| [t[0], t[1], t[2], 2048].map(half_of_step))
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        twin.replace_region(Region::new_2d(0, 0, W, H), 0, 0, &bytes, 8 * W, 0)
+            .unwrap();
+        let metal = device
+            .compile_device()
+            .profile()
+            .enabled()
+            .properties
+            .contains(&VkProperty::MetalSampler);
+        let exact = filter == YCbCrFilterPolicy::Exact;
+        let linear = sampler(device, SamplerMinMagFilter::Linear);
+        let library = device
+            .new_library_with_air(&llvm_assemble_text(&fragments()).unwrap())
+            .unwrap();
+        for fragment in ["between_runtime_float", "between_runtime_half"] {
+            let pipeline = between_state(device, &library, fragment);
+            let plain = drawn_with(device, &pipeline, (&twin, Some(&linear)), |_, _| {});
+            let before = device.work_counts().variant_pipelines_made;
+            let got = drawn_with(device, &pipeline, (&texture, Some(&linear)), |_, _| {});
+            let made = device.work_counts().variant_pipelines_made - before;
+            assert_eq!(
+                made,
+                u64::from(exact),
+                "{fragment}: pipelines the YCbCr draw made"
+            );
+            let mut worst = 0f32;
+            for (i, texel) in (0..W * H).zip(&got) {
+                let at = (i % W, i / W);
+                for (c, &value) in texel.iter().enumerate().take(3) {
+                    let want = metal_step(&read, at, BETWEEN, c) as f32 / 2048.0;
+                    match exact {
+                        true => assert_eq!(value, want, "pixel {at:?} of {fragment}"),
+                        false => worst = worst.max((value - want).abs() * 255.0),
+                    }
+                }
+                assert_eq!(texel[3], 1.0, "pixel {at:?} of {fragment}");
+            }
+            if !exact {
+                println!(
+                    "YCBCR-DEVICE-FILTER {} {fragment}: largest difference from Metal's step \
+                     {worst} codes",
+                    device.name()
+                );
+                assert!(
+                    got == plain,
+                    "{fragment}: the device's filter of the same texels"
+                );
+                assert!(worst <= DEVICE_FILTER_BOUND, "{fragment}: {worst} codes");
+            }
+        }
+        let notices = messages.take_notices();
+        let announced = counts(&notices);
+        for kind in [
+            Degradation::FloatSampleFilter,
+            Degradation::HalfSampleFilter,
+        ] {
+            assert_eq!(announced.get(&kind), None, "{announced:?}");
+        }
+        let ycbcr = announced.get(&Degradation::YCbCrFilterNotExact);
+        match metal && !exact {
+            true => {
+                assert_eq!(ycbcr, Some(&1), "{announced:?}");
+                let notice = notices
+                    .iter()
+                    .filter_map(|m| m.degradation.as_ref())
+                    .find(|n| n.degradation == Degradation::YCbCrFilterNotExact)
+                    .unwrap();
+                let named = format!("texture 0 bound as {:?}", PixelFormat::YCBCR84202P);
+                assert!(notice.reason.contains(&named), "{notice:?}");
+            }
+            false => assert_eq!(ycbcr, None, "{announced:?}"),
+        }
+        assert_eq!(
+            announced.contains_key(&Degradation::DeviceSampling),
+            !metal,
+            "{announced:?}"
+        );
     });
 }
 

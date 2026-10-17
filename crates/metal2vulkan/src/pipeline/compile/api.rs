@@ -26,7 +26,7 @@ use crate::budget::{Budget, Meter};
 use crate::cache::VariantKey;
 use crate::device::policy::{
     DevicePolicy, FloatMathsPolicy, HalfBlendPolicy, HalfRoundingPolicy, NanMinMaxPolicy,
-    RoundingOrderPolicy, SamplingPolicy, TexelConversionPolicy,
+    RoundingOrderPolicy, SamplingPolicy, TexelConversionPolicy, YCbCrFilterPolicy,
 };
 use crate::device::requirements::{Requirements, VkExtension, VkFeature, VkLimit, VkProperty};
 use crate::device::{mechanism, Device, DeviceProfile};
@@ -1300,7 +1300,8 @@ fn largest_stage_words(pipeline: &RenderPipeline) -> u32 {
 }
 
 /// A step of the compiler-word-bound fallback: the exact forms to drop from the consumer's policy.
-/// `NativeSampling` drops exact sampling, the single largest exact form; `AllNative` drops every
+/// `NativeSampling` drops exact sampling, the single largest exact form, with Metal's filter of a
+/// two-plane YCbCr texture (`YCbCrFilterPolicy::Exact`, reported with it); `AllNative` drops every
 /// module-growing exact answer (the fast default's forms). Neither touches the policy's other
 /// choices (pointer and handle domains, containment, isolation, framebuffer fetch, the 8-bit
 /// filter, or `padded_reads`, which changes no module), so a reduced device keeps them.
@@ -1315,6 +1316,7 @@ impl ReducedForms {
     fn of(self, base: DevicePolicy) -> DevicePolicy {
         let sampled = DevicePolicy {
             sampling: SamplingPolicy::NativeDevice,
+            ycbcr_filter: YCbCrFilterPolicy::Device,
             ..base
         };
         match self {
@@ -1342,7 +1344,7 @@ fn record_dropped_forms(
     reduced: &DeviceProfile,
 ) {
     let fact = RuntimeFact::ExactFormsOverCompilerLimit {
-        sampling: base.sampling != policy.sampling,
+        sampling: base.sampling != policy.sampling || base.ycbcr_filter != policy.ycbcr_filter,
         float_maths: base.float_maths != policy.float_maths,
         texel_conversion: base.texel_conversion != policy.texel_conversion,
         half_rounding: base.half_rounding != policy.half_rounding,

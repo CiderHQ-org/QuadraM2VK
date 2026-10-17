@@ -3423,16 +3423,26 @@ pub(super) fn notes_pipeline(
 
 /// The notes of pipeline `p` on `dev` planned for texture slot 0 bound as a `ty` texture in `pf`,
 /// buffers 0 to 2 bound, and sampler slot 0 bound to `sampler` (or nothing): its stage's notes
-/// under the plan's specialization.
+/// under the plan's specialization, where a test of the format bound at texture slot 0
+/// (`SpecKey::BoundTexelFormat`), which no pipeline's key carries, reads `pf`'s class
+/// (`metal::format::bound_texel_format`), as a runtime reads it at each draw or dispatch.
 pub(super) fn notes_bound(
     p: &crate::pipeline::ComputePipeline,
     dev: &crate::device::Device,
     texture: (crate::metal::TextureType, PixelFormat),
     sampler: Option<crate::bind::SamplerDescriptor>,
 ) -> Vec<PrecisionNote> {
+    let pf = texture.1;
     let plan = plan_bound(p, dev, texture, sampler);
     p.stage
-        .precision_notes_bound(&plan.specialization, &|k| plan.specialized_value(k))
+        .precision_notes_bound(&plan.specialization, &|k| match k {
+            SpecKey::BoundTexelFormat(SlotRef {
+                class: SlotClass::Texture,
+                index: 0,
+                ..
+            }) => Some(u64::from(crate::metal::format::bound_texel_format(pf))),
+            k => plan.specialized_value(k),
+        })
 }
 
 /// The plan of pipeline `p` on `dev` for texture slot 0 bound as a `ty` texture in `pf`, buffers
