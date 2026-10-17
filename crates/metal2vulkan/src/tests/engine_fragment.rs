@@ -474,7 +474,8 @@ fn fetch_state(read: &[u32], formats: &[PixelFormat], blending: bool) -> Lowerin
 /// the interlock, under its pipeline's state (standalone, the function needs that state); where
 /// that state blocks the storage form (a blend of a format whose blend the shader does not compute),
 /// `RequireOrdered` refuses with the blocker and `AcceptUnordered` reads an input attachment
-/// unordered with a precision note; a 16-bit float attachment's blend the shader computes. With neither,
+/// unordered with a precision note; a 16-bit float or 8-bit unorm attachment's blend the shader
+/// computes. With neither,
 /// `RequireOrdered` refuses naming both and `AcceptUnordered` reads unordered. Every compiled
 /// module passes L3.
 #[test]
@@ -556,10 +557,14 @@ fn framebuffer_fetch_reads_in_an_ordered_form_where_the_device_has_one() {
                     assert!(!unordered(&a), "{entry} on {stem}");
                 }
                 // Blending the written color 0 blocks its storage form where the shader computes
-                // no blend of its format (`RGBA8Unorm`, `R32Float`): refused with that reason, or
-                // read unordered. A 16-bit float one's blend the shader computes, as Metal's.
+                // no blend of its format (`R32Float`): refused with that reason, or read
+                // unordered. A 16-bit float or 8-bit unorm one's blend the shader computes, as
+                // Metal's.
                 let blended = fetch_state(colors, formats, true);
-                if formats[0] == PixelFormat::RGBA16Float {
+                if matches!(
+                    formats[0],
+                    PixelFormat::RGBA16Float | PixelFormat::RGBA8Unorm
+                ) {
                     for p in [&strict, &lenient] {
                         let a = compile_with(&bc, entry, p, &blended)
                             .unwrap_or_else(|e| panic!("{entry} on {stem}: blended: {e}"));

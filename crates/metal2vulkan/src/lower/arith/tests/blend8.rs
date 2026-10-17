@@ -1,21 +1,28 @@
 //! A fetched 8-bit unorm attachment's blend on the interpreter
-//! (`extended_range::blend::blend_unorm8`, then the 8-bit unorm rule of `arith::color_write`):
-//! premultiplied source-over (one over one minus the source alpha, added, for color and alpha),
+//! (`extended_range::blend::blend_unorm8`, then the 8-bit unorm rule of `arith::color_write`),
 //! of a `half4` or `float4` output, under fast math and without, against Metal's measured
 //! arithmetic. Metal clamps the output to `[0, 1]` (a NaN to 0), reads the destination's code `c`
-//! as `h(c / 255)` (`f(c / 255)` for a `float4` output), blends in the output's type (fast math:
-//! `h(fma(d, h(1 - a), s))`; without: `h(s + h(d · h(1 - a)))`; in `float` likewise), and stores
-//! the result's code by its unorm write (a NaN 0, clamped, the exact product with 255 rounded to
-//! nearest). The function writes that code as `c` times the `f32` nearest `1 / 255`.
+//! as `h(c / 255)` (`f(c / 255)` for a `float4` output) and the blend color clamped to `[0, 1]`
+//! (as `half` in `half` arithmetic), blends in the output's type, and stores the result's code by
+//! its unorm write (a NaN 0, clamped, the exact product with 255 rounded to nearest). The function
+//! writes that code as `c` times the `f32` nearest `1 / 255`.
 //!
-//! EV FB8-sw1-m3 (plain Metal on the M3 Max under macOS 27.0.1, our own MSL of the guest's
-//! shape, a 4096 x 961 target): every `half` alpha in `[0, 1]` against every destination code of
-//! each channel, four source draws per pair (half aimed within four units in the last place of a
+//! Premultiplied source-over (one over one minus the source alpha, added, for color and alpha):
+//! fast math `h(fma(d, h(1 - a), s))`, without `h(s + h(d · h(1 - a)))`, in `float` likewise.
+//! EV FB8-sw1-m3 (plain Metal on the M3 Max under macOS 27.0.1, our own MSL of the guest's shape,
+//! a 4096 x 961 target): every `half` alpha in `[0, 1]` against every destination code of each
+//! channel, four source draws per pair (half aimed within four units in the last place of a
 //! code's midpoint, 2% out of range, infinite or NaN), each of `half4` and `float4`, fast and safe:
 //! this arithmetic gives Metal's code in every one of 63 million channels per variant, into
 //! `BGRA8Unorm`, and `RGBA8Unorm`, `RG8Unorm` and `R8Unorm` alike. Here every alpha code's `half`
 //! (or `float`) meets every destination code in some lane, beside sources aimed at the codes'
 //! midpoints, out of range and NaN, and texels read a unit in the last place off `c / 255`.
+//!
+//! Other factors, operations, write masks and the blend color: a state of each rule
+//! `Blend::unorm8` names (the color's contracted pair and alpha's lerp of source alpha over, the
+//! blend color's lerps, a lone color channel's lerp, and alpha alone beside the color channels'
+//! destination factor), against the arithmetic the probes measured (EVs FB8-sw2-m3, FB8-bc1-m3,
+//! FB8-sc1-m3 and FB8-ao1-m3).
 
 use super::*;
 use crate::lower::arith::extended_range::blend::{blend_unorm8, Blend, BlendArith, BlendMath};
@@ -152,14 +159,14 @@ fn a_fetched_eight_bit_unorm_blend_stores_metals_code() {
         for math in [BlendMath::Fast, BlendMath::Rounded] {
             for pf in [PixelFormat::BGRA8Unorm, PixelFormat::R8Unorm] {
                 let what = format!("{arith:?} {math:?} {pf:?}");
-                let b = Blend::unorm8(&over, pf, ColorWriteMask::ALL, math)
+                let b = Blend::unorm8(&over, pf, ColorWriteMask::ALL, (math, arith))
                     .unwrap_or_else(|e| panic!("{what}: {e:?}"));
                 check(
                     &format!("the fetched 8-bit unorm blend, {what}"),
                     &[f4, f4],
                     f4,
                     &|fb, x| {
-                        let v = blend_unorm8(fb, &b, arith, (x[0], x[1]))?;
+                        let v = blend_unorm8(fb, &b, arith, (x[0], x[1]), None)?;
                         crate::lower::arith::color_write::round(fb, f4, v, &[unorm; 4], None)
                     },
                     &cases,
@@ -188,10 +195,10 @@ fn a_fetched_eight_bit_unorm_blend_stores_metals_code() {
     }
 }
 
-/// Another blend of an 8-bit unorm attachment, a write mask that keeps a channel, and another
-/// format are not measured: `Blend::unorm8` refuses each `NotImplemented(FramebufferFetch)`.
+/// A factor of the second source, in any of the four factors, and another format are not built:
+/// `Blend::unorm8` refuses each `NotImplemented(FramebufferFetch)`, under either math.
 #[test]
-fn another_eight_bit_unorm_blend_is_not_built() {
+fn a_second_source_or_another_format_is_not_built() {
     let over = BlendEquation {
         source_rgb: F::One,
         destination_rgb: F::OneMinusSourceAlpha,
@@ -207,34 +214,301 @@ fn another_eight_bit_unorm_blend_is_not_built() {
         }
         _ => false,
     };
-    let math = BlendMath::Fast;
-    let rgb = ColorWriteMask::RED
-        .union(ColorWriteMask::GREEN)
-        .union(ColorWriteMask::BLUE);
     let cases = [
         (
             BlendEquation {
-                source_rgb: F::SourceAlpha,
+                source_rgb: F::Source1Color,
                 ..over
             },
             PixelFormat::BGRA8Unorm,
-            ColorWriteMask::ALL,
         ),
         (
             BlendEquation {
-                alpha_operation: O::Max,
+                destination_rgb: F::OneMinusSource1Color,
                 ..over
             },
             PixelFormat::RGBA8Unorm,
-            ColorWriteMask::ALL,
         ),
-        (over, PixelFormat::BGRA8Unorm, rgb),
-        (over, PixelFormat::RGBA8UnormSRGB, ColorWriteMask::ALL),
+        (
+            BlendEquation {
+                source_alpha: F::Source1Alpha,
+                ..over
+            },
+            PixelFormat::RG8Unorm,
+        ),
+        (
+            BlendEquation {
+                destination_alpha: F::OneMinusSource1Alpha,
+                ..over
+            },
+            PixelFormat::R8Unorm,
+        ),
+        (over, PixelFormat::RGBA8UnormSRGB),
     ];
-    for (eq, pf, mask) in cases {
-        assert!(
-            refused(Blend::unorm8(&eq, pf, mask, math)),
-            "{eq:?} {pf:?} {mask:?}"
-        );
+    for (eq, pf) in cases {
+        for math in [BlendMath::Fast, BlendMath::Rounded] {
+            assert!(
+                refused(Blend::unorm8(
+                    &eq,
+                    pf,
+                    ColorWriteMask::ALL,
+                    (math, BlendArith::Half)
+                )),
+                "{eq:?} {pf:?} {math:?}"
+            );
+        }
+    }
+}
+
+/// `x` rounded in `arith`: to `half`, nearest even, or to `float`.
+fn rounded(arith: BlendArith, x: f64) -> f64 {
+    match arith {
+        BlendArith::Half => h(x),
+        BlendArith::Float => f64::from(x as f32),
+    }
+}
+
+/// `a b + c` fused, rounded once in `arith` (a product of `half`s and its sum with one are exact
+/// in `f64` over a blend's operands).
+fn fused(arith: BlendArith, (a, b, c): (f64, f64, f64)) -> f64 {
+    match arith {
+        BlendArith::Half => h(a * b + c),
+        BlendArith::Float => f64::from((a as f32).mul_add(b as f32, c as f32)),
+    }
+}
+
+/// One lane's operands as Metal's blend reads them: the source lane `s` and alpha `sa` clamped,
+/// the destination lane `d` and alpha `da` decoded, and the blend color's lane `c` and alpha `ca`
+/// clamped, each rounded to the arithmetic's type.
+#[derive(Clone, Copy)]
+struct Lane {
+    s: f64,
+    sa: f64,
+    d: f64,
+    da: f64,
+    c: f64,
+    ca: f64,
+}
+
+#[test]
+fn the_factor_set_masks_and_blend_color_store_metals_code() {
+    let f4 = vec(float(32), 4);
+    let u4 = vec(int(32), 4);
+    let unorm = Some(ChannelWrite::Unorm { bits: 8 });
+    let one_over = 1.0f32 / 255.0;
+    let colors: [[f32; 4]; 2] = [[0.3, 0.6, 0.9, 0.45], [-0.25, 1.5, 0.321, 0.8]];
+    let eq = |(fs, fd, op): (F, F, O), (sa, da, oa): (F, F, O)| BlendEquation {
+        source_rgb: fs,
+        destination_rgb: fd,
+        rgb_operation: op,
+        source_alpha: sa,
+        destination_alpha: da,
+        alpha_operation: oa,
+    };
+    type Form = fn(BlendArith, BlendMath, Lane) -> f64;
+    // Each state, its format and mask, and the color and alpha lanes' Metal arithmetic (EVs
+    // FB8-sw2-m3, FB8-bc1-m3, FB8-sc1-m3 and FB8-ao1-m3); `None` where the lane keeps its texel.
+    let states: [(
+        BlendEquation,
+        PixelFormat,
+        ColorWriteMask,
+        Option<Form>,
+        Option<Form>,
+    ); 4] = [
+        // Source alpha over: the color's source product rounded first; alpha a lerp of the
+        // source alpha from the destination's.
+        (
+            eq(
+                (F::SourceAlpha, F::OneMinusSourceAlpha, O::Add),
+                (F::SourceAlpha, F::OneMinusSourceAlpha, O::Add),
+            ),
+            PixelFormat::BGRA8Unorm,
+            ColorWriteMask::ALL,
+            Some(|ar, math, l| {
+                let m = rounded(ar, 1.0 - l.sa);
+                match math {
+                    BlendMath::Fast => fused(ar, (l.d, m, rounded(ar, l.s * l.sa))),
+                    BlendMath::Rounded => {
+                        rounded(ar, rounded(ar, l.s * l.sa) + rounded(ar, l.d * m))
+                    }
+                }
+            }),
+            Some(|ar, math, l| {
+                let m = rounded(ar, 1.0 - l.sa);
+                match math {
+                    BlendMath::Fast => fused(ar, (l.sa, rounded(ar, l.sa - l.da), l.da)),
+                    BlendMath::Rounded => {
+                        rounded(ar, rounded(ar, l.sa * l.sa) + rounded(ar, l.da * m))
+                    }
+                }
+            }),
+        ),
+        // The blend color and its one minus: lerps of it under fast math.
+        (
+            eq(
+                (F::BlendColor, F::OneMinusBlendColor, O::Add),
+                (F::BlendAlpha, F::OneMinusBlendAlpha, O::Add),
+            ),
+            PixelFormat::RGBA8Unorm,
+            ColorWriteMask::ALL,
+            Some(|ar, math, l| match math {
+                BlendMath::Fast => fused(ar, (l.c, rounded(ar, l.s - l.d), l.d)),
+                BlendMath::Rounded => {
+                    let m = rounded(ar, 1.0 - l.c);
+                    rounded(ar, rounded(ar, l.s * l.c) + rounded(ar, l.d * m))
+                }
+            }),
+            Some(|ar, math, l| match math {
+                BlendMath::Fast => fused(ar, (l.ca, rounded(ar, l.sa - l.da), l.da)),
+                BlendMath::Rounded => {
+                    let m = rounded(ar, 1.0 - l.ca);
+                    rounded(ar, rounded(ar, l.sa * l.ca) + rounded(ar, l.da * m))
+                }
+            }),
+        ),
+        // One color channel stored: a lerp of the source alpha a vector does not take.
+        (
+            eq(
+                (F::OneMinusSourceAlpha, F::SourceAlpha, O::Add),
+                (F::One, F::Zero, O::Add),
+            ),
+            PixelFormat::BGRA8Unorm,
+            ColorWriteMask::BLUE,
+            Some(|ar, math, l| match math {
+                BlendMath::Fast => fused(ar, (l.sa, rounded(ar, l.d - l.s), l.s)),
+                BlendMath::Rounded => {
+                    let m = rounded(ar, 1.0 - l.sa);
+                    rounded(ar, rounded(ar, l.s * m) + rounded(ar, l.d * l.sa))
+                }
+            }),
+            None,
+        ),
+        // Alpha alone stored: the color channels' destination factor still computes one minus
+        // the destination alpha, so alpha takes no lerp of it.
+        (
+            eq(
+                (F::Zero, F::OneMinusDestinationAlpha, O::Add),
+                (F::OneMinusDestinationColor, F::DestinationColor, O::Add),
+            ),
+            PixelFormat::BGRA8Unorm,
+            ColorWriteMask::ALPHA,
+            None,
+            Some(|ar, math, l| {
+                let m = rounded(ar, 1.0 - l.da);
+                match math {
+                    BlendMath::Fast => fused(ar, (l.sa, m, rounded(ar, l.da * l.da))),
+                    BlendMath::Rounded => {
+                        rounded(ar, rounded(ar, l.sa * m) + rounded(ar, l.da * l.da))
+                    }
+                }
+            }),
+        ),
+    ];
+    for arith in [BlendArith::Half, BlendArith::Float] {
+        let float = arith == BlendArith::Float;
+        let mut rng = Rng(0xFAC7_0B1E ^ u64::from(float));
+        let mut cases: Vec<Case> = Vec::new();
+        for bc in colors {
+            let color: Vec<u64> = bc.iter().map(|c| u64::from(c.to_bits())).collect();
+            for _ in 0..1500 {
+                let codes: Vec<u32> = (0..4).map(|_| (rng.next() % 256) as u32).collect();
+                let a = h(f64::from((rng.next() % 256) as u32) / 255.0);
+                let s = codes
+                    .iter()
+                    .map(|&c| source(&mut rng, float, (a, c)))
+                    .collect();
+                let d = codes.iter().map(|&c| texel(&mut rng, c)).collect();
+                cases.push(vec![s, d, color.clone()]);
+            }
+        }
+        for (e, pf, mask, color_form, alpha_form) in states {
+            for math in [BlendMath::Fast, BlendMath::Rounded] {
+                let what = format!("{arith:?} {math:?} {pf:?} {mask:?} {e:?}");
+                let b = Blend::unorm8(&e, pf, mask, (math, arith))
+                    .unwrap_or_else(|err| panic!("{what}: {err:?}"));
+                assert_eq!(b.reads_constant(), pf == PixelFormat::RGBA8Unorm, "{what}");
+                check(
+                    &format!("the fetched 8-bit unorm blend, {what}"),
+                    &[f4, f4, u4],
+                    f4,
+                    &|fb, x| {
+                        let color = b.reads_constant().then_some(x[2]);
+                        let v = blend_unorm8(fb, &b, arith, (x[0], x[1]), color)?;
+                        crate::lower::arith::color_write::round(fb, f4, v, &[unorm; 4], None)
+                    },
+                    &cases,
+                    &|c| {
+                        let code = |l: usize| (f64::from(f32v(c[1][l])) * 255.0).round() as u32;
+                        let read = |x: f64| rounded(arith, clamp01(x));
+                        let lane = |l: usize| Lane {
+                            s: read(f64::from(f32v(c[0][l]))),
+                            sa: read(f64::from(f32v(c[0][3]))),
+                            d: rounded(arith, f64::from(code(l)) / 255.0),
+                            da: rounded(arith, f64::from(code(3)) / 255.0),
+                            c: read(f64::from(f32v(c[2][l]))),
+                            ca: read(f64::from(f32v(c[2][3]))),
+                        };
+                        Some(
+                            (0..4)
+                                .map(|l| {
+                                    let form = if l < 3 { color_form } else { alpha_form };
+                                    let got = match form {
+                                        Some(form) => {
+                                            let v = form(arith, math, lane(l));
+                                            (clamp01(v) * 255.0 + 0.5).floor() as u32
+                                        }
+                                        None => code(l),
+                                    };
+                                    u64::from(((got as f32) * one_over).to_bits())
+                                })
+                                .collect(),
+                        )
+                    },
+                    false,
+                );
+            }
+        }
+    }
+}
+
+/// A format without alpha (`R8Unorm`, `RG8Unorm`) sums its products under fast math in forms of
+/// its own (EV FB8-r8-m3): a lerp, common factor or contracted pair is refused
+/// `NotImplemented(FramebufferFetch)` there, a fused or single product built, and without fast
+/// math every blend is built.
+#[test]
+fn a_format_without_alpha_builds_only_its_measured_fast_forms() {
+    let eq = |fs, fd| BlendEquation {
+        source_rgb: fs,
+        destination_rgb: fd,
+        rgb_operation: O::Add,
+        source_alpha: fs,
+        destination_alpha: fd,
+        alpha_operation: O::Add,
+    };
+    // Each blend and whether fast math builds it.
+    let cases = [
+        (eq(F::SourceAlpha, F::OneMinusSourceAlpha), false),
+        (eq(F::OneMinusSourceAlpha, F::SourceAlpha), false),
+        (eq(F::DestinationColor, F::OneMinusSourceAlpha), false),
+        (eq(F::One, F::OneMinusSourceAlpha), true),
+        (eq(F::Zero, F::SourceColor), true),
+        (eq(F::BlendColor, F::One), true),
+    ];
+    for pf in [PixelFormat::R8Unorm, PixelFormat::RG8Unorm] {
+        for (e, fast) in cases {
+            for math in [BlendMath::Fast, BlendMath::Rounded] {
+                let built = Blend::unorm8(&e, pf, ColorWriteMask::ALL, (math, BlendArith::Half));
+                let what = format!("{pf:?} {math:?} {e:?}");
+                match built {
+                    Ok(_) => assert!(fast || math == BlendMath::Rounded, "{what}"),
+                    Err(crate::error::Error::Unsupported(u)) => {
+                        assert!(!fast && math == BlendMath::Fast, "{what}");
+                        assert_eq!(u.feature, crate::error::Feature::FramebufferFetch, "{what}");
+                        assert_eq!(u.needs, crate::error::Needs::NotImplemented, "{what}");
+                    }
+                    Err(e) => panic!("{what}: {e:?}"),
+                }
+            }
+        }
     }
 }

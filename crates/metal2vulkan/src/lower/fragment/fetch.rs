@@ -198,23 +198,27 @@
 //! names for the blend alone (`FramebufferFetchInputs::half_blends`; elsewhere it stays a color
 //! attachment).
 //!
-//! **An 8-bit unorm attachment's blend** (`R8Unorm`, `RG8Unorm`, `RGBA8Unorm`, `BGRA8Unorm`):
-//! premultiplied source-over (`One` over `OneMinusSourceAlpha`, added, for color and alpha) of a
-//! `half4` or `float4` output, every channel of the format written, the shader computes as Metal
-//! does ([`unorm8_blended`]): the write reads the texel at the pixel inside the interlock in Metal's
-//! channel order, clamps the output to `[0, 1]` (a NaN to 0), reads each code `c` as `h(c / 255)`
-//! (`f(c / 255)` for a `float4` output), blends in the output's type, fused under fast math
-//! (`h(fma(d, h(1 - a), s))`) and each step rounded without (`h(s + h(d · h(1 - a)))`), and stores
-//! the result's code by Metal's unorm write (`extended_range::Blend::unorm8`,
-//! `extended_range::blend::blend_unorm8`). EV FB8-sw1-m3 (plain Metal on the M3 Max under
-//! macOS 27.0.1, our own MSL of the guest's shape): every `half` alpha in `[0, 1]` against every
-//! code of each channel, four source draws per pair (half aimed within four units in the last
-//! place of a code midpoint, 2% out of range, infinite or NaN), `half4` and `float4`, fast and safe
-//! math, each of the four formats: Metal's code in every channel. The clamp keeps the output's own
-//! arithmetic out of the blend (EV FB8-fold1-m3: products, sums and a regroup over the fetched
-//! color, each the model's over the function's value), so the blend is Metal's wherever the module
-//! states its math (`HalfOutputPrecision` for one naming none). Another blend, a write mask that
-//! keeps a channel, an output of fewer lanes, and a second (index 1) output are not built.
+//! **An 8-bit unorm attachment's blend** (`R8Unorm`, `RG8Unorm`, `RGBA8Unorm`, `BGRA8Unorm`) of a
+//! `half4` or `float4` output the shader computes as Metal does ([`unorm8_blended`]): the write
+//! reads the texel at the pixel inside the interlock in Metal's channel order, clamps the output to
+//! `[0, 1]` (a NaN to 0), reads each code `c` as `h(c / 255)` (`f(c / 255)` for a `float4` output)
+//! and the blend color clamped to `[0, 1]` (pushed as `PushField::HalfBlendColor`), blends in the
+//! output's type in the forms Metal's compiler builds (`extended_range::Blend::unorm8`: fused and
+//! regrouped under fast math, each step rounded without), stores the result's code by Metal's unorm
+//! write (`extended_range::blend::blend_unorm8`), and keeps the codes of the channels its write
+//! mask leaves out. EVs, plain Metal on the M3 Max under macOS 27.0.1: FB8-sw1-m3 (premultiplied
+//! source-over, every `half` alpha in `[0, 1]` against every code of each channel, `half4` and
+//! `float4`, fast and safe math, each of the four formats: Metal's code in every channel);
+//! FB8-sw2-m3 and FB8-rnd1-m3 (every factor and operation pair for color beside source-over alpha
+//! and the reverse, the same pair for both, and random pairs, over every destination code times
+//! every source alpha code); FB8-mk1-m3, FB8-sc1-m3 and FB8-ao1-m3 (write masks, one color
+//! channel and alpha alone among them); FB8-bc1-m3 (blend colors past both ends). The clamp keeps
+//! the output's own arithmetic out of the blend (EV FB8-fold1-m3: products, sums and a regroup
+//! over the fetched color, each the model's over the function's value), so the blend is Metal's
+//! wherever the module states its math (`HalfOutputPrecision` for one naming none). A factor of the
+//! second source, a format without alpha's fast-math lerp, common factor or contracted pair
+//! (EV FB8-r8-m3: Metal sums those in forms of their own), an output of fewer lanes, and a second
+//! (index 1) output are not built.
 //!
 //! A blocked attachment is refused under `RequireOrdered` with the blocker's reason (what the
 //! device lacks, or `NotImplemented`), and read unordered as before under `AcceptUnordered`
@@ -291,17 +295,22 @@ pub(crate) fn unorm8_format(pf: crate::metal::PixelFormat) -> bool {
 }
 
 /// Metal's blend `eq` of a format held directly, which the shader computes in the storage form,
-/// storing the channels `written` of four under math `math`: an 8-bit unorm attachment's
-/// ([`extended_range::Blend::unorm8`]), else a 16-bit float one's
-/// ([`extended_range::Blend::half_float`]).
+/// storing the channels `written` of four under math `math`: an 8-bit unorm attachment's in
+/// `arith` ([`extended_range::Blend::unorm8`]), else a 16-bit float one's
+/// ([`extended_range::Blend::half_float`], which takes its arithmetic when it computes). The
+/// planning callers pass `BlendArith::Half`: what is refused, what reads the blend color, and the
+/// words are the same in either arithmetic.
 fn direct_blend(
     eq: &BlendEquation,
     pf: crate::metal::PixelFormat,
     written: ColorWriteMask,
-    math: extended_range::blend::BlendMath,
+    (math, arith): (
+        extended_range::blend::BlendMath,
+        extended_range::blend::BlendArith,
+    ),
 ) -> Result<extended_range::Blend, Error> {
     match unorm8_format(pf) {
-        true => extended_range::Blend::unorm8(eq, pf, written, math),
+        true => extended_range::Blend::unorm8(eq, pf, written, (math, arith)),
         false => extended_range::Blend::half_float(eq, pf, written, math),
     }
 }
@@ -720,8 +729,8 @@ fn channels(pf: crate::metal::PixelFormat) -> ColorWriteMask {
 }
 
 /// Whether a storage-form write to an attachment of `pf` that keeps some of its channels takes
-/// them from the draw (`PushField::StorageKeptChannels`), so that every such write mask compiles
-/// alike: every format but an extended-range one, whose kept channels Metal's blend model and
+/// them from the draw (`PushField::StorageKeptChannels`), so that the write masks of a class
+/// compile alike ([`compiled_write_mask`]): every format but an extended-range one, whose kept channels Metal's blend model and
 /// encode read (`extended_range::Blend`, `encode_keeping`), and an sRGB one, whose write merges the
 /// bytes of its `uint` view.
 pub(crate) fn kept_at_draw(pf: crate::metal::PixelFormat) -> bool {
@@ -751,24 +760,41 @@ pub(crate) fn kept_channels(
 }
 
 /// The write mask a fragment function compiles the storage form of an attachment of `pf` under,
-/// for the descriptor's `mask` (`FramebufferFetchInputs::of`): where the write takes its kept
-/// channels from the draw ([`kept_at_draw`]), the class of `mask` alone (none where it covers
-/// none of the format's channels, all where it covers every one, and for a mask covering some,
-/// every channel of the format but the first, the one mask that stands for them all), so the
-/// write masks of a class share one key and one module; any other format's `mask` as it is.
+/// for the descriptor's `mask` (`FramebufferFetchInputs::of`), blended where `blended`: where the
+/// write takes its kept channels from the draw ([`kept_at_draw`]), the class of `mask` alone (none
+/// where it covers none of the format's channels, all where it covers every one, and for a mask
+/// covering some, every channel of the format but the first, the one mask that stands for them
+/// all), so the write masks of a class share one key and one module; any other format's `mask` as
+/// it is. A blended 8-bit unorm attachment with alpha splits the partial class in three, as
+/// Metal's blend forms do (`extended_range::Blend::unorm8`): alpha alone (`ALPHA`), one color
+/// channel with or without alpha (`RED` and `ALPHA`), and two or more color channels.
 pub(crate) fn compiled_write_mask(
     pf: crate::metal::PixelFormat,
     mask: ColorWriteMask,
+    blended: bool,
 ) -> ColorWriteMask {
     if !kept_at_draw(pf) || mask.contains(ColorWriteMask::UNSPECIALIZED) {
         return mask;
     }
     let all = channels(pf);
     let written = all.intersection(mask);
+    let colors = [
+        ColorWriteMask::RED,
+        ColorWriteMask::GREEN,
+        ColorWriteMask::BLUE,
+    ]
+    .into_iter()
+    .filter(|&c| written.contains(c))
+    .count();
+    let unorm8 = blended && unorm8_format(pf) && all.contains(ColorWriteMask::ALPHA);
     if written.is_empty() {
         ColorWriteMask::NONE
     } else if written == all {
         ColorWriteMask::ALL
+    } else if unorm8 && colors == 0 {
+        ColorWriteMask::ALPHA
+    } else if unorm8 && colors == 1 {
+        ColorWriteMask::RED.union(ColorWriteMask::ALPHA)
     } else {
         all.difference(ColorWriteMask::RED)
     }
@@ -856,15 +882,16 @@ pub(crate) fn storage_form(
     let half_blend =
         half_float_format(pf) && attachment.blending_enabled && (!attachment.replaces || kept_zero);
     // And the blend of an 8-bit unorm attachment where Metal's measured model holds it
-    // (`extended_range::Blend::unorm8`: premultiplied source-over, every channel stored); its
-    // other blends stay the gap below. A channel the format lacks counts as written, as [`plan`]
-    // plans it.
+    // (`extended_range::Blend::unorm8`: every factor and operation but the second source's, any
+    // write mask); its other blends stay the gap below. A channel the format lacks counts as
+    // written, as [`plan`] plans it.
     let written_of_four = ColorWriteMask::ALL.difference(kept);
+    let half = extended_range::blend::BlendArith::Half;
     let unorm8_blend = unorm8_format(pf)
         && attachment.blending_enabled
         && !attachment.replaces
         && attachment.equation.is_some_and(|eq| {
-            extended_range::Blend::unorm8(&eq, pf, written_of_four, use_.math).is_ok()
+            extended_range::Blend::unorm8(&eq, pf, written_of_four, (use_.math, half)).is_ok()
         });
     let blend = attachment.equation.filter(|_| {
         (extended.is_some_and(|e| !e.padded()) || half_blend || unorm8_blend) && stores
@@ -875,7 +902,7 @@ pub(crate) fn storage_form(
                 let written = all.intersection(attachment.write_mask);
                 extended_range::Blend::of(&eq, form, written, use_.math)
             }
-            None => direct_blend(&eq, pf, written_of_four, use_.math),
+            None => direct_blend(&eq, pf, written_of_four, (use_.math, half)),
         };
         match planned {
             Ok(_) => {}
@@ -1398,7 +1425,8 @@ pub(super) fn plan(cx: &mut SelectCx<'_>) -> Result<(), Error> {
                 let math = blend_math(cx);
                 let planned = view.blend.map(|eq| {
                     let written = written(view.kept);
-                    direct_blend(&eq, view.pixel_format, written, math)
+                    let half = extended_range::blend::BlendArith::Half;
+                    direct_blend(&eq, view.pixel_format, written, (math, half))
                 });
                 let unorm8 = unorm8_format(view.pixel_format);
                 match (planned, blended_output(cx.entry, color)) {
@@ -1476,8 +1504,9 @@ pub(super) fn plan(cx: &mut SelectCx<'_>) -> Result<(), Error> {
                 // The blend color as the encoder set it, where Metal's 16-bit float blend reads
                 // it. Where that blend is not Metal's exactly, the function notes it.
                 if let (Some(eq), None) = (view.blend, view.extended) {
-                    let half =
-                        direct_blend(&eq, view.pixel_format, written(view.kept), blend_math(cx));
+                    let arith = extended_range::blend::BlendArith::Half;
+                    let math = (blend_math(cx), arith);
+                    let half = direct_blend(&eq, view.pixel_format, written(view.kept), math);
                     if half.is_ok_and(|h| h.reads_constant()) {
                         cx.push.insert(PushField::HalfBlendColor);
                     }
@@ -1861,7 +1890,8 @@ pub(super) fn words(cx: &SelectCx<'_>, uses: u64, rets: u64) -> u64 {
             let eq = sc.view.blend?;
             let kept = self::written(sc.view.kept);
             let pf = sc.view.pixel_format;
-            let b = direct_blend(&eq, pf, kept, blend_math(cx)).ok()?;
+            let half = extended_range::blend::BlendArith::Half;
+            let b = direct_blend(&eq, pf, kept, (blend_math(cx), half)).ok()?;
             let unorm8 = match unorm8_format(pf) {
                 true => {
                     let rule = crate::pipeline::lower_inputs::ChannelWrite::Unorm { bits: 8 };
@@ -2385,15 +2415,17 @@ fn half_blended(
 
 /// The output `part` of `form` (four `f32` lanes: a `half4` output's `half`s, or a `float4` one's
 /// `float`s) blended into 8-bit unorm attachment `color` by Metal's blend `eq`
-/// (`extended_range::Blend::unorm8`, of the function's math), stored as Metal's unorm write
-/// stores it: the texel read first at the invocation's pixel (and sample), inside the interlock,
-/// in Metal's channel order ([`read_texel`]: an attachment viewed in its RGBA-order twin has red
-/// and blue exchanged, and the write exchanges them back, [`emit_return`]), Metal's arithmetic of
-/// the clamped output over the destination's code decoded in the output's
-/// type (`extended_range::blend::blend_unorm8`), and the result's code by Metal's 8-bit unorm rule
+/// (`extended_range::Blend::unorm8`, of the function's math and the output's type), stored as
+/// Metal's unorm write stores it: the texel read first at the invocation's pixel (and sample),
+/// inside the interlock, in Metal's channel order ([`read_texel`]: an attachment viewed in its
+/// RGBA-order twin has red and blue exchanged, and the write exchanges them back,
+/// [`emit_return`]), Metal's arithmetic of the clamped output over the destination's code decoded
+/// in the output's type, the blend color from `PushField::HalfBlendColor` where the blend reads it
+/// (`extended_range::blend::blend_unorm8`), and the result's code by Metal's 8-bit unorm rule
 /// (`arith::color_write`'s `ChannelWrite::Unorm`: a NaN 0, clamped, the exact product with 255
-/// rounded to nearest), written as the `f32` the device stores as that code (EV FB8-sw1-m3: Metal's
-/// code in every channel, the module docs).
+/// rounded to nearest), written as the `f32` the device stores as that code; a channel the write
+/// mask keeps takes the texel's after (EVs FB8-sw1-m3 and FB8-sw2-m3: Metal's code in every
+/// channel, the module docs).
 fn unorm8_blended(
     cx: &mut EmitCx<'_>,
     fb: &mut FunctionBuilder<'_>,
@@ -2404,16 +2436,23 @@ fn unorm8_blended(
 ) -> BResult<SValue> {
     let math = extended_range::blend::BlendMath::of(cx.entry.compile.fast_math);
     let (pf, written) = (sc.view.pixel_format, written(sc.view.kept));
-    let Ok(b) = direct_blend(&eq, pf, written, math) else {
-        return Err(cx.fail("an 8-bit unorm blend outside Metal's model"));
-    };
     let arith = match (form.lanes, form.float_fmt()) {
         (4, Some(FloatFmt::Half)) => extended_range::blend::BlendArith::Half,
         (4, Some(FloatFmt::F32)) => extended_range::blend::BlendArith::Float,
         _ => return Err(cx.fail("an 8-bit unorm blend of another output")),
     };
+    let Ok(b) = direct_blend(&eq, pf, written, (math, arith)) else {
+        return Err(cx.fail("an 8-bit unorm blend outside Metal's model"));
+    };
     let texel = read_texel(cx, fb, color, sc)?;
-    let v = extended_range::blend::blend_unorm8(fb, &b, arith, (part, texel))?;
+    let constant = match b.reads_constant() {
+        true => {
+            let field = cx.push_field(fb, PushField::HalfBlendColor)?;
+            Some(fb.composite_extract(field, &[0])?)
+        }
+        false => None,
+    };
+    let v = extended_range::blend::blend_unorm8(fb, &b, arith, (part, texel), constant)?;
     let f4 = form.with(Held::Float(FloatFmt::F32));
     let rule = Some(crate::pipeline::lower_inputs::ChannelWrite::Unorm { bits: 8 });
     crate::lower::arith::color_write::round(fb, f4, v, &[rule; 4], None)

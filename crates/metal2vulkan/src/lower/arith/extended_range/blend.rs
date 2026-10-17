@@ -143,15 +143,33 @@ impl Atom {
         matches!(self, Atom::Sa | Atom::Da | Atom::Ca | Atom::S1a)
     }
 
-    /// An inner sum's order among its atoms: the source's before the destination's.
-    fn order(self) -> u8 {
-        match self {
-            Atom::S | Atom::Sa | Atom::Sf => 0,
-            Atom::S1 | Atom::S1a => 1,
-            Atom::D | Atom::Da => 2,
-            Atom::C | Atom::Ca => 9,
+    /// An inner sum's order among its atoms under `scheme`.
+    fn order(self, scheme: Order) -> u8 {
+        match (self, scheme) {
+            (Atom::C | Atom::Ca, _) => 9,
+            (Atom::S1 | Atom::S1a, _) => 1,
+            (Atom::S | Atom::Sa | Atom::Sf, Order::Source) => 0,
+            (Atom::D | Atom::Da, Order::Source) => 2,
+            (Atom::S | Atom::Sa | Atom::Sf, Order::Destination) => 2,
+            (Atom::D | Atom::Da, Order::Destination) => 0,
+            (Atom::Da, Order::Scalar) => 0,
+            (Atom::D, Order::Scalar) => 1,
+            (Atom::Sa, Order::Scalar) => 2,
+            (Atom::S | Atom::Sf, Order::Scalar) => 3,
         }
     }
+}
+
+/// An inner sum's order among its atoms ([`Atom::order`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Order {
+    /// The source's before the destination's.
+    Source,
+    /// The destination's before the source's: an 8-bit unorm attachment's blend.
+    Destination,
+    /// The destination's before the source's, and each alpha before its lane: an 8-bit unorm
+    /// attachment's color channel stored alone.
+    Scalar,
 }
 
 /// A factor or operand of a blend lane.
@@ -355,6 +373,29 @@ fn alpha_rank(f: BlendFactor) -> u8 {
     }
 }
 
+/// An 8-bit unorm attachment's factor rank, of a color factor or alpha's where `alpha`, in the
+/// arithmetic `arith`: of an added pair, the destination's product is rounded first where the
+/// source factor's rank is at least the destination factor's, else the source's (EVs FB8-sw2-m3
+/// and FB8-rnd1-m3).
+fn unorm8_rank(f: BlendFactor, alpha: bool, arith: BlendArith) -> u8 {
+    use BlendFactor as F;
+    let float = arith == BlendArith::Float;
+    match f {
+        F::SourceColor
+        | F::SourceAlpha
+        | F::DestinationColor
+        | F::OneMinusDestinationColor
+        | F::DestinationAlpha
+        | F::OneMinusDestinationAlpha => 0,
+        F::OneMinusSourceColor | F::OneMinusSourceAlpha if alpha && !float => 0,
+        F::OneMinusSourceColor | F::OneMinusSourceAlpha | F::SourceAlphaSaturated => 1,
+        F::BlendColor | F::BlendAlpha if float => 1,
+        F::BlendColor | F::BlendAlpha => 2,
+        F::OneMinusBlendColor | F::OneMinusBlendAlpha => 3,
+        _ => 9,
+    }
+}
+
 /// The factor `n` of a format without alpha (`BGR10_XR`, `R16Float`, `RG16Float`): its destination
 /// alpha is one.
 fn opaque(n: Node) -> Node {
@@ -375,17 +416,21 @@ struct Shared {
     leaves: Vec<Node>,
 }
 
-/// Whether an inner sum keeps the one-minus node `n`, added with `sign` as its `i`th pair, whole
-/// beyond the nodes that always stay whole ([`inner_sum`]): a shared value added second; under a
-/// `float4` output's alpha (`float_alpha`), a shared value or leaf added second or first in a
-/// difference (`op`), and in a lerp's destination form (`lerp_destination`) a shared value added
-/// anywhere.
+/// Whether an inner sum keeps the one-minus node `n`, added with `sign` as its `i`th pair (from
+/// the destination's product where `destination`), whole beyond the nodes that always stay whole
+/// ([`inner_sum`]): a shared value added second; under a `float4` output's alpha
+/// (`float_alpha`), a shared value or leaf added second or first in a difference (`op`), and in a
+/// lerp's destination form (`lerp_destination`) a shared value added anywhere. An 8-bit unorm
+/// attachment's blend (`unorm8`) keeps a shared value added from the destination's product.
 fn kept_whole(
-    (n, sign, i): (Node, i8, usize),
+    (n, sign, i, destination): (Node, i8, usize, bool),
     shared: &Shared,
-    (float_alpha, op, lerp_destination): (bool, BlendOperation, bool),
+    (float_alpha, op, lerp_destination, unorm8): (bool, BlendOperation, bool, bool),
 ) -> bool {
     let added = sign > 0;
+    if unorm8 {
+        return shared.values.contains(&n) && added && destination;
+    }
     if !float_alpha {
         return shared.values.contains(&n) && added && i > 0;
     }
@@ -394,25 +439,27 @@ fn kept_whole(
         || (lerp_destination && shared.values.contains(&n) && added)
 }
 
-/// The summands of `pairs` (each a node and its sign, in the IR's order) as Metal's compiler
-/// adds them: each `1 - z` expanded into `1` and `-z` but where it stays one value (a blend
-/// color's; an alpha's in a color lane; where `keep` says so, [`kept_whole`]), equal terms
-/// merged, and the terms ordered: the constant last, but between the two others where they are
-/// not both subtracted, after the one of the lower [`Atom::order`]. Where `half_reads` (a
-/// `float4` output's color lanes), the first two summands read an unrounded source lane
-/// ([`Atom::Sf`]) beside a splat alpha as `half` ([`Atom::S`]).
+/// The summands of `pairs` (each a node, its sign, and whether it comes from the destination's
+/// product, in the IR's order) as Metal's compiler adds them: each `1 - z` expanded into `1` and
+/// `-z` but where it stays one value (a blend color's; an alpha's in a color lane of a vector
+/// class, `scalar` false; where `keep` says so, [`kept_whole`]), equal terms merged, and the terms
+/// ordered: the constant last, but between the two others where they are not both subtracted,
+/// after the one of the lower [`Atom::order`] under `order`. Where
+/// `half_reads` (a `float4` output's color lanes), the first two summands read an unrounded source
+/// lane ([`Atom::Sf`]) beside a splat alpha as `half` ([`Atom::S`]).
 fn inner_sum(
-    pairs: [(Node, i8); 2],
-    alpha: bool,
-    keep: &dyn Fn((Node, i8, usize)) -> bool,
+    pairs: [(Node, i8, bool); 2],
+    (scalar, order): (bool, Order),
+    keep: &dyn Fn((Node, i8, usize, bool)) -> bool,
     half_reads: bool,
 ) -> Vec<Summand> {
     let mut terms: Vec<Summand> = Vec::with_capacity(4);
-    for (i, (n, sign)) in pairs.into_iter().enumerate() {
+    for (i, (n, sign, destination)) in pairs.into_iter().enumerate() {
         match n {
             Node::OneMinus(z) => {
-                let leaf =
-                    matches!(z, Atom::C | Atom::Ca) || (!alpha && z.splat()) || keep((n, sign, i));
+                let leaf = matches!(z, Atom::C | Atom::Ca)
+                    || (!scalar && z.splat())
+                    || keep((n, sign, i, destination));
                 if leaf {
                     terms.push((sign, Some(n)));
                 } else {
@@ -436,11 +483,11 @@ fn inner_sum(
     let rest: Vec<Summand> = merged.iter().copied().filter(|m| m.1.is_some()).collect();
     let mut ordered = match (constant, rest.as_slice()) {
         (Some(one), &[a, b]) if a.0 > 0 || b.0 > 0 => {
-            let order = |m: Summand| match m.1 {
-                Some(Node::Atom(x)) => x.order(),
+            let rank = |m: Summand| match m.1 {
+                Some(Node::Atom(x)) => x.order(order),
                 _ => 9,
             };
-            match order(b) < order(a) {
+            match rank(b) < rank(a) {
                 true => vec![b, one, a],
                 false => vec![a, one, b],
             }
@@ -468,14 +515,24 @@ fn raw_term(t: &Term) -> bool {
 
 /// The arithmetic of a lane class (alpha where `alpha`) of factors `fs` and `fd` under `op`,
 /// `shared` the one-minus nodes of the color factors that alpha's sums and lerps take apart,
-/// `opaque_` for a format without alpha, and `float` for a `float4` output's.
+/// `opaque_` for a format without alpha, `float` for a `float4` output's, in the rules of
+/// `family`. `scalar` marks a color class of one channel (an 8-bit unorm attachment's write mask
+/// of one color channel), which Metal plans as a scalar: an alpha read there is no splat, but a
+/// one minus an alpha that its destination factor is or that alpha's factors compute (`shared`)
+/// stays whole in its sums and takes no lerp.
 fn plan(
     (fs, fd, op): (BlendFactor, BlendFactor, BlendOperation),
-    alpha: bool,
+    (alpha, scalar): (bool, bool),
     shared: &Shared,
-    opaque_: bool,
-    float: bool,
+    (opaque_, float): (bool, bool),
+    family: Family,
 ) -> Result<Arith, Error> {
+    let unorm8 = matches!(family, Family::Unorm8(_));
+    let order = match (unorm8, scalar) {
+        (false, _) => Order::Source,
+        (true, false) => Order::Destination,
+        (true, true) => Order::Scalar,
+    };
     // A `float4` output's color lanes read their source lane unrounded.
     let raw = float && !alpha;
     let float_alpha = float && alpha;
@@ -551,20 +608,45 @@ fn plan(
     let sops = (Node::Atom(s), nfs);
     let dops = (Node::Atom(da), nfd);
     let both_orders = |p: (Node, Node)| [(p.0, p.1), (p.1, p.0)];
+    // A color channel stored alone keeps whole the one minus an alpha its destination factor is
+    // and those alpha's factors compute.
+    let mut alone = shared.values.clone();
+    if matches!(nfd, Node::OneMinus(z) if z.splat()) {
+        alone.push(nfd);
+    }
+    let alone = &alone;
     let keep_in = |lerp_destination: bool| {
-        move |k: (Node, i8, usize)| kept_whole(k, shared, (float_alpha, op, lerp_destination))
+        move |k: (Node, i8, usize, bool)| match scalar {
+            true => alone.contains(&k.0),
+            false => kept_whole(k, shared, (float_alpha, op, lerp_destination, unorm8)),
+        }
     };
+    // An 8-bit unorm attachment's lerp takes the destination's product for `y`'s first.
+    let mut sides = [(true, (sops, dops)), (false, (dops, sops))];
+    if unorm8 {
+        sides.reverse();
+    }
     if op == BlendOperation::Add {
-        for (source_side, (yt, zo)) in [(true, (sops, dops)), (false, (dops, sops))] {
+        for (source_side, (yt, zo)) in sides {
             for (y, f) in both_orders(yt) {
                 let Node::OneMinus(za) = f else {
                     continue;
                 };
-                if shared.values.contains(&f) && za == Atom::Ca {
+                // No lerp of a one minus the color factors computed (8-bit unorm: the destination
+                // alpha's too).
+                if shared.values.contains(&f) && (za == Atom::Ca || (unorm8 && za == Atom::Da)) {
                     continue;
                 }
                 let both = [sops.0, sops.1].contains(&f) && [dops.0, dops.1].contains(&f);
-                if !alpha && (za.splat() || y == Node::Atom(za) || both) {
+                if !alpha && !scalar && (za.splat() || y == Node::Atom(za) || both) {
+                    continue;
+                }
+                if scalar && (alone.contains(&f) || y == Node::Atom(za) || both) {
+                    continue;
+                }
+                // An 8-bit unorm attachment's alpha takes no lerp of the destination alpha beside
+                // itself or held by both products.
+                if unorm8 && alpha && za == Atom::Da && (y == Node::Atom(za) || both) {
                     continue;
                 }
                 // A `float4` output's alpha takes no lerp of a one minus the source alpha the
@@ -577,7 +659,9 @@ fn plan(
                 let z = Node::Atom(za);
                 if let Some((_, x)) = both_orders(zo).into_iter().find(|&(zj, _)| zj == z) {
                     let keep = keep_in(!source_side);
-                    let inner = inner_sum([(x, 1), (y, -1)], alpha, &keep, raw);
+                    // `x` comes from the other product than `y`.
+                    let pairs = [(x, 1, source_side), (y, -1, !source_side)];
+                    let inner = inner_sum(pairs, (alpha || scalar, order), &keep, raw);
                     return Ok(Arith::Lerp { y, z, inner });
                 }
             }
@@ -601,8 +685,8 @@ fn plan(
         for (zd, y) in both_orders(dops) {
             if z == zd && !matches!(z, Node::Zero | Node::One) {
                 let pair = match op {
-                    BlendOperation::ReverseSubtract => [(y, pd), (x, ps)],
-                    _ => [(x, ps), (y, pd)],
+                    BlendOperation::ReverseSubtract => [(y, pd, true), (x, ps, false)],
+                    _ => [(x, ps, false), (y, pd, true)],
                 };
                 // A difference of the destination's products by a splat alpha reads the source
                 // unrounded and rounds its sum.
@@ -610,14 +694,14 @@ fn plan(
                     && matches!(x, Node::Atom(_))
                     && matches!(y, Node::Atom(Atom::Sa | Atom::Da));
                 if raw && z == Node::Atom(Atom::D) && splat_difference {
-                    let inner = inner_sum(pair, alpha, &keep, false);
+                    let inner = inner_sum(pair, (alpha || scalar, order), &keep, false);
                     return Ok(Arith::Common {
                         z,
                         inner,
                         round_inner: true,
                     });
                 }
-                let inner = inner_sum(pair, alpha, &keep, raw);
+                let inner = inner_sum(pair, (alpha || scalar, order), &keep, raw);
                 return Ok(Arith::Common {
                     z,
                     inner,
@@ -635,6 +719,13 @@ fn plan(
         fused: (ps, st),
     };
     use BlendFactor as F;
+    if let (Family::Unorm8(arith), BlendOperation::Add) = (family, op) {
+        let rank = |f| unorm8_rank(f, alpha, arith);
+        return Ok(match rank(fs) >= rank(fd) {
+            true => destination_first,
+            false => source_first,
+        });
+    }
     Ok(match op {
         BlendOperation::ReverseSubtract => source_first,
         BlendOperation::Subtract => destination_first,
@@ -750,19 +841,35 @@ fn planned(
     (float, math): (bool, BlendMath),
 ) -> Result<Blend, Error> {
     let has_alpha = !matches!(form, ExtendedRange::Bgr10 { .. });
-    planned_for(eq, (has_alpha, form.srgb(), false), written, (float, math))
+    let family = Family::Extended { srgb: form.srgb() };
+    planned_for(eq, (has_alpha, family), written, (float, math))
 }
 
-/// [`planned`] for a format with an alpha channel where `has_alpha`, an `_sRGB` extended-range
-/// form where `srgb`, and a 16-bit float attachment's blend where `sixteen`
-/// ([`Blend::half_float`]), which takes fast math's color channels' blend color difference (an
-/// extended-range form refuses it).
+/// The attachment whose blend Metal's compiler builds, whose forms differ: an extended-range
+/// form's (an `_sRGB` one's where `srgb`), a 16-bit float attachment's ([`Blend::half_float`]), or
+/// an 8-bit unorm one's in the arithmetic of the output's type ([`Blend::unorm8`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Family {
+    Extended { srgb: bool },
+    HalfFloat,
+    Unorm8(BlendArith),
+}
+
+/// [`planned`] for a format with an alpha channel where `has_alpha`, of `family`: a 16-bit float
+/// or 8-bit unorm attachment's blend takes fast math's color channels' blend color difference
+/// (an extended-range form refuses it), and an 8-bit unorm one's a write mask of one color
+/// channel, which Metal plans as a scalar.
 fn planned_for(
     eq: &BlendEquation,
-    (has_alpha, srgb, sixteen): (bool, bool, bool),
+    (has_alpha, family): (bool, Family),
     written: ColorWriteMask,
     (float, math): (bool, BlendMath),
 ) -> Result<Blend, Error> {
+    let srgb = family == Family::Extended { srgb: true };
+    let sixteen = !matches!(family, Family::Extended { .. });
+    let unorm8 = matches!(family, Family::Unorm8(_));
+    // A zero factor keeps its product without fast math in a 16-bit float attachment's blend.
+    let keep_zero = family == Family::HalfFloat;
     let colors = [
         ColorWriteMask::RED,
         ColorWriteMask::GREEN,
@@ -783,7 +890,7 @@ fn planned_for(
     let opaque_ = !has_alpha;
     let color = match colors {
         0 => None,
-        1 if fast => return Err(refused(ExtendedRangeBlend::OneColorChannel)),
+        1 if fast && !unorm8 => return Err(refused(ExtendedRangeBlend::OneColorChannel)),
         _ => {
             let pair = [eq.source_rgb, eq.destination_rgb];
             let differs = matches!(
@@ -795,9 +902,36 @@ fn planned_for(
                 return Err(refused(ExtendedRangeBlend::ConstantColorDifference));
             }
             let f = (eq.source_rgb, eq.destination_rgb, eq.rgb_operation);
+            let scalar = unorm8 && colors == 1;
+            // A color channel stored alone shares the one minus an alpha that alpha's factors
+            // compute, stored or not.
+            let mut computed = Shared::default();
+            let alpha_factors = !matches!(
+                eq.alpha_operation,
+                BlendOperation::Min | BlendOperation::Max
+            );
+            if scalar && has_alpha && alpha_factors {
+                use BlendFactor as F;
+                let uses = |f: [F; 2]| {
+                    f.iter()
+                        .any(|f| [eq.source_alpha, eq.destination_alpha].contains(f))
+                };
+                for (f, z) in [
+                    ([F::OneMinusSourceAlpha, F::OneMinusSourceColor], Atom::Sa),
+                    (
+                        [F::OneMinusDestinationAlpha, F::OneMinusDestinationColor],
+                        Atom::Da,
+                    ),
+                    ([F::OneMinusBlendAlpha, F::OneMinusBlendColor], Atom::Ca),
+                ] {
+                    if uses(f) {
+                        computed.values.push(Node::OneMinus(z));
+                    }
+                }
+            }
             Some(match math {
-                BlendMath::Fast => plan(f, false, &Shared::default(), opaque_, float)?,
-                BlendMath::Rounded => plan_rounded(f, false, (opaque_, sixteen))?,
+                BlendMath::Fast => plan(f, (false, scalar), &computed, (opaque_, float), family)?,
+                BlendMath::Rounded => plan_rounded(f, false, (opaque_, keep_zero))?,
             })
         }
     };
@@ -818,10 +952,45 @@ fn planned_for(
             if float && uses(BlendFactor::OneMinusDestinationAlpha) {
                 shared.leaves.push(Node::OneMinus(Atom::Da));
             }
+            // An 8-bit unorm attachment's alpha shares what color lanes it stores compute: one
+            // minus the blend alpha, the source alpha, and the destination alpha (which
+            // `SourceAlphaSaturated` computes too); with no color channel stored, the one minus
+            // an alpha the color channels' destination factor is, which Metal computes still. A
+            // minimum or maximum computes no factor.
+            if unorm8 {
+                use BlendFactor as F;
+                shared = Shared::default();
+                let factors =
+                    !matches!(eq.rgb_operation, BlendOperation::Min | BlendOperation::Max);
+                if colors == 0 && factors {
+                    let z = match eq.destination_rgb {
+                        F::OneMinusBlendAlpha => Some(Atom::Ca),
+                        F::OneMinusSourceAlpha => Some(Atom::Sa),
+                        F::OneMinusDestinationAlpha => Some(Atom::Da),
+                        _ => None,
+                    };
+                    shared.values = z.map(Node::OneMinus).into_iter().collect();
+                }
+                if colors > 0 && factors {
+                    let minus = [
+                        (uses(F::OneMinusBlendAlpha), Atom::Ca),
+                        (uses(F::OneMinusSourceAlpha), Atom::Sa),
+                        (
+                            uses(F::OneMinusDestinationAlpha) || uses(F::SourceAlphaSaturated),
+                            Atom::Da,
+                        ),
+                    ];
+                    shared.values = minus
+                        .into_iter()
+                        .filter(|&(u, _)| u)
+                        .map(|(_, z)| Node::OneMinus(z))
+                        .collect();
+                }
+            }
             let f = (eq.source_alpha, eq.destination_alpha, eq.alpha_operation);
             Some(match math {
-                BlendMath::Rounded => plan_rounded(f, true, (opaque_, sixteen))?,
-                BlendMath::Fast => plan(f, true, &shared, opaque_, float)?,
+                BlendMath::Rounded => plan_rounded(f, true, (opaque_, keep_zero))?,
+                BlendMath::Fast => plan(f, (true, false), &shared, (opaque_, float), family)?,
             })
         }
     };
@@ -955,7 +1124,12 @@ impl Blend {
             PixelFormat::RG16Float => 2,
             _ => 4,
         };
-        let b = planned_for(eq, (channels == 4, false, true), written, (false, math))?;
+        let b = planned_for(
+            eq,
+            (channels == 4, Family::HalfFloat),
+            written,
+            (false, math),
+        )?;
         let b = Blend {
             negates_one_minus: channels > 1 && math == BlendMath::Fast,
             ..b
@@ -966,39 +1140,82 @@ impl Blend {
         }
     }
 
-    /// Metal's blend `eq` of a four-lane `half` or `float` output of a module of math `math` into
-    /// an 8-bit unorm attachment of format `pf` (`R8Unorm`, `RG8Unorm`, `RGBA8Unorm`,
-    /// `BGRA8Unorm`) storing the channels `written` of four (a channel the format lacks counts as
-    /// written), computed by [`blend_unorm8`]: the 16-bit float blend's forms in the arithmetic of
-    /// the output's type ([`Blend::half_float`]), of the output clamped to `[0, 1]` and the
-    /// destination's code decoded in that type, the result stored by Metal's unorm write. Modelled
-    /// for premultiplied source-over (`One` over `OneMinusSourceAlpha`, added, for color and
-    /// alpha) storing every channel of the format, whose fused form (fast math) and rounded form
-    /// (without) hold Metal's code in every channel (EV FB8-sw1-m3, plain Metal on the M3 Max
-    /// under macOS 27.0.1, `lower::fragment::fetch`'s module docs); another blend or write mask is
-    /// not built
-    /// (`Feature::FramebufferFetch` `NotImplemented`).
+    /// Metal's blend `eq` of a four-lane output of a module of math `math`, blended in `arith`
+    /// (the output's type), into an 8-bit unorm attachment of format `pf` (`R8Unorm`, `RG8Unorm`,
+    /// `RGBA8Unorm`, `BGRA8Unorm`) storing the channels `written` of four (a channel the format
+    /// lacks counts as written), computed by [`blend_unorm8`] over the output clamped to `[0, 1]`
+    /// and the destination's code decoded in that type, the result stored by Metal's unorm write.
+    /// Without fast math the rounded forms (the module docs). Under fast math the 16-bit float
+    /// blend's forms, but as Metal's compiler builds an 8-bit unorm attachment's blend (EVs
+    /// FB8-sw2-m3, FB8-rnd1-m3 and FB8-mk1-m3, plain Metal on the M3 Max under macOS 27.0.1,
+    /// `lower::fragment::fetch`'s module docs):
+    ///
+    /// - an inner sum adds the destination's atoms before the source's ([`Atom::order`]);
+    /// - a lerp takes `y` from the destination's product first, and alpha takes no lerp of the
+    ///   destination alpha beside itself or held by both products;
+    /// - of an added pair the product rounded first follows [`unorm8_rank`];
+    /// - alpha shares the one minus the blend alpha, the source alpha and the destination alpha
+    ///   (`SourceAlphaSaturated`'s too) that stored color lanes compute, and with no color
+    ///   channel stored the one minus an alpha the color channels' destination factor is
+    ///   (EV FB8-ao1-m3), where the color channels' operation is no minimum or maximum, which
+    ///   computes no factor (EV FB8-mm1-m3): it takes no lerp of a shared blend or destination
+    ///   alpha, and its sums keep a shared one minus whole where they add it from the
+    ///   destination's product;
+    /// - a write mask of one color channel plans that channel as a scalar (EV FB8-sc1-m3): its
+    ///   alpha reads are no splats, but it keeps whole, and takes no lerp of, a one minus an alpha
+    ///   that its destination factor is or that alpha's factors compute, alpha stored or not; its
+    ///   sums add the destination alpha before the destination's lane, then the source alpha
+    ///   before the source's ([`Order::Scalar`]).
+    ///
+    /// A factor of the second source is not built (`Feature::FramebufferFetch` `NotImplemented`):
+    /// its output is not planned beside the storage form's write. Nor, under fast math, is a
+    /// format without alpha's (`R8Unorm`, `RG8Unorm`) lerp, common factor or contracted pair: Metal
+    /// sums those in forms of their own, not measured.
     pub fn unorm8(
         eq: &BlendEquation,
         pf: PixelFormat,
         written: ColorWriteMask,
-        math: BlendMath,
+        (math, arith): (BlendMath, BlendArith),
     ) -> Result<Blend, Error> {
         use BlendFactor as F;
-        let over = |s: BlendFactor, d: BlendFactor, op: BlendOperation| {
-            (s, d, op) == (F::One, F::OneMinusSourceAlpha, BlendOperation::Add)
-        };
-        let source_over = over(eq.source_rgb, eq.destination_rgb, eq.rgb_operation)
-            && over(eq.source_alpha, eq.destination_alpha, eq.alpha_operation);
         let has_alpha = match pf {
             PixelFormat::R8Unorm | PixelFormat::RG8Unorm => false,
             PixelFormat::RGBA8Unorm | PixelFormat::BGRA8Unorm => true,
             _ => return Err(Unsupported::not_implemented(Feature::FramebufferFetch).into()),
         };
-        if !source_over || written != ColorWriteMask::ALL {
+        let factors = [
+            eq.source_rgb,
+            eq.destination_rgb,
+            eq.source_alpha,
+            eq.destination_alpha,
+        ];
+        let second = |f: &BlendFactor| {
+            matches!(
+                f,
+                F::Source1Color
+                    | F::OneMinusSource1Color
+                    | F::Source1Alpha
+                    | F::OneMinusSource1Alpha
+            )
+        };
+        if factors.iter().any(second) {
             return Err(Unsupported::not_implemented(Feature::FramebufferFetch).into());
         }
-        planned_for(eq, (has_alpha, false, false), written, (false, math))
+        let family = Family::Unorm8(arith);
+        let b = planned_for(eq, (has_alpha, family), written, (false, math))?;
+        // A format without alpha sums its two products in forms of its own (EV FB8-r8-m3): of
+        // its fast-math forms only a single or fused product, zero, and a minimum or maximum are
+        // measured.
+        let measured = |a: &Arith| {
+            matches!(
+                a,
+                Arith::MinMax { .. } | Arith::Zero | Arith::Term { .. } | Arith::Fused { .. }
+            )
+        };
+        if !has_alpha && math == BlendMath::Fast && !b.color.iter().all(measured) {
+            return Err(Unsupported::not_implemented(Feature::FramebufferFetch).into());
+        }
+        Ok(b)
     }
 
     /// Whether every class the blend stores takes a form the 16-bit float sweeps fit in every state
@@ -1878,18 +2095,48 @@ pub fn blend_half_float(
 /// unorm write (`arith::color_write`'s 8-bit unorm rule). Metal clamps the output to `[0, 1]`
 /// first, a NaN to 0, every lane ([`clamped`]), and reads the destination as its code over 255
 /// correctly rounded to the arithmetic's type ([`unorm8_tile_value`]), the value a fetch reads.
+/// `color`, the encoder's blend color (a `uvec4` of its `f32`s' bits, `PushField::HalfBlendColor`,
+/// where `b` reads it, [`Blend::reads_constant`]), is what `BlendColor` reads, clamped to `[0, 1]`
+/// and rounded to `half` in `half` arithmetic (EV FB8-bc1-m3: blend colors past both ends of every
+/// channel), and `OneMinusBlendColor` reads the one minus of that read under either math,
+/// `h(1 - h(c))` (`f(1 - c)` in `float`; EV FB8-sw2-m3). A NaN blend color, which no probe drew,
+/// reads 0.
 pub fn blend_unorm8(
     fb: &mut FunctionBuilder<'_>,
     b: &Blend,
     arith: BlendArith,
     (s, texel): (Value, Value),
+    color: Option<Value>,
 ) -> BResult<Value> {
+    let f = floats();
     let s = clamped(fb, s, (0.0, 1.0))?;
     let d = unorm8_tile_value(fb, texel, arith)?;
+    let constant = match color {
+        Some(words) => {
+            let ft = ty(fb, f)?;
+            let c = fb.convert(ConvOp::Bitcast, words, ft)?;
+            let zero = fsplat(fb, f, 0.0)?;
+            let one = fsplat(fb, f, 1.0)?;
+            let nan = fb.unary(UnOp::IsNan, c)?;
+            let c = fb.select(nan, zero, c)?;
+            let c = fb.glsl(GlslOp::FClamp, &[c, zero, one])?;
+            let c = match arith {
+                BlendArith::Half => f32_to_half(fb, f, c, HalfRounding::NearestEven)?,
+                BlendArith::Float => c,
+            };
+            let m = fb.binary_no_contraction(BinOp::FSub, one, c)?;
+            let m = match arith {
+                BlendArith::Half => f32_to_half(fb, f, m, HalfRounding::NearestEven)?,
+                BlendArith::Float => m,
+            };
+            Some((c, m, c))
+        }
+        None => None,
+    };
     let inputs = Inputs {
         s,
         d,
-        constant: None,
+        constant,
         sf: None,
         math: b.math,
         s1: None,

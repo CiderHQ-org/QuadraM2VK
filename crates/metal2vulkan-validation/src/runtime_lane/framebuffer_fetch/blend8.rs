@@ -26,12 +26,18 @@
 //! is refused by that capability, which is printed. Through input attachments (lavapipe) the device
 //! blends; what it announces and how many channels are Metal's is printed. Each draw prints a
 //! `FETCH-BLEND8` line naming its function and format.
+//!
+//! Other blends, write masks and the blend color, into `BGRA8Unorm` through each fixture's
+//! loaded `half4` and `float4`: source alpha over, the blend color's lerps with one channel of the
+//! encoder's color past each end, blue alone stored, and alpha alone stored, against the
+//! arithmetic `Blend::unorm8` names for each (EVs FB8-sw2-m3, FB8-bc1-m3, FB8-sc1-m3 and
+//! FB8-ao1-m3), each channel the mask leaves out its code; checked as above.
 
 use super::{form, library, through_inputs};
-use crate::runtime_lane::buffer_with;
 use crate::runtime_lane::degrade_notices::counts;
 use crate::runtime_lane::resolves::{lane_with, quiet, Lane};
 use crate::runtime_lane::WAIT;
+use crate::runtime_lane::{buffer_with, Messages};
 use metal2vulkan::error::Needs;
 use metal2vulkan::metal::{
     BlendFactor, BlendOperation, ColorWriteMask, PixelFormat, PrimitiveType, TextureUsage,
@@ -40,8 +46,9 @@ use metal2vulkan::pipeline::{
     ColorAttachmentDescriptor, PrecisionNote, RenderPipelineDescriptor, StageSource,
 };
 use metal2vulkan_runtime::{
-    BlitOption, ClearColor, Degradation, Error, LoadAction, Origin, PipelineOptions,
-    RenderPassDescriptor, ResourceOptions, Size, StoreAction, Texture, TextureDescriptor,
+    BlitOption, ClearColor, Degradation, Error, Library, LoadAction, Origin, PipelineOptions,
+    RenderPassDescriptor, RenderPipelineState, ResourceOptions, Size, StoreAction, Texture,
+    TextureDescriptor,
 };
 
 /// The target's side, as the fixtures'.
@@ -261,6 +268,166 @@ fn filled(lane: &Lane, pf: PixelFormat, bytes: &[u8], bpp: u64) -> Texture {
     texture
 }
 
+/// A pipeline of `fixture`'s `entry` blending color 0 of `pf` by `blended` (with color 1 of mask
+/// none), or `None` where a device fetching through the pixel interlock lacks the format's
+/// storage there (printed).
+fn pipeline(
+    lane: &Lane,
+    (library, fixture): (&Library, &Fixture),
+    entry: &str,
+    blended: ColorAttachmentDescriptor,
+) -> Option<RenderPipelineState> {
+    let device = lane.device.name();
+    let function = |name| {
+        StageSource::Function(
+            library
+                .new_function_with_name(name)
+                .unwrap()
+                .function_descriptor(),
+        )
+    };
+    let pf = blended.pixel_format;
+    let mut descriptor = RenderPipelineDescriptor::new(function(fixture.vertex));
+    descriptor.fragment = Some(function(entry));
+    let mut unwritten = ColorAttachmentDescriptor::new(PixelFormat::RGBA16Float);
+    unwritten.write_mask = ColorWriteMask::NONE;
+    descriptor.color_attachments[0] = Some(blended);
+    descriptor.color_attachments[1] = Some(unwritten);
+    match lane
+        .device
+        .new_render_pipeline_state(&descriptor, &PipelineOptions::default())
+    {
+        Ok(state) => Some(state),
+        // A format whose storage the device lacks is refused by that capability.
+        Err(Error::Unsupported(u)) if !through_inputs(lane) && u.needs != Needs::NotImplemented => {
+            println!("FETCH-BLEND8 {entry} {pf:?} | {device} | refused: {u}");
+            None
+        }
+        Err(error) => panic!("{entry} into {pf:?} on {device}: {error}"),
+    }
+}
+
+/// One draw of `state` (whose function returns `output`) over a target of `pf` (`order` the
+/// channel of each byte) holding `texels`, the encoder's blend color `color`: the target's bytes
+/// after it, and which of [`NOTES`] it announced.
+fn draw(
+    (lane, messages): (&Lane, &Messages),
+    state: &RenderPipelineState,
+    (pf, order): (PixelFormat, &[usize]),
+    (output, texels, sources): (Output, &[[u8; 4]], &[[f64; 4]]),
+    color: [f32; 4],
+) -> (Vec<u8>, Vec<Degradation>) {
+    let kinds = NOTES.map(Degradation::from_precision_note);
+    let bpp = order.len();
+    let bytes: Vec<u8> = texels
+        .iter()
+        .flat_map(|t| order.iter().map(|&c| t[c]))
+        .collect();
+    let target = filled(lane, pf, &bytes, bpp as u64);
+    let mut second = TextureDescriptor::texture_2d(PixelFormat::RGBA16Float, SIDE, SIDE, false);
+    second.usage = TextureUsage::RENDER_TARGET;
+    second.resource_options = ResourceOptions::private();
+    let second = lane.device.new_texture(&second).unwrap();
+    let src: Vec<u8> = match output {
+        Output::Float => sources
+            .iter()
+            .flat_map(|s| s.map(|v| v as f32))
+            .flat_map(f32::to_le_bytes)
+            .collect(),
+        Output::Half | Output::Product => sources
+            .iter()
+            .flat_map(|s| s.map(half_bits))
+            .flat_map(u16::to_le_bytes)
+            .collect(),
+    };
+    let src = buffer_with(&lane.device, &src).unwrap();
+    let mut pass = RenderPassDescriptor::new();
+    let attachment = &mut pass.color_attachments[0];
+    attachment.texture = Some(target.clone());
+    attachment.load_action = LoadAction::Load;
+    attachment.store_action = StoreAction::Store;
+    let attachment = &mut pass.color_attachments[1];
+    attachment.texture = Some(second);
+    attachment.load_action = LoadAction::Clear;
+    attachment.clear_color = ClearColor::new(0.0, 0.0, 0.0, 0.0);
+    attachment.store_action = StoreAction::DontCare;
+    let _ = messages.take_notices();
+    lane.run(&pass, |_, encoder, _| {
+        encoder.set_render_pipeline_state(state).unwrap();
+        encoder.set_blend_color(color[0], color[1], color[2], color[3]);
+        encoder.set_fragment_buffer(Some(&src), 0, 0).unwrap();
+        encoder
+            .draw_primitives(PrimitiveType::Triangle, 0, 3, 1, 0)
+            .unwrap();
+    })
+    .unwrap();
+    let announced = counts(&messages.take_notices());
+    let noted = kinds
+        .into_iter()
+        .filter(|k| announced.contains_key(k))
+        .collect();
+    (
+        lane.read(&target, (0, 0), bpp as u64, BlitOption::None),
+        noted,
+    )
+}
+
+/// The source each pixel's function returns: a load chosen by the fetched alpha, or the first
+/// load times the fetched color (each channel's code, a missing color channel 0, a missing alpha
+/// one).
+fn returned(
+    output: Output,
+    order: &[usize],
+    (i, codes): (usize, [u8; 4]),
+    sources: &[[f64; 4]],
+) -> [f64; 4] {
+    let fetched: [f64; 4] = std::array::from_fn(|c| match order.contains(&c) {
+        true => f64::from(codes[c]) / 255.0,
+        false => f64::from(u8::from(c == 3)),
+    });
+    let chosen = match order.contains(&3) && codes[3] == 0 {
+        true => i + TEXELS,
+        false => i,
+    };
+    match output {
+        Output::Product => std::array::from_fn(|c| h(sources[i][c] * h(fetched[c]))),
+        _ => sources[chosen],
+    }
+}
+
+/// Check one draw (the module docs): print its line, assert that a device fetching through the
+/// pixel interlock announces none of [`NOTES`], and that every texel is Metal's where none is
+/// announced. `wrong` holds each texel that is not: its index, the bytes read and Metal's.
+fn checked(
+    lane: &Lane,
+    what: (&str, PixelFormat),
+    noted: &[Degradation],
+    wrong: &[(usize, Vec<u8>, Vec<u8>)],
+) {
+    let device = lane.device.name();
+    let (entry, pf) = what;
+    println!(
+        "FETCH-BLEND8 {entry} {pf:?} | {device} | through {} | Metal's {}/{} texels | announced \
+         {noted:?}",
+        form(lane),
+        TEXELS - wrong.len(),
+        TEXELS,
+    );
+    let what = format!("{entry} into {pf:?} on {device}");
+    if !through_inputs(lane) {
+        assert!(noted.is_empty(), "{what}: announced {noted:?}");
+    }
+    if noted.is_empty() {
+        let shown = &wrong[..wrong.len().min(8)];
+        assert!(
+            wrong.is_empty(),
+            "{what}: {} of {TEXELS} texels differ from Metal's, first (index, read, Metal's) \
+             {shown:?}",
+            wrong.len()
+        );
+    }
+}
+
 /// Each draw's channels are Metal's where it announces none of [`NOTES`], and on a device that
 /// fetches through the pixel interlock it announces none (the module docs).
 #[test]
@@ -270,23 +437,11 @@ fn a_blended_eight_bit_unorm_fetch_stores_metals_blend() {
         options.announce_each = kinds.into_iter().collect();
     });
     let device = lane.device.name();
-    let interlock = !through_inputs(&lane);
     let mut drawn = 0;
     for fixture in &FIXTURES {
         let library = library(&lane, fixture.stem);
-        let function = |name| {
-            StageSource::Function(
-                library
-                    .new_function_with_name(name)
-                    .unwrap()
-                    .function_descriptor(),
-            )
-        };
         for (pf, order) in FORMATS {
             for (entry, output) in fixture.cases {
-                let what = format!("{entry} into {pf:?} on {device}");
-                let mut descriptor = RenderPipelineDescriptor::new(function(fixture.vertex));
-                descriptor.fragment = Some(function(entry));
                 let mut blended = ColorAttachmentDescriptor::new(pf);
                 blended.blending_enabled = true;
                 blended.source_rgb_blend_factor = BlendFactor::One;
@@ -295,95 +450,17 @@ fn a_blended_eight_bit_unorm_fetch_stores_metals_blend() {
                 blended.source_alpha_blend_factor = BlendFactor::One;
                 blended.destination_alpha_blend_factor = BlendFactor::OneMinusSourceAlpha;
                 blended.alpha_blend_operation = BlendOperation::Add;
-                let mut unwritten = ColorAttachmentDescriptor::new(PixelFormat::RGBA16Float);
-                unwritten.write_mask = ColorWriteMask::NONE;
-                descriptor.color_attachments[0] = Some(blended);
-                descriptor.color_attachments[1] = Some(unwritten);
-                let state = match lane
-                    .device
-                    .new_render_pipeline_state(&descriptor, &PipelineOptions::default())
-                {
-                    Ok(state) => state,
-                    // A format whose storage the device lacks is refused by that capability.
-                    Err(Error::Unsupported(u)) if interlock && u.needs != Needs::NotImplemented => {
-                        println!("FETCH-BLEND8 {entry} {pf:?} | {device} | refused: {u}");
-                        continue;
-                    }
-                    Err(error) => panic!("{what}: {error}"),
+                let Some(state) = pipeline(&lane, (&library, fixture), entry, blended) else {
+                    continue;
                 };
-                let bpp = order.len();
                 let (texels, sources) = data(output);
-                let bytes: Vec<u8> = texels
-                    .iter()
-                    .flat_map(|t| order.iter().map(|&c| t[c]))
-                    .collect();
-                let target = filled(&lane, pf, &bytes, bpp as u64);
-                let mut second =
-                    TextureDescriptor::texture_2d(PixelFormat::RGBA16Float, SIDE, SIDE, false);
-                second.usage = TextureUsage::RENDER_TARGET;
-                second.resource_options = ResourceOptions::private();
-                let second = lane.device.new_texture(&second).unwrap();
-                let src: Vec<u8> = match output {
-                    Output::Float => sources
-                        .iter()
-                        .flat_map(|s| s.map(|v| v as f32))
-                        .flat_map(f32::to_le_bytes)
-                        .collect(),
-                    Output::Half | Output::Product => sources
-                        .iter()
-                        .flat_map(|s| s.map(half_bits))
-                        .flat_map(u16::to_le_bytes)
-                        .collect(),
-                };
-                let src = buffer_with(&lane.device, &src).unwrap();
-                let mut pass = RenderPassDescriptor::new();
-                let color = &mut pass.color_attachments[0];
-                color.texture = Some(target.clone());
-                color.load_action = LoadAction::Load;
-                color.store_action = StoreAction::Store;
-                let color = &mut pass.color_attachments[1];
-                color.texture = Some(second);
-                color.load_action = LoadAction::Clear;
-                color.clear_color = ClearColor::new(0.0, 0.0, 0.0, 0.0);
-                color.store_action = StoreAction::DontCare;
-                let _ = messages.take_notices();
-                lane.run(&pass, |_, encoder, _| {
-                    encoder.set_render_pipeline_state(&state).unwrap();
-                    encoder.set_fragment_buffer(Some(&src), 0, 0).unwrap();
-                    encoder
-                        .draw_primitives(PrimitiveType::Triangle, 0, 3, 1, 0)
-                        .unwrap();
-                })
-                .unwrap();
-                let announced = counts(&messages.take_notices());
-                let noted: Vec<_> = kinds
-                    .iter()
-                    .filter(|k| announced.contains_key(*k))
-                    .collect();
-                let read = lane.read(&target, (0, 0), bpp as u64, BlitOption::None);
-                let has_alpha = order.contains(&3);
+                let data = (output, texels.as_slice(), sources.as_slice());
+                let (read, noted) = draw((&lane, &messages), &state, (pf, order), data, [0.0; 4]);
+                let bpp = order.len();
                 let mut wrong = Vec::new();
-                for i in 0..TEXELS {
-                    let codes = texels[i];
+                for (i, &codes) in texels.iter().enumerate() {
                     let got = &read[bpp * i..bpp * i + bpp];
-                    // The fetched color: each channel's code, a missing color channel 0, a
-                    // missing alpha one.
-                    let fetched: [f64; 4] = std::array::from_fn(|c| match order.contains(&c) {
-                        true => f64::from(codes[c]) / 255.0,
-                        false => f64::from(u8::from(c == 3)),
-                    });
-                    // A load chosen by the fetched alpha, or the first load times the fetched
-                    // color.
-                    let chosen = match has_alpha && codes[3] == 0 {
-                        true => i + TEXELS,
-                        false => i,
-                    };
-                    let s: [f64; 4] = match output {
-                        Output::Product => {
-                            std::array::from_fn(|c| h(sources[i][c] * h(fetched[c])))
-                        }
-                        _ => sources[chosen],
-                    };
+                    let s = returned(output, order, (i, codes), &sources);
                     let float = output == Output::Float;
                     let want: Vec<u8> = order
                         .iter()
@@ -393,25 +470,216 @@ fn a_blended_eight_bit_unorm_fetch_stores_metals_blend() {
                         wrong.push((i, got.to_vec(), want));
                     }
                 }
-                println!(
-                    "FETCH-BLEND8 {entry} {pf:?} | {device} | through {} | Metal's {}/{} texels \
-                     | announced {noted:?}",
-                    form(&lane),
-                    TEXELS - wrong.len(),
-                    TEXELS,
-                );
-                if interlock {
-                    assert!(noted.is_empty(), "{what}: announced {noted:?}");
+                checked(&lane, (entry, pf), &noted, &wrong);
+                drawn += 1;
+            }
+        }
+    }
+    assert!(drawn > 0, "no draw on {device}");
+    let _ = messages.take_notices();
+    quiet(lane, &messages);
+}
+
+/// One lane's operands as Metal's blend reads them, each rounded to the arithmetic's type: the
+/// source lane `s` and alpha `sa` clamped, the destination lane `d` and alpha `da` decoded, and
+/// the blend color's lane `c` and alpha `ca` clamped.
+#[derive(Clone, Copy)]
+struct Operands {
+    s: f64,
+    sa: f64,
+    d: f64,
+    da: f64,
+    c: f64,
+    ca: f64,
+}
+
+/// A lane's Metal arithmetic, in `float` where the first flag says so and without fast math
+/// where the second does.
+type Form = fn((bool, bool), Operands) -> f64;
+
+/// `x` rounded to `float` where `float`, else to `half`.
+fn rounded(float: bool, x: f64) -> f64 {
+    match float {
+        true => f64::from(x as f32),
+        false => h(x),
+    }
+}
+
+/// `a b + c` rounded once, in `float` where `float`, else in `half` (exact in `f64` over a blend's
+/// `half` operands).
+fn fused(float: bool, (a, b, c): (f64, f64, f64)) -> f64 {
+    match float {
+        true => f64::from((a as f32).mul_add(b as f32, c as f32)),
+        false => h(a * b + c),
+    }
+}
+
+/// `x y + z w`, each product rounded, then their sum, in `float` where `float`, else `half`.
+fn sum(float: bool, (x, y): (f64, f64), (z, w): (f64, f64)) -> f64 {
+    rounded(float, rounded(float, x * y) + rounded(float, z * w))
+}
+
+/// The states [`other_blends_masks_and_the_blend_color_store_metals_blend`] draws: the blend
+/// (color factors and operation, then alpha's), the write mask, the encoder's blend color, and
+/// the color and alpha lanes' Metal arithmetic (`None` where the mask keeps the lane).
+type State = (
+    [(BlendFactor, BlendFactor, BlendOperation); 2],
+    ColorWriteMask,
+    [f32; 4],
+    Option<Form>,
+    Option<Form>,
+);
+
+/// Other blends, write masks and the blend color, into `BGRA8Unorm`: Metal's arithmetic (EVs
+/// FB8-sw2-m3, FB8-bc1-m3, FB8-sc1-m3 and FB8-ao1-m3, plain Metal on the M3 Max under macOS
+/// 27.0.1) is each color lane's and alpha's form `Blend::unorm8` names; a channel the mask leaves
+/// out keeps its code. Each draw's channels are Metal's where it announces none of [`NOTES`], and
+/// on a device that fetches through the pixel interlock it announces none.
+#[test]
+fn other_blends_masks_and_the_blend_color_store_metals_blend() {
+    use BlendFactor as F;
+    use BlendOperation as O;
+    let states: [State; 4] = [
+        // Source alpha over: the color's source product rounded first, alpha a lerp of the
+        // source alpha from the destination's.
+        (
+            [
+                (F::SourceAlpha, F::OneMinusSourceAlpha, O::Add),
+                (F::SourceAlpha, F::OneMinusSourceAlpha, O::Add),
+            ],
+            ColorWriteMask::ALL,
+            [0.0; 4],
+            Some(|(float, safe), l| {
+                let m = rounded(float, 1.0 - l.sa);
+                match safe {
+                    false => fused(float, (l.d, m, rounded(float, l.s * l.sa))),
+                    true => sum(float, (l.s, l.sa), (l.d, m)),
                 }
-                if noted.is_empty() {
-                    let shown = &wrong[..wrong.len().min(8)];
-                    assert!(
-                        wrong.is_empty(),
-                        "{what}: {} of {TEXELS} texels differ from Metal's, first (index, read, \
-                         Metal's) {shown:?}",
-                        wrong.len()
-                    );
+            }),
+            Some(|(float, safe), l| match safe {
+                false => fused(float, (l.sa, rounded(float, l.sa - l.da), l.da)),
+                true => sum(float, (l.sa, l.sa), (l.da, rounded(float, 1.0 - l.sa))),
+            }),
+        ),
+        // The blend color, one channel past each end: lerps of it under fast math.
+        (
+            [
+                (F::BlendColor, F::OneMinusBlendColor, O::Add),
+                (F::BlendAlpha, F::OneMinusBlendAlpha, O::Add),
+            ],
+            ColorWriteMask::ALL,
+            [0.3, -0.25, 1.5, 0.45],
+            Some(|(float, safe), l| match safe {
+                false => fused(float, (l.c, rounded(float, l.s - l.d), l.d)),
+                true => sum(float, (l.s, l.c), (l.d, rounded(float, 1.0 - l.c))),
+            }),
+            Some(|(float, safe), l| match safe {
+                false => fused(float, (l.ca, rounded(float, l.sa - l.da), l.da)),
+                true => sum(float, (l.sa, l.ca), (l.da, rounded(float, 1.0 - l.ca))),
+            }),
+        ),
+        // Blue alone stored: a lerp of the source alpha a vector does not take.
+        (
+            [
+                (F::OneMinusSourceAlpha, F::SourceAlpha, O::Add),
+                (F::One, F::Zero, O::Add),
+            ],
+            ColorWriteMask::BLUE,
+            [0.0; 4],
+            Some(|(float, safe), l| match safe {
+                false => fused(float, (l.sa, rounded(float, l.d - l.s), l.s)),
+                true => sum(float, (l.s, rounded(float, 1.0 - l.sa)), (l.d, l.sa)),
+            }),
+            None,
+        ),
+        // Alpha alone stored: the color channels' destination factor computes one minus the
+        // destination alpha still, so alpha takes no lerp of it.
+        (
+            [
+                (F::Zero, F::OneMinusDestinationAlpha, O::Add),
+                (F::OneMinusDestinationColor, F::DestinationColor, O::Add),
+            ],
+            ColorWriteMask::ALPHA,
+            [0.0; 4],
+            None,
+            Some(|(float, safe), l| {
+                let m = rounded(float, 1.0 - l.da);
+                match safe {
+                    false => fused(float, (l.sa, m, rounded(float, l.da * l.da))),
+                    true => sum(float, (l.sa, m), (l.da, l.da)),
                 }
+            }),
+        ),
+    ];
+    let kinds = NOTES.map(Degradation::from_precision_note);
+    let (messages, _cache, lane) = lane_with(|options| {
+        options.announce_each = kinds.into_iter().collect();
+    });
+    let device = lane.device.name();
+    let (pf, order) = FORMATS[0];
+    let mut drawn = 0;
+    for fixture in &FIXTURES {
+        let library = library(&lane, fixture.stem);
+        for &(entry, output) in &fixture.cases[..2] {
+            for ([color, alpha], mask, bc, color_form, alpha_form) in states {
+                let mut blended = ColorAttachmentDescriptor::new(pf);
+                blended.blending_enabled = true;
+                (
+                    blended.source_rgb_blend_factor,
+                    blended.destination_rgb_blend_factor,
+                    blended.rgb_blend_operation,
+                ) = color;
+                (
+                    blended.source_alpha_blend_factor,
+                    blended.destination_alpha_blend_factor,
+                    blended.alpha_blend_operation,
+                ) = alpha;
+                blended.write_mask = mask;
+                let Some(state) = pipeline(&lane, (&library, fixture), entry, blended) else {
+                    continue;
+                };
+                let (texels, sources) = data(output);
+                let data = (output, texels.as_slice(), sources.as_slice());
+                let (read, noted) = draw((&lane, &messages), &state, (pf, order), data, bc);
+                let float = output == Output::Float;
+                let read_as = |x: f64| rounded(float, clamp01(x));
+                let mut wrong = Vec::new();
+                for (i, &codes) in texels.iter().enumerate() {
+                    let got = &read[4 * i..4 * i + 4];
+                    let s = returned(output, order, (i, codes), &sources);
+                    let operands = |c: usize| Operands {
+                        s: read_as(s[c]),
+                        sa: read_as(s[3]),
+                        d: rounded(float, f64::from(codes[c]) / 255.0),
+                        da: rounded(float, f64::from(codes[3]) / 255.0),
+                        c: read_as(f64::from(bc[c])),
+                        ca: read_as(f64::from(bc[3])),
+                    };
+                    let want: Vec<u8> = order
+                        .iter()
+                        .map(|&c| {
+                            let form = if c < 3 { color_form } else { alpha_form };
+                            let bit = [
+                                ColorWriteMask::RED,
+                                ColorWriteMask::GREEN,
+                                ColorWriteMask::BLUE,
+                                ColorWriteMask::ALPHA,
+                            ][c];
+                            match form.filter(|_| mask.contains(bit)) {
+                                Some(form) => {
+                                    let v = form((float, fixture.safe), operands(c));
+                                    (clamp01(v) * 255.0 + 0.5).floor() as u8
+                                }
+                                None => codes[c],
+                            }
+                        })
+                        .collect();
+                    if got != want.as_slice() {
+                        wrong.push((i, got.to_vec(), want));
+                    }
+                }
+                let what = format!("{entry} {color:?} {alpha:?} {mask:?} {bc:?}");
+                checked(&lane, (&what, pf), &noted, &wrong);
                 drawn += 1;
             }
         }

@@ -323,9 +323,14 @@ driver's. Each is open work.
 - **A fetched attachment's blend through the pixel interlock (RADV, ANV, NVIDIA, MoltenVK).** No
   Vulkan blend applies to the storage form's write, so the function computes Metal's blend: an
   extended-range or 16-bit float attachment's, and an 8-bit unorm one's (`R8Unorm`, `RG8Unorm`,
-  `RGBA8Unorm`, `BGRA8Unorm`) for premultiplied source-over of a four-lane output storing every
-  channel. Another blend of an 8-bit unorm attachment, a write mask that keeps one of its
-  channels, and a blend into any other format are refused (`FramebufferFetch`, `NotImplemented`).
+  `RGBA8Unorm`, `BGRA8Unorm`) of a four-lane output under any factor, operation, write mask and
+  blend color. Refused (`FramebufferFetch`, `NotImplemented`): a factor of the second source; under
+  fast math, a lerp, common factor or contracted pair into `R8Unorm` or `RG8Unorm`, which Metal
+  sums in forms not measured; and a blend into any other format, `RGB10A2Unorm`, `BGR10A2Unorm`,
+  `RGBA8Snorm`, `RGBA16Unorm`, `RGBA16Snorm`, `RGBA32Float` and the 8-bit `_sRGB` ones among them.
+  A source-over survey on the M3 fits the 8-bit model to the 10-bit unorm and 8-bit snorm formats
+  (with their clamps), and shows the 16-bit norms and `RGBA32Float` blending in `float` even for a
+  `half4` output; their factor sets are not measured.
 - **Format-less storage reads on a device without `shaderStorageImageReadWithoutFormat` (ANV).**
   A fetch through the pixel interlock of a 16-bit packed color attachment (`B5G6R5Unorm`,
   `A1BGR5Unorm`, `ABGR4Unorm`, `BGR5A1Unorm`), which no SPIR-V format names, is refused

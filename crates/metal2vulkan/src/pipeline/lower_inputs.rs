@@ -1183,6 +1183,7 @@ impl FramebufferFetchInputs {
                                 write_mask: crate::lower::fragment::compiled_write_mask(
                                     a.pixel_format,
                                     a.write_mask,
+                                    a.blending_enabled,
                                 ),
                                 replaces: crate::pipeline::color_writes::replaces(&a),
                                 equation: BlendEquation::of(&a),

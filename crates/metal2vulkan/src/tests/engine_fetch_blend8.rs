@@ -15,8 +15,9 @@
 //! RGBA-order twin, the shader exchanging red and blue around the blend), and the guest's whole
 //! pipeline is made there, color 0 a written storage attachment and no color attachment of the
 //! subpass, its stages passing L3. Before the shader computed the
-//! blend, each was refused `NotImplemented(FramebufferFetch)` at color 0. Another blend, and a
-//! write mask that keeps a channel, are refused so still. No GPU is used.
+//! blend, each was refused `NotImplemented(FramebufferFetch)` at color 0. Other blends (the blend
+//! color's among them) and write masks that keep channels compile the same way; a blend that reads
+//! the second source is refused so still. No GPU is used.
 //!
 //! `llvm-as` assembles the fixtures; a missing tool skips visibly.
 
@@ -245,43 +246,141 @@ fn a_blended_eight_bit_unorm_fetch_computes_metals_blend() {
     assert!(anv, "no ANV profile compiled the guest's shape");
 }
 
-/// A blend of an 8-bit unorm attachment other than premultiplied source-over, and the guest's
-/// blend under a write mask that keeps a channel, are not measured: on every committed profile
-/// that orders fetch through the pixel interlock alone each is refused
-/// `NotImplemented(FramebufferFetch)` at color 0, as before.
+/// Other blends and write masks of an 8-bit unorm attachment: on every committed profile that
+/// orders fetch through the pixel interlock alone, each compiles in the storage form with the
+/// blend it computes, rounded without fast math, and announces nothing; one reading the blend
+/// color pushes it as `half` (`PushField::HalfBlendColor`), and its module passes L3.
 #[test]
-fn another_eight_bit_unorm_fetched_blend_stays_refused() {
-    let Some(fast) = assembled("fbl_fetch_blend8") else {
+fn another_eight_bit_unorm_blend_or_mask_computes_metals_blend() {
+    let (Some(fast), Some(safe)) = (
+        assembled("fbl_fetch_blend8"),
+        assembled("fbl_fetch_blend8_safe"),
+    ) else {
         return;
     };
+    use crate::pipeline::sym::PushField;
     use BlendFactor as F;
-    let alpha_over = BlendEquation {
-        source_rgb: F::SourceAlpha,
-        ..OVER
-    };
-    let added = BlendEquation {
-        destination_rgb: F::One,
-        destination_alpha: F::One,
-        ..OVER
-    };
+    use BlendOperation as O;
+    let rgb = ColorWriteMask::RED
+        .union(ColorWriteMask::GREEN)
+        .union(ColorWriteMask::BLUE);
+    // Each blend, its write mask, and whether it reads the blend color.
     let cases = [
-        (alpha_over, ColorWriteMask::ALL),
-        (added, ColorWriteMask::ALL),
         (
-            OVER,
-            ColorWriteMask::RED
-                .union(ColorWriteMask::GREEN)
-                .union(ColorWriteMask::BLUE),
+            BlendEquation {
+                source_rgb: F::SourceAlpha,
+                ..OVER
+            },
+            ColorWriteMask::ALL,
+            false,
         ),
+        (
+            BlendEquation {
+                destination_rgb: F::One,
+                destination_alpha: F::One,
+                ..OVER
+            },
+            ColorWriteMask::ALL,
+            false,
+        ),
+        (
+            BlendEquation {
+                source_rgb: F::BlendColor,
+                destination_rgb: F::OneMinusBlendAlpha,
+                rgb_operation: O::ReverseSubtract,
+                source_alpha: F::DestinationAlpha,
+                destination_alpha: F::OneMinusSourceColor,
+                alpha_operation: O::Subtract,
+            },
+            ColorWriteMask::ALL,
+            true,
+        ),
+        (
+            BlendEquation {
+                rgb_operation: O::Max,
+                alpha_operation: O::Min,
+                ..OVER
+            },
+            ColorWriteMask::ALL,
+            false,
+        ),
+        (OVER, rgb, false),
+        (OVER, ColorWriteMask::BLUE, false),
+        (OVER, ColorWriteMask::ALPHA, false),
+        (
+            BlendEquation {
+                source_rgb: F::OneMinusDestinationAlpha,
+                destination_rgb: F::SourceColor,
+                rgb_operation: O::ReverseSubtract,
+                ..OVER
+            },
+            ColorWriteMask::GREEN.union(ColorWriteMask::ALPHA),
+            false,
+        ),
+    ];
+    let entries = [
+        (&fast, "fbl8_over_loaded", false),
+        (&safe, "fbl8_safe_loaded", true),
     ];
     let mut checked = 0;
     for (stem, p) in committed_profiles().expect("profiles") {
         if !crate::lower::fragment::interlock_orders(&p) {
             continue;
         }
-        for (eq, mask) in cases {
+        for (eq, mask, reads_color) in cases {
             let inputs = state(&p, PixelFormat::BGRA8Unorm, eq, mask);
-            let what = format!("{stem} {eq:?} {mask:?}");
+            for &(bc, entry, rounded) in &entries {
+                let what = format!("{stem} {entry} {eq:?} {mask:?}");
+                let a =
+                    compile_with(bc, entry, &p, &inputs).unwrap_or_else(|e| panic!("{what}: {e}"));
+                assert_eq!(
+                    fetched(&a),
+                    Some((true, Some(eq), rounded)),
+                    "{what}: {:?}",
+                    a.facts
+                );
+                for note in NOTES {
+                    assert!(!a.precision.contains(&note), "{what}: {:?}", a.precision);
+                }
+                let pushes =
+                    |field: PushField| a.interface.push.fields.iter().any(|x| x.field == field);
+                assert_eq!(pushes(PushField::HalfBlendColor), reads_color, "{what}");
+                assert!(!pushes(PushField::BlendColor), "{what}");
+                link_and_validate(&a, &p).unwrap_or_else(|e| panic!("{what}: L3: {e}"));
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 0, "no interlock profile took the storage form");
+}
+
+/// A blend of an 8-bit unorm attachment that reads the second source is not measured: on every
+/// committed profile that orders fetch through the pixel interlock alone it is refused
+/// `NotImplemented(FramebufferFetch)` at color 0.
+#[test]
+fn an_eight_bit_unorm_second_source_blend_stays_refused() {
+    let Some(fast) = assembled("fbl_fetch_blend8") else {
+        return;
+    };
+    use BlendFactor as F;
+    let cases = [
+        BlendEquation {
+            source_rgb: F::Source1Color,
+            ..OVER
+        },
+        BlendEquation {
+            destination_alpha: F::OneMinusSource1Alpha,
+            ..OVER
+        },
+    ];
+    let mut checked = 0;
+    for (stem, p) in committed_profiles().expect("profiles") {
+        if !crate::lower::fragment::interlock_orders(&p) {
+            continue;
+        }
+        for eq in cases {
+            let inputs = state(&p, PixelFormat::BGRA8Unorm, eq, ColorWriteMask::ALL);
+            let what = format!("{stem} {eq:?}");
             match compile_with(&fast, "fbl8_over_loaded", &p, &inputs) {
                 Err(Error::Unsupported(u)) if u.needs == Needs::NotImplemented => {
                     assert_eq!(u.feature, Feature::FramebufferFetch, "{what}");

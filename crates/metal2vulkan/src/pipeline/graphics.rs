@@ -836,8 +836,9 @@ pub struct StorageAttachmentUse {
     /// write mask: empty where it does not write the attachment or the mask covers every channel of
     /// the format, all four where it covers none of them (the write stores nothing), else those of
     /// the format the mask leaves out. One module serves every write mask that keeps some of a
-    /// format's channels: the binder writes these into each draw's push bytes, where the function
-    /// reads them. Nothing for the consumer to do.
+    /// format's channels (a blended 8-bit unorm attachment with alpha: each of alpha alone, one
+    /// color channel, and more): the binder writes these into each draw's push bytes, where the
+    /// function reads them. Nothing for the consumer to do.
     #[cfg_attr(feature = "serde", serde(default))]
     pub kept: vk::ColorComponentFlags,
 }

@@ -2301,7 +2301,8 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   Metal's at the operands' magnitude, 16 at the stored value's under cancellation. Where the output
   is opaque to the blend and its form fits every measured state, the function's blend is Metal's
   and records nothing; so does the blend of a fetched 8-bit unorm attachment it computes there
-  (premultiplied source-over), which Metal reads the output into clamped, folding none of it.
+  (every factor, operation, write mask and blend color it builds), which Metal reads the output
+  into clamped, folding none of it.
 - `metal2vulkan-degrade-device-sampling` (precision). `PrecisionNote::DeviceSampling`: Native device
   sampling: the module hands a sample, gather or comparison to the device's own sampler where a
   device whose sampler is not Metal's would emulate Metal's (`SamplingPolicy::NativeDevice`, the
