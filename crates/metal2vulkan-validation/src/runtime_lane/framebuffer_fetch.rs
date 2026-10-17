@@ -134,6 +134,7 @@
 mod beside_depth;
 mod bgra;
 mod blend16;
+mod blend8;
 mod coverage_chain;
 mod planes;
 mod returned_depth;

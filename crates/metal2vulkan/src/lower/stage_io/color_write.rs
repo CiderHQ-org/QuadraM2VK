@@ -117,7 +117,10 @@ pub(crate) fn plan(cx: &mut SelectCx<'_>, color: u32, f: Form) {
     // A storage write the shader blends into a 16-bit float attachment stores the blend's `half`
     // in every channel, which the device converts exactly, but for a NaN: no conversion of an
     // output variable's bears on it, and its NaN is the storage image's store's ([`storage_nan`]).
-    let shader_blended = crate::lower::fragment::blends_sixteen_in_storage(cx, color);
+    // One the shader blends into an 8-bit unorm attachment stores the code Metal's unorm rule
+    // gives the blend's result, which the shader rounds itself (`fetch::unorm8_blended`).
+    let shader_blended = crate::lower::fragment::blends_in_storage(cx, color);
+    let sixteen_blended = crate::lower::fragment::blends_sixteen_in_storage(cx, color);
     let mut lanes = [None; 4];
     let mut device = false;
     let mut blended = false;
@@ -189,7 +192,7 @@ pub(crate) fn plan(cx: &mut SelectCx<'_>, color: u32, f: Form) {
     if blended {
         cx.precision.insert(PrecisionNote::BlendedWriteRounding);
     }
-    if shader_blended {
+    if sixteen_blended {
         half_nans |= !storage_nan(cx, &mut relied);
     }
     if half_nans {

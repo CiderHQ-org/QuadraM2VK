@@ -320,6 +320,12 @@ driver's. Each is open work.
   512 arms together is refused (`TexelOffset` or `GatherExtended`): a driver's making grows faster
   than the arms (on ANV 512 arms make in 0.63 s, 1536 in 5.9 s). Applying the offset in the shader
   is exact only where the shader filters, so a filtered sample past the bound has no exact form yet.
+- **A fetched attachment's blend through the pixel interlock (RADV, ANV, NVIDIA, MoltenVK).** No
+  Vulkan blend applies to the storage form's write, so the function computes Metal's blend: an
+  extended-range or 16-bit float attachment's, and an 8-bit unorm one's (`R8Unorm`, `RG8Unorm`,
+  `RGBA8Unorm`, `BGRA8Unorm`) for premultiplied source-over of a four-lane output storing every
+  channel. Another blend of an 8-bit unorm attachment, a write mask that keeps one of its
+  channels, and a blend into any other format are refused (`FramebufferFetch`, `NotImplemented`).
 - **Format-less storage reads on a device without `shaderStorageImageReadWithoutFormat` (ANV).**
   A fetch through the pixel interlock of a 16-bit packed color attachment (`B5G6R5Unorm`,
   `A1BGR5Unorm`, `ABGR4Unorm`, `BGR5A1Unorm`), which no SPIR-V format names, is refused

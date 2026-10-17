@@ -966,6 +966,41 @@ impl Blend {
         }
     }
 
+    /// Metal's blend `eq` of a four-lane `half` or `float` output of a module of math `math` into
+    /// an 8-bit unorm attachment of format `pf` (`R8Unorm`, `RG8Unorm`, `RGBA8Unorm`,
+    /// `BGRA8Unorm`) storing the channels `written` of four (a channel the format lacks counts as
+    /// written), computed by [`blend_unorm8`]: the 16-bit float blend's forms in the arithmetic of
+    /// the output's type ([`Blend::half_float`]), of the output clamped to `[0, 1]` and the
+    /// destination's code decoded in that type, the result stored by Metal's unorm write. Modelled
+    /// for premultiplied source-over (`One` over `OneMinusSourceAlpha`, added, for color and
+    /// alpha) storing every channel of the format, whose fused form (fast math) and rounded form
+    /// (without) hold Metal's code in every channel (EV FB8-sw1-m3, plain Metal on the M3 Max
+    /// under macOS 27.0.1, `lower::fragment::fetch`'s module docs); another blend or write mask is
+    /// not built
+    /// (`Feature::FramebufferFetch` `NotImplemented`).
+    pub fn unorm8(
+        eq: &BlendEquation,
+        pf: PixelFormat,
+        written: ColorWriteMask,
+        math: BlendMath,
+    ) -> Result<Blend, Error> {
+        use BlendFactor as F;
+        let over = |s: BlendFactor, d: BlendFactor, op: BlendOperation| {
+            (s, d, op) == (F::One, F::OneMinusSourceAlpha, BlendOperation::Add)
+        };
+        let source_over = over(eq.source_rgb, eq.destination_rgb, eq.rgb_operation)
+            && over(eq.source_alpha, eq.destination_alpha, eq.alpha_operation);
+        let has_alpha = match pf {
+            PixelFormat::R8Unorm | PixelFormat::RG8Unorm => false,
+            PixelFormat::RGBA8Unorm | PixelFormat::BGRA8Unorm => true,
+            _ => return Err(Unsupported::not_implemented(Feature::FramebufferFetch).into()),
+        };
+        if !source_over || written != ColorWriteMask::ALL {
+            return Err(Unsupported::not_implemented(Feature::FramebufferFetch).into());
+        }
+        planned_for(eq, (has_alpha, false, false), written, (false, math))
+    }
+
     /// Whether every class the blend stores takes a form the 16-bit float sweeps fit in every state
     /// ([`Blend::half_float`]): the rounded forms without fast math; under fast math no term, one
     /// term, one fused multiply-add, a minimum or maximum, or a blend constant's difference
@@ -1833,6 +1868,63 @@ pub fn blend_half_float(
         negates_one_minus: b.negates_one_minus,
     };
     lanes(fb, b, &inputs)
+}
+
+/// Metal's blend `b` ([`Blend::unorm8`]) of a four-lane output `s` (a `vec4` of `f32`: a `half4`
+/// output's `half`s, or a `float4` one) over `texel`, the 8-bit unorm attachment's texel as the
+/// storage image reads it (a `vec4` of `f32`, each channel its code over 255; a channel the format
+/// lacks reads 0, alpha 1), in `arith`: a `vec4` of `f32` holding each blended lane, a `half`
+/// (`BlendArith::Half`) or a `float` (`BlendArith::Float`), which the caller stores by Metal's
+/// unorm write (`arith::color_write`'s 8-bit unorm rule). Metal clamps the output to `[0, 1]`
+/// first, a NaN to 0, every lane ([`clamped`]), and reads the destination as its code over 255
+/// correctly rounded to the arithmetic's type ([`unorm8_tile_value`]), the value a fetch reads.
+pub fn blend_unorm8(
+    fb: &mut FunctionBuilder<'_>,
+    b: &Blend,
+    arith: BlendArith,
+    (s, texel): (Value, Value),
+) -> BResult<Value> {
+    let s = clamped(fb, s, (0.0, 1.0))?;
+    let d = unorm8_tile_value(fb, texel, arith)?;
+    let inputs = Inputs {
+        s,
+        d,
+        constant: None,
+        sf: None,
+        math: b.math,
+        s1: None,
+        arith,
+        negates_one_minus: false,
+    };
+    lanes(fb, b, &inputs)
+}
+
+/// Metal's read of each lane of `texel` (a `vec4` of `f32`, an 8-bit unorm texel as the storage
+/// image reads it, `c / 255` for each code `c`, Vulkan's conversion of a normalized fixed-point
+/// value) in `arith`: the code `c` (the lane times 255, rounded to the nearest integer, which any
+/// decode within half a code of `c / 255` gives) over 255, correctly rounded to `float`
+/// ([`div_exact`](crate::lower::arith::exact_division::div_exact)), and to `half` from that for
+/// `BlendArith::Half` (EV FB8-dec1-m3, the M3 Max under macOS 27.0.1: a fetch of every code reads
+/// `h(c / 255)` as a `half4` and `f(c / 255)` as a `float4`; the blend reads the same). Rounding
+/// the `float` rounds the quotient: `c / 255` repeats the byte `c` without end, which keeps its
+/// `half` at least `2^-9` of a `half`'s step from a midpoint, far beyond an `f32` step.
+pub fn unorm8_tile_value(
+    fb: &mut FunctionBuilder<'_>,
+    texel: Value,
+    arith: BlendArith,
+) -> BResult<Value> {
+    let f = floats();
+    let u = crate::lower::arith::narrow::u32_form(f);
+    let ut = ty(fb, u)?;
+    let k255 = fsplat(fb, f, 255.0)?;
+    let scaled = fb.binary(BinOp::FMul, texel, k255)?;
+    let rounded = fb.glsl(GlslOp::RoundEven, &[scaled])?;
+    let code = fb.convert(ConvOp::ConvertFToU, rounded, ut)?;
+    let v = crate::lower::arith::exact_division::div_exact(fb, u, code, 255)?;
+    match arith {
+        BlendArith::Float => Ok(v),
+        BlendArith::Half => f32_to_half(fb, f, v, HalfRounding::NearestEven),
+    }
 }
 
 /// The `vec4` of blend `b`'s lanes over `inputs`: the color class's three, and alpha's, each
