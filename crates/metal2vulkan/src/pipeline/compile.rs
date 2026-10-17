@@ -2215,6 +2215,22 @@ fn compile_kept<K>(
     // Metal's: the module requires that fact.
     let converts = plan.families.arith.quantize == crate::spirv::builder::QuantizeForm::Converted
         && crate::lower::arith::narrow::rounds_by_conversion(&module, m)?;
+    // A `half` rounded through the device's conversion and its widening, each decorated
+    // `NoContraction`, under the float controls that make it Metal's, or read from its bits by the
+    // device's widening, which they make exact but for a NaN's bits: the entry declares them, and
+    // so requires the device's float-controls properties for them, and no fact. A module that
+    // widens so leaves a NaN's bits to the device, as the profile does (`NanMinMaxPolicy::Native`).
+    if plan.families.arith.quantize == crate::spirv::builder::QuantizeForm::Controlled {
+        let widens = crate::lower::arith::narrow::widens_bits(&module, m)?;
+        if widens || crate::lower::arith::narrow::rounds_by_conversion(&module, m)? {
+            let modes = crate::lower::arith::narrow::controlled_modes(p).unwrap_or_default();
+            module.declare_modes(&modes)?;
+        }
+        if widens && !precision.contains(&PrecisionNote::NativeNanEncoding) {
+            precision.push(PrecisionNote::NativeNanEncoding);
+            precision.sort_unstable();
+        }
+    }
     // Native half rounding: a module that rounds through the device's conversion or quantize, or
     // decodes a `half` by the device's widening, where the profile does not take the deviation
     // making it Metal's records the kind, and requires no fact.

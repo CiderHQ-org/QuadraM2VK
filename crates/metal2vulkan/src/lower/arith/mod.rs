@@ -46,9 +46,13 @@
 //! it, or a check or a fused multiply-add routine answers Metal's zero of its sign
 //! ([`ArithPlan::keep_zero_signs`]), and the profile supports it (else
 //! `PrecisionNote::DeviceSignedZeroInfNan`), while denormal flushing and the rounding mode are the
-//! device default (no `DenormPreserve`/`RoundingModeRTE` yet; the rounding mode decides the
-//! inexact `FConvert` narrowings and integer-to-float conversions, which Vulkan leaves to the
-//! device without `shaderRoundingModeRTE`). `sign`,
+//! device default (the rounding mode decides the inexact `FConvert` narrowings and integer-to-float
+//! conversions, which Vulkan leaves to the device without `RoundingModeRTE`), but in an entry that
+//! rounds to `half` under the float controls ([`narrow::controlled_modes`]), which declares
+//! `RoundingModeRTE`, `DenormPreserve` and `SignedZeroInfNanPreserve` for 16 bits and the modes the
+//! device's independence ties to them: `RoundingModeRTE` for 32 bits on a device whose rounding
+//! modes are not independent, Metal's own rounding of `float` arithmetic, and for 64 bits the
+//! rounding and denormals IEEE 754 gives `double`. `sign`,
 //! `fract`, `saturate`, `median3`, and `pow` answer as Metal does at zeros, NaNs, infinities, and
 //! `f32` denormals whatever the device's modes, and the normalized and sRGB `air.unpack`/`air.pack`
 //! conversions are exact integer sequences and Metal's tables.
@@ -966,6 +970,13 @@ pub struct ArithPlan {
     /// (`narrow::round_texel`): where the profile's NaN is the translation's to answer as Metal's
     /// (`NanEncoding::Device`, the policy's `NanMinMaxPolicy::Exact`), decided by [`finish`].
     pub texel_nans: bool,
+    /// Whether a `half`'s NaN bits are left to the device's conversion where the module rounds
+    /// through the conversion under the float controls ([`QuantizeForm::Controlled`]): a `half`
+    /// read from its bits is the device's widening of them (`narrow::from_bits`), and a `half`
+    /// texel takes the rounding's NaN (`narrow::round_texel`). Where the profile's NaN is the
+    /// device's own (`NanEncoding::Native`, the policy's `NanMinMaxPolicy::Native`, the default),
+    /// decided by [`finish`].
+    pub native_half_nans: bool,
     /// Whether Metal's `fmin`, `fmax`, `min3`, `max3`, `clamp` or `saturate` on `float` or `half`
     /// takes the device's `NMin`, `NMax` or `NClamp`, measured to be Metal's
     /// (`DriverDeviation::MetalMinMax`), recorded at selection: the module then requires
@@ -1152,6 +1163,10 @@ pub fn finish(cx: &mut SelectCx<'_>) -> Result<(), Error> {
         narrow::native_rounding(cx.profile, cx.families.arith.quantize).is_some();
     // Where the NaN switch asks for Metal's NaN, a texel's NaN is its own through that rounding.
     cx.families.arith.texel_nans = nan::encoding(cx.profile) == NanEncoding::Device;
+    // Under the float controls a `half`'s NaN is the device's conversion's where the profile
+    // leaves NaN bits to the device.
+    cx.families.arith.native_half_nans = cx.families.arith.quantize == QuantizeForm::Controlled
+        && nan::encoding(cx.profile) == NanEncoding::Native;
     cx.families.arith.mask = if cx
         .profile
         .fields()

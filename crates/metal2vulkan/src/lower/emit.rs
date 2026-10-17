@@ -107,6 +107,7 @@ fn declare(mb: &mut ModuleBuilder, plan: &Plan) -> BResult<Declared> {
     mb.set_quantize_form(plan.families.arith.quantize);
     mb.set_native_half(plan.families.arith.native_half);
     mb.set_texel_nans(plan.families.arith.texel_nans);
+    mb.set_native_half_nans(plan.families.arith.native_half_nans);
     let mut d = Declared::default();
     let modes = &mut d.modes;
     d.families.access = access::declare(mb, plan, modes)?;

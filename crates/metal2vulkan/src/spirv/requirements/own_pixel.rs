@@ -488,6 +488,7 @@ impl<'m> Trace<'m> {
                 let Some(Inst::Convert {
                     op: ConvOp::Bitcast,
                     a,
+                    ..
                 }) = self.def(*bits)
                 else {
                     return Ok(false);
@@ -645,6 +646,7 @@ impl<'m> Trace<'m> {
             Inst::Convert {
                 op: ConvOp::ConvertFToU,
                 a,
+                ..
             } => match self.def(*a) {
                 Some(Inst::Glsl {
                     op: GlslOp::NClamp,
@@ -668,6 +670,7 @@ impl<'m> Trace<'m> {
             Inst::Convert {
                 op: ConvOp::UConvert | ConvOp::SConvert | ConvOp::Bitcast,
                 a,
+                ..
             } => {
                 // Integers to integers of at least 16 bits a lane, one lane for one: a pixel
                 // index is below 2^15 (Vulkan's largest framebuffer is far smaller).

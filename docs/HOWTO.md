@@ -41,6 +41,12 @@ walks the flow in the order a consumer meets it:
 Every `air.simd_*` operation keeps Metal's 32-lane simdgroup; there is no option to use the
 driver's subgroup width instead.
 
+A `half` computed in `float` rounds through the device's conversion to 16 bits and back, Metal's
+`half(float)` under the float controls the entry declares, where the driver keeps that pair (ANV,
+RADV). NVIDIA's driver (615.71.09) folds it (`DriverWorkaround::HalfConversionPairFolded`), so
+there a `half` rounds natively by default and in integer arithmetic under
+`HalfRoundingPolicy::Exact`.
+
 To read AIR without translating it (list a metallib's functions, decode a module into typed IR,
 read its entry points' bindings, canonicalize an entry under function-constant values), depend on
 [`metal2vulkan-air`](../crates/metal2vulkan-air). Use the same version as `metal2vulkan`, which

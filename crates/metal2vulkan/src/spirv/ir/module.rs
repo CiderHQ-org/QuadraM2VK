@@ -219,8 +219,15 @@ pub enum Inst {
         offset: Value,
         count: Value,
     },
-    /// A conversion; the target type is the result's type.
-    Convert { op: ConvOp, a: Value },
+    /// A conversion; the target type is the result's type. `contract` is
+    /// [`Contraction::Forbidden`] only on an `FConvert`: a conversion decorated `NoContraction`,
+    /// which the device may not remove or merge with another operation (without it Vulkan assumes
+    /// `AllowTransform`, under which `f32 -> f16 -> f32` may become `f32` alone).
+    Convert {
+        op: ConvOp,
+        a: Value,
+        contract: Contraction,
+    },
     // ---- Composites (builder/ops/composite.rs) ----
     /// `OpCompositeConstruct`.
     CompositeConstruct { parts: Box<[Value]> },
@@ -1287,6 +1294,16 @@ pub enum ExecMode {
     },
     DerivativeGroupLinear,
     SignedZeroInfNanPreserve {
+        width: u8,
+    },
+    /// `DenormPreserve` (`SPV_KHR_float_controls`): denormal results and operands of this float
+    /// width are kept.
+    DenormPreserve {
+        width: u8,
+    },
+    /// `RoundingModeRTE` (`SPV_KHR_float_controls`): float operations and conversions of this
+    /// width round to nearest even.
+    RoundingModeRte {
         width: u8,
     },
     SubgroupUniformControlFlow,

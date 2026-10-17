@@ -4,18 +4,22 @@
 //! every input of EV REF-fx-probe-3 as Metal did (an M4, macOS 27.0.1, libraries compiled offline;
 //! every offline build, with and without fast math and `air.compile.denorms_disable`, answered
 //! alike). The tables are those answers: the input's bits, `frexp`'s mantissa bits and exponent,
-//! and `ilogb`.
+//! and `ilogb`. Under the default NaN policy (`NanMinMaxPolicy::Native`) a module that records
+//! `PrecisionNote::NativeNanEncoding` answers a `half` NaN's mantissa with a NaN whose bits are the
+//! device's (on ANV and RADV a `half` read from its bits is the device's widening, which the
+//! interpreter answers with the positive quiet NaN); `NanMinMaxPolicy::Exact` answers Metal's bits.
 //!
 //! Each kernel loops over its input buffer (`[[buffer(0)]]`, one word or halfword an element) in
 //! groups of its lanes, and writes three words an element to `[[buffer(1)]]`: the mantissa's
 //! bits (zero-extended), the exponent, and `ilogb` (mode 0 in the scalar kernels, 3 in the vector
 //! ones). `llvm-as` assembles the module; without it the tests skip visibly.
 
-use crate::device::DevicePolicy;
+use crate::device::{DevicePolicy, DeviceProfile, NanMinMaxPolicy};
 use crate::pipeline::sym::{ResourceKind, ResourceSlot, Stage};
 use crate::pipeline::testing::{
     compile, link_and_validate, llvm_assemble, profile, typed_module, AssembleError,
 };
+use crate::pipeline::PrecisionNote;
 use crate::spirv::interp::{run, Buffer, Config, Resources};
 
 const PROFILES: [&str; 4] = [
@@ -369,10 +373,9 @@ fn assemble() -> Option<Vec<u8>> {
     }
 }
 
-/// The words kernel `k` writes on `stem`, run on the interpreter.
-fn interpret(bc: &[u8], k: &Kernel, stem: &str) -> Vec<u32> {
-    let p = profile(stem, DevicePolicy::default()).expect("profile");
-    let (plan, m) = typed_module(bc, k.name, &p).unwrap_or_else(|e| panic!("{}: {e}", k.name));
+/// The words kernel `k` writes on profile `p` (`what` names it), run on the interpreter.
+fn interpret(bc: &[u8], k: &Kernel, p: &DeviceProfile, what: &str) -> Vec<u32> {
+    let (plan, m) = typed_module(bc, k.name, p).unwrap_or_else(|e| panic!("{what}: {e}"));
     let inputs = k.inputs();
     let input: Vec<u8> = if k.half {
         inputs
@@ -405,39 +408,61 @@ fn interpret(bc: &[u8], k: &Kernel, stem: &str) -> Vec<u32> {
         push: vec![0; plan.push.push_range.map_or(0, |(_, end)| end as usize)],
         spec: Default::default(),
     };
-    let out = run(&m, &Config::default(), res)
-        .unwrap_or_else(|e| panic!("{} on {stem}: interpreter: {e}", k.name));
+    let out =
+        run(&m, &Config::default(), res).unwrap_or_else(|e| panic!("{what}: interpreter: {e}"));
     out.buffers[1]
         .chunks(4)
         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
 }
 
-/// Every kernel compiles, links and passes L3 on every profile, and answers every measured input as
-/// Metal did on the interpreter: `float` denormals flushed (`(+0, 0)`, `INT_MIN`), `half` denormals
-/// normalized, zeros `(+0, 0)` and `INT_MIN` whatever their sign, infinities and NaNs returned with
-/// their bits and exponent 0, `ilogb` `INT_MAX` for an infinity and `INT_MIN` for a NaN, lane by
-/// lane.
+/// Whether `bits` (zero-extended) are a `half` NaN's.
+fn half_nan(bits: u32) -> bool {
+    bits <= 0xffff && bits & 0x7c00 == 0x7c00 && bits & 0x3ff != 0
+}
+
+/// Every kernel compiles, links and passes L3 on every profile under either NaN policy, and answers
+/// every measured input as Metal did on the interpreter: `float` denormals flushed (`(+0, 0)`,
+/// `INT_MIN`), `half` denormals normalized, zeros `(+0, 0)` and `INT_MIN` whatever their sign,
+/// infinities and NaNs returned with their bits and exponent 0, `ilogb` `INT_MAX` for an infinity
+/// and `INT_MIN` for a NaN, lane by lane. The one exception: by default
+/// (`NanMinMaxPolicy::Native`) a module that records `NativeNanEncoding` answers a `half` NaN's
+/// mantissa with a NaN of the device's bits; under `NanMinMaxPolicy::Exact` with Metal's.
 #[test]
 fn frexp_and_ilogb_answer_as_metals_routines() {
     let Some(bc) = assemble() else {
         return;
     };
+    let exact = DevicePolicy {
+        nan_and_min_max: NanMinMaxPolicy::Exact,
+        ..DevicePolicy::default()
+    };
     for stem in PROFILES {
-        let p = profile(stem, DevicePolicy::default()).expect("profile");
-        for k in &KERNELS {
-            let what = format!("{} on {stem}", k.name);
-            let a = compile(&bc, k.name, &p).unwrap_or_else(|e| panic!("{what}: {e:?}"));
-            link_and_validate(&a, &p).unwrap_or_else(|e| panic!("{what}: L3: {e}"));
-            let got = interpret(&bc, k, stem);
-            for (i, &(x, mantissa, exponent, ilogb)) in k.inputs().iter().enumerate() {
-                let want = [mantissa, exponent as u32, ilogb as u32];
-                assert_eq!(
-                    got[3 * i..3 * i + 3],
-                    want,
-                    "{what}: x = {x:#x}: got {:#x?}",
-                    &got[3 * i..3 * i + 3]
+        for policy in [DevicePolicy::default(), exact] {
+            let p = profile(stem, policy).expect("profile");
+            for k in &KERNELS {
+                let what = format!("{} on {stem}, {:?}", k.name, policy.nan_and_min_max);
+                let a = compile(&bc, k.name, &p).unwrap_or_else(|e| panic!("{what}: {e:?}"));
+                link_and_validate(&a, &p).unwrap_or_else(|e| panic!("{what}: L3: {e}"));
+                let device_nans = a.precision.contains(&PrecisionNote::NativeNanEncoding);
+                assert!(
+                    !device_nans || policy.nan_and_min_max == NanMinMaxPolicy::Native,
+                    "{what}: {:?}",
+                    a.precision
                 );
+                let got = interpret(&bc, k, &p, &what);
+                for (i, &(x, mantissa, exponent, ilogb)) in k.inputs().iter().enumerate() {
+                    let got = &got[3 * i..3 * i + 3];
+                    let want = [mantissa, exponent as u32, ilogb as u32];
+                    if k.half && device_nans && half_nan(x) {
+                        assert!(
+                            half_nan(got[0]) && got[1..] == want[1..],
+                            "{what}: x = {x:#x}: got {got:#x?}"
+                        );
+                        continue;
+                    }
+                    assert_eq!(got, want, "{what}: x = {x:#x}: got {got:#x?}");
+                }
             }
         }
     }

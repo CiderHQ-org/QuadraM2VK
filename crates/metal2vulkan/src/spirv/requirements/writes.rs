@@ -226,6 +226,7 @@ impl<'m> Status<'m> {
                 Some(Inst::Convert {
                     op: ConvOp::ConvertUToPtr,
                     a,
+                    ..
                 }) => *a,
                 Some(Inst::Binary {
                     op: BinOp::IAdd,

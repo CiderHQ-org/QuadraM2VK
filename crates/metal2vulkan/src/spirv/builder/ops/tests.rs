@@ -7,11 +7,11 @@ use crate::spirv::builder::{FunctionBuilder, ModuleBuilder};
 use crate::spirv::error::{BuildError, EntryRule, ImageRule, OperandRule};
 use crate::spirv::ids::{TypeId, Value};
 use crate::spirv::ir::{
-    natural_layout, AtomicOp, BinOp, ConstBits, Constant, ConvOp, DerivOp, Dim, ExecMode,
-    ExecModel, GlslOp, GroupArith, ImageOperandKind as K, ImageOperands, ImageQuery, ImageType,
-    ImageUsage, Inst, IoDir, LayoutRule, MemAccess, MemberLayout, MemoryOrder, ModelNeed,
-    QuadDirection, Scope, Semantics, ShuffleOp, StorageClass, StructLayout, TexelMemory, Type,
-    UnOp,
+    natural_layout, AtomicOp, BinOp, ConstBits, Constant, Contraction, ConvOp, DerivOp, Dim,
+    ExecMode, ExecModel, GlslOp, GroupArith, ImageOperandKind as K, ImageOperands, ImageQuery,
+    ImageType, ImageUsage, Inst, IoDir, LayoutRule, MemAccess, MemberLayout, MemoryOrder,
+    ModelNeed, QuadDirection, Scope, Semantics, ShuffleOp, StorageClass, StructLayout, TexelMemory,
+    Type, UnOp,
 };
 
 use crate::spv::{ImageFormat, Op};
@@ -795,7 +795,8 @@ fn device_places_are_block_members_at_offset_zero() {
                 def_of(f, base),
                 Inst::Convert {
                     op: ConvOp::ConvertUToPtr,
-                    a: a64
+                    a: a64,
+                    contract: Contraction::Allowed,
                 }
             );
             let block = block_of(f, pointee, rule);

@@ -251,3 +251,55 @@ fn a_texel_keeps_its_nan_under_native_half_rounding_where_the_nan_switch_asks() 
         assert_eq!(compares[1], compares[0] + 1, "{q:?}");
     }
 }
+
+/// Under the float controls (`QuantizeForm::Controlled`), where the profile leaves a NaN's bits to
+/// the device (`ModuleBuilder::native_half_nans`, `NanMinMaxPolicy::Native`), a texel's `half` is
+/// the conversion's own rounding: every half-float texel and every wider value but a NaN reads as
+/// with the keep, to nearest even with half subnormals kept, and a NaN stays a NaN, without the
+/// keep's unsigned compare of the texel's bits. Without the flag (the NaN switch's
+/// `NanMinMaxPolicy::Exact`) the keep stands, and every half bit pattern reads back as itself.
+#[test]
+fn a_texel_under_the_float_controls_takes_the_conversions_nan_by_default() {
+    use crate::spirv::builder::QuantizeForm;
+    let halves: Vec<Case> = (0..=0xFFFFu16).map(|h| vec![vec![widened(h)]]).collect();
+    let mut cases = halves.clone();
+    cases.extend(half_probe_bits().into_iter().map(|b| vec![vec![b]]));
+    let mut compares = [0usize; 2];
+    for native in [false, true] {
+        let what = format!("Controlled, NaN bits the device's {native}");
+        let body = move |fb: &mut FunctionBuilder<'_>, x: &[Value]| -> BResult<Value> {
+            fb.module().set_quantize_form(QuantizeForm::Controlled);
+            fb.module().set_native_half_nans(native);
+            texel(1)(fb, x)
+        };
+        let m = kernel_with(&[float(32)], half(), &body, true, false)
+            .unwrap_or_else(|e| panic!("{what}: build: {e:?}"));
+        compares[usize::from(native)] = unsigned_compares(&m);
+        check_accept(
+            &what,
+            &[float(32)],
+            half(),
+            &body,
+            &cases,
+            &|c| {
+                Some(vec![u64::from(f64_to_f16(f64::from(f32::from_bits(
+                    arg(c, 0) as u32,
+                ))))])
+            },
+            &|g, w| g == w || (is_nan(half(), g) && is_nan(half(), w)),
+        );
+        if !native {
+            check_accept(
+                &format!("{what}, every half"),
+                &[float(32)],
+                half(),
+                &body,
+                &halves,
+                &|c| Some(vec![want(arg(c, 0))]),
+                &|g, w| g == w,
+            );
+        }
+    }
+    // The keep's one test of the texel's bits, left out where the NaN bits are the device's.
+    assert_eq!(compares[0], compares[1] + 1, "{compares:?}");
+}

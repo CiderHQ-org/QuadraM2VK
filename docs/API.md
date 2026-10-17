@@ -2343,8 +2343,12 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   Native half rounding (a conversion): the module rounds a `half` result it computes in `float` (a
   `half` operation's, a function's, a conversion from `float`'s, a texel's) by the device's
   conversion of the `float` to 16 bits and its widening, not by the translation's integer rounding,
-  on a device with `shaderFloat16` whose conversion is not measured to be Metal's `half(float)`
-  (every driver but MoltenVK on an Apple GPU), under `HalfRoundingPolicy::Native`.
+  on a device with `shaderFloat16` whose conversion is neither measured to be Metal's `half(float)`
+  (MoltenVK on an Apple GPU) nor made Metal's by its float controls (`RoundingModeRTE`,
+  `DenormPreserve` and `SignedZeroInfNanPreserve` for 16 bits: ANV and RADV round through the
+  conversion under them, exactly, with no note), under `HalfRoundingPolicy::Native`: NVIDIA, whose
+  driver folds the conversion's round trip even under those controls
+  (`DriverWorkaround::HalfConversionPairFolded`), lavapipe, and any device without them.
 - `metal2vulkan-degrade-native-half-quantize` (precision). `PrecisionNote::NativeHalfQuantize`:
   Native half rounding (a quantize): the module rounds a `half` result it computes in `float` by the
   device's `OpQuantizeToF16`, a result the quantize flushes to zero rounded by the translation to
@@ -2353,7 +2357,9 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
 - `metal2vulkan-degrade-native-nan-encoding` (precision). `PrecisionNote::NativeNanEncoding`: Native
   device maths: a `float` or `half` operation's NaN result is the device's, its sign and payload
   unselected, on a device whose arithmetic is not measured to answer Metal's canonical NaN, under
-  `NanMinMaxPolicy::Native`.
+  `NanMinMaxPolicy::Native`. Also recorded where a `half` read from its bits is the device's
+  widening under the float controls (ANV, RADV): a NaN's bits the device's, where Metal widens
+  every `half` NaN to `0x7fc00000`.
 - `metal2vulkan-degrade-native-min-max` (precision). `PrecisionNote::NativeMinMax`: Native device
   maths: Metal's `fmin`, `fmax`, `min3`, `max3`, `clamp` or `saturate` (its `clamp(x, +0, 1)`) on
   `float` or `half` is the device's `GLSL.std.450` `NMin`, `NMax` or `NClamp`, not the translation's

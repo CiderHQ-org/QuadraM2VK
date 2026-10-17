@@ -693,7 +693,9 @@ pub enum PrecisionNote {
     /// the functions that select Metal's NaN themselves, nor by Metal's precise and fast `float`
     /// divisions. Also recorded by every read, sample, gather, and pixel fetch of a `half` texel:
     /// Metal hands back the texel's own NaN, sign and payload, and Vulkan states no encoding for a
-    /// 16-bit float texel's decode (MoltenVK answers the canonical NaN for every one). Also
+    /// 16-bit float texel's decode (MoltenVK answers the canonical NaN for every one); on a device
+    /// that rounds a `half` through its conversion under the float controls (ANV, RADV), the NaN
+    /// that conversion makes of the device's decode, by default (`NanMinMaxPolicy::Native`). Also
     /// recorded by a `half` texel's write to a storage texture that may hold a float format: Metal
     /// stores a 16-bit float texel's NaN as the half's own bits and a 32-bit one's as `0x7fc00000`,
     /// and the device converts the half widened. Also recorded by a 16-bit float attachment's blend
@@ -1547,17 +1549,20 @@ pub enum PrecisionNote {
     /// `float` (a `half` operation's, a function's, a conversion from `float`'s, a texel's) by
     /// the device's conversion of the `float` to 16 bits and its widening (`OpFConvert` of the
     /// value itself, with no barrier), not by the translation's integer rounding, on a device with
-    /// `shaderFloat16` whose conversion is not measured to be Metal's `half(float)` (every driver
-    /// but MoltenVK on an Apple GPU), under `HalfRoundingPolicy::Native` (the default). Vulkan
-    /// leaves the conversion's rounding mode and its 16-bit denormals to the device. The recorded
+    /// `shaderFloat16` whose conversion is neither measured to be Metal's `half(float)` (MoltenVK
+    /// on an Apple GPU) nor made Metal's by its float controls (`RoundingModeRTE`,
+    /// `DenormPreserve` and `SignedZeroInfNanPreserve` for 16 bits, under which ANV and RADV
+    /// round through the conversion exactly and record no note), under
+    /// `HalfRoundingPolicy::Native` (the default): NVIDIA, whose driver folds the conversion's
+    /// round trip even under those controls (`DriverWorkaround::HalfConversionPairFolded`),
+    /// lavapipe, and any device without them. Without them Vulkan leaves the conversion's
+    /// rounding mode and its 16-bit denormals to the device. The recorded
     /// bound, against Metal's `half(float)` (to nearest even on the half grid, half denormals kept,
     /// infinity from 65520 up, `0x7E00` for a NaN):
     /// - a finite result within one unit in the last place of the `half`: NVIDIA's 615.71.09
     ///   rounds to nearest even on the RTX 5080 Laptop GPU (every `float` pattern, loaded and
     ///   computed, EV `NAN2-hcv-nv5080`) and toward zero on the RTX 3090 (EV `NAN2-hcv-nv3090`);
-    ///   lavapipe (Mesa 26.0.8) a loaded value toward zero (EV `NAN2-hcv-lvpx86`); RADV and ANV
-    ///   take their quantize, measured to be Metal's, so they record no such note (EVs
-    ///   `NKP-lane8-radv`, `NKP-lane8-anv`);
+    ///   lavapipe (Mesa 26.0.8) a loaded value toward zero (EV `NAN2-hcv-lvpx86`);
     /// - or no rounding at all: NVIDIA's 615.71.09 on the RTX 3090 drops the conversion pair, with
     ///   or without a `NoContraction` barrier (EVs `NKP-lane6-nv3090`, `NKP-lane4-nv3090`);
     ///   lavapipe drops it in arithmetic on Mesa 26.2.4 with LLVM 23.1.1 (EV `NKP-lane10-hostlvp`)
@@ -1602,7 +1607,11 @@ pub enum PrecisionNote {
     /// device's own (llvmpipe: `0xffc00000`), where Metal answers its canonical `0x7fc00000`
     /// (`0x7e00` as `half`), an operand's bits (`round`, `ldexp`, `fast::tan`), or the canonical
     /// NaN with an operand's sign (`asin`, `atan`, `asinh`, `atanh`). Every non-NaN result is as
-    /// without it. Validation derives no tolerance from it.
+    /// without it. Also recorded by a module that reads a `half` from its bits (a load, a
+    /// reinterpretation, a texel's bits) by the device's widening under the float controls its
+    /// `half` rounding declares (ANV, RADV): every `half` but a NaN widens to its value, and a NaN
+    /// to a NaN whose bits are the device's, where Metal widens every `half` NaN to `0x7fc00000`; a
+    /// `half` stored back unchanged keeps its bits. Validation derives no tolerance from it.
     NativeNanEncoding,
     /// Native device maths: Metal's `fmin`, `fmax`, `min3`, `max3`, `clamp` or `saturate` (its
     /// `clamp(x, +0, 1)`) on `float` or `half` is the device's `GLSL.std.450` `NMin`, `NMax` or

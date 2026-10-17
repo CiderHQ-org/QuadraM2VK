@@ -1874,12 +1874,12 @@ pub(crate) fn device_texels(cx: &SelectCx<'_>, sampled: bool) -> bool {
     !metal && (policy || (sampled && cx.profile.device_samples()))
 }
 
-/// The families the module's `half` routine tells apart (`half::HalfFamilies`): on a device
-/// whose texel is Metal's `float` result of the access (`VkProperty::MetalSampler`) and whose
-/// rounding to nearest even is Metal's (`QuantizeForm::Device` and `Converted`), only those
-/// whose `half` is not that texel rounded to nearest even
-/// ([`half::HalfFamilies::MetalSampler`]); elsewhere every measured one. A function of the
-/// profile alone, so every access of a function agrees.
+/// The families the module's `half` routine tells apart (`half::HalfFamilies`): on a device whose
+/// texel is Metal's `float` result of the access (`VkProperty::MetalSampler`) and whose rounding to
+/// nearest even is Metal's (`QuantizeForm::Device`, `Converted` and `Controlled`), only those whose
+/// `half` is not that texel rounded to nearest even ([`half::HalfFamilies::MetalSampler`]);
+/// elsewhere every measured one. A function of the profile alone, so every access of a function
+/// agrees.
 pub(crate) fn half_families(cx: &SelectCx<'_>) -> half::HalfFamilies {
     use crate::spirv::builder::QuantizeForm;
     let metal = cx
@@ -1890,7 +1890,7 @@ pub(crate) fn half_families(cx: &SelectCx<'_>) -> half::HalfFamilies {
         .contains(&crate::device::requirements::VkProperty::MetalSampler);
     let rounds = matches!(
         crate::lower::arith::narrow::quantize_form(cx.profile),
-        QuantizeForm::Device | QuantizeForm::Converted
+        QuantizeForm::Device | QuantizeForm::Converted | QuantizeForm::Controlled
     );
     match metal && rounds {
         true => half::HalfFamilies::MetalSampler,

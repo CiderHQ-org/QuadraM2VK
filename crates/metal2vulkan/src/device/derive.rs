@@ -502,10 +502,14 @@ fn by_identity(desc: &DeviceDescription) -> Vec<DriverWorkaround> {
         Some(vk::DriverId::MESA_LLVMPIPE) => {
             vec![DriverWorkaround::ClippedTrianglesSplitPixelFragments]
         }
-        Some(vk::DriverId::NVIDIA_PROPRIETARY)
-            if super::NVIDIA_AMPERE_GA10X.contains(&desc.device_id) =>
-        {
-            vec![DriverWorkaround::NarrowMaskAfterSignedClamp]
+        // A `half` round trip folded on every GPU it drives, and on the 3090's generation a
+        // narrow integer's mask dropped.
+        Some(vk::DriverId::NVIDIA_PROPRIETARY) => {
+            let mut found = vec![DriverWorkaround::HalfConversionPairFolded];
+            if super::NVIDIA_AMPERE_GA10X.contains(&desc.device_id) {
+                found.push(DriverWorkaround::NarrowMaskAfterSignedClamp);
+            }
+            found
         }
         // A uniform buffer's reads at different addresses, and a register allocator that faults
         // compiling a module past a word bound, on every GPU it drives.

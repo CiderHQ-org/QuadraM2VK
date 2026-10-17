@@ -289,8 +289,9 @@ fn only_the_entry_reads_the_coverage_of_a_looped_body() {
 /// requires `VkProperty::MetalHalfFma`; on macOS it compiles as MoltenVK's MSL. Every other
 /// committed profile takes native device maths (the default): the device's `float` `Fma` rounded to
 /// `half`, inline too, under `PrecisionNote::NativeFma`; it holds a 16-bit float only where it
-/// rounds a `half` through the device's measured conversion (`QuantizeForm::Converted`). Under
-/// `FloatMathsPolicy::Exact` it calls the `half` routine.
+/// rounds a `half` through the device's conversion, measured (`QuantizeForm::Converted`) or under
+/// the float controls (`QuantizeForm::Controlled`: ANV and RADV). Under `FloatMathsPolicy::Exact`
+/// it calls the `half` routine.
 #[test]
 fn a_half_fused_multiply_add_is_inline_on_moltenvk() {
     let Some(lib) = library("fmx_fma_precise") else {
@@ -320,8 +321,11 @@ fn a_half_fused_multiply_add_is_inline_on_moltenvk() {
             .properties
             .contains(&VkProperty::MetalHalfFma);
         let moltenvk = is_moltenvk_capture(&stem);
-        let converts = crate::lower::arith::narrow::quantize_form(dev.profile())
-            == crate::spirv::builder::QuantizeForm::Converted;
+        let converts = matches!(
+            crate::lower::arith::narrow::quantize_form(dev.profile()),
+            crate::spirv::builder::QuantizeForm::Converted
+                | crate::spirv::builder::QuantizeForm::Controlled
+        );
         assert_eq!((requires, f16), (moltenvk, moltenvk || converts), "{what}");
         assert_eq!(functions, 1, "{what}: only the entry");
         let native = p

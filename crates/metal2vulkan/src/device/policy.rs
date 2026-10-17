@@ -277,7 +277,10 @@ pub enum TexelConversionPolicy {
 /// GPUs" of 2026-10-11, which the device's conversion may do besides its rounding, native by
 /// default). Where either is measured to be Metal's (`DriverDeviation::MetalHalfConversion`,
 /// MoltenVK on an Apple GPU; `DriverDeviation::MetalHalfQuantize`, MoltenVK, RADV and ANV where
-/// measured) the module rounds through it under either policy.
+/// measured), or the device's float controls make the conversion Metal's by the Vulkan spec
+/// (`shaderFloat16` with `RoundingModeRTE`, `DenormPreserve` and `SignedZeroInfNanPreserve` for
+/// 16 bits, on a driver that keeps the conversion's round trip: ANV and RADV, which take it before
+/// a measured quantize), the module rounds through it under either policy.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -313,16 +316,21 @@ pub enum HalfRoundingPolicy {
 pub enum NanMinMaxPolicy {
     /// The device's own (the default): every NaN Metal answers is the device's (its sign and
     /// payload; no select of Metal's bits), and those functions are the device's `NMin`, `NMax`
-    /// and `NClamp`. Such a module records
+    /// and `NClamp`. On a device that rounds a `half` through its conversion under the float
+    /// controls (ANV, RADV), a `half` read from its bits is the device's widening of them, and a
+    /// `half` texel takes that conversion's NaN. Such a module records
     /// [`PrecisionNote::NativeNanEncoding`](crate::pipeline::PrecisionNote::NativeNanEncoding)
     /// or [`NativeMinMax`](crate::pipeline::PrecisionNote::NativeMinMax), whose docs state the
     /// bound.
     #[default]
     Native,
     /// Metal's: the translation selects Metal's NaN where the device may answer another, and
-    /// Metal's operand where the device's instructions may pick another. A `half` texel read,
-    /// sampled or gathered keeps the NaN the device decoded through native half rounding too
-    /// (`HalfRoundingPolicy::Native`), where the default takes the rounding's.
+    /// Metal's operand where the device's instructions may pick another; a `half` widened to
+    /// `float` answers `0x7fc00000` for every NaN, as Metal does. A `half` texel read, sampled or
+    /// gathered keeps the NaN the device decoded through native half rounding too
+    /// (`HalfRoundingPolicy::Native`) and through the conversion under the float controls, and a
+    /// `half` read from its bits is decoded in integer arithmetic where the default takes the
+    /// device's widening (a `half` stored back unchanged keeps its bits under either).
     Exact,
 }
 

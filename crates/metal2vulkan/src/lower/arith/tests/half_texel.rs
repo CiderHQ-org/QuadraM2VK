@@ -14,10 +14,11 @@ use crate::metal::PixelFormat as P;
 use crate::spirv::builder::QuantizeForm;
 
 /// The module roundings the routine is built under.
-const FORMS: [QuantizeForm; 3] = [
+const FORMS: [QuantizeForm; 4] = [
     QuantizeForm::Integer,
     QuantizeForm::Device,
     QuantizeForm::Converted,
+    QuantizeForm::Controlled,
 ];
 
 fn v4() -> Form {
@@ -600,7 +601,7 @@ fn the_half_texel_routine_words_bound_its_emission() {
         }) - without;
         match q {
             QuantizeForm::Integer => assert_eq!(metal, defined, "{q:?}"),
-            QuantizeForm::Device | QuantizeForm::Converted => assert!(
+            QuantizeForm::Device | QuantizeForm::Converted | QuantizeForm::Controlled => assert!(
                 metal < defined,
                 "{q:?}: the Metal sampler's routine is {metal} words, every family's {defined}"
             ),
@@ -912,7 +913,11 @@ fn the_metal_sampler_routine_answers_as_every_family_on_metal_s_texels() {
         (HalfForm::Sample, TexelLanes::Texel),
         (HalfForm::Sample, TexelLanes::Filtered),
     ];
-    for q in [QuantizeForm::Device, QuantizeForm::Converted] {
+    for q in [
+        QuantizeForm::Device,
+        QuantizeForm::Converted,
+        QuantizeForm::Controlled,
+    ] {
         for (form, lanes) in forms {
             let build = |families| {
                 kernel_with(
@@ -1057,7 +1062,11 @@ fn grid16_forms_agree(part: usize, of: usize) {
             .map(|t| vec![t.to_vec(), vec![u64::from(f.class)]])
             .collect();
         let cases = part_of(cases, part, of);
-        for q in [QuantizeForm::Device, QuantizeForm::Converted] {
+        for q in [
+            QuantizeForm::Device,
+            QuantizeForm::Converted,
+            QuantizeForm::Controlled,
+        ] {
             for (form, lanes) in forms {
                 let build = |families, native: bool| {
                     let body = body_families(form, lanes, q, families);

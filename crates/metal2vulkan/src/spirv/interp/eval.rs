@@ -146,7 +146,7 @@ pub(super) fn exec(p: &Prog<'_>, l: &mut Lane, sh: &mut Shared, node: &InstNode)
                 })
             })?
         }
-        Inst::Convert { op, a } => convert(p, *op, *a, &*l.get_ref(p, *a)?, res_ty()?)?,
+        Inst::Convert { op, a, .. } => convert(p, *op, *a, &*l.get_ref(p, *a)?, res_ty()?)?,
         Inst::CompositeConstruct { parts } => {
             let ty = res_ty()?;
             if matches!(t.get(ty)?, Type::Vector { .. }) {

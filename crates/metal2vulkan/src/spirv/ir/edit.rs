@@ -8,7 +8,8 @@
 use crate::spirv::error::{BResult, BuildError, Dangling, OperandRule};
 use crate::spirv::ids::{BlockId, ConstId, FuncId, TypeId, Value, VarId};
 use crate::spirv::ir::{
-    ConstKind, Decl, Inst, InstNode, Merge, Shape, Type, TypedModule, UnOp, ValueDef, ValueOrigin,
+    ConstKind, Decl, ExecMode, Inst, InstNode, Merge, Shape, Type, TypedModule, UnOp, ValueDef,
+    ValueOrigin,
 };
 use crate::spirv::requirements::{interface, recorded, ModuleView};
 
@@ -611,6 +612,24 @@ impl TypedModule {
             }
         }
         self.rederive()
+    }
+
+    /// Declare execution modes `modes` on the entry, each one it does not declare yet, in order;
+    /// then record the entry interface and requirements again once, as after
+    /// [`TypedModule::apply_promotions`], so the modes' capabilities, properties and independence
+    /// become the module's requirements.
+    pub fn declare_modes(&mut self, modes: &[ExecMode]) -> BResult<()> {
+        let mut added = false;
+        for mode in modes {
+            if !self.entry.modes.contains(mode) {
+                self.entry.modes.push(*mode);
+                added = true;
+            }
+        }
+        if added {
+            self.rederive()?;
+        }
+        Ok(())
     }
 
     /// Record the entry interface and requirements again from the module as it now is, and the

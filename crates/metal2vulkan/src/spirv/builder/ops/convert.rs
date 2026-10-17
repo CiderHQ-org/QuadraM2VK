@@ -4,7 +4,7 @@ use crate::spirv::builder::function::FunctionBuilder;
 use crate::spirv::builder::ops::err;
 use crate::spirv::error::{BResult, OperandRule};
 use crate::spirv::ids::{TypeId, Value};
-use crate::spirv::ir::{ConvOp, Inst, StorageClass, Type};
+use crate::spirv::ir::{Contraction, ConvOp, Inst, StorageClass, Type};
 
 /// A bitcast endpoint: a numeric (non-`bool`) scalar or vector, or a `PhysicalStorageBuffer`
 /// pointer, with its total bit width.
@@ -28,6 +28,24 @@ impl FunctionBuilder<'_> {
     ///   width; a pointer converts only to another such pointer, a 64-bit integer, or a vector of
     ///   two 32-bit integers.
     pub fn convert(&mut self, op: ConvOp, a: Value, to: TypeId) -> BResult<Value> {
+        self.convert_with(op, a, to, Contraction::Allowed)
+    }
+
+    /// An `FConvert` of `a` to type `to` decorated `NoContraction`: a conversion the device must
+    /// perform as written. Vulkan assumes `AllowTransform` on a float operation not so decorated,
+    /// under which a driver may drop a conversion to 16 bits that another widens back (Mesa's NIR
+    /// folds `f2f32(f2f16(x))` to `x`).
+    pub fn convert_no_contraction(&mut self, a: Value, to: TypeId) -> BResult<Value> {
+        self.convert_with(ConvOp::FConvert, a, to, Contraction::Forbidden)
+    }
+
+    fn convert_with(
+        &mut self,
+        op: ConvOp,
+        a: Value,
+        to: TypeId,
+        contract: Contraction,
+    ) -> BResult<Value> {
         let o = op.to_spirv();
         let result = err(o, OperandRule::ResultType);
         match op {
@@ -94,7 +112,7 @@ impl FunctionBuilder<'_> {
                 }
             }
         }
-        self.emit(Inst::Convert { op, a }, to)
+        self.emit(Inst::Convert { op, a, contract }, to)
     }
 
     fn is_psb_ptr(&self, ty: TypeId) -> BResult<bool> {

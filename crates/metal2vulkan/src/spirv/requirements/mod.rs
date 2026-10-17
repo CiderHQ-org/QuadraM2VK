@@ -46,6 +46,7 @@ use std::collections::BTreeSet;
 
 use crate::spv::Capability as Cap;
 
+use crate::device::profile::Independence;
 use crate::device::requirements::{
     ApiVersion, FloatControl, FloatWidth, Requirements, SpirvCapability, SpirvExtension,
     SubgroupOp, VkExtension, VkFeature, VkLimit, VkProperty,
@@ -65,6 +66,20 @@ use crate::spirv::ir::{
 
 /// `SkipTrianglesKHR | SkipAABBsKHR`.
 const SKIP_PRIMITIVES: u64 = 0x100 | 0x200;
+
+/// The independence an entry needs whose one denormal (or rounding) mode names `widths`
+/// (RuntimeSpirv VUIDs 06289-06292): none where every width or none is named; 32-bit only where 16
+/// and 64 bits agree and 32 bits does not; all where 16 and 64 bits differ.
+fn independence_needed(widths: &BTreeSet<u8>) -> Independence {
+    let named = |w: u8| widths.contains(&w);
+    if named(16) != named(64) {
+        Independence::All
+    } else if named(32) != named(16) {
+        Independence::Only32Bit
+    } else {
+        Independence::None
+    }
+}
 
 mod own_pixel;
 mod snapshot;
@@ -844,6 +859,12 @@ impl Deriver<'_> {
                     FloatControl::SignedZeroInfNanPreserve,
                     width,
                 ),
+                ExecMode::DenormPreserve { width } => {
+                    self.float_control(Cap::DenormPreserve, FloatControl::DenormPreserve, width)
+                }
+                ExecMode::RoundingModeRte { width } => {
+                    self.float_control(Cap::RoundingModeRTE, FloatControl::RoundingModeRte, width)
+                }
                 ExecMode::PixelInterlockOrdered => {
                     self.cap(Cap::FragmentShaderPixelInterlockEXT);
                     self.ext(SpirvExtension::ExtFragmentShaderInterlock);
@@ -921,6 +942,19 @@ impl Deriver<'_> {
                 | ExecMode::Invocations { .. } => {}
             }
         }
+        // The widths the denormal and rounding modes name: a width without one keeps the
+        // device's default, which is another mode for the independence rules.
+        let widths = |pick: fn(&ExecMode) -> Option<u8>| -> BTreeSet<u8> {
+            m.entry.modes.iter().filter_map(pick).collect()
+        };
+        self.r.denorm_independence = independence_needed(&widths(|m| match m {
+            ExecMode::DenormPreserve { width } => Some(*width),
+            _ => None,
+        }));
+        self.r.rounding_independence = independence_needed(&widths(|m| match m {
+            ExecMode::RoundingModeRte { width } => Some(*width),
+            _ => None,
+        }));
         Ok(())
     }
 

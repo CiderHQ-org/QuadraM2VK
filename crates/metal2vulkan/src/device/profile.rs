@@ -1228,6 +1228,18 @@ pub enum DriverWorkaround {
     /// emitted as `OpBitFieldUExtract(x, 0, N)` there (`lower::arith::ops::mask`), which is the
     /// same bits on every device.
     NarrowMaskAfterSignedClamp,
+    /// The driver's compiler folds a `half` round trip, an `OpFConvert` from 32- to 16-bit floats
+    /// and its widening back, each decorated `NoContraction`, into the 32-bit value it started
+    /// from, in an entry declaring `RoundingModeRTE`, `DenormPreserve` and
+    /// `SignedZeroInfNanPreserve` for 16 bits. Vulkan assumes no value-changing transform of an
+    /// operation decorated `NoContraction`, and rounds a conversion between types correctly
+    /// ("Precision and Operation of SPIR-V Instructions"). Measured on the GeForce RTX 3090
+    /// (`deviceID` 0x2204) under NVIDIA's 615.71.09 (`VK_DRIVER_ID_NVIDIA_PROPRIETARY`): of the
+    /// 2^32 `f32` values, the round trip left 2,231,288,832 off Metal's `half(float)`, under each
+    /// combination of those modes and with or without the decoration. Keyed on NVIDIA's driver
+    /// on every GPU, the others unmeasured. Such a profile rounds a `half` in another form
+    /// (`lower::arith::narrow::controlled_modes`).
+    HalfConversionPairFolded,
     /// The driver refuses a fragment shader that reads both barycentric builtins,
     /// `BaryCoordKHR` and `BaryCoordNoPerspKHR`, at pipeline creation, where Metal compiles a
     /// fragment function that declares both `[[barycentric_coord, center_perspective]]` and

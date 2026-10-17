@@ -148,6 +148,9 @@ pub struct ModuleBuilder {
     /// Whether a `half` texel keeps the NaN the device decoded under native half rounding too
     /// ([`ModuleBuilder::texel_nans`]).
     texel_nans: bool,
+    /// Whether a `half`'s NaN bits are the device's conversion's under the float controls
+    /// ([`ModuleBuilder::native_half_nans`]).
+    native_half_nans: bool,
     /// The equal values offered for where no loop holds them (`FunctionBuilder::offer_outside_loops`),
     /// in offer order.
     pub(super) loop_free: Vec<Offer>,
@@ -187,11 +190,12 @@ pub enum MaskForm {
 }
 
 /// How the lowering rounds an `f32` to `half` (`lower::arith::narrow`). Lowering takes it from
-/// the profile's measured driver deviations and its half rounding policy (`ArithPlan::quantize`).
-/// Every form gives Metal's conversion to `half` (to nearest even on the half grid, half
-/// denormals kept, infinity from 65520 up) where it is measured or integer; under native half
-/// rounding `Device` and `Converted` are the device's rounding where neither is measured, within
-/// `PrecisionNote::NativeHalfQuantize`'s or `NativeHalfConversion`'s bound.
+/// the profile's measured driver deviations, its float-controls properties and its half rounding
+/// policy (`ArithPlan::quantize`). Every form gives Metal's conversion to `half` (to nearest even
+/// on the half grid, half denormals kept, infinity from 65520 up) where it is measured, controlled
+/// or integer; under native half rounding `Device` and `Converted` are the device's rounding where
+/// neither is measured, within `PrecisionNote::NativeHalfQuantize`'s or `NativeHalfConversion`'s
+/// bound.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum QuantizeForm {
     /// No device rounding: integer arithmetic on the `f32`'s bits, and an exact scaling below
@@ -208,6 +212,13 @@ pub enum QuantizeForm {
     /// (`DriverDeviation::MetalHalfConversion`), or under native half rounding, and the profile has
     /// `shaderFloat16`.
     Converted,
+    /// No quantize: `OpFConvert` to a 16-bit float and back, each decorated `NoContraction`, in
+    /// an entry that declares `RoundingModeRTE`, `DenormPreserve` and `SignedZeroInfNanPreserve`
+    /// for 16 bits (and the modes the device's independence ties to them), where the profile has
+    /// `shaderFloat16` and those float controls: Metal's `half(float)` by the Vulkan spec, which
+    /// makes such a conversion correctly rounded to nearest even with denormals, signed zeros,
+    /// infinities and NaNs kept, and forbids removing it (`narrow::controlled_modes`).
+    Controlled,
 }
 
 /// A 16-bit float format the lowering holds widened in `f32`, whose bits it may note.
@@ -290,6 +301,22 @@ impl ModuleBuilder {
     /// ([`ModuleBuilder::set_texel_nans`]).
     pub fn texel_nans(&self) -> bool {
         self.texel_nans
+    }
+
+    /// Whether a `half`'s NaN bits are left to the device's conversion where the module rounds
+    /// through it under the float controls ([`QuantizeForm::Controlled`]): a `half` read from its
+    /// bits is the device's widening of them, and a `half` texel takes the rounding's NaN, where
+    /// the profile leaves NaN bits to the device (`NanMinMaxPolicy::Native`). Emission sets it
+    /// with the form; a builder that never sets it decodes in integer arithmetic and keeps a
+    /// texel's NaN, as before.
+    pub fn set_native_half_nans(&mut self, native: bool) {
+        self.native_half_nans = native;
+    }
+
+    /// Whether a `half`'s NaN bits are the device's conversion's
+    /// ([`ModuleBuilder::set_native_half_nans`]).
+    pub fn native_half_nans(&self) -> bool {
+        self.native_half_nans
     }
 
     /// The heap bytes the builder holds, for the byte ledger: every input-scaled container's
@@ -1501,6 +1528,8 @@ fn mode_contract(m: ExecMode) -> (u8, Option<u8>, &'static [ExecModel]) {
         ExecMode::LocalSize { .. } => (6, None, WORKGROUPS),
         ExecMode::DerivativeGroupLinear => (7, None, COMP),
         ExecMode::SignedZeroInfNanPreserve { width } => (9, Some(width), ALL),
+        ExecMode::DenormPreserve { width } => (8, Some(width), ALL),
+        ExecMode::RoundingModeRte { width } => (10, Some(width), ALL),
         ExecMode::SubgroupUniformControlFlow => (11, None, ALL),
         ExecMode::MaximallyReconverges => (12, None, ALL),
         ExecMode::Triangles => (13, None, TRIANGLES),

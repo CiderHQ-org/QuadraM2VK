@@ -198,6 +198,7 @@ fn f32_to_half_from_even_is_exact_on_every_tie() {
         QuantizeForm::Integer,
         QuantizeForm::Device,
         QuantizeForm::Converted,
+        QuantizeForm::Controlled,
     ] {
         for (tz, mode) in [
             (true, HalfRounding::TowardZeroSaturating),

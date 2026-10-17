@@ -1416,6 +1416,10 @@ impl Ser<'_> {
             ExecMode::SignedZeroInfNanPreserve { width } => {
                 plain(w, M::SignedZeroInfNanPreserve, &[u32::from(width)])
             }
+            ExecMode::DenormPreserve { width } => plain(w, M::DenormPreserve, &[u32::from(width)]),
+            ExecMode::RoundingModeRte { width } => {
+                plain(w, M::RoundingModeRTE, &[u32::from(width)])
+            }
             ExecMode::SubgroupUniformControlFlow => plain(w, M::SubgroupUniformControlFlowKHR, &[]),
             ExecMode::MaximallyReconverges => plain(w, M::MaximallyReconvergesKHR, &[]),
             ExecMode::RequireFullQuads => plain(w, M::RequireFullQuadsKHR, &[]),
@@ -1645,6 +1649,10 @@ impl Ser<'_> {
                         ..
                     }
                     | Inst::Glsl {
+                        contract: Contraction::Forbidden,
+                        ..
+                    }
+                    | Inst::Convert {
                         contract: Contraction::Forbidden,
                         ..
                     } = &n.inst
@@ -2224,7 +2232,7 @@ impl Ser<'_> {
                 &with(head()?, &[v(*base)?, v(*offset)?, v(*count)?]),
             ),
             Inst::Fma { a, b, c } => w.inst(Op::FmaKHR, &with(head()?, &[v(*a)?, v(*b)?, v(*c)?])),
-            Inst::Convert { op, a } => w.inst(op.to_spirv(), &with(head()?, &[v(*a)?])),
+            Inst::Convert { op, a, .. } => w.inst(op.to_spirv(), &with(head()?, &[v(*a)?])),
             Inst::CompositeConstruct { parts } => {
                 let mut ops = head()?;
                 for p in parts.iter() {

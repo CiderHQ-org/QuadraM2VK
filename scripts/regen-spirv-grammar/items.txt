@@ -88,8 +88,8 @@ values Quads OutputVertices OutputPoints SubgroupUniformControlFlowKHR SignedZer
 values StencilRefReplacingEXT RequireFullQuadsKHR OutputLinesEXT OutputPrimitivesEXT
 values DerivativeGroupLinearKHR OutputTrianglesEXT PixelInterlockOrderedEXT
 values SampleInterlockOrderedEXT MaximallyReconvergesKHR InputPoints InputLines Invocations
-values OutputLineStrip OutputTriangleStrip
-test-values ContractionOff RoundingModeRTE FPFastMathDefault
+values OutputLineStrip OutputTriangleStrip DenormPreserve RoundingModeRTE
+test-values ContractionOff FPFastMathDefault
 
 enum StorageClass
 values UniformConstant Input Uniform Output Workgroup Private Function PushConstant Image

@@ -1163,6 +1163,42 @@ fn only_nvidia_on_ampere_ga10x_carries_the_narrow_mask_defect() {
     assert!(!carries(&desc));
 }
 
+/// `DriverWorkaround::HalfConversionPairFolded` is keyed on NVIDIA's driver whatever its GPU and on
+/// nothing else: every committed NVIDIA profile carries it (the RTX 3090's generation and the RTX
+/// 50 series alike) and no other committed profile does; the RTX 5080 laptop GPU's description
+/// under Mesa's NVK does not. Where it is carried, a profile whose float controls would make the
+/// conversion Metal's rounds a `half` in another form (`narrow::controlled_modes` is `None`).
+#[test]
+fn nvidia_carries_the_folded_half_conversion_pair() {
+    use crate::device::profile::DriverWorkaround;
+    let defect = DriverWorkaround::HalfConversionPairFolded;
+    let carries = |desc: &DeviceDescription| {
+        Device::new(desc.clone(), DevicePolicy::default())
+            .unwrap()
+            .profile()
+            .fields()
+            .workarounds
+            .contains(&defect)
+    };
+    for (stem, text) in committed_profiles() {
+        let desc = DeviceDescription::from_khronos_json(&text, None).unwrap();
+        let nvidia = desc.driver_id == Some(vk::DriverId::NVIDIA_PROPRIETARY);
+        assert_eq!(carries(&desc), nvidia, "{stem}");
+    }
+    let mut desc = profile("nvidia-rtx5080-laptop");
+    let p = Device::new(desc.clone(), DevicePolicy::default())
+        .unwrap()
+        .profile()
+        .clone();
+    let half = p.fields().float_controls.f16;
+    assert!(half.rounding_rte && half.denorm_preserve && half.signed_zero_inf_nan_preserve);
+    assert!(crate::lower::arith::narrow::controlled_modes(&p).is_none());
+    desc.device_id = 0x2204;
+    assert!(carries(&desc));
+    desc.driver_id = Some(vk::DriverId::MESA_NVK);
+    assert!(!carries(&desc));
+}
+
 /// `DriverWorkaround::UniformReadsOutpaceStorageReads` is keyed on ANV, whatever its GPU, and on
 /// lavapipe at `subgroupSize` 4 (128-bit vectors): every committed ANV profile carries it (the
 /// Intel venue's two devices alike, so they keep one translation key), and of the lavapipes the

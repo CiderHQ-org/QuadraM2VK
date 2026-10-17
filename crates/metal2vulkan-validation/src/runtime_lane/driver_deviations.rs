@@ -106,7 +106,7 @@ use crate::observation::MetalObservation;
 use crate::store::CorpusStore;
 use base64::Engine as _;
 use metal2vulkan::cache::VariantKey;
-use metal2vulkan::device::{VkFeature, VkProperty};
+use metal2vulkan::device::{FloatControl, FloatWidth, VkFeature, VkProperty};
 use metal2vulkan::error::{Capability, DriverDeviation, Error as CompileError, Feature, Needs};
 use metal2vulkan::library::Library;
 use metal2vulkan::metal::{PixelFormat, PrimitiveType, TextureUsage};
@@ -643,6 +643,17 @@ fn requires_property(device: &Device, case: &PublicCase, property: VkProperty) -
         .contains(&property)
 }
 
+/// Whether `case`'s kernel rounds to `half` under the float controls that make the device's
+/// conversion Metal's: it declares `DenormPreserve` for 16 bits, which no other form declares, and
+/// so requires that property.
+fn rounds_under_float_controls(device: &Device, case: &PublicCase) -> bool {
+    requires_property(
+        device,
+        case,
+        VkProperty::FloatControl(FloatControl::DenormPreserve, FloatWidth::F16),
+    )
+}
+
 /// Where the profile takes the deviation, both cases' kernels take the device's 16-bit `Fma`
 /// (they require `VkProperty::MetalHalfFma`) and every thread's two `half` results are the Metal
 /// row's of the same chip, with and without fast math. Elsewhere neither kernel requires it.
@@ -877,9 +888,10 @@ const HALF_EDGE_CASES: [&str; 6] = [
 /// `0xFBFF` in either half, or the `float` 65504 of either sign) is the Metal row's of the same
 /// chip on every profile: the device's conversion to 16 bits and back where the profile takes
 /// `DriverDeviation::MetalHalfConversion` (the kernels then require
-/// `VkProperty::MetalHalfConversion` and hold no quantize), else the device's quantize where the
-/// profile takes `MetalHalfQuantize` (the kernels then require `VkProperty::MetalHalfQuantize`),
-/// integer arithmetic elsewhere.
+/// `VkProperty::MetalHalfConversion` and hold no quantize), else that conversion under the float
+/// controls that make it Metal's where the profile has them (the kernels then declare them and
+/// require neither fact), else the device's quantize where the profile takes `MetalHalfQuantize`
+/// (the kernels then require `VkProperty::MetalHalfQuantize`), integer arithmetic elsewhere.
 #[test]
 fn half_quantize_rounds_as_metal_at_the_edge() {
     let messages = Messages::default();
@@ -902,11 +914,16 @@ fn half_quantize_rounds_as_metal_at_the_edge() {
         let mut failures = Vec::new();
         for case_name in HALF_EDGE_CASES {
             let case = public_case(case_name).unwrap();
+            let controlled = rounds_under_float_controls(&device, &case);
+            assert!(
+                !(converts && controlled),
+                "{case_name} on {name}: the measured conversion takes no float controls"
+            );
             assert_eq!(
                 requires_property(&device, &case, VkProperty::MetalHalfQuantize),
-                metals,
+                metals && !controlled,
                 "{case_name} on {name}: the kernel takes the device's quantize alone exactly \
-                 where the profile takes the deviation"
+                 where the profile takes the deviation and has not the float controls"
             );
             assert_eq!(
                 requires_property(&device, &case, VkProperty::MetalHalfConversion),
@@ -927,7 +944,8 @@ fn half_quantize_rounds_as_metal_at_the_edge() {
                 .collect();
             eprintln!(
                 "half quantize {case_name} on {name} (the device's: {metals}, the device's \
-                 conversion: {converts}): {} of {} edge words differ from Metal",
+                 conversion: {converts}, under float controls: {controlled}): {} of {} edge \
+                 words differ from Metal",
                 differ.len(),
                 edge.len()
             );
@@ -985,7 +1003,8 @@ const DFL_TRIG_CASE: &str = "precise-trigonometric-functions-at-nan-operands-und
 /// [`DFL_DENORMAL_ROWS`] and the special lanes of [`DFL_ROOT_ROWS`], the kernels requiring
 /// `VkProperty::MetalFloatDenormals` exactly where the profile takes the deviation; in the `half`
 /// edge cases every word, the kernels requiring `VkProperty::MetalHalfConversion` exactly where the
-/// profile takes that one, else `VkProperty::MetalHalfQuantize` exactly where it takes that one;
+/// profile takes that one, else neither where they round under the float controls, else
+/// `VkProperty::MetalHalfQuantize` exactly where the profile takes that one;
 /// and in [`DFL_TRIG_CASE`] every word whose Metal answer is a NaN (the functions' other words are
 /// the math library's precision, not their NaNs). The test prints how many words of the other rows
 /// differ, by row.
@@ -1048,11 +1067,16 @@ fn owned_float_fixtures_answer_metal() {
         let quantize = takes(&device, DriverDeviation::MetalHalfQuantize) && !converts;
         for case_name in DFL_HALF_EDGE_CASES {
             let case = public_case(case_name).unwrap();
+            let controlled = rounds_under_float_controls(&device, &case);
+            assert!(
+                !(converts && controlled),
+                "{case_name} on {name}: the measured conversion takes no float controls"
+            );
             assert_eq!(
                 requires_property(&device, &case, VkProperty::MetalHalfQuantize),
-                quantize,
+                quantize && !controlled,
                 "{case_name} on {name}: the kernel takes the device's quantize alone exactly \
-                 where the profile takes the deviation"
+                 where the profile takes the deviation and has not the float controls"
             );
             assert_eq!(
                 requires_property(&device, &case, VkProperty::MetalHalfConversion),
@@ -1065,7 +1089,8 @@ fn owned_float_fixtures_answer_metal() {
             let differ = differing_of(&run.output, &metal, 16, &(0..16).collect::<Vec<_>>());
             eprintln!(
                 "owned half edge {case_name} on {name} (the device's quantize: {quantize}, \
-                 conversion: {converts}): {} of {} words differ from Metal",
+                 conversion: {converts}, under float controls: {controlled}): {} of {} words \
+                 differ from Metal",
                 differ.len(),
                 metal.len() / 4
             );

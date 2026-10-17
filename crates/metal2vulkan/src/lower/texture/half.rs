@@ -36,11 +36,11 @@
 //! - That value is rounded to nearest even once by integer arithmetic on its bits, in every
 //!   rounding form: it is a normal `half`'s, or a `half` already. The texel itself, for the other
 //!   families, is rounded to nearest even once by the module's `half` rounding
-//!   (`narrow::round_texel`) where the device's is measured to be Metal's (`QuantizeForm::Device`
-//!   and `Converted`), else by the integer sequence (`texel_round::f32_to_half`,
-//!   `QuantizeForm::Integer`), so every device answers alike. The grid's value is selected after
-//!   that rounding, so where a device specializes a grid class, no rounding of the texel (on
-//!   MoltenVK a `[[clang::optnone]]` call at every access) is left.
+//!   (`narrow::round_texel`) where the device's is measured or controlled to be Metal's
+//!   (`QuantizeForm::Device`, `Converted` and `Controlled`), else by the integer sequence
+//!   (`texel_round::f32_to_half`, `QuantizeForm::Integer`), so every device answers alike. The
+//!   grid's value is selected after that rounding, so where a device specializes a grid class, no
+//!   rounding of the texel (on MoltenVK a `[[clang::optnone]]` call at every access) is left.
 //! - A sample of a float or half-float texel rounds toward zero saturating or to nearest with ties
 //!   away: from the device's rounding to nearest even where that is Metal's, by stepping to its
 //!   neighbour where the directed mode differs (`texel_round::f32_to_half_from_even`), else by the
@@ -66,9 +66,9 @@
 //!
 //! **On a device that samples through Metal's own texture unit**: where the device's `f32` texel is
 //! Metal's `float` result of the same access (`VkProperty::MetalSampler`) and the module's rounding
-//! to nearest even is Metal's (`QuantizeForm::Device` and `Converted`), the routine tells apart
-//! only the families whose `half` result is not that `float` result rounded to nearest even
-//! ([`HalfFamilies::MetalSampler`]): a 32-bit float texel's sample (toward zero), the 16-bit
+//! to nearest even is Metal's (`QuantizeForm::Device`, `Converted` and `Controlled`), the routine
+//! tells apart only the families whose `half` result is not that `float` result rounded to nearest
+//! even ([`HalfFamilies::MetalSampler`]): a 32-bit float texel's sample (toward zero), the 16-bit
 //! normalized grids (their `f32` value rounds twice: `65455 / 65535`, `65519 / 65535` and `32759 /
 //! 32767`), and a YCbCr field's one texel on the grid `8192` (ties away). Every other family's
 //! `half` is the `OTHER` arm's rounding of the device's texel there: an 8-bit normalized step `n /
@@ -205,7 +205,7 @@ pub enum HalfFamilies {
 pub fn define(mb: &mut ModuleBuilder, families: HalfFamilies) -> BResult<FuncId> {
     let families = match mb.quantize_form() {
         QuantizeForm::Integer => HalfFamilies::Every,
-        QuantizeForm::Device | QuantizeForm::Converted => families,
+        QuantizeForm::Device | QuantizeForm::Converted | QuantizeForm::Controlled => families,
     };
     let f32_ = mb.ty(SType::Float { width: 32 })?;
     let u32_ = mb.ty(SType::Int {
@@ -469,7 +469,7 @@ fn body(
     // selected after it, so a device that specializes a grid class drops the rounding of `x`
     // whole.
     let rounded = match fb.module().quantize_form() {
-        QuantizeForm::Device | QuantizeForm::Converted => {
+        QuantizeForm::Device | QuantizeForm::Converted | QuantizeForm::Controlled => {
             // The module's rounding is Metal's here, and is every other family's, the `OTHER`
             // arm's among them, so a sample's directed rounding follows from `even`.
             let even = narrow::round_texel(fb, hform(), x)?;

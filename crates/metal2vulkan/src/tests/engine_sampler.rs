@@ -137,15 +137,16 @@ const OP_CONSTANT: u16 = 43;
 const OP_CONSTANT_COMPOSITE: u16 = 44;
 const OP_BITWISE_AND: u16 = 199;
 
-/// `a`'s module rounds a `half` exactly, by one of the three forms `lower::arith::narrow::round`
-/// takes, at least once: on a profile that takes neither measured fact below, the integer rounding,
+/// `a`'s module rounds a `half` exactly, by one of the forms `lower::arith::narrow::round` takes,
+/// at least once: on a profile that takes neither measured fact below, the integer rounding,
 /// which clears the 13 bits below the half's last with an `OpBitwiseAnd` of `0xFFFFE000`; where the
 /// device's quantize is measured Metal's (`DriverDeviation::MetalHalfQuantize`), each
 /// `OpQuantizeToF16` feeds an `OpFOrdEqual`, the test of the rounding that keeps half subnormals
 /// where the quantize gives a zero, so none rounds a `half` alone, which flushes them; or, on a
 /// profile that takes `DriverDeviation::MetalHalfConversion` (moltenvk-m3), an `OpFConvert` of an
 /// `f32` to 16 bits widened back by another, the device's conversion that is measured to be
-/// Metal's.
+/// Metal's, or the same pair on a profile whose float controls make it Metal's
+/// (`narrow::controlled_modes`).
 fn assert_exact_half_rounding(a: &FunctionArtifact) {
     let w = &a.module.words;
     let mut quantized = Vec::new();

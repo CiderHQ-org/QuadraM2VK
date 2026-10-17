@@ -26,7 +26,9 @@ use super::degrade_notices::{counts, on_device_with};
 use super::{buffer_with, read_buffer, Messages, WAIT};
 use crate::air_library::AirLibrary;
 use metal2vulkan::cache::VariantKey;
-use metal2vulkan::device::{FloatMathsPolicy, NanMinMaxPolicy, RoundingOrderPolicy};
+use metal2vulkan::device::{
+    FloatControl, FloatMathsPolicy, FloatWidth, NanMinMaxPolicy, RoundingOrderPolicy, VkProperty,
+};
 use metal2vulkan::error::DriverDeviation;
 use metal2vulkan::library::Library;
 use metal2vulkan::pipeline::{ComputePipelineDescriptor, FunctionDescriptor, PrecisionNote};
@@ -619,19 +621,21 @@ fn half_operands() -> Vec<[f32; 2]> {
     (0..COUNT).map(|_| [one(), one()]).collect()
 }
 
-/// With native half rounding on, on a device whose conversion to 16 bits is not measured to be
-/// Metal's, the stage records `NativeHalfConversion` (or `NativeHalfQuantize` without
-/// `shaderFloat16`) and the pipeline state announces it, and each `half` narrowing and sum is
-/// within the bound the note records: one unit in the last place of the `half`, 65504 where Metal
-/// answers infinity from 65520 up on a device that rounds toward zero, and the zero of its sign
-/// below `2^-14` on one that flushes 16-bit denormals; or the `float` computation itself, each
-/// rounding the device dropped left out: NVIDIA's (RTX 3090) and lavapipe's (Mesa 26.2.4 with LLVM
-/// 23.1.1; EV `NKP-lane10-hostlvp`, 2526 of 8192 sums Metal's) compilers drop the conversion pair,
-/// so `half(a)` is `a` and the sum `a + b` rounded to `float` once (or of the operands rounded, or
-/// rounded itself), exactly. CI's lavapipe (Mesa 26.0.8 with LLVM 21.1.8) rounds here (EV
-/// `NKP-lane9-lvpx86`, 8192 of 8192). With it off (Metal's integer rounding) each is Metal's
-/// `half(float)` exactly, and neither kind is recorded. A device measured to round as Metal does
-/// (MoltenVK, the measured quantizes) records neither under either setting.
+/// With native half rounding on, on a device whose conversion to 16 bits is neither measured to be
+/// Metal's nor made Metal's by its float controls, the stage records `NativeHalfConversion` (or
+/// `NativeHalfQuantize` without `shaderFloat16`) and the pipeline state announces it, and each
+/// `half` narrowing and sum is within the bound the note records: one unit in the last place of the
+/// `half`, 65504 where Metal answers infinity from 65520 up on a device that rounds toward zero,
+/// and the zero of its sign below `2^-14` on one that flushes 16-bit denormals; or the `float`
+/// computation itself, each rounding the device dropped left out: NVIDIA's (RTX 3090) and
+/// lavapipe's (Mesa 26.2.4 with LLVM 23.1.1; EV `NKP-lane10-hostlvp`, 2526 of 8192 sums Metal's)
+/// compilers drop the conversion pair, so `half(a)` is `a` and the sum `a + b` rounded to `float`
+/// once (or of the operands rounded, or rounded itself), exactly. CI's lavapipe (Mesa 26.0.8 with
+/// LLVM 21.1.8) rounds here (EV `NKP-lane9-lvpx86`, 8192 of 8192). With it off (Metal's integer
+/// rounding) each is Metal's `half(float)` exactly, and neither kind is recorded. A device measured
+/// to round as Metal does (MoltenVK), or whose float controls make its conversion Metal's (the
+/// module declares `RoundingModeRTE`, `DenormPreserve` and `SignedZeroInfNanPreserve` for 16 bits:
+/// ANV and RADV), records neither under either setting and answers Metal's exactly.
 #[test]
 fn half_rounding_answers_within_its_recorded_bound_on_and_metal_s_off() {
     use metal2vulkan::device::HalfRoundingPolicy;
@@ -652,6 +656,24 @@ fn half_rounding_answers_within_its_recorded_bound_on_and_metal_s_off() {
                 let profile = device.compile_device().profile();
                 let measured = profile.takes_driver_deviation(DriverDeviation::MetalHalfQuantize)
                     || profile.takes_driver_deviation(DriverDeviation::MetalHalfConversion);
+                // A module rounding under the float controls that make the device's conversion
+                // Metal's declares `DenormPreserve` for 16 bits, and so requires its property.
+                let controlled = {
+                    let library = Library::from_air(&bitcode).unwrap();
+                    let function = FunctionDescriptor::new(library.function("hr").unwrap());
+                    let inputs = VariantKey::new().lowering_inputs(Stage::Kernel);
+                    device
+                        .compile_device()
+                        .compile_function(&function, &inputs, &Budget::standard())
+                        .unwrap()
+                        .requirements()
+                        .properties
+                        .contains(&VkProperty::FloatControl(
+                            FloatControl::DenormPreserve,
+                            FloatWidth::F16,
+                        ))
+                };
+                let metal_s = measured || controlled;
                 let library = device.new_library_with_air(&bitcode).unwrap();
                 let function = library.new_function_with_name("hr").unwrap();
                 let descriptor = ComputePipelineDescriptor::new(StageSource::Function(
@@ -665,8 +687,11 @@ fn half_rounding_answers_within_its_recorded_bound_on_and_metal_s_off() {
                     .filter_map(|kind| kind.precision_note())
                     .filter(|note| kinds.contains(note))
                     .collect();
-                eprintln!("{name}: measured {measured}; announced {announced:?}");
-                assert_eq!(announced.len(), usize::from(on && !measured), "{name}");
+                eprintln!(
+                    "{name}: measured {measured}, float controls {controlled}; announced \
+                     {announced:?}"
+                );
+                assert_eq!(announced.len(), usize::from(on && !metal_s), "{name}");
                 let operands = half_operands();
                 let bytes: Vec<u8> = operands
                     .iter()
@@ -726,7 +751,7 @@ fn half_rounding_answers_within_its_recorded_bound_on_and_metal_s_off() {
                             || (want.is_infinite() && f64::from(got) == 65504f64.copysign(want))
                             || (want.abs() < 2f64.powi(-14) && got == 0.0)
                             || unrounded.iter().any(|u| u.to_bits() == got.to_bits());
-                        if !((on && !measured && within) || same) {
+                        if !((on && !metal_s && within) || same) {
                             failures.push(format!(
                                 "thread {i}: {what} of {a:e}, {b:e}: {got:e} for Metal's {want:e}"
                             ));

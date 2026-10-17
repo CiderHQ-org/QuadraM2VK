@@ -871,7 +871,7 @@ fn no_float_instruction_of_the_control_stage_can_see_a_nan_or_an_infinity() {
                         BinOp::FMul | BinOp::FOrdGreaterThanEqual | BinOp::FOrdLessThanEqual
                     ),
                     Inst::Binary { .. } => !produces,
-                    Inst::Convert { op, a } if float(&m, *a) => *op == ConvOp::ConvertFToU,
+                    Inst::Convert { op, a, .. } if float(&m, *a) => *op == ConvOp::ConvertFToU,
                     Inst::Convert { op, .. } => !produces || *op == ConvOp::ConvertUToF,
                     Inst::Glsl { op, args, .. }
                         if produces || args.iter().any(|&a| float(&m, a)) =>
