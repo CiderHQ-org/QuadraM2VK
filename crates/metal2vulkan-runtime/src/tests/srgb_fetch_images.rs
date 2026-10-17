@@ -162,7 +162,7 @@ fn an_srgb_attachment_is_fetched_through_its_unsigned_integer_view() {
     let profile = device.compile_device().profile();
     let (mut stand_ins, mut multisampled, mut planes) = (0, 0, 0);
     for (pf, format) in FORMATS {
-        let view = storage_view_format(format);
+        let view = storage_view_format(profile, format);
         assert_eq!(view, Format::R32_UINT, "{pf:?}");
         if !profile.supports_format(view, FormatUsage::StorageImage) {
             eprintln!("{pf:?}: the device stores no {view:?} image: refused, typed");

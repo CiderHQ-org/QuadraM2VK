@@ -4982,6 +4982,7 @@ impl RenderCommandEncoder {
     ) -> Result<Vec<StorageAttachmentUse>, Error> {
         let mut storage = graphics.storage_attachments.clone();
         storage.sort_by_key(|s| s.color_index);
+        let profile = self.core.device().compile_device().profile();
         for s in &storage {
             let present = self
                 .layout
@@ -4994,8 +4995,9 @@ impl RenderCommandEncoder {
             }
             // The pass makes each fetched attachment's image take the storage view of its format
             // (`framebuffer_fetch::storage_view_format`: an 8-bit sRGB format's unsigned-integer
-            // view, the compile layer's `uint_view`), and no other.
-            if s.view_format() != framebuffer_fetch::storage_view_format(s.format) {
+            // view, a BGRA-order one's RGBA-order twin where the device reads it without a format
+            // in neither direction; the compile layer's `view_alias`), and no other.
+            if s.view_format() != framebuffer_fetch::storage_view_format(profile, s.format) {
                 return Err(internal(
                     "a storage attachment viewed in another format than its pass makes",
                 ));
@@ -5167,9 +5169,9 @@ impl RenderCommandEncoder {
             let plan = own.texture.image_plan()?;
             // In the interlock a fetching draw reads and writes the attachment through a storage
             // view in `view` (an 8-bit sRGB format's in the unsigned-integer format of its texel
-            // size), which the device must store: the pipeline's link names that usage, so this
+            // size, a BGRA-order one's in its RGBA-order twin on ANV), which the device must store: the pipeline's link names that usage, so this
             // refuses only a pass its pipelines' device would not have made them for.
-            let view = framebuffer_fetch::storage_view_format(own.format);
+            let view = framebuffer_fetch::storage_view_format(profile, own.format);
             if needs == STORAGE && !profile.supports_format(view, FormatUsage::StorageImage) {
                 return Err(Error::Unsupported(metal2vulkan::error::Unsupported::needs(
                     metal2vulkan::error::Feature::FramebufferFetch,
@@ -5181,7 +5183,8 @@ impl RenderCommandEncoder {
             }
             // The attachment's image takes that view where it has `STORAGE` and is its format,
             // or the attachment a view of it in a format the device stores, or the image is
-            // mutable to the view (an sRGB format's), which a texture is not made.
+            // mutable to the view (an sRGB format's, which a texture is not made; an RGBA-order
+            // twin's, which a render target's free `STORAGE` and a writable texture list).
             let viewed_in_place = framebuffer_fetch::stores_in_place(profile, own.format, plan);
             let usable = if planes {
                 // A memoryless attachment whose samples nothing reads after the pass but the

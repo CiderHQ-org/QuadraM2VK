@@ -1373,7 +1373,7 @@ fn an_interlocked_fetch_links_only_into_the_state_it_was_compiled_for() {
                 &p
             ),
             view: StorageAttachmentView::Attachment,
-            uint_view: None,
+            view_alias: None,
             kept: vk::ColorComponentFlags::empty(),
         }]
     );

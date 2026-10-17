@@ -550,7 +550,7 @@ fn a_float_attachment_is_bound_through_its_bits() {
                         color_index: c as u32,
                         format: view,
                         view: StorageAttachmentView::Attachment,
-                        uint_view: None,
+                        view_alias: None,
                     }),
                 "{stem} {c}: {:?}",
                 plan.descriptors
@@ -982,7 +982,7 @@ fn a_tile_pipeline_binds_its_attachments() {
                         color_index: c,
                         format: vk::Format::R32_UINT,
                         view: StorageAttachmentView::Attachment,
-                        uint_view: None,
+                        view_alias: None,
                     }),
                 "{stem} {c}"
             );
@@ -2269,7 +2269,7 @@ fn a_normalized_attachment_is_bound_through_its_bits() {
                         color_index: 0,
                         format: view,
                         view: StorageAttachmentView::Attachment,
-                        uint_view: None,
+                        view_alias: None,
                     }),
                 "{stem} {entry} {pf:?}: {:?}",
                 plan.descriptors

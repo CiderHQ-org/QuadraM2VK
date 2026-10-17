@@ -699,11 +699,13 @@ pub enum WriteSource {
         color_index: u32,
         format: vk::Format,
         view: StorageAttachmentView,
-        /// A draw's: the pipeline's `StorageAttachmentUse::uint_view`, where the view is in that
-        /// unsigned-integer format of the texel size, of an image the consumer made mutable to
-        /// it (an sRGB attachment's); `None` elsewhere, and for a tile dispatch's, whose view is
-        /// `format`.
-        uint_view: Option<vk::Format>,
+        /// A draw's: the pipeline's `StorageAttachmentUse::view_alias`, where the view is in that
+        /// format, of an image the consumer made mutable to it (an sRGB attachment's
+        /// unsigned-integer format of its texel size, a BGRA-order one's RGBA-order twin on a
+        /// device that accesses its format without one in neither direction); `None` elsewhere,
+        /// and for a tile dispatch's, whose view is `format`.
+        #[cfg_attr(feature = "serde", serde(alias = "uint_view"))]
+        view_alias: Option<vk::Format>,
     },
     /// The tile map of the sparse texture bound at texture slot `slot` (`bind::SparseTileMap`),
     /// a read-only storage buffer of [`SparseTileMap::byte_len`](crate::bind::SparseTileMap)

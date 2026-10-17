@@ -251,6 +251,246 @@ fn a_four_channel_srgb_attachment_takes_a_uint_view() {
     }
 }
 
+/// A BGRA-order attachment (`BGRA8Unorm`, `BGR10A2Unorm`), whose format SPIR-V names no image
+/// format for, takes the storage form on a device that accesses its format without one in neither
+/// direction (the ANV profiles: no `shaderStorageImageReadWithoutFormat`) through a view in its
+/// RGBA-order twin, declared as the twin is (by its SPIR-V image format, or without one where the
+/// device grants the twin that), with `float` texels: of one sample
+/// and as sample planes, read only, written, and under a write mask that keeps some channels. So
+/// does a device whose description states no per-format bits (no `VkFormatProperties3`:
+/// `intel-arl-anv`), which reads without a format only the formats Vulkan lists for it, no
+/// BGRA-order one among them. On a device that reads and writes the format without one it keeps
+/// its own format, declared without one, as before.
+#[test]
+fn a_bgra_order_attachment_takes_its_rgba_twin_where_no_declaration_reaches_it() {
+    use crate::spv::ImageFormat as I;
+    let formats = [
+        (
+            PixelFormat::BGRA8Unorm,
+            vk::Format::B8G8R8A8_UNORM,
+            vk::Format::R8G8B8A8_UNORM,
+            I::Rgba8,
+        ),
+        (
+            PixelFormat::BGR10A2Unorm,
+            vk::Format::A2R10G10B10_UNORM_PACK32,
+            vk::Format::A2B10G10R10_UNORM_PACK32,
+            I::Rgb10A2,
+        ),
+    ];
+    let partial = ColorWriteMask::RED.union(ColorWriteMask::BLUE);
+    for stem in [
+        "intel-irisxe-anv",
+        "intel-irisxe-rplp-anv",
+        "intel-uhd770-rpls-anv",
+        "intel-arl-anv",
+    ] {
+        let p = profile(stem, &[]);
+        assert!(interlock_orders(&p), "{stem}");
+        for (pf, format, twin, typed) in formats {
+            assert_eq!(
+                StorageAttachmentUse::view_alias_of(format, &p),
+                Some(twin),
+                "{stem} {pf:?}"
+            );
+            for multisampled in [false, true] {
+                for (use_, mask) in [
+                    (READS, ColorWriteMask::ALL),
+                    (WRITES, ColorWriteMask::ALL),
+                    (WRITES, partial),
+                ] {
+                    let what = format!("{stem} {pf:?} {multisampled} {use_:?} {mask:?}");
+                    let view = form(&state(pf, |c| c.write_mask = mask), multisampled, use_, &p)
+                        .unwrap_or_else(|e| panic!("{what}: {e:?}"));
+                    assert_eq!(
+                        (
+                            view.format,
+                            view.rgba_view,
+                            view.uint_view,
+                            view.declared,
+                            view.numeric
+                        ),
+                        (
+                            format,
+                            Some(twin),
+                            None,
+                            expected_declaration(twin, use_, typed, &p),
+                            SampledType::Float
+                        ),
+                        "{what}"
+                    );
+                    let samples = match multisampled {
+                        true => StorageSamples::Planes,
+                        false => StorageSamples::One,
+                    };
+                    assert_eq!(view.samples, samples, "{what}");
+                    assert_eq!(view.merges(), mask == partial, "{what}");
+                }
+            }
+        }
+    }
+    for stem in [
+        "moltenvk-m3",
+        "amd-rdna3-radv",
+        "amd-780m-radv",
+        "nvidia-rtx50-linux",
+        "nvidia-rtx5080-laptop",
+    ] {
+        let p = profile(stem, &[]);
+        let (pf, format, ..) = formats[0];
+        assert_eq!(
+            StorageAttachmentUse::view_alias_of(format, &p),
+            None,
+            "{stem}"
+        );
+        for use_ in [READS, WRITES] {
+            let view = form(&state(pf, |_| {}), false, use_, &p).expect("the storage form");
+            assert_eq!(
+                (view.rgba_view, view.declared),
+                (None, I::Unknown),
+                "{stem}"
+            );
+        }
+    }
+}
+
+/// The view a fetched attachment takes (`StorageAttachmentUse::view_alias_of`, the one decision of
+/// the compile layer and the runtime) on every committed profile: an 8-bit sRGB format's
+/// unsigned-integer view whatever the device; any other format the device reads and writes without
+/// a format keeps its own view (as every such device had before); and a BGRA-order format it does
+/// not takes its RGBA-order twin only where the device stores the twin and declares it. Some
+/// committed profile takes a twin.
+#[test]
+fn a_view_alias_is_a_twin_only_where_no_declaration_reaches_the_format() {
+    let rw = StorageUse::READ_WRITE_TEXTURE;
+    let mut twins = 0;
+    for (stem, p) in crate::spirv::testing::committed_profiles().expect("profiles") {
+        for &pf in PixelFormat::ALL {
+            let Some(format) = crate::metal::format::direct_format(pf) else {
+                continue;
+            };
+            let srgb = match format {
+                vk::Format::B8G8R8A8_SRGB | vk::Format::R8G8B8A8_SRGB => Some(vk::Format::R32_UINT),
+                vk::Format::R8G8_SRGB => Some(vk::Format::R16_UINT),
+                vk::Format::R8_SRGB => Some(vk::Format::R8_UINT),
+                _ => None,
+            };
+            let alias = StorageAttachmentUse::view_alias_of(format, &p);
+            let what = format!("{stem} {pf:?}");
+            if srgb.is_some() || accessed_without_format(format, rw, &p) {
+                assert_eq!(alias, srgb, "{what}");
+                continue;
+            }
+            match alias {
+                Some(twin) => {
+                    assert_eq!(rgba_twin(format), Some(twin), "{what}");
+                    assert!(p.supports_format(twin, FormatUsage::StorageImage), "{what}");
+                    assert!(
+                        accessed_without_format(twin, rw, &p) || spirv_image_format(twin).is_some(),
+                        "{what}"
+                    );
+                    twins += 1;
+                }
+                None => assert!(
+                    rgba_twin(format).is_none_or(|t| !rgba_twin_gaps(t, &p).is_empty()),
+                    "{what}"
+                ),
+            }
+        }
+    }
+    assert!(
+        twins > 0,
+        "no committed profile views an attachment in its twin"
+    );
+}
+
+/// A BGRA-order attachment whose RGBA-order twin lacks something too is refused naming both
+/// routes: `BGR10A2Unorm` on the ANV profile without `shaderStorageImageExtendedFormats` (its
+/// twin's `Rgb10A2` is an extended format) needs reads without a format of its own format, or the
+/// extended formats for the twin. `BGRA8Unorm`'s twin, a base format, still serves.
+#[test]
+fn a_bgra_order_attachment_without_either_route_names_both() {
+    use crate::error::Needs;
+    let p = profile(
+        "intel-irisxe-anv",
+        &[VkFeature::ShaderStorageImageExtendedFormats],
+    );
+    let format = vk::Format::A2R10G10B10_UNORM_PACK32;
+    assert_eq!(StorageAttachmentUse::view_alias_of(format, &p), None);
+    let refused =
+        form(&state(PixelFormat::BGR10A2Unorm, |_| {}), false, WRITES, &p).expect_err("no route");
+    assert_eq!(
+        refused.needs,
+        Needs::AnyOf(vec![
+            vec![Capability::Feature(
+                VkFeature::ShaderStorageImageReadWithoutFormat
+            )],
+            vec![Capability::Feature(
+                VkFeature::ShaderStorageImageExtendedFormats
+            )],
+        ])
+    );
+    let bgra8 = form(&state(PixelFormat::BGRA8Unorm, |_| {}), false, WRITES, &p);
+    assert_eq!(
+        bgra8.map(|v| v.rgba_view),
+        Ok(Some(vk::Format::R8G8B8A8_UNORM))
+    );
+}
+
+/// On a device without format-less storage reads (the ANV profile), every color format whose
+/// storage form is modelled takes it but those whose direct format has neither a SPIR-V image
+/// format nor an RGBA-order twin, refused naming the reads without a format they would need:
+/// the 16-bit packed formats, whose exact form (a view of their 16-bit words, converted by Metal's
+/// measured conversions in the shader) is not built.
+#[test]
+fn without_formatless_reads_only_formats_no_declaration_reaches_are_refused() {
+    use crate::error::Needs;
+    let p = profile("intel-irisxe-anv", &[]);
+    let mut refused = Vec::new();
+    for &pf in PixelFormat::ALL {
+        let inputs = FramebufferFetchInputs::of(
+            [0],
+            &[Some(ColorAttachmentDescriptor::new(pf))],
+            false,
+            false,
+            1,
+        );
+        for use_ in [READS, WRITES] {
+            let Ok(Err(u)) = storage_form(0, &inputs, false, use_, &p) else {
+                continue;
+            };
+            if matches!(u.needs, Needs::NotImplemented | Needs::NotRepresentable) {
+                continue;
+            }
+            let needs_reads = |alt: &Vec<Capability>| {
+                alt.contains(&Capability::Feature(
+                    VkFeature::ShaderStorageImageReadWithoutFormat,
+                ))
+            };
+            let Needs::AnyOf(alternatives) = &u.needs else {
+                panic!("{pf:?} {use_:?}: {u:?}");
+            };
+            assert!(
+                alternatives.iter().all(needs_reads),
+                "{pf:?} {use_:?}: {u:?}"
+            );
+            if !refused.contains(&pf) {
+                refused.push(pf);
+            }
+        }
+    }
+    assert_eq!(
+        refused,
+        [
+            PixelFormat::B5G6R5Unorm,
+            PixelFormat::A1BGR5Unorm,
+            PixelFormat::ABGR4Unorm,
+            PixelFormat::BGR5A1Unorm,
+        ],
+        "{refused:?}"
+    );
+}
+
 /// A blend of one and zero, added, for color and alpha stores the source as no blend does, so a
 /// written attachment under it takes the storage form, but for a signed normalized format (its NaN
 /// stores another code under the blend); one and zero for color alone is a blend, which a format

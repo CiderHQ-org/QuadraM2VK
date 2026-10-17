@@ -2037,7 +2037,7 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
                         color_index,
                         format: a.format,
                         view: a.view,
-                        uint_view: a.uint_view,
+                        view_alias: a.view_alias,
                     }
                 }
                 // A sparse texture's tile map.

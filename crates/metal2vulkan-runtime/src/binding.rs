@@ -1193,14 +1193,14 @@ fn image_descriptor(
         }
         // The attachment's own image, or its sample planes (`sample_planes.rs`), which the
         // encoder made before the draw.
-        // Viewed in `uint_view` where the pipeline reads it so (an 8-bit sRGB attachment's
-        // codes), which the encoder made the image or planes mutable to (it held the view to
-        // `framebuffer_fetch::storage_view_format`, `render.rs`).
+        // Viewed in `view_alias` where the pipeline reads it so (an 8-bit sRGB attachment's
+        // codes, a BGRA-order one's RGBA-order twin), which the encoder made the image or planes
+        // mutable to (it held the view to `framebuffer_fetch::storage_view_format`, `render.rs`).
         WriteSource::TileAttachment {
             color_index,
             format,
             view,
-            uint_view,
+            view_alias,
         } if ty == vk::DescriptorType::STORAGE_IMAGE && tables.pass.is_some() => {
             let color = tables
                 .pass
@@ -1208,7 +1208,7 @@ fn image_descriptor(
                 .and_then(Option::as_ref)
                 .filter(|color| color.target.format == *format)
                 .ok_or_else(|| internal("a storage attachment the pass does not have"))?;
-            let in_format = uint_view.unwrap_or(*format);
+            let in_format = view_alias.unwrap_or(*format);
             match view {
                 StorageAttachmentView::Attachment => {
                     image(render_target::storage_view_in(&color.target, in_format)?)

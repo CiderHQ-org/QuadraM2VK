@@ -56,7 +56,15 @@
 //! - a direct format, declared without a format where the device grants the format's storage
 //!   access without one, so that one module serves every format the function reads alike, else with
 //!   its SPIR-V image format where it has one (no format feature beyond storage,
-//!   `shaderStorageImageExtendedFormats` for an extended one); an 8-bit four-channel sRGB format
+//!   `shaderStorageImageExtendedFormats` for an extended one); a BGRA-order format (`BGRA8Unorm`,
+//!   `BGR10A2Unorm`), which has no SPIR-V image format, on a device that accesses it without one
+//!   in neither direction (ANV), through a view of the attachment in its RGBA-order twin
+//!   (`R8G8B8A8_UNORM`, `A2B10G10R10_UNORM_PACK32`; `StorageView::rgba_view`,
+//!   `StorageAttachmentUse::view_alias_of`), declared as the twin is, every texel read from the
+//!   image or written to it with red and blue exchanged ([`metal_order`]): the device converts
+//!   each channel as it converts the attachment's own, so a read, a write, the channels a write
+//!   mask keeps and the per-sample forms hold the values the attachment's own view would; an
+//!   8-bit four-channel sRGB format
 //!   (`RGBA8Unorm_sRGB`, `BGRA8Unorm_sRGB`) through a view of the attachment in `R32_UINT`
 //!   (`StorageView::uint_view`), whose bytes the function converts by Metal's measured conversions
 //!   itself: a read decodes each color byte to its twelve-bit step over 4095 and alpha's to its
@@ -215,8 +223,8 @@ use crate::lower::select::SelectCx;
 use crate::lower::stage_io::{self, Returned};
 use crate::lower::sync::memory_model;
 use crate::metal::format::{
-    accessed_without_format, color_output_components, sampled_type, spirv_image_format,
-    without_format_gaps, ExtendedRange, FormatEmulation, StorageUse,
+    accessed_without_format, color_output_components, rgba_twin, rgba_twin_gaps, sampled_type,
+    spirv_image_format, without_format_gaps, ExtendedRange, FormatEmulation, StorageUse,
 };
 use crate::metal::ColorWriteMask;
 use crate::pipeline::artifact::PrecisionNote;
@@ -544,7 +552,7 @@ pub struct StorageView {
     /// The attachment's Metal pixel format.
     pub pixel_format: crate::metal::PixelFormat,
     /// The attachment's Vulkan format, which the view takes (but an sRGB attachment's,
-    /// [`uint_view`](Self::uint_view)).
+    /// [`uint_view`](Self::uint_view), and a BGRA-order one's [`rgba_view`](Self::rgba_view)).
     pub format: vk::Format,
     /// The declared SPIR-V image format: `Unknown` for a formatless declaration.
     pub declared: crate::spv::ImageFormat,
@@ -572,10 +580,16 @@ pub struct StorageView {
     /// there. `None` for an unblended write, no write, or another format.
     pub blend: Option<BlendEquation>,
     /// The unsigned-integer format of the texel size an sRGB attachment is viewed in
-    /// (`StorageAttachmentUse::uint_view`): the declaration's texels are its `uint`s, which a
+    /// (`StorageAttachmentUse::view_alias`): the declaration's texels are its `uint`s, which a
     /// read unpacks and decodes and a write encodes and packs, by Metal's measured conversions.
     /// `None` for another format.
     pub uint_view: Option<vk::Format>,
+    /// The RGBA-order twin a BGRA-order attachment is viewed in (`StorageAttachmentUse::
+    /// view_alias`, `metal::format::rgba_twin`) on a device that accesses its own format without
+    /// one in neither direction: the declaration is the twin's, and every texel read from the
+    /// image or written to it has red and blue exchanged ([`metal_order`]), so the function sees
+    /// Metal's channels. `None` for another format and device.
+    pub rgba_view: Option<vk::Format>,
 }
 
 impl StorageView {
@@ -757,10 +771,15 @@ pub(crate) fn storage_form(
     // twelve-bit decode of the stored byte, `math::unpack`'s, even after an earlier draw of the
     // pass wrote it, and a write stores `math::pack`'s encode). The one- and two-channel sRGB
     // formats are not measured, nor is a blend into one.
-    let uint_view = StorageAttachmentUse::uint_view_of(format).filter(|&u| {
-        srgb && u == vk::Format::R32_UINT && mapping.emulation == FormatEmulation::Direct
-    });
-    let viewed = uint_view.unwrap_or(format);
+    // A BGRA-order attachment on a device that accesses its format without one in neither
+    // direction (SPIR-V names no image format for it) is viewed in its RGBA-order twin, whose red
+    // and blue the function exchanges on every read and write: the device converts each channel
+    // as it converts the attachment's, so the values are those of the attachment's own view.
+    let alias = StorageAttachmentUse::view_alias_of(format, p)
+        .filter(|_| mapping.emulation == FormatEmulation::Direct);
+    let uint_view = alias.filter(|&u| srgb && u == vk::Format::R32_UINT);
+    let rgba_view = alias.filter(|_| !srgb);
+    let viewed = uint_view.or(rgba_view).unwrap_or(format);
     let writes = use_.writes;
     // The channels a write keeps from the texel: those of the format the descriptor's mask leaves
     // out, or all four where it leaves out every one (the write stores nothing). An `Unspecialized`
@@ -854,7 +873,9 @@ pub(crate) fn storage_form(
             defect,
         )));
     }
-    let mut missing = Vec::new();
+    // What the form needs whatever view it takes, and what the view's own route lacks.
+    let mut common = Vec::new();
+    let mut route = Vec::new();
     // The per-sample form: the image read and written at the invocation's `SampleId`, which needs
     // sample-rate shading. It is multisampled where the device has multisampled storage images (its
     // sample count is the pipeline's, which link checks against `storageImageSampleCounts`), and
@@ -865,13 +886,13 @@ pub(crate) fn storage_form(
         (true, false) => StorageSamples::Planes,
     };
     if multisampled && !f.fragment.sample_rate_shading {
-        missing.push(Capability::Feature(VkFeature::SampleRateShading));
+        common.push(Capability::Feature(VkFeature::SampleRateShading));
     }
     if writes && !f.leaf.fragment_stores_and_atomics {
-        missing.push(Capability::Feature(VkFeature::FragmentStoresAndAtomics));
+        common.push(Capability::Feature(VkFeature::FragmentStoresAndAtomics));
     }
     if !p.supports_format(viewed, FormatUsage::StorageImage) {
-        missing.push(Capability::Format {
+        route.push(Capability::Format {
             format: viewed,
             usage: FormatUsage::StorageImage,
         });
@@ -891,10 +912,10 @@ pub(crate) fn storage_form(
         Some(d) => Some(d),
         None => {
             match spirv_image_format(viewed) {
-                Some(_) => missing.push(Capability::Feature(
+                Some(_) => route.push(Capability::Feature(
                     VkFeature::ShaderStorageImageExtendedFormats,
                 )),
-                None => missing.extend(without_format_gaps(viewed, use_without, p)),
+                None => route.extend(without_format_gaps(viewed, use_without, p)),
             }
             None
         }
@@ -904,7 +925,7 @@ pub(crate) fn storage_form(
         (None, None) => sampled_type(pf).ok_or_else(not_implemented)?,
     };
     match declared {
-        Some(declared) if missing.is_empty() => Ok(Ok(StorageView {
+        Some(declared) if common.is_empty() && route.is_empty() => Ok(Ok(StorageView {
             pixel_format: pf,
             format,
             declared,
@@ -915,11 +936,24 @@ pub(crate) fn storage_form(
             extended,
             blend,
             uint_view,
+            rgba_view,
         })),
-        _ => Ok(Err(Unsupported::needs_any_of(
-            Feature::FramebufferFetch,
-            vec![missing],
-        ))),
+        _ => {
+            // A BGRA-order format no declaration reaches, whose RGBA-order twin lacks something
+            // too: either route's gaps.
+            let mut alternatives = vec![[common.clone(), route].concat()];
+            let twin_gaps = rgba_twin(viewed)
+                .filter(|_| declared.is_none())
+                .map(|twin| rgba_twin_gaps(twin, p))
+                .filter(|gaps| !gaps.is_empty());
+            if let Some(twin_gaps) = twin_gaps {
+                alternatives.push([common, twin_gaps].concat());
+            }
+            Ok(Err(Unsupported::needs_any_of(
+                Feature::FramebufferFetch,
+                alternatives,
+            )))
+        }
     }
 }
 
@@ -1726,7 +1760,8 @@ pub(super) fn finish(cx: &SelectCx<'_>) -> Result<(), Error> {
 /// coordinate (and sample) and a read per use, and at each of `rets` returns the coordinate, the
 /// guard (with the returned mask's bit), and a write per written attachment (a read first where
 /// it merges kept channels, and a decode, blend, and encode where it blends an extended-range
-/// texel).
+/// texel; an exchange of red and blue per read and write of an attachment viewed in its
+/// RGBA-order twin).
 pub(super) fn words(cx: &SelectCx<'_>, uses: u64, rets: u64) -> u64 {
     const OBJECT: u64 = 40;
     const READ: u64 = 56;
@@ -1785,6 +1820,12 @@ pub(super) fn words(cx: &SelectCx<'_>, uses: u64, rets: u64) -> u64 {
     let shadowed = fetch.values().filter(|sc| sc.shadowed).count() as u64;
     // An extended-range attachment's read decodes its texel, an sRGB one's reorders its bytes and
     // decodes three channels' steps and four quotients.
+    // An RGBA-order view's read and write exchange red and blue: one shuffle each.
+    const EXCHANGE: u64 = 10;
+    let exchanged = fetch
+        .values()
+        .filter(|sc| sc.view.rgba_view.is_some())
+        .count() as u64;
     let read = match (
         fetch.values().any(|sc| sc.view.extended.is_some()),
         fetch.values().any(|sc| sc.view.uint_view.is_some()),
@@ -1792,7 +1833,8 @@ pub(super) fn words(cx: &SelectCx<'_>, uses: u64, rets: u64) -> u64 {
         (true, _) => READ.saturating_add(u64::from(extended_range::DECODE_WORDS) + 120),
         (false, true) => READ.saturating_add(u64::from(3 * srgb::STEP_WORDS) + 400),
         (false, false) => READ,
-    };
+    }
+    .saturating_add(EXCHANGE.saturating_mul(exchanged));
     // An sRGB attachment's write encodes four channels (three through Metal's thresholds),
     // reorders its bytes, and merges kept ones from the texel it reads first.
     let srgb_writes = fetch
@@ -1809,6 +1851,7 @@ pub(super) fn words(cx: &SelectCx<'_>, uses: u64, rets: u64) -> u64 {
         .saturating_add(stage_io::extended_color::WORDS.saturating_mul(unblended))
         .saturating_add(srgb_write.saturating_mul(srgb_writes))
         .saturating_add((READ + WRITE + 8).saturating_mul(shadowed))
+        .saturating_add((2 * EXCHANGE).saturating_mul(exchanged))
         .saturating_add(40);
     OBJECT
         .saturating_mul(fetch.len() as u64 + shadowed)
@@ -1949,6 +1992,34 @@ fn image_and_texel(
     Ok((image, texel, ImageOperands::default()))
 }
 
+/// The texel of storage-form attachment `sc`'s image at the invocation's pixel (and sample) of
+/// attachment `color`, read inside the interlock, in Metal's channel order ([`metal_order`]):
+/// every read of the attachment's image goes through here, so a read, a merge's kept channels, a
+/// blend's destination and the per-sample forms see Metal's channels alike.
+fn read_texel(
+    cx: &mut EmitCx<'_>,
+    fb: &mut FunctionBuilder<'_>,
+    color: u32,
+    sc: &StorageColor,
+) -> BResult<SValue> {
+    let (image, at, ops) = image_and_texel(cx, fb, color, sc.view.samples)?;
+    let mem = memory_model::coherence(cx.plan).texel(fb)?;
+    let texel = fb.read(image, at, &ops, mem)?;
+    metal_order(fb, sc, texel)
+}
+
+/// Texel `texel` of storage-form attachment `sc`, in Metal's channel order from the image's or in
+/// the image's from Metal's: an attachment viewed in its RGBA-order twin
+/// ([`StorageView::rgba_view`]) has red and blue exchanged, an exchange that is its own inverse;
+/// any other is as it is. Every texel written to the attachment's image goes through here too
+/// ([`emit_return`]).
+fn metal_order(fb: &mut FunctionBuilder<'_>, sc: &StorageColor, texel: SValue) -> BResult<SValue> {
+    match sc.view.rgba_view {
+        Some(_) => fb.vector_shuffle(texel, texel, &[2, 1, 0, 3]),
+        None => Ok(texel),
+    }
+}
+
 /// The image operands of a fetched color's read or write in a multisampled image (an input
 /// attachment, or a multisampled storage image): the invocation's `SampleId` for a per-sample
 /// function (`FragmentPlan::fetch_sample`), none for one sample.
@@ -2027,11 +2098,7 @@ pub(super) fn value(
     };
     let texel = match texel {
         Some(held) => held,
-        None => {
-            let (image, at, ops) = image_and_texel(cx, fb, c.color, sc.view.samples)?;
-            let mem = memory_model::coherence(cx.plan).texel(fb)?;
-            fb.read(image, at, &ops, mem)?
-        }
+        None => read_texel(cx, fb, c.color, &sc)?,
     };
     let texel = match (sc.view.extended, sc.view.uint_view) {
         (Some(_), _) if sc.shadowed => texel,
@@ -2132,6 +2199,8 @@ pub(super) fn emit_return(
                 texel_of(fb, part, form, sc.view.numeric)?
             }
         };
+        // The image's texel of the Metal-ordered one.
+        let texel = metal_order(fb, &sc, texel)?;
         let (image, at, ops) = image_and_texel(cx, fb, color, sc.view.samples)?;
         texels.push((image, at, texel, ops));
         if let Some(held) = held {
@@ -2218,9 +2287,7 @@ fn half_blended(
         };
         return ops::splat(fb, form.with(Held::Float(FloatFmt::F32)), bits);
     }
-    let (image, at, ops) = image_and_texel(cx, fb, color, sc.view.samples)?;
-    let mem = memory_model::coherence(cx.plan).texel(fb)?;
-    let texel = fb.read(image, at, &ops, mem)?;
+    let texel = read_texel(cx, fb, color, sc)?;
     let d = as_held(fb, texel, sc.view.numeric)?;
     let constant = match b.reads_constant() {
         true => {
@@ -2307,9 +2374,7 @@ fn merge(
     form: Form,
     part: SValue,
 ) -> BResult<SValue> {
-    let (image, at, ops) = image_and_texel(cx, fb, color, sc.view.samples)?;
-    let mem = memory_model::coherence(cx.plan).texel(fb)?;
-    let texel = fb.read(image, at, &ops, mem)?;
+    let texel = read_texel(cx, fb, color, sc)?;
     let texel = as_held(fb, texel, sc.view.numeric)?;
     let n = u32::from(form.lanes);
     if n < 2 {
@@ -2444,9 +2509,7 @@ fn blended(
         if let Some(texel) = codes {
             return Ok(texel);
         }
-        let (image, at, ops) = image_and_texel(cx, fb, color, sc.view.samples)?;
-        let mem = memory_model::coherence(cx.plan).texel(fb)?;
-        let texel = fb.read(image, at, &ops, mem)?;
+        let texel = read_texel(cx, fb, color, sc)?;
         codes = Some(texel);
         Ok(texel)
     };
@@ -2582,9 +2645,7 @@ fn srgb_texel(
             .zip(bytes)
             .filter(|(c, _)| sc.view.kept.contains(**c))
             .fold(0u32, |m, (_, at)| m | 0xff << at);
-        let (image, at, ops) = image_and_texel(cx, fb, color, sc.view.samples)?;
-        let mem = memory_model::coherence(cx.plan).texel(fb)?;
-        let old = fb.read(image, at, &ops, mem)?;
+        let old = read_texel(cx, fb, color, sc)?;
         let old = fb.composite_extract(old, &[0])?;
         let keep = fb.u32_const(mask)?;
         let keep = fb.module().const_value(keep)?;

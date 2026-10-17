@@ -357,7 +357,11 @@ Where Metal's rules differ from Vulkan's, the pipeline gives Metal's answer:
   state of those it does; where those differ the pipeline is refused, naming the feature.
 - A fragment function that reads a color attachment (framebuffer fetch) reads it in an ordered
   form wherever the device has one: rasterization-order attachment access, or the interlocked
-  storage form. A `[[stencil]]` output uses `VK_EXT_shader_stencil_export`.
+  storage form, which binds the attachment as a storage image viewed in
+  `StorageAttachmentUse::view_format()`: its own format, an 8-bit sRGB format's unsigned-integer
+  view, or, where the device declares a BGRA-order format neither typed nor without a format, its
+  RGBA-order twin (the shader exchanges red and blue). A `[[stencil]]` output uses
+  `VK_EXT_shader_stencil_export`.
 - `[[barycentric_coord]]` reads `BaryCoordKHR` or `BaryCoordNoPerspKHR`, whose vertex order is
   Vulkan's first-vertex order and Metal's for every primitive type. A `float3` read takes the
   first two weights and computes the third as `1 - (x + y)` in `float`, as Metal does, not the

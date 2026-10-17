@@ -1314,7 +1314,7 @@ codec_struct! {
     ColorAttachmentState { format, write_mask, blend }
     BlendState { src_color, dst_color, color_op, src_alpha, dst_alpha, alpha_op }
     InputAttachmentUse { color_index, input_attachment_index, format_class }
-    StorageAttachmentUse { color_index, format, writes, formatless, view, uint_view, kept }
+    StorageAttachmentUse { color_index, format, writes, formatless, view, view_alias, kept }
     ShadowStencilUse { format, formatless, samples }
     ShaderTestsUse { depth, stencil }
     StandInUse { format, formatless, samples, view }

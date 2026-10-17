@@ -58,7 +58,18 @@
 //! a backing; the pass's draws that do not fetch it render it through a view in its own format. A
 //! multisampled pass's sample planes take the view too (`sample_planes.rs`). A device that stores
 //! no image of the view's format, or does not reinterpret the attachment's components as the
-//! view's, refuses the fetching draw, typed `Unsupported`. Through input attachments the device
+//! view's, refuses the fetching draw, typed `Unsupported`.
+//!
+//! A BGRA-order attachment (`BGRA8Unorm`, `BGR10A2Unorm`) on a device that accesses its format
+//! without one in neither direction (ANV; SPIR-V names no image format for it) is read and written
+//! through a storage view in its RGBA-order twin (`R8G8B8A8_UNORM`, `A2B10G10R10_UNORM_PACK32`),
+//! the compile layer exchanging red and blue: one decision for both layers
+//! (`StorageAttachmentUse::view_alias_of`, with the device's profile), so a device that reads the
+//! format without one (RADV, NVIDIA, MoltenVK) views it in its own format, as before. A color
+//! render target's free `STORAGE` ([`storage_candidate`]) is mutable to the twin as well where
+//! that costs the image nothing, so the common pass fetches it in place; a texture Metal may write
+//! lists the twin already (`metal::format::storage_view_formats`); any other renders into a
+//! scratch, backing or sample planes made mutable to it, as the sRGB view's. Through input attachments the device
 //! decodes the codes the function reads, and the compile layer takes that value back to its code by
 //! Metal's encode and decodes the code by Metal's table, so the function reads Metal's value there
 //! too.
@@ -90,7 +101,7 @@ use metal2vulkan::device::{DeviceProfile, FormatUsage, VkFeature, VkProperty};
 use metal2vulkan::error::{Capability, Feature, Unsupported};
 use metal2vulkan::metal::TextureType;
 use metal2vulkan::pipeline::{GraphicsState, StorageAttachmentUse};
-use metal2vulkan::vk::{Format, ImageCreateFlags, ImageUsageFlags};
+use metal2vulkan::vk::{Format, ImageCreateFlags, ImageUsageFlags, NumericFormat};
 use std::collections::VecDeque;
 
 /// Whether the compile layer reads `profile`'s fetched color attachments as input attachments
@@ -136,14 +147,17 @@ pub(crate) fn stores_samples(profile: &DeviceProfile, samples: u32) -> bool {
 }
 
 /// The format of a fetching draw's storage view of a color attachment of `format` in the pixel
-/// interlock (`StorageAttachmentUse::view_format`): the unsigned-integer format of an 8-bit sRGB
-/// format's texel size (`StorageAttachmentUse::uint_view_of`), through which the compile layer
-/// reads and writes the attachment's codes and decodes and encodes them itself, as Metal's tile
-/// keeps them; `format` itself for any other. A pass renders such an attachment, wherever a
-/// draw fetches it, into an image that takes this view: its own where it does
-/// ([`views_in`]), else a stand-in made mutable to it (`attachment_stand_in.rs`).
-pub(crate) fn storage_view_format(format: Format) -> Format {
-    StorageAttachmentUse::uint_view_of(format).unwrap_or(format)
+/// interlock on `profile` (`StorageAttachmentUse::view_format`), the compile layer's own choice
+/// (`StorageAttachmentUse::view_alias_of`): the unsigned-integer format of an 8-bit sRGB
+/// format's texel size, through which the compile layer reads and writes the attachment's codes
+/// and decodes and encodes them itself, as Metal's tile keeps them; a BGRA-order format's
+/// RGBA-order twin on a device that accesses the format without one in neither direction (ANV),
+/// through which it reads and writes the texels with red and blue exchanged; `format` itself for
+/// any other, and on any other device. A pass renders such an attachment, wherever a draw fetches
+/// it, into an image that takes this view: its own where it does ([`views_in`]), else a stand-in
+/// made mutable to it (`attachment_stand_in.rs`).
+pub(crate) fn storage_view_format(profile: &DeviceProfile, format: Format) -> Format {
+    StorageAttachmentUse::view_alias_of(format, profile).unwrap_or(format)
 }
 
 /// Whether an image of `plan` takes a view in `format`: its own format, or a mutable image's
@@ -159,7 +173,7 @@ pub(crate) fn views_in(plan: &ImagePlan, format: Format) -> bool {
 /// that format, or the attachment a view of it in a format `profile` stores, or the image takes
 /// the view ([`views_in`]).
 pub(crate) fn stores_in_place(profile: &DeviceProfile, format: Format, plan: &ImagePlan) -> bool {
-    let view = storage_view_format(format);
+    let view = storage_view_format(profile, format);
     if view == format {
         format == plan.format || profile.supports_format(format, FormatUsage::StorageImage)
     } else {
@@ -211,8 +225,12 @@ pub(crate) fn fetch_candidate(plan: &ImagePlan, profile: &DeviceProfile) -> Opti
 /// image (the module docs): a color attachment that is not transient, of a format the device
 /// stores, on a device whose fetch is that form; single-sampled, or multisampled where the fetch
 /// reads the attachment's own multisampled image ([`through_multisampled_storage`]) and the device
-/// stores images of its samples ([`stores_samples`]). `None` where the plan has `STORAGE` already
-/// (a texture Metal may write) or cannot take it.
+/// stores images of its samples ([`stores_samples`]). Where a fetching draw views the image in
+/// another format ([`storage_view_format`]: a BGRA-order format's RGBA-order twin on ANV) that
+/// the device stores and the image does not take ([`views_in`]), the candidate is mutable to it
+/// too, its own format and the view's listed (beside those it lists already), so a pass fetches
+/// it in place. `None` where the plan has `STORAGE` already (a texture Metal may write) or cannot
+/// take it.
 pub(crate) fn storage_candidate(plan: &ImagePlan, profile: &DeviceProfile) -> Option<ImagePlan> {
     let usage = plan.usage;
     let samples = plan.samples.as_raw();
@@ -223,10 +241,27 @@ pub(crate) fn storage_candidate(plan: &ImagePlan, profile: &DeviceProfile) -> Op
         && own_image
         && stores_samples(profile, samples)
         && profile.supports_format(plan.format, FormatUsage::StorageImage);
-    candidate.then(|| ImagePlan {
+    if !candidate {
+        return None;
+    }
+    let mut candidate = ImagePlan {
         usage: usage | ImageUsageFlags::STORAGE,
         ..plan.clone()
-    })
+    };
+    // An 8-bit sRGB format's unsigned-integer view stays off a texture (the module docs).
+    let srgb = plan
+        .format
+        .block()
+        .is_some_and(|b| b.color == Some(NumericFormat::Srgb));
+    let view = storage_view_format(profile, plan.format);
+    if !srgb && !views_in(plan, view) && profile.supports_format(view, FormatUsage::StorageImage) {
+        candidate.flags |= ImageCreateFlags::MUTABLE_FORMAT;
+        if candidate.view_formats.is_empty() {
+            candidate.view_formats.push(plan.format);
+        }
+        candidate.view_formats.push(view);
+    }
+    Some(candidate)
 }
 
 /// Whether the sample planes' copies (`sample_planes.rs`) read and write `plan`'s image directly:

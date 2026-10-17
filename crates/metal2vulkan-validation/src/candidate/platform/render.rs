@@ -1533,6 +1533,12 @@ impl<'a> Targets<'a> {
                     StorageAttachmentView::Attachment => Bound::Storage,
                     StorageAttachmentView::SamplePlanes { .. } => Bound::Planes,
                 };
+                // The draw views a multisampled target in its own format alone.
+                if bound == Bound::Storage && a.view_alias.is_some() {
+                    return Err(not_implemented(
+                        "a multisampled storage-form attachment viewed in another format",
+                    ));
+                }
                 let target = multisampled::create_target(
                     context,
                     a.color_index,

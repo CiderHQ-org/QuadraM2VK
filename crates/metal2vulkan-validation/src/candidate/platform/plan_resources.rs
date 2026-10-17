@@ -347,14 +347,16 @@ impl<'a> PlanResources<'a> {
                 {
                     continue
                 }
+                // In its view's format: the attachment's own, or the pipeline's alias of it
+                // (`StorageAttachmentUse::view_alias`), which makes the image mutable to it.
                 WriteSource::TileAttachment {
                     color_index,
                     format,
                     view: StorageAttachmentView::Attachment,
-                    uint_view: None,
+                    view_alias,
                 } => (
                     TextureKey::TileAttachment(*color_index),
-                    tile_attachment_view(guest, *color_index, *format)?,
+                    tile_attachment_view(guest, *color_index, view_alias.unwrap_or(*format))?,
                 ),
                 WriteSource::TileAttachment { color_index, .. } => {
                     return Err(format!(
@@ -757,11 +759,12 @@ impl<'a> PlanResources<'a> {
                 color_index,
                 format,
                 view: StorageAttachmentView::Attachment,
-                uint_view: None,
+                view_alias,
             } => {
                 let key = TextureKey::TileAttachment(*color_index);
                 let (image, layout) = self.image(key)?;
-                let format = tile_attachment_view(guest, *color_index, *format)?.format;
+                let format = view_alias.unwrap_or(*format);
+                let format = tile_attachment_view(guest, *color_index, format)?.format;
                 let info = vk::ImageViewCreateInfo::default()
                     .image(image)
                     .view_type(vk::ImageViewType::TYPE_2D)
@@ -1388,7 +1391,8 @@ impl<'a> PlanResources<'a> {
 /// The view of color attachment `index` of a tile pass or of a draw's storage form in the plan's
 /// `format`, in `GENERAL`: for a tile pass the attachment's own format for an integer one and the
 /// unsigned-integer format of the same channels for a float one, which [`create_slot_image`] makes
-/// the image `MUTABLE_FORMAT` for; for a draw the attachment's own format.
+/// the image `MUTABLE_FORMAT` for; for a draw the attachment's own format, or the pipeline's alias
+/// of it (`StorageAttachmentUse::view_alias`), which it makes the image mutable to likewise.
 fn tile_attachment_view(
     guest: &Guest<'_>,
     index: u32,

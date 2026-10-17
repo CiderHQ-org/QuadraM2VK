@@ -932,7 +932,7 @@ fn the_merged_members_round_trip_in_one_render_pipeline() {
         writes: true,
         formatless: false,
         view: crate::pipeline::StorageAttachmentView::SamplePlanes { layers: 4 },
-        uint_view: Some(vk::Format::R32_UINT),
+        view_alias: Some(vk::Format::R32_UINT),
         kept: vk::ColorComponentFlags::B,
     });
     p.dependencies.push(RuntimeDependency {

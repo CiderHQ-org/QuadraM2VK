@@ -268,6 +268,9 @@ impl<'a> SamplePlanes<'a> {
         copy_support(context, &label, view, samples)?;
         let words = view_format(view);
         let format: vk::Format = used.format.into();
+        // The draws' storage view: the attachment's format, or the pipeline's alias of it
+        // (`StorageAttachmentUse::view_alias`), to which the mutable planes take a view.
+        let draw_format: vk::Format = used.view_format().into();
         let mut planes = SamplePlanes {
             device: &context.device,
             color_index: used.color_index,
@@ -313,7 +316,7 @@ impl<'a> SamplePlanes<'a> {
             context,
             &label,
             planes.image,
-            (array, format, layers),
+            (array, draw_format, layers),
             vk::ImageUsageFlags::STORAGE,
         )?;
         planes.words = create_view(

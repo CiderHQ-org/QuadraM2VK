@@ -6,8 +6,9 @@
 //! addressed `(x, y, SampleId)` inside the pixel interlock. The render encoder keeps one per
 //! fetched attachment for the pass ([`Planes`], made at the first draw that reads it), binds its
 //! 2D-array storage view of every layer in the attachment's format (an 8-bit sRGB one's in the
-//! unsigned-integer format of its texel size, `framebuffer_fetch::storage_view_format`, to which
-//! the planes are made mutable) to each fetching draw, and
+//! unsigned-integer format of its texel size, a BGRA-order one's in its RGBA-order twin on ANV,
+//! `framebuffer_fetch::storage_view_format`, to which the planes are made mutable) to each fetching
+//! draw, and
 //! moves the samples between it and the attachment around the draws that read it
 //! (`render.rs`, [`PlanesStep`]):
 //!
@@ -97,8 +98,8 @@ pub(super) struct Planes {
     /// One layer per sample of the pass.
     pub(super) layers: u32,
     /// The format of the draws' storage view (`framebuffer_fetch::storage_view_format`): the
-    /// attachment's, the planes' own, or an 8-bit sRGB one's unsigned-integer view, to which the
-    /// planes are mutable.
+    /// attachment's, the planes' own, or an 8-bit sRGB one's unsigned-integer view or a BGRA-order
+    /// one's RGBA-order twin, to which the planes are mutable.
     pub(super) view: Format,
     /// The render area's extent, which the planes cover.
     pub(super) extent: [u32; 2],
@@ -160,10 +161,10 @@ impl Planes {
                 },
             );
         }
-        // The draws' storage view in its format (the attachment's, or an 8-bit sRGB one's
-        // unsigned-integer view), the split's storage view and the merge's sampled view in the
-        // copy format.
-        let view = framebuffer_fetch::storage_view_format(format);
+        // The draws' storage view in its format (the attachment's, an 8-bit sRGB one's
+        // unsigned-integer view, or a BGRA-order one's RGBA-order twin), the split's storage view
+        // and the merge's sampled view in the copy format.
+        let view = framebuffer_fetch::storage_view_format(profile, format);
         for (format, usage) in [
             (view, FormatUsage::StorageImage),
             (copy.format(), FormatUsage::StorageImage),

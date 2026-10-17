@@ -616,7 +616,7 @@ fn plan(p: &ComputePipeline, device: &Device, shape: &BindShape) -> Result<Bindi
                     color_index,
                     format: tile_view_format(p, color_index)?,
                     view: StorageAttachmentView::Attachment,
-                    uint_view: None,
+                    view_alias: None,
                 },
                 other => return Err(internal(format!("a compute binding {other:?}"))),
             };

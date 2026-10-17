@@ -320,6 +320,12 @@ driver's. Each is open work.
   512 arms together is refused (`TexelOffset` or `GatherExtended`): a driver's making grows faster
   than the arms (on ANV 512 arms make in 0.63 s, 1536 in 5.9 s). Applying the offset in the shader
   is exact only where the shader filters, so a filtered sample past the bound has no exact form yet.
+- **Format-less storage reads on a device without `shaderStorageImageReadWithoutFormat` (ANV).**
+  A fetch through the pixel interlock of a 16-bit packed color attachment (`B5G6R5Unorm`,
+  `A1BGR5Unorm`, `ABGR4Unorm`, `BGR5A1Unorm`), which no SPIR-V format names, is refused
+  (`FramebufferFetch`); so is a read of an argument buffer's writable texture, whose heap classes
+  are format-less (`ArgumentBufferTextures`). A fetch through a 16-bit unsigned view that packs
+  the channels in the shader, and heap storage classes typed per format, are not built.
 - **The formats from 630 to 645 under macOS 27.0.1.** The macOS 27.0.1 level answers as an Apple M3
   Max, which describes none of them (`BGRA10Unorm`, its packed, sRGB, PQ and HLG forms,
   `R10UintX6`, `RG10UintX12` and the rest): a texture of one is stopped and the linear alignment

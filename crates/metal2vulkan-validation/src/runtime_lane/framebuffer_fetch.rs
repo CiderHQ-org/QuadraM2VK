@@ -109,6 +109,12 @@
 //!   one minus the source alpha, fetched by `fbl_fetch_blend16`'s functions, which return a loaded
 //!   `half4` or `float4`: Metal's blend in every channel (EV FBL-sw1-m3). In the pixel interlock
 //!   the function computes it, no Vulkan blend applying to the storage write.
+//! - **A BGRA-order target** (`bgra.rs`): a `BGRA8Unorm` target (and `RGBA8Unorm` beside it)
+//!   whose channels take every byte, halved by `fetch_ordered` one to three times in a pass,
+//!   single-sampled and at 4x, under a mask of every channel and of red and alpha, beside an
+//!   unwritten `RGBA16Float` color 1: Metal's bytes (the M3 probe of `bgra.rs`). In the pixel
+//!   interlock on a device that reads `B8G8R8A8_UNORM` without a format in neither direction
+//!   (ANV), the attachment is read and written through its `R8G8B8A8_UNORM` view.
 //! - **An sRGB target** (`srgb.rs`): a `BGRA8Unorm_sRGB` target whose channels take every byte,
 //!   halved by `fetch_ordered` one to three times in a pass, with and without a depth and stencil
 //!   attachment that passes or fails half the draws' fragments: Metal's bytes (EV XRR2-halve1-m4).
@@ -126,6 +132,7 @@
 //!   planes' split before it and merge after it.
 
 mod beside_depth;
+mod bgra;
 mod blend16;
 mod coverage_chain;
 mod planes;

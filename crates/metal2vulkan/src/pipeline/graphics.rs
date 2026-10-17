@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 
 use crate::air::container::Hash256;
 use crate::device::requirements::{VkFeature, VkProperty};
+use crate::device::DeviceProfile;
 use crate::error::{
     Attachment, Capability, Error, Feature, InternalError, InternalKind, Unsupported,
 };
@@ -799,29 +800,38 @@ pub struct StorageAttachmentUse {
     pub format: vk::Format,
     /// The fragment function writes the attachment (otherwise it only reads it).
     pub writes: bool,
-    /// The function declares the storage image without a format (`Unknown`), so the format
-    /// supports storage reads (and, when `writes`, writes) without one
-    /// (`VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT` and its write twin); otherwise the
-    /// declaration names `format`'s SPIR-V image format.
+    /// The function declares the storage image without a format (`Unknown`), so the view's
+    /// format ([`view_format`](Self::view_format)) supports storage reads (and, when `writes`,
+    /// writes) without one (`VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT` and its write
+    /// twin); otherwise the declaration names the view's format's SPIR-V image format.
     pub formatless: bool,
     /// The image the consumer binds and how it views it: the attachment's own image, or its
     /// sample planes (see the type's docs). The plan's `WriteSource::TileAttachment` carries the
     /// same value.
     #[cfg_attr(feature = "serde", serde(default))]
     pub view: StorageAttachmentView,
-    /// Where `Some`, the storage view is in this unsigned-integer format of the attachment's
-    /// texel size (`R32_UINT` for a 4-byte texel, `R16_UINT` for 2, `R8_UINT` for 1), not in
-    /// `format`, which stays the attachment's own: an sRGB attachment, whose format has no
-    /// storage access, and whose texels the function unpacks in `format`'s byte order and decodes
-    /// and encodes itself, by Metal's measured conversions. The declaration names the view's
-    /// format (`formatless` is false). The consumer binds such a view of an image made with
-    /// `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT` and `VK_IMAGE_CREATE_EXTENDED_USAGE_BIT`, whose
+    /// Where `Some`, the storage view is in this format, not in `format`, which stays the
+    /// attachment's own ([`view_alias_of`](Self::view_alias_of) decides it from `format` and the
+    /// device):
+    ///
+    /// - an 8-bit sRGB attachment's unsigned-integer format of its texel size (`R32_UINT` for a
+    ///   4-byte texel): its format has no storage access, and the function unpacks the texels in
+    ///   `format`'s byte order and decodes and encodes them itself, by Metal's measured
+    ///   conversions;
+    /// - a BGRA-order attachment's RGBA-order twin (`R8G8B8A8_UNORM` for `B8G8R8A8_UNORM`,
+    ///   `A2B10G10R10_UNORM_PACK32` for `A2R10G10B10_UNORM_PACK32`) on a device that neither
+    ///   reads nor writes `format` without a format (SPIR-V names no image format for it): the
+    ///   function exchanges red and blue on every read and write, and the device converts each
+    ///   channel as it converts `format`'s.
+    ///
+    /// The consumer binds such a view of an image made with `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT`
+    /// (and `VK_IMAGE_CREATE_EXTENDED_USAGE_BIT` where `format` has no storage access), whose
     /// `VkImageFormatListCreateInfo` lists `format` and this format, with `STORAGE` usage (the
     /// sample planes of [`StorageAttachmentView::SamplePlanes`] in this format); its draws that
-    /// do not fetch render the image through a view in `format`. `None` for any other format: the
-    /// view is in `format`.
-    #[cfg_attr(feature = "serde", serde(default))]
-    pub uint_view: Option<vk::Format>,
+    /// do not fetch render the image through a view in `format`. `None` for any other format, and
+    /// on a device that accesses a BGRA-order format without one: the view is in `format`.
+    #[cfg_attr(feature = "serde", serde(default, alias = "uint_view"))]
+    pub view_alias: Option<vk::Format>,
     /// The channels the function's write keeps from the texel it reads first, by the pipeline's
     /// write mask: empty where it does not write the attachment or the mask covers every channel of
     /// the format, all four where it covers none of them (the write stores nothing), else those of
@@ -866,7 +876,7 @@ impl StorageAttachmentUse {
             writes,
             formatless,
             view,
-            uint_view: None,
+            view_alias: None,
             kept: vk::ColorComponentFlags::empty(),
         }
     }
@@ -876,34 +886,34 @@ impl StorageAttachmentUse {
         StorageAttachmentUse { kept, ..self }
     }
 
-    /// The use with its storage view in `uint_view` ([`uint_view`](Self::uint_view)).
-    pub fn with_uint_view(self, uint_view: vk::Format) -> StorageAttachmentUse {
+    /// The use with its storage view in `view_alias` ([`view_alias`](Self::view_alias)).
+    pub fn with_view_alias(self, view_alias: vk::Format) -> StorageAttachmentUse {
         StorageAttachmentUse {
-            uint_view: Some(uint_view),
+            view_alias: Some(view_alias),
             ..self
         }
     }
 
-    /// The format of the storage view: [`uint_view`](Self::uint_view) where it is set, else
+    /// The format of the storage view: [`view_alias`](Self::view_alias) where it is set, else
     /// `format`.
     pub fn view_format(&self) -> vk::Format {
-        self.uint_view.unwrap_or(self.format)
+        self.view_alias.unwrap_or(self.format)
     }
 
-    /// The unsigned-integer format of the texel size an attachment of the sRGB format `format`
-    /// is viewed in, where a fragment function reads it in the storage form
-    /// ([`uint_view`](Self::uint_view)): `R32_UINT` for `B8G8R8A8_SRGB` and `R8G8B8A8_SRGB`,
-    /// `R16_UINT` for `R8G8_SRGB`, `R8_UINT` for `R8_SRGB`; `None` for any other format. A
-    /// consumer that makes an attachment's image before it knows the pipeline (a memoryless
-    /// attachment's backing) makes it mutable to this format. The compile layer sets the view
-    /// only where it builds the form (today the four-byte formats).
-    pub fn uint_view_of(format: vk::Format) -> Option<vk::Format> {
-        match format {
-            vk::Format::B8G8R8A8_SRGB | vk::Format::R8G8B8A8_SRGB => Some(vk::Format::R32_UINT),
-            vk::Format::R8G8_SRGB => Some(vk::Format::R16_UINT),
-            vk::Format::R8_SRGB => Some(vk::Format::R8_UINT),
-            _ => None,
-        }
+    /// The format other than `format` a fetching draw views a color attachment of `format` in,
+    /// where a fragment function reads it in the storage form on `profile`
+    /// ([`view_alias`](Self::view_alias)): `R32_UINT` for `B8G8R8A8_SRGB` and `R8G8B8A8_SRGB`,
+    /// `R16_UINT` for `R8G8_SRGB` and `R8_UINT` for `R8_SRGB`, on every device; `R8G8B8A8_UNORM`
+    /// for `B8G8R8A8_UNORM` and `A2B10G10R10_UNORM_PACK32` for `A2R10G10B10_UNORM_PACK32` where
+    /// the device neither reads nor writes the attachment's format without a format, and stores
+    /// the twin and declares it (without a format, or by its SPIR-V image format,
+    /// `shaderStorageImageExtendedFormats` for an extended one); `None` for any other format and
+    /// device. The compile layer and a consumer that makes an attachment's image before it knows
+    /// the pipeline (a memoryless attachment's backing, a render target's free usage) both take
+    /// it from here, so the image is made mutable to the view the pipeline binds. The compile
+    /// layer sets an sRGB view only where it builds the form (today the four-byte formats).
+    pub fn view_alias_of(format: vk::Format, profile: &DeviceProfile) -> Option<vk::Format> {
+        crate::metal::format::fetch_view_alias(format, profile)
     }
 
     /// The format usages the consumer's image and view need: `StorageImage` of the view's
@@ -912,11 +922,12 @@ impl StorageAttachmentUse {
         &self,
     ) -> Vec<(vk::Format, crate::device::requirements::FormatUsage)> {
         use crate::device::requirements::FormatUsage as U;
-        let mut out = vec![(self.view_format(), U::StorageImage)];
+        let view = self.view_format();
+        let mut out = vec![(view, U::StorageImage)];
         if self.formatless {
-            out.push((self.format, U::StorageImageReadWithoutFormat));
+            out.push((view, U::StorageImageReadWithoutFormat));
             if self.writes {
-                out.push((self.format, U::StorageImageWriteWithoutFormat));
+                out.push((view, U::StorageImageWriteWithoutFormat));
             }
         }
         out

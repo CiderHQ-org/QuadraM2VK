@@ -145,7 +145,7 @@ pub fn storage_attachments(
                     writes,
                     formatless: view.formatless(),
                     view: view_of,
-                    uint_view: view.uint_view,
+                    view_alias: view.uint_view.or(view.rgba_view),
                     kept,
                 });
             }

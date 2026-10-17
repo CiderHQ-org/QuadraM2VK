@@ -756,7 +756,7 @@ fn the_binder_writes_storage_attachments_and_refuses_layered_passes() {
                     color_index: 0,
                     format: vk::Format::R32_SFLOAT,
                     view: crate::pipeline::StorageAttachmentView::Attachment,
-                    uint_view: None,
+                    view_alias: None,
                 }
         })
         .collect();
@@ -1788,6 +1788,168 @@ fn a_fetched_attachment_s_module_is_the_same_for_each_format_it_reads_alike() {
         shared += 1;
     }
     assert!(shared > 0, "no committed profile shares the module");
+}
+
+/// In the shape of the pipeline a guest made on ANV: `fetch_ordered` reads and writes color 0, a
+/// `BGRA8Unorm` attachment, beside an `RGBA16Float` color 1, no blending, every channel written. On
+/// the ANV profile (no `shaderStorageImageReadWithoutFormat`, and SPIR-V names no image format for
+/// `B8G8R8A8_UNORM`) the whole pipeline is made, its fetched attachment a written storage
+/// attachment viewed in `R8G8B8A8_UNORM` (`StorageAttachmentUse::view_alias`), declared `Rgba8`,
+/// which the plan's write binds; the fragment module exchanges red and blue (an `OpVectorShuffle`
+/// of lanes 2, 1, 0, 3 on its read and its write) and passes `spirv-val`. So at 4 samples, through
+/// sample planes, and under a write mask that keeps green and alpha. A pipeline fetching an
+/// `RGBA16Float` color 0 alone is made there too, viewed in its own format, declared `Rgba16f`. On
+/// a profile that reads and writes `B8G8R8A8_UNORM` without a format the pipeline keeps its own
+/// format, declared without one, as before.
+#[test]
+fn a_fetched_bgra_attachment_is_viewed_in_its_rgba_twin_where_no_declaration_reaches_it() {
+    use crate::metal::ColorWriteMask;
+    use crate::pipeline::{StorageAttachmentUse, StorageAttachmentView};
+    let (Some(io), Some(fetch)) = (fixture("stage_io"), fixture("fragment_fetch")) else {
+        return;
+    };
+    let device = |stem: &str| {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../metal2vulkan-validation/profiles")
+            .join(format!("{stem}.json"));
+        let text = std::fs::read_to_string(path).expect("profile");
+        let desc = DeviceDescription::from_khronos_json(&text, None).expect("description");
+        Device::new(desc, DevicePolicy::default()).expect("device")
+    };
+    let function = |bc: &[u8], name: &str| {
+        StageSource::Function(FunctionDescriptor::new(
+            Library::from_air(bc)
+                .expect("library")
+                .function(name)
+                .expect("function"),
+        ))
+    };
+    let descriptor = |colors: &[PixelFormat], samples: u32, mask: ColorWriteMask| {
+        let mut d = RenderPipelineDescriptor::new(function(&io, "stage_io_vertex_position"));
+        d.fragment = Some(function(&fetch, "fetch_ordered"));
+        for (i, &pf) in colors.iter().enumerate() {
+            d.color_attachments[i] = Some(ColorAttachmentDescriptor::new(pf));
+        }
+        if let Some(c) = d.color_attachments[0].as_mut() {
+            c.write_mask = mask;
+        }
+        d.raster_sample_count = samples;
+        d
+    };
+    // The instructions of opcode `op` in `words`, each as its words.
+    let instructions = |words: &[u32], op: u32| {
+        let mut at = 5;
+        let mut found = Vec::new();
+        while at < words.len() {
+            let count = (words[at] >> 16) as usize;
+            if count == 0 || at + count > words.len() {
+                break;
+            }
+            if words[at] & 0xffff == op {
+                found.push(words[at..at + count].to_vec());
+            }
+            at += count;
+        }
+        found
+    };
+    // The `OpVectorShuffle`s (79) of four lanes 2, 1, 0, 3: an exchange of red and blue.
+    let exchanges = |words: &[u32]| {
+        instructions(words, 79)
+            .iter()
+            .filter(|i| i.len() == 9 && i[5..] == [2, 1, 0, 3])
+            .count()
+    };
+    // Whether `words` declare an `OpTypeImage` (25) of storage (`Sampled` 2) in `format`.
+    let declares = |words: &[u32], format: crate::spv::ImageFormat| {
+        instructions(words, 25)
+            .iter()
+            .any(|i| i.len() >= 9 && i[7] == 2 && i[8] == format as u32)
+    };
+    let consumer = [PixelFormat::BGRA8Unorm, PixelFormat::RGBA16Float];
+    let partial = ColorWriteMask::RED.union(ColorWriteMask::BLUE);
+    let anv = device("intel-irisxe-anv");
+    for (samples, mask) in [
+        (1, ColorWriteMask::ALL),
+        (4, ColorWriteMask::ALL),
+        (1, partial),
+    ] {
+        let what = format!("{samples}x {mask:?}");
+        let p = anv
+            .compile_render_pipeline(&descriptor(&consumer, samples, mask), &Budget::standard())
+            .unwrap_or_else(|e| panic!("{what}: {e}"));
+        let view = match samples {
+            1 => StorageAttachmentView::Attachment,
+            layers => StorageAttachmentView::SamplePlanes { layers },
+        };
+        let kept = match mask == partial {
+            true => vk::ColorComponentFlags::G | vk::ColorComponentFlags::A,
+            false => vk::ColorComponentFlags::empty(),
+        };
+        let want = StorageAttachmentUse::new(0, vk::Format::B8G8R8A8_UNORM, true, false, view)
+            .with_view_alias(vk::Format::R8G8B8A8_UNORM)
+            .with_kept(kept);
+        assert_eq!(p.graphics.storage_attachments, [want], "{what}");
+        assert_eq!(want.view_format(), vk::Format::R8G8B8A8_UNORM);
+        let plan = p.plan(&anv, &BindState::default().shape()).expect("plan");
+        let bound = plan.descriptors.iter().any(|w| {
+            w.source
+                == WriteSource::TileAttachment {
+                    color_index: 0,
+                    format: vk::Format::B8G8R8A8_UNORM,
+                    view,
+                    view_alias: Some(vk::Format::R8G8B8A8_UNORM),
+                }
+        });
+        assert!(bound, "{what}: {:?}", plan.descriptors);
+        let fragment = (p.stages.iter())
+            .find(|m| m.stage == vk::ShaderStage::FRAGMENT)
+            .expect("a fragment stage");
+        let rgba8 = declares(&fragment.spirv, crate::spv::ImageFormat::Rgba8);
+        assert!(rgba8, "{what}: no Rgba8 storage image");
+        // A read, a write and, under the partial mask, the merge's read of the kept channels.
+        let reads = 1 + usize::from(mask == partial);
+        assert_eq!(exchanges(&fragment.spirv), reads + 1, "{what}");
+        check_words_valid(&fragment.spirv, &p.requirements, anv.profile())
+            .unwrap_or_else(|e| panic!("{what}: {e}"));
+    }
+    // `RGBA16Float` fetched alone: its own format, declared `Rgba16f`.
+    let p = anv
+        .compile_render_pipeline(
+            &descriptor(&[PixelFormat::RGBA16Float], 1, ColorWriteMask::ALL),
+            &Budget::standard(),
+        )
+        .expect("an RGBA16Float fetch");
+    let want = StorageAttachmentUse::new(
+        0,
+        vk::Format::R16G16B16A16_SFLOAT,
+        true,
+        false,
+        StorageAttachmentView::Attachment,
+    );
+    assert_eq!(p.graphics.storage_attachments, [want]);
+    let fragment = (p.stages.iter())
+        .find(|m| m.stage == vk::ShaderStage::FRAGMENT)
+        .expect("a fragment stage");
+    assert!(declares(&fragment.spirv, crate::spv::ImageFormat::Rgba16f));
+    assert_eq!(exchanges(&fragment.spirv), 0);
+    // A device that reads and writes `B8G8R8A8_UNORM` without a format keeps its own view.
+    for stem in ["amd-rdna3-radv", "nvidia-rtx5080-laptop"] {
+        let dev = device(stem);
+        let p = dev
+            .compile_render_pipeline(
+                &descriptor(&consumer, 1, ColorWriteMask::ALL),
+                &Budget::standard(),
+            )
+            .unwrap_or_else(|e| panic!("{stem}: {e}"));
+        let want = StorageAttachmentUse::new(
+            0,
+            vk::Format::B8G8R8A8_UNORM,
+            true,
+            true,
+            StorageAttachmentView::Attachment,
+        );
+        assert_eq!(p.graphics.storage_attachments, [want], "{stem}");
+    }
 }
 
 /// In the shapes of two pipelines a guest made: a fetched attachment written under a blend of one

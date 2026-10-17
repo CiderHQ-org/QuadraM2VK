@@ -23,7 +23,8 @@
 //!   the texture keeps its texels, as Apple's GPU keeps them. In the pixel interlock an 8-bit sRGB
 //!   texture renders, in a pass that fetches it, into a scratch made mutable to the
 //!   unsigned-integer view a fetching draw reads and writes it through
-//!   (`framebuffer_fetch::storage_view_format`), to which a texture's image is not made.
+//!   (`framebuffer_fetch::storage_view_format`), to which a texture's image is not made; so does
+//!   a BGRA-order texture viewed in its RGBA-order twin (ANV) whose image does not take that view.
 //!
 //! - **A depth/stencil texture not made for the pass's custom sample positions**. Vulkan rasterizes
 //!   a depth/stencil attachment at custom positions only where its image was made with
@@ -245,7 +246,8 @@ pub(super) fn kept_backing(
 /// A single-sampled color stand-in takes `STORAGE` usage where the device stores the format of a
 /// fetching draw's storage view of it (`framebuffer_fetch::storage_view_format`), which every
 /// fetched format's has (the compile layer's interlock form needs it), and is made mutable to
-/// that view where it is another format (an 8-bit sRGB format's); a multisampled one where the
+/// that view where it is another format (an 8-bit sRGB format's, a BGRA-order one's RGBA-order
+/// twin on ANV); a multisampled one where the
 /// device's fetch reads the attachment's own multisampled image and stores that view at its
 /// sample count. Either takes input attachment usage where the device's
 /// framebuffer fetch reads input attachments, and a multisampled one the sample planes' copies'
@@ -292,8 +294,9 @@ pub(super) fn stand_in_as(
         || (framebuffer_fetch::through_multisampled_storage(profile, target.samples)
             && framebuffer_fetch::stores_samples(profile, target.samples));
     // A fetching draw's storage view is in `view`: an 8-bit sRGB format's, the unsigned-integer
-    // format of its texel size (`framebuffer_fetch::storage_view_format`).
-    let view = framebuffer_fetch::storage_view_format(format);
+    // format of its texel size, a BGRA-order one's, its RGBA-order twin on a device that accesses
+    // its format without one in neither direction (`framebuffer_fetch::storage_view_format`).
+    let view = framebuffer_fetch::storage_view_format(profile, format);
     let stored = color && own_image && profile.supports_format(view, FormatUsage::StorageImage);
     if stored {
         usage |= ImageUsageFlags::STORAGE;
@@ -372,10 +375,10 @@ pub(super) fn stand_in_as(
             | TextureUsage::SHADER_ATOMIC
             | TextureUsage::PIXEL_FORMAT_VIEW,
     };
-    // A stand-in a fetching draw views in another format than its own (an sRGB format's) is
-    // mutable to that view, with extended usage: its `STORAGE` is the view's, which its own
-    // format need not have (a view in its own format serves the draws that do not fetch it, each
-    // view's usage restricted to what it serves, `binding_view.rs`).
+    // A stand-in a fetching draw views in another format than its own (an sRGB format's, an
+    // RGBA-order twin's) is mutable to that view, with extended usage: its `STORAGE` is the
+    // view's, which its own format need not have (a view in its own format serves the draws that
+    // do not fetch it, each view's usage restricted to what it serves, `binding_view.rs`).
     if stored && view != format {
         plan.flags |= ImageCreateFlags::MUTABLE_FORMAT | ImageCreateFlags::EXTENDED_USAGE;
         plan.view_formats = vec![format, view];

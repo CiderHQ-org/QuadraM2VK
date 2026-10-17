@@ -2760,6 +2760,71 @@ pub fn storage_view_formats(pf: PixelFormat, profile: &DeviceProfile) -> Vec<vk:
     formats
 }
 
+/// The RGBA-order twin of a BGRA-order direct format, whose fields are the format's with red and
+/// blue exchanged: `R8G8B8A8_UNORM` for `B8G8R8A8_UNORM` and `A2B10G10R10_UNORM_PACK32` for
+/// `A2R10G10B10_UNORM_PACK32`, each of the format's texel size and compatibility class (the
+/// kernels' `SwizzleBgra` alias views, [`storage_choice`]). SPIR-V names no image format for
+/// either BGRA-order format. `None` for every other format.
+pub(crate) fn rgba_twin(format: vk::Format) -> Option<vk::Format> {
+    match format {
+        vk::Format::B8G8R8A8_UNORM => Some(vk::Format::R8G8B8A8_UNORM),
+        vk::Format::A2R10G10B10_UNORM_PACK32 => Some(vk::Format::A2B10G10R10_UNORM_PACK32),
+        _ => None,
+    }
+}
+
+/// What a storage view in `twin`, an RGBA-order twin ([`rgba_twin`]), lacks on `profile` for a
+/// function that reads and writes it: the format's storage usage, and a declaration, without a
+/// format where the device grants the format that access without one, else by its SPIR-V image
+/// format (`shaderStorageImageExtendedFormats` for an extended one). Empty where it lacks
+/// nothing.
+pub(crate) fn rgba_twin_gaps(twin: vk::Format, profile: &DeviceProfile) -> Vec<Capability> {
+    let use_ = StorageUse::READ_WRITE_TEXTURE;
+    let mut gaps = Vec::new();
+    if !profile.supports_format(twin, FormatUsage::StorageImage) {
+        gaps.push(Capability::Format {
+            format: twin,
+            usage: FormatUsage::StorageImage,
+        });
+    }
+    if !accessed_without_format(twin, use_, profile) {
+        match spirv_image_format(twin) {
+            Some(declared)
+                if crate::spirv::requirements::extended_format(declared)
+                    && !profile.fields().images.storage_extended_formats =>
+            {
+                gaps.push(Capability::Feature(
+                    VkFeature::ShaderStorageImageExtendedFormats,
+                ));
+            }
+            Some(_) => {}
+            None => gaps.extend(without_format_gaps(twin, use_, profile)),
+        }
+    }
+    gaps
+}
+
+/// The format other than `format` a fetching draw's storage view of a color attachment of
+/// `format` takes in the storage form of framebuffer fetch on `profile`
+/// (`StorageAttachmentUse::view_alias_of`, its public door): an 8-bit sRGB format's
+/// unsigned-integer format of its texel size on every device, and a BGRA-order format's
+/// RGBA-order twin ([`rgba_twin`]) where the device neither reads nor writes the format without a
+/// format ([`accessed_without_format`]; SPIR-V names no image format for it, so no declaration
+/// reaches it otherwise) and the twin lacks nothing ([`rgba_twin_gaps`]). `None` elsewhere: the
+/// view is in `format`, and a device that accesses a BGRA-order format without one keeps that.
+pub(crate) fn fetch_view_alias(format: vk::Format, profile: &DeviceProfile) -> Option<vk::Format> {
+    use vk::Format as F;
+    match format {
+        F::B8G8R8A8_SRGB | F::R8G8B8A8_SRGB => Some(F::R32_UINT),
+        F::R8G8_SRGB => Some(F::R16_UINT),
+        F::R8_SRGB => Some(F::R8_UINT),
+        _ => rgba_twin(format).filter(|&twin| {
+            !accessed_without_format(format, StorageUse::READ_WRITE_TEXTURE, profile)
+                && rgba_twin_gaps(twin, profile).is_empty()
+        }),
+    }
+}
+
 /// The class of a storage choice that views `pf`'s own format for `use_`: for a half-float
 /// format (`R16Float`, `RG16Float`, `RGBA16Float`, `RGBX16Float`) the function writes, by what the device is
 /// measured to store for a written `float` (Metal rounds each channel toward zero and stores
