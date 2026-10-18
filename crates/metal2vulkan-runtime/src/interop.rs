@@ -169,10 +169,10 @@ impl CommandQueue {
     /// and presents (`vkQueuePresentKHR`) go there, externally synchronized as Vulkan requires.
     /// On MoltenVK, where the runtime relays the driver's command-buffer failures, it submits no
     /// work with a fence of its own after `f` under the same lock, so a failure of the caller's
-    /// submissions stays the caller's. There the runtime's frees of its memory wait for its own
-    /// work in flight, not for the caller's
-    /// (`RuntimeDriverDefect::FreedAddressMemoryFailsPendingWork`): a submission of the caller's
-    /// still pending whose pipelines read device addresses may fail.
+    /// submissions stays the caller's. There the runtime's frees of its memory wait for the work
+    /// in flight (`RuntimeDriverDefect::FreedAddressMemoryFailsPendingWork`), the caller's
+    /// submissions in `f` among it: that submission of no work also signals a value the use took
+    /// before `f` ran, and memory that goes while it is pending is freed once it completed.
     ///
     /// # Safety
     ///
@@ -183,7 +183,12 @@ impl CommandQueue {
         let shared = self.device().shared();
         let family = shared.queue_family_of(self.vk_queue());
         // Where the queue's failures are relayed, a mark after `f`'s submissions keeps a failure
-        // of theirs the caller's (`device/relay.rs`).
-        shared.use_queue(self.vk_queue(), By::Program, |queue| f(queue, family))
+        // of theirs the caller's (`device/relay.rs`); where freed memory waits for the work in
+        // flight, it waits for that mark (`freed_memory.rs`).
+        let used = shared.use_queue(self.vk_queue(), By::Program, |queue| f(queue, family));
+        if let Some(parking) = shared.parking.get() {
+            parking.watch(self.device());
+        }
+        used
     }
 }

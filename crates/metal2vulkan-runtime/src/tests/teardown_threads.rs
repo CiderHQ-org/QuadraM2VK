@@ -31,6 +31,16 @@
 //!   buffer of another queue committed after it finished, no thread but the handler's holds the
 //!   device. The handler lets the module go, then the command buffer's release drops the last
 //!   device handle on that thread, whose teardown destroys the module.
+//! - **Not a handler thread after the program's use of a queue**: on a device that parks freed
+//!   memory (`Device::park_freed_memory`), a use of a queue through `with_vk_queue` leaves its
+//!   mark pending and posts the watch of the marks, held as it begins (`freed_memory::held`). The
+//!   watch holds nothing of the device, so the program's drops tear the device down on its own
+//!   thread before the last drop returns; the teardown waits for the watch, let go once the
+//!   teardown began.
+//! - **Nor after a wait, beside a block that waits**: likewise, with a released host import's
+//!   block waiting for that mark and the release of freed memory that a later command buffer's
+//!   completion posted, held too, as the program's wait for that command buffer returns. The
+//!   teardown frees the block and runs its deallocator, before the last drop returns.
 //!
 //! The teardown's end is seen through the device's message sink, whose last share the instance
 //! drops after `vkDestroyInstance`, the teardown's last step: the sink owns a value that, dropped,
@@ -41,6 +51,7 @@
 //! fixture `validation/fixtures/public/examples/runtime_examples.ll` (`llvm-as`).
 
 use super::dispatch_pending as pending;
+use super::freed_memory::{unused, Host, Runs};
 use crate::device::lock;
 use crate::device::prime::SHADER;
 use crate::exit_guard;
@@ -57,6 +68,7 @@ use metal2vulkan::metal::{PixelFormat, PrimitiveType, TextureUsage};
 use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -467,4 +479,92 @@ fn a_host_step_s_own_module_and_the_last_device_go_on_a_handler_thread() {
     ending.not_yet("the completed handler");
     drop(open);
     ending.on(&[HANDLERS]);
+}
+
+/// A thread that lets the hold of `device`'s watch and releases go once its teardown began, or
+/// once the test let it go: the teardown waits for what the hold holds.
+fn let_go_once_torn_down(device: &Device) -> std::thread::JoinHandle<()> {
+    let parking = Arc::clone(device.shared().parking.get().expect("the device parks"));
+    std::thread::spawn(move || parking.release_once_closed())
+}
+
+/// The program's use of a queue leaves its mark pending; the watch of the marks, held as it
+/// begins, holds nothing of the device: the program's drops tear the device down on its own
+/// thread before the last drop returns, the teardown waiting for the watch.
+#[test]
+fn the_watch_of_the_program_s_marks_leaves_the_device_to_the_program_s_thread() {
+    let scratch = Scratch::new("marks");
+    let (device, ending) = watched(&scratch.0);
+    device.park_freed_memory();
+    let parking = Arc::clone(device.shared().parking.get().expect("the device parks"));
+    let queue = device.new_command_queue().unwrap();
+    parking.held.hold();
+    // SAFETY: the closure uses the queue for nothing.
+    unsafe { queue.with_vk_queue(|_, _| ()) };
+    parking.held.until_waiting(1, WAIT);
+    let releasing = let_go_once_torn_down(&device);
+    drop(queue);
+    drop(device);
+    let torn_down = ending.thread.try_recv();
+    parking.held.release();
+    releasing.join().unwrap();
+    assert_eq!(
+        torn_down,
+        Ok(program_thread()),
+        "the device was not torn down on this thread before its last drop returned"
+    );
+    let failures = lock(&ending.failures);
+    assert!(failures.is_empty(), "failing messages: {:#?}", *failures);
+}
+
+/// A released host import's block waits for the program's mark, which only the held watch sees;
+/// a later command buffer's completion posts the release of freed memory, held too, before the
+/// program's wait for it returns. Neither holds the device: the program's drops tear it down on
+/// its own thread before the last drop returns, freeing the block and running its deallocator.
+#[test]
+fn a_release_of_freed_memory_leaves_the_device_to_the_program_s_thread() {
+    let scratch = Scratch::new("unpark");
+    let host = Host::new();
+    let (device, ending) = watched(&scratch.0);
+    device.park_freed_memory();
+    let parking = Arc::clone(device.shared().parking.get().expect("the device parks"));
+    let queue = device.new_command_queue().unwrap();
+    let runs = Arc::new(Runs::default());
+    let Some(import) = unused(&device, &host, &runs) else {
+        return;
+    };
+    parking.held.hold();
+    // SAFETY: the closure uses the queue for nothing.
+    unsafe { queue.with_vk_queue(|_, _| ()) };
+    parking.held.until_waiting(1, WAIT);
+    drop(import);
+    assert_eq!(
+        device.work_counts().freed_memory_waiting,
+        1,
+        "the import's block waits for the mark"
+    );
+    let buffer = floats(&device, [0.0; 64]);
+    let command_buffer = filling(&queue, &buffer);
+    command_buffer.commit().unwrap();
+    command_buffer.wait_until_completed_for(WAIT).unwrap();
+    parking.held.until_waiting(2, WAIT);
+    let releasing = let_go_once_torn_down(&device);
+    drop((command_buffer, buffer, queue));
+    drop(device);
+    let torn_down = ending.thread.try_recv();
+    parking.held.release();
+    releasing.join().unwrap();
+    assert_eq!(
+        torn_down,
+        Ok(program_thread()),
+        "the device was not torn down on this thread before its last drop returned"
+    );
+    assert_eq!(
+        runs.count.load(Ordering::SeqCst),
+        1,
+        "the teardown freed the block and ran its deallocator"
+    );
+    let failures = lock(&ending.failures);
+    assert!(failures.is_empty(), "failing messages: {:#?}", *failures);
+    drop(host);
 }

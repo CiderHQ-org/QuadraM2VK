@@ -4,6 +4,12 @@
 //! released while a batch submitted before it runs keeps its memory, and its deallocator waits,
 //! until that batch completed, then goes on a handler thread; elsewhere it goes at once, as
 //! before. The counts show which path ran (`WorkCounts::freed_memory_parked`,
+//! `freed_memory_waiting`, `host_deallocators_delayed`). The same release waits too for the
+//! program's own submission through `CommandQueue::with_vk_queue` pending as it goes, held back
+//! by a timeline semaphore of the program's that the program signals once the release returned.
+//! And what a block notes as it goes holds it for the batches, the device's own submissions and
+//! the program's uses of a queue made before, and for none after.
+//!
 //! Where a host import goes as its release frees it: its free, then its deallocator, before the
 //! release returns, on the releasing thread, as Metal runs the deallocator (an M3 Max under macOS
 //! 27.0.1 ran an unused buffer's deallocator inside its final release, on the releasing thread,
@@ -19,6 +25,7 @@ use crate::{
     BufferContents, BufferDescriptor, CommandBuffer, CommandBufferStatus, CommandQueue, Device,
     DeviceKind, DeviceOptions, Error, HostMemory, KeepAlive, ResourceOptions, ShaderCacheOptions,
 };
+use ash::vk;
 use std::alloc::Layout;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
@@ -58,14 +65,14 @@ impl Drop for Scratch {
 
 /// Page-aligned host memory of [`BYTES`], freed when dropped: declared first, after the device
 /// that used it.
-struct Host(NonNull<u8>);
+pub(super) struct Host(NonNull<u8>);
 
 impl Host {
     fn layout() -> Layout {
         Layout::from_size_align(BYTES, BYTES).unwrap()
     }
 
-    fn new() -> Host {
+    pub(super) fn new() -> Host {
         // SAFETY: the layout's size is not zero.
         let pointer = unsafe { std::alloc::alloc_zeroed(Host::layout()) };
         Host(NonNull::new(pointer).unwrap())
@@ -102,14 +109,14 @@ fn device(cache: &Path) -> Device {
 
 /// The runs of a deallocator: how many, and the thread of the last.
 #[derive(Default)]
-struct Runs {
-    count: AtomicUsize,
+pub(super) struct Runs {
+    pub(super) count: AtomicUsize,
     thread: Mutex<Option<ThreadId>>,
 }
 
 /// A no-copy buffer over `host` that no command uses, its deallocator's runs in `runs`; `None`,
 /// printed, where the device imports no host memory.
-fn unused(device: &Device, host: &Host, runs: &Arc<Runs>) -> Option<crate::Buffer> {
+pub(super) fn unused(device: &Device, host: &Host, runs: &Arc<Runs>) -> Option<crate::Buffer> {
     let runs = Arc::clone(runs);
     // SAFETY: the memory outlives the buffer (dropped after the device), and nothing else uses it.
     let made = unsafe {
@@ -325,6 +332,113 @@ fn a_note_holds_a_block_for_the_work_submitted_before_it_alone() {
     );
     drop(later);
     assert!(parking.reached(&last), "every own submission completed");
+    // The program's uses of a queue, marked on a timeline of their own.
+    let raw = device.shared().vk();
+    let (_, first) = parking.program_use(1, raw).expect("the timeline of marks");
+    let using = parking.note();
+    assert!(
+        parking.reached(&last),
+        "a use of the program's after the note"
+    );
+    assert!(!parking.reached(&using), "the program's use in flight");
+    let (_, second) = parking.program_use(1, raw).unwrap();
+    parking.program_completed(1, first);
+    assert!(
+        parking.reached(&using),
+        "the program's use completed; the later one is after"
+    );
+    let after = parking.note();
+    assert!(!parking.reached(&after), "the later use in flight");
+    parking.program_completed(1, second);
+    assert!(
+        parking.reached(&after),
+        "every use of the program's completed"
+    );
+    // SAFETY: the timeline is the device's, and no submission or wait uses it.
+    unsafe { parking.release(raw) };
+}
+
+/// Where the device parks freed memory, a host import released while the program's own
+/// submission through `with_vk_queue` is pending keeps its memory, its deallocator waiting, until
+/// that submission completed: the runtime sees neither what it lists nor when it completes, so
+/// the use's mark holds the block. The submission waits on a timeline semaphore of the program's,
+/// which the program signals once the release returned, so nothing else of the device's is in
+/// flight meanwhile. It names none of the buffer's Vulkan objects: the block's buffer of addresses
+/// is destroyed as it goes, which Vulkan forbids under a pending command that names it, and
+/// MoltenVK fails a pending submission whose pipelines read device addresses whatever buffers it
+/// names (`RuntimeDriverDefect::FreedAddressMemoryFailsPendingWork`).
+#[test]
+fn a_release_waits_for_the_program_s_own_submission_where_the_device_parks_freed_memory() {
+    let scratch = Scratch::new("program");
+    let host = Host::new();
+    let device = device(&scratch.0);
+    device.park_freed_memory();
+    let queue = device.new_command_queue().unwrap();
+    let runs = Arc::new(Runs::default());
+    let Some(buffer) = unused(&device, &host, &runs) else {
+        return;
+    };
+    // SAFETY: the handles are used only below, while the device lives; nothing here destroys one
+    // of the runtime's, and the test submits only through `with_vk_queue`.
+    let vk_device = unsafe { device.raw() }.device;
+    let mut kind = vk::SemaphoreTypeCreateInfo::default()
+        .semaphore_type(vk::SemaphoreType::TIMELINE)
+        .initial_value(0);
+    let info = vk::SemaphoreCreateInfo::default().push_next(&mut kind);
+    // SAFETY: the device is live and enables `timelineSemaphore`.
+    let gate = unsafe { vk_device.create_semaphore(&info, None) }.unwrap();
+    let waits = [gate];
+    let values = [1];
+    let stages = [vk::PipelineStageFlags::ALL_COMMANDS];
+    let mut timeline = vk::TimelineSemaphoreSubmitInfo::default().wait_semaphore_values(&values);
+    let submit = vk::SubmitInfo::default()
+        .wait_semaphores(&waits)
+        .wait_dst_stage_mask(&stages)
+        .push_next(&mut timeline);
+    // SAFETY: the queue is used only inside `f`, under the runtime's lock; the submission waits
+    // for a value of the program's semaphore that the program signals below.
+    unsafe {
+        queue.with_vk_queue(|vk_queue, _| {
+            vk_device
+                .queue_submit(vk_queue, &[submit], vk::Fence::null())
+                .unwrap()
+        })
+    };
+    let before = device.work_counts();
+    drop(buffer);
+    let after = device.work_counts();
+    let ran = runs.count.load(Ordering::SeqCst);
+    eprintln!(
+        "FREED-MEMORY: at the release, the program's submission pending: parked {}, waiting {}, \
+         deallocators delayed {}, run {ran}",
+        after.freed_memory_parked - before.freed_memory_parked,
+        after.freed_memory_waiting,
+        after.host_deallocators_delayed - before.host_deallocators_delayed,
+    );
+    let signal = vk::SemaphoreSignalInfo::default().semaphore(gate).value(1);
+    // SAFETY: the program's semaphore, signalled above its value, with no signal pending.
+    unsafe { vk_device.signal_semaphore(&signal) }.unwrap();
+    assert_eq!(
+        ran, 0,
+        "the deallocator ran while the program's submission before its release was pending"
+    );
+    assert_eq!(after.freed_memory_parked - before.freed_memory_parked, 1);
+    assert_eq!(after.freed_memory_waiting, 1);
+    until("the deallocator never ran", || {
+        runs.count.load(Ordering::SeqCst) == 1
+    });
+    until("the memory never went", || {
+        device.work_counts().freed_memory_waiting == 0
+    });
+    assert_ne!(
+        *runs.thread.lock().unwrap(),
+        Some(std::thread::current().id()),
+        "the deallocator ran on the program's thread"
+    );
+    // SAFETY: the program's semaphore; the submission that waited on it completed (its mark
+    // did, which the deallocator waited for).
+    unsafe { vk_device.destroy_semaphore(gate, None) };
+}
 
 /// A no-copy buffer over `host` that no command uses, whose deallocator records its run in
 /// `runs` with the device's live host imports as it ran, once `go` lets it (at most [`WAIT`]);

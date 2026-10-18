@@ -415,47 +415,91 @@ impl super::DeviceShared {
     /// `f` with `VkQueue` `queue` under its lock: a use outside a batch, `by`'s. Where the
     /// queue's failures are relayed, a submission of no work after `f`'s, under the same lock,
     /// signals a fence logged as `by`'s, which ends where `f`'s submissions end (the module
-    /// docs); the marks before it whose fences are signaled go back first. Each reach of the
+    /// docs); the marks before it whose fences are signaled go back first. Where freed memory
+    /// waits for the work in flight, the program's use takes a value of the queue's timeline of
+    /// such marks before `f` runs, which that submission signals too (`freed_memory.rs`); should
+    /// the submission fail, the value counts as reached once the queue is idle. Each reach of the
     /// device is a section of the exit guard of its own (`f` runs outside one: it may be the
     /// program's); once the process is exiting no mark is made.
     pub(crate) fn use_queue<R>(&self, queue: usize, by: By, f: impl FnOnce(vk::Queue) -> R) -> R {
         let slot = &self.queues[queue];
-        let Some(flights) = slot.flights.get() else {
+        let flights = slot.flights.get();
+        let parking = (self.parking.get()).filter(|_| matches!(by, By::Program));
+        if flights.is_none() && parking.is_none() {
             return slot.with(f);
-        };
-        let fence = exit_guard::enter().and_then(|_busy| {
-            let raw = self.vk();
-            let mut done = flights.done_marks();
-            if !done.is_empty() {
-                // SAFETY: each is signaled, its submission completed, and out of the log.
-                let reset = unsafe { raw.reset_fences(&done) };
-                exit_guard::called(Call::ResetFences);
-                // Kept idle where reset; the rest, and all where the reset failed, released.
-                if reset.is_ok() {
-                    self.fences.keep(&mut done);
+        }
+        let fence = flights.and_then(|flights| {
+            exit_guard::enter().and_then(|_busy| {
+                let raw = self.vk();
+                let mut done = flights.done_marks();
+                if !done.is_empty() {
+                    // SAFETY: each is signaled, its submission completed, and out of the log.
+                    let reset = unsafe { raw.reset_fences(&done) };
+                    exit_guard::called(Call::ResetFences);
+                    // Kept idle where reset; the rest, and all where the reset failed, released.
+                    if reset.is_ok() {
+                        self.fences.keep(&mut done);
+                    }
+                    for fence in done {
+                        // SAFETY: as above.
+                        unsafe { crate::release::object(raw, fence) };
+                    }
                 }
-                for fence in done {
-                    // SAFETY: as above.
-                    unsafe { crate::release::object(raw, fence) };
-                }
-            }
-            // SAFETY: the device's fences, inside a section.
-            unsafe { self.fences.take(raw) }.ok()
+                // SAFETY: the device's fences, inside a section.
+                unsafe { self.fences.take(raw) }.ok()
+            })
         });
         slot.with(|vk_queue| {
+            // Taken before `f` submits: a block that goes meanwhile waits for the mark.
+            let mark = parking.and_then(|parking| {
+                let _busy = exit_guard::enter()?;
+                parking.program_use(queue, self.vk())
+            });
             let used = f(vk_queue);
-            if let (Some(fence), Some(_busy)) = (fence, exit_guard::enter()) {
-                let raw = self.vk();
+            let Some(_busy) = exit_guard::enter() else {
+                return used;
+            };
+            let raw = self.vk();
+            let logged = fence.zip(flights);
+            if let Some((fence, flights)) = logged {
                 flights.push(fence, by);
+            }
+            if fence.is_some() || mark.is_some() {
+                let signal = mark.map(|(timeline, value)| ([timeline], [value]));
+                let mut values = vk::TimelineSemaphoreSubmitInfo::default();
+                let mut submit = vk::SubmitInfo::default();
+                if let Some((timelines, signalled)) = &signal {
+                    values = values.signal_semaphore_values(signalled);
+                    submit = submit.signal_semaphores(timelines).push_next(&mut values);
+                }
+                // A mark alone needs a submission of its own; a fence alone none.
+                let submits = match signal.is_some() {
+                    true => std::slice::from_ref(&submit),
+                    false => &[],
+                };
                 self.counts.queue_submitted(0);
-                // SAFETY: a submission of no work with an unsignaled fence in no pending
-                // submission; the queue is used under its lock.
-                let submitted = unsafe { raw.queue_submit(vk_queue, &[], fence) };
+                // SAFETY: a submission of no work, with an unsignaled fence in no pending
+                // submission where it has one, signalling the timeline of marks above every
+                // value signalled there before where it has one; the queue is used under its
+                // lock.
+                let submitted =
+                    unsafe { raw.queue_submit(vk_queue, submits, fence.unwrap_or_default()) };
                 exit_guard::called(Call::QueueSubmit);
                 if submitted.is_err() {
-                    flights.unpush(fence);
-                    // SAFETY: the failed submission is not pending (as a failed batch's fence).
-                    unsafe { crate::release::object(raw, fence) };
+                    if let Some((fence, flights)) = logged {
+                        flights.unpush(fence);
+                        // SAFETY: the failed submission is not pending (as a failed batch's
+                        // fence).
+                        unsafe { crate::release::object(raw, fence) };
+                    }
+                    if let (Some(parking), Some((_, value))) = (parking, mark) {
+                        // The use's submissions completed once the queue is idle (or the device
+                        // is lost); the answer changes nothing.
+                        // SAFETY: the queue is used under its lock.
+                        let _ = unsafe { raw.queue_wait_idle(vk_queue) };
+                        exit_guard::called(Call::QueueWaitIdle);
+                        parking.program_completed(queue, value);
+                    }
                 }
             }
             used

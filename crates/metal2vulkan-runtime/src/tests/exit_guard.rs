@@ -1622,6 +1622,7 @@ fn the_device_s_functions_are_reached_through_checked_accessors() {
 /// tuple field, a type argument or a by-value parameter) fails
 /// `only_the_listed_modules_keep_the_device_s_functions`; so does a listed module that keeps none
 /// any more.
+const KEEPERS: [(&str, &str); 24] = [
     (
         "binding.rs",
         "the push command (vkCmdPushDescriptorSet), a call's parameter (`push_set`) and the \
@@ -1657,6 +1658,12 @@ fn the_device_s_functions_are_reached_through_checked_accessors() {
     (
         "dynamic_state.rs",
         "the device's extended dynamic state commands (DeviceShared)",
+    ),
+    (
+        "freed_memory.rs",
+        "the watch of the program's marks and the release of freed memory, posted to the handler \
+         threads; the teardown closes the parking first and waits for those threads, and one that \
+         starts after finds the parking closed and calls nothing",
     ),
     (
         "generated_commands.rs",

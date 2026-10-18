@@ -234,6 +234,9 @@ pub(super) struct Affected {
 ///   27.0.1: a bare-Vulkan program freeing an unused buffer's memory while a dispatch through a
 ///   device address waits behind fills fails at once, and `runtime_lane::freed_memory`: known
 ///   broken through 1.4.1. Nothing is refused: the runtime frees such memory once the batches
+///   submitted before it completed (`freed_memory.rs`), the program's own submissions through
+///   `CommandQueue::with_vk_queue` among them (a mark after each use signals a timeline of its
+///   own).
 ///
 /// `PushedBufferSizesUnset`:
 /// - MoltenVK (`MOLTENVK`): a shader's runtime array length of a buffer (`OpArrayLength`) reads

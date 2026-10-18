@@ -1992,8 +1992,9 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   unnamed holds a table of the live buffers that lists it (its first submission's and its host
   steps', until it completes; one a rebind encoded again before its first submission, until then);
   with no keep-alive on MoltenVK (`RuntimeDriverDefect::FreedAddressMemoryFailsPendingWork`), while
-  the batches submitted before the import's memory went are in flight, as MoltenVK fails pending work
-  that reads device addresses where such memory is freed. With a keep-alive the deallocator runs at
+  the batches submitted before the import's memory went, and the program's own submissions through
+  `CommandQueue::with_vk_queue` before it, are in flight, as MoltenVK fails pending work that reads
+  device addresses where such memory is freed. With a keep-alive the deallocator runs at
   the release, as Metal's, and the import keeps the keep-alive, which keeps the pages mapped, until
   it is freed: not announced.
   Cost: the deallocator runs once every such command buffer lets go of the pages, or those batches

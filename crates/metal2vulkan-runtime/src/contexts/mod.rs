@@ -95,6 +95,8 @@ struct Shared<I> {
     /// The notifies made, and those spared as no thread slept or no line was ready.
     woke: AtomicU64,
     spared: AtomicU64,
+    /// The identity the next context takes ([`Contexts::fresh`]).
+    next: AtomicU64,
 }
 
 struct State<I> {
@@ -144,6 +146,7 @@ impl<I: Run> Contexts<I> {
             wake: Condvar::new(),
             woke: AtomicU64::new(0),
             spared: AtomicU64::new(0),
+            next: AtomicU64::new(0),
             census: Arc::new(Census {
                 count: Mutex::new(Count {
                     threads: 1,
@@ -155,6 +158,12 @@ impl<I: Run> Contexts<I> {
         });
         spawn(&shared, true).map_err(|_| Error::OutOfMemory(MemoryKind::Host))?;
         Ok(Contexts { shared })
+    }
+
+    /// A context's identity, each call a new one: a logical queue's, or a release's of its own
+    /// (`Device::let_go_elsewhere`).
+    pub(crate) fn fresh(&self) -> u64 {
+        self.shared.next.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Append `item` to the context of logical queue `queue`; start a thread when a context is

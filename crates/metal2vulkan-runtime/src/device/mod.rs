@@ -164,8 +164,9 @@ pub(super) struct DeviceShared {
     /// The instance outlives the device.
     pub(super) instance: Arc<InstanceShared>,
     pub(super) physical: vk::PhysicalDevice,
-    /// The device's functions: through [`DeviceShared::vk`] only.
-    functions: Functions,
+    /// The device's functions: through [`DeviceShared::vk`] only, or a share that holds nothing
+    /// of the device ([`DeviceShared::functions`]).
+    functions: Arc<Functions>,
     /// The primary queue family: its first queue's, where internal submissions go.
     pub(super) queue_family: u32,
     /// The `VkQueue`s the runtime submits to, the primary family's first queue first: at least
@@ -174,9 +175,6 @@ pub(super) struct DeviceShared {
     /// The families of those queues, the primary first, each once: what the device's buffers and
     /// images are shared among (`sharing.rs`).
     pub(super) queue_families: Vec<u32>,
-    /// The identity the next logical queue takes, or the next release's context of its own
-    /// ([`Device::let_go_elsewhere`]).
-    next_queue: AtomicU64,
     /// How many of `queues`, the first, logical queues share round robin; the rest are reserved
     /// for presenting queues.
     round_robin: usize,
@@ -201,7 +199,9 @@ pub(super) struct DeviceShared {
     /// The alignment of every upload (`upload.rs`): 16 bytes, and the device's storage and
     /// uniform buffer offset alignments.
     pub(super) upload_alignment: u64,
-    pub(super) memory: Mutex<Memory>,
+    /// Shared with the releases of freed memory posted to the handler threads, which hold
+    /// nothing of the device (`freed_memory.rs`).
+    pub(super) memory: Arc<Mutex<Memory>>,
     pub(super) addresses: Mutex<AddressSpace>,
     /// The resource IDs of textures and sampler states (`resource_ids.rs`).
     pub(super) resource_ids: Arc<Mutex<ResourceIds>>,
@@ -470,6 +470,13 @@ impl DeviceShared {
         self.functions.get()
     }
 
+    /// A share of the device's functions, which holds nothing of the device: for the releases
+    /// posted to its handler threads, which its teardown waits for (`freed_memory.rs`). Reached
+    /// through [`Functions::get`] alone, as [`vk`](Self::vk) reaches them.
+    pub(crate) fn functions(&self) -> Arc<Functions> {
+        Arc::clone(&self.functions)
+    }
+
     /// What its encoders' deferred command buffers' replays share, where it records them so
     /// (`recorder`).
     pub(crate) fn recorder(&self) -> Option<&Arc<RecorderShared>> {
@@ -566,6 +573,12 @@ impl Drop for DeviceShared {
         let Some(_busy) = exit_guard::enter() else {
             return;
         };
+        // The watch of the program's marks and the releases of freed memory, posted to the
+        // handler threads, hold nothing of the device: those that begin from here on call
+        // nothing, and the threads' stop below waits for those running (`freed_memory.rs`).
+        if let Some(parking) = self.parking.get() {
+            parking.close();
+        }
         // The draws the snapshot's area rule weighed since the last line (`reader_sizes.rs`).
         if let Some(text) = lock(&self.reader_sizes).last_line() {
             let sink = self.instance.sink();
@@ -602,6 +615,10 @@ impl Drop for DeviceShared {
                 for fence in queue.flights.get().map(|f| f.drain()).unwrap_or_default() {
                     release::object(self.vk(), fence);
                 }
+            }
+            // Nor the marks of the program's uses of the queues (`freed_memory.rs`).
+            if let Some(parking) = self.parking.get() {
+                parking.release(self.vk());
             }
             // No fence is pending either: each command buffer's was given back as it finished.
             self.fences.release(self.vk());
@@ -864,14 +881,13 @@ impl Device {
     /// and a context of its own. The handle of the pool holds nothing of the device, so what holds
     /// the device can be posted with no handle of it taken here.
     pub(crate) fn elsewhere(&self) -> (Contexts<Item>, u64) {
-        let context = self.0.next_queue.fetch_add(1, Ordering::Relaxed);
-        (self.0.contexts.clone(), context)
+        (self.0.contexts.clone(), self.0.contexts.fresh())
     }
 
     /// A new logical queue's identity, and the index of the `VkQueue` it submits to: round
     /// robin over the device's queues that are not reserved for presenting.
     pub(super) fn next_queue(&self) -> (u64, usize) {
-        let id = self.0.next_queue.fetch_add(1, Ordering::Relaxed);
+        let id = self.0.contexts.fresh();
         let made = self.0.round_robin_made.fetch_add(1, Ordering::Relaxed);
         (id, (made % self.0.round_robin as u64) as usize)
     }
@@ -883,7 +899,7 @@ impl Device {
         if reserved == 0 {
             return None;
         }
-        let id = self.0.next_queue.fetch_add(1, Ordering::Relaxed);
+        let id = self.0.contexts.fresh();
         let made = self.0.presenting_made.fetch_add(1, Ordering::Relaxed);
         Some((id, self.0.round_robin + (made % reserved as u64) as usize))
     }
@@ -1513,12 +1529,11 @@ impl Device {
         let shared = Arc::new(DeviceShared {
             instance,
             physical,
-            functions,
+            functions: Arc::new(functions),
             queue_family,
             round_robin: queues.len() - present_queues,
             queues,
             queue_families,
-            next_queue: AtomicU64::new(0),
             round_robin_made: AtomicU64::new(0),
             presenting_made: AtomicU64::new(0),
             compile,
@@ -1530,7 +1545,7 @@ impl Device {
             views_epoch: AtomicU64::new(0),
             device_address,
             upload_alignment,
-            memory: Mutex::new(memory),
+            memory: Arc::new(Mutex::new(memory)),
             addresses: Mutex::new(AddressSpace::new()),
             resource_ids,
             identifiers: Arc::default(),
@@ -1634,6 +1649,7 @@ impl Device {
         // but on MoltenVK, whose wait for any of several semaphores loses a signal that lands
         // while it registers a later one (`command_buffer/completion.rs`).
         if !moltenvk {
+            (shared.scheduler).wait_on_gpu(Functions::clone(&shared.functions), shared.nudge);
         }
         let device = Device(shared);
         // The pages its replays held last go on its handler threads (`recorder`).
