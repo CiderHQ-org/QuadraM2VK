@@ -550,5 +550,59 @@ pub(crate) fn rotated_blend(
     Ok(Some(RotatedBlend::Synthesized(state, lanes)))
 }
 
+/// Vulkan's blend of attachment `a` on an `R8_UNORM` image holding Metal's alpha in red
+/// (`metal::format::alpha_in_red`, `A8Unorm`), whose fragment output the function writes rotated
+/// (the red of each output, of either dual-source index, Metal's alpha): `None` without blending,
+/// and the descriptor's own errors. Metal blends `A8Unorm`'s alpha by its alpha operation and
+/// factors alone, each factor reading alphas: `SourceColor` and `SourceAlpha` the source's,
+/// `DestinationColor` and `DestinationAlpha` the destination's, `SourceAlphaSaturated` one,
+/// `BlendColor` and `BlendAlpha` the blend color's, `Source1Color` and `Source1Alpha` the second
+/// output's (probe `a8`, an M3 Max under macOS 27.0.1: every factor as source and as
+/// destination, under every operation). Vulkan's color operation and factors govern the image's
+/// red, where each of those alphas is that of the red it reads (the source's red, the
+/// destination's, the second output's), but the blend color's, which `CONSTANT_ALPHA` reads
+/// unrotated, and the saturated alpha's one. The image has no alpha, so its alpha factors are the
+/// same as its color factors, read by nothing.
+pub(crate) fn alpha_in_red_blend(
+    a: &ColorAttachmentDescriptor,
+    p: &DeviceProfile,
+) -> Result<Option<BlendState>, Error> {
+    // The descriptor's own errors first: a placeholder, and a `Source1` factor without
+    // dual-source blending.
+    if blend_factors(a, p)?.is_none() {
+        return Ok(None);
+    }
+    use vk::BlendFactor as B;
+    use BlendFactor as F;
+    let red = |f: BlendFactor| match f {
+        F::Zero => Some(B::ZERO),
+        F::One | F::SourceAlphaSaturated => Some(B::ONE),
+        F::SourceColor | F::SourceAlpha => Some(B::SRC_COLOR),
+        F::OneMinusSourceColor | F::OneMinusSourceAlpha => Some(B::ONE_MINUS_SRC_COLOR),
+        F::DestinationColor | F::DestinationAlpha => Some(B::DST_COLOR),
+        F::OneMinusDestinationColor | F::OneMinusDestinationAlpha => Some(B::ONE_MINUS_DST_COLOR),
+        F::BlendColor | F::BlendAlpha => Some(B::CONSTANT_ALPHA),
+        F::OneMinusBlendColor | F::OneMinusBlendAlpha => Some(B::ONE_MINUS_CONSTANT_ALPHA),
+        F::Source1Color | F::Source1Alpha => Some(B::SRC1_COLOR),
+        F::OneMinusSource1Color | F::OneMinusSource1Alpha => Some(B::ONE_MINUS_SRC1_COLOR),
+        F::Unspecialized => None,
+    };
+    let (Some(src), Some(dst)) = (
+        red(a.source_alpha_blend_factor),
+        red(a.destination_alpha_blend_factor),
+    ) else {
+        return Err(Unsupported::not_implemented(Feature::Format).into());
+    };
+    let op = blend_op(a.alpha_blend_operation)?;
+    Ok(Some(BlendState {
+        src_color: src,
+        dst_color: dst,
+        color_op: op,
+        src_alpha: src,
+        dst_alpha: dst,
+        alpha_op: op,
+    }))
+}
+
 #[cfg(test)]
 mod tests;

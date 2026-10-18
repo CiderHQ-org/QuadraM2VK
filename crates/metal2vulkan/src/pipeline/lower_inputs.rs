@@ -525,13 +525,28 @@ pub struct LoweringInputs {
     /// each such attachment's image holds Metal's alpha, red, green and blue in its red, green,
     /// blue and alpha, so the function writes each `float` or `half` output to it, of either
     /// dual-source index, rotated (`metal::format::to_rotated_image`), after Metal's conversion
-    /// of its channels (`color_writes`). An output of fewer than four lanes there is
+    /// of its channels (`color_writes`). An attachment whose image holds Metal's alpha in red
+    /// (`metal::format::alpha_in_red`, `A8Unorm` in `R8_UNORM`) is listed too: the rotation's red
+    /// is Metal's alpha (and `alpha_in_red_colors` names it). An output of fewer than four lanes
+    /// there is
     /// `NotImplemented(Format)`. `Device::compile_render_pipeline` sets it for a `Function`
     /// fragment stage from the pipeline's color attachments, and a fragment compiled on its own for
     /// such a pipeline compiles under the same set: link refuses one compiled under another as
     /// `NeedsInput(ColorWrites)`. Empty for any other function.
     #[cfg_attr(feature = "serde", serde(default))]
     pub rotated_colors: BTreeSet<u32>,
+    /// The color attachments of `rotated_colors` whose image holds Metal's alpha in red
+    /// (`metal::format::alpha_in_red`: `A8Unorm` in `R8_UNORM`), by color index. An output to one
+    /// holds Metal's alpha in the image's alpha lane as well as its red (the image keeps only the
+    /// red), so alpha to coverage through attachment 0 reads Metal's alpha as Metal's does; a
+    /// color input (`[[color(n)]]`) of one reads the image's red as Metal's alpha, `(0, 0, 0, r)`,
+    /// as Metal reads an `A8Unorm` attachment (probe `a8`'s uses on an M3 Max under macOS
+    /// 27.0.1), through the input attachment or the interlocked storage form alike.
+    /// `Device::compile_render_pipeline` sets it for a `Function` fragment stage from the
+    /// pipeline's color attachments, and link refuses a fragment compiled under another set as
+    /// `NeedsInput(ColorWrites)`. Empty for any other function.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub alpha_in_red_colors: BTreeSet<u32>,
     /// The second output (`[[color(n), index(1)]]`) the fragment function writes for an
     /// attachment of `rotated_colors` whose blend reads a value no channel of the image holds where
     /// Vulkan's factors read it (Metal's source alpha in a color factor), by color index: per
@@ -1349,6 +1364,11 @@ pub enum StorageImageClass {
     /// An `ARGB8Unorm` image (alpha in byte 0, then red, green, and blue) viewed as
     /// `R8G8B8A8_UNORM`: the shader rotates the channels.
     RotateArgb,
+    /// An `A8Unorm` texture held in `R8_UNORM` (`metal::format::FormatEmulation::AlphaInRed`):
+    /// a read is the byte as alpha, `(0, 0, 0, r)`, and a write stores the texel's alpha, as
+    /// Metal's do (probe `a8`, an M3 Max under macOS 27.0.1: kernel writes of `float` and `half`
+    /// texels and `read_write` access).
+    AlphaInRed,
     /// A half-float image (`R16Float`, `RG16Float`, `RGBA16Float`) written by a device not
     /// measured to round a `float` texel as Metal does: the shader rounds each written `float`
     /// channel toward zero to the `half` Metal stores (a finite value past 65504 to 65504, an

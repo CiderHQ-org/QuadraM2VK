@@ -1335,6 +1335,12 @@ pub(super) fn layout(
         .filter(|w| w.word_format() == target.format);
         let clear = match word {
             Some(word) => clear_value::word(texture.pixel_format(), channels, word),
+            None => clear_value::held_color(
+                texture.pixel_format(),
+                target.format,
+                channels,
+                ClearRoute::ThroughHalf,
+            ),
         }
         .ok_or_else(not_yet)?;
         let straight_clear = ExtendedRange::of(texture.pixel_format()).and_then(|_| {

@@ -1790,6 +1790,9 @@ pub(crate) fn fragment_inputs(
     );
     out.word_colors =
         crate::pipeline::color_writes::word_colors(d.color_attachments, d.alpha_to_coverage, p);
+    out.rotated_colors = crate::pipeline::color_writes::rotated_colors(d.color_attachments, p);
+    out.alpha_in_red_colors =
+        crate::pipeline::color_writes::alpha_in_red_colors(d.color_attachments, p);
     out.rotated_factors = crate::pipeline::color_writes::rotated_factors(d.color_attachments, p);
     out.rotated_blends = crate::pipeline::color_writes::rotated_blends(d.color_attachments, p);
     out.sample_mask = d.sample_mask;

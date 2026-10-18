@@ -891,6 +891,16 @@ pub fn heap_one_bit_indices() -> Vec<u32> {
         .collect()
 }
 
+/// The index in [`heap_classes`] of `A8Unorm`'s class, which no other format's texture carries:
+/// a storage read or write through a heap handle carrying it converts the member's texels where
+/// the device holds such a texture's alpha in red (`metal::format::alpha_in_red`), which a heap's
+/// storage array views without a component mapping. A swizzled `A8Unorm` texture that reads as
+/// none carries it too; another swizzle's class is `OTHER`, which a heap's storage array does not
+/// hold there (`bind::heap`'s storage elements).
+pub fn heap_alpha_in_red_index() -> u32 {
+    heap_class_index(PixelFormat::A8Unorm, TextureSwizzleChannels::DEFAULT)
+}
+
 /// Whether a texture of pixel format `pf` holds 16-bit float channels of its own: its class is
 /// the half-float family's without a packed field ([`heap_half_indices`]' classes), so a written
 /// `half` stores its NaN there as the half's own bits, and elsewhere as the conversion of
@@ -1483,6 +1493,33 @@ mod tests {
         let rgba8 = heap_class_index(PixelFormat::RGBA8Unorm, TextureSwizzleChannels::DEFAULT);
         let r32 = heap_class_index(PixelFormat::R32Float, TextureSwizzleChannels::DEFAULT);
         assert!(rgba8 != 0 && r32 != 0 && rgba8 != r32);
+    }
+
+    /// `A8Unorm`'s heap class index, which a heap storage access tests to convert a member held in
+    /// red, names no other format's texture, swizzled or not, nor `OTHER`.
+    #[test]
+    fn the_alpha_in_red_heap_class_is_a8_unorms_alone() {
+        use crate::metal::TextureSwizzle as S;
+        let a8 = heap_alpha_in_red_index();
+        assert_ne!(heap_classes()[a8 as usize], TexelFormat::OTHER.0);
+        let swizzles = [
+            TextureSwizzleChannels::DEFAULT,
+            TextureSwizzleChannels::new(S::Blue, S::Green, S::Red, S::Alpha),
+            TextureSwizzleChannels::new(S::Alpha, S::Alpha, S::Alpha, S::Alpha),
+            TextureSwizzleChannels::new(S::Red, S::Red, S::Red, S::One),
+        ];
+        for &pf in PixelFormat::ALL {
+            if pf == PixelFormat::A8Unorm {
+                continue;
+            }
+            for swizzle in swizzles {
+                assert_ne!(heap_class_index(pf, swizzle), a8, "{pf:?} {swizzle:?}");
+            }
+        }
+        let alpha_only = TextureSwizzleChannels::new(S::Zero, S::Zero, S::Zero, S::Alpha);
+        assert_eq!(heap_class_index(PixelFormat::A8Unorm, alpha_only), a8);
+        let moved = TextureSwizzleChannels::new(S::Alpha, S::Zero, S::Zero, S::One);
+        assert_ne!(heap_class_index(PixelFormat::A8Unorm, moved), a8);
     }
 
     /// The half-float heap classes a float write tests by index are the unswizzled half-float

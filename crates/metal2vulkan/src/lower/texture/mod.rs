@@ -308,6 +308,10 @@ pub struct Read {
     /// the handle's class index names one (`heap_raw`): its raw texel fetched from the group's
     /// unsigned integer class (`HeapPlan::raw`), in place of the float array's neutral.
     pub heap_raw: bool,
+    /// The read, of a storage heap group, takes Metal's texel `(0, 0, 0, r)` from the image's red
+    /// where the handle's class index is `A8Unorm`'s, on a device that holds such a texture's alpha
+    /// in red ([`heap_alpha_in_red`]).
+    pub heap_alpha_red: bool,
     /// A `float` texel of the slot converts by the bound format's class (`float_texel`): its
     /// code recovered from the device's value and divided exactly.
     pub float_texel: bool,
@@ -363,6 +367,11 @@ fn read_words(r: &Read) -> u32 {
         + if r.level_views { 48 } else { 0 }
         + if r.image.heap() { 32 } else { 0 }
         + if r.heap_raw { heap_raw::READ_WORDS } else { 0 }
+        + if r.heap_alpha_red {
+            emit::HEAP_ALPHA_IN_RED_WORDS
+        } else {
+            0
+        }
         + if r.edge.is_some() { 64 } else { 0 }
         + if r.raw || r.srgb_codes {
             SRGB_RAW_WORDS
@@ -428,6 +437,10 @@ pub struct Write {
     /// texel class is a small float's (`StorageImageClass::SmallFloatQuietNan`,
     /// `emit::heap_small_float_format`).
     pub heap_small_floats: bool,
+    /// A `float` or `half` texel written through a heap handle stores its alpha in the image's
+    /// red where the handle's class index is `A8Unorm`'s, on a device that holds such a texture's
+    /// alpha in red ([`heap_alpha_in_red`]).
+    pub heap_alpha_red: bool,
     /// The slot is one of `LoweringInputs::swizzled_storage`: the write undoes the bound
     /// texture's swizzle on its held value, before converting it, under the slot's
     /// `TextureSwizzle` specialization (`emit::unswizzled`).
@@ -892,6 +905,11 @@ impl TextureStrategy {
                     + match w.heap_small_floats {
                         true => heap_half_write_words(StorageImageClass::SmallFloatQuietNan),
                         false => 0,
+                    }
+                    + if w.heap_alpha_red {
+                        emit::HEAP_ALPHA_IN_RED_WORDS
+                    } else {
+                        0
                     }
                     + w.half_nans.words()
                     + w.norm.words(w.image.heap())
@@ -2642,6 +2660,30 @@ pub(super) fn heap_bits(
     applies
 }
 
+/// Whether a storage read or write of a `float` or `half` texel (`texel`) through heap handle
+/// `image` of shape `shape` converts an `A8Unorm` member's texels: a heap access, not to a texture
+/// buffer (no heap class holds one), on a device that holds such a texture's alpha in
+/// its `R8_UNORM` image's red (`metal::format::alpha_in_red`), which the storage array views without
+/// a component mapping (`bind::heap`'s storage elements). The handle carries its class index, and
+/// where it is `A8Unorm`'s (`metal::texel_format::heap_alpha_in_red_index`) a read is Metal's
+/// `(0, 0, 0, r)` and a write stores the alpha in red (`StorageImageClass::AlphaInRed`'s
+/// conversion), as Metal reads and writes such a member (probe `a8`'s argument buffers).
+pub(super) fn heap_alpha_in_red(
+    cx: &mut SelectCx<'_>,
+    image: ImageRef,
+    shape: ImageShape,
+    texel: TexelConv,
+) -> bool {
+    let applies = image.heap()
+        && matches!(texel, TexelConv::F32 | TexelConv::F16)
+        && shape.dim != ImageDim::Buffer
+        && crate::metal::format::alpha_in_red(crate::metal::PixelFormat::A8Unorm, cx.profile);
+    if applies {
+        cx.families.access.heap_class_index = true;
+    }
+    applies
+}
+
 /// Record that the stage's `half` (`packed`) or `float` writes through heap handles store
 /// half-float members' bits through the unsigned integer twin, and leave the device's conversion
 /// of a NaN to the members it does not hold (`RuntimeFact::HeapHalfTexelWrites`), which the
@@ -2688,10 +2730,14 @@ pub(super) fn norm_storage(
                         || c.vk_format
                             .block()
                             .is_some_and(|b| matches!(b.color, Some(N::Unorm | N::Snorm)));
+                    // `AlphaInRed` stores the rounded alpha in red: the routine rounds the
+                    // texel in Metal's channels, before the class moves them.
                     normalized
                         && matches!(
                             c.class,
-                            StorageImageClass::Identity | StorageImageClass::SwizzleBgra
+                            StorageImageClass::Identity
+                                | StorageImageClass::SwizzleBgra
+                                | StorageImageClass::AlphaInRed
                         )
                 }
             }
@@ -3427,6 +3473,7 @@ fn select_read_as(
     if let (true, ImageRef::Slot(index)) = (swizzle || storage_swizzle, image) {
         swizzles(cx, index)?;
     }
+    let heap_alpha_red = storage && heap_alpha_in_red(cx, image, shape, texel.conv);
     // Where the profile's sparse textures are sparse images, a block of one that holds no mapped
     // tile reads the device's value (RADV's alpha 0), where Metal reads a channel the format
     // lacks as its constant: a color read of four 32-bit held lanes sets them after it, whether
@@ -3473,6 +3520,7 @@ fn select_read_as(
         storage_swizzle,
         extended,
         heap_raw,
+        heap_alpha_red,
         float_texel,
         half_nans,
         constant_lanes,
@@ -3648,6 +3696,8 @@ fn select_write(
     // Its NaNs quieted where the class is a small float's.
     let heap_small_floats = image.heap() && texel.conv == TexelConv::F32;
     cx.families.access.heap_class_index |= heap_half.is_some() || heap_small_floats;
+    // Its alpha in red where the class is `A8Unorm`'s and the device holds such a texture so.
+    let heap_alpha_red = heap_alpha_in_red(cx, image, shape, texel.conv);
     // A half-float member's bits through the group's unsigned integer twin, where the handle's
     // class names one.
     let encoded = extended.is_some() || cross.is_some();
@@ -3692,6 +3742,7 @@ fn select_write(
         class,
         heap_half,
         heap_small_floats,
+        heap_alpha_red,
         swizzle,
         half_nans,
         norm,

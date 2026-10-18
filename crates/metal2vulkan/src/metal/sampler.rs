@@ -1748,7 +1748,7 @@ mod tests {
                 b: S::ZERO,
                 a: S::R,
             },
-            FormatEmulation::SwizzledView,
+            FormatEmulation::AlphaInRed,
         );
         let mut black = metal_default();
         black.t_address_mode = SamplerAddressMode::ClampToBorderColor;

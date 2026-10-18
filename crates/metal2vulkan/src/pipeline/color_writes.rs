@@ -362,7 +362,8 @@ fn metal_stored(c: &ColorAttachmentDescriptor) -> Option<[Option<ChannelWrite>; 
 /// ([`wanted_extended_range`]), and every color it stores nowhere (`StageIo::unattached_colors`)
 /// has no attachment and is not color 0 under alpha to coverage, and the second outputs it writes
 /// for rotated attachments are the pipeline's ([`wanted_rotated_factors`]), and so are the forms of
-/// their blends ([`wanted_rotated_blends`]), and the pipeline takes the `half` outputs it computes
+/// their blends ([`wanted_rotated_blends`]), and the attachments holding Metal's alpha in red it
+/// writes or reads are the pipeline's ([`wanted_alpha_in_red`]), and the pipeline takes the `half` outputs it computes
 /// at `float` precision as it compiled them ([`half_output_lanes_hold`]), and its texture writes
 /// that Metal's mode 2 stores otherwise compiled under the pipeline's `textureWriteRoundingMode`
 /// (`StageIo::texture_write_rounding`), else `NeedsInput(ColorWrites)`.
@@ -383,7 +384,8 @@ pub(crate) fn check(
         && wanted_extended_range(fragment, colors, rounding) == io.extended_range_colors
         && wanted_word_colors(fragment, colors, alpha_to_coverage, p) == io.word_colors
         && wanted_srgb_fetches(fragment, colors) == io.srgb_fetches
-        && wanted_rotated(fragment, colors) == io.rotated_colors
+        && wanted_rotated(fragment, colors, p) == io.rotated_colors
+        && wanted_alpha_in_red(fragment, colors, p) == io.alpha_in_red_colors
         && wanted_rotated_factors(fragment, colors, p) == io.rotated_factors
         && wanted_rotated_blends(fragment, colors, p) == io.rotated_blends
         && half_output_lanes_hold(fragment, colors)
@@ -613,13 +615,23 @@ pub(crate) fn wanted_word_colors(
 }
 
 /// The color attachments of a render pipeline whose color attachments are `colors` held with
-/// their channels rotated, by color index (`LoweringInputs::rotated_colors`): every attachment
-/// of a format `metal::format::rotated_channels` names (`ARGB8Unorm`).
-pub(crate) fn rotated_colors(colors: &[Option<ColorAttachmentDescriptor>]) -> BTreeSet<u32> {
+/// their channels rotated on `p`, by color index (`LoweringInputs::rotated_colors`): every
+/// attachment of a format `metal::format::rotated_channels` names (`ARGB8Unorm`), and every one
+/// whose image holds Metal's alpha in red (`metal::format::alpha_in_red`: `A8Unorm` without
+/// `A8_UNORM`), which the rotation's red is.
+pub(crate) fn rotated_colors(
+    colors: &[Option<ColorAttachmentDescriptor>],
+    p: &DeviceProfile,
+) -> BTreeSet<u32> {
     colors
         .iter()
         .enumerate()
-        .filter(|(_, c)| c.is_some_and(|c| metal::format::rotated_channels(c.pixel_format)))
+        .filter(|(_, c)| {
+            c.is_some_and(|c| {
+                metal::format::rotated_channels(c.pixel_format)
+                    || metal::format::alpha_in_red(c.pixel_format, p)
+            })
+        })
         .map(|(i, _)| i as u32)
         .collect()
 }
@@ -630,6 +642,7 @@ pub(crate) fn rotated_colors(colors: &[Option<ColorAttachmentDescriptor>]) -> BT
 pub(crate) fn wanted_rotated(
     fragment: &FunctionArtifact,
     colors: &[Option<ColorAttachmentDescriptor>],
+    p: &DeviceProfile,
 ) -> BTreeSet<u32> {
     let written: BTreeSet<u32> = fragment
         .interface
@@ -641,8 +654,61 @@ pub(crate) fn wanted_rotated(
             _ => None,
         })
         .collect();
-    let mut out = rotated_colors(colors);
+    let mut out = rotated_colors(colors, p);
     out.retain(|a| written.contains(a));
+    out
+}
+
+/// The color attachments of a render pipeline whose color attachments are `colors` whose image
+/// holds Metal's alpha in red on `p` (`metal::format::alpha_in_red`: `A8Unorm` without
+/// `A8_UNORM`), by color index (`LoweringInputs::alpha_in_red_colors`).
+pub(crate) fn alpha_in_red_colors(
+    colors: &[Option<ColorAttachmentDescriptor>],
+    p: &DeviceProfile,
+) -> BTreeSet<u32> {
+    colors
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.is_some_and(|c| metal::format::alpha_in_red(c.pixel_format, p)))
+        .map(|(i, _)| i as u32)
+        .collect()
+}
+
+/// The attachments holding Metal's alpha in red that the fragment stage `fragment` writes or reads
+/// in a render pipeline whose color attachments are `colors` on `p`: [`alpha_in_red_colors`]'s,
+/// for the attachments it writes through output variables of either dual-source index, reads
+/// through an input attachment, or reads in the interlocked storage form
+/// (`RuntimeFact::InterlockedFramebufferFetch`), the set it must have compiled under
+/// (`StageIo::alpha_in_red_colors`).
+pub(crate) fn wanted_alpha_in_red(
+    fragment: &FunctionArtifact,
+    colors: &[Option<ColorAttachmentDescriptor>],
+    p: &DeviceProfile,
+) -> BTreeSet<u32> {
+    let written = fragment
+        .interface
+        .io
+        .outputs
+        .iter()
+        .filter_map(|v| match v.role {
+            IoRole::Color { attachment, .. } => Some(attachment),
+            _ => None,
+        });
+    let inputs = fragment
+        .interface
+        .descriptors
+        .iter()
+        .filter_map(|d| match d.slot.kind {
+            crate::pipeline::sym::ResourceKind::InputAttachment(color) => Some(color),
+            _ => None,
+        });
+    let interlocked = fragment.facts.iter().filter_map(|f| match *f {
+        RuntimeFact::InterlockedFramebufferFetch { color, .. } => Some(color),
+        _ => None,
+    });
+    let used: BTreeSet<u32> = written.chain(inputs).chain(interlocked).collect();
+    let mut out = alpha_in_red_colors(colors, p);
+    out.retain(|a| used.contains(a));
     out
 }
 

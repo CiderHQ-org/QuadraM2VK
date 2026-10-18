@@ -76,7 +76,9 @@
 //!   [`ResolveSource::InputAttachment`] does.
 //! - [`ResolveSource::Planes`]: the attachment's sample planes (`bind::PlanesCopy`), a sampled
 //!   2D-array view of every layer in the copy format, layer `s` holding sample `s`: each channel's
-//!   code is its bits in the texel `(FragCoord.xy, s)` (a half's, unpacked to its `float`).
+//!   code is its bits in the texel `(FragCoord.xy, s)` (a half's, unpacked to its `float`), or,
+//!   for planes held in `A8_UNORM` itself (`PlanesCopy::Alpha8`), its float's code as an input
+//!   attachment's is.
 //!
 //! Draw it into a render pass whose one color attachment is the resolve texture's single-sampled
 //! level and layer in [`ColorResolveFormat::written_format`] (its own format, or its raw twin
@@ -230,8 +232,10 @@ impl ColorResolveFormat {
     /// its 8- and 16-bit snorm ones, its 8-bit sRGB ones, its 32-bit float ones, its packed 16-bit
     /// unorm ones (each Vulkan layout that holds one, its red and blue twin included), and its
     /// 16-bit float, `RG11B10Float` and `RGB9E5Float` ones, whose rules hold at 2 and 4 samples
-    /// ([`ColorResolveFormat::resolves`]), as Vulkan formats. `None` for another format (the
-    /// module docs).
+    /// ([`ColorResolveFormat::resolves`]), as Vulkan formats; `A8Unorm`'s alpha resolves by the
+    /// 8-bit unorm rule, as `R8Unorm`'s red (probe `a8`, an M3 Max under macOS 27.0.1: at every
+    /// alpha in 1/32 steps an `A8Unorm` resolve is `RGBA8Unorm`'s alpha). `None` for another format
+    /// (the module docs).
     pub fn of(format: Format) -> Option<ColorResolveFormat> {
         use ResolveRule::{Float16 as F16, Float32 as F32, SharedExponent as E9, Srgb as S};
         const H1: ResolveRule = ResolveRule::HalfUnorm { bits: 1 };
@@ -248,6 +252,7 @@ impl ColorResolveFormat {
         const U2: ResolveRule = ResolveRule::Unorm { bits: 2 };
         let channels = match format {
             Format::R8_UNORM => [at(U8, 0), None, None, None],
+            Format::A8_UNORM => [None, None, None, at(U8, 0)],
             Format::R8G8_UNORM => [at(U8, 0), at(U8, 8), None, None],
             Format::R8G8B8A8_UNORM => [at(U8, 0), at(U8, 8), at(U8, 16), at(U8, 24)],
             Format::B8G8R8A8_UNORM => [at(U8, 16), at(U8, 8), at(U8, 0), at(U8, 24)],
@@ -372,6 +377,15 @@ pub enum ResolveSource {
     RawInputAttachment,
     /// The attachment's sample planes, viewed in their copy format.
     Planes(PlanesCopy),
+}
+
+impl ResolveSource {
+    /// Whether the source's texels are the attachment's bits, in an unsigned-integer copy format:
+    /// sample planes of a bits copy (`PlanesCopy::moves_bits`). Else they are the format's
+    /// `float`s.
+    fn reads_bits(self) -> bool {
+        matches!(self, ResolveSource::Planes(copy) if copy.moves_bits())
+    }
 }
 
 /// The crate-owned resolve modules of one format, sample count and source on one device,
@@ -723,7 +737,7 @@ fn code(
     source: ResolveSource,
 ) -> BResult<Value> {
     let bits = u32::from(channel.rule.bits());
-    if let ResolveSource::Planes(_) = source {
+    if source.reads_bits() {
         let offset = u32::from(channel.offset);
         let word = f.composite_extract(texel, &[offset / 32])?;
         let shift = uint(f, t, offset % 32)?;
@@ -1326,9 +1340,9 @@ fn alike(
         len: 4,
     })?;
     let words = |f: &mut FunctionBuilder<'_>, texel: Value| -> BResult<Value> {
-        match source {
-            ResolveSource::Planes(_) => Ok(texel),
-            ResolveSource::InputAttachment => f.convert(ConvOp::Bitcast, texel, uvec4),
+        match source.reads_bits() {
+            true => Ok(texel),
+            false => f.convert(ConvOp::Bitcast, texel, uvec4),
         }
     };
     let (&first, rest) = texels
@@ -1452,9 +1466,12 @@ pub fn fragment_typed_module(
                 None,
             )
         }
-        ResolveSource::Planes(_) => {
+        ResolveSource::Planes(copy) => {
             let ty = b.ty(Type::Image(ImageType {
-                sampled_type: t.u32_,
+                sampled_type: match copy.moves_bits() {
+                    true => t.u32_,
+                    false => t.f32_,
+                },
                 dim: Dim::D2,
                 depth: false,
                 arrayed: true,

@@ -598,7 +598,11 @@ fn resource_id_placement_puts_a_sampler_at_its_element() {
 /// without an alias, the view the class's formatless declaration serves, or a half-float format's
 /// rounding, which a heap write takes from its handle's class; one needing a conversion view (bgra8
 /// or sRGB where the profile cannot store them directly) is a typed refusal. Both occur on the
-/// committed profiles, and every profile views a half-float member directly.
+/// committed profiles, and every profile views a half-float member directly. An `A8Unorm` member
+/// held in red (`StorageImageClass::AlphaInRed`) is viewed through its `R8_UNORM` image, whose
+/// texels a heap access converts where the handle carries `A8Unorm`'s class: unswizzled, or
+/// swizzled to read as unswizzled; a swizzle that moves its alpha carries another class and is
+/// refused.
 #[test]
 fn a_storage_member_needing_a_conversion_view_is_refused() {
     let s2d = class(
@@ -608,7 +612,7 @@ fn a_storage_member_needing_a_conversion_view_is_refused() {
         SampledType::Float,
         ImageAccess::Storage,
     );
-    let (mut direct, mut refused) = (0, 0);
+    let (mut direct, mut refused, mut in_red) = (0, 0, 0);
     for (stem, p) in committed_profiles().expect("profiles") {
         let planner = HeapPlanner {
             profile: &p,
@@ -640,6 +644,7 @@ fn a_storage_member_needing_a_conversion_view_is_refused() {
             PixelFormat::RGBA8UnormSRGB,
             PixelFormat::R16Float,
             PixelFormat::RGBA16Float,
+            PixelFormat::A8Unorm,
         ] {
             let m = shape(TextureType::Type2D, pf, 1, WRITE);
             let got = planner.view(&m, &s2d, vk::ImageLayout::GENERAL);
@@ -654,6 +659,38 @@ fn a_storage_member_needing_a_conversion_view_is_refused() {
                     assert_eq!(Some(v.format), crate::metal::format::direct_format(pf));
                     assert_eq!(v.layout, vk::ImageLayout::GENERAL);
                     direct += 1;
+                }
+                Ok(c) if c.class == StorageImageClass::AlphaInRed => {
+                    let v = got.unwrap_or_else(|e| panic!("{stem} {pf:?}: {e}"));
+                    assert_eq!(v.format, vk::Format::R8_UNORM, "{stem}");
+                    use crate::metal::TextureSwizzle as S;
+                    for (swizzle, kept) in [
+                        ((S::Zero, S::Zero, S::Zero, S::Alpha), true),
+                        ((S::Alpha, S::Zero, S::Zero, S::One), false),
+                    ] {
+                        let mut swizzled = m;
+                        if let TextureShape::Texture { swizzle: s, .. } = &mut swizzled {
+                            *s = crate::metal::TextureSwizzleChannels::new(
+                                swizzle.0, swizzle.1, swizzle.2, swizzle.3,
+                            );
+                        }
+                        let got = planner.view(&swizzled, &s2d, vk::ImageLayout::GENERAL);
+                        match kept {
+                            true => assert_eq!(
+                                got.map(|v| v.format),
+                                Ok(vk::Format::R8_UNORM),
+                                "{stem} {swizzle:?}"
+                            ),
+                            false => assert_eq!(
+                                got,
+                                Err(BindError::Unsupported(Unsupported::not_implemented(
+                                    Feature::ArgumentBufferTextures
+                                ))),
+                                "{stem} {swizzle:?}"
+                            ),
+                        }
+                    }
+                    in_red += 1;
                 }
                 Ok(_) => {
                     assert_eq!(
@@ -670,8 +707,8 @@ fn a_storage_member_needing_a_conversion_view_is_refused() {
         }
     }
     assert!(
-        direct > 0 && refused > 0,
-        "direct {direct}, refused {refused}"
+        direct > 0 && refused > 0 && in_red > 0,
+        "direct {direct}, refused {refused}, in red {in_red}"
     );
 }
 

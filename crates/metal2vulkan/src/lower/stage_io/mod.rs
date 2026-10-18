@@ -298,6 +298,11 @@ pub struct PlannedOutput {
     /// with its channels rotated (`LoweringInputs::rotated_colors`): its four lanes are stored
     /// rotated (`metal::format::to_rotated_image`), after their conversion.
     pub rotated: bool,
+    /// A [`rotated`](Self::rotated) output to an attachment whose image holds Metal's alpha in
+    /// red (`LoweringInputs::alpha_in_red_colors`): the image's alpha lane holds Metal's alpha
+    /// too, not Metal's blue, so alpha to coverage reads Metal's alpha (the image keeps only its
+    /// red).
+    pub alpha_red: bool,
     /// A fragment function's first output to a rotated attachment whose blend takes
     /// `RotatedBlendForm::Premultiplied` (`LoweringInputs::rotated_blends`): after the rotation,
     /// the image's alpha lane (Metal's blue) holds Metal's blue times Metal's alpha, each clamped
@@ -1990,10 +1995,12 @@ fn output_part(
         },
         None => part,
     };
-    // Metal's red, green, blue and alpha, held as the image's green, blue, alpha and red.
-    let part = match o.rotated {
-        true => fb.vector_shuffle(part, part, &[3, 0, 1, 2])?,
-        false => part,
+    // Metal's red, green, blue and alpha, held as the image's green, blue, alpha and red; an
+    // image holding Metal's alpha in red takes that alpha in its alpha lane as well.
+    let part = match (o.rotated, o.alpha_red) {
+        (true, false) => fb.vector_shuffle(part, part, &[3, 0, 1, 2])?,
+        (true, true) => fb.vector_shuffle(part, part, &[3, 0, 1, 3])?,
+        (false, _) => part,
     };
     match o.premultiplied {
         true => premultiplied_blue(fb, o.link.form, part),

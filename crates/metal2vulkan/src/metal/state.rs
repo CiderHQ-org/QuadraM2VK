@@ -119,6 +119,10 @@ pub fn blend_state(
 
 /// [`blend_state`] without the portability subset's constant-alpha check, which link applies only
 /// to an attachment the draw can write.
+///
+/// An `A8Unorm` attachment has no color channel, so its color equation blends nothing: it takes
+/// the alpha operation there too, which a driver that blends the format's one channel by the
+/// color operation (lavapipe, Mesa 26.2: with the alpha factors) then applies as Metal does.
 pub(crate) fn blend_factors(
     attachment: &ColorAttachmentDescriptor,
     profile: &DeviceProfile,
@@ -126,10 +130,14 @@ pub(crate) fn blend_factors(
     if !attachment.blending_enabled {
         return Ok(None);
     }
+    let color_op = match attachment.pixel_format {
+        PixelFormat::A8Unorm => attachment.alpha_blend_operation,
+        _ => attachment.rgb_blend_operation,
+    };
     Ok(Some(BlendState {
         src_color: blend_factor(attachment.source_rgb_blend_factor, profile)?,
         dst_color: blend_factor(attachment.destination_rgb_blend_factor, profile)?,
-        color_op: blend_op(attachment.rgb_blend_operation)?,
+        color_op: blend_op(color_op)?,
         src_alpha: blend_factor(attachment.source_alpha_blend_factor, profile)?,
         dst_alpha: blend_factor(attachment.destination_alpha_blend_factor, profile)?,
         alpha_op: blend_op(attachment.alpha_blend_operation)?,
@@ -586,6 +594,15 @@ mod tests {
                 vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
                 vk::BlendOp::ADD
             )
+        );
+        // An `A8Unorm` attachment, which has no color channel, takes its alpha operation in
+        // both equations.
+        att.pixel_format = PixelFormat::A8Unorm;
+        att.alpha_blend_operation = BlendOperation::ReverseSubtract;
+        let b = blend_state(&att, without.profile()).unwrap().unwrap();
+        assert_eq!(
+            (b.color_op, b.alpha_op),
+            (vk::BlendOp::REVERSE_SUBTRACT, vk::BlendOp::REVERSE_SUBTRACT)
         );
     }
 

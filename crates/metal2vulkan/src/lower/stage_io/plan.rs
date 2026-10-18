@@ -2040,6 +2040,7 @@ pub fn entry(cx: &mut SelectCx<'_>) -> Result<(), Error> {
                     below: None,
                     color: None,
                     rotated: false,
+                    alpha_red: false,
                     premultiplied: false,
                     offset: offset(PushField::AmplificationLayerOffset),
                 });
@@ -2193,6 +2194,7 @@ pub fn entry(cx: &mut SelectCx<'_>) -> Result<(), Error> {
                 below: None,
                 color: None,
                 rotated: false,
+                alpha_red: false,
                 premultiplied: false,
                 offset: offset(PushField::AmplificationViewportOffset),
             });
@@ -2242,8 +2244,11 @@ pub fn entry(cx: &mut SelectCx<'_>) -> Result<(), Error> {
             }
             _ => None,
         };
-        // An output to an attachment held with its channels rotated stores them rotated.
+        // An output to an attachment held with its channels rotated stores them rotated; one to an
+        // attachment holding Metal's alpha in red holds that alpha in the image's alpha lane too,
+        // where alpha to coverage reads it.
         let mut premultiplied = false;
+        let mut alpha_red = false;
         let rotated = match o.role {
             OutputRole::RenderTarget {
                 attachment: AbiInt::Const(attachment),
@@ -2259,6 +2264,10 @@ pub fn entry(cx: &mut SelectCx<'_>) -> Result<(), Error> {
                 }
                 let sp = &mut cx.families.stage_io;
                 sp.interface.rotated_colors.insert(attachment);
+                if cx.inputs.alpha_in_red_colors.contains(&attachment) {
+                    sp.interface.alpha_in_red_colors.insert(attachment);
+                    alpha_red = true;
+                }
                 if let (0, Some(&lanes)) = (index, cx.inputs.rotated_factors.get(&attachment)) {
                     seconds.push((attachment, o.field, link.form, lanes));
                 }
@@ -2277,6 +2286,7 @@ pub fn entry(cx: &mut SelectCx<'_>) -> Result<(), Error> {
             below: raw.map(|(_, count, _)| count),
             color,
             rotated,
+            alpha_red,
             premultiplied,
             offset: added,
         });
@@ -2293,6 +2303,7 @@ pub fn entry(cx: &mut SelectCx<'_>) -> Result<(), Error> {
                 below: None,
                 color: None,
                 rotated: false,
+                alpha_red: false,
                 premultiplied: false,
                 offset: added,
             });

@@ -30,7 +30,9 @@
 //! its samples are the planes' there.
 //!
 //! Both copies read and write the bits of each texel through a view in the unsigned-integer
-//! format of its size (`bind::PlanesCopy`), so every format crosses unchanged. The image the
+//! format of its size (`bind::PlanesCopy`), so every format crosses unchanged; `A8_UNORM`, whose
+//! class no unsigned format shares, crosses as the `float`s of its own views
+//! (`bind::PlanesCopy::Alpha8`), which keep each code. The image the
 //! copies run on is the attachment's own where it is sampled and may be viewed so
 //! (`framebuffer_fetch::planes_copies`, which a multisampled color render target the runtime
 //! makes takes where it costs the image nothing), else a stand-in that is
@@ -43,7 +45,9 @@
 //! `Unsupported` (feature `FramebufferFetch`) naming what it lacks: a storage view of an extended
 //! copy format (`shaderStorageImageExtendedFormats`), `sampleRateShading` for the merge, the
 //! pass's sample count among `framebufferIntegerColorSampleCounts` (the merge renders the copy
-//! format, an integer one), or a format usage of the attachment's or the copy format's. A device
+//! format, an integer one; `framebufferColorSampleCounts` for `A8_UNORM`'s), or a format usage of
+//! the attachment's or the copy format's (`A8_UNORM`'s storage write without a format among them,
+//! which its split's declaration needs). A device
 //! whose portability subset withholds `imageViewFormatReinterpretation` refuses it too, typed
 //! `Unsupported` (feature `ViewFormatReinterpretation`, `view_plan.rs`), where the copy format's
 //! components differ from the attachment's in count or width: every format but those of one 8-, 16-
@@ -133,9 +137,9 @@ impl Planes {
     ) -> Result<Planes, Error> {
         let device = maker.device();
         let format = target.format;
-        // A format of a compatibility class of its own (`A8_UNORM`) has no view whose texels the
-        // copies move as bits.
-        let copy = PlanesCopy::for_format(format).ok_or_else(|| {
+        // A format of a compatibility class of its own has no view whose texels the copies move
+        // as bits; `A8_UNORM`'s move as its own views' floats (`PlanesCopy::for_planes`).
+        let copy = PlanesCopy::for_planes(format).ok_or_else(|| {
             Error::Unsupported(Unsupported::not_implemented(Feature::FramebufferFetch))
         })?;
         // The copies view the planes and the attachment's image in the copy format, whose
@@ -165,11 +169,18 @@ impl Planes {
         // unsigned-integer view, or a BGRA-order one's RGBA-order twin), the split's storage view
         // and the merge's sampled view in the copy format.
         let view = framebuffer_fetch::storage_view_format(profile, format);
+        // The split writes `A8_UNORM` planes through a declaration without a format
+        // (`PlanesSplitModule::requirements`), which the format's own bit must allow.
+        let formatless = (!copy.moves_bits())
+            .then_some((copy.format(), FormatUsage::StorageImageWriteWithoutFormat));
         for (format, usage) in [
             (view, FormatUsage::StorageImage),
             (copy.format(), FormatUsage::StorageImage),
             (copy.format(), FormatUsage::SampledImage),
-        ] {
+        ]
+        .into_iter()
+        .chain(formatless)
+        {
             if !profile.supports_format(format, usage) {
                 return Err(lacks_format(format, usage));
             }
@@ -329,11 +340,12 @@ struct MergePipeline {
     pipeline: vk::Pipeline,
 }
 
-/// The planes' objects one device has made (the module docs).
+/// The planes' objects one device has made (the module docs). The merge's shaders are one pair
+/// for every bits copy and one for the copy of floats (`PlanesCopy::moves_bits`).
 #[derive(Default)]
 pub(super) struct PlanesObjects {
     split: Vec<(PlanesCopy, SplitKernel)>,
-    merge: Option<MergeShaders>,
+    merge: Vec<(bool, MergeShaders)>,
     merge_pipelines: Vec<((PlanesCopy, u32), MergePipeline)>,
 }
 
@@ -347,7 +359,7 @@ impl PlanesObjects {
                 release::object(raw, merge.pipeline);
                 release::object(raw, merge.render_pass);
             }
-            if let Some(shaders) = self.merge {
+            for (_, shaders) in &self.merge {
                 release::object(raw, shaders.layout);
                 release::object(raw, shaders.set_layout);
                 release::object(raw, shaders.fragment);
@@ -485,12 +497,16 @@ impl Device {
         copy: PlanesCopy,
         samples: u32,
     ) -> Result<(MergeShaders, MergePipeline), Error> {
-        // The merge renders the attachment's view in the copy format, an integer one, at the
-        // pass's samples: a count every integer color attachment takes, or the copy format's
-        // own, the alternatives link asks of a pipeline's integer color attachment
-        // (`pipeline::graphics`, which the runtime does not import), in its order.
+        // The merge renders the attachment's view in the copy format, an integer one (or
+        // `A8_UNORM` itself), at the pass's samples: a count every integer (or every) color
+        // attachment takes, or the copy format's own, the alternatives link asks of a pipeline's
+        // color attachment (`pipeline::graphics`, which the runtime does not import), in its order.
+        let every = match copy.moves_bits() {
+            true => VkProperty::FramebufferIntegerColorSampleCount(samples),
+            false => VkProperty::FramebufferColorSampleCount(samples),
+        };
         let alternatives = [
-            VkProperty::FramebufferIntegerColorSampleCount(samples),
+            every,
             VkProperty::ColorAttachmentSampleCount(copy.format(), samples),
         ];
         let enabled = &self.compile_device().profile().enabled().properties;
@@ -513,10 +529,17 @@ impl Device {
         let mut objects = lock(&self.shared().planes);
         let shared = self.shared();
         let raw = shared.vk();
-        let shaders = match objects.merge {
+        let bits = copy.moves_bits();
+        let made = objects
+            .merge
+            .iter()
+            .find(|(b, _)| *b == bits)
+            .map(|(_, s)| *s);
+        let shaders = match made {
             Some(shaders) => shaders,
             None => {
-                let modules = planes_merge_modules(self.compile_device()).map_err(device_error)?;
+                let modules =
+                    planes_merge_modules(self.compile_device(), copy).map_err(device_error)?;
                 let mut shaders = MergeShaders {
                     vertex: vk::ShaderModule::null(),
                     fragment: vk::ShaderModule::null(),
@@ -545,7 +568,7 @@ impl Device {
                     }
                     return Err(error);
                 }
-                objects.merge = Some(shaders);
+                objects.merge.push((bits, shaders));
                 shaders
             }
         };

@@ -207,10 +207,11 @@ fn storage_is_offered_to_the_interlock_forms_color_targets() {
 }
 
 /// A multisampled `A8Unorm` render target held as `A8_UNORM`, whose class ("8-bit alpha") no
-/// copy format shares, is offered no planes copies' usage, on a device whose fetch reads planes
-/// too: no view in `R8_UINT` is listed for it.
+/// unsigned copy format shares, takes the planes copies in its own format
+/// (`PlanesCopy::Alpha8`), on a device whose fetch reads planes: its candidate is the plan sampled,
+/// neither mutable nor listing another format, which the copies then read and write directly.
 #[test]
-fn an_a8_target_is_offered_no_planes_copies() {
+fn an_a8_target_takes_the_planes_copies_in_its_own_format() {
     let mut planes = 0;
     for (name, desc, device) in committed() {
         let facts = facts(&desc, &device);
@@ -222,10 +223,27 @@ fn an_a8_target_is_offered_no_planes_copies() {
         if target.format != Format::A8_UNORM {
             continue;
         }
-        planes += usize::from(through_planes(profile, 4));
         assert_eq!(PlanesCopy::for_format(target.format), None, "{name}");
-        assert_eq!(planes_candidate(&target, profile), None, "{name}");
-        assert!(!planes_copies(&target), "{name}");
+        assert_eq!(
+            PlanesCopy::for_planes(target.format),
+            Some(PlanesCopy::Alpha8),
+            "{name}"
+        );
+        if !through_planes(profile, 4) || planes_copies_gap(target.format, profile).is_some() {
+            continue;
+        }
+        planes += 1;
+        let candidate = planes_candidate(&target, profile).expect("the planes' usage");
+        assert_eq!(
+            candidate,
+            ImagePlan {
+                usage: target.usage | ImageUsageFlags::SAMPLED,
+                ..target.clone()
+            },
+            "{name}"
+        );
+        assert!(planes_copies(&candidate), "{name}");
+        assert_eq!(planes_candidate(&candidate, profile), None, "{name}");
     }
     assert!(planes > 0, "a planes profile holds A8Unorm as A8_UNORM");
 }

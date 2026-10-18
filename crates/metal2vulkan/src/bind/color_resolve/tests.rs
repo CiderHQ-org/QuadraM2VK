@@ -10,8 +10,9 @@ use crate::spirv::testing::{assert_valid, committed_profiles};
 use std::path::PathBuf;
 
 /// Every format the module docs list.
-const CLOSED: [Format; 34] = [
+const CLOSED: [Format; 35] = [
     Format::R8_UNORM,
+    Format::A8_UNORM,
     Format::R8G8_UNORM,
     Format::R8G8B8A8_UNORM,
     Format::B8G8R8A8_UNORM,
@@ -145,7 +146,8 @@ fn needs(m: TypedModule) -> Requirements {
         .requirements
 }
 
-/// A format of each rule, each with its sample planes' copy format.
+/// A format of each rule, and `A8_UNORM` (its planes held in its own format), each with its sample
+/// planes' copy format.
 fn representatives() -> Vec<(ColorResolveFormat, PlanesCopy)> {
     [
         Format::R8G8B8A8_UNORM,
@@ -158,12 +160,13 @@ fn representatives() -> Vec<(ColorResolveFormat, PlanesCopy)> {
         Format::A1R5G5B5_UNORM_PACK16,
         Format::B10G11R11_UFLOAT_PACK32,
         Format::E5B9G9R9_UFLOAT_PACK32,
+        Format::A8_UNORM,
     ]
     .into_iter()
     .map(|format| {
         (
             ColorResolveFormat::of(format).expect("closed"),
-            PlanesCopy::for_format(format).expect("copy"),
+            PlanesCopy::for_planes(format).expect("copy"),
         )
     })
     .collect()
@@ -245,8 +248,9 @@ const RESOLVED_OUT: ResourceSlot = ResourceSlot {
 };
 
 /// A kernel running the fragment stage's arithmetic: invocation `i` reads its `samples` texels as
-/// four words each from `SAMPLES_IN` (the planes' bits for [`ResolveSource::Planes`], the
-/// attachment's floats' bits for [`ResolveSource::InputAttachment`]), and writes the output
+/// four words each from `SAMPLES_IN` (the planes' bits for [`ResolveSource::Planes`] of a bits
+/// copy, the attachment's floats' bits for [`ResolveSource::InputAttachment`] and for planes held
+/// in `A8_UNORM`, its raw twin's for [`ResolveSource::RawInputAttachment`]), and writes the output
 /// floats' bits to `RESOLVED_OUT`.
 fn arithmetic_module(
     format: ColorResolveFormat,
@@ -299,9 +303,9 @@ fn arithmetic_module(
                 lanes.push(f.load(p, MemAccess::default())?);
             }
             let texel = f.composite_construct(uvec4, &lanes)?;
-            texels.push(match source {
-                ResolveSource::Planes(_) => texel,
-                _ => f.convert(ConvOp::Bitcast, texel, t.vec4)?,
+            texels.push(match source.reads_bits() {
+                true => texel,
+                false => f.convert(ConvOp::Bitcast, texel, t.vec4)?,
             });
         }
         let four = uint(f, t, 4)?;
@@ -748,7 +752,7 @@ fn sample_words(
                 let Some(channel) = channel else { continue };
                 let code = sample[component];
                 match source {
-                    ResolveSource::Planes(_) => {
+                    _ if source.reads_bits() => {
                         let offset = u32::from(channel.offset);
                         words[(offset / 32) as usize] |= code << (offset % 32);
                     }
@@ -876,12 +880,23 @@ fn small_float_bits(r: &mut SplitMix, mantissa: u8) -> u32 {
     }
 }
 
-/// Every pair of 8-bit codes of `format` at 2 samples, through both sources.
+/// Every pair of 8-bit codes of `format`'s one channel at 2 samples, through every source
+/// ([`sources`]).
 fn every_pair_of_8_bit_codes(format: Format) {
     let resolve = ColorResolveFormat::of(format).expect("closed");
-    let copy = PlanesCopy::for_format(format).expect("copy");
+    let copy = PlanesCopy::for_planes(format).expect("copy");
+    let component = resolve
+        .channels()
+        .iter()
+        .position(Option::is_some)
+        .expect("a channel");
+    let sample = |code: u32| {
+        let mut codes = [0; 4];
+        codes[component] = code;
+        codes
+    };
     let texels: Vec<Vec<[u32; 4]>> = (0..65536u32)
-        .map(|p| vec![[p & 0xff, 0, 0, 0], [p >> 8, 0, 0, 0]])
+        .map(|p| vec![sample(p & 0xff), sample(p >> 8)])
         .collect();
     for (resolve, source) in cases(resolve, copy) {
         check(resolve, 2, source, &texels);
@@ -891,6 +906,13 @@ fn every_pair_of_8_bit_codes(format: Format) {
 #[test]
 fn every_pair_of_unorm_codes_resolves_as_metal() {
     every_pair_of_8_bit_codes(Format::R8_UNORM);
+}
+
+/// `A8_UNORM`'s alpha, from its input attachment and from sample planes held in its own format
+/// (`PlanesCopy::Alpha8`).
+#[test]
+fn every_pair_of_alpha_codes_resolves_as_metal() {
+    every_pair_of_8_bit_codes(Format::A8_UNORM);
 }
 
 #[test]
@@ -1670,7 +1692,7 @@ fn alike_samples_resolve_as_metal() {
             continue;
         }
         let resolve = ColorResolveFormat::of(format).expect("closed");
-        let copy = PlanesCopy::for_format(format).expect("copy");
+        let copy = PlanesCopy::for_planes(format).expect("copy");
         for samples in [2usize, 4, 8]
             .into_iter()
             .filter(|&n| resolve.resolves(n as u32))

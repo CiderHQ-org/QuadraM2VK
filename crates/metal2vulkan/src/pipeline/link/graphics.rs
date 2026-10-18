@@ -136,7 +136,14 @@
 //!   coverage stays the rasterizer's, measured at 1 and 4 samples, while Vulkan requires an alpha
 //!   output at location 0 (`VUID-VkGraphicsPipelineCreateInfo-alphaToCoverageEnable-08891`), so
 //!   link turns it off. Over an integer attachment 0 it is Metal's pipeline error
-//!   (`ColorAttachment`).
+//!   (`ColorAttachment`). Over an `A8Unorm` attachment 0 whose image holds Metal's alpha in red
+//!   (`R8_UNORM`, no `A8_UNORM`), the output holds Metal's alpha in its alpha lane too
+//!   (`StageIo::alpha_in_red_colors`), so Vulkan's coverage, which reads the output's alpha
+//!   whatever the format keeps (the specification's multisample coverage section: "All alpha
+//!   values in this section refer only to the alpha component of the fragment shader output that
+//!   has a `Location` and `Index` decoration of zero"), reads Metal's alpha;
+//!   over an `ARGB8Unorm` one, whose image's alpha is Metal's blue, it is
+//!   `NotImplemented(Format)`.
 //! - **Vertex amplification**: `maxVertexAmplificationCount` above 1 makes a pipeline whose draws
 //!   may be multiview, which needs `multiview`; its draws of more amplifications than the device's
 //!   `maxMultiviewViewCount` are draws of one amplification each. A count of 0 is an invalid
@@ -154,7 +161,9 @@ use crate::error::{
     Attachment, Capability, DescriptorError, Error, Feature, RuntimeInput, Unsupported,
 };
 use crate::metal;
-use crate::metal::format::{color_output_components, sampled_type, vk_format, ExtendedRange};
+use crate::metal::format::{
+    color_output_components, sampled_type, vk_format, ExtendedRange, FormatEmulation,
+};
 use crate::metal::state::{
     blend_factors, check_constant_alpha, color_write_mask, constant_alpha_withheld,
 };
@@ -165,7 +174,7 @@ use crate::pipeline::graphics::{
 };
 use crate::pipeline::interface::StageInterface;
 use crate::pipeline::link::RenderLinkInputs;
-use crate::pipeline::rotated_blend::{rotated_blend, RotatedBlend};
+use crate::pipeline::rotated_blend::{alpha_in_red_blend, rotated_blend, RotatedBlend};
 use crate::pipeline::stage_io::{
     CoverageLoop, Interpolation, IoNumeric, IoRole, Sampling, StageBuiltin, StageIo,
 };
@@ -389,8 +398,11 @@ pub fn graphics_state(
                     let input_blend = input_blends.get(&(index as u32)).copied();
                     // An attachment held with its channels rotated takes the function's rotated
                     // output, the descriptor's mask rotated, and the blend `rotated_blend`
-                    // finds Metal's in Vulkan's factors.
-                    let rotated = metal::format::rotated_channels(a.pixel_format);
+                    // finds Metal's in Vulkan's factors; one holding Metal's alpha in red
+                    // (`A8Unorm` in `R8_UNORM`) the rotated output too, whose red is Metal's
+                    // alpha, the mask's alpha bit in red, and Metal's alpha blend in red.
+                    let alpha_red = metal::format::alpha_in_red(a.pixel_format, p);
+                    let rotated = metal::format::rotated_channels(a.pixel_format) || alpha_red;
                     let blended = a.blending_enabled && !replaced && input_blend.is_none();
                     let mut usages = BTreeSet::from([FormatUsage::ColorAttachment]);
                     if blended {
@@ -409,9 +421,10 @@ pub fn graphics_state(
                     {
                         return Err(Unsupported::not_implemented(Feature::Format).into());
                     }
-                    let descriptor_mask = match rotated {
-                        true => rotated_mask(descriptor_mask),
-                        false => descriptor_mask,
+                    let descriptor_mask = match (alpha_red, rotated) {
+                        (true, _) => rotated_mask(descriptor_mask) & vk::ColorComponentFlags::R,
+                        (false, true) => rotated_mask(descriptor_mask),
+                        (false, false) => descriptor_mask,
                     };
                     // An extended-range attachment holds its raw texels, whose components the
                     // function writes whole.
@@ -434,6 +447,7 @@ pub fn graphics_state(
                     let blend = match (replaced || input_blend.is_some(), rotated) {
                         (true, _) => None,
                         (false, false) => blend_factors(a, p)?,
+                        (false, true) if alpha_red => alpha_in_red_blend(a, p)?,
                         // The second output the rotation needs is the function's only beside
                         // a first output to the attachment; without one the draw writes nothing
                         // there whatever the blend (its mask is empty).
@@ -447,7 +461,13 @@ pub fn graphics_state(
                             Some(RotatedBlend::Synthesized(..)) | None => None,
                         },
                     };
-                    let format = vk_format(a.pixel_format, &usages, p)?.format;
+                    let mapping = vk_format(a.pixel_format, &usages, p)?;
+                    // The format holds Metal's alpha in red for these usages exactly where the
+                    // function wrote it there (`alpha_in_red`, of the attachment usage alone).
+                    if (mapping.emulation == FormatEmulation::AlphaInRed) != alpha_red {
+                        return Err(Unsupported::not_implemented(Feature::Format).into());
+                    }
+                    let format = mapping.format;
                     Ok(ColorAttachmentState {
                         format,
                         write_mask,
@@ -508,7 +528,9 @@ pub fn graphics_state(
                     index: color,
                 }))?;
             // An input attachment of an image holding Metal's channels rotated would read them
-            // rotated: not modelled.
+            // so: not modelled. (One holding Metal's alpha in red is read as Metal's alpha by a
+            // stage compiled for it, `StageIo::alpha_in_red_colors`, which
+            // `color_writes::check` holds to the pipeline's.)
             // Nor is a two-plane YCbCr attachment's, whose texels Metal holds as halves and the
             // attachment as the function's floats.
             if metal::format::rotated_channels(attachment.pixel_format)
@@ -934,7 +956,11 @@ fn reads_alpha_to_coverage(
             && o.ty.components == 4
     });
     // An attachment 0 held with its channels rotated takes Metal's alpha in its red, where
-    // Vulkan's coverage reads its alpha (Metal's blue).
+    // Vulkan's coverage reads its alpha (Metal's blue). One holding Metal's alpha in red takes
+    // that alpha in its alpha lane too (`StageIo::alpha_in_red_colors`, which
+    // `color_writes::check` holds to the pipeline's), so the coverage reads Metal's alpha, as
+    // Metal's does through an `A8Unorm` attachment 0 (probe `a8`'s uses: the masks of every alpha
+    // in 1/32 steps at four samples are `RGBA8Unorm`'s).
     if reads
         && r.color_attachments[0].is_some_and(|a| metal::format::rotated_channels(a.pixel_format))
     {

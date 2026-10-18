@@ -61,7 +61,8 @@
 
 use ash::vk;
 use metal2vulkan::metal::format::{
-    rotated_channels, to_rotated_image, ycbcr_renders, ClearRoute, ExtendedRange,
+    alpha_in_red_format, rotated_channels, to_rotated_image, ycbcr_renders, ClearRoute,
+    ExtendedRange, WordAttachment,
 };
 use metal2vulkan::metal::PixelFormat;
 use metal2vulkan::vk::Format;
@@ -251,6 +252,27 @@ pub(super) fn color(
             float32 = to_rotated_image(float32);
         }
         vk::ClearColorValue { float32 }
+    })
+}
+
+/// [`color`] for an attachment of `pf` whose image is of Vulkan format `format`: an `A8Unorm`
+/// image held in `R8_UNORM` (`metal::format::FormatEmulation::AlphaInRed`) takes the clear's alpha
+/// in red, as it holds Metal's alpha (Metal's clear stores the color's alpha, probe `a8`, an M3
+/// Max under macOS 27.0.1).
+pub(super) fn held_color(
+    pf: PixelFormat,
+    format: Format,
+    color: [f64; 4],
+    route: ClearRoute,
+) -> Option<vk::ClearColorValue> {
+    let value = self::color(pf, color, route)?;
+    if alpha_in_red_format(pf) != Some(format) {
+        return Some(value);
+    }
+    // SAFETY: `color` gives a normalized format's clear as `float32`.
+    let float32 = unsafe { value.float32 };
+    Some(vk::ClearColorValue {
+        float32: to_rotated_image(float32),
     })
 }
 
@@ -975,6 +997,28 @@ pub(crate) mod tests {
         for &(pf, c, want) in cases {
             assert_eq!(hex(&bytes(pf, c)), want, "{pf:?} {c:?}");
         }
+    }
+
+    /// An `A8Unorm` attachment's clear writes the color's alpha (probe `a8`, an M3 Max under
+    /// macOS 27.0.1: a clear of (0.2, 0.4, 0.6, 0.8) stores 204): in `A8_UNORM`'s alpha, and in an
+    /// `R8_UNORM` image's red where the image holds Metal's alpha there; another format's image
+    /// takes [`color`]'s value as it is.
+    #[test]
+    fn an_alpha_in_red_clear_takes_the_alpha_in_red() {
+        let color = [0.2, 0.4, 0.6, 0.8];
+        let route = ClearRoute::ThroughHalf;
+        let code = 204.0 / 255.0;
+        let held = |pf, format| {
+            let value = held_color(pf, format, color, route).expect("a clear rule");
+            // SAFETY: a normalized format's clear is `float32`.
+            unsafe { value.float32 }
+        };
+        assert_eq!(held(P::A8Unorm, Format::A8_UNORM), [0.0, 0.0, 0.0, code]);
+        assert_eq!(held(P::A8Unorm, Format::R8_UNORM), [code, 0.0, 0.0, 0.0]);
+        assert_eq!(
+            held(P::R8Unorm, Format::R8_UNORM),
+            [51.0 / 255.0, 0.0, 0.0, 0.0]
+        );
     }
 
     /// A texel's unsigned-integer clear writes its bytes: its little-endian words in the format

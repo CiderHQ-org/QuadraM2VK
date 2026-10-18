@@ -240,6 +240,11 @@ pub fn function_key(
             .bytes(format!("{:?}", inputs.rotated_colors).as_bytes());
     }
     // Appended only when set, as `storage_view_slots`.
+    if !inputs.alpha_in_red_colors.is_empty() {
+        h.bytes(b"alpha-in-red-colors")
+            .bytes(format!("{:?}", inputs.alpha_in_red_colors).as_bytes());
+    }
+    // Appended only when set, as `storage_view_slots`.
     if !inputs.rotated_factors.is_empty() {
         h.bytes(b"rotated-factors")
             .bytes(format!("{:?}", inputs.rotated_factors).as_bytes());

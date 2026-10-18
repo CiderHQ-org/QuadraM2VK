@@ -8,7 +8,8 @@ use crate::spirv::testing::assert_valid;
 use std::path::PathBuf;
 
 /// The copy format follows the texel size of a single-texel color format that shares its
-/// compatibility class, and no other format has one.
+/// compatibility class, and no other format has one; the sample planes' copies take `A8_UNORM`'s
+/// own format besides.
 #[test]
 fn the_copy_format_is_the_texel_size() {
     for (format, copy) in [
@@ -31,13 +32,20 @@ fn the_copy_format_is_the_texel_size() {
         (Format::G8B8G8R8_422_UNORM, None),
     ] {
         assert_eq!(PlanesCopy::for_format(format), copy, "{format:?}");
+        let planes = match format {
+            Format::A8_UNORM => Some(PlanesCopy::Alpha8),
+            _ => copy,
+        };
+        assert_eq!(PlanesCopy::for_planes(format), planes, "{format:?}");
     }
     for copy in PlanesCopy::ALL {
         assert_eq!(
-            PlanesCopy::for_format(copy.format()),
+            PlanesCopy::for_planes(copy.format()),
             Some(copy),
             "{copy:?}"
         );
+        let bits = copy.moves_bits().then_some(copy);
+        assert_eq!(PlanesCopy::for_format(copy.format()), bits, "{copy:?}");
     }
 }
 
@@ -49,26 +57,35 @@ fn needs(m: TypedModule) -> Requirements {
 }
 
 /// Each module needs exactly what the module docs say: the split of an extended storage format
-/// `shaderStorageImageExtendedFormats`, the merge's fragment stage `sampleRateShading`, and
-/// nothing else of the device.
+/// `shaderStorageImageExtendedFormats`, the split of `A8_UNORM`'s planes a storage write without a
+/// format (the capability, which the device resolves), the merge's fragment stage
+/// `sampleRateShading`, and nothing else of the device.
 #[test]
 fn each_module_needs_what_its_docs_say() {
+    let write_without = crate::device::requirements::SpirvCapability::of(
+        crate::spv::Capability::StorageImageWriteWithoutFormat,
+    );
     for copy in PlanesCopy::ALL {
         let r = needs(split_typed_module(copy).expect("split"));
-        let extended = !matches!(copy, PlanesCopy::R32 | PlanesCopy::Rgba32);
+        let extended = matches!(copy, PlanesCopy::R8 | PlanesCopy::R16 | PlanesCopy::Rg32);
         assert_eq!(
             r.features
                 .contains(&VkFeature::ShaderStorageImageExtendedFormats),
             extended,
             "{copy:?}: {r:?}"
         );
+        assert_eq!(
+            r.spirv_capabilities.contains(&write_without),
+            !copy.moves_bits(),
+            "{copy:?}: {r:?}"
+        );
         assert!(
             !r.features.contains(&VkFeature::SampleRateShading),
             "{copy:?}"
         );
+        let r = needs(merge_fragment_typed_module(copy).expect("fragment"));
+        assert!(r.features.contains(&VkFeature::SampleRateShading), "{r:?}");
     }
-    let r = needs(merge_fragment_typed_module().expect("fragment"));
-    assert!(r.features.contains(&VkFeature::SampleRateShading), "{r:?}");
     let r = needs(merge_vertex_typed_module().expect("vertex"));
     assert!(r.features.is_empty(), "{r:?}");
 }
@@ -119,18 +136,19 @@ fn the_modules_are_valid_where_the_device_has_what_they_need() {
                 Err(other) => panic!("{name} {copy:?}: {other}"),
             }
         }
-        let fits = profile
-            .check(&needs(merge_fragment_typed_module().expect("fragment")))
-            .is_ok();
-        match planes_merge_modules(&device) {
-            Ok(modules) => {
-                assert!(fits, "{name}");
-                assert_valid(merge_vertex_typed_module().expect("vertex"), profile);
-                assert_valid(merge_fragment_typed_module().expect("fragment"), profile);
-                assert!(!modules.vertex.is_empty() && !modules.fragment.is_empty());
+        for copy in [PlanesCopy::R32, PlanesCopy::Alpha8] {
+            let fragment = || merge_fragment_typed_module(copy).expect("fragment");
+            let fits = profile.check(&needs(fragment())).is_ok();
+            match planes_merge_modules(&device, copy) {
+                Ok(modules) => {
+                    assert!(fits, "{name} {copy:?}");
+                    assert_valid(merge_vertex_typed_module().expect("vertex"), profile);
+                    assert_valid(fragment(), profile);
+                    assert!(!modules.vertex.is_empty() && !modules.fragment.is_empty());
+                }
+                Err(Error::Unsupported(_)) => assert!(!fits, "{name} {copy:?}"),
+                Err(other) => panic!("{name} {copy:?}: {other}"),
             }
-            Err(Error::Unsupported(_)) => assert!(!fits, "{name}"),
-            Err(other) => panic!("{name}: {other}"),
         }
     }
     assert!(built > 0);

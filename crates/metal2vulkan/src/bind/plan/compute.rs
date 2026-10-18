@@ -460,6 +460,7 @@ fn plan(p: &ComputePipeline, device: &Device, shape: &BindShape) -> Result<Bindi
         diagnostics: Vec::new(),
         uses: Vec::new(),
         template: Default::default(),
+        alpha_red_texels: Default::default(),
     };
     let mut heap = HeapPlanner::new(device.profile(), &p.layout, &p.dependencies, shape, |_| {
         vec![Stage::Kernel]

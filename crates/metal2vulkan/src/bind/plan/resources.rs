@@ -44,7 +44,7 @@
 //!   the shader, so each texture's write checks the bound sampler's filtering against its view at
 //!   plan time, which `bind::sampler_desc` does per bind for a combined write.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     AccessClass, ImageSource, ImageViewDesc, PlanDiagnostic, PlannedTexel, ResourceTemplate,
@@ -59,8 +59,8 @@ use crate::error::{BindError, Capability, Error, Feature, LowerFamily, Unsupport
 use crate::metal::bicubic::{texels as bicubic_texels, BicubicTexels};
 use crate::metal::format::{
     accessed_without_format, aspects, direct_format, is_depth_stencil, sampled_type, srgb_raw_twin,
-    storage_choice_viewed, vk_format, writes_dropped, ycbcr_writes_stored, ExtendedRange,
-    FormatMapping, StorageUse,
+    storage_choice_viewed, texel_buffer_alpha_in_red, vk_format, writes_dropped,
+    ycbcr_writes_stored, ExtendedRange, FormatMapping, StorageUse,
 };
 use crate::metal::sampler::{
     check_border_view, check_sampler, opaque_black_reads_transparent, vk_filtering,
@@ -240,6 +240,11 @@ pub(crate) struct ResourcePlanner<'a> {
     pub diagnostics: Vec<PlanDiagnostic>,
     pub uses: Vec<ResourceUse>,
     pub template: ResourceTemplate,
+    /// The texture-buffer slots whose texel view reads an `A8Unorm` texture buffer's bytes as
+    /// `R8_UNORM` with no storage class to convert them (`metal::format::texel_buffer_alpha_in_red`):
+    /// their reads take Metal's alpha from red through the slot's swizzle
+    /// ([`ResourcePlanner::texture_swizzle`]).
+    pub alpha_red_texels: BTreeSet<SlotRef>,
 }
 
 /// The type a texture binding declares (the neutral's input).
@@ -1108,14 +1113,34 @@ impl ResourcePlanner<'_> {
                     // The `R64_UINT` view of a `ulong` slot's bytes.
                     _ if ulong_atomic => Some(vk::Format::R64_UINT),
                     // The storage texel view reads the choice's view format (an alias of the
-                    // bound format's bytes), which must itself support the usage.
+                    // bound format's bytes, or an `A8Unorm` texture buffer's bytes as `R8_UNORM`,
+                    // Metal's alpha in red), which must itself support the usage.
                     Some(c) => Some(
-                        c.alias
-                            .map(|_| c.vk_format)
-                            .or_else(|| direct_format(pixel_format))
-                            .ok_or_else(|| internal("a storage choice without a format"))?,
+                        match (c.alias, c.class) {
+                            (Some(_), _) | (None, StorageImageClass::AlphaInRed) => {
+                                Some(c.vk_format)
+                            }
+                            (None, _) => direct_format(pixel_format),
+                        }
+                        .ok_or_else(|| internal("a storage choice without a format"))?,
                     ),
-                    None => None,
+                    // An `A8Unorm` texture buffer's bytes as `R8_UNORM` where the device views
+                    // no `A8_UNORM` texels for the usage: the slot's reads take Metal's alpha
+                    // from red through its swizzle, which every texture-buffer read applies but a
+                    // `ulong` one, whose texel no `A8Unorm` texture buffer binds.
+                    None => match texel_buffer_alpha_in_red(pixel_format, usage, self.profile) {
+                        Some(held) => {
+                            if t.access.read && !self.has_fact(RuntimeFact::TextureSwizzle { slot })
+                            {
+                                return Err(BindError::Unsupported(Unsupported::not_implemented(
+                                    Feature::Format,
+                                )));
+                            }
+                            self.alpha_red_texels.insert(slot);
+                            Some(held)
+                        }
+                        None => None,
+                    },
                 };
                 let format = match view {
                     Some(view) => {
@@ -1202,8 +1227,16 @@ impl ResourcePlanner<'_> {
                     let format = match choice {
                         _ if ulong_atomic => vk::Format::R64_UINT,
                         Some(c) if c.alias.is_some() => c.vk_format,
-                        // The write shadow's own format.
-                        Some(c) if c.class == StorageImageClass::YCbCrWrite => c.vk_format,
+                        // The write shadow's own format, and the `R8_UNORM` image an `A8Unorm`
+                        // texture holds its alpha in.
+                        Some(c)
+                            if matches!(
+                                c.class,
+                                StorageImageClass::YCbCrWrite | StorageImageClass::AlphaInRed
+                            ) =>
+                        {
+                            c.vk_format
+                        }
                         _ => direct_format(pixel_format)
                             .ok_or_else(|| internal("a storage texture without a format"))?,
                     };
@@ -1930,6 +1963,11 @@ impl ResourcePlanner<'_> {
     /// texture, takes the identity's.
     pub fn texture_swizzle(&self, slot: SlotRef) -> u64 {
         let swizzle = match self.texture_shape(slot) {
+            Some(&TextureShape::Buffer { swizzle, .. })
+                if self.alpha_red_texels.contains(&slot) =>
+            {
+                swizzle.alpha_in_red()
+            }
             Some(&TextureShape::Buffer { swizzle, .. }) => swizzle,
             Some(&TextureShape::Texture { swizzle, .. })
                 if self.variant.swizzled_storage.contains(&slot) =>

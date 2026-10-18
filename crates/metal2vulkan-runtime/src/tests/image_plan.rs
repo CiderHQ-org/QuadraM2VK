@@ -189,8 +189,14 @@ fn check_plan(
         }
         assert!(supports(FormatUsage::StorageImage) || extended, "{what}");
         // The format's own, or the UNORM twin of an 8-bit sRGB format the device holds no image
+        // of, which serves its storage alias, or the red image of an `A8Unorm` texture the
+        // device holds no `A8_UNORM` image of.
         let own = direct_format(pf);
+        let unheld = own.filter(|&f| facts.optimal(f).is_empty());
+        let twin = unheld.and(srgb_raw_twin(pf).and_then(direct_format));
+        let red = unheld.and(alpha_in_red_format(pf));
         assert!(
+            Some(plan.format) == own || Some(plan.format) == twin || Some(plan.format) == red,
             "{what}"
         );
     }
@@ -510,6 +516,72 @@ fn an_srgb_format_the_device_cannot_sample_is_held_as_its_unorm_twin() {
             held.contains(&format!("{stem} R8UnormSRGB")),
             "{stem}: {held:?}"
         );
+    }
+}
+
+/// An `A8Unorm` texture on a device that holds no `A8_UNORM` image is an `R8_UNORM` image holding
+/// Metal's alpha in red (`FormatEmulation::AlphaInRed`), sampled through `(Zero, Zero, Zero, R)`,
+/// stored and rendered where the device does those with `R8_UNORM`; where the device holds
+/// `A8_UNORM`, that format. A pipeline's attachment agrees (`alpha_in_red`).
+#[test]
+fn an_a8_texture_without_a8_unorm_holds_its_alpha_in_red() {
+    let usage =
+        TextureUsage::SHADER_READ | TextureUsage::SHADER_WRITE | TextureUsage::RENDER_TARGET;
+    let mut held = Vec::new();
+    for (name, desc, device) in committed() {
+        let facts = facts(&desc, &device);
+        let profile = facts.profile;
+        let what = name.clone();
+        let l = layout(TextureType::Type2D, PixelFormat::A8Unorm, 1, 1);
+        let plan = plan_image(&l, usage, false, &facts).expect(&what);
+        check_plan(&name, PixelFormat::A8Unorm, usage, &plan, &facts);
+        if !facts.optimal(Format::A8_UNORM).is_empty() {
+            assert_eq!(plan.format, Format::A8_UNORM, "{what}: {plan:?}");
+            assert!(!alpha_in_red(PixelFormat::A8Unorm, profile), "{what}");
+            continue;
+        }
+        held.push(name.clone());
+        assert_eq!(plan.format, Format::R8_UNORM, "{what}: {plan:?}");
+        assert_eq!(
+            plan.mapping.emulation,
+            FormatEmulation::AlphaInRed,
+            "{what}"
+        );
+        assert_eq!(
+            plan.mapping.components.a,
+            metal2vulkan::vk::ComponentSwizzle::R,
+            "{what}"
+        );
+        assert!(alpha_in_red(PixelFormat::A8Unorm, profile), "{what}");
+        for (bit, flags, need) in [
+            (
+                TextureUsage::SHADER_READ,
+                ImageUsageFlags::SAMPLED,
+                FormatUsage::SampledImage,
+            ),
+            (
+                TextureUsage::SHADER_WRITE,
+                ImageUsageFlags::STORAGE,
+                FormatUsage::StorageImage,
+            ),
+            (
+                TextureUsage::RENDER_TARGET,
+                ImageUsageFlags::COLOR_ATTACHMENT,
+                FormatUsage::ColorAttachment,
+            ),
+        ] {
+            let has = profile.supports_format(Format::R8_UNORM, need);
+            assert_eq!(plan.usage.contains(flags), has, "{what}: {bit:?} {plan:?}");
+            assert_eq!(plan.unavailable.contains(bit), !has, "{what}: {bit:?}");
+        }
+    }
+    for stem in [
+        "vk12-floor",
+        "lavapipe",
+        "amd-rdna3-radv",
+        "nvidia-pascal-linux",
+    ] {
+        assert!(held.contains(&stem.to_owned()), "{stem}: {held:?}");
     }
 }
 

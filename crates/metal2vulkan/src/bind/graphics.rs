@@ -1794,6 +1794,7 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
         diagnostics: Vec::new(),
         uses: Vec::new(),
         template: Default::default(),
+        alpha_red_texels: Default::default(),
     };
     let heap_reach = |s: metal::RenderStages| {
         let mut out = Vec::new();

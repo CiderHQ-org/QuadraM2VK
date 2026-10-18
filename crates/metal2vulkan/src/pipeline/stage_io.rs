@@ -240,6 +240,15 @@ pub struct StageIo {
     /// refuses a stage compiled for another set than the pipeline's (`NeedsInput(ColorWrites)`).
     #[cfg_attr(feature = "serde", serde(default))]
     pub rotated_colors: std::collections::BTreeSet<u32>,
+    /// The attachments whose image holds Metal's alpha in red
+    /// (`LoweringInputs::alpha_in_red_colors`) that the fragment function writes through an output
+    /// variable of either dual-source index, or reads (`[[color(n)]]`) through an input attachment
+    /// or the interlocked storage form, by color index: each such output holds Metal's alpha in
+    /// the image's alpha lane too, which alpha to coverage reads, and each read takes the image's
+    /// red as Metal's alpha. Link refuses a stage compiled for another set than the pipeline's
+    /// (`NeedsInput(ColorWrites)`).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub alpha_in_red_colors: std::collections::BTreeSet<u32>,
     /// The second outputs the fragment function writes for attachments held with their channels
     /// rotated (`LoweringInputs::rotated_factors`), by color index: those of the attachments it
     /// writes through a first output, each with what it holds in each channel of the image. Link

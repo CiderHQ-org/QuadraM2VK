@@ -770,6 +770,40 @@ fn rotate_argb(fb: &mut FunctionBuilder<'_>, x: SValue, read: bool) -> BResult<S
     }
 }
 
+/// `A8Unorm`'s byte held in an `R8_UNORM` image's red (`AlphaInRed`): a read (image texel `x`,
+/// `(r, 0, 0, 1)`) is `(0, 0, 0, r)`, Metal's alpha-only texel; a write stores the texel's alpha
+/// in red (the image's other lanes are none).
+fn alpha_in_red(fb: &mut FunctionBuilder<'_>, x: SValue, read: bool) -> BResult<SValue> {
+    match read {
+        true => {
+            let zero = f32s(fb, 4, 0.0)?;
+            fb.vector_shuffle(zero, x, &[0, 1, 2, 4])
+        }
+        false => fb.vector_shuffle(x, x, &[3, 3, 3, 3]),
+    }
+}
+
+/// The words [`heap_alpha_in_red`] emits, at most: the class field's shift and mask, the
+/// comparison, the shuffle and the select.
+pub(crate) const HEAP_ALPHA_IN_RED_WORDS: u32 = 40;
+
+/// Image texel `x` (four `f32` lanes) of a storage access through heap handle `handle`, as
+/// [`alpha_in_red`] converts it (`read`: the image's to Metal's; else Metal's to the image's) where
+/// the handle's class index is `A8Unorm`'s (`metal::texel_format::heap_alpha_in_red_index`), as
+/// it is elsewhere (`Read::heap_alpha_red`, `Write::heap_alpha_red`).
+fn heap_alpha_in_red(
+    cx: &mut EmitCx<'_>,
+    fb: &mut FunctionBuilder<'_>,
+    handle: ValueId,
+    x: SValue,
+    read: bool,
+) -> BResult<SValue> {
+    let index = crate::metal::texel_format::heap_alpha_in_red_index();
+    let is = heap_class_among(cx, fb, handle, &[index])?;
+    let held = alpha_in_red(fb, x, read)?;
+    fb.select(is, held, x)
+}
+
 /// The words [`srgb_codes`] emits, at most: `math::pack`'s `unorm4x8_srgb` (its exact products,
 /// three table searches, and the placement) and the codes' extraction and scale.
 pub(crate) const SRGB_WRITE_WORDS: u32 =
@@ -854,6 +888,7 @@ fn from_image(
             return srgb_raw_texel(cx, fb, form, x, SRGB_TEXEL);
         }
         StorageImageClass::RotateArgb => rotate_argb(fb, x, true)?,
+        StorageImageClass::AlphaInRed => alpha_in_red(fb, x, true)?,
         // A `YCbCrWrite` slot is only written (`StorageImageClass::YCbCrWrite`).
         StorageImageClass::HalfTowardZero
         | StorageImageClass::HalfQuietNan
@@ -1707,6 +1742,12 @@ pub fn to_image(
         StorageImageClass::RotateArgb => {
             let x = argb_codes(fb, form, x)?;
             rotate_argb(fb, x, false)?
+        }
+        StorageImageClass::AlphaInRed if form.lanes == 4 => alpha_in_red(fb, x, false)?,
+        StorageImageClass::AlphaInRed => {
+            return Err(crate::spirv::error::BuildError::Type(
+                crate::spirv::error::TypeRule::FunctionSignature,
+            ))
         }
         StorageImageClass::HalfTowardZero
         | StorageImageClass::HalfQuietNan
@@ -3274,6 +3315,12 @@ fn read(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>, r: &Read) -> BResult<
         }
         false => texel,
     };
+    // An `A8Unorm` storage member's texel held in red, Metal's `(0, 0, 0, r)` before Metal's
+    // out-of-bounds texel is selected.
+    let texel = match (r.heap_alpha_red, r.image) {
+        (true, ImageRef::Heap { handle, .. }) => heap_alpha_in_red(cx, fb, handle, texel, true)?,
+        _ => texel,
+    };
     // An extended-range texel's value, decoded from its raw code before Metal's out-of-bounds
     // texel is selected.
     let texel = match r.extended {
@@ -3727,6 +3774,11 @@ fn write(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>, w: &Write) -> BResul
     };
     // An integer texel's lanes, saturated to the format's channels as Metal stores them.
     let texel = saturated(cx, fb, &decl, (w.saturate, w.texel), texel)?;
+    // An `A8Unorm` storage member's alpha, stored in its image's red.
+    let texel = match (w.heap_alpha_red, w.image) {
+        (true, ImageRef::Heap { handle, .. }) => heap_alpha_in_red(cx, fb, handle, texel, false)?,
+        _ => texel,
+    };
     // A `float` through a heap handle, rounded where the handle's class is a half-float
     // format's.
     let texel = match (w.heap_half, w.image) {

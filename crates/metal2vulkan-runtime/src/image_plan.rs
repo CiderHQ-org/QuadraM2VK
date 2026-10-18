@@ -77,8 +77,9 @@ use metal2vulkan::error::{
     Capability, Error as CompileError, Feature, Needs, RuntimeDriverDefect, Unsupported,
 };
 use metal2vulkan::metal::format::{
-    direct_format, image_type, is_depth_stencil, srgb_raw_twin, storage_image_choice,
-    storage_view_formats, vk_format, FormatEmulation, FormatMapping,
+    alpha_in_red, alpha_in_red_format, direct_format, image_type, is_depth_stencil, srgb_raw_twin,
+    storage_image_choice, storage_view_formats, vk_format, FormatEmulation, FormatMapping,
+    WordAttachment,
 };
 use metal2vulkan::metal::{PixelFormat, TextureType, TextureUsage};
 use metal2vulkan::vk::{
@@ -627,7 +628,12 @@ fn plan_held(
     // `vk_format` with no usage names the refusal of a format without a representation (not
     // representable, not implemented, or no format at all).
     let any = vk_format(pf, &BTreeSet::new(), profile).map_err(ImageRefusal::of)?;
-    let direct = direct_format(pf).unwrap_or(any.format);
+    // An `A8Unorm` texture on a device that holds no `A8_UNORM` image is held in `R8_UNORM`, its
+    // alpha in red, for every use (`metal::format::alpha_in_red`): that is its direct format here.
+    let direct = match alpha_in_red_format(pf).filter(|_| alpha_in_red(pf, profile)) {
+        Some(red) => red,
+        None => direct_format(pf).unwrap_or(any.format),
+    };
     let depth_stencil = is_depth_stencil(pf);
     let attachment_usage = if depth_stencil {
         FormatUsage::DepthStencilAttachment

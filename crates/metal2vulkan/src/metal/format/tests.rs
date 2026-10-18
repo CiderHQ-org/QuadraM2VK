@@ -187,7 +187,7 @@ fn swap_red_blue(name: &str) -> String {
 }
 
 /// Every swizzled twin is the direct format with red and blue exchanged in the same bit layout
-/// (or `A8Unorm`'s single byte read as red), and its mapping moves the channels back.
+/// (or `A8Unorm`'s single byte held in red), and its mapping moves the channels back.
 #[test]
 fn swizzled_twins_share_the_bit_layout() {
     use vk::ComponentSwizzle as S;
@@ -198,7 +198,9 @@ fn swizzled_twins_share_the_bit_layout() {
         for c in candidates.iter().filter(|c| {
             matches!(
                 c.emulation,
-                FormatEmulation::SwizzledView | FormatEmulation::RotatedView
+                FormatEmulation::SwizzledView
+                    | FormatEmulation::RotatedView
+                    | FormatEmulation::AlphaInRed
             )
         }) {
             // `ARGB8Unorm`'s bytes through a rotating view.
@@ -552,47 +554,70 @@ fn mandatory_formats_map_on_every_committed_profile() {
 }
 
 /// `A8Unorm` is `A8_UNORM` where the profile exposes and supports it (Vulkan's alpha format reads
-/// (0, 0, 0, a), as Metal does); elsewhere sampling reads the byte as red through a swizzled
-/// `R8_UNORM` view, and other usages name what exposes `A8_UNORM`.
+/// (0, 0, 0, a), as Metal does); elsewhere its byte is `R8_UNORM`'s, its alpha in red
+/// (`FormatEmulation::AlphaInRed`), for sampling through `(Zero, Zero, Zero, R)`, storage, color
+/// attachments and their blend; a usage neither format has names what each lacks.
 #[test]
-fn a8_is_direct_where_exposed_and_samples_as_red_elsewhere() {
+fn a8_is_direct_where_exposed_and_holds_alpha_in_red_elsewhere() {
     use FormatUsage as U;
     let attach = SAMPLED | vk::FormatFeatureFlags::COLOR_ATTACHMENT;
-    let table = [
-        (vk::Format::R8_UNORM, SAMPLED),
-        (vk::Format::A8_UNORM, attach),
-    ];
+    let red = SAMPLED
+        | vk::FormatFeatureFlags::STORAGE_IMAGE
+        | vk::FormatFeatureFlags::COLOR_ATTACHMENT
+        | vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND;
+    let table = [(vk::Format::R8_UNORM, red), (vk::Format::A8_UNORM, attach)];
     // The 1.2 floor without `VK_KHR_maintenance5`: the listed `A8_UNORM` is not exposed, so the
     // profile does not hold it.
     let floor = device(floor_with(&table));
     assert!(!floor
         .profile()
         .supports_format(vk::Format::A8_UNORM, U::SampledImage));
-    let m = vk_format(
-        PixelFormat::A8Unorm,
-        &usages(&[U::SampledImage]),
-        floor.profile(),
-    )
-    .unwrap();
-    assert_eq!(m.format, vk::Format::R8_UNORM);
-    assert_eq!(m.emulation, FormatEmulation::SwizzledView);
-    assert_eq!(m.components.a, vk::ComponentSwizzle::R);
-    for u in [U::ColorAttachment, U::StorageImage] {
-        assert_eq!(
-            vk_format(PixelFormat::A8Unorm, &usages(&[u]), floor.profile()),
-            Err(Unsupported::needs_any_of(
-                Feature::Format,
-                vec![vec![
+    for set in [
+        &[U::SampledImage][..],
+        &[U::StorageImage],
+        &[U::ColorAttachment],
+        &[U::ColorAttachment, U::ColorAttachmentBlend, U::SampledImage],
+    ] {
+        let m = vk_format(PixelFormat::A8Unorm, &usages(set), floor.profile()).unwrap();
+        assert_eq!(m.format, vk::Format::R8_UNORM, "{set:?}");
+        assert_eq!(m.emulation, FormatEmulation::AlphaInRed, "{set:?}");
+        assert_eq!(m.components.a, vk::ComponentSwizzle::R, "{set:?}");
+    }
+    assert!(alpha_in_red(PixelFormat::A8Unorm, floor.profile()));
+    assert!(!alpha_in_red(PixelFormat::R8Unorm, floor.profile()));
+    assert_eq!(
+        alpha_in_red_format(PixelFormat::A8Unorm),
+        Some(vk::Format::R8_UNORM)
+    );
+    assert_eq!(alpha_in_red_format(PixelFormat::R8Unorm), None);
+    // Neither format renders: the refusal names what each lacks.
+    let sampled_red = device(floor_with(&[(vk::Format::R8_UNORM, SAMPLED)]));
+    assert_eq!(
+        vk_format(
+            PixelFormat::A8Unorm,
+            &usages(&[U::ColorAttachment]),
+            sampled_red.profile()
+        ),
+        Err(Unsupported::needs_any_of(
+            Feature::Format,
+            vec![
+                vec![
                     Capability::Extension(VkExtension::KhrMaintenance5),
                     Capability::Format {
                         format: vk::Format::A8_UNORM,
-                        usage: u
+                        usage: U::ColorAttachment
                     }
-                ]]
-            )
-            .into())
-        );
-    }
+                ],
+                vec![Capability::Format {
+                    format: vk::Format::R8_UNORM,
+                    usage: U::ColorAttachment
+                }],
+            ]
+        )
+        .into())
+    );
+    // Still a device that holds `A8Unorm` in red: its attachments are what the device lacks.
+    assert!(alpha_in_red(PixelFormat::A8Unorm, sampled_red.profile()));
     // With the extension (and its 1.2 requirement), the direct format.
     let mut desc = floor_with(&table);
     desc.extensions.extend([
@@ -609,22 +634,7 @@ fn a8_is_direct_where_exposed_and_samples_as_red_elsewhere() {
         assert_eq!(m.emulation, FormatEmulation::Direct);
         assert_eq!(m.components, vk::ComponentMapping::IDENTITY);
     }
-    // Exposed but without the usage: only the format pair is missing.
-    assert_eq!(
-        vk_format(
-            PixelFormat::A8Unorm,
-            &usages(&[U::StorageImage]),
-            m5.profile()
-        ),
-        Err(Unsupported::needs_any_of(
-            Feature::Format,
-            vec![vec![Capability::Format {
-                format: vk::Format::A8_UNORM,
-                usage: U::StorageImage
-            }]]
-        )
-        .into())
-    );
+    assert!(!alpha_in_red(PixelFormat::A8Unorm, m5.profile()));
     // Vulkan 1.4 exposes it in core.
     let mut desc = floor_with(&table);
     desc.api_version = ApiVersion { major: 1, minor: 4 };
@@ -636,6 +646,24 @@ fn a8_is_direct_where_exposed_and_samples_as_red_elsewhere() {
     )
     .unwrap();
     assert_eq!(m.format, vk::Format::A8_UNORM);
+}
+
+/// An `A8Unorm` storage texture on a device that stores no `A8_UNORM` is its `R8_UNORM` image
+/// itself, read as alpha and written from alpha by the shader (`StorageImageClass::AlphaInRed`),
+/// with no alias.
+#[test]
+fn a8_storage_is_its_red_image_without_a8_unorm() {
+    let red = SAMPLED | vk::FormatFeatureFlags::STORAGE_IMAGE;
+    let table = [(vk::Format::R8_UNORM, red), (vk::Format::A8_UNORM, red)];
+    let floor = device(floor_with(&table));
+    let c = storage_image_choice(PixelFormat::A8Unorm, floor.profile()).unwrap();
+    assert_eq!(c.vk_format, vk::Format::R8_UNORM);
+    assert_eq!(c.class, StorageImageClass::AlphaInRed);
+    assert_eq!(c.alias, None);
+    assert_eq!(
+        storage_view_formats(PixelFormat::A8Unorm, floor.profile()),
+        vec![vk::Format::R8_UNORM]
+    );
 }
 
 /// A `BGRA8Unorm_sRGB` storage texture is its `B8G8R8A8_UNORM` twin's encode view where the device
@@ -1189,7 +1217,9 @@ fn swizzled_views_read_metal_s_opaque_black_border() {
         for c in candidates.iter().filter(|c| {
             matches!(
                 c.emulation,
-                FormatEmulation::SwizzledView | FormatEmulation::RotatedView
+                FormatEmulation::SwizzledView
+                    | FormatEmulation::RotatedView
+                    | FormatEmulation::AlphaInRed
             )
         }) {
             let device = crate::metal::sampler::device_opaque_black(c.format, c.components, false);
@@ -1439,38 +1469,9 @@ fn storage_choices_follow_d25() {
         .into())
     );
 
-    // A8Unorm's storage image is `A8_UNORM` itself (the swizzled `R8_UNORM` view is sampling
-    // only: a storage image ignores the swizzle), so without `VK_KHR_maintenance5` it is refused
-    // even though R8_UNORM is storage-capable and declarable as `R8`.
-    let a8_lacks = |formatless: bool| {
-        let mut need = vec![
-            Capability::Extension(VkExtension::KhrMaintenance5),
-            Capability::Format {
-                format: vk::Format::A8_UNORM,
-                usage: FormatUsage::StorageImage,
-            },
-        ];
-        // No SPIR-V image format declares it: the device's features, or with them the format's
-        // without-format usages, which a format the device does not expose has none of.
-        if formatless {
-            need.extend([
-                Capability::Format {
-                    format: vk::Format::A8_UNORM,
-                    usage: FormatUsage::StorageImageReadWithoutFormat,
-                },
-                Capability::Format {
-                    format: vk::Format::A8_UNORM,
-                    usage: FormatUsage::StorageImageWriteWithoutFormat,
-                },
-            ]);
-        } else {
-            need.extend([
-                Capability::Feature(VkFeature::ShaderStorageImageReadWithoutFormat),
-                Capability::Feature(VkFeature::ShaderStorageImageWriteWithoutFormat),
-            ]);
-        }
-        Err(Unsupported::needs_any_of(Feature::Format, vec![need]).into())
-    };
+    // Without `VK_KHR_maintenance5` an `A8Unorm` texture is an `R8_UNORM` image holding its alpha
+    // in red, which the storage choice reads and writes as alpha (`AlphaInRed`), typed as `R8`.
+    let held_in_red = StorageImageChoice::new(vk::Format::R8_UNORM, StorageImageClass::AlphaInRed);
     let typed_r8 = device(floor_with(&[(vk::Format::R8_UNORM, storage)]));
     assert_eq!(
         choice(PixelFormat::R8Unorm, &typed_r8),
@@ -1479,7 +1480,7 @@ fn storage_choices_follow_d25() {
             StorageImageClass::Identity
         ))
     );
-    assert_eq!(choice(PixelFormat::A8Unorm, &typed_r8), a8_lacks(false));
+    assert_eq!(choice(PixelFormat::A8Unorm, &typed_r8), Ok(held_in_red));
 
     // Formatless: every storage-capable format of one numeric type shares the `Unknown` identity
     // key, which keeps the type.
@@ -1517,6 +1518,7 @@ fn storage_choices_follow_d25() {
         choice(PixelFormat::RGBA16Sint, &formatless),
         Ok(unknown(SampledType::Sint))
     );
+    assert_eq!(choice(PixelFormat::A8Unorm, &formatless), Ok(held_in_red));
     // bgra8 sRGB's UNORM twin is not accessed without a format here (no `VkFormatProperties3`):
     // both conversions through rgba8.
     assert_eq!(

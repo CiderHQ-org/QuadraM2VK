@@ -865,6 +865,8 @@ surface! {
         fn ycbcr_format;
         fn rotated_channels;
         fn to_rotated_image;
+        fn alpha_in_red;
+        fn alpha_in_red_format;
     }
     "metal::sampler" => metal2vulkan::metal::sampler {
         struct SamplerUse N;

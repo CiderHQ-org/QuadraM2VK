@@ -1071,7 +1071,7 @@ codec_struct! {
         sample_mask, rotated_colors, rotated_factors, rotated_blends, srgb_fetches,
         half_output_lanes, texture_write_rounding, uniform_outputs, uniform_inputs,
         instanced_attributes, selected_colors, half_blend_colors, half_fast_colors,
-        float_blend_colors, zero_indices, color_group,
+        float_blend_colors, zero_indices, color_group, word_colors, alpha_in_red_colors,
     }
     ColorGroup { present, width, group }
     WordField { shift, bits }

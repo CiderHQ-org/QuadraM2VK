@@ -275,14 +275,16 @@ pub(crate) fn storage_candidate(plan: &ImagePlan, profile: &DeviceProfile) -> Op
 
 /// Whether the sample planes' copies (`sample_planes.rs`) read and write `plan`'s image directly:
 /// it is sampled and may be viewed in the [`PlanesCopy`] format of its texel size (mutable, with
-/// no format list or one that lists it).
+/// no format list or one that lists it); an `A8_UNORM` image, whose copy is in its own format
+/// ([`PlanesCopy::Alpha8`]), needs no other view.
 pub(crate) fn planes_copies(plan: &ImagePlan) -> bool {
-    let Some(copy) = PlanesCopy::for_format(plan.format) else {
+    let Some(copy) = PlanesCopy::for_planes(plan.format) else {
         return false;
     };
     plan.usage.contains(ImageUsageFlags::SAMPLED)
-        && plan.flags.contains(ImageCreateFlags::MUTABLE_FORMAT)
-        && (plan.view_formats.is_empty() || plan.view_formats.contains(&copy.format()))
+        && (!copy.moves_bits()
+            || (plan.flags.contains(ImageCreateFlags::MUTABLE_FORMAT)
+                && (plan.view_formats.is_empty() || plan.view_formats.contains(&copy.format()))))
 }
 
 /// What a multisampled color image of `format` lacks on `profile` for the sample planes' copies
@@ -290,7 +292,7 @@ pub(crate) fn planes_copies(plan: &ImagePlan) -> bool {
 /// usage is asked), and the [`PlanesCopy`] format of its texel size sampled and a color
 /// attachment. `None` where it lacks nothing, and where `format` has no copy format.
 pub(crate) fn planes_copies_gap(format: Format, profile: &DeviceProfile) -> Option<Capability> {
-    let copy = PlanesCopy::for_format(format)?;
+    let copy = PlanesCopy::for_planes(format)?;
     [
         (format, FormatUsage::SampledImage),
         (copy.format(), FormatUsage::SampledImage),
@@ -303,15 +305,20 @@ pub(crate) fn planes_copies_gap(format: Format, profile: &DeviceProfile) -> Opti
 
 /// The usage and format list a multisampled color image takes for the sample planes' copies
 /// (`sample_planes.rs`): `plan` sampled and mutable with the [`PlanesCopy`] format of its texel
-/// size among its view formats. `None` where the device cannot run the copies on it: no copy
-/// format, or a format usage it lacks ([`planes_copies_gap`]).
+/// size among its view formats, or sampled alone where the copy is in its own format
+/// (`A8_UNORM`'s). `None` where the device cannot run the copies on it: no copy format, or a
+/// format usage it lacks ([`planes_copies_gap`]).
 pub(crate) fn with_planes_copies(plan: &ImagePlan, profile: &DeviceProfile) -> Option<ImagePlan> {
-    let copy = PlanesCopy::for_format(plan.format)?;
+    let copy = PlanesCopy::for_planes(plan.format)?;
     if planes_copies_gap(plan.format, profile).is_some() {
         return None;
     }
     let mut candidate = plan.clone();
     candidate.usage |= ImageUsageFlags::SAMPLED;
+    // `A8_UNORM`'s copy is in its own format, which views it as it is.
+    if !copy.moves_bits() {
+        return Some(candidate);
+    }
     let any_format =
         plan.flags.contains(ImageCreateFlags::MUTABLE_FORMAT) && plan.view_formats.is_empty();
     candidate.flags |= ImageCreateFlags::MUTABLE_FORMAT;

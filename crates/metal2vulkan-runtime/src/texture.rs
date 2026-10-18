@@ -3891,7 +3891,9 @@ impl Device {
         };
         let written = match pattern {
             FreshPattern::Color { color, .. } if clear && color.is_some() => color
-                .and_then(|color| clear_value::color(pf, color, ClearRoute::ThroughHalf))
+                .and_then(|color| {
+                    clear_value::held_color(pf, plan.format, color, ClearRoute::ThroughHalf)
+                })
                 .map(Pattern::Color),
             FreshPattern::Color { texel, .. }
                 if single && heap_tiled::holds_metal_texels(pf, plan.format, texel.len()) =>

@@ -21,9 +21,11 @@
 //!   `ShaderWrite` or Apple's private `BlockWritesOnly` for a storage one (Metal's validation takes
 //!   a write of either, EV XRR2-usw1), which never holds a depth or stencil format), through its
 //!   view: a sampled one as a slot's (`plan::resources::sampled_view`), a storage one the direct
-//!   format, which the class's formatless declaration serves exactly when the format's storage
-//!   choice for every access the device lets a heap make (`heap_storage_use`) is `Identity` without
-//!   an alias and the format serves those accesses without a format
+//!   format (an `A8Unorm` texture held in red its `R8_UNORM` image, whose texels a heap access
+//!   converts where the handle carries `A8Unorm`'s class), which the class's formatless declaration
+//!   serves exactly when the format's storage choice for every access the device lets a heap make
+//!   (`heap_storage_use`) is `Identity` (or `AlphaInRed`) without an alias and the format serves
+//!   those accesses without a format
 //!   (`metal::format::without_format_gaps`: the device's features and the format's own
 //!   `VkFormatFeatureFlags2` bits). A fitting member the heap cannot view (another storage choice,
 //!   a format the profile cannot sample or store) is `Unsupported`, as for a slot: a handle may
@@ -385,11 +387,13 @@ pub fn heap_raw_form(facts: &TextureFacts) -> Option<crate::metal::format::Exten
 
 /// The view through which the heap array of `class` holds a member of facts `shape`, in
 /// `layout`, on `profile` (the module docs): a sampled class's as a slot's
-/// (`plan::resources::sampled_view`), a storage class's the direct format, which the class's
-/// formatless declaration must serve. `Unsupported` where the array cannot view it: an
-/// extended-range format (its raw texels need its function's decode) but a form a heap reads in the
-/// unsigned integer class ([`Fit::Raw`]), its raw view, or a storage member whose storage choice or
-/// format the formatless declaration cannot serve.
+/// (`plan::resources::sampled_view`), a storage class's the direct format (an `A8Unorm` texture
+/// held in red its `R8_UNORM` image), which the class's formatless declaration must serve.
+/// `Unsupported` where the array cannot view it: an extended-range format (its raw texels need its
+/// function's decode) but a form a heap reads in the unsigned integer class ([`Fit::Raw`]), its raw
+/// view, a storage member whose storage choice or format the formatless declaration cannot serve,
+/// or an `A8Unorm` one held in red whose swizzle moves its alpha (its handle's class is not
+/// `A8Unorm`'s).
 fn member_view(
     profile: &DeviceProfile,
     shape: &TextureShape,
@@ -451,13 +455,29 @@ fn member_view(
         // A half-float member's writes take the class its handle carries, as before: the alias
         // a slot only written takes (`StorageImageClass::HalfBits`) is a slot's alone.
         let aliased = c.alias.is_some() && c.class != StorageImageClass::HalfBits;
-        if !per_element || aliased || c.x_channel {
+        // An `A8Unorm` texture held in red (`StorageImageClass::AlphaInRed`): its `R8_UNORM`
+        // image, whose texels a heap access converts where the handle carries `A8Unorm`'s class
+        // (`metal::texel_format::heap_alpha_in_red_index`), which a swizzle that moves its alpha
+        // does not keep.
+        let alpha_in_red = c.class == StorageImageClass::AlphaInRed;
+        if alpha_in_red
+            && crate::metal::texel_format::heap_class_index(pixel_format, shape.swizzle())
+                != crate::metal::texel_format::heap_alpha_in_red_index()
+        {
             return Err(BindError::Unsupported(Unsupported::not_implemented(
                 Feature::ArgumentBufferTextures,
             )));
         }
-        let format = crate::metal::format::direct_format(pixel_format)
-            .ok_or_else(|| internal("a storage heap member without a format"))?;
+        if !(per_element || alpha_in_red) || aliased || c.x_channel {
+            return Err(BindError::Unsupported(Unsupported::not_implemented(
+                Feature::ArgumentBufferTextures,
+            )));
+        }
+        let format = match alpha_in_red {
+            true => c.vk_format,
+            false => crate::metal::format::direct_format(pixel_format)
+                .ok_or_else(|| internal("a storage heap member without a format"))?,
+        };
         // The declaration names no format, so the member's format must serve those accesses
         // without one.
         let gaps = without_format_gaps(format, use_, profile);

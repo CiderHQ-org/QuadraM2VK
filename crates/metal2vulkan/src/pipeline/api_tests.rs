@@ -408,6 +408,7 @@ mod serde_round_trips {
             shader_stencil: true,
             window_depth_varying: true,
             rotated_colors: BTreeSet::from([4]),
+            alpha_in_red_colors: BTreeSet::from([4]),
             rotated_factors: BTreeMap::from([(
                 4,
                 [

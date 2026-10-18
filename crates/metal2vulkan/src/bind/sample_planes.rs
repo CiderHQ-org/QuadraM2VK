@@ -6,7 +6,9 @@
 //! addressed `(x, y, SampleId)`. The consumer keeps the planes and moves the samples between
 //! them and the attachment around the fetching draws. These crate-owned modules are the two
 //! moves, each through an unsigned-integer view of the attachment format's texel size
-//! ([`PlanesCopy`]), so every texel's bits cross unchanged whatever the format:
+//! ([`PlanesCopy`]), so every texel's bits cross unchanged whatever the format; `A8_UNORM`, whose
+//! class no unsigned format shares, moves through its own format's `float`s
+//! ([`PlanesCopy::Alpha8`]), which keep each 8-bit code:
 //!
 //! - **The split** ([`planes_split_module`], one per [`PlanesCopy`]): one `GLCompute` entry `main`
 //!   with local size ([`PlanesSplitModule::LOCAL_SIZE`], [`PlanesSplitModule::LOCAL_SIZE`], 1)
@@ -15,7 +17,7 @@
 //!   | Binding | Image | View |
 //!   |---|---|---|
 //!   | [`PlanesSplitModule::SOURCE_BINDING`] | the multisampled attachment | a sampled 2D view of its level and layer, in [`PlanesCopy::format`] |
-//!   | [`PlanesSplitModule::PLANES_BINDING`] | the planes | a storage 2D-array view of every layer, in [`PlanesCopy::format`] |
+//!   | [`PlanesSplitModule::PLANES_BINDING`] | the planes | a storage 2D-array view of every layer, in [`PlanesCopy::format`] (declared without a format for [`PlanesCopy::Alpha8`]) |
 //!
 //!   Invocation `(x, y, s)` inside the planes' size fetches sample `s` of pixel `(x, y)` and
 //!   writes it to texel `(x, y)` of layer `s`. Dispatch `ceil(width / LOCAL_SIZE)`,
@@ -24,8 +26,8 @@
 //!   the whole viewport from `VertexIndex` 0 to 2 (no vertex input), and a `Fragment` entry `main`
 //!   with one sampled 2D-array image, the planes in [`PlanesCopy::format`], at
 //!   [`PlanesMergeModules::PLANES_BINDING`] of set 0. Each invocation fetches texel
-//!   `(FragCoord.xy, SampleId)` and writes it, an unsigned `uvec4`, to the color output at
-//!   `Location` 0. Run at sample rate (`sampleShadingEnable`, `minSampleShading` 1) into a
+//!   `(FragCoord.xy, SampleId)` and writes it, an unsigned `uvec4` (a `vec4` for
+//!   [`PlanesCopy::Alpha8`]), to the color output at `Location` 0. Run at sample rate (`sampleShadingEnable`, `minSampleShading` 1) into a
 //!   render pass whose one color attachment is the multisampled attachment's view in
 //!   [`PlanesCopy::format`], over the render area, without blending: each invocation writes its
 //!   own sample. The fragment module reads `SampleId`, so it needs `sampleRateShading`.
@@ -68,24 +70,30 @@ pub enum PlanesCopy {
     Rg32,
     /// Sixteen bytes: `R32G32B32A32_UINT`.
     Rgba32,
+    /// One byte of `A8_UNORM`'s own compatibility class ("8-bit alpha"), which no view of another
+    /// format reads: moved through `A8_UNORM` views as the `float` each reads, `code / 255` in
+    /// alpha, which its store keeps as the code. Not a bits copy ([`PlanesCopy::for_format`]):
+    /// the sample planes' copies alone take it ([`PlanesCopy::for_planes`]).
+    Alpha8,
 }
 
 impl PlanesCopy {
-    /// Every copy format, by texel size.
-    pub const ALL: [PlanesCopy; 5] = [
+    /// Every copy format, by texel size, then [`PlanesCopy::Alpha8`].
+    pub const ALL: [PlanesCopy; 6] = [
         PlanesCopy::R8,
         PlanesCopy::R16,
         PlanesCopy::R32,
         PlanesCopy::Rg32,
         PlanesCopy::Rgba32,
+        PlanesCopy::Alpha8,
     ];
 
-    /// The copy format of `format`: a color format of one texel per block, of 1, 2, 4, 8 or 16
-    /// bytes, which shares the compatibility class of that unsigned format, so a view of it
-    /// moves the texel's bits. `None` for a depth, stencil, compressed, multi-planar or
-    /// 3-component 96-bit format, and for one of a class of its own (`A8_UNORM`'s "8-bit
-    /// alpha", the 4-pack 10- and 12-bit formats', the 4:2:2 formats'), which no view of
-    /// another format reads (the scout's VUID-VkImageCreateInfo-pNext-06722).
+    /// The copy format of `format` through which a copy moves its texels' bits: a color format
+    /// of one texel per block, of 1, 2, 4, 8 or 16 bytes, which shares the compatibility class of
+    /// that unsigned format, so a view of it moves the texel's bits. `None` for a depth, stencil,
+    /// compressed, multi-planar or 3-component 96-bit format, and for one of a class of its own
+    /// (`A8_UNORM`'s "8-bit alpha", the 4-pack 10- and 12-bit formats', the 4:2:2 formats'),
+    /// which no view of another format reads (VUID-VkImageCreateInfo-pNext-06722).
     pub fn for_format(format: Format) -> Option<PlanesCopy> {
         let block = format.block()?;
         if block.color.is_none() || block.depth.is_some() || block.stencil.is_some() {
@@ -108,7 +116,16 @@ impl PlanesCopy {
             .then_some(copy)
     }
 
-    /// The unsigned-integer Vulkan format of the copy.
+    /// The copy format of the sample planes of a color attachment of `format`: its bits copy
+    /// ([`PlanesCopy::for_format`]), else [`PlanesCopy::Alpha8`] for `A8_UNORM`, whose one 8-bit
+    /// unorm channel its own views' `float`s keep. `None` for another format.
+    pub fn for_planes(format: Format) -> Option<PlanesCopy> {
+        PlanesCopy::for_format(format)
+            .or_else(|| (format == Format::A8_UNORM).then_some(PlanesCopy::Alpha8))
+    }
+
+    /// The Vulkan format of the copy's views: an unsigned-integer one, or `A8_UNORM` for
+    /// [`PlanesCopy::Alpha8`].
     pub fn format(self) -> Format {
         match self {
             PlanesCopy::R8 => Format::R8_UINT,
@@ -116,10 +133,18 @@ impl PlanesCopy {
             PlanesCopy::R32 => Format::R32_UINT,
             PlanesCopy::Rg32 => Format::R32G32_UINT,
             PlanesCopy::Rgba32 => Format::R32G32B32A32_UINT,
+            PlanesCopy::Alpha8 => Format::A8_UNORM,
         }
     }
 
-    /// The SPIR-V image format of a storage view in [`PlanesCopy::format`].
+    /// Whether the copy moves texels as their bits, through an unsigned-integer format; else as
+    /// the `float`s of their own format ([`PlanesCopy::Alpha8`]).
+    pub fn moves_bits(self) -> bool {
+        self != PlanesCopy::Alpha8
+    }
+
+    /// The SPIR-V image format of a storage view in [`PlanesCopy::format`]: `Unknown` for
+    /// [`PlanesCopy::Alpha8`], whose format no SPIR-V format names.
     pub(crate) fn spirv_format(self) -> crate::spv::ImageFormat {
         match self {
             PlanesCopy::R8 => crate::spv::ImageFormat::R8ui,
@@ -127,6 +152,7 @@ impl PlanesCopy {
             PlanesCopy::R32 => crate::spv::ImageFormat::R32ui,
             PlanesCopy::Rg32 => crate::spv::ImageFormat::Rg32ui,
             PlanesCopy::Rgba32 => crate::spv::ImageFormat::Rgba32ui,
+            PlanesCopy::Alpha8 => crate::spv::ImageFormat::Unknown,
         }
     }
 }
@@ -139,7 +165,9 @@ pub struct PlanesSplitModule {
     pub spirv: Arc<[u32]>,
     /// What the module needs from the device: a storage image of an extended format
     /// (`shaderStorageImageExtendedFormats`) for [`PlanesCopy::R8`], [`PlanesCopy::R16`] and
-    /// [`PlanesCopy::Rg32`].
+    /// [`PlanesCopy::Rg32`], and a storage write without a format (the SPIR-V capability
+    /// `StorageImageWriteWithoutFormat`, which the device resolves, `Requirements`) for
+    /// [`PlanesCopy::Alpha8`].
     pub requirements: Requirements,
 }
 
@@ -161,7 +189,8 @@ pub struct PlanesMergeModules {
     /// The vertex stage: SPIR-V 1.5 words, entry point `main`, no resources.
     pub vertex: Arc<[u32]>,
     /// The fragment stage: SPIR-V 1.5 words, entry point `main`, the planes at
-    /// [`PlanesMergeModules::PLANES_BINDING`] of set 0, the output at `Location` 0.
+    /// [`PlanesMergeModules::PLANES_BINDING`] of set 0, the output at `Location` 0: a `uvec4`, or
+    /// a `vec4` for [`PlanesCopy::Alpha8`].
     pub fragment: Arc<[u32]>,
     /// What the two stages need from the device: `sampleRateShading`.
     pub requirements: Requirements,
@@ -204,15 +233,26 @@ fn u32_ty(b: &mut ModuleBuilder) -> BResult<TypeId> {
     })
 }
 
-/// An unsigned 2D image type of `usage` and `format`, arrayed or multisampled as asked.
-fn uint_image(
+/// The scalar type of `copy`'s texels: unsigned 32-bit, or 32-bit float for a copy that does not
+/// move bits ([`PlanesCopy::moves_bits`]).
+fn texel_scalar(b: &mut ModuleBuilder, copy: PlanesCopy) -> BResult<TypeId> {
+    match copy.moves_bits() {
+        true => u32_ty(b),
+        false => b.ty(Type::Float { width: 32 }),
+    }
+}
+
+/// A 2D image type of `copy`'s texels ([`texel_scalar`]), of `usage` and `format`, arrayed or
+/// multisampled as asked.
+fn copy_image(
     b: &mut ModuleBuilder,
+    copy: PlanesCopy,
     usage: ImageUsage,
     format: crate::spv::ImageFormat,
     arrayed: bool,
     multisampled: bool,
 ) -> BResult<TypeId> {
-    let sampled_type = u32_ty(b)?;
+    let sampled_type = texel_scalar(b, copy)?;
     b.ty(Type::Image(ImageType {
         sampled_type,
         dim: Dim::D2,
@@ -239,9 +279,10 @@ pub fn split_typed_module(copy: PlanesCopy) -> BResult<TypedModule> {
     let uvec2 = b.ty(Type::Vector { elem: u32_, len: 2 })?;
     let uvec3 = b.ty(Type::Vector { elem: u32_, len: 3 })?;
     let unknown = crate::spv::ImageFormat::Unknown;
-    let source_ty = uint_image(&mut b, ImageUsage::Sampled, unknown, false, true)?;
-    let planes_ty = uint_image(
+    let source_ty = copy_image(&mut b, copy, ImageUsage::Sampled, unknown, false, true)?;
+    let planes_ty = copy_image(
         &mut b,
+        copy,
         ImageUsage::Storage,
         copy.spirv_format(),
         true,
@@ -359,10 +400,12 @@ pub fn merge_vertex_typed_module() -> BResult<TypedModule> {
     b.finalize()
 }
 
-/// The merge's fragment stage as a typed module. Its binding is the symbol [`MERGE_PLANES`].
-pub fn merge_fragment_typed_module() -> BResult<TypedModule> {
+/// The merge's fragment stage of `copy` as a typed module. Its binding is the symbol
+/// [`MERGE_PLANES`].
+pub fn merge_fragment_typed_module(copy: PlanesCopy) -> BResult<TypedModule> {
     let mut b = ModuleBuilder::new();
     let u32_ = u32_ty(&mut b)?;
+    let scalar = texel_scalar(&mut b, copy)?;
     let i32_ = b.ty(Type::Int {
         width: 32,
         signed: true,
@@ -370,13 +413,16 @@ pub fn merge_fragment_typed_module() -> BResult<TypedModule> {
     let f32_ = b.ty(Type::Float { width: 32 })?;
     let vec4 = b.ty(Type::Vector { elem: f32_, len: 4 })?;
     let uvec3 = b.ty(Type::Vector { elem: u32_, len: 3 })?;
-    let uvec4 = b.ty(Type::Vector { elem: u32_, len: 4 })?;
+    let texel4 = b.ty(Type::Vector {
+        elem: scalar,
+        len: 4,
+    })?;
     let unknown = crate::spv::ImageFormat::Unknown;
-    let planes_ty = uint_image(&mut b, ImageUsage::Sampled, unknown, true, false)?;
+    let planes_ty = copy_image(&mut b, copy, ImageUsage::Sampled, unknown, true, false)?;
     let planes = b.resource(MERGE_PLANES, StorageClass::UniformConstant, planes_ty)?;
     let coord = b.builtin(crate::spv::BuiltIn::FragCoord, IoDir::Input, vec4)?;
     let sample = b.builtin(crate::spv::BuiltIn::SampleId, IoDir::Input, i32_)?;
-    let output = b.fixed_io(0, IoDir::Output, uvec4, false)?;
+    let output = b.fixed_io(0, IoDir::Output, texel4, false)?;
     let void = b.ty(Type::Void)?;
     let mut f = b.function(void)?;
     let coord = f.module().global_value(coord)?;
@@ -455,16 +501,20 @@ pub fn planes_split_module(device: &Device, copy: PlanesCopy) -> Result<PlanesSp
     })
 }
 
-/// The merge modules on `device`, built and checked as [`planes_split_module`] is; refused
-/// likewise where the device lacks `sampleRateShading`.
-pub fn planes_merge_modules(device: &Device) -> Result<PlanesMergeModules, Error> {
+/// The merge modules of `copy` on `device`, built and checked as [`planes_split_module`] is;
+/// refused likewise where the device lacks `sampleRateShading`. Every bits copy
+/// ([`PlanesCopy::moves_bits`]) takes the same modules.
+pub fn planes_merge_modules(
+    device: &Device,
+    copy: PlanesCopy,
+) -> Result<PlanesMergeModules, Error> {
     let (vertex, vertex_needs) = finish(
         device,
         merge_vertex_typed_module()?,
         "planes merge's vertex stage",
     )?;
     let (fragment, fragment_needs) =
-        finish(device, merge_fragment_typed_module()?, "planes merge")?;
+        finish(device, merge_fragment_typed_module(copy)?, "planes merge")?;
     let requirements = device
         .profile()
         .union_requirements(&vertex_needs, &fragment_needs);

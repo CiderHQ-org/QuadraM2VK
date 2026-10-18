@@ -64,6 +64,12 @@
 //!   image or written to it with red and blue exchanged ([`metal_order`]): the device converts
 //!   each channel as it converts the attachment's own, so a read, a write, the channels a write
 //!   mask keeps and the per-sample forms hold the values the attachment's own view would; an
+//!   `A8Unorm` attachment whose image holds Metal's alpha in red (`R8_UNORM` on a device without
+//!   `A8_UNORM`, `StorageView::alpha_in_red`) through that image, every texel read from it taken
+//!   to Metal's `(0, 0, 0, r)` and every one written to it holding Metal's alpha in red
+//!   ([`metal_order`], [`image_order`]), so a read, a merge of the channels a write mask keeps
+//!   (in Metal's channels, of which only alpha is stored) and the per-sample forms are Metal's
+//!   (probe `a8`'s uses on an M3 Max under macOS 27.0.1); an
 //!   8-bit four-channel sRGB format
 //!   (`RGBA8Unorm_sRGB`, `BGRA8Unorm_sRGB`) through a view of the attachment in `R32_UINT`
 //!   (`StorageView::uint_view`), whose bytes the function converts by Metal's measured conversions
@@ -680,6 +686,11 @@ pub struct StorageView {
     /// unsigned integer format, and a write encodes Metal's word ([`word_texel`]). `None` for
     /// another format and device.
     pub word: Option<WordAttachment>,
+    /// The attachment's image holds Metal's alpha in red (`metal::format::alpha_in_red`:
+    /// `A8Unorm` in `R8_UNORM` on a device without `A8_UNORM`): the view and the declaration are
+    /// `R8_UNORM`'s, a texel read from the image, `(r, 0, 0, 1)`, is Metal's `(0, 0, 0, r)`, and a
+    /// texel written to it holds Metal's alpha in red ([`metal_order`], [`image_order`]).
+    pub alpha_in_red: bool,
 }
 
 impl StorageView {
@@ -974,11 +985,17 @@ pub(crate) fn storage_form(
     }
     let shader_blends = blend.is_some();
     let blends = attachment.blending_enabled && !(attachment.replaces && !snorm) && !shader_blends;
+    // An `A8Unorm` attachment whose image holds Metal's alpha in red, for every use of the
+    // texture (`metal::format::alpha_in_red`), is read and written through its `R8_UNORM` image,
+    // the function moving Metal's alpha into and out of red.
+    let alpha_in_red = emulation == FormatEmulation::AlphaInRed
+        && crate::metal::format::alpha_in_red(pf, p)
+        && word.is_none();
     // An unblended write of every channel stores Metal's write of the output. A padded 10-bit
     // attachment's tile value and blends are not measured: no storage form.
     let not_modelled = inputs.amplified
         || extended.is_some_and(ExtendedRange::padded)
-        || (mapping.emulation != FormatEmulation::Direct && extended.is_none())
+        || (emulation != FormatEmulation::Direct && extended.is_none() && !alpha_in_red)
         || (extended.is_some()
             && stores
             && !shader_blends
@@ -1077,6 +1094,7 @@ pub(crate) fn storage_form(
             uint_view,
             rgba_view,
             word,
+            alpha_in_red,
         })),
         _ => {
             // A BGRA-order format no declaration reaches, whose RGBA-order twin lacks something
@@ -1611,6 +1629,16 @@ pub(super) fn plan(cx: &mut SelectCx<'_>) -> Result<(), Error> {
                         nearest_even,
                     },
                 );
+                // An image holding Metal's alpha in red is read and written as Metal's alpha; the
+                // interface records the attachment, which link holds the pipeline's to
+                // (`color_writes::check`).
+                if view.alpha_in_red {
+                    cx.families
+                        .stage_io
+                        .interface
+                        .alpha_in_red_colors
+                        .insert(color);
+                }
                 cx.facts.insert(RuntimeFact::InterlockedFramebufferFetch {
                     color,
                     format: view.format,
@@ -2029,6 +2057,8 @@ pub(super) fn words(cx: &SelectCx<'_>, uses: u64, rets: u64) -> u64 {
         .values()
         .filter(|sc| sc.view.rgba_view.is_some())
         .count() as u64;
+    // An alpha-in-red image's read moves its red to alpha, and its write alpha to red.
+    let moved = fetch.values().filter(|sc| sc.view.alpha_in_red).count() as u64;
     let read = match (
         fetch.values().any(|sc| sc.view.extended.is_some()),
         fetch.values().any(|sc| sc.view.uint_view.is_some()),
@@ -2037,7 +2067,8 @@ pub(super) fn words(cx: &SelectCx<'_>, uses: u64, rets: u64) -> u64 {
         (false, true) => READ.saturating_add(u64::from(3 * srgb::STEP_WORDS) + 400),
         (false, false) => READ,
     }
-    .saturating_add(EXCHANGE.saturating_mul(exchanged));
+    .saturating_add(EXCHANGE.saturating_mul(exchanged))
+    .saturating_add(super::color::ALPHA_IN_RED_WORDS.saturating_mul(moved));
     // An sRGB attachment's write encodes four channels (three through Metal's thresholds),
     // reorders its bytes, and merges kept ones from the texel it reads first.
     let srgb_writes = fetch
@@ -2064,6 +2095,7 @@ pub(super) fn words(cx: &SelectCx<'_>, uses: u64, rets: u64) -> u64 {
         .saturating_add(word_write)
         .saturating_add((READ + WRITE + 8).saturating_mul(shadowed))
         .saturating_add((2 * EXCHANGE).saturating_mul(exchanged))
+        .saturating_add((EXCHANGE + super::color::ALPHA_IN_RED_WORDS).saturating_mul(moved))
         .saturating_add(40);
     OBJECT
         .saturating_mul(fetch.len() as u64 + shadowed)
@@ -2220,15 +2252,28 @@ fn read_texel(
     metal_order(fb, sc, texel)
 }
 
-/// Texel `texel` of storage-form attachment `sc`, in Metal's channel order from the image's or in
-/// the image's from Metal's: an attachment viewed in its RGBA-order twin
-/// ([`StorageView::rgba_view`]) has red and blue exchanged, an exchange that is its own inverse;
-/// any other is as it is. Every texel written to the attachment's image goes through here too
-/// ([`emit_return`]).
+/// Texel `texel` of storage-form attachment `sc`'s image, in Metal's channel order: an attachment
+/// viewed in its RGBA-order twin ([`StorageView::rgba_view`]) has red and blue exchanged, and one
+/// whose image holds Metal's alpha in red ([`StorageView::alpha_in_red`]) reads `(r, 0, 0, 1)` as
+/// Metal's `(0, 0, 0, r)`; any other is as it is. Every texel read from the attachment's image
+/// goes through here ([`read_texel`]), and every one written to it through [`image_order`].
 fn metal_order(fb: &mut FunctionBuilder<'_>, sc: &StorageColor, texel: SValue) -> BResult<SValue> {
-    match sc.view.rgba_view {
-        Some(_) => fb.vector_shuffle(texel, texel, &[2, 1, 0, 3]),
-        None => Ok(texel),
+    match (sc.view.rgba_view, sc.view.alpha_in_red) {
+        (Some(_), _) => fb.vector_shuffle(texel, texel, &[2, 1, 0, 3]),
+        (None, true) => super::color::alpha_in_red(fb, texel),
+        (None, false) => Ok(texel),
+    }
+}
+
+/// Metal-ordered texel `texel` of storage-form attachment `sc`, in its image's channel order:
+/// [`metal_order`]'s exchange of red and blue, which is its own inverse, and for an image holding
+/// Metal's alpha in red, Metal's alpha in every lane (the image keeps its red). Every texel
+/// written to the attachment's image goes through here ([`emit_return`]).
+fn image_order(fb: &mut FunctionBuilder<'_>, sc: &StorageColor, texel: SValue) -> BResult<SValue> {
+    match (sc.view.rgba_view, sc.view.alpha_in_red) {
+        (Some(_), _) => fb.vector_shuffle(texel, texel, &[2, 1, 0, 3]),
+        (None, true) => fb.vector_shuffle(texel, texel, &[3, 3, 3, 3]),
+        (None, false) => Ok(texel),
     }
 }
 
@@ -2417,7 +2462,7 @@ pub(super) fn emit_return(
             }
         };
         // The image's texel of the Metal-ordered one.
-        let texel = metal_order(fb, &sc, texel)?;
+        let texel = image_order(fb, &sc, texel)?;
         let (image, at, ops) = image_and_texel(cx, fb, color, sc.view.samples)?;
         texels.push((image, at, texel, ops));
         if let Some(held) = held {

@@ -491,3 +491,47 @@ fn unmeasured_blends_are_announced() {
         assert_eq!(rotated_form(&refused, p), None);
     }
 }
+
+/// Every pair of Metal's alpha factors under each operation, beside color factors that would read
+/// other values: Vulkan's blend [`alpha_in_red_blend`] gives an `R8_UNORM` image holding Metal's
+/// alpha in red, whose function writes its outputs rotated, stores in red Metal's blend of
+/// `A8Unorm`'s alpha (probe `a8`, an M3 Max under macOS 27.0.1: each alpha factor reads alphas,
+/// the color factors nothing). The image's destination reads red as its own and alpha as one.
+#[test]
+fn an_alpha_in_red_blend_stores_metals_alpha() {
+    use BlendFactor as F;
+    use BlendOperation as O;
+    let p = moltenvk();
+    let factors: Vec<F> = F::ALL
+        .iter()
+        .copied()
+        .filter(|&f| f != F::Unspecialized)
+        .collect();
+    let mut checked = 0;
+    for op in [O::Add, O::Subtract, O::ReverseSubtract, O::Min, O::Max] {
+        for &sa in &factors {
+            for &da in &factors {
+                let mut a = attachment(
+                    (F::OneMinusDestinationColor, F::SourceAlphaSaturated, O::Add),
+                    (sa, da, op),
+                );
+                a.pixel_format = PixelFormat::A8Unorm;
+                let state = alpha_in_red_blend(&a, &p)
+                    .unwrap_or_else(|e| panic!("{a:?}: {e:?}"))
+                    .expect("blends");
+                for v in texels(u64::from(sa.as_raw()) << 8 | u64::from(da.as_raw())).take(16) {
+                    let (s, s1, d, c) = v;
+                    let image = [d[3], 0.0, 0.0, 1.0];
+                    let got = vulkan_blend(&state, (rotated(s), rotated(s1), image, c));
+                    assert_eq!(got[0], metal_blend(&a, v)[3], "{a:?}: {state:?}");
+                }
+                checked += 1;
+            }
+        }
+    }
+    assert_eq!(checked, 5 * factors.len() * factors.len());
+    let mut off = attachment((F::One, F::Zero, O::Add), (F::One, F::Zero, O::Add));
+    off.pixel_format = PixelFormat::A8Unorm;
+    off.blending_enabled = false;
+    assert_eq!(alpha_in_red_blend(&off, &p), Ok(None));
+}

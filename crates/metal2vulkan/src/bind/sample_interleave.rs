@@ -317,12 +317,18 @@ fn finish(
 
 /// The split module of `copy` at `samples` on `device`, built, verified, serialized and
 /// numbered. Refused, `Unsupported` (feature `Format`) naming what the device lacks: an extended
-/// copy format's storage without `shaderStorageImageExtendedFormats`.
+/// copy format's storage without `shaderStorageImageExtendedFormats`; and `NotImplemented` for a
+/// copy that moves no bits ([`PlanesCopy::Alpha8`], the sample planes' alone).
 pub fn interleave_split_module(
     device: &Device,
     copy: PlanesCopy,
     samples: u32,
 ) -> Result<InterleaveSplitModule, Error> {
+    if !copy.moves_bits() {
+        return Err(Error::Unsupported(Unsupported::not_implemented(
+            Feature::Format,
+        )));
+    }
     let (spirv, requirements) = finish(
         device,
         split_typed_module(copy, samples)?,

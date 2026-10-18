@@ -278,6 +278,7 @@ fn a_numeric_slot_binds_either_integer_type() {
             diagnostics: Vec::new(),
             uses: Vec::new(),
             template: Default::default(),
+            alpha_red_texels: Default::default(),
         };
         let (write, _) = planner
             .plain_texture(0, 1, vk::DescriptorType::STORAGE_IMAGE, texture, false)
@@ -594,6 +595,7 @@ fn runtime_sampler_values_are_checked_at_plan_time() {
                     diagnostics: Vec::new(),
                     uses: Vec::new(),
                     template: Default::default(),
+                    alpha_red_texels: Default::default(),
                 };
                 let planned = planner.sampler(slot);
                 match vk_sampler(desc, SamplerUse::new(compare, false), &p) {
@@ -629,6 +631,7 @@ fn runtime_sampler_values_are_checked_at_plan_time() {
                 diagnostics: Vec::new(),
                 uses: Vec::new(),
                 template: Default::default(),
+                alpha_red_texels: Default::default(),
             };
             assert_eq!(
                 planner.sampler(slot),
@@ -709,6 +712,7 @@ fn an_immutable_linear_sampler_needs_a_filterable_view() {
                 diagnostics: Vec::new(),
                 uses: Vec::new(),
                 template: Default::default(),
+                alpha_red_texels: Default::default(),
             };
             let immutable = vk_sampler(&linear, SamplerUse::new(false, integer), &p).expect("maps");
             let sampler = CombinedSampler::new(SamplerRef::Constexpr([0, 0]), false, integer);
@@ -809,6 +813,7 @@ fn a_linear_compare_sampler_needs_no_filterable_view() {
                     diagnostics: Vec::new(),
                     uses: Vec::new(),
                     template: Default::default(),
+                    alpha_red_texels: Default::default(),
                 };
                 let immutable =
                     vk_sampler(&pcf, SamplerUse::new(compare, false), &p).expect("maps");
@@ -904,6 +909,7 @@ fn bicubic_texels_follow_the_bound_format() {
             diagnostics: Vec::new(),
             uses: Vec::new(),
             template: Default::default(),
+            alpha_red_texels: Default::default(),
         };
         planner.bicubic_texels(texture)
     };
@@ -1000,6 +1006,7 @@ fn an_explicit_cube_gradient_binding_takes_an_anisotropic_sampler_isotropically(
                     diagnostics: Vec::new(),
                     uses: Vec::new(),
                     template: Default::default(),
+                    alpha_red_texels: Default::default(),
                 };
                 let sampler =
                     CombinedSampler::new(SamplerRef::Slot(sampler_slot.index), false, false)
@@ -1107,6 +1114,7 @@ fn sampler_state_follows_the_bound_sampler() {
             diagnostics: Vec::new(),
             uses: Vec::new(),
             template: Default::default(),
+            alpha_red_texels: Default::default(),
         };
         [W::PIXEL_COORDINATES, W::PIXEL_NEAREST, W::FIELDS]
             .map(|fields| planner.sampler_state(slot, fields) as u32)
@@ -1174,6 +1182,7 @@ fn texel_format_follows_the_bound_format() {
             diagnostics: Vec::new(),
             uses: Vec::new(),
             template: Default::default(),
+            alpha_red_texels: Default::default(),
         };
         planner.texel_format(texture)
     };
@@ -1392,6 +1401,7 @@ fn a_separate_pair_takes_the_combined_pairs_checks() {
                     diagnostics: Vec::new(),
                     uses: Vec::new(),
                     template: Default::default(),
+                    alpha_red_texels: Default::default(),
                 };
                 // The runtime pair.
                 let runtime =
@@ -1446,4 +1456,135 @@ fn a_separate_pair_takes_the_combined_pairs_checks() {
         !refused.is_empty() && !passed.is_empty(),
         "refused on {refused:?}, passed on {passed:?}"
     );
+}
+
+/// On a device without `A8_UNORM` (lavapipe's profile), an `A8Unorm` texture buffer's bytes are
+/// viewed as `R8_UNORM`, Metal's alpha in red: a storage slot through its choice's class
+/// (`StorageImageClass::AlphaInRed`), whose swizzle stays the texture's; a uniform one with no
+/// class, whose swizzle takes the alpha from red (`TextureSwizzleChannels::alpha_in_red`). A
+/// uniform slot that reads without applying the swizzle is refused there. Where the device has
+/// `A8_UNORM` (MoltenVK's), the uniform view is `A8_UNORM` and its swizzle the texture's.
+#[test]
+fn an_a8_texture_buffer_without_a8_unorm_views_its_bytes_in_red() {
+    use crate::metal::{TextureSwizzle as S, TextureSwizzleChannels};
+    use crate::pipeline::facts::{Mechanism, RuntimeFact};
+    let slot = |index| SlotRef {
+        stage: Stage::Kernel,
+        class: SlotClass::Texture,
+        index,
+    };
+    let (uniform, storage) = (slot(0), slot(1));
+    let mut read = slot_iface(TextureType::TextureBuffer, SampledType::Float);
+    read.access = TextureAccess::new(false, true, false);
+    let mut read_write = read;
+    read_write.access = TextureAccess::new(false, true, true);
+    let slots = BTreeMap::from([
+        (uniform, SlotInterface::Texture(read)),
+        (storage, SlotInterface::Texture(read_write)),
+    ]);
+    let shape = |swizzle| {
+        let mut stage = StageShape::default();
+        for index in [0, 1] {
+            let pixel_format = PixelFormat::A8Unorm;
+            let buffer = TextureShape::Buffer {
+                pixel_format,
+                swizzle,
+            };
+            stage.textures.insert(index, buffer);
+        }
+        BTreeMap::from([(Stage::Kernel, stage)])
+    };
+    let swizzle = TextureSwizzleChannels::new(S::Alpha, S::Zero, S::Green, S::One);
+    let swizzled = shape(swizzle);
+    let stated = [uniform, storage].map(|slot| {
+        let fact = RuntimeFact::TextureSwizzle { slot };
+        RuntimeDependency::new(fact, Mechanism::Specialization)
+    });
+    fn make<'a>(
+        profile: &'a DeviceProfile,
+        shape: &'a BTreeMap<Stage, StageShape>,
+        slots: &'a BTreeMap<SlotRef, SlotInterface>,
+        dependencies: &'a [RuntimeDependency],
+    ) -> ResourcePlanner<'a> {
+        ResourcePlanner {
+            profile,
+            shape,
+            slots,
+            dependencies,
+            stage_flags: |_| vk::PipelineStageFlags2::COMPUTE_SHADER,
+            variant: VariantKey::new(),
+            diagnostics: Vec::new(),
+            uses: Vec::new(),
+            template: Default::default(),
+            alpha_red_texels: Default::default(),
+        }
+    }
+    let uniform_ty = vk::DescriptorType::UNIFORM_TEXEL_BUFFER;
+    let storage_ty = vk::DescriptorType::STORAGE_TEXEL_BUFFER;
+    for (profile, held) in [("lavapipe", true), ("moltenvk-m3", false)] {
+        let p = crate::pipeline::testing::profile(profile, crate::device::DevicePolicy::default())
+            .expect("profile");
+        let a8 = PixelFormat::A8Unorm;
+        assert_eq!(
+            crate::metal::format::alpha_in_red(a8, &p),
+            held,
+            "{profile}"
+        );
+        let mut planner = make(&p, &swizzled, &slots, &stated);
+        let own = match held {
+            true => vk::Format::R8_UNORM,
+            false => vk::Format::A8_UNORM,
+        };
+        let planned = planner.plain_texture(0, 0, uniform_ty, uniform, false);
+        let Ok((WriteSource::TexelBuffer { format, .. }, _)) = planned else {
+            panic!("{profile}: {planned:?}");
+        };
+        assert_eq!(format, own, "{profile}: the uniform view");
+        let planned = planner.plain_texture(0, 1, storage_ty, storage, false);
+        let Ok((WriteSource::TexelBuffer { format, .. }, _)) = planned else {
+            panic!("{profile}: {planned:?}");
+        };
+        // A storage view takes `R8_UNORM` wherever `A8_UNORM` does not serve the use, the device's
+        // images aside.
+        let class = planner
+            .variant
+            .storage_images
+            .get(&storage)
+            .map(|c| c.class);
+        let in_red = class == Some(StorageImageClass::AlphaInRed);
+        assert!(in_red || !held, "{profile}: {class:?}");
+        let view = match in_red {
+            true => vk::Format::R8_UNORM,
+            false => vk::Format::A8_UNORM,
+        };
+        assert_eq!(format, view, "{profile}: the storage view");
+        let read_swizzle = match held {
+            true => TextureSwizzleChannels::new(S::Red, S::Zero, S::Zero, S::One),
+            false => swizzle,
+        };
+        assert_eq!(
+            planner.texture_swizzle(uniform),
+            u64::from(read_swizzle.word()),
+            "{profile}: the uniform slot's swizzle"
+        );
+        assert_eq!(
+            planner.texture_swizzle(storage),
+            u64::from(swizzle.word()),
+            "{profile}: the storage slot's swizzle"
+        );
+        // A read that does not apply the swizzle.
+        let plain = shape(TextureSwizzleChannels::DEFAULT);
+        let mut planner = make(&p, &plain, &slots, &[]);
+        let planned = planner.plain_texture(0, 0, uniform_ty, uniform, false);
+        match held {
+            true => assert_eq!(
+                planned.map(|(w, _)| w),
+                Err(BindError::Unsupported(Unsupported::not_implemented(
+                    Feature::Format
+                ))),
+                "{profile}"
+            ),
+            false => assert!(planned.is_ok(), "{profile}: {planned:?}"),
+        }
+    }
 }

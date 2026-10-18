@@ -47,7 +47,8 @@ pub struct FormatMapping {
     /// The format of the Vulkan image (and of its views).
     pub format: vk::Format,
     /// The view's component mapping that presents Metal's channels (identity unless
-    /// [`FormatEmulation::SwizzledView`]). Texture swizzles the guest requests compose on top.
+    /// [`FormatEmulation::SwizzledView`] or [`FormatEmulation::AlphaInRed`]). Texture swizzles
+    /// the guest requests compose on top.
     pub components: vk::ComponentMapping,
     /// The aspects the Metal format has (a sampled view selects one of them).
     pub aspects: vk::ImageAspectFlags,
@@ -77,14 +78,36 @@ pub enum FormatEmulation {
     /// The Vulkan format has exactly the Metal format's layout and numeric format.
     Direct,
     /// The bytes are read through a Vulkan format with the same bit layout but a different channel
-    /// order (or `R8_UNORM` for `A8Unorm` where `A8_UNORM` is not exposed), and
-    /// [`FormatMapping::components`] moves the channels back. Exact for sampling, except that
+    /// order, and [`FormatMapping::components`] moves the channels back. Exact for sampling, except that
     /// Vulkan leaves an opaque-black border read through a non-identity mapping undefined unless
     /// the device swizzles borders
     /// ([`check_border_swizzle`](crate::metal::sampler::check_border_swizzle)); admitted only for
     /// sampled-image usages, because texel buffers, storage images, and attachments ignore the
     /// component mapping.
     SwizzledView,
+    /// `A8Unorm`'s byte held in `R8_UNORM`, on a device without `A8_UNORM` for the usages (it is
+    /// core only from Vulkan 1.4, else `VK_KHR_maintenance5`): sampled through
+    /// [`FormatMapping::components`] `(Zero, Zero, Zero, R)` as [`FormatEmulation::SwizzledView`]
+    /// is (exact, and at the border as that is); a storage image whose shader reads the byte as
+    /// alpha and writes a texel's alpha into it (`StorageImageClass::AlphaInRed`); and a color
+    /// attachment the fragment function writes its alpha to (`LoweringInputs::rotated_colors`,
+    /// whose rotation puts Metal's alpha in the image's red), whose write mask's alpha bit, clear
+    /// color's alpha and blend (Metal's alpha factors and operation, each factor that reads an
+    /// alpha reading the red it lands in, `pipeline::rotated_blend::alpha_in_red_blend`) the
+    /// consumer and link move to red. Metal stores, reads, masks, clears, blends and resolves
+    /// `A8Unorm` exactly so (probe `a8`, an M3 Max under macOS 27.0.1: kernel and render writes
+    /// store the alpha, every read is `(0, 0, 0, a)`, only the alpha bit of a write mask writes,
+    /// each alpha factor reads alphas, and a 4-sample resolve is `R8Unorm`'s). An output to such
+    /// an attachment holds Metal's alpha in the image's alpha lane too, which alpha to coverage
+    /// reads, and a fetch of one reads its red as Metal's alpha, `(0, 0, 0, r)`
+    /// (`LoweringInputs::alpha_in_red_colors`; probe `a8`'s uses: Metal's coverage through an
+    /// `A8Unorm` attachment 0 is `RGBA8Unorm`'s of the same alpha, and its fetch `(0, 0, 0, a)`).
+    /// A texture buffer's bytes take an `R8_UNORM` view wherever `A8_UNORM` does not serve its use
+    /// (`texel_buffer_alpha_in_red`), and an argument buffer holds a storage texture of it as its
+    /// `R8_UNORM` image, whose texels a heap read or write converts where the handle carries
+    /// `A8Unorm`'s class (`bind::heap`; probe `a8`'s argument buffers: a member reads `(0, 0, 0, a)`
+    /// and a write stores its alpha). Admitted for the image usages.
+    AlphaInRed,
     /// A stencil-only format held in a combined depth/stencil format; only the stencil aspect is
     /// used. Exact.
     StencilInCombined,
@@ -191,6 +214,15 @@ impl FormatEmulation {
             FormatEmulation::SwizzledView => matches!(
                 usage,
                 U::SampledImage | U::SampledImageFilterLinear | U::SampledImageFilterMinmax
+            ),
+            FormatEmulation::AlphaInRed => matches!(
+                usage,
+                U::SampledImage
+                    | U::SampledImageFilterLinear
+                    | U::SampledImageFilterMinmax
+                    | U::StorageImage
+                    | U::ColorAttachment
+                    | U::ColorAttachmentBlend
             ),
             FormatEmulation::RotatedView => matches!(
                 usage,
@@ -1158,6 +1190,57 @@ pub fn rotated_channels(pf: PixelFormat) -> bool {
     }
 }
 
+/// Whether a texture of `pf` holds Metal's alpha in its image's red on `profile`
+/// ([`FormatEmulation::AlphaInRed`]: `A8Unorm` on a device that holds no `A8_UNORM` image, for
+/// sampling, storage or attachments): its image is [`alpha_in_red_format`]'s for every use, its
+/// storage choice `StorageImageClass::AlphaInRed`, and a color attachment of it takes the
+/// function's output, its clear color and its write mask through [`to_rotated_image`] as
+/// [`rotated_channels`]' formats do (the rotation's red is Metal's alpha), and its blend in red
+/// (`pipeline::rotated_blend::alpha_in_red_blend`).
+pub fn alpha_in_red(pf: PixelFormat, profile: &DeviceProfile) -> bool {
+    let held = |own: vk::Format| {
+        [
+            FormatUsage::SampledImage,
+            FormatUsage::StorageImage,
+            FormatUsage::ColorAttachment,
+        ]
+        .into_iter()
+        .any(|usage| profile.supports_format(own, usage))
+    };
+    alpha_in_red_format(pf).is_some() && direct_format(pf).is_some_and(|own| !held(own))
+}
+
+/// The format a texel buffer view of a texture buffer of `pf` takes for `usage` (a texel buffer
+/// usage) on `profile` where the format's own does not serve it and the bytes hold Metal's alpha in
+/// red ([`FormatEmulation::AlphaInRed`]): `R8_UNORM` for `A8Unorm` on a device that views no
+/// `A8_UNORM` texels for the usage (a Vulkan 1.2 device without `VK_KHR_maintenance5`), where it
+/// views `R8_UNORM` ones. A view reads `(r, 0, 0, 1)` where Metal reads `(0, 0, 0, r)`: a storage
+/// view's reads and writes convert by its choice's class (`StorageImageClass::AlphaInRed`,
+/// [`storage_choice`]), and a uniform view's reads take the alpha from red through the slot's
+/// swizzle (`TextureSwizzleChannels::alpha_in_red`). `None` elsewhere.
+pub(crate) fn texel_buffer_alpha_in_red(
+    pf: PixelFormat,
+    usage: FormatUsage,
+    profile: &DeviceProfile,
+) -> Option<vk::Format> {
+    let own = direct_format(pf)?;
+    let held = alpha_in_red_format(pf)?;
+    (!profile.supports_format(own, usage) && profile.supports_format(held, usage)).then_some(held)
+}
+
+/// The format of `pf`'s image where the device holds no image of its direct format and `pf`
+/// holds Metal's alpha in red ([`FormatEmulation::AlphaInRed`]): `R8_UNORM` for `A8Unorm`,
+/// `None` for every other format.
+pub fn alpha_in_red_format(pf: PixelFormat) -> Option<vk::Format> {
+    match repr(pf) {
+        Repr::Candidates(_, candidates) => candidates
+            .iter()
+            .find(|c| c.emulation == FormatEmulation::AlphaInRed)
+            .map(|c| c.format),
+        Repr::NotImplemented | Repr::NotAFormat => None,
+    }
+}
+
 /// The candidate of an RGBX format held in its RGBA twin `format`
 /// ([`FormatEmulation::XChannel`]): sampled through a view that reads alpha as one.
 fn x_channel_twin(format: vk::Format) -> Repr {
@@ -1236,7 +1319,7 @@ fn make_repr(pf: PixelFormat) -> Repr {
     match pf {
         P::Invalid | P::Unspecialized => Repr::NotAFormat,
         // Metal presents (0, 0, 0, a), as `VK_FORMAT_A8_UNORM` does (core 1.4 or
-        // `VK_KHR_maintenance5`). Without it, sampling reads the byte as red.
+        // `VK_KHR_maintenance5`). Without it, the byte is `R8_UNORM`'s, its alpha in red.
         P::A8Unorm => color(vec![
             direct(F::A8_UNORM),
             Candidate {
@@ -1247,7 +1330,7 @@ fn make_repr(pf: PixelFormat) -> Repr {
                     b: S::ZERO,
                     a: S::R,
                 },
-                emulation: E::SwizzledView,
+                emulation: E::AlphaInRed,
             },
         ]),
         P::R8Unorm => one(F::R8_UNORM),
@@ -1582,8 +1665,9 @@ pub fn vk_format(
 /// The swizzle, over the channels of `own`, through which a texture of `own` reads what a view
 /// of `pf` made with `swizzle` reads, where `pf` holds its texels in the very bits of `own`'s and
 /// presents them in other channels: `own` samples as its direct Vulkan format on `profile`, and
-/// one of `pf`'s candidates is [`FormatEmulation::SwizzledView`] of that format (`A8Unorm` over
-/// `R8Unorm`, read through `(Zero, Zero, Zero, Red)`). Exact for sampling and reads as that
+/// one of `pf`'s candidates is [`FormatEmulation::SwizzledView`] or
+/// [`FormatEmulation::AlphaInRed`] of that format (`A8Unorm` over `R8Unorm`, read through
+/// `(Zero, Zero, Zero, Red)`). Exact for sampling and reads as that
 /// emulation is: the same bits, the same filter, the channels moved by the view's mapping, which
 /// Vulkan applies to gathered texels and border texels as to any other ("Texel Input Operations":
 /// replacement, then the component swizzle). `None` elsewhere, for `pf` equal to `own`, where
@@ -1616,9 +1700,12 @@ pub fn swizzle_over(
         return None;
     }
     let (_, candidates) = candidates(pf).ok()?;
-    let candidate = candidates
-        .iter()
-        .find(|c| c.emulation == FormatEmulation::SwizzledView && c.format == image.format)?;
+    let candidate = candidates.iter().find(|c| {
+        matches!(
+            c.emulation,
+            FormatEmulation::SwizzledView | FormatEmulation::AlphaInRed
+        ) && c.format == image.format
+    })?;
     let mapping = swizzle.compose(candidate.components);
     if view_mapping_gap(mapping, profile).is_some() {
         return None;
@@ -2622,6 +2709,10 @@ pub fn storage_image_choice(
 /// `SrgbEncode` (`BGRA8Unorm_sRGB`, where its twin is not accessed without a format, through
 /// `R8G8B8A8_UNORM` with `SrgbEncodeBgra`), `RGB9E5Float` through `R32_UINT` with
 /// `SharedExponentBits`, and `A8Unorm` through `R8_UNORM` with `AlphaInRed` (no alias: such a
+/// texture's image is `R8_UNORM` itself, [`FormatEmulation::AlphaInRed`]; a texture buffer's bytes
+/// take that view wherever `A8_UNORM` does not serve the use, [`texel_buffer_alpha_in_red`]).
+/// Anything else is `Unsupported{Format}` naming what each route lacks, a format's without-format
+/// usage included.
 ///
 /// An RGBX format's choice ([`x_channel`]) is its RGBA twin's, which converts its texels in the
 /// shader (`StorageImageChoice::x_channel`); its texture buffer, whose reads a texel buffer's view
@@ -2690,6 +2781,12 @@ fn held_storage_choice(
             Some((F::A2B10G10R10_UNORM_PACK32, StorageImageClass::SwizzleBgra))
         }
         PixelFormat::ARGB8Unorm => Some((F::R8G8B8A8_UNORM, StorageImageClass::RotateArgb)),
+        // `A8Unorm`'s byte in red, where the device holds no `A8_UNORM`: an image of its own. A
+        // texture buffer's bytes take the view wherever `A8_UNORM` does not serve the use, whatever
+        // the device's images hold (a texel buffer's view names its format alone).
+        PixelFormat::A8Unorm if use_.texel_buffer || alpha_in_red(pf, profile) => {
+            Some((F::R8_UNORM, StorageImageClass::AlphaInRed))
+        }
         PixelFormat::RGB9E5Float => Some((F::R32_UINT, StorageImageClass::SharedExponentBits)),
         PixelFormat::R8UnormSRGB => Some((F::R8_UNORM, StorageImageClass::SrgbEncode)),
         PixelFormat::RG8UnormSRGB => Some((F::R8G8_UNORM, StorageImageClass::SrgbEncode)),
@@ -2735,8 +2832,11 @@ fn held_storage_choice(
     for (view, class) in alias.into_iter().chain(second) {
         if storage(view) && declarable(view) {
             let mut choice = StorageImageChoice::new(view, class);
-            // `ARGB8Unorm`'s image is the view's format: its choice rotates without an alias.
-            choice.alias = (view != image).then(|| AliasView::new(image));
+            // `ARGB8Unorm`'s image is the view's format: its choice rotates without an alias. So is
+            // the image of an `A8Unorm` texture held in red, whose `R8_UNORM` views no `A8_UNORM`
+            // image (a class of its own).
+            let own = view == image || class == StorageImageClass::AlphaInRed;
+            choice.alias = (!own).then(|| AliasView::new(image));
             return Ok(choice);
         }
     }
@@ -2824,9 +2924,9 @@ pub fn storage_view_formats(pf: PixelFormat, profile: &DeviceProfile) -> Vec<vk:
         let Ok(choice) = storage_choice(pf, use_, profile) else {
             continue;
         };
-        let format = match choice.alias {
-            Some(_) => Some(choice.vk_format),
-            None => direct_format(pf),
+        let format = match (choice.alias, choice.class) {
+            (Some(_), _) | (None, StorageImageClass::AlphaInRed) => Some(choice.vk_format),
+            (None, _) => direct_format(pf),
         };
         if let Some(format) = format {
             if !formats.contains(&format) {
