@@ -511,7 +511,6 @@ const HOST: DriverFact = DriverFact::HostTransferImagesKeepTheirBytes;
 const OPTIMIZED: DriverFact = DriverFact::DepthStencilImagesStayGpuOptimized;
 const DEPTH16: DriverFact = DriverFact::FragmentDepthKeepsDepth16Codes;
 const FETCH: DriverFact = DriverFact::SampledFetchRecoversCodes;
-const WHOLE: DriverFact = DriverFact::InterlockedPassWholeFaster;
 const SPLIT: DriverFact = DriverFact::InterlockedPassSplitNoSlower;
 const RESTART: DriverFact = DriverFact::DynamicRestartWarns;
 const FILL: DriverFact = DriverFact::FillCompiledPerCommandPool;
@@ -550,6 +549,8 @@ const INTERLOCK_ORDER: DriverFact = DriverFact::InterlockOrdersDraws;
 /// test keeps denormals and compares magnitudes as Metal's (the M4's identity: the latter measured
 /// on the M3 Max, the M4's by construction); ANV's compressed images hide aliased writes and its
 /// host-transfer images keep their bytes; a pass the interlock would split runs
+/// no slower split on the M3 Max (under macOS 26.7, and under 27 the M4's identity), the 780M, the
+/// RPL-P, the RPL-S and the RTX 5080 Laptop GPU; MoltenVK warns of a dynamic
 /// restart, compiles its fill per command pool, stores `DONT_CARE` as Metal's own, orders its
 /// timestamps across queues and stores a signed normalized minimum code and an `E5B9G9R9` word as
 /// Metal's tile store does; BC1 to BC3 decode as Metal's on the 780M and MoltenVK, BC4 and BC5 on
@@ -648,6 +649,7 @@ fn the_committed_profiles_drivers_have_their_facts() {
                 HIDE,
                 HOST,
                 FETCH,
+                SPLIT,
                 SPARSE_WAIT,
                 ONE_OF_METALS,
                 COPY_BACK,
@@ -958,28 +960,6 @@ fn nvidia_s_semaphore_stall_holds_on_the_gpus_measured() {
     assert_eq!(drivers, [DriverId::NVIDIA_PROPRIETARY; 2]);
 }
 
-/// No GPU and release is measured both to run a pass the interlock would split faster whole and
-/// no slower split: each measured row's GPU, at its first release, holds one of the two.
-#[test]
-fn a_gpu_keeps_one_form_of_an_interlocked_pass() {
-    let rows = MEASURED
-        .iter()
-        .filter(|row| row.fact == WHOLE || row.fact == SPLIT);
-    let mut measured = 0;
-    for row in rows {
-        let gpu = (row.vendor.unwrap_or(APPLE), row.device.unwrap_or(0));
-        let facts = among(MEASURED, Some(row.driver), gpu, row.first);
-        assert!(
-            facts.contains_key(&WHOLE) != facts.contains_key(&SPLIT),
-            "{:?} on {gpu:x?} at {:#x}: {facts:?}",
-            row.driver,
-            row.first
-        );
-        measured += 1;
-    }
-    assert_eq!(measured, 7, "the GPUs measured");
-}
-
 /// MoltenVK's warning of a pipeline whose restart may be disabled (`MVKPipeline.mm` lines 881-893
 /// at 1.4.1) is the diagnostic of a pipeline that makes the restart dynamic with its topology
 /// dynamic or a strip or fan, exactly as the driver reports it; no other pipeline's, and no other
@@ -1015,7 +995,7 @@ fn moltenvk_1_4_1_warns_of_a_pipeline_whose_restart_is_dynamic() {
             warns.then_some(warning),
             "{dynamic:?} {top:?}"
         );
-        for other in [ZERO, DENORMALS, FETCH, WHOLE, SPLIT] {
+        for other in [ZERO, DENORMALS, FETCH, SPLIT] {
             assert_eq!(other.pipeline_creation_diagnostic(dynamic, top), None);
         }
     }

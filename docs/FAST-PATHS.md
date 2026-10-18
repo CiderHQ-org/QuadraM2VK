@@ -189,6 +189,9 @@ recorded here.
   texture keeps, the buffer's texels copied in first (`dont-care-stand-in`), so the buffer keeps its
   bytes as Metal's does: about 10 µs a pass on the Iris Xe (ANV). A pass that clears and stores
   `DontCare` costs no more, and one that stores renders in place.
+- **The interlocked pass on the M4.** Every device splits a pass the pixel interlock would split,
+  about a quarter faster than kept whole on the M3 Max (`DriverFact::InterlockedPassSplitNoSlower`);
+  the M4 ran that pass about 8% faster kept whole.
 - **A fetching draw in the pixel interlock waits for the draw before it.** Between two draws of a
   render pass instance where the later one reaches a color in the fetch's interlocked storage form
   (or an extended-range color's `half` shadow) that the earlier one wrote, the runtime records a

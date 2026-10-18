@@ -40,11 +40,8 @@
 //!   before the pass (`vkCmdClearColorImage`), not as the attachment's load operation.
 //!
 //! - **Plain draws before a fetch**: beside a memoryless attachment the pipelines never write,
-//!   `rt6_resolve_white` then `fetch_scalar` in one pass: in the pixel interlock, on a device whose
-//!   driver runs such a pass faster whole, the draws before the fetch record again, and later plain
-//!   ones record, through the variant that writes the attachment in the fetch's storage form, so
-//!   the pass runs whole, splitting only where a plain draw's blend keeps it out of that form;
-//!   elsewhere it splits at the fetch.
+//!   `rt6_resolve_white` then `fetch_scalar` in one pass: in the pixel interlock it splits at the
+//!   fetch, on every device.
 //!
 //! - **A masked fetched write**: `con_fetch_coverage` reads an `RG16Float` attachment and writes it
 //!   under a mask of green alone, beside a blended attachment and one it never writes, with a depth
@@ -317,15 +314,6 @@ pub(super) fn through_inputs(lane: &Lane) -> bool {
         .profile()
         .fragment()
         .rasterization_order_color_access
-}
-
-/// Whether the device keeps whole a pass that a fetch through the pixel interlock would split
-/// after plain draws: its driver ran such a pass faster whole
-fn keeps_whole(lane: &Lane) -> bool {
-    lane.device
-        .properties()
-        .driver_facts
-        .contains(&DriverFact::InterlockedPassWholeFaster)
 }
 
 /// Whether the device announces a split the interlock alone makes (`render-pass-split`, and
@@ -1332,11 +1320,13 @@ fn fetched_textures_load_store_and_reach_later_passes() {
 /// pass and back after it; so does a pass that clears it, draws it white and then halves it:
 /// through input attachments split where the fetch begins (the scratch's input attachment usage
 /// makes it an input attachment of the later draws' subpass alone), and in the pixel interlock
-/// whole, the white recorded again into the scratch through the fetch's storage form, on a device
-/// that runs such a pass faster whole, elsewhere split there. Each holds Metal's texels, and the
-/// scratch is announced once, naming the missing usage and the caller, and the split once through
-/// input attachments, and in the interlock where the device splits it and is not measured to run it
-/// no slower so.
+/// split there too, its first instance, its one attachment cleared and stored, recorded inline
+/// or not (counted in `WorkCounts::inline_passes`, `render/inline_first.rs`). Beside a memoryless
+/// attachment, which no inline instance takes, the same pass records no instance inline, and in
+/// the interlock splits there and backs the memoryless attachment. Each holds Metal's texels, and
+/// the scratch is announced once, naming the missing usage and the caller, and the split once
+/// through input attachments, and in the interlock where the device is not measured to run such a
+/// split no slower than whole, with the backing.
 #[test]
 fn a_callers_image_without_the_fetch_usage_fetches_through_a_scratch() {
     let (messages, cache, lane) = lane();
@@ -1406,7 +1396,7 @@ fn a_callers_image_without_the_fetch_usage_fetches_through_a_scratch() {
     let notices = messages.take_notices();
     messages.restore_notices(notices.clone());
     let mut kinds = vec![Degradation::FetchThroughScratch];
-    let split = through_inputs(&lane) || (!keeps_whole(&lane) && announces_interlock_splits(&lane));
+    let split = through_inputs(&lane) || announces_interlock_splits(&lane);
     if split {
         kinds.push(Degradation::RenderPassSplit);
     }
@@ -1467,6 +1457,7 @@ fn a_callers_image_without_the_fetch_usage_fetches_through_a_scratch() {
         (&texture, clear, StoreAction::Store),
         (&tag, clear, StoreAction::DontCare),
     ];
+    let before = inline_passes();
     let drawn = steps(&lane, &pass(&beside, None), &[&white_beside, &halve_beside])
         .map(|()| read(&texture));
     assert_eq!(
@@ -1482,6 +1473,7 @@ fn a_callers_image_without_the_fetch_usage_fetches_through_a_scratch() {
     );
     if !through_inputs(&lane) {
         // The split was announced at the pass drawn first, where the device announces it.
+        let backed = announces_interlock_splits(&lane);
         let kinds: Vec<Degradation> = [Degradation::MemorylessBacked]
             .into_iter()
             .filter(|_| backed)
@@ -1504,6 +1496,7 @@ fn a_callers_image_without_the_fetch_usage_fetches_through_a_scratch() {
         );
         eprintln!(
             "framebuffer fetch of a caller's image beside a memoryless attachment on {device}: \
+             split at the fetch"
         );
     }
     drop(tag);
@@ -1520,15 +1513,11 @@ fn a_callers_image_without_the_fetch_usage_fetches_through_a_scratch() {
 /// A pass of a 4² `R32Float` target cleared to 0.75 and stored, beside a memoryless `R32Float`
 /// attachment its pipelines have and never write: `rt6_resolve_white`, `fetch_scalar`, the white
 /// again and `fetch_scalar` twice (0.25); the white drawn of indices, then `fetch_scalar` (0.5).
-/// In the pixel interlock, on a device whose driver runs such a pass faster whole (ANV on the
-/// RPL-S), the fetch's first draw records the pass's draws before it again, and later whites
-/// record, through the variant that writes color 0 in the fetch's storage form, so
-/// each pass runs whole: none splits or backs its memoryless attachment. Elsewhere in the interlock
-/// each splits at the fetch, which backs the memoryless attachment. The white under a blend the
-/// storage form does not build ([`blended_white`]), then `fetch_scalar`, holds 0.5 too, and in the
-/// pixel interlock splits there on every device. A split is announced, and the backing, once each
-/// (at the plain draws' pass where it split), but on a device whose driver runs such a split no
-/// slower than whole, where neither is.
+/// In the pixel interlock each splits at the fetch, which backs the memoryless attachment. The
+/// white under a blend ([`blended_white`]), then `fetch_scalar`, holds 0.5 too, and in the pixel
+/// interlock splits there too. A split is announced, and the backing, once each (at the plain
+/// draws' pass), but on a device whose driver runs such a split no slower than whole, where
+/// neither is.
 #[test]
 fn a_plain_draw_before_a_fetch_takes_the_devices_faster_form() {
     let (messages, cache, lane) = lane();
@@ -1586,12 +1575,11 @@ fn a_plain_draw_before_a_fetch_takes_the_devices_faster_form() {
         .map(|()| read());
     expect(&lane, "after an indexed plain draw", indexed, &texels(0.5));
     let interlock = !through_inputs(&lane);
-    let whole = !interlock || keeps_whole(&lane);
     let announced_split = |splits: bool| -> Vec<Degradation> {
         let announced = splits && announces_interlock_splits(&lane);
         split.into_iter().filter(|_| announced).collect()
     };
-    let kinds = announced_split(!whole);
+    let kinds = announced_split(interlock);
     let mut first = made(
         &lane,
         &[
@@ -1618,8 +1606,7 @@ fn a_plain_draw_before_a_fetch_takes_the_devices_faster_form() {
     let blending = steps(&lane, &descriptor, &[&blended, &halve]).map(|()| read());
     expect(&lane, "after a blended draw", blending, &texels(0.5));
     // Each kind is announced once: where the plain draws' pass split, its split and backing
-    // were announced there (the RTX 3080, EV SDX-ff1-3080), and this split announces neither.
-    let kinds = announced_split(interlock && whole);
+    let kinds: Vec<Degradation> = Vec::new();
     let scratch = scratched(&messages);
     let first = forced(&[
         (Degradation::FetchThroughScratch, scratch),
@@ -1635,9 +1622,9 @@ fn a_plain_draw_before_a_fetch_takes_the_devices_faster_form() {
         announced, kinds,
         "a blended draw before a fetch on {device}"
     );
-    let instances = match whole {
-        true => "one render pass instance",
-        false => "split at the fetch",
+    let instances = match interlock {
+        true => "split at the fetch",
+        false => "one render pass instance",
     };
     eprintln!(
         "framebuffer fetch after plain draws on {device} through {}: {instances}",

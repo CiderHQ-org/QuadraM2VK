@@ -196,8 +196,8 @@ fn sample_planes_carry_every_sample() {
     // instance: the pass splits there (on the RTX 3080 too, through its multisampled storage
     // images, EV SDX-ff1-3080). The interlock alone makes that split, so on a driver measured to
     // run such a split no slower than whole (`DriverFact::InterlockedPassSplitNoSlower`, ANV on the
-    // Iris Xe of RPL-P, MoltenVK on the M3 Max, NVIDIA on the RTX 3090 and the RTX 5080 Laptop GPU)
-    // it is the device's faster form and is not announced.
+    // Iris Xe of RPL-P and the RPL-S, MoltenVK on the M3 Max, NVIDIA on the RTX 3090 and the RTX
+    // 5080 Laptop GPU) it is the device's faster form and is not announced.
     first.extend(forced(&[
         (
             Degradation::RenderPassSplit,

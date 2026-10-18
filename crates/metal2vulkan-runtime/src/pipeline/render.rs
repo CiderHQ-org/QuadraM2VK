@@ -75,7 +75,7 @@ use metal2vulkan::pipeline::{
 };
 use metal2vulkan::reflection::{LinkedUseAnswers, RenderPipelineReflection};
 use std::any::Any;
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 mod residual;
@@ -193,11 +193,6 @@ pub(crate) struct Program {
     texture_accesses: TextureAccessMemo,
     /// Its part of the pipeline creation log, while the log is on (`creation_log.rs`).
     log: Option<StateLog>,
-    /// The sets of colors kept out of a draw's subpass whose variant writing them through the
-    /// interlocked storage form the compile refused (`BindState::interlocked_colors`): a draw
-    /// meeting one again records in an instance of its own without asking (`render.rs`). At
-    /// most one per subset of the eight colors.
-    refused_interlocks: Mutex<Vec<BTreeSet<u32>>>,
     /// Its variants' capture forms (`VariantKey::captured_positions`), as capture replay asked for
     /// them (`GraphicsState::capture_variant`): at most [`CAPTURES`].
     captures: Mutex<Lru<VariantKey, Capture>>,
@@ -1635,7 +1630,6 @@ impl GraphicsState {
                 log,
                 label,
                 texture_accesses: TextureAccessMemo::new(),
-                refused_interlocks: Mutex::new(Vec::new()),
                 captures: Mutex::new(Lru::counted(CAPTURES)),
                 settled: Mutex::new(VecDeque::with_capacity(SETTLED)),
                 last_pipelines: Mutex::new(VecDeque::with_capacity(LAST_PIPELINES)),

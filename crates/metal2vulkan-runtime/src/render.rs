@@ -857,7 +857,8 @@ struct Instance {
     /// recording of the instance is such a draw (`render/reroute.rs`): what records them again
     /// into an instance that leaves more colors out of its subpass, in place of this one. `None`
     /// once anything else recorded into it, or a draw that cannot record again; and from the
-    /// start where the device splits such a pass (`reroute::keeps_whole`).
+    /// start in a pass that holds no extended-range color's `half` shadow
+    /// (`ExtendedShadows::keeps_draws`).
     rerecord: Option<Vec<reroute::Rerecord>>,
     /// What the draws recorded into `draws` bound there that still holds (`render/bound.rs`): a
     /// draw leaves out a state command that sets what it holds.
@@ -1636,6 +1637,7 @@ impl RenderCommandEncoder {
             grouped,
         } = opening;
         let keeping = capture::Keeping::of(&layout);
+        let rerecord = extended.keeps_draws();
         // The bind state the device's last ended render encoder left (`live_bind.rs`).
         let live = core.device().shared().live_binds.take();
         // The views and sampler descriptions its binds made or found (`binding::BindMemo`).
@@ -5358,46 +5360,11 @@ impl RenderCommandEncoder {
         Ok(storage)
     }
 
-    /// The colors the current instance leaves out of its subpass for draws that read and write
-    /// them in the interlocked storage form, but those `pipeline` reads or writes so itself
-    /// (`BindState::interlocked_colors`): a draw that writes one of them takes the variant that
-    /// writes it through that form too, so it records in the instance. None in the input
-    /// attachment form, for an execution's commands, in a multisampled pass (not implemented), for a mesh pipeline, and where the compile refused that variant before
-    /// (`GraphicsState::refuse_interlock`); and on a device that splits such a pass instead
-    /// (`reroute::keeps_whole`).
-    fn interlocked_colors(&self, pipeline: &DrawingState) -> BTreeSet<u32> {
-        if self.layout.fetch_inputs
-            || !reroute::keeps_whole(self.core.device())
-            || self.replaying
-            || self.layout.samples != 1
-            || pipeline.descriptor().vertex().is_none()
-        {
-            return BTreeSet::new();
-        }
-        let own: BTreeSet<u32> = pipeline
-            .base()
-            .graphics
-            .storage_attachments
-            .iter()
-            .map(|s| s.color_index)
-            .collect();
-        let colors: BTreeSet<u32> = self
-            .current
-            .shape
-            .storage
-            .iter()
-            .copied()
-            .filter(|c| !own.contains(c))
-            .collect();
-        match colors.is_empty() || pipeline.interlock_refused(&colors) {
-            true => BTreeSet::new(),
-            false => colors,
-        }
-    }
-
     /// What the tests of `depth_stencil` can do to the fragments of a draw of `pipeline`
     /// (`BindState::fragment_tests`) whose fragment function may store a color through the
     /// interlocked storage form before them: one that states `RuntimeFact::TestedStorageWrites`,
+    /// or one whose draw writes colors through that form (`stores`: the pass's extended-range
+    /// shadows), whose variant may state it.
     /// `FragmentTests::Any`, which no other plan reads, for every other draw, so that its plans
     /// stay one per shape whatever its tests.
     fn fragment_tests(
@@ -5752,7 +5719,7 @@ impl RenderCommandEncoder {
             reformats: reformats.to_vec(),
             positioned: None,
             // And in a pass that may hold an extended-range color's shadow, on every device.
-            rerecord: (reroute::keeps_whole(device) || self.extended.keeps_draws()).then(Vec::new),
+            rerecord: self.extended.keeps_draws().then(Vec::new),
             bound: Bound::default(),
             drawn: clear_reach::DrawnArea::default(),
             inline: false,
@@ -7240,19 +7207,6 @@ impl RenderCommandEncoder {
         // wrote, or whose clear its codes cannot hold, starts the color's `half` shadow where it
         // can (`render/extended_shadow.rs`).
         self.start_extended_shadows(&pipeline)?;
-        // A draw that reads and writes colors in the interlocked storage form that the current
-        // instance's subpass has records that instance's draws again first, into one that leaves
-        // them out, where they can (`render/reroute.rs`).
-        if !self.layout.fetch_inputs {
-            let own: Vec<u32> = pipeline
-                .base()
-                .graphics
-                .storage_attachments
-                .iter()
-                .map(|s| s.color_index)
-                .collect();
-            self.reroute(&own, &pipeline)?;
-        }
         // What the draw settles from the encoder's state, as an execution's precompile at commit
         // settles it (`draw_settings`).
         // An indexed strip the encoder's call restarts at another index than Vulkan's is drawn
@@ -9516,8 +9470,7 @@ impl RenderCommandEncoder {
         // Its runtime samplers' address modes as the textures they sample map them.
         let sampler_maps = self.sampler_maps(pipeline, pass_start)?;
         // The pass's extended-range colors' shadows, which a variant that writes or reads them
-        // reads and writes beside the codes (`render/extended_shadow.rs`); its interlocked
-        // colors are the others.
+        // reads and writes beside the codes (`render/extended_shadow.rs`).
         let mut shadows = self.extended_shadows_bound();
         // From the state the pipeline state's last draw left, where the encoder set it aside.
         live.select(&pipeline.base().interface);
@@ -9565,6 +9518,7 @@ impl RenderCommandEncoder {
             };
             // No shape reads the depth/stencil state but through the fragment tests (below).
             state.depth_stencil = depth_stencil;
+            let stores = !shadows.is_empty();
             let tests = self.fragment_tests(pipeline, &state.depth_stencil, stores);
             reshape.field(&mut state.fragment_tests, tests);
             let tiles = settings.tiles.map(|(tile, area)| {

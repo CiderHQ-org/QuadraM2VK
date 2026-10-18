@@ -1,35 +1,21 @@
-//! Recording a render pass instance's draws again, so a pass whose later draws fetch an
-//! attachment its earlier draws wrote stays one instance.
+//! Recording a render pass instance's draws again, into an instance that leaves more colors out
+//! of its subpass, in its place: the start of an extended-range color's `half` shadow where the
+//! current instance's draws wrote the color (`render/extended_shadow.rs`).
 //!
-//! On a device that orders framebuffer fetch only through the pixel interlock, a draw that reads
-//! and writes a color attachment as a storage image records in an instance whose subpass leaves
-//! the attachment out (`framebuffer_fetch.rs`). Draws before it that write the attachment as a
-//! color attachment recorded in an instance that has it, and Vulkan orders those writes before
-//! the storage reads only across render pass instances: the pass split there, where Metal's own
-//! pass runs whole. Instead, while every recording of the current instance is a draw that can
-//! record again (below), each draw keeps the encoder's state at it (`Rerecord`). A draw that
-//! needs colors left out that the instance has records the instance's draws again first, into an
-//! instance that leaves them out (`RenderCommandEncoder::reroute`), which takes the current
-//! one's place: each draw through the variant that writes such a color through the interlocked
-//! storage form (`BindState::interlocked_colors`), and draws after it that write the colors take
-//! that variant too (`RenderCommandEncoder::interlocked_colors`), so the pass stays whole.
+//! In a pass that may hold such a shadow (`ExtendedShadows::keeps_draws`), on every device, while
+//! every recording of the current instance is a draw that can record again (below), each draw
+//! keeps the encoder's state at it (`Rerecord`). A shadow's start records the instance's draws
+//! again first into an instance that leaves the color out (`record_leaving_out`), which takes the
+//! current one's place: each draw through the variant that reads and writes the shadow
+//! (`BindState::extended_shadows`).
 //!
-//! Only on a device whose driver ran such a pass faster whole than split
-//! (`DriverFact::InterlockedPassWholeFaster`; `keeps_whole`). Elsewhere, a device unmeasured among
-//! them, the pass splits there, which is exact and compiles no interlocked variant: no draw takes
-//! such a variant, and its instances keep no draw but in a pass that may hold an extended-range
-//! color's `half` shadow (`render/extended_shadow.rs`), whose start records the current instance's
-//! draws again the same way (`record_leaving_out`) on every device.
-//!
-//! Exact where it happens: the storage form stores the texel the attachment write stores, in
-//! primitive order across the instance's draws, only where it is built (no blend but one and
-//! zero, among others, `lower::fragment::fetch`); a draw whose variant it refuses fails the
-//! reroute, which leaves the instance and the pass's layout as they were, and the pass splits as
-//! before. The rerouted instance is the one `next_instance` makes for a draw that fetches every
+//! Exact where it happens: a draw whose variant the storage form or the bind layer refuses fails
+//! the reroute, which leaves the instance and the pass's layout as they were, and the color keeps
+//! its codes. The rerouted instance is the one `next_instance` makes for a draw that fetches every
 //! color it leaves out, as if the current instance held nothing: a fetched texture without
-//! `STORAGE` renders into its stand-in from that instance on (`attachment_stand_in.rs`), and
-//! the pass's first instance reroutes only where each color it leaves out that the pass clears
-//! can be cleared before the pass, as a first instance that leaves one out must.
+//! `STORAGE` renders into its stand-in from that instance on (`attachment_stand_in.rs`), and the
+//! pass's first instance reroutes only where each color it leaves out that the pass clears can be
+//! cleared before the pass, as a first instance that leaves one out must.
 //!
 //! A draw records again only where nothing but its own recording depends on when it was
 //! recorded: a direct draw of primitives, or of indices read in place, in a single-sampled pass
@@ -57,24 +43,12 @@ use crate::error::Error;
 use crate::pipeline::{GraphicsState as DrawingState, RenderPipelineState};
 use crate::render_state::EncoderState;
 use crate::residency::Residency;
-use crate::Device;
 use metal2vulkan::bind::{DrawCall, ViewSetup};
-use metal2vulkan::device::DriverFact;
 use std::sync::Arc;
 
 /// The most draws an instance keeps for recording again: past them its draws record again no
 /// more, which bounds what an instance holds.
 pub(super) const MAX_DRAWS: usize = 64;
-
-/// Whether `device` keeps whole a pass that a fetch through the pixel interlock would split (the
-/// module docs): its driver ran such a pass faster whole than split
-/// (`DriverFact::InterlockedPassWholeFaster`, a cost fact of the releases measured alone).
-pub(super) fn keeps_whole(device: &Device) -> bool {
-    device
-        .properties()
-        .driver_facts
-        .contains(&DriverFact::InterlockedPassWholeFaster)
-}
 
 /// A draw recorded into the current instance, and the encoder's state at it: what records it
 /// again.
@@ -154,22 +128,6 @@ impl RenderCommandEncoder {
             }
             _ => self.current.rerecord = None,
         }
-    }
-
-    /// Before a draw that reads and writes `own` (its storage attachments' colors, ascending),
-    /// record the current instance's draws again into an instance that leaves out its colors
-    /// and those, in its place, where the instance leaves out fewer and its draws can (the
-    /// module docs, `record_leaving_out`); only on a device that keeps such a pass whole
-    /// (`keeps_whole`): elsewhere the draw records in an instance of its own.
-    pub(super) fn reroute(&mut self, own: &[u32], by: &DrawingState) -> Result<(), Error> {
-        let left_out = &self.current.shape.storage;
-        if !keeps_whole(self.core.device()) || own.iter().all(|c| left_out.contains(c)) {
-            return Ok(());
-        }
-        let mut colors: Vec<u32> = left_out.iter().chain(own).copied().collect();
-        colors.sort_unstable();
-        colors.dedup();
-        self.record_leaving_out(colors, by).map(drop)
     }
 
     /// Record the current instance's draws again into an instance that leaves `colors`

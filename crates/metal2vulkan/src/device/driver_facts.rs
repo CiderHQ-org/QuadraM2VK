@@ -1154,18 +1154,12 @@ pub enum DriverFact {
     /// every driver: their fetch returns the bits.
     SampledFetchRecoversCodes,
     /// A cost fact (the module docs): a render pass whose draws fetch a color through the pixel
-    /// interlock after plain draws wrote it ran faster kept whole, the plain draws recorded again
-    /// through the variant that writes the color in the interlocked storage form, than split into
-    /// two render pass instances there. On a driver with it the runtime keeps such a pass whole
-    /// where it can (`render/reroute.rs`); elsewhere it splits there, which is exact and compiles
-    /// no such variant.
-    InterlockedPassWholeFaster,
-    /// A cost fact (the module docs): such a pass ran no slower split there than kept whole
-    /// ([`InterlockedPassWholeFaster`](Self::InterlockedPassWholeFaster)), whose plain draws'
-    /// variants the split never compiles. On a driver with it the runtime announces no
-    /// `render-pass-split`, nor `memoryless-backed` for the split, where the interlock's
-    /// attachments alone split a pass: the device's faster form. Elsewhere such a split is
-    /// announced.
+    /// interlock after plain draws wrote it ran no slower split into two render pass instances
+    /// there, as the runtime runs it on every device, than kept whole, the plain draws writing the
+    /// color through the interlocked storage form (`VariantKey::interlocked_colors`). On a driver
+    /// with it the runtime announces no `render-pass-split`, nor `memoryless-backed` for the
+    /// split, where the interlock's attachments alone split a pass: the device's faster form.
+    /// Elsewhere such a split is announced.
     InterlockedPassSplitNoSlower,
     /// A driver diagnostic (the module docs): the driver reports a warning as it creates a
     /// graphics pipeline that makes the primitive restart dynamic with its topology dynamic or a
@@ -1834,30 +1828,42 @@ const DYNAMIC_RESTART_WARNING: DriverDiagnostic = DriverDiagnostic {
 /// Not listed: every GPU and release not measured, among them the RTX 5080 desktop GPU. There
 /// `generate_mipmaps` copies the first level into its scratch buffer, as before.
 ///
-/// `InterlockedPassWholeFaster` and `InterlockedPassSplitNoSlower`, cost facts measured by the
-/// scratch lane `reroute_costs` (EVs `RRS2-rcost2-mvk4`, `RRS2-rcost2-mvk3` and `RRS2-rcost3-*` at
-/// 85f395e1, 2026-10-08; release builds without the validation layer): a 1920x1080 `RGBA16Float`
-/// target beside a memoryless one, three plain draws then a fetching draw, the fullscreen triangle
-/// each, split (the plain draws blended, which the storage form refuses) or whole, each frame from
-/// commit to the wait's return (wall) and the GPU's own span; the medians of 30 frames after the
-/// first, split against whole, in microseconds. Whole's first frame compiles each plain pipeline's
-/// variant at the fetching call (that call about 56 ms on MoltenVK, 8 to 22 ms on the Linux
-/// drivers, where split's took 1 to 2 ms); split's compiles none. One row per GPU, as measured:
-/// - `InterlockedPassWholeFaster`: ANV, Mesa 26.2.4, on Intel Graphics (RPL-S) (EV
-///   `RRS2-rcost3-anv`; wall 3529 against 1940, GPU 3133 against 1717).
-/// - `InterlockedPassSplitNoSlower`: MoltenVK 1.4.1 on the M3 Max under macOS 26.7 (EV
-///   `RRS2-rcost2-mvk3`; wall 871 against 968, GPU 94 against 261) and under macOS 27.0.1, the
-///   M4's identity (2026-10-14, the same pass at 8b1f8606 with the scratch test's two runs of
-///   three rounds: wall 721 to 769 against 974 to 1045, GPU 671 to 719 against 914 to 964, and
-///   whole's first frame 7.7 to 7.9 ms against 1.2 to 1.8 ms; the M4 itself ran it faster whole,
-///   EV `RRS2-rcost2-mvk4`, wall 1499 against 1383, though the GPU's span 12 against 82, which its
-///   shared identity does not take); RADV, Mesa 26.2.4, on the Radeon 780M (EV
-///   `RRS2-rcost3-radv`; wall 1183 against 1332, GPU 1045 against 1033); NVIDIA's 615.71.09 on
-///   the RTX 5080 Laptop GPU (EV `RRS2-rcost3-nv5080`; wall 251 against 289, GPU 86 against 140);
-///   and, tied in steady frames and so split for whole's first frame, NVIDIA's 615.71.09 on the
-///   RTX 3090 (EV `RRS2-rcost3-nvidia`; wall 208 against 216, GPU 156 against 153) and ANV, Mesa
-///   26.2.4, on the Iris Xe (RPL-P) (EV `RRS2-rcost3-anvp`; wall 4112 against 4078, GPU 3128
-///   against 3110).
+/// `InterlockedPassSplitNoSlower`, a cost fact: each GPU ran the same passes in both forms, each
+/// forced in turn by a scratch build whose runtime could still keep such a pass whole (2026-10-18;
+/// release builds without the validation layer; the GPU's own span, medians, whole against split):
+/// - `runtime_lane::tile_path_costs`, milliseconds a frame, two runs of two rounds: `wide
+///   composite` (nine 1920x1080 passes a frame, each 26 blended rectangles into a memoryless
+///   `RGBA16Float` color, then the fetch that resolves it into the `BGRA8Unorm` base), `base
+///   fetched every fourth draw` (the rectangles into the base, every fourth fetching it) and
+///   `window: tile dispatch, base fetched every fourth draw, resolve` (three 960x768 passes).
+/// - Four draws, microseconds a frame, the medians of 30 frames after the first in three rounds: a
+///   1920x1080 `RGBA16Float` target beside a memoryless one, three unblended plain draws then a
+///   fetching draw, the fullscreen triangle each. Whole's first frame compiles each plain
+///   pipeline's variant at the fetching call: 5 to 35 ms, against 0.1 ms split.
+///
+/// One row per GPU, as measured, which the window server's passes decide: split ran them faster on
+/// every GPU, where only ANV ran the four draws faster whole, by 0.6% and 2.4% in steady frames.
+/// - ANV, Mesa 26.2.4, on Intel Graphics (RPL-S), at 1650 MHz: 22.1 against 7.3, 25.5 against 8.9
+///   and 12.1 against 8.8 ms; four draws 1984 to 1987 against 1997 to 1999.
+/// - ANV, Mesa 26.2.4, on the Iris Xe (RPL-P), at 1200 to 1500 MHz: 6.6 to 7.6 against 3.4 to 3.7,
+///   7.9 to 9.4 against 4.3 to 4.9 and 4.6 to 5.2 against 3.4 to 4.1 ms; four draws, at 300 MHz,
+///   3759 against 3851.
+/// - RADV, Mesa 26.2.4, on the Radeon 780M: 7.1 to 9.1 against 3.3 to 4.0, 9.4 to 9.6 against 5.5
+///   to 5.9 and 4.7 against 3.9 ms; four draws 1216 to 1236 against 1134 to 1194.
+/// - NVIDIA's 615.71.09 on the RTX 3090: 2.33 against 0.86, 2.62 against 1.30 and 0.75 against
+///   0.44 ms; four draws 169 to 185 against 160.
+/// - NVIDIA's 615.71.09 on the RTX 5080 Laptop GPU: 1.75 to 1.91 against 0.44 to 0.46, 2.06 to
+///   2.25 against 0.89 to 0.90 and 0.57 to 0.61 against 0.33 to 0.35 ms; four draws 155 to 163
+///   against 105.
+/// - MoltenVK 1.4.1 on the M3 Max, not measured again: measured on the four draws alone by the
+///   scratch lane `reroute_costs` at 85f395e1 (2026-10-08), each frame from commit to the wait's
+///   return (wall) and the GPU's span, its split's plain draws blended and whole's not, which
+///   weighs against the split, so the split's lead stands: under macOS 26.7 wall 968 against 871,
+///   GPU 261 against 94; under macOS 27.0.1, the M4's identity (2026-10-14, the same pass at
+///   8b1f8606, two runs of three rounds) wall 974 to 1045 against 721 to 769, GPU 914 to 964
+///   against 671 to 719, whole's first frame 7.7 to 7.9 ms against 1.2 to 1.8 ms. The M4 itself
+///   ran it faster whole (wall 1383 against 1499, though the GPU's span 82 against 12), which its
+///   shared identity does not take.
 ///
 /// Not listed: lavapipe, which fetches through input attachments and so never splits for the
 /// interlock, and every GPU and release not measured, which split such a pass and announce it.
@@ -2178,14 +2184,6 @@ pub(crate) const MEASURED: &[Measured<DriverFact>] = &[
         last: mesa(26, 2, 4),
     },
     Measured {
-        fact: DriverFact::InterlockedPassWholeFaster,
-        driver: DriverId::INTEL_OPEN_SOURCE_MESA,
-        vendor: Some(INTEL_VENDOR_ID),
-        device: Some(INTEL_UHD_770_RPL_S),
-        first: mesa(26, 2, 4),
-        last: mesa(26, 2, 4),
-    },
-    Measured {
         fact: DriverFact::InterlockedPassSplitNoSlower,
         driver: DriverId::MOLTENVK,
         vendor: Some(APPLE_VENDOR_ID),
@@ -2230,6 +2228,14 @@ pub(crate) const MEASURED: &[Measured<DriverFact>] = &[
         driver: DriverId::INTEL_OPEN_SOURCE_MESA,
         vendor: Some(INTEL_VENDOR_ID),
         device: Some(INTEL_IRIS_XE_RPL_P),
+        first: mesa(26, 2, 4),
+        last: mesa(26, 2, 4),
+    },
+    Measured {
+        fact: DriverFact::InterlockedPassSplitNoSlower,
+        driver: DriverId::INTEL_OPEN_SOURCE_MESA,
+        vendor: Some(INTEL_VENDOR_ID),
+        device: Some(INTEL_UHD_770_RPL_S),
         first: mesa(26, 2, 4),
         last: mesa(26, 2, 4),
     },
