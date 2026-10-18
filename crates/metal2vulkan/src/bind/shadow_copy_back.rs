@@ -58,6 +58,7 @@ use crate::spirv::ir::{
 
 /// The unsigned-integer view of a shadow that its kernels read its texels through, and a copy in
 /// stores them through ([`shadow_copy_back_module`], `shadow_merge_image_module`,
+/// `shadow_merge_kept_image_module`, `shadow_copy_in_module`): the format of the texel's width, or for a 4-byte texel either its
 /// word's or its bytes'. Every one shares the texel's compatibility class, so a view of any
 /// reads and stores the texel's bits unconverted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]

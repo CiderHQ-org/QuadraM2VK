@@ -974,12 +974,21 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   (`DriverFact::ShadowCopyInDispatchFaster`) also takes the copy in of the same texels before it,
   storing them in the image through that view (`WorkCounts::shadow_copies_in_dispatched`); after
   them, a cut merge reads the texels the commands left from the image itself, through an
+  unsigned-integer view of it, with no copy of them (`WorkCounts::shadow_merges_fetched`). On a
+  device with the first fact alone, such a merge keeps the texels in an image of the texture's
+  size in place of its scratch buffer, copied from the texture's image at the same coordinates,
+  and reads them from there (`WorkCounts::shadow_merges_kept_in_images`). Its command queue keeps
+  that image for its later merges of the same size and format, whatever their texture, each
+  taking it once the encoder that took it last ended (`WorkCounts::shadow_merge_kept_images_made`,
+  `shadow_merge_kept_images_followed`, `shadow_merge_kept_images_live`).
 - `metal2vulkan-degrade-staged-texture-buffer` (performance). `StagedTextureBuffer`: A texture
   buffer is viewed through a staging buffer: its texels start where the device views none
   (`minTexelBufferOffsetAlignment`). Cost: its texels are copied into a staging buffer before each
   use and back after each write.
 - `metal2vulkan-degrade-shadow-merge` (performance). `ShadowMerge`: One command writes a buffer's
   bytes through a shadowed texture or a staged texture buffer and also another way. Cost: the
+  shadow's texels are kept in a scratch buffer of one to three times the texture's bytes (or an
+  image of the texture's size) before the command, and after it a dispatch merges the bytes it changed through the texture into the
   buffer's, in place where the texture's bytes start and end in whole words of the buffer: one to
   three copies and a dispatch in place of one copy back.
 - `metal2vulkan-degrade-copied-draw-bytes` (performance). `CopiedDrawBytes`: A draw's index buffer

@@ -1058,6 +1058,14 @@ fn a_pass_that_draws_nothing_copies_no_shadow() {
 /// texel. The CPU may write the `Shared` buffer's bytes, so its texture's copy back is a merge,
 /// which moves no texel back as a copy and dispatches no copy back; its keep moves the texels
 /// inside the scissor alone (`WorkCounts::shadow_texels_kept`). On a device that takes the copy
+/// back's dispatch (`DriverFact::ShadowCopyBackDispatchFaster`) the merge fetches the changed
+/// texels from the shadow, copying none (`WorkCounts::shadow_merges_fetched`); elsewhere all
+/// three copy. On a device that also takes a copy in with its keep as one dispatch
+/// (`DriverFact::ShadowCopyInDispatchFaster`), the copy in and the keep, of the same texels, are
+/// that dispatch (`WorkCounts::shadow_copies_in_dispatched`, one of
+/// `WorkCounts::shadow_merge_copies_dispatched`, printed as `SHADOW-COPY-BACK`); on one that takes
+/// the copy back's alone, the keep copies the texels into an image the merge fetches them from
+/// beside the shadow (`WorkCounts::shadow_merges_kept_in_images`), which makes no scratch.
 /// Neither merge zeroes its scratch (`WorkCounts::shadow_merge_scratches_zeroed`). Where the
 /// device pushes set 0, the keep's and the merge's dispatches push their descriptors and make no
 /// descriptor pool; elsewhere each makes one (`WorkCounts::owned_descriptor_pools`).
@@ -1106,7 +1114,12 @@ fn a_pass_copies_in_and_back_only_the_texels_its_scissors_reach() {
             encoder.end_encoding().unwrap();
             run(&command_buffer);
         };
+        // Each pass's merge fetches the shadow's texels, where the device runs a copy back faster
+        // as a dispatch (`DriverFact::ShadowCopyBackDispatchFaster`,
         // `WorkCounts::shadow_merges_fetched`); both copy everywhere else.
+        let facts = &device.properties().driver_facts;
+        let dispatches = facts.contains(&DriverFact::ShadowCopyBackDispatchFaster);
+        let copies_in = facts.contains(&DriverFact::ShadowCopyInDispatchFaster);
         let moved = || {
             let counts = device.work_counts();
             (
@@ -1118,8 +1131,10 @@ fn a_pass_copies_in_and_back_only_the_texels_its_scissors_reach() {
                 counts.shadow_merges_fetched,
                 counts.owned_descriptor_pools,
                 counts.shadow_copies_in_dispatched,
+                counts.shadow_merges_kept_in_images,
             )
         };
+        let since = |before: (u64, u64, u64, u64, u64, u64, u64, u64, u64)| {
             let now = moved();
             (
                 now.0 - before.0,
@@ -1130,25 +1145,40 @@ fn a_pass_copies_in_and_back_only_the_texels_its_scissors_reach() {
                 now.5 - before.5,
                 now.6 - before.6,
                 now.7 - before.7,
+                now.8 - before.8,
             )
         };
+        // Merged back: no texel goes back as a copy, and no copy back is dispatched; the merge
+        // fetches where the device takes the copy back's dispatch, its keep then the copy in's
+        // dispatch where the device takes that too (`DriverFact::ShadowCopyInDispatchFaster`),
+        // else a copy into a kept image.
         let (dispatched, back) = (0, |_: u64| 0);
+        let (merged, fetched, kept_in_image) = match (dispatches, copies_in) {
+            (true, true) => (1, 1, 0),
+            (true, false) => (0, 1, 1),
+            (false, _) => (0, 0, 0),
+        };
         // The merge's kernel, and the keep where it is a dispatch, each make a descriptor pool
         // where the device does not push set 0.
         let pools = if pushes(&device) { 0 } else { 1 + merged };
         // The keep's dispatch takes the copy in of the same texels with it, where the device takes
+        // the two as one.
+        let copied_in = merged;
         let zeroed = device.work_counts().shadow_merge_scratches_zeroed;
         let before = moved();
         draw(&texture, Some(scissor));
         let scissored = since(before);
         println!(
             "SHADOW-COPY-BACK on {}: a scissored pass dispatched {} copies back and {} of its \
+             keep and merge, kept {} texels, fetched {} merges, dispatched {} copies in with \
+             their keeps and kept {} merges' texels in images (the device {} the dispatch)",
             device.name(),
             scissored.2,
             scissored.3,
             scissored.4,
             scissored.5,
             scissored.7,
+            scissored.8,
             if dispatches { "takes" } else { "does not take" },
         );
         assert_eq!(
@@ -1161,6 +1191,8 @@ fn a_pass_copies_in_and_back_only_the_texels_its_scissors_reach() {
                 300 * 200,
                 fetched,
                 pools,
+                copied_in,
+                kept_in_image
             ),
             "a scissored pass"
         );
@@ -1205,6 +1237,8 @@ fn a_pass_copies_in_and_back_only_the_texels_its_scissors_reach() {
                 every,
                 fetched,
                 pools,
+                copied_in,
+                kept_in_image
             ),
             "an unscissored pass"
         );

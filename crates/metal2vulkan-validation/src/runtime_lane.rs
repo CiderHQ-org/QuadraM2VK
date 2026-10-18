@@ -521,6 +521,8 @@ mod keep_alives;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod kept_buffer_bytes;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod kept_images;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod kept_resolves;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod kept_variants;

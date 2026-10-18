@@ -159,8 +159,8 @@ fn modules() -> Vec<Build> {
             Box::new(move |d| Ok(bind::shadow_merge_image_module(d, view)?.spirv)),
         );
         push(
-            format!("shadow_copy_back_module({words})"),
-            Box::new(move |d| Ok(bind::shadow_copy_back_module(d, words)?.spirv)),
+            format!("shadow_merge_kept_image_module({view:?})"),
+            Box::new(move |d| Ok(bind::shadow_merge_kept_image_module(d, view)?.spirv)),
         );
     }
     for output in [

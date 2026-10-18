@@ -619,6 +619,7 @@ surface! {
         fn shadow_merge_module;
         struct ShadowMergeModule N;
         fn shadow_merge_image_module;
+        fn shadow_merge_kept_image_module;
         struct ShadowMergeImageModule N;
         fn depth_magnitude_module;
         struct DepthMagnitudeModule N;

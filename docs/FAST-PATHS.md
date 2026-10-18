@@ -221,6 +221,20 @@ recorded here.
   alone), that dispatch reads the texels from the buffer once and stores them in the image and in
   the scratch: on the UHD 770 a 1920x1080 pass that loads took 1.43 ms of GPU time against
   1.64-1.67 ms, twelve 17.2 ms against 20.0 ms, a clearing pass 0.89 against 1.04 ms; on the Iris
+  Xe of RPL-P twelve took a median 5% longer, so the Iris keeps the two. Where
+  the merge reads the image and the copy in takes no first copy (the Iris), the first copy is a
+  copy of the image's texels into a second image at the same coordinates (`vkCmdCopyImage`), which
+  the merge reads beside it through the same view: the same bits, as a copy between formats of
+  one compatibility class moves them. On the Iris Xe a 1920x1080 `BGRA8Unorm` image copied into
+  another in 67-73 µs of GPU time, against 236-253 µs into a buffer and 270 µs for the dispatch
+  it replaces; over a 1920x1080 surface of anonymous pages (`guest_frame_costs`, three rounds),
+  twelve passes in as many command buffers took 7.2-8.2 ms of GPU time a frame against 9.2 ms,
+  twelve in one 10.4-12.9 against 14.5-16.2 ms, and one 0.76-0.83 against 0.92-1.42 ms. That
+  image takes the scratch buffer's place, 8.3 MB at 1920x1080, and is its queue's: a later keep of
+  the queue of the same view and extent, whatever its texture, takes it once the encoder that
+  took it ended, without waiting for the command buffers that used it, which the merge's closing
+  barrier and the image's tracked uses order (`texture/kept_image.rs`); at most two that no open
+  encoder holds stay for each view and extent, and none untaken over 256 takes. On the Iris Xe
   (`surface_texture_costs::surface_texture_cost_parts`, four shadowed textures a frame, 1,582,016
   texels), over anonymous pages, merged back, passes that draw took 5.0-5.4 ms a frame from commit
   to completion, and under scissors (790,448 texels) 3.6-3.9 ms; over tracked `Private` buffers,

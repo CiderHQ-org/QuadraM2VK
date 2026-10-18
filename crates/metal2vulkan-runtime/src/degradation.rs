@@ -265,6 +265,10 @@ degradations! {
         /// buffer and also another way (`shadow_merge.rs`).
         ShadowMerge = "shadow-merge", Performance,
             "the shadow's texels are kept in a scratch buffer of one to three times the texture's \
+             bytes (or an image of the texture's size) before the command, and after it a \
+             dispatch merges the bytes it changed through the texture into the buffer's, in place \
+             where the texture's bytes start and end in whole words of the buffer: one to three \
+             copies and a dispatch in place of one copy back";
         /// A draw's index buffer or indirect arguments start where Vulkan reads neither.
         CopiedDrawBytes = "copied-draw-bytes", Performance,
             "they are copied into a buffer of the command buffer before the pass, and the draw \

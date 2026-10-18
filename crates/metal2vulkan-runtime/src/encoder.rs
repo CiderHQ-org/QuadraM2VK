@@ -47,6 +47,7 @@ use super::shadow_copy_in::CopyIn;
 use super::shadow_merge::ShadowMerge;
 use super::sparse::encoder::SparseUpdate;
 use super::texture::decoded_twin::TwinWrite;
+use super::texture::kept_image::KeptLease;
 use super::tracker::{Barrier, EncoderUses, Summary, Use, UseRange};
 use super::used_resources::EncoderKind;
 use super::Device;
@@ -215,6 +216,9 @@ pub(super) struct EncoderCore {
     /// Its first copies in of shadowed textures, each copy's texture and texels: `end` notes them
     /// in the command buffer (`WorkCounts::shadow_texels_first_copied_in_again`).
     first_copies: Vec<(ResourceKey, u64)>,
+    /// Its holds on the kept images its merges took from its queue (`texture/kept_image.rs`):
+    /// no keep of another encoder takes one before this one ends, its merges done.
+    kept_leases: Vec<KeptLease>,
     /// The heaps its commands used through what the encoder made resident; `end` hands them,
     /// and those of `keys`, to the command buffer, whose commit marks them used.
     heaps: Vec<Heap>,
@@ -331,6 +335,7 @@ impl EncoderCore {
             touched: Vec::new(),
             attachment_shadows: Vec::new(),
             first_copies: Vec::new(),
+            kept_leases: Vec::new(),
             heaps: Vec::new(),
             holds: Holds::new(command_buffer.device()),
             taken: Taken::default(),
@@ -408,6 +413,7 @@ impl EncoderCore {
             touched: Vec::new(),
             attachment_shadows: Vec::new(),
             first_copies: Vec::new(),
+            kept_leases: Vec::new(),
             heaps: Vec::new(),
             holds: Holds::new(command_buffer.device()),
             taken: Taken::default(),
@@ -974,8 +980,25 @@ impl EncoderCore {
         let device = self.device().clone();
         let aliased = self.aliased(uses);
         let uses = aliased.as_deref().unwrap_or(uses);
+        // The kept images its merges take are held to the encoder's end, those of a refused
+        // command let go of here.
+        let images = self.open.command_buffer.command_queue().kept_images();
+        let held = self.kept_leases.len();
+        let leases = &mut self.kept_leases;
+        let planned = self
             .shadows
             .before(shadows, uses, |copies, two_ways, area| {
+                let (merge, lease) = ShadowMerge::new(&device, copies, (two_ways, area), images)?;
+                leases.extend(lease);
+                Ok(Arc::new(merge))
+            });
+        let copies = match planned {
+            Ok(copies) => copies,
+            Err(refused) => {
+                self.kept_leases.truncate(held);
+                return Err(refused);
+            }
+        };
         self.count_shadow_copies(&copies);
         for copy in &copies {
             if let Step::Keep(merge) = &copy.step {

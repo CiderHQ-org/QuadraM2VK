@@ -35,7 +35,19 @@
 //! ([`ShadowMergeImageModule::groups`]). No word between the region's rows or past its texels is
 //! read or written.
 //!
+//! **Kept in an image** ([`shadow_merge_kept_image_module`]): the same module, but for its kept
+//! binding, a sampled image of the module's format ([`ShadowTexelView`]) in the `GENERAL` layout,
+//! of at least the shadow's extent, which holds the region's texels before the command at their
+//! own coordinates (a copy of the shadow's region into it, `vkCmdCopyImage`). Invocation `(x, y)`
+//! fetches texel `(x0 + x, y0 + y)` of both images and compares their words as above. Both views
+//! being of one format, the kept words are the shadow's bits at the copy: "Copies are done
+//! layer-by-layer starting with the baseArrayLayer member of srcSubresource ... the texel data is
+//! copied" bit for bit between compatible formats (`vkCmdCopyImage`).
+//!
 //! **Synchronization** (consumer): the shadow's last writes → `SHADER_SAMPLED_READ` in
+//! `COMPUTE_SHADER`, the kept buffer's copy → `SHADER_STORAGE_READ` (the kept image's copy →
+//! `SHADER_SAMPLED_READ`), and the bytes' earlier accesses → `SHADER_STORAGE_READ` and
+//! `SHADER_STORAGE_WRITE` there, before the dispatch; its writes → the bytes' next use.
 
 use std::sync::Arc;
 
@@ -70,6 +82,9 @@ impl ShadowMergeImageModule {
     pub const SET: u32 = 0;
     /// The shadow's unsigned-integer view, a sampled image.
     pub const IMAGE_BINDING: u32 = 0;
+    /// The region's texels before the command: a storage buffer, row after row, or (the
+    /// [`shadow_merge_kept_image_module`] form) a sampled image holding them at their own
+    /// coordinates.
     pub const KEPT_BINDING: u32 = 1;
     /// The buffer's bytes after the command, a storage buffer the dispatch merges into.
     pub const CURRENT_BINDING: u32 = 2;
@@ -108,6 +123,12 @@ const KEPT: ResourceSlot = ResourceSlot {
     kind: ResourceKind::Buffer,
     index: 0,
 };
+/// The binding symbol of the kept image in the typed module of the kept-image form.
+const KEPT_IMAGE: ResourceSlot = ResourceSlot {
+    stage: Stage::Kernel,
+    kind: ResourceKind::Texture,
+    index: 1,
+};
 /// The binding symbol of the current buffer in the typed module.
 const CURRENT: ResourceSlot = ResourceSlot {
     stage: Stage::Kernel,
@@ -119,6 +140,21 @@ const CURRENT: ResourceSlot = ResourceSlot {
 /// selection places.
 const SHAPE: PushField = PushField::DispatchRegion;
 
+/// Where the merge reads the texels before the command (the module docs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kept {
+    /// A storage buffer, row after row: the symbol `KEPT`.
+    Buffer,
+    /// A sampled image, at their own coordinates: the symbol `KEPT_IMAGE`.
+    Image,
+}
+
+/// The merge module of `view` reading the kept texels from `kept` as a typed module, before
+/// serialization: the module [`shadow_merge_image_module`] (or, the kept texels in an image,
+/// [`shadow_merge_kept_image_module`]) serializes, which the CPU interpreter runs. Its bindings
+/// are the symbols `IMAGE`, `KEPT` (or `KEPT_IMAGE`) and `CURRENT`, and its push field the shape,
+/// a `uvec4` (the module docs).
+fn typed_module(view: ShadowTexelView, kept: Kept) -> BResult<TypedModule> {
     let words = view.words();
     let mut b = ModuleBuilder::new();
     let u32_ = b.ty(Type::Int {
@@ -140,6 +176,12 @@ const SHAPE: PushField = PushField::DispatchRegion;
         format: crate::spv::ImageFormat::Unknown,
     }))?;
     let image = b.resource(IMAGE, StorageClass::UniformConstant, image_type)?;
+    let kept = match kept {
+        Kept::Buffer => KeptAt::Buffer(words_buffer(&mut b, KEPT, u32_)?),
+        Kept::Image => {
+            KeptAt::Image(b.resource(KEPT_IMAGE, StorageClass::UniformConstant, image_type)?)
+        }
+    };
     let current = words_buffer(&mut b, CURRENT, u32_)?;
     let invocation = b.builtin(crate::spv::BuiltIn::GlobalInvocationId, IoDir::Input, uvec3)?;
     let void = b.ty(Type::Void)?;
@@ -157,6 +199,10 @@ const SHAPE: PushField = PushField::DispatchRegion;
     let x = f.composite_extract(invocation, &[0])?;
     let y = f.composite_extract(invocation, &[1])?;
     let image = f.module().global_value(image)?;
+    let kept = match kept {
+        KeptAt::Buffer(kept) => KeptAt::Buffer(f.module().global_value(kept)?),
+        KeptAt::Image(kept) => KeptAt::Image(f.module().global_value(kept)?),
+    };
     let current = f.module().global_value(current)?;
     let push = f.module().global_value(push)?;
     let member = u32_value(&mut f, m_shape.index)?;
@@ -180,10 +226,33 @@ const SHAPE: PushField = PushField::DispatchRegion;
         };
         let texel = f.fetch(image, coord, &ops)?;
         let texel = fetched_words(f, texel, view)?;
+        // The texel's words before the command: in the kept image, at the texel's coordinates;
+        // in the kept buffer, from its first word, row after row.
+        let before = match kept {
+            KeptAt::Image(kept) => {
+                let kept = f.load(kept, MemAccess::default())?;
+                let texel = f.fetch(kept, coord, &ops)?;
+                fetched_words(f, texel, view)?
+            }
+            KeptAt::Buffer(kept) => {
+                let kept_row = f.binary(BinOp::IMul, y, width)?;
+                let kept_texel = f.binary(BinOp::IAdd, kept_row, x)?;
+                let kept_at = f.binary(BinOp::IMul, kept_texel, n)?;
+                let mut words = Vec::with_capacity(lanes.len());
+                for &index in &lanes {
+                    let place = f.binary(BinOp::IAdd, kept_at, index)?;
+                    let p = f.access_chain(kept, &[zero, place])?;
+                    words.push(f.load(p, MemAccess::default())?);
+                }
+                words
+            }
+        };
+        // The texel's first word in the current buffer, at its row's place.
         let row = f.binary(BinOp::IMul, y, row_words)?;
         let column = f.binary(BinOp::IMul, x, n)?;
         let at = f.binary(BinOp::IAdd, first_word, row)?;
         let at = f.binary(BinOp::IAdd, at, column)?;
+        for ((&after, &before), &index) in texel.iter().zip(&before).zip(&lanes) {
             let differ = f.binary(BinOp::BitwiseXor, before, after)?;
             let moved = f.binary(BinOp::INotEqual, differ, zero)?;
             // A word the command left as it was is neither read nor written.
@@ -212,11 +281,20 @@ const SHAPE: PushField = PushField::DispatchRegion;
     b.finalize()
 }
 
+/// A kept binding: the buffer's or the image's global (or, inside the function, value).
+enum KeptAt<T> {
+    Buffer(T),
+    Image(T),
+}
+
 /// The fixed binding numbers of the module's symbols.
 fn binding_of(sym: &Symbol) -> Option<u32> {
     match sym {
         Symbol::DescriptorSet(_) => Some(ShadowMergeImageModule::SET),
         Symbol::Binding(s) if *s == IMAGE => Some(ShadowMergeImageModule::IMAGE_BINDING),
+        Symbol::Binding(s) if *s == KEPT || *s == KEPT_IMAGE => {
+            Some(ShadowMergeImageModule::KEPT_BINDING)
+        }
         Symbol::Binding(s) if *s == CURRENT => Some(ShadowMergeImageModule::CURRENT_BINDING),
         _ => None,
     }
@@ -229,7 +307,27 @@ pub fn shadow_merge_image_module(
     device: &Device,
     view: ShadowTexelView,
 ) -> Result<ShadowMergeImageModule, Error> {
+    module_of(device, view, Kept::Buffer)
+}
+
+/// The image-reading merge module of `device` reading texels through `view`, the kept texels a
+/// sampled image of `view`'s format holding them at their own coordinates (the module docs):
+/// as [`shadow_merge_image_module`], its [`ShadowMergeImageModule::KEPT_BINDING`] that image.
+pub fn shadow_merge_kept_image_module(
+    device: &Device,
+    view: ShadowTexelView,
+) -> Result<ShadowMergeImageModule, Error> {
+    module_of(device, view, Kept::Image)
+}
+
+/// [`shadow_merge_image_module`] or [`shadow_merge_kept_image_module`], by `kept`.
+fn module_of(
+    device: &Device,
+    view: ShadowTexelView,
+    kept: Kept,
+) -> Result<ShadowMergeImageModule, Error> {
     let profile = device.profile();
+    let m = typed_module(view, kept)?;
     let mut meter = Meter::new(&Budget::default());
     crate::spirv::verify::verify(&m, profile, &mut meter)?;
     let r = crate::spirv::serialize::serialize(m)?;
@@ -248,6 +346,10 @@ pub fn shadow_merge_image_module(
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        typed_module, Kept, ShadowMergeImageModule, ShadowTexelView, CURRENT, IMAGE, KEPT,
+        KEPT_IMAGE,
+    };
     use crate::spirv::interp::{run_with_images, Buffer, Config, Image, Order, Resources};
     use crate::spirv::testing::{assert_valid, committed_profiles};
 
@@ -255,6 +357,9 @@ mod tests {
     fn the_image_merge_kernels_are_valid_on_every_committed_profile() {
         for (_, p) in committed_profiles().expect("profiles") {
             for view in ShadowTexelView::ALL {
+                for kept in [Kept::Buffer, Kept::Image] {
+                    assert_valid(typed_module(view, kept).expect("module"), &p);
+                }
             }
         }
     }
@@ -265,14 +370,26 @@ mod tests {
         0x0100_0000 * (i + 1) + 0x1000 * y + x
     }
 
+    /// The `slot` image of `[width, height]` texels whose words are `word(x, y, i)`, as `view`
+    /// returns them: an `R8G8B8A8_UINT` view's components its word's bytes, another view's its
+    /// words (the components a view lacks 0, and alpha 1).
+    fn image_of(
+        slot: crate::pipeline::sym::ResourceSlot,
+        [width, height]: [u32; 2],
+        view: ShadowTexelView,
+        word: impl Fn(u32, u32, u32) -> u32,
+    ) -> Image {
+        let mut image = Image::new(slot, [width, height, 1], 1, 1, 1);
         for y in 0..height {
             for x in 0..width {
                 let mut texel = [0, 0, 0, 1];
                 match view {
                     ShadowTexelView::R8G8B8A8Uint => {
+                        texel = word(x, y, 0).to_le_bytes().map(u32::from);
                     }
                     _ => {
                         for (i, c) in texel.iter_mut().enumerate().take(view.words() as usize) {
+                            *c = word(x, y, i as u32);
                         }
                     }
                 }
@@ -280,6 +397,11 @@ mod tests {
             }
         }
         image
+    }
+
+    /// The `[width, height]` image the tests read, of texels whose words are [`texel_word`].
+    fn image(extent: [u32; 2], view: ShadowTexelView) -> Image {
+        image_of(IMAGE, extent, view, texel_word)
     }
 
     fn bytes_of(words: &[u32]) -> Vec<u8> {
@@ -296,15 +418,33 @@ mod tests {
     }
 
     /// The current buffer's words after one dispatch over `region` (`[x0, y0, width, height]`) of
+    /// the `extent` image read through `view`, `kept` its region's words before (in a buffer, row
+    /// after row, or, by `form`, in an image at their own coordinates), rows `row_words` apart in
+    /// `current` from `first_word`, in both invocation orders.
     fn merged(
         extent: [u32; 2],
+        (view, form): (ShadowTexelView, Kept),
         region: [u32; 4],
         kept: &[u32],
         (row_words, first_word): (u32, u32),
         current: &[u32],
     ) -> Vec<u32> {
+        let m = typed_module(view, form).expect("module");
         let [x0, y0, width, height] = region;
         let shape = ShadowMergeImageModule::shape([x0, y0], width, row_words, first_word);
+        let words = view.words();
+        // The kept image: the region's kept words at their coordinates, and outside it words no
+        // texel of the read image has, which the merge must not read.
+        let kept_image = || {
+            image_of(KEPT_IMAGE, extent, view, |x, y, i| {
+                let inside = (x0..x0 + width).contains(&x) && (y0..y0 + height).contains(&y);
+                if inside {
+                    kept[(((y - y0) * width + (x - x0)) * words + i) as usize]
+                } else {
+                    0x5a5a_5a5a ^ texel_word(x, y, i)
+                }
+            })
+        };
         let mut out = Vec::new();
         for order in [Order::Forward, Order::Reverse] {
             let buffer = |slot, words: &[u32]| Buffer {
@@ -312,7 +452,14 @@ mod tests {
                 address: None,
                 bytes: bytes_of(words),
             };
+            let mut buffers = vec![buffer(CURRENT, current)];
+            let mut images = vec![image(extent, view)];
+            match form {
+                Kept::Buffer => buffers.insert(0, buffer(KEPT, kept)),
+                Kept::Image => images.push(kept_image()),
+            }
             let res = Resources {
+                buffers,
                 push: shape.to_vec(),
                 spec: Default::default(),
             };
@@ -324,6 +471,13 @@ mod tests {
             };
             let (outcome, images) = run_with_images(&m, &cfg, res, images).expect("run");
             assert_eq!(images[0], image(extent, view), "the view is only read");
+            match form {
+                Kept::Buffer => {
+                    assert_eq!(outcome.buffers[0], bytes_of(kept), "kept is only read");
+                }
+                Kept::Image => assert_eq!(images[1], kept_image(), "kept is only read"),
+            }
+            out.push(words_of(outcome.buffers.last().expect("current")));
         }
         assert_eq!(out[0], out[1], "order independent");
         out.swap_remove(0)
@@ -332,8 +486,14 @@ mod tests {
     /// Each byte the texture changed since the keep lands at its row's place; a word whose kept
     /// and fetched words are equal keeps the current buffer's (another writer's write there
     /// stays); a word with one byte changed takes that byte alone; and no word between the rows,
+    /// before the first texel or past the last changes: through every view, across workgroups,
+    /// the kept words in a buffer or in an image.
     #[test]
     fn the_bytes_the_texture_changed_merge_at_their_rows_alone() {
+        for (view, form) in ShadowTexelView::ALL
+            .into_iter()
+            .flat_map(|view| [(view, Kept::Buffer), (view, Kept::Image)])
+        {
             let words = view.words();
             let extent = [90, 7];
             let region = [10, 2, 70, 4];
@@ -360,6 +520,7 @@ mod tests {
             }
             let got = merged(
                 extent,
+                (view, form),
                 region,
                 &kept,
                 (row_words, first_word),
@@ -379,6 +540,7 @@ mod tests {
                     }
                 }
             }
+            assert_eq!(got, want, "{view:?} {form:?}");
         }
     }
 }

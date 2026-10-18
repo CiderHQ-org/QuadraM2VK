@@ -34,6 +34,7 @@ use super::contexts;
 use super::degradation::Degradation;
 use super::device::{lock, Device};
 use super::error::{Error, Invalid, Problem};
+use super::texture::kept_image::KeptImages;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Instant;
@@ -70,6 +71,9 @@ struct QueueShared {
     /// The backings of memoryless attachments its passes render into images of their own
     /// (`attachment_stand_in::pooled_backing`). A leaf lock: never held while another is taken.
     memoryless_backings: Mutex<BackingPool>,
+    /// The kept images its merges' keeps made, kept for its later keeps
+    /// (`texture/kept_image.rs`).
+    kept_images: KeptImages,
 }
 
 /// A queue's slots: one per uncompleted command buffer, at most `max`.
@@ -242,6 +246,7 @@ impl Device {
             slots: Slots::new(count, Arc::clone(&self.shared().uncommitted)),
             latest_gpu_end: Mutex::new(0),
             memoryless_backings: Mutex::new(BackingPool::default()),
+            kept_images: KeptImages::default(),
         }))
     }
 }
@@ -338,6 +343,11 @@ impl CommandQueue {
     /// (`attachment_stand_in::pooled_backing`).
     pub(super) fn memoryless_backings(&self) -> &Mutex<BackingPool> {
         &self.0.memoryless_backings
+    }
+
+    /// The kept images the queue keeps for its merges' keeps (`texture/kept_image.rs`).
+    pub(super) fn kept_images(&self) -> &KeptImages {
+        &self.0.kept_images
     }
 
     /// Place a command buffer of the queue that completed after every one placed before: `place`

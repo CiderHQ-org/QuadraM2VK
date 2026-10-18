@@ -77,6 +77,10 @@ pub(super) enum OwnedModule {
     /// texture's writes merged into its buffer's bytes, reading its shadow's texels through its
     /// unsigned-integer view, its sampled image (`shadow_merge.rs`).
     ShadowMergeImage(ShadowTexelView),
+    /// `bind::shadow_merge_kept_image_module` of one view of a texel (`ShadowTexelView`): as
+    /// [`OwnedModule::ShadowMergeImage`], the texels before the commands read from an image copy
+    /// of the shadow, its second sampled image (`shadow_merge.rs`).
+    ShadowMergeKeptImage(ShadowTexelView),
     /// `bind::shadow_copy_in_module` of one view of a texel (`ShadowTexelView`): a merged
     /// shadowed texture's texels copied in from its buffer's rows and kept in its merge's scratch
     /// by one dispatch (`shadow_copy_in.rs`). Its shadow's unsigned-integer view is its storage
@@ -161,6 +165,7 @@ impl OwnedModule {
         match self {
             OwnedModule::MipmapFilter(kernel) => u32::from(kernel.fetches()),
             OwnedModule::ShadowCopyBack(_) | OwnedModule::ShadowMergeImage(_) => 1,
+            OwnedModule::ShadowMergeKeptImage(_) => 2,
             _ => 0,
         }
     }
@@ -177,6 +182,7 @@ impl OwnedModule {
                 | OwnedModule::ShadowCopyIn(_)
                 | OwnedModule::ShadowMerge
                 | OwnedModule::ShadowMergeImage(_)
+                | OwnedModule::ShadowMergeKeptImage(_)
         ) && device.shared().vk().push_descriptor().is_some()
     }
 
@@ -261,6 +267,15 @@ impl OwnedModule {
                         .map_err(Error::Compile)?;
                 let push_bytes = metal2vulkan::bind::ShadowMergeImageModule::PUSH_BYTES;
                 Ok((module.spirv.to_vec(), 2, push_bytes))
+            }
+            OwnedModule::ShadowMergeKeptImage(view) => {
+                let module = metal2vulkan::bind::shadow_merge_kept_image_module(
+                    device.compile_device(),
+                    view,
+                )
+                .map_err(Error::Compile)?;
+                let push_bytes = metal2vulkan::bind::ShadowMergeImageModule::PUSH_BYTES;
+                Ok((module.spirv.to_vec(), 1, push_bytes))
             }
             OwnedModule::ShadowCopyIn(view) => {
                 let module =
@@ -427,6 +442,7 @@ pub(super) struct OwnedKernels {
     depth_magnitude: Option<OwnedKernel>,
     shadow_copy_backs: HashMap<ShadowTexelView, OwnedKernel>,
     shadow_merge_images: HashMap<ShadowTexelView, OwnedKernel>,
+    shadow_merge_kept_images: HashMap<ShadowTexelView, OwnedKernel>,
     shadow_copy_ins: HashMap<ShadowTexelView, OwnedKernel>,
     mipmap_filters: HashMap<MipmapFilterKernel, OwnedKernel>,
     mesh_scan: Option<OwnedKernel>,
@@ -481,6 +497,7 @@ impl OwnedKernels {
         .flatten()
         .chain(self.shadow_copy_backs.values().copied())
         .chain(self.shadow_merge_images.values().copied())
+        .chain(self.shadow_merge_kept_images.values().copied())
         .chain(self.shadow_copy_ins.values().copied())
         .chain(self.mipmap_filters.values().copied())
         .chain(self.index_rewrites.values().copied())
@@ -500,6 +517,9 @@ impl OwnedKernels {
         match which {
             OwnedModule::ShadowCopyBack(view) => self.shadow_copy_backs.get(&view).copied(),
             OwnedModule::ShadowMergeImage(view) => self.shadow_merge_images.get(&view).copied(),
+            OwnedModule::ShadowMergeKeptImage(view) => {
+                self.shadow_merge_kept_images.get(&view).copied()
+            }
             OwnedModule::ShadowCopyIn(view) => self.shadow_copy_ins.get(&view).copied(),
             OwnedModule::MipmapFilter(kernel) => self.mipmap_filters.get(&kernel).copied(),
             OwnedModule::IndexRewrite(program, phase) => {
@@ -525,6 +545,9 @@ impl OwnedKernels {
             }
             OwnedModule::ShadowMergeImage(view) => {
                 self.shadow_merge_images.insert(view, kernel);
+            }
+            OwnedModule::ShadowMergeKeptImage(view) => {
+                self.shadow_merge_kept_images.insert(view, kernel);
             }
             OwnedModule::ShadowCopyIn(view) => {
                 self.shadow_copy_ins.insert(view, kernel);
@@ -577,6 +600,7 @@ impl OwnedKernels {
             OwnedModule::DepthMagnitude => &mut self.depth_magnitude,
             OwnedModule::ShadowCopyBack(_)
             | OwnedModule::ShadowMergeImage(_)
+            | OwnedModule::ShadowMergeKeptImage(_)
             | OwnedModule::ShadowCopyIn(_)
             | OwnedModule::MipmapFilter(_)
             | OwnedModule::IndexRewrite(..)

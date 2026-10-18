@@ -7,6 +7,7 @@
 //! the last command buffer's completion), its GPU time (each command buffer's `GPUEndTime` less
 //! `GPUStartTime`, summed) and the process's CPU time, each busy thread's CPU time per frame (the
 //! encoding thread, the recorder that replays its Vulkan commands, the scheduler, the queue's
+//! waiter), and the work counts per frame (the merges' kept images live at the end too).
 
 use super::host_memory::Mapping;
 use super::no_copy_textures::{blending, floats, staged};
@@ -205,6 +206,9 @@ fn per_frame(before: &WorkCounts, after: &WorkCounts) -> String {
         "vkQueueSubmit {:.2}, command buffers {:.2}, internal submissions {:.2}, shadows made \
          {:.2}, zeroed {:.2}, shadow copies {:.2}, texels in {:.0}, back {:.0}, copies back \
          dispatched {:.2}, copies in dispatched {:.2}, merge copies dispatched {:.2}, merge \
+         scratches reused {:.2}, zeroed {:.2}, merges kept in images {:.2}, kept images made \
+         {:.2}, taken ahead of a holder's completion {:.2}, live at the end {}, owned descriptor \
+         pools {:.2}",
         per(|c| c.queue_submissions),
         per(|c| c.command_buffers_submitted),
         per(|c| c.internal_submissions),
@@ -218,6 +222,10 @@ fn per_frame(before: &WorkCounts, after: &WorkCounts) -> String {
         per(|c| c.shadow_merge_copies_dispatched),
         per(|c| c.shadow_merge_scratches_reused),
         per(|c| c.shadow_merge_scratches_zeroed),
+        per(|c| c.shadow_merges_kept_in_images),
+        per(|c| c.shadow_merge_kept_images_made),
+        per(|c| c.shadow_merge_kept_images_followed),
+        after.shadow_merge_kept_images_live,
         per(|c| c.owned_descriptor_pools),
     )
 }

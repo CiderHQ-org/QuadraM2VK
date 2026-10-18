@@ -91,6 +91,8 @@ mod inline_splits;
 mod interop;
 mod keeper;
 mod kept_barriers;
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+mod kept_images;
 mod left;
 mod linear_attachment;
 mod linear_plan;

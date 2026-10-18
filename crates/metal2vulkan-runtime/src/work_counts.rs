@@ -252,6 +252,10 @@ pub(crate) struct Counters {
     row_copy_regions_most: AtomicU64,
     row_copies_dispatched: AtomicU64,
     shadow_merges_fetched: AtomicU64,
+    shadow_merges_kept_in_images: AtomicU64,
+    shadow_merge_kept_images_made: AtomicU64,
+    shadow_merge_kept_images_followed: AtomicU64,
+    shadow_merge_kept_images_live: AtomicU64,
     shadow_attachment_passes: AtomicU64,
     shadow_attachment_textures: AtomicU64,
     shadow_attachment_loads_within: AtomicU64,
@@ -1622,6 +1626,34 @@ impl Counters {
     /// unsigned-integer view (`shadow_merge.rs`).
     pub(crate) fn shadow_merge_fetched(&self) {
         self.shadow_merges_fetched.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A merge of a shadowed texture keeps the texels before the commands in an image, `made`
+    /// where its queue kept none it could take, else `followed` where a command buffer not yet
+    /// completed holds the one it took (`shadow_merge.rs`, `texture/kept_image.rs`).
+    pub(crate) fn shadow_merge_kept_in_image(&self, made: bool, followed: bool) {
+        self.shadow_merges_kept_in_images
+            .fetch_add(1, Ordering::Relaxed);
+        if made {
+            self.shadow_merge_kept_images_made
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        if followed {
+            self.shadow_merge_kept_images_followed
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// A merge's kept image was made (`texture/kept_image.rs`).
+    pub(crate) fn shadow_merge_kept_image_made(&self) {
+        self.shadow_merge_kept_images_live
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A merge's kept image went.
+    pub(crate) fn shadow_merge_kept_image_gone(&self) {
+        self.shadow_merge_kept_images_live
+            .fetch_sub(1, Ordering::Relaxed);
     }
 
     /// An ended encoder's pass took `passes` shadowed textures as attachments, `first` of them
@@ -3024,6 +3056,21 @@ pub struct WorkCounts {
     /// through its unsigned-integer view, comparing them with the kept texels, in place of a copy
     /// of them into the scratch (`shadow_merge.rs`): a cut merge whose shadow has the view.
     pub shadow_merges_fetched: u64,
+    /// Of `shadow_merges_fetched`, those whose keep copies the shadow's texels into an image at
+    /// their own coordinates (`vkCmdCopyImage`), which their kernel fetches beside the shadow's,
+    /// in place of a copy or dispatch into the scratch: on a device whose copies in take no keep
+    /// (no `DriverFact::ShadowCopyInDispatchFaster`), so they make no scratch.
+    pub shadow_merges_kept_in_images: u64,
+    /// Of `shadow_merges_kept_in_images`, those that made their image: the others took one their
+    /// queue kept from an earlier keep of the same view and extent, whatever its shadow, once the
+    /// encoder that took it ended (`texture/kept_image.rs`).
+    pub shadow_merge_kept_images_made: u64,
+    /// Of the others, those that took an image a command buffer not yet completed still held: in
+    /// their queue's order, ahead of that completion, which they did not wait for.
+    pub shadow_merge_kept_images_followed: u64,
+    /// The kept images live now: those their queues keep, and those the command buffers that
+    /// used them hold until they complete.
+    pub shadow_merge_kept_images_live: u64,
     /// The shadowed textures render passes took as attachments, each once a pass
     /// (`render/shadows.rs`): among them textures over a buffer's bytes, a no-copy buffer's or an
     /// IOSurface plane's, whose pass copies the texels in before it where it loads them and back
@@ -3628,6 +3675,18 @@ impl Device {
             row_copy_regions_most: counters.row_copy_regions_most.load(Ordering::Relaxed),
             row_copies_dispatched: counters.row_copies_dispatched.load(Ordering::Relaxed),
             shadow_merges_fetched: counters.shadow_merges_fetched.load(Ordering::Relaxed),
+            shadow_merges_kept_in_images: counters
+                .shadow_merges_kept_in_images
+                .load(Ordering::Relaxed),
+            shadow_merge_kept_images_made: counters
+                .shadow_merge_kept_images_made
+                .load(Ordering::Relaxed),
+            shadow_merge_kept_images_followed: counters
+                .shadow_merge_kept_images_followed
+                .load(Ordering::Relaxed),
+            shadow_merge_kept_images_live: counters
+                .shadow_merge_kept_images_live
+                .load(Ordering::Relaxed),
             shadow_attachment_passes: counters.shadow_attachment_passes.load(Ordering::Relaxed),
             shadow_attachment_textures: counters.shadow_attachment_textures.load(Ordering::Relaxed),
             shadow_attachment_loads_within: counters
