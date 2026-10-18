@@ -163,6 +163,7 @@ fn a_committed_command_buffer_gives_its_slot_back_once_completed() {
 /// returned, never while it runs, and while the deallocator of a no-copy buffer the command
 /// buffer held last still runs, whether or not the program still holds the command buffer. The
 /// buffer has a keep-alive, which its mapping lives in, as the consumer's do: its deallocator then
+/// runs in the release. The slot's return and the make's wait are counted.
 #[test]
 fn a_command_buffer_s_slot_comes_back_as_its_completed_handlers_return() {
     on_device(|device| {

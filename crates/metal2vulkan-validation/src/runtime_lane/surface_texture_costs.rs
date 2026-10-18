@@ -545,6 +545,9 @@ fn surface_texture_costs() {
 /// frame its copies in and the pass; the blits read the bytes either way. A shadow over the pages
 /// is kept and merged back in place of a copy back, and one over a tracked `Private` buffer's
 /// bytes copied back. Printed per set and part (`SURFTEX-PART`): the
+/// textures' forms, the medians and 90th percentiles of each one's making (its buffer and
+/// texture), of the frame's release, encoding, commit to completion and process CPU time, and the
+/// work counts per frame.
 #[test]
 #[ignore = "a release-mode measurement: run by name"]
 fn surface_texture_cost_parts() {
@@ -672,7 +675,8 @@ fn surface_texture_cost_parts() {
             let (wait, wait90) = median_p90(waits);
             let (cpu, cpu90) = median_p90(cpus);
             println!(
-                "SURFTEX-PART on {}: {set}, {part:?}, forms {forms} (a aliased, s shadowed): \
+                "SURFTEX-PART on {}: {set}, {part:?}, forms {forms} (a aliased, s \
+                 shadowed): \
                  making us {}; release {release:.0} us (p90 {release90:.0}), encode {encode:.0} us \
                  (p90 {encode90:.0}), commit to completion {wait:.0} us (p90 {wait90:.0}), process \
                  CPU {cpu:.0} us (p90 {cpu90:.0}); per frame: {}",

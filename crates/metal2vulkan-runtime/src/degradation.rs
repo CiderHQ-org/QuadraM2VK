@@ -11,7 +11,9 @@
 //!   and cost, in `degradations!`; its precision kinds include one per
 //!   [`PrecisionNote`](metal2vulkan::pipeline::PrecisionNote), named alike, which the macro maps both
 //!   ways, so a note without a kind (or two kinds of one note) does not compile. docs/API.md's
-//!   catalogue lists every code, and every retired one, closed both ways by a test.
+//!   catalogue lists every code, and every retired one, closed both ways by a test, and every
+//!   code ever issued is in `tests/degradation_codes.txt`, live or retired, so a kind removed
+//!   without retiring its code fails that test.
 //! - **Codes are a contract.** `metal2vulkan-degrade-<kind>`, never renamed or reused; a new
 //!   degradation is a new kind. A kind that no longer fires is retired before the API freezes:
 //!   its code stays in [`Degradation::RETIRED_CODES`], with the notices that replace it (or, where
@@ -258,6 +260,7 @@ degradations! {
         /// host pages: its image is a shadow of its elements tiled in the heap's bytes, where Metal
         /// lays them out.
         ShadowedTexture = "shadowed-texture", Performance,
+            "its texels are copied into an image before each use and back after each write \
              (over a buffer's bytes but a tracked private buffer's, kept before a write and merged \
              back after it)";
         /// A texture buffer is viewed through a staging buffer: its texels start where the
@@ -2116,6 +2119,24 @@ impl Degradation {
             "none: the opt-in deferred half rounding is removed; every half result rounds where it \
              is computed, under native half rounding (metal2vulkan-degrade-native-half-conversion \
              or metal2vulkan-degrade-native-half-quantize) or Metal's",
+        ),
+        (
+            // A shadow copied back over bytes the CPU may write, under the default
+            // `ShadowHostWritesPolicy::CopyBack`, announced it: a CPU write made while the command
+            // buffer ran, beside the commands' writes, could be undone. The policy is gone, and
+            // such a shadow is always merged back.
+            "metal2vulkan-degrade-shadow-copy-back-race",
+            "none: a shadow over bytes the CPU may write is always merged back, so the CPU's \
+             writes beside the commands' stay, as Metal keeps them",
+        ),
+        (
+            // A no-copy buffer's release, under the default `ImportReleasePolicy::Background`,
+            // announced it: its deallocator ran on a handler thread after the release returned.
+            // The policy is gone, and a deallocator waiting for the import's free runs in the
+            // release.
+            "metal2vulkan-degrade-deallocator-after-release",
+            "none: a no-copy buffer's deallocator runs in its release, on the releasing thread, \
+             as Metal runs it",
         ),
     ];
 

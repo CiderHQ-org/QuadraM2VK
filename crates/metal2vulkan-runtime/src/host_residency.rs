@@ -45,6 +45,16 @@
 //!   bounds the churn whatever the program's pattern: an import is made again at most five times
 //!   before its window reaches [`IDLE_MOST`], and at most once per such window after.
 //! - **The import going** (its last buffer released) lets go of its objects, and the caller's
+//!   keep-alive and deallocators go once their memory is freed: as the import goes (in the
+//!   release, or on a handler thread where a keep-alive alone waits for the free, `buffer.rs`), or
+//!   with the last submitted command buffer that read
+//!   them, which holds them, not the buffer, once a rebind or a detach replaced the buffer's pages
+//!   (`rebind.rs`, `detach.rs`). One committed and not yet submitted holds them weakly and never
+//!   runs the recording that named them, so they go in that rebind or detach, as Metal's
+//!   deallocator runs there. So the caller's pages stay mapped while any memory over them lives:
+//!   ANV on i915 lists every memory of the device in every execbuffer, and one over
+//!   pointer-imported pages since unmapped fails it, the device lost. Where the free waits for the
+//!   batches in flight (`freed_memory.rs`) that is announced, as for an import kept.
 //! - **Imported again at the next blit,** on the encoding thread, before its command reads the
 //!   `VkBuffer`. A dma-buf import from the dma-bufs kept, never from the source again, so the
 //!   buffer lies over the pages it was made over even where `host_range_remapped` told the device
@@ -67,7 +77,7 @@
 //!   did not fit); the device's dma-buf memories (`dma_buf_memories_live`) and its
 //!   imports of host pages by their pointer (`host_imports_live`) fall as imports are released.
 
-use super::buffer::{FixedPages, HostImport, Pages, Shape};
+use super::buffer::{FixedPages, HostImport, Imported, Pages, Shape};
 use super::device::lock;
 use super::dma_buf::{DmaBufRequest, DmaBufSource};
 use super::error::{internal, Error};
@@ -227,21 +237,6 @@ impl Drop for Again {
         let count = chunks.len() as u64;
         self.device.shared().counts.host_import_fds_closed(count);
         KEPT_FDS.fetch_sub(count, Ordering::AcqRel);
-    }
-}
-
-/// A releasable import's `VkBuffer` and memory: held by the import while it is imported, and by
-/// each command buffer whose blit read them until it completed (`EncoderCore::blit_at`); the last
-/// lets go, which destroys the `VkBuffer` and frees the memory.
-pub(super) struct Imported {
-    device: Device,
-    pub(super) pages: Pages,
-}
-
-impl Drop for Imported {
-    fn drop(&mut self) {
-        // SAFETY: no pending command buffer uses them: each that read them holds them until it
-        // completed, and no other read reached a releasable import (the module docs).
     }
 }
 
@@ -418,7 +413,15 @@ impl Residency {
 }
 
 impl Residency {
+    /// Its objects, the import going, for the caller to leave what waits for their free with
+    /// (`Imported::leave`): freed as the last of their holders lets go, the caller or the last
+    /// command buffer that read them, so the caller's pages stay mapped, and its deallocator
+    /// waits, while any memory over them lives (the module docs). `None` where it is released,
+    /// nothing imported.
+    pub(super) fn let_go(&self) -> Option<Arc<Imported>> {
+        let held = lock(&self.state).held.take()?;
         self.device.shared().counts.host_import_resident(false);
+        Some(held)
     }
 }
 

@@ -57,6 +57,8 @@
 //!   dma-bufs, each such image is made again over a dma-buf of its own new pages before the rebind
 //!   settles (`Device::dma_buf_images_again`, `dma_buf.rs`), and refused likewise where it is not.
 
+#[cfg(unix)]
+use super::buffer::Imported;
 use super::buffer::{Buffer, Detached, HostCell, HostPages, Lying, WeakBuffer};
 use super::command_buffer::CommandBufferShared;
 use super::device::lock;

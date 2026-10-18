@@ -43,7 +43,15 @@ fn shadow_joined(
     buffer: ResourceKey,
     alias: Option<ResourceKey>,
     bytes: Range<u64>,
+) -> Arc<ShadowCopies> {
+    shadow_in(
         ShadowBuffer::Fixed(vk::Buffer::null(), 0),
+        buffer,
+        alias,
+        bytes,
+    )
+}
+
 /// `texture` over a `Private` buffer's bytes, tracked where `tracked`: the CPU writes none, and
 /// another queue's commands write them while a command buffer runs only where it is untracked
 /// (`ShadowCopies::merges_back`).
@@ -52,10 +60,18 @@ fn over_private(texture: Arc<ShadowCopies>, tracked: bool) -> Arc<ShadowCopies> 
     copies.backing = Backing::PrivateBuffer;
     copies.tracked = tracked;
     Arc::new(copies)
+}
+
+/// A shadowed texture over `bytes` of the buffer `buffer`, in `raw`.
+fn shadow_in(
+    raw: ShadowBuffer,
+    buffer: ResourceKey,
+    alias: Option<ResourceKey>,
+    bytes: Range<u64>,
 ) -> Arc<ShadowCopies> {
     Arc::new(ShadowCopies {
         source: ShadowSource::Bytes {
-            buffer: ShadowBuffer::Fixed(vk::Buffer::null()),
+            buffer: raw,
             key: buffer,
             bytes,
             target: ShadowTarget::Image {
@@ -408,7 +424,9 @@ fn a_copy_in_covers_only_where_the_command_reads_and_writes() {
     // Written two ways: kept, and every texel copied in for the merge to compare.
     let mut sync = ShadowSync::<u32>::default();
     let uses = [written, bytes(buffer, 256..512, true)];
+    let copies = sync
         .before(&[inside(a, true)], &uses, |_, _, _| Ok(7))
+        .unwrap();
     assert_eq!(
         moved(&copies),
         [Moved::Into(t.shadow_key), Moved::Keep(t.shadow_key, 7)]
@@ -898,6 +916,7 @@ fn a_merge_of_a_part_leaves_a_twin_stale_there_alone() {
             .map(|copy| (copy.copies.shadow_key, step(copy), copy.area, bounded(copy)))
             .collect::<Vec<_>>()
     };
+    let mut sync = ShadowSync::<u32>::default();
     let all = Some([0, 0, 64, 32]);
     let a = attachment.shadow_key;
     let (r, o) = (read.shadow_key, other.shadow_key);
@@ -1061,7 +1080,9 @@ fn a_use_that_overwrites_every_texel_takes_no_copy_in() {
     // Written two ways (the bytes too), the texture is kept and copied in.
     let mut sync = ShadowSync::<u32>::default();
     let uses = [written, bytes(buffer, 256..512, true)];
+    let copies = sync
         .before(&[overwriting(true)], &uses, |_, _, _| Ok(7))
+        .unwrap();
     assert_eq!(
         moved(&copies),
         [Moved::Into(t.shadow_key), Moved::Keep(t.shadow_key, 7)]
@@ -1272,8 +1293,11 @@ fn one_command_writing_a_texture_and_its_bytes_another_way_keeps_and_merges_it()
 /// merged before the next command. An image's shadow, one whose writes Metal drops, and one over a
 /// tracked `Private` buffer's bytes, which no other writer writes while a command buffer runs,
 /// merge nothing back: the last is copied in and back; an untracked `Private` buffer's merges.
+#[test]
 fn a_texture_over_a_buffer_s_bytes_is_merged_where_it_would_be_copied_back() {
+    let buffer = ResourceKey::new();
     let a = shadow(buffer, 0..1024);
+    let ka = a.shadow_key;
     assert!(a.merges_back());
     assert!(!image_shadow(ResourceKey::new(), 0, 1).merges_back());
     assert!(over_private(shadow(buffer, 0..1024), false).merges_back());
@@ -1282,13 +1306,55 @@ fn a_texture_over_a_buffer_s_bytes_is_merged_where_it_would_be_copied_back() {
     let mut dropped = Arc::into_inner(shadow(buffer, 0..1024)).expect("one holder");
     dropped.drops_writes = true;
     assert!(!dropped.merges_back());
+    let mut made = 0;
+    let mut run = |sync: &mut ShadowSync<u32>,
+                   textures: &[(&Arc<ShadowCopies>, bool)],
+                   others: &[Use<ResourceKey>]| {
+        moved(&planned(sync, &mut made, textures, others))
+    };
+    let mut sync = ShadowSync::default();
+    assert_eq!(
+        run(&mut sync, &[(&a, true)], &[]),
+        [Moved::Into(ka), Moved::Keep(ka, 1)]
+    );
+    assert_eq!(run(&mut sync, &[(&a, true)], &[]), [], "kept already");
+    assert_eq!(run(&mut sync, &[(&a, false)], &[]), [], "current");
+    assert_eq!(
+        run(&mut sync, &[], &[bytes(buffer, 0..64, false)]),
+        [Moved::Merge(ka, 1)]
+    );
+    assert_eq!(
+        run(&mut sync, &[(&a, true)], &[]),
+        [Moved::Keep(ka, 1)],
+        "current after the merge, kept again in the encoder's scratch"
+    );
+    assert_eq!(moved(&sync.finish()), [Moved::Merge(ka, 1)]);
+    // Another encoder: a scratch of its own.
+    let mut sync = ShadowSync::default();
+    assert_eq!(
+        run(&mut sync, &[(&a, true)], &[]),
+        [Moved::Into(ka), Moved::Keep(ka, 2)]
+    );
+    assert_eq!(moved(&sync.finish()), [Moved::Merge(ka, 2)]);
     // Over a tracked `Private` buffer's bytes: copied in and back, nothing kept.
     let kp = private.shadow_key;
     let mut sync = ShadowSync::default();
     assert_eq!(run(&mut sync, &[(&private, true)], &[]), [Moved::Into(kp)]);
     assert_eq!(run(&mut sync, &[(&private, true)], &[]), []);
     assert_eq!(moved(&sync.finish()), [Moved::Back(kp)]);
+    // Every texel replaced: no copy in, no keep, a copy back.
+    let mut sync = ShadowSync::<u32>::default();
+    let replacing = ShadowUse {
+        overwrites: true,
+        ..through(&a, true).0
+    };
+    let uses = [through(&a, true).1];
+    let copies = sync
         .before(std::slice::from_ref(&replacing), &uses, |_, _, _| Ok(9))
+        .unwrap();
+    sync.after(std::slice::from_ref(&replacing), &uses, &[]);
+    assert_eq!(moved(&copies), []);
+    assert_eq!(moved(&sync.finish()), [Moved::Back(ka)]);
     // Every texel replaced, then written through without replacing them: the first command's
     // writes are copied back before the keep, as the merge after it takes only the words changed
     // since the keep.
@@ -1301,7 +1367,14 @@ fn a_texture_over_a_buffer_s_bytes_is_merged_where_it_would_be_copied_back() {
         [Moved::Back(ka), Moved::Keep(ka, 3)]
     );
     assert_eq!(moved(&sync.finish()), [Moved::Merge(ka, 3)]);
+    // Two ways: the command's own scratch, merged before the next command, which copies in.
+    let mut sync = ShadowSync::default();
+    assert_eq!(
+        run(&mut sync, &[(&a, true)], &[bytes(buffer, 0..4096, true)]),
         [Moved::Into(ka), Moved::Keep(ka, 4)]
+    );
+    assert_eq!(
+        run(&mut sync, &[(&a, true)], &[]),
         [Moved::Merge(ka, 4), Moved::Into(ka), Moved::Keep(ka, 5)]
     );
     assert_eq!(moved(&sync.finish()), [Moved::Merge(ka, 5)]);
@@ -1435,6 +1508,8 @@ fn a_command_writing_an_image_through_a_views_shadow_and_another_way_is_refused(
         let mut sync = ShadowSync::<u32>::default();
         let (shadows, uses) = command_uses(textures, &others);
         let refused = sync.before(&shadows, &uses, |_, _, _| {
+            panic!("a merge of an image's shadow")
+        });
         match refused {
             Err(Error::Unsupported(gap)) => {
                 assert_eq!(gap.feature, Feature::ViewFormatReinterpretation)
@@ -1457,6 +1532,8 @@ fn a_command_writing_an_image_through_a_views_shadow_and_another_way_is_refused(
         let (shadows, uses) = command_uses(textures, &others);
         let copies = sync
             .before(&shadows, &uses, |_, _, _| {
+                panic!("a merge of an image's shadow")
+            })
             .unwrap();
         let into: Vec<(ResourceKey, bool)> = textures
             .iter()

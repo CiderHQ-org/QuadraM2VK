@@ -333,6 +333,8 @@ impl ShadowBuffer {
                 .upgrade()
                 .map_or(0, |buffer| buffer.start() + buffer.length()),
         }
+    }
+
     /// The `VkBuffer` the bytes lie in now: the null handle once a rebound buffer went (a copy's
     /// texture keeps its buffer), and while it is detached (`detach.rs`), when its `VkBuffer` is
     /// the device's stand-in, which holds none of its bytes. No copy records it: an encoder
@@ -616,6 +618,8 @@ impl ShadowCopies {
         let bytes = matches!(&self.source, ShadowSource::Bytes { .. });
         let other_writer = self.backing != Backing::PrivateBuffer || !self.tracked;
         bytes && other_writer && !self.drops_writes && self.unmerged().is_none()
+    }
+
     /// Whether two shadowed textures copy some of the same truth.
     fn shares_truth(&self, other: &ShadowCopies) -> bool {
         let ((key, range), (other_key, other_range)) = (self.truth(), other.truth());
@@ -729,10 +733,12 @@ pub(super) enum Step<M> {
     Into,
     /// From the shadow back into the buffer.
     Back,
+    /// The shadow kept, before a command that writes its bytes two ways, or before the first
     /// command since the last copy back that writes through it where it merges back
     /// ([`ShadowCopies::merges_back`]).
     Keep(M),
-    /// After that command, the bytes it changed through the texture merged into the buffer's.
+    /// After the command that wrote two ways, or in place of the next copy back, the bytes
+    /// changed through the texture since the keep merged into the buffer's.
     Merge(M),
 }
 
@@ -1388,6 +1394,8 @@ pub(super) fn image_part_of(
 /// writes them two ways too ([`two_ways`]) is.
 fn merged_back(shadow: &ShadowUse) -> bool {
     shadow.writes && !shadow.overwrites && shadow.copies.merges_back()
+}
+
 /// Whether a command that uses the shadowed textures `shadows` and has `uses` writes the bytes
 /// of `shadows[i]` two ways: through it, and through `uses` or another shadowed texture over
 /// them (the module's rules).
@@ -1514,10 +1522,17 @@ struct Entry<M> {
     /// Where those commands wrote through it, where they bound it ([`ShadowUse::area`]).
     area: Option<[u32; 4]>,
     /// The scratch the image was kept in before a command that writes its bytes two ways, until
+    /// the merge after it, or before the first command since the last copy back that wrote
     /// through a texture that merges back ([`ShadowCopies::merges_back`]), until the next copy
     /// back, which is then a merge.
     merge: Option<M>,
+    /// The keep in `merge` is a command's that writes the bytes two ways: merged before the
+    /// encoder's next command, after which the image no longer holds the bytes.
+    two_ways: bool,
     /// The scratch of the texture's keeps where it merges back, made at the first
+    /// command of the encoder that writes through it, and kept in again at each keep after a
+    /// merge: each merge's dispatches end with a barrier to everything after them.
+    scratch: Option<M>,
     /// When [`Standing::Current`], the rectangle bounding the texels whose bytes changed since the image's
     /// copy in, where only writes [`Within`] it changed them (the module's rules): the next
     /// command that uses the texture copies those in first, or those of them it reads where it
@@ -1664,6 +1679,7 @@ pub(super) struct ShadowSync<M = Arc<ShadowMerge>> {
 }
 
 impl<M> Default for ShadowSync<M> {
+    /// No texture used yet.
     fn default() -> Self {
         ShadowSync {
             entries: Vec::new(),
@@ -1713,6 +1729,8 @@ impl<M: Clone + KeptArea> ShadowSync<M> {
                     dirty: false,
                     area: None,
                     merge: None,
+                    two_ways: false,
+                    scratch: None,
                     stale: None,
                 });
                 self.entries.len() - 1
@@ -1722,11 +1740,16 @@ impl<M: Clone + KeptArea> ShadowSync<M> {
 
     /// Copy back entry `i` (dirty): its image's bytes replace the buffer's, so every other
     /// texture over them is no longer current, or, where the copy back covers a rectangle of
+    /// texels laid out as its own, stale there alone (the module's rules). One kept is merged
+    /// instead: one kept before a command that wrote its bytes two ways is then no longer current
     /// either, as the buffer holds the other way's writes too, and leaves every other texture
     /// over the bytes no longer current; one kept as it merges back still holds what the
     /// encoder's commands left in them, and its merge changes only words they changed through
     /// it, inside the area they wrote in where they bound it, so it leaves the others stale there
     /// alone, as a copy back of that area does. A copy back covers only the
+    /// area the commands wrote in, where they bound it: the image's other texels are what the last
+    /// copy in left, which the buffer still holds (a write of its bytes another way leaves the
+    /// image stale, and copies in again before the next use).
     fn copy_back(&mut self, i: usize, copies: &mut Vec<ShadowCopy<M>>) {
         let entry = &mut self.entries[i];
         let two_ways = entry.two_ways;
@@ -1736,6 +1759,8 @@ impl<M: Clone + KeptArea> ShadowSync<M> {
                 entry.merge = None;
                 if two_ways {
                     entry.lose(Lost::TwoWays);
+                }
+                entry.two_ways = false;
                 Step::Merge(merge)
             }
             None => Step::Back,
@@ -1801,6 +1826,7 @@ impl<M: Clone + KeptArea> ShadowSync<M> {
         // The textures the command writes through, its bytes another way not, that merge back:
         // kept in a scratch of the encoder's, made at the first such command.
         let mut merged_kept = Vec::new();
+        let mut scratches = Vec::new();
         for (i, shadow) in shadows.iter().enumerate() {
             if two_ways(shadows, i, uses) {
                 kept.push((
@@ -1830,6 +1856,8 @@ impl<M: Clone + KeptArea> ShadowSync<M> {
         // A texture kept in a scratch that does not keep what the command writes: merged before
         // its keep in the new one.
         let mut regrown = Vec::new();
+        for (copies, scratch) in scratches {
+            let i = self.entry(&copies);
             let entry = &mut self.entries[i];
             if entry.merge.is_some() && !entry.two_ways {
                 regrown.push(copies.shadow_key);
@@ -1850,6 +1878,7 @@ impl<M: Clone + KeptArea> ShadowSync<M> {
                     shadow.copies.shadow_key != entry.shadow_key
                         && shadow.copies.shares_truth(entry)
                 });
+            let entry = &self.entries[i];
             let regrows = regrown.contains(&entry.copies.shadow_key);
             // Written since its last copy back with nothing kept (by a command that replaced
             // every texel), and kept below: copied back first, as the merge after the keep takes
@@ -1939,12 +1968,29 @@ impl<M: Clone + KeptArea> ShadowSync<M> {
                 entry.held = None;
             }
         }
+        // Kept after its copy in, until the copy back after the command, or after a later one,
+        // which is then a merge: a copy back would write the texels no command wrote with what the
         // copy in read, over what another writer may have written since.
         for shadow in merged_kept {
+            let i = self.entry(&shadow);
+            let entry = &mut self.entries[i];
+            let (None, Some(scratch)) = (&entry.merge, &entry.scratch) else {
+                continue;
+            };
+            let scratch = scratch.clone();
+            entry.merge = Some(scratch.clone());
+            copies.push(ShadowCopy {
+                copies: shadow,
+                step: Step::Keep(scratch),
+                kept: false,
+                area: None,
                 cause: None,
+            });
+        }
         for (shadow, merge) in kept {
             let i = self.entry(&shadow);
             self.entries[i].merge = Some(merge.clone());
+            self.entries[i].two_ways = true;
             copies.push(ShadowCopy {
                 copies: shadow,
                 step: Step::Keep(merge),

@@ -124,6 +124,7 @@ impl DevicePolicy {
     /// ([`RoundingOrderPolicy::Exact`]), its 16-bit float blend of a `half` output
     /// ([`HalfBlendPolicy::Exact`]), its filter of a two-plane YCbCr texture
     /// as written ([`HeapCompressionPolicy::Uncompressed`]), each command buffer seen complete
+    /// at its own end ([`CompletionPolicy::Exact`]), a loaded attachment's texels as its tile
     /// store leaves them ([`TileStorePolicy::Exact`]), its multisample color resolve
     /// ([`ResolvePolicy::Exact`]), and each batch ordered after the earlier ones of its queue by
     /// the accesses it depends on alone ([`BatchOrderPolicy::Exact`]). Sampling and every other
@@ -527,6 +528,7 @@ pub enum TileStorePolicy {
     /// [`Device`](Self::Device).
     Exact,
 }
+
 
 /// How a batch of command buffers on one `VkQueue` (the work the runtime submits for a command
 /// buffer between its event waits and signals) begins after the earlier batches there. Metal

@@ -109,6 +109,8 @@
 //! ([`KEPT_BYTES`]), the device's
 //! first sparse texture on a driver whose first sparse resource waits for every queue's work in
 //! `first_use` ([`FIRST_SPARSE`]), command buffers a submission of several batches completes
+//! together on a driver that merges submissions in `grouped_submissions` ([`GROUPED`]),
+//! visibility
 //! counts of draws writing several colors on a driver that counts each sample once per color in
 //! `color_groups` ([`PER_COLOR_COUNTS`]), passes that load and draw a signed normalized attachment
 //! holding a minimum code, or an `RGB9E5Float` one holding an unnormalized word, in

@@ -52,7 +52,17 @@
 //!   per GiB). The runtime once deferred the macOS import to the buffer's first GPU use, which
 //!   saw pages remapped in between and lost the device where the import then failed.
 //! - **The deallocator** runs once, with the pointer and the length, when the buffer's last
-//!   reference goes: after the imported memory is freed, on the thread that drops it. A committed
+//!   reference goes: after the imported memory is freed. Where that release frees the import, the
+//!   free and the deallocator after it run on the thread that drops it, before the release
+//!   returns, as Metal runs the deallocator in the release (an M3 Max under macOS 27.0.1 ran an
+//!   unused buffer's deallocator inside its final release, on the releasing thread, every time);
+//!   the free waits there on the driver's locks a submission holds, ANV's device lock among them.
+//!   Only where a keep-alive alone waits for the free ([`KeepAlive`], a runtime extension) do the
+//!   free and the keep-alive's drop go to one of the device's handler threads, in a context of its
+//!   own, the release returning first. With neither a deallocator nor a keep-alive the free is
+//!   made in the release: the caller may unmap the pages once it returns, and
+//!   `VK_EXT_external_memory_host` requires the imported range to stay valid for the imported
+//!   memory's whole life. A committed
 //!   command buffer holds the buffer until it completed and its completed handlers ran, so then it
 //!   runs on one of the device's handler threads, in the command buffer's queue's context, after
 //!   the GPU's last use, as Metal's runs on one of its threads: what its commands retained and its
@@ -223,8 +233,9 @@ impl HostMemory {
 /// A no-copy buffer's deallocator (Metal's block): called once, with the pointer and the length,
 /// when the buffer is released. It may run on a runtime thread, as Metal's runs on any thread: a
 /// command buffer's queue's handler thread, where that command buffer's release lets go of the
-/// buffer, never a thread that submits command buffers or sees them complete. A panic inside it
-/// is caught.
+/// buffer, or, where the release frees the import, the releasing thread before the release
+/// returns, as Metal's; never a thread that submits command buffers or sees them complete. A panic
+/// inside it is caught.
 pub type Deallocator = Box<dyn FnOnce(NonNull<u8>, u64) + Send + 'static>;
 
 /// What keeps the caller's host memory mapped (a runtime extension: Metal has none): given with a

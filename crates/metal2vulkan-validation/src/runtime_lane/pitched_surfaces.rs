@@ -1452,7 +1452,9 @@ fn a_padded_texture_s_shadow_names_what_may_write_its_padding() {
 /// every device) that loads it and draws nothing leaves its texels as they were, as Metal's leaves
 /// the tiles no draw reaches: it takes no copy in and no copy back (`WorkCounts::shadow_copies`),
 /// whether it stores the attachment or stores it `DontCare`, and the buffer keeps every byte. A
-/// pass that draws a rectangle copies in before it and back after it.
+/// pass that draws a rectangle copies in before it, keeps the image after the copy in, and merges
+/// back what it drew in place of a copy back, as the CPU may write the `Shared` buffer's bytes:
+/// three copies.
 #[test]
 fn a_pass_that_draws_nothing_copies_no_shadow() {
     let layout = LAYOUTS[0];
@@ -1497,8 +1499,8 @@ fn a_pass_that_draws_nothing_copies_no_shadow() {
         blend_pass(&queue, &blend, (&texture, StoreAction::Store), false, rect);
         assert_eq!(
             copies() - before,
-            2,
-            "a pass drawing a rectangle: in and back"
+            3,
+            "a pass drawing a rectangle: in, kept and merged back"
         );
         drop((texture, buffer));
     }
@@ -1593,6 +1595,7 @@ fn a_pass_copies_in_and_back_only_the_texels_its_scissors_reach() {
                 now.7 - before.7,
             )
         };
+        let (dispatched, back) = (0, |_: u64| 0);
         // The merge's kernel, and the keep where it is a dispatch, each make a descriptor pool
         // where the device does not push set 0.
         let pools = if pushes(&device) { 0 } else { 1 + merged };

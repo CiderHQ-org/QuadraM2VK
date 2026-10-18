@@ -2575,6 +2575,11 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   rounding is removed; every half result rounds where it is computed, under native half rounding
   (metal2vulkan-degrade-native-half-conversion or metal2vulkan-degrade-native-half-quantize) or
   Metal's.
+- `metal2vulkan-degrade-shadow-copy-back-race` (retired). No replacement: a shadow over bytes the
+  CPU may write is always merged back, so the CPU's writes beside the commands' stay, as Metal
+  keeps them.
+- `metal2vulkan-degrade-deallocator-after-release` (retired). No replacement: a no-copy buffer's
+  deallocator runs in its release, on the releasing thread, as Metal runs it.
 
 ## 10. Accepted differences
 

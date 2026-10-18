@@ -4,21 +4,26 @@
 //! released while a batch submitted before it runs keeps its memory, and its deallocator waits,
 //! until that batch completed, then goes on a handler thread; elsewhere it goes at once, as
 //! before. The counts show which path ran (`WorkCounts::freed_memory_parked`,
-//! `freed_memory_waiting`, `host_deallocators_delayed`). And what a block notes as it goes holds
-//! it for the batches and the device's own submissions made before, and for none after.
+//! Where a host import goes as its release frees it: its free, then its deallocator, before the
+//! release returns, on the releasing thread, as Metal runs the deallocator (an M3 Max under macOS
+//! 27.0.1 ran an unused buffer's deallocator inside its final release, on the releasing thread,
+//! every time); with neither a deallocator nor a keep-alive, its free before the release returns,
+//! as the caller may unmap the pages then; with a keep-alive alone (a runtime extension), its free
+//! and the keep-alive's drop on a handler thread, the release returning first.
 //!
 //! Device tests: compiled only under the validation crate's GPU safety cfgs (`m2v_gpu`,
 //! `m2v_cpu_icd`), on the kind of device the cfg selects.
 
 use crate::freed_memory::Parking;
 use crate::{
-    CommandBuffer, CommandBufferStatus, CommandQueue, Device, DeviceKind, DeviceOptions, Error,
-    HostMemory, ResourceOptions, ShaderCacheOptions,
+    BufferContents, BufferDescriptor, CommandBuffer, CommandBufferStatus, CommandQueue, Device,
+    DeviceKind, DeviceOptions, Error, HostMemory, KeepAlive, ResourceOptions, ShaderCacheOptions,
 };
 use std::alloc::Layout;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::ThreadId;
 use std::time::{Duration, Instant};
@@ -74,8 +79,8 @@ impl Drop for Host {
     }
 }
 
-/// The device the cfg selects: a CPU device under `m2v_cpu_icd`, else a GPU, its shader cache
-/// in `cache`.
+/// The device the cfg selects: a CPU device under `m2v_cpu_icd`, else a GPU, its shader cache in
+/// `cache`.
 fn device(cache: &Path) -> Device {
     let options = DeviceOptions {
         kinds: match cfg!(m2v_cpu_icd) {
@@ -320,4 +325,175 @@ fn a_note_holds_a_block_for_the_work_submitted_before_it_alone() {
     );
     drop(later);
     assert!(parking.reached(&last), "every own submission completed");
+
+/// A no-copy buffer over `host` that no command uses, whose deallocator records its run in
+/// `runs` with the device's live host imports as it ran, once `go` lets it (at most [`WAIT`]);
+/// `None`, printed, where the device imports no host memory.
+fn waiting(
+    device: &Device,
+    host: &Host,
+    runs: &Arc<Runs>,
+    go: mpsc::Receiver<()>,
+) -> Option<(crate::Buffer, Arc<Mutex<Option<u64>>>)> {
+    let live = Arc::new(Mutex::new(None));
+    let (runs, seen, counted) = (Arc::clone(runs), Arc::clone(&live), device.clone());
+    // SAFETY: the memory outlives the buffer (dropped after the device), and nothing else uses it.
+    let made = unsafe {
+        device.new_buffer_with_bytes_no_copy(
+            HostMemory::new(host.0),
+            BYTES as u64,
+            ResourceOptions::default(),
+            Some(Box::new(move |_: NonNull<u8>, _: u64| {
+                let _ = go.recv_timeout(WAIT);
+                *seen.lock().unwrap() = Some(counted.work_counts().host_imports_live);
+                *runs.thread.lock().unwrap() = Some(std::thread::current().id());
+                runs.count.fetch_add(1, Ordering::SeqCst);
+            })),
+        )
+    };
+    match made {
+        Ok(buffer) => Some((buffer, live)),
+        Err(Error::Unsupported(gap)) => {
+            eprintln!("IMPORT-RELEASE: the device imports no host memory: {gap:?}");
+            None
+        }
+        Err(error) => panic!("new_buffer_with_bytes_no_copy: {error:?}"),
+    }
+}
+
+/// A no-copy buffer's release frees its import and runs its deallocator before it returns, on the
+/// releasing thread, as Metal runs it at the release (an M3 Max under macOS 27.0.1 ran an unused
+/// buffer's deallocator inside its final release, on the releasing thread, every time, released on
+/// the main thread or another); no release is posted. A runtime that ran it later, or on another
+/// thread, would break a program valid under Metal's contract.
+#[test]
+fn a_release_frees_and_runs_its_deallocator_before_it_returns_on_its_thread() {
+    let scratch = Scratch::new("exact");
+    let host = Host::new();
+    let device = device(&scratch.0);
+    let runs = Arc::new(Runs::default());
+    let (go, wait) = mpsc::channel();
+    go.send(()).unwrap();
+    let Some((buffer, live_at_run)) = waiting(&device, &host, &runs, wait) else {
+        return;
+    };
+    let before = device.work_counts();
+    drop(buffer);
+    let after = device.work_counts();
+    assert_eq!(runs.count.load(Ordering::SeqCst), 1, "ran at the release");
+    assert_eq!(
+        *runs.thread.lock().unwrap(),
+        Some(std::thread::current().id())
+    );
+    assert_eq!(
+        *live_at_run.lock().unwrap(),
+        Some(before.host_imports_live - 1),
+        "the deallocator ran before the import was freed"
+    );
+    assert_eq!(
+        after.host_import_releases_posted,
+        before.host_import_releases_posted
+    );
+}
+
+/// A no-copy buffer released with neither a deallocator nor a keep-alive has its import freed in
+/// the release: the caller may unmap the pages once the release returns, and
+/// `VK_EXT_external_memory_host` requires the imported range to stay valid for the imported
+/// memory's whole life. No release is posted, and the import is gone from the live imports as the
+/// release returns.
+#[test]
+fn a_release_with_nothing_waiting_frees_its_import_before_it_returns() {
+    let scratch = Scratch::new("nothing-waiting");
+    let host = Host::new();
+    let device = device(&scratch.0);
+    // SAFETY: the memory outlives the buffer (dropped after the device), and nothing else uses it.
+    let made = unsafe {
+        device.new_buffer_with_bytes_no_copy(
+            HostMemory::new(host.0),
+            BYTES as u64,
+            ResourceOptions::default(),
+            None,
+        )
+    };
+    let buffer = match made {
+        Ok(buffer) => buffer,
+        Err(Error::Unsupported(gap)) => {
+            eprintln!("IMPORT-RELEASE: the device imports no host memory: {gap:?}");
+            return;
+        }
+        Err(error) => panic!("new_buffer_with_bytes_no_copy: {error:?}"),
+    };
+    let before = device.work_counts();
+    drop(buffer);
+    let after = device.work_counts();
+    assert_eq!(
+        after.host_import_releases_posted, before.host_import_releases_posted,
+        "the release posted its free"
+    );
+    assert_eq!(
+        after.host_imports_live,
+        before.host_imports_live - 1,
+        "the import outlived the release"
+    );
+}
+
+/// A keep-alive's drop (a runtime extension) tells the caller the pages may go.
+struct Dropped(Arc<Runs>);
+
+impl Drop for Dropped {
+    fn drop(&mut self) {
+        *self.0.thread.lock().unwrap() = Some(std::thread::current().id());
+        self.0.count.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// A no-copy buffer released with a keep-alive alone (a runtime extension: Metal has none) has
+/// its import's free, and the keep-alive's drop after it, posted to a handler thread, the release
+/// returning first: no deallocator waits, so Metal's contract sees nothing late.
+#[test]
+fn a_release_with_a_keep_alive_alone_posts_its_free() {
+    let scratch = Scratch::new("keep-alive");
+    let host = Host::new();
+    let device = device(&scratch.0);
+    let runs = Arc::new(Runs::default());
+    let keep_alive: KeepAlive = Box::new(Dropped(Arc::clone(&runs)));
+    let contents = BufferContents::NoCopy {
+        // SAFETY: the memory outlives the buffer (dropped after the device), and nothing else
+        // uses it.
+        memory: unsafe { HostMemory::new(host.0) },
+        deallocator: None,
+        keep_alive: Some(keep_alive),
+    };
+    let made = device.new_buffer_with_descriptor(BufferDescriptor::new(
+        BYTES as u64,
+        ResourceOptions::default(),
+        contents,
+    ));
+    let buffer = match made {
+        Ok(buffer) => buffer,
+        Err(Error::Unsupported(gap)) => {
+            eprintln!("IMPORT-RELEASE: the device imports no host memory: {gap:?}");
+            return;
+        }
+        Err(error) => panic!("new_buffer_with_descriptor: {error:?}"),
+    };
+    let before = device.work_counts();
+    drop(buffer);
+    let after = device.work_counts();
+    assert_eq!(
+        after.host_import_releases_posted - before.host_import_releases_posted,
+        1,
+        "the release posted its free"
+    );
+    until("the keep-alive never dropped", || {
+        runs.count.load(Ordering::SeqCst) == 1
+    });
+    until("the release never finished", || {
+        device.work_counts().host_import_releases_pending == 0
+    });
+    assert_ne!(
+        *runs.thread.lock().unwrap(),
+        Some(std::thread::current().id()),
+        "the keep-alive dropped on the releasing thread"
+    );
 }

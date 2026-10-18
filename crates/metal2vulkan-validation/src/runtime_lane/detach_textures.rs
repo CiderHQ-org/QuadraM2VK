@@ -29,8 +29,8 @@
 //!   those over the other form's bytes and one of the device's own among them, reads its own
 //!   texels through its slot after each.
 //! - **Attached again**: a rebind gives every texture its pages back, those made while detached
-//!   among them; a kernel's write of one made while detached lands in the new pages, through the
-//!   copy back that dispatches where the device's does.
+//!   among them; a kernel's write of one made while detached lands in the new pages, merged back,
+//!   as the CPU may write them.
 //! - **A two-plane extended-range heap texture** made in a detached heap answers its descriptor.
 
 use super::degrade_notices::on_device as on_device_noticed;
@@ -39,7 +39,7 @@ use super::host_memory::on_device;
 use super::rebind_reach::{heap_member, member_over, rebind_heap_to, rebind_to, A, B};
 use super::{bound_buffers, encode_case, pipeline_state, public_case, CaseResources, PublicCase};
 use super::{buffer_with, texture_descriptor, WAIT};
-use metal2vulkan::device::{DriverFact, VkFeature};
+use metal2vulkan::device::VkFeature;
 use metal2vulkan::error::{Capability, Feature, Needs};
 use metal2vulkan::metal::{PixelFormat, ResourceUsage, TextureUsage};
 use metal2vulkan_devtools::llvm_assemble_text;
@@ -617,12 +617,10 @@ fn a_rebind_or_a_detach_rewrites_its_own_textures_slots_alone() {
 }
 
 /// A texture made while its bytes are detached is their shadow, presenting a stand-in; once the
-/// bytes lie in pages again, a kernel's write of it lands in them, both forms. Where the device
-/// copies a shadow back by a dispatch (`DriverFact::ShadowCopyBackDispatchFaster`), that dispatch
-/// reads the shadow through the word view its copies made with it, before the stand-in: the
-/// view is the image's own (`Image::own_view`), which the stand-in leaves alone. Before, it was
-/// among the views the stand-in let go of, and the copy back wrote a destroyed view into its set
-/// (`VUID-VkWriteDescriptorSet-descriptorType-02996` on the Iris Xe of RPL-P).
+/// bytes lie in pages again, a kernel's write of it lands in them, both forms. The bytes are host
+/// pages the CPU may write, so the write is merged into them in place of a copy back
+/// (`shadow_merge.rs`): no copy back is dispatched, even where the device copies a shadow back by a
+/// dispatch (`DriverFact::ShadowCopyBackDispatchFaster`).
 #[test]
 fn a_texture_made_while_detached_writes_its_pages_once_they_are_given_again() {
     on_device(|device| {
@@ -640,13 +638,8 @@ fn a_texture_made_while_detached_writes_its_pages_once_they_are_given_again() {
             assert_eq!(texels(&texture), read_texels(), "{over:?}");
         }
         let dispatched = device.work_counts().shadow_copies_back_dispatched - before;
-        if dispatches {
-            assert!(dispatched > 0, "no copy back dispatched");
-        }
-        eprintln!(
-            "DETACH textures: made while detached, written once attached again; {dispatched} \
-             copies back dispatched"
-        );
+        assert_eq!(dispatched, 0, "copies back dispatched");
+        eprintln!("DETACH textures: made while detached, written once attached again, merged");
     });
 }
 

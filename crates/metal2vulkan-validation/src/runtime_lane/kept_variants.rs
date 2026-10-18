@@ -66,7 +66,7 @@ fn render_state(device: &Device, format: PixelFormat) -> RenderPipelineState {
 }
 
 /// The fixture's compute pipeline state of kernel `name`.
-fn kernel_state(device: &Device, name: &str) -> ComputePipelineState {
+pub(super) fn kernel_state(device: &Device, name: &str) -> ComputePipelineState {
     let function = library(device).new_function_with_name(name).unwrap();
     let descriptor =
         ComputePipelineDescriptor::new(StageSource::Function(function.function_descriptor()));

@@ -1187,10 +1187,12 @@ fn a_no_copy_buffer_s_deallocator_runs_at_its_release_given_a_keep_alive() {
                 !delay,
                 "{what}: the deallocator at the release"
             );
+            let deadline = Instant::now() + WAIT;
+                std::thread::sleep(Duration::from_millis(10));
+            }
             assert_eq!(
                 kept_dropped.load(Ordering::SeqCst),
-                keeps && !bound,
-                "{what}: the keep-alive at the release"
+                "{what}: the keep-alive with the import's free"
             );
             assert_eq!(
                 device.work_counts().host_deallocators_delayed,

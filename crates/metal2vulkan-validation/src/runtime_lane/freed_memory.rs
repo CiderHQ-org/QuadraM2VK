@@ -9,6 +9,9 @@
 //! deallocator wait for the batches submitted before the release
 //! (`WorkCounts::freed_memory_parked`), announced once (`host-deallocator-delayed`); elsewhere
 //! they go at once.
+//!
+//! A no-copy buffer whose deallocator has no keep-alive, released with no command using it: its
+//! deallocator runs before the release returns, on the releasing thread, as Metal's does.
 
 use super::degrade_notices::{assert_made_once, on_device};
 use super::host_memory::Seen;
@@ -19,6 +22,8 @@ use super::{
 };
 use metal2vulkan::error::RuntimeDriverDefect;
 use metal2vulkan_runtime::ResourceOptions;
+use std::collections::BTreeSet;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -99,5 +104,35 @@ fn a_buffer_released_behind_work_that_reads_device_addresses_fails_none_of_it() 
             _ => &DELAYED_DEALLOCATORS,
         };
         assert_made_once(messages, kinds, &shared_kinds(device));
+    });
+}
+
+/// A no-copy buffer whose deallocator has no keep-alive, released with no command using it: its
+/// import is freed and its deallocator run before the release returns, on the releasing thread,
+/// as Metal runs it (an M3 Max under macOS 27.0.1 ran an unused buffer's deallocator inside its
+/// final release, on the releasing thread, every time, released on the main thread or another).
+/// Nothing is posted to a thread of the device's (`WorkCounts::host_import_releases_posted`) and
+/// nothing is announced. A runtime that ran it later, or on another thread, would break a program
+/// valid under Metal's contract. The test makes no `Shared` buffer of its own, so no device
+/// announces `shared-in-system-memory` in it.
+#[test]
+fn a_deallocator_without_a_keep_alive_runs_in_its_release_on_its_thread() {
+    on_device(|device, messages| {
+        let seen = Arc::new(Seen::default());
+        let Some(buffer) = buffer_over(device, pages(buffer_len(), 0, &node(C)), &seen) else {
+            return;
+        };
+        let posted = device.work_counts().host_import_releases_posted;
+        let releaser = std::thread::current().id();
+        drop(buffer);
+        assert_eq!(seen.runs.load(Ordering::SeqCst), 1, "ran in the release");
+        assert_eq!(
+            *seen.thread.lock().unwrap(),
+            Some(releaser),
+            "ran on the releasing thread"
+        );
+        let counted = device.work_counts().host_import_releases_posted - posted;
+        assert_eq!(counted, 0, "posted");
+        assert_made_once(messages, &[], &BTreeSet::new());
     });
 }

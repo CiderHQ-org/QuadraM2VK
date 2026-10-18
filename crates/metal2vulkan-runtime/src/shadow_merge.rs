@@ -1,8 +1,18 @@
+//! A shadowed texture's writes merged into its buffer's bytes (`shadow.rs`), where a copy back of
+//! its shadow would write bytes Metal keeps:
+//!
+//! - **Two ways**: one command that writes through a shadowed texture and also writes the same
+//!   buffer's bytes another way (through the buffer, a texture buffer, or another texture over
+//!   them). A copy back would replace the other write's bytes with the shadow's, where Metal keeps
+//!   both writes when they touch different bytes (Metal probe cases `k.two_ways_disjoint` and
+//!   `k.two_ways_gap`, M3 Max and M4). Merged before the encoder's next command.
 //! - **Merged back** (`ShadowCopies::merges_back`: a buffer's bytes but a tracked `Private`
 //!   buffer's): a copy back would write the texels the encoder's commands left with what the copy
 //!   in read, over another writer's writes to them while the command buffer ran (the CPU's, or
 //!   another queue's commands' over an untracked buffer's), where Metal writes only the texels a
 //!   command writes (`shadow.rs`). Merged in place of each copy back.
+//!
+//! So the bytes the commands changed through the texture are merged into the buffer's instead:
 //!
 //! - **Kept.** Before the command, after its copies in, the shadow's texels are copied into the
 //!   *kept* part of a scratch buffer, laid out as in the buffer from the texture's first byte.
@@ -54,7 +64,7 @@
 //!   retained until its command buffer completes: one, two or three parts of the texture's bytes
 //!   (a cut's rows) rounded up to 256, in one buffer where the device's buffers take it (else one
 //! - **The kernel** (`bind::shadow_merge_module`, one per device, `owned_kernel.rs`): one
-//!   invocation per 4-byte word, the three parts bound as its kept, changed and current storage
+//!   invocation per 4-byte word, the parts bound as its kept, changed and current storage
 //!   buffers, in windows of at most `maxStorageBufferRange` bytes and
 //!   `maxComputeWorkGroupCount[0]` groups, one dispatch each; where it fetches
 //!   (`bind::shadow_merge_image_module`, one per texel width), one invocation per texel, the
@@ -159,6 +169,7 @@ enum Changed {
     Fetched,
 }
 
+/// The scratch and the dispatches of one merge (the module docs).
 pub(super) struct ShadowMerge {
     /// The texture's bytes.
     merged: Merged,
@@ -168,6 +179,8 @@ pub(super) struct ShadowMerge {
     texels: u64,
     /// How the merge reads the texels after the commands.
     changed: Changed,
+    /// The current part, where the merge goes through a copy; `None` where it merges in place.
+    current: Option<Part>,
     /// The keep's dispatch, where the device runs a copy back faster as one
     keep_dispatch: Option<CopyBack>,
     held: Held,
@@ -179,8 +192,13 @@ pub(super) struct ShadowMerge {
 }
 
 impl ShadowMerge {
+    /// The scratch and the kernel's sets for a merge of the texture of `copies` on `device`, of a
+    /// command that writes its bytes two ways where `two_ways` (announced once per device), else
     /// in place of a copy back; cut to the texels inside `area` (`[x0, y0, x1, y1)`), widened
     /// to whole words of the buffer, where given and the merge goes in place over one region's
+    pub(super) fn new(
+        device: &Device,
+        copies: &ShadowCopies,
         let (
             ShadowSource::Bytes {
                 buffer, key, bytes, ..
@@ -188,6 +206,7 @@ impl ShadowMerge {
             Some(first),
         ) = (&copies.source, copies.first_byte())
         else {
+            // A command writing an image two ways is refused before (`ShadowSync::before`), and
             // only a buffer's bytes merge back (`ShadowCopies::merges_back`).
             return Err(internal("a merge of an image's shadow"));
         };
@@ -262,21 +281,25 @@ impl ShadowMerge {
                     device.own_buffer(length, options)?
                 }
             };
+            let placed: Vec<Part> = (0..roles).map(|role| place(&one, role * part)).collect();
             (Held::Spare(one, spares), placed)
         } else {
+            let held = (0..roles)
+                .map(|_| device.own_buffer(part, options))
+                .collect::<Result<Vec<Buffer>, Error>>()?;
             counts.shadow_merge_scratch_zeroed();
+            let placed = held.iter().map(|buffer| place(buffer, 0)).collect();
             (Held::Apart(held), placed)
         };
-        let kept = {
-            let first = held
-                .first()
-                .ok_or_else(|| internal("a merge without its scratch"))?;
-            let (identity, range) = first.tracked(0..part);
-            (identity.key, identity.tracked, range)
+            _ => return Err(internal("a merge's scratch of another number of parts")),
         };
             }
         };
+        let u32_of = |value: u64| {
+            u32::try_from(value).map_err(|_| internal("a merge window past u32 words"))
+        };
         let mut sets = Vec::new();
+        let mut dispatches = Vec::new();
         let set = |buffers: Vec<(vk::Buffer, u64, u64)>| OwnedSet {
             storage_images: Vec::new(),
             buffers,
@@ -328,6 +351,7 @@ impl ShadowMerge {
             let room = match in_place {
                 true => range.saturating_sub(PART_ALIGNMENT),
                 false => range,
+            };
             let window = (room / PART_ALIGNMENT * PART_ALIGNMENT).min(groups * GROUP_BYTES);
             if window == 0 {
                 return Err(internal(
@@ -383,6 +407,16 @@ impl ShadowMerge {
             }
             None => copies.texels(),
         };
+        if two_ways {
+            let bytes = merged.bytes.clone();
+            device.degrade(Degradation::ShadowMerge, || {
+                let object = format!("a command writing bytes {bytes:?} of a buffer two ways");
+                let reason = "it writes them through a shadowed texture over the buffer and also \
+                              another way, and a copy back of the shadow would replace the other \
+                              write's bytes, which Metal keeps"
+                    .to_owned();
+                (object, reason)
+            });
         }
         let kernel = device.owned_kernel(OwnedModule::ShadowMerge)?;
         let sets = OwnedSets::write(device, &kernel, &ranges)?;
@@ -400,11 +434,13 @@ impl ShadowMerge {
             cut,
             texels,
             changed,
+            current,
             kept,
             keep_dispatch,
             held,
             kernel,
             binds,
+            dispatches,
     }
 
     /// Whether the keep is a dispatch (`ShadowMerge::keep_dispatch`), which runs in the compute
@@ -555,25 +591,21 @@ impl ShadowMerge {
     }
 
     /// The uses of merging the shadow of `copies`: a read of the shadow and of the kept part, and
-    /// a read and a write of the texture's bytes.
+    /// a read and a write of the texture's bytes (by the kernel where it merges in place, else by
+    /// copies).
     pub(super) fn merge_uses(&self, copies: &ShadowCopies) -> Vec<Use<ResourceKey>> {
         let (key, tracked, range) = self.kept.clone();
-        vec![
-            Use::reads(
-                copies.shadow_key,
-                copies.tracked,
-                copies.shadow_range.clone(),
+        let storage = |access| Access::new(vk::PipelineStageFlags2::COMPUTE_SHADER, access);
+        let (read, write) = match self.current {
+            Some(_) => (
                 transfer(vk::AccessFlags2::TRANSFER_READ),
+                transfer(vk::AccessFlags2::TRANSFER_WRITE),
             ),
-            Use::reads(
-                key,
-                tracked,
-                UseRange::Bytes(range),
-                Access::new(
-                    vk::PipelineStageFlags2::COMPUTE_SHADER,
-                    vk::AccessFlags2::SHADER_STORAGE_READ,
-                ),
+            None => (
+                storage(vk::AccessFlags2::SHADER_STORAGE_READ),
+                storage(vk::AccessFlags2::SHADER_STORAGE_WRITE),
             ),
+        };
         let dispatched = match self.changed {
             Changed::Copied { ref dispatch, .. } => dispatch.is_some(),
             Changed::Fetched => true,
@@ -583,8 +615,8 @@ impl ShadowMerge {
                 key: self.merged.key,
                 tracked: copies.tracked,
                 range: UseRange::Bytes(self.merged.bytes.clone()),
-                read: transfer(vk::AccessFlags2::TRANSFER_READ),
-                write: transfer(vk::AccessFlags2::TRANSFER_WRITE),
+                read,
+                write,
             },
         ]
     }
@@ -623,7 +655,6 @@ impl ShadowMerge {
         command_buffer: vk::CommandBuffer,
         copies: &ShadowCopies,
     ) {
-        let [_, changed, current] = self.parts;
         let Merged {
             buffer,
             ref bytes,
@@ -645,6 +676,18 @@ impl ShadowMerge {
                 }
                 Changed::Fetched => {}
             }
+            if let Some(current) = self.current {
+                device.cmd_copy_buffer(
+                    command_buffer,
+                    buffer,
+                    current.raw,
+                    &[vk::BufferCopy {
+                        src_offset: first,
+                        dst_offset: current.at,
+                        size: span,
+                    }],
+                );
+            }
             let copied = !matches!(self.changed, Changed::Fetched) || self.current.is_some();
             if copied {
                 Barrier::everything().record(device, command_buffer);
@@ -662,11 +705,27 @@ impl ShadowMerge {
                     self.kernel.layout,
                     vk::ShaderStageFlags::COMPUTE,
                     0,
-                    &shape,
+                    shape,
                 );
                 device.cmd_dispatch(command_buffer, groups[0], groups[1], 1);
             }
+            // To everything after: the copy back, the next keep into the same scratch, and the
+            // bytes' next use.
             Barrier::everything().record(device, command_buffer);
+            if let Some(current) = self.current {
+                device.cmd_copy_buffer(
+                    command_buffer,
+                    current.raw,
+                    buffer,
+                    &[vk::BufferCopy {
+                        src_offset: current.at,
+                        dst_offset: first,
+                        size: span,
+                    }],
+                );
+            }
+        }
+    }
 }
 
 impl Drop for ShadowMerge {

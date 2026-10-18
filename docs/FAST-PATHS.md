@@ -179,6 +179,7 @@ recorded here.
   buffer ran after the kernel or the pass ended, every time, as the runtime's tracker orders it.
   So a shadow over the bytes of a `Shared` or `Managed` buffer, host pages, the caller's
   `VkBuffer` or an untracked buffer is kept after its copy in, and the bytes the commands changed
+  are merged back in place of the copy back (`shadow.rs`, `shadow_merge.rs`): two copies of the
   texture's image into a buffer and a merge, in place of one copy back, each cut to the rectangle
   the commands write in where they bound it. A tracked `Private` buffer's, which no other writer
   writes while the command buffer runs, is copied back. Where the copy back is a dispatch
@@ -193,6 +194,16 @@ recorded here.
   texels), over anonymous pages, merged back, passes that draw took 5.0-5.4 ms a frame from commit
   to completion, and under scissors (790,448 texels) 3.6-3.9 ms; over tracked `Private` buffers,
   copied back, 3.1 ms and 2.2-2.4 ms.
+- **A no-copy buffer's deallocator runs in its release.** On an M3 Max under macOS 27.0.1 an unused
+  no-copy buffer's deallocator ran inside its final release, on the releasing thread, every time.
+  So a release that frees the buffer's import while a deallocator waits for the free frees it
+  there and then runs the deallocator, before returning. The free waits on the driver's locks a
+  submission holds (ANV takes its device's lock in each execbuffer and in `vkFreeMemory`). On the
+  Iris Xe (`submit_per_import::submit_per_import_release_cost`, 520 host imports live, four
+  releases a frame) a free in the release took 115-128 µs (p50) on the releasing thread, 472-691
+  µs a frame. A release whose keep-alive (a runtime extension) alone waits for the free goes to a
+  handler thread instead, the release returning in 2.7-4.0 µs, 64-145 µs a frame: the consumer's
+  guest gives its transfer buffers keep-alives.
 - **Emulated tessellation's scan.** On a device without `tessellationShader` a patch draw first
   runs a one-workgroup scan that places each patch's triangles in Metal's order, patch after
   patch: about 6-60 ms of GPU time per 10,000-patch draw at factors 4 to 64 on the Radeon 780M and

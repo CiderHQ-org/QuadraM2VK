@@ -7,8 +7,11 @@
 //! (`host_aliases.rs`), and the import keeps the pages imported while anything holds it. A
 //! keep-alive goes at its buffer's release, after the deallocator, where the import's pages stay
 //! mapped without it: another buffer lies in the import, or the import keeps another's keep-alive
-//! already; else the import keeps it until it is freed. So an import keeps one keep-alive at
-//! most, however many buffers come and go over its bytes (`WorkCounts::host_keep_alives_kept`
+//! already; else the import keeps it until it is freed. An import freed with only a keep-alive
+//! waiting for the free (the deallocator ran at the release) is freed on one of the device's
+//! handler threads, and the keep-alive goes there after the free, a moment after the release
+//! returned (`HostImport`'s drop): the tests wait for it there. So an import keeps one keep-alive
+//! at most, however many buffers come and go over its bytes (`WorkCounts::host_keep_alives_kept`
 //! held now, `WorkCounts::host_keep_alives_covered` dropped at the release). A buffer over part of
 //! a released buffer's bytes is another import, and covers nothing of it.
 //!
@@ -187,10 +190,10 @@ fn keep_alives_over_one_import_stay_at_most_one_as_buffers_come_and_go() {
         drop(texture);
         assert_eq!(tally.deallocated(), ROUNDS + 1, "the last at the release");
         let held = u64::from(bound);
-        assert_eq!(
-            tally.dropped(),
-            ROUNDS + 1 - held as usize,
-            "the last keep-alive goes at the release unless the image holds the import"
+        // Where nothing holds the import, its free and the keep-alive go on a handler thread.
+        assert!(
+            eventually(|| tally.dropped() == ROUNDS + 1 - held as usize),
+            "the last keep-alive goes with the import unless the image holds it"
         );
         assert_eq!(
             since(device, &base),
@@ -249,7 +252,10 @@ fn a_kept_keep_alive_covers_later_buffers_over_its_bytes() {
         );
         assert_eq!(tally.deallocated(), 1, "the first's at the release");
         if !bound {
-            assert_eq!(tally.dropped(), 1, "no import held: the keep-alive goes");
+            assert!(
+                eventually(|| tally.dropped() == 1),
+                "no import held: the keep-alive goes with it"
+            );
             assert_eq!(since(device, &base), (0, 0), "(held, covered)");
             reaching.complete(&sampling);
             return;
@@ -277,9 +283,8 @@ fn a_kept_keep_alive_covers_later_buffers_over_its_bytes() {
         );
         assert_eq!(since(device, &base), (0, ROUNDS as u64), "(held, covered)");
         drop(noting);
-        assert_eq!(
-            other.dropped(),
-            1,
+        assert!(
+            eventually(|| other.dropped() == 1),
             "the other class's import went with its buffer"
         );
     });
@@ -289,7 +294,8 @@ fn a_kept_keep_alive_covers_later_buffers_over_its_bytes() {
 /// (`host_aliases.rs` joins only the same bytes), and covers nothing of the wider one's: while an
 /// image over the wider one's pages is reached by a running command buffer, the import keeps its
 /// keep-alive though the narrower buffer lives, until that command buffer completed. The narrower
-/// one's own keep-alive goes as its own import is freed. No keep-alive is counted covered.
+/// one's own keep-alive goes as its own import is freed, on a handler thread. No keep-alive is
+/// counted covered.
 #[test]
 fn a_narrower_live_buffer_covers_no_wider_released_one() {
     let len = 2 * GUEST_PAGE;
@@ -326,9 +332,10 @@ fn a_narrower_live_buffer_covers_no_wider_released_one() {
             "the wider one's deallocator at the release"
         );
         let held = u64::from(bound);
-        assert_eq!(
-            wide_tally.dropped(),
-            1 - held as usize,
+        // Where nothing holds the wider one's import, its free and the keep-alive go on a
+        // handler thread.
+        assert!(
+            eventually(|| wide_tally.dropped() == 1 - held as usize),
             "the wider one's keep-alive stays while the image holds its import"
         );
         assert_eq!(since(device, &base), (held, 0), "(held, covered)");
@@ -338,9 +345,8 @@ fn a_narrower_live_buffer_covers_no_wider_released_one() {
             1,
             "the narrower one's deallocator"
         );
-        assert_eq!(
-            narrow_tally.dropped(),
-            1,
+        assert!(
+            eventually(|| narrow_tally.dropped() == 1),
             "the narrower one's keep-alive with its import"
         );
         assert_eq!(wide_tally.dropped(), 1 - held as usize, "still the image's");

@@ -40,6 +40,15 @@
 //! preloaded, the kernel submissions a frame, the objects and userptrs each lists and the
 //! microseconds a frame spent in the ioctl.
 //!
+//! A third holds the guest's shape and releases [`RELEASES_PER_FRAME`] no-copy buffers a frame
+//! midway through committing it, each over pages of its own (`submit_per_import_release_cost`):
+//! the time each release takes on the committing thread, alternating two shapes. With a keep-alive
+//! that unmaps the pages, as the consumer's guest releases its transfer buffers, the free goes to a
+//! handler thread, the release returning first; with a deallocator that unmaps them and no
+//! keep-alive, the free and the deallocator run in the release, as Metal runs the deallocator.
+//! Printed as `IMPORT-RELEASE-COST` lines: the release's 50th and 90th percentiles and its time a
+//! frame, a frame's wall time, and the releases posted.
+//!
 //! Ignored by default: measurements, not checks. Run them by name with `--run-ignored all`; on a
 //! host without `/dev/udmabuf` access the dma-buf rows say so and are skipped.
 
@@ -54,6 +63,7 @@ use metal2vulkan::device::DriverFact;
 use metal2vulkan_runtime::{
     Buffer, CommandBuffer, CommandBufferStatus, CommandQueue, Device, ResourceOptions,
 };
+use metal2vulkan_runtime::{BufferContents, BufferDescriptor, Deallocator, HostMemory, KeepAlive};
 use std::time::{Duration, Instant};
 
 /// The live imports of each phase.
@@ -73,6 +83,8 @@ const SCHEDULER: &str = "metal2vulkan-sc";
 const GUEST_IMPORTS: usize = 520;
 const GUEST_USED: usize = 35;
 const GUEST_PER_FRAME: usize = 43;
+/// The no-copy buffers released a frame by `submit_per_import_release_cost`.
+const RELEASES_PER_FRAME: usize = 4;
 /// The guest-shape frames measured, after [`GUEST_WARM`] untimed, each committed in a row and
 /// waited for at its end.
 const GUEST_FRAMES: usize = 120;
@@ -378,4 +390,134 @@ fn submit_per_import_guest_shape() {
     );
     guest_measure(&device, &queue, &target, used, &waited);
     drop(buffers);
+}
+
+/// A no-copy buffer over [`IMPORT_BYTES`] of pages of its own, which its keep-alive unmaps where
+/// `kept`, else its deallocator.
+fn going_no_copy(device: &Device, kept: bool) -> Buffer {
+    let mapping = Mapping::anonymous(IMPORT_BYTES);
+    mapping.fill(0x3c);
+    let pointer = mapping.pointer();
+    // SAFETY: the keep-alive, or the deallocator, unmaps the pages once the device's import of
+    // them is freed.
+    let memory = unsafe { HostMemory::new(pointer) };
+    let contents = match kept {
+        true => BufferContents::NoCopy {
+            memory,
+            deallocator: None,
+            keep_alive: Some(Box::new(mapping) as KeepAlive),
+        },
+        false => BufferContents::NoCopy {
+            memory,
+            deallocator: Some(Box::new(move |_, _| drop(mapping)) as Deallocator),
+            keep_alive: None,
+        },
+    };
+    let descriptor =
+        BufferDescriptor::new(IMPORT_BYTES as u64, ResourceOptions::shared(), contents);
+    device.new_buffer_with_descriptor(descriptor).unwrap()
+}
+
+/// A guest-shape frame that releases `going` once half its command buffers are committed, each
+/// release's time pushed to `releases`.
+fn releasing_frame(
+    queue: &CommandQueue,
+    target: &Buffer,
+    used: &[Buffer],
+    going: Vec<Buffer>,
+    releases: &mut Vec<f64>,
+) {
+    let mut going = Some(going);
+    let mut last = None;
+    for i in 0..GUEST_PER_FRAME {
+        if i == GUEST_PER_FRAME / 2 {
+            for buffer in going.take().into_iter().flatten() {
+                let start = Instant::now();
+                drop(buffer);
+                releases.push(start.elapsed().as_secs_f64() * 1e6);
+            }
+        }
+        let command_buffer = queue.command_buffer().unwrap();
+        let mut blit = command_buffer.blit_command_encoder().unwrap();
+        match used.get(i) {
+            Some(import) => blit
+                .copy_from_buffer_to_buffer(import, 0, target, 0, 4096)
+                .unwrap(),
+            None => blit.fill_buffer(target, 0..4096, i as u8).unwrap(),
+        }
+        blit.end_encoding().unwrap();
+        command_buffer.commit().unwrap();
+        last = Some(command_buffer);
+    }
+    let last = last.expect("a frame of command buffers");
+    last.wait_until_completed_for(WAIT).unwrap();
+    assert_eq!(last.status(), CommandBufferStatus::Completed);
+}
+
+/// The release of no-copy buffers in the guest's shape, printed (the module docs).
+#[test]
+#[ignore = "a measurement, not a check: run by name with --run-ignored all"]
+fn submit_per_import_release_cost() {
+    for kept in [true, false].repeat(2) {
+        let shape = match kept {
+            true => "a keep-alive",
+            false => "a deallocator",
+        };
+        let cache = ScratchCache::new().unwrap();
+        let messages = Messages::default();
+        let device = validated_device_with(TEST_DEVICE, &messages, cache.path(), |options| {
+            options.layers.clear();
+            // A consumer's device keeps no execution record.
+            options.record_executions = false;
+        })
+        .unwrap();
+        let queue = device.new_command_queue().unwrap();
+        let target = device.new_buffer(4096, ResourceOptions::shared()).unwrap();
+        let pages = Mapping::anonymous(GUEST_IMPORTS * IMPORT_BYTES);
+        pages.fill(0x5a);
+        let buffers: Vec<Buffer> = (0..GUEST_IMPORTS)
+            .map(|i| {
+                // SAFETY: the pages are this process's, mapped read and write, and outlive the
+                // buffers (dropped first).
+                let at = unsafe { pages.pointer().add(i * IMPORT_BYTES) };
+                // SAFETY: as above.
+                unsafe { no_copy(&device, at, IMPORT_BYTES, ResourceOptions::shared(), None) }
+                    .unwrap()
+            })
+            .collect();
+        let used = &buffers[..GUEST_USED];
+        let mut releases = Vec::new();
+        let mut frames = Vec::new();
+        let before = device.work_counts();
+        for frame in 0..GUEST_WARM + GUEST_FRAMES {
+            let going = (0..RELEASES_PER_FRAME)
+                .map(|_| going_no_copy(&device, kept))
+                .collect();
+            let start = Instant::now();
+            let mut taken = Vec::new();
+            releasing_frame(&queue, &target, used, going, &mut taken);
+            if frame >= GUEST_WARM {
+                frames.push(start.elapsed().as_secs_f64() * 1e6);
+                releases.extend(taken);
+            }
+        }
+        let start = Instant::now();
+        while device.work_counts().host_import_releases_pending > 0 {
+            assert!(start.elapsed() < WAIT, "posted releases never ran");
+            std::thread::yield_now();
+        }
+        let after = device.work_counts();
+        let per_frame = releases.iter().sum::<f64>() / GUEST_FRAMES as f64;
+        let [_, r50, r90] = percentiles(releases);
+        let [_, f50, f90] = percentiles(frames);
+        eprintln!(
+            "IMPORT-RELEASE-COST {}: {shape}: {} host imports live; a release p50 \
+             {r50:.1} us (p90 {r90:.1}), {per_frame:.0} us a frame on the committing thread; frame \
+             p50 {f50:.0} us (p90 {f90:.0}); {} releases posted",
+            device.name(),
+            after.host_imports_live,
+            after.host_import_releases_posted - before.host_import_releases_posted,
+        );
+        drop(buffers);
+    }
 }

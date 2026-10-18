@@ -466,6 +466,8 @@ mod hidden_depth;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod host_bytes;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod host_contract;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod host_copied_textures;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod host_memory;

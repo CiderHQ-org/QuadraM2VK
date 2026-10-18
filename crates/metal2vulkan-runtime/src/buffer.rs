@@ -32,7 +32,7 @@ use super::heap::{Heap, HeapType};
 use super::host_aliases::Alias;
 use super::host_memory::{KeepAlive, Release};
 #[cfg(unix)]
-use super::host_residency::{Again, Imported, Residency};
+use super::host_residency::{Again, Residency};
 use super::memory::{Mapped, MemoryClass, Placement, BLOCK_BYTES};
 use super::program_objects::ProgramObject;
 use super::rebind::{ImportHold, Unexact};
@@ -46,9 +46,11 @@ use crate::release;
 use ash::vk;
 use metal2vulkan::bind::ResidentRange;
 use std::any::Any;
+use std::mem::ManuallyDrop;
 use std::ops::Range;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 
 /// A Metal buffer (`MTLBuffer`). Cheap to clone (a retain); `Send + Sync`. Two handles are equal
 /// when they are the same buffer.
@@ -787,14 +789,16 @@ impl HostPages {
 /// memory imported from them. Every no-copy buffer made over the same bytes as a live one, of
 /// its memory class, lies in its import (`host_aliases.rs`): one resource to the driver, as one
 /// IOSurface's memory is to Metal. The last hold on it destroys the `VkBuffer` and frees the
-/// import, but for a releasable one's, which the command buffers that read them hold too
+/// import (in the release, or on a handler thread where a keep-alive alone waits for the free),
+/// but for a releasable one's, which the command buffers that read them hold too
 /// (`host_residency.rs`).
 pub(super) struct HostImport {
     device: Device,
     /// Where the bytes lie in its `VkBuffer` and memory: the same in each import of them again.
     shape: Shape,
-    /// Its `VkBuffer` and memory.
-    objects: Objects,
+    /// Its `VkBuffer` and memory: taken as it goes, to be freed in the release or, where a
+    /// keep-alive alone waits for the free, on a handler thread.
+    objects: ManuallyDrop<Objects>,
     /// The [`HostPages`] lying in it.
     lying: AtomicUsize,
     /// The reads other than a blit's that took it, a bit each ([`HostImport::note_read_apart`]):
@@ -935,7 +939,7 @@ impl KeptBecause {
 /// A host import's `VkBuffer` and memory.
 enum Objects {
     /// Imported until the import goes.
-    Fixed(Pages),
+    Fixed(Imported),
     /// Released while idle, and imported again at the next read (`host_residency.rs`).
     #[cfg(unix)]
     Releasable(Residency),
@@ -981,7 +985,7 @@ impl HostImport {
         HostImport {
             device: device.clone(),
             shape: Shape::of(&pages),
-            objects: Objects::Fixed(pages),
+            objects: ManuallyDrop::new(Objects::Fixed(Imported::new(device, pages))),
             lying: AtomicUsize::new(0),
             read_apart: AtomicU8::new(0),
             kept_because: because,
@@ -1004,7 +1008,9 @@ impl HostImport {
         HostImport {
             device: device.clone(),
             shape: Shape::of(&pages),
-            objects: Objects::Releasable(Residency::new(device, pages, again, stand_in)),
+            objects: ManuallyDrop::new(Objects::Releasable(Residency::new(
+                device, pages, again, stand_in,
+            ))),
             lying: AtomicUsize::new(0),
             read_apart: AtomicU8::new(0),
             kept_because: None,
@@ -1025,7 +1031,7 @@ impl HostImport {
     /// Its residency, where the device may release it while idle.
     #[cfg(unix)]
     pub(super) fn residency(&self) -> Option<&Residency> {
-        match &self.objects {
+        match &*self.objects {
             Objects::Fixed(_) => None,
             Objects::Releasable(residency) => Some(residency),
         }
@@ -1037,6 +1043,8 @@ impl HostImport {
     /// takes the device's stand-in.
     pub(super) fn pages(&self, reason: ReadApart) -> ImportPages<'_> {
         self.note_read_apart(reason);
+        match &*self.objects {
+            Objects::Fixed(imported) => ImportPages::Fixed(&imported.pages),
             #[cfg(unix)]
             Objects::Releasable(residency) => match residency.exposed() {
                 Some(held) => ImportPages::Held(held),
@@ -1054,6 +1062,8 @@ impl HostImport {
     /// released, with what the command buffer holds of them (`rebind::ImportHold`): nothing of an
     /// import that keeps them. Refused where the device cannot import them again.
     pub(super) fn blit_pages(&self) -> Result<(ImportPages<'_>, Option<ImportHold>), Error> {
+        match &*self.objects {
+            Objects::Fixed(imported) => Ok((ImportPages::Fixed(&imported.pages), None)),
             #[cfg(unix)]
             Objects::Releasable(residency) => {
                 let held = residency.for_blit()?;
@@ -1066,8 +1076,8 @@ impl HostImport {
     /// Its `VkBuffer` and memory for a live-table listing (`live_buffers.rs`), which reads them
     /// without exposing them: `None` while a releasable import is released.
     fn listing(&self) -> Option<ImportPages<'_>> {
-        match &self.objects {
-            Objects::Fixed(pages) => Some(ImportPages::Fixed(pages)),
+        match &*self.objects {
+            Objects::Fixed(imported) => Some(ImportPages::Fixed(&imported.pages)),
             #[cfg(unix)]
             Objects::Releasable(residency) => residency.listing().map(ImportPages::Held),
         }
@@ -1077,6 +1087,7 @@ impl HostImport {
     /// ever released, so a range of it noted before may be stale.
     pub(super) fn expose(&self, reason: ReadApart) -> bool {
         self.note_read_apart(reason);
+        match &*self.objects {
             Objects::Fixed(_) => false,
             #[cfg(unix)]
             Objects::Releasable(residency) => residency.expose(),
@@ -1153,6 +1164,8 @@ impl Drop for HostImport {
             if let Some(kept) = lock(&self.kept).take() {
                 std::mem::forget(kept);
             }
+            // SAFETY: dropped once, here, and never read again; its free finds the exit too.
+            unsafe { ManuallyDrop::drop(&mut self.objects) };
             return;
         };
         // Its shared images go before the memory they are bound in is freed: nothing else holds
@@ -1181,46 +1194,127 @@ impl Drop for HostImport {
             shared.counts.host_keep_alive_freed();
         }
         let releases: Vec<Release> = lock(&self.after_free).drain(..).collect();
-        let delayed = releases.iter().find(|release| release.deallocates());
-        let length = delayed.map(Release::length);
-        let after = AfterFree { kept, releases };
-        let freed = match &self.objects {
-            // SAFETY: no pending command buffer uses the pages: one whose commands used them
-            // holds them until it completed (`rebind.rs`), one that may read a texture's image
-            // over them holds the image, which holds the import (`heap_sets.rs`), and every
-            // buffer over them let go of them.
-            Objects::Fixed(pages) => unsafe {
-                pages.release_import(&self.device, Some(Box::new(after)))
-            },
-            // Its objects go now, or with the last command buffer that read them, which
-            // completes before the buffers over it let go (each holds its buffer too).
-            #[cfg(unix)]
-            Objects::Releasable(residency) => {
-                residency.let_go();
-                Some(Box::new(after) as Box<dyn Send>)
-            }
-                }
+        let delayed = releases
+            .iter()
+            .find(|release| release.deallocates())
+            .map(Release::length);
+        // The free goes off the releasing thread only where a keep-alive (a runtime extension
+        // whose drop tells the caller the pages may go) alone waits for it. A deallocator waiting
+        // for it runs in the release, as Metal runs it there (an M3 Max under macOS 27.0.1 ran an
+        // unused buffer's deallocator inside its final release, on the releasing thread, every
+        // time). With nothing waiting the caller may unmap the pages once the release returns, and
+        // `VK_EXT_external_memory_host` requires the imported range to stay valid for the imported
+        // memory's whole life (`VkImportMemoryHostPointerInfoEXT`), so the free is made here too.
+        let posts =
+            delayed.is_none() && (kept.is_some() || releases.iter().any(Release::keeps_alive));
+        let left = AfterImport {
+            after: Box::new(AfterFree { kept, releases }),
+            delayed,
         };
-        match (freed, length) {
-            // Freed now: what waited goes here.
-            (Some(after), _) => drop(after),
-            // Its memory waits for the batches in flight (`freed_memory.rs`), and a deallocator
-            // with it, past Metal's release.
-            (None, Some(length)) => {
-                shared.counts.host_deallocator_delayed();
-                self.device
-                    .degrade_once(Degradation::HostDeallocatorDelayed, || {
-                        (
-                            format!("a no-copy buffer of {length} bytes"),
-                            "its pages' import, freed, waits for the batches submitted before \
-                             its release: the device's driver fails pending work whose \
-                             pipelines read device addresses where such memory is freed, and \
-                             the caller gave no keep-alive"
-                                .to_owned(),
-                        )
-                    });
+        // SAFETY: taken once, here, as the import goes, and never read again.
+        let objects = unsafe { ManuallyDrop::take(&mut self.objects) };
+        let going: Box<dyn Send> = match objects {
+            // No pending command buffer uses the pages: one whose commands used them holds them
+            // until it completed (`rebind.rs`), one that may read a texture's image over them
+            // holds the image, which holds the import (`heap_sets.rs`), and every buffer over them
+            // let go of them.
+            Objects::Fixed(imported) => {
+                imported.leave(left);
+                Box::new(imported)
             }
-            (None, None) => {}
+            // Its objects go with their last holder, here or the last command buffer that read
+            // them (a blit's, which holds them and not the buffer once a rebind or detach
+            // replaced its pages), and what waits for the free with them: a driver may list a
+            // pointer import's memory in every submission, which fails where its pages were
+            // unmapped.
+            #[cfg(unix)]
+            Objects::Releasable(residency) => match residency.let_go() {
+                Some(held) => {
+                    held.leave(left);
+                    Box::new(held)
+                }
+                // Released: nothing to free.
+                None => left.after,
+            },
+        };
+        if posts {
+            shared.counts.host_import_release_posted();
+            // A tuple drops in order: the release, then its count.
+            let posted = (going, PostedDone(self.device.clone()));
+            self.device.let_go_elsewhere(Box::new(posted));
+        } else {
+            drop(going);
+        }
+    }
+}
+
+/// Counts a host import's release posted to a handler thread (a keep-alive alone waiting for its
+/// free) run as it drops, after the release.
+struct PostedDone(Device);
+
+impl Drop for PostedDone {
+    fn drop(&mut self) {
+        self.0.shared().counts.host_import_release_done();
+    }
+}
+
+/// A host import's `VkBuffer` and memory, which the last holder lets go of, destroying the
+/// `VkBuffer` and freeing the memory: the import's own, and a releasable import's, held by the
+/// import while it is imported and by each command buffer whose blit read them until it completed
+/// (`EncoderCore::blit_at`, `host_residency.rs`).
+pub(super) struct Imported {
+    device: Device,
+    pub(super) pages: Pages,
+    /// What goes once its memory is freed, which the import left as it went ([`Imported::leave`]).
+    after: Mutex<Option<AfterImport>>,
+}
+
+/// What a going import leaves with its objects ([`Imported::leave`]): the caller's keep-alive and
+/// deallocators, which go once the memory is freed, and the length of a deallocator's pages,
+/// announced where the free waits for the batches in flight.
+pub(super) struct AfterImport {
+    after: Box<dyn Send>,
+    delayed: Option<u64>,
+}
+
+impl Imported {
+    /// The objects of `pages`, imported now.
+    pub(super) fn new(device: &Device, pages: Pages) -> Imported {
+        Imported {
+            device: device.clone(),
+            pages,
+            after: Mutex::new(None),
+        }
+    }
+
+    /// Leave `left` to go once the memory is freed, the import going.
+    fn leave(&self, left: AfterImport) {
+        *lock(&self.after) = Some(left);
+    }
+}
+
+impl Drop for Imported {
+    fn drop(&mut self) {
+        let left = (self.after.get_mut())
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        let (after, delayed) = match left {
+            Some(AfterImport { after, delayed }) => (Some(after), delayed),
+            None => (None, None),
+        };
+        // SAFETY: no pending command buffer uses them: an import's own go as the import goes
+        // (`HostImport::drop`), a releasable import's as the last command buffer whose blit read
+        // them completed, and no other read reached them (`host_residency.rs`).
+        match unsafe { self.pages.release_import(&self.device, after) } {
+            // Freed now: what waited goes here.
+            Some(after) => drop(after),
+            // Its memory waits for the batches in flight (`freed_memory.rs`), and what the import
+            // left with it, past Metal's release.
+            None => {
+                if let Some(length) = delayed {
+                    deallocator_delayed(&self.device, length);
+                }
+            }
         }
     }
 }
@@ -1228,6 +1322,7 @@ impl Drop for HostImport {
 /// Count and announce once that a deallocator of a no-copy buffer of `length` bytes waits for
 /// the batches submitted before its release (`freed_memory.rs`): its import's memory, freed,
 /// waits for them, and the deallocator with it.
+fn deallocator_delayed(device: &Device, length: u64) {
     device.shared().counts.host_deallocator_delayed();
     device.degrade_once(Degradation::HostDeallocatorDelayed, || {
         (

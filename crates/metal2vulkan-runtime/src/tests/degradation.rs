@@ -160,6 +160,28 @@ fn the_catalogue_lists_every_kind_and_only_them() {
     assert!(listed.is_empty(), "codes of no kind: {listed:?}");
 }
 
+/// Every code ever issued, in `degradation_codes.txt`, is a kind's or retired, and no other code
+/// is either: a kind removed without retiring its code, or a new kind not added to the list,
+/// fails here. The list only grows, since a code is never reused.
+#[test]
+fn every_code_ever_issued_is_live_or_retired() {
+    let issued: BTreeSet<&str> = include_str!("degradation_codes.txt").lines().collect();
+    let mut known: BTreeSet<&str> = Degradation::ALL.iter().map(|kind| kind.code()).collect();
+    for &(code, _) in Degradation::RETIRED_CODES {
+        assert!(known.insert(code), "{code} is both a kind's and retired");
+    }
+    let unaccounted: Vec<_> = issued.difference(&known).collect();
+    assert!(
+        unaccounted.is_empty(),
+        "issued codes neither a kind's nor retired: {unaccounted:?}"
+    );
+    let unlisted: Vec<_> = known.difference(&issued).collect();
+    assert!(
+        unlisted.is_empty(),
+        "codes missing from degradation_codes.txt: {unlisted:?}"
+    );
+}
+
 /// A kind asked for at every occurrence may be announced on the program's own threads, in a
 /// runtime thread running the program's code, and in a host step on any thread; not on a runtime
 /// thread by itself, nor in a pipeline pool's piece. Any other kind anywhere.

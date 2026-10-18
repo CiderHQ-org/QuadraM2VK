@@ -169,6 +169,8 @@ pub(crate) struct Counters {
     set_zero_writes_if_shapes_shared: AtomicU64,
     dispatches_pushing_set_zero: AtomicU64,
     host_deallocators_delayed: AtomicU64,
+    host_import_releases_posted: AtomicU64,
+    host_import_releases_pending: AtomicU64,
     host_keep_alives_kept: AtomicU64,
     host_keep_alives_covered: AtomicU64,
     host_mappings_queried: AtomicU64,
@@ -1098,6 +1100,23 @@ impl Counters {
     pub(crate) fn host_deallocator_delayed(&self) {
         self.host_deallocators_delayed
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A host import's free, and what waits for it, posted to a handler thread as the import
+    /// went (a keep-alive alone waiting for the free), pending until it ran
+    /// ([`host_import_release_done`](Self::host_import_release_done)).
+    pub(crate) fn host_import_release_posted(&self) {
+        self.host_import_releases_posted
+            .fetch_add(1, Ordering::Relaxed);
+        self.host_import_releases_pending
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A posted host import's free, and what waited for it, ran
+    /// ([`host_import_release_posted`](Self::host_import_release_posted)).
+    pub(crate) fn host_import_release_done(&self) {
+        self.host_import_releases_pending
+            .fetch_sub(1, Ordering::Release);
     }
 
     /// A no-copy buffer's keep-alive is kept past its release by the import of its pages, which
@@ -2382,6 +2401,15 @@ pub struct WorkCounts {
     /// pages, which a command buffer that may reach them unnamed held, until it let go of it
     /// (`live_buffers.rs`; with a keep-alive it runs at the release there too).
     pub host_deallocators_delayed: u64,
+    /// Imports of host pages (no-copy buffers' and heaps') whose free, with the keep-alive that
+    /// waits for it, went to one of the device's handler threads as their last buffer was
+    /// released, the release returning at once: where a keep-alive alone waits for the free. A
+    /// deallocator waiting for it runs in the release, after it, as Metal runs it there.
+    pub host_import_releases_posted: u64,
+    /// Those not yet run: their memory not yet freed (or parked, `freed_memory.rs`), their
+    /// keep-alives not yet dropped. A program that waits for a keep-alive's drop after its release
+    /// waits until this falls to 0.
+    pub host_import_releases_pending: u64,
     /// Keep-alives of no-copy buffers and heaps (`KeepAlive`) held now past their release: each
     /// by the import of its pages, whose last buffer it was while something else (a texture's
     /// image a submitted command buffer may still read) held the import, or that a live buffers'
@@ -3068,6 +3096,10 @@ impl Device {
             dispatches_pushing_set_zero: (counters.dispatches_pushing_set_zero)
                 .load(Ordering::Relaxed),
             host_deallocators_delayed: counters.host_deallocators_delayed.load(Ordering::Relaxed),
+            host_import_releases_posted: (counters.host_import_releases_posted)
+                .load(Ordering::Relaxed),
+            host_import_releases_pending: (counters.host_import_releases_pending)
+                .load(Ordering::Acquire),
             host_keep_alives_kept: counters.host_keep_alives_kept.load(Ordering::Relaxed),
             host_keep_alives_covered: counters.host_keep_alives_covered.load(Ordering::Relaxed),
             host_mappings_queried: counters.host_mappings_queried.load(Ordering::Relaxed),
