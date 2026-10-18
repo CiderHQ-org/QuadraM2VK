@@ -17,6 +17,9 @@
 //!   face position and fold, and a comparison's tap tests.
 //! - [`Fetched`]: a sample's nearest-exact fetch arm (`fetched::branch`): the level its sampler
 //!   reads, the texel's position and addressing, the border, and the fetch.
+//! - [`Filter`]: Metal's anisotropic filter emulated (`anisotropic`): the level-0 size and level
+//!   count, the sampler's degree and mip filter, the footprint, and the taps' samples at explicit
+//!   levels and their sum.
 //! - [`Extended`]: an extended-range texture's sample (`extended`): the levels its mip filter
 //!   reads, the filter's footprint and addressing, the fetches and their decodes, the sums' calls,
 //!   the border and the swizzle.
@@ -33,15 +36,25 @@
 //! its level, bias or gradients, and the texel's conversion: no implicit level crosses a call, and
 //! each arm is the code it was, so every answer is the one the inline code gave.
 //!
+//! An anisotropic sample's call passes its coordinate (a cube's direction, its ties broken), its
+//! gradients (a cube's on its face) and a cube's face steps, the array layer and the
+//! `min_lod_clamp`, and its texel offset, constant or dynamic, where the profile admits the
+//! `Offset` operand on a sample (`maintenance8` and `shaderImageGatherExtended`), which the taps'
+//! samples take, so the samples at every offset call one routine; elsewhere a constant offset is
+//! the shape's, as the taps' `ConstOffset`. The site keeps the gradients (no implicit derivative
 //! crosses a call), the word's test, the plain arm and the texel's conversion of the sum. An
 //! extended-range sample's call passes its coordinate, the array layer and the level its mip
 //! filter reads at (an explicit level, or the level of detail its site takes from derivatives or
 //! gradients), and its constant texel offset, which the routine places on each lane, so the
 //! samples at every offset call one routine; the site keeps the result's status word.
+//!
 //! **Not routines.** A heap image's sample (an argument buffer's), whose `NonUniform` handle a
 //! call would carry (a later step's check); an extended-range sample on a profile whose driver is
 //! not known to keep a `DontInline` call a call (`extended::Sample::routine`), where the routine
 //! measured slower to make than the site code; a switch-at-use's shared emulation
+//! (`sampler::shared_value`), which runs once already; a gather's fetches; an anisotropic sample
+//! at a dynamic texel offset on a profile without the `Offset` operand on a sample, whose arms its
+//! site's access reads; and the bicubic filter's site code.
 //!
 //! **The call's control.** A sampling routine is started by
 //! `ModuleBuilder::sampling_routine`: `DontInline` where the profile states that its driver keeps
@@ -63,6 +76,7 @@ use crate::lower::texture::TexelConv;
 use crate::metal::format::ExtendedRange;
 use crate::spirv::ids::{FuncId, TypeId};
 
+use super::anisotropic::Anisotropic;
 use super::bicubic::Bicubic;
 use super::extended;
 use super::fetched::{Fetch, FetchAddress, FetchLevel};
@@ -86,6 +100,8 @@ pub enum Shape {
     Emulation(Emulation),
     /// A sample's nearest-exact fetch arm (`fetched::branch`).
     Fetched(Fetched),
+    /// Metal's anisotropic filter emulated (`anisotropic`).
+    Anisotropic(Filter),
     /// An extended-range texture's sample (`extended`).
     Extended(Box<Extended>),
 }
@@ -96,6 +112,7 @@ impl Shape {
         match self {
             Shape::Emulation(_) => "sampler.linear.routine",
             Shape::Fetched(_) => "sampler.fetch.routine",
+            Shape::Anisotropic(_) => "sampler.anisotropic.routine",
             Shape::Extended(_) => "sampler.extended_range.routine",
         }
     }
@@ -106,6 +123,7 @@ impl Shape {
         match self {
             Shape::Emulation(e) => e.linear.words() + offset_words(e.offset) + ROUTINE_WORDS,
             Shape::Fetched(f) => f.words + offset_words(f.offset) + ROUTINE_WORDS,
+            Shape::Anisotropic(_) => FILTER_WORDS + ROUTINE_WORDS,
             Shape::Extended(e) => e.words + ROUTINE_WORDS,
         }
     }
@@ -158,6 +176,35 @@ impl Emulation {
             layer: s.layer.is_some(),
         })
     }
+}
+
+/// The estimated words of an anisotropic emulation's body (`anisotropic`), its taps past the first
+/// in one loop: about 2,100 measured on a runtime slot's.
+pub const FILTER_WORDS: u32 = 2_400;
+
+/// Metal's anisotropic filter emulated (`anisotropic`), as a sample of a texture slot through its
+/// combined binding takes it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Filter {
+    /// The sample's combined binding.
+    pub binding: BindingKey,
+    /// The sampler's degree, mip filter and the device's anisotropy.
+    pub filter: Anisotropic,
+    /// The coordinate's plane lanes (2; a cube direction's 3).
+    pub lanes: u8,
+    /// The sample reads a cube: its call passes the face's steps.
+    pub cube: bool,
+    /// The sample reads an array's layer.
+    pub layer: bool,
+    /// The sample states a `min_lod_clamp`.
+    pub min_lod: bool,
+    /// The constant texel offset the taps' samples take as `ConstOffset`, where the sample has one
+    /// and the profile admits no `Offset` operand on a sample.
+    pub offset: Option<Vec<i32>>,
+    /// The call passes the sample's texel offset, constant or dynamic, which the taps' samples
+    /// take as their `Offset` operand: on a profile that admits it on a sample (`maintenance8`
+    /// and `shaderImageGatherExtended`), so the samples at every offset call one routine.
+    pub passed_offset: bool,
 }
 
 /// An extended-range texture's sample (`extended::Sample`) without the operands its call passes:

@@ -77,6 +77,27 @@
 //! fragment's variant of 135 emulated samples took 1.49M words instead of 1.79M, and its pipeline
 //! 29.0 s to make on an RTX 3090 instead of 38.9 s.
 //!
+//! **The routine** (`routine::Filter`). The emulation (the level-0 size and level count, the
+//! degree and mip filter, the footprint and the taps' sum) is one routine per shape: the binding,
+//! the sampler's degree, mip filter and device anisotropy, a cube, an array, a `min_lod_clamp` and
+//! a texel offset. Every sample of the shape calls it with what its site computes (the
+//! coordinate, the gradients, a cube's face steps, the layer and the clamp), and converts the sum
+//! as its texel. Where the profile admits the `Offset` operand on a sample (`maintenance8` and
+//! `shaderImageGatherExtended`), the call passes the texel offset, constant or dynamic, and the
+//! taps' samples take it as that operand, which adds the same offset to the texel coordinates at
+//! each level as `ConstOffset` does (the specification's texel coordinate offset), so the samples
+//! at every offset call one routine; elsewhere a constant offset is the shape's `ConstOffset`. Each
+//! answer is the one the code written at the site gave, and the module holds one copy of the code
+//! a driver compiles, where a sample costs a call
+//! (`anisotropic_samples_call_one_routine`). Written at each site, the emulation was about 2,100
+//! words a sample, each compiled again: a guest fragment's variant of an anisotropic runtime
+//! sampler under the exact forms took 1,113,991 words where the plain function took 572,061, and
+//! 33.6 to 40.7 s to make on the RTX 5080 Laptop GPU; as the routine, 659,590 words, made in 20.9
+//! to 26.1 s on a loaded host whose plain function took 16.7 to 22.3 s, its calls kept calls there
+//! (`DriverWorkaround::DontInlineKeepsCalls`). A sample at a
+//! dynamic texel offset on a profile without the `Offset` operand on a sample, whose arms the
+//! taps' samples read, keeps the code at its site.
+//!
 //! **Reach** (`select`): a sample without comparison of a 2D texture or 2D array of `float` or
 //! `half` texels, at the fragment's implicit level (with a bias, through Metal's biased minor
 //! axis) or with explicit gradients, or of a cube or cube array with explicit gradients, through a
@@ -97,10 +118,10 @@
 //! argument buffer's anisotropic sampler, which the function cannot record, is refused there
 //! (`metal::sampler::check_argument_sampler`).
 //!
-//! **The variant**. A runtime slot's emulation was about 3,200 words a sample with its taps written
-//! out (about 1,900), at every sample it reaches: a guest's fragment function of 337 such samples
-//! doubled (2.35M words from 1.18M), whatever samplers its draws bind, and every making of its
-//! pipeline hands the driver the whole module. Such a sample states
+//! **The variant**. A runtime slot's emulation, at every sample it reaches, made a guest's
+//! fragment function of 337 such samples twice its size (2.35M words from 1.18M, the emulation
+//! written at each site), whatever samplers its draws bind, and every making of its pipeline hands
+//! the driver the whole module. Such a sample states
 //! `RuntimeFact::AnisotropicSampler` for its slot and takes the emulation only under the variant
 //! naming the slot (`LoweringInputs::anisotropic_samplers`), which the binder asks for wherever
 //! the bound sampler's word states anisotropy; elsewhere it is the plain sample, which is
@@ -120,15 +141,16 @@ use crate::metal::sampler::{device_anisotropy_by_filters, SamplerUse, SamplerWor
 use crate::pipeline::artifact::PrecisionNote;
 use crate::pipeline::sym::SamplerRef;
 use crate::spirv::builder::constructs::{ArmEnd, ArmFn, LoopFn, LoopSpec, Merged};
-use crate::spirv::builder::FunctionBuilder;
+use crate::spirv::builder::{FunctionBuilder, ModuleBuilder};
 use crate::spirv::error::BResult;
-use crate::spirv::ids::{TypeId, Value as SValue};
+use crate::spirv::ids::{FuncId, TypeId, Value as SValue};
 use crate::spirv::ir::{
     BinOp, ConstBits, Constant, Contraction, ConvOp, DerivOp, GlslOp, ImageOperands, ImageQuery,
     MemAccess, Type as SType, UnOp,
 };
 
-use super::{Lod, SampleOp, Sampling};
+use super::routine::{Filter, Shape};
+use super::{BindingKey, Lod, Offset, SampleOp, Sampling, Source};
 
 /// A sample that takes Metal's anisotropic filter, emulated (the module docs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -140,6 +162,10 @@ pub struct Anisotropic {
     /// Whether the device's sampler of the sample's binding filters anisotropically, which
     /// decides the level handed for level 0 where Metal minifies ([`read_levels`]).
     pub device: DeviceAnisotropy,
+    /// Whether the profile admits the `Offset` operand on a sample (`maintenance8` and
+    /// `shaderImageGatherExtended`), so the routine's call passes the sample's texel offset
+    /// (`routine::Filter::passed_offset`).
+    pub offset_operand: bool,
 }
 
 /// Whether the device's sampler of an emulated sample's binding filters anisotropically
@@ -404,10 +430,12 @@ pub(super) fn select(
             cx.note_when(note, vec![[anisotropic].into()], m)?;
         }
     }
+    let images = &cx.profile.fields().images;
     Ok(reached.then_some(Anisotropic {
         degree,
         mip,
         device,
+        offset_operand: images.dynamic_sample_offset && images.gather_extended,
     }))
 }
 
@@ -430,19 +458,19 @@ pub(super) fn sample(
     else {
         return Err(cx.fail("an anisotropic emulation of another access than a plain sample"));
     };
+    let Source::Combined(key) = s.source else {
+        return Err(cx.fail("an anisotropic emulation of a heap element"));
+    };
+    let Some(&(_, image)) = cx.decl.families.sampler.combined.get(&key) else {
+        return Err(cx.fail(format!("combined binding {key:?} is not declared")));
+    };
     let coord = cx.operand(fb, s.coord)?;
     // A cube's direction with its ties broken as Metal breaks them, whose face Metal reads.
     let coord = match s.cube {
         true => super::face::metal_ties(fb, coord)?,
         false => coord,
     };
-    // The level-0 size and the level count, and the gradients, in the sample's own position.
-    let (si, image, _) = super::emit::sampled_image(cx, fb, s.source)?;
-    let img = fb.image(si)?;
-    let zero = u32c(fb, 0)?;
-    let size = fb.query(ImageQuery::SizeLod(zero), img)?;
-    let size_lanes = image.plane + u8::from(image.arrayed);
-    let levels = fb.query(ImageQuery::Levels, img)?;
+    // The gradients, in the sample's own position.
     let (dx, dy) = match lod {
         Lod::Grad(dx, dy) | Lod::CubeGrad(dx, dy, _) => {
             (cx.operand(fb, *dx)?, cx.operand(fb, *dy)?)
@@ -455,10 +483,15 @@ pub(super) fn sample(
             fb.derivative(DerivOp::DPdx, coord)?,
             fb.derivative(DerivOp::DPdy, coord)?,
         ),
-        // Metal's bias shifts the footprint's minor axis alone.
+        // Metal's bias shifts the footprint's minor axis alone, in the level-0 size's texels.
         Lod::Implicit { bias: Some(b), .. } => {
             let b = cx.operand(fb, *b)?;
             let b = super::emit::metal_bias(fb, b)?;
+            let (si, _, _) = super::emit::sampled_image(cx, fb, s.source)?;
+            let img = fb.image(si)?;
+            let zero = u32c(fb, 0)?;
+            let size = fb.query(ImageQuery::SizeLod(zero), img)?;
+            let size_lanes = image.plane + u8::from(image.arrayed);
             super::emit::plane_axis_gradients(fb, coord, b, (size, size_lanes))?
         }
         _ => return Err(cx.fail("an anisotropic emulation of a sample at an explicit level")),
@@ -467,8 +500,6 @@ pub(super) fn sample(
         Some(m) => Some(cx.operand(fb, *m)?),
         None => None,
     };
-    let mut ops = ImageOperands::default();
-    super::emit::offset_operands(cx, fb, offset, s.lanes, &mut ops)?;
     let layer = match s.layer {
         Some(l) => Some(cx.operand(fb, l)?),
         None => None,
@@ -481,15 +512,225 @@ pub(super) fn sample(
         }
         _ => (None, (dx, dy)),
     };
-    let at = At {
+    let site = Site {
         coord,
         grads: on_face,
+        face,
+        layer,
+        min_lod,
+    };
+    let a = *a;
+    match a.degree {
+        Degree::Const(_) => {
+            let x = filter(cx, fb, s, (key, a), &site, offset)?;
+            super::emit::texel_value(cx, fb, s, image, x, None)
+        }
+        Degree::Slot(n) => {
+            // The plain sample where the bound sampler's word states no anisotropy.
+            let word = super::emit::sampler_word(cx, fb, super::Pixel::Spec(n))?;
+            let anisotropic = super::emit::word_states_any(fb, word, SamplerWord::ANISOTROPIC)?;
+            let plain = Sampling {
+                anisotropic: None,
+                ..s.clone()
+            };
+            let emulation: ArmFn<'_, EmitCx<'_>> = Box::new(move |fb, cx| {
+                let x = filter(cx, fb, s, (key, a), &site, offset)?;
+                let x = super::emit::texel_value(cx, fb, s, image, x, None)?;
+                Ok(ArmEnd::FallThrough(vec![x]))
+            });
+            let device: ArmFn<'_, EmitCx<'_>> = Box::new(move |fb, cx| {
+                let x = super::emit::sampled_value(cx, fb, &plain, grads)?;
+                Ok(ArmEnd::FallThrough(vec![x]))
+            });
+            let Merged(merged) = fb.if_(cx, anisotropic, emulation, Some(device))?;
+            match merged[..] {
+                [x] => Ok(x),
+                _ => Err(cx.fail("an anisotropic sample without its merged result")),
+            }
+        }
+    }
+}
+
+/// What a sample's emulation reads that its site computes: the coordinate and its gradients, a
+/// cube's face, the array layer and the `min_lod_clamp`.
+#[derive(Clone, Copy)]
+struct Site {
+    /// The plane coordinate (normalized); a cube's direction, its ties broken as Metal breaks
+    /// them.
+    coord: SValue,
+    /// The plane coordinate's gradients (normalized); a cube's, Metal's gradients on its face.
+    grads: (SValue, SValue),
+    /// A cube's face, across which its taps step.
+    face: Option<Face>,
+    /// The array layer (an integer), for an array.
+    layer: Option<SValue>,
+    /// The sample's `min_lod_clamp`.
+    min_lod: Option<SValue>,
+}
+
+/// The emulation's sum of the taps of sample `s` through binding `key` (the device's texels, before
+/// the texel's conversion), as filter `a` takes it: its shape's routine's call
+/// (`routine::Filter`), or its code in the open block where the texel offset is dynamic and takes
+/// arms, which the site's samples read.
+fn filter(
+    cx: &mut EmitCx<'_>,
+    fb: &mut FunctionBuilder<'_>,
+    s: &Sampling,
+    (key, a): (BindingKey, Anisotropic),
+    site: &Site,
+    offset: &Option<Offset>,
+) -> BResult<SValue> {
+    // Where the profile admits the `Offset` operand on a sample, the call passes the offset, a
+    // constant one too, and the taps' samples read it; else a constant offset is the shape's
+    // `ConstOffset`, and a dynamic one's arms are the site's.
+    let (offset, passed) = match offset {
+        Some(Offset::Dynamic(_, Some(_))) => {
+            let mut ops = ImageOperands::default();
+            super::emit::offset_operands(cx, fb, offset, s.lanes, &mut ops)?;
+            return emulate(cx, fb, (s.source, s.lanes), a, site, ops);
+        }
+        Some(Offset::Dynamic(_, None)) => {
+            let mut ops = ImageOperands::default();
+            super::emit::offset_operands(cx, fb, offset, s.lanes, &mut ops)?;
+            match ops.offset {
+                Some(v) => (None, Some(v)),
+                None => return Err(cx.fail("a dynamic texel offset without its operand")),
+            }
+        }
+        Some(Offset::Const(k)) if a.offset_operand => {
+            (None, Some(super::emit::const_offset(fb, k)?))
+        }
+        Some(Offset::Const(k)) => (Some(k.clone()), None),
+        None => (None, None),
+    };
+    let mut args = vec![site.coord, site.grads.0, site.grads.1];
+    if let Some(face) = site.face {
+        args.extend([face.s, face.t]);
+    }
+    args.extend(site.layer);
+    args.extend(site.min_lod);
+    args.extend(passed);
+    let mut tys = Vec::with_capacity(args.len());
+    for &v in &args {
+        tys.push(fb.value_ty(v)?);
+    }
+    let shape = Shape::Anisotropic(Filter {
+        binding: key,
+        filter: a,
+        lanes: s.lanes,
+        cube: site.face.is_some(),
+        layer: site.layer.is_some(),
+        min_lod: site.min_lod.is_some(),
+        offset,
+        passed_offset: passed.is_some(),
+    });
+    let f = match cx.sampling.get(&shape, &tys) {
+        Some(f) => f,
+        None => {
+            let Shape::Anisotropic(r) = &shape else {
+                return Err(cx.fail("an anisotropic routine of another shape"));
+            };
+            let mut rcx = cx.for_new_function();
+            let made = define(&mut rcx, fb.module(), r, &tys);
+            cx.adopt(rcx);
+            let f = made?;
+            cx.sampling.insert(shape, tys, f);
+            f
+        }
+    };
+    match fb.call(f, &args)? {
+        Some(x) => Ok(x),
+        None => Err(cx.fail("an anisotropic routine without its result")),
+    }
+}
+
+/// Define the routine of emulation `r` (`routine::Filter`) in `mb`, its parameters of types `tys`
+/// in [`filter`]'s order: the sum the emulation's code gave at the site, read from `r`'s binding
+/// and its sampler's specializations.
+fn define(
+    cx: &mut EmitCx<'_>,
+    mb: &mut ModuleBuilder,
+    r: &Filter,
+    tys: &[TypeId],
+) -> BResult<FuncId> {
+    let f32_ = mb.ty(SType::Float { width: 32 })?;
+    let ret = mb.ty(SType::Vector { elem: f32_, len: 4 })?;
+    let mut fb = mb.sampling_routine(ret)?;
+    let mut params = Vec::with_capacity(tys.len());
+    for &ty in tys {
+        params.push(fb.param(ty)?);
+    }
+    let want = 3
+        + 2 * usize::from(r.cube)
+        + usize::from(r.layer)
+        + usize::from(r.min_lod)
+        + usize::from(r.passed_offset);
+    if params.len() != want {
+        return Err(cx.fail("an anisotropic routine without its parameters"));
+    }
+    let mut params = params.into_iter();
+    let (Some(coord), Some(dx), Some(dy)) = (params.next(), params.next(), params.next()) else {
+        return Err(cx.fail("an anisotropic routine without its coordinate"));
+    };
+    let face = match r.cube {
+        true => match (params.next(), params.next()) {
+            (Some(s), Some(t)) => Some(Face { s, t }),
+            _ => return Err(cx.fail("an anisotropic routine without its face")),
+        },
+        false => None,
+    };
+    let layer = r.layer.then(|| params.next()).flatten();
+    let min_lod = r.min_lod.then(|| params.next()).flatten();
+    let passed = r.passed_offset.then(|| params.next()).flatten();
+    let site = Site {
+        coord,
+        grads: (dx, dy),
+        face,
+        layer,
+        min_lod,
+    };
+    let mut ops = ImageOperands::default();
+    if let Some(k) = &r.offset {
+        ops.const_offset = Some(super::emit::const_offset(&mut fb, k)?);
+    }
+    ops.offset = passed;
+    let x = emulate(
+        cx,
+        &mut fb,
+        (Source::Combined(r.binding), r.lanes),
+        r.filter,
+        &site,
+        ops,
+    )?;
+    fb.ret(Some(x))?;
+    fb.finish()
+}
+
+/// The emulation's sum in the open block for the sample of `source` (its coordinate of `lanes`
+/// plane lanes) at `site` with offset operands `ops`: the level-0 size and the level count, the
+/// sampler's degree and mip filter, then [`filtered`].
+fn emulate(
+    cx: &mut EmitCx<'_>,
+    fb: &mut FunctionBuilder<'_>,
+    (source, lanes): (Source, u8),
+    a: Anisotropic,
+    site: &Site,
+    ops: ImageOperands,
+) -> BResult<SValue> {
+    let (si, _, _) = super::emit::sampled_image(cx, fb, source)?;
+    let img = fb.image(si)?;
+    let zero = u32c(fb, 0)?;
+    let size = fb.query(ImageQuery::SizeLod(zero), img)?;
+    let levels = fb.query(ImageQuery::Levels, img)?;
+    let at = At {
+        coord: site.coord,
+        grads: site.grads,
         size,
         levels,
-        min_lod,
+        min_lod: site.min_lod,
         ops,
-        layer,
-        face,
+        layer: site.layer,
+        face: site.face,
     };
     let (la, mip, minified) = match (a.degree, a.mip, a.device) {
         (Degree::Const(la), Mip::Const(mip), DeviceAnisotropy::Const(device)) => {
@@ -522,31 +763,14 @@ pub(super) fn sample(
     };
     // An isotropic sampler's (a cube's): one tap, at Metal's level alone.
     let isotropic = a.degree == Degree::Const(0);
-    match a.degree {
-        Degree::Const(_) => emulated(cx, fb, s, &at, (la, mip, minified), (most, isotropic)),
-        Degree::Slot(n) => {
-            // The plain sample where the bound sampler's word states no anisotropy.
-            let word = super::emit::sampler_word(cx, fb, super::Pixel::Spec(n))?;
-            let anisotropic = super::emit::word_states_any(fb, word, SamplerWord::ANISOTROPIC)?;
-            let plain = Sampling {
-                anisotropic: None,
-                ..s.clone()
-            };
-            let emulation: ArmFn<'_, EmitCx<'_>> = Box::new(move |fb, cx| {
-                let x = emulated(cx, fb, s, &at, (la, mip, minified), (most, false))?;
-                Ok(ArmEnd::FallThrough(vec![x]))
-            });
-            let device: ArmFn<'_, EmitCx<'_>> = Box::new(move |fb, cx| {
-                let x = super::emit::sampled_value(cx, fb, &plain, grads)?;
-                Ok(ArmEnd::FallThrough(vec![x]))
-            });
-            let Merged(merged) = fb.if_(cx, anisotropic, emulation, Some(device))?;
-            match merged[..] {
-                [x] => Ok(x),
-                _ => Err(cx.fail("an anisotropic sample without its merged result")),
-            }
-        }
-    }
+    filtered(
+        cx,
+        fb,
+        (source, lanes),
+        &at,
+        (la, mip, minified),
+        (most, isotropic),
+    )
 }
 
 /// What a sample's emulation reads, taken in the sample's own position.
@@ -690,13 +914,14 @@ fn word_minified_level(
     fb.select(device, zero_level, nearest_level)
 }
 
-/// The emulation's result in `s`'s result form: the footprint, then up to `most` taps; an
-/// `isotropic` sampler's level alone and its one tap. `minified` is the level handed for level 0
-/// where Metal minifies under a nearest mip filter or none ([`minified_level`]).
-fn emulated(
+/// The emulation's sum of the device's texels of `source` (its coordinate of `lanes` plane lanes):
+/// the footprint, then up to `most` taps; an `isotropic` sampler's level alone and its one tap.
+/// `minified` is the level handed for level 0 where Metal minifies under a nearest mip filter or
+/// none ([`minified_level`]).
+fn filtered(
     cx: &mut EmitCx<'_>,
     fb: &mut FunctionBuilder<'_>,
-    s: &Sampling,
+    src: (Source, u8),
     at: &At,
     (la, mip, minified): (SValue, SValue, SValue),
     (most, isotropic): (u32, bool),
@@ -739,10 +964,9 @@ fn emulated(
     // written out one by one, so the answer is the same, and the driver compiles one tap instead
     // of `most`.
     let zero = i32c(fb, 0)?;
-    let first = tap(cx, fb, s, &taps, zero)?;
+    let first = tap(cx, fb, src, &taps, zero)?;
     if most == 1 {
-        let (_, image, _) = super::emit::sampled_image(cx, fb, s.source)?;
-        return super::emit::texel_value(cx, fb, s, image, first, None);
+        return Ok(first);
     }
     let i = int(fb)?;
     let sum_ty = fb.value_ty(first)?;
@@ -764,7 +988,7 @@ fn emulated(
             Ok(ArmEnd::Exits)
         });
         fb.if_(cx, done, exit, None)?;
-        let t = tap(cx, fb, s, &taps, j)?;
+        let t = tap(cx, fb, src, &taps, j)?;
         let kept = fb.load(sum, MemAccess::default())?;
         let total = fb.binary(BinOp::FAdd, kept, t)?;
         fb.store(sum, total, MemAccess::default())?;
@@ -777,9 +1001,7 @@ fn emulated(
         dont_unroll: true,
     };
     fb.loop_(cx, spec, body)?;
-    let acc = fb.load(sum, MemAccess::default())?;
-    let (_, image, _) = super::emit::sampled_image(cx, fb, s.source)?;
-    super::emit::texel_value(cx, fb, s, image, acc, None)
+    fb.load(sum, MemAccess::default())
 }
 
 /// Metal's footprint of one sample (the module docs).
@@ -1204,7 +1426,7 @@ struct Taps {
 fn tap(
     cx: &mut EmitCx<'_>,
     fb: &mut FunctionBuilder<'_>,
-    s: &Sampling,
+    (source, lanes): (Source, u8),
     t: &Taps,
     j: SValue,
 ) -> BResult<SValue> {
@@ -1232,7 +1454,7 @@ fn tap(
             let lf = fb.convert(ConvOp::ConvertUToF, l, f)?;
             let with_layer = fb.module().ty(SType::Vector {
                 elem: f,
-                len: s.lanes + 1,
+                len: lanes + 1,
             })?;
             fb.composite_construct(with_layer, &[p, lf])?
         }
@@ -1255,11 +1477,11 @@ fn tap(
         w: q,
     } = t.levels;
     let ops = t.at.ops;
-    let a = read(cx, fb, s, (p, ops), first)?;
+    let a = read(cx, fb, source, (p, ops), first)?;
     let zf = f32c(fb, 0.0)?;
     let blends = fb.binary(BinOp::FOrdGreaterThan, q, zf)?;
     let arm: ArmFn<'_, EmitCx<'_>> = Box::new(move |fb, cx| {
-        let b = read(cx, fb, s, (p, ops), second)?;
+        let b = read(cx, fb, source, (p, ops), second)?;
         let onef = f32c(fb, 1.0)?;
         let keep = fb.binary(BinOp::FSub, onef, q)?;
         let a = fb.binary(BinOp::VectorTimesScalar, a, keep)?;
@@ -1276,16 +1498,16 @@ fn tap(
     fb.binary(BinOp::VectorTimesScalar, x, w)
 }
 
-/// The device's sample of `s`'s texture at `p` with offset operands `ops` at explicit level
-/// `lod`, from a sampled image made in the open block.
+/// The device's sample of `source` at `p` with offset operands `ops` at explicit level `lod`, from
+/// a sampled image made in the open block.
 fn read(
     cx: &mut EmitCx<'_>,
     fb: &mut FunctionBuilder<'_>,
-    s: &Sampling,
+    source: Source,
     (p, mut ops): (SValue, ImageOperands),
     lod: SValue,
 ) -> BResult<SValue> {
-    let (si, _, _) = super::emit::sampled_image(cx, fb, s.source)?;
+    let (si, _, _) = super::emit::sampled_image(cx, fb, source)?;
     ops.lod = Some(lod);
     fb.sample(si, p, None, false, &ops)
 }

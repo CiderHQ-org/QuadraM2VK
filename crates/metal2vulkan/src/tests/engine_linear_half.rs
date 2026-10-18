@@ -4039,8 +4039,9 @@ impl ModuleFunctions {
 /// its shape's sampling routine, which the entry calls; the routine calls the two sums, which are
 /// declared `DontInline` on every such profile. The routine states `DontInline` where the driver is
 /// measured to keep such a call a call (`DriverWorkaround::DontInlineKeepsCalls`, NVIDIA's
-/// 615.71.09 on the RTX 3090) and no control elsewhere: on Mesa's drivers, which inline every
-/// function whatever it states, and on a GPU not measured (the RTX 5080 Laptop GPU's profile). The
+/// 615.71.09 on the RTX 3090 and the RTX 5080 Laptop GPU) and no control elsewhere: on Mesa's
+/// drivers, which inline every function whatever it states, and on a GPU not measured (the desktop
+/// RTX 5080's profile, `nvidia-rtx50-linux`, on the same release). The
 /// texel conversion the device's sample calls, which its class specialization folds where it is
 /// inlined, and the entry take no control.
 #[test]
@@ -4053,6 +4054,11 @@ fn the_linear_sums_run_one_by_a_branch_and_stay_calls() {
         (
             "nvidia-rtx5080-laptop",
             profile("nvidia-rtx5080-laptop", EXACT_SAMPLING).expect("profile"),
+            true,
+        ),
+        (
+            "nvidia-rtx50-linux",
+            profile("nvidia-rtx50-linux", EXACT_SAMPLING).expect("profile"),
             false,
         ),
         (
@@ -4123,7 +4129,8 @@ fn the_linear_sums_run_one_by_a_branch_and_stay_calls() {
 }
 
 /// The profile of the RTX 5080 Laptop GPU's committed description with the RTX 3090's `deviceID`:
-/// NVIDIA's 615.71.09 on the GPU `DriverWorkaround::DontInlineKeepsCalls` is measured on.
+/// NVIDIA's 615.71.09 on the RTX 3090, a GPU `DriverWorkaround::DontInlineKeepsCalls` is measured
+/// on.
 fn rtx3090() -> DeviceProfile {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../metal2vulkan-validation/profiles/nvidia-rtx5080-laptop.json");

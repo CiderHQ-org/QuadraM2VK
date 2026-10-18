@@ -107,6 +107,13 @@
 //! palette's bytes (blending and framebuffer reads see them). A run reads back every attachment,
 //! then every buffer and texture the fragment may write, in slot order; that is what it hashes.
 //!
+//! `--policy NAMES` (`run` and `time`) opens the device with those `DevicePolicy` switches at their
+//! accurate forms, where it opens at the default policy otherwise: a comma-separated list of
+//! `exact-answers` (`DevicePolicy::exact_answers`) and field names (`sampling`, `ycbcr_filter`,
+//! `float_maths`, `texel_conversion`, `half_rounding`, `nan_and_min_max`, `rounding_order`,
+//! `half_blend`), each set to its `Exact` form, so a making under an application's exact forms is
+//! timed as it makes them.
+//!
 //! `--device-type` names the device the draw runs on, as validation's other device commands do
 //! (`cpu` matches only a CPU implementation such as lavapipe); the device opens through
 //! `candidate::runtime_case::open_device`, which refuses a GPU while the hang tripwire is set.
@@ -141,6 +148,10 @@
 //! consumer's shaders: they stay on the hosts the guest data rule allows and are never committed.
 
 use metal2vulkan::bind::SamplerDescriptor;
+use metal2vulkan::device::{
+    DevicePolicy, FloatMathsPolicy, HalfBlendPolicy, HalfRoundingPolicy, NanMinMaxPolicy,
+    RoundingOrderPolicy, SamplingPolicy, TexelConversionPolicy, YCbCrFilterPolicy,
+};
 use metal2vulkan::metal::state::DepthStencilDescriptor;
 use metal2vulkan::metal::CompareFunction;
 use metal2vulkan::metal::{
@@ -181,6 +192,7 @@ const USAGE: &str =
      \x20                          [--then-lines yes|together] [--qos CLASS]\n\
      \x20                          [--device-qos CLASS] [--prime-qos CLASS] [--then TYPE]\n\
      \x20                          [--skip-ok yes] [--combo FORMAT:MODE] [--again yes]\n\
+     \x20      (run and time take [--policy NAMES])\n\
      \x20      corpus-draw-ab storm --storm a|b|c|d --air FILE --vertex NAME --fragment NAME\n\
      \x20                           --device-type cpu|gpu --shader-cache DIR --out FILE\n\
      \x20                           [--makings N] [--concurrency C] [--turns T --ahead A]\n\
@@ -291,6 +303,35 @@ fn options(args: &[String]) -> Result<BTreeMap<String, String>, String> {
         out.insert(key.to_string(), value.clone());
     }
     Ok(out)
+}
+
+/// The device policy `--policy` names (the module docs): the default policy with each named
+/// switch at its accurate form.
+fn policy(options: &BTreeMap<String, String>) -> Result<DevicePolicy, String> {
+    let mut policy = DevicePolicy::default();
+    let Some(names) = options.get("policy") else {
+        return Ok(policy);
+    };
+    for name in names.split(',').filter(|name| !name.is_empty()) {
+        match name {
+            "exact-answers" => policy = policy.exact_answers(),
+            "sampling" => policy.sampling = SamplingPolicy::Exact,
+            "ycbcr_filter" => policy.ycbcr_filter = YCbCrFilterPolicy::Exact,
+            "float_maths" => policy.float_maths = FloatMathsPolicy::Exact,
+            "texel_conversion" => policy.texel_conversion = TexelConversionPolicy::Exact,
+            "half_rounding" => policy.half_rounding = HalfRoundingPolicy::Exact,
+            "nan_and_min_max" => policy.nan_and_min_max = NanMinMaxPolicy::Exact,
+            "rounding_order" => policy.rounding_order = RoundingOrderPolicy::Exact,
+            "half_blend" => policy.half_blend = HalfBlendPolicy::Exact,
+            _ => {
+                return Err(format!(
+                    "--policy {name:?}: exact-answers, sampling, ycbcr_filter, float_maths, \
+                     texel_conversion, half_rounding, nan_and_min_max, rounding_order or half_blend"
+                ))
+            }
+        }
+    }
+    Ok(policy)
 }
 
 fn required<'a>(options: &'a BTreeMap<String, String>, name: &str) -> Result<&'a str, String> {
@@ -739,6 +780,7 @@ fn setup(options: &BTreeMap<String, String>) -> Result<Setup, Stop> {
     let mut device_options = DeviceOptions::default();
     device_options.shader_cache =
         ShaderCacheOptions::in_directory(required(options, "shader-cache")?);
+    device_options.policy = policy(options)?;
     // Through validation's tripwire-checked open: a GPU only while the hang tripwire is absent.
     let device_type = DeviceType::parse(required(options, "device-type")?)?;
     let device =

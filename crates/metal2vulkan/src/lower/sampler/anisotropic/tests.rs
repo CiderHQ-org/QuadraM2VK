@@ -769,3 +769,185 @@ fn gradient_masks(a: &FunctionArtifact) -> Vec<u32> {
     }
     out
 }
+
+/// A fragment function summing `n` implicit-level samples of `texture2d<float>` slot 0 through
+/// runtime sampler slot 0, each at its position scaled by its own power of two, and where
+/// `offsets` at its own constant texel offset (`(i + 1, -i)` for the `i`-th).
+fn sampling_fragment(n: usize, offsets: bool) -> String {
+    let mut body = String::new();
+    let mut acc = "zeroinitializer".to_string();
+    for i in 0..n {
+        let scale = 1.0 / f64::from(1u32 << (4 + i));
+        let offset = match offsets {
+            true => format!("<2 x i32> <i32 {}, i32 {}>", i + 1, -(i as i32)),
+            false => "<2 x i32> zeroinitializer".to_string(),
+        };
+        body.push_str(&format!(
+            "  %uv{i} = fmul <2 x float> %xy, <float {scale:e}, float {scale:e}>\n  \
+             %r{i} = call {{ <4 x float>, i8 }} @air.sample_texture_2d.v4f32(ptr addrspace(1) %t, \
+             ptr addrspace(2) %s, <2 x float> %uv{i}, i1 true, {offset}, i1 false, \
+             float 0.000000e+00, float 0.000000e+00, i32 0)\n  \
+             %v{i} = extractvalue {{ <4 x float>, i8 }} %r{i}, 0\n  \
+             %a{i} = fadd <4 x float> {acc}, %v{i}\n"
+        ));
+        acc = format!("%a{i}");
+    }
+    format!(
+        r#"define <4 x float> @k(<4 x float> %pos, ptr addrspace(1) %t, ptr addrspace(2) %s) {{
+  %xy = shufflevector <4 x float> %pos, <4 x float> poison, <2 x i32> <i32 0, i32 1>
+{body}  ret <4 x float> {acc}
+}}
+
+declare {{ <4 x float>, i8 }} @air.sample_texture_2d.v4f32(ptr addrspace(1), ptr addrspace(2), <2 x float>, i1, <2 x i32>, i1, float, float, i32)
+
+!air.fragment = !{{!0}}
+!0 = !{{ptr @k, !1, !3}}
+!1 = !{{!2}}
+!2 = !{{!"air.render_target", i32 0, i32 0, !"air.arg_type_name", !"float4"}}
+!3 = !{{!4, !5, !6}}
+!4 = !{{i32 0, !"air.position", !"air.center", !"air.no_perspective", !"air.arg_type_name", !"float4", !"air.arg_name", !"position"}}
+!5 = !{{i32 1, !"air.texture", !"air.location_index", i32 0, i32 1, !"air.sample", !"air.arg_type_name", !"texture2d<float, sample>", !"air.arg_name", !"t"}}
+!6 = !{{i32 2, !"air.sampler", !"air.location_index", i32 0, i32 1, !"air.arg_type_name", !"sampler", !"air.arg_name", !"s"}}
+"#
+    )
+}
+
+/// The words a sample's site may spend on the emulation's routine besides the plain sample's:
+/// the word's test and branch, the call with its arguments, and the sum's conversion.
+const SITE_CALL_WORDS: usize = 256;
+
+/// The emulation of a runtime sampler slot's samples is one routine every sample calls
+/// (`routine::Filter`): under the variant naming the slot, a fragment function of 1, 2 and 4 such
+/// samples holds one emulation's taps (two explicit-level samples each, past the base's) and its
+/// one loop, and each sample past the first adds no more than the plain sample's words and a
+/// call's. Written at every site, each sample added about 2,100 words more than the plain one's.
+#[test]
+fn anisotropic_samples_call_one_routine() {
+    let inputs = fragment_variant();
+    for stem in ["lavapipe", "intel-irisxe-anv", "nvidia-rtx5080-laptop"] {
+        let p = p(stem);
+        let mut words = Vec::new();
+        for n in [1usize, 2, 4] {
+            let what = format!("{stem}, {n} samples");
+            let Some(bc) = assemble(&what, &sampling_fragment(n, false)) else {
+                return;
+            };
+            let base = ok(&bc, "k", &p);
+            let a = ok_with(&bc, &inputs, &p);
+            assert_eq!(
+                count(&a, OP_IMAGE_SAMPLE_EXPLICIT_LOD),
+                count(&base, OP_IMAGE_SAMPLE_EXPLICIT_LOD) + 2 * WRITTEN_TAPS as usize,
+                "{what}"
+            );
+            assert_eq!(dont_unroll_loops(&a), 1, "{what}");
+            words.push((n, base.module.words.len(), a.module.words.len()));
+        }
+        let (n0, base0, variant0) = words[0];
+        for &(n, base, variant) in &words[1..] {
+            let added = n - n0;
+            assert!(
+                variant - variant0 <= base - base0 + added * SITE_CALL_WORDS,
+                "{stem}: {n} samples: the variant grew {} words from {n0}, the base {}",
+                variant - variant0,
+                base - base0
+            );
+        }
+    }
+}
+
+/// The fragment of [`sampling_fragment`]'s runtime sampler slot (`LoweringInputs::anisotropic_samplers`).
+fn fragment_variant() -> LoweringInputs {
+    let mut inputs = LoweringInputs::new();
+    inputs.anisotropic_samplers.insert(SlotRef {
+        stage: Stage::Fragment,
+        class: SlotClass::Sampler,
+        index: 0,
+    });
+    inputs
+}
+
+/// The samples of one binding at different constant texel offsets call one routine where the
+/// profile admits the `Offset` operand on a sample (`maintenance8` and
+/// `shaderImageGatherExtended`): the call passes the offset, which the taps' samples take as that
+/// operand, so a fragment of 1, 2 and 4 samples at their own offsets holds one emulation's taps and
+/// its one loop, no tap sample takes `ConstOffset`, and each sample past the first adds no more
+/// than the plain sample's words and a call's. Without the operand (`vk12-floor`) each offset is
+/// its own routine's `ConstOffset`: a loop per sample.
+#[test]
+fn anisotropic_samples_at_every_offset_call_one_routine() {
+    let inputs = fragment_variant();
+    for (stem, passes) in [
+        ("lavapipe", true),
+        ("intel-irisxe-anv", true),
+        ("nvidia-rtx5080-laptop", true),
+        ("vk12-floor", false),
+    ] {
+        let p = p(stem);
+        let images = &p.fields().images;
+        assert_eq!(
+            images.dynamic_sample_offset && images.gather_extended,
+            passes,
+            "{stem}"
+        );
+        let mut words = Vec::new();
+        for n in [1usize, 2, 4] {
+            let what = format!("{stem}, {n} samples at their offsets");
+            let Some(bc) = assemble(&what, &sampling_fragment(n, true)) else {
+                return;
+            };
+            let base = ok(&bc, "k", &p);
+            let a = ok_with(&bc, &inputs, &p);
+            let routines = if passes { 1 } else { n };
+            assert_eq!(dont_unroll_loops(&a), routines, "{what}");
+            assert_eq!(
+                count(&a, OP_IMAGE_SAMPLE_EXPLICIT_LOD),
+                count(&base, OP_IMAGE_SAMPLE_EXPLICIT_LOD) + routines * 2 * WRITTEN_TAPS as usize,
+                "{what}"
+            );
+            let taps = if passes {
+                0
+            } else {
+                n * 2 * WRITTEN_TAPS as usize
+            };
+            assert_eq!(
+                const_offset_samples(&a),
+                const_offset_samples(&base) + taps,
+                "{what}: the taps' samples take ConstOffset only without the Offset operand"
+            );
+            words.push((n, base.module.words.len(), a.module.words.len()));
+        }
+        if passes {
+            let (n0, base0, variant0) = words[0];
+            for &(n, base, variant) in &words[1..] {
+                let added = n - n0;
+                assert!(
+                    variant - variant0 <= base - base0 + added * SITE_CALL_WORDS,
+                    "{stem}: {n} samples: the variant grew {} words from {n0}, the base {}",
+                    variant - variant0,
+                    base - base0
+                );
+            }
+        }
+    }
+}
+
+/// The `ConstOffset` bit of an image operands mask.
+const CONST_OFFSET: u32 = 0x8;
+
+/// The explicit-level samples of `a`'s module that take the `ConstOffset` image operand.
+fn const_offset_samples(a: &FunctionArtifact) -> usize {
+    let words = &a.module.words;
+    let mut found = 0;
+    let mut i = 5;
+    while i < words.len() {
+        let len = ((words[i] >> 16) as usize).max(1);
+        // The operands' mask follows the result type, result, sampled image and coordinate.
+        found += usize::from(
+            (words[i] & 0xffff) as u16 == OP_IMAGE_SAMPLE_EXPLICIT_LOD
+                && len > 5
+                && words[i + 5] & CONST_OFFSET != 0,
+        );
+        i += len;
+    }
+    found
+}

@@ -1356,10 +1356,11 @@ fn anv_carries_the_vertex_grouping_from_its_measured_release() {
     assert!(!carries(&profile("intel-irisxe-anv")));
 }
 
-/// `DriverWorkaround::DontInlineKeepsCalls`, a cost fact, is keyed on the identity measured with
-/// it: NVIDIA's driver at 615.71.09 (EV SHB-g1) on the RTX 3090. Another GPU of the vendor (the RTX
-/// 5080 Laptop GPU's committed profile, the desktop RTX 50's, Pascal's), an older release, another
-/// vendor's ID, or another driver (NVK, Mesa's, MoltenVK) does not carry it.
+/// `DriverWorkaround::DontInlineKeepsCalls`, a cost fact, is keyed on the identities measured with
+/// it: NVIDIA's driver at 615.71.09 on the RTX 3090 and on the RTX 5080 Laptop GPU
+/// (`scripts/making-bench`). Another GPU of the vendor (the desktop RTX 50's committed profile,
+/// Pascal's), an older release, another vendor's ID, or another driver (NVK, Mesa's, MoltenVK)
+/// does not carry it.
 #[test]
 fn nvidia_keeps_dont_inline_calls_on_its_measured_gpu() {
     use crate::device::driver_facts::nvidia;
@@ -1376,7 +1377,10 @@ fn nvidia_keeps_dont_inline_calls_on_its_measured_gpu() {
     let mut desc = profile("nvidia-rtx5080-laptop");
     assert_eq!(desc.driver_id, Some(vk::DriverId::NVIDIA_PROPRIETARY));
     assert_eq!(desc.driver_version, nvidia(615, 71, 9));
-    assert!(!carries(&desc), "on the RTX 5080 Laptop GPU, not measured");
+    assert!(
+        carries(&desc),
+        "on the RTX 5080 Laptop GPU, where it was measured"
+    );
     desc.device_id = crate::device::driver_facts::NVIDIA_RTX_3090;
     assert!(carries(&desc), "on the RTX 3090, where it was measured");
     desc.driver_version = nvidia(615, 71, 8);
@@ -1389,9 +1393,10 @@ fn nvidia_keeps_dont_inline_calls_on_its_measured_gpu() {
     assert!(!carries(&desc), "under NVK");
     for (stem, text) in committed_profiles() {
         let desc = DeviceDescription::from_khronos_json(&text, None).unwrap();
-        assert!(
-            !carries(&desc),
-            "{stem}: no committed profile is the RTX 3090's"
+        assert_eq!(
+            carries(&desc),
+            stem == "nvidia-rtx5080-laptop",
+            "{stem}: the RTX 5080 Laptop GPU's is the one committed profile of a measured GPU"
         );
     }
     assert!(!carries(&profile("nvidia-pascal-linux")));

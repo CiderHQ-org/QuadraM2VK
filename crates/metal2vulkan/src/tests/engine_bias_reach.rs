@@ -544,7 +544,8 @@ const WRITTEN_TAPS: u32 = 2;
 /// derivatives, their lengths in texels of the level-0 size, and `Exp2` of Metal's reading of the
 /// bias), with `PrecisionNote::GradFromBias`. Off Metal's own sampler they are the footprint of
 /// Metal's anisotropic filter, emulated: its taps' samples at explicit levels, two a tap under the
-/// sampler's linear mip filter, and its level-0 size the axis gradients read.
+/// sampler's linear mip filter, in the emulation's routine, which queries the level-0 size the
+/// site's axis gradients read again (one query each).
 #[test]
 fn an_anisotropic_sampler_takes_the_axis_gradients() {
     for stem in ["amd-rdna3-radv", "lavapipe"] {
@@ -565,7 +566,7 @@ fn an_anisotropic_sampler_takes_the_axis_gradients() {
                 "{what}"
             );
             assert_eq!((s.count(OP_DPDX), s.count(OP_DPDY)), (1, 1), "{what}");
-            assert_eq!(s.count(OP_IMAGE_QUERY_SIZE_LOD), 1, "{what}");
+            assert_eq!(s.count(OP_IMAGE_QUERY_SIZE_LOD), 2, "{what}");
             assert_eq!(s.glsl_count(GLSL_LENGTH), 2, "{what}");
             s.scales_finitely_beside(0, 1, 1, &what);
             s.reads_metals_bias(1, &what);
@@ -622,8 +623,8 @@ fn a_runtime_samplers_word_chooses_the_axis_gradients() {
             assert_eq!(plain.count(OP_IMAGE_SAMPLE_IMPLICIT_LOD), 1, "{what}");
             assert_eq!(plain.count(OP_IMAGE_SAMPLE_EXPLICIT_LOD), taps, "{what}");
             // The device's sample keeps its `Bias` operand, and where the word's test holds the
-            // sample with the gradients replaces it; the axis gradients query the level-0 size
-            // once more.
+            // sample with the gradients replaces it; the axis gradients of each arm query the
+            // level-0 size once more (the emulation's routine queries its own).
             assert_eq!(
                 s.count(OP_IMAGE_SAMPLE_IMPLICIT_LOD),
                 1,
@@ -634,7 +635,7 @@ fn a_runtime_samplers_word_chooses_the_axis_gradients() {
             assert_eq!(s.count(OP_IMAGE_SAMPLE_EXPLICIT_LOD), taps + 1, "{what}");
             assert_eq!(
                 s.count(OP_IMAGE_QUERY_SIZE_LOD),
-                plain.count(OP_IMAGE_QUERY_SIZE_LOD) + 1,
+                plain.count(OP_IMAGE_QUERY_SIZE_LOD) + 2,
                 "{what}"
             );
             // The axis gradients of both arms, and the emulation's spacing.

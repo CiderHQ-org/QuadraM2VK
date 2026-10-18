@@ -4,7 +4,7 @@
 #
 #   scripts/making-bench/making-bench --bin PATH --set DIR --out DIR
 #       [--combos "FORMAT:MODE ..."] [--repeats N] [--timeout SECONDS] [--ids "ID ..."]
-#       [--queue-first]
+#       [--queue-first] [--policy NAMES]
 #
 # The set is a `corpus-draw-ab` draws set (`crates/metal2vulkan-validation/src/bin/corpus-draw-ab.rs` documents it):
 # `DIR/draws.jsonl`, one state per line (`{"id", "vertex", "fragment", "template"}`), and
@@ -26,6 +26,11 @@
 # is kept by the queue's creation, not inside the state's: the creation is timed cold as such a
 # program sees it, and the queue's own creation is reported apart (`queue_first_ms`). Off by
 # default, so runs without it stay comparable with earlier ones.
+#
+# `--policy NAMES`: each run opens its device with those `DevicePolicy` switches at their accurate
+# forms (`corpus-draw-ab time --policy NAMES`: `exact-answers` and field names such as `sampling`,
+# comma-separated), so a state is timed as an application under those forms makes it. Off by
+# default (the default policy).
 #
 # Writes, under `--out`:
 # - `makings.tsv`: `id combo pipeline at ms waited_ms words`, one line per `VkPipeline` made
@@ -50,7 +55,7 @@
 set -euo pipefail
 
 bin='' set_dir='' out='' combos='RGBA8Unorm:linear BGRA8Unorm:nearest' repeats=10 timeout=1800 ids=''
-queue_first=''
+queue_first='' policy=''
 while [ $# -gt 0 ]; do
   case "$1" in
     --bin) bin=$2; shift 2 ;;
@@ -61,6 +66,7 @@ while [ $# -gt 0 ]; do
     --timeout) timeout=$2; shift 2 ;;
     --ids) ids=$2; shift 2 ;;
     --queue-first) queue_first=yes; shift ;;
+    --policy) policy=$2; shift 2 ;;
     *) echo "making-bench: unknown argument $1" >&2; exit 64 ;;
   esac
 done
@@ -83,7 +89,7 @@ fi
   echo "host $(hostname) $(nproc) CPUs, $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   vulkaninfo --summary 2>/dev/null | grep -m 1 -A 9 '^GPU0:' | grep -E 'deviceName|driverInfo' || true
   echo "binary sha256 $(sha256sum "$bin" | cut -c1-16)"
-  echo "combos $combos; repeats $repeats; timeout ${timeout}s${queue_first:+; queue first}"
+  echo "combos $combos; repeats $repeats; timeout ${timeout}s${queue_first:+; queue first}${policy:+; policy $policy}"
 } > "$out/host.txt"
 printf 'id\tcombo\tpipeline\tat\tms\twaited_ms\twords\n' > "$out/makings.tsv"
 qf_column=''
@@ -113,7 +119,7 @@ for id in $ids; do
       /usr/bin/time -f 'maxrss %M KB' timeout --kill-after=10 "$timeout" \
       "$bin" time --repeats "$repeats" --combo "$combo" --draws "$set_dir/draws.jsonl" --id "$id" \
       --sources "$set_dir/src" --device-type gpu --shader-cache "$run/cache" --out "$run/out" \
-      ${queue_first:+--queue-first yes} \
+      ${queue_first:+--queue-first yes} ${policy:+--policy "$policy"} \
       > "$run/stdout.txt" 2> "$run/stderr.txt" || rc=$?
     t=$run/out/$id.time.tsv
     python3 -I - "$id" "$combo" "$run/stderr.txt" >> "$out/makings.tsv" <<'PY'

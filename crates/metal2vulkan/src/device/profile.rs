@@ -1409,15 +1409,7 @@ pub enum DriverWorkaround {
     /// call and compiles each copy. A measured cost, not a defect: NVIDIA's
     /// (`VK_DRIVER_ID_NVIDIA_PROPRIETARY`) 615.71.09 on the RTX 3090 created a fragment of 256
     /// calls of one sample emulation in 0.39 to 0.40 s with the routine `DontInline` and in 10.1
-    /// to 10.2 s without (EV SHB-g1, a probe, two rounds, shader caches off), and drew it in 15.2
-    /// against 10.3 ms; and its creation of the linear sums kept as calls fell from tens of seconds
-    /// (EVs SUB-xt3 and SUB-xc1). Mesa's drivers inline every function whatever its control, so the
-    /// control changes nothing there, and MoltenVK states it on every routine already
-    /// (`FunctionsInlinedAtEveryCall`). It is keyed on the driver's release
-    /// (`device::driver_facts`) and on the GPU measured with it alone, as every cost fact is: a
-    /// release or a GPU not measured takes no control, the default, whose code and answers are the
-    /// same. There each sampling routine (`spirv::builder::ModuleBuilder::sampling_routine`) is
-    /// declared `DontInline` (`spirv::serialize::serialize_for`). It changes no answer, only the
+    /// 5080 Laptop GPU's, its measurement in `device::driver_facts`. Mesa's drivers inline every
     /// making's and the draw's time.
     DontInlineKeepsCalls,
     /// The device's rasterizer does not split a primitive it clips as Apple's does: Apple's GPU

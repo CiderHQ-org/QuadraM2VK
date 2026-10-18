@@ -928,11 +928,12 @@ const fn moltenvk_141(fact: DriverDeviation) -> Measured<DriverDeviation> {
 ///   it announces a difference rather than hides one.
 /// - `DontInlineKeepsCalls`: NVIDIA's 615.71.09 on the RTX 3090 kept a call of a `DontInline`
 ///   sample emulation a call, creating a fragment of 256 such calls in 0.39 to 0.40 s against 10.1
-///   to 10.2 s for the same routine without the control (EV SHB-g1), as it kept the linear sums
-///   declared so (EVs SUB-xt3 and SUB-xc1, the RTX 3090). A cost fact: it only chooses between two
-///   exact encodings, so a release or GPU not measured loses nothing by going without it and gains
-///   no reason to assume it. Its row names the RTX 3090 alone, the GPU measured; another NVIDIA
-///   GPU, the RTX 5080 Laptop GPU included, takes it once measured.
+///   release on the RTX 5080 Laptop GPU made a guest fragment's pipeline under the exact sampling
+///   and arithmetic forms (`scripts/making-bench`, cold, its anisotropic emulation one sampling
+///   routine) in 22.6 to 22.9 s with each sampling routine `DontInline` and in 45.8 to 54.7 s
+///   without, and its linear sampler's pipeline in 8.9 to 11.9 s against 14.8 to 14.9 s, drawing in
+///   0.32 against 0.43 ms. Its rows name those two GPUs, the GPUs measured; another NVIDIA GPU
+///   takes it once measured.
 pub(crate) const DEFECTS: &[Measured<DriverWorkaround>] = &[
     Measured {
         fact: DriverWorkaround::BothBarycentricFormsRejected,
@@ -1011,6 +1012,14 @@ pub(crate) const DEFECTS: &[Measured<DriverWorkaround>] = &[
         driver: DriverId::NVIDIA_PROPRIETARY,
         vendor: Some(NVIDIA_VENDOR_ID),
         device: Some(NVIDIA_RTX_3090),
+        first: nvidia(615, 71, 9),
+        last: nvidia(615, 71, 9),
+    },
+    Measured {
+        fact: DriverWorkaround::DontInlineKeepsCalls,
+        driver: DriverId::NVIDIA_PROPRIETARY,
+        vendor: Some(NVIDIA_VENDOR_ID),
+        device: Some(NVIDIA_RTX_5080_LAPTOP),
         first: nvidia(615, 71, 9),
         last: nvidia(615, 71, 9),
     },

@@ -387,13 +387,18 @@ fn explicit_cube_gradients_take_metals_footprint() {
     assert!(compiled >= 4, "{compiled}");
 }
 
+/// The textures `unk_cube_grad_lod` samples, a cube and a cube array, twice each: Metal's level and
+/// taps of a cube's explicit gradients, emulated, is one sampling routine per texture
+/// (`routine::Filter`), which each of its samples calls.
+const CUBE_GRAD_TEXTURES: usize = 2;
+
 /// An anisotropic constexpr sampler (`max_anisotropy(2)`, bits 20-23 of the state's first word) on
 /// a cube's explicit gradients takes Metal's footprint on every profile that compiles the isotropic
 /// fixture, with `samplerAnisotropy` or without it (whose Vulkan sampler is isotropic, the taps
 /// the emulation's). Off `VkProperty::MetalSampler` the shader takes Metal's level and taps: each
-/// of the four samples queries the level count and loops over its taps, `AnisotropicFilter` is
-/// recorded and `CubeGradientFootprint` is not; through the isotropic sampler, Metal's level and
-/// one tap: no loop, neither note. On a driver that hands a compute pipeline's cube gradients to
+/// texture's routine, which its samples call, queries the level count and loops over its taps,
+/// `AnisotropicFilter` is recorded and `CubeGradientFootprint` is not; through the isotropic
+/// sampler, Metal's level and one tap: no loop, neither note. On a driver that hands a compute pipeline's cube gradients to
 /// Metal's `gradientcube`, the kernel hands Metal's own through either sampler: no level query, no
 /// note. Neither module has a `Length`.
 #[test]
@@ -435,7 +440,7 @@ fn an_anisotropic_constexpr_sampler_takes_metals_cube_gradient_footprint() {
         assert!(samples > 0, "{stem}");
         assert_eq!(
             count(&i, OP_IMAGE_QUERY_LEVELS),
-            if shader { samples } else { 0 },
+            if shader { CUBE_GRAD_TEXTURES } else { 0 },
             "{stem}"
         );
         assert_eq!(count(&i, OP_LOOP_MERGE), 0, "{stem}");
@@ -459,7 +464,7 @@ fn an_anisotropic_constexpr_sampler_takes_metals_cube_gradient_footprint() {
         assert_eq!(glsl(&a, GLSL_LENGTH), 0, "{stem}");
         assert_eq!(
             count(&a, OP_LOOP_MERGE),
-            if shader { samples } else { 0 },
+            if shader { CUBE_GRAD_TEXTURES } else { 0 },
             "{stem}"
         );
         assert_eq!(
@@ -480,9 +485,10 @@ fn an_anisotropic_constexpr_sampler_takes_metals_cube_gradient_footprint() {
 
 /// An unmeasured route: `moltenvk-m3` without its measured compute cube-gradient route (as a
 /// MoltenVK release no measurement covers) takes Metal's footprint in the shader, where the
-/// refusal was: `unk_cube_grad_lod`'s isotropic sampler Metal's level and one tap (each sample
-/// queries the level count; no loop, no note), the same kernel through an anisotropic constexpr
-/// sampler Metal's level and taps (a loop of taps per sample, `AnisotropicFilter`), neither with
+/// refusal was: `unk_cube_grad_lod`'s isotropic sampler Metal's level and one tap (each texture's
+/// routine queries the level count; no loop, no note), the same kernel through an anisotropic
+/// constexpr sampler Metal's level and taps (a loop of taps per routine, `AnisotropicFilter`),
+/// neither with
 /// `CubeGradientFootprint`. The measured description hands Metal's own gradients: no level query,
 /// no note.
 #[test]
@@ -531,10 +537,14 @@ fn an_unmeasured_cube_gradient_route_takes_metals_footprint_in_the_shader() {
         let u = artifact(bc, "unk_cube_grad_lod", "unmeasured", &unmeasured).expect(what);
         let samples = uses(&u, "sampler.sample_cube_grad") as usize;
         assert!(samples > 0, "{what}");
-        assert_eq!(count(&u, OP_IMAGE_QUERY_LEVELS), samples, "{what}");
+        assert_eq!(
+            count(&u, OP_IMAGE_QUERY_LEVELS),
+            CUBE_GRAD_TEXTURES,
+            "{what}"
+        );
         assert_eq!(
             count(&u, OP_LOOP_MERGE),
-            if taps { samples } else { 0 },
+            if taps { CUBE_GRAD_TEXTURES } else { 0 },
             "{what}"
         );
         assert_eq!(
