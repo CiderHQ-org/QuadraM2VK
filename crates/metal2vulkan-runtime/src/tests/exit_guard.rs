@@ -717,6 +717,19 @@ fn a_section_at_a_power_of_two_registers_the_hook_again() {
     );
 }
 
+/// An instance made registers the hook again after it, so an exit handler a layer registered at
+/// its `vkCreateInstance` (the validation layer's, which forgets every device it knows) runs after
+/// the hook: the child's destructor stands for it.
+#[cfg(unix)]
+#[test]
+fn an_instance_made_registers_the_hook_again() {
+    assert_eq!(
+        late_destructor_exit(exit_guard::instance_made),
+        42,
+        "the layer's handler ran before the hook"
+    );
+}
+
 /// The exit of a child that registers an end (which ends it with 42), its hook (its first
 /// device), a destructor (a layer's static first made by a call on the program's thread, which
 /// registers no hook), and its hook again (a section after an entry point's first call), with a
@@ -1467,6 +1480,34 @@ fn every_image_render_pass_and_framebuffer_goes_through_the_creation_door() {
     assert!(
         found.is_empty(),
         "images, render passes or framebuffers made outside creation.rs: {found:#?}"
+    );
+}
+
+/// Every instance the runtime creates goes through `device/create.rs`'s door (`new_instance`),
+/// which registers the exit hook again after it: a layer registers an exit handler at each
+/// `vkCreateInstance`. The runtime's sources call `vkCreateInstance` once, in that door, and the
+/// door registers after the call.
+#[test]
+fn every_instance_goes_through_the_instance_door() {
+    let found = uses(&[], ".create_instance(", &[]);
+    assert!(
+        found.len() == 1 && found[0].starts_with("device/create.rs: "),
+        "vkCreateInstance called outside device/create.rs's door: {found:#?}"
+    );
+    let (_, code) = runtime_sources()
+        .into_iter()
+        .find(|(path, _)| path == "device/create.rs")
+        .unwrap();
+    let compact: String = code.split_whitespace().collect();
+    let door = &compact[compact.find("fnnew_instance(").expect("the door")..];
+    let door = &door[..door[1..].find("fn").map_or(door.len(), |at| at + 1)];
+    let call = door.find(".create_instance(").expect("the door's call");
+    let registers = door
+        .find("exit_guard::instance_made()")
+        .expect("the door's registration");
+    assert!(
+        call < registers,
+        "the door registers before its call: {door}"
     );
 }
 

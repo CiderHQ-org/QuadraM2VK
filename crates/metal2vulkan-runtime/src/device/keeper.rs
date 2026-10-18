@@ -15,7 +15,7 @@
 //! destroyed. It is made only after a device was made, while that device's instance is alive, so
 //! it loads no driver itself; adopted devices never make one.
 
-use super::create::lists_portability;
+use super::create::{lists_portability, new_instance};
 use super::lock;
 use ash::vk;
 use std::sync::Mutex;
@@ -100,6 +100,6 @@ fn bare_instance(entry: &ash::Entry) -> Option<vk::Instance> {
         info
     };
     // SAFETY: `info` and everything it points at live for the call.
-    let instance = unsafe { entry.create_instance(&info, None) }.ok()?;
+    let instance = unsafe { new_instance(entry, &info) }.ok()?;
     Some(instance.handle())
 }

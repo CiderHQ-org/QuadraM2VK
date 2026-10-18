@@ -9,7 +9,9 @@
 //! waited for a CPU meanwhile ([`exit_end`]): below the exit hook's own bound of 2 s on macOS, so a
 //! hook that waited out its bound fails too. On Linux (the GNU C library) the hook waits for
 //! nothing: where the runtime is busy as it runs, the process ends at once from it, the handlers
-//! registered before it unrun, and the process's end counts. Each child reports the validation
+//! registered before it unrun, and the exit ends at the notice the runtime writes as it ends the
+//! process ([`AT_ONCE`]), as the parent reads it: the kernel's teardown of the process after it is
+//! printed, not counted. Each child reports the validation
 //! layer's messages until then, which must be none. The parent prints each exit's time, with its
 //! wall time, that wait, and how long the process took to end after its handlers. Each test that
 //! checks that time runs alone in the suite (`.config/nextest.toml`): an exit's time holds the
@@ -47,7 +49,8 @@ use std::sync::{mpsc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The longest an exit may take, from the child's last line to the end of its last exit handler
-/// ([`exit_end`]; the process's end where it ended at once and that handler did not run), or,
+/// ([`exit_end`]; the runtime's notice where it ended the process at once and that handler did not
+/// run, [`AT_ONCE`]), or,
 /// where the exit waits for a CPU device's work that ends later (macOS), from that work's end: the
 /// work runs for as long as the host's load lets it ([`CPU_WORK_TIME`]), and the exit's own part
 /// does not. Less the time the exiting thread waited for a CPU meanwhile, which is the host's
@@ -200,6 +203,23 @@ struct Gate {
 
 /// The CPU work case's [`Gate`], set once both command buffers are committed.
 static GATE: OnceLock<Gate> = OnceLock::new();
+
+/// The last device of the case `instance_after_handler_exit`, which [`drop_the_held_device`]
+/// drops.
+static HELD: Mutex<Option<Device>> = Mutex::new(None);
+
+/// An exit handler the case `instance_after_handler_exit` registers after its first device's hook
+/// and before its last device, so that it runs after the exit handler the validation layer
+/// registers at the last device's instance (which forgets every device the layer knows): note
+/// whether the hook ran (`hook_ran`), then drop the last device, whose teardown, once the hook
+/// closed the guard, makes no Vulkan call.
+extern "C" fn drop_the_held_device() {
+    let hook_ran = metal2vulkan_runtime::process_exiting();
+    let line = format!("{REPORT}-HELD hook_ran={}\n", u8::from(hook_ran));
+    // SAFETY: a write of the line's bytes to standard output.
+    unsafe { libc::write(1, line.as_ptr().cast(), line.len()) };
+    drop(HELD.lock().unwrap_or_else(PoisonError::into_inner).take());
+}
 
 /// The longest [`release_the_gate`] waits for the gate's work to be submitted once it opened the
 /// gate: a submission takes milliseconds on a loaded host, so a wait past it is a failure the
@@ -467,6 +487,21 @@ fn child() {
             unsafe { libc::atexit(release_the_gate) };
             exit_now(case, &messages);
         }
+        "instance_after_handler_exit" => {
+            // Each device another sink, so another instance; the first keeps the layer loaded. A
+            // device made and dropped first: its making's sections register the hook again after
+            // each entry point's first call since the first device's, which the last one's then
+            // do not.
+            drop(validated_device(TEST_DEVICE, &messages, &cache).unwrap());
+            // SAFETY: a handler with no arguments that never unwinds.
+            unsafe { libc::atexit(drop_the_held_device) };
+            let before = metal2vulkan_runtime::exit_registrations();
+            let last = validated_device(TEST_DEVICE, &messages, &cache).unwrap();
+            let after = metal2vulkan_runtime::exit_registrations();
+            println!("{REPORT}-REGISTRATIONS before={before:?} after={after:?}");
+            *HELD.lock().unwrap_or_else(PoisonError::into_inner) = Some(last);
+            exit_now(case, &messages);
+        }
         "pending_plain_event_exit" => {
             {
                 let queue = device.new_command_queue().unwrap();
@@ -678,6 +713,9 @@ struct Exited {
     stderr: String,
     /// When the parent saw it end, in milliseconds since the epoch.
     ended_ms: u128,
+    /// When the parent read the runtime's notice that it ends the process at once ([`AT_ONCE`])
+    /// on its standard error, in milliseconds since the epoch; `None` where it wrote none.
+    at_once_ms: Option<u128>,
 }
 
 /// Run `case` in a child process, for at most [`WAIT`] (then it is killed, and this fails).
@@ -698,15 +736,29 @@ fn run_child(case: &str) -> Exited {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let read = |mut pipe: Box<dyn Read + Send>| {
+    // The pipe's text, and when `mark` first showed in it.
+    let read = |mut pipe: Box<dyn Read + Send>, mark: &'static str| {
         std::thread::spawn(move || {
-            let mut text = String::new();
-            let _ = pipe.read_to_string(&mut text);
-            text
+            let (mut bytes, mut chunk, mut marked) = (Vec::new(), [0; 4096], None);
+            loop {
+                match pipe.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(read) => {
+                        bytes.extend_from_slice(&chunk[..read]);
+                        let shown = || bytes.windows(mark.len()).any(|w| w == mark.as_bytes());
+                        if marked.is_none() && !mark.is_empty() && shown() {
+                            marked = Some(now_ms());
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
+            (String::from_utf8_lossy(&bytes).into_owned(), marked)
         })
     };
-    let stdout = read(Box::new(child.stdout.take().unwrap()));
-    let stderr = read(Box::new(child.stderr.take().unwrap()));
+    let stdout = read(Box::new(child.stdout.take().unwrap()), "");
+    let stderr = read(Box::new(child.stderr.take().unwrap()), AT_ONCE);
     let pid = child.id();
     let (ended, end) = mpsc::channel();
     std::thread::spawn(move || {
@@ -718,11 +770,14 @@ fn run_child(case: &str) -> Exited {
         unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
         panic!("{case}: the child did not end within {WAIT:?}");
     };
+    let (stdout, _) = stdout.join().unwrap();
+    let (stderr, at_once_ms) = stderr.join().unwrap();
     Exited {
         status: status.unwrap(),
-        stdout: stdout.join().unwrap(),
-        stderr: stderr.join().unwrap(),
+        stdout,
+        stderr,
         ended_ms,
+        at_once_ms,
     }
 }
 
@@ -736,8 +791,9 @@ fn stdout_line<'a>(exited: &'a Exited, start: &str) -> Option<&'a str> {
 }
 
 /// Run each of `cases` in a child process, and check each exit: status 0, no signal, no
-/// validation message, and its exit handlers ended ([`exit_end`]'s `at_ms`; the process's end
-/// where the child printed none) within [`EXIT_LIMIT`] of the child's last line, or of the end of
+/// validation message, and its exit handlers ended ([`exit_end`]'s `at_ms`; where the child
+/// printed none, the runtime's at-once notice as the parent read it, else the process's end)
+/// within [`EXIT_LIMIT`] of the child's last line, or of the end of
 /// the CPU device's work the exit waits for where that is later (the marker's `seen_ms`), less the
 /// time the exiting thread waited for a CPU since (`queued_us`; none where the child gave no
 /// count). What each child did, in order.
@@ -750,6 +806,7 @@ fn exits_cleanly(cases: &[&str]) -> Vec<Exited> {
             stdout,
             stderr,
             ended_ms,
+            at_once_ms,
         } = &exited;
         let output = || format!("stdout:\n{stdout}\nstderr:\n{stderr}");
         #[cfg(unix)]
@@ -796,7 +853,9 @@ fn exits_cleanly(cases: &[&str]) -> Vec<Exited> {
                 .parse()
                 .ok()
         };
-        let handled_ms = end_field("at_ms").unwrap_or(*ended_ms);
+        // Where the runtime ended the process at once, the exit's part ends at its notice: the
+        // kernel's teardown of the process after it is printed, not counted.
+        let handled_ms = end_field("at_ms").or(*at_once_ms).unwrap_or(*ended_ms);
         let wall = Duration::from_millis(handled_ms.saturating_sub(from_ms) as u64);
         let queued = end_field("queued_us").map_or(Duration::ZERO, |us| {
             Duration::from_micros(u64::try_from(us).unwrap_or(u64::MAX))
@@ -1038,6 +1097,24 @@ fn exits_right_after_learning_of_completion_are_clean() {
     ]);
 }
 
+/// An exit handler of the program's, registered between two devices, finds the hook ran, and
+/// drops the later device: the validation layer registers an exit handler at each instance, which
+/// forgets every device it knows, after which its next call for one ends the process. The hook
+/// registers again after each instance the runtime creates, so it runs before the layer's handler
+/// and closes the guard, and the teardown makes no Vulkan call. Before, on the M3 Max, a pool's
+/// making for a lane's third device, in progress at exit, ended its process with `SIGABRT` in the
+/// layer ("The VkDevice dispatch handle was not found").
+#[test]
+fn an_exit_handler_registered_before_an_instance_runs_after_the_hook() {
+    let exited = exits_cleanly(&["instance_after_handler_exit"]);
+    let line = stdout_line(&exited[0], &format!("{REPORT}-HELD "))
+        .unwrap_or_else(|| panic!("no line from the handler: {}", exited[0].stdout));
+    assert!(
+        line.contains("hook_ran=1"),
+        "the handler ran before the hook: {line}"
+    );
+}
+
 /// A command buffer whose program dropped every handle but the shared event it waits for stays
 /// pending, and completes once the event is signalled: its completed handler runs, and sees the
 /// status `Completed` (Metal's answer: status 4).
@@ -1088,7 +1165,8 @@ fn a_dropped_command_buffer_completes_once_its_event_is_signalled() {
 /// Devices made again in a long-lived process register the exit hook no more while what they
 /// load stays loaded: with one device held, whose instance keeps the Vulkan loader, the driver and
 /// the layers loaded, 16 devices made and dropped after two that warm up add no registration at a
-/// device, and the sections' registrations stay within their bound.
+/// device, one after each of their instances (a layer registers an exit handler at each), and the
+/// sections' registrations stay within their bound.
 #[test]
 fn devices_made_again_register_the_exit_hook_no_more() {
     let cache = ScratchCache::new().unwrap();
@@ -1108,8 +1186,13 @@ fn devices_made_again_register_the_exit_hook_no_more() {
             after.at_devices, before.at_devices,
             "devices made again registered the hook"
         );
+        assert_eq!(
+            after.at_instances - before.at_instances,
+            16,
+            "each instance made registers the hook once after it"
+        );
         assert!(
-            after.total - after.at_devices <= after.section_bound,
+            after.total - after.at_devices - after.at_instances <= after.section_bound,
             "the sections registered past their bound: {after:?}"
         );
         drop(held);

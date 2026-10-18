@@ -86,20 +86,30 @@
 //!   ([`forget_calls`]). Measured: before, a teardown lane whose six devices each reloaded the
 //!   validation layer ended with `SIGSEGV` at exit, a pool thread's `vkDestroyRenderPass` (its
 //!   making's pass) calling through a static of the layer's destroyed first, while the hook waited
-//!   for that section (EVs PRDP-hl1-anv, PRDP-hl1-radv, PRDP-hl2-anv: in the core, that pool
-//!   thread, and the main thread asleep as the hook's wait polls). The hook then runs before every
-//!   destructor registered before its last registration. Since a section publishes nothing before
-//!   it ended, an exit the program makes once it learned of a section's work (from a handler, a
-//!   wait, a status) comes after that section's registration. Measured: while the scheduler posted
-//!   a command buffer's scheduling inside its section, an exit from a scheduled handler crashed the
-//!   completion's poll on MoltenVK in 10 runs of 10. The hole left: a static first made by a
-//!   call after the hook's last registration (one in progress as the exit begins included), when
-//!   the process exits before the next registration. The program's own calls register nothing,
-//!   so one of those may make it too: on the M3 Max (the validation layer 1.4.357.0 from
-//!   Homebrew), the layer's descriptor set layouts' empty lists
+//!   for that section (in the core, that pool thread, and the main thread asleep as the hook's wait
+//!   polls). A layer also registers an exit handler at every `vkCreateInstance`, loaded again or
+//!   not: the validation layer 1.4.357's (`ApplicationAtExit`) forgets every device the layer
+//!   knows, and its next call for any of them ends the process ("The VkDevice dispatch handle was
+//!   not found"). So every instance the runtime creates goes through one door (`device/create.rs`,
+//!   which a source test holds), and the hook registers again after it ([`instance_made`]).
+//!   Measured: before, on the M3 Max, a pool's making for a lane's third device, made on an
+//!   instance of its own with the layer loaded since the first, called `vkGetPipelineCacheData` or
+//!   `vkDestroyPipelineCache` at exit after the layer's handler ran and before the hook did, and
+//!   the layer ended the process (`SIGABRT`). The hook then runs before every destructor registered
+//!   before its last registration. Since a section publishes nothing before it ended, an exit the
+//!   program makes once it learned of a section's work (from a handler, a wait, a status) comes
+//!   after that section's registration. Measured: while the scheduler posted a command buffer's
+//!   scheduling inside its section, an exit from a scheduled handler crashed the completion's poll
+//!   on MoltenVK in 10 runs of 10. The hole left: a static first made by a call after the hook's
+//!   last registration (one in progress as the exit begins included), when the process exits before
+//!   the next registration. The program's own calls register nothing, so one of those may make it
+//!   too: on the M3 Max (the validation layer 1.4.357.0 from Homebrew), the layer's descriptor set
+//!   layouts' empty lists
 //!   (`DescriptorSetLayoutDef::GetMutableTypes` and `GetImmutableSamplerCreateInfosFromIndex`),
 //!   first made on the program's thread 3 to 11 ms before an exit in each of 20 runs; no section
-//!   was seen to read them at exit. Not the guard's, at exit or before: under a layer on MoltenVK
+//!   was seen to read them at exit. So may an instance the program creates itself (an adopted
+//!   device's included): a layer's exit handler registered there runs before the hook's, until
+//!   the next registration. Not the guard's, at exit or before: under a layer on MoltenVK
 //!   1.4.1, a message that names the device leaves `ICD_LOADER_MAGIC` in its loader word, and the
 //!   layer, which finds its state by that word, ends the process at its next call for the device
 //!   (the validation layer: "The VkDevice dispatch handle was not found";
@@ -1185,8 +1195,10 @@ pub(crate) enum Admitted {
 /// The process's [`Devices`].
 static DEVICES: Mutex<Devices> = Mutex::new(Devices::new());
 
-/// The hook's registrations in this process: at devices ([`register_device`]), and in all.
+/// The hook's registrations in this process: at devices ([`register_device`]), after instances
+/// ([`instance_made`]), and in all.
 static AT_DEVICES: AtomicU64 = AtomicU64::new(0);
+static AT_INSTANCES: AtomicU64 = AtomicU64::new(0);
 static INSTALLED: AtomicU64 = AtomicU64::new(0);
 
 /// Register the hook at a device made or adopted, once its driver and layers are loaded and
@@ -1215,6 +1227,18 @@ pub(crate) fn register_device(identity: Vec<u64>) {
     register();
 }
 
+/// This thread called `vkCreateInstance` (the runtime's one door, `device/create.rs`), whatever it
+/// answered: a layer registers an exit handler at each call, as it begins (the validation layer
+/// 1.4.357's `ApplicationAtExit`, which forgets every device the layer knows), so the hook
+/// registers again after it, where it is registered in this process. Before the process's first
+/// device the hook is not registered yet: that device registers it, after its instance.
+pub(crate) fn instance_made() {
+    if REGISTERED.load(Ordering::SeqCst) == std::process::id() {
+        AT_INSTANCES.fetch_add(1, Ordering::Relaxed);
+        install();
+    }
+}
+
 /// Forget the entry points called so far ([`CALLED`]): the next section that calls each
 /// registers the hook again as it ends.
 pub(crate) fn forget_calls() {
@@ -1232,8 +1256,10 @@ static LOADS: AtomicU64 = AtomicU64::new(0);
 pub struct Registrations {
     /// At devices made or adopted.
     pub at_devices: u64,
-    /// In all: at devices, and at the end of sections (after the first call of an entry point
-    /// of the table, and at powers of two of the sections' count).
+    /// After instances the runtime created.
+    pub at_instances: u64,
+    /// In all: at devices, after instances, and at the end of sections (after the first call of
+    /// an entry point of the table, and at powers of two of the sections' count).
     pub total: u64,
     /// The most the sections can make: one per entry point of the table at each load a device
     /// was made after, the process's first device's included (It was one per entry point), and 64.
@@ -1244,6 +1270,7 @@ pub struct Registrations {
 pub fn registrations() -> Registrations {
     Registrations {
         at_devices: AT_DEVICES.load(Ordering::Relaxed),
+        at_instances: AT_INSTANCES.load(Ordering::Relaxed),
         total: INSTALLED.load(Ordering::Relaxed),
         section_bound: Call::ALL.len() as u64 * LOADS.load(Ordering::Relaxed).max(1) + 64,
     }

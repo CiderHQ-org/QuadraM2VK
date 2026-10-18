@@ -36,6 +36,7 @@ use super::{device_error, lock, Device, DeviceShared, InstanceShared, Parts};
 use crate::degradation::{Degradation, DegradeNotice};
 use crate::enables::{host_image_copy_names, listed_reported, listed_structures, Enables};
 use crate::error::{vulkan, Error, InstanceApiVersion, LoaderNotFound};
+use crate::exit_guard;
 use crate::gpu_time;
 use crate::image_barrier::MemoryReads;
 use crate::loader_word::LoaderWord;
@@ -489,6 +490,24 @@ pub(crate) fn open_loader(loader: Option<&Path>) -> Result<ash::Entry, Error> {
     Err(Error::LoaderNotFound(LoaderNotFound { tried }))
 }
 
+/// `vkCreateInstance` of `info` from `entry`: every instance the runtime creates, its devices' and
+/// the drivers' keeper's (`keeper.rs`), is made here, and the exit guard's hook registers again
+/// after it, whatever it answered ([`exit_guard::instance_made`]): a layer registers an exit
+/// handler at each such call.
+///
+/// # Safety
+///
+/// `info` and everything it points at live for the call.
+pub(super) unsafe fn new_instance(
+    entry: &ash::Entry,
+    info: &vk::InstanceCreateInfo<'_>,
+) -> ash::prelude::VkResult<ash::Instance> {
+    // SAFETY: the caller's.
+    let made = unsafe { entry.create_instance(info, None) };
+    exit_guard::instance_made();
+    made
+}
+
 /// The instance of `options`.
 fn create_instance(options: &DeviceOptions) -> Result<Arc<InstanceShared>, Error> {
     let entry = open_loader(options.loader.as_deref())?;
@@ -565,7 +584,7 @@ fn create_instance(options: &DeviceOptions) -> Result<Arc<InstanceShared>, Error
         info = info.push_next(&mut settings_info);
     }
     // SAFETY: `info` and everything it points at live for the call.
-    let raw = match unsafe { entry.create_instance(&info, None) } {
+    let raw = match unsafe { new_instance(&entry, &info) } {
         Ok(raw) => raw,
         Err(vk::Result::ERROR_INCOMPATIBLE_DRIVER) => return Err(Error::NoDevice),
         Err(error) => return Err(vulkan(error)),
