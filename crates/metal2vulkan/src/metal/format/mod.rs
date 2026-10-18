@@ -2580,7 +2580,8 @@ pub(crate) fn without_format_gaps(
 /// `STORAGE_{READ,WRITE}_WITHOUT_FORMAT` optimal-tiling bits, or what the specification implies
 /// for them), else with its SPIR-V image format. Otherwise an alias view (bgra8 through rgba8 and
 /// bgr10a2 through rgb10a2 with `SwizzleBgra`, the 8-bit sRGB formats through their UNORM twin with
-/// `SrgbEncode`), else
+/// `SrgbEncode` or bgra8 sRGB through rgba8 with `SrgbEncodeBgra`, `RGB9E5Float` through `R32_UINT`
+/// with `SharedExponentBits`, `A8Unorm` through `R8_UNORM` with `AlphaInRed`), else
 /// `Unsupported{Format}`. A read-and-write choice serves any access to a storage image, so a
 /// caller that does not know the function's accesses uses it. It does not serve a texture
 /// buffer: Vulkan implies no buffer bit, so a format formatless as an image can need a declared
@@ -2604,9 +2605,10 @@ pub fn storage_image_choice(
 /// Otherwise an alias view of a `MUTABLE_FORMAT` image (or the same bytes viewed as the alias
 /// format, for a texture buffer): bgra8 through an rgba8 view and bgr10a2 through an rgb10a2 view
 /// (`A2R10G10B10` through `A2B10G10R10`, which NVIDIA and lavapipe store where they do not store
-/// the former) with `SwizzleBgra`, and the 8-bit sRGB formats through their UNORM twin with
-/// `SrgbEncode`. Anything else is `Unsupported{Format}` naming what each route lacks, a format's
-/// without-format usage included.
+/// the former) with `SwizzleBgra`, the 8-bit sRGB formats through their UNORM twin with
+/// `SrgbEncode` (`BGRA8Unorm_sRGB`, where its twin is not accessed without a format, through
+/// `R8G8B8A8_UNORM` with `SrgbEncodeBgra`), `RGB9E5Float` through `R32_UINT` with
+/// `SharedExponentBits`, and `A8Unorm` through `R8_UNORM` with `AlphaInRed` (no alias: such a
 ///
 /// An RGBX format's choice ([`x_channel`]) is its RGBA twin's, which converts its texels in the
 /// shader (`StorageImageChoice::x_channel`); its texture buffer, whose reads a texel buffer's view
@@ -2675,13 +2677,20 @@ fn held_storage_choice(
             Some((F::A2B10G10R10_UNORM_PACK32, StorageImageClass::SwizzleBgra))
         }
         PixelFormat::ARGB8Unorm => Some((F::R8G8B8A8_UNORM, StorageImageClass::RotateArgb)),
+        PixelFormat::RGB9E5Float => Some((F::R32_UINT, StorageImageClass::SharedExponentBits)),
+        PixelFormat::R8UnormSRGB => Some((F::R8_UNORM, StorageImageClass::SrgbEncode)),
+        PixelFormat::RG8UnormSRGB => Some((F::R8G8_UNORM, StorageImageClass::SrgbEncode)),
         PixelFormat::RGBA8UnormSRGB => Some((F::R8G8B8A8_UNORM, StorageImageClass::SrgbEncode)),
         PixelFormat::RGBX8UnormSRGB => Some((F::R8G8B8A8_UNORM, StorageImageClass::SrgbEncode)),
-        // bgra8 sRGB needs both conversions unless its own UNORM twin is declarable.
         PixelFormat::BGRA8UnormSRGB => Some((F::B8G8R8A8_UNORM, StorageImageClass::SrgbEncode)),
         _ => None,
     };
-    // An RGBX format's write stores the green field's bits as X (EV FPV-pf1-m4): green's sRGB code
+    // bgra8 sRGB takes both conversions through an rgba8 view where its own UNORM twin, which
+    // has no SPIR-V image format, is not accessed without one.
+    let second = match pf {
+        PixelFormat::BGRA8UnormSRGB => Some((F::R8G8B8A8_UNORM, StorageImageClass::SrgbEncodeBgra)),
+        _ => None,
+    };
     // for `RGBX8Unorm_sRGB`. A device storing into the sRGB image itself encodes red, green and
     // blue and stores the fourth lane linearly, as alpha, so that format's writes take the UNORM
     // alias, whose encode the shader applies before it moves green into the fourth lane.
@@ -2695,7 +2704,11 @@ fn held_storage_choice(
         choice.alias = Some(AliasView::new(image));
         return Ok(choice);
     }
-    if storage(image) && declarable(image) && !rotated && !srgb_x {
+    // Vulkan's conversion to a shared-exponent texel rounds each mantissa half up, where Metal
+    // truncates it: an `RGB9E5Float` write takes its word alias, whose encode is Metal's, even on a
+    // device that stores the format.
+    let word = matches!(alias, Some((_, StorageImageClass::SharedExponentBits)));
+    if storage(image) && declarable(image) && !rotated && !srgb_x && !word {
         let class = half_storage_class(pf, use_, profile);
         if !formatless(image) {
             return Ok(StorageImageChoice::new(image, class));
@@ -2706,7 +2719,7 @@ fn held_storage_choice(
         choice.numeric = crate::bind::neutral::numeric_type(image);
         return Ok(choice);
     }
-    if let Some((view, class)) = alias {
+    for (view, class) in alias.into_iter().chain(second) {
         if storage(view) && declarable(view) {
             let mut choice = StorageImageChoice::new(view, class);
             // `ARGB8Unorm`'s image is the view's format: its choice rotates without an alias.
@@ -2726,9 +2739,7 @@ fn held_storage_choice(
         missing
     };
     let mut alternatives = vec![lacks(image)];
-    if let Some((view, _)) = alias {
-        alternatives.push(lacks(view));
-    }
+    alternatives.extend(alias.into_iter().chain(second).map(|(view, _)| lacks(view)));
     Err(Unsupported::needs_any_of(Feature::Format, alternatives).into())
 }
 

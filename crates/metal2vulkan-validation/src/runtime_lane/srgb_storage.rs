@@ -1,7 +1,8 @@
-//! A kernel's storage reads and writes of the 8-bit sRGB formats `RGBA8Unorm_sRGB`,
-//! `RGBX8Unorm_sRGB` and `BGRA8Unorm_sRGB` on the device the cfg selects, under the validation
-//! layer, against Metal's answers (EV FPV-sr1-m4, an M4 under macOS 27.0.1, our own probe
-//! `srgb-storage`).
+//! A kernel's storage reads and writes of the 8-bit sRGB formats `R8Unorm_sRGB`, `RG8Unorm_sRGB`,
+//! `RGBA8Unorm_sRGB`, `RGBX8Unorm_sRGB` and `BGRA8Unorm_sRGB` on the device the cfg selects, under
+//! the validation layer, against Metal's answers (an M4 under macOS 27.0.1, our own
+//! probe `srgb-storage`; `R8Unorm_sRGB`, `RG8Unorm_sRGB` and `RGBA8Unorm_sRGB` again on an M3 Max
+//! under macOS 27.0.1, our own probe `srgb8`: every texel of the same rule).
 //!
 //! Metal's answers, recorded there for the values below: a kernel's write (`access::write` and
 //! `read_write`, `float4` and `half4`) stores each color channel as its twelve-bit encode (a NaN
@@ -10,7 +11,7 @@
 //! 255 rounded to nearest even, the X field of `RGBX8Unorm_sRGB` green's byte: every texel equal
 //! to `pack_float_to_srgb_unorm4x8` of the same values. A read (`read_write`, `float4` and
 //! `half4`) of code `c` answers its twelve-bit step `k / 4095` correctly rounded (alpha `c / 255`,
-//! 1 for `RGBX8Unorm_sRGB`). The tables are Metal's own: the first encode indices are the color
+//! 1 for `RGBX8Unorm_sRGB`; a channel the format lacks 0, alpha 1). The tables are Metal's own: the first encode indices are the color
 //! table's (`bind::color_write_table`), the steps `round(decode(c / 255) * 4095)` of the sRGB
 //! transfer (every one at least `1.6e-4` of a step from a half step).
 //!
@@ -20,10 +21,12 @@
 //! `c` of texel `t` takes value `4t + (c + p) % 4` in pass `p` of 4, so each value reaches each
 //! channel. The kernels are the owned fixture `fpv_srgb_storage`'s.
 
-use super::degrade_notices::on_device;
+use super::degrade_notices::{on_device, on_device_with};
 use super::{buffer_with, read_buffer, WAIT};
 use crate::air_library::AirLibrary;
+use metal2vulkan::metal::format::storage_image_choice;
 use metal2vulkan::metal::{PixelFormat, TextureUsage};
+use metal2vulkan::pipeline::StorageImageClass;
 use metal2vulkan::pipeline::{ComputePipelineDescriptor, StageSource};
 use metal2vulkan_devtools::{engine_dir, llvm_assemble};
 use metal2vulkan_runtime::{
@@ -34,12 +37,39 @@ use metal2vulkan_runtime::{
 /// The texture's width; its height holds every value.
 const WIDTH: u64 = 256;
 
-/// Each format, whether the probe measured its `read_write` access, and the byte of each
-/// channel (red, green, blue, alpha) in its texel.
-const FORMATS: [(PixelFormat, bool, [usize; 4]); 3] = [
-    (PixelFormat::RGBA8UnormSRGB, true, [0, 1, 2, 3]),
-    (PixelFormat::RGBX8UnormSRGB, true, [0, 1, 2, 3]),
-    (PixelFormat::BGRA8UnormSRGB, false, [2, 1, 0, 3]),
+/// Each format, whether the probe measured its `read_write` access, its texel's bytes, and the
+/// byte of each channel (red, green, blue, alpha) in its texel, `None` for a channel it lacks.
+const FORMATS: [(PixelFormat, bool, usize, [Option<usize>; 4]); 5] = [
+    (
+        PixelFormat::R8UnormSRGB,
+        true,
+        1,
+        [Some(0), None, None, None],
+    ),
+    (
+        PixelFormat::RG8UnormSRGB,
+        true,
+        2,
+        [Some(0), Some(1), None, None],
+    ),
+    (
+        PixelFormat::RGBA8UnormSRGB,
+        true,
+        4,
+        [Some(0), Some(1), Some(2), Some(3)],
+    ),
+    (
+        PixelFormat::RGBX8UnormSRGB,
+        true,
+        4,
+        [Some(0), Some(1), Some(2), Some(3)],
+    ),
+    (
+        PixelFormat::BGRA8UnormSRGB,
+        false,
+        4,
+        [Some(2), Some(1), Some(0), Some(3)],
+    ),
 ];
 
 /// The byte of each twelve-bit index: the largest whose first encode index (the color table's
@@ -183,9 +213,14 @@ fn state(device: &Device, kernel: &str) -> ComputePipelineState {
         .unwrap()
 }
 
-/// A shared texture of `pf`, [`WIDTH`] texels wide and `height` high, that kernels read and
-/// write, holding `bytes` where given.
-fn texture(device: &Device, pf: PixelFormat, height: u64, bytes: Option<&[u8]>) -> Texture {
+/// A shared texture of `pf` (`size` bytes a texel), [`WIDTH`] texels wide and `height` high, that
+/// kernels read and write, holding `bytes` where given.
+fn texture(
+    device: &Device,
+    (pf, size): (PixelFormat, u64),
+    height: u64,
+    bytes: Option<&[u8]>,
+) -> Texture {
     let mut d = TextureDescriptor::texture_2d(pf, WIDTH, height, false);
     d.usage = TextureUsage::SHADER_READ | TextureUsage::SHADER_WRITE;
     d.resource_options = ResourceOptions::shared();
@@ -197,7 +232,7 @@ fn texture(device: &Device, pf: PixelFormat, height: u64, bytes: Option<&[u8]>) 
                 0,
                 0,
                 bytes,
-                WIDTH * 4,
+                WIDTH * size,
                 0,
             )
             .unwrap();
@@ -205,13 +240,13 @@ fn texture(device: &Device, pf: PixelFormat, height: u64, bytes: Option<&[u8]>) 
     texture
 }
 
-/// `texture`'s bytes, `height` rows.
-fn bytes_of(texture: &Texture, height: u64) -> Vec<u8> {
-    let mut out = vec![0u8; (WIDTH * height * 4) as usize];
+/// `texture`'s bytes (`size` a texel), `height` rows.
+fn bytes_of(texture: &Texture, size: u64, height: u64) -> Vec<u8> {
+    let mut out = vec![0u8; (WIDTH * height * size) as usize];
     texture
         .get_bytes(
             &mut out,
-            WIDTH * 4,
+            WIDTH * size,
             0,
             Region::new_2d(0, 0, WIDTH, height),
             0,
@@ -268,75 +303,100 @@ fn write_values(half: bool) -> Vec<(f32, Vec<u8>)> {
 /// each texel's (the X field of `RGBX8Unorm_sRGB` green's byte), over bytes of `0xA5`.
 #[test]
 fn srgb_storage_writes_store_metals_codes() {
+    on_device(|device, _| writes_store_metals_codes(device));
+}
+
+/// [`srgb_storage_writes_store_metals_codes`] on the device made without its storage accesses
+#[test]
+fn srgb_storage_writes_through_rgba8_store_metals_codes() {
+    on_device_with(
+        |options| {
+            options.withheld_features.extend([
+                VkFeature::ShaderStorageImageReadWithoutFormat,
+                VkFeature::ShaderStorageImageWriteWithoutFormat,
+            ]);
+        },
+        |device, _| {
+            let profile = device.compile_device().profile();
+            let choice = storage_image_choice(PixelFormat::BGRA8UnormSRGB, profile).unwrap();
+            assert_eq!(choice.class, StorageImageClass::SrgbEncodeBgra);
+            writes_store_metals_codes(device);
+        },
+    );
+}
+
+fn writes_store_metals_codes(device: &Device) {
     let bytes = encode_bytes();
-    on_device(|device, _| {
-        let name = device.name().to_owned();
-        let mut differ = Vec::new();
-        for (pf, read_write, at) in FORMATS {
-            let rgbx = pf == PixelFormat::RGBX8UnormSRGB;
-            let kernels: &[(&str, bool)] = match read_write {
-                true => &[
-                    ("fpv_srgb_write", false),
-                    ("fpv_srgb_update", false),
-                    ("fpv_srgb_write_half", true),
-                    ("fpv_srgb_update_half", true),
-                ],
-                false => &[("fpv_srgb_write", false), ("fpv_srgb_write_half", true)],
-            };
-            for &(kernel, half) in kernels {
-                let state = state(device, kernel);
-                let list = write_values(half);
-                let texels = list.len() / 4;
-                let height = (texels as u64).div_ceil(WIDTH);
-                let cells = (WIDTH * height) as usize;
-                let size = list[0].1.len();
-                let (mut wrong, mut example) = (0, None);
-                for pass in 0..4 {
-                    let entry = |t: usize, c: usize| &list[4 * t + (c + pass) % 4];
-                    let mut data = vec![0u8; cells * 4 * size];
-                    for t in 0..texels {
-                        for c in 0..4 {
-                            let at = (4 * t + c) * size;
-                            data[at..at + size].copy_from_slice(&entry(t, c).1);
-                        }
+    let name = device.name().to_owned();
+    let mut differ = Vec::new();
+    for (pf, read_write, texel, at) in FORMATS {
+        let rgbx = pf == PixelFormat::RGBX8UnormSRGB;
+        let kernels: &[(&str, bool)] = match read_write {
+            true => &[
+                ("fpv_srgb_write", false),
+                ("fpv_srgb_update", false),
+                ("fpv_srgb_write_half", true),
+                ("fpv_srgb_update_half", true),
+            ],
+            false => &[("fpv_srgb_write", false), ("fpv_srgb_write_half", true)],
+        };
+        for &(kernel, half) in kernels {
+            let state = state(device, kernel);
+            let list = write_values(half);
+            let texels = list.len() / 4;
+            let height = (texels as u64).div_ceil(WIDTH);
+            let cells = (WIDTH * height) as usize;
+            let size = list[0].1.len();
+            let (mut wrong, mut example) = (0, None);
+            for pass in 0..4 {
+                let entry = |t: usize, c: usize| &list[4 * t + (c + pass) % 4];
+                let mut data = vec![0u8; cells * 4 * size];
+                for t in 0..texels {
+                    for c in 0..4 {
+                        let at = (4 * t + c) * size;
+                        data[at..at + size].copy_from_slice(&entry(t, c).1);
                     }
-                    let target = texture(device, pf, height, Some(&vec![0xA5u8; cells * 4]));
-                    run(device, &state, &target, height, &data);
-                    let got = bytes_of(&target, height);
-                    for t in 0..texels {
-                        let mut want = [0u8; 4];
-                        for (c, byte) in at.into_iter().enumerate() {
+                }
+                let fill = vec![0xA5u8; cells * texel];
+                let target = texture(device, (pf, texel as u64), height, Some(&fill));
+                run(device, &state, &target, height, &data);
+                let got = bytes_of(&target, texel as u64, height);
+                for t in 0..texels {
+                    let mut want = [0u8; 4];
+                    for (c, byte) in at.into_iter().enumerate() {
+                        if let Some(byte) = byte {
                             want[byte] = code(&bytes, entry(t, c).0, c < 3);
                         }
-                        if rgbx {
-                            want[3] = want[1];
-                        }
-                        if got[4 * t..4 * t + 4] != want {
-                            wrong += 1;
-                            example.get_or_insert((
-                                (0..4).map(|c| entry(t, c).0).collect::<Vec<_>>(),
-                                got[4 * t..4 * t + 4].to_vec(),
-                                want,
-                            ));
-                        }
+                    }
+                    if rgbx {
+                        want[3] = want[1];
+                    }
+                    let got = &got[texel * t..texel * (t + 1)];
+                    if got != &want[..texel] {
+                        wrong += 1;
+                        example.get_or_insert((
+                            (0..4).map(|c| entry(t, c).0).collect::<Vec<_>>(),
+                            got.to_vec(),
+                            want,
+                        ));
                     }
                 }
-                let example = example.map_or(String::new(), |e| format!(", e.g. {e:?}"));
-                eprintln!(
-                    "SRGB write {pf:?} by {kernel} on {name}: {wrong} of {} texels differ from \
-                     Metal's{example}",
-                    4 * texels
-                );
-                if wrong > 0 {
-                    differ.push(format!("{pf:?} by {kernel}: {wrong} of {}", 4 * texels));
-                }
+            }
+            let example = example.map_or(String::new(), |e| format!(", e.g. {e:?}"));
+            eprintln!(
+                "SRGB write {pf:?} by {kernel} on {name}: {wrong} of {} texels differ from \
+                 Metal's{example}",
+                4 * texels
+            );
+            if wrong > 0 {
+                differ.push(format!("{pf:?} by {kernel}: {wrong} of {}", 4 * texels));
             }
         }
-        assert!(
-            differ.is_empty(),
-            "sRGB storage writes not Metal's: {differ:#?}"
-        );
-    });
+    }
+    assert!(
+        differ.is_empty(),
+        "sRGB storage writes not Metal's: {differ:#?}"
+    );
 }
 
 /// Every `read_write` read of every code in every channel of each format the probe read so:
@@ -346,19 +406,21 @@ fn srgb_storage_reads_are_metals_table() {
     on_device(|device, _| {
         let name = device.name().to_owned();
         let mut differ = Vec::new();
-        for (pf, read_write, at) in FORMATS {
+        for (pf, read_write, texel, at) in FORMATS {
             if !read_write {
                 continue;
             }
             let rgbx = pf == PixelFormat::RGBX8UnormSRGB;
             let codes = |b: u32| [b, 255 - b, (37 * b) & 255, (b + 128) & 255];
-            let mut bytes = vec![0u8; 256 * 4];
+            let mut bytes = vec![0u8; 256 * texel];
             for b in 0..256u32 {
                 for (c, code) in codes(b).into_iter().enumerate() {
-                    bytes[4 * b as usize + at[c]] = code as u8;
+                    if let Some(byte) = at[c] {
+                        bytes[texel * b as usize + byte] = code as u8;
+                    }
                 }
             }
-            let source = texture(device, pf, 1, Some(&bytes));
+            let source = texture(device, (pf, texel as u64), 1, Some(&bytes));
             for (kernel, half) in [
                 ("fpv_srgb_read_write", false),
                 ("fpv_srgb_read_write_half", true),
@@ -369,9 +431,11 @@ fn srgb_storage_reads_are_metals_table() {
                 let mut wrong = 0;
                 for b in 0..256u32 {
                     for (c, code) in codes(b).into_iter().enumerate() {
-                        let (k, d) = match (c, rgbx) {
-                            (3, true) => (1, 1),
-                            (3, false) => (u64::from(code), 255),
+                        // A channel the format lacks reads 0, alpha 1.
+                        let (k, d) = match (c, rgbx, at[c]) {
+                            (3, true, _) | (3, _, None) => (1, 1),
+                            (_, _, None) => (0, 1),
+                            (3, false, Some(_)) => (u64::from(code), 255),
                             _ => (u64::from(super::srgb_step(code)), 4095),
                         };
                         let lane = &got[(b as usize * 4 + c) * size / 4..];

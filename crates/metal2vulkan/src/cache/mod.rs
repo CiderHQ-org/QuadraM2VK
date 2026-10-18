@@ -188,6 +188,14 @@ pub struct VariantKey {
     /// the plan of a pipeline compiled under it states it.
     #[cfg_attr(feature = "serde", serde(default))]
     pub srgb_textures: BTreeSet<SlotRef>,
+    /// Slots of [`srgb_textures`](Self::srgb_textures) bound to a texture whose 8-bit sRGB format
+    /// the device cannot sample, which it holds as the format's UNORM twin
+    /// (`metal::format::srgb_raw_twin`), whose views read the codes (`c / 255`): the accesses the
+    /// raw codes do not serve exactly (a runtime sampler's sample, a filter the emulation does not
+    /// reach) sample the twin and decode the device's filtered codes
+    /// (`LoweringInputs::srgb_twins`). The plan of a pipeline compiled under it states it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub srgb_twins: BTreeSet<SlotRef>,
     /// Fragment texture slots the draw reads through a snapshot an earlier draw of the same
     /// primitives took (`LoweringInputs::snapshot_textures`), each with the form the snapshot
     /// keeps its texels in (`SnapshotForm::of` the slot's bound view): the slots
@@ -504,6 +512,7 @@ impl VariantKey {
             && !self.dropped_vertex_layer
             && self.storage_view_slots.is_empty()
             && self.srgb_textures.is_empty()
+            && self.srgb_twins.is_empty()
             && self.snapshot_textures.is_empty()
             && self.ycbcr_textures.is_empty()
             && self.address_maps.is_empty()
@@ -588,6 +597,12 @@ impl VariantKey {
             .collect();
         out.srgb_textures = self
             .srgb_textures
+            .iter()
+            .filter(|s| s.stage == stage)
+            .copied()
+            .collect();
+        out.srgb_twins = self
+            .srgb_twins
             .iter()
             .filter(|s| s.stage == stage)
             .copied()

@@ -113,6 +113,31 @@ fn the_srgb_tables_are_metals_measured_ones() {
     assert_eq!(higher, [804, 1371, 2121, 2569]);
 }
 
+/// The sources a test reads `format` from: the input attachment, in its own format and, where that
+/// is another, its raw twin's, and the sample planes in `copy`.
+fn sources(format: ColorResolveFormat, copy: PlanesCopy) -> Vec<ResolveSource> {
+    let mut sources = vec![ResolveSource::InputAttachment];
+    if format.raw_format() != format.format() {
+        sources.push(ResolveSource::RawInputAttachment);
+    }
+    sources.push(ResolveSource::Planes(copy));
+    sources
+}
+
+/// The resolves a test runs of `format`: its result written in its own format and, where its raw
+/// twin is another, through the twin ([`ColorResolveFormat::written_raw`]), each from every source
+/// ([`sources`]).
+fn cases(format: ColorResolveFormat, copy: PlanesCopy) -> Vec<(ColorResolveFormat, ResolveSource)> {
+    let mut written = vec![format];
+    if format.written_raw() != format {
+        written.push(format.written_raw());
+    }
+    written
+        .into_iter()
+        .flat_map(|format| sources(format, copy).into_iter().map(move |s| (format, s)))
+        .collect()
+}
+
 /// The requirements of `m` as serialized.
 fn needs(m: TypedModule) -> Requirements {
     crate::spirv::serialize::serialize(m)
@@ -145,12 +170,12 @@ fn representatives() -> Vec<(ColorResolveFormat, PlanesCopy)> {
 }
 
 /// The fragment stage needs nothing of a device beyond Vulkan 1.2's shaders, at every sample count
-/// its rules hold at and from either source.
+/// its rules hold at and from every source.
 #[test]
 fn the_fragment_stage_needs_nothing_of_a_device() {
     for (format, copy) in representatives() {
         for samples in [2, 4, 8].into_iter().filter(|&n| format.resolves(n)) {
-            for source in [ResolveSource::InputAttachment, ResolveSource::Planes(copy)] {
+            for (format, source) in cases(format, copy) {
                 let r = needs(fragment_typed_module(format, samples, source).expect("module"));
                 assert!(
                     r.features.is_empty(),
@@ -166,7 +191,7 @@ fn the_fragment_stage_needs_nothing_of_a_device() {
 fn the_modules_are_valid_on_every_committed_profile() {
     for (name, profile) in committed_profiles().expect("profiles") {
         for (format, copy) in representatives() {
-            for source in [ResolveSource::InputAttachment, ResolveSource::Planes(copy)] {
+            for (format, source) in cases(format, copy) {
                 for samples in [2, 4] {
                     let m = fragment_typed_module(format, samples, source).expect("module");
                     let _ = assert_valid(m, &profile);
@@ -187,7 +212,7 @@ fn the_modules_come_numbered_and_refuse_another_count() {
     let desc = DeviceDescription::from_khronos_json(&text, None).expect("description");
     let device = Device::new(desc, DevicePolicy::default()).expect("device");
     let (format, copy) = representatives()[0];
-    for source in [ResolveSource::InputAttachment, ResolveSource::Planes(copy)] {
+    for (format, source) in cases(format, copy) {
         let modules =
             color_resolve_modules(&device, format, 4, source, Feature::Format).expect("modules");
         assert!(!modules.vertex.is_empty() && !modules.fragment.is_empty());
@@ -232,7 +257,7 @@ fn arithmetic_module(
     let t = Types::new(&mut b).expect("types");
     let srgb = format
         .srgb()
-        .then(|| SrgbTables::declare(&mut b, t))
+        .then(|| SrgbTables::declare(&mut b, t, format, source))
         .transpose()
         .expect("tables");
     let words = super::super::visibility_resolve::words_buffer;
@@ -727,6 +752,10 @@ fn sample_words(
                         let offset = u32::from(channel.offset);
                         words[(offset / 32) as usize] |= code << (offset % 32);
                     }
+                    // The raw twin reads an sRGB code as an 8-bit unorm one.
+                    ResolveSource::RawInputAttachment if channel.rule == ResolveRule::Srgb => {
+                        words[component] = read_as(ResolveRule::Unorm { bits: 8 }, code).to_bits()
+                    }
                     _ => words[component] = read_as(channel.rule, code).to_bits(),
                 }
             }
@@ -789,12 +818,20 @@ fn check(
             let word = u32::from_le_bytes(out[at..at + 4].try_into().expect("word"));
             let codes: Vec<u32> = texel.iter().map(|s| s[component]).collect();
             let want = metal(channel.rule, &codes);
-            let got = stored_as(channel.rule, f32::from_bits(word));
+            // Written through the raw twin, an sRGB channel's float is stored as an 8-bit unorm
+            // one.
+            let stored = match channel.rule {
+                ResolveRule::Srgb if format.written_raw => ResolveRule::Unorm { bits: 8 },
+                rule => rule,
+            };
+            let got = stored_as(stored, f32::from_bits(word));
             assert_eq!(
                 got,
                 want,
-                "{:?} x{samples} {source:?} component {component}: {codes:x?} wrote {word:#x}",
-                format.format()
+                "{:?} written as {:?} x{samples} {source:?} component {component}: {codes:x?} \
+                 wrote {word:#x}",
+                format.format(),
+                format.written_format()
             );
         }
     }
@@ -846,7 +883,7 @@ fn every_pair_of_8_bit_codes(format: Format) {
     let texels: Vec<Vec<[u32; 4]>> = (0..65536u32)
         .map(|p| vec![[p & 0xff, 0, 0, 0], [p >> 8, 0, 0, 0]])
         .collect();
-    for source in [ResolveSource::InputAttachment, ResolveSource::Planes(copy)] {
+    for (resolve, source) in cases(resolve, copy) {
         check(resolve, 2, source, &texels);
     }
 }
@@ -867,7 +904,7 @@ fn every_pair_of_snorm_codes_resolves_as_metal() {
 }
 
 /// Random and edge texels of every closed format at 2, 4 and 8 samples (those its rules hold at),
-/// through both sources.
+/// through every source ([`sources`]).
 #[test]
 fn random_texels_of_every_format_resolve_as_metal() {
     let mut r = SplitMix(0x0052_504c);
@@ -906,7 +943,7 @@ fn random_texels_of_every_format_resolve_as_metal() {
                         .collect()
                 })
                 .collect();
-            for source in [ResolveSource::InputAttachment, ResolveSource::Planes(copy)] {
+            for (resolve, source) in cases(resolve, copy) {
                 check(resolve, samples, source, &texels);
             }
         }
@@ -1623,7 +1660,8 @@ fn alike_texels(
 
 /// A pixel whose samples all hold the same codes resolves as the model of Metal's rules
 /// ([`metal`]) says, which is the code (`resolve_alike`): every closed format but the shared
-/// exponent's (below), at each of 2, 4 and 8 samples its rules hold at, through both sources.
+/// exponent's (below), at each of 2, 4 and 8 samples its rules hold at, through every source
+/// ([`sources`]).
 #[test]
 fn alike_samples_resolve_as_metal() {
     let mut r = SplitMix(0x0041_4c4b);
@@ -1638,7 +1676,7 @@ fn alike_samples_resolve_as_metal() {
             .filter(|&n| resolve.resolves(n as u32))
         {
             let texels = alike_texels(resolve, samples, &mut r);
-            for source in [ResolveSource::InputAttachment, ResolveSource::Planes(copy)] {
+            for (resolve, source) in cases(resolve, copy) {
                 for chunk in texels.chunks(4096) {
                     check(resolve, samples, source, chunk);
                 }
@@ -1684,14 +1722,14 @@ fn alike_shared_exponents_resolve_as_metal() {
 }
 
 /// A pixel whose samples all hold the same bits skips the average: on the interpreter, 64 such
-/// texels of each representative format at 4 samples take fewer lane-steps, through either
+/// texels of each representative format at 4 samples take fewer lane-steps, through every
 /// source, than the same texels with the last sample's first channel changed; a format that
 /// always averages (32-bit floats, or unorm and snorm channels alone) takes as many.
 #[test]
 fn alike_samples_skip_the_average() {
     let mut r = SplitMix(0x0041_4c53);
     for (format, copy) in representatives() {
-        for source in [ResolveSource::InputAttachment, ResolveSource::Planes(copy)] {
+        for source in sources(format, copy) {
             let inputs = if format.shared_exponent() {
                 let words: Vec<u32> = (0..64).map(|_| shared_word(&mut r)).collect();
                 [false, true].map(|change| {
@@ -1749,6 +1787,60 @@ fn alike_samples_skip_the_average() {
     }
 }
 
+/// The raw twin reads an sRGB format's codes with no table lookup: on the interpreter, 64 random
+/// `BGRA8Unorm_sRGB` texels at 4 samples take fewer lane-steps from
+/// [`ResolveSource::RawInputAttachment`] than from [`ResolveSource::InputAttachment`], each sample
+/// alike and with the last sample's red changed.
+#[test]
+fn the_raw_twin_reads_srgb_codes_in_fewer_steps() {
+    let format = ColorResolveFormat::of(Format::B8G8R8A8_SRGB).expect("closed");
+    let mut r = SplitMix(0x0052_4157);
+    let codes: Vec<[u32; 4]> = (0..64)
+        .map(|_| [0; 4].map(|_: u32| (r.next() as u32) & 0xff))
+        .collect();
+    for change in [false, true] {
+        let texels: Vec<Vec<[u32; 4]>> = codes
+            .iter()
+            .map(|&c| {
+                let mut last = c;
+                if change {
+                    last[0] ^= 2;
+                }
+                vec![c, c, c, last]
+            })
+            .collect();
+        let [read, raw] = [
+            ResolveSource::InputAttachment,
+            ResolveSource::RawInputAttachment,
+        ]
+        .map(|source| {
+            let input = sample_words(format, source, &texels);
+            dispatch(format, 4, source, input, texels.len()).steps
+        });
+        assert!(raw < read, "changed {change}: {raw} against {read}");
+    }
+}
+
+/// Written through the raw twin, an sRGB format's codes go out with no table: the fragment module
+/// of `BGRA8Unorm_sRGB` at 4 samples, read through the raw twin, holds no 256-entry table of
+/// linear values written raw ([`ColorResolveFormat::written_raw`]), and so is at least that many
+/// words smaller than the one written in the format. Lane-steps do not show the saving: the
+/// lookup takes as many instructions as the conversion and scale in its place, where the GPU pays
+/// for a dynamically indexed `Private` array (`runtime_lane::resolve_rounding`'s cost test).
+#[test]
+fn the_raw_twin_writes_srgb_codes_with_no_table() {
+    let format = ColorResolveFormat::of(Format::B8G8R8A8_SRGB).expect("closed");
+    let source = ResolveSource::RawInputAttachment;
+    let [own, raw] = [format, format.written_raw()].map(|format| {
+        let m = fragment_typed_module(format, 4, source).expect("module");
+        crate::spirv::serialize::serialize(m)
+            .expect("serialize")
+            .words
+            .len()
+    });
+    assert!(raw + 256 <= own, "{raw} words against {own}");
+}
+
 // ---- The sRGB codes by estimate and correction ----
 
 /// A kernel whose invocation `i` reads `words` words from `SAMPLES_IN` at `i * words` and writes
@@ -1759,7 +1851,10 @@ fn word_kernel(
 ) -> TypedModule {
     let mut b = ModuleBuilder::new();
     let t = Types::new(&mut b).expect("types");
-    let tables = SrgbTables::declare(&mut b, t).expect("tables");
+    // Every table: an sRGB format's, read as floats and written in its own format.
+    let srgb = ColorResolveFormat::of(Format::R8G8B8A8_SRGB).expect("closed");
+    let tables =
+        SrgbTables::declare(&mut b, t, srgb, ResolveSource::InputAttachment).expect("tables");
     let buffer = super::super::visibility_resolve::words_buffer;
     let input = buffer(&mut b, SAMPLES_IN, t.u32_).expect("in");
     let output = buffer(&mut b, RESOLVED_OUT, t.u32_).expect("out");
@@ -1916,7 +2011,8 @@ fn the_srgb_codes_are_exact_from_any_estimate_near_the_encode() {
         let offset = f.convert(ConvOp::Bitcast, w[1], t.f32_)?;
         let e = srgb_estimate(f, t, x)?;
         let e = f.binary(BinOp::FAdd, e, offset)?;
-        corrected_rank(f, t, tables.midpoints, x, e, BinOp::FOrdGreaterThanEqual)
+        let midpoints = tables.midpoints.expect("midpoints");
+        corrected_rank(f, t, midpoints, x, e, BinOp::FOrdGreaterThanEqual)
     });
     let cases: Vec<(f32, u32, f32)> = srgb_floats()
         .into_iter()

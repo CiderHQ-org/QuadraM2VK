@@ -638,6 +638,50 @@ fn a8_is_direct_where_exposed_and_samples_as_red_elsewhere() {
     assert_eq!(m.format, vk::Format::A8_UNORM);
 }
 
+/// A `BGRA8Unorm_sRGB` storage texture is its `B8G8R8A8_UNORM` twin's encode view where the device
+/// accesses the twin without a format (SPIR-V names no BGRA image format), and else an
+/// `R8G8B8A8_UNORM` view that encodes and exchanges red and blue (`SrgbEncodeBgra`), which every
+/// committed profile stores: ARL's and Pascal's profiles state no `VkFormatProperties3`, so their
+/// twin takes neither access without a format, and the Iris Xe's ANV reads no storage image
+/// without one. Its texture lists the view among its formats.
+#[test]
+fn bgra8_srgb_storage_takes_an_rgba8_view_where_its_twin_is_not_declarable() {
+    let mut swizzled = Vec::new();
+    for (name, dev) in committed_devices() {
+        let p = dev.profile();
+        let pf = PixelFormat::BGRA8UnormSRGB;
+        let c = storage_image_choice(pf, p).unwrap_or_else(|e| panic!("{name}: {e}"));
+            vk::Format::B8G8R8A8_UNORM,
+            StorageUse::READ_WRITE_TEXTURE,
+            p,
+        match c.class {
+            StorageImageClass::Identity => {}
+            StorageImageClass::SrgbEncode => {
+                assert!(twin, "{name}");
+                assert_eq!(c.vk_format, vk::Format::B8G8R8A8_UNORM, "{name}");
+            }
+            StorageImageClass::SrgbEncodeBgra => {
+                assert!(!twin, "{name}");
+                assert_eq!(c.vk_format, vk::Format::R8G8B8A8_UNORM, "{name}");
+                assert_eq!(
+                    c.alias,
+                    Some(AliasView::new(vk::Format::B8G8R8A8_SRGB)),
+                    "{name}"
+                );
+                assert!(
+                    storage_view_formats(pf, p).contains(&vk::Format::R8G8B8A8_UNORM),
+                    "{name}"
+                );
+                swizzled.push(name);
+            }
+            other => panic!("{name}: {other:?}"),
+        }
+    }
+    for want in ["intel-arl-anv", "nvidia-pascal-linux", "intel-irisxe-anv"] {
+        assert!(swizzled.iter().any(|n| n == want), "{want}: {swizzled:?}");
+    }
+}
+
 /// An `A8Unorm` view reads an `R8Unorm` image through `(Zero, Zero, Zero, Red)` composed under the
 /// view's own swizzle, where the device has `A8_UNORM` and where it does not (the probe a8view on
 /// an Apple M3 Max under macOS 27.0.1: Metal's `A8Unorm` view of an `R8Unorm` texture made without
@@ -1261,6 +1305,91 @@ fn depth_and_stencil_fall_back_to_combined_formats() {
     );
 }
 
+/// A one- or two-channel 8-bit sRGB storage texture on a device that stores neither sRGB format
+/// takes its UNORM twin's view, converting through Metal's tables (`SrgbEncode`), as the
+/// four-channel ones do; without the UNORM format's storage the refusal names both routes.
+#[test]
+fn one_and_two_channel_srgb_storage_takes_the_unorm_alias() {
+    use vk::Format as F;
+    let storage = SAMPLED | vk::FormatFeatureFlags::STORAGE_IMAGE;
+    let stored = device(floor_with(&[
+        (F::R8_UNORM, storage),
+        (F::R8G8_UNORM, storage),
+        (F::R8_SRGB, SAMPLED),
+        (F::R8G8_SRGB, SAMPLED),
+    ]));
+    for (pf, image, view) in [
+        (PixelFormat::R8UnormSRGB, F::R8_SRGB, F::R8_UNORM),
+        (PixelFormat::RG8UnormSRGB, F::R8G8_SRGB, F::R8G8_UNORM),
+    ] {
+        let mut want = StorageImageChoice::new(view, StorageImageClass::SrgbEncode);
+        want.alias = Some(AliasView::new(image));
+        assert_eq!(
+            storage_image_choice(pf, stored.profile()),
+            Ok(want),
+            "{pf:?}"
+        );
+    }
+    let unstored = device(floor_with(&[(F::R8_UNORM, SAMPLED), (F::R8_SRGB, SAMPLED)]));
+    let Err(Error::Unsupported(u)) =
+        storage_image_choice(PixelFormat::R8UnormSRGB, unstored.profile())
+    else {
+        panic!("R8Unorm_sRGB stored without R8_UNORM storage");
+    };
+    let named: Vec<Vec<vk::Format>> = match u.needs {
+        Needs::AnyOf(routes) => routes
+            .iter()
+            .map(|route| {
+                route
+                    .iter()
+                    .filter_map(|c| match c {
+                        Capability::Format { format, .. } => Some(*format),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .collect(),
+        other => panic!("{other:?}"),
+    };
+    assert!(
+        named[0].contains(&F::R8_SRGB) && named[1].contains(&F::R8_UNORM),
+        "{named:?}"
+    );
+}
+
+/// An `RGB9E5Float` storage texture takes its `R32_UINT` alias, holding Metal's word
+/// (`SharedExponentBits`), on a device that does not store the format and on one that stores it
+/// (whose own conversion rounds the mantissas half up, where Metal truncates them).
+#[test]
+fn shared_exponent_storage_takes_the_word_alias() {
+    use vk::Format as F;
+    let storage = SAMPLED | vk::FormatFeatureFlags::STORAGE_IMAGE;
+    let unstored = device(floor_with(&[
+        (F::R32_UINT, storage),
+        (F::E5B9G9R9_UFLOAT_PACK32, SAMPLED),
+    ]));
+    let mut want = StorageImageChoice::new(F::R32_UINT, StorageImageClass::SharedExponentBits);
+    want.alias = Some(AliasView::new(F::E5B9G9R9_UFLOAT_PACK32));
+    assert_eq!(
+        storage_image_choice(PixelFormat::RGB9E5Float, unstored.profile()),
+        Ok(want)
+    );
+    let mut desc = floor_with(&[(F::R32_UINT, storage), (F::E5B9G9R9_UFLOAT_PACK32, storage)]);
+    if let Some(e5) = desc.formats.formats.get_mut(&F::E5B9G9R9_UFLOAT_PACK32) {
+        e5.optimal_tiling |= vk::FormatFeatureFlags2::STORAGE_READ_WITHOUT_FORMAT
+            | vk::FormatFeatureFlags2::STORAGE_WRITE_WITHOUT_FORMAT;
+    }
+    desc.features
+        .insert(VkFeature::ShaderStorageImageReadWithoutFormat);
+    desc.features
+        .insert(VkFeature::ShaderStorageImageWriteWithoutFormat);
+    let stored = device(desc);
+    assert_eq!(
+        storage_image_choice(PixelFormat::RGB9E5Float, stored.profile()),
+        Ok(want)
+    );
+}
+
 /// The required fixture shape: on a profile where bgra8 lacks `STORAGE_IMAGE`, a bgra8 and an rgba8
 /// storage texture get distinct choices (and so distinct keys).
 #[test]
@@ -1286,8 +1415,14 @@ fn storage_choices_follow_d25() {
     let srgb = choice(PixelFormat::RGBA8UnormSRGB, &typed).unwrap();
     assert_eq!(srgb.class, StorageImageClass::SrgbEncode);
     assert_eq!(srgb.alias, Some(AliasView::new(vk::Format::R8G8B8A8_SRGB)));
-    // bgra8 sRGB needs its own UNORM twin to be declarable: formatless only.
-    assert!(choice(PixelFormat::BGRA8UnormSRGB, &typed).is_err());
+    // bgra8 sRGB, whose own UNORM twin is declarable only without a format, takes both
+    // conversions through rgba8.
+    let mut srgb_bgra = StorageImageChoice::new(
+        vk::Format::R8G8B8A8_UNORM,
+        StorageImageClass::SrgbEncodeBgra,
+    );
+    srgb_bgra.alias = Some(AliasView::new(vk::Format::B8G8R8A8_SRGB));
+    assert_eq!(choice(PixelFormat::BGRA8UnormSRGB, &typed), Ok(srgb_bgra));
     assert_eq!(
         choice(PixelFormat::Depth32Float, &typed),
         Err(Unsupported::not_representable(Feature::Format).into())
@@ -1382,30 +1517,11 @@ fn storage_choices_follow_d25() {
         choice(PixelFormat::RGBA16Sint, &formatless),
         Ok(unknown(SampledType::Sint))
     );
-    assert_eq!(choice(PixelFormat::A8Unorm, &formatless), a8_lacks(true));
-    // bgra8 sRGB has only its UNORM twin's encode view, which the shader cannot declare either:
-    // a typed refusal naming each route's without-format usages (both conversions through rgba8 are
-    // not modelled).
-    let without = |format| {
-        [
-            FormatUsage::StorageImageReadWithoutFormat,
-            FormatUsage::StorageImageWriteWithoutFormat,
-        ]
-        .map(|usage| Capability::Format { format, usage })
-    };
-    let srgb = vk::Format::B8G8R8A8_SRGB;
-    let mut direct = vec![Capability::Format {
-        format: srgb,
-        usage: FormatUsage::StorageImage,
-    }];
-    direct.extend(without(srgb));
+    // bgra8 sRGB's UNORM twin is not accessed without a format here (no `VkFormatProperties3`):
+    // both conversions through rgba8.
     assert_eq!(
         choice(PixelFormat::BGRA8UnormSRGB, &formatless),
-        Err(Unsupported::needs_any_of(
-            Feature::Format,
-            vec![direct, without(vk::Format::B8G8R8A8_UNORM).to_vec()]
-        )
-        .into())
+        Ok(srgb_bgra)
     );
 }
 

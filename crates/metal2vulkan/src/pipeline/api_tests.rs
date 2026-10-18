@@ -196,6 +196,7 @@ mod serde_round_trips {
             dropped_vertex_layer: true,
             storage_view_slots: BTreeSet::from([buffer(3)]),
             srgb_textures: BTreeSet::from([slot(Stage::Kernel, SlotClass::Texture, 4)]),
+            srgb_twins: BTreeSet::from([slot(Stage::Kernel, SlotClass::Texture, 4)]),
             ycbcr_textures: BTreeSet::from([slot(Stage::Kernel, SlotClass::Texture, 6)]),
             flat_grid: true,
             replay_bindings: true,
@@ -321,6 +322,7 @@ mod serde_round_trips {
                 half_blends: BTreeSet::from([0]),
             }),
             srgb_textures: BTreeSet::from([slot(Stage::Fragment, SlotClass::Texture, 7)]),
+            srgb_twins: BTreeSet::from([slot(Stage::Fragment, SlotClass::Texture, 7)]),
             snapshot_textures: BTreeMap::from([(
                 slot(Stage::Fragment, SlotClass::Texture, 3),
                 crate::pipeline::SnapshotForm::Half,

@@ -50,31 +50,40 @@
 //! over the whole viewport from `VertexIndex` 0 to 2 (the sample planes merge's), and a `Fragment`
 //! entry `main` that reads each of a pixel's samples from its [`ResolveSource`] at
 //! [`ColorResolveModules::SOURCE_BINDING`] of set [`ColorResolveModules::SET`], resolves each
-//! channel by its rule, and writes the result to the color output at `Location` 0 as the float
-//! that the resolve texture's format stores as the resolved code: `code / (2^b - 1)` for unorm,
+//! channel by its rule, and writes the result to the color output at `Location` 0 as the float that
+//! the resolve texture's format stores as the resolved code: `code / (2^b - 1)` for unorm,
 //! `code / (2^(b-1) - 1)` for snorm, the code's linear value for sRGB (the attachment encodes it),
-//! and the float's own bits. A pixel whose samples all hold the same bits, as every pixel inside
-//! a primitive does where one invocation writes each covered sample, skips the average: there
-//! every rule but the 32-bit float's gives back the sample's code (a 16-bit float's NaN and -0 as
-//! +0), so the module writes that code's float, after a small float's grid step and a shared
-//! exponent's encode as after an average. The 32-bit float's rule always averages, as its sum
-//! rounds; so does a format of unorm and snorm channels alone, whose average costs about what
-//! comparing the samples does: on a Radeon 780M, comparing first took 8% off an `RGBA8Unorm`
-//! 1080p 4x resolve's cost over a plain store where every pixel's samples matched, and added 14%
-//! where one pixel in 16 straddled an edge (`runtime_lane::resolve_rounding`'s cost test).
+//! or `code / 255` where the result is written through the raw twin's view
+//! ([`ColorResolveFormat::written_raw`]), and the float's own bits. A pixel whose samples all hold
+//! the same bits, as every pixel inside a primitive does where one invocation writes each covered
+//! sample, skips the average: there every rule but the 32-bit float's gives back the sample's code
+//! (a 16-bit float's NaN and -0 as +0), so the module writes that code's float, after a small
+//! float's grid step and a shared exponent's encode as after an average. The 32-bit float's rule
+//! always averages, as its sum rounds; so does a format of unorm and snorm channels alone, whose
+//! average costs about what comparing the samples does: on a Radeon 780M, comparing first took 8%
+//! off an `RGBA8Unorm` 1080p 4x resolve's cost over a plain store where every pixel's samples
+//! matched, and added 14% where one pixel in 16 straddled an edge
+//! (`runtime_lane::resolve_rounding`'s cost test).
 //!
 //! - [`ResolveSource::InputAttachment`]: the multisampled attachment as the input attachment of
 //!   index 0 (`InputAttachmentIndex 0`), in its own format, read at each sample. A unorm or snorm
 //!   channel's code is its float times the code's scale, rounded; an sRGB channel's the code whose
 //!   linear value is nearest the float; a float's its bits (a half's as the `float` it reads as).
+//! - [`ResolveSource::RawInputAttachment`]: the same attachment viewed in the format's raw twin
+//!   ([`ColorResolveFormat::raw_format`]: an 8-bit sRGB format's UNORM one), so an sRGB channel's
+//!   float is its code over 255, whose code is read as a unorm channel's, with no table lookup.
+//!   Another format's raw twin is itself, and the source reads it as
+//!   [`ResolveSource::InputAttachment`] does.
 //! - [`ResolveSource::Planes`]: the attachment's sample planes (`bind::PlanesCopy`), a sampled
 //!   2D-array view of every layer in the copy format, layer `s` holding sample `s`: each channel's
 //!   code is its bits in the texel `(FragCoord.xy, s)` (a half's, unpacked to its `float`).
 //!
 //! Draw it into a render pass whose one color attachment is the resolve texture's single-sampled
-//! level and layer in its own format, over the render area, one sample, without blending; for
+//! level and layer in [`ColorResolveFormat::written_format`] (its own format, or its raw twin
+//! where the result is written raw), over the render area, one sample, without blending; for
 //! [`ResolveSource::InputAttachment`] the pass's subpass also reads the multisampled attachment as
-//! its input attachment 0.
+//! its input attachment 0, and for [`ResolveSource::RawInputAttachment`] a view of it in its raw
+//! twin.
 //!
 //! **Synchronization** (consumer): the samples' writes before the draw's reads, and the resolve
 //! texture's earlier accesses before its color writes.
@@ -206,6 +215,9 @@ pub struct ResolveChannel {
 pub struct ColorResolveFormat {
     format: Format,
     channels: [Option<ResolveChannel>; 4],
+    /// Whether the result is written through the raw twin's view
+    /// ([`ColorResolveFormat::written_raw`]).
+    written_raw: bool,
 }
 
 /// A channel of `rule` at bit `offset`.
@@ -272,7 +284,11 @@ impl ColorResolveFormat {
             Format::E5B9G9R9_UFLOAT_PACK32 => [at(E9, 0), at(E9, 9), at(E9, 18), None],
             _ => return None,
         };
-        Some(ColorResolveFormat { format, channels })
+        Some(ColorResolveFormat {
+            format,
+            channels,
+            written_raw: false,
+        })
     }
 
     /// The Vulkan format.
@@ -293,6 +309,38 @@ impl ColorResolveFormat {
             .iter()
             .flatten()
             .all(|c| c.rule.resolves(samples))
+    }
+
+    /// The format of the view [`ResolveSource::RawInputAttachment`] reads: an 8-bit sRGB format's
+    /// UNORM twin, whose floats are the codes over 255; any other format itself.
+    pub fn raw_format(self) -> Format {
+        match self.format {
+            Format::R8_SRGB => Format::R8_UNORM,
+            Format::R8G8_SRGB => Format::R8G8_UNORM,
+            Format::R8G8B8A8_SRGB => Format::R8G8B8A8_UNORM,
+            Format::B8G8R8A8_SRGB => Format::B8G8R8A8_UNORM,
+            format => format,
+        }
+    }
+
+    /// The resolve writing its result through a view of the format's raw twin
+    /// ([`raw_format`](Self::raw_format)): an sRGB channel's code as an 8-bit unorm code's float,
+    /// `code / 255`, which the twin's store keeps as the code, in place of the code's linear value,
+    /// which the format's own store encodes. Another format's is itself.
+    pub fn written_raw(self) -> ColorResolveFormat {
+        ColorResolveFormat {
+            written_raw: self.raw_format() != self.format,
+            ..self
+        }
+    }
+
+    /// The format of the view the result is written through: the raw twin's where
+    /// [`written_raw`](Self::written_raw), else the format.
+    pub fn written_format(self) -> Format {
+        match self.written_raw {
+            true => self.raw_format(),
+            false => self.format,
+        }
     }
 
     /// Whether the channels share an exponent (`RGB9E5Float`'s, at bits 27 to 31).
@@ -319,6 +367,9 @@ impl ColorResolveFormat {
 pub enum ResolveSource {
     /// The multisampled attachment, as input attachment 0.
     InputAttachment,
+    /// The multisampled attachment, as input attachment 0, viewed in its format's raw twin
+    /// ([`ColorResolveFormat::raw_format`]).
+    RawInputAttachment,
     /// The attachment's sample planes, viewed in their copy format.
     Planes(PlanesCopy),
 }
@@ -506,15 +557,26 @@ struct SrgbTables {
     linear: GlobalId,
     /// [`SRGB_RESOLVE_THRESHOLDS`].
     thresholds: GlobalId,
-    /// Each code's linear value as an `f32`: what the attachment encodes as the code.
-    decoded: GlobalId,
+    /// Each code's linear value as an `f32`: what the attachment encodes as the code. Declared
+    /// only where the module writes an sRGB channel's linear value (not
+    /// [`ColorResolveFormat::written_raw`]).
+    decoded: Option<GlobalId>,
     /// The `f32` midway between each code's linear value and the next code's: an input
-    /// attachment's float is the code of the midpoints at or below it.
-    midpoints: GlobalId,
+    /// attachment's float is the code of the midpoints at or below it. Declared only where the
+    /// module reads an sRGB attachment's floats ([`ResolveSource::InputAttachment`]).
+    midpoints: Option<GlobalId>,
 }
 
 impl SrgbTables {
-    fn declare(b: &mut ModuleBuilder, t: Types) -> BResult<SrgbTables> {
+    /// The tables of `format`'s module reading `source`: [`SrgbTables::midpoints`] among them
+    /// where it reads an sRGB attachment's floats, and [`SrgbTables::decoded`] where it writes
+    /// linear values.
+    fn declare(
+        b: &mut ModuleBuilder,
+        t: Types,
+        format: ColorResolveFormat,
+        source: ResolveSource,
+    ) -> BResult<SrgbTables> {
         let linear = table(
             b,
             t.u32_,
@@ -527,27 +589,53 @@ impl SrgbTables {
             t.u32_,
             SRGB_RESOLVE_THRESHOLDS.iter().map(|&v| u64::from(v)),
         )?;
-        let decoded = table(
-            b,
-            t.f32_,
-            t.u32_,
-            (0..256).map(|k| u64::from((srgb_decode(k) as f32).to_bits())),
-        )?;
-        let midpoints = table(
-            b,
-            t.f32_,
-            t.u32_,
-            (0..255).map(|k| {
-                let mid = (srgb_decode(k) + srgb_decode(k + 1)) / 2.0;
-                u64::from((mid as f32).to_bits())
-            }),
-        )?;
+        let decoded = match format.written_raw {
+            true => None,
+            false => Some(table(
+                b,
+                t.f32_,
+                t.u32_,
+                (0..256).map(|k| u64::from((srgb_decode(k) as f32).to_bits())),
+            )?),
+        };
+        let midpoints = match source == ResolveSource::InputAttachment {
+            true => Some(table(
+                b,
+                t.f32_,
+                t.u32_,
+                (0..255).map(|k| {
+                    let mid = (srgb_decode(k) + srgb_decode(k + 1)) / 2.0;
+                    u64::from((mid as f32).to_bits())
+                }),
+            )?),
+            false => None,
+        };
         Ok(SrgbTables {
             linear,
             thresholds,
             decoded,
             midpoints,
         })
+    }
+}
+
+/// The float an sRGB channel's resolved `code` (a `uint`) is written as: its linear value, which
+/// the format's store encodes as the code, or, written through the raw twin (`tables` without
+/// [`SrgbTables::decoded`]), `code / 255`, which the twin's store keeps as the code, as an 8-bit
+/// unorm channel's.
+fn srgb_written(
+    f: &mut FunctionBuilder<'_>,
+    t: Types,
+    tables: SrgbTables,
+    code: Value,
+) -> BResult<Value> {
+    match tables.decoded {
+        Some(decoded) => element(f, decoded, code),
+        None => {
+            let x = f.convert(ConvOp::ConvertUToF, code, t.f32_)?;
+            let scale = float(f, t, (1.0 / 255.0f64) as f32)?;
+            f.binary(BinOp::FMul, x, scale)
+        }
     }
 }
 
@@ -690,7 +778,16 @@ fn code(
         | ResolveRule::Float16
         | ResolveRule::SmallFloat { .. }
         | ResolveRule::SharedExponent => f.convert(ConvOp::Bitcast, lane, t.u32_),
-        ResolveRule::Unorm { .. } | ResolveRule::HalfUnorm { .. } => {
+        ResolveRule::Srgb if source != ResolveSource::RawInputAttachment => {
+            let midpoints = srgb
+                .and_then(|tables| tables.midpoints)
+                .ok_or(crate::spirv::error::BuildError::IdSpaceExhausted)?;
+            let estimate = srgb_estimate(f, t, lane)?;
+            corrected_rank(f, t, midpoints, lane, estimate, BinOp::FOrdGreaterThanEqual)
+        }
+        // Read through the raw twin, an sRGB channel's float is its code over 255: an 8-bit unorm
+        // code's.
+        ResolveRule::Unorm { .. } | ResolveRule::HalfUnorm { .. } | ResolveRule::Srgb => {
             let scale = float(f, t, ((1u64 << bits) - 1) as f32)?;
             let half = float(f, t, 0.5)?;
             let x = f.binary(BinOp::FMul, lane, scale)?;
@@ -702,18 +799,6 @@ fn code(
             let x = f.binary(BinOp::FMul, lane, scale)?;
             let x = f.glsl(GlslOp::Round, &[x])?;
             f.convert(ConvOp::ConvertFToS, x, t.i32_)
-        }
-        ResolveRule::Srgb => {
-            let tables = srgb.ok_or(crate::spirv::error::BuildError::IdSpaceExhausted)?;
-            let estimate = srgb_estimate(f, t, lane)?;
-            corrected_rank(
-                f,
-                t,
-                tables.midpoints,
-                lane,
-                estimate,
-                BinOp::FOrdGreaterThanEqual,
-            )
         }
     }
 }
@@ -870,7 +955,7 @@ fn resolve(
                 estimate,
                 BinOp::UGreaterThanEqual,
             )?;
-            element(f, tables.decoded, code)
+            srgb_written(f, t, tables, code)
         }
         ResolveRule::HalfUnorm { .. } => resolve_half_unorm(f, t, bits, codes),
         ResolveRule::Float32 => {
@@ -1218,7 +1303,7 @@ fn resolve_alike(
         }
         ResolveRule::Srgb => {
             let tables = srgb.ok_or(crate::spirv::error::BuildError::IdSpaceExhausted)?;
-            element(f, tables.decoded, code)?
+            srgb_written(f, t, tables, code)?
         }
         ResolveRule::Float16 | ResolveRule::SharedExponent => half(f)?,
         ResolveRule::SmallFloat { mantissa } => {
@@ -1347,12 +1432,12 @@ pub fn fragment_typed_module(
     let mut b = ModuleBuilder::new();
     let t = Types::new(&mut b)?;
     let srgb = if format.srgb() {
-        Some(SrgbTables::declare(&mut b, t)?)
+        Some(SrgbTables::declare(&mut b, t, format, source)?)
     } else {
         None
     };
     let (image, coord) = match source {
-        ResolveSource::InputAttachment => {
+        ResolveSource::InputAttachment | ResolveSource::RawInputAttachment => {
             let ty = b.ty(Type::Image(ImageType {
                 sampled_type: t.f32_,
                 dim: Dim::SubpassData,

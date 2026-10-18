@@ -94,19 +94,12 @@
 //! device specializes the module the arithmetic folds to the bound sampler's. A `MirrorClampToEdge`
 //! axis, which only a runtime sampler states, reflects each tap's index once, `-1 - i` for a
 //! negative `i`, and clamps it into the level, under pixel and normalized coordinates alike, its
-//! constant texel offset placed as on a repeating axis (RRP-probe1-m4 and RRP-probe5-m4, Apple M4:
-//! every lane of nearest and linear samples, gathers and depth comparisons of textures 1 to 8
-//! texels wide); the emulation reaches it on a 1D or 2D texture, and the device filters it on a 3D
-//! texture or a cube, where no probe measured it ([`Linear::mirror_clamp_reached`]).
-//! Argument-buffer samplers are not reached: their textures are heap elements, whose format no
-//! specialization states; the device filters them, under the notes. A slot under its 8-bit sRGB
-//! variant is (EVs TXN-srgbprobe-m3 and -m4, Metal's samples of `RGBA8Unorm_sRGB` and
-//! `BGRA8Unorm_sRGB` through a runtime sampler are its constexpr sampler's of the same state, bit
-//! for bit, in 1D, 2D, and 3D): the emulation sums the raw codes fetched through the slot's raw
-//! view (`Linear::fetch`) where the word reaches it, and elsewhere the device samples the slot's
-//! own binding, the decoding view, under `PrecisionNote::SrgbTexelDecode` ([`decode_when`]). A
-//! cube's is inferred from the same equality on the other formats and from its constexpr
-//! sampler's raw emulation.
+//! view (`Linear::fetch`) where the word reaches it; where the word reads one texel the device
+//! samples the raw view through the same sampler, and Metal's table decodes the code, as a
+//! constexpr nearest sample's raw read does; elsewhere the device samples the slot's own binding,
+//! the decoding view, under `PrecisionNote::SrgbTexelDecode` ([`decode_when`]). A cube's is
+//! inferred from the same equality on the other formats and from its constexpr sampler's raw
+//! emulation; its word that reads one texel samples the decoding view too.
 //!
 //! **Where it is exact**, on the probes: in 1D and 2D for every measured format (a 16-bit
 //! normalized format's 2D sum on every channel of probes, under `clamp_to_edge`, `repeat`,
@@ -225,8 +218,9 @@ pub struct Linear {
     /// variant: each tap's color lanes become the table's steps (`srgb_raw_tap`), and the exact
     /// routine sums them on the sRGB grids (`BicubicTexels::SRGB`), whatever the device. Through a
     /// runtime sampler slot it does so where the word reaches the emulation, its taps fetched
-    /// through [`fetch`](Self::fetch), the slot's raw view; the sample's own binding is the
-    /// decoding view, which its device arm samples elsewhere.
+    /// through [`fetch`](Self::fetch), the slot's raw view, which its device arm samples where the
+    /// word reads one texel; the sample's own binding is the decoding view, which its device arm
+    /// samples elsewhere.
     pub raw: bool,
     /// A cube's sample (`cube`), with its face position's routines: its taps are fetched from the
     /// faces of the slot's 2D-array view (its raw view where `raw`), its state's addressing is its
@@ -801,11 +795,17 @@ pub(super) fn device_when(l: &Linear) -> Vec<NoteClause> {
 }
 
 /// Where a raw emulation `l` through a runtime sampler slot hands its sample to the device's
-/// decoding view (`PrecisionNote::SrgbTexelDecode`): wherever the word does not reach the
-/// emulation, a word that reads one texel included. Never for another emulation.
+/// decoding view (`PrecisionNote::SrgbTexelDecode`): where the word does not reach the emulation
+/// and filters, since a word that reads one texel samples the slot's raw view ([`Linear::fetch`]);
+/// a cube's (no such view) wherever the word does not reach it. Never for another emulation.
 pub(super) fn decode_when(l: &Linear) -> Vec<NoteClause> {
-    match (&l.state, l.raw) {
-        (LinearState::Slot { sampler, .. }, true) => unreached(l, *sampler),
+    match (&l.state, l.raw, &l.cube) {
+        // A word that reads one texel samples the raw view ([`emit`], [`emit_shared`]): the
+        // device decodes only where the word filters too.
+        (LinearState::Slot { sampler, .. }, true, None) => {
+            both(&unreached(l, *sampler), &word_filters(*sampler))
+        }
+        (LinearState::Slot { sampler, .. }, true, Some(_)) => unreached(l, *sampler),
         _ => Vec::new(),
     }
 }
@@ -958,8 +958,9 @@ fn reaches(s: &SamplerState) -> bool {
 /// binding's sampled image (a `vec4` of `f32`), converted as a sample's for a `half` result: a
 /// branch on the slot's `TexelFormat` specialization, so only one of them runs, and once a device
 /// specializes the module the other is dead. A raw emulation runs alone through a constexpr
-/// sampler, and through a runtime sampler where its word reaches it, the device's sample of the
-/// binding's decoding view elsewhere. Each arm loads the binding's sampled image, which is consumed
+/// sampler, and through a runtime sampler where its word reaches it; elsewhere the device samples
+/// the slot's raw view where the word reads one texel, decoded through Metal's table, and the
+/// binding's decoding view otherwise. Each arm loads the binding's sampled image, which is consumed
 /// in the block that loads it, or a cube's emulation the slot's 2D-array view at `plane`, the
 /// direction the device's sample reads (its ties broken as Metal breaks them). A `half` result is
 /// the held `half` texel.
@@ -1073,6 +1074,19 @@ pub(super) fn emit(
                 device(fb, si)?
             }
         };
+        // Under the slot's twin variant the device sampled the codes: decoded through the table,
+        // exactly where the sampler read one texel.
+        let x = match s.srgb_codes {
+            true => {
+                let four = crate::lower::texture::TexelForm {
+                    lanes: 4,
+                    conv: crate::lower::texture::TexelConv::F32,
+                };
+                let color = crate::lower::texture::SRGB_TEXEL;
+                crate::lower::texture::srgb_filtered_texel(cx, fb, four, x, color)?
+            }
+            false => x,
+        };
         let x = match (h, float) {
             (Some(HalfArm::Class(h)), _) => {
                 let lanes = super::emit::sample_lanes(cx, fb, s)?;
@@ -1095,11 +1109,55 @@ pub(super) fn emit(
         };
         Ok(ArmEnd::FallThrough(vec![x]))
     });
-    let Merged(merged) = fb.if_(cx, measured, emulated, Some(filtered))?;
+    // A raw emulation's device arm, where the runtime sampler's word reads one texel (nearest
+    // minification and magnification, no linear mip filter, isotropic): the device's sample of the
+    // slot's raw view, through the same sampler, reads that texel's code, which Metal's table
+    // decodes exactly, as a constexpr nearest sample's raw read does. Every other word samples the
+    // decoding view ([`decode_when`]). Under the slot's twin variant the decoding view holds the
+    // codes already.
+    let device_arm: ArmFn<'_, EmitCx<'_>> = match (l.raw, word, &l.cube, s.srgb_codes) {
+        (true, Some(word), None, false) => {
+            let (Some(raw_key), Some(form)) = (l.fetch, s.texel) else {
+                return Err(cx.fail("a raw sample's device arm without its raw view"));
+            };
+            let Some(&(raw_binding, _)) = cx.decl.families.sampler.combined.get(&raw_key) else {
+                return Err(cx.fail(format!("raw binding {raw_key:?} is not declared")));
+            };
+            let raw: ArmFn<'_, EmitCx<'_>> = Box::new(move |fb, cx| {
+                let si = raw_binding.sampled_image(fb)?;
+                let x = device(fb, si)?;
+                let color = crate::lower::texture::SRGB_TEXEL;
+                let x = crate::lower::texture::srgb_raw_texel(cx, fb, form, x, color)?;
+                Ok(ArmEnd::FallThrough(vec![x]))
+            });
+            one_texel_arm(word, raw, filtered)
+        }
+        _ => filtered,
+    };
+    let Merged(merged) = fb.if_(cx, measured, emulated, Some(device_arm))?;
     match merged[..] {
         [x] => Ok(x),
         _ => Err(cx.fail("a linear sample's branch without its texel")),
     }
+}
+
+/// A raw emulation's device arm through runtime sampler word `word`: `raw`'s texel (the device's
+/// sample of the slot's raw view, decoded through Metal's table) where the word reads one texel
+/// (`compared::one_texel`), else `filtered`'s (the device's sample of the decoding view).
+fn one_texel_arm<'a, 'c: 'a>(
+    word: SValue,
+    raw: ArmFn<'a, EmitCx<'c>>,
+    filtered: ArmFn<'a, EmitCx<'c>>,
+) -> ArmFn<'a, EmitCx<'c>> {
+    Box::new(move |fb, cx| {
+        let t = Tys::new(fb)?;
+        let (one, _) = super::compared::one_texel(fb, &t, word)?;
+        let Merged(merged) = fb.if_(cx, one, raw, Some(filtered))?;
+        match merged[..] {
+            [x] => Ok(ArmEnd::FallThrough(vec![x])),
+            _ => Err(cx.fail("a raw sample's device arm without its texel")),
+        }
+    })
 }
 
 /// The gathered texel of cube gather `s` by `g` (`cube`) of channel `component`, along `plane` (the
@@ -1239,7 +1297,34 @@ pub(super) fn emit_shared(
         };
         Ok(ArmEnd::FallThrough(vec![x]))
     });
-    let Merged(merged) = fb.if_(cx, measured, emulated, Some(filtered))?;
+    // A raw emulation's device arm reads each arm's raw view where the word reads one texel, as
+    // [`emit`]'s does; a null arm's zero decodes to zero.
+    let device_arm: ArmFn<'_, EmitCx<'_>> = match (l.raw, word, &l.cube, s.srgb_codes) {
+        (true, Some(word), None, false) => {
+            let (Some(_), Some(form)) = (l.fetch, s.texel) else {
+                return Err(cx.fail("a shared raw sample's device arm without its raw view"));
+            };
+            let raw: ArmFn<'_, EmitCx<'_>> = Box::new(move |fb, cx| {
+                let read = |cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>, a: &Sampling| {
+                    let si = c.fetch_sampled_image(cx, fb, a)?;
+                    Ok(vec![device(fb, si)?])
+                };
+                let null = |_: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>| {
+                    let z = fb.module().constant(Constant::Null { ty: t.vec4 })?;
+                    Ok(vec![value(fb, z)?])
+                };
+                let [x] = c.each(cx, fb, &read, &null)?[..] else {
+                    return Err(cx.fail("a shared raw sample's device texel"));
+                };
+                let color = crate::lower::texture::SRGB_TEXEL;
+                let x = crate::lower::texture::srgb_raw_texel(cx, fb, form, x, color)?;
+                Ok(ArmEnd::FallThrough(vec![x]))
+            });
+            one_texel_arm(word, raw, filtered)
+        }
+        _ => filtered,
+    };
+    let Merged(merged) = fb.if_(cx, measured, emulated, Some(device_arm))?;
     match merged[..] {
         [x] => Ok(x),
         _ => Err(cx.fail("a linear sample's branch without its texel")),

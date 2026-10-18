@@ -301,8 +301,8 @@ use crate::bind::plan::resources::{separate_samplers, ResourcePlanner};
 use crate::bind::plan::slots::{
     address_map_variant, anisotropic_variant, bindings, bound_value, buffer_use, check_slots,
     check_sparse_textures, cross_variant, cubic_variant, large_view_candidates, mark_disjoint,
-    plan_buffer, psb_variant, range_variant, record_specialized, snapshot_forms, srgb_variant,
-    storage_view_variant, used_uses, ycbcr_variant,
+    plan_buffer, psb_variant, range_variant, record_specialized, snapshot_forms, srgb_twin_variant,
+    srgb_variant, storage_view_variant, used_uses, ycbcr_variant,
 };
 use crate::bind::plan::{
     AccessClass, BindingPlan, BoundKind, ByteRange, DescriptorWrite, FactorSite, FactorTemplate,
@@ -2365,6 +2365,7 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
     variant.storage_view_slots = storage_view_variant(&p.dependencies, &buffers, profile);
     variant.cross_class = cross_variant(&p.dependencies, &p.interface.slots, shape);
     variant.srgb_textures = srgb_variant(profile, &p.dependencies, shape, &variant.cross_class);
+    variant.srgb_twins = srgb_twin_variant(profile, &variant.srgb_textures, shape);
     variant.ycbcr_textures = ycbcr_variant(&p.dependencies, shape);
     variant.address_maps = address_map_variant(&p.dependencies, shape);
     variant.cubic_samplers = cubic_variant(&p.dependencies, shape)?;

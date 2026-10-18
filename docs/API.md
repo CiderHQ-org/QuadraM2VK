@@ -2151,7 +2151,8 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   magnification, or a runtime sampler) on a device that does not sample through Metal's own sampler.
 - `metal2vulkan-degrade-srgb-texel-decode` (precision). `PrecisionNote::SrgbTexelDecode`: The module
   reads, samples, or gathers a texture with a `half` or `float` result through the device's sRGB
-  decode where the texture may be bound in an 8-bit sRGB format.
+  decode, or decodes the device's filter of its codes, where the texture may be bound in an 8-bit
+  sRGB format.
 - `metal2vulkan-degrade-float-sample-filter` (precision). `PrecisionNote::FloatSampleFilter`: The
   module samples a texture with a `float` result through a filter on a device that does not sample
   through Metal's own sampler.

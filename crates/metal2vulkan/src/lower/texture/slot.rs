@@ -772,7 +772,10 @@ fn storage_format(
     // written stores its half bits in its unsigned integer alias.
     let converting = !matches!(
         choice.class,
-        StorageImageClass::Identity | StorageImageClass::YCbCrWrite | StorageImageClass::HalfBits
+        StorageImageClass::Identity
+            | StorageImageClass::YCbCrWrite
+            | StorageImageClass::HalfBits
+            | StorageImageClass::SharedExponentBits
     );
     if converting && texel != TexelClass::Float {
         return Err(Unsupported::not_representable(Feature::Format).into());
@@ -1018,11 +1021,12 @@ fn declare_slot(
     // holds each texel's half bits there (`StorageImageClass::HalfBits`): a `float` slot's reads
     // and writes, as the binder chooses it (`metal::format::storage_choice`); no atomic.
     let half_bits = storage
-        && cx
-            .inputs
-            .storage_images
-            .get(&s.slot)
-            .is_some_and(|c| c.class == StorageImageClass::HalfBits);
+        && cx.inputs.storage_images.get(&s.slot).is_some_and(|c| {
+            matches!(
+                c.class,
+                StorageImageClass::HalfBits | StorageImageClass::SharedExponentBits
+            )
+        });
     if half_bits && (s.uses.atomic || !float) {
         return Err(Unsupported::not_representable(Feature::Format).into());
     }
@@ -1386,7 +1390,10 @@ pub fn finish(cx: &mut SelectCx<'_>) -> Result<(), Error> {
     for (index, d, volatile) in decls {
         // An 8-bit sRGB format's codes convert through Metal's twelve-bit tables (`emit::
         // srgb_codes`, `emit::srgb_raw_texel`), which the module declares once.
-        if d.class == StorageImageClass::SrgbEncode {
+        if matches!(
+            d.class,
+            StorageImageClass::SrgbEncode | StorageImageClass::SrgbEncodeBgra
+        ) {
             let written = cx
                 .families
                 .texture

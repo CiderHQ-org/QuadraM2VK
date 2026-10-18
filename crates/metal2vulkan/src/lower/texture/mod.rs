@@ -2082,20 +2082,37 @@ pub(crate) fn srgb_texels(
         return Ok(false);
     }
     // A form the raw codes do not serve everywhere decodes through the device's view, which a
-    // device that cannot sample the bound format does not have.
+    // device that cannot sample the bound format does not have: under the slot's twin variant it
+    // decodes the device's filtered codes instead, through Metal's table.
     if reach != SrgbReach::Raw {
         cx.facts
             .insert(crate::pipeline::facts::RuntimeFact::SrgbDeviceDecode { slot });
     }
-    if reach == SrgbReach::Device {
+    let twin = reach != SrgbReach::Raw && cx.inputs.srgb_twins.contains(&slot);
+    if reach == SrgbReach::Device && !twin {
         device_decode(cx);
         return Ok(false);
+    }
+    if reach == SrgbReach::Device {
+        cx.precision.insert(PrecisionNote::SrgbTexelDecode);
     }
     cx.families
         .arith
         .srgb
         .get_or_insert(crate::air::intrinsics::PackDir::Unpack);
-    Ok(true)
+    Ok(reach != SrgbReach::Device)
+}
+
+/// Whether an access of `image` that keeps the device's decode of an 8-bit sRGB texture
+/// ([`srgb_texels`] with a reach other than [`SrgbReach::Raw`]) samples the bound format's UNORM
+/// twin instead (`LoweringInputs::srgb_twins`: a format the device cannot sample), whose view reads
+/// the codes, so the access decodes the device's filtered codes through Metal's table
+/// (`texture::srgb_filtered_texel`), Metal's value exactly where the filter reads one texel.
+pub(crate) fn srgb_twin(cx: &SelectCx<'_>, image: ImageRef) -> Result<bool, Error> {
+    match image {
+        ImageRef::Slot(index) => Ok(cx.inputs.srgb_twins.contains(&slot_of(cx, index)?.slot)),
+        ImageRef::Heap { .. } => Ok(false),
+    }
 }
 
 /// An access that keeps the device's decode of a texture that may be bound in an 8-bit sRGB
@@ -3349,12 +3366,19 @@ fn select_read_as(
     // (the slot's planning declares it), as a raw view's are.
     let srgb_codes = storage
         && matches!(texel.conv, TexelConv::F16 | TexelConv::F32)
-        && storage_class(cx, image)? == StorageImageClass::SrgbEncode;
+        && matches!(
+            storage_class(cx, image)?,
+            StorageImageClass::SrgbEncode | StorageImageClass::SrgbEncodeBgra
+        );
     // A storage slot's half-float texels, through its unsigned integer alias, widened exactly
-    // (the slot's planning declares it): Metal's read, a NaN's included.
+    // (the slot's planning declares it): Metal's read, a NaN's included. So is an `RGB9E5Float`
+    // slot's word through its `R32_UINT` alias, decoded exactly.
     let half_bits = storage
         && matches!(texel.conv, TexelConv::F16 | TexelConv::F32)
-        && storage_class(cx, image)? == StorageImageClass::HalfBits;
+        && matches!(
+            storage_class(cx, image)?,
+            StorageImageClass::HalfBits | StorageImageClass::SharedExponentBits
+        );
     let exact = raw || srgb_codes || half_bits;
     // An extended-range texel is decoded exactly to `f32`, which a `half` result rounds to
     // nearest even, as Metal answers. A read is one texel.

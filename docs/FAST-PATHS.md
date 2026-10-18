@@ -178,6 +178,12 @@ recorded here.
 Open differences from Metal that no note announces yet, and runtime costs still above the
 driver's. Each is open work.
 
+- **A runtime sampler's nearest sample of an 8-bit sRGB texture under native sampling.** On a
+  device that samples the format, the sample keeps the device's sRGB decode (announced as
+  `SrgbTexelDecode`), where the table's exact decode of the one texel it reads would cost little:
+  the function does not know the bound sampler's filter, and a variant keyed on a nearest
+  sampler's word is not built. Under `SamplingPolicy::Exact` a sample the linear emulation takes
+  (not a cube's) reads the code through the slot's raw view there and decodes it exactly.
 - **ASTC textures on a device without ASTC.** A heap's or a sparse heap's such texture
   (`RuntimeGap::DecodedHeapTexture`) and a view of another decode (its HDR form) are refused.
 - **PVRTC textures on a device without PVRTC.** One without a decoded twin (a sparse heap's, or a

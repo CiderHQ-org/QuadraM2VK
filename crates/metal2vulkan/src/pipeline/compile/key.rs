@@ -200,6 +200,11 @@ pub fn function_key(
             .bytes(format!("{:?}", inputs.srgb_textures).as_bytes());
     }
     // Appended only when set, as `storage_view_slots`.
+    if !inputs.srgb_twins.is_empty() {
+        h.bytes(b"srgb-twins")
+            .bytes(format!("{:?}", inputs.srgb_twins).as_bytes());
+    }
+    // Appended only when set, as `storage_view_slots`.
     if !inputs.snapshot_textures.is_empty() {
         h.bytes(b"snapshot-textures")
             .bytes(format!("{:?}", inputs.snapshot_textures).as_bytes());

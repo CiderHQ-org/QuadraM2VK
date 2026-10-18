@@ -74,6 +74,18 @@ impl Candidates<'_> {
         binding(cx, a)?.0.sampled_image(fb)
     }
 
+    /// The sampled image of arm sampling `a`'s binding its linear taps are fetched through
+    /// (`Linear::fetch`; its own binding where it names none), made in the open block: a raw
+    /// emulation's raw view, through the arm's runtime sampler.
+    pub(super) fn fetch_sampled_image(
+        &self,
+        cx: &mut EmitCx<'_>,
+        fb: &mut FunctionBuilder<'_>,
+        a: &Sampling,
+    ) -> BResult<SValue> {
+        fetch_binding(cx, a)?.sampled_image(fb)
+    }
+
     /// The image of arm sampling `a`'s binding, loaded in the open block: for an emulated linear
     /// comparison the binding its taps are fetched through (`Linear::fetch`).
     pub(super) fn image(
@@ -82,15 +94,7 @@ impl Candidates<'_> {
         fb: &mut FunctionBuilder<'_>,
         a: &Sampling,
     ) -> BResult<SValue> {
-        let key = match (&a.linear, a.source) {
-            (Some(super::linear::Linear { fetch: Some(k), .. }), _) => *k,
-            (_, Source::Combined(key)) => key,
-            _ => return Err(cx.fail("a shared sampling of a heap element")),
-        };
-        match cx.decl.families.sampler.combined.get(&key) {
-            Some(&(b, _)) => b.image(fb),
-            None => Err(cx.fail(format!("combined binding {key:?} is not declared"))),
-        }
+        fetch_binding(cx, a)?.image(fb)
     }
 }
 
@@ -101,6 +105,19 @@ fn binding(cx: &mut EmitCx<'_>, a: &Sampling) -> BResult<(Binding, CombinedImage
     };
     match cx.decl.families.sampler.combined.get(&key) {
         Some(&b) => Ok(b),
+        None => Err(cx.fail(format!("combined binding {key:?} is not declared"))),
+    }
+}
+
+/// The binding arm sampling `a`'s linear taps are fetched through (`Linear::fetch`), else its own.
+fn fetch_binding(cx: &mut EmitCx<'_>, a: &Sampling) -> BResult<Binding> {
+    let key = match (&a.linear, a.source) {
+        (Some(super::linear::Linear { fetch: Some(k), .. }), _) => *k,
+        (_, Source::Combined(key)) => key,
+        _ => return Err(cx.fail("a shared sampling of a heap element")),
+    };
+    match cx.decl.families.sampler.combined.get(&key) {
+        Some(&(b, _)) => Ok(b),
         None => Err(cx.fail(format!("combined binding {key:?} is not declared"))),
     }
 }

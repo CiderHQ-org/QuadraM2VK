@@ -424,11 +424,12 @@ pub enum RuntimeFact {
     AbsentArgumentRead { stage: Stage },
     /// Under its `SrgbTexture` variant (`LoweringInputs::srgb_textures`), the function still
     /// decodes texels of the 8-bit sRGB texture bound to the slot through the device's sampled
-    /// view, in a form the raw codes do not serve (a `float` gather, a linear mip filter, a
-    /// runtime sampler's sample; `PrecisionNote::SrgbTexelDecode`). Where the device cannot sample
-    /// the bound sRGB format, whose texture it holds as the format's UNORM twin, the planner
-    /// refuses the texture there, needing the format's `SampledImage`; without the fact the
-    /// slot's own binding serves queries alone and takes the twin's view.
+    /// view, in a form the raw codes do not serve (a `float` gather on Metal's own sampler, a
+    /// linear mip filter, a runtime sampler's sample; `PrecisionNote::SrgbTexelDecode`). Where the
+    /// device cannot sample the bound sRGB format, whose texture it holds as the format's UNORM
+    /// twin, the slot's own binding takes the twin's view, and the plan's variant names the slot
+    /// in `VariantKey::srgb_twins`, under which the function decodes what the device samples
+    /// there; without the fact that binding serves queries alone.
     SrgbDeviceDecode { slot: SlotRef },
     /// The fragment function was compiled under `VariantKey::zeroed_colors`
     /// (`LoweringInputs::zeroed_colors`): it writes zero to color attachment `color`, of pixel

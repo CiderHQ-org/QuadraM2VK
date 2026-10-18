@@ -1393,6 +1393,62 @@ fn a_maps_form_pass_resolves_bgra8_by_metals_rule() {
     quiet(lane, &messages);
 }
 
+/// A 4x sRGB texture of `RenderTarget` usage alone, cleared in a pass of no draws that resolves
+/// it, resolves to the clear's codes, the bytes Metal stores for that clear (`renders.rs`'
+/// `COLOR_CLEARS`): every sample holds the clear, which Metal's rule gives back. The exact resolve
+/// reads such an attachment through its UNORM twin's view (`color_resolve.rs`), whatever form the
+/// device keeps the clear in.
+#[test]
+fn cleared_srgb_attachments_resolve_to_the_clear_s_codes() {
+    let (messages, _cache, lane) = lane();
+    let name = lane.device.name().to_owned();
+    let side = 64u32;
+    for (pf, [r, g, b, a], bytes) in [
+        (
+            PixelFormat::RGBA8UnormSRGB,
+            [0.5, 0.214, 0.0031308, 1.0],
+            [0xbc, 0x7f, 0x0a, 0xff],
+        ),
+        (
+            PixelFormat::BGRA8UnormSRGB,
+            [0.5, 0.214, 0.0031308, 0.5],
+            [0x0a, 0x7f, 0xbc, 0x80],
+        ),
+    ] {
+        let texture = |samples: u64| {
+            let mut d = TextureDescriptor::texture_2d(pf, side.into(), side.into(), false);
+            if samples > 1 {
+                d.texture_type = TextureType::Type2DMultisample;
+                d.sample_count = samples;
+            }
+            d.usage = TextureUsage::RENDER_TARGET;
+            d.resource_options = ResourceOptions::private();
+            lane.device.new_texture(&d).unwrap()
+        };
+        let (msaa, resolved) = (texture(4), texture(1));
+        let mut pass = RenderPassDescriptor::new();
+        let target = &mut pass.color_attachments[0];
+        target.texture = Some(msaa);
+        target.load_action = LoadAction::Clear;
+        target.clear_color = ClearColor::new(r, g, b, a);
+        target.store_action = StoreAction::MultisampleResolve;
+        target.resolve_texture = Some(resolved.clone());
+        let command_buffer = lane.queue.command_buffer().unwrap();
+        let encoder = command_buffer.render_command_encoder(&pass).unwrap();
+        encoder.end_encoding().unwrap();
+        command_buffer.commit().unwrap();
+        command_buffer
+            .wait_until_completed_for(super::WAIT)
+            .unwrap();
+        assert_eq!(command_buffer.error(), None);
+        let read = super::renders::blit_read(&lane.device, &resolved, 4);
+        let wrong = read.chunks(4).filter(|texel| *texel != bytes).count();
+        eprintln!("cleared resolve {pf:?} x4 on {name}: {wrong} texels other than the clear's");
+        assert_eq!(wrong, 0, "{pf:?} on {name}: {:02x?}", &read[..4]);
+    }
+    quiet(lane, &messages);
+}
+
 /// The width and height of the cost test's target: a 1080p frame.
 const FRAME: [u32; 2] = [1920, 1080];
 

@@ -2566,11 +2566,16 @@ pub(super) fn held_value(
     };
     // An 8-bit sRGB texel's raw code, decoded as Metal decodes it: a gather's lanes are one
     // channel's, all alpha or all color.
-    if s.raw() {
+    if s.raw() || s.srgb_codes {
         let color = match s.op {
             SampleOp::Gather { component, .. } => [component != 3; 4],
             _ => crate::lower::texture::SRGB_TEXEL,
         };
+        // The device's sample of a twin's codes, filtered: decoded through the table, exactly
+        // where it read one texel.
+        if !s.raw() {
+            return crate::lower::texture::srgb_filtered_texel(cx, fb, form, texel, color);
+        }
         return crate::lower::texture::srgb_raw_texel(cx, fb, form, texel, color);
     }
     // A `half` texel of a slot converts by the bound format's class: a gather's texel as a read's,

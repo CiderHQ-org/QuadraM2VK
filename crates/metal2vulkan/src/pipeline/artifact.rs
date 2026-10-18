@@ -854,7 +854,8 @@ pub enum PrecisionNote {
     /// it: the class is unbounded.
     HalfSampleFilter,
     /// The module reads, samples, or gathers a texture with a `half` or `float` result through
-    /// the device's sRGB decode where the texture may be bound in an 8-bit sRGB format. Metal
+    /// the device's sRGB decode, or decodes the device's filter of its codes, where the texture may
+    /// be bound in an 8-bit sRGB format. Metal
     /// decodes such a texel's color channels through its twelve-bit table (`k / 4095` for the
     /// code's step `k`) and its alpha as `c / 255`, which the device's decode (Vulkan's transfer
     /// function, within its precision rules) does not reproduce. A texture slot the shape binds in
@@ -872,7 +873,12 @@ pub enum PrecisionNote {
     /// known when the function compiles); and any such access of an argument-buffer (heap) element,
     /// whose format is never known. On a device that does (`VkProperty::MetalSampler`: MoltenVK on
     /// Apple's GPU) the device's decode is Metal's, and the module requires the property instead.
-    /// Validation derives no tolerance from it: the class is unbounded.
+    /// Where the device cannot sample the bound format, whose texture it holds as the format's
+    /// UNORM twin (`LoweringInputs::srgb_twins`), such an access samples the twin's codes and
+    /// decodes the device's filtered value through the table: Metal's value where the filter reads
+    /// one texel (a nearest sampler's), Metal's sum where it blends two adjacent codes, otherwise
+    /// the decode of the codes' blend, where Metal blends the decoded texels; recorded on every
+    /// device under that variant. Validation derives no tolerance from it: the class is unbounded.
     SrgbTexelDecode,
     /// The module samples a texture with a `float` result through a filter on a device that does
     /// not sample through Metal's own sampler (one that does, `VkProperty::MetalSampler`, filters

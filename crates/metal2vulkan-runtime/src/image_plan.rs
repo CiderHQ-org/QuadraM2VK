@@ -713,20 +713,34 @@ fn plan_held(
         .then(|| storage_image_choice(pf, profile).ok())
         .flatten();
     // A format no slot both reads and writes on the device, whose written-only binding's view
-    // the device stores (`BGRA8Unorm_sRGB` on ANV: its UNORM twin is stored without a format for
-    // writes alone, and SPIR-V names no BGRA format), still takes that view: a slot that only
+    // the device stores (on ANV, which reads no storage image without a format, a format SPIR-V
+    // names no image format for and no alias serves), still takes that view: a slot that only
     // writes the texture binds, and one that reads it too is refused at its binding.
     let written_only = match (stored, &storage) {
         (true, None) => storage_view_formats(pf, profile),
         _ => Vec::new(),
     };
     let wants_attachment = wants(TextureUsage::RENDER_TARGET) && attachment.is_some();
+    // An 8-bit sRGB texture whose format the device holds no image of at all (`R8G8_SRGB` on
+    // NVIDIA) is held in its UNORM twin (`srgb_raw_twin`), which is its storage alias's own view:
+    // the twin serves the storage too. Where the device holds the sRGB format, it stays the
+    // image's own, and only the storage view is the alias.
+    let direct_held = !facts.optimal(direct).is_empty();
+    let unorm_twin = srgb_raw_twin(pf).and_then(direct_format);
+    let twin_stored = |m: &FormatMapping| {
+        Some(m.format) == unorm_twin
+            && !direct_held
+            && storage
+                .as_ref()
+                .is_some_and(|c| c.alias.is_some() && c.vk_format == m.format)
+    };
 
     // The image format: the sampled representation, unless a storage view or an attachment needs
     // the direct format, or nothing samples the texture.
     let mapping = match (sampled, attachment) {
         (Some(m), _)
             if m.format == direct
+                || twin_stored(&m)
                 || !(storage.is_some() || !written_only.is_empty() || wants_attachment) =>
         {
             m
@@ -770,7 +784,11 @@ fn plan_held(
     // hold (roadmap-2022 states no `A2R10G10B10` at all, whose `BGR10A2Unorm` storage its
     // `A2B10G10R10` view would otherwise serve).
     let held = !facts.optimal(format).is_empty();
-    match storage.filter(|c| format == direct && (c.alias.is_none() || held)) {
+    let twin = Some(format) == unorm_twin
+        && storage
+            .as_ref()
+            .is_some_and(|c| c.alias.is_some() && c.vk_format == format);
+    match storage.filter(|c| twin || (format == direct && (c.alias.is_none() || held))) {
         Some(choice) => {
             usage_flags |= ImageUsageFlags::STORAGE;
             views.insert(match choice.alias {

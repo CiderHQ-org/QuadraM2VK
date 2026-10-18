@@ -278,6 +278,30 @@ pub(crate) fn srgb_variant(
         .collect()
 }
 
+/// The slots of `srgb` (`VariantKey::srgb_textures`) at which `shape` binds a texture whose 8-bit
+/// sRGB format `profile`'s device cannot sample, which the runtime holds as the format's UNORM twin
+/// (`metal::format::srgb_raw_twin`), a format it can: the plan's `VariantKey::srgb_twins`. Its
+/// views read the codes, so the function decodes what the device samples there. Derived from the
+/// device's format features alone, as the runtime's image plan holds the twin.
+pub(crate) fn srgb_twin_variant(
+    profile: &DeviceProfile,
+    srgb: &std::collections::BTreeSet<SlotRef>,
+    shape: &BindShape,
+) -> std::collections::BTreeSet<SlotRef> {
+    use crate::device::requirements::FormatUsage;
+    let samples = |pf: metal::PixelFormat| {
+        metal::format::vk_format(pf, &[FormatUsage::SampledImage].into(), profile).is_ok()
+    };
+    srgb.iter()
+        .filter(|slot| {
+            matches!(bound_texture(shape, **slot), Some(TextureShape::Texture { pixel_format, .. })
+                if !samples(*pixel_format)
+                    && metal::format::srgb_raw_twin(*pixel_format).is_some_and(samples))
+        })
+        .copied()
+        .collect()
+}
+
 /// The form each of the snapshot slots `slots` keeps its texels in (`VariantKey::snapshot_textures`,
 /// `SnapshotForm::of`): by the view the snapshot's copy fetches through, the bound texture's
 /// sampled view or, at a slot whose raw codes the variant reads (`srgb`, `slots::srgb_variant`),

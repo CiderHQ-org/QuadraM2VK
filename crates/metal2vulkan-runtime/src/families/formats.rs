@@ -13,8 +13,9 @@
 //!   read (`SampledImageFilterLinear` of the view's format), of a format whose texels are not
 //!   integers: Metal filters none, a stencil view's included, nor a bfloat format's (a linear
 //!   sample reads the nearest texel). A texture held as its sRGB format's UNORM twin
-//!   (`image_plan::holds_srgb_twin`), whose raw codes the shader reads, has no view a runtime
-//!   sampler filters through: it answers as a format not sampled. An extended-range texture
+//!   (`image_plan::holds_srgb_twin`) is filtered by the device through the twin's view and the
+//!   filtered codes decoded through Metal's table (`PrecisionNote::SrgbTexelDecode`): its Filter
+//!   is the twin's linear filter. An extended-range texture
 //!   (`ExtendedRange`) is filtered by the shader from fetches of its raw texels on every device:
 //!   its Filter is its `ShaderRead` texture's.
 //! - **Write**: a 2D `ShaderWrite` texture with a storage view.
@@ -67,9 +68,7 @@
 use super::{Column, Facts, Refusal, RowState};
 use crate::device::lock;
 use crate::error::{Error, RuntimeGap};
-use crate::image_plan::{
-    check_image_limits, holds_srgb_twin, plan_image, ImageFacts, ImagePlan, ImageRefusal,
-};
+use crate::image_plan::{check_image_limits, plan_image, ImageFacts, ImagePlan, ImageRefusal};
 use crate::resolve::unmodelled_resolve;
 use crate::sparse::texture::sparse_refusal;
 use crate::sparse::SparsePageSize;
@@ -316,21 +315,10 @@ pub(crate) fn answers(
     } else {
         single.clone()
     };
-    // A texture held as its sRGB format's UNORM twin is read through its raw codes alone: a runtime
-    // sampler's filter and border decode through the device's view of the format, which the device
-    // lacks, so both answer as for a format the runtime does not sample.
-    let sampled = probe(TextureType::Type2D, 1, TextureUsage::SHADER_READ).and_then(|plan| {
-        if holds_srgb_twin(&plan) {
-            Err(Missing::Refused(lacking(
-                pf,
-                TextureUsage::SHADER_READ,
-                plan.format,
-                profile,
-            )))
-        } else {
-            Ok(plan)
-        }
-    });
+    // A texture held as its sRGB format's UNORM twin is sampled through the twin's view, whose
+    // filtered codes the function decodes (`lower::texture::srgb_filtered_texel`): its filter and
+    // border are that view's.
+    let sampled = probe(TextureType::Type2D, 1, TextureUsage::SHADER_READ);
     let own = TextureSwizzleChannels::DEFAULT;
     let border = match &sampled {
         // The binder makes a runtime sampler's opaque-black border transparent black where Metal

@@ -10,7 +10,8 @@
 //! too); a write, `access::write` or `read_write`, stores the plain write's texel with its fourth
 //! lane the green lane's bits, after the class's conversion. An sRGB twin's `SrgbEncode`, and an
 //! `_sRGB` format's at any storage slot, reads and writes Metal's codes through its twelve-bit
-//! tables, with and without the RGBX conversion.
+//! tables, with and without the RGBX conversion. An `RGB9E5Float` texture's `SharedExponentBits`
+//! writes Metal's truncated shared-exponent word through its `R32_UINT` alias and reads it exactly.
 //!
 //! `llvm-as` assembles the kernels; without it the tests skip visibly.
 
@@ -584,6 +585,166 @@ fn an_srgb_storage_write_stores_metals_codes() {
                     ran += 1;
                 }
             }
+        }
+    }
+    assert!(ran > 0);
+}
+
+/// The choice of an `RGB9E5Float` texture at a storage slot of a device that does not store the
+/// format: its `R32_UINT` alias, holding Metal's word (`SharedExponentBits`).
+const SHARED_EXPONENT: (vk::Format, StorageImageClass) =
+    (vk::Format::R32_UINT, StorageImageClass::SharedExponentBits);
+
+/// The `RGB9E5Float` word Metal stores for red, green and blue `rgb` (an Apple M3 Max under macOS
+/// 27.0.1, our own probe: every texel of 65,536 `float` and 65,536 `half` kernel writes): each
+/// channel clamped to `[0, 65408]` (a NaN, a negative value and `-0` 0), the exponent
+/// `max(⌊log2 m⌋, -16) + 16` of the largest clamped channel `m`, and each mantissa the channel
+/// times `2^(24 - e)` truncated.
+fn shared_exponent_word(rgb: [f32; 3]) -> u32 {
+    let c = rgb.map(|v| match v.is_nan() || v.is_sign_negative() {
+        true => 0.0,
+        false => v.min(65408.0),
+    });
+    let m = c[0].max(c[1]).max(c[2]);
+    let field = (m.to_bits() >> 23) as i32;
+    let e = (field.max(111) - 111) as u32;
+    let scale = 2f64.powi(24 - e as i32);
+    let mantissa = c.map(|v| ((f64::from(v) * scale).floor() as u32).min(511));
+    mantissa[0] | mantissa[1] << 9 | mantissa[2] << 18 | e << 27
+}
+
+/// The values the shared-exponent tests write, three a texel: the specials, the values at and
+/// around each exponent's mantissa steps and the clamp, and spread random values from `2^-30`
+/// to past the clamp.
+fn shared_exponent_values(half: bool) -> Vec<[f32; 3]> {
+    use crate::float16::{f16_bits_to_f32, f32_to_f16_bits};
+    let specials = [
+        0.0,
+        -0.0,
+        -1.0,
+        f32::NAN,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        65408.0,
+        65472.0,
+        65504.0,
+        65536.0,
+        2f32.powi(-16),
+        2f32.powi(-17),
+        2f32.powi(-24),
+        2f32.powi(-25),
+        f32::from_bits(1),
+        1.0,
+        0.5,
+    ];
+    let mut out: Vec<[f32; 3]> = specials
+        .iter()
+        .flat_map(|&a| specials.iter().map(move |&b| [a, b, 0.25 * b]))
+        .collect();
+    let mut s: u64 = 0x2545_F491_4F6C_DD1D;
+    let mut next = || {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        s
+    };
+    for _ in 0..384 {
+        let e = (next() % 48) as i32 - 30;
+        let big = 2f32.powi(e) * (1.0 + (next() % 1024) as f32 / 1024.0);
+        let frac = |r: u64| (r % 65536) as f32 / 65536.0;
+        out.push([big, big * frac(next()), big * frac(next()) * frac(next())]);
+        // A mantissa step's edge: `k + 1/2` units of the exponent's step, and one ulp either side.
+        let unit = 2f32.powi(e.clamp(-24, 7));
+        let k = (next() % 511) as f32;
+        let edge = (k + 0.5) * unit;
+        out.push([
+            edge,
+            f32::from_bits(edge.to_bits() + 1),
+            f32::from_bits(edge.to_bits() - 1),
+        ]);
+    }
+    if half {
+        for t in &mut out {
+            *t = t.map(|v| f16_bits_to_f32(f32_to_f16_bits(v)));
+        }
+    }
+    out
+}
+
+/// A write of an `RGB9E5Float` texture through its `R32_UINT` alias (`SharedExponentBits`),
+/// `access::write` and `read_write`, of `float` and `half` texels, stores Metal's word.
+#[test]
+fn a_shared_exponent_storage_write_stores_metals_word() {
+    let mut ran = 0;
+    for texel in [Texel::Float, Texel::Half] {
+        let values = shared_exponent_values(texel == Texel::Half);
+        let width = u32::try_from(values.len()).expect("texels");
+        let bytes: Vec<u8> = values
+            .iter()
+            .flat_map(|rgb| {
+                let lanes = [rgb[0], rgb[1], rgb[2], 1.0];
+                lanes.into_iter().flat_map(move |v| match texel {
+                    Texel::Half => crate::float16::f32_to_f16_bits(v).to_le_bytes().to_vec(),
+                    _ => v.to_bits().to_le_bytes().to_vec(),
+                })
+            })
+            .collect();
+        for access in ["write", "read_write"] {
+            let what = format!("{texel:?} {access}");
+            let Some(bc) = assemble(&what, &write_kernel(texel, access)) else {
+                return;
+            };
+            for (stem, p) in committed_profiles().expect("profiles") {
+                let what = format!("{what} on {stem}");
+                let (plan, m) = compiled(&bc, &p, &inputs(SHARED_EXPONENT, false), &what);
+                let img = image_of(width, |_| [0x5a5a_5a5a; 4], robust(&p));
+                let (_, got) = run_over(width, &m, &resources(&plan, bytes.clone()), &img);
+                for (n, rgb) in values.iter().enumerate() {
+                    let at = img.index(0, 0, 0, [n as u32, 0, 0]).expect("texel");
+                    let want = shared_exponent_word(*rgb);
+                    assert_eq!(got[at][0], want, "{what}: values {rgb:?}");
+                }
+                ran += 1;
+            }
+        }
+    }
+    assert!(ran > 0);
+}
+
+/// A `read_write` read of an `RGB9E5Float` texture through its `R32_UINT` alias
+/// (`SharedExponentBits`) is Metal's: each channel its mantissa times `2^(e - 24)`, exact in
+/// `float` and in `half`, and alpha 1, for words of every exponent.
+#[test]
+fn a_shared_exponent_storage_read_decodes_exactly() {
+    let mut ran = 0;
+    let words: Vec<u32> = (0..256u32)
+        .map(|n| (n % 32) << 27 | (n * 37 % 512) | (n * 101 % 512) << 9 | (511 - n % 512) << 18)
+        .collect();
+    let value = |w: u32, c: u32| ((w >> (9 * c)) & 0x1ff) as f32 * 2f32.powi((w >> 27) as i32 - 24);
+    for texel in [Texel::Float, Texel::Half] {
+        let what = format!("{texel:?}");
+        let Some(bc) = assemble(&what, &read_kernel(texel, 0)) else {
+            return;
+        };
+        for (stem, p) in committed_profiles().expect("profiles") {
+            let what = format!("{what} on {stem}");
+            let (plan, m) = compiled(&bc, &p, &inputs(SHARED_EXPONENT, false), &what);
+            let img = image_of(256, |n| [words[n as usize], 0, 0, 1], robust(&p));
+            let size = if texel == Texel::Half { 8 } else { 16 };
+            let fill = vec![0xab; size * 256];
+            let (got, _) = run_over(256, &m, &resources(&plan, fill), &img);
+            for (n, &w) in words.iter().enumerate() {
+                for c in 0..4u32 {
+                    let v = if c == 3 { 1.0 } else { value(w, c) };
+                    let want = match texel {
+                        Texel::Half => u32::from(crate::float16::f32_to_f16_bits(v)),
+                        _ => v.to_bits(),
+                    };
+                    let read = lane(&got, texel, n as u32, c as usize);
+                    assert_eq!(read, want, "{what}: word {w:#x} lane {c}");
+                }
+            }
+            ran += 1;
         }
     }
     assert!(ran > 0);

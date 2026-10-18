@@ -135,6 +135,14 @@ pub struct LoweringInputs {
     /// Metal's twelve-bit table. A slot of no such access is ignored.
     #[cfg_attr(feature = "serde", serde(default))]
     pub srgb_textures: BTreeSet<SlotRef>,
+    /// Slots of `srgb_textures` bound to a texture held as its 8-bit sRGB format's UNORM twin, a
+    /// format the device cannot sample (`VariantKey::srgb_twins`): each access the raw codes do
+    /// not serve exactly, which elsewhere keeps the device's decode, samples the twin through the
+    /// slot's own binding and decodes the device's filtered codes
+    /// (`PrecisionNote::SrgbTexelDecode`): exactly where the filter reads one texel. A slot of no
+    /// such access is ignored.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub srgb_twins: BTreeSet<SlotRef>,
     /// Fragment texture slots of `StageInterface::snapshot_textures` the draw reads through a
     /// snapshot (`VariantKey::snapshot_textures`), each with its snapshot's form, drawn twice
     /// (`PushField::SnapshotPhase`). The entry opens with the ordered pixel interlock's critical
@@ -1315,6 +1323,14 @@ pub enum StorageImageClass {
     /// An sRGB image viewed as its UNORM alias: the shader encodes and decodes sRGB, through
     /// Metal's twelve-bit tables.
     SrgbEncode,
+    /// A `BGRA8Unorm_sRGB` image viewed as `R8G8B8A8_UNORM`, on a device that cannot declare its
+    /// `B8G8R8A8_UNORM` twin (a format without a SPIR-V image format, so it needs the device's
+    /// without-format access): the shader encodes and decodes sRGB as [`SrgbEncode`] does and
+    /// exchanges red and blue as [`SwizzleBgra`] does.
+    ///
+    /// [`SrgbEncode`]: StorageImageClass::SrgbEncode
+    /// [`SwizzleBgra`]: StorageImageClass::SwizzleBgra
+    SrgbEncodeBgra,
     /// An `ARGB8Unorm` image (alpha in byte 0, then red, green, and blue) viewed as
     /// `R8G8B8A8_UNORM`: the shader rotates the channels.
     RotateArgb,
@@ -1358,6 +1374,16 @@ pub enum StorageImageClass {
     /// Metal reads them. The slot is declared of the alias's unsigned integer format; it takes no
     /// atomic.
     HalfBits,
+    /// An `RGB9E5Float` image a slot writes, and may read, viewed through its `R32_UINT` alias, on
+    /// every device (one that stores the format rounds each mantissa half up, as Vulkan's
+    /// conversion states, where Metal truncates it): the shader writes each texel as the word Metal
+    /// stores, and a read decodes the word exactly (each channel `m · 2^(e - 24)`, alpha 1). Metal's
+    /// word (an Apple M3 Max under macOS 27.0.1: kernel writes of `float` and `half` texels, both
+    /// accesses): each red, green and blue channel clamped to `[0, 65408]` (a NaN or a negative
+    /// value 0), the exponent `e = max(⌊log2 m⌋, -16) + 16` of the largest clamped channel `m` (0
+    /// where all are 0), and each mantissa the clamped channel times `2^(24 - e)` truncated. The
+    /// slot is declared `R32ui`; it takes no atomic.
+    SharedExponentBits,
 }
 
 /// The alias view of a storage image created with `MUTABLE_FORMAT`.

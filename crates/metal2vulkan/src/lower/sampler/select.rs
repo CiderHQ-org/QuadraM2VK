@@ -1829,21 +1829,32 @@ fn select_one(
     // Or natively (`VkProperty::DeviceSampling`), whose are the device's: every sample and
     // gather is then the device's answer, which the module records.
     let metal_sampler = cx.profile.device_samples();
+    // Whether the device's sampler is Metal's own (`VkProperty::MetalSampler` alone), whose sRGB
+    // decode is Metal's table.
+    let metal_unit = cx
+        .profile
+        .fields()
+        .enabled
+        .properties
+        .contains(&crate::device::requirements::VkProperty::MetalSampler);
     if metal_sampler && matches!(op, SampleOp::Sample { .. } | SampleOp::Gather { .. }) {
         cx.families.sampler.device_sampling = true;
     }
     // An 8-bit sRGB texel Metal decodes from its raw code: a nearest sample's, a pixel fetch's, a
     // `half` gather's, an emulated cube gather's (a `float` one's too), a `float` gather's on a
-    // device whose own decode is not Metal's (Metal's own sampler gathers the table's decode, EV
-    // FRT4-rpk2-mvk4), a bicubic sample's, and an emulated linear sample's through a constexpr
-    // sampler, through the slot's raw view under its variant, decoded exactly (the filters sum the
-    // table's steps). A runtime sampler's emulated linear sample reads the raw codes where its word
-    // reaches the emulation, and the device's decoding view elsewhere (`word_raw`). An LOD query
-    // reads no texel.
+    // device whose sampler is not Metal's own, whatever the sampling policy (Metal's own sampler
+    // gathers the table's decode; a gather reads one texel per lane, so the
+    // table's decode is exact and cheap), a bicubic sample's, and an emulated linear sample's
+    // through a constexpr sampler, through the slot's raw view under its variant, decoded exactly
+    // (the filters sum the table's steps). A runtime sampler's emulated linear sample reads the raw
+    // codes where its word reaches the emulation or reads one texel (not a cube's there), and the
+    // device's decoding view elsewhere (`word_raw`). Under the slot's twin variant (a bound format the device cannot sample) the
+    // device's view reads the codes, so an access the raw codes do not serve decodes what the
+    // device samples there (`srgb_codes`). An LOD query reads no texel.
     let constant = linear
         .as_ref()
         .is_some_and(|l| matches!(l.state, super::linear::LinearState::Constant { .. }));
-    let (raw, word_raw) = match form {
+    let (raw, word_raw, srgb_codes) = match form {
         Some(f) if matches!(f.conv, TexelConv::F16 | TexelConv::F32) => {
             use crate::lower::texture::SrgbReach;
             let reach = match &op {
@@ -1854,19 +1865,21 @@ fn select_one(
                     _ => SrgbReach::Device,
                 },
                 SampleOp::Gather { .. }
-                    if f.conv == TexelConv::F16 || cube_gather.is_some() || !metal_sampler =>
+                    if f.conv == TexelConv::F16 || cube_gather.is_some() || !metal_unit =>
                 {
                     SrgbReach::Raw
                 }
                 _ => SrgbReach::Device,
             };
             let read = crate::lower::texture::srgb_texels(cx, image, shape, reach)?;
+            let codes = reach != SrgbReach::Raw && crate::lower::texture::srgb_twin(cx, image)?;
             (
                 read && reach == SrgbReach::Raw,
                 read && reach == SrgbReach::Word,
+                codes,
             )
         }
-        _ => (false, false),
+        _ => (false, false, false),
     };
     let cube_gather = cube_gather.map(|g| super::linear::CubeGather { raw, ..g });
     // A cube gather's corner rule, where the bound format's class states none, is the device's
@@ -2510,6 +2523,7 @@ fn select_one(
         swizzle,
         offset_base,
         anisotropic,
+        srgb_codes,
     };
     // The sampling routines it calls, for the census.
     super::routine::note(&mut cx.families.sampler, &sampling);

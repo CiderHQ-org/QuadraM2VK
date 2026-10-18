@@ -13,7 +13,8 @@
 //!   sample both, its note conditional on the bound sampler's word), and that without the
 //!   variant every access records the fact and nothing else.
 //! - On the CPU interpreter, a linear sample through a runtime sampler under the variant is the
-//!   raw emulation's sum where the word reaches it, as a constexpr sampler's is.
+//!   raw emulation's sum where the word reaches it, as a constexpr sampler's is; where the word
+//!   reads one texel the device samples the raw view, and the decode note does not hold there.
 //! - The binder joins a slot bound in an 8-bit sRGB format to the plan's variant, the variant's
 //!   plan states the same key, and its raw bindings view the image in the UNORM format of the
 //!   same channels, on every committed profile.
@@ -234,6 +235,14 @@ fn inputs(variant: bool) -> LowerInputs {
     i
 }
 
+/// Lowering inputs with slot 0 in the `SrgbTexture` variant and bound to a format held as its
+/// UNORM twin (`LoweringInputs::srgb_twins`).
+fn twin_inputs() -> LowerInputs {
+    let mut i = inputs(true);
+    i.srgb_twins.insert(TEXTURE);
+    i
+}
+
 fn lavapipe() -> crate::device::profile::DeviceProfile {
     profile("lavapipe", EXACT_SAMPLING).expect("profile")
 }
@@ -443,6 +452,119 @@ fn raw_reads_and_fetches_decode_every_code_as_metal_does() {
             }
         }
     }
+}
+
+/// A read of an 8-bit sRGB texture whose swizzle moves a code between a color lane and alpha
+/// (`abgr`) decodes each code by its own channel and then swizzles, as plain Metal does, under
+/// the slot's `swizzled_storage` variant (the view takes no swizzle): each lane is its source
+/// channel's quotient, a color channel's step over 4095 on alpha's lane and alpha's code over 255
+/// on red's, bit for bit, on the interpreter.
+#[test]
+fn a_swizzled_srgb_read_decodes_before_its_swizzle() {
+    use crate::metal::{TextureSwizzle as S, TextureSwizzleChannels};
+    let Some(bc) = assemble("read float", &kernel(Access::Read, false)) else {
+        return;
+    };
+    let swizzle = TextureSwizzleChannels {
+        red: S::Alpha,
+        green: S::Blue,
+        blue: S::Green,
+        alpha: S::Red,
+    };
+    let source = [3usize, 2, 1, 0];
+    for (stem, p) in [("lavapipe", lavapipe()), ("moltenvk-m3", m3())] {
+        let mut under = inputs(true);
+        under.swizzled_storage.insert(TEXTURE);
+        let (plan, m) =
+            typed_module_with(&bc, "k", &p, &under).unwrap_or_else(|e| panic!("{stem}: {e}"));
+        let raw = resource(&m, |k| *k == ResourceKind::RawTexture)
+            .unwrap_or_else(|| panic!("{stem}: no raw binding"));
+        let mut own = Image::new(
+            ResourceSlot {
+                stage: Stage::Kernel,
+                kind: ResourceKind::Texture,
+                index: 0,
+            },
+            [SIDE, SIDE, 1],
+            1,
+            1,
+            1,
+        );
+        own.texels.fill([0x7fc0_0001; 4]);
+        let mut res = resources(&plan, 16);
+        res.spec
+            .insert(SpecKey::TextureSwizzle(TEXTURE), u64::from(swizzle.word()));
+        let out = run(&m, &res, &[raw_image(raw), own]);
+        for n in 0..SIDE * SIDE {
+            let codes = codes(n);
+            for (lane, &from) in source.iter().enumerate() {
+                let (k, d) = quotient(from, codes[from]);
+                let i = n as usize * 16 + 4 * lane;
+                let got = u32::from_le_bytes([out[i], out[i + 1], out[i + 2], out[i + 3]]);
+                assert_eq!(
+                    got,
+                    f32_bits(k, d),
+                    "{stem}: texel {n} lane {lane} (channel {from}, code {})",
+                    codes[from]
+                );
+            }
+        }
+    }
+}
+
+/// The plan of a slot bound in an 8-bit sRGB format with a swizzle names the slot in
+/// `VariantKey::swizzled_storage`, and its views take no swizzle, exactly where the swizzle moves
+/// a code between a color lane and alpha; a swizzle among the color lanes or to constants keeps
+/// the views' component mapping, which reads the same.
+#[test]
+fn an_srgb_swizzle_across_alpha_swizzles_in_the_function() {
+    use crate::metal::{TextureSwizzle as S, TextureSwizzleChannels};
+    let Some(bc) = assemble("read float", &kernel(Access::Read, false)) else {
+        return;
+    };
+    let channels = |red, green, blue, alpha| TextureSwizzleChannels {
+        red,
+        green,
+        blue,
+        alpha,
+    };
+    let cases = [
+        (channels(S::Alpha, S::Blue, S::Green, S::Red), true),
+        (channels(S::Red, S::Green, S::Blue, S::Red), true),
+        (channels(S::Alpha, S::Green, S::Blue, S::Alpha), true),
+        (channels(S::Blue, S::Green, S::Red, S::Alpha), false),
+        (channels(S::Red, S::Red, S::Red, S::One), false),
+        (channels(S::Zero, S::Green, S::One, S::Alpha), false),
+    ];
+    let mut planned = 0;
+    for (stem, dev) in devices() {
+        let variant = pipeline(&dev, &bc, &inputs(true));
+        for (swizzle, crosses) in cases {
+            let what = format!("{stem} {swizzle:?}");
+            let mut state = state(Some(PixelFormat::RGBA8UnormSRGB));
+            if let Some(BoundTexture::Texture { facts, .. }) = state
+                .stages
+                .get_mut(&Stage::Kernel)
+                .and_then(|t| t.textures.get_mut(&0))
+            {
+                facts.swizzle = swizzle;
+            }
+            let Ok(plan) = variant.plan(&dev, &state.shape()) else {
+                continue;
+            };
+            assert_eq!(
+                plan.variant.swizzled_storage.contains(&TEXTURE),
+                crosses,
+                "{what}"
+            );
+            let (raw, own) = views(&variant, &plan);
+            for v in raw.iter().chain(own.iter()).filter_map(view_of) {
+                assert_eq!(v.shader_swizzle, crosses, "{what}");
+            }
+            planned += 1;
+        }
+    }
+    assert!(planned > 0, "no committed profile planned the texture");
 }
 
 /// Where an access reads the raw view under the variant.
@@ -1161,8 +1283,219 @@ fn runtime_raw_filters_sum_the_steps_where_the_word_reaches() {
     }
 }
 
+/// How many device samples (`OpImageSample*`) of `m` read the combined binding at `slot`: their
+/// sampled image loaded from the slot's variable.
+fn samples_of(m: &TypedModule, slot: ResourceSlot) -> usize {
+    use crate::spirv::ir::Inst;
+    let Some(var) = m.globals().iter().find_map(|g| match g.kind {
+        GlobalKind::Resource(s) if s == slot => Some(g.value),
+        _ => None,
+    }) else {
+        return 0;
+    };
+    let insts = || m.blocks().iter().flat_map(|b| &b.insts);
+    let loads: BTreeSet<u32> = insts()
+        .filter_map(|n| match (&n.inst, n.result) {
+            (Inst::Load { ptr, .. }, Some(r)) if *ptr == var => Some(r.0),
+            _ => None,
+        })
+        .collect();
+    insts()
+        .filter(|n| {
+            matches!(&n.inst, Inst::ImageSample { sampled_image, .. }
+                if loads.contains(&sampled_image.0))
+        })
+        .count()
+}
+
+/// Under the variant a runtime sampler's sample (2D `half` and `float`, 3D, and 1D) whose bound
+/// word reads one texel (nearest minification and magnification, no linear mip filter, isotropic)
+/// samples the slot's raw view through the same sampler and decodes the code through Metal's table,
+/// as a constexpr nearest sample's raw read does: the module samples the raw binding as well as the
+/// decoding one, and `PrecisionNote::SrgbTexelDecode` holds only where the word filters but does
+/// not reach the emulation, not under a nearest word with or without a nearest mip filter. On
+/// lavapipe; every form validates.
+#[test]
+fn a_runtime_raw_sample_reads_one_texel_through_the_raw_view() {
+    use crate::metal::sampler::SamplerWord;
+    use crate::metal::SamplerAddressMode;
+    let mut clamp = 0;
+    for shift in SamplerWord::ADDRESS_SHIFT {
+        clamp |= SamplerAddressMode::ClampToEdge.as_raw() << shift;
+    }
+    let mip = |m: u32| m << SamplerWord::MIP_FILTER_SHIFT;
+    // A word and whether the device decodes under it.
+    let words = [
+        ("nearest", 0, false),
+        ("nearest, nearest mip", mip(1), false),
+        ("nearest, linear mip", mip(2), true),
+        ("linear minification", SamplerWord::MIN_LINEAR, true),
+        ("linear", SamplerWord::LINEAR, false),
+        ("linear, linear mip", SamplerWord::LINEAR | mip(2), true),
+    ];
+    let class = crate::metal::texel_format::texel_format(PixelFormat::RGBA8UnormSRGB);
+    let p = lavapipe();
+    let consts = FunctionConstantValues::defaults();
+    let kernels = [
+        ("runtime 2d half", kernel(Access::Runtime, true)),
+        ("runtime 2d float", kernel(Access::Runtime, false)),
+        ("runtime 3d float", filter_kernel_through(None, 3, false)),
+        ("runtime 1d half", filter_kernel_through(None, 1, true)),
+    ];
+    for (name, k) in kernels {
+        let Some(bc) = assemble(name, &k) else {
+            return;
+        };
+        let a = compile_bitcode(
+            &bc,
+            EntryRef::Name("k"),
+            &consts,
+            &p,
+            &inputs(true),
+            &mut meter(),
+            SPIRV_WORDS,
+        )
+        .unwrap_or_else(|e| panic!("{name}: {e}"));
+        link_and_validate(&a, &p).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let (_, m) = typed_module_with(&bc, "k", &p, &inputs(true))
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let raw = resource(&m, raw_combined).unwrap_or_else(|| panic!("{name}: no raw binding"));
+        let own = resource(
+            &m,
+            |k| matches!(k, ResourceKind::CombinedTextureSampler(c) if !c.raw),
+        )
+        .unwrap_or_else(|| panic!("{name}: no decoding binding"));
+        assert!(samples_of(&m, raw) >= 1, "{name}: the raw view's sample");
+        assert!(
+            samples_of(&m, own) >= 1,
+            "{name}: the decoding view's sample"
+        );
+        let Some(note) = a
+            .specialized
+            .iter()
+            .find(|s| s.note == PrecisionNote::SrgbTexelDecode)
+        else {
+            panic!("{name}: no conditional decode note: {:?}", a.specialized);
+        };
+        let fields: Vec<(SpecKey, u32)> = a
+            .interface
+            .read_keys()
+            .into_iter()
+            .filter_map(|k| match k {
+                SpecKey::SamplerState { fields, .. } => Some((k, fields)),
+                _ => None,
+            })
+            .collect();
+        let [(sampler, fields)] = fields[..] else {
+            panic!("{name}: the sampler's `SamplerState` specialization: {fields:?}");
+        };
+        for (what, filter, decodes) in words {
+            let word = (clamp | filter) & fields;
+            let holds = note.when.iter().any(|clause| {
+                clause.all.iter().all(|t| {
+                    let v = match t.key {
+                        k if k == sampler => word,
+                        SpecKey::TexelFormat(_) | SpecKey::BoundTexelFormat(_) => class.0,
+                        k => panic!("{name}: a decode note's test of {k:?}"),
+                    };
+                    (v & t.mask == t.bits) == t.equal
+                })
+            });
+            assert_eq!(holds, decodes, "{name} under a {what} word");
+        }
+    }
+}
+
+/// A kernel sampling element `ks[tid]` (`uint` buffer 2) of an array of `n` `texture2d<half>`
+/// slots through the runtime `[[sampler(0)]]` at `float2` buffer 0's lane `tid`, storing the
+/// `half4` to buffer 1 (the null texture where `ks[tid]` is past the array): a switch-at-use.
+fn switch_kernel(n: u32) -> String {
+    format!(
+        r#"%"struct.metal::texture2d" = type {{ ptr addrspace(1) }}
+
+define void @k(ptr readonly byval([{n} x ptr addrspace(1)]) %t, ptr addrspace(1) %c, ptr addrspace(1) %out, ptr addrspace(1) %ks, ptr addrspace(2) %s, i32 %tid) {{
+  %i = zext i32 %tid to i64
+  %p = getelementptr inbounds <2 x float>, ptr addrspace(1) %c, i64 %i
+  %uv = load <2 x float>, ptr addrspace(1) %p, align 8
+  %pk = getelementptr inbounds i32, ptr addrspace(1) %ks, i64 %i
+  %k = load i32, ptr addrspace(1) %pk, align 4
+  %past = icmp uge i32 %k, {n}
+  %kc = select i1 %past, i32 0, i32 %k
+  %kk = zext i32 %kc to i64
+  %e = getelementptr inbounds [{n} x %"struct.metal::texture2d"], ptr %t, i64 0, i64 %kk, i32 0
+  %elem = load ptr addrspace(1), ptr %e, align 8
+  %h = select i1 %past, ptr addrspace(1) null, ptr addrspace(1) %elem
+  %r = call {{ <4 x half>, i8 }} @air.sample_texture_2d.v4f16(ptr addrspace(1) %h, ptr addrspace(2) %s, <2 x float> %uv, i1 true, <2 x i32> zeroinitializer, i1 false, float 0.0, float 0.0, i32 0)
+  %v = extractvalue {{ <4 x half>, i8 }} %r, 0
+  %q = getelementptr inbounds <4 x half>, ptr addrspace(1) %out, i64 %i
+  store <4 x half> %v, ptr addrspace(1) %q, align 8
+  ret void
+}}
+
+declare {{ <4 x half>, i8 }} @air.sample_texture_2d.v4f16(ptr addrspace(1), ptr addrspace(2), <2 x float>, i1, <2 x i32>, i1, float, float, i32)
+
+!air.kernel = !{{!0}}
+!0 = !{{ptr @k, !1, !2}}
+!1 = !{{}}
+!2 = !{{!3, !4, !5, !6, !7, !8}}
+!3 = !{{i32 0, !"air.texture", !"air.location_index", i32 0, i32 {n}, !"air.sample", !"air.arg_type_name", !"array<texture2d<half, sample>, {n}>", !"air.arg_name", !"t"}}
+!4 = !{{i32 1, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read", !"air.address_space", i32 1, !"air.arg_type_size", i32 8, !"air.arg_type_align_size", i32 8, !"air.arg_type_name", !"float2", !"air.arg_name", !"c"}}
+!5 = !{{i32 2, !"air.buffer", !"air.location_index", i32 1, i32 1, !"air.read_write", !"air.address_space", i32 1, !"air.arg_type_size", i32 8, !"air.arg_type_align_size", i32 8, !"air.arg_type_name", !"half4", !"air.arg_name", !"out"}}
+!6 = !{{i32 3, !"air.buffer", !"air.location_index", i32 2, i32 1, !"air.read", !"air.address_space", i32 1, !"air.arg_type_size", i32 4, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"uint", !"air.arg_name", !"ks"}}
+!7 = !{{i32 4, !"air.sampler", !"air.location_index", i32 0, i32 1, !"air.arg_type_name", !"sampler", !"air.arg_name", !"s"}}
+!8 = !{{i32 5, !"air.thread_position_in_grid", !"air.arg_type_name", !"uint", !"air.arg_name", !"tid"}}
+"#
+    )
+}
+
+/// A switch-at-use over texture slots under the variant, sampled through a runtime sampler, reads
+/// each slot's raw view where the word reads one texel, as one slot's sample does: on lavapipe the
+/// module samples every slot's raw binding, its estimate bounds its emission, and it validates.
+#[test]
+fn a_switch_of_raw_slots_reads_one_texel_through_each_raw_view() {
+    let p = lavapipe();
+    let consts = FunctionConstantValues::defaults();
+    for n in [2u32, 4] {
+        let name = format!("switch of {n}");
+        let Some(bc) = assemble(&name, &switch_kernel(n)) else {
+            return;
+        };
+        let mut under = LowerInputs::new();
+        for index in 0..n {
+            under.srgb_textures.insert(SlotRef { index, ..TEXTURE });
+        }
+        let entry = EntryRef::Name("k");
+        let plan = plan_bitcode(&bc, entry, &consts, &p, &under, &mut meter())
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let a = compile_bitcode(&bc, entry, &consts, &p, &under, &mut meter(), SPIRV_WORDS)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        link_and_validate(&a, &p).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let words = a.module.words.len() as u64;
+        assert!(
+            plan.estimate.words >= words,
+            "{name}: estimate {} < emitted {words}",
+            plan.estimate.words
+        );
+        let (_, m) =
+            typed_module_with(&bc, "k", &p, &under).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let raw: Vec<ResourceSlot> = m
+            .globals()
+            .iter()
+            .filter_map(|g| match g.kind {
+                GlobalKind::Resource(s) if raw_combined(&s.kind) => Some(s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(raw.len(), n as usize, "{name}: the raw bindings {raw:?}");
+        for slot in raw {
+            assert!(samples_of(&m, slot) >= 1, "{name}: {slot:?} is not sampled");
+        }
+    }
+}
+
 /// The plan's word estimate bounds the emitted module of every raw form under the variant (a
-/// runtime sampler's emulation beside its device arm included), on every committed profile, and
+/// runtime sampler's emulation beside its device arm included), with the slot bound to a twin
+/// (whose device arm decodes the filtered codes) and without, on every committed profile, and
 /// every form validates there.
 #[test]
 fn the_raw_estimate_bounds_its_emission() {
@@ -1220,21 +1553,29 @@ fn the_raw_estimate_bounds_its_emission() {
         let Some(bc) = assemble(name, &k) else {
             return;
         };
-        for (stem, p) in committed_exact_profiles().expect("profiles") {
-            let what = format!("{name} on {stem}");
+        // Native sampling's profiles too: a runtime sampler's sample there keeps the device's
+        // arm alone, which decodes a twin's filtered codes.
+        let native = crate::spirv::testing::committed_profiles()
+            .expect("profiles")
+            .into_iter()
+            .map(|(stem, p)| (format!("{stem} native"), p));
+        for ((stem, p), (twin, under)) in committed_exact_profiles()
+            .expect("profiles")
+            .into_iter()
+            .chain(native)
+            .flat_map(|sp| {
+                [
+                    (sp.clone(), ("", inputs(true))),
+                    (sp, (" twin", twin_inputs())),
+                ]
+            })
+        {
+            let what = format!("{name}{twin} on {stem}");
             let entry = EntryRef::Name("k");
-            let plan = plan_bitcode(&bc, entry, &consts, &p, &inputs(true), &mut meter())
+            let plan = plan_bitcode(&bc, entry, &consts, &p, &under, &mut meter())
                 .unwrap_or_else(|e| panic!("{what}: {e}"));
-            let a = compile_bitcode(
-                &bc,
-                entry,
-                &consts,
-                &p,
-                &inputs(true),
-                &mut meter(),
-                SPIRV_WORDS,
-            )
-            .unwrap_or_else(|e| panic!("{what}: {e}"));
+            let a = compile_bitcode(&bc, entry, &consts, &p, &under, &mut meter(), SPIRV_WORDS)
+                .unwrap_or_else(|e| panic!("{what}: {e}"));
             let words = a.module.words.len() as u64;
             eprintln!("{what}: estimate {} emitted {words}", plan.estimate.words);
             assert!(
@@ -1624,15 +1965,18 @@ fn metals_own_srgb_decode_converts_to_half_as_metal_does() {
 }
 
 /// Under the variant, a form the raw codes do not serve (a runtime sampler's sample) states
-/// `RuntimeFact::SrgbDeviceDecode`, so a profile that samples the bound format only through its
-/// UNORM twin refuses the texture there, naming the format; the plain pipeline's plan still names
-/// the variant.
+/// `RuntimeFact::SrgbDeviceDecode`. On a profile that samples the bound format only through its
+/// UNORM twin, the plan names the slot in `VariantKey::srgb_twins` beside `srgb_textures`, from
+/// the device's format features alone; the pipeline compiled under that key notes
+/// `PrecisionNote::SrgbTexelDecode` (the device's filter of the codes, decoded through the table),
+/// validates, plans the same key with every binding of the slot viewing the image in the twin's
+/// format, and refuses nothing. A profile that samples the format leaves the twins empty.
 #[test]
-fn a_device_decode_refuses_a_format_sampled_only_through_its_twin() {
+fn a_device_decode_samples_the_twin_of_a_format_the_device_cannot_sample() {
     let Some(bc) = assemble("runtime float", &kernel(Access::Runtime, false)) else {
         return;
     };
-    let mut refused = 0;
+    let (mut twinned, mut sampled_count) = (0, 0);
     for (stem, dev) in devices() {
         let plain = pipeline(&dev, &bc, &inputs(false));
         for pf in [
@@ -1651,7 +1995,7 @@ fn a_device_decode_refuses_a_format_sampled_only_through_its_twin() {
                 .is_ok()
             };
             let twin = crate::metal::format::srgb_raw_twin(pf).expect(&what);
-            if sampled(pf) || !sampled(twin) {
+            if !sampled(pf) && !sampled(twin) {
                 continue;
             }
             let shape = state(Some(pf)).shape();
@@ -1663,6 +2007,12 @@ fn a_device_decode_refuses_a_format_sampled_only_through_its_twin() {
                 BTreeSet::from([TEXTURE]),
                 "{what}"
             );
+            if sampled(pf) {
+                assert!(plan.variant.srgb_twins.is_empty(), "{what}");
+                sampled_count += 1;
+                continue;
+            }
+            assert_eq!(plan.variant.srgb_twins, BTreeSet::from([TEXTURE]), "{what}");
             let variant = pipeline(&dev, &bc, &plan.variant.lowering_inputs(Stage::Kernel));
             assert!(
                 variant
@@ -1671,19 +2021,51 @@ fn a_device_decode_refuses_a_format_sampled_only_through_its_twin() {
                     .any(|d| d.fact == RuntimeFact::SrgbDeviceDecode { slot: TEXTURE }),
                 "{what}"
             );
-            match variant.plan(&dev, &shape) {
-                Err(crate::error::BindError::Unsupported(u))
-                    if u.feature == crate::error::Feature::Format =>
-                {
-                    refused += 1
-                }
-                other => panic!("{what}: {other:?}"),
-            }
+            let twins = plan.variant.lowering_inputs(Stage::Kernel);
+            let (lowered, _) = typed_module_with(&bc, "k", dev.profile(), &twins)
+                .unwrap_or_else(|e| panic!("{what}: {e}"));
+            assert!(
+                lowered.precision.contains(&PrecisionNote::SrgbTexelDecode),
+                "{what}: {:?}",
+                lowered.precision
+            );
+            let a = compile_bitcode(
+                &bc,
+                EntryRef::Name("k"),
+                &FunctionConstantValues::defaults(),
+                dev.profile(),
+                &twins,
+                &mut meter(),
+                SPIRV_WORDS,
+            )
+            .unwrap_or_else(|e| panic!("{what}: {e}"));
+            link_and_validate(&a, dev.profile()).unwrap_or_else(|e| panic!("{what}: {e}"));
+            let again = variant
+                .plan(&dev, &shape)
+                .unwrap_or_else(|e| panic!("{what}: {e}"));
+            assert_eq!(again.variant, plan.variant, "{what}");
+            let (raw, own) = views(&variant, &again);
+            let formats: BTreeSet<_> = raw
+                .iter()
+                .chain(own.iter())
+                .filter_map(view_of)
+                .map(|v| v.format)
+                .collect();
+            assert_eq!(
+                formats,
+                BTreeSet::from([crate::metal::format::direct_format(twin).expect(&what)]),
+                "{what}"
+            );
+            twinned += 1;
         }
     }
     assert!(
-        refused > 0,
+        twinned > 0,
         "no committed profile samples a format only through its twin"
+    );
+    assert!(
+        sampled_count > 0,
+        "no committed profile samples the formats"
     );
 }
 

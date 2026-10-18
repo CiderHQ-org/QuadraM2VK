@@ -208,7 +208,7 @@ fn bgra8_and_rgba8_storage_textures_compile_to_distinct_modules() {
         return;
     };
     let slot = texture_slot(0);
-    let (mut swizzled, mut srgb) = (0, 0);
+    let (mut swizzled, mut srgb, mut srgb_bgra) = (0, 0, 0);
     for (stem, p) in committed_profiles().expect("profiles") {
         let variant = |pf: PixelFormat| {
             let choice = storage_image_choice(pf, &p).ok()?;
@@ -242,24 +242,46 @@ fn bgra8_and_rgba8_storage_textures_compile_to_distinct_modules() {
                 );
             }
         }
-        if let Some((choice, s)) = variant(PixelFormat::RGBA8UnormSRGB) {
+        let table = |a: &FunctionArtifact| {
+            a.strategies
+                .entries
+                .contains_key(crate::lower::arith::SRGB_PACK)
+        };
+        let srgb_rgba = variant(PixelFormat::RGBA8UnormSRGB);
+        if let Some((choice, s)) = &srgb_rgba {
             if choice.class == StorageImageClass::SrgbEncode {
                 srgb += 1;
                 assert!(!s.precision.contains(&PrecisionNote::DeviceTranscendentals));
                 assert_ne!(s.key, rgba.key, "{stem}");
                 // instructions' count: an rgba8 write rounds to Metal's codes in the shader too
                 // where the device is not measured to store them.
-                let table = |a: &FunctionArtifact| {
-                    a.strategies
-                        .entries
-                        .contains_key(crate::lower::arith::SRGB_PACK)
-                };
-                assert!(table(&s) && !table(&rgba), "{stem}");
+                assert!(table(s) && !table(&rgba), "{stem}");
+            }
+        }
+        // bgra8 sRGB through rgba8: the encode's table, and red and blue exchanged after it.
+        if let Some((choice, b)) = variant(PixelFormat::BGRA8UnormSRGB) {
+            if choice.class == StorageImageClass::SrgbEncodeBgra {
+                srgb_bgra += 1;
+                assert!(table(&b), "{stem}");
+                assert_ne!(b.key, rgba.key, "{stem}");
+                if let Some((c, s)) = &srgb_rgba {
+                    if c.class == StorageImageClass::SrgbEncode {
+                        assert_ne!(b.key, s.key, "{stem}");
+                        assert!(
+                            count(&b, OP_VECTOR_SHUFFLE) > count(s, OP_VECTOR_SHUFFLE),
+                            "{stem}"
+                        );
+                    }
+                }
             }
         }
     }
     assert!(swizzled > 0, "no committed profile exercises SwizzleBgra");
     assert!(srgb > 0, "no committed profile exercises SrgbEncode");
+    assert!(
+        srgb_bgra > 0,
+        "no committed profile exercises SrgbEncodeBgra"
+    );
 }
 
 /// A texture buffer is a buffer image; both slots carry the texel-buffer range fact and the storage

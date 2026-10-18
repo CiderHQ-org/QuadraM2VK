@@ -709,6 +709,11 @@ pub struct Sampling {
     /// device's samples at explicit levels, answers ([`anisotropic`]): through a constexpr
     /// sampler always, through a runtime sampler slot where its word states anisotropy.
     pub anisotropic: Option<anisotropic::Anisotropic>,
+    /// The slot's own binding views the codes of an 8-bit sRGB texture held as its UNORM twin
+    /// (`LoweringInputs::srgb_twins`), where the access would keep the device's decode: the
+    /// device's sample there, filtered codes, decodes through Metal's table
+    /// (`texture::srgb_filtered_texel`), exactly where it read one texel.
+    pub srgb_codes: bool,
 }
 
 /// The declared result of a sampling whose slot's variant binds a texture of another numeric
@@ -1150,6 +1155,7 @@ impl Sampling {
                 0
             }
             _ if self.raw() => crate::lower::texture::SRGB_RAW_WORDS,
+            _ if self.srgb_codes => crate::lower::texture::SRGB_FILTERED_WORDS,
             // A heap color texture's call reads the class its handle carries first.
             (_, Some(f)) if f.conv == crate::lower::texture::TexelConv::F16 => {
                 let class = match self.source {
@@ -1190,11 +1196,20 @@ impl Sampling {
             _ => 0,
         };
         // The emulation beside the device's sample, or gather, and a native class's snapped
-        // coordinate.
-        let linear = self
-            .linear
-            .as_ref()
-            .map_or(0, |l| l.words() + l.native_words())
+        // coordinate; a runtime sampler's raw emulation's device arm where its word reads one
+        // texel: the word's test and branch, the raw view's sampled image and sample, and the
+        // table's decode (`linear::emit`).
+        let one_texel = match &self.linear {
+            Some(l) if l.raw && l.word_state() && l.cube.is_none() && !self.srgb_codes => {
+                RAW_TEXEL_ARM_WORDS + crate::lower::texture::SRGB_RAW_WORDS
+            }
+            _ => 0,
+        };
+        let linear = one_texel
+            + self
+                .linear
+                .as_ref()
+                .map_or(0, |l| l.words() + l.native_words())
             + self
                 .cube_gather
                 .as_ref()
@@ -1280,6 +1295,12 @@ impl Sampling {
 /// The estimated words of a swizzle of a sampled texel: the word's fields, their tests, and the
 /// selects of each lane's source (`extended`'s).
 const SWIZZLE_WORDS: u32 = extended::SWIZZLE_WORDS;
+
+/// The estimated words of a runtime sampler's raw emulation's device arm where its word reads one
+/// texel, but the table's decode: the word's filter test and mip field, the branch and its merge,
+/// and the raw view's sampled image and sample (`linear::emit`,
+/// `the_raw_estimate_bounds_its_emission`).
+const RAW_TEXEL_ARM_WORDS: u32 = 64 + 64;
 
 /// The estimated words of setting an access's lanes to the constants Metal reads
 /// (`texture::constant_lanes`): per lane its extraction and two selections (the slot's tests are

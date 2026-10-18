@@ -30,7 +30,10 @@
 //!   attachment resolves from its planes there as well ([`resolve_planes`]): its pass has one
 //!   subpass, whose resolve references render pass compatibility ignores (`render_target.rs`).
 //! - **From the attachment** otherwise: its level and layer as the resolve pass's input
-//!   attachment 0, loaded and stored. Its image needs input attachment usage, which a
+//!   attachment 0, loaded and stored. An 8-bit sRGB attachment whose image takes its UNORM twin's
+//!   view (an sRGB texture's image lists its twin's formats) is read through that view
+//!   ([`raw_view`], `bind::ResolveSource::RawInputAttachment`), so the resolve reads each sample's
+//!   code as a unorm code with no table lookup. Its image needs input attachment usage, which a
 //!   multisampled color render target the runtime makes takes where the device may resolve it so
 //!   and the usage costs the image nothing, and a memoryless one wherever the device makes the
 //!   image (`framebuffer_fetch.rs`), as does a stand-in (`attachment_stand_in.rs`).
@@ -47,6 +50,11 @@
 //!   image of has neither usage: it resolves by the device's average, announced as
 //!   `device-rounded-resolve`.
 //!
+//! From any source, an 8-bit sRGB resolve writes its result through the resolve attachment's view
+//! in its UNORM twin where that image takes one ([`raw_view`],
+//! `bind::ColorResolveFormat::written_raw`): each code goes out as a unorm code's float, which the
+//! twin's store keeps as the code, with no table lookup and no sRGB encode.
+//!
 //! A layered pass (`renderTargetArrayLength` 2 or more) resolves each of its layers in a render
 //! pass instance of its own, through views of that layer. Its resolve from the sample planes, which
 //! hold one layer, is `NotImplemented(LayeredPass)`.
@@ -60,7 +68,7 @@
 //! runtime announces `shader-resolve` (performance) for the extra pass (naming the copy where the
 //! resolve reads one), and `unmeasured-resolve` (precision) at more than 4 samples.
 
-use super::binding_view::VkView;
+use super::binding_view::{views_as, VkView};
 use super::blit::TRANSFER;
 use super::command_buffer::CommandBuffer;
 use super::device::{device_error, lock};
@@ -190,11 +198,27 @@ pub(super) fn input_candidate(plan: &ImagePlan, device: &Device) -> Option<Image
     })
 }
 
+/// Whether the exact resolve of `rules` may reach `target` (the color attachment it reads, or the
+/// resolve attachment it writes), an attachment in `rules`' own format, through a view in its raw
+/// twin (`ColorResolveFormat::raw_format`, the module docs): an 8-bit sRGB format's UNORM twin,
+/// where the image takes a view of it (an sRGB texture's image lists its twin's formats,
+/// `image_plan.rs`) and `device` renders it.
+fn raw_view(device: &Device, target: &Target, rules: ColorResolveFormat) -> Result<bool, Error> {
+    let raw = rules.raw_format();
+    if raw == rules.format() || target.format != rules.format() {
+        return Ok(false);
+    }
+    let profile = device.compile_device().profile();
+    Ok(views_as(target.texture.image_plan()?, raw, false)
+        && profile.supports_format(raw, FormatUsage::ColorAttachment))
+}
+
 /// Where a resolve reads its samples (the module docs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Source {
-    /// The attachment, as the resolve pass's input attachment 0.
-    Attachment,
+    /// The attachment, as the resolve pass's input attachment 0: through its raw twin's view where
+    /// `raw` ([`raw_view`]), else in its own format.
+    Attachment { raw: bool },
     /// The attachment's sample planes, viewed in their copy format.
     Planes(PlanesCopy),
 }
@@ -202,7 +226,8 @@ enum Source {
 impl Source {
     fn bind(self) -> ResolveSource {
         match self {
-            Source::Attachment => ResolveSource::InputAttachment,
+            Source::Attachment { raw: false } => ResolveSource::InputAttachment,
+            Source::Attachment { raw: true } => ResolveSource::RawInputAttachment,
             Source::Planes(copy) => ResolveSource::Planes(copy),
         }
     }
@@ -210,8 +235,22 @@ impl Source {
     /// The descriptor type of the source's binding.
     fn descriptor(self) -> vk::DescriptorType {
         match self {
-            Source::Attachment => vk::DescriptorType::INPUT_ATTACHMENT,
+            Source::Attachment { .. } => vk::DescriptorType::INPUT_ATTACHMENT,
             Source::Planes(_) => vk::DescriptorType::SAMPLED_IMAGE,
+        }
+    }
+
+    /// Whether the source is the attachment, as input attachment 0.
+    fn attachment(self) -> bool {
+        matches!(self, Source::Attachment { .. })
+    }
+
+    /// The format of the view of the attachment the source reads, whose format is `rules`'s: its
+    /// raw twin through the raw view, else its own.
+    fn read_format(self, rules: ColorResolveFormat) -> Format {
+        match self {
+            Source::Attachment { raw: true } => rules.raw_format(),
+            Source::Attachment { raw: false } | Source::Planes(_) => rules.format(),
         }
     }
 }
@@ -306,7 +345,7 @@ impl Device {
             made.set_layout =
                 set_layout(raw, &[source.descriptor()], vk::ShaderStageFlags::FRAGMENT)?;
             made.layout = pipeline_layout(raw, made.set_layout)?;
-            made.render_pass = resolve_pass(raw, format.format(), samples, source)?;
+            made.render_pass = resolve_pass(raw, format, samples, source)?;
             let making = Making::new("color resolve")
                 .words(&modules.vertex)
                 .words(&modules.fragment)
@@ -328,19 +367,20 @@ impl Device {
     }
 }
 
-/// The resolve's render pass for `format` at `samples` from `source`: the multisampled
-/// attachment as input attachment 0 (loaded and stored, `GENERAL`) where it reads it, then the
-/// single-sampled resolve attachment, written whole over the render area (`DONT_CARE`, then
-/// `STORE`).
+/// The resolve's render pass for `rules`'s format at `samples` from `source`: the multisampled
+/// attachment as input attachment 0 (loaded and stored, `GENERAL`, in the format of the view the
+/// source reads) where it reads it, then the single-sampled resolve attachment in the format of
+/// the view the result is written through (`ColorResolveFormat::written_format`), written whole
+/// over the render area (`DONT_CARE`, then `STORE`).
 fn resolve_pass(
     raw: &ash::Device,
-    format: Format,
+    rules: ColorResolveFormat,
     samples: u32,
     source: Source,
 ) -> Result<vk::RenderPass, Error> {
     let general = vk::ImageLayout::GENERAL;
     let samples_attachment = vk::AttachmentDescription::default()
-        .format(format.into())
+        .format(source.read_format(rules).into())
         .samples(vk::SampleCountFlags::from_raw(samples))
         .load_op(vk::AttachmentLoadOp::LOAD)
         .store_op(vk::AttachmentStoreOp::STORE)
@@ -349,7 +389,7 @@ fn resolve_pass(
         .initial_layout(general)
         .final_layout(general);
     let resolved = vk::AttachmentDescription::default()
-        .format(format.into())
+        .format(rules.written_format().into())
         .samples(vk::SampleCountFlags::TYPE_1)
         .load_op(vk::AttachmentLoadOp::DONT_CARE)
         .store_op(vk::AttachmentStoreOp::STORE)
@@ -358,7 +398,7 @@ fn resolve_pass(
         .initial_layout(general)
         .final_layout(general);
     let (attachments, color) = match source {
-        Source::Attachment => (vec![samples_attachment, resolved], 1),
+        Source::Attachment { .. } => (vec![samples_attachment, resolved], 1),
         Source::Planes(_) => (vec![resolved], 0),
     };
     let inputs = [vk::AttachmentReference::default()
@@ -370,7 +410,7 @@ fn resolve_pass(
     let mut subpass = vk::SubpassDescription::default()
         .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
         .color_attachments(&colors);
-    if source == Source::Attachment {
+    if source.attachment() {
         subpass = subpass.input_attachments(&inputs);
     }
     let subpasses = [subpass];
@@ -624,7 +664,7 @@ fn pass_key<'a>(
 ) -> Result<Option<PassKey>, Error> {
     let mut resolves = Vec::new();
     for (attachment, into, format, source) in wanted {
-        let own_views = source == Source::Attachment
+        let own_views = source.attachment()
             && attachment.layers == layers
             && into.layers == layers
             && takes_input(attachment)?;
@@ -636,8 +676,14 @@ fn pass_key<'a>(
         for layer in 0..layers {
             resolves.push(ResolveKey {
                 pipeline: (format, attachment.samples, source),
-                read: (read, view_of(attachment, layer, attachment.format, INPUT)?),
-                written: (written, view_of(into, layer, into.format, WRITTEN)?),
+                read: (
+                    read,
+                    view_of(attachment, layer, source.read_format(format), INPUT)?,
+                ),
+                written: (
+                    written,
+                    view_of(into, layer, format.written_format(), WRITTEN)?,
+                ),
             });
         }
     }
@@ -811,9 +857,18 @@ impl ShaderResolves {
                 .planes
                 .as_ref()
                 .filter(|_| last_storage.contains(&(index as u32)));
+            // An attachment read from a copy of its samples ([`copied`]) is read in its own
+            // format: the scratch image takes no other view.
             let source = match planes {
                 Some(planes) => Source::Planes(planes.copy),
-                None => Source::Attachment,
+                None => Source::Attachment {
+                    raw: takes_input(&color.target)? && raw_view(device, &color.target, format)?,
+                },
+            };
+            // The result goes out through the resolve attachment's raw view where it has one.
+            let format = match raw_view(device, &resolve.attachment, format)? {
+                true => format.written_raw(),
+                false => format,
             };
             wanted.push((color, resolve, format, source, planes));
         }
@@ -824,7 +879,7 @@ impl ShaderResolves {
         // sample planes hold one layer (`sample_planes.rs`), so such a pass's resolve from them
         // is not built.
         let layers = layout.layers;
-        if layers > 1 && wanted.iter().any(|w| w.3 != Source::Attachment) {
+        if layers > 1 && wanted.iter().any(|w| !w.3.attachment()) {
             return Err(Error::NotImplemented(RuntimeGap::LayeredPass));
         }
         // A pass whose resolves read their attachments through their own views takes the objects
@@ -863,7 +918,7 @@ impl ShaderResolves {
             pool: vk::DescriptorPool::null(),
             resolves: Vec::with_capacity(count as usize),
         };
-        let inputs = wanted.iter().filter(|w| w.3 == Source::Attachment).count() as u32 * layers;
+        let inputs = wanted.iter().filter(|w| w.3.attachment()).count() as u32 * layers;
         let mut sizes = Vec::new();
         for (ty, n) in [
             (vk::DescriptorType::INPUT_ATTACHMENT, inputs),
@@ -890,7 +945,7 @@ impl ShaderResolves {
             }
             // An attachment whose image takes no input attachment usage is read from a copy of
             // its samples ([`copied`]).
-            let read_copy = source == Source::Attachment && !takes_input(attachment)?;
+            let read_copy = source.attachment() && !takes_input(attachment)?;
             let scratch = match read_copy {
                 true if copied(device, attachment)? => {
                     let (scratch, copy, used) = copy_out(maker, attachment, layers, layout.extent)?;
@@ -915,7 +970,7 @@ impl ShaderResolves {
                     ),
                     false,
                 )?),
-                (Source::Attachment, _) => uses.push(read_use(samples, layers)?),
+                (Source::Attachment { .. }, _) => uses.push(read_use(samples, layers)?),
                 (Source::Planes(_), None) => {
                     return Err(internal("a planes resolve without planes"))
                 }
@@ -934,14 +989,14 @@ impl ShaderResolves {
                     .first()
                     .copied()
                     .ok_or_else(|| internal("the driver allocated no set"))?;
-                let written = view(into, layer, into.format, WRITTEN)?;
+                let written = view(into, layer, format.written_format(), WRITTEN)?;
                 let (read, attachments) = match (source, planes) {
                     (Source::Planes(copy), Some(planes)) => {
                         let read = planes.view(copy.format(), ImageUsageFlags::SAMPLED)?;
                         (read, vec![written])
                     }
-                    (Source::Attachment, _) => {
-                        let read = view(samples, layer, samples.format, INPUT)?;
+                    (Source::Attachment { .. }, _) => {
+                        let read = view(samples, layer, source.read_format(format), INPUT)?;
                         (read, vec![read, written])
                     }
                     (Source::Planes(_), None) => {
@@ -1094,7 +1149,7 @@ mod tests {
         PassKey {
             extent: [4, 4],
             resolves: vec![ResolveKey {
-                pipeline: (format, 4, Source::Attachment),
+                pipeline: (format, 4, Source::Attachment { raw: false }),
                 read: (read, view),
                 written: (
                     written,

@@ -25,7 +25,8 @@ use metal2vulkan::device::{
 };
 use metal2vulkan::error::{Capability, Feature, Needs, RuntimeDriverDefect, Unsupported};
 use metal2vulkan::metal::format::{
-    direct_format, srgb_raw_twin, storage_image_choice, storage_view_formats, vk_format,
+    alpha_in_red, alpha_in_red_format, direct_format, is_depth_stencil, srgb_raw_twin,
+    storage_image_choice, storage_view_formats, vk_format, FormatEmulation, WordAttachment,
 };
 use metal2vulkan::metal::{PixelFormat, TextureType, TextureUsage};
 use metal2vulkan::vk::{
@@ -187,7 +188,11 @@ fn check_plan(
             }
         }
         assert!(supports(FormatUsage::StorageImage) || extended, "{what}");
-        assert_eq!(Some(plan.format), direct_format(pf), "{what}");
+        // The format's own, or the UNORM twin of an 8-bit sRGB format the device holds no image
+        let own = direct_format(pf);
+        assert!(
+            "{what}"
+        );
     }
     if plan.usage.contains(ImageUsageFlags::COLOR_ATTACHMENT) {
         assert!(supports(FormatUsage::ColorAttachment), "{what}");
@@ -314,103 +319,128 @@ fn every_format_and_usage_plans_or_refuses_typed_on_every_profile() {
 
 #[test]
 fn a_usage_the_device_lacks_is_unavailable_not_a_refusal() {
-    // `RGBA8Unorm_sRGB` is a storage image itself where the device stores and declares
-    // `R8G8B8A8_SRGB`, through its UNORM alias where the device stores `R8G8B8A8_UNORM`, and
+    // An 8-bit sRGB texture is a storage image itself where the device stores and declares its
+    // sRGB format, through its UNORM alias where the device stores the UNORM format (the image's
+    // own format where it holds the texture in that twin, unable to sample the sRGB one), and
     // otherwise its write usage is unavailable.
     let (mut own, mut alias, mut lacking) = (0, 0, 0);
-    for (name, desc, device) in committed() {
-        let facts = facts(&desc, &device);
-        let l = layout(TextureType::Type2D, PixelFormat::RGBA8UnormSRGB, 1, 1);
-        let usage = TextureUsage::SHADER_READ | TextureUsage::SHADER_WRITE;
-        let plan = plan_image(&l, usage, false, &facts).expect(&name);
-        assert_eq!(plan.format, Format::R8G8B8A8_SRGB, "{name}");
-        match storage_image_choice(PixelFormat::RGBA8UnormSRGB, device.profile()) {
-            Ok(choice) if choice.alias.is_some() => {
-                alias += 1;
-                assert!(plan.usage.contains(ImageUsageFlags::STORAGE), "{name}");
-                assert_eq!(choice.vk_format, Format::R8G8B8A8_UNORM, "{name}");
-                assert!(
-                    plan.view_formats.contains(&Format::R8G8B8A8_UNORM),
-                    "{name}"
-                );
-                let extended = !device
-                    .profile()
-                    .supports_format(Format::R8G8B8A8_SRGB, FormatUsage::StorageImage);
-                assert_eq!(
-                    plan.flags.contains(ImageCreateFlags::EXTENDED_USAGE),
-                    extended,
-                    "{name}"
-                );
-                assert!(plan.unavailable.is_empty(), "{name}");
-            }
-            Ok(_) => {
-                own += 1;
-                assert!(plan.usage.contains(ImageUsageFlags::STORAGE), "{name}");
-                assert!(
-                    !plan.flags.contains(ImageCreateFlags::EXTENDED_USAGE),
-                    "{name}"
-                );
-                assert!(plan.unavailable.is_empty(), "{name}");
-            }
-            Err(_)
-                if storage_view_formats(PixelFormat::RGBA8UnormSRGB, device.profile())
-                    .is_empty() =>
-            {
-                lacking += 1;
-                assert!(!plan.usage.contains(ImageUsageFlags::STORAGE), "{name}");
-                assert_eq!(plan.unavailable, TextureUsage::SHADER_WRITE, "{name}");
-            }
-            Err(_) => {
-                own += 1;
-                assert!(plan.usage.contains(ImageUsageFlags::STORAGE), "{name}");
-                assert!(plan.unavailable.is_empty(), "{name}");
+    for (pf, srgb, unorm) in [
+        (
+            PixelFormat::RGBA8UnormSRGB,
+            Format::R8G8B8A8_SRGB,
+            Format::R8G8B8A8_UNORM,
+        ),
+        (
+            PixelFormat::RG8UnormSRGB,
+            Format::R8G8_SRGB,
+            Format::R8G8_UNORM,
+        ),
+        (PixelFormat::R8UnormSRGB, Format::R8_SRGB, Format::R8_UNORM),
+    ] {
+        for (name, desc, device) in committed() {
+            let name = format!("{name} {pf:?}");
+            let facts = facts(&desc, &device);
+            let l = layout(TextureType::Type2D, pf, 1, 1);
+            let usage = TextureUsage::SHADER_READ | TextureUsage::SHADER_WRITE;
+            let plan = plan_image(&l, usage, false, &facts).expect(&name);
+            assert!(plan.format == srgb || plan.format == unorm, "{name}");
+            match storage_image_choice(pf, device.profile()) {
+                Ok(choice) if choice.alias.is_some() => {
+                    alias += 1;
+                    assert!(plan.usage.contains(ImageUsageFlags::STORAGE), "{name}");
+                    assert_eq!(choice.vk_format, unorm, "{name}");
+                    assert!(
+                        plan.format == unorm || plan.view_formats.contains(&unorm),
+                        "{name}"
+                    );
+                    let extended = !device
+                        .profile()
+                        .supports_format(plan.format, FormatUsage::StorageImage);
+                    assert_eq!(
+                        plan.flags.contains(ImageCreateFlags::EXTENDED_USAGE),
+                        extended,
+                        "{name}"
+                    );
+                    assert!(plan.unavailable.is_empty(), "{name}");
+                }
+                Ok(_) => {
+                    own += 1;
+                    assert!(plan.usage.contains(ImageUsageFlags::STORAGE), "{name}");
+                    assert!(
+                        !plan.flags.contains(ImageCreateFlags::EXTENDED_USAGE),
+                        "{name}"
+                    );
+                    assert!(plan.unavailable.is_empty(), "{name}");
+                }
+                Err(_) if storage_view_formats(pf, device.profile()).is_empty() => {
+                    lacking += 1;
+                    assert!(!plan.usage.contains(ImageUsageFlags::STORAGE), "{name}");
+                    assert_eq!(plan.unavailable, TextureUsage::SHADER_WRITE, "{name}");
+                }
+                Err(_) => {
+                    own += 1;
+                    assert!(plan.usage.contains(ImageUsageFlags::STORAGE), "{name}");
+                    assert!(plan.unavailable.is_empty(), "{name}");
+                }
             }
         }
     }
     assert!(
-        alias > 0 && own + alias + lacking > 10,
+        alias > 0 && own + alias + lacking > 30,
         "{own} {alias} {lacking}"
     );
 }
 
 /// A texture of a format no slot both reads and writes on the device, whose written-only
-/// binding's view the device stores, takes the storage usage and that view: `BGRA8Unorm_sRGB` on
-/// the ANV profiles, whose `B8G8R8A8_UNORM` twin ANV stores without a format for writes alone (no
-/// `STORAGE_READ_WITHOUT_FORMAT`, and SPIR-V names no BGRA format), so a slot that only writes it
-/// binds (EV RES-all1-anv refused it at dispatch). Where no written-only view serves either, the
-/// write stays unavailable.
+/// binding's view the device stores, takes the storage usage and that view, so a slot that only
+/// writes it binds: on ANV, which reads no storage image without a format, a format SPIR-V names
+/// no image format for and no alias view serves (the packed 16-bit formats among them), whose own
+/// format ANV stores without one for writes alone. Where no written-only view serves either, the
+/// write stays unavailable. `BGRA8Unorm_sRGB`, whose `R8G8B8A8_UNORM` view serves both accesses
+/// (`StorageImageClass::SrgbEncodeBgra`), is not such a format on any committed profile.
 #[test]
 fn a_written_only_view_serves_where_no_slot_both_reads_and_writes() {
-    let pf = PixelFormat::BGRA8UnormSRGB;
     let mut written_only = Vec::new();
     for (name, desc, device) in committed() {
         let facts = facts(&desc, &device);
         let profile = device.profile();
-        let l = layout(TextureType::Type2D, pf, 1, 1);
-        let usage = TextureUsage::SHADER_READ | TextureUsage::SHADER_WRITE;
-        let plan = plan_image(&l, usage, false, &facts).expect(&name);
-        if storage_image_choice(pf, profile).is_ok() {
-            continue;
+        for &pf in PixelFormat::ALL {
+            let what = format!("{name} {pf:?}");
+            let l = layout(TextureType::Type2D, pf, 1, 1);
+            let usage = TextureUsage::SHADER_READ | TextureUsage::SHADER_WRITE;
+            let Ok(plan) = plan_image(&l, usage, false, &facts) else {
+                continue;
+            };
+            if storage_image_choice(pf, profile).is_ok() || is_depth_stencil(pf) {
+                continue;
+            }
+            let views = storage_view_formats(pf, profile);
+            if views.is_empty() {
+                assert!(!plan.usage.contains(ImageUsageFlags::STORAGE), "{what}");
+                assert!(
+                    plan.unavailable.contains(TextureUsage::SHADER_WRITE),
+                    "{what}"
+                );
+                continue;
+            }
+            assert!(plan.usage.contains(ImageUsageFlags::STORAGE), "{what}");
+            for view in &views {
+                assert!(
+                    plan.format == *view || plan.view_formats.contains(view),
+                    "{what}: {plan:?}"
+                );
+            }
+            assert!(
+                !plan.unavailable.contains(TextureUsage::SHADER_WRITE),
+                "{what}"
+            );
+            assert_ne!(pf, PixelFormat::BGRA8UnormSRGB, "{what}");
+            written_only.push(what);
         }
-        let views = storage_view_formats(pf, profile);
-        if views.is_empty() {
-            assert!(!plan.usage.contains(ImageUsageFlags::STORAGE), "{name}");
-            assert_eq!(plan.unavailable, TextureUsage::SHADER_WRITE, "{name}");
-            continue;
-        }
-        assert_eq!(views, [Format::B8G8R8A8_UNORM], "{name}");
-        assert_eq!(plan.format, Format::B8G8R8A8_SRGB, "{name}");
-        assert!(plan.usage.contains(ImageUsageFlags::STORAGE), "{name}");
-        assert!(
-            plan.view_formats.contains(&Format::B8G8R8A8_UNORM),
-            "{name}"
-        );
-        assert!(plan.unavailable.is_empty(), "{name}");
-        written_only.push(name);
     }
     assert!(
-        written_only.iter().any(|n| n.ends_with("-anv")),
-        "an ANV profile takes the written-only view: {written_only:?}"
+        written_only.iter().any(|n| n.contains("-anv ")),
+        "an ANV profile takes a written-only view: {written_only:?}"
     );
 }
 

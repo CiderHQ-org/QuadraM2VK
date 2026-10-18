@@ -936,6 +936,63 @@ fn extended_range_formats_answer_the_shaders_filter_and_blend() {
     }
 }
 
+/// An 8-bit sRGB format a device holds as its UNORM twin, unable to sample the sRGB format
+/// (`R8Unorm_sRGB` on lavapipe, `RG8Unorm_sRGB` on lavapipe, ANV and NVIDIA), answers Filter where
+/// the twin filters linearly: the device filters the twin's codes, which the function decodes
+/// through Metal's table (`PrecisionNote::SrgbTexelDecode`), as every 8-bit sRGB format it samples
+/// itself answers its own filter.
+#[test]
+fn srgb_formats_held_as_their_unorm_twin_answer_the_twins_filter() {
+    use metal2vulkan::device::FormatUsage;
+    use metal2vulkan::metal::format::{srgb_raw_twin, vk_format};
+    let mut twins = Vec::new();
+    for (stem, desc) in committed_descriptions() {
+        let (enabled, _) = created(&stem, &desc);
+        let compile = Device::new(enabled.clone(), DevicePolicy::UNTRUSTED).unwrap();
+        let profile = compile.profile();
+        let image = ImageFacts {
+            profile,
+            formats: &enabled.formats,
+            storage_multisample: enabled.has(VkFeature::ShaderStorageImageMultisample),
+            depth_images: crate::image_plan::DepthImageFacts::of(&enabled.driver_facts()),
+            linear_attachments: false,
+        };
+        for pf in [
+            PixelFormat::R8UnormSRGB,
+            PixelFormat::RG8UnormSRGB,
+            PixelFormat::RGBA8UnormSRGB,
+            PixelFormat::BGRA8UnormSRGB,
+        ] {
+            let sampled = [FormatUsage::SampledImage].into();
+            if vk_format(pf, &sampled, profile).is_ok() {
+                continue;
+            }
+            let Some(twin) = srgb_raw_twin(pf).and_then(|t| vk_format(t, &sampled, profile).ok())
+            else {
+                continue;
+            };
+            let sparse = Err(Missing::Gap(RuntimeGap::SparseHeaps));
+            let caps = answers(pf, &image, &any_limits, sparse).capabilities();
+            let filters =
+                profile.supports_format(twin.format, FormatUsage::SampledImageFilterLinear);
+            assert_eq!(
+                caps.contains(FormatCapability::Filter),
+                filters,
+                "{stem}: {pf:?}"
+            );
+            twins.push(format!("{stem} {pf:?}"));
+        }
+    }
+    for want in [
+        "lavapipe R8UnormSRGB",
+        "lavapipe RG8UnormSRGB",
+        "nvidia-rtx5080-laptop RG8UnormSRGB",
+        "intel-arl-anv RG8UnormSRGB",
+    ] {
+        assert!(twins.iter().any(|t| t == want), "{want}: {twins:?}");
+    }
+}
+
 /// No answer past the Apple GPU's the runtime presents (Apple9): a format Apple's tables list
 /// answers at most its Apple9 cell on every committed profile, sparse textures taken as made
 /// (which a profile cannot say), so the M3 Max's measured over-answers, Sparse for `GBGR422`,
