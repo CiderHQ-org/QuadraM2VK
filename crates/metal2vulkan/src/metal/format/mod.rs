@@ -2635,34 +2635,48 @@ impl StorageUse {
     }
 }
 
-/// Whether a storage image or texel buffer viewed as `format` serves `use_` through an image
-/// declared without a format on `profile`: for each access, the device's
-/// `shaderStorageImage{Read,Write}WithoutFormat` (the lowering's formatless declaration needs it)
-/// and the format's without-format usage (the profile's, which carries the per-format bits and
-/// what the specification implies). A use that neither reads nor writes needs nothing.
+/// Whether a storage image or texel buffer viewed as `format` is declared without a format for
+/// `use_` by preference on `profile`, so that one declaration, and with it one module, serves every
+/// format a function accesses alike: for each access, the device's
+/// `shaderStorageImage{Read,Write}WithoutFormat` and the format's without-format usage (the
+/// profile's, which carries the per-format bits and what the specification implies). A device
+/// without the feature that accesses formats by their own bits alone
+/// ([`DeviceProfile::without_format_by_format_bits`]) keeps a typed declaration wherever SPIR-V
+/// names the format, and takes one without a format only where nothing else declares the view
+/// ([`without_format_gaps`]). A use that neither reads nor writes needs nothing.
 pub(crate) fn accessed_without_format(
     format: vk::Format,
     use_: StorageUse,
     profile: &DeviceProfile,
 ) -> bool {
-    without_format_gaps(format, use_, profile).is_empty()
+    let images = &profile.fields().images;
+    use_.without_format().all(|(usage, feature)| {
+        let enabled = match feature {
+            VkFeature::ShaderStorageImageReadWithoutFormat => images.storage_read_without_format,
+            _ => images.storage_write_without_format,
+        };
+        enabled && profile.supports_format(format, usage)
+    })
 }
 
-/// What `format` lacks for `use_` without a format ([`accessed_without_format`]): each access's
-/// device feature, then its format usage.
+/// What `format` lacks for `use_` through a declaration without a format on `profile`, empty where
+/// it can be accessed so: for each access, the device's `shaderStorageImage{Read,Write}WithoutFormat`
+/// or the formats' own bits ([`DeviceProfile::without_format_by_format_bits`]: Vulkan 1.3 or
+/// `VK_KHR_format_feature_flags2`), else the feature; then the format's without-format usage.
 pub(crate) fn without_format_gaps(
     format: vk::Format,
     use_: StorageUse,
     profile: &DeviceProfile,
 ) -> Vec<Capability> {
     let images = &profile.fields().images;
+    let bits = profile.without_format_by_format_bits();
     let mut gaps = Vec::new();
     for (usage, feature) in use_.without_format() {
         let enabled = match feature {
             VkFeature::ShaderStorageImageReadWithoutFormat => images.storage_read_without_format,
             _ => images.storage_write_without_format,
         };
-        if !enabled {
+        if !(enabled || bits) {
             gaps.push(Capability::Feature(feature));
         } else if !profile.supports_format(format, usage) {
             gaps.push(Capability::Format { format, usage });
@@ -2771,8 +2785,14 @@ fn held_storage_choice(
     let image = candidates[0].format;
     let usage = use_.usage();
     let storage = |f: vk::Format| profile.supports_format(f, usage);
-    let formatless = |f: vk::Format| accessed_without_format(f, use_, profile);
-    let declarable = |f: vk::Format| formatless(f) || spirv_image_format(f).is_some();
+    // Declared without a format by preference where the device's features grant it, by its SPIR-V
+    // image format where it has one, else without a format where the format's own bits allow it.
+    let typed = |f: vk::Format| spirv_image_format(f).is_some();
+    let formatless = |f: vk::Format| {
+        accessed_without_format(f, use_, profile)
+            || (!typed(f) && without_format_gaps(f, use_, profile).is_empty())
+    };
+    let declarable = |f: vk::Format| formatless(f) || typed(f);
     let rotated = candidates[0].emulation == FormatEmulation::RotatedView;
     let alias = match pf {
         PixelFormat::BGRA8Unorm => Some((F::R8G8B8A8_UNORM, StorageImageClass::SwizzleBgra)),

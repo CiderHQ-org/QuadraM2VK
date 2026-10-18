@@ -1683,6 +1683,7 @@ pub(crate) fn extension_from_name(name: &str) -> Option<VkExtension> {
         "VK_EXT_extended_dynamic_state" => E::ExtExtendedDynamicState,
         "VK_EXT_extended_dynamic_state2" => E::ExtExtendedDynamicState2,
         "VK_EXT_extended_dynamic_state3" => E::ExtExtendedDynamicState3,
+        "VK_KHR_format_feature_flags2" => E::KhrFormatFeatureFlags2,
         "VK_EXT_attachment_feedback_loop_layout" => E::ExtAttachmentFeedbackLoopLayout,
         "VK_EXT_mutable_descriptor_type" | "VK_VALVE_mutable_descriptor_type" => {
             E::ExtMutableDescriptorType

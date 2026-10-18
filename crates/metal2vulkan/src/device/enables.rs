@@ -29,7 +29,7 @@ use crate::device::derive::Device;
 use crate::device::description::DeviceDescription;
 use crate::device::policy::{ContainmentPolicy, DevicePolicy};
 use crate::device::requirements::{
-    ApiVersion, Requirements, StageCreateFlag, VkExtension, VkFeature,
+    ApiVersion, Requirements, StageCreateFlag, VkExtension, VkFeature, WITHOUT_FORMAT_CAPABILITIES,
 };
 use crate::error::{Capability, DescriptorError, Error};
 use crate::vk;
@@ -369,6 +369,9 @@ fn facts(ext: VkExtension) -> ExtensionFacts {
         | E::KhrMaintenance4
         | E::KhrSynchronization2
         | E::ExtTextureCompressionAstcHdr => fact(true, Some(3), &[]),
+        // The core reads it directly: a storage access without a format by the format's own bits
+        // (`DeviceProfile::without_format_by_format_bits`).
+        E::KhrFormatFeatureFlags2 => fact(true, Some(3), &[]),
         E::KhrDynamicRenderingLocalRead | E::KhrMaintenance5 => {
             fact(true, Some(4), DYNAMIC_RENDERING_BELOW_1_3)
         }
@@ -731,7 +734,9 @@ impl DeviceDescription {
     /// member (stage create flags add theirs), each one's exposing extension below its core
     /// version, the required extensions, the extension exposing each required format below its
     /// core version, `VK_KHR_portability_subset` where the description lists it, and every
-    /// extension those require.
+    /// extension those require. A storage capability without a format (`Requirements` lists it
+    /// without a feature) takes `shaderStorageImage{Read,Write}WithoutFormat` where the
+    /// description lists it, nothing at Vulkan 1.3, else `VK_KHR_format_feature_flags2`.
     ///
     /// Errors: the first capability the description lacks (the API version, a feature, or an
     /// extension, the one a missing exposure or requirement names first). Properties, limits,
@@ -763,6 +768,24 @@ impl DeviceDescription {
             out.extensions.extend(pick(x.extensions_at(api)));
             if x.has_member(api) {
                 out.features.insert(f);
+            }
+        }
+        for (capability, feature) in WITHOUT_FORMAT_CAPABILITIES {
+            if !requirements.spirv_capabilities.contains(&capability) {
+                continue;
+            }
+            if self.has(feature) {
+                let x = feature.exposure();
+                out.extensions.extend(pick(x.extensions_at(api)));
+                if x.has_member(api) {
+                    out.features.insert(feature);
+                }
+            } else if api < ApiVersion::V1_3 {
+                let flags2 = VkExtension::KhrFormatFeatureFlags2;
+                if !self.extensions.contains(&flags2) {
+                    return Err(Capability::Feature(feature));
+                }
+                out.extensions.insert(flags2);
             }
         }
         out.extensions

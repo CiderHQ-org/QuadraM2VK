@@ -1052,10 +1052,12 @@ pub(crate) fn storage_form(
             usage: FormatUsage::StorageImage,
         });
     }
-    // Declared without a format where the device grants the format that access without one, so
-    // that the declaration, and with it the module, is the same for every format the function
-    // reads alike (a `BGRA8Unorm` attachment's and an `RGBA16Float` one's); else with its SPIR-V
-    // image format where the device can (no format feature beyond storage).
+    // Declared without a format where the device's features grant the format that access without
+    // one, so that the declaration, and with it the module, is the same for every format the
+    // function reads alike (a `BGRA8Unorm` attachment's and an `RGBA16Float` one's); else with its
+    // SPIR-V image format where the device can (no format feature beyond storage); else without a
+    // format where the format's own bits allow it (`without_format_gaps`: Vulkan 1.3 or
+    // `VK_KHR_format_feature_flags2`).
     let use_without = StorageUse::texture(true, writes);
     let typed = spirv_image_format(viewed).filter(|d| {
         !crate::spirv::requirements::extended_format(*d) || f.images.storage_extended_formats
@@ -1066,13 +1068,18 @@ pub(crate) fn storage_form(
         }
         Some(d) => Some(d),
         None => {
-            match spirv_image_format(viewed) {
-                Some(_) => route.push(Capability::Feature(
-                    VkFeature::ShaderStorageImageExtendedFormats,
-                )),
-                None => route.extend(without_format_gaps(viewed, use_without, p)),
+            let gaps = without_format_gaps(viewed, use_without, p);
+            if gaps.is_empty() {
+                Some(crate::spv::ImageFormat::Unknown)
+            } else {
+                match spirv_image_format(viewed) {
+                    Some(_) => route.push(Capability::Feature(
+                        VkFeature::ShaderStorageImageExtendedFormats,
+                    )),
+                    None => route.extend(gaps),
+                }
+                None
             }
-            None
         }
     };
     let numeric = match (extended, uint_view, word) {

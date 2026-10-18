@@ -13,7 +13,7 @@ use super::{close_extensions, spirv_extension_name, ALL_SPIRV_EXTENSIONS};
 use crate::device::enables;
 use crate::device::requirements::{
     ApiVersion, FloatControl, FloatWidth, Requirements, SpirvCapability, SubgroupOp, VkExtension,
-    VkFeature, VkProperty,
+    VkFeature, VkProperty, WITHOUT_FORMAT_CAPABILITIES,
 };
 
 /// The registry's name for a derived property, when the registry has one.
@@ -47,7 +47,9 @@ fn property_name(p: &VkProperty) -> Option<String> {
 /// version, a derived device extension, a derived feature, or a derived property. By the
 /// derivation's convention a feature implies its exposure (`VkFeature::exposure`, checked
 /// against the registry below), so an extension alternative is also satisfied by a derived
-/// feature that the extension exposes.
+/// feature that the extension exposes. A capability the device resolves
+/// (`WITHOUT_FORMAT_CAPABILITIES`) needs nothing derived: its registry enablements are the
+/// resolution's (`the_device_resolved_capabilities_are_the_registrys`).
 pub(crate) fn check_against_registry(r: &Requirements) -> Result<(), String> {
     let api = r.api_version.map_or((1, 0), |v| (v.major, v.minor));
     let names = |it: &mut dyn Iterator<Item = String>| it.collect::<BTreeSet<String>>();
@@ -74,6 +76,9 @@ pub(crate) fn check_against_registry(r: &Requirements) -> Result<(), String> {
     };
     let mut errors = Vec::new();
     for c in &r.spirv_capabilities {
+        if WITHOUT_FORMAT_CAPABILITIES.iter().any(|(x, _)| x == c) {
+            continue;
+        }
         let name = format!("{c:?}");
         match registry::capability_enablement(&name) {
             Some(alts) if satisfied(alts) => {}
@@ -135,6 +140,30 @@ fn the_registry_check_refuses_unsatisfied_capabilities() {
     r.properties
         .insert(VkProperty::SubgroupOperation(SubgroupOp::Vote));
     assert_eq!(check_against_registry(&r), Ok(()));
+}
+
+/// The capabilities a module lists without a feature (`WITHOUT_FORMAT_CAPABILITIES`) are enabled,
+/// per the registry, by exactly what `DeviceProfile::check` and
+/// `DeviceDescription::required_enables` resolve them by: the feature, Vulkan 1.3, or
+/// `VK_KHR_format_feature_flags2`.
+#[test]
+fn the_device_resolved_capabilities_are_the_registrys() {
+    for (capability, feature) in WITHOUT_FORMAT_CAPABILITIES {
+        let name = format!("{capability:?}");
+        let feature_name = format!("{feature:?}");
+        let flags2 = format!("{:?}", VkExtension::KhrFormatFeatureFlags2);
+        let alternatives = registry::capability_enablement(&name).expect("a registry capability");
+        let resolved: Vec<bool> = alternatives
+            .iter()
+            .map(|e| match e {
+                Enablement::Feature(f) => *f == feature_name,
+                Enablement::Exposed(Exposure::Core(1, 3)) => true,
+                Enablement::Exposed(Exposure::Extension(x)) => *x == flags2,
+                _ => false,
+            })
+            .collect();
+        assert_eq!(resolved, vec![true; 3], "{name}: {alternatives:?}");
+    }
 }
 
 /// `VkFeature::exposure` agrees with the registry's enablement table on every feature the

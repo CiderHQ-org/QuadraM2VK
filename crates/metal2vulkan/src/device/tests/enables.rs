@@ -769,3 +769,73 @@ fn profile_format_tables_hold_only_exposed_formats() {
     ]);
     assert!(a8(&d));
 }
+
+/// A storage capability without a format is enabled on the device, as the registry allows
+/// (`WITHOUT_FORMAT_CAPABILITIES`): the ANV profile, without `shaderStorageImageReadWithoutFormat`,
+/// is told to enable `VK_KHR_format_feature_flags2` at Vulkan 1.2, and a module that reads storage
+/// without a format then checks and requires that extension in place of the feature; at its own
+/// Vulkan 1.4 it requires nothing; without the extension it lacks the feature. MoltenVK, which has
+/// the feature, requires the feature.
+#[test]
+fn a_storage_read_without_a_format_is_enabled_by_the_feature_the_version_or_the_extension() {
+    use crate::device::requirements::SpirvCapability;
+    use crate::pipeline::testing::description_at_1_2;
+    let read = VkFeature::ShaderStorageImageReadWithoutFormat;
+    let flags2 = VkExtension::KhrFormatFeatureFlags2;
+    let mut reads = Requirements::default();
+    reads.spirv_capabilities.insert(SpirvCapability::of(
+        crate::spv::Capability::StorageImageReadWithoutFormat,
+    ));
+    let policy = DevicePolicy::default();
+    let open = |desc: &DeviceDescription| {
+        let enabled = desc.recommended_enables(&policy);
+        let opened = desc.clone().with_enabled(&enabled).unwrap();
+        (
+            enabled,
+            Device::new(opened.clone(), policy).unwrap(),
+            opened,
+        )
+    };
+
+    let anv = description_at_1_2("intel-irisxe-rplp-anv", true).unwrap();
+    assert!(!anv.has(read));
+    let (enabled, device, opened) = open(&anv);
+    assert!(enabled.extensions.contains(&flags2), "{enabled:?}");
+    assert!(device.profile().without_format_by_format_bits());
+    assert_eq!(device.profile().check(&reads), Ok(()));
+    let required = opened.required_enables(&reads).unwrap();
+    assert!(required.extensions.contains(&flags2), "{required:?}");
+    assert!(!required.features.contains(&read));
+
+    let without = description_at_1_2("intel-irisxe-rplp-anv", false).unwrap();
+    let (enabled, device, opened) = open(&without);
+    assert!(!enabled.extensions.contains(&flags2));
+    assert!(!device.profile().without_format_by_format_bits());
+    assert_eq!(
+        device.profile().check(&reads),
+        Err(Capability::Feature(read))
+    );
+    assert_eq!(
+        opened.required_enables(&reads),
+        Err(Capability::Feature(read))
+    );
+
+    let whole = profile("intel-irisxe-rplp-anv");
+    assert!(whole.api_version >= ApiVersion::V1_3);
+    let (enabled, device, opened) = open(&whole);
+    assert!(!enabled.extensions.contains(&flags2), "core at 1.3");
+    assert_eq!(device.profile().check(&reads), Ok(()));
+    let required = opened.required_enables(&reads).unwrap();
+    assert!(!required.extensions.contains(&flags2));
+    assert!(!required.features.contains(&read));
+
+    let moltenvk = profile("moltenvk-m3");
+    assert!(moltenvk.has(read));
+    let (_, device, opened) = open(&moltenvk);
+    assert_eq!(device.profile().check(&reads), Ok(()));
+    assert!(opened
+        .required_enables(&reads)
+        .unwrap()
+        .features
+        .contains(&read));
+}

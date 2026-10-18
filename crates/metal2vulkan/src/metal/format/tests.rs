@@ -679,9 +679,14 @@ fn bgra8_srgb_storage_takes_an_rgba8_view_where_its_twin_is_not_declarable() {
         let p = dev.profile();
         let pf = PixelFormat::BGRA8UnormSRGB;
         let c = storage_image_choice(pf, p).unwrap_or_else(|e| panic!("{name}: {e}"));
+        // The twin, which SPIR-V names no format for, is declarable without one exactly where the
+        // device accesses it so, by its features or by the format's own bits.
+        let twin = without_format_gaps(
             vk::Format::B8G8R8A8_UNORM,
             StorageUse::READ_WRITE_TEXTURE,
             p,
+        )
+        .is_empty();
         match c.class {
             StorageImageClass::Identity => {}
             StorageImageClass::SrgbEncode => {
@@ -707,6 +712,63 @@ fn bgra8_srgb_storage_takes_an_rgba8_view_where_its_twin_is_not_declarable() {
     }
     for want in ["intel-arl-anv", "nvidia-pascal-linux", "intel-irisxe-anv"] {
         assert!(swizzled.iter().any(|n| n == want), "{want}: {swizzled:?}");
+    }
+}
+
+/// On a device without `shaderStorageImageReadWithoutFormat` (the ANV profile of the Iris Xe of
+/// RPL-P, read at the runtime's Vulkan 1.2), `VK_KHR_format_feature_flags2` lets a storage access
+/// without a format go by each format's own bits: `A8_UNORM`, which SPIR-V names no format for and
+/// which has both bits there, is then declared without one, read and written; `RGBA8Unorm` keeps
+/// its typed declaration (the formatless one is preferred by the features alone); and
+/// `B5G6R5_UNORM_PACK16`, which lacks the read bit there, lacks that bit. Without the extension
+/// every such access lacks the feature.
+#[test]
+fn a_storage_access_without_a_format_goes_by_the_format_s_own_bits_with_the_extension() {
+    let read = StorageUse::texture(true, false);
+    let read_write = StorageUse::READ_WRITE_TEXTURE;
+    for flags2 in [true, false] {
+        let desc =
+            crate::pipeline::testing::description_at_1_2("intel-irisxe-rplp-anv", flags2).unwrap();
+        let dev = device(desc);
+        let p = dev.profile();
+        assert!(!p.images().storage_read_without_format);
+        assert!(p.images().storage_write_without_format);
+        assert_eq!(p.without_format_by_format_bits(), flags2);
+        assert!(!accessed_without_format(vk::Format::A8_UNORM, read, p));
+        let a8 = storage_image_choice(PixelFormat::A8Unorm, p);
+        let rgba8 = storage_image_choice(PixelFormat::RGBA8Unorm, p).expect("RGBA8Unorm");
+        assert_eq!(rgba8.vk_format, vk::Format::R8G8B8A8_UNORM, "typed");
+        if flags2 {
+            assert_eq!(without_format_gaps(vk::Format::A8_UNORM, read_write, p), []);
+            let a8 = a8.expect("A8Unorm");
+            assert_eq!(
+                (a8.vk_format, a8.numeric, a8.class, a8.alias),
+                (
+                    vk::Format::UNDEFINED,
+                    Some(SampledType::Float),
+                    StorageImageClass::Identity,
+                    None
+                )
+            );
+            assert_eq!(
+                without_format_gaps(vk::Format::B5G6R5_UNORM_PACK16, read, p),
+                [Capability::Format {
+                    format: vk::Format::B5G6R5_UNORM_PACK16,
+                    usage: FormatUsage::StorageImageReadWithoutFormat,
+                }]
+            );
+        } else {
+            let feature = Capability::Feature(VkFeature::ShaderStorageImageReadWithoutFormat);
+            assert_eq!(
+                without_format_gaps(vk::Format::A8_UNORM, read_write, p),
+                std::slice::from_ref(&feature)
+            );
+            assert!(a8.is_err(), "{a8:?}");
+            assert_eq!(
+                without_format_gaps(vk::Format::B5G6R5_UNORM_PACK16, read, p),
+                [feature]
+            );
+        }
     }
 }
 

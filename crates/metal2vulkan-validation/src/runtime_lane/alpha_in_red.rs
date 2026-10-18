@@ -382,6 +382,16 @@ impl Lane {
     /// The lane's device, `VK_KHR_maintenance5` and its feature withheld where `withheld`, with the owned fixtures
     /// `a8r_targets` and `a8r_buffers`.
     fn new(messages: &Messages, cache: &ScratchCache, withheld: bool) -> Lane {
+        Lane::withholding(messages, cache, withheld, &[])
+    }
+
+    /// [`Lane::new`], the device made without `features` too.
+    fn withholding(
+        messages: &Messages,
+        cache: &ScratchCache,
+        withheld: bool,
+        features: &[VkFeature],
+    ) -> Lane {
         let device = validated_device_with(TEST_DEVICE, messages, cache.path(), |options| {
             if withheld {
                 options
@@ -389,6 +399,7 @@ impl Lane {
                     .insert(VkExtension::KhrMaintenance5);
                 options.withheld_features.insert(VkFeature::Maintenance5);
             }
+            options.withheld_features.extend(features.iter().copied());
         })
         .unwrap();
         let bitcode = llvm_assemble(&engine_dir().join("a8r_targets.ll")).unwrap();
@@ -790,6 +801,72 @@ fn a8_without_a8_unorm_writes_and_reads_alpha_as_metal() {
     let got = lane.dispatch("a8r_read_write", &t, [0.1, 0.3, 0.5, 0.7]);
     assert!(got.iter().all(|&v| v == alpha), "a8r_read_write: {got:?}");
     every("a8r_read_write", &lane.bytes(&t), 178);
+    drop(lane);
+    assert!(messages.take().is_empty(), "the validation layer reported");
+}
+
+/// An `A8Unorm` storage texture's reads on the device made without
+/// `shaderStorageImageReadWithoutFormat` (as Intel's ANV is), with its own `A8_UNORM` where it has
+/// the format: no SPIR-V format names it, so its reads are declared without a format, which the
+/// format's own `STORAGE_READ_WITHOUT_FORMAT` bit allows under `VK_KHR_format_feature_flags2`,
+/// the device's enable at the runtime's Vulkan 1.2 instance in place of the feature: a read and a
+/// `read_write` read of the byte 153 are `(0, 0, 0, 0.6)`, and that slot's write of
+/// (0.1, 0.3, 0.5, 0.7) stores 178, as Metal's (probe `a8`). A device without the extension, or
+/// whose `A8_UNORM` lacks the bit, refuses the kernel naming what it lacks.
+#[test]
+fn a8_storage_reads_without_the_feature_go_by_the_format_s_bit() {
+    let messages = Messages::default();
+    let cache = ScratchCache::new().unwrap();
+    let feature = VkFeature::ShaderStorageImageReadWithoutFormat;
+    let lane = Lane::withholding(&messages, &cache, false, &[feature]);
+    let name = lane.device.name().to_owned();
+    if lane.in_red() {
+        println!("A8-FORMATLESS {name}: no A8_UNORM, its own format not checked");
+        drop(lane);
+        assert!(messages.take().is_empty(), "the validation layer reported");
+        return;
+    }
+    let profile = lane.device.compile_device().profile();
+    let enabled = profile.enabled();
+    assert!(!enabled.features.contains(&feature), "{name}: {feature:?}");
+    let flags2 = enabled
+        .extensions
+        .contains(&VkExtension::KhrFormatFeatureFlags2);
+    let bit = profile.supports_format(
+        metal2vulkan::vk::Format::A8_UNORM,
+        metal2vulkan::device::FormatUsage::StorageImageReadWithoutFormat,
+    );
+    let made = |kernel: &str| {
+        lane.device.new_compute_pipeline_state(
+            &ComputePipelineDescriptor::new(lane.function(kernel)),
+            &PipelineOptions::default(),
+        )
+    };
+    if !(flags2 && bit) {
+        for kernel in ["a8r_read", "a8r_read_write"] {
+            let Err(Error::Unsupported(refused)) = made(kernel) else {
+                panic!("{name}: {kernel} made without the feature, the extension or the bit");
+            };
+            println!(
+                "A8-FORMATLESS {name}: {kernel} refused (flags2 {flags2}, bit {bit}): {refused}"
+            );
+        }
+        drop(lane);
+        assert!(messages.take().is_empty(), "the validation layer reported");
+        return;
+    }
+    let usage = TextureUsage::SHADER_READ | TextureUsage::SHADER_WRITE;
+    let alpha = [0.0, 0.0, 0.0, 153.0 / 255.0];
+    for kernel in ["a8r_read", "a8r_read_write"] {
+        made(kernel).unwrap_or_else(|e| panic!("{name}: {kernel} by the format's bit: {e}"));
+        let t = lane.texture(PixelFormat::A8Unorm, 1, usage, 153);
+        let got = lane.dispatch(kernel, &t, [0.1, 0.3, 0.5, 0.7]);
+        assert!(got.iter().all(|&v| v == alpha), "{name}: {kernel}: {got:?}");
+        if kernel == "a8r_read_write" {
+            every(&format!("{name}: {kernel}"), &lane.bytes(&t), 178);
+        }
+    }
+    println!("A8-FORMATLESS {name}: read by A8_UNORM's own bit, as Metal's");
     drop(lane);
     assert!(messages.take().is_empty(), "the validation layer reported");
 }

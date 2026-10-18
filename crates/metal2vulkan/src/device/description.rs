@@ -54,8 +54,9 @@ pub struct DeviceDescription {
     /// held to the rule. No translation reads it.
     pub robust_buffer_access_update_after_bind: bool,
     /// The device lists `VK_KHR_format_feature_flags2`, which, like Vulkan 1.3, reports
-    /// `VkFormatProperties3` ([`DeviceDescription::has_format_feature_flags2`]). The product reads
-    /// it and does not enable it.
+    /// `VkFormatProperties3` ([`DeviceDescription::has_format_feature_flags2`]): a fact of the
+    /// query, which an enable set that leaves the extension out keeps. Enabled, the extension is
+    /// [`VkExtension::KhrFormatFeatureFlags2`] among the description's extensions.
     pub khr_format_feature_flags2: bool,
     /// `VK_EXT_device_generated_commands`: `Some` with the device's
     /// `VkPhysicalDeviceDeviceGeneratedCommandsPropertiesEXT` where the device supports the

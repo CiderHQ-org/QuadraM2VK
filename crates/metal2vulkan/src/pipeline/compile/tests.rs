@@ -1477,7 +1477,13 @@ fn a_framebuffer_fetch_pipeline_is_ordered_exactly_where_the_device_orders_it() 
             (s.color_index, s.format, s.writes, s.formatless),
             (0, vk::Format::R32_SFLOAT, true, true)
         );
-        assert!(pipe
+        // The capability, which the device resolves (`DeviceProfile::check`), not its feature.
+        assert!(pipe.requirements.spirv_capabilities.contains(
+            &crate::device::requirements::SpirvCapability::of(
+                crate::spv::Capability::StorageImageReadWithoutFormat
+            )
+        ));
+        assert!(!pipe
             .requirements
             .features
             .contains(&VkFeature::ShaderStorageImageReadWithoutFormat));

@@ -949,6 +949,7 @@ codec_enum! {
         ExtExtendedDynamicState2,
         KhrShaderQuadControl,
         ExtAttachmentFeedbackLoopLayout, ExtExtendedDynamicState3,
+        KhrFormatFeatureFlags2,
     }
     SubgroupOp { Basic, Vote, Arithmetic, Ballot, Shuffle, ShuffleRelative, Clustered, Quad }
     FloatWidth { F16, F32, F64 }

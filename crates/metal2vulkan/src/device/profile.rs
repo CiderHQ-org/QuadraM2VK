@@ -85,6 +85,33 @@ impl DeviceProfile {
         &self.fields.images
     }
 
+    /// Whether the profile reads and writes a storage image or storage texel buffer through a
+    /// declaration without a format by its format's own `STORAGE_READ_WITHOUT_FORMAT` /
+    /// `STORAGE_WRITE_WITHOUT_FORMAT` bit, whatever `shaderStorageImage{Read,Write}WithoutFormat`
+    /// say: at Vulkan 1.3, or with `VK_KHR_format_feature_flags2` enabled, each an enablement of
+    /// the SPIR-V capabilities `StorageImageReadWithoutFormat` and `StorageImageWriteWithoutFormat`
+    /// beside the features. The format tables then hold the bits
+    /// (`DeviceDescription::has_format_feature_flags2`), which govern each format's access.
+    pub(crate) fn without_format_by_format_bits(&self) -> bool {
+        self.fields.api_version >= ApiVersion::V1_3
+            || self
+                .fields
+                .enabled
+                .extensions
+                .contains(&VkExtension::KhrFormatFeatureFlags2)
+    }
+
+    /// Whether the profile can read (`read`) and write (`write`) storage through a declaration
+    /// without a format at all: by the device's `shaderStorageImage{Read,Write}WithoutFormat`, or
+    /// by the formats' own bits ([`DeviceProfile::without_format_by_format_bits`]). Which formats
+    /// it may then view is the format tables' (`metal::format::without_format_gaps`).
+    pub(crate) fn accesses_without_format(&self, read: bool, write: bool) -> bool {
+        let images = &self.fields.images;
+        let bits = self.without_format_by_format_bits();
+        (!read || images.storage_read_without_format || bits)
+            && (!write || images.storage_write_without_format || bits)
+    }
+
     /// The descriptor and addressing capabilities the profile enables: whether it reaches buffers
     /// by device address, binds descriptors after binding, and so on.
     pub fn descriptors(&self) -> &DescriptorCaps {

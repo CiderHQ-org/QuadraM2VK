@@ -1327,6 +1327,10 @@ const EXTENSIONS: &[ExtensionName] = {
         e(c"VK_KHR_dynamic_rendering", Some(X::KhrDynamicRendering)),
         e(c"VK_KHR_portability_subset", Some(X::KhrPortabilitySubset)),
         e(c"VK_EXT_device_generated_commands", None),
+        e(
+            c"VK_KHR_format_feature_flags2",
+            Some(X::KhrFormatFeatureFlags2),
+        ),
     ]
 };
 

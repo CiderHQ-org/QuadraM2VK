@@ -13,6 +13,7 @@ use crate::device::derive::{usage_class, UsageClass};
 use crate::device::profile::{DeviceProfile, Independence};
 use crate::device::requirements::{
     FormatUsage, Requirements, StageCreateFlag, VkFeature, VkLimit, VkProperty,
+    WITHOUT_FORMAT_CAPABILITIES,
 };
 use crate::error::Capability;
 use crate::vk;
@@ -29,7 +30,9 @@ enum Direction {
 impl DeviceProfile {
     /// Whether the profile enabled everything `req` needs. Returns the first missing capability
     /// in a fixed order (API version, features, extensions, properties, independence, limits,
-    /// formats, stage flags).
+    /// formats, stage flags). A storage capability without a format is enabled by its feature or
+    /// by the formats' own bits (`DeviceProfile::without_format_by_format_bits`), and missing as
+    /// its feature.
     pub fn check(&self, req: &Requirements) -> Result<(), Capability> {
         let f = &self.fields;
         if let Some(v) = req.api_version {
@@ -39,6 +42,14 @@ impl DeviceProfile {
         }
         if let Some(&x) = req.features.difference(&f.enabled.features).next() {
             return Err(Capability::Feature(x));
+        }
+        for (capability, feature) in WITHOUT_FORMAT_CAPABILITIES {
+            if req.spirv_capabilities.contains(&capability)
+                && !f.enabled.features.contains(&feature)
+                && !self.without_format_by_format_bits()
+            {
+                return Err(Capability::Feature(feature));
+            }
         }
         if let Some(&x) = req.extensions.difference(&f.enabled.extensions).next() {
             return Err(Capability::Extension(x));

@@ -22,6 +22,21 @@ fn profile(stem: &str, features: &[VkFeature]) -> DeviceProfile {
         .clone()
 }
 
+/// Committed profile `stem` with `features` removed from its description, read at Vulkan 1.2 (the
+/// runtime's instance) with `VK_KHR_format_feature_flags2` enabled where `flags2`
+/// (`pipeline::testing::description_at_1_2`; without it, a device that lists the extension and a
+/// consumer that did not enable it).
+fn profile_with(stem: &str, features: &[VkFeature], flags2: bool) -> DeviceProfile {
+    let mut desc = crate::pipeline::testing::description_at_1_2(stem, flags2).expect("description");
+    for f in features {
+        desc.features.remove(f);
+    }
+    Device::new(desc, DevicePolicy::default())
+        .expect("device")
+        .profile()
+        .clone()
+}
+
 /// The state of a pipeline of one color attachment of `format` at index 0, changed by `edit`.
 fn state(
     format: PixelFormat,
@@ -407,45 +422,62 @@ fn a_view_alias_is_a_twin_only_where_no_declaration_reaches_the_format() {
 /// A BGRA-order attachment whose RGBA-order twin lacks something too is refused naming both
 /// routes: `BGR10A2Unorm` on the ANV profile without `shaderStorageImageExtendedFormats` (its
 /// twin's `Rgb10A2` is an extended format) needs reads without a format of its own format, or the
-/// extended formats for the twin. `BGRA8Unorm`'s twin, a base format, still serves.
+/// extended formats for the twin. With `VK_KHR_format_feature_flags2` the first is the format's own
+/// `STORAGE_READ_WITHOUT_FORMAT` bit, which `A2R10G10B10_UNORM_PACK32` lacks there; without it, the
+/// feature. `BGRA8Unorm`'s twin, a base format, still serves.
 #[test]
 fn a_bgra_order_attachment_without_either_route_names_both() {
     use crate::error::Needs;
-    let p = profile(
-        "intel-irisxe-anv",
-        &[VkFeature::ShaderStorageImageExtendedFormats],
-    );
     let format = vk::Format::A2R10G10B10_UNORM_PACK32;
-    assert_eq!(StorageAttachmentUse::view_alias_of(format, &p), None);
-    let refused =
-        form(&state(PixelFormat::BGR10A2Unorm, |_| {}), false, WRITES, &p).expect_err("no route");
-    assert_eq!(
-        refused.needs,
-        Needs::AnyOf(vec![
-            vec![Capability::Feature(
-                VkFeature::ShaderStorageImageReadWithoutFormat
-            )],
-            vec![Capability::Feature(
-                VkFeature::ShaderStorageImageExtendedFormats
-            )],
-        ])
-    );
-    let bgra8 = form(&state(PixelFormat::BGRA8Unorm, |_| {}), false, WRITES, &p);
-    assert_eq!(
-        bgra8.map(|v| v.rgba_view),
-        Ok(Some(vk::Format::R8G8B8A8_UNORM))
-    );
+    let own_bit = Capability::Format {
+        format,
+        usage: FormatUsage::StorageImageReadWithoutFormat,
+    };
+    let feature = Capability::Feature(VkFeature::ShaderStorageImageReadWithoutFormat);
+    for (flags2, reads) in [(true, own_bit), (false, feature)] {
+        let p = profile_with(
+            "intel-irisxe-anv",
+            &[VkFeature::ShaderStorageImageExtendedFormats],
+            flags2,
+        );
+        assert_eq!(StorageAttachmentUse::view_alias_of(format, &p), None);
+        let refused = form(&state(PixelFormat::BGR10A2Unorm, |_| {}), false, WRITES, &p)
+            .expect_err("no route");
+        assert_eq!(
+            refused.needs,
+            Needs::AnyOf(vec![
+                vec![reads],
+                vec![Capability::Feature(
+                    VkFeature::ShaderStorageImageExtendedFormats
+                )],
+            ]),
+            "VK_KHR_format_feature_flags2 enabled: {flags2}"
+        );
+        let bgra8 = form(&state(PixelFormat::BGRA8Unorm, |_| {}), false, WRITES, &p);
+        assert_eq!(
+            bgra8.map(|v| v.rgba_view),
+            Ok(Some(vk::Format::R8G8B8A8_UNORM))
+        );
+    }
 }
 
-/// On a device without format-less storage reads (the ANV profile), every color format whose
-/// storage form is modelled takes it but those whose direct format has neither a SPIR-V image
-/// format nor an RGBA-order twin, refused naming the reads without a format they would need:
-/// the 16-bit packed formats, whose exact form (a view of their 16-bit words, converted by Metal's
-/// measured conversions in the shader) is not built.
+/// On a device without `shaderStorageImageReadWithoutFormat` (the ANV profile), every color format
+/// whose storage form is modelled takes it but those whose direct format has neither a SPIR-V
+/// image format, nor an RGBA-order twin, nor its own `STORAGE_READ_WITHOUT_FORMAT` bit where
+/// `VK_KHR_format_feature_flags2` is enabled, refused naming the reads without a format they would
+/// need (the bit, or without the extension the feature): the 16-bit packed formats, whose exact
+/// form (a view of their 16-bit words, converted by Metal's measured conversions in the shader) is
+/// not built.
 #[test]
 fn without_formatless_reads_only_formats_no_declaration_reaches_are_refused() {
+    for flags2 in [true, false] {
+        formats_no_declaration_reaches_are_refused(flags2);
+    }
+}
+
+fn formats_no_declaration_reaches_are_refused(flags2: bool) {
     use crate::error::Needs;
-    let p = profile("intel-irisxe-anv", &[]);
+    let p = profile_with("intel-irisxe-anv", &[], flags2);
     let mut refused = Vec::new();
     for &pf in PixelFormat::ALL {
         let inputs = FramebufferFetchInputs::of(
@@ -462,11 +494,14 @@ fn without_formatless_reads_only_formats_no_declaration_reaches_are_refused() {
             if matches!(u.needs, Needs::NotImplemented | Needs::NotRepresentable) {
                 continue;
             }
-            let needs_reads = |alt: &Vec<Capability>| {
-                alt.contains(&Capability::Feature(
-                    VkFeature::ShaderStorageImageReadWithoutFormat,
-                ))
+            let reads = match flags2 {
+                true => Capability::Format {
+                    format: crate::metal::format::direct_format(pf).expect("a direct format"),
+                    usage: FormatUsage::StorageImageReadWithoutFormat,
+                },
+                false => Capability::Feature(VkFeature::ShaderStorageImageReadWithoutFormat),
             };
+            let needs_reads = |alt: &Vec<Capability>| alt.contains(&reads);
             let Needs::AnyOf(alternatives) = &u.needs else {
                 panic!("{pf:?} {use_:?}: {u:?}");
             };
@@ -487,8 +522,54 @@ fn without_formatless_reads_only_formats_no_declaration_reaches_are_refused() {
             PixelFormat::ABGR4Unorm,
             PixelFormat::BGR5A1Unorm,
         ],
-        "{refused:?}"
+        "VK_KHR_format_feature_flags2 enabled: {flags2}: {refused:?}"
     );
+}
+
+/// A native `A8_UNORM` attachment, which no SPIR-V image format names and whose compatibility class
+/// is its own (no other view reaches it), takes the storage form on the ANV profile, which has no
+/// `shaderStorageImageReadWithoutFormat`, through a declaration without a format where
+/// `VK_KHR_format_feature_flags2` is enabled, as `A8_UNORM`'s own `STORAGE_READ_WITHOUT_FORMAT` bit
+/// grants (Mesa 26.2.4 on the Iris Xe reports it); without the extension it is refused naming the
+/// feature. A format that lacks the bit there (`B5G6R5Unorm`'s `R5G6B5_UNORM_PACK16`) stays refused,
+/// naming the bit.
+#[test]
+fn an_a8_unorm_attachment_is_fetched_without_a_format_by_its_own_bit() {
+    use crate::error::Needs;
+    let a8 = state(PixelFormat::A8Unorm, |_| {});
+    for use_ in [READS, WRITES] {
+        let p = profile_with("intel-irisxe-rplp-anv", &[], true);
+        assert!(!p.images().storage_read_without_format);
+        assert_eq!(
+            declared(form(&a8, false, use_, &p)),
+            (
+                vk::Format::A8_UNORM,
+                crate::spv::ImageFormat::Unknown,
+                SampledType::Float
+            ),
+            "{use_:?}"
+        );
+        let packed =
+            form(&state(PixelFormat::B5G6R5Unorm, |_| {}), false, use_, &p).expect_err("no bit");
+        assert_eq!(
+            packed.needs,
+            Needs::AnyOf(vec![vec![Capability::Format {
+                format: vk::Format::R5G6B5_UNORM_PACK16,
+                usage: FormatUsage::StorageImageReadWithoutFormat,
+            }]]),
+            "{use_:?}"
+        );
+        let without = profile_with("intel-irisxe-rplp-anv", &[], false);
+        assert_eq!(
+            form(&a8, false, use_, &without)
+                .expect_err("no route")
+                .needs,
+            Needs::AnyOf(vec![vec![Capability::Feature(
+                VkFeature::ShaderStorageImageReadWithoutFormat
+            )]]),
+            "{use_:?}"
+        );
+    }
 }
 
 /// A blend of one and zero, added, for color and alpha stores the source as no blend does, so a
@@ -829,7 +910,8 @@ fn a_multisampled_state_takes_the_per_sample_form_or_names_what_it_needs() {
 /// What the device lacks blocks the form with that capability: the fragment-stage store for a
 /// written attachment, and, for an extended format without `shaderStorageImageExtendedFormats`,
 /// that feature unless the device reads and writes the format without a format, which it then
-/// declares.
+/// declares: by its features, or, without `shaderStorageImageReadWithoutFormat`, by the format's
+/// own bits where `VK_KHR_format_feature_flags2` is enabled (read at the runtime's Vulkan 1.2).
 #[test]
 fn device_gaps_name_what_the_device_lacks() {
     use crate::error::Needs;
@@ -856,13 +938,16 @@ fn device_gaps_name_what_the_device_lacks() {
     assert!(form(&rg16, false, WRITES, &formatless)
         .expect("formatless")
         .formatless());
-    let neither = profile(
-        "moltenvk-m3",
-        &[
-            VkFeature::ShaderStorageImageExtendedFormats,
-            VkFeature::ShaderStorageImageReadWithoutFormat,
-        ],
+    let without = [
+        VkFeature::ShaderStorageImageExtendedFormats,
+        VkFeature::ShaderStorageImageReadWithoutFormat,
+    ];
+    let own_bits = profile_with("moltenvk-m3", &without, true);
+    assert_eq!(
+        declared(form(&rg16, false, READS, &own_bits)).1,
+        crate::spv::ImageFormat::Unknown
     );
+    let neither = profile_with("moltenvk-m3", &without, false);
     assert_eq!(
         form(&rg16, false, READS, &neither)
             .expect_err("blocked")

@@ -22,6 +22,13 @@
 //!   (`VK_KHR_shader_terminate_invocation`) depends on the device's version, so it is not listed:
 //!   the description lists the feature only where it is exposed (`Device::new` checks it), and
 //!   `DeviceDescription::required_enables` names the extension below that version.
+//! - **A capability with a version or an extension beside its feature is enabled on the device.**
+//!   `StorageImageReadWithoutFormat` and `StorageImageWriteWithoutFormat` are enabled by
+//!   `shaderStorageImage{Read,Write}WithoutFormat`, by Vulkan 1.3, or by
+//!   `VK_KHR_format_feature_flags2`, under which each format's own bits govern its access. The
+//!   module lists the capability alone, and `DeviceProfile::check` and
+//!   `DeviceDescription::required_enables` resolve it on the device
+//!   (`device::requirements::WITHOUT_FORMAT_CAPABILITIES`).
 //! - **Contextual choices are structural.** Where the Vulkan registry offers alternatives for one
 //!   capability (buffer vs shared vs image float atomics, 8/16-bit access per storage class), the
 //!   walk picks the one the instruction's storage class and type select. A test checks every
@@ -1099,9 +1106,9 @@ impl Deriver<'_> {
                     self.sparse_residency();
                 }
                 let img = self.image_of(*image)?;
+                // Enabled on the device (`DeviceProfile::check`), not by a feature listed here.
                 if img.format == crate::spv::ImageFormat::Unknown && img.dim != Dim::SubpassData {
                     self.cap(Cap::StorageImageReadWithoutFormat);
-                    self.feat(VkFeature::ShaderStorageImageReadWithoutFormat);
                 }
             }
             Inst::ImageWrite {
@@ -1112,7 +1119,6 @@ impl Deriver<'_> {
                 self.stage_stores();
                 if self.image_of(*image)?.format == crate::spv::ImageFormat::Unknown {
                     self.cap(Cap::StorageImageWriteWithoutFormat);
-                    self.feat(VkFeature::ShaderStorageImageWriteWithoutFormat);
                 }
             }
             Inst::ImageQuery { .. } | Inst::ImageQueryLod { .. } => self.cap(Cap::ImageQuery),

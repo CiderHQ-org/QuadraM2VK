@@ -24,6 +24,7 @@
 use super::degrade_notices::{on_device, on_device_with};
 use super::{buffer_with, read_buffer, WAIT};
 use crate::air_library::AirLibrary;
+use metal2vulkan::device::{VkExtension, VkFeature};
 use metal2vulkan::metal::format::storage_image_choice;
 use metal2vulkan::metal::{PixelFormat, TextureUsage};
 use metal2vulkan::pipeline::StorageImageClass;
@@ -307,6 +308,12 @@ fn srgb_storage_writes_store_metals_codes() {
 }
 
 /// [`srgb_storage_writes_store_metals_codes`] on the device made without its storage accesses
+/// without a format (`shaderStorageImageReadWithoutFormat`, `shaderStorageImageWriteWithoutFormat`
+/// and `VK_KHR_format_feature_flags2`, under which a format's own bits would grant them at the
+/// runtime's Vulkan 1.2 instance), as ARL's and Pascal's profiles state none for
+/// `B8G8R8A8_UNORM`: a `BGRA8Unorm_sRGB` slot is then an `R8G8B8A8_UNORM` view that encodes and
+/// exchanges red and blue (`StorageImageClass::SrgbEncodeBgra`), and stores Metal's bytes as the
+/// twin's view does.
 #[test]
 fn srgb_storage_writes_through_rgba8_store_metals_codes() {
     on_device_with(
@@ -315,6 +322,9 @@ fn srgb_storage_writes_through_rgba8_store_metals_codes() {
                 VkFeature::ShaderStorageImageReadWithoutFormat,
                 VkFeature::ShaderStorageImageWriteWithoutFormat,
             ]);
+            options
+                .withheld_extensions
+                .insert(VkExtension::KhrFormatFeatureFlags2);
         },
         |device, _| {
             let profile = device.compile_device().profile();

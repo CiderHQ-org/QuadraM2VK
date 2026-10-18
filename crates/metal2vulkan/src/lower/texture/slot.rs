@@ -504,6 +504,9 @@ fn declare_heap(
             d.update_after_bind_storage_image,
             VkFeature::DescriptorBindingStorageImageUpdateAfterBind,
         );
+        // A heap's storage classes are declared without a format, and the binder views its
+        // members for every access the device's features grant (`bind::heap`): a device's
+        // formats' own bits do not serve a heap.
         need(
             !h.uses.read || images.storage_read_without_format,
             VkFeature::ShaderStorageImageReadWithoutFormat,
@@ -675,9 +678,12 @@ pub(super) fn stage_stores(cx: &SelectCx<'_>) -> Result<(), Error> {
 }
 
 /// The format a storage slot is declared with and its class: the slot's `StorageImageChoice` from
-/// the lowering inputs, or, without one, a formatless `Identity` declaration where the profile can
-/// access it without a format; otherwise the format is an input the caller must supply
-/// (`NeedsInput`).
+/// the lowering inputs, or, without one, a formatless `Identity` declaration where the device's
+/// `shaderStorageImage{Read,Write}WithoutFormat` grant its accesses without a format; otherwise the
+/// format is an input the caller must supply (`NeedsInput`). A choice whose view SPIR-V names no
+/// format for is declared without one wherever the profile accesses storage so at all, by the
+/// features or by the formats' own bits (`DeviceProfile::accesses_without_format`; the choice
+/// checked the view's bits).
 ///
 /// A slot that is only queried accesses no texel, so it is declared `Unknown` with class
 /// `Identity` whatever the choice (queries need no format feature, and no format then pairs with
@@ -746,7 +752,11 @@ fn storage_format(
     ) {
         return Err(Unsupported::not_representable(Feature::Format).into());
     }
-    if format == crate::spv::ImageFormat::Unknown && !formatless_ok {
+    if format == crate::spv::ImageFormat::Unknown
+        && !cx
+            .profile
+            .accesses_without_format(s.uses.read, s.uses.write)
+    {
         let mut missing = Vec::new();
         if s.uses.read && !images.storage_read_without_format {
             missing.push(Capability::Feature(
@@ -826,8 +836,15 @@ fn ulong_format(
     if images.storage_extended_formats {
         return Ok((crate::spv::ImageFormat::Rg32ui, StorageImageClass::Identity));
     }
-    let formatless = (!s.uses.read || images.storage_read_without_format)
-        && (!s.uses.write || images.storage_write_without_format);
+    // Without a format by the device's features, or by `R32G32_UINT`'s own bits.
+    let use_ = match buffer {
+        true => crate::metal::format::StorageUse::texel_buffer(s.uses.read, s.uses.write),
+        false => crate::metal::format::StorageUse::texture(s.uses.read, s.uses.write),
+    };
+    let formatless = ((!s.uses.read || images.storage_read_without_format)
+        && (!s.uses.write || images.storage_write_without_format))
+        || crate::metal::format::without_format_gaps(vk::Format::R32G32_UINT, use_, cx.profile)
+            .is_empty();
     if formatless && !declared {
         return Ok((
             crate::spv::ImageFormat::Unknown,

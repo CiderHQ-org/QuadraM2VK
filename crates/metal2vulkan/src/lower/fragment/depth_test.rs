@@ -93,7 +93,7 @@ use crate::lower::emit::EmitCx;
 use crate::lower::select::SelectCx;
 use crate::lower::stage_io::{self, Returned};
 use crate::lower::sync::memory_model;
-use crate::metal::format::{accessed_without_format, spirv_image_format, StorageUse};
+use crate::metal::format::{spirv_image_format, without_format_gaps, StorageUse};
 use crate::pipeline::artifact::PrecisionNote;
 use crate::pipeline::facts::RuntimeFact;
 use crate::pipeline::sym::{PushField, ResourceKind, ResourceSlot, Stage, SyntheticBinding};
@@ -247,7 +247,9 @@ pub(crate) fn depth_test_form(
     });
     let declared = match typed {
         Some(d) => Some(d),
-        None if accessed_without_format(STAND_IN_FORMAT, StorageUse::texture(true, true), p) => {
+        None if without_format_gaps(STAND_IN_FORMAT, StorageUse::texture(true, true), p)
+            .is_empty() =>
+        {
             Some(crate::spv::ImageFormat::Unknown)
         }
         None => {
@@ -303,7 +305,7 @@ pub(crate) fn stencil_test_form(
     }
     let declared = if f.images.storage_extended_formats {
         Some(crate::spv::ImageFormat::R8ui)
-    } else if accessed_without_format(SHADOW_FORMAT, StorageUse::texture(true, true), p) {
+    } else if without_format_gaps(SHADOW_FORMAT, StorageUse::texture(true, true), p).is_empty() {
         Some(crate::spv::ImageFormat::Unknown)
     } else {
         // `R8ui` is an extended format: the typed declaration needs only the feature.

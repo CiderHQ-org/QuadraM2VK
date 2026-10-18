@@ -49,7 +49,7 @@ use crate::lower::emit::EmitCx;
 use crate::lower::select::SelectCx;
 use crate::lower::stage_io::{self, Returned};
 use crate::lower::sync::memory_model;
-use crate::metal::format::{accessed_without_format, StorageUse};
+use crate::metal::format::{without_format_gaps, StorageUse};
 use crate::pipeline::facts::RuntimeFact;
 use crate::pipeline::sym::{PushField, ResourceKind, ResourceSlot, Stage, SyntheticBinding};
 use crate::spirv::builder::constructs::{ArmEnd, ArmFn, LoopFn, LoopSpec};
@@ -143,7 +143,7 @@ pub(crate) fn device_form(
     let use_ = StorageUse::texture(true, true);
     let declared = if f.images.storage_extended_formats {
         Some(crate::spv::ImageFormat::R8ui)
-    } else if accessed_without_format(SHADOW_FORMAT, use_, p) {
+    } else if without_format_gaps(SHADOW_FORMAT, use_, p).is_empty() {
         Some(crate::spv::ImageFormat::Unknown)
     } else {
         // `R8ui` is an extended format: the typed declaration needs only the feature.

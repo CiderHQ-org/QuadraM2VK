@@ -420,6 +420,13 @@ pub enum VkExtension {
     /// `VK_EXT_extended_dynamic_state3` (never promoted):
     /// [`VkFeature::ExtendedDynamicState3ColorWriteMask`].
     ExtExtendedDynamicState3,
+    // Appended.
+    /// `VK_KHR_format_feature_flags2` (core in 1.3, no feature member): with it a storage image or
+    /// storage texel buffer is read or written through a declaration without a format where its
+    /// format's own `STORAGE_READ_WITHOUT_FORMAT` / `STORAGE_WRITE_WITHOUT_FORMAT` bit says, on a
+    /// device without `shaderStorageImageReadWithoutFormat` (or `Write`), as the SPIR-V
+    /// capabilities `StorageImageReadWithoutFormat` and `StorageImageWriteWithoutFormat` allow.
+    KhrFormatFeatureFlags2,
 }
 
 /// One subgroup operation class (`VkSubgroupFeatureFlagBits`).
@@ -1071,6 +1078,22 @@ pub enum SpirvExtension {
     KhrQuadControl,
 }
 
+/// The SPIR-V capabilities a module's [`Requirements`] list without the feature that enables them,
+/// each with that feature: Vulkan also enables them by Vulkan 1.3 or by
+/// `VK_KHR_format_feature_flags2`, which `DeviceProfile::check` and
+/// `DeviceDescription::required_enables` resolve on the device
+/// (`DeviceProfile::without_format_by_format_bits`).
+pub(crate) const WITHOUT_FORMAT_CAPABILITIES: [(SpirvCapability, VkFeature); 2] = [
+    (
+        SpirvCapability::of(crate::spv::Capability::StorageImageReadWithoutFormat),
+        VkFeature::ShaderStorageImageReadWithoutFormat,
+    ),
+    (
+        SpirvCapability::of(crate::spv::Capability::StorageImageWriteWithoutFormat),
+        VkFeature::ShaderStorageImageWriteWithoutFormat,
+    ),
+];
+
 /// A shader-stage create flag a module can require (`VkPipelineShaderStageCreateFlags`).
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1092,6 +1115,15 @@ pub enum StageCreateFlag {
 /// stage that needs full subgroups adds [`StageCreateFlag::RequireFullSubgroups`]. A pipeline's
 /// requirements are the union of its stages', plus, for a render pipeline, what its fixed-function
 /// state needs (dynamic states, blending, multisampling, sample counts, multiview).
+///
+/// The SPIR-V capabilities `StorageImageReadWithoutFormat` and `StorageImageWriteWithoutFormat`
+/// are listed without a feature: Vulkan enables each by `shaderStorageImage{Read,Write}WithoutFormat`,
+/// by Vulkan 1.3, or by `VK_KHR_format_feature_flags2` (under which each format's own
+/// `STORAGE_{READ,WRITE}_WITHOUT_FORMAT` bit governs its access), and
+/// [`DeviceProfile::check`](crate::device::DeviceProfile::check) and
+/// [`DeviceDescription::required_enables`](crate::device::DeviceDescription::required_enables)
+/// resolve it on the device: the feature where the device has it, else nothing at Vulkan 1.3, else
+/// the extension.
 #[non_exhaustive]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Requirements {

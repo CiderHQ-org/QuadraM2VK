@@ -461,11 +461,17 @@ driver's. Each is open work.
   attachment takes there, is not built: Metal's snorm blend is measured for source-over alone
   (the row above).
 - **Format-less storage reads on a device without `shaderStorageImageReadWithoutFormat` (ANV).**
-  A fetch through the pixel interlock of a 16-bit packed color attachment (`B5G6R5Unorm`,
-  `A1BGR5Unorm`, `ABGR4Unorm`, `BGR5A1Unorm`), which no SPIR-V format names, is refused
-  (`FramebufferFetch`); so is a read of an argument buffer's writable texture, whose heap classes
-  are format-less (`ArgumentBufferTextures`). A fetch through a 16-bit unsigned view that packs
-  the channels in the shader, and heap storage classes typed per format, are not built.
+  There a read without a format goes by the format's own `STORAGE_READ_WITHOUT_FORMAT` bit
+  (Vulkan 1.3 or `VK_KHR_format_feature_flags2`), which the 16-bit packed formats,
+  `B8G8R8A8_UNORM`, `A2R10G10B10_UNORM_PACK32`, `A2B10G10R10_UNORM_PACK32` and
+  `B10G11R11_UFLOAT_PACK32` lack in the committed ANV profiles: a fetch through the pixel interlock
+  of a 16-bit packed color attachment (`B5G6R5Unorm`, `A1BGR5Unorm`, `ABGR4Unorm`, `BGR5A1Unorm`),
+  which no SPIR-V format names, is refused (`FramebufferFetch`). A read of an argument buffer's
+  writable texture is refused there whatever its format (`ArgumentBufferTextures`): the heap
+  views its members for the accesses the device's features grant, for every pipeline alike, and a
+  check of each member's bit against the pipeline's heap reads is not built. A fetch through a
+  16-bit unsigned view that packs the channels in the shader, and heap storage classes typed per
+  format, are not built either.
 - **The formats from 630 to 645 under macOS 27.0.1.** The macOS 27.0.1 level answers as an Apple M3
   Max, which describes none of them (`BGRA10Unorm`, its packed, sRGB, PQ and HLG forms,
   `R10UintX6`, `RG10UintX12` and the rest): a texture of one is stopped and the linear alignment

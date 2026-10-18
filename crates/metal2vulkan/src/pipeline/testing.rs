@@ -73,6 +73,33 @@ pub fn description(stem: &str) -> Result<DeviceDescription, String> {
     DeviceDescription::from_khronos_json(&text, None).map_err(|e| format!("{stem}: {e}"))
 }
 
+/// The description of committed profile `stem` as a context at Vulkan 1.2, the runtime's instance
+/// version, reads the device (`DeviceDescription::query`'s rule), with
+/// `VK_KHR_format_feature_flags2` left out of what it enabled unless `flags2`: the version is the
+/// lower of the two, a feature that version does not expose with the remaining extensions is not
+/// read, and only the formats the product asks about are. The format tables keep the per-format
+/// bits the device reported (`DeviceDescription::khr_format_feature_flags2` stays).
+pub fn description_at_1_2(stem: &str, flags2: bool) -> Result<DeviceDescription, String> {
+    use crate::device::requirements::{ApiVersion, VkExtension};
+    let mut desc = description(stem)?;
+    let api = desc.api_version.min(ApiVersion::V1_2);
+    desc.api_version = api;
+    if !flags2 {
+        desc.extensions.remove(&VkExtension::KhrFormatFeatureFlags2);
+    }
+    let extensions = desc.extensions.clone();
+    desc.features
+        .retain(|&feature| feature.exposure().exposed(api, &extensions));
+    let queried: std::collections::BTreeSet<_> =
+        crate::device::FormatSupport::queries_for(api, &extensions)
+            .into_iter()
+            .collect();
+    desc.formats
+        .formats
+        .retain(|format, _| queried.contains(format));
+    Ok(desc)
+}
+
 /// Committed profile `stem` (`validation/profiles/<stem>.json`) derived under `policy`.
 pub fn profile(stem: &str, policy: DevicePolicy) -> Result<DeviceProfile, String> {
     let dev = Device::new(description(stem)?, policy).map_err(|e| format!("{stem}: {e}"))?;
