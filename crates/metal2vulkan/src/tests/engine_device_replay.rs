@@ -1429,6 +1429,7 @@ fn the_generated_commands_path_holds_to_what_the_device_states() {
     assert_eq!(
         generating,
         [
+            "amd-780m-hawkpoint-radv",
             "amd-780m-radv",
             "amd-rdna2-apu-radv",
             "amd-rdna3-radv",

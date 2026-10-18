@@ -203,6 +203,7 @@ released:
   A blit whose released buffer the device cannot import again (out of memory) is refused.
 - An import of the pointer, on a driver whose pointer imports follow their address
   (`DriverFact::PointerImportsFollowTheirAddress`: ANV, Mesa 26.2.4 on the Iris Xe of Raptor
+  Lake-P; RADV, Mesa 26.2.4 on the Radeon 780M of Phoenix or Hawk Point; and lavapipe). There a live import reads, at each
   submission, the pages mapped at its pointer then, so the new import at the same pointer reads
   what the kept one would. A blit whose released buffer the device cannot import again is refused,
   typed as the first import would be. Elsewhere a pointer import stays imported.

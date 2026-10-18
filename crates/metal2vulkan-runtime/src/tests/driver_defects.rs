@@ -31,6 +31,8 @@ const STALE_PUSHES: RuntimeDriverDefect =
 /// compiled at load, the copies of compressed images that rewrite texels, the reads of command
 /// buffers after their signal, the frees that fail pending work and the pushed sets' unset buffer
 /// sizes; lavapipe the colour copies, the depth/stencil resolve of the
+/// preprocessing after an execution set on every GPU but the 780M at 26.2.4 (Phoenix's and Hawk
+/// Point's), measured clean; ANV
 /// the compressed image's short size, the occlusion count per color output and the pushed
 /// descriptors a pipeline bind leaves stale on every GPU (Arrow Lake's, not measured, too);
 /// NVIDIA's the
@@ -60,9 +62,10 @@ fn the_committed_profiles_drivers_have_their_defects() {
                     PUSHES,
                 ]
             }
-            Some(DriverId::MESA_LLVMPIPE) => vec![COPIES, RESOLVES, PAST_HEIGHT],
+            // The 780M at 26.2.4, under Phoenix's `deviceID` and Hawk Point's.
             Some(DriverId::MESA_RADV)
-                if (desc.device_id, desc.driver_version) == (0x15bf, MESA_26_2_4) =>
+                if matches!(desc.device_id, 0x15bf | 0x1900)
+                    && desc.driver_version == MESA_26_2_4 =>
             {
                 vec![NAN_COPIES]
             }
@@ -171,6 +174,46 @@ fn radv_s_preprocessing_is_clean_on_the_identity_measured_alone() {
         mesa_26_0_8,
     );
     assert!(!nvidia.contains(&PREPROCESS));
+}
+
+/// Hawk Point's Radeon 780M (`deviceID` 0x1900) is Phoenix's GPU (0x15bf): at RADV 26.2.4 it is a
+/// measured identity, so it sends no unmeasured-driver message and takes Phoenix's driver facts
+/// and defects, the implicit preprocessing measured clean among them. At another release, or as a
+/// neighbouring `deviceID` (0x1901), it is unmeasured, works the preprocessing around, and says
+/// so in the message, naming its own `deviceID`.
+#[test]
+fn hawk_points_780m_is_phoenixs_measured_identity() {
+    use crate::driver_facts::{unmeasured_driver, UNMEASURED_DRIVER};
+    let (stem, phoenix) = super::capabilities::committed_descriptions()
+        .into_iter()
+        .find(|(stem, _)| stem == "amd-780m-radv")
+        .expect("amd-780m-radv");
+    let (_, measured) = super::capabilities::created(&stem, &phoenix);
+    let mut hawk_point = phoenix.clone();
+    hawk_point.device_id = 0x1900;
+    let (_, properties) = super::capabilities::created(&stem, &hawk_point);
+    assert_eq!(unmeasured_driver(&properties), None);
+    assert_eq!(properties.driver_facts, measured.driver_facts);
+    assert!(!properties.driver_facts.is_empty());
+    assert_eq!(properties.driver_defects, measured.driver_defects);
+    assert_eq!(
+        of(&hawk_point).into_iter().collect::<Vec<_>>(),
+        [NAN_COPIES]
+    );
+    for (device, release) in [
+        (0x1900, MESA_26_2_4 + 1),
+        (0x1900, MESA_26_2_4 - 1),
+        (0x1901, MESA_26_2_4),
+    ] {
+        let mut other = phoenix.clone();
+        (other.device_id, other.driver_version) = (device, release);
+        let (_, properties) = super::capabilities::created(&stem, &other);
+        let text = unmeasured_driver(&properties).expect("an unmeasured identity");
+        assert!(text.contains(&format!("deviceID {device:#x}")), "{text}");
+        assert!(text.ends_with(&format!("[{UNMEASURED_DRIVER}]")), "{text}");
+        assert!(properties.driver_facts.is_empty(), "{text}");
+        assert!(of(&other).contains(&PREPROCESS), "{device:#x} {release:#x}");
+    }
 }
 
 /// Each clean identity is a measured one: a committed profile of the driver, GPU and release

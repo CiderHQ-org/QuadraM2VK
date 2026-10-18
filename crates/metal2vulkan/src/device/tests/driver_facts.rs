@@ -359,8 +359,9 @@ fn the_profile_takes_the_deviations_its_driver_release_is_measured_with() {
                 D::MetalHalfStorageWrites,
                 D::MetalFloatStorageNans,
             ],
-            // The per-sample `FragCoord.z` last, in `taken`'s order.
-            (false, "amd-780m-radv") => vec![
+            // The per-sample `FragCoord.z` last, in `taken`'s order. The 780M under Phoenix's
+            // `deviceID` and Hawk Point's alike.
+            (false, "amd-780m-radv" | "amd-780m-hawkpoint-radv") => vec![
                 D::MetalFloatDenormals,
                 D::MetalHalfQuantize,
                 D::MetalSmallFloatColorWrites,
@@ -539,7 +540,7 @@ const INTERLOCK_ORDER: DriverFact = DriverFact::InterlockOrdersDraws;
 
 /// Every committed profile's driver has exactly its measured facts (on a measured identity those
 /// its rows name, on any other its driver's defects alone). A profile of a measured identity: the
-/// 780M (RADV 26.2.4), the gate's lavapipe 26.0.8 (both CPUs), the RPL-P and the RPL-S (ANV
+/// 780M (RADV 26.2.4, Phoenix's and Hawk Point's alike), the gate's lavapipe 26.0.8 (both CPUs), the RPL-P and the RPL-S (ANV
 /// 26.2.4), the M3 Max and the M4 (MoltenVK 1.4.1, one identity under macOS 27) and the RTX 5080
 /// Laptop GPU (NVIDIA's 615.71.09). It reads zero past the bound index range on the 780M, the RPL-S
 /// and the RTX 5080 Laptop GPU, the GPUs measured; its depth images keep denormals on the RTX 5080
@@ -585,6 +586,19 @@ fn the_committed_profiles_drivers_have_their_facts() {
         }
     }
     let expected: BTreeMap<String, Vec<DriverFact>> = [
+        (
+            "amd-780m-hawkpoint-radv",
+            vec![
+                ZERO,
+                FETCH,
+                SPLIT,
+                COLOR_BLOCKS,
+                BC6H,
+                BC7,
+                ONE_OF_METALS,
+                FOLLOWS,
+            ],
+        ),
         (
             "amd-780m-radv",
             vec![
@@ -764,12 +778,14 @@ fn an_unmeasured_identity_takes_its_drivers_defects_alone() {
 }
 
 /// Each measured identity is a GPU and release a venue ran: the committed profiles of the measured
-/// GPUs carry exactly the identities listed, so no row names a release or GPU nobody measured.
+/// GPUs carry exactly the identities listed, so no row names a release or GPU nobody measured. The
+/// Radeon 780M's capture under its Hawk Point `deviceID` is a measured identity through Phoenix's.
 #[test]
 fn the_measured_identities_are_the_committed_profiles() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../metal2vulkan-validation/profiles");
     let mut measured = Vec::new();
     for stem in [
+        "amd-780m-hawkpoint-radv",
         "amd-780m-radv",
         "gate-lavapipe",
         "gate-lavapipe-x86_64",
@@ -796,6 +812,76 @@ fn the_measured_identities_are_the_committed_profiles() {
             "{id:?} is measured but no venue's profile names it"
         );
     }
+}
+
+/// One GPU that reports more than one `deviceID` takes its measured rows under each: the Radeon
+/// 780M of Hawk Point (0x1900) is Phoenix's (0x15bf), so a RADV 26.2.4 description of it is a
+/// measured identity with Phoenix's driver facts, deviations and defects, and derives Phoenix's
+/// profile, its Function storage among it, and fingerprint. The release a row names still holds
+/// exactly: 0x1900 at Mesa 26.2.3 or 26.2.5 is unmeasured, as Phoenix is there. A neighbouring
+/// `deviceID` (0x1901), or 0x1900 of another vendor, is another GPU: unmeasured, its own.
+#[test]
+fn a_gpu_under_another_of_its_device_ids_takes_its_measured_rows() {
+    use crate::device::driver_facts::{defects, deviations};
+    use crate::device::{Device, DevicePolicy, FunctionStorage};
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../metal2vulkan-validation/profiles");
+    let text = std::fs::read_to_string(dir.join("amd-780m-radv.json")).expect("amd-780m-radv");
+    let phoenix = DeviceDescription::from_khronos_json(&text, None).expect("profile parses");
+    let profile = |desc: &DeviceDescription| {
+        Device::new(desc.clone(), DevicePolicy::default())
+            .expect("the device is made")
+            .profile()
+            .clone()
+    };
+    let mut hawk_point = phoenix.clone();
+    hawk_point.device_id = 0x1900;
+    assert_eq!(phoenix.canonical_device_id(), 0x15bf);
+    assert_eq!(hawk_point.canonical_device_id(), 0x15bf);
+    assert!(hawk_point.measured_identity());
+    assert!(!hawk_point.driver_facts().is_empty());
+    assert_eq!(hawk_point.driver_facts(), phoenix.driver_facts());
+    assert!(hawk_point.driver_facts_withheld().is_empty());
+    assert!(!deviations(&hawk_point).is_empty());
+    assert_eq!(deviations(&hawk_point), deviations(&phoenix));
+    assert_eq!(defects(&hawk_point), defects(&phoenix));
+    assert_eq!(
+        profile(&hawk_point).fields().function_storage,
+        FunctionStorage::Measured(96 * 1024)
+    );
+    assert_eq!(
+        profile(&hawk_point).fingerprint(),
+        profile(&phoenix).fingerprint()
+    );
+
+    for release in [mesa(26, 2, 3), mesa(26, 2, 5)] {
+        let (mut other, mut phoenix_there) = (hawk_point.clone(), phoenix.clone());
+        other.driver_version = release;
+        phoenix_there.driver_version = release;
+        assert!(!other.measured_identity(), "{release:#x}");
+        assert!(other.driver_facts().is_empty(), "{release:#x}");
+        assert!(!other.driver_facts_withheld().is_empty(), "{release:#x}");
+        assert_eq!(
+            other.driver_facts_withheld(),
+            phoenix_there.driver_facts_withheld()
+        );
+        assert_eq!(deviations(&other), deviations(&phoenix_there));
+    }
+
+    let mut neighbour = hawk_point.clone();
+    neighbour.device_id = 0x1901;
+    let mut other_vendor = hawk_point.clone();
+    other_vendor.vendor_id = 0x8086;
+    for (desc, device) in [(&neighbour, 0x1901), (&other_vendor, 0x1900)] {
+        assert_eq!(desc.canonical_device_id(), device);
+        assert!(!desc.measured_identity(), "{device:#x}");
+        assert!(desc.driver_facts().is_empty(), "{device:#x}");
+    }
+    assert!(!neighbour.driver_facts_withheld().is_empty());
+    assert!(deviations(&neighbour).len() < deviations(&phoenix).len());
+    assert_eq!(
+        profile(&neighbour).fields().function_storage,
+        FunctionStorage::Assumed(16 * 1024)
+    );
 }
 
 /// The identities measured whose venue has no committed profile: the RTX 3090 (gem10) at NVIDIA's

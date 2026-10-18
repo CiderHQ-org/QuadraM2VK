@@ -3,6 +3,7 @@
 use super::*;
 
 const COMMITTED: &[&str] = &[
+    "amd-780m-hawkpoint-radv",
     "amd-780m-radv",
     "amd-rdna2-apu-radv",
     "amd-rdna3-radv",

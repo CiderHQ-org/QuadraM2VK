@@ -12,7 +12,9 @@
 //! each size cut at 60 s). A device's value is its largest size answered correctly over every
 //! thread count below its first size that failed; a size cut at 60 s is not measured, never taken
 //! as correct. The table keys each value on the device's identity, its driver, vendor, and device
-//! ID, as the driver workarounds are keyed ([`DriverWorkaround`]), and on nothing else.
+//! ID, as the driver workarounds are keyed ([`DriverWorkaround`]), and on nothing else; a GPU that
+//! reports more than one device ID is read by the one it was measured under
+//! ([`DeviceDescription::canonical_device_id`]).
 //!
 //! A device the table does not name holds [`FLOOR`], 16 KiB a thread: half the least any
 //! measured device held (32 KiB), and below every size any of them failed at (48 KiB and up).
@@ -46,9 +48,8 @@ const KIB: u64 = 1024;
 
 /// The devices measured, each with the build and the evidence it was measured on.
 const MEASURED: [Measured; 9] = [
-    // AMD Radeon 780M (RADV PHOENIX), RADV Mesa 26.2.4-arch3.1 (EV
-    // UNI-B3-pm-radv): 64 and 96 KiB correct over 262144 threads; 128 KiB wrong over 4096. RADV
-    // Mesa 26.0.8-1ubuntu0.3 (homelab-um780): 4 to 96 KiB correct over 262144 threads.
+    // threads; 128 KiB wrong over 4096. RADV Mesa 26.0.8-1ubuntu0.3 (homelab-um780): 4 to 96 KiB
+    // correct over 262144 threads. Hawk Point's 780M (0x1900) is the same GPU, read as 0x15bf.
     Measured {
         driver: vk::DriverId::MESA_RADV,
         vendor: 0x1002,
@@ -142,13 +143,10 @@ pub(crate) const METAL: u64 = 192 * KIB;
 /// The Function storage a thread of `desc`'s device holds correctly: the measured value of its
 /// identity, or [`FLOOR`] for a device not measured.
 pub(crate) fn of(desc: &DeviceDescription) -> FunctionStorage {
+    let gpu = desc.canonical_device_id();
     MEASURED
         .iter()
-        .find(|d| {
-            desc.driver_id == Some(d.driver)
-                && desc.vendor_id == d.vendor
-                && desc.device_id == d.device
-        })
+        .find(|d| desc.driver_id == Some(d.driver) && desc.vendor_id == d.vendor && gpu == d.device)
         .map_or(FunctionStorage::Assumed(FLOOR), |d| {
             FunctionStorage::Measured(d.bytes)
         })

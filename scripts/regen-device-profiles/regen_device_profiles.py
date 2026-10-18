@@ -428,6 +428,22 @@ SOURCES = [
         },
     },
     {
+        # The Radeon 780M of Hawk Point, the GPU of `amd-780m-radv` under another deviceID
+        # (0x1900), whose measured driver facts it shares; no venue names it. Its capture, under
+        # the same RADV build, differs from `amd-780m-radv`'s only in the deviceID.
+        "name": "amd-780m-hawkpoint-radv",
+        "kind": "vulkaninfo",
+        "sha256": "2a79388cb4ef4f6dbe99fd31217b6eb6b200c1d92c3e12304e99efb15c46cd3c",
+        "profile": "VP_VULKANINFO_AMD_Radeon_780M_Graphics_(RADV_PHOENIX)_26_2_4",
+        "command": "vulkaninfo --json",
+        "host": ("AMD Radeon 780M (Hawk Point, Ryzen 7 8845HS), CachyOS: mesa and vulkan-radeon "
+                 "26.2.4, vulkan-icd-loader and vulkan-tools 1.4.363.0"),
+        "formats": {
+            "command": "corpus-vulkan --capture-formats OUT --device-type gpu",
+            "sha256": "d999da3206596ae9b15e9c523b098bdda379b4c2a8a214076e7fc8804e095321",
+        },
+    },
+    {
         "name": "intel-irisxe-rplp-anv",
         "kind": "vulkaninfo",
         "sha256": "6d34a34db319ee2f6b45f0fadac382cb5d3b3e7a5f5816513a71cd4080d34c8d",

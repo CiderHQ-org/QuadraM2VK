@@ -24,7 +24,9 @@
 //! `driverID`, `vendorID`, `deviceID` and `driverVersion`; `MEASURED_DEVICES` lists the ones the
 //! lanes measure (a driver at one release on one GPU: the device class is the GPU's `deviceID`,
 //! never a host's name), and [`DeviceDescription::measured_identity`] answers whether a description
-//! is one.
+//! is one. A GPU that reports more than one `deviceID` is one device class under each: every table
+//! here names it by the ID it was measured under, and a description is read by its
+//! [`DeviceDescription::canonical_device_id`].
 //! - **On a measured identity** a fact is taken where a row of its driver names the identity's
 //!   release (from the first through the last) and, where it names them, its vendor and GPU: as
 //!   measured.
@@ -825,7 +827,9 @@ const fn nvidia_61571(fact: DriverDeviation, device: u32) -> Measured<DriverDevi
 /// AMD's `vendorID`.
 const AMD_VENDOR_ID: u32 = 0x1002;
 
-/// The `deviceID` of the Radeon 780M (the committed capture `amd-780m-radv`).
+/// The `deviceID` of the Radeon 780M it was measured under, Phoenix's (the committed capture
+/// `amd-780m-radv`); Hawk Point's 0x1900 is the same GPU, so it takes these rows too
+/// ([`DeviceDescription::canonical_device_id`]).
 pub(crate) const AMD_RADEON_780M: u32 = 0x15bf;
 
 /// The `deviceID` of the Intel UHD Graphics 770 of Raptor Lake-S (the committed capture
@@ -1031,7 +1035,7 @@ pub(crate) fn defects(description: &DeviceDescription) -> BTreeSet<DriverWorkaro
     among(
         DEFECTS,
         description.driver_id,
-        (description.vendor_id, description.device_id),
+        (description.vendor_id, description.canonical_device_id()),
         description.driver_version,
     )
     .into_keys()
@@ -1043,7 +1047,7 @@ pub(crate) fn deviations(description: &DeviceDescription) -> BTreeMap<DriverDevi
     among(
         DEVIATIONS,
         description.driver_id,
-        (description.vendor_id, description.device_id),
+        (description.vendor_id, description.canonical_device_id()),
         description.driver_version,
     )
 }
@@ -2549,7 +2553,9 @@ pub(crate) struct MeasuredDevice {
     pub(crate) driver: DriverId,
     /// `VkPhysicalDeviceProperties::vendorID`.
     pub(crate) vendor: u32,
-    /// `VkPhysicalDeviceProperties::deviceID`: the device class a measurement covers.
+    /// `VkPhysicalDeviceProperties::deviceID`: the device class a measurement covers, which a
+    /// description of any `deviceID` of the same GPU is
+    /// ([`DeviceDescription::canonical_device_id`]).
     pub(crate) device: u32,
     /// `VkPhysicalDeviceProperties::driverVersion`.
     pub(crate) release: u32,
@@ -2627,6 +2633,7 @@ impl DeviceDescription {
     /// the driver has it, and elsewhere takes the exact path that needs none.
     pub fn driver_facts(&self) -> BTreeSet<DriverFact> {
         let measured = self.measured_identity();
+        let gpu = self.canonical_device_id();
         MEASURED
             .iter()
             .filter(|row| Some(row.driver) == self.driver_id)
@@ -2634,7 +2641,7 @@ impl DeviceDescription {
                 true => {
                     (row.first..=row.last).contains(&self.driver_version)
                         && row.vendor.is_none_or(|v| v == self.vendor_id)
-                        && row.device.is_none_or(|d| d == self.device_id)
+                        && row.device.is_none_or(|d| d == gpu)
                 }
                 false => row.fact.assumed_where_unmeasured(),
             })
@@ -2643,15 +2650,18 @@ impl DeviceDescription {
     }
 
     /// Whether the device's identity (`driverID`, `vendorID`, `deviceID` and `driverVersion`) is
-    /// one the runtime's driver facts were measured on (`MEASURED_DEVICES`, the module docs).
-    /// Another release of a measured driver, another GPU of it, or another driver is not: the
-    /// runtime takes no answer fact there, assumes its driver's measured defects, and says so once
-    /// in the informational message `metal2vulkan-unmeasured-driver`.
+    /// one the runtime's driver facts were measured on (`MEASURED_DEVICES`, the module docs), its
+    /// `deviceID` read as the GPU's measured one
+    /// ([`canonical_device_id`](DeviceDescription::canonical_device_id)). Another release of a
+    /// measured driver, another GPU of it, or another driver is not: the runtime takes no answer
+    /// fact there, assumes its driver's measured defects, and says so once in the informational
+    /// message `metal2vulkan-unmeasured-driver`.
     pub fn measured_identity(&self) -> bool {
+        let gpu = self.canonical_device_id();
         MEASURED_DEVICES.iter().any(|m| {
             Some(m.driver) == self.driver_id
                 && m.vendor == self.vendor_id
-                && m.device == self.device_id
+                && m.device == gpu
                 && m.release == self.driver_version
         })
     }

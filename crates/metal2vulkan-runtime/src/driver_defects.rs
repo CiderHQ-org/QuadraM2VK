@@ -10,7 +10,8 @@
 //! `families/features.rs`) does it run, announced as a degradation.
 //!
 //! Each defect lists the drivers that have it and, for each, the measured identities a probe found
-//! clean: a GPU (`deviceID`) at one release, which the device layer measured
+//! clean: a GPU (`deviceID`, the one it was measured under for a GPU that reports several:
+//! `DeviceDescription::canonical_device_id`) at one release, which the device layer measured
 //! (`DeviceDescription::measured_identity`). Every other release and GPU of the driver has it,
 //! measured broken or not measured at all, so a release or GPU nobody probed takes the exact path,
 //! and one probed clean then needs only its identity in the list, not new code.
@@ -197,8 +198,8 @@ pub(super) struct Affected {
 ///   Measured clean on 26.2.4 (driverVersion 0x6802004) on both. Nothing is refused: the runtime
 ///   preprocesses every execution of the range apart, before the first runs
 ///   (`generated_execute.rs`). Every RADV GPU and release but the measured identity found clean,
-///   the 780M at 26.2.4, takes it; the RX 7900 XTX is no measured identity, so it takes it at
-///   every release.
+///   the 780M at 26.2.4 (Phoenix's 0x15bf, and Hawk Point's 0x1900, the same GPU), takes it; the
+///   RX 7900 XTX is no measured identity, so it takes it at every release.
 ///
 /// `ExplicitPlaneRowsPastHeight`:
 /// - Mesa's lavapipe (`MESA_LLVMPIPE`): a `DRM_FORMAT_MOD_LINEAR` image made for host allocations
@@ -353,12 +354,13 @@ pub(super) const AFFECTED: &[Affected] = &[
     },
 ];
 
-/// The defects of the driver and device `description` names.
+/// The defects of the driver and device `description` names, its GPU read by the `deviceID` it
+/// was measured under (`DeviceDescription::canonical_device_id`).
 pub(super) fn of(description: &DeviceDescription) -> BTreeSet<RuntimeDriverDefect> {
     among(
         AFFECTED,
         description.driver_id,
-        description.device_id,
+        description.canonical_device_id(),
         description.driver_version,
     )
 }

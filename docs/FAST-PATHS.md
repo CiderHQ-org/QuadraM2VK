@@ -360,7 +360,8 @@ driver's. Each is open work.
   device's value, or past 192 KiB elsewhere (below that it runs with `FunctionStorageAssumed`, the
   device-gap row above). Vulkan states no limit on the driver's scratch, so the lane
   `runtime_lane::private_memory` measures it per device and `device::function_storage` keys it on
-  the driver, vendor and device ID: 96 KiB on the Radeon 780M and RX 7900 XTX, 32 KiB on the Iris
+  the driver, vendor and device ID (a GPU that reports several read by the one measured, the Radeon
+  780M of Hawk Point as Phoenix's): 96 KiB on the Radeon 780M and RX 7900 XTX, 32 KiB on the Iris
   Xe, the UHD 770 and the RTX 5080 Laptop GPU, 128 KiB on the RTX 3090, 192 KiB on the M3 Max and
   M4 under MoltenVK, 48 KiB on lavapipe; 16 KiB elsewhere. An exact form for compute, private memory
   in a runtime buffer with a slot per resident threadgroup, is not built.

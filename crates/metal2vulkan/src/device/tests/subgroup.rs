@@ -50,6 +50,7 @@ fn short(t: &Result<Tier, crate::error::Unsupported>) -> String {
 /// PartialFragment, `L` Linear, `E` Emulated, `-` no subgroup; `xW` width refusal, `xO`/`xQ`/`xM`
 /// missing operations (subgroup ops, quads, matrix ops).
 const GOLDEN: &str = "\
+amd-780m-hawkpoint-radv: -,C,C,C,C,C,xW | -,D,D,D,D,D,D | -,L,D,D,D,D,D
 amd-780m-radv: -,C,C,C,C,C,xW | -,D,D,D,D,D,D | -,L,D,D,D,D,D
 amd-rdna2-apu-radv: -,C,C,C,C,C,xW | -,D,D,D,D,D,D | -,L,D,D,D,D,D
 amd-rdna3-radv: -,C,C,C,C,C,xW | -,D,D,D,D,D,D | -,L,D,D,D,D,D

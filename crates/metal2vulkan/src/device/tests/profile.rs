@@ -485,9 +485,11 @@ fn streamed_fingerprint_equals_the_hash_of_the_rendering() {
 /// Two committed profiles share a fingerprint only when their descriptions differ in nothing a
 /// translation reads: at most in the device's identity (vendor, device, driver version, type) and
 /// its allocation sizes, as two captures of one GPU family on one driver do
-/// (`intel-irisxe-rplp-anv` and `intel-uhd770-rpls-anv`, the one Intel venue), and `moltenvk-m3`
-/// and `moltenvk-m4` (MoltenVK 1.4.1 on the Apple M3 Max and the Apple M4 under macOS 27, whose
-/// `deviceID` MoltenVK makes one: the macOS release and the GPU family).
+/// (`intel-irisxe-rplp-anv` and `intel-uhd770-rpls-anv`, the one Intel venue), two of one GPU
+/// under its two `deviceID`s (`amd-780m-hawkpoint-radv` and `amd-780m-radv`, the Radeon 780M of
+/// Hawk Point and of Phoenix), and `moltenvk-m3` and `moltenvk-m4` (MoltenVK 1.4.1 on the Apple
+/// M3 Max and the Apple M4 under macOS 27, whose `deviceID` MoltenVK makes one: the macOS release
+/// and the GPU family).
 #[test]
 fn fingerprints_distinguish_committed_profiles() {
     let translated = |stem: &str| {
@@ -512,6 +514,10 @@ fn fingerprints_distinguish_committed_profiles() {
     assert_eq!(
         shared,
         [
+            (
+                "amd-780m-hawkpoint-radv".to_string(),
+                "amd-780m-radv".to_string()
+            ),
             (
                 "intel-irisxe-rplp-anv".to_string(),
                 "intel-uhd770-rpls-anv".to_string()
@@ -1275,6 +1281,7 @@ fn function_storage_is_the_measured_value_of_the_device() {
     use crate::device::profile::FunctionStorage::{Assumed, Measured};
     let kib = 1024;
     let measured = [
+        ("amd-780m-hawkpoint-radv", 96 * kib),
         ("amd-780m-radv", 96 * kib),
         ("intel-irisxe-rplp-anv", 32 * kib),
         ("intel-uhd770-rpls-anv", 32 * kib),

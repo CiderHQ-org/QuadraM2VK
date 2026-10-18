@@ -163,7 +163,9 @@ it only where that driver was measured to give it, keyed on the description's dr
 (`driver_id`, `vendor_id`, `driver_version`, and `device_id` where one GPU differs from another;
 MoltenVK's `device_id` is the macOS release and the Apple GPU family, so the M3 Max and the M4 share
 one under macOS 27 and a macOS release not measured is another identity), never on a claim of the
-description itself. These are `DriverDeviation`s (simdgroups that run in lockstep, Metal's own
+description itself. A GPU that reports more than one `device_id` is read by the one it was measured
+under (`DeviceDescription::canonical_device_id`): the Radeon 780M of Hawk Point (`0x1900`) as
+Phoenix's (`0x15bf`), at the releases measured there. These are `DriverDeviation`s (simdgroups that run in lockstep, Metal's own
 `float` functions, sampler and canonical NaNs, color writes, ...), measured on MoltenVK 1.4.1 on
 Apple's M3 Max and M4, with a few per-GPU facts measured elsewhere. A driver,
 GPU or release that was not measured takes the conservative, exact route. A newer MoltenVK release

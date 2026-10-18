@@ -1937,6 +1937,7 @@ fn half_float_storage_writes_take_their_measured_class() {
         let want = match stem.as_str() {
             "moltenvk-m3" | "moltenvk-m4" => StorageImageClass::Identity,
             "amd-780m-radv"
+            | "amd-780m-hawkpoint-radv"
             | "intel-irisxe-rplp-anv"
             | "intel-uhd770-rpls-anv"
             | "nvidia-rtx5080-laptop"

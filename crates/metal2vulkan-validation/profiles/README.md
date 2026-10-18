@@ -23,6 +23,7 @@ validation uses them for per-profile checks.
 | `gate-lavapipe` | `vulkaninfo --json` capture in `scripts/linux-gate --icd lavapipe` (arm64 image), plus its supplement | llvmpipe (LLVM 21.1.8, 128 bits): the gate's own CPU device, so a run restricted to it under `VK_LAYER_KHRONOS_profiles` reports the device itself | Mesa 26.0.8 | 1.4.335 |
 | `gate-lavapipe-x86_64` | `vulkaninfo --json` capture in `scripts/linux-gate --icd lavapipe` (amd64 image), plus its supplement | llvmpipe (LLVM 21.1.8, 256 bits) | Mesa 26.0.8 | 1.4.335 |
 | `amd-780m-radv` | local `vulkaninfo --json`, plus its supplement | AMD Radeon 780M Graphics (RADV PHOENIX), CachyOS | Mesa 26.2.4 | 1.4.354 |
+| `amd-780m-hawkpoint-radv` | local `vulkaninfo --json`, plus its supplement | AMD Radeon 780M Graphics (RADV PHOENIX) of a Hawk Point Ryzen 7 8845HS (`deviceID` 0x1900), CachyOS | Mesa 26.2.4 | 1.4.354 |
 | `intel-irisxe-rplp-anv` | local `vulkaninfo --json`, plus its supplement | Intel(R) Iris(R) Xe Graphics (RPL-P), ANV, CachyOS | Mesa 26.2.4 | 1.4.354 |
 | `intel-uhd770-rpls-anv` | local `vulkaninfo --json`, plus its supplement | Intel(R) Graphics (RPL-S), the UHD Graphics 770 of an i9-13900, ANV, CachyOS | Mesa 26.2.4 | 1.4.354 |
 | `nvidia-rtx5080-laptop` | local `vulkaninfo --json`, plus its supplement | NVIDIA GeForce RTX 5080 Laptop GPU, CachyOS | 615.71.09 | 1.4.351 |
@@ -38,7 +39,10 @@ declares for it, or that derives another translation key than the venue's profil
 files above are census profiles of devices in the wild; no venue names them. Nor does it name
 `moltenvk-m4`, the capture of the Apple M4 whose measured MoltenVK answers the product's driver
 facts name beside the M3 Max's. MoltenVK's `deviceID` is the macOS release and the Apple GPU family,
-so under macOS 27 the two captures share one identity and differ only in allocation sizes.
+so under macOS 27 the two captures share one identity and differ only in allocation sizes. Nor does
+it name `amd-780m-hawkpoint-radv`, the Radeon 780M of Hawk Point: the GPU of `amd-780m-radv` under
+another `deviceID` (0x1900), whose capture under the same RADV build differs from `amd-780m-radv`'s
+only there, so it takes the 780M's measured driver facts and derives the same translation key.
 
 Reading notes for consumers of these files:
 
