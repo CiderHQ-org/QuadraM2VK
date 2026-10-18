@@ -22,16 +22,19 @@
 //!   the clear.
 //! - **The copy back**: the buffer, bit for bit, but for an edge value the device is known to
 //!   change, each change announced or a recorded driver fact: by the `FragDepth` draw where the
-//!   driver's fragment depth changes values (`drawn-depth-copy`, its driver's measured changes:
-//!   NVIDIA's denormals as a zero of their sign and NaN as -inf; MoltenVK's positive NaN writing
-//!   nothing, a value with the sign bit set as +0, one past 1 as 1), by a depth image without
+//!   driver's fragment depth is not measured to keep every value (`drawn-depth-copy`, its driver's
+//!   measured changes: NVIDIA's denormals as a zero of their sign and NaN as -inf; MoltenVK's
+//!   positive NaN writing nothing, a value with the sign bit set as +0, one past 1 as 1; on a
+//!   driver not measured, what Vulkan leaves to it: any value outside `[0, 1]`, a denormal as a
+//!   zero, -0 as +0), by a depth image without
 //!   `VK_EXT_depth_range_unrestricted` whose driver may clamp (`restricted-depth-upload`; ANV's
 //!   stores a value past 1 as 1, and NaN and a value with the sign bit set as +0), and by a depth
 //!   image whose driver is not measured to keep a denormal (no
 //!   `DriverFact::DepthImageKeepsDenormals`: RADV's and ANV's hold one as a zero).
 //! - **Refused** only where the move refuses: a 16-bit depth on a device whose maintenance8
 //!   copies are missing or wrong (`RuntimeDriverDefect::MultisampledDepthStencilColourCopies`),
-//!   whose draws would convert it (unmeasured), as `NotImplemented(MultisampledBufferCopy)`.
+//!   whose draws would convert it (unmeasured), as `NotImplemented(MultisampledBufferCopy)`. A
+//!   32-bit float depth is copied in on every such device, by the draw, announced where inexact.
 //!
 //! Each case prints a `DEPTH-BUFFER` line, and each edge value a `DEPTH-EDGE` line (what the
 //! kernel read and what came back), so a lane's log shows every device's answer.
@@ -243,7 +246,15 @@ impl Changes {
                 (_, true) => back == 0,
                 (false, false) => value > 1.0 && back == one,
             },
-            _ => false,
+            // A driver whose fragment depth is not measured (`depth_copy::UNMEASURED_FLOAT_DEPTH`):
+            // Vulkan leaves a value outside `[0, 1]` undefined, and the driver may flush a
+            // denormal to zero or store -0 as +0.
+            _ => {
+                let outside = is_nan(word) || !(0.0..=1.0).contains(&value);
+                outside
+                    || (is_denormal(word) && back & 0x7fff_ffff == 0)
+                    || (word == sign && back == 0)
+            }
         }
     }
 }

@@ -995,9 +995,8 @@ impl BlitCommandEncoder {
     /// `Depth24Unorm_Stencil8` texture); a multisampled copy between a depth or stencil aspect and
     /// a colour format, or between two depth/stencil formats, on a device without
     /// `VK_KHR_maintenance8` or whose driver
-    /// copies such images wrong, where its sample-rate draws cannot copy it exactly either: a
-    /// 16-bit depth, a 32-bit float depth written where the driver's fragment depth changes values,
-    /// a source the draws cannot sample or a destination they cannot render to (`Unsupported`,
+    /// copies such images wrong, where its sample-rate draws cannot copy it either: a 16-bit
+    /// depth, a source the draws cannot sample or a destination they cannot render to (`Unsupported`,
     /// `Feature::Format`, naming maintenance8 or the defect); textures of another device
     /// (`Invalid`).
     pub fn copy_from_texture_to_texture(

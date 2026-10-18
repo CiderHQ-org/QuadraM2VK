@@ -10,10 +10,10 @@
 //! driver copies such images wrong (lavapipe, MoltenVK, NVIDIA's Ampere GA10x:
 //! `RuntimeDriverDefect::MultisampledDepthStencilColourCopies`), the copies go by sample-rate
 //! draws. A copy into a 32-bit float depth there is exact where the driver's fragment depth
-//! stores every value (`DriverFact::FragmentDepthStoresUnchanged`), and where it is measured to
-//! change some (MoltenVK, NVIDIA's) runs announced once ([`DRAWN_DEPTH`]), exact for these
-//! depths in `[0, 1]`; on another driver, and for a 16-bit depth, the copy is refused, typed,
-//! naming `Feature::Format`.
+//! stores every value (`DriverFact::FragmentDepthStoresUnchanged`), and elsewhere (measured to
+//! change some values, MoltenVK's and NVIDIA's, or not measured) runs announced once
+//! ([`DRAWN_DEPTH`]), exact for these depths in `[0, 1]`; for a 16-bit depth the copy is refused,
+//! typed, naming `Feature::Format`.
 
 use super::degrade_notices::shared_in_system_memory;
 use super::degrade_notices::signs_depth_tests;
@@ -360,7 +360,7 @@ fn multisampled_depth_and_stencil_copy_every_sample_with_colour() {
             let copies = maintenance8 && defect.is_none();
             // The draws copy a stencil, and a 32-bit float depth where the driver's fragment
             // depth stores it unchanged; never a 16-bit depth. A 32-bit float depth's copy in
-            // elsewhere runs announced where the driver's changes are measured, else is refused.
+            // elsewhere runs announced.
             let drawn = pair.depth_stencil != PixelFormat::Depth16Unorm
                 && (matches!(pair.read, SampleRead::Stencil) || exact_depth);
             let near = !copies && !drawn && pair.depth_stencil == PixelFormat::Depth32Float;

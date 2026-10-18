@@ -1077,13 +1077,16 @@ degradations! {
         /// render pass's separate multisampled 32-bit float depth texture copied to and from its
         /// scratch image (`depth_stencil_scratch.rs`), by the sample-rate `FragDepth` draw
         /// (`sample_copy.rs`, `depth_copy.rs`), on a device whose copies go by draws and whose
-        /// driver's fragment depth is measured to change some values (`depth_copy::drawn`:
-        /// MoltenVK, NVIDIA's). Both copies take the one decision and announce through
-        /// `depth_copy::announce_changes`. The reason names the values that driver changes.
+        /// driver's fragment depth is not measured to store every value unchanged
+        /// (`depth_copy::drawn`): measured to change some values (MoltenVK, NVIDIA's), or not
+        /// measured at all (any other driver, and lavapipe releases not measured). Both copies
+        /// take the one decision and announce through `depth_copy::announce_changes`. The reason
+        /// names the values that driver changes, or, on a driver not measured, those Vulkan leaves
+        /// to it (outside `[0, 1]`, denormals, -0).
         DrawnDepthCopy = "drawn-depth-copy", Precision,
             "each sample's depth is written by a fragment-depth draw, where Metal copies its \
-             bytes: the values the driver's fragment depth changes, which the reason names, \
-             land changed; every other value lands as Metal's copy leaves it";
+             bytes: the values the driver's fragment depth changes or may change, which the \
+             reason names, can land changed; every other value lands as Metal's copy leaves it";
         /// A texture bound by a slot as a storage image without `ShaderWrite` usage, or as a
         /// sampled one without `ShaderRead`, whose image lacks that usage because adding it
         /// would cost the image its size or the driver's compression: the binding takes an image

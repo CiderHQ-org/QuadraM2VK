@@ -230,13 +230,11 @@ fn separate_multisampled_depth_and_stencil_keep_every_sample() {
             .properties()
             .driver_facts
             .contains(&DriverFact::FragmentDepthStoresUnchanged);
-        // Where the driver's fragment depth is measured to change some values (the runtime's
-        // `depth_copy::fragment_depth_changes`): the draw runs as the announced
-        // `drawn-depth-copy`, and every depth here (0.1 to 1) lands exactly.
-        let draws_change = matches!(
-            description.driver_id,
-            Some(DriverId::MOLTENVK | DriverId::NVIDIA_PROPRIETARY)
-        ) && !draws_exact;
+        // Where the driver's fragment depth is not measured to keep every value (measured to
+        // change some, MoltenVK's and NVIDIA's, or not measured: the runtime's
+        // `depth_copy::drawn`): the draw runs as the announced `drawn-depth-copy`, and every depth
+        // here (0.1 to 1) lands exactly.
+        let draws_change = !draws_exact;
         let mut ran = false;
         let mut drawn = false;
         for extent in EXTENTS {

@@ -17,11 +17,15 @@
 //!   from the release measured (`device/driver_facts.rs`). And a 16-bit unsigned normalized depth,
 //!   on a driver whose fragment depth stores each code's fetched `float` as that code
 //!   (`fragment_depth_keeps_every_16_bit_code` probes every code; the fact
-//!   [`DriverFact::FragmentDepthKeepsDepth16Codes`]). Where the driver is measured to change some
-//!   values of a 32-bit float depth ([`fragment_depth_changes`]: MoltenVK, NVIDIA's), the draw runs
-//!   as an announced near-equivalent (`drawn-depth-copy`, [`drawn`]): a blit copy into such a
-//!   depth, and the separate textures' depth copies. Elsewhere the draw is not used and its
-//!   consumer refuses, typed.
+//!   [`DriverFact::FragmentDepthKeepsDepth16Codes`]). Elsewhere a 32-bit float depth has no exact
+//!   form on a device whose copies go by draws (Vulkan writes a multisampled depth image's
+//!   samples by no other means there), so the draw runs as an announced near-equivalent
+//!   (`drawn-depth-copy`, [`drawn`]): a blit copy into such a depth, and the separate textures'
+//!   depth copies. Its reason names the values the driver is measured to change
+//!   ([`fragment_depth_changes`]: MoltenVK, NVIDIA's), or, on a driver whose fragment depth is not
+//!   measured (another driver, or a release of lavapipe not measured), those Vulkan leaves to the
+//!   driver ([`UNMEASURED_FLOAT_DEPTH`]). A 16-bit depth is drawn only where its codes are
+//!   measured kept; elsewhere its consumer refuses, typed.
 //!
 //! - **The bits draws** ([`DepthDraw::bits`]): the other way, a depth or stencil aspect's samples
 //!   into a multisampled unsigned colour image of their bits (`R32_UINT`, `R8_UINT`), for the
@@ -75,6 +79,7 @@ use metal2vulkan::error::Feature;
 use metal2vulkan::vk::{
     ComponentMapping, DriverId, Format, ImageAspectFlags, ImageUsageFlags, ImageViewType,
 };
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 /// Whether `format`'s depth is a 32-bit float's, the one depth the `FragDepth` draw writes.
@@ -92,7 +97,11 @@ fn unorm16_depth(format: Format) -> bool {
 /// [`DriverFact::FragmentDepthStoresUnchanged`], and a 16-bit unsigned normalized one, where it
 /// has [`DriverFact::FragmentDepthKeepsDepth16Codes`].
 pub(super) fn copies_exactly(device: &Device, format: Format) -> bool {
-    let facts = &device.properties().driver_facts;
+    copies_exactly_by(&device.properties().driver_facts, format)
+}
+
+/// [`copies_exactly`] on a driver with `facts`.
+fn copies_exactly_by(facts: &BTreeSet<DriverFact>, format: Format) -> bool {
     (float_depth(format) && facts.contains(&DriverFact::FragmentDepthStoresUnchanged))
         || (unorm16_depth(format) && facts.contains(&DriverFact::FragmentDepthKeepsDepth16Codes))
 }
@@ -102,64 +111,87 @@ pub(super) fn copies_exactly(device: &Device, format: Format) -> bool {
 pub(super) enum Drawn {
     /// Every value stored unchanged ([`copies_exactly`]).
     Exact,
-    /// The values the driver's fragment depth is measured to change, named
-    /// ([`fragment_depth_changes`]): Metal's copy keeps them, so the copy is the announced
-    /// near-equivalent `drawn-depth-copy`.
+    /// The values the draw may change, named: those the driver's fragment depth is measured to
+    /// change ([`fragment_depth_changes`]), or those Vulkan leaves to a driver not measured.
+    /// Metal's copy keeps them, so the copy is the announced near-equivalent `drawn-depth-copy`.
     Changes(&'static str),
 }
 
 /// What the draw does to a depth aspect of `format` on `device` ([`Drawn`]): exact where
 /// [`copies_exactly`]; a 32-bit float depth on a driver measured to change some values changes
-/// them; `None` elsewhere (a driver not measured for the format's depth), where the copy is
-/// refused.
+/// them, and on any other driver may change the values Vulkan leaves to it. `None` for any other
+/// depth (a 16-bit one whose codes are not measured kept), where the copy is refused.
 pub(super) fn drawn(device: &Device, format: Format) -> Option<Drawn> {
-    if copies_exactly(device, format) {
+    let description = &device.properties().description;
+    drawn_by(
+        &device.properties().driver_facts,
+        description.driver_id,
+        format,
+    )
+}
+
+/// [`drawn`] on a driver of `driver` with `facts`.
+pub(super) fn drawn_by(
+    facts: &BTreeSet<DriverFact>,
+    driver: Option<DriverId>,
+    format: Format,
+) -> Option<Drawn> {
+    if copies_exactly_by(facts, format) {
         return Some(Drawn::Exact);
     }
     float_depth(format)
-        .then(|| fragment_depth_changes(device))
-        .flatten()
-        .map(Drawn::Changes)
+        .then(|| Drawn::Changes(fragment_depth_changes(driver).unwrap_or(UNMEASURED_FLOAT_DEPTH)))
 }
+
+/// What the `FragDepth` draw may change of a 32-bit float depth on a driver whose fragment depth
+/// is not measured: what Vulkan leaves to the driver. A fragment depth outside the depth range
+/// `[0, 1]` is undefined (the fragment operations chapter: "If zf is not in the range
+/// [zmin, zmax], then zf is undefined"), a denormal may be flushed to zero, and the probe found
+/// -0 stored as +0 on a driver (MoltenVK); every other value is stored as the shader wrote it.
+pub(super) const UNMEASURED_FLOAT_DEPTH: &str = "its driver's fragment depth is not measured: \
+     Vulkan leaves undefined a value outside [0, 1] (past 1, below 0, an infinity or a NaN), \
+     which it may store clamped, as a value of its own or not at all, and it may flush a \
+     denormal to zero or store -0 as +0; every other value lands as Metal's copy leaves it";
 
 /// What the `FragDepth` draw changes on drivers measured to store some depth values otherwise
 /// (`runtime_lane::separate_samples::fragment_depth_stores_depth_values_unchanged`, signed zero,
 /// denormals, 1, values outside `[0, 1]`, infinities and NaN payloads, each stored once and
 /// again; `DriverFact::FragmentDepthStoresUnchanged`'s record): the driver, and the values it
 /// changes. Where the multisampled copies go by draws, a copy into a 32-bit float depth runs
-/// on these as the announced `drawn-depth-copy`; on a driver neither here nor exact it stays
-/// refused.
+/// on these as the announced `drawn-depth-copy`, naming them; on a driver neither here nor exact
+/// it runs announced too, naming what Vulkan leaves to the driver ([`UNMEASURED_FLOAT_DEPTH`]).
 const FRAGMENT_DEPTH_CHANGES: &[(DriverId, &str)] = &[
     // MoltenVK 1.4.1 on an M3 Max and an M4 (EVs `RT6-fragdepth-mvk`, `RPL-ss1-*`; the NaNs by
     // EV ZIN2-dm3-mvk4 on an M4, which drew them over a depth of 0.25: changed).
     (
         DriverId::MOLTENVK,
-        "a value with the sign bit set (-0, a negative value, -inf, a negative NaN) is stored as \
-         +0, a value past 1 and +inf as 1, and a positive NaN writes nothing, the sample keeping \
-         the depth it held",
+        "its driver's fragment depth changes values: a value with the sign bit set (-0, a \
+         negative value, -inf, a negative NaN) is stored as +0, a value past 1 and +inf as 1, \
+         and a positive NaN writes nothing, the sample keeping the depth it held",
     ),
     // NVIDIA's 615.71.09 on the RTX 3090 (EV `RT6-fragdepth-nv3090`), with
     // `VK_EXT_depth_range_unrestricted`: values outside `[0, 1]` are kept.
     (
         DriverId::NVIDIA_PROPRIETARY,
-        "denormals are flushed to zero of their sign, and NaN is stored as -inf",
+        "its driver's fragment depth changes values: denormals are flushed to zero of their \
+         sign, and NaN is stored as -inf",
     ),
 ];
 
-/// The values the `FragDepth` draw changes on `device`'s driver, where they are measured
+/// The values the `FragDepth` draw changes on a driver of `driver`, where they are measured
 /// ([`FRAGMENT_DEPTH_CHANGES`]); `None` where they are not.
-fn fragment_depth_changes(device: &Device) -> Option<&'static str> {
-    let driver = device.properties().description.driver_id?;
+fn fragment_depth_changes(driver: Option<DriverId>) -> Option<&'static str> {
+    let driver = driver?;
     FRAGMENT_DEPTH_CHANGES
         .iter()
         .find(|(of, _)| *of == driver)
         .map(|(_, changes)| *changes)
 }
 
-/// Announce `drawn-depth-copy` once for `what`, a copy whose `FragDepth` draw changes the values
-/// `changes` names ([`Drawn::Changes`]): the one notice of every copy the draw makes inexactly,
-/// a blit copy into a multisampled depth and a pass's separate depth texture's copies to and from
-/// its scratch image.
+/// Announce `drawn-depth-copy` once for `what`, a copy whose `FragDepth` draw may change the
+/// values `changes` names ([`Drawn::Changes`]): the one notice of every copy the draw makes
+/// inexactly, a blit copy into a multisampled depth and a pass's separate depth texture's copies
+/// to and from its scratch image.
 pub(super) fn announce_changes(
     device: &Device,
     changes: &'static str,
@@ -169,8 +201,7 @@ pub(super) fn announce_changes(
         (
             what(),
             format!(
-                "the device copies a multisampled depth by a fragment-depth draw, and its \
-                 driver's fragment depth changes values: {changes}"
+                "the device copies a multisampled depth by a fragment-depth draw, and {changes}"
             ),
         )
     });

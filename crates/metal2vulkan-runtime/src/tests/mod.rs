@@ -37,6 +37,7 @@ mod compute;
 mod contexts;
 mod copy_plan;
 mod degradation;
+mod depth_copy;
 mod depth_ranges;
 mod depth_stencil_resolve;
 mod descriptor_arena;

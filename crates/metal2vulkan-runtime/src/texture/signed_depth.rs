@@ -85,9 +85,10 @@
 //!   (`DepthStencilCopy::MagnitudeBits`), and copied back: exact. Where those copies are missing or
 //!   run wrong, they are copied into a sampled image of the depth's format and written back by a
 //!   sample-rate `FragDepth` draw of each layer (`DepthStencilCopy::DepthMagnitude`), exact where
-//!   the driver's fragment depth stores every value unchanged, and where it is measured to change
-//!   some (MoltenVK, NVIDIA's), the announced near-equivalent `drawn-depth-copy` (on those drivers a
-//!   blit into a multisampled depth goes by the same draw). A combined depth/stencil format's
+//!   the driver's fragment depth stores every value unchanged, and elsewhere the announced
+//!   near-equivalent `drawn-depth-copy` (what MoltenVK's and NVIDIA's are measured to change, or
+//!   Vulkan leaves to a driver not measured; on those drivers a blit into a multisampled depth
+//!   goes by the same draw). A combined depth/stencil format's
 //!   stencil is not touched. Counted per pass
 //!   (`WorkCounts::sign_strips`); a strip the device does not make is announced
 //!   (`signed-depth-test`).

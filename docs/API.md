@@ -1610,13 +1610,15 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   where Metal's compiler folds the output to a constant that zeroes the factor (an alpha of the
   literal 1 under `OneMinusSourceAlpha`), Metal stores zero there (measured on an Apple M4).
 - `metal2vulkan-degrade-drawn-depth-copy` (precision). `DrawnDepthCopy`: A blit copy into a
-  multisampled 32-bit float depth texture from a colour one, or a render pass's separate
-  multisampled 32-bit float depth texture copied to and from its scratch image, by the sample-rate
-  `FragDepth` draw, on a device whose copies go by draws and whose driver's fragment depth is
-  measured to change some values (`depth_copy::drawn`: MoltenVK, NVIDIA's). Cost: each sample's
-  depth is written by a fragment-depth draw, where Metal copies its bytes: the values the driver's
-  fragment depth changes, which the reason names, land changed; every other value lands as Metal's
-  copy leaves it.
+  multisampled 32-bit float depth texture from a colour one or a buffer, or a render pass's
+  separate multisampled 32-bit float depth texture copied to and from its scratch image, by the
+  sample-rate `FragDepth` draw, on a device whose copies go by draws and whose driver's fragment
+  depth is not measured to store every value unchanged: measured to change some values (MoltenVK,
+  NVIDIA's), or not measured at all (any other driver, and lavapipe releases not measured). The
+  reason names the values that driver changes, or, on a driver not measured, those Vulkan leaves to
+  it (outside `[0, 1]`, denormals, -0). Cost: each sample's depth is written by a fragment-depth
+  draw, where Metal copies its bytes: the values the driver's fragment depth changes or may change,
+  which the reason names, can land changed; every other value lands as Metal's copy leaves it.
 - `metal2vulkan-degrade-undeclared-usage-shadow` (performance). `UndeclaredUsageShadow`: A texture
   bound by a slot as a storage image without `ShaderWrite` usage, or as a sampled one without
   `ShaderRead`, whose image lacks that usage because adding it would cost the image its size or the

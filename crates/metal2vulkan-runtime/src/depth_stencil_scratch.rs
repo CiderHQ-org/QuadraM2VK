@@ -29,8 +29,9 @@
 //!   sample-rate draws instead: the stencil by `stencil_copy.rs`'s plane draws, exact, and the
 //!   depth by `depth_copy.rs`'s `FragDepth` draw, where the device's fragment depth is measured
 //!   to store it unchanged (`depth_copy::copies_exactly`: a 32-bit float depth, and, a 16-bit one's
-//!   codes), or a 32-bit float depth to change some values, which the copy then changes, the
-//!   announced near-equivalent `drawn-depth-copy` (MoltenVK, NVIDIA's; `depth_copy::drawn`). In,
+//!   codes); a 32-bit float depth elsewhere, which the draw may change, as the announced
+//!   near-equivalent `drawn-depth-copy` (`depth_copy::drawn`: the values MoltenVK's and NVIDIA's
+//!   are measured to change, or those Vulkan leaves to a driver not measured). In,
 //!   from the texture's aspect, sampled, into the scratch image's (the depth first, then the
 //!   stencil); out, from the scratch image's, which is then made sampled, into the texture's. No
 //!   byte crosses between texels of different sizes.
@@ -379,8 +380,8 @@ pub(super) fn scratch(
         };
         let is_depth = aspect == ImageAspectFlags::DEPTH;
         // The depth's draw is exact only where its fragment depth is measured so; a 32-bit float
-        // depth on a driver measured to change some values runs it as the announced
-        // near-equivalent (`depth_copy::drawn`).
+        // depth runs it elsewhere as the announced near-equivalent, a 16-bit one not
+        // (`depth_copy::drawn`).
         if is_depth && depth_copy::drawn(device, target.format).is_none() {
             return Err(Error::Unsupported(refused));
         }
@@ -616,9 +617,9 @@ pub(super) struct ScratchCopy {
     /// after a barrier (and after the depth's draws).
     planes: Vec<StencilPlanes>,
     uses: Vec<Use<ResourceKey>>,
-    /// The values the depth's draws change, where the driver's fragment depth is measured to
-    /// change some (`depth_copy::Drawn::Changes`), and the depth texture's pixel format: the
-    /// copy announces `drawn-depth-copy` as it is recorded.
+    /// The values the depth's draws change or may change, where the driver's fragment depth is
+    /// not measured to keep every value (`depth_copy::Drawn::Changes`), and the depth texture's
+    /// pixel format: the copy announces `drawn-depth-copy` as it is recorded.
     inexact_depth: Option<(&'static str, PixelFormat)>,
 }
 

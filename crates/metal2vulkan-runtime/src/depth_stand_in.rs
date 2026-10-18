@@ -30,9 +30,10 @@
 //!   sample planes), by the kernel and the draw of `depth_copy.rs`: the depth split, which reads
 //!   the depth aspect through a sampled view into the stand-in, and the `FragDepth` draw of
 //!   `DepthStencilCopy::DepthFromStandIn` back, exact where the driver's fragment depth stores
-//!   every value unchanged (lavapipe), the announced near-equivalent `drawn-depth-copy` where it
-//!   is measured to change some (MoltenVK, NVIDIA's: values outside `[0, 1]`, signed zero, NaN,
-//!   none of which a depth test stores in the clip mode's range), and refused elsewhere. The
+//!   every value unchanged (lavapipe), and elsewhere, for a 32-bit float depth, the announced
+//!   near-equivalent `drawn-depth-copy` (what MoltenVK's and NVIDIA's are measured to change, or
+//!   Vulkan leaves to a driver not measured: values outside `[0, 1]`, denormals, signed zero, NaN,
+//!   none of which a depth test stores in the clip mode's range); a 16-bit depth is refused. The
 //!   split reads an image with `SAMPLED`, which a multisampled depth/stencil render target the
 //!   runtime makes takes on such a device where it costs the image nothing
 //!   (`depth_stencil_scratch::sampled_candidate`); a draw whose instance needs the copy in of an
