@@ -17,7 +17,10 @@
 //! - **A memoryless attachment fetched**: `RGBA32Uint` targets, the stored 0 cleared to
 //!   (1, 2, 3, 4) and the memoryless 1 to (5, 6, 7, 8), then `exf2_fetch_unwritten` (three times
 //!   what it reads of 0, plus what it reads of 1, into 0) three times: `c · 27 + t · 13`, which
-//!   holds only where each fetch of the memoryless attachment reads its clear.
+//!   holds only where each fetch of the memoryless attachment reads its clear. Three command
+//!   buffers of two such passes, over fresh memoryless attachments, the second loaded `DontCare`
+//!   (`c · 27`), make one backing between them where the device renders the attachment into an
+//!   image of its own, and passes of 12 sizes, rendered twice in turn, one backing for each size.
 //!
 //! - **Load, store, and later passes**: a 16² `R32Float` texture cleared to 0.75 and stored,
 //!   then loaded and halved by `fetch_scalar` (0.375, stored), sampled by `a4_pixel_fetch` in a
@@ -593,6 +596,172 @@ fn a_dont_care_memoryless_attachment_reads_zero() {
         "a memoryless attachment loaded DontCare",
         ran,
         &texel.repeat(TEXELS),
+    );
+    drop(cache);
+    quiet(lane, &messages);
+}
+
+/// Draw `step` three times in each pass of `descriptors`, in order, in one command buffer of
+/// `lane`'s queue; the first refusal of a pass, a pipeline or a draw, if any.
+fn passes(
+    lane: &Lane,
+    descriptors: &[RenderPassDescriptor],
+    step: &RenderPipelineState,
+) -> Result<(), Error> {
+    let command_buffer = lane.queue.command_buffer().unwrap();
+    let depth = buffer_with(&lane.device, &Z.to_le_bytes()).unwrap();
+    for descriptor in descriptors {
+        let mut encoder = command_buffer.render_command_encoder(descriptor)?;
+        encoder.set_vertex_buffer(Some(&depth), 0, 0)?;
+        for _ in 0..3 {
+            encoder.set_render_pipeline_state(step)?;
+            encoder.draw_primitives(PrimitiveType::Triangle, 0, 3, 1, 0)?;
+        }
+        encoder.end_encoding()?;
+    }
+    command_buffer.commit().unwrap();
+    command_buffer.wait_until_completed_for(WAIT).unwrap();
+    assert_eq!(command_buffer.error(), None);
+    Ok(())
+}
+
+/// A queue keeps one backing for its passes' memoryless attachments of one shape, where a pass
+/// renders one into an image of its own (`WorkCounts::pooled_backings_made`: one for every pass
+/// and command buffer below where the device announces `memoryless-backed`, none where it does not).
+/// Each of three command buffers holds two passes of `exf2_fetch_unwritten` three times, each over
+/// a count cleared to (1, 2, 3, 4) and a fresh memoryless tag: the first's tag cleared to
+/// (5 + r, 6 + r, 7 + r, 8 + r) in round `r`, `c · 27 + t · 13` of its own clear; the second's
+/// loaded `DontCare`, `c · 27`, the tag read as zero (as `a_dont_care_memoryless_attachment_reads_zero`
+/// measures Metal's). No pass reads what an earlier one left in the backing.
+#[test]
+fn a_queue_keeps_one_memoryless_backing_for_its_passes() {
+    let (messages, cache, lane) = lane();
+    let vertices = library(&lane, "rt6_resolves");
+    let unwritten = library(&lane, "exf2_fetch_unwritten");
+    let pf = PixelFormat::RGBA32Uint;
+    let fragment = (&unwritten, "exf2_fetch_unwritten");
+    let step = pipeline(&lane, &vertices, fragment, &[pf, pf], 1).unwrap();
+    let before = lane.device.work_counts().pooled_backings_made;
+    let usage = TextureUsage::RENDER_TARGET;
+    for round in 0..3u32 {
+        let counts = [lane.texture(pf, ONE, usage), lane.texture(pf, ONE, usage)];
+        let ran: Result<[Vec<u8>; 2], Error> = (|| {
+            let tags = [
+                memoryless(&lane, TextureType::Type2D, pf, ONE, usage)?,
+                memoryless(&lane, TextureType::Type2D, pf, ONE, usage)?,
+            ];
+            let count = ClearColor::new(1.0, 2.0, 3.0, 4.0);
+            let r = f64::from(round);
+            let tag = ClearColor::new(5.0 + r, 6.0 + r, 7.0 + r, 8.0 + r);
+            let mut descriptors: Vec<RenderPassDescriptor> = (counts.iter().zip(&tags))
+                .map(|(counted, tagged)| {
+                    let targets = [
+                        (counted, count, StoreAction::Store),
+                        (tagged, tag, StoreAction::DontCare),
+                    ];
+                    pass(&targets, None)
+                })
+                .collect();
+            descriptors[1].color_attachments[1].load_action = LoadAction::DontCare;
+            passes(&lane, &descriptors, &step)?;
+            Ok(counts
+                .each_ref()
+                .map(|c| lane.read(c, (0, 0), 16, BlitOption::None)))
+        })();
+        // Lane `k` counts from `k + 1` with the tag `k + 5 + round`, then with zero.
+        let cleared: Vec<u8> = (1u32..=4)
+            .flat_map(|c| (c * 27 + (c + 4 + round) * 13).to_le_bytes())
+            .collect();
+        let unloaded: Vec<u8> = (1u32..=4).flat_map(|c| (c * 27).to_le_bytes()).collect();
+        let (first, second) = match ran {
+            Ok([first, second]) => (Ok(first), Ok(second)),
+            Err(error) => (Err(error.clone()), Err(error)),
+        };
+        let name = format!("a memoryless attachment of a kept backing, round {round}");
+        expect(&lane, &name, first, &cleared.repeat(TEXELS));
+        let name =
+            format!("a memoryless attachment of a kept backing loaded DontCare, round {round}");
+        expect(&lane, &name, second, &unloaded.repeat(TEXELS));
+    }
+    let made = lane.device.work_counts().pooled_backings_made - before;
+    let backed = messages
+        .take_notices()
+        .into_iter()
+        .filter_map(|message| message.degradation)
+        .any(|notice| notice.degradation == Degradation::MemorylessBacked);
+    eprintln!(
+        "framebuffer fetch on {}: {made} memoryless backings made for 6 passes in 3 command buffers",
+        lane.device.name()
+    );
+    assert_eq!(
+        made,
+        u64::from(backed),
+        "one backing for every pass, where backed"
+    );
+    drop(cache);
+    quiet(lane, &messages);
+}
+
+/// A queue keeps a backing for each shape of memoryless attachment its frames render, a
+/// compositor's dozen (`WorkCounts::pooled_backings_made`): two rounds of the memoryless case's
+/// pass at 12 sides in turn, 1 to 12 texels square, each in a command buffer of its own over a
+/// fresh memoryless tag, `c · 27 + t · 13` every texel; the second round makes none where the
+/// device announces `memoryless-backed` (12 in all), and none at all where it does not.
+#[test]
+fn a_queue_keeps_a_memoryless_backing_for_each_shape_it_renders() {
+    const SIDES: u64 = 12;
+    let (messages, cache, lane) = lane();
+    let vertices = library(&lane, "rt6_resolves");
+    let unwritten = library(&lane, "exf2_fetch_unwritten");
+    let pf = PixelFormat::RGBA32Uint;
+    let fragment = (&unwritten, "exf2_fetch_unwritten");
+    let step = pipeline(&lane, &vertices, fragment, &[pf, pf], 1).unwrap();
+    let usage = TextureUsage::RENDER_TARGET;
+    let texel: Vec<u8> = (1u32..=4)
+        .flat_map(|c| (c * 27 + (c + 4) * 13).to_le_bytes())
+        .collect();
+    let before = lane.device.work_counts().pooled_backings_made;
+    for round in 0..2 {
+        for size in 1..=SIDES {
+            let shape = Shape { size, ..ONE };
+            let count = lane.texture(pf, shape, usage);
+            let ran = (|| {
+                let tag = memoryless(&lane, TextureType::Type2D, pf, shape, usage)?;
+                let targets = [
+                    (
+                        &count,
+                        ClearColor::new(1.0, 2.0, 3.0, 4.0),
+                        StoreAction::Store,
+                    ),
+                    (
+                        &tag,
+                        ClearColor::new(5.0, 6.0, 7.0, 8.0),
+                        StoreAction::DontCare,
+                    ),
+                ];
+                steps(&lane, &pass(&targets, None), &[&step, &step, &step])?;
+                Ok(lane.read(&count, (0, 0), 16, BlitOption::None))
+            })();
+            let name = format!("a memoryless attachment {size} texels square, round {round}");
+            let texels = usize::try_from(size * size).unwrap();
+            expect(&lane, &name, ran, &texel.repeat(texels));
+        }
+    }
+    let made = lane.device.work_counts().pooled_backings_made - before;
+    let backed = messages
+        .take_notices()
+        .into_iter()
+        .filter_map(|message| message.degradation)
+        .any(|notice| notice.degradation == Degradation::MemorylessBacked);
+    eprintln!(
+        "framebuffer fetch on {}: {made} memoryless backings made for {SIDES} shapes rendered \
+         twice",
+        lane.device.name()
+    );
+    assert_eq!(
+        made,
+        SIDES * u64::from(backed),
+        "one backing for each shape, where backed"
     );
     drop(cache);
     quiet(lane, &messages);

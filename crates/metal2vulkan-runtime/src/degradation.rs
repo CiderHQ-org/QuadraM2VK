@@ -554,10 +554,13 @@ degradations! {
              at once";
         /// A memoryless attachment renders into a backing image of the device's own memory,
         /// because a framebuffer fetch through the pixel interlock reads it or the pass splits
-        /// (`attachment_stand_in.rs`); not for a split `render-pass-split` leaves unannounced.
+        /// (`attachment_stand_in.rs`); not for a split `render-pass-split` leaves unannounced. A
+        /// color's backing is one its command queue keeps for its passes of the attachment's
+        /// format, samples and size (`attachment_stand_in::pooled_backing`).
         MemorylessBacked = "memoryless-backed", Performance,
-            "a scratch image per pass: memory, and the bandwidth to write and read it, that \
-             Metal does not spend on a memoryless texture";
+            "a scratch image, a color's kept by its command queue for its passes of that shape \
+             and a depth or stencil one's per pass: memory, and the bandwidth to write and read \
+             it, that Metal does not spend on a memoryless texture";
         /// A color render target that a framebuffer fetch reads lacks the usage the fetch's form
         /// needs, so its pass renders into a scratch image that has it
         /// (`attachment_stand_in.rs`): `STORAGE` in the pixel interlock, or for its sample

@@ -1212,8 +1212,10 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
 - `metal2vulkan-degrade-memoryless-backed` (performance). `MemorylessBacked`: A memoryless
   attachment renders into a backing image of the device's own memory, because a framebuffer fetch
   through the pixel interlock reads it or the pass splits; not for a split `render-pass-split`
-  leaves unannounced. Cost: a scratch image per pass: memory, and the bandwidth to write and read
-  it, that Metal does not spend on a memoryless texture.
+  leaves unannounced. A color's backing is one its command queue keeps for its passes of the
+  attachment's format, samples and size. Cost: a scratch image, a color's kept by its command queue
+  for its passes of that shape and a depth or stencil one's per pass: memory, and the bandwidth to
+  write and read it, that Metal does not spend on a memoryless texture.
 - `metal2vulkan-degrade-fetch-through-scratch` (performance). `FetchThroughScratch`: A color render
   target that a framebuffer fetch reads lacks the usage the fetch's form needs, so its pass renders
   into a scratch image that has it: `STORAGE` in the pixel interlock, or for its sample planes

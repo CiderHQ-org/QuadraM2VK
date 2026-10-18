@@ -5444,7 +5444,16 @@ impl RenderCommandEncoder {
             }
             let target = match copies {
                 Some(copies) => {
-                    let target = attachment_stand_in::stand_in(maker, own, copies)?;
+                    // A memoryless attachment's backing is one its queue keeps; a scratch is the
+                    // pass's own.
+                    let target = match copies {
+                        false => attachment_stand_in::pooled_backing(
+                            maker,
+                            own,
+                            &standing_images(&self.layout, &standing),
+                        )?,
+                        true => attachment_stand_in::stand_in(maker, own, copies)?,
+                    };
                     // A texture fetched in place once its image has `STORAGE` takes its storage
                     // form at a later commit of the device's only uncommitted command buffer
                     // (`texture/storage_form.rs`).
@@ -5547,7 +5556,8 @@ impl RenderCommandEncoder {
                     .iter()
                     .any(|s| matches!(s, Standing::Color(i, ..) if *i == index));
                 if color.stand_in.is_none() && !stood && memoryless(own) {
-                    let target = attachment_stand_in::stand_in(maker, own, false)?;
+                    let taken = standing_images(&self.layout, &standing);
+                    let target = attachment_stand_in::pooled_backing(maker, own, &taken)?;
                     let stand_in = StandIn {
                         own: own.clone(),
                         cause: Cause::Backing,
@@ -10079,6 +10089,32 @@ fn instance_layout<'a>(
         (Some(bare), None) => bare,
         _ => layout,
     }
+}
+
+/// The images a pass renders attachments into in place of their textures: those of `layout`'s
+/// stand-ins and of the ones `standing` brings (`attachment_stand_in::pooled_backing` takes none
+/// of them for another attachment of the pass).
+fn standing_images(layout: &PassLayout, standing: &[Standing]) -> Vec<Texture> {
+    let colors = layout
+        .colors
+        .iter()
+        .flatten()
+        .filter(|color| color.stand_in.is_some())
+        .map(|color| &color.target);
+    let depth_stencil = layout
+        .depth_stencil
+        .iter()
+        .filter(|ds| ds.stand_in.is_some())
+        .map(|ds| &ds.target);
+    let brought = standing.iter().filter_map(|stand| match stand {
+        Standing::Color(_, target, _) | Standing::DepthStencil(target, _) => Some(target),
+        Standing::Planes(..) | Standing::Hidden(_) => None,
+    });
+    colors
+        .chain(depth_stencil)
+        .chain(brought)
+        .map(|target| target.texture.clone())
+        .collect()
 }
 
 /// `layout` with `standing`'s stand-ins in place of their attachments (`attachment_stand_in.rs`)

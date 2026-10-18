@@ -27,6 +27,7 @@
 //!   Metal's never returns, it refuses at once (`WaitWouldDeadlock`, `command_buffer/own.rs`).
 //! - The limit is the queue's alone: another queue's command buffers are made meanwhile.
 
+use super::attachment_stand_in::BackingPool;
 use super::command_buffer::own::{running, slot_wait, Answer, Context};
 use super::command_buffer::CommandBuffer;
 use super::contexts;
@@ -66,6 +67,9 @@ struct QueueShared {
     /// so far, which the completion turns place in its order (`gpu_time.rs`). A leaf lock:
     /// taken under a command buffer's, never held while another is taken.
     latest_gpu_end: Mutex<u64>,
+    /// The backings of memoryless attachments its passes render into images of their own
+    /// (`attachment_stand_in::pooled_backing`). A leaf lock: never held while another is taken.
+    memoryless_backings: Mutex<BackingPool>,
 }
 
 /// A queue's slots: one per uncompleted command buffer, at most `max`.
@@ -237,6 +241,7 @@ impl Device {
             label: Mutex::new(None),
             slots: Slots::new(count, Arc::clone(&self.shared().uncommitted)),
             latest_gpu_end: Mutex::new(0),
+            memoryless_backings: Mutex::new(BackingPool::default()),
         }))
     }
 }
@@ -327,6 +332,12 @@ impl CommandQueue {
     /// The index of the device's `VkQueue` the queue submits to.
     pub(super) fn vk_queue(&self) -> usize {
         self.0.vk_queue
+    }
+
+    /// The backings of memoryless attachments the queue keeps for its passes
+    /// (`attachment_stand_in::pooled_backing`).
+    pub(super) fn memoryless_backings(&self) -> &Mutex<BackingPool> {
+        &self.0.memoryless_backings
     }
 
     /// Place a command buffer of the queue that completed after every one placed before: `place`
