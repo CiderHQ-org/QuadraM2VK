@@ -1479,6 +1479,44 @@ degradations! {
              staging queue: the first command buffer that may read the texture waits at its \
              submission for that, and the call waits for it where a command buffer that may read \
              the texture is submitted and not yet complete, or the texture is untracked";
+        /// A texture of an ASTC LDR format (`ASTC_4x4_LDR` to `ASTC_12x12_LDR`, the sRGB forms
+        /// too) made on a device without that ASTC format (`textureCompressionASTC_LDR`), of a
+        /// PVRTC format on a device without it (`VK_IMG_format_pvrtc`'s RGBA formats; the RGB ones
+        /// on every device), or of an ETC2 or EAC format on a device without them
+        /// (`textureCompressionETC2`): its blocks lie in an image of a carrier format whose blocks
+        /// are also 16 (ASTC, `EAC_RGBA8`, `RG11`) or 8 (PVRTC, the other ETC2 and EAC formats)
+        /// bytes, which copies and `get_bytes` move unchanged, and its samples read a decoded
+        /// twin, Metal's decode of the blocks (an ASTC error block's magenta included) in the
+        /// texels [`metal2vulkan::device::DecodedTexelsPolicy`] names (a PVRTC texture's, an ASTC
+        /// sRGB one's and an 8-bit ETC2 or EAC one's, 8-bit codes, exact, under either), decoded
+        /// after each write into it as a BC texture's twin is (`decoded-block-twin`; a PVRTC
+        /// texture's whole levels). An ASTC texture's first view in its other colour space gives
+        /// it a second twin of that form's decode. Also a texture of a 4:2:2 format (`GBGR422`,
+        /// `BGRG422`) on every device, whose Vulkan formats reconstruct chroma by the
+        /// implementation's rules: its texels' bytes lie in an `R8G8_UNORM` carrier, and its twin
+        /// holds Metal's texels as 8-bit codes, exact, decoded in whole rows.
+        CarriedDecodedTwin = "carried-decoded-twin", Performance,
+            "a carrier image of its blocks, at most about 1 byte a texel, and a decoded twin of \
+             4 bytes a texel (R8G8B8A8, `DecodedTexelsPolicy::Compact`; an EAC 11-bit texture's \
+             16-bit codes, 2 bytes a channel) or 16 (R32G32B32A32_SFLOAT, \
+             `DecodedTexelsPolicy::Exact`; an EAC 11-bit texture's floats, 4 bytes a channel), \
+             two for an ASTC texture viewed in both colour spaces, and a decode after each write \
+             into it: a pass on the GPU for a blit, a copy from a texture or a CPU copy through a \
+             submission; on the CPU, on the device's decode thread, where its CPU copies go on \
+             the host or the staging queue";
+        /// A texture with an ASTC LDR decoded twin (`carried-decoded-twin`) of 8-bit codes, or an
+        /// EAC 11-bit one of 16-bit codes, under
+        /// [`metal2vulkan::device::DecodedTexelsPolicy::Compact`]: Metal decodes an ASTC LDR channel
+        /// to a 12-bit value (`C >> 4` over 4095 of the 16-bit interpolated channel `C`), which the
+        /// twin's R8G8B8A8 texels hold as the nearest 8-bit code (at most 1/510 off Metal's value).
+        /// It reads an EAC 11-bit channel as `c / 2047` (signed `c / 1023`), which the twin holds
+        /// as the nearest 16-bit normalized code (at most half a 16-bit step off).
+        /// `DecodedTexelsPolicy::Exact` holds Metal's values instead. (An ASTC sRGB texture's twin
+        /// holds Metal's own 8-bit codes, which its slots decode through Metal's table: exact.)
+        DecodedTexelPrecision = "decoded-texel-precision", Precision,
+            "a read, sample or gather of its texels answers the nearest 8-bit code to Metal's \
+             12-bit value, at most 1/510 off it; an EAC 11-bit texture's, the nearest 16-bit \
+             normalized code to Metal's 11-bit value, at most half a 16-bit step off it";
         /// A command queue made for presenting
         /// ([`Device::new_command_queue_for_presenting`](crate::Device::new_command_queue_for_presenting))
         /// on a device that reserved no `VkQueue` for presenting: its queue family has no queue

@@ -45,6 +45,7 @@ a cell that names another source took its numbers there.
 | A computed `half` or `float` color blended into an extended-range attachment (`BGR10_XR`, `BGRA10_XR`, `RGB10A8_2P_XR10`) rounds the blend's source as a loaded one; Metal's compiler rounds it by how it computed it. Every device. | The in-shader blend's loaded rounding (no switch) | **Not built yet:** Metal's rounding per shape is probed, not modelled | One code. `ExtendedRangeBlendSource` (`extended-range-blend-source`), `ExtendedRangeFloatBlendSource` (`extended-range-float-blend-source`) | Not measured |
 | A bicubic sample of an 8- or 16-bit normalized texture sums its taps exactly and rounds half up; Metal truncates its row terms, row sums and column terms first. Every device. | The exact sum (no switch) | **Not built yet:** Metal's datapath is pinned (17.75M lanes measured, no miss); its emitter is not written | One grid step (1/4080 at 8 bits) within about 2^-21 of a tie. `BicubicFilterArithmetic` (`bicubic-filter-arithmetic`) | Not measured (Metal's form is expected no larger) |
 | A bicubic sample of an extended-range texture (`BGR10_XR`, `BGRA10_XR`, `RGB10A8_2P_XR10` and their sRGB twins) sums its taps' steps exactly, rounds half up and clamps into the format's decoded endpoints; within 0.014 of a grid step of a rounding tie Metal may round the other way. Every device. | The exact sum (no switch) | **None known:** no model of Metal's datapath tried fits; 3,317,760 lanes measured on the M3 Max (macOS 26.7) | One grid step (1/8160 a color lane, 1/8192 an sRGB color lane, 1/4080 alpha), 4,050 of the lanes measured, each within 0.014 of a step of a tie. `BicubicFilterArithmetic` (`bicubic-filter-arithmetic`) | No accurate form |
+| A texture of an ASTC LDR format on a device without that ASTC format reads a decoded twin of 8-bit codes, each channel the code nearest Metal's 12-bit value (`C >> 4` over 4095). (An sRGB form's twin holds Metal's own 8-bit codes under either value, which its slots decode through Metal's table: exact.) A texture of an EAC 11-bit format (`R11`, `RG11`, unsigned and signed) on a device without ETC2 reads one of 16-bit normalized codes, each nearest Metal's value (`c / 2047`, signed `c / 1023`). The runtime's choice: no pipeline differs. | `decoded_texels = DecodedTexelsPolicy::Compact` | `decoded_texels = DecodedTexelsPolicy::Exact`: Metal's values in an `R32G32B32A32_SFLOAT` twin (an EAC 11-bit one's in `R32_SFLOAT` or `R32G32_SFLOAT`) | Within 1/510 of Metal's value. An EAC 11-bit channel within half a 16-bit step (1/131070, signed 1/65534). `decoded-texel-precision`, announced where such a texture is made; `runtime_lane::astc_textures`, `runtime_lane::etc_textures` | The twin's memory, 16 bytes a texel against 4 (a 2048 x 2048 texture's chain: 85 MiB against 21 MiB), and as much again for a second twin once the texture is viewed in its other colour space; an EAC 11-bit twin's 4 bytes a channel against 2. The CPU decode of that chain of 8 x 8 blocks on one core of the Iris Xe host: 79 ms against 68 ms. Sampling not measured |
 
 All at once: `DevicePolicy::exact_answers()` sets every switch above but sampling's (validation
 adds `sampling = SamplingPolicy::Exact`). Against master 1ee783c77 it cost A2X 0.99-1.04 → 17.5 s,
@@ -177,9 +178,16 @@ recorded here.
 Open differences from Metal that no note announces yet, and runtime costs still above the
 driver's. Each is open work.
 
-- **A mesh or tile render pipeline past ANV's compiler word bound.** Its stages are not fitted to
-  the bound as a vertex and fragment pipeline's are, so under the exact forms ANV's compiler can
-  fault on it.
+- **ASTC textures on a device without ASTC.** A heap's or a sparse heap's such texture
+  (`RuntimeGap::DecodedHeapTexture`) and a view of another decode (its HDR form) are refused.
+- **PVRTC textures on a device without PVRTC.** One without a decoded twin (a sparse heap's, or a
+  heap's over the caller's host pages or laid out apart from its bytes) holds its blocks for copies
+  alone: a command that reads it is refused.
+- **ETC2 and EAC textures on a device without them.** A sparse heap's such texture
+  (`RuntimeGap::DecodedHeapTexture`) and a view of another decode (an EAC 11-bit format's other
+  signedness) are refused; one without a decoded twin (a heap's over the caller's host pages or
+  laid out apart from its bytes) holds its blocks for copies alone, and a command that reads it is
+  refused.
 - **A level the device's arithmetic chooses.** Off MoltenVK under exact sampling, a fragment's
   implicit-level sample (its bias Metal's `B` within the device's limit), a sample with explicit
   gradients and a fragment's LOD query take the device's level of detail, where Metal's is not

@@ -153,10 +153,12 @@ use crate::event_timeline::Signal;
 use crate::exit_guard::{self, Call};
 use crate::gpu_time;
 use crate::release;
+use crate::resource::ResourceKey;
 use crate::retained::Retained;
 use crate::scheduler;
 use crate::sparse::bind::{bind_batch, BindFailure, Bound};
 use crate::sparse::encoder::SparseUpdate;
+use crate::texture::decoded_twin::{SecondDecode, TwinWrite};
 use crate::texture::wrapped::Transition;
 use crate::texture::Texture;
 use crate::tracker::{Barrier, EncoderUses, Point, Summary};
@@ -308,6 +310,9 @@ impl CommandBufferShared {
         state
             .runs_nothing_unrunnable(range.clone())
             .map_err(|error| recording_error(device, error))?;
+        // The decodes into ASTC carriers' second decoded twins: those queued, before its work;
+        // its blits' writes', after each part.
+        self.record_second_decodes(&mut state, range.clone())?;
         let at = Point {
             queue,
             value: scheduler.values[queue] + 1,
@@ -915,6 +920,81 @@ impl CommandBufferShared {
                 resident_misses: 0,
                 faults: ReplayFaults::default(),
             });
+        }
+        Ok(())
+    }
+
+    /// Record the decodes into ASTC carriers' second decoded twins (`texture/decoded_twin.rs`) of
+    /// the batch of encoders `range`, a batch with work: those queued (as each twin was made,
+    /// and after host calls wrote its carrier), in one command buffer before the first part's
+    /// own, their uses joined to its summary, so the barrier and waits planned before that part
+    /// order them after the earlier writes of their images; but those of an image a part of the
+    /// batch wrote without a decode (the image had no second twin as the write was encoded), which
+    /// stay queued for a later batch: a twin made since reads the carrier as this batch leaves it.
+    /// Then after each part's own command buffers, the decodes its writes made as they were
+    /// encoded, their uses joined to its summary. Nothing, and no command buffer, where there is
+    /// none (counted: `WorkCounts::second_twin_checks`, `WorkCounts::second_twin_decodes`).
+    fn record_second_decodes(
+        &self,
+        state: &mut State,
+        range: std::ops::Range<usize>,
+    ) -> Result<(), CommandBufferError> {
+        let device = &self.device;
+        let counts = &device.shared().counts;
+        if range.is_empty() {
+            return Ok(());
+        }
+        let held: Vec<ResourceKey> = state.recorded[range.clone()]
+            .iter()
+            .flat_map(|part| &part.twin_writes)
+            .filter_map(TwinWrite::without_decode)
+            .collect();
+        let queued = device.take_second_decodes(|key| held.contains(&key));
+        if !queued.is_empty() {
+            let raw = self.record_raw(state, |_, buffer| {
+                for decode in &queued {
+                    // SAFETY: the command buffer is recording, outside a render pass, on the
+                    // device's queue family; the decode is retained until the command buffer
+                    // completes.
+                    unsafe { decode.record(device.shared().vk(), buffer) };
+                }
+                Ok(())
+            })?;
+            let uses = queued.iter().flat_map(|decode| decode.uses()).cloned();
+            let first = &mut state.recorded[range.start];
+            first.raws.insert(0, raw);
+            first
+                .summary
+                .join(Summary::outside_encoders(uses.collect()));
+            counts.second_twin_decodes(queued.len());
+            state.retained.push(Box::new(queued));
+        }
+        for part in range {
+            let mut checked = 0;
+            let mut decodes: Vec<SecondDecode> = Vec::new();
+            for write in state.recorded[part].twin_writes.drain(..) {
+                checked += 1;
+                decodes.extend(write.into_decode());
+            }
+            counts.second_twin_checks(checked);
+            if decodes.is_empty() {
+                continue;
+            }
+            let raw = self.record_raw(state, |_, buffer| {
+                for decode in &decodes {
+                    // SAFETY: as above.
+                    unsafe { decode.record(device.shared().vk(), buffer) };
+                }
+                Ok(())
+            })?;
+            let uses = decodes.iter().flat_map(|decode| decode.uses()).cloned();
+            let recorded = &mut state.recorded[part];
+            recorded.raws.push(raw);
+            recorded
+                .summary
+                .join(Summary::outside_encoders(uses.collect()));
+            counts.second_twin_decodes(decodes.len());
+            state.retained.push(Box::new(decodes));
         }
         Ok(())
     }

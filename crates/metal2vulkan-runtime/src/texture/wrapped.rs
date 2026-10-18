@@ -620,6 +620,7 @@ impl Device {
             resolves: KeptResolves::new(),
             twin: None,
             decoded: None,
+            second: std::sync::OnceLock::new(),
             form: Default::default(),
             kept_outside: AtomicBool::new(false),
             signed_depth: AtomicBool::new(false),

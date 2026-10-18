@@ -22,7 +22,9 @@
 //! their own memory replay `tfl4.swift` (EV XRR2-fill4-m4) the same way, 5 and 8 texels wide.
 
 use super::degrade_notices::{assert_made_once, forced, loses_depth_denormals, on_device};
-use super::degrade_notices::{decodes_blocks_its_way, shared_in_system_memory, twins_blocks};
+use super::degrade_notices::{
+    decodes_blocks_its_way, shared_in_system_memory, twins_blocks, twins_carried,
+};
 use super::degrade_notices::{twins_depth, UNPACKED_FILL};
 use super::extended_range_two_planes::{get, put};
 use super::texture_blits::depth_images;
@@ -586,6 +588,14 @@ fn texture_fills_write_metal_s_bytes() {
             let first = forced(&[
                 (Degradation::DepthTwin, twin),
                 (Degradation::DecodedBlockTwin, twins_blocks(device, pf)),
+                (
+                    Degradation::CarriedDecodedTwin,
+                    twins_carried(device, pf)[0],
+                ),
+                (
+                    Degradation::DecodedTexelPrecision,
+                    twins_carried(device, pf)[1],
+                ),
                 (
                     Degradation::CompressedTexelDecode,
                     decodes_blocks_its_way(device, pf),

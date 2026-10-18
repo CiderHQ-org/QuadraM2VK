@@ -66,8 +66,7 @@ use crate::metal::sampler::{
     check_border_view, check_sampler, opaque_black_reads_transparent, vk_filtering,
     OpaqueBlackBorder, SamplerUse, SamplerWord,
 };
-use crate::metal::texel_format::{reads_unswizzled, srgb_raw_view, texel_format, TexelFormat};
-use crate::metal::{PixelFormat, TextureSwizzleChannels, TextureType};
+    reads_unswizzled, srgb_raw, srgb_raw_on, srgb_raw_view, texel_format, TexelFormat,
 use crate::pipeline::artifact::RuntimeDependency;
 use crate::pipeline::facts::RuntimeFact;
 use crate::pipeline::interface::{
@@ -423,7 +422,8 @@ fn texel_type_binds(pf: PixelFormat, ty: SampledType) -> bool {
 
 /// Metal's numeric type of a texture of `pf` bound at a slot: the format table's
 /// (`sampled_type`), and `Float` for a color format the table holds no representation of (the
-/// PVRTC RGB formats, whose blocks the runtime holds raw for copies, and the 4:2:2 formats).
+/// 4:2:2 formats, whose texels the runtime holds raw for copies, and ASTC's 4x2 and 8x4
+/// footprints).
 /// Metal reads each as floats, so a slot of that type holds such a texture, and its binding is
 /// the format's own refusal (it has no sampled view), not a mismatch a neutral stands in for.
 /// A slot has an interface only where the function uses it, so a texture bound at an index the
@@ -1259,6 +1259,17 @@ impl ResourcePlanner<'_> {
         }
     }
 
+    /// and keeps the view's. A format whose codes the device does not hold (an ASTC sRGB format
+    /// it decodes itself, `srgb_raw_on`) is decoded by the device's view, swizzle and all.
+        crosses && self.has_fact(RuntimeFact::SrgbTexture { slot }) && srgb_raw_on(pf, self.profile)
+    }
+
+    /// Whether the device decodes the texels of `pf` itself, though Metal decodes them from raw
+    /// codes (`srgb_raw`, not `srgb_raw_on`): an ASTC sRGB format the device samples, whose
+    /// image's every view decodes its blocks. Its texels take no family there
+    /// ([`TexelFormat::OTHER`]) and no bicubic treatment, as a format outside the families.
+    fn decodes_srgb_itself(&self, pf: PixelFormat) -> bool {
+        srgb_raw(pf) && !srgb_raw_on(pf, self.profile)
     /// The runtime sampler `slot` for a use, with the shape's value checks
     /// (`metal::sampler::check_sampler`: reduction; address modes, border colors, and LOD
     /// clamps), or the neutral sampler when the slot is unbound. The write keeps the use's
@@ -1755,7 +1766,8 @@ impl ResourcePlanner<'_> {
     /// incompatibly, or bound in an extended-range format, whose texels the slot's variant this
     /// plan asks for samples itself, `VariantKey::extended_range`) takes `BicubicTexels::NEUTRAL`;
     /// another compatible format of no measured family is refused
-    /// `NotImplemented(SamplerBicubicFilter)`.
+    /// `NotImplemented(SamplerBicubicFilter)`, and so is an ASTC sRGB format the device decodes
+    /// itself (`metal::texel_format::srgb_raw_on`).
     pub fn bicubic_texels(&self, slot: SlotRef) -> Result<u64, BindError> {
         let t = *self.texture_slot(slot)?;
         let class = declared(
@@ -1769,6 +1781,7 @@ impl ResourcePlanner<'_> {
             _ if self.variant.extended_range.contains_key(&slot) => BicubicTexels::NEUTRAL,
             Some(s @ TextureShape::Texture { pixel_format, .. }) if compatible(s, &t, &class) => {
                 bicubic_texels(*pixel_format)
+                    .filter(|_| !self.decodes_srgb_itself(*pixel_format))
                     .ok_or(BindError::Unsupported(Unsupported::not_implemented(
                         Feature::SamplerBicubicFilter,
                     )))?
@@ -1804,9 +1817,12 @@ impl ResourcePlanner<'_> {
     /// function swizzles the converted texel (`VariantKey::swizzled_storage`: a storage slot's; an
     /// extended-range sampled one's; a packed normalized sampled one's on a device without Metal's
     /// own sampler, whose border texels are then the unswizzled texture's). A slot bound to nothing
-    /// takes [`TexelFormat::OTHER`]: a neutral reads zero, which every class converts alike.
+    /// takes [`TexelFormat::OTHER`]: a neutral reads zero, which every class converts alike. So
+    /// does one bound to a format the device decodes itself where Metal decodes raw codes (an ASTC
+    /// sRGB format the device samples, `metal::texel_format::srgb_raw_on`).
     pub fn texel_format(&self, slot: SlotRef) -> u64 {
         let class = match self.texture_shape(slot) {
+            Some(shape) if self.decodes_srgb_itself(shape.pixel_format()) => TexelFormat::OTHER.0,
             Some(shape) => {
                 let class = match texel_format(shape.pixel_format()) {
                     class if !class.has_channels() => class.0,

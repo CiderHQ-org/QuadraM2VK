@@ -69,8 +69,7 @@ fn choices() -> Vec<Choice> {
         nan_and_min_max: _,
         rounding_order: _,
         half_blend: _,
-        // The runtime's: whether a texture over padded rows that only reads aliases them.
-        padded_reads: _,
+        decoded_texels: _,
     } = p;
     vec![
         choice!(p.framebuffer_fetch: FramebufferFetchPolicy { RequireOrdered, AcceptUnordered }),
@@ -83,7 +82,7 @@ fn choices() -> Vec<Choice> {
         choice!(p.nan_and_min_max: NanMinMaxPolicy { Native, Exact }),
         choice!(p.rounding_order: RoundingOrderPolicy { Native, Exact }),
         choice!(p.half_blend: HalfBlendPolicy { Device, Exact }),
-        choice!(p.padded_reads: PaddedReadsPolicy { Alias, Shadow }),
+        choice!(p.decoded_texels: DecodedTexelsPolicy { Compact, Exact }),
     ]
 }
 
@@ -395,6 +394,20 @@ fn the_runtime_s_padded_reads_choice_keys_no_profile() {
     assert_eq!(alias.len(), shadow.len());
     for ((stem, a), (other, s)) in alias.iter().zip(&shadow) {
         assert_eq!(stem, other);
-        assert_eq!(a.fingerprint(), s.fingerprint(), "{stem}");
+/// The runtime's choice of a carried texture's decoded twin (`decoded_texels`) moves no committed
+/// profile's fingerprint: no profile carries it, so no translation follows it.
+#[test]
+fn the_runtime_s_decoded_texels_choice_keys_no_profile() {
+    use crate::spirv::testing::committed_profiles_with;
+    let codes = committed_profiles_with(DevicePolicy::UNTRUSTED).expect("profiles");
+    let exact = committed_profiles_with(DevicePolicy {
+        decoded_texels: DecodedTexelsPolicy::Exact,
+        ..DevicePolicy::UNTRUSTED
+    })
+    .expect("profiles");
+    assert_eq!(codes.len(), exact.len());
+    for ((stem, a), (other, e)) in codes.iter().zip(&exact) {
+        assert_eq!(stem, other);
+        assert_eq!(a.fingerprint(), e.fingerprint(), "{stem}");
     }
 }

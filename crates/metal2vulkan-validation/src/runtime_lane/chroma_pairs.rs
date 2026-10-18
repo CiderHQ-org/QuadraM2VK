@@ -12,25 +12,33 @@
 //! - A copy into such a texture from a texture of another format is refused typed
 //!   (`Unsupported`, `Feature::Format`): plain Metal writes `0xff` over part of each row.
 //! - A kernel that only writes the texture completes and leaves it as it was, as plain Metal's
-//!   `write()` does (its validation stops the binding). A kernel that reads it is refused typed
-//!   (`Bind(Unsupported)`, `Feature::Format`): Metal decodes the pairs.
+//!   `write()` does (its validation stops the binding).
+//! - A kernel reads and samples Metal's texels (`metal2vulkan::bind::ChromaDecode`, matched
+//!   against an Apple M3 Max's reads by its own tests) through the texture's decoded twin,
+//!   announced `carried-decoded-twin` once and `decoded-texel-precision` never: a new texture's
+//!   opaque black, then after a CPU copy of the whole texture and of part of two rows, a blit
+//!   from a buffer of the whole texture and of part of a row, and a copy from another texture,
+//!   each decoded into the twin in whole rows (a blit's by a GPU decode pass, a CPU copy's by one
+//!   or on the CPU, counted in `WorkCounts`; [`four_two_two_texels_read_as_metal_s`]).
 //! - A render pipeline state of the format, which Metal's own validation aborts plain too, and a
 //!   render pass into the texture, whose clear plain Metal stores in the format's encoding (not
 //!   built), are refused typed (`Unsupported`, `Feature::Format`).
 
-use super::degrade_notices::on_device;
+use super::astc_textures::{read_whole, reader};
+use super::degrade_notices::{counts, on_device};
 use super::{buffer_with, read_buffer, WAIT};
 use crate::air_library::AirLibrary;
-use metal2vulkan::error::{BindError, Feature, Unsupported};
+use metal2vulkan::bind::ChromaDecode;
+use metal2vulkan::error::Feature;
 use metal2vulkan::metal::{PixelFormat, TextureUsage};
 use metal2vulkan::pipeline::{
     ColorAttachmentDescriptor, ComputePipelineDescriptor, RenderPipelineDescriptor, StageSource,
 };
 use metal2vulkan_devtools::{engine_dir, llvm_assemble};
 use metal2vulkan_runtime::{
-    BlitOption, Buffer, CommandBufferStatus, ComputePipelineState, Device, Error, LoadAction,
-    Origin, PipelineOptions, Region, RenderPassDescriptor, ResourceOptions, Size, StoreAction,
-    Texture, TextureDescriptor,
+    BlitOption, Buffer, CommandBufferStatus, ComputePipelineState, Degradation, Device, Error,
+    LoadAction, Origin, PipelineOptions, Region, RenderPassDescriptor, ResourceOptions, Size,
+    StoreAction, Texture, TextureDescriptor,
 };
 
 /// The two 4:2:2 formats.
@@ -400,7 +408,8 @@ fn state(device: &Device, stem: &str, entry: &str) -> ComputePipelineState {
 /// `(0.25, 0.5, 0.75, 1)` at each thread's position, over a filled 4:2:2 texture of `ShaderRead
 /// | ShaderWrite` usage completes and leaves its bytes as they were; over an `RGBA8Unorm` one,
 /// the control, it writes them (its tie within one unit of Metal's). `sampling`'s
-/// `sample_pixel`, which reads its texture, is refused typed at the dispatch.
+/// `sample_pixel`, whose linear sample at texel (0, 0)'s centre reads that texel, reads Metal's
+/// texel there (within one ulp: the device's filter converts the twin's codes).
 #[test]
 fn a_four_two_two_texture_written_by_a_kernel_keeps_its_texels() {
     on_device(|device, _| {
@@ -435,20 +444,20 @@ fn a_four_two_two_texture_written_by_a_kernel_keeps_its_texels() {
             let out = buffer_with(device, &[0; 1024]).unwrap();
             encoder.set_buffer(Some(&out), 0, 0).unwrap();
             let one = Size::new(1, 1, 1);
-            let dispatched = encoder.dispatch_threads(one, one);
+            encoder.dispatch_threads(one, one).unwrap();
             encoder.end_encoding().unwrap();
             command_buffer.commit().unwrap();
             command_buffer.wait_until_completed_for(WAIT).unwrap();
-            assert!(
-                matches!(
-                    &dispatched,
-                    Err(Error::Bind(BindError::Unsupported(Unsupported {
-                        feature: Feature::Format,
-                        ..
-                    })))
-                ),
-                "{pf:?}: read: {dispatched:?}"
-            );
+            assert_eq!(command_buffer.status(), CommandBufferStatus::Completed);
+            let got = &metal_texels(pf, &pattern)[0];
+            let read = read_buffer(&out, 0, 16).unwrap();
+            for (c, want) in got.iter().enumerate() {
+                let value = f32::from_le_bytes(read[4 * c..4 * c + 4].try_into().unwrap());
+                assert!(
+                    (value - want).abs() <= f32::EPSILON,
+                    "{pf:?}: sampled channel {c}: {value} against Metal's {want}"
+                );
+            }
         }
         let control = texture(device, PixelFormat::RGBA8Unorm, usage, false);
         dispatch(&control);
@@ -483,6 +492,133 @@ fn a_four_two_two_texture_written_by_a_kernel_keeps_its_texels() {
             bytes[1].abs_diff(0x80) <= 1,
             "the control's tie is written: {:#x}",
             bytes[1]
+        );
+    });
+}
+
+/// Metal's `float` texels of a [`SIDE`]-square 4:2:2 texture of `pf` holding `bytes`
+/// (`ChromaDecode`): each code over 255.
+fn metal_texels(pf: PixelFormat, bytes: &[u8]) -> Vec<[f32; 4]> {
+    let decode = ChromaDecode::of(pf).unwrap();
+    let codes = decode.decode(bytes, [SIDE as u32, SIDE as u32, 1]);
+    (codes.as_chunks::<4>().0.iter())
+        .map(|texel| texel.map(|code| f32::from(code) / 255.0))
+        .collect()
+}
+
+/// Each format's texels read exactly as Metal's after every kind of write (the module docs): a
+/// `Shared` texture's after a CPU copy of the whole texture and of 4 x 2 texels off the pairs'
+/// rows, whose red and blue change beside the region too, then after a blit of the whole texture
+/// and of 6 x 1 texels; a `Private` texture's after a copy from the `Shared` one. Each read is a
+/// command buffer after the write. The CPU copies' decodes are a GPU pass or the CPU's, the
+/// blits' GPU passes; the twin announces `carried-decoded-twin` once.
+#[test]
+fn four_two_two_texels_read_as_metal_s() {
+    on_device(|device, messages| {
+        let name = device.name().to_owned();
+        let state = reader(device);
+        let usage = TextureUsage::SHADER_READ;
+        let decodes = |device: &Device| {
+            let counts = device.work_counts();
+            (counts.block_decode_passes, counts.cpu_block_decodes)
+        };
+        let mut wrong = Vec::new();
+        let check =
+            |wrong: &mut Vec<String>, what: &str, pf: PixelFormat, t: &Texture, bytes: &[u8]| {
+                assert_eq!(bytes_of(device, t), bytes, "{pf:?} {what}: its bytes");
+                let got = read_whole(device, &state, t);
+                let want = metal_texels(pf, bytes);
+                for (at, (got, want)) in got.iter().zip(&want).enumerate() {
+                    for c in 0..4 {
+                        if got[c].to_bits() != want[c].to_bits() && wrong.len() < 24 {
+                            wrong.push(format!(
+                                "{pf:?} {what}, texel {at} channel {c}: {} against Metal's {}",
+                                got[c], want[c]
+                            ));
+                        }
+                    }
+                }
+            };
+        let whole = Region::new_2d(0, 0, SIDE, SIDE);
+        for (f, pf) in PAIRS.into_iter().enumerate() {
+            let t = texture(device, pf, usage, true);
+            check(&mut wrong, "fresh", pf, &t, &vec![0; (ROW * SIDE) as usize]);
+            let written = seq(ROW * SIDE, 0x31 + 0x40 * f as u8);
+            let before = decodes(device);
+            t.replace_region(whole, 0, 0, &written, ROW, 0).unwrap();
+            check(&mut wrong, "CPU copy", pf, &t, &written);
+            // A part of two rows off the pairs: 4 texels from x 6 on rows 3 and 4.
+            let patch = seq(16, 0xa0);
+            let region = Region::new_2d(6, 3, 4, 2);
+            t.replace_region(region, 0, 0, &patch, 8, 0).unwrap();
+            let mut expected = written.clone();
+            for row in 0..2 {
+                let at = ((3 + row) * ROW + 2 * 6) as usize;
+                expected[at..at + 8].copy_from_slice(&patch[8 * row as usize..][..8]);
+            }
+            check(
+                &mut wrong,
+                "CPU copy of part of two rows",
+                pf,
+                &t,
+                &expected,
+            );
+            if decodes(device) == before {
+                wrong.push(format!(
+                    "{pf:?} CPU copies: neither a pass nor a CPU decode"
+                ));
+            }
+            let blitted = seq(ROW * SIDE, 0x17 + 0x40 * f as u8);
+            let before = decodes(device);
+            fill(device, &t, &blitted);
+            check(&mut wrong, "blit", pf, &t, &blitted);
+            // 6 texels from x 2 on row 7.
+            let row = seq(12, 0xc8);
+            let source = buffer_with(device, &row).unwrap();
+            blit(device, |e| {
+                e.copy_from_buffer_to_texture(
+                    &source,
+                    0,
+                    12,
+                    12,
+                    Size::new(6, 1, 1),
+                    &t,
+                    0,
+                    0,
+                    Origin::new(2, 7, 0),
+                    BlitOption::None,
+                )
+            })
+            .unwrap();
+            let mut expected = blitted.clone();
+            let at = (7 * ROW + 2 * 2) as usize;
+            expected[at..at + 12].copy_from_slice(&row);
+            check(&mut wrong, "blit of part of a row", pf, &t, &expected);
+            let private = texture(device, pf, usage, false);
+            blit(device, |e| {
+                let at = Origin::new(0, 0, 0);
+                let side = Size::new(SIDE, SIDE, 1);
+                e.copy_from_texture_to_texture(&t, 0, 0, at, side, &private, 0, 0, at)
+            })
+            .unwrap();
+            check(&mut wrong, "texture copy", pf, &private, &expected);
+            let after = decodes(device);
+            if after.0 < before.0 + 3 {
+                wrong.push(format!(
+                    "{pf:?} blits: GPU decode passes {before:?} -> {after:?}"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "on {name}:\n{}", wrong.join("\n"));
+        let counts = counts(&messages.take_notices());
+        let announced = |kind| counts.get(&kind).copied().unwrap_or(0);
+        assert_eq!(
+            (
+                announced(Degradation::CarriedDecodedTwin),
+                announced(Degradation::DecodedTexelPrecision)
+            ),
+            (1, 0),
+            "on {name}"
         );
     });
 }

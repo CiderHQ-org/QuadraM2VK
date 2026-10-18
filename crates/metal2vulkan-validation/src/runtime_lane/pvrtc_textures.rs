@@ -26,27 +26,37 @@
 //!   CFR-probe7-m4).
 //! - The runtime's gap, `NotImplemented(PvrtcBlockOrder)`: `replaceRegion` and `getBytes` of a
 //!   region other than a whole level, which plain Metal places by no rule the runtime has found,
-//!   and of a whole level at another `bytesPerRow`, unmeasured. A kernel that reads the texture
-//!   is refused where the device has no format for it.
-//! - Made resident for a kernel that reads texture handles from memory, such a texture takes the
-//!   neutral's place there, and the dispatch announces it once ([`UNREADABLE`]); a kernel that
-//!   reads no handles announces nothing.
+//!   and of a whole level at another `bytesPerRow`, unmeasured.
+//! - Where the device has no format for it, its reads go through a decoded twin of its codes,
+//!   announced `carried-decoded-twin` once: every format's texels read exactly as Metal's
+//!   (`metal2vulkan::bind::PvrtcDecode`, matched against an Apple M3 Max by its own tests), and so
+//!   do its view's as the format's other colour space, after a CPU copy, a row-linear blit and a
+//!   copy from another texture, each decoded into the twin (a blit's by a GPU decode pass, a CPU
+//!   copy's by one or on the CPU, counted in `WorkCounts`; [`pvrtc_texels_read_as_metal_s`]).
+//! - A texture held for copies alone (a 4:2:2 texture in a heap over the caller's host pages, which
+//!   keeps no decoded twin, as a PVRTC texture there keeps none), made resident for a kernel that
+//!   reads texture handles from memory, takes the neutral's place there, and the dispatch announces
+//!   it once ([`UNREADABLE`]); a kernel that reads no handles announces nothing.
 
+use super::astc_textures::{read_whole, reader};
 use super::case_making_kinds;
-use super::degrade_notices::{assert_made_once, shared_in_system_memory};
+use super::degrade_notices::{assert_made_once, counts, shared_in_system_memory};
+use super::host_memory::Mapping;
+use super::no_copy_heaps::{no_copy_heap, shared, HEAP};
 use super::{
     bound_buffers, encode_case, pipeline_state, public_case, read_buffer, validated_device,
     CaseResources, Messages, PublicCase, ScratchCache, WAIT,
 };
 use crate::candidate::engine::ComputeOutput;
 use crate::gpu::TEST_DEVICE;
-use metal2vulkan::bind::Dispatch;
-use metal2vulkan::error::{BindError, Feature, Needs, Unsupported};
+use metal2vulkan::bind::PvrtcDecode;
+use metal2vulkan::device::FormatUsage;
+use metal2vulkan::metal::format::{vk_format, FormatEmulation};
 use metal2vulkan::metal::{PixelFormat, ResourceUsage, TextureUsage};
 use metal2vulkan_runtime::{
     BlitCommandEncoder, BlitOption, Buffer, CommandBufferStatus, CommandQueue, CpuCacheMode,
-    Degradation, Device, Error, HazardTrackingMode, Origin, Region, ResourceOptions, RuntimeGap,
-    Size, StorageMode, Texture, TextureDescriptor,
+    Degradation, Device, Error, HazardTrackingMode, HeapType, Origin, Region, ResourceOptions,
+    RuntimeGap, Size, StorageMode, Texture, TextureDescriptor,
 };
 
 /// The 4-bit PVRTC formats, which the runtime holds where the device has no format for them.
@@ -67,9 +77,6 @@ const TWO_BIT: [PixelFormat; 4] = [
     PixelFormat::PVRTCRGBA2BPPSRGB,
 ];
 
-/// A public case that samples textures in a kernel (`kernel_textures.rs`'s).
-const SAMPLED: &str = "sample-each-of-three-textures-through-one-dynamic-array-index";
-
 /// A public case whose kernel reads texture handles from memory: it samples an unsigned texture
 /// through a sampler, both held in its argument buffer (`resource_ids.rs`'s).
 const HANDLES: &str =
@@ -78,7 +85,7 @@ const HANDLES: &str =
 /// A public case whose kernel reads buffers alone.
 const BUFFERS: &str = "store-through-a-selected-base-and-test-a-nullable-pointer";
 
-/// The kind [`a_pvrtc_texture_a_kernel_s_handles_reach_is_announced_once`] takes.
+/// The kind [`a_texture_held_for_copies_a_kernel_s_handles_reach_is_announced_once`] takes.
 pub(super) const UNREADABLE: [Degradation; 1] = [Degradation::UnreadableHandleTexture];
 
 /// The option a PVRTC copy takes.
@@ -991,12 +998,9 @@ fn gap<T: std::fmt::Debug>(result: Result<T, Error>, what: &str) {
 }
 
 /// The runtime's block-order gap is refused `NotImplemented(PvrtcBlockOrder)`, recording
-/// nothing: `replaceRegion` and `getBytes` of a region other than a whole level (EV
-/// CFR-probe7-m4: plain Metal places its blocks by no rule the runtime has found) and of a whole
-/// level at a padded `bytesPerRow` (unmeasured). A kernel that samples a PVRTC RGB texture is
-/// refused at its dispatch with the format's refusal, recording nothing.
+/// (unmeasured).
 #[test]
-fn pvrtc_block_order_and_reads_are_refused_typed() {
+fn pvrtc_block_order_is_refused_typed() {
     on_device(|lane| {
         for pf in FOUR_BIT.into_iter().chain(TWO_BIT) {
             let texture = lane.texture(pf, 32, 1, StorageMode::Shared);
@@ -1016,81 +1020,182 @@ fn pvrtc_block_order_and_reads_are_refused_typed() {
                 gap(texture.get_bytes(&mut out, pitch, 0, region, 0, 0), &what);
             }
         }
-        // A kernel sampling the texture: every texture slot of the case bound to a PVRTC
-        // texture.
-        let case = public_case(SAMPLED).unwrap();
-        let pipeline = pipeline_state(&lane.device, &case).unwrap();
-        let resources = CaseResources::new(&lane.device, &case).unwrap();
-        let texture = lane.texture(PixelFormat::PVRTCRGB4BPP, 16, 1, StorageMode::Private);
-        let command_buffer = lane.queue.command_buffer().unwrap();
-        let mut encoder = command_buffer.compute_command_encoder().unwrap();
-        encoder.set_compute_pipeline_state(&pipeline).unwrap();
-        for (&index, bytes) in &case.compute.buffers {
-            encoder
-                .set_buffer(Some(&lane.buffer(bytes)), 0, index)
-                .unwrap();
-        }
-        for &index in resources.textures.keys() {
-            encoder.set_texture(Some(&texture), index).unwrap();
-        }
-        for (&index, sampler) in &resources.samplers {
-            encoder.set_sampler_state(Some(sampler), index).unwrap();
-        }
-        for (&index, &length) in &case.compute.threadgroup_lengths {
-            encoder
-                .set_threadgroup_memory_length(length, index)
-                .unwrap();
-        }
-        let dispatched = match case.compute.dispatch {
-            Dispatch::Threads {
-                threads,
-                threads_per_group,
-            } => encoder.dispatch_threads(size(threads), size(threads_per_group)),
-            Dispatch::Threadgroups {
-                groups,
-                threads_per_group,
-            } => encoder.dispatch_threadgroups(size(groups), size(threads_per_group)),
-            other => panic!("{SAMPLED}: dispatch {other:?}"),
+    });
+}
+
+/// Whether `device` holds a texture of `pf` in its own PVRTC format, decoding it its own way,
+/// rather than in a carrier with a decoded twin.
+fn holds_pvrtc(device: &Device, pf: PixelFormat) -> bool {
+    let usage = [FormatUsage::SampledImage].into();
+    vk_format(pf, &usage, device.compile_device().profile())
+        .is_ok_and(|m| m.emulation == FormatEmulation::Direct)
+}
+
+/// `n` bytes of a seeded xorshift: random blocks of every mode.
+fn seeded(seed: u64, n: usize) -> Vec<u8> {
+    let mut x = seed | 1;
+    let mut out = Vec::with_capacity(n + 8);
+    while out.len() < n {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        out.extend_from_slice(&x.wrapping_mul(0x2545_f491_4f6c_dd1d).to_le_bytes());
+    }
+    out.truncate(n);
+    out
+}
+
+/// The form of a PVRTC format in the other colour space, its sRGB or linear twin.
+fn other_space(pf: PixelFormat) -> PixelFormat {
+    use PixelFormat as P;
+    match pf {
+        P::PVRTCRGB2BPP => P::PVRTCRGB2BPPSRGB,
+        P::PVRTCRGB2BPPSRGB => P::PVRTCRGB2BPP,
+        P::PVRTCRGB4BPP => P::PVRTCRGB4BPPSRGB,
+        P::PVRTCRGB4BPPSRGB => P::PVRTCRGB4BPP,
+        P::PVRTCRGBA2BPP => P::PVRTCRGBA2BPPSRGB,
+        P::PVRTCRGBA2BPPSRGB => P::PVRTCRGBA2BPP,
+        P::PVRTCRGBA4BPP => P::PVRTCRGBA4BPPSRGB,
+        P::PVRTCRGBA4BPPSRGB => P::PVRTCRGBA4BPP,
+        other => panic!("{other:?} is no PVRTC format"),
+    }
+}
+
+/// Every PVRTC format's texels read exactly as Metal's on a device without the format (the module
+/// docs), through the texture and through its view as the other colour space: a new texture's
+/// zero blocks, then a whole level's blocks a CPU copy wrote (in Metal's CPU order), a row-linear
+/// blit from a buffer, and a copy from another texture, each read by a command buffer after the
+/// write's. A device with the format reads through its own decode (not compared).
+#[test]
+fn pvrtc_texels_read_as_metal_s() {
+    super::degrade_notices::on_device(|device, messages| {
+        let name = device.name().to_owned();
+        let state = reader(device);
+        let queue = device.new_command_queue().unwrap();
+        let lane = Lane {
+            device: device.clone(),
+            queue,
+            messages: messages.clone(),
         };
-        encoder.end_encoding().unwrap();
-        let committed = command_buffer.commit();
-        command_buffer.wait_until_completed_for(WAIT).unwrap();
-        println!(
-            "a kernel sampling PVRTC_RGB_4BPP textures at {:?}: dispatch {dispatched:?}, commit \
-             {committed:?}, status {:?}, error {:?}",
-            resources.textures.keys().collect::<Vec<_>>(),
-            command_buffer.status(),
-            command_buffer.error()
-        );
-        // The format's own refusal: no Vulkan format holds PVRTC RGB texels a shader reads.
-        assert!(
-            matches!(
-                dispatched,
-                Err(Error::Bind(BindError::Unsupported(Unsupported {
-                    feature: Feature::Format,
-                    needs: Needs::NotImplemented,
-                    ..
-                })))
+        let mut wrong = Vec::new();
+        let mut undecoded = Vec::new();
+        let mut twinned = false;
+        // The GPU decode passes and CPU decodes so far.
+        let decodes = |device: &Device| {
+            let counts = device.work_counts();
+            (counts.block_decode_passes, counts.cpu_block_decodes)
+        };
+        for (f, pf) in FOUR_BIT.into_iter().chain(TWO_BIT).enumerate() {
+            let native = holds_pvrtc(device, pf);
+            twinned |= !native;
+            let decode = PvrtcDecode::of(pf).unwrap();
+            let [bw, bh] = decode.block_extent().map(u64::from);
+            let blocks = [16 / bw, 16 / bh];
+            let bytes = (blocks[0] * blocks[1] * 8) as usize;
+            let mut check = |what: &str, texture: &Texture, rows: &[u8]| {
+                if native {
+                    return;
+                }
+                let codes = decode.decode(rows, [16, 16, 1]);
+                let view = texture.new_texture_view(other_space(pf)).unwrap();
+                for (read, through) in [(texture, pf), (&view, other_space(pf))] {
+                    let as_read = PvrtcDecode::of(through).unwrap();
+                    let got = read_whole(device, &state, read);
+                    for (t, got) in got.iter().enumerate() {
+                        for (c, &got) in got.iter().enumerate() {
+                            let want = as_read.metal_value(c, codes[4 * t + c]);
+                            if got.to_bits() != want.to_bits() && wrong.len() < 24 {
+                                wrong.push(format!(
+                                    "{pf:?} {what} read as {through:?}, texel {t} channel {c}: \
+                                     {got} against Metal's {want}"
+                                ));
+                            }
+                        }
+                    }
+                }
+            };
+            let texture = lane.texture(pf, 16, 1, StorageMode::Shared);
+            check("fresh", &texture, &vec![0; bytes]);
+            // A CPU copy of the whole level, its blocks in Metal's CPU order.
+            let rows = seeded(0x9e37_0000 + 0x10 * f as u64, bytes);
+            let mut cpu = vec![0; bytes];
+            for (i, block) in rows.as_chunks::<8>().0.iter().enumerate() {
+                let (x, y) = (i as u64 % blocks[0], i as u64 / blocks[0]);
+                let at = cpu_order(x, y, blocks) as usize * 8;
+                cpu[at..at + 8].copy_from_slice(block);
+            }
+            let before = decodes(device);
+            texture.replace_region(whole(16), 0, 0, &cpu, 0, 0).unwrap();
+            check("CPU copy", &texture, &rows);
+            if !native && decodes(device) == before {
+                undecoded.push(format!("{pf:?} CPU copy: neither a pass nor a CPU decode"));
+            }
+            // A row-linear blit from a buffer, then a copy into another texture.
+            let blitted = seeded(0x9e37_0001 + 0x10 * f as u64, bytes);
+            let before = decodes(device);
+            let row = blocks[0] * 8;
+            lane.run(|blit| {
+                lane.put(blit, &texture, &blitted, At::rows(whole(16), row))?;
+                Ok(Vec::new())
+            })
+            .unwrap();
+            check("blit", &texture, &blitted);
+            let copy = lane.texture(pf, 16, 1, StorageMode::Private);
+            lane.run(|blit| {
+                let at = Origin::new(0, 0, 0);
+                let size = Size::new(16, 16, 1);
+                blit.copy_from_texture_to_texture(&texture, 0, 0, at, size, &copy, 0, 0, at)?;
+                Ok(Vec::new())
+            })
+            .unwrap();
+            check("texture copy", &copy, &blitted);
+            // Each blit's decode is a GPU pass.
+            let after = decodes(device);
+            if !native && after.0 < before.0 + 2 {
+                undecoded.push(format!(
+                    "{pf:?} blits: GPU decode passes {before:?} -> {after:?}"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "on {name}:\n{}", wrong.join("\n"));
+        assert!(undecoded.is_empty(), "on {name}:\n{}", undecoded.join("\n"));
+        let counts = counts(&messages.take_notices());
+        let announced = |kind| counts.get(&kind).copied().unwrap_or(0);
+        assert_eq!(
+            (
+                announced(Degradation::CarriedDecodedTwin),
+                announced(Degradation::DecodedTexelPrecision)
             ),
-            "{dispatched:?}"
+            (usize::from(twinned), 0),
+            "on {name}"
         );
     });
 }
 
-/// A size of three axes.
-fn size(axes: [u32; 3]) -> Size {
-    Size::new(axes[0].into(), axes[1].into(), axes[2].into())
-}
-
-/// A PVRTC RGB texture, whose blocks a carrier holds, made resident for a kernel that reads no
-/// texture handles changes nothing and announces nothing. Made resident for a kernel that reads
-/// texture handles from memory, it changes nothing the kernel reads through its own handle (its
-/// element is the neutral texture), and the dispatch announces
-/// [`Degradation::UnreadableHandleTexture`] once over two command buffers.
+/// A 4:2:2 texture in a heap over the caller's host pages, whose texels a carrier holds for copies
+/// alone (it keeps no decoded twin, as a PVRTC texture's blocks there keep none), made resident
+/// for a kernel that reads no texture handles changes nothing and announces nothing. Made resident
+/// for a kernel that reads texture handles from memory, it changes nothing the kernel reads
+/// through its own handle (its element is the neutral texture), and the dispatch announces
+/// [`Degradation::UnreadableHandleTexture`] once over two command buffers. The kernel samples an
+/// unsigned texture and the 4:2:2 texture's class is a float one (`RGBX8Unorm`'s), so the element
+/// is the neutral by class as well: [`Degradation::CrossClassTextureNeutral`], also once. Nothing
+/// where the device imports no host memory.
 #[test]
-fn a_pvrtc_texture_a_kernel_s_handles_reach_is_announced_once() {
+fn a_texture_held_for_copies_a_kernel_s_handles_reach_is_announced_once() {
     on_device(|lane| {
-        let pvrtc = lane.texture(PixelFormat::PVRTCRGB4BPP, 16, 1, StorageMode::Private);
+        let pages = Mapping::anonymous(HEAP);
+        // SAFETY: the mapping holds `HEAP` writable bytes and outlives the heap, dropped after it.
+        let made =
+            unsafe { no_copy_heap(&lane.device, pages.pointer(), HeapType::Placement, None) };
+        let Some(heap) = made else {
+            return;
+        };
+        let mut held = descriptor(PixelFormat::GBGR422, 16, 1, StorageMode::Shared);
+        held.resource_options = shared();
+        let pvrtc = heap.new_texture_at_offset(&held, 0).unwrap();
+        // What the heap and its texture announce is theirs.
+        drop(lane.messages.take_notices());
         // Beside the dispatches' own kind, what their steps force: the case's pipeline state's
         // making, and the `Shared` buffers' system memory.
         let forced = |case| {
@@ -1109,6 +1214,8 @@ fn a_pvrtc_texture_a_kernel_s_handles_reach_is_announced_once() {
         for _ in 0..2 {
             assert_eq!(lane.dispatch(&handles, Some(&pvrtc)), alone, "{HANDLES}");
         }
-        assert_made_once(&lane.messages, &UNREADABLE, &forced(&handles));
+        let mut kinds = forced(&handles);
+        kinds.insert(Degradation::CrossClassTextureNeutral);
+        assert_made_once(&lane.messages, &UNREADABLE, &kinds);
     });
 }

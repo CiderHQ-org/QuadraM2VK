@@ -78,8 +78,8 @@
 //! sampler states of an anisotropy past the device's largest here ([`CAPPED_ANISOTROPY`]),
 //! anisotropic sampler states without a mip filter through Metal's own sampler
 //! ([`NOT_MIPMAPPED_ANISOTROPY`]), draws that read an attachment's bytes in place in
-//! `attachment_reads` ([`IN_PLACE`]), PVRTC
-//! textures held for copies that a kernel's texture handles reach in `pvrtc_textures`
+//! `attachment_reads` ([`IN_PLACE`]), textures
+//! held for copies alone that a kernel's texture handles reach in `pvrtc_textures`
 //! ([`UNREADABLE`]), the device's texture table and heap sets in `resource_ids` (an unviewable
 //! texture, [`UNVIEWABLE`]; a shadowed one, [`UNNAMED_SHADOWS`]; an ID past a pipeline's arrays,
 //! [`PAST_CAPACITY`]; each command buffer's own copy on a device withholding
@@ -100,7 +100,8 @@
 //! ([`UNMODELLED_SIZES`]) and those whose images take more of a heap than Metal's answer there
 //! ([`PAST_METAL_SIZES`]), BC1 to BC5 textures on a driver not measured to decode them as Metal
 //! does in `compressed_decode` ([`BLOCK_DECODES`]) and writes into their decoded twins behind
-//! work in flight there ([`BEHIND_WRITES`]), passes rendering a linear image apart in
+//! work in flight there ([`BEHIND_WRITES`]), ASTC textures on a device without their format in
+//! `astc_textures` ([`ASTC_TWINS`]; PVRTC ones take the first in `pvrtc_textures`), passes rendering a linear image apart in
 //! `linear_attachments` ([`LINEAR_COPIES`]) and those rendering one through copies as they clear
 //! it and no command of them may read it, there too ([`CHOSEN_COPIES`]), passes rendering a texture
 //! over a buffer they do not store through the image its texture keeps in `kept_buffer_bytes`
@@ -136,6 +137,7 @@
 
 use super::absent_reads::ABSENT_READS;
 use super::amplified_draws::AMPLIFICATION;
+use super::astc_textures::{decodes_astc, ASTC_TWINS};
 use super::attachment_reads::IN_PLACE;
 use super::barycentric_weights::SYNTHESIZED_GEOMETRY;
 use super::binary_archives::ARCHIVES;
@@ -205,7 +207,7 @@ use crate::candidate::engine::compute_shape;
 use crate::candidate::engine::resources::pixel_format;
 use crate::candidate::engine::variants::compile_compute_for_shape;
 use crate::gpu::TEST_DEVICE;
-use metal2vulkan::bind::SamplerDescriptor;
+use metal2vulkan::bind::{AstcDecode, SamplerDescriptor};
 use metal2vulkan::cache::VariantKey;
 use metal2vulkan::device::VkExtension;
 use metal2vulkan::device::{DriverFact, DriverWorkaround, OpBits, VkFeature, VkProperty};
@@ -525,6 +527,7 @@ fn every_kind_has_a_site_a_lane_test_takes() {
         &NIL_OFFSETS,
         &BLOCK_DECODES,
         &BEHIND_WRITES,
+        &ASTC_TWINS,
         &SHARED_PRESENT_QUEUES,
         &PAST_METAL_SIZES,
         &LINEAR_COPIES,
@@ -1996,6 +1999,31 @@ pub(super) fn draws_depth_copies(device: &Device) -> bool {
         .driver_facts
         .contains(&DriverFact::FragmentDepthStoresUnchanged);
     !copies && !exact
+}
+
+/// Whether `device` holds a texture of `pf` of its own in a carrier with a decoded twin
+/// (`carried-decoded-twin`), and whether the twin's codes announce `decoded-texel-precision`: an
+/// ASTC format the device has no block for (`astc_textures::decodes_astc`), a PVRTC, ETC2 or
+/// EAC format it has no format for, or a 4:2:2 format (every device); the notice for an ASTC LDR
+/// format's 8-bit codes and an EAC 11-bit format's 16-bit ones under
+/// `DecodedTexelsPolicy::Compact`, and for no other twin, whose codes are exact (an ASTC sRGB
+/// format's, a PVRTC format's, an 8-bit ETC2 or EAC format's, a 4:2:2 format's).
+pub(super) fn twins_carried(device: &Device, pf: PixelFormat) -> [bool; 2] {
+    let astc = AstcDecode::of(pf).filter(|_| !decodes_astc(device, pf));
+    let usage = [metal2vulkan::device::FormatUsage::SampledImage].into();
+    let profile = device.compile_device().profile();
+    let decoded = metal2vulkan::metal::format::vk_format(pf, &usage, profile)
+        .is_ok_and(|m| m.emulation == metal2vulkan::metal::format::FormatEmulation::Decoded);
+    let pvrtc = metal2vulkan::bind::PvrtcDecode::of(pf).is_some() && decoded;
+    let etc = metal2vulkan::bind::EtcDecode::of(pf).filter(|_| decoded);
+    let chroma = metal2vulkan::bind::ChromaDecode::of(pf).is_some() && decoded;
+    let eleven = etc.is_some_and(metal2vulkan::bind::EtcDecode::eleven_bit);
+    let compact = device.compile_device().policy().decoded_texels == DecodedTexelsPolicy::Compact;
+    let ldr = astc.is_some_and(|decode| !decode.srgb);
+    [
+        astc.is_some() || pvrtc || etc.is_some() || chroma,
+        (ldr || eleven) && compact,
+    ]
 }
 
 /// Whether `device` gives a single-sample texture of `pf` a decoded twin (`decoded-block-twin`): a

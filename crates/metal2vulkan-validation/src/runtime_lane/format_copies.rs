@@ -9,6 +9,10 @@
 //! - A buffer copy through the stencil view reads or writes the stencil, a byte a texel, with any
 //!   blit option; the depth stays. A `Depth32FloatStencil8` texture copies into another, both
 //!   aspects.
+//! - Between a compressed format and an uncompressed one whose texel is its block's bytes, Metal
+//!   copies each block into one texel and back, the copy's origins and size in the destination's
+//!   texels (our probe on an Apple M3 Max under macOS 27.0.1;
+//!   [`compressed_blocks_copy_into_texels_of_their_bytes_and_back`]).
 //! - Formats of different units, and a combined format with another, are Metal's to refuse
 //!   (`Invalid`, `CopyProblem::Format`).
 //! - A region copied onto itself keeps its texels; a copy between other overlapping regions of
@@ -531,6 +535,134 @@ fn a_copy_onto_its_own_texels_keeps_them_and_another_overlap_moves_as_memmove() 
         }
         let notices = assert_once(&messages.take_notices(), &MEMMOVES);
         assert_eq!(notices.len(), 1, "{notices:?} on {name}");
+    }
+    assert_eq!(messages.take(), Vec::new(), "the validation layer reported");
+}
+
+/// A unit's bytes: `tag`, its index `i`, then bytes that count up, `n` in all.
+fn unit_bytes(i: usize, tag: u8, n: usize) -> Vec<u8> {
+    let mut bytes = vec![tag, i as u8];
+    bytes.extend((2..n).map(|k| (k as u8) ^ tag));
+    bytes
+}
+
+/// Our probe on an Apple M3 Max under macOS 27.0.1: between a compressed format and an
+/// uncompressed one whose texel is its block's bytes, each block copies into one texel and back,
+/// the copy's origins and size in the destination's texels. Out of a texture of 8 x 8 blocks an
+/// origin of (4, 4) and a size of 2 x 2 into an 8 x 8 texture at (1, 2) copy the blocks from
+/// (4, 4) into texels (1, 2) to (2, 3); out of that texture an origin of (1, 2) and a size of
+/// 2 x 2 into the compressed one at a block's texel extent (its second block across and down)
+/// copy texel (0, 0) alone into that block. Every other byte stays. BC1 and BC7, and ETC2 and
+/// ASTC 6x5, which a device without them holds in a carrier.
+#[test]
+fn compressed_blocks_copy_into_texels_of_their_bytes_and_back() {
+    use PixelFormat as P;
+    let messages = Messages::default();
+    let cache = ScratchCache::new().unwrap();
+    {
+        let device = validated_device(TEST_DEVICE, &messages, cache.path()).unwrap();
+        let name = device.name().to_owned();
+        let lane = Lane {
+            queue: device.new_command_queue().unwrap(),
+            device,
+        };
+        let made = |pf: PixelFormat, width: u64, height: u64| {
+            let mut d = TextureDescriptor::texture_2d(pf, width, height, false);
+            d.usage = TextureUsage::SHADER_READ;
+            d.resource_options = ResourceOptions::new(
+                StorageMode::Private,
+                CpuCacheMode::DefaultCache,
+                HazardTrackingMode::Default,
+            );
+            lane.device.new_texture(&d).unwrap()
+        };
+        let cases: [(P, [u64; 2], P, usize); 4] = [
+            (P::BC1RGBA, [4, 4], P::RG32Uint, 8),
+            (P::BC7RGBAUnorm, [4, 4], P::RGBA32Uint, 16),
+            (P::ETC2RGB8, [4, 4], P::RG32Uint, 8),
+            (P::ASTC6x5LDR, [6, 5], P::RGBA32Uint, 16),
+        ];
+        for (c, [bw, bh], u, n) in cases {
+            let compressed = made(c, 8 * bw, 8 * bh);
+            let texels = made(u, 8, 8);
+            let blocks: Vec<u8> = (0..64).flat_map(|i| unit_bytes(i, 0x10, n)).collect();
+            let words: Vec<u8> = (0..64).flat_map(|i| unit_bytes(i, 0x80, n)).collect();
+            let row = 8 * n as u64;
+            let got = lane.run(|blit| {
+                for (texture, bytes, size) in [
+                    (&compressed, &blocks, Size::new(8 * bw, 8 * bh, 1)),
+                    (&texels, &words, Size::new(8, 8, 1)),
+                ] {
+                    blit.copy_from_buffer_to_texture(
+                        &lane.buffer(bytes),
+                        0,
+                        row,
+                        8 * row,
+                        size,
+                        texture,
+                        0,
+                        0,
+                        Origin::new(0, 0, 0),
+                        BlitOption::None,
+                    )?;
+                }
+                blit.copy_from_texture_to_texture(
+                    &compressed,
+                    0,
+                    0,
+                    Origin::new(4, 4, 0),
+                    Size::new(2, 2, 1),
+                    &texels,
+                    0,
+                    0,
+                    Origin::new(1, 2, 0),
+                )?;
+                blit.copy_from_texture_to_texture(
+                    &texels,
+                    0,
+                    0,
+                    Origin::new(1, 2, 0),
+                    Size::new(2, 2, 1),
+                    &compressed,
+                    0,
+                    0,
+                    Origin::new(bw, bh, 0),
+                )?;
+                let mut out = Vec::new();
+                for (texture, size) in [
+                    (&compressed, Size::new(8 * bw, 8 * bh, 1)),
+                    (&texels, Size::new(8, 8, 1)),
+                ] {
+                    let buffer = lane.buffer(&vec![0xee; 64 * n]);
+                    blit.copy_from_texture_to_buffer(
+                        texture,
+                        0,
+                        0,
+                        Origin::new(0, 0, 0),
+                        size,
+                        &buffer,
+                        0,
+                        row,
+                        8 * row,
+                        BlitOption::None,
+                    )?;
+                    out.push((buffer, 64 * n));
+                }
+                Ok(out)
+            });
+            let at = |x: usize, y: usize| (8 * y + x) * n..(8 * y + x + 1) * n;
+            let mut want_blocks = blocks.clone();
+            want_blocks[at(1, 1)].copy_from_slice(&words[at(0, 0)]);
+            let mut want_words = words.clone();
+            for (x, y) in [(1, 2), (2, 2), (1, 3), (2, 3)] {
+                want_words[at(x, y)].copy_from_slice(&blocks[at(x + 3, y + 2)]);
+            }
+            assert_eq!(
+                got,
+                Ok(vec![want_blocks, want_words]),
+                "{c:?} with {u:?} on {name}"
+            );
+        }
     }
     assert_eq!(messages.take(), Vec::new(), "the validation layer reported");
 }

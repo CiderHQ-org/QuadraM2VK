@@ -1151,6 +1151,11 @@ impl Device {
         let usage = descriptor.image_usage();
         let (plan, twin) = plan_texture_images(&layout, usage, false, &facts)
             .map_err(|refusal| image_error(call, refusal))?;
+        // A heap texture's samples read what its bytes hold, which an ASTC carrier's decoded twin
+        // would decode as it is placed (`astc.rs`): refused, its size query too.
+        if crate::astc::decode_of(&plan).is_some() {
+            return Err(Error::NotImplemented(RuntimeGap::DecodedHeapTexture));
+        }
         // An image whose copies would rewrite texels a CPU copy keeps is made uncompressed; the
         // texture still takes the compressed image's bytes of the heap, as Metal's does.
         let (plan, twin, compressed) =
@@ -2099,6 +2104,7 @@ impl Device {
             resolves: KeptResolves::new(),
             twin: None,
             decoded: None,
+            second: std::sync::OnceLock::new(),
             form: Default::default(),
             kept_outside: AtomicBool::new(false),
             signed_depth: AtomicBool::new(false),
@@ -2139,6 +2145,7 @@ impl Device {
             resolves: KeptResolves::new(),
             twin: None,
             decoded: None,
+            second: std::sync::OnceLock::new(),
             form: Default::default(),
             kept_outside: AtomicBool::new(false),
             signed_depth: AtomicBool::new(false),

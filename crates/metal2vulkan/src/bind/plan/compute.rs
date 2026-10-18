@@ -780,7 +780,12 @@ fn plan(p: &ComputePipeline, device: &Device, shape: &BindShape) -> Result<Bindi
     variant.psb_slots = psb_variant(&p.dependencies, &buffers, device.profile());
     variant.storage_view_slots = storage_view_variant(&p.dependencies, &buffers, device.profile());
     variant.cross_class = cross_variant(&p.dependencies, &p.interface.slots, shape);
-    variant.srgb_textures = srgb_variant(&p.dependencies, shape, &variant.cross_class);
+    variant.srgb_textures = srgb_variant(
+        device.profile(),
+        &p.dependencies,
+        shape,
+        &variant.cross_class,
+    );
     variant.ycbcr_textures = ycbcr_variant(&p.dependencies, shape);
     variant.address_maps = address_map_variant(&p.dependencies, shape);
     variant.cubic_samplers = cubic_variant(&p.dependencies, shape)?;

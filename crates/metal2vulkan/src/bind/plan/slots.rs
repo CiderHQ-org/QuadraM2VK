@@ -247,13 +247,15 @@ fn offset_base_axes(shape: &BindShape, slot: SlotRef) -> u64 {
 }
 
 /// The texture slots whose function decodes an 8-bit sRGB texel from its raw code
-/// (`RuntimeFact::SrgbTexture`) at which `shape` binds a texture of such a format
-/// (`metal::texel_format::srgb_raw`): the plan's `VariantKey::srgb_textures`. So is each slot of
-/// `cross` that the variant reads in the float class (an integer slot), whose accesses there take
-/// `float` results, which the raw code serves as a float slot's: the variant's compile states
-/// `SrgbTexture` there. The variant's compile states the same facts, so its plan for the same shape
-/// states the same key.
+/// (`RuntimeFact::SrgbTexture`) at which `shape` binds a texture of such a format whose codes
+/// `profile`'s device holds (`metal::texel_format::srgb_raw_on`: not an ASTC sRGB format it
+/// decodes itself): the plan's `VariantKey::srgb_textures`. So is each slot of `cross` that the
+/// variant reads in the float class (an integer slot), whose accesses there take `float` results,
+/// which the raw code serves as a float slot's: the variant's compile states `SrgbTexture` there.
+/// The variant's compile states the same facts, so its plan for the same shape states the same
+/// key.
 pub(crate) fn srgb_variant(
+    profile: &DeviceProfile,
     dependencies: &[RuntimeDependency],
     shape: &BindShape,
     cross: &BTreeMap<SlotRef, SampledType>,
@@ -271,7 +273,7 @@ pub(crate) fn srgb_variant(
         .chain(read_float)
         .filter(|slot| {
             matches!(bound_texture(shape, *slot), Some(TextureShape::Texture { pixel_format, .. })
-                if metal::texel_format::srgb_raw(*pixel_format))
+                if metal::texel_format::srgb_raw_on(*pixel_format, profile))
         })
         .collect()
 }

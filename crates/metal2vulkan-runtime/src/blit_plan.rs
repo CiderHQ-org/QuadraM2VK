@@ -24,6 +24,7 @@ use super::copy_plan::{
 };
 use super::image_plan::ImagePlan;
 use super::linear_plan::BufferLayout as TexelsLayout;
+use super::pvrtc::is_pvrtc;
 use super::two_planes;
 use super::view_plan::ViewRecord;
 use metal2vulkan::error::{Feature, Unsupported};
@@ -445,7 +446,14 @@ fn texture_unit(pf: PixelFormat) -> Option<(u32, [u32; 2])> {
 
 /// Whether Metal copies between textures of `a` and `b` (macOS 26.7's rule): the same format, or
 /// two formats of one copy unit, whose bytes it copies, a depth or stencil format's among them
-/// (probes); formats of different units are refused.
+/// (probes), or a compressed format and an uncompressed one whose texel is the bytes of its block
+/// (each block into one texel and back, [`source_region`]); formats of units of different bytes
+/// are refused.
+///
+/// The runtime's gaps: a PVRTC format with an uncompressed one, whose blocks plain Metal moves in
+/// an order of its own (our probe on an Apple M3 Max under macOS 27.0.1: neither the rows nor the
+/// CPU's Z order), and two compressed formats of one block's bytes and different extents (ASTC
+/// 6x5 and BC7), not measured.
 fn check_formats(a: PixelFormat, b: PixelFormat) -> Result<(), CopyRefusal> {
     // Between two `YCBCR8_420_2P` textures Metal copies both of the surfaces' planes (EV
     // XRR2-ycc2-m4), where the runtime's copy moves the luma bytes its texels are: the runtime's
@@ -458,8 +466,16 @@ fn check_formats(a: PixelFormat, b: PixelFormat) -> Result<(), CopyRefusal> {
     if a == b {
         return Ok(());
     }
+    let not_implemented =
+        || CopyRefusal::Unsupported(Unsupported::not_implemented(Feature::Format).naming_format(a));
     match (texture_unit(a), texture_unit(b)) {
         (Some(x), Some(y)) if x == y => {}
+        (Some((x, from)), Some((y, to))) if x == y => {
+            let texel = |extent: [u32; 2]| extent == [1, 1];
+            if texel(from) == texel(to) || is_pvrtc(a) || is_pvrtc(b) {
+                return Err(not_implemented());
+            }
+        }
         _ => return Err(CopyProblem::Format.into()),
     }
     // Into a 4:2:2 texture from another format of its unit plain Metal writes `0xff` over part
@@ -540,7 +556,8 @@ fn pair_unit(record: &ViewRecord, image: Option<&ImagePlan>) -> Result<CopyUnit,
 /// edge inside a block and not at the other's, the sides differ in size and cover the same blocks,
 /// which plain Metal copies whole (an Apple M3 Max under macOS 26.7, a probe: a whole block of a
 /// 4 x 2 level into one of an 8 x 8 level and back, which its validation takes, and 4 x 2 of
-/// either, which it stops).
+/// either, which it stops). Between a compressed and an uncompressed format the region is in the
+/// destination's texels ([`source_region`]).
 pub(super) fn plan_region_copy(
     pair: &CopyPair<'_>,
     region: &TextureRegion,
@@ -549,7 +566,8 @@ pub(super) fn plan_region_copy(
     dst_origin: [u32; 3],
 ) -> Result<Vec<ImageCopyRegion>, CopyRefusal> {
     let (src_unit, dst_unit) = pair.check()?;
-    let src = check_region(pair.src, region, &src_unit)?;
+    let source = source_region(region, &src_unit, &dst_unit)?;
+    let src = check_region(pair.src, &source, &src_unit)?;
     let dst_region = TextureRegion {
         level: dst_level,
         slice: dst_slice,
@@ -563,9 +581,44 @@ pub(super) fn plan_region_copy(
     Ok(vec![ImageCopyRegion { src, dst }])
 }
 
+/// The source's region of a region copy of `region` between textures of units `src` and `dst`:
+/// `region` itself between units of one extent. Between a compressed format and an uncompressed
+/// one (`check_formats`) every coordinate of the copy is in the destination's texels, the source
+/// addressed as if it held the destination's format (our probe on an Apple M3 Max under macOS
+/// 27.0.1: BC1 with `RG32Uint` and `RGBA16Uint`, BC7, `EAC_RGBA8` and ASTC 6x5 with
+/// `RGBA32Uint`, `ETC2_RGB8` with `RG32Uint`, both ways): out of a compressed texture the origin
+/// and size count its blocks (an origin of 4 is the fifth block), into one they count the
+/// source's texels as the destination's, the origin rounded down to a block's texel and the size
+/// up to whole blocks, each on its own (an origin of 1 and a size of 4 copy texel 0 alone).
+/// Refused (`Region`) where the source's texels overflow.
+fn source_region(
+    region: &TextureRegion,
+    src: &CopyUnit,
+    dst: &CopyUnit,
+) -> Result<TextureRegion, CopyProblem> {
+    let mut out = *region;
+    for axis in 0..2 {
+        let (from, to) = (src.extent[axis], dst.extent[axis]);
+        if from == to {
+            continue;
+        }
+        let (origin, size) = (region.origin[axis], region.size[axis]);
+        (out.origin[axis], out.size[axis]) = match to {
+            1 => (
+                origin.checked_mul(from).ok_or(CopyProblem::Region)?,
+                size.checked_mul(from).ok_or(CopyProblem::Region)?,
+            ),
+            _ => (origin / to, size.div_ceil(to)),
+        };
+    }
+    Ok(out)
+}
+
 /// `copyFromTexture:sourceSlice:sourceLevel:toTexture:destinationSlice:destinationLevel:
 /// sliceCount:levelCount:`, and `copyFromTexture:toTexture:` (`whole`: every level and slice of
-/// two textures of one shape).
+/// two textures of one shape). Between a compressed and an uncompressed format (`check_formats`)
+/// the runtime's gap (`NotImplemented(Format)`): which level's blocks Metal copies into which
+/// level's texels is not measured.
 pub(super) fn plan_levels_copy(
     pair: &CopyPair<'_>,
     src_slice: u32,
@@ -576,6 +629,11 @@ pub(super) fn plan_levels_copy(
     levels: u32,
 ) -> Result<Vec<ImageCopyRegion>, CopyRefusal> {
     let (src_unit, dst_unit) = pair.check()?;
+    if src_unit.extent != dst_unit.extent {
+        return Err(CopyRefusal::Unsupported(
+            Unsupported::not_implemented(Feature::Format).naming_format(pair.src.pixel_format),
+        ));
+    }
     let (src, dst) = (pair.src, pair.dst);
     let in_range = |start: u32, count: u32, limit: u32| {
         start.checked_add(count).is_some_and(|end| end <= limit)

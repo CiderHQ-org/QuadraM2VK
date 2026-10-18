@@ -8,7 +8,7 @@
 
 use super::degrade_notices::{assert_made_once, assert_once, forced, loses_depth_denormals};
 use super::degrade_notices::{decodes_blocks_its_way, shared_in_system_memory};
-use super::degrade_notices::{twins_blocks, twins_depth};
+use super::degrade_notices::{twins_blocks, twins_carried, twins_depth};
 use super::{validated_device, Messages, ScratchCache};
 use crate::gpu::TEST_DEVICE;
 use metal2vulkan::bind::{MipmapFilterChain, MipmapRule};
@@ -1577,6 +1577,14 @@ fn mipmaps_of_every_format_run_or_are_refused_typed() {
                         pf == PixelFormat::Depth32Float && twins_depth(&device),
                     ),
                     (Degradation::DecodedBlockTwin, twins_blocks(&device, pf)),
+                    (
+                        Degradation::CarriedDecodedTwin,
+                        twins_carried(&device, pf)[0],
+                    ),
+                    (
+                        Degradation::DecodedTexelPrecision,
+                        twins_carried(&device, pf)[1],
+                    ),
                     (
                         Degradation::CompressedTexelDecode,
                         decodes_blocks_its_way(&device, pf),

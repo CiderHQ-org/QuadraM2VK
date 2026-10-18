@@ -123,7 +123,7 @@ use ash::vk::Handle;
 use decoded_twin::{Decoded, PassScratch};
 use first_move::{FirstMove, Fresh, Keep, Pattern, Patterned, TexelCopy, PATTERN_BYTES};
 use heap_tiled::{FreshDepth, FreshPattern};
-use metal2vulkan::bind::{ImageViewDesc, TextureFacts};
+use metal2vulkan::bind::{AstcDecode, EtcDecode, ImageViewDesc, PvrtcDecode, TextureFacts};
 use metal2vulkan::device::{
     DeviceDescription, DeviceProfile, DriverFact, FormatSupport, VkFeature,
 };
@@ -221,6 +221,9 @@ pub(super) struct TextureState {
     pub(super) first_moves: first_move::FirstMoves,
     /// The decoded twins' CPU decodes and the thread that runs them (`texture/twin_decode.rs`).
     pub(super) twin_decodes: twin_decode::TwinDecodes,
+    /// The decodes queued for ASTC carriers' second decoded twins, which the device's next batch
+    /// with work records (`texture/decoded_twin.rs`).
+    pub(super) second_decodes: decoded_twin::SecondDecodes,
 }
 
 impl TextureState {
@@ -252,6 +255,7 @@ impl TextureState {
             storage_forms: storage_form::StorageForms::default(),
             first_moves: first_move::FirstMoves::default(),
             twin_decodes: twin_decode::TwinDecodes::default(),
+            second_decodes: Mutex::new(Vec::new()),
         }
     }
 
@@ -483,8 +487,12 @@ struct Image {
     twin: Option<Box<Image>>,
     /// The image's decoded twin (`texture/decoded_twin.rs`): a BC1 to BC5 image's texels as
     /// Metal decodes them, which its sampled views present, on a device whose driver is not
-    /// measured to decode them so.
+    /// measured to decode them so; an ASTC or PVRTC carrier's.
     decoded: Option<Box<Decoded>>,
+    /// An ASTC carrier's second decoded twin (`texture/decoded_twin.rs`): its blocks' decode in
+    /// the texture's other colour space (its LDR form's for an sRGB texture, its sRGB form's for
+    /// an LDR one), made at the first view of the texture in that form.
+    second: OnceLock<Box<Decoded>>,
     /// The storage form a fetched render target's image may take once (`texture/storage_form.rs`).
     form: storage_form::Form,
     /// Whether a blit wrote bytes outside the image's texels, which Metal's blit of a two-plane
@@ -1084,11 +1092,13 @@ impl Image {
         self.device.shared().textures.first_moves.register(fresh);
     }
 
-    /// Whether its move, or its depth twin's or its decoded twin's, waits for a submission.
+    /// Whether its move, or its depth twin's or one of its decoded twins', waits for a
+    /// submission.
     fn move_waits(&self) -> bool {
         lock(&self.first_move).is_some()
             || (self.twin.as_ref()).is_some_and(|twin| lock(&twin.first_move).is_some())
             || (self.decoded.as_ref()).is_some_and(|d| lock(&d.image.first_move).is_some())
+            || (self.second.get()).is_some_and(|d| lock(&d.image.first_move).is_some())
     }
 
     /// Make its move now where it waits, by an internal submission waited for: for a `VkImage`
@@ -1274,20 +1284,23 @@ impl Fresh for Image {
                 .take()
                 .filter(|first| twin.holds(first.image))
         });
-        let decoded = (self.decoded.as_ref()).and_then(|decoded| {
-            lock(&decoded.image.first_move)
-                .take()
-                .filter(|first| decoded.image.holds(first.image))
-        });
+        let decoded = (self.decoded.as_deref().into_iter())
+            .chain(self.second.get().map(Box::as_ref))
+            .filter_map(|decoded| {
+                lock(&decoded.image.first_move)
+                    .take()
+                    .filter(|first| decoded.image.holds(first.image))
+            });
         own.into_iter().chain(twin).chain(decoded).collect()
     }
 
     fn give_back(&self, moves: Vec<FirstMove>) {
         for first in moves {
             let twin = (self.twin.as_deref()).filter(|twin| twin.raw.get() == first.image);
-            let decoded = (self.decoded.as_deref())
+            let decoded = (self.decoded.as_deref().into_iter())
+                .chain(self.second.get().map(Box::as_ref))
                 .map(|decoded| &decoded.image)
-                .filter(|decoded| decoded.raw.get() == first.image);
+                .find(|decoded| decoded.raw.get() == first.image);
             let image = twin.or(decoded).unwrap_or(self);
             // A rebind may have swapped another `VkImage` in meanwhile, whose move it noted.
             if image.holds(first.image) {
@@ -1630,6 +1643,14 @@ impl Device {
             // A depth twin would need its own memory bound alike.
             return Err(Error::NotImplemented(RuntimeGap::SparseHeaps));
         }
+        // An ASTC, ETC2, EAC or 4:2:2 carrier's samples read a decoded twin, which tiles GPU
+        // commands map would leave behind (`astc.rs`, `etc.rs`, `chroma_pairs.rs`).
+        if super::astc::decode_of(&plan).is_some()
+            || super::etc::decode_of(&plan).is_some()
+            || super::chroma_pairs::decode_of(&plan).is_some()
+        {
+            return Err(Error::NotImplemented(RuntimeGap::DecodedHeapTexture));
+        }
         let mask: vk::ImageAspectFlags = image_aspects(plan.format).into();
         let [width, height, depth] = layout.extent;
         let shape = SparseShape {
@@ -1771,6 +1792,7 @@ impl Device {
             resolves: KeptResolves::new(),
             twin: None,
             decoded: None,
+            second: OnceLock::new(),
             form: Default::default(),
             kept_outside: AtomicBool::new(false),
             signed_depth: AtomicBool::new(false),
@@ -1897,6 +1919,7 @@ impl Device {
             resolves: KeptResolves::new(),
             twin: None,
             decoded: None,
+            second: OnceLock::new(),
             form: Default::default(),
             kept_outside: AtomicBool::new(false),
             signed_depth: AtomicBool::new(false),
@@ -2517,6 +2540,7 @@ impl Device {
             resolves: KeptResolves::new(),
             twin: None,
             decoded: None,
+            second: OnceLock::new(),
             form: Default::default(),
             kept_outside: AtomicBool::new(false),
             signed_depth: AtomicBool::new(false),
@@ -2861,6 +2885,7 @@ impl Device {
             resolves: KeptResolves::new(),
             twin: None,
             decoded: None,
+            second: OnceLock::new(),
             form: Default::default(),
             kept_outside: AtomicBool::new(false),
             signed_depth: AtomicBool::new(false),
@@ -3692,6 +3717,7 @@ impl Device {
             resolves: KeptResolves::new(),
             twin: None,
             decoded: None,
+            second: OnceLock::new(),
             form: Default::default(),
             kept_outside: AtomicBool::new(false),
             signed_depth: AtomicBool::new(false),
@@ -5714,6 +5740,32 @@ impl Texture {
                 Problem::TextureView(ViewProblem::BufferSlices),
             ));
         }
+        // A carrier's decoded twin holds its own blocks' decode alone: a view of another decode
+        // (an ASTC format's HDR form or another footprint, another PVRTC block, an EAC 11-bit
+        // format's other signedness) reads no twin (`astc.rs`, `pvrtc.rs`, `etc.rs`; a PVRTC,
+        // ETC2 or EAC format's sRGB form's codes are its linear form's). A view of an ASTC
+        // texture in its other colour space reads the carrier's second twin, made now where it
+        // has none (`texture/decoded_twin.rs`).
+        if let Storage::Image(image) = &self.0.storage {
+            let truth = view_shadow::truth(image);
+            let pf = record.pixel_format;
+            let astc = super::astc::decode_of(truth.plan()).map(|held| (held, AstcDecode::of(pf)));
+            let other_space = matches!(astc, Some((held, Some(view)))
+                if view.srgb != held.srgb && [view.width, view.height] == [held.width, held.height]);
+            let astc = astc.is_some_and(|(held, view)| view != Some(held)) && !other_space;
+            let pvrtc = super::pvrtc::decode_of(truth.plan())
+                .is_some_and(|held| PvrtcDecode::of(pf).map(PvrtcDecode::linear) != Some(held));
+            let etc = super::etc::decode_of(truth.plan())
+                .is_some_and(|held| EtcDecode::of(pf) != Some(held));
+            if astc || pvrtc || etc {
+                return Err(Error::Unsupported(Unsupported::not_implemented(
+                    Feature::TextureView,
+                )));
+            }
+            if other_space {
+                truth.make_second_twin(pf)?;
+            }
+        }
         // A view shares its texture's storage: its image, its buffer's bytes, and a shadowed
         // texture's copies, so its uses are its texture's. Where the image takes no Vulkan view
         // of the view's format (the device reinterprets no image's components, or the texture's
@@ -5909,7 +5961,8 @@ impl Texture {
             if firsts.register_texels(keeper, staged) {
                 truth.submit_copy(|_, _| {})?;
             }
-            return Ok(());
+            // An ASTC carrier's second twin's decode, for the next batch, after the copy.
+            return truth.queue_second_decode(regions);
         }
         let mut staging = Staging::new(device, host.packed_len())?;
         host.pack(bytes, staging.bytes());
@@ -5944,7 +5997,9 @@ impl Texture {
                 // SAFETY: as above; the pass lives until the submission, waited for, completed.
                 unsafe { decode.record(raw, command_buffer) };
             }
-        })
+        })?;
+        // An ASTC carrier's second twin's decode, for the next batch.
+        truth.queue_second_decode(std::slice::from_ref(&image_region))
     }
 
     /// `getBytes:bytesPerRow:bytesPerImage:fromRegion:mipmapLevel:slice:`: read `region` of
@@ -6250,9 +6305,12 @@ impl Texture {
                 return Err(Error::NotImplemented(RuntimeGap::PvrtcBlockOrder));
             }
         }
-        // A 2-bit PVRTC texture's carrier halves its regions' x (`pvrtc.rs`).
+        // A 2-bit PVRTC texture's carrier halves its regions' x (`pvrtc.rs`); an ASTC texture's
+        // carrier holds each block in 4 x 4 of its texels (`astc.rs`).
         let planned = match &self.0.storage {
-            Storage::Image(image) if holds_blocks(image.plan()) => {
+            Storage::Image(image)
+                if holds_blocks(image.plan()) || super::astc::decode_of(image.plan()).is_some() =>
+            {
                 image_region(image.plan(), planned)
             }
             _ => planned,

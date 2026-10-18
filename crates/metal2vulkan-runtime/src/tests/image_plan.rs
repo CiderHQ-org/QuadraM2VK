@@ -221,10 +221,17 @@ fn check_plan(
     }
     // `PixelFormatView` and `Unknown` take any compatible format; a PVRTC texture's carrier
     // has no other view (`pvrtc.rs`).
-    // A 4:2:2 texture's carrier likewise (`chroma_pairs.rs`).
+    // A 4:2:2 texture's carrier likewise (`chroma_pairs.rs`), and an ASTC texture's, whose
+    // sampled views present its decoded twin (`astc.rs`), as a PVRTC texture's do, and an ETC2
+    // or EAC texture's (`etc.rs`).
+    let astc = super::super::astc::decode_of(plan).is_some();
+    let etc = super::super::etc::decode_of(plan).is_some();
+    let carried = astc || etc || holds_blocks(plan) || holds_pairs(plan);
     if (unknown || usage.contains(TextureUsage::PIXEL_FORMAT_VIEW))
         && !holds_blocks(plan)
         && !holds_pairs(plan)
+        && !astc
+        && !etc
     {
         assert!(mutable && plan.view_formats.is_empty(), "{what}");
     }
@@ -239,6 +246,11 @@ fn check_plan(
             ImageUsageFlags::COLOR_ATTACHMENT | ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
         ),
     ] {
+        // An ASTC, PVRTC, ETC2, EAC or 4:2:2 carrier's reads are its decoded twin's.
+        if carried && bit == TextureUsage::SHADER_READ {
+            assert!(!plan.unavailable.contains(bit), "{what}");
+            continue;
+        }
         if usage.contains(bit) {
             assert!(
                 plan.usage.intersects(flags) != plan.unavailable.contains(bit),
@@ -1400,7 +1412,8 @@ fn extended_range_textures_hold_their_bytes_raw() {
 }
 
 /// A PVRTC texture a device has no format for holds its blocks in the first carrier the device
-/// copies, for copies alone: every usage a shader or a pass needs is unavailable. A 4-bit
+/// copies, which copies alone reach: its reads are its decoded twin's, so no usage it asks for is
+/// unavailable (none a shader write or a pass needs is asked for here). A 4-bit
 /// texture's image is the texture's extent; a 2-bit texture's is half as wide, rounded up, its 8
 /// x 4 blocks each over 4 x 4 carrier texels. A device with `VK_IMG_format_pvrtc` keeps its RGBA
 /// formats' own images, 2- and 4-bit; no device refuses a PVRTC format where a carrier copies.
@@ -1456,7 +1469,7 @@ fn a_pvrtc_texture_without_a_format_holds_its_blocks_in_a_carrier() {
                 ImageUsageFlags::TRANSFER_SRC | ImageUsageFlags::TRANSFER_DST,
                 "{what}"
             );
-            assert_eq!(plan.unavailable, TextureUsage::SHADER_READ, "{what}");
+            assert_eq!(plan.unavailable, TextureUsage::empty(), "{what}");
             check_plan(&name, pf, usage, &plan, &facts);
             // A cube's carrier holds its faces as layers, of no create flags: no view of it is
             // made, and a 2-bit one's half-width carrier is no square.
@@ -1476,6 +1489,75 @@ fn a_pvrtc_texture_without_a_format_holds_its_blocks_in_a_carrier() {
         }
     }
     assert!(carried >= 40, "{carried}");
+}
+
+/// An ETC2 or EAC texture a device has no format for holds its blocks in the first carrier of
+/// its blocks' bytes the device copies (`etc.rs`): of the texture's extent, levels and layers
+/// (a cube's faces as layers, of no create flags), which copies alone reach, its reads its
+/// decoded twin's. A device with the formats keeps each texture's own image.
+#[test]
+fn an_etc_texture_without_a_format_holds_its_blocks_in_a_carrier() {
+    use super::super::etc::{decode_of, CARRIERS_16, CARRIERS_8};
+    use metal2vulkan::bind::EtcDecode;
+    let mut carried = 0;
+    for (name, desc, device) in committed() {
+        let facts = facts(&desc, &device);
+        let copies = FormatFeatureFlags2::TRANSFER_SRC | FormatFeatureFlags2::TRANSFER_DST;
+        for &pf in PixelFormat::ALL {
+            let Some(decode) = EtcDecode::of(pf) else {
+                continue;
+            };
+            let what = format!("{name} {pf:?}");
+            let usage = TextureUsage::SHADER_READ | TextureUsage::PIXEL_FORMAT_VIEW;
+            let mut l = layout(TextureType::Type2D, pf, 1, 1);
+            l.extent = [20, 12, 1];
+            l.levels = 3;
+            let sampled = vk_format(pf, &[FormatUsage::SampledImage].into(), device.profile());
+            let plan = plan_image(&l, usage, false, &facts);
+            // A device that samples neither the format nor its twin's view refuses it.
+            let Ok(sampled) = sampled else {
+                assert!(plan.is_err(), "{what}");
+                continue;
+            };
+            if sampled.emulation == metal2vulkan::metal::format::FormatEmulation::Direct {
+                let plan = plan.expect(&what);
+                assert_eq!(decode_of(&plan), None, "{what}");
+                continue;
+            }
+            let carriers: &[Format] = match decode.block_bytes() {
+                8 => &CARRIERS_8,
+                _ => &CARRIERS_16,
+            };
+            let Some(&carrier) = carriers
+                .iter()
+                .find(|&&f| facts.optimal(f).contains(copies))
+            else {
+                assert!(plan.is_err(), "{what}");
+                continue;
+            };
+            let plan = plan.expect(&what);
+            carried += 1;
+            assert_eq!(decode_of(&plan), Some(decode), "{what}");
+            assert_eq!(plan.format, carrier, "{what}");
+            assert_eq!((plan.extent, plan.levels), ([20, 12, 1], 3), "{what}");
+            assert_eq!(
+                plan.usage,
+                ImageUsageFlags::TRANSFER_SRC | ImageUsageFlags::TRANSFER_DST,
+                "{what}"
+            );
+            assert_eq!(plan.unavailable, TextureUsage::empty(), "{what}");
+            check_plan(&name, pf, usage, &plan, &facts);
+            let mut l = layout(TextureType::Cube, pf, 1, 1);
+            l.extent = [16, 16, 1];
+            let plan = plan_image(&l, usage, false, &facts).expect(&what);
+            assert_eq!(decode_of(&plan), Some(decode), "{what} cube");
+            assert_eq!(plan.flags, ImageCreateFlags::empty(), "{what} cube");
+            assert_eq!((plan.extent, plan.layers), ([16, 16, 1], 6), "{what} cube");
+            check_plan(&name, pf, usage, &plan, &facts);
+        }
+    }
+    // Ten formats on each committed profile without ETC2 (lavapipe, RADV, NVIDIA).
+    assert!(carried >= 50, "{carried}");
 }
 
 /// Each level of a 2-bit PVRTC texture's half-width carrier holds the blocks the texture's level
@@ -1544,11 +1626,17 @@ fn a_two_bit_pvrtc_carrier_holds_each_level_s_blocks() {
     }
 }
 
-/// A 4:2:2 texture holds its 2-byte texels in an `R8G8_UNORM` image of its extent, for copies
-/// alone, on every committed profile (each copies the format): every usage a shader or a pass
-/// needs is unavailable, whatever its storage and usage.
+/// A 4:2:2 texture holds its 2-byte texels in an `R8G8_UNORM` image of its extent, for copies, on
+/// every committed profile (each copies the format), its reads and samples its decoded twin's:
+/// every other usage a shader or a pass needs is unavailable, whatever its storage and usage. Its
+/// twin is an `R8G8B8A8_UNORM` image of the texture's extent and level, its copies' unit an
+/// `RGBA8Unorm` texel, and its decode the format's.
 #[test]
 fn a_four_two_two_texture_holds_its_texels_in_a_carrier() {
+    use super::super::chroma_pairs::decode_of;
+    use super::super::texture::copy_units;
+    use super::super::texture::decoded_twin::{twin_plan, TwinDecode};
+    use metal2vulkan::bind::ChromaDecode;
     let mut carried = 0;
     for (name, desc, device) in committed() {
         let facts = facts(&desc, &device);
@@ -1574,13 +1662,24 @@ fn a_four_two_two_texture_holds_its_texels_in_a_carrier() {
                 );
                 assert_eq!(
                     plan.unavailable,
-                    effective_usage(usage).intersection(
-                        TextureUsage::SHADER_READ
-                            | TextureUsage::SHADER_WRITE
-                            | TextureUsage::RENDER_TARGET
-                    ),
+                    effective_usage(usage)
+                        .intersection(TextureUsage::SHADER_WRITE | TextureUsage::RENDER_TARGET),
                     "{what}"
                 );
+                let decode = decode_of(&plan).expect(&what);
+                assert_eq!(Some(decode), ChromaDecode::of(pf), "{what}");
+                for routed in [false, true] {
+                    let twin = twin_plan(&plan, &l, TwinDecode::Chroma(decode), routed);
+                    assert_eq!(
+                        (twin.pixel_format, twin.format),
+                        (PixelFormat::RGBA8Unorm, Format::R8G8B8A8_UNORM),
+                        "{what}"
+                    );
+                    let unit = (ImageAspectFlags::COLOR, 4, [1, 1]);
+                    assert_eq!(copy_units(twin.format, twin.pixel_format), [unit], "{what}");
+                    assert!(twin.usage.contains(ImageUsageFlags::SAMPLED), "{what}");
+                    assert_eq!((twin.extent, twin.levels), ([18, 6, 1], 1), "{what}");
+                }
                 check_plan(&name, pf, usage, &plan, &facts);
                 carried += 1;
             }
@@ -1713,7 +1812,7 @@ fn padded_formats_are_held_only_over_given_memory() {
 #[test]
 fn decoded_twins_are_planned_in_their_texels_format() {
     use super::super::texture::copy_units;
-    use super::super::texture::decoded_twin::twin_plan;
+    use super::super::texture::decoded_twin::{twin_plan, TwinDecode};
     use metal2vulkan::bind::BlockDecode;
     let both = ImageUsageFlags::TRANSFER_SRC | ImageUsageFlags::TRANSFER_DST;
     let mut planned = 0;
@@ -1738,7 +1837,7 @@ fn decoded_twins_are_planned_in_their_texels_format() {
             };
             planned += 1;
             for routed in [false, true] {
-                let twin = twin_plan(&plan, decode, routed);
+                let twin = twin_plan(&plan, &l, TwinDecode::Block(decode), routed);
                 let what = format!("{name}: {pf:?}, routed {routed}");
                 assert_eq!(
                     (twin.pixel_format, twin.format),
@@ -1760,13 +1859,17 @@ fn decoded_twins_are_planned_in_their_texels_format() {
 /// A decode pass's bands of a region cover each of its texels once, and each band's blocks and
 /// texels take at most the budget together, so a pass in the device's decode scratch
 /// (`PassScratch::Device`, of the budget and an alignment) holds any band; only a single block
-/// row of one image past the budget is a band alone. Regions of every decode, square and
-/// narrow, of sides off a multiple of 4, of layers and of depth slices, under the band budget
-/// and two small ones that make them band.
+/// row of one image past the budget is a band alone. Regions of BC decodes, of ASTC ones
+/// (blocks of 12 x 10 and 4 x 4, texels of 16 and 4 bytes), PVRTC ones, ETC2 and EAC ones
+/// (texels of 2, 8 and 4 bytes) and 4:2:2 ones (pairs of 2 x 1), square and narrow, of sides off a
+/// multiple of the block, of layers and of depth slices, under the band budget and two small ones
+/// that make them band.
 #[test]
 fn decode_bands_cover_each_texel_once_within_the_budget() {
-    use super::super::texture::decoded_twin::{bands, BAND_BYTES};
-    use metal2vulkan::bind::BlockDecode;
+    use super::super::texture::decoded_twin::{bands, TwinDecode, BAND_BYTES};
+    use metal2vulkan::bind::{
+        AstcDecode, AstcTexels, BlockDecode, ChromaDecode, EtcDecode, EtcTexels, PvrtcDecode,
+    };
     let shapes: [([u32; 3], u32); 7] = [
         ([2048, 2048, 1], 1),
         ([16384, 16, 1], 1),
@@ -1776,11 +1879,26 @@ fn decode_bands_cover_each_texel_once_within_the_budget() {
         ([64, 64, 32], 1),
         ([3, 1, 1], 1),
     ];
-    for decode in [BlockDecode::Bc1, BlockDecode::Bc3, BlockDecode::Bc5Unorm] {
+    let astc = |pf| AstcDecode::of(pf).expect("an ASTC decode");
+    let decodes = [
+        TwinDecode::Block(BlockDecode::Bc1),
+        TwinDecode::Block(BlockDecode::Bc3),
+        TwinDecode::Block(BlockDecode::Bc5Unorm),
+        TwinDecode::Astc(astc(PixelFormat::ASTC12x10LDR), AstcTexels::Float),
+        TwinDecode::Astc(astc(PixelFormat::ASTC4x4SRGB), AstcTexels::Unorm8),
+        TwinDecode::Pvrtc(PvrtcDecode::of(PixelFormat::PVRTCRGBA2BPP).expect("a PVRTC decode")),
+        TwinDecode::Pvrtc(PvrtcDecode::of(PixelFormat::PVRTCRGB4BPP).expect("a PVRTC decode")),
+        TwinDecode::Etc(EtcDecode::R11Unorm, EtcTexels::Compact),
+        TwinDecode::Etc(EtcDecode::Rg11Snorm, EtcTexels::Float),
+        TwinDecode::Etc(EtcDecode::Rgba8, EtcTexels::Compact),
+        TwinDecode::Chroma(ChromaDecode::Gbgr),
+    ];
+    for decode in decodes {
         let (texel, block) = (
             u64::from(decode.texel_bytes()),
             u64::from(decode.block_bytes()),
         );
+        let [bw, bh] = decode.block_extent().map(u64::from);
         for (size, layers) in shapes {
             for most in [BAND_BYTES, 1 << 20, 64 << 10] {
                 let region = ImageRegion {
@@ -1793,11 +1911,16 @@ fn decode_bands_cover_each_texel_once_within_the_budget() {
                 };
                 let what = format!("{decode:?} {size:?} x{layers} in {most}");
                 let mut covered = std::collections::BTreeMap::new();
-                for band in bands(&region, texel, block, most) {
+                for band in bands(&region, decode, most) {
                     let [w, h, d] = band.size.map(u64::from);
-                    let bytes = w.div_ceil(4) * h.div_ceil(4) * d * u64::from(band.layers) * block
+                    // A whole-level decode's band reads all its images' blocks, of any rows.
+                    let (block_rows, row) = match decode.whole_levels() {
+                        true => (u64::from(size[1]).div_ceil(bh), 1),
+                        false => (h.div_ceil(bh), bh),
+                    };
+                    let bytes = w.div_ceil(bw) * block_rows * d * u64::from(band.layers) * block
                         + w * h * d * u64::from(band.layers) * texel;
-                    let one_row = band.size[1] <= 4 && d * u64::from(band.layers) == 1;
+                    let one_row = h <= row && d * u64::from(band.layers) == 1;
                     assert!(bytes <= most || one_row, "{what}: {band:?} takes {bytes}");
                     assert_eq!(band.size[0], size[0], "{what}");
                     assert_eq!(band.origin[0], region.origin[0], "{what}");
@@ -1819,4 +1942,79 @@ fn decode_bands_cover_each_texel_once_within_the_budget() {
             }
         }
     }
+}
+
+/// On every committed device without ASTC, every ASTC LDR format's texture, of every usage Metal
+/// takes, holds its blocks in a carrier (`astc.rs`) whose every level keeps the blocks the
+/// texture's level holds, at sides no multiple of the block too: a whole level's region (and one
+/// starting at its second block) maps to the carrier's region of the same blocks, inside the
+/// carrier's level, and back. A profile that lists no carrier's copies refuses the texture: the
+/// decoded twin's view holds no blocks.
+#[test]
+fn astc_carriers_hold_each_level_s_blocks() {
+    use super::super::astc::{decode_of, texture_region, CARRIERS as ASTC_CARRIERS};
+    use metal2vulkan::bind::AstcDecode;
+    use metal2vulkan::metal::format::FormatEmulation;
+    let mut carried = 0;
+    for (name, desc, device) in committed() {
+        let facts = facts(&desc, &device);
+        let profile = device.profile();
+        for &pf in PixelFormat::ALL {
+            let Some(decode) = AstcDecode::of(pf) else {
+                continue;
+            };
+            let sampled = vk_format(pf, &[FormatUsage::SampledImage].into(), profile);
+            if sampled.map(|m| m.emulation) != Ok(FormatEmulation::Decoded) {
+                continue;
+            }
+            let [bw, bh] = decode.block_extent();
+            let copies = FormatFeatureFlags2::TRANSFER_SRC | FormatFeatureFlags2::TRANSFER_DST;
+            let carriers = (ASTC_CARRIERS.iter()).any(|&f| facts.optimal(f).contains(copies));
+            for (width, height) in [(1, 1), (7, 3), (16, 16), (37, 23), (100, 257)] {
+                let what = format!("{name} {pf:?} {width}x{height}");
+                let mut l = layout(TextureType::Type2D, pf, 1, 1);
+                l.extent = [width, height, 1];
+                l.levels = width.max(height).ilog2() + 1;
+                let usage = TextureUsage::SHADER_READ
+                    | TextureUsage::SHADER_WRITE
+                    | TextureUsage::RENDER_TARGET;
+                let planned = plan_image(&l, usage, false, &facts);
+                if !carriers {
+                    assert!(planned.is_err(), "{what}: {planned:?}");
+                    continue;
+                }
+                let plan = planned.expect(&what);
+                assert_eq!(decode_of(&plan), Some(decode), "{what}");
+                assert!(ASTC_CARRIERS.contains(&plan.format), "{what}");
+                carried += 1;
+                for level in 0..l.levels {
+                    let [w, h] = [width, height].map(|side| (side >> level).max(1));
+                    let carrier = [0, 1].map(|axis| (plan.extent[axis] >> level).max(1));
+                    let blocks = [w.div_ceil(bw), h.div_ceil(bh)];
+                    assert!(carrier[0].div_ceil(4) >= blocks[0], "{what} level {level}");
+                    assert!(carrier[1].div_ceil(4) >= blocks[1], "{what} level {level}");
+                    let starts = [(0, 0), (bw.min(w - 1) / bw * bw, 0)];
+                    for (x, y) in starts {
+                        let region = ImageRegion {
+                            aspect: ImageAspectFlags::COLOR,
+                            level,
+                            layer: 0,
+                            layers: 1,
+                            origin: [x, y, 0],
+                            size: [w - x, h - y, 1],
+                        };
+                        let image = image_region(&plan, region);
+                        let end = [0, 1].map(|axis| image.origin[axis] + image.size[axis]);
+                        assert!(end[0] <= carrier[0] && end[1] <= carrier[1], "{what}");
+                        let across = image.size[0].div_ceil(4);
+                        assert_eq!(across, (w - x).div_ceil(bw), "{what} level {level}");
+                        assert_eq!(image.size[1].div_ceil(4), blocks[1], "{what}");
+                        let back = texture_region(&plan, l.extent, image);
+                        assert_eq!(back, Some(region), "{what} level {level} at {x}");
+                    }
+                }
+            }
+        }
+    }
+    assert!(carried > 0, "no committed device holds ASTC in a carrier");
 }

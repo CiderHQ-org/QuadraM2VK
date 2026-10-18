@@ -58,10 +58,10 @@ pub struct DevicePolicy {
     /// attachment in the device's blend (the default) or in Metal's `half` arithmetic, which the
     /// function computes in the shader.
     pub half_blend: HalfBlendPolicy,
-    /// Whether a texture over a buffer whose rows (or slices) lie with bytes between them, and
-    /// which only reads (its usage holds no `RenderTarget`, `ShaderWrite`, `ShaderAtomic` or block
-    /// writes), is an image over the buffer's bytes at Metal's row pitch (the default) or the
-    /// runtime's shadow of them, copied in before each use. The runtime's choice alone: no
+    /// Whether a texture whose format the device lacks, held in a carrier (an ASTC LDR texture,
+    /// or an EAC 11-bit one), samples a decoded twin of compact codes (the default) or of Metal's
+    /// values exactly. The runtime's choice alone: no emitted code changes.
+    pub decoded_texels: DecodedTexelsPolicy,
     /// emitted code changes.
     pub padded_reads: PaddedReadsPolicy,
 }
@@ -89,7 +89,7 @@ impl DevicePolicy {
         nan_and_min_max: NanMinMaxPolicy::Native,
         rounding_order: RoundingOrderPolicy::Native,
         half_blend: HalfBlendPolicy::Device,
-        padded_reads: PaddedReadsPolicy::Alias,
+        decoded_texels: DecodedTexelsPolicy::Compact,
     };
 
     /// This policy with Metal's answer wherever the choices offer it: its maths functions,
@@ -110,7 +110,7 @@ impl DevicePolicy {
             nan_and_min_max: NanMinMaxPolicy::Exact,
             rounding_order: RoundingOrderPolicy::Exact,
             half_blend: HalfBlendPolicy::Exact,
-            padded_reads: PaddedReadsPolicy::Shadow,
+            decoded_texels: DecodedTexelsPolicy::Exact,
             ..self
         }
     }
@@ -387,31 +387,29 @@ pub enum HalfBlendPolicy {
     Exact,
 }
 
-/// How the runtime makes a texture over a buffer whose rows (or an array's slices) lie with bytes
-/// between them that are not its texels (a guest browser's padded surfaces), and which only reads:
-/// its usage, as Metal reports it (`Unknown` reads as `ShaderRead | ShaderWrite | RenderTarget |
-/// PixelFormatView`), holds no `RenderTarget`, `ShaderWrite`, `ShaderAtomic` or block writes.
-/// Metal never writes those bytes. A render target, or a texture a shader writes, is a shadow
-/// under either value: a render pass's load and store operations may write back any byte of an
-/// attachment's subresource.
+/// What texels the runtime holds in the decoded twin of a texture whose blocks it holds in a
+/// carrier on a device without the format (the runtime's `texture/decoded_twin.rs`), which the
+/// texture's samples, reads and gathers read: an ASTC LDR texture's (`bind::AstcDecode`), and an
+/// EAC 11-bit texture's (`bind::EtcDecode`). Metal reads an ASTC LDR channel as a 12-bit value,
+/// `(C >> 4) / 4095` of the decode's 16-bit result, which no 8- or 16-bit texel holds; it reads
+/// an EAC 11-bit channel as `c / 2047` (signed `c / 1023`), which no 16-bit normalized code
+/// holds. (An ASTC sRGB texture's twin holds the 8-bit codes `C >> 8` under either, which its
+/// slots read raw and decode through Metal's table, exact; so does a PVRTC texture's twin, and an
+/// 8-bit ETC2 or EAC texture's.) The runtime's choice alone: no emitted code changes.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum PaddedReadsPolicy {
-    /// An image over the buffer's bytes at Metal's row pitch, as a texture whose rows lie one
-    /// after another has (the default): the device's own linear image, a `DRM_FORMAT_MOD_LINEAR`
-    /// image at that pitch, or one over a dma-buf of the pages, holding the bytes between the
-    /// rows in its subresource. After its first move every command uses it in `GENERAL`, and
-    /// copies and shader reads touch its texels alone; the first move, a layout transition, "may
-    /// perform read and write accesses on all memory bound to the image subresource range"
-    /// (Vulkan's Image Layout Transitions), and from `UNDEFINED` may discard it. So the runtime
-    /// keeps the bytes the image is bound to, the bytes between the rows among them, on the host
-    /// across that move; a CPU write to them meanwhile is undone (docs/FAST-PATHS.md, its known
-    /// gaps).
+pub enum DecodedTexelsPolicy {
+    /// Compact texels (the default): an ASTC LDR texture's `R8G8B8A8_UNORM` codes, 4 bytes a
+    /// texel, each channel the code nearest Metal's value, at most `1/510` off it. An EAC 11-bit
+    /// texture's 16-bit normalized codes (`R16_UNORM`, `R16_SNORM` and their two-channel forms),
+    /// 2 bytes a channel, each nearest Metal's value, at most half a 16-bit step off it.
+    /// Announced `decoded-texel-precision` where such a texture is made.
     #[default]
-    Alias,
-    /// The runtime's shadow image of the texels, copied in from the buffer before each use: the
-    /// copies address the texels alone, so no byte between the rows is ever read or written
-    /// through an image.
-    Shadow,
+    Compact,
+    /// Metal's values exactly, an ASTC LDR texture's in `R32G32B32A32_SFLOAT`, 16 bytes a texel
+    /// (an EAC 11-bit texture's in `R32_SFLOAT` or `R32G32_SFLOAT`, 4 bytes a channel), where the
+    /// device samples, filters and copies into the format (else the compact texels, announced).
+    Exact,
+}
 }

@@ -280,8 +280,8 @@ pub(crate) fn fit(shape: &TextureShape, class: &ImageHandleClass) -> Fit {
             false => Fit::No,
         };
     }
-    // A resident texture of a format the table holds no representation of (PVRTC blocks held for
-    // copies) fits no class: its element is the neutral, and nothing is refused, since the heap
+    // A resident texture of a format the table holds no representation of (ASTC's 4x2 and 8x4
+    // footprints) fits no class: its element is the neutral, and nothing is refused, since the heap
     // does not know which of its textures the function reads.
     match sampled_type(pixel_format) {
         _ if !shaped => Fit::No,

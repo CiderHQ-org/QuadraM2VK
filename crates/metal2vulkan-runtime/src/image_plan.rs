@@ -607,6 +607,15 @@ fn plan_held(
         if let Some(plan) = plan_blocks(layout, usage, facts) {
             return Ok(plan);
         }
+        // An ASTC texture the device has no block for holds its blocks in a carrier, sampled
+        // through a decoded twin (`astc.rs`).
+        if let Some(plan) = super::astc::plan_blocks(layout, usage, facts) {
+            return Ok(plan);
+        }
+        // So does an ETC2 or EAC texture on a device without the formats (`etc.rs`).
+        if let Some(plan) = super::etc::plan_blocks(layout, usage, facts) {
+            return Ok(plan);
+        }
         // A 4:2:2 texture holds its texels in a carrier (`chroma_pairs.rs`).
         if let Some(plan) = plan_pairs(layout, usage, facts) {
             return Ok(plan);
@@ -728,8 +737,13 @@ fn plan_held(
         // one.
         _ => any,
     };
-    if mapping.emulation == FormatEmulation::DepthWidened {
-        // 24-bit depth held as 32-bit float depth is not exact: the texture needs its own format.
+    // 24-bit depth held as 32-bit float depth is not exact, and an ASTC, PVRTC, ETC2 or EAC
+    // format's decoded twin's view holds no blocks (a memoryless texture, or a device with no
+    // carrier, `astc.rs`, `pvrtc.rs`, `etc.rs`): the texture needs its own format.
+    if matches!(
+        mapping.emulation,
+        FormatEmulation::DepthWidened | FormatEmulation::Decoded
+    ) {
         return Err(ImageRefusal::Unsupported(Unsupported::needs(
             Feature::Format,
             Capability::Format {
@@ -1034,6 +1048,15 @@ pub(super) fn takes_views_of(plan: &ImagePlan, pf: PixelFormat, profile: &Device
                 && (plan.view_formats.is_empty() || plan.view_formats.contains(&format))
                 && compatible(plan.format, format, true))
     })
+}
+
+/// The cube compatibility a sampled image of a texture of `layout` takes: a cube's, and a square
+/// 2D array's of six layers or more ([`cube_compatible`]), which a cube view may present.
+pub(super) fn cube_flags(layout: &TextureLayout) -> ImageCreateFlags {
+    match cube_compatible(layout) {
+        true => ImageCreateFlags::CUBE_COMPATIBLE,
+        false => ImageCreateFlags::empty(),
+    }
 }
 
 /// Whether the image of `layout` is cube-compatible: a cube or cube array, or a square 2D array

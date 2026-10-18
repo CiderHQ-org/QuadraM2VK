@@ -20,8 +20,8 @@
 //!
 //! **Kept in step.** After every write into the BC image (`replace_region`, staged or submitted
 //! now; a blit from a buffer, `fillTexture` included; a copy from a texture), the written region
-//! is decoded into the twin by `bind::block_decode_module` ([`DecodePass`]): its blocks copied
-//! into a scratch buffer, decoded, and the texels copied into the twin, in bands of whole block
+//! is decoded into the twin by the decode's kernel (`TwinDecode::module`; [`DecodePass`]): its
+//! blocks copied into a scratch buffer, decoded, and the texels copied into the twin, in bands of whole block
 //! rows of at most [`BAND_BYTES`] of blocks and texels, which bound the scratch: the pass's own,
 //! or for a pass the device's next submission takes, the device's ([`PassScratch`]). A new
 //! texture's twin starts as its zero blocks decode (the zeros: BC1 opaque black, every other format
@@ -30,7 +30,7 @@
 //!
 //! **Host writes decode on the CPU** (off the caller's thread). A `replace_region` whose blocks go
 //! on the host or the staging queue queues the region's decode on the CPU
-//! (`BlockDecode::decode_into`, the kernel's rules) for the device's decode thread, which copies
+//! (`TwinDecode::decode_into`, the kernel's rules) for the device's decode thread, which copies
 //! its texels into the twin the same way ([`Image::decode_written`], `twin_decode.rs`, announced
 //! `cpu-block-decode`). A batch that may read the texture waits at its submission for that; one
 //! submitted before the call and not yet complete makes the call wait for its decode, so it reads
@@ -43,6 +43,59 @@
 //! (`decode_twin`) is the caller's command's, and covers only what it wrote, as Metal's write of
 //! those texels would.
 //!
+//! **ASTC** (`astc.rs`): on a device without a texture's ASTC LDR format its blocks lie in a
+//! carrier image and its twin holds Metal's decode in the texels `DevicePolicy::decoded_texels` names
+//! (`TwinDecode::Astc`; an sRGB form's 8-bit codes under either, which its slots read raw and
+//! decode through Metal's table), kept in step as a BC image's twin is (`bind::astc_decode_module`
+//! on the GPU, `AstcDecode::decode_into` on the CPU): a pass's bands are of the texture's texels,
+//! each band's blocks copied out of the carrier's texels over them. A new one's zero blocks read
+//! magenta (an error block).
+//!
+//! **An ASTC texture's other colour space.** Metal views an ASTC texture as its `_sRGB` or LDR
+//! form over the same blocks, whatever its usage, and the view reads what a texture of its own
+//! format over those blocks reads (our probe on an M3 Max, macOS 27.0.1: reads and linear samples
+//! bit for bit, footprints 4x4, 6x5 and 12x12). The two forms widen the endpoints apart
+//! (`bind::AstcDecode`), so neither's texels follow from the other's: the first view of the
+//! texture in its other colour space makes the carrier a second twin ([`Image::make_second_twin`]),
+//! of that form's decode in the texels the policy names, in memory of its own, which the CPU
+//! never writes. Its decodes are the GPU's, each recorded by a batch's submission
+//! ([`SecondDecode`]): its whole decode as it is made, and a host write's, queued for the
+//! device's next batch with work, which records them before its work, their uses joined to its
+//! first part's, so the tracker orders them after earlier writes of the texture
+//! ([`Device::take_second_decodes`]); a blit's write's, made as the blit is encoded where the
+//! twin is there then, recorded by its batch after the blit's encoder ([`TwinWrite`]). A write
+//! encoded before the twin was made has no decode: its batch leaves the texture's queued decodes,
+//! the whole decode among them, to a later batch, which reads the carrier as the write left it.
+//! Without a second twin a submission records nothing for such writes (counted:
+//! `WorkCounts::second_twins`, `second_twin_checks`, `second_twin_decodes`).
+//!
+//! **PVRTC** (`pvrtc.rs`): on a device without a texture's PVRTC format its blocks lie in a
+//! carrier too, and its twin holds their codes (`TwinDecode::Pvrtc`, `R8G8B8A8_UNORM`; an sRGB
+//! form's slots read them raw and decode them through Metal's table), which serve the views of the
+//! format's linear and sRGB forms alike. Each texel's colors come from the four blocks around it,
+//! wrapping at the level's edges, so a write's decode is of whole levels (`twin_region`): on the
+//! GPU (`bind::pvrtc_decode_module`), each band of a level's rows with all of its blocks, or a
+//! host write's on the CPU (`PvrtcDecode::decode_rows`), a host write being of whole levels. A new
+//! one's zero blocks read transparent black (an RGB format's opaque).
+//!
+//! **ETC2 and EAC** (`etc.rs`): on a device without the formats their blocks lie in a carrier of
+//! the texture's shape, and the twin holds Metal's decode (`TwinDecode::Etc`): an 8-bit format's
+//! codes (`R8G8B8A8_UNORM`; an sRGB form's slots read them raw and decode them through Metal's
+//! table), which serve the views of its linear and sRGB forms alike, and an 11-bit format's texels
+//! `DevicePolicy::decoded_texels` names (`bind::EtcTexels`). Each is kept in step as a BC image's
+//! twin is (`bind::etc_decode_module` on the GPU, `EtcDecode::decode_into` on the CPU). A new
+//! one's zero blocks read grey of codes 2 (`ETC2_RGB8`, and `EAC_RGBA8`'s colour, its alpha 0),
+//! opaque black (`RGB8A1`), or an 11-bit value of 1 (signed -3), not zeros: the twin starts
+//! cleared to them.
+//!
+//! **4:2:2** (`chroma_pairs.rs`): a `GBGR422` or `BGRG422` texture's texels lie in a carrier of
+//! 2 bytes a texel, the texture's shape, and its twin holds Metal's texels (`TwinDecode::Chroma`,
+//! `R8G8B8A8_UNORM` codes, exact), kept in step as an ETC2 texture's twin is
+//! (`bind::chroma_decode_module` on the GPU, `ChromaDecode::decode_into` on the CPU). A texel's red
+//! and blue read the pair beside it, so a write's decode is of whole rows (`twin_region`; a host
+//! write of part of a row decodes its rows as the carrier then holds them, read back first). A new
+//! one's zero pairs read opaque black: the twin starts cleared to it.
+//!
 //! **Without a twin**, announced `compressed-texel-decode` as before: a texture over the caller's
 //! host pages or laid out apart from a heap's bytes (tiled, shadowed), a sparse texture, a
 //! texture over an IOSurface or the caller's image, one whose twin's format the device lacks;
@@ -53,14 +106,18 @@
 //! after each write. A `VkImage` handed out (`Texture::vk_image`) is the BC image: what the
 //! caller writes into it outside the runtime's calls leaves the twin as it was.
 
+use super::super::astc;
 use super::super::blit::{BlitCommandEncoder, TRANSFER};
+use super::super::chroma_pairs;
 use super::super::copy_plan::ImageRegion;
 use super::super::degradation::Degradation;
 use super::super::device::{lock, DebugMessage, MessageKind, MessageSeverity};
 use super::super::error::{internal, Error};
+use super::super::etc;
 use super::super::exit_guard::{self, Call};
 use super::super::image_plan::ImagePlan;
 use super::super::owned_kernel::{OwnedModule, OwnedSets};
+use super::super::pvrtc;
 use super::super::resource::Identity;
 use super::super::resource::ResourceKey;
 use super::super::texture_descriptor::{TextureDescriptor, TextureLayout};
@@ -76,26 +133,206 @@ use super::{
 };
 use crate::device::functions::Vk;
 use ash::vk;
-use metal2vulkan::bind::{BlockDecode, BlockDecodeModule, ImageViewDesc};
+use metal2vulkan::bind::{
+    AstcDecode, AstcTexels, BlockDecode, BlockDecodeModule, ChromaDecode, EtcDecode, EtcTexels,
+    ImageViewDesc, PvrtcDecode,
+};
+use metal2vulkan::device::DecodedTexelsPolicy;
+use metal2vulkan::device::FormatUsage;
+use metal2vulkan::error::{Capability, Feature, Unsupported};
 use metal2vulkan::metal::format::FormatMapping;
+use metal2vulkan::metal::PixelFormat;
 use metal2vulkan::vk::{
     Format, FormatFeatureFlags2, ImageAspectFlags, ImageCreateFlags, ImageType, ImageUsageFlags,
 };
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex, Weak};
+
+/// What a decoded twin's format must take on the device: sampling, its linear filter and copies
+/// into it.
+const TWIN_FEATURES: FormatFeatureFlags2 = FormatFeatureFlags2::SAMPLED_IMAGE
+    .union(FormatFeatureFlags2::SAMPLED_IMAGE_FILTER_LINEAR)
+    .union(FormatFeatureFlags2::TRANSFER_DST);
 
 /// The most bytes of texels one band of a decode pass holds: its scratch's texels (and fewer
 /// blocks), within `maxStorageBufferRange`.
 pub(crate) const BAND_BYTES: u64 = 32 << 20;
 
-/// A BC1 to BC5 image's decoded twin (the module docs).
+/// How a decoded twin's blocks decode: a BC1 to BC5 format's (`BlockDecode`), an ASTC LDR
+/// format's held in a carrier (`astc.rs`) into the texels the device's policy names, a PVRTC
+/// format's held in a carrier (`pvrtc.rs`) into its codes (its linear form's decode, which its
+/// sRGB form's is too), an ETC2 or EAC format's held in a carrier (`etc.rs`) into its codes or
+/// an 11-bit format's texels the policy names (its unorm form's decode, which its sRGB form's is
+/// too), or a 4:2:2 format's pairs held in a carrier (`chroma_pairs.rs`) into its codes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum TwinDecode {
+    Block(BlockDecode),
+    Astc(AstcDecode, AstcTexels),
+    Pvrtc(PvrtcDecode),
+    Etc(EtcDecode, EtcTexels),
+    Chroma(ChromaDecode),
+}
+
+impl TwinDecode {
+    /// The texels across and down of a block.
+    pub(crate) fn block_extent(self) -> [u32; 2] {
+        match self {
+            TwinDecode::Block(_) => [4, 4],
+            TwinDecode::Astc(decode, _) => decode.block_extent(),
+            TwinDecode::Pvrtc(decode) => decode.block_extent(),
+            TwinDecode::Etc(decode, _) => decode.block_extent(),
+            TwinDecode::Chroma(decode) => decode.block_extent(),
+        }
+    }
+
+    /// Whether a write's decode is of whole levels: a PVRTC texel's colors come from the blocks
+    /// around it, wrapping at the level's edges.
+    pub(crate) fn whole_levels(self) -> bool {
+        matches!(self, TwinDecode::Pvrtc(_))
+    }
+
+    /// Whether a write's decode is of whole rows: a 4:2:2 texel's red and blue read the pair
+    /// beside it.
+    pub(crate) fn whole_rows(self) -> bool {
+        matches!(self, TwinDecode::Chroma(_))
+    }
+
+    /// The bytes of a block.
+    pub(crate) fn block_bytes(self) -> u32 {
+        match self {
+            TwinDecode::Block(decode) => decode.block_bytes(),
+            TwinDecode::Astc(..) => AstcDecode::BLOCK_BYTES,
+            TwinDecode::Pvrtc(_) => PvrtcDecode::BLOCK_BYTES,
+            TwinDecode::Etc(decode, _) => decode.block_bytes(),
+            TwinDecode::Chroma(_) => ChromaDecode::BLOCK_BYTES,
+        }
+    }
+
+    /// The bytes of a decoded texel.
+    pub(crate) fn texel_bytes(self) -> u32 {
+        match self {
+            TwinDecode::Block(decode) => decode.texel_bytes(),
+            TwinDecode::Astc(_, texels) => AstcDecode::texel_bytes(texels),
+            TwinDecode::Pvrtc(_) => PvrtcDecode::TEXEL_BYTES,
+            TwinDecode::Etc(decode, texels) => decode.texel_bytes(texels),
+            TwinDecode::Chroma(_) => ChromaDecode::TEXEL_BYTES,
+        }
+    }
+
+    /// The Vulkan format of the decoded texels.
+    pub(crate) fn texel_format(self) -> Format {
+        match self {
+            TwinDecode::Block(decode) => decode.texel_format(),
+            TwinDecode::Astc(decode, texels) => decode.texel_format(texels),
+            TwinDecode::Pvrtc(decode) => decode.texel_format(),
+            TwinDecode::Etc(decode, texels) => decode.texel_format(texels),
+            TwinDecode::Chroma(decode) => decode.texel_format(),
+        }
+    }
+
+    /// The Metal pixel format whose texels the decoded ones are.
+    fn texel_pixel_format(self) -> PixelFormat {
+        match self {
+            TwinDecode::Block(decode) => decode.texel_pixel_format(),
+            TwinDecode::Astc(decode, texels) => decode.texel_pixel_format(texels),
+            TwinDecode::Pvrtc(decode) => decode.texel_pixel_format(),
+            TwinDecode::Etc(decode, texels) => decode.texel_pixel_format(texels),
+            TwinDecode::Chroma(decode) => decode.texel_pixel_format(),
+        }
+    }
+
+    /// The decode of a texture of `pf`, whose texels it decodes as the twin's: the same BC
+    /// decode, the same ASTC format (an sRGB form is another decode), the same PVRTC, ETC2 or
+    /// EAC blocks (an sRGB form's codes are its linear form's), or the same 4:2:2 pairs.
+    fn decodes(self, pf: PixelFormat) -> bool {
+        match self {
+            TwinDecode::Block(decode) => BlockDecode::of(pf) == Some(decode),
+            TwinDecode::Astc(decode, _) => AstcDecode::of(pf) == Some(decode),
+            TwinDecode::Pvrtc(decode) => {
+                PvrtcDecode::of(pf).map(PvrtcDecode::linear) == Some(decode)
+            }
+            TwinDecode::Etc(decode, _) => EtcDecode::of(pf) == Some(decode),
+            TwinDecode::Chroma(decode) => ChromaDecode::of(pf) == Some(decode),
+        }
+    }
+
+    /// [`decode_into`](Self::decode_into) into a new buffer.
+    pub(crate) fn decode(self, blocks: &[u8], size: [u32; 3]) -> Vec<u8> {
+        let [width, height, depth] = size.map(|axis| axis as usize);
+        let mut texels = vec![0; width * height * depth * self.texel_bytes() as usize];
+        self.decode_into(blocks, size, &mut texels);
+        texels
+    }
+
+    /// The texels of a region `size` whose `blocks` lie as a copy of the region out of the
+    /// blocks' image lays them, into `texels`, laid out as a copy into the twin reads them (a
+    /// PVRTC region's images whole levels, [`whole_levels`](Self::whole_levels)).
+    pub(crate) fn decode_into(self, blocks: &[u8], size: [u32; 3], texels: &mut [u8]) {
+        match self {
+            TwinDecode::Block(decode) => decode.decode_into(blocks, size, texels),
+            TwinDecode::Astc(decode, form) => decode.decode_into(form, blocks, size, texels),
+            TwinDecode::Pvrtc(decode) => texels.copy_from_slice(&decode.decode(blocks, size)),
+            TwinDecode::Etc(decode, form) => decode.decode_into(form, blocks, size, texels),
+            TwinDecode::Chroma(decode) => decode.decode_into(blocks, size, texels),
+        }
+    }
+
+    /// The texels of rows `first` to `first + rows` of one image `width` x `height` of a region
+    /// whose `blocks` (all of the image's) lie as for [`decode_into`](Self::decode_into), into
+    /// `texels`: a block decode's rows start at a block row (`first` a multiple of the block's
+    /// height); a PVRTC image's rows read all its blocks.
+    pub(crate) fn decode_rows(
+        self,
+        blocks: &[u8],
+        [width, height]: [u32; 2],
+        [first, rows]: [u32; 2],
+        texels: &mut [u8],
+    ) {
+        if let TwinDecode::Pvrtc(decode) = self {
+            decode.decode_rows(blocks, [width, height], [first, rows], texels);
+            return;
+        }
+        let [bw, bh] = self.block_extent();
+        let row = (width.div_ceil(bw) * self.block_bytes()) as usize;
+        let at = (first / bh) as usize * row;
+        self.decode_into(&blocks[at..], [width, rows, 1], texels);
+    }
+
+    /// The module of `device` whose dispatch decodes its blocks into the twin's texels on the
+    /// GPU ([`Image::decode_pass`]), each decode's own kernel on `BlockDecodeModule`'s bindings:
+    /// `bind::block_decode_module`'s, `bind::astc_decode_module`'s, `bind::etc_decode_module`'s
+    /// and `bind::chroma_decode_module`'s of its shape, `bind::pvrtc_decode_module`'s of
+    /// `PvrtcDecode::shape`.
+    pub(crate) fn module(
+        self,
+        device: &metal2vulkan::device::Device,
+    ) -> Result<BlockDecodeModule, metal2vulkan::error::Error> {
+        match self {
+            TwinDecode::Block(decode) => metal2vulkan::bind::block_decode_module(device, decode),
+            TwinDecode::Astc(decode, texels) => {
+                metal2vulkan::bind::astc_decode_module(device, decode, texels)
+            }
+            TwinDecode::Pvrtc(decode) => metal2vulkan::bind::pvrtc_decode_module(device, decode),
+            TwinDecode::Etc(decode, texels) => {
+                metal2vulkan::bind::etc_decode_module(device, decode, texels)
+            }
+            TwinDecode::Chroma(decode) => metal2vulkan::bind::chroma_decode_module(device, decode),
+        }
+    }
+}
+
+/// A BC1 to BC5 image's, or an ASTC, PVRTC, ETC2, EAC or 4:2:2 carrier's, decoded twin (the
+/// module docs).
 pub(super) struct Decoded {
-    /// The twin: `decode`'s texels, of the BC image's shape, levels and layers.
+    /// The twin: `decode`'s texels, of the texture's shape, levels and layers.
     pub(super) image: Image,
-    /// How the BC image's blocks decode.
-    pub(super) decode: BlockDecode,
+    /// How the blocks decode.
+    pub(super) decode: TwinDecode,
     /// It was made moved alone (`Start::Moved`): its texels start as the CPU's decode of the zero
     /// blocks, written as the texture is made ([`Texture::start_decoded_twin`]).
     started_on_the_cpu: bool,
+    /// The layout and descriptor of the texture it was made for, by which an ASTC carrier's
+    /// second twin is made ([`Image::make_second_twin`]).
+    made_for: (TextureLayout, TextureDescriptor),
 }
 
 impl Decoded {
@@ -105,7 +342,30 @@ impl Decoded {
     fn view_format(&self, format: Format) -> Option<Format> {
         use BlockDecode as D;
         use Format as F;
-        match (self.decode, format) {
+        // An ASTC texture's binding views name its candidate's 8-bit format (its `_sRGB` form's
+        // `R8G8B8A8_SRGB`, or its raw view `R8G8B8A8_UNORM`, whose codes its twin holds): the
+        // twin's own view of it, or an LDR twin's exact values.
+        // A PVRTC texture's name the same formats, and the twin holds their codes; so does an
+        // ETC2 or EAC 8-bit format's, and an 11-bit one's name its compact texels' format. A
+        // 4:2:2 texture's name the codes' `R8G8B8A8_UNORM` alone (it has no sRGB form).
+        let named = matches!(format, F::R8G8B8A8_UNORM | F::R8G8B8A8_SRGB);
+        let decode = match self.decode {
+            TwinDecode::Block(decode) => decode,
+            TwinDecode::Astc(_, texels) => {
+                return named.then_some(match texels {
+                    AstcTexels::Unorm8 => format,
+                    _ => self.decode.texel_format(),
+                });
+            }
+            TwinDecode::Pvrtc(_) => return named.then_some(format),
+            TwinDecode::Etc(etc, texels) if etc.eleven_bit() => {
+                let compact = etc.texel_format(EtcTexels::Compact);
+                return (format == compact).then_some(etc.texel_format(texels));
+            }
+            TwinDecode::Etc(..) => return named.then_some(format),
+            TwinDecode::Chroma(_) => return (format == F::R8G8B8A8_UNORM).then_some(format),
+        };
+        match (decode, format) {
             (D::Bc1, F::BC1_RGBA_SRGB_BLOCK)
             | (D::Bc2, F::BC2_SRGB_BLOCK)
             | (D::Bc3, F::BC3_SRGB_BLOCK) => Some(F::R8G8B8A8_SRGB),
@@ -115,7 +375,7 @@ impl Decoded {
             | (D::Bc4Unorm, F::BC4_UNORM_BLOCK)
             | (D::Bc4Snorm, F::BC4_SNORM_BLOCK)
             | (D::Bc5Unorm, F::BC5_UNORM_BLOCK)
-            | (D::Bc5Snorm, F::BC5_SNORM_BLOCK) => Some(self.decode.texel_format()),
+            | (D::Bc5Snorm, F::BC5_SNORM_BLOCK) => Some(decode.texel_format()),
             _ => None,
         }
     }
@@ -129,12 +389,13 @@ impl Decoded {
     fn bytes(&self) -> (u64, u64) {
         let plan = self.image.plan();
         let decode = self.decode;
+        let [bw, bh] = decode.block_extent().map(u64::from);
         (0..plan.levels)
             .map(|level| {
                 let [w, h, d] = plan.extent.map(|axis| u64::from((axis >> level).max(1)));
                 let layers = u64::from(plan.layers);
                 let texels = w * h * d * layers * u64::from(decode.texel_bytes());
-                let blocks = w.div_ceil(4) * h.div_ceil(4) * d * layers;
+                let blocks = w.div_ceil(bw) * h.div_ceil(bh) * d * layers;
                 (texels, blocks * u64::from(decode.block_bytes()))
             })
             .fold((0, 0), |(t, b), (texels, blocks)| (t + texels, b + blocks))
@@ -149,21 +410,35 @@ fn placed(image: &Image) -> Option<u64> {
     }
 }
 
-/// The plan of the decoded twin of a BC image of `plan` whose blocks decode by `decode`: the
-/// image's type, shape, levels, layers and cube compatibility, of the decoded texels' format
-/// (mutable for an sRGB view of BC1 to BC3's codes; `BlockDecode::texel_pixel_format`'s), sampled
-/// and copied into. `routed`: the BC image's CPU copies go on the host or the staging queue, which
-/// the twin starts on and takes the CPU's decodes through ([`Image::decode_written`]), copied both
-/// ways as the staging queue's images are (`Device::stages`).
-pub(crate) fn twin_plan(plan: &ImagePlan, decode: BlockDecode, routed: bool) -> ImagePlan {
+/// The plan of the decoded twin of the blocks' image of `plan`, a texture of `layout`, whose
+/// blocks decode by `decode`: the texture's type, shape (its extent, which an ASTC carrier's is
+/// not), levels, layers and cube compatibility, of the decoded texels' format (mutable for an sRGB
+/// view of 8-bit codes; `TwinDecode::texel_pixel_format`'s), sampled and copied into. `routed`:
+/// the blocks' CPU copies go on the host or the staging queue, which the twin starts on and takes
+/// the CPU's decodes through ([`Image::decode_written`]), copied both ways as the staging queue's
+/// images are (`Device::stages`).
+pub(crate) fn twin_plan(
+    plan: &ImagePlan,
+    layout: &TextureLayout,
+    decode: TwinDecode,
+    routed: bool,
+) -> ImagePlan {
     let format = decode.texel_format();
+    // A cube texture's twin is cube compatible, as its image would be (a carrier is not).
     let kept = ImageCreateFlags::CUBE_COMPATIBLE | ImageCreateFlags::CREATE_2D_ARRAY_COMPATIBLE;
+    let wanted = match decode {
+        TwinDecode::Block(_) => plan.flags & kept,
+        TwinDecode::Astc(..)
+        | TwinDecode::Pvrtc(_)
+        | TwinDecode::Etc(..)
+        | TwinDecode::Chroma(_) => super::super::image_plan::cube_flags(layout),
+    };
     let (flags, view_formats) = match format {
         Format::R8G8B8A8_UNORM => (
-            (plan.flags & kept) | ImageCreateFlags::MUTABLE_FORMAT,
+            wanted | ImageCreateFlags::MUTABLE_FORMAT,
             vec![Format::R8G8B8A8_UNORM, Format::R8G8B8A8_SRGB],
         ),
-        _ => (plan.flags & kept, Vec::new()),
+        _ => (wanted, Vec::new()),
     };
     let copies = match routed {
         true => ImageUsageFlags::TRANSFER_SRC | ImageUsageFlags::TRANSFER_DST,
@@ -175,7 +450,7 @@ pub(crate) fn twin_plan(plan: &ImagePlan, decode: BlockDecode, routed: bool) -> 
         flags,
         image_type: plan.image_type,
         format,
-        extent: plan.extent,
+        extent: layout.extent,
         levels: plan.levels,
         layers: plan.layers,
         samples: plan.samples,
@@ -196,6 +471,76 @@ impl Device {
         (!measured && layout.samples == 1).then_some(decode)
     }
 
+    /// The texels of the decoded twin of an ASTC texture of `decode` on this device: an sRGB
+    /// form's 8-bit codes either way, which its slots read raw and decode through Metal's table,
+    /// exactly (`metal::texel_format::srgb_raw_on`); an LDR form's Metal's exact values where
+    /// `DevicePolicy::decoded_texels` asks for them and the device samples, filters and copies
+    /// into their format, else 8-bit codes. Refused where the device does not even take the
+    /// codes' format so (no conformant device).
+    fn astc_texels(&self, decode: AstcDecode) -> Result<AstcTexels, Error> {
+        let facts = self
+            .shared()
+            .textures
+            .facts(self.compile_device().profile());
+        let takes = |texels: AstcTexels| {
+            facts
+                .optimal(decode.texel_format(texels))
+                .contains(TWIN_FEATURES)
+        };
+        let wanted = match self.compile_device().policy().decoded_texels {
+            DecodedTexelsPolicy::Exact if !decode.srgb => AstcTexels::Float,
+            _ => AstcTexels::Unorm8,
+        };
+        [wanted, AstcTexels::Unorm8]
+            .into_iter()
+            .find(|&texels| takes(texels))
+            .ok_or_else(|| {
+                Error::Unsupported(Unsupported::needs(
+                    Feature::Format,
+                    Capability::Format {
+                        format: decode.texel_format(AstcTexels::Unorm8),
+                        usage: FormatUsage::SampledImageFilterLinear,
+                    },
+                ))
+            })
+    }
+
+    /// The texels of the decoded twin of an ETC2 or EAC texture of `decode` on this device: an
+    /// 8-bit format's codes either way; an 11-bit format's values exactly where
+    /// `DevicePolicy::decoded_texels` asks for them, else 16-bit normalized codes, each where the
+    /// device samples, filters and copies into their format, else the other. Refused where the
+    /// device takes neither so.
+    fn etc_texels(&self, decode: EtcDecode) -> Result<EtcTexels, Error> {
+        if !decode.eleven_bit() {
+            return Ok(EtcTexels::Compact);
+        }
+        let facts = self
+            .shared()
+            .textures
+            .facts(self.compile_device().profile());
+        let takes = |texels: EtcTexels| {
+            facts
+                .optimal(decode.texel_format(texels))
+                .contains(TWIN_FEATURES)
+        };
+        let order = match self.compile_device().policy().decoded_texels {
+            DecodedTexelsPolicy::Exact => [EtcTexels::Float, EtcTexels::Compact],
+            _ => [EtcTexels::Compact, EtcTexels::Float],
+        };
+        order
+            .into_iter()
+            .find(|&texels| takes(texels))
+            .ok_or_else(|| {
+                Error::Unsupported(Unsupported::needs(
+                    Feature::Format,
+                    Capability::Format {
+                        format: decode.texel_format(order[0]),
+                        usage: FormatUsage::SampledImageFilterLinear,
+                    },
+                ))
+            })
+    }
+
     /// `image`, a new texture's image of `layout` made with `descriptor`, its own for good, with
     /// its decoded twin where the texture takes one (the module docs), announced
     /// (`decoded-block-twin`); without one, `compressed-texel-decode` where the device's decode
@@ -210,23 +555,37 @@ impl Device {
         descriptor: &TextureDescriptor,
         fresh: bool,
     ) -> Result<Image, Error> {
-        let Some(decode) = self.twin_decode(layout) else {
-            self.degrade_block_decode(layout);
-            return Ok(image);
+        // An ASTC, PVRTC, ETC2, EAC or 4:2:2 carrier's texels are read through its twin alone
+        // (`astc.rs`, `pvrtc.rs`, `etc.rs`, `chroma_pairs.rs`).
+        let plan = image.plan();
+        let carried = if let Some(decode) = astc::decode_of(plan) {
+            Some(TwinDecode::Astc(decode, self.astc_texels(decode)?))
+        } else if let Some(decode) = etc::decode_of(plan) {
+            Some(TwinDecode::Etc(decode, self.etc_texels(decode)?))
+        } else {
+            (pvrtc::decode_of(plan).map(TwinDecode::Pvrtc))
+                .or_else(|| chroma_pairs::decode_of(plan).map(TwinDecode::Chroma))
+        };
+        let decode = match carried {
+            Some(decode) => decode,
+            None => match self.twin_decode(layout) {
+                Some(decode) => TwinDecode::Block(decode),
+                None => {
+                    self.degrade_block_decode(layout);
+                    return Ok(image);
+                }
+            },
         };
         // A twin starts, and takes the CPU's decodes, as the BC image's CPU copies go: on the
         // host or the staging queue where they do (then made as a `Shared` or `Managed`
         // texture's image is), else through submissions.
         let routed = image.host_copies || image.staging_copies;
-        let plan = twin_plan(image.plan(), decode, routed);
+        let plan = twin_plan(image.plan(), layout, decode, routed);
         let facts = self
             .shared()
             .textures
             .facts(self.compile_device().profile());
-        let needs = FormatFeatureFlags2::SAMPLED_IMAGE
-            | FormatFeatureFlags2::SAMPLED_IMAGE_FILTER_LINEAR
-            | FormatFeatureFlags2::TRANSFER_DST;
-        if !facts.optimal(plan.format).contains(needs) {
+        if !facts.optimal(plan.format).contains(TWIN_FEATURES) {
             self.degrade_block_decode(layout);
             return Ok(image);
         }
@@ -256,14 +615,12 @@ impl Device {
             image.host_copies = false;
             image.staging_copies = false;
         }
-        // A new BC1 texture's zero blocks are three-color blocks of black, alpha 1; every other
-        // format's decode to zero, which the twin's first move writes.
-        if fresh && decode == BlockDecode::Bc1 && !routed {
+        // A new texture's zero blocks: BC1's three-color blocks of black, alpha 1, an ASTC
+        // texture's error blocks of magenta, a 4:2:2 texture's opaque black; every other format's
+        // decode to zero, which the twin's first move writes.
+        if let Some(color) = zero_clear(decode).filter(|_| fresh && !routed) {
             let plan = twin.plan();
-            let black = vk::ClearColorValue {
-                float32: [0.0, 0.0, 0.0, 1.0],
-            };
-            let patterned = Patterned::new(Pattern::Color(black), plan.levels, plan.levels);
+            let patterned = Patterned::new(Pattern::Color(color), plan.levels, plan.levels);
             let first = FirstMove::new(
                 twin.raw.get(),
                 plan.format,
@@ -276,8 +633,12 @@ impl Device {
             image: twin,
             decode,
             started_on_the_cpu: routed && fresh,
+            made_for: (*layout, *descriptor),
         };
-        self.degrade_decoded_twin(layout, &decoded, placed(&image));
+        match carried {
+            Some(_) => self.degrade_carried_twin(layout, &decoded, placed(&image)),
+            None => self.degrade_decoded_twin(layout, &decoded, placed(&image)),
+        }
         image.decoded = Some(Box::new(decoded));
         Ok(image)
     }
@@ -310,10 +671,62 @@ impl Device {
     }
 }
 
+impl Device {
+    /// Announce, for an ASTC, PVRTC, ETC2 or EAC texture of `layout` made with `decoded`:
+    /// `carried-decoded-twin`, its cost (the twin's texels' bytes and memory beside its blocks'
+    /// carrier), and where an ASTC LDR texture's twin holds 8-bit codes or an 11-bit EAC
+    /// texture's 16-bit ones, `decoded-texel-precision` (a PVRTC texture's codes are exact, and so
+    /// are an ASTC sRGB texture's, an 8-bit ETC2 or EAC texture's and a 4:2:2 texture's).
+    fn degrade_carried_twin(&self, layout: &TextureLayout, decoded: &Decoded, image: Option<u64>) {
+        let [width, height, depth] = layout.extent;
+        let object = || {
+            format!(
+                "a {:?} {:?} texture of {width}x{height}x{depth}",
+                layout.pixel_format, layout.texture_type
+            )
+        };
+        self.degrade(Degradation::CarriedDecodedTwin, || {
+            let (texels, blocks) = decoded.bytes();
+            let placed =
+                |bytes: Option<u64>| bytes.map_or_else(String::new, |n| format!(", {n} placed"));
+            let held = match decoded.decode {
+                TwinDecode::Chroma(_) => "Vulkan's 4:2:2 formats reconstruct chroma by the \
+                                          implementation's rules"
+                    .to_owned(),
+                _ => format!("the device has no {:?} format", layout.pixel_format),
+            };
+            let why = format!(
+                "{held}: its blocks ({blocks} bytes) lie in a carrier image{}, which copies \
+                 move, and its samples read a decoded twin of {texels} bytes of {:?} texels{}, \
+                 decoded after each write into it",
+                placed(image),
+                decoded.decode.texel_format(),
+                placed(decoded.placed()),
+            );
+            (object(), why)
+        });
+        let why = match decoded.decode {
+            TwinDecode::Astc(decode, AstcTexels::Unorm8) if !decode.srgb => {
+                "its decoded twin holds each channel as the 8-bit code nearest Metal's 12-bit \
+                 value, at most 1/510 off it"
+            }
+            TwinDecode::Etc(decode, EtcTexels::Compact) if decode.eleven_bit() => {
+                "its decoded twin holds each channel as the 16-bit normalized code nearest \
+                 Metal's 11-bit value, at most half a 16-bit step off it"
+            }
+            _ => return,
+        };
+        self.degrade(Degradation::DecodedTexelPrecision, || {
+            (object(), why.to_owned())
+        });
+    }
+}
+
 impl Texture {
     /// The `VkImageView` of `desc` (a sampled view; `call`'s) of the texture's decoded twin, where
-    /// its image (`image`) has one and the texture's format decodes as the twin's (the module
-    /// docs): made at its first bind, then kept with the twin. `None` elsewhere (an image with
+    /// its image (`image`) has one whose decode the texture's format takes (the module docs; an
+    /// ASTC carrier's second twin for a view in the texture's other colour space): made at its
+    /// first bind, then kept with the twin. `None` elsewhere (an image with
     /// one presents no stand-in: its detach is refused, `stand_in.rs`).
     pub(super) fn decoded_view(
         &self,
@@ -321,11 +734,10 @@ impl Texture {
         image: &Image,
         desc: &ImageViewDesc,
     ) -> Result<Option<vk::ImageView>, Error> {
-        let Some(decoded) = image.decoded.as_deref() else {
+        let Some(decoded) = image.twin_of(self.0.record.pixel_format) else {
             return Ok(None);
         };
-        let same = BlockDecode::of(self.0.record.pixel_format) == Some(decoded.decode);
-        let Some(format) = decoded.view_format(desc.format).filter(|_| same) else {
+        let Some(format) = decoded.view_format(desc.format) else {
             return Ok(None);
         };
         let mut twin = *desc;
@@ -346,16 +758,17 @@ impl Texture {
         if view_shadow::truth(image).decoded.is_none() {
             return;
         }
-        let decode = BlockDecode::of(record.pixel_format);
-        if image
-            .decoded
-            .as_ref()
-            .is_some_and(|d| Some(d.decode) == decode)
-        {
+        if image.twin_of(record.pixel_format).is_some() {
             return;
         }
         let device = self.device();
         device.degrade_device_decode(record.pixel_format, record.texture_type, record.extent());
+    }
+
+    /// Whether the texture's texels are held in an image with a decoded twin
+    /// ([`decoding_image`](Self::decoding_image)).
+    pub(crate) fn has_decoded_twin(&self) -> bool {
+        self.decoding_image().is_some()
     }
 
     /// The image the texture's texels are held in where it has a decoded twin: its image, or a
@@ -401,14 +814,52 @@ impl Texture {
 
 /// The texel every texel of a zero block decodes to, as `decode` writes it: `None` where they
 /// differ (no format so far), when the zero blocks are decoded instead.
-fn zero_texel(decode: BlockDecode) -> Option<Vec<u8>> {
-    let texels = decode.decode(&vec![0; decode.block_bytes() as usize], [4, 4, 1]);
+fn zero_texel(decode: TwinDecode) -> Option<Vec<u8>> {
+    let [bw, bh] = decode.block_extent();
+    let texels = decode.decode(&vec![0; decode.block_bytes() as usize], [bw, bh, 1]);
     let size = decode.texel_bytes() as usize;
     let first = texels.get(..size)?;
     texels
         .chunks_exact(size)
         .all(|texel| texel == first)
         .then(|| first.to_vec())
+}
+
+/// The clear color of a twin whose zero blocks decode to texels other than zeros: BC1's opaque
+/// black, an ASTC texture's magenta (an error block), an ETC2 texture's grey of codes 2, an EAC
+/// 11-bit texture's value of 1 (signed -3) or its compact code; `None` where they decode to
+/// zeros, which a new image's first move writes. The clear converts each value back to the code
+/// it came from: a normalized code over its largest is within half a step of it.
+fn zero_clear(decode: TwinDecode) -> Option<vk::ClearColorValue> {
+    let texel = zero_texel(decode)?;
+    if texel.iter().all(|&byte| byte == 0) {
+        return None;
+    }
+    let mut float32 = [0.0; 4];
+    match decode.texel_format() {
+        Format::R8G8B8A8_UNORM => {
+            for (value, &code) in float32.iter_mut().zip(&texel) {
+                *value = f32::from(code) / 255.0;
+            }
+        }
+        Format::R32G32B32A32_SFLOAT | Format::R32G32_SFLOAT | Format::R32_SFLOAT => {
+            for (value, bytes) in float32.iter_mut().zip(texel.as_chunks::<4>().0) {
+                *value = f32::from_le_bytes(*bytes);
+            }
+        }
+        Format::R16_UNORM | Format::R16G16_UNORM => {
+            for (value, bytes) in float32.iter_mut().zip(texel.as_chunks::<2>().0) {
+                *value = f32::from(u16::from_le_bytes(*bytes)) / 65535.0;
+            }
+        }
+        Format::R16_SNORM | Format::R16G16_SNORM => {
+            for (value, bytes) in float32.iter_mut().zip(texel.as_chunks::<2>().0) {
+                *value = (f32::from(i16::from_le_bytes(*bytes)) / 32767.0).max(-1.0);
+            }
+        }
+        _ => return None,
+    }
+    Some(vk::ClearColorValue { float32 })
 }
 
 /// The copies of `band`'s texels, laid out tight in rows of `row` bytes, in parts of whole block
@@ -497,7 +948,10 @@ impl Image {
     /// copies stand when it runs, as Metal's unsynchronized CPU write leaves the ordering to the
     /// program. Always on the CPU: a decode staged for the GPU could run while a later write's CPU
     /// decode copies into the twin, read the old blocks before it and write their texels after it
-    /// (lavapipe under a lane's load, master `7d426aff`). Nothing for an image without a twin.
+    /// (lavapipe under a lane's load, master `7d426aff`). An ASTC carrier's second twin's decode
+    /// goes to the device's next batch ([`queue_second_decode`](Self::queue_second_decode)).
+    /// A 4:2:2 carrier's write of part of its rows decodes the whole rows as the image then holds
+    /// them ([`written_rows`](Self::written_rows)). Nothing for an image without a twin.
     pub(super) fn decode_written(
         self: &Arc<Self>,
         region: &ImageRegion,
@@ -507,7 +961,9 @@ impl Image {
             return Ok(());
         };
         let host = decoded.image.takes_host_copies();
-        self.queue_twin_decode(region, Some(packed))?;
+        let (region, packed) = self.written_rows(decoded, region, packed)?;
+        self.queue_twin_decode(&region, Some(packed))?;
+        self.queue_second_decode(std::slice::from_ref(&region))?;
         let device = &self.device;
         let object = || {
             let plan = self.plan();
@@ -530,6 +986,41 @@ impl Image {
             (object(), why)
         });
         Ok(())
+    }
+
+    /// `region` and its blocks `packed`, a host call's write into the image, as its twin's decode
+    /// reads them: for a decode of whole rows ([`TwinDecode::whole_rows`], a 4:2:2 carrier's) of a
+    /// region short of its rows, the rows' region and their bytes as the image holds them after
+    /// the write, read back on the host or the staging queue as the write went (the caller waits
+    /// for that read); else themselves.
+    fn written_rows(
+        &self,
+        decoded: &Decoded,
+        region: &ImageRegion,
+        packed: Vec<u8>,
+    ) -> Result<(ImageRegion, Vec<u8>), Error> {
+        let rows = self.twin_region(decoded, region);
+        if !decoded.decode.whole_rows() || rows == *region {
+            return Ok((*region, packed));
+        }
+        let decode = decoded.decode;
+        let [bw, bh] = decode.block_extent();
+        let [width, height, depth] = rows.size.map(|axis| axis as usize);
+        let image = width.div_ceil(bw as usize)
+            * height.div_ceil(bh as usize)
+            * decode.block_bytes() as usize;
+        let mut bytes = vec![0; image * depth * rows.layers as usize];
+        let copy = buffer_image_copy(&rows);
+        let read = match self.takes_host_copies() {
+            true => self.host_read(copy, &mut bytes)?,
+            false => self.staging_read(copy, &mut bytes)?,
+        };
+        if !read {
+            return Err(internal(
+                "a 4:2:2 texture's rows that took no CPU copy its write took",
+            ));
+        }
+        Ok((rows, bytes))
     }
 
     /// Queue the decode of `region` into the image's twin for the device's decode thread
@@ -631,22 +1122,32 @@ impl Image {
         let decode = decoded.decode;
         let block = decode.block_bytes() as usize;
         let texel = decode.texel_bytes() as usize;
+        // The twin's region: a carrier's region in the texture's texels (a PVRTC one's whole
+        // levels, a 4:2:2 one's whole rows, whose blocks `decode_written` read).
+        let region = &self.twin_region(decoded, region);
+        let [bw, bh] = decode.block_extent();
         let [width, height, depth] = region.size;
-        let (across, down) = (width.div_ceil(4) as usize, height.div_ceil(4) as usize);
-        // Block rows a band, each 4 texel rows of `width`.
-        let rows = (twin_decode::BAND_BYTES / (4 * width as usize * texel)).max(1);
+        let image_blocks = width.div_ceil(bw) as usize * height.div_ceil(bh) as usize * block;
+        // Texel rows a band, of `width` texels: whole block rows, but for a whole-level decode,
+        // each of whose bands reads all its image's blocks.
+        let fit = u32::try_from(twin_decode::BAND_BYTES / (width as usize * texel))
+            .unwrap_or(u32::MAX)
+            .max(1);
+        let rows = match decode.whole_levels() {
+            true => fit,
+            false => (fit / bh).max(1) * bh,
+        };
         let fill = blocks.is_none().then(|| zero_texel(decode));
         for image in 0..depth * region.layers {
-            for first in (0..down).step_by(rows) {
-                let count = rows.min(down - first);
-                let y = first as u32 * 4;
-                let h = (count as u32 * 4).min(height - y);
+            for y in (0..height).step_by(rows as usize) {
+                let h = rows.min(height - y);
                 let mut texels = vec![0; width as usize * h as usize * texel];
                 match (blocks, &fill) {
                     (Some(blocks), _) => {
-                        let at = (image as usize * down + first) * across * block;
-                        let band = &blocks[at..at + count * across * block];
-                        twin_decode::decode_band(decode, band, [width, h], &mut texels);
+                        let at = image as usize * image_blocks;
+                        let image = &blocks[at..at + image_blocks];
+                        let size = [width, height];
+                        twin_decode::decode_band(decode, image, size, [y, h], &mut texels);
                     }
                     (None, Some(Some(texel))) => {
                         for out in texels.chunks_exact_mut(texel.len()) {
@@ -654,8 +1155,9 @@ impl Image {
                         }
                     }
                     (None, _) => {
-                        let zeros = vec![0; count * across * block];
-                        twin_decode::decode_band(decode, &zeros, [width, h], &mut texels);
+                        let zeros = vec![0; image_blocks];
+                        let size = [width, height];
+                        twin_decode::decode_band(decode, &zeros, size, [y, h], &mut texels);
                     }
                 }
                 let band = band_region(region, image, y, h);
@@ -677,46 +1179,127 @@ impl Image {
         Ok(host)
     }
 
-    /// The pass that decodes `regions` (of the image's levels and layers) of the image into its
-    /// decoded twin (the module docs), its scratch (as `scratch` says) and sets made; `None` for an
-    /// image without one, or regions of no texel.
+    /// The twin's region of `region` of the image: a PVRTC carrier's whole levels of the
+    /// region's images, whose texels each write changes around it ([`TwinDecode::whole_levels`]);
+    /// a 4:2:2 carrier's whole rows of the region ([`TwinDecode::whole_rows`]); an ASTC carrier's
+    /// region in the texture's texels (`astc::texture_region`); any other image's itself.
+    fn twin_region(&self, decoded: &Decoded, region: &ImageRegion) -> ImageRegion {
+        let extent = decoded.image.plan().extent;
+        let level = |axis: usize| (extent[axis] >> region.level.min(31)).max(1);
+        if decoded.decode.whole_levels() {
+            return ImageRegion {
+                origin: [0, 0, region.origin[2]],
+                size: [level(0), level(1), region.size[2]],
+                ..*region
+            };
+        }
+        if decoded.decode.whole_rows() {
+            return ImageRegion {
+                origin: [0, region.origin[1], region.origin[2]],
+                size: [level(0), region.size[1], region.size[2]],
+                ..*region
+            };
+        }
+        astc::texture_region(self.plan(), extent, *region).unwrap_or(*region)
+    }
+
+    /// The plan of the step of a decode pass that decodes `band` (of the twin's texels, one of
+    /// [`bands`]): the image's region its blocks are copied out of and their bytes, its shape and
+    /// its workgroups. A PVRTC band's blocks are its images' whole levels' (`pvrtc::image_region`
+    /// of them), its shape `PvrtcDecode::shape`; any other band's blocks lie over it (an ASTC
+    /// carrier's region over it, `astc::image_region`).
+    fn band_plan(&self, decode: TwinDecode, band: &ImageRegion) -> BandPlan {
+        let [w, h, _] = band.size;
+        let images = band.size[2] * band.layers;
+        let local = BlockDecodeModule::LOCAL_SIZE;
+        let groups = [w.div_ceil(local), h.div_ceil(local), images];
+        if let TwinDecode::Pvrtc(pvrtc) = decode {
+            let height = (self.decoded_extent(1) >> band.level.min(31)).max(1);
+            let whole = ImageRegion {
+                origin: [0, 0, band.origin[2]],
+                size: [w, height, band.size[2]],
+                ..*band
+            };
+            return BandPlan {
+                blocks: pvrtc::image_region(self.plan(), whole),
+                block_bytes: (pvrtc.level_bytes([w, height]) * images as usize) as u64,
+                shape: PvrtcDecode::shape([w, height], [band.origin[1], h], images),
+                groups,
+            };
+        }
+        let [bw, bh] = decode.block_extent();
+        let blocks = u64::from(w.div_ceil(bw)) * u64::from(h.div_ceil(bh)) * u64::from(images);
+        BandPlan {
+            blocks: astc::image_region(self.plan(), *band).unwrap_or(*band),
+            block_bytes: blocks * u64::from(decode.block_bytes()),
+            shape: BlockDecodeModule::shape([w, h, images]),
+            groups,
+        }
+    }
+
+    /// The decoded twin's level-0 extent along `axis` (the texture's), 1 for an image without one.
+    fn decoded_extent(&self, axis: usize) -> u32 {
+        self.decoded
+            .as_deref()
+            .map_or(1, |decoded| decoded.image.plan().extent[axis])
+    }
+
+    /// The pass that decodes `regions` (of the image's levels and layers, in its texels: a
+    /// carrier's) of the image into its decoded twin (the module docs), its scratch (as `scratch`
+    /// says) and sets made; `None` for an image without one, or regions of no texel. Its steps are
+    /// bands of the twin's regions (a carrier's in the texture's texels, a PVRTC one's whole
+    /// levels, `twin_region`), each band's blocks copied out of the image's region over them (a
+    /// PVRTC band's, its images' whole levels; [`band_plan`](Self::band_plan)).
     pub(super) fn decode_pass(
         &self,
         regions: &[ImageRegion],
         scratch: PassScratch,
     ) -> Result<Option<DecodePass>, Error> {
-        let Some(decoded) = self.decoded.as_deref() else {
-            return Ok(None);
-        };
+        match self.decoded.as_deref() {
+            Some(decoded) => self.decode_pass_into(decoded, regions, scratch),
+            None => Ok(None),
+        }
+    }
+
+    /// [`decode_pass`](Self::decode_pass) into `decoded`, one of the image's twins.
+    fn decode_pass_into(
+        &self,
+        decoded: &Decoded,
+        regions: &[ImageRegion],
+        scratch: PassScratch,
+    ) -> Result<Option<DecodePass>, Error> {
         let decode = decoded.decode;
         let device = &self.device;
         let limits = &device.properties().description.limits;
         let align = limits.min_storage_buffer_offset_alignment.max(16);
         let most = u64::from(limits.max_storage_buffer_range).min(BAND_BYTES);
         let texel = u64::from(decode.texel_bytes());
-        let block = u64::from(decode.block_bytes());
-        let steps: Vec<ImageRegion> = regions
-            .iter()
-            .flat_map(|region| bands(region, texel, block, most))
+        // A whole-level decode's regions of one level and its images are one region.
+        let mut twins: Vec<ImageRegion> = (regions.iter())
+            .map(|region| self.twin_region(decoded, region))
+            .collect();
+        twins.dedup();
+        let steps: Vec<ImageRegion> = (twins.iter())
+            .flat_map(|region| bands(region, decode, most))
             .collect();
         if steps.is_empty() {
             return Ok(None);
         }
-        let images = |r: &ImageRegion| u64::from(r.size[2]) * u64::from(r.layers);
-        let blocks_of = |r: &ImageRegion| {
-            let [w, h, _] = r.size.map(u64::from);
-            w.div_ceil(4) * h.div_ceil(4) * images(r) * u64::from(decode.block_bytes())
-        };
+        // A step's texels in whole words: an `R11` format's compact texels are 2 bytes, two to
+        // a word, which the kernel writes whole (`bind::etc_decode_module`).
         let texels_of = |r: &ImageRegion| {
             let [w, h, _] = r.size.map(u64::from);
-            w * h * images(r) * texel
+            (w * h * u64::from(r.size[2]) * u64::from(r.layers) * texel).next_multiple_of(4)
         };
+        let plans: Vec<BandPlan> = steps
+            .iter()
+            .map(|step| self.band_plan(decode, step))
+            .collect();
         // Each step's blocks at the scratch's start and its texels at the alignment after them:
         // at most `most` bytes together (`bands`), so within `most` and the alignment.
-        let layouts: Vec<(u64, u64, u64)> = steps
-            .iter()
-            .map(|step| {
-                let blocks = blocks_of(step);
+        let layouts: Vec<(u64, u64, u64)> = (steps.iter().zip(&plans))
+            .map(|(step, plan)| {
+                let blocks = plan.block_bytes;
                 (blocks, blocks.div_ceil(align) * align, texels_of(step))
             })
             .collect();
@@ -751,21 +1334,15 @@ impl Image {
         }
         let contents = (shapes.contents())
             .ok_or_else(|| internal("a Shared block decode shapes' buffer without contents"))?;
-        let mut groups = Vec::with_capacity(steps.len());
-        for (at, step) in steps.iter().enumerate() {
-            let [w, h, _] = step.size;
-            let d = step.size[2] * step.layers;
-            let shape = BlockDecodeModule::shape([w, h, d]);
+        for (at, plan) in plans.iter().enumerate() {
             // SAFETY: the shapes' buffer holds `steps.len()` slots of `slot` bytes, each at least
             // a shape's, in host-coherent memory nothing else uses yet.
             unsafe {
                 let to = contents.as_ptr().add(at * slot as usize);
-                std::ptr::copy_nonoverlapping(shape.as_ptr(), to, shape.len());
+                std::ptr::copy_nonoverlapping(plan.shape.as_ptr(), to, plan.shape.len());
             }
-            let local = BlockDecodeModule::LOCAL_SIZE;
-            groups.push([w.div_ceil(local), h.div_ceil(local), d]);
         }
-        let kernel = device.owned_kernel(OwnedModule::BlockDecode(decode))?;
+        let kernel = device.owned_kernel(OwnedModule::TwinDecode(decode))?;
         let ranges: Vec<Vec<(vk::Buffer, u64, u64)>> = (layouts.iter())
             .zip(0u64..)
             .map(|(&(blocks, texels_at, texels), at)| {
@@ -779,20 +1356,20 @@ impl Image {
         let sets = OwnedSets::write(device, &kernel, &ranges)?;
         let steps = steps
             .iter()
+            .zip(&plans)
             .zip(&layouts)
             .zip(&sets.sets)
-            .zip(groups)
-            .map(|(((region, &(_, texels_at, _)), &set), groups)| Step {
+            .map(|(((region, plan), &(_, texels_at, _)), &set)| Step {
                 blocks: vk::BufferImageCopy {
                     buffer_offset: base,
-                    ..buffer_image_copy(region)
+                    ..buffer_image_copy(&plan.blocks)
                 },
                 texels: vk::BufferImageCopy {
                     buffer_offset: base + texels_at,
                     ..buffer_image_copy(region)
                 },
                 set,
-                groups,
+                groups: plan.groups,
             })
             .collect();
         device.shared().counts.block_decode_pass();
@@ -809,6 +1386,114 @@ impl Image {
                 _shapes: shapes,
                 _sets: sets,
             },
+        }))
+    }
+
+    /// The image's decoded twin that decodes a texture of `pf` (its first, or an ASTC carrier's
+    /// second): `None` where neither does.
+    fn twin_of(&self, pf: PixelFormat) -> Option<&Decoded> {
+        (self.decoded.as_deref().into_iter())
+            .chain(self.second.get().map(Box::as_ref))
+            .find(|decoded| decoded.decode.decodes(pf))
+    }
+
+    /// Make the image's second decoded twin, an ASTC carrier's, for a view of the texture as `pf`
+    /// (its other colour space; the module docs), where it has none:
+    /// moved by the device's next submission, its texels the carrier's whole decode, which the
+    /// device's next batch with work records before that work ([`Device::take_second_decodes`]).
+    /// Refused (`Feature::TextureView`, not implemented) where the device takes no twin of the
+    /// decode's texels.
+    pub(super) fn make_second_twin(self: &Arc<Self>, pf: PixelFormat) -> Result<(), Error> {
+        if self.second.get().is_some() {
+            return Ok(());
+        }
+        // A carrier without a twin (the device takes none of its texels) reads none either way.
+        let (Some(first), Some(decode)) = (self.decoded.as_deref(), AstcDecode::of(pf)) else {
+            return Ok(());
+        };
+        let device = &self.device;
+        let (layout, descriptor) = first.made_for;
+        let decode = TwinDecode::Astc(decode, device.astc_texels(decode)?);
+        let plan = twin_plan(self.plan(), &layout, decode, false);
+        let facts = (device.shared().textures).facts(device.compile_device().profile());
+        if !facts.optimal(plan.format).contains(TWIN_FEATURES) {
+            return Err(Error::Unsupported(Unsupported::not_implemented(
+                Feature::TextureView,
+            )));
+        }
+        // The kernel that keeps it in step, made now rather than by a submission.
+        device.owned_kernel(OwnedModule::TwinDecode(decode))?;
+        // Its uses are the image's, as the first twin's; it takes no CPU copy, so only the GPU
+        // writes it, in submission order.
+        let mut own = descriptor;
+        own.resource_options = ResourceOptions::private();
+        let identity = Identity::new(HazardTrackingMode::Default, false);
+        let start = Start::Moved;
+        let twin = device.new_image_starting(
+            plan,
+            &layout,
+            &own,
+            identity,
+            start,
+            Device::runtime_owner,
+        )?;
+        let second = Decoded {
+            image: twin,
+            decode,
+            started_on_the_cpu: false,
+            made_for: (layout, own),
+        };
+        let mut viewed = layout;
+        viewed.pixel_format = pf;
+        device.degrade_carried_twin(&viewed, &second, None);
+        // Made for another view meanwhile: that one stands, and this one goes unused.
+        if self.second.set(Box::new(second)).is_err() {
+            return Ok(());
+        }
+        device.shared().counts.second_twin();
+        self.register_first_move();
+        self.queue_second_decode(&whole_regions(self.plan()))
+    }
+
+    /// Queue the decode of `regions` (of the image's levels and layers, in its texels: a
+    /// carrier's) into its second decoded twin, where it has one, for the device's next batch with
+    /// work ([`Device::take_second_decodes`]): its pass made now, by the calling thread. After a
+    /// host call wrote the regions, or as the twin is made.
+    pub(super) fn queue_second_decode(
+        self: &Arc<Self>,
+        regions: &[ImageRegion],
+    ) -> Result<(), Error> {
+        let Some(SecondDecode { pass, uses, .. }) = self.second_decode(regions)? else {
+            return Ok(());
+        };
+        // Held weakly: an image gone takes its queued decodes with it.
+        let queued = QueuedDecode {
+            image: Arc::downgrade(self),
+            key: self.identity.key,
+            pass,
+            uses,
+        };
+        lock(&self.device.shared().textures.second_decodes).push(queued);
+        Ok(())
+    }
+
+    /// The decode of `regions` (as for [`queue_second_decode`](Self::queue_second_decode)) into
+    /// the image's second decoded twin, for a batch to record: `None` for an image without one,
+    /// or regions of no texel.
+    fn second_decode(
+        self: &Arc<Self>,
+        regions: &[ImageRegion],
+    ) -> Result<Option<SecondDecode>, Error> {
+        let Some(second) = self.second.get() else {
+            return Ok(None);
+        };
+        let Some(pass) = self.decode_pass_into(second, regions, PassScratch::Own)? else {
+            return Ok(None);
+        };
+        Ok(Some(SecondDecode {
+            pass,
+            uses: self.decode_uses(regions),
+            _image: Arc::clone(self),
         }))
     }
 
@@ -838,18 +1523,24 @@ impl Image {
     }
 }
 
-/// `region` (of texels of `texel` bytes, in blocks of `block` bytes of 4 x 4 texels) in steps
-/// whose blocks and texels take at most `most` bytes together (before, its texels alone): whole,
-/// else runs of its images (layers or depth slices), else each image in bands of whole block rows.
-/// A block row past `most` (16384 texels of 16 bytes and their blocks are 1 MiB and 64 KiB) is a
-/// step alone.
-pub(crate) fn bands(region: &ImageRegion, texel: u64, block: u64, most: u64) -> Vec<ImageRegion> {
+/// `region` (of the twin's texels, in `decode`'s blocks) in steps whose blocks and texels take at
+/// most `most` bytes together (before, its texels alone): whole, else runs of its images (layers
+/// or depth slices), else each image in bands of whole block rows (of a whole-level decode's
+/// region, bands of rows beside all the image's blocks, [`TwinDecode::whole_levels`]). A block
+/// row past `most` (16384 texels of 16 bytes and their blocks are 1 MiB and 64 KiB) is a step
+/// alone.
+pub(crate) fn bands(region: &ImageRegion, decode: TwinDecode, most: u64) -> Vec<ImageRegion> {
+    let (texel, block) = (
+        u64::from(decode.texel_bytes()),
+        u64::from(decode.block_bytes()),
+    );
+    let [bw, bh] = decode.block_extent();
     let [w, h, d] = region.size;
     let count = u64::from(d) * u64::from(region.layers);
-    let across = u64::from(w).div_ceil(4);
-    // A row of blocks and its four rows of texels.
-    let row = across * block + 4 * u64::from(w) * texel;
-    let image = across * u64::from(h).div_ceil(4) * block + u64::from(w) * u64::from(h) * texel;
+    let across = u64::from(w).div_ceil(bw.into());
+    // A row of blocks and its rows of texels.
+    let row = across * block + u64::from(bh) * u64::from(w) * texel;
+    let image = across * u64::from(h.div_ceil(bh)) * block + u64::from(w) * u64::from(h) * texel;
     if count == 0 || w == 0 || h == 0 {
         return Vec::new();
     }
@@ -879,7 +1570,16 @@ pub(crate) fn bands(region: &ImageRegion, texel: u64, block: u64, most: u64) -> 
             .map(|i| images(i, per.min(total - i)))
             .collect();
     }
-    let rows = u32::try_from((most / row).max(1) * 4).unwrap_or(u32::MAX);
+    // Rows a band: whole block rows, but for a whole-level decode, each of whose bands reads all
+    // its image's blocks.
+    let rows = match decode.whole_levels() {
+        true => {
+            let blocks = image - u64::from(w) * u64::from(h) * texel;
+            most.saturating_sub(blocks) / (u64::from(w) * texel)
+        }
+        false => (most / row).max(1) * u64::from(bh),
+    };
+    let rows = u32::try_from(rows.max(1)).unwrap_or(u32::MAX);
     (0..total)
         .flat_map(|i| {
             let one = images(i, 1);
@@ -893,8 +1593,17 @@ pub(crate) fn bands(region: &ImageRegion, texel: u64, block: u64, most: u64) -> 
         .collect()
 }
 
-/// One band of a decode pass: its blocks copied out of the BC image, its set, its workgroups and
-/// its texels copied into the twin.
+/// The plan of one band of a decode pass ([`Image::band_plan`]): the image's region its blocks
+/// are copied out of and their bytes, its shape and its workgroups.
+struct BandPlan {
+    blocks: ImageRegion,
+    block_bytes: u64,
+    shape: [u8; BlockDecodeModule::SHAPE_WORDS as usize * 4],
+    groups: [u32; 3],
+}
+
+/// One band of a decode pass: its blocks copied out of the image, its set, its workgroups and its
+/// texels copied into the twin.
 struct Step {
     blocks: vk::BufferImageCopy,
     texels: vk::BufferImageCopy,
@@ -908,6 +1617,105 @@ struct Held {
     _scratch: Option<Buffer>,
     _shapes: Buffer,
     _sets: OwnedSets,
+}
+
+/// A decode into an ASTC carrier's second decoded twin (the module docs) that a batch records
+/// (`command_buffer/submit.rs`): its pass and its uses, and the image, held until the batch
+/// completed.
+pub(crate) struct SecondDecode {
+    pass: DecodePass,
+    uses: Vec<Use<ResourceKey>>,
+    _image: Arc<Image>,
+}
+
+impl SecondDecode {
+    /// The uses of its command (the image's, `Image::decode_uses`).
+    pub(crate) fn uses(&self) -> &[Use<ResourceKey>] {
+        &self.uses
+    }
+
+    /// Record it ([`DecodePass::record`]).
+    ///
+    /// # Safety
+    ///
+    /// `raw` is recording, outside a render pass, on a queue family with compute; the decode lives
+    /// until it completes.
+    pub(crate) unsafe fn record(&self, device: &Vk, raw: vk::CommandBuffer) {
+        // SAFETY: the caller's contract; the decode holds the image and its twin, both in the
+        // `GENERAL` layout (the twin moved by a submission no later than the one that records
+        // this, `Image::make_second_twin`).
+        unsafe { self.pass.record(device, raw) }
+    }
+}
+
+/// A blit encoder's write into an ASTC carrier's blocks (`BlitCommandEncoder::decode_twin`),
+/// which its batch's submission decodes into the image's second decoded twin: by the decode made
+/// as the command was encoded, where the image had a second twin then. Without one, the decodes
+/// queued for the image wait past the batch ([`Device::take_second_decodes`]): a second twin made
+/// since reads the carrier as the batch leaves it.
+pub(crate) struct TwinWrite {
+    key: ResourceKey,
+    decode: Option<SecondDecode>,
+}
+
+impl TwinWrite {
+    /// The image's resource key, where the write made no decode.
+    pub(crate) fn without_decode(&self) -> Option<ResourceKey> {
+        self.decode.is_none().then_some(self.key)
+    }
+
+    /// Its decode, where it made one.
+    pub(crate) fn into_decode(self) -> Option<SecondDecode> {
+        self.decode
+    }
+}
+
+/// A decode queued for an image's second decoded twin ([`Image::queue_second_decode`]): the
+/// image, held weakly, its key, and the decode's pass and uses.
+pub(crate) struct QueuedDecode {
+    image: Weak<Image>,
+    key: ResourceKey,
+    pass: DecodePass,
+    uses: Vec<Use<ResourceKey>>,
+}
+
+/// The decodes queued for second decoded twins ([`Image::queue_second_decode`]), which the
+/// device's next batch with work records before that work ([`Device::take_second_decodes`]).
+pub(crate) type SecondDecodes = Mutex<Vec<QueuedDecode>>;
+
+impl Device {
+    /// The decodes queued for second decoded twins (the module docs), taken for the batch now
+    /// submitted to record before its work, in the order they were queued, but those of an image
+    /// for which `held` answers true (a write of the batch's made no decode), which stay queued
+    /// for a later batch, and those of an image gone, dropped.
+    pub(crate) fn take_second_decodes(
+        &self,
+        held: impl Fn(ResourceKey) -> bool,
+    ) -> Vec<SecondDecode> {
+        let mut queued = lock(&self.shared().textures.second_decodes);
+        if queued.is_empty() {
+            return Vec::new();
+        }
+        let (kept, taken): (Vec<QueuedDecode>, Vec<QueuedDecode>) =
+            queued.drain(..).partition(|decode| held(decode.key));
+        queued.extend(kept);
+        drop(queued);
+        taken
+            .into_iter()
+            .filter_map(
+                |QueuedDecode {
+                     image, pass, uses, ..
+                 }| {
+                    let image = image.upgrade()?;
+                    Some(SecondDecode {
+                        pass,
+                        uses,
+                        _image: image,
+                    })
+                },
+            )
+            .collect()
+    }
 }
 
 /// The scratch buffer a decode pass's bands go through ([`Image::decode_pass`]).
@@ -982,9 +1790,9 @@ impl DecodePass {
 }
 
 impl BlitCommandEncoder {
-    /// After the encoder's last command wrote `regions` (of the image's levels and layers) of
-    /// `texture`'s texels: their decode into its decoded twin (the module docs), one command of
-    /// the encoder. Nothing for a texture without one.
+    /// After the encoder's last command wrote `regions` (of the texture's levels and layers, in
+    /// its texels) of `texture`'s texels: their decode into its decoded twin (the module docs),
+    /// one command of the encoder. Nothing for a texture without one.
     pub(crate) fn decode_twin(
         &mut self,
         texture: &Texture,
@@ -993,10 +1801,15 @@ impl BlitCommandEncoder {
         let Some(image) = texture.decoding_image() else {
             return Ok(());
         };
-        let Some(pass) = image.decode_pass(regions, PassScratch::Own)? else {
+        // A carrier's regions: the carrier's texels over the texture's.
+        let regions: Vec<ImageRegion> = regions
+            .iter()
+            .map(|region| pvrtc::image_region(image.plan(), *region))
+            .collect();
+        let Some(pass) = image.decode_pass(&regions, PassScratch::Own)? else {
             return Ok(());
         };
-        let uses = image.decode_uses(regions);
+        let uses = image.decode_uses(&regions);
         let stages = TRANSFER | vk::PipelineStageFlags2::COMPUTE_SHADER;
         self.command_in(stages, &uses, |device, raw| {
             // SAFETY: the encoder's command buffer is recording, outside a render pass; the
@@ -1005,6 +1818,13 @@ impl BlitCommandEncoder {
             unsafe { pass.record(device, raw) }
         })?;
         self.core().retain(pass.held);
+        // An ASTC carrier's write, for its batch's submission to decode into the image's second
+        // twin, by the decode made now where it has one (the module docs).
+        if matches!(image.decoded.as_deref(), Some(d) if matches!(d.decode, TwinDecode::Astc(..))) {
+            let decode = image.second_decode(&regions)?;
+            let key = image.identity.key;
+            self.core().wrote_twin(TwinWrite { key, decode });
+        }
         self.core().retain(image);
         Ok(())
     }

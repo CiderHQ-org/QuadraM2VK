@@ -8,7 +8,8 @@
 //! **The thread.** One per device, started with its first job ([`TwinDecodes::start`]), takes
 //! the jobs in the order they were queued, so a later write's texels land in a twin after an
 //! earlier one's. Each job decodes its region in bands of at most [`BAND_BYTES`] of texels, each
-//! band's block rows split over up to [`THREADS`] threads ([`decode_band`]), and copies each band
+//! band's rows split over up to [`THREADS`] threads ([`decode_band`]; a PVRTC image's bands read
+//! all of its blocks, `TwinDecode::whole_levels`), and copies each band
 //! into the twin as the twin's copies go (on the host, or on the staging queue, waited for). A
 //! new texture's start, the zero blocks' decode, is a constant fill there.
 //!
@@ -29,8 +30,8 @@ use super::super::copy_plan::ImageRegion;
 use super::super::device::lock;
 use super::super::error::{Error, MemoryKind};
 use super::super::exit_guard;
+use super::decoded_twin::TwinDecode;
 use super::Image;
-use metal2vulkan::bind::BlockDecode;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
@@ -213,43 +214,42 @@ fn run(shared: &Shared) {
     }
 }
 
-/// Decode `blocks`, the block rows of a band `width` x `height` texels of one image, into
-/// `texels` (exactly its texels), split over up to [`THREADS`] threads of at least
-/// [`ROWS_PER_THREAD`] block rows each; this thread takes its share. A thread the host does not
-/// start leaves its share to the others.
+/// Decode rows `first` to `first + rows` of one image `width` x `height` texels, whose blocks
+/// are `blocks` (all of the image's), into `texels` (exactly the rows' texels), split over up to
+/// [`THREADS`] threads of at least [`ROWS_PER_THREAD`] block rows each (`TwinDecode::decode_rows`:
+/// a block decode's shares start at a block row, as `first` does); this thread takes its share. A
+/// thread the host does not start leaves its share to the others.
 pub(super) fn decode_band(
-    decode: BlockDecode,
+    decode: TwinDecode,
     blocks: &[u8],
-    [width, height]: [u32; 2],
+    size: [u32; 2],
+    [first, rows]: [u32; 2],
     texels: &mut [u8],
 ) {
-    let down = height.div_ceil(4) as usize;
-    let across = width.div_ceil(4) as usize;
-    let block = decode.block_bytes() as usize;
-    let row = width as usize * decode.texel_bytes() as usize;
+    let bh = decode.block_extent()[1];
+    let row = size[0] as usize * decode.texel_bytes() as usize;
     let host = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    let down = rows.div_ceil(bh) as usize;
     let threads = host.min(THREADS).min(down / ROWS_PER_THREAD).max(1);
     if threads == 1 {
-        decode.decode_into(blocks, [width, height, 1], texels);
+        decode.decode_rows(blocks, size, [first, rows], texels);
         return;
     }
-    // Each share: its block rows' blocks, its texel rows' bytes, and its height.
-    let per = down.div_ceil(threads);
+    // Each share: its first row, its texel rows' bytes, and its rows, whole block rows.
+    let per = (down.div_ceil(threads) as u32) * bh;
     let mut shares = Vec::with_capacity(threads);
     let mut rest = texels;
-    for first in (0..down).step_by(per) {
-        let rows = per.min(down - first);
-        let h = (rows * 4).min(height as usize - first * 4);
-        let (mine, after) = rest.split_at_mut(h * row);
+    for at in (0..rows).step_by(per as usize) {
+        let h = per.min(rows - at);
+        let (mine, after) = rest.split_at_mut(h as usize * row);
         rest = after;
-        let span = first * across * block..(first + rows) * across * block;
-        shares.push(Mutex::new(Some((&blocks[span], mine, h as u32))));
+        shares.push(Mutex::new(Some((first + at, mine, h))));
     }
     let next = AtomicUsize::new(0);
     let work = || {
         while let Some(share) = shares.get(next.fetch_add(1, Ordering::Relaxed)) {
-            if let Some((blocks, texels, h)) = lock(share).take() {
-                decode.decode_into(blocks, [width, h, 1], texels);
+            if let Some((y, texels, h)) = lock(share).take() {
+                decode.decode_rows(blocks, size, [y, h], texels);
             }
         }
     };

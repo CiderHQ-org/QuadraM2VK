@@ -93,7 +93,14 @@
 //! leaves of the formats whose bytes it changes ([`CompressedBlit`]), which
 //! [`compressed_blit_module`] of the rule rewrites after the copy. A BC1 to BC5 texture a device
 //! decodes otherwise than Metal is read through a twin of its texels as Metal decodes them
-//! ([`BlockDecode`]), which [`block_decode_module`] writes from the blocks each write left.
+//! ([`BlockDecode`]), which [`block_decode_module`] writes from the blocks each write left; an
+//! ASTC LDR texture on a device without its block through a twin of Metal's decode of its blocks
+//! ([`AstcDecode`], in the texels [`AstcTexels`] names), which [`astc_decode_module`] writes; a
+//! PVRTC texture on a device without its format through a twin of its texels' codes
+//! ([`PvrtcDecode`]), which [`pvrtc_decode_module`] writes; an ETC2 or EAC texture on a device
+//! without the formats through a twin of its codes or an 11-bit format's values ([`EtcDecode`], in
+//! the texels [`EtcTexels`] names), which [`etc_decode_module`] writes; a 4:2:2 texture through a
+//! twin of its texels' codes ([`ChromaDecode`]), which [`chroma_decode_module`] writes.
 //! [`sampler_desc`] gives the Vulkan sampler a plan's sampler write needs, [`heap_classes`] the
 //! classes of the handle heap's arrays on a profile, [`FunctionTableWords`] the words of a
 //! visible-function table's buffer, and [`FunctionTableSnapshot`] the one buffer of a command's
@@ -114,14 +121,17 @@
 
 pub(crate) mod acceleration;
 pub(crate) mod argument_buffer;
+pub(crate) mod astc_decode;
 pub(crate) mod block_decode;
 pub(crate) mod capture_assembly;
+pub(crate) mod chroma_decode;
 pub(crate) mod color_resolve;
 pub(crate) mod compressed_blit;
 pub(crate) mod depth_magnitude;
 pub(crate) mod depth_stencil_copy;
 pub(crate) mod depth_stencil_resolve;
 pub(crate) mod dispatch;
+pub(crate) mod etc_decode;
 pub(crate) mod extended_shadow;
 pub(crate) mod graphics;
 pub(crate) mod heap;
@@ -137,6 +147,7 @@ pub(crate) mod plan;
 pub(crate) mod plane_bytes_copy;
 pub(crate) mod plane_copy;
 pub(crate) mod plane_words;
+pub(crate) mod pvrtc_decode;
 pub(crate) mod rate_map;
 pub(crate) mod replay;
 pub(crate) mod resident;
@@ -167,15 +178,18 @@ pub use argument_buffer::{
     ArgumentBufferLayout, ArgumentDescriptor, ArgumentLayoutError, ArgumentMember, ArgumentPlace,
     ArgumentType, ARGUMENT_HANDLE_BYTES,
 };
+pub use astc_decode::{astc_decode_module, AstcDecode, AstcTexels};
 pub use block_decode::{block_decode_module, BlockDecode, BlockDecodeModule};
 pub use capture_assembly::{
     capture_assembly_module, capture_settle_module, CaptureAssemblyModule, CaptureSettleModule,
 };
+pub use chroma_decode::{chroma_decode_module, ChromaDecode};
 pub use color_resolve::{
     color_resolve_modules, ColorResolveFormat, ColorResolveModules, ResolveChannel, ResolveRule,
     ResolveSource, SRGB_RESOLVE_LINEAR, SRGB_RESOLVE_THRESHOLDS,
 };
 pub use compressed_blit::{compressed_blit_module, CompressedBlit, CompressedBlitModule};
+pub use etc_decode::{etc_decode_module, EtcDecode, EtcTexels};
 // The bytes of `WriteSource::ColorWriteTable`'s buffer.
 pub use crate::lower::arith::srgb::color_write_table;
 pub use depth_magnitude::{depth_magnitude_module, DepthMagnitudeModule};
@@ -255,6 +269,7 @@ pub use plane_bytes_copy::{
 };
 pub use plane_copy::{plane_copy_module, PlaneCopyModule, PlaneRows};
 pub use plane_words::{plane_words_module, PlaneWordsModule};
+pub use pvrtc_decode::{pvrtc_decode_module, PvrtcDecode};
 pub use rotate_texels::{rotate_texels_module, RotateTexelsModule};
 pub use sample_interleave::{
     interleave_merge_modules, interleave_split_module, InterleaveMergeModules,

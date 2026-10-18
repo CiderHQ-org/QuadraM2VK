@@ -1210,7 +1210,7 @@ fn texel_format_follows_the_bound_format() {
         assert_eq!(plan(texture2d(pf)), u64::from(want.0), "{pf:?}");
     }
     assert_eq!(
-        plan(texture2d(PixelFormat::ETC2RGB8SRGB)),
+        plan(texture2d(PixelFormat::BGRA10XRSRGB)),
         u64::from(C::OTHER.0)
     );
     // A cube gather's corner alone: its field, without border texels; and a packed format's family,

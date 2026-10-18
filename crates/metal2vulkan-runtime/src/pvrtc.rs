@@ -1,5 +1,5 @@
 //! PVRTC textures on a device without a format for them: their blocks held as raw bytes, which
-//! copies move and nothing reads.
+//! copies move, and their samples read a decoded twin.
 //!
 //! - **Metal's answers** (an M4 under macOS 27.0.1, EV SPCrp-probe7-m4, alike plain twice and
 //!   under API validation where it passes): every PVRTC format makes a texture, `Private` and
@@ -35,16 +35,22 @@
 //!   than one: a PVRTC texture is square with a power-of-two side (`texture_descriptor`), so the
 //!   half-width image's level `l`, `max(1, w / 2^(l+1))` wide, holds `ceil(max(1, w / 2^l) / 8)`
 //!   blocks across, as the texture's does.
-//! - **What it serves.** Copies only: copies between buffers and the texture, row by row and in
-//!   block order, and copies between textures (`blit_texture.rs`), and the CPU's copies of whole
-//!   levels in their order (`Texture::replace_region` and `get_bytes`, through rows,
-//!   [`rows_of_cpu_order`]). Sampling, shader reads and writes and
-//!   rendering need a decoder the runtime does not have: the texture is made, as Metal makes it,
-//!   and a command that binds it is refused with the format's own refusal (its representation's
-//!   `NotImplemented`, or the extension it needs).
-//! - **Through handles.** A function that reads texture handles from memory may reach such a
-//!   texture made resident, or bound in a stage that reads handles, and the runtime does not know
-//!   which of the textures it reaches the function reads: the handle's element is the neutral
+//! - **What it serves.** Copies between buffers and the texture, row by row and in block order,
+//!   and copies between textures (`blit_texture.rs`), and the CPU's copies of whole levels in
+//!   their order (`Texture::replace_region` and `get_bytes`, through rows, [`rows_of_cpu_order`]).
+//!   Its sampled views, of the format's linear and sRGB forms alike, present its decoded twin
+//!   (`texture/decoded_twin.rs`): Metal's decode of the blocks (`bind::PvrtcDecode`, fitted on an
+//!   Apple M3 Max) as 8-bit codes, exact, decoded after each write into it, whole levels at a time
+//!   (each texel's colors come from the blocks around it, wrapping): on the GPU
+//!   (`bind::pvrtc_decode_module`), or a host write's on the CPU. Announced
+//!   `carried-decoded-twin` (the twin's memory and the decodes). A shader write and an attachment
+//!   take no such image: Metal's functions write no compressed texture, and no pass renders into
+//!   one. A texture without a twin (memoryless, sparse, or a heap's over the caller's host pages or
+//!   laid out apart from the heap's bytes) holds its blocks for copies alone, and a command that
+//!   binds it for a read is refused (the twin's format's sampled usage, which its image lacks).
+//! - **Through handles.** A function that reads texture handles from memory may reach a texture
+//!   without a twin made resident, or bound in a stage that reads handles, and the runtime does not
+//!   know which of the textures it reaches the function reads: the handle's element is the neutral
 //!   texture, nothing is refused, and the command announces it once
 //!   ([`Degradation::UnreadableHandleTexture`], `degrade_unreadable`).
 //! - **Not yet:** the CPU's copies of a region other than a whole level, and of a whole level at
@@ -58,7 +64,8 @@ use super::device::Device;
 use super::image_plan::{block_family, sample_count, ImageFacts, ImagePlan};
 use super::texture::Texture;
 use super::texture_descriptor::{effective_usage, TextureLayout};
-use metal2vulkan::metal::format::{image_type, vk_format, FormatMapping};
+use metal2vulkan::bind::PvrtcDecode;
+use metal2vulkan::metal::format::{image_type, vk_format, FormatEmulation, FormatMapping};
 use metal2vulkan::metal::{PixelFormat, TextureUsage};
 use metal2vulkan::vk::{
     Format, FormatFeatureFlags2, ImageAspectFlags, ImageCreateFlags, ImageUsageFlags,
@@ -107,8 +114,12 @@ fn texels_across(plan: &ImagePlan) -> u32 {
 /// `region`, in the texels of a texture whose image `plan` plans, in the image's texels: a 2-bit
 /// PVRTC texture's carrier halves x and the width, the width rounded up (a region of whole
 /// blocks starts at a multiple of 8 and is 8 texels a block wide, or ends at the level's edge,
-/// which rounding up keeps at the image level's); every other image's region is the texture's.
+/// which rounding up keeps at the image level's); an ASTC texture's carrier holds each block in
+/// 4 x 4 of its texels (`astc::image_region`); every other image's region is the texture's.
 pub(super) fn image_region(plan: &ImagePlan, region: ImageRegion) -> ImageRegion {
+    if let Some(carried) = super::astc::image_region(plan, region) {
+        return carried;
+    }
     let n = texels_across(plan);
     let [x, y, z] = region.origin;
     let [width, height, depth] = region.size;
@@ -125,6 +136,16 @@ pub(super) fn image_buffer_region(
     plan: &ImagePlan,
     region: BufferImageRegion,
 ) -> BufferImageRegion {
+    // An ASTC texture's carrier: rows and images of its blocks, 4 x 4 carrier texels each.
+    if let Some(decode) = super::astc::decode_of(plan) {
+        let [bw, bh] = decode.block_extent();
+        return BufferImageRegion {
+            row_length: super::astc::carrier_texels(region.row_length, bw),
+            image_height: super::astc::carrier_texels(region.image_height, bh),
+            image: image_region(plan, region.image),
+            ..region
+        };
+    }
     BufferImageRegion {
         row_length: region.row_length / texels_across(plan),
         image: image_region(plan, region.image),
@@ -167,10 +188,13 @@ pub(super) fn cpu_order_of_rows(rows: &[u8], blocks: [u64; 2], level: &mut [u8])
 }
 
 /// The block extent, in texels of an image of `format` holding a texture of `pf`, of the blocks
-/// Vulkan copies: a carrier's 4 x 4 (a 2-bit PVRTC texture's 8 x 4 blocks lie over 4 x 4 of its
-/// carrier's texels), else `pf`'s own.
+/// Vulkan copies: a carrier's 4 x 4 (a 2-bit PVRTC texture's 8 x 4 blocks and an ASTC texture's
+/// blocks lie over 4 x 4 of its carrier's texels), else `pf`'s own.
 pub(super) fn image_block_extent(format: Format, pf: PixelFormat) -> Option<[u32; 2]> {
-    if is_pvrtc(pf) && CARRIERS.contains(&format) {
+    let astc = metal2vulkan::bind::AstcDecode::of(pf).is_some();
+    if (is_pvrtc(pf) && CARRIERS.contains(&format))
+        || (astc && super::astc::CARRIERS.contains(&format))
+    {
         Some([4, 4])
     } else {
         block_extent(pf)
@@ -186,7 +210,9 @@ pub(super) fn plan_blocks(
     facts: &ImageFacts<'_>,
 ) -> Option<ImagePlan> {
     let pf = layout.pixel_format;
-    if !is_pvrtc(pf) || vk_format(pf, &BTreeSet::new(), facts.profile).is_ok() {
+    let direct = vk_format(pf, &BTreeSet::new(), facts.profile)
+        .is_ok_and(|m| m.emulation == FormatEmulation::Direct);
+    if !is_pvrtc(pf) || direct {
         return None;
     }
     let copies = FormatFeatureFlags2::TRANSFER_SRC | FormatFeatureFlags2::TRANSFER_DST;
@@ -217,11 +243,9 @@ pub(super) fn plan_blocks(
         usage: ImageUsageFlags::TRANSFER_SRC | ImageUsageFlags::TRANSFER_DST,
         view_formats: Vec::new(),
         mapping: FormatMapping::direct(carrier, ImageAspectFlags::COLOR),
+        // Its decoded twin serves its samples and reads (`texture/decoded_twin.rs`).
         unavailable: usage.intersection(
-            TextureUsage::SHADER_READ
-                | TextureUsage::SHADER_WRITE
-                | TextureUsage::SHADER_ATOMIC
-                | TextureUsage::RENDER_TARGET,
+            TextureUsage::SHADER_WRITE | TextureUsage::SHADER_ATOMIC | TextureUsage::RENDER_TARGET,
         ),
     })
 }
@@ -231,25 +255,38 @@ pub(super) fn holds_blocks(plan: &ImagePlan) -> bool {
     is_pvrtc(plan.pixel_format) && CARRIERS.contains(&plan.format)
 }
 
-/// Whether `plan` holds a texture's bytes in a carrier for copies alone: a PVRTC texture's blocks
-/// (the module docs), or a 4:2:2 texture's texels (`chroma_pairs.rs`).
-pub(super) fn holds_for_copies(plan: &ImagePlan) -> bool {
-    holds_blocks(plan) || super::chroma_pairs::holds_pairs(plan)
+/// The decode of the PVRTC texture whose blocks `plan` holds in a carrier, its linear form's (an
+/// sRGB form's codes are the same); `None` for any other image.
+pub(super) fn decode_of(plan: &ImagePlan) -> Option<PvrtcDecode> {
+    PvrtcDecode::of(plan.pixel_format)
+        .filter(|_| holds_blocks(plan))
+        .map(PvrtcDecode::linear)
+}
+
+/// The carrier's format of `texture`, whose bytes a carrier holds for copies alone: a PVRTC,
+/// ETC2 or EAC texture's blocks, or a 4:2:2 texture's texels (`chroma_pairs.rs`), without a
+/// decoded twin (the module docs, `etc.rs`); `None` for any other texture.
+pub(super) fn held_for_copies(texture: &Texture) -> Option<Format> {
+    let plan = texture.image_plan().ok()?;
+    let carried = holds_blocks(plan)
+        || super::etc::decode_of(plan).is_some()
+        || super::chroma_pairs::holds_pairs(plan);
+    (carried && !texture.has_decoded_twin()).then_some(plan.format)
 }
 
 /// Announce once ([`Degradation::UnreadableHandleTexture`]) that `command` (named), encoded, whose
 /// functions read texture handles from memory, reaches a texture among `textures` (those made
 /// resident, and those bound in a stage that reads handles) whose bytes a carrier holds for
-/// copies alone ([`holds_for_copies`]).
+/// copies alone ([`held_for_copies`]).
 pub(super) fn degrade_unreadable<'a>(
     device: &Device,
     textures: impl IntoIterator<Item = &'a Texture>,
     command: &str,
 ) {
-    let Some((texture, carrier)) = textures.into_iter().find_map(|texture| {
-        let plan = texture.image_plan().ok()?;
-        holds_for_copies(plan).then_some((texture, plan.format))
-    }) else {
+    let Some((texture, carrier)) = textures
+        .into_iter()
+        .find_map(|texture| Some((texture, held_for_copies(texture)?)))
+    else {
         return;
     };
     device.degrade(Degradation::UnreadableHandleTexture, || {

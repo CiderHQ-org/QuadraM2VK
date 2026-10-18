@@ -416,26 +416,26 @@ impl BlockDecodeModule {
 }
 
 /// The binding symbol of the shape in the typed module.
-const SHAPE: ResourceSlot = ResourceSlot {
+pub(super) const SHAPE: ResourceSlot = ResourceSlot {
     stage: Stage::Kernel,
     kind: ResourceKind::Buffer,
     index: 0,
 };
 /// The binding symbol of the blocks in the typed module.
-const BLOCKS: ResourceSlot = ResourceSlot {
+pub(super) const BLOCKS: ResourceSlot = ResourceSlot {
     stage: Stage::Kernel,
     kind: ResourceKind::Buffer,
     index: 1,
 };
 /// The binding symbol of the texels in the typed module.
-const TEXELS: ResourceSlot = ResourceSlot {
+pub(super) const TEXELS: ResourceSlot = ResourceSlot {
     stage: Stage::Kernel,
     kind: ResourceKind::Buffer,
     index: 2,
 };
 
 /// A `u32[n]` `Private` table initialized to `values`.
-fn table(b: &mut ModuleBuilder, u32_: TypeId, values: &[u32]) -> BResult<GlobalId> {
+pub(super) fn table(b: &mut ModuleBuilder, u32_: TypeId, values: &[u32]) -> BResult<GlobalId> {
     let len = b.constant(Constant::Scalar {
         ty: u32_,
         bits: ConstBits(values.len() as u64),
@@ -868,15 +868,26 @@ pub fn block_decode_module(
     device: &Device,
     decode: BlockDecode,
 ) -> Result<BlockDecodeModule, Error> {
+    decode_module(device, typed_module(decode)?, "block decode")
+}
+
+/// The decode module of `device` of the typed module `m` (whose bindings are the symbols
+/// `SHAPE`, `BLOCKS` and `TEXELS`, `what` its kind): checked by the owned verifier against the
+/// device's profile (requirements included), serialized, and numbered with the fixed bindings of
+/// [`BlockDecodeModule`].
+pub(super) fn decode_module(
+    device: &Device,
+    m: TypedModule,
+    what: &str,
+) -> Result<BlockDecodeModule, Error> {
     let profile = device.profile();
-    let m = typed_module(decode)?;
     let mut meter = Meter::new(&Budget::default());
     crate::spirv::verify::verify(&m, profile, &mut meter)?;
     let r = crate::spirv::serialize::serialize(m)?;
     profile.check(&r.requirements).map_err(|c| {
         Error::Internal(InternalError::new(
             InternalKind::RequirementsExceedProfile,
-            format!("the block decode module needs {c:?}"),
+            format!("the {what} module needs {c:?}"),
         ))
     })?;
     let words = crate::spirv::serialize::relocate(&r, &binding_of)?;

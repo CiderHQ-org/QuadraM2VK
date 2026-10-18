@@ -1239,6 +1239,110 @@ fn pvrtc_copies_at_a_pitch_of_0_follow_metals_block_order() {
     assert!(plan(region([8, 4, 0], [12, 8, 1]), 0, 0, 56).is_ok());
 }
 
+/// Between a compressed format and an uncompressed one whose texel is its block's bytes, a region
+/// copy's coordinates are the destination's texels, as our probe on an Apple M3 Max under macOS
+/// 27.0.1 read them: out of BC1 into `RG32Uint` an origin of (4, 4) and a size of 2 x 2 copy the
+/// blocks from the fifth across and down (texels from 16), into BC1 from `RG32Uint` an origin of
+/// (1, 2) and a size of 2 x 2 copy texel (0, 0) alone into the block at (4, 4); ASTC 6x5's
+/// blocks likewise. Units of other bytes stay Metal's refusal; a PVRTC format with an
+/// uncompressed one, two compressed formats of different extents, and a level copy between a
+/// compressed and an uncompressed format, the runtime's gap.
+#[test]
+fn compressed_and_uncompressed_textures_copy_in_the_destination_s_texels() {
+    use PixelFormat as P;
+    let t = |pf, w, h| tex(pf, TextureType::Type2D, [w, h, 1]);
+    let (bc1, rg32) = (t(P::BC1RGBA, 32, 32), t(P::RG32Uint, 8, 8));
+    let out = plan_region_copy(
+        &pair(&bc1, &rg32),
+        &region([4, 4, 0], [2, 2, 1]),
+        0,
+        0,
+        [1, 2, 0],
+    )
+    .unwrap();
+    assert_eq!(
+        (out[0].src.origin, out[0].src.size),
+        ([16, 16, 0], [8, 8, 1])
+    );
+    assert_eq!((out[0].dst.origin, out[0].dst.size), ([1, 2, 0], [2, 2, 1]));
+    let into =
+        |origin, size, at| plan_region_copy(&pair(&rg32, &bc1), &region(origin, size), 0, 0, at);
+    let out = into([1, 2, 0], [2, 2, 1], [4, 4, 0]).unwrap();
+    assert_eq!((out[0].src.origin, out[0].src.size), ([0, 0, 0], [1, 1, 1]));
+    assert_eq!((out[0].dst.origin, out[0].dst.size), ([4, 4, 0], [4, 4, 1]));
+    let out = into([1, 1, 0], [4, 2, 1], [4, 0, 0]).unwrap();
+    assert_eq!((out[0].src.origin, out[0].src.size), ([0, 0, 0], [1, 1, 1]));
+    assert_eq!((out[0].dst.origin, out[0].dst.size), ([4, 0, 0], [4, 4, 1]));
+    let out = into([0, 0, 0], [8, 8, 1], [0, 0, 0]).unwrap();
+    assert_eq!((out[0].src.size, out[0].dst.size), ([2, 2, 1], [8, 8, 1]));
+    // Past the source's blocks: Metal's refusal.
+    assert_eq!(
+        plan_region_copy(
+            &pair(&bc1, &rg32),
+            &region([7, 0, 0], [2, 1, 1]),
+            0,
+            0,
+            [0, 0, 0]
+        ),
+        Err(CopyRefusal::Invalid(CopyProblem::Region))
+    );
+    let (astc, rgba32) = (t(P::ASTC6x5LDR, 48, 40), t(P::RGBA32Uint, 8, 8));
+    let out = plan_region_copy(
+        &pair(&astc, &rgba32),
+        &region([6, 5, 0], [2, 2, 1]),
+        0,
+        0,
+        [1, 2, 0],
+    )
+    .unwrap();
+    assert_eq!(
+        (out[0].src.origin, out[0].src.size),
+        ([36, 25, 0], [12, 10, 1])
+    );
+    let out = plan_region_copy(
+        &pair(&rgba32, &astc),
+        &region([1, 2, 0], [2, 2, 1]),
+        0,
+        0,
+        [6, 5, 0],
+    )
+    .unwrap();
+    assert_eq!((out[0].src.origin, out[0].src.size), ([0, 0, 0], [1, 1, 1]));
+    assert_eq!((out[0].dst.origin, out[0].dst.size), ([6, 5, 0], [6, 5, 1]));
+    let full = region([0, 0, 0], [2, 2, 1]);
+    assert_eq!(
+        plan_region_copy(&pair(&bc1, &t(P::RGBA8Unorm, 8, 8)), &full, 0, 0, [0, 0, 0]),
+        Err(CopyRefusal::Invalid(CopyProblem::Format))
+    );
+    let gap = |r: Result<Vec<ImageCopyRegion>, CopyRefusal>| matches!(&r, Err(CopyRefusal::Unsupported(u)) if u.feature == Feature::Format);
+    let pvrtc = t(P::PVRTCRGBA4BPP, 32, 32);
+    assert!(gap(plan_region_copy(
+        &pair(&pvrtc, &rg32),
+        &full,
+        0,
+        0,
+        [0, 0, 0]
+    )));
+    assert!(gap(plan_region_copy(
+        &pair(&rg32, &pvrtc),
+        &full,
+        0,
+        0,
+        [0, 0, 0]
+    )));
+    let bc7 = t(P::BC7RGBAUnorm, 48, 40);
+    assert!(gap(plan_region_copy(
+        &pair(&astc, &bc7),
+        &full,
+        0,
+        0,
+        [0, 0, 0]
+    )));
+    assert!(gap(plan_levels_copy(&pair(&bc1, &rg32), 0, 0, 0, 0, 1, 1)));
+    let small = t(P::BC1RGBA, 8, 8);
+    assert!(gap(plan_whole_copy(&pair(&rg32, &small))));
+}
+
 /// A 4:2:2 texture copies into the other order, `RG8Unorm` and `R16Uint` byte for byte (macOS
 /// 26.7's rule of one copy unit); a copy into one from another format of its unit is the
 /// runtime's refusal (plain Metal writes `0xff` over part of each row, EV RRP-probe11-m4), and

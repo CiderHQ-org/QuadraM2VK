@@ -955,13 +955,21 @@ impl BlitCommandEncoder {
     ///
     /// The textures have one sample count and formats of one copy unit (macOS 26.7's rule: the
     /// bytes are copied, `RGBA8Unorm` into `RGBA8Uint` or `R32Uint` among them, and
-    /// `Depth32Float` into `R32Float` or back).
+    /// `Depth32Float` into `R32Float` or back), or a compressed format and an uncompressed one
+    /// whose texel is its block's bytes (BC1 and `RG32Uint`, BC7 and `RGBA32Uint`): each block
+    /// copies into one texel and back, and the origins and size are the destination's texels, the
+    /// source addressed as if it held the destination's format (our probe on an Apple M3 Max
+    /// under macOS 27.0.1: out of BC1 an origin of (4, 4) is the block from texel (16, 16); into
+    /// it an origin of (1, 2) and a size of 2 x 2 copy `RG32Uint` texel (0, 0) alone, into the
+    /// block a destination origin of (4, 4) names).
     ///
     /// A size of 0 copies as the module docs say, as plain Metal does, and a compressed region
     /// off its blocks copies the blocks it starts in on each side, a whole block of a level
     /// smaller than one included, into or out of a larger level too. Refused: what Metal stops
     /// (`Invalid`: with a [`CopyProblem`], formats of different copy units, different sample
-    /// counts, a region past either level); a copy between overlapping regions of one
+    /// counts, a region past either level); a PVRTC format with an uncompressed one, whose blocks
+    /// plain Metal moves in an order of its own, and two compressed formats of one block's bytes
+    /// and different extents, not measured (`NotImplemented(Format)`); a copy between overlapping regions of one
     /// multisampled texture (`NotImplemented(OverlappingTextureCopies)`), other than of a region
     /// onto itself (one texture's other overlapping regions copy as `memmove` does, the module
     /// docs); a copy through a scratch buffer of 24-bit depth, whose bytes Metal's reference GPUs
@@ -1035,8 +1043,9 @@ impl BlitCommandEncoder {
     ///
     /// Refused as [`copy_from_texture_to_texture`](Self::copy_from_texture_to_texture) is, and
     /// for levels or slices past either texture and compressed levels of different sizes
-    /// (`Invalid`, unmeasured). A count of 0 copies nothing, wherever its slices or levels lie,
-    /// as plain Metal does.
+    /// (`Invalid`, unmeasured), and between a compressed and an uncompressed format
+    /// (`NotImplemented(Format)`: which levels Metal pairs is not measured). A count of 0 copies
+    /// nothing, wherever its slices or levels lie, as plain Metal does.
     pub fn copy_texture_slices(
         &mut self,
         source_texture: &Texture,

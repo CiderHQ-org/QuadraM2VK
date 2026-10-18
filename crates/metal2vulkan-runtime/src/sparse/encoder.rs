@@ -416,6 +416,7 @@ impl ResourceStateCommandEncoder {
                 segments: Vec::new(),
                 summary: Summary::of_fences(waits, fence_updates),
                 sparse: updates,
+                twin_writes: Vec::new(),
             },
         );
         drop(state);

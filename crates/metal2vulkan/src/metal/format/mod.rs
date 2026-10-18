@@ -161,6 +161,23 @@ pub enum FormatEmulation {
     /// reads the nearest texel) and blends none (its validation asserts), so a filter and a blend
     /// are not admitted.
     Bfloat,
+    /// A compressed format the device has no format for, today an ASTC LDR, a PVRTC, an ETC2 or
+    /// an EAC one (or its `_sRGB` form), or a 4:2:2 one (`GBGR422`, `BGRG422`, whose Vulkan
+    /// formats reconstruct chroma by the implementation's rules): the texture's blocks are held
+    /// for copies alone, and its sampled views present a decoded twin, an image of Metal's decode
+    /// of them ([`AstcDecode`](crate::bind::AstcDecode), [`PvrtcDecode`](crate::bind::PvrtcDecode),
+    /// [`EtcDecode`](crate::bind::EtcDecode), [`ChromaDecode`](crate::bind::ChromaDecode)), which
+    /// the consumer decodes after each write. The candidate's format is the twin's view of compact
+    /// texels, `R8G8B8A8_UNORM` (an `_sRGB` form's `R8G8B8A8_SRGB`), whose texels are 8-bit codes
+    /// of Metal's values (a PVRTC, ETC2, EAC or 4:2:2 format's own codes, an sRGB one's read raw,
+    /// `texel_format::srgb_raw`), or an EAC 11-bit
+    /// format's 16-bit normalized codes nearest Metal's values (`R16_UNORM`, `R16_SNORM` and their
+    /// two-channel forms); for an ASTC or an EAC 11-bit format the consumer may hold Metal's values
+    /// exactly as `float`s instead ([`AstcTexels`](crate::bind::AstcTexels),
+    /// [`EtcTexels`](crate::bind::EtcTexels)), whose views it presents for the candidate's.
+    /// Admitted for sampling only: Metal's functions do not write a compressed texture, and no
+    /// pass renders into one.
+    Decoded,
 }
 
 impl FormatEmulation {
@@ -206,6 +223,10 @@ impl FormatEmulation {
                     U::SampledImage | U::StorageImage | U::ColorAttachment
                 )
             }
+            FormatEmulation::Decoded => matches!(
+                usage,
+                U::SampledImage | U::SampledImageFilterLinear | U::SampledImageFilterMinmax
+            ),
             FormatEmulation::StencilInCombined
             | FormatEmulation::DepthInCombined
             | FormatEmulation::DepthWidened => matches!(
@@ -985,6 +1006,15 @@ fn ycbcr_repr(pf: PixelFormat) -> Repr {
     }
 }
 
+/// The candidates of a compressed format whose block is `block`: the block, then the decoded twin
+/// whose view is `twin` ([`FormatEmulation::Decoded`]).
+fn decoded(block: vk::Format, twin: vk::Format) -> Repr {
+    color(vec![
+        direct(block),
+        combined(twin, FormatEmulation::Decoded),
+    ])
+}
+
 /// The pattern of ASTC's 4x2 and 8x4 formats, LDR, sRGB and HDR: Metal makes a 2D texture of
 /// each from a descriptor alone (an Apple M4 under macOS 27.0.1, EV GSM2-fmt0-m4), and no Vulkan
 /// ASTC block has either footprint, so this crate holds none of them (`repr`'s `NotImplemented`).
@@ -1347,54 +1377,62 @@ fn make_repr(pf: PixelFormat) -> Repr {
         P::BC6HRGBUfloat => one(F::BC6H_UFLOAT_BLOCK),
         P::BC7RGBAUnorm => one(F::BC7_UNORM_BLOCK),
         P::BC7RGBAUnormSRGB => one(F::BC7_SRGB_BLOCK),
-        // PVRTC1 blocks behind `VK_IMG_format_pvrtc` (never promoted). Vulkan has only the RGBA
-        // formats; reading Metal's RGB formats through them needs the alpha a decoder returns for
-        // RGB data, which is not established (a swizzle to one would assume it).
-        P::PVRTCRGBA2BPP => one(F::PVRTC1_2BPP_UNORM_BLOCK_IMG),
-        P::PVRTCRGBA2BPPSRGB => one(F::PVRTC1_2BPP_SRGB_BLOCK_IMG),
-        P::PVRTCRGBA4BPP => one(F::PVRTC1_4BPP_UNORM_BLOCK_IMG),
-        P::PVRTCRGBA4BPPSRGB => one(F::PVRTC1_4BPP_SRGB_BLOCK_IMG),
-        P::PVRTCRGB2BPP | P::PVRTCRGB2BPPSRGB | P::PVRTCRGB4BPP | P::PVRTCRGB4BPPSRGB => {
-            Repr::NotImplemented
+        // PVRTC1 blocks behind `VK_IMG_format_pvrtc` (never promoted), else the decoded twin's
+        // view of their codes (`FormatEmulation::Decoded`). Vulkan has only the RGBA formats;
+        // reading Metal's RGB formats through them needs the alpha a decoder returns for RGB
+        // data, which is not established (a swizzle to one would assume it), so those take the
+        // twin alone.
+        P::PVRTCRGBA2BPP => decoded(F::PVRTC1_2BPP_UNORM_BLOCK_IMG, F::R8G8B8A8_UNORM),
+        P::PVRTCRGBA2BPPSRGB => decoded(F::PVRTC1_2BPP_SRGB_BLOCK_IMG, F::R8G8B8A8_SRGB),
+        P::PVRTCRGBA4BPP => decoded(F::PVRTC1_4BPP_UNORM_BLOCK_IMG, F::R8G8B8A8_UNORM),
+        P::PVRTCRGBA4BPPSRGB => decoded(F::PVRTC1_4BPP_SRGB_BLOCK_IMG, F::R8G8B8A8_SRGB),
+        P::PVRTCRGB2BPP | P::PVRTCRGB4BPP => {
+            color(vec![combined(F::R8G8B8A8_UNORM, FormatEmulation::Decoded)])
         }
-        P::EACR11Unorm => one(F::EAC_R11_UNORM_BLOCK),
-        P::EACR11Snorm => one(F::EAC_R11_SNORM_BLOCK),
-        P::EACRG11Unorm => one(F::EAC_R11G11_UNORM_BLOCK),
-        P::EACRG11Snorm => one(F::EAC_R11G11_SNORM_BLOCK),
-        P::EACRGBA8 => one(F::ETC2_R8G8B8A8_UNORM_BLOCK),
-        P::EACRGBA8SRGB => one(F::ETC2_R8G8B8A8_SRGB_BLOCK),
-        P::ETC2RGB8 => one(F::ETC2_R8G8B8_UNORM_BLOCK),
-        P::ETC2RGB8SRGB => one(F::ETC2_R8G8B8_SRGB_BLOCK),
-        P::ETC2RGB8A1 => one(F::ETC2_R8G8B8A1_UNORM_BLOCK),
-        P::ETC2RGB8A1SRGB => one(F::ETC2_R8G8B8A1_SRGB_BLOCK),
-        P::ASTC4x4SRGB => one(F::ASTC_4X4_SRGB_BLOCK),
-        P::ASTC5x4SRGB => one(F::ASTC_5X4_SRGB_BLOCK),
-        P::ASTC5x5SRGB => one(F::ASTC_5X5_SRGB_BLOCK),
-        P::ASTC6x5SRGB => one(F::ASTC_6X5_SRGB_BLOCK),
-        P::ASTC6x6SRGB => one(F::ASTC_6X6_SRGB_BLOCK),
-        P::ASTC8x5SRGB => one(F::ASTC_8X5_SRGB_BLOCK),
-        P::ASTC8x6SRGB => one(F::ASTC_8X6_SRGB_BLOCK),
-        P::ASTC8x8SRGB => one(F::ASTC_8X8_SRGB_BLOCK),
-        P::ASTC10x5SRGB => one(F::ASTC_10X5_SRGB_BLOCK),
-        P::ASTC10x6SRGB => one(F::ASTC_10X6_SRGB_BLOCK),
-        P::ASTC10x8SRGB => one(F::ASTC_10X8_SRGB_BLOCK),
-        P::ASTC10x10SRGB => one(F::ASTC_10X10_SRGB_BLOCK),
-        P::ASTC12x10SRGB => one(F::ASTC_12X10_SRGB_BLOCK),
-        P::ASTC12x12SRGB => one(F::ASTC_12X12_SRGB_BLOCK),
-        P::ASTC4x4LDR => one(F::ASTC_4X4_UNORM_BLOCK),
-        P::ASTC5x4LDR => one(F::ASTC_5X4_UNORM_BLOCK),
-        P::ASTC5x5LDR => one(F::ASTC_5X5_UNORM_BLOCK),
-        P::ASTC6x5LDR => one(F::ASTC_6X5_UNORM_BLOCK),
-        P::ASTC6x6LDR => one(F::ASTC_6X6_UNORM_BLOCK),
-        P::ASTC8x5LDR => one(F::ASTC_8X5_UNORM_BLOCK),
-        P::ASTC8x6LDR => one(F::ASTC_8X6_UNORM_BLOCK),
-        P::ASTC8x8LDR => one(F::ASTC_8X8_UNORM_BLOCK),
-        P::ASTC10x5LDR => one(F::ASTC_10X5_UNORM_BLOCK),
-        P::ASTC10x6LDR => one(F::ASTC_10X6_UNORM_BLOCK),
-        P::ASTC10x8LDR => one(F::ASTC_10X8_UNORM_BLOCK),
-        P::ASTC10x10LDR => one(F::ASTC_10X10_UNORM_BLOCK),
-        P::ASTC12x10LDR => one(F::ASTC_12X10_UNORM_BLOCK),
-        P::ASTC12x12LDR => one(F::ASTC_12X12_UNORM_BLOCK),
+        P::PVRTCRGB2BPPSRGB | P::PVRTCRGB4BPPSRGB => {
+            color(vec![combined(F::R8G8B8A8_SRGB, FormatEmulation::Decoded)])
+        }
+        // ETC2 and EAC: the block, else the decoded twin's view (`FormatEmulation::Decoded`) of
+        // its codes, or an 11-bit format's compact texels (`bind::EtcTexels`).
+        P::EACR11Unorm => decoded(F::EAC_R11_UNORM_BLOCK, F::R16_UNORM),
+        P::EACR11Snorm => decoded(F::EAC_R11_SNORM_BLOCK, F::R16_SNORM),
+        P::EACRG11Unorm => decoded(F::EAC_R11G11_UNORM_BLOCK, F::R16G16_UNORM),
+        P::EACRG11Snorm => decoded(F::EAC_R11G11_SNORM_BLOCK, F::R16G16_SNORM),
+        P::EACRGBA8 => decoded(F::ETC2_R8G8B8A8_UNORM_BLOCK, F::R8G8B8A8_UNORM),
+        P::EACRGBA8SRGB => decoded(F::ETC2_R8G8B8A8_SRGB_BLOCK, F::R8G8B8A8_SRGB),
+        P::ETC2RGB8 => decoded(F::ETC2_R8G8B8_UNORM_BLOCK, F::R8G8B8A8_UNORM),
+        P::ETC2RGB8SRGB => decoded(F::ETC2_R8G8B8_SRGB_BLOCK, F::R8G8B8A8_SRGB),
+        P::ETC2RGB8A1 => decoded(F::ETC2_R8G8B8A1_UNORM_BLOCK, F::R8G8B8A8_UNORM),
+        P::ETC2RGB8A1SRGB => decoded(F::ETC2_R8G8B8A1_SRGB_BLOCK, F::R8G8B8A8_SRGB),
+        // ASTC LDR: the block, else the decoded twin's view (`FormatEmulation::Decoded`).
+        P::ASTC4x4SRGB => decoded(F::ASTC_4X4_SRGB_BLOCK, F::R8G8B8A8_SRGB),
+        P::ASTC5x4SRGB => decoded(F::ASTC_5X4_SRGB_BLOCK, F::R8G8B8A8_SRGB),
+        P::ASTC5x5SRGB => decoded(F::ASTC_5X5_SRGB_BLOCK, F::R8G8B8A8_SRGB),
+        P::ASTC6x5SRGB => decoded(F::ASTC_6X5_SRGB_BLOCK, F::R8G8B8A8_SRGB),
+        P::ASTC6x6SRGB => decoded(F::ASTC_6X6_SRGB_BLOCK, F::R8G8B8A8_SRGB),
+        P::ASTC8x5SRGB => decoded(F::ASTC_8X5_SRGB_BLOCK, F::R8G8B8A8_SRGB),
+        P::ASTC8x6SRGB => decoded(F::ASTC_8X6_SRGB_BLOCK, F::R8G8B8A8_SRGB),
+        P::ASTC8x8SRGB => decoded(F::ASTC_8X8_SRGB_BLOCK, F::R8G8B8A8_SRGB),
+        P::ASTC10x5SRGB => decoded(F::ASTC_10X5_SRGB_BLOCK, F::R8G8B8A8_SRGB),
+        P::ASTC10x6SRGB => decoded(F::ASTC_10X6_SRGB_BLOCK, F::R8G8B8A8_SRGB),
+        P::ASTC10x8SRGB => decoded(F::ASTC_10X8_SRGB_BLOCK, F::R8G8B8A8_SRGB),
+        P::ASTC10x10SRGB => decoded(F::ASTC_10X10_SRGB_BLOCK, F::R8G8B8A8_SRGB),
+        P::ASTC12x10SRGB => decoded(F::ASTC_12X10_SRGB_BLOCK, F::R8G8B8A8_SRGB),
+        P::ASTC12x12SRGB => decoded(F::ASTC_12X12_SRGB_BLOCK, F::R8G8B8A8_SRGB),
+        P::ASTC4x4LDR => decoded(F::ASTC_4X4_UNORM_BLOCK, F::R8G8B8A8_UNORM),
+        P::ASTC5x4LDR => decoded(F::ASTC_5X4_UNORM_BLOCK, F::R8G8B8A8_UNORM),
+        P::ASTC5x5LDR => decoded(F::ASTC_5X5_UNORM_BLOCK, F::R8G8B8A8_UNORM),
+        P::ASTC6x5LDR => decoded(F::ASTC_6X5_UNORM_BLOCK, F::R8G8B8A8_UNORM),
+        P::ASTC6x6LDR => decoded(F::ASTC_6X6_UNORM_BLOCK, F::R8G8B8A8_UNORM),
+        P::ASTC8x5LDR => decoded(F::ASTC_8X5_UNORM_BLOCK, F::R8G8B8A8_UNORM),
+        P::ASTC8x6LDR => decoded(F::ASTC_8X6_UNORM_BLOCK, F::R8G8B8A8_UNORM),
+        P::ASTC8x8LDR => decoded(F::ASTC_8X8_UNORM_BLOCK, F::R8G8B8A8_UNORM),
+        P::ASTC10x5LDR => decoded(F::ASTC_10X5_UNORM_BLOCK, F::R8G8B8A8_UNORM),
+        P::ASTC10x6LDR => decoded(F::ASTC_10X6_UNORM_BLOCK, F::R8G8B8A8_UNORM),
+        P::ASTC10x8LDR => decoded(F::ASTC_10X8_UNORM_BLOCK, F::R8G8B8A8_UNORM),
+        P::ASTC10x10LDR => decoded(F::ASTC_10X10_UNORM_BLOCK, F::R8G8B8A8_UNORM),
+        P::ASTC12x10LDR => decoded(F::ASTC_12X10_UNORM_BLOCK, F::R8G8B8A8_UNORM),
+        P::ASTC12x12LDR => decoded(F::ASTC_12X12_UNORM_BLOCK, F::R8G8B8A8_UNORM),
         // The ASTC HDR profile: the `SFLOAT` blocks (core 1.3 or
         // `VK_EXT_texture_compression_astc_hdr`). Like every compressed format they are usable
         // where the format properties say so; `textureCompressionASTC_HDR` only guarantees that.
@@ -1412,10 +1450,13 @@ fn make_repr(pf: PixelFormat) -> Repr {
         P::ASTC10x10HDR => one(F::ASTC_10X10_SFLOAT_BLOCK),
         P::ASTC12x10HDR => one(F::ASTC_12X10_SFLOAT_BLOCK),
         P::ASTC12x12HDR => one(F::ASTC_12X12_SFLOAT_BLOCK),
-        // `G8B8G8R8_422_UNORM`/`B8G8R8G8_422_UNORM` exist (core 1.1), but a view of them needs a
-        // sampler Y′CbCr conversion (VUID-VkImageViewCreateInfo-format-06415), which neither the
-        // binder nor lowering models.
-        P::GBGR422 | P::BGRG422 => Repr::NotImplemented,
+        // 4:2:2: `G8B8G8R8_422_UNORM`/`B8G8R8G8_422_UNORM` exist (core 1.1), but a view of them
+        // needs a sampler Y′CbCr conversion (VUID-VkImageViewCreateInfo-format-06415), whose
+        // chroma reconstruction is the implementation's. The decoded twin's view
+        // (`FormatEmulation::Decoded`) holds Metal's texels instead (`bind::ChromaDecode`).
+        P::GBGR422 | P::BGRG422 => {
+            color(vec![combined(F::R8G8B8A8_UNORM, FormatEmulation::Decoded)])
+        }
         two_plane_ycbcr!() => ycbcr_repr(pf),
         // Formats Metal makes no texture of from a descriptor alone (EV XRR2-ycc1-m4); one over
         // an IOSurface plane is not modelled.
@@ -1659,8 +1700,8 @@ fn candidates(pf: PixelFormat) -> Result<(vk::ImageAspectFlags, &'static [Candid
 }
 
 /// The UNORM format of an 8-bit sRGB format whose texels Metal decodes from their raw codes
-/// (`R8Unorm_sRGB`, `RG8Unorm_sRGB`, `RGBA8Unorm_sRGB`, `BGRA8Unorm_sRGB`; a BC sRGB format's
-/// unorm form, the same blocks): the same channels and bits, its texels the sRGB format's codes
+/// (`R8Unorm_sRGB`, `RG8Unorm_sRGB`, `RGBA8Unorm_sRGB`, `BGRA8Unorm_sRGB`; a BC, PVRTC, ETC2 or
+/// EAC sRGB format's unorm form, the same blocks): the same channels and bits, its texels the sRGB format's codes
 /// read as `c / 255`. A device that cannot sample the sRGB format holds a sampled texture of it in
 /// this format, and a pipeline reads the raw codes through its view and decodes them as Metal does.
 /// `None` for any other format.
@@ -1676,6 +1717,13 @@ pub fn srgb_raw_twin(pf: PixelFormat) -> Option<PixelFormat> {
         P::BC2RGBASRGB => P::BC2RGBA,
         P::BC3RGBASRGB => P::BC3RGBA,
         P::BC7RGBAUnormSRGB => P::BC7RGBAUnorm,
+        P::PVRTCRGB2BPPSRGB => P::PVRTCRGB2BPP,
+        P::PVRTCRGB4BPPSRGB => P::PVRTCRGB4BPP,
+        P::PVRTCRGBA2BPPSRGB => P::PVRTCRGBA2BPP,
+        P::PVRTCRGBA4BPPSRGB => P::PVRTCRGBA4BPP,
+        P::ETC2RGB8SRGB => P::ETC2RGB8,
+        P::ETC2RGB8A1SRGB => P::ETC2RGB8A1,
+        P::EACRGBA8SRGB => P::EACRGBA8,
         _ => return None,
     })
 }
@@ -1736,10 +1784,15 @@ pub fn bound_texel_format(pf: PixelFormat) -> u32 {
     crate::metal::texel_format::texel_format(pf).0
 }
 
-/// The direct Vulkan format of `pf` (its first candidate), independent of any device.
+/// The direct Vulkan format of `pf` (its first candidate), independent of any device: `None` for
+/// a format held only through its decoded twin's view ([`FormatEmulation::Decoded`], the PVRTC
+/// RGB formats), whose blocks no Vulkan format holds.
 pub fn direct_format(pf: PixelFormat) -> Option<vk::Format> {
     match repr(pf) {
-        Repr::Candidates(_, c) => c.first().map(|c| c.format),
+        Repr::Candidates(_, c) => c
+            .first()
+            .filter(|c| c.emulation != FormatEmulation::Decoded)
+            .map(|c| c.format),
         _ => None,
     }
 }

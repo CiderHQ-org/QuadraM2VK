@@ -973,10 +973,7 @@ impl State {
     /// between layouts (whose move back its submission plans before the end).
     fn may_fold(&self, device: &Device, index: usize) -> bool {
         let parts = &self.recorded[self.batch_range(index)];
-        self.batches.all()[index].signals.is_empty()
-            && parts
-                .iter()
-                .all(|part| part.segments.is_empty() && part.sparse.is_empty())
+            && parts.last().is_none_or(|part| part.twin_writes.is_empty())
             && device
                 .shared()
                 .interop
@@ -1030,10 +1027,10 @@ impl State {
         self.failed_at_commit = Some(failure.encoders);
     }
 
-    /// A failed encoder's recorded `part` runs nothing: its segments (with their recordings)
-    /// and sparse updates go to `retained`, released with what the command buffer retained
-    /// without this lock, its `VkCommandBuffer`s are left unsubmitted, and it keeps its place
-    /// among the batches with its fences' waits and updates alone.
+    /// A failed encoder's recorded `part` runs nothing: its segments (with their recordings),
+    /// sparse updates and writes into ASTC carriers go to `retained`, released with what the
+    /// command buffer retained without this lock, its `VkCommandBuffer`s are left unsubmitted,
+    /// and it keeps its place among the batches with its fences' waits and updates alone.
     pub(super) fn fail_part(part: &mut Recorded, retained: &mut Vec<Box<dyn Any + Send + Sync>>) {
         for segment in part.segments.drain(..) {
             retained.push(Box::new((segment.work, segment.inputs)));
@@ -1044,6 +1041,10 @@ impl State {
         }
         for update in part.sparse.drain(..) {
             retained.push(Box::new(update));
+        }
+        // Its writes into ASTC carriers ran nothing, so nothing of them is decoded.
+        for write in part.twin_writes.drain(..) {
+            retained.push(Box::new(write));
         }
         part.raws.clear();
         part.summary = part.summary.fences_only();

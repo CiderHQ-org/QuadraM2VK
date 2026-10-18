@@ -1496,6 +1496,69 @@ fn a_slot_bound_in_srgb_joins_the_variant_and_binds_its_raw_view() {
     );
 }
 
+/// A slot bound in an ASTC sRGB format joins the variant exactly where the device holds the
+/// format's decoded twin (no ASTC block, `metal::texel_format::srgb_raw_on`): its raw binding
+/// views the twin's codes as `R8G8B8A8_UNORM`, its own binding as `R8G8B8A8_SRGB`. A device with
+/// the block (ANV, MoltenVK) decodes the texture itself: no variant, and its own view the block's.
+#[test]
+fn an_astc_srgb_slot_reads_raw_codes_only_where_its_twin_holds_them() {
+    let Some(bc) = assemble("astc read", &kernel(Access::Read, true)) else {
+        return;
+    };
+    let (mut twinned, mut native) = (0, 0);
+    for (stem, dev) in devices() {
+        let plain = pipeline(&dev, &bc, &inputs(false));
+        for pf in [PixelFormat::ASTC4x4SRGB, PixelFormat::ASTC12x10SRGB] {
+            let what = format!("{stem} {pf:?}");
+            let sampled = crate::metal::format::vk_format(
+                pf,
+                &[FormatUsage::SampledImage].into(),
+                dev.profile(),
+            )
+            .unwrap_or_else(|e| panic!("{what}: {e}"));
+            let shape = state(Some(pf)).shape();
+            let plan = plain.plan(&dev, &shape).expect(&what);
+            let decoded = sampled.emulation == crate::metal::format::FormatEmulation::Decoded;
+            assert_eq!(
+                crate::metal::texel_format::srgb_raw_on(pf, dev.profile()),
+                decoded,
+                "{what}"
+            );
+            if !decoded {
+                assert!(plan.variant.srgb_textures.is_empty(), "{what}");
+                let (_, own) = views(&plain, &plan);
+                for o in own.iter().filter_map(view_of) {
+                    assert_eq!(o.format, sampled.format, "{what}");
+                }
+                native += 1;
+                continue;
+            }
+            assert_eq!(
+                plan.variant.srgb_textures,
+                BTreeSet::from([TEXTURE]),
+                "{what}"
+            );
+            let key = plan.variant.lowering_inputs(Stage::Kernel);
+            let variant = pipeline(&dev, &bc, &key);
+            let again = variant.plan(&dev, &shape).expect("variant plan");
+            assert_eq!(again.variant, plan.variant, "{what}");
+            let (raw, own) = views(&variant, &again);
+            let raw: Vec<_> = raw.iter().filter_map(view_of).collect();
+            assert_eq!(raw.len(), 1, "{what}: {raw:?}");
+            assert_eq!(raw[0].format, crate::vk::Format::R8G8B8A8_UNORM, "{what}");
+            for o in own.iter().filter_map(view_of) {
+                assert_eq!(o.format, crate::vk::Format::R8G8B8A8_SRGB, "{what}");
+            }
+            twinned += 1;
+        }
+    }
+    assert!(twinned > 0, "no committed profile holds an ASTC sRGB twin");
+    assert!(
+        native > 0,
+        "no committed profile samples an ASTC sRGB block"
+    );
+}
+
 /// A `half` sample the device decodes and filters under the variant (a linear one with a linear
 /// mip filter, which the raw view does not serve) converts the device's `f32` texel by the bound
 /// format's class, the conversion's `OTHER` arm for an 8-bit sRGB format. On MoltenVK, whose

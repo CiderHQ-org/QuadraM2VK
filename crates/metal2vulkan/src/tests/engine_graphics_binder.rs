@@ -1680,8 +1680,8 @@ fn sampled_textures_and_runtime_samplers() {
     assert!(planned >= 3, "sample_level planned on {planned} profiles");
 }
 
-/// A texture of a format the table holds no representation of (`PVRTC_RGB_4BPP`, whose blocks the
-/// runtime holds for copies alone) is refused with the format's refusal only at a slot its
+/// A texture of a format the table holds no representation of (`ASTC_4x2_HDR`, whose footprint no
+/// Vulkan block has) is refused with the format's refusal only at a slot its
 /// function uses: at a sampled slot the plan is `Unsupported(Format)`, and bound at an index the
 /// function does not declare, or at an argument the function declares and never reads
 /// (`reflection/textures`'s `unused_tex`, `air.arg_unused`), the plan is the one without it.
@@ -1704,7 +1704,7 @@ fn a_texture_without_a_representation_is_refused_only_where_its_function_reads_i
     ) else {
         return;
     };
-    let pvrtc = || texture(TextureType::Type2D, PixelFormat::PVRTCRGB4BPP);
+    let unheld = || texture(TextureType::Type2D, PixelFormat::ASTC4x2HDR);
     let rgba = || texture(TextureType::Type2D, PixelFormat::RGBA8Unorm);
     let linear = || sampler(true, SamplerReductionMode::WeightedAverage);
     let refused = |r: &Result<BindingPlan, BindError>| matches!(r, Err(BindError::Unsupported(u)) if u.feature == Feature::Format);
@@ -1713,9 +1713,9 @@ fn a_texture_without_a_representation_is_refused_only_where_its_function_reads_i
         if let Ok(p) = kernel(&dev, &sampling, "sample_level") {
             let r = p.plan(
                 &dev,
-                &kernel_state(&[(0, pvrtc())], &[(0, linear())], true).shape(),
+                &kernel_state(&[(0, unheld())], &[(0, linear())], true).shape(),
             );
-            assert!(refused(&r), "{stem}: a sampled PVRTC texture: {r:?}");
+            assert!(refused(&r), "{stem}: a sampled unheld texture: {r:?}");
             let plain = p
                 .plan(
                     &dev,
@@ -1725,9 +1725,11 @@ fn a_texture_without_a_representation_is_refused_only_where_its_function_reads_i
             let beside = p
                 .plan(
                     &dev,
-                    &kernel_state(&[(0, rgba()), (5, pvrtc())], &[(0, linear())], true).shape(),
+                    &kernel_state(&[(0, rgba()), (5, unheld())], &[(0, linear())], true).shape(),
                 )
-                .unwrap_or_else(|e| panic!("{stem}: a PVRTC texture at an undeclared index: {e}"));
+                .unwrap_or_else(|e| {
+                    panic!("{stem}: an unheld texture at an undeclared index: {e}")
+                });
             assert_eq!(beside.descriptors, plain.descriptors, "{stem}");
             assert!(beside.diagnostics.is_empty(), "{stem}");
             sampled += 1;
@@ -1736,9 +1738,11 @@ fn a_texture_without_a_representation_is_refused_only_where_its_function_reads_i
             let unused = p
                 .plan(
                     &dev,
-                    &kernel_state(&[(16, pvrtc())], &[(0, linear())], true).shape(),
+                    &kernel_state(&[(16, unheld())], &[(0, linear())], true).shape(),
                 )
-                .unwrap_or_else(|e| panic!("{stem}: a PVRTC texture at the unread argument: {e}"));
+                .unwrap_or_else(|e| {
+                    panic!("{stem}: an unheld texture at the unread argument: {e}")
+                });
             let none = p
                 .plan(&dev, &kernel_state(&[], &[(0, linear())], true).shape())
                 .unwrap_or_else(|e| panic!("{stem}: {e}"));
@@ -1746,11 +1750,11 @@ fn a_texture_without_a_representation_is_refused_only_where_its_function_reads_i
             assert!(unused.diagnostics.is_empty(), "{stem}");
             let read = p.plan(
                 &dev,
-                &kernel_state(&[(3, pvrtc())], &[(0, linear())], true).shape(),
+                &kernel_state(&[(3, unheld())], &[(0, linear())], true).shape(),
             );
             assert!(
                 refused(&read),
-                "{stem}: a PVRTC texture at a sampled argument: {read:?}"
+                "{stem}: an unheld texture at a sampled argument: {read:?}"
             );
             declared += 1;
         }
@@ -2544,9 +2548,8 @@ fn a_written_sparse_texture_binds() {
 
 /// A 4:2:2 texture (`GBGR422`, `BGRG422`) at a storage slot its function only writes
 /// (`storage_texture_write`) binds the slot's neutral with an `IncompatibleBinding` note: plain
-/// Metal completes the writes and stores nothing (EVs CFR-probe8-m4, RRP-probe11-m4). At a slot
-/// that samples it (`sampling`'s `sample_level`) the plan is the format's refusal,
-/// `Unsupported(Format)` (Metal decodes the pairs).
+/// `sample_level`) the plan samples the decoded twin's view of Metal's texels, `R8G8B8A8_UNORM`
+/// (`FormatEmulation::Decoded`).
 #[test]
 fn a_four_two_two_texture_a_function_only_writes_binds_the_neutral() {
     let (Some(write), Some(sampling)) = (fixture("storage_texture_write"), fixture("sampling"))
@@ -2554,7 +2557,17 @@ fn a_four_two_two_texture_a_function_only_writes_binds_the_neutral() {
         return;
     };
     let linear = || sampler(true, SamplerReductionMode::WeightedAverage);
-    let refused = |r: &Result<BindingPlan, BindError>| matches!(r, Err(BindError::Unsupported(u)) if u.feature == Feature::Format);
+    let twin_view = |plan: &BindingPlan| {
+        plan.descriptors.iter().any(|d| {
+            matches!(
+                &d.source,
+                WriteSource::CombinedImageSampler {
+                    image: ImageSource::Texture { view, .. },
+                    ..
+                } if view.format == vk::Format::R8G8B8A8_UNORM
+            )
+        })
+    };
     let (mut written, mut sampled) = (0, 0);
     for (stem, dev) in devices() {
         for pf in [PixelFormat::GBGR422, PixelFormat::BGRG422] {
@@ -2589,11 +2602,13 @@ fn a_four_two_two_texture_a_function_only_writes_binds_the_neutral() {
                 written += 1;
             }
             if let Ok(p) = kernel(&dev, &sampling, "sample_level") {
-                let r = p.plan(
-                    &dev,
-                    &kernel_state(&[(0, pairs())], &[(0, linear())], true).shape(),
-                );
-                assert!(refused(&r), "{stem} {pf:?}: a sampled 4:2:2 texture: {r:?}");
+                let plan = p
+                    .plan(
+                        &dev,
+                        &kernel_state(&[(0, pairs())], &[(0, linear())], true).shape(),
+                    )
+                    .unwrap_or_else(|e| panic!("{stem} {pf:?}: a sampled 4:2:2 texture: {e}"));
+                assert!(twin_view(&plan), "{stem} {pf:?}: {:?}", plan.descriptors);
                 sampled += 1;
             }
         }

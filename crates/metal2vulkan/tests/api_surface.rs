@@ -229,7 +229,7 @@ surface! {
         enum NanMinMaxPolicy N;
         enum RoundingOrderPolicy N;
         enum HalfBlendPolicy N;
-        enum PaddedReadsPolicy N;
+        enum DecodedTexelsPolicy N;
         struct DeviceProfile O;
         struct SpirvValidation N;
         struct EnabledCaps N;
@@ -628,6 +628,16 @@ surface! {
         fn block_decode_module;
         enum BlockDecode N;
         struct BlockDecodeModule N;
+        fn astc_decode_module;
+        struct AstcDecode N;
+        enum AstcTexels N;
+        fn pvrtc_decode_module;
+        struct PvrtcDecode N;
+        fn etc_decode_module;
+        enum EtcDecode N;
+        enum EtcTexels N;
+        fn chroma_decode_module;
+        enum ChromaDecode N;
         fn mesh_scan_module;
         struct MeshScanModule N;
         fn tessellation_scan_module;

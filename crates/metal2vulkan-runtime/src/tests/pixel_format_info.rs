@@ -293,3 +293,45 @@ fn extents_near_two_to_the_64_wrap_the_block_count() {
         }
     }
 }
+
+/// Every ASTC LDR format, and its sRGB form, is described as Metal describes it whatever the
+/// device holds its blocks in (its ASTC format, or a carrier, `astc.rs`): a format of blocks (flags
+/// bit 0x400) of 16 bytes, its footprint, depth 1; and a level's layout counts its blocks, a side
+/// no multiple of the block rounded up, rows of 16-byte blocks, an image of those rows.
+#[test]
+fn astc_formats_answer_metal_s_blocks_and_levels() {
+    use metal2vulkan::bind::AstcDecode;
+    let formats = P::ALL
+        .iter()
+        .filter_map(|&pf| AstcDecode::of(pf).map(|decode| (pf, decode)));
+    let mut seen = 0;
+    for (pf, decode) in formats {
+        seen += 1;
+        let [bw, bh] = decode.block_extent().map(u64::from);
+        for level in MetalLevel::ALL {
+            let raw = u64::from(pf.as_raw());
+            let info = level.pixel_format_info(raw);
+            assert_ne!(info.flags & 0x400, 0, "{level} {pf:?}");
+            assert_eq!(info.words, [16, bw, bh, 1], "{level} {pf:?}");
+            for (width, height, mip) in [(37, 23, 0), (37, 23, 2), (1000, 7, 1), (1, 1, 0)] {
+                let at = |side: u64| (side >> mip).max(1);
+                let (w, h) = (at(width), at(height));
+                let [across, down] = [w.div_ceil(bw), h.div_ceil(bh)];
+                let mut query = TextureLevelQuery::plane_2d(raw, width, height);
+                query.level = mip;
+                let answer = level.texture_level_info(&query);
+                let what = format!("{level} {pf:?} {width}x{height} level {mip}");
+                assert_eq!([answer.width, answer.height], [w, h], "{what}");
+                assert_eq!(
+                    [answer.blocks_across, answer.blocks_down],
+                    [across, down],
+                    "{what}"
+                );
+                assert_eq!(answer.bytes_per_block, 16, "{what}");
+                assert_eq!(answer.bytes_per_row, 16 * across, "{what}");
+                assert_eq!(answer.bytes_per_image, 16 * across * down, "{what}");
+            }
+        }
+    }
+    assert_eq!(seen, 28);
+}

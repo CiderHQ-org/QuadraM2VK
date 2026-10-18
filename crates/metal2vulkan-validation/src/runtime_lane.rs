@@ -223,6 +223,8 @@ mod argument_buffers;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod argument_linear_samples;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod astc_textures;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod attachment_reads;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod attachmentless;
@@ -346,6 +348,8 @@ mod driver_deviations;
 mod dynamic_libraries;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod escaped_slots;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod etc_textures;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod events;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]

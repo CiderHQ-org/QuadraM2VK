@@ -78,8 +78,10 @@
 //! `ARGB8Unorm` takes a field too ([`PackedTexels::Argb8`]): Metal reads its one texel as `c / 255`
 //! correctly rounded, its bytes rotated in the view; its cube gathers and its linear filter are not
 //! measured, so it has no corner and no family. The unorm forms of BC1 to BC3 take the same field
-//! beside their cube corner: Metal reads their decoded 8-bit codes so (EV SID2-bcd2-m4), and a
-//! device's view of a decoded twin's codes may not (lavapipe's is an ulp high). A texture buffer's
+//! device's view of a decoded twin's codes may not (lavapipe's is an ulp high). So do the 8-bit
+//! linear ETC2 and EAC formats (`RGB8`, `RGB8A1`, `RGBA8`), beside their corner, and the linear
+//! PVRTC formats, alone: Metal reads their decoded 8-bit codes as `c / 255` correctly rounded too
+//! (an Apple M3 Max, `bind::EtcDecode`, `bind::PvrtcDecode`), their filters unmeasured. A texture buffer's
 //! texels convert as a texture's of the same format (`RGBA32Float`, `RGBA16Float`, `RGBA8Unorm`,
 //! and `RGBA8Snorm` read: the P2a probe).
 //!
@@ -119,8 +121,13 @@
 //! 8-bit code, alpha `c / 255`), read through their unorm views: exact where the device decodes the
 //! unorm form's codes as Metal does (BC7's on every venue measured, as Direct3D specifies its
 //! decode bit for bit; BC1 to BC3's where the driver has `DriverFact::ColorBlockDecodeIsMetals`,
-//! and elsewhere announced as `compressed-texel-decode`). The other compressed and the wide sRGB
-//! formats are not measured and keep the device's decode.
+//! and elsewhere announced as `compressed-texel-decode`). So do the ASTC sRGB formats, whose
+//! colour Metal reads as the table's step of the top byte of each channel's decode (`bind::AstcDecode`,
+//! an Apple M3 Max): read through the unorm view of their decoded twin's codes on a device without
+//! the format, exact; a device with it decodes them itself, as its unorm view would decode the
+//! blocks the LDR way, so they take the rule only where the device holds the codes
+//! ([`srgb_raw_on`]). The other compressed and the wide sRGB formats are not measured and keep the
+//! device's decode.
 //!
 //! **Depth formats**. A depth texture has no `half` result, and no linear filter is emulated on
 //! one, so its class is read by a read, plain gather or sample of one texel with a `float` result
@@ -382,13 +389,10 @@ pub enum PackedTexels {
     /// NaN reads `0x7fc00000` (Metal's, every NaN code of `RG11B10Float`'s rows).
     SmallFloat = 5,
     /// Every channel of 8 bits, held in its bytes' rotation: `ARGB8Unorm`, whose reads Metal
-    /// answers `c / 255` correctly rounded (EVs TXN-xrprobe-m3 and -m4, and its plane views over a
-    /// buffer, EVs TXN-xr6probe-m3 and -m4), where lavapipe's are an ulp high. Its class has no
-    /// family, as its border passes through the rotation. Also the unorm forms of BC1 to BC3, whose
-    /// blocks Metal decodes to 8-bit codes it reads as `c / 255` correctly rounded (EV
-    /// SID2-bcd2-m4), where lavapipe's view of a decoded twin's codes (`R8G8B8A8_UNORM`) is an ulp
-    /// high: beside their cube corner, with no family, Metal's linear filter of them not being
-    /// measured.
+    /// filter of them not being measured. And the 8-bit linear ETC2 and EAC formats (beside their
+    /// corner) and the linear PVRTC formats (alone), whose decoded 8-bit codes Metal reads so too
+    /// (an Apple M3 Max, `bind::EtcDecode`, `bind::PvrtcDecode`), and which a twin holds as
+    /// `R8G8B8A8_UNORM` codes on a device without them.
     Argb8 = 6,
     /// The 8- and 10-bit two-plane YCbCr formats' channels as their view holds them: Metal reads a
     /// texel as its converted color, each channel a step `k / 2048` of `[0, 1]`, and alpha as 1,
@@ -440,6 +444,13 @@ impl PackedTexels {
             P::RG11B10Float | P::RGB9E5Float => PackedTexels::SmallFloat,
             P::ARGB8Unorm => PackedTexels::Argb8,
             P::BC1RGBA | P::BC2RGBA | P::BC3RGBA => PackedTexels::Argb8,
+            P::PVRTCRGB2BPP
+            | P::PVRTCRGB4BPP
+            | P::PVRTCRGBA2BPP
+            | P::PVRTCRGBA4BPP
+            | P::ETC2RGB8
+            | P::ETC2RGB8A1
+            | P::EACRGBA8 => PackedTexels::Argb8,
             _ => return None,
         })
     }
@@ -580,6 +591,10 @@ pub fn texel_format(pf: PixelFormat) -> TexelFormat {
             | P::RGBX16Float
             | P::RGBX8Unorm
             | P::RGBX8Snorm
+            // Read, sampled (nearest, linear and bicubic, `float` and `half`) and gathered as an
+            // `RGBX8Unorm` texture of their decoded codes (an Apple M3 Max, `bind::ChromaDecode`).
+            | P::GBGR422
+            | P::BGRG422
     );
     // A depth format's cube gather: its one channel's family (module docs).
     match pf {
@@ -923,7 +938,11 @@ pub fn heap_class_index(pf: PixelFormat, swizzle: TextureSwizzleChannels) -> u32
 
 /// Whether Metal decodes `pf`'s texels from their raw 8-bit codes through its twelve-bit table
 /// (module docs): the 8-bit sRGB formats whose raw code a UNORM view of the same image reads,
-/// and the sRGB forms of BC1 to BC3 and BC7, whose codes their unorm views decode.
+/// the sRGB forms of BC1 to BC3 and BC7, whose codes their unorm views decode, the PVRTC,
+/// ETC2 and EAC sRGB formats, whose codes their linear forms decode (`bind::PvrtcDecode`,
+/// `bind::EtcDecode`; a decoded twin's codes on a device without them), and the ASTC sRGB
+/// formats, whose codes their decoded twin holds (`bind::AstcDecode`), which a device takes only
+/// where it holds the twin ([`srgb_raw_on`]).
 pub fn srgb_raw(pf: PixelFormat) -> bool {
     use PixelFormat as P;
     matches!(
@@ -937,13 +956,50 @@ pub fn srgb_raw(pf: PixelFormat) -> bool {
             | P::BC2RGBASRGB
             | P::BC3RGBASRGB
             | P::BC7RGBAUnormSRGB
+            | P::PVRTCRGB2BPPSRGB
+            | P::PVRTCRGB4BPPSRGB
+            | P::PVRTCRGBA2BPPSRGB
+            | P::PVRTCRGBA4BPPSRGB
+            | P::ETC2RGB8SRGB
+            | P::ETC2RGB8A1SRGB
+            | P::EACRGBA8SRGB
+            | P::ASTC4x4SRGB
+            | P::ASTC5x4SRGB
+            | P::ASTC5x5SRGB
+            | P::ASTC6x5SRGB
+            | P::ASTC6x6SRGB
+            | P::ASTC8x5SRGB
+            | P::ASTC8x6SRGB
+            | P::ASTC8x8SRGB
+            | P::ASTC10x5SRGB
+            | P::ASTC10x6SRGB
+            | P::ASTC10x8SRGB
+            | P::ASTC10x10SRGB
+            | P::ASTC12x10SRGB
+            | P::ASTC12x12SRGB
     )
 }
 
+/// Whether `profile`'s device reads a texture of `pf` from its raw codes as Metal decodes them
+/// ([`srgb_raw`]): where the format it samples `pf` in has a raw view ([`srgb_raw_view`]), or where
+/// it samples no format of `pf`'s, which the binder holds as its UNORM twin
+/// (`metal::format::srgb_raw_twin`) or refuses. An ASTC sRGB format a device samples itself has
+/// none: its unorm form widens the blocks' endpoints the LDR way (`bind::AstcDecode`), so no view
+/// of its image reads Metal's codes, and the device's own sRGB decode answers.
+pub fn srgb_raw_on(pf: PixelFormat, profile: &crate::device::profile::DeviceProfile) -> bool {
+    use crate::device::requirements::FormatUsage;
+    let usages = [FormatUsage::SampledImage].into();
+    srgb_raw(pf)
+        && match crate::metal::format::vk_format(pf, &usages, profile) {
+            Ok(m) => srgb_raw_view(m.format).is_some(),
+            Err(_) => true,
+        }
+}
+
 /// The raw view's format of an image of Vulkan format `format`, the sampled view of an
-/// [`srgb_raw`] format: the UNORM format of the same channels and bits (a BC format's of the same
-/// blocks), which views the image's texels as their codes (`c / 255`). `None` for any other
-/// format.
+/// [`srgb_raw`] format: the UNORM format of the same channels and bits (a BC, PVRTC, ETC2 or EAC
+/// format's of the same blocks), which views the image's texels as their codes (`c / 255`). `None` for any
+/// other format.
 pub fn srgb_raw_view(format: vk::Format) -> Option<vk::Format> {
     use vk::Format as F;
     Some(match format {
@@ -955,6 +1011,11 @@ pub fn srgb_raw_view(format: vk::Format) -> Option<vk::Format> {
         F::BC2_SRGB_BLOCK => F::BC2_UNORM_BLOCK,
         F::BC3_SRGB_BLOCK => F::BC3_UNORM_BLOCK,
         F::BC7_SRGB_BLOCK => F::BC7_UNORM_BLOCK,
+        F::PVRTC1_2BPP_SRGB_BLOCK_IMG => F::PVRTC1_2BPP_UNORM_BLOCK_IMG,
+        F::PVRTC1_4BPP_SRGB_BLOCK_IMG => F::PVRTC1_4BPP_UNORM_BLOCK_IMG,
+        F::ETC2_R8G8B8_SRGB_BLOCK => F::ETC2_R8G8B8_UNORM_BLOCK,
+        F::ETC2_R8G8B8A1_SRGB_BLOCK => F::ETC2_R8G8B8A1_UNORM_BLOCK,
+        F::ETC2_R8G8B8A8_SRGB_BLOCK => F::ETC2_R8G8B8A8_UNORM_BLOCK,
         _ => return None,
     })
 }
@@ -964,18 +1025,20 @@ mod tests {
     use super::*;
     use BicubicTexels as T;
 
-    /// The raw view is the UNORM twin of each candidate image format of an [`srgb_raw`] format,
-    /// and nothing else has one.
+    /// The raw view is the UNORM twin of each candidate image format of an [`srgb_raw`] format (a
+    /// PVRTC, ETC2, EAC or ASTC sRGB format's decoded twin's among them), but an ASTC sRGB
+    /// format's own block, whose unorm form decodes the blocks the LDR way; nothing else has one.
     #[test]
     fn an_srgb_format_has_a_raw_view_of_its_own_channels() {
         for &pf in PixelFormat::ALL {
-            let candidates = crate::metal::format::candidate_formats(pf);
-            let raw: Vec<Option<vk::Format>> =
-                candidates.iter().map(|f| srgb_raw_view(*f)).collect();
-            if srgb_raw(pf) {
-                assert!(raw.iter().all(Option::is_some), "{pf:?}: {candidates:?}");
-            } else {
-                assert!(raw.iter().all(Option::is_none), "{pf:?}: {candidates:?}");
+            let astc = crate::bind::AstcDecode::of(pf).is_some();
+            for format in crate::metal::format::candidate_formats(pf) {
+                let own_block = astc && crate::metal::format::direct_format(pf) == Some(format);
+                assert_eq!(
+                    srgb_raw_view(format).is_some(),
+                    srgb_raw(pf) && !own_block,
+                    "{pf:?}: {format:?}"
+                );
             }
         }
         assert_eq!(
@@ -986,7 +1049,7 @@ mod tests {
 
     /// An [`srgb_raw`] format's twin (`metal::format::srgb_raw_twin`) is a format whose direct
     /// image format is the raw view of the sRGB format's: the same channels and bits, read as
-    /// their codes; nothing else has one.
+    /// their codes; nothing else has one, nor an ASTC sRGB format.
     #[test]
     fn an_srgb_format_s_twin_holds_its_raw_view() {
         for &pf in PixelFormat::ALL {
@@ -996,12 +1059,29 @@ mod tests {
                     let own = crate::metal::format::direct_format(pf).and_then(srgb_raw_view);
                     assert_eq!(own, crate::metal::format::direct_format(twin), "{pf:?}");
                 }
-                None => assert!(!srgb_raw(pf), "{pf:?}"),
+                // An ASTC sRGB format has none: its unorm form decodes the blocks otherwise.
+                None => assert!(
+                    !srgb_raw(pf) || crate::bind::AstcDecode::of(pf).is_some(),
+                    "{pf:?}"
+                ),
             }
         }
     }
 
-    /// An RGBX format converts as its RGBA twin with red, green and blue (EV FPV-pf6-m4: every
+    /// A 4:2:2 format reads, samples and gathers as an `RGBA8Unorm` texture of its decoded codes
+    /// with alpha 1 (our probe on an Apple M3 Max under macOS 27.0.1, `bind::ChromaDecode`):
+    /// `RGBX8Unorm`'s class, its border texels too.
+    #[test]
+    fn four_two_two_formats_convert_as_rgbx8_unorm() {
+        for pf in [PixelFormat::GBGR422, PixelFormat::BGRG422] {
+            assert_eq!(
+                texel_format(pf),
+                texel_format(PixelFormat::RGBX8Unorm),
+                "{pf:?}"
+            );
+        }
+    }
+
     /// read, sample, gather and bicubic sample equals the twin's but for alpha 1): its family,
     /// an `_sRGB` one's raw codes through the twin's raw view.
     #[test]
@@ -1061,6 +1141,13 @@ mod tests {
             (PixelFormat::R8UnormSRGB, 0x1),
             (PixelFormat::BC1RGBASRGB, 0xF),
             (PixelFormat::BC7RGBAUnormSRGB, 0xF),
+            (PixelFormat::PVRTCRGBA2BPPSRGB, 0xF),
+            (PixelFormat::PVRTCRGB4BPPSRGB, 0x7),
+            (PixelFormat::ETC2RGB8SRGB, 0x7),
+            (PixelFormat::ETC2RGB8A1SRGB, 0xF),
+            (PixelFormat::EACRGBA8SRGB, 0xF),
+            (PixelFormat::ASTC4x4SRGB, 0xF),
+            (PixelFormat::ASTC12x12SRGB, 0xF),
         ] {
             assert_eq!(
                 texel_format(pf).0 & !(0xfff << T::BORDER),
@@ -1069,10 +1156,9 @@ mod tests {
             );
         }
         for pf in [
-            PixelFormat::ETC2RGB8SRGB,
             PixelFormat::BGRA10XRSRGB,
             PixelFormat::RGBA8Uint,
-            PixelFormat::ASTC4x4SRGB,
+            PixelFormat::ASTC4x4LDR,
         ] {
             assert_eq!(texel_format(pf), TexelFormat::OTHER, "{pf:?}");
         }
@@ -1136,8 +1222,9 @@ mod tests {
     /// Each packed format takes its field beside its corner, and nothing else does: the field fits
     /// its four bits, each value has a format, each code scale suits `texel_round::grid_value` (`1
     /// <= S < 2^16`), and the field touches no other field's bit. `ARGB8Unorm`'s cube gathers and
-    /// linear filter are not measured: its field stands alone; BC1 to BC3's unorm forms take it
-    /// beside their corner. No cube gather of a two-plane YCbCr format is measured: its field has
+    /// linear filter are not measured: its field stands alone, as the linear PVRTC formats' does;
+    /// BC1 to BC3's unorm forms and the 8-bit linear ETC2 and EAC formats take it beside their
+    /// corner. No cube gather of a two-plane YCbCr format is measured: its field has
     /// no corner. A packed normalized format's class is its normalized family's with `EXACT`, a
     /// small float's the half-float family's, each with its channels and border texels, and a
     /// two-plane format's the normalized family's with `EXACT` (signed where its field's steps are)
@@ -1154,7 +1241,12 @@ mod tests {
                     let two_plane = crate::metal::format::ycbcr_format(pf).is_some();
                     let blocks = matches!(
                         pf,
-                        PixelFormat::BC1RGBA | PixelFormat::BC2RGBA | PixelFormat::BC3RGBA
+                        PixelFormat::BC1RGBA
+                            | PixelFormat::BC2RGBA
+                            | PixelFormat::BC3RGBA
+                            | PixelFormat::ETC2RGB8
+                            | PixelFormat::ETC2RGB8A1
+                            | PixelFormat::EACRGBA8
                     );
                     assert_eq!(
                         CubeCorner::of(pf).is_some(),

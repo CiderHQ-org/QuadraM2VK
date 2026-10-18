@@ -43,6 +43,7 @@ use super::retained::Retained;
 use super::shadow::{ShadowCopy, ShadowSync, ShadowUse, Step, Within};
 use super::shadow_merge::ShadowMerge;
 use super::sparse::encoder::SparseUpdate;
+use super::texture::decoded_twin::TwinWrite;
 use super::tracker::{Barrier, EncoderUses, Summary, Use, UseRange};
 use super::used_resources::EncoderKind;
 use super::Device;
@@ -74,6 +75,10 @@ pub(super) struct Recorded {
     /// A resource state encoder's sparse mapping updates, which its batch binds before its work
     /// (`sparse/`); none for any other encoder.
     pub(super) sparse: Vec<SparseUpdate>,
+    /// A blit encoder's writes into ASTC carriers, which its batch's submission decodes into
+    /// their second decoded twins after its work (`texture/decoded_twin.rs`); none for any other
+    /// encoder.
+    pub(super) twin_writes: Vec<TwinWrite>,
 }
 
 /// Commands an encoder left to record later (`deferred.rs`).
@@ -211,6 +216,9 @@ pub(super) struct EncoderCore {
     /// made without `supportIndirectCommandBuffers`): `end` says so to the command buffer, whose
     /// commit runs nothing of it (`State::fault`).
     faults: bool,
+    /// Its writes into ASTC carriers ([`wrote_twin`](Self::wrote_twin)): `end` hands them to the
+    /// command buffer with its last part.
+    twin_writes: Vec<TwinWrite>,
     /// The core's own number in the process ([`id`](Self::id)).
     id: u64,
     /// It encodes an ended encoder's calls again, its command buffer committed (`replay.rs`):
@@ -303,6 +311,7 @@ impl EncoderCore {
             taken: Taken::default(),
             fails_command_buffer: None,
             faults: false,
+            twin_writes: Vec::new(),
             id: CORES.fetch_add(1, Ordering::Relaxed),
             replaying: false,
             _not_sync: PhantomData,
@@ -375,6 +384,7 @@ impl EncoderCore {
             taken: Taken::default(),
             fails_command_buffer: None,
             faults: false,
+            twin_writes: Vec::new(),
             id: CORES.fetch_add(1, Ordering::Relaxed),
             replaying: false,
             _not_sync: PhantomData,
@@ -421,6 +431,12 @@ impl EncoderCore {
     /// Hold `object` until the command buffer completes: the encoder's commands use it.
     pub(super) fn retain(&mut self, object: impl Any + Send + Sync) {
         self.retained.boxed(Box::new(object));
+    }
+
+    /// A command of the encoder wrote `write` into an ASTC carrier's blocks: its batch's
+    /// submission decodes it into the image's second decoded twin (`texture/decoded_twin.rs`).
+    pub(super) fn wrote_twin(&mut self, write: TwinWrite) {
+        self.twin_writes.push(write);
     }
 
     /// Hold `object`, a shared one (`Buffer::held` and its kin), until the command buffer
@@ -1172,6 +1188,7 @@ impl EncoderCore {
             taken,
             fails_command_buffer,
             faults,
+            twin_writes,
             ..
         } = self;
         ended.push(raw);
@@ -1220,6 +1237,9 @@ impl EncoderCore {
             current.push(segment);
         }
         parts.push((raws.collect(), current));
+        // The writes into ASTC carriers go with the last part (a blit encoder's only one).
+        let count = parts.len();
+        let mut twin_writes = Some(twin_writes);
         for (at, (raws, segments)) in parts.into_iter().enumerate() {
             let summary = summaries
                 .next()
@@ -1227,6 +1247,10 @@ impl EncoderCore {
             if at > 0 {
                 state.host_step();
             }
+            let twin_writes = match at + 1 == count {
+                true => twin_writes.take().unwrap_or_default(),
+                false => Vec::new(),
+            };
             state.end_encoder(
                 &open.command_buffer,
                 Recorded {
@@ -1235,6 +1259,7 @@ impl EncoderCore {
                     segments,
                     summary,
                     sparse: Vec::new(),
+                    twin_writes,
                 },
             );
         }

@@ -18,6 +18,7 @@ use super::device::lock;
 use super::error::{internal, vulkan, Error};
 use super::exit_guard;
 use super::release;
+use super::texture::decoded_twin::TwinDecode;
 use super::Device;
 use crate::shader_cache::driver::Making;
 use ash::vk;
@@ -121,9 +122,11 @@ pub(super) enum OwnedModule {
     /// moved and its dispatches gated (`predication.rs`). No descriptor: it reaches memory by
     /// device address.
     PredicationStep,
-    /// `bind::block_decode_module` of one decode: a BC1 to BC5 texture's written region decoded
-    /// as Metal decodes it into its decoded twin (`texture/decoded_twin.rs`).
-    BlockDecode(BlockDecode),
+    /// The GPU decode of one decoded twin's blocks (`TwinDecode::module`:
+    /// `bind::block_decode_module`, `bind::astc_decode_module`): a BC1 to BC5 texture's or an
+    /// ASTC carrier's written region decoded as Metal decodes it into its decoded twin
+    /// (`texture/decoded_twin.rs`).
+    TwinDecode(TwinDecode),
     /// `bind::tessellation_scan_module` of one pipeline's tessellation state: an emulated patch
     /// draw's records and chunk draws (`render/tessellation_scan.rs`). One per state a pipeline
     /// of the device draws with (its domain, partition, winding, maximum factor, step function
@@ -305,10 +308,10 @@ impl OwnedModule {
                 let push_bytes = metal2vulkan::bind::PredicationStepModule::PUSH_BYTES;
                 Ok((module.spirv.to_vec(), 0, push_bytes))
             }
-            OwnedModule::BlockDecode(decode) => {
-                let module =
-                    metal2vulkan::bind::block_decode_module(device.compile_device(), decode)
-                        .map_err(Error::Compile)?;
+            OwnedModule::TwinDecode(decode) => {
+                let module = decode
+                    .module(device.compile_device())
+                    .map_err(Error::Compile)?;
                 Ok((module.spirv.to_vec(), 3, 0))
             }
             OwnedModule::TessellationScan(kernel) => {
@@ -380,7 +383,7 @@ pub(super) struct OwnedKernels {
     capture_settle: Option<OwnedKernel>,
     extended_shadow_loads: HashMap<ExtendedRange, OwnedKernel>,
     predication_step: Option<OwnedKernel>,
-    block_decodes: HashMap<BlockDecode, OwnedKernel>,
+    twin_decodes: HashMap<TwinDecode, OwnedKernel>,
     tessellation_scans: HashMap<TessellationScanKernel, OwnedKernel>,
 }
 
@@ -418,7 +421,7 @@ impl OwnedKernels {
         .chain(self.unused_bits.values().copied())
         .chain(self.compressed_blits.values().copied())
         .chain(self.extended_shadow_loads.values().copied())
-        .chain(self.block_decodes.values().copied())
+        .chain(self.twin_decodes.values().copied())
         .chain(self.tessellation_scans.values().copied())
         {
             kernel.destroy(raw);
@@ -437,7 +440,7 @@ impl OwnedKernels {
             OwnedModule::UnusedBits(form, words) => self.unused_bits.get(&(form, words)).copied(),
             OwnedModule::CompressedBlit(rule) => self.compressed_blits.get(&rule).copied(),
             OwnedModule::ExtendedShadowLoad(form) => self.extended_shadow_loads.get(&form).copied(),
-            OwnedModule::BlockDecode(decode) => self.block_decodes.get(&decode).copied(),
+            OwnedModule::TwinDecode(decode) => self.twin_decodes.get(&decode).copied(),
             OwnedModule::TessellationScan(kernel) => self.tessellation_scans.get(&kernel).copied(),
             _ => self.slot(which).and_then(|slot| *slot),
         }
@@ -467,8 +470,8 @@ impl OwnedKernels {
             OwnedModule::ExtendedShadowLoad(form) => {
                 self.extended_shadow_loads.insert(form, kernel);
             }
-            OwnedModule::BlockDecode(decode) => {
-                self.block_decodes.insert(decode, kernel);
+            OwnedModule::TwinDecode(decode) => {
+                self.twin_decodes.insert(decode, kernel);
             }
             OwnedModule::TessellationScan(key) => {
                 self.tessellation_scans.insert(key, kernel);
@@ -481,9 +484,7 @@ impl OwnedKernels {
         }
     }
 
-    /// The slot of a kernel the device makes once (none for the shadow copy back's, the mipmap
-    /// filter's, the index rewrite's, the YCbCr conversion's, the unused bits', the compressed
-    /// blit's, the extended shadow load's, the block decode's or the tessellation scan's, one
+    /// blit's, the extended shadow load's, the twin decode's or the tessellation scan's, one
     /// per key).
     fn slot(&mut self, which: OwnedModule) -> Option<&mut Option<OwnedKernel>> {
         Some(match which {
@@ -502,7 +503,7 @@ impl OwnedKernels {
             | OwnedModule::UnusedBits(..)
             | OwnedModule::CompressedBlit(_)
             | OwnedModule::ExtendedShadowLoad(_)
-            | OwnedModule::BlockDecode(_)
+            | OwnedModule::TwinDecode(_)
             | OwnedModule::TessellationScan(_) => return None,
             OwnedModule::MeshScan => &mut self.mesh_scan,
             OwnedModule::PlaneWords => &mut self.plane_words,

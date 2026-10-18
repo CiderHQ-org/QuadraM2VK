@@ -174,6 +174,7 @@ gap	DetachedTexelAccess	none	CPU texel access while a runtime extension detached
 gap	TextureBufferLevels	rare	a texture buffer of more than one level (public, unusual)
 gap	WriteSwizzle	none	Apple-private writeSwizzleEnabled with a swizzle that writes
 gap	PvrtcBlockOrder	rare	PVRTC regions off whole levels
+gap	DecodedHeapTexture	app	an ASTC texture in a heap on a device without ASTC
 gap	VertexFetchPast4GiB	rare	vertex fetch past 4 GiB of a bind offset
 gap	StageInFetchPast4GiB	rare	stage-in fetch past 4 GiB of a bind offset
 apple	ProtectedContent	none	Apple-private (no public header)

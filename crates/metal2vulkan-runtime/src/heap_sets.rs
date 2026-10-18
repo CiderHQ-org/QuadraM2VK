@@ -836,13 +836,9 @@ impl Notes {
 
     /// `texture` placed, into a set where `in_set`.
     fn placed(&mut self, texture: &Texture, in_set: bool) {
-        if in_set && self.unreadable.is_none() {
-            let blocks = texture
-                .image_plan()
-                .is_ok_and(super::pvrtc::holds_for_copies);
-            if blocks {
-                self.unreadable = Some(texture.clone());
-            }
+        let held = || super::pvrtc::held_for_copies(texture).is_some();
+        if in_set && self.unreadable.is_none() && held() {
+            self.unreadable = Some(texture.clone());
         }
     }
 

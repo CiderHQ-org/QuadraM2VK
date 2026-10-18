@@ -72,9 +72,8 @@ fn refused_formats_are_exactly_the_documented_set() {
     }
     let count = |class: &str| refused.get(class).map_or(0, Vec::len);
     assert_eq!(refused["placeholder"], [P::Invalid, P::Unspecialized]);
-    // 4 PVRTC RGB (Vulkan's PVRTC1 formats are RGBA) + 2 Y′CbCr 4:2:2. The two-plane extended-range
-    // pair is held raw.
-    // + the 68 two-plane YCbCr formats but `YCBCR8_420_2P`, and the 3 others Metal makes no
+    // The two-plane extended-range pair is held raw, the 4:2:2 pair through its decoded twin.
+    // The 68 two-plane YCbCr formats but `YCBCR8_420_2P`, and the 3 others Metal makes no
     // texture of from a descriptor alone.
     // + ASTC's 6 formats of a 4x2 or 8x4 footprint, which no Vulkan block has.
     // - `YCBCR10_420_2P`, `RGB10_420_2P` and the `_sRGB` twins of the 4:2:0 converted pair, made
@@ -88,11 +87,9 @@ fn refused_formats_are_exactly_the_documented_set() {
     // - their `_sRGB` twins, held raw.
     // - the eleven RGBX formats, held in their RGBA twins.
     // - the three bfloat formats, held raw.
-    assert_eq!(count("not_implemented"), 6 + 45 + 3 + 6 + 62, "{refused:?}");
+    assert_eq!(count("not_implemented"), 45 + 3 + 6 + 62, "{refused:?}");
     assert!(refused["not_implemented"].iter().all(|&pf| {
-        pf.name().contains("PVRTC_RGB_")
-            || matches!(pf, P::GBGR422 | P::BGRG422)
-            || (ycbcr_format(pf).is_some() && !ycbcr(pf))
+        (ycbcr_format(pf).is_some() && !ycbcr(pf))
             || matches!(pf, P::RGBA16FloatXR | P::AnyDepth | P::AnyStencil)
             || matches!(pf, astc_without_a_vulkan_block!())
             || matches!(pf, formats_named_not_held!())
@@ -100,7 +97,8 @@ fn refused_formats_are_exactly_the_documented_set() {
 }
 
 /// Every candidate is a named, non-`UNDEFINED` registry format, and the direct formats are
-/// one-to-one: two Metal formats share one only when one is a stencil view of the other.
+/// one-to-one: two Metal formats share one only when one is a stencil view of the other. A format
+/// held only through its decoded twin's view has none.
 #[test]
 fn direct_formats_round_trip() {
     let mut back: BTreeMap<vk::Format, Vec<PixelFormat>> = BTreeMap::new();
@@ -113,6 +111,17 @@ fn direct_formats_round_trip() {
         for c in &candidates {
             assert!(c.format.is_known(), "{pf:?} -> {:?}", c.format);
             assert_ne!(c.format, vk::Format::UNDEFINED, "{pf:?}");
+        }
+        // A PVRTC RGB or 4:2:2 format, held through its decoded twin's view alone, has no
+        // direct format: no Vulkan format holds its blocks as Metal reads them.
+        if candidates[0].emulation == FormatEmulation::Decoded {
+            assert_eq!(direct_format(pf), None, "{pf:?}");
+            let pvrtc = crate::bind::PvrtcDecode::of(pf).is_some();
+            assert!(
+                pvrtc || crate::bind::ChromaDecode::of(pf).is_some(),
+                "{pf:?}"
+            );
+            continue;
         }
         assert_eq!(direct_format(pf), Some(candidates[0].format));
         // `storage_image_choice` relies on it: a storage image ignores the view's mapping. The
@@ -397,8 +406,7 @@ fn placeholders_and_refusals_are_typed() {
         }
         other => panic!("{pf:?}: {other:?}"),
     };
-    assert_eq!(needs(PixelFormat::PVRTCRGB4BPP), Needs::NotImplemented);
-    assert_eq!(needs(PixelFormat::GBGR422), Needs::NotImplemented);
+    assert_eq!(needs(PixelFormat::RGBA16FloatXR), Needs::NotImplemented);
 }
 
 /// On every committed profile, a mapping is only ever returned for supported usages, a swizzled
@@ -771,7 +779,8 @@ fn a_swizzled_candidate_needs_the_subset_s_view_swizzle() {
 /// The ASTC HDR and PVRTC RGBA formats are their `SFLOAT` and PVRTC1 blocks where the profile
 /// exposes them: on `moltenvk-m3` (a 1.4 device with `VK_IMG_format_pvrtc`) they map directly;
 /// on the 1.2 floor listing the same blocks without the extensions, the refusal names the
-/// extension.
+/// extension, and for a PVRTC format the format of its decoded twin's codes, which that floor does
+/// not list either.
 #[test]
 fn compressed_extension_formats_follow_exposure() {
     use FormatUsage as U;
@@ -807,19 +816,27 @@ fn compressed_extension_formats_follow_exposure() {
         let m =
             vk_format(pf, &sampled, moltenvk.profile()).unwrap_or_else(|e| panic!("{pf:?}: {e}"));
         assert_eq!((m.format, m.emulation), (format, FormatEmulation::Direct));
+        let mut needs = vec![vec![
+            Capability::Extension(extension),
+            Capability::Format {
+                format,
+                usage: U::SampledImage,
+            },
+        ]];
+        // A PVRTC format's decoded twin, whose codes' format this floor does not list.
+        if crate::bind::PvrtcDecode::of(pf).is_some() {
+            let codes = match crate::metal::texel_format::srgb_raw(pf) {
+                true => vk::Format::R8G8B8A8_SRGB,
+                false => vk::Format::R8G8B8A8_UNORM,
+            };
+            needs.push(vec![Capability::Format {
+                format: codes,
+                usage: U::SampledImage,
+            }]);
+        }
         assert_eq!(
             vk_format(pf, &sampled, floor.profile()),
-            Err(Unsupported::needs_any_of(
-                Feature::Format,
-                vec![vec![
-                    Capability::Extension(extension),
-                    Capability::Format {
-                        format,
-                        usage: U::SampledImage
-                    }
-                ]]
-            )
-            .into()),
+            Err(Unsupported::needs_any_of(Feature::Format, needs).into()),
             "{pf:?}"
         );
     }

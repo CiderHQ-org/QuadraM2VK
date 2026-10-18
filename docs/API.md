@@ -1797,6 +1797,39 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   the decoded twin on the host or the staging queue: the first command buffer that may read the
   texture waits at its submission for that, and the call waits for it where a command buffer that
   may read the texture is submitted and not yet complete, or the texture is untracked.
+- `metal2vulkan-degrade-carried-decoded-twin` (performance). `CarriedDecodedTwin`: A texture of an ASTC
+  LDR format (`ASTC_4x4_LDR` to `ASTC_12x12_LDR`, the sRGB forms too) made on a device without that
+  ASTC format, of a PVRTC format on a device without it (every device but MoltenVK's, and there
+  the four RGB formats), or of an ETC2 or EAC format on a device without them (desktop GPUs and
+  lavapipe): its blocks lie in an image of a carrier format whose blocks are also 16 (ASTC,
+  `EAC_RGBA8`, `RG11`) or 8 (PVRTC, the other ETC2 and EAC formats) bytes, which copies and
+  `get_bytes` move unchanged, and its samples read a decoded twin, Metal's decode of the blocks in
+  the texels `DecodedTexelsPolicy` names (a PVRTC texture's, and an 8-bit ETC2 or EAC texture's,
+  8-bit codes, exact under either: its sRGB form's slots decode them through Metal's table, and one
+  twin serves the views of the linear and sRGB forms; an ASTC sRGB texture's, its own 8-bit codes,
+  read the same way), decoded after each write into it as a BC
+  texture's twin is (`decoded-block-twin`; a PVRTC texture's whole levels, since each texel's
+  colors come from the blocks around it). An ASTC texture's first view in its other colour
+  space (its sRGB form as LDR, or the other way) gives it a second twin of that form's decode, kept
+  in step by GPU passes its command buffers' submissions record. Also a texture of a 4:2:2 format
+  (`GBGR422`, `BGRG422`) on every device, whose Vulkan formats reconstruct chroma by the
+  implementation's rules: its texels' bytes lie in an `R8G8_UNORM` carrier, and its twin holds
+  Metal's texels as 8-bit codes, exact (each texel's own green, its red and blue interpolated with
+  the pair beside it), decoded in whole rows. Cost: a carrier image of its
+  blocks, at most about 1 byte a texel (a 4:2:2 texture's 2), and a decoded twin of 4 bytes a texel (R8G8B8A8,
+  `DecodedTexelsPolicy::Compact`; an EAC 11-bit texture's 16-bit codes, 2 bytes a channel) or 16
+  (R32G32B32A32_SFLOAT, `DecodedTexelsPolicy::Exact`; an EAC 11-bit texture's floats, 4 bytes a
+  channel), two for an ASTC texture viewed in both colour spaces, and a decode after each write into it: a pass on
+  the GPU for a blit, a copy from a texture or a CPU copy through a submission; on the CPU, on the
+  device's decode thread, where its CPU copies go on the host or the staging queue.
+- `metal2vulkan-degrade-decoded-texel-precision` (precision). `DecodedTexelPrecision`: A texture with an
+  ASTC LDR decoded twin of 8-bit codes, or an EAC 11-bit one (`R11`, `RG11`) of 16-bit normalized
+  codes, under `DecodedTexelsPolicy::Compact`. Cost: a read, sample or gather of its texels answers
+  the nearest 8-bit code to Metal's 12-bit value, at most 1/510 off it; an EAC 11-bit texture's,
+  the nearest 16-bit normalized code to Metal's `c / 2047` (signed `c / 1023`), at most half a
+  16-bit step off it. `DecodedTexelsPolicy::Exact` holds Metal's values instead. An ASTC sRGB
+  texture's twin holds Metal's own 8-bit codes, which its slots decode through Metal's table:
+  exact, under either.
 - `metal2vulkan-degrade-shared-present-queue` (performance). `SharedPresentQueue`: A command queue
   made for presenting (`Device::new_command_queue_for_presenting`) on a device that reserved no
   `VkQueue` for presenting: its queue family has no queue past the ones the round robin takes

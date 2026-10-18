@@ -903,11 +903,15 @@ fn block_rows_lie_as_their_level_lays_them_out(
             return;
         };
         let descriptor = row.descriptor();
-        // A format the device has no image of is refused before any layout (lavapipe's ETC2 and
-        // EAC).
+        // A format the device has no image of is refused before any layout, and an ASTC texture
+        // on a device without ASTC (`RuntimeGap::DecodedHeapTexture`); an ETC2 or EAC texture on a
+        // device without them lies in a carrier of the same blocks (`etc.rs`).
         let answer = match device.heap_texture_size_and_align(&descriptor) {
             Ok(answer) => answer,
-            Err(error @ Error::Unsupported(_)) => {
+            Err(
+                error @ (Error::Unsupported(_)
+                | Error::NotImplemented(RuntimeGap::DecodedHeapTexture)),
+            ) => {
                 eprintln!("HEAPLAYOUT {what}: refused {error:?}");
                 continue;
             }

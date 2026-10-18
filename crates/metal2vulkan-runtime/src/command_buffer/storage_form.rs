@@ -87,6 +87,7 @@ impl CommandBuffer {
                 segments: Vec::new(),
                 summary: recorded.summary,
                 sparse: Vec::new(),
+                twin_writes: Vec::new(),
             },
         );
         state.retained.extend(recorded.retained.into_entry());

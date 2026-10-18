@@ -96,6 +96,9 @@ pub(crate) struct Counters {
     uncached_host_images: AtomicU64,
     cpu_block_decodes: AtomicU64,
     block_decode_passes: AtomicU64,
+    second_twins: AtomicU64,
+    second_twin_checks: AtomicU64,
+    second_twin_decodes: AtomicU64,
     queue_drains: AtomicU64,
     stand_in_copies_made: AtomicU64,
     stand_in_copies_made_at_draws: AtomicU64,
@@ -575,6 +578,24 @@ impl Counters {
     /// A GPU decode pass into a decoded twin was made (`Image::decode_pass`).
     pub(crate) fn block_decode_pass(&self) {
         self.block_decode_passes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// An ASTC carrier's second decoded twin was made (`Image::make_second_twin`).
+    pub(crate) fn second_twin(&self) {
+        self.second_twins.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A submission checked `n` blit writes into ASTC carriers for second twins' decodes
+    /// (`command_buffer/submit.rs`).
+    pub(crate) fn second_twin_checks(&self, n: usize) {
+        self.second_twin_checks
+            .fetch_add(n as u64, Ordering::Relaxed);
+    }
+
+    /// A submission recorded `n` decodes into second decoded twins.
+    pub(crate) fn second_twin_decodes(&self, n: usize) {
+        self.second_twin_decodes
+            .fetch_add(n as u64, Ordering::Relaxed);
     }
 
     /// The device's queues were drained before a failed wait's command buffers let go of what
@@ -1367,6 +1388,17 @@ pub struct WorkCounts {
     /// a blit's or a copy's into a BC texture, a heap texture's start, a write through
     /// submissions. None for a twin that takes CPU copies, whose texels only the CPU decodes.
     pub block_decode_passes: u64,
+    /// ASTC textures' second decoded twins made (`texture/decoded_twin.rs`): one at a texture's
+    /// first view in its other colour space (an `_sRGB` texture's as its LDR form, or the other
+    /// way), which reads Metal's decode of the blocks in that form.
+    pub second_twins: u64,
+    /// Blit commands' writes into an ASTC texture's blocks that a submission checked for a
+    /// second twin's decode: each such write, whether or not the texture had one.
+    pub second_twin_checks: u64,
+    /// Decodes into ASTC textures' second decoded twins that submissions recorded: a new twin's
+    /// whole decode, a host write's, and a blit write's where the texture had one as the write was
+    /// encoded. None where no texture has a second twin.
+    pub second_twin_decodes: u64,
     /// Drains of the device's queues: one each time a wait for command buffers' work failed (a
     /// lost device), before those command buffers let go of what they used, so that the
     /// driver's own completion of the work, which can still read their pools, has run
@@ -1764,6 +1796,9 @@ impl Device {
             uncached_host_images: counters.uncached_host_images.load(Ordering::Relaxed),
             cpu_block_decodes: counters.cpu_block_decodes.load(Ordering::Relaxed),
             block_decode_passes: counters.block_decode_passes.load(Ordering::Relaxed),
+            second_twins: counters.second_twins.load(Ordering::Relaxed),
+            second_twin_checks: counters.second_twin_checks.load(Ordering::Relaxed),
+            second_twin_decodes: counters.second_twin_decodes.load(Ordering::Relaxed),
             queue_drains: counters.queue_drains.load(Ordering::Relaxed),
             stand_in_copies_made: counters.stand_in_copies_made.load(Ordering::Relaxed),
             stand_in_copies_made_at_draws: counters
