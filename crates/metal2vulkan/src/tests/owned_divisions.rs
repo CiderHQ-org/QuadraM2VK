@@ -18,7 +18,8 @@ use crate::device::{Device, DevicePolicy};
 use crate::error::{Error, Feature};
 use crate::metal::format::ExtendedRange;
 use crate::metal::{
-    TessellationFactorStepFunction as Step, TessellationPartitionMode as Partition, Winding,
+    PixelFormat, TessellationFactorStepFunction as Step, TessellationPartitionMode as Partition,
+    Winding,
 };
 use crate::pipeline::interface::PatchDomain;
 use crate::spirv::testing::{all_ones_divisions, committed_descriptions};
@@ -44,6 +45,31 @@ const EXTENDED: [ExtendedRange; 13] = [
     ExtendedRange::R16Bfloat,
     ExtendedRange::Rg16Bfloat,
     ExtendedRange::Rgba16Bfloat,
+];
+
+/// Every format a render pass's load pass rewrites (`bind::unused_bits_module`): the
+/// extended-range, padded and bfloat formats, the signed normalized formats and `RGB9E5Float`.
+const UNUSED_BITS: [PixelFormat; 20] = [
+    PixelFormat::BGR10XR,
+    PixelFormat::BGR10XRSRGB,
+    PixelFormat::BGRA10XR,
+    PixelFormat::BGRA10XRSRGB,
+    PixelFormat::RGB10A82PXR10,
+    PixelFormat::RGB10A82PXR10SRGB,
+    PixelFormat::R10UnormX6,
+    PixelFormat::RG10UnormX12,
+    PixelFormat::R10UnormX6SRGB,
+    PixelFormat::RG10UnormX12SRGB,
+    PixelFormat::R16Bfloat,
+    PixelFormat::RG16Bfloat,
+    PixelFormat::RGBA16Bfloat,
+    PixelFormat::R8Snorm,
+    PixelFormat::RG8Snorm,
+    PixelFormat::RGBA8Snorm,
+    PixelFormat::R16Snorm,
+    PixelFormat::RG16Snorm,
+    PixelFormat::RGBA16Snorm,
+    PixelFormat::RGB9E5Float,
 ];
 
 fn modules() -> Vec<Build> {
@@ -101,10 +127,12 @@ fn modules() -> Vec<Build> {
             format!("extended_shadow_module({form:?})"),
             Box::new(move |d| Ok(bind::extended_shadow_module(d, form)?.spirv)),
         );
+    }
+    for format in UNUSED_BITS {
         for words in [TexelWords::Raw, TexelWords::ColorPlane] {
             push(
-                format!("unused_bits_module({form:?}, {words:?})"),
-                Box::new(move |d| Ok(bind::unused_bits_module(d, form, words)?.spirv)),
+                format!("unused_bits_module({format:?}, {words:?})"),
+                Box::new(move |d| Ok(bind::unused_bits_module(d, format, words)?.spirv)),
             );
         }
     }

@@ -20,12 +20,23 @@
 //!   (`ExtendedRange::load_code`; EV FRT-bfp1-m4 on an Apple M4 under macOS 27.0.1: 56,829 of the
 //!   65,536 codes move, in every tile a draw reaches).
 //!
+//! The same store writes a single-sampled signed normalized or `RGB9E5Float` attachment's tiles
+//! back through their values (an Apple M3 Max under macOS 27.0.1), which a consumer's exact tile
+//! store takes (`TileStorePolicy::Exact`):
+//!
+//! - a signed normalized format's code (`R8Snorm`, `RG8Snorm`, `RGBA8Snorm`, `R16Snorm`,
+//!   `RG16Snorm`, `RGBA16Snorm`): a channel's minimum code (-128, or -32768), which reads as -1.0
+//!   as the code above it does, raised to that code (-127, -32767);
+//! - an `RGB9E5Float` word whose largest mantissa is below 256 under an exponent above 0:
+//!   normalized, its three mantissas shifted up one bit as its exponent steps down one, until the
+//!   largest reaches 256 or the exponent 0 (the word Metal's encoding of its value gives).
+//!
 //! A consumer copies the region's texels, row after row, into a buffer of words, one dispatch of
 //! [`unused_bits_module`] of the texture's form rewrites the words of the tiles a mask names, and
 //! it copies them back before the pass: the pass's write masks, discards, tests and uncovered
 //! texels then keep Metal's words.
 //!
-//! **The module** (one per device, form and [`TexelWords`]). One `GLCompute` entry `main` with
+//! **The module** (one per device, format and [`TexelWords`]). One `GLCompute` entry `main` with
 //! local size ([`UnusedBitsModule::LOCAL_SIZE`], 1, 1), no push constants, and three storage
 //! buffers of 4-byte words in set 0:
 //!
@@ -54,6 +65,7 @@ use crate::device::requirements::Requirements;
 use crate::device::Device;
 use crate::error::{Error, Feature, InternalError, InternalKind, Unsupported};
 use crate::metal::format::ExtendedRange;
+use crate::metal::PixelFormat;
 use crate::pipeline::sym::{ResourceKind, ResourceSlot, Stage, Symbol};
 use crate::spirv::builder::constructs::{ArmEnd, ArmFn};
 use crate::spirv::builder::{FunctionBuilder, ModuleBuilder};
@@ -64,8 +76,8 @@ use crate::spirv::ir::{
     MemAccess, StorageClass, Type, TypedModule,
 };
 
-/// The crate-owned unused bits module of one device, form and [`TexelWords`], validated like
-/// any output.
+/// The crate-owned unused bits module of one device, format and [`TexelWords`], validated like
+/// any output: the words of the texels Metal's tile store rewrites (the module docs).
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnusedBitsModule {
@@ -105,11 +117,21 @@ impl UnusedBitsModule {
         bytes
     }
 
-    /// The bytes of one texel of `form` held as `words`: the raw texel
-    /// (`ExtendedRange::raw_format`), or a two-plane format's color word alone. `None` where
-    /// `form` has no such words ([`TexelWords::ColorPlane`] of another form).
-    pub fn texel_bytes(form: ExtendedRange, words: TexelWords) -> Option<u32> {
-        Some(match (rule(form, words)?, form) {
+    /// The bytes of one texel of `format` held as `words`: an extended-range, padded or bfloat
+    /// format's raw texel (`ExtendedRange::raw_format`) or a two-plane format's color word
+    /// alone, or a signed normalized or `RGB9E5Float` texel. `None` where `format` has no such
+    /// words: another format, or [`TexelWords::ColorPlane`] of a format but a two-plane one.
+    pub fn texel_bytes(format: PixelFormat, words: TexelWords) -> Option<u32> {
+        let rule = rule(format, words)?;
+        let Some(form) = ExtendedRange::of(format) else {
+            return match format {
+                PixelFormat::R8Snorm => Some(1),
+                PixelFormat::RG8Snorm | PixelFormat::R16Snorm => Some(2),
+                PixelFormat::RGBA16Snorm => Some(8),
+                _ => Some(4),
+            };
+        };
+        Some(match (rule, form) {
             (Rule::Padded(_), ExtendedRange::R10X6 | ExtendedRange::R10X6Srgb) => 2,
             (Rule::Bfloat, ExtendedRange::R16Bfloat) => 2,
             (Rule::Bfloat, ExtendedRange::Rgba16Bfloat) => 8,
@@ -151,10 +173,34 @@ enum Rule {
     /// A bfloat form's two 16-bit codes: each one's value through `half` and back
     /// (`ExtendedRange::load_code`, [`bfloat_load`]).
     Bfloat,
+    /// A signed normalized format's codes, each byte (each 16-bit half where `wide`): one at the
+    /// minimum code (`0x80`, `0x8000`) raised to the code above it ([`snorm_minimum`]).
+    SnormMinimum { wide: bool },
+    /// An `RGB9E5Float` word, normalized ([`shared_exponent`]).
+    SharedExponent,
 }
 
-/// The rule of `form`'s texels held as `words`, or `None` where it has none.
-fn rule(form: ExtendedRange, words: TexelWords) -> Option<Rule> {
+/// The rule of `format`'s texels held as `words`, or `None` where it has none.
+fn rule(format: PixelFormat, words: TexelWords) -> Option<Rule> {
+    if let Some(form) = ExtendedRange::of(format) {
+        return extended_rule(form, words);
+    }
+    Some(match (format, words) {
+        (_, TexelWords::ColorPlane) => return None,
+        (PixelFormat::R8Snorm | PixelFormat::RG8Snorm | PixelFormat::RGBA8Snorm, _) => {
+            Rule::SnormMinimum { wide: false }
+        }
+        (PixelFormat::R16Snorm | PixelFormat::RG16Snorm | PixelFormat::RGBA16Snorm, _) => {
+            Rule::SnormMinimum { wide: true }
+        }
+        (PixelFormat::RGB9E5Float, _) => Rule::SharedExponent,
+        _ => return None,
+    })
+}
+
+/// The rule of an extended-range, padded or bfloat `form`'s texels held as `words`, or `None`
+/// where it has none.
+fn extended_rule(form: ExtendedRange, words: TexelWords) -> Option<Rule> {
     Some(match (form, words) {
         (ExtendedRange::Bgr10 { .. }, TexelWords::Raw) => Rule::OnesOnTop,
         (ExtendedRange::Bgra10 { .. }, TexelWords::Raw) => Rule::Fields,
@@ -300,7 +346,73 @@ fn rewritten(
             let hi = f.binary(BinOp::ShiftLeftLogical, hi, k16)?;
             f.binary(BinOp::BitwiseOr, lo, hi)?
         }
+        Rule::SnormMinimum { wide } => snorm_minimum(f, word, *wide)?,
+        Rule::SharedExponent => shared_exponent(f, word)?,
     })
+}
+
+/// `word`'s signed normalized codes, each byte (each 16-bit half where `wide`) at the minimum
+/// code (`0x80`, `0x8000`) raised by one to the code above it: no carry leaves its lane.
+fn snorm_minimum(f: &mut FunctionBuilder<'_>, word: Value, wide: bool) -> BResult<Value> {
+    let (bits, minimum) = match wide {
+        true => (16, 0x8000),
+        false => (8, 0x80),
+    };
+    let (zero, mask, minimum) = (
+        u32_value(f, 0)?,
+        u32_value(f, (1 << bits) - 1)?,
+        u32_value(f, minimum)?,
+    );
+    let mut out = word;
+    for shift in (0..32).step_by(bits) {
+        let k = u32_value(f, shift)?;
+        let lane = f.binary(BinOp::ShiftRightLogical, word, k)?;
+        let lane = f.binary(BinOp::BitwiseAnd, lane, mask)?;
+        let least = f.binary(BinOp::IEqual, lane, minimum)?;
+        let one = u32_value(f, 1 << shift)?;
+        let raise = f.select(least, one, zero)?;
+        out = f.binary(BinOp::IAdd, out, raise)?;
+    }
+    Ok(out)
+}
+
+/// The `RGB9E5Float` word `word` normalized: its three 9-bit mantissas (red at bit 0, green at
+/// 9, blue at 18) shifted up by `s` and its exponent (bits 27 to 31) lowered by `s`, `s` the
+/// fewest shifts that bring the largest mantissa to 256 or more, at most the exponent (all of it
+/// for three zero mantissas). A word whose largest mantissa is 256 or more, or whose exponent is
+/// 0, stays.
+fn shared_exponent(f: &mut FunctionBuilder<'_>, word: Value) -> BResult<Value> {
+    let c = |f: &mut FunctionBuilder<'_>, v: u32| u32_value(f, v);
+    let mantissa = c(f, 0x1ff)?;
+    let (k9, k18, k27) = (c(f, 9)?, c(f, 18)?, c(f, 27)?);
+    let r = f.binary(BinOp::BitwiseAnd, word, mantissa)?;
+    let g = f.binary(BinOp::ShiftRightLogical, word, k9)?;
+    let g = f.binary(BinOp::BitwiseAnd, g, mantissa)?;
+    let b = f.binary(BinOp::ShiftRightLogical, word, k18)?;
+    let b = f.binary(BinOp::BitwiseAnd, b, mantissa)?;
+    let e = f.binary(BinOp::ShiftRightLogical, word, k27)?;
+    let largest = f.glsl(GlslOp::UMax, &[g, b])?;
+    let largest = f.glsl(GlslOp::UMax, &[r, largest])?;
+    // The shifts that bring the largest to 256: `8 - msb` below it, none at or above it, and the
+    // whole exponent for a zero.
+    let msb = f.glsl(GlslOp::FindUMsb, &[largest])?;
+    let (zero, k8, k31, k256) = (c(f, 0)?, c(f, 8)?, c(f, 31)?, c(f, 256)?);
+    let need = f.binary(BinOp::ISub, k8, msb)?;
+    let full = f.binary(BinOp::UGreaterThanEqual, largest, k256)?;
+    let need = f.select(full, zero, need)?;
+    let none = f.binary(BinOp::IEqual, largest, zero)?;
+    let need = f.select(none, k31, need)?;
+    let shift = f.glsl(GlslOp::UMin, &[need, e])?;
+    let r = f.binary(BinOp::ShiftLeftLogical, r, shift)?;
+    let g = f.binary(BinOp::ShiftLeftLogical, g, shift)?;
+    let b = f.binary(BinOp::ShiftLeftLogical, b, shift)?;
+    let e = f.binary(BinOp::ISub, e, shift)?;
+    let g = f.binary(BinOp::ShiftLeftLogical, g, k9)?;
+    let b = f.binary(BinOp::ShiftLeftLogical, b, k18)?;
+    let e = f.binary(BinOp::ShiftLeftLogical, e, k27)?;
+    let out = f.binary(BinOp::BitwiseOr, r, g)?;
+    let out = f.binary(BinOp::BitwiseOr, out, b)?;
+    f.binary(BinOp::BitwiseOr, out, e)
 }
 
 /// `x >> k` rounded to nearest, ties to even (`k` at most 31, `x` below `2^30`).
@@ -528,19 +640,19 @@ fn binding_of(sym: &Symbol) -> Option<u32> {
     }
 }
 
-/// The unused bits module of `device` for textures of `form` held as `words`: built with the
+/// The unused bits module of `device` for textures of `format` held as `words`: built with the
 /// typed builder, checked by the owned verifier against the device's profile (requirements
-/// included), serialized, and numbered with the fixed bindings of [`UnusedBitsModule`]. A form
+/// included), serialized, and numbered with the fixed bindings of [`UnusedBitsModule`]. A format
 /// that has no such words ([`UnusedBitsModule::texel_bytes`] is `None`) is
 /// `NotImplemented(Format)`.
 pub fn unused_bits_module(
     device: &Device,
-    form: ExtendedRange,
+    format: PixelFormat,
     words: TexelWords,
 ) -> Result<UnusedBitsModule, Error> {
     let (Some(rule), Some(texel_bytes)) = (
-        rule(form, words),
-        UnusedBitsModule::texel_bytes(form, words),
+        rule(format, words),
+        UnusedBitsModule::texel_bytes(format, words),
     ) else {
         return Err(Unsupported::not_implemented(Feature::Format).into());
     };

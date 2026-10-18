@@ -1416,6 +1416,19 @@ pub enum DriverFact {
     /// against 2.56 to 2.58 ms at one. Measured no faster, so not listed: NVIDIA's 615.71.09 on
     /// the RTX 3090 (0.112 against 0.113 ms at 32 layers, 0.028 against 0.030 at one).
     MultisampledDepthFasterOutOfGeneral,
+    /// A render pass that loads a single-sampled colour attachment of a signed normalized format
+    /// or of `E5B9G9R9_UFLOAT_PACK32` and draws stores each 32x32 tile a draw reaches back through
+    /// its texels' values, as Metal's pass does, the texels no fragment writes too: a channel's
+    /// minimum code (-128, or -32768), which reads as -1.0 as the code above it does, is stored as
+    /// that code (-127, -32767), and a shared-exponent word whose largest mantissa is below 256
+    /// under an exponent above 0 is stored normalized. Vulkan's load and store keep the bytes no
+    /// draw writes. MoltenVK records the render pass as a Metal render pass whose attachments
+    /// Metal's own load and store actions load and store
+    /// (`MVKAttachmentDescription::getMTLStoreAction` at 1.4.1), so the GPU's tile store is
+    /// Metal's by construction. On a driver with it the runtime announces no `snorm-minimum-kept`
+    /// or `shared-exponent-kept`, and its exact tile store (`TileStorePolicy::Exact`) adds no load
+    /// pass for such an attachment.
+    TileStoreIsMetals,
 }
 
 impl DriverFact {
@@ -1820,6 +1833,20 @@ const DYNAMIC_RESTART_WARNING: DriverDiagnostic = DriverDiagnostic {
 /// `vkGetPhysicalDeviceImageFormatProperties` of a linear `COLOR_ATTACHMENT` image succeeded in
 /// 38. MoltenVK's code on every GPU, so the row names no vendor; a defect fact, taken at every
 /// release.
+///
+/// `TileStoreIsMetals`, measured by
+/// `runtime_lane::snorm_tile_store::a_drawing_pass_keeps_a_snorm_minimum_code_and_says_so` (a
+/// 4x4 target of each of the six signed normalized colour formats holding a channel's minimum code
+/// in every channel, loaded and drawn over by a full-screen triangle that writes no channel):
+/// MoltenVK 1.4.1 on the M3 Max under macOS 27.0.1 ([`APPLE_M4`]'s identity) stored the code
+/// above it in every texel, as plain Metal's pass does on that GPU. Its `RGB9E5Float` twin
+/// (`a_drawing_pass_keeps_an_unnormalized_shared_exponent_word_and_says_so`: the word `1 | 2 << 9
+/// | 3 << 18 | 20 << 27` in every texel) is Metal's by the same construction: MoltenVK renders
+/// `E5B9G9R9_UFLOAT_PACK32` as a Metal `RGB9E5Float` attachment, whose pass plain Metal measured
+/// normalizing such a word on that GPU. One row for Apple's GPUs, by
+/// construction (the fact's docs). Measured not to have it, so not listed (every texel kept its
+/// code): RADV, Mesa 26.0.8, on the Radeon 780M and the RX 7900 XTX; ANV, Mesa 26.2.4, on the
+/// Iris Xe (RPL-P).
 ///
 /// `DontCareStoreIsOneOfMetals`: measured by `runtime_lane::dont_care_stores`, every texel of each
 /// of its twelve kept cases the earlier one or the stored one, none other: at 66ffe6775, RADV, Mesa
@@ -2311,6 +2338,14 @@ pub(crate) const MEASURED: &[Measured<DriverFact>] = &[
         device: Some(INTEL_IRIS_XE_RPL_P),
         first: mesa(26, 2, 4),
         last: mesa(26, 2, 4),
+    },
+    Measured {
+        fact: DriverFact::TileStoreIsMetals,
+        driver: DriverId::MOLTENVK,
+        vendor: Some(APPLE_VENDOR_ID),
+        device: None,
+        first: moltenvk(1, 4, 1),
+        last: moltenvk(1, 4, 1),
     },
         device: Some(INTEL_IRIS_XE_RPL_P),
         first: mesa(26, 2, 4),

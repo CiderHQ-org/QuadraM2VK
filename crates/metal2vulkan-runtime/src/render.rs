@@ -6236,6 +6236,9 @@ impl RenderCommandEncoder {
             )
         });
     }
+
+    /// Announce `snorm-minimum-kept` at a draw in a pass that loads a single-sampled color
+    /// attachment of a signed normalized format (and does not discard it at the store), whatever
     /// the draw's state, naming every such attachment, `kept`
     /// (`unused_bits_load::snorm_minimum_kept`): Metal's pass, once it draws, writes each tile a
     /// draw reaches back through the channels' values, so a minimum code (-128, or -32768) the
@@ -6243,6 +6246,20 @@ impl RenderCommandEncoder {
     /// on a driver whose pass stores it so too (`DriverFact::TileStoreIsMetals`: MoltenVK's pass
     /// is a Metal pass), nor for an attachment the load pass rewrites (`TileStorePolicy::Exact`).
     fn degrade_snorm_minimum(device: &Device, kept: &[String]) {
+        if kept.is_empty() {
+            return;
+        }
+        device.degrade(Degradation::SnormMinimumKept, || {
+            (
+                format!("a draw in a render pass that loads {}", kept.join(" and ")),
+                "the texels the pass's draws do not write keep a channel's minimum code (-128, \
+                 or -32768), which Metal's pass stores as the code above it (-127, -32767) in \
+                 each tile a draw reaches"
+                    .to_owned(),
+            )
+        });
+    }
+
     /// state, naming every such attachment, `kept` (`unused_bits_load::shared_exponent_kept`):
     /// Metal's pass, once it draws, writes each tile a draw reaches back through its texels'
     /// values, so a word the draws do not write whose largest mantissa is below 256 under an

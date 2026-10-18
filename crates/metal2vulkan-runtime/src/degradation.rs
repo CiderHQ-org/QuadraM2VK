@@ -1119,6 +1119,29 @@ degradations! {
              zeros, the two-plane color word's top two bits to zeros) and clamps BGRA10_XR's \
              alpha code to [384, 894]: a texel whose bytes no Metal write left (uploaded bytes, \
              or an alpha code past 894) keeps bytes Metal's pass would change";
+        /// A draw in a render pass that loads a single-sampled color attachment of a signed
+        /// normalized format (`R8Snorm`, `RG8Snorm`, `RGBA8Snorm`, `R16Snorm`, `RG16Snorm`,
+        /// `RGBA16Snorm`) and does not discard it at the store (`render.rs`). Metal's pass, once
+        /// it draws, writes each 32 x 32 tile a draw reaches back through its channels' values,
+        /// so a channel's minimum code (-128, or -32768), which reads as -1.0 as the code above
+        /// it does, is stored as that code (-127, or -32767), in the texels no fragment writes
+        /// too (measured on an Apple M3 Max under macOS 27.0.1: every such code of each tile a
+        /// draw reaches, none in other tiles, none in a pass that draws nothing or through a
+        /// blit), where the device's pass keeps the bytes its draws do not write. Announced at
+        /// every draw, an indirect command buffer's executed commands' too, naming every such
+        /// attachment of the pass. Not where `DriverFact::TileStoreIsMetals` holds (MoltenVK's
+        /// pass is a Metal pass, whose tile store rewrites the codes as Metal's does), nor under
+        /// [`metal2vulkan::device::TileStorePolicy::Exact`] for an attachment the load pass
+        /// (`render/unused_bits_load.rs`) rewrites.
+        SnormMinimumKept = "snorm-minimum-kept", Precision,
+            "the texels the pass's draws do not write keep their bytes; Metal's pass rewrites a \
+             channel's minimum code (-128, or -32768 for 16 bits) as the code above it (-127, \
+             -32767) in each tile a draw reaches: a texel whose bytes no Metal write left \
+             (uploaded or copied bytes) keeps a code Metal's pass would change";
+        /// too, naming every such attachment of the pass. Not where `DriverFact::TileStoreIsMetals`
+        /// holds (MoltenVK's pass is a Metal pass), nor under
+        /// [`metal2vulkan::device::TileStorePolicy::Exact`] for an attachment the load pass
+        /// (`render/unused_bits_load.rs`) rewrites.
         /// A blit between a buffer and a level of `RGB10A8_2P_XR10` or its sRGB twin whose width
         /// is not a multiple of 4 (`two_planes.rs`): it moves the texels at the rows the texture
         /// holds them in, where Metal's blit addresses the level's rows `⌊4 w / 16⌋ · 16` bytes
@@ -1238,7 +1261,8 @@ degradations! {
              stops";
         /// A render pass that loads a color attachment of an extended-range or padded 10-bit
         /// format (`BGR10_XR`, `BGRA10_XR`, `RGB10A8_2P_XR10`, `R10Unorm_X6`, `RG10Unorm_X12` and
-        /// their sRGB twins), stores it and draws, whose load pass
+        /// their sRGB twins), or under [`metal2vulkan::device::TileStorePolicy::Exact`] of a
+        /// signed normalized format or `RGB9E5Float`, stores it and draws, whose load pass
         /// (`render/unused_bits_load.rs`) rewrites every 32 x 32 tile of its render area: Metal's
         /// pass rewrites only the tiles a draw's primitives reach (EVs XRR2-xrb2 and XRR2-xrb3 on
         /// an Apple M4 and an Apple M3 Max, alike), and every tile only where a color
@@ -1249,9 +1273,10 @@ degradations! {
             "in tiles no draw reaches the pass rewrites what Metal keeps: the unused bits made \
              canonical (BGR10_XR's bits 30 and 31 ones, BGRA10_XR's low six bits of each field \
              and the two-plane color word's top two bits zeros) and BGRA10_XR alpha codes \
-             clamped to [384, 894], so an out-of-range raw alpha reads back changed, and a padded \
-             word's low six bits zeroed (an sRGB twin's code moved through Metal's table); the \
-             tiles a draw reaches are Metal's";
+             clamped to [384, 894], so an out-of-range raw alpha reads back changed, a padded \
+             word's low six bits zeroed (an sRGB twin's code moved through Metal's table) and, \
+             under the exact tile store, a signed normalized minimum code raised and an \
+             RGB9E5Float word normalized; the tiles a draw reaches are Metal's";
         /// A draw in a render pass over a rasterization-rate map of no layers that was made after
         /// the device released a map of one or more layers (`rate_mapped_pass.rs`). The draw
         /// writes nothing, where Metal draws: an Apple M4 and an Apple M3 Max drew a 64-pixel

@@ -27,6 +27,7 @@ use metal2vulkan::bind::{
     TessellationScanKernel, TexelWords, YCbCrOutput,
 };
 use metal2vulkan::metal::format::ExtendedRange;
+use metal2vulkan::metal::PixelFormat;
 use std::collections::HashMap;
 
 /// A crate-owned module the runtime dispatches.
@@ -95,10 +96,11 @@ pub(super) enum OwnedModule {
     /// `bind::ycbcr_write_module`: a 4:4:4 YCbCr texture's written texels encoded into its
     /// surface's two planes (`ycbcr.rs`), its write shadow bound as a storage image.
     YCbCrWrite,
-    /// `bind::unused_bits_module` of one form held as one kind of words: an extended-range or
-    /// padded 10-bit texture's words in the tiles a mask names rewritten as Metal's tile store
-    /// leaves them, before a pass that loads it and draws (`render/unused_bits_load.rs`).
-    UnusedBits(ExtendedRange, TexelWords),
+    /// `bind::unused_bits_module` of one format held as one kind of words: an extended-range,
+    /// padded 10-bit or bfloat texture's words (or, under `TileStorePolicy::Exact`, a signed
+    /// normalized or `RGB9E5Float` one's) in the tiles a mask names rewritten as Metal's tile
+    /// store leaves them, before a pass that loads it and draws (`render/unused_bits_load.rs`).
+    UnusedBits(PixelFormat, TexelWords),
     /// `bind::tiled_texels_module`: a heap texture's elements moved between its image's tight
     /// copy and Metal's tiles in the heap's bytes (`texture/heap_tiled.rs`).
     TiledTexels,
@@ -269,9 +271,9 @@ impl OwnedModule {
                     .map_err(Error::Compile)?;
                 Ok((module.spirv.to_vec(), 3, 0))
             }
-            OwnedModule::UnusedBits(form, words) => {
+            OwnedModule::UnusedBits(format, words) => {
                 let device = device.compile_device();
-                let module = metal2vulkan::bind::unused_bits_module(device, form, words)
+                let module = metal2vulkan::bind::unused_bits_module(device, format, words)
                     .map_err(Error::Compile)?;
                 Ok((module.spirv.to_vec(), 3, 0))
             }
@@ -375,7 +377,7 @@ pub(super) struct OwnedKernels {
     two_plane_texels: Option<OwnedKernel>,
     plane_bytes_copy: Option<OwnedKernel>,
     ycbcr_write: Option<OwnedKernel>,
-    unused_bits: HashMap<(ExtendedRange, TexelWords), OwnedKernel>,
+    unused_bits: HashMap<(PixelFormat, TexelWords), OwnedKernel>,
     tiled_texels: Option<OwnedKernel>,
     compressed_blits: HashMap<CompressedBlit, OwnedKernel>,
     capture_assembly: Option<OwnedKernel>,
@@ -437,7 +439,9 @@ impl OwnedKernels {
                 self.index_rewrites.get(&(program, phase)).copied()
             }
             OwnedModule::YCbCrConvert(output) => self.ycbcr_converts.get(&output).copied(),
-            OwnedModule::UnusedBits(form, words) => self.unused_bits.get(&(form, words)).copied(),
+            OwnedModule::UnusedBits(format, words) => {
+                self.unused_bits.get(&(format, words)).copied()
+            }
             OwnedModule::CompressedBlit(rule) => self.compressed_blits.get(&rule).copied(),
             OwnedModule::ExtendedShadowLoad(form) => self.extended_shadow_loads.get(&form).copied(),
             OwnedModule::TwinDecode(decode) => self.twin_decodes.get(&decode).copied(),
@@ -461,8 +465,8 @@ impl OwnedKernels {
             OwnedModule::YCbCrConvert(output) => {
                 self.ycbcr_converts.insert(output, kernel);
             }
-            OwnedModule::UnusedBits(form, words) => {
-                self.unused_bits.insert((form, words), kernel);
+            OwnedModule::UnusedBits(format, words) => {
+                self.unused_bits.insert((format, words), kernel);
             }
             OwnedModule::CompressedBlit(rule) => {
                 self.compressed_blits.insert(rule, kernel);

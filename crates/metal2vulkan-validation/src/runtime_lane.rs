@@ -642,6 +642,8 @@ mod single_sample_passes;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod snapshot_reads;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod snorm_tile_store;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod sparse_textures;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod srgb_storage;

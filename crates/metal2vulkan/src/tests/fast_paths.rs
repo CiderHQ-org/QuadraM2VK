@@ -70,6 +70,7 @@ fn choices() -> Vec<Choice> {
         rounding_order: _,
         half_blend: _,
         decoded_texels: _,
+        tile_store: _,
     } = p;
     vec![
         choice!(p.framebuffer_fetch: FramebufferFetchPolicy { RequireOrdered, AcceptUnordered }),
@@ -83,6 +84,7 @@ fn choices() -> Vec<Choice> {
         choice!(p.rounding_order: RoundingOrderPolicy { Native, Exact }),
         choice!(p.half_blend: HalfBlendPolicy { Device, Exact }),
         choice!(p.decoded_texels: DecodedTexelsPolicy { Compact, Exact }),
+        choice!(p.tile_store: TileStorePolicy { Device, Exact }),
     ]
 }
 
@@ -394,6 +396,24 @@ fn the_runtime_s_padded_reads_choice_keys_no_profile() {
     assert_eq!(alias.len(), shadow.len());
     for ((stem, a), (other, s)) in alias.iter().zip(&shadow) {
         assert_eq!(stem, other);
+/// The runtime's choice of a loaded attachment's tile store (`tile_store`) moves no committed
+/// profile's fingerprint: no profile carries it, so no translation follows it.
+#[test]
+fn the_runtime_s_tile_store_choice_keys_no_profile() {
+    use crate::spirv::testing::committed_profiles_with;
+    let device = committed_profiles_with(DevicePolicy::UNTRUSTED).expect("profiles");
+    let exact = committed_profiles_with(DevicePolicy {
+        tile_store: TileStorePolicy::Exact,
+        ..DevicePolicy::UNTRUSTED
+    })
+    .expect("profiles");
+    assert_eq!(device.len(), exact.len());
+    for ((stem, d), (other, e)) in device.iter().zip(&exact) {
+        assert_eq!(stem, other);
+        assert_eq!(d.fingerprint(), e.fingerprint(), "{stem}");
+    }
+}
+
 /// The runtime's choice of a carried texture's decoded twin (`decoded_texels`) moves no committed
 /// profile's fingerprint: no profile carries it, so no translation follows it.
 #[test]

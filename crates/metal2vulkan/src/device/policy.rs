@@ -63,7 +63,11 @@ pub struct DevicePolicy {
     /// values exactly. The runtime's choice alone: no emitted code changes.
     pub decoded_texels: DecodedTexelsPolicy,
     /// emitted code changes.
-    pub padded_reads: PaddedReadsPolicy,
+    /// Whether a render pass that loads a signed normalized or `RGB9E5Float` color attachment and
+    /// draws keeps the texels its draws do not write as the device's load and store leave them
+    /// (the default), or as Metal's tile store writes them back in the tiles a draw reaches. The
+    /// runtime's choice alone: no emitted code changes.
+    pub tile_store: TileStorePolicy,
 }
 
 impl DevicePolicy {
@@ -90,6 +94,7 @@ impl DevicePolicy {
         rounding_order: RoundingOrderPolicy::Native,
         half_blend: HalfBlendPolicy::Device,
         decoded_texels: DecodedTexelsPolicy::Compact,
+        tile_store: TileStorePolicy::Device,
     };
 
     /// This policy with Metal's answer wherever the choices offer it: its maths functions,
@@ -98,8 +103,7 @@ impl DevicePolicy {
     /// NaN and minimum and maximum ([`NanMinMaxPolicy::Exact`]), its rounding order
     /// ([`RoundingOrderPolicy::Exact`]), its 16-bit float blend of a `half` output
     /// ([`HalfBlendPolicy::Exact`]), its filter of a two-plane YCbCr texture
-    /// ([`YCbCrFilterPolicy::Exact`]), and the bytes between a texture's rows that no first move
-    /// of an image over them reaches ([`PaddedReadsPolicy::Shadow`]). Sampling and every other
+    /// as written ([`HeapCompressionPolicy::Uncompressed`]), each command buffer seen complete
     /// field are kept.
     pub const fn exact_answers(self) -> DevicePolicy {
         DevicePolicy {
@@ -111,6 +115,7 @@ impl DevicePolicy {
             rounding_order: RoundingOrderPolicy::Exact,
             half_blend: HalfBlendPolicy::Exact,
             decoded_texels: DecodedTexelsPolicy::Exact,
+            tile_store: TileStorePolicy::Exact,
             ..self
         }
     }
@@ -410,6 +415,34 @@ pub enum DecodedTexelsPolicy {
     /// Metal's values exactly, an ASTC LDR texture's in `R32G32B32A32_SFLOAT`, 16 bytes a texel
     /// (an EAC 11-bit texture's in `R32_SFLOAT` or `R32G32_SFLOAT`, 4 bytes a channel), where the
     /// device samples, filters and copies into the format (else the compact texels, announced).
+    Exact,
+}
+
+/// What a render pass that loads a single-sampled color attachment of a signed normalized format
+/// (`R8Snorm`, `RG8Snorm`, `RGBA8Snorm`, `R16Snorm`, `RG16Snorm`, `RGBA16Snorm`) or of
+/// `RGB9E5Float`, stores it and draws leaves in the texels its draws do not write. An Apple GPU
+/// writes each 32 x 32 tile a draw reaches back through its texels' values (an Apple M3 Max under
+/// macOS 27.0.1): a channel's minimum code (-128, or -32768), which reads as -1.0 as the code above
+/// it does, is stored as that code (-127, -32767), and an `RGB9E5Float` word whose largest
+/// mantissa is below 256 under an exponent above 0 is stored normalized (its mantissas shifted up
+/// as its exponent steps down, to 0 at most). No Metal write leaves such a code or word: only
+/// uploaded or copied bytes hold one. The extended-range, padded 10-bit and bfloat attachments'
+/// tile store, the runtime's load pass, runs under either value. The runtime's choice alone: no
+/// emitted code changes.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum TileStorePolicy {
+    /// The device's load and store (the default): such a texel keeps its code or word, announced
+    /// `snorm-minimum-kept` or `shared-exponent-kept` at each draw in such a pass.
+    #[default]
+    Device,
+    /// The runtime's load pass rewrites such an attachment's texels in the tiles the pass's draws
+    /// reach, as Metal's tile store leaves them, before the pass (as it does an extended-range
+    /// attachment's): a copy of the render area into a scratch buffer and back, with a dispatch.
+    /// An attachment the load pass cannot take (a texture held as a shadow, a sparse one, or one
+    /// whose image the device does not copy both ways) keeps the device's, announced as under
+    /// [`Device`](Self::Device).
     Exact,
 }
 }

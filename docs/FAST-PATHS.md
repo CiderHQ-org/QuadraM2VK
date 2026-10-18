@@ -347,6 +347,12 @@ driver's. Each is open work.
   A source-over survey on the M3 fits the 8-bit model to the 10-bit unorm and 8-bit snorm formats
   (with their clamps), and shows the 16-bit norms and `RGBA32Float` blending in `float` even for a
   `half4` output; their factor sets are not measured.
+- **A blended signed normalized attachment on lavapipe.** lavapipe blends no snorm format
+  (`R8Snorm`, `RG8Snorm`, `RGBA8Snorm`, `R16Snorm`, `RG16Snorm`, `RGBA16Snorm`: no
+  `COLOR_ATTACHMENT_BLEND`), so a pipeline that blends one is refused as the device lacking the
+  format. The function's own blend over the attachment's input attachment, as an extended-range
+  attachment takes there, is not built: Metal's snorm blend is measured for source-over alone
+  (the row above).
 - **Format-less storage reads on a device without `shaderStorageImageReadWithoutFormat` (ANV).**
   A fetch through the pixel interlock of a 16-bit packed color attachment (`B5G6R5Unorm`,
   `A1BGR5Unorm`, `ABGR4Unorm`, `BGR5A1Unorm`), which no SPIR-V format names, is refused

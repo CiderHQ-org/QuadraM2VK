@@ -531,6 +531,7 @@ const LINEAR_UNINITIALIZED: DriverFact = DriverFact::LinearTilingFeaturesUniniti
 const STALL: DriverFact = DriverFact::SemaphoreOperationsStallSubmits;
 const SAMPLED_HIZ: DriverFact = DriverFact::SampledDepthKeepsHiZ;
 const MSAA_DEPTH: DriverFact = DriverFact::MultisampledDepthFasterOutOfGeneral;
+const TILE_STORE: DriverFact = DriverFact::TileStoreIsMetals;
 
 /// Every committed profile's driver has exactly its measured facts (on a measured identity those
 /// its rows name, on any other its driver's defects alone). A profile of a measured identity: the
@@ -544,10 +545,9 @@ const MSAA_DEPTH: DriverFact = DriverFact::MultisampledDepthFasterOutOfGeneral;
 /// test keeps denormals and compares magnitudes as Metal's (the M4's identity: the latter measured
 /// on the M3 Max, the M4's by construction); ANV's compressed images hide aliased writes and its
 /// host-transfer images keep their bytes; a pass the interlock would split runs
-/// faster whole on the RPL-S and no slower split on the M3 Max (under macOS 26.7, and under 27 the
-/// M4's identity), the 780M, the RPL-P and the RTX 5080 Laptop GPU; MoltenVK warns of a dynamic
-/// restart, compiles its fill per command pool, stores `DONT_CARE` as Metal's own and orders its
-/// timestamps across queues; BC1 to BC3 decode as Metal's on the 780M and MoltenVK, BC4 and BC5 on
+/// restart, compiles its fill per command pool, stores `DONT_CARE` as Metal's own, orders its
+/// timestamps across queues and stores a signed normalized minimum code and an `E5B9G9R9` word as
+/// Metal's tile store does; BC1 to BC3 decode as Metal's on the 780M and MoltenVK, BC4 and BC5 on
 /// MoltenVK; NVIDIA's reads a depth rendered at custom sample positions at the standard ones; ANV's
 /// first sparse resource waits for every queue; BC6H decodes as Metal's on the 780M, the RPL-P,
 /// lavapipe 26.0.8, both MoltenVK GPUs and the RTX 5080 Laptop GPU, and BC7 on the same but
@@ -631,6 +631,7 @@ fn the_committed_profiles_drivers_have_their_facts() {
                 BC7,
                 SCARCE_POOLS,
                 LINEAR_UNINITIALIZED,
+                TILE_STORE,
             ],
         ),
         (
@@ -655,6 +656,7 @@ fn the_committed_profiles_drivers_have_their_facts() {
                 BC7,
                 SCARCE_POOLS,
                 LINEAR_UNINITIALIZED,
+                TILE_STORE,
             ],
         ),
         ("nvidia-pascal-linux", vec![PLANES]),

@@ -509,6 +509,7 @@ fn every_kind_has_a_site_a_lane_test_takes() {
         &TWO_PLANE_COPIES,
         &EXTENDED_RANGE_BITS,
         &UNREACHED_TILES,
+        &SNORM_MINIMUM,
         &STORED_CODES,
         &UNADVERTISED_VERTEX_SIMDGROUPS,
         &YCBCR_FILTERS,
