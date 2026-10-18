@@ -2709,7 +2709,8 @@ impl Device {
     }
 
     /// [`new_image`](Self::new_image)'s image, of `identity`, its owner made by `owner` of its
-    /// placement and `VkImage` (a heap's shadow, `texture/heap.rs`).
+    /// placement and `VkImage` (a heap's unaliased texture and a shadow whose copies leave an
+    /// aspect out, `texture/heap.rs`; a view's shadow, `texture/view_shadow.rs`).
     fn new_image_owned(
         &self,
         plan: ImagePlan,
@@ -2729,8 +2730,10 @@ impl Device {
     /// [`new_image_owned`](Self::new_image_owned)'s image holding what its memory held, whatever
     /// its storage mode: a heap texture's in memory of its own where its bytes in the heap are no
     /// layout of its texels (`texture/heap.rs`, `AliasRoute::Lossless`), as a heap's textures hold
-    /// what their bytes held; and the shadow of a texture over a buffer whose copy in writes every
-    /// texel of every aspect before any command reads it (`storage_over_buffer`).
+    /// what their bytes held; and a shadow whose copy in writes every texel of every aspect before
+    /// any command reads it: a texture's over a buffer (`storage_over_buffer`), and a heap
+    /// texture's over the heap's bytes (`texture/heap.rs`, `new_heap_shadow` and
+    /// `heap_planes_image`).
     fn new_image_as_it_lies(
         &self,
         plan: ImagePlan,

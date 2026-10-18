@@ -4,10 +4,11 @@
 //! - **Tiles.** A texture of a plain format that Metal keeps uncompressed lies in the heap's
 //!   bytes as Metal's tiles hold it: each element (a texel) in the tile of the largest 16 KiB
 //!   whose side is the level's own where shorter, the tiles in rows, the elements of a tile in
-//!   Morton order (`x0 y0 x1 y1 ...`, the longer side's extra bits on top). Its `replaceRegion`
-//!   and `getBytes`, the GPU's blits, and the CPU's and a buffer's writes over the bytes all meet
-//!   the texels at those bytes, and no byte between them changes. The runtime counts the texture
-//!   (`WorkCounts::heap_textures_tiled`) and announces no layout notice. Each lane-side offset
+//!   Morton order (`x0 y0 x1 y1 ...`, the longer side's extra bits on top). The bytes it is made
+//!   over, its `replaceRegion` and `getBytes`, the GPU's blits, and the CPU's and a buffer's
+//!   writes over the bytes all meet the texels at those bytes, and no byte between them changes.
+//!   The runtime counts the texture (`WorkCounts::heap_textures_tiled`), announces no layout
+//!   notice, and writes no zeros making it. Each lane-side offset
 //!   is restated here from the measured rule, apart from the runtime's
 //!   (`texture/heap_tiled.rs`).
 //! - **Two ways in one command.** A dispatch that writes the tiled texture's texel (0, 0) and
@@ -283,9 +284,10 @@ fn layouts_counted(before: &WorkCounts, after: &WorkCounts) -> [u64; 4] {
 }
 
 /// A plain texture in a heap over host pages lies in Metal's tiles (the module docs): its
-/// answered size holds them; `replaceRegion`, a blit into it, the CPU's writes and a buffer's
-/// over the bytes meet its texels there, and `getBytes` and a blit out of it read them; no byte
-/// between them changes. Counted tiled, with no layout notice.
+/// answered size holds them; the bytes it is made over, `replaceRegion`, a blit into it, the CPU's
+/// writes and a buffer's over the bytes meet its texels there, and `getBytes` and a blit out of it
+/// read them; no byte between them changes. Counted tiled, with no layout notice; made with no
+/// zeros (`WorkCounts::images_started_on_the_host`, `staging_submissions`).
 #[test]
 fn a_host_heap_s_plain_texture_lies_in_metal_s_tiles() {
     on_device(|device, messages| {
@@ -303,16 +305,36 @@ fn a_host_heap_s_plain_texture_lies_in_metal_s_tiles() {
                 "{what}: the answer {answer:?} holds Metal's tiles ({} bytes)",
                 plain.span()
             );
+            let len = plain.texels() * plain.unit as usize;
+            let zero = vec![0u8; HEAP];
+
+            // What the heap's bytes held before the texture was made is its texels: making it
+            // writes nothing (its image starts as its memory lies, each move in writing every
+            // element first: no copy on the host, no staging submission), and a blit reads them.
+            let held = named(len, 5);
+            mapping.write(0, &plain.laid(&held, &zero));
             let before = device.work_counts();
             let texture = heap.new_texture_at_offset(&descriptor, OFFSET).unwrap();
+            let made = device.work_counts();
             assert_eq!(
-                layouts_counted(&before, &device.work_counts()),
+                layouts_counted(&before, &made),
                 [1, 0, 0, 0],
                 "{what}: counted tiled"
             );
+            assert_eq!(
+                (made.images_started_on_the_host, made.staging_submissions),
+                (
+                    before.images_started_on_the_host,
+                    before.staging_submissions
+                ),
+                "{what}: made with no zeros"
+            );
             assert_eq!(layout_notices(messages), [], "{what}");
-            let len = plain.texels() * plain.unit as usize;
-            let zero = vec![0u8; HEAP];
+            assert_eq!(
+                blit_out(&queue, &texture, &plain),
+                held,
+                "{what}: the bytes it was made over"
+            );
             mapping.fill(0);
 
             // `replaceRegion` writes the texels into Metal's tiles; `getBytes` and a blit read

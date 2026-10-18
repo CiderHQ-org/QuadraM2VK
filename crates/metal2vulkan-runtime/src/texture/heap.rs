@@ -765,6 +765,17 @@ pub(crate) fn heap_planes(
     (regions, end)
 }
 
+/// Whether `regions` copy every aspect of an image of `format`: every aspect but an
+/// `X32_Stencil8` texture's depth, whose planes are its stencil's alone ([`heap_plane_layout`]).
+fn copies_every_aspect(regions: &[vk::BufferImageCopy], format: Format) -> bool {
+    let copied = regions
+        .iter()
+        .fold(vk::ImageAspectFlags::empty(), |aspects, region| {
+            aspects | region.image_subresource.aspect_mask
+        });
+    copied == image_aspects(format).into()
+}
+
 /// The initial layout of a heap texture's image of `tiling`: `PREINITIALIZED` for a linear one,
 /// whose move to `GENERAL` then keeps the bytes it holds, the heap's.
 fn initial_layout(tiling: vk::ImageTiling) -> vk::ImageLayout {
@@ -2537,10 +2548,33 @@ impl Device {
 }
 
 impl Device {
+    /// The image of a heap's shadow of `plan` (`heap_shadow_image`, `heap_tiled_image`), of
+    /// `identity`, its owner made by `owner`. Where its copies in write every aspect (`every`,
+    /// [`copies_every_aspect`]) it starts as its memory lies: each copy in writes every texel of
+    /// every aspect before any command reads it (`shadow.rs`), so zeros there would never be read.
+    /// Else it starts as a new texture of its storage mode does
+    /// ([`new_image_owned`](Self::new_image_owned)), as no copy writes the aspect they leave out (an
+    /// `X32_Stencil8` texture's depth).
+    fn new_heap_shadow(
+        &self,
+        plan: ImagePlan,
+        layout: &TextureLayout,
+        descriptor: &TextureDescriptor,
+        identity: Identity,
+        every: bool,
+        owner: impl FnOnce(Placement, vk::Image) -> Owner,
+    ) -> Result<Image, Error> {
+        match every {
+            true => self.new_image_as_it_lies(plan, layout, descriptor, identity, owner),
+            false => self.new_image_owned(plan, layout, descriptor, identity, owner),
+        }
+    }
+
     /// The image of a heap texture on [`AliasRoute::Shadow`]: `image`'s plan in memory of its own,
     /// whose texels the encoders copy from the heap's bytes (`bytes`) at `place` and back
     /// (`shadow.rs`), laid out as [`heap_planes`] says; of an identity of its own, of the heap's
-    /// hazard tracking, and the heap's `options`. Its drop gives the range back.
+    /// hazard tracking, and the heap's `options`, started by [`new_heap_shadow`](Self::new_heap_shadow).
+    /// Its drop gives the range back.
     fn heap_shadow_image(
         &self,
         bytes: &Buffer,
@@ -2570,6 +2604,7 @@ impl Device {
                 ..region
             })
             .collect();
+        let every = copies_every_aspect(&regions, plan.format);
         let shadow_range = UseRange::Image {
             aspects: image_aspects(plan.format).into(),
             levels: 0..plan.levels,
@@ -2581,7 +2616,7 @@ impl Device {
         };
         let mut own = *descriptor;
         own.resource_options = options;
-        self.new_image_owned(plan, layout, &own, identity, |placement, image| {
+        self.new_heap_shadow(plan, layout, &own, identity, every, |placement, image| {
             let copies = ShadowCopies {
                 source: ShadowSource::Bytes {
                     buffer,
@@ -2636,8 +2671,9 @@ impl Device {
     /// The image of a heap's two-plane texture on [`AliasRoute::Planes`]: `image`'s plan in
     /// memory of its own, whose texels the encoders move from its two planes in the heap's bytes
     /// (`bytes`) at `place` and back (`shadow.rs`, `heap_two_planes.rs`); of an identity of its
-    /// own, of the heap's hazard tracking, and the heap's `options`. Its drop gives the range
-    /// back.
+    /// own, of the heap's hazard tracking, and the heap's `options`. It starts as its memory lies,
+    /// as each move in writes every texel (its color word and its alpha byte) before any command
+    /// reads it. Its drop gives the range back.
     fn heap_planes_image(
         &self,
         bytes: &Buffer,
@@ -2670,7 +2706,7 @@ impl Device {
         let pixel_format = layout.pixel_format;
         let mut own = *descriptor;
         own.resource_options = options;
-        self.new_image_owned(plan, layout, &own, identity, |placement, image| {
+        self.new_image_as_it_lies(plan, layout, &own, identity, |placement, image| {
             let copies = ShadowCopies {
                 source: ShadowSource::Bytes {
                     buffer,
@@ -2703,8 +2739,8 @@ impl Device {
     /// The image of a heap texture on `AliasRoute::Tiled`: `image`'s plan in memory of its own,
     /// whose elements the encoders move from Metal's tiles, laid out as `tiled`, in the heap's
     /// bytes (`bytes`) at `place` and back (`shadow.rs`, `heap_tiled.rs`); of an identity of its
-    /// own, of the heap's hazard tracking, and the heap's `options`. Its drop gives the range
-    /// back.
+    /// own, of the heap's hazard tracking, and the heap's `options`, started by
+    /// [`new_heap_shadow`](Self::new_heap_shadow). Its drop gives the range back.
     fn heap_tiled_image(
         &self,
         bytes: &Buffer,
@@ -2728,6 +2764,7 @@ impl Device {
             plan.levels,
             plan.layers,
         );
+        let every = copies_every_aspect(&regions, plan.format);
         if tiled.size > place.size {
             return Err(internal("a tiled heap texture's elements past its range"));
         }
@@ -2750,7 +2787,7 @@ impl Device {
         };
         let mut own = *descriptor;
         own.resource_options = options;
-        self.new_image_owned(plan, layout, &own, identity, |placement, image| {
+        self.new_heap_shadow(plan, layout, &own, identity, every, |placement, image| {
             let copies = ShadowCopies {
                 source: ShadowSource::Bytes {
                     buffer,
