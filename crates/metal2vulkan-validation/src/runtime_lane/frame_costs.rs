@@ -44,6 +44,8 @@
 //! layouts of equal shapes (`WorkCounts::set_zero_equal_shape_switches` and kin), the passes whose
 //! first instance recorded inline and the others by the check that ruled it out
 //! (`WorkCounts::inline_passes`, `WorkCounts::passes_not_inline_actions` and kin)
+//! with the render pass begins and secondary executions the recorder's replays called
+//! (`WorkCounts::commands_replayed`), and the device's live
 //! `VkDeviceMemory` by kind after the timed frames (ANV on i915 lists each in every kernel
 //! submission). Then the CPU time of the
 //! process's other threads over the timed frames, their waits included, per command buffer (on
@@ -95,6 +97,27 @@
 //! draws on the Iris Xe (43%). Its draws bind what the draws before them bound, which every draw
 //! of the other runs changes.
 //!
+//! `frame_costs_guest_passes` measures the plain device with frames of the consumer's guest's
+//! shapes ([`Shape`]), each pass loading its layer as the guest's passes do ([`GUEST_LOADS`]: most
+//! clear it) and its draws the window server's in turn from its first: the old image's 100 passes
+//! of one draw, in 100 command buffers of one pass and in one command buffer of all 100; and the
+//! new image's frame ([`NEW_IMAGE`]): 41 command buffers, 9 of no pass, 32 of one pass, most of
+//! one or two draws but five of 20 to 105, which hold most of its 277 draws. A single-draw pass's
+//! own costs (its opening, end and commit, its instance's state) are a draw's there, where the
+//! window server's passes spread them over six draws.
+//!
+//! `frame_costs_guest_composite` measures the plain device with frames of the guest's composite
+//! passes ([`Composite`]), one a command buffer of a plain draw and then two through the fetching
+//! CoreAnimation composite: a `BGRA8Unorm` layer loaded as [`GUEST_LOADS`] and stored beside a
+//! memoryless `RGBA16Float` scratch loaded and stored `DontCare`, the shape of the guest's passes
+//! whose first instance does not record inline; then with the scratch a private texture cleared
+//! and stored, whose actions the inline path takes. On a device that fetches through the pixel
+//! interlock the fetching draws leave the layer out of their subpass and the plain draw keeps it
+//! in its own, so each pass splits there, as the guest's do, or runs whole where the device runs
+//! such a pass faster so (`render/reroute.rs`). Its lines count the passes by why their first
+//! instance did not record inline, the split instances recorded inline, the instances ended
+//! unrun, and the replays' render pass begins and secondary executions.
+//!
 //! `frame_costs_alternating` measures the plain device with frames of passes whose draws switch
 //! between two pipeline states of one layout at every draw ([`Shape::Alternating`]): the mask's,
 //! and a gathering mask's of the same interface (`zwd_mask_gather`), each draw its shape's bytes
@@ -103,6 +126,12 @@
 //! consumer's guest's passes switch so between states whose layouts are defined alike, which share
 //! one layout (`WorkCounts::pipeline_layouts_shared`): its lines give what a draw's push of set 0
 //! carries there.
+//!
+//! `frame_costs_host_pages` measures the plain device with the index and rectangle buffers over
+//! host pages ([`Workload::host_pages`]), as every buffer of the consumer's guest lies over its RAM,
+//! in the window server's frame and in the new image's: each draw's uses of them then take the
+//! uses of the keys their bytes share, and its keys are named and their pages held, as the guest's
+//! draws' are.
 //!
 //! Ignored by default: a measurement, not a check. Run it by name with `--run-ignored all`, in a
 //! build with `--cfg m2v_system_alloc` for the times, whose lib test binary keeps the system
@@ -126,6 +155,8 @@
 //! commit none, and the frame's submissions none but the barrier command buffers they record to
 //! keep, on a device that keeps them (`Device::work_counts`). They count, and time nothing.
 
+use super::host_memory::{host_page, no_copy, Mapping};
+use super::memoryless::memoryless_options;
 use super::render_arguments::{Members, ORDERED};
 use super::renders::public_render;
 use super::submit_costs::Execbuffers;
@@ -142,8 +173,8 @@ use metal2vulkan::device::CompletionPolicy;
 use metal2vulkan::error::RuntimeDriverDefect;
 use metal2vulkan::library::{FunctionConstantValue, FunctionConstantValues};
 use metal2vulkan::metal::{
-    BlendFactor, DataType, IndexType, PixelFormat, PrimitiveType, SamplerMinMagFilter, TextureType,
-    TextureUsage,
+    BlendFactor, ColorWriteMask, DataType, IndexType, PixelFormat, PrimitiveType, RenderStages,
+    ResourceUsage, SamplerMinMagFilter, TextureType, TextureUsage,
 };
 use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};
 use metal2vulkan_devtools::{engine_dir, llvm_assemble};
@@ -181,6 +212,64 @@ const TEXTURES: usize = 16;
 const TEXTURE_SIDE: u64 = 64;
 /// The bytes of `zwd_shapes`' `ZwdShape`: rectangle, fill, outline and shape.
 const SHAPE_BYTES: usize = 64;
+
+/// The load actions of the passes of the guest's shapes ([`Shape::Passes`], [`Shape::NewImage`]),
+/// in turn: of every 20 passes, 15 clear their layer, 4 load it and 1 leaves it undefined, about
+/// the consumer's guest's mix (74 clear, 20 load and 5 don't-care of 99, reims-vgpu's counts of
+/// its window server's passes).
+const GUEST_LOADS: [LoadAction; 20] = {
+    use LoadAction::{Clear as C, DontCare as D, Load as L};
+    [C, C, L, C, C, C, L, C, C, D, C, C, L, C, C, C, L, C, C, C]
+};
+
+/// The command buffers of a frame in [`Shape::NewImage`], in turn: each the draws of its one pass,
+/// or `None` for one with no pass. As the consumer's guest's new image commits them (a frame of
+/// its trace: 41 command buffers, none of more than one pass; 32 passes of 275 draws, on average a
+/// pass of none, 15 of one, 4.6 of two, 5 of 3 to 5, 1.5 of 6 to 10, 3.8 of 11 to 50 and one of
+/// more): here 41, 32 passes of 277 draws.
+const NEW_IMAGE: [Option<usize>; 41] = [
+    Some(1),
+    Some(20),
+    Some(1),
+    None,
+    Some(2),
+    Some(1),
+    Some(3),
+    Some(1),
+    Some(105),
+    None,
+    Some(1),
+    Some(2),
+    Some(6),
+    Some(1),
+    None,
+    Some(3),
+    Some(1),
+    Some(30),
+    Some(2),
+    None,
+    Some(1),
+    Some(0),
+    Some(4),
+    Some(1),
+    None,
+    Some(35),
+    Some(1),
+    Some(2),
+    Some(3),
+    None,
+    Some(1),
+    Some(6),
+    Some(1),
+    None,
+    Some(3),
+    Some(2),
+    Some(35),
+    None,
+    Some(1),
+    Some(1),
+    None,
+];
 /// The host imports a run over imports holds live: the consumer's guest drag on the Iris Xe held
 /// 259 to 556, each in every kernel submission. With the fewer, the Iris Xe's scheduler thread
 /// keeps up with the encoding thread; with the more, its submissions fall behind the commits, as
@@ -272,6 +361,9 @@ struct Run {
     guest: bool,
     /// Whether the [`REPEATED`] draws of each pass are drawn again with no call before them.
     repeats: bool,
+    shape: Shape,
+    /// Whether the index and rectangle buffers lie over host pages ([`Workload::host_pages`]).
+    host: bool,
 }
 
 impl Run {
@@ -283,6 +375,8 @@ impl Run {
         completion: CompletionPolicy::Grouped,
         guest: false,
         repeats: false,
+        shape: Shape::Window,
+        host: false,
     };
     const CHECKED: Run = Run {
         checked: true,
@@ -296,6 +390,22 @@ impl Run {
         repeats: true,
         ..Run::PLAIN
     };
+
+    /// The plain device's run of a frame of `shape`.
+    const fn shaped(shape: Shape) -> Run {
+        Run {
+            shape,
+            ..Run::PLAIN
+        }
+    }
+
+    /// [`shaped`](Self::shaped)'s, its index and rectangle buffers over host pages.
+    const fn hosted(shape: Shape) -> Run {
+        Run {
+            host: true,
+            ..Run::shaped(shape)
+        }
+    }
 
     /// The checked device's run with `imports` host imports live, under `completion`, in the
     /// guest's shape where `guest` ([`Workload::guest`]).
@@ -337,10 +447,37 @@ impl Run {
             false => device,
             true => format!("{device}, draws repeated with no call before them"),
         };
+        let device = match self.shape {
+            Shape::Window => device,
+            Shape::Passes { buffers, passes } => format!(
+                "{device}, {buffers} command buffers of {passes} passes of one draw, the guest's \
+                 loads"
+            ),
+            Shape::NewImage => {
+                format!("{device}, the guest's new image's frame, the guest's loads")
+            }
+            Shape::Composite {
+                buffers,
+                draws,
+                kept,
+            } => format!(
+                "{device}, {buffers} command buffers of 1 composite pass of a plain draw and {} \
+                 fetching draws, the guest's loads, {}",
+                draws - 1,
+                match kept {
+                    false => "a memoryless DontCare scratch",
+                    true => "a private scratch cleared and stored",
+                }
+            ),
             Shape::Alternating { buffers, draws } => format!(
                 "{device}, {buffers} command buffers of 1 pass of {draws} masked shapes \
                  alternating between two pipeline states of one layout, the guest's loads"
             ),
+        };
+        let device = match self.host {
+            false => device,
+            true => format!("{device}, buffers over host pages"),
+        };
         match self.imports {
             0 => device,
             imports => format!(
@@ -349,10 +486,45 @@ impl Run {
             ),
         }
     }
+}
+
+/// How a frame's draws group into passes and command buffers.
+#[derive(Clone, Copy)]
+enum Shape {
+    /// The window server's (the module docs): [`BUFFERS`] command buffers of one pass of
+    /// [`DRAWS`] draws, every [`RESOLVED`]th pass resolved.
+    Window,
+    /// The guest's old image's: `buffers` command buffers of `passes` passes of one draw each,
+    /// loading as [`GUEST_LOADS`].
+    Passes { buffers: usize, passes: usize },
+    /// The guest's new image's: the command buffers of [`NEW_IMAGE`], loading as
+    /// [`GUEST_LOADS`].
+    NewImage,
+    /// The guest's composite passes ([`Composite`]): `buffers` command buffers of one pass of
+    /// `draws` draws each, a plain draw and then fetching ones, the scratch memoryless and
+    /// `DontCare`, or, where `kept`, a private texture cleared and stored (actions the inline path
+    /// takes).
+    Composite {
+        buffers: usize,
+        draws: usize,
+        kept: bool,
+    },
     /// `buffers` command buffers of one pass of `draws` masked shapes, which switch between the
     /// mask's pipeline state and the gathering mask's ([`Workload::gather`]) at every draw,
     /// loading as [`GUEST_LOADS`].
     Alternating { buffers: usize, draws: usize },
+}
+
+impl Shape {
+    /// Each command buffer's passes, as their draws.
+    fn layout(self) -> Vec<Vec<usize>> {
+        match self {
+            Shape::Window => vec![vec![DRAWS]; BUFFERS],
+            Shape::Passes { buffers, passes } => vec![vec![1; passes]; buffers],
+            Shape::NewImage => (NEW_IMAGE.iter())
+                .map(|draws| draws.iter().copied().collect())
+                .collect(),
+            Shape::Composite { buffers, draws, .. } => vec![vec![draws]; buffers],
             Shape::Alternating { buffers, draws } => vec![vec![draws]; buffers],
         }
     }
@@ -415,6 +587,9 @@ struct Workload {
     guest: Option<GuestEvents>,
     /// Whether each pass draws its [`REPEATED`] draws again with no call before them.
     repeats: bool,
+    /// The frame's shape, and each command buffer's passes as their draws ([`Shape::layout`]).
+    shape: Shape,
+    layout: Vec<Vec<usize>>,
     /// A checked run's submissions checked.
     checks: Option<Arc<Checks>>,
     /// One sample, and four.
@@ -428,10 +603,114 @@ struct Workload {
     /// Six `UInt16` indices, 0 to 5, and the rectangles' corners, one `float4` a draw of a frame.
     indices: Buffer,
     rects: Buffer,
+    /// Where they lie over host pages: a no-copy buffer over all of them, and the pages, which
+    /// outlive the three buffers (declared after them).
+    _host_pages: Option<(Buffer, Mapping)>,
+    /// What a composite frame draws with, in a run of that shape.
+    composite: Option<Composite>,
     /// In an alternating run ([`Shape::Alternating`]), a gathering mask's pipeline state of one
     /// sample (`zwd_quad`, `zwd_mask_gather`): the mask's interface, so a layout defined as the
     /// mask's, and another variant.
     gather: Option<RenderPipelineState>,
+}
+
+/// The guest's composite pass, as its passes the inline path takes none of
+/// (`WorkCounts::passes_not_inline_actions`) are: color 0 one of [`TARGETS`] private
+/// `BGRA8Unorm` layers, loaded as [`GUEST_LOADS`] and stored, color 1 a memoryless `RGBA16Float`
+/// scratch loaded and stored `DontCare`; each draw through the CoreAnimation composite of
+/// `runtime_lane::framebuffer_fetch::blend8` (the owned fixture `fbl_fetch_blend8_safe`'s
+/// `fbl8_safe_loaded`): color 0 fetched and blended one over one minus the source alpha, color 1
+/// written under an empty mask; each pass's first draw a plain one before them, white
+/// (`rt6_resolves`'s `rt6_resolve_white`) through the same blend and mask.
+struct Composite {
+    /// The plain draw's pipeline.
+    plain: RenderPipelineState,
+    /// The fetching draws' pipeline.
+    pipeline: RenderPipelineState,
+    layers: Vec<Texture>,
+    scratch: Texture,
+    /// The `half4` sources the fragment function reads, at `64 y + x` and 4096 past it.
+    sources: Buffer,
+    /// Whether the scratch is a private texture its passes clear and store.
+    kept: bool,
+}
+
+impl Composite {
+    fn new(device: &Device, kept: bool) -> Composite {
+        let library = device
+            .new_library_with_air(
+                &llvm_assemble(&engine_dir().join("fbl_fetch_blend8_safe.ll")).unwrap(),
+            )
+            .unwrap();
+        let function = |name| {
+            StageSource::Function(
+                library
+                    .new_function_with_name(name)
+                    .unwrap()
+                    .function_descriptor(),
+            )
+        };
+        let mut descriptor = RenderPipelineDescriptor::new(function("fbl8_safe_vertex"));
+        descriptor.fragment = Some(function("fbl8_safe_loaded"));
+        let white = device
+            .new_library_with_air(&llvm_assemble(&engine_dir().join("rt6_resolves.ll")).unwrap())
+            .unwrap();
+        let white = white
+            .new_function_with_name("rt6_resolve_white")
+            .unwrap()
+            .function_descriptor();
+        let mut color = ColorAttachmentDescriptor::new(PixelFormat::BGRA8Unorm);
+        color.blending_enabled = true;
+        color.source_rgb_blend_factor = BlendFactor::One;
+        color.source_alpha_blend_factor = BlendFactor::One;
+        color.destination_rgb_blend_factor = BlendFactor::OneMinusSourceAlpha;
+        color.destination_alpha_blend_factor = BlendFactor::OneMinusSourceAlpha;
+        let mut scratch = ColorAttachmentDescriptor::new(PixelFormat::RGBA16Float);
+        scratch.write_mask = ColorWriteMask::NONE;
+        descriptor.color_attachments[0] = Some(color);
+        descriptor.color_attachments[1] = Some(scratch);
+        let pipeline = device
+            .new_render_pipeline_state(&descriptor, &PipelineOptions::default())
+            .unwrap();
+        descriptor.fragment = Some(StageSource::Function(white));
+        let plain = device
+            .new_render_pipeline_state(&descriptor, &PipelineOptions::default())
+            .unwrap();
+        let layer = || {
+            let mut layer = TextureDescriptor::texture_2d(
+                PixelFormat::BGRA8Unorm,
+                TARGET_SIDE,
+                TARGET_SIDE,
+                false,
+            );
+            layer.usage = TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ;
+            layer.resource_options = ResourceOptions::private();
+            device.new_texture(&layer).unwrap()
+        };
+        let mut scratch = TextureDescriptor::texture_2d(
+            PixelFormat::RGBA16Float,
+            TARGET_SIDE,
+            TARGET_SIDE,
+            false,
+        );
+        scratch.usage = TextureUsage::RENDER_TARGET;
+        scratch.resource_options = match kept {
+            false => memoryless_options(),
+            true => ResourceOptions::private(),
+        };
+        // A half 0.5 in every channel, past every index the fragment reads.
+        let count = (64 * (TARGET_SIDE - 1) + TARGET_SIDE + 4096) as usize;
+        let half = 0x3800u16.to_le_bytes();
+        let sources: Vec<u8> = (0..4 * count).flat_map(|_| half).collect();
+        Composite {
+            plain,
+            pipeline,
+            layers: (0..TARGETS).map(|_| layer()).collect(),
+            scratch: device.new_texture(&scratch).unwrap(),
+            sources: buffer_with(device, &sources).unwrap(),
+            kept,
+        }
+    }
 }
 
 /// A function of `library`, its constant 0 (`zwd_variant`) 0.
@@ -549,6 +828,7 @@ impl Workload {
         device: Device,
         checked: bool,
         layers: Layers,
+        (guest, repeats, shape, host): (bool, bool, Shape, bool),
     ) -> Workload {
         let library = |name: &str| {
             device.new_library_with_air(&llvm_assemble(&engine_dir().join(name)).unwrap())
@@ -604,6 +884,17 @@ impl Workload {
             ),
             Layers::OverBuffers(..) => (0..TARGETS).map(|_| target_over_buffer(&device)).unzip(),
         };
+        let (indices, rects, host_pages) = match host {
+            false => (
+                buffer_with(&device, &indices).unwrap(),
+                buffer_with(&device, &rects).unwrap(),
+                None,
+            ),
+            true => {
+                let (indices, rects, whole) = Workload::host_pages(&device, &indices, &rects);
+                (indices, rects, Some(whole))
+            }
+        };
         Workload {
             layers,
             layer_buffers,
@@ -616,6 +907,8 @@ impl Workload {
                 values: Cell::new((0, 0)),
             }),
             repeats,
+            shape,
+            layout: shape.layout(),
             checks: checked.then(Arc::default),
             pipelines,
             sampler,
@@ -623,6 +916,13 @@ impl Workload {
             mask: sampled(&device, [255, 255, 255, 128]),
             targets,
             multisampled: target(&device, 4),
+            indices,
+            rects,
+            _host_pages: host_pages,
+            composite: match shape {
+                Shape::Composite { kept, .. } => Some(Composite::new(&device, kept)),
+                _ => None,
+            },
             gather: matches!(shape, Shape::Alternating { .. }).then(|| {
                 pipeline(
                     &device,
@@ -635,14 +935,64 @@ impl Workload {
         }
     }
 
+    /// The index and rectangle buffers over host pages, as the consumer's guest's buffers all
+    /// lie over its RAM: each a no-copy buffer over pages of one mapping holding `indices` and
+    /// `rects`, and a third no-copy buffer over the whole mapping, whose bytes meet both, so a
+    /// use of either takes the uses of the keys its bytes share (`HostAliases::augment`), as the
+    /// guest's overlapping buffers do.
+    fn host_pages(
+        device: &Device,
+        indices: &[u8],
+        rects: &[u8],
+    ) -> (Buffer, Buffer, (Buffer, Mapping)) {
+        let page = host_page();
+        let (index_len, rect_len) = (
+            indices.len().next_multiple_of(page),
+            rects.len().next_multiple_of(page),
+        );
+        let pages = Mapping::anonymous(index_len + rect_len);
+        pages.write(0, indices);
+        pages.write(index_len, rects);
+        let over = |offset: usize, len: usize| {
+            // SAFETY: the pages are this process's, mapped read and write, and outlive the
+            // buffers (`Workload::host_pages`'s order).
+            let at = unsafe { pages.pointer().add(offset) };
+            // SAFETY: as above.
+            unsafe { no_copy(device, at, len, ResourceOptions::shared(), None) }.unwrap()
+        };
+        let (indices, rects) = (over(0, index_len), over(index_len, rect_len));
+        let whole = over(0, index_len + rect_len);
+        (indices, rects, (whole, pages))
+    }
+
     /// Pass `pass`'s descriptor: its layer loaded and stored (by the layers' actions where they
     /// lie over buffers), or, for a resolved pass, the 4-sample texture cleared and resolved into
     /// the layer.
     fn pass(&self, pass: usize) -> RenderPassDescriptor {
         let mut descriptor = RenderPassDescriptor::new();
+        if let Some(composite) = &self.composite {
+            let color = &mut descriptor.color_attachments[0];
+            color.texture = Some(composite.layers[pass % TARGETS].clone());
+            color.load_action = GUEST_LOADS[pass % GUEST_LOADS.len()];
+            color.clear_color = ClearColor::new(0.0, 0.0, 0.0, 0.0);
+            color.store_action = StoreAction::Store;
+            let scratch = &mut descriptor.color_attachments[1];
+            scratch.texture = Some(composite.scratch.clone());
+            (scratch.load_action, scratch.store_action) = match composite.kept {
+                false => (LoadAction::DontCare, StoreAction::DontCare),
+                true => (LoadAction::Clear, StoreAction::Store),
+            };
+            scratch.clear_color = ClearColor::new(0.0, 0.0, 0.0, 0.0);
+            return descriptor;
+        }
         let color = &mut descriptor.color_attachments[0];
         let layer = self.targets[pass % TARGETS].clone();
-        if pass % RESOLVED == RESOLVED - 1 {
+        if !matches!(self.shape, Shape::Window) {
+            color.texture = Some(layer);
+            color.load_action = GUEST_LOADS[pass % GUEST_LOADS.len()];
+            color.clear_color = ClearColor::new(0.0, 0.0, 0.0, 0.0);
+            color.store_action = StoreAction::Store;
+        } else if self.resolved(pass) {
             color.texture = Some(self.multisampled.clone());
             color.resolve_texture = Some(layer);
             color.load_action = LoadAction::Clear;
@@ -661,6 +1011,31 @@ impl Workload {
         descriptor
     }
 
+    /// Whether pass `pass` draws into the 4-sample texture and resolves it: every [`RESOLVED`]th
+    /// of the window server's.
+    fn resolved(&self, pass: usize) -> bool {
+        matches!(self.shape, Shape::Window) && pass % RESOLVED == RESOLVED - 1
+    }
+
+    /// Draw `draw` of a pass (the module docs; `draw` past them as `draw % DRAWS`), its state
+    /// changes first: pass `pass`'s, the `n`th draw of the frame.
+    fn draw(&self, encoder: &mut RenderCommandEncoder, (pass, n): (usize, usize), draw: usize) {
+        if let Some(composite) = &self.composite {
+            match draw {
+                0 => encoder.set_render_pipeline_state(&composite.plain).unwrap(),
+                1 => {
+                    encoder
+                        .set_render_pipeline_state(&composite.pipeline)
+                        .unwrap();
+                    encoder
+                        .set_fragment_buffer(Some(&composite.sources), 0, 0)
+                        .unwrap();
+                }
+                _ => {}
+            }
+            self.draw_call(encoder);
+            return;
+        }
         if let Some(gather) = &self.gather {
             let state = match draw % 2 {
                 0 => &self.pipelines[0].masked,
@@ -679,6 +1054,8 @@ impl Workload {
             self.draw_call(encoder);
             return;
         }
+        let pipelines = &self.pipelines[usize::from(self.resolved(pass))];
+        match draw % DRAWS {
             0 | 1 | 5 => {
                 if draw != 1 {
                     encoder.set_render_pipeline_state(&pipelines.rect).unwrap();
@@ -733,12 +1110,30 @@ impl Workload {
             .unwrap();
     }
 
+    /// The draws of a window server's pass: [`DRAWS`], and the [`REPEATED`] ones again where it
+    /// repeats them.
     fn draws(&self) -> usize {
         DRAWS
             + REPEATED
                 .iter()
                 .filter(|&&again| again && self.repeats)
                 .count()
+    }
+
+    /// A frame's command buffers, passes and draws.
+    fn buffers(&self) -> usize {
+        self.layout.len()
+    }
+
+    fn passes(&self) -> usize {
+        self.layout.iter().map(Vec::len).sum()
+    }
+
+    fn draws_a_frame(&self) -> usize {
+        match self.shape {
+            Shape::Window => BUFFERS * self.draws(),
+            _ => self.layout.iter().flatten().sum(),
+        }
     }
 
     /// Encode and commit one frame, then wait for its last command buffer: what each step cost.
@@ -758,20 +1153,51 @@ impl Workload {
         let start = Instant::now();
         let at_start = counts();
         let mut begun = [Begun::default(); 4];
+        let (mut pass, mut n) = (0, 0);
+        for (buffer, passes) in self.layout.iter().enumerate() {
             let queue = usize::from(
+                self.queues.len() > 1 && buffer % SECOND_QUEUE_EVERY == SECOND_QUEUE_EVERY - 1,
             );
             let command_buffer = self.queues[queue].command_buffer().unwrap();
             if let Some(guest) = &self.guest {
+                guest.begin(&command_buffer, queue, buffer);
             }
-            for draw in 0..DRAWS {
+            for &draws in passes {
+                let descriptor = self.pass(pass);
                 let before = counts();
-                let ((), drawn) = step(reads.instructions, || self.draw(&mut encoder, pass, draw));
-                frame.draws.push(drawn);
+                let (mut encoder, open) = step(reads.instructions, || {
+                    command_buffer.render_command_encoder(&descriptor).unwrap()
+                });
+                frame.open.push(open);
                 if let Some(before) = &before {
-                    begun[1].add(Begun::since(&self.device, before));
+                    begun[0].add(Begun::since(&self.device, before));
                 }
+                for draw in 0..draws {
+                    let first = match self.shape {
+                        Shape::Window => pass * DRAWS + draw,
+                        _ => n,
+                    };
+                    n += 1;
+                    let again = self.repeats && REPEATED[draw % DRAWS];
+                    for repeat in [false, true].into_iter().take(1 + usize::from(again)) {
+                        let before = counts();
+                        let ((), drawn) = step(reads.instructions, || match repeat {
+                            false => self.draw(&mut encoder, (pass, first), draw),
+                            true => self.draw_call(&mut encoder),
+                        });
+                        frame.draws.push(drawn);
+                        if let Some(before) = &before {
+                            begun[1].add(Begun::since(&self.device, before));
+                        }
                     }
                 }
+                let before = counts();
+                let ((), ended) = step(reads.instructions, || encoder.end_encoding().unwrap());
+                frame.end.push(ended);
+                if let Some(before) = &before {
+                    begun[2].add(Begun::since(&self.device, before));
+                }
+                pass += 1;
             }
             if let Some(guest) = &self.guest {
                 guest.end(&command_buffer, queue);
@@ -1219,6 +1645,7 @@ fn measure(runs: &[Run]) {
             device(&cache, run.announced, &heard, run.completion),
             run.checked,
             run.layers,
+            (run.guest, run.repeats, run.shape, run.host),
         );
         let _imports = imports(&work.device, run.imports);
         let label = run.label();
@@ -1267,18 +1694,19 @@ fn measure(runs: &[Run]) {
             ..Reads::default()
         };
         let counted: Vec<Frame> = (0..COUNTED).map(|_| work.frame_reading(reads)).collect();
+        let (buffers, passes) = (work.buffers(), work.passes());
+        let draws = work.draws_a_frame();
         let [cpu, cpu_high] = percentiles(frames.iter().map(|f| ms(f.cpu)).collect());
         let [wall, wall_high] = percentiles(frames.iter().map(|f| ms(f.wall)).collect());
         let [done, done_high] = percentiles(frames.iter().map(|f| ms(f.done)).collect());
         eprintln!(
-            "FRAME-COST {name} {label}: {BUFFERS} command buffers of one pass of {DRAWS} indexed \
-             draws a frame, every {RESOLVED}th pass resolved, {WARM} untimed and {TIMED} timed \
-             frames: the encoding thread's CPU {cpu:.2} ms a frame (p90 {cpu_high:.2}), wall \
+            "FRAME-COST {name} {label}: {buffers} command buffers of {passes} passes of {draws} \
+             indexed draws a frame, {WARM} untimed and {TIMED} timed frames: the encoding thread's CPU {cpu:.2} ms a frame (p90 {cpu_high:.2}), wall \
              {wall:.2} ms (p90 {wall_high:.2}), through completion {done:.2} ms (p90 \
              {done_high:.2}), {} a frame; {:.1} us of CPU a draw over the frame; {:.1} notices \
              a frame",
             blocks(&frames),
-            cpu * 1e3 / (BUFFERS * DRAWS) as f64,
+            cpu * 1e3 / draws as f64,
             (notices - notices_before) as f64 / TIMED as f64,
         );
         let steps: [(&str, StepsOf); 4] = [
@@ -1325,7 +1753,7 @@ fn measure(runs: &[Run]) {
                 "FRAME-COST {name} {label}: the encoding thread's user-space instructions in a \
                  frame's steps, over {COUNTED} frames of their own: {:.0} a frame, {:.0} a pass",
                 total as f64 / COUNTED as f64,
-                total as f64 / (COUNTED * BUFFERS) as f64,
+                total as f64 / (COUNTED * passes) as f64,
             );
         }
         let per_frame = |count: fn(&WorkCounts) -> u64| {
@@ -1367,6 +1795,26 @@ fn measure(runs: &[Run]) {
             per_frame(|c| c.set_zero_writes_on_equal_shape_switches),
             per_frame(|c| c.set_zero_writes_if_shapes_shared),
         );
+        eprintln!(
+            "FRAME-COST {name} {label}: a frame's passes: {:.1} recorded their first instance \
+             inline; not inline for the encoder {:.1}, the layout {:.1}, a memoryless color {:.1}, \
+             {:.1}, a storage color {:.1}, a stand-in {:.1}, a draw {:.1}; {:.1} split instances \
+             recorded inline, {:.1} instances ended unrun; the replays' {:.1} render pass begins \
+             and {:.1} secondary executions",
+            per_frame(|c| c.inline_passes),
+            per_frame(|c| c.passes_not_inline_encoders),
+            per_frame(|c| c.passes_not_inline_layouts),
+            per_frame(|c| c.passes_not_inline_memoryless),
+            per_frame(|c| c.passes_not_inline_actions),
+            per_frame(|c| c.passes_not_inline_buffer_textures),
+            per_frame(|c| c.passes_not_inline_attachments),
+            per_frame(|c| c.passes_not_inline_storage),
+            per_frame(|c| c.passes_not_inline_stand_ins),
+            per_frame(|c| c.passes_not_inline_draws),
+            per_frame(|c| c.inline_split_instances),
+            per_frame(|c| c.unrun_instances_ended),
+            per_frame(|c| c.commands_replayed.cmd_begin_render_pass),
+            per_frame(|c| c.commands_replayed.cmd_execute_commands),
         );
         eprintln!(
             "FRAME-COST {name} {label}: a frame's command buffers: {:.1} begun ({:.2} a pass), \
@@ -1375,11 +1823,11 @@ fn measure(runs: &[Run]) {
              calls, {:.1} of which held {:.1} batches together; {:.1} batches ended in their \
              work, {:.1} in a command buffer of their own",
             per_frame(|c| c.command_buffers_begun),
-            per_frame(|c| c.command_buffers_begun) / BUFFERS as f64,
+            per_frame(|c| c.command_buffers_begun) / passes as f64,
             per_frame(|c| c.barrier_buffers_kept),
             per_frame(|c| c.encoder_primaries_begun_ahead),
             per_frame(|c| c.command_buffers_submitted),
-            per_frame(|c| c.command_buffers_submitted) / BUFFERS as f64,
+            per_frame(|c| c.command_buffers_submitted) / passes as f64,
             per_frame(|c| c.queue_submissions),
             per_frame(|c| c.grouped_submissions),
             per_frame(|c| c.batches_grouped),
@@ -1423,6 +1871,7 @@ fn measure(runs: &[Run]) {
             per_frame(|c| c.batches_with_two_or_three_pending),
             per_frame(|c| c.batches_with_four_or_more_pending),
         );
+        let per_buffer = |count: fn(&WorkCounts) -> u64| per_frame(count) / buffers as f64;
         eprintln!(
             "FRAME-COST {name} {label}: the scheduler's thread a command buffer: {:.2} sleeps, \
              {:.2} of them on the GPU, woken {:.2} times by commits, {:.2} by completions, {:.2} \
@@ -1480,6 +1929,7 @@ fn measure(runs: &[Run]) {
                 (after.nanos - before.nanos) as f64 / 1e6 / TIMED as f64,
             );
         }
+        let buffers = (TIMED * buffers) as f64;
         let threads = match (&threads_before, &threads) {
             (Some(before), Some(after)) => spent_by_group(before, after)
                 .iter()
@@ -1594,6 +2044,22 @@ fn frame_costs_repeating() {
     measure(&[Run::REPEATING]);
 }
 
+#[test]
+#[ignore = "a measurement, not a check: run by name with --run-ignored all"]
+fn frame_costs_guest_passes() {
+    measure(&[
+        Run::shaped(Shape::Passes {
+            buffers: 100,
+            passes: 1,
+        }),
+        Run::shaped(Shape::Passes {
+            buffers: 1,
+            passes: 100,
+        }),
+        Run::shaped(Shape::NewImage),
+    ]);
+}
+
 /// Passes whose draws switch between two pipeline states of one layout at every draw
 /// ([`Shape::Alternating`]): 40 command buffers of one pass of 16 draws, 600 switches a frame.
 #[test]
@@ -1603,6 +2069,28 @@ fn frame_costs_alternating() {
         buffers: 40,
         draws: 16,
     })]);
+}
+
+/// The guest's composite passes ([`Composite`]), one a command buffer of a plain draw and two
+/// fetching ones: the shape of the guest's passes that do not record inline, and the same with a
+/// scratch the inline path's action rules take, measured for those rules
+/// (`render/inline_first.rs`, `render/inline_splits.rs`).
+#[test]
+#[ignore = "a measurement, not a check: run by name with --run-ignored all"]
+fn frame_costs_guest_composite() {
+    measure(&[false, true].map(|kept| {
+        Run::shaped(Shape::Composite {
+            buffers: 40,
+            draws: 3,
+            kept,
+        })
+    }));
+}
+
+#[test]
+#[ignore = "a measurement, not a check: run by name with --run-ignored all"]
+fn frame_costs_host_pages() {
+    measure(&[Run::hosted(Shape::Window), Run::hosted(Shape::NewImage)]);
 }
 
 #[test]
@@ -1684,6 +2172,7 @@ fn counted() -> (String, Frame) {
         device(&cache, false, &heard, CompletionPolicy::default()),
         false,
         Layers::Private,
+        (false, false, Shape::Window, false),
     );
     for _ in 0..WARM {
         work.frame();
@@ -1765,6 +2254,7 @@ fn a_frame_s_passes_and_commits_begin_their_command_buffers_within_their_bound()
         device(&cache, false, &heard, CompletionPolicy::default()),
         false,
         Layers::Private,
+        (false, false, Shape::Window, false),
     );
     // Every pipeline made, and every pool piece done, before the frame that counts.
     for _ in 0..WARM {
@@ -1923,6 +2413,7 @@ fn a_frame_s_commits_allocate_within_their_bound() {
         device(&cache, false, &heard, CompletionPolicy::default()),
         true,
         Layers::Private,
+        (false, false, Shape::Window, false),
     );
     // Every pipeline made, and every pool piece done, before the frames that count.
     for _ in 0..WARM {
