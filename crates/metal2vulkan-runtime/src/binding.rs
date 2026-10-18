@@ -1099,7 +1099,7 @@ fn image_descriptor(
     };
     // A slot a draw reads through a snapshot samples its texture's subresource that the
     // instance's color attachment holds in the feedback loop layout, the layout its accesses
-    // there name (`render_target::feedback_barriers`; "This layout is valid only for image
+    // there name (`render_target::moved_barriers`; "This layout is valid only for image
     // subresources of images created with the VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT
     // usage flag set", which `Texture::snapshot_color` checked).
     let in_feedback =

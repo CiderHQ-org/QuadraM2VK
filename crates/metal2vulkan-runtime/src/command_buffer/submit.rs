@@ -89,6 +89,13 @@
 //! so the tracker orders them against every other use of the image on any queue, and each is
 //! recorded as an image memory barrier from all commands before to all commands after.
 //!
+//! **Held depths** (`texture/held_depth.rs`). Before each encoder that names a held multisampled
+//! depth, the encoder's command buffer of barriers moves it into the layout the encoder needs
+//! where the batches submitted before, or the batch's earlier encoders, left it in another. The
+//! moves are planned with the encoders as the caller's images' are, each a write of the whole
+//! image outside the encoder joined to its summary, and recorded the same way, after the barrier
+//! the tracker planned for the encoder. The layouts the batch leaves count from its submission on.
+//!
 //! **New resources' first work** (`texture/first_move.rs`). Every batch first does the first GPU
 //! work of the resources made since the device's last submission: each new image's move to
 //! `GENERAL`, and the zeros a new texture, stand-in or buffer reads. It runs before every command
@@ -164,6 +171,7 @@ use crate::texture::Texture;
 use crate::tracker::{Barrier, EncoderUses, Point, Summary};
 use ash::vk;
 use metal2vulkan::bind::ReplayFaults;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 /// The lists a batch's submission fills and empties, kept in the scheduler's state from batch to
@@ -404,13 +412,37 @@ impl CommandBufferShared {
         };
         let entry = (!entries.is_empty()).then(|| Summary::outside_encoders(entry_uses));
         let exit = (!exits.is_empty()).then(|| Summary::outside_encoders(exit_uses));
-        let plan = scheduler.tracker.plan(
-            entry
-                .iter()
-                .chain(encoders.iter().map(|recorded| &recorded.summary))
-                .chain(&exit),
-            at,
-        );
+        // The held depths' moves before each encoder that names one, into the layout it needs
+        // (`texture/held_depth.rs`): writes the tracker plans with the encoder's uses, before
+        // them, so each waits for what came before it and orders what follows.
+        let unnamed = BTreeSet::new();
+        let held_moves = shared.textures.held.moves(encoders.iter().map(|recorded| {
+            match state.ended.get(recorded.encoder) {
+                Some(record) => (&record.keys, record.held.as_slice()),
+                None => (&unnamed, &[][..]),
+            }
+        }));
+        // Each encoder's summary with its moves' uses joined, where it has moves.
+        let moved: Vec<Option<Summary<ResourceKey>>> = match held_moves.is_empty() {
+            true => Vec::new(),
+            false => (encoders.iter().enumerate())
+                .map(|(at, recorded)| {
+                    let uses = held_moves.uses(at);
+                    (!uses.is_empty()).then(|| {
+                        let mut summary = recorded.summary.clone();
+                        summary.join(Summary::outside_encoders(uses.to_vec()));
+                        summary
+                    })
+                })
+                .collect(),
+        };
+        let summaries = (encoders.iter().enumerate()).map(|(at, recorded)| {
+            let moved = moved.get(at).and_then(Option::as_ref);
+            moved.unwrap_or(&recorded.summary)
+        });
+        let plan = scheduler
+            .tracker
+            .plan(entry.iter().chain(summaries).chain(&exit), at);
         // One barrier per summary planned: the entry's, the encoders', the exit's.
         let mut barriers = plan.barriers();
         let mut entry_barrier = None;
@@ -437,6 +469,7 @@ impl CommandBufferShared {
             && completed_barrier.is_none()
             && entry.is_none()
             && barriers.first().is_some_and(Option::is_none)
+            && held_moves.transitions(0).is_empty()
             && prefix.is_some_and(|raw| {
                 state
                     .recorded
@@ -453,10 +486,11 @@ impl CommandBufferShared {
         let mut work = Vec::with_capacity(2 * (end - start) + 1);
         // Whether a command buffer of barriers goes before the first encoder.
         let mut started = false;
-        // A barrier planned before the first encoder, for earlier work that may still run: the
-        // start goes after the last such barrier, once every command before it completed (the
-        // module docs).
-        let encoder_behind = barriers.first().is_some_and(Option::is_some);
+        // A barrier planned before the first encoder, for earlier work that may still run, or a
+        // held depth's move there, which waits for all of it: the start goes after the last such
+        // barrier, once every command before it completed (the module docs).
+        let encoder_behind =
+            barriers.first().is_some_and(Option::is_some) || !held_moves.transitions(0).is_empty();
         if entry.is_some() {
             started = true;
             let globals: Vec<Barrier> = completed_barrier
@@ -480,15 +514,16 @@ impl CommandBufferShared {
                 .into_iter()
                 .chain(*barrier)
                 .collect();
-            if !globals.is_empty() || start_stamp.is_some() {
+            let moves = held_moves.transitions(offset);
+            if !globals.is_empty() || start_stamp.is_some() || !moves.is_empty() {
                 started |= offset == 0;
                 let stamps = Stamps {
                     start: start_stamp.take(),
-                    after: barrier.is_some(),
+                    after: barrier.is_some() || !moves.is_empty(),
                     end: None,
                 };
                 let kept = &mut scheduler.kept;
-                work.push(self.barrier_buffer(&mut state, kept, at, &globals, &[], stamps)?);
+                work.push(self.barrier_buffer(&mut state, kept, at, &globals, moves, stamps)?);
             }
             work.extend(&state.recorded[start + offset].raws);
         }
@@ -803,6 +838,8 @@ impl CommandBufferShared {
         let handlers = last && (!state.submission.is_empty() || state.storage_form.is_some());
         state.submitting = handlers;
         scheduler.tracker.apply(plan);
+        held_moves.submitted();
+        shared.counts.held_depths_released(held_moves.released);
         let several = shared.queues.len() > 1;
         let held = first_work.submitted(several.then_some(at));
         if !held.is_empty() {
@@ -1000,7 +1037,7 @@ impl CommandBufferShared {
     }
 
     /// A command buffer holding only `barriers`, in order, then `transitions` of the caller's
-    /// images, between the `stamps` it writes, for the batch that signals `at`: where it moves no
+    /// images or of held depths, between the `stamps` it writes, for the batch that signals `at`: where it moves no
     /// image, one the scheduler keeps (`kept_barriers.rs`; one that writes timestamps, kept for
     /// their slot) on a queue whose command buffers end at their timeline's value
     /// (`fences::ends_at_fence`), and else, or past the kept ones' bounds, one recorded into this
@@ -1027,8 +1064,8 @@ impl CommandBufferShared {
     }
 
     /// A command buffer of this command buffer's pool holding only `barriers`, in order, then
-    /// `transitions` of the caller's images, from all commands before to all commands after,
-    /// between the `stamps` it writes.
+    /// `transitions` of the caller's images or of held depths, from all commands before to all
+    /// commands after, between the `stamps` it writes.
     fn record_barriers(
         &self,
         state: &mut State,

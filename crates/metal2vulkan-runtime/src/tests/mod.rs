@@ -67,6 +67,7 @@ mod heap_sets;
 mod heap_tiled;
 mod heap_tiled_blocks;
 mod heap_usage;
+mod held_depth;
 mod host_aliases;
 mod host_memory;
 #[cfg(all(any(m2v_gpu, m2v_cpu_icd), target_os = "linux"))]

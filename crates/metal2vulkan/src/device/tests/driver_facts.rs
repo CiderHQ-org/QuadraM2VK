@@ -529,6 +529,8 @@ const ONE_OF_METALS: DriverFact = DriverFact::DontCareStoreIsOneOfMetals;
 const COPY_BACK: DriverFact = DriverFact::ShadowCopyBackDispatchFaster;
 const LINEAR_UNINITIALIZED: DriverFact = DriverFact::LinearTilingFeaturesUninitialized;
 const STALL: DriverFact = DriverFact::SemaphoreOperationsStallSubmits;
+const SAMPLED_HIZ: DriverFact = DriverFact::SampledDepthKeepsHiZ;
+const MSAA_DEPTH: DriverFact = DriverFact::MultisampledDepthFasterOutOfGeneral;
 
 /// Every committed profile's driver has exactly its measured facts (on a measured identity those
 /// its rows name, on any other its driver's defects alone). A profile of a measured identity: the
@@ -549,10 +551,8 @@ const STALL: DriverFact = DriverFact::SemaphoreOperationsStallSubmits;
 /// MoltenVK; NVIDIA's reads a depth rendered at custom sample positions at the standard ones; ANV's
 /// first sparse resource waits for every queue; BC6H decodes as Metal's on the 780M, the RPL-P,
 /// lavapipe 26.0.8, both MoltenVK GPUs and the RTX 5080 Laptop GPU, and BC7 on the same but
-/// lavapipe; `DONT_CARE` keeps one of Metal's two answers on the 780M and the RPL-S; a shadow's
-/// copy back runs faster as a dispatch on the RPL-P; MoltenVK reads its linear-tiling attachment
-/// features uninitialized; NVIDIA's stalls a submission per thousand semaphore operations on the
-/// RTX 5080 Laptop GPU. Every other
+/// lavapipe; `DONT_CARE` keeps one of Metal's two answers on the 780M, the RPL-S and the RPL-P; a
+/// linear-tiling attachment features uninitialized; NVIDIA's stalls a submission per thousand
 /// profile is an unmeasured identity and takes its driver's defects alone: the GTX 1060
 /// (580.178.04) and the RTX 5080 desktop GPU (another GPU at 615.71.09) NVIDIA's custom-position
 /// depth, the ARL (26.2.3) and the Tiger Lake Iris Xe (26.2.2) ANV's hidden aliased writes; the
@@ -591,7 +591,19 @@ fn the_committed_profiles_drivers_have_their_facts() {
         ("intel-irisxe-anv", vec![HIDE]),
         (
             "intel-irisxe-rplp-anv",
-            vec![HIDE, HOST, FETCH, SPLIT, SPARSE_WAIT, BC6H, BC7, COPY_BACK],
+            vec![
+                HIDE,
+                HOST,
+                FETCH,
+                SPLIT,
+                SPARSE_WAIT,
+                BC6H,
+                BC7,
+                ONE_OF_METALS,
+                COPY_BACK,
+                SAMPLED_HIZ,
+                MSAA_DEPTH,
+            ],
         ),
         (
             "intel-uhd770-rpls-anv",

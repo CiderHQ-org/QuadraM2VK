@@ -1357,6 +1357,65 @@ pub enum DriverFact {
     /// a batch) for about 1 us of CPU a wait (`command_buffer/submit.rs` in the runtime). Held on
     /// the GPUs and release measured alone.
     SemaphoreOperationsStallSubmits,
+    /// A cost fact (the module docs): the driver keeps a single-sample depth image's
+    /// hierarchical depth, with which its depth test rejects hidden fragments a block at a time,
+    /// in the `GENERAL` layout where the image has sampled usage, and drops it there, with the
+    /// depth's compression, where the image has transfer-source usage without it. Every image of
+    /// the runtime's rests in `GENERAL` and takes transfer usage, as Metal copies every texture,
+    /// so on a driver with it a single-sample depth or depth/stencil attachment the runtime makes
+    /// takes sampled usage too, where the device samples its format, whatever it costs the image
+    /// (`image_plan::hiz_candidate` in the runtime): the same texels either way. A device's own
+    /// texture takes that usage already wherever it costs the image nothing (the runtime's
+    /// undeclared usage), as it did on the Iris Xe at each of 75 sizes from 256x256 to 4096x4096
+    /// in `D16_UNORM`, `D32_SFLOAT` and `D32_SFLOAT_S8_UINT`; the fact reaches the images that
+    /// take only their declared usage, a heap's textures among them. ANV on Intel's Xe-LP GPUs
+    /// gives such an image write-through hierarchical depth (`ISL_AUX_USAGE_HIZ_CCS_WT`,
+    /// `want_hiz_wt_for_image` in Mesa 26.2.4's `anv_image.c`), which `anv_layout_to_aux_state`
+    /// keeps in `GENERAL`; without sampled usage the image takes `ISL_AUX_USAGE_HIZ_CCS`, which
+    /// that function turns off in `GENERAL` on such a GPU for an image of transfer-source usage.
+    /// Measured on ANV, Mesa 26.2.4 on
+    /// the Iris Xe of RPL-P, with a probe outside the runtime (a 1920x1080 `D32_SFLOAT` attachment
+    /// in `GENERAL` cleared to 1.0, fullscreen triangles front to back under `LESS` with writes,
+    /// the GPU's time a frame, medians of 50 frames): 32 layers 2.822 ms without sampled usage
+    /// against 0.475 ms with it, a clear and one layer 0.233 against 0.120 ms; `D32_SFLOAT_S8_UINT`
+    /// 2.838 against 0.582 ms and `D16_UNORM` 1.623 against 0.451 ms at 32 layers; the image's
+    /// size the same (9432960 bytes). Through the runtime (`runtime_lane::depth_costs` in the
+    /// validation crate, the same frames in `Depth32Float`, the depth a heap's texture): 4.72 to
+    /// 5.66 ms without the fact against 0.82 to 0.87 ms with it at 32 layers, 0.51 against 0.24
+    /// to 0.25 ms at one; a device's own texture alike either way. Measured no faster, so not
+    /// listed: NVIDIA's 615.71.09 on the RTX 3090 (0.058 ms either way at 32 layers, 0.017 at
+    /// one).
+    SampledDepthKeepsHiZ,
+    /// A cost fact (the module docs): the driver renders into a multisampled depth image much
+    /// faster in `DEPTH_STENCIL_ATTACHMENT_OPTIMAL` than in `GENERAL`, the moves from `GENERAL`
+    /// before the render pass instance and back after it included. ANV on Intel's Xe-LP GPUs
+    /// gives such an image hierarchical depth (`ISL_AUX_USAGE_HIZ_CCS`; the write-through form
+    /// that keeps it in `GENERAL` is single-sample only, `want_hiz_wt_for_image` in Mesa 26.2.4's
+    /// `anv_image.c`), unused in `GENERAL`: there its depth test rejects no fragment a block at a
+    /// time. The move in costs a hierarchical depth ambiguate, the move back a resolve. On a
+    /// driver with it the runtime holds a multisampled depth or depth/stencil attachment that is
+    /// not transient in the attachment layout for each render pass instance, moved there just
+    /// before the instance begins and back just after it ends (`render_target::depth_layout` in
+    /// the runtime): the same texels, as a layout transition preserves them. A device's own
+    /// `Private` such texture rests in that layout between the passes of render encoders that
+    /// touch it only as their attachment, moved back to `GENERAL` only before an encoder that
+    /// names it otherwise (`texture/held_depth.rs` in the runtime), so such passes spend neither
+    /// move. Measured on ANV, Mesa
+    /// 26.2.4 on the Iris Xe of RPL-P, with a probe outside the runtime (a 1920x1080 attachment of
+    /// 4 samples cleared to 1.0, fullscreen triangles front to back under `LESS` with writes, the
+    /// GPU's time a frame, medians of 50 frames, two rounds alike), in `GENERAL` against moved:
+    /// `D32_SFLOAT` 12.25 against 1.44 ms at 32 layers and 1.60 against 1.10 ms at one,
+    /// `D32_SFLOAT_S8_UINT` 12.38 against 1.60 and 1.73 against 1.28 ms, `D16_UNORM` 6.12 against
+    /// 0.83 and 0.46 against 0.48 ms; in `GENERAL` alike with transfer-source usage or without.
+    /// Through the runtime (`runtime_lane::depth_costs` in the validation crate, the same frames
+    /// in `Depth32Float`, a device's own texture and a heap's alike): 12.14 against 1.44 to 1.52
+    /// ms at 32 layers, 1.54 against 1.08 to 1.12 ms at one. Held between frames against moved
+    /// around each instance, the GPU at 300 MHz throughout (`gt_cur_freq_mhz`; the moved form
+    /// both at the commit before and, alternating with it in one session, in a heap's texture or
+    /// an encoder that also binds the depth): 2.38 against 4.34 to 4.37 ms at 32 layers, 0.62
+    /// against 2.56 to 2.58 ms at one. Measured no faster, so not listed: NVIDIA's 615.71.09 on
+    /// the RTX 3090 (0.112 against 0.113 ms at 32 layers, 0.028 against 0.030 at one).
+    MultisampledDepthFasterOutOfGeneral,
 }
 
 impl DriverFact {
@@ -1762,11 +1821,12 @@ const DYNAMIC_RESTART_WARNING: DriverDiagnostic = DriverDiagnostic {
 /// 38. MoltenVK's code on every GPU, so the row names no vendor; a defect fact, taken at every
 /// release.
 ///
-/// `DontCareStoreIsOneOfMetals`: measured by `runtime_lane::dont_care_stores` at 66ffe6775, every
-/// texel of each of its twelve kept cases the earlier one or the stored one, none other: RADV, Mesa
-/// 26.2.4, on the Radeon 780M (EV `SWA-r2-radv`) and ANV, Mesa 26.2.4, on the UHD 770 (RPL-S) (EV
-/// `SWA-r2-anvs`). Not listed: NVIDIA's 615.71.09, whose RTX 3080 left a third answer (EV
-/// `SWA-r2-nv3080`), and every GPU and release not measured, which store with `STORE`.
+/// `DontCareStoreIsOneOfMetals`: measured by `runtime_lane::dont_care_stores`, every texel of each
+/// of its twelve kept cases the earlier one or the stored one, none other: at 66ffe6775, RADV, Mesa
+/// row, ANV, Mesa 26.2.4, on the Iris Xe (RPL-P). Not listed: NVIDIA's 615.71.09, whose RTX 3080
+/// left a third answer; RADV, Mesa 26.0.8, on the RX 7900 XTX, clean at dd718a7905 but an
+/// unmeasured identity (`MEASURED_DEVICES`); and every GPU and release not measured, which store
+/// with `STORE`.
 pub(crate) const MEASURED: &[Measured<DriverFact>] = &[
     Measured {
         fact: DriverFact::RobustIndexFetchReadsZero,
@@ -2105,6 +2165,14 @@ pub(crate) const MEASURED: &[Measured<DriverFact>] = &[
         last: mesa(26, 2, 4),
     },
     Measured {
+        fact: DriverFact::DontCareStoreIsOneOfMetals,
+        driver: DriverId::INTEL_OPEN_SOURCE_MESA,
+        vendor: Some(INTEL_VENDOR_ID),
+        device: Some(INTEL_IRIS_XE_RPL_P),
+        first: mesa(26, 2, 4),
+        last: mesa(26, 2, 4),
+    },
+    Measured {
         fact: DriverFact::ColorBlockDecodeIsMetals,
         driver: DriverId::MESA_RADV,
         vendor: Some(AMD_VENDOR_ID),
@@ -2228,6 +2296,22 @@ pub(crate) const MEASURED: &[Measured<DriverFact>] = &[
         fact: DriverFact::ShadowCopyBackDispatchFaster,
         driver: DriverId::INTEL_OPEN_SOURCE_MESA,
         vendor: Some(INTEL_VENDOR_ID),
+    Measured {
+        fact: DriverFact::SampledDepthKeepsHiZ,
+        driver: DriverId::INTEL_OPEN_SOURCE_MESA,
+        vendor: Some(INTEL_VENDOR_ID),
+        device: Some(INTEL_IRIS_XE_RPL_P),
+        first: mesa(26, 2, 4),
+        last: mesa(26, 2, 4),
+    },
+    Measured {
+        fact: DriverFact::MultisampledDepthFasterOutOfGeneral,
+        driver: DriverId::INTEL_OPEN_SOURCE_MESA,
+        vendor: Some(INTEL_VENDOR_ID),
+        device: Some(INTEL_IRIS_XE_RPL_P),
+        first: mesa(26, 2, 4),
+        last: mesa(26, 2, 4),
+    },
         device: Some(INTEL_IRIS_XE_RPL_P),
         first: mesa(26, 2, 4),
         last: mesa(26, 2, 4),

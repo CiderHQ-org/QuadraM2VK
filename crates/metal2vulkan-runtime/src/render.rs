@@ -326,6 +326,7 @@ use super::shadow::{self, ShadowCopy};
 use super::shadow_stencil::ShadowStencil;
 use super::sparse::emulated::Scrub;
 use super::tessellation::{FactorBuffer, Factors};
+use super::texture::held_depth;
 use super::texture::signed_depth::{self, MagnitudeCopies, SignStrip};
 use super::texture::Texture;
 use super::tracker::{self, Access, Barrier, UnorderedWrites, Use};
@@ -4205,27 +4206,6 @@ impl RenderCommandEncoder {
                 depth_stencil: None,
                 ..layout.clone()
             });
-        // Those of the instances after the ones recorded inline, and the subresources of the
-        // colors each holds in the feedback loop layout (`render/snapshot.rs`), which none
-        // recorded inline does.
-        let mut objects = Vec::with_capacity(count - inlined);
-        let mut feedback_images = vec![Vec::new(); count];
-        for (index, instance) in instances.iter().enumerate().skip(inlined) {
-            let at = Position {
-                first: index == 0,
-                last: index + 1 == count && !resolve_after,
-            };
-            let own = instance_layout(&layout, bare.as_ref(), &instance.shape);
-            let feedback = instance.feedback;
-            let pass = render_target::final_pass(&device, own, &instance.shape, at, feedback)?;
-            // Its framebuffer holds the views its draws render colors through.
-            let viewed = reformatted(own, &instance.reformats);
-            let framebuffer =
-                render_target::framebuffer(&device, &pass, &viewed, instance.views, feedback)?;
-            feedback_images[index] =
-                render_target::feedback_images(&viewed, instance.views, feedback)?;
-            objects.push((pass, framebuffer));
-        }
         // The layout of the instances that resolve: the scratch image as the depth/stencil
         // attachment where its copy stands for it.
         let resolving_layout = resolve_source
@@ -4238,7 +4218,15 @@ impl RenderCommandEncoder {
                 last: true,
             };
             let none = Feedback::NONE;
-            let pass = render_target::final_pass(&device, resolving_layout, &resolving, at, none)?;
+            let general = vk::ImageLayout::GENERAL;
+            let pass = render_target::final_pass(
+                &device,
+                resolving_layout,
+                &resolving,
+                at,
+                none,
+                general,
+            )?;
             let views = ViewSetup::default();
             let framebuffer =
                 render_target::framebuffer(&device, &pass, resolving_layout, views, none)?;
@@ -4528,13 +4516,82 @@ impl RenderCommandEncoder {
             Some(grouped) => grouped.later(&mut core, &layout)?,
             None => None,
         };
+        // The multisampled depth the encoder holds in the attachment layout through all its
+        // instances, and between the encoders that hold it (`texture/held_depth.rs`): a held
+        // texture's own image as the depth/stencil attachment (no scratch, stand-in or hidden
+        // depth stands for it), where nothing else in the encoder touches it. No command of the
+        // encoder named it so far (its draws' bindings, the steps recorded ahead of the pass), no
+        // step of the pass uses it but as the attachment, and no step after the instances reads or
+        // writes it: no depth resolve drawn after them, in a pass of its own or in a resolving
+        // instance, no sign strip, no shader-side depth or stencil test, and no execution of
+        // render commands or draw whose pipeline is being made, whose pass records later.
+        let held_depth = match layout.depth_stencil.as_ref() {
+            Some(ds) if ds.separate.is_none() && ds.stand_in.is_none() && !ds.hidden => {
+                let none = crate::tracker::Access::NONE;
+                let key = ds.target.texture.bound_use(none, none).key;
+                let alone = !inline
+                    && executions.is_empty()
+                    && pending.is_empty()
+                    && !resolve_after
+                    && later_resolves.is_empty()
+                    && picked_resolve.is_none()
+                    && strip.is_none()
+                    && depth_stand_in.is_none()
+                    && shadow.is_none()
+                    && !core.named_keys().contains(&key)
+                    && (uses.iter())
+                        .filter(|used| used.key == key)
+                        .all(crate::tracker::Use::is_depth_attachment);
+                (alone && device.shared().textures.held.holds(key)).then_some(key)
+            }
+            _ => None,
+        };
+        if let Some(key) = held_depth {
+            core.uses().hold(key);
+        }
+        // Those of the instances after the ones recorded inline, and the subresources of the
+        // attachments each holds out of `GENERAL`, which none recorded inline does: the colors in
+        // the feedback loop layout (`render/snapshot.rs`) and the depth/stencil attachment where
+        // the device renders it faster in the attachment layout
+        // (`render_target::depth_layout`), moved there before the instance and back after it,
+        // but for a held depth, which is there already. An instance an execution of render
+        // commands joins holds its depth/stencil in `GENERAL`: the execution's runs begin passes
+        // of their own (`render/executions.rs`), each made in that layout.
+        let mut objects = Vec::with_capacity(count - inlined);
         let mut later_moved = Vec::with_capacity(count - inlined);
+        for (index, instance) in instances.iter().enumerate().skip(inlined) {
+            let at = Position {
+                first: index == 0,
+                last: index + 1 == count && !resolve_after,
+            };
+            let own = instance_layout(&layout, bare.as_ref(), &instance.shape);
+            let feedback = instance.feedback;
+            // Its framebuffer holds the views its draws render colors through.
+            let viewed = reformatted(own, &instance.reformats);
+            let executes = (instance.pieces.iter()).any(|p| matches!(p, Piece::Execution(_)));
+            let (depth, moved) = match (held_depth, executes) {
+                (Some(_), _) => (held_depth::HELD.into(), vk::ImageLayout::GENERAL),
+                (None, true) => (vk::ImageLayout::GENERAL, vk::ImageLayout::GENERAL),
+                (None, false) => {
+                    let depth = render_target::depth_layout(&device, &viewed)?;
+                    (depth, depth)
+                }
+            };
+            if held_depth.is_some() {
+                device.shared().counts.depth_instance_held();
+            } else if depth != vk::ImageLayout::GENERAL {
+                device.shared().counts.depth_attachment_moved();
+            }
+            let shape = &instance.shape;
+            let pass = render_target::final_pass(&device, own, shape, at, feedback, depth)?;
             later_moved.push(render_target::moved_images(
                 &viewed,
                 instance.views,
                 feedback,
                 moved,
             )?);
+            objects.push((pass, framebuffer));
+        }
         // The draws and pieces of each instance after those recorded inline, and the steps
         // around the instances, which record alike whether the pass records now or later with
         // its executions (`render/pass_steps.rs`). An empty list of the extended-range shadows'
@@ -4550,6 +4607,7 @@ impl RenderCommandEncoder {
         for (index, ((instance, (shadow_fills, (reformat_in, reformat_out))), moved)) in instances
             .into_iter()
             .zip(fills_and_copies)
+            .zip(moved_images)
             .enumerate()
         {
             let Instance {
@@ -4562,11 +4620,11 @@ impl RenderCommandEncoder {
                 positioned,
                 ..
             } = instance;
-            // An instance whose colors are in the feedback loop layout runs in one render pass
-            // instance of its own pass: no execution of render commands joins it (`Piece`), whose
-            // runs would begin others (`render/snapshot.rs`).
-            if !feedback.is_empty() && pieces.iter().any(|p| matches!(p, Piece::Execution(_))) {
-                return Err(internal("an execution in an instance of feedback colors"));
+            // An instance holding attachments out of `GENERAL` runs in one render pass instance
+            // of its own pass: no execution of render commands joins it (`Piece`), whose runs
+            // would begin others (`render/snapshot.rs`, the depth's layout above).
+            if !moved.is_empty() && pieces.iter().any(|p| matches!(p, Piece::Execution(_))) {
+                return Err(internal("an execution in an instance of moved attachments"));
             }
             instance_steps.push(InstanceSteps {
                 shadow: shadowed,
@@ -4576,7 +4634,7 @@ impl RenderCommandEncoder {
                 positioned,
                 reformat_in,
                 reformat_out,
-                feedback,
+                moved,
             });
             if index >= inlined {
                 drawn.push((draws, pieces, shape));
@@ -4645,8 +4703,10 @@ impl RenderCommandEncoder {
                     // shadowed textures copied between instances (the draws' and the
                     // attachments', retained with them), are live until the command buffer
                     // completes, as are the draws' copies and index bounds passes before their
-                    // instances (retained at the draws); every image rests in `GENERAL`, and
-                    // each copy is recorded between two instances.
+                    // instances (retained at the draws); every image rests in `GENERAL` but a
+                    // held depth, which only the instances use, in its attachment layout
+                    // (`texture/held_depth.rs`), and each copy is recorded between two
+                    // instances.
                     unsafe {
                         if let Some(results) = &results {
                             results.reset(raw, command_buffer);
@@ -4743,8 +4803,9 @@ impl RenderCommandEncoder {
                         let mut run_pass = |first, last| {
                             let at = Position { first, last };
                             let own = instance_layout(&layout, bare.as_ref(), &shape);
-                            let none = Feedback::NONE;
-                            let pass = render_target::final_pass(&device, own, &shape, at, none)?;
+                            let (none, general) = (Feedback::NONE, vk::ImageLayout::GENERAL);
+                            let pass =
+                                render_target::final_pass(&device, own, &shape, at, none, general)?;
                             let raw = pass.raw;
                             run_objects.push(pass);
                             Ok::<_, Error>(raw)

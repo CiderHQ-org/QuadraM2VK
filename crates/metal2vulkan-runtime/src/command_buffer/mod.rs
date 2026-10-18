@@ -600,8 +600,17 @@ impl State {
             taken,
             replay: None,
             executions: 0..0,
+            held: Vec::new(),
         });
         self.ended.len() - 1
+    }
+
+    /// Ended encoder `encoder` holds the images `held` in their attachment layout
+    /// (`texture/held_depth.rs`).
+    pub(super) fn encoder_holds(&mut self, encoder: usize, held: Vec<ResourceKey>) {
+        if let Some(record) = self.ended.get_mut(encoder) {
+            record.held = held;
+        }
     }
 
     /// Keep `replay`, the log of ended encoder `encoder`, whose executions take `executions`

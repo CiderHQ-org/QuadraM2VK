@@ -429,3 +429,73 @@ fn multisampled_depth_stencil_targets_are_offered_sampled_where_the_copies_read_
     }
     assert!(offered > 0);
 }
+
+/// A single-sample depth render target is offered sampled usage where its driver keeps a depth
+/// image's hierarchical depth in `GENERAL` only for a sampled image
+/// (`image_plan::hiz_candidate`, `DriverFact::SampledDepthKeepsHiZ`): never without the fact,
+/// never multisampled, never transient (memoryless), never a stencil alone, never already
+/// sampled; the candidate is the plan with `SAMPLED` added and nothing else changed. The committed
+/// Iris Xe of RPL-P's profile has the fact, and its `Depth32Float` target takes the usage.
+#[test]
+fn single_sample_depth_targets_are_offered_sampled_where_the_driver_keeps_hiz_so() {
+    use crate::image_plan::hiz_candidate;
+    use metal2vulkan::device::DriverFact;
+    let mut offered = Vec::new();
+    for (name, desc, device) in committed() {
+        let facts = facts(&desc, &device);
+        let profile = device.profile();
+        let keeps = desc
+            .driver_facts()
+            .contains(&DriverFact::SampledDepthKeepsHiZ);
+        for pf in [
+            PixelFormat::Depth16Unorm,
+            PixelFormat::Depth32Float,
+            PixelFormat::Stencil8,
+            PixelFormat::Depth32FloatStencil8,
+        ] {
+            for (samples, memoryless) in [(1, false), (1, true), (4, false)] {
+                let usage = TextureUsage::RENDER_TARGET;
+                let Ok(target) = plan_image(&layout(pf, 8, samples), usage, memoryless, &facts)
+                else {
+                    continue;
+                };
+                assert!(hiz_candidate(&target, profile, false).is_none());
+                let candidate = hiz_candidate(&target, profile, keeps);
+                let samples_it = profile.supports_format(target.format, FormatUsage::SampledImage);
+                let vk_usage = target.usage;
+                let open = vk_usage.contains(ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+                    && !vk_usage.intersects(
+                        ImageUsageFlags::TRANSIENT_ATTACHMENT | ImageUsageFlags::SAMPLED,
+                    );
+                let depth = pf != PixelFormat::Stencil8;
+                assert_eq!(
+                    candidate.is_some(),
+                    keeps && samples == 1 && depth && open && samples_it,
+                    "{name} {pf:?} {samples}x memoryless {memoryless}: {vk_usage:?}"
+                );
+                if let Some(candidate) = candidate {
+                    let mut expected = target.clone();
+                    expected.usage |= ImageUsageFlags::SAMPLED;
+                    assert_eq!(candidate, expected, "{name} {pf:?}");
+                    offered.push((name.clone(), pf));
+                }
+                let sampled = plan_image(
+                    &layout(pf, 8, samples),
+                    usage | TextureUsage::SHADER_READ,
+                    memoryless,
+                    &facts,
+                );
+                if let Ok(sampled) = sampled {
+                    assert!(
+                        hiz_candidate(&sampled, profile, true).is_none(),
+                        "{name} {pf:?}: already sampled"
+                    );
+                }
+            }
+        }
+    }
+    assert!(offered.contains(&(
+        "intel-irisxe-rplp-anv".to_owned(),
+        PixelFormat::Depth32Float
+    )));
+}

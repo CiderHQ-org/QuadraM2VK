@@ -94,7 +94,7 @@ use super::color_resolve;
 use super::depth_stencil_scratch;
 use super::device::lock;
 use super::error::Error;
-use super::image_plan::ImagePlan;
+use super::image_plan::{hiz_candidate, ImagePlan};
 use super::Device;
 use metal2vulkan::bind::PlanesCopy;
 use metal2vulkan::device::{DeviceProfile, FormatUsage, VkFeature, VkProperty};
@@ -334,7 +334,10 @@ pub(crate) fn planes_candidate(plan: &ImagePlan, profile: &DeviceProfile) -> Opt
 }
 
 impl Device {
-    /// `plan`, an image of Metal's `texture_type`, with the usage its framebuffer fetch's form
+    /// `plan`, an image of Metal's `texture_type`, with the sampled usage that keeps a
+    /// single-sample depth attachment's hierarchical depth in `GENERAL` on a driver measured to
+    /// need it (`image_plan::hiz_candidate`), wherever the device makes the image, whatever its
+    /// size; then with the usage its framebuffer fetch's form
     /// needs ([`fetch_candidate`]), or a multisampled depth/stencil attachment's copies without
     /// colour copies need (`depth_stencil_scratch::sampled_candidate`), then the unsigned-integer
     /// view a NaN clear writes a multisampled attachment through on a device whose copies
@@ -352,6 +355,12 @@ impl Device {
         plan: ImagePlan,
         texture_type: TextureType,
     ) -> Result<ImagePlan, Error> {
+        let keeps_hiz =
+            (self.properties().driver_facts).contains(&DriverFact::SampledDepthKeepsHiZ);
+        let plan = match hiz_candidate(&plan, self.compile_device().profile(), keeps_hiz) {
+            Some(candidate) => self.if_made(plan, candidate, texture_type)?,
+            None => plan,
+        };
         let fetched = fetch_candidate(&plan, self.compile_device().profile())
             .or_else(|| depth_stencil_scratch::sampled_candidate(&plan, self));
         let plan = match fetched {

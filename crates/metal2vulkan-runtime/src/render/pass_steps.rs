@@ -2,9 +2,11 @@
 //! the encoder records the pass at once or leaves it to record later with its executions of
 //! render commands (`render/executions.rs`), in this order:
 //!
-//! - **Around each instance's render pass instance**: its colors a draw reads through a snapshot
-//!   moved into the feedback loop layout just before it begins, and back just after it ends
-//!   (`render_target::feedback_barriers`).
+//! - **Around each instance's render pass instance**: the attachments it holds out of `GENERAL`
+//!   (its colors a draw reads through a snapshot, in the feedback loop layout; its multisampled
+//!   depth/stencil attachment, where the device renders it faster in the attachment layout)
+//!   moved into their layouts just before it begins, and back just after it ends
+//!   (`render_target::moved_barriers`).
 //! - **Before each instance**: after a memory barrier, the colors over a buffer's bytes that
 //!   render through copied stand-ins merged back and copied in again, or copied back
 //!   (`linear_merge.rs`); after the first, the shadowed textures' copies into it, each before a
@@ -62,11 +64,12 @@ pub(super) struct InstanceSteps {
     pub(super) reformat_in: Option<StandInCopies>,
     /// Their copies back after it.
     pub(super) reformat_out: Option<StandInCopies>,
-    /// The subresources of its colors in the feedback loop layout (`render/snapshot.rs`): moved
-    /// there just before it begins and back just after it ends
-    /// (`render_target::feedback_barriers`). Empty for every instance whose draws read no color
-    /// through a snapshot.
-    pub(super) feedback: Vec<FeedbackImage>,
+    /// The subresources of its attachments it holds out of `GENERAL`
+    /// (`render_target::moved_images`): its colors in the feedback loop layout
+    /// (`render/snapshot.rs`) and its depth/stencil attachment in the attachment layout
+    /// (`render_target::depth_layout`), moved there just before it begins and back just after it
+    /// ends (`render_target::moved_barriers`). Empty for every other instance.
+    pub(super) moved: Vec<MovedImage>,
 }
 
 /// A tile dispatch, ready to record after the instance before it: its staged attachments'
@@ -161,8 +164,8 @@ impl PassSteps {
 
     /// Begin instance `index` in `pass` and `framebuffer` (one of its runs, where an execution
     /// splits it), its subpass running secondary command buffers, after binding its positioned
-    /// pipeline where it has one, and after moving its feedback colors into their layout
-    /// (`InstanceSteps::feedback`).
+    /// pipeline where it has one, and after moving the attachments it holds out of `GENERAL`
+    /// into their layouts (`InstanceSteps::moved`).
     ///
     /// # Safety
     ///
@@ -177,13 +180,10 @@ impl PassSteps {
         framebuffer: vk::Framebuffer,
     ) {
         let positioned = self.instances.get(index).and_then(|i| i.positioned);
-        let feedback = self
-            .instances
-            .get(index)
-            .map_or(&[][..], |i| &i.feedback[..]);
-        // SAFETY: the caller's contract; the feedback colors rest in `GENERAL` until here.
+        let moved = self.instances.get(index).map_or(&[][..], |i| &i.moved[..]);
+        // SAFETY: the caller's contract; the moved attachments rest in `GENERAL` until here.
         unsafe {
-            render_target::feedback_barriers(raw, command_buffer, feedback, true, self.family);
+            render_target::moved_barriers(raw, command_buffer, moved, true, self.family);
             if let Some(pipeline) = positioned {
                 raw.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, pipeline);
             }
@@ -200,12 +200,13 @@ impl PassSteps {
         }
     }
 
-    /// Move instance `index`'s feedback colors back to `GENERAL` (`InstanceSteps::feedback`),
-    /// right after its render pass instance ended, before anything after it.
+    /// Move instance `index`'s attachments held out of `GENERAL` back to it
+    /// (`InstanceSteps::moved`), right after its render pass instance ended, before anything
+    /// after it.
     ///
     /// # Safety
     ///
-    /// As for [`PassSteps::before`], but for the feedback colors, in their layout since the
+    /// As for [`PassSteps::before`], but for the moved attachments, in their layouts since the
     /// instance began ([`PassSteps::begin`]).
     pub(super) unsafe fn ended(
         &self,
@@ -213,10 +214,10 @@ impl PassSteps {
         command_buffer: vk::CommandBuffer,
         index: usize,
     ) {
-        let feedback = self
-            .instances
-            .get(index)
-            .map_or(&[][..], |i| &i.feedback[..]);
+        let moved = self.instances.get(index).map_or(&[][..], |i| &i.moved[..]);
+        // SAFETY: the caller's contract.
+        unsafe { render_target::moved_barriers(raw, command_buffer, moved, false, self.family) };
+    }
         // SAFETY: the caller's contract.
         unsafe {
             render_target::feedback_barriers(raw, command_buffer, feedback, false, self.family)

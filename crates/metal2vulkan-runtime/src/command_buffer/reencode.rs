@@ -165,6 +165,7 @@ impl State {
         let Replayed {
             raws,
             summary,
+            held,
             retained,
             executions,
             keys,
@@ -209,6 +210,7 @@ impl State {
         let record = &mut self.ended[at];
         record.executions = first.start..first.start + count;
         record.keys = keys;
+        record.held = held;
         record.taken = taken;
         if let Some(residency) = residency {
             if let Some(first) = record.residency.replace(residency) {

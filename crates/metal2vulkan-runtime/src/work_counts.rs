@@ -161,6 +161,9 @@ pub(crate) struct Counters {
     attachment_read_splits: AtomicU64,
     reading_draws_snapshotted: AtomicU64,
     snapshot_inline_splits: AtomicU64,
+    depth_attachments_moved: AtomicU64,
+    depth_instances_held: AtomicU64,
+    held_depths_released: AtomicU64,
     own_pixel_reads: AtomicU64,
     replay_logs_kept: AtomicU64,
     replay_log_bytes: AtomicU64,
@@ -1004,6 +1007,25 @@ impl Counters {
         self.snapshot_inline_splits.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// A render pass instance holds its multisampled depth/stencil attachment in the attachment
+    /// layout (`render_target::depth_layout`).
+    pub(crate) fn depth_attachment_moved(&self) {
+        self.depth_attachments_moved.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A render pass instance renders its multisampled depth/stencil attachment in the layout
+    /// its encoder holds it in, with no move around it (`texture/held_depth.rs`).
+    pub(crate) fn depth_instance_held(&self) {
+        self.depth_instances_held.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A batch moved `count` held depths out of the attachment layout (`texture/held_depth.rs`).
+    pub(crate) fn held_depths_released(&self, count: usize) {
+        if count > 0 {
+            (self.held_depths_released).fetch_add(count as u64, Ordering::Relaxed);
+        }
+    }
+
     /// A draw that samples a color attachment's texture reads it at its fragments' own pixels
     /// alone, and its copy in moves the texels around its scissors alone
     /// (`texture/attached_reads.rs`).
@@ -1719,6 +1741,21 @@ pub struct WorkCounts {
     /// was recorded inline, its render pass instance begun without the feedback loop layout the
     /// snapshot needs (`render/snapshot.rs`, `render/inline_first.rs`).
     pub snapshot_inline_splits: u64,
+    /// Render pass instances that held their multisampled depth/stencil attachment in
+    /// `DEPTH_STENCIL_ATTACHMENT_OPTIMAL`, moved there from `GENERAL` just before each began and
+    /// back just after it ended, on a device measured to render it faster so
+    /// (`render_target::depth_layout`, `DriverFact::MultisampledDepthFasterOutOfGeneral`).
+    pub depth_attachments_moved: u64,
+    /// Render pass instances that rendered their multisampled depth/stencil attachment in
+    /// `DEPTH_STENCIL_ATTACHMENT_OPTIMAL` with no move around them: their encoder holds it there,
+    /// and it rests there between the encoders that hold it, on a device measured to render it
+    /// faster so (`DriverFact::MultisampledDepthFasterOutOfGeneral`). They count in
+    /// `depth_attachments_moved` too.
+    pub depth_instances_held: u64,
+    /// The moves of such a held depth out of `DEPTH_STENCIL_ATTACHMENT_OPTIMAL`, back to
+    /// `GENERAL`, before an encoder that names it otherwise: each costs the device a resolve of
+    /// the depth, as each instance's move back did before.
+    pub held_depths_released: u64,
     /// Of `attachment_reads_through_copies`, the draws that read the texture at their fragments'
     /// own pixels alone (`StageModule::own_pixel_textures`) over a texture whose copy is cut to a
     /// rectangle: the copy in before their instance moves only the texels inside the rectangle
@@ -1955,6 +1992,9 @@ impl Device {
             attachment_read_splits: counters.attachment_read_splits.load(Ordering::Relaxed),
             reading_draws_snapshotted: counters.reading_draws_snapshotted.load(Ordering::Relaxed),
             snapshot_inline_splits: counters.snapshot_inline_splits.load(Ordering::Relaxed),
+            depth_attachments_moved: counters.depth_attachments_moved.load(Ordering::Relaxed),
+            depth_instances_held: counters.depth_instances_held.load(Ordering::Relaxed),
+            held_depths_released: counters.held_depths_released.load(Ordering::Relaxed),
             own_pixel_reads: counters.own_pixel_reads.load(Ordering::Relaxed),
             shadows_zeroed: counters.shadows_zeroed.load(Ordering::Relaxed),
             shadow_copies: counters.shadow_copies.load(Ordering::Relaxed),

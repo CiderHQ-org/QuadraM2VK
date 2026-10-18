@@ -117,6 +117,9 @@ pub(super) struct EncoderRecord {
     pub(super) replay: Option<std::sync::Arc<Replay>>,
     /// Its executions' place among the command buffer's (`State::executions`).
     pub(super) executions: std::ops::Range<usize>,
+    /// The images it holds in their attachment layout (`texture/held_depth.rs`): the scheduler
+    /// moves each there before it.
+    pub(super) held: Vec<ResourceKey>,
 }
 
 /// What owns the memory under a key, held without keeping it.

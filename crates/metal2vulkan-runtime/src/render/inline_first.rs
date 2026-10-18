@@ -297,10 +297,11 @@ impl RenderCommandEncoder {
             first: true,
             last: false,
         };
-        let none = Feedback::NONE;
-        let pass = render_target::final_pass(&device, &self.layout, &instance.shape, at, none)?;
-        let framebuffer =
-            render_target::framebuffer(&device, &pass, &self.layout, instance.views, none)?;
+        // The pass has no depth/stencil attachment (`opens_inline`): every attachment in
+        // `GENERAL`.
+        let (none, general) = (Feedback::NONE, vk::ImageLayout::GENERAL);
+        let shape = &instance.shape;
+        let pass = render_target::final_pass(&device, &self.layout, shape, at, none, general)?;
         let held = self.core.hold_pass()?;
         Ok(Some(InlineBegin {
             pass,

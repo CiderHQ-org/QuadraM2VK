@@ -241,6 +241,8 @@ pub(super) struct EncoderCore {
 pub(super) struct Replayed {
     pub(super) raws: Vec<vk::CommandBuffer>,
     pub(super) summary: Summary<ResourceKey>,
+    /// The images it holds in their attachment layout (`texture/held_depth.rs`).
+    pub(super) held: Vec<ResourceKey>,
     pub(super) retained: Retained,
     pub(super) executions: Vec<Execution>,
     pub(super) keys: BTreeSet<ResourceKey>,
@@ -1228,6 +1230,11 @@ impl EncoderCore {
         let copies = self.shadows.finish();
         self.count_shadow_copies(&copies);
         self.shadow_copies(&copies);
+        // Its commands were recorded for one layout of each image it holds
+        // (`texture/held_depth.rs`).
+        if self.uses.broke_hold() {
+            return Err(internal("a held depth used but as its attachment"));
+        }
         // Its last `VkCommandBuffer` stays recording, the command buffer's tail: its batch's end
         // may go into it (`CommandBufferShared::close_tail`).
         let EncoderCore {
@@ -1258,6 +1265,7 @@ impl EncoderCore {
         let mut state = open.command_buffer.state();
         state.use_heaps(heaps);
         let encoder = state.encoder_ended(kind, keys, residency, taken);
+        state.encoder_holds(encoder, uses.held().to_vec());
         if let Some(error) = fails_command_buffer {
             state.fail_from(encoder, error);
         }
@@ -1343,6 +1351,9 @@ impl EncoderCore {
         let copies = self.shadows.finish();
         self.count_shadow_copies(&copies);
         self.shadow_copies(&copies);
+        if self.uses.broke_hold() {
+            return Err(internal("a held depth used but as its attachment"));
+        }
         // SAFETY: as in `barrier`.
         unsafe { self.open.command_buffer.end_raw(self.raw) }.map_err(vulkan)?;
         let EncoderCore {
@@ -1364,6 +1375,7 @@ impl EncoderCore {
                 "an encoder encoded again differs from its first encoding",
             ));
         }
+        let held = uses.held().to_vec();
         let mut summaries = uses.finish_parts();
         let summary = match (summaries.pop(), summaries.is_empty()) {
             (Some(summary), true) => summary,
@@ -1373,6 +1385,7 @@ impl EncoderCore {
         Ok(Replayed {
             raws: ended,
             summary,
+            held,
             retained,
             executions,
             keys,

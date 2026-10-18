@@ -122,7 +122,8 @@ fn executes(instance: &PassInstance) -> bool {
 
 /// The passes of `instance`'s runs over `own`, its layout: the first run's at the instance's
 /// first position, one between two others, and the last run's at its last (as the encoder makes
-/// them, `render.rs`), with the objects that hold them.
+/// them, `render.rs`), with the objects that hold them. Every attachment is in `GENERAL`: an
+/// instance an execution joins holds none out of it (`render_target::depth_layout`).
 fn run_passes(
     device: &Device,
     own: &PassLayout,
@@ -136,6 +137,7 @@ fn run_passes(
             &instance.shape,
             Position { first, last },
             Feedback::NONE,
+            vk::ImageLayout::GENERAL,
         )
     };
     let objects = [

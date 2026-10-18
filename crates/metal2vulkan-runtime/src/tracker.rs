@@ -21,15 +21,16 @@
 //!   submission order.
 //!
 //! **Barriers and waits.** Every image rests in `VK_IMAGE_LAYOUT_GENERAL` outside render passes,
-//! so nothing here changes a layout. An access after one of the same `VkQueue` needs a
-//! [`Barrier`]: one global memory barrier, everything in `src` before everything in `dst`, which
-//! orders buffer and image memory alike; Vulkan's submission order on one `VkQueue` makes it cover
-//! the earlier batches of every logical queue there. An access after one of another `VkQueue`
-//! needs a [`Wait`] of its batch for that queue's timeline semaphore at the earlier batch's
-//! [`Point`]: the signal makes the earlier writes available and the wait makes them visible to
-//! the waiting stages of this batch and of every later one of its queue. That batch was submitted
-//! before, so the wait never waits on an unsubmitted signal. Both may order more than Metal
-//! requires, never less.
+//! so nothing here changes a layout; but for a held multisampled depth (`texture/held_depth.rs`),
+//! whose moves between encoders the scheduler plans with the encoders, each a write of the whole
+//! image outside them, which the plan orders as any other. An access after one of the same
+//! `VkQueue` needs a [`Barrier`]: one global memory barrier, everything in `src` before everything
+//! in `dst`, which orders buffer and image memory alike; Vulkan's submission order on one
+//! of another `VkQueue` needs a [`Wait`] of its batch for that queue's timeline semaphore at the
+//! earlier batch's [`Point`]: the signal makes the earlier writes available and the wait makes
+//! them visible to the waiting stages of this batch and of every later one of its queue. That
+//! batch was submitted before, so the wait never waits on an unsubmitted signal. Both may order
+//! more than Metal requires, never less.
 //!
 //! **The state.** Per resource, per range: the last write on each queue that wrote it (one queue's
 //! unless entries were merged), with the stages and access types it is already visible to on its
@@ -290,6 +291,17 @@ impl<K> Use<K> {
     /// Whether the use touches nothing: an empty range, or neither a read nor a write.
     fn is_nothing(&self) -> bool {
         self.range.is_empty() || (self.read.is_empty() && self.write.is_empty())
+    }
+
+    /// Whether the use is a depth/stencil attachment's alone: its reads and writes are the
+    /// attachment's, in the stages of the fragment tests, which load, test and store it.
+    pub(super) fn is_depth_attachment(&self) -> bool {
+        let stages = vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+            | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS;
+        let access = vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ
+            | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE;
+        let both = self.read.union(self.write);
+        stages.contains(both.stages) && access.contains(both.access)
     }
 }
 
@@ -983,7 +995,10 @@ pub(super) struct EncoderUses<K> {
     /// The fences waited for: before the encoder's first part.
     waits: Vec<K>,
     /// The fences updated: after its last part.
-    updates: Vec<K>,
+    /// The images it holds in their attachment layout (`texture/held_depth.rs`).
+    held: Vec<K>,
+    /// A use of a held image but as a depth/stencil attachment was recorded after its hold.
+    broke: bool,
 }
 
 /// The uses of one part of an encoder.
@@ -1013,6 +1028,8 @@ impl<K: Copy + Ord + Hash> EncoderUses<K> {
             parts: vec![Part::new()],
             waits: Vec::new(),
             updates: Vec::new(),
+            held: Vec::new(),
+            broke: false,
         }
     }
 
@@ -1040,6 +1057,12 @@ impl<K: Copy + Ord + Hash> EncoderUses<K> {
         uses: &[Use<K>],
         barrier: Option<Barrier>,
     ) {
+        if !self.held.is_empty() {
+            let held = &self.held;
+            self.broke |= uses.iter().any(|used| {
+                held.contains(&used.key) && !used.is_nothing() && !used.is_depth_attachment()
+            });
+        }
         let part = self.current();
         // Every stage, untracked work's too: a fence wait orders all of the encoder's work.
         part.stages |= uses.iter().fold(stages, |all, used| {
@@ -1140,17 +1163,31 @@ impl<K: Copy + Ord + Hash> EncoderUses<K> {
         }
     }
 
-    /// `update_fence`: the fence is updated after the encoder's work.
-    pub(super) fn update_fence(&mut self, fence: K) {
-        if !self.updates.contains(&fence) {
-            self.updates.push(fence);
+
+    /// Hold the image known by `key` in its attachment layout through the encoder
+    /// (`texture/held_depth.rs`): a use of it recorded from now on but as a depth/stencil
+    /// attachment breaks the hold ([`broke_hold`](Self::broke_hold)).
+    pub(super) fn hold(&mut self, key: K) {
+        if !self.held.contains(&key) {
+            self.held.push(key);
         }
+    }
+
+    /// The images the encoder holds in their attachment layout.
+    pub(super) fn held(&self) -> &[K] {
+        &self.held
     }
 
     /// How many parts the encoder's commands were recorded in so far: one more at each
     /// [`split`](Self::split).
     pub(super) fn parts(&self) -> usize {
         self.parts.len()
+    }
+
+    /// Whether a use of a held image but as a depth/stencil attachment was recorded after its
+    /// hold: the encoder's commands would find it in another layout than they were recorded for.
+    pub(super) fn broke_hold(&self) -> bool {
+        self.broke
     }
 
     /// The part commands are recorded into now.

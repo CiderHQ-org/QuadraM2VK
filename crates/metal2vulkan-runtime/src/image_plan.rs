@@ -17,7 +17,10 @@
 //!   of the texture's uses, nor for copies, lacks the format: the texture is refused, naming it.
 //!   Metal's `Unknown` usage is the usage Metal gives it
 //!   (`texture_descriptor::effective_usage`). Transfer usage is always asked for where the format
-//!   has it, because Metal copies every texture with blits, `replaceRegion` and `getBytes`.
+//!   has it, because Metal copies every texture with blits, `replaceRegion` and `getBytes`. A
+//!   single-sample depth attachment the runtime makes also takes sampled usage where its driver
+//!   keeps a depth image's hierarchical depth in `GENERAL` only for a sampled image
+//!   ([`hiz_candidate`], `DriverFact::SampledDepthKeepsHiZ`: ANV on the Iris Xe, measured).
 //! - **`ulong` atomics.** A `RG32Uint` texture (Metal's `ulong` texture) made with `ShaderAtomic`
 //!   also takes the `R64_UINT` view its `ulong` atomics update, where the device has that format's
 //!   storage atomics.
@@ -1087,6 +1090,37 @@ pub(super) fn cube_compatible(layout: &TextureLayout) -> bool {
         }
         _ => false,
     }
+}
+
+/// `plan` with sampled usage, where its driver keeps a single-sample depth image's hierarchical
+/// depth in `GENERAL` only for a sampled image (`keeps_hiz`: the cost fact
+/// [`DriverFact::SampledDepthKeepsHiZ`]): a single-sample depth attachment with a depth aspect,
+/// not transient and not yet sampled, of a format the device samples. The image holds the same
+/// texels either way; every image rests in `GENERAL` (`tracker.rs`) and takes transfer-source
+/// usage, which on such a driver turns the hierarchical depth off there. `Device::with_free_usage`
+/// gives the image the usage wherever the device makes it, though it may enlarge the image (ANV
+/// keeps the write-through form's state in the image's memory), so a heap's size answer, which
+/// reads the same plan, is that image's. `None` otherwise.
+pub(super) fn hiz_candidate(
+    plan: &ImagePlan,
+    profile: &DeviceProfile,
+    keeps_hiz: bool,
+) -> Option<ImagePlan> {
+    let usage = plan.usage;
+    let depth = plan
+        .format
+        .block()
+        .is_some_and(|block| block.depth.is_some());
+    let candidate = keeps_hiz
+        && depth
+        && plan.samples.as_raw() == 1
+        && usage.contains(ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+        && !usage.intersects(ImageUsageFlags::SAMPLED | ImageUsageFlags::TRANSIENT_ATTACHMENT)
+        && profile.supports_format(plan.format, FormatUsage::SampledImage);
+    candidate.then(|| ImagePlan {
+        usage: usage | ImageUsageFlags::SAMPLED,
+        ..plan.clone()
+    })
 }
 
 fn attachment_flag(depth_stencil: bool, profile: &DeviceProfile) -> ImageUsageFlags {

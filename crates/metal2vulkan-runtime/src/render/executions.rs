@@ -2690,6 +2690,8 @@ impl DeferredPass {
                         (passes.at(at, count), instance.framebuffer)
                     }
                     (None, _, Some((passes, framebuffer))) => (passes.at(at, count), *framebuffer),
+                    // An instance of several runs holds an execution, so it holds every attachment
+                    // in `GENERAL` (`render_target::depth_layout`), as its runs' passes do.
                     (None, None, _) if !backed => {
                         let pass = render_target::final_pass(
                             device,
@@ -2697,6 +2699,7 @@ impl DeferredPass {
                             shape,
                             position,
                             Feedback::NONE,
+                            vk::ImageLayout::GENERAL,
                         )?;
                         let raw = pass.raw;
                         made.0.push(pass);
@@ -2709,8 +2712,9 @@ impl DeferredPass {
                         let framed = of.map_or(&[][..], |of| &of.framed[..]);
                         let framed = framed_layout(own, framed);
                         let own = &*framed;
-                        let none = Feedback::NONE;
-                        let pass = render_target::final_pass(device, own, shape, position, none)?;
+                        let (none, general) = (Feedback::NONE, vk::ImageLayout::GENERAL);
+                        let pass =
+                            render_target::final_pass(device, own, shape, position, none, general)?;
                         let framebuffer =
                             render_target::framebuffer(device, &pass, own, views, none)?;
                         let raw = (pass.raw, framebuffer.raw);

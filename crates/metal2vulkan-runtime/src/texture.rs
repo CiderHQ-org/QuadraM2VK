@@ -156,6 +156,7 @@ mod first_move_lifetimes;
 pub(super) mod heap;
 pub(super) mod heap_tiled;
 pub(super) mod heap_two_planes;
+pub(crate) mod held_depth;
 pub(crate) mod host_copy;
 #[cfg(unix)]
 pub(crate) mod pitch_refusals;
@@ -224,6 +225,9 @@ pub(super) struct TextureState {
     /// The decodes queued for ASTC carriers' second decoded twins, which the device's next batch
     /// with work records (`texture/decoded_twin.rs`).
     pub(super) second_decodes: decoded_twin::SecondDecodes,
+    /// The multisampled depth textures held in the attachment layout between passes
+    /// (`texture/held_depth.rs`).
+    pub(crate) held: held_depth::HeldImages,
 }
 
 impl TextureState {
@@ -256,6 +260,7 @@ impl TextureState {
             first_moves: first_move::FirstMoves::default(),
             twin_decodes: twin_decode::TwinDecodes::default(),
             second_decodes: Mutex::new(Vec::new()),
+            held: held_depth::HeldImages::default(),
         }
     }
 
@@ -1231,6 +1236,8 @@ impl Drop for Image {
             return;
         };
         let shared = self.device.shared();
+        // A held image's scheduler state goes with it (`texture/held_depth.rs`).
+        shared.textures.held.remove(self.identity.key);
         let (image, memory) = self.owner.releases();
         // An image that took its storage form is in the form's memory: the memory it was made in
         // goes with its first `VkImage`, which the switch's command buffer holds until it
@@ -2043,6 +2050,14 @@ impl Device {
         };
         let plan = self.with_free_usage(plan, layout.texture_type)?;
         let mut image = self.new_texture_image(plan, &layout, descriptor, hazard)?;
+        // A multisampled depth the device renders faster out of `GENERAL` rests in the attachment
+        // layout between the passes that hold it (`texture/held_depth.rs`).
+        let private = storage == StorageMode::Private;
+        if private && twin.is_none() && held_depth::eligible(self, &image.plan) {
+            let raw = image.raw.get();
+            let held = held_depth::HeldImage::of_plan(image.identity.key, raw, &image.plan);
+            self.shared().textures.held.insert(held);
+        }
         if let Some(twin) = twin {
             let twin = self.new_texture_image(twin, &layout, descriptor, hazard)?;
             image.twin = Some(Box::new(twin));
