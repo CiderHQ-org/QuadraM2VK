@@ -159,6 +159,7 @@ mod rate_map;
 mod rate_mapped_pass;
 mod reader_sizes;
 mod rebind;
+mod recorder;
 mod release;
 mod render;
 mod render_pass;
@@ -296,6 +297,8 @@ pub use queue::CommandQueue;
 pub use rate_map::{RasterizationRateMap, RateMapProblem};
 pub use rate_mapped_pass::RegionRefusal;
 pub use rebind::RebindProblem;
+#[doc(hidden)]
+pub use recorder::CommandsReplayed;
 pub use render::{DrawProblem, RenderCommandEncoder, ResolveTarget};
 pub use render_pass::{
     Attachment, RenderPassColorAttachmentDescriptor, RenderPassDepthAttachmentDescriptor,

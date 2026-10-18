@@ -15,6 +15,7 @@
 
 use crate::exit_guard::{self, Call};
 use crate::image_barrier::MemoryReads;
+use crate::recorder::Slot;
 use ash::vk;
 use std::ffi::{c_void, CStr};
 use std::ops::Deref;
@@ -91,14 +92,16 @@ impl Functions {
     ///
     /// # Safety
     ///
-    /// `all` is a live device of `instance`, routed (`compiles::route`), and the loader serves
-    /// `vkGetDeviceProcAddr` for it (its loader word is in place).
+    /// `all` is a live device of `instance`, routed (`compiles::route`, and through `recording`
+    /// where it is set, `recorder::route`), and the loader serves `vkGetDeviceProcAddr` for it
+    /// (its loader word is in place).
     pub(super) unsafe fn new(
         instance: &ash::Instance,
         all: ash::Device,
         reads: MemoryReads,
         push_descriptor: Option<vk::PFN_vkCmdPushDescriptorSetKHR>,
         object_name: Option<vk::PFN_vkSetDebugUtilsObjectNameEXT>,
+        recording: Option<&Slot>,
     ) -> Functions {
         let handle = all.handle();
         let get = instance.fp_v1_0().get_device_proc_addr;
@@ -115,8 +118,11 @@ impl Functions {
                 Some(at) => {
                     let pointer = address(name);
                     entry_points[at] = pointer as usize as u64;
-                    // The pipeline makings come through `compiles.rs`, as `all`'s do.
-                    super::compiles::entry(name).unwrap_or(pointer)
+                    // The pipeline makings come through `compiles.rs`, and the commands through
+                    // the device's slot, as `all`'s do.
+                    super::compiles::entry(name)
+                        .or_else(|| recording.and_then(|slot| slot.entry(name)))
+                        .unwrap_or(pointer)
                 }
                 None => std::ptr::null(),
             }

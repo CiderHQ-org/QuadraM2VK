@@ -1145,10 +1145,11 @@ fn other_threads_cpu() -> Option<BTreeMap<String, Cpu>> {
 
 /// The groups of the process's other threads [`other_threads_cpu`] reports: the runtime's by the
 /// prefix of their names, and the rest.
-const THREAD_GROUPS: [(&str, &str); 3] = [
+const THREAD_GROUPS: [(&str, &str); 4] = [
     ("scheduler", "metal2vulkan-sc"),
     ("queue waits", "metal2vulkan-qu"),
     ("handlers", "metal2vulkan-ha"),
+    ("recorder", "metal2vulkan-re"),
 ];
 
 /// What the other threads spent between `before` and `after` ([`other_threads_cpu`]), by

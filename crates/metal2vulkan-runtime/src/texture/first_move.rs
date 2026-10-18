@@ -92,15 +92,18 @@
 //!   one waits for the batch that did it until that batch completed ([`FirstMoves::waits`]): any
 //!   of its commands may reach the resource unnamed.
 //! - **Order**. Each submission holds its place in the order from its take until its submission was
-//!   made, whether or not it took anything, and each registration waits for its place: so no
-//!   submission is made between another's take and its submission (one that found nothing to take
-//!   would otherwise run before the moves another took, on the same `VkQueue`), and no resource
-//!   registers between a take and its submission (its texture table element, written after it
-//!   registered, then reaches no batch submitted without its move). An internal submission signals
-//!   a timeline of its own, which a batch on another `VkQueue` waits for while one that did first
-//!   work may not have completed ([`FirstMoves::internal_wait`]). Seen without it on RADV: a batch
-//!   submitted with images in `UNDEFINED` in its texture table, under the validation layer (EV
-//!   STL-ps4-radv).
+//!   made, whether or not it took anything: so no submission is made between another's take and its
+//!   submission (one that found nothing to take would otherwise run before the moves another took,
+//!   on the same `VkQueue`). No texture's elements are written between a batch's take and its
+//!   submission: a texture registered after the take, whose move the batch did not take, would be
+//!   in the batch's texture table in `UNDEFINED`. So a batch holds the texture slots' writes over
+//!   that span ([`FirstMoves::take_holding`], `heap_sets::hold`): elements asked meanwhile are
+//!   written once its submission was made, before the next submission takes its place, and a
+//!   registration waits for nothing, as Metal's makes wait for nothing. Where registrations waited
+//!   for the place instead, a texture made while a batch of 4096 to 32768 fills was submitted on
+//!   the M3 Max waited up to 13 ms, in 20 of 60 makings: MoltenVK encodes a command buffer's Metal
+//!   commands inside `vkQueueSubmit`, on the calling thread (4.5 to 17 ms for those batches); with
+//!   the hold, no making of 60 took past 0.16 ms. A device whose heap sets take no writes while a
 //! - **Failure.** A submission that fails gives its work back, still to be done.
 //! - **Out of reach of a submission.** A texture's `VkImage` handed out (`Texture::vk_image`)
 //!   rests in `GENERAL` as its contract says: handing it out does its work first, by an internal

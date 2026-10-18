@@ -8,7 +8,7 @@
 //! they made read by a pass; and a pass leaves the inbox room for twice the commits it took in.
 
 use crate::device::lock;
-use crate::scheduler::inbox::Inbox;
+use crate::scheduler::inbox::{Inbox, ROOM};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar};
@@ -129,6 +129,20 @@ fn a_commit_finding_no_pass_marks_the_state_for_the_thread_s_wake() {
     });
     assert_eq!(lock(inbox.state()).0, [7]);
     assert!(!inbox.holds_commits());
+}
+
+/// A new inbox holds [`ROOM`] commits without growing: so a frame's commits, which wait at most
+/// that many, push theirs with no allocation on their own thread, in `commit`, however far the
+/// thread making passes falls behind them before its first pass took in as many.
+#[test]
+fn a_new_inbox_holds_room_commits_without_growing() {
+    let inbox = Log::new(Vec::new());
+    let room = inbox.room();
+    assert!(room >= ROOM, "a new inbox has room for {room}");
+    for commit in 0..ROOM as u32 {
+        inbox.post(commit, |_| {});
+    }
+    assert_eq!(inbox.room(), room, "{ROOM} commits grew the inbox");
 }
 
 /// A pass leaves the inbox room for twice the commits it took in, made on the passing thread: so

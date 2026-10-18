@@ -277,6 +277,8 @@ mod command_queues;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod command_render_states;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod commands_replayed;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod commit_costs;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod commit_latency;

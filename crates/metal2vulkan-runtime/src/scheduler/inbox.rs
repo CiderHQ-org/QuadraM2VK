@@ -41,11 +41,16 @@ use crate::device::lock;
 use std::sync::atomic::{fence, AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, TryLockError};
 
+/// The commits the inbox holds from its making without growing: more than a frame commits (the
+/// consumer's guest commits about 45 command buffers a frame, the `frame_costs` lanes 41 to 108
+/// and wait for each frame's last), so a commit's push allocates only past a backlog that deep.
+pub(crate) const ROOM: usize = 128;
+
 /// A state `S` that passes work on under its lock, and the commits `C` waiting to be taken in.
 pub(crate) struct Inbox<S, C> {
     state: Mutex<S>,
-    /// Commits not yet taken in, in commit order. It keeps its room, and the thread making passes
-    /// grows it ahead of the commits ([`take`](Self::take)).
+    /// Commits not yet taken in, in commit order. It starts with room for [`ROOM`], keeps its room,
+    /// and the thread making passes grows it ahead of the commits ([`take`](Self::take)).
     commits: Mutex<Vec<C>>,
     /// The commits a pass takes in. Filled and drained by the thread making the pass, under the
     /// state's lock, so it keeps its room from pass to pass and a pass allocates no list of them
@@ -63,7 +68,7 @@ impl<S, C> Inbox<S, C> {
     pub(crate) fn new(state: S) -> Inbox<S, C> {
         Inbox {
             state: Mutex::new(state),
-            commits: Mutex::new(Vec::new()),
+            commits: Mutex::new(Vec::with_capacity(ROOM)),
             taking: Mutex::new(Vec::new()),
             posted: AtomicBool::new(false),
             nudged: AtomicBool::new(false),
@@ -197,7 +202,7 @@ impl<S, C> Inbox<S, C> {
     ///
     /// The inbox is left room for twice the commits taken in, made here, on the thread making
     /// passes: a commit's push then grows it, an allocation on the committing thread, only where
-    /// more than twice as many commits wait as a pass ever took in.
+    /// more commits wait than [`ROOM`] and twice as many as a pass ever took in.
     fn take(&self, taking: &mut Vec<C>) {
         self.nudged.swap(false, Ordering::SeqCst);
         if !self.posted.load(Ordering::SeqCst) {

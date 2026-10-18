@@ -330,6 +330,12 @@ driver's. Each is open work.
   each timed command buffer writes: on an M4 a bare barrier took 14.7 µs alone and 167.8 µs with
   them. `DeviceOptions::gpu_times_from_host` (off by default, announced) answers GPU times from the
   host clock and spares them.
+- **A texture made while a batch is submitted waits for that submission on a device without
+  `descriptorBindingUpdateUnusedWhilePending`** (the `vk12-floor` profile), where its making
+  registers a first move (a `Private` texture's): the registration takes the first-move order,
+  which the batch holds from its take until its `vkQueueSubmit` returns. Metal's making waits for
+  nothing. Elsewhere the batch holds the texture slots' writes instead
+  (`WorkCounts::heap_slot_writes_deferred`, which stays 0 on such a device).
 - **A shadow's copy back covers every texel it moves, where no merge serves it**: an image's
   shadow (a view of a layout the device's views do not reinterpret), a turned texture's and a
   two-plane one's. After a pass that draws, that is every texel inside the draws' scissors, where

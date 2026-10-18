@@ -1435,6 +1435,9 @@ impl EncoderCore {
                 },
             );
         }
+        // SAFETY: only this call records `raw`, under the state lock, and it records until the
+        // tail ends (at the next part's end or the commit, `close_tail`).
+        unsafe { crate::recorder::reserve_end(raw) };
         state.tail = Some(raw);
         state.retained.extend(retained.into_entry());
         state.executions.extend(executions);

@@ -843,6 +843,12 @@ impl CommandBufferShared {
             true => (&signal_semaphores[..], &signal_values[..]),
             false => (&[][..], &[][..]),
         };
+        for buffer in work.iter_mut() {
+            // SAFETY: each ended, and its command buffer committed; inside the scheduler's
+            // section.
+            *buffer = unsafe { crate::recorder::resolve(raw, *buffer) }
+                .map_err(|error| recording_error(device, crate::error::vulkan(error)))?;
+        }
         let mut work_timeline = vk::TimelineSemaphoreSubmitInfo::default()
             .wait_semaphore_values(wait_values)
             .signal_semaphore_values(work_signal_values);

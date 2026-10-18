@@ -129,6 +129,7 @@ mod range;
 mod rate_map;
 mod reader_sizes;
 mod render;
+mod replays;
 mod resource;
 mod resource_ids;
 mod rotated;

@@ -216,6 +216,7 @@ impl MemoryRequirementsInfo {
 
 /// `VkGeneratedCommandsInfoEXT`.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct GeneratedCommandsInfo {
     pub s_type: vk::StructureType,
     pub p_next: *const c_void,
@@ -335,6 +336,23 @@ impl Commands {
             execute: command!(c"vkCmdExecuteGeneratedCommandsEXT", Execute),
             preprocess: command!(c"vkCmdPreprocessGeneratedCommandsEXT", Preprocess),
         })
+    }
+
+    /// The commands, those that record through `slot` where the device has one (`recorder`).
+    pub(crate) fn routed(self, slot: Option<&crate::recorder::Slot>) -> Commands {
+        use crate::recorder::{through, Command};
+        // SAFETY: each is the device's command of the routed command's signature.
+        unsafe {
+            Commands {
+                execute: through(slot, Command::CmdExecuteGeneratedCommands, self.execute),
+                preprocess: through(
+                    slot,
+                    Command::CmdPreprocessGeneratedCommands,
+                    self.preprocess,
+                ),
+                ..self
+            }
+        }
     }
 
     /// `vkCreateIndirectExecutionSetEXT`.

@@ -68,6 +68,8 @@
 //! first call of each entry point, and every section whose count reaches a power of two,
 //! register the hook again for those (`exit_guard`).
 
+use crate::draw_source::SizedIndexBind;
+use crate::dynamic_state::{ColorWriteMasks, ExtendedDynamicState};
 use crate::error::{vulkan, Error};
 use crate::exit_guard::Call;
 use crate::generated_commands::{
@@ -79,6 +81,7 @@ use crate::gpu_time::Calibration;
 use crate::loader_word::LoaderWord;
 use crate::memory;
 use crate::release::{self, Generated, Released};
+use crate::render_state::DepthBiasCommand;
 use crate::sharing::Sharing;
 use crate::tracker::Barrier;
 use ash::vk;
@@ -88,12 +91,18 @@ use super::functions::Vk;
 use super::QueueSlot;
 
 /// The table's entry points priming cannot make before the hook is registered for the device it
-/// primes: the release of a device, an instance and a messenger. The first release of each in
-/// the process registers the hook again as its section ends (`exit_guard::called`).
-pub(crate) const UNPRIMED: [Call; 3] = [
+/// primes: the release of a device, an instance and a messenger, and the commands of a mesh draw
+/// and of an execution of commands the GPU generates, which take pipelines of their own kinds.
+/// The first release of each in the process, and the first replay of each command
+/// (`recorder`), registers the hook again as its section ends (`exit_guard::called`).
+pub(crate) const UNPRIMED: [Call; 7] = [
     Call::DestroyDevice,
     Call::DestroyDebugUtilsMessenger,
     Call::DestroyInstance,
+    Call::CmdDrawMeshTasks,
+    Call::CmdDrawMeshTasksIndirect,
+    Call::CmdExecuteGeneratedCommands,
+    Call::CmdPreprocessGeneratedCommands,
 ];
 
 /// The table's entry points a queue family that writes no timestamps (`timestampValidBits` 0)
@@ -136,6 +145,37 @@ pub(crate) const CALIBRATION_CALLS: [Call; 1] = [Call::GetCalibratedTimestamps];
 /// The table's entry points a device whose instance reports no messages never calls, nor primes:
 /// a graphics pipeline's debug name (`pipeline/graphics.rs`).
 pub(crate) const NAMING_CALLS: [Call; 1] = [Call::SetDebugUtilsObjectName];
+
+/// The table's entry points a device without extended dynamic state (Vulkan 1.3, or
+/// `VK_EXT_extended_dynamic_state`) never calls, nor primes: a render encoder's dynamic states
+/// (`dynamic_state.rs`).
+pub(crate) const EXTENDED_DYNAMIC_STATE_CALLS: [Call; 9] = [
+    Call::CmdSetCullMode,
+    Call::CmdSetFrontFace,
+    Call::CmdSetPrimitiveTopology,
+    Call::CmdBindVertexBuffers2,
+    Call::CmdSetDepthTestEnable,
+    Call::CmdSetDepthWriteEnable,
+    Call::CmdSetDepthCompareOp,
+    Call::CmdSetStencilTestEnable,
+    Call::CmdSetStencilOp,
+];
+
+/// The table's entry points a device without a dynamic primitive restart (Vulkan 1.3, or
+/// `VK_EXT_extended_dynamic_state2`) never calls, nor primes (`dynamic_state.rs`).
+pub(crate) const PRIMITIVE_RESTART_CALLS: [Call; 1] = [Call::CmdSetPrimitiveRestartEnable];
+
+/// The table's entry points a device without the dynamic color write mask never calls, nor
+/// primes: a snapshot draw's masks (`dynamic_state.rs`, `render/snapshot.rs`).
+pub(crate) const COLOR_WRITE_MASK_CALLS: [Call; 1] = [Call::CmdSetColorWriteMask];
+
+/// The table's entry points a device without `VK_EXT_depth_bias_control` never calls, nor
+/// primes: a depth bias in a unit of its own (`render_state.rs`).
+pub(crate) const DEPTH_BIAS_CALLS: [Call; 1] = [Call::CmdSetDepthBias2];
+
+/// The table's entry points a device without `maintenance5` never calls, nor primes: an index
+/// buffer bound with its size (`draw_source.rs`).
+pub(crate) const SIZED_INDEX_BIND_CALLS: [Call; 1] = [Call::CmdBindIndexBuffer2];
 
 /// The debug name of a render host step's pipeline that priming makes, where the instance reports
 /// messages ([`NAMING_CALLS`]).
@@ -316,6 +356,7 @@ fn specialization() -> vk::SpecializationInfo<'static> {
 
 /// What the device primed has: a queue family that writes timestamps, `hostQueryReset`, device
 /// addresses, `VK_EXT_device_generated_commands`, sparse binding on its queues, the push command,
+/// calibrated timestamps, and the render encoder's commands of [`PrimedDraws`].
 #[derive(Clone, Copy)]
 pub(crate) struct Has {
     pub(crate) timestamps: bool,
@@ -326,12 +367,45 @@ pub(crate) struct Has {
     pub(crate) push_descriptor: bool,
     pub(crate) calibration: bool,
     pub(crate) object_names: bool,
+    pub(crate) extended_dynamic_state: bool,
+    pub(crate) primitive_restart: bool,
+    pub(crate) color_write_masks: bool,
+    pub(crate) depth_bias: bool,
+    pub(crate) sized_index_bind: bool,
+}
+
+/// The commands a render encoder records that the device has where it has their feature or
+/// extension, which the priming's render host step makes (a deferred command buffer's replay
+/// records them inside a section, `recorder`).
+#[derive(Clone, Copy, Default)]
+pub(crate) struct PrimedDraws {
+    pub(crate) dynamic: Option<ExtendedDynamicState>,
+    pub(crate) color_write_masks: Option<ColorWriteMasks>,
+    pub(crate) depth_bias: Option<DepthBiasCommand>,
+    pub(crate) sized_index_bind: Option<SizedIndexBind>,
+}
+
+impl PrimedDraws {
+    /// `has`, with what it says of these commands set from them.
+    pub(crate) fn has(&self, has: Has) -> Has {
+        Has {
+            extended_dynamic_state: self.dynamic.is_some(),
+            primitive_restart: self
+                .dynamic
+                .is_some_and(|dynamic| dynamic.primitive_restart_enable.is_some()),
+            color_write_masks: self.color_write_masks.is_some(),
+            depth_bias: self.depth_bias.is_some(),
+            sized_index_bind: self.sized_index_bind.is_some(),
+            ..has
+        }
+    }
 }
 
 /// Prime `device` of `physical`, made from `instance`, whose queues are `queues`, the first of
 /// its primary family `queue_family`, its buffers and images shared as `sharing` says, on this
-/// thread; `has` says what the device has, and `generated` holds the commands of
-/// `VK_EXT_device_generated_commands` where it has them.
+/// thread; `has` says what the device has, `generated` holds the commands of
+/// `VK_EXT_device_generated_commands` where it has them, and `drawn` the render encoder's
+/// commands it has.
 ///
 /// # Safety
 ///
@@ -351,6 +425,7 @@ pub(super) unsafe fn prime(
     generated: Option<&Commands>,
     push: Option<vk::PFN_vkCmdPushDescriptorSetKHR>,
     calibration: Option<Calibration>,
+    drawn: PrimedDraws,
 ) -> Result<(), Error> {
     let mut primer = Primer {
         device,
@@ -358,6 +433,7 @@ pub(super) unsafe fn prime(
         sharing,
         push,
         calibration,
+        drawn,
         // SAFETY: the caller's.
         memory: unsafe { instance.get_physical_device_memory_properties(physical) },
         calls: 0,
@@ -402,6 +478,8 @@ pub(super) unsafe fn prime(
 /// has no push command, those of [`CALIBRATION_CALLS`] where it calibrates no timestamps, those
 /// of [`NAMING_CALLS`] where its instance reports no messages, and those of
 /// [`EXTENDED_DYNAMIC_STATE_CALLS`], [`PRIMITIVE_RESTART_CALLS`],
+/// [`COLOR_WRITE_MASK_CALLS`], [`DEPTH_BIAS_CALLS`] and [`SIZED_INDEX_BIND_CALLS`] where it has
+/// not their commands, that `calls` (one bit each) does not hold.
 pub(crate) fn missing(calls: u128, has: Has) -> Vec<Call> {
     Call::ALL
         .iter()
@@ -418,6 +496,11 @@ pub(crate) fn missing(calls: u128, has: Has) -> Vec<Call> {
                 && (has.push_descriptor || !PUSH_DESCRIPTOR_CALLS.contains(&call))
                 && (has.calibration || !CALIBRATION_CALLS.contains(&call))
                 && (has.object_names || !NAMING_CALLS.contains(&call))
+                && (has.extended_dynamic_state || !EXTENDED_DYNAMIC_STATE_CALLS.contains(&call))
+                && (has.primitive_restart || !PRIMITIVE_RESTART_CALLS.contains(&call))
+                && (has.color_write_masks || !COLOR_WRITE_MASK_CALLS.contains(&call))
+                && (has.depth_bias || !DEPTH_BIAS_CALLS.contains(&call))
+                && (has.sized_index_bind || !SIZED_INDEX_BIND_CALLS.contains(&call))
         })
         .collect()
 }
@@ -451,6 +534,8 @@ struct Primer<'a> {
     push: Option<vk::PFN_vkCmdPushDescriptorSetKHR>,
     /// The device's calibrated timestamps, where its queue family writes timestamps.
     calibration: Option<Calibration>,
+    /// The render encoder's commands the device has.
+    drawn: PrimedDraws,
     memory: vk::PhysicalDeviceMemoryProperties,
     /// The table's entry points called, one bit each.
     calls: u128,
@@ -1185,6 +1270,36 @@ impl Primer<'_> {
             let zero = vk::ClearDepthStencilValue::default();
             device.cmd_clear_depth_stencil_image(recorded, depth, general, &zero, &[depth_whole]);
             self.made(Call::CmdClearDepthStencilImage);
+            // What an encoder records that no host step does, which a deferred command buffer's
+            // replay records (`recorder`): a buffer's fill and its inline update, each at bytes
+            // of its own, a copy of the query's result, and a blit of the image's first texel to
+            // its second after the clear.
+            device.cmd_fill_buffer(recorded, buffer, 192, 4, 0);
+            self.made(Call::CmdFillBuffer);
+            device.cmd_update_buffer(recorded, buffer, 208, &[0; 4]);
+            self.made(Call::CmdUpdateBuffer);
+            let results = vk::QueryResultFlags::empty();
+            device.cmd_copy_query_pool_results(recorded, queries, 0, 1, buffer, 224, 4, results);
+            self.made(Call::CmdCopyQueryPoolResults);
+            Barrier::everything().record(device, recorded);
+            let corner = |x| vk::Offset3D { x, y: 0, z: 0 };
+            let far = |x| vk::Offset3D { x, y: 1, z: 1 };
+            let blit = [vk::ImageBlit {
+                src_subresource: texel,
+                src_offsets: [corner(0), far(1)],
+                dst_subresource: texel,
+                dst_offsets: [corner(1), far(2)],
+            }];
+            device.cmd_blit_image(
+                recorded,
+                image,
+                general,
+                image,
+                general,
+                &blit,
+                vk::Filter::NEAREST,
+            );
+            self.made(Call::CmdBlitImage);
             // The image's read before the pass's layout transition of it.
             Barrier::everything().record(device, recorded);
             self.render_step(RenderStep {
@@ -1316,9 +1431,72 @@ impl Primer<'_> {
             self.made(Call::CmdSetStencilWriteMask);
             device.cmd_set_stencil_reference(draws, faces, 0);
             self.made(Call::CmdSetStencilReference);
+            // The extended dynamic states and the extension states the device has, set before
+            // the bind too (a deferred command buffer's replay records them, `recorder`).
+            let drawn = self.drawn;
+            if let Some(dynamic) = drawn.dynamic {
+                (dynamic.cull_mode)(draws, vk::CullModeFlags::NONE);
+                self.made(Call::CmdSetCullMode);
+                (dynamic.front_face)(draws, vk::FrontFace::COUNTER_CLOCKWISE);
+                self.made(Call::CmdSetFrontFace);
+                (dynamic.primitive_topology)(draws, vk::PrimitiveTopology::TRIANGLE_LIST);
+                self.made(Call::CmdSetPrimitiveTopology);
+                (dynamic.depth_test_enable)(draws, vk::FALSE);
+                self.made(Call::CmdSetDepthTestEnable);
+                (dynamic.depth_write_enable)(draws, vk::FALSE);
+                self.made(Call::CmdSetDepthWriteEnable);
+                (dynamic.depth_compare_op)(draws, vk::CompareOp::ALWAYS);
+                self.made(Call::CmdSetDepthCompareOp);
+                (dynamic.stencil_test_enable)(draws, vk::FALSE);
+                self.made(Call::CmdSetStencilTestEnable);
+                let keep = vk::StencilOp::KEEP;
+                (dynamic.stencil_op)(draws, faces, keep, keep, keep, vk::CompareOp::ALWAYS);
+                self.made(Call::CmdSetStencilOp);
+                if let Some(restart) = dynamic.primitive_restart_enable {
+                    restart(draws, vk::FALSE);
+                    self.made(Call::CmdSetPrimitiveRestartEnable);
+                }
+            }
+            if let Some(ColorWriteMasks(masks)) = drawn.color_write_masks {
+                let all = [vk::ColorComponentFlags::RGBA];
+                masks(draws, 0, all.len() as u32, all.as_ptr());
+                self.made(Call::CmdSetColorWriteMask);
+            }
+            if let Some(bias) = drawn.depth_bias {
+                bias(draws, &vk::DepthBiasInfoEXT::default());
+                self.made(Call::CmdSetDepthBias2);
+            }
+            // A clear of the attachment inside the pass, as a render encoder's clear of a stand-in
+            // records it.
+            let clear = [vk::ClearAttachment {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                color_attachment: 0,
+                clear_value: vk::ClearValue::default(),
+            }];
+            let rect = [vk::ClearRect {
+                rect: area,
+                base_array_layer: 0,
+                layer_count: 1,
+            }];
+            device.cmd_clear_attachments(draws, &clear, &rect);
+            self.made(Call::CmdClearAttachments);
             device.cmd_bind_pipeline(draws, vk::PipelineBindPoint::GRAPHICS, pipeline);
             device.cmd_bind_vertex_buffers(draws, 0, &[buffer], &[0]);
             self.made(Call::CmdBindVertexBuffers);
+            if let Some(dynamic) = drawn.dynamic {
+                let (buffers, offsets) = ([buffer], [0]);
+                let none = std::ptr::null();
+                (dynamic.bind_vertex_buffers2)(
+                    draws,
+                    0,
+                    1,
+                    buffers.as_ptr(),
+                    offsets.as_ptr(),
+                    none,
+                    none,
+                );
+                self.made(Call::CmdBindVertexBuffers2);
+            }
             // An execution under a visibility result mode counts its draws in a query begun and
             // ended in its secondary.
             device.cmd_begin_query(draws, queries, 0, vk::QueryControlFlags::empty());
@@ -1332,6 +1510,10 @@ impl Primer<'_> {
             // and from its arguments.
             device.cmd_bind_index_buffer(draws, buffer, 0, vk::IndexType::UINT32);
             self.made(Call::CmdBindIndexBuffer);
+            if let Some(bind) = drawn.sized_index_bind {
+                bind(draws, buffer, 0, 256, vk::IndexType::UINT32);
+                self.made(Call::CmdBindIndexBuffer2);
+            }
             device.cmd_draw_indexed(draws, 3, 1, 0, 0, 0);
             self.made(Call::CmdDrawIndexed);
             device.cmd_draw_indexed_indirect(draws, buffer, 0, 1, 20);

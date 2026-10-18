@@ -79,6 +79,7 @@ use super::stencil_copy::StencilCopyObjects;
 use super::texture::TextureState;
 use super::unique_identifier::UniqueIdentifiers;
 use crate::image_barrier::MemoryReads;
+use crate::recorder::{Command, MeshDraws, Recorder, RecorderShared, Slot};
 use crate::release;
 use ash::vk::{self, Handle};
 use functions::{Functions, Vk};
@@ -284,6 +285,7 @@ pub(super) struct DeviceShared {
     /// `VK_EXT_depth_bias_control` (`render_state.rs`).
     pub(super) depth_bias_command: Option<DepthBiasCommand>,
     /// The mesh draw commands, where the device enabled `meshShader` (`render/mesh.rs`).
+    pub(super) mesh_draws: Option<MeshDraws>,
     /// `vkCmdPushDescriptorSet`, from Vulkan 1.4 or `VK_KHR_push_descriptor`
     /// (`binding::push_set`); none where the driver has
     /// `RuntimeDriverDefect::PushedBufferSizesUnset`.
@@ -295,6 +297,12 @@ pub(super) struct DeviceShared {
     /// The command that sets a draw's color write masks, where the device enabled everything a
     /// draw that reads its own pass's texture through a snapshot takes (`render/snapshot.rs`).
     pub(super) color_write_masks: Option<ColorWriteMasks>,
+    /// The device's slot among those its commands go through (`recorder`), where it took one:
+    /// let go of after `vkDestroyDevice` (it drops after the teardown, `Drop`). Held, not read.
+    _recording: Option<Slot>,
+    /// The thread that replays its encoders' deferred command buffers, where it has a slot
+    /// (`recorder`).
+    recorder: Option<Recorder>,
     /// The reasons a draw that reads its pass's texture took the split that the device said
     /// already, where `METAL2VULKAN_LOG_PIPELINES` is set (`render/snapshot.rs`).
     pub(super) snapshot_fallbacks: Mutex<Vec<&'static str>>,
@@ -457,6 +465,12 @@ impl DeviceShared {
     /// (`functions.rs`).
     pub(crate) fn vk(&self) -> &Vk {
         self.functions.get()
+    }
+
+    /// What its encoders' deferred command buffers' replays share, where it records them so
+    /// (`recorder`).
+    pub(crate) fn recorder(&self) -> Option<&Arc<RecorderShared>> {
+        self.recorder.as_ref().map(Recorder::shared)
     }
 
     /// `vkAllocateCommandBuffers` of `info`: the loader serves it and reads the device's loader
@@ -995,6 +1009,10 @@ impl Device {
         // Every pipeline made on the device from here on is made at the user-initiated class.
         // SAFETY: the device is live (the caller's contract), and its functions are its own.
         let raw = unsafe { compiles::route(raw) };
+        // Every command recorded with the device's functions goes through a slot of its own
+        // (`recorder`), dropped with the device after `vkDestroyDevice`.
+        // SAFETY: as above; its functions were routed for its pipeline makings alone.
+        let (raw, recording) = unsafe { crate::recorder::route(raw) };
         // What the runtime made from the device, destroyed with it when a later step fails.
         let undo = |timelines: &[vk::Semaphore]| {
             // The record of pipeline makings first, as in the teardown (`compiles.rs`).
@@ -1123,6 +1141,7 @@ impl Device {
                         .get_device_proc_addr(raw.handle(), name.as_ptr())
                 })
             }
+            .map(|commands| commands.routed(recording.as_ref()))
         } else {
             None
         };
@@ -1147,6 +1166,13 @@ impl Device {
                 &enabled,
             )
         }
+        .filter(|_| pushes_whole_sets)
+        .map(|push| {
+            // SAFETY: the device's own command of that name.
+            unsafe {
+                crate::recorder::through(recording.as_ref(), Command::CmdPushDescriptorSet, push)
+            }
+        });
         // Its naming of an object, where its instance reports messages: a graphics pipeline that
         // reads its input attachments in rasterization order is named for the layers' messages
         // (`pipeline/graphics.rs`).
@@ -1179,6 +1205,55 @@ impl Device {
             gpu_time::calibrated(&instance.entry, &instance.raw, physical, &raw, calibration)
         }
         .filter(|_| timestamp_bits > 0);
+        // The render encoder's commands of extensions and of Vulkan 1.3, which priming makes too.
+        // SAFETY: as above; the loader serves `vkGetDeviceProcAddr` once the word is put back.
+        let extended_dynamic_state = unsafe {
+            loader_word.restore();
+            ExtendedDynamicState::load(
+                &instance.raw,
+                &raw,
+                description.api_version,
+                &enabled,
+                recording.as_ref(),
+            )
+        };
+        // SAFETY: as above; the loader serves `vkGetDeviceProcAddr` once the word is put back.
+        let sized_index_bind = unsafe {
+            loader_word.restore();
+            sized_index_bind(&instance.raw, &raw, &enabled)
+        }
+        .map(|bind| {
+            // SAFETY: the device's own command of that name.
+            unsafe {
+                crate::recorder::through(recording.as_ref(), Command::CmdBindIndexBuffer2, bind)
+            }
+        });
+        // SAFETY: as above; the loader serves `vkGetDeviceProcAddr` once the word is put back.
+        let depth_bias_command = unsafe {
+            loader_word.restore();
+            depth_bias_command(&instance.raw, &raw, &enabled)
+        }
+        .map(|bias| {
+            // SAFETY: the device's own command of that name.
+            unsafe { crate::recorder::through(recording.as_ref(), Command::CmdSetDepthBias2, bias) }
+        });
+        // SAFETY: as above; the loader serves `vkGetDeviceProcAddr` once the word is put back.
+        let color_write_masks = unsafe {
+            loader_word.restore();
+            ColorWriteMasks::load(&instance.raw, &raw, &enabled)
+        }
+        .map(|ColorWriteMasks(masks)| {
+            // SAFETY: the device's own command of that name.
+            ColorWriteMasks(unsafe {
+                crate::recorder::through(recording.as_ref(), Command::CmdSetColorWriteMask, masks)
+            })
+        });
+        let drawn = prime::PrimedDraws {
+            dynamic: extended_dynamic_state,
+            color_write_masks,
+            depth_bias: depth_bias_command,
+            sized_index_bind,
+        };
         // Before the exit hook is registered for this device (below): the first call of each
         // entry point of the exit guard's table (`prime.rs`).
         // SAFETY: the device is live, of `physical`, and enables timeline semaphores, and
@@ -1193,7 +1268,7 @@ impl Device {
                 queue_family,
                 &queues,
                 Sharing::new(&queue_families),
-                prime::Has {
+                drawn.has(prime::Has {
                     timestamps: timestamp_bits > 0,
                     // A device the runtime created enables it (`enables.rs`).
                     host_query_reset: owned,
@@ -1203,9 +1278,16 @@ impl Device {
                     push_descriptor: push_descriptor.is_some(),
                     calibration: calibrated.is_some(),
                     object_names: object_name.is_some(),
+                    extended_dynamic_state: false,
+                    primitive_restart: false,
+                    color_write_masks: false,
+                    depth_bias: false,
+                    sized_index_bind: false,
+                }),
                 generated_commands.as_ref(),
                 push_descriptor,
                 calibrated,
+                drawn,
             )
         } {
             scheduler.stop();
@@ -1269,26 +1351,6 @@ impl Device {
                 dma_buf_images,
             )
         };
-        // SAFETY: as above; the loader serves `vkGetDeviceProcAddr` once the word is put back.
-        let extended_dynamic_state = unsafe {
-            loader_word.restore();
-            ExtendedDynamicState::load(
-                &instance.raw,
-                &raw,
-                properties.description.api_version,
-                &enabled,
-            )
-        };
-        // SAFETY: as above; the loader serves `vkGetDeviceProcAddr` once the word is put back.
-        let sized_index_bind = unsafe {
-            loader_word.restore();
-            sized_index_bind(&instance.raw, &raw, &enabled)
-        };
-        // SAFETY: as above; the loader serves `vkGetDeviceProcAddr` once the word is put back.
-        let depth_bias_command = unsafe {
-            loader_word.restore();
-            depth_bias_command(&instance.raw, &raw, &enabled)
-        };
         // The host image copy functions, where the device enabled `hostImageCopy` and copies to
         // and from `GENERAL` on the host: by their core names from Vulkan 1.4, else by the
         // extension's, which the device then enabled.
@@ -1314,11 +1376,6 @@ impl Device {
                 })
             })
         });
-        // SAFETY: as above; the loader serves `vkGetDeviceProcAddr` once the word is put back.
-        let color_write_masks = unsafe {
-            loader_word.restore();
-            ColorWriteMasks::load(&instance.raw, &raw, &enabled)
-        };
         // The mesh draw commands, which exist where `meshShader` is enabled (it needs
         // `VK_EXT_mesh_shader`).
         let mesh_draws = if enabled
@@ -1328,7 +1385,8 @@ impl Device {
             // SAFETY: as above; the loader serves `vkGetDeviceProcAddr` once the word is put
             // back.
             unsafe { loader_word.restore() };
-            Some(ash::ext::mesh_shader::Device::new(&instance.raw, &raw))
+            let loaded = ash::ext::mesh_shader::Device::new(&instance.raw, &raw);
+            Some(MeshDraws::new(&loaded, recording.as_ref()))
         } else {
             None
         };
@@ -1384,8 +1442,22 @@ impl Device {
         // SAFETY: as above; the loader serves `vkGetDeviceProcAddr` once the word is put back.
         let functions = unsafe {
             loader_word.restore();
+            Functions::new(
+                &instance.raw,
+                raw.clone(),
+                memory_reads,
+                push_descriptor,
                 object_name,
+                recording.as_ref(),
+            )
         };
+        // Its encoders' commands replay on a thread of its own where it has a slot (`recorder`).
+        // SAFETY: the device's handle, live, its word the loader's (put back just now).
+        let recorder = recording.as_ref().and_then(|slot| {
+            Recorder::start(slot, &functions, unsafe {
+                LoaderWord::of_device(raw.handle())
+            })
+        });
         let shader_cache = match ShaderCache::start(
             cache,
             &physical_properties,
@@ -1491,6 +1563,8 @@ impl Device {
             push_descriptor,
             pushes_after_pipeline_binds,
             color_write_masks,
+            _recording: recording,
+            recorder,
             snapshot_fallbacks: Mutex::new(Vec::new()),
             reader_sizes: Mutex::new(Default::default()),
             gpu_pools,
@@ -1557,6 +1631,10 @@ impl Device {
         if !moltenvk {
         }
         let device = Device(shared);
+        // The pages its replays held last go on its handler threads (`recorder`).
+        if let Some(recorder) = device.shared().recorder() {
+            recorder.set_elsewhere(device.elsewhere());
+        }
         device.say_unmeasured_driver();
         device.degrade_argument_buffers_unread();
         device.degrade_float_tininess();

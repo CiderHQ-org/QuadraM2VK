@@ -1470,6 +1470,64 @@ fn every_image_render_pass_and_framebuffer_goes_through_the_creation_door() {
     );
 }
 
+/// Every command a `VkCommandBuffer` takes that the runtime names, through `ash`'s tables or a
+/// function pointer it loads, goes through the devices' slots (`recorder`), which route it
+/// (`recorder::Command::ALL`): no file outside `recorder/` names one that is not routed.
+#[test]
+fn every_command_the_runtime_records_is_routed() {
+    /// `name` lowercase, without `vk` and underscores, nor an `ext` or `khr` suffix: an
+    /// extension's command and the core one it became compare equal.
+    fn plain(name: &str) -> String {
+        let lower: String = name.chars().filter(|c| *c != '_').collect::<String>();
+        let lower = lower.to_lowercase();
+        let lower = lower.strip_prefix("vk").unwrap_or(&lower).to_owned();
+        let lower = lower.strip_prefix("pfnvk").unwrap_or(&lower).to_owned();
+        ["ext", "khr"]
+            .iter()
+            .find_map(|suffix| lower.strip_suffix(suffix))
+            .unwrap_or(&lower)
+            .to_owned()
+    }
+    let routed: Vec<String> = crate::recorder::Command::ALL
+        .iter()
+        .map(|command| plain(command.name().to_str().unwrap()))
+        .collect();
+    let mut unrouted = Vec::new();
+    for (path, code) in runtime_sources() {
+        if path.starts_with("recorder") {
+            continue;
+        }
+        let mut rest = code.as_str();
+        while let Some(at) = rest.find(['.', 'P']) {
+            let after = &rest[at + 1..];
+            let word: String = after
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            let named = match &rest[at..=at] {
+                "." if word.starts_with("cmd_")
+                    || word == "begin_command_buffer"
+                    || word == "end_command_buffer" =>
+                {
+                    Some(word.clone())
+                }
+                "P" if word.starts_with("FN_vkCmd") => Some(format!("P{word}")),
+                _ => None,
+            };
+            if let Some(named) = named {
+                if !routed.contains(&plain(&named)) {
+                    unrouted.push(format!("{path}: {named}"));
+                }
+            }
+            rest = after;
+        }
+    }
+    assert!(
+        unrouted.is_empty(),
+        "commands named outside recorder/ that it does not route: {unrouted:#?}"
+    );
+}
+
 /// The creation door refuses each kind of object in a host step, typed, and lets it through
 /// outside one.
 #[test]
@@ -1579,6 +1637,19 @@ fn the_device_s_functions_are_reached_through_checked_accessors() {
     (
         "pipeline/creation_log.rs",
         "MoltenVK's statistics call, inside a call that borrows the device",
+    ),
+    (
+        "recorder/log.rs",
+        "the generated-command entry points' types, a replay's call through its slot's entry \
+         points",
+    ),
+    (
+        "recorder/mod.rs",
+        "the device's mesh draw commands, routed through its slot (DeviceShared)",
+    ),
+    (
+        "recorder/thunks.rs",
+        "a slot's driver entry points, called by its thunks and cleared at the slot's release",
     ),
     (
         "render.rs",
@@ -1931,12 +2002,15 @@ fn the_table_names_each_entry_point_once() {
 /// Priming's check misses nothing but the entry points it cannot make (and, on a queue family
 /// that writes no timestamps, the timestamp commands, on a device without device addresses, a
 /// buffer's address, on one without generated commands, the release of their objects, on one
+/// without the push command, a host step's push, on one that calibrates no timestamps, a
 /// completion turn's calibration reading, on one whose instance reports no messages, a pipeline's
 /// debug name, and on one without a render encoder's command of an extension or of Vulkan 1.3,
 /// that command), and names an entry point of the table it did not make.
 #[test]
 fn the_priming_check_names_what_was_not_made() {
     use crate::device::prime::{
+        missing, Has, CALIBRATION_CALLS, COLOR_WRITE_MASK_CALLS, DEPTH_BIAS_CALLS,
+        DEVICE_ADDRESS_CALLS, EXTENDED_DYNAMIC_STATE_CALLS, GENERATED_COMMANDS_CALLS,
         HOST_QUERY_RESET_CALLS, NAMING_CALLS, PRIMITIVE_RESTART_CALLS, PUSH_DESCRIPTOR_CALLS,
         SIZED_INDEX_BIND_CALLS, SPARSE_CALLS, TIMESTAMP_CALLS, UNPRIMED,
     };
@@ -1949,6 +2023,11 @@ fn the_priming_check_names_what_was_not_made() {
         push_descriptor: true,
         calibration: true,
         object_names: true,
+        extended_dynamic_state: true,
+        primitive_restart: true,
+        color_write_masks: true,
+        depth_bias: true,
+        sized_index_bind: true,
     };
     let all = Call::ALL.iter().fold(0, |bits, call| bits | call.bit());
     assert!(missing(all, has(true, true)).is_empty());
@@ -2044,6 +2123,34 @@ fn the_priming_check_names_what_was_not_made() {
     };
     assert!(missing(unnamed, without).is_empty());
     assert_eq!(missing(unnamed, has(true, true)), NAMING_CALLS);
+    // Without a render encoder's command of an extension or of Vulkan 1.3, nor is that command.
+    let groups: [(&[Call], fn(Has) -> Has); 5] = [
+        (&EXTENDED_DYNAMIC_STATE_CALLS, |has| Has {
+            extended_dynamic_state: false,
+            ..has
+        }),
+        (&PRIMITIVE_RESTART_CALLS, |has| Has {
+            primitive_restart: false,
+            ..has
+        }),
+        (&COLOR_WRITE_MASK_CALLS, |has| Has {
+            color_write_masks: false,
+            ..has
+        }),
+        (&DEPTH_BIAS_CALLS, |has| Has {
+            depth_bias: false,
+            ..has
+        }),
+        (&SIZED_INDEX_BIND_CALLS, |has| Has {
+            sized_index_bind: false,
+            ..has
+        }),
+    ];
+    for (calls, without) in groups {
+        let unmade = calls.iter().fold(made, |bits, call| bits & !call.bit());
+        assert!(missing(unmade, without(has(true, true))).is_empty());
+        assert_eq!(missing(unmade, has(true, true)), calls);
+    }
 }
 
 /// A thread is in a section, so that the device's functions are the table's alone, while its

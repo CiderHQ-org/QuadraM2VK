@@ -179,7 +179,10 @@ impl State {
         // Held weakly until the first submission, as the commit held what the first recording
         // took, and by its replays until they are replayed: what they held last goes here, as
         // it does without them (`Replays::hold`, with `device`, the device's functions).
+        match self.replays.clone() {
             Some(replays) => drop(replays.hold(device, |pages| taken.wait(pages))),
+            None => taken.wait(&mut Vec::new()),
+        }
         let recorded = &mut self.recorded[part];
         recorded.raws = raws;
         recorded.summary = summary;

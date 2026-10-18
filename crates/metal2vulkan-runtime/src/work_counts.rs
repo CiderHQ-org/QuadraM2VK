@@ -9,6 +9,7 @@ use super::buffer::{KeptBecause, ReadApart};
 use super::command_buffer::GroupEnd;
 use super::degradation::Degradation;
 use super::device::lock;
+use super::recorder::{CommandsReplayed, ReplayCounts};
 use super::shadow::{Backing, CopyCause, Lost, ShadowCopy, ShadowSource};
 use super::Device;
 use ash::vk;
@@ -22,6 +23,7 @@ const LARGE_SURFACE_TEXELS: u64 = 1 << 20;
 #[derive(Default)]
 pub(crate) struct Counters {
     command_pools_made: AtomicU64,
+    command_buffers_deferred: AtomicU64,
     spare_command_pools_taken: AtomicU64,
     spare_command_pools_reset: AtomicU64,
     live_tables_uploaded: AtomicU64,
@@ -361,6 +363,13 @@ impl Counters {
     /// A `VkCommandPool` was made for a command buffer, none of the device's spares taken.
     pub(crate) fn command_pool_made(&self) {
         self.command_pools_made.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// An encoder took a deferred command buffer, which the device's recorder replays
+    /// (`recorder`).
+    pub(crate) fn command_buffer_deferred(&self) {
+        self.command_buffers_deferred
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// A command buffer took one of the device's spare command pools (`spares.rs`).
@@ -828,7 +837,8 @@ impl Counters {
     }
 
     /// A render pass instance its pass replaced or gave up before running it had its draws
-    /// recording ended (`render.rs`, `RenderCommandEncoder::end_unrun`).
+    /// recording given up (`render.rs`, `RenderCommandEncoder::end_unrun`): never replayed where
+    /// deferred, else ended.
     pub(crate) fn unrun_instance_ended(&self) {
         self.unrun_instances_ended.fetch_add(1, Ordering::Relaxed);
     }
@@ -1694,6 +1704,18 @@ impl Counters {
 pub struct WorkCounts {
     /// `VkCommandPool`s made for command buffers, where no spare one was free.
     pub command_pools_made: u64,
+    /// The command buffers encoders took that the program's thread logged and the device's
+    /// recorder replays into `VkCommandBuffer`s once their command buffer is committed
+    /// (`recorder`): every encoder's, on a device with a recorder.
+    pub command_buffers_deferred: u64,
+    /// Those the recorder's thread replayed.
+    pub command_buffers_replayed: u64,
+    /// Those another thread replayed itself where the recorder's had not yet reached them: one
+    /// that submits them, or that releases, rebinds or detaches host pages their commands name.
+    pub command_buffers_replayed_inline: u64,
+    /// The commands their replays called, by kind, on whichever thread replayed them
+    /// (`recorder`): one per call made into a `VkCommandBuffer`, the begins and ends among them.
+    pub commands_replayed: CommandsReplayed,
     /// Spare `VkCommandPool`s command buffers took, made by earlier ones. The pool is not reset
     /// where the command buffer that gave it back completed and ended every command buffer of it
     /// it was handed: each is reset as it is begun again.
@@ -2000,6 +2022,8 @@ pub struct WorkCounts {
     /// Of `encoder_command_buffers_begun`, the encoders' own `VkCommandBuffer`s begun ahead: a
     /// settled spare command pool's primary, begun by the thread that completed the command
     /// buffer that gave it back where no thread waited for that one, which the first encoder of
+    /// the command buffer that takes the pool records into, begun no more on its thread (on a
+    /// device with a recorder, the first encoder's replay, `recorder`).
     pub encoder_primaries_begun_ahead: u64,
     /// The spare command pools' primaries begun ahead (`encoder_primaries_begun_ahead`), taken
     /// by an encoder or not yet: not among `command_buffers_begun` until one is taken. Each is
@@ -2148,7 +2172,8 @@ pub struct WorkCounts {
     /// Render pass instances a pass replaced or gave up before running them (a draw that needed
     /// another shape before any draw recorded, a reroute's instance left behind, a capture that
     /// recorded nothing, a first instance whose draws record inline instead), whose draws
-    /// recording the runtime ended: their command pool goes back to the device's spares unreset
+    /// recording the runtime gave up: never replayed where deferred (`recorder`), else ended, so
+    /// their command pool goes back to the device's spares unreset
     /// (`WorkCounts::spare_command_pools_reset` counts the others). A pass's first instance that
     /// may record inline begins its draws' secondary only where a command records into it, so
     /// one replaced or recording inline before then began none, ended none, and is not counted.
@@ -2821,8 +2846,15 @@ impl Device {
                 turnover,
             )
         };
+        let replays = (self.shared().recorder())
+            .map_or_else(ReplayCounts::default, |recorder| recorder.counts());
         WorkCounts {
-            command_pools_made: counters.command_pools_made.load(Ordering::Relaxed),
+            command_pools_made: counters.command_pools_made.load(Ordering::Relaxed)
+                + replays.pools_made,
+            command_buffers_deferred: counters.command_buffers_deferred.load(Ordering::Relaxed),
+            command_buffers_replayed: replays.by_recorder,
+            command_buffers_replayed_inline: replays.by_submitter,
+            commands_replayed: replays.commands,
             spare_command_pools_taken: counters.spare_command_pools_taken.load(Ordering::Relaxed),
             spare_command_pools_reset: counters.spare_command_pools_reset.load(Ordering::Relaxed),
             live_tables_uploaded: counters.live_tables_uploaded.load(Ordering::Relaxed),
@@ -2931,6 +2963,8 @@ impl Device {
             encoder_command_buffers_begun: (counters.encoder_command_buffers_begun)
                 .load(Ordering::Relaxed),
             encoder_primaries_begun_ahead: (counters.encoder_primaries_begun_ahead)
+                .load(Ordering::Relaxed)
+                + replays.begun_ahead_taken,
             primaries_begun_ahead: counters.primaries_begun_ahead.load(Ordering::Relaxed),
             barrier_buffers_kept: counters.barrier_buffers_kept.load(Ordering::Relaxed),
             stamped_buffers_kept: counters.stamped_buffers_kept.load(Ordering::Relaxed),

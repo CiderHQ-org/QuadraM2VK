@@ -442,6 +442,41 @@ calls! {
     // A batch's first work: the clear of a neutral depth image, which may be multisampled
     // (`texture/first_move.rs`, `neutral.rs`).
     CmdClearDepthStencilImage => c"vkCmdClearDepthStencilImage",
+    // An encoder's commands, which a deferred command buffer's replay records (`recorder`): those
+    // no host step records.
+    CmdBlitImage => c"vkCmdBlitImage",
+    CmdUpdateBuffer => c"vkCmdUpdateBuffer",
+    CmdFillBuffer => c"vkCmdFillBuffer",
+    CmdClearAttachments => c"vkCmdClearAttachments",
+    CmdCopyQueryPoolResults => c"vkCmdCopyQueryPoolResults",
+    // A render encoder's extended dynamic states, on a device that has them
+    // ([`EXTENDED_DYNAMIC_STATE_CALLS`](crate::device::prime::EXTENDED_DYNAMIC_STATE_CALLS),
+    // [`PRIMITIVE_RESTART_CALLS`](crate::device::prime::PRIMITIVE_RESTART_CALLS)), through the
+    // entry points the device gave (`dynamic_state.rs`: Vulkan 1.3's, else the extensions').
+    CmdSetCullMode => c"vkCmdSetCullMode",
+    CmdSetFrontFace => c"vkCmdSetFrontFace",
+    CmdSetPrimitiveTopology => c"vkCmdSetPrimitiveTopology",
+    CmdBindVertexBuffers2 => c"vkCmdBindVertexBuffers2",
+    CmdSetDepthTestEnable => c"vkCmdSetDepthTestEnable",
+    CmdSetDepthWriteEnable => c"vkCmdSetDepthWriteEnable",
+    CmdSetDepthCompareOp => c"vkCmdSetDepthCompareOp",
+    CmdSetStencilTestEnable => c"vkCmdSetStencilTestEnable",
+    CmdSetStencilOp => c"vkCmdSetStencilOp",
+    CmdSetPrimitiveRestartEnable => c"vkCmdSetPrimitiveRestartEnable",
+    // A render encoder's extension commands, each on a device that has it
+    // ([`COLOR_WRITE_MASK_CALLS`](crate::device::prime::COLOR_WRITE_MASK_CALLS),
+    // [`DEPTH_BIAS_CALLS`](crate::device::prime::DEPTH_BIAS_CALLS),
+    // [`SIZED_INDEX_BIND_CALLS`](crate::device::prime::SIZED_INDEX_BIND_CALLS)), through the
+    // entry point the device gave (`vkCmdBindIndexBuffer2KHR` where it enables that form).
+    CmdSetColorWriteMask => c"vkCmdSetColorWriteMaskEXT",
+    CmdSetDepthBias2 => c"vkCmdSetDepthBias2EXT",
+    CmdBindIndexBuffer2 => c"vkCmdBindIndexBuffer2",
+    // A mesh draw's, and an execution of commands the GPU generates: never primed
+    // ([`UNPRIMED`](crate::device::prime::UNPRIMED)).
+    CmdDrawMeshTasks => c"vkCmdDrawMeshTasksEXT",
+    CmdDrawMeshTasksIndirect => c"vkCmdDrawMeshTasksIndirectEXT",
+    CmdExecuteGeneratedCommands => c"vkCmdExecuteGeneratedCommandsEXT",
+    CmdPreprocessGeneratedCommands => c"vkCmdPreprocessGeneratedCommandsEXT",
 }
 
 /// The entry points a host step may call (`CommandBufferShared::host_step`): what a dispatch
@@ -528,7 +563,7 @@ pub(crate) const HOST_STEP: &[Call] = &[
 ];
 
 impl Call {
-    /// Its bit. The table fills 88 of the word's 128 (widened from 64): when it next outgrows the
+    /// Its bit. The table fills 113 of the word's 128 (widened from 64): when it next outgrows the
     /// word, widen the word (here, [`CALLED`], `PENDING` and the priming's calls); do not add a
     /// second table.
     pub(crate) fn bit(self) -> u128 {

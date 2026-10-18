@@ -3581,6 +3581,11 @@ impl RenderCommandEncoder {
         {
             sample_positions::check_options(CALL, Attachment::Stencil, s.options, s.store, None)?;
         }
+            // The instance's secondary, where the pass began one as it opened, is given up
+            // unrun (`end_unrun`).
+                    // records it, nothing recorded into it (`untouched::changes_nothing`), and
+                    // nothing executes it.
+                    let ended = unsafe { core.command_buffer().give_up_raw(only.draws) };
         // An extended-range attachment's clear takes Metal's straight route where Metal keeps its
         // level compressed and the pass has no draw call, where a `half` NaN clear keeps its sign
         // (`nan_clear::keeps_nan_sign`), and goes through `half` elsewhere (bfloat: EVs
@@ -5774,11 +5779,12 @@ impl RenderCommandEncoder {
         }
     }
 
-    /// End the draws recording of `instance`, one the pass replaced or gave up before running
+    /// Give up the draws recording of `instance`, one the pass replaced or gave up before running
     /// it ([`install`](Self::install), `render/reroute.rs`, `render/capture.rs`): never submitted,
-    /// it ends so its command buffer's pool goes back to the device's spares unreset (`spares.rs`).
-    /// One with pieces (the secondaries of draws whose pipelines were being made) is left to the
-    /// pool's reset; one whose secondary never began has none to end.
+    /// a deferred one is never replayed, and one of the pool's ends so the pool goes back to the
+    /// device's spares unreset (`CommandBuffer::give_up_raw`). One with pieces (the secondaries
+    /// of draws whose pipelines were being made) is left to the pool's reset; one whose secondary
+    /// never began has none to give up.
     fn end_unrun(&self, instance: Instance) {
         // Nor one recorded inline, in the pass's command buffer or kept (`render/inline_first.rs`,
         // `render/inline_splits.rs`).
@@ -5788,11 +5794,11 @@ impl RenderCommandEncoder {
         {
             return;
         }
-        // SAFETY: the secondary command buffer is recording, and only this encoder records it;
-        // no query is active in it: a query begins or continues only in an instance none of
-        // whose draws record again (`rerecord` `None`, which `recorded` marks too), never one a
-        // pass replaces, a reroute leaves, or a capture's.
-        let ended = unsafe { self.core.command_buffer().end_raw(instance.draws) };
+        // SAFETY: the secondary command buffer is recording, only this encoder records it, and
+        // nothing executes it; no query is active in it: a query begins or continues only in an
+        // instance none of whose draws record again (`rerecord` `None`, which `recorded` marks
+        // too), never one a pass replaces, a reroute leaves, or a capture's.
+        let ended = unsafe { self.core.command_buffer().give_up_raw(instance.draws) };
         if ended.is_ok() {
             self.core.device().shared().counts.unrun_instance_ended();
         }
@@ -9563,7 +9569,7 @@ struct Recording<'a> {
     state: &'a DrawState,
     extended: Option<super::dynamic_state::ExtendedDynamicState>,
     /// The device's mesh draw commands, where it enabled `meshShader`.
-    mesh: Option<&'a ash::ext::mesh_shader::Device>,
+    mesh: Option<&'a crate::recorder::MeshDraws>,
     draw: metal2vulkan::vk::DrawCommand,
     /// Its part in a draw read through snapshots (`render/snapshot.rs`): the barrier, write
     /// masks and phase it records before its draw.

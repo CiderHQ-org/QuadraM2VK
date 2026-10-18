@@ -858,6 +858,11 @@ impl Release {
         lock(&self.deallocator).is_some()
     }
 
+    /// Whether it still holds the caller's keep-alive.
+    pub(super) fn keeps_alive(&self) -> bool {
+        lock(&self.keep_alive).is_some()
+    }
+
     /// The length of the caller's range.
     pub(super) fn length(&self) -> u64 {
         self.length

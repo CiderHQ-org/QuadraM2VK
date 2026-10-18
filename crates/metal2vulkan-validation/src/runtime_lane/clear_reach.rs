@@ -17,6 +17,7 @@
 
 use super::degrade_notices::{assert_made_once, forced, made_render_kinds};
 use super::degrade_notices::{shared_in_system_memory, twins_depth};
+use super::hidden_depth::replayed_but_unrun;
 use super::{buffer_with, read_buffer, validated_device, Messages, ScratchCache, WAIT};
 use crate::air_library::AirLibrary;
 use crate::gpu::TEST_DEVICE;
@@ -724,8 +725,25 @@ fn depth_stencil_and_multisampled_clears_reach_past_the_render_area_as_metal_s()
     quiet(lane, &messages);
 }
 
-/// A `DontCare` load of an attachment the pass stores (EV RRS-probe-5's `dl_rgba8_emptydraw`,
-/// `dl_rgba8_full`, `dl_rgba8_nodraw`, `dl_rgba8_nothing` and `dl_d32_touch00`): kept in a pass
+/// vertex keeps the texels, and a pass with a visibility result buffer keeps them: each records its
+/// pass as before. The pass beside a depth, whose first instance never records inline, began its
+/// draws' secondary as it opened: given up unused (`WorkCounts::unrun_instances_ended`), it is
+/// never replayed (`CommandBuffer::give_up_raw`).
+    let counted = lane.device.work_counts();
+    let after = lane.device.work_counts();
+    let unrun = after.unrun_instances_ended - counted.unrun_instances_ended;
+    assert_eq!(unrun, 1, "a depth beside: secondaries given up");
+    let (replayed, deferred) = replayed_but_unrun(&counted, &after);
+    eprintln!(
+        "a pass beside a depth that changes nothing on {}: {unrun} secondaries given up, \
+         {replayed} of {deferred} deferred command buffers begun replayed",
+        lane.device.name()
+    );
+    assert_eq!(
+        replayed,
+        deferred - unrun,
+        "a depth beside: command buffers replayed of those begun deferred"
+    );
 /// that does not draw (a draw call of no vertex, or through a pipeline that rasterizes nothing,
 /// included), as Metal keeps it, with no notice; cleared to zero over every tile, Metal's answer
 /// with no notice, where such a pass clears and stores its depth (the clear rule); in one that
