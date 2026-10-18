@@ -488,6 +488,9 @@ pub(super) struct State {
     /// state made without `supportIndirectCommandBuffers`): as it commits, they run nothing, and
     /// it completes with `CommandBufferError::PageFault`.
     faulted: BTreeSet<usize>,
+    /// The shadowed textures its ended encoders' passes took as attachments
+    /// (`render/shadows.rs`), each once.
+    shadow_attachments: Vec<ResourceKey>,
     /// The shadowed textures its ended encoders copied in first (`shadow.rs`), each once.
     shadows_copied_in: Vec<ResourceKey>,
     /// The pools of its commands' set 0 (`descriptor_arena.rs`), given back or released with
@@ -976,6 +979,19 @@ impl State {
         self.fails_from.get_or_insert((encoder, error));
     }
 
+    /// Note the shadowed textures an ended encoder's pass took as attachments: how many of them
+    /// no pass of the command buffer took before.
+    pub(super) fn shadows_attached(&mut self, keys: &[ResourceKey]) -> usize {
+        let mut first = 0;
+        for &key in keys {
+            if !self.shadow_attachments.contains(&key) {
+                self.shadow_attachments.push(key);
+                first += 1;
+            }
+        }
+        first
+    }
+
     /// Note the shadowed textures an ended encoder copied in first, each copy's texture and
     /// texels: the texels of those an earlier encoder of the command buffer copied in too.
     pub(super) fn shadows_copied_in(&mut self, copies: &[(ResourceKey, u64)]) -> u64 {
@@ -1382,6 +1398,7 @@ impl CommandBuffer {
                 unlisted_argument_samplers: false,
                 fails_from: None,
                 faulted: BTreeSet::new(),
+                shadow_attachments: Vec::new(),
                 shadows_copied_in: Vec::new(),
                 descriptors: DescriptorArena::default(),
                 status_words: None,

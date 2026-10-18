@@ -47,8 +47,6 @@ pub struct RawDevice {
     /// by default): `VK_KHR_calibrated_timestamps` or `VK_EXT_calibrated_timestamps` places
     /// command buffers' GPU times on the host's clock
     /// ([`CommandBuffer::gpu_start_time`](crate::CommandBuffer::gpu_start_time));
-    /// `VK_EXT_metal_objects`, on a driver that runs on Metal, makes a texture over a no-copy
-    /// buffer a Metal texture over the buffer's imported memory, without a copy;
     /// `VK_NV_linear_color_attachment`, with its `linearColorAttachment` feature enabled beside
     /// it (and, below Vulkan 1.3, `VK_KHR_format_feature_flags2`, which it requires there), makes
     /// a texture over a buffer's memory render into its linear image in place;
@@ -268,10 +266,6 @@ impl Device {
             compile,
             description: enabled,
             enabled: raw.enabled,
-            metal_objects: raw
-                .device_extensions
-                .iter()
-                .any(|name| name.as_c_str() == ash::ext::metal_objects::NAME),
             creation_feedback: raw
                 .device_extensions
                 .iter()

@@ -14,6 +14,12 @@
 //!   texture over it is rebound. The end mark reads 0 as each call returns. Afterwards every
 //!   texture and buffer holds what Metal's holds: zero where new, the bytes it was made with, the
 //!   bytes it lies over where it aliases, what a blit wrote.
+//! - **Making waits for no submission's replay.** A command buffer whose deferred command buffers
+//!   take long to replay (`recorder`) and to submit is committed, and a `Private` texture made
+//!   `Private` texture: its move waits for a submission, so its making registers it, where a new
+//!   `Shared` texture's move is made on the host on a device with host image copies
+//!   (`texture/host_copy.rs`), registering nothing, whatever the order. One is made before,
+//!   untimed: a device's first texture making took 4 to 9 ms on RADV
 //! - **The zeros come before every use, on every queue** (the coordinator's conditions). A new
 //!   `Private` buffer whose memory held other bytes is read through its address unnamed, and
 //!   through its heap made resident, by a command buffer on another queue, after a command

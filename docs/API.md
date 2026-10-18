@@ -180,44 +180,19 @@ What the runtime enables for itself outside the vocabulary enters no enable set,
 or fingerprint: among it the extensions of its dma-buf fallback for no-copy memory whose pointer
 the device refuses (`HostMemory::with_dma_buf`), `VK_EXT_external_memory_dma_buf` with
 `VK_KHR_external_memory_fd`, and `VK_EXT_image_drm_format_modifier` with
-`VK_EXT_queue_family_foreign` beside them, wherever a device lists them. With them enabled, a
-texture over a no-copy buffer's pages imported by their pointer, its rows packed, is also a
-`DRM_FORMAT_MOD_LINEAR` image made for host allocations at Metal's row pitch where the driver's own
-linear image lays its rows out otherwise and the driver takes that layout, of a format with no depth
-or stencil component (Vulkan has no query of where such a format's memory plane lies, so the runtime
-makes no `DRM_FORMAT_MOD_LINEAR` image of one)
-(`WorkCounts::pitched_host_images`; HOWTO.md section 6 lists what each measured driver takes).
-`Texture::vk_image` then gives that image. A layout the driver refused is kept per device and not
-asked again (`pitched_host_image_refusals`, `pitched_host_image_refusals_recalled`).
+`VK_EXT_queue_family_foreign` beside them, wherever a device lists them.
 
-An image over a no-copy buffer's pages imported by their pointer (the driver's linear image or such
-a `DRM_FORMAT_MOD_LINEAR` image, both made for host allocations, and on MoltenVK the image of a
-Metal texture over the import's `MTLBuffer`) starts in `VK_IMAGE_LAYOUT_UNDEFINED`, as Vulkan makes
-an image for host allocations, and a move from there leaves its memory's contents undefined. Its
-first move, made by the next submission that may reach it (any command buffer's, or the internal
-submission of a host call on the texture, or `Texture::vk_image`), keeps the bytes the image is
-bound to, through the host: before that submission, once every submission made before it on each
-queue completed, the runtime reads them through the host pointer, submits the move alone and waits
-for it, and writes back the bytes the move changed, so none is stored where it changed none (pages
-the process cannot write stay untouched); no GPU command writes them, and no byte outside them is
-touched (`WorkCounts::first_move_keeps`, `first_move_kept_bytes`, `first_move_restored_bytes`).
-Changed bytes on pages the process no longer maps writable keep the move's values, announced
-(`unrestored-first-move-bytes`). The submission waits for that,
-`commit` never. A rebind's new image keeps its new pages' bytes the same way. An image
-over a dma-buf of its own pages keeps them through its acquire from `VK_QUEUE_FAMILY_FOREIGN_EXT`,
-and a linear image of the runtime's own memory through its move from `PREINITIALIZED`.
-FAST-PATHS.md's known gaps state what this differs from Metal in.
-
-Textures of one image over the same bytes of one import of host pages (the same plan, row and
-slice pitches and form, at the same place in the import) share one `VkImage`, which the import
-holds while it lives (the four images of it made or taken last), and every texture over it holds
-too: a consumer's texture over the presented surface made at each present, each over a new no-copy
-buffer of the same pages that joins the import of a buffer kept over them, takes the image the
-first made, already moved, though the texture before was released, so its texels are kept once per
-surface, and over dma-buf pages the pages' source is not asked again
-(`WorkCounts::shared_alias_images`). Each texture stays its own object, with its own resource ID,
-views and hazard tracking; `Texture::vk_image` gives each the shared `VkImage`. A rebind or detach of
-one texture's buffer gives that texture an image of its own over the new pages, or a stand-in.
+A texture over a no-copy buffer's host pages (imported by their pointer or as dma-bufs) is a shadow
+(`shadowed-texture`): an optimal image of the runtime's own memory, whose texels the encoders copy
+in from the pages before a use and back (merged back: only the bytes the commands changed) after a
+write. No image is bound to the pages: an image bound to imported memory starts in
+`VK_IMAGE_LAYOUT_UNDEFINED` (`VUID-VkImageCreateInfo-pNext-01443`), and its first move, like any
+layout transition, may read and write every byte bound to it, where Metal keeps every CPU write to
+bytes a command buffer does not write. `Texture::vk_image` gives `None` for such a texture. A
+texture placed in a heap over dma-buf pages is an image over a dma-buf of its own pages, which its
+first submission acquires from `VK_QUEUE_FAMILY_FOREIGN_EXT`; a linear image over a buffer of the
+runtime's own memory starts `VK_IMAGE_LAYOUT_PREINITIALIZED`, and its move from there keeps its
+bytes. FAST-PATHS.md's costs and known gaps state what this costs and differs from Metal in.
 
 ## 2. A library
 
@@ -963,25 +938,18 @@ how to avoid it in full. [FAST-PATHS.md](FAST-PATHS.md) lists which notes the de
 fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
 
 - `metal2vulkan-degrade-shadowed-texture` (performance). `ShadowedTexture`: A 2D texture over a
-  buffer is a shadow image: its rows (or an array's slices) lie with the buffer's bytes between
-  them, and it renders or a shader writes it (or it only reads, under `padded_reads =
-  PaddedReadsPolicy::Shadow`), which an image over them would hold in its subresource, where
-  Vulkan lets the image's layout transitions (its first move among them) read and write any byte
-  of its subresources, and a render pass's load and store operations read and write back any byte
-  of an attachment's image subresource, and Metal leaves them as the program writes them (but
-  where the device's image of it is a Metal texture over the buffer, on MoltenVK); or no linear image of the device lays its texels out as
-  Metal does in the buffer's memory, holding no byte past them (over a no-copy buffer's imported
-  host memory, no linear image made for host allocations does: neither the driver's own nor, where
-  the device enables `VK_EXT_image_drm_format_modifier`, a `DRM_FORMAT_MOD_LINEAR` image laid out
-  at Metal's row pitch, which the driver may refuse for the texture's format, usage or pitch, and
-  which the runtime makes of no depth or stencil format, nor of a height that is no multiple of 4
-  where the driver renders an explicit plane's rows past its height
-  (`RuntimeDriverDefect::ExplicitPlaneRowsPastHeight`, lavapipe); `WorkCounts::pitched_host_images`
-  counts those made, `pitched_host_image_refusals` those the driver refused), or the buffer is
-  over the caller's `VkBuffer`, whose memory backs no image of the runtime's, or over host pages
-  imported as dma-bufs (`HostMemory::with_dma_buf`) where the device makes no image over a dma-buf
-  of the texture's own pages (the notice names why; `WorkCounts::dma_buf_image_fallbacks` counts
-  it).
+  buffer is a shadow image: the buffer is over host pages (a no-copy buffer's, imported by their
+  pointer or as dma-bufs), where an image bound to them would start `UNDEFINED` and Vulkan lets its
+  layout transitions (its first move among them) read and write any byte bound to it, where Metal
+  keeps every CPU write; or its rows (or an array's slices) lie with the buffer's bytes between
+  them, which an image over them would hold in its subresource, where Vulkan lets the image's
+  layout transitions read and write any byte of its subresources, and a render pass's load and
+  store operations read and write back any byte of an attachment's image subresource, and Metal
+  leaves them as the program writes them; or no linear image of the device lays its texels out as
+  Metal does in the buffer's memory, holding no byte past them; or the buffer is over the caller's
+  `VkBuffer`, whose memory backs no image of the runtime's. Also a heap's texture over host pages
+  imported as dma-bufs where the device makes no image over a dma-buf of the texture's own pages
+  (the notice names why; `WorkCounts::dma_buf_image_fallbacks` counts it).
   Cost: its texels are copied into an image before each use and back after each write; a render
   pass that loads it as an attachment, takes it in no other way and draws under scissors copies in
   only the texels inside them (`WorkCounts::shadow_texels_copied_in`). Over a buffer's bytes that
@@ -1989,8 +1957,7 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
 - `metal2vulkan-degrade-dont-care-stand-in` (performance). `DontCareStandIn`: A pass renders a color
   attachment that it stores with `DontCare` (or resolves alone, `MultisampleResolve`) and whose
   texture's image lies over the buffer the texture lies in (a linear image over an ordinary buffer's
-  memory, a no-copy buffer's host pages, a dma-buf's, a surface's; on MoltenVK, a Metal texture over
-  a no-copy or surface buffer's `MTLBuffer`) through an image its texture keeps, so that the buffer
+  memory) through an image its texture keeps, so that the buffer
   keeps its bytes, as Metal's does: rendered in place, the pass would write them. A pass that stores
   the attachment renders it in place, at no cost; so does one that hands it to a driver that stores
   `DONT_CARE` as Metal's own `DontCare` (MoltenVK on the M3 Max and the M4), as one render pass
@@ -2106,14 +2073,6 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   draw counted by a `Counting` visibility result whose fragment function writes more than one color
   attachment, on ANV (`RuntimeDriverDefect::OcclusionCountPerColorOutput`). Cost: the result is
   Metal's count multiplied by the colors the draw writes; a `Boolean` result is Metal's.
-- `metal2vulkan-degrade-unrestored-first-move-bytes` (precision). `UnrestoredFirstMoveBytes`: A
-  texture's first move over a no-copy buffer's host pages changed bytes the host kept across it, on
-  pages the process maps without write permission when the host writes them back: on Linux, pages
-  made read-only after the buffer was made (Linux refuses read-only pages at the import); on macOS
-  also pages read-only from the start, which Metal reads (a GPU write into them fails its command
-  buffer). Not observed on RADV, which fails the command buffers submitted after a page of an
-  import loses write permission (`HostMemory::new`). Cost: those bytes keep what the image's move
-  from `UNDEFINED` wrote, where Metal's texture leaves its pages as they were.
 - `metal2vulkan-degrade-float-tininess-after-rounding` (precision). `FloatTininessAfterRounding`: A
   device whose policy takes native device maths (`FloatMathsPolicy::Native`, the default) where its
   float functions are not Metal's own (not MoltenVK): Metal flushes a `float` product or fused
@@ -2602,6 +2561,8 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   keeps them.
 - `metal2vulkan-degrade-deallocator-after-release` (retired). No replacement: a no-copy buffer's
   deallocator runs in its release, on the releasing thread, as Metal runs it.
+- `metal2vulkan-degrade-unrestored-first-move-bytes` (retired). No replacement: a texture over a
+  no-copy buffer's host pages is a shadow, which takes no first move over them.
 
 ## 10. Accepted differences
 

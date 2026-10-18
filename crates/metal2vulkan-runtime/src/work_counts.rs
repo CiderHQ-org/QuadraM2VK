@@ -200,14 +200,6 @@ pub(crate) struct Counters {
     dma_buf_sparse_buffers: AtomicU64,
     dma_buf_images: AtomicU64,
     dma_buf_image_fallbacks: AtomicU64,
-    pitched_host_images: AtomicU64,
-    pitched_host_image_refusals: AtomicU64,
-    pitched_host_image_refusals_recalled: AtomicU64,
-    first_move_keeps: AtomicU64,
-    first_move_kept_bytes: AtomicU64,
-    first_move_restored_bytes: AtomicU64,
-    shared_alias_images: AtomicU64,
-    shared_alias_moves_waited: AtomicU64,
     modifier_feature_queries: AtomicU64,
     shadowed_textures: AtomicU64,
     shadows_zeroed: AtomicU64,
@@ -245,6 +237,8 @@ pub(crate) struct Counters {
     shadow_merge_scratches_reused: AtomicU64,
     shadow_merge_scratches_zeroed: AtomicU64,
     shadow_merges_fetched: AtomicU64,
+    shadow_attachment_passes: AtomicU64,
+    shadow_attachment_textures: AtomicU64,
     shadow_attachment_loads_within: AtomicU64,
     shadow_attachment_loads_whole: AtomicU64,
     shadow_attachment_clears: AtomicU64,
@@ -1332,66 +1326,10 @@ impl Counters {
         self.dma_buf_images.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// A texture over dma-buf pages that such an image would alias took the path of a texture
-    /// over memory no image aliases instead: the device made no such image of it (`dma_buf.rs`).
+    /// A texture placed in a heap over dma-buf pages that such an image would alias is a shadow of
+    /// the heap's bytes instead: the device made no such image of it (`texture/heap.rs`).
     pub(crate) fn dma_buf_image_fell_back(&self) {
         self.dma_buf_image_fallbacks.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// A texture's image over a no-copy buffer's host pages imported by their pointer was made a
-    /// `DRM_FORMAT_MOD_LINEAR` image at Metal's row pitch and bound there (`texture.rs`'s
-    /// `host_pitched_image`).
-    pub(crate) fn pitched_host_image_made(&self) {
-        self.pitched_host_images.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// The driver refused a `DRM_FORMAT_MOD_LINEAR` image at Metal's row pitch (`texture.rs`'s
-    /// `host_pitched_image`).
-    #[cfg(unix)]
-    pub(crate) fn pitched_host_image_refused(&self) {
-        self.pitched_host_image_refusals
-            .fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// A texture's image at Metal's row pitch was not asked of the driver, which refused the same
-    /// image before (`texture/pitch_refusals.rs`).
-    #[cfg(unix)]
-    pub(crate) fn pitched_host_image_refusal_recalled(&self) {
-        self.pitched_host_image_refusals_recalled
-            .fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// The host kept the bytes `count` first moves' images are bound to across them, `bytes` of
-    /// them in all (`texture/first_move.rs`'s `Keep`).
-    pub(crate) fn first_move_kept(&self, (count, bytes): (usize, u64)) {
-        if count > 0 {
-            self.first_move_keeps
-                .fetch_add(count as u64, Ordering::Relaxed);
-            self.first_move_kept_bytes
-                .fetch_add(bytes, Ordering::Relaxed);
-        }
-    }
-
-    /// The host stored `bytes` of the kept bytes again, those first moves changed
-    /// (`texture/first_move.rs`'s `KeptBytes::write_back`).
-    pub(crate) fn first_move_restored(&self, bytes: u64) {
-        if bytes > 0 {
-            self.first_move_restored_bytes
-                .fetch_add(bytes, Ordering::Relaxed);
-        }
-    }
-
-    /// A texture over host pages took the `VkImage` another texture of the same image over the
-    /// same bytes made (`texture/shared_alias.rs`).
-    pub(crate) fn shared_alias_taken(&self) {
-        self.shared_alias_images.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// A submission left a shared image's first move waiting: no texture over the image lived
-    /// (`texture/shared_alias.rs`).
-    pub(crate) fn shared_alias_move_waited(&self) {
-        self.shared_alias_moves_waited
-            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// The driver was asked a format's `DRM_FORMAT_MOD_LINEAR` tiling features (`dma_buf.rs`'s
@@ -1527,6 +1465,15 @@ impl Counters {
     /// unsigned-integer view (`shadow_merge.rs`).
     pub(crate) fn shadow_merge_fetched(&self) {
         self.shadow_merges_fetched.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// An ended encoder's pass took `passes` shadowed textures as attachments, `first` of them
+    /// taken by no pass of its command buffer before (`render/shadows.rs`).
+    pub(crate) fn shadow_attachments(&self, passes: usize, first: usize) {
+        self.shadow_attachment_passes
+            .fetch_add(passes as u64, Ordering::Relaxed);
+        self.shadow_attachment_textures
+            .fetch_add(first as u64, Ordering::Relaxed);
     }
 
     /// A render pass took a shadowed texture as a color attachment so (`render/shadows.rs`).
@@ -2580,52 +2527,19 @@ pub struct WorkCounts {
     /// Of those buffers, heaps and rebinds, the ones whose `VkBuffer` is a sparse buffer
     /// assembled from several chunks.
     pub dma_buf_sparse_buffers: u64,
-    /// Images of textures over such dma-buf memory (over a no-copy buffer, placed in a no-copy
-    /// heap, a view of either), each a `DRM_FORMAT_MOD_LINEAR` image bound to a dedicated import
-    /// of a dma-buf of its own pages from the caller's source, aliasing the buffer's bytes: one per
-    /// image made, a rebind's too. Not counted in `dma_buf_imports`.
+    /// Images of textures placed in a no-copy heap over such dma-buf memory (or a view of one),
+    /// each a `DRM_FORMAT_MOD_LINEAR` image bound to a dedicated import of a dma-buf of its own
+    /// pages from the caller's source, aliasing the heap's bytes: one per image made, a rebind's
+    /// too. Not counted in `dma_buf_imports`. A texture over a no-copy buffer's pages takes no such
+    /// image: it is a shadow (`shadowed-texture`).
     pub dma_buf_images: u64,
-    /// Textures over such dma-buf memory that such an image would alias but the device made none
+    /// Textures placed in such a heap that such an image would alias but the device made none
     /// (the source failed, the format, usage, extent or plane layout is not supported, or the
-    /// driver refused the import): each takes the path of a texture over memory no image aliases
+    /// driver refused the import): each is a shadow of the heap's bytes in memory of its own
     /// (`shadowed-texture`).
     pub dma_buf_image_fallbacks: u64,
-    /// Images of textures over no-copy buffers' host pages imported by their pointer made
-    /// `DRM_FORMAT_MOD_LINEAR` images at Metal's row pitch, where the driver's own linear image
-    /// lays the rows out otherwise (ANV packs them tight), each bound in the buffer's import and
-    /// aliasing its bytes: one per image made, a rebind's too.
-    pub pitched_host_images: u64,
-    /// Images at Metal's row pitch the driver refused (with
-    /// `VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT`, by laying the plane out at another
-    /// offset or pitch, or by asking a dedicated allocation of it): one per image asked of the
-    /// driver, and a texture asks up to two (with a usage it did not declare, then without).
-    pub pitched_host_image_refusals: u64,
-    /// Images at Metal's row pitch not asked of the driver, which refused the same image (format,
-    /// extent, usage, flags, view formats and row pitch) before (`texture/pitch_refusals.rs`).
-    pub pitched_host_image_refusals_recalled: u64,
-    /// First moves of images over a no-copy buffer's host pages (or a rebind's new pages) across
-    /// which the host kept the bytes the image is bound to, which a move from `UNDEFINED` may
-    /// discard: read through the host pointer once the submissions before completed, the move
-    /// submitted alone and waited for, the bytes it changed written back. One per image moved, a
-    /// rebind's too.
-    pub first_move_keeps: u64,
-    /// The bytes those moves kept, each read once, and read again after the move.
-    pub first_move_kept_bytes: u64,
-    /// The kept bytes a move changed that the host stored again: none where the driver's moves
-    /// change no byte of the memory bound to the image.
-    pub first_move_restored_bytes: u64,
-    /// Textures over a no-copy buffer's host pages that took the `VkImage` another texture of the
-    /// same image over the same bytes of the same import made, which the import or a texture
-    /// holds, rather than make one (and move it, keep its texels or, over dma-buf pages, ask the
-    /// pages' source and import one).
-    pub shared_alias_images: u64,
-    /// Submissions that found a shared image's first move with no texture over the image alive,
-    /// and left it waiting for a submission while one is (one a submission and image): the move
-    /// holds the host pages of a texture over the image while it runs.
-    pub shared_alias_moves_waited: u64,
     /// Formats whose `DRM_FORMAT_MOD_LINEAR` tiling features the driver was asked, for an image
-    /// over dma-bufs or one at Metal's row pitch over host pages: each format once at most, as
-    /// the answer is kept.
+    /// over dma-bufs: each format once at most, as the answer is kept.
     pub modifier_feature_queries: u64,
     /// Textures over a buffer's bytes (a 2D texture or array over a buffer, a no-copy buffer or an
     /// IOSurface plane, or a view of another layout of one) that no image aliases, each an image
@@ -2755,6 +2669,16 @@ pub struct WorkCounts {
     /// through its unsigned-integer view, comparing them with the kept texels, in place of a copy
     /// of them into the scratch (`shadow_merge.rs`): a cut merge whose shadow has the view.
     pub shadow_merges_fetched: u64,
+    /// The shadowed textures render passes took as attachments, each once a pass
+    /// (`render/shadows.rs`): among them textures over a buffer's bytes, a no-copy buffer's or an
+    /// IOSurface plane's, whose pass copies the texels in before it where it loads them and back
+    /// after it where it stores them.
+    pub shadow_attachment_passes: u64,
+    /// Of `shadow_attachment_passes`, those of a texture no earlier pass of its command buffer
+    /// took as an attachment. The difference counts the passes on a texture after its first in a
+    /// command buffer: the copies in and back a shadow kept across a command buffer's passes
+    /// could leave out, at most.
+    pub shadow_attachment_textures: u64,
     /// The shadowed textures render passes took as color attachments and loaded, each once a
     /// pass, whose copies are cut to the rectangle bounding the pass's draws' scissors
     /// (`render/shadows.rs`): the copy in moves the texels inside it alone, as do the copy back
@@ -3198,18 +3122,6 @@ impl Device {
             dma_buf_sparse_buffers: counters.dma_buf_sparse_buffers.load(Ordering::Relaxed),
             dma_buf_images: counters.dma_buf_images.load(Ordering::Relaxed),
             dma_buf_image_fallbacks: counters.dma_buf_image_fallbacks.load(Ordering::Relaxed),
-            pitched_host_images: counters.pitched_host_images.load(Ordering::Relaxed),
-            pitched_host_image_refusals: counters
-                .pitched_host_image_refusals
-                .load(Ordering::Relaxed),
-            pitched_host_image_refusals_recalled: counters
-                .pitched_host_image_refusals_recalled
-                .load(Ordering::Relaxed),
-            first_move_keeps: counters.first_move_keeps.load(Ordering::Relaxed),
-            first_move_kept_bytes: counters.first_move_kept_bytes.load(Ordering::Relaxed),
-            first_move_restored_bytes: counters.first_move_restored_bytes.load(Ordering::Relaxed),
-            shared_alias_images: counters.shared_alias_images.load(Ordering::Relaxed),
-            shared_alias_moves_waited: counters.shared_alias_moves_waited.load(Ordering::Relaxed),
             modifier_feature_queries: counters.modifier_feature_queries.load(Ordering::Relaxed),
             shadowed_textures: counters.shadowed_textures.load(Ordering::Relaxed),
             views_through_swizzle: counters.views_through_swizzle.load(Ordering::Relaxed),
@@ -3320,6 +3232,8 @@ impl Device {
                 .shadow_merge_scratches_zeroed
                 .load(Ordering::Relaxed),
             shadow_merges_fetched: counters.shadow_merges_fetched.load(Ordering::Relaxed),
+            shadow_attachment_passes: counters.shadow_attachment_passes.load(Ordering::Relaxed),
+            shadow_attachment_textures: counters.shadow_attachment_textures.load(Ordering::Relaxed),
             shadow_attachment_loads_within: counters
                 .shadow_attachment_loads_within
                 .load(Ordering::Relaxed),

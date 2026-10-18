@@ -135,7 +135,6 @@ mod managed;
 mod memory;
 mod memory_log;
 mod metal_level;
-mod metal_texture;
 mod mipmap;
 mod mipmap_filter;
 mod mipmap_pick;

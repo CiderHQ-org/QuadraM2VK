@@ -96,31 +96,25 @@ impl Device {
 
 impl Texture {
     /// No Metal counterpart (an interop hook): the texture's `VkImage`, the image of the texture
-    /// and of every view of it, made by the
-    /// runtime or the caller's
+    /// and of every view of it, made by the runtime or the caller's
     /// ([`Device::new_texture_with_vk_image`](super::Device::new_texture_with_vk_image)). `None`
     /// where the texels are a buffer's bytes the runtime copies into and out of an image of its
-    /// own (a texture buffer, or a texture over a buffer that does not alias it), or another
-    /// image's texels it so copies (a view of another component layout on a device whose views
-    /// reinterpret none). A texture with a depth twin gives its `R32_SFLOAT` image, which holds its
-    /// texels; its comparisons read the twin, which a write into the image does not reach.
+    /// own (a texture buffer, a texture over a no-copy buffer's host pages, or a texture over
+    /// another buffer that does not alias it), or another image's texels it so copies (a view of
+    /// another component layout on a device whose views reinterpret none). A texture with a depth
+    /// twin gives its `R32_SFLOAT` image, which holds its texels; its comparisons read the twin,
+    /// which a write into the image does not reach.
     ///
-    /// A texture over a buffer's bytes whose image aliases them gives a linear image: of
-    /// `VK_IMAGE_TILING_LINEAR`, or of `VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT` with
-    /// `DRM_FORMAT_MOD_LINEAR` and one memory plane laid out at the texels' offset and the
-    /// texture's `bytes_per_row`. Such a texture's rows lie one after another and its image's
-    /// subresource holds no byte but its texels, or, for a texture that only reads under
-    /// `PaddedReadsPolicy::Alias` (the default), its rows lie apart and its subresource holds the
-    /// buffer's bytes between them too, up to its last row's pitch. A texture whose rows lie with
-    /// the buffer's bytes between them and which renders or which a shader writes gives none (it
-    /// is a shadow, `shadowed-texture`) but on MoltenVK, whose image is a Metal texture over the
-    /// buffer. The second is the image over host pages imported as
-    /// dma-bufs (`HostMemory::with_dma_buf`), and over a no-copy buffer's host pages where the
-    /// driver's own linear image lays its rows out otherwise than `bytes_per_row`
-    /// (`WorkCounts::pitched_host_images` counts them). Ask such an image's layout of its memory
-    /// plane (`VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT`, not the color aspect), and its modifier
-    /// with `vkGetImageDrmFormatModifierPropertiesEXT`. Textures of one image over the same bytes
-    /// of one import of host pages give the same `VkImage`, which they share.
+    /// A texture over a buffer's bytes whose image aliases them gives a linear image of
+    /// `VK_IMAGE_TILING_LINEAR`, bound to the buffer's memory, the runtime's own: such a texture's
+    /// rows lie one after another and its image's subresource holds no byte but its texels. A
+    /// texture over a no-copy buffer's host pages (imported by their pointer or as dma-bufs) gives
+    /// none: an image bound to them would start `VK_IMAGE_LAYOUT_UNDEFINED`, whose first move
+    /// Vulkan lets read and write every byte bound to it (it is a shadow, `shadowed-texture`). A
+    /// texture placed in a heap over host pages imported as dma-bufs (`HostMemory::with_dma_buf`)
+    /// gives an image of `VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT` with `DRM_FORMAT_MOD_LINEAR`:
+    /// ask its layout of its memory plane (`VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT`, not the color
+    /// aspect), and its modifier with `vkGetImageDrmFormatModifierPropertiesEXT`.
     ///
     /// # Safety
     ///

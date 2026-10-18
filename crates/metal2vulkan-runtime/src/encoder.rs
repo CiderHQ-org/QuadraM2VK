@@ -208,6 +208,9 @@ pub(super) struct EncoderCore {
     /// open, so a use at that place of the same key, named only where that one was, is kept and
     /// named already.
     touched: Vec<(ResourceKey, bool)>,
+    /// The shadowed textures its pass took as attachments (`render/shadows.rs`): `end` notes them
+    /// in the command buffer (`WorkCounts::shadow_attachment_passes`).
+    attachment_shadows: Vec<ResourceKey>,
     /// Its first copies in of shadowed textures, each copy's texture and texels: `end` notes them
     /// in the command buffer (`WorkCounts::shadow_texels_first_copied_in_again`).
     first_copies: Vec<(ResourceKey, u64)>,
@@ -325,6 +328,7 @@ impl EncoderCore {
             shadows: ShadowSync::default(),
             keys: BTreeSet::new(),
             touched: Vec::new(),
+            attachment_shadows: Vec::new(),
             first_copies: Vec::new(),
             heaps: Vec::new(),
             holds: Holds::new(command_buffer.device()),
@@ -401,6 +405,7 @@ impl EncoderCore {
             shadows: ShadowSync::default(),
             keys: BTreeSet::new(),
             touched: Vec::new(),
+            attachment_shadows: Vec::new(),
             first_copies: Vec::new(),
             heaps: Vec::new(),
             holds: Holds::new(command_buffer.device()),
@@ -982,6 +987,13 @@ impl EncoderCore {
         Ok(copies)
     }
 
+    /// Note that the encoder's pass takes the shadowed texture `key` as an attachment.
+    pub(super) fn shadow_attached(&mut self, key: ResourceKey) {
+        if !self.attachment_shadows.contains(&key) {
+            self.attachment_shadows.push(key);
+        }
+    }
+
     /// Count shadowed textures' `copies` as planned (`WorkCounts::shadow_copies`), the texels
     /// their copies in and back of buffers' textures' images move, each copy in's texels by why
     /// it is made and what holds its truth (`WorkCounts::shadow_texels_first_copied_in` and kin),
@@ -1346,6 +1358,7 @@ impl EncoderCore {
             retained,
             executions,
             keys,
+            attachment_shadows,
             first_copies,
             mut heaps,
             holds,
@@ -1364,6 +1377,11 @@ impl EncoderCore {
             .among(keys.iter().copied());
         heaps.extend(keyed);
         let mut state = open.command_buffer.state();
+        if !attachment_shadows.is_empty() {
+            let first = state.shadows_attached(&attachment_shadows);
+            (open.command_buffer.device().shared().counts)
+                .shadow_attachments(attachment_shadows.len(), first);
+        }
         if !first_copies.is_empty() {
             let again = state.shadows_copied_in(&first_copies);
             if again > 0 {

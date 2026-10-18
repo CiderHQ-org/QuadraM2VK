@@ -231,28 +231,21 @@ macro_rules! degradations {
 
 degradations! {
     runtime {
-        /// A 2D texture over a buffer is a shadow image: its rows (or an array's slices) lie with
-        /// the buffer's bytes between them, and it renders or a shader writes it (or it only
-        /// reads, under [`metal2vulkan::device::PaddedReadsPolicy::Shadow`]), which an image over
-        /// them would hold in its subresource, where Vulkan lets the image's layout transitions
-        /// (its first move among them) read and write any byte of its subresources, and a render
-        /// pass's load and store operations read and write back any byte of an attachment's image
-        /// subresource, and Metal leaves them as the program writes them (but where the device's
-        /// image of it is a Metal texture over the buffer, on MoltenVK); or no linear image of the device
-        /// lays its texels out as Metal does in the buffer's memory, holding no byte past them
-        /// (over a no-copy buffer's imported
-        /// host memory, no linear image made for host allocations does: neither the driver's own
-        /// nor, where the device enables `VK_EXT_image_drm_format_modifier`, a
-        /// `DRM_FORMAT_MOD_LINEAR` image laid out at Metal's row pitch, which the driver may refuse
-        /// for the texture's format, usage or pitch, and which the runtime makes of no depth or
-        /// stencil format, nor of a height that is no multiple of 4 where the driver renders an
-        /// explicit plane's rows past its height
-        /// ([`metal2vulkan::error::RuntimeDriverDefect::ExplicitPlaneRowsPastHeight`])), or the
-        /// buffer is over
-        /// the caller's `VkBuffer`, whose memory backs no image of the runtime's, or over host
-        /// pages imported as dma-bufs (`HostMemory::with_dma_buf`) where the device makes no image
-        /// over a dma-buf of the texture's own pages (the notice names why). Also a heap's depth
-        /// or stencil texture on a device whose driver lays such images apart from their memory
+        /// A 2D texture over a buffer is a shadow image: the buffer is over host pages (a no-copy
+        /// buffer's, imported by their pointer or as dma-bufs), where an image bound to them would
+        /// start `UNDEFINED` (`VUID-VkImageCreateInfo-pNext-01443`) and Vulkan lets its layout
+        /// transitions (its first move among them) read and write any byte bound to it, where
+        /// Metal keeps every CPU write; or its rows (or an array's slices) lie with the buffer's
+        /// bytes between them, which an image over them would hold in its subresource, where
+        /// Vulkan lets the image's layout transitions read and write any byte of its subresources,
+        /// and a render pass's load and store operations read and write back any byte of an
+        /// attachment's image subresource, and Metal leaves them as the program writes them; or no
+        /// linear image of the device lays its texels out as Metal does in the buffer's memory,
+        /// holding no byte past them; or the buffer is over the caller's `VkBuffer`, whose memory
+        /// backs no image of the runtime's. Also a heap's texture over host pages imported as
+        /// dma-bufs where the device makes no image over a dma-buf of the texture's own pages (the
+        /// notice names why). Also a heap's depth or stencil texture on a device whose driver lays
+        /// such images apart from their memory
         /// ([`metal2vulkan::device::DriverFact::DepthStencilImagesLieApart`]): its image is a
         /// shadow of the heap's bytes in its range. Also a heap's 2D texture of one level of
         /// `RGB10A8_2P_XR10` or its sRGB twin: its image is a shadow of its two planes in the
@@ -1632,9 +1625,7 @@ degradations! {
              texture's linear image in place costs more";
         /// A pass renders a color attachment that it stores with `DontCare` (or resolves alone,
         /// `MultisampleResolve`) and whose texture's image lies over the buffer the texture lies
-        /// in (a linear image over an ordinary buffer's memory, a no-copy buffer's host pages, a
-        /// dma-buf's, a surface's; on MoltenVK, a Metal texture over a no-copy or surface buffer's
-        /// `MTLBuffer`) through an image its texture keeps, so that the buffer keeps its bytes, as
+        /// in (a linear image over an ordinary buffer's memory) through an image its texture keeps, so that the buffer keeps its bytes, as
         /// Metal's does (`kept_bytes.rs`): rendered in place, the pass would write them. Not where
         /// the pass hands the attachment to a driver that stores `DONT_CARE` as Metal's own
         /// `DontCare` (`DriverFact::DontCareStoreIsMetals`), one render pass instance the driver
@@ -1832,17 +1823,6 @@ degradations! {
         VisibilityCountPerColor = "visibility-count-per-color", Precision,
             "the result is Metal's count multiplied by the colors the draw writes; a `Boolean` \
              result is Metal's";
-        /// A texture's first move over a no-copy buffer's host pages (or a rebind's new pages)
-        /// changed bytes the host kept across it, on pages the process maps without write
-        /// permission when the host writes them back: on Linux, pages made read-only after the
-        /// buffer was made (Linux refuses read-only pages at the import); on macOS also pages
-        /// read-only from the start, which Metal reads (a GPU write into them fails its command
-        /// buffer). Not observed on RADV, which fails the command buffers submitted after a page
-        /// of an import loses write permission (`HostMemory::new`). Announced once per device, on
-        /// the thread that makes the submission; the payload counts the bytes.
-        UnrestoredFirstMoveBytes = "unrestored-first-move-bytes", Precision,
-            "those bytes keep what the image's move from `UNDEFINED` wrote, where Metal's \
-             texture leaves its pages as they were";
         /// A device whose policy takes native device maths (`FloatMathsPolicy::Native`, the
         /// default) where its float functions are not Metal's own (not MoltenVK,
         /// `DriverDeviation::MetalFloatFunctions`): Metal flushes a `float` product or fused
@@ -2154,6 +2134,15 @@ impl Degradation {
             "metal2vulkan-degrade-deallocator-after-release",
             "none: a no-copy buffer's deallocator runs in its release, on the releasing thread, \
              as Metal runs it",
+        ),
+        (
+            // An aliasing image's first move over a no-copy buffer's host pages changed bytes the
+            // host kept across it, on pages the process maps read-only. No image is bound to a
+            // no-copy buffer's host pages: a texture over them is a shadow, which writes no byte
+            // its commands do not write.
+            "metal2vulkan-degrade-unrestored-first-move-bytes",
+            "none: a texture over a no-copy buffer's host pages is a shadow, which takes no first \
+             move over them",
         ),
     ];
 

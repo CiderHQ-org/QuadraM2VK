@@ -588,12 +588,9 @@ impl Device {
             return Err(invalid(call, Problem::Heap(problem)));
         }
         // The texel views and copies of the textures over the bytes are planned at their offset
-        // in the `VkBuffer`, the bytes' offset in their page; and their aliasing images are
-        // bound where Metal lays their texels out, which keeps their alignment only at that
-        // offset.
+        // in the `VkBuffer`, the bytes' offset in their page.
         let texels = cell.texels();
-        let aliases = cell.aliases();
-        if (!texels.is_empty() || !aliases.is_empty()) && window.offset != cell.offset() {
+        if !texels.is_empty() && window.offset != cell.offset() {
             return Err(Error::NotImplemented(RuntimeGap::RebindTextures));
         }
         // Detached bytes are given pages with no texture being made over them, and none is
@@ -607,7 +604,11 @@ impl Device {
         // its import, as a buffer made over them lies in it (`host_aliases.rs`), the dma-buf source
         // dropped uncalled: they pin no page, that import's making asked about the same window,
         // and the pages stay writable while imported (`HostMemory::new`). A heap's own buffer
+        // imports its own, whose images bound to its bytes are made again over the new import's
+        // memory or its dma-bufs.
         let made_over = (pointer.as_ptr() as u64, length);
+        let shares = heap
+            .is_none()
             .then(|| shared.aliases.import(made_over, class))
             .flatten();
         let (pages, remade) = match shares {
@@ -639,6 +640,12 @@ impl Device {
                                 call, importer, pointer, length, window, source, class, false,
                             )
                         }?;
+                        // The heap's images bound to its bytes, made over dma-bufs of their own
+                        // pages, each of which the source makes: still with no lock held.
+                        let again = match heap {
+                            Some(heap) => self.dma_buf_images_again(heap, &placement, pointer),
+                            None => Ok(Remade::default()),
+                        };
                         let remade = match again {
                             Ok(remade) => remade,
                             Err(error) => {
@@ -673,14 +680,10 @@ impl Device {
         // The heap's images bound to its bytes, made again over the new pages. A refusal drops
         // them and the new pages unreleased: the deallocator goes unrun.
         let mut remade = remade;
-        let mut swaps = match heap {
+        let swaps = match heap {
             Some(heap) => self.rebound_heap_images(heap, &pages, &mut remade)?,
             None => Vec::new(),
         };
-        // The aliasing images of the textures over the bytes, made again over the new pages.
-        if !aliases.is_empty() {
-            swaps.extend(self.rebound_alias_images(&aliases, &pages, remade)?);
-        }
         let (old, again) = shared
             .rebinds
             .replace(key, cell, Arc::clone(&pages))
@@ -1054,18 +1057,13 @@ impl Device {
     ) -> Result<Placement, Error> {
         let shared = self.shared();
         let raw_device = shared.vk();
-        let export_metal = shared
-            .host_import
-            .as_ref()
-            .is_ok_and(|importer| importer.exports_metal());
         // SAFETY: the caller's contract keeps the pages mapped until the placement is freed.
-        let placement = unsafe {
-            lock(&shared.memory).import_host(raw_device, start, size, allowed, class, export_metal)
-        }
-        .map_err(|failure| match failure {
-            ImportFailure::NoMemoryType => not_importable(),
-            ImportFailure::Vulkan(error) => import_refused(error),
-        })?;
+        let placement =
+            unsafe { lock(&shared.memory).import_host(raw_device, start, size, allowed, class) }
+                .map_err(|failure| match failure {
+                    ImportFailure::NoMemoryType => not_importable(),
+                    ImportFailure::Vulkan(error) => import_refused(error),
+                })?;
         // SAFETY: the placement is the pages' memory, the buffer's size and requirements of it
         // available from `at` (the caller's), and the buffer is unbound.
         let bound =

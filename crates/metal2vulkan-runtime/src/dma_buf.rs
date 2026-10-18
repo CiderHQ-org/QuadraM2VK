@@ -27,41 +27,24 @@
 //! - **The bytes.** The runtime never maps a dma-buf: `contents` stays the caller's pointer, and
 //!   the CPU's writes through it and the GPU's through the imports meet in the same pages with no
 //!   flush or invalidate (the types are host-coherent).
-//! - **Textures** over such pages (a no-copy buffer's texture and its views, or a texture placed in
-//!   such a heap), where the device also lists `VK_EXT_image_drm_format_modifier` and
-//!   `VK_EXT_queue_family_foreign` (enabled beside the route, `create.rs`'s `dma_buf_image_names`),
-//!   are each an image of `DRM_FORMAT_MOD_LINEAR` made for dma-bufs and bound to a dedicated import
-//!   (`VkMemoryDedicatedAllocateInfo`) of the one dma-buf the source makes of the pages its memory
-//!   requirements cover ([`Device::dma_buf_image`]). Its one plane starts at the texels' offset in
-//!   their first page; its rows are the texture's (`bytesPerRow`) over a buffer, and the driver's
-//!   own (`VkImageDrmFormatModifierListCreateInfoEXT`) in a heap, where a texture over pages
-//!   imported by their pointer is the driver's linear image. Its features are the modifier's
-//!   (64-bit where the device has `format_feature_flags2`: `modifier_features`), checked as a
-//!   linear image's are against the optimal tiling's for the texture's usage, and its limits the
-//!   format query's for that modifier and dma-bufs. RADV (Mesa 26.2.4 and 26.0.8) lays a plane only
-//!   at an offset that is a multiple of 256 bytes and rows a multiple of 256 apart, and refuses any
-//!   other layout (`VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT`): the runtime asks the
-//!   driver and takes its answer, never a rule of its own. The source is called only once the image
-//!   is made and checked; the import keeps it, and goes after the image. Counted:
-//!   `WorkCounts::dma_buf_images`. A texture whose rows (or slices) lie with the buffer's bytes
-//!   between them takes no such image unless it only reads (under `PaddedReadsPolicy::Alias`, the
-//!   default), nor one whose plane holds bytes past its texels (past its last row's pitch, for one
-//!   that only reads): Vulkan lets an image's layout transitions and a render pass's load and
-//!   store operations write any byte of its subresource (`linear_plan::holding`, `Holds`); it is a
-//!   shadow, the source not asked, counted as a fallback. Over pages imported by their pointer, a texture over a
-//!   buffer, its rows packed, whose rows the driver's linear image lays out otherwise is likewise
-//!   a `DRM_FORMAT_MOD_LINEAR` image, its plane at the texture's pitches, made for host allocations
-//!   ([`ModifierMemory::Host`]) and bound in the buffer's import, its features and limits checked
-//!   the same way (`texture.rs`'s `host_pitched_image`; counted:
-//!   `WorkCounts::pitched_host_images`), where the driver takes that layout. Measured
-//!   (`runtime_lane::surface_texture_costs::pitch_classes`): ANV of Mesa 26.2.4 takes every pitch
-//!   of every format and usage asked; NVIDIA 615.71.09 a pitch at least its own linear image's row
-//!   (128-byte aligned), for a texture it samples or writes and not one it renders to, and not in
-//!   `R16Float`, `R32Float` or `RGBA32Float`, whose `DRM_FORMAT_MOD_LINEAR` tiling it gives no
-//!   sampling or transfers; RADV of Mesa 26.2.4 refuses a pitch that is not a multiple of 256
-//!   bytes and asks a dedicated allocation of an image at any other, so none but its own row. The
-//!   driver's refusal of an image is kept and not asked again (`texture/pitch_refusals.rs`;
-//!   `WorkCounts::pitched_host_image_refusals`).
+//! - **Textures** placed in a heap over such pages (and their views), where the device also lists
+//!   `VK_EXT_image_drm_format_modifier` and `VK_EXT_queue_family_foreign` (enabled beside the
+//!   route, `create.rs`'s `dma_buf_image_names`), are each an image of `DRM_FORMAT_MOD_LINEAR` made
+//!   for dma-bufs and bound to a dedicated import (`VkMemoryDedicatedAllocateInfo`) of the one
+//!   dma-buf the source makes of the pages its memory requirements cover
+//!   ([`Device::dma_buf_image`]). Its one plane starts at the texels' offset in their first page,
+//!   its rows the driver's own (`VkImageDrmFormatModifierListCreateInfoEXT`), as a texture placed
+//!   in a heap over pages imported by their pointer is the driver's linear image. Its features are
+//!   the modifier's (64-bit where the device has `format_feature_flags2`: `modifier_features`),
+//!   checked as a linear image's are against the optimal tiling's for the texture's usage, and its
+//!   limits the format query's for that modifier and dma-bufs. RADV (Mesa 26.2.4 and 26.0.8) lays
+//!   a plane only at an offset that is a multiple of 256 bytes and rows a multiple of 256 apart,
+//!   and refuses any other layout (`VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT`): the
+//!   runtime asks the driver and takes its answer, never a rule of its own. The source is called
+//!   only once the image is made and checked; the import keeps it, and goes after the image.
+//!   Counted: `WorkCounts::dma_buf_images`. A texture over a no-copy buffer's pages, a dma-buf's or
+//!   a pointer's, takes no image over them: it is a shadow (`texture.rs`'s `storage_over_buffer`),
+//!   whose copies go through the buffer's import.
 //! - **Their layouts.** The image is made `UNDEFINED`, as Vulkan makes an image of external
 //!   memory (`VUID-VkImageCreateInfo-pNext-01443`), and the first submission that uses it acquires
 //!   it from `VK_QUEUE_FAMILY_FOREIGN_EXT` into `GENERAL` (`texture/first_move.rs`), from
@@ -74,14 +57,14 @@
 //!   foreign write could leave stale. Measured on RADV of both versions: a CPU write between two
 //!   submissions, with no acquire between, is what the second reads; the GPU's writes reach the
 //!   pages at the texels' places and leave the rows' padding.
-//! - **Their hazards.** The image takes the identity of the bytes it lies over (the buffer's, or
-//!   the heap's), so hazard tracking orders its uses against the buffer's and the heap's other
-//!   resources' over the same pages, as for any aliasing image, though its import is its own.
-//! - **Where none is made** (for the reasons [`Device::dma_buf_image`] lists), the texture takes
-//!   the way it took before such images: a shadow of the bytes, counted
-//!   (`WorkCounts::dma_buf_image_fallbacks`) and announced (`shadowed-texture`, naming why).
-//! - **Rebinds** onto pages imported as dma-bufs make each texture's image again over its own new
-//!   pages before the rebind settles (`rebind.rs`), and are refused
+//! - **Their hazards.** The image takes the identity of the heap's bytes it lies over, so hazard
+//!   tracking orders its uses against the heap's other resources' over the same pages, as for any
+//!   aliasing image, though its import is its own.
+//! - **Where none is made** (for the reasons [`Device::dma_buf_image`] lists), the texture is a
+//!   shadow of the heap's bytes, counted (`WorkCounts::dma_buf_image_fallbacks`) and announced
+//!   (`shadowed-texture`, naming why).
+//! - **Rebinds** of a heap onto pages imported as dma-bufs make each such texture's image again
+//!   over its own new pages before the rebind settles (`rebind.rs`), and are refused
 //!   (`NotImplemented(RebindTextures)`) where one is not made.
 //! - **Refused** (the pointer's refusal: `Unsupported`, `HostMemory`): a source that fails, chunks
 //!   the device imports as no type the buffer takes, a driver that refuses a chunk, and a sparse
@@ -96,9 +79,7 @@ use super::exit_guard::{self, Call};
 use super::host_memory::{based_size, import_refused, not_importable, ImportWindow, Importer};
 use super::host_residency::Again;
 use super::image_plan::{ImageFacts, ImagePlan};
-use super::linear_plan::{
-    check_linear_limits, tiling_lack, viewed_formats, BufferLayout, Holds, LinearLack,
-};
+use super::linear_plan::{check_linear_limits, tiling_lack, viewed_formats, LinearLack};
 use super::memory::{ImportFailure, MemoryClass, Placement};
 use super::program_objects::ProgramObject;
 use super::Device;
@@ -737,7 +718,7 @@ pub(super) const DRM_FORMAT_MOD_LINEAR: u64 = 0;
 /// Where a texture's texels lie in dma-buf pages, for its image over them
 /// ([`Device::dma_buf_image`]).
 pub(super) struct DmaBufTexels<'a> {
-    /// The imports of the pages (a no-copy buffer's or heap's), with the caller's source.
+    /// The imports of the pages (a no-copy heap's), with the caller's source.
     pub(super) pages: &'a DmaBufPages,
     /// Their memory type, which the image's import takes too.
     pub(super) type_index: u32,
@@ -747,10 +728,6 @@ pub(super) struct DmaBufTexels<'a> {
     pub(super) row_pitch: u64,
     /// The bytes from a slice's first texel to the next slice's, for a plan of several layers.
     pub(super) slice_pitch: u64,
-    /// For a texture over a buffer, its texels' layout, and what the image's plane may hold beside
-    /// them (`linear_plan::Holds`): the buffer's other bytes are the program's. `None` for a
-    /// heap's texture, whose image's bytes are its own.
-    pub(super) alone: Option<(BufferLayout, Holds)>,
 }
 
 /// A texture's image over dma-buf pages, made and bound ([`Device::dma_buf_image`]): its
@@ -789,9 +766,8 @@ struct Unbound {
 }
 
 impl Device {
-    /// The image of the first of `plans` the device makes one of (a texture's plans, each viewed
-    /// as `facts` says), and its index, over `texels`, where the texels lie in the caller's
-    /// dma-buf pages: a `DRM_FORMAT_MOD_LINEAR` image
+    /// The image of `plan` (a heap texture's, viewed as `facts` says) over `texels`, where the
+    /// texels lie in the caller's dma-buf pages: a `DRM_FORMAT_MOD_LINEAR` image
     /// (`VK_EXT_image_drm_format_modifier`) whose one plane starts at the texels' offset in their
     /// first page, rows `row_pitch` apart (slices `slice_pitch`), made for dma-bufs, and bound to
     /// a dedicated import (`VkMemoryDedicatedAllocateInfo`) of the one dma-buf the caller's source
@@ -806,27 +782,19 @@ impl Device {
     /// feature the plan's optimal tiling has for its usage; the format query refuses such an
     /// image, or the plan passes its limits; the driver refuses the plane layout or lays it out
     /// otherwise; the image's memory runs past the pages or takes no memory of their type; the
-    /// source fails or answers against its contract; the driver refuses the import. The reason is
-    /// the last plan's; everything made is released then. The source is called at most once, for
-    /// the first plan the device makes an image of before asking it, with no lock of the
-    /// runtime's held (the caller holds none).
+    /// source fails or answers against its contract; the driver refuses the import. Everything
+    /// made is released then. The source is called at most once, once the image is made and
+    /// checked, with no lock of the runtime's held (the caller holds none).
     pub(super) fn dma_buf_image(
         &self,
-        plans: &[&ImagePlan],
+        plan: &ImagePlan,
         facts: &ImageFacts<'_>,
         texels: &DmaBufTexels<'_>,
-    ) -> Result<Result<(usize, DmaBufImage), String>, Error> {
-        let mut why = "no plan".to_owned();
-        for (index, plan) in plans.iter().enumerate() {
-            match self.dma_buf_image_unbound(plan, facts, texels)? {
-                Ok(unbound) => {
-                    let made = self.bind_dma_buf_image(unbound, texels)?;
-                    return Ok(made.map(|image| (index, image)));
-                }
-                Err(reason) => why = reason,
-            }
+    ) -> Result<Result<DmaBufImage, String>, Error> {
+        match self.dma_buf_image_unbound(plan, facts, texels)? {
+            Ok(unbound) => self.bind_dma_buf_image(unbound, texels),
+            Err(why) => Ok(Err(why)),
         }
-        Ok(Err(why))
     }
 
     /// The queue family the first move of an image over dma-buf pages acquires it for: the
@@ -872,8 +840,7 @@ impl Device {
         let mut explicit = vk::ImageDrmFormatModifierExplicitCreateInfoEXT::default()
             .drm_format_modifier(DRM_FORMAT_MOD_LINEAR)
             .plane_layouts(&planes);
-        let dma_buf = ModifierMemory::DmaBuf;
-        let raw = match self.drm_linear_image(plan, &view_formats, &mut explicit, dma_buf)? {
+        let raw = match self.drm_linear_image(plan, &view_formats, &mut explicit)? {
             Ok(raw) => raw,
             Err(error) => {
                 return Ok(Err(format!(
@@ -903,15 +870,6 @@ impl Device {
                  where the texels lie at offset {offset}, rows {} and slices {array_pitch} apart",
                 report.offset, report.row_pitch, report.array_pitch, texels.row_pitch
             ));
-        }
-        if let Some((layout, holds)) = &texels.alone {
-            if !holds.fits(layout, report.size, report.array_pitch) {
-                return refuse(format!(
-                    "the driver's plane takes {} bytes, past the texels' {}",
-                    report.size,
-                    holds.reach(layout)
-                ));
-            }
         }
         // The pages from the texels' first, through the image's memory.
         let first = texels.at - offset;
@@ -1055,16 +1013,16 @@ impl Device {
                 ))
             }
         };
-        let checked = self.modifier_image_checks(plan, facts, ModifierMemory::DmaBuf)?;
+        let checked = self.modifier_image_checks(plan, facts)?;
         Ok(checked.map(|view_formats| (page, view_formats)))
     }
 
-    /// What a `DRM_FORMAT_MOD_LINEAR` image of `plan` for `memory` takes before its plane is laid
+    /// What a `DRM_FORMAT_MOD_LINEAR` image of `plan` for dma-bufs takes before its plane is laid
     /// out, on a device that enables `VK_EXT_image_drm_format_modifier`: the formats it lists for
     /// its views; why not where the device makes none: the plan has several levels, depth or
     /// samples, or a mutable format with no list of its views; its format has a depth or stencil
     /// component; the modifier's tiling lacks a feature the plan's optimal tiling has for its
-    /// usage; the format query refuses such an image for `memory`, or the plan passes its limits.
+    /// usage; the format query refuses such an image for dma-bufs, or the plan passes its limits.
     ///
     /// The runtime takes a modifier image's plane layout from the driver
     /// (`vkGetImageSubresourceLayout`), and Vulkan has no valid such query of a format with a
@@ -1077,7 +1035,6 @@ impl Device {
         &self,
         plan: &ImagePlan,
         facts: &ImageFacts<'_>,
-        memory: ModifierMemory,
     ) -> Result<Result<Vec<vk::Format>, String>, Error> {
         if plan.levels != 1 || plan.extent[2] != 1 || plan.samples != SampleCountFlags::COUNT_1 {
             return Ok(Err(format!(
@@ -1115,16 +1072,15 @@ impl Device {
             )));
         }
         let view_formats: Vec<vk::Format> = formats.iter().map(|&format| format.into()).collect();
-        let limits = match self.modifier_image_limits(plan, &view_formats, memory) {
+        let limits = match self.modifier_image_limits(plan, &view_formats) {
             Ok(limits) => limits,
             Err(why) => return Ok(Err(why)),
         };
         if let Err(need) = check_linear_limits(plan, &limits) {
             return Ok(Err(format!(
                 "its image passes the device's limits for a DRM_FORMAT_MOD_LINEAR image of \
-                 {:?} for {}: {need:?}",
+                 {:?} for dma-bufs: {need:?}",
                 plan.format,
-                memory.words()
             )));
         }
         Ok(Ok(view_formats))
@@ -1149,8 +1105,7 @@ impl Device {
         let modifiers = [DRM_FORMAT_MOD_LINEAR];
         let mut chosen =
             vk::ImageDrmFormatModifierListCreateInfoEXT::default().drm_format_modifiers(&modifiers);
-        let dma_buf = ModifierMemory::DmaBuf;
-        let raw = match self.drm_linear_image(plan, &view_formats, &mut chosen, dma_buf)? {
+        let raw = match self.drm_linear_image(plan, &view_formats, &mut chosen)? {
             Ok(raw) => raw,
             Err(error) => {
                 return Ok(Err(format!(
@@ -1175,7 +1130,7 @@ impl Device {
         }))
     }
 
-    /// A `DRM_FORMAT_MOD_LINEAR` image of `plan` for `memory`, viewed as `view_formats`, its
+    /// A `DRM_FORMAT_MOD_LINEAR` image of `plan` for dma-bufs, viewed as `view_formats`, its
     /// plane laid out as `modifier` says (an explicit layout, or the modifier listed for the driver
     /// to lay out), made `UNDEFINED` as Vulkan makes an image of external memory; or the driver's
     /// refusal of it.
@@ -1184,11 +1139,9 @@ impl Device {
         plan: &ImagePlan,
         view_formats: &[vk::Format],
         modifier: &mut impl vk::ExtendsImageCreateInfo,
-        memory: ModifierMemory,
     ) -> Result<Result<vk::Image, vk::Result>, Error> {
         let shared = self.shared();
-        let mut external =
-            vk::ExternalMemoryImageCreateInfo::default().handle_types(memory.handle_type());
+        let mut external = vk::ExternalMemoryImageCreateInfo::default().handle_types(DMA_BUF);
         let mut list = vk::ImageFormatListCreateInfo::default();
         let info = plan
             .create_info(shared.sharing(), view_formats, &mut list)
@@ -1277,15 +1230,13 @@ impl Device {
         features.map_or(FormatFeatureFlags2::empty(), FormatFeatureFlags2::from_raw)
     }
 
-    /// The device's limits for a `DRM_FORMAT_MOD_LINEAR` image of `plan` for `memory`, viewed as
-    /// `view_formats`; why not where its format query refuses such an image or it imports no such
-    /// memory for one (for host allocations, none but a dedicated one: such an image is bound at
-    /// an offset of a buffer's import).
+    /// The device's limits for a `DRM_FORMAT_MOD_LINEAR` image of `plan` for dma-bufs, viewed as
+    /// `view_formats`; why not where its format query refuses such an image or it imports no
+    /// dma-buf for one.
     fn modifier_image_limits(
         &self,
         plan: &ImagePlan,
         view_formats: &[vk::Format],
-        memory: ModifierMemory,
     ) -> Result<vk::ImageFormatProperties, String> {
         let shared = self.shared();
         let families = &shared.queue_families;
@@ -1298,7 +1249,7 @@ impl Device {
             false => modifier.sharing_mode(vk::SharingMode::EXCLUSIVE),
         };
         let mut external =
-            vk::PhysicalDeviceExternalImageFormatInfo::default().handle_type(memory.handle_type());
+            vk::PhysicalDeviceExternalImageFormatInfo::default().handle_type(DMA_BUF);
         let mut list = vk::ImageFormatListCreateInfo::default().view_formats(view_formats);
         let mut query = vk::PhysicalDeviceImageFormatInfo2::default()
             .format(plan.format.into())
@@ -1328,22 +1279,16 @@ impl Device {
         if let Err(error) = queried {
             return Err(format!(
                 "the device's image format query reports no DRM_FORMAT_MOD_LINEAR image of {:?}, \
-                 usage {:?}, flags {:?} for {} ({error:?})",
-                plan.format,
-                plan.usage,
-                plan.flags,
-                memory.words()
+                 usage {:?}, flags {:?} for dma-bufs ({error:?})",
+                plan.format, plan.usage, plan.flags,
             ));
         }
         let limits = properties.image_format_properties;
         let features = imported.external_memory_properties.external_memory_features;
-        let dedicated_only = memory == ModifierMemory::Host
-            && features.contains(vk::ExternalMemoryFeatureFlags::DEDICATED_ONLY);
-        if !features.contains(vk::ExternalMemoryFeatureFlags::IMPORTABLE) || dedicated_only {
+        if !features.contains(vk::ExternalMemoryFeatureFlags::IMPORTABLE) {
             return Err(format!(
-                "it imports no {} for a DRM_FORMAT_MOD_LINEAR image of {:?} (importable {}, \
+                "it imports no dma-bufs for a DRM_FORMAT_MOD_LINEAR image of {:?} (importable {}, \
                  dedicated only {})",
-                memory.words(),
                 plan.format,
                 features.contains(vk::ExternalMemoryFeatureFlags::IMPORTABLE),
                 features.contains(vk::ExternalMemoryFeatureFlags::DEDICATED_ONLY)
@@ -1369,32 +1314,5 @@ impl Device {
                 )
             },
         )
-    }
-}
-
-/// The memory a `DRM_FORMAT_MOD_LINEAR` image is made for: a dma-buf of its own pages
-/// ([`Device::dma_buf_image`]), or a no-copy buffer's host pages imported by their pointer, where
-/// the image lays its rows out at Metal's pitch (`texture.rs`'s `host_pitched_image`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum ModifierMemory {
-    DmaBuf,
-    Host,
-}
-
-impl ModifierMemory {
-    /// The external memory handle type the image is made for.
-    fn handle_type(self) -> vk::ExternalMemoryHandleTypeFlags {
-        match self {
-            ModifierMemory::DmaBuf => DMA_BUF,
-            ModifierMemory::Host => vk::ExternalMemoryHandleTypeFlags::HOST_ALLOCATION_EXT,
-        }
-    }
-
-    /// The memory, in words.
-    fn words(self) -> &'static str {
-        match self {
-            ModifierMemory::DmaBuf => "dma-bufs",
-            ModifierMemory::Host => "host allocations",
-        }
     }
 }

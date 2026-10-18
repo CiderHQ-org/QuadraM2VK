@@ -129,6 +129,8 @@ recorded here.
   its own pixels alone, else every texel or what the instances since drew. After a barrier inside
   the instance, an own-pixel read takes a snapshot drawn in its subpass (`render/snapshot.rs`,
   docs/API.md "Snapshot reads") or splits the instance; both are exact. Over a texture whose image
+  lies over its buffer's bytes (a linear image over an ordinary buffer's packed rows) it takes the
+  snapshot at any area, where
   the device makes that linear image with feedback loop usage
   (`WorkCounts::feedback_loop_alias_images`; NVIDIA's drivers make it without, and a surface's
   readers split there): on the Iris Xe (`runtime_lane::attachment_read_costs::snapshot_crossover`,
@@ -159,13 +161,25 @@ recorded here.
   sign strip (two copies and a dispatch, or a draw per layer when multisampled) follows a pass with
   depth writes where no stand-in runs (`texture/signed_depth.rs`). A texture never switched on pays
   a flag read per pass.
-- **A texture over a buffer whose rows lie with bytes between them, which renders or which a shader
-  writes**, is a shadow on every device but MoltenVK (`shadowed-texture`): its texels copied in
-  before each use and back after each write (only those inside the draws' scissors for a pass that
-  takes it as a loaded attachment alone): an image over those rows holds the bytes between them in
-  its subresources, which a render pass's load and store operations and the image's first move may
-  rewrite. On ANV making a 1307x512 tile took about 135 µs as a shadow against 41 µs as an image.
-  Packed rows avoid it.
+- **A texture over a no-copy buffer's host pages, or over a buffer whose rows lie with bytes
+  between them,** is a shadow on every device, whatever its usage (`shadowed-texture`): its texels
+  copied in before each use and merged back after each write (only those inside the draws'
+  scissors for a pass that takes it as a loaded attachment alone). An image bound to host pages
+  starts `UNDEFINED` (`VUID-VkImageCreateInfo-pNext-01443`), and its first move may read and write
+  every byte bound to it, which the host could keep only by undoing a CPU write made meanwhile,
+  where Metal keeps it; an image over padded rows holds the bytes between them, which a render
+  pass's load and store operations may rewrite too. On the UHD 770 (ANV) a 1080p `BGRA8Unorm`
+  surface's pass that loads, draws and stores (`guest_frame_costs`) took 1.9 ms from commit to
+  completion, 1.4 ms of it the copies (copy in 0.21 ms, keep 0.60, merge 0.60), against 0.4 ms
+  into a `Private` texture; a linear image over the pages took 2.6-3.1 ms, its draws slow in host
+  memory. Twelve such passes in one command buffer took 21 ms against the linear image's 27.5 ms,
+  and 0.4-0.5 ms more of the process's CPU a frame (1.2 ms against 0.7): about 20 µs a pass on the
+  encoding thread, 10 µs on the queue's waiter and 10 µs on the recorder and reaper together. On
+  ANV making a 1307x512 tile took about 135 µs as a shadow against 41 µs as an image; a frame
+  sampling four `BGRA8Unorm` tiles over no-copy pages
+  (`surface_texture_costs::read_only_padded_costs`) took 3.2-5.3 ms with the textures made once
+  and 3.4-7.1 ms with new ones each frame, where images over the rows took 3.0-6.1 and 4.6-8.6
+  ms. An ordinary buffer's packed rows avoid it.
 - **On MoltenVK, a texture over a buffer that renders or that blits write keeps a shadow.** MoltenVK
   1.4.1 reports a format's linear-tiling attachment and blit-destination features from
   uninitialized memory, so no MoltenVK description states them
@@ -380,6 +394,9 @@ driver's. Each is open work.
   word runs past the buffer, the merge copies the bytes from the texture's first to its last into
   its scratch, merges there, and copies them back (`shadow_merge.rs`). Another writer's write to
   them between the two copies is undone.
+- **A linear image over a `Shared` or `Managed` buffer's packed rows moves out of
+  `PREINITIALIZED` at its first use**, a transition Vulkan lets read and write every byte bound to
+  it: a CPU write to those bytes during it could be undone, where Metal keeps it (not observed).
 - **A cold pipeline making on NVIDIA grows with a module's sampling sites.** NVIDIA's compiler takes
   about 1 s for macOS 26's largest CoreAnimation fragment (210,033 words) on the RTX 5080 Laptop
   GPU, once per cold cache; states that share the module then take 13 to 16 ms, and a warm cache

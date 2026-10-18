@@ -1103,16 +1103,6 @@ fn create_on(
     // The runtime's own need, outside the vocabulary, where listed: GPU times on the host's
     // clock (`gpu_time.rs`).
     let calibration = gpu_time::Extension::among(&listed);
-    // The runtime's own need, outside the vocabulary, where listed beside the host imports it
-    // serves: a texture over a no-copy buffer as a Metal texture over the import's `MTLBuffer`
-    // on a driver that runs on Metal (`metal_texture.rs`).
-    let metal_name = ash::ext::metal_objects::NAME;
-    let metal_objects =
-        listed.contains(metal_name) && set.extensions.contains(&VkExtension::ExtExternalMemoryHost);
-    let metal_asked = options
-        .device_extensions
-        .iter()
-        .any(|name| name.as_c_str() == metal_name);
     // The runtime's own need, outside the vocabulary, wherever listed (Not only on a driver that
     // compiles every library of saved cache data at load): which stages a variant's cache held
     // (`shader_cache/variant.rs`), and whether the driver's cache held a pipeline
@@ -1132,7 +1122,6 @@ fn create_on(
         .iter()
         .cloned()
         .chain(calibration.map(|extension| extension.name().to_owned()))
-        .chain((metal_objects && !metal_asked).then(|| metal_name.to_owned()))
         .chain((creation_feedback && !feedback_asked).then(|| feedback_name.to_owned()))
         .chain(dma_buf.into_iter().flatten().map(CStr::to_owned))
         .chain(dma_buf_images.into_iter().flatten().map(CStr::to_owned))
@@ -1278,7 +1267,6 @@ fn create_on(
         host_image_copy,
         linear_color_attachment,
         graphics_pipeline_library,
-        metal_objects: metal_objects || metal_asked,
         creation_feedback: creation_feedback || feedback_asked,
         dma_buf: dma_buf.is_some(),
         dma_buf_images: dma_buf_images.is_some(),

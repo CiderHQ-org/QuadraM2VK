@@ -341,6 +341,7 @@ impl CommandBufferShared {
         // Whether the batch may wait in the scheduler's group for one kernel submission with the
         // batches after it (`group.rs`), as far as is known before anything changes; first work
         // it takes still sends it now. One that may not, or of another `VkQueue`, waits,
+        // nothing changed, for the group to go first. Its event signals ride to the group's end;
         // a wait for an event a batch held signals, which only that end meets, goes after it.
         let met = (event_waits.iter()).any(|&wait| scheduler.group.meets(wait));
         let joins = {
@@ -524,17 +525,10 @@ impl CommandBufferShared {
         // The new resources' first work, before every command (`texture/first_move.rs`), given
         // back if the submission is not made. A batch's commands may reach every texture
         // unnamed, so it takes every move, those of images bound to host pages among them, whose
-        // pages it then holds. The moves that keep the bytes their images are bound to the host
-        // makes first, once every submission before completed (`Device::keep_on_host`); one
-        // registered meanwhile too.
+        // pages it then holds. Its commands bind the heap sets, so it holds the texture slots'
+        // writes until its submission was made (`heap_sets::hold`).
         let firsts = &shared.textures.first_moves;
-        let first_work = loop {
-            (device.keep_on_host(|_| true)).map_err(|error| recording_error(device, error))?;
-            let work = firsts.take(|_| true);
-            if !work.has_keeps() {
-                break work;
-            }
-        };
+        let first_work = firsts.take_holding(|_| true, || crate::heap_sets::hold(device));
         let entry = (!entries.is_empty()).then(|| Summary::outside_encoders(entry_uses));
         let exit = (!exits.is_empty()).then(|| Summary::outside_encoders(exit_uses));
         // The held depths' moves before each encoder that names one, into the layout it needs

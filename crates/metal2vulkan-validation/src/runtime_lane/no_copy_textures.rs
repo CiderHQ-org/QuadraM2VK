@@ -1,33 +1,24 @@
 //! Device tests of 2D textures (and 2D arrays) over no-copy buffers on the device the cfg selects.
-//! A texture over the caller's host pages is a linear image bound to the buffer's imported memory,
-//! made for host allocations, where the device makes one that lies on Metal's layout there; on a
-//! driver that runs on Metal, an image of a Metal texture over the import's `MTLBuffer`; elsewhere
-//! a shadow image the encoders copy the texels into and back (`shadowed-texture`). Each form reads
-//! and writes the caller's bytes as Metal's texture over the buffer does.
+//! A texture over the caller's host pages is a shadow image the encoders copy the texels into and
+//! back (`shadowed-texture`): it reads and writes the caller's bytes as Metal's texture over the
+//! buffer does.
 //!
 //! - [`textures_over_no_copy_buffers_read_and_write_the_caller_s_pages`], under the validation
 //!   layer: the consumer's surface formats (and `BGR10_XR`, an extended-range format held in an
 //!   integer image) at 1920x1080 with packed rows, and with rows padded by 64 bytes as a guest
 //!   browser's surfaces have them (the `_padded` tests), as render targets the shaders read (and
 //!   write), and as textures the shaders only read (and write): the bytes the caller wrote before
-//!   the texture was made are what a blit reads out of it (a linear image made for host allocations
-//!   starts `UNDEFINED`, and its move to `GENERAL` must keep them); a render pass's clear (a blit's
-//!   write, without render target usage) lands in the pages, as the next blit reads the texture;
+//!   the texture was made are what a blit reads out of it; a render pass's clear (a blit's write,
+//!   without render target usage) lands in the pages, as the next blit reads the texture;
 //!   the caller's later writes are what the next blit reads; and a blit's write through the texture
 //!   read through the buffer by a blit, and the other way round, in one blit encoder and in two of
 //!   one command buffer, read the write (the texture and its buffer are one resource to hazard
 //!   tracking, which on MoltenVK leaves blits to Metal's tracking). Padded rows' bytes between
-//!   the rows are never written. Each texture's form is printed (`NOCOPY-TEXTURE`): aliased where
-//!   `vk_image` answers its own image over the pages, shadowed where it answers none, and the
-//!   images the making counted (`WorkCounts::pitched_host_images`, `shadowed_textures`). A shadow
-//!   is made without zeroing its image (`shadows_zeroed`, `images_started_on_the_host`: its copy
-//!   in writes every texel first); a padded texture is a shadow but on a driver that runs on
-//!   Metal (a linear image over the pages would hold the bytes between the rows, which Vulkan
-//!   lets a render pass write back); and making the same texture again asks the driver no
-//!   format's modifier features
-//!   (`modifier_feature_queries`), nor a layout at Metal's row pitch it refused
-//!   (`pitched_host_image_refusals`, `pitched_host_image_refusals_recalled`), and takes the same
-//!   form.
+//!   the rows are never written. Each texture's form is printed (`NOCOPY-TEXTURE`): a shadow, which
+//!   `vk_image` answers no image for, counted (`WorkCounts::shadowed_textures`) and made without
+//!   zeroing its image (`shadows_zeroed`, `images_started_on_the_host`: its copy in writes every
+//!   texel first); making it, and making it again, asks the driver no format's modifier features
+//!   (`modifier_feature_queries`), and the second takes the same form.
 //! - [`two_slice_arrays_over_no_copy_buffers_read_and_write_the_caller_s_pages`], under the
 //!   validation layer: two-slice `RGBA8Unorm` 2D arrays made by the linear call, a 4x4 sampled one
 //!   and an 8x8 render target, read and written a slice at a time at Metal's slice places
@@ -56,7 +47,6 @@ use metal2vulkan::metal::{
     BlendFactor, ColorWriteMask, PixelFormat, PrimitiveType, TextureType, TextureUsage,
 };
 use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};
-use metal2vulkan::vk::DriverId;
 use metal2vulkan_devtools::llvm_assemble;
 use metal2vulkan_runtime::{
     BlitOption, Buffer, ClearColor, CommandQueue, Degradation, Device, IoSurfacePlane, LoadAction,
@@ -198,13 +188,6 @@ fn padding(bytes: &[u8], bpr: u64, row: u64) -> Vec<u8> {
         .collect()
 }
 
-/// Whether the device runs on Metal (MoltenVK), where a texture over host pages is an image of a
-/// Metal texture over the buffer, which keeps the bytes between its rows as Metal does: anywhere
-/// else a texture over padded rows is a shadow.
-fn on_metal(device: &Device) -> bool {
-    device.properties().description.driver_id == Some(DriverId::MOLTENVK)
-}
-
 /// A `Shared` buffer holding `bytes`.
 pub(super) fn staged(device: &Device, bytes: &[u8]) -> Buffer {
     let buffer = device
@@ -339,59 +322,29 @@ fn read_and_write_the_caller_s_pages(pf: PixelFormat, texel: u64, pad: u64) {
             let counted = device.work_counts();
             let made = aliased(&texture);
             let what = format!("{} usage {usage:?}, rows of {bpr} bytes", pf.name());
-            let pitched = counted.pitched_host_images - before.pitched_host_images;
             let shadowed = counted.shadowed_textures - before.shadowed_textures;
-            if made {
-                assert_eq!(
-                    shadowed, 0,
-                    "{what}: an aliased texture counted as shadowed"
-                );
-            } else {
-                // Its copy in writes every texel before any command reads it: no zeros first.
-                assert_eq!(shadowed, 1, "{what}: a shadow not counted");
-                assert_eq!(
-                    counted.shadows_zeroed - before.shadows_zeroed,
-                    0,
-                    "{what}: the shadow's image was zeroed"
-                );
-                assert_eq!(
-                    counted.images_started_on_the_host - before.images_started_on_the_host,
-                    0,
-                    "{what}: the shadow's image was zeroed on the host"
-                );
-            }
-            if pad != 0 && !on_metal(&device) {
-                assert!(
-                    !made && pitched == 0,
-                    "{what}: rows with bytes between them aliased by a linear image (pitched \
-                     images {pitched})"
-                );
-            }
-            // A format's modifier features are asked of the driver once, and a layout it refused
-            // is not asked again: making the same texture again asks neither, and takes the same
-            // form.
+            // A texture over host pages is a shadow, whose copy in writes every texel before any
+            // command reads it: no zeros first.
+            assert!(!made, "{what}: a texture over host pages aliased");
+            assert_eq!(shadowed, 1, "{what}: a shadow not counted");
+            assert_eq!(
+                counted.shadows_zeroed - before.shadows_zeroed,
+                0,
+                "{what}: the shadow's image was zeroed"
+            );
+            assert_eq!(
+                counted.images_started_on_the_host - before.images_started_on_the_host,
+                0,
+                "{what}: the shadow's image was zeroed on the host"
+            );
+            // Making it asks the driver no format's modifier features, nor does making it again,
+            // which takes the same form.
             let again = buffer.new_texture(&d, 0, bpr).unwrap();
             let asked = device.work_counts();
             assert_eq!(
-                asked.modifier_feature_queries - counted.modifier_feature_queries,
+                asked.modifier_feature_queries - before.modifier_feature_queries,
                 0,
-                "{what}: the same texture's making asked the driver's modifier features again"
-            );
-            // The first making's refusal was asked or recalled (an earlier usage's image may be
-            // this one's); the second recalls it.
-            let refused = (counted.pitched_host_image_refusals
-                - before.pitched_host_image_refusals)
-                + (counted.pitched_host_image_refusals_recalled
-                    - before.pitched_host_image_refusals_recalled);
-            assert_eq!(
-                (
-                    asked.pitched_host_image_refusals - counted.pitched_host_image_refusals,
-                    asked.pitched_host_image_refusals_recalled
-                        - counted.pitched_host_image_refusals_recalled,
-                ),
-                (0, refused),
-                "{what}: the same texture's making asked the driver a layout it refused (refused \
-                 or recalled at first {refused})"
+                "{what}: the texture's making asked the driver's modifier features"
             );
             assert_eq!(aliased(&again), made, "{what}: made again in another form");
             drop(again);
@@ -462,8 +415,7 @@ fn read_and_write_the_caller_s_pages(pf: PixelFormat, texel: u64, pad: u64) {
             ordered(&queue, &texture, &buffer, (bpr, row), true);
             ordered(&queue, &texture, &buffer, (bpr, row), false);
             eprintln!(
-                "NOCOPY-TEXTURE on {}: {what} {W}x{H}: {} (pitched host images {pitched}, \
-                 refused {refused}, shadows {shadowed})",
+                "NOCOPY-TEXTURE on {}: {what} {W}x{H}: {} (shadows {shadowed})",
                 device.name(),
                 form(made)
             );

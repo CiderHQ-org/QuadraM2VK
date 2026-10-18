@@ -224,6 +224,28 @@ used (no command reaches them unnamed yet), `host_rebind_imports_made` those reb
 `host_rebind_imports_covered` those whose pages lay within bytes a buffer over host pages lay over
 already.
 
+A texture over a no-copy buffer's host pages, imported by their pointer or as dma-bufs, is a
+shadow (`shadowed-texture`) on every device, whatever its usage and row pitch: an optimal image of
+the runtime's own memory, its texels copied in from the pages before a use and merged back after a
+write. An image bound to imported memory starts in `VK_IMAGE_LAYOUT_UNDEFINED`
+(`VUID-VkImageCreateInfo-pNext-01443`), and its layout transitions "may perform read and write
+accesses on all memory bound to the image subresource range"; every image takes one, its first move
+from the layout it is made in, before any use, and the host could keep the bytes across it only by
+reading them before it and writing them back after, which would undo a CPU write made meanwhile,
+where Metal keeps every write to bytes a command buffer does not write.
+
+A texture over another buffer's bytes (the runtime's own memory) is a linear image over them where
+its rows lie one after another (`bytes_per_row` is its texels' bytes, or it has one row; an array's
+slices likewise), the device lays a linear image's rows at that pitch, and the image holds no byte
+past its texels; it starts `VK_IMAGE_LAYOUT_PREINITIALIZED`, which keeps its bytes. A texture whose
+rows lie with bytes between them is a shadow (`shadowed-texture`), whatever its usage: an image at
+that pitch holds the bytes between the rows in its subresource (`VkSubresourceLayout`: "size
+includes any extra memory that is required based on rowPitch"), which its layout transitions and a
+render pass's load and store operations ("read and write back any memory locations within the image
+subresource bound for that attachment"; lavapipe writes back the bytes its 4-texel blocks reach
+past a row, a signaling NaN's bits quieted) may write, where Metal leaves them as the program writes
+them.
+
 
 ## 7. Check the integration
 

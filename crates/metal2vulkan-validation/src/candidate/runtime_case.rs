@@ -190,10 +190,13 @@ pub(crate) fn report_each_message() {
 ///
 /// Two layer gaps pass, on the layer releases whose source was read with their cause in place:
 /// the layer's synchronization validation forgetting a semaphore chain once the host waited on a
+/// timeline (`runtime_case/host_wait_gap.rs`); and the layer's synchronization validation not
+/// reading rasterization-order attachment access, so that it reports an input attachment read of
+/// the runtime's pipelines made with it (named so) after an earlier draw's color write
 /// (`runtime_case/raster_order_gap.rs`). Each message passed prints a `LAYER-GAP` line with the
 /// layer's source, and a test's count of them prints once its messages go. On any other release
-/// each fails, marked "re-read WaitForSemaphore in layer X.Y.Z" or "re-read the image state in
-/// layer X.Y.Z".
+/// each fails, marked "re-read WaitForSemaphore in layer X.Y.Z" or "re-read the input attachment
+/// ordering in layer X.Y.Z".
 ///
 /// One message about the driver passes too, once the runtime announced it: the layer's report
 /// of a vertex module's subgroup operations outside `subgroupSupportedStages`
@@ -208,7 +211,7 @@ pub struct Messages(Arc<Mutex<Reported>>);
 struct Reported {
     failing: Vec<DebugMessage>,
     notices: Vec<DebugMessage>,
-    /// How many of the layer gaps' messages passed.
+    /// How many of the layer gap's messages passed.
     layer_gaps: usize,
     /// Whether a device announced `Degradation::UnadvertisedVertexSimdgroups`.
     unadvertised_vertex: bool,
@@ -332,7 +335,7 @@ impl Messages {
     }
 
     /// How many of the layer gaps' messages passed so far (`runtime_case/host_wait_gap.rs`,
-    /// `runtime_case/metal_import_gap.rs`).
+    /// `runtime_case/raster_order_gap.rs`).
     pub fn layer_gaps(&self) -> usize {
         self.0.lock().unwrap_or_else(|p| p.into_inner()).layer_gaps
     }

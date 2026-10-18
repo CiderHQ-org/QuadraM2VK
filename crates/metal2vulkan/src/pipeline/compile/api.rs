@@ -1304,7 +1304,6 @@ fn largest_stage_words(pipeline: &RenderPipeline) -> u32 {
 /// two-plane YCbCr texture (`YCbCrFilterPolicy::Exact`, reported with it); `AllNative` drops every
 /// module-growing exact answer (the fast default's forms). Neither touches the policy's other
 /// choices (pointer and handle domains, containment, isolation, framebuffer fetch, the 8-bit
-/// filter, or `padded_reads`, which changes no module), so a reduced device keeps them.
 #[derive(Clone, Copy)]
 enum ReducedForms {
     NativeSampling,

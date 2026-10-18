@@ -46,12 +46,6 @@ pub(super) const CARRIER: Format = Format::R8G8_UNORM;
 /// The bytes of a 4:2:2 texel.
 pub(super) const TEXEL_BYTES: u32 = 2;
 
-/// The Metal format whose own Vulkan format is [`CARRIER`]: a Metal texture over a 4:2:2
-/// texture's bytes is of it (`metal_texture.rs`), since Metal makes no linear texture of a 4:2:2
-/// format (it asserts "Linear textures do not support compressed pixel formats", EV
-/// APX2-l2-mvk4).
-pub(super) const CARRIER_PIXEL_FORMAT: PixelFormat = PixelFormat::RG8Unorm;
-
 /// Whether `pf` is a 4:2:2 format.
 pub(super) fn is_four_two_two(pf: PixelFormat) -> bool {
     matches!(pf, PixelFormat::GBGR422 | PixelFormat::BGRG422)

@@ -1313,16 +1313,7 @@ impl Texels {
             .device()
             .own_buffer(span.next_multiple_of(4), options)?;
         let (_, start) = buffer.at(0);
-        let rows = (0..layout.slices).flat_map(|slice| {
-            (0..layout.rows).map(move |row| slice * layout.slice_pitch + row * layout.row_pitch)
-        });
-        let back = rows
-            .map(|row| vk::BufferCopy {
-                src_offset: start + row,
-                dst_offset: at + row,
-                size: layout.row_bytes,
-            })
-            .collect();
+        let back = staged_rows_back(layout, start, at);
         Ok(ShadowStaging {
             into: vk::BufferCopy {
                 src_offset: at,
@@ -1561,4 +1552,27 @@ pub(super) fn view_usage(
         (true, false) if maintenance5 => Ok(ViewUsage::Only { storage }),
         _ => Err(Error::NotImplemented(RuntimeGap::Textures)),
     }
+}
+
+/// The regions that copy the texels laid out as `layout` from a staging buffer, where they start at
+/// `start`, back into the texture's `VkBuffer`, where they start at `at` (`ShadowStaging::back`):
+/// one a row, but one for rows that lie one after another.
+pub(super) fn staged_rows_back(layout: &BufferLayout, start: u64, at: u64) -> Vec<vk::BufferCopy> {
+    let rows = (0..layout.slices).flat_map(|slice| {
+        (0..layout.rows).map(move |row| slice * layout.slice_pitch + row * layout.row_pitch)
+    });
+    let mut back: Vec<vk::BufferCopy> = Vec::new();
+    for row in rows {
+        match back.last_mut() {
+            Some(last) if last.src_offset + last.size == start + row => {
+                last.size += layout.row_bytes;
+            }
+            _ => back.push(vk::BufferCopy {
+                src_offset: start + row,
+                dst_offset: at + row,
+                size: layout.row_bytes,
+            }),
+        }
+    }
+    back
 }

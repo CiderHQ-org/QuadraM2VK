@@ -1,14 +1,15 @@
 //! Color attachments rendered into linear images in place.
 //!
-//! A texture over a buffer's memory, a no-copy buffer's host pages included, is a linear image
-//! over the buffer's bytes where the device makes one that lies on Metal's layout there
-//! (`Device::alias_image`), and a heap's texture may be a linear image (`texture/heap.rs`). On a
-//! device that enabled `VK_NV_linear_color_attachment`'s `linearColorAttachment` (`enables.rs`),
-//! such an image of a format whose linear tiling has `LINEAR_COLOR_ATTACHMENT_NV` takes color
-//! attachment usage (`ImageFacts::linear`), and a pass renders into it in place: no shadow, no
-//! copy in, no copy back. Vulkan renders it there only where every color attachment of the
-//! render pass instance is linear (the extension's rule): such an attachment is *bound*
-//! ([`bound`]; `ImageFacts::linear_attachment_rule`). A multisampled image is never linear, so:
+//! A texture over a buffer of the runtime's memory is a linear image over the buffer's bytes where
+//! the device makes one that lies on Metal's layout there (`Device::alias_image`; one over a
+//! no-copy buffer's host pages is a shadow), and a heap's texture may be a linear image
+//! (`texture/heap.rs`). On a device that enabled `VK_NV_linear_color_attachment`'s
+//! `linearColorAttachment` (`enables.rs`), such an image of a format whose linear tiling has
+//! `LINEAR_COLOR_ATTACHMENT_NV` takes color attachment usage (`ImageFacts::linear`), and a pass
+//! renders into it in place: no shadow, no copy in, no copy back. Vulkan renders it there only
+//! where every color attachment of the render pass instance is linear (the extension's rule): such
+//! an attachment is *bound* ([`bound`]; `ImageFacts::linear_attachment_rule`). A multisampled image
+//! is never linear, so:
 //!
 //! - **A pass beside a color attachment that is not linear** (a private texture's image, an image
 //!   of the runtime's standing in for an attachment), **or with a depth or stencil attachment**

@@ -437,9 +437,9 @@ pub(super) fn refuse_unwritable(window: &ImportWindow, counts: &Counters) -> Res
 }
 
 /// Whether the process maps `[start, end)` without a gap, each page with write permission, as the
-/// kernel answers now: on Linux for the mappings over it ([`queried_writable`]), or from the lines
-/// of `/proc/self/maps` where the kernel predates the query ([`writable`]); `None` when that file
-/// cannot be opened.
+/// kernel answers now: for the mappings over it ([`queried_writable`]), or from the lines of
+/// `/proc/self/maps` where the kernel predates the query ([`writable`]); `None` when that file
+/// cannot be opened. Each mapping asked is added to `asked`.
 #[cfg(target_os = "linux")]
 fn mappings_writable(start: u64, end: u64, asked: &mut u64) -> Option<bool> {
     use std::io::BufRead;
@@ -613,13 +613,6 @@ pub(super) struct Importer {
     pub(super) page: u64,
     /// `minImportedHostPointerAlignment`.
     pub(super) alignment: u64,
-    /// `vkExportMetalObjectsEXT`, where the device enables `VK_EXT_metal_objects`: each import is
-    /// then allocated for export of its `MTLBuffer` (`metal_texture.rs`).
-    metal: Option<ash::ext::metal_objects::DeviceFn>,
-    /// `vkSetDebugUtilsObjectNameEXT`, where the device exports `MTLBuffer`s and the runtime's
-    /// instance reports through `VK_EXT_debug_utils`: an image made of a Metal texture is named
-    /// [`METAL_TEXTURE_IMAGE`] for the layers' messages.
-    names: Option<ash::ext::debug_utils::DeviceFn>,
     /// `vkGetMemoryFdPropertiesKHR`, where the device enables the dma-buf route (`dma_buf.rs`).
     dma_buf: Option<ash::khr::external_memory_fd::DeviceFn>,
     /// Whether the device also enables the route's image extensions (`create.rs`'s
@@ -631,14 +624,6 @@ pub(super) struct Importer {
     /// such buffer.
     pub(super) sparse_granule: std::sync::OnceLock<Option<u64>>,
 }
-
-/// The debug name of an image the runtime made of a Metal texture over an import's `MTLBuffer`
-/// (`VkImportMetalTextureInfoEXT`, `metal_texture.rs`), where its instance reports messages. The
-/// validation layer (1.4.357, and its main of 2026-10-07) does not model that import, which
-/// Vulkan treats as bound, and reports such an image as used with no memory bound; the name lets
-/// a reader tell those reports from others.
-pub(super) const METAL_TEXTURE_IMAGE: &std::ffi::CStr =
-    c"metal2vulkan: a Metal texture over imported host memory";
 
 impl Importer {
     /// The importer of a device, or the refusal every no-copy buffer on it gets: the device did
@@ -657,8 +642,6 @@ impl Importer {
         enabled: &EnableSet,
         usage: vk::BufferUsageFlags,
         loader_word: &LoaderWord,
-        metal_objects: bool,
-        debug_names: bool,
         dma_buf: bool,
         dma_buf_images: bool,
     ) -> Result<Importer, Unsupported> {
@@ -702,17 +685,12 @@ impl Importer {
             function.map_or(std::ptr::null(), |function| function as *const c_void)
         };
         let functions = ash::ext::external_memory_host::DeviceFn::load(load);
-        let metal = metal_objects.then(|| ash::ext::metal_objects::DeviceFn::load(load));
-        let names =
-            (metal_objects && debug_names).then(|| ash::ext::debug_utils::DeviceFn::load(load));
         let dma_buf = dma_buf.then(|| ash::khr::external_memory_fd::DeviceFn::load(load));
         let dma_buf_images = dma_buf.is_some() && dma_buf_images;
         Ok(Importer {
             functions,
             page,
             alignment,
-            metal,
-            names,
             dma_buf,
             dma_buf_images,
             sparse_granule: std::sync::OnceLock::new(),
@@ -727,9 +705,7 @@ impl Importer {
 
     /// Whether the device makes images over dma-bufs of host pages (`dma_buf.rs`): it imports
     /// dma-bufs and enables `VK_EXT_image_drm_format_modifier` and `VK_EXT_queue_family_foreign`
-    /// (`create.rs`'s `dma_buf_image_names`). A texture over host pages imported by their pointer
-    /// may then be a `DRM_FORMAT_MOD_LINEAR` image at Metal's row pitch too (`texture.rs`'s
-    /// `host_pitched_image`).
+    /// (`create.rs`'s `dma_buf_image_names`).
     pub(super) fn makes_dma_buf_images(&self) -> bool {
         self.dma_buf_images
     }
@@ -763,51 +739,6 @@ impl Importer {
             )
         };
         result.result_with_success(properties.memory_type_bits)
-    }
-
-    /// Whether the device's imports are allocated for export of their `MTLBuffer`
-    /// (`VK_EXT_metal_objects`).
-    pub(super) fn exports_metal(&self) -> bool {
-        self.metal.is_some()
-    }
-
-    /// The `id<MTLBuffer>` behind `memory`, an import of this importer's device allocated for
-    /// export; `None` where the device does not export one.
-    ///
-    /// # Safety
-    ///
-    /// `device` is the importer's device and `memory` a live import of it.
-    pub(super) unsafe fn metal_buffer(
-        &self,
-        device: &ash::Device,
-        memory: vk::DeviceMemory,
-    ) -> Option<vk::MTLBuffer_id> {
-        let metal = self.metal.as_ref()?;
-        let mut buffer = vk::ExportMetalBufferInfoEXT::default().memory(memory);
-        let mut info = vk::ExportMetalObjectsInfoEXT::default().push_next(&mut buffer);
-        // SAFETY: the caller's; the memory was allocated for export of its `MTLBuffer`
-        // (`Memory::import_host`), and the function was loaded for this device.
-        unsafe { (metal.export_metal_objects_ext)(device.handle(), &mut info) };
-        let exported = buffer.mtl_buffer;
-        (!exported.is_null()).then_some(exported)
-    }
-
-    /// Name `image`, made of a Metal texture, [`METAL_TEXTURE_IMAGE`] where the instance reports
-    /// messages; a failure to name it is ignored (the name serves messages only).
-    ///
-    /// # Safety
-    ///
-    /// `device` is the importer's device and `image` a live image of it.
-    pub(super) unsafe fn name_metal_image(&self, device: &ash::Device, image: vk::Image) {
-        let Some(names) = &self.names else {
-            return;
-        };
-        let info = vk::DebugUtilsObjectNameInfoEXT::default()
-            .object_handle(image)
-            .object_name(METAL_TEXTURE_IMAGE);
-        // SAFETY: the caller's; the instance enables `VK_EXT_debug_utils` (it reports messages),
-        // and the function was loaded for this device.
-        let _ = unsafe { (names.set_debug_utils_object_name_ext)(device.handle(), &info) };
     }
 
     /// The memory types `pointer` can be imported into (`vkGetMemoryHostPointerPropertiesEXT`).

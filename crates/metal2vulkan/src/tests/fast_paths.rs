@@ -70,6 +70,8 @@ fn choices() -> Vec<Choice> {
         nan_and_min_max: _,
         rounding_order: _,
         half_blend: _,
+        // The runtime's: the texels of a carried texture's decoded twin, a heap's compressed
+        // texture's image, when the host sees a command buffer complete, a loaded attachment's
         // tile store, a multisampled color attachment's resolve, and how a batch begins after the
         // earlier ones of its queue.
         decoded_texels: _,

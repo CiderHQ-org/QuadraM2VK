@@ -413,7 +413,8 @@ pub(super) struct ShadowStaging {
     pub(super) buffer: Buffer,
     /// The texture's bytes from its buffer into the staging buffer.
     pub(super) into: vk::BufferCopy,
-    /// Each row of texels from the staging buffer back into the texture's buffer.
+    /// Each row of texels from the staging buffer back into the texture's buffer: one region for
+    /// rows that lie one after another.
     pub(super) back: Vec<vk::BufferCopy>,
 }
 

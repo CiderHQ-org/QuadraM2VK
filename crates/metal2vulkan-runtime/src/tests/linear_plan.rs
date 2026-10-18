@@ -4,17 +4,15 @@
 
 use super::super::image_plan::plan_image;
 use super::super::linear_plan::{
-    aliases, check_linear_limits, holding, linear_alignment, linear_lack, only_reads,
-    plan_buffer_texture, BufferFacts, BufferLayout, BufferRefusal, BufferTexture,
-    BufferTextureCall, BufferTextureProblem, Holds, LinearImage, LinearLack, Placed,
-    LINEAR_ALIGNMENT,
+    aliases, check_linear_limits, holding, linear_alignment, linear_lack, plan_buffer_texture,
+    BufferFacts, BufferLayout, BufferRefusal, BufferTexture, BufferTextureCall,
+    BufferTextureProblem, LinearImage, LinearLack, Placed, LINEAR_ALIGNMENT,
 };
 use super::super::texture_descriptor::{effective_usage, no_texture_alone, TextureDescriptor};
 use super::super::values::StorageMode;
 use super::image_plan::{committed, facts};
 use super::texture_descriptor::APPLE;
 use crate::MetalLevel;
-use metal2vulkan::device::PaddedReadsPolicy;
 use metal2vulkan::metal::format::direct_format;
 use metal2vulkan::metal::PixelFormat as P;
 use metal2vulkan::metal::TextureType;
@@ -711,11 +709,10 @@ fn a_linear_image_aliases_only_metals_layout() {
         row_pitch: 80,
         array_pitch: 320,
     };
-    assert!(aliases(&single, Holds::Texels, 4096 + 256, 320, &image));
+    assert!(aliases(&single, 4096 + 256, 320, &image));
     // The binding off the image's alignment (RADV's 256 at a 16-byte offset).
     assert!(!aliases(
         &single,
-        Holds::Texels,
         4096 + 272,
         320,
         &LinearImage {
@@ -726,7 +723,6 @@ fn a_linear_image_aliases_only_metals_layout() {
     // The driver's own pitch where another was asked for (NVIDIA's explicit layouts).
     assert!(!aliases(
         &single,
-        Holds::Texels,
         4096,
         320,
         &LinearImage {
@@ -737,7 +733,6 @@ fn a_linear_image_aliases_only_metals_layout() {
     // Texels not at the binding, or memory past the buffer's.
     assert!(!aliases(
         &single,
-        Holds::Texels,
         4096,
         320,
         &LinearImage {
@@ -745,11 +740,10 @@ fn a_linear_image_aliases_only_metals_layout() {
             ..image
         }
     ));
-    assert!(!aliases(&single, Holds::Texels, 4096, 319, &image));
+    assert!(!aliases(&single, 4096, 319, &image));
     // Memory past the subresource, within the buffer's: no write through the image reaches it.
     assert!(aliases(
         &single,
-        Holds::Texels,
         4096,
         4096,
         &LinearImage {
@@ -759,10 +753,9 @@ fn a_linear_image_aliases_only_metals_layout() {
     ));
     // A subresource past the texels (lavapipe's rows rounded up to 4, of a texture of 3).
     let three = BufferLayout { rows: 3, ..single };
-    assert!(!aliases(&three, Holds::Texels, 4096, 320, &image));
+    assert!(!aliases(&three, 4096, 320, &image));
     assert!(aliases(
         &three,
-        Holds::Texels,
         4096,
         320,
         &LinearImage {
@@ -775,45 +768,24 @@ fn a_linear_image_aliases_only_metals_layout() {
         row_bytes: 68,
         ..single
     };
-    assert!(!aliases(&padded, Holds::Texels, 4096, 320, &image));
-    let renders = TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ;
-    let alias = PaddedReadsPolicy::Alias;
-    assert!(holding(&padded, renders, alias).is_err());
-    assert_eq!(holding(&single, renders, alias), Ok(Holds::Texels));
-    // A texture that only reads may hold the bytes between its rows, its last row's to its pitch
-    // among them, but none past them.
-    assert!(aliases(&padded, Holds::Padding, 4096, 320, &image));
-    assert!(!aliases(
-        &padded,
-        Holds::Padding,
-        4096,
-        400,
-        &LinearImage {
-            size: 400,
-            subresource: 400,
-            ..image
-        }
-    ));
-    assert!(!aliases(
-        &padded,
-        Holds::Padding,
-        4096,
-        320,
-        &LinearImage {
-            row_pitch: 96,
-            ..image
-        }
-    ));
+    assert!(!aliases(&padded, 4096, 320, &image));
+    // Whatever its usage: a texture that only reads takes a first move over them too.
+    for usage in [
+        TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ,
+        TextureUsage::SHADER_READ,
+    ] {
+        assert!(holding(&padded, usage).is_err(), "{usage:?}");
+        assert_eq!(holding(&single, usage), Ok(()), "{usage:?}");
+    }
     // One row has nothing between rows, but its pitch's padding past the texels.
     let row = BufferLayout {
         rows: 1,
         slice_pitch: 80,
         ..padded
     };
-    assert_eq!(holding(&row, renders, alias), Ok(Holds::Texels));
+    assert_eq!(holding(&row, TextureUsage::SHADER_READ), Ok(()));
     assert!(!aliases(
         &row,
-        Holds::Texels,
         4096,
         80,
         &LinearImage {
@@ -824,7 +796,6 @@ fn a_linear_image_aliases_only_metals_layout() {
     ));
     assert!(aliases(
         &row,
-        Holds::Texels,
         4096,
         80,
         &LinearImage {
@@ -839,10 +810,9 @@ fn a_linear_image_aliases_only_metals_layout() {
         ..single
     };
     let stacked = LinearImage { size: 960, ..image };
-    assert!(aliases(&slices, Holds::Texels, 4096, 960, &stacked));
+    assert!(aliases(&slices, 4096, 960, &stacked));
     assert!(!aliases(
         &slices,
-        Holds::Texels,
         4096,
         960,
         &LinearImage {
@@ -855,25 +825,14 @@ fn a_linear_image_aliases_only_metals_layout() {
         slice_pitch: 384,
         ..slices
     };
-    assert!(holding(&apart, renders, alias).is_err());
-    assert_eq!(
-        holding(&apart, TextureUsage::SHADER_READ, alias),
-        Ok(Holds::Padding)
-    );
-    assert!(aliases(
-        &apart,
-        Holds::Padding,
-        4096,
-        1088,
-        &LinearImage {
-            size: 1088,
-            array_pitch: 384,
-            ..image
-        }
-    ));
+    for usage in [
+        TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ,
+        TextureUsage::SHADER_READ,
+    ] {
+        assert!(holding(&apart, usage).is_err(), "{usage:?}");
+    }
     assert!(!aliases(
         &apart,
-        Holds::Texels,
         4096,
         1088,
         &LinearImage {
@@ -885,7 +844,6 @@ fn a_linear_image_aliases_only_metals_layout() {
     // A driver that reports the array's whole bytes as its first subresource's.
     assert!(!aliases(
         &slices,
-        Holds::Texels,
         4096,
         960,
         &LinearImage {
@@ -896,7 +854,6 @@ fn a_linear_image_aliases_only_metals_layout() {
     // A single slice ignores the array pitch a driver reports.
     assert!(aliases(
         &single,
-        Holds::Texels,
         4096,
         320,
         &LinearImage {
@@ -906,12 +863,11 @@ fn a_linear_image_aliases_only_metals_layout() {
     ));
 }
 
-/// A texture over padded rows is a shadow for the operations Vulkan lets write the padding: a
-/// render target names its image's layout transitions (its first move among them) and a render
-/// pass's load and store operations; a texture a shader writes names its layout transitions alone,
-/// as one that only reads does under `PaddedReadsPolicy::Shadow`, which says the policy asked it.
-/// A texture that only reads, under `PaddedReadsPolicy::Alias`, may hold the bytes between its
-/// rows: its usage as Metal reports it decides, `Unknown` a render target's.
+/// A texture over padded rows is a shadow, whatever its usage, naming the operations Vulkan lets
+/// write the padding: a render target its image's layout transitions (its first move among them)
+/// and a render pass's load and store operations; any other (one that only reads, or that a
+/// shader writes) its layout transitions alone. Its usage as Metal reports it decides, `Unknown`
+/// a render target's.
 #[test]
 fn a_padded_texture_s_shadow_names_what_may_write_its_padding() {
     let padded = BufferLayout {
@@ -922,49 +878,32 @@ fn a_padded_texture_s_shadow_names_what_may_write_its_padding() {
         rows: 4,
         slices: 1,
     };
-    let (alias, shadow) = (PaddedReadsPolicy::Alias, PaddedReadsPolicy::Shadow);
     let transitions = "its rows lie 80 bytes apart, 68 bytes of texels each: an image over them \
                        holds the bytes between them, which Vulkan lets its layout transitions \
                        read and write, its first move from the layout it is made in among them";
-    let reads = holding(&padded, TextureUsage::SHADER_READ, shadow).unwrap_err();
-    assert_eq!(
-        reads,
-        format!(
-            "{transitions} (the device's policy asks no image over them for a texture that only \
-             reads, `PaddedReadsPolicy::Shadow`)"
-        )
-    );
-    assert!(!reads.contains("render pass"), "{reads}");
-    let writes = TextureUsage::SHADER_READ | TextureUsage::SHADER_WRITE;
-    for policy in [alias, shadow] {
-        assert_eq!(
-            holding(&padded, writes, policy),
-            Err(transitions.to_owned())
-        );
-        let renders = TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ;
-        assert_eq!(
-            holding(&padded, renders, policy).unwrap_err(),
-            "its rows lie 80 bytes apart, 68 bytes of texels each: an image over them holds the \
-             bytes between them, which Vulkan lets its layout transitions read and write, and a \
-             render pass's load and store operations write back"
-        );
-    }
+    let passes = "its rows lie 80 bytes apart, 68 bytes of texels each: an image over them holds \
+                  the bytes between them, which Vulkan lets its layout transitions read and write, \
+                  and a render pass's load and store operations write back";
     for usage in [
         TextureUsage::SHADER_READ,
         TextureUsage::SHADER_READ | TextureUsage::PIXEL_FORMAT_VIEW,
-    ] {
-        assert!(only_reads(usage), "{usage:?}");
-        assert_eq!(holding(&padded, usage, alias), Ok(Holds::Padding));
-    }
-    for usage in [
-        TextureUsage::RENDER_TARGET,
+        TextureUsage::SHADER_READ | TextureUsage::SHADER_WRITE,
         TextureUsage::SHADER_WRITE,
         TextureUsage::SHADER_ATOMIC,
         TextureUsage::BLOCK_WRITES_ONLY,
+    ] {
+        assert_eq!(
+            holding(&padded, usage),
+            Err(transitions.to_owned()),
+            "{usage:?}"
+        );
+    }
+    for usage in [
+        TextureUsage::RENDER_TARGET,
+        TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ,
         effective_usage(TextureUsage::UNKNOWN),
     ] {
-        assert!(!only_reads(usage), "{usage:?}");
-        assert!(holding(&padded, usage, alias).is_err(), "{usage:?}");
+        assert_eq!(holding(&padded, usage), Err(passes.to_owned()), "{usage:?}");
     }
 }
 
@@ -1265,8 +1204,7 @@ fn a_linear_image_s_limits_name_what_it_lacks() {
 
 /// A texture over a buffer that takes no linear image says which need failed: the features the
 /// format's linear tiling lacks, the format query's refusal with the format, usage and flags,
-/// a limit with what it needs and what the device holds, an import that is not importable or
-/// dedicated only, a dedicated allocation.
+/// a limit with what it needs and what the device holds, an import that is not importable.
 #[test]
 fn a_refused_linear_image_names_the_need_that_failed() {
     use super::super::texture::LinearRefusal;
@@ -1287,47 +1225,36 @@ fn a_refused_linear_image_names_the_need_that_failed() {
     .unwrap();
     let usage = TextureUsage::SHADER_READ | TextureUsage::RENDER_TARGET;
     let plan = plan_image(&layout, usage, false, &facts).unwrap();
-    let describe = |refusal: LinearRefusal, host: bool| refusal.describe(&plan, host);
-    let lacks = describe(
-        LinearRefusal::Need(LinearNeed::Features {
-            format: Format::B8G8R8A8_UNORM,
-            features: FormatFeatureFlags2::COLOR_ATTACHMENT,
-        }),
-        true,
-    );
+    let describe = |refusal: LinearRefusal| refusal.describe(&plan);
+    let lacks = describe(LinearRefusal::Need(LinearNeed::Features {
+        format: Format::B8G8R8A8_UNORM,
+        features: FormatFeatureFlags2::COLOR_ATTACHMENT,
+    }));
     assert!(
         lacks.contains("B8G8R8A8_UNORM") && lacks.contains("COLOR_ATTACHMENT"),
         "{lacks}"
     );
-    let refused = describe(LinearRefusal::Need(LinearNeed::Image), true);
+    let refused = describe(LinearRefusal::Need(LinearNeed::Image));
     assert!(
-        refused.contains("B8G8R8A8_UNORM")
-            && refused.contains("COLOR_ATTACHMENT")
-            && refused.contains("for host allocations"),
+        refused.contains("B8G8R8A8_UNORM") && refused.contains("COLOR_ATTACHMENT"),
         "{refused}"
     );
-    let layers = describe(
-        LinearRefusal::Need(LinearNeed::ArrayLayers {
-            required: 2,
-            available: 1,
-        }),
-        true,
-    );
+    let layers = describe(LinearRefusal::Need(LinearNeed::ArrayLayers {
+        required: 2,
+        available: 1,
+    }));
     assert!(
-        layers.starts_with("2 array layers, where its linear images for host allocations")
+        layers.starts_with("2 array layers, where its linear images of")
             && layers.ends_with("hold 1"),
         "{layers}"
     );
-    let import = describe(
-        LinearRefusal::NotImportable(vk::ExternalMemoryFeatureFlags::DEDICATED_ONLY),
-        true,
-    );
+    let import = describe(LinearRefusal::NotImportable(
+        vk::ExternalMemoryFeatureFlags::DEDICATED_ONLY,
+    ));
     assert!(
         import.contains("importable false, dedicated only true"),
         "{import}"
     );
-    let dedicated = describe(LinearRefusal::Dedicated, false);
-    assert!(dedicated.contains("dedicated allocation"), "{dedicated}");
 }
 
 /// The committed profiles of the devices linear images were measured on.
@@ -1517,145 +1444,6 @@ fn iosurface_planes_lie_where_metal_puts_them() {
     ];
     for (case, want) in cases {
         assert_eq!(placed(case), want, "{case:?}");
-    }
-}
-
-/// A Metal texture over a no-copy buffer's `MTLBuffer` stands for an extended-range texture's
-/// image (`metal_texture::integer_twin`) only where it holds the image's bytes: the twin's own
-/// Vulkan format is the one the image holds Metal's bytes in, for `BGR10_XR`, `BGRA10_XR` and
-/// their sRGB twins; the two-plane formats, whose image holds both planes side by side, and every
-/// other format have none.
-#[test]
-fn an_extended_range_texture_s_metal_twin_holds_its_image_s_bytes() {
-    use super::super::metal_texture::integer_twin;
-    use metal2vulkan::metal::format::ExtendedRange;
-    for pf in [P::BGR10XR, P::BGR10XRSRGB, P::BGRA10XR, P::BGRA10XRSRGB] {
-        let range = ExtendedRange::of(pf).unwrap();
-        let twin = integer_twin(pf).unwrap();
-        assert_eq!(direct_format(twin), Some(range.raw_format()), "{pf:?}");
-    }
-    for pf in [
-        P::RGB10A82PXR10,
-        P::RGB10A82PXR10SRGB,
-        P::RGBA8Unorm,
-        P::R32Uint,
-    ] {
-        assert_eq!(integer_twin(pf), None, "{pf:?}");
-    }
-}
-
-/// A Metal texture over a no-copy buffer's `MTLBuffer` stands for a 2D texture of one level and
-/// sample, and for a 2D array whose slices lie as Metal's linear call lays them out: each
-/// `bytesPerRow` x height, rounded up to 128 bytes, after the one before. An array of another
-/// slice stride, and an image of two levels, keep their shadow with the reason the notice names.
-#[test]
-fn a_metal_texture_stands_for_an_array_at_metal_s_slice_stride() {
-    use super::super::metal_texture::MetalOver;
-    let (_, desc, device) = committed().into_iter().next().unwrap();
-    let facts = facts(&desc, &device);
-    let usage = TextureUsage::SHADER_READ | TextureUsage::RENDER_TARGET;
-    let plan = |texture_type: TextureType, side: u64, slices: u64, levels: u64| {
-        let layout = TextureDescriptor {
-            pixel_format: P::RGBA8Unorm,
-            texture_type,
-            width: side,
-            height: side,
-            mipmap_level_count: levels,
-            array_length: slices,
-            usage,
-            ..TextureDescriptor::default()
-        }
-        .check(APPLE)
-        .unwrap();
-        plan_image(&layout, usage, false, &facts).unwrap()
-    };
-    let array = TextureType::Type2DArray;
-    // 8x8 rows of 32 bytes: 256-byte slices, already a multiple of 128.
-    assert!(MetalOver::of(&plan(array, 8, 2, 1), 32, 256).is_ok());
-    // 4x4 rows of 16 bytes: 64-byte images, slices 128 bytes apart.
-    assert!(MetalOver::of(&plan(array, 4, 2, 1), 16, 128).is_ok());
-    let elsewhere = "its slices lie otherwise than those of the 2D array Metal's linear call \
-                     makes over a buffer";
-    assert_eq!(MetalOver::of(&plan(array, 4, 2, 1), 16, 64), Err(elsewhere));
-    assert_eq!(
-        MetalOver::of(&plan(array, 8, 2, 1), 32, 384),
-        Err(elsewhere)
-    );
-    // A 2D texture, and a one-slice array, whatever the slice stride.
-    assert!(MetalOver::of(&plan(TextureType::Type2D, 8, 1, 1), 32, 0).is_ok());
-    assert!(MetalOver::of(&plan(array, 8, 1, 1), 32, 256).is_ok());
-    assert_eq!(
-        MetalOver::of(&plan(TextureType::Type2D, 8, 1, 2), 32, 256),
-        Err("its image is not 2D of one level and sample, as a Metal texture over a buffer is")
-    );
-}
-
-/// No Metal texture over a no-copy buffer's `MTLBuffer` stands for a depth or stencil texture
-/// (a planar surface's): Metal makes no linear texture of such a format and aborts the process when
-/// asked for one (an M4 under MoltenVK), so the texture keeps its aspect shadow, with the reason
-/// the notice names.
-#[test]
-fn no_metal_texture_stands_for_a_depth_or_stencil_texture() {
-    use super::super::metal_texture::MetalOver;
-    let (_, desc, device) = committed().into_iter().next().unwrap();
-    let facts = facts(&desc, &device);
-    let usage = TextureUsage::SHADER_READ | TextureUsage::RENDER_TARGET;
-    for (pf, unit) in [
-        (P::Depth16Unorm, 2u64),
-        (P::Depth32Float, 4),
-        (P::Depth32FloatStencil8, 4),
-        (P::Stencil8, 1),
-        (P::X32Stencil8, 1),
-    ] {
-        let layout = TextureDescriptor {
-            pixel_format: pf,
-            width: 4,
-            height: 4,
-            usage,
-            ..TextureDescriptor::default()
-        }
-        .check(APPLE)
-        .unwrap();
-        let plan = plan_image(&layout, usage, false, &facts).unwrap();
-        assert_eq!(
-            MetalOver::of(&plan, (4 * unit).next_multiple_of(16), 0),
-            Err("Metal makes no linear texture of a depth or stencil format"),
-            "{pf:?}"
-        );
-    }
-}
-
-/// A Metal texture over a 4:2:2 texture's bytes is of the carrier's own Metal format,
-/// `RG8Unorm`, whose Vulkan format the carrier is: Metal makes no linear texture of a 4:2:2
-/// format (it asserts, EV APX2-l2-mvk4), and `RG8Unorm`'s 2-byte texels are the same bytes.
-#[test]
-fn a_metal_texture_over_four_two_two_texels_is_the_carrier_s() {
-    use super::super::chroma_pairs::{CARRIER, CARRIER_PIXEL_FORMAT};
-    use super::super::metal_texture::MetalOver;
-    assert_eq!(direct_format(CARRIER_PIXEL_FORMAT), Some(CARRIER));
-    let (_, desc, device) = committed().into_iter().next().unwrap();
-    let facts = facts(&desc, &device);
-    let usage = TextureUsage::SHADER_READ;
-    for pf in [P::GBGR422, P::BGRG422] {
-        let layout = TextureDescriptor {
-            pixel_format: pf,
-            width: 16,
-            height: 4,
-            usage,
-            ..TextureDescriptor::default()
-        }
-        .check(APPLE)
-        .unwrap();
-        let plan = plan_image(&layout, usage, false, &facts).unwrap();
-        assert_eq!(plan.format, CARRIER, "{pf:?}");
-        // One slice: the slice stride is not looked at.
-        let over = MetalOver::of(&plan, 64, 0).unwrap();
-        let named = format!("MTLPixelFormat {} of 16x4", CARRIER_PIXEL_FORMAT.as_raw());
-        assert!(
-            over.describe().starts_with(&named),
-            "{pf:?}: {}",
-            over.describe()
-        );
     }
 }
 

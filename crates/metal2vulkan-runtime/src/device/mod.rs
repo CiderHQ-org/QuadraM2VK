@@ -939,10 +939,6 @@ pub(super) struct Parts {
     /// `adopt.rs`, where the consumer lists it), outside `enabled`'s vocabulary: its render
     /// pipelines are linked from libraries (`pipeline/libraries.rs`).
     pub(super) graphics_pipeline_library: bool,
-    /// It enables `VK_EXT_metal_objects` (`create.rs`), outside `enabled`'s vocabulary: textures
-    /// over no-copy buffers are Metal textures over their imports' `MTLBuffer`s
-    /// (`metal_texture.rs`).
-    pub(super) metal_objects: bool,
     /// It enables `VK_EXT_pipeline_creation_feedback` (`create.rs`), outside `enabled`'s
     /// vocabulary, wherever listed: each making of a program's pipeline reads whether its cache
     /// held the pipeline (`shader_cache/mod.rs`).
@@ -996,7 +992,6 @@ impl Device {
             host_image_copy,
             linear_color_attachment,
             graphics_pipeline_library,
-            metal_objects,
             creation_feedback,
             dma_buf,
             dma_buf_images,
@@ -1345,8 +1340,6 @@ impl Device {
                 &enabled,
                 super::buffer::usage(device_address),
                 &loader_word,
-                metal_objects,
-                instance.sink().is_some(),
                 dma_buf,
                 dma_buf_images,
             )

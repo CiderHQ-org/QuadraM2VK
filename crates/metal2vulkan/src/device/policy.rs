@@ -3,6 +3,7 @@
 
 use crate::device::profile::{FramebufferFetchPolicy, GuestIsolation, HandleDomain, PointerDomain};
 
+/// Policy inputs of `Device::new`. Every field but `decoded_texels`, `heap_compression`,
 /// `completion`, `tile_store`, `resolve` and `batch_order` can change emitted code, so the profile
 /// carries it (containment as the encoding it selects) and its fingerprint covers it; those six
 /// are the runtime's alone (the texels of a carried texture's decoded twin, a heap's compressed
@@ -98,6 +99,10 @@ impl DevicePolicy {
     /// emulation runs, native device sampling (a two-plane YCbCr texture's samples among them),
     /// native device maths, the device's own texel
     /// conversions, native half rounding, the device's NaN and minimum and maximum, the device's
+    /// rounding order, the device's blend of a `half` output into a 16-bit float attachment,
+    /// compact codes in a carried texture's decoded twin, the driver's compressed image of a
+    /// heap's texture Metal keeps compressed, command buffers ready together in one kernel
+    /// submission, the device's load and store of a signed normalized or `RGB9E5Float` color
     /// attachment, the device's resolve of a multisampled color attachment, and batches of one
     /// queue ordered by their ends where the driver runs them one after another.
     pub const UNTRUSTED: DevicePolicy = DevicePolicy {
@@ -129,6 +134,8 @@ impl DevicePolicy {
     /// NaN and minimum and maximum ([`NanMinMaxPolicy::Exact`]), its rounding order
     /// ([`RoundingOrderPolicy::Exact`]), its 16-bit float blend of a `half` output
     /// ([`HalfBlendPolicy::Exact`]), its filter of a two-plane YCbCr texture
+    /// ([`YCbCrFilterPolicy::Exact`]), its decode of a carried texture's texels
+    /// ([`DecodedTexelsPolicy::Exact`]), a heap's texture whose bytes alias the heap's
     /// as written ([`HeapCompressionPolicy::Uncompressed`]), each command buffer seen complete
     /// at its own end ([`CompletionPolicy::Exact`]), a loaded attachment's texels as its tile
     /// store leaves them ([`TileStorePolicy::Exact`]), its multisample color resolve

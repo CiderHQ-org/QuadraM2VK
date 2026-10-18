@@ -13,12 +13,14 @@
 //! as a consumer does: the runtime runs no udmabuf code.
 //!
 //! RADV refuses the pointer of such memory and imports the chunks, which the runtime counts
-//! (`WorkCounts::dma_buf_imports`, and `dma_buf_sparse_buffers` for a buffer of several), and
-//! makes each texture over them an image of `DRM_FORMAT_MOD_LINEAR` over a dma-buf of its own
-//! pages, which it asks the source for too (`dma_buf_images`), or its shadow where it makes none
-//! (`dma_buf_image_fallbacks`); NVIDIA and lavapipe import the pointer, never call the source and
-//! count nothing. A driver not measured has its answers printed. Where `/dev/udmabuf` cannot be
-//! opened each test says so and passes without running.
+//! (`WorkCounts::dma_buf_imports`, and `dma_buf_sparse_buffers` for a buffer of several). A
+//! texture over a no-copy buffer of them is a shadow of its bytes, as over any host pages, and
+//! asks the source for nothing; a texture placed in a no-copy heap over them is an image of
+//! `DRM_FORMAT_MOD_LINEAR` over a dma-buf of its own pages, which it asks the source for too
+//! (`dma_buf_images`), or its shadow where it makes none (`dma_buf_image_fallbacks`). NVIDIA and
+//! lavapipe import the pointer, never call the source and count nothing. A driver not measured
+//! has its answers printed. Where `/dev/udmabuf` cannot be opened each test says so and passes
+//! without running.
 
 use super::first_use::{read_mark, release, scheduled, Busy, ENDED};
 use super::host_memory::{
@@ -814,11 +816,11 @@ fn shared_memory_is_refused_without_a_working_source() {
 }
 
 /// The source runs with no lock of the runtime's held: one that makes a buffer of the device's
-/// own and a no-copy buffer of private memory before it answers, for a no-copy buffer, a texture
-/// over it and a view of that texture in another format (each texture's image over a dma-buf of
-/// its own pages), and for a rebind of one onto memfd memory, returns, and each is made over its
-/// chunks (RADV) or over the pointer, the source uncalled (elsewhere). The rebound buffer's bytes
-/// are then the view's.
+/// own and a no-copy buffer of private memory before it answers, for a no-copy buffer, a no-copy
+/// heap and a texture placed in it (its image over a dma-buf of its own pages), and for a rebind
+/// of a buffer onto memfd memory, returns, and each is made over its chunks (RADV) or over the
+/// pointer, the source uncalled (elsewhere). A texture over the no-copy buffer, a shadow of its
+/// bytes, asks it nothing. The rebound buffer's bytes are then the view's.
 #[test]
 fn the_source_runs_with_no_runtime_lock_held() {
     const TEST: &str = "dma-buf source calls the runtime";
@@ -830,8 +832,8 @@ fn the_source_runs_with_no_runtime_lock_held() {
         let queue = device.new_command_queue().unwrap();
         let ram = Memfd::new(8 * page);
         let view = ram.view(&[(4 * page, 2 * page)]);
-        let reentrant = |calls: &Calls| -> DmaBufSource {
-            let inner = ram.source(&view, calls);
+        let reentrant = |ram: &Memfd, view: &View, calls: &Calls| -> DmaBufSource {
+            let inner = ram.source(view, calls);
             let device = device.clone();
             Arc::new(move |request| {
                 let own = device.new_buffer(4096, ResourceOptions::default()).unwrap();
@@ -852,7 +854,8 @@ fn the_source_runs_with_no_runtime_lock_held() {
         };
         let calls = Calls::default();
         let before = dma_buf_counts(device);
-        let buffer = no_copy(device, &view, 0, 2 * page, reentrant(&calls)).unwrap();
+        let source = reentrant(&ram, &view, &calls);
+        let buffer = no_copy(device, &view, 0, 2 * page, source).unwrap();
         check_route(
             TEST,
             device,
@@ -861,15 +864,48 @@ fn the_source_runs_with_no_runtime_lock_held() {
             before,
             Some(1),
         );
-        // A texture over it, and a view of another format: each image's call (RADV) too.
+        // A texture over it, a shadow, asks the source nothing.
         let counted = image_counts(device);
+        let asked = calls.lock().unwrap().len();
         let texture = buffer
             .new_texture(&read_only(PixelFormat::BGRA8Unorm, 64, 8), 0, 256)
             .unwrap();
-        let viewed = texture.new_texture_view(PixelFormat::RGBA8Unorm).unwrap();
-        check_images(TEST, device, counted, 2, 0);
-        drop((viewed, texture));
+        check_images(TEST, device, counted, 0, 0);
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            asked,
+            "{TEST}: the texture's calls"
+        );
+        drop(texture);
         drop(buffer);
+        // A heap over other pages, and a texture placed in it: the heap's call, and the texture
+        // image's (RADV).
+        let heap_size = 1 << 20;
+        let heap_ram = Memfd::new(heap_size);
+        let heap_view = heap_ram.view(&[(0, heap_size)]);
+        let calls = Calls::default();
+        let before = dma_buf_counts(device);
+        let source = reentrant(&heap_ram, &heap_view, &calls);
+        let descriptor = HeapDescriptor::new(HeapType::Placement, heap_size as u64, shared());
+        // SAFETY: the view outlives the heap, and the source makes dma-bufs of its pages.
+        let heap = unsafe {
+            device.new_heap_with_bytes_no_copy(
+                HostMemory::with_dma_buf(heap_view.pointer(0), source),
+                &descriptor,
+                None,
+                None,
+            )
+        }
+        .unwrap();
+        let pages = (heap_view.at, heap_size as u64);
+        check_route(TEST, device, &calls, pages, before, None);
+        let mut placed = read_only(PixelFormat::RGBA8Unorm, 64, 64);
+        placed.resource_options = shared();
+        let counted = image_counts(device);
+        let texture = heap.new_texture_at_offset(&placed, 0).unwrap();
+        check_images(TEST, device, counted, 1, 0);
+        drop(texture);
+        drop(heap);
         // A rebind of a buffer over private memory onto the view.
         let private = Mapping::anonymous(2 * page);
         // SAFETY: the mapping outlives the buffer.
@@ -889,7 +925,7 @@ fn the_source_runs_with_no_runtime_lock_held() {
         // SAFETY: the view outlives the buffer, and no other thread encodes or commits.
         unsafe {
             buffer.rebind_bytes_no_copy(
-                HostMemory::with_dma_buf(view.pointer(0), reentrant(&calls)),
+                HostMemory::with_dma_buf(view.pointer(0), reentrant(&ram, &view, &calls)),
                 None,
                 None,
             )
@@ -1196,8 +1232,8 @@ fn a_sparse_buffer_s_binding_waits_for_no_gpu_work() {
     });
 }
 
-/// The device's counts of textures' images made over dma-bufs of their own pages, and of textures
-/// over dma-buf pages that took the path such a texture took before (a shadow of the bytes).
+/// The device's counts of heap textures' images made over dma-bufs of their own pages, and of
+/// heap textures over dma-buf pages that took their shadow instead.
 fn image_counts(device: &Device) -> (u64, u64) {
     let counts = device.work_counts();
     (counts.dma_buf_images, counts.dma_buf_image_fallbacks)
@@ -1206,7 +1242,7 @@ fn image_counts(device: &Device) -> (u64, u64) {
 /// Check what making textures over dma-buf pages counted since `before`: `images` images and
 /// `fallbacks` fallbacks where the device imports dma-bufs (RADV, whose list holds
 /// `VK_EXT_image_drm_format_modifier` and `VK_EXT_queue_family_foreign`); none where it imports
-/// the pointer (NVIDIA, lavapipe), whose textures take the path they took before.
+/// the pointer (NVIDIA, lavapipe), whose heap textures are images bound to the pointer's import.
 fn check_images(test: &str, device: &Device, before: (u64, u64), images: u64, fallbacks: u64) {
     let now = image_counts(device);
     let counted = (now.0 - before.0, now.1 - before.1);
@@ -1234,10 +1270,10 @@ fn read_only(pf: PixelFormat, width: u64, height: u64) -> TextureDescriptor {
 
 /// Check the source's requests `asked`, made as a texture whose `texels` are `(pitch, row, rows)`
 /// (rows `pitch` bytes apart, `row` bytes each) was made at `offset` of a view starting `at`:
-/// where the device made its image over a dma-buf of its own pages (`image`, on RADV), one request,
-/// for the page its texels start in and the pages from there its image's memory covers, in one
-/// chunk (its granule its length), one chunk answered; none where it took its shadow, or where the
-/// device imports the pointer.
+/// where the device made its image over a dma-buf of its own pages (`image`, a heap texture on
+/// RADV), one request, for the page its texels start in and the pages from there its image's
+/// memory covers, in one chunk (its granule its length), one chunk answered; none where it took
+/// its shadow, or where the device imports the pointer.
 fn check_texture_request(
     test: &str,
     device: &Device,
@@ -1273,27 +1309,18 @@ fn check_texture_request(
 }
 
 /// Textures over a no-copy buffer of memfd memory (the consumer's display-path surfaces), rows 256
-/// bytes apart: where the device imports the buffer's pages as dma-bufs (RADV), each whose rows
-/// are 256 bytes of texels is an image of `DRM_FORMAT_MOD_LINEAR` bound to a dedicated import of a
-/// dma-buf of its own pages, which the source is asked for once, counted, its plane at the texels'
-/// offset in their first page: over three pages, a page into the buffer; 256 bytes into a page;
-/// one a shader writes, whose modifier's storage features above bit 31 the device reports only in
-/// the 64-bit list (`STORAGE_*_WITHOUT_FORMAT`, which the optimal tiling has). One over one page,
-/// whose rows of 240 bytes of texels have 16 of the file's between them, and one 64 bytes into a
-/// page, of 64-byte rows, take their shadows instead (an image over them would hold the bytes
-/// between the rows, which Vulkan lets a render pass write back), the source not called, counted
-/// as fallbacks. Each reads the bytes the CPU wrote; the CPU's later writes, with no call between, are
-/// what the next command buffer reads (the image rests in `GENERAL` after its one acquire from the
-/// foreign queue family); a blit's write into it lands in the file's pages at the texels' places,
-/// the padding past each row keeping the CPU's bytes; the same texture made again asks the driver
-/// no format's modifier features (`WorkCounts::modifier_feature_queries`, which RADV's images
-/// ask). The one over three pages, `BGRA8Unorm` made without `PixelFormatView` usage, is read and
-/// written through a view in `RGBA8Unorm` (`texture/view_shadow.rs`), an image over a dma-buf of
-/// its own pages too, counted, whose write the texture then reads. Where the device imports the
-/// pointer (NVIDIA, lavapipe) the textures take the path they took before: the source uncalled,
-/// nothing counted.
+/// bytes apart, are shadows of the buffer's bytes on every device (`shadowed-texture`), as over any
+/// host pages: none asks the source, none counts as an image or a fallback, and making one asks
+/// the driver no format's modifier features (`WorkCounts::modifier_feature_queries`). Over three
+/// pages, a page into the buffer; over one page, whose rows of 240 bytes of texels have 16 of the
+/// file's between them; 256 bytes into a page; 64 bytes into a page, of 64-byte rows; and one a
+/// shader writes. Each reads the bytes the CPU wrote; the CPU's later writes, with no call between,
+/// are what the next command buffer reads; a blit's write into it lands in the file's pages at the
+/// texels' places, the padding past each row keeping the CPU's bytes. The one over three pages,
+/// `BGRA8Unorm` made without `PixelFormatView` usage, is read and written through a view in
+/// `RGBA8Unorm` (`texture/view_shadow.rs`), whose write the texture then reads.
 #[test]
-fn a_texture_over_dma_buf_pages_is_an_image_over_its_own_pages() {
+fn a_texture_over_dma_buf_pages_is_a_shadow_of_them() {
     const TEST: &str = "dma-buf texture";
     if !udmabuf_openable(TEST) {
         return;
@@ -1311,8 +1338,7 @@ fn a_texture_over_dma_buf_pages_is_an_image_over_its_own_pages() {
         let buffer = no_copy(device, &pages, 0, length, ram.source(&pages, &calls)).unwrap();
         check_route(TEST, device, &calls, (at, length as u64), before, Some(1));
         let pitch = 256;
-        // What, its descriptor, offset, whether RADV makes its image over a dma-buf of its own
-        // pages, and whether it is used through a view.
+        // What, its descriptor, offset, and whether it is used through a view.
         let writable = |pf, width, height| {
             let mut descriptor = read_only(pf, width, height);
             descriptor.usage |= TextureUsage::SHADER_WRITE;
@@ -1324,20 +1350,17 @@ fn a_texture_over_dma_buf_pages_is_an_image_over_its_own_pages() {
                 read_only(PixelFormat::RGBA8Unorm, 60, 16),
                 0,
                 false,
-                false,
             ),
             (
                 "three pages",
                 read_only(PixelFormat::BGRA8Unorm, 64, 40),
                 page,
                 true,
-                true,
             ),
             (
                 "256 bytes in",
                 read_only(PixelFormat::RGBA8Unorm, 64, 20),
                 5 * page + 256,
-                true,
                 false,
             ),
             (
@@ -1345,18 +1368,16 @@ fn a_texture_over_dma_buf_pages_is_an_image_over_its_own_pages() {
                 read_only(PixelFormat::RGBA8Unorm, 16, 8),
                 7 * page + 64,
                 false,
-                false,
             ),
             (
                 "shader write",
                 writable(PixelFormat::RGBA8Unorm, 64, 16),
                 0,
-                true,
                 false,
             ),
         ];
         for (k, case) in cases.into_iter().enumerate() {
-            let (what, descriptor, offset, image, view) = case;
+            let (what, descriptor, offset, view) = case;
             let test = format!("{TEST}: {what}");
             let size = (descriptor.width, descriptor.height);
             let (row, rows) = (4 * size.0 as usize, size.1 as usize);
@@ -1364,18 +1385,27 @@ fn a_texture_over_dma_buf_pages_is_an_image_over_its_own_pages() {
             let counted = image_counts(device);
             let earlier = counting(pitch * rows, 20 + k);
             ram.whole.write(2 * page + offset, &earlier);
+            let queries = device.work_counts().modifier_feature_queries;
             let texture = buffer
                 .new_texture(&descriptor, offset as u64, pitch as u64)
                 .unwrap();
-            check_images(&test, device, counted, u64::from(image), u64::from(!image));
+            assert_eq!(
+                device.work_counts().modifier_feature_queries,
+                queries,
+                "{test}: the texture asked the driver's modifier features"
+            );
+            // SAFETY: the handle is only compared, while the texture lives.
+            let bound = unsafe { texture.vk_image() }.is_some();
+            assert!(!bound, "{test}: an image bound to host pages");
+            check_images(&test, device, counted, 0, 0);
             let asked = calls.lock().unwrap()[asked_before..].to_vec();
             let texels = (pitch, row, rows);
-            check_texture_request(&test, device, &asked, at, offset, texels, image);
+            check_texture_request(&test, device, &asked, at, offset, texels, false);
             let target = match view {
                 true => {
                     let counted = image_counts(device);
                     let viewed = texture.new_texture_view(PixelFormat::RGBA8Unorm).unwrap();
-                    check_images(&test, device, counted, 1, 0);
+                    check_images(&test, device, counted, 0, 0);
                     viewed
                 }
                 false => texture.clone(),
@@ -1413,38 +1443,17 @@ fn a_texture_over_dma_buf_pages_is_an_image_over_its_own_pages() {
                 );
             }
             drop((target, texture));
-            eprintln!(
-                "{test}: on {}: {}",
-                device.name(),
-                match image_counts(device).0 - counted.0 {
-                    0 => "the path taken before",
-                    _ => "an image over a dma-buf of its own pages",
-                }
-            );
-            // A format's modifier features are asked of the driver once: the same texture made
-            // again asks none.
-            let queries = device.work_counts().modifier_feature_queries;
-            drop(
-                buffer
-                    .new_texture(&descriptor, offset as u64, pitch as u64)
-                    .unwrap(),
-            );
-            assert_eq!(
-                device.work_counts().modifier_feature_queries,
-                queries,
-                "{test}: the same texture made again asked the driver's modifier features"
-            );
         }
         drop(buffer);
     });
 }
 
-/// A texture's image over a dma-buf of its own pages and its buffer's import of the same pages
-/// are one resource to hazard tracking (the texture's image takes the buffer's identity): in one
-/// command buffer, a blit's write of the buffer is what the next encoder's copy out of the texture
-/// reads, and a copy into the texture is what the next encoder's copy out of the buffer reads;
-/// and so across two command buffers on one queue. Where the device imports the pointer the
-/// texture is what it was before, and the same holds.
+/// A texture over a no-copy buffer of dma-buf pages, a shadow of the buffer's bytes, is ordered
+/// with the buffer's other uses (its copy in reads the buffer's bytes, its copy back writes them):
+/// in one command buffer, a blit's write of the buffer is what the next encoder's copy out of the
+/// texture reads, and a copy into the texture is what the next encoder's copy out of the buffer
+/// reads; and so across two command buffers on one queue. Nothing counts as an image or a
+/// fallback. Where the device imports the pointer the same holds.
 #[test]
 fn a_buffer_and_its_texture_over_dma_buf_pages_order_their_writes() {
     const TEST: &str = "dma-buf texture and buffer";
@@ -1466,7 +1475,7 @@ fn a_buffer_and_its_texture_over_dma_buf_pages_order_their_writes() {
         let texture = buffer
             .new_texture(&read_only(PixelFormat::RGBA8Unorm, size.0, size.1), 0, 256)
             .unwrap();
-        check_images(TEST, device, counted, 1, 0);
+        check_images(TEST, device, counted, 0, 0);
         let out = device
             .new_buffer(bytes as u64, ResourceOptions::shared())
             .unwrap();
@@ -1517,14 +1526,14 @@ fn a_buffer_and_its_texture_over_dma_buf_pages_order_their_writes() {
     });
 }
 
-/// Where the source fails for a texture's pages (it answers the buffer's request, then none), the
-/// texture over dma-buf pages takes the path it took before: a shadow of the bytes, counted as a
-/// fallback and announced once (`shadowed-texture`, naming the dma-buf pages and the source's
-/// failure); the source asked once for it. The shadow reads the CPU's bytes, and a blit's write
-/// through it reaches them. Where the device imports the pointer, nothing is asked or counted.
+/// Where the source fails for a heap texture's pages (it answers the heap's request, then none),
+/// the texture placed in a no-copy heap over dma-buf pages takes its shadow of the heap's bytes,
+/// counted as a fallback and announced once (`shadowed-texture`, naming the dma-buf pages and the
+/// source's failure); the source asked once for it. A blit's write through it reads back. Where
+/// the device imports the pointer, nothing is asked or counted.
 #[test]
-fn a_texture_over_dma_buf_pages_takes_its_shadow_where_the_source_fails() {
-    const TEST: &str = "dma-buf texture fallback";
+fn a_heap_texture_over_dma_buf_pages_takes_its_shadow_where_the_source_fails() {
+    const TEST: &str = "dma-buf heap texture fallback";
     if !udmabuf_openable(TEST) {
         return;
     }
@@ -1533,12 +1542,11 @@ fn a_texture_over_dma_buf_pages_takes_its_shadow_where_the_source_fails() {
     {
         let device = validated_device(TEST_DEVICE, &messages, cache.path()).unwrap();
         let page = host_page();
+        let size = 1 << 20;
         let queue = device.new_command_queue().unwrap();
-        let length = 2 * page;
-        let ram = Memfd::new(4 * page);
-        let view = ram.view(&[(page, length)]);
-        let earlier = counting(length, 17);
-        ram.whole.write(page, &earlier);
+        let ram = Memfd::new(size + 2 * page);
+        let view = ram.view(&[(2 * page, size)]);
+        ram.whole.write(2 * page, &counting(size, 17));
         let calls = Calls::default();
         let inner = ram.source(&view, &calls);
         let answered = Arc::new(Mutex::new(0usize));
@@ -1551,12 +1559,27 @@ fn a_texture_over_dma_buf_pages_takes_its_shadow_where_the_source_fails() {
                 _ => Err(std::io::Error::other("no dma-buf for a texture")),
             }
         });
-        let buffer = no_copy(&device, &view, 0, length, once).unwrap();
+        let descriptor = HeapDescriptor::new(HeapType::Placement, size as u64, shared());
+        // SAFETY: the view outlives the heap, and the source makes dma-bufs of its pages.
+        let heap = unsafe {
+            device.new_heap_with_bytes_no_copy(
+                HostMemory::with_dma_buf(view.pointer(0), once),
+                &descriptor,
+                None,
+                None,
+            )
+        }
+        .unwrap();
+        let extent = (64, 64);
+        let mut texture_descriptor = read_only(PixelFormat::RGBA8Unorm, extent.0, extent.1);
+        texture_descriptor.resource_options = shared();
+        let answer = device
+            .heap_texture_size_and_align(&texture_descriptor)
+            .unwrap();
+        let offset = answer.align.max(page as u64) * 3;
         let counted = image_counts(&device);
-        let size = (64, 32);
-        let bytes = (4 * size.0 * size.1) as usize;
-        let texture = buffer
-            .new_texture(&read_only(PixelFormat::RGBA8Unorm, size.0, size.1), 0, 256)
+        let texture = heap
+            .new_texture_at_offset(&texture_descriptor, offset)
             .unwrap();
         check_images(TEST, &device, counted, 0, 1);
         let notices: Vec<_> = messages
@@ -1579,17 +1602,14 @@ fn a_texture_over_dma_buf_pages_takes_its_shadow_where_the_source_fails() {
             Some(false) => assert_eq!(*answered.lock().unwrap(), 0, "{TEST}: called"),
             None => eprintln!("{TEST}: on {}: notices {notices:?}", device.name()),
         }
-        assert!(
-            blit_texels(&queue, &texture, size, 4) == earlier[..bytes],
-            "{TEST}: the CPU's bytes"
-        );
+        let bytes = (4 * extent.0 * extent.1) as usize;
         let texels = counting(bytes, 61);
-        blit_into(&queue, &texture, size, 4, &texels);
+        blit_into(&queue, &texture, extent, 4, &texels);
         assert!(
-            ram.whole.read(page..page + bytes) == texels,
-            "{TEST}: the blit's write"
+            blit_texels(&queue, &texture, extent, 4) == texels,
+            "{TEST}: the blit's write reads back"
         );
-        drop((texture, buffer));
+        drop((texture, heap));
     }
     let failing = messages.take();
     assert!(
@@ -1687,11 +1707,12 @@ fn a_no_copy_heap_s_texture_over_dma_buf_pages_is_an_image_over_its_own_pages() 
     });
 }
 
-/// A rebind of bytes over dma-buf pages to other such pages makes each texture's image again over
-/// a dma-buf of its own new pages (RADV), counted, the new source asked once for the bytes and
-/// once for each texture: a no-copy buffer's texture, and a no-copy heap's. Each then reads the
-/// new pages' bytes, and a blit's write through it lands there, the old pages keeping theirs.
-/// Elsewhere the textures are made again as before, nothing counted or asked.
+/// A rebind of bytes over dma-buf pages to other such pages: a no-copy buffer's texture, a shadow
+/// of the bytes, copies the new pages' texels, the new source asked once for the bytes alone,
+/// nothing counted; a no-copy heap's texture is made again as an image over a dma-buf of its own
+/// new pages (RADV), counted, the new source asked once for the bytes and once for the texture.
+/// Each then reads the new pages' bytes, and a blit's write through it lands there, the old pages
+/// keeping theirs. Elsewhere the textures are made again as before, nothing counted or asked.
 #[test]
 fn a_rebind_makes_textures_over_dma_buf_pages_again_over_the_new_pages() {
     const TEST: &str = "dma-buf texture rebind";
@@ -1729,10 +1750,9 @@ fn a_rebind_makes_textures_over_dma_buf_pages_again_over_the_new_pages() {
             )
         }
         .unwrap();
-        check_images(TEST, device, counted, 1, 0);
-        let expected = if radv { 2 } else { 0 };
+        check_images(TEST, device, counted, 0, 0);
         let asked = calls.lock().unwrap().len();
-        assert_eq!(asked, expected, "{TEST}: the new source's calls");
+        assert_eq!(asked, usize::from(radv), "{TEST}: the new source's calls");
         assert!(
             blit_texels(&queue, &texture, size, 4) == after[..bytes],
             "{TEST}: the texture reads the new pages"
@@ -1774,6 +1794,7 @@ fn a_rebind_makes_textures_over_dma_buf_pages_again_over_the_new_pages() {
         .unwrap();
         check_images(TEST, device, counted, 1, 0);
         let asked = calls.lock().unwrap().len();
+        let expected = if radv { 2 } else { 0 };
         assert_eq!(asked, expected, "{TEST}: the heap's new source's calls");
         let texels = counting(heap_bytes, 131);
         blit_into(&queue, &texture, extent, 4, &texels);
@@ -1798,9 +1819,8 @@ fn a_rebind_makes_textures_over_dma_buf_pages_again_over_the_new_pages() {
 
 /// A rebind between pages a source answers in one chunk and pages it answers a chunk per granule
 /// (a sparse buffer, RADV), both ways, of a no-copy buffer 80 bytes into its page with a texture
-/// over it whose rows are 240 bytes apart: RADV lays no `DRM_FORMAT_MOD_LINEAR` plane there, so
-/// the texture is a shadow of the bytes, its copies planned at the bytes' offset in their
-/// `VkBuffer`. Either buffer holds the bytes at their offset in their page, so each rebind is made
+/// over it whose rows are 240 bytes apart: the texture is a shadow of the bytes, as every texture
+/// over a no-copy buffer's pages, its copies planned at the bytes' offset in their `VkBuffer`. Either buffer holds the bytes at their offset in their page, so each rebind is made
 /// and the texture reads each new pages' texels. Elsewhere the pointer is imported each time. Then
 /// a rebind onto anonymous memory, whose pointer every device imports: made, the texture reading
 /// its texels, or refused (`NotImplemented`, `RebindTextures`) where that import holds the bytes
@@ -1833,7 +1853,7 @@ fn a_rebind_between_one_chunk_and_several_keeps_a_texture_s_texels() {
         let counted = image_counts(device);
         let descriptor = read_only(PixelFormat::RGBA8Unorm, size.0, size.1);
         let texture = buffer.new_texture(&descriptor, 0, pitch).unwrap();
-        check_images(TEST, device, counted, 0, 1);
+        check_images(TEST, device, counted, 0, 0);
         assert!(blit_texels(&queue, &texture, size, 4) == fills[0][offset..offset + bytes]);
         for (at, several) in [(1, true), (2, false)] {
             let calls = Calls::default();

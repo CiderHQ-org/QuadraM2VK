@@ -277,10 +277,15 @@ pub(super) fn plan<'a>(
         writes.push((uses, texture.usage_shadow_copies()));
     }
     let mut copies = Vec::new();
-    for (instance, bound) in instances {
+    for (index, (instance, bound)) in instances.enumerate() {
         let bound = bound.filter(|_| drawn.is_some());
         let attachments = attachment_shadows(layout, reached, drawn, bound);
+        if index == 0 {
+            for shadow in &attachments {
+                core.shadow_attached(shadow.copies.shadow_key);
+            }
             count_colors(&core.device().shared().counts, layout, reached, drawn, area);
+        }
         let mut shadows = Vec::with_capacity(attachments.len() + instance.shadows.len());
         for shadow in attachments.iter().chain(&instance.shadows) {
             shadow::join(&mut shadows, shadow);

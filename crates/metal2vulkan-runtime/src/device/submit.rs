@@ -20,7 +20,6 @@
 use super::functions::Vk;
 use super::relay::By;
 use super::{lock, Device};
-use crate::degradation::Degradation;
 use crate::error::{vulkan, Error};
 use crate::exit_guard::{self, Call};
 use crate::release;
@@ -33,19 +32,6 @@ use std::time::Duration;
 
 /// How long one wait for an internal submission lasts before it is repeated.
 const WAIT_SLICE: Duration = Duration::from_millis(100);
-
-/// One wait of [`WAIT_SLICE`] on `info`'s timelines.
-///
-/// # Safety
-///
-/// The timelines are `device`'s.
-unsafe fn raw_wait(
-    device: &ash::Device,
-    info: &vk::SemaphoreWaitInfo<'_>,
-) -> Result<(), vk::Result> {
-    // SAFETY: the caller's contract.
-    unsafe { device.wait_semaphores(info, WAIT_SLICE.as_nanos() as u64) }
-}
 
 /// A timeline the device's own submissions signal outside the batches (the internal ones here,
 /// the staging queue's copies, `staging.rs`), and the value through which the host saw them
@@ -185,19 +171,12 @@ impl Device {
         let firsts = &shared.textures.first_moves;
         // The new resources' first work, given back if the submission is not made, after every
         // batch on another `VkQueue` that did some. Its place in the submissions' order is held
-        // until it was made. The moves that keep the bytes their images are bound to the host
-        // makes first ([`keep_on_host`](Self::keep_on_host)); one registered meanwhile too.
-        let (mut internal, taken) = loop {
-            self.keep_on_host(&named)?;
-            let mut internal = lock(&shared.internal);
-            if internal.is_none() {
-                *internal = Some(Internal::new(self)?);
-            }
-            let taken = firsts.take(&named);
-            if !taken.has_keeps() {
-                break (internal, taken);
-            }
-        };
+        // until it was made.
+        let mut internal = lock(&shared.internal);
+        if internal.is_none() {
+            *internal = Some(Internal::new(self)?);
+        }
+        let taken = firsts.take(&named);
         let Some(objects) = internal.as_mut() else {
             unreachable!("made above");
         };
@@ -312,144 +291,19 @@ impl Device {
         }
     }
 
-    /// The new images' first moves that keep the bytes they are bound to (`texture/first_move.rs`'s
-    /// `Keep`), of every resource but those bound to host pages whose key `named` does not name,
-    /// made by the host before a submission takes the rest of the first work: once every
     /// submission made before on each `VkQueue` completed ([`drain_submitted`]), each image's
-    /// bytes are read through the host pointer, the moves alone are submitted and waited for, and
-    /// the bytes the moves changed are written back (`KeptBytes::write_back`: none where they
-    /// changed none; a run on pages the process cannot write stays as the move left it, announced
-    /// once as `Degradation::UnrestoredFirstMoveBytes`). Nothing where no such move waits. The
-    /// bytes the move may write are its image's own: "Image layout transitions may perform read and
-    /// write accesses on all memory bound to the image subresource range"; and a linear image's
-    /// subresource in `GENERAL` is host-accessible, its memory "interpreted" as its subresource
-    /// layout lays it, so the host's writes are what the image then holds.
-    ///
     /// [`drain_submitted`]: Self::drain_submitted
-    pub(crate) fn keep_on_host(&self, named: impl Fn(ResourceKey) -> bool) -> Result<(), Error> {
-        let shared = self.shared();
-        let firsts = &shared.textures.first_moves;
-        if !firsts.keeps_wait() {
-            return Ok(());
-        }
-        if self.is_lost() {
-            return Err(Error::DeviceLost);
-        }
-        let raw = shared.vk();
-        let mut internal = lock(&shared.internal);
-        if internal.is_none() {
-            *internal = Some(Internal::new(self)?);
-        }
-        let Some(objects) = internal.as_mut() else {
-            unreachable!("made above");
-        };
         let taken = firsts.take_keeps(named);
         if !taken.has_keeps() {
             return Ok(());
         }
-        // What every submission before wrote is in the bytes, available to the host (each
         // batch's last barrier, `tracker.rs`'s `to_host`).
         self.drain_submitted()?;
-        let kept = taken.read_kept();
-        let begin = vk::CommandBufferBeginInfo::default()
-            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-        // SAFETY: the command buffer is not pending (every internal submission is waited for)
-        // and the internal lock is held; beginning it resets it.
-        unsafe { raw.begin_command_buffer(objects.first, &begin) }.map_err(vulkan)?;
-        shared.counts.command_buffer_begun();
-        // SAFETY: recording, outside a render pass, for the queue family; it is submitted alone
-        // and waited for below, before any submission that uses the images.
-        unsafe { taken.record(raw, objects.first, shared.queue_flags_of(0)) };
-        // SAFETY: as above.
-        unsafe { raw.end_command_buffer(objects.first) }.map_err(vulkan)?;
-        // SAFETY: the fence is unsignaled or signaled and not pending.
-        unsafe { raw.reset_fences(&[objects.fence]) }.map_err(vulkan)?;
-        // After the last binding of a no-copy buffer's dma-bufs, until it completed.
-        let (wait_semaphores, wait_values): (Vec<vk::Semaphore>, Vec<u64>) =
-            self.binding_wait().into_iter().unzip();
-        let wait_stages = vec![vk::PipelineStageFlags::ALL_COMMANDS; wait_semaphores.len()];
-        let value = objects.signalled + 1;
-        let buffers = [objects.first];
-        let signal_semaphores = [objects.timeline];
-        let signal_values = [value];
-        let mut timeline = vk::TimelineSemaphoreSubmitInfo::default()
-            .wait_semaphore_values(&wait_values)
-            .signal_semaphore_values(&signal_values);
-        let submit = vk::SubmitInfo::default()
-            .wait_semaphores(&wait_semaphores)
-            .wait_dst_stage_mask(&wait_stages)
-            .command_buffers(&buffers)
-            .signal_semaphores(&signal_semaphores)
-            .push_next(&mut timeline);
-        // As in `submit_internal_naming`.
-        let _own = (shared.parking.get()).map(|parking| parking.own_submission(self));
-        // SAFETY: as in `submit_internal_naming`.
-        let made = shared.use_queue(0, By::Runtime, |queue| unsafe {
-            shared.counts.queue_submitted(1);
-            raw.queue_submit(queue, &[submit], objects.fence)
-        });
-        // A `vkQueueSubmit` that fails gives the moves back as `taken` drops.
-        if let Err(error) = made {
-            return Err(self.failed(error));
-        }
-        objects.signalled = value;
-        shared.counts.internal_submission();
-        shared.counts.first_move_kept(taken.kept());
-        // The moves and the pages their bytes lie in, held until the bytes are written back.
-        let held = taken.submitted_internally(objects.timeline, value);
-        loop {
-            // SAFETY: the fence was submitted just now.
-            match unsafe {
-                raw.wait_for_fences(&[objects.fence], true, WAIT_SLICE.as_nanos() as u64)
-            } {
-                Ok(()) => break,
-                Err(vk::Result::TIMEOUT) => continue,
-                Err(error) => return Err(self.failed(error)),
-            }
-        }
-        firsts.internal_completed(value);
-        shared.internal_done.reached(value);
-        let restored = kept.write_back();
-        drop(held);
-        shared.counts.first_move_restored(restored.stored);
-        if restored.unwritable > 0 {
-            self.degrade_once(Degradation::UnrestoredFirstMoveBytes, || {
-                (
-                    format!("{} bytes of host pages", restored.unwritable),
-                    "a texture's first move changed them, and the process maps their pages \
-                     without write permission, so the host could not put back the bytes it kept"
-                        .to_owned(),
-                )
-            });
-        }
-        Ok(())
-    }
-
     /// Wait until every batch submitted to each `VkQueue` before now completed.
     fn drain_submitted(&self) -> Result<(), Error> {
         let shared = self.shared();
         let (timelines, values): (Vec<vk::Semaphore>, Vec<u64>) = (shared.queues.iter())
-            .map(|queue| (queue.timeline, queue.submitted_value()))
-            .filter(|&(_, value)| value != 0)
             .unzip();
-        if timelines.is_empty() {
-            return Ok(());
-        }
-        let info = vk::SemaphoreWaitInfo::default()
-            .semaphores(&timelines)
-            .values(&values);
-        loop {
-            // SAFETY: the timelines are the device's; each value was submitted to be signalled,
-            // and no batch submitted waits for a signal not submitted (`scheduler`).
-            match unsafe { raw_wait(shared.vk(), &info) } {
-                Ok(()) => return Ok(()),
-                Err(vk::Result::TIMEOUT) if !self.is_lost() => continue,
-                Err(vk::Result::TIMEOUT) => return Err(Error::DeviceLost),
-                Err(error) => return Err(self.failed(error)),
-            }
-        }
-    }
-
     /// Bind `binds` to `buffer`, a sparse buffer no command has used, with one
     /// `vkQueueBindSparse` on the device's first `VkQueue` that signals the internal timeline,
     /// and return without waiting for it: every submission made after it, on every `VkQueue`,

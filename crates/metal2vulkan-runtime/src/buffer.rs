@@ -25,7 +25,7 @@ use super::attributes::ResourceAttributes;
 use super::buffer_texture::TexelViews;
 use super::degradation::Degradation;
 use super::device::{lock, DeviceShared};
-use super::error::{internal, invalid, nil, vulkan, Error, Problem, RuntimeGap};
+use super::error::{internal, invalid, nil, vulkan, Error, Problem};
 use super::exit_guard;
 use super::generated_commands::PREPROCESS_BUFFER;
 use super::heap::{Heap, HeapType};
@@ -38,8 +38,6 @@ use super::program_objects::ProgramObject;
 use super::rebind::{ImportHold, Unexact};
 use super::resource::{Identity, ObjectId, ResourceKey};
 use super::texture::first_move::Filled;
-use super::texture::shared_alias::SharedImages;
-use super::texture::AliasWatch;
 use super::values::{CpuCacheMode, HazardTrackingMode, ResourceOptions, StorageMode};
 use super::Device;
 use crate::release;
@@ -143,9 +141,6 @@ pub(super) struct HostCell {
     /// The texel buffer views of the textures over the buffer's bytes (a no-copy heap's: over
     /// its buffers'), which view its pages: a rebind empties them.
     texels: Mutex<Vec<Weak<TexelViews>>>,
-    /// The linear images of the textures over the buffer's bytes (a no-copy heap's: over its
-    /// buffers') bound to its pages: a rebind makes them again over the new pages.
-    aliases: Mutex<Vec<AliasWatch>>,
     /// The images of the textures over the buffer's bytes (a no-copy heap's: over its buffers'
     /// and in it), which a detach makes present stand-ins (`detach.rs`), and the textures being
     /// made over them, which a detach refuses while one is.
@@ -435,20 +430,6 @@ impl HostCell {
         texels.retain(|views| views.strong_count() > 0);
         texels.push(Arc::downgrade(views));
     }
-
-    /// The live aliasing images bound to the buffer's pages.
-    pub(super) fn aliases(&self) -> Vec<AliasWatch> {
-        let mut aliases = lock(&self.aliases);
-        aliases.retain(AliasWatch::lives);
-        aliases.clone()
-    }
-
-    /// Note `watch`, an aliasing image bound to the buffer's pages, forgetting those gone.
-    fn watch_alias(&self, watch: AliasWatch) {
-        let mut aliases = lock(&self.aliases);
-        aliases.retain(AliasWatch::lives);
-        aliases.push(watch);
-    }
 }
 
 /// A hold on the pages a buffer of its own lies in (`Buffer::resident`), kept and never read:
@@ -645,14 +626,6 @@ impl HostPages {
         self.import.shape.offset
     }
 
-    /// The host address of the byte `from_base` bytes past their bytes' start
-    /// ([`HostPages::memory`]): where an image bound there lies for the host. `None` where the
-    /// import is not mapped.
-    pub(super) fn host_at(&self, from_base: u64) -> Option<Mapped> {
-        let shape = &self.import.shape;
-        Some(shape.mapped?.add(shape.offset + from_base))
-    }
-
     /// The index of their memory's type.
     pub(super) fn type_index(&self) -> u32 {
         self.import.shape.type_index
@@ -819,9 +792,6 @@ pub(super) struct HostImport {
     /// The releases of pages that went while it lived with no keep-alive: their deallocators
     /// run once it is freed.
     after_free: Mutex<Vec<Release>>,
-    /// The `VkImage`s textures of one image over the same bytes of it share
-    /// (`texture/shared_alias.rs`), held while it lives, and dropped before its memory is freed.
-    shared: SharedImages,
 }
 
 /// Where a host import's bytes lie in its `VkBuffer` and memory, which reading needs no
@@ -992,7 +962,6 @@ impl HostImport {
             unlisted: AtomicBool::new(unlisted),
             kept: Mutex::new(None),
             after_free: Mutex::new(Vec::new()),
-            shared: SharedImages::default(),
         }
     }
 
@@ -1168,9 +1137,6 @@ impl Drop for HostImport {
             unsafe { ManuallyDrop::drop(&mut self.objects) };
             return;
         };
-        // Its shared images go before the memory they are bound in is freed: nothing else holds
-        // one, as every holder of one holds the import.
-        self.shared.clear();
         let shared = self.device.shared();
         let read_apart = self.read_apart.load(Ordering::Relaxed);
         if read_apart != 0 {
@@ -2236,7 +2202,6 @@ impl Device {
         let cell = Arc::new(HostCell {
             pages: Mutex::new(Lying::In(Arc::new(host))),
             texels: Mutex::new(Vec::new()),
-            aliases: Mutex::new(Vec::new()),
             textures: Mutex::new(TexturesOver::default()),
             exposed: AtomicU8::new(0),
             device: self.clone(),

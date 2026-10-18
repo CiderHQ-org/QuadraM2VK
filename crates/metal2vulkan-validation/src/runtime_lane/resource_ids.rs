@@ -1031,22 +1031,25 @@ fn a_heap_s_token_drops_at_its_release_whatever_keeps_its_textures_images() {
 ///
 /// - the consumer's surface texture (its `Beside::PendingArgument`): a texture of an IOSurface
 ///   plane over a no-copy buffer of the surface's pages (`new_texture_with_iosurface_plane`),
-///   whose deallocator, the consumer's hold on the surface (a use the host sees), runs at the
-///   texture's release, as Metal lets go of the surface. The deallocator scribbles over the pages,
-///   as a caller reusing them would: the waiting command buffer, which starts after it, reads the
-///   neutral through the ID, never the pages, and completes cleanly;
-/// - a texture over a buffer of the runtime's memory, whose range token drops then.
+///   a shadow on every device (`shadowed-texture`), whose image lies in memory of its own;
+///   the buffer's deallocator, the consumer's hold on the surface (a use the host sees), runs at
+///   the texture's release, as Metal lets go of the surface. The deallocator scribbles over the
+///   pages, as a caller reusing them would: the waiting command buffer, which starts after it,
+///   reads the neutral through the ID, never the pages, and completes cleanly;
+/// - a texture over a buffer of the runtime's memory, an image bound to the buffer's memory where
+///   a linear image of the device holds its texels alone, else a shadow, whose range token drops
+///   then.
 ///
-/// A texture over host pages the device holds as a shadow (`shadowed-texture`) is announced as
-/// its ID's holder once (`UNNAMED_SHADOWS`): the command binds the heap set holding it with its
-/// ID in the argument buffer, neither naming it nor making it resident, so its function may read
-/// the shadow stale; nothing else is.
+/// A shadow is announced as its ID's holder once (`UNNAMED_SHADOWS`): the command binds the heap
+/// set holding it with its ID in the argument buffer, neither naming it nor making it resident,
+/// so its function may read the shadow stale; nothing else is.
 #[test]
 fn a_buffer_under_a_texture_goes_at_its_release_whatever_keeps_the_image() {
     let mapping = Mapping::anonymous(GUEST_PAGE);
     on_device(|device, messages| {
         let sampling = Sampling::new(device);
         let reads = Reads::of(device, &sampling);
+        let mut surface = false;
         for form in ["surface plane", "runtime memory"] {
             let gone = Arc::new(AtomicBool::new(false));
             let noted = Arc::clone(&gone);
@@ -1081,9 +1084,9 @@ fn a_buffer_under_a_texture_goes_at_its_release_whatever_keeps_the_image() {
                     device.new_buffer_with_descriptor(descriptor).unwrap()
                 }
             };
-            // A surface format the devices bind to the pages (an image over them, not a shadow,
-            // where they can: its rows packed, as wide as a device's linear rows), unsigned as the
-            // kernel's: what it reads is gone anyway.
+            // A format and rows a device's linear image holds alone (an image bound to the
+            // runtime's memory, not a shadow, where it can: its rows packed, as wide as a device's
+            // linear rows), unsigned as the kernel's: what it reads is gone anyway.
             let mut d = TextureDescriptor::texture_2d(PixelFormat::RGBA8Uint, ROW_TEXELS, 2, false);
             d.usage = TextureUsage::SHADER_READ;
             d.resource_options = buffer.resource_options();
@@ -1101,6 +1104,11 @@ fn a_buffer_under_a_texture_goes_at_its_release_whatever_keeps_the_image() {
                 "SURFACE-HOLD {} {form}: an image bound to the bytes: {bound}",
                 device.name()
             );
+            assert!(
+                !(bound && form == "surface plane"),
+                "{form}: a texture over host pages takes an image bound to them"
+            );
+            surface |= form == "surface plane";
             drop(buffer);
             assert!(!gone.load(Ordering::SeqCst), "{form}: its texture keeps it");
             let event = device.new_shared_event().unwrap();
@@ -1116,8 +1124,12 @@ fn a_buffer_under_a_texture_goes_at_its_release_whatever_keeps_the_image() {
             let output = sampling.output(&command_buffer, &buffers);
             assert_eq!(output, reads.neutral, "{form}");
         }
-        // A shadow where the device's linear rows lie otherwise, which its driver decides.
-        let shadowed = row_shadow_kinds(device);
+        // The surface's shadow, and the runtime memory's where the device's linear rows lie
+        // otherwise, which its driver decides.
+        let shadowed = match surface {
+            true => [Degradation::ShadowedTexture, UNNAMED_SHADOWS[0]].into(),
+            false => row_shadow_kinds(device),
+        };
         println!(
             "SURFACE-HOLD {}: a shadow: {}",
             device.name(),
@@ -1129,13 +1141,12 @@ fn a_buffer_under_a_texture_goes_at_its_release_whatever_keeps_the_image() {
 
 /// A no-copy buffer and a texture over it released while a submitted command buffer that may
 /// read the texture through its ID runs (its dispatch submitted and done, which an event it
-/// signals then shows; a wait for another event after it holds it): where the texture's image is
-/// bound to the buffer's pages, the image, and the device's import of the pages, stay until that
-/// command buffer completed. With a keep-alive the deallocator runs at the release, as Metal's
-/// does (EV XRB-bft1-m4), and the keep-alive goes only once the command buffer completed; with
-/// none the deallocator waits for that, counted (`host_deallocators_delayed`) and announced once
-/// ([`DELAYED_DEALLOCATORS`]). A texture whose image is its own (a shadow) holds no import: both
-/// run at the release. A command buffer committed but not yet submitted holds nothing
+/// signals then shows; a wait for another event after it holds it). The texture is a shadow
+/// (`shadowed-texture`), whose image lies in memory of its own and holds no import of the pages:
+/// the deallocator runs at the release, as Metal's does, with a keep-alive or
+/// without, and nothing waits for the command buffer; a keep-alive goes on one of the device's
+/// handler threads, after the import's free (`HostImport`'s drop). A command buffer committed but
+/// not yet submitted holds nothing
 /// ([`a_buffer_under_a_texture_goes_at_its_release_whatever_keeps_the_image`]). The device
 /// reports nothing either way.
 #[test]
@@ -1143,7 +1154,6 @@ fn a_no_copy_buffer_s_deallocator_runs_at_its_release_given_a_keep_alive() {
     let mapping = Mapping::anonymous(GUEST_PAGE);
     on_device(|device, messages| {
         let sampling = Sampling::new(device);
-        let mut delays = 0;
         for keeps in [true, false] {
             let ran = Arc::new(AtomicBool::new(false));
             let kept_dropped = Arc::new(AtomicBool::new(false));
@@ -1172,51 +1182,42 @@ fn a_no_copy_buffer_s_deallocator_runs_at_its_release_given_a_keep_alive() {
             d.usage = TextureUsage::SHADER_READ;
             d.resource_options = buffer.resource_options();
             let doomed = buffer.new_texture(&d, 0, ROW_BYTES).unwrap();
+            let what = format!("keep-alive {keeps}");
             // SAFETY: the handle is only compared, while the texture lives.
             let bound = unsafe { doomed.vk_image() }.is_some();
+            assert!(
+                !bound,
+                "{what}: a texture over host pages takes an image bound to them"
+            );
             let reaching = sampling.reaching(device, &doomed);
             let delayed = device.work_counts().host_deallocators_delayed;
             drop(buffer);
             drop(doomed);
-            let what = format!("keep-alive {keeps}, an image bound to the bytes {bound}");
             println!("DEALLOCATOR-HOLD {}: {what}", device.name());
-            // The image holds the import where it is bound to the pages.
-            let delay = bound && !keeps;
-            assert_eq!(
+            assert!(
                 ran.load(Ordering::SeqCst),
-                !delay,
                 "{what}: the deallocator at the release"
             );
+            // Nothing holds the import: it is freed with only the keep-alive waiting for the free,
+            // on one of the device's handler threads, and the keep-alive goes there after it.
             let deadline = Instant::now() + WAIT;
+            while keeps && !kept_dropped.load(Ordering::SeqCst) && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(10));
             }
             assert_eq!(
                 kept_dropped.load(Ordering::SeqCst),
+                keeps,
                 "{what}: the keep-alive with the import's free"
             );
             assert_eq!(
                 device.work_counts().host_deallocators_delayed,
-                delayed + u64::from(delay),
+                delayed,
                 "{what}: counted delayed"
             );
             reaching.complete(&sampling);
-            // The import goes as the command buffer lets go of the image: the deallocator waiting
-            // for it runs then, and the keep-alive goes.
-            let done =
-                || ran.load(Ordering::SeqCst) && kept_dropped.load(Ordering::SeqCst) == keeps;
-            let deadline = Instant::now() + WAIT;
-            while !done() && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            assert!(done(), "{what}: once the command buffer completed");
-            delays += usize::from(delay);
         }
-        // A shadow, where the device's linear rows lie otherwise, reached through its ID is
-        // announced as the lane above says.
-        let mut expected = row_shadow_kinds(device);
-        if delays > 0 {
-            expected.extend(DELAYED_DEALLOCATORS);
-        }
+        // The shadow, reached through its ID, is announced as the lane above says.
+        let expected = [Degradation::ShadowedTexture, UNNAMED_SHADOWS[0]];
         sampling.announced(device, messages, &expected);
     });
 }

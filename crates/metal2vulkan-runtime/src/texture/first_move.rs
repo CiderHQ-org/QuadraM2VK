@@ -9,7 +9,7 @@
 //!   and 18 µs with its command buffer still scheduled (the consumer's PS ask, an M3 Max). An
 //!   encoder that made a scratch buffer for its own commands waited so too.
 //! - **What waits.** Every image the runtime makes in memory it binds (its own, a buffer's, a
-//!   heap's, host pages', a Metal texture over an `MTLBuffer`), and a stand-in's images
+//!   heap's, a no-copy heap's host pages'), and a stand-in's images
 //!   (`stand_in.rs`), starts in `UNDEFINED` (`PREINITIALIZED` for a linear image whose bytes it
 //!   keeps) and notes its move ([`FirstMove`]): for one that reads zero (a new `Shared` or
 //!   `Managed` texture, a stand-in) with the copies of the device's zeros ([`Zeros`]) that write
@@ -55,32 +55,12 @@
 //!   submission (staged bytes' copies into buffers, a `Managed` buffer's uploads, and staged texel
 //!   copies), the call that staged the last makes a submission for them and waits
 //!   (`FirstMoves::register_bytes` and `register_texels` answer when).
-//! - **The bytes kept.** An image bound to a no-copy buffer's host pages (the driver's linear
-//!   image for host allocations, a `DRM_FORMAT_MOD_LINEAR` image at Metal's row pitch, and on
-//!   MoltenVK a Metal texture over the import's `MTLBuffer`) starts in `UNDEFINED`, as Vulkan
-//!   makes an image for host allocations (`VUID-VkImageCreateInfo-pNext-01443`), and a move from
-//!   `UNDEFINED` "will cause the contents of the image's memory to be undefined": "Image layout
-//!   transitions may perform read and write accesses on all memory bound to the image
-//!   subresource range". The host keeps those bytes across it ([`Keep`],
-//!   `device/submit.rs`'s `keep_on_host`), before a submission takes the rest of the first work:
-//!   once every submission made before on each `VkQueue` completed (each batch's last barrier
-//!   makes its writes available to the host), it reads the bytes the image's subresources reach
-//!   through the host pointer, submits the moves alone (and a barrier that makes their writes
-//!   available to the host) and waits for them, then writes back the bytes the moves changed
-//!   ([`KeptBytes::write_back`]), so the memory holds every byte read: a linear image's
-//!   subresource in `GENERAL` is host-accessible, and the host's writes are what it then holds. A
-//!   move that changed nothing has nothing stored, so pages the process cannot write stay
-//!   untouched (Metal makes a buffer over read-only pages, and MoltenVK imports them in place;
-//!   Linux refuses them at the import, `host_memory.rs`). Changed bytes on pages the process maps
-//!   without write permission when the write back comes (a program's later `mprotect`) keep what
-//!   the move wrote, announced once (`Degradation::UnrestoredFirstMoveBytes`). No GPU command
-//!   writes the bytes, so none writes back a cache line that also holds another's bytes: ANV did,
-//!   the texels' copies back undoing the CPU's writes of the bytes beside them in their 64-byte
-//!   lines (Mesa 26.2.4, the lane's
-//!   `a_cpu_write_during_a_texture_s_first_move_stays_outside_its_bytes`). A CPU write to the bytes
-//!   between their read and their write back is undone: once per image, in the submission that
-//!   makes its move. Counted: `WorkCounts::first_move_keeps`, `first_move_kept_bytes` and
-//!   `first_move_restored_bytes`.
+//! - **Over host pages.** An image bound to imported host memory starts in `UNDEFINED`
+//!   (`VUID-VkImageCreateInfo-pNext-01443`), and its move "may perform read and write accesses
+//!   on all memory bound to the image subresource range": a no-copy heap's texture bound to the
+//!   heap's bytes (`texture/heap.rs`) takes such a move. A texture over a no-copy buffer's host
+//!   pages takes no such image: it is a shadow, whose copies address its texels alone
+//!   (`texture.rs`'s `storage_over_buffer`).
 //! - **The work.** A barrier from every command before (memory other commands wrote), then the
 //!   buffers' fills with zeros, then their copies of staged bytes after a barrier, then a
 //!   barrier carrying each image's move (after the fills: an image placed in a new heap moves
@@ -104,6 +84,7 @@
 //!   the M3 Max waited up to 13 ms, in 20 of 60 makings: MoltenVK encodes a command buffer's Metal
 //!   commands inside `vkQueueSubmit`, on the calling thread (4.5 to 17 ms for those batches); with
 //!   the hold, no making of 60 took past 0.16 ms. A device whose heap sets take no writes while a
+//!   `recorder`, before its take), only for the recording of a submission's own barriers and its
 //! - **Failure.** A submission that fails gives its work back, still to be done.
 //! - **Out of reach of a submission.** A texture's `VkImage` handed out (`Texture::vk_image`)
 //!   rests in `GENERAL` as its contract says: handing it out does its work first, by an internal
@@ -115,7 +96,7 @@ use super::super::error::{internal, vulkan, Error, MemoryKind};
 use super::super::exit_guard::{self, Call};
 use super::super::host_memory::host_writable;
 use super::super::image_barrier::{image_barrier, ImageDst};
-use super::super::memory::{Mapped, Memory, MemoryClass, Placement};
+use super::super::memory::{Memory, MemoryClass, Placement};
 use super::super::release;
 use super::super::resource::ResourceKey;
 use super::super::tracker::Point;
@@ -151,119 +132,6 @@ pub(crate) struct FirstMove {
     /// The queue family the move acquires the image for from `VK_QUEUE_FAMILY_FOREIGN_EXT`, an
     /// image over dma-buf pages the CPU writes ([`FirstMove::acquired`]).
     acquire: Option<u32>,
-    /// The bytes the image lies over, kept across the move ([`FirstMove::keeping`]).
-    keep: Option<Keep>,
-}
-
-/// The bytes an image bound to host pages is bound to, which its move from `UNDEFINED` may
-/// discard, kept across it by the host ([`FirstMove::keeping`]; the module docs): read through
-/// the host pointer once every submission before completed, the move submitted alone and waited
-/// for, then written back where the move changed them ([`KeptBytes::write_back`]).
-pub(crate) struct Keep {
-    /// The host address of the first byte the image is bound to.
-    at: Mapped,
-    /// The bytes from there its subresources may reach: all the move may write.
-    length: usize,
-    /// The device's count of keeps alive ([`FirstMoves::keeps_wait`]).
-    live: Arc<AtomicUsize>,
-}
-
-/// The bytes of each of a submission's keeps, read before their moves ([`Taken::read_kept`]),
-/// with where they lie.
-pub(crate) struct KeptBytes(Vec<(Mapped, Vec<u8>)>);
-
-impl KeptBytes {
-    /// Put each keep's bytes back where their moves changed them: once the moves completed, their
-    /// writes available to the host, before any submission after them, while the pages they lie
-    /// in are held (with the moves, `Taken::submitted_internally`). Only the bytes that differ
-    /// from those read are stored ([`changed_runs`]), so the pages end holding every byte read,
-    /// and a move that changed none stores nothing: the pages may be ones the process cannot
-    /// write (Metal makes a buffer over read-only pages, and MoltenVK imports them). A run of
-    /// changed bytes is stored where the process maps its pages writable now
-    /// (`host_memory::host_writable`), else left as the move left it and counted for the caller
-    /// to announce ([`Restored::unwritable`]).
-    pub(crate) fn write_back(self) -> Restored {
-        let mut restored = Restored::default();
-        for (at, kept) in self.0 {
-            // SAFETY: the bytes lie in host pages the caller holds, mapped and readable for as
-            // long; the moves that may have written them completed and their writes were made
-            // available to the host. A CPU write to them meanwhile is the program's (the known gap
-            // the module docs name).
-            let one = unsafe { put_back(at.as_ptr(), &kept) };
-            restored.stored += one.stored;
-            restored.unwritable += one.unwritable;
-        }
-        restored
-    }
-}
-
-/// Store `kept` again at `at` where the bytes there now differ from it ([`changed_runs`]), each
-/// run where the process maps its pages writable now (`host_memory::host_writable`, asked once
-/// for the span of every run, then run by run where that span is not all writable).
-///
-/// # Safety
-///
-/// The `kept.len()` bytes at `at` are mapped and readable for the call, and nothing writes them
-/// meanwhile but the program, whose write is a race as on Metal.
-pub(crate) unsafe fn put_back(at: *mut u8, kept: &[u8]) -> Restored {
-    let runs = {
-        // SAFETY: the caller's.
-        let now = unsafe { std::slice::from_raw_parts(at.cast_const(), kept.len()) };
-        changed_runs(kept, now)
-    };
-    let mut restored = Restored::default();
-    let (Some(first), Some(last)) = (runs.first(), runs.last()) else {
-        return restored;
-    };
-    let address = |offset: usize| at as u64 + offset as u64;
-    let all = host_writable(address(first.start), address(last.end)) == Some(true);
-    for run in runs {
-        let len = run.len() as u64;
-        if all || host_writable(address(run.start), address(run.end)) == Some(true) {
-            // SAFETY: the caller's, and the process maps the run's pages writable.
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    kept[run.clone()].as_ptr(),
-                    at.add(run.start),
-                    run.len(),
-                );
-            }
-            restored.stored += len;
-        } else {
-            restored.unwritable += len;
-        }
-    }
-    restored
-}
-
-/// What [`KeptBytes::write_back`] put back of the bytes the moves changed.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Restored {
-    /// The changed bytes it stored again (`WorkCounts::first_move_restored_bytes`).
-    pub(crate) stored: u64,
-    /// The changed bytes on pages the process does not map writable, which keep what the move
-    /// wrote (`Degradation::UnrestoredFirstMoveBytes`).
-    pub(crate) unwritable: u64,
-}
-
-/// The ranges of bytes where `now` differs from `kept`, in order, each as long as it runs.
-pub(crate) fn changed_runs(kept: &[u8], now: &[u8]) -> Vec<Range<usize>> {
-    /// The bytes compared at once before a byte-by-byte look.
-    const BLOCK: usize = 64;
-    let mut runs: Vec<Range<usize>> = Vec::new();
-    for (block, (kept, now)) in kept.chunks(BLOCK).zip(now.chunks(BLOCK)).enumerate() {
-        if kept == now {
-            continue;
-        }
-        for (i, _) in (kept.iter().zip(now).enumerate()).filter(|(_, (k, n))| k != n) {
-            let at = block * BLOCK + i;
-            match runs.last_mut() {
-                Some(run) if run.end == at => run.end = at + 1,
-                _ => runs.push(at..at + 1),
-            }
-        }
-    }
-    runs
 }
 
 /// How a first move writes Metal's pattern into the first `levels` levels of its image, of
@@ -377,14 +245,7 @@ impl FirstMove {
             holding: None,
             pattern: None,
             acquire: None,
-            keep: None,
         }
-    }
-
-    /// The move, of `image` (made after the move was planned, with what it keeps).
-    pub(crate) fn of_image(mut self, image: vk::Image) -> FirstMove {
-        self.image = image;
-        self
     }
 
     /// Whether the image is bound to host pages, which a rebind may swap it out of (the module
@@ -402,26 +263,9 @@ impl FirstMove {
         Some(self)
     }
 
-    /// The move, holding `pages` from now on, the pages a submission that takes it holds: those
-    /// of a texture over a shared image that lives (`texture/shared_alias.rs`).
-    pub(super) fn holding_now(mut self, pages: Arc<dyn Any + Send + Sync>) -> FirstMove {
-        self.pages = Some(Arc::downgrade(&pages));
-        self.holding = Some(pages);
-        self
-    }
-
     /// The move, given back by a submission not made: no longer holding its pages.
     fn unheld(mut self) -> FirstMove {
         self.holding = None;
-        self
-    }
-
-    /// The move, which also keeps `keep`'s texels, those the image lies over: a move from
-    /// `UNDEFINED` "will cause the contents of the image's memory to be undefined" (the image
-    /// layouts' chapter), so the work copies them into its staging buffer before the move and
-    /// back after it (the module docs).
-    pub(crate) fn keeping(mut self, keep: Keep) -> FirstMove {
-        self.keep = Some(keep);
         self
     }
 
@@ -748,34 +592,6 @@ enum Zero {
     Clear,
 }
 
-impl Keep {
-    /// The keep of the `length` bytes from the host address `at`, where an image of `moves`'s
-    /// device is bound to host pages.
-    pub(crate) fn new(moves: &FirstMoves, at: Mapped, length: u64) -> Keep {
-        moves.live_keeps.fetch_add(1, AtomicOrdering::AcqRel);
-        Keep {
-            at,
-            length: usize::try_from(length).unwrap_or(usize::MAX),
-            live: Arc::clone(&moves.live_keeps),
-        }
-    }
-
-    /// The bytes as they lie now, and where.
-    fn read(&self) -> (Mapped, Vec<u8>) {
-        // SAFETY: the bytes lie in host pages the submission that took the move holds, mapped
-        // for as long; a CPU write to them meanwhile is the program's (the known gap the module
-        // docs name).
-        let bytes = unsafe { std::slice::from_raw_parts(self.at.as_ptr(), self.length) };
-        (self.at, bytes.to_vec())
-    }
-}
-
-impl Drop for Keep {
-    fn drop(&mut self) {
-        self.live.fetch_sub(1, AtomicOrdering::AcqRel);
-    }
-}
-
 /// The most bytes host calls' copies stage for the device's next submission before one is made
 /// for them, waited for (the module docs).
 const STAGED_BYTES: u64 = 256 << 20;
@@ -887,15 +703,8 @@ impl TexelCopy {
 
 /// What holds first moves not yet made: an image of the runtime's, or a stand-in.
 pub(crate) trait Fresh: Send + Sync {
-    /// Its moves not yet taken, taken now: none where a move may wait for a later submission
-    /// ([`still_waits`](Fresh::still_waits)).
+    /// Its moves not yet taken, taken now.
     fn take(&self) -> Vec<FirstMove>;
-    /// Whether a move of it waits still, which [`take`](Fresh::take) gave no submission: one of a
-    /// shared image no texture over which lives (`texture/shared_alias.rs`). A later submission
-    /// takes it.
-    fn still_waits(&self) -> bool {
-        false
-    }
     /// `moves`, which [`take`](Fresh::take) gave and no submission made, given back.
     fn give_back(&self, moves: Vec<FirstMove>);
     /// The key the commands that use it name, where a move of it waiting is of an image bound to
@@ -935,7 +744,7 @@ impl Held {
     /// What keeps the resource, or its memory (and a fill's staging buffer).
     fn keeper(self) -> Box<dyn Any + Send + Sync> {
         match self {
-            // The moves keep the pages their images are bound to, and their keeps' staging.
+            // The moves keep the pages their images are bound to.
             Held::Moves(fresh, moves) => Box::new((fresh, moves)),
             Held::Fill(_, memory, fill) => match fill.staging {
                 Some(staging) => Box::new((memory, staging)),
@@ -981,8 +790,6 @@ pub(crate) struct FirstMoves {
     /// (`texture/decoded_twin.rs`, `PassScratch::Device`), and its bytes: made at the first such
     /// decode, kept with the device.
     decode_scratch: Mutex<Option<(Zeros, u64)>>,
-    /// The keeps alive ([`Keep`]): while none is, no submission looks for one to make.
-    live_keeps: Arc<AtomicUsize>,
 }
 
 /// The side of each of the device's multisampled scratch images ([`FirstMoves::scratch`]): its
@@ -1072,65 +879,6 @@ impl FirstMoves {
         past_bound(&waiting)
     }
 
-    /// Whether a move that keeps the bytes its image is bound to may wait ([`Keep`]).
-    pub(crate) fn keeps_wait(&self) -> bool {
-        self.live_keeps.load(AtomicOrdering::Acquire) > 0
-    }
-
-    /// Take the moves that keep the bytes their images are bound to ([`Keep`]), which the host
-    /// makes before a submission takes the rest (`device/submit.rs`'s `keep_on_host`): of every
-    /// resource but those bound to host pages whose key `named` does not name, as
-    /// [`take`](Self::take). Every other move goes back to its resource, which stays registered.
-    pub(crate) fn take_keeps(&self, named: impl Fn(ResourceKey) -> bool) -> Taken<'_> {
-        let order = lock(&self.order);
-        let mut held = Vec::new();
-        let mut left: Vec<Box<dyn Any + Send + Sync>> = Vec::new();
-        {
-            let mut waiting = lock(&self.waiting);
-            let mut kept = Vec::new();
-            for entry in waiting.drain(..) {
-                let Waiting::Moves(weak) = entry else {
-                    kept.push(entry);
-                    continue;
-                };
-                let Some(fresh) = weak.upgrade() else {
-                    continue;
-                };
-                if fresh.rebindable().is_some_and(|key| !named(key)) {
-                    kept.push(Waiting::Moves(weak));
-                    left.push(Box::new(fresh));
-                    continue;
-                }
-                let (keeping, others): (Vec<FirstMove>, Vec<FirstMove>) = fresh
-                    .take()
-                    .into_iter()
-                    .partition(|first| first.keep.is_some());
-                let rest = !others.is_empty();
-                if rest {
-                    fresh.give_back(others);
-                }
-                let keeping: Vec<FirstMove> =
-                    keeping.into_iter().filter_map(FirstMove::held).collect();
-                // A resource whose move waits on (`Fresh::still_waits`) stays registered.
-                if rest || fresh.still_waits() {
-                    kept.push(Waiting::Moves(weak.clone()));
-                }
-                if keeping.is_empty() {
-                    left.push(Box::new(fresh));
-                } else {
-                    held.push(Held::Moves(fresh, keeping));
-                }
-            }
-            waiting.extend(kept);
-        }
-        drop(left);
-        Taken {
-            moves: self,
-            held,
-            _order: order,
-        }
-    }
-
     /// Take the work a submission does: all of it, but the moves of images bound to host pages
     /// whose key `named` does not name (an internal submission's; a batch names every key, the
     /// module docs). What goes is dropped once the lock is free.
@@ -1168,9 +916,6 @@ impl FirstMoves {
                             .filter_map(FirstMove::held)
                             .collect();
                         if moves.is_empty() {
-                            if fresh.still_waits() {
-                                kept.push(Waiting::Moves(weak));
-                            }
                             left.push(Box::new(fresh));
                         } else {
                             held.push(Held::Moves(fresh, moves));
@@ -1536,35 +1281,6 @@ impl Taken<'_> {
         (self.held.iter()).any(|held| matches!(held, Held::Moves(..) | Held::Fill(..)))
     }
 
-    /// Whether one of its moves keeps the bytes its image is bound to ([`Keep`]).
-    pub(crate) fn has_keeps(&self) -> bool {
-        self.keeps().next().is_some()
-    }
-
-    /// How many of its moves keep the bytes their images are bound to, and how many bytes in all.
-    pub(crate) fn kept(&self) -> (usize, u64) {
-        (self.keeps()).fold((0, 0), |(count, bytes), keep| {
-            (count + 1, bytes + keep.length as u64)
-        })
-    }
-
-    /// The bytes each of its keeps keeps, read now: once every submission before completed, and
-    /// before the moves are submitted ([`Keep`]).
-    pub(crate) fn read_kept(&self) -> KeptBytes {
-        KeptBytes(self.keeps().map(Keep::read).collect())
-    }
-
-    /// The keeps of its moves.
-    fn keeps(&self) -> impl Iterator<Item = &Keep> {
-        self.held.iter().flat_map(|held| {
-            let moves: &[FirstMove] = match held {
-                Held::Moves(_, moves) => moves,
-                Held::Fill(..) | Held::Texels(..) => &[],
-            };
-            moves.iter().filter_map(|first| first.keep.as_ref())
-        })
-    }
-
     /// Whether it took host calls' staged copies ([`record_staged`](Self::record_staged)'s).
     pub(crate) fn has_staged(&self) -> bool {
         (self.held.iter()).any(|held| matches!(held, Held::Texels(..)))
@@ -1656,7 +1372,6 @@ impl Taken<'_> {
                 Held::Fill(..) | Held::Texels(..) => &[],
             })
         };
-        let keeps = self.has_keeps();
         if !fills.is_empty() {
             // SAFETY: the caller's contract.
             unsafe {
@@ -1708,28 +1423,6 @@ impl Taken<'_> {
                     &written(),
                     &[],
                     &images,
-                );
-            }
-            exit_guard::called(Call::CmdPipelineBarrier);
-        }
-        // The moves whose bytes the host keeps: their writes, which a layout transition makes
-        // available, made available to the host too, before it writes the bytes back ([`Keep`]).
-        if keeps {
-            let host = [vk::MemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
-                .dst_access_mask(vk::AccessFlags::HOST_READ | vk::AccessFlags::HOST_WRITE)];
-            // SAFETY: the caller's contract.
-            unsafe {
-                let flags = vk::DependencyFlags::empty();
-                let host_stage = vk::PipelineStageFlags::HOST;
-                device.cmd_pipeline_barrier(
-                    command_buffer,
-                    all,
-                    host_stage,
-                    flags,
-                    &host,
-                    &[],
-                    &[],
                 );
             }
             exit_guard::called(Call::CmdPipelineBarrier);
@@ -2092,58 +1785,6 @@ mod tests {
             .collect();
         assert!(!past_bound(&lock(&moves.waiting)));
         drop(held);
-    }
-
-    /// A resource whose move a submission takes only once it is `ready`, as a shared image's
-    /// while a texture over it lives (`texture/shared_alias.rs`).
-    struct Waiter {
-        moves: Mutex<Vec<FirstMove>>,
-        ready: std::sync::atomic::AtomicBool,
-    }
-
-    impl Fresh for Waiter {
-        fn take(&self) -> Vec<FirstMove> {
-            match self.ready.load(std::sync::atomic::Ordering::Relaxed) {
-                true => lock(&self.moves).drain(..).collect(),
-                false => Vec::new(),
-            }
-        }
-
-        fn still_waits(&self) -> bool {
-            !lock(&self.moves).is_empty()
-        }
-
-        fn give_back(&self, moves: Vec<FirstMove>) {
-            lock(&self.moves).extend(moves);
-        }
-
-        fn rebindable(&self) -> Option<ResourceKey> {
-            None
-        }
-    }
-
-    /// A move a submission found waiting still stays registered, and a later submission takes it.
-    #[test]
-    fn a_move_that_waits_still_stays_for_a_later_submission() {
-        let moves = FirstMoves::default();
-        let waiter = Arc::new(Waiter {
-            moves: Mutex::new(vec![first(1, false)]),
-            ready: std::sync::atomic::AtomicBool::new(false),
-        });
-        let weak: Weak<Waiter> = Arc::downgrade(&waiter);
-        moves.register(weak);
-        let taken = moves.take(|_| false);
-        assert!(taken.held.is_empty(), "nothing is taken while it waits");
-        drop(taken.submitted(None));
-        assert_eq!(lock(&moves.waiting).len(), 1, "it stays registered");
-        waiter
-            .ready
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        let taken = moves.take(|_| false);
-        assert_eq!(taken.held.len(), 1, "a later submission takes it");
-        drop(taken.submitted(None));
-        assert!(lock(&moves.waiting).is_empty());
-        assert!(lock(&waiter.moves).is_empty());
     }
 
     #[test]

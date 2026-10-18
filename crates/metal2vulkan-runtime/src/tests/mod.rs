@@ -119,7 +119,6 @@ mod pipeline;
 #[cfg(any(m2v_gpu, m2v_cpu_icd))]
 mod pipeline_wait_order;
 #[cfg(unix)]
-mod pitch_refusals;
 mod pixel_format_info;
 #[cfg(all(any(m2v_gpu, m2v_cpu_icd), target_os = "linux"))]
 mod pointer_residency;

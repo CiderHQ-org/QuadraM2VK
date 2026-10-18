@@ -1960,9 +1960,8 @@ impl Device {
             at,
             row_pitch: natural.row_pitch,
             slice_pitch: natural.slice_pitch,
-            alone: None,
         };
-        Ok((self.dma_buf_image(&[plan], facts, &texels)?).map(|(_, made)| made))
+        self.dma_buf_image(plan, facts, &texels)
     }
 
     /// No pages are imported as dma-bufs on this system: never reached.

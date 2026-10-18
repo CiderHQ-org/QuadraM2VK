@@ -535,12 +535,6 @@ impl Mapped {
     pub(super) fn as_ptr(self) -> *mut u8 {
         self.0.as_ptr()
     }
-
-    /// The address `bytes` past this one, in the same mapping.
-    pub(super) fn add(self, bytes: u64) -> Mapped {
-        let bytes = usize::try_from(bytes).unwrap_or(usize::MAX);
-        Mapped(NonNull::new(self.0.as_ptr().wrapping_add(bytes)).unwrap_or(self.0))
-    }
 }
 
 /// One `VkDeviceMemory` block.
@@ -1280,9 +1274,8 @@ impl Memory {
     /// import alignment), as a dedicated block of the best memory type of `class` among
     /// `allowed` (the types both the pointer and the resource take): its placement at offset 0,
     /// whose `mapped` is `pointer`. The block is never pooled and is freed with the placement,
-    /// as a dedicated block is (`host_memory.rs`). Allocated for export of its
-    /// `MTLBuffer` where `export_metal` (`VK_EXT_metal_objects`, `metal_texture.rs`). Refused
-    /// when no type of `class` is among `allowed`, else with the failure of the last type tried.
+    /// as a dedicated block is (`host_memory.rs`). Refused when no type of `class` is among
+    /// `allowed`, else with the failure of the last type tried.
     ///
     /// # Safety
     ///
@@ -1295,7 +1288,6 @@ impl Memory {
         size: u64,
         allowed: u32,
         class: MemoryClass,
-        export_metal: bool,
     ) -> Result<Placement, ImportFailure> {
         let mut failure = ImportFailure::NoMemoryType;
         for type_index in candidates(&self.types, allowed, class, self.unified) {
@@ -1304,17 +1296,12 @@ impl Memory {
                 .host_pointer(pointer.as_ptr().cast());
             let mut flags = vk::MemoryAllocateFlagsInfo::default()
                 .flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
-            let mut export = vk::ExportMetalObjectCreateInfoEXT::default()
-                .export_object_type(vk::ExportMetalObjectTypeFlagsEXT::METAL_BUFFER);
             let mut info = vk::MemoryAllocateInfo::default()
                 .allocation_size(size)
                 .memory_type_index(type_index)
                 .push_next(&mut import);
             if self.device_address {
                 info = info.push_next(&mut flags);
-            }
-            if export_metal {
-                info = info.push_next(&mut export);
             }
             // SAFETY: `info` and its chain live for the call; the type index is the device's and
             // allows the pointer; the caller's contract keeps the memory mapped.
