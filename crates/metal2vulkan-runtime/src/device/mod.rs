@@ -252,6 +252,10 @@ pub(super) struct DeviceShared {
     /// The queue reserved for staging copies, where the device has one (`staging.rs`).
     staging: Option<staging::StagingQueue>,
     pub(super) scheduler: Scheduler,
+    /// The scheduler's nudge, a timeline semaphore its wakers signal where its thread waits for
+    /// the GPU (`scheduler/mod.rs`): made on every device, used where the driver's wait for any
+    /// of several semaphores loses no signal (not MoltenVK's).
+    nudge: vk::Semaphore,
     pub(super) completion: Completion,
     /// The idle fences the batches that end command buffers signal (`command_buffer/fences.rs`).
     pub(super) fences: Fences,
@@ -573,6 +577,8 @@ impl Drop for DeviceShared {
         unsafe {
             let _ = self.vk().device_wait_idle();
             exit_guard::called(Call::DeviceWaitIdle);
+            // The scheduler's thread, which waited on its nudge, has stopped.
+            release::object(self.vk(), self.nudge);
             for queue in &self.queues {
                 release::object(self.vk(), queue.timeline);
                 // The marks after the last uses of the queue outside a batch (`relay.rs`).
@@ -1005,8 +1011,9 @@ impl Device {
                 }
             }
         };
-        let mut timelines = Vec::with_capacity(queue_places.len());
-        for _ in &queue_places {
+        // Each `VkQueue`'s timeline, then the scheduler's nudge (`scheduler/mod.rs`).
+        let mut timelines = Vec::with_capacity(queue_places.len() + 1);
+        for _ in 0..=queue_places.len() {
             let mut kind = vk::SemaphoreTypeCreateInfo::default()
                 .semaphore_type(vk::SemaphoreType::TIMELINE)
                 .initial_value(0);
@@ -1056,6 +1063,7 @@ impl Device {
         let flags_of = |family: u32| {
             (families.get(family as usize)).map_or(vk::QueueFlags::empty(), |p| p.queue_flags)
         };
+        let nudge = timelines[queue_places.len()];
         let queues: Vec<QueueSlot> = queue_places
             .iter()
             .zip(&timelines)
@@ -1466,6 +1474,7 @@ impl Device {
             bound_at: Mutex::new(None),
             staging,
             scheduler,
+            nudge,
             completion,
             fences: Fences::default(),
             contexts,
@@ -1541,6 +1550,11 @@ impl Device {
         if in_process {
             let device: Weak<dyn exit_guard::InProcess> = Arc::<DeviceShared>::downgrade(&shared);
             exit_guard::runs_in_process(device);
+        }
+        // The scheduler's thread waits for the GPU itself where heads wait for signals to land,
+        // but on MoltenVK, whose wait for any of several semaphores loses a signal that lands
+        // while it registers a later one (`command_buffer/completion.rs`).
+        if !moltenvk {
         }
         let device = Device(shared);
         device.say_unmeasured_driver();

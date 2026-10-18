@@ -28,6 +28,7 @@ pub(crate) struct Counters {
     timeline_waits: AtomicU64,
     missed_completion_wakes: AtomicU64,
     completed_where_seen: AtomicU64,
+    scheduled_where_submitted: AtomicU64,
     timestamp_slots_taken: AtomicU64,
     timestamp_slots_reset_on_host: AtomicU64,
     calibrations: AtomicU64,
@@ -106,6 +107,14 @@ pub(crate) struct Counters {
     batches_by_pending: [AtomicU64; 4],
     groups_kept_pending: AtomicU64,
     groups_sent_for_waits: AtomicU64,
+    command_buffer_wakes: AtomicU64,
+    command_buffer_wakes_spared: AtomicU64,
+    event_wakes: AtomicU64,
+    event_wakes_spared: AtomicU64,
+    slot_returns: AtomicU64,
+    slot_return_nanos: AtomicU64,
+    slot_waits: AtomicU64,
+    slot_wait_nanos: AtomicU64,
     completed_waits: AtomicU64,
     event_waits_met: AtomicU64,
     bare_starts: AtomicU64,
@@ -388,6 +397,13 @@ impl Counters {
     /// it complete (`CommandBufferShared::finish_here`).
     pub(crate) fn completed_where_seen(&self) {
         self.completed_where_seen.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A command buffer's transition to `Scheduled` ran on the scheduler's thread as its last
+    /// batch went (`CommandBufferShared::schedule`).
+    pub(crate) fn scheduled_where_submitted(&self) {
+        self.scheduled_where_submitted
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// A committed command buffer took a slot of one of the device's timestamp pools, to write
@@ -732,6 +748,39 @@ impl Counters {
     /// Such a group went at once because a thread waits for one of its command buffers.
     pub(crate) fn group_sent_for_wait(&self) {
         self.groups_sent_for_waits.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A command buffer's change woke the threads sleeping on it where `parked`, else spared the
+    /// notify (`command_buffer/mod.rs`).
+    pub(crate) fn command_buffer_wake(&self, parked: bool) {
+        match parked {
+            true => &self.command_buffer_wakes,
+            false => &self.command_buffer_wakes_spared,
+        }
+        .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// An event's rise woke the host waits sleeping on it where `parked`, else spared the notify
+    /// (`event.rs`).
+    pub(crate) fn event_wake(&self, parked: bool) {
+        match parked {
+            true => &self.event_wakes,
+            false => &self.event_wakes_spared,
+        }
+        .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A completed command buffer gave its queue's slot back `nanos` nanoseconds after its last
+    /// completed handler returned (`command_buffer/mod.rs`).
+    pub(crate) fn slot_returned(&self, nanos: u64) {
+        self.slot_returns.fetch_add(1, Ordering::Relaxed);
+        self.slot_return_nanos.fetch_add(nanos, Ordering::Relaxed);
+    }
+
+    /// A new command buffer waited `nanos` nanoseconds for a slot of its full queue (`queue.rs`).
+    pub(crate) fn slot_waited(&self, nanos: u64) {
+        self.slot_waits.fetch_add(1, Ordering::Relaxed);
+        self.slot_wait_nanos.fetch_add(nanos, Ordering::Relaxed);
     }
 
     /// A batch with work was submitted waiting for `waits` timelines at values the host saw them
@@ -1671,6 +1720,11 @@ pub struct WorkCounts {
     /// the program's code or runs on a handler thread then, while the runtime held none of the
     /// program's objects a release drops or runs (`command_buffer/completion.rs`).
     pub completed_where_seen: u64,
+    /// Command buffers whose transition to `Scheduled` ran on the scheduler's thread as their last
+    /// batch went, with no handler thread woken: those with no scheduled handler and no
+    /// submission handler, whose queue's context held nothing and ran on no thread then
+    /// (`CommandBufferShared::schedule`).
+    pub scheduled_where_submitted: u64,
     /// Command buffers that took a slot of the device's timestamp pools: only those that encoded
     /// work, on a device that times them by GPU timestamps.
     pub timestamp_slots_taken: u64,
@@ -2023,6 +2077,56 @@ pub struct WorkCounts {
     /// Of those, the groups that went at once because a thread began to wait for one of their
     /// command buffers' completion (`CommandBuffer::wait_until_completed`).
     pub groups_sent_for_waits: u64,
+    /// Times the scheduler's thread found no work and slept (`scheduler/mod.rs`), each until it
+    /// was woken or [`scheduler_sleep_slices`](Self::scheduler_sleep_slices) says it timed out.
+    pub scheduler_sleeps: u64,
+    /// Times a commit woke the scheduler's thread, which slept: it left its batches to the
+    /// thread. Each waking here is a notify of its condition variable, or a signal of its nudge
+    /// where it slept on the GPU, made only where it slept.
+    pub scheduler_wakes_commit: u64,
+    /// Times a completion woke it: what a head waited for from the GPU (its gate's values
+    /// completed, an event value its checks wait for landed) was met, seen by a completion turn or
+    /// by its own wait on the GPU, or the device was lost.
+    pub scheduler_wakes_completion: u64,
+    /// Times a host signal woke it: an event's value set by the host, a pipeline a host step waits
+    /// for made, a texture decode finished, a command buffer encoded again after a rebind, a lost
+    /// device.
+    pub scheduler_wakes_host: u64,
+    /// Sleeps that ended at the thread's longest wait with nothing having woken it.
+    pub scheduler_sleep_slices: u64,
+    /// Of `scheduler_sleeps`, those on the GPU: in one wait for the event values every head's
+    /// checks wait for to land, or for the scheduler's nudge, which a commit, a host signal or a
+    /// stop signals (`scheduler/mod.rs`; not on MoltenVK). A value landed wakes it as a
+    /// completion, counted in `scheduler_wakes_completion`.
+    pub scheduler_gpu_waits: u64,
+    /// Notifies of the queue waiters' condition variable (a batch watched, a turn's finish, a
+    /// value reached), each a system call: made only where a waiter slept on it
+    /// (`command_buffer/completion.rs`).
+    pub wakes_completion_waiters: u64,
+    /// Notifies of the handler threads' condition variable (a transition or release posted to a
+    /// queue's context): made only where a thread slept on it and a context was ready
+    /// (`contexts/mod.rs`).
+    pub wakes_handler_threads: u64,
+    /// Notifies of a command buffer's condition variable (its submission handlers ran, its
+    /// scheduled handlers ran, it completed): made only where a thread slept on it.
+    pub wakes_command_buffer_waiters: u64,
+    /// Notifies of an event's condition variable (its value rose): made only where a host wait
+    /// slept on it (`event.rs`).
+    pub wakes_event_waiters: u64,
+    /// The notifies those four and the scheduler's wakers spared, as no thread slept on the
+    /// condition variable (or, for the handler threads, no context was ready).
+    pub wakes_spared: u64,
+    /// Committed command buffers that gave their queue's slot back as they completed.
+    pub slot_returns: u64,
+    /// Nanoseconds from the return of their last completed handler to their slot's return, as
+    /// Metal's comes back once the handlers ran, before what the commands used is released (a
+    /// no-copy buffer's deallocator runs after it: `queue.rs`).
+    pub slot_return_nanos: u64,
+    /// Makes of a command buffer that waited for a slot of their full queue
+    /// (`CommandQueue::command_buffer`).
+    pub slot_waits: u64,
+    /// Nanoseconds those makes waited.
+    pub slot_wait_nanos: u64,
     /// The waits batches with work made for timelines at values the host had seen them reach,
     /// which make what completed work wrote visible to them: one per timeline whose completed
     /// value moved since a batch of the same `VkQueue` last waited for it.
@@ -2699,6 +2803,14 @@ impl Device {
         };
         let begun =
             |what: Begun| counters.command_buffers_begun_by[what as usize].load(Ordering::Relaxed);
+        let (sleeps, [by_commit, by_completion, by_host, by_slice], scheduler_spared, gpu_waits) =
+            self.shared().scheduler.sleeps_and_wakings();
+        let (completion_wakes, completion_spared) = self.shared().completion.wakes();
+        let (handler_wakes, handler_spared) = self.shared().contexts.wakes();
+        let command_buffer_wakes = counters.command_buffer_wakes.load(Ordering::Relaxed);
+        let command_buffer_spared = counters.command_buffer_wakes_spared.load(Ordering::Relaxed);
+        let event_wakes = counters.event_wakes.load(Ordering::Relaxed);
+        let event_spared = counters.event_wakes_spared.load(Ordering::Relaxed);
         let (allocated, census, (parked, waiting), (made, freed)) = {
             let memory = lock(&self.shared().memory);
             let turnover = memory.turnover();
@@ -2717,6 +2829,7 @@ impl Device {
             timeline_waits: counters.timeline_waits.load(Ordering::Relaxed),
             missed_completion_wakes: counters.missed_completion_wakes.load(Ordering::Relaxed),
             completed_where_seen: counters.completed_where_seen.load(Ordering::Relaxed),
+            scheduled_where_submitted: (counters.scheduled_where_submitted).load(Ordering::Relaxed),
             timestamp_slots_taken: counters.timestamp_slots_taken.load(Ordering::Relaxed),
             timestamp_slots_reset_on_host: (counters.timestamp_slots_reset_on_host)
                 .load(Ordering::Relaxed),
@@ -2839,6 +2952,25 @@ impl Device {
             batches_with_four_or_more_pending: pending(3),
             groups_kept_pending: counters.groups_kept_pending.load(Ordering::Relaxed),
             groups_sent_for_waits: counters.groups_sent_for_waits.load(Ordering::Relaxed),
+            scheduler_sleeps: sleeps,
+            scheduler_wakes_commit: by_commit,
+            scheduler_wakes_completion: by_completion,
+            scheduler_wakes_host: by_host,
+            scheduler_sleep_slices: by_slice,
+            scheduler_gpu_waits: gpu_waits,
+            wakes_completion_waiters: completion_wakes,
+            wakes_handler_threads: handler_wakes,
+            wakes_command_buffer_waiters: command_buffer_wakes,
+            wakes_event_waiters: event_wakes,
+            wakes_spared: completion_spared
+                + handler_spared
+                + command_buffer_spared
+                + event_spared
+                + scheduler_spared,
+            slot_returns: counters.slot_returns.load(Ordering::Relaxed),
+            slot_return_nanos: counters.slot_return_nanos.load(Ordering::Relaxed),
+            slot_waits: counters.slot_waits.load(Ordering::Relaxed),
+            slot_wait_nanos: counters.slot_wait_nanos.load(Ordering::Relaxed),
             completed_waits: counters.completed_waits.load(Ordering::Relaxed),
             event_waits_met: counters.event_waits_met.load(Ordering::Relaxed),
             bare_starts: counters.bare_starts.load(Ordering::Relaxed),

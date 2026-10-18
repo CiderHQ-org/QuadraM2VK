@@ -31,6 +31,11 @@
 //! - **Scheduled.** A command buffer is scheduled once its last batch is submitted (its every
 //!   wait was satisfied), or held in a group (below): this thread posts its transition to
 //!   `Scheduled` to its queue's context
+//!   ([`contexts`](super::contexts)), which runs its scheduled handlers. No submission runs a
+//!   scheduled handler, so none holds back a submission. A transition with no handler to run or
+//!   wait for, whose context holds nothing and runs on no thread, this thread runs itself as it
+//!   publishes the batch (`CommandBufferShared::schedule`): it sets the status and wakes the
+//!   command buffer's waiters, and no handler thread is woken for it.
 //! - **Submission handlers** (a runtime extension). This thread runs a command buffer's
 //!   submission handlers once it submitted its last batch, or held it in a group (below), in
 //!   submission order among the command buffers its passes took so, once it let go of the lock
@@ -67,14 +72,38 @@
 //!   ready together.
 //! - **Waits are bounded.** The thread wakes on a commit or a host signal, and at least every
 //!   [`WAIT_SLICE`], so a stop is seen promptly.
+//! - **Woken by completions only when they let a batch go** ([`Awaits`]). A pass that leaves a
 //!   head at its gate, its checks waiting for a GPU signal to land, or a group kept, leaves what
 //!   it waits for: each `VkQueue`'s value to complete, each event value to be reached. A
 //!   completion turn wakes
+//!   the thread only once one is met ([`Scheduler::completions`]), not at every batch that
+//!   completes meanwhile. Each waking is counted by what woke the thread, and each sleep
+//!   (`WorkCounts::scheduler_sleeps` and kin).
+//! - **Waits for a signal to land itself** ([`Nudge`]). Where the heads wait only for event
+//!   values that submitted GPU signals reach (no gate, none reached yet), the thread sleeps in one
+//!   `vkWaitSemaphores` for any of those values, or for the device's nudge semaphore to reach its
+//!   next value, instead of on its condition variable: the signal wakes it from the driver, with
+//!   no completion turn and no waker between, and it observes the values itself
+//!   (`EventShared::value`, which waits for what it reads), then checks and submits. Every other
+//!   waker (a commit, a host signal, a finished decode, a lost device, a stop) signals the nudge,
+//!   under the lock, where the thread waits so; a completion turn needs not, as the thread's own
+//!   wait sees the signal the turn saw. Not on MoltenVK 1.4.1, whose wait for any of several
+//!   semaphores loses a signal that lands while it registers a later one (`completion.rs`): there
+//!   the thread sleeps on its condition variable, woken by the turns. Counted:
+//!   `WorkCounts::scheduler_gpu_waits`; checked by `runtime_lane::event_round_trips`, a host
+//!   signal included.
 //! - **Exit.** Each submission is a section of the exit guard ([`exit_guard`]); once the process
 //!   is exiting, the thread ends, and what it holds stays held.
 //! - **Let go without the lock.** A submitted batch's hold of its command buffer goes after the
 //!   lock: it may be the last reference, and the command buffer's device may go with it, whose
 //!   drop stops this thread.
+//! - **A few batches a pass** ([`PASS_SUBMISSIONS`]). A pass that submitted that many batches ends
+//!   at the next point where no batch is held for a group (so a group is never cut short); the
+//!   thread lets go of their command buffers, runs their submission handlers, and passes again at
+//!   once for what is still ready, in the same order. A command buffer's waiters wait for these
+//!   holds (`command_buffer/gate.rs`), so a pass of every ready batch would keep the first one's
+//!   waiters until the last was submitted, however long before that its work completed: seconds,
+//!   once thousands of command buffers wait for one shared event (`runtime_lane::gpu_times`).
 //!
 //! Locks are taken in one order: the scheduler's state, then its inbox's, then a command buffer's,
 //! then an event's or a `VkQueue`'s, then the handler threads' state, then the queues' waiters'
@@ -93,6 +122,7 @@ use super::command_buffer::kept_barriers::KeptBarriers;
 use super::command_buffer::BatchLists;
 use super::command_buffer::CommandBufferShared;
 use super::command_buffer::{Group, GroupEnd, Submitting, GROUP_BATCHES};
+use super::device::functions::Functions;
 use super::device::lock;
 use super::error::{CommandBufferError, Error, MemoryKind};
 use super::event::EventShared;
@@ -101,20 +131,136 @@ use super::exit_guard;
 use super::replay::SpareLogs;
 use super::resource::ResourceKey;
 use super::tracker::{self, Footprint, Tracker};
+use super::Device;
 use ash::vk;
 use binary::{BinarySignals, Needs};
 use inbox::Inbox;
 use left::{work_through, Kind, Left};
 use order::{Behind, Order};
 use std::collections::BTreeMap;
-use std::sync::atomic::{fence, AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 /// How long the thread sleeps at most without looking for work.
 const WAIT_SLICE: Duration = Duration::from_millis(100);
 
+/// The batches one pass submits before it ends, at the next point where no batch is held for a
+/// group, for the thread to let go of their command buffers (the module docs): a submitted
+/// command buffer's waiters wait for about that many submissions, not for every ready batch's.
+/// A multiple of a group's batches (`command_buffer/group.rs`).
+const PASS_SUBMISSIONS: usize = 16;
+
+/// The device's nudge (the module docs): a timeline semaphore of its own, which a waker signals
+/// to the value the thread waits for beside the GPU's signals.
+struct Nudge {
+    functions: Functions,
+    semaphore: vk::Semaphore,
+}
+
+impl Nudge {
+    /// Signal the semaphore to `value`, above every value signalled before (each under the
+    /// scheduler's lock); false where it failed (a lost device, whose waits return) or the process
+    /// is exiting (the thread ends at its slice).
+    fn signal(&self, value: u64) -> bool {
+        let Some(_busy) = exit_guard::enter() else {
+            return false;
+        };
+        let info = vk::SemaphoreSignalInfo::default()
+            .semaphore(self.semaphore)
+            .value(value);
+        // SAFETY: the device's semaphore, live while its scheduler runs; `value` is above the
+        // semaphore's (the values rise under the scheduler's lock).
+        let signalled = unsafe { self.functions.get().signal_semaphore(&info) };
+        exit_guard::called(exit_guard::Call::SignalSemaphore);
+        signalled.is_ok()
+    }
+}
+
+/// How the thread slept as a waker marked the state ([`State::mark`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Asleep {
+    /// It made a pass or was about to look again: no wake needed.
+    No,
+    /// On its condition variable: notify it.
+    OnCondvar,
+    /// On the GPU: the nudge was signalled, under the lock.
+    Nudged,
+    /// On the GPU, for what the waker's completion turn saw land: its own wait returns for it.
+    OnGpu,
+}
+
+/// The lists the thread's wait for the GPU fills, kept with their room.
+#[derive(Default)]
+struct GpuWait {
+    events: Vec<(Arc<EventShared>, u64)>,
+    semaphores: Vec<vk::Semaphore>,
+    values: Vec<u64>,
+}
+
+/// What woke the scheduler's thread (`WorkCounts::scheduler_wakes_commit` and kin), in the order
+/// [`Scheduler::sleeps_and_wakings`] gives them.
+#[derive(Clone, Copy)]
+enum Woken {
+    /// A commit left its batches to the thread.
+    Commit,
+    /// A completion turn: what a head waited for from the GPU was met, or the device was lost.
+    Completion,
+    /// A host signal: an event's value set, a pipeline made, a decode finished, a command buffer
+    /// encoded again, the device lost.
+    Host,
+    /// No waking: the sleep ended at [`WAIT_SLICE`].
+    Slice,
+}
+
+/// What the heads a pass left waiting for the GPU wait for (the module docs): each one at its gate,
+/// the `VkQueue`s' values to complete; each one whose checks wait for GPU signals to land, the
+/// event values. Left under its own lock, which the scheduler's thread takes under its state's
+/// and a completion turn alone; the completion turn reads events under it, so no event's lock is
+/// held while it is taken.
+#[derive(Default)]
+struct Awaits {
+    /// A head waits: read without the lock first.
+    any: AtomicBool,
+    list: Mutex<AwaitList>,
+}
+
+/// [`Awaits`]' lists, kept with their room.
+#[derive(Default)]
+struct AwaitList {
+    /// The event values heads' checks wait for to be reached on the device or by the host.
+    events: Vec<(Arc<EventShared>, u64)>,
+    /// The gates heads' host steps wait at, one after another, each a value per `VkQueue`.
+    gates: Vec<u64>,
+    /// How many `VkQueue`s each gate has a value for.
+    queues: usize,
+}
+
+impl Awaits {
+    /// A pass begins: what heads wait for is found again.
+    fn clear(&self) {
+        if self.any.load(Ordering::SeqCst) {
+            let mut list = lock(&self.list);
+            list.events.clear();
+            list.gates.clear();
+        }
+    }
+
+    /// A head's checks wait for the event values of `waits` to land.
+    fn events(&self, waits: &[(Arc<EventShared>, u64)]) {
+        let mut list = lock(&self.list);
+        list.events.extend(waits.iter().cloned());
+        self.any.store(true, Ordering::SeqCst);
+    }
+
+    /// A head's host step waits for every `VkQueue` to complete its value of `gate`.
+    fn gate(&self, gate: &[u64]) {
+        let mut list = lock(&self.list);
+        list.queues = gate.len();
+        list.gates.extend_from_slice(gate);
+        self.any.store(true, Ordering::SeqCst);
+    }
 
     /// The group held waits for `VkQueue` `queue`, of `queues`, to complete `value`
     /// (`Group::keeps`): a gate of no other queue's value.
@@ -124,6 +270,18 @@ const WAIT_SLICE: Duration = Duration::from_millis(100);
         (list.gates).extend((0..queues).map(|at| if at == queue { value } else { 0 }));
         self.any.store(true, Ordering::SeqCst);
     }
+}
+
+impl AwaitList {
+    /// Whether a head may go: an event value it waits for was reached on the device or by the
+    /// host, or every `VkQueue` completed its gate (`completed`).
+    fn met(&self, completed: impl Fn(&[u64]) -> bool) -> bool {
+        (self.events.iter())
+            .any(|(event, value)| matches!(event.wait(*value), Some(WaitFor::Reached)))
+            || (self.queues > 0 && self.gates.chunks(self.queues).any(completed))
+    }
+}
+
 /// One device's scheduler thread.
 pub(crate) struct Scheduler {
     shared: Arc<SchedulerShared>,
@@ -134,12 +292,67 @@ struct SchedulerShared {
     /// The state, under the lock a pass holds, with the commits a pass under way takes in.
     inbox: Inbox<State, Committed>,
     wake: Condvar,
-    /// A batch waits at its gate for work to complete: the completion turns wake the thread
-    /// as batches complete.
-    gated: AtomicBool,
+    /// What heads wait for from the GPU: the completion turns wake the thread once one is met.
+    awaits: Awaits,
+    /// The thread's sleeps, its wakings by what woke it ([`Woken`]), and the notifies spared as
+    /// it did not sleep, counted.
+    sleeps: AtomicU64,
+    wakings: [AtomicU64; 4],
+    spared: AtomicU64,
+    /// The sleeps on the GPU, of `sleeps` (the module docs).
+    gpu_waits: AtomicU64,
+    /// The device's nudge, where the thread waits for the GPU itself (the module docs).
+    nudge: OnceLock<Nudge>,
     /// The device's cleared encoder logs (`replay.rs`): an encoder takes one, and its log comes
     /// back as the encoder ends, or in its command buffer's release.
     spare_logs: SpareLogs,
+}
+
+impl SchedulerShared {
+    /// A waker marked the state for the thread, which makes no pass: wake it where it sleeps
+    /// (`asleep`, read under the lock the mark was made under; one that sleeps later reads the
+    /// mark first), counted as `woken`; else the notify, a system call, is spared.
+    fn woken(&self, woken: Woken, asleep: Asleep) {
+        match asleep {
+            Asleep::OnCondvar => {
+                self.wakings[woken as usize].fetch_add(1, Ordering::Relaxed);
+                self.wake.notify_all();
+            }
+            Asleep::Nudged => {
+                self.wakings[woken as usize].fetch_add(1, Ordering::Relaxed);
+            }
+            Asleep::No | Asleep::OnGpu => {
+                self.spared.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// The `(semaphore, index)` pairs of the event values every head waits for to land, into
+    /// `wait`, where the thread may wait for them itself (the module docs): the device has a
+    /// nudge, no head waits at a gate, and each value is a submitted signal's not yet observed (one
+    /// reached already may let a head go, a completion turn's wake the thread's condition variable
+    /// takes).
+    fn gpu_waits(&self, wait: &mut GpuWait) -> bool {
+        wait.events.clear();
+        wait.semaphores.clear();
+        wait.values.clear();
+        if self.nudge.get().is_none() || !self.awaits.any.load(Ordering::SeqCst) {
+            return false;
+        }
+        let list = lock(&self.awaits.list);
+        if !list.gates.is_empty() || list.events.is_empty() {
+            return false;
+        }
+        for (event, value) in &list.events {
+            let Some(WaitFor::Index(index)) = event.wait(*value) else {
+                return false;
+            };
+            wait.events.push((Arc::clone(event), *value));
+            wait.semaphores.push(event.semaphore());
+            wait.values.push(index);
+        }
+        true
+    }
 }
 
 /// What the scheduler submits from, and the device state it submits against.
@@ -158,6 +371,13 @@ pub(crate) struct State {
     binary: BinarySignals<vk::Semaphore>,
     /// A commit or a host signal came since the thread last looked.
     dirty: bool,
+    /// The thread sleeps on its condition variable: a waker notifies it only then.
+    asleep: bool,
+    /// The thread waits for the GPU, and for the nudge to reach this value: a waker signals it
+    /// to that value under the lock, instead of notifying (the module docs).
+    on_gpu: Option<u64>,
+    /// The nudge semaphore's value: the last a waker signalled it to.
+    nudge_value: u64,
     stopping: bool,
     /// The textures whose decoded twins have CPU decodes queued or running, each with how many
     /// (`texture/twin_decode.rs`): a batch whose footprint names one waits for them.
@@ -178,6 +398,28 @@ pub(crate) struct State {
     /// Those batches as the order held them, with their logical queues, in order.
     grouped: Vec<(u64, Held)>,
 }
+
+impl State {
+    /// A waker's mark (the module docs): look for work again, and how the thread sleeps. Where it
+    /// waits for the GPU, `nudge` is signalled to the value it waits for, here, under the lock;
+    /// none is given for a completion turn's wake, whose signal the thread's own wait sees.
+    fn mark(&mut self, nudge: Option<&Nudge>) -> Asleep {
+        self.dirty = true;
+        if self.asleep {
+            return Asleep::OnCondvar;
+        }
+        match (self.on_gpu, nudge) {
+            (None, _) => Asleep::No,
+            (Some(_), None) => Asleep::OnGpu,
+            (Some(value), Some(nudge)) => {
+                if nudge.signal(value) {
+                    self.on_gpu = None;
+                    self.nudge_value = value;
+                }
+                Asleep::Nudged
+            }
+        }
+    }
 }
 
 /// A commit not yet taken into the order: the command buffer, its logical queue, its batches.
@@ -247,6 +489,9 @@ impl Scheduler {
                 waited: vec![vec![0; queues + 2]; queues],
                 binary: BinarySignals::default(),
                 dirty: false,
+                asleep: false,
+                on_gpu: None,
+                nudge_value: 0,
                 stopping: false,
                 decodes: BTreeMap::new(),
                 untracked_decodes: 0,
@@ -256,7 +501,12 @@ impl Scheduler {
                 grouped: Vec::new(),
             }),
             wake: Condvar::new(),
-            gated: AtomicBool::new(false),
+            awaits: Awaits::default(),
+            sleeps: AtomicU64::new(0),
+            wakings: Default::default(),
+            spared: AtomicU64::new(0),
+            gpu_waits: AtomicU64::new(0),
+            nudge: OnceLock::new(),
             spare_logs: SpareLogs::default(),
         });
         let thread = {
@@ -271,6 +521,17 @@ impl Scheduler {
             shared,
             thread: Mutex::new(Some(thread)),
         })
+    }
+
+    /// Wait for the GPU itself where heads wait for signals to land, with `semaphore`, a timeline
+    /// semaphore at 0 of the device of `functions`, which destroys it after stopping the thread,
+    /// as its nudge (the module docs): on a device whose wait for any of several semaphores loses
+    /// no signal.
+    pub(crate) fn wait_on_gpu(&self, functions: Functions, semaphore: vk::Semaphore) {
+        let _ = self.shared.nudge.set(Nudge {
+            functions,
+            semaphore,
+        });
     }
 
     /// Hold the batches of `buffer`, committed now on logical queue `queue`: what each batch
@@ -290,8 +551,12 @@ impl Scheduler {
             batches,
         };
         buffer.device().shared().counts.commit_handed_off();
-        if (shared.inbox).post(committed, |state| state.dirty = true) {
-            shared.wake.notify_all();
+        let mut asleep = Asleep::No;
+        let marked = (shared.inbox).post(committed, |state| {
+            asleep = state.mark(shared.nudge.get());
+        });
+        if marked {
+            shared.woken(Woken::Commit, asleep);
         }
     }
 
@@ -302,8 +567,8 @@ impl Scheduler {
         let shared = Arc::downgrade(&self.shared);
         move || {
             if let Some(shared) = shared.upgrade() {
-                lock(shared.inbox.state()).dirty = true;
-                shared.wake.notify_all();
+                let asleep = lock(shared.inbox.state()).mark(shared.nudge.get());
+                shared.woken(Woken::Host, asleep);
             }
         }
     }
@@ -342,9 +607,9 @@ impl Scheduler {
         if !tracked {
             state.untracked_decodes -= 1;
         }
-        state.dirty = true;
+        let asleep = state.mark(self.shared.nudge.get());
         drop(state);
-        self.shared.wake.notify_all();
+        self.shared.woken(Woken::Host, asleep);
     }
 
     /// Whether this thread is the scheduler's (a submission check runs on it).
@@ -354,27 +619,69 @@ impl Scheduler {
             .is_some_and(|handle| handle.thread().id() == std::thread::current().id())
     }
 
-    /// Look for work again: an event's value rose, a batch completed, or a commit's thread left
-    /// what other threads committed to the thread ([`inbox::Outcome::unattended`]). Where a pass
-    /// is under way, it passes again once done, and wakes the thread for a step or a check that
-    /// finds; else the thread is woken here, under the lock, which then only a short hold or a
-    /// pass made after this one's change has ([`Inbox::wake`]): the waker never waits for a
-    /// pass's submissions.
+    /// Look for work again: an event's value rose, a pipeline was made, a rebind encoded a
+    /// command buffer again, or the device was lost (each a host signal). Where a pass is under
+    /// way, it passes again once done, and wakes the thread for a step or a check that finds;
+    /// else the thread is woken here, under the lock, which then only a short hold or a pass made
+    /// after this one's change has ([`Inbox::wake`]): the waker never waits for a pass's
+    /// submissions.
     pub(crate) fn wake(&self) {
-        if (self.shared.inbox).wake(|state| state.dirty = true) {
-            self.shared.wake.notify_all();
+        self.wake_for(Woken::Host);
+    }
+
+    /// [`wake`](Self::wake), counted as `woken`.
+    fn wake_for(&self, woken: Woken) {
+        self.wake_with(woken, self.shared.nudge.get());
+    }
+
+    /// [`wake_for`](Self::wake_for), signalling `nudge` where the thread waits for the GPU.
+    fn wake_with(&self, woken: Woken, nudge: Option<&Nudge>) {
+        let mut asleep = Asleep::No;
+        let marked = (self.shared.inbox).wake(|state| {
+            asleep = state.mark(nudge);
+        });
+        if marked {
+            self.shared.woken(woken, asleep);
         }
     }
 
-    /// Batches completed, their queues' completed values and their event signals published: look
-    /// for work again when a batch waits at its gate or for a GPU signal to land. The flag is read
-    /// after a fence, as the thread sets it before it reads the completed values or the events,
-    /// so one of the two sees the other.
-    pub(crate) fn completions(&self) {
+    /// Batches of `device` completed, their queues' completed values and their event signals
+    /// published: look for work again where a head waits at its gate, or for a GPU signal to land,
+    /// and what it waits for is now met ([`Awaits`]), or the device is lost. The flag is read
+    /// after a fence, as the thread sets it, and leaves what it waits for, before it reads the
+    /// completed values or the events, so one of the two sees the other.
+    pub(crate) fn completions(&self, device: &Device) {
         fence(Ordering::SeqCst);
-        if self.shared.gated.load(Ordering::SeqCst) {
-            self.wake();
+        let awaits = &self.shared.awaits;
+        if !awaits.any.load(Ordering::SeqCst) {
+            return;
         }
+        let shared = device.shared();
+        let completed = |gate: &[u64]| {
+            (shared.queues.iter())
+                .zip(gate)
+                .all(|(queue, &value)| queue.completed_value() >= value)
+        };
+        // Where the thread waits for the GPU, it waits for the signals the turn saw land: it is
+        // nudged only for a lost device.
+        if device.is_lost() {
+            self.wake_for(Woken::Completion);
+        } else if lock(&awaits.list).met(completed) {
+            self.wake_with(Woken::Completion, None);
+        }
+    }
+
+    /// The thread's sleeps and wakings so far: sleeps, then wakings by a commit, by a completion,
+    /// by a host signal, and the sleeps that ended at [`WAIT_SLICE`]; then the notifies spared as
+    /// it did not sleep; then the sleeps on the GPU, of the sleeps (`WorkCounts`).
+    pub(crate) fn sleeps_and_wakings(&self) -> (u64, [u64; 4], u64, u64) {
+        let shared = &self.shared;
+        (
+            shared.sleeps.load(Ordering::Relaxed),
+            std::array::from_fn(|at| shared.wakings[at].load(Ordering::Relaxed)),
+            shared.spared.load(Ordering::Relaxed),
+            shared.gpu_waits.load(Ordering::Relaxed),
+        )
     }
 
     /// The device's cleared encoder logs (`replay.rs`).
@@ -391,7 +698,11 @@ impl Scheduler {
     /// Ask the thread to end, and wait for it unless this is the thread. The device is being
     /// dropped, so nothing is held: every held command buffer holds its device.
     pub(crate) fn stop(&self) {
-        lock(self.shared.inbox.state()).stopping = true;
+        {
+            let mut state = lock(self.shared.inbox.state());
+            state.stopping = true;
+            state.mark(self.shared.nudge.get());
+        }
         self.shared.wake.notify_all();
         let mut thread = lock(&self.thread);
         let own = thread
@@ -412,6 +723,7 @@ fn run(shared: &SchedulerShared) {
     // What its rounds let go of and the work they leave it, emptied after each waking and kept
     // with their room.
     let (mut passed, mut left) = (Passed::default(), Left::default());
+    let mut gpu = GpuWait::default();
     loop {
         let mut state = lock(shared.inbox.state());
         // A commit, or a nudge, left to this thread's pass may wait in the inbox (`inbox.rs`).
@@ -420,11 +732,21 @@ fn run(shared: &SchedulerShared) {
             && !shared.inbox.holds_commits()
             && !shared.inbox.nudged()
         {
-            state = shared
+            shared.sleeps.fetch_add(1, Ordering::Relaxed);
+            if let Some(nudge) = shared.nudge.get().filter(|_| shared.gpu_waits(&mut gpu)) {
+                state = wait_for_gpu(shared, state, nudge, &mut gpu);
+                continue;
+            }
+            state.asleep = true;
+            let (woke, waited) = shared
                 .wake
                 .wait_timeout(state, WAIT_SLICE)
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .0;
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state = woke;
+            state.asleep = false;
+            if waited.timed_out() {
+                shared.wakings[Woken::Slice as usize].fetch_add(1, Ordering::Relaxed);
+            }
         }
         if state.stopping {
             return;
@@ -444,6 +766,63 @@ fn run(shared: &SchedulerShared) {
             Some(true) => lock(shared.inbox.state()).dirty = true,
         }
     }
+}
+
+/// Sleep on the GPU (the module docs): for any of `gpu`'s semaphores to reach its value, or the
+/// nudge its next, at most [`WAIT_SLICE`], without the lock `state` holds, which comes back taken.
+/// Where a value landed, its events observe their counters, and the state is marked for a pass.
+fn wait_for_gpu<'a>(
+    shared: &'a SchedulerShared,
+    mut state: std::sync::MutexGuard<'a, State>,
+    nudge: &Nudge,
+    gpu: &mut GpuWait,
+) -> std::sync::MutexGuard<'a, State> {
+    shared.gpu_waits.fetch_add(1, Ordering::Relaxed);
+    let target = state.nudge_value + 1;
+    state.on_gpu = Some(target);
+    drop(state);
+    gpu.semaphores.push(nudge.semaphore);
+    gpu.values.push(target);
+    let info = vk::SemaphoreWaitInfo::default()
+        .flags(vk::SemaphoreWaitFlags::ANY)
+        .semaphores(&gpu.semaphores)
+        .values(&gpu.values);
+    // A section, as each queue waiter's wait: once the process is exiting, no wait.
+    let waited = exit_guard::enter().map(|_busy| {
+        // SAFETY: the semaphores are live: the events' are held, the nudge is the device's until
+        // the thread stopped; each value is a submitted signal's, or the nudge's next, which a
+        // waker signals.
+        let waited =
+            unsafe { (nudge.functions.get()).wait_semaphores(&info, WAIT_SLICE.as_nanos() as u64) };
+        exit_guard::called(exit_guard::Call::WaitSemaphores);
+        waited
+    });
+    let landed = matches!(waited, Some(Ok(())));
+    if landed {
+        // What landed is observed here, the reads waited for (`event.rs`), so the pass sees it.
+        for (event, _) in &gpu.events {
+            event.value();
+        }
+    }
+    gpu.events.clear();
+    let mut state = lock(shared.inbox.state());
+    // Whether a waker signalled the nudge (taking `on_gpu`); where none did, the next wait waits
+    // for the same value.
+    let by_waker = state.on_gpu.take().is_none();
+    match waited {
+        Some(Ok(())) if !by_waker => {
+            shared.wakings[Woken::Completion as usize].fetch_add(1, Ordering::Relaxed);
+            state.dirty = true;
+        }
+        // Nudged: the waker counted the waking and marked the state.
+        Some(Ok(())) => {}
+        Some(Err(vk::Result::TIMEOUT)) => {
+            shared.wakings[Woken::Slice as usize].fetch_add(1, Ordering::Relaxed);
+        }
+        // A failed wait (a lost device) or an exit: a pass finds out.
+        _ => state.dirty = true,
+    }
+    state
 }
 
 /// Run one piece of work the thread's passes left it, without the lock (a check runs the program's
@@ -470,7 +849,8 @@ fn run_work(kind: Kind, work: Work) -> bool {
 }
 
 /// One round of the thread's: a pass, looking at the inbox again while the passes leave the
-/// thread no work ([`Inbox::pass`]), what they leave added to `left` and what they let go of to
+/// thread no work and none stopped at [`PASS_SUBMISSIONS`] ([`Inbox::pass`]; such a pass marked
+/// the state for the next round), what they leave added to `left` and what they let go of to
 /// `passed` (empty, kept from round to round); then, without the lock, what they let go of: the
 /// switches of storage forms settled ended and the submission handlers run (on this thread,
 /// before its next pass; neither once the process is exiting, as the thread then runs nothing
@@ -480,9 +860,10 @@ fn run_work(kind: Kind, work: Work) -> bool {
 /// exiting.
 fn round(shared: &SchedulerShared, left: &mut Left<Work>, passed: &mut Passed) -> bool {
     (shared.inbox).pass(|state, commits| {
-        pass(state, commits, (&mut *passed, &mut *left), &shared.gated);
-        !passed.exiting && left.is_empty()
+        pass(state, commits, (&mut *passed, &mut *left), &shared.awaits);
+        !passed.exiting && left.is_empty() && !passed.more
     });
+    passed.more = false;
     if passed.exiting {
         passed.settled.clear();
         passed.handlers.clear();
@@ -495,22 +876,26 @@ fn round(shared: &SchedulerShared, left: &mut Left<Work>, passed: &mut Passed) -
 }
 
 /// What passes let go of for their thread to finish without the lock ([`submit_ready`]'s
-/// outputs), and whether the process is exiting.
+/// outputs), whether a pass stopped at [`PASS_SUBMISSIONS`] (more may be ready), and whether the
+/// process is exiting.
 #[derive(Default)]
 struct Passed {
     spent: Spent,
     settled: Settled,
     handlers: Handlers,
+    more: bool,
     exiting: bool,
 }
 
 /// A pass of the thread's: take `commits` into the order, in commit order, then submit what is
-/// ready ([`submit_ready`]) into `passed` and `left`.
+/// ready ([`submit_ready`]) into `passed` and `left`. A pass that stopped at
+/// [`PASS_SUBMISSIONS`] marks the state, so the thread passes again at once after its round let
+/// go of them.
 fn pass(
     state: &mut State,
     commits: &mut Vec<Committed>,
     (passed, left): (&mut Passed, &mut Left<Work>),
-    gated: &AtomicBool,
+    awaits: &Awaits,
 ) {
     for Committed {
         buffer,
@@ -536,16 +921,25 @@ fn pass(
         passed.spent.push(buffer);
     }
     state.dirty = false;
-    let exiting = submit_ready(
+    match submit_ready(
         state,
         (&mut passed.spent, &mut passed.settled),
         left,
         &mut passed.handlers,
-        gated,
-    )
-    .is_err();
-    passed.exiting |= exiting;
+        awaits,
+    ) {
+        Ok(More(true)) => {
+            state.dirty = true;
+            passed.more = true;
+        }
+        Ok(More(false)) => {}
+        Err(Exiting) => passed.exiting = true,
+    }
 }
+
+/// Whether a pass of [`submit_ready`] stopped at [`PASS_SUBMISSIONS`], with batches perhaps still
+/// ready.
+struct More(bool);
 
 /// What a pass of [`submit_ready`] lets go of, for the caller to drop without the lock: the holds
 /// of the command buffers its batches came from, the last of which may be a command buffer's last
@@ -579,10 +973,16 @@ fn submit_ready(
     (spent, settled): (&mut Spent, &mut Settled),
     left: &mut Left<Work>,
     handlers: &mut Handlers,
-    gated: &AtomicBool,
-) -> Result<(), Exiting> {
+    awaits: &Awaits,
+) -> Result<More, Exiting> {
+    let before = spent.len();
     loop {
+        if spent.len() - before >= PASS_SUBMISSIONS && state.grouped.is_empty() {
+            return Ok(More(true));
+        }
         let busy = exit_guard::enter().ok_or(Exiting)?;
+        // What the heads wait for from the GPU is found again by this pass's looks.
+        awaits.clear();
         // The heads that wait behind a batch committed before them that keeps its place: no step,
         // check or submission of theirs before it is submitted (`order.rs`).
         // Of those whose host step or checks may start (`gate_heads`, `check_heads`), and of the
@@ -599,8 +999,8 @@ fn submit_ready(
             .filter(|&sequence| is_behind(&state.order, &state.binary, &mut memo, sequence))
             .collect(),
         };
-        let waiting = gate_heads(state, &behind, left, gated);
-        let landing = check_heads(state, &behind, left, gated);
+        let waiting = gate_heads(state, &behind, left, awaits);
+        let landing = check_heads(state, &behind, left, awaits);
         let binary = &state.binary;
         let decodes = &state.decodes;
         let untracked_decodes = state.untracked_decodes;
@@ -649,8 +1049,9 @@ fn submit_ready(
             };
             submit_group(state, (spent, settled), handlers, end)?;
             if !waiting && !landing {
+                awaits.any.store(false, Ordering::SeqCst);
             }
-            return Ok(());
+            return Ok(More(false));
         };
         let submitted = held
             .buffer
@@ -899,6 +1300,9 @@ type Work = (Hold<CommandBufferShared>, usize);
 /// ready (its binary semaphores' signals submitted, its events' values reached, its host step
 /// recorded, not `behind` an earlier commit) and waits for its checks: once every value it waits
 /// for was reached on the device or by the host, not only by a submitted GPU signal (or the device
+/// is lost), it goes to `left` as a check, unless there already. What it waits for goes to
+/// `awaits` before the events are read again, as [`Scheduler::completions`] says. Whether a head
+/// still waits for a GPU signal to land.
 ///
 /// Where the line's batches may go in one kernel submission (`command_buffer/group.rs`), the
 /// batches right behind a head that goes (its checks in `left` or none due, otherwise ready, its
@@ -908,6 +1312,7 @@ type Work = (Hold<CommandBufferShared>, usize);
 /// finds them ready together. Each check still runs in commit order before its own batch's
 /// submission, within the pass before it, where a head's alone runs after the batch before it
 /// was submitted.
+fn check_heads(state: &mut State, behind: &[u64], left: &mut Left<Work>, awaits: &Awaits) -> bool {
     let State { order, binary, .. } = state;
     let mut landing = false;
     order.leading_mut(behind, GROUP_BATCHES - 1, |held, head| {
@@ -939,7 +1344,7 @@ type Work = (Hold<CommandBufferShared>, usize);
         match event_waits(held) {
             None => return false,
             Some(waits) if !waits.is_empty() && !held.buffer.device().is_lost() => {
-                gated.store(true, Ordering::SeqCst);
+                awaits.events(&held.waits);
                 fence(Ordering::SeqCst);
                 if event_waits(held).is_some_and(|waits| !waits.is_empty()) {
                     landing = true;
@@ -957,15 +1362,10 @@ type Work = (Hold<CommandBufferShared>, usize);
 /// Look at each line's head that is otherwise ready (not `behind` an earlier commit either,
 /// its gate then covers that commit's work) and needs a host step: its gate is taken (the queues'
 /// submitted values, the first time), and once every `VkQueue`'s completed value reached it (or the
-/// device is lost), its step goes to `left`, unless there already. `gated` is set before the
-/// completed values are read, as [`Scheduler::completions`] says. Whether a head still waits at its
-/// gate.
-fn gate_heads(
-    state: &mut State,
-    behind: &[u64],
-    left: &mut Left<Work>,
-    gated: &AtomicBool,
-) -> bool {
+/// device is lost), its step goes to `left`, unless there already. The gate goes to `awaits`
+/// before the completed values are read, as [`Scheduler::completions`] says. Whether a head still
+/// waits at its gate.
+fn gate_heads(state: &mut State, behind: &[u64], left: &mut Left<Work>, awaits: &Awaits) -> bool {
     let State {
         order,
         values,
@@ -995,7 +1395,7 @@ fn gate_heads(
             continue;
         }
         let gate = held.gate.get_or_insert_with(|| values.clone());
-        gated.store(true, Ordering::SeqCst);
+        awaits.gate(gate);
         fence(Ordering::SeqCst);
         let device = held.buffer.device();
         let shared = device.shared();

@@ -103,6 +103,16 @@
 //! - **No self-join.** A turn's drop of a command buffer's last reference can drop the device's
 //!   last handle on its waiter; stopping from a waiter then joins the others and only asks it to
 //!   end.
+//! - **Woken only where one sleeps, and only the one a change is for.** Each waiter sleeps on a
+//!   condition variable of its own, and a drain ([`take_pending`]) on another. A change wakes only
+//!   the sleepers it is for: a batch watched, its queue's waiter; a turn that took a queue's
+//!   batches, that queue's waiter (its next batch may arm); a wait that ended, a drain waiting for
+//!   it; the pending batches given back after a failure, a stop or an exit, every one. Each where
+//!   it sleeps (`Pending::parked`, `Pending::draining`), read under the lock the change is made
+//!   under: one that sleeps later looks at the change first. A batch watched while its waiter is
+//!   in its queue's wait, or a turn's look, so costs no system call (a notify is one, sleeper or
+//!   not), and the waiters of the device's idle `VkQueue`s sleep through the other queues'
+//!   batches. Counted: `WorkCounts::wakes_completion_waiters`, `WorkCounts::wakes_spared`.
 
 use super::gate::Hold;
 use super::CommandBufferShared;
@@ -115,6 +125,7 @@ use crate::release;
 use crate::Device;
 use ash::vk;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -131,9 +142,39 @@ pub(crate) struct Completion {
 /// What the waiters and the scheduler share.
 struct Watch {
     pending: Mutex<Pending>,
-    /// Notified on every change a waiter waits for: a batch watched, a value reached, a wait
-    /// ended, batches finished or taken, a failure, a stop, an exit.
-    wake: Condvar,
+    /// Per `VkQueue`: its waiter's condition variable, notified where it sleeps on it on a change
+    /// it waits for (the module docs): a batch watched on its queue, its queue's batches taken by
+    /// a turn, the pending batches given back after a failure, a stop, an exit.
+    wakes: Box<[Condvar]>,
+    /// A drain's ([`take_pending`]), notified where one sleeps on it as a waiter's wait ends, and
+    /// on a stop or an exit.
+    drained: Condvar,
+    /// The notifies made, and those spared as no waiter slept (`WorkCounts`).
+    woke: AtomicU64,
+    spared: AtomicU64,
+}
+
+impl Watch {
+    /// Notify `wake` where `asleep` (read under the lock the change was made under) says a thread
+    /// sleeps on it, counted either way.
+    fn notify(&self, wake: &Condvar, asleep: bool) {
+        if asleep {
+            self.woke.fetch_add(1, Ordering::Relaxed);
+            wake.notify_all();
+        } else {
+            self.spared.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Wake every waiter and drain, wherever they sleep: the pending batches were given back after
+    /// a failure, or the waiters stop or end.
+    fn wake_all(&self) {
+        self.woke.fetch_add(1, Ordering::Relaxed);
+        for wake in &self.wakes {
+            wake.notify_all();
+        }
+        self.drained.notify_all();
+    }
 }
 
 struct Pending {
@@ -152,6 +193,10 @@ struct Pending {
     /// The process is exiting: every waiter ends, and what is pending stays pending.
     exiting: bool,
     stopping: bool,
+    /// Per `VkQueue`: its waiter sleeps on its condition variable ([`wait`]).
+    parked: Vec<bool>,
+    /// The drains sleeping until no waiter is in a wait ([`take_pending`]).
+    draining: usize,
 }
 
 /// A submitted batch its queue's waiter waits for.
@@ -183,8 +228,13 @@ impl Completion {
                 turning: false,
                 exiting: false,
                 stopping: false,
+                parked: vec![false; queues],
+                draining: 0,
             }),
-            wake: Condvar::new(),
+            wakes: (0..queues).map(|_| Condvar::new()).collect(),
+            drained: Condvar::new(),
+            woke: AtomicU64::new(0),
+            spared: AtomicU64::new(0),
         });
         let completion = Completion {
             watch: Arc::clone(&watch),
@@ -213,15 +263,27 @@ impl Completion {
     /// Wait for `batch`, just submitted to `VkQueue` `queue` (or a failed command buffer's end,
     /// at the queue's last submitted value).
     pub(crate) fn watch(&self, queue: usize, batch: Submitted) {
-        lock(&self.watch.pending).queues[queue].push_back(batch);
-        self.watch.wake.notify_all();
+        let parked = {
+            let mut pending = lock(&self.watch.pending);
+            pending.queues[queue].push_back(batch);
+            pending.parked[queue]
+        };
+        self.watch.notify(&self.watch.wakes[queue], parked);
+    }
+
+    /// The notifies made to the waiters, and those spared as none slept.
+    pub(crate) fn wakes(&self) -> (u64, u64) {
+        (
+            self.watch.woke.load(Ordering::Relaxed),
+            self.watch.spared.load(Ordering::Relaxed),
+        )
     }
 
     /// Ask the waiters to end once nothing is pending, and wait for each but this one (the
     /// device's last handle can drop on one of them, in its turn).
     pub(crate) fn stop(&self) {
         lock(&self.watch.pending).stopping = true;
-        self.watch.wake.notify_all();
+        self.watch.wake_all();
         let current = std::thread::current().id();
         let threads: Vec<JoinHandle<()>> = lock(&self.threads).drain(..).collect();
         for handle in threads {
@@ -238,22 +300,25 @@ enum Turn {
     Failed(CommandBufferError),
 }
 
-/// Wait on `watch`'s condition variable up to one slice.
+/// Wait on `queue`'s waiter's condition variable up to one slice, counted as parked meanwhile.
 fn wait<'a>(
     watch: &'a Watch,
-    pending: std::sync::MutexGuard<'a, Pending>,
+    mut pending: std::sync::MutexGuard<'a, Pending>,
+    queue: usize,
 ) -> std::sync::MutexGuard<'a, Pending> {
-    watch
-        .wake
+    pending.parked[queue] = true;
+    let mut pending = watch.wakes[queue]
         .wait_timeout(pending, WAIT_SLICE)
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .0
+        .0;
+    pending.parked[queue] = false;
+    pending
 }
 
 /// The process is exiting: every waiter ends.
 fn exit(watch: &Watch) {
     lock(&watch.pending).exiting = true;
-    watch.wake.notify_all();
+    watch.wake_all();
 }
 
 /// Turns, made by the waiter that called this once it set `turning` (the module docs): each looks
@@ -270,6 +335,7 @@ fn turns(watch: &Watch, lists: &mut FenceLists) -> bool {
             if pending.exiting {
                 return false;
             }
+            lists.woken.clear();
             if let Some(error) = pending.failed.take() {
                 // No waiter arms until the pending batches are taken (`fail`).
                 pending.holding = true;
@@ -280,11 +346,23 @@ fn turns(watch: &Watch, lists: &mut FenceLists) -> bool {
                     pending.turning = false;
                     return true;
                 }
+                // The waiters of the queues whose batches it took, where they sleep.
+                for (queue, _) in &finished {
+                    if lists.woken.last() != Some(queue) {
+                        lists.woken.push(*queue);
+                    }
+                }
+                lists.woken.retain(|&queue| pending.parked[queue]);
                 Turn::Finished(finished)
             }
         };
         // A waiter whose front finished may arm for its queue's next.
-        watch.wake.notify_all();
+        if lists.woken.is_empty() {
+            watch.spared.fetch_add(1, Ordering::Relaxed);
+        }
+        for &queue in &lists.woken {
+            watch.notify(&watch.wakes[queue], true);
+        }
         match turn {
             Turn::Finished(finished) => {
                 if !finish(watch, lists, finished) {
@@ -319,7 +397,7 @@ fn finish(watch: &Watch, lists: &mut FenceLists, finished: Vec<(usize, Submitted
         }
     }
     // A batch held at its gate, or for a GPU signal to land, may now go (`scheduler`).
-    device.shared().scheduler.completions();
+    device.shared().scheduler.completions(&device);
     // Every finished batch's fence is waited for: where a queue's failures are relayed each
     // batch has one (`device/relay.rs`), signaled after the driver reported its failure.
     let mut ending = Vec::new();
@@ -431,9 +509,12 @@ enum Settled {
     Failed(CommandBufferError),
 }
 
-/// A turn's fences, in lists each waiter keeps from turn to turn ([`turns`]).
+/// A turn's fences, and the waiters it wakes, in lists each waiter keeps from turn to turn
+/// ([`turns`]).
 #[derive(Default)]
 struct FenceLists {
+    /// The queues whose batches a look took and whose waiters sleep, to wake.
+    woken: Vec<usize>,
     /// The fences of the batches the turn finished, each with its `VkQueue`.
     gathered: Vec<(usize, vk::Fence)>,
     /// Those the turn waits for, then resets and gives back, the relayed queues' marks with them.
@@ -452,6 +533,7 @@ fn settle(device: &Device, lists: &mut FenceLists) -> Settled {
         gathered,
         waited,
         queue: ours,
+        ..
     } = lists;
     if gathered.is_empty() {
         return Settled::Signaled;
@@ -528,7 +610,12 @@ fn take_pending(watch: &Watch) -> Vec<(usize, Submitted)> {
     let mut pending = lock(&watch.pending);
     pending.holding = true;
     while pending.waiting.iter().any(|&waiting| waiting) {
-        pending = wait(watch, pending);
+        pending.draining += 1;
+        pending = (watch.drained)
+            .wait_timeout(pending, WAIT_SLICE)
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .0;
+        pending.draining -= 1;
     }
     let taken = pending
         .queues
@@ -538,7 +625,7 @@ fn take_pending(watch: &Watch) -> Vec<(usize, Submitted)> {
         .collect();
     pending.holding = false;
     drop(pending);
-    watch.wake.notify_all();
+    watch.wake_all();
     taken
 }
 
@@ -590,7 +677,7 @@ fn wait_for_queue(watch: &Watch, queue: usize) {
                     pending.waiting[queue] = true;
                     break Some(armed);
                 }
-                pending = wait(watch, pending);
+                pending = wait(watch, pending, queue);
             }
         };
         let Some((front, device)) = armed else {
@@ -618,7 +705,7 @@ fn wait_for_queue(watch: &Watch, queue: usize) {
         let Some(polled) = polled else {
             pending.exiting = true;
             drop(pending);
-            watch.wake.notify_all();
+            watch.wake_all();
             return;
         };
         match polled {
@@ -631,11 +718,12 @@ fn wait_for_queue(watch: &Watch, queue: usize) {
             }
         }
         // This waiter finishes what it saw, where no turn is under way; the one under way takes
-        // it at its next look, which takes this lock.
+        // it at its next look, which takes this lock. A drain waits for the wait to end.
         let turn = !pending.turning && due(&pending, queue);
         pending.turning |= turn;
+        let draining = pending.draining > 0;
         drop(pending);
-        watch.wake.notify_all();
+        watch.notify(&watch.drained, draining);
         if turn && !turns(watch, &mut lists) {
             return;
         }

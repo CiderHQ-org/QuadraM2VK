@@ -103,6 +103,22 @@ impl<I> Lines<I> {
         Some(items)
     }
 
+    /// Take `queue`'s line for the calling thread where it holds no item and no thread runs it:
+    /// the line is running until [`Lines::done`]. False otherwise, changing nothing.
+    pub(crate) fn take_idle(&mut self, queue: u64) -> bool {
+        if self.lines.contains_key(&queue) {
+            return false;
+        }
+        self.lines.insert(
+            queue,
+            Line {
+                items: VecDeque::new(),
+                running: true,
+            },
+        );
+        true
+    }
+
     /// How many lines are ready.
     pub(crate) fn ready(&self) -> usize {
         self.ready.len()

@@ -244,6 +244,105 @@ fn grouped_where_merging(checked: bool) {
     }
 }
 
+/// The fills one command buffer on a first queue waits for, before it, each of [`LARGE_FILL`]
+/// bytes (about 0.5 ms or more of GPU each), the last signalling the event a checked command
+/// buffer on a second queue waits for.
+const AHEAD: usize = 8;
+const LARGE_FILL: u64 = 64 << 20;
+
+/// A checked command buffer whose event wait only a submitted GPU signal meets holds its check
+/// until that signal landed (it sees the event's value reached), and meanwhile the fills that
+/// complete before the signalling one wake the scheduler's thread no more than once
+/// (`WorkCounts::scheduler_wakes_completion`): a completion turn wakes it only once what a head
+/// waits for is met, not at each batch that completes. The first fill waits for a gate the host
+/// raises once the checked command buffer is committed, so the scheduler holds the check before
+/// any fill completes; a wake at every completion while a head waits would count about one a
+/// fill. Under `CompletionPolicy::Exact`, so each fill is a submission of its own; every command
+/// buffer completes, and the layer reports nothing.
+#[test]
+fn completions_wake_the_scheduler_only_once_a_head_may_go() {
+    let messages = Messages::default();
+    let cache = ScratchCache::new().unwrap();
+    let (seen, wakes) = {
+        let device = validated_device_with(TEST_DEVICE, &messages, cache.path(), |options| {
+            options.policy.completion = CompletionPolicy::Exact;
+        })
+        .unwrap();
+        let (first, second) = (
+            device.new_command_queue().unwrap(),
+            device.new_command_queue().unwrap(),
+        );
+        let (event, gate) = (
+            device.new_shared_event().unwrap(),
+            device.new_shared_event().unwrap(),
+        );
+        let large = device
+            .new_buffer(LARGE_FILL, ResourceOptions::private())
+            .unwrap();
+        let small = device.new_buffer(BYTES, ResourceOptions::shared()).unwrap();
+        let before = device.work_counts();
+        let mut committed: Vec<CommandBuffer> = (0..AHEAD)
+            .map(|at| {
+                let command_buffer = first.command_buffer().unwrap();
+                if at == 0 {
+                    command_buffer
+                        .encode_wait_for_event(EventRef::from(&gate), 1)
+                        .unwrap();
+                }
+                let mut blit = command_buffer.blit_command_encoder().unwrap();
+                blit.fill_buffer(&large, 0..LARGE_FILL, at as u8).unwrap();
+                blit.end_encoding().unwrap();
+                if at + 1 == AHEAD {
+                    command_buffer
+                        .encode_signal_event(EventRef::from(&event), 1)
+                        .unwrap();
+                }
+                command_buffer.commit().unwrap();
+                command_buffer
+            })
+            .collect();
+        let seen = Arc::new(Mutex::new(None));
+        let waiting = second.command_buffer().unwrap();
+        {
+            let (seen, event) = (Arc::clone(&seen), event.clone());
+            waiting
+                .set_submission_check(Arc::new(move |_| {
+                    *seen.lock().unwrap() = Some(event.signaled_value());
+                    None
+                }))
+                .unwrap();
+        }
+        waiting
+            .encode_wait_for_event(EventRef::from(&event), 1)
+            .unwrap();
+        let mut blit = waiting.blit_command_encoder().unwrap();
+        blit.fill_buffer(&small, 0..BYTES, 0x5a).unwrap();
+        blit.end_encoding().unwrap();
+        waiting.commit().unwrap();
+        committed.push(waiting);
+        gate.set_signaled_value(1);
+        for (at, command_buffer) in committed.iter().enumerate() {
+            command_buffer.wait_until_completed_for(WAIT).unwrap();
+            assert_eq!(command_buffer.error(), None, "command buffer {at}");
+        }
+        assert!(bytes_of(&small).iter().all(|&byte| byte == 0x5a));
+        let after = device.work_counts();
+        let seen = *seen.lock().unwrap();
+        (
+            seen,
+            after.scheduler_wakes_completion - before.scheduler_wakes_completion,
+        )
+    };
+    let failing = messages.take();
+    assert!(
+        failing.is_empty(),
+        "the validation layer reported: {failing:#?}"
+    );
+    eprintln!("GROUPED-COMPLETION-WAKES: the check saw {seen:?}; {wakes} wakings by completions");
+    assert_eq!(seen, Some(1), "the event's value the check saw");
+    assert!(wakes <= 1, "{wakes} wakings by completions");
+}
+
 /// Under `CompletionPolicy::Exact` each batch goes alone, signalling its own value, announcing
 /// nothing, checked or not; each command buffer completes with its own fill.
 #[test]

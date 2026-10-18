@@ -14,6 +14,13 @@
 //! `Completed` or `Error`. The transitions after `Committed` run in the queue's serial context on
 //! the device's handler threads ([`contexts`](super::contexts)), in the queue's order: to
 //! `Scheduled` once its last batch is submitted (every wait of it satisfied), with its scheduled
+//! handlers; to `Completed` once its work completed, with its completed handlers and the release of
+//! what it retained. A transition that runs none of the program's code runs where it is seen
+//! instead, where its context is free: to `Scheduled` on the scheduler's thread
+//! (`CommandBufferShared::schedule`), to `Completed` on the queue waiter
+//! (`CommandBufferShared::finish_here`). As on Metal, a queue's command buffer whose work completed
+//! stays `Committed` while an earlier transition of its queue, a handler, still runs. Its
+//! submission handlers (a runtime extension) run before its transition to `Scheduled`, on the
 //! thread that took its last batch for its queue (submitted it, or held it for one kernel
 //! submission with later batches: `group.rs`), which the transition waits for.
 //!
@@ -435,6 +442,9 @@ pub(super) struct State {
     /// Its scheduled handlers ran: `wait_until_scheduled` returns, as Metal's does only once
     /// they ran (EV SUB-sched1-m4).
     scheduled_ran: bool,
+    /// The threads sleeping on its `changed` condition variable: a change wakes it only where
+    /// one does ([`CommandBufferShared::wake_parked`]).
+    parked: usize,
     /// Why a batch could not be submitted: the command buffer finishes with it, and its
     /// scheduled handlers never run. Or the failure `commit_failed` chose, with which it
     /// finishes once its batches completed, its scheduled handlers run.
@@ -1345,6 +1355,7 @@ impl CommandBuffer {
                 submission: VecDeque::new(),
                 submitting: false,
                 scheduled_ran: false,
+                parked: 0,
                 failure: None,
                 completed: VecDeque::new(),
                 executed_handlers: Vec::new(),
@@ -2208,12 +2219,14 @@ impl CommandBuffer {
             if exit_guard::closed() {
                 return Err(DeadlockCause::Exiting.into());
             }
+            state.parked += 1;
             state = self
                 .0
                 .changed
                 .wait_timeout(state, exit_guard::WAKE)
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .0;
+            state.parked -= 1;
         }
         Ok(())
     }
@@ -2931,11 +2944,13 @@ impl CommandBufferShared {
                 if exit_guard::closed() {
                     return;
                 }
+                state.parked += 1;
                 state = self
                     .changed
                     .wait_timeout(state, exit_guard::WAKE)
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .0;
+                state.parked -= 1;
             }
             state.status = CommandBufferStatus::Scheduled;
             self.answer(&state);
@@ -2951,10 +2966,24 @@ impl CommandBufferShared {
             }
         }
         drop(buffer);
-        lock(&self.state).scheduled_ran = true;
-        self.changed.notify_all();
+        let parked = {
+            let mut state = lock(&self.state);
+            state.scheduled_ran = true;
+            state.parked > 0
+        };
+        self.wake_parked(parked);
     }
 
+    /// Wake the threads sleeping on `changed`, where `parked` (read under the state's lock the
+    /// change was made under) says one does: a thread that sleeps later looks at the change
+    /// first, and a notify is a system call, sleeper or not. Counted:
+    /// `WorkCounts::wakes_command_buffer_waiters`, `WorkCounts::wakes_spared`.
+    fn wake_parked(&self, parked: bool) {
+        self.device.shared().counts.command_buffer_wake(parked);
+        if parked {
+            self.changed.notify_all();
+        }
+    }
 
     /// Its last batch was submitted, or held in a group, on this thread, which holds no lock of
     /// the runtime's: run its submission handlers here, in the order added, then let its
@@ -2971,8 +3000,12 @@ impl CommandBufferShared {
             }
         }
         drop(buffer);
-        lock(&self.state).submitting = false;
-        self.changed.notify_all();
+        let parked = {
+            let mut state = lock(&self.state);
+            state.submitting = false;
+            state.parked > 0
+        };
+        self.wake_parked(parked);
     }
 
     /// A batch could not be submitted (the scheduler dropped the rest): the command buffer
@@ -3033,15 +3066,27 @@ impl CommandBufferShared {
 
     /// The command buffer's last batch is submitted, or held in a group (`group.rs`), on the
     /// scheduler's thread under its lock: its transition to `Scheduled` runs here where it is [`plain`](Transition::plain) (it has no
+    /// scheduled handler, none is added after the commit, and it waits for no submission handler)
+    /// and its queue's context runs on no thread and holds nothing (`Contexts::run_alone`): its
+    /// status reads `Scheduled`, and `wait_until_scheduled` returns, as its last batch goes, with
+    /// no handler thread woken for it. Else it is posted to that context. The scheduler's own
+    /// holds of the command buffer outlive the transition's, so it never lets go of the last one
+    /// here. Counted: `WorkCounts::scheduled_where_submitted`.
+    pub(crate) fn schedule(self: &Arc<Self>) {
         let plain = {
             let state = lock(&self.state);
             state.scheduled.is_empty() && !state.submitting
         };
-        self.post(Transition {
+        let shared = self.device.shared();
+        let item = Item::Transition(Transition {
             buffer: self.hold(),
             to: To::Scheduled,
             plain,
         });
+        match shared.contexts.run_alone(self.queue.id(), item) {
+            Ok(()) => shared.counts.scheduled_where_submitted(),
+            Err(item) => shared.contexts.post(self.queue.id(), item),
+        }
     }
 
     /// The last batch of the command buffer `buffer` holds finished with `result` (or a batch
@@ -3091,24 +3136,18 @@ impl CommandBufferShared {
         contexts.post(queue, item);
     }
 
-    /// Append `transition` to this command buffer's queue's context.
-    fn post(&self, transition: Transition) {
-        self.device
-            .shared()
-            .contexts
-            .post(self.queue.id(), Item::Transition(transition));
-    }
-
     /// Finish the command buffer with `result` (or the failure of a batch): take the device's
     /// trail mark (`trails.rs`), set its status, decode its status words, release its uploads,
-    /// run its completed handlers on this thread, release what it retained and its encoders'
-    /// logs, then open its gate, which releases its waiters once the transition's [`Hold`] (and
-    /// every other) is gone, and they wait for the trails below the mark. Waits from inside these
-    /// steps answer as [`own`] says.
+    /// run its completed handlers on this thread, give its queue's slot back, release what it
+    /// retained and its encoders' logs, then open its gate, which releases its waiters once the
+    /// transition's [`Hold`] (and every other) is gone, and they wait for the trails below the
+    /// mark. Waits from inside these steps answer as [`own`] says.
     fn complete(self: &Arc<Self>, result: Result<(), CommandBufferError>) {
         // A capture replay found a primitive whose reach was not measured: its pass rewrote
         // every tile, announced once the lock is let go (below).
         let mut unmeasured_reach = false;
+        // A thread sleeps on `changed`, as the state's lock below reads.
+        let parked;
         // Its command pool, where it settled, whose primary the device's spares begin ahead once
         // its completed handlers ran (below).
         let mut settled_pool = None;
@@ -3246,8 +3285,9 @@ impl CommandBufferShared {
                 state.descriptors.release();
             }
             state.unplaced();
+            parked = state.parked > 0;
         }
-        self.changed.notify_all();
+        self.wake_parked(parked);
         if unmeasured_reach {
             self.device
                 .degrade(Degradation::UnreachedTilesRewritten, || {
@@ -3272,7 +3312,18 @@ impl CommandBufferShared {
                 exit_guard::program(|| handler(&buffer));
             }
         }
+        let handled = Instant::now();
         drop(buffer);
+        // Its queue's slot comes back as its last completed handler returns, as Metal's does: a
+        // make blocked on its full queue returns then, never while a completed handler runs, nor
+        // from one on its own full queue, and does not wait for what the commands used to be
+        // released below (a no-copy buffer's deallocator may run long there); a make after
+        // `wait_until_completed` returned never blocks (probe `slotdealloc`:
+        // `queue.rs`).
+        let slot = lock(&self.state).slot.take();
+        drop(slot);
+        let nanos = u64::try_from(handled.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        self.device.shared().counts.slot_returned(nanos);
         // What the commands used goes after the completed handlers, as Metal releases it (a
         // no-copy buffer's deallocator runs after them), and before the gate opens, so a waiter
         // returns after it. Each leaves under the lock and drops without it.
@@ -3314,11 +3365,6 @@ impl CommandBufferShared {
             let check = lock(&self.state).check.take();
             drop(check);
         }
-        // Its queue's slot comes back after the completed handlers, as Metal's does: a completed
-        // handler's make on its full queue never returns there, and a make after
-        // `wait_until_completed` returned never blocks (RT10-qlprobe3).
-        let slot = lock(&self.state).slot.take();
-        drop(slot);
         self.gate.finish();
         // Its pool's primary begun ahead, where no command buffer took the pool since
         // (`spares.rs`), and no thread waits for the gate, which opens only once this

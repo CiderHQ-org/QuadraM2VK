@@ -57,6 +57,24 @@
 //! build), that round's first commit read 120.2 ms, none of it a wait for a CPU, and the test
 //! failed, as it did beside 48 spinning threads (123.1 ms).
 //!
+//! Where the kernel counts no wait for a CPU (macOS: no `/proc`), a commit's time is its wall
+//! time, the host's preemption of the thread in it: there a round with a commit that slow runs
+//! again, timed afresh, and the test fails only where a commit of the round run again takes that
+//! long too. A lock a commit waits for, held that long, is held again; a preemption seldom is: on
+//! the M3 Max beside the full suite at the utility quality of service, two commits of a run's
+//! 1,800 took 69 and 97 ms of wall time after handing off their batches, which the scheduler
+//! submitted and the completion saw within 8 ms, while 20 runs alone held none over 63 us. With
+//! the scheduler's inbox lock held 100 ms by another thread during one commit of every 100th
+//! round and of its run again (a diagnostic build), the test failed on the M3 Max and on
+//! lavapipe.
+//!
+//! **The wakes** (`a_queue_s_batches_wake_no_other_queue_s_waiter`). A queue's command buffers
+//! wake their own `VkQueue`'s waiter alone, where it sleeps, and no idle queue's: over
+//! [`WAKE_ROUNDS`] rounds of [`IN_FLIGHT`] fills on one queue, the notifies to the waiters
+//! (`WorkCounts::wakes_completion_waiters`) number at most the command buffers, where waking the
+//! idle `VkQueue`s' waiters at each batch's watch, wait and turn makes more than one a command
+//! buffer. On a device of one `VkQueue` there is no idle waiter to wake, and it holds either way.
+//!
 //! A summary of the rounds' times, of how late each round's command buffers were seen, of how long
 //! each wait returned after its command buffer was seen (what the wait adds), of the commits' times
 //! and their waits for a CPU, and of the missed wakes is printed (`ROUNDS`), and each round that
@@ -84,6 +102,9 @@ const ROUNDS: usize = 600;
 
 /// The command buffers of a round, committed back to back.
 const IN_FLIGHT: usize = 3;
+
+/// How many rounds the wakes are counted over (`a_queue_s_batches_wake_no_other_queue_s_waiter`).
+const WAKE_ROUNDS: usize = 100;
 
 /// The fills' sizes, in turn over the rounds: their GPU times move each signal's moment.
 const SIZES: [u64; 7] = [
@@ -208,43 +229,65 @@ fn times(command_buffer: &CommandBuffer, seen: &Seen, from: f64) -> String {
     )
 }
 
-/// Run the rounds on a device of its own (its shader cache in a scratch directory named for
-/// `test`): four queues, three of them idle and in use, the fourth committing [`IN_FLIGHT`] fills
-/// a round, each with a completed handler that notes the time, then waiting for each. The rounds,
-/// and whether the device calibrates its timestamps.
-fn rounds(test: &str) -> (Vec<Round>, bool) {
-    let scratch = Scratch::new(test);
-    let device = device(&scratch.0);
-    let calibrated = calibrated(&device);
-    let buffer = device
-        .new_buffer(SIZES[SIZES.len() - 1], ResourceOptions::private())
-        .unwrap();
-    // Four queues, round robin over the device's `VkQueue`s: each is in use.
-    let queues: Vec<_> = (0..4)
-        .map(|_| device.new_command_queue().unwrap())
-        .collect();
-    // A short command buffer: one fill of `size` bytes.
-    let fill = |queue: &crate::CommandQueue, size: u64, value: u8| {
+/// A device of its own (its shader cache in a scratch directory named for the test) with four
+/// queues, three of them idle and in use, the fourth the one each round commits on, and the buffer
+/// the rounds fill: [`Rounds::round`] runs one round.
+struct Rounds {
+    device: Device,
+    queues: Vec<crate::CommandQueue>,
+    buffer: crate::Buffer,
+    /// Whether the device calibrates its timestamps.
+    calibrated: bool,
+    /// Dropped after the device.
+    _scratch: Scratch,
+}
+
+impl Rounds {
+    fn new(test: &str) -> Rounds {
+        let scratch = Scratch::new(test);
+        let device = device(&scratch.0);
+        let calibrated = calibrated(&device);
+        let buffer = device
+            .new_buffer(SIZES[SIZES.len() - 1], ResourceOptions::private())
+            .unwrap();
+        // Four queues, round robin over the device's `VkQueue`s: each is in use.
+        let queues: Vec<_> = (0..4)
+            .map(|_| device.new_command_queue().unwrap())
+            .collect();
+        let rounds = Rounds {
+            device,
+            queues,
+            buffer,
+            calibrated,
+            _scratch: scratch,
+        };
+        // Each idle queue runs one first, so its `VkQueue` has a value its waits name.
+        for (value, queue) in rounds.queues[1..].iter().enumerate() {
+            let command_buffer = rounds.fill(queue, SIZES[0], value as u8);
+            command_buffer.commit().unwrap();
+            command_buffer.wait_until_completed_for(WAIT).unwrap();
+            assert_eq!(command_buffer.status(), CommandBufferStatus::Completed);
+        }
+        rounds
+    }
+
+    /// A short command buffer of `queue`: one fill of `size` bytes of `value`.
+    fn fill(&self, queue: &crate::CommandQueue, size: u64, value: u8) -> CommandBuffer {
         let command_buffer = queue.command_buffer().unwrap();
         let mut blit = command_buffer.blit_command_encoder().unwrap();
-        blit.fill_buffer(&buffer, 0..size, value).unwrap();
+        blit.fill_buffer(&self.buffer, 0..size, value).unwrap();
         blit.end_encoding().unwrap();
         command_buffer
-    };
-    // Each idle queue runs one first, so its `VkQueue` has a value its waits name.
-    for (value, queue) in queues[1..].iter().enumerate() {
-        let command_buffer = fill(queue, SIZES[0], value as u8);
-        command_buffer.commit().unwrap();
-        command_buffer.wait_until_completed_for(WAIT).unwrap();
-        assert_eq!(command_buffer.status(), CommandBufferStatus::Completed);
     }
-    let mut rounds = Vec::with_capacity(ROUNDS);
-    for round in 0..ROUNDS {
+
+    /// Round `round`: [`IN_FLIGHT`] fills of its size committed back to back on the busy queue,
+    /// each with a completed handler that notes the time, then a wait for each.
+    fn round(&self, round: usize) -> Round {
         let size = SIZES[round % SIZES.len()];
         // Each with the slot its completed handler notes the host time in.
         let command_buffers: Vec<(CommandBuffer, Arc<Mutex<Option<f64>>>)> = (0..IN_FLIGHT)
             .map(|_| {
-                let command_buffer = fill(&queues[0], size, round as u8);
+                let command_buffer = self.fill(&self.queues[0], size, round as u8);
                 let handled = Arc::new(Mutex::new(None));
                 let noted = Arc::clone(&handled);
                 command_buffer
@@ -255,7 +298,7 @@ fn rounds(test: &str) -> (Vec<Round>, bool) {
                 (command_buffer, handled)
             })
             .collect();
-        let missed_before = device.work_counts().missed_completion_wakes;
+        let missed_before = self.device.work_counts().missed_completion_wakes;
         let start = Instant::now();
         let committed = host_time();
         let commits: Vec<(Duration, Duration)> = command_buffers
@@ -281,11 +324,11 @@ fn rounds(test: &str) -> (Vec<Round>, bool) {
             });
         }
         let took = start.elapsed();
-        let missed = device.work_counts().missed_completion_wakes - missed_before;
+        let missed = self.device.work_counts().missed_completion_wakes - missed_before;
         // How late each was seen after it could first be seen: the latest of the round.
         let late = (command_buffers.iter().zip(&seen))
             .map(|((command_buffer, _), seen)| {
-                let seeable = match calibrated {
+                let seeable = match self.calibrated {
                     true => (command_buffer.gpu_end_time().unwrap())
                         .max(command_buffer.kernel_end_time()),
                     false => command_buffer.kernel_end_time().max(committed),
@@ -298,15 +341,23 @@ fn rounds(test: &str) -> (Vec<Round>, bool) {
             .map(|((command_buffer, _), seen)| self::times(command_buffer, seen, committed))
             .collect::<Vec<String>>()
             .join(" ");
-        rounds.push(Round {
+        Round {
             size,
             took,
             late,
             missed,
             seen,
             line,
-        });
+        }
     }
+}
+
+/// Run the rounds ([`Rounds`]), and print what they saw: the rounds, and what ran them, to run a
+/// round again.
+fn rounds(test: &str) -> (Vec<Round>, Rounds) {
+    let runner = Rounds::new(test);
+    let calibrated = runner.calibrated;
+    let rounds: Vec<Round> = (0..ROUNDS).map(|round| runner.round(round)).collect();
     let summary = |durations: Vec<Duration>| {
         let mut sorted = durations;
         sorted.sort();
@@ -355,7 +406,7 @@ fn rounds(test: &str) -> (Vec<Round>, bool) {
         summary(seen().map(|seen| seen.queued).collect()),
         rounds.iter().map(|round| round.missed).sum::<u64>(),
     );
-    (rounds, calibrated)
+    (rounds, runner)
 }
 
 /// `command_buffer`'s `commit`, timed: its wall time less the committing thread's wait for a CPU
@@ -387,7 +438,8 @@ fn run_queue_wait() -> Option<Duration> {
 
 #[test]
 fn a_completion_on_one_queue_is_seen_while_other_queues_are_waited_for() {
-    let (rounds, calibrated) = rounds("seen");
+    let (rounds, runner) = rounds("seen");
+    let calibrated = runner.calibrated;
     let missed: Vec<(usize, u64, Duration)> = (rounds.iter().enumerate())
         .filter(|(_, round)| round.missed > 0 && (!calibrated || round.late >= STALL))
         .map(|(n, round)| (n, round.missed, round.late))
@@ -401,16 +453,65 @@ fn a_completion_on_one_queue_is_seen_while_other_queues_are_waited_for() {
 
 #[test]
 fn a_commit_returns_while_other_queues_are_waited_for() {
-    let (rounds, _) = rounds("commit");
-    let held: Vec<(usize, Duration)> = (rounds.iter().enumerate())
+    let (rounds, runner) = rounds("commit");
+    // Where the kernel counts no wait for a CPU, a round with a commit that slow runs again,
+    // timed afresh: held only where a commit takes that long again (the module docs).
+    let counted = run_queue_wait().is_some();
+    let held: Vec<(usize, Duration, Option<Duration>)> = (rounds.iter().enumerate())
         .filter(|(_, round)| round.longest_commit() >= STALL)
-        .map(|(n, round)| (n, round.longest_commit()))
+        .map(|(n, round)| {
+            let again = (!counted).then(|| runner.round(n).longest_commit());
+            (n, round.longest_commit(), again)
+        })
+        .filter(|&(_, _, again)| again.is_none_or(|again| again >= STALL))
         .collect();
     assert!(
         held.is_empty(),
-        "commits that took {STALL:?} or more, less the committing thread's wait for a CPU, \
-         where Metal's returns at once (round, longest): {held:?}. A commit only hands its \
-         batches to the scheduler's thread (scheduler/inbox.rs): one this slow waited for a lock \
-         or worked that long, not for a submission"
+        "commits that took {STALL:?} or more, less the committing thread's wait for a CPU \
+         where the kernel counts it, and again in the round run again where it does not, where \
+         Metal's returns at once (round, longest, longest again): {held:?}. A commit only hands \
+         its batches to the scheduler's thread (scheduler/inbox.rs): one this slow waited for a \
+         lock or worked that long, not for a submission"
+    );
+}
+
+#[test]
+fn a_queue_s_batches_wake_no_other_queue_s_waiter() {
+    let scratch = Scratch::new("wakes");
+    let device = device(&scratch.0);
+    let buffer = device
+        .new_buffer(SIZES[0], ResourceOptions::private())
+        .unwrap();
+    // Four queues, round robin over the device's `VkQueue`s, three of them idle.
+    let queues: Vec<_> = (0..4)
+        .map(|_| device.new_command_queue().unwrap())
+        .collect();
+    let fill = |value: u8| {
+        let command_buffer = queues[0].command_buffer().unwrap();
+        let mut blit = command_buffer.blit_command_encoder().unwrap();
+        blit.fill_buffer(&buffer, 0..SIZES[0], value).unwrap();
+        blit.end_encoding().unwrap();
+        command_buffer.commit().unwrap();
+        command_buffer
+    };
+    // The first makes what the first commit makes (a pool, a kept barrier command buffer).
+    fill(0).wait_until_completed_for(WAIT).unwrap();
+    let before = device.work_counts().wakes_completion_waiters;
+    for round in 0..WAKE_ROUNDS {
+        let command_buffers: Vec<CommandBuffer> =
+            (0..IN_FLIGHT).map(|_| fill(round as u8)).collect();
+        for command_buffer in &command_buffers {
+            command_buffer.wait_until_completed_for(WAIT).unwrap();
+            assert_eq!(command_buffer.status(), CommandBufferStatus::Completed);
+        }
+    }
+    let woke = device.work_counts().wakes_completion_waiters - before;
+    let committed = (WAKE_ROUNDS * IN_FLIGHT) as u64;
+    assert!(
+        woke <= committed,
+        "{woke} notifies to the completion waiters for {committed} command buffers of one queue, \
+         on a device of {} VkQueues: a batch watched wakes its own queue's waiter alone, where it \
+         sleeps, and no turn of that queue's wakes another (command_buffer/completion.rs)",
+        device.shared().queues.len()
     );
 }

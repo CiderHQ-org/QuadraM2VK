@@ -359,6 +359,8 @@ mod escaped_slots;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod etc_textures;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod event_round_trips;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod events;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod executions;

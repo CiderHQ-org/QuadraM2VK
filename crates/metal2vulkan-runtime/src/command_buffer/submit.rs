@@ -1062,8 +1062,12 @@ impl CommandBufferShared {
     }
 
     /// Publish a batch [`submit_batch`](Self::submit_batch) submitted, after the section that
+    /// submitted it ended: when it ends the command buffer, its transition to `Scheduled`
     /// (`CommandBufferShared::schedule`) unless it made it as it was held in a group
     /// ([`Submission::schedule_held`]), then its queue waiter's watch for it. From the watch
+    /// on, the command buffer may complete and run its release on its queue's handler thread
+    /// before the caller lets go of anything it took, so the caller holds nothing of what its
+    /// commands or encoders took (`scheduler::Spent`).
     pub(crate) fn publish(self: &Arc<Self>, submission: Submission) {
         let Submission {
             queue,
@@ -1074,7 +1078,7 @@ impl CommandBufferShared {
         if batch.last && !scheduled {
             // Before a completion turn can see it finish, so the queue's context runs its
             // transition to `Scheduled` first.
-            self.post_scheduled();
+            self.schedule();
         }
         self.device.shared().completion.watch(queue, batch);
     }

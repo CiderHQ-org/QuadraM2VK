@@ -74,6 +74,9 @@
 //! `WorkCounts::groups_sent_for_waits`), the batches by how many earlier
 //! batches of their queue were pending as each went (`WorkCounts::batches_with_none_pending` and
 //! kin), and the scheduler thread's sleeps
+//! and wakings by what woke it (`WorkCounts::scheduler_sleeps` and kin), and the
+//! condition-variable notifies the runtime's threads made and spared (`WorkCounts::wakes_spared`
+//! and kin). Where the
 //! kernel-submission counter is loaded (`scripts/i915-execbuffers`, `LD_PRELOAD`), every
 //! measurement's lines count the kernel submissions of its timed frames, the objects each lists
 //! and the time each spent in the ioctl.
@@ -1418,6 +1421,27 @@ fn measure(runs: &[Run]) {
             per_frame(|c| c.batches_with_one_pending),
             per_frame(|c| c.batches_with_two_or_three_pending),
             per_frame(|c| c.batches_with_four_or_more_pending),
+        );
+        eprintln!(
+            "FRAME-COST {name} {label}: the scheduler's thread a command buffer: {:.2} sleeps, \
+             {:.2} of them on the GPU, woken {:.2} times by commits, {:.2} by completions, {:.2} \
+             by host signals, {:.2} at its longest wait",
+            per_buffer(|c| c.scheduler_sleeps),
+            per_buffer(|c| c.scheduler_gpu_waits),
+            per_buffer(|c| c.scheduler_wakes_commit),
+            per_buffer(|c| c.scheduler_wakes_completion),
+            per_buffer(|c| c.scheduler_wakes_host),
+            per_buffer(|c| c.scheduler_sleep_slices),
+        );
+        eprintln!(
+            "FRAME-COST {name} {label}: condition-variable notifies a command buffer (each a \
+             system call): {:.2} to the queue waiters, {:.2} to the handler threads, {:.2} on \
+             command buffers, {:.2} to events' host waits; {:.2} spared as no thread slept",
+            per_buffer(|c| c.wakes_completion_waiters),
+            per_buffer(|c| c.wakes_handler_threads),
+            per_buffer(|c| c.wakes_command_buffer_waiters),
+            per_buffer(|c| c.wakes_event_waiters),
+            per_buffer(|c| c.wakes_spared),
         );
         eprintln!(
             "FRAME-COST {name} {label}: a frame's host remap reports {:.1}, {:.1} of them over \

@@ -320,6 +320,8 @@ calls! {
     QueueBindSparse => c"vkQueueBindSparse",
     WaitSemaphores => c"vkWaitSemaphores",
     GetSemaphoreCounterValue => c"vkGetSemaphoreCounterValue",
+    // A waker's nudge of the scheduler's thread where it waits for the GPU (`scheduler/mod.rs`).
+    SignalSemaphore => c"vkSignalSemaphore",
     GetPipelineCacheData => c"vkGetPipelineCacheData",
     // A making's own pipeline cache (`shader_cache/driver.rs`), made in a host step's or a pool
     // piece's making as in the program's.

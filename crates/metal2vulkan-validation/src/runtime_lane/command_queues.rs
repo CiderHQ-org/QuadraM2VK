@@ -2,19 +2,16 @@
 //! device the cfg selects, under the validation layer.
 //!
 //! The answers expected are Metal's, measured on an M3 Max with macOS 26.7 and an M4 with macOS
-//! 27.0.1, with and without API validation (EVs `RT10-qlprobe`, `-qlprobe2`, `-qlprobe3`): a
-//! queue holds 64 uncompleted command buffers, or the count it was made with; a make past them
-//! blocks until one completes (after its completed handlers) or is dropped uncommitted, and never
-//! answers nil; a count of 0 stops Metal's validation, where the runtime refuses it typed; and
-//! another queue's makes go on. Where Metal's blocked make never returns, from a handler of the
-//! full queue itself, the runtime refuses it (`WaitWouldDeadlock`). No wait here can hang: each
-//! blocked make runs on a thread of its own and is answered within [`WAIT`].
+//! count it was made with; a make past them blocks until one completes (after its completed
+//! handlers, not waiting for its release: probe `slotdealloc`, the M3 Max under macOS 27.0.1) or is
 
+use super::host_memory::Mapping;
 use super::{validated_device, Messages, ScratchCache};
 use crate::gpu::TEST_DEVICE;
 use metal2vulkan_runtime::{
-    CommandBuffer, CommandQueue, DeadlockCause, Degradation, Device, Error, EventRef, Invalid,
-    Problem, SharedEvent,
+    BufferContents, BufferDescriptor, CommandBuffer, CommandQueue, DeadlockCause, Deallocator,
+    Degradation, Device, Error, EventRef, HostMemory, Invalid, KeepAlive, Problem, ResourceOptions,
+    SharedEvent,
 };
 use std::sync::mpsc;
 use std::time::Duration;
@@ -27,6 +24,13 @@ const BLOCKED: Duration = Duration::from_millis(300);
 
 /// Metal's default `maxCommandBufferCount`, measured (`RT10-qlprobe`).
 const METAL_DEFAULT: usize = 64;
+
+/// How long the completed handler of
+/// [`a_command_buffer_s_slot_comes_back_as_its_completed_handlers_return`] runs.
+const HANDLING: Duration = Duration::from_millis(300);
+
+/// How long its no-copy buffer's deallocator runs.
+const DEALLOCATING: Duration = Duration::from_secs(2);
 
 /// Run `test` on a validated device, then check that once everything is dropped (the device
 /// last) the layer reported nothing.
@@ -148,6 +152,103 @@ fn a_committed_command_buffer_gives_its_slot_back_once_completed() {
             assert!(
                 answered(&next).is_ok(),
                 "round {round}: the make after the wait"
+            );
+        }
+    });
+}
+
+/// A committed command buffer gives its slot back as its last completed handler returns, before
+/// what its commands used is released, as Metal's does (probe `slotdealloc`, the M3 Max under
+/// macOS 27.0.1): a make blocked on its full queue returns once a long completed handler
+/// returned, never while it runs, and while the deallocator of a no-copy buffer the command
+/// buffer held last still runs, whether or not the program still holds the command buffer. The
+/// buffer has a keep-alive, which its mapping lives in, as the consumer's do: its deallocator then
+#[test]
+fn a_command_buffer_s_slot_comes_back_as_its_completed_handlers_return() {
+    on_device(|device| {
+        let queue = device
+            .new_command_queue_with_max_command_buffer_count(1)
+            .unwrap();
+        for kept in [false, true] {
+            const LENGTH: usize = 1 << 16;
+            let (sender, steps) = mpsc::channel();
+            let mapping = Mapping::anonymous(LENGTH);
+            let pointer = mapping.pointer();
+            let in_deallocator = sender.clone();
+            let deallocator: Deallocator = Box::new(move |_, _| {
+                std::thread::sleep(DEALLOCATING);
+                in_deallocator.send("the deallocator ended").unwrap();
+            });
+            let keep_alive: KeepAlive = Box::new(mapping);
+            // SAFETY: the mapping lives in the keep-alive, which the import holds until its pages
+            // are freed.
+            let memory = unsafe { HostMemory::new(pointer) };
+            let contents = BufferContents::NoCopy {
+                memory,
+                deallocator: Some(deallocator),
+                keep_alive: Some(keep_alive),
+            };
+            let made = device.new_buffer_with_descriptor(BufferDescriptor::new(
+                LENGTH as u64,
+                ResourceOptions::default(),
+                contents,
+            ));
+            let buffer = match made {
+                Ok(buffer) => buffer,
+                Err(error) => {
+                    eprintln!("QUEUE slot: no buffer over host memory: {error:?}");
+                    return;
+                }
+            };
+            let command_buffer = queue.command_buffer().unwrap();
+            let mut blit = command_buffer.blit_command_encoder().unwrap();
+            blit.fill_buffer(&buffer, 0..LENGTH as u64, 7).unwrap();
+            blit.end_encoding().unwrap();
+            let in_handler = sender.clone();
+            command_buffer
+                .add_completed_handler(Box::new(move |_: &CommandBuffer| {
+                    std::thread::sleep(HANDLING);
+                    in_handler.send("the completed handler ended").unwrap();
+                }))
+                .unwrap();
+            let before = device.work_counts();
+            command_buffer.commit().unwrap();
+            drop(buffer);
+            let held = kept.then_some(command_buffer);
+            let next = make_aside(&queue);
+            let made = answered(&next).unwrap();
+            let seen: Vec<&str> = steps.try_iter().collect();
+            assert_eq!(
+                seen,
+                ["the completed handler ended"],
+                "kept {kept}: what ran before the blocked make returned"
+            );
+            assert_eq!(
+                steps.recv_timeout(WAIT),
+                Ok("the deallocator ended"),
+                "kept {kept}: the deallocator ran"
+            );
+            drop((made, held));
+            let after = device.work_counts();
+            assert_eq!(
+                after.slot_waits - before.slot_waits,
+                1,
+                "kept {kept}: the blocked make counted"
+            );
+            assert!(
+                after.slot_returns > before.slot_returns,
+                "kept {kept}: the slot's return counted"
+            );
+            let returning =
+                Duration::from_nanos(after.slot_return_nanos - before.slot_return_nanos);
+            assert!(
+                returning < DEALLOCATING,
+                "kept {kept}: the slot came back {returning:?} after the completed handlers"
+            );
+            eprintln!(
+                "QUEUE slot: kept {kept}: back {returning:?} after the handlers; the make waited \
+                 {:?}",
+                Duration::from_nanos(after.slot_wait_nanos - before.slot_wait_nanos)
             );
         }
     });

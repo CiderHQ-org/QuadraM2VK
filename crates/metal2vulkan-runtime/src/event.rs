@@ -17,7 +17,10 @@
 //!   queues' waiters do (`command_buffer/completion.rs`): one call more, and only where the
 //!   read ran ahead of the completion turns.
 //! - **Host waits** (`wait_until_signaled_value`) wait on the event's condition variable, which
-//!   every rise signals, and read the counter again at least every [`POLL`]. Once the process is
+//!   every rise signals where a host wait sleeps on it (`EventState::parked`, read under the lock
+//!   the rise is made under: a wait that sleeps later looks at the value first), and read the
+//!   counter again at least every [`POLL`]. A rise with no wait asleep spares the notify, a system
+//!   call (`WorkCounts::wakes_event_waiters`, `WorkCounts::wakes_spared`). Once the process is
 //!   exiting they answer from the value last seen ([`exit_guard`]).
 //! - **Shared event handles** are in-process: a handle shares the event, and opening it gives a
 //!   new `SharedEvent` of the same event. Opening it on another device is refused: Vulkan
@@ -104,6 +107,8 @@ struct EventState {
     timeline: EventTimeline<usize>,
     /// The listeners' notifications not yet due, in the order they were asked for.
     notifications: Vec<Notification>,
+    /// The host waits asleep on `changed`: a rise notifies it only where one is.
+    parked: usize,
 }
 
 struct Notification {
@@ -154,6 +159,7 @@ impl EventShared {
             state: Mutex::new(EventState {
                 timeline: EventTimeline::default(),
                 notifications: Vec::new(),
+                parked: 0,
             }),
             changed: Condvar::new(),
             label: Mutex::new(None),
@@ -194,7 +200,7 @@ impl EventShared {
             if !state.timeline.observe(index) {
                 return;
             }
-            self.changed.notify_all();
+            self.rose(&state);
             due(&mut state)
         };
         self.post(due);
@@ -204,7 +210,7 @@ impl EventShared {
     /// shows past the index last seen is waited for, a wait that returns at once, before it is
     /// observed (the module docs). Once the process is exiting, the counter is not read
     /// (`exit_guard`): the value is the one last seen.
-    fn value(self: &Arc<Self>) -> u64 {
+    pub(super) fn value(self: &Arc<Self>) -> u64 {
         if let Some(busy) = exit_guard::enter() {
             let raw = self.device.shared().vk();
             // SAFETY: the semaphore is the device's and live. A failure (a lost device) leaves
@@ -231,7 +237,7 @@ impl EventShared {
                     let mut state = lock(&self.state);
                     match state.timeline.observe_read(read, reaches) {
                         Ok(true) => {
-                            self.changed.notify_all();
+                            self.rose(&state);
                             due(&mut state)
                         }
                         Ok(false) | Err(_) => Vec::new(),
@@ -251,7 +257,7 @@ impl EventShared {
             if !state.timeline.set(value) {
                 return;
             }
-            self.changed.notify_all();
+            self.rose(&state);
             due(&mut state)
         };
         self.post(due);
@@ -268,7 +274,7 @@ impl EventShared {
             if self.value() >= value {
                 return true;
             }
-            let state = lock(&self.state);
+            let mut state = lock(&self.state);
             if state.timeline.value() >= value {
                 return true;
             }
@@ -276,11 +282,13 @@ impl EventShared {
             if left.is_zero() || exit_guard::closed() {
                 return false;
             }
-            drop(
-                self.changed
-                    .wait_timeout(state, left.min(POLL))
-                    .unwrap_or_else(std::sync::PoisonError::into_inner),
-            );
+            state.parked += 1;
+            let mut state = self
+                .changed
+                .wait_timeout(state, left.min(POLL))
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+            state.parked -= 1;
         }
     }
 
@@ -302,6 +310,16 @@ impl EventShared {
             due(&mut state)
         };
         self.post(due);
+    }
+
+    /// The value rose, under the state's lock (`state`): wake the host waits asleep on it, if any
+    /// (the module docs).
+    fn rose(&self, state: &EventState) {
+        let parked = state.parked > 0;
+        if parked {
+            self.changed.notify_all();
+        }
+        self.device.shared().counts.event_wake(parked);
     }
 
     /// Post `due` notifications to their listeners.

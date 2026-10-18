@@ -15,7 +15,12 @@
 //! - A command buffer holds one of its queue's slots from its creation, whether it is made with
 //!   retained references or not, until it completes (after its completed handlers, before its
 //!   `wait_until_completed` returns), or until it is dropped uncommitted. Enqueued, committed and
-//!   scheduled command buffers hold theirs.
+//!   scheduled command buffers hold theirs. A completed one's comes back as its last completed
+//!   handler returns, whether or not the program still holds it, and without waiting for the
+//!   release of what its commands used: a blocked make returns while a no-copy buffer's
+//!   deallocator run there still runs (probe `slotdealloc`, the M3 Max under macOS 27.0.1: 0.04
+//!   to 0.3 ms after a handler of 0 to 200 ms, with a deallocator of 200 ms under way; counted,
+//!   `WorkCounts::slot_return_nanos`).
 //! - At the limit, `commandBuffer` blocks until a slot comes back; it never answers nil. The
 //!   runtime blocks too, except where no slot can come back: in the queue's own context (its
 //!   handlers and deallocators) while every slot is held by a committed command buffer, where
@@ -30,6 +35,7 @@ use super::device::{lock, Device};
 use super::error::{Error, Invalid, Problem};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::Instant;
 
 /// The uncompleted command buffers a queue holds when made with `new_command_queue`: Metal's
 /// default `maxCommandBufferCount`, measured (`RT10-qlprobe`).
@@ -268,13 +274,15 @@ impl CommandQueue {
         Ok(CommandBuffer::new(self, slot))
     }
 
-    /// A slot for a new command buffer, waiting for one to come back while all are held.
+    /// A slot for a new command buffer, waiting for one to come back while all are held: counted
+    /// (`WorkCounts::slot_waits`).
     fn slot(&self) -> Result<Slot, Error> {
         let slots = &self.0.slots;
         let mut held = slots.lock();
         if let Some(slot) = slots.take(&mut held) {
             return Ok(slot);
         }
+        let waited = Instant::now();
         let context = self.context();
         let _blocked = match slot_wait(running(), context, held.open > 0) {
             Answer::Wait | Answer::Return => None,
@@ -289,6 +297,9 @@ impl CommandQueue {
         };
         loop {
             if let Some(slot) = slots.take(&mut held) {
+                drop(held);
+                let nanos = u64::try_from(waited.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                self.0.device.shared().counts.slot_waited(nanos);
                 return Ok(slot);
             }
             held = slots

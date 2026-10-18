@@ -72,6 +72,26 @@ fn a_line_is_taken_whole_where_it_runs_nowhere_and_holds_only_plain_items() {
     assert!(lines.is_empty());
 }
 
+/// A line is taken for the calling thread only where it holds no item and no thread runs it:
+/// items pushed meanwhile wait for its end.
+#[test]
+fn an_idle_line_alone_is_taken_for_the_calling_thread() {
+    let mut lines = Lines::default();
+    assert!(lines.take_idle(1));
+    lines.push(1, "a1");
+    assert!(!lines.is_ready());
+    assert!(!lines.take_idle(1));
+    lines.done(1);
+    // A line holding an item, plain or not, stays as it is.
+    assert_eq!(lines.ready(), 1);
+    assert!(!lines.take_idle(1));
+    assert_eq!(lines.take(), Some((1, "a1")));
+    // So does a line a thread runs.
+    assert!(!lines.take_idle(1));
+    lines.done(1);
+    assert!(lines.is_empty());
+}
+
 #[test]
 fn ready_lines_are_taken_in_the_order_they_became_ready() {
     let mut lines = Lines::default();
@@ -176,6 +196,71 @@ fn a_plain_item_runs_here_after_its_context_s_plain_items_and_before_later_ones(
     assert_eq!(
         *log.lock().unwrap(),
         [("earlier", true), ("here", true), ("later", false)],
+        "the item posted meanwhile ran after it, on the pool's thread"
+    );
+    contexts.stop();
+}
+
+/// A plain item runs alone on the calling thread where its context runs on no thread and holds
+/// nothing, and the items posted to its context meanwhile run after it, on the pool's thread.
+/// Where the context holds an item, plain or not, or runs on a thread, or the item is not plain,
+/// it is given back. The pool's one thread is held on another context meanwhile, so what is
+/// posted waits.
+#[test]
+fn a_plain_item_runs_alone_only_where_its_context_is_idle() {
+    let contexts: Contexts<Said> = Contexts::start(1).unwrap();
+    let here = std::thread::current().id();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let note = move |log: &Arc<Mutex<Vec<(&'static str, bool)>>>, name: &'static str| {
+        let log = Arc::clone(log);
+        move || {
+            let on_here = std::thread::current().id() == here;
+            log.lock().unwrap().push((name, on_here));
+        }
+    };
+    let (release, released) = mpsc::channel::<()>();
+    let (started, starts) = mpsc::channel::<()>();
+    contexts.post(
+        9,
+        said(false, move || {
+            started.send(()).unwrap();
+            released.recv_timeout(WAIT).unwrap();
+        }),
+    );
+    starts.recv_timeout(WAIT).unwrap();
+    let (done, finished) = mpsc::channel::<()>();
+    let later = {
+        let (contexts, log) = (contexts.clone(), Arc::clone(&log));
+        move || {
+            let posted = note(&log, "later");
+            contexts.post(
+                1,
+                said(true, move || {
+                    posted();
+                    done.send(()).unwrap();
+                }),
+            );
+            note(&log, "here")();
+        }
+    };
+    assert!(contexts.run_alone(1, said(true, later)).is_ok());
+    assert_eq!(
+        *log.lock().unwrap(),
+        [("here", true)],
+        "the item, on this thread"
+    );
+    // A context holding the item posted meanwhile, one holding a plain item, one a thread runs,
+    // and an item that is not plain: given back.
+    assert!(contexts.run_alone(1, said(true, || {})).is_err());
+    contexts.post(2, said(true, || {}));
+    assert!(contexts.run_alone(2, said(true, || {})).is_err());
+    assert!(contexts.run_alone(9, said(true, || {})).is_err());
+    assert!(contexts.run_alone(3, said(false, || {})).is_err());
+    release.send(()).unwrap();
+    finished.recv_timeout(WAIT).unwrap();
+    assert_eq!(
+        *log.lock().unwrap(),
+        [("here", true), ("later", false)],
         "the item posted meanwhile ran after it, on the pool's thread"
     );
     contexts.stop();

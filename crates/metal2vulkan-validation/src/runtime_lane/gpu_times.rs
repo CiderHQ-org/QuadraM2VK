@@ -27,8 +27,9 @@
 //! pools are not Metal counter sample buffers, more than [`HELD_POOLS`] pools hold, every one
 //! timed from pools made as the command buffers in flight need them, and nothing announced; where
 //! they are (one pool), one more than it holds, every one but the last timed, the last untimed, its
-//! GPU times refused, and the device announces `Degradation::UntimedCommandBuffer` once. It prints
-//! how long the commits and the completions took (`GPU-TIMES-HELD`). Each of their command buffers
+//! GPU times refused, and the device announces `Degradation::UntimedCommandBuffer` once. The first
+//! one's wait returns a few submissions into the rest, not once all are submitted. It prints how
+//! long the commits and the completions took (`GPU-TIMES-HELD`). Each of their command buffers
 //! has an encoder (an empty blit encoder): one with none writes no timestamps.
 //!
 //! Command buffers committed one after another, each once the one before it completed, take
@@ -715,8 +716,12 @@ fn more_command_buffers_in_flight_than_metal_keeps_sample_buffers_are_timed() {
 /// one pool), one more than [`POOL_SLOTS`]: each but the last is timed, and the last found no
 /// slot free and no pool more: its GPU times are refused (`Unsupported`, `Feature::GpuTimes`),
 /// its kernel times kept, and the device announces `untimed-command-buffer` once, naming the
-/// slots. The slots taken are the timed command buffers'. It prints how long the commits took
-/// and how long after the signal every one had completed. The validation layer reported nothing.
+/// slots. The slots taken are the timed command buffers'. The first one's wait returns before
+/// the device made as many submissions after the signal as there are command buffers: the
+/// scheduler lets go of each few it submits (`scheduler/mod.rs`), where a pass that submitted all
+/// of them would hold the first one's waiter until the last was submitted. It prints how long the
+/// commits took, how long after the signal the first and every one had completed, and the
+/// submissions made by then. The validation layer reported nothing.
 #[test]
 fn command_buffers_past_a_pool_s_slots_are_timed_by_pools_made_as_needed() {
     let cache = ScratchCache::new().unwrap();
@@ -756,13 +761,26 @@ fn command_buffers_past_a_pool_s_slots_are_timed_by_pools_made_as_needed() {
                 })
                 .collect();
             let committing = started.elapsed();
+            let submitted = device.work_counts().queue_submissions;
             let signaled = Instant::now();
             event.set_signaled_value(1);
+            // The first one's wait returns once its work completed and the scheduler let go of
+            // it, a few submissions into the rest (`scheduler/mod.rs`), not once all are.
+            committed[0].wait_until_completed_for(WAIT).unwrap();
+            let first = signaled.elapsed();
+            let at_first = device.work_counts().queue_submissions - submitted;
+            assert!(
+                at_first < count as u64,
+                "the first command buffer's wait returned {:.3} s after the signal, {at_first} \
+                 submissions in, once all {count} command buffers were submitted",
+                first.as_secs_f64()
+            );
             for (at, cb) in committed.iter().enumerate() {
                 cb.wait_until_completed_for(WAIT).unwrap();
                 assert_eq!(cb.error(), None, "{at}");
             }
             let completing = signaled.elapsed();
+            let at_all = device.work_counts().queue_submissions - submitted;
             let (timed, untimed) = committed.split_at(count - usize::from(scarce));
             for (at, cb) in timed.iter().enumerate() {
                 let [gpu_start, gpu_end, ..] = times(cb);
@@ -803,14 +821,16 @@ fn command_buffers_past_a_pool_s_slots_are_timed_by_pools_made_as_needed() {
             }
             eprintln!(
                 "GPU-TIMES-HELD {count} command buffers over {} queues on {}: committed in \
-                 {:.3} s ({:.3} s for the first {}), the longest commit {:.3} ms, all completed \
-                 {:.3} s after the signal, {} untimed",
+                 {:.3} s ({:.3} s for the first {}), the longest commit {:.3} ms, the first \
+                 completed {:.3} s after the signal ({at_first} submissions in), all {:.3} s \
+                 after it ({at_all} submissions in), {} untimed",
                 queues.len(),
                 device.name(),
                 committing.as_secs_f64(),
                 at_one_pool.as_secs_f64(),
                 POOL_SLOTS + 1,
                 longest.as_secs_f64() * 1e3,
+                first.as_secs_f64(),
                 completing.as_secs_f64(),
                 untimed.len()
             );

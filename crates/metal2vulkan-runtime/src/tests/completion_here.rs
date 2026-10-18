@@ -2,7 +2,10 @@
 //! completes finishes on the queue waiter that saw its work complete, with no handler thread
 //! woken, as Metal's completion wakes its waiting thread itself (`command_buffer/completion.rs`);
 //! one with a completed handler, and any while the runtime holds a deallocator of the program's,
-//! finishes on its queue's handler thread (`WorkCounts::completed_where_seen`).
+//! finishes on its queue's handler thread (`WorkCounts::completed_where_seen`). Likewise
+//! `CommandBufferShared::schedule`: a command buffer with no scheduled handler is scheduled on the
+//! scheduler's thread as its last batch goes, and one with a scheduled handler on its queue's
+//! handler thread (`WorkCounts::scheduled_where_submitted`).
 //!
 //! Device tests: compiled only under the validation crate's GPU safety cfgs (`m2v_gpu`,
 //! `m2v_cpu_icd`), on the kind of device the cfg selects.
@@ -143,6 +146,49 @@ fn a_command_buffer_with_no_handler_finishes_where_its_completion_is_seen() {
         }
         Err(error) => println!("no buffer over host memory: {error:?}"),
     }
+    drop(queue);
+    drop(device);
+}
+
+/// [`ROUNDS`] command buffers of `queue`, each a fill of 16 bytes, with a scheduled handler where
+/// `handler`, each committed and waited for before the next: how many were scheduled where their
+/// last batch was submitted.
+fn scheduled_where_submitted(device: &Device, queue: &CommandQueue, handler: bool) -> u64 {
+    let target = device.new_buffer(16, ResourceOptions::shared()).unwrap();
+    let before = device.work_counts().scheduled_where_submitted;
+    for round in 0..ROUNDS {
+        let command_buffer = queue.command_buffer().unwrap();
+        let mut blit = command_buffer.blit_command_encoder().unwrap();
+        blit.fill_buffer(&target, 0..16, round as u8).unwrap();
+        blit.end_encoding().unwrap();
+        if handler {
+            command_buffer
+                .add_scheduled_handler(Box::new(|_: &CommandBuffer| {}))
+                .unwrap();
+        }
+        command_buffer.commit().unwrap();
+        command_buffer.wait_until_completed().unwrap();
+    }
+    device.work_counts().scheduled_where_submitted - before
+}
+
+/// Command buffers with no scheduled handler are scheduled where their last batch is submitted:
+/// at least one of [`ROUNDS`] (the one before's transition to `Completed` may still hold its
+/// queue's context as the next one's last batch goes, which is then posted behind it). Those with
+/// a scheduled handler never are.
+#[test]
+fn a_command_buffer_with_no_scheduled_handler_is_scheduled_where_submitted() {
+    let scratch = Scratch::new();
+    let device = device(&scratch.0);
+    let queue = device.new_command_queue().unwrap();
+    let plain = scheduled_where_submitted(&device, &queue, false);
+    println!("scheduled where submitted: {plain} of {ROUNDS} with no handler");
+    assert!(plain >= 1, "none of {ROUNDS} was scheduled where submitted");
+    assert_eq!(
+        scheduled_where_submitted(&device, &queue, true),
+        0,
+        "a command buffer with a scheduled handler was scheduled off its queue's handler thread"
+    );
     drop(queue);
     drop(device);
 }

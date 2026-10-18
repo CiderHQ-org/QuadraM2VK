@@ -6,6 +6,10 @@
 //!   handlers and the release of what it retained. The scheduler posts them ([`Contexts::post`]),
 //!   and so does a completion turn, but for a transition that runs none of the program's code: the
 //!   turn runs such a transition to `Completed` itself where the context runs on no thread and
+//!   holds only such transitions, in order after them ([`Contexts::run_here`],
+//!   `command_buffer/completion.rs`), and the scheduler such a transition to `Scheduled` where the
+//!   context runs on no thread and holds nothing ([`Contexts::run_alone`],
+//!   `CommandBufferShared::schedule`); neither runs a handler. (A transition to `Scheduled` waits
 //!   for its command buffer's submission handlers, which the thread that took its last batch for
 //!   its queue runs.) A release the scheduler's thread hands off (`Device::let_go_elsewhere`) runs
 //!   in a context of its own, behind no queue's handlers.
@@ -25,6 +29,12 @@
 //!   release may hold nothing of the device, and runs before its thread ends. A drop on one of the
 //!   threads (its item held the last reference) does not wait for itself.
 //!
+//! - **Woken only where one sleeps.** A post wakes a thread only where a line is ready and a
+//!   thread sleeps waiting for one (`State::parked`), read under the state's lock: a thread that
+//!   sleeps later looks at the lines first. A post to a context a thread is running, or while
+//!   every thread runs, so costs no system call (a notify is one, sleeper or not). Counted:
+//!   `WorkCounts::wakes_handler_threads`, `WorkCounts::wakes_spared`.
+//!
 //! Locks: a pool's state, then its census; the waits' graph, then a census. No call made under
 //! either takes the state again.
 
@@ -36,6 +46,7 @@ use super::error::{DeadlockCause, Error, MemoryKind};
 use super::exit_guard;
 use lines::Lines;
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -78,15 +89,20 @@ impl<I: Run> Clone for Contexts<I> {
 
 struct Shared<I> {
     state: Mutex<State<I>>,
-    /// Signaled when a line becomes ready or the pool stops.
+    /// Signaled when a line becomes ready, where a thread sleeps, or the pool stops.
     wake: Condvar,
     census: Arc<Census>,
+    /// The notifies made, and those spared as no thread slept or no line was ready.
+    woke: AtomicU64,
+    spared: AtomicU64,
 }
 
 struct State<I> {
     lines: Lines<I>,
     /// The threads that run no item: waiting for one, or starting.
     free: usize,
+    /// The threads sleeping on the condition variable, waiting for a line.
+    parked: usize,
     stopping: bool,
 }
 
@@ -122,9 +138,12 @@ impl<I: Run> Contexts<I> {
             state: Mutex::new(State {
                 lines: Lines::default(),
                 free: 1,
+                parked: 0,
                 stopping: false,
             }),
             wake: Condvar::new(),
+            woke: AtomicU64::new(0),
+            spared: AtomicU64::new(0),
             census: Arc::new(Census {
                 count: Mutex::new(Count {
                     threads: 1,
@@ -168,8 +187,23 @@ impl<I: Run> Contexts<I> {
         Ok(())
     }
 
+    /// Run `item` in the context of logical queue `queue` on this thread, where no thread runs
+    /// that context, it holds no item, and `item` is [`plain`](Run::plain): the context runs on
+    /// this thread meanwhile, so the items posted to it wait for `item`, then run on the pool's
+    /// threads. Else give `item` back, changing nothing.
+    pub(crate) fn run_alone(&self, queue: u64, item: I) -> Result<(), I> {
+        if !item.plain() || !lock(&self.shared.state).lines.take_idle(queue) {
+            return Err(item);
+        }
+        item.run();
+        let mut state = lock(&self.shared.state);
+        state.lines.done(queue);
+        self.serve(state);
+        Ok(())
+    }
+
     /// Start a thread where a context is ready that no free thread will take, below the cap, and
-    /// wake one: `state` was just changed.
+    /// wake one where one sleeps and a context is ready: `state` was just changed.
     fn serve(&self, mut state: std::sync::MutexGuard<'_, State<I>>) {
         if state.lines.ready() > state.free {
             let start = {
@@ -192,8 +226,22 @@ impl<I: Run> Contexts<I> {
                 }
             }
         }
+        let wake = state.parked > 0 && state.lines.is_ready();
         drop(state);
-        self.shared.wake.notify_one();
+        if wake {
+            self.shared.woke.fetch_add(1, Ordering::Relaxed);
+            self.shared.wake.notify_one();
+        } else {
+            self.shared.spared.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// The notifies made to the threads, and those spared.
+    pub(crate) fn wakes(&self) -> (u64, u64) {
+        (
+            self.shared.woke.load(Ordering::Relaxed),
+            self.shared.spared.load(Ordering::Relaxed),
+        )
     }
 
     /// Stop the threads and wait for them to end, but for this one when it is one of them: each
@@ -254,11 +302,13 @@ fn run<I: Run>(shared: &Shared<I>, first: bool) {
         if state.stopping {
             break;
         }
+        state.parked += 1;
         let (next, waited) = shared
             .wake
             .wait_timeout(state, IDLE)
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state = next;
+        state.parked -= 1;
         if waited.timed_out() && !first && !state.lines.is_ready() && !state.stopping {
             break;
         }

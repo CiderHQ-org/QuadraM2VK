@@ -1596,6 +1596,11 @@ fn the_device_s_functions_are_reached_through_checked_accessors() {
         "render_state.rs",
         "a draw's recording (vkCmd*), held by what holds its command buffer",
     ),
+    (
+        "scheduler/mod.rs",
+        "the scheduler's nudge, signalled and waited for only while its thread waits on the \
+         GPU, a thread the teardown stops first",
+    ),
 ];
 
 /// The device itself: a holder of it keeps the device alive, so it is no copy of its functions.

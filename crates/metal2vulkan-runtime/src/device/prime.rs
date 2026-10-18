@@ -643,6 +643,14 @@ impl Primer<'_> {
             }
         }
         self.made(Call::WaitSemaphores);
+        // A waker's nudge of the scheduler's thread (`scheduler/mod.rs`): the semaphore, at 1,
+        // raised from the host, with no signal of it pending.
+        let raised = vk::SemaphoreSignalInfo::default()
+            .semaphore(signal)
+            .value(2);
+        // SAFETY: the semaphore is live, its one submitted signal landed, and 2 is above it.
+        unsafe { device.signal_semaphore(&raised) }.map_err(vulkan)?;
+        self.made(Call::SignalSemaphore);
         for queue in queues {
             // SAFETY: the timeline is live.
             unsafe { device.get_semaphore_counter_value(queue.timeline) }.map_err(vulkan)?;

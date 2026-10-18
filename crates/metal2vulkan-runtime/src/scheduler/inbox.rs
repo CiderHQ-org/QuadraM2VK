@@ -4,7 +4,8 @@
 //!
 //! A pass takes the lock, takes in what was committed, and submits what is ready, one
 //! `vkQueueSubmit` after another (about 80 us each on ANV with i915, whose execbuffer lists every
-//! memory object of the device). No commit waits for one.
+//! memory object of the device), a few batches a pass (`scheduler/mod.rs`). No commit waits for
+//! one.
 //!
 //! - **Posted, never passed** ([`Inbox::post`]). A commit puts its commit in the inbox and
 //!   returns: the scheduler's thread takes it in at its next pass. The inbox keeps commit order,
