@@ -895,6 +895,12 @@ pub enum RuntimeDriverDefect {
     /// constants at fixed offsets. Nothing is refused: the first draw after each pipeline bind
     /// there pushes at least one of set 0's descriptors, those that changed or else the first.
     PushedDescriptorsStaleAfterPipelineBinds,
+    /// A compute dispatch recorded after a copy in the same `VkCommandBuffer` samples a binding
+    /// its pipeline layout bakes an immutable sampler into (a constexpr sampler's) as Repeat, not
+    /// with the baked sampler's modes. Nothing is refused: an encoder's dispatch of a variant
+    /// that bakes samplers records in a `VkCommandBuffer` of its own there, as one whose pipeline
+    /// is still being made does.
+    ImmutableSamplersLostAfterCopies,
 }
 
 /// One device capability a refusal can name.

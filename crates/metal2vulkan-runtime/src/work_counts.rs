@@ -181,6 +181,7 @@ pub(crate) struct Counters {
     set_zero_writes_on_equal_shape_switches: AtomicU64,
     set_zero_writes_if_shapes_shared: AtomicU64,
     dispatches_pushing_set_zero: AtomicU64,
+    baked_sampler_dispatches_apart: AtomicU64,
     host_deallocators_delayed: AtomicU64,
     host_import_releases_posted: AtomicU64,
     host_import_releases_pending: AtomicU64,
@@ -1227,6 +1228,13 @@ impl Counters {
     /// A dispatch encoded with its set 0 pushed (`pipeline::objects::pushes_set_zero`).
     pub(crate) fn dispatch_pushing_set_zero(&self) {
         self.dispatches_pushing_set_zero
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A dispatch of a variant that bakes samplers, its pipelines made, recorded in a
+    /// `VkCommandBuffer` of its own (`RuntimeDriverDefect::ImmutableSamplersLostAfterCopies`).
+    pub(crate) fn baked_sampler_dispatch_apart(&self) {
+        self.baked_sampler_dispatches_apart
             .fetch_add(1, Ordering::Relaxed);
     }
 
@@ -2754,6 +2762,13 @@ pub struct WorkCounts {
     /// a kernel's variant whose set 0 a push descriptor set layout can hold, on a device of Vulkan
     /// 1.4 or `VK_KHR_push_descriptor`. Every dispatch pushes all of its set's writes.
     pub dispatches_pushing_set_zero: u64,
+    /// Dispatches of a kernel's variant whose layout bakes immutable samplers (constexpr
+    /// samplers'), their pipelines made, recorded in a `VkCommandBuffer` of their own, as a
+    /// dispatch whose pipeline is still being made is (`pending_dispatch.rs`): on a device whose
+    /// driver loses baked samplers after a copy in the same `VkCommandBuffer`
+    /// (`RuntimeDriverDefect::ImmutableSamplersLostAfterCopies`, every lavapipe release). Zero
+    /// elsewhere.
+    pub baked_sampler_dispatches_apart: u64,
     /// No-copy buffers and heaps released with a deallocator whose deallocator waited past the
     /// release (`host-deallocator-delayed`), counted at each wait: given no keep-alive, for the
     /// import of their pages, which something else held (a command buffer submitted before a
@@ -3513,6 +3528,8 @@ impl Device {
             set_zero_writes_if_shapes_shared: (counters.set_zero_writes_if_shapes_shared)
                 .load(Ordering::Relaxed),
             dispatches_pushing_set_zero: (counters.dispatches_pushing_set_zero)
+                .load(Ordering::Relaxed),
+            baked_sampler_dispatches_apart: (counters.baked_sampler_dispatches_apart)
                 .load(Ordering::Relaxed),
             host_deallocators_delayed: counters.host_deallocators_delayed.load(Ordering::Relaxed),
             host_import_releases_posted: (counters.host_import_releases_posted)

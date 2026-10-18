@@ -86,6 +86,7 @@ use metal2vulkan::bind::{
     BindShape, BindState, BindingPlan, Dispatch, FlatIndirect, HeapPlacement, ImageblockSize,
     StageInRegion, UseTarget,
 };
+use metal2vulkan::error::RuntimeDriverDefect;
 use metal2vulkan::metal::{BarrierScope, DispatchType, RenderStages, ResourceUsage};
 use metal2vulkan::pipeline::Stage;
 use std::collections::BTreeMap;
@@ -1651,8 +1652,20 @@ fn record(
                     RegionPipeline::Making(_) => None,
                 })
                 .collect();
+            // Where the driver loses a layout's baked samplers after a copy in the same
+            // `VkCommandBuffer` (`RuntimeDriverDefect::ImmutableSamplersLostAfterCopies`), a
+            // variant that bakes them records in one of its own, as one being made does.
+            let apart = objects.bakes_samplers()
+                && device
+                    .properties()
+                    .driver_defects
+                    .contains(&RuntimeDriverDefect::ImmutableSamplersLostAfterCopies);
             match made {
-                Some(made) => (made, None),
+                Some(made) if !apart => (made, None),
+                Some(_) => {
+                    device.shared().counts.baked_sampler_dispatch_apart();
+                    (Vec::new(), Some((dispatch, begun)))
+                }
                 None => (Vec::new(), Some((dispatch, begun))),
             }
         }

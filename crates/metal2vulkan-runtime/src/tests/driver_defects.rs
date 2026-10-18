@@ -24,6 +24,7 @@ const FREES: RuntimeDriverDefect = RuntimeDriverDefect::FreedAddressMemoryFailsP
 const PUSHES: RuntimeDriverDefect = RuntimeDriverDefect::PushedBufferSizesUnset;
 const STALE_PUSHES: RuntimeDriverDefect =
     RuntimeDriverDefect::PushedDescriptorsStaleAfterPipelineBinds;
+const BAKED_SAMPLERS: RuntimeDriverDefect = RuntimeDriverDefect::ImmutableSamplersLostAfterCopies;
 
 /// Every committed profile's driver has its defects at every release and GPU but those a probe
 /// found clean: MoltenVK the multisampled depth/stencil colour copies, the inexact depths past
@@ -31,6 +32,9 @@ const STALE_PUSHES: RuntimeDriverDefect =
 /// compiled at load, the copies of compressed images that rewrite texels, the reads of command
 /// buffers after their signal, the frees that fail pending work and the pushed sets' unset buffer
 /// sizes; lavapipe the colour copies, the depth/stencil resolve of the
+/// first layer and level, the explicit plane's rows past its height and the baked samplers lost
+/// after a copy;
+/// RADV the multisampled copies that convert float NaNs, and the implicit
 /// preprocessing after an execution set on every GPU but the 780M at 26.2.4 (Phoenix's and Hawk
 /// Point's), measured clean; ANV
 /// the compressed image's short size, the occlusion count per color output and the pushed
@@ -62,6 +66,7 @@ fn the_committed_profiles_drivers_have_their_defects() {
                     PUSHES,
                 ]
             }
+            Some(DriverId::MESA_LLVMPIPE) => vec![COPIES, RESOLVES, PAST_HEIGHT, BAKED_SAMPLERS],
             // The 780M at 26.2.4, under Phoenix's `deviceID` and Hawk Point's.
             Some(DriverId::MESA_RADV)
                 if matches!(desc.device_id, 0x15bf | 0x1900)
@@ -174,6 +179,21 @@ fn radv_s_preprocessing_is_clean_on_the_identity_measured_alone() {
         mesa_26_0_8,
     );
     assert!(!nvidia.contains(&PREPROCESS));
+}
+
+/// lavapipe's baked samplers lost after a copy, measured broken at 26.0.8, are every lavapipe
+/// release's: 26.2.4, measured clean, has no committed profile to be a measured identity. A device
+/// that runs another driver has none.
+#[test]
+fn lavapipe_s_baked_samplers_are_every_release_s() {
+    let lavapipe = Some(DriverId::MESA_LLVMPIPE);
+    let of = |release| among(AFFECTED, lavapipe, 0, release);
+    let mesa_26_0_8 = (26 << 22) | 8;
+    for release in [mesa_26_0_8, MESA_26_2_4 - 1, MESA_26_2_4, MESA_26_2_4 + 1] {
+        assert!(of(release).contains(&BAKED_SAMPLERS), "{release:#x}");
+    }
+    let radv = among(AFFECTED, Some(DriverId::MESA_RADV), 0, mesa_26_0_8);
+    assert!(!radv.contains(&BAKED_SAMPLERS));
 }
 
 /// Hawk Point's Radeon 780M (`deviceID` 0x1900) is Phoenix's GPU (0x15bf): at RADV 26.2.4 it is a

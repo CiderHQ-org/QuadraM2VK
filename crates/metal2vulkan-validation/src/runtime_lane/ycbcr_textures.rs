@@ -39,7 +39,7 @@ use metal2vulkan::bind::{
     YCbCrRange,
 };
 use metal2vulkan::device::{SamplingPolicy, VkProperty, YCbCrFilterPolicy};
-use metal2vulkan::error::{BindError, Feature};
+use metal2vulkan::error::{BindError, Feature, RuntimeDriverDefect};
 use metal2vulkan::metal::format::{ycbcr_format, ChromaSubsampling, YCbCrReads};
 use metal2vulkan::metal::{
     PixelFormat, PrimitiveType, ResourceUsage, SamplerAddressMode, SamplerBorderColor,
@@ -3010,6 +3010,10 @@ declare {{ <4 x float>, i8 }} @air.sample_texture_2d.v4f32(ptr addrspace(1), ptr
 /// module), once, which a `YCBCR8_420_2P` one, whose map agrees on repeat, shares. Over each it
 /// reads, word for word, what the runtime repeat sampler at slot 0 reads (`sample_outside`), as
 /// Metal samples a constexpr sampler as a runtime one of its modes: the 4:2:0 textures their
+/// texels clamped to the edge. A dispatch again of a made variant, after the texture's shadow
+/// copy, records in a `VkCommandBuffer` of its own exactly where the driver loses baked samplers
+/// after a copy (`RuntimeDriverDefect::ImmutableSamplersLostAfterCopies`: lavapipe 26.0.8 sampled
+/// it as Repeat in place).
 #[test]
 fn a_constexpr_sampler_takes_a_ycbcr_map_through_one_variant() {
     on_device(|device, _| {
@@ -3086,35 +3090,49 @@ fn a_constexpr_sampler_takes_a_ycbcr_map_through_one_variant() {
                 (after.shader_modules_made + after.shader_modules_shared)
                     - (before.shader_modules_made + before.shader_modules_shared),
                 after.variant_pipelines_made - before.variant_pipelines_made,
+                after.baked_sampler_dispatches_apart - before.baked_sampler_dispatches_apart,
             )
         };
-        let (got, _, _) = dispatched(&rgba);
+        // Each variant bakes its sampler: a dispatch whose pipeline is made records apart where
+        // the driver loses baked samplers after a copy, the texture's shadow copy among them.
+        let apart = u64::from(
+            device
+                .properties()
+                .driver_defects
+                .contains(&RuntimeDriverDefect::ImmutableSamplersLostAfterCopies),
+        );
+        let (got, _, _, _) = dispatched(&rgba);
         assert_eq!(got, want[0], "RGBA8Unorm");
-        let (got, modules, pipelines) = dispatched(&rgba);
+        let (got, modules, pipelines, recorded_apart) = dispatched(&rgba);
         assert_eq!(got, want[0], "RGBA8Unorm, again");
         assert_eq!((modules, pipelines), (0, 0), "RGBA8Unorm, again");
+        assert_eq!(recorded_apart, apart, "RGBA8Unorm, again: recorded apart");
         // A texture of another texel class may specialize the variant's module anew (a
         // `VkPipeline`, the filter class), never compile another.
-        let (got, modules, _) = dispatched(&ten_444);
+        let (got, modules, _, _) = dispatched(&ten_444);
         assert_eq!(got, want[3], "YCBCR10_444_2P");
         assert_eq!(
             modules, 0,
             "YCBCR10_444_2P keeps the RGBA8Unorm texture's variant"
         );
-        let (got, modules, pipelines) = dispatched(&ten_420);
+        let (got, modules, pipelines, _) = dispatched(&ten_420);
         assert_eq!(got, want[1], "YCBCR10_420_2P");
         assert_eq!(modules, 1, "YCBCR10_420_2P makes one variant");
         assert!(
             pipelines >= 1,
             "YCBCR10_420_2P makes its variant's pipeline"
         );
-        let (got, modules, pipelines) = dispatched(&ten_420);
+        let (got, modules, pipelines, recorded_apart) = dispatched(&ten_420);
         assert_eq!(got, want[1], "YCBCR10_420_2P, again");
         assert_eq!((modules, pipelines), (0, 0), "YCBCR10_420_2P, again");
-        let (got, modules, _) = dispatched(&eight_420);
+        assert_eq!(
+            recorded_apart, apart,
+            "YCBCR10_420_2P, again: recorded apart"
+        );
+        let (got, modules, _, _) = dispatched(&eight_420);
         assert_eq!(got, want[2], "YCBCR8_420_2P");
         assert_eq!(modules, 0, "YCBCR8_420_2P shares YCBCR10_420_2P's variant");
-        let (got, modules, _) = dispatched(&rgba);
+        let (got, modules, _, _) = dispatched(&rgba);
         assert_eq!(got, want[0], "RGBA8Unorm, after");
         assert_eq!(modules, 0, "RGBA8Unorm, after");
     });

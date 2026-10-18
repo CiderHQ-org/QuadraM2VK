@@ -749,6 +749,9 @@ impl VariantObjects {
         &self.immutable_pushes
     }
 
+    /// Whether its layout bakes an immutable sampler.
+    pub(crate) fn bakes_samplers(&self) -> bool {
+        !self.samplers.samplers.is_empty()
     }
 
     /// A command's set 0, from its command buffer's pools `arena`; none when the layout has no

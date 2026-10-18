@@ -266,6 +266,25 @@ pub(super) struct Affected {
 ///   no push after the bind, 3 of 3 right with the one write): known broken through 26.2.4.
 ///   Nothing is refused: the first draw after each pipeline bind pushes at least one write, those
 ///   that changed or else set 0's first (`render/bound.rs`).
+///
+/// `ImmutableSamplersLostAfterCopies`:
+/// - Mesa's lavapipe (`MESA_LLVMPIPE`): a compute dispatch recorded after a copy in the same
+///   `VkCommandBuffer` samples a combined image sampler binding whose pipeline layout bakes an
+///   immutable sampler as Repeat. A kernel's variant for a 4:2:0 texture, whose layout bakes a
+///   clamp-to-edge sampler (`runtime_lane::ycbcr_textures`'s
+///   `a_constexpr_sampler_takes_a_ycbcr_map_through_one_variant`), read the texels clamped at its
+///   first dispatch, recorded in a `VkCommandBuffer` of its own while its pipeline was being made,
+///   and Repeat-addressed at every later one, recorded after the texture's shadow copy: the same
+///   pipeline, layout and pushed descriptors (with the immutable sampler pushed or not), and the
+///   validation layer reported nothing. Measured on 26.0.8 (driverVersion 0x6800008, Ubuntu's
+///   26.0.8-1ubuntu0.3 on LLVM 21.1.8): known broken through 26.0.8. Measured clean on 26.2.4
+///   (0x6802004, LLVM 23.1.1), the same calls recorded alike. Mesa 26.1.0's release notes list
+///   "lavapipe: rework immutable samplers", likely the fix (unverified: its change was not read).
+///   Nothing is refused: an encoder's dispatch of a variant that bakes samplers records in a
+///   `VkCommandBuffer` of its own there (`compute.rs`), as one whose pipeline is still being made
+///   does (`pending_dispatch.rs`); a host step's dispatch (an indirect dispatch's, an indirect
+///   command buffer's execution) records in place. Graphics draws are unmeasured. Every lavapipe
+///   release takes it: 26.2.4, measured clean, has no committed profile to be a measured identity.
 pub(super) const AFFECTED: &[Affected] = &[
     Affected {
         defect: RuntimeDriverDefect::MultisampledDepthStencilColourCopies,
@@ -352,6 +371,11 @@ pub(super) const AFFECTED: &[Affected] = &[
     Affected {
         defect: RuntimeDriverDefect::PushedDescriptorsStaleAfterPipelineBinds,
         driver: DriverId::INTEL_OPEN_SOURCE_MESA,
+        clean: &[],
+    },
+    Affected {
+        defect: RuntimeDriverDefect::ImmutableSamplersLostAfterCopies,
+        driver: DriverId::MESA_LLVMPIPE,
         clean: &[],
     },
 ];
