@@ -248,7 +248,13 @@ impl TextureState {
             modifier_features: Mutex::new(HashMap::new()),
             heap_types: std::sync::OnceLock::new(),
             storage_forms: storage_form::StorageForms::default(),
-            first_moves: first_move::FirstMoves::default(),
+            // A batch holds the texture slots' writes in place of each registration waiting for
+            // its place where the heap sets take writes while pending, the
+            // `UPDATE_UNUSED_WHILE_PENDING` the device's profile derives from the same feature
+            // (`heap_sets.rs`).
+            first_moves: first_move::FirstMoves::new(
+                !description.has(VkFeature::DescriptorBindingUpdateUnusedWhilePending),
+            ),
             twin_decodes: twin_decode::TwinDecodes::default(),
             second_decodes: Mutex::new(Vec::new()),
             held: held_depth::HeldImages::default(),

@@ -522,6 +522,18 @@ impl CommandBufferShared {
                 exit_uses.push(image.transition_use());
             }
         }
+        // Its encoders' deferred command buffers replayed now, where the recorder's thread has
+        // not yet (`recorder`), waiting for a replay in progress: before the first work's take,
+        // which holds the submissions' order until the submission is made, and which a new
+        // resource's registration waits for where registrations wait for their place
+        // (`texture/first_move.rs`). A texture made meanwhile so waits for no replay. Each keeps
+        // its handle as encoded until the submission (below), which finds it replayed.
+        for buffer in encoders.iter().flat_map(|recorded| &recorded.raws) {
+            // SAFETY: each ended, and its command buffer committed; inside the scheduler's
+            // section.
+            unsafe { crate::recorder::resolve(raw, *buffer) }
+                .map_err(|error| recording_error(device, crate::error::vulkan(error)))?;
+        }
         // The new resources' first work, before every command (`texture/first_move.rs`), given
         // back if the submission is not made. A batch's commands may reach every texture
         // unnamed, so it takes every move, those of images bound to host pages among them, whose
@@ -837,6 +849,10 @@ impl CommandBufferShared {
             true => (&signal_semaphores[..], &signal_values[..]),
             false => (&[][..], &[][..]),
         };
+        // Its deferred command buffers go as their replays (`recorder`), after every check above
+        // that compares them as encoded: its encoders', replayed before the first work's take
+        // (above); the barriers recorded since, replayed here where the recorder's thread has
+        // not yet reached them.
         for buffer in work.iter_mut() {
             // SAFETY: each ended, and its command buffer committed; inside the scheduler's
             // section.

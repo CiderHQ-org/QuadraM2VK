@@ -81,6 +81,7 @@ pub(crate) struct Counters {
     stale_detached_reaches: AtomicU64,
     detached_storage_reaches: AtomicU64,
     heap_slots_rewritten: AtomicU64,
+    heap_slot_writes_deferred: AtomicU64,
     heap_textures_tiled: AtomicU64,
     heap_texture_lossless_layouts: AtomicU64,
     heap_texture_block_compressed_layouts: AtomicU64,
@@ -1679,6 +1680,11 @@ impl Counters {
         }
     }
 
+    /// A write of texture slots waited for a batch's hold of them to end (`heap_sets::hold`).
+    pub(crate) fn heap_slot_writes_deferred(&self) {
+        (self.heap_slot_writes_deferred).fetch_add(1, Ordering::Relaxed);
+    }
+
     /// A texture in a heap over host pages was made tiled as Metal lays it out
     /// (`texture/heap_tiled.rs`).
     pub(crate) fn heap_texture_tiled(&self) {
@@ -1982,6 +1988,13 @@ pub struct WorkCounts {
     /// detach, one for each live texture whose images or texel views lie in those bytes (in a
     /// no-copy heap or over one of its buffers, for the heap's), and none for any other texture.
     pub heap_slots_rewritten: u64,
+    /// Writes of texture slots of the device's heap (a new texture's, or those a rebind, a detach
+    /// or a change of storage form writes again) that waited for a batch: asked between its
+    /// first work's take and its `vkQueueSubmit`, they were made once its submission was made,
+    /// before the next batch took its first work. So a texture's making waits for no batch's
+    /// submission. A device whose heap sets take no writes while a command buffer is pending
+    /// defers none: there a texture's registration waits for the batch instead.
+    pub heap_slot_writes_deferred: u64,
     /// Uses of a buffer over host pages that looked up by address the ranges of host bytes their
     /// bytes meet (`host_aliases.rs`): a use of a range met by no more ranges than the classes of
     /// length that lookup visits reads those its range keeps instead.
@@ -2147,6 +2160,14 @@ pub struct WorkCounts {
     /// Of those, the groups that went at once because a thread began to wait for one of their
     /// command buffers' completion (`CommandBuffer::wait_until_completed`).
     pub groups_sent_for_waits: u64,
+    /// Registrations of a new resource's first work (as a texture or buffer is made) that found
+    /// a submission holding its place in the submissions' order and waited until that submission
+    /// was made: only on a device whose heap sets take no writes while a command buffer that binds
+    /// them is pending (no `descriptorBindingUpdateUnusedWhilePending`), where a submission holds
+    /// the order from its take of the first work, after replaying its encoders' deferred command
+    /// buffers, to its `vkQueueSubmit` (`texture/first_move.rs`). Elsewhere a registration takes
+    /// no place, and this stays 0.
+    pub registrations_waited: u64,
     /// Times the scheduler's thread found no work and slept (`scheduler/mod.rs`), each until it
     /// was woken or [`scheduler_sleep_slices`](Self::scheduler_sleep_slices) says it timed out.
     pub scheduler_sleeps: u64,
@@ -2979,6 +3000,7 @@ impl Device {
             stale_detached_reaches: counters.stale_detached_reaches.load(Ordering::Relaxed),
             detached_storage_reaches: counters.detached_storage_reaches.load(Ordering::Relaxed),
             heap_slots_rewritten: counters.heap_slots_rewritten.load(Ordering::Relaxed),
+            heap_slot_writes_deferred: counters.heap_slot_writes_deferred.load(Ordering::Relaxed),
             host_range_lookups: self.shared().aliases.range_lookups(),
             heap_textures_tiled: counters.heap_textures_tiled.load(Ordering::Relaxed),
             heap_texture_lossless_layouts: counters
@@ -3037,6 +3059,7 @@ impl Device {
             batches_with_four_or_more_pending: pending(3),
             groups_kept_pending: counters.groups_kept_pending.load(Ordering::Relaxed),
             groups_sent_for_waits: counters.groups_sent_for_waits.load(Ordering::Relaxed),
+            registrations_waited: self.shared().textures.first_moves.registrations_waited(),
             scheduler_sleeps: sleeps,
             scheduler_wakes_commit: by_commit,
             scheduler_wakes_completion: by_completion,

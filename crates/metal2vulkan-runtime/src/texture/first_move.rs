@@ -84,7 +84,15 @@
 //!   the M3 Max waited up to 13 ms, in 20 of 60 makings: MoltenVK encodes a command buffer's Metal
 //!   commands inside `vkQueueSubmit`, on the calling thread (4.5 to 17 ms for those batches); with
 //!   the hold, no making of 60 took past 0.16 ms. A device whose heap sets take no writes while a
+//!   command buffer that binds them is pending (no `descriptorBindingUpdateUnusedWhilePending`)
+//!   holds no slots, as a write made after a command buffer committed misses the version it binds
+//!   (`heap_sets.rs`): there each registration waits for its place ([`FirstMoves::ordered`]), so
+//!   for no replay and no GPU work (a batch replays its encoders' deferred command buffers,
 //!   `recorder`, before its take), only for the recording of a submission's own barriers and its
+//!   `vkQueueSubmit`. An internal submission signals a timeline of its own, which a batch on
+//!   another `VkQueue` waits for while one that did first work may not have completed
+//!   ([`FirstMoves::internal_wait`]). Seen without it on RADV: a batch submitted with images in
+//!   `UNDEFINED` in its texture table, under the validation layer.
 //! - **Failure.** A submission that fails gives its work back, still to be done.
 //! - **Out of reach of a submission.** A texture's `VkImage` handed out (`Texture::vk_image`)
 //!   rests in `GENERAL` as its contract says: handing it out does its work first, by an internal
@@ -94,7 +102,7 @@ use super::super::creation;
 use super::super::device::lock;
 use super::super::error::{internal, vulkan, Error, MemoryKind};
 use super::super::exit_guard::{self, Call};
-use super::super::host_memory::host_writable;
+use super::super::heap_sets::HeldSlots;
 use super::super::image_barrier::{image_barrier, ImageDst};
 use super::super::memory::{Memory, MemoryClass, Placement};
 use super::super::release;
@@ -107,9 +115,8 @@ use crate::device::functions::Vk;
 use ash::vk;
 use metal2vulkan::vk::Format;
 use std::any::Any;
-use std::ops::Range;
-use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError, Weak};
 
 /// One `VkImage`'s first move: from `old` to `GENERAL`, then, where it reads zero, the copies of
 /// the device's zeros that write every texel, or a clear of them.
@@ -769,9 +776,17 @@ struct Zeros {
 #[derive(Default)]
 pub(crate) struct FirstMoves {
     /// The submissions' order: held by each from its take until its submission was made
-    /// ([`Taken`]), and by each registration, so no submission is made between another's take
-    /// and its submission, and no resource registers meanwhile (the module docs).
+    /// ([`Taken`]), so no submission is made between another's take and its submission; and by
+    /// each registration where [`ordered`](Self::ordered), so no resource registers meanwhile
+    /// (the module docs).
     order: Mutex<()>,
+    /// Each registration waits for its place in the order: on a device whose heap sets take no
+    /// writes while a command buffer that binds them is pending, where a batch cannot hold the
+    /// texture slots' writes instead (`heap_sets::hold`).
+    ordered: bool,
+    /// The registrations that found a submission holding the order and waited for its place
+    /// (`WorkCounts::registrations_waited`).
+    waited: AtomicU64,
     waiting: Mutex<Vec<Waiting>>,
     /// The point of the last batch on each `VkQueue` that did some, by queue.
     done_at: Mutex<Vec<Point>>,
@@ -823,9 +838,37 @@ fn past_bound(waiting: &[Waiting]) -> bool {
 }
 
 impl FirstMoves {
+    /// The first moves of a device whose registrations wait for their place in the order where
+    /// `ordered` ([`FirstMoves::ordered`]).
+    pub(crate) fn new(ordered: bool) -> FirstMoves {
+        FirstMoves {
+            ordered,
+            ..FirstMoves::default()
+        }
+    }
+
+    /// The submissions' order, for a registration: held where registrations wait for their
+    /// place (the module docs), else not taken. One that finds a submission holding it is
+    /// counted as it waits.
+    fn registration_place(&self) -> Option<MutexGuard<'_, ()>> {
+        self.ordered.then(|| match self.order.try_lock() {
+            Ok(order) => order,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                self.waited.fetch_add(1, Ordering::Relaxed);
+                lock(&self.order)
+            }
+        })
+    }
+
+    /// The registrations that waited for a submission's place in the order so far.
+    pub(crate) fn registrations_waited(&self) -> u64 {
+        self.waited.load(Ordering::Relaxed)
+    }
+
     /// `fresh`, just shared, has moves waiting.
     pub(crate) fn register(&self, fresh: Weak<dyn Fresh>) {
-        let _order = lock(&self.order);
+        let _order = self.registration_place();
         lock(&self.waiting).push(Waiting::Moves(fresh));
     }
 
@@ -840,7 +883,7 @@ impl FirstMoves {
     ) -> Result<(), Error> {
         let zeros = self.zeros(device, 0)?;
         let fill = FirstFill::new(buffer, range.start, range.end - range.start, zeros);
-        let _order = lock(&self.order);
+        let _order = self.registration_place();
         lock(&self.waiting).push(Waiting::Fill(keeper, fill));
         Ok(())
     }
@@ -859,7 +902,7 @@ impl FirstMoves {
         staging: Box<dyn Any + Send + Sync>,
     ) -> bool {
         let fill = FirstFill::bytes(buffer, start, source, length, staging);
-        let _order = lock(&self.order);
+        let _order = self.registration_place();
         let mut waiting = lock(&self.waiting);
         waiting.push(Waiting::Fill(keeper, fill));
         past_bound(&waiting)
@@ -873,7 +916,7 @@ impl FirstMoves {
         keeper: Weak<dyn Any + Send + Sync>,
         copy: TexelCopy,
     ) -> bool {
-        let _order = lock(&self.order);
+        let _order = self.registration_place();
         let mut waiting = lock(&self.waiting);
         waiting.push(Waiting::Texels(keeper, copy));
         past_bound(&waiting)
@@ -886,7 +929,29 @@ impl FirstMoves {
     /// The submission's place in the order is held until it was made or the work given back
     /// ([`Taken`]): every submission takes, whether or not anything waits.
     pub(crate) fn take(&self, named: impl Fn(ResourceKey) -> bool) -> Taken<'_> {
+        self.take_with(named, || None)
+    }
+
+    /// As [`take`](Self::take), for a submission whose commands may bind the heap sets (a
+    /// batch's): where registrations do not wait for their place ([`FirstMoves::ordered`]), it
+    /// also holds the texture slots' writes (`heap_sets::hold`, which `hold` makes) from before it
+    /// takes until its submission was made or the work given back (the module docs).
+    pub(crate) fn take_holding(
+        &self,
+        named: impl Fn(ResourceKey) -> bool,
+        hold: impl FnOnce() -> HeldSlots,
+    ) -> Taken<'_> {
+        self.take_with(named, || (!self.ordered).then(hold))
+    }
+
+    /// As [`take`](Self::take), holding the slots `hold` gives once its place is taken.
+    fn take_with(
+        &self,
+        named: impl Fn(ResourceKey) -> bool,
+        hold: impl FnOnce() -> Option<HeldSlots>,
+    ) -> Taken<'_> {
         let order = lock(&self.order);
+        let slots = hold();
         let mut held = Vec::new();
         let mut left: Vec<Box<dyn Any + Send + Sync>> = Vec::new();
         {
@@ -895,6 +960,7 @@ impl FirstMoves {
                 return Taken {
                     moves: self,
                     held,
+                    _slots: slots,
                     _order: order,
                 };
             }
@@ -946,6 +1012,7 @@ impl FirstMoves {
         Taken {
             moves: self,
             held,
+            _slots: slots,
             _order: order,
         }
     }
@@ -1271,6 +1338,9 @@ impl Zeros {
 pub(crate) struct Taken<'a> {
     moves: &'a FirstMoves,
     held: Vec<Held>,
+    /// The texture slots' writes it holds ([`FirstMoves::take_holding`]), made as this drops,
+    /// before its place goes: the field before `_order`, which drops after it.
+    _slots: Option<HeldSlots>,
     /// The submission's place in the order ([`FirstMoves::take`]), let go as this drops.
     _order: MutexGuard<'a, ()>,
 }
@@ -1638,6 +1708,67 @@ mod tests {
         );
         assert!(lock(&image.moves).is_empty());
         drop(buffer);
+    }
+
+    /// A resource registered on another thread while a submission holds its place: whether the
+    /// registration returned within `within`, and the resource once it did.
+    fn register_beside(
+        moves: &Arc<FirstMoves>,
+        within: std::time::Duration,
+    ) -> (bool, std::thread::JoinHandle<Arc<Resource>>) {
+        let (sent, got) = std::sync::mpsc::channel();
+        let registering = Arc::clone(moves);
+        let thread = crate::exit_guard::spawn(std::thread::Builder::new(), move || {
+            let image = registered(&registering, 7, None);
+            // Received, or not where the wait for it ended first.
+            sent.send(()).ok();
+            image
+        })
+        .unwrap();
+        (got.recv_timeout(within).is_ok(), thread)
+    }
+
+    /// Where a batch holds the texture slots' writes ([`FirstMoves::ordered`] false), a resource
+    /// registers while a submission holds its place, without waiting for it, and the next
+    /// submission takes its move.
+    #[test]
+    fn a_registration_waits_for_no_submission_where_batches_hold_the_slots() {
+        let moves = Arc::new(FirstMoves::new(false));
+        let taken = moves.take(|_| false);
+        let (returned, thread) = register_beside(&moves, std::time::Duration::from_secs(30));
+        assert!(
+            returned,
+            "the registration waited for the submission's place"
+        );
+        assert!(
+            taken.submitted(None).is_empty(),
+            "registered after the take"
+        );
+        let image = thread.join().unwrap();
+        assert_eq!(moves.registrations_waited(), 0, "counted as waiting");
+        let next = moves.take(|_| false);
+        assert_eq!(next.held.len(), 1, "the next submission takes the move");
+        assert!(lock(&image.moves).is_empty());
+    }
+
+    /// Where registrations wait for their place ([`FirstMoves::ordered`]), a resource registers
+    /// only once the submission holding its place let go of it, counted as it waits, and the next
+    /// submission takes its move.
+    #[test]
+    fn a_registration_waits_for_the_submission_where_registrations_are_ordered() {
+        let moves = Arc::new(FirstMoves::new(true));
+        let taken = moves.take(|_| false);
+        let (returned, thread) = register_beside(&moves, std::time::Duration::from_millis(200));
+        assert!(
+            !returned,
+            "the registration came between a take and its submission"
+        );
+        assert!(taken.submitted(None).is_empty());
+        let image = thread.join().unwrap();
+        assert_eq!(moves.registrations_waited(), 1, "the wait counted");
+        let next = moves.take(|_| false);
+        assert_eq!(next.held.len(), 1, "the next submission takes the move");
+        assert!(lock(&image.moves).is_empty());
     }
 
     #[test]

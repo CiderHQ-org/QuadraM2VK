@@ -20,6 +20,11 @@
 //!   each image array holds the texture at ID `i` as the array's class takes it
 //!   (`bind::heap_element`: its view where it fits the class, else the neutral), written as the
 //!   texture takes the slot ([`place`]), for each set that lives then, and by a set made later
+//!   for each texture that lives then. A batch holds those writes from its first work's take
+//!   until its submission was made ([`hold`]): one asked meanwhile is made then, before the next
+//!   submission takes its first work, so no texture registered after the take, whose move is
+//!   not the batch's, is in its sets or table in `UNDEFINED` (`texture/first_move.rs`), and its
+//!   making waits for no submission. A rebind or a detach of host pages writes again the
 //!   elements of the textures whose images or texel views lie in those bytes ([`renew_over`]),
 //!   and of no other texture (`WorkCounts::heap_slots_rewritten`). A texture the class fits that it cannot view (a format
 //!   the device cannot sample or store formatless, or that needs its function's decode) is the
@@ -125,6 +130,11 @@ pub(super) struct DeviceHeaps {
     /// What a rebind or a detach replaced ([`retire`]), which waits for the command buffers
     /// committed before it.
     replaced: Retirement<Keeper>,
+    /// The batches holding the texture slots' writes ([`hold`]): while one is, a write waits in
+    /// `deferred`.
+    holds: usize,
+    /// The slot writes asked while a batch held them, in order, made as the last hold ends.
+    deferred: VecDeque<Slots>,
 }
 
 /// A texture the table and the heap sets hold: its slot's generation and hold serial when it
@@ -361,6 +371,37 @@ impl DeviceHeaps {
         self.table
             .as_ref()
             .ok_or_else(|| internal("a texture table not made"))
+    }
+
+    /// Write `slots` ([`sync`]): the slots that failed, each with its error, their entries the
+    /// neutral's. Their holders go to `held`, to drop once the lock is free.
+    fn write_slots(
+        &mut self,
+        device: &Device,
+        slots: Slots,
+        held: &mut Vec<Texture>,
+        notes: &mut Notes,
+    ) -> Vec<(u64, Error)> {
+        let (ids, force): (Vec<u64>, bool) = match slots {
+            Slots::Changed(id) => (vec![id], false),
+            Slots::All => (self.textures.keys().copied().collect(), true),
+            Slots::Over(key) => {
+                let over = self.textures.iter();
+                let over = over.filter(|(_, placed)| placed.bytes == Some(key));
+                (over.map(|(&id, _)| id).collect(), true)
+            }
+        };
+        if force {
+            device.shared().counts.heap_slots_rewritten(ids.len());
+        }
+        let mut failed = Vec::new();
+        for id in ids {
+            if let Err(error) = self.sync(device, id, force, held, notes) {
+                let cleared = self.clear(device, id);
+                failed.push((id, cleared.err().unwrap_or(error)));
+            }
+        }
+        failed
     }
 
     /// Write texture slot `id` into the table and every heap set where its holder changed since
@@ -1083,28 +1124,73 @@ enum Slots {
     Over(ResourceKey),
 }
 
+/// Write `slots`: a changed one where its holder changed, the others whatever changed. While a
+/// batch holds the slots' writes ([`hold`]), they wait for it.
 fn sync(device: &Device, slots: Slots) {
     let mut held = Vec::new();
     let mut notes = Notes::default();
     let failed = {
         let mut heaps = lock(&device.shared().heaps);
-        let ids: Vec<u64> = match force {
-            true => heaps.textures.keys().copied().collect(),
-            false => vec![id],
-        };
-        let mut failed = None;
-        for id in ids {
-            if let Err(error) = heaps.sync(device, id, force, &mut held, &mut notes) {
-                let cleared = heaps.clear(device, id);
-                failed = Some((id, cleared.err().unwrap_or(error)));
+        match heaps.holds {
+            0 => heaps.write_slots(device, slots, &mut held, &mut notes),
+            _ => {
+                heaps.deferred.push_back(slots);
+                device.shared().counts.heap_slot_writes_deferred();
+                Vec::new()
             }
         }
-        failed
     };
     drop(held);
     notes.announce(device);
-    if let Some((id, error)) = failed {
+    for (id, error) in failed {
         failed_write(device, id, &error);
+    }
+}
+
+/// A batch's hold of the device's texture slots' writes ([`hold`]), from before its first work's
+/// take until its submission was made or the work given back (`texture/first_move.rs`'s
+/// `Taken`). The writes asked meanwhile ([`place`], [`renew_over`], [`renew`]) are made as the
+/// last hold ends, before the batch lets go of its place in the first work's order: so no
+/// texture's elements reach the table or a heap set between the take and the `vkQueueSubmit`
+/// (a texture registered after the take, whose move the batch did not take, would be in them in
+/// `UNDEFINED`), and every later batch, which takes its place after, finds them written.
+pub(super) struct HeldSlots {
+    device: Device,
+}
+
+/// Hold `device`'s texture slots' writes for a batch taking its first work (the module docs): only
+/// on a device whose heap sets take writes while a command buffer that binds them is pending, as
+/// the writes made as it ends reach the sets the batch's commands bound, which it is by then
+/// (`texture/first_move.rs` takes no hold elsewhere).
+pub(super) fn hold(device: &Device) -> HeldSlots {
+    lock(&device.shared().heaps).holds += 1;
+    HeldSlots {
+        device: device.clone(),
+    }
+}
+
+impl Drop for HeldSlots {
+    fn drop(&mut self) {
+        let device = &self.device;
+        let mut held = Vec::new();
+        let mut notes = Notes::default();
+        let failed = {
+            let mut heaps = lock(&device.shared().heaps);
+            heaps.holds -= 1;
+            let mut failed = Vec::new();
+            while heaps.holds == 0 {
+                let Some(slots) = heaps.deferred.pop_front() else {
+                    break;
+                };
+                failed.extend(heaps.write_slots(device, slots, &mut held, &mut notes));
+            }
+            failed
+        };
+        drop(held);
+        notes.announce(device);
+        for (id, error) in failed {
+            failed_write(device, id, &error);
+        }
     }
 }
 

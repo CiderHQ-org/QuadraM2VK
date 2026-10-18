@@ -291,19 +291,6 @@ impl Device {
         }
     }
 
-    /// submission made before on each `VkQueue` completed ([`drain_submitted`]), each image's
-    /// [`drain_submitted`]: Self::drain_submitted
-        let taken = firsts.take_keeps(named);
-        if !taken.has_keeps() {
-            return Ok(());
-        }
-        // batch's last barrier, `tracker.rs`'s `to_host`).
-        self.drain_submitted()?;
-    /// Wait until every batch submitted to each `VkQueue` before now completed.
-    fn drain_submitted(&self) -> Result<(), Error> {
-        let shared = self.shared();
-        let (timelines, values): (Vec<vk::Semaphore>, Vec<u64>) = (shared.queues.iter())
-            .unzip();
     /// Bind `binds` to `buffer`, a sparse buffer no command has used, with one
     /// `vkQueueBindSparse` on the device's first `VkQueue` that signals the internal timeline,
     /// and return without waiting for it: every submission made after it, on every `VkQueue`,
