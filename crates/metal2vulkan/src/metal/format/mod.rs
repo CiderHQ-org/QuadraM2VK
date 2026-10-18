@@ -405,6 +405,17 @@ impl ExtendedRange {
         )
     }
 
+    /// Whether Metal's linear mip filter of the form's samples is built, a blend of two levels'
+    /// samples (`lower::sampler::extended`): `BGR10_XR`'s and `BGRA10_XR`'s and their `_sRGB`
+    /// twins', measured on an Apple M3 Max. Another form's sample through a sampler with a linear
+    /// mip filter is refused.
+    pub(crate) fn blends_levels(self) -> bool {
+        matches!(
+            self,
+            ExtendedRange::Bgr10 { .. } | ExtendedRange::Bgra10 { .. }
+        )
+    }
+
     /// The forms an argument buffer's texture is read in (a heap element), in the order their
     /// classes follow `metal::texel_format::heap_classes`' own: a function decodes such a texture's
     /// raw texels, read through the heap's unsigned integer array, without a table. The `_sRGB`

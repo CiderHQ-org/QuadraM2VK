@@ -97,7 +97,6 @@
 
 use crate::air::abi::{AddressMode, BorderColor, Filter, SamplerState};
 use crate::air::intrinsics::ImageDim;
-use crate::air::ir::ValueId;
 use crate::error::{Error, Feature, Unsupported};
 use crate::lower::emit::EmitCx;
 use crate::lower::texture::{OffsetBase, TexelConv};
@@ -960,6 +959,12 @@ impl Footprint {
             _ => Ok(texel),
         }
     }
+
+    /// The border texel (a `vec4` of `f32`) a tap outside a border axis reads, where an axis has
+    /// a border.
+    pub(super) fn border_texel(&self) -> Option<SValue> {
+        self.border
+    }
 }
 
 /// Where an emulation reads its taps: the image of its own binding, or, in the shared emulation of
@@ -1130,37 +1135,35 @@ pub(super) fn footprint_from(
 }
 
 /// The footprint over `taps` of a sample at plane coordinate `coord` (and array layer `layer`)
-/// of image `img` (image facts `image`) at its base level, whose taps are fetched from `img`, the
+/// of image `img` (image facts `image`) at the taps' level, whose taps are fetched from `img`, the
 /// border color seen through the channels of the format's treatment `bits`: an extended-range
 /// texture's emulated sample (`super::extended`), which reads its slot's own image, its offset
-/// placed by the slot's `SpecKey::OffsetBaseAxes` tests `parent` where it reads them.
+/// (its taps' constant one, or a sampling routine's call's value `offset`, as [`At::offset`])
+/// placed by the slot's `SpecKey::OffsetBaseAxes` tests `parent` where it reads them (a level's
+/// taps read its size, and the offset rule the base level's too, as [`footprint_from`]'s).
 pub(super) fn footprint_of_image(
-    cx: &mut EmitCx<'_>,
     fb: &mut FunctionBuilder<'_>,
     t: &Tys,
-    (coord, layer): (ValueId, Option<ValueId>),
+    (coord, layer, offset): (SValue, Option<SValue>, Option<(SValue, u8)>),
     (img, image): (SValue, CombinedImage),
     bits: Bits,
     (taps, parent): (&Taps<'_>, Option<OffsetBase>),
 ) -> BResult<Footprint> {
-    if taps.level.is_some() {
-        return Err(missing_tap());
-    }
-    let coord = cx.operand(fb, coord)?;
-    let layer = match layer {
-        Some(l) => Some(cx.operand(fb, l)?),
-        None => None,
-    };
     let at = At {
         coord,
         layer,
         parent,
-        offset: None,
+        offset,
     };
     let zero_u = fb.u32_const(0)?;
     let zero_u = value(fb, zero_u)?;
-    let size = fb.query(ImageQuery::SizeLod(zero_u), img)?;
-    footprint_at(fb, t, &at, (size, None, image), bits, taps)
+    let size = fb.query(ImageQuery::SizeLod(taps.level.unwrap_or(zero_u)), img)?;
+    let offset = at.offset.is_some() || taps.offset.is_some_and(|o| o.iter().any(|o| *o != 0));
+    let base = match (taps.level, offset) {
+        (Some(_), true) => Some(fb.query(ImageQuery::SizeLod(zero_u), img)?),
+        _ => None,
+    };
+    footprint_at(fb, t, &at, (size, base, image), bits, taps)
 }
 
 /// The footprint of sample `s` over `taps` on an image of level-0 size `size` (image facts

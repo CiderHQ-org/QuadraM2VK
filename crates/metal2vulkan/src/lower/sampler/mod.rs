@@ -205,7 +205,7 @@ use crate::pipeline::sym::{
 };
 use crate::spirv::builder::{FunctionBuilder, ModuleBuilder};
 use crate::spirv::error::BResult;
-use crate::spirv::ids::{ConstId, DemoteTy, GlobalId, Value as SValue};
+use crate::spirv::ids::{ConstId, DemoteTy, FuncId, GlobalId, Value as SValue};
 use crate::spirv::ir::{ConstBits, Dim, ExecMode, ImageUsage, StorageClass, Type as SType};
 
 fn refuse() -> Error {
@@ -1352,7 +1352,8 @@ pub struct RuntimeSlot {
     /// function reads its word's `r` address mode too.
     pub fetched_depth: bool,
     /// A comparison the shader makes fetches its texel from the level its word reads
-    /// (`fetched::FetchLevel::Word`): the function reads its word's mip filter and the levels its
+    /// (`fetched::FetchLevel::Word`), or an extended-range sample reads its levels by its word
+    /// (`extended::Level::Word`): the function reads its word's mip filter and the levels its
     /// clamp leaves.
     pub fetch_levels: bool,
     /// A cube's explicit gradients take their footprint by its word (`CubeFootprint::Word`): the
@@ -1372,8 +1373,9 @@ pub struct RuntimeSlot {
     /// reads one texel of one level (`texture::OneTexel::Word`): the function reads its word's
     /// filter fields.
     pub texels: bool,
-    /// A clamped LOD query outside a fragment function reads it ([`SampleOp::QueryLevel`]): the
-    /// function reads its `SpecKey::SamplerMinLevel` specialization.
+    /// A clamped LOD query outside a fragment function reads it ([`SampleOp::QueryLevel`]), or an
+    /// extended-range sample whose linear mip filter blends two levels (`extended::Level::Word`):
+    /// the function reads its `SpecKey::SamplerMinLevel` specialization.
     pub min_level: bool,
     /// An emulated anisotropic sample reads it ([`anisotropic`]): the function reads its word's
     /// anisotropy and mip filter and its `SpecKey::SamplerAnisotropy` specialization.
@@ -1635,6 +1637,12 @@ pub struct Declared {
     pub linear_block: Option<bicubic::routines::Block>,
     /// The emulated linear cube samples' fold and corner routines, when the module has one.
     pub linear_cube: Option<bicubic::routines::Cube>,
+    /// The blend of an extended-range sample's two levels under a linear mip filter
+    /// (`bicubic::routines::define_levels`), when the module has one.
+    pub level_blend: Option<FuncId>,
+    /// The exact sum of a linear 2D extended-range sample's taps' grid steps
+    /// (`bicubic::routines::define_quad_steps`), when the module has one.
+    pub quad_steps: Option<FuncId>,
 }
 
 /// Complete the sampler family's plan: declare each combined binding (its image from the
@@ -1966,6 +1974,12 @@ pub fn declare(
             }
             bicubic::routines::Routine::Cube => {
                 d.linear_cube = Some(bicubic::routines::define_cube(mb)?);
+            }
+            bicubic::routines::Routine::Levels => {
+                d.level_blend = Some(bicubic::routines::define_levels(mb)?);
+            }
+            bicubic::routines::Routine::QuadSteps => {
+                d.quad_steps = Some(bicubic::routines::define_quad_steps(mb)?);
             }
         }
     }

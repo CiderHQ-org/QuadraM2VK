@@ -198,8 +198,11 @@ pub(crate) fn emit(
             parent: None,
         };
         let at = At {
-            coord: s.coord,
+            coord: cx.operand(fb, s.coord)?,
+            layer: None,
             offset: raw.offset.as_deref(),
+            passed: None,
+            level: None,
             half: raw.half,
         };
         let addressing = match (&raw.state, word) {

@@ -14,15 +14,19 @@
 //! M4 under macOS 27.0.1, through the probe's constexpr samplers, plain and under Metal's
 //! validation layer alike), which the EV keeps. A differing case is printed with its first
 //! results, on one `XR-TWO-PLANE-SAMPLES-DIFFERS` line.
+//!
+//! A fragment function's samples of such a texture run the variant that takes its slot, counted
+//! per draw (`WorkCounts::two_plane_draws`): [`draws_that_sample_a_two_plane_texture_are_counted`].
 
 use super::degrade_notices::on_device;
 use super::extended_range_samples::state;
 use super::extended_range_two_planes::digest;
+use super::read_through_views::{draw, sampling_state, Sampled};
 use super::two_plane_copies::{lane, planes, Rng, FORMATS};
 use super::{buffer_with, read_buffer};
 use metal2vulkan::bind::SamplerDescriptor;
-use metal2vulkan::metal::{SamplerAddressMode, SamplerMinMagFilter};
-use metal2vulkan_runtime::{CommandBufferStatus, Size};
+use metal2vulkan::metal::{PixelFormat, SamplerAddressMode, SamplerMinMagFilter, TextureUsage};
+use metal2vulkan_runtime::{CommandBufferStatus, Size, TextureDescriptor};
 use std::time::Duration;
 
 /// The longest a command buffer may take.
@@ -223,6 +227,34 @@ fn two_plane_samples_are_metal_s() {
             wrong.len()
         );
         assert!(wrong.is_empty(), "{} cases differ from Metal", wrong.len());
+    });
+}
+
+/// A draw whose fragment function samples a two-plane texture, nearest or linear, runs the variant
+/// that takes its slot and counts once (`WorkCounts::two_plane_draws`); the same pipeline's draws
+/// over an `RGBA8Unorm` texture count none.
+#[test]
+fn draws_that_sample_a_two_plane_texture_are_counted() {
+    on_device(|device, _| {
+        let lane = lane(device);
+        let state = sampling_state(device);
+        let mut d = TextureDescriptor::texture_2d(PixelFormat::RGBA8Unorm, SIDE, SIDE, false);
+        d.usage = TextureUsage::SHADER_READ;
+        let plain = device.new_texture(&d).unwrap();
+        let counted = || device.work_counts().two_plane_draws;
+        let before = counted();
+        for sampled in [Sampled::Nearest, Sampled::Linear] {
+            draw(&lane.queue, &state, &plain, sampled);
+        }
+        assert_eq!(counted(), before, "draws over an RGBA8Unorm texture");
+        for (format, name) in FORMATS {
+            let (texture, _, _) = lane.filled(format, 4, (SIDE, SIDE));
+            for sampled in [Sampled::Nearest, Sampled::Linear] {
+                let before = counted();
+                draw(&lane.queue, &state, &texture, sampled);
+                assert_eq!(counted(), before + 1, "{name}: a {sampled:?} draw");
+            }
+        }
     });
 }
 

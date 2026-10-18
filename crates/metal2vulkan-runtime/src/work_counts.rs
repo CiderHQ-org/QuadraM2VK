@@ -136,6 +136,7 @@ pub(crate) struct Counters {
     commands_noted_as_before: AtomicU64,
     draws_settled: AtomicU64,
     depth16_sided_draws: AtomicU64,
+    two_plane_draws: AtomicU64,
     bound_notices_made: AtomicU64,
     argument_tables_retained: AtomicU64,
     graphics_pipelines_looked_up: AtomicU64,
@@ -900,6 +901,12 @@ impl Counters {
     /// (`VariantKey::depth16_bias_raises`).
     pub(crate) fn depth16_sided_draw(&self) {
         self.depth16_sided_draws.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A draw ran a variant that takes a slot bound to a two-plane extended-range texture
+    /// (`VariantKey::extended_range`).
+    pub(crate) fn two_plane_draw(&self) {
+        self.two_plane_draws.fetch_add(1, Ordering::Relaxed);
     }
 
     /// A bind of a variant made the notices it announces at every occurrence
@@ -2143,6 +2150,11 @@ pub struct WorkCounts {
     /// device may then test the depth before the stage runs, which a stage that writes its depth
     /// otherwise keeps it from.
     pub depth16_sided_draws: u64,
+    /// Draws that ran a variant taking a texture slot bound to a two-plane extended-range texture
+    /// (`RGB10A8_2P_XR10` or its sRGB twin), read or sampled: the variant's function reads the
+    /// slot's raw texels and decodes them, and filters each linear sample of the slot itself over
+    /// four of them, where a draw of another texture samples through the device's sampler.
+    pub two_plane_draws: u64,
     /// Notices of a variant's that a bind announces at every occurrence
     /// (`DeviceOptions::announce_each`), made for a bind: once per variant until the
     /// specializations or the formats its notices name change; each bind announces them.
@@ -2859,6 +2871,7 @@ impl Device {
             commands_noted_as_before: counters.commands_noted_as_before.load(Ordering::Relaxed),
             draws_settled: counters.draws_settled.load(Ordering::Relaxed),
             depth16_sided_draws: counters.depth16_sided_draws.load(Ordering::Relaxed),
+            two_plane_draws: counters.two_plane_draws.load(Ordering::Relaxed),
             bound_notices_made: counters.bound_notices_made.load(Ordering::Relaxed),
             argument_tables_retained: counters.argument_tables_retained.load(Ordering::Relaxed),
             graphics_pipelines_looked_up: counters

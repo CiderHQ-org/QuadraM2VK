@@ -248,7 +248,8 @@ driver's. Each is open work.
   measured, and an explicit level Metal's rule is not handed on (an integer texture's, a constexpr
   sampler's with its own bias or an unmeasured clamp) takes the device's rounding. Where the level
   chooses what a sample reads and no sample-filter note records it, and for every LOD query, it is
-  announced as `DeviceSampleLevel`.
+  announced as `DeviceSampleLevel`. An extended-range texture's such sample takes Vulkan's level of
+  detail computed in the shader on every device, with the same note.
 - **An anisotropic cube sample on a `y` face through MoltenVK's vertex and fragment stages under
   macOS 27.** SPIRV-Cross's `spvGradientCube`, which MoltenVK 1.4.1 applies, writes a `+Y` or `-Y`
   face's gradients as `(d_x, d_z, d_x)`, so Metal loses the `z` gradient. The module hands such a

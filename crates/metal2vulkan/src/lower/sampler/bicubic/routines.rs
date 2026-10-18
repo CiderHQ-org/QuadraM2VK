@@ -46,7 +46,9 @@
 //!   (`BicubicTexels::EXTENDED`); a packed field's by its own `s`
 //!   (`PackedTexels::filter_truncation`: 7 on YCbCr's grid `2048`). `float` is a 32-bit float or
 //!   half format's sum through Metal's linear accumulator under the weights' products, and Metal's
-//!   non-finite results on the taps of nonzero weight.
+//!   non-finite results on the taps of nonzero weight. [`define_quad_steps`] is `exact` over taps
+//!   given as the integers `exact` recovers from their values, an extended-range sample's grid
+//!   steps from its codes ([`Routine::QuadSteps`]).
 //! - [`Cube`] (a linear cube sample's emulation, beside [`Quad`]'s sums): `fold` is the texel a tap
 //!   reads across the faces' edges, and `corner` the tap past both edges of its face, Metal's
 //!   made-up texel of an exact format's codes.
@@ -124,6 +126,11 @@ pub enum Routine {
     /// A linear cube sample's taps across the faces' edges: [`Cube`], beside [`Routine::Quad`]'s
     /// sums.
     Cube,
+    /// A linear mip filter's blend of an extended-range sample's two levels: [`define_levels`].
+    Levels,
+    /// A linear 2D (or 2D array) extended-range sample's exact sum of its taps' grid steps:
+    /// [`define_quad_steps`].
+    QuadSteps,
 }
 
 impl Routine {
@@ -139,6 +146,8 @@ impl Routine {
             Routine::Span => 3968,
             Routine::Block => BLOCK_WORDS,
             Routine::Cube => CUBE_WORDS,
+            Routine::Levels => LEVELS_WORDS,
+            Routine::QuadSteps => 5184,
         }
     }
 
@@ -151,6 +160,8 @@ impl Routine {
             Routine::Span => "sampler.linear.span",
             Routine::Block => "sampler.linear.block",
             Routine::Cube => "sampler.linear.cube",
+            Routine::Levels => "sampler.linear.levels",
+            Routine::QuadSteps => "sampler.linear.quad_steps",
         }
     }
 }
@@ -1003,22 +1014,187 @@ fn define_exact_quad(mb: &mut ModuleBuilder) -> BResult<FuncId> {
     let t = types(mb)?;
     let mut fb = mb.texel_routine(t.vf)?;
     let q = quad_params(&mut fb, t)?;
-    let (kx, ky, flags, half) = (q.kx, q.ky, q.flags, q.half);
     let fb_ = &mut fb;
-    let g = grid(fb_, t, flags, Packed::Field)?;
+    let g = grid(fb_, t, q.flags, Packed::Field)?;
+    let n = quad_sum(fb_, t, &g, &q, |fb, x| code(fb, &g, x))?;
+    let r = ratio(fb_, &g, n, q.half)?;
+    finish(fb, r)
+}
+
+/// `fn(c00, c01, c10, c11: uvec4, kx, ky, flags, half) -> vec4` ([`Routine::QuadSteps`]): the
+/// exact quad's sum ([`define_exact_quad`]) of an extended-range sample's four taps given as
+/// their grid steps (`i32` bits, `arith::extended_range::steps`, a border tap's its value times
+/// the lane's grid), the integers [`code`] recovers from their decoded values: each tap's step
+/// enters the sum as the recovered code did, so the result is the same, without a decode at the
+/// tap or a recovery here.
+pub fn define_quad_steps(mb: &mut ModuleBuilder) -> BResult<FuncId> {
+    let t = types(mb)?;
+    let mut fb = mb.texel_routine(t.vf)?;
+    let q = QuadParams {
+        t00: fb.param(t.vu)?,
+        t01: fb.param(t.vu)?,
+        t10: fb.param(t.vu)?,
+        t11: fb.param(t.vu)?,
+        kx: fb.param(t.u)?,
+        ky: fb.param(t.u)?,
+        flags: fb.param(t.u)?,
+        half: fb.param(t.b)?,
+    };
+    let fb_ = &mut fb;
+    let g = grid(fb_, t, q.flags, Packed::Field)?;
+    let n = quad_sum(fb_, t, &g, &q, |_, c| Ok(c))?;
+    let r = extended_ratio(fb_, t, &g, q.flags, n, q.half)?;
+    finish(fb, r)
+}
+
+/// [`ratio`] of an extended-range format's step `n` (`BicubicTexels::EXTENDED`: [`grid`]'s
+/// divisor `2D` and factor 2, so the value is `|n| / D` correctly rounded, `n`'s sign set), its
+/// `f32` result without [`ratio`]'s general quotient: on a lane of grid `D = 255 · 2^k` (a color
+/// lane's `16 · 510`, `k = 5`; alpha's `8 · 510`, `k = 4`) `RN(|n| / 255)`
+/// ([`texel_round::ratio_by_255_to_f32`]) times `2^-k`, and on an `_sRGB` twin's color lane (`D =
+/// 8192`) `|n| · 2^-13`, each product exact (`|n| <= 2D`, every quotient normal or zero). A `half`
+/// result is that `f32` rounded to `half`, which no quotient here rounds twice (below).
+fn extended_ratio(
+    fb: &mut FunctionBuilder<'_>,
+    t: Tys,
+    g: &Grid,
+    flags: Value,
+    n: Value,
+    half: Value,
+) -> BResult<Value> {
+    let m = fb.glsl(GlslOp::SAbs, &[n])?;
+    let q = texel_round::ratio_by_255_to_f32(fb, uform(LANES), m)?;
+    let (color, alpha) = (f1(fb, 1.0 / 32.0)?, f1(fb, 1.0 / 16.0)?);
+    let scale = fb.composite_construct(t.vf, &[color, color, color, alpha])?;
+    let by255 = exact_op(fb, BinOp::FMul, q, scale)?;
+    let x = fb.convert(ConvOp::ConvertUToF, m, t.vf)?;
+    let step = f4(fb, 1.0 / 8192.0)?;
+    let steps = exact_op(fb, BinOp::FMul, x, step)?;
+    let srgb = flag(fb, flags, BicubicTexels::SRGB)?;
+    let no = splat(fb, bform(1), 0)?;
+    let lanes = crate::lower::arith::ops::ty(fb, bform(LANES))?;
+    let stepped = fb.composite_construct(lanes, &[srgb, srgb, srgb, no])?;
+    let v = fb.select(stepped, steps, by255)?;
+    let bits = fb.convert(ConvOp::Bitcast, v, t.vu)?;
+    // A `half` result: no `f32` quotient on these grids lies on a `half` tie, so rounding it
+    // rounds the quotient once (`the_extended_grids_half_rounds_once_through_f32`), to nearest
+    // even, an `_sRGB` twin's color lane with ties away from zero; every one is a normal `half`
+    // or zero (at least `1 / 8160`, at most 2).
+    let rounded = texel_round::normal_half_bits(fb, uform(LANES), bits, g.away)?;
+    let bits = fb.select(half, rounded, bits)?;
+    let z = u4(fb, 0)?;
+    let neg = bin(fb, BinOp::SLessThan, n, z)?;
+    let sign = u4(fb, 0x8000_0000)?;
+    let sign = fb.select(neg, sign, z)?;
+    let bits = bin(fb, BinOp::BitwiseOr, bits, sign)?;
+    fb.convert(ConvOp::Bitcast, bits, t.vf)
+}
+
+/// The exact quad's step ([`define_exact_quad`]) over grid `g` of `q`'s taps (`(i, j)`, `(i + 1,
+/// j)`, `(i, j + 1)`, `(i + 1, j + 1)`), each tap's code `code_of` it (taken where its term is),
+/// under `q`'s fractions and flags: the terms' step rounded half up and clamped into the grid's
+/// step bounds, which the caller divides.
+fn quad_sum(
+    fb_: &mut FunctionBuilder<'_>,
+    t: Tys,
+    g: &Grid,
+    q: &QuadParams,
+    mut code_of: impl FnMut(&mut FunctionBuilder<'_>, Value) -> BResult<Value>,
+) -> BResult<Value> {
+    let (kx, ky, flags) = (q.kx, q.ky, q.flags);
     let k256 = u1(fb_, 256)?;
     let wx = [bin(fb_, BinOp::ISub, k256, kx)?, kx];
     let wy = [bin(fb_, BinOp::ISub, k256, ky)?, ky];
-    let tr = Truncation::of(fb_, t, flags, &g)?;
+    let tr = Truncation::of(fb_, t, flags, g)?;
     let rows = [[q.t00, q.t01], [q.t10, q.t11]];
     let mut total = u4(fb_, 0)?;
     for (row, b) in rows.into_iter().zip(wy) {
         for (x, a) in row.into_iter().zip(wx) {
-            let c = code(fb_, &g, x)?;
+            let c = code_of(fb_, x)?;
             let w = bin(fb_, BinOp::IMul, a, b)?;
             let w = broadcast(fb_, t.vu, w)?;
             let term = tr.term(fb_, c, w)?;
             total = bin(fb_, BinOp::IAdd, total, term)?;
+        }
+    }
+    let n = tr.step(fb_, total)?;
+    fb_.glsl(GlslOp::SClamp, &[n, g.lo, g.hi])
+}
+
+/// An upper estimate of [`define_levels`]'s words: eight codes' recovery, the weights and terms,
+/// the step, the clamp, and the ratio's two roundings.
+const LEVELS_WORDS: u32 = 4096;
+
+/// `fn(a00, a01, a10, a11, b00, b01, b10, b11: vec4, kxa, kya, kxb, kyb, kz: u32, flags: u32,
+/// half: bool) -> vec4`: an extended-range sample's linear mip filter (`super::super::extended`),
+/// Metal's trilinear sum over its two levels' footprints, the level as a third axis. `a..` are
+/// level `L`'s four taps (`(i, j)`, `(i + 1, j)`, `(i, j + 1)`, `(i + 1, j + 1)`, each decoded,
+/// a `float`, which [`code`] recovers exactly) and `kxa`, `kya` its fractions in 256ths (a merged
+/// axis's 0), `b..`, `kxb`, `kyb` level `L + 1`'s, and `kz` the second level's weight in 256ths
+/// (four times its sixty-fourths). A nearest filter's level is its texel at every tap, at
+/// fractions 0. Each tap weighs the product `P = wx · wy · wz` of its axes' weights `256 - k` and
+/// `k`, rounded to `P / 256` to nearest, a tie up on the `t` axis's first tap and down on its
+/// second, as a 3D footprint's ([`block_weights`]); its term is truncated as a 2D sum's
+/// ([`Truncation`]: onto `2^-7` of a color lane's steps, `2^-4` of alpha's), the terms' step
+/// rounded half up, clamped, and divided by the grid exactly ([`ratio`]: a `half` result rounded
+/// to nearest even, an `_sRGB` color lane's the exact `f32` rounded with ties away from zero).
+/// Every lane of 8,192 samples per form (`BGR10_XR`, `BGRA10_XR` and their `_sRGB` twins),
+/// filter, result type, 2D and 2D array textures of five levels, at levels from -0.6 to 5.5,
+/// read so on an Apple M3 Max under macOS 27.0.1; at the weight 0 the sum is level `L`'s 2D one.
+pub fn define_levels(mb: &mut ModuleBuilder) -> BResult<FuncId> {
+    let t = types(mb)?;
+    let mut fb = mb.texel_routine(t.vf)?;
+    let mut quads = Vec::with_capacity(2);
+    for _ in 0..2 {
+        let quad: [Value; 4] = [
+            fb.param(t.vf)?,
+            fb.param(t.vf)?,
+            fb.param(t.vf)?,
+            fb.param(t.vf)?,
+        ];
+        quads.push(quad);
+    }
+    let mut ks = Vec::with_capacity(2);
+    for _ in 0..2 {
+        ks.push((fb.param(t.u)?, fb.param(t.u)?));
+    }
+    let kz = fb.param(t.u)?;
+    let flags = fb.param(t.u)?;
+    let half = fb.param(t.b)?;
+    let fb_ = &mut fb;
+    let g = grid(fb_, t, flags, Packed::No)?;
+    let tr = Truncation::of(fb_, t, flags, &g)?;
+    let k256 = u1(fb_, 256)?;
+    let pair = |fb: &mut FunctionBuilder<'_>, k: Value| -> BResult<[Value; 2]> {
+        Ok([bin(fb, BinOp::ISub, k256, k)?, k])
+    };
+    let wz = pair(fb_, kz)?;
+    let (k8, k255, k128) = (u1(fb_, 8)?, u1(fb_, 255)?, u1(fb_, 128)?);
+    let (z, one) = (u1(fb_, 0)?, u1(fb_, 1)?);
+    let mut total = u4(fb_, 0)?;
+    for ((c, [t00, t01, t10, t11]), (kx, ky)) in wz.into_iter().zip(quads).zip(ks) {
+        let (wx, wy) = (pair(fb_, kx)?, pair(fb_, ky)?);
+        for (row, (b, taps)) in wy.into_iter().zip([[t00, t01], [t10, t11]]).enumerate() {
+            for (a, tap) in wx.into_iter().zip(taps) {
+                let p = bin(fb_, BinOp::IMul, a, b)?;
+                let p = bin(fb_, BinOp::IMul, p, c)?;
+                let q = bin(fb_, BinOp::ShiftRightLogical, p, k8)?;
+                let r = bin(fb_, BinOp::BitwiseAnd, p, k255)?;
+                let above = bin(fb_, BinOp::UGreaterThan, r, k128)?;
+                let up = match row {
+                    0 => {
+                        let tie = bin(fb_, BinOp::IEqual, r, k128)?;
+                        bin(fb_, BinOp::LogicalOr, above, tie)?
+                    }
+                    _ => above,
+                };
+                let inc = fb_.select(up, one, z)?;
+                let w = bin(fb_, BinOp::IAdd, q, inc)?;
+                let w = broadcast(fb_, t.vu, w)?;
+                let code = code(fb_, &g, tap)?;
+                let term = tr.term(fb_, code, w)?;
+                total = bin(fb_, BinOp::IAdd, total, term)?;
+            }
         }
     }
     let n = tr.step(fb_, total)?;

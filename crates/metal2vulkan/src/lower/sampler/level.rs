@@ -243,9 +243,39 @@ fn on_grid(fb: &mut FunctionBuilder<'_>, x: SValue) -> BResult<(SValue, SValue)>
     Ok((l, q))
 }
 
+/// Level `x` (an `f32`) as Metal reads it, on its grid, in whole levels and sixty-fourths `(L,
+/// q)` (module docs): rounded to `half` (a NaN 0), clamped into the sampler's clamp `[min, max]`
+/// (`f32`s; `None`: no maximum) and into the texture's levels `[0, last]` (`last` an `f32`).
+pub(super) fn clamped_on_grid(
+    fb: &mut FunctionBuilder<'_>,
+    x: SValue,
+    (min, max): (SValue, Option<SValue>),
+    last: SValue,
+) -> BResult<(SValue, SValue)> {
+    let h = half_level(fb, x)?;
+    let h = fb.glsl(GlslOp::FMax, &[h, min])?;
+    let h = match max {
+        Some(max) => fb.glsl(GlslOp::FMin, &[h, max])?,
+        None => h,
+    };
+    let zero = float(fb, 0.0)?;
+    let h = fb.glsl(GlslOp::FMax, &[h, zero])?;
+    let h = fb.glsl(GlslOp::FMin, &[h, last])?;
+    let l = fb.glsl(GlslOp::Floor, &[h])?;
+    let f = fb.binary_no_contraction(BinOp::FSub, h, l)?;
+    let (sixty_four, step) = (float(fb, 64.0)?, float(fb, 1.0 / 64.0)?);
+    let f = fb.binary_no_contraction(BinOp::FMul, f, sixty_four)?;
+    let f = fb.glsl(GlslOp::Floor, &[f])?;
+    let q = fb.binary_no_contraction(BinOp::FMul, f, step)?;
+    Ok((l, q))
+}
+
 /// The level a nearest mip filter reads at level `x` before the sampler's clamp (module docs):
 /// `L + 1` where `q > 1/2`, else `L`, on [`on_grid`]'s `(L, q)`.
-fn nearest_on_grid(fb: &mut FunctionBuilder<'_>, (l, q): (SValue, SValue)) -> BResult<SValue> {
+pub(super) fn nearest_on_grid(
+    fb: &mut FunctionBuilder<'_>,
+    (l, q): (SValue, SValue),
+) -> BResult<SValue> {
     let (zero, half, one) = (float(fb, 0.0)?, float(fb, 0.5)?, float(fb, 1.0)?);
     let next = fb.binary(BinOp::FOrdGreaterThan, q, half)?;
     let up = fb.select(next, one, zero)?;

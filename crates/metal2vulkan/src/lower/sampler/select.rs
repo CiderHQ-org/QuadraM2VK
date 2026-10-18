@@ -11,7 +11,7 @@ use crate::error::{
     Capability, Error, Feature, InternalError, InternalKind, LowerFamily, Unsupported,
 };
 use crate::lower::access::handle::HandleTarget;
-use crate::lower::select::{NoteOn, NoteTest, SelectCx};
+use crate::lower::select::{any_of, NoteOn, NoteTest, SelectCx};
 use crate::lower::texture::{
     texel_conv, AbsentArgument, ImageRef, NullArm, Prelude, Switch, TexelClass, TexelConv,
     TexelForm, TextureStrategy,
@@ -1046,7 +1046,7 @@ fn select_slot(
         _ => sampler,
     };
     match crate::lower::texture::extended_range(cx, ImageRef::Slot(index))? {
-        Some(form) => select_extended(cx, call, (index, form), sampler),
+        Some(form) => select_extended(cx, call, (index, form), sampler, m),
         None => select_one(cx, call, ImageRef::Slot(index), sampler, arm, m)
             .map(|x| TextureStrategy::Sampling(Box::new(x))),
     }
@@ -1054,32 +1054,39 @@ fn select_slot(
 
 /// Select sampling call `call` of texture slot `index`, whose variant binds the extended-range
 /// format `form`, through `sampler`: Metal's nearest or linear filter of the decoded texels,
-/// emulated by fetches of the raw texels on every device (`extended`). Built: a 2D texture's sample
-/// or gradient sample without comparison, with a `float` or `half` result, a constant texel offset
-/// or none, no `min_lod_clamp`, and no observed residency, through a constexpr sampler with one
-/// filter for minification and magnification (nearest or linear), no mip filter, and no anisotropy,
-/// or through a runtime sampler slot, whose bound sampler the binder holds to the same
-/// (`ResourcePlanner::pair`). Its level, bias, and gradients select nothing (no mip filter), so it
-/// is not tangled. A bfloat form's sample is nearest under either filter, as Metal's, and its
-/// gather of a component is built, the taps of the linear footprint; so is another form's `float`
-/// gather, but a two-plane form's; and a swizzled texture of the slot's variant
-/// (`LoweringInputs::swizzled_storage`) swizzles the decoded texels. A `BGR10_XR`, `BGRA10_XR` or
-/// two-plane form's (or `_sRGB` twin's) sample through a bicubic sampler, constexpr or a runtime
-/// one whose bound word states `Cubic` (`LoweringInputs::cubic_samplers`), is Metal's bicubic filter
-/// of the decoded texels (`extended`), under the bicubic filter's checks
-/// (`NotImplemented(SamplerBicubicFilter)`: `bicubic::check`), and refused there for a bfloat or
-/// padded form, a gather, and a swizzled texture (not measured). Every other sampling of the slot is
-/// `NotImplemented(Format)`: a two-plane form's gather, or another non-bfloat form's `half` one, an
-/// LOD query, a comparison, a 1D, 3D, cube, or array texture, a mipmapped, anisotropic, or mixed
-/// filter, and a dynamic offset.
+/// emulated by fetches of the raw texels on every device (`extended`). Built: a 2D or 2D array
+/// texture's sample or gradient sample without comparison (and a `BGR10_XR` or `BGRA10_XR`
+/// form's, or `_sRGB` twin's, 3D texture's under no mip filter or a nearest one), with a `float` or `half` result, a
+/// constant texel offset or none, no `min_lod_clamp`, and no observed residency, through a
+/// constexpr sampler with one filter for minification and magnification (nearest or linear), no
+/// anisotropy, and no mip filter, a nearest one, or a linear one of a form whose levels' blend is
+/// built (`ExtendedRange::blends_levels`), or through a runtime sampler slot, whose bound sampler
+/// the binder holds to the same (`ResourcePlanner::pair`). Its level is Metal's rule's
+/// (`extended::Level`): an explicit level or a kernel's bias exactly, a fragment function's
+/// implicit level and explicit gradients by Vulkan's level of detail, recorded
+/// (`PrecisionNote::DeviceSampleLevel`). A bfloat form's sample is nearest under either filter, as
+/// Metal's, and its gather of a component is built, the taps of the linear footprint; so is another
+/// form's gather, but a two-plane form's and a padded form's `half` one, at the base level; and a
+/// swizzled texture of the slot's variant (`LoweringInputs::swizzled_storage`) swizzles the decoded
+/// texels. A `BGR10_XR`, `BGRA10_XR` or two-plane form's (or `_sRGB` twin's) 2D sample through a
+/// bicubic sampler, constexpr or a runtime one whose bound word states `Cubic`
+/// (`LoweringInputs::cubic_samplers`), is Metal's bicubic filter of the decoded texels
+/// (`extended`), under the bicubic filter's checks (`NotImplemented(SamplerBicubicFilter)`:
+/// `bicubic::check`), and refused there for a bfloat or padded form, a gather, a 2D array, and a
+/// swizzled texture (not measured). Every other sampling of the slot is `NotImplemented(Format)`:
+/// a two-plane form's gather, or a padded form's `half` one, an LOD query, a comparison, a 1D or
+/// cube texture, another form's 3D texture, an anisotropic or mixed filter, a linear mip filter of
+/// another form or of a 3D texture, a constexpr sampler's level bias of its own or empty clamp,
+/// and a dynamic offset.
 fn select_extended(
     cx: &mut SelectCx<'_>,
     call: Call<'_>,
     (index, form): (u32, crate::metal::format::ExtendedRange),
     sampler: SamplerArg,
+    m: &mut Meter,
 ) -> Result<TextureStrategy, Error> {
     use super::bicubic::TapAddress;
-    use super::extended::{Sample, State};
+    use super::extended::{Level, LevelAt, Sample, State};
     let Call { at, inst, t, args } = call;
     let ops = Operands { t, args };
     let shape = t.image;
@@ -1095,19 +1102,49 @@ fn select_extended(
     if access != crate::air::abi::Access::Sample {
         return Err(refuse());
     }
-    let (has_offset, gather) = match t.op {
+    let fragment = cx.stage == Stage::Fragment;
+    // Where a mip filter's level comes from: an explicit level or a kernel's bias (none, level 0),
+    // or a fragment function's implicit level shifted by its bias, or explicit gradients.
+    let (has_offset, gather, at_level) = match t.op {
         TexOp::Sample {
             compare: false,
             offset,
-            ..
+            lod: LodMode::Level,
+        } => {
+            let v = ops
+                .get(TexRole::LodValue)
+                .ok_or_else(|| cx.invariant("a level sample without a level"))?;
+            (offset, None, LevelAt::Explicit(Some(id(cx, v)?)))
         }
-        | TexOp::SampleGrad {
+        TexOp::Sample {
             compare: false,
             offset,
-        } => (offset, None),
-        // A bfloat texture's gather of a component, its taps' reads (EV FPV-pf5-m4).
-        // So is an extended-range or padded one's (EV FPV-sw1-m4), whose `half` result is
-        // refused below.
+            lod: LodMode::Bias,
+        } => {
+            let bias = match ops.get(TexRole::LodValue) {
+                Some(v) if !is_zero_float(cx, v) => Some(id(cx, v)?),
+                _ => None,
+            };
+            let at = match fragment {
+                true => LevelAt::Derived { bias, grad: None },
+                false => LevelAt::Explicit(bias),
+            };
+            (offset, None, at)
+        }
+        TexOp::SampleGrad {
+            compare: false,
+            offset,
+        } => {
+            let (dx, dy) = match (ops.get(TexRole::Dpdx), ops.get(TexRole::Dpdy)) {
+                (Some(dx), Some(dy)) => (id(cx, dx)?, id(cx, dy)?),
+                _ => return Err(cx.invariant("a gradient sample without gradients")),
+            };
+            let at = LevelAt::Derived {
+                bias: None,
+                grad: Some((dx, dy)),
+            };
+            (offset, None, at)
+        }
         TexOp::Gather {
             component,
             compare: false,
@@ -1120,11 +1157,13 @@ fn select_extended(
                 Some(C::Z) => 2,
                 Some(C::W) => 3,
             };
-            (offset, Some(component))
+            (offset, Some(component), LevelAt::Explicit(None))
         }
         _ => return Err(refused()),
     };
-    if shape.dim != ImageDim::D2 || shape.array || shape.ms || shape.depth {
+    // A 2D, 2D array or 3D texture's (a 3D one's samples alone: Metal has no 3D gather).
+    let volume = shape.dim == ImageDim::D3;
+    if !matches!(shape.dim, ImageDim::D2 | ImageDim::D3) || shape.ms || shape.depth {
         return Err(refused());
     }
     if clamp_value(cx, &ops)?.is_some() {
@@ -1141,9 +1180,22 @@ fn select_extended(
         TexelConv::F32 => false,
         _ => return Err(refused()),
     };
-    // An extended-range or padded form's `half` gather is not measured: whether its taps round
-    // as its reads (to nearest even) or as its nearest samples (ties away from zero).
-    if gather.is_some() && half && !form.bfloat() {
+    // A `BGR10_XR` or `BGRA10_XR` form's (or `_sRGB` twin's) `half` gather rounds each tap as its
+    // nearest sample does, with ties away from zero (every lane of 8,192 gathers of each form's 2D
+    // and 2D array textures, an Apple M3 Max under macOS 27.0.1). A padded form's is not measured:
+    // whether its taps round as its reads (to nearest even) or as its nearest samples.
+    let measured = matches!(
+        form,
+        crate::metal::format::ExtendedRange::Bgr10 { .. }
+            | crate::metal::format::ExtendedRange::Bgra10 { .. }
+    );
+    if gather.is_some() && half && !form.bfloat() && !measured {
+        return Err(refused());
+    }
+    // A 3D texture's samples are measured for those forms alone (the XR mip probe: every lane of
+    // 8,192 nearest and linear samples of each form's 3D texture of five levels under a nearest
+    // mip filter, `float` and `half`).
+    if volume && (shape.array || gather.is_some() || !measured) {
         return Err(refused());
     }
     // Metal's bicubic filter: a constexpr bicubic sampler's, or a runtime sampler's whose bound
@@ -1156,8 +1208,15 @@ fn select_extended(
     let swizzle = crate::lower::texture::swizzled_storage(cx, ImageRef::Slot(index))?;
     let cubic = match cubic {
         None => None,
-        // Measured on the six `BGR10_XR`, `BGRA10_XR` and two-plane forms' samples alone.
-        Some(_) if form.bfloat() || form.padded() || gather.is_some() || swizzle => {
+        // Measured on the six `BGR10_XR`, `BGRA10_XR` and two-plane forms' 2D samples alone.
+        Some(_)
+            if form.bfloat()
+                || form.padded()
+                || gather.is_some()
+                || swizzle
+                || shape.array
+                || volume =>
+        {
             return Err(bicubic_refused());
         }
         Some(s) => {
@@ -1165,6 +1224,9 @@ fn select_extended(
             Some(super::bicubic::plan(&s, index, shape.dim, offset.clone())?)
         }
     };
+    // The level a sample reads by its sampler's mip filter (`extended::Level`): a gather and a
+    // bicubic sample read the base level, as Metal's do.
+    let mut level = Level::Base;
     let state = match &cubic {
         // The bicubic filter's addressing, which places a constant offset (below).
         Some(b) => State::Constant {
@@ -1184,11 +1246,31 @@ fn select_extended(
                 // Metal's linear filter of a bfloat texture reads the nearest texel (EV FPV-pf5-m4),
                 // and a gather follows no filter.
                 let linear = linear && !form.bfloat() && gather.is_none();
-                if s.mip_filter != MipFilter::None || s.max_anisotropy > 1 {
+                if s.max_anisotropy > 1 {
                     return Err(refused());
                 }
-                let address = [s.address_s, s.address_t]
+                if gather.is_none() && s.mip_filter != MipFilter::None {
+                    let Some(stated) = super::extended::Stated::of(&s, form) else {
+                        return Err(refused());
+                    };
+                    // A 3D texture's blend of two levels is not modelled (the XR mip probe's 3D
+                    // samples under a linear mip filter fit no rule tried).
+                    if volume && stated.linear {
+                        return Err(refused());
+                    }
+                    // A level from derivatives or gradients is Vulkan's level of detail.
+                    if matches!(at_level, LevelAt::Derived { .. }) {
+                        cx.precision.insert(PrecisionNote::DeviceSampleLevel);
+                    }
+                    level = Level::Stated {
+                        stated,
+                        at: at_level,
+                    };
+                }
+                let axes = if volume { 3 } else { 2 };
+                let address = [s.address_s, s.address_t, s.address_r]
                     .into_iter()
+                    .take(axes)
                     .map(|m| match m {
                         AddressMode::ClampToEdge => TapAddress::Edge,
                         AddressMode::Repeat => TapAddress::Repeat,
@@ -1203,12 +1285,30 @@ fn select_extended(
                     pixel: s.coordinates == Coordinates::Pixel,
                 }
             }
-            // The function reads the word's filter, coordinates, address modes, and border color.
+            // The function reads the word's filter, coordinates, address modes, and border color;
+            // a sample its mip filter and the levels its clamp leaves, and under a linear mip
+            // filter the slot's `SamplerMinLevel` specialization.
             SamplerArg::Static(SamplerRef::Slot(n), _) => {
                 let Some(s) = cx.families.sampler.slots.get_mut(&n) else {
                     return Err(cx.invariant("an unplanned sampler slot"));
                 };
                 s.linear = true;
+                if gather.is_none() {
+                    s.fetch_levels = true;
+                    // A 3D texture's linear mip filter is the binder's refusal.
+                    s.min_level |= form.blends_levels() && !volume;
+                    level = Level::Word {
+                        sampler: n,
+                        at: at_level,
+                    };
+                    // A level from derivatives or gradients is Vulkan's level of detail, where
+                    // the word states a mip filter.
+                    if matches!(at_level, LevelAt::Derived { .. }) {
+                        let on = NoteOn::Sampler(n);
+                        let when = any_of([NoteTest::differ(on, SamplerWord::MIP_FILTER, 0)]);
+                        cx.note_when(PrecisionNote::DeviceSampleLevel, when, m)?;
+                    }
+                }
                 State::Slot { sampler: n }
             }
             SamplerArg::Heap(_) => return Err(refused()),
@@ -1245,10 +1345,15 @@ fn select_extended(
     cx.families.arith.converts(form);
     let filters = !form.bfloat() && gather.is_none();
     if filters && !matches!(state, State::Constant { linear: false, .. }) {
-        cx.families
-            .sampler
-            .bicubic_routines
-            .insert(super::bicubic::routines::Routine::Quad);
+        // A 2D linear filter of a form with grid steps sums its taps' steps; a 3D one, and a
+        // padded form's, their decoded values.
+        let steps = crate::lower::arith::extended_range::has_steps(form);
+        let routine = match (volume, steps) {
+            (true, _) => super::bicubic::routines::Routine::Block,
+            (false, true) => super::bicubic::routines::Routine::QuadSteps,
+            (false, false) => super::bicubic::routines::Routine::Quad,
+        };
+        cx.families.sampler.bicubic_routines.insert(routine);
     }
     // A bicubic sample takes the 2D routines, and a level below four texels on either axis the
     // linear ones; its sum near a rounding tie is not Metal's datapath's.
@@ -1259,10 +1364,31 @@ fn select_extended(
         ]);
         cx.precision.insert(PrecisionNote::BicubicFilterArithmetic);
     }
+    // A linear mip filter's blend of two levels (not a 3D texture's).
+    let blends = match level {
+        Level::Base => false,
+        Level::Stated { stated, .. } => stated.linear,
+        Level::Word { .. } => form.blends_levels() && !volume,
+    };
+    if blends {
+        cx.families
+            .sampler
+            .bicubic_routines
+            .insert(super::bicubic::routines::Routine::Levels);
+    }
     let coord = ops
         .get(TexRole::Coord)
         .ok_or_else(|| cx.invariant("a sampling call without a coordinate"))?;
-    Ok(TextureStrategy::ExtendedSample(Box::new(Sample {
+    let layer = match shape.array {
+        true => {
+            let l = ops
+                .get(TexRole::Layer)
+                .ok_or_else(|| cx.invariant("an array sample without its layer"))?;
+            Some(id(cx, l)?)
+        }
+        false => None,
+    };
+    let sample = Sample {
         texture: index,
         form,
         state,
@@ -1272,9 +1398,22 @@ fn select_extended(
         offset,
         offset_base,
         coord: id(cx, coord)?,
+        layer,
+        volume,
+        level,
         half,
         result: cx.lowered_repr(Value::Inst(at), inst.ty)?,
-    })))
+        routine: cx
+            .profile
+            .fields()
+            .workarounds
+            .contains(&crate::device::profile::DriverWorkaround::DontInlineKeepsCalls),
+    };
+    // Its routine, counted once in the module (`routine::Extended`).
+    if sample.routine {
+        super::routine::note_extended(&mut cx.families.sampler, &sample);
+    }
+    Ok(TextureStrategy::ExtendedSample(Box::new(sample)))
 }
 
 /// Select sampling call `inst` (sample, gather, or LOD query) of `image` (a texture slot, or a

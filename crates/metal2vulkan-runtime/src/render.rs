@@ -350,6 +350,7 @@ use metal2vulkan::device::{DriverFact, FormatUsage, VkFeature};
 use metal2vulkan::error::BindError;
 use metal2vulkan::error::Feature as ErrorFeature;
 use metal2vulkan::error::RuntimeDriverDefect;
+use metal2vulkan::metal::format::ExtendedRange;
 use metal2vulkan::metal::state::DepthStencilDescriptor;
 use metal2vulkan::metal::{
     CullMode, DepthClipMode, IndexType, PixelFormat, PrimitiveTopologyClass, PrimitiveType,
@@ -6311,7 +6312,6 @@ impl RenderCommandEncoder {
     /// `RGB10A8_2P_XR10` and their sRGB twins), by index, with their formats. Not the padded and
     /// bfloat forms, whose tile memory is unmeasured.
     fn extended_colors(&self) -> BTreeMap<u32, PixelFormat> {
-        use metal2vulkan::metal::format::ExtendedRange;
         (0u32..)
             .zip(&self.layout.colors)
             .filter_map(|(index, c)| {
@@ -7158,6 +7158,10 @@ impl RenderCommandEncoder {
         )?;
         if plan.variant.depth16_bias_raises.is_some() {
             self.core.device().shared().counts.depth16_sided_draw();
+        }
+        let planes = |form: &ExtendedRange| matches!(form, ExtendedRange::Planes { .. });
+        if plan.variant.extended_range.values().any(planes) {
+            self.core.device().shared().counts.two_plane_draw();
         }
         self.give_up_extended_shadows(&pipeline, &live.state);
         // The draw's primitive type: an indexed capture draw's layout says whether its strip
@@ -10016,7 +10020,6 @@ fn clears(layout: &PassLayout) -> bool {
 /// (`ExtendedRange::clear_read_back`): a draw that reads or blends into one sees the codes, where
 /// Metal's sees the clear's halves (`RenderCommandEncoder::degrade_extended_range_blends`).
 fn cleared_off_codes(descriptor: &RenderPassDescriptor) -> BTreeSet<u32> {
-    use metal2vulkan::metal::format::ExtendedRange;
     (0u32..)
         .zip(&descriptor.color_attachments)
         .filter(|(_, color)| color.load_action == LoadAction::Clear)

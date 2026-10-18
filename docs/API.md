@@ -2209,8 +2209,12 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   sampler that chooses a level or a filter by it where no sample-filter note records the sample:
   nearest filters with a nearest mip filter (a constexpr sampler's, or a runtime sampler's where its
   word states them), or an integer texture's sampler with a mip filter or filters that differ (an
-  argument buffer's sampler always). The sample may read another level or filter than Metal's near a
-  boundary, and the query answers the device's level.
+  argument buffer's sampler always). An extended-range texture's (`BGR10_XR`, `BGRA10_XR` and their
+  sRGB twins) fragment sample at an implicit level, or with explicit gradients, records it on every
+  device: its texels are read in the shader, at Vulkan's level of detail computed there and Metal's
+  level rule, where a constexpr sampler states a mip filter or a runtime sampler's word does. The
+  sample may read another level or filter than Metal's near a boundary, and the query answers the
+  device's level.
 - `metal2vulkan-degrade-fp8-value` (precision). `PrecisionNote::Fp8Value`: An 8-bit float converts
   to an integer from the format's documented value with Metal's saturating float-to-integer rule,
   where Metal's device here answers otherwise: Metal on Apple M3 compiles these reads but extends

@@ -30,7 +30,9 @@
 //!   format at one slot and samples 8-bit textures at the others); `FORMAT2` a two-plane YCbCr
 //!   format of 8-bit 4:2:0 codes (`YCBCR8_420_2P`, its `_sRGB` twin, `RGB8_420_2P`) binds a
 //!   texture over plane 0 of a `420v` surface of seeded bytes ([`ycbcr_surface`]), as a video
-//!   frame is bound. `--primitive TYPE` (`point`,
+//!   frame is bound, and a two-plane extended-range format (`RGB10A8_2P_XR10`, its `_sRGB` twin)
+//!   a texture over plane 0 of a `'b3a8'` surface of seeded bytes ([`surface_planes`]), as the
+//!   consumer's drawables are sampled. `--primitive TYPE` (`point`,
 //!   `line`, `line-strip`, `triangle` or `triangle-strip`; `time` takes it too) draws the three
 //!   vertices as `TYPE`, where the draws are of the template's class's list by default (a triangle
 //!   for no class): a strip of three vertices covers what its list does, through a pipeline of the
@@ -477,8 +479,9 @@ fn formats(data: DataType, depth: bool) -> &'static [PixelFormat] {
     }
 }
 
-/// The layout of a two-plane extended-range attachment's surface (`RGB10A8_2P_XR10` and its sRGB
-/// twin), a texture over plane 0 of a `'b3a8'` surface as the consumer's drawables are: plane 0's
+/// The layout of a two-plane extended-range attachment's or sampled texture's surface
+/// (`RGB10A8_2P_XR10` and its sRGB twin), a texture over plane 0 of a `'b3a8'` surface as the
+/// consumer's drawables are: plane 0's
 /// rows of `side` color words, then plane 1's rows of `side` alpha bytes, each row padded to 64
 /// bytes. `None` for every other format. Returns plane 0's `bytesPerRow`, plane 1's offset and
 /// `bytesPerRow`, and the surface's length.
@@ -1103,6 +1106,39 @@ fn inputs(
                         d.resource_options = ResourceOptions::shared();
                         let facts = IoSurfaceYCbCr::new(YUV420V, 0, [side, side], chroma_at, row);
                         let plane = IoSurfacePlane::new(0, row, true).with_ycbcr(facts);
+                        let texture = surface
+                            .new_texture_with_iosurface_plane(&d, plane)
+                            .map_err(e(format!("texture {slot} of {}", format.name())))?;
+                        inputs
+                            .described
+                            .push_str(&format!(" t{slot}={}", format.name()));
+                        inputs.textures.push(BoundTexture {
+                            index: slot,
+                            texture,
+                            written,
+                            descriptor: d,
+                            uploads: Vec::new(),
+                            _surface: Some(surface),
+                        });
+                        continue;
+                    }
+                    // A two-plane extended-range texture stands over a `'b3a8'` surface of seeded
+                    // bytes, as the consumer's drawables are sampled, one level.
+                    if let Some((color_row, alpha_at, alpha_row, length)) =
+                        surface_planes(format, side)
+                    {
+                        if ty != TextureType::Type2D || !chosen {
+                            return Err(format!(
+                                "texture {slot}: {} at a slot not a sampled 2D one",
+                                format.name()
+                            ));
+                        }
+                        let surface = upload(stream | u64::from(element), length)?;
+                        let mut d = TextureDescriptor::texture_2d(format, side, side, false);
+                        d.usage = TextureUsage::SHADER_READ;
+                        d.resource_options = ResourceOptions::shared();
+                        let facts = IoSurfaceYCbCr::new(B3A8, 0, [side, side], alpha_at, alpha_row);
+                        let plane = IoSurfacePlane::new(0, color_row, true).with_ycbcr(facts);
                         let texture = surface
                             .new_texture_with_iosurface_plane(&d, plane)
                             .map_err(e(format!("texture {slot} of {}", format.name())))?;

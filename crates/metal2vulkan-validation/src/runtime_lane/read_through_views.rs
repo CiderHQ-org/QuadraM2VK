@@ -72,7 +72,7 @@ fn atlas(device: &Device, pf: PixelFormat, usage: TextureUsage, levels: bool) ->
 }
 
 /// The `tob_rect` and `tob_sample` state into an unblended `RGBA8Unorm` color.
-fn sampling_state(device: &Device) -> RenderPipelineState {
+pub(super) fn sampling_state(device: &Device) -> RenderPipelineState {
     let ll = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/public/engine/tob_renders.ll");
     let library = device
         .new_library_with_air(&llvm_assemble(&ll).unwrap())
@@ -95,7 +95,7 @@ fn sampling_state(device: &Device) -> RenderPipelineState {
 
 /// How a draw samples the atlas.
 #[derive(Clone, Copy, Debug)]
-enum Sampled {
+pub(super) enum Sampled {
     /// Nearest, at each texel's center.
     Nearest,
     /// Linear, at each texel's center.
@@ -108,7 +108,7 @@ enum Sampled {
 /// whole target with `state` sampling `texture` as `sampled` says (`tob_sample` reads the pixel's
 /// center over the texture's size: the target's pixel `p` at the atlas's texel `p`'s center, and
 /// past its right and bottom edges beyond them), and the target's bytes after it, read back.
-fn draw(
+pub(super) fn draw(
     queue: &CommandQueue,
     state: &RenderPipelineState,
     texture: &Texture,

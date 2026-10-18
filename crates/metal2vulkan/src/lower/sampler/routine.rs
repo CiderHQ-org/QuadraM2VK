@@ -17,6 +17,9 @@
 //!   face position and fold, and a comparison's tap tests.
 //! - [`Fetched`]: a sample's nearest-exact fetch arm (`fetched::branch`): the level its sampler
 //!   reads, the texel's position and addressing, the border, and the fetch.
+//! - [`Extended`]: an extended-range texture's sample (`extended`): the levels its mip filter
+//!   reads, the filter's footprint and addressing, the fetches and their decodes, the sums' calls,
+//!   the border and the swizzle.
 //!
 //! The routine reads its binding's image and sampler variables and its slots' specialization
 //! constants (the runtime sampler's word, the offset tests) itself, so no image handle crosses a
@@ -30,10 +33,15 @@
 //! its level, bias or gradients, and the texel's conversion: no implicit level crosses a call, and
 //! each arm is the code it was, so every answer is the one the inline code gave.
 //!
+//! crosses a call), the word's test, the plain arm and the texel's conversion of the sum. An
+//! extended-range sample's call passes its coordinate, the array layer and the level its mip
+//! filter reads at (an explicit level, or the level of detail its site takes from derivatives or
+//! gradients), and its constant texel offset, which the routine places on each lane, so the
+//! samples at every offset call one routine; the site keeps the result's status word.
 //! **Not routines.** A heap image's sample (an argument buffer's), whose `NonUniform` handle a
-//! call would carry (a later step's check); a switch-at-use's shared emulation
-//! (`sampler::shared_value`), which runs once already; a gather's fetches; and the bicubic filter's
-//! site code.
+//! call would carry (a later step's check); an extended-range sample on a profile whose driver is
+//! not known to keep a `DontInline` call a call (`extended::Sample::routine`), where the routine
+//! measured slower to make than the site code; a switch-at-use's shared emulation
 //!
 //! **The call's control.** A sampling routine is started by
 //! `ModuleBuilder::sampling_routine`: `DontInline` where the profile states that its driver keeps
@@ -45,13 +53,18 @@
 //!
 //! **Census**. A routine's words are counted once per shape the plan notes ([`note`],
 //! `sampler::routine_words`), under `sampler.linear.routine` and `sampler.fetch.routine`; the
-//! site counts its call ([`CALL_WORDS`]) where it counted the code.
+//! site counts its call ([`CALL_WORDS`]) where it counted the code; an extended-range sample's
+//! routine is counted under `sampler.extended_range.routine` (`extended::Sample::words` its
+//! site's). The census counts no anisotropic emulation, at its sites or in a routine.
 
 use std::collections::HashMap;
 
 use crate::lower::texture::TexelConv;
+use crate::metal::format::ExtendedRange;
 use crate::spirv::ids::{FuncId, TypeId};
 
+use super::bicubic::Bicubic;
+use super::extended;
 use super::fetched::{Fetch, FetchAddress, FetchLevel};
 use super::level::{LevelRule, LevelSnap};
 use super::linear::{Linear, LinearState};
@@ -73,6 +86,8 @@ pub enum Shape {
     Emulation(Emulation),
     /// A sample's nearest-exact fetch arm (`fetched::branch`).
     Fetched(Fetched),
+    /// An extended-range texture's sample (`extended`).
+    Extended(Box<Extended>),
 }
 
 impl Shape {
@@ -81,6 +96,7 @@ impl Shape {
         match self {
             Shape::Emulation(_) => "sampler.linear.routine",
             Shape::Fetched(_) => "sampler.fetch.routine",
+            Shape::Extended(_) => "sampler.extended_range.routine",
         }
     }
 
@@ -90,6 +106,7 @@ impl Shape {
         match self {
             Shape::Emulation(e) => e.linear.words() + offset_words(e.offset) + ROUTINE_WORDS,
             Shape::Fetched(f) => f.words + offset_words(f.offset) + ROUTINE_WORDS,
+            Shape::Extended(e) => e.words + ROUTINE_WORDS,
         }
     }
 }
@@ -140,6 +157,75 @@ impl Emulation {
             parent: s.offset_base,
             layer: s.layer.is_some(),
         })
+    }
+}
+
+/// An extended-range texture's sample (`extended::Sample`) without the operands its call passes:
+/// its coordinate, layer and the level its mip filter reads at.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Extended {
+    /// The texture slot, whose variant binds [`form`](Self::form).
+    pub texture: u32,
+    /// The extended-range form the slot's texels are decoded from.
+    pub form: ExtendedRange,
+    /// The sampler's state the sample follows.
+    pub state: extended::State,
+    /// Metal's bicubic filter of the decoded texels, where the sampler's state is cubic.
+    pub cubic: Option<Bicubic>,
+    /// A gather of this component instead of a sample.
+    pub gather: Option<u32>,
+    /// The sample swizzles its decoded texel under the slot's `TextureSwizzle` specialization.
+    pub swizzle: bool,
+    /// The lanes of the sample's constant texel offset, which the call passes, where it has one.
+    pub offset: Option<u8>,
+    /// The offset is placed by the slot's `SpecKey::OffsetBaseAxes` tests.
+    pub offset_base: bool,
+    /// A 3D texture: the sample reads three plane axes.
+    pub volume: bool,
+    /// The sample reads an array's layer, which the call passes.
+    pub layer: bool,
+    /// The mip filter the level is read by; a level the call passes but at the base level.
+    pub level: extended::Mip,
+    /// The result is `half`, else `float`.
+    pub half: bool,
+    /// The census words of the routine's body (`extended::Sample::body_words`).
+    pub words: u32,
+}
+
+impl Extended {
+    /// The routine extended-range sample `e` calls.
+    pub(super) fn of(e: &extended::Sample) -> Extended {
+        Extended {
+            texture: e.texture,
+            form: e.form,
+            state: e.state.clone(),
+            cubic: e.cubic.clone(),
+            gather: e.gather,
+            swizzle: e.swizzle,
+            offset: e.offset.as_ref().map(|o| o.len() as u8),
+            offset_base: e.offset_base,
+            volume: e.volume,
+            layer: e.layer.is_some(),
+            level: e.level.mip(),
+            half: e.half,
+            words: e.body_words(),
+        }
+    }
+
+    /// The plane axes the sample reads: a 2D texture's two, a 3D texture's three.
+    pub(super) fn axes(&self) -> usize {
+        match self.volume {
+            true => 3,
+            false => extended::AXES,
+        }
+    }
+}
+
+/// Note the routine of extended-range sample `e` in `plan`, its shape once, for the census.
+pub(super) fn note_extended(plan: &mut SamplerPlan, e: &extended::Sample) {
+    let shape = Shape::Extended(Box::new(Extended::of(e)));
+    if !plan.routines.contains(&shape) {
+        plan.routines.push(shape);
     }
 }
 

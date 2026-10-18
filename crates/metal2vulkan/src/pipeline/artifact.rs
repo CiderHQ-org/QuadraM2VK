@@ -1731,8 +1731,12 @@ pub enum PrecisionNote {
     /// records the sample: through a constexpr sampler with nearest filters and a nearest mip
     /// filter, through a runtime sampler where its word states those, and through any such sampler
     /// of an integer texture (an argument buffer's sampler, whose state the function does not know,
-    /// always). A bias past the limit and hoisted derivatives record
-    /// [`PrecisionNote::GradFromBias`] instead. **Residual:** the sample may read another level, or
+    /// always). An extended-range texture's fragment sample at an implicit level and its sample
+    /// with explicit gradients (`BGR10_XR`, `BGRA10_XR` and their sRGB twins), which read texels
+    /// in the shader on every device, take Vulkan's level of detail computed in the shader and
+    /// then Metal's level rule: recorded through a constexpr sampler with a mip filter, and through
+    /// a runtime sampler where its word states one. A bias past the limit and hoisted derivatives
+    /// record [`PrecisionNote::GradFromBias`] instead. **Residual:** the sample may read another level, or
     /// another filter, than Metal's near a boundary, and the query answers the device's level.
     /// Validation derives no tolerance from it.
     DeviceSampleLevel,

@@ -14,7 +14,8 @@
 //!   `HalfQuietNan` its NaN alone.
 //! - The binder joins a slot bound in an extended-range format to the plan's variant, the
 //!   variant's plan states the same key, and it views the image in the raw format.
-//! - Samples of such a texture are Metal's (`samples`).
+//! - Samples of such a texture are Metal's (`samples`), at Metal's level and through a linear
+//!   mip filter's trilinear sum (`levels`), and a 3D texture's (`volumes`).
 //!
 //! `llvm-as` assembles the kernels; without it the tests skip visibly.
 
@@ -45,8 +46,10 @@ use crate::spirv::ir::TypedModule;
 
 mod bicubic;
 mod heap;
+mod levels;
 mod samples;
 mod targets;
+mod volumes;
 
 const HEADER: &str = "target datalayout = \"e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:1024-n8:16:32\"\ntarget triple = \"air64_v28-apple-macosx26.0.0\"\n\n";
 
@@ -170,8 +173,10 @@ fn inputs(form: ExtendedRange, source: Source) -> LowerInputs {
     i
 }
 
+/// The profiles the extended-range tests compile for: the site code's (lavapipe, MoltenVK) and a
+/// routine's (the RTX 5080 Laptop GPU, whose driver keeps a `DontInline` call a call).
 fn profiles() -> Vec<(&'static str, crate::device::profile::DeviceProfile)> {
-    ["lavapipe", "moltenvk-m3"]
+    ["lavapipe", "moltenvk-m3", "nvidia-rtx5080-laptop"]
         .into_iter()
         .map(|stem| {
             (

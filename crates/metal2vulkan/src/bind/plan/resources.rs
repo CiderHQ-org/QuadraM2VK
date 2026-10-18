@@ -69,6 +69,7 @@ use crate::metal::sampler::{
 use crate::metal::texel_format::{
     reads_unswizzled, srgb_raw, srgb_raw_on, srgb_raw_view, texel_format, TexelFormat,
 };
+use crate::metal::{PixelFormat, SamplerMipFilter, TextureSwizzleChannels, TextureType};
 use crate::pipeline::artifact::RuntimeDependency;
 use crate::pipeline::facts::RuntimeFact;
 use crate::pipeline::interface::{
@@ -1651,12 +1652,16 @@ impl ResourcePlanner<'_> {
                 if !swizzle.is_default() {
                     self.variant.swizzled_storage.insert(texture);
                 }
-                if let SamplerRef::Slot(index) = sampler.sampler {
-                    self.extended_sampler(SlotRef {
+                if let (SamplerRef::Slot(index), Some(form)) =
+                    (sampler.sampler, ExtendedRange::of(pixel_format))
+                {
+                    let slot = SlotRef {
                         stage: texture.stage,
                         class: SlotClass::Sampler,
                         index,
-                    })?;
+                    };
+                    let volume = t.texture_type == TextureType::Type3D;
+                    self.extended_sampler(slot, form, volume)?;
                 }
                 extended = true;
                 (ImageSource::Neutral(n), Vec::new())
@@ -1734,23 +1739,44 @@ impl ResourcePlanner<'_> {
         Ok((image, sampler))
     }
 
-    /// Check the runtime sampler bound at `slot`, which samples an extended-range texture by
-    /// fetches: its word must state one filter for minification and magnification (nearest or
-    /// linear), no mip filter, and no anisotropy: else `NotImplemented(Format)`. Every address mode
-    /// is the fetches' (a `MirrorClampToEdge` axis's taps mirrored once and clamped; a padded
-    /// form's under every mode, measured). An unbound slot's word is 0, a nearest sampler's. A word
-    /// that states a `Cubic` filter is the plan's cubic-sampler variant's
-    /// (`VariantKey::cubic_samplers`), whose function samples through Metal's bicubic filter of its
-    /// state: the plan refuses a word whose state that filter is not measured under before it names
-    /// the variant (`slots::cubic_variant`), and the variant's function refuses what else the
-    /// filter's checks refuse for its sample (`lower::sampler::extended`).
-    fn extended_sampler(&self, slot: SlotRef) -> Result<(), BindError> {
+    /// Check the runtime sampler bound at `slot`, which samples an extended-range texture of
+    /// `form` (a 3D one where `volume`) by fetches: its word must state one filter for
+    /// minification and magnification (nearest or linear), no anisotropy, and no mip filter, a
+    /// nearest one, or a linear one where the form's levels' blend is built
+    /// (`ExtendedRange::blends_levels`; not a 3D texture's) and the clamp's maximum is past every
+    /// texture's last level (its word's `SamplerWord::LEVEL_MAX` 0, a nearest mip
+    /// filter's level at it 15: the function clamps a linear one's level by the clamp's minimum
+    /// alone, `lower::sampler::extended`): else `NotImplemented(Format)`. Every address mode is the
+    /// fetches' (a `MirrorClampToEdge` axis's taps mirrored once and clamped; a padded form's under
+    /// every mode, measured). An unbound slot's word is 0, a nearest sampler's. A word that states
+    /// a `Cubic` filter is the plan's cubic-sampler variant's (`VariantKey::cubic_samplers`), whose
+    /// function samples through Metal's bicubic filter of its state: the plan refuses a word whose
+    /// state that filter is not measured under before it names the variant
+    /// (`slots::cubic_variant`), and the variant's function refuses what else the filter's checks
+    /// refuse for its sample (`lower::sampler::extended`).
+    fn extended_sampler(
+        &self,
+        slot: SlotRef,
+        form: ExtendedRange,
+        volume: bool,
+    ) -> Result<(), BindError> {
         let word = self
             .stage_shape(slot.stage)
             .and_then(|s| s.samplers.get(&slot.index))
             .map_or(0, |s| s.word.0);
-        let filter = word & SamplerWord::LINEAR_FILTER;
-        if word & SamplerWord::CUBIC != 0 || filter == 0 || filter == SamplerWord::LINEAR {
+        let filter = word & (SamplerWord::MIN_LINEAR | SamplerWord::MAG_LINEAR);
+        let one_filter = filter == 0 || filter == SamplerWord::LINEAR;
+        let mip = (word & SamplerWord::MIP_FILTER) >> SamplerWord::MIP_FILTER_SHIFT;
+        let levels = match mip {
+            0 => true,
+            m if m == SamplerMipFilter::Nearest.as_raw() => true,
+            m if m == SamplerMipFilter::Linear.as_raw() => {
+                form.blends_levels() && !volume && word & SamplerWord::LEVEL_MAX == 0
+            }
+            _ => false,
+        };
+        let isotropic = word & SamplerWord::ANISOTROPIC == 0;
+        if word & SamplerWord::CUBIC != 0 || (one_filter && levels && isotropic) {
             return Ok(());
         }
         Err(BindError::Unsupported(Unsupported::not_implemented(
