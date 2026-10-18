@@ -77,7 +77,7 @@ use super::tracker::Use;
 use super::values::ResourceOptions;
 use metal2vulkan::bind::PlanDiagnostic;
 use metal2vulkan::cache::SpecializationKey;
-use metal2vulkan::device::{DriverFact, FunctionStorage, VkProperty};
+use metal2vulkan::device::{DriverFact, FunctionStorage, ResolvePolicy, VkProperty};
 use metal2vulkan::metal::PixelFormat;
 use metal2vulkan::pipeline::{
     PrecisionNote, Reconvergence, RenderPipeline, SlotRef, SpecKey, StageModule,
@@ -508,7 +508,9 @@ degradations! {
             "the pass resolves into a scratch image, whose render area is copied into the \
              texture after the pass";
         /// A multisample color resolve drawn after the pass by Metal's exact rules, where the
-        /// device's `AVERAGE` resolve is not measured to be Metal's (`color_resolve.rs`); or a
+        /// device's `AVERAGE` resolve is not measured to be Metal's, under
+        /// [`metal2vulkan::device::ResolvePolicy::Exact`] or from a fetching pass's sample planes
+        /// (`color_resolve.rs`); or a
         /// stencil resolved by `DepthResolvedSample` after `Min` or `Max`, which no Vulkan
         /// resolve mode states, or a `Min` or `Max` depth on a device without the mode, drawn
         /// after the pass (`depth_stencil_resolve.rs`).
@@ -684,21 +686,36 @@ degradations! {
              and end";
         /// A multisample color resolve averages through Vulkan's `AVERAGE` mode, which leaves
         /// the rounding of the average (and the sRGB encoding) to the device, on a device not
-        /// measured to round as Metal does: a format without Metal's closed rule at its count
-        /// (the 16-bit float, `RG11B10Float` and `RGB9E5Float` formats past 4 samples, and a
-        /// format no rule covers), or an attachment whose image the exact resolve can neither read
-        /// nor copy: an image without input attachment usage of a format the device does not copy
-        /// (`color_resolve.rs`). Not where `DriverFact::ColorResolveAverageIsMetals` holds, for
-        /// any format: MoltenVK's resolve is Metal's own.
+        /// measured to round as Metal does: under [`metal2vulkan::device::ResolvePolicy::Device`],
+        /// the default, any color attachment but one a fetching pass's sample planes hold as it
+        /// ends (resolved from them by Metal's rule); under
+        /// [`metal2vulkan::device::ResolvePolicy::Exact`] a format without Metal's closed rule at
+        /// its count (the 16-bit float, `RG11B10Float` and `RGB9E5Float` formats past 4 samples,
+        /// and a format no rule covers), or an attachment whose image the exact resolve can
+        /// neither read nor copy: an image without input attachment usage of a format the device
+        /// does not copy (`color_resolve.rs`). Not where `DriverFact::ColorResolveAverageIsMetals`
+        /// holds, for any format: MoltenVK's resolve is Metal's own.
+        /// Measured against Metal's rules at 2 and 4 samples
+        /// (`runtime_lane::resolve_rounding::the_device_resolve_rounds_as_announced`, which holds
+        /// the bound) on RADV (Mesa 26.0.8, the Radeon 780M and the RX 7900 XTX), ANV (Mesa
+        /// 26.2.4, the Iris Xe), NVIDIA (615.71, the RTX 5080 Laptop GPU) and lavapipe (Mesa
+        /// 26.2.4, at 4 samples): every unorm, snorm and packed 16-bit unorm channel within one
+        /// code of Metal's, an sRGB channel within two (NVIDIA's at 4 samples; one elsewhere).
+        /// Each rounds an 8-bit unorm tie down (RADV and ANV: 32512 of `R8Unorm`'s 65536 pairs of
+        /// samples one code below at 2 samples); an sRGB or packed channel lands above Metal's
+        /// code in some texels and below in others. A float channel's average differs in its
+        /// last bits, counted and not bounded (RADV: 8565 of `R32Float`'s 65536 channels at 2
+        /// samples).
         /// The device also decides what a NaN or infinite sample makes of the average, where
         /// Metal's resolve counts a NaN of a `half` or small-float channel as 0 and an infinite
         /// `half` as 65536 of its sign, and makes any NaN of a 32-bit float channel `0x7fc00000`
         /// (EVs ZIN-zms4-m4 and ZIN-zms7-m4); lavapipe's average keeps a `half` NaN.
         DeviceRoundedResolve = "device-rounded-resolve", Precision,
-            "a resolved texel can differ from Metal's by one unit where the average lies at a \
-             rounding tie, and wholly where a sample is a NaN or an infinity: Metal's resolve \
-             counts a half or small-float NaN as 0 and a half infinity as 65536 of its sign, and \
-             makes any 32-bit float NaN 0x7fc00000, where the device's average may keep them";
+            "a resolved channel can differ from Metal's by one code (an sRGB channel by two) \
+             where the average lies near a rounding boundary, a float channel in its last bits, \
+             and wholly where a sample is a NaN or an infinity: Metal's resolve counts a half or \
+             small-float NaN as 0 and a half infinity as 65536 of its sign, and makes any 32-bit \
+             float NaN 0x7fc00000, where the device's average may keep them";
         /// A multisample color resolve of more than 4 samples, of which Apple's GPUs make no
         /// texture: no Metal answer is measured there (`color_resolve.rs`); likewise a stencil
         /// resolved by `DepthResolvedSample` after `Min` or `Max` (`depth_stencil_resolve.rs`),
@@ -3718,6 +3735,10 @@ impl Device {
                 && !color_resolve::average_is_metals(self, color.target.samples)
         });
         if let Some(color) = rounded {
+            // Under the device's resolve, a format of Metal's rule at its count resolves by that
+            // rule under the exact one.
+            let switch = self.compile_device().policy().resolve == ResolvePolicy::Device
+                && color_resolve::from_planes(color.target.format, color.target.samples);
             self.degrade(Degradation::DeviceRoundedResolve, || {
                 (
                     format!(
@@ -3727,8 +3748,15 @@ impl Device {
                     ),
                     format!(
                         "Vulkan's `AVERAGE` resolve of {:?} leaves the average's rounding, and \
-                         what a NaN or infinite sample makes of it, to the device",
-                        color.target.format
+                         what a NaN or infinite sample makes of it, to the device{}",
+                        color.target.format,
+                        match switch {
+                            true => {
+                                "; `ResolvePolicy::Exact` resolves it by Metal's rule after the \
+                                 pass"
+                            }
+                            false => "",
+                        }
                     ),
                 )
             });

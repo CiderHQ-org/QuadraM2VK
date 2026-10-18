@@ -80,6 +80,11 @@ pub struct DevicePolicy {
     /// (the default), or as Metal's tile store writes them back in the tiles a draw reaches. The
     /// runtime's choice alone: no emitted code changes.
     pub tile_store: TileStorePolicy,
+    /// Whether a multisampled color attachment whose format has Metal's resolve rule resolves by
+    /// the device's own `AVERAGE` in the pass (the default), or by Metal's rule in one more render
+    /// pass instance after it, on a device whose average is not measured to be Metal's. The
+    /// runtime's choice alone: no emitted code changes.
+    pub resolve: ResolvePolicy,
     /// Whether a batch of command buffers on one `VkQueue` begins after the batches before it
     /// there by their ends (the default, on a driver measured to run no two kernel submissions of
     /// one queue side by side), or by a barrier for each access that depends on theirs. The
@@ -114,6 +119,7 @@ impl DevicePolicy {
         heap_compression: HeapCompressionPolicy::Compressed,
         completion: CompletionPolicy::Grouped,
         tile_store: TileStorePolicy::Device,
+        resolve: ResolvePolicy::Device,
         batch_order: BatchOrderPolicy::Ends,
     };
 
@@ -142,6 +148,7 @@ impl DevicePolicy {
             heap_compression: HeapCompressionPolicy::Uncompressed,
             completion: CompletionPolicy::Exact,
             tile_store: TileStorePolicy::Exact,
+            resolve: ResolvePolicy::Exact,
             batch_order: BatchOrderPolicy::Exact,
             ..self
         }
@@ -529,6 +536,35 @@ pub enum TileStorePolicy {
     Exact,
 }
 
+/// How a multisampled color attachment resolves into its resolve texture where its format has
+/// Metal's resolve rule at its sample count (`bind::ColorResolveFormat`: unorm, snorm, sRGB,
+/// 32-bit float and packed 16-bit unorm formats at every count, 16-bit float, `RG11B10Float` and
+/// `RGB9E5Float` ones at 2 and 4 samples), on a device whose own `AVERAGE` resolve is not measured
+/// to write Metal's (`DriverFact::ColorResolveAverageIsMetals`, which only MoltenVK on Apple's GPUs
+/// holds: there the device's resolve is Metal's under either value, and nothing is announced).
+/// Metal's resolve rounds each average by its format's rule; Vulkan's `AVERAGE` leaves the
+/// rounding, an sRGB average's space and what a NaN or infinite sample makes of it to the device.
+/// An attachment whose samples a fetching pass holds in its sample planes as it ends resolves from
+/// them by Metal's rule under either value, which costs less than merging them back for the
+/// device's resolve. The runtime's choice alone: no emitted code changes.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum ResolvePolicy {
+    /// The device's `AVERAGE` resolve in the pass (the default), announced
+    /// `device-rounded-resolve`: a resolved channel can differ from Metal's by one code (an sRGB
+    /// channel by two) where the average lies near a rounding boundary, a float channel in its
+    /// last bits, and wholly where a sample is a NaN or an infinity. Measured at 2 and 4 samples
+    /// on RADV, ANV, NVIDIA and lavapipe; each rounds an 8-bit unorm tie down (RADV: 32512 of
+    /// `R8Unorm`'s 65536 pairs of samples one code below Metal's at 2 samples).
+    #[default]
+    Device,
+    /// Metal's rule, drawn after the pass: one more render pass instance per resolved attachment,
+    /// between barriers, reads its samples (as an input attachment, or from a copy of them where
+    /// its image takes no input attachment usage) and writes the resolve texture, announced
+    /// `shader-resolve` (a performance note).
+    Exact,
+}
 
 /// How a batch of command buffers on one `VkQueue` (the work the runtime submits for a command
 /// buffer between its event waits and signals) begins after the earlier batches there. Metal

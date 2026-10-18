@@ -218,6 +218,7 @@ use crate::gpu::TEST_DEVICE;
 use metal2vulkan::bind::{AstcDecode, SamplerDescriptor};
 use metal2vulkan::cache::VariantKey;
 use metal2vulkan::device::VkExtension;
+use metal2vulkan::device::{DecodedTexelsPolicy, ResolvePolicy};
 use metal2vulkan::device::{DriverFact, DriverWorkaround, OpBits, VkFeature, VkProperty};
 use metal2vulkan::device::{SimdClass, Tier};
 use metal2vulkan::error::{DriverDeviation, Feature};
@@ -1964,14 +1965,15 @@ pub(super) fn twins_depth(device: &Device) -> bool {
 }
 
 /// The kind `device` announces for a resolve of a color attachment of `format` at `samples`, a
-/// texture the runtime made: `shader-resolve` where the format has Metal's rules at that count
-/// (`ColorResolveFormat::of` and `resolves`) and the device's `AVERAGE` is not measured to be
-/// Metal's there (`DriverFact::ColorResolveAverageIsMetals`, at most 4 samples): the runtime
-/// gives such a target the input attachment usage the exact resolve reads it through where that
-/// costs the image nothing, which every driver measured answers so (lavapipe, RADV, ANV and
-/// NVIDIA, EVs `RES-l2-*`); `device-rounded-resolve` where the device's `AVERAGE` resolves one
-/// without rules there and is not measured to resolve as Metal's; none where it is (the fact holds
-/// for every format).
+/// texture the runtime made: `shader-resolve` under `ResolvePolicy::Exact` where the format has
+/// Metal's rules at that count (`ColorResolveFormat::of` and `resolves`) and the device's
+/// `AVERAGE` is not measured to be Metal's there (`DriverFact::ColorResolveAverageIsMetals`, at
+/// most 4 samples): the runtime gives such a target the input attachment usage the exact resolve
+/// reads it through where that costs the image nothing, which every driver measured answers so
+/// (lavapipe, RADV, ANV and NVIDIA); `device-rounded-resolve` where the device's
+/// `AVERAGE` resolves it (one with rules under `ResolvePolicy::Device`, the default, and one
+/// without rules there under either) and is not measured to resolve as Metal's; none where it is
+/// (the fact holds for every format).
 pub(super) fn resolve_kind(
     device: &Device,
     format: PixelFormat,
@@ -1986,14 +1988,16 @@ pub(super) fn resolve_kind(
             .properties()
             .driver_facts
             .contains(&DriverFact::ColorResolveAverageIsMetals);
-    let exact = rules && samples > 1 && !metals;
-    // A format without rules resolves by the device's average, Metal's own where the fact holds.
-    if exact {
-        Some(Degradation::ShaderResolve)
-    } else if !rules && !metals {
-        Some(Degradation::DeviceRoundedResolve)
-    } else {
-        None
+    let policy = device.compile_device().policy().resolve;
+    // A format without rules, or any under the device's resolve, resolves by the device's
+    // average, Metal's own where the fact holds.
+    match (
+        metals,
+        rules && samples > 1 && policy == ResolvePolicy::Exact,
+    ) {
+        (true, _) => None,
+        (false, true) => Some(Degradation::ShaderResolve),
+        (false, false) => Some(Degradation::DeviceRoundedResolve),
     }
 }
 

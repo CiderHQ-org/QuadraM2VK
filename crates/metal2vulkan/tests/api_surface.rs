@@ -233,6 +233,7 @@ surface! {
         enum HeapCompressionPolicy N;
         enum CompletionPolicy N;
         enum TileStorePolicy N;
+        enum ResolvePolicy N;
         enum BatchOrderPolicy N;
         struct DeviceProfile O;
         struct SpirvValidation N;

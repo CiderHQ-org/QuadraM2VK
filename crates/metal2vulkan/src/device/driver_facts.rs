@@ -1097,7 +1097,9 @@ pub enum DriverFact {
     /// snorm's `floor((2·sum + n) / 2n)`, sRGB's mean of 12-bit linear values encoded by Metal's
     /// thresholds, and `float`'s flushed sequential sum times `1/n`. Vulkan leaves the average's
     /// rounding to the implementation. On a driver with it the runtime resolves such an attachment
-    /// in its pass; elsewhere, and at 8 samples or more, by that exact shader after the pass
+    /// in its pass under either [`ResolvePolicy`](crate::device::ResolvePolicy); elsewhere, and at
+    /// 8 samples or more, by that exact shader after the pass under `ResolvePolicy::Exact`, and in
+    /// its pass by the device's average, announced, under `ResolvePolicy::Device`
     /// (`color_resolve.rs`).
     /// The fact holds for every colour format the driver resolves, those without a crate-owned
     /// rule too (half floats, packed 16-bit, `RG11B10Float`, `RGB9E5Float`): MoltenVK 1.4.1

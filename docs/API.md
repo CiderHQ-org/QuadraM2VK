@@ -103,6 +103,15 @@ compile does. `DevicePolicy::default()` is `DevicePolicy::UNTRUSTED`:
   `tile_store = TileStorePolicy::Exact`, which `exact_answers()` selects, rewrites them before
   the pass as Metal's store leaves them, through the extended-range attachments' load pass. On
   MoltenVK the pass is a Metal pass and stores them as Metal's under either value.
+- **The device's resolve of a multisampled color attachment** (`ResolvePolicy::Device`, the
+  runtime's choice; no pipeline differs). A pass resolves a color attachment by the device's
+  `AVERAGE` in the pass, which rounds the average (a tie, an sRGB average) as the device does and
+  answers a NaN or infinite sample as the device does, announced as `device-rounded-resolve`.
+  `resolve = ResolvePolicy::Exact`, which `exact_answers()` selects, resolves an attachment whose
+  format has Metal's rule at its sample count by that rule in one more render pass instance after
+  the pass (`shader-resolve`). On MoltenVK the device's resolve is Metal's own under either value,
+  and an attachment a fetching pass's sample planes hold as it ends resolves from them by Metal's
+  rule under either.
 - **Batches of a queue ordered by their ends** (`BatchOrderPolicy::Ends`, the runtime's choice; no
   pipeline differs). On ANV, RADV and NVIDIA's driver, each measured to start no kernel submission
   of a `VkQueue` before the one before it completed, each batch of command buffers ends with a
@@ -1196,7 +1205,7 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   resolves into a scratch image, whose render area is copied into the texture after the pass.
 - `metal2vulkan-degrade-shader-resolve` (performance). `ShaderResolve`: A multisample color resolve
   drawn after the pass by Metal's exact rules, where the device's `AVERAGE` resolve is not measured
-  to be Metal's; or a stencil resolved by `DepthResolvedSample` after `Min` or `Max`, which no
+  to be Metal's, under `ResolvePolicy::Exact` or from a fetching pass's sample planes; or a stencil resolved by `DepthResolvedSample` after `Min` or `Max`, which no
   Vulkan resolve mode states, or a `Min` or `Max` depth on a device without the mode, drawn after
   the pass. Cost: one more render pass instance after the pass reads the stored samples (or the
   sample planes) and writes the resolve texture, where the device would resolve in the pass; where
@@ -1327,14 +1336,25 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   the submission's and the completion's latencies, not the GPU's own start and end.
 - `metal2vulkan-degrade-device-rounded-resolve` (precision). `DeviceRoundedResolve`: A multisample
   color resolve averages through Vulkan's `AVERAGE` mode, which leaves the rounding of the average
-  (and the sRGB encoding) to the device, on a device not measured to round as Metal does: a format
+  (and the sRGB encoding) to the device, on a device not measured to round as Metal does: under
+  `ResolvePolicy::Device`, the default, any color attachment but one a fetching pass's sample
+  planes hold as it ends (resolved from them by Metal's rule); under `ResolvePolicy::Exact` a format
   without Metal's closed rule at its count (the 16-bit float, `RG11B10Float` and `RGB9E5Float`
   formats past 4 samples, and a format no rule covers), or an attachment whose image the exact
   resolve can neither read nor copy: an image without input attachment usage of a format the
-  device does not copy. Cost: a resolved texel can differ from Metal's by one unit where the
-  average lies at a rounding tie, and wholly where a sample is a NaN or an infinity: Metal's
-  resolve counts a half or small-float NaN as 0 and a half infinity as 65536 of its sign, and
-  makes any 32-bit float NaN 0x7fc00000, where the device's average may keep them.
+  device does not copy. Measured against Metal's rules at 2 and 4 samples on RADV (Mesa 26.0.8, the
+  Radeon 780M and the RX 7900 XTX), ANV (Mesa 26.2.4, the Iris Xe), NVIDIA (615.71, the RTX 5080
+  Laptop GPU) and lavapipe (Mesa 26.2.4, at 4 samples): every unorm, snorm and packed 16-bit unorm
+  channel within one code of Metal's, an sRGB channel within two (NVIDIA's at 4 samples; one
+  elsewhere). Each rounds an 8-bit unorm tie down (RADV and ANV: 32512 of `R8Unorm`'s 65536 pairs
+  of samples one code below at 2 samples); an sRGB or packed channel lands above Metal's code in
+  some texels and below in others. A float channel's average differs in its last bits, counted and
+  not bounded. Cost: a
+  resolved channel can differ from Metal's by one code (an sRGB channel by two) where the average
+  lies near a rounding boundary, a float channel in its last bits, and wholly where a sample is a
+  NaN or an infinity: Metal's resolve counts a half or small-float NaN as 0 and a half infinity as
+  65536 of its sign, and makes any 32-bit float NaN 0x7fc00000, where the device's average may
+  keep them.
 - `metal2vulkan-degrade-unmeasured-resolve` (precision). `UnmeasuredResolve`: A multisample color
   resolve of more than 4 samples, of which Apple's GPUs make no texture: no Metal answer is measured
   there; likewise a stencil resolved by `DepthResolvedSample` after `Min` or `Max`, whose pick among

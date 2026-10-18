@@ -76,6 +76,7 @@ fn choices() -> Vec<Choice> {
         heap_compression: _,
         completion: _,
         tile_store: _,
+        resolve: _,
         batch_order: _,
     } = p;
     vec![
@@ -93,6 +94,7 @@ fn choices() -> Vec<Choice> {
         choice!(p.heap_compression: HeapCompressionPolicy { Compressed, Uncompressed }),
         choice!(p.completion: CompletionPolicy { Grouped, Exact }),
         choice!(p.tile_store: TileStorePolicy { Device, Exact }),
+        choice!(p.resolve: ResolvePolicy { Device, Exact }),
         choice!(p.batch_order: BatchOrderPolicy { Ends, Exact }),
     ]
 }
@@ -433,6 +435,24 @@ fn the_runtime_s_tile_store_choice_keys_no_profile() {
     let device = committed_profiles_with(DevicePolicy::UNTRUSTED).expect("profiles");
     let exact = committed_profiles_with(DevicePolicy {
         tile_store: TileStorePolicy::Exact,
+        ..DevicePolicy::UNTRUSTED
+    })
+    .expect("profiles");
+    assert_eq!(device.len(), exact.len());
+    for ((stem, d), (other, e)) in device.iter().zip(&exact) {
+        assert_eq!(stem, other);
+        assert_eq!(d.fingerprint(), e.fingerprint(), "{stem}");
+    }
+}
+
+/// The runtime's choice of a multisampled color attachment's resolve (`resolve`) moves no
+/// committed profile's fingerprint: no profile carries it, so no translation follows it.
+#[test]
+fn the_runtime_s_resolve_choice_keys_no_profile() {
+    use crate::spirv::testing::committed_profiles_with;
+    let device = committed_profiles_with(DevicePolicy::UNTRUSTED).expect("profiles");
+    let exact = committed_profiles_with(DevicePolicy {
+        resolve: ResolvePolicy::Exact,
         ..DevicePolicy::UNTRUSTED
     })
     .expect("profiles");

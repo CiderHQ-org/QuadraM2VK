@@ -38,9 +38,12 @@
 //! a pass of no draws that loads it, and compares every channel of the resolve texture with the
 //! rule applied to the samples read back: every pair of codes of an 8-bit channel at 2 samples,
 //! every pair as `(a, a, b, b)` and random texels at 4, and random texels with the edge values of
-//! a wider channel. The runtime resolves every one of these formats by Metal's rules on every
-//! device (its exact resolve, or a driver measured to average as Metal does), so every channel must
-//! match. Metal has no texture of more than 4 samples on Apple silicon, so a resolve of 8 is
+//! a wider channel. Under the lanes' policy (`DevicePolicy::exact_answers`, so
+//! `ResolvePolicy::Exact`) the runtime resolves every one of these formats by Metal's rules on
+//! every device (its exact resolve, or a driver measured to average as Metal does), so every
+//! channel must match; under the default, `ResolvePolicy::Device`, the device's average resolves
+//! them in the pass, announced, and [`the_device_resolve_rounds_as_announced`] measures it against
+//! the rules. Metal has no texture of more than 4 samples on Apple silicon, so a resolve of 8 is
 //! compared with the same rules and printed as unmeasured, never as Metal's. A device without
 //! `imageViewFormatReinterpretation` (MoltenVK) views no texel as an unsigned format of other
 //! components, so the formats only such a view reads back are printed as unread there. The runs
@@ -48,12 +51,13 @@
 //! average, which `DriverFact::ColorResolveAverageIsMetals` records.
 
 use super::presenting::{image_info, made_image, shared_among};
-use super::resolves::{lane, quiet, Lane, FULL, WHITE};
+use super::resolves::{lane, lane_with, quiet, Lane, FULL, WHITE};
 use crate::air_library::AirLibrary;
 use crate::candidate::runtime_samples::{encode_through, library, shape};
 use crate::executor_contract::multisample::{ReadbackView, SampleRead};
 use crate::runtime_lane::buffer_with;
 use metal2vulkan::bind::{SRGB_RESOLVE_LINEAR, SRGB_RESOLVE_THRESHOLDS};
+use metal2vulkan::device::{DriverFact, ResolvePolicy};
 use metal2vulkan::metal::state::DepthStencilDescriptor;
 use metal2vulkan::metal::{CompareFunction, PixelFormat, PrimitiveType, TextureType, TextureUsage};
 use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};
@@ -241,6 +245,16 @@ impl Case {
     /// Whether the case's texels share an exponent (`RGB9E5Float`'s, at bits 27 to 31).
     fn shared(&self) -> bool {
         self.channels.iter().any(|&(_, _, c)| c == Channel::Shared)
+    }
+
+    /// The most codes the device's average of a channel of a code may stand from Metal's rule
+    /// (`device-rounded-resolve`'s bound): two in a texel of sRGB channels (NVIDIA's at 4
+    /// samples), one otherwise.
+    fn device_codes(&self) -> u64 {
+        match self.channels.iter().any(|&(_, _, c)| c == Channel::Srgb) {
+            true => 2,
+            false => 1,
+        }
     }
 
     /// Whether Metal's rules of every channel hold at `n` samples.
@@ -700,6 +714,11 @@ struct Outcome {
     differ: usize,
     /// Samples the fill did not store as drawn (a float the device changed on the way).
     changed: usize,
+    /// Of the channels of a code (unorm, snorm, sRGB, packed unorm) that differ, those above
+    /// Metal's code and those below it, and the most codes between the two.
+    above: usize,
+    below: usize,
+    most_codes: u64,
     examples: Vec<String>,
 }
 
@@ -861,6 +880,9 @@ fn resolve_case_through(
         channels: 0,
         differ: 0,
         changed: 0,
+        above: 0,
+        below: 0,
+        most_codes: 0,
         examples: Vec::new(),
     };
     for p in 0..pixels {
@@ -884,6 +906,13 @@ fn resolve_case_through(
             let metal_value = metal(channel, &samples);
             if device_value != metal_value {
                 outcome.differ += 1;
+                if let Some((device_code, metal_code)) = codes(channel, device_value, metal_value) {
+                    match device_code > metal_code {
+                        true => outcome.above += 1,
+                        false => outcome.below += 1,
+                    }
+                    outcome.most_codes = outcome.most_codes.max(device_code.abs_diff(metal_code));
+                }
                 if outcome.examples.len() < 4 {
                     let shown: Vec<String> = samples.iter().map(|v| format!("{v:#x}")).collect();
                     outcome.examples.push(format!(
@@ -895,6 +924,21 @@ fn resolve_case_through(
         }
     }
     Ok(outcome)
+}
+
+/// A channel's device and Metal values as the codes they order by, where `channel` is one of a
+/// code (a snorm channel's two's complement read signed); `None` for a float channel.
+fn codes(channel: Channel, device: u64, metal: u64) -> Option<(i64, i64)> {
+    match channel {
+        Channel::Unorm(_) | Channel::HalfUnorm(_) | Channel::Srgb => {
+            Some((device as i64, metal as i64))
+        }
+        Channel::Snorm(bits) => {
+            let signed = |v: u64| ((v << (64 - bits)) as i64) >> (64 - bits);
+            Some((signed(device), signed(metal)))
+        }
+        Channel::Float | Channel::Half | Channel::SmallFloat(_) | Channel::Shared => None,
+    }
 }
 
 /// Compare pixel `p`'s shared-exponent texel of 4 bytes, `n` samples each in `drawn` and
@@ -992,6 +1036,110 @@ fn color_resolves_against_metals_rules() {
     assert!(
         differ.is_empty(),
         "resolves not by Metal's rules on {name}: {differ:#?}"
+    );
+    quiet(lane, &messages);
+}
+
+/// Under `ResolvePolicy::Device`, the default, every closed format at every sample count the
+/// device takes resolves by the device's `AVERAGE` in the pass: nothing announces
+/// `shader-resolve`, and `device-rounded-resolve` is announced exactly where the device's average
+/// is not measured to be Metal's (`DriverFact::ColorResolveAverageIsMetals`, at 2 and 4 samples),
+/// where every channel is Metal's. Elsewhere what the device's average gives against Metal's rule
+/// is printed, a measurement: the channels that differ, those of a code above and below Metal's,
+/// and the most codes between the two, held at 2 and 4 samples to the bound
+/// `device-rounded-resolve` states ([`Case::device_codes`]; a float channel's differences are
+/// counted, not bounded).
+#[test]
+fn the_device_resolve_rounds_as_announced() {
+    let (messages, _cache, lane) = lane_with(|options| {
+        options.policy.resolve = ResolvePolicy::Device;
+    });
+    let name = lane.device.name().to_owned();
+    let description = &lane.device.properties().description;
+    eprintln!(
+        "the device's resolve on {name}: driver {:?}, driverVersion {:#x}, vendor {:#x}",
+        description.driver_id, description.driver_version, description.vendor_id
+    );
+    let metals = lane
+        .device
+        .properties()
+        .driver_facts
+        .contains(&DriverFact::ColorResolveAverageIsMetals);
+    messages.take_notices();
+    let mut differ = Vec::new();
+    let mut past_bound = Vec::new();
+    let mut resolved_past_metal = false;
+    for n in [2u32, 4, 8] {
+        let supported = lane
+            .device
+            .properties()
+            .supports_texture_sample_count(n.into())
+            .unwrap();
+        if !supported {
+            eprintln!("the device's resolve on {name}: no texture of {n} samples");
+            continue;
+        }
+        for case in CASES {
+            let pf = case.pf;
+            match resolve_case(&lane, case, n) {
+                Err(why) => eprintln!("the device's resolve {pf:?} x{n} on {name}: {why}"),
+                Ok(outcome) => {
+                    resolved_past_metal |= n > 4;
+                    if outcome.differ != 0 && n <= 4 {
+                        differ.push(format!("{pf:?} x{n}: {} channels", outcome.differ));
+                    }
+                    if outcome.most_codes > case.device_codes() && n <= 4 {
+                        past_bound.push(format!("{pf:?} x{n}: {} codes", outcome.most_codes));
+                    }
+                    eprintln!(
+                        "the device's resolve {pf:?} x{n} on {name}: {} of {} channels differ \
+                         from Metal's rule{} ({} above Metal's code, {} below, by {} codes at \
+                         most; {} samples stored otherwise than drawn){}",
+                        outcome.differ,
+                        outcome.channels,
+                        if case.resolves(n) {
+                            ""
+                        } else {
+                            " (applied unmeasured)"
+                        },
+                        outcome.above,
+                        outcome.below,
+                        outcome.most_codes,
+                        outcome.changed,
+                        if outcome.examples.is_empty() {
+                            String::new()
+                        } else {
+                            format!(": {}", outcome.examples.join("; "))
+                        }
+                    );
+                }
+            }
+        }
+    }
+    let counts = super::degrade_notices::counts(&messages.take_notices());
+    eprintln!("the device's resolve on {name}: announced {counts:?}");
+    assert_eq!(
+        counts.get(&Degradation::ShaderResolve),
+        None,
+        "shader-resolve on {name} under the device's resolve"
+    );
+    // At more than 4 samples no device's average is measured to be Metal's.
+    let rounded = !metals || resolved_past_metal;
+    assert_eq!(
+        counts.contains_key(&Degradation::DeviceRoundedResolve),
+        rounded,
+        "device-rounded-resolve on {name}: {counts:?}"
+    );
+    if metals {
+        assert!(
+            differ.is_empty(),
+            "the resolve of a driver measured to average as Metal does, not by Metal's rules on \
+             {name}: {differ:#?}"
+        );
+    }
+    assert!(
+        past_bound.is_empty(),
+        "the device's resolve past device-rounded-resolve's codes on {name}: {past_bound:#?}"
     );
     quiet(lane, &messages);
 }

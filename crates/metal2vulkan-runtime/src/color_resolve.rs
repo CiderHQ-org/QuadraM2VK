@@ -2,17 +2,19 @@
 //!
 //! Vulkan's `AVERAGE` resolve leaves the average's rounding, and an sRGB average's space, to the
 //! device, and of the drivers measured only MoltenVK's from 1.4.1 on Apple's GPUs writes Metal's
-//! answer (`DriverFact::ColorResolveAverageIsMetals`, measured at 2 and 4 samples). Every other
-//! device resolves a color attachment whose format has Metal's closed rule at its count
-//! (`bind::ColorResolveFormat::of` and `resolves`: unorm, snorm, sRGB, 32-bit float and packed
-//! 16-bit unorm formats at every count, and 16-bit float, `RG11B10Float` and `RGB9E5Float` ones at
-//! 2 and 4 samples) by the crate-owned exact resolve (`bind::color_resolve_modules`), and so does
-//! every device at more than 4 samples, where Apple's GPUs have no texture and the integer rules
-//! measured at 2 and 4 are applied unmeasured. A format without a closed rule at its count (the
-//! 16-bit float, `RG11B10Float` and `RGB9E5Float` formats past 4 samples, and a format no rule
-//! covers) resolves by the device's average: Metal's own resolve where the fact holds
-//! ([`average_is_metals`]: MoltenVK resolves every such format by Metal's multisample resolve store
-//! action), elsewhere a recorded near-equivalent.
+//! answer (`DriverFact::ColorResolveAverageIsMetals`, measured at 2 and 4 samples). Under
+//! `ResolvePolicy::Exact` every other device resolves a color attachment whose format has Metal's
+//! closed rule at its count (`bind::ColorResolveFormat::of` and `resolves`: unorm, snorm, sRGB,
+//! 32-bit float and packed 16-bit unorm formats at every count, and 16-bit float, `RG11B10Float`
+//! and `RGB9E5Float` ones at 2 and 4 samples) by the crate-owned exact resolve
+//! (`bind::color_resolve_modules`), and so does every device at more than 4 samples, where Apple's
+//! GPUs have no texture and the integer rules measured at 2 and 4 are applied unmeasured. Under
+//! `ResolvePolicy::Device`, the default, such an attachment resolves by the device's average in
+//! the pass, as does, under either value, a format without a closed rule at its count (the 16-bit
+//! float, `RG11B10Float` and `RGB9E5Float` formats past 4 samples, and a format no rule covers):
+//! Metal's own resolve where the fact holds ([`average_is_metals`]: MoltenVK resolves every such
+//! format by Metal's multisample resolve store action), elsewhere a recorded near-equivalent,
+//! announced as `device-rounded-resolve`.
 //!
 //! The choice is made with the attachment's resolve ([`exact`], `resolve.rs`), so the pass's
 //! shape (`render_target.rs`) leaves such a resolve out of its subpass from its first instance:
@@ -26,9 +28,10 @@
 //!   their copy format. The planes are not merged back into the attachment unless Metal keeps
 //!   its samples (`Store`, `StoreAndMultisampleResolve`), no instance of no draws follows to
 //!   resolve, and a memoryless attachment the pass only fetches and resolves needs no backing
-//!   (`render.rs`). This is the cheaper path on a driver whose average is Metal's too, so such an
-//!   attachment resolves from its planes there as well ([`resolve_planes`]): its pass has one
-//!   subpass, whose resolve references render pass compatibility ignores (`render_target.rs`).
+//!   (`render.rs`). This is the cheaper path on a driver whose average is Metal's too, and under
+//!   `ResolvePolicy::Device`, so such an attachment resolves from its planes there as well
+//!   ([`resolve_planes`]): its pass has one subpass, whose resolve references render pass
+//!   compatibility ignores (`render_target.rs`).
 //! - **From the attachment** otherwise: its level and layer as the resolve pass's input
 //!   attachment 0, loaded and stored. An 8-bit sRGB attachment whose image takes its UNORM twin's
 //!   view (an sRGB texture's image lists its twin's formats) is read through that view
@@ -87,7 +90,7 @@ use super::Device;
 use crate::shader_cache::driver::Making;
 use ash::vk;
 use metal2vulkan::bind::{color_resolve_modules, ColorResolveFormat, PlanesCopy, ResolveSource};
-use metal2vulkan::device::DriverFact;
+use metal2vulkan::device::{DriverFact, FormatUsage, ResolvePolicy};
 use metal2vulkan::error::Feature;
 use metal2vulkan::vk::{
     ComponentMapping, Format, FormatFeatureFlags2, ImageAspectFlags, ImageUsageFlags, ImageViewType,
@@ -99,9 +102,13 @@ use std::sync::{Arc, Mutex};
 pub(super) const METAL_SAMPLES: u32 = 4;
 
 /// The exact resolve of a color attachment of `format` at `samples` samples on `device`: its
-/// format's rules where the format has them and the device's average is not measured to be
-/// Metal's at that count (the module docs). `None` where the device resolves it in the pass.
+/// format's rules under `ResolvePolicy::Exact`, where the format has them and the device's average
+/// is not measured to be Metal's at that count (the module docs). `None` where the device resolves
+/// it in the pass.
 pub(super) fn exact(device: &Device, format: Format, samples: u32) -> Option<ColorResolveFormat> {
+    if device.compile_device().policy().resolve != ResolvePolicy::Exact {
+        return None;
+    }
     // Rules that hold at that count: the float formats' at 2 and 4 samples only.
     let rules = ColorResolveFormat::of(format).filter(|rules| rules.resolves(samples))?;
     (samples > 1 && !average_is_metals(device, samples)).then_some(rules)
@@ -150,8 +157,8 @@ fn copied(device: &Device, source: &Target) -> Result<bool, Error> {
 }
 
 /// Whether a multisampled color attachment of `format` at `samples` that the sample planes may
-/// hold as a pass ends resolves from them by the exact resolve whatever its device's average: its
-/// format has Metal's rules at that count. Its pass is of one subpass, whose resolve references
+/// hold as a pass ends resolves from them by the exact resolve whatever its device's average and
+/// its device's `ResolvePolicy`: its format has Metal's rules at that count. Its pass is of one subpass, whose resolve references
 /// render pass compatibility ignores, so its last instance may leave the subpass's resolve out
 /// (`render_target.rs`).
 pub(super) fn from_planes(format: Format, samples: u32) -> bool {
