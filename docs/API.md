@@ -2215,15 +2215,20 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   where Metal's device here answers otherwise: Metal on Apple M3 compiles these reads but extends
   the carrier byte as an integer, the same for every format, so the result is unverified on Metal.
 - `metal2vulkan-degrade-multisample-position` (precision). `PrecisionNote::MultisamplePosition`: A
-  fragment function of a render pipeline that rasterizes more than one sample reads, at pixel rate,
-  a value Metal reads at the pixel center in every invocation and Vulkan evaluates at an
-  implementation-defined position within the fragment: `[[position]]`'s z or w (the interpolated
-  depth and `1/w`, whose position Vulkan does not state), a center-sampled varying on a device
-  without its pixel form (interpolation functions whose `InterpolateAtOffset` reads from the pixel
-  center: "an implementation-defined position within the fragment area being shaded"), a centroid
-  varying (anywhere in the fragment's covered area, where Metal, measured on Apple M3 Max, moves it
-  to a covered sample's location only under partial coverage), `[[point_coord]]` ("the fragment
-  center, or the location of a sample"), or `[[barycentric_coord]]`.
+  fragment function of a render pipeline that rasterizes more than one sample reads a value Metal
+  reads at the pixel center in every invocation and Vulkan evaluates at an implementation-defined
+  position within the fragment: `[[position]]`'s z or w (the interpolated depth and `1/w`, whose
+  position Vulkan does not state), a center-sampled varying on a device without its pixel form
+  (interpolation functions whose `InterpolateAtOffset` reads from the pixel center: "an
+  implementation-defined position within the fragment area being shaded"), a centroid varying
+  (anywhere in the fragment's covered area, where Metal, measured on Apple M3 Max, moves it to a
+  covered sample's location only under partial coverage), `[[point_coord]]` ("the fragment center,
+  or the location of a sample"), or `[[barycentric_coord]]` (its builtin). A function that runs per
+  sample under sample shading reads all but the center varying where Vulkan evaluates them for its
+  sample, where Metal reads every one as the pixel's in each sample's run (Apple M3 Max at 4x,
+  measured). Each is evaluated at a point of the pixel, so it differs from Metal's by at most its
+  change over half the pixel's diagonal, and a centroid varying by at most its change across the
+  pixel's covered area; exact where the device evaluates a read where Metal does.
 - `metal2vulkan-degrade-rasterization-rate-map` (precision). `PrecisionNote::RasterizationRateMap`:
   A render pass drawn by regions over a rasterization-rate map that is not the identity: its
   regions' lines are this crate's tiles' exact lines, where Apple's are its fixed-point ones, so a

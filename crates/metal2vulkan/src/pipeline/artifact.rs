@@ -597,17 +597,27 @@ pub enum PrecisionNote {
     /// to a float carries none: Metal on Apple M3 does not compile it, so no Metal answer
     /// contradicts it (and none verifies it either).
     Fp8Value,
-    /// A fragment function of a render pipeline that rasterizes more than one sample reads, at
-    /// pixel rate, a value Metal reads at the pixel center in every invocation and Vulkan
-    /// evaluates at an implementation-defined position within the fragment: `[[position]]`'s z or w
-    /// (the interpolated depth and `1/w`, whose position Vulkan does not state), a center-sampled
+    /// A fragment function of a render pipeline that rasterizes more than one sample reads a value
+    /// Metal reads at the pixel center in every invocation and Vulkan evaluates at an
+    /// implementation-defined position within the fragment: `[[position]]`'s z or w (the
+    /// interpolated depth and `1/w`, whose position Vulkan does not state), a center-sampled
     /// varying on a device without its pixel form (interpolation functions whose
     /// `InterpolateAtOffset` reads from the pixel center: "an implementation-defined position
     /// within the fragment area being shaded"), a centroid varying (anywhere in the fragment's
     /// covered area, where Metal, measured on Apple M3 Max, moves it to a covered sample's location
     /// only under partial coverage), `[[point_coord]]` ("the fragment center, or the location of a
-    /// sample"), or `[[barycentric_coord]]`. Exact where the device evaluates each where Metal
-    /// does. A function that runs per sample never carries it: link refuses those reads there.
+    /// sample"), or `[[barycentric_coord]]` (its builtin; the varying form without
+    /// `fragmentShaderBarycentric` is read at the pixel center, as a center varying). A function
+    /// that runs per sample under sample shading reads all but the center varying (which link
+    /// refuses there without its pixel form) where Vulkan evaluates them for its sample, where
+    /// Metal reads every one as the pixel's in each sample's run (Apple M3 Max at 4x, measured).
+    /// Bound: each is evaluated at a point of the pixel (the center or a sample's location), so it
+    /// differs from Metal's by at most its change over half the pixel's diagonal, and a centroid
+    /// varying by at most its change across the pixel's covered area. Exact where the device
+    /// evaluates a read where Metal does: measured per sample at 4x, lavapipe evaluates
+    /// `[[position]]`'s z at the sample and the others at the pixel, and ANV (Intel UHD 770)
+    /// `[[point_coord]]` and a centroid varying at the sample and `[[position]]`'s z and w at the
+    /// pixel, where they equal Metal's to the last bit or two.
     MultisamplePosition,
     /// A render pass drawn by regions over a rasterization-rate map that is not the identity
     /// (`bind::RateMapRegions::precision`): its regions' lines are this crate's tiles' exact lines,

@@ -95,16 +95,23 @@
 //!   the reason its interface records (`CoverageLoopRefusal`). On a driver that runs a
 //!   memory-writing function once per covered sample itself (`CoverageLoop::DriverRunsPerSample`,
 //!   MoltenVK on Apple's GPU) the function runs as written, without sample shading, and its other
-//!   reads are checked as below. It refuses one beside another pixel read it has no pixel form for:
-//!   `[[position]]`'s z or w, `[[point_coord]]`, `[[barycentric_coord]]`, a centroid varying, or a
-//!   center varying on a device without the varyings' pixel form. That refusal is
-//!   `Unsupported{SampleRateShading, NotImplemented}`, or names what the device lacks:
-//!   `sampleRateShading`, or, for a center varying, `VkProperty::InterpolateAtOffsetCentered` (a
-//!   device whose `InterpolateAtOffset` does not read from the pixel center, as MoltenVK's does
-//!   not, has no such form, and has a pixel form only where it reads the varying at the pixel
-//!   center itself) and `shaderSampleRateInterpolationFunctions`. Such a function whose pixel reads
-//!   all have forms on the device, but which was compiled without `multisampled`, is
-//!   `NeedsInput(Multisampled)`: compiled for the pipeline it links. A function that runs per
+//!   reads are checked as below. A per-sample function reads the pixel values Vulkan has no pixel
+//!   form for where Vulkan evaluates them, as a pixel-rate function does: `[[position]]`'s z and w
+//!   (the interpolated depth and `1/w`, at a position Vulkan does not state), `[[point_coord]]`
+//!   ("the fragment center, or the location of a sample"), `[[barycentric_coord]]`, and a centroid
+//!   varying (at the invocation's sample under sample shading), each within half a pixel of the
+//!   pixel center Metal reads it at; the compile layer notes `PrecisionNote::MultisamplePosition`
+//!   for them, as for a pixel-rate function's. Link refuses a per-sample function's center varying
+//!   on a device without the varyings' pixel form, naming what the device lacks:
+//!   `VkProperty::InterpolateAtOffsetCentered` (a device whose `InterpolateAtOffset` does not read
+//!   from the pixel center, as MoltenVK's does not, has no such form, and has a pixel form only
+//!   where it reads the varying at the pixel center itself) and
+//!   `shaderSampleRateInterpolationFunctions`; and a function that needs sample shading, or reads
+//!   `[[position]]` or a center varying per sample, on a device without `sampleRateShading`. Such a
+//!   function whose pixel reads all have forms on the device, but which was compiled without
+//!   `multisampled`, is `NeedsInput(Multisampled)`: compiled for the pipeline it links. A function
+//!   compiled for another device's forms is `Unsupported{SampleRateShading, NotImplemented}`. A
+//!   function that runs per
 //!   pixel, or a pipeline of one sample, has no sample shading: `FragCoord`'s x and y are the
 //!   pixel's center and `SampleMask` the fragment's coverage. The sample mask a function returns
 //!   keeps, under either API, the samples of the invocation whose bits it sets (measured with
@@ -698,7 +705,7 @@ pub fn graphics_state(
     };
     // The sample count against the attachments' sample counts.
     state.sample_count_properties(&p.fields().enabled.properties)?;
-    split_pixel_fragments(r, fs, p)?;
+    split_pixel_fragments(r, fs, p, state.sample_shading)?;
     Ok(state)
 }
 
@@ -740,13 +747,17 @@ fn reads_flat_inputs(io: &StageIo) -> bool {
 /// Refuse what a fragment stage `fs` of a multisampled pipeline reads of its coverage on a
 /// driver that rasterizes a clipped triangle as several
 /// ([`DriverWorkaround::ClippedTrianglesSplitPixelFragments`]): `[[sample_mask]]` and a centroid
-/// varying, each of which such a split changes in the pixels on the pieces' shared edges. Each is
-/// read once per pixel here: `sample_invocations` refused either beside a function that runs per
-/// sample.
+/// varying, each of which such a split changes in the pixels on the pieces' shared edges.
+/// `[[sample_mask]]` is read once per pixel here: `sample_invocations` refused it beside a function
+/// that runs per sample under sample shading. A function sample shading surely runs per sample
+/// (the pipeline's, `sample_shading`, or the one a `SampleId` input enables; a `Sample` input only
+/// may enable it) reads a centroid varying at its own sample, which lies in one piece: no split
+/// changes it.
 fn split_pixel_fragments(
     r: &RenderLinkInputs,
     fs: Option<&StageInterface>,
     p: &DeviceProfile,
+    sample_shading: bool,
 ) -> Result<(), Error> {
     let defect = DriverWorkaround::ClippedTrianglesSplitPixelFragments;
     let Some(fs) = fs else {
@@ -758,6 +769,9 @@ fn split_pixel_fragments(
     let io = &fs.io;
     if io.builtins.contains(&StageBuiltin::SampleMaskIn) {
         return Err(Unsupported::driver_defect(Feature::PixelCoverage, defect).into());
+    }
+    if sample_shading || io.builtins.contains(&StageBuiltin::SampleId) {
+        return Ok(());
     }
     let centroid = io.inputs.iter().any(|v| {
         matches!(
@@ -783,8 +797,11 @@ fn split_pixel_fragments(
 /// that writes memory runs per covered sample under sample shading, which needs
 /// `sampleRateShading`; a function that runs per sample (that one, or one that reads
 /// `[[sample_id]]`, as a per-sample framebuffer fetch's stage does, or a sample-qualified varying)
-/// is refused where it reads what Metal keeps at the pixel without a pixel form, and needs
-/// `multisampled` where it has one but was compiled without it.
+/// reads `[[position]]`'s x and y and its center varyings at the pixel through their pixel forms,
+/// is refused for a center varying where the device has no pixel form, and needs `multisampled`
+/// where it has one but was compiled without it. Its other pixel reads (`[[position]]`'s z and w,
+/// `[[point_coord]]`, `[[barycentric_coord]]`, a centroid varying) read where Vulkan evaluates
+/// them, noted by the compile layer.
 fn sample_invocations(
     r: &RenderLinkInputs,
     fs: Option<&StageInterface>,
@@ -858,16 +875,11 @@ fn sample_invocations(
         return Err(refused());
     }
     // Compiled for a multisampled pipeline, the function reads `[[position]]`'s x and y and
-    // (with the pixel form) its center varyings at the pixel; nothing reads `[[position]]`'s z
-    // and w, `[[point_coord]]`, `[[barycentric_coord]]`, or a centroid varying where Metal does.
+    // (with the pixel form) its center varyings at the pixel. `[[position]]`'s z and w,
+    // `[[point_coord]]`, `[[barycentric_coord]]` and a centroid varying have no pixel form under
+    // sample shading: they read where Vulkan evaluates them, within the pixel, as a pixel-rate
+    // function's do, and the compile layer notes `PrecisionNote::MultisamplePosition` for them.
     let position = io.builtins.contains(&StageBuiltin::FragCoord);
-    let pixel_builtin = io
-        .builtins
-        .iter()
-        .any(|b| matches!(b, StageBuiltin::PointCoord | StageBuiltin::BaryCoord { .. }));
-    if (position && io.position_depth) || pixel_builtin || interpolated(Sampling::Centroid) {
-        return Err(refused());
-    }
     let center = interpolated(Sampling::Center);
     if !position && !center {
         return Ok(sample_shading);

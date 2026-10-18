@@ -2186,12 +2186,13 @@ fn the_raster_sample_count_needs_the_framebuffer_sample_counts() {
 /// and centroid varyings, its point and barycentric coordinates, and its sample mask as the
 /// pixel's. Vulkan runs per sample only under sample shading, which `SampleId` turns on, a `Sample`
 /// input may, and the pipeline enables for a function that writes memory; it moves those reads to
-/// the sample there. Link refuses a per-sample function with a pixel read it has no pixel form for;
-/// the same pipelines at one sample, a pixel-rate function that reads them (but its
-/// `[[sample_mask]]` on lavapipe, whose split of a clipped triangle's fragments changes it), a
-/// per-sample one that does not, and one compiled for the pipeline that reads `[[position]]`'s x
-/// and y or its center varyings at the pixel, link, with sample shading exactly where the function
-/// writes memory at four samples. A per-sample function whose pixel reads all have forms on the
+/// the sample there. The same pipelines at one sample, a pixel-rate function that reads them (but
+/// its `[[sample_mask]]` on lavapipe, whose split of a clipped triangle's fragments changes it), a
+/// per-sample one that does not, one compiled for the pipeline that reads `[[position]]`'s x and y
+/// or its center varyings at the pixel, and a per-sample one that reads `[[position]]`'s z or w, a
+/// centroid varying, or its point or barycentric coordinates where Vulkan evaluates them (which
+/// the compile layer notes), link, with sample shading exactly where the function writes memory
+/// at four samples. A per-sample function whose pixel reads all have forms on the
 /// device, compiled without `multisampled`, needs that input. A center varying has no pixel form on
 /// `moltenvk-m3` at a release not measured to read it at the pixel center itself (1.4.0), whose
 /// `InterpolateAtOffset` reads off the center, which the refusal names; at 1.4.1, measured so, its
@@ -2249,7 +2250,6 @@ fn multisampled_fragment_invocations_follow_metals_measured_rules() {
     #[derive(Clone, Copy, Debug, PartialEq)]
     enum At4 {
         Links,
-        Refused,
         // Every pixel read has a form the device has, which a function compiled without
         // `multisampled` does not use.
         Recompile,
@@ -2259,7 +2259,7 @@ fn multisampled_fragment_invocations_follow_metals_measured_rules() {
         // The pixel's coverage, which no device gives a per-sample invocation.
         Coverage,
     }
-    use At4::{Center, Coverage, Links, Recompile, Refused};
+    use At4::{Center, Coverage, Links, Recompile};
     let cases = [
         // Pixel rate, no side effect: every pixel read is the pixel's in both APIs.
         (
@@ -2286,14 +2286,15 @@ fn multisampled_fragment_invocations_follow_metals_measured_rules() {
             ),
             Links,
         ),
-        // Sample rate beside a pixel read.
+        // Sample rate beside a pixel read: a center varying needs its pixel form; the others read
+        // where Vulkan evaluates them, which the compile layer notes.
         (
             fragment(vec![center.clone()], vec![B::SampleId], false),
             Center,
         ),
         (
             fragment(vec![centroid.clone()], vec![B::SampleId], false),
-            Refused,
+            Links,
         ),
         (
             fragment(vec![sample.clone(), center.clone()], vec![], false),
@@ -2301,7 +2302,7 @@ fn multisampled_fragment_invocations_follow_metals_measured_rules() {
         ),
         (
             fragment(vec![sample.clone(), centroid.clone()], vec![], false),
-            Refused,
+            Links,
         ),
         (
             fragment(vec![], vec![B::FragCoord, B::SampleId], false),
@@ -2309,13 +2310,13 @@ fn multisampled_fragment_invocations_follow_metals_measured_rules() {
         ),
         (
             fragment(vec![], vec![B::PointCoord, B::SampleId], false),
-            Refused,
+            Links,
         ),
         (
             fragment(vec![], vec![B::SampleId, B::SampleMaskIn], false),
             Coverage,
         ),
-        (fragment(vec![], vec![B::SampleId, bary], false), Refused),
+        (fragment(vec![], vec![B::SampleId, bary], false), Links),
         (
             fragment(vec![sample.clone()], vec![B::FragCoord], false),
             Recompile,
@@ -2329,14 +2330,14 @@ fn multisampled_fragment_invocations_follow_metals_measured_rules() {
             fragment(vec![sample.clone()], vec![B::SampleMaskOut], false),
             Links,
         ),
-        // Compiled for the pipeline: the pixel forms link, the reads without one do not.
+        // Compiled for the pipeline: the pixel forms link, and so do the reads without one.
         (
             compiled(vec![], vec![B::FragCoord, B::SampleId], false, false),
             Links,
         ),
         (
             compiled(vec![], vec![B::FragCoord, B::SampleId], false, true),
-            Refused,
+            Links,
         ),
         (
             compiled(
@@ -2353,11 +2354,11 @@ fn multisampled_fragment_invocations_follow_metals_measured_rules() {
         ),
         (
             compiled(vec![centroid.clone()], vec![B::SampleId], true, false),
-            Refused,
+            Links,
         ),
         (
             compiled(vec![], vec![B::PointCoord, B::SampleId], true, false),
-            Refused,
+            Links,
         ),
         (
             compiled(vec![sample], vec![B::SampleMaskIn], true, false),
@@ -2471,8 +2472,21 @@ fn multisampled_fragment_invocations_follow_metals_measured_rules() {
                         split,
                     )))
                 }
+                // ... and a centroid varying of a function that sample shading may leave at pixel
+                // rate (only a `Sample` input makes it per sample); one that surely runs per sample
+                // reads it at its sample, which no split moves.
+                Links
+                    if p.fields().workarounds.contains(&split)
+                        && fa.interface.io.inputs.contains(&centroid)
+                        && !fa.interface.io.builtins.contains(&B::SampleId)
+                        && !fa.interface.writes_memory =>
+                {
+                    Err(Error::Unsupported(Unsupported::driver_defect(
+                        Feature::CentroidVarying,
+                        split,
+                    )))
+                }
                 Links => Ok(()),
-                Refused => Err(refused.clone()),
                 Coverage => Err(coverage.clone()),
                 Recompile => Err(recompile.clone()),
                 Center if biased => Err(needs_centered.clone()),

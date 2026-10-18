@@ -1699,12 +1699,14 @@ fn mesh_fields(d: &MeshPipelineDescriptor) -> String {
     format!("{:?}", RenderLinkInputs::from(d))
 }
 
-/// A fragment function of a pipeline that rasterizes more than one sample, which reads at pixel
-/// rate a value Vulkan evaluates at an implementation-defined position within the fragment and
-/// Metal at the pixel center, notes `PrecisionNote::MultisamplePosition`: `[[position]]`'s z or w,
-/// a center varying not read at the pixel (`StageIo::varyings_at_pixel`), a centroid varying,
-/// `[[point_coord]]`, or `[[barycentric_coord]]`. Link refused these reads in a function that runs
-/// per sample, so only a pixel-rate one reaches here with them.
+/// A fragment function of a pipeline that rasterizes more than one sample, which reads a value
+/// Vulkan evaluates at an implementation-defined position within the fragment, or at the
+/// invocation's sample under sample shading, and Metal at the pixel center, notes
+/// `PrecisionNote::MultisamplePosition`: `[[position]]`'s z or w, a center varying not read at the
+/// pixel (`StageIo::varyings_at_pixel`), a centroid varying, `[[point_coord]]`, or
+/// `[[barycentric_coord]]`, at pixel rate or per sample. Link refused a per-sample function's
+/// center varying where the device has no pixel form, so a center varying reaches here without it
+/// only at pixel rate.
 fn note_sample_position(
     d: FragmentPass<'_>,
     stages: &[&FunctionArtifact],

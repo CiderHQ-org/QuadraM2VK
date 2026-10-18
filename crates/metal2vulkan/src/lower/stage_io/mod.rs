@@ -115,8 +115,10 @@
 //! `InterpolateAtOffset` at offset 0; where the device reads such a varying at the pixel center
 //! itself, as Metal does (`VkProperty::MetalCenterVaryings`), as it is, and the module requires
 //! that property. Its interface records both, and whether it may read `[[position]]`'s z or w,
-//! which have no such form (`StageIo::{multisampled, varyings_at_pixel, position_depth}`); link
-//! refuses what a sample-rate invocation would read elsewhere.
+//! which have no such form (`StageIo::{multisampled, varyings_at_pixel, position_depth}`): those
+//! read where Vulkan evaluates them, a sample's under sample shading, and the compile layer notes
+//! `PrecisionNote::MultisamplePosition`; link refuses a center varying a sample-rate invocation
+//! would read elsewhere.
 //!
 //! A pulled vertex attribute (`VertexFetch::Pulled`) has no interface variable: its value is
 //! fetched from its source buffer once, in the function's first block before any instruction of the

@@ -2716,11 +2716,12 @@ fn the_interface_states_whether_the_function_writes_textures() {
 }
 
 /// A render pipeline whose fragment function reads `[[sample_id]]` and `[[point_coord]]`
-/// (`stage_io_fragment_point`) links at one sample and is refused at four, where Vulkan's sample
-/// shading may move the point coordinate to the sample while Metal keeps it at the pixel's.
+/// (`stage_io_fragment_point`) compiles at one sample and at four, where Vulkan's sample shading
+/// may move the point coordinate to the sample while Metal keeps it at the pixel's: there its
+/// fragment module notes `MultisamplePosition`, and at one sample nothing.
 #[test]
-fn a_sample_rate_point_coordinate_is_refused_under_multisampling() {
-    use crate::error::Unsupported;
+fn a_sample_rate_point_coordinate_is_noted_under_multisampling() {
+    use crate::pipeline::artifact::PrecisionNote;
     let Some(bc) = fixture("stage_io") else {
         return;
     };
@@ -2736,16 +2737,24 @@ fn a_sample_rate_point_coordinate_is_refused_under_multisampling() {
     ));
     for stem in ["moltenvk-m3", "lavapipe"] {
         let dev = device(stem);
-        d.raster_sample_count = 1;
-        dev.compile_render_pipeline(&d, &Budget::standard())
-            .unwrap_or_else(|e| panic!("{stem}: {e}"));
-        d.raster_sample_count = 4;
-        assert_eq!(
-            dev.compile_render_pipeline(&d, &Budget::standard())
-                .unwrap_err(),
-            Error::Unsupported(Unsupported::not_implemented(Feature::SampleRateShading)),
-            "{stem}"
-        );
+        for samples in [1, 4] {
+            d.raster_sample_count = samples;
+            let p = dev
+                .compile_render_pipeline(&d, &Budget::standard())
+                .unwrap_or_else(|e| panic!("{stem} at {samples}: {e}"));
+            let fragment = p
+                .stages
+                .iter()
+                .find(|m| m.stage == crate::vk::ShaderStage::FRAGMENT)
+                .expect("fragment stage");
+            assert_eq!(
+                fragment
+                    .precision_notes
+                    .contains(&PrecisionNote::MultisamplePosition),
+                samples == 4,
+                "{stem} at {samples}"
+            );
+        }
     }
 }
 

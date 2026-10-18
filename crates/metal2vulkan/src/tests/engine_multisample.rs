@@ -15,9 +15,10 @@
 //!   the property.
 //! - A function that writes memory, which Metal runs once per covered sample, runs under the
 //!   pipeline's sample shading (`GraphicsState::sample_shading`, needing `sampleRateShading`).
-//! - Link refuses a per-sample function (that one, or one that reads `[[sample_id]]` or a
-//!   sample-qualified varying) beside a read without a pixel form (`[[position]]`'s z and w, a
-//!   centroid varying) as `Unsupported{SampleRateShading, NotImplemented}`.
+//! - A per-sample function (that one, or one that reads `[[sample_id]]` or a sample-qualified
+//!   varying) reads what has no pixel form under sample shading (`[[position]]`'s z and w, a
+//!   centroid varying) where Vulkan evaluates it for its sample, and notes
+//!   `PrecisionNote::MultisamplePosition`, as Metal accepts it.
 //! - At one sample every function compiles as without multisampling.
 //! - A pixel-rate function of a multisampled pipeline that reads a value Vulkan evaluates at an
 //!   implementation-defined position (`[[position]]`'s z, a centroid varying) notes
@@ -60,6 +61,8 @@ const DEPTH: &str = "multisample_depth_at_sample";
 const SAMPLED: &str = "multisample_sampled_varying";
 const CENTROID: &str = "multisample_centroid_at_sample";
 const COUNTER: &str = "multisample_counter";
+const FETCH_VERTEX: &str = "multisample_fetch_vertex";
+const FETCH_DEPTH: &str = "multisample_fetch_depth";
 
 /// `GLSL.std.450` instruction numbers.
 const FLOOR: u32 = 8;
@@ -104,12 +107,22 @@ fn stems() -> Vec<String> {
 /// The render pipeline of `multisample_vertex` and `fragment` over one `RGBA16Float`
 /// attachment at `samples`.
 fn render(lib: &Library, fragment: &str, samples: u32) -> RenderPipelineDescriptor {
+    render_after(lib, VERTEX, fragment, samples)
+}
+
+/// The render pipeline of `vertex` and `fragment` over one `RGBA16Float` attachment at `samples`.
+fn render_after(
+    lib: &Library,
+    vertex: &str,
+    fragment: &str,
+    samples: u32,
+) -> RenderPipelineDescriptor {
     let stage = |name: &str| {
         StageSource::Function(FunctionDescriptor::new(
             lib.function(name).expect("function"),
         ))
     };
-    let mut d = RenderPipelineDescriptor::new(stage(VERTEX));
+    let mut d = RenderPipelineDescriptor::new(stage(vertex));
     d.fragment = Some(stage(fragment));
     d.color_attachments[0] = Some(ColorAttachmentDescriptor::new(PixelFormat::RGBA16Float));
     d.raster_sample_count = samples;
@@ -185,8 +198,14 @@ fn validate(p: &RenderPipeline, dev: &Device, what: &str) {
     }
 }
 
-fn not_implemented() -> Error {
-    Unsupported::not_implemented(Feature::SampleRateShading).into()
+/// Whether the fragment module of `p` notes `MultisamplePosition`.
+fn noted(p: &RenderPipeline) -> bool {
+    p.stages
+        .iter()
+        .find(|m| m.stage == crate::vk::ShaderStage::FRAGMENT)
+        .expect("fragment stage")
+        .precision_notes
+        .contains(&PrecisionNote::MultisamplePosition)
 }
 
 /// The refusal of a per-sample function's center varying on a device that lacks `needs`.
@@ -247,11 +266,14 @@ fn reads_center_at_pixel(dev: &Device) -> bool {
 /// per-sample center varying compiles on every profile with `sampleRateShading`: through
 /// `InterpolateAtOffset` at offset 0 where that reads from the center, and as it is on the
 /// MoltenVK captures ([`MOLTENVK_CAPTURES`]), whose `InterpolateAtOffset` reads off the center
-/// and whose driver reads the varying at the pixel center itself.
+/// and whose driver reads the varying at the pixel center itself. A per-sample `[[position]]` z
+/// and w, or centroid varying, compiles on every profile with `sampleRateShading` too, noting
+/// `MultisamplePosition`.
 #[test]
 fn multisampled_fragments_read_the_pixel_center_or_are_refused() {
     let Some(lib) = fixture() else { return };
     let mut checked = 0usize;
+    let mut unformed = 0usize;
     let mut biased = Vec::new();
     let mut by_device_profiles = Vec::new();
     for stem in stems() {
@@ -358,7 +380,23 @@ fn multisampled_fragments_read_the_pixel_center_or_are_refused() {
                     );
                     checked += 1;
                 }
-                (DEPTH | CENTROID, Err(e)) => assert_eq!(e, not_implemented(), "{what}"),
+                // Metal accepts a per-sample function beside a read without a pixel form: it
+                // reads where Vulkan evaluates it for the sample, which the module notes.
+                (DEPTH | CENTROID, Ok(p)) => {
+                    validate(&p, &dev, &what);
+                    assert!(noted(&p), "{what}");
+                    let ext = ext_insts(fragment_words(&p));
+                    assert!(!ext.contains(&INTERPOLATE_AT_OFFSET), "{what}: {ext:?}");
+                    // `[[sample_id]]` turns sample shading on itself; the pipeline does not.
+                    assert!(!p.graphics.sample_shading, "{what}");
+                    assert!(
+                        p.requirements
+                            .features
+                            .contains(&VkFeature::SampleRateShading),
+                        "{what}"
+                    );
+                    unformed += 1;
+                }
                 (COUNTER, Err(e)) => assert_eq!(
                     e,
                     Unsupported::needs(
@@ -375,6 +413,10 @@ fn multisampled_fragments_read_the_pixel_center_or_are_refused() {
     assert!(
         checked > 0,
         "no profile compiled a multisampled pixel-center read"
+    );
+    assert!(
+        unformed > 0,
+        "no profile compiled a per-sample read without a pixel form"
     );
     assert_eq!(biased, MOLTENVK_CAPTURES);
     assert_eq!(by_device_profiles, MOLTENVK_CAPTURES);
@@ -485,14 +527,6 @@ fn a_pixel_rate_read_at_an_unstated_position_is_noted() {
     let Some(stage_io) = library("stage_io") else {
         return;
     };
-    let noted = |p: &RenderPipeline| {
-        p.stages
-            .iter()
-            .find(|m| m.stage == crate::vk::ShaderStage::FRAGMENT)
-            .expect("fragment stage")
-            .precision_notes
-            .contains(&PrecisionNote::MultisamplePosition)
-    };
     for stem in ["moltenvk-m3", "amd-780m-radv"] {
         let dev = Device::new(description(stem), DevicePolicy::default()).expect("device");
         for samples in [1, 4] {
@@ -513,6 +547,50 @@ fn a_pixel_rate_read_at_an_unstated_position_is_noted() {
                 .unwrap_or_else(|e| panic!("{stem} {fragment}: {e}"));
             assert!(!noted(&p), "{stem} {fragment}");
         }
+    }
+}
+
+/// Programmable blending beside `[[position]]`'s w (`multisample_fetch_depth` after
+/// `multisample_fetch_vertex`, the owned fixture `engine/multisample_fetch`), the shape of a
+/// browser compositor's blend: Metal runs a function that reads a color attachment once per
+/// covered sample and reads `[[position]]` as the pixel's in each run. At four samples it compiles
+/// on every committed profile with a form of the fetch at sample rate, its per-sample fetch
+/// reading `[[sample_id]]` beside `[[position]]`'s w, which reads where Vulkan evaluates it and
+/// notes `MultisamplePosition`; a profile without such a form refuses it for the fetch, never for
+/// the read.
+#[test]
+fn programmable_blending_beside_position_w_compiles_noted() {
+    let Some(lib) = library("multisample_fetch") else {
+        return;
+    };
+    let mut compiled = Vec::new();
+    for stem in stems() {
+        let dev = Device::new(description(&stem), DevicePolicy::default()).expect("device");
+        let what = format!("{stem} {FETCH_DEPTH}");
+        let d = render_after(&lib, FETCH_VERTEX, FETCH_DEPTH, 4);
+        match dev.compile_render_pipeline(&d, &Budget::standard()) {
+            Ok(p) => {
+                validate(&p, &dev, &what);
+                assert!(noted(&p), "{what}");
+                assert!(p.graphics.reads_position_depth, "{what}");
+                compiled.push(stem);
+            }
+            Err(Error::Unsupported(u)) => assert!(
+                matches!(
+                    u.feature,
+                    Feature::FramebufferFetch | Feature::RasterSampleCount
+                ),
+                "{what}: {u:?}"
+            ),
+            Err(e) => panic!("{what}: {e:?}"),
+        }
+    }
+    for stem in [
+        "amd-780m-radv",
+        "intel-uhd770-rpls-anv",
+        "nvidia-rtx5080-laptop",
+    ] {
+        assert!(compiled.iter().any(|s| s == stem), "{stem}: {compiled:?}");
     }
 }
 
