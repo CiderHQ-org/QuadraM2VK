@@ -14,7 +14,7 @@ use crate::metal;
 use crate::pipeline::artifact::RuntimeDependency;
 use crate::pipeline::facts::{Mechanism, RuntimeFact, UniformViewChoice};
 use crate::pipeline::interface::SlotInterface;
-use crate::pipeline::interface::{AccessSet, BufferForm, BufferSlot, DescriptorView, Window};
+use crate::pipeline::interface::{AccessSet, BufferForm, BufferSlot, Window};
 use crate::pipeline::layout::{BindingSource, PipelineLayout};
 use crate::pipeline::sym::{
     PushField, SampledType, SlotClass, SlotRef, SnapshotForm, SpecKey, Stage,
@@ -89,14 +89,6 @@ impl BoundKind {
     }
 }
 
-/// Whether a buffer form reads through a uniform-buffer view.
-pub(crate) fn uniform(form: BufferForm) -> bool {
-    matches!(
-        form,
-        BufferForm::Descriptor(DescriptorView::UniformWords | DescriptorView::UniformVec4)
-    )
-}
-
 /// The plan of buffer slot `slot` with interface `b` and what the shape binds there: its descriptor
 /// binding (descriptor forms), the view's descriptor base alignment and range limit, and a
 /// `MissingDeviceAddress` refusal for a device-address slot bound without an address. The base
@@ -110,7 +102,7 @@ pub(crate) fn plan_buffer(
     bindings: &BTreeMap<BindingSource, (u32, u32)>,
 ) -> Result<PlannedBuffer, BindError> {
     let bound = BoundKind::of(shape);
-    let (min_offset, max_range) = if uniform(b.form) {
+    let (min_offset, max_range) = if b.form.uniform_view() {
         (
             limits.min_uniform_buffer_offset_alignment,
             u64::from(limits.max_uniform_buffer_range),
@@ -156,6 +148,30 @@ pub(crate) fn plan_buffer(
     })
 }
 
+/// The `SpecKey::RangeAtBindOffset` of buffer slot `b`, bound as `shape` states: whether the
+/// descriptor range starts at its bind offset (`instantiate::starts_at_bind`, under the view's
+/// descriptor base alignment, as [`plan_buffer`] takes it): inline bytes, at offset 0 of the
+/// consumer's aligned upload; a buffer, at an offset whose alignment class
+/// (`BufferShape::Buffer::offset_alignment`: `BindState::view_base_alignment` where the runtime
+/// tells it apart at the slot and it divides the offset, else a power of two up to 4) the base
+pub(crate) fn range_at_bind_offset(
+    b: &BufferSlot,
+    shape: Option<&BufferShape>,
+    limits: &Limits,
+) -> bool {
+    let min = match b.form.uniform_view() {
+        true => limits.min_uniform_buffer_offset_alignment,
+        false => limits.min_storage_buffer_offset_alignment,
+    };
+    let offset = match shape {
+        Some(&BufferShape::Buffer {
+            offset_alignment, ..
+        }) => u64::from(offset_alignment),
+    };
+    let alignment = crate::memory::views::base_alignment(min);
+    crate::bind::instantiate::starts_at_bind(offset, b.window, alignment)
+}
+
 /// The value of `key` for a draw or dispatch of `shape`, whose resources `resources` plans, where
 /// the bound resources decide it: a slot's presence, a bound sampler's words, a bound texture's
 /// class, swizzle, sparseness and view axes. It is what a specialization constant of `key` is set
@@ -183,6 +199,14 @@ pub(crate) fn bound_value(
         SpecKey::SparseTexture(slot) => sparse_texture(shape, slot),
         SpecKey::ConstantLanes(slot) => constant_lanes(shape, slot),
         SpecKey::OffsetBaseAxes(slot) => offset_base_axes(shape, slot),
+        SpecKey::RangeAtBindOffset(slot) => match resources.slots.get(&slot) {
+            Some(SlotInterface::Buffer(b)) => u64::from(range_at_bind_offset(
+                b,
+                bound_buffer(shape, slot),
+                &resources.profile.fields().limits,
+            )),
+            _ => 0,
+        },
         _ => return Ok(None),
     }))
 }
@@ -506,6 +530,14 @@ pub(crate) fn anisotropic_variant(
 }
 
 /// The texture `shape` binds at `slot`.
+/// What `shape` binds at buffer `slot`.
+fn bound_buffer(shape: &BindShape, slot: SlotRef) -> Option<&BufferShape> {
+    shape
+        .stages
+        .get(&slot.stage)
+        .and_then(|s| s.buffers.get(&slot.index))
+}
+
 fn bound_texture(shape: &BindShape, slot: SlotRef) -> Option<&TextureShape> {
     shape
         .stages
@@ -697,7 +729,7 @@ pub(crate) fn buffer_use(b: &PlannedBuffer, stages: vk::PipelineStageFlags2) -> 
     ResourceUse {
         resource: UseTarget::Slot(b.slot),
         access: b.access,
-        class: if uniform(b.form) {
+        class: if b.form.uniform_view() {
             AccessClass::Uniform
         } else {
             AccessClass::Storage

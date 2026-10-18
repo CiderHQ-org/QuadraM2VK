@@ -9,6 +9,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::bind::ResidentRange;
+use crate::device::profile::Limits;
 use crate::metal;
 use crate::pipeline::artifact::RuntimeDependency;
 use crate::pipeline::facts::RuntimeFact;
@@ -115,6 +116,15 @@ pub struct BindState {
     /// [`BindingPlan::heap_elements`]: crate::bind::BindingPlan::heap_elements
     #[cfg_attr(feature = "serde", serde(default))]
     pub heap_placement: HeapPlacement,
+    /// The descriptor base alignment of the device's uniform views
+    /// ([`view_base_alignment_of`](Self::view_base_alignment_of)), which the runtime sets: the one
+    /// alignment above the vertex fetch's that the bind offset class of a buffer at a slot of
+    /// [`StageTable::at_bind_views`] tells apart, as a uniform view's range starts at its bind
+    /// offset only at a multiple of it (`SpecKey::RangeAtBindOffset`). 0, the
+    /// default, tells none apart: every view is then read at its residual, exact on every device,
+    /// as it is under any other value the plan does not find its own.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub view_base_alignment: u32,
     /// The render encoder's viewport count (`setViewports:count:`): a vertex function's
     /// `[[viewport_array_index]]` at or past it draws through viewport 0, as Metal's does
     /// (`PushField::ViewportCount`). Metal's default is one viewport; 0, the default here, and 1
@@ -634,9 +644,21 @@ impl TessellationFactorBuffer {
 }
 
 impl BindState {
+    /// The [`view_base_alignment`](Self::view_base_alignment) of a device of `limits`: the larger
+    /// of its `minUniformBufferOffsetAlignment` and 16, the descriptor base alignment of a Metal
+    /// buffer slot's uniform view; 0 (none told apart) past `u32`.
+    pub fn view_base_alignment_of(limits: &Limits) -> u32 {
+        let alignment =
+            crate::memory::views::base_alignment(limits.min_uniform_buffer_offset_alignment);
+        u32::try_from(alignment).unwrap_or(0)
+    }
+
     /// The projection of this state that can change a plan: per stage, which slots are bound and
     /// with what kind of resource, whether a buffer has a device address, its per-bind stride, its
-    /// length class and bind-offset alignment class, texture types and formats, sampler modes,
+    /// length class and bind-offset alignment class (the largest power of two up to 4 that
+    /// divides the offset, or [`view_base_alignment`](Self::view_base_alignment) where that
+    /// divides it at a slot of [`StageTable::at_bind_views`]), texture types and formats, sampler
+    /// modes,
     /// threadgroup lengths, the vertex amplification, the render target array length, whether a
     /// tessellation factor buffer is set, a tile dispatch's render area, the argument samplers'
     /// capacity class and shapes ([`ArgumentSamplersShape::of`]), and the tile threadgroup memory
@@ -647,7 +669,7 @@ impl BindState {
         let stages = self
             .stages
             .iter()
-            .map(|(stage, t)| (*stage, t.shape()))
+            .map(|(stage, t)| (*stage, t.shape(self.view_base_alignment)))
             .filter(|(_, s)| *s != StageShape::default())
             .collect();
         BindShape {
@@ -732,7 +754,9 @@ impl BindState {
         tables.clone().count() == stages.len()
             && tables
                 .zip(stages)
-                .all(|((stage, t), (of, s))| stage == of && t.has_shape(s))
+                .all(|((stage, t), (of, s))| {
+                    stage == of && t.has_shape(s, self.view_base_alignment)
+                })
             && self.vertex_amplification == *vertex_amplification
             && self.imageblock_size == *imageblock_size
             && self.render_target_array_length == *render_target_array_length
@@ -952,10 +976,15 @@ impl ViewMapping {
 }
 
 impl StageTable {
-    /// The shape of this stage's tables ([`BindState::shape`]).
-    pub fn shape(&self) -> StageShape {
+    /// The shape of this stage's tables ([`BindState::shape`]), the bind offsets of its buffers at
+    /// [`at_bind_views`](Self::at_bind_views) classed under the uniform views' base alignment
+    /// `view_base_alignment` ([`BindState::view_base_alignment`]).
+    pub fn shape(&self, view_base_alignment: u32) -> StageShape {
+        let buffer = |(i, b): (&u32, &BoundBuffer)| {
+            (*i, b.shape(self.class_alignment(*i, view_base_alignment)))
+        };
         StageShape {
-            buffers: self.buffers.iter().map(|(i, b)| (*i, b.shape())).collect(),
+            buffers: self.buffers.iter().map(buffer).collect(),
             textures: self.textures.iter().map(|(i, t)| (*i, t.shape())).collect(),
             samplers: self.samplers.iter().map(|(i, s)| (*i, s.shape())).collect(),
             threadgroup_lengths: self.threadgroup_lengths.clone(),
@@ -970,15 +999,17 @@ impl StageTable {
             && self.threadgroup_lengths.is_empty()
     }
 
-    /// Whether `shape` is its shape ([`BindState::has_shape`]).
-    fn has_shape(&self, shape: &StageShape) -> bool {
+    /// Whether `shape` is its shape ([`BindState::has_shape`]), under the uniform views' base
+    /// alignment `view_base_alignment`.
+    fn has_shape(&self, shape: &StageShape, view_base_alignment: u32) -> bool {
         let StageShape {
             buffers,
             textures,
             samplers,
             threadgroup_lengths,
         } = shape;
-        let buffer_shapes = self.buffers.iter().map(|(i, b)| (*i, b.shape()));
+        let buffer_shapes = (self.buffers.iter())
+            .map(|(i, b)| (*i, b.shape(self.class_alignment(*i, view_base_alignment))));
         let texture_shapes = self.textures.iter().map(|(i, t)| (*i, t.shape()));
         let sampler_shapes = self.samplers.iter().map(|(i, s)| (*i, s.shape()));
         buffer_shapes.eq(buffers.iter().map(|(i, b)| (*i, *b)))
@@ -986,11 +1017,24 @@ impl StageTable {
             && sampler_shapes.eq(samplers.iter().map(|(i, s)| (*i, *s)))
             && self.threadgroup_lengths == *threadgroup_lengths
     }
+
+    /// The alignment above the vertex fetch's that the bind offset class of a buffer at index
+    /// `index` tells apart ([`BoundBuffer::shape`]): `view_base_alignment` at a slot of
+    /// [`at_bind_views`](Self::at_bind_views), else 0 (none).
+    pub fn class_alignment(&self, index: u32, view_base_alignment: u32) -> u32 {
+        let viewed = index < u64::BITS && (self.at_bind_views >> index) & 1 == 1;
+        if viewed {
+            view_base_alignment
+        } else {
+            0
+        }
+    }
 }
 
 impl BoundBuffer {
-    /// The shape of this binding.
-    pub fn shape(&self) -> BufferShape {
+    /// The shape of this binding, its bind offset classed under the uniform views' base alignment
+    /// `view_base_alignment` (`BufferShape::Buffer`'s `offset_alignment`).
+    pub fn shape(&self, view_base_alignment: u32) -> BufferShape {
         match *self {
             BoundBuffer::Buffer {
                 length,
@@ -1002,7 +1046,7 @@ impl BoundBuffer {
                 attribute_stride,
                 device_address: device_address.is_some(),
                 length_class: length_class(length),
-                offset_alignment: offset_alignment(offset),
+                offset_alignment: offset_alignment(offset, view_base_alignment),
             },
             BoundBuffer::Bytes {
                 attribute_stride, ..
@@ -1011,14 +1055,23 @@ impl BoundBuffer {
     }
 }
 
-/// The largest power of two up to [`MAX_VERTEX_ALIGNMENT`](metal::vertex::MAX_VERTEX_ALIGNMENT)
-/// that divides `offset`: whether fixed-function vertex input can fetch every attribute format
-/// at a buffer bound at `offset`. Capped there, so offsets differing only above it share a shape.
-pub fn offset_alignment(offset: u64) -> u32 {
-    let max = metal::vertex::MAX_VERTEX_ALIGNMENT;
-    let divides = |a: u32| offset.is_multiple_of(u64::from(a));
-    let mut a = max;
-    while a > 1 && !divides(a) {
+/// The alignment class of bind offset `offset` (a buffer's,
+/// [`BufferShape::Buffer::offset_alignment`]): `view_base_alignment` where that divides it (the
+/// uniform views' descriptor base alignment, [`BindState::view_base_alignment`]: a view's range
+/// then starts at the offset, `SpecKey::RangeAtBindOffset`), else the largest power of two up to
+/// [`MAX_VERTEX_ALIGNMENT`](metal::vertex::MAX_VERTEX_ALIGNMENT) that divides it (whether
+/// fixed-function vertex input can fetch every attribute format at a buffer bound there). These
+/// are the only predicates a plan reads of a bind offset, so offsets moving between multiples of
+/// 4 that the base alignment does not divide, or between those it divides, keep one shape; a
+/// `view_base_alignment` of 4 or less (0, the default) tells only the vertex fetch's apart.
+pub fn offset_alignment(offset: u64, view_base_alignment: u32) -> u32 {
+    if view_base_alignment > metal::vertex::MAX_VERTEX_ALIGNMENT
+        && offset.is_multiple_of(u64::from(view_base_alignment))
+    {
+        return view_base_alignment;
+    }
+    let mut a = metal::vertex::MAX_VERTEX_ALIGNMENT;
+    while a > 1 && !offset.is_multiple_of(u64::from(a)) {
         a /= 2;
     }
     a
@@ -1138,6 +1191,15 @@ pub struct StageTable {
     /// shape.
     #[cfg_attr(feature = "serde", serde(default))]
     pub acceleration_structures: BTreeMap<u32, BoundAccelerationStructure>,
+    /// The buffer slots (bit `i` for index `i`) whose bind offset class tells
+    /// [`BindState::view_base_alignment`] apart, which the runtime sets: the
+    /// slots its function reads through a uniform view, whose range a plan starts at the bind
+    /// offset where that alignment divides it (`SpecKey::RangeAtBindOffset`). No plan reads that
+    /// predicate of another slot, so its offsets moving among multiples of 4 keep one shape. A slot
+    /// left out (none, the default) reads its view at its residual, exact at every offset: a
+    /// runtime leaves out a slot it finds bound at moving offsets, so that its draws keep one shape.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub at_bind_views: u64,
 }
 
 /// What the consumer knows of a Metal acceleration structure bound at a buffer slot.
@@ -1820,7 +1882,10 @@ pub enum BufferShape {
         device_address: bool,
         /// The length class of the allocation, as [`BindState::shape`] computes it.
         length_class: u8,
-        /// The alignment class of the bind offset, as [`BindState::shape`] computes it.
+        /// The alignment class of the bind offset, as [`BindState::shape`] computes it: the
+        /// uniform views' base alignment ([`BindState::view_base_alignment`]) where the slot
+        /// tells it apart ([`StageTable::at_bind_views`]) and it divides the offset, else the
+        /// largest power of two up to 4 that divides it.
         offset_alignment: u32,
     },
     /// Inline bytes (`set*Bytes`).

@@ -33,6 +33,8 @@ pub(crate) struct Counters {
     pipelines_pooled: AtomicU64,
     shader_modules_made: AtomicU64,
     shader_modules_shared: AtomicU64,
+    pipeline_layouts_made: AtomicU64,
+    pipeline_layouts_shared: AtomicU64,
     variant_pipelines_made: AtomicU64,
     flights_followed: AtomicU64,
     variants_taken_back: AtomicU64,
@@ -129,6 +131,12 @@ pub(crate) struct Counters {
     color_group_twins: AtomicU64,
     color_group_draws_skipped: AtomicU64,
     draw_states_recorded: AtomicU64,
+    draws_pushing_set_zero: AtomicU64,
+    set_zero_writes_pushed: AtomicU64,
+    set_zero_equal_shape_switches: AtomicU64,
+    set_zero_writes_on_equal_shape_switches: AtomicU64,
+    set_zero_writes_if_shapes_shared: AtomicU64,
+    dispatches_pushing_set_zero: AtomicU64,
     host_deallocators_delayed: AtomicU64,
     host_keep_alives_kept: AtomicU64,
     host_keep_alives_covered: AtomicU64,
@@ -362,6 +370,18 @@ impl Counters {
     /// (`pipeline/objects.rs`).
     pub(crate) fn shader_module_shared(&self) {
         self.shader_modules_shared.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A pipeline state's variant made a `VkPipelineLayout` and its set layouts
+    /// (`pipeline/shared_layouts.rs`).
+    pub(crate) fn pipeline_layout_made(&self) {
+        self.pipeline_layouts_made.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A pipeline state's variant took the device's `VkPipelineLayout` of its layout's definition
+    /// (`pipeline/shared_layouts.rs`).
+    pub(crate) fn pipeline_layout_shared(&self) {
+        self.pipeline_layouts_shared.fetch_add(1, Ordering::Relaxed);
     }
 
     /// A pipeline state's variant made a `VkPipeline` (`pipeline/objects.rs`,
@@ -827,6 +847,44 @@ impl Counters {
         }
     }
 
+    /// A draw recorded with its set 0 pushed (`pipeline::objects::pushes_set_zero`).
+    pub(crate) fn draw_pushing_set_zero(&self) {
+        self.draws_pushing_set_zero.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A dispatch encoded with its set 0 pushed (`pipeline::objects::pushes_set_zero`).
+    pub(crate) fn dispatch_pushing_set_zero(&self) {
+        self.dispatches_pushing_set_zero
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Draws' pushes of their set 0 carried `count` writes (`render/bound.rs`).
+    pub(crate) fn set_zero_writes_pushed(&self, count: u64) {
+        if count > 0 {
+            self.set_zero_writes_pushed
+                .fetch_add(count, Ordering::Relaxed);
+        }
+    }
+
+    /// `switches` draws' pushes carried their set 0 whole with another layout of the shape set 0
+    /// was last pushed with: `carried` writes, where `if_shared` would do if the layouts were one
+    /// (`render/bound.rs`).
+    pub(crate) fn set_zero_equal_shape_switches(
+        &self,
+        switches: u64,
+        carried: u64,
+        if_shared: u64,
+    ) {
+        if switches > 0 {
+            self.set_zero_equal_shape_switches
+                .fetch_add(switches, Ordering::Relaxed);
+            self.set_zero_writes_on_equal_shape_switches
+                .fetch_add(carried, Ordering::Relaxed);
+            self.set_zero_writes_if_shapes_shared
+                .fetch_add(if_shared, Ordering::Relaxed);
+        }
+    }
+
     /// A no-copy buffer's deallocator waits past its release: given no keep-alive, for the import
     /// of its pages, which something else still holds, or for the batches in flight as that
     /// import's memory is freed (`freed_memory.rs`); or for a live buffers' table that lists its
@@ -1264,6 +1322,13 @@ pub struct WorkCounts {
     /// Variants' stages that took the device's `VkShaderModule` of their SPIR-V, made before by
     /// another variant or state.
     pub shader_modules_shared: u64,
+    /// `VkPipelineLayout`s, each with its set layouts, pipeline states' variants made: none for a
+    /// state made again whose released variant's objects were kept (`pipeline/kept.rs`).
+    pub pipeline_layouts_made: u64,
+    /// Variants that took the device's `VkPipelineLayout` of their layout's exact definition, made
+    /// before by another variant or state: their draws keep what the draws before them bound and
+    /// pushed with it (`render/bound.rs`).
+    pub pipeline_layouts_shared: u64,
     /// `VkPipeline`s pipeline states' variants made (compute regions and their emulated mesh
     /// stages, indirect-bindable replays, and draws): none for one a released variant kept.
     pub variant_pipelines_made: u64,
@@ -1684,6 +1749,34 @@ pub struct WorkCounts {
     /// states. None for a command that sets what its command buffer already holds from an
     /// earlier draw there.
     pub draw_states_recorded: u64,
+    /// Draws recorded with their set 0 pushed (`vkCmdPushDescriptorSet`) rather than allocated
+    /// from their command buffer's pools, written and bound: those of a render variant whose set 0
+    /// a push descriptor set layout can hold, on a device of Vulkan 1.4 or
+    /// `VK_KHR_push_descriptor`. The same descriptors at the same bindings either way.
+    pub draws_pushing_set_zero: u64,
+    /// The writes those draws' pushes carried: a push carries only the writes that differ from
+    /// what set 0 holds where it holds the same bindings, pushed with the same layout
+    /// (`render/bound.rs`), and none is recorded where none differs.
+    pub set_zero_writes_pushed: u64,
+    /// Of those draws, the ones whose push carried set 0 whole although set 0 held the
+    /// descriptors of another layout of the same shape: equal set-0 layouts (each binding's
+    /// number, type, count, stages, baked sampler and flags) and equal push-constant ranges, which
+    /// Vulkan holds compatible for set 0 where the layouts are identically defined. Variants share
+    /// a layout only where it is identically defined whole (`pipeline/shared_layouts.rs`), so a
+    /// switch between layouts of the same shape that differ in a later set, or bake a host step's
+    /// own samplers, carries set 0 whole (`render/bound.rs`). Measured, not acted on.
+    pub set_zero_equal_shape_switches: u64,
+    /// The writes those pushes carried.
+    pub set_zero_writes_on_equal_shape_switches: u64,
+    /// The writes those pushes would carry if the layouts were one: those that differ from what
+    /// set 0 held, and at least one after a pipeline bind where the driver's pushed descriptors go
+    /// stale across one (`RuntimeDriverDefect::PushedDescriptorsStaleAfterPipelineBinds`).
+    pub set_zero_writes_if_shapes_shared: u64,
+    /// Dispatches encoded with their set 0 pushed (`vkCmdPushDescriptorSet`) at the compute bind
+    /// point rather than allocated from their command buffer's pools, written and bound: those of
+    /// a kernel's variant whose set 0 a push descriptor set layout can hold, on a device of Vulkan
+    /// 1.4 or `VK_KHR_push_descriptor`. Every dispatch pushes all of its set's writes.
+    pub dispatches_pushing_set_zero: u64,
     /// No-copy buffers and heaps released with a deallocator whose deallocator waited past the
     /// release (`host-deallocator-delayed`), counted at each wait: given no keep-alive, for the
     /// import of their pages, which something else held (a command buffer submitted before a
@@ -1941,6 +2034,8 @@ impl Device {
             pipelines_pooled: counters.pipelines_pooled.load(Ordering::Relaxed),
             shader_modules_made: counters.shader_modules_made.load(Ordering::Relaxed),
             shader_modules_shared: counters.shader_modules_shared.load(Ordering::Relaxed),
+            pipeline_layouts_made: counters.pipeline_layouts_made.load(Ordering::Relaxed),
+            pipeline_layouts_shared: counters.pipeline_layouts_shared.load(Ordering::Relaxed),
             variant_pipelines_made: counters.variant_pipelines_made.load(Ordering::Relaxed),
             flights_followed: counters.flights_followed.load(Ordering::Relaxed),
             variants_taken_back: counters.variants_taken_back.load(Ordering::Relaxed),
@@ -2076,6 +2171,17 @@ impl Device {
             color_group_twins: counters.color_group_twins.load(Ordering::Relaxed),
             color_group_draws_skipped: counters.color_group_draws_skipped.load(Ordering::Relaxed),
             draw_states_recorded: counters.draw_states_recorded.load(Ordering::Relaxed),
+            draws_pushing_set_zero: counters.draws_pushing_set_zero.load(Ordering::Relaxed),
+            set_zero_writes_pushed: counters.set_zero_writes_pushed.load(Ordering::Relaxed),
+            set_zero_equal_shape_switches: (counters.set_zero_equal_shape_switches)
+                .load(Ordering::Relaxed),
+            set_zero_writes_on_equal_shape_switches: (counters
+                .set_zero_writes_on_equal_shape_switches)
+                .load(Ordering::Relaxed),
+            set_zero_writes_if_shapes_shared: (counters.set_zero_writes_if_shapes_shared)
+                .load(Ordering::Relaxed),
+            dispatches_pushing_set_zero: (counters.dispatches_pushing_set_zero)
+                .load(Ordering::Relaxed),
             host_deallocators_delayed: counters.host_deallocators_delayed.load(Ordering::Relaxed),
             host_keep_alives_kept: counters.host_keep_alives_kept.load(Ordering::Relaxed),
             host_keep_alives_covered: counters.host_keep_alives_covered.load(Ordering::Relaxed),

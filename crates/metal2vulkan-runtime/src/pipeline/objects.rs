@@ -1,20 +1,24 @@
 //! The Vulkan objects of one compiled variant of a pipeline state: its shader modules (one per
-//! stage), descriptor-set layouts (with their immutable samplers), and pipeline layout, made when
-//! the variant compiles; a `VkPipeline` per region specialization of a compute variant, or per
-//! graphics key of a render variant (`graphics.rs`), made when a command first needs it; a
-//! command's set 0 from its command buffer's pools (`descriptor_arena.rs`); and its hold on the
-//! device's heap set of its set-1 layout (`heap_sets.rs`), taken at its first command.
+//! stage), immutable samplers, descriptor-set layouts and pipeline layout, taken when the variant
+//! compiles; a `VkPipeline` per region specialization of a compute variant, or per graphics key
+//! of a render variant (`graphics.rs`), made when a command first needs it; a command's set 0
+//! from its command buffer's pools (`descriptor_arena.rs`); and its hold on the device's heap set
+//! of its set-1 layout (`heap_sets.rs`), taken at its first command.
 //!
 //! Each object owns its device handle and is destroyed when its last holder drops it: a command
 //! buffer retains what its commands use until it completes. A shader module is the device's,
-//! shared by every variant whose stage has its exact SPIR-V (`content_keyed.rs`), and only the
-//! device's map destroys it: a variant's is a share.
+//! shared by every variant whose stage has its exact SPIR-V (`content_keyed.rs`); so are the
+//! immutable samplers, by their descriptions (`sampler_set`), and the set layouts and pipeline
+//! layout, by their exact definition (`shared_layouts.rs`). Only the device's maps destroy those:
+//! a variant's are shares.
 
 use super::content_keyed::{program_call, ContentKeyed, Owned};
 use super::graphics::Notices;
 use super::kept::{Compiled, Instance, KeptObjects, KeptPipeline, Place};
 use super::libraries::Linked;
+use super::shared_layouts::{settle_layouts, shared_layout, SharedLayout};
 use super::RegionKey;
+use crate::binding::{Info, SetWrite};
 use crate::degradation::{
     tested_slots_of, BoundFormats, BoundNotice, Kinds, Occurrence, TestedFormats,
 };
@@ -78,6 +82,11 @@ impl Owned<DeviceShared> for SamplerSet {
 }
 
 impl SamplerSet {
+    /// Its samplers, one per binding that bakes one, in its layout's order.
+    pub(super) fn samplers(&self) -> &[vk::Sampler] {
+        &self.samplers
+    }
+
     /// Destroy its samplers, giving their count back: the set's destruction, or a set whose
     /// creation failed part way (never made, so never counted destroyed).
     fn release(&self, shared: &DeviceShared) {
@@ -335,10 +344,19 @@ pub(crate) struct VariantObjects {
     /// The stages' modules, in the pipeline's stage order.
     pub(super) stages: Vec<StageObject>,
     samplers: Arc<SamplerSet>,
-    set_layouts: Vec<vk::DescriptorSetLayout>,
-    layout: vk::PipelineLayout,
+    /// Its set layouts and pipeline layout: the device's of their definition
+    /// (`shared_layouts.rs`).
+    layout: Arc<SharedLayout>,
     /// What one set of each layout set takes from a pool, by set number.
     set_needs: Vec<SetNeeds>,
+    /// Whether its draws push set 0 rather than allocate it (`pushes_set_zero`).
+    push_set_zero: bool,
+    /// The shape of its set 0 and push-constant ranges ([`set_zero_shape`]), which a draw's
+    /// record compares with the last push's (`render/bound.rs`).
+    set_zero_shape: u64,
+    /// Where they do, a write of each element of each set-0 sampler binding that bakes its sampler
+    /// (`immutable_pushes`), pushed with every draw's writes.
+    immutable_pushes: Vec<SetWrite>,
     /// The stages with notes a specialization decides, announced as each `VkPipeline` of the
     /// variant is made (`Device::degrade_specialized`).
     pub(super) specialized: Vec<StageModule>,
@@ -414,23 +432,20 @@ impl Drop for VariantObjects {
         let Some(_busy) = exit_guard::enter() else {
             return;
         };
-        // A kept instance's objects go to the device's kept variants, whose eviction or the
-        // device's teardown destroys them.
-        let shared = self.device.shared();
+        // A kept instance's objects go to the device's kept variants. The objects own no Vulkan
+        // object of their own: their shares of the device's modules, layouts and samplers go
+        // with them, and only the device's maps destroy those (`content_keyed.rs`).
+        let Some(instance) = self.keep else {
+            return;
+        };
         let objects = KeptObjects {
             stages: self.stages.clone(),
             samplers: Arc::clone(&self.samplers),
-            set_layouts: self.set_layouts.clone(),
-            layout: self.layout,
+            layout: Arc::clone(&self.layout),
             content: self.content,
             words: Arc::clone(&self.words),
         };
-        match self.keep {
-            Some(instance) => lock(&shared.kept).objects_released(instance, objects),
-            // No pending command uses the objects (a command buffer retains them until it
-            // completes).
-            None => objects.destroy(shared),
-        }
+        lock(&self.device.shared().kept).objects_released(instance, objects);
     }
 }
 
@@ -519,11 +534,7 @@ impl VariantObjects {
         stages: &[StageModule],
         render: Option<&RenderPipeline>,
     ) -> Result<VariantObjects, Error> {
-        let set_needs = layout
-            .sets
-            .iter()
-            .map(set_needs)
-            .collect::<Result<_, _>>()?;
+        let set_needs = needs_of(layout, push_set_zero)?;
         // One sampler per binding that bakes one, in the layout's order: the live set of the same
         // samplers where it holds one, else one made now (`sampler_set`).
         let descs: Vec<metal2vulkan::vk::SamplerDesc> = layout
@@ -542,13 +553,16 @@ impl VariantObjects {
             .iter()
             .map(|stage| words_digest(&stage.spirv))
             .collect();
+        let shared_layout = shared_layout(device, layout, &samplers, push_set_zero)?;
         let mut objects = VariantObjects {
             device: device.clone(),
             stages: Vec::with_capacity(stages.len()),
             samplers,
-            set_layouts: Vec::new(),
-            layout: vk::PipelineLayout::null(),
+            layout: shared_layout,
             set_needs,
+            push_set_zero,
+            set_zero_shape: set_zero_shape(layout, push_set_zero),
+            immutable_pushes: Vec::new(),
             specialized: stages
                 .iter()
                 .filter(|s| !s.specialized_notes.is_empty())
@@ -564,7 +578,6 @@ impl VariantObjects {
             words: Arc::clone(&words),
             parts_content: OnceLock::new(),
         };
-        let raw = device.shared().vk();
         for (stage, words) in stages.iter().zip(words.iter()) {
             let entry = CString::new(stage.entry_point.as_str())
                 .map_err(|_| internal("an entry point name holds NUL"))?;
@@ -575,42 +588,9 @@ impl VariantObjects {
                 entry,
             });
         }
-        let mut baked = objects.samplers.samplers.iter().copied();
-        for (index, set) in layout.sets.iter().enumerate() {
-            if set.set as usize != index {
-                return Err(internal("a layout set is not at its own index"));
-            }
-            let mut immutable: Vec<Vec<vk::Sampler>> = Vec::with_capacity(set.bindings.len());
-            for binding in &set.bindings {
-                let samplers = match binding.immutable_sampler {
-                    Some(_) => {
-                        let sampler = baked
-                            .next()
-                            .ok_or_else(|| internal("a sampler set shorter than its layout"))?;
-                        vec![sampler; binding.count as usize]
-                    }
-                    None => Vec::new(),
-                };
-                immutable.push(samplers);
-            }
-            let set_layout = create_set_layout(device, set, &immutable)?;
-            objects.set_layouts.push(set_layout);
+        if push_set_zero {
+            objects.immutable_pushes = immutable_pushes(layout, &objects.samplers.samplers)?;
         }
-        let push: Vec<vk::PushConstantRange> = layout
-            .push_constants
-            .iter()
-            .map(|range| {
-                vk::PushConstantRange::default()
-                    .stage_flags(range.stages.into())
-                    .offset(range.offset)
-                    .size(range.size)
-            })
-            .collect();
-        let info = vk::PipelineLayoutCreateInfo::default()
-            .set_layouts(&objects.set_layouts)
-            .push_constant_ranges(&push);
-        // SAFETY: `info` and its arrays are live for the call.
-        objects.layout = unsafe { raw.create_pipeline_layout(&info, None) }.map_err(vulkan)?;
         device.degrade_stages(stages, Occurrence::Made);
         Ok(objects)
     }
@@ -626,17 +606,15 @@ impl VariantObjects {
         stages: &[StageModule],
         render: Option<&RenderPipeline>,
     ) -> Result<(VariantObjects, Vec<(Place, RawPipeline)>), Error> {
-        let set_needs = layout
-            .sets
-            .iter()
-            .map(set_needs)
-            .collect::<Result<_, _>>()?;
+        let set_needs = needs_of(layout, push_set_zero)?;
         let shared = device.shared();
         let back = lock(&shared.kept).take(shared, compiled);
         // The kept variants' queue applied (an evicted instance's modules let go): the device's
         // modules nothing holds now go, in the program's order.
         settle_modules(device);
-        // And the device's sampler sets nothing holds now, the evicted instances' layouts gone.
+        // And the device's pipeline layouts nothing holds now, then the sampler sets nothing
+        // holds now, the evicted instances' layouts gone.
+        settle_layouts(device);
         settle_sampler_sets(device);
         // And the device's graphics pipeline libraries nothing holds now.
         settle_libraries(device);
@@ -647,13 +625,19 @@ impl VariantObjects {
         };
         device.shared().counts.variant_taken_back();
         let instance = back.instance;
+        let immutable_pushes = match push_set_zero {
+            true => immutable_pushes(layout, &back.objects.samplers.samplers)?,
+            false => Vec::new(),
+        };
         let objects = VariantObjects {
             device: device.clone(),
             stages: back.objects.stages,
             samplers: back.objects.samplers,
-            set_layouts: back.objects.set_layouts,
             layout: back.objects.layout,
             set_needs,
+            push_set_zero,
+            set_zero_shape: set_zero_shape(layout, push_set_zero),
+            immutable_pushes,
             specialized: stages
                 .iter()
                 .filter(|s| !s.specialized_notes.is_empty())
@@ -739,23 +723,42 @@ impl VariantObjects {
         device.announce_bound(&notices);
     }
 
-    /// The pipeline layout.
+    /// The pipeline layout: the device's of its definition, which every variant of the same
+    /// definition shares (`shared_layouts.rs`).
     pub(crate) fn layout(&self) -> vk::PipelineLayout {
-        self.layout
+        self.layout.layout()
     }
 
     /// How many sets the layout has.
     pub(crate) fn set_count(&self) -> usize {
-        self.set_layouts.len()
+        self.layout.set_layouts().len()
+    }
+
+    /// Whether its draws push set 0 rather than allocate it (`pushes_set_zero`).
+    pub(crate) fn pushes_set_zero(&self) -> bool {
+        self.push_set_zero
+    }
+
+    /// The shape of its set 0 and push-constant ranges ([`set_zero_shape`]).
+    pub(crate) fn set_zero_shape(&self) -> u64 {
+        self.set_zero_shape
+    }
+
+    /// The writes its draws push for set 0's baked samplers, where they push set 0.
+    pub(crate) fn immutable_pushes(&self) -> &[SetWrite] {
+        &self.immutable_pushes
+    }
+
     }
 
     /// A command's set 0, from its command buffer's pools `arena`; none when the layout has no
-    /// set, or set 0 no descriptor (a pipeline that uses no set needs none bound).
+    /// set, set 0 no descriptor (a pipeline that uses no set needs none bound), or its commands
+    /// push set 0.
     pub(crate) fn set_zero(
         &self,
         arena: &mut DescriptorArena,
     ) -> Result<Option<vk::DescriptorSet>, Error> {
-        match (self.set_layouts.first(), self.set_needs.first()) {
+        match (self.layout.set_layouts().first(), self.set_needs.first()) {
             (Some(&layout), Some(needs)) if !needs.is_empty() => {
                 Ok(Some(arena.allocate(&self.device, layout, needs)?))
             }
@@ -872,7 +875,7 @@ impl VariantObjects {
         let mut flags = vk::PipelineCreateFlags2CreateInfoKHR::default().flags(INDIRECT_BINDABLE);
         let mut info = vk::ComputePipelineCreateInfo::default()
             .stage(stage)
-            .layout(self.layout);
+            .layout(self.layout.layout());
         if bindable {
             info = info.push_next(&mut flags);
         }
@@ -955,7 +958,8 @@ impl VariantObjects {
 pub(crate) fn create_set_layout(
     device: &Device,
     set: &DescriptorSetLayout,
-    immutable: &[Vec<vk::Sampler>],
+    immutable: &[&[vk::Sampler]],
+    push: bool,
 ) -> Result<vk::DescriptorSetLayout, Error> {
     let bindings: Vec<vk::DescriptorSetLayoutBinding<'_>> = set
         .bindings
@@ -977,8 +981,12 @@ pub(crate) fn create_set_layout(
         set.bindings.iter().map(|b| b.flags.into()).collect();
     let mut flags_info =
         vk::DescriptorSetLayoutBindingFlagsCreateInfo::default().binding_flags(&flags);
+    let mut set_flags: vk::DescriptorSetLayoutCreateFlags = set.flags.into();
+    if push {
+        set_flags |= vk::DescriptorSetLayoutCreateFlags::PUSH_DESCRIPTOR_KHR;
+    }
     let mut info = vk::DescriptorSetLayoutCreateInfo::default()
-        .flags(set.flags.into())
+        .flags(set_flags)
         .bindings(&bindings);
     if flags.iter().any(|f| !f.is_empty()) {
         info = info.push_next(&mut flags_info);
@@ -991,6 +999,137 @@ pub(crate) fn create_set_layout(
             .create_descriptor_set_layout(&info, None)
     }
     .map_err(vulkan)
+}
+
+/// The shape of `layout`'s set 0 and push-constant ranges, where its draws push set 0
+/// (`push_set_zero`) or not: a hash of what Vulkan's compatibility for set 0 compares (the set-0
+/// `VkDescriptorSetLayout`'s create info, each binding's number, type, count, stages, baked sampler
+/// and flags and the set's flags, and the push-constant ranges), which two variants of the same
+/// shape would create identically defined, compatible for set 0 (Pipeline Layout
+/// Compatibility). Variants share a layout only where it is identically defined whole
+/// (`shared_layouts.rs`), so a draw's record compares shapes to count the pushes that carry set 0
+/// whole across a switch between two layouts of equal shapes (which differ in a later set, or
+/// bake a host step's own samplers; `WorkCounts::set_zero_equal_shape_switches`). Taken once, as
+/// the variant's objects are made.
+fn set_zero_shape(layout: &PipelineLayout, push_set_zero: bool) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    push_set_zero.hash(&mut hasher);
+    if let Some(set) = layout.sets.first() {
+        set.flags.hash(&mut hasher);
+        for binding in &set.bindings {
+            binding.binding.hash(&mut hasher);
+            binding.ty.hash(&mut hasher);
+            binding.count.hash(&mut hasher);
+            binding.stages.hash(&mut hasher);
+            binding.immutable_sampler.hash(&mut hasher);
+            binding.flags.hash(&mut hasher);
+        }
+    }
+    layout.push_constants.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// What one set of each of `layout`'s sets takes from a pool, by set number: nothing for set 0
+/// where it is pushed (`push_set_zero`).
+fn needs_of(layout: &PipelineLayout, push_set_zero: bool) -> Result<Vec<SetNeeds>, Error> {
+    layout
+        .sets
+        .iter()
+        .enumerate()
+        .map(|(index, set)| match push_set_zero && index == 0 {
+            true => Ok(SetNeeds {
+                counts: Vec::new(),
+                flags: vk::DescriptorPoolCreateFlags::empty(),
+            }),
+            false => set_needs(set),
+        })
+        .collect()
+}
+
+/// The descriptor types a pushed set 0 takes: those a set-0 write (`binding::Info`) carries, but
+/// the dynamic buffers, inline uniform blocks and mutable descriptors a push descriptor set layout
+/// cannot hold (`VkDescriptorSetLayoutCreateInfo`'s valid usage).
+const PUSHED_TYPES: [vk::DescriptorType; 9] = [
+    vk::DescriptorType::SAMPLER,
+    vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+    vk::DescriptorType::SAMPLED_IMAGE,
+    vk::DescriptorType::STORAGE_IMAGE,
+    vk::DescriptorType::UNIFORM_TEXEL_BUFFER,
+    vk::DescriptorType::STORAGE_TEXEL_BUFFER,
+    vk::DescriptorType::UNIFORM_BUFFER,
+    vk::DescriptorType::STORAGE_BUFFER,
+    vk::DescriptorType::INPUT_ATTACHMENT,
+];
+
+/// Whether a variant of `layout` and `stages` pushes its set 0 (`vkCmdPushDescriptorSet`) at
+/// each draw or dispatch, rather than allocating a set from its command buffer's pools, writing it
+/// and binding it: the same descriptors, at the same bindings. Where the device has the push
+/// command (Vulkan 1.4, or `VK_KHR_push_descriptor`, `binding::push_descriptor_command`), the
+/// compiled layout's set 0 fits `maxPushDescriptors` (`push_descriptor_eligible`), takes no set or
+/// binding flag and only descriptor types a push descriptor set layout takes (`PUSHED_TYPES`),
+/// and the variant binds set 0 at one bind point: a render variant of no compute stage at the
+/// graphics bind point, its draws' (`render::Recording`), where one that emulates a mesh or
+/// tessellation stage dispatches with set 0 too; a kernel's variant, of compute stages alone
+fn pushes_set_zero(
+    device: &Device,
+    layout: &PipelineLayout,
+    stages: &[StageModule],
+) -> bool {
+    let compute = |stage: &StageModule| {
+        let flags: vk::ShaderStageFlags = stage.stage.into();
+        flags.contains(vk::ShaderStageFlags::COMPUTE)
+    };
+    };
+    device.shared().push_descriptor.is_some()
+        && layout.push_descriptor_eligible
+        && one_point
+        && layout.sets.first().is_some_and(|set| {
+            let flags: vk::DescriptorSetLayoutCreateFlags = set.flags.into();
+            flags.is_empty()
+                && !set.bindings.is_empty()
+                && set.bindings.iter().all(|binding| {
+                    let flags: vk::DescriptorBindingFlags = binding.flags.into();
+                    flags.is_empty() && PUSHED_TYPES.contains(&binding.ty.into())
+                })
+        })
+}
+
+/// A write of each element of each sampler binding of `layout`'s set 0 that bakes its sampler, of
+/// the sampler `samplers` holds for it (one per binding that bakes one, in the layout's order of
+/// sets and bindings, as `VariantObjects::create` takes them). A pushed set takes them, which a
+/// pool-allocated one holds from its layout. The Vulkan specification, `vkCmdPushDescriptorSet`:
+/// "This includes immutable sampler descriptors, which must be pushed before they are accessed by
+/// a pipeline (the immutable samplers are pushed, rather than the samplers in pDescriptorWrites)."
+/// A combined image sampler binding that bakes its sampler takes the draw's image write, whose
+/// sampler Vulkan ignores there.
+fn immutable_pushes(
+    layout: &PipelineLayout,
+    samplers: &[vk::Sampler],
+) -> Result<Vec<SetWrite>, Error> {
+    let mut baked = samplers.iter().copied();
+    let mut pushes = Vec::new();
+    for (index, set) in layout.sets.iter().enumerate() {
+        for binding in set
+            .bindings
+            .iter()
+            .filter(|b| b.immutable_sampler.is_some())
+        {
+            let sampler = baked
+                .next()
+                .ok_or_else(|| internal("a sampler set shorter than its layout"))?;
+            let ty: vk::DescriptorType = binding.ty.into();
+            if index == 0 && ty == vk::DescriptorType::SAMPLER {
+                pushes.extend((0..binding.count).map(|element| SetWrite {
+                    binding: binding.binding,
+                    element,
+                    ty,
+                    info: Info::Image(vk::DescriptorImageInfo::default().sampler(sampler)),
+                }));
+            }
+        }
+    }
+    Ok(pushes)
 }
 
 /// What a pool that allocates one set of `set` needs: each binding's count summed per

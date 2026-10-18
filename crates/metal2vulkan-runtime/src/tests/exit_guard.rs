@@ -1523,7 +1523,11 @@ fn the_device_s_functions_are_reached_through_checked_accessors() {
 /// tuple field, a type argument or a by-value parameter) fails
 /// `only_the_listed_modules_keep_the_device_s_functions`; so does a listed module that keeps none
 /// any more.
-const KEEPERS: [(&str, &str); 18] = [
+    (
+        "binding.rs",
+        "the push command (vkCmdPushDescriptorSet), a call's parameter (`push_set`) and the \
+         device's lookup of it as it is made (`push_descriptor_command`)",
+    ),
     (
         "device/adopt.rs",
         "the consumer's loader entry, read while the device is adopted",
@@ -1937,6 +1941,7 @@ fn the_priming_check_names_what_was_not_made() {
         device_addresses,
         generated_commands: true,
         sparse_binding: true,
+        push_descriptor: true,
         calibration: true,
         object_names: true,
     };
@@ -2004,6 +2009,16 @@ fn the_priming_check_names_what_was_not_made() {
     };
     assert!(missing(unbound, without).is_empty());
     assert_eq!(missing(unbound, has(true, true)), SPARSE_CALLS);
+    // Without the push command, nor is a host step's push.
+    let unpushed = PUSH_DESCRIPTOR_CALLS
+        .iter()
+        .fold(made, |bits, call| bits & !call.bit());
+    let without = Has {
+        push_descriptor: false,
+        ..has(true, true)
+    };
+    assert!(missing(unpushed, without).is_empty());
+    assert_eq!(missing(unpushed, has(true, true)), PUSH_DESCRIPTOR_CALLS);
     // Without calibrated timestamps, nor is a completion turn's calibration reading.
     let uncalibrated = CALIBRATION_CALLS
         .iter()

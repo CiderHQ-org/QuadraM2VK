@@ -147,6 +147,9 @@ pub(super) struct TileDispatch {
     copied: [[u32; 2]; 2],
     layout: vk::PipelineLayout,
     sets: Vec<vk::DescriptorSet>,
+    /// Set 0's writes, where the variant pushes it (`pipeline::objects::pushes_set_zero`):
+    /// pushed with the device's push command (`Vk::push_descriptor`).
+    pushed: Vec<binding::SetWrite>,
     /// Set 1, the command buffer's heap set of the variant, when the variant has one.
     heap: Option<vk::DescriptorSet>,
     /// Each region's pipeline, push constants and group count.
@@ -211,7 +214,15 @@ impl TileDispatch {
                 );
             }
             Barrier::everything().record(raw, command_buffer);
-            if !self.sets.is_empty() {
+            if let Some(push) = raw.push_descriptor().filter(|_| !self.pushed.is_empty()) {
+                binding::push_set(
+                    push,
+                    command_buffer,
+                    vk::PipelineBindPoint::COMPUTE,
+                    self.layout,
+                    &self.pushed,
+                );
+            } else if !self.sets.is_empty() {
                 raw.cmd_bind_descriptor_sets(
                     command_buffer,
                     vk::PipelineBindPoint::COMPUTE,
@@ -832,10 +843,8 @@ impl RenderCommandEncoder {
         let function_tables = kernel.function_tables();
         // A buffer where the tile function reads a table reads as a null table, and a table
         // where it reads a buffer it does not write as an unbound buffer, as a kernel's and a
-        // drawing stage's do (EV ICR-tilevft2-m4 `buffer`).
-        let stage_table = self
-            .tile
-            .stage_table_reading(Stage::Kernel, kernel.interface());
+        let views = kernel.at_bind_views();
+        let stage_table = (self.tile).stage_table_reading(Stage::Kernel, kernel.interface(), views);
         // Its runtime samplers' address modes as the textures they sample map them.
         let sampler_maps = address_map::sampler_maps(
             kernel.base_layout(),
@@ -848,6 +857,7 @@ impl RenderCommandEncoder {
         let bind_state = |argument_samplers: &[SamplerState]| {
             let mut bind = BindState::default();
             bind.stages.insert(Stage::Kernel, stage_table.clone());
+            bind.view_base_alignment = views.alignment();
             bind.imageblock_size = ImageblockSize::new(tile[0], tile[1]);
             bind.render_area = area;
             // The planner refuses a layered pass's dispatch (`NotImplemented(TileShading)`).
@@ -1137,10 +1147,16 @@ impl RenderCommandEncoder {
         let (heap_writes, writes): (Vec<_>, Vec<_>) =
             writes.into_iter().partition(|write| write.set > 0);
         let set = objects.set_zero(&mut self.core.command_buffer().state().descriptors)?;
-        // SAFETY: the set was just allocated and no command uses it yet; every buffer, view
-        // and sampler written is live (the command buffer retains them below, and a refusal
-        // leaves the set unused in its pool).
-        unsafe { binding::write_sets(&device, set.as_slice(), &writes) }?;
+        let pushed = match objects.pushes_set_zero() {
+            true => binding::SetWrite::pushed(&writes, objects.immutable_pushes()),
+            false => {
+                // SAFETY: the set was just allocated and no command uses it yet; every buffer,
+                // view and sampler written is live (the command buffer retains them below, and a
+                // refusal leaves the set unused in its pool).
+                unsafe { binding::write_sets(&device, set.as_slice(), &writes) }?;
+                Vec::new()
+            }
+        };
         let stages = uses
             .iter()
             .fold(vk::PipelineStageFlags2::empty(), |all, used| {
@@ -1190,6 +1206,7 @@ impl RenderCommandEncoder {
             copied,
             layout: objects.layout(),
             sets: set.into_iter().collect(),
+            pushed,
             heap: heap_set,
             regions,
             shadows,

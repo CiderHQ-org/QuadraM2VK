@@ -34,8 +34,13 @@
 //!   up (`WorkCounts::graphics_pipelines_looked_up`), states and keys switched between included.
 //! - **Recorded states.** A draw records into its secondary command buffer only the state
 //!   commands that set what changed since the draws before it there
-//!   (`WorkCounts::draw_states_recorded`): of an unchanged state, none but its own descriptor set;
+//!   (`WorkCounts::draw_states_recorded`): of an unchanged state, none but its own descriptor set
+//!   (none at all where the device pushes set 0, `WorkCounts::draws_pushing_set_zero`);
 //!   switching pipelines, not the dynamic states both make dynamic.
+//! - **Pushed sets.** Where the device pushes set 0, a draw that changes some of its set's
+//!   descriptors pushes only those (`WorkCounts::set_zero_writes_pushed`). Each test of set 0 runs
+//!   with `VK_KHR_push_descriptor` withheld too, so every device runs the path of one without the
+//!   push command, which binds set 0.
 //! - **Retains.** An argument table that binds the objects its encoder last retained it with is
 //!   not retained again (`WorkCounts::argument_tables_retained`): one whose objects changed is,
 //!   and an object the program let go of after its draw lives until the command buffer
@@ -48,11 +53,14 @@
 //! The pipeline is the owned fixture `tob_renders`'s `tob_rect` (a rectangle of the corners at
 //! vertex buffer 0) and `tob_sample` (texture 0 through sampler 0, where its pixel lies).
 
-use super::degrade_notices::on_device;
-use super::{buffer_with, WAIT};
+use super::degrade_notices::{on_device, on_device_with};
 use crate::air_library::AirLibrary;
+use metal2vulkan::bind::{BindState, SamplerDescriptor};
+use metal2vulkan::device::VkExtension;
+use metal2vulkan::library::{FunctionConstantValue, FunctionConstantValues};
 use metal2vulkan::metal::state::DepthStencilDescriptor;
 use metal2vulkan::metal::{
+    BlendFactor, CompareFunction, DataType, DepthClipMode, PixelFormat, PrimitiveType, TextureUsage,
 };
 use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};
 use metal2vulkan_devtools::{engine_dir, llvm_assemble};
@@ -123,17 +131,23 @@ impl Scene {
         }
     }
 
+    /// A pass into the target, which `load`s it (a clear to [`CLEAR`]) and stores it.
+    fn pass(&self, load: LoadAction) -> RenderPassDescriptor {
+        let mut pass = RenderPassDescriptor::new();
+        let color = &mut pass.color_attachments[0];
+        color.texture = Some(self.target.clone());
+        color.load_action = load;
+        color.store_action = StoreAction::Store;
+        color.clear_color = ClearColor::new(0.0, 0.0, 1.0, 1.0);
+        pass
+    }
+
     /// A render encoder of a new command buffer of `device`'s that clears the target to
     /// [`CLEAR`], its pipeline and sampler set.
     fn encoder(&self, device: &Device) -> (CommandBuffer, RenderCommandEncoder) {
         let queue = device.new_command_queue().unwrap();
         let command_buffer = queue.command_buffer().unwrap();
-        let mut pass = RenderPassDescriptor::new();
-        let color = &mut pass.color_attachments[0];
-        color.texture = Some(self.target.clone());
-        color.load_action = LoadAction::Clear;
-        color.store_action = StoreAction::Store;
-        color.clear_color = ClearColor::new(0.0, 0.0, 1.0, 1.0);
+        let pass = self.pass(LoadAction::Clear);
         let mut encoder = command_buffer.render_command_encoder(&pass).unwrap();
         encoder.set_render_pipeline_state(&self.pipeline).unwrap();
         encoder
@@ -616,10 +630,22 @@ fn a_pass_that_binds_as_the_one_before_works_out_no_view() {
 /// Draws whose vertex buffer slot 0 binds a buffer and inline bytes in turn, a binding of another
 /// class at the slot each draw, a slot's class being of its shape, make and settle each shape
 /// once (the state keeps the settles of its latest shapes, among which a draw finds its shape).
+/// The buffer is bound at 0, 32, 64 and 96, where `tob_rect` reads it through a uniform view: on
+/// a device whose view base alignment (`BindState::view_base_alignment_of`: ANV's 64) does not
+/// divide 32, the slot leaves the slots that tell it apart at the second, a shape of its own,
+/// and reads at its residual from then on, so its draws make and settle three shapes there.
 /// Every column is drawn, from the buffer's corners or the bytes'.
 #[test]
 fn draws_that_change_a_slot_s_class_make_their_shapes_again() {
     on_device(|device, _| {
+        let limits = device.compile_device().profile().limits();
+        let alignment = BindState::view_base_alignment_of(limits);
+        let shapes = if alignment != 0 && 32 % alignment != 0 {
+            3
+        } else {
+            2
+        };
+        eprintln!("view base alignment {alignment}: {shapes} shapes");
         let scene = Scene::new(device);
         let red = solid(device, PixelFormat::RGBA8Unorm, RED);
         let corners: Vec<u8> = (0..SIDE).flat_map(column).collect();
@@ -638,8 +664,8 @@ fn draws_that_change_a_slot_s_class_make_their_shapes_again() {
         }
         let after = device.work_counts();
         encoder.end_encoding().unwrap();
-        assert_eq!(grew(&before, &after, |c| c.draw_shapes_made), 2);
-        assert_eq!(grew(&before, &after, |c| c.draws_settled), 2);
+        assert_eq!(grew(&before, &after, |c| c.draw_shapes_made), shapes);
+        assert_eq!(grew(&before, &after, |c| c.draws_settled), shapes);
         let pixels = scene.pixels(&command_buffer);
         assert!(pixels.iter().all(|&p| p == RED), "{pixels:?}");
         let executions = command_buffer.executions();
@@ -960,16 +986,44 @@ fn make(device: &Device, scene: &Scene, pipelines: &[RenderPipelineState], textu
     }
     encoder.end_encoding().unwrap();
     scene.pixels(&command_buffer);
+
+/// Whether `device` pushes set 0: Vulkan 1.4 or `VK_KHR_push_descriptor` (the instance's Vulkan
+/// 1.2 leaves `VK_KHR_push_descriptor` alone), whose `maxPushDescriptors` the lanes' set 0 fits,
+/// on a driver whose pushed sets keep their buffers' sizes
+/// (`RuntimeDriverDefect::PushedBufferSizesUnset`, MoltenVK's: set 0 is bound there).
+pub(super) fn pushes(device: &Device) -> bool {
+    let unset = metal2vulkan::error::RuntimeDriverDefect::PushedBufferSizesUnset;
+    let profile = device.compile_device().profile();
+    profile.descriptors().push_descriptor && !device.properties().driver_defects.contains(&unset)
+}
+
+/// Run `test` on the device twice: as it is, and with `VK_KHR_push_descriptor` withheld, so a
+/// device of the instance's Vulkan 1.2 has no push command and binds set 0 as a device without
+/// one does.
+pub(super) fn on_device_both_ways(test: impl Fn(&Device)) {
+    on_device(|device, _| test(device));
+    on_device_with(
+        |options| {
+            options
+                .withheld_extensions
+                .insert(VkExtension::KhrPushDescriptor);
+        },
+        |device, _| {
+            assert!(!pushes(device), "withheld, the device pushes");
+            test(device);
+        },
+    );
 }
 
 /// Draws of an unchanged state into one render pass instance record its state commands once:
-/// past the first, a draw records at most its own descriptor set (each draw writes its set 0
-/// anew), so no pipeline, push constant, buffer or dynamic state is set again. The first draw
-/// records them all, and the target is the texture's.
+/// past the first, a draw records at most its own descriptor set (each draw writes an allocated
+/// set 0 anew), so no pipeline, push constant, buffer or dynamic state is set again. Where the
+/// device pushes set 0 ([`pushes`]), every draw pushes it, and past the first a draw records
+/// nothing, its writes the same. The first draw records them all, and the target is the
 #[test]
 fn draws_of_an_unchanged_state_record_its_commands_once() {
     const DRAWS: usize = 16;
-    on_device(|device, _| {
+    on_device_both_ways(|device| {
         let scene = Scene::new(device);
         let red = solid(device, PixelFormat::RGBA8Unorm, RED);
         make(device, &scene, std::slice::from_ref(&scene.pipeline), &red);
@@ -977,15 +1031,76 @@ fn draws_of_an_unchanged_state_record_its_commands_once() {
         let (command_buffer, mut encoder) = scene.encoder(device);
         encoder.set_vertex_bytes(&corners, 0).unwrap();
         encoder.set_fragment_texture(Some(&red), 0).unwrap();
+        let before = device.work_counts();
         let first = recorded_by(device, &mut encoder);
         let later: Vec<u64> = (1..DRAWS)
             .map(|_| recorded_by(device, &mut encoder))
             .collect();
         encoder.end_encoding().unwrap();
+        let pushes = pushes(device);
+        assert_eq!(pushed, if pushes { DRAWS as u64 } else { 0 }, "{pushes}");
+        let most = if pushes { 0 } else { 1 };
         assert!(first > 1, "the first draw recorded {first}");
-        assert!(later.iter().all(|&n| n <= 1), "{first}, then {later:?}");
+        assert!(later.iter().all(|&n| n <= most), "{first}, then {later:?}");
         let pixels = scene.pixels(&command_buffer);
         assert!(pixels.iter().all(|&p| p == RED), "{pixels:?}");
+    });
+}
+
+/// Draws of other inline bytes, one column each, the first half of the columns with one texture
+/// and the second half with the other: where the device pushes set 0, each draw past the first
+/// but the one that switches the texture pushes fewer writes than the first, only those its bytes
+/// changed, and that one at most as many (`WorkCounts::set_zero_writes_pushed`); where it binds
+/// set 0, none pushes. Each column is drawn, in its half's texture, both ways
+/// ([`on_device_both_ways`]).
+#[test]
+fn draws_of_other_bytes_push_only_what_changed() {
+    on_device_both_ways(|device| {
+        let scene = Scene::new(device);
+        let textures = [
+            solid(device, PixelFormat::RGBA8Unorm, RED),
+            solid(device, PixelFormat::RGBA8Unorm, GREEN),
+        ];
+        make(
+            device,
+            &scene,
+            std::slice::from_ref(&scene.pipeline),
+            &textures[0],
+        );
+        let half = SIDE / 2;
+        let (command_buffer, mut encoder) = scene.encoder(device);
+        let pushed: Vec<u64> = (0..SIDE)
+            .map(|c| {
+                encoder.set_vertex_bytes(&column(c), 0).unwrap();
+                if c % half == 0 {
+                    encoder
+                        .set_fragment_texture(Some(&textures[(c / half) as usize]), 0)
+                        .unwrap();
+                }
+                let before = device.work_counts();
+                draw(&mut encoder);
+                grew(&before, &device.work_counts(), |c| c.set_zero_writes_pushed)
+            })
+            .collect();
+        encoder.end_encoding().unwrap();
+        match pushes(device) {
+            true => {
+                let first = pushed[0];
+                assert!(first > 0, "{pushed:?}");
+                for (c, &n) in (1..).zip(&pushed[1..]) {
+                    match c == half {
+                        true => assert!(0 < n && n <= first, "draw {c}: {pushed:?}"),
+                        false => assert!(n < first, "draw {c}: {pushed:?}"),
+                    }
+                }
+            }
+            false => assert!(pushed.iter().all(|&n| n == 0), "{pushed:?}"),
+        }
+        let pixels = scene.pixels(&command_buffer);
+        for (at, &pixel) in pixels.iter().enumerate() {
+            let want = if at as u64 % SIDE < half { RED } else { GREEN };
+            assert_eq!(pixel, want, "pixel {at}: {pixels:?}");
+        }
     });
 }
 
@@ -1016,6 +1131,238 @@ fn draws_switching_pipelines_keep_the_dynamic_states_set() {
         assert!(later.iter().all(|&n| 1 <= n && n < first), "{recorded:?}");
         let pixels = scene.pixels(&command_buffer);
         assert!(pixels.iter().all(|&p| p == RED), "{pixels:?}");
+    });
+}
+
+/// Draws alternating between two pipeline states of the same functions, one blending (its own
+/// pipeline key, so its own variant), whose layouts are defined alike and so are one
+/// (`pipeline/shared_layouts.rs`, `WorkCounts::pipeline_layouts_shared`), each draw the target's
+/// whole rectangle, the texture switched halfway: where the device pushes set 0, each draw pushes
+/// what the same draws of the first state alone push, the writes that changed, and at least one
+/// past the first where the driver's pushed descriptors go stale across a pipeline bind
+/// (`RuntimeDriverDefect::PushedDescriptorsStaleAfterPipelineBinds`). No push counts as a switch
+/// between equal shapes (`WorkCounts::set_zero_equal_shape_switches` and kin), either way. The
+/// target is the second texture's; both ways ([`on_device_both_ways`]).
+#[test]
+fn draws_alternating_states_of_one_layout_push_only_what_changed() {
+    const DRAWS: usize = 8;
+    on_device_both_ways(|device| {
+        let scene = Scene::new(device);
+        let textures = [
+            solid(device, PixelFormat::RGBA8Unorm, RED),
+            solid(device, PixelFormat::RGBA8Unorm, GREEN),
+        ];
+        make(
+            device,
+            &scene,
+            std::slice::from_ref(&scene.pipeline),
+            &textures[0],
+        );
+        let before = device.work_counts();
+        let pipelines = [scene.pipeline.clone(), pipeline(device, true)];
+        make(device, &scene, &pipelines, &textures[0]);
+        let shared = grew(&before, &device.work_counts(), |c| {
+            c.pipeline_layouts_shared
+        });
+        assert!(shared >= 1, "the second state's layout shared: {shared}");
+        let corners = [-1.0f32, -1.0, 1.0, 1.0].map(f32::to_le_bytes).concat();
+        // Each draw's pushed writes, and the three counts' growth, through the first state alone
+        // or both in turn.
+        let run = |alternate: bool| {
+            let (command_buffer, mut encoder) = scene.encoder(device);
+            encoder.set_vertex_bytes(&corners, 0).unwrap();
+            let before = device.work_counts();
+            let pushed: Vec<u64> = (0..DRAWS)
+                .map(|d| {
+                    let state = if alternate { d % 2 } else { 0 };
+                    encoder
+                        .set_render_pipeline_state(&pipelines[state])
+                        .unwrap();
+                    if d % (DRAWS / 2) == 0 {
+                        let texture = &textures[d / (DRAWS / 2)];
+                        encoder.set_fragment_texture(Some(texture), 0).unwrap();
+                    }
+                    let before = device.work_counts();
+                    draw(&mut encoder);
+                    grew(&before, &device.work_counts(), |c| c.set_zero_writes_pushed)
+                })
+                .collect();
+            let after = device.work_counts();
+            encoder.end_encoding().unwrap();
+            let counts = [
+                grew(&before, &after, |c| c.set_zero_equal_shape_switches),
+                grew(&before, &after, |c| {
+                    c.set_zero_writes_on_equal_shape_switches
+                }),
+                grew(&before, &after, |c| c.set_zero_writes_if_shapes_shared),
+            ];
+            let pixels = scene.pixels(&command_buffer);
+            assert!(pixels.iter().all(|&p| p == GREEN), "{pixels:?}");
+            (pushed, counts)
+        };
+        let (alone, alone_counts) = run(false);
+        let (alternating, counts) = run(true);
+        println!(
+            "runtime_lane: set 0 pushed alone {alone:?}, alternating {alternating:?}; equal-shape \
+             switches, writes carried and writes if shared {counts:?}"
+        );
+        assert_eq!(alone_counts, [0; 3], "{alone:?}");
+        assert_eq!(counts, [0; 3], "{alternating:?}");
+        if !pushes(device) {
+            return;
+        }
+        let stale =
+            metal2vulkan::error::RuntimeDriverDefect::PushedDescriptorsStaleAfterPipelineBinds;
+        let at_least = u64::from(device.properties().driver_defects.contains(&stale));
+        assert!(alone[0] > 0, "{alone:?}");
+        let expected: Vec<u64> = (alone.iter().enumerate())
+            .map(|(d, &n)| if d == 0 { n } else { n.max(at_least) })
+            .collect();
+        assert_eq!(alternating, expected, "alone {alone:?}");
+    });
+}
+
+/// A pipeline state of the owned fixture `zwd_shapes`' `zwd_quad` (a shape's box, from its bytes
+/// at buffer 0) and its fragment function `fragment` (the shape's fill times its coverage, from the
+/// same bytes at fragment buffer 0), its constant 0 (`zwd_variant`) 0, into an `RGBA8Unorm` color
+/// attachment, blending premultiplied colors.
+fn shape_pipeline(device: &Device, fragment: &str) -> RenderPipelineState {
+    let ll = engine_dir().join("zwd_shapes.ll");
+    let library = device
+        .new_library_with_air(&llvm_assemble(&ll).unwrap())
+        .unwrap();
+    let constants = FunctionConstantValues::defaults().with_index(
+        0,
+        FunctionConstantValue::new(DataType::UInt, 0u32.to_le_bytes().to_vec()),
+    );
+    let function = |name| {
+        StageSource::Function(
+            library
+                .new_function_with_name_constant_values(name, &constants)
+                .unwrap()
+                .function_descriptor(),
+        )
+    };
+    let mut descriptor = RenderPipelineDescriptor::new(function("zwd_quad"));
+    descriptor.fragment = Some(function(fragment));
+    let mut color = ColorAttachmentDescriptor::new(PixelFormat::RGBA8Unorm);
+    color.blending_enabled = true;
+    color.source_rgb_blend_factor = BlendFactor::One;
+    color.source_alpha_blend_factor = BlendFactor::One;
+    color.destination_rgb_blend_factor = BlendFactor::OneMinusSourceAlpha;
+    color.destination_alpha_blend_factor = BlendFactor::OneMinusSourceAlpha;
+    descriptor.color_attachments[0] = Some(color);
+    device
+        .new_render_pipeline_state(&descriptor, &PipelineOptions::default())
+        .unwrap()
+}
+
+/// The bytes of [`SHAPES`] `ZwdShape`s, one every [`SHAPE_STRIDE`] bytes: shape `p` a box over the
+/// target's columns `2p` and `2p + 1`, of half a pixel's radius, a premultiplied fill of its own.
+fn shape_bytes() -> Vec<u8> {
+    let side = SIDE as f32;
+    (0..SHAPES)
+        .flat_map(|p| {
+            let x = 2.0 * p as f32;
+            let fill = [0.125 * x, 0.5 - 0.0625 * x, 0.25, 0.75];
+            let words = [x, 1.0, x + 2.0, side - 1.0]
+                .into_iter()
+                .chain(fill)
+                .chain([0.0; 4])
+                .chain([0.5, side, side, 0.0]);
+            let mut bytes: Vec<u8> = words.flat_map(f32::to_le_bytes).collect();
+            bytes.resize(SHAPE_STRIDE as usize, 0);
+            bytes
+        })
+        .collect()
+}
+
+/// The shapes [`shape_bytes`] holds, and the bytes from one to the next: past every device's
+/// uniform buffer offset alignment (Vulkan's largest allowed is 256).
+const SHAPES: u64 = SIDE / 2;
+const SHAPE_STRIDE: u64 = 256;
+
+/// Draws alternating between two pipeline states of other fragment functions of one interface
+/// (`zwd_panel`, `zwd_disc`), whose layouts are defined alike and so are one
+/// (`pipeline/shared_layouts.rs`), each pair of draws one shape of a buffer ([`shape_bytes`]) at
+/// vertex and fragment buffer 0, the second of each pair binding what the first bound: in one
+/// pass, where a pipeline bind between them keeps set 0, they draw what the same draws draw each
+/// in a command buffer of its own, which pushes or binds set 0 whole. Where the device pushes set
+/// 0, the second of each pair pushes nothing, as set 0 holds its descriptors; where the driver's
+/// pushed descriptors go stale across a pipeline bind
+/// (`RuntimeDriverDefect::PushedDescriptorsStaleAfterPipelineBinds`), it pushes one write, and
+/// each draw past the first at least one. No push counts as a switch between equal shapes. Both
+/// ways ([`on_device_both_ways`]).
+#[test]
+fn draws_alternating_functions_of_one_layout_read_their_own_bytes() {
+    on_device_both_ways(|device| {
+        let scene = Scene::new(device);
+        let panel = shape_pipeline(device, "zwd_panel");
+        let made = device.work_counts();
+        let states = [panel, shape_pipeline(device, "zwd_disc")];
+        let shapes = buffer_with(device, &shape_bytes()).unwrap();
+        let record = |encoder: &mut RenderCommandEncoder, d: u64| {
+            let offset = d / 2 * SHAPE_STRIDE;
+            encoder
+                .set_render_pipeline_state(&states[(d % 2) as usize])
+                .unwrap();
+            encoder.set_vertex_buffer(Some(&shapes), offset, 0).unwrap();
+            encoder
+                .set_fragment_buffer(Some(&shapes), offset, 0)
+                .unwrap();
+            draw(encoder);
+        };
+        // Each draw in a command buffer of its own, the first clearing the target.
+        let queue = device.new_command_queue().unwrap();
+        let mut apart = Vec::new();
+        for d in 0..2 * SHAPES {
+            let command_buffer = queue.command_buffer().unwrap();
+            let load = if d == 0 {
+                LoadAction::Clear
+            } else {
+                LoadAction::Load
+            };
+            let mut encoder = command_buffer
+                .render_command_encoder(&scene.pass(load))
+                .unwrap();
+            record(&mut encoder, d);
+            encoder.end_encoding().unwrap();
+            match d + 1 < 2 * SHAPES {
+                true => command_buffer.commit().unwrap(),
+                false => apart = scene.pixels(&command_buffer),
+            }
+        }
+        // The disc's variant, made by now, took the panel's layout.
+        let shared = grew(&made, &device.work_counts(), |c| c.pipeline_layouts_shared);
+        assert!(shared >= 1, "the disc's layout shared: {shared}");
+        // Every draw in one pass.
+        let (command_buffer, mut encoder) = scene.encoder(device);
+        let before = device.work_counts();
+        let pushed: Vec<u64> = (0..2 * SHAPES)
+            .map(|d| {
+                let before = device.work_counts();
+                record(&mut encoder, d);
+                grew(&before, &device.work_counts(), |c| c.set_zero_writes_pushed)
+            })
+            .collect();
+        let switches = grew(&before, &device.work_counts(), |c| {
+            c.set_zero_equal_shape_switches
+        });
+        encoder.end_encoding().unwrap();
+        let together = scene.pixels(&command_buffer);
+        println!("runtime_lane: alternating functions of one layout pushed {pushed:?}");
+        assert!(together.iter().any(|&p| p != CLEAR), "{together:?}");
+        assert_eq!(together, apart, "pushed {pushed:?}");
+        assert_eq!(switches, 0, "{pushed:?}");
+        if !pushes(device) {
+            return;
+        }
+        let stale =
+            metal2vulkan::error::RuntimeDriverDefect::PushedDescriptorsStaleAfterPipelineBinds;
+        let at_least = u64::from(device.properties().driver_defects.contains(&stale));
+        let seconds: Vec<u64> = pushed.iter().copied().skip(1).step_by(2).collect();
+        assert!(seconds.iter().all(|&n| n == at_least), "{pushed:?}");
+        assert!(pushed[1..].iter().all(|&n| n >= at_least), "{pushed:?}");
     });
 }
 

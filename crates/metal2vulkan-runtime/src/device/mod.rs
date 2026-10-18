@@ -276,7 +276,14 @@ pub(super) struct DeviceShared {
     /// `VK_EXT_depth_bias_control` (`render_state.rs`).
     pub(super) depth_bias_command: Option<DepthBiasCommand>,
     /// The mesh draw commands, where the device enabled `meshShader` (`render/mesh.rs`).
-    pub(super) mesh_draws: Option<ash::ext::mesh_shader::Device>,
+    /// `vkCmdPushDescriptorSet`, from Vulkan 1.4 or `VK_KHR_push_descriptor`
+    /// (`binding::push_set`); none where the driver has
+    /// `RuntimeDriverDefect::PushedBufferSizesUnset`.
+    pub(super) push_descriptor: Option<vk::PFN_vkCmdPushDescriptorSetKHR>,
+    /// A draw after a pipeline bind pushes at least one of set 0's descriptors, the first where
+    /// none changed (`render/bound.rs`), where the driver has
+    /// `RuntimeDriverDefect::PushedDescriptorsStaleAfterPipelineBinds`.
+    pub(super) pushes_after_pipeline_binds: bool,
     /// The command that sets a draw's color write masks, where the device enabled everything a
     /// draw that reads its own pass's texture through a snapshot takes (`render/snapshot.rs`).
     pub(super) color_write_masks: Option<ColorWriteMasks>,
@@ -318,6 +325,9 @@ pub(super) struct DeviceShared {
     /// The variants' shader modules by their exact SPIR-V, shared device-wide
     /// (`pipeline/content_keyed.rs`).
     pub(super) shader_modules: Mutex<crate::pipeline::ShaderModules>,
+    /// The variants' pipeline layouts by their exact definition, shared device-wide
+    /// (`pipeline/shared_layouts.rs`).
+    pub(crate) pipeline_layouts: Mutex<crate::pipeline::shared_layouts::SharedLayouts>,
     /// The variants' makings in the air, by their compile, which a twin's waits for to land
     /// (`pipeline/flight.rs`).
     pub(crate) flights: crate::pipeline::flight::Flights,
@@ -611,6 +621,9 @@ impl Drop for DeviceShared {
         // nothing), and the kept ones let go of theirs above (`pipeline/content_keyed.rs`).
         let modules = lock(&self.shader_modules).drain();
         modules.destroy(&*self);
+        // The pipeline layouts, likewise (`pipeline/shared_layouts.rs`).
+        let layouts = lock(&self.pipeline_layouts).drain();
+        layouts.destroy(&*self);
         // The immutable sampler sets, likewise, each counted back as its samplers go: the
         // layouts that baked them are gone.
         let sampler_sets = lock(&self.sampler_sets).drain();
@@ -1078,6 +1091,27 @@ impl Device {
         } else {
             None
         };
+        // None where the driver's pushed sets lose their buffers' sizes
+        // (`RuntimeDriverDefect::PushedBufferSizesUnset`): every draw and dispatch binds set 0
+        // there, as on a device without the command.
+        let pushes_whole_sets = !crate::driver_defects::of(&description)
+            .contains(&metal2vulkan::error::RuntimeDriverDefect::PushedBufferSizesUnset);
+        // At least one write of set 0 pushed after each pipeline bind where the driver's pushed
+        // descriptors go stale across one
+        // (`RuntimeDriverDefect::PushedDescriptorsStaleAfterPipelineBinds`).
+        let pushes_after_pipeline_binds = crate::driver_defects::of(&description).contains(
+            &metal2vulkan::error::RuntimeDriverDefect::PushedDescriptorsStaleAfterPipelineBinds,
+        );
+        // SAFETY: as above; the loader serves `vkGetDeviceProcAddr` once the word is put back.
+        let push_descriptor = unsafe {
+            loader_word.restore();
+            crate::binding::push_descriptor_command(
+                &instance.raw,
+                &raw,
+                description.api_version,
+                &enabled,
+            )
+        }
         // Its naming of an object, where its instance reports messages: a graphics pipeline that
         // reads its input attachments in rasterization order is named for the layers' messages
         // (`pipeline/graphics.rs`).
@@ -1131,9 +1165,11 @@ impl Device {
                     device_addresses: device_address,
                     generated_commands: generated_commands.is_some(),
                     sparse_binding: sparse.binds(),
+                    push_descriptor: push_descriptor.is_some(),
                     calibration: calibrated.is_some(),
                     object_names: object_name.is_some(),
                 generated_commands.as_ref(),
+                push_descriptor,
                 calibrated,
             )
         } {
@@ -1415,6 +1451,8 @@ impl Device {
             sized_index_bind,
             depth_bias_command,
             mesh_draws,
+            push_descriptor,
+            pushes_after_pipeline_binds,
             color_write_masks,
             snapshot_fallbacks: Mutex::new(Vec::new()),
             reader_sizes: Mutex::new(Default::default()),
@@ -1436,6 +1474,7 @@ impl Device {
             interleave: Mutex::default(),
             kept: Mutex::default(),
             shader_modules: Mutex::default(),
+            pipeline_layouts: Mutex::default(),
             flights: crate::pipeline::flight::Flights::default(),
             color_resolves: Mutex::new(ColorResolveObjects::default()),
             stencil_copies: Mutex::new(StencilCopyObjects::default()),

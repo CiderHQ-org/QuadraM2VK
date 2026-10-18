@@ -215,7 +215,7 @@ struct Run {
 }
 
 /// The calling thread's CPU time so far.
-fn thread_cpu() -> Duration {
+pub(super) fn thread_cpu() -> Duration {
     let mut now = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
@@ -227,7 +227,7 @@ fn thread_cpu() -> Duration {
 }
 
 /// The 10th, 50th and 90th percentiles of `values`.
-fn percentiles(mut values: Vec<f64>) -> [f64; 3] {
+pub(super) fn percentiles(mut values: Vec<f64>) -> [f64; 3] {
     values.sort_by(f64::total_cmp);
     let at = |p: usize| values[(values.len() * p / 100).min(values.len() - 1)];
     [at(10), at(50), at(90)]

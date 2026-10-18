@@ -6,7 +6,7 @@ use crate::bind::state::{
 };
 use crate::device::profile::BufferAccess;
 use crate::pipeline::facts::{Mechanism, UniformViewChoice};
-use crate::pipeline::interface::BufferKind;
+use crate::pipeline::interface::{BufferKind, DescriptorView};
 use crate::pipeline::sym::Stage;
 use crate::spirv::testing::committed_profiles;
 
@@ -284,7 +284,7 @@ fn the_bound_kind_carries_the_length_class() {
         attribute_stride: None,
     };
     assert_eq!(
-        BoundKind::of(Some(&b.shape())),
+        BoundKind::of(Some(&b.shape(0))),
         BoundKind::Buffer {
             device_address: true,
             length_class: 7
@@ -390,6 +390,83 @@ fn descriptor_bases_are_sixteen_aligned_on_every_profile() {
                     );
                 }
             }
+        }
+    }
+}
+
+/// A uniform view's `RangeAtBindOffset` holds exactly where instantiation starts its range at the
+/// bind offset, its residual 0, on every committed profile, for a buffer bound anywhere before the
+/// end of its allocation under a window starting at or after the bind offset and inside the
+/// allocation (elsewhere it never holds where the residual is not 0; false reads correctly at any
+#[test]
+fn a_uniform_range_starts_at_the_bind_offset_where_the_specialization_says() {
+    const LENGTH: u64 = 4096;
+    for (stem, p) in committed_profiles().expect("profiles") {
+        let limits = &p.fields().limits;
+        let alignment =
+            crate::memory::views::base_alignment(limits.min_uniform_buffer_offset_alignment);
+        for window in [
+            Window::Whole,
+            Window::Bounded { start: 0, len: 64 },
+            Window::Bounded { start: 4, len: 28 },
+            Window::Bounded { start: 52, len: 16 },
+            Window::Bounded {
+                start: 192,
+                len: 16,
+            },
+            Window::Bounded { start: 255, len: 1 },
+            Window::Bounded { start: -8, len: 40 },
+        ] {
+            let b = BufferSlot {
+                access: AccessSet::READ,
+                window,
+                form: BufferForm::Descriptor(DescriptorView::UniformWords),
+                kind: BufferKind::Buffer,
+            };
+            let zero = |bind_offset: u64| {
+                let (_, residual) = crate::bind::instantiate::descriptor_range(
+                    bind_offset,
+                    LENGTH,
+                    window,
+                    alignment,
+                    u64::MAX,
+                )
+                .unwrap_or_else(|e| panic!("{stem} {window:?} {bind_offset}: {e:?}"));
+                residual == 0
+            };
+            for bind_offset in (0..LENGTH).step_by(4) {
+                let shape = BoundBuffer::Buffer {
+                    gpu_address: 0x1_0000,
+                    length: LENGTH,
+                    offset: bind_offset,
+                    device_address: None,
+                    attribute_stride: None,
+                }
+                .shape(alignment as u32);
+                let at = range_at_bind_offset(&b, Some(&shape), limits);
+                let what = format!("{stem} {window:?} {bind_offset}");
+                // A window starting below the bind offset, or past the allocation's end (whose
+                // range is widened down into it), may still start at the bind offset.
+                match window {
+                    Window::Bounded { start, .. }
+                        if start < 0 || bind_offset as i64 + start >= LENGTH as i64 =>
+                    {
+                        assert!(!at || zero(bind_offset), "{what}")
+                    }
+                    _ => assert_eq!(at, zero(bind_offset), "{what}"),
+                }
+            }
+            let bytes = BufferShape::Bytes {
+                attribute_stride: None,
+            };
+            let at = range_at_bind_offset(&b, Some(&bytes), limits);
+            assert_eq!(
+                at,
+                zero(0) && !matches!(window, Window::Bounded { start, .. } if start < 0),
+                "{stem} {window:?} bytes"
+            );
+                "{stem} {window:?} unbound"
+            );
         }
     }
 }

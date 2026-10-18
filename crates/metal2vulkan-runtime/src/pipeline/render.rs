@@ -49,6 +49,7 @@ use super::texture_access::{TextureAccessMemo, TextureAccesses};
 use super::tile::TileState;
 use super::BufferForms;
 use super::{compile_error, stand_in, PipelineOptions, PIPELINES, PLANS, VARIANTS};
+use crate::argument_table::AtBindViews;
 use crate::binary_archive::{self, Used};
 use crate::color_reformat::Routing;
 use crate::degradation::{BoundFormats, Degradation, Occurrence};
@@ -210,6 +211,9 @@ pub(crate) struct Program {
     /// What its pool pieces hold (`piece_holds.rs`): its draws' makings and its capture forms'
     /// translations, kept here so a pool thread never holds the device's last reference.
     pieces: Arc<PieceHolds<PieceHeld>>,
+    /// Its buffer slots whose bind offset class tells the device's view base alignment apart
+    /// (`argument_table::AtBindViews`), of its base's interface.
+    at_bind_views: AtBindViews,
 }
 
 /// The state's release returns at once: it lets go of what its pool pieces held on its own
@@ -1606,6 +1610,7 @@ impl GraphicsState {
             descriptor.support_indirect_command_buffers(),
         )?;
         let samplers = descriptor.number_samplers(device, &base.shared_pipeline().interface);
+        let at_bind_views = AtBindViews::new(device, &base.shared_pipeline().interface);
         let log = StateLog::new(label.as_deref(), &descriptor.function_names());
         Ok(GraphicsState(Arc::new_cyclic(|state| {
             // The state holds its ID's slot, which lists it among the states an indirect render
@@ -1636,6 +1641,7 @@ impl GraphicsState {
                 last_pipelines: Mutex::new(VecDeque::with_capacity(LAST_PIPELINES)),
                 routed: Mutex::new(None),
                 pieces: PieceHolds::new(),
+                at_bind_views,
             };
             StateShared {
                 id,
@@ -1792,19 +1798,10 @@ impl GraphicsState {
         &self.0.base.pipeline
     }
 
-    /// Whether the compile refused the variant that writes `colors`, kept out of a draw's
-    /// subpass, through the interlocked storage form (`refuse_interlock`).
-    pub(crate) fn interlock_refused(&self, colors: &BTreeSet<u32>) -> bool {
-        lock(&self.0.refused_interlocks).contains(colors)
-    }
-
-    /// Remember that the compile refused the variant that writes `colors` through the
-    /// interlocked storage form.
-    pub(crate) fn refuse_interlock(&self, colors: &BTreeSet<u32>) {
-        let mut refused = lock(&self.0.refused_interlocks);
-        if !refused.contains(colors) {
-            refused.push(colors.clone());
-        }
+    /// Its buffer slots whose bind offset class tells the device's view base alignment apart
+    /// (`argument_table::AtBindViews`).
+    pub(crate) fn at_bind_views(&self) -> &AtBindViews {
+        &self.0.at_bind_views
     }
 
     /// The render stages whose functions read texture handles from memory (a handle table): only

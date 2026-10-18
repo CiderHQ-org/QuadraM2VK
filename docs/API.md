@@ -558,7 +558,16 @@ for dependency in &pipeline.dependencies {
   acts on them; you do not have to.
 - The format class of a bound texture is read by the shader as push data, not specialized, so binds
   that differ only in their textures' formats share one `VkPipeline`. Other bound values (a slot's
-  presence, a sampler's word) are specialization constants.
+  presence, a sampler's word, whether a uniform buffer's descriptor range starts at its bind offset)
+  are specialization constants. The last lets a driver load the constants ahead of the shader:
+  inline bytes take that form, and so does a buffer bound at a multiple of
+  `max(minUniformBufferOffsetAlignment, 16)` at a slot whose table tells that alignment apart
+  (`state.view_base_alignment = BindState::view_base_alignment_of(limits)`, and the slot's bit in
+  its table's `at_bind_views`; `interface.uniform_view_buffers(stage)` lists the slots that can
+  take it). A buffer bound at any other offset, or at a slot left out, takes the other form, a
+  pipeline of its own: leave out a slot bound at offsets that move, so that its draws keep one
+  shape and one pipeline (the runtime leaves out each slot of a state once it finds one bound at
+  an offset the alignment does not divide).
 - `interface.reaches_command_buffers` and `interface.texture_writing_stages` say, provably, which
   pipelines may touch an indirect command buffer and which stages may write a texture.
 

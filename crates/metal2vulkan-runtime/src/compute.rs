@@ -1332,12 +1332,13 @@ impl DispatchTables<'_> {
         function_tables: &[VisibleFunctionTable],
     ) -> BindState {
         // A buffer where the kernel reads a table reads as a null table.
-        let mut table = self
-            .table
-            .stage_table_reading(Stage::Kernel, self.pipeline.interface());
+        let views = self.pipeline.at_bind_views();
+        let mut table =
+            (self.table).stage_table_reading(Stage::Kernel, self.pipeline.interface(), views);
         table.threadgroup_lengths = self.threadgroup_lengths.clone();
         let mut state = BindState::default();
         state.stages.insert(Stage::Kernel, table);
+        state.view_base_alignment = views.alignment();
         if self.pipeline.imageblock_cell_bytes().is_some() {
             state.imageblock_size = self.imageblock;
         }
@@ -1666,10 +1667,16 @@ fn record(
             (made, None)
         }
     };
-    // SAFETY: the set was just allocated and no command uses it yet; every buffer, view and
-    // sampler written is live (the command buffer retains them below, and a refusal leaves the
-    // set unused in its pool).
-    unsafe { binding::write_sets(&device, set.as_slice(), &writes) }?;
+    let pushed = match objects.pushes_set_zero() {
+        true => binding::SetWrite::pushed(&writes, objects.immutable_pushes()),
+        false => {
+            // SAFETY: the set was just allocated and no command uses it yet; every buffer, view
+            // and sampler written is live (the command buffer retains them below, and a refusal
+            // leaves the set unused in its pool).
+            unsafe { binding::write_sets(&device, set.as_slice(), &writes) }?;
+            Vec::new()
+        }
+    };
     let textures = tables
         .table
         .textures
@@ -1706,9 +1713,13 @@ fn record(
     // Recording starts here: nothing below can be refused (but a `VkCommandBuffer` that does not
     // end, which abandons the command buffer).
     core.shadow_copies(&copies);
+    if !pushed.is_empty() {
+        device.shared().counts.dispatch_pushing_set_zero();
+    }
     let recording = Recording {
         layout: objects.layout(),
         set,
+        pushed,
         heap: heap_set,
         preprocess,
         gates,

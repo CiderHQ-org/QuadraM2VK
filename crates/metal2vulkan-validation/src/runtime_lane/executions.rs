@@ -39,9 +39,10 @@ pub(super) fn on_device_with(adjust: impl FnOnce(&mut DeviceOptions), test: impl
 
 /// The kernel case's run records one execution: the compiled compute pipeline its dispatch ran,
 /// which is the case's compile for the recorded bind shape and dispatch (the compile the
-/// executor's artifact digest covers), planned for the bind shape the executor computes for the
-/// case, and each `VkPipeline` the dispatch records, created within the ceiling. A dispatch of no
-/// threads records an execution with no `VkPipeline`.
+/// executor's artifact digest covers), planned for the recorded bind shape as for the one the
+/// executor computes for the case (the two tell different view base alignments apart:
+/// `engine::VIEW_BASE_ALIGNMENT`), and each `VkPipeline` the dispatch records, created within the
+/// ceiling. A dispatch of no threads records an execution with no `VkPipeline`.
 #[test]
 fn the_execution_record_names_each_dispatchs_compiled_pipeline() {
     on_device_with(
@@ -62,10 +63,14 @@ fn the_execution_record_names_each_dispatchs_compiled_pipeline() {
             }
             let compile = device.compile_device();
             let addressed = compile.profile().descriptors().buffer_device_address;
+            let planned = |shape| {
+                let plan = pipeline.plan(compile, shape).unwrap();
+                plan.content_digest().unwrap()
+            };
             assert_eq!(
-                execution.shape(),
-                &compute_shape(&case.compute, addressed).unwrap(),
-                "the runtime planned another bind shape than the executor computes"
+                planned(execution.shape()),
+                planned(&compute_shape(&case.compute, addressed).unwrap()),
+                "the runtime planned other than the executor plans"
             );
             let library = Library::from_air(&case.bitcode).unwrap();
             let function = FunctionDescriptor::new(library.function(&case.compute.entry).unwrap());

@@ -225,6 +225,18 @@ pub enum BufferForm {
     Psb,
 }
 
+impl BufferForm {
+    /// Whether the form reads through a uniform-buffer view: the views whose range a plan starts
+    /// at the bind offset where the device's view base alignment divides it
+    /// (`SpecKey::RangeAtBindOffset`, `BindState::view_base_alignment`).
+    pub fn uniform_view(self) -> bool {
+        matches!(
+            self,
+            BufferForm::Descriptor(DescriptorView::UniformWords | DescriptorView::UniformVec4)
+        )
+    }
+}
+
 /// The descriptor view kind of a descriptor-form slot.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -515,6 +527,23 @@ pub enum PatchDomain {
     Triangle,
     /// `[[patch(quad, N)]]`.
     Quad,
+}
+
+impl PipelineInterface {
+    /// The buffer slots of `stage` (bit `i` for index `i`, below 64) its function reads through a
+    /// uniform view ([`BufferForm::uniform_view`]): the slots whose bind offset class can tell the
+    /// device's view base alignment apart (`StageTable::at_bind_views`).
+    pub fn uniform_view_buffers(&self, stage: Stage) -> u64 {
+        let mut slots = 0;
+        for (slot, interface) in &self.slots {
+            if let SlotInterface::Buffer(b) = interface {
+                if slot.stage == stage && slot.index < u64::BITS && b.form.uniform_view() {
+                    slots |= 1 << slot.index;
+                }
+            }
+        }
+        slots
+    }
 }
 
 impl StageInterface {

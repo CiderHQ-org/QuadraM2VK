@@ -124,6 +124,11 @@ pub(crate) const GENERATED_COMMANDS_CALLS: [Call; 2] = [
 /// batch's sparse binding (`sparse/bind.rs`).
 pub(crate) const SPARSE_CALLS: [Call; 1] = [Call::QueueBindSparse];
 
+/// The table's entry points a device without the push command (Vulkan 1.4, or
+/// `VK_KHR_push_descriptor`) never calls, nor primes: a host step's set 0 pushed
+/// (`pipeline::objects::pushes_set_zero`).
+pub(crate) const PUSH_DESCRIPTOR_CALLS: [Call; 1] = [Call::CmdPushDescriptorSet];
+
 /// The table's entry points a device that calibrates no timestamps never calls, nor primes: a
 /// completion turn's calibration reading (`gpu_time.rs`).
 pub(crate) const CALIBRATION_CALLS: [Call; 1] = [Call::GetCalibratedTimestamps];
@@ -318,6 +323,7 @@ pub(crate) struct Has {
     pub(crate) device_addresses: bool,
     pub(crate) generated_commands: bool,
     pub(crate) sparse_binding: bool,
+    pub(crate) push_descriptor: bool,
     pub(crate) calibration: bool,
     pub(crate) object_names: bool,
 }
@@ -343,12 +349,14 @@ pub(super) unsafe fn prime(
     sharing: Sharing<'_>,
     has: Has,
     generated: Option<&Commands>,
+    push: Option<vk::PFN_vkCmdPushDescriptorSetKHR>,
     calibration: Option<Calibration>,
 ) -> Result<(), Error> {
     let mut primer = Primer {
         device,
         loader_word,
         sharing,
+        push,
         calibration,
         // SAFETY: the caller's.
         memory: unsafe { instance.get_physical_device_memory_properties(physical) },
@@ -407,6 +415,7 @@ pub(crate) fn missing(calls: u128, has: Has) -> Vec<Call> {
                 && (has.device_addresses || !DEVICE_ADDRESS_CALLS.contains(&call))
                 && (has.generated_commands || !GENERATED_COMMANDS_CALLS.contains(&call))
                 && (has.sparse_binding || !SPARSE_CALLS.contains(&call))
+                && (has.push_descriptor || !PUSH_DESCRIPTOR_CALLS.contains(&call))
                 && (has.calibration || !CALIBRATION_CALLS.contains(&call))
                 && (has.object_names || !NAMING_CALLS.contains(&call))
         })
@@ -438,6 +447,8 @@ struct Primer<'a> {
     loader_word: &'a LoaderWord,
     /// How the device's buffers and images are shared among its queue families.
     sharing: Sharing<'a>,
+    /// The push command, where the device has it (`binding::push_descriptor_command`).
+    push: Option<vk::PFN_vkCmdPushDescriptorSetKHR>,
     /// The device's calibrated timestamps, where its queue family writes timestamps.
     calibration: Option<Calibration>,
     memory: vk::PhysicalDeviceMemoryProperties,
@@ -1044,6 +1055,31 @@ impl Primer<'_> {
                 .map_err(vulkan)?;
             device.cmd_bind_pipeline(recorded, vk::PipelineBindPoint::COMPUTE, pipeline);
             self.made(Call::CmdBindPipeline);
+            // Where the device has the push command, the set's write pushed with a layout whose
+            // set 0 takes push descriptors, before the set is bound with the pipeline's layout
+            // (which disturbs it). The push ignores the write's `dstSet`.
+            if let Some(push) = self.push {
+                let info = vk::DescriptorSetLayoutCreateInfo::default()
+                    .flags(vk::DescriptorSetLayoutCreateFlags::PUSH_DESCRIPTOR_KHR)
+                    .bindings(&bindings);
+                let pushed_set = device
+                    .create_descriptor_set_layout(&info, None)
+                    .map_err(vulkan)?;
+                self.hold(pushed_set);
+                let pushed_sets = [pushed_set];
+                let info = vk::PipelineLayoutCreateInfo::default().set_layouts(&pushed_sets);
+                let pushed = device.create_pipeline_layout(&info, None).map_err(vulkan)?;
+                self.hold(pushed);
+                push(
+                    recorded,
+                    vk::PipelineBindPoint::COMPUTE,
+                    pushed,
+                    0,
+                    writes.len() as u32,
+                    writes.as_ptr(),
+                );
+                self.made(Call::CmdPushDescriptorSet);
+            }
             device.cmd_bind_descriptor_sets(
                 recorded,
                 vk::PipelineBindPoint::COMPUTE,

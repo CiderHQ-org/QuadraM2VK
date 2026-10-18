@@ -233,8 +233,36 @@ pub(super) struct Affected {
 ///   27.0.1: a bare-Vulkan program freeing an unused buffer's memory while a dispatch through a
 ///   device address waits behind fills fails at once, and `runtime_lane::freed_memory`: known
 ///   broken through 1.4.1. Nothing is refused: the runtime frees such memory once the batches
-///   submitted before it completed (`freed_memory.rs`). The program's own submissions through
-///   `CommandQueue::with_vk_queue` signal no timeline of the runtime's, so its frees wait for none.
+///
+/// `PushedBufferSizesUnset`:
+/// - MoltenVK (`MOLTENVK`): a shader's runtime array length of a buffer (`OpArrayLength`) reads
+///   the buffer's size from the stage's implicit buffer of sizes, which
+///   `MVKCommandEncoderState::bindDescriptorSets` fills for a set of discrete descriptors (a push
+///   descriptor set layout is one: `pickArgumentBufferMode` takes no argument buffer for it) and
+///   `MVKCommandEncoderState::pushDescriptorSet` never fills: it writes the pushed descriptors
+///   alone. A pushed buffer's length then reads 0, or what an earlier bind left there, and the
+///   accesses bounded by it go nowhere: on an M3 Max with macOS 27.0.1, kernels that push set 0
+///   read the null entry for every resource id (`runtime_lane::resource_ids`), stored no
+///   normalized storage write (`runtime_lane::norm_storage_writes`), and wrote nothing through a
+///   device without robustness's in-shader bounds (`runtime_lane::executions`), where binding set
+///   0 passes each. Read in 1.4.1's source and measured on 1.4.1 (driverVersion 10401): known
+///   broken through 1.4.1. Nothing is refused: the device takes no push command there
+///   (`device/mod.rs`), and every draw and dispatch binds set 0 from its command buffer's pools,
+///   as on a device without the command.
+///
+/// `PushedDescriptorsStaleAfterPipelineBinds`:
+/// - Mesa's ANV (`INTEL_OPEN_SOURCE_MESA`): draws of one layout that push set 0 alike, a
+///   pipeline reading a uniform buffer's constants at fixed offsets (its range starting at the
+///   bind offset, `SpecKey::RangeAtBindOffset`) and then one reading it at the pushed residual
+///   plus the offset through the same descriptor, which the second draw's push leaves out as
+///   unchanged, so that no push follows the bind: the second pipeline reads zeros. Pushing set 0
+///   whole after the bind reads the bytes, and so does pushing one write that did not change
+///   (set 0's first). Measured on 26.2.4 (driverVersion 0x6802004) on the Iris Xe (`deviceID`
+///   0xa7a0; `runtime_lane::unorm_depth_bias`, 3 of 3 runs wrong without the whole push, 3 of 3
+///   right with it) and on the UHD 770 (`deviceID` 0xa780; the same lane, 3 of 3 runs wrong with
+///   no push after the bind, 3 of 3 right with the one write): known broken through 26.2.4.
+///   Nothing is refused: the first draw after each pipeline bind pushes at least one write, those
+///   that changed or else set 0's first (`render/bound.rs`).
 pub(super) const AFFECTED: &[Affected] = &[
     Affected {
         defect: RuntimeDriverDefect::MultisampledDepthStencilColourCopies,
@@ -311,6 +339,16 @@ pub(super) const AFFECTED: &[Affected] = &[
     Affected {
         defect: RuntimeDriverDefect::FreedAddressMemoryFailsPendingWork,
         driver: DriverId::MOLTENVK,
+        clean: &[],
+    },
+    Affected {
+        defect: RuntimeDriverDefect::PushedBufferSizesUnset,
+        driver: DriverId::MOLTENVK,
+        clean: &[],
+    },
+    Affected {
+        defect: RuntimeDriverDefect::PushedDescriptorsStaleAfterPipelineBinds,
+        driver: DriverId::INTEL_OPEN_SOURCE_MESA,
         clean: &[],
     },
 ];

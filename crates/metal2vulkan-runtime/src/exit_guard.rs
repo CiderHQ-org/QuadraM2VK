@@ -377,6 +377,9 @@ calls! {
     // A host step's ([`HOST_STEP`]), and a translation's on a device without device addresses.
     CmdBindPipeline => c"vkCmdBindPipeline",
     CmdBindDescriptorSets => c"vkCmdBindDescriptorSets",
+    // A host step's set 0 pushed (`pipeline::objects::pushes_set_zero`), on a device that has the
+    // push command ([`PUSH_DESCRIPTOR_CALLS`](crate::device::prime::PUSH_DESCRIPTOR_CALLS)).
+    CmdPushDescriptorSet => c"vkCmdPushDescriptorSetKHR",
     CmdPushConstants => c"vkCmdPushConstants",
     CmdDispatch => c"vkCmdDispatch",
     CmdCopyBuffer => c"vkCmdCopyBuffer",
@@ -454,6 +457,7 @@ pub(crate) const HOST_STEP: &[Call] = &[
     Call::EndCommandBuffer,
     Call::CmdBindPipeline,
     Call::CmdBindDescriptorSets,
+    Call::CmdPushDescriptorSet,
     Call::CmdPushConstants,
     Call::CmdDispatch,
     Call::CmdCopyBuffer,

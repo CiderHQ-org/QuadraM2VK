@@ -60,6 +60,7 @@ mod predicted;
 mod raster_samples;
 pub(super) mod reaper;
 mod render;
+pub(super) mod shared_layouts;
 mod sources;
 pub(super) mod stand_in;
 mod texture_access;
@@ -96,6 +97,7 @@ use super::families::GpuFamily;
 use super::library::Function;
 use super::values::Size;
 use super::Device;
+use crate::argument_table::AtBindViews;
 use crate::binary_archive::Used;
 use crate::residency::handle_stages;
 use crate::resource_ids::{
@@ -275,6 +277,9 @@ pub(super) struct Program {
     /// (`dispatch_making.rs`), kept here so a pool thread never holds the device's last
     /// reference.
     pieces: Arc<piece_holds::PieceHolds<dispatch_making::RegionHeld>>,
+    /// Its buffer slots whose bind offset class tells the device's view base alignment apart
+    /// (`argument_table::AtBindViews`), of its base's interface.
+    at_bind_views: AtBindViews,
 }
 
 /// The program's release returns at once: a piece not started stops, and a piece running gives
@@ -612,6 +617,7 @@ impl ComputePipelineState {
         );
         let identifier =
             UniqueIdentifier::state(&device.shared().identifiers, StateKind::Compute, indirect)?;
+        let at_bind_views = AtBindViews::new(device, &base.shared_pipeline().interface);
         Ok(ComputePipelineState(Arc::new_cyclic(|state| {
             // The state holds its ID's slot, which lists it among the states an indirect
             // command's record can name (`indirect_states`).
@@ -633,6 +639,7 @@ impl ComputePipelineState {
                 added_unsupported,
                 label: options.label.clone(),
                 pieces: piece_holds::PieceHolds::new(),
+                at_bind_views,
             };
             StateShared {
                 id,
@@ -725,6 +732,12 @@ impl ComputePipelineState {
     /// visible-function table comes from the AIR, so every variant states it alike.
     pub(crate) fn interface(&self) -> &PipelineInterface {
         &self.0.base.pipeline().interface
+    }
+
+    /// Its buffer slots whose bind offset class tells the device's view base alignment apart
+    /// (`argument_table::AtBindViews`).
+    pub(crate) fn at_bind_views(&self) -> &AtBindViews {
+        &self.0.at_bind_views
     }
 
     /// The layout of the kernel's base variant: which texture slot each sampler samples comes

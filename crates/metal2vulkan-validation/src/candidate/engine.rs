@@ -858,6 +858,26 @@ pub fn function_constants(
     Ok(constants)
 }
 
+/// The view base alignment the executor's bind states state (`BindState::view_base_alignment`):
+/// 256, the largest `minUniformBufferOffsetAlignment` Vulkan allows, a multiple of every device's
+/// view base alignment (`BindState::view_base_alignment_of`), which every bind offset the
+/// executor binds, 0, is a multiple of in turn. Each of its states tells it apart at every buffer
+/// slot ([`views_told_apart`]), so a uniform view's range starts at its bind offset in its plan
+/// (`SpecKey::RangeAtBindOffset`) on every device, as in the runtime's plan of the same binds: the
+/// runtime states its device's own alignment at the slots its pipeline reads through a uniform
+/// view, and the plans of the two are the same, so the runtime path's artifact digest is the
+/// executor's and the authored compile census's.
+pub const VIEW_BASE_ALIGNMENT: u32 = 256;
+
+/// `state` telling [`VIEW_BASE_ALIGNMENT`] apart at every buffer slot of each of its stages.
+pub fn views_told_apart(mut state: BindState) -> BindState {
+    state.view_base_alignment = VIEW_BASE_ALIGNMENT;
+    for table in state.stages.values_mut() {
+        table.at_bind_views = u64::MAX;
+    }
+    state
+}
+
 /// The `BindState` of `case`: each buffer bound at offset 0 with its length, its guest address,
 /// and its host device address when the device has one (`addresses` by Metal index), each
 /// visible-function table the same way as a buffer of its table words' length (`bind::table`), each
@@ -869,7 +889,8 @@ pub fn function_constants(
 /// with its resource id (its token follows the buffers', [`argument_buffers::texture_tokens`]),
 /// each made resident for reading and writing, as the Metal oracle's `useResource` does, and each
 /// argument-buffer sampler as an argument sampler with its id
-/// ([`argument_buffers::argument_samplers`]).
+/// ([`argument_buffers::argument_samplers`]); telling the executor's view base alignment apart
+/// ([`views_told_apart`]).
 pub fn bind_state(
     case: &ComputeCase,
     addresses: &BTreeMap<u32, BufferAddress>,
@@ -952,7 +973,7 @@ pub fn bind_state(
     }
     state.argument_samplers =
         argument_buffers::argument_samplers(case.argument_buffer_samplers.iter())?;
-    Ok(state)
+    Ok(views_told_apart(state))
 }
 
 /// The consumer token of each argument-buffer texture of `case`, by its key

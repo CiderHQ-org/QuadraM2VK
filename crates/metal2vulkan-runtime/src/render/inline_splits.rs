@@ -47,7 +47,7 @@
 //!   Elsewhere the instance records as before, in a secondary, and so does every later one.
 //! - **Counted**: `WorkCounts::inline_split_instances`.
 
-use super::bound::Bound;
+use super::bound::{Bound, Recorded};
 use super::pending::OwnedRecording;
 use super::{inline_first, shadows, Instance, Next, Recording, RenderCommandEncoder, ViewSetup};
 use crate::clear_reach;
@@ -368,6 +368,7 @@ fn record_kept(
             extent: vk::Extent2D { width, height },
         })
         .clear_values(clear_values.as_slice());
+    let mut recorded = Recorded::default();
     // SAFETY: the held command buffer is recording outside a render pass instance, and only this
     // encoder records it; the steps' objects are live until it completes (retained at their
     // draws); the pass and framebuffer are live until it completes (the encoder holds them to its
@@ -394,8 +395,12 @@ fn record_kept(
                         raw,
                         command_buffer: held,
                         layout: owned.layout,
+                        shape: owned.shape,
                         pipeline: *pipeline,
                         sets: &owned.sets,
+                        pushed: &owned.pushed,
+                        push_descriptor: shared.push_descriptor,
+                        pushes_after_pipeline_binds: shared.pushes_after_pipeline_binds,
                         heap: owned.heap,
                         push: &owned.push,
                         vertex_buffers: &owned.vertex_buffers,
@@ -427,5 +432,5 @@ fn record_kept(
             }
         }
     }
-    shared.counts.draw_states_recorded(recorded);
+    recorded.count(&shared.counts);
 }

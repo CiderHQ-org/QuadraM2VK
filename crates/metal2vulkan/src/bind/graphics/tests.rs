@@ -362,9 +362,15 @@ fn fixed_function_fetches_only_what_vulkan_can_bind() {
     let first = vertex_buffers()[0];
     assert!(fetchable(&first, &rules(None, true), 4, None));
     assert!(!fetchable(&first, &rules(None, true), 2, None));
+    // Classed up to 4, and the view base alignment where one is told apart and divides it.
+    let offsets = [0, 1, 2, 3, 4, 6, 8, 12, 64, 192, 1 << 40, (1 << 40) + 2];
     assert_eq!(
-        [0, 1, 2, 3, 4, 6, 8, 12, 1 << 40, (1 << 40) + 2].map(offset_alignment),
-        [4, 1, 2, 1, 4, 2, 4, 4, 4, 2]
+        offsets.map(|o| offset_alignment(o, 0)),
+        [4, 1, 2, 1, 4, 2, 4, 4, 4, 4, 4, 2]
+    );
+    assert_eq!(
+        offsets.map(|o| offset_alignment(o, 64)),
+        [64, 1, 2, 1, 4, 2, 4, 4, 64, 64, 64, 2]
     );
 }
 

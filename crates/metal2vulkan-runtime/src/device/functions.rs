@@ -7,7 +7,7 @@
 //! table holds every entry point a section calls, and priming, which makes each before the exit
 //! hook is registered (`prime.rs`), covers them all. Other builds hand out every function.
 //!
-//! Each is a [`Vk`]: the `ash::Device`, which it dereferences to, and the reads the commands of the
+//! Each is a [`Vk`]: the `ash::Device`, which it dereferences to, the reads the commands of the
 //! device's queue family for encoders make, which the runtime's global memory barriers name in
 //! their destination (`tracker::Barrier::record`, `image_barrier::MemoryReads`), the push
 //! command where the device has it (`binding::push_descriptor_command`), and
@@ -19,25 +19,42 @@ use ash::vk;
 use std::ffi::{c_void, CStr};
 use std::ops::Deref;
 
-/// A device's functions as the runtime records commands with them: the `ash::Device`, and the
-/// reads a global memory barrier recorded into a command buffer of the device's queue family for
-/// encoders names in place of `MEMORY_READ` (the module docs).
+/// A device's functions as the runtime records commands with them: the `ash::Device`, the reads
+/// a global memory barrier recorded into a command buffer of the device's queue family for
 #[derive(Clone)]
 pub(crate) struct Vk {
     device: ash::Device,
     reads: MemoryReads,
+    push_descriptor: Option<vk::PFN_vkCmdPushDescriptorSetKHR>,
     object_name: Option<vk::PFN_vkSetDebugUtilsObjectNameEXT>,
 }
 
 impl Vk {
+    /// `device`'s functions, whose global memory barriers name `reads`, with `push_descriptor`,
     /// its push command where it has one, and `object_name`, its naming of an object where its
+    pub(super) fn new(
+        device: ash::Device,
+        reads: MemoryReads,
+        push_descriptor: Option<vk::PFN_vkCmdPushDescriptorSetKHR>,
         object_name: Option<vk::PFN_vkSetDebugUtilsObjectNameEXT>,
+    ) -> Vk {
+        Vk {
+            device,
+            reads,
+            push_descriptor,
             object_name,
+        }
     }
 
     /// The reads a global memory barrier's destination names.
     pub(crate) fn reads(&self) -> MemoryReads {
         self.reads
+    }
+
+    /// `vkCmdPushDescriptorSet`, where the device has it: what a dispatch and a tile dispatch
+    /// that push their set 0 record it with (`binding::push_set`).
+    pub(crate) fn push_descriptor(&self) -> Option<vk::PFN_vkCmdPushDescriptorSetKHR> {
+        self.push_descriptor
     }
 
     /// `vkSetDebugUtilsObjectNameEXT`, where the device's instance reports messages: what names a
@@ -80,6 +97,7 @@ impl Functions {
         instance: &ash::Instance,
         all: ash::Device,
         reads: MemoryReads,
+        push_descriptor: Option<vk::PFN_vkCmdPushDescriptorSetKHR>,
         object_name: Option<vk::PFN_vkSetDebugUtilsObjectNameEXT>,
     ) -> Functions {
         let handle = all.handle();

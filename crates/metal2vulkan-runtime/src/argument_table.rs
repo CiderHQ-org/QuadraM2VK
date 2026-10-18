@@ -34,6 +34,7 @@ use super::address_map::SamplerMaps;
 use super::binding::bound_sampler;
 use super::buffer::Buffer;
 use super::device::lock;
+use super::device::Device;
 use super::encoder::EncoderCore;
 use super::error::{invalid, Error, Problem};
 use super::function_table::{FunctionTableProblem, VisibleFunctionTable};
@@ -41,13 +42,14 @@ use super::live_bind::Reshape;
 use super::sampler::SamplerState;
 use super::texture::Texture;
 use super::upload::Upload;
-use metal2vulkan::bind::{BoundBuffer, BoundSampler, BoundTexture, StageTable};
+use metal2vulkan::bind::{BindState, BoundBuffer, BoundSampler, BoundTexture, StageTable};
 use metal2vulkan::pipeline::{
     BufferKind, PipelineInterface, SlotClass, SlotInterface, SlotRef, Stage,
 };
 use std::any::Any;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 /// Entries of a buffer table (`setBuffer:offset:atIndex:` and its stage forms).
@@ -63,6 +65,47 @@ pub(super) const ATTRIBUTE_STRIDE_STATIC: u64 = u64::MAX;
 /// limit for inline bytes, 4 KiB.
 pub(super) const INLINE_BYTES_LIMIT: u64 = 4096;
 
+/// The stages whose buffer slots [`AtBindViews`] keeps, in its order.
+const VIEW_STAGES: [Stage; 5] = [
+    Stage::Vertex,
+    Stage::Fragment,
+    Stage::Kernel,
+    Stage::Object,
+    Stage::Mesh,
+];
+
+/// A pipeline state's buffer slots, per stage, whose bind offset class tells the device's uniform
+/// view base alignment apart (`StageTable::at_bind_views`): at first those its functions read
+/// through a uniform view (`PipelineInterface::uniform_view_buffers`), which a command bound at a
+/// multiple of the alignment reads at its bind offset alone (`SpecKey::RangeAtBindOffset`). A slot
+/// a command binds at an offset the alignment does not divide is left out from then on: a slot
+/// bound at offsets that move takes one shape and one pipeline, its view read at its residual
+/// (exact at any offset), not a shape and a pipeline for each in turn, whose draws would each
+/// settle and switch pipelines on the encoding thread.
+pub(crate) struct AtBindViews {
+    /// Each stage's of [`VIEW_STAGES`], bit `i` for buffer index `i`.
+    slots: [AtomicU64; VIEW_STAGES.len()],
+    /// The device's view base alignment (`BindState::view_base_alignment_of`).
+    alignment: u32,
+}
+
+impl AtBindViews {
+    /// The slots `interface`'s functions read through a uniform view, under the view base
+    /// alignment of `device`.
+    pub(crate) fn new(device: &Device, interface: &PipelineInterface) -> AtBindViews {
+        let limits = device.compile_device().profile().limits();
+        AtBindViews {
+            slots: VIEW_STAGES.map(|stage| AtomicU64::new(interface.uniform_view_buffers(stage))),
+            alignment: BindState::view_base_alignment_of(limits),
+        }
+    }
+
+    /// The device's view base alignment, which a bind state states
+    /// (`BindState::view_base_alignment`).
+    pub(crate) fn alignment(&self) -> u32 {
+        self.alignment
+    }
+
     /// Whether `stage`'s slots are `slots` (none for a stage it does not keep): a table read under
     /// them that binds the same offsets leaves the same out ([`ArgumentTable::at_bind_views`]),
     /// as it left out its own as it was read.
@@ -71,6 +114,13 @@ pub(super) const INLINE_BYTES_LIMIT: u64 = 4096;
             .map_or(0, |kept| kept.load(Ordering::Relaxed))
             == slots
     }
+
+    /// `stage`'s slots, none for a stage it does not keep.
+    fn of(&self, stage: Stage) -> Option<&AtomicU64> {
+        let at = VIEW_STAGES.iter().position(|s| *s == stage)?;
+        Some(&self.slots[at])
+    }
+}
 
 /// One stage's bound objects, by Metal index.
 #[derive(Default)]
@@ -813,19 +863,50 @@ impl ArgumentTable {
     /// The table as `stage`'s function of `interface` reads it: `stage_table`, but a buffer bound
     /// where the function reads a visible-function table is left out, so the slot reads its
     /// neutral, a null table of size 0, as plain Metal reads such a buffer where its validation
-    /// stops the command (probe `RT7-ftable-probe1` `query_buffer_at_index`, an M3 Max and an
-    /// M4), and so is a table bound where it reads a buffer, whose slot then reads zeros, as
-    /// plain Metal's read (EV RFC-probe1-m4, an M4).
+    /// whose slot then reads zeros, as plain Metal's read (an M4). Its slots that tell the device's
+    /// view base alignment apart are those of `views`, the state's, as
+    /// [`at_bind_views`](Self::at_bind_views) leaves them.
     pub(super) fn stage_table_reading(
         &self,
         stage: Stage,
         interface: &PipelineInterface,
+        views: &AtBindViews,
     ) -> StageTable {
         let mut table = self.stage_table();
+        table.at_bind_views = self.at_bind_views(stage, views);
         table
             .buffers
             .retain(|&index, _| !self.reads_unbound((stage, interface), index));
         table
+    }
+
+    /// The slots of `stage` whose bind offset class tells the device's view base alignment apart
+    /// for a command binding this table (`StageTable::at_bind_views`): the state's `views` of it,
+    /// each that binds a buffer here at an offset the alignment does not divide left out, now and
+    /// from then on ([`AtBindViews`]). Inline bytes leave none out.
+    fn at_bind_views(&self, stage: Stage, views: &AtBindViews) -> u64 {
+        let Some(kept) = views.of(stage) else {
+            return 0;
+        };
+        let alignment = views.alignment;
+        let viewed = kept.load(Ordering::Relaxed);
+        let mut slots = viewed;
+        let mut left = viewed;
+        while left != 0 {
+            let index = left.trailing_zeros();
+            left &= left - 1;
+            let moved = alignment != 0
+                && !self.bytes.contains_key(&index)
+                && (self.buffers.get(&index))
+                    .is_some_and(|(_, offset)| !offset.is_multiple_of(u64::from(alignment)));
+            if moved {
+                slots &= !(1 << index);
+            }
+        }
+        if slots != viewed {
+            kept.fetch_and(slots, Ordering::Relaxed);
+        }
+        slots
     }
 
     /// Whether `stage`'s function of `interface` reads buffer index `index` as unbound
@@ -861,10 +942,14 @@ impl ArgumentTable {
         &self,
         kept: &mut StageTable,
         (stage, interface): (Stage, &PipelineInterface),
-        maps: &SamplerMaps,
+        (maps, views): (&SamplerMaps, &AtBindViews),
         reshape: &mut Reshape,
     ) {
         let read = (stage, interface);
+        // The slots that tell the view base alignment apart first, which the buffers' shapes
+        // read.
+        reshape.field(&mut kept.at_bind_views, self.at_bind_views(stage, views));
+        let alignment = views.alignment;
         kept.buffers.retain(|&index, _| {
             let bound = !self.reads_unbound(read, index)
                 && (self.bytes.contains_key(&index)
@@ -883,17 +968,14 @@ impl ArgumentTable {
             }
             let stride = self.attribute_strides.get(&index).copied();
             if let Some(bound) = bound_buffer(buffer, *offset, stride) {
-                reshape.slot(&mut kept.buffers, index, bound, BoundBuffer::shape);
+                let a = kept.class_alignment(index, alignment);
+                reshape.slot(&mut kept.buffers, index, bound, |b| b.shape(a));
             }
         }
         for (&index, bytes) in &self.bytes {
             if !self.reads_unbound(read, index) {
-                reshape.slot(
-                    &mut kept.buffers,
-                    index,
-                    bound_bytes(bytes),
-                    BoundBuffer::shape,
-                );
+                let a = kept.class_alignment(index, alignment);
+                reshape.slot(&mut kept.buffers, index, bound_bytes(bytes), |b| b.shape(a));
             }
         }
         kept.textures.retain(|index, _| {
@@ -933,7 +1015,7 @@ impl ArgumentTable {
             );
         }
         #[cfg(debug_assertions)]
-        self.check_reading(kept, read, maps);
+        self.check_reading(kept, read, (maps, views));
     }
 
     /// That `kept`, brought in place by [`refresh_reading`](Self::refresh_reading) (or kept unread
@@ -950,10 +1032,39 @@ impl ArgumentTable {
         &self,
         kept: &StageTable,
         read: (Stage, &PipelineInterface),
-        maps: &SamplerMaps,
+        (maps, views): (&SamplerMaps, &AtBindViews),
     ) {
         let (stage, _) = read;
         const DIFFERS: &str = "a stage table brought in place that is not the table read whole";
+        // The slots that tell the view base alignment apart, which the buffers' shapes read: each
+        // binds no buffer here at an offset the alignment does not divide, and they hold every slot
+        // the state's views hold now. A slot leaves those for good, and another encoder of the
+        // state may leave one out after this table read them, so `kept` may hold more than a
+        // table read whole now would, never fewer.
+        let now = views
+            .of(stage)
+            .map_or(0, |slots| slots.load(Ordering::Relaxed));
+        assert!(
+            now & !kept.at_bind_views == 0,
+            "{DIFFERS}: {stage:?} tells the view base alignment apart at {:#x}, the state's views \
+             at {now:#x}",
+            kept.at_bind_views
+        );
+        let mut told = kept.at_bind_views;
+        while told != 0 {
+            let index = told.trailing_zeros();
+            told &= told - 1;
+            let moved = !self.bytes.contains_key(&index)
+                && (self.buffers.get(&index)).is_some_and(|(_, offset)| {
+                    views.alignment != 0 && !offset.is_multiple_of(u64::from(views.alignment))
+                });
+            assert!(
+                !moved,
+                "{DIFFERS}: {stage:?} buffer {index} tells the view base alignment {} apart at an \
+                 offset it does not divide",
+                views.alignment
+            );
+        }
         // A buffer slot as `stage_table_reading` reads it: inline bytes where they are bound,
         // else the buffer within its length, and nothing where the function reads it unbound.
         let buffer = |index: u32| {

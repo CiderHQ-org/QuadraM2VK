@@ -928,10 +928,12 @@ mod bind_serde_round_trips {
             },
         );
         table.threadgroup_lengths.insert(0, 1024);
+        table.at_bind_views = 0b101;
         let mut stages = BTreeMap::new();
         stages.insert(Stage::Kernel, table);
         round_trip(&BindState {
             stages,
+            view_base_alignment: 64,
             used_resources: vec![UsedResource {
                 class: ResourceClass::Heap,
                 gpu_address: Some(0x2_0000_0000),

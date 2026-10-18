@@ -392,7 +392,7 @@ mod unused_bits_load;
 mod vertex_reach;
 mod vertex_strides;
 
-use bound::{Bound, Now};
+use bound::{Bound, EqualShapes, Now, Recorded};
 use replay::{
     DrawIndexed, DrawIndexedIndirect, DrawIndexedPatches, DrawIndexedPatchesIndirect, DrawPatches,
     DrawPatchesIndirect, Samplers,
@@ -5061,6 +5061,7 @@ impl RenderCommandEncoder {
         let interface = &pipeline.base().interface;
         let state = &mut live.state;
         let views = pipeline.at_bind_views();
+        reshape.field(&mut state.view_base_alignment, views.alignment());
         let tables = [
             (Stage::Vertex, pass_start.or(Stage::Vertex, &self.vertex)),
             (Stage::Fragment, &self.fragment),
@@ -5083,6 +5084,7 @@ impl RenderCommandEncoder {
                 continue;
             }
             counts.stage_table_read();
+            table.refresh_reading(kept, (stage, interface), (maps, views), &mut reshape);
         }
         let stamps = tables.map(|(_, table)| table.stamp());
         live.read_from
@@ -8184,7 +8186,14 @@ impl RenderCommandEncoder {
                 binding::SetWrite::push_into(&writes, objects.immutable_pushes(), &mut live.pushed);
                 &live.pushed
             }
+            false => {
+                // SAFETY: the set was just allocated and no command uses it yet; every buffer,
+                // view and sampler written is live (the command buffer retains them below, and a
+                // refusal leaves the set unused in its pool).
+                unsafe { binding::write_sets(&device, set.as_slice(), &writes) }?;
                 &[]
+            }
+        };
         // The Vulkan draws: the binder's, the index bounds pass's two, or the index rewrite
         // pass's one.
         let sized = device.shared().sized_index_bind;
@@ -8588,6 +8597,9 @@ impl RenderCommandEncoder {
         }
         // Recording starts here: nothing below can be refused.
         self.driver_restarts |= tessellation.is_some_and(|t| !t.emulated);
+        if !pushed.is_empty() {
+            device.shared().counts.draw_pushing_set_zero();
+        }
         if let Some(made) = made {
             self.shadow = Some(made);
         }
@@ -8762,7 +8774,7 @@ impl RenderCommandEncoder {
                 DrawPipeline::Making(_) => None,
             };
             let mut owned = Vec::new();
-            let mut states_recorded = 0;
+            let mut states_recorded = Recorded::default();
             // A draw read through snapshots records its recordings twice: every snapshot draw,
             // then every drawing draw (`render/snapshot.rs`).
             let phases: &[Option<snapshot::Phase>] = match pair_base {
@@ -8822,9 +8834,13 @@ impl RenderCommandEncoder {
                                 raw: device.shared().vk(),
                                 command_buffer: self.current.draws,
                                 layout: objects.layout(),
+                                shape: objects.set_zero_shape(),
                                 pipeline: made_now.unwrap_or_default(),
                                 sets: set.as_slice(),
                                 pushed,
+                                push_descriptor: device.shared().push_descriptor,
+                                pushes_after_pipeline_binds: (device.shared())
+                                    .pushes_after_pipeline_binds,
                                 heap: heap_set,
                                 push,
                                 vertex_buffers,
@@ -8865,7 +8881,7 @@ impl RenderCommandEncoder {
                     }
                 }
             }
-            device.shared().counts.draw_states_recorded(states_recorded);
+            states_recorded.count(&device.shared().counts);
             if let Some((making, state, draws, query)) = split {
                 // The record's times: the pipeline's, then those of the other `VkPipeline`s the
                 // draw records, made at the draw, set once the making made it. Every copy of the
@@ -9505,8 +9521,18 @@ struct Recording<'a> {
     raw: &'a ash::Device,
     command_buffer: vk::CommandBuffer,
     layout: vk::PipelineLayout,
+    /// The shape of the layout's set 0 and push-constant ranges
+    /// (`VariantObjects::set_zero_shape`).
+    shape: u64,
     pipeline: vk::Pipeline,
     sets: &'a [vk::DescriptorSet],
+    /// Set 0's descriptors, where the variant pushes set 0 (then `sets` is empty), and the push
+    /// command.
+    pushed: &'a [binding::SetWrite],
+    push_descriptor: Option<vk::PFN_vkCmdPushDescriptorSetKHR>,
+    /// After a pipeline bind the draw's push of set 0 carries at least one write
+    /// (`DeviceShared::pushes_after_pipeline_binds`).
+    pushes_after_pipeline_binds: bool,
     /// Set 1, the command buffer's heap set of the variant, when the variant has one.
     heap: Option<vk::DescriptorSet>,
     push: &'a [binding::PushWrite],
@@ -9539,7 +9565,9 @@ impl Recording<'_> {
     fn owned(&self) -> OwnedRecording {
         OwnedRecording {
             layout: self.layout,
+            shape: self.shape,
             sets: self.sets.to_vec(),
+            pushed: self.pushed.to_vec(),
             heap: self.heap,
             push: self.push.to_vec(),
             vertex_buffers: self.vertex_buffers.to_vec(),
@@ -9564,19 +9592,45 @@ impl Recording<'_> {
     /// is live until the command buffer completes, and `bound` is the record of what the draws
     /// recorded into it bound (each recorded through it). With a pair, the pass is one
     /// `render_target` made, of no views (`snapshot::Pair::record`).
-    unsafe fn record(&self, bound: &mut Bound) -> u64 {
+    unsafe fn record(&self, bound: &mut Bound) -> Recorded {
         let (raw, cb) = (self.raw, self.command_buffer);
         let dynamic = |state| self.dynamic.contains(&state);
         bound.follow(cb);
         let mut recorded = 0;
+        let mut writes_pushed = 0;
+        let mut equal_shapes = EqualShapes::default();
         // SAFETY: the caller's contract; the extended commands exist wherever the pipeline makes
         // their states dynamic (checked by the draw).
         unsafe {
-            if bound.pipeline(self.pipeline, self.dynamic) {
+            if bound.pipeline(
+                self.pipeline,
+                self.dynamic,
+                self.pushes_after_pipeline_binds,
+            ) {
                 raw.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
                 recorded += 1;
             }
-            if !self.sets.is_empty() && bound.sets(self.layout, 0, self.sets) {
+            if let Some(push) = self.push_descriptor.filter(|_| !self.pushed.is_empty()) {
+                let (writes, if_shared) = bound.pushed_set(self.layout, self.shape, self.pushed);
+                writes_pushed = writes.len() as u64;
+                if let Some(if_shared) = if_shared {
+                    equal_shapes = EqualShapes {
+                        switches: 1,
+                        carried: writes_pushed,
+                        if_shared,
+                    };
+                }
+                if !writes.is_empty() {
+                    binding::push_set(
+                        push,
+                        cb,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        self.layout,
+                        writes,
+                    );
+                    recorded += 1;
+                }
+            } else if !self.sets.is_empty() && bound.sets(self.layout, 0, self.sets) {
                 raw.cmd_bind_descriptor_sets(
                     cb,
                     vk::PipelineBindPoint::GRAPHICS,
@@ -9760,7 +9814,11 @@ impl Recording<'_> {
                 }
             }
         }
-        recorded
+        Recorded {
+            states: recorded,
+            writes_pushed,
+            equal_shapes,
+        }
     }
 }
 

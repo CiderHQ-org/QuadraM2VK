@@ -33,6 +33,7 @@
 
 use super::graphics::GraphicsKey;
 use super::objects::{SamplerSet, StageObject};
+use super::shared_layouts::SharedLayout;
 use super::RegionKey;
 use crate::device::DeviceShared;
 use crate::release;
@@ -156,36 +157,20 @@ impl StepNumbers {
     }
 }
 
-/// A released instance's objects.
+/// A released instance's objects. They own no Vulkan object of their own: their immutable
+/// samplers, layouts and stages' modules are the device's (`objects::SamplerSet`,
+/// `shared_layouts.rs`, `content_keyed.rs`). Dropping them lets go of their shares, and only the
+/// device's maps destroy each, where a program's call settles it or at the device's teardown,
+/// after these.
 pub(crate) struct KeptObjects {
     pub(crate) stages: Vec<StageObject>,
     pub(crate) samplers: Arc<SamplerSet>,
-    pub(crate) set_layouts: Vec<vk::DescriptorSetLayout>,
-    pub(crate) layout: vk::PipelineLayout,
+    /// Its set layouts and pipeline layout, a share of the device's (`shared_layouts.rs`).
+    pub(crate) layout: Arc<SharedLayout>,
     /// The digest the variant's makings' records are named by (`objects::variant_content`).
     pub(crate) content: metal2vulkan::cache::Hash256,
     /// Each stage's words' digest (`objects::words_digest`), in stage order.
     pub(crate) words: std::sync::Arc<[metal2vulkan::cache::Hash256]>,
-}
-
-impl KeptObjects {
-    /// Destroy them, released by their last holder. Their immutable samplers are the device's
-    /// set (`objects::SamplerSet`): dropping these objects lets go of it, and the device's map
-    /// destroys it where a program's call settles it.
-    pub(crate) fn destroy(&self, shared: &DeviceShared) {
-        let raw = shared.vk();
-        // SAFETY: released by their last holder, so no pending command uses them; destroying a
-        // null handle is a no-op.
-        unsafe {
-            release::object(raw, self.layout);
-            for &set_layout in &self.set_layouts {
-                release::object(raw, set_layout);
-            }
-        }
-        // The stages' modules are the device's: dropping these objects lets go of their shares,
-        // and only the device's map destroys each, where a program's call settles it or at the
-        // device's teardown, after these (`content_keyed.rs`).
-    }
 }
 
 /// A kept `VkPipeline`: its place, and whether its specialized notices wait for a draw's first
@@ -213,12 +198,10 @@ struct Entry {
 }
 
 impl Entry {
+    /// Destroy its pipelines; dropping it lets go of its objects' shares.
     fn destroy(&self, shared: &DeviceShared) {
-        if let Some(objects) = &self.objects {
-            objects.destroy(shared);
-        }
         for pipeline in &self.pipelines {
-            // SAFETY: as for the objects.
+            // SAFETY: released by its last holder, so no pending command uses it.
             unsafe { release::object(shared.vk(), pipeline.raw) };
         }
     }
@@ -237,13 +220,11 @@ impl Arrival {
         }
     }
 
+    /// Destroy its pipeline; dropping it lets go of its objects' shares.
     fn destroy(&self, shared: &DeviceShared) {
-        match self {
-            Arrival::Objects(_, objects) => objects.destroy(shared),
-            Arrival::Pipeline(_, pipeline) => {
-                // SAFETY: released by its last holder.
-                unsafe { release::object(shared.vk(), pipeline.raw) };
-            }
+        if let Arrival::Pipeline(_, pipeline) = self {
+            // SAFETY: released by its last holder.
+            unsafe { release::object(shared.vk(), pipeline.raw) };
         }
     }
 }
@@ -303,14 +284,12 @@ impl Entries {
     /// `VkPipeline`s.
     fn apply(&mut self, shared: &DeviceShared, arrival: Arrival) {
         match arrival {
-            Arrival::Objects(instance, objects) => match self.entry(shared, instance) {
-                Some(entry) => {
-                    if let Some(old) = entry.objects.replace(objects) {
-                        old.destroy(shared);
-                    }
+            Arrival::Objects(instance, objects) => {
+                // An earlier release's objects, or these where no entry takes them, are dropped.
+                if let Some(entry) = self.entry(shared, instance) {
+                    entry.objects = Some(objects);
                 }
-                None => objects.destroy(shared),
-            },
+            }
             Arrival::Pipeline(instance, pipeline) => match self.entry(shared, instance) {
                 // The instance made its place again after taking the first back: one is enough.
                 Some(entry) if !entry.pipelines.iter().any(|p| p.place == pipeline.place) => {

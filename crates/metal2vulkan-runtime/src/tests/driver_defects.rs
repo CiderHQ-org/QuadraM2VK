@@ -21,16 +21,19 @@ const PREPROCESS: RuntimeDriverDefect = RuntimeDriverDefect::ImplicitPreprocessA
 const PAST_HEIGHT: RuntimeDriverDefect = RuntimeDriverDefect::ExplicitPlaneRowsPastHeight;
 const COUNTS: RuntimeDriverDefect = RuntimeDriverDefect::OcclusionCountPerColorOutput;
 const FREES: RuntimeDriverDefect = RuntimeDriverDefect::FreedAddressMemoryFailsPendingWork;
+const PUSHES: RuntimeDriverDefect = RuntimeDriverDefect::PushedBufferSizesUnset;
+const STALE_PUSHES: RuntimeDriverDefect =
+    RuntimeDriverDefect::PushedDescriptorsStaleAfterPipelineBinds;
 
 /// Every committed profile's driver has its defects at every release and GPU but those a probe
 /// found clean: MoltenVK the multisampled depth/stencil colour copies, the inexact depths past
 /// `[0, 1]`, the crashing 2D views of a 3D image in lazily allocated memory, the pipeline cache
 /// compiled at load, the copies of compressed images that rewrite texels, the reads of command
-/// buffers after their signal and the frees that fail pending work; lavapipe the colour copies, the depth/stencil resolve of the
-/// first layer and level and the explicit plane's rows past its height; RADV the multisampled copies that convert float NaNs, and the implicit
-/// preprocessing after an execution set on every GPU but the 780M at 26.2.4, measured clean; ANV
-/// the compressed image's short size and the occlusion count per color output on every GPU (Arrow
-/// Lake's, not measured, too); NVIDIA's the
+/// buffers after their signal, the frees that fail pending work and the pushed sets' unset buffer
+/// sizes; lavapipe the colour copies, the depth/stencil resolve of the
+/// the compressed image's short size, the occlusion count per color output and the pushed
+/// descriptors a pipeline bind leaves stale on every GPU (Arrow Lake's, not measured, too);
+/// NVIDIA's the
 /// stencil colour copies on every GPU but the RTX 5080 Laptop GPU at 615.71.09, measured clean (the
 /// GTX 1060 and the RTX 5080 desktop GPU, not measured, take them); SwiftShader none.
 #[test]
@@ -54,6 +57,7 @@ fn the_committed_profiles_drivers_have_their_defects() {
                     COPY_REWRITES,
                     LATE_READS,
                     FREES,
+                    PUSHES,
                 ]
             }
             Some(DriverId::MESA_LLVMPIPE) => vec![COPIES, RESOLVES, PAST_HEIGHT],
@@ -63,7 +67,7 @@ fn the_committed_profiles_drivers_have_their_defects() {
                 vec![NAN_COPIES]
             }
             Some(DriverId::MESA_RADV) => vec![NAN_COPIES, PREPROCESS],
-            Some(DriverId::INTEL_OPEN_SOURCE_MESA) => vec![COMPRESSION, COUNTS],
+            Some(DriverId::INTEL_OPEN_SOURCE_MESA) => vec![COMPRESSION, COUNTS, STALE_PUSHES],
             Some(DriverId::NVIDIA_PROPRIETARY)
                 if (desc.device_id, desc.driver_version) == (0x2c19, NVIDIA_615_71_09) =>
             {

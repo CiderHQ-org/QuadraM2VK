@@ -4371,7 +4371,7 @@ fn instantiate(
                 };
                 // The plan put a layout fixed function cannot fetch as bound into its variant,
                 // whose pipeline pulls it; this plan's pipeline is not that one.
-                if !fetchable(vb, &t.vertex_strides, offset_alignment(offset), per_bind) {
+                if !fetchable(vb, &t.vertex_strides, offset_alignment(offset, 0), per_bind) {
                     return Err(internal(format!(
                         "a draw of {:?} as the plan's pulled-vertex-buffer variant binds it; \
                          compile and plan the variant",

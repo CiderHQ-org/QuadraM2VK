@@ -40,6 +40,10 @@
 //! system call, which a timed frame's CPU time would hold; the notices the sink took per frame;
 //! and a frame's share of the device's work counts (`Device::work_counts`) the draw and commit
 //! paths keep, the command buffers begun (by what for: `WorkCounts::command_buffers_begun_encoders`
+//! and kin) and submitted among them, the set-0 writes pushed and those of the switches between
+//! layouts of equal shapes (`WorkCounts::set_zero_equal_shape_switches` and kin), the passes whose
+//! first instance recorded inline and the others by the check that ruled it out
+//! (`WorkCounts::inline_passes`, `WorkCounts::passes_not_inline_actions` and kin)
 //! process's other threads over the timed frames, their waits included, per command buffer (on
 //! Linux, from each thread's `schedstat`), with its user-space part (from its `stat`, in clock
 //! ticks) and how often they slept (their voluntary context switches, from their `status`: the
@@ -65,6 +69,15 @@
 //! which (45%) follow a draw with no call between them, about the share of the consumer's guest's
 //! draws on the Iris Xe (43%). Its draws bind what the draws before them bound, which every draw
 //! of the other runs changes.
+//!
+//! `frame_costs_alternating` measures the plain device with frames of passes whose draws switch
+//! between two pipeline states of one layout at every draw ([`Shape::Alternating`]): the mask's,
+//! and a gathering mask's of the same interface (`zwd_mask_gather`), each draw its shape's bytes
+//! and the mask texture and sampler set once a pass, the passes loading their layers as
+//! [`GUEST_LOADS`]: 640 draws, 600 switches a frame. The
+//! consumer's guest's passes switch so between states whose layouts are defined alike, which share
+//! one layout (`WorkCounts::pipeline_layouts_shared`): its lines give what a draw's push of set 0
+//! carries there.
 //!
 //! Ignored by default: a measurement, not a check. Run it by name with `--run-ignored all`, in a
 //! build with `--cfg m2v_system_alloc` for the times, whose lib test binary keeps the system
@@ -264,6 +277,15 @@ impl Run {
             false => device,
             true => format!("{device}, draws repeated with no call before them"),
         };
+            Shape::Alternating { buffers, draws } => format!(
+                "{device}, {buffers} command buffers of 1 pass of {draws} masked shapes \
+                 alternating between two pipeline states of one layout, the guest's loads"
+            ),
+    /// `buffers` command buffers of one pass of `draws` masked shapes, which switch between the
+    /// mask's pipeline state and the gathering mask's ([`Workload::gather`]) at every draw,
+    /// loading as [`GUEST_LOADS`].
+    Alternating { buffers: usize, draws: usize },
+            Shape::Alternating { buffers, draws } => vec![vec![draws]; buffers],
         }
     }
 }
@@ -330,6 +352,10 @@ struct Workload {
     /// Six `UInt16` indices, 0 to 5, and the rectangles' corners, one `float4` a draw of a frame.
     indices: Buffer,
     rects: Buffer,
+    /// In an alternating run ([`Shape::Alternating`]), a gathering mask's pipeline state of one
+    /// sample (`zwd_quad`, `zwd_mask_gather`): the mask's interface, so a layout defined as the
+    /// mask's, and another variant.
+    gather: Option<RenderPipelineState>,
 }
 
 /// A function of `library`, its constant 0 (`zwd_variant`) 0.
@@ -513,8 +539,14 @@ impl Workload {
             mask: sampled(&device, [255, 255, 255, 128]),
             targets,
             multisampled: target(&device, 4),
-            indices: buffer_with(&device, &indices).unwrap(),
-            rects: buffer_with(&device, &rects).unwrap(),
+            gather: matches!(shape, Shape::Alternating { .. }).then(|| {
+                pipeline(
+                    &device,
+                    function(&zwd, "zwd_quad"),
+                    function(&zwd, "zwd_mask_gather"),
+                    1,
+                )
+            }),
             device,
         }
     }
@@ -545,11 +577,24 @@ impl Workload {
         descriptor
     }
 
-    /// Draw `draw` of pass `pass` (the module docs), its state changes first.
-    fn draw(&self, encoder: &mut RenderCommandEncoder, pass: usize, draw: usize) {
-        let pipelines = &self.pipelines[usize::from(pass % RESOLVED == RESOLVED - 1)];
-        let n = pass * DRAWS + draw;
-        match draw {
+        if let Some(gather) = &self.gather {
+            let state = match draw % 2 {
+                0 => &self.pipelines[0].masked,
+                _ => gather,
+            };
+            encoder.set_render_pipeline_state(state).unwrap();
+            if draw == 0 {
+                encoder.set_fragment_texture(Some(&self.mask), 0).unwrap();
+                encoder
+                    .set_fragment_sampler_state(Some(&self.sampler), 0)
+                    .unwrap();
+            }
+            let shape = shape(n);
+            encoder.set_vertex_bytes(&shape, 0).unwrap();
+            encoder.set_fragment_bytes(&shape, 0).unwrap();
+            self.draw_call(encoder);
+            return;
+        }
             0 | 1 | 5 => {
                 if draw != 1 {
                     encoder.set_render_pipeline_state(&pipelines.rect).unwrap();
@@ -1214,6 +1259,7 @@ fn measure(runs: &[Run]) {
             per_frame(|c| c.commands_noted_as_before),
             per_frame(|c| c.graphics_pipelines_looked_up),
             per_frame(|c| c.draw_states_recorded),
+            per_frame(|c| c.draws_pushing_set_zero),
             per_frame(|c| c.argument_tables_retained),
             per_frame(|c| c.command_pools_made),
             per_frame(|c| c.timeline_waits),
@@ -1222,6 +1268,15 @@ fn measure(runs: &[Run]) {
             per_frame(|c| c.commits_handed_off),
             (checks - checks_before) as f64 / TIMED as f64,
             per_frame(|c| c.render_passes_made),
+        );
+        eprintln!(
+            "FRAME-COST {name} {label}: a frame's set 0: {:.1} writes pushed; {:.1} switches \
+             between layouts of equal shapes, which pushed {:.1} of them and would push {:.1} if \
+             those layouts were one",
+            per_frame(|c| c.set_zero_writes_pushed),
+            per_frame(|c| c.set_zero_equal_shape_switches),
+            per_frame(|c| c.set_zero_writes_on_equal_shape_switches),
+            per_frame(|c| c.set_zero_writes_if_shapes_shared),
         );
         );
         eprintln!(
@@ -1347,6 +1402,17 @@ fn frame_costs_announced() {
 #[ignore = "a measurement, not a check: run by name with --run-ignored all"]
 fn frame_costs_repeating() {
     measure(&[Run::REPEATING]);
+}
+
+/// Passes whose draws switch between two pipeline states of one layout at every draw
+/// ([`Shape::Alternating`]): 40 command buffers of one pass of 16 draws, 600 switches a frame.
+#[test]
+#[ignore = "a measurement, not a check: run by name with --run-ignored all"]
+fn frame_costs_alternating() {
+    measure(&[Run::shaped(Shape::Alternating {
+        buffers: 40,
+        draws: 16,
+    })]);
 }
 
 #[test]

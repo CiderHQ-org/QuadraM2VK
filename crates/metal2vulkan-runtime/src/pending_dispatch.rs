@@ -25,7 +25,7 @@
 //!   `CommandBuffer::failed_pipeline` names the dispatch: its encoder's place and its order among
 //!   the encoder's dispatches, the state, its variant and specialization, and the driver's error.
 
-use super::binding::PushWrite;
+use super::binding::{self, PushWrite, SetWrite};
 use super::command_buffer::CommandBuffer;
 use super::encoder::{EncoderCore, RecordedSegment};
 use super::error::{Error, FailedPipeline, FailedState};
@@ -47,6 +47,9 @@ pub(super) struct Recording {
     pub(super) layout: vk::PipelineLayout,
     /// Set 0, where the variant binds one.
     pub(super) set: Option<vk::DescriptorSet>,
+    /// Set 0's writes, where the variant pushes it (`pipeline::objects::pushes_set_zero`):
+    /// pushed with the device's push command (`Vk::push_descriptor`).
+    pub(super) pushed: Vec<SetWrite>,
     /// Set 1, the heap, where the variant has one.
     pub(super) heap: Option<vk::DescriptorSet>,
     pub(super) preprocess: Option<FlatPreprocess>,
@@ -74,15 +77,26 @@ impl Recording {
             if let Some(preprocess) = &self.preprocess {
                 preprocess.record(raw, command_buffer, self.gates.first());
             }
-            if let Some(set) = self.set {
-                raw.cmd_bind_descriptor_sets(
+            match raw.push_descriptor().filter(|_| !self.pushed.is_empty()) {
+                Some(push) => binding::push_set(
+                    push,
                     command_buffer,
                     vk::PipelineBindPoint::COMPUTE,
                     self.layout,
-                    0,
-                    &[set],
-                    &[],
-                );
+                    &self.pushed,
+                ),
+                None => {
+                    if let Some(set) = self.set {
+                        raw.cmd_bind_descriptor_sets(
+                            command_buffer,
+                            vk::PipelineBindPoint::COMPUTE,
+                            self.layout,
+                            0,
+                            &[set],
+                            &[],
+                        );
+                    }
+                }
             }
             if let Some(heap) = self.heap {
                 raw.cmd_bind_descriptor_sets(

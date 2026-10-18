@@ -40,7 +40,10 @@
 use super::argument_buffers::{self, FieldKey};
 use super::imageblock::{self, Cells};
 use super::tables::{function_tables, FunctionTable};
-use super::{function_constants, require_case_families, resources, select_range, BufferAddress};
+use super::{
+    function_constants, require_case_families, resources, select_range, views_told_apart,
+    BufferAddress,
+};
 use crate::air::reflect::FragmentImageblock;
 use crate::case::indirect_commands::CommandBufferResource;
 use crate::case::out_of_bounds::OutOfBoundsTarget;
@@ -1213,7 +1216,8 @@ pub fn synthetic_address(stage: ShaderStage, index: u32) -> BufferAddress {
 /// and a patch draw's factor buffer, its whole length at the shared offset and instance stride,
 /// with Metal's default scale (`executor_contract::tessellation`); and the draw's depth/stencil
 /// descriptor, the one the Metal oracle sets (`RenderCase::depth_stencil_state`), which a
-/// pipeline's shader-side stencil reads as push data.
+/// pipeline's shader-side stencil reads as push data; telling the executor's view base alignment
+/// apart ([`views_told_apart`]).
 pub fn bind_state(
     case: &RenderCase,
     addresses: &BTreeMap<(ShaderStage, u32), BufferAddress>,
@@ -1282,7 +1286,7 @@ pub fn bind_state(
     }
     state.argument_samplers = argument_buffers::argument_samplers(case.argument_buffer_samplers())?;
     state.depth_stencil = case.depth_stencil_state.descriptor;
-    Ok(state)
+    Ok(views_told_apart(state))
 }
 
 /// The bind table of `function`'s own resources at `stage`: its buffers and visible function

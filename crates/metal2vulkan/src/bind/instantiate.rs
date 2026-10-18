@@ -404,6 +404,23 @@ pub(crate) enum RangeError {
     TooLarge { needed: u64 },
 }
 
+/// Whether [`descriptor_range`] starts the range of a slot with `window` at `bind_offset` for the
+/// descriptor base alignment `alignment` (`A`, at least 4 used), so its residual is 0, wherever
+/// the bind offset lies before the padded end of the allocation: the bind offset is a multiple of
+/// `A`, and the window is `Whole` or starts in `[0, A)` (`align_down(bind_offset + start, A)` is
+/// then the bind offset, and a range from an aligned bind offset inside the allocation is at least
+/// 16 bytes, so it is never widened down). At or past the end, where every byte the slot reaches
+/// lies outside the bound buffer, the range is widened down into the allocation and the residual
+/// is not 0. The plan specializes `SpecKey::RangeAtBindOffset` on it.
+pub(crate) fn starts_at_bind(bind_offset: u64, window: Window, alignment: u64) -> bool {
+    let a = alignment.max(4);
+    bind_offset.is_multiple_of(a)
+        && match window {
+            Window::Whole => true,
+            Window::Bounded { start, .. } => u64::try_from(start).is_ok_and(|s| s < a),
+        }
+}
+
 /// The descriptor range and the `SlotBindOffset` residual of a descriptor-form slot, in checked
 /// `i128` arithmetic, for an allocation of `length` bytes (padded to 16) bound at `bind_offset`,
 /// with the slot's proven `window`, the descriptor base `alignment` `A` (at least 4 is used; a
@@ -469,7 +486,8 @@ pub(crate) fn bound_buffer(
         .stages
         .get(&slot.stage)
         .and_then(|t| t.buffers.get(&slot.index));
-    if BoundKind::of(b.map(BoundBuffer::shape).as_ref()) != expected {
+    // The kind alone is compared, which no offset class changes.
+    if BoundKind::of(b.map(|b| b.shape(0)).as_ref()) != expected {
         return Err(internal(format!(
             "the bind state's shape differs from the plan's at {slot:?}"
         )));

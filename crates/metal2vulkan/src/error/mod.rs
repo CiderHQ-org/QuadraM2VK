@@ -881,6 +881,20 @@ pub enum RuntimeDriverDefect {
     /// buffer's deallocator waiting with it, announced (`host-deallocator-delayed`). The
     /// program's own submissions to the runtime's queues are not waited for.
     FreedAddressMemoryFailsPendingWork,
+    /// `vkCmdPushDescriptorSet` writes the descriptors it pushes but not the sizes of their
+    /// buffers that a shader reads back (a storage buffer's runtime array length,
+    /// `OpArrayLength`), which the driver takes from `vkCmdBindDescriptorSets` alone: a pushed
+    /// buffer's length reads 0, so the accesses a shader bounds by it read and write nothing.
+    /// Nothing is refused: the runtime binds set 0 there, as on a device without the push
+    /// command.
+    PushedBufferSizesUnset,
+    /// Descriptors of set 0 pushed (`vkCmdPushDescriptorSet`) before a bind of another pipeline
+    /// of the same layout, which Vulkan keeps for it (Pipeline Layout Compatibility), are not
+    /// what that pipeline reads where no push follows the bind: a uniform buffer it reads
+    /// through its descriptor reads zeros there after a pipeline that read the same buffer's
+    /// constants at fixed offsets. Nothing is refused: the first draw after each pipeline bind
+    /// there pushes at least one of set 0's descriptors, those that changed or else the first.
+    PushedDescriptorsStaleAfterPipelineBinds,
 }
 
 /// One device capability a refusal can name.

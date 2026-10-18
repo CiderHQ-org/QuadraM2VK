@@ -114,6 +114,20 @@ fn states() -> Vec<BindState> {
         with(|s| {
             vertex(s).buffers.insert(0, buffer(256, 2));
         }),
+        // A view base alignment no slot tells apart, or a slot that tells apart none, or one
+        // that tells it apart at an offset it does not divide, all of the base's shape; one that
+        // tells it apart where it divides the offset, of another.
+        with(|s| s.view_base_alignment = 64),
+        with(|s| vertex(s).at_bind_views = 1),
+        with(|s| {
+            s.view_base_alignment = 64;
+            vertex(s).at_bind_views = 1;
+            vertex(s).buffers.insert(0, buffer(256, 16));
+        }),
+        with(|s| {
+            s.view_base_alignment = 64;
+            vertex(s).at_bind_views = 1;
+        }),
         with(|s| {
             vertex(s).buffers.insert(
                 0,
@@ -261,10 +275,40 @@ fn a_state_has_exactly_the_shape_it_makes() {
             );
         }
     }
-    // The states of the base's shape (the base, the four its comment names, and the base with
-    // another argument sampler of the same shape) and the used resources' two of one shape: each
-    // against the others of its shape.
-    assert_eq!(same, 6 * 5 + 2, "pairs of one shape");
+    // The states of the base's shape (the base, the four its comment names, the three of a view
+    // base alignment told apart nowhere it divides an offset, and the base with another argument
+    // sampler of the same shape) and the used resources' two of one shape: each against the
+    // others of its shape.
+    assert_eq!(same, 9 * 8 + 2, "pairs of one shape");
+}
+
+/// A buffer's bind offset cycling through the multiples of 16 up to 256 at a view base alignment
+/// of 64 keeps one shape where its slot tells no alignment past 4 apart (vertex data, or a view
+/// a runtime left out), and takes two where the slot tells it apart (a uniform view: 64 divides
+/// the offset or not): none past those two, and none new on a second cycle.
+#[test]
+fn a_slot_s_offsets_moving_among_multiples_of_16_keep_their_shapes() {
+    for (views, shapes) in [(0, 1), (1, 2)] {
+        let mut seen = Vec::new();
+        for cycle in 0..2 {
+            for offset in (16..=256).step_by(16) {
+                let state = with(|s| {
+                    s.view_base_alignment = 64;
+                    vertex(s).at_bind_views = views;
+                    vertex(s).buffers.insert(0, buffer(4096, offset));
+                });
+                let shape = state.shape();
+                if !seen.contains(&shape) {
+                    assert_eq!(
+                        cycle, 0,
+                        "a new shape at offset {offset} on the second cycle"
+                    );
+                    seen.push(shape);
+                }
+            }
+        }
+        assert_eq!(seen.len(), shapes, "slots telling apart {views:#b}");
+    }
 }
 
 /// A state that lists used resources is found among shapes that each match it in every other

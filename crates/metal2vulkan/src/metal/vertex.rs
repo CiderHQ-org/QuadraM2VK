@@ -132,7 +132,7 @@ pub fn vertex_alignment(format: VertexFormat) -> Result<u32, Error> {
 }
 
 /// The largest [`vertex_alignment`] of any Metal vertex format: a bind offset this divides meets
-/// every attribute's alignment (`bind::BufferShape::Buffer::offset_alignment` caps there).
+/// every attribute's alignment.
 pub const MAX_VERTEX_ALIGNMENT: u32 = 4;
 
 /// How an attribute's data reaches the shader.

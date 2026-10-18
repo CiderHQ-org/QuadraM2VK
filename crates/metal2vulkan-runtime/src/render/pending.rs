@@ -28,7 +28,7 @@
 //!   buffer the GPU may write since) records each such draw once, its secondary executed by the
 //!   recording that is submitted.
 
-use super::bound::Bound;
+use super::bound::{Bound, Recorded};
 use super::{DrawState, Recording};
 use crate::binding::PushWrite;
 use crate::command_buffer::CommandBuffer;
@@ -49,7 +49,9 @@ use std::sync::Mutex;
 /// device, the command buffer and the pipeline.
 pub(super) struct OwnedRecording {
     pub(super) layout: vk::PipelineLayout,
+    pub(super) shape: u64,
     pub(super) sets: Vec<vk::DescriptorSet>,
+    pub(super) pushed: Vec<crate::binding::SetWrite>,
     pub(super) heap: Option<vk::DescriptorSet>,
     pub(super) push: Vec<PushWrite>,
     pub(super) vertex_buffers: Vec<(u32, vk::Buffer, u64, u64)>,
@@ -169,14 +171,18 @@ impl PendingDraw {
                 query.begin(raw, cb);
             }
             let mut bound = Bound::default();
-            let mut recorded = 0;
+            let mut recorded = Recorded::default();
             for owned in &self.recordings {
                 recorded += Recording {
                     raw,
                     command_buffer: cb,
                     layout: owned.layout,
+                    shape: owned.shape,
                     pipeline: pipeline.raw,
                     sets: &owned.sets,
+                    pushed: &owned.pushed,
+                    push_descriptor: shared.push_descriptor,
+                    pushes_after_pipeline_binds: shared.pushes_after_pipeline_binds,
                     heap: owned.heap,
                     push: &owned.push,
                     vertex_buffers: &owned.vertex_buffers,
@@ -193,7 +199,7 @@ impl PendingDraw {
                 }
                 .record(&mut bound);
             }
-            shared.counts.draw_states_recorded(recorded);
+            recorded.count(&shared.counts);
             if let Some(query) = &self.query {
                 query.end(raw, cb);
             }

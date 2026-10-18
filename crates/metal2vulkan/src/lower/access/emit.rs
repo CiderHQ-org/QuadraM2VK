@@ -275,7 +275,21 @@ pub(super) fn prepare(
         return Err(cx.fail("an access names an undeclared slot view"));
     };
     let residual = cx.push_field(fb, PushField::SlotBindOffset(choice.slot))?;
-    let off = u32_op(fb, BinOp::IAdd, residual, m)?;
+    let shifted = u32_op(fb, BinOp::IAdd, residual, m)?;
+    // Where the binder starts a uniform view's range at the bind offset (`RangeAtBindOffset`), the
+    // residual is 0: the offset alone, a constant for a constant member, which a driver can push.
+    let off = match cx
+        .decl
+        .families
+        .access
+        .at_bind
+        .get(t.slot)
+        .copied()
+        .flatten()
+    {
+        Some(at_bind) => fb.select(at_bind, m, shifted)?,
+        None => shifted,
+    };
     let inb = match (t.check, view.kind) {
         (Check::None, _) => None,
         (Check::InShader, ViewKind::Storage) => match views::storage_bytes(fb, view)? {

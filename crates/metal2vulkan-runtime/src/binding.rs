@@ -868,6 +868,20 @@ fn fill_holes(filled: &mut [PushWrite], holes: &[Hole]) -> Result<(), Error> {
     }
     Ok(())
 }
+
+/// One descriptor of a pushed set 0: [`Write`]'s, without its set number and keeper.
+#[derive(Clone, Copy)]
+pub(super) struct SetWrite {
+    pub(super) binding: u32,
+    pub(super) element: u32,
+    pub(super) ty: vk::DescriptorType,
+    pub(super) info: Info,
+}
+
+impl SetWrite {
+    /// Set 0's `writes`, then a variant's `immutable` pushes (`VariantObjects::immutable_pushes`):
+    /// what a draw pushes.
+    pub(super) fn pushed(writes: &[Write], immutable: &[SetWrite]) -> Vec<SetWrite> {
         let mut pushed = Vec::new();
         Self::push_into(writes, immutable, &mut pushed);
         pushed
@@ -884,6 +898,135 @@ fn fill_holes(filled: &mut [PushWrite], holes: &[Hole]) -> Result<(), Error> {
             info: write.info,
         });
         pushed.extend(writes.chain(immutable.iter().copied()));
+    }
+
+    /// Whether it writes what `other` writes.
+    pub(super) fn same(&self, other: &SetWrite) -> bool {
+        (self.binding, self.element, self.ty) == (other.binding, other.element, other.ty)
+            && match (self.info, other.info) {
+                (Info::Buffer(a), Info::Buffer(b)) => {
+                    (a.buffer, a.offset, a.range) == (b.buffer, b.offset, b.range)
+                }
+                (Info::Image(a), Info::Image(b)) => {
+                    (a.sampler, a.image_view, a.image_layout)
+                        == (b.sampler, b.image_view, b.image_layout)
+                }
+                (Info::Texel(a), Info::Texel(b)) => a == b,
+                _ => false,
+            }
+    }
+}
+
+/// `vkCmdPushDescriptorSet` by its core name from Vulkan 1.4 (`api`), else by
+/// `VK_KHR_push_descriptor`'s where the device enabled it; none otherwise.
+///
+/// # Safety
+///
+/// `device` is live, of `instance`, made with `enabled` enabled.
+pub(crate) unsafe fn push_descriptor_command(
+    instance: &ash::Instance,
+    device: &ash::Device,
+    api: metal2vulkan::device::ApiVersion,
+    enabled: &metal2vulkan::device::EnableSet,
+) -> Option<vk::PFN_vkCmdPushDescriptorSetKHR> {
+    let name: &std::ffi::CStr = if api >= (metal2vulkan::device::ApiVersion { major: 1, minor: 4 })
+    {
+        c"vkCmdPushDescriptorSet"
+    } else if enabled
+        .extensions
+        .contains(&metal2vulkan::device::VkExtension::KhrPushDescriptor)
+    {
+        c"vkCmdPushDescriptorSetKHR"
+    } else {
+        return None;
+    };
+    // SAFETY: the caller's; a command the device does not have is null.
+    let command = unsafe { instance.get_device_proc_addr(device.handle(), name.as_ptr()) }?;
+    // SAFETY: the device gave the command of this name, and both names share its signature.
+    Some(unsafe {
+        std::mem::transmute::<unsafe extern "system" fn(), vk::PFN_vkCmdPushDescriptorSetKHR>(
+            command,
+        )
+    })
+}
+
+/// Push `writes` as set 0 of `layout` at `point` into `command_buffer`, in one
+/// `vkCmdPushDescriptorSet` (`push`): their infos on the stack up to [`WRITES_AT_ONCE`], else on
+/// the heap.
+///
+/// # Safety
+///
+/// `command_buffer` is recording, `layout`'s set 0 is a push descriptor set layout, and every
+/// buffer, view and sampler written stays live while the command buffer can run.
+pub(super) unsafe fn push_set(
+    push: vk::PFN_vkCmdPushDescriptorSetKHR,
+    command_buffer: vk::CommandBuffer,
+    point: vk::PipelineBindPoint,
+    layout: vk::PipelineLayout,
+    writes: &[SetWrite],
+) {
+    let count = writes.len();
+    if count <= WRITES_AT_ONCE {
+        let mut buffer_infos = [[vk::DescriptorBufferInfo::default()]; WRITES_AT_ONCE];
+        let mut image_infos = [[vk::DescriptorImageInfo::default()]; WRITES_AT_ONCE];
+        let mut texel_views = [[vk::BufferView::null()]; WRITES_AT_ONCE];
+        let mut raw = [vk::WriteDescriptorSet::default(); WRITES_AT_ONCE];
+        fill_pushed(
+            writes,
+            (&mut buffer_infos, &mut image_infos, &mut texel_views),
+            &mut raw,
+        );
+        // SAFETY: the caller's contract; every array `raw` points at is live for the call.
+        unsafe { push(command_buffer, point, layout, 0, count as u32, raw.as_ptr()) };
+    } else {
+        let mut buffer_infos = vec![[vk::DescriptorBufferInfo::default()]; count];
+        let mut image_infos = vec![[vk::DescriptorImageInfo::default()]; count];
+        let mut texel_views = vec![[vk::BufferView::null()]; count];
+        let mut raw = vec![vk::WriteDescriptorSet::default(); count];
+        fill_pushed(
+            writes,
+            (&mut buffer_infos, &mut image_infos, &mut texel_views),
+            &mut raw,
+        );
+        // SAFETY: as above.
+        unsafe { push(command_buffer, point, layout, 0, count as u32, raw.as_ptr()) };
+    }
+}
+
+/// The infos of a push's `writes` into `infos`, one place each, and its writes into `raw`, each
+/// pointing at its info.
+fn fill_pushed<'a>(
+    writes: &[SetWrite],
+    infos: (
+        &'a mut [[vk::DescriptorBufferInfo; 1]],
+        &'a mut [[vk::DescriptorImageInfo; 1]],
+        &'a mut [[vk::BufferView; 1]],
+    ),
+    raw: &mut [vk::WriteDescriptorSet<'a>],
+) {
+    let (buffer_infos, image_infos, texel_views) = infos;
+    for (i, write) in writes.iter().enumerate() {
+        match write.info {
+            Info::Buffer(info) => buffer_infos[i] = [info],
+            Info::Image(info) => image_infos[i] = [info],
+            Info::Texel(view) => texel_views[i] = [view],
+        }
+    }
+    let infos = buffer_infos
+        .iter()
+        .zip(image_infos.iter())
+        .zip(texel_views.iter());
+    for ((write, ((buffer, image), texel)), raw) in writes.iter().zip(infos).zip(raw) {
+        let set = vk::WriteDescriptorSet::default()
+            .dst_binding(write.binding)
+            .dst_array_element(write.element)
+            .descriptor_type(write.ty);
+        *raw = match write.info {
+            Info::Buffer(_) => set.buffer_info(buffer),
+            Info::Image(_) => set.image_info(image),
+            Info::Texel(_) => set.texel_buffer_view(texel),
+        };
+    }
 }
 
 /// The descriptor writes [`write_sets`] hands the driver in one call: their infos sit on the stack.
