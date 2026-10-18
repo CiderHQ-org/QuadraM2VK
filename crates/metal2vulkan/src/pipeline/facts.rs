@@ -636,6 +636,18 @@ pub enum RuntimeFact {
         blend: crate::pipeline::lower_inputs::BlendEquation,
         kept: crate::vk::ColorComponentFlags,
     },
+    /// On a device that orders framebuffer fetch through rasterization-order input attachments,
+    /// the function writes color attachment `color`, which renders through a view of its word
+    /// (`metal::format::WordAttachment`, an 8-bit sRGB one), under a write mask of some of the
+    /// word's channels: it reads the texel's word through the attachment's input attachment
+    /// (`RuntimeFact::FramebufferFetch`) and writes Metal's word of its output with the fields of
+    /// the channels `kept` (those of the word the descriptor's write mask leaves out) taken from
+    /// the word read. Link writes the whole word, and a pipeline of another write mask there is
+    /// `NeedsInput(FramebufferFetch)`.
+    WordInputMerge {
+        color: u32,
+        kept: crate::vk::ColorComponentFlags,
+    },
     /// The function reads, samples or gathers the sampled color texture (not a texture buffer,
     /// a multisampled or a depth texture) bound to the slot only with `float`, `half` or 32-bit
     /// integer results: bound to a texture of a color format whose numeric class is not the

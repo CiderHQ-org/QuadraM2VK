@@ -102,6 +102,10 @@ pub(crate) fn exact_writes(
         let Some(c) = colors.get(attachment as usize).copied().flatten() else {
             continue;
         };
+        // A word attachment's output is the word the function encodes (`word_colors`).
+        if word_color(attachment, &c, alpha_to_coverage, p).is_some() {
+            continue;
+        }
         let coverage_alpha = attachment == 0 && alpha_to_coverage;
         let write = match metal {
             true => metal_stored(&c),
@@ -377,6 +381,7 @@ pub(crate) fn check(
     });
     if writes_hold(fragment, colors, (alpha_to_coverage, rounding), p)
         && wanted_extended_range(fragment, colors, rounding) == io.extended_range_colors
+        && wanted_word_colors(fragment, colors, alpha_to_coverage, p) == io.word_colors
         && wanted_srgb_fetches(fragment, colors) == io.srgb_fetches
         && wanted_rotated(fragment, colors) == io.rotated_colors
         && wanted_rotated_factors(fragment, colors, p) == io.rotated_factors
@@ -445,6 +450,166 @@ pub(crate) fn extended_range_colors(
             Some((i as u32, write))
         })
         .collect()
+}
+
+/// The word view through which profile `p`'s device renders color attachment `index` of a
+/// render pipeline, described by `c`, that covers by alpha where `alpha_to_coverage`
+/// (`LoweringInputs::word_colors`): `metal::format::WordAttachment::of` the attachment's format,
+/// where the pipeline writes it unblended (or blended with factors one and zero, added, which
+/// Metal stores alike), under a write mask of all of the format's channels or none, or of some of
+/// them where the function merges the word into the texel over its input attachment
+/// ([`merged_word`]), and it is not attachment 0 under alpha-to-coverage (whose coverage reads the
+/// output's alpha as computed). `None` for every other attachment: one the function stores in the
+/// interlocked storage form ([`stored_word`]), or one that takes its format's own attachment, as
+/// the device has it or not.
+pub(crate) fn word_color(
+    index: u32,
+    c: &ColorAttachmentDescriptor,
+    alpha_to_coverage: bool,
+    p: &DeviceProfile,
+) -> Option<metal::format::WordAttachment> {
+    let word = metal::format::WordAttachment::of(c.pixel_format, p)?;
+    let kept = c.write_mask & word_channels(word);
+    let whole = kept.is_empty() || kept == word_channels(word);
+    let merged = merges_over_input(c, word, p);
+    let unblended = !c.blending_enabled || replaces(c);
+    (unblended && (whole || merged) && !(index == 0 && alpha_to_coverage)).then_some(word)
+}
+
+/// The channels of `word`'s fields: Metal's red, green, blue and alpha, in its field order.
+fn word_channels(word: metal::format::WordAttachment) -> metal::ColorWriteMask {
+    use metal::ColorWriteMask as M;
+    [M::RED, M::GREEN, M::BLUE, M::ALPHA]
+        .into_iter()
+        .zip(word.fields())
+        .filter(|(_, f)| f.is_some())
+        .fold(M::NONE, |m, (bit, _)| m | bit)
+}
+
+/// Whether the fragment function merges its word of attachment `c` (a `word` attachment) into the
+/// texel over the attachment's input attachment: a write mask of some of the word's channels, on a
+/// device that orders framebuffer fetch through rasterization-order input attachments
+/// (`lower::fragment`'s `word_input`), for a format whose mask the function compiles as the
+/// descriptor sets it (`lower::fragment::fetch::kept_at_draw` false: the 8-bit sRGB words, where a
+/// packed 16-bit or `RGB9E5Float` word's mask stands for its class).
+fn merges_over_input(
+    c: &ColorAttachmentDescriptor,
+    word: metal::format::WordAttachment,
+    p: &DeviceProfile,
+) -> bool {
+    let channels = word_channels(word);
+    let kept = c.write_mask & channels;
+    let partial = !kept.is_empty() && kept != channels;
+    partial
+        && !crate::lower::fragment::fetch::kept_at_draw(c.pixel_format)
+        && crate::lower::fragment::inputs_order(p)
+}
+
+/// The channels the fragment function keeps from the texel of color attachment `index` of a
+/// render pipeline, described by `c`, that covers by alpha where `alpha_to_coverage`, where it
+/// merges its word into the texel over the attachment's input attachment ([`word_color`],
+/// `lower::fragment`'s `word_input`): those of the word's channels the write mask leaves out.
+/// `None` for every other attachment.
+pub(crate) fn merged_word(
+    index: u32,
+    c: &ColorAttachmentDescriptor,
+    alpha_to_coverage: bool,
+    p: &DeviceProfile,
+) -> Option<metal::ColorWriteMask> {
+    let word = word_color(index, c, alpha_to_coverage, p)?;
+    merges_over_input(c, word, p).then(|| word_channels(word).difference(c.write_mask))
+}
+
+/// The word view of color attachment `c` of a render pipeline on profile `p` whose writes the
+/// fragment function stores in the interlocked storage form (`lower::fragment::fetch`), reading
+/// the word first inside the interlock: a packed 16-bit word attachment
+/// (`metal::format::WordAttachment::of`) written under a blend other than one and zero, added,
+/// whose factors read no second source (Metal's packed 16-bit blend, which the function computes
+/// over the word, `extended_range::Blend::packed16`), or a word attachment other than
+/// `RGB9E5Float`'s written unblended under a write mask of some of the format's channels (the
+/// function merges the fields of the channels the mask keeps), on a device that orders fetch
+/// through the pixel interlock alone.
+/// `None` for every other attachment, and for a write mask of none of the format's channels.
+pub(crate) fn stored_word(
+    c: &ColorAttachmentDescriptor,
+    p: &DeviceProfile,
+) -> Option<metal::format::WordAttachment> {
+    use metal::{BlendFactor as F, ColorWriteMask as M};
+    let word = metal::format::WordAttachment::of(c.pixel_format, p)?;
+    let channels = [M::RED, M::GREEN, M::BLUE, M::ALPHA]
+        .into_iter()
+        .zip(word.fields())
+        .filter(|(_, f)| f.is_some())
+        .fold(M::NONE, |m, (bit, _)| m | bit);
+    let kept = c.write_mask & channels;
+    let partial = !kept.is_empty() && kept != channels;
+    let unblended = !c.blending_enabled || replaces(c);
+    let second = [
+        c.source_rgb_blend_factor,
+        c.destination_rgb_blend_factor,
+        c.source_alpha_blend_factor,
+        c.destination_alpha_blend_factor,
+    ]
+    .iter()
+    .any(|f| {
+        matches!(
+            f,
+            F::Source1Color | F::OneMinusSource1Color | F::Source1Alpha | F::OneMinusSource1Alpha
+        )
+    });
+    // Metal's blend of a packed 16-bit word is built; an 8-bit sRGB word's is not, nor is an
+    // `RGB9E5Float` word's blend or partial mask (its mantissas share the exponent).
+    let packed = matches!(word, metal::format::WordAttachment::Packed16 { .. });
+    let fielded = word != metal::format::WordAttachment::Rgb9e5;
+    let stored = match unblended {
+        true => partial && fielded,
+        false => packed && !kept.is_empty() && !second,
+    };
+    (stored && crate::lower::fragment::interlock_orders(p)).then_some(word)
+}
+
+/// The word attachments of a render pipeline whose color attachments are `colors` (covering by
+/// alpha where `alpha_to_coverage`) on `p`, by color index ([`word_color`]).
+pub(crate) fn word_colors(
+    colors: &[Option<ColorAttachmentDescriptor>],
+    alpha_to_coverage: bool,
+    p: &DeviceProfile,
+) -> BTreeMap<u32, metal::format::WordAttachment> {
+    colors
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| {
+            let word = word_color(i as u32, c.as_ref()?, alpha_to_coverage, p)?;
+            Some((i as u32, word))
+        })
+        .collect()
+}
+
+/// The word attachments the fragment stage `fragment` writes through output variables of
+/// dual-source index 0 in a render pipeline whose color attachments are `colors` (covering by
+/// alpha where `alpha_to_coverage`) on `p`: [`word_colors`]'s, for those attachments.
+pub(crate) fn wanted_word_colors(
+    fragment: &FunctionArtifact,
+    colors: &[Option<ColorAttachmentDescriptor>],
+    alpha_to_coverage: bool,
+    p: &DeviceProfile,
+) -> BTreeMap<u32, metal::format::WordAttachment> {
+    let written: BTreeSet<u32> = fragment
+        .interface
+        .io
+        .outputs
+        .iter()
+        .filter_map(|v| match v.role {
+            IoRole::Color {
+                attachment,
+                index: 0,
+            } => Some(attachment),
+            _ => None,
+        })
+        .collect();
+    let mut out = word_colors(colors, alpha_to_coverage, p);
+    out.retain(|a, _| written.contains(a));
+    out
 }
 
 /// The color attachments of a render pipeline whose color attachments are `colors` held with

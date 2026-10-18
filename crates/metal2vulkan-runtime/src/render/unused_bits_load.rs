@@ -404,6 +404,7 @@ pub(super) fn snorm_minimum_kept(color: &ColorTarget) -> bool {
         && takes(color, true).is_none()
 }
 
+/// Whether `color` is a single-sampled `RGB9E5Float` attachment, loaded and not discarded at the
 /// store, where the load pass does not take it: Metal's pass, once it draws, writes each tile a
 /// draw reaches back through its texels' values, so a word whose largest mantissa is below 256
 /// under an exponent above 0 (one no Metal write leaves) is stored normalized, its mantissas
@@ -411,7 +412,17 @@ pub(super) fn snorm_minimum_kept(color: &ColorTarget) -> bool {
 /// not write (`degrade_shared_exponent`, which reads `DriverFact::TileStoreIsMetals`). The load
 /// pass rewrites them under the exact tile store (`TileStorePolicy::Exact`) where it takes the
 /// attachment.
+pub(super) fn shared_exponent_kept(color: &ColorTarget) -> bool {
+    let target = own(color);
+    let discarded = color.store == StoreAction::DontCare && !color.late_store;
+    target.texture.pixel_format() == PixelFormat::RGB9E5Float
+        && target.samples == 1
+        && color.load == LoadAction::Load
+        && !color.memoryless
+        && !discarded
         && takes(color, true).is_none()
+}
+
 /// The color attachments of a pass's layout that each of a draw's kept-attachment notices names, as
 /// `color {index}, {format:?}`: the extended-range or padded ones the load pass does not take
 /// ([`untaken`], `degrade_unused_bits`) and, on a driver whose pass does not store as Metal's

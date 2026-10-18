@@ -1078,6 +1078,19 @@ pub enum PrecisionNote {
     /// such a buffer may hold a 1-bit alpha). Every other `float` texel write to a normalized
     /// storage texture rounds to Metal's code in the shader.
     ///
+    /// Also: a blend into a packed 16-bit unorm attachment (`B5G6R5Unorm`, `A1BGR5Unorm`,
+    /// `ABGR4Unorm`, `BGR5A1Unorm`) reads what the device's attachment holds, its channels' codes,
+    /// where Metal's tile memory holds the pass's clear and each earlier blend's result finer than
+    /// those codes until the store (measured on an Apple M3 Max under macOS 27.0.1: in a pass that
+    /// clears and blends, and over two blends in one pass, every channel where the two readings
+    /// store different codes stored the finer one's, `half` precision fitting all of them,
+    /// single-sampled and 4x alike; a pass that loads what an earlier pass stored blends against
+    /// the codes). Such a blend may store a code one apart from Metal's. So does the blend the
+    /// function computes into such an attachment the device renders through its word view
+    /// (`metal::format::WordAttachment`), which under fast math also sums a few states otherwise
+    /// than Metal (3,527 of 94,732,288 channels measured a code apart, none further). `RGBA8Unorm`
+    /// and `RGB10A2Unorm` hold their codes there, as the device does.
+    ///
     /// Validation derives no tolerance and no explanation from it: a difference stays a
     /// mismatch for review.
     DeviceColorConversion,

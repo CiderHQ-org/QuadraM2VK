@@ -724,6 +724,18 @@ fn plan_held(
         _ => Vec::new(),
     };
     let wants_attachment = wants(TextureUsage::RENDER_TARGET) && attachment.is_some();
+    // A format the device samples but does not render, whose word it renders, renders through a
+    // view of the word (`metal::format::WordAttachment`): its image keeps the format (an 8-bit
+    // sRGB format the device holds no image of, its UNORM twin), mutable, with the attachment
+    // usage extended to the word's view.
+    let word = match (
+        wants(TextureUsage::RENDER_TARGET),
+        attachment,
+        depth_stencil,
+    ) {
+        (true, None, false) => WordAttachment::of(pf, profile).map(|w| w.word_format()),
+        _ => None,
+    };
     // An 8-bit sRGB texture whose format the device holds no image of at all (`R8G8_SRGB` on
     // NVIDIA) is held in its UNORM twin (`srgb_raw_twin`), which is its storage alias's own view:
     // the twin serves the storage too. Where the device holds the sRGB format, it stays the
@@ -833,6 +845,9 @@ fn plan_held(
             if depth_stencil {
                 flags |= compatible_depth(profile, format, samples);
             }
+        } else if let Some(word) = word.filter(|_| format == direct || Some(format) == unorm_twin) {
+            usage_flags |= attachment_flag(false, profile);
+            views.insert(word);
         } else {
             unavailable |= usage.intersection(TextureUsage::RENDER_TARGET);
         }
@@ -899,20 +914,28 @@ fn plan_held(
             views.insert(raw);
         }
     }
-    // The sRGB twin's views, which Metal makes without `PixelFormatView`.
+    // The sRGB twin's views, which Metal makes without `PixelFormatView`; not the view of the
+    // twin's word (`WordAttachment`), which would make every such render target mutable for a view
+    // few textures take: an attachment view of the twin the device renders only through its word
+    // is refused, as without the word.
     if let Some(twin) = srgb_twin(pf) {
+        let twin_word = WordAttachment::of(twin, profile).map(|w| w.word_format());
         views.extend(
             view_formats(twin, usage_flags, profile)
                 .into_iter()
-                .filter(|&f| compatible(format, f, true)),
+                .filter(|&f| compatible(format, f, true) && Some(f) != twin_word),
         );
     }
     views.insert(format);
     // A usage the image's own format lacks, which a view format has (a storage alias, a sampled
-    // twin), needs extended usage.
+    // twin, a word attachment), needs extended usage.
     let extended = [
         (ImageUsageFlags::SAMPLED, FormatUsage::SampledImage),
         (ImageUsageFlags::STORAGE, FormatUsage::StorageImage),
+        (
+            ImageUsageFlags::COLOR_ATTACHMENT,
+            FormatUsage::ColorAttachment,
+        ),
     ]
     .iter()
     .any(|&(bit, need)| usage_flags.contains(bit) && !profile.supports_format(format, need));
@@ -1020,7 +1043,8 @@ fn plan_depth_twin(
 
 /// The formats of the views the runtime makes of a texture of `pf` for the Vulkan usages in
 /// `usage` on `profile`: its sampled representation, its storage view (the alias, or the direct
-/// format), and its attachment format (the direct format). A view the device cannot make for `pf`
+/// format), and its attachment format (the direct format, or the view of its word where the device
+/// renders that and not the format, `WordAttachment`). A view the device cannot make for `pf`
 /// is left out: a format list naming a format the device lacks is one some drivers make no image
 /// of (ANV, for an `RG8Unorm` render target listing its twin's `R8G8_SRGB`).
 pub(super) fn view_formats(
@@ -1048,6 +1072,10 @@ pub(super) fn view_formats(
             FormatUsage::ColorAttachment
         };
         out.extend(direct_format(pf).filter(|&f| profile.supports_format(f, need)));
+        // A format the device samples but does not render renders through its word's view.
+        if usage.contains(ImageUsageFlags::COLOR_ATTACHMENT) {
+            out.extend(WordAttachment::of(pf, profile).map(|w| w.word_format()));
+        }
     }
     out
 }

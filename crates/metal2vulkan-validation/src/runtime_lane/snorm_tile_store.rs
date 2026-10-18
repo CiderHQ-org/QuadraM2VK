@@ -8,6 +8,7 @@
 //! written back the same way, through their values, so a word whose largest mantissa is below 256
 //! under an exponent above 0 is stored normalized (its mantissas shifted up as its exponent steps
 //! down; measured there too).
+//!
 //! Under `TileStorePolicy::Device`, the default, the runtime keeps the device's load and store
 //! (docs/FAST-PATHS.md), so the texels keep their codes and words, and a draw in such a pass
 //! announces `snorm-minimum-kept` or `shared-exponent-kept`, naming the attachment. Under
@@ -22,10 +23,15 @@ use metal2vulkan::device::{DriverFact, TileStorePolicy};
 use metal2vulkan::metal::{ColorWriteMask, PixelFormat, TextureUsage};
 use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};
 use metal2vulkan_runtime::{
+    BlitOption, Degradation, Error, LoadAction, PipelineOptions, Region, RenderPassDescriptor,
+    ResourceOptions, StoreAction, Texture, TextureDescriptor,
 };
 
 /// The kind a draw in a pass that loads a single-sampled signed normalized color announces.
 pub(super) const SNORM_MINIMUM: [Degradation; 1] = [Degradation::SnormMinimumKept];
+
+/// The kind a draw in a pass that loads a single-sampled `RGB9E5Float` color announces.
+pub(super) const SHARED_EXPONENT: [Degradation; 1] = [Degradation::SharedExponentKept];
 
 /// The signed normalized formats Metal's tile store rewrites: each one's bytes a texel, the bytes
 /// of a channel's minimum code and those of the code above it, which Metal's pass stores.
@@ -192,6 +198,7 @@ fn snorm_minimum_codes(tile_store: TileStorePolicy) {
     }
     quiet(lane, &messages);
 }
+
 /// [`snorm_minimum_codes`] under the default, the device's load and store.
 #[test]
 fn a_drawing_pass_keeps_a_snorm_minimum_code_and_says_so() {
@@ -204,23 +211,64 @@ fn the_exact_tile_store_raises_a_snorm_minimum_code() {
     snorm_minimum_codes(TileStorePolicy::Exact);
 }
 
+/// A pass that loads a 4² `RGB9E5Float` target whose every word is unnormalized (mantissas 1, 2
+/// and 3 under the exponent 20: its largest mantissa below 256) and draws under a write mask of
 /// none of its channels, under `tile_store`: where the device's store is Metal's or the load pass
 /// rewrites the words (one load pass), every word takes Metal's (mantissas 128, 256 and 384 under
 /// the exponent 13) and nothing is announced; else every word stays and `shared-exponent-kept` is
 /// announced once (the device asks for it at each occurrence), naming color 0 and its format. A
 /// pass that loads it and draws nothing announces nothing. A device that renders no
+/// `RGB9E5Float` (refusing its texture or pipeline state) takes neither, and says so.
 fn shared_exponent_words(tile_store: TileStorePolicy) {
+    let pf = PixelFormat::RGB9E5Float;
     let (messages, _cache, lane) = lane_with(|options| {
         options.announce_each = SHARED_EXPONENT.into_iter().collect();
         options.policy.tile_store = tile_store;
     });
+    let name = lane.device.name();
     let (metals, rewritten) = expected(&lane, tile_store);
+    let mut descriptor = TextureDescriptor::texture_2d(pf, SIZE, SIZE, false);
+    descriptor.usage = TextureUsage::RENDER_TARGET;
+    descriptor.resource_options = ResourceOptions::shared();
+    let t = match lane.device.new_texture(&descriptor) {
+        Ok(t) => t,
+        Err(Error::Unsupported(why)) => {
+            println!("SHARED-EXPONENT-SKIP {pf:?} on {name}: {why:?}");
+            quiet(lane, &messages);
+            return;
+        }
+        Err(e) => panic!("{pf:?} on {name}: {e:?}"),
+    };
+    let pipeline = match lane
+        .device
+        .new_render_pipeline_state(&unwritten(&lane, pf), &PipelineOptions::default())
+    {
+        Ok(p) => p,
+        Err(Error::Unsupported(why)) => {
+            println!("SHARED-EXPONENT-SKIP {pf:?} pipeline on {name}: {why:?}");
+            quiet(lane, &messages);
+            return;
+        }
+        Err(e) => panic!("{pf:?} pipeline on {name}: {e:?}"),
+    };
+    let word: u32 = 1 | 2 << 9 | 3 << 18 | 20 << 27;
     let metal: u32 = 128 | 256 << 9 | 384 << 18 | 13 << 27;
+    let bytes = word.to_le_bytes().repeat((SIZE * SIZE) as usize);
+    t.replace_region(Region::new_2d(0, 0, SIZE, SIZE), 0, 0, &bytes, 4 * SIZE, 0)
+        .unwrap();
     let before = load_passes(&lane);
+    lane.run(&pass(&t, LoadAction::Load), |l, e, h| {
+        l.draw(e, h, &pipeline, 0.5)
+    })
+    .unwrap();
     let loads = load_passes(&lane) - before;
+    let got = lane.read(&t, (0, 0), 4, BlitOption::None);
+    let notices = messages.take_notices();
+    assert_eq!(
         loads,
         u64::from(rewritten),
         "{pf:?} {tile_store:?} on {name}: load passes"
+    );
     if metals || rewritten {
         let normalized = metal.to_le_bytes().repeat((SIZE * SIZE) as usize);
         assert!(
@@ -249,6 +297,14 @@ fn shared_exponent_words(tile_store: TileStorePolicy) {
         });
         assert!(named, "{pf:?} on {name}: the notice names no color 0");
     }
+    lane.run(&pass(&t, LoadAction::Load), |_, _, _| {}).unwrap();
+    let notices = messages.take_notices();
+    assert!(
+        !counts(&notices).contains_key(&SHARED_EXPONENT[0]),
+        "{pf:?} on {name}: a pass of no draw"
+    );
+    quiet(lane, &messages);
+}
 
 /// [`shared_exponent_words`] under the default, the device's load and store.
 #[test]

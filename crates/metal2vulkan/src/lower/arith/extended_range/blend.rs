@@ -1218,6 +1218,54 @@ impl Blend {
         Ok(b)
     }
 
+    /// Metal's blend `eq` of a four-lane output of a module of math `math` into a packed 16-bit
+    /// unorm attachment (`B5G6R5Unorm`, `A1BGR5Unorm`, `ABGR4Unorm`, `BGR5A1Unorm`) storing the
+    /// channels `written` of four, computed by [`blend_packed16`] in `half` arithmetic whatever the
+    /// output's type, over the output clamped to `[0, 1]` and rounded to `half`, and the
+    /// destination's code decoded to `half` (alpha one in a format without it), the result stored
+    /// by Metal's write of the format's codes. Without fast math the 8-bit unorm blend's rounded
+    /// forms in `half` ([`Blend::unorm8`]); under fast math the 16-bit float blend's forms of four
+    /// channels ([`Blend::half_float`]), and a write mask of one color channel the 8-bit unorm
+    /// blend's scalar plan. Measured on plain Metal on the M3 Max under macOS 27.0.1, our own MSL:
+    /// 2,891 states (every factor and operation pair for color beside source-over alpha, the same
+    /// pair for both, and random states under random write masks, one blend color) over 8,192
+    /// random pixels of `half4` and `float4` outputs into each of the four formats, under fast and
+    /// safe math. Without fast math every channel holds Metal's code; under fast math every channel
+    /// lies within one code of Metal's, and 3,527 of 94,732,288 channels miss it (`B5G6R5Unorm`;
+    /// at most 1,232 in each other format): Metal regroups some sums otherwise than either form.
+    /// A factor of the second source is not built (`Feature::FramebufferFetch` `NotImplemented`).
+    pub fn packed16(
+        eq: &BlendEquation,
+        written: ColorWriteMask,
+        math: BlendMath,
+    ) -> Result<Blend, Error> {
+        use BlendFactor as F;
+        let factors = [
+            eq.source_rgb,
+            eq.destination_rgb,
+            eq.source_alpha,
+            eq.destination_alpha,
+        ];
+        let second = |f: &BlendFactor| {
+            matches!(
+                f,
+                F::Source1Color
+                    | F::OneMinusSource1Color
+                    | F::Source1Alpha
+                    | F::OneMinusSource1Alpha
+            )
+        };
+        if factors.iter().any(second) {
+            return Err(Unsupported::not_implemented(Feature::FramebufferFetch).into());
+        }
+        let unorm8 = (true, Family::Unorm8(BlendArith::Half));
+        match math {
+            BlendMath::Rounded => planned_for(eq, unorm8, written, (false, math)),
+            BlendMath::Fast => planned_for(eq, (true, Family::HalfFloat), written, (false, math))
+                .or_else(|_| planned_for(eq, unorm8, written, (false, math))),
+        }
+    }
+
     /// Whether every class the blend stores takes a form the 16-bit float sweeps fit in every state
     /// ([`Blend::half_float`]): the rounded forms without fast math; under fast math no term, one
     /// term, one fused multiply-add, a minimum or maximum, or a blend constant's difference
@@ -2108,9 +2156,22 @@ pub fn blend_unorm8(
     (s, texel): (Value, Value),
     color: Option<Value>,
 ) -> BResult<Value> {
-    let f = floats();
     let s = clamped(fb, s, (0.0, 1.0))?;
     let d = unorm8_tile_value(fb, texel, arith)?;
+    clamped_blend(fb, b, arith, (s, d), color)
+}
+
+/// Blend `b` of the clamped output `s` over the destination `d`, both `vec4`s of `f32` in
+/// `arith`, the blend color `color` clamped to `[0, 1]` (a NaN 0) and rounded to `arith`, and
+/// its one minus that of the read: [`blend_unorm8`]'s and [`blend_packed16`]'s arithmetic.
+fn clamped_blend(
+    fb: &mut FunctionBuilder<'_>,
+    b: &Blend,
+    arith: BlendArith,
+    (s, d): (Value, Value),
+    color: Option<Value>,
+) -> BResult<Value> {
+    let f = floats();
     let constant = match color {
         Some(words) => {
             let ft = ty(fb, f)?;
@@ -2144,6 +2205,24 @@ pub fn blend_unorm8(
         negates_one_minus: false,
     };
     lanes(fb, b, &inputs)
+}
+
+/// Metal's blend `b` ([`Blend::packed16`]) of a four-lane output `s` (a `vec4` of `f32`: a
+/// `half4` output's `half`s, or a `float4` one) over `d`, a packed 16-bit attachment's texel as
+/// Metal's blend reads it (a `vec4` of `f32`, each channel its code over its maximum rounded to
+/// `half`, a channel the format lacks 0, alpha 1), in `half` arithmetic: a `vec4` of `f32` holding
+/// each blended lane, a `half`, which the caller stores as the format's codes. Metal clamps the
+/// output to `[0, 1]` first, a NaN to 0, and rounds it to `half`, nearest even, a `float4` one too;
+/// `color`, the blend color, reads as [`blend_unorm8`]'s in `half`.
+pub fn blend_packed16(
+    fb: &mut FunctionBuilder<'_>,
+    b: &Blend,
+    (s, d): (Value, Value),
+    color: Option<Value>,
+) -> BResult<Value> {
+    let f = floats();
+    let s = clamped(fb, s, (0.0, 1.0))?;
+    clamped_blend(fb, b, BlendArith::Half, (s, d), color)
 }
 
 /// Metal's read of each lane of `texel` (a `vec4` of `f32`, an 8-bit unorm texel as the storage

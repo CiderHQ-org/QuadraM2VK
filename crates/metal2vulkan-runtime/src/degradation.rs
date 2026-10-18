@@ -1138,10 +1138,24 @@ degradations! {
              channel's minimum code (-128, or -32768 for 16 bits) as the code above it (-127, \
              -32767) in each tile a draw reaches: a texel whose bytes no Metal write left \
              (uploaded or copied bytes) keeps a code Metal's pass would change";
+        /// A draw in a render pass that loads a single-sampled `RGB9E5Float` color attachment and
+        /// does not discard it at the store (`render.rs`). Metal's pass, once it draws, writes
+        /// each 32 x 32 tile a draw reaches back through its texels' values, so a word whose
+        /// largest mantissa is below 256 under an exponent above 0 is stored normalized: its
+        /// mantissas shifted up a bit as its exponent steps down one, until the largest reaches
+        /// 256 or the exponent 0 (measured on an Apple M3 Max under macOS 27.0.1: the format
+        /// scout's draw over uploaded words, 22 of 143 untouched texels of the reached tile
+        /// normalized, none other changed), where the device's pass keeps the bytes its draws do
+        /// not write. Announced at every draw, an indirect command buffer's executed commands'
         /// too, naming every such attachment of the pass. Not where `DriverFact::TileStoreIsMetals`
         /// holds (MoltenVK's pass is a Metal pass), nor under
         /// [`metal2vulkan::device::TileStorePolicy::Exact`] for an attachment the load pass
         /// (`render/unused_bits_load.rs`) rewrites.
+        SharedExponentKept = "shared-exponent-kept", Precision,
+            "the texels the pass's draws do not write keep their words; Metal's pass normalizes \
+             a word whose largest mantissa is below 256 (its exponent above 0) in each tile a \
+             draw reaches: a texel whose bytes no Metal write left (uploaded or copied words) \
+             keeps a word Metal's pass would change, of the same value";
         /// A blit between a buffer and a level of `RGB10A8_2P_XR10` or its sRGB twin whose width
         /// is not a multiple of 4 (`two_planes.rs`): it moves the texels at the rows the texture
         /// holds them in, where Metal's blit addresses the level's rows `⌊4 w / 16⌋ · 16` bytes

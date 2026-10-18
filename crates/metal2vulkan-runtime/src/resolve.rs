@@ -42,6 +42,10 @@
 //!   another one each run, and a 32-bit channel takes such a value even where the samples
 //!   agree; only an 8- or 16-bit channel (`RGB10A2Uint`'s too) whose samples agree resolves to
 //!   their value. No rule that holds for every pixel: refused.
+//! - A packed 16-bit attachment the device renders through the view of its word
+//!   (`metal::format::WordAttachment`) holds each sample's stored codes, while Metal's resolve
+//!   averages its tile's values, finer than the codes: not modelled, refused
+//!   `NotImplemented(Format)`.
 //! - The depth filters `Sample0`, `Min` and `Max` take sample 0's depth, the smallest and the
 //!   largest. The stencil filter `Sample0` takes sample 0's stencil, and `DepthResolvedSample`
 //!   the stencil of the sample whose depth the depth filter took: of equal depths, the last
@@ -467,6 +471,17 @@ pub(super) fn color(
         .find_map(unmodelled_resolve)
     {
         return Err(Error::Unsupported(unsupported));
+    }
+    // An attachment rendered through the view of its word (`metal::format::WordAttachment`) holds
+    // each sample's stored codes, while Metal resolves its tile's values: not modelled.
+    let word = metal2vulkan::metal::format::WordAttachment::of(
+        source.texture.pixel_format(),
+        device.compile_device().profile(),
+    );
+    if word.is_some_and(|w| w.word_format() == source.format) {
+        return Err(Error::Unsupported(
+            metal2vulkan::error::Unsupported::not_implemented(metal2vulkan::error::Feature::Format),
+        ));
     }
     single_sampled(call, which, source)?;
     let Some(destination) = destination(call, device, which, source, texture, wanted)? else {

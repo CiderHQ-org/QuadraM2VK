@@ -30,6 +30,10 @@
 //! attachment of the subpass, which `graphics_state` gives no Vulkan blend and a write of every raw
 //! component, the function merging the channels the descriptor's mask keeps; a stage compiled under
 //! another blend or mask there was compiled for another pipeline, `NeedsInput(FramebufferFetch)`.
+//! There too the function merges its word of a word attachment written under a mask of some of
+//! the word's channels into the word its input attachment holds (`RuntimeFact::WordInputMerge`,
+//! [`word_merges`]); `graphics_state` writes the whole word, and a stage compiled under another
+//! mask there, or without the merge, was compiled for another pipeline.
 
 use std::collections::BTreeMap;
 
@@ -40,13 +44,14 @@ use crate::error::{
 };
 use crate::library::FunctionArtifact;
 use crate::lower::fragment::{
-    interlock_orders, kept_channels, storage_form, ColorUse, StorageSamples,
+    inputs_order, interlock_orders, kept_channels, storage_form, ColorUse, StorageSamples,
 };
 use crate::metal::state::color_write_mask;
 use crate::pipeline::facts::RuntimeFact;
 use crate::pipeline::graphics::{StorageAttachmentUse, StorageAttachmentView};
 use crate::pipeline::link::RenderLinkInputs;
 use crate::pipeline::lower_inputs::{BlendEquation, FramebufferFetchInputs};
+use crate::pipeline::stage_io::IoRole;
 
 /// The attachments the fragment stage `fragment` of render inputs `r` reads in the storage form
 /// on `p`, by color index (see the module docs).
@@ -182,7 +187,7 @@ pub fn input_blends(
         let RuntimeFact::ExtendedRangeInputBlend { color, blend, kept } = *fact else {
             continue;
         };
-        if interlock_orders(p) || !p.fields().fragment.rasterization_order_color_access {
+        if !inputs_order(p) {
             return Err(Error::Internal(InternalError::new(
                 InternalKind::Invariant,
                 "an extended-range blend over an input attachment on a device that fetches \
@@ -199,4 +204,56 @@ pub fn input_blends(
         out.insert(color, kept);
     }
     Ok(out)
+}
+
+/// The word merges the fragment stage `fragment` computes over input attachments
+/// (`RuntimeFact::WordInputMerge`), against the attachments of render inputs `r` on `p`: each
+/// attachment the stage writes through a first output whose word the pipeline's state merges
+/// (`color_writes::merged_word`) needs the stage's merge keeping the channels the mask leaves out,
+/// and each merge the stage states needs that state. A stage compiled under another mask there,
+/// or without the merge, is `NeedsInput(FramebufferFetch)`.
+pub fn word_merges(
+    r: &RenderLinkInputs,
+    fragment: Option<&FunctionArtifact>,
+    p: &DeviceProfile,
+) -> Result<(), Error> {
+    let Some(f) = fragment else {
+        return Ok(());
+    };
+    let stated: BTreeMap<u32, crate::vk::ColorComponentFlags> = f
+        .facts
+        .iter()
+        .filter_map(|fact| match *fact {
+            RuntimeFact::WordInputMerge { color, kept } => Some((color, kept)),
+            _ => None,
+        })
+        .collect();
+    if !stated.is_empty() && !inputs_order(p) {
+        return Err(Error::Internal(InternalError::new(
+            InternalKind::Invariant,
+            "a word merge over an input attachment on a device that fetches otherwise",
+        )));
+    }
+    let mut wanted = BTreeMap::new();
+    for o in &f.interface.io.outputs {
+        let IoRole::Color {
+            attachment: color,
+            index: 0,
+        } = o.role
+        else {
+            continue;
+        };
+        let Some(a) = r.color_attachments.get(color as usize).copied().flatten() else {
+            continue;
+        };
+        if let Some(kept) =
+            crate::pipeline::color_writes::merged_word(color, &a, r.alpha_to_coverage, p)
+        {
+            wanted.insert(color, color_write_mask(kept)?);
+        }
+    }
+    match stated == wanted {
+        true => Ok(()),
+        false => Err(Error::NeedsInput(RuntimeInput::FramebufferFetch)),
+    }
 }

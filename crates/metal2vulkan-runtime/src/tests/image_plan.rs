@@ -195,7 +195,12 @@ fn check_plan(
         );
     }
     if plan.usage.contains(ImageUsageFlags::COLOR_ATTACHMENT) {
-        assert!(supports(FormatUsage::ColorAttachment), "{what}");
+        // Or, with extended usage, through the view of the format's word.
+        let word = WordAttachment::of(pf, profile).map(|w| w.word_format());
+        assert!(
+            supports(FormatUsage::ColorAttachment) || (extended && word.is_some_and(&viewable)),
+            "{what}"
+        );
     }
     // A color attachment is an input attachment exactly where the device's framebuffer fetch
     // reads input attachments.
@@ -447,6 +452,7 @@ fn a_written_only_view_serves_where_no_slot_both_reads_and_writes() {
 /// An 8-bit sRGB format the device samples only through its UNORM twin is held in the twin's
 /// format, sampled, with no usage the device lacks for the sRGB format: lavapipe's `R8Unorm_sRGB`
 /// and ANV's and NVIDIA's `RG8Unorm_sRGB`. A device that samples the format keeps its own image.
+/// A render target the device renders through its word's view (`WordAttachment`) lists that view.
 #[test]
 fn an_srgb_format_the_device_cannot_sample_is_held_as_its_unorm_twin() {
     let mut held = Vec::new();
@@ -482,12 +488,16 @@ fn an_srgb_format_the_device_cannot_sample_is_held_as_its_unorm_twin() {
             assert!(plan.usage.contains(ImageUsageFlags::SAMPLED), "{what}");
             assert!(plan.unavailable.is_empty(), "{what}");
             check_plan(&name, pf, TextureUsage::SHADER_READ, &plan, &facts);
-            // A render target or a storage view the device lacks for the format stays
-            // unavailable.
+            // A render target the device lacks for the format stays unavailable, unless the
+            // device renders the view of its word, which the twin's image lists.
             let usage = TextureUsage::SHADER_READ | TextureUsage::RENDER_TARGET;
             let plan = plan_image(&l, usage, false, &facts).expect(&what);
             assert!(plan.usage.contains(ImageUsageFlags::SAMPLED), "{what}");
-            if !profile.supports_format(
+            let word = WordAttachment::of(pf, profile).map(|w| w.word_format());
+            if let Some(word) = word {
+                assert!(plan.unavailable.is_empty(), "{what}: {plan:?}");
+                assert!(plan.view_formats.contains(&word), "{what}: {plan:?}");
+            } else if !profile.supports_format(
                 direct_format(pf).expect(&what),
                 FormatUsage::ColorAttachment,
             ) {
@@ -633,6 +643,68 @@ fn twin_attachment_views_the_device_lacks_are_left_out() {
     assert!(
         with > 0 && without > 0,
         "{with} with the twin, {without} without"
+    );
+}
+
+/// A packed 16-bit render target a device samples but does not render renders through the view of
+/// its word (`metal::format::WordAttachment`): its image keeps the format, mutable with extended
+/// usage, takes the attachment usage and lists `R16_UINT`; where the device renders the format the
+/// image takes neither, and one it does not hold is not planned so.
+#[test]
+fn packed_render_targets_the_device_cannot_render_take_their_word_view() {
+    let (mut with, mut without) = (0, 0);
+    for (name, desc, device) in committed() {
+        let facts = facts(&desc, &device);
+        for pf in [
+            PixelFormat::A1BGR5Unorm,
+            PixelFormat::ABGR4Unorm,
+            PixelFormat::B5G6R5Unorm,
+            PixelFormat::BGR5A1Unorm,
+        ] {
+            let l = layout(TextureType::Type2D, pf, 1, 1);
+            for usage in [
+                TextureUsage::RENDER_TARGET,
+                TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ,
+            ] {
+                let what = format!("{name}: {pf:?} {usage:?}");
+                let Ok(plan) = plan_image(&l, usage, false, &facts) else {
+                    continue;
+                };
+                let word = WordAttachment::of(pf, device.profile());
+                match word {
+                    Some(word) => {
+                        with += 1;
+                        assert_eq!(Some(plan.format), direct_format(pf), "{what}");
+                        assert!(
+                            plan.usage.contains(ImageUsageFlags::COLOR_ATTACHMENT),
+                            "{what}"
+                        );
+                        assert!(
+                            plan.flags.contains(
+                                ImageCreateFlags::MUTABLE_FORMAT | ImageCreateFlags::EXTENDED_USAGE
+                            ),
+                            "{what}"
+                        );
+                        assert!(
+                            plan.view_formats.contains(&word.word_format()),
+                            "{what}: {plan:?}"
+                        );
+                        assert!(
+                            !plan.unavailable.contains(TextureUsage::RENDER_TARGET),
+                            "{what}"
+                        );
+                    }
+                    None => {
+                        without += 1;
+                        assert!(!plan.view_formats.contains(&Format::R16_UINT), "{what}");
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        with > 0 && without > 0,
+        "{with} with the word, {without} without"
     );
 }
 

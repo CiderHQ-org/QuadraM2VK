@@ -389,6 +389,11 @@ mod serde_round_trips {
                     true,
                 ),
             )]),
+            word_colors: BTreeMap::from([(
+                5,
+                crate::metal::format::WordAttachment::layout(metal::PixelFormat::ABGR4Unorm)
+                    .expect("a word layout"),
+            )]),
             srgb_fetches: BTreeSet::from([0, 2]),
             zeroed_colors: BTreeMap::from([(2, metal::PixelFormat::RGBA32Sint)]),
             dropped_colors: BTreeSet::from([3]),

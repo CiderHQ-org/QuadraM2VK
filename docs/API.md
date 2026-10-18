@@ -356,6 +356,36 @@ Where Metal's rules differ from Vulkan's, the pipeline gives Metal's answer:
   outputs at one attachment are `InvalidDescriptor(DuplicateColorOutput)`.
 - On a device without `independentBlend`, attachments the function does not write copy the blend
   state of those it does; where those differ the pipeline is refused, naming the feature.
+- A packed 16-bit attachment (`A1BGR5Unorm`, `ABGR4Unorm`) of a format the device samples but does
+  not render (the RTX 5080) renders through an `R16_UINT` view of its texture
+  (`metal::format::WordAttachment`, `LoweringInputs::word_colors`): the fragment function writes
+  the word Metal stores and `graphics` gives the attachment that format; a pass clears it to the
+  word of Metal's clear. Exact, for a write unblended (or blended one and zero); under a mask of
+  some of its channels the function merges the word into the texel in the interlocked storage
+  form (a `GraphicsState::storage_attachments` entry of `R16_UINT`) where the device orders fetch
+  through the pixel interlock. Blended otherwise, there too the function computes Metal's blend of
+  a `half4` or `float4` output over the word it reads, within one code of Metal's
+  (`PrecisionNote::DeviceColorConversion`: the attachment holds codes where Metal's tile holds a
+  clear's or an earlier blend's result in the pass as a `half`, and under fast math Metal sums a
+  few states otherwise; `docs/FAST-PATHS.md`). A blend of the second source, and a blend or
+  partial mask on a device without the interlock, is refused as the device lacking the format; a
+  color input or resolve of one, and a blend of an output of fewer lanes, is `NotImplemented`.
+- An 8-bit sRGB attachment of one or two channels (`R8Unorm_sRGB`, `RG8Unorm_sRGB`) the device
+  does not render (the RTX 5080: it renders neither `R8_SRGB` nor `R8G8_SRGB`, and holds the
+  latter in its UNORM twin) renders through an `R8_UINT` or `R16_UINT` view of its texture the
+  same way: the fragment function writes Metal's bytes (its twelve-bit encode), a pass clears it
+  to the bytes of Metal's clear, and a partial mask merges the word in the interlock, or over the
+  attachment's input attachment on a device that orders fetch through rasterization-order input
+  attachments (lavapipe; `RuntimeFact::WordInputMerge`). Exact. A blend of one
+  other than one and zero is refused as the device lacking the format; a color input or resolve
+  of one is `NotImplemented(Format)`.
+- An `RGB9E5Float` attachment the device does not render (the RTX 5080) renders through an
+  `R32_UINT` view of its texture: the fragment function writes Metal's word of a `float` output
+  (each channel clamped to `[0, 65408]`, a NaN 0, the exponent of the largest, every mantissa
+  truncated), and a pass clears it to the word of Metal's clear. Exact. A `half` output to one
+  is `NotImplemented(Format)` (Metal rounds the `float` the `half` was converted from, half up);
+  a blend, or a mask of some of its channels, is refused as the device lacking the format; a
+  color input or resolve of one is `NotImplemented(Format)`.
 - A fragment function that reads a color attachment (framebuffer fetch) reads it in an ordered
   form wherever the device has one: rasterization-order attachment access, or the interlocked
   storage form, which binds the attachment as a storage image viewed in
@@ -1589,6 +1619,11 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   pass would change. Not on a driver whose pass stores the codes as Metal's
   (`DriverFact::TileStoreIsMetals`: MoltenVK on Apple's GPUs, whose pass is a Metal pass), nor under
   `TileStorePolicy::Exact` for an attachment the load pass rewrites as Metal's store leaves it.
+- `metal2vulkan-degrade-shared-exponent-kept` (precision). `SharedExponentKept`: A draw in a render
+  pass that loads a single-sampled `RGB9E5Float` color attachment and does not discard it at the
+  store. Cost: the texels the pass's draws do not write keep their words; Metal's pass normalizes a
+  word whose largest mantissa is below 256 (its exponent above 0) in each tile a draw reaches: a
+  texel whose bytes no Metal write left (uploaded or copied words) keeps a word Metal's pass would
   change, of the same value. Not on a driver whose pass stores the words as Metal's
   (`DriverFact::TileStoreIsMetals`), nor under `TileStorePolicy::Exact` for an attachment the load
   pass rewrites as Metal's store leaves it.

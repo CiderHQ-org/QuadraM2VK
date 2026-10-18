@@ -161,6 +161,7 @@ mod engine_vertex_fetch;
 mod engine_viewport_compensation;
 mod engine_volatile;
 mod engine_wide;
+mod engine_word_attachments;
 mod engine_zeroed_colors;
 mod env_registry;
 mod fast_paths;

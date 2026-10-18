@@ -1327,8 +1327,16 @@ pub(super) fn layout(
         // An extended-range attachment's codes by either of Metal's routes: the pass's encoder
         // chooses as it ends, once it knows whether the pass draws (`ColorTarget::straight_clear`).
         let channels = color.clear_color.channels();
-        let clear = clear_value::color(texture.pixel_format(), channels, ClearRoute::ThroughHalf)
-            .ok_or_else(not_yet)?;
+        // A word attachment clears to the word of Metal's codes.
+        let word = metal2vulkan::metal::format::WordAttachment::of(
+            texture.pixel_format(),
+            device.compile_device().profile(),
+        )
+        .filter(|w| w.word_format() == target.format);
+        let clear = match word {
+            Some(word) => clear_value::word(texture.pixel_format(), channels, word),
+        }
+        .ok_or_else(not_yet)?;
         let straight_clear = ExtendedRange::of(texture.pixel_format()).and_then(|_| {
             clear_value::color(texture.pixel_format(), channels, ClearRoute::Straight)
         });
@@ -1658,6 +1666,9 @@ pub(super) fn not_2d(target: &Target) -> bool {
 /// stencil view (the stencil view of a combined texture) renders in its image's format, the one the
 /// device represents the view's format by; one the device represents otherwise is not built, nor is
 /// a color view without a direct format or one the image cannot take (`NotImplemented(Render)`).
+/// A color format the device samples but does not render, whose word it renders
+/// (`metal::format::WordAttachment`), renders in the word's format where the image takes that
+/// view, as the pipeline's fragment function writes it.
 pub(super) fn attachment_format(
     which: Attachment,
     plan: &ImagePlan,
@@ -1665,11 +1676,23 @@ pub(super) fn attachment_format(
     device: &Device,
 ) -> Result<metal2vulkan::vk::Format, Error> {
     use metal2vulkan::device::FormatUsage;
+    let profile = device.compile_device().profile();
+    let family = block_family(pixel_format) == block_family(plan.pixel_format);
+    // A color format the device samples but does not render renders through the view of its word
+    // (`metal::format::WordAttachment`), which a pipeline's fragment function writes, where the
+    // image takes that view.
+    if let Attachment::Color(_) = which {
+        if let Some(word) = metal2vulkan::metal::format::WordAttachment::of(pixel_format, profile) {
+            let format = word.word_format();
+            if views_as(plan, format, family) {
+                return Ok(format);
+            }
+        }
+    }
     if plan.pixel_format == pixel_format {
         return Ok(plan.format);
     }
     let not_built = || Error::NotImplemented(RuntimeGap::Render);
-    let profile = device.compile_device().profile();
     if let Attachment::Depth | Attachment::Stencil = which {
         let usages: std::collections::BTreeSet<_> = [FormatUsage::DepthStencilAttachment].into();
         return match vk_format(pixel_format, &usages, profile) {
@@ -1688,7 +1711,6 @@ pub(super) fn attachment_format(
             },
         )));
     }
-    let family = block_family(pixel_format) == block_family(plan.pixel_format);
     if !views_as(plan, direct, family) {
         return Err(not_built());
     }

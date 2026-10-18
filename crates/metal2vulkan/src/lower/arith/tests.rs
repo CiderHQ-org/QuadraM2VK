@@ -4100,6 +4100,7 @@ mod atan2;
 mod bicubic;
 mod blend16;
 mod blend8;
+mod blend_packed;
 mod color_write;
 mod depth16;
 mod divide;

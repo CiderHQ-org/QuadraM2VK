@@ -515,6 +515,13 @@ pub fn small_float(
     }
 }
 
+/// `v` (`f32` lanes of form `s`) rounded to the nearest `half`, ties to even, held in an `f32`: a
+/// NaN stays a NaN and a value past the largest finite `half` an infinity (a packed 16-bit
+/// format's channel reads it so, `ChannelWrite::HalfUnorm`).
+pub(crate) fn half_rounded(fb: &mut FunctionBuilder<'_>, s: Form, v: Value) -> BResult<Value> {
+    float_nearest_even(fb, s, v, 10, true)
+}
+
 /// `v` (`f32` lanes of form `s`) rounded to nearest even to a float of a five-bit exponent (bias
 /// 15) and `mantissa` fraction bits, signed or not, held in an `f32` (see the module docs): `x`'s
 /// bits plus `2^(k-1) - 1` and the lowest kept bit, shifted right by the `k` bits dropped, is the

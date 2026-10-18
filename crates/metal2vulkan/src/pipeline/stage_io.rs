@@ -217,6 +217,15 @@ pub struct StageIo {
     /// stage compiled for another map than the pipeline's (`NeedsInput(ColorWrites)`).
     #[cfg_attr(feature = "serde", serde(default))]
     pub extended_range_colors: BTreeMap<u32, crate::pipeline::lower_inputs::ExtendedRangeColor>,
+    /// The word attachments the fragment function writes a `float` or `half` output to through
+    /// output variables of dual-source index 0 (`LoweringInputs::word_colors`), by color index:
+    /// each output variable there is declared as the word's unsigned integer and holds the word
+    /// Metal stores ([`StageIo::declared_type`]; the variable's `ty` stays the Metal output's,
+    /// which link checks against the attachment's format), and link gives the attachment the
+    /// word's format and refuses a stage compiled for another map than the pipeline's
+    /// (`NeedsInput(ColorWrites)`).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub word_colors: BTreeMap<u32, crate::metal::format::WordAttachment>,
     /// The input attachments the fragment function reads through Metal's decode of their bytes
     /// (`LoweringInputs::srgb_fetches`): each read snaps the device's sRGB decode back to its
     /// byte and decodes that by Metal's table. Link refuses a stage compiled for another set
@@ -514,7 +523,8 @@ impl StageIo {
 
     /// The type variable `v` is declared with: its `ty`, but for a color output of dual-source
     /// index 0 to an attachment among `extended_range_colors` the raw texel's, the raw format's
-    /// unsigned 32-bit components.
+    /// unsigned 32-bit components, and to one among `word_colors` the word's, one unsigned 32-bit
+    /// component.
     pub(crate) fn declared_type(&self, v: &IoVariable) -> IoType {
         let IoRole::Color {
             attachment,
@@ -523,6 +533,14 @@ impl StageIo {
         else {
             return v.ty;
         };
+        if self.word_colors.contains_key(&attachment) {
+            return IoType {
+                numeric: IoNumeric::Uint,
+                components: 1,
+                source_bits: 32,
+                bits: 32,
+            };
+        }
         match self.extended_range_colors.get(&attachment) {
             Some(e) => IoType {
                 numeric: IoNumeric::Uint,

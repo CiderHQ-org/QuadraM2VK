@@ -6260,6 +6260,8 @@ impl RenderCommandEncoder {
         });
     }
 
+    /// Announce `shared-exponent-kept` at a draw in a pass that loads a single-sampled
+    /// `RGB9E5Float` color attachment (and does not discard it at the store), whatever the draw's
     /// state, naming every such attachment, `kept` (`unused_bits_load::shared_exponent_kept`):
     /// Metal's pass, once it draws, writes each tile a draw reaches back through its texels'
     /// values, so a word the draws do not write whose largest mantissa is below 256 under an
@@ -6267,6 +6269,9 @@ impl RenderCommandEncoder {
     /// whose pass stores it so too (`DriverFact::TileStoreIsMetals`), nor for an attachment the
     /// load pass rewrites (`TileStorePolicy::Exact`).
     fn degrade_shared_exponent(device: &Device, kept: &[String]) {
+        if kept.is_empty() {
+            return;
+        }
         device.degrade(Degradation::SharedExponentKept, || {
             (
                 format!("a draw in a render pass that loads {}", kept.join(" and ")),

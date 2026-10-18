@@ -2157,6 +2157,11 @@ pub fn entry(cx: &mut SelectCx<'_>) -> Result<(), Error> {
             if cx.stage == Stage::Fragment && cx.inputs.extended_range_colors.contains_key(&color) {
                 continue;
             }
+            // A word attachment's write is unblended: a second output there is stored nowhere,
+            // as Metal's unblended write reads none.
+            if cx.stage == Stage::Fragment && cx.inputs.word_colors.contains_key(&color) {
+                continue;
+            }
         }
         // On a device without `multiViewport` a draw has one viewport, so the index selects
         // viewport 0 whatever it is: no `ViewportIndex` is stored, and the raw varying holds the
@@ -2838,9 +2843,12 @@ fn output(cx: &mut SelectCx<'_>, o: &OutputBinding, ty: AirTypeId) -> Result<Lin
                 true => IoType { bits: 16, ..io },
                 false => io,
             };
-            // An extended-range attachment's raw texel, through a variable of its raw components;
-            // the interface keeps the Metal output's type.
-            let declared = super::extended_color::plan(cx, attachment, index, f)?.unwrap_or(io);
+            // An extended-range attachment's raw texel, through a variable of its raw components,
+            // and a word attachment's word; the interface keeps the Metal output's type.
+            let declared = match super::word_color::plan(cx, attachment, index, f)? {
+                Some(word) => word,
+                None => super::extended_color::plan(cx, attachment, index, f)?.unwrap_or(io),
+            };
             let key = VaryingKey::color(attachment, index);
             let deco = IoDecor {
                 index: (index == 1).then_some(1),
@@ -3135,6 +3143,11 @@ pub fn finish(cx: &mut SelectCx<'_>) -> Result<(), Error> {
                 .saturating_mul(sp.halves.len() as u64),
         )
         .saturating_add(super::extended_color::WORDS.saturating_mul(sp.extended.len() as u64))
+        .saturating_add(
+            (sp.words_written.values())
+                .map(|&w| super::word_color::encode_words(w))
+                .fold(0u64, u64::saturating_add),
+        )
         // A returned depth's code.
         .saturating_add(match sp.depth_clamp.is_some_and(|d| d.codes) {
             true => super::depth16::CODE_WORDS,

@@ -107,8 +107,9 @@
 //! over a buffer they do not store through the image its texture keeps in `kept_buffer_bytes`
 //! ([`KEPT_BYTES`]), the device's
 //! first sparse texture on a driver whose first sparse resource waits for every queue's work in
-//! `first_use` ([`FIRST_SPARSE`]), visibility counts of draws writing several colors on a driver
-//! that counts each sample once per color in `color_groups` ([`PER_COLOR_COUNTS`]),
+//! `color_groups` ([`PER_COLOR_COUNTS`]), passes that load and draw a signed normalized attachment
+//! holding a minimum code, or an `RGB9E5Float` one holding an unnormalized word, in
+//! `snorm_tile_store` ([`SNORM_MINIMUM`], [`SHARED_EXPONENT`]),
 //! and
 //! pipeline states, whose stages' precision notes and reconvergence are announced where the
 //! runtime makes their objects (one site, which maps every note to its kind; a fragment function's
@@ -187,6 +188,7 @@ use super::resource_ids::{
 use super::rotated_textures::ROTATED_LOADS;
 use super::sample_copies::DRAWN_DEPTH;
 use super::shader_stencil::SHADOW;
+use super::snorm_tile_store::{SHARED_EXPONENT, SNORM_MINIMUM};
 use super::sparse_textures::SPARSE;
 use super::texture_blits::{MIPMAPS, TWINS, UPLOADS};
 use super::tile_dispatches::TILE_DISPATCHES;
@@ -510,6 +512,7 @@ fn every_kind_has_a_site_a_lane_test_takes() {
         &EXTENDED_RANGE_BITS,
         &UNREACHED_TILES,
         &SNORM_MINIMUM,
+        &SHARED_EXPONENT,
         &STORED_CODES,
         &UNADVERTISED_VERTEX_SIMDGROUPS,
         &YCBCR_FILTERS,

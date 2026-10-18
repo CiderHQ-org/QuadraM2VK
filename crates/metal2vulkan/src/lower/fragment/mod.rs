@@ -63,6 +63,7 @@ mod input_blend;
 mod rog;
 mod snapshot;
 mod stencil;
+mod word_input;
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -101,8 +102,8 @@ pub(crate) use depth_test::{
 pub use discard::DiscardForm;
 pub(crate) use fetch::{
     blends_half_in_shader, compiled_write_mask, extended_range_blend, half_blend_attachment,
-    half_float_format, half_output, interlock_orders, kept_channels, storage_form, ColorUse,
-    StorageSamples,
+    half_float_format, half_output, inputs_order, interlock_orders, kept_channels, storage_form,
+    ColorUse, StorageSamples,
 };
 pub use fetch::{
     select_output as select_storage_output, select_second_output as select_storage_second_output,
@@ -116,6 +117,7 @@ pub(crate) use snapshot::{decode as snapshot_decode, encode as snapshot_encode};
 pub(crate) use snapshot::{prepare as snapshot_prepare, read as snapshot_read};
 pub(crate) use stencil::{face_word, SHADOW_FORMAT};
 pub use stencil::{select_output as select_stencil_output, ShadowStencil};
+pub(crate) use word_input::merge as word_input_merge;
 
 fn not_lowered() -> Error {
     Unsupported::not_implemented(Feature::Lowering(LowerFamily::Fragment)).into()
@@ -193,6 +195,10 @@ pub struct FragmentPlan {
     /// The extended-range attachments whose blend the function computes over their input
     /// attachments, on a device that orders fetch through them (`input_blend`), by index.
     pub input_blends: BTreeMap<u32, InputBlend>,
+    /// The word attachments whose word the function merges into the texel's over their input
+    /// attachments, on a device that orders fetch through them (`word_input`), by index: the bits
+    /// of the fields each write keeps from the texel.
+    pub word_merges: BTreeMap<u32, u32>,
     /// The stage interface's `FragCoord` object, which gives the pixel of the storage form and
     /// of the shader-side stencil.
     pub fetch_coord: Option<usize>,
@@ -398,6 +404,7 @@ pub fn finish(cx: &mut SelectCx<'_>, m: &mut Meter) -> Result<(), Error> {
         ))
         .saturating_add(stencil::words(cx, rets))
         .saturating_add(input_blend::words(cx, returns(cx)))
+        .saturating_add(word_input::words(cx, returns(cx)))
         .saturating_add(depth_test::words(cx, rets))
         .saturating_add(killing_rets.saturating_mul(RETURN_KILL_WORDS))
         .saturating_add((quad_exits.len() as u64).saturating_mul(QUAD_EXIT_WORDS))
@@ -482,7 +489,7 @@ pub fn declare(
     d.attachments = color::declare(
         mb,
         &fp.colors,
-        (&fp.fetch, &fp.input_blends),
+        (&fp.fetch, &fp.input_blends, &fp.word_merges),
         fp.fetch_sample.is_some(),
     )?;
     for (&color, sc) in &fp.fetch {
@@ -582,6 +589,7 @@ pub fn select_param(cx: &mut SelectCx<'_>, b: &ParamBinding) -> Result<(), Error
 pub fn plan_entry(cx: &mut SelectCx<'_>) -> Result<(), Error> {
     fetch::plan(cx)?;
     input_blend::plan(cx)?;
+    word_input::plan(cx)?;
     coverage::plan(cx)
 }
 

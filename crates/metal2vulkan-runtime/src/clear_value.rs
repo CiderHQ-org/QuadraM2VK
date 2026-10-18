@@ -47,8 +47,9 @@
 //! level compressed and the pass has no draw call (`nan_clear::keeps_nan_sign`, the pass's encoder
 //! choosing at its end), a bfloat channel's `float` is rounded straight to bfloat, on the M4 under
 //! 27.0.1 and the M3 Max under 26.7 alike, and a `BGR10_XR` or `BGRA10_XR` channel's code is
-//! straight from its `float`, `BGR10_XR`'s bits 30 and 31 zero (EVs XSH-clr2-m4 to XSH-clr5-m4, the
-//! M4 under 27.0.1); the two-plane formats store the same on either route.
+//! A **word** attachment (`metal::format::WordAttachment`: a packed 16-bit, one- or two-channel
+//! 8-bit sRGB or `RGB9E5Float` format the device holds but does not render) renders through the
+//! view of its word, so its clear value is the word Metal's clear stores ([`word`]).
 //!
 //! A **two-plane YCbCr** attachment whose store is matched (`metal::format::ycbcr_renders`) renders
 //! into floats, which the pass's store encodes into the planes as Metal stores a drawn texel: its
@@ -250,6 +251,30 @@ pub(super) fn color(
             float32 = to_rotated_image(float32);
         }
         vk::ClearColorValue { float32 }
+    })
+}
+
+/// The Vulkan clear value of Metal's clear `color` for an attachment of `pf` that renders through
+/// the view of its word `word` (`metal::format::WordAttachment`): the word of the codes Metal's
+/// clear stores ([`color`]'s conversion of each channel; `RGB9E5Float`'s word of the color
+/// through `float`, its mantissas truncated, `WordAttachment::output_word`), in the view's one
+/// unsigned component. `None` for a format with no clear rule.
+pub(super) fn word(
+    pf: PixelFormat,
+    color: [f64; 4],
+    word: WordAttachment,
+) -> Option<vk::ClearColorValue> {
+    if word == WordAttachment::Rgb9e5 {
+        let uint32 = [word.output_word(color.map(|c| c as f32)), 0, 0, 0];
+        return Some(vk::ClearColorValue { uint32 });
+    }
+    let codes = convert(&channels(pf)?, color).map(|t| match t {
+        Texel::Norm { k, .. } => u32::try_from(k).unwrap_or(0),
+        Texel::Srgb(k) => k,
+        _ => 0,
+    });
+    Some(vk::ClearColorValue {
+        uint32: [word.pack(codes), 0, 0, 0],
     })
 }
 
@@ -728,6 +753,61 @@ pub(crate) mod tests {
         }
         let bytes = at.div_ceil(8) as usize;
         Some(bits.to_le_bytes()[..bytes].to_vec())
+    }
+
+    /// A word attachment's clear value ([`word`]) is the little-endian word of the texel Metal's
+    /// clear writes ([`texel_bytes`]), for every packed 16-bit layout, the one- and two-channel
+    /// 8-bit sRGB ones and `RGB9E5Float`'s, over colors at and beside each layout's ties, NaN,
+    /// negative values, values past one and past `RGB9E5Float`'s largest, and tiny ones.
+    #[test]
+    fn word_clears_are_metals_texels() {
+        let values = [
+            0.0,
+            1.0,
+            0.5,
+            0.49,
+            0.1,
+            0.25,
+            0.75,
+            1.0 / 3.0,
+            0.016,
+            -0.5,
+            2.0,
+            f64::NAN,
+            15.5 / 31.0,
+            7.5 / 15.0,
+            31.5 / 63.0,
+            70000.0,
+            3.0e-6,
+            1000.3,
+        ];
+        for pf in [
+            P::B5G6R5Unorm,
+            P::A1BGR5Unorm,
+            P::ABGR4Unorm,
+            P::BGR5A1Unorm,
+            P::R8UnormSRGB,
+            P::RG8UnormSRGB,
+            P::RGB9E5Float,
+        ] {
+            let layout = WordAttachment::layout(pf).expect("a word layout");
+            for (i, &r) in values.iter().enumerate() {
+                let n = values.len();
+                let color = [
+                    r,
+                    values[(i + 3) % n],
+                    values[(i + 7) % n],
+                    values[(i + 11) % n],
+                ];
+                let got = word(pf, color, layout).expect("a clear value");
+                // SAFETY: every member of the union is four 32-bit values; any bits are a `u32`.
+                let got = unsafe { got.uint32 };
+                let texel = bytes(pf, color);
+                let want =
+                    (texel.iter().enumerate()).fold(0u32, |w, (i, &b)| w | u32::from(b) << (8 * i));
+                assert_eq!(got, [want, 0, 0, 0], "{pf:?} {color:?}");
+            }
+        }
     }
 
     /// The texels Metal writes, as little-endian bytes.

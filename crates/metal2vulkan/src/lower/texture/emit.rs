@@ -1892,6 +1892,8 @@ fn shared_exponent_texel(
 
 /// The `uvec4` a `SharedExponentBits` slot stores for held texel `x` (`f32` lanes of `form`, a
 /// `half` texel's widened exactly): the `RGB9E5Float` word Metal stores in its first lane
+/// (`StorageImageClass::SharedExponentBits`, [`rgb9e5_word`]); alpha is not stored. An integer
+/// texel is not one the format takes.
 fn shared_exponent_word(
     fb: &mut FunctionBuilder<'_>,
     form: TexelForm,
@@ -1902,6 +1904,24 @@ fn shared_exponent_word(
             crate::spirv::error::TypeRule::FunctionSignature,
         ));
     }
+    let u = u32_ty(fb)?;
+    let word = rgb9e5_word(fb, x)?;
+    let zero = fb.u32_const(0)?;
+    let zero = fb.module().const_value(zero)?;
+    let v4 = vec(fb, u, 4)?;
+    fb.composite_construct(v4, &[word, zero, zero, zero])
+}
+
+/// An upper estimate of the SPIR-V words of one [`rgb9e5_word`].
+pub(crate) const RGB9E5_WORDS: u64 = 3 * 8 * 7 + 3 * 7 * 7 + 16 * 7;
+
+/// The `RGB9E5Float` word, a `u32`, Metal stores for the red, green and blue `f32` lanes of `x` (a
+/// vector of at least three; a kernel's write, a `float` output's store into a word attachment,
+/// `metal::format::WordAttachment::Rgb9e5`): each clamped to `[0, 65408]` on its bits (a NaN, a
+/// negative value and `-0` 0; an infinity 65408), the exponent `e = max(⌊log2 m⌋, -16) + 16` from
+/// the largest clamped channel `m`'s exponent field, and each mantissa the clamped channel times
+/// `2^(24 - e)` (exact: a power of two, the product below 512) converted toward zero.
+pub(crate) fn rgb9e5_word(fb: &mut FunctionBuilder<'_>, x: SValue) -> BResult<SValue> {
     let u = u32_ty(fb)?;
     let f = f32_ty(fb)?;
     let constant = |fb: &mut FunctionBuilder<'_>, v: u32| -> BResult<SValue> {
@@ -1952,6 +1972,7 @@ fn shared_exponent_word(
         let m = fb.binary(BinOp::ShiftLeftLogical, m, shift)?;
         word = fb.binary(BinOp::BitwiseOr, word, m)?;
     }
+    Ok(word)
 }
 
 /// The `f32` NaN a written `float`'s NaN becomes under `HalfTowardZero` and `HalfQuietNan`

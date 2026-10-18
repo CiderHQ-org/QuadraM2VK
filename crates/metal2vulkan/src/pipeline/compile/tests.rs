@@ -662,6 +662,7 @@ fn the_inputs_encoding_is_the_earlier_derived_debug() {
                 .replace(", folded_groups: false", "")
                 .replace(", extended_range: {}", "")
                 .replace(", extended_range_colors: {}", "")
+                .replace(", word_colors: {}", "")
                 .replace(", srgb_fetches: {}", "")
                 .replace(", zeroed_colors: {}", "")
                 .replace(", dropped_colors: {}", "")

@@ -148,6 +148,11 @@ pub(super) fn select_param(cx: &mut SelectCx<'_>, b: &ParamBinding) -> Result<Co
     };
     let form = param_form(cx, b)?;
     let extended = cx.inputs.extended_range_colors.get(&color).copied();
+    // A word attachment's input reads the word, whose decode is not built.
+    if cx.inputs.word_colors.contains_key(&color) {
+        let refused = Unsupported::not_implemented(Feature::Format);
+        return Err(refused.at_attachment(Attachment::Color(color)).into());
+    }
     // A fetch of a bfloat attachment is unmeasured (its draws are built; what a fetch reads of the
     // `half`s Metal's tile holds is not).
     if extended.is_some_and(|e| e.form.bfloat()) {
@@ -309,14 +314,16 @@ pub(super) fn words(cx: &SelectCx<'_>, colors: &[ColorInput]) -> u64 {
 /// Declare one input attachment per color index the plan reads, multisampled for a per-sample
 /// function (`multisampled`), or its storage image in the interlocked storage form (`fetch`), which
 /// holds the samples as its view states; the storage image of every other attachment in that form
-/// (one the function only writes); and the input attachment of every extended-range attachment
-/// whose blend the function computes over it (`input_blend`).
+/// (one the function only writes); the input attachment of every extended-range attachment whose
+/// blend the function computes over it (`input_blend`); and that of every word attachment whose
+/// word the function merges into the texel's (`word_input`), of `uint` texels.
 pub(super) fn declare(
     mb: &mut ModuleBuilder,
     colors: &[ColorInput],
-    (storage, blends): (
+    (storage, blends, merges): (
         &BTreeMap<u32, super::fetch::StorageColor>,
         &BTreeMap<u32, super::InputBlend>,
+        &BTreeMap<u32, u32>,
     ),
     multisampled: bool,
 ) -> BResult<BTreeMap<u32, GlobalId>> {
@@ -340,7 +347,11 @@ pub(super) fn declare(
             e.insert(super::fetch::declare(mb, color, sc)?);
         }
     }
-    for (&color, _) in blends.iter().filter(|(_, ib)| ib.blend.is_some()) {
+    let blended = blends
+        .iter()
+        .filter(|(_, ib)| ib.blend.is_some())
+        .map(|(&c, _)| c);
+    for color in blended.chain(merges.keys().copied()) {
         if let std::collections::btree_map::Entry::Vacant(e) = out.entry(color) {
             e.insert(input_attachment(mb, color, false, multisampled)?);
         }

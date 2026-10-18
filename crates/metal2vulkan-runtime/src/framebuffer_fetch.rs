@@ -97,8 +97,7 @@ use super::error::Error;
 use super::image_plan::{hiz_candidate, ImagePlan};
 use super::Device;
 use metal2vulkan::bind::PlanesCopy;
-use metal2vulkan::device::{DeviceProfile, FormatUsage, VkFeature, VkProperty};
-use metal2vulkan::error::{Capability, Feature, Unsupported};
+use metal2vulkan::metal::format::WordAttachment;
 use metal2vulkan::metal::TextureType;
 use metal2vulkan::pipeline::{GraphicsState, StorageAttachmentUse};
 use metal2vulkan::vk::{Format, ImageCreateFlags, ImageUsageFlags, NumericFormat};
@@ -235,12 +234,22 @@ pub(crate) fn storage_candidate(plan: &ImagePlan, profile: &DeviceProfile) -> Op
     let usage = plan.usage;
     let samples = plan.samples.as_raw();
     let own_image = samples == 1 || through_multisampled_storage(profile, samples);
+    // A packed 16-bit render target the device renders through its word's view
+    // (`image_plan.rs`), which a fetching draw stores through too: `STORAGE` is that view's, which
+    // the image's extended usage lets it hold.
+    let word = WordAttachment::of(plan.pixel_format, profile)
+        .map(WordAttachment::word_format)
+        .filter(|&w| {
+            plan.flags.contains(ImageCreateFlags::EXTENDED_USAGE)
+                && views_in(plan, w)
+                && profile.supports_format(w, FormatUsage::StorageImage)
+        });
     let candidate = through_storage(profile)
         && usage.contains(ImageUsageFlags::COLOR_ATTACHMENT)
         && !usage.intersects(ImageUsageFlags::STORAGE | ImageUsageFlags::TRANSIENT_ATTACHMENT)
         && own_image
         && stores_samples(profile, samples)
-        && profile.supports_format(plan.format, FormatUsage::StorageImage);
+        && (profile.supports_format(plan.format, FormatUsage::StorageImage) || word.is_some());
     if !candidate {
         return None;
     }

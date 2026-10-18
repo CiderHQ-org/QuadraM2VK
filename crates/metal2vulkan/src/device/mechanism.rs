@@ -227,6 +227,9 @@ pub fn mechanism(fact: &RuntimeFact, profile: &DeviceProfile) -> Mechanism {
         // Link gives the attachment no Vulkan blend and its input attachment, which the consumer
         // binds as `GraphicsState::input_attachments` states.
         RuntimeFact::ExtendedRangeInputBlend { .. } => Mechanism::RenderPassContract,
+        // Link writes the whole word and gives the attachment its input attachment, which the
+        // consumer binds as `GraphicsState::input_attachments` states.
+        RuntimeFact::WordInputMerge { .. } => Mechanism::RenderPassContract,
         // Keyed by the slots bound in a format of another numeric class than the declared one,
         // whose texels the function reads in that class.
         RuntimeFact::CrossClassReads { .. } => Mechanism::Variant,

@@ -144,6 +144,7 @@ pub(crate) mod extended_color;
 pub mod fetch;
 mod plan;
 mod stage_in;
+pub(crate) mod word_color;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -384,6 +385,9 @@ pub struct StageIoPlan {
     /// as the raw texel Metal stores (`extended_color::encode`), with the form each is held in
     /// (and, a bfloat one's rounding).
     pub extended: BTreeMap<u32, crate::pipeline::lower_inputs::ExtendedRangeColor>,
+    /// The word attachments whose `float` or `half` output each return stores as the word Metal
+    /// stores (`word_color::encode`), with each word's layout.
+    pub words_written: BTreeMap<u32, crate::metal::format::WordAttachment>,
     /// A vertex function's viewport compensation (`LoweringInputs::viewport_compensation`).
     pub compensation: Option<Compensation>,
     /// A fragment function's depth output, which each return gives Metal's answer
@@ -1966,9 +1970,23 @@ fn output_part(
         Some(color) if cx.plan.families.fragment.input_blends.contains_key(&color) => {
             input_blended(cx, fb, (x, returned), color, (o.link.form, part))?
         }
-        Some(color) => match cx.plan.families.stage_io.extended.get(&color).copied() {
-            Some(e) => extended_color::encode(cx, fb, e, o.link.form, part)?,
-            None => color_write::round(cx, fb, color, o.link.form, part)?,
+        Some(color) => match (
+            cx.plan.families.stage_io.words_written.get(&color).copied(),
+            cx.plan.families.stage_io.extended.get(&color).copied(),
+        ) {
+            (Some(w), _) => {
+                let srgb = word_color::srgb_table(cx);
+                let word = word_color::encode(fb, w, (o.link.form, part), srgb)?;
+                // A write of some of the word's channels over the attachment's input attachment.
+                match cx.plan.families.fragment.word_merges.get(&color).copied() {
+                    Some(kept) => {
+                        crate::lower::fragment::word_input_merge(cx, fb, color, kept, word)?
+                    }
+                    None => word,
+                }
+            }
+            (None, Some(e)) => extended_color::encode(cx, fb, e, o.link.form, part)?,
+            (None, None) => color_write::round(cx, fb, color, o.link.form, part)?,
         },
         None => part,
     };

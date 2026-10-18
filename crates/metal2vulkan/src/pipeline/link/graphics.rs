@@ -340,6 +340,36 @@ pub fn graphics_state(
             Some(_) if storage.contains(&(index as u32)) => None,
             Some(a) => {
                 let state = || -> Result<ColorAttachmentState, Error> {
+                    // A word attachment renders through the view of its word, which the function
+                    // writes whole and unblended (`color_writes::word_color`): its one component,
+                    // where the function writes the attachment and the mask keeps some of the
+                    // format's channels (all of them, or some where the function merges the word
+                    // into its input attachment's, `fetch::word_merges`).
+                    if let Some(word) =
+                        color_writes::word_color(index as u32, a, r.alpha_to_coverage, p)
+                    {
+                        let channels = [
+                            vk::ColorComponentFlags::R,
+                            vk::ColorComponentFlags::G,
+                            vk::ColorComponentFlags::B,
+                            vk::ColorComponentFlags::A,
+                        ]
+                        .into_iter()
+                        .zip(word.fields())
+                        .filter(|(_, f)| f.is_some())
+                        .fold(vk::ColorComponentFlags::empty(), |m, (c, _)| m | c);
+                        let kept = color_write_mask(a.write_mask)? & channels;
+                        let write_mask = match written.contains(&(index as u32)) && !kept.is_empty()
+                        {
+                            true => vk::ColorComponentFlags::R,
+                            false => vk::ColorComponentFlags::empty(),
+                        };
+                        return Ok(ColorAttachmentState {
+                            format: word.word_format(),
+                            write_mask,
+                            blend: None,
+                        });
+                    }
                     // The fragment function writes what Metal's blend of one and zero stores,
                     // so the attachment takes no Vulkan blend, nor the format's blend support:
                     // one it rounds, and one it writes as a half's bits. But not a 16-bit float
@@ -489,9 +519,13 @@ pub fn graphics_state(
                 return Err(refused.at_attachment(Attachment::Color(color)).into());
             }
             // An extended-range attachment's input reads its raw texels, the raw format's
-            // `uint`s, which a stage compiled for the attachment decodes (`color_writes::check`).
+            // `uint`s, which a stage compiled for the attachment decodes (`color_writes::check`);
+            // a word attachment's reads its word, which a stage merges (`fetch::word_merges`).
+            let word =
+                color_writes::word_color(color, &attachment, r.alpha_to_coverage, p).is_some();
             let format_class = match ExtendedRange::of(attachment.pixel_format) {
                 Some(_) => SampledType::Uint,
+                None if word => SampledType::Uint,
                 None => sampled_type(attachment.pixel_format).unwrap_or(SampledType::Float),
             };
             input_attachments.push(InputAttachmentUse {

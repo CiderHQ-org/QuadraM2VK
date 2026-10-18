@@ -894,3 +894,72 @@ fn half_bits_are_each_halfs_bits() {
         color_write::HALF_BITS_WORDS
     );
 }
+
+/// A word attachment's encode (`stage_io::word_color::encode`) stores Metal's word for every
+/// packed 16-bit layout: each lane rounded to `half`, then its code rounded to even
+/// (`WordAttachment::output_word`, which the M3 Max's draws and clears matched on every texel),
+/// over the values beside each code and tie of the 1-, 4-, 5- and 6-bit channels, the half grid
+/// and the specials, each lane of a case a different value, and a three-lane output's alpha 1;
+/// and `RGB9E5Float`'s word of a `float` output, its mantissas truncated, over those and values
+/// across its range.
+#[test]
+fn word_attachments_store_metals_words() {
+    use crate::metal::format::WordAttachment;
+    use crate::metal::PixelFormat;
+    let mut values = Vec::new();
+    for m in [1, 15, 31, 63] {
+        values.extend(around_codes(m, false, 1, 2));
+    }
+    values.extend(half_values().into_iter().step_by(5));
+    values.extend(specials());
+    // `RGB9E5Float`'s range: past its largest, its smallest step, and between.
+    values.extend([
+        70000.0,
+        65408.0,
+        65409.0,
+        1e-7,
+        2f32.powi(-24),
+        3e-5,
+        1000.3,
+        2.5,
+        0.375,
+    ]);
+    let n = values.len();
+    let quad = |i: usize| [0, 1, 2, 3].map(|l| values[(i + l * 7919) % n]);
+    for pf in [
+        PixelFormat::B5G6R5Unorm,
+        PixelFormat::A1BGR5Unorm,
+        PixelFormat::ABGR4Unorm,
+        PixelFormat::BGR5A1Unorm,
+        PixelFormat::RGB9E5Float,
+    ] {
+        let word = WordAttachment::layout(pf).expect("a word layout");
+        for lanes in [4u8, 3] {
+            let f = vec(float(32), lanes);
+            let cases: Vec<Case> = (0..n)
+                .map(|i| {
+                    let q = quad(i);
+                    vec![q[..usize::from(lanes)]
+                        .iter()
+                        .map(|x| u64::from(x.to_bits()))
+                        .collect()]
+                })
+                .collect();
+            check_accept(
+                &format!("{pf:?} word of {lanes} lanes"),
+                &[f],
+                int(32),
+                &|fb, x| crate::lower::stage_io::word_color::encode(fb, word, (f, x[0]), None),
+                &cases,
+                &|c| {
+                    let mut rgba = [0.0, 0.0, 0.0, 1.0];
+                    for (out, b) in rgba.iter_mut().zip(&c[0]) {
+                        *out = f32::from_bits(*b as u32);
+                    }
+                    Some(vec![u64::from(word.output_word(rgba))])
+                },
+                &|g, w| g == w,
+            );
+        }
+    }
+}

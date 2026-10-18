@@ -500,6 +500,8 @@ impl RenderCommandEncoder {
     ) -> Result<(), Error> {
         self.sync_heaps();
         // An execution rewrites an extended-range or padded attachment as a draw does, of reset
+        // commands too, and a signed normalized one's minimum codes, and an
+        // `RGB9E5Float` one's words.
         self.degrade_kept_attachments();
         self.rewrites_unused_bits = true;
         self.degrade_extended_range_execution();

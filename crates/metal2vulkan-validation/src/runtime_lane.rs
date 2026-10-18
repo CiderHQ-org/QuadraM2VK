@@ -740,6 +740,8 @@ mod wide_points;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod window_surfaces;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod word_samples;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod wrapped_buffers;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod ycbcr_minify;

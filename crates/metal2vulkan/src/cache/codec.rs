@@ -29,7 +29,7 @@ use crate::device::requirements::{
 use crate::device::subgroup::SubgroupRequirement;
 use crate::library::{FunctionArtifact, FunctionCompileKey, KernelFacts};
 use crate::metal;
-use crate::metal::format::ExtendedRange;
+use crate::metal::format::{ExtendedRange, WordAttachment, WordField};
 use crate::metal::TextureWriteRoundingMode;
 use crate::pipeline::artifact::{
     ComputePipeline, ComputePipelineMetalInfo, PrecisionNote, Reconvergence, RenderPipeline,
@@ -1074,6 +1074,7 @@ codec_struct! {
         float_blend_colors, zero_indices, color_group,
     }
     ColorGroup { present, width, group }
+    WordField { shift, bits }
     SelectedWrite { lanes, rounds, nans }
     ExtendedRangeColor { form, blended, nearest_even }
     PulledInput { index, ty, fetch }
@@ -1115,6 +1116,7 @@ codec_enum! {
         Bgr10 { srgb }, Bgra10 { srgb }, Planes { srgb }, R10X6, Rg10X12, R10X6Srgb, Rg10X12Srgb,
         R16Bfloat, Rg16Bfloat, Rgba16Bfloat,
     }
+    WordAttachment { Packed16 { fields }, Srgb8 { fields }, Rgb9e5 }
     FactorLane { Zero, One, Output(f0) }
     RotatedBlendForm { Premultiplied, Unmeasured }
     CaptureForm { Vertices, Indexed(f0) }
@@ -1192,6 +1194,7 @@ codec_enum! {
         HeapRawSamples { stage, sampler },
         ShaderStencilTest { formatless },
         ExtendedRangeInputBlend { color, blend, kept },
+        WordInputMerge { color, kept },
         CrossClassReads { slot },
         StorageTextureWriteRounding { slot, halves },
         HeapWriteRounding { stage, halves },

@@ -72,8 +72,7 @@ const WRITE_WORDS: u64 = 120;
 /// where this module computes an extended-range blend (on one that orders it through the pixel
 /// interlock, the storage form does, `fetch::interlock_orders`).
 fn through_inputs(cx: &SelectCx<'_>) -> bool {
-    let f = cx.profile.fields().fragment;
-    f.rasterization_order_color_access && !fetch::interlock_orders(cx.profile)
+    fetch::inputs_order(cx.profile)
 }
 
 /// Plan the extended-range attachments the function writes through a first output where the

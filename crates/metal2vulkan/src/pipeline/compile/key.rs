@@ -225,6 +225,11 @@ pub fn function_key(
             .bytes(format!("{:?}", inputs.extended_range_colors).as_bytes());
     }
     // Appended only when set, as `storage_view_slots`.
+    if !inputs.word_colors.is_empty() {
+        h.bytes(b"word-colors")
+            .bytes(format!("{:?}", inputs.word_colors).as_bytes());
+    }
+    // Appended only when set, as `storage_view_slots`.
     if !inputs.srgb_fetches.is_empty() {
         h.bytes(b"srgb-fetches")
             .bytes(format!("{:?}", inputs.srgb_fetches).as_bytes());

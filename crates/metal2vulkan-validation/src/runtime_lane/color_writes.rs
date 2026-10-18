@@ -28,6 +28,11 @@
 //! A `half` output (probe 5, an M4) converts as its value does, and a half-float channel stores it
 //! as it is, a NaN's payload included; the half-output cases draw every `half`.
 //!
+//! A packed format the device samples but does not render (the RTX 5080's `A1BGR5Unorm` and
+//! `ABGR4Unorm`) draws through the view of its word, the word the fragment function encodes
+//! (`metal::format::WordAttachment`): its cases must draw there, plain and blended alike, and say
+//! so.
+//!
 //! Each case draws the same inputs into the format, every channel of a texel the same input,
 //! plain and through blending with factors one and zero, reads the attachment back, and compares
 //! every channel with the rule. One difference is the recorded near-equivalent
@@ -52,15 +57,16 @@ use crate::candidate::runtime_samples::{library, shape};
 use crate::runtime_lane::buffer_with;
 use metal2vulkan::bind::SRGB_RESOLVE_THRESHOLDS;
 use metal2vulkan::error::DriverDeviation;
-use metal2vulkan::metal::{PixelFormat, PrimitiveType, TextureUsage};
+use metal2vulkan::metal::format::WordAttachment;
+use metal2vulkan::metal::{BlendFactor, ColorWriteMask, PixelFormat, PrimitiveType, TextureUsage};
 use metal2vulkan::pipeline::{
     ColorAttachmentDescriptor, PrecisionNote, Reconvergence, RenderPipelineDescriptor, StageSource,
 };
 use metal2vulkan::vk;
 use metal2vulkan::Budget;
 use metal2vulkan_runtime::{
-    BlitOption, Degradation, LoadAction, PipelineOptions, RenderPassDescriptor, ResourceOptions,
-    StoreAction, TextureDescriptor,
+    BlitOption, ClearColor, Degradation, LoadAction, PipelineOptions, RenderPassDescriptor,
+    ResourceOptions, StoreAction, TextureDescriptor,
 };
 use std::collections::BTreeSet;
 
@@ -717,9 +723,25 @@ struct Drawn {
 /// the capability (4436).
 const IO16_CAPABILITY: [u32; 2] = [0x0002_0011, 4436];
 
-/// The texels a draw of `values` into `case`'s format stores, plain or through blending with
-/// factors one and zero, and how the fragment stage was compiled; or why it could not draw.
-fn drawn(lane: &Lane, case: &Case, values: &[f32], blended: bool) -> Result<Drawn, String> {
+/// How a draw blends: not at all, with factors one and zero, or by premultiplied source-over (one
+/// and one minus the source alpha, added, for color and alpha).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DrawBlend {
+    Off,
+    Replace,
+    Over,
+}
+
+/// The texels a draw of `values` into `case`'s format stores, blended by `blend`, and how the
+/// fragment stage was compiled; or why it could not draw. Where `masked`, under that write mask
+/// over a pass that clears to that color.
+fn drawn(
+    lane: &Lane,
+    case: &Case,
+    values: &[f32],
+    blend: DrawBlend,
+    masked: Option<(ColorWriteMask, [f64; 4])>,
+) -> Result<Drawn, String> {
     let device = &lane.device;
     let height = values.len().div_ceil(WIDTH);
     let library = library(device).map_err(|e| e.to_string())?;
@@ -737,7 +759,14 @@ fn drawn(lane: &Lane, case: &Case, values: &[f32], blended: bool) -> Result<Draw
     };
     pipeline.fragment = Some(StageSource::Function(function(fragment)?));
     let mut attachment = ColorAttachmentDescriptor::new(case.pf);
-    attachment.blending_enabled = blended;
+    attachment.blending_enabled = blend != DrawBlend::Off;
+    if blend == DrawBlend::Over {
+        attachment.destination_rgb_blend_factor = BlendFactor::OneMinusSourceAlpha;
+        attachment.destination_alpha_blend_factor = BlendFactor::OneMinusSourceAlpha;
+    }
+    if let Some((mask, _)) = masked {
+        attachment.write_mask = mask;
+    }
     pipeline.color_attachments[0] = Some(attachment);
     let compiled = device
         .compile_device()
@@ -778,6 +807,9 @@ fn drawn(lane: &Lane, case: &Case, values: &[f32], blended: bool) -> Result<Draw
     let color = &mut pass.color_attachments[0];
     color.texture = Some(target.clone());
     color.load_action = LoadAction::Clear;
+    if let Some((_, [r, g, b, a])) = masked {
+        color.clear_color = ClearColor::new(r, g, b, a);
+    }
     color.store_action = StoreAction::Store;
     lane.run(&pass, |_, e, _| {
         e.set_render_pipeline_state(&pipeline).unwrap();
@@ -815,18 +847,31 @@ fn draws_store_metals_codes() {
                 },
                 if blended { " blended (one, zero)" } else { "" }
             );
+            // A packed format the device samples but does not render draws through the view of
+            // its word (`metal::format::WordAttachment`), plain and blended alike.
+            let word = WordAttachment::of(case.pf, lane.device.compile_device().profile());
+            let blend = match blended {
+                true => DrawBlend::Replace,
+                false => DrawBlend::Off,
+            };
             let Drawn {
                 stored,
                 noted,
                 sixteen,
                 rounded,
-            } = match drawn(&lane, case, &values, blended) {
+            } = match drawn(&lane, case, &values, blend, None) {
                 Ok(drawn) => drawn,
                 Err(why) => {
                     eprintln!("color write {label} on {name}: {why}");
+                    if word.is_some() {
+                        differ.push(format!("{label}: not drawn through its word view: {why}"));
+                    }
                     continue;
                 }
             };
+            if word.is_some() {
+                eprintln!("color write {label} on {name}: through the view of its word");
+            }
             let (mut channels, mut wrong, mut examples) = (0usize, 0usize, Vec::new());
             let (mut nans, mut stores) = (0usize, BTreeSet::new());
             for (i, &x) in values.iter().enumerate() {
@@ -887,6 +932,237 @@ fn draws_store_metals_codes() {
     }
     assert!(differ.is_empty(), "color writes not Metal's: {differ:#?}");
     quiet(lane, &messages);
+}
+
+/// A packed 16-bit or two-channel 8-bit sRGB format's draw under a write mask of some of its
+/// channels, over a pass that clears it: each written channel stores Metal's code of the output
+/// and each kept one the code of the clear (Metal's rule of both). A format the device holds but
+/// does not render must draw so through the view of its word (`metal::format::WordAttachment`),
+/// which the fragment function merges into the texel's, in the pixel interlock or over the
+/// attachment's input attachment on a device that orders fetch through them (lavapipe; an 8-bit
+/// sRGB word), and says so.
+#[test]
+fn partly_masked_packed_formats_keep_their_fields() {
+    let (messages, _cache, lane) = lane();
+    let name = lane.device.name().to_owned();
+    let profile = lane.device.compile_device().profile().clone();
+    // Each clear channel's code is clear of a tie at 4, 5 and 1 bits, so a device that clears a
+    // format it renders by its own conversion stores Metal's code too.
+    let clear = [0.2, 0.6, 0.8, 0.4];
+    let masks = [
+        ColorWriteMask::RED,
+        ColorWriteMask::RED | ColorWriteMask::GREEN,
+        ColorWriteMask::ALPHA,
+        ColorWriteMask::RED | ColorWriteMask::GREEN | ColorWriteMask::BLUE,
+    ];
+    let mut differ = Vec::new();
+    let cases = CASES.iter().filter(|c| {
+        matches!(
+            c.pf,
+            PixelFormat::A1BGR5Unorm | PixelFormat::ABGR4Unorm | PixelFormat::RG8UnormSRGB
+        ) && c.output == Output::Float
+    });
+    for case in cases {
+        let values = (case.values)();
+        let word = WordAttachment::of(case.pf, &profile);
+        for mask in masks {
+            let label = format!("{:?} under {mask:?}", case.pf);
+            let stored = match drawn(&lane, case, &values, DrawBlend::Off, Some((mask, clear))) {
+                Ok(drawn) => drawn.stored,
+                Err(why) => {
+                    eprintln!("masked color write {label} on {name}: {why}");
+                    if word.is_some() {
+                        differ.push(format!("{label}: not drawn through its word: {why}"));
+                    }
+                    continue;
+                }
+            };
+            if word.is_some() {
+                eprintln!("masked color write {label} on {name}: its word merged into the texel's");
+            }
+            let (mut channels, mut wrong, mut examples) = (0usize, 0usize, Vec::new());
+            for (i, &x) in values.iter().enumerate() {
+                let texel = &stored[i * case.bytes..(i + 1) * case.bytes];
+                // The case lists red, green, blue and alpha by their fields, least significant
+                // first; each channel's mask bit names it.
+                for &(offset, channel) in case.channels {
+                    let lane_of = channel_lane(case.pf, offset);
+                    let bit = [
+                        ColorWriteMask::RED,
+                        ColorWriteMask::GREEN,
+                        ColorWriteMask::BLUE,
+                        ColorWriteMask::ALPHA,
+                    ][lane_of];
+                    channels += 1;
+                    let got = field(texel, offset, channel.bits());
+                    let want = match mask.contains(bit) {
+                        true => metal(channel, x, false),
+                        false => metal(channel, clear[lane_of] as f32, false),
+                    };
+                    if got != want {
+                        wrong += 1;
+                        if examples.len() < 6 {
+                            examples.push(format!(
+                                "{x:e} at bit {offset}: {got:#x}, Metal's {want:#x}"
+                            ));
+                        }
+                    }
+                }
+            }
+            if wrong == 0 {
+                eprintln!(
+                    "masked color write {label} on {name}: Metal's, 0 of {channels} channels differ"
+                );
+            } else {
+                eprintln!(
+                    "masked color write {label} on {name}: {wrong} of {channels} channels differ: {}",
+                    examples.join("; ")
+                );
+                differ.push(format!("{label}: {wrong} of {channels}"));
+            }
+        }
+    }
+    assert!(
+        differ.is_empty(),
+        "masked color writes not Metal's: {differ:#?}"
+    );
+    quiet(lane, &messages);
+}
+
+/// `x` rounded to `half`, nearest even, for `x` in `[0, 2]`.
+fn half_even(x: f64) -> f64 {
+    if x == 0.0 {
+        return 0.0;
+    }
+    let step = 2f64.powi((x.log2().floor() as i32).max(-14) - 10);
+    (x / step).round_ties_even() * step
+}
+
+/// A packed 16-bit format's draw blended by premultiplied source-over (one and one minus the
+/// source alpha, added, for color and alpha) over a pass that clears it to codes it holds exactly,
+/// so Metal's tile holds the codes' values: each channel stores Metal's code of the blend, under
+/// the fixture's fast math `h(fma(d, h(1 - a), s))`, the output clamped to `[0, 1]` (a NaN 0) and
+/// rounded to `half` to nearest even, `a` its alpha, each code `c` of the clear read as
+/// `h(c / m)`, the result's code to nearest even (the packed 16-bit blend sweep of the M3 Max
+/// under macOS 27.0.1: every channel of this state, into each packed format, from `half4` and
+/// `float4` outputs). A format the device samples but does not render must draw so through the
+/// pixel interlock, which computes the blend over its word, and says so; a format the device
+/// renders takes the device's blend, printed against Metal's and not held to it
+/// (`DeviceColorConversion`).
+#[test]
+fn blended_packed_formats_store_metals_blend() {
+    let (messages, _cache, lane) = lane();
+    let name = lane.device.name().to_owned();
+    let profile = lane.device.compile_device().profile().clone();
+    let mut differ = Vec::new();
+    let cases = CASES
+        .iter()
+        .filter(|c| matches!(c.pf, PixelFormat::A1BGR5Unorm | PixelFormat::ABGR4Unorm));
+    for case in cases {
+        let values = (case.values)();
+        let word = WordAttachment::of(case.pf, &profile);
+        let layout = WordAttachment::layout(case.pf).expect("a packed format");
+        // Red, green, blue and alpha codes, each the clear's exact value.
+        let codes = match case.pf {
+            PixelFormat::A1BGR5Unorm => [6u32, 18, 25, 1],
+            _ => [3, 9, 12, 6],
+        };
+        let maxima = layout
+            .fields()
+            .map(|f| f.map_or(1, |f| (1u32 << f.bits) - 1));
+        let clear: [f64; 4] = std::array::from_fn(|l| f64::from(codes[l]) / f64::from(maxima[l]));
+        let label = format!(
+            "{:?}{}",
+            case.pf,
+            if case.output == Output::Half {
+                " from half"
+            } else {
+                ""
+            }
+        );
+        let stored = match drawn(
+            &lane,
+            case,
+            &values,
+            DrawBlend::Over,
+            Some((ColorWriteMask::ALL, clear)),
+        ) {
+            Ok(drawn) => drawn.stored,
+            Err(why) => {
+                eprintln!("blended color write {label} on {name}: {why}");
+                if word.is_some() {
+                    differ.push(format!("{label}: not drawn through the interlock: {why}"));
+                }
+                continue;
+            }
+        };
+        if word.is_some() {
+            eprintln!(
+                "blended color write {label} on {name}: blended over its word in the interlock"
+            );
+        }
+        let (mut channels, mut wrong, mut examples) = (0usize, 0usize, Vec::new());
+        for (i, &x) in values.iter().enumerate() {
+            let texel = &stored[i * case.bytes..(i + 1) * case.bytes];
+            // The output as the function returns it, clamped and rounded to `half`.
+            let out = match case.output {
+                Output::Float => f64::from(x),
+                Output::Half => f64::from(widen(narrow(x))),
+            };
+            let s = match out.is_nan() {
+                true => 0.0,
+                false => half_even(out.clamp(0.0, 1.0)),
+            };
+            let minus = half_even(1.0 - s);
+            for &(offset, channel) in case.channels {
+                let l = channel_lane(case.pf, offset);
+                channels += 1;
+                let m = f64::from(maxima[l]);
+                let d = half_even(f64::from(codes[l]) / m);
+                let v = half_even(d * minus + s);
+                let want = (v.clamp(0.0, 1.0) * m).round_ties_even() as u64;
+                let got = field(texel, offset, channel.bits());
+                if got != want {
+                    wrong += 1;
+                    if examples.len() < 6 {
+                        examples.push(format!(
+                            "{x:e} at bit {offset}: {got:#x}, Metal's {want:#x}"
+                        ));
+                    }
+                }
+            }
+        }
+        if wrong == 0 {
+            eprintln!(
+                "blended color write {label} on {name}: Metal's, 0 of {channels} channels differ"
+            );
+        } else {
+            eprintln!(
+                "blended color write {label} on {name}: {wrong} of {channels} channels differ: {}",
+                examples.join("; ")
+            );
+            if word.is_some() {
+                differ.push(format!("{label}: {wrong} of {channels}"));
+            }
+        }
+    }
+    assert!(
+        differ.is_empty(),
+        "blended color writes not Metal's: {differ:#?}"
+    );
+    quiet(lane, &messages);
+}
+
+/// The channel (0 red to 3 alpha) whose field starts at bit `offset` of a texel of packed 16-bit
+/// format `pf` (`metal::format::WordAttachment::layout`).
+fn channel_lane(pf: PixelFormat, offset: u32) -> usize {
+    WordAttachment::layout(pf)
+        .and_then(|w| {
+            w.fields()
+                .iter()
+                .position(|f| f.is_some_and(|f| u32::from(f.shift) == offset))
+        })
+        .expect("a field of a packed format")
 }
 
 /// Render pipeline states, each made twice, announce their fragment stage's color writes once,

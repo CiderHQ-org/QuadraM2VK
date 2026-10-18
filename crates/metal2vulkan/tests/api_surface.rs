@@ -822,6 +822,8 @@ surface! {
         struct FormatMapping N;
         enum FormatEmulation N;
         enum ExtendedRange N;
+        enum WordAttachment N;
+        struct WordField E;
         enum ClearRoute N;
         fn vk_format;
         fn swizzle_over;

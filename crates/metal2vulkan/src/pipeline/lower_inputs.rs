@@ -378,6 +378,21 @@ pub struct LoweringInputs {
     /// one compiled under another as `NeedsInput(ColorWrites)`. Empty for any other function.
     #[cfg_attr(feature = "serde", serde(default))]
     pub extended_range_colors: BTreeMap<u32, ExtendedRangeColor>,
+    /// The color attachments the device renders through a word view
+    /// (`metal::format::WordAttachment`), by color index: an attachment the pipeline writes
+    /// unblended (or blended with factors one and zero, added), under a write mask of all of the
+    /// format's channels or none, and that is not attachment 0 under alpha-to-coverage, of a format
+    /// the device samples but does not render (one written under a mask of some of its channels
+    /// is stored in the interlocked storage form instead, named in
+    /// [`framebuffer_fetch`](Self::framebuffer_fetch)). The function writes such an attachment
+    /// through an output variable of the word's unsigned integer, the word Metal stores for its
+    /// `float` or `half` output (`ChannelWrite::HalfUnorm`'s rule per channel); a dual-source
+    /// second output there is stored nowhere, as Metal's unblended write reads none, and a color
+    /// input of one is `NotImplemented(Format)`. `Device::compile_render_pipeline` sets it for a
+    /// `Function` fragment stage from the pipeline's color attachments, and link refuses a fragment
+    /// compiled under another map as `NeedsInput(ColorWrites)`. Empty for any other function.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub word_colors: BTreeMap<u32, metal::format::WordAttachment>,
     /// The color attachments the fragment function reads (`[[color(n)]]`) that its render
     /// pipeline gives an 8-bit four-channel sRGB format (`RGBA8Unorm_sRGB`, `BGRA8Unorm_sRGB`),
     /// by color index. Read through an input attachment, such an attachment's value is the

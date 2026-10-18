@@ -956,3 +956,91 @@ fn an_extended_range_blend_follows_the_ordered_storage_form() {
     assert!(extended_range_blend(PixelFormat::BGRA10XR, &p)
         .is_err_and(|u| u.feature == Feature::FramebufferFetch));
 }
+
+/// A packed 16-bit attachment the device samples but does not render (`A1BGR5Unorm`,
+/// `ABGR4Unorm` on the RTX 5080 profiles) takes the storage form through a view of its words: the
+/// view and declaration `R16_UINT`, `uint` texels the function reads as floats, and the word's
+/// layout (`StorageView::word`), whose kept fields a partial write mask merges by the draw's word;
+/// a replacing blend too. Another blend is the shader's (`StorageView::blend`), but one of the
+/// second source, which is not built. A device that renders the format takes it directly, without
+/// the word.
+#[test]
+fn a_word_attachment_takes_the_view_of_its_words() {
+    use crate::metal::format::WordAttachment;
+    let ni = Err(Unsupported::not_implemented(Feature::FramebufferFetch));
+    for stem in ["nvidia-rtx5080-laptop", "nvidia-rtx50-linux"] {
+        let p = profile(stem, &[]);
+        assert!(interlock_orders(&p), "{stem}");
+        for pf in [PixelFormat::A1BGR5Unorm, PixelFormat::ABGR4Unorm] {
+            let what = format!("{stem} {pf:?}");
+            let word = WordAttachment::layout(pf);
+            assert_eq!(WordAttachment::of(pf, &p), word, "{what}");
+            for mask in [
+                ColorWriteMask::RED | ColorWriteMask::GREEN,
+                ColorWriteMask::ALPHA,
+                ColorWriteMask::ALL,
+            ] {
+                let view = form(&state(pf, |c| c.write_mask = mask), false, WRITES, &p)
+                    .unwrap_or_else(|e| panic!("{what} {mask:?}: {e:?}"));
+                assert_eq!(
+                    (view.format, view.declared, view.numeric, view.word),
+                    (
+                        vk::Format::R16_UINT,
+                        expected_declaration(
+                            vk::Format::R16_UINT,
+                            WRITES,
+                            crate::spv::ImageFormat::R16ui,
+                            &p
+                        ),
+                        SampledType::Uint,
+                        word
+                    ),
+                    "{what} {mask:?}"
+                );
+                assert_eq!(view.read_class(), SampledType::Float, "{what}");
+                assert_eq!(view.uint_view.or(view.rgba_view), None, "{what}");
+                let partial = mask != ColorWriteMask::ALL;
+                assert_eq!(
+                    (view.merges(), view.kept_at_draw),
+                    (partial, partial),
+                    "{what}"
+                );
+            }
+            let replacing = state(pf, |c| {
+                c.blending_enabled = true;
+                c.write_mask = ColorWriteMask::RED;
+            });
+            assert!(form(&replacing, false, WRITES, &p).is_ok(), "{what}");
+            let blended = state(pf, |c| {
+                c.blending_enabled = true;
+                c.destination_rgb_blend_factor = crate::metal::BlendFactor::One;
+            });
+            let view = form(&blended, false, WRITES, &p)
+                .unwrap_or_else(|e| panic!("{what} blended: {e:?}"));
+            assert_eq!(
+                (view.word, view.format),
+                (word, vk::Format::R16_UINT),
+                "{what}"
+            );
+            assert!(view.blend.is_some(), "{what}");
+            let second = state(pf, |c| {
+                c.blending_enabled = true;
+                c.destination_rgb_blend_factor = crate::metal::BlendFactor::Source1Color;
+            });
+            assert_eq!(form(&second, false, WRITES, &p), ni, "{what}");
+        }
+    }
+    let radv = profile("amd-rdna3-radv", &[]);
+    let view = form(
+        &state(PixelFormat::ABGR4Unorm, |c| {
+            c.write_mask = ColorWriteMask::RED
+        }),
+        false,
+        WRITES,
+        &radv,
+    );
+    if let Ok(view) = view {
+        assert_eq!(view.word, None);
+        assert_eq!(view.format, vk::Format::R4G4B4A4_UNORM_PACK16);
+    }
+}

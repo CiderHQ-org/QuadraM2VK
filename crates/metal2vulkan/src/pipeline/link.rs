@@ -484,6 +484,9 @@ fn render_state(
     // The extended-range blends the fragment computes over input attachments, against this
     // pipeline's attachments.
     let input_blends = fetch::input_blends(r, fragment, p)?;
+    // The word merges the fragment computes over input attachments, against this pipeline's
+    // write masks.
+    fetch::word_merges(r, fragment, p)?;
     let fs = fragment.map(|f| &f.interface);
     let mut gs = graphics::graphics_state(r, (geometry, fs), vi, ts, &input_blends, p)?;
     // The color writes the fragment rounds against this pipeline's attachments, once the

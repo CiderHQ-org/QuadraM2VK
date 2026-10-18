@@ -204,6 +204,10 @@ fn every_fact() -> Vec<RuntimeFact> {
             },
             kept: crate::vk::ColorComponentFlags::empty(),
         },
+        RuntimeFact::WordInputMerge {
+            color: 1,
+            kept: crate::vk::ColorComponentFlags::G,
+        },
         RuntimeFact::CrossClassReads { slot },
         RuntimeFact::StorageTextureWriteRounding { slot, halves: true },
         RuntimeFact::HeapWriteRounding {
@@ -368,6 +372,7 @@ fn variant(f: &RuntimeFact) -> usize {
         RuntimeFact::SynthesizedGeometry { .. } => 88,
         RuntimeFact::ObjectThreadgroupArena { .. } => 89,
         RuntimeFact::ExactFormsOverCompilerLimit { .. } => 90,
+        RuntimeFact::WordInputMerge { .. } => 91,
     }
 }
 
@@ -375,7 +380,7 @@ fn variant(f: &RuntimeFact) -> usize {
 fn mechanism_is_total_over_every_fact_and_profile() {
     let facts = every_fact();
     let covered: std::collections::BTreeSet<usize> = facts.iter().map(variant).collect();
-    assert_eq!(covered, (0..91).collect(), "every_fact misses a variant");
+    assert_eq!(covered, (0..92).collect(), "every_fact misses a variant");
     for (stem, _) in super::committed_profiles() {
         let dev = device(&stem);
         let p = dev.profile();
@@ -491,7 +496,8 @@ fn mechanism_is_total_over_every_fact_and_profile() {
                 | RuntimeFact::ShaderTests { .. }
                 | RuntimeFact::ShaderStencilTest { .. }
                 | RuntimeFact::TileImageblock { .. }
-                | RuntimeFact::ExtendedRangeInputBlend { .. } => Mechanism::RenderPassContract,
+                | RuntimeFact::ExtendedRangeInputBlend { .. }
+                | RuntimeFact::WordInputMerge { .. } => Mechanism::RenderPassContract,
                 RuntimeFact::ExecutionStatus => match f.buffer_access {
                     crate::device::profile::BufferAccess::Addressed => Mechanism::PushConstant,
                     _ => Mechanism::SyntheticBinding,
