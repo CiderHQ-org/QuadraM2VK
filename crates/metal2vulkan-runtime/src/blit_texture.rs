@@ -466,8 +466,9 @@ impl BlitCommandEncoder {
                 Some(copy) => {
                     self.command_in(copy.stages, &copy.uses, |device, raw| {
                         // SAFETY: the encoder's command buffer is recording outside a render
-                        // pass; the buffer, the texture, and the copy's images and objects are
-                        // live until it completes (retained below).
+                        // pass; the buffer (held by `blit_at`), the texture, and the copy's
+                        // images and objects (held by the copy, retained below) are live until
+                        // it completes.
                         unsafe { copy.record(device, raw) };
                     })?;
                     // A depth written as the single-sample path writes one announces as it does.

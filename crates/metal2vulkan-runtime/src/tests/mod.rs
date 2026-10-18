@@ -21,6 +21,8 @@ mod binary;
 mod binary_archive;
 mod binding_view;
 mod blit;
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+mod blit_holds;
 mod blit_plan;
 mod buffer_texture;
 mod capabilities;
@@ -45,6 +47,8 @@ mod device;
 mod dispatch_pending;
 mod driver_defects;
 mod enables;
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+mod encoder_holds;
 mod error_kinds;
 mod event_timeline;
 mod exactness;

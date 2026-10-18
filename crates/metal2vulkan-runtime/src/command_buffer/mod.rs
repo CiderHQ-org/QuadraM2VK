@@ -2420,8 +2420,8 @@ impl CommandBufferShared {
 
     /// The host step's reading of batch `index`'s indirect sparse updates (`sparse/indirect.rs`),
     /// before its segments' steps: each is replaced, in its place, by the updates its arguments
-    /// state now. A refusal is kept for the batch's submission, which fails the command buffer with
-    /// it, and the rest stay unread.
+    /// state now, and held until the command buffer completes. A refusal is kept for the batch's
+    /// submission, which fails the command buffer with it, and the rest stay unread.
     fn read_mappings(self: &Arc<Self>, index: usize) {
         let device = &self.device;
         let unread: Vec<(usize, usize, SparseUpdate)> = {
@@ -2463,7 +2463,17 @@ impl CommandBufferShared {
             let mut state = lock(&self.state);
             match read {
                 Ok(updates) => {
-                    state.recorded[encoder].sparse.splice(at..at + 1, updates);
+                    // The update read goes to `retained`: its texture and buffer are held until
+                    // the command buffer completes, as Metal's command buffer holds what its
+                    // encoders were given, though its arguments map nothing; and it is released
+                    // outside this lock (the buffer's last release may run a deallocator).
+                    let read: Vec<SparseUpdate> = state.recorded[encoder]
+                        .sparse
+                        .splice(at..at + 1, updates)
+                        .collect();
+                    state
+                        .retained
+                        .extend(read.into_iter().map(|update| Box::new(update) as Box<_>));
                 }
                 Err(failure) => {
                     state.step_failure = Some(match failure {

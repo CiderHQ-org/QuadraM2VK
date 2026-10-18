@@ -464,6 +464,12 @@ impl EncoderCore {
     /// ([`Buffer::blit_at`]): a no-copy buffer's import the device released while idle is
     /// imported again first, and what the command reads of it held until the command buffer
     /// completes (`host_residency.rs`). Refused where the device cannot import it again.
+    ///
+    /// The buffer itself is held until the command buffer completes too, whatever path records
+    /// the command (a per-sample copy's plan holds only the raw `VkBuffer`): its `VkBuffer`, and a
+    /// no-copy buffer's import of the caller's pages, go only once nothing holds the buffer
+    /// (`HostImport`'s drop), so a program that lets go of it once it committed (as Metal lets it,
+    /// a command buffer retaining what its commands use) frees nothing a command in flight writes.
     pub(super) fn blit_at(
         &mut self,
         buffer: &Buffer,
@@ -473,6 +479,7 @@ impl EncoderCore {
         if let Some(hold) = hold {
             self.retain_shared(hold);
         }
+        self.retain_shared(buffer.held());
         Ok(at)
     }
 

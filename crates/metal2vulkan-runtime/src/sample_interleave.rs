@@ -611,8 +611,9 @@ enum Recorded {
 }
 
 /// The emulated copy: its steps, the resource uses the command barriers over, the stages it
-/// runs in, the band objects, and the scratch and wide textures it holds until the command
-/// buffer completes.
+/// runs in, the band objects, and the textures it holds until the command buffer completes (the
+/// copy's own, its scratch and wide images, and the texture it copies into or out of). The buffer
+/// it copies with is held by the encoder (`EncoderCore::blit_at`).
 pub(super) struct InterleaveCopy {
     steps: Vec<Recorded>,
     pub(super) uses: Vec<Use<ResourceKey>>,
@@ -941,6 +942,9 @@ impl InterleaveCopy {
         };
         uses.push(texture.image_use(level..level + 1, layer..layer + 1, stage, into_texture)?);
         let texture_image = texture.raw_image()?;
+        // The copy holds the texture its steps record on until its command buffer completes, as
+        // it holds its wide and scratch images.
+        textures.push(texture.clone());
         for (bx, by, bw, bh) in tiles {
             let wide_usage = if into_texture {
                 ImageUsageFlags::SAMPLED | ImageUsageFlags::TRANSFER_DST
