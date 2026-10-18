@@ -34,6 +34,7 @@ use metal2vulkan::metal::{
     SamplerAddressMode, SamplerBorderColor, SamplerMinMagFilter, SamplerMipFilter,
 };
 use metal2vulkan::pipeline::FunctionDescriptor;
+use metal2vulkan::vk::DriverId;
 use metal2vulkan::Budget;
 use metal2vulkan_runtime::{Buffer, CommandBufferStatus, ComputeCommandEncoder, Device, Error};
 use std::collections::BTreeMap;
@@ -549,9 +550,20 @@ fn dispatch(encoder: &mut ComputeCommandEncoder, case: &PublicCase) -> Result<()
 /// A kernel whose texture and sampler slots nothing is bound to reads and writes the device's
 /// neutral resources: its dispatches complete with a clean execution report and the validation
 /// layer reports nothing (what Metal reads there is undefined, so the bytes are not compared).
+///
+/// The neutral images its pipeline state's making made take no memory block of their own
+/// (`WorkCounts::dedicated_memory_blocks_live` unchanged) where the driver binds memory that
+/// queued work uses without waiting for it (ANV and RADV, the runtime's `memory.rs` `Fit`), and
+/// blocks of their own elsewhere.
 #[test]
 fn unbound_texture_and_sampler_slots_use_neutrals() {
     on_device(|device, _| {
+        let pooled = matches!(
+            device.properties().description.driver_id,
+            Some(DriverId::INTEL_OPEN_SOURCE_MESA | DriverId::MESA_RADV)
+        );
+        let dedicated = || device.work_counts().dedicated_memory_blocks_live;
+        let before = dedicated();
         for name in [SAMPLED, STORED] {
             let case = public_case(name).unwrap();
             let pipeline = pipeline_state(device, &case).unwrap();
@@ -580,6 +592,12 @@ fn unbound_texture_and_sampler_slots_use_neutrals() {
                 Some(StatusReport::default()),
                 "{name}"
             );
+        }
+        let made = dedicated() - before;
+        println!("NEUTRAL-BLOCKS on {}: {made} dedicated", device.name());
+        match pooled {
+            true => assert_eq!(made, 0, "a neutral took a block of its own"),
+            false => assert!(made > 0, "no neutral took a block of its own"),
         }
     });
 }

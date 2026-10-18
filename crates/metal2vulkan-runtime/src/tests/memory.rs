@@ -1,7 +1,9 @@
 use crate::memory::{
     candidates, host_cached, host_cached_placement, host_incoherent, MemoryClass, Pool,
+    KEPT_EMPTY_BLOCKS, KEPT_EMPTY_FOR,
 };
 use ash::vk;
+use std::time::Instant;
 
 fn ty(flags: vk::MemoryPropertyFlags) -> vk::MemoryType {
     vk::MemoryType {
@@ -234,31 +236,118 @@ fn host_transfer_images_prefer_host_cached_memory() {
     }
 }
 
+/// The memory log's line for a large pooled placement names what it is, its class where placed,
+/// its bytes and where it lies, in the words of the block's own lines (`memory_log.rs`).
 #[test]
-fn pooled_blocks_place_until_full_and_one_empty_block_is_kept() {
+fn the_memory_log_names_a_placement_s_kind_class_and_place() {
+    use crate::memory_log::placement_line;
+    use ash::vk::Handle;
+    let memory = vk::DeviceMemory::from_raw(0xabc0);
+    let placed = placement_line(
+        "placed",
+        16 << 20,
+        Some(MemoryClass::Private),
+        true,
+        (memory, 0x200_0000, 0),
+    );
+    assert_eq!(
+        placed,
+        "metal2vulkan: memory: placed a Private image of 16777216 bytes at offset 0x2000000 of \
+         memory 0xabc0 of type 0"
+    );
+    let returned = placement_line("returned", 4 << 20, None, false, (memory, 0, 2));
+    assert_eq!(
+        returned,
+        "metal2vulkan: memory: returned a buffer of 4194304 bytes at offset 0x0 of memory 0xabc0 \
+         of type 2"
+    );
+}
+
+/// Pooled blocks take placements until full; a block that empties is kept while fewer than
+/// `KEPT_EMPTY_BLOCKS` empty ones are, and freed past that, so a working set that dips by a block
+/// and comes back makes and frees none. Freed slots are reused.
+#[test]
+fn pooled_blocks_place_until_full_and_two_empty_blocks_are_kept() {
+    assert_eq!(KEPT_EMPTY_BLOCKS, 2);
+    let now = Instant::now();
     let mut pool: Pool<&str> = Pool::default();
     assert_eq!(pool.place(16, 16), None, "no block yet");
     let first = pool.add(256, false, "first", 100);
     assert_eq!(pool.place(100, 64), Some((first, 128)));
     assert_eq!(pool.place(100, 64), None, "full");
     let second = pool.add(256, false, "second", 200);
+    let third = pool.add(256, false, "third", 256);
     assert_ne!(first, second);
+    assert_eq!(pool.blocks(), 3);
+    // Emptying the first block keeps it, and the second likewise: two empty blocks are kept.
+    assert_eq!(pool.release(first, 0, 100, now), None);
+    assert_eq!(pool.release(first, 128, 100, now), None);
+    assert_eq!(pool.release(second, 0, 200, now), None);
+    assert_eq!(pool.blocks(), 3);
+    // Emptying the third while two are kept frees it.
+    assert_eq!(pool.release(third, 0, 256, now), Some("third"));
     assert_eq!(pool.blocks(), 2);
-    // Emptying the first block keeps it: it is the only empty pooled block.
-    assert_eq!(pool.release(first, 0, 100), None);
-    assert_eq!(pool.release(first, 128, 100), None);
-    assert_eq!(pool.blocks(), 2);
-    // Emptying the second while the first is empty frees the second.
-    assert_eq!(pool.release(second, 0, 200), Some("second"));
-    assert_eq!(pool.blocks(), 1);
-    // The kept block serves the next request; its slot is reused for a new block.
+    // The kept blocks serve the next requests, the first-made first; the freed slot is reused.
     assert_eq!(pool.place(256, 1), Some((first, 0)));
-    let third = pool.add(256, false, "third", 1);
-    assert_eq!(third, second, "the freed slot is reused");
+    assert_eq!(pool.place(256, 1), Some((second, 0)));
+    let fourth = pool.add(256, false, "fourth", 1);
+    assert_eq!(fourth, third, "the freed slot is reused");
+    assert_eq!(pool.turnover(), (4, 1));
     let mut drained: Vec<&str> = pool.drain().collect();
     drained.sort_unstable();
-    assert_eq!(drained, ["first", "third"]);
+    assert_eq!(drained, ["first", "fourth", "second"]);
     assert_eq!(pool.blocks(), 0);
+}
+
+/// A kept empty block beyond its pool's one goes once it stayed empty for `KEPT_EMPTY_FOR`, the
+/// one emptied earliest first, and never the last kept one; a placement in a kept block makes it
+/// a block in use again. Every kept block goes where the caller takes them (a block of the type
+/// failing to be made).
+#[test]
+fn a_kept_empty_block_beyond_one_goes_after_its_quiet_period() {
+    let start = Instant::now();
+    let later = start + KEPT_EMPTY_FOR;
+    let mut pool: Pool<&str> = Pool::default();
+    let first = pool.add(256, false, "first", 256);
+    let second = pool.add(256, false, "second", 256);
+    assert_eq!(pool.release(first, 0, 256, start), None);
+    assert_eq!(
+        pool.stale(later),
+        None,
+        "one kept block stays, however long"
+    );
+    assert_eq!(
+        pool.release(second, 0, 256, start + KEPT_EMPTY_FOR / 2),
+        None
+    );
+    assert_eq!(
+        pool.stale(later - KEPT_EMPTY_FOR / 4),
+        None,
+        "neither stayed empty so long"
+    );
+    assert_eq!(
+        pool.stale(later),
+        Some("first"),
+        "the earliest emptied goes first"
+    );
+    assert_eq!(
+        pool.stale(later + KEPT_EMPTY_FOR),
+        None,
+        "the last kept block stays"
+    );
+    assert_eq!(pool.blocks(), 1);
+    // Placed in again, a kept block is no longer empty, and emptied again it starts anew.
+    let third = pool.add(256, false, "third", 256);
+    assert_eq!(pool.place(256, 1), Some((second, 0)));
+    let at = later + KEPT_EMPTY_FOR;
+    assert_eq!(pool.release(second, 0, 256, at), None);
+    assert_eq!(pool.release(third, 0, 256, at), None);
+    assert_eq!(pool.stale(at + KEPT_EMPTY_FOR / 2), None);
+    let mut taken = pool.take_kept();
+    taken.sort_unstable();
+    assert_eq!(taken, ["second", "third"]);
+    assert_eq!(pool.blocks(), 0);
+    assert_eq!(pool.turnover(), (3, 3));
 }
 
 #[test]
@@ -266,7 +355,7 @@ fn dedicated_blocks_take_no_other_placement_and_free_with_their_resource() {
     let mut pool: Pool<u32> = Pool::default();
     let dedicated = pool.add(1000, true, 7, 1000);
     assert_eq!(pool.place(1, 1), None, "a dedicated block is never shared");
-    assert_eq!(pool.release(dedicated, 0, 1000), Some(7));
+    assert_eq!(pool.release(dedicated, 0, 1000, Instant::now()), Some(7));
     assert_eq!(pool.blocks(), 0);
 }
 
@@ -288,7 +377,7 @@ fn room_is_a_pooled_block_s_free_range_at_the_largest_alignment_asked() {
     // A placement aligned to 64 asks the pool's later room at 64: 192 bytes from offset 64.
     assert_eq!(pool.place(8, 64), Some((block, 64)));
     assert!(pool.has_room(128) && !pool.has_room(129));
-    assert_eq!(pool.release(block, 64, 8), None);
+    assert_eq!(pool.release(block, 64, 8, Instant::now()), None);
     assert!(pool.has_room(192) && !pool.has_room(193));
 }
 

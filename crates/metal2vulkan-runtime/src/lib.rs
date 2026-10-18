@@ -131,6 +131,7 @@ mod loaded;
 mod loader_word;
 mod managed;
 mod memory;
+mod memory_log;
 mod metal_level;
 mod metal_texture;
 mod mipmap;

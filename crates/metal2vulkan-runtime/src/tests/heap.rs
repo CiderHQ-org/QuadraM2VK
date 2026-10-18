@@ -333,7 +333,7 @@ fn a_heap_s_textures_are_linear_where_their_optimal_images_take_none_of_its_memo
             heap_index: u32::from(!property_flags.contains(F::DEVICE_LOCAL)),
         };
     }
-    let memory = Memory::new(&properties, 1 << 32, true, false, vec![0], None);
+    let memory = Memory::new(&properties, 1 << 32, true, false, vec![0], None, None);
     // The tiling a texture whose optimal image takes `optimal` gets in a heap of `class`.
     let tiling = |types: HeapTypes, optimal: u32, class| {
         let heap = types.heap_memory(&memory, types.buffer, class);

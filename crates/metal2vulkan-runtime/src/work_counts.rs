@@ -1265,6 +1265,12 @@ pub struct WorkCounts {
     pub memory_blocks_live: u64,
     /// Its live pooled blocks with no placement, kept for the next.
     pub empty_memory_blocks_live: u64,
+    /// The pooled blocks it made so far (`memory.rs`), each a `vkAllocateMemory`.
+    pub pooled_memory_blocks_made: u64,
+    /// The pooled blocks it freed so far: emptied while its pool kept as many empty ones as it
+    /// keeps, kept empty past their quiet period, or freed for a block of their type that
+    /// failed to be made (`memory.rs`'s `KEPT_EMPTY_BLOCKS`).
+    pub pooled_memory_blocks_freed: u64,
     /// Its live dedicated blocks: a placement larger than half a block, or one placed apart.
     pub dedicated_memory_blocks_live: u64,
     /// Its live imports of the caller's host memory, a block each (`Memory::import_host`).
@@ -1742,9 +1748,15 @@ impl Device {
     #[doc(hidden)]
     pub fn work_counts(&self) -> WorkCounts {
         let counters = &self.shared().counts;
-        let (allocated, census, (parked, waiting)) = {
+        let (allocated, census, (parked, waiting), (made, freed)) = {
             let memory = lock(&self.shared().memory);
-            (memory.allocated(), memory.census(), memory.parked())
+            let turnover = memory.turnover();
+            (
+                memory.allocated(),
+                memory.census(),
+                memory.parked(),
+                turnover,
+            )
         };
         WorkCounts {
             command_pools_made: counters.command_pools_made.load(Ordering::Relaxed),
@@ -1804,6 +1816,8 @@ impl Device {
             device_memory_allocated: allocated,
             memory_blocks_live: census.pooled,
             empty_memory_blocks_live: census.empty,
+            pooled_memory_blocks_made: made,
+            pooled_memory_blocks_freed: freed,
             dedicated_memory_blocks_live: census.dedicated,
             host_imports_live: census.imported,
             freed_memory_parked: parked,

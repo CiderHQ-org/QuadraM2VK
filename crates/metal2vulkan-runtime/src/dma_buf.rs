@@ -215,6 +215,19 @@ impl Drop for DmaBufPages {
         };
         let shared = self.device.shared();
         let raw_device = shared.vk();
+        if let Some(log) = crate::memory_log::MemoryLog::new(shared.instance.sink()) {
+            use ash::vk::Handle;
+            let memories: Vec<String> = (self.memories.iter())
+                .map(|memory| format!("0x{:x}", memory.as_raw()))
+                .collect();
+            log.line(format!(
+                "metal2vulkan: memory: freed the dma-buf imports of host memory 0x{:x}, {} \
+                 bytes: memory {}",
+                self.start,
+                self.length,
+                memories.join(", ")
+            ));
+        }
         for &memory in &self.memories {
             // SAFETY: nothing is bound to the imports any more and no command reads them (the
             // struct's docs).

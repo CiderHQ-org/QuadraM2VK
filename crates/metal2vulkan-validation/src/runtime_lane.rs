@@ -554,6 +554,8 @@ mod pixel_samplers;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod placement;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod pool_churn;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod pool_slots;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod predication;

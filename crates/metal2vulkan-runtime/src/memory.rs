@@ -6,8 +6,12 @@
 //!   at offsets).
 //! - **Pooling.** Resources share blocks of [`BLOCK_BYTES`], so `maxMemoryAllocationCount` (4096
 //!   on many devices) stays out of reach. A request larger than half a block takes a dedicated
-//!   block of its own size, freed with it. A pooled block is freed when it empties, except one
-//!   empty block per memory type that is kept for the next request.
+//!   block of its own size, freed with it. A pooled block that empties is kept for the next
+//!   placements while fewer than [`KEPT_EMPTY_BLOCKS`] empty ones are kept in its pool, else freed:
+//!   a working set that dips by a block and comes back a frame later (a frame's buffers, returned
+//!   as its command buffer completes) makes and frees no block for it. Every kept empty block but
+//!   one goes once it stayed empty for [`KEPT_EMPTY_FOR`] ([`Pool::stale`]), and every one of a
+//!   memory type goes before a block of that type fails to be made ([`place`]).
 //! - **Entry point.** [`allocate`] with the resource's memory requirements and its
 //!   [`MemoryClass`]; [`Memory::free`] with the placement it gave. Buffers use it in step 1;
 //!   textures and heaps add their classes and callers in their own steps. Imported host memory
@@ -44,16 +48,36 @@ use super::device::lock;
 use super::dma_buf::DmaBufPages;
 use super::error::{internal, vulkan, Error, MemoryKind};
 use super::freed_memory::{Parked, Parking};
+use super::memory_log::{self, MemoryLog};
 use super::range::RangeAllocator;
 use super::sharing::Sharing;
 use super::work_counts::Counters;
 use crate::release;
 use ash::vk;
+use metal2vulkan::vk::DriverId;
 use std::ptr::NonNull;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// The size of a pooled block, at most the device's `maxMemoryAllocationSize`.
 pub(super) const BLOCK_BYTES: u64 = 64 << 20;
+
+/// The most empty pooled blocks a pool keeps for its next placements ([`Pool::release`]), at
+/// most 128 MiB of empty memory a pool. In a pool the encodings place in, one of them is mostly
+/// the block [`keep_room`] made for room: with one kept, every other block that emptied was freed,
+/// and a block made again as the next placements filled that one, so a frame's buffers, returned
+/// each frame, made and freed a block a frame. With two they make and free none
+/// (`runtime_lane::pool_churn`).
+pub(super) const KEPT_EMPTY_BLOCKS: usize = 2;
+
+/// How long a kept empty pooled block beyond its pool's one stays empty before it is freed
+/// ([`Pool::stale`]): a frame's dip comes back well within it.
+pub(super) const KEPT_EMPTY_FOR: Duration = Duration::from_secs(1);
+
+/// The least bytes of a pooled placement the memory log names as it is placed and returned
+/// (`memory_log.rs`): a few such placements fill a block, so their comings and goings are what
+/// makes and frees blocks.
+const LOGGED_PLACEMENT_BYTES: u64 = 4 << 20;
 
 /// What memory a resource needs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,6 +125,16 @@ pub(super) enum Holds {
 /// queued command buffer sampled, waited in `vkBindImageMemory` (NVIDIA's ioctl) until that work
 /// ended (EV STL-au3-nvgdb; 490 ms behind a 0.5 s kernel in EV STL-au2-nv5080). On lavapipe the
 /// same case waits for its queue lock instead, in making the image's view.
+///
+/// Other drivers bind without waiting. Measured with a probe outside the runtime: an image bound
+/// at the start of a block, a submission of long fills of a large buffer and then a clear of that
+/// image, and at once a second image bound 1 MiB into the same block and its view made, each
+/// timed, the submission's fence read after both. On ANV (Mesa 26.2.4, the UHD 770 of RPL-S) the
+/// bind took 0.2 to 1.8 us and the view 1.8 to 5.1 us; on RADV (Mesa 26.0.8) 0.0 to 0.6 us and
+/// 0.6 to 2.0 us on the Radeon 780M and the RX 7900 XTX; the submission still pending after both
+/// in every round, as with a fresh block. There ([`binds_wait`]) such an image shares a pooled
+/// block ([`allocate_image_while_queued`]), and every submission names one buffer object fewer
+/// to the kernel for each.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Fit {
     Pooled,
@@ -272,6 +306,9 @@ pub(super) struct Pool<T> {
     blocks: Vec<Option<PoolBlock<T>>>,
     /// The largest alignment a pooled placement asked of it so far ([`Pool::has_room`]).
     align: u64,
+    /// The pooled blocks added and freed so far ([`Pool::turnover`]).
+    made: u64,
+    freed: u64,
 }
 
 #[derive(Debug)]
@@ -279,6 +316,16 @@ struct PoolBlock<T> {
     ranges: RangeAllocator,
     dedicated: bool,
     payload: T,
+    /// When it emptied, while it is empty and kept ([`Pool::release`]); `None` for a block
+    /// added with nothing placed in it, kept as long as it stays empty.
+    emptied: Option<Instant>,
+}
+
+impl<T> PoolBlock<T> {
+    /// Whether it is a pooled block with nothing placed in it, kept for the next placements.
+    fn kept(&self) -> bool {
+        !self.dedicated && self.ranges.is_empty()
+    }
 }
 
 impl<T> Default for Pool<T> {
@@ -286,6 +333,8 @@ impl<T> Default for Pool<T> {
         Pool {
             blocks: Vec::new(),
             align: 1,
+            made: 0,
+            freed: 0,
         }
     }
 }
@@ -300,10 +349,9 @@ impl<T> Pool<T> {
             .enumerate()
             .find_map(|(index, block)| {
                 let block = block.as_mut().filter(|block| !block.dedicated)?;
-                block
-                    .ranges
-                    .allocate(size, align)
-                    .map(|offset| (index, offset))
+                let offset = block.ranges.allocate(size, align)?;
+                block.emptied = None;
+                Some((index, offset))
             })
     }
 
@@ -319,7 +367,9 @@ impl<T> Pool<T> {
             ranges,
             dedicated,
             payload,
+            emptied: None,
         });
+        self.made += u64::from(!dedicated);
         match self.blocks.iter().position(Option::is_none) {
             Some(index) => {
                 self.blocks[index] = block;
@@ -339,6 +389,13 @@ impl<T> Pool<T> {
             .any(|block| !block.dedicated && block.ranges.longest(self.align) >= size)
     }
 
+    /// Whether block `index` is a live pooled block, not a dedicated one.
+    fn pooled(&self, index: usize) -> bool {
+        (self.blocks.get(index))
+            .and_then(Option::as_ref)
+            .is_some_and(|block| !block.dedicated)
+    }
+
     /// The payload of block `index`.
     pub(super) fn payload(&self, index: usize) -> Option<&T> {
         self.blocks.get(index)?.as_ref().map(|block| &block.payload)
@@ -352,26 +409,75 @@ impl<T> Pool<T> {
             .map(|block| &mut block.payload)
     }
 
-    /// Return `[offset, offset + size)` of block `index`. The block's payload when the block
-    /// must now be freed: a dedicated block, or a pooled block that emptied while another empty
-    /// pooled block is kept.
-    pub(super) fn release(&mut self, index: usize, offset: u64, size: u64) -> Option<T> {
+    /// Return `[offset, offset + size)` of block `index`, at `now`. The block's payload when the
+    /// block must now be freed: a dedicated block, or a pooled block that emptied while
+    /// [`KEPT_EMPTY_BLOCKS`] other empty pooled blocks are kept.
+    pub(super) fn release(
+        &mut self,
+        index: usize,
+        offset: u64,
+        size: u64,
+        now: Instant,
+    ) -> Option<T> {
         let block = self.blocks.get_mut(index)?.as_mut()?;
         block.ranges.free(offset, size);
         if !block.ranges.is_empty() {
             return None;
         }
-        let keep = !block.dedicated
-            && !self.blocks.iter().enumerate().any(|(other, block)| {
-                other != index
-                    && block
-                        .as_ref()
-                        .is_some_and(|block| !block.dedicated && block.ranges.is_empty())
-            });
-        if keep {
+        let dedicated = block.dedicated;
+        let kept = (self.blocks.iter().enumerate())
+            .filter(|&(other, block)| other != index && block.as_ref().is_some_and(PoolBlock::kept))
+            .count();
+        if !dedicated && kept < KEPT_EMPTY_BLOCKS {
+            if let Some(block) = self.blocks[index].as_mut() {
+                block.emptied = Some(now);
+            }
             return None;
         }
-        self.blocks[index].take().map(|block| block.payload)
+        self.take(index)
+    }
+
+    /// At `now`, the payload of the kept empty pooled block that emptied earliest, where it
+    /// stayed empty for [`KEPT_EMPTY_FOR`], taken out to be freed, while another empty pooled
+    /// block stays kept.
+    pub(super) fn stale(&mut self, now: Instant) -> Option<T> {
+        let kept = (self.blocks.iter().flatten())
+            .filter(|block| block.kept())
+            .count();
+        if kept < 2 {
+            return None;
+        }
+        let (index, _) = (self.blocks.iter().enumerate())
+            .filter_map(|(index, block)| {
+                let block = block.as_ref().filter(|block| block.kept())?;
+                Some((index, block.emptied?))
+            })
+            .filter(|&(_, at)| now.saturating_duration_since(at) >= KEPT_EMPTY_FOR)
+            .min_by_key(|&(_, at)| at)?;
+        self.take(index)
+    }
+
+    /// Every kept empty pooled block's payload, taken out to be freed.
+    pub(super) fn take_kept(&mut self) -> Vec<T> {
+        let kept: Vec<usize> = (self.blocks.iter().enumerate())
+            .filter(|(_, block)| block.as_ref().is_some_and(PoolBlock::kept))
+            .map(|(index, _)| index)
+            .collect();
+        kept.into_iter()
+            .filter_map(|index| self.take(index))
+            .collect()
+    }
+
+    /// Block `index`'s payload, its slot emptied.
+    fn take(&mut self, index: usize) -> Option<T> {
+        let block = self.blocks.get_mut(index)?.take()?;
+        self.freed += u64::from(!block.dedicated);
+        Some(block.payload)
+    }
+
+    /// The pooled blocks added and freed so far.
+    pub(super) fn turnover(&self) -> (u64, u64) {
+        (self.made, self.freed)
     }
 
     /// Every block's payload, emptying the pool.
@@ -448,6 +554,8 @@ pub(super) struct Block {
     addresses: Option<BlockAddresses>,
     /// It is the caller's host memory, imported ([`Memory::import_host`]).
     imported: bool,
+    /// Its memory type.
+    type_index: u32,
 }
 
 /// A buffer over the first `Block::size` bytes of a block, with every usage of an addressed
@@ -700,12 +808,18 @@ pub(super) struct Memory {
     parked: Vec<Parked>,
     /// The blocks that waited so far ([`Memory::parked`]).
     parked_count: u64,
+    /// The memory log, where `METAL2VULKAN_LOG_MEMORY` is set (`memory_log.rs`).
+    log: Option<MemoryLog>,
+    /// A bind into memory that queued work uses waits for that work on the device's driver
+    /// ([`binds_wait`]), so an image bound while such work may be queued takes a block of its own
+    /// ([`allocate_image_while_queued`]).
+    binds_wait: bool,
 }
 
 impl Memory {
     /// The memory of a device with `properties`, whose largest allocation is
     /// `max_allocation` bytes, with unified memory or without (`unified`), whose queue families
-    /// are `families`.
+    /// are `families`, whose driver is `driver`.
     pub(super) fn new(
         properties: &vk::PhysicalDeviceMemoryProperties,
         max_allocation: u64,
@@ -713,6 +827,7 @@ impl Memory {
         unified: bool,
         families: Vec<u32>,
         parking: Option<Arc<Parking>>,
+        driver: Option<DriverId>,
     ) -> Memory {
         let count = properties.memory_type_count as usize;
         let types = properties.memory_types[..count.min(vk::MAX_MEMORY_TYPES)].to_vec();
@@ -731,7 +846,59 @@ impl Memory {
             parking,
             parked: Vec::new(),
             parked_count: 0,
+            log: None,
+            binds_wait: binds_wait(driver),
         }
+    }
+
+    /// Log each `VkDeviceMemory` allocated, imported or freed from now on to `log`
+    /// (`memory_log.rs`).
+    pub(super) fn log_to(&mut self, log: Option<MemoryLog>) {
+        self.log = log;
+    }
+
+    /// Say `what` happened to `block`, where the log is on: its device address from its buffer of
+    /// addresses, else asked of its memory where blocks are allocated with the device-address
+    /// flag (`memory_log::address_of`).
+    fn say_block(&self, device: &ash::Device, what: &str, block: &Block) {
+        let Some(log) = &self.log else {
+            return;
+        };
+        let imported = block
+            .imported
+            .then_some(vk::ExternalMemoryHandleTypeFlags::HOST_ALLOCATION_EXT);
+        let address = match (&block.addresses, self.device_address) {
+            (Some(addresses), _) => Some(addresses.address),
+            // SAFETY: the block's memory is the device's, live, allocated with the device-address
+            // flag (`device_address`), and never a dedicated allocation.
+            (None, true) => unsafe {
+                memory_log::address_of(device, block.memory, block.size, block.type_index, imported)
+            },
+            (None, false) => None,
+        };
+        log.say(what, block.memory, block.type_index, block.size, address);
+    }
+
+    /// Say `what` happened to `placement`, a placement of `class` where given, where the log is on
+    /// and the placement is in a pooled block and at least [`LOGGED_PLACEMENT_BYTES`] long.
+    fn say_placement(&self, what: &str, placement: &Placement, class: Option<MemoryClass>) {
+        let Some(log) = &self.log else {
+            return;
+        };
+        let pooled = placement.block.is_some_and(|index| {
+            self.pool_ref(placement.holds, placement.type_index)
+                .pooled(index)
+        });
+        if !pooled || placement.size < LOGGED_PLACEMENT_BYTES {
+            return;
+        }
+        log.line(memory_log::placement_line(
+            what,
+            placement.size,
+            class,
+            placement.holds == Holds::Images,
+            (placement.memory, placement.offset, placement.type_index),
+        ));
     }
 
     /// The blocks that waited for the batches in flight as they went, so far, and those that
@@ -831,9 +998,9 @@ impl Memory {
         &mut self,
         device: &ash::Device,
         (holds, type_index): (Holds, u32),
-        size: u64,
-        align: u64,
+        (size, align): (u64, u64),
         addressed: Option<&Counters>,
+        class: MemoryClass,
     ) -> Result<Option<Placement>, Error> {
         let Some((block, offset)) = self.pool(holds, type_index).place(size, align) else {
             return Ok(None);
@@ -845,25 +1012,31 @@ impl Memory {
             }
         }
         let addressed = addressed.is_some();
-        Ok(Some(self.placement(
-            (holds, type_index),
-            block,
-            offset,
-            size,
-            addressed,
-        )))
+        let placement = self.placement((holds, type_index), block, offset, size, addressed);
+        self.say_placement("placed", &placement, Some(class));
+        Ok(Some(placement))
     }
 
     /// Block `block` of `size` bytes, just made, added to the pool of memory type `type_index`
     /// that holds `holds`, dedicated or pooled, with `used` bytes at its start placed: its index.
     fn add_block(
         &mut self,
+        device: &ash::Device,
         (holds, type_index): (Holds, u32),
         block: Block,
         size: u64,
         dedicated: bool,
         used: u64,
     ) -> usize {
+        if self.log.is_some() {
+            let what = match (dedicated, holds) {
+                (false, Holds::Buffers) => "made a pooled block of buffers",
+                (false, Holds::Images) => "made a pooled block of images",
+                (true, Holds::Buffers) => "made a dedicated block of a buffer",
+                (true, Holds::Images) => "made a dedicated block of an image",
+            };
+            self.say_block(device, what, &block);
+        }
         self.allocated += size;
         self.pool(holds, type_index)
             .add(size, dedicated, block, used)
@@ -994,7 +1167,8 @@ impl Memory {
 
     /// Return `[offset, offset + size)` of block `block` of memory type `type_index`, freeing the
     /// block when it empties ([`Pool::release`]); `after` goes once it is freed. `after`, given
-    /// back for the caller to let go of with no lock held, unless the block waits with it.
+    /// back for the caller to let go of with no lock held, unless the block waits with it. A kept
+    /// empty block of the pool that stayed empty too long goes too ([`Pool::stale`]).
     fn release_range(
         &mut self,
         device: &ash::Device,
@@ -1004,11 +1178,39 @@ impl Memory {
         size: u64,
         after: Option<Box<dyn Send>>,
     ) -> Option<Box<dyn Send>> {
-        match self.pool(holds, type_index).release(block, offset, size) {
+        let now = Instant::now();
+        let pool = self.pool(holds, type_index);
+        let (freed, stale) = (pool.release(block, offset, size, now), pool.stale(now));
+        if let Some(stale) = stale {
+            // SAFETY: nothing is placed in a kept empty block, and no command reads it.
+            drop(unsafe { self.let_go(device, stale, None) });
+        }
+        match freed {
             // SAFETY: no resource is placed in the block any more.
             Some(block) => unsafe { self.let_go(device, block, after) },
             None => after,
         }
+    }
+
+    /// Release every kept empty pooled block of memory type `type_index`, of buffers and of
+    /// images, as a block of that type fails to be made ([`place`]): how many went.
+    fn release_kept(&mut self, device: &ash::Device, type_index: u32) -> usize {
+        let blocks: Vec<Block> = [Holds::Buffers, Holds::Images]
+            .into_iter()
+            .flat_map(|holds| self.pool(holds, type_index).take_kept())
+            .collect();
+        let count = blocks.len();
+        for block in blocks {
+            // SAFETY: nothing is placed in a kept empty block, and no command reads it.
+            drop(unsafe { self.let_go(device, block, None) });
+        }
+        count
+    }
+
+    /// The pooled blocks made and freed so far, of every pool.
+    pub(super) fn turnover(&self) -> (u64, u64) {
+        (self.pools.iter().map(Pool::turnover))
+            .fold((0, 0), |(made, freed), (m, f)| (made + m, freed + f))
     }
 
     /// Free `block`, or where the device parks freed memory (`freed_memory.rs`), destroy its
@@ -1025,10 +1227,16 @@ impl Memory {
         after: Option<Box<dyn Send>>,
     ) -> Option<Box<dyn Send>> {
         let Some(parking) = &self.parking else {
+            self.say_block(device, "freed a block", &block);
             // SAFETY: the caller's.
             unsafe { block.release(device) };
             return after;
         };
+        self.say_block(
+            device,
+            "a block goes, freed once the batches in flight complete",
+            &block,
+        );
         // Out of the driver's list first, then the batches that may list it noted.
         // SAFETY: the caller's.
         let memory = unsafe { block.release_addresses(device) };
@@ -1117,7 +1325,10 @@ impl Memory {
                         mapped: Some(Mapped(pointer)),
                         addresses: None,
                         imported: true,
+                        type_index,
                     };
+                    let host = pointer.as_ptr() as usize;
+                    self.say_block(device, &format!("imported host memory 0x{host:x}"), &block);
                     let index = self
                         .pool(Holds::Buffers, type_index)
                         .add(size, true, block, size);
@@ -1173,6 +1384,25 @@ impl Memory {
                 Ok(memory) => {
                     // A successful import owns the descriptor: Vulkan closes it with the memory.
                     let _ = fd.into_raw_fd();
+                    if let Some(log) = &self.log {
+                        let handle = vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT;
+                        let (what, address) = match image {
+                            Some(_) => ("imported a dma-buf for an image", None),
+                            // SAFETY: the memory was just imported, with the device-address
+                            // flag, and is bound to nothing.
+                            None if self.device_address => ("imported a dma-buf", unsafe {
+                                memory_log::address_of(
+                                    device,
+                                    memory,
+                                    size,
+                                    type_index,
+                                    Some(handle),
+                                )
+                            }),
+                            None => ("imported a dma-buf", None),
+                        };
+                        log.say(what, memory, type_index, size, address);
+                    }
                     return Ok((memory, type_index));
                 }
                 Err(error) => failure = ImportFailure::Vulkan(error),
@@ -1211,6 +1441,7 @@ impl Memory {
         let Some(index) = placement.block else {
             return after;
         };
+        self.say_placement("returned", placement, None);
         self.release_range(
             device,
             (placement.holds, placement.type_index),
@@ -1225,11 +1456,13 @@ impl Memory {
     /// and no resource is left. What waited with them, for the caller to let go of with no lock
     /// held.
     pub(super) fn destroy(&mut self, device: &ash::Device) -> Vec<Box<dyn Send>> {
-        for pool in &mut self.pools {
-            for block in pool.drain() {
-                // SAFETY: no resource is left, and the device is idle.
-                unsafe { block.release(device) };
-            }
+        let blocks: Vec<Block> = (self.pools.iter_mut())
+            .flat_map(|pool| pool.drain())
+            .collect();
+        for block in blocks {
+            self.say_block(device, "freed a block as the device is destroyed", &block);
+            // SAFETY: no resource is left, and the device is idle.
+            unsafe { block.release(device) };
         }
         let mut after = Vec::new();
         for parked in self.parked.drain(..) {
@@ -1332,6 +1565,7 @@ impl BlockMaker {
             mapped,
             addresses,
             imported: false,
+            type_index,
         })
     }
 }
@@ -1424,15 +1658,20 @@ pub(super) fn allocate_image(
     )
 }
 
-/// [`allocate_image`] in a block of its own (`Fit::Apart`): for an image the runtime keeps for the
-/// device's lifetime and binds while work that uses others of its kind may be queued, a neutral
-/// image (`neutral.rs`). Freed, its block goes with it.
-pub(super) fn allocate_image_apart(
+/// [`allocate_image`] for an image the runtime binds while work that uses others of its kind may
+/// be queued (a neutral image, `neutral.rs`; a storage placeholder, `storage_placeholder.rs`): in
+/// a block of its own (`Fit::Apart`) where such a bind waits for that work ([`binds_wait`]),
+/// freed with it, else in a pooled block like any image.
+pub(super) fn allocate_image_while_queued(
     memory: &Mutex<Memory>,
     device: &ash::Device,
     requirements: &vk::MemoryRequirements,
     class: MemoryClass,
 ) -> Result<Placement, Error> {
+    let fit = match lock(memory).binds_wait {
+        true => Fit::Apart,
+        false => Fit::Pooled,
+    };
     place(
         memory,
         device,
@@ -1440,7 +1679,16 @@ pub(super) fn allocate_image_apart(
         class,
         None,
         Holds::Images,
-        Fit::Apart,
+        fit,
+    )
+}
+
+/// Whether binding memory that queued work uses waits for that work on a device of `driver`:
+/// on every driver but those measured to bind at once (the [`Fit`] docs).
+fn binds_wait(driver: Option<DriverId>) -> bool {
+    !matches!(
+        driver,
+        Some(DriverId::INTEL_OPEN_SOURCE_MESA | DriverId::MESA_RADV)
     )
 }
 
@@ -1507,16 +1755,25 @@ fn place(
         let pool = (holds, type_index);
         if fit == Fit::Pooled {
             if let Some(placement) =
-                lock(memory).place_pooled(device, pool, size, align, addressed)?
+                lock(memory).place_pooled(device, pool, (size, align), addressed, class)?
             {
                 return Ok(placement);
             }
         }
-        match maker.make(device, type_index, block_size, addressed) {
+        // The type's kept empty blocks go before a block of it fails to be made.
+        let made = match maker.make(device, type_index, block_size, addressed) {
+            Err(Error::OutOfMemory(_)) if lock(memory).release_kept(device, type_index) > 0 => {
+                maker.make(device, type_index, block_size, addressed)
+            }
+            made => made,
+        };
+        match made {
             Ok(block) => {
                 let mut memory = lock(memory);
-                let index = memory.add_block(pool, block, block_size, dedicated, size);
-                return Ok(memory.placement(pool, index, 0, size, addressed.is_some()));
+                let index = memory.add_block(device, pool, block, block_size, dedicated, size);
+                let placement = memory.placement(pool, index, 0, size, addressed.is_some());
+                memory.say_placement("placed", &placement, Some(class));
+                return Ok(placement);
             }
             Err(error @ Error::OutOfMemory(_)) => failure = error,
             Err(error) => return Err(error),
@@ -1554,11 +1811,13 @@ pub(super) fn keep_room(memory: &Mutex<Memory>, device: &ash::Device, counts: &C
             .pool_ref(pool.0, pool.1)
             .has_room(maker.block_bytes / 2)
         {
+            let what = "made a pooled block and freed it at once, its pool having room";
+            memory.say_block(device, what, &block);
             drop(memory);
             // SAFETY: nothing is placed in the block, which no command reads.
             unsafe { block.release(device) };
             continue;
         }
-        memory.add_block(pool, block, maker.block_bytes, false, 0);
+        memory.add_block(device, pool, block, maker.block_bytes, false, 0);
     }
 }

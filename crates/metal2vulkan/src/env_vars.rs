@@ -46,6 +46,17 @@ pub const REGISTRY: &[EnvVar] = &[
                  than a snapshot, and how many such draws the snapshot's area rule weighed at each \
                  share of their colors' pixels and texel bytes; set to anything but empty or 0",
     },
+    EnvVar {
+        name: "METAL2VULKAN_LOG_MEMORY",
+        default: "unset (off)",
+        effect: "metal2vulkan-runtime's diagnostics: one line per VkDeviceMemory a device \
+                 allocates, imports or frees, through the device's message sink or on stderr: \
+                 its kind, handle, memory type, bytes, host address (an import's) and device \
+                 address range, to place a GPU fault's address; and one line per placement of \
+                 4 MiB or more in a pooled block as it is placed and returned: image or buffer, \
+                 its memory class (placed), bytes, offset and block, to show what makes and \
+                 frees blocks; set to anything but empty or 0",
+    },
 ];
 
 /// Multi-line `--help` block listing every registry var.
@@ -76,6 +87,15 @@ pub fn lane_validation() -> Option<OsString> {
 /// neither empty nor `0`. A default-off diagnostic: it changes no pipeline, only what is printed.
 pub fn log_pipelines() -> bool {
     std::env::var_os("METAL2VULKAN_LOG_PIPELINES")
+        .is_some_and(|value| !value.is_empty() && value != "0")
+}
+
+/// Whether metal2vulkan-runtime logs each `VkDeviceMemory` a device allocates, imports or frees,
+/// and each placement of 4 MiB or more in a pooled block (`REGISTRY`): set, and neither empty nor
+/// `0`. A default-off diagnostic: it changes no
+/// allocation, only what is printed.
+pub fn log_memory() -> bool {
+    std::env::var_os("METAL2VULKAN_LOG_MEMORY")
         .is_some_and(|value| !value.is_empty() && value != "0")
 }
 

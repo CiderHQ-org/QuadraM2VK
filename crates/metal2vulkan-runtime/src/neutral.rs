@@ -22,8 +22,9 @@
 //! are, where they were an internal submission the making waited for, behind every command buffer
 //! submitted before it on the device's first `VkQueue`. Every submission that may bind a neutral is
 //! made after it was made, so its first work, or a batch it waits for, does the neutral's first. A
-//! neutral image takes memory of its own: bound into a block beside another neutral that queued
-//! work samples, its bind waited for that work on NVIDIA's driver (`memory.rs`'s `Fit`).
+//! neutral image takes memory of its own where binds wait: bound into a block beside another
+//! neutral that queued work samples, its bind waited for that work on NVIDIA's driver; ANV and
+//! RADV bind at once, so there it shares a pooled block (`memory.rs`'s `Fit`).
 
 use super::device::lock;
 use super::error::{vulkan, Error};
@@ -354,8 +355,8 @@ impl Device {
         let requirements = unsafe { raw_device.get_image_memory_requirements(image) };
         let requirements = shared.textures.placement().place(requirements);
         // Bound while work that samples another neutral may be queued: memory of its own, which
-        // no submission used, so the bind waits for none (`memory.rs`'s `Fit`).
-        let placement = match crate::memory::allocate_image_apart(
+        // no submission used, where such a bind waits for that work (`memory.rs`'s `Fit`).
+        let placement = match crate::memory::allocate_image_while_queued(
             &shared.memory,
             raw_device,
             &requirements,

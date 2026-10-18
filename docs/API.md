@@ -883,7 +883,14 @@ that reads its own pass's color attachment after a barrier took the split rather
 (id name `metal2vulkan-snapshot-fallback`, `Info` severity; `WorkCounts::reading_draws_snapshotted`
 counts those that took a snapshot), and now and then a count of the draws the snapshot's area rule
 weighed, by their scissors' share of the target, texel bytes and side of the rule (id name
-`metal2vulkan-snapshot-readers`, `Info` severity). That text is for people, not a contract.
+`metal2vulkan-snapshot-readers`, `Info` severity). With `METAL2VULKAN_LOG_MEMORY` set, a device
+logs one line per `VkDeviceMemory` it allocates, imports or frees (id name `metal2vulkan-memory`,
+`Info` severity): what it holds (a block of buffers or images, a host-memory import with its host
+address, a dma-buf import), its handle, memory type, bytes and device address range, where the
+device gives addresses. On NVIDIA that range is the GPU virtual address a fault report names. It
+also logs each placement of 4 MiB or more in a pooled block as it is placed and returned: an image
+or a buffer, its memory class where placed, its bytes, its offset and its block's handle and type.
+That text is for people, not a contract.
 
 Each entry below gives the code, its category, the `Degradation` kind (or the `PrecisionNote`) and
 what triggers it; a runtime kind's cost follows. The kind's rustdoc states the trigger, cost and

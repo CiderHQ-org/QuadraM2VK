@@ -62,6 +62,7 @@ use super::host_memory::Importer;
 use super::interop::Interop;
 use super::loader_word::LoaderWord;
 use super::memory::Memory;
+use super::memory_log::MemoryLog;
 use super::mipmap_scratch::MipmapScratch;
 use super::owned_kernel::OwnedKernels;
 use super::render_state::{depth_bias_command, DepthBiasCommand};
@@ -1094,14 +1095,16 @@ impl Device {
         let parking = (properties.driver_defects)
             .contains(&RuntimeDriverDefect::FreedAddressMemoryFailsPendingWork)
             .then(|| Arc::new(Parking::new(queues.len())));
-        let memory = Memory::new(
+        let mut memory = Memory::new(
             &memory_properties,
             max_allocation,
             device_address,
             properties.has_unified_memory,
             queue_families.clone(),
             parking.clone(),
+            properties.description.driver_id,
         );
+        memory.log_to(MemoryLog::new(instance.sink()));
         // SAFETY: as above.
         let physical_properties = unsafe { instance.raw.get_physical_device_properties(physical) };
         let limits = physical_properties.limits;
